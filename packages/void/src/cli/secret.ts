@@ -145,7 +145,7 @@ async function readSecretValue(): Promise<string> {
     mask: '*',
   });
 
-  if (isCancel(result)) {
+  if (isCancel(result) || typeof result === 'symbol') {
     cancel('Secret command cancelled.');
     process.exit(0);
   }

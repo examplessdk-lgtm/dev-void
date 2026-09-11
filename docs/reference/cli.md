@@ -12,7 +12,7 @@ Use this page as a command reference. If you are setting up a project for the fi
 
 | Command                           | Purpose                                                                      |
 | --------------------------------- | ---------------------------------------------------------------------------- |
-| `void deploy`                     | Build and deploy to Void                                                     |
+| `void deploy`                     | Build and deploy to the configured platform                                  |
 | `void prepare`                    | Generate `.void` artifacts without starting Vite                             |
 | `void gen model <name> [cols...]` | Scaffold migration + CRUD routes                                             |
 | `void gen route <path>`           | Create an API route                                                          |
@@ -22,7 +22,7 @@ Use this page as a command reference. If you are setting up a project for the fi
 | `void db reset`                   | Drop and re-apply all migrations                                             |
 | `void db seed`                    | Reset + seed local database                                                  |
 | `void db execute <sql>`           | Run SQL against the database (--remote for deployed)                         |
-| `void db studio`                  | Open Drizzle Studio (--remote for the deployed PostgreSQL database)          |
+| `void db studio`                  | Open Drizzle Studio (--remote for a deployed external database)              |
 | `void secret put <name=value>`    | Set a production secret                                                      |
 | `void secret list`                | List production secrets                                                      |
 | `void secret sync .env.local`     | Bulk upload secrets from dotenv file                                         |
@@ -81,7 +81,7 @@ void init [--tsconfig] [--github] [--agents]
 
 Setup wizard for Void projects (new or existing).
 
-If run in a scaffoldable empty directory, `void init` scaffolds a Pages starter. It asks which scaffold toolchain to use, with Vite+ as the default top option and plain Vite as the alternative. If a single Pages adapter is already installed, it reuses that framework; otherwise it asks which framework to scaffold (React, Vue, Svelte, or Solid). It then asks which starter you want: D1, PostgreSQL, or Static Pages. The D1 and PostgreSQL starters write a framework-specific `vite.config.ts`, a `pages/` home page plus `.server.ts` loader, `db/schema.ts`, `db/seed.ts`, a generated initial migration under `db/migrations/`, and `routes/api/hello.ts`. The Static Pages starter writes just the framework-specific `vite.config.ts` and a `pages/` home page so you can add server features later. Vite+ starters add `vite-plus` and use `vp dev`, `vp build`, and `vp preview` scripts.
+If run in a scaffoldable empty directory, `void init` scaffolds a Pages starter. It asks which scaffold toolchain to use, with Vite+ as the default top option and plain Vite as the alternative. If a single Pages adapter is already installed, it reuses that framework; otherwise it asks which framework to scaffold (React, Vue, Svelte, or Solid). It then asks which starter you want: D1, PostgreSQL, MySQL, or Static Pages. The database-backed starters write a framework-specific `vite.config.ts`, a `pages/` home page plus `.server.ts` loader, `db/schema.ts`, `db/seed.ts`, a generated initial migration under `db/migrations/`, and `routes/api/hello.ts`. The Static Pages starter writes just the framework-specific `vite.config.ts` and a `pages/` home page so you can add server features later. Vite+ starters add `vite-plus` and use `vp dev`, `vp build`, and `vp preview` scripts.
 
 If run in a non-empty folder that does not look like an app yet, such as a parent `Projects/` folder with subdirectories but no `package.json`, `void init` asks whether to create a new subfolder or continue in the current folder. Creating a subfolder is the default selection.
 
@@ -90,24 +90,26 @@ If run in an existing project, `void init` configures the project in place: it e
 After that, the full interactive flow walks through:
 
 1. **TypeScript:** creates or updates `tsconfig.json`, including `extends .void/tsconfig.json`, `void/env` types, and root-level `files` / `compilerOptions.paths` merges when an existing config would otherwise replace Void's generated entries.
-2. **Database:** asks whether you want D1, PostgreSQL, or no database yet. Choosing PostgreSQL writes `"database": "pg"` to `void.json`; D1 stays implicit; choosing no database leaves config unchanged so you can add data features later.
+2. **Database:** asks whether you want D1, PostgreSQL, MySQL, or no database yet. PostgreSQL writes `"database": "pg"`; MySQL writes `"database": "mysql"`; D1 stays implicit.
 3. **Agent instructions:** detects agents once and injects instructions into `CLAUDE.md` or `AGENTS.md`.
 4. **Skills:** links Void skills using the same detected or selected agent context.
-5. **MCP config:** writes MCP server config using that same agent context.
-6. **Demo code:** for existing non-Pages projects, optionally scaffolds a `db/migrations/` directory plus an API route and typed fetch example.
-7. **GitHub Actions:** optionally creates `.github/workflows/void-deploy.yml`. The workflow deploys on pushes to `main` and authenticates via [GitHub OIDC](https://docs.github.com/en/actions/deployment/security-hardening-your-deployments/about-security-hardening-with-openid-connect) — no long-lived `VOID_TOKEN` secret is stored in the repo. The workflow is a single `void deploy` step: when it runs in GitHub Actions, `void deploy` mints an OIDC token (audience `void`), exchanges it at `POST $VOID_API_URL/auth/github-oidc` for a short-lived project-scoped deploy token, and deploys. `permissions: id-token: write` is retained so the CLI can mint that token. The project slug is baked in from your linked project (`.void/project.json`) when known; otherwise the workflow reads a `VOID_PROJECT` repository variable.
+5. **Demo code:** for existing non-Pages projects, optionally scaffolds a `db/migrations/` directory plus an API route and typed fetch example.
+6. **Deployment platform:** asks where `void deploy` should send the app: Cloudflare (the default), Void, or Skip deployment setup. The choice is stored as `platform` in `.void/project.json`. Choosing Cloudflare creates or augments `wrangler.jsonc`, checks `wrangler whoami`, offers to run `wrangler login` when needed, and writes the selected account as `account_id` (automatically when Wrangler returns only one account).
+7. **GitHub Actions:** when Void is selected, optionally creates `.github/workflows/void-deploy.yml`. The workflow deploys on pushes to `main` through GitHub OIDC and explicitly runs `void deploy --platform void`.
 8. **`env.ts` scaffold:** if the project has no `env.ts` but has `.env` / `.env.example` / `.env.local` / `.env.development*` files on disk, generates an `env.ts` pre-populated with their keys. Values get conservative type inference (`boolean`/`url`/`number`/`string`) — the file carries a banner nudging you to tighten anything the heuristic got wrong.
-9. **Project setup:** optionally logs you in, lets you select or create a project, and writes `.void/project.json` so your first deploy can just be `void deploy`.
+9. **Void project setup:** when Void is selected, optionally logs you in, lets you select or create a project, and adds the link to `.void/project.json` so your first deploy can just be `void deploy`.
+
+If Cloudflare login is declined or does not complete, initialization still finishes with the Wrangler config in place. Run `wrangler login` and then rerun `void init` to select and save the account.
 
 If no agent is detected, `void init` asks you to choose one from a short list (Claude, Cursor, Codex, Gemini CLI, Generic). That single choice is reused across all agent steps.
 
 Use flags to run individual steps without prompts:
 
-| Flag         | Purpose                                           |
-| ------------ | ------------------------------------------------- |
-| `--tsconfig` | Only update `tsconfig.json`                       |
-| `--agents`   | Set up agent instructions, skills, and MCP config |
-| `--github`   | Only create the GitHub Actions deploy workflow    |
+| Flag         | Purpose                                        |
+| ------------ | ---------------------------------------------- |
+| `--tsconfig` | Only update `tsconfig.json`                    |
+| `--agents`   | Set up agent instructions and skills           |
+| `--github`   | Only create the GitHub Actions deploy workflow |
 
 Flags can be combined. When any flag is provided, only the specified steps run and interactive prompts are skipped.
 
@@ -259,29 +261,30 @@ If `--project` is provided, purges that project's cache instead of the linked pr
 
 ```
 void deploy [--project <name>] [--dir <path>] [--spa] [--skip-build] [--debug]
-void deploy --backend cloudflare [--provision] [--require-email]
+void deploy [--platform <cloudflare|void>] [--require-email]
 ```
 
 Auto-detects your project type and chooses the right pipeline. See [Supported App Types](../guide/app-types.md) and [Deployment](../guide/deployment.md) for details.
 
 For Drizzle projects, deploy performs a read-only schema drift check. If a new migration would be generated, deploy stops and tells you to run `void db generate`, review the migration, commit it yourself, and rerun `void deploy`.
 
-| Flag                   | Purpose                                                                                           |
-| ---------------------- | ------------------------------------------------------------------------------------------------- |
-| `--project <name>`     | Target a specific project by slug; not supported with `--backend cloudflare`                      |
-| `--dir <path>`         | Deploy a pre-built static directory (skips build); not supported with `--backend cloudflare`      |
-| `--spa`                | Use SPA mode instead of SSG for static deploys; not supported with `--backend cloudflare`         |
-| `--skip-build`         | Skip the build step (use existing build output); not supported with `--backend cloudflare`        |
-| `--backend cloudflare` | Deploy to your own Cloudflare account instead of the Void platform                                |
-| `--provision`          | Create missing bindings (D1/KV/R2/Queues/Hyperdrive); requires `--backend cloudflare`             |
-| `--require-email`      | Fail when email cannot be set up instead of deploying without it; requires `--backend cloudflare` |
-| `--debug`              | Mirror the structured deploy log to stderr (also written to `~/.void/logs/`)                      |
+| Flag                            | Purpose                                                                                            |
+| ------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `--platform <cloudflare\|void>` | Override the platform stored in `.void/project.json`                                               |
+| `--project <name>`              | Target a specific Void project by slug; not supported with `--platform cloudflare`                 |
+| `--dir <path>`                  | Deploy a pre-built static directory (skips build); not supported with `--platform cloudflare`      |
+| `--spa`                         | Use SPA mode instead of SSG for static deploys; not supported with `--platform cloudflare`         |
+| `--skip-build`                  | Skip the build step (use existing build output); not supported with `--platform cloudflare`        |
+| `--require-email`               | Fail when email cannot be set up instead of deploying without it; requires `--platform cloudflare` |
+| `--debug`                       | Mirror the structured deploy log to stderr (also written to `~/.void/logs/`)                       |
+
+The older `--backend cloudflare` spelling remains available as a compatibility alias for `--platform cloudflare`.
 
 Every deploy writes a structured JSONL trace to `~/.void/logs/deploy-<timestamp>.jsonl` regardless of `--debug`. On failure the path is printed at the end of the error message so you can attach it when reporting platform issues. `VOID_DEPLOY_DEBUG=1` is accepted as an alternate trigger for stderr mirroring.
 
 When a deploy fails after it starts, the CLI also prints a summary of that trace under the error, so the cause is visible where the file is not — a CI runner, for example, is discarded with the job. The summary has two blocks: every `error` record with its flattened cause chain, then the last 20 records as a timeline.
 
-Pre-flight failures print no summary. A missing project, a rejected flag combination, or an unsupported `--backend cloudflare` feature stops before any trace exists, and each of those prints its own message explaining what to change. A build failure prints no summary either — the build streams its own output straight to the terminal.
+Pre-flight failures print no summary. A missing project, a rejected flag combination, or an unsupported `--platform cloudflare` feature stops before any trace exists, and each of those prints its own message explaining what to change. A build failure prints no summary either — the build streams its own output straight to the terminal.
 
 Void masks the credentials it emits itself: signed query parameters, bearer tokens, and any field whose key names a credential.
 
@@ -303,7 +306,15 @@ Masking your own values is left to your CI platform, which holds the secrets and
 │     9.0s  error  deploy_server_error   message=deploy in progress
 ```
 
-Project resolution precedence:
+Platform resolution precedence:
+
+1. `--platform <cloudflare|void>` (or the legacy `--backend cloudflare` alias)
+2. `platform` in `.void/project.json`
+3. Void for projects initialized by an older SDK without a saved platform
+
+Selecting Skip deployment setup stores `"platform": "none"`; a later `void deploy` stops with guidance until a platform override is provided.
+
+For the Void platform, project resolution precedence is:
 
 1. `--project <name>`
 2. `VOID_PROJECT`
@@ -313,35 +324,34 @@ If no project is linked and no override is provided, CLI prompts to link or crea
 
 That fallback is mainly for projects that skipped Void project setup during `void init`.
 
-### `void deploy --backend cloudflare`
+### `void deploy --platform cloudflare`
 
 Deploy the built worker straight to **your own** Cloudflare account instead of the Void platform. This path uses your local `wrangler` auth and your root `wrangler.jsonc` — no Void login or linked project is involved.
 
 ```
-void deploy --backend cloudflare                  # deploy using resources already in wrangler.jsonc
-void deploy --backend cloudflare --provision      # create any missing resources first, then deploy
-void deploy --backend cloudflare --require-email  # fail instead of deploying without email
+void deploy --platform cloudflare                   # provision what is missing, then deploy
+void deploy --platform cloudflare --require-email   # fail instead of deploying without email
 ```
 
 Prerequisites:
 
 - A Cloudflare account must be **pinned**: set `account_id` in your root `wrangler.jsonc`, or export `CLOUDFLARE_ACCOUNT_ID`. A multi-account token otherwise makes wrangler prompt (or error in CI), which Void cannot intercept.
-- Authenticate wrangler (`wrangler login`, or set `CLOUDFLARE_API_TOKEN`). Deploy needs a token with `Workers Scripts:Edit` plus read on the resources you bind; `--provision` additionally needs per-product `*:Edit` (D1, KV, R2, Queues, Hyperdrive). Email setup needs a `wrangler login` session from wrangler 4.81 or newer (it carries the Email Routing and Email Sending scopes), or a `CLOUDFLARE_API_TOKEN` that also has Email Routing Edit and Email Sending Edit (a Global API Key pair is refused).
-- `CLOUDFLARE_API_TOKEN` is **required** to provision a Hyperdrive config for the first time — `wrangler login` covers every other resource, but wrangler exposes no machine-readable Hyperdrive list, so Void checks for an existing config over the Cloudflare REST API, which OAuth cannot authenticate. Without a token, `--provision` stops before touching your account. Alternatively create the Hyperdrive config yourself and put its id in `wrangler.jsonc` — deploying an already-provisioned Hyperdrive app needs no token.
-- `--skip-build` is **not supported** with `--backend cloudflare`: this backend validates the artifact the build emits (worker `vars` in `dist/ssr/wrangler.json`, the generated auth schema), so there is nothing to check without a fresh build.
-- `--project`, `--dir` and `--spa` are **not supported** with `--backend cloudflare` either, and are rejected rather than ignored: no Void project is resolved on this path, and it uploads the worker your build emits rather than a static directory.
+- Authenticate wrangler (`wrangler login`, or set `CLOUDFLARE_API_TOKEN`). Deploy needs `Workers Scripts:Edit` plus read on the resources you bind, and per-product `*:Edit` whenever it must create a missing D1 database, KV namespace, R2 bucket, Queue, or Hyperdrive config. Email setup needs a `wrangler login` session from wrangler 4.81 or newer (it carries the Email Routing and Email Sending scopes), or a `CLOUDFLARE_API_TOKEN` that also has Email Routing Edit and Email Sending Edit (a Global API Key pair is refused).
+- `CLOUDFLARE_API_TOKEN` is **required** to provision a Hyperdrive config for the first time — `wrangler login` covers every other resource, but wrangler exposes no machine-readable Hyperdrive list, so Void checks for an existing config over the Cloudflare REST API, which OAuth cannot authenticate. Without a token, automatic provisioning stops before touching your account. Alternatively create the Hyperdrive config yourself and put its id in `wrangler.jsonc` — deploying an already-provisioned Hyperdrive app needs no token.
+- `--skip-build` is **not supported** with `--platform cloudflare`: this path validates the artifact the build emits (worker `vars` in `dist/ssr/wrangler.json`, the generated auth schema), so there is nothing to check without a fresh build.
+- `--project`, `--dir` and `--spa` are **not supported** with `--platform cloudflare` either, and are rejected rather than ignored: no Void project is resolved on this path, and it uploads the worker your build emits rather than a static directory.
 - Local Docker is required to build apps that use the sandbox.
 
-What it does, in order: settles the app class before any account op (v1 supports **full Void apps on the Cloudflare Workers target** -- worker-bearing apps running Void's routing, with D1/KV/R2/Queues/Hyperdrive and, on D1/SQLite, auth + ISR; framework SSR of every kind, static/SPA/SSG apps, node/bun/deno targets, and PostgreSQL apps with auth or with checked-in migrations all fail closed with guidance), pins the account and checks auth, provisions or drift-checks resources, **builds**, then gates on the artifact the build emitted — production secrets checked against the build's effective mode/envDir, the auth schema, and migration validation — then applies remote D1 migrations for SQLite apps (verifying the applied set equals the validated set and none remain pending), and finally runs `wrangler deploy` on exactly the verified artifact. Auth apps must ship checked-in migrations that produce the Better Auth schema — the managed platform's runtime auth-migration step does not run on this backend.
+What it does, in order: settles the app class, pins the account and checks auth, runs the email step when the app uses email (below), automatically provisions missing resources, **builds**, validates the emitted artifact and migrations, preserves or creates the auth secret, applies remote D1 migrations or checked-in PostgreSQL/MySQL migrations through the production `DATABASE_URL`, promotes explicit env schema `.secret()` values to encrypted Cloudflare Worker secrets, then runs `wrangler deploy` on exactly the verified artifact. PostgreSQL migrations are transactional; MySQL DDL is not. External database URLs are never written to the Worker config.
 
 The build deliberately comes **before** the secret, auth-schema, and migration gates, because those gates inspect the real emitted worker rather than a prediction of it. A missing secret or a bad migration surfaces after the build has run — relevant when a build is expensive or has side effects. Remote D1 migrations run only once every gate has passed, so a failed gate mutates nothing remote.
 
-`--provision` creates any D1 database, KV namespace, R2 bucket, Queues, Hyperdrive config, and the ISR cache namespace your source needs, then lets wrangler write the real ids into your root `wrangler.jsonc`. It is **idempotent** — re-running creates nothing that already exists (it reads existing ids first). Notes:
+Every deploy automatically ensures that the D1 database, KV namespaces, R2 bucket, Queues, Hyperdrive config, and ISR cache namespace inferred from your source exist, then lets wrangler write the real ids into your root `wrangler.jsonc`. Provisioning is **idempotent** — re-running creates nothing that already exists (it reads existing ids first). The former `--provision` flag is still accepted for backwards compatibility but is no longer needed. Notes:
 
-- **Provision is a single-operator, dev-machine action.** The lock that guards it is per local config path only; it does not coordinate across machines. Two people provisioning the same account at once could create duplicate resources. `--provision` also **fails closed in CI / non-interactive shells** unless your committed `wrangler.jsonc` already covers every resource (a provable no-op). Provision locally, commit the updated `wrangler.jsonc`, then let CI run `void deploy --backend cloudflare`.
+- **Avoid concurrent first deploys from different machines or CI runners.** The provisioning lock is per local config path and does not coordinate across hosts. Resource adoption makes later deploys idempotent, but two first deploys racing the same account could create duplicate resources whose names are not account-unique. Commit the updated `wrangler.jsonc` when practical so CI starts with the resolved ids.
 - **Your `wrangler.jsonc` is rewritten.** When wrangler writes the new ids, it preserves your comments but normalizes the whole file's indentation — expect that in the diff.
-- **Your `.env*` values ship as plaintext.** All four of `.env`, `.env.local`, `.env.production` and `.env.production.local` are loaded by this backend and baked into the worker's `vars` — the `.local` files included, unlike managed `void deploy`. A value also present in the shell environment is stripped back out. Move real secrets to `wrangler secret put <NAME>` so they are not committed into `wrangler.json`. Deploy warns on likely-plaintext secrets and hard-blocks on missing required secrets.
-- **First deploy of a not-yet-deployed worker:** its remote secrets can't be listed yet, so the secret gate prints the required key names and the `wrangler secret put <NAME>` commands to bootstrap them on the draft worker before deploying (or add a value to `.env` / `.env.production` and rerun).
+- **Explicit schema secrets are encrypted automatically.** `.secret()` values may come from `.env`, `.env.production`, `.env.production.local`, or the deploy process environment. Void removes them from generated `vars`, uploads them over stdin, and inherits them through `secrets.required`. Remote-only marked secrets are preserved; absent optional values are skipped; nothing is pruned. Unmarked portable env values remain plaintext, while unmarked local and shell values are excluded.
+- **First deploy of a not-yet-deployed worker:** Void can bootstrap schema-marked values on the draft Worker and automatically manages `BETTER_AUTH_SECRET` for auth-enabled apps.
 
 **Email.** When the app uses email (`sendEmail()` or `email/` handlers) and `void.json` has `email.from`, the deploy reads the state of that address's zone before the build — session scopes, zone, MX records, Email Routing, subaddressing, routing rules, Email Sending, and what `wrangler.jsonc` holds — prints a checklist of what it would change in your account, and asks once (default Yes). On Yes it enables what is missing, writes `send_email: [{ "name": "SEND_EMAIL" }]`, the `__VOID_EMAIL_FROM` var and the `addresses` array into `wrangler.jsonc`, and lets `wrangler deploy` create the routing rules; the deploy ends with the address map. A deploy with nothing left to set up asks nothing. Without `email.from` the deploy prints `add "email": { "from": "you@mail.acme.com" } to void.json` and continues without email. Non-interactive runs (CI, or stdin/stdout not a terminal) never prompt: they print the checklist plus `Run void email setup --backend cloudflare once locally, commit wrangler.jsonc, then redeploy` and deploy without email (or with the setup `wrangler.jsonc` already carries, when the binding is committed; a committed `addresses` array whose routing is off is removed first, since wrangler's plan on it would fail after the upload) — unless `--require-email` is passed, which fails instead. A deploy whose account rows all read ready reconciles the two config rows — `addresses` against the current derivation and `vars.__VOID_EMAIL_FROM` against `email.from` — with a plain file write and no prompt. See [Your own Cloudflare account](../guide/email.md#your-own-cloudflare-account) for the whole flow, including the subdomain-vs-apex rule and what stays manual.
 
@@ -351,7 +361,7 @@ See the [Cloudflare integration guide](../integrations/cloudflare.md#deploy-to-y
 
 ### `void db push`
 
-Apply your Drizzle schema directly to the development database without creating migration files. For D1 projects, this updates the local D1 database used by dev. For PostgreSQL projects, this uses `DATABASE_URL` from `.env.local`.
+Apply your Drizzle schema directly to the development database without creating migration files. D1 updates the local database; PostgreSQL and MySQL use `DATABASE_URL` from `.env.local`.
 
 Use this for quick schema iteration while prototyping. Before deploying, generate and review migration files with `void db generate`.
 
@@ -359,7 +369,7 @@ Use this for quick schema iteration while prototyping. Before deploying, generat
 
 Generate SQL migration files from schema changes.
 
-The command compares your current `db/schema.ts` or `db/schema/` modules against the last generated Drizzle snapshot and writes new migration artifacts under `db/migrations/`. Review and commit the generated files before deploying.
+The command compares your current `db/schema.ts` or `db/schema/` modules against the last generated Drizzle snapshot and writes new migration artifacts under `db/migrations/`. When Void-managed auth is enabled, it also resolves the Better Auth schema in production mode and includes those tables automatically, including configured renames and plugin tables. This works for auth-only apps without an application schema. Review and commit the generated files before deploying.
 
 ### `void db status`
 
@@ -396,7 +406,7 @@ Run ad-hoc SQL against the database. Provide SQL inline or from a file. SELECT q
 By default, targets the local database. Pass `--remote` to run against the deployed database:
 
 - **D1 projects**: routes the query through the Void proxy (`proxy.void.cloud/d1/query`) using your auth token. No Cloudflare credentials needed.
-- **PostgreSQL projects**: fetches the stored connection string from the platform and connects directly. Requires that `void db set-url` has been run at least once (the platform stores the URL encrypted). If the URL isn't stored yet, you will see: _"Run `void db set-url` once to populate it, then retry."_
+- **PostgreSQL and MySQL projects**: fetch the stored connection string from the platform and connect directly. Requires that `void db set-url` has been run at least once.
 
 For destructive statements (`DELETE`, `UPDATE`, `DROP`, etc.) when running in a TTY, you will be prompted to confirm before the query is sent to the deployed database. Non-TTY environments (CI) skip the prompt.
 
@@ -420,16 +430,30 @@ Open [Drizzle Studio](https://orm.drizzle.team/docs/drizzle-kit-studio) for the 
 
 By default, targets the local database. Pass `--remote` to open Studio against the deployed database:
 
-- **PostgreSQL projects**: fetches the stored connection string from the platform and opens Studio against it. Requires being logged in (`void auth login`) with a linked project. If the URL isn't stored yet, run `void db set-url` first.
+- **PostgreSQL and MySQL projects**: fetch the stored connection string from the platform and open Studio against it. If the URL isn't stored yet, run `void db set-url` first.
 - **D1 projects**: remote Studio is not yet supported. Use `void db execute --remote` for ad-hoc queries against your deployed D1 database.
 
 ### `void db rename-migrations`
 
 Rename existing migrations from the old numeric prefix format (`0001_name.sql`) to timestamp-based format (`20260410161500_name.sql`). Updates local tracking table and remote records if logged in with a linked project.
 
+### `void db connect`
+
+Connect an existing PostgreSQL/MySQL database or provision one through an adapter:
+
+```sh
+void db connect 'postgresql://user:password@host/database'
+NEON_API_KEY=... void db connect --provider neon --name my-app
+void db connect --provider @acme/void-db-provider --region region-id
+```
+
+The command saves `DATABASE_URL` in `.env.local`. When authenticated with a linked Void project, it also updates the encrypted deployment URL; pass `--local-only` to skip that sync. `neon` is built in. Other adapters are project dependencies or local modules exporting a `DatabaseProviderAdapter` from `void/database-provider`.
+
+Provider-created credentials are never printed. For direct Cloudflare deploys, configure the same URL as a protected `DATABASE_URL` in the shell or CI environment that runs deploy.
+
 ### `void db set-url`
 
-Update the PostgreSQL connection string for deployment. Only available for projects with `"database": "pg"` in `void.json`.
+Update the PostgreSQL or MySQL connection string for deployment. Available for projects with `"database": "pg"` or `"database": "mysql"`.
 
 Prompts for a connection string and sends it to the platform API to create or update the Hyperdrive configuration.
 
@@ -956,14 +980,14 @@ Without `--backend cloudflare` the command is not available yet; on the Void pla
 void email setup --backend cloudflare
 ```
 
-The same setup `void deploy --backend cloudflare` offers on its first deploy, on its own — for CI, which cannot press Enter: run it locally once, commit `wrangler.jsonc`, then let CI run `void deploy --backend cloudflare --require-email`. Needs `email.from` in `void.json` and a `wrangler login` session from wrangler 4.81 or newer (older sessions lack the email scopes) or a `CLOUDFLARE_API_TOKEN` with Email Routing Edit + Email Sending Edit — the CI credential. It runs the preflight above, prints the checklist of what will change on your account, asks once, then:
+The same setup `void deploy --platform cloudflare` offers on its first deploy, on its own — for CI, which cannot press Enter: run it locally once, commit `wrangler.jsonc`, then let CI run `void deploy --platform cloudflare --require-email`. Needs `email.from` in `void.json` and a `wrangler login` session from wrangler 4.81 or newer (older sessions lack the email scopes) or a `CLOUDFLARE_API_TOKEN` with Email Routing Edit + Email Sending Edit — the CI credential. It runs the preflight above, prints the checklist of what will change on your account, asks once, then:
 
 1. enables Email Routing on the domain (`wrangler email routing enable <zone>` on an apex; a subdomain is enabled through your session's bearer, borrowed from `wrangler auth token --json` for that one call and dropped),
 2. turns on subaddressing for the zone, so `support+anything@` reaches `support@`,
 3. onboards the domain for Email Sending (`wrangler email sending enable <domain>`; a Workers Free account keeps inbound and sends to verified destinations only),
 4. writes `send_email: [{ "name": "SEND_EMAIL" }]`, the derived `addresses` array, and `vars.__VOID_EMAIL_FROM` into your root `wrangler.jsonc`, comments preserved.
 
-The routing rules themselves are created by the next `void deploy --backend cloudflare`: wrangler applies its Email Routing plan from `addresses` on deploy. `void email setup` never writes `addresses` unless routing is ready for the domain, prunes an address already routed to another worker or a forward (and says so), and skips the whole step when the existing `addresses` array holds entries it did not derive. A run that finds every row ready asks nothing and changes nothing on your account. Needs an interactive terminal; exits 1 when routing is still not ready afterwards. See [Your own Cloudflare account](../guide/email.md#your-own-cloudflare-account).
+The routing rules themselves are created by the next `void deploy --platform cloudflare`: wrangler applies its Email Routing plan from `addresses` on deploy. `void email setup` never writes `addresses` unless routing is ready for the domain, prunes an address already routed to another worker or a forward (and says so), and skips the whole step when the existing `addresses` array holds entries it did not derive. A run that finds every row ready asks nothing and changes nothing on your account. Needs an interactive terminal; exits 1 when routing is still not ready afterwards. See [Your own Cloudflare account](../guide/email.md#your-own-cloudflare-account).
 
 ## Agent
 
@@ -973,17 +997,8 @@ Runs all agent setup steps:
 
 1. **Instructions:** detects agents once and injects Void framework instructions with versioned markers.
 2. **Skills:** links skills for the same detected or selected agent context.
-3. **MCP config:** writes MCP server config for that same context, or prints generic MCP JSON in Generic mode.
 
 If no agent is detected, `void init --agents` asks you to choose from Claude Code, Cursor, Codex, Gemini CLI, or Generic.
-
-### `void mcp`
-
-```
-void mcp
-```
-
-Start the Void MCP server over stdio for supported coding agents.
 
 ## Environment variables
 

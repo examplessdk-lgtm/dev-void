@@ -1,0 +1,188 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1772336954171,
+      "tag": "0000_confused_starjammers",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1772619623864,
+      "tag": "0001_famous_magus",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1772625614805,
+      "tag": "0002_glorious_morgan_stark",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1772784261759,
+      "tag": "0003_awesome_ares",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1772937600000,
+      "tag": "0004_talented_mimic",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1773069751817,
+      "tag": "0005_legal_red_ghost",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1773286257384,
+      "tag": "0006_wonderful_madame_masque",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1774007038000,
+      "tag": "0007_normal_skin",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1774093438000,
+      "tag": "0008_auth_codes",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1774748243151,
+      "tag": "0009_chubby_masked_marvel",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1776245794851,
+      "tag": "0010_wild_aqueduct",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1777824065590,
+      "tag": "0011_curly_stryfe",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1777914461330,
+      "tag": "0012_eminent_mystique",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1778144684001,
+      "tag": "0013_quick_selene",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1778657801579,
+      "tag": "0014_mysterious_medusa",
+      "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "7",
+      "when": 1778790678997,
+      "tag": "0015_backfill_accepted_invitations",
+      "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1778790678998,
+      "tag": "0016_verified_phoenix",
+      "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1778859255013,
+      "tag": "0017_gorgeous_johnny_blaze",
+      "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1779152519000,
+      "tag": "0018_project_migrations",
+      "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1779874928068,
+      "tag": "0019_project_database_credentials",
+      "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "7",
+      "when": 1781253699032,
+      "tag": "0027_github_deploy",
+      "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "7",
+      "when": 1782220390482,
+      "tag": "0028_check_runs",
+      "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "7",
+      "when": 1782979059578,
+      "tag": "0029_fluffy_justin_hammer",
+      "breakpoints": true
+    },
+    {
+      "idx": 30,
+      "version": "7",
+      "when": 1783086419783,
+      "tag": "0030_smooth_marvel_boy",
+      "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1783105127814,
+      "tag": "0031_thankful_madame_masque",
+      "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1783242864932,
+      "tag": "0032_remarkable_skullbuster",
+      "breakpoints": true
+    }
+  ]
+}

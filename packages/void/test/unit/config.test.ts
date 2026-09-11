@@ -1575,15 +1575,22 @@ describe('database config', () => {
     cleanup();
   });
 
-  it('rejects invalid value', () => {
+  it('accepts mysql', () => {
     setup(JSON.stringify({ database: 'mysql' }));
-    expect(() => readConfig(tmpDir)).toThrow('"database" in void.json must be "pg"');
+    const config = readConfig(tmpDir);
+    expect(getDatabaseDialect(config)).toBe('mysql');
+    cleanup();
+  });
+
+  it('rejects invalid value', () => {
+    setup(JSON.stringify({ database: 'mariadb' }));
+    expect(() => readConfig(tmpDir)).toThrow('"database" in void.json must be "pg" or "mysql"');
     cleanup();
   });
 
   it('rejects object value', () => {
     setup(JSON.stringify({ database: { dialect: 'pg' } }));
-    expect(() => readConfig(tmpDir)).toThrow('"database" in void.json must be "pg"');
+    expect(() => readConfig(tmpDir)).toThrow('"database" in void.json must be "pg" or "mysql"');
     cleanup();
   });
 });

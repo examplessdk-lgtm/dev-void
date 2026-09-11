@@ -220,9 +220,9 @@ When auth is active, Void configures Better Auth with these conventions:
 
 Auth sessions live in the same database system as the rest of the app. `AUTH_KV` is no longer used.
 
-On Void Cloud, Void auto-creates `BETTER_AUTH_SECRET` for auth-enabled apps if you have not set `BETTER_AUTH_SECRET` yourself through project secrets.
+Both Void Cloud and `void deploy --platform cloudflare` automatically ensure a persistent `BETTER_AUTH_SECRET` for auth-enabled apps. An existing secret is preserved; when it is missing, deploy generates it once and stores it through the target's encrypted secret storage. On Cloudflare, the value is sent to `wrangler secret put` over stdin and inherited by later Worker versions.
 
-Localhost dev uses a built-in fallback secret automatically. Outside the managed Void Cloud deploy flow, set `BETTER_AUTH_SECRET` yourself.
+Localhost dev uses a built-in fallback secret automatically. If you deploy without the Void CLI, including bare `vite build && wrangler deploy`, set and inherit `BETTER_AUTH_SECRET` yourself.
 
 ## Customization
 
@@ -251,11 +251,13 @@ Void manages Better Auth migrations as part of the normal Void migration flow:
 
 This applies to `void deploy` (the managed platform), which creates the Better Auth
 tables at runtime after dispatch. Deploying to your own Cloudflare account with
-[`--backend cloudflare`](/integrations/cloudflare) does **not** run that step: there,
+[`--platform cloudflare`](/integrations/cloudflare) does **not** run that step: there,
 your checked-in `db/migrations/*.sql` must already produce the Better Auth schema, and
-deploy fails closed if they do not. Define the tables in `db/schema.ts` and run
-`void db generate` — Drizzle's `.unique()` and `.references()` are opt-in, and the
-constraints are verified too. See [#274](https://github.com/voidzero-dev/void/issues/274).
+deploy fails closed if they do not. Run `void db generate`: Void resolves the production
+Better Auth configuration (including renamed models/fields and plugin tables), adds it to
+Drizzle's schema input, and generates reviewable migration SQL alongside your application
+tables. Commit that migration before deploying. No duplicate auth definitions in
+`db/schema.ts` or separate Better Auth CLI are needed.
 
 ## Unsupported Modes
 

@@ -636,7 +636,7 @@ export type AuthCompileOptions = {
   authConfigPath: string | null;
   authDatabasePath: string | null;
   authSchemaPath: string | null;
-  dialect: 'sqlite' | 'postgresql';
+  dialect: 'sqlite' | 'postgresql' | 'mysql';
   providers: Array<VoidAuthProvider> | null;
 };
 
@@ -684,8 +684,8 @@ export type CompileOptions = {
   migrations?: Array<{ name: string; sql: string }>;
   /** Build-time migration execution plans for protocol v2 workers */
   migrationPlanBundle?: MigrationPlanBundle;
-  /** Migration dialect (sqlite or postgresql) */
-  migrationDialect?: 'sqlite' | 'postgresql';
+  /** Migration dialect. */
+  migrationDialect?: 'sqlite' | 'postgresql' | 'mysql';
   /** Custom binding names configured through inference.bindings. */
   bindingNames?: { d1?: string; kv?: string; r2?: string };
   /** Header rules from routing.headers config (node/bun/deno targets only) */
@@ -2637,6 +2637,12 @@ export interface WorkerEntryOptions {
    * which emits the pre-existing helper byte-for-byte.
    */
   notFound?: NotFoundHandling;
+  /**
+   * User-defined Durable Object classes (`durable/` directory). Each entry is
+   * imported from `filePath`, bound to `bindingName`, and re-exported as
+   * `className` so wrangler's `durable_objects.bindings` can find it.
+   */
+  durableObjects?: Array<{ bindingName: string; className: string; filePath: string }>;
 }
 
 export function compileWorkerEntry(options: WorkerEntryOptions = {}): string {
@@ -2654,6 +2660,7 @@ export function compileWorkerEntry(options: WorkerEntryOptions = {}): string {
     live,
     isr,
     notFound = 'none',
+    durableObjects = [],
   } = options;
   const remotePath = remote?.remotePath;
   const remoteBindingNames = JSON.stringify(remote?.bindingNames);
@@ -2689,6 +2696,18 @@ export function compileWorkerEntry(options: WorkerEntryOptions = {}): string {
       ? `export { VoidLiveStreamDurableObject };\n__setLiveBindingName(${JSON.stringify(liveBindingName)});\n`
       : `export { VoidLiveStreamDurableObject as ${liveClassName} };\n__setLiveBindingName(${JSON.stringify(liveBindingName)});\n`
     : '';
+  const durableObjectImports = durableObjects
+    .map(
+      ({ filePath }, index) =>
+        `import __voidDurableObject${index} from ${JSON.stringify(filePath)};`,
+    )
+    .join('\n');
+  const durableObjectExports = durableObjects
+    .map(
+      ({ bindingName, className }, index) =>
+        `__voidDurableObject${index}.__bind(${JSON.stringify(bindingName)});\nexport const ${className} = __voidDurableObject${index}.class;`,
+    )
+    .join('\n');
   const runtimeEnvImport = `import { withRuntimeEnv } from ${JSON.stringify(runtimeEnvPath)};\n`;
   const remoteImport = remote
     ? `import { createRemoteEnv } from ${JSON.stringify(remote.remotePath)};\n`
@@ -2901,7 +2920,7 @@ ${queueMethodBody}${emailMethodBody}}`;
 
   if (hasQueues) {
     return `${sandboxImport}${entryImport}${liveRuntimeImport}import app, { scheduled, __voidCollectPrerenderPaths, __voidHandleInternalRoute, __voidHandleWebSocket, __withRawEnv, __processQueue${emailImport}${webSocketClasses.length > 0 ? `, ${webSocketClasses.join(', ')}` : ''}${liveRouteImport} } from 'virtual:void-routes';
-${runtimeEnvImport}${emailProxyImport}${envSchemaImport}${remoteImport}${isrImport}${filterBindingsHelper}${assetHelper}
+${durableObjectImports}\n${runtimeEnvImport}${emailProxyImport}${envSchemaImport}${remoteImport}${isrImport}${filterBindingsHelper}${assetHelper}
 ${internalRouteHelper}
 ${fetchDeclaration}
 ${scheduledHandler}
@@ -2930,10 +2949,11 @@ ${envValidateCall}${remotePath ? `  if (env.__VOID_REMOTE === "1") env = ${creat
 ${webSocketClasses.map((name) => `export { ${name} };`).join('\n')}
 ${liveExport}
 ${sandboxExport}
+${durableObjectExports}
 ${entryClass}`;
   }
   return `${sandboxImport}${entryImport}${liveRuntimeImport}import app, { scheduled, __voidCollectPrerenderPaths, __voidHandleInternalRoute, __voidHandleWebSocket, __withRawEnv${emailImport}${webSocketClasses.length > 0 ? `, ${webSocketClasses.join(', ')}` : ''}${liveRouteImport} } from 'virtual:void-routes';
-${runtimeEnvImport}${emailProxyImport}${envSchemaImport}${remoteImport}${isrImport}${filterBindingsHelper}${assetHelper}
+${durableObjectImports}\n${runtimeEnvImport}${emailProxyImport}${envSchemaImport}${remoteImport}${isrImport}${filterBindingsHelper}${assetHelper}
 ${internalRouteHelper}
 ${fetchDeclaration}
 ${scheduledHandler}
@@ -2941,6 +2961,7 @@ ${emailHandler}
 ${webSocketClasses.map((name) => `export { ${name} };`).join('\n')}
 ${liveExport}
 ${sandboxExport}
+${durableObjectExports}
 ${entryClass}`;
 }
 

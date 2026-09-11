@@ -7,6 +7,7 @@ export default defineConfig({
     dts: true,
     clean: true,
     deps: {
+      resolveDepSubpath: true,
       neverBundle: [
         'solid-js',
         'solid-js/web',

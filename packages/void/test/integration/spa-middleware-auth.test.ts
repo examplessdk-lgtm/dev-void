@@ -2,20 +2,27 @@ import { execSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import spawn from 'cross-spawn';
 import { join } from 'pathslash';
-import { afterEach, describe, expect, it } from 'vite-plus/test';
-import { getPort, killChild, waitForServer } from '../../../../test/integration-helpers.ts';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vite-plus/test';
+import {
+  createIsolatedPlayground,
+  getPort,
+  killChild,
+  type IsolatedPlayground,
+  waitForServer,
+} from '../../../../test/integration-helpers.ts';
 
 const ROOT = join(import.meta.dirname, '..', '..', '..', '..');
-const PLAYGROUND = join(ROOT, 'playground/spa');
-const PLAYGROUND_FILTER = './playground/spa';
-const AUTH_MIDDLEWARE = join(PLAYGROUND, 'middleware/00.basic-auth-regression.ts');
-const DOCUMENT_ROUTE = join(PLAYGROUND, 'routes/dashboard.ts');
-const MIDDLEWARE_DIR = join(PLAYGROUND, 'middleware');
-const MIDDLEWARE_BACKUP_DIR = join(PLAYGROUND, `.middleware.e2e-backup-${process.pid}`);
-const PUBLIC_DIR = join(PLAYGROUND, 'public');
-const PROTECTED_ASSET = join(PUBLIC_DIR, 'void-basic-auth-regression.txt');
-const WRANGLER_CONFIG = join(PLAYGROUND, 'wrangler.jsonc');
-const DIST = join(PLAYGROUND, 'dist');
+const SOURCE_PLAYGROUND = 'playground/spa';
+let playground: IsolatedPlayground;
+let playgroundFilter = '';
+let authMiddleware = '';
+let documentRoute = '';
+let middlewareDir = '';
+let middlewareBackupDir = '';
+let publicDir = '';
+let protectedAsset = '';
+let wranglerConfig = '';
+let dist = '';
 const AUTH_HEADER = 'Basic Z3Vlc3Q6d2VkZGluZw==';
 
 const middlewareSource = `import { basicAuth } from 'void';
@@ -49,24 +56,22 @@ let middlewareBackedUp = false;
 let publicDirCreated = false;
 
 function saveWranglerConfig(): void {
-  previousWrangler = existsSync(WRANGLER_CONFIG)
-    ? readFileSync(WRANGLER_CONFIG, 'utf-8')
-    : undefined;
+  previousWrangler = existsSync(wranglerConfig) ? readFileSync(wranglerConfig, 'utf-8') : undefined;
 }
 
 function restoreWranglerConfig(): void {
   if (previousWrangler === undefined) {
-    rmSync(WRANGLER_CONFIG, { force: true });
+    rmSync(wranglerConfig, { force: true });
   } else {
-    writeFileSync(WRANGLER_CONFIG, previousWrangler);
+    writeFileSync(wranglerConfig, previousWrangler);
   }
   previousWrangler = undefined;
 }
 
 function disableMiddlewareDir(): void {
-  rmSync(MIDDLEWARE_BACKUP_DIR, { recursive: true, force: true });
-  if (existsSync(MIDDLEWARE_DIR)) {
-    renameSync(MIDDLEWARE_DIR, MIDDLEWARE_BACKUP_DIR);
+  rmSync(middlewareBackupDir, { recursive: true, force: true });
+  if (existsSync(middlewareDir)) {
+    renameSync(middlewareDir, middlewareBackupDir);
     middlewareBackedUp = true;
   }
 }
@@ -75,19 +80,19 @@ function restoreMiddlewareDir(): void {
   if (!middlewareBackedUp) {
     return;
   }
-  rmSync(MIDDLEWARE_DIR, { recursive: true, force: true });
-  if (existsSync(MIDDLEWARE_BACKUP_DIR)) {
-    renameSync(MIDDLEWARE_BACKUP_DIR, MIDDLEWARE_DIR);
+  rmSync(middlewareDir, { recursive: true, force: true });
+  if (existsSync(middlewareBackupDir)) {
+    renameSync(middlewareBackupDir, middlewareDir);
   }
   middlewareBackedUp = false;
 }
 
 function writeProtectedAsset(): void {
-  if (!existsSync(PUBLIC_DIR)) {
-    mkdirSync(PUBLIC_DIR);
+  if (!existsSync(publicDir)) {
+    mkdirSync(publicDir);
     publicDirCreated = true;
   }
-  writeFileSync(PROTECTED_ASSET, 'protected static asset');
+  writeFileSync(protectedAsset, 'protected static asset');
 }
 
 async function startSpaDevServer(): Promise<string> {
@@ -96,7 +101,7 @@ async function startSpaDevServer(): Promise<string> {
   stderr = '';
   child = spawn(
     'vp',
-    ['run', '--filter', PLAYGROUND_FILTER, 'dev', '--host', '127.0.0.1', '--port', String(port)],
+    ['run', '--filter', playgroundFilter, 'dev', '--host', '127.0.0.1', '--port', String(port)],
     {
       cwd: ROOT,
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -121,26 +126,43 @@ function readBuiltAssetConfig(): {
   not_found_handling?: string;
   run_worker_first?: boolean | Array<string>;
 } {
-  const wranglerConfig = JSON.parse(readFileSync(join(DIST, 'ssr/wrangler.json'), 'utf-8')) as {
+  const emittedWrangler = JSON.parse(readFileSync(join(dist, 'ssr/wrangler.json'), 'utf-8')) as {
     assets?: {
       not_found_handling?: string;
       run_worker_first?: boolean | Array<string>;
     };
   };
-  return wranglerConfig.assets ?? {};
+  return emittedWrangler.assets ?? {};
 }
+
+beforeAll(() => {
+  playground = createIsolatedPlayground(ROOT, SOURCE_PLAYGROUND);
+  playgroundFilter = `./${playground.workspacePath}`;
+  authMiddleware = join(playground.root, 'middleware/00.basic-auth-regression.ts');
+  documentRoute = join(playground.root, 'routes/dashboard.ts');
+  middlewareDir = join(playground.root, 'middleware');
+  middlewareBackupDir = join(playground.root, `.middleware.e2e-backup-${process.pid}`);
+  publicDir = join(playground.root, 'public');
+  protectedAsset = join(publicDir, 'void-basic-auth-regression.txt');
+  wranglerConfig = join(playground.root, 'wrangler.jsonc');
+  dist = join(playground.root, 'dist');
+});
+
+afterAll(() => {
+  playground?.cleanup();
+});
 
 afterEach(async () => {
   if (child) {
     await killChild(child);
     child = undefined;
   }
-  rmSync(DOCUMENT_ROUTE, { force: true });
+  rmSync(documentRoute, { force: true });
   restoreMiddlewareDir();
-  rmSync(AUTH_MIDDLEWARE, { force: true });
-  rmSync(PROTECTED_ASSET, { force: true });
+  rmSync(authMiddleware, { force: true });
+  rmSync(protectedAsset, { force: true });
   if (publicDirCreated) {
-    rmSync(PUBLIC_DIR, { recursive: true, force: true });
+    rmSync(publicDir, { recursive: true, force: true });
     publicDirCreated = false;
   }
   restoreWranglerConfig();
@@ -153,10 +175,10 @@ describe('SPA asset routing policy', () => {
   it('keeps API-only projects on static SPA fallback while routing API requests to the worker', () => {
     saveWranglerConfig();
     disableMiddlewareDir();
-    writeFileSync(WRANGLER_CONFIG, staleWranglerSource);
-    rmSync(DIST, { recursive: true, force: true });
+    writeFileSync(wranglerConfig, staleWranglerSource);
+    rmSync(dist, { recursive: true, force: true });
 
-    execSync(`vp run --filter ${PLAYGROUND_FILTER} build`, { cwd: ROOT, stdio: 'pipe' });
+    execSync(`vp run --filter ${playgroundFilter} build`, { cwd: ROOT, stdio: 'pipe' });
 
     const assetConfig = readBuiltAssetConfig();
     expect(assetConfig.not_found_handling).toBe('single-page-application');
@@ -166,8 +188,8 @@ describe('SPA asset routing policy', () => {
   it('routes document routes through the worker before SPA fallback HTML', async () => {
     saveWranglerConfig();
     disableMiddlewareDir();
-    writeFileSync(WRANGLER_CONFIG, staleWranglerSource);
-    writeFileSync(DOCUMENT_ROUTE, documentRouteSource);
+    writeFileSync(wranglerConfig, staleWranglerSource);
+    writeFileSync(documentRoute, documentRouteSource);
 
     const base = await startSpaDevServer();
     const response = await fetch(`${base}/dashboard`, {
@@ -180,8 +202,8 @@ describe('SPA asset routing policy', () => {
 
   it('runs middleware before serving SPA fallback HTML on nested navigations', async () => {
     saveWranglerConfig();
-    writeFileSync(AUTH_MIDDLEWARE, middlewareSource);
-    writeFileSync(WRANGLER_CONFIG, staleWranglerSource);
+    writeFileSync(authMiddleware, middlewareSource);
+    writeFileSync(wranglerConfig, staleWranglerSource);
     writeProtectedAsset();
 
     const base = await startSpaDevServer();

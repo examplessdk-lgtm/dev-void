@@ -96,6 +96,11 @@ When you run `void deploy` with a PostgreSQL project:
 4. Pending migrations run inside the deployed worker via Hyperdrive
 5. The new worker goes live
 
+When deploying to your own account with `void deploy --platform cloudflare`, export the production
+connection string as `DATABASE_URL`. Void uses it to provision Hyperdrive and apply the checked-in
+migrations transactionally before it uploads the Worker. The connection string is not written to
+`wrangler.jsonc` or the generated Worker config.
+
 ## Updating the Connection String
 
 To update the connection string for an existing deployment (e.g. migrating to a new database host):

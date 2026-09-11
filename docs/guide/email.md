@@ -44,7 +44,7 @@ Zero config on the Void platform (`void deploy`). Every Void project ships with:
 
 That's it. `sendEmail({ to: '...', subject: '...', text: '...' })` works on first deploy.
 
-Deploying to your own Cloudflare account instead (`void deploy --backend cloudflare`) takes one line of `void.json` and one Enter on the first deploy — see [Your own Cloudflare account](#your-own-cloudflare-account).
+Deploying to your own Cloudflare account instead (`void deploy --platform cloudflare`) takes one line of `void.json` and one Enter on the first deploy — see [Your own Cloudflare account](#your-own-cloudflare-account).
 
 ## Adding recipients
 
@@ -413,7 +413,7 @@ The harness uses the same precedence rules as the production dispatcher. Reserve
 
 ## Your own Cloudflare account
 
-`void deploy --backend cloudflare` sets email up on a zone **you** own, through your `wrangler login` session. You never handle a Cloudflare object — no zone id, no routing rule, no token scope. You type one address, read one checklist, and press Enter once.
+`void deploy --platform cloudflare` sets email up on a zone **you** own, through your `wrangler login` session. You never handle a Cloudflare object — no zone id, no routing rule, no token scope. You type one address, read one checklist, and press Enter once.
 
 ### Two things to type, once
 
@@ -539,9 +539,9 @@ deploy: email on mail.acme.com is not set up, and this shell cannot ask.
 Run `void email setup --backend cloudflare` once locally, commit wrangler.jsonc, then redeploy — deploying without email.
 ```
 
-then deploys **without** email. Pass `--require-email` to fail instead. `--provision` is not an escape hatch; it fails closed in CI too. To read the rows without deploying or being asked anything, run `void email status --backend cloudflare`.
+then deploys **without** email. Pass `--require-email` to fail instead. Automatic resource provisioning is not an escape hatch: it creates D1/KV/R2/Queue/Hyperdrive resources, never a mail setup. To read the rows without deploying or being asked anything, run `void email status --backend cloudflare`.
 
-So the CI story is: run `void email setup --backend cloudflare` once on your machine (it runs the same preflight, checklist and prompt as the first deploy, then writes `wrangler.jsonc`, without deploying), commit `wrangler.jsonc`, and let CI run `void deploy --backend cloudflare --require-email`. With the binding and `addresses` committed, every row reads ready and nothing is asked.
+So the CI story is: run `void email setup --backend cloudflare` once on your machine (it runs the same preflight, checklist and prompt as the first deploy, then writes `wrangler.jsonc`, without deploying), commit `wrangler.jsonc`, and let CI run `void deploy --platform cloudflare --require-email`. With the binding and `addresses` committed, every row reads ready and nothing is asked.
 
 ### If the subdomain step is refused
 

@@ -11,10 +11,11 @@ import {
   realpathSync,
   renameSync,
   unlinkSync,
-  writeFileSync,
   writeSync,
 } from 'node:fs';
 import { createRequire } from 'node:module';
+import { resolve as resolvePosixPath } from 'node:path/posix';
+import { resolve as resolveWindowsPath } from 'node:path/win32';
 import { types as utilTypes } from 'node:util';
 import { parse, type ParseError } from 'jsonc-parser';
 import { basename, dirname, join, normalize, resolve } from 'pathslash';
@@ -82,9 +83,8 @@ export interface ProvisionDriftResult {
  * Queues are NAME-bearing (no id in the config), so they are NOT part of this
  * id-drift check. A missing config file yields every desired resource as missing.
  *
- * Used by the deploy orchestrator (Task 6) for BOTH the no-`--provision` DRIFT
- * CHECK (any `missing` → guidance error) and the CI `--provision` no-op gate
- * (`missing.length === 0` ⇒ a provable no-op the committed config already covers).
+ * Used by the deploy orchestrator to decide whether automatic provisioning is needed
+ * and to verify that every id-bearing resource was satisfied afterward.
  * A malformed/duplicate-binding config makes {@link readProvisionedBindingEntry}
  * throw — fail closed, exactly as the provisioner would.
  */
@@ -2109,7 +2109,7 @@ function selectHyperdriveMatch(
 // ownership-scoped release.
 
 interface ProvisionLock {
-  /** The locked marker path (`<configPath>.void-provision.lock`), for diagnostics. */
+  /** The synthetic lock target (`<configPath>.void-provision.lock`), for diagnostics. */
   readonly lockTargetPath: string;
   /**
    * Drop the mutex. REJECTS on a genuine (non-`onCompromised`) unlock failure so a
@@ -2568,13 +2568,30 @@ function normalizeLockRetries(retries: ProvisionLockOptions['retries']): {
 }
 
 /**
+ * Match the key spelling `proper-lockfile` stores when `realpath: false`.
+ *
+ * The library uses the host's native `node:path.resolve`, including backslashes on
+ * Windows. Most Void paths intentionally use `pathslash`, but its forward-slash output
+ * cannot address `proper-lockfile`'s internal registry on Windows.
+ */
+export function resolveProperLockfileKey(
+  file: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  return platform === 'win32' ? resolveWindowsPath(file) : resolvePosixPath(file);
+}
+
+/**
  * Acquire the cross-process provision lock over the resolved config path via
  * `proper-lockfile` (an atomic `mkdir`-based mutex at `<configPath>.void-provision.lock.lock`).
- * `proper-lockfile` requires the locked pathname to EXIST, so we lock a DEDICATED
- * adjacent marker file (`<configPath>.void-provision.lock`), creating it if absent —
- * never the real config, so the writer's missing-vs-empty config semantics stay
- * untouched. Returns a handle whose `release()` drops the mutex; ALWAYS call it in a
- * `finally` so an interruption never leaks the lock.
+ * The library normally realpaths the pathname being locked, which requires it to exist.
+ * Both lock identities here are deliberately SYNTHETIC adjacent paths, so acquisition
+ * passes `realpath: false`: proper-lockfile resolves the identity lexically and creates
+ * only its temporary mutex directory — never an empty marker file in the user's project.
+ * This is safe because the config path was already canonicalized (including missing-file
+ * and symlink cases) before reaching this function. It also preserves the writer's
+ * missing-vs-empty config semantics. Returns a handle whose `release()` drops the mutex;
+ * ALWAYS call it in a `finally` so an interruption never leaks the lock.
  *
  * `onCompromised` FAILS CLOSED (re-throws): if the lock is ever detected stolen (its
  * mtime changed, or the mutex vanished under a live owner), provisioning must NEVER
@@ -2607,12 +2624,6 @@ export async function acquireProvisionLock(
 ): Promise<ProvisionLock> {
   const lockTarget = `${configPath}.void-provision.lock`;
   const recoveryTarget = `${lockTarget}.recovery`;
-  if (!existsSync(lockTarget)) {
-    writeFileSync(lockTarget, '');
-  }
-  if (!existsSync(recoveryTarget)) {
-    writeFileSync(recoveryTarget, '');
-  }
   const staleMs = lockOptions?.stale ?? LOCK_STALE_MS;
   const retryCfg = normalizeLockRetries(lockOptions?.retries);
   const isElocked = (error: unknown): boolean =>
@@ -2631,6 +2642,9 @@ export async function acquireProvisionLock(
       stale: staleMs,
       update: lockOptions?.update ?? LOCK_UPDATE_MS,
       retries: 0,
+      // `lockTarget` is a synthetic identity derived from an already-canonical config
+      // path. Do not require/create an on-disk marker merely so it can be realpathed.
+      realpath: false,
       // `proper-lockfile`'s callback-style fs seam — overridable so a test can force an
       // unlock failure. Production uses the library default (graceful-fs).
       ...(lockOptions?.fs !== undefined ? { fs: lockOptions.fs as never } : {}),
@@ -2645,6 +2659,9 @@ export async function acquireProvisionLock(
     lockfile.lock(recoveryTarget, {
       stale: RECOVERY_LOCK_STALE_MS,
       retries: 0,
+      // Same synthetic-identity contract as the main mutex above. Distinct config paths
+      // remain distinct, so different apps can provision concurrently on one machine.
+      realpath: false,
       onCompromised: (error) => {
         throw error;
       },
@@ -2815,13 +2832,10 @@ export async function acquireProvisionLock(
       if (!locks) {
         return; // degraded: retained only until process exit (internals unavailable)
       }
-      // proper-lockfile keys its registry on the REALPATH of the locked marker file.
-      let key: string;
-      try {
-        key = realpathSync(lockTarget);
-      } catch {
-        key = resolve(lockTarget);
-      }
+      // With `realpath: false`, proper-lockfile keys its registry using node:path.resolve.
+      // Use that same NATIVE spelling here (not pathslash's POSIX spelling) so quarantine
+      // detaches correctly on Windows too.
+      const key = resolveProperLockfileKey(lockTarget);
       const tracked = locks[key];
       if (tracked) {
         tracked.released = true;
@@ -3405,8 +3419,8 @@ const RESOURCE_NAME_GRAMMARS: Record<
  * violation, before the account gate or any wrangler/REST call.
  *
  * Exported — like {@link isQueueConfirmedAbsent} — so the deploy orchestrator's
- * no-`--provision` queue probe (`cli/deploy.ts`) gates names on the SAME rules this
- * provisioner enforces, instead of only the `--provision` path being protected. Queue names
+ * pre-provision queue probe (`cli/deploy.ts`) gates names on the SAME rules this
+ * provisioner enforces. Queue names
  * are taken verbatim from filenames with no sanitization, so without this gate a name
  * beginning with `-` reaches wrangler as a FLAG rather than a positional.
  */
@@ -3950,7 +3964,7 @@ async function provisionWithProcessSlot(
   // Then CANONICALIZE it with `realpath` so the lock identity (and every read/
   // write/`-c`) is keyed on the REAL file, not a lexical alias. Without this, a real
   // config and a symlink alias to it resolve to DIFFERENT lexical paths → DIFFERENT lock
-  // marker dirs (`<path>.void-provision.lock`), so both processes acquire "the" lock at
+  // mutex dirs (`<path>.void-provision.lock.lock`), so both processes acquire "the" lock at
   // once and race the same underlying file. Canonicalizing collapses all aliases to one
   // identity; a missing config canonicalizes its parent dir so the identity is still
   // alias-stable before the file is created.

@@ -2,7 +2,11 @@ import { join } from 'pathslash';
 import { loadEnv } from 'vite';
 import { readConfig } from '../config.ts';
 import { getMiniflareDatabasePath } from '../migrations/runner.ts';
-import { applyPgAuthMigrations, applySqliteAuthMigrations } from '../runtime/auth-migrations.ts';
+import {
+  applyMySqlAuthMigrations,
+  applyPgAuthMigrations,
+  applySqliteAuthMigrations,
+} from '../runtime/auth-migrations.ts';
 import type { VoidAuthDialect, VoidAuthEnv } from '../runtime/better-auth-shared.ts';
 import { findVoidAuthConfig, loadVoidAuthConfig } from './config.ts';
 import { resolveVoidAuthMigrationSchema } from './drizzle.ts';
@@ -50,6 +54,28 @@ export async function runLocalVoidAuthMigrations(
       ? env.DATABASE_URL
       : undefined;
   if (!connectionString) {
+    return;
+  }
+
+  if (dialect === 'mysql') {
+    const { createConnection } = await import('mysql2/promise');
+    const connection = await createConnection(connectionString);
+    try {
+      await applyMySqlAuthMigrations(
+        {
+          async all<T extends Record<string, unknown>>(sql: string, params?: Array<unknown>) {
+            const [rows] = await connection.query(sql, params);
+            return rows as Array<T>;
+          },
+          async run(sql: string, params?: Array<unknown>) {
+            await connection.query(sql, params);
+          },
+        },
+        migrationSchema,
+      );
+    } finally {
+      await connection.end();
+    }
     return;
   }
 

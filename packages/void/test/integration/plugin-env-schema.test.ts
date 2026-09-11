@@ -256,4 +256,27 @@ describe('envSchemaPlugin auto-discovery', () => {
 
     expect(resolved.env).toEqual({ PUBLIC_TITLE: 'Public' });
   });
+
+  it('reports only keys explicitly marked secret', async () => {
+    const { defineEnv } = await import('../../src/runtime/env-public.ts');
+    const { string } = await import('../../src/runtime/env-helpers.ts');
+    defineEnv({
+      API_TOKEN: string().secret(),
+      PUBLIC_KEY: string().public(),
+      ORDINARY: string(),
+    });
+    const root = createTempRoot();
+    writeFileSync(join(root, 'env.ts'), 'export default {};\n');
+    let secretKeys: Array<string> = [];
+
+    await runConfig(
+      envSchemaPlugin(root, {
+        onSecrets(keys) {
+          secretKeys = keys;
+        },
+      }),
+    );
+
+    expect(secretKeys).toEqual(['API_TOKEN']);
+  });
 });

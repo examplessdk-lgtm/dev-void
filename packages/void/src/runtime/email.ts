@@ -125,7 +125,7 @@ function readEmailDomain(): string | undefined {
 }
 
 // The project's own default sender, written into the worker's `vars` by
-// `void deploy --backend cloudflare` from `email.from` in void.json. It is a
+// `void deploy --platform cloudflare` from `email.from` in void.json. It is a
 // full address on a zone the developer owns, so there is no slug to
 // substitute; `normalizeEmail` validates it like any explicit `from`.
 function readEmailFrom(): string | undefined {
@@ -139,7 +139,7 @@ interface ProxyEnv {
   __PROJECT_ID?: string;
 }
 
-// The `send_email` binding `void deploy --backend cloudflare` provisions
+// The `send_email` binding `void deploy --platform cloudflare` provisions
 // (`cli/email-cloudflare.ts` writes the same name into wrangler.jsonc).
 const SEND_EMAIL_BINDING_NAME = 'SEND_EMAIL';
 
@@ -690,7 +690,7 @@ export async function sendEmail(opts: SendEmailOptions): Promise<SendEmailResult
     return err(
       'BINDING_MISSING',
       'email: neither SEND_EMAIL nor __VOID_PROXY is available, so nothing was sent. Deploy via Void to bind the platform proxy, ' +
-        'or set `email.from` in void.json so `void deploy --backend cloudflare` provisions the SEND_EMAIL binding. ' +
+        'or set `email.from` in void.json so `void deploy --platform cloudflare` provisions the SEND_EMAIL binding. ' +
         'Under `void dev` messages are captured by the local inbox at /__void/inbox instead — reaching this error there means ' +
         'that path was bypassed (`sendInDev: true`) or unavailable (the worker has no assets binding to reach the dev server through).',
     );

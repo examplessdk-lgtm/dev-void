@@ -51,6 +51,16 @@ describe('Better Auth Drizzle codegen', () => {
     expect(code).toContain('"name": "members"');
   });
 
+  it('generates MySQL auth tables with native column types', () => {
+    const code = generateVoidAuthDrizzleSchema({ dialect: 'mysql', providers: null });
+
+    expect(code).toContain('mysqlTable');
+    expect(code).toContain('from "void/schema-mysql"');
+    expect(code).toContain('boolean("emailVerified")');
+    expect(code).toContain('timestamp("createdAt", { mode: "date", fsp: 3 })');
+    expect(code).toContain('"dialect": "mysql"');
+  });
+
   it('lazily creates an auth database adapter that reuses void/db', () => {
     const code = generateVoidAuthDatabaseModule({
       dialect: 'postgresql',

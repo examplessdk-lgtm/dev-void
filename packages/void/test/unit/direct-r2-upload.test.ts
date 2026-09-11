@@ -66,6 +66,7 @@ describe('uploadAssetsToR2', () => {
   });
 
   it('retries 5xx up to 3 times then succeeds', async () => {
+    vi.useFakeTimers();
     let attempts = 0;
     const fetchMock = vi.fn().mockImplementation(() => {
       attempts++;
@@ -75,7 +76,13 @@ describe('uploadAssetsToR2', () => {
       return Promise.resolve(new Response(null, { status: 200 }));
     });
 
-    await uploadAssetsToR2([makeItem('/x.css', 'h-x')], cliLog, fetchMock);
+    try {
+      const upload = uploadAssetsToR2([makeItem('/x.css', 'h-x')], cliLog, fetchMock);
+      await vi.runAllTimersAsync();
+      await upload;
+    } finally {
+      vi.useRealTimers();
+    }
 
     expect(fetchMock).toHaveBeenCalledTimes(3);
     const retries = cliLog.warn.mock.calls.filter(([msg]) => msg === 'r2_put_retry');
@@ -99,16 +106,23 @@ describe('uploadAssetsToR2', () => {
   });
 
   it('throws DirectR2PutError when 5xx exceeds retry budget', async () => {
+    vi.useFakeTimers();
     const fetchMock = vi.fn().mockResolvedValue(new Response('boom', { status: 500 }));
 
-    await expect(
-      uploadAssetsToR2([makeItem('/x.html', 'h-x')], cliLog, fetchMock),
-    ).rejects.toMatchObject({
-      name: 'DirectR2PutError',
-      status: 500,
-      hash: 'h-x',
-      path: '/x.html',
-    });
+    try {
+      const upload = expect(
+        uploadAssetsToR2([makeItem('/x.html', 'h-x')], cliLog, fetchMock),
+      ).rejects.toMatchObject({
+        name: 'DirectR2PutError',
+        status: 500,
+        hash: 'h-x',
+        path: '/x.html',
+      });
+      await vi.runAllTimersAsync();
+      await upload;
+    } finally {
+      vi.useRealTimers();
+    }
     // 1 initial attempt + 3 retries = 4 calls.
     expect(fetchMock).toHaveBeenCalledTimes(4);
   });
@@ -148,16 +162,23 @@ describe('uploadAssetsToR2', () => {
   });
 
   it('surfaces network errors with retry exhaustion', async () => {
+    vi.useFakeTimers();
     const fetchMock = vi.fn().mockRejectedValue(new TypeError('fetch failed'));
 
-    await expect(
-      uploadAssetsToR2([makeItem('/n.html', 'h-n')], cliLog, fetchMock),
-    ).rejects.toMatchObject({
-      name: 'DirectR2PutError',
-      status: 0,
-      hash: 'h-n',
-      path: '/n.html',
-    });
+    try {
+      const upload = expect(
+        uploadAssetsToR2([makeItem('/n.html', 'h-n')], cliLog, fetchMock),
+      ).rejects.toMatchObject({
+        name: 'DirectR2PutError',
+        status: 0,
+        hash: 'h-n',
+        path: '/n.html',
+      });
+      await vi.runAllTimersAsync();
+      await upload;
+    } finally {
+      vi.useRealTimers();
+    }
     expect(fetchMock).toHaveBeenCalledTimes(4);
   });
 

@@ -188,6 +188,43 @@ function drizzleImportsForColumnsPg(columns: Array<ColumnSpec>): Array<string> {
   return [...types].sort();
 }
 
+function drizzleColumnDefMySql(col: ColumnSpec): string {
+  const { name, type } = col;
+  switch (type) {
+    case 'string':
+    case 'text':
+      return `  ${name}: text("${name}").notNull(),`;
+    case 'integer':
+      return `  ${name}: int("${name}").notNull(),`;
+    case 'boolean':
+      return `  ${name}: boolean("${name}").notNull().default(false),`;
+    case 'real':
+      return `  ${name}: double("${name}").notNull(),`;
+    default:
+      return `  ${name}: text("${name}"),`;
+  }
+}
+
+function drizzleImportsForColumnsMySql(columns: Array<ColumnSpec>): Array<string> {
+  const types = new Set<string>(['int', 'text', 'timestamp']);
+  for (const col of columns) {
+    switch (col.type) {
+      case 'integer':
+        types.add('int');
+        break;
+      case 'boolean':
+        types.add('boolean');
+        break;
+      case 'real':
+        types.add('double');
+        break;
+      default:
+        types.add('text');
+    }
+  }
+  return [...types].sort();
+}
+
 // ---------------------------------------------------------------------------
 // Validator detection + templates
 // ---------------------------------------------------------------------------
@@ -232,7 +269,7 @@ async function resolveValidator(root: string): Promise<Validator> {
     ],
   });
 
-  if (isCancel(choice)) {
+  if (isCancel(choice) || typeof choice === 'symbol') {
     cancel('Cancelled.');
     process.exit(0);
   }
@@ -506,6 +543,24 @@ async function runModel(root: string, name: string, columns: Array<ColumnSpec>):
       '});',
       '',
     ].join('\n');
+  } else if (dialect === 'mysql') {
+    const colDefs = columns.map((col) => drizzleColumnDefMySql(col));
+    const columnImports = drizzleImportsForColumnsMySql(columns);
+    const allCols = [
+      `  id: int("id").autoincrement().primaryKey(),`,
+      ...colDefs,
+      `  createdAt: timestamp("created_at").notNull().defaultNow(),`,
+      `  updatedAt: timestamp("updated_at").notNull().defaultNow(),`,
+    ];
+
+    content = [
+      `import { mysqlTable, ${columnImports.join(', ')} } from "void/schema-mysql";`,
+      '',
+      `export const ${name} = mysqlTable("${name}", {`,
+      ...allCols,
+      '});',
+      '',
+    ].join('\n');
   } else {
     const colDefs = columns.map((col) => drizzleColumnDef(col));
     const columnImports = drizzleImportsForColumns(columns);
@@ -727,8 +782,7 @@ function runMigration(root: string, name: string): void {
     // correct recovery is an explicit one (revert void.json, or drop
     // db/migrations/ and regenerate).
     //
-    // Round 42: whitelist the two dialects void actually supports
-    // (`sqlite`, `postgresql`) instead of collapsing anything unknown
+    // Whitelist the dialects Void supports instead of collapsing anything unknown
     // to sqlite. A hand-edited or merge-corrupted journal with e.g.
     // `mysql`, `pg`, or an empty dialect would otherwise silently be
     // treated as sqlite, producing either a sqlite snapshot on top of
@@ -736,17 +790,19 @@ function runMigration(root: string, name: string): void {
     // X but journal says sqlite" cross-check message. Refuse loudly
     // instead so the user restores the journal (or drops db/migrations/)
     // on their terms.
-    let journalDialect: 'sqlite' | 'postgresql';
+    let journalDialect: 'sqlite' | 'postgresql' | 'mysql';
     if (existingJournal.dialect === 'sqlite') {
       journalDialect = 'sqlite';
     } else if (existingJournal.dialect === 'postgresql') {
       journalDialect = 'postgresql';
+    } else if (existingJournal.dialect === 'mysql') {
+      journalDialect = 'mysql';
     } else {
       log.error(
         `db/migrations/meta/_journal.json has an unsupported dialect: \`${existingJournal.dialect}\`.`,
       );
       log.error(
-        'void supports `sqlite` and `postgresql` only. Restore the journal from version control, or drop db/migrations/ and regenerate from scratch.',
+        'void supports `sqlite`, `postgresql`, and `mysql` only. Restore the journal from version control, or drop db/migrations/ and regenerate from scratch.',
       );
       process.exit(1);
     }
@@ -760,10 +816,18 @@ function runMigration(root: string, name: string): void {
       );
       process.exit(1);
     }
-    const configPath =
+    const authSchemaPath = join(root, '.void', 'better-auth-schema.ts');
+    const additionalSchemas = existsSync(authSchemaPath) ? [authSchemaPath] : undefined;
+    const configPath = writeDrizzleConfig(
+      root,
       journalDialect === 'postgresql'
-        ? writeDrizzleConfig(root, 'postgresql://dummy', 'postgresql')
-        : writeDrizzleConfig(root, ':memory:');
+        ? 'postgresql://dummy'
+        : journalDialect === 'mysql'
+          ? 'mysql://dummy'
+          : ':memory:',
+      journalDialect,
+      { additionalSchemas },
+    );
 
     // Round 38: under Yarn Berry PnP, there is no `node_modules` tree —
     // dependencies live inside ZIP archives (`.yarn/cache/*.zip`) and are

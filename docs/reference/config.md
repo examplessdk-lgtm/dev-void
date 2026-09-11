@@ -111,7 +111,7 @@ Supported values for `auth.providers`:
 
 ### `database`
 
-Database backend. Omit for D1/SQLite (default). Set to `"pg"` for PostgreSQL via Hyperdrive.
+Database backend. Omit for D1/SQLite (default). Set to `"pg"` or `"mysql"` for an external database through Hyperdrive.
 
 ```json
 {
@@ -123,13 +123,14 @@ Database backend. Omit for D1/SQLite (default). Set to `"pg"` for PostgreSQL via
 | ----------- | ------------------------------------------------------- |
 | _(omitted)_ | D1 (SQLite), fully managed by Void with no extra config |
 | `"pg"`      | PostgreSQL via Hyperdrive; bring your own database      |
+| `"mysql"`   | MySQL via Hyperdrive; bring your own database           |
 
-When using `"pg"`:
+When using an external database:
 
 - Add `DATABASE_URL` to `.env.local` for local development
-- Import schema helpers from `void/schema-pg` instead of `void/schema-d1`
+- Import schema helpers from `void/schema-pg` or `void/schema-mysql`
 - `void/db` connects via Hyperdrive in production, direct connection locally
-- `void gen model` generates `pgTable` with `serial`, `timestamp`, etc.
+- `void gen model` generates dialect-appropriate table and column builders
 
 ### `email`
 
@@ -151,7 +152,7 @@ What `from` does depends on where the app runs:
 
 - **`void dev`** — becomes the default `from` of every `sendEmail()` call, captured in the dev inbox; no mail leaves the machine.
 - **`void deploy`** (managed platform) — not used: the sender is pinned to your project's own platform address, which Void fills in for you.
-- **`void deploy --backend cloudflare`** (your own Cloudflare account) — the address host (`mail.acme.com`) is the domain Void sets Email Routing and Email Sending up on, and the address becomes the default `from` (written into the worker as the `__VOID_EMAIL_FROM` var). The host must be a zone in the pinned Cloudflare account, or a subdomain of one; a subdomain is the usual choice, and the apex is refused when it already receives mail elsewhere. An app that uses email without `email.from` deploys without it and prints the line to add. Void never picks a zone or writes `void.json` for you. See [Your own Cloudflare account](../guide/email.md#your-own-cloudflare-account).
+- **`void deploy --platform cloudflare`** (your own Cloudflare account) — the address host (`mail.acme.com`) is the domain Void sets Email Routing and Email Sending up on, and the address becomes the default `from` (written into the worker as the `__VOID_EMAIL_FROM` var). The host must be a zone in the pinned Cloudflare account, or a subdomain of one; a subdomain is the usual choice, and the apex is refused when it already receives mail elsewhere. An app that uses email without `email.from` deploys without it and prints the line to add. Void never picks a zone or writes `void.json` for you. See [Your own Cloudflare account](../guide/email.md#your-own-cloudflare-account).
 
 ### `head`
 
@@ -292,7 +293,7 @@ Curated Cloudflare Workers configuration. Cloudflare-targeted apps require an ex
 
 `worker.vars` values must be strings. They are merged into Worker bindings before `.env` files are loaded, so project `.env` values override `worker.vars` for local dev/build. Do not put secrets here; use `env.ts` plus `void secret put` for production secrets.
 
-`worker.limits.cpu_ms` caps Workers CPU time per request, in milliseconds. It must be an integer between 1 and 300000 (Cloudflare's hard maximum, 5 minutes). A deploy that requests more than your account plan's ceiling fails with an error naming both the requested value and the plan maximum. Only a rollback clamps: rolling back to a deployment whose configured limit now exceeds your plan applies the plan ceiling instead of failing. If your plan changes so that a previously valid value now exceeds the ceiling, deploys keep failing until you lower `cpu_ms` in `void.json`. On the self-hosted path (`void deploy --backend cloudflare`, or a bare `wrangler deploy` of the build output), the value is written into the generated `dist/ssr/wrangler.json` as `limits.cpu_ms` and enforced by Cloudflare directly. The Void plan ceiling does not apply there, but your Cloudflare account's own CPU-time allowance still does: the Workers Free plan caps CPU at 10 ms per request, and the Workers Paid plan allows up to 300000 ms. A value above what your Cloudflare account permits is constrained or rejected by Cloudflare, not by Void.
+`worker.limits.cpu_ms` caps Workers CPU time per request, in milliseconds. It must be an integer between 1 and 300000 (Cloudflare's hard maximum, 5 minutes). A deploy that requests more than your account plan's ceiling fails with an error naming both the requested value and the plan maximum. Only a rollback clamps: rolling back to a deployment whose configured limit now exceeds your plan applies the plan ceiling instead of failing. If your plan changes so that a previously valid value now exceeds the ceiling, deploys keep failing until you lower `cpu_ms` in `void.json`. On the self-hosted path (`void deploy --platform cloudflare`, or a bare `wrangler deploy` of the build output), the value is written into the generated `dist/ssr/wrangler.json` as `limits.cpu_ms` and enforced by Cloudflare directly. The Void plan ceiling does not apply there, but your Cloudflare account's own CPU-time allowance still does: the Workers Free plan caps CPU at 10 ms per request, and the Workers Paid plan allows up to 300000 ms. A value above what your Cloudflare account permits is constrained or rejected by Cloudflare, not by Void.
 
 ```json
 {
@@ -457,7 +458,7 @@ Each binding accepts `true` (use default name), `false` (disable), or a string (
 
 Custom names are used in the deploy manifest, Wrangler config generation/sync, remote binding proxying, internal migrations, and generated runtime helpers such as `void/db`, `void/kv`, and `void/storage`.
 
-`email` is a feature switch rather than a Cloudflare binding, so it has no binding name or type. On the platform, outbound mail is sent through the Void proxy, which owns the `send_email` binding — none is written into your worker; on your own Cloudflare account, `void deploy --backend cloudflare` writes a `send_email` binding named `SEND_EMAIL` into `wrangler.jsonc` itself once email is set up (see [`email.from`](#email)). Set it to `true` to turn the [email integration](../guide/email.md) on — which registers the `void dev` inbox — even when no scanned file imports `void/email`, or `false` to turn it off.
+`email` is a feature switch rather than a Cloudflare binding, so it has no binding name or type. On the platform, outbound mail is sent through the Void proxy, which owns the `send_email` binding — none is written into your worker; on your own Cloudflare account, `void deploy --platform cloudflare` writes a `send_email` binding named `SEND_EMAIL` into `wrangler.jsonc` itself once email is set up (see [`email.from`](#email)). Set it to `true` to turn the [email integration](../guide/email.md) on — which registers the `void dev` inbox — even when no scanned file imports `void/email`, or `false` to turn it off.
 
 #### `inference.build`
 

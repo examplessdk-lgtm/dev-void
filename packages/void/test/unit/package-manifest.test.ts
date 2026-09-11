@@ -121,7 +121,11 @@ describe('package manifests', () => {
           const catalogSpecifier = catalogPackageSpecifiers.get(name);
           const isAliasedPeer =
             field === 'peerDependencies' && catalogSpecifier?.startsWith('npm:');
-          if (catalogPackageNames.has(name) && !isAliasedPeer && specifier !== 'catalog:') {
+          if (
+            catalogPackageNames.has(name) &&
+            !isAliasedPeer &&
+            !specifier.startsWith('catalog:')
+          ) {
             violations.push(`${packageRoot} ${field}.${name} = ${specifier}`);
           }
         }

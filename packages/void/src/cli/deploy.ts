@@ -1,5 +1,5 @@
 import { execSync, spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import {
   cpSync,
   existsSync,
@@ -8,6 +8,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  writeFileSync,
 } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { isCI as ciInfoIsCI } from 'ci-info';
@@ -38,9 +39,12 @@ import {
 import { scanJobsSync } from '../crons/scan.ts';
 import { writeDrizzleConfig } from '../drizzle/config.ts';
 import { discoverSchema } from '../drizzle/discover.ts';
+import { scanDurableObjectModules } from '../durable/scan.ts';
 import { collectRevalidate, collectPages, hasRevalidate } from '../isr-config.ts';
 import { voidWarn } from '../log.ts';
 import { collectMigrations } from '../migrations/collect.ts';
+import { runMySqlMigrations } from '../migrations/runner-mysql.ts';
+import { runPgMigrations } from '../migrations/runner-pg.ts';
 import { assertJournalCoherence, validateMigrations } from '../migrations/validate.ts';
 import { scanPages } from '../pages/scan.ts';
 import type { PageScanResult } from '../pages/types.ts';
@@ -70,7 +74,11 @@ import {
   resolveSandboxConfig,
 } from '../sandbox/config.ts';
 import { mergeAndExpand, parseDotenvFile, scanWranglerDotenvKeys } from '../shared/dotenv.ts';
-import { resolveRemoteMode, stripInternalEnvKeys } from '../shared/env.ts';
+import {
+  CLOUDFLARE_DEPLOY_BUILD_ENV,
+  resolveRemoteMode,
+  stripInternalEnvKeys,
+} from '../shared/env.ts';
 import { validateSsrEntry } from '../ssr/entry.ts';
 import { getApiUrl, getToken, getTokenSource } from './auth.ts';
 import {
@@ -113,6 +121,7 @@ import {
   fetchRemoteSecretNames,
   formatEnvReport,
   getDeployEnvDefaults,
+  listSelfHostSecretNames,
   readEmittedWorkerVars,
   selfHostSchemaFailureMessage,
   SelfHostEnvValidationError,
@@ -154,7 +163,13 @@ import {
   type StaticPreset,
   type FrameworkPreset,
 } from './preset.ts';
-import { readProjectConfig, writeProjectConfig, type ProjectConfig } from './project.ts';
+import {
+  readDeploymentPlatform,
+  readProjectConfig,
+  writeProjectConfig,
+  type DeploymentPlatform,
+  type ProjectConfig,
+} from './project.ts';
 import { promptProjectSelection, promptProjectSetupAction } from './prompt.ts';
 // The provision module pulls in the whole-provision cross-process lock
 // (`proper-lockfile` → `signal-exit`), which patches `process.emit` /
@@ -210,6 +225,7 @@ import {
   ensureWranglerCompat,
   resolveLiveBindingConfig,
   syncWranglerBindings,
+  syncWranglerDurableObjects,
   writeProvisionedWranglerConfig,
   bindingEntriesForField,
   FRIENDLY_BINDING_NAMES,
@@ -228,6 +244,8 @@ export type RunDeployOptions = {
   spa?: boolean;
   skipBuild?: boolean;
   debug?: boolean;
+  platform?: Exclude<DeploymentPlatform, 'none'>;
+  /** @deprecated Use platform instead. */
   backend?: 'cloudflare';
   provision?: boolean;
   /**
@@ -237,6 +255,13 @@ export type RunDeployOptions = {
    */
   requireEmail?: boolean;
 };
+
+export function resolveDeploymentPlatform(
+  root: string,
+  options?: RunDeployOptions,
+): DeploymentPlatform {
+  return options?.platform ?? options?.backend ?? readDeploymentPlatform(root) ?? 'void';
+}
 
 type DeployDoneEvent = Extract<DeployEvent, { event: 'done' }>;
 type StreamDeployResult = DeployDoneEvent;
@@ -378,7 +403,7 @@ export function resolveDeployWranglerCompat(
   const compatibilityFlags = normalizeWranglerCompatibilityFlags(compat.compatibilityFlags, {
     needsNodejsCompat:
       requirements?.authEnabled === true ||
-      requirements?.dialect === 'postgresql' ||
+      (requirements?.dialect !== undefined && requirements.dialect !== 'sqlite') ||
       requirements?.needsSandbox === true,
   });
   return compatibilityFlags === compat.compatibilityFlags
@@ -601,7 +626,7 @@ function assertNoAmbientConfigOverride(): void {
   const cloudflareEnv = process.env.CLOUDFLARE_ENV;
   if (typeof cloudflareEnv === 'string' && cloudflareEnv.trim().length > 0) {
     throw new Error(
-      'CLOUDFLARE_ENV is set. --backend cloudflare deploys the TOP-LEVEL environment of ' +
+      'CLOUDFLARE_ENV is set. --platform cloudflare deploys the TOP-LEVEL environment of ' +
         'your root wrangler config only (a named environment can carry a different account, ' +
         'worker name, or binding set). Unset CLOUDFLARE_ENV and retry.',
     );
@@ -609,7 +634,7 @@ function assertNoAmbientConfigOverride(): void {
   const configPathOverride = process.env.CLOUDFLARE_VITE_WRANGLER_CONFIG_PATH;
   if (typeof configPathOverride === 'string' && configPathOverride.trim().length > 0) {
     throw new Error(
-      'CLOUDFLARE_VITE_WRANGLER_CONFIG_PATH is set. --backend cloudflare builds from the ' +
+      'CLOUDFLARE_VITE_WRANGLER_CONFIG_PATH is set. --platform cloudflare builds from the ' +
         'canonical root wrangler config only. Unset it and retry.',
     );
   }
@@ -1270,60 +1295,6 @@ function deepEqual(a: unknown, b: unknown): boolean {
 }
 
 /**
- * Recursively normalize every `Map` (at any depth) to a plain object keyed by its entries, so a
- * Map-shaped value can be compared with {@link deepEqual} — which is JSON-shaped and does NOT
- * handle `Map`. Handles the nested `Map<string, Map<…>>` {@link snapshotPassthroughIdentities}
- * returns, as well as the flat `Map<string, string>` / `Map<string, unknown>` the other snapshots
- * return. Arrays and plain objects pass through with their elements normalized.
- */
-function normalizeMapsForCompare(value: unknown): unknown {
-  if (value instanceof Map) {
-    const obj: Record<string, unknown> = {};
-    for (const [key, val] of value) {
-      obj[String(key)] = normalizeMapsForCompare(val);
-    }
-    return obj;
-  }
-  if (Array.isArray(value)) {
-    return value.map(normalizeMapsForCompare);
-  }
-  if (value !== null && typeof value === 'object') {
-    const out: Record<string, unknown> = {};
-    for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
-      out[key] = normalizeMapsForCompare(val);
-    }
-    return out;
-  }
-  return value;
-}
-
-/**
- * Structural equality for the possibly-`Map`-shaped pre-build snapshots — normalizes every Map to
- * a plain object first (see {@link normalizeMapsForCompare}), then compares with the key-order-
- * independent {@link deepEqual}. Used to assert the step-6 binding/pass-through snapshots match the
- * pre-probe ones captured before any project code ran.
- */
-function snapshotsDeepEqual(a: unknown, b: unknown): boolean {
-  return deepEqual(normalizeMapsForCompare(a), normalizeMapsForCompare(b));
-}
-
-/**
- * The reject shown when a PostgreSQL app ships checked-in `db/migrations/*.sql` through the
- * self-host Cloudflare backend. This backend applies ONLY remote D1 (SQLite) migrations; a pg
- * app desires Hyperdrive (never `desired.d1`), so its migrations would never run here and the
- * worker would hit an unmigrated database. Shared by the pre-build fail-fast guard and the
- * post-build re-check (a build plugin can write these files during `vite build`).
- */
-const PG_CHECKED_IN_MIGRATIONS_REJECT_MESSAGE = [
-  'deploy: --backend cloudflare will not run a PostgreSQL app’s checked-in migrations.',
-  'This backend applies only remote D1 (SQLite) migrations. A PostgreSQL app’s',
-  'db/migrations/*.sql are applied over Hyperdrive by the managed platform (`void deploy`);',
-  'this self-host backend does not run them, so your database would be left unmigrated.',
-  'Deploy this app with `void deploy`, or apply the migrations yourself against your',
-  'Postgres and remove them from db/migrations/, then rerun.',
-].join('\n');
-
-/**
  * Every queue NAME the emitted artifact binds — `queues.producers[].queue` +
  * `queues.consumers[].queue`. Non-throwing: a wrong-shaped `queues` field or an entry with no
  * readable `queue` string contributes no name (an unnamed queue binds nothing), so only real,
@@ -1457,6 +1428,12 @@ function scrubWranglerAuthCredentials(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv
  */
 function buildSchemaProbeEnv(accountId: string, apiBaseUrl: string): NodeJS.ProcessEnv {
   const env = scrubWranglerAuthCredentials(deployChildEnv(accountId, apiBaseUrl));
+  // Match the Cloudflare deploy build's dotenv boundary. Besides keeping a
+  // schema conditioned on this internal marker consistent with the build,
+  // this prevents an ambient case variant from shadowing the pinned value on
+  // Windows.
+  requireProvisionModule().deleteEnvVarCaseAware(env, CLOUDFLARE_DEPLOY_BUILD_ENV);
+  env[CLOUDFLARE_DEPLOY_BUILD_ENV] = '1';
   // Scrub any ambient spelling first (case-aware on win32) so it cannot shadow the pin.
   requireProvisionModule().deleteEnvVarCaseAware(env, 'NODE_ENV');
   env.NODE_ENV = 'production';
@@ -1506,7 +1483,7 @@ function cloudflareEnvDirModeRejectMessage(
 ): string {
   if (reject.reason === 'custom-envdir') {
     return [
-      'deploy: --backend cloudflare does not support a custom Vite `envDir` (including `envDir: false`).',
+      'deploy: --platform cloudflare does not support a custom Vite `envDir` (including `envDir: false`).',
       'v1 loads env from the project root only. The build reads `.env*` from your envDir but',
       'generates the auth schema from the project root, so a custom envDir could validate a',
       'different table set than the worker actually ships. Remove `envDir` from your Vite config',
@@ -1515,7 +1492,7 @@ function cloudflareEnvDirModeRejectMessage(
     ].join('\n');
   }
   return [
-    'deploy: --backend cloudflare builds in production mode only (your build resolves to a non-production mode).',
+    'deploy: --platform cloudflare builds in production mode only (your build resolves to a non-production mode).',
     'A non-production build mode selects a different `.env.<mode>` set than this backend validates.',
     'Remove the custom `mode` from your Vite config / build command so the build runs in production,',
     'then rerun — or deploy this app with `void deploy` (the managed platform).',
@@ -1534,6 +1511,222 @@ export type { EmittedWorkerVarsResult };
  */
 function readEmittedWorkerVarsDefault(root: string): EmittedWorkerVarsResult {
   return readEmittedWorkerVars(root);
+}
+
+type CloudflareSchemaSecretFailureReason =
+  | 'invalid-value'
+  | 'config-invalid'
+  | 'uploader-changed'
+  | 'list-failed'
+  | 'bulk-failed'
+  | 'verification-failed';
+
+/** Values-free failure from promotion of schema-marked Cloudflare secrets. */
+export class CloudflareSchemaSecretError extends Error {
+  override name = 'CloudflareSchemaSecretError';
+
+  constructor(
+    message: string,
+    readonly reason: CloudflareSchemaSecretFailureReason,
+  ) {
+    super(message);
+  }
+}
+
+function readGeneratedDeployConfig(root: string): {
+  path: string;
+  config: Record<string, unknown>;
+} {
+  const pointerPath = deployPointerPath(root);
+  let redirectedPath: string;
+  try {
+    const pointer = JSON.parse(readFileSync(pointerPath, 'utf-8')) as { configPath?: unknown };
+    if (typeof pointer.configPath !== 'string' || pointer.configPath.length === 0) {
+      throw new Error('missing pointer');
+    }
+    redirectedPath = resolve(dirname(pointerPath), pointer.configPath);
+  } catch {
+    throw new CloudflareSchemaSecretError(
+      'deploy: could not resolve the generated Cloudflare config while preparing schema secrets.',
+      'config-invalid',
+    );
+  }
+  try {
+    const config = JSON.parse(readFileSync(redirectedPath, 'utf-8')) as unknown;
+    if (config === null || typeof config !== 'object' || Array.isArray(config)) {
+      throw new Error('malformed config');
+    }
+    return { path: redirectedPath, config: config as Record<string, unknown> };
+  } catch (error) {
+    if (error instanceof CloudflareSchemaSecretError) {
+      throw error;
+    }
+    throw new CloudflareSchemaSecretError(
+      'deploy: the generated Cloudflare config is not valid JSON; no schema secrets were uploaded.',
+      'config-invalid',
+    );
+  }
+}
+
+/**
+ * Promote explicit `env.ts` `.secret()` values from generated plaintext vars to
+ * Cloudflare Worker secrets. Values are streamed as JSON over stdin, remote-only
+ * marked secrets are inherited, and no remote secret is ever deleted.
+ */
+export async function syncCloudflareSchemaSecrets(options: {
+  root: string;
+  configPath: string;
+  accountId?: string;
+  workerName: string;
+  emittedVars: Record<string, unknown>;
+  secretKeys: Array<string>;
+  excludeKeys?: Array<string>;
+  runWrangler: DeployWranglerRun;
+  beforeWranglerRun?: () => boolean;
+}): Promise<{ requiredSecretNames: Array<string>; uploaded: number }> {
+  const excluded = new Set(options.excludeKeys ?? []);
+  const secretKeys = [...new Set(options.secretKeys)].filter((key) => !excluded.has(key));
+  if (secretKeys.length === 0) {
+    return { requiredSecretNames: [], uploaded: 0 };
+  }
+
+  const uploadValues: Record<string, string> = {};
+  for (const key of secretKeys) {
+    if (!Object.prototype.hasOwnProperty.call(options.emittedVars, key)) {
+      continue;
+    }
+    const value = options.emittedVars[key];
+    if (value === '') {
+      continue;
+    }
+    if (typeof value !== 'string') {
+      throw new CloudflareSchemaSecretError(
+        `deploy: schema secret ${key} must resolve to a string before it can be uploaded.`,
+        'invalid-value',
+      );
+    }
+    uploadValues[key] = value;
+  }
+
+  const beforeRun = (): void => {
+    if (options.beforeWranglerRun && !options.beforeWranglerRun()) {
+      throw new CloudflareSchemaSecretError('', 'uploader-changed');
+    }
+  };
+  const list = async (allowMissingWorker: boolean): Promise<Array<string>> => {
+    beforeRun();
+    try {
+      return await listSelfHostSecretNames(
+        {
+          root: options.root,
+          configPath: options.configPath,
+          accountId: options.accountId,
+          workerName: options.workerName,
+          runWrangler: (args) => options.runWrangler(args, { capture: true }),
+        },
+        secretKeys,
+      );
+    } catch (error) {
+      if (allowMissingWorker && error instanceof SelfHostFirstDeployError) {
+        return [];
+      }
+      if (error instanceof SelfHostFirstDeployError || error instanceof SelfHostSecretListError) {
+        throw new CloudflareSchemaSecretError(
+          'deploy: could not confirm the remote schema secrets. No Worker was uploaded; diagnose with `wrangler secret list -c <config>` and retry.',
+          allowMissingWorker ? 'list-failed' : 'verification-failed',
+        );
+      }
+      throw error;
+    }
+  };
+
+  const existing = await list(true);
+  const marked = new Set(secretKeys);
+  const requiredSecretNames = [
+    ...new Set([...Object.keys(uploadValues), ...existing.filter((name) => marked.has(name))]),
+  ].sort();
+
+  const generated = readGeneratedDeployConfig(options.root);
+  const rawVars = generated.config.vars;
+  if (
+    rawVars !== undefined &&
+    (rawVars === null || typeof rawVars !== 'object' || Array.isArray(rawVars))
+  ) {
+    throw new CloudflareSchemaSecretError(
+      'deploy: the generated Cloudflare config has a malformed vars field; no schema secrets were uploaded.',
+      'config-invalid',
+    );
+  }
+  const vars = { ...((rawVars as Record<string, unknown> | undefined) ?? {}) };
+  for (const key of secretKeys) {
+    delete vars[key];
+  }
+  generated.config.vars = vars;
+
+  const rawSecrets = generated.config.secrets;
+  if (
+    rawSecrets !== undefined &&
+    (rawSecrets === null || typeof rawSecrets !== 'object' || Array.isArray(rawSecrets))
+  ) {
+    throw new CloudflareSchemaSecretError(
+      'deploy: the generated Cloudflare config has a malformed secrets field; no schema secrets were uploaded.',
+      'config-invalid',
+    );
+  }
+  const secrets = { ...((rawSecrets as Record<string, unknown> | undefined) ?? {}) };
+  const rawRequired = secrets.required;
+  if (
+    rawRequired !== undefined &&
+    (!Array.isArray(rawRequired) || !rawRequired.every((name) => typeof name === 'string'))
+  ) {
+    throw new CloudflareSchemaSecretError(
+      'deploy: the generated Cloudflare config has a malformed secrets.required field; no schema secrets were uploaded.',
+      'config-invalid',
+    );
+  }
+  const existingRequired = (rawRequired as Array<string> | undefined) ?? [];
+  secrets.required = [...new Set([...existingRequired, ...requiredSecretNames])].sort();
+  generated.config.secrets = secrets;
+  writeFileSync(generated.path, `${JSON.stringify(generated.config, null, 2)}\n`);
+
+  const entries = Object.entries(uploadValues);
+  for (let offset = 0; offset < entries.length; offset += 100) {
+    const chunk = Object.fromEntries(entries.slice(offset, offset + 100));
+    beforeRun();
+    let result: DeployWranglerRunResult;
+    try {
+      result = await Promise.resolve(
+        options.runWrangler(['secret', 'bulk', '-c', options.configPath, '--env='], {
+          capture: true,
+          input: `${JSON.stringify(chunk)}\n`,
+        }),
+      );
+    } catch {
+      throw new CloudflareSchemaSecretError(
+        'deploy: Cloudflare schema-secret upload failed. No secret value was logged; retry the deploy.',
+        'bulk-failed',
+      );
+    }
+    if (!isCleanWranglerExit(result)) {
+      throw new CloudflareSchemaSecretError(
+        `deploy: Cloudflare schema-secret upload failed (wrangler exit ${String(result.status)}). No secret value was logged; retry the deploy.`,
+        'bulk-failed',
+      );
+    }
+  }
+
+  if (entries.length > 0) {
+    const verified = new Set(await list(false));
+    const missing = Object.keys(uploadValues).filter((key) => !verified.has(key));
+    if (missing.length > 0) {
+      throw new CloudflareSchemaSecretError(
+        `deploy: Cloudflare did not confirm these uploaded schema secrets: ${missing.join(', ')}. No Worker was uploaded; retry once secret storage is available.`,
+        'verification-failed',
+      );
+    }
+  }
+
+  return { requiredSecretNames, uploaded: entries.length };
 }
 
 /**
@@ -1605,6 +1798,14 @@ export function verifyGeneratedDeployConfig(
      */
     needsAI?: boolean;
     /**
+     * Auth-enabled Cloudflare builds must emit `secrets.required` with
+     * BETTER_AUTH_SECRET so Wrangler inherits the persistent remote value into
+     * the uploaded Worker version instead of dropping it during replacement.
+     */
+    authEnabled?: boolean;
+    /** Additional Worker secret names the generated version must inherit. */
+    requiredSecretNames?: Array<string>;
+    /**
      * The exact `containers` set Void's build emits, reconstructed PRE-BUILD
      * ({@link reconstructExpectedContainers}) from the root-declared containers plus — when the
      * source needs the sandbox — Void's own sandbox container. A bare `wrangler deploy` PROVISIONS a
@@ -1663,6 +1864,29 @@ export function verifyGeneratedDeployConfig(
       ok: false,
       reason: `generated config worker name ${JSON.stringify(generated.name)} does not match the expected worker ${JSON.stringify(expected.workerName)}.`,
     };
+  }
+  const expectedRequiredSecrets = new Set(expected.requiredSecretNames ?? []);
+  if (expected.authEnabled) {
+    expectedRequiredSecrets.add(BETTER_AUTH_SECRET_NAME);
+  }
+  if (expectedRequiredSecrets.size > 0) {
+    const secrets = generated.secrets;
+    const required =
+      typeof secrets === 'object' && secrets !== null && !Array.isArray(secrets)
+        ? (secrets as Record<string, unknown>).required
+        : undefined;
+    if (
+      !Array.isArray(required) ||
+      !required.every((name): name is string => typeof name === 'string') ||
+      [...expectedRequiredSecrets].some((name) => !required.includes(name))
+    ) {
+      return {
+        ok: false,
+        reason:
+          `generated config must include ${[...expectedRequiredSecrets].join(', ')} in ` +
+          '`secrets.required` so wrangler inherits the persistent secrets during upload.',
+      };
+    }
   }
   // Binding-identity check: the generated artifact's id-bearing bindings must be the SAME ones
   // (by id) as were PINNED before the build (the in-memory snapshot). A flattened named-env /
@@ -2112,6 +2336,8 @@ export type DeployWranglerRun = (
   args: Array<string>,
   opts: {
     capture: boolean;
+    /** Piped to the child's stdin (e.g. a secret value for `wrangler secret put`). */
+    input?: string;
     /**
      * Extra env pins layered OVER the deploy child env for this one spawn (e.g.
      * `WRANGLER_WRITE_LOGS=false` for `auth token`). Never a credential — the runner's own
@@ -2142,12 +2368,20 @@ export interface CloudflareDeployDeps {
   provision?: typeof provisionCloudflareResources;
   /** Parent-side secret-gate discharge seam (default: {@link dischargeSelfHostEnvContext}). */
   dischargeSelfHostEnv?: typeof dischargeSelfHostEnvContext;
+  /** Persistent Better Auth secret seam (default: {@link ensureCloudflareAuthSecret}). */
+  ensureAuthSecret?: typeof ensureCloudflareAuthSecret;
+  /** Schema-marked Worker secret sync seam (default: {@link syncCloudflareSchemaSecrets}). */
+  syncSchemaSecrets?: typeof syncCloudflareSchemaSecrets;
   /** Generated-deploy-config verification seam (default: {@link verifyGeneratedDeployConfig}). */
   verifyDeployConfig?: typeof verifyGeneratedDeployConfig;
   /** Pre-remote-migrate gate seam (default: {@link assertRemoteMigrationsDeployable}). */
   assertMigrationsDeployable?: typeof assertRemoteMigrationsDeployable;
   /** Migration apply-set equality gate seam (default: {@link checkWranglerMigrationApplySet}). */
   checkMigrationApplySet?: typeof checkWranglerMigrationApplySet;
+  /** PostgreSQL migration runner (default: {@link runPgMigrations}). */
+  applyPostgresMigrations?: typeof runPgMigrations;
+  /** MySQL migration runner (default: {@link runMySqlMigrations}). */
+  applyMySqlMigrations?: typeof runMySqlMigrations;
   /**
    * Auth-schema validation seam (default: {@link validateAuthMigrationSchema}).
    * Runs POST-build: reads the generated auth schema the build emitted
@@ -2184,9 +2418,9 @@ export interface CloudflareDeployDeps {
    */
   readEmittedWorkerVars?: (root: string) => EmittedWorkerVarsResult;
   /**
-   * Override CI / non-interactive detection for BOTH gates that ask nothing in CI: the
-   * `--provision` gate (default: `!stdin.isTTY || getTokenSource()==='ci'`) and the Mode B
-   * email prompt (default: wrangler's own {@link isWranglerNonInteractiveOrCI}).
+   * Override CI / non-interactive detection for the Mode B email prompt (default: wrangler's
+   * own {@link isWranglerNonInteractiveOrCI}, so Void and wrangler call the same run
+   * interactive).
    */
   isCI?: boolean;
   /**
@@ -2220,6 +2454,25 @@ const PLAINTEXT_WARNING_REASONS: Record<PlaintextVarWarning['reason'], string> =
   heuristic: '',
   'value-shape': ' (value looks like a connection URL with embedded credentials)',
 };
+
+const BETTER_AUTH_SECRET_NAME = 'BETTER_AUTH_SECRET';
+
+type CloudflareAuthSecretFailureReason =
+  | 'uploader-changed'
+  | 'list-failed'
+  | 'put-failed'
+  | 'verification-failed';
+
+/** Values-free failure from the Cloudflare Better Auth secret lifecycle. */
+export class CloudflareAuthSecretError extends Error {
+  override name = 'CloudflareAuthSecretError';
+  readonly reason: CloudflareAuthSecretFailureReason;
+
+  constructor(message: string, reason: CloudflareAuthSecretFailureReason) {
+    super(message);
+    this.reason = reason;
+  }
+}
 
 /** True only for a wrangler child that ran to completion with a clean exit 0. */
 function isCleanWranglerExit(result: DeployWranglerRunResult): boolean {
@@ -2508,7 +2761,7 @@ function assertDistinctKvNamespaces(
           `"${configPath}" both point at KV namespace id ${JSON.stringify(id)}. They resolved to a ` +
           `single namespace when they were provisioned, so the two bindings share one namespace ` +
           `and one quota slot. Give one of them a fresh namespace (create it, or drop its entry ` +
-          `from "${configPath}" and re-run with --provision), then retry.`,
+          `from "${configPath}" and rerun the deploy), then retry.`,
       );
     }
     bindingById.set(id, binding);
@@ -2626,7 +2879,7 @@ export async function computeDesiredCloudflareResources(
 
   // Database — desired on source-use OR auth OR checked-in migrations (the SAME
   // predicate the managed manifest applies), with the dialect selecting D1 (sqlite)
-  // vs Hyperdrive (postgresql). This keeps provision/drift equivalent to the build:
+  // vs Hyperdrive (PostgreSQL/MySQL). This keeps provision/drift equivalent to the build:
   // a migration-only SQLite app still provisions D1, and an unused pg config does
   // not needlessly require Hyperdrive.
   const needsDatabase = bindings.needsD1 || authEnabled || hasMigrations;
@@ -2635,7 +2888,7 @@ export async function computeDesiredCloudflareResources(
     : authEnabled
       ? 'auth requires a D1 database'
       : 'checked-in migrations need a D1 database';
-  if (needsDatabase && dialect !== 'postgresql') {
+  if (needsDatabase && dialect === 'sqlite') {
     const binding = bindingNames?.d1 ?? 'DB';
     // Trust a stored `database_name` ONLY when the paired `database_id` is a REAL
     // (non-placeholder) id. A synced-but-unprovisioned entry carries the local
@@ -2675,17 +2928,20 @@ export async function computeDesiredCloudflareResources(
   // Queues (resource names — account-unique; the build binds them for native apps).
   desired.queues = scanQueuesSync(root, paths.queuesDir).map((q) => q.name);
 
-  // Hyperdrive (PostgreSQL apps) — same database gate as D1, dialect-selected. The
+  // Hyperdrive (PostgreSQL/MySQL apps) — same database gate as D1, dialect-selected. The
   // connection string is only consumed on a fresh create; a re-provision reads-first
   // from the config id and never needs it.
-  if (needsDatabase && dialect === 'postgresql') {
+  if (needsDatabase && dialect !== 'sqlite') {
     const binding = 'HYPERDRIVE';
     desired.hyperdrive = {
       binding,
       name: suffixedResourceName(workerName, 'hyperdrive'),
       connectionString: process.env.DATABASE_URL ?? '',
     };
-    reasons.set(binding, 'app uses PostgreSQL (needs a Hyperdrive config)');
+    reasons.set(
+      binding,
+      `app uses ${dialect === 'mysql' ? 'MySQL' : 'PostgreSQL'} (needs a Hyperdrive config)`,
+    );
   }
 
   // ISR_CACHE (a KV namespace) — self-host-only, not in the import walk. Desired
@@ -3495,7 +3751,13 @@ export function createDeployWranglerRunner(
     }
     const result = spawnSync(command as string, [...prefix, ...args], {
       cwd: root,
-      stdio: opts.capture ? ['ignore', 'pipe', 'pipe'] : 'inherit',
+      stdio:
+        opts.input === undefined
+          ? opts.capture
+            ? ['ignore', 'pipe', 'pipe']
+            : 'inherit'
+          : ['pipe', opts.capture ? 'pipe' : 'inherit', opts.capture ? 'pipe' : 'inherit'],
+      input: opts.input,
       encoding: 'utf-8',
       env: childEnv,
       shell: false,
@@ -3836,6 +4098,97 @@ function existingAddresses(
 }
 
 /**
+ * Ensure an auth-enabled worker has one persistent Better Auth secret.
+ *
+ * Existing remote secrets are adopted unchanged. A missing secret is generated
+ * once, streamed to `wrangler secret put` over stdin (never argv), then verified
+ * by listing names again. A not-yet-deployed Worker is the one safe list failure
+ * treated as absence because Wrangler can attach a secret to its draft Worker.
+ */
+export async function ensureCloudflareAuthSecret(options: {
+  root: string;
+  configPath: string;
+  accountId?: string;
+  workerName: string;
+  runWrangler: DeployWranglerRun;
+  beforeWranglerRun?: () => boolean;
+}): Promise<{ created: boolean }> {
+  const beforeRun = (): void => {
+    if (options.beforeWranglerRun && !options.beforeWranglerRun()) {
+      throw new CloudflareAuthSecretError('', 'uploader-changed');
+    }
+  };
+  const list = async (allowMissingWorker: boolean): Promise<Array<string>> => {
+    beforeRun();
+    try {
+      return await listSelfHostSecretNames(
+        {
+          root: options.root,
+          configPath: options.configPath,
+          accountId: options.accountId,
+          workerName: options.workerName,
+          runWrangler: (args) => options.runWrangler(args, { capture: true }),
+        },
+        [BETTER_AUTH_SECRET_NAME],
+      );
+    } catch (error) {
+      if (allowMissingWorker && error instanceof SelfHostFirstDeployError) {
+        return [];
+      }
+      if (error instanceof SelfHostSecretListError) {
+        throw new CloudflareAuthSecretError(
+          `deploy: could not confirm the remote ${BETTER_AUTH_SECRET_NAME}. ` +
+            'No worker was uploaded. Run `wrangler secret list -c <config>` to diagnose the Cloudflare response, then retry.',
+          allowMissingWorker ? 'list-failed' : 'verification-failed',
+        );
+      }
+      throw error;
+    }
+  };
+
+  const existing = await list(true);
+  if (existing.includes(BETTER_AUTH_SECRET_NAME)) {
+    return { created: false };
+  }
+
+  const secret = randomBytes(32).toString('hex');
+  beforeRun();
+  let put: DeployWranglerRunResult;
+  try {
+    put = await Promise.resolve(
+      options.runWrangler(
+        ['secret', 'put', BETTER_AUTH_SECRET_NAME, '-c', options.configPath, '--env='],
+        { capture: true, input: `${secret}\n` },
+      ),
+    );
+  } catch {
+    throw new CloudflareAuthSecretError(
+      `deploy: could not create the remote ${BETTER_AUTH_SECRET_NAME}. ` +
+        `No worker was uploaded. Run \`wrangler secret put ${BETTER_AUTH_SECRET_NAME}\` and retry.`,
+      'put-failed',
+    );
+  }
+  if (!isCleanWranglerExit(put)) {
+    throw new CloudflareAuthSecretError(
+      `deploy: could not create the remote ${BETTER_AUTH_SECRET_NAME} ` +
+        `(wrangler exit ${String(put.status)}). No worker was uploaded. ` +
+        `Run \`wrangler secret put ${BETTER_AUTH_SECRET_NAME}\` and retry.`,
+      'put-failed',
+    );
+  }
+
+  const verified = await list(false);
+  if (!verified.includes(BETTER_AUTH_SECRET_NAME)) {
+    throw new CloudflareAuthSecretError(
+      `deploy: wrangler reported success but ${BETTER_AUTH_SECRET_NAME} was not present afterward. ` +
+        'No worker was uploaded; retry once Cloudflare secret storage is available.',
+      'verification-failed',
+    );
+  }
+  return { created: true };
+}
+
+/**
  * Deploy to the user's OWN Cloudflare account (no Void platform).
  *
  * Orchestrates the existing units — it does NOT re-implement provisioning
@@ -3843,7 +4196,7 @@ function existingAddresses(
  * secret preflight (`cli/env-validation.ts`). Flow:
  *
  *   app-class guard → desired set (from source, pre-build) → preflight (auth +
- *   account pin + CI gate) → provision OR drift-check → ensure worker name →
+ *   account pin) → automatically ensure resources → ensure worker name →
  *   remote D1 migrate → secrets (warn + gate) → clean-env build → wrangler deploy
  *
  * ORDERING DECISION (documented): the secrets GATE runs AFTER provision + remote
@@ -3881,7 +4234,7 @@ export async function runCloudflareDeploy(
   if (options.skipBuild) {
     log.error(
       [
-        'deploy: --skip-build is not supported with --backend cloudflare.',
+        'deploy: --skip-build is not supported with --platform cloudflare.',
         'This backend validates the artifact the build emits — the worker vars in',
         'dist/ssr/wrangler.json and the generated auth schema — so a skipped build would',
         'leave every check reading a stale or missing artifact instead of the worker you',
@@ -3900,7 +4253,7 @@ export async function runCloudflareDeploy(
 
   // 1. App-class narrowing — v1 of `--backend cloudflare` supports ONE well-understood
   // shape: a FULL VOID APP (worker-bearing, running `routingPlugin`) on the Cloudflare
-  // Workers target, with D1/KV/R2/Queues/Hyperdrive and — on D1/SQLite — auth + ISR.
+  // Workers target, with D1/KV/R2/Queues/Hyperdrive, auth, and ISR.
   // Everything else FAILS CLOSED here, BEFORE any account / preflight / provision / build
   // op, reusing the SAME classifiers the managed deploy path uses (`detectPreset` +
   // `detectFramework`) so this fork can never disagree with the build about what the app is.
@@ -3910,9 +4263,9 @@ export async function runCloudflareDeploy(
   if (isNodeTarget(voidConfig.target)) {
     log.error(
       [
-        `deploy: --backend cloudflare is not supported for the "${voidConfig.target}" target.`,
+        `deploy: --platform cloudflare is not supported for the "${voidConfig.target}" target.`,
         'This backend deploys Cloudflare Workers only. Deploy a node/bun/deno build with its',
-        'own host/runtime, or use the default Cloudflare target for --backend cloudflare.',
+        'own host/runtime, or use the default Cloudflare target for --platform cloudflare.',
       ].join('\n'),
     );
     return exit(1);
@@ -3930,7 +4283,7 @@ export async function runCloudflareDeploy(
   if (framework) {
     log.error(
       [
-        `deploy: --backend cloudflare does not yet support framework SSR (${framework.name}).`,
+        `deploy: --platform cloudflare does not yet support framework SSR (${framework.name}).`,
         'v1 deploys full Void apps only. Deploy this framework with `void deploy` (the managed',
         'platform) or the framework’s own Cloudflare adapter. Framework SSR support for this',
         'backend is a follow-up.',
@@ -3960,7 +4313,7 @@ export async function runCloudflareDeploy(
     const appType = staticPreset?.appType ?? (options.spa ? 'spa' : 'static');
     log.error(
       [
-        `deploy: --backend cloudflare does not yet support ${appType} (static-asset) apps.`,
+        `deploy: --platform cloudflare does not yet support ${appType} (static-asset) apps.`,
         'The Cloudflare backend v1 deploys full Void apps (worker-bearing) on the Cloudflare',
         'Workers target. Deploy this app with `void deploy` (the managed platform), or host',
         'the built assets on Cloudflare Pages / any static host.',
@@ -3976,7 +4329,7 @@ export async function runCloudflareDeploy(
   if (!hasBackendFiles(root)) {
     log.error(
       [
-        'deploy: --backend cloudflare found no Void backend to deploy.',
+        'deploy: --platform cloudflare found no Void backend to deploy.',
         'A full Void app has at least one of: routes/, pages/, middleware, crons/, queues/,',
         'email/, or an SSR entry. Add your server code, or use `void deploy` for a static site.',
       ].join('\n'),
@@ -3995,6 +4348,7 @@ export async function runCloudflareDeploy(
     assertNoRootSourceConventionConflicts(paths);
     validateSsrEntry(root, paths);
     scanJobsSync(root, paths.cronsDir);
+    syncWranglerDurableObjects(root, scanDurableObjectModules(root));
   } catch (err) {
     log.error(`deploy: ${getErrorMessage(err)}`);
     return exit(1);
@@ -4003,7 +4357,7 @@ export async function runCloudflareDeploy(
   // 1f. WebSocket / Durable Object guard — FAIL CLOSED before any account op. For a `.ws.ts`
   // route, the self-host `vite build` emits a `durable_objects` binding plus a DO migration
   // block keyed `new_classes` (index.ts `mergeBindings`, via the SAME `scanWebSocketRoutesSync`
-  // scan; also cli/wrangler.ts for --provision) — i.e. a KEY-VALUE-backed Durable Object
+  // scan; also cli/wrangler.ts for provisioning) — i.e. a KEY-VALUE-backed Durable Object
   // namespace. As of Cloudflare's 2026-07-09 change, a fresh account (every Workers Free
   // account, and any account with no pre-existing KV-backed namespace) REJECTS a `new_classes`
   // migration at `wrangler deploy` ("create a namespace using a new_sqlite_classes migration
@@ -4013,7 +4367,7 @@ export async function runCloudflareDeploy(
   if (scanWebSocketRoutesSync(root, paths, 'prod').length > 0) {
     log.error(
       [
-        'deploy: --backend cloudflare does not yet support WebSocket / Durable Object routes.',
+        'deploy: --platform cloudflare does not yet support WebSocket / Durable Object routes.',
         'A `.ws.ts` route makes the build emit a key-value-backed Durable Object namespace',
         '(a `new_classes` migration), which a fresh Cloudflare account (and every Workers Free',
         'account) refuses to create. Deploy this app with `void deploy` (the managed platform).',
@@ -4044,38 +4398,23 @@ export async function runCloudflareDeploy(
     emailHandlers,
   } = await computeDesiredCloudflareResources(root, voidConfig, configPath);
 
-  // 2a. Postgres + auth guard — reject before any account op. This backend applies only
-  // checked-in `db/migrations/*.sql` to REMOTE D1 (SQLite); a Postgres/Hyperdrive app runs
-  // no D1 migrate step here, so it can neither create NOR verify the Better Auth tables. v1
-  // supports Void-managed auth on D1/SQLite only. (A pg app WITHOUT auth is still supported.)
-  if (authEnabled && dialect === 'postgresql') {
+  // 2a. External-database migrations are applied directly after every local gate
+  // passes and immediately before the Worker upload. A checked-in migration therefore requires
+  // the production DATABASE_URL in the deploy environment; the URL is also the source used when
+  // provisioning a missing Hyperdrive config and is never serialized into the Worker artifact.
+  if (dialect !== 'sqlite' && preBuildMigrations.length > 0 && !process.env.DATABASE_URL) {
     log.error(
       [
-        'deploy: --backend cloudflare does not yet support Void-managed auth on a PostgreSQL app.',
-        'This backend verifies + applies auth tables through remote D1 (SQLite) migrations',
-        'only; it cannot provision or verify the Better Auth schema on Postgres/Hyperdrive.',
-        'Deploy this app with `void deploy` (the managed platform), or switch the app to D1.',
+        `deploy: ${dialect === 'mysql' ? 'MySQL' : 'PostgreSQL'} migrations require DATABASE_URL for --platform cloudflare.`,
+        'Set the production connection string in the deploy environment. Void uses it only to',
+        'provision Hyperdrive and apply checked-in migrations before uploading the Worker; it is',
+        'never written to wrangler.jsonc or the generated Worker config.',
       ].join('\n'),
     );
     return exit(1);
   }
 
-  // 2b. Postgres + checked-in migrations guard — reject before any account op. This backend
-  // applies ONLY remote D1 (SQLite) migrations; the remote-migrate step (8d/9) is gated on
-  // `desired.d1`, which a PostgreSQL app never has (it desires `hyperdrive` instead). The managed
-  // platform DOES apply a pg app's `db/migrations/*.sql` over Hyperdrive at deploy (its runtime
-  // migration handler), so shipping them through this self-host backend would silently deploy
-  // against an UNMIGRATED database → a 500 on the first query. Keyed on migration PRESENCE, not
-  // dialect alone: a pg app with an externally-managed schema and ZERO checked-in migrations is
-  // legitimately deployable and MUST still pass. `preBuildMigrations` is the SAME pre-build
-  // `collectMigrations` set the desired-database gate counts, so this guard and `desired.hyperdrive`
-  // agree. (A pg app WITH auth is already rejected at 2a.)
-  if (dialect === 'postgresql' && preBuildMigrations.length > 0) {
-    log.error(PG_CHECKED_IN_MIGRATIONS_REJECT_MESSAGE);
-    return exit(1);
-  }
-
-  // 2c. Custom migrations_pattern guard — FAIL CLOSED before any account op. v1 supports ONLY
+  // 2b. Custom migrations_pattern guard — FAIL CLOSED before any account op. v1 supports ONLY
   // Void's default migration convention: `db/migrations/*.sql` with wrangler's default
   // `migrations_pattern` (unset). An explicit `migrations_pattern` makes wrangler enumerate its
   // remote-apply set through Minimatch over a custom glob, which can diverge from Void's
@@ -4094,7 +4433,7 @@ export async function runCloudflareDeploy(
     if (migrationsPattern.present) {
       log.error(
         [
-          `deploy: --backend cloudflare does not support a custom migrations_pattern (${JSON.stringify(migrationsPattern.value)}).`,
+          `deploy: --platform cloudflare does not support a custom migrations_pattern (${JSON.stringify(migrationsPattern.value)}).`,
           'v1 deploys only the default Void migration convention: db/migrations/*.sql with',
           "wrangler's default pattern (leave `migrations_pattern` unset). A custom glob would",
           'apply a set to remote D1 that Void cannot verify against its own db/migrations.',
@@ -4110,8 +4449,8 @@ export async function runCloudflareDeploy(
   // the SAME scrubbed env the build uses — still BEFORE whoami / provision / build / deploy.)
 
   // 3. Preflight — pin ONE transport, pin the account, confirm wrangler auth. `rootConfig` is the
-  // pre-probe ground truth the laundering guard (6a) compares against; the ONLY re-parse is the
-  // email step's (3b-ii), which writes BEFORE any project code runs.
+  // pre-probe ground truth the post-probe laundering guard (after 3c) compares against; the ONLY
+  // re-parse is the email step's (3b-ii), which writes BEFORE any project code runs.
   let rootConfig = parseRootWranglerConfig(configPath);
 
   // 3a. Resolve + pin the ONE transport for the WHOLE deploy (build + whoami + migrate +
@@ -4144,9 +4483,9 @@ export async function runCloudflareDeploy(
 
   // 3b-i. Pin the wrangler UPLOADER bundle NOW — at the START of the credentialed sequence, BEFORE
   // any project code runs and BEFORE any credentialed wrangler call. The email step (3b-ii), the
-  // env-schema probe (3c), the `whoami` auth check (3e), and — under `--provision` — the
-  // provisioner all run before the build, and the probe executes ARBITRARY project code (the
-  // user's Vite config + env.ts). That code runs
+  // env-schema probe (3c), the `whoami` auth check (3e), and the automatic provisioner all run
+  // before the build, and the probe executes ARBITRARY project code (the user's Vite config +
+  // env.ts). That code runs
   // with the parent's Cloudflare creds scrubbed so it can only edit FILES — but that INCLUDES the
   // `wrangler-dist` bundle every credentialed wrangler run executes (whoami, the provisioner's own
   // `wrangler <res> create`, and the post-build secret list / remote D1 migrate / deploy), so a
@@ -4192,10 +4531,11 @@ export async function runCloudflareDeploy(
   // developer's own mail domain. Slotted AFTER the uploader hash (3b-i), so its credentialed
   // wrangler runs execute the pinned bundle, and BEFORE the env-schema probe (3c), so no project
   // code has run when a credentialed call is made — and so `rootConfig` can simply be RE-PARSED
-  // after the write: the laundering guard (6a) then sees `send_email` / `addresses` / `vars` as
-  // the pre-probe baseline and needs no exception. Only `needsEmail` apps pay for it. The step
-  // never fails the deploy on its own; `--require-email` turns every "deploying without email"
-  // branch into an exit BEFORE anything is built or uploaded.
+  // after the write: the post-probe laundering guard (the full-config `deepEqual` after 3c) then
+  // sees `send_email` / `addresses` / `vars` as the pre-probe baseline and needs no exception.
+  // Only `needsEmail` apps pay for it. The step never fails the deploy on its own;
+  // `--require-email` turns every "deploying without email" branch into an exit BEFORE anything
+  // is built or uploaded.
   let emailMap: EmailAddressMapInput | null = null;
   if (needsEmail) {
     if (!assertUploaderStillPinned()) {
@@ -4301,6 +4641,24 @@ export async function runCloudflareDeploy(
   }
   const schemaFacts: SelfHostSchemaFacts = schemaResult.facts;
 
+  // The schema probe above imports project code. Its child has no Cloudflare credentials, but it
+  // can still rewrite files — including the root Wrangler config that every authenticated command
+  // below consumes. Compare the full parsed config with the pre-probe value before `whoami` or the
+  // provisioner gets a chance to run. This placement cleanly distinguishes an illicit probe write
+  // from the provisioner's legitimate id/migrations_dir updates, so automatic provisioning does
+  // not create a laundering exception. Formatting-only JSONC rewrites remain harmless because the
+  // comparison is semantic and key-order-independent.
+  if (!deepEqual(rootConfig, parseRootWranglerConfig(configPath))) {
+    log.error(
+      [
+        'deploy: the root wrangler config changed during the pre-build env-schema probe.',
+        'Refusing to run an authenticated Cloudflare command with a config rewritten by project',
+        'code. Rebuild from a clean checkout, then rerun.',
+      ].join('\n'),
+    );
+    return exit(1);
+  }
+
   // 3e. Confirm wrangler auth. `whoami` gets the SAME `-c`/`--env=`/pinned-transport
   // context as migrate/deploy, so it authenticates against the exact endpoint they use.
   // Re-verify the uploader immediately before this credentialed run — the env-schema probe above
@@ -4316,55 +4674,19 @@ export async function runCloudflareDeploy(
       [
         'deploy: not authenticated with Cloudflare.',
         'Run `wrangler login`, or set CLOUDFLARE_API_TOKEN (a token with',
-        'Workers Scripts:Edit + read on your bound resources; --provision also needs',
-        'per-product *:Edit for D1/KV/R2/Queues/Hyperdrive). Then rerun.',
+        'Workers Scripts:Edit + read on your bound resources, plus per-product *:Edit',
+        'for any missing D1/KV/R2/Queue/Hyperdrive resource). Then rerun.',
       ].join('\n'),
     );
     return exit(1);
   }
 
-  // CI gate for --provision: fail closed in non-interactive shells unless the
-  // committed config already covers every desired resource (a provable no-op) —
-  // CI cannot commit back the ids a create would mint, so a re-run would dup.
-  const isCI = deps.isCI ?? (!process.stdin.isTTY || getTokenSource() === 'ci');
-  if (options.provision && isCI) {
-    const { missing } = provisionModule.checkCloudflareProvisionDrift(configPath, desired);
-    // Queues are name-bearing (no id in the committed config), so the id-drift check
-    // CANNOT prove a desired queue is already created — and `provisionCloudflareResources`
-    // would run `wrangler queues create` for it, mutating the account. That breaks the
-    // "CI --provision is a provable no-op" contract, so fail closed on ANY desired queue.
-    if (missing.length > 0 || desired.queues.length > 0) {
-      const lines = ['deploy: --provision is disabled in CI / non-interactive shells.'];
-      if (missing.length > 0) {
-        lines.push('', 'These id-bearing resources are not yet in your committed wrangler.jsonc:');
-        for (const entry of missing) {
-          const reason = reasons.get(entry.binding);
-          lines.push(
-            `  • ${entry.binding} (${CLOUDFLARE_RESOURCE_LABELS[entry.kind]})${reason ? ` — ${reason}` : ''}`,
-          );
-        }
-      }
-      if (desired.queues.length > 0) {
-        lines.push(
-          '',
-          'These queues cannot be proven already created (queues carry no id in the config):',
-        );
-        for (const name of desired.queues) {
-          lines.push(`  • ${name} (queue)`);
-        }
-      }
-      lines.push(
-        '',
-        'Provision them locally (`void deploy --backend cloudflare --provision`), commit the',
-        'updated wrangler.jsonc, then let CI run `void deploy --backend cloudflare`.',
-      );
-      log.error(lines.join('\n'));
-      return exit(1);
-    }
-  }
-
-  // 4. Provision (--provision) OR drift-check (no --provision).
-  if (options.provision) {
+  // 4. Ensure every inferred resource exists. Missing id-bearing bindings trigger this
+  // immediately; queues are probed below and trigger it when absent. `--provision` remains a
+  // backwards-compatible force switch, but normal local and CI deploys need no extra command.
+  // The provisioner is read-first and idempotent, and its local lock/config postconditions remain
+  // the single authority for resource creation.
+  const provisionAndVerify = async (): Promise<void> => {
     // Re-verify the uploader immediately before the credentialed provisioner, which runs
     // `wrangler <res> create` with the CF token. Nothing between `whoami` and here runs project
     // code, so this is defense-in-depth against the same probe-swap vector — against the one
@@ -4418,28 +4740,46 @@ export async function runCloudflareDeploy(
           missing,
           reasons,
           'deploy: provisioning did not satisfy every required resource:',
-          'Rerun `void deploy --backend cloudflare --provision`, or provision the listed resources manually.',
+          'Retry `void deploy --platform cloudflare`, or provision the listed resources manually.',
         ),
       );
       return exit(1);
     }
-  } else {
-    const { missing } = provisionModule.checkCloudflareProvisionDrift(configPath, desired);
-    if (missing.length > 0) {
+    if (
+      desired.d1 &&
+      readStoredResourceName(
+        parseRootWranglerConfig(configPath),
+        'd1_databases',
+        desired.d1.binding,
+        'migrations_dir',
+      ) !== desired.d1.migrationsDir
+    ) {
       log.error(
-        formatCloudflareDriftMessage(
-          missing,
-          reasons,
-          'Deploy blocked — resources not yet provisioned in your Cloudflare account:',
-          'Run:  void deploy --backend cloudflare --provision',
-        ),
+        `deploy: provisioning did not set migrations_dir for D1 binding ${desired.d1.binding}. Retry \`void deploy --platform cloudflare\`.`,
       );
       return exit(1);
     }
+  };
+
+  const { missing: initiallyMissing } = provisionModule.checkCloudflareProvisionDrift(
+    configPath,
+    desired,
+  );
+  const d1NeedsConfigReconciliation =
+    desired.d1 != null &&
+    readStoredResourceName(
+      parseRootWranglerConfig(configPath),
+      'd1_databases',
+      desired.d1.binding,
+      'migrations_dir',
+    ) !== desired.d1.migrationsDir;
+  if (options.provision || initiallyMissing.length > 0 || d1NeedsConfigReconciliation) {
+    await provisionAndVerify();
+  } else {
     // Queue names are taken VERBATIM from filenames (`queues/<name>.ts` → `<name>`, see
     // `queues/scan.ts`) with no sanitization, and the probe below passes each one to wrangler
     // as an ARGV positional. Gate them on the SAME `assertValidResourceName('queue', …)` the
-    // `--provision` path already applies, BEFORE the probe runs: a name beginning with `-` is
+    // provisioner applies, BEFORE the probe runs: a name beginning with `-` is
     // parsed by wrangler as a FLAG (`queues info --help` exits 0 printing usage), which the
     // probe would classify as inconclusive and wave through — silently forfeiting the
     // early-ordering guarantee this whole step exists to provide. Collect EVERY offending name
@@ -4471,7 +4811,7 @@ export async function runCloudflareDeploy(
     // desired queue that was never created is invisible to it. `wrangler deploy` (step 11)
     // does reject a missing queue before uploading, but only AFTER the build (step 7) and
     // the remote D1 apply (step 9) have run. Probe each desired queue by name HERE so that
-    // failure lands before either. `--provision` needs no probe: it creates the queues.
+    // an absent queue can trigger the provisioner before either.
     //
     // `queues list` is unusable (a human table with no `--json`, whose single un-looped
     // page-1 request silently truncates on large accounts), so this is N `queues info`
@@ -4489,18 +4829,7 @@ export async function runCloudflareDeploy(
       }
     }
     if (absentQueues.length > 0) {
-      log.error(
-        [
-          'Deploy blocked — these queues do not exist in your Cloudflare account:',
-          ...absentQueues.map((name) => `  • ${name} (queue)`),
-          '',
-          'Create them by rerunning with --provision:',
-          '  void deploy --backend cloudflare --provision',
-          'Or create each one yourself:',
-          ...absentQueues.map((name) => `  wrangler queues create ${name}`),
-        ].join('\n'),
-      );
-      return exit(1);
+      await provisionAndVerify();
     }
   }
 
@@ -4565,56 +4894,6 @@ export async function runCloudflareDeploy(
     needsSandbox,
   );
 
-  // 6a. Reject a PRE-BUILD PROBE that laundered the root bindings. The step-3c env-schema probe
-  // runs project code BEFORE the step-6 snapshots above, so a probe that rewrote wrangler.jsonc —
-  // swapping a binding id, ADDING an id-bearing / pass-through binding, or changing unsafe /
-  // tail_consumers / routes / addresses / containers — would be captured HERE as the trusted
-  // baseline, emitted by the build, and waved through the step-10 verifier that pins against it.
-  // `rootConfig` was parsed at step 3, BEFORE any project code ran (and re-parsed after the email
-  // step's own write, which precedes the probe), so it is the pre-probe ground truth. Rebuild the
-  // same four snapshots from it and assert they deep-equal the step-6 ones.
-  //
-  // The ONLY config writes between the pre-probe parse and step 6 are step 5's reconcile (top-level
-  // `name`/`account_id`) and, under `--provision`, the provisioner's real ids for d1/kv/r2/
-  // hyperdrive/queues plus name/account_id/compatibility_date/migrations_dir. None of the
-  // pass-through ENTRY, raw-field (unsafe/tail/routes/addresses/…) or containers snapshots read any
-  // of those, so those three comparisons hold on EVERY path — an `addresses` entry a probe injects
-  // under `--provision` is an `added` plan change wrangler applies with no prompt, so that path
-  // must not skip it. Only the id-bearing binding snapshot legitimately differs under `--provision`
-  // (the provisioner writes ids after the probe); closing that residual needs delta-authorization
-  // against a live-provision model and is tracked in #283.
-  {
-    const preProbePassthroughIdentities = snapshotPassthroughIdentities(rootConfig);
-    const preProbePassthroughRawFields = snapshotPassthroughRawFields(rootConfig);
-    const preProbeExpectedContainers = reconstructExpectedContainers(
-      voidConfig,
-      root,
-      rootConfig,
-      needsSandbox,
-    );
-    // `snapshotBindingIdentities` / `…PassthroughIdentities` / `…PassthroughRawFields` return Maps,
-    // which the JSON-shaped `deepEqual` cannot compare — use `snapshotsDeepEqual` (Map-aware).
-    // `expectedContainers` is a plain array, so `deepEqual` handles it directly.
-    const rootBindingsLaundered =
-      (!options.provision &&
-        !snapshotsDeepEqual(snapshotBindingIdentities(rootConfig), bindingIdentitySnapshot)) ||
-      !snapshotsDeepEqual(preProbePassthroughIdentities, passthroughIdentitySnapshot) ||
-      !snapshotsDeepEqual(preProbePassthroughRawFields, passthroughRawFields) ||
-      !deepEqual(preProbeExpectedContainers, expectedContainers);
-    if (rootBindingsLaundered) {
-      log.error(
-        [
-          'deploy: the root wrangler config’s bindings, pass-through entries, or containers changed',
-          'during the pre-build env-schema probe (the config differs from its state before any',
-          'project code ran). Refusing to deploy a config a pre-build step rewrote — the binding set',
-          'the deploy would ship no longer matches the one present before the probe. Rebuild from a',
-          'clean checkout, then rerun.',
-        ].join('\n'),
-      );
-      return exit(1);
-    }
-  }
-
   // (The LOCAL migration gates run POST-build at step 8d, immediately before the remote
   // apply — not here — so they validate the exact files on disk AFTER the build. See step 8d.)
 
@@ -4651,6 +4930,11 @@ export async function runCloudflareDeploy(
   // the PARENT holds, which the project never had.
   const buildChildEnv = scrubWranglerAuthCredentials(deployChildEnv(accountId, apiBaseUrl));
   delete buildChildEnv.VOID_DEPLOY_PROJECT_ID;
+  // Tell void:env to build Worker vars from portable production dotenv files
+  // only. Outside this deploy path Vite keeps its standard dotenv behavior,
+  // but local files cannot be serialized into the artifact this command uploads.
+  requireProvisionModule().deleteEnvVarCaseAware(buildChildEnv, CLOUDFLARE_DEPLOY_BUILD_ENV);
+  buildChildEnv[CLOUDFLARE_DEPLOY_BUILD_ENV] = '1';
   // Pin NODE_ENV=production for the build too, so the build and the env-schema probes evaluate
   // env.ts under the SAME environment. `vite build` only DEFAULTS NODE_ENV to production when it
   // is unset (`if (!isNodeEnvSet) process.env.NODE_ENV = defaultNodeEnv`), so an ambient
@@ -4692,16 +4976,13 @@ export async function runCloudflareDeploy(
   // the auth-schema check (8c) and the local migration gates (8d).
   const migrations = collectMigrations(migrationsDir);
 
-  // Re-run the PostgreSQL checked-in-migrations reject on the POST-build set. The pre-build guard
-  // (step 2b) saw an empty set, but a build plugin can WRITE `db/migrations/*.sql` during
-  // `vite build`; the local migration apply/validate (step 8d) is gated on `desired.d1`, which a
-  // pg app never has, so those files would ship UNRUN and the worker would hit an unmigrated
-  // database. Re-checking here — before the remote migrate (step 9) and the deploy (step 11), the
-  // first remote mutations — fails closed without leaving a half-deployed account. A pg app with
-  // ZERO checked-in migrations still passes (an externally-managed schema is legitimately
-  // deployable — never reject on dialect alone).
-  if (dialect === 'postgresql' && migrations.length > 0) {
-    log.error(PG_CHECKED_IN_MIGRATIONS_REJECT_MESSAGE);
+  // A build plugin can add migrations after the pre-build source scan. Require the production URL
+  // again against the post-build ground truth so no injected migration can be silently skipped.
+  if (dialect !== 'sqlite' && migrations.length > 0 && !process.env.DATABASE_URL) {
+    log.error(
+      `deploy: the build added ${dialect === 'mysql' ? 'MySQL' : 'PostgreSQL'} migrations, but DATABASE_URL is not set. ` +
+        'Refusing to upload a Worker against an unmigrated database.',
+    );
     return exit(1);
   }
 
@@ -4723,14 +5004,44 @@ export async function runCloudflareDeploy(
     return exit(1);
   }
   const emittedVars = emitted.vars;
+  const schemaSecretKeys = schemaFacts.hasSchema
+    ? schemaFacts.secretKeys.filter((key) => !(authEnabled && key === BETTER_AUTH_SECRET_NAME))
+    : [];
+
+  // Explicit schema secrets are about to be promoted, so classify warnings
+  // against the plaintext vars that will actually remain in the artifact.
+  // Validate the transport shape early and without printing any value.
+  const remainingPlaintextVars = { ...emittedVars };
+  for (const key of schemaSecretKeys) {
+    if (!Object.prototype.hasOwnProperty.call(emittedVars, key)) {
+      continue;
+    }
+    const value = emittedVars[key];
+    if (value !== '' && typeof value !== 'string') {
+      log.error(`deploy: schema secret ${key} must resolve to a string before it can be uploaded.`);
+      return exit(1);
+    }
+    delete remainingPlaintextVars[key];
+  }
+
+  // Better Auth's signing secret must never be baked into the generated config.
+  // Match the managed Void deploy contract: the deploy target owns this secret
+  // and stores it through its encrypted secret API, not through plaintext vars.
+  if (authEnabled && Object.prototype.hasOwnProperty.call(emittedVars, BETTER_AUTH_SECRET_NAME)) {
+    log.error(
+      [
+        `deploy: ${BETTER_AUTH_SECRET_NAME} must be stored as a Cloudflare Worker secret, not a plaintext worker var.`,
+        'Remove it from .env / .env.production and rerun. This deploy command preserves an',
+        'existing remote value or creates a persistent one automatically when it is missing.',
+      ].join('\n'),
+    );
+    return exit(1);
+  }
 
   // 8a. Plaintext-var warnings — classify the secret-looking keys among the REAL emitted vars
   // (`.secret()`-flagged from the schema facts, OR the shared name heuristic). Ground truth —
   // no `loadEnv`, no facsimile.
-  const warnings = collectPlaintextVarWarningsFromVars(
-    emittedVars,
-    schemaFacts.hasSchema ? schemaFacts.secretKeys : [],
-  );
+  const warnings = collectPlaintextVarWarningsFromVars(remainingPlaintextVars, []);
   if (warnings.secretKeys.length > 0) {
     log.warn(
       [
@@ -4771,6 +5082,17 @@ export async function runCloudflareDeploy(
     }
     envContext.invalidKeys = validateResult.invalidKeys;
   }
+  // The auth secret has its own deploy-owned lifecycle below. If an env schema
+  // also declares it required, do not make the generic secret gate reject it
+  // before the deploy has a chance to provision and verify it.
+  if (authEnabled) {
+    envContext.absentRequired = envContext.absentRequired.filter(
+      (key) => key !== BETTER_AUTH_SECRET_NAME,
+    );
+    envContext.invalidKeys = envContext.invalidKeys.filter(
+      (key) => key !== BETTER_AUTH_SECRET_NAME,
+    );
+  }
   // DISCHARGE the context. Reuses the same `dischargeSelfHostEnvContext` the unit tests
   // exercise — now fed the ground-truth vars + the real invalid-value set. It may spawn a
   // credentialed `wrangler secret list` (its own runner, via `createDefaultSecretListRunner`),
@@ -4809,39 +5131,38 @@ export async function runCloudflareDeploy(
   // it only applies checked-in `db/migrations/*.sql`. So verify the checked-in migrations
   // PRODUCE the required Better Auth schema (tables + columns, incl. configured renames + plugin
   // tables) by reading the schema the BUILD generated (`.void/better-auth-schema.ts` — ground
-  // truth) and applying the migrations to in-memory SQLite. `dialect` is guaranteed `'sqlite'`
-  // here (pg+auth was rejected at 2a).
-  if (authEnabled) {
+  // truth) and applying the migrations to in-memory SQLite. PostgreSQL uses the same generated
+  // schema as the drift gate below; applying its SQL to SQLite would be invalid, so only the D1
+  // dialect needs this additional structural simulation.
+  if (authEnabled && dialect === 'sqlite') {
     try {
       await (deps.validateAuthMigrations ?? validateAuthMigrationSchema)(root, migrations);
     } catch (err) {
       log.error(
         [
-          'deploy: --backend cloudflare cannot verify the Void-managed Better Auth schema.',
+          'deploy: --platform cloudflare cannot verify the Void-managed Better Auth schema.',
           'The managed platform creates these tables at runtime (POST /__void/migrate/auth)',
           'after deploy; this self-host backend only applies checked-in db/migrations/*.sql, so',
           'they must already produce the Better Auth schema — tables, columns, and the primary',
           'keys, unique constraints and foreign keys it declares:',
           `  ${getErrorMessage(err)}`,
-          'Define the Better Auth tables in `db/schema.ts`, run `void db generate`, commit the',
-          'migration, then rerun — or deploy this app with `void deploy` (the managed platform).',
-          "Note that Drizzle opts out of constraints by default: every auth table's `id` needs",
-          '`.primaryKey()`, a field the schema marks unique needs `.unique()`, and one that',
-          'references another table needs `.references()`.',
+          '`void db generate` includes the production Better Auth schema automatically. Run it,',
+          'review and commit the generated migration, then rerun deploy — or deploy this app',
+          'with `void deploy` (the managed platform).',
         ].join('\n'),
       );
       return exit(1);
     }
   }
 
-  // 8d. Local migration gates (D1/SQLite apps only; pg/Hyperdrive skip) — run POST-build,
+  // 8d. Local migration gates — run POST-build,
   // immediately before the remote apply, against the RE-COLLECTED post-build migrations. Moving
   // them here (from pre-build) closes the window where a build plugin could add/rewrite migration
   // SQL that step 9 would then apply to remote D1 ungated: `wrangler d1 migrations apply` reads
   // the live post-build files, and these gates now validate exactly that set. Nothing between the
   // build and here mutates remote state, so a failed gate never leaves a half-migrated account.
   let d1MigrateToken: string | undefined;
-  if (desired.d1) {
+  if (desired.d1 || desired.hyperdrive) {
     // 8d-i. Run the SAME gates the managed deploy runs — schema drift, journal coherence,
     // destructive-op-without-pragma — for EVERY D1 app REGARDLESS of migration count. A
     // `db/schema.ts` with no generated migration is drift the old count-gated check silently
@@ -4860,10 +5181,10 @@ export async function runCloudflareDeploy(
       return exit(1);
     }
 
-    // Resolve + validate the migrate target ONLY when there ARE checked-in migrations: a D1
+    // Resolve + validate the D1 migrate target ONLY when there ARE checked-in migrations: a D1
     // desired purely from DB-use or auth can have no `db/migrations`, and wrangler 4.131
     // HARD-FAILS `d1 migrations apply` on a missing/empty folder (it never no-ops).
-    if (migrations.length > 0) {
+    if (desired.d1 && migrations.length > 0) {
       // `migrations_dir` must be present in the config: wrangler defaults a missing value to
       // `./migrations` (relative to the config) and would apply an unrelated folder.
       const migrateConfig = parseRootWranglerConfig(configPath);
@@ -4879,8 +5200,8 @@ export async function runCloudflareDeploy(
             `deploy: D1 binding ${desired.d1.binding} has no "migrations_dir" in ${configPath}.`,
             'Refusing to run `wrangler d1 migrations apply` — wrangler would default to',
             '`./migrations` (relative to the config) and apply an unrelated folder to your',
-            'remote database, or error. Run `void deploy --backend cloudflare --provision`',
-            'once to set `migrations_dir` (it writes `./db/migrations`), or add it yourself.',
+            'remote database, or error. Automatic provisioning should have set this field;',
+            'rerun `void deploy --platform cloudflare`, or add it yourself.',
           ].join('\n'),
         );
         return exit(1);
@@ -4956,7 +5277,109 @@ export async function runCloudflareDeploy(
     }
   }
 
-  // 9. Apply pending migrations to remote D1 — AFTER all local + ground-truth gates pass, so a
+  // 8e. Persistent Better Auth secret — after every local/build-derived gate,
+  // but before the first remote migration or worker upload. Existing secrets
+  // are adopted unchanged; a missing value is generated once, sent over stdin,
+  // and verified by name before deployment can continue.
+  if (authEnabled) {
+    // Prove the artifact will inherit the secret BEFORE creating it. Wrangler
+    // replaces Worker versions on deploy; without `secrets.required`, a secret
+    // successfully written to the draft/current Worker can be dropped by the
+    // immediately following upload.
+    const inheritance = (deps.verifyDeployConfig ?? verifyGeneratedDeployConfig)(root, {
+      accountId,
+      workerName,
+      desired,
+      bindingIdentitySnapshot,
+      passthroughIdentitySnapshot,
+      passthroughRawFields,
+      needsAI,
+      authEnabled,
+      expectedContainers,
+      expectedCrons,
+    });
+    if (!inheritance.ok) {
+      log.error(
+        [
+          'deploy: the generated deploy config cannot preserve the Better Auth secret — refusing to deploy.',
+          inheritance.reason,
+        ]
+          .filter(Boolean)
+          .join('\n'),
+      );
+      return exit(1);
+    }
+    try {
+      const authSecret = await (deps.ensureAuthSecret ?? ensureCloudflareAuthSecret)({
+        root,
+        configPath,
+        accountId,
+        workerName,
+        runWrangler,
+        beforeWranglerRun: assertUploaderStillPinned,
+      });
+      cliLog.info('cloudflare_auth_secret_ready', { created: authSecret.created });
+    } catch (error) {
+      if (error instanceof CloudflareAuthSecretError && error.reason === 'uploader-changed') {
+        return exit(1);
+      }
+      if (error instanceof CloudflareAuthSecretError) {
+        log.error(error.message);
+        return exit(1);
+      }
+      throw error;
+    }
+  }
+
+  // 9. Apply pending PostgreSQL migrations transactionally before the Worker upload. The
+  // production URL is intentionally provided by the deploy environment rather than recovered
+  // from Hyperdrive (Cloudflare never returns the database password). `runPgMigrations` records
+  // applied names in `_void_migrations`, so retries are idempotent.
+  if (dialect === 'postgresql' && migrations.length > 0) {
+    const databaseUrl = process.env.DATABASE_URL;
+    if (!databaseUrl) {
+      log.error('deploy: DATABASE_URL disappeared before PostgreSQL migrations could run.');
+      return exit(1);
+    }
+    try {
+      const applied = await (deps.applyPostgresMigrations ?? runPgMigrations)(
+        migrationsDir,
+        databaseUrl,
+      );
+      cliLog.info('cloudflare_postgres_migrations', { applied: applied.length });
+      if (applied.length > 0) {
+        log.success(
+          `Applied ${applied.length} PostgreSQL migration${applied.length === 1 ? '' : 's'}.`,
+        );
+      }
+    } catch (err) {
+      log.error(`deploy: PostgreSQL migrations failed — ${getErrorMessage(err)}`);
+      return exit(1);
+    }
+  }
+
+  if (dialect === 'mysql' && migrations.length > 0) {
+    const databaseUrl = process.env.DATABASE_URL;
+    if (!databaseUrl) {
+      log.error('deploy: DATABASE_URL disappeared before MySQL migrations could run.');
+      return exit(1);
+    }
+    try {
+      const applied = await (deps.applyMySqlMigrations ?? runMySqlMigrations)(
+        migrationsDir,
+        databaseUrl,
+      );
+      cliLog.info('cloudflare_mysql_migrations', { applied: applied.length });
+      if (applied.length > 0) {
+        log.success(`Applied ${applied.length} MySQL migration${applied.length === 1 ? '' : 's'}.`);
+      }
+    } catch (err) {
+      log.error(`deploy: MySQL migrations failed — ${getErrorMessage(err)}`);
+      return exit(1);
+    }
+  }
+
+  // 10. Apply pending migrations to remote D1 — AFTER all local + ground-truth gates pass, so a
   // failed gate never mutates remote D1. Uses the token resolved + validated at step 8d, and the
   // pinned root config (`-c`), which targets the account already verified by provision/drift.
   if (d1MigrateToken) {
@@ -5034,7 +5457,39 @@ export async function runCloudflareDeploy(
     }
   }
 
-  // 10. Verify the generated deploy config targets the pinned account + expected worker
+  // 10. Promote explicit `.secret()` schema values only after every migration
+  // gate/apply has succeeded, immediately before final verification + upload.
+  // The sync rewrites the fresh generated artifact to remove plaintext values,
+  // bulk uploads over stdin, and inherits both uploaded and remote-only marked
+  // secrets without pruning anything from Cloudflare.
+  let requiredSchemaSecretNames: Array<string> = [];
+  if (schemaSecretKeys.length > 0) {
+    try {
+      const synced = await (deps.syncSchemaSecrets ?? syncCloudflareSchemaSecrets)({
+        root,
+        configPath,
+        accountId,
+        workerName,
+        emittedVars,
+        secretKeys: schemaSecretKeys,
+        runWrangler,
+        beforeWranglerRun: assertUploaderStillPinned,
+      });
+      requiredSchemaSecretNames = synced.requiredSecretNames;
+      cliLog.info('cloudflare_schema_secrets_ready', { uploaded: synced.uploaded });
+    } catch (error) {
+      if (error instanceof CloudflareSchemaSecretError && error.reason === 'uploader-changed') {
+        return exit(1);
+      }
+      if (error instanceof CloudflareSchemaSecretError) {
+        log.error(error.message);
+        return exit(1);
+      }
+      throw error;
+    }
+  }
+
+  // 10b. Verify the generated deploy config targets the pinned account + expected worker
   // AND the exact provisioned binding IDENTITIES BEFORE uploading. A `CLOUDFLARE_ENV` /
   // `CLOUDFLARE_VITE_WRANGLER_CONFIG_PATH` the CF plugin loaded could have baked a
   // different account/name — or the SAME account/name with a flattened, DIFFERENT binding
@@ -5053,6 +5508,8 @@ export async function runCloudflareDeploy(
     passthroughIdentitySnapshot,
     passthroughRawFields,
     needsAI,
+    authEnabled,
+    requiredSecretNames: requiredSchemaSecretNames,
     expectedContainers,
     expectedCrons,
   });
@@ -5137,11 +5594,39 @@ async function runDeployInner(
   options: RunDeployOptions | undefined,
   cliLog: CliLogger,
 ): Promise<void> {
-  // Fork to the self-hosted Cloudflare backend BEFORE any managed-platform work
+  // A missing field retains the historical Void behavior. New interactive
+  // init runs always persist an explicit choice, with Cloudflare preselected.
+  const platform = resolveDeploymentPlatform(root, options);
+
+  if (platform === 'none') {
+    throw new Error(
+      'deploy: deployment setup was skipped during `void init`. Pass `--platform cloudflare` or `--platform void` to choose a destination.',
+    );
+  }
+
+  if (platform === 'cloudflare') {
+    if (options?.projectSlug !== undefined) {
+      throw new Error(
+        'deploy: --project is not supported with platform cloudflare — this platform deploys to your own Cloudflare account and no Void project is involved.',
+      );
+    }
+    if (options?.dir !== undefined) {
+      throw new Error(
+        'deploy: --dir is not supported with platform cloudflare — this platform uploads the worker your build emits, not a static directory.',
+      );
+    }
+    if (options?.spa) {
+      throw new Error(
+        'deploy: --spa is not supported with platform cloudflare — this platform uploads the worker your build emits, not a static SPA.',
+      );
+    }
+  }
+
+  // Fork to the self-hosted Cloudflare platform BEFORE any managed-platform work
   // (auth token, PlatformClient, project resolution, config read, branch
   // selection). Everything below stays byte-for-byte the managed `void` path.
-  if (options?.backend === 'cloudflare') {
-    return runCloudflareDeploy(root, options, cliLog);
+  if (platform === 'cloudflare') {
+    return runCloudflareDeploy(root, options ?? {}, cliLog);
   }
 
   let reauthenticated = false;
@@ -6236,8 +6721,8 @@ async function runFrameworkDeploy(
     }
   }
 
-  // Pre-deploy: ensure Hyperdrive is provisioned for PostgreSQL projects
-  if (dialect === 'postgresql' && (bindings.needsD1 || rawMigrations.length > 0)) {
+  // Pre-deploy: ensure Hyperdrive is provisioned for external SQL projects.
+  if (dialect !== 'sqlite' && (bindings.needsD1 || rawMigrations.length > 0)) {
     let resources: Array<ResourceSummary> | null = null;
     try {
       resources = await client.getResources(config.projectId);
@@ -6251,11 +6736,20 @@ async function runFrameworkDeploy(
       if (!hasHyperdrive) {
         const { text: promptText, isCancel: isCancelPrompt } = await import('@clack/prompts');
         const connectionString = await promptText({
-          message: 'Your project uses PostgreSQL. Enter your connection string:',
-          placeholder: 'postgresql://user:pass@host:5432/dbname',
+          message: `Your project uses ${dialect === 'mysql' ? 'MySQL' : 'PostgreSQL'}. Enter your connection string:`,
+          placeholder:
+            dialect === 'mysql'
+              ? 'mysql://user:pass@host:3306/dbname'
+              : 'postgresql://user:pass@host:5432/dbname',
           validate(value) {
-            if (!value?.startsWith('postgres://') && !value?.startsWith('postgresql://')) {
-              return 'Must start with "postgres://" or "postgresql://"';
+            const valid =
+              dialect === 'mysql'
+                ? value?.startsWith('mysql://')
+                : value?.startsWith('postgres://') || value?.startsWith('postgresql://');
+            if (!valid) {
+              return dialect === 'mysql'
+                ? 'Must start with "mysql://"'
+                : 'Must start with "postgres://" or "postgresql://"';
             }
           },
         });
@@ -6453,6 +6947,14 @@ async function runFrameworkDeploy(
   outro('Done!');
 }
 
+export function assertManagedDurableStateSupported(root: string): void {
+  if (scanDurableObjectModules(root).length > 0) {
+    throw new Error(
+      'deploy: typed Durable State modules in durable-objects/ are not yet supported by the Void managed platform. Deploy to your own Cloudflare account with `void deploy --platform cloudflare`.',
+    );
+  }
+}
+
 async function runFullDeploy(
   root: string,
   config: ProjectConfig,
@@ -6475,6 +6977,8 @@ async function runFullDeploy(
     mode: 'full',
     framework: detected?.name,
   });
+
+  assertManagedDurableStateSupported(root);
 
   // 3. Build (child process to avoid Vite API side effects on bundle output)
   if (!skipBuild) {
@@ -6619,10 +7123,10 @@ async function runFullDeploy(
     }
   }
 
-  // Pre-deploy: ensure Hyperdrive is provisioned for PostgreSQL projects.
+  // Pre-deploy: ensure Hyperdrive is provisioned for external SQL projects.
   // Migrations on disk also gate this — even if inference says needsD1: false,
   // buildVoidManifest will add the hyperdrive binding when migrations are present.
-  if (dialect === 'postgresql' && (effectiveBindings.needsD1 || rawMigrations.length > 0)) {
+  if (dialect !== 'sqlite' && (effectiveBindings.needsD1 || rawMigrations.length > 0)) {
     let resources: Array<ResourceSummary> | null = null;
     try {
       resources = await client.getResources(config.projectId);
@@ -6636,11 +7140,20 @@ async function runFullDeploy(
       if (!hasHyperdrive) {
         const { text: promptText, isCancel: isCancelPrompt } = await import('@clack/prompts');
         const connectionString = await promptText({
-          message: 'Your project uses PostgreSQL. Enter your connection string:',
-          placeholder: 'postgresql://user:pass@host:5432/dbname',
+          message: `Your project uses ${dialect === 'mysql' ? 'MySQL' : 'PostgreSQL'}. Enter your connection string:`,
+          placeholder:
+            dialect === 'mysql'
+              ? 'mysql://user:pass@host:3306/dbname'
+              : 'postgresql://user:pass@host:5432/dbname',
           validate(value) {
-            if (!value?.startsWith('postgres://') && !value?.startsWith('postgresql://')) {
-              return 'Must start with "postgres://" or "postgresql://"';
+            const valid =
+              dialect === 'mysql'
+                ? value?.startsWith('mysql://')
+                : value?.startsWith('postgres://') || value?.startsWith('postgresql://');
+            if (!valid) {
+              return dialect === 'mysql'
+                ? 'Must start with "mysql://"'
+                : 'Must start with "postgres://" or "postgresql://"';
             }
           },
         });
@@ -7029,7 +7542,8 @@ function assertDeploySchemaDriftFree(root: string, dialect: DatabaseDialect): vo
 }
 
 export function hasDeploySchemaDrift(root: string, dialect: DatabaseDialect): boolean {
-  if (!discoverSchema(root, readProjectPaths(root))) {
+  const authSchemaPath = join(root, '.void', 'better-auth-schema.ts');
+  if (!discoverSchema(root, readProjectPaths(root)) && !existsSync(authSchemaPath)) {
     return false;
   }
 
@@ -7041,10 +7555,18 @@ export function hasDeploySchemaDrift(root: string, dialect: DatabaseDialect): bo
   try {
     const migrationsDir = readProjectPaths(driftProjectRoot).migrationsDir;
     const before = snapshotDir(migrationsDir);
+    const driftAuthSchemaPath = join(driftProjectRoot, '.void', 'better-auth-schema.ts');
     const driftConfigPath = writeDrizzleConfig(
       driftProjectRoot,
-      dialect === 'postgresql' ? 'postgresql://dummy' : ':memory:',
+      dialect === 'postgresql'
+        ? 'postgresql://dummy'
+        : dialect === 'mysql'
+          ? 'mysql://dummy'
+          : ':memory:',
       dialect,
+      {
+        additionalSchemas: existsSync(driftAuthSchemaPath) ? [driftAuthSchemaPath] : undefined,
+      },
     );
 
     const output = runDrizzleKitGenerate(driftProjectRoot, driftConfigPath);
@@ -7162,6 +7684,16 @@ function createDeployDriftProject(root: string, driftProjectRoot: string): void 
     const target = join(driftProjectRoot, entry.name);
 
     cpSync(source, target, { recursive: true });
+  }
+
+  // The build-generated Better Auth schema participates in `void db generate`, so
+  // it must also participate in the isolated drift check. Copy only this known
+  // generated input; the rest of `.void` remains excluded as before.
+  const authSchemaPath = join(root, '.void', 'better-auth-schema.ts');
+  if (existsSync(authSchemaPath)) {
+    const target = join(driftProjectRoot, '.void', 'better-auth-schema.ts');
+    mkdirSync(dirname(target), { recursive: true });
+    cpSync(authSchemaPath, target);
   }
 }
 

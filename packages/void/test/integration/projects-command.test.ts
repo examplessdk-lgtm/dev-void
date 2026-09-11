@@ -1,9 +1,15 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'pathslash';
-import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 
 const tempHomes: Array<string> = [];
+const mockGetToken = vi.fn<() => string | null>();
+
+vi.mock('../../src/cli/auth', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../src/cli/auth.ts')>()),
+  getToken: () => mockGetToken(),
+}));
 
 function setIsolatedHome(): void {
   const dir = mkdtempSync(join(tmpdir(), 'void-home-'));
@@ -55,6 +61,10 @@ function captureOutput(): { output: () => string; restore: () => void } {
 }
 
 describe('runProjectsCommand', () => {
+  beforeEach(() => {
+    mockGetToken.mockReset().mockReturnValue(null);
+  });
+
   afterEach(() => {
     delete process.env.VOID_TOKEN;
     delete process.env.VOID_API_URL;
@@ -71,7 +81,7 @@ describe('runProjectsCommand', () => {
   it('prints projects for the authenticated user', async () => {
     setIsolatedHome();
     const root = createProjectRoot({ staging: true });
-    process.env.VOID_TOKEN = 'test-token';
+    mockGetToken.mockReturnValue('test-token');
     process.env.VOID_API_URL = 'https://api.example.test';
 
     const fetchMock = vi.fn(async () =>
@@ -113,7 +123,7 @@ describe('runProjectsCommand', () => {
   it('prints a friendly message when there are no projects', async () => {
     setIsolatedHome();
     const root = createProjectRoot();
-    process.env.VOID_TOKEN = 'test-token';
+    mockGetToken.mockReturnValue('test-token');
     process.env.VOID_API_URL = 'https://api.example.test';
 
     vi.stubGlobal(

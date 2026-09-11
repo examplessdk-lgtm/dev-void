@@ -1,6 +1,17 @@
 import { execSync, type spawn } from 'node:child_process';
 import { once } from 'node:events';
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { createServer, type Server } from 'node:net';
+import { basename, join, relative } from 'node:path/posix';
 
 /**
  * Timeout multiplier for Windows CI runners, which are 2–3× slower
@@ -15,6 +26,83 @@ const CI_TIMEOUT_SCALE = process.platform === 'win32' ? 3 : 1;
  * during the gap between close and the child process's listen().
  */
 const heldServers = new Map<number, Server>();
+
+const GENERATED_PLAYGROUND_ENTRIES = new Set([
+  '.astro',
+  '.nuxt',
+  '.output',
+  '.react-router',
+  '.svelte-kit',
+  '.tanstack',
+  '.void',
+  '.vite-cloud',
+  '.wrangler',
+  'build',
+  'dist',
+  'node_modules',
+]);
+
+export type IsolatedPlayground = {
+  root: string;
+  workspacePath: string;
+  cleanup: () => void;
+};
+
+export function shouldCopyPlaygroundPath(sourceRoot: string, path: string): boolean {
+  const normalizedSourceRoot = sourceRoot.replaceAll('\\', '/');
+  const normalizedPath = path.replaceAll('\\', '/');
+  const relativePath = relative(normalizedSourceRoot, normalizedPath);
+  const topLevelEntry = relativePath.split('/')[0];
+  return relativePath === '' || !GENERATED_PLAYGROUND_ENTRIES.has(topLevelEntry);
+}
+
+/**
+ * Copies a playground into the gitignored playground-local workspace so tests that rewrite configs,
+ * source, or build output can run beside tests using the checked-in playground. Dependencies stay
+ * linked to the installed source tree; generated state is deliberately not copied.
+ */
+export function createIsolatedPlayground(
+  workspaceRoot: string,
+  sourceWorkspacePath: string,
+): IsolatedPlayground {
+  const sourceRoot = join(workspaceRoot, sourceWorkspacePath);
+  const playgroundLocal = join(workspaceRoot, 'playground-local');
+  mkdirSync(playgroundLocal, { recursive: true });
+  const root = mkdtempSync(join(playgroundLocal, `test-${basename(sourceWorkspacePath)}-`));
+
+  cpSync(sourceRoot, root, {
+    recursive: true,
+    filter(path) {
+      // `cpSync` reports native backslash paths on Windows, while these workspace paths are
+      // normalized to forward slashes. Normalize before using the POSIX path helpers or the
+      // top-level `node_modules` junction is copied and the replacement junction already exists.
+      return shouldCopyPlaygroundPath(sourceRoot, path);
+    },
+  });
+
+  const sourceNodeModules = join(sourceRoot, 'node_modules');
+  if (existsSync(sourceNodeModules)) {
+    symlinkSync(
+      sourceNodeModules,
+      join(root, 'node_modules'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+  }
+
+  // Avoid duplicate workspace package names when multiple copies exist concurrently.
+  const packagePath = join(root, 'package.json');
+  const packageJson = JSON.parse(readFileSync(packagePath, 'utf-8')) as { name?: string };
+  packageJson.name = `${packageJson.name ?? basename(sourceWorkspacePath)}-${basename(root)}`;
+  writeFileSync(packagePath, `${JSON.stringify(packageJson, null, 2)}\n`);
+
+  return {
+    root,
+    workspacePath: relative(workspaceRoot, root),
+    cleanup() {
+      rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
+    },
+  };
+}
 
 /**
  * Returns an unused port by binding to port 0 and reading the
@@ -35,7 +123,13 @@ export async function getPort(): Promise<number> {
 export async function waitForServer(
   url: string,
   timeoutMs: number,
-  options?: { expectBody?: string; isAlive?: () => boolean; requestTimeoutMs?: number },
+  options?: {
+    expectBody?: string;
+    rejectBody?: string;
+    expectStatus?: number;
+    isAlive?: () => boolean;
+    requestTimeoutMs?: number;
+  },
 ): Promise<void> {
   // Release the held port so the child process can bind to it.
   // This is called right after spawn(), minimizing the TOCTOU window.
@@ -58,12 +152,19 @@ export async function waitForServer(
       const response = await fetch(url, {
         signal: AbortSignal.timeout(Math.min(options?.requestTimeoutMs ?? 5_000, remainingMs)),
       });
-      if (response.status > 0) {
-        if (!options?.expectBody) {
+      const statusMatches =
+        options?.expectStatus === undefined
+          ? response.status > 0
+          : response.status === options.expectStatus;
+      if (statusMatches) {
+        if (!options?.expectBody && !options?.rejectBody) {
           return;
         }
         const body = await response.text();
-        if (body.includes(options.expectBody)) {
+        if (
+          (!options.expectBody || body.includes(options.expectBody)) &&
+          (!options.rejectBody || !body.includes(options.rejectBody))
+        ) {
           return;
         }
       }

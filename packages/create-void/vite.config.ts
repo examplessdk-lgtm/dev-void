@@ -8,6 +8,7 @@ export default defineConfig({
     clean: true,
     minify: true,
     deps: {
+      resolveDepSubpath: true,
       onlyBundle: [
         '@clack/prompts',
         '@clack/core',

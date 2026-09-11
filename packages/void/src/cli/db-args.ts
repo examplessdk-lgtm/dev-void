@@ -28,7 +28,18 @@ export const dbSubcommands: Array<SubcommandDef> = [
       'Open Drizzle Studio against the database (use --remote for the deployed PostgreSQL database)',
     flags: [{ name: '--remote', description: 'Open Studio against the deployed database' }],
   },
-  { name: 'set-url', description: 'Update the PostgreSQL connection string for deployment' },
+  { name: 'set-url', description: 'Update the external database URL for deployment' },
+  {
+    name: 'connect',
+    arg: '[connection-string]',
+    description: 'Connect or provision an external database',
+    flags: [
+      { name: '--provider', arg: '<name-or-module>', description: 'Provision with an adapter' },
+      { name: '--name', arg: '<name>', description: 'Provider project/database name' },
+      { name: '--region', arg: '<region>', description: 'Provider region identifier' },
+      { name: '--local-only', description: 'Do not sync a linked Void project' },
+    ],
+  },
   { name: 'rename-migrations', description: 'Rename migrations to timestamp-based format' },
   {
     name: 'export',
@@ -59,6 +70,14 @@ export type DbArgs =
       table?: string;
     }
   | { action: 'set-url' }
+  | {
+      action: 'connect';
+      url?: string;
+      provider?: string;
+      name?: string;
+      region?: string;
+      localOnly?: boolean;
+    }
   | { action: 'rename-migrations' };
 
 export function parseDbArgs(args: Array<string>): DbArgs {
@@ -71,6 +90,10 @@ export function parseDbArgs(args: Array<string>): DbArgs {
       'no-schema': { type: 'boolean' },
       table: { type: 'string' },
       remote: { type: 'boolean' },
+      provider: { type: 'string' },
+      name: { type: 'string' },
+      region: { type: 'string' },
+      'local-only': { type: 'boolean' },
     },
     allowPositionals: true,
     strict: true,
@@ -153,6 +176,26 @@ export function parseDbArgs(args: Array<string>): DbArgs {
     return { action };
   }
 
+  if (action === 'connect') {
+    if (rest.length > 1) {
+      throw new Error(`db: Unexpected argument '${rest[1]}'.`);
+    }
+    const url = rest[0];
+    const provider =
+      typeof parsed.values.provider === 'string' ? parsed.values.provider : undefined;
+    if (url && provider) {
+      throw new Error('db: Provide either a connection string or --provider, not both.');
+    }
+    return {
+      action,
+      url,
+      provider,
+      name: typeof parsed.values.name === 'string' ? parsed.values.name : undefined,
+      region: typeof parsed.values.region === 'string' ? parsed.values.region : undefined,
+      localOnly: parsed.values['local-only'] === true ? true : undefined,
+    };
+  }
+
   if (action === 'rename-migrations') {
     if (rest.length > 0) {
       throw new Error(`db: Unexpected argument '${rest[0]}'.`);
@@ -175,6 +218,6 @@ export function parseDbArgs(args: Array<string>): DbArgs {
   }
 
   throw new Error(
-    'db: Usage: void db <push|generate|status|reset|seed|execute|migrate|studio|export|set-url|rename-migrations>.',
+    'db: Usage: void db <push|generate|status|reset|seed|execute|migrate|studio|export|connect|set-url|rename-migrations>.',
   );
 }

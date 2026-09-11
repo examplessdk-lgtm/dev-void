@@ -35,6 +35,10 @@ afterAll(async () => {
 });
 
 function defineClientTests(getBase: () => string) {
+  describe.concurrent('shared client behavior', () => registerClientTests(getBase));
+}
+
+function registerClientTests(getBase: () => string) {
   let BASE: string;
   beforeAll(() => {
     BASE = getBase();
@@ -210,7 +214,7 @@ function defineClientTests(getBase: () => string) {
     }
   });
 
-  it('form submission adds user', async () => {
+  it.sequential('form submission adds user', async () => {
     const page = await newPage();
 
     try {
@@ -233,7 +237,7 @@ function defineClientTests(getBase: () => string) {
     }
   });
 
-  it('navigate to newly added user detail', async () => {
+  it.sequential('navigate to newly added user detail', async () => {
     const page = await newPage();
 
     try {
@@ -461,6 +465,10 @@ function defineClientTests(getBase: () => string) {
 }
 
 function defineIslandTests(getBase: () => string) {
+  describe.concurrent('shared island behavior', () => registerIslandTests(getBase));
+}
+
+function registerIslandTests(getBase: () => string) {
   let BASE: string;
   beforeAll(() => {
     BASE = getBase();
@@ -477,7 +485,13 @@ function defineIslandTests(getBase: () => string) {
     const page = await newPage();
     try {
       await page.goto(BASE + '/blog');
-      await page.waitForSelector('[data-island][data-hydrated="true"]');
+      await page.waitForFunction(() => {
+        const islands = [...document.querySelectorAll('[data-island]')];
+        return (
+          islands.length >= 2 &&
+          islands.every((island) => island.getAttribute('data-hydrated') === 'true')
+        );
+      });
 
       const islands = await page.$$eval('[data-island]', (els) =>
         els.map((el) => ({
@@ -523,7 +537,9 @@ function defineIslandTests(getBase: () => string) {
       await page.waitForSelector('[data-island][data-hydrated="true"]');
 
       await page.click('button:has-text("Add Post")');
-      await page.waitForFunction(() => document.body.textContent?.includes('Title is required'));
+      // The first action can include a cold worker compile under full-suite load. Keep the normal
+      // 10s page timeout for every other assertion, but give this server round-trip more headroom.
+      await page.getByText('Title is required').waitFor({ timeout: 20_000 });
 
       const text = await page.textContent('body');
       expect(text).toContain('Title is required');
@@ -901,7 +917,7 @@ describe('solid-pages client (dev)', () => {
     } finally {
       await page.context().close();
       writeFileSync(counterFile, original);
-      await new Promise((r) => setTimeout(r, 500));
+      await waitForServer(`${DEV_BASE}/blog`, 10_000, { expectBody: 'Count:' });
     }
   });
 
@@ -937,8 +953,7 @@ describe('solid-pages client (dev)', () => {
       expect(updatedHtml).toContain('data-island=');
     } finally {
       writeFileSync(islandFile, original);
-      // Wait for restore to be picked up
-      await new Promise((r) => setTimeout(r, 500));
+      await waitForServer(`${DEV_BASE}/blog`, 10_000, { expectBody: '<h1>Blog</h1>' });
     }
   });
 });

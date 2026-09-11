@@ -1,0 +1,37 @@
+/**
+ * VoidZero React Theme - Main Stylesheet
+ * Unified design system for app marketing-style sections
+ *
+ * Layer Architecture (priority low → high):
+ * @layer base      - Shared resets and base element styles
+ * @layer marketing - Marketing typography and components
+ * (unlayered)      - Tailwind utilities (highest priority)
+ */
+
+/* Define explicit cascade layer order (left = lowest priority) */
+@layer base, marketing;
+
+/* 1. Design tokens and Tailwind */
+@import './tokens.css';
+
+/* 2. Shared foundation (@layer base) */
+@import './base.css';
+
+/* 3. Marketing styles (@layer marketing) */
+@import './marketing.css';
+
+/* ============================================
+   5. Variant Brand Colors - Light/Dark Mode
+   ============================================ */
+
+/* Default (VoidZero/Vite+) */
+:root {
+  --color-brand: var(--color-electric);
+}
+
+/* User's dark mode - system preference */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-brand: var(--color-vite);
+  }
+}

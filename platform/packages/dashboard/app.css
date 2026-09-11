@@ -1,0 +1,51 @@
+@import '@voidcloud/ui/styles.css';
+
+@source '../ui/src/**/*.{ts,tsx}';
+
+/* Navigation progress bar */
+.nav-progress {
+  position: fixed;
+  top: 0;
+  left: 0;
+  height: 2px;
+  width: 100%;
+  z-index: 50;
+  background: var(--color-brand);
+  transform-origin: left;
+  pointer-events: none;
+  opacity: 0;
+}
+
+.nav-progress.loading {
+  animation: nav-grow 8s cubic-bezier(0.1, 0.5, 0, 1) forwards;
+}
+
+.nav-progress.completing {
+  animation: nav-complete 0.4s ease-out forwards;
+}
+
+@keyframes nav-grow {
+  from {
+    transform: scaleX(0);
+    opacity: 1;
+  }
+  to {
+    transform: scaleX(0.9);
+    opacity: 1;
+  }
+}
+
+@keyframes nav-complete {
+  0% {
+    transform: scaleX(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scaleX(1);
+    opacity: 1;
+  }
+  100% {
+    transform: scaleX(1);
+    opacity: 0;
+  }
+}

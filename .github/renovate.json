@@ -1,4 +1,11 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["github>Boshen/renovate"]
+  "extends": ["github>Boshen/renovate"],
+  "packageRules": [
+    {
+      "description": "Keep Hono aligned across the SDK and hosted platform; dashboard typechecking has regressed when the versions diverge.",
+      "matchPackageNames": ["hono"],
+      "enabled": false
+    }
+  ]
 }

@@ -3,12 +3,14 @@ export const SCAFFOLD_GITIGNORE_LINES = [
   'dist',
   '.void',
   '.wrangler',
+  '.env.local',
+  '.env.*.local',
   '*.tsbuildinfo',
   '.DS_Store',
 ] as const;
 
 export type ScaffoldFramework = 'react' | 'vue' | 'svelte' | 'solid';
-export type ScaffoldStarterMode = 'sqlite' | 'postgresql' | 'static';
+export type ScaffoldStarterMode = 'sqlite' | 'postgresql' | 'mysql' | 'static';
 export type ScaffoldToolchain = 'vite-plus' | 'vite';
 
 export const SCAFFOLD_BASE_DEPENDENCIES = {
@@ -17,7 +19,7 @@ export const SCAFFOLD_BASE_DEPENDENCIES = {
 
 export const SCAFFOLD_BASE_DEV_DEPENDENCIES = {
   vite: '^8.0.10',
-  typescript: '^5.9.3',
+  typescript: '^7.0.2',
 } as const;
 
 export const SCAFFOLD_VITE_PLUS_DEV_DEPENDENCIES = {
@@ -38,9 +40,7 @@ export const SCAFFOLD_TOOLCHAIN_OPTIONS = [
 ] as const;
 
 const REACT_SCAFFOLD_COMPILER_DEV_DEPENDENCIES = {
-  '@rolldown/plugin-babel': '^0.2.3',
-  '@vitejs/plugin-react': '^6.0.1',
-  'babel-plugin-react-compiler': '^1.0.0',
+  'oxc-transform-react': '^0.149.0',
 } as const;
 
 export const SCAFFOLD_FRAMEWORK_OPTIONS = [
@@ -204,19 +204,14 @@ export function createPagesStarterTemplate(options: {
 
 function getViteConfig(framework: ScaffoldFramework, config: ScaffoldFrameworkConfig): string {
   if (framework === 'react') {
-    return `import babel from "@rolldown/plugin-babel";
-import { reactCompilerPreset } from "@vitejs/plugin-react";
-import { defineConfig } from "vite";
+    return `import { defineConfig } from "vite";
 import { voidPlugin } from "void";
 import { ${config.adapterImport} } from "${config.adapterPlugin}";
 
 export default defineConfig({
   plugins: [
-    babel({
-      presets: [reactCompilerPreset()],
-    }),
     voidPlugin(),
-    ${config.adapterImport}(),
+    ${config.adapterImport}({ react: { compiler: true } }),
   ],
 });
 `;
@@ -250,7 +245,8 @@ function getHelloRoute(
   frameworkLabel: string,
   starterMode: Exclude<ScaffoldStarterMode, 'static'>,
 ): string {
-  const databaseLabel = starterMode === 'postgresql' ? 'PostgreSQL' : 'D1';
+  const databaseLabel =
+    starterMode === 'postgresql' ? 'PostgreSQL' : starterMode === 'mysql' ? 'MySQL' : 'D1';
   return `import { defineHandler } from "void";
 
 export const GET = defineHandler(() => {
@@ -269,6 +265,17 @@ function getSchemaFile(starterMode: Exclude<ScaffoldStarterMode, 'static'>): str
 
 export const messages = pgTable("messages", {
   id: serial("id").primaryKey(),
+  text: text("text").notNull(),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+});
+`;
+  }
+
+  if (starterMode === 'mysql') {
+    return `import { int, mysqlTable, text, timestamp } from "void/schema-mysql";
+
+export const messages = mysqlTable("messages", {
+  id: int("id").autoincrement().primaryKey(),
   text: text("text").notNull(),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });

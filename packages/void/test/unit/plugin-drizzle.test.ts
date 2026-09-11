@@ -70,6 +70,30 @@ describe('drizzlePlugin db typing generation', () => {
     );
   });
 
+  it('generates MySQL database types from the dedicated runtime entry', () => {
+    const root = createProjectRoot();
+
+    drizzlePlugin(root, false, 'mysql');
+
+    const dts = readFileSync(join(root, '.void', 'db.d.ts'), 'utf8');
+    expect(dts).toContain('import type { MySql2Database } from "void/_db-mysql";');
+    expect(dts).toContain('export type { MySql2Database } from "void/_db-mysql";');
+  });
+
+  it('uses the required default mode for MySQL databases with a schema', () => {
+    const root = createProjectRoot();
+    const plugin = drizzlePlugin(root, false, 'mysql');
+    const load = getHookHandler(plugin.load) as (this: object, id: string) => string;
+
+    const code = load.call({}, '\0virtual:void-db');
+
+    expect(code).toContain(
+      'drizzle(getRuntimeBinding("DATABASE_URL"), { schema, mode: "default" })',
+    );
+    expect(code).toContain('drizzle(getConnectionString(), { schema, mode: "default" })');
+    expect(code).toContain('drizzle(connectionString, { schema, mode: "default" })');
+  });
+
   it('serves schema imports of void/db from an operator-only virtual module', () => {
     const root = createProjectRoot();
     const plugin = drizzlePlugin(root, false, 'sqlite');

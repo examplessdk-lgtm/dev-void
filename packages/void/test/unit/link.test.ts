@@ -94,6 +94,7 @@ describe('runLink', () => {
         'Linking to an existing project. Running `void deploy` will overwrite the current deployment of existing-app.void.app. Continue?',
     });
     expect(JSON.parse(readFileSync(join(root, '.void', 'project.json'), 'utf-8'))).toEqual({
+      platform: 'void',
       projectId: 'proj_1',
       slug: 'existing-app',
     });

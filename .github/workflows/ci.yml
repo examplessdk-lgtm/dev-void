@@ -17,6 +17,7 @@ permissions: {}
 
 jobs:
   test:
+    name: test (${{ matrix.os }}, ${{ matrix.shard }})
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
@@ -29,6 +30,9 @@ jobs:
         # Windows runs on main pushes and on PRs labeled "test: windows",
         # unless a reusable workflow caller explicitly disables it.
         os: '${{ (((github.event_name == ''push'' && startsWith(github.ref, ''refs/heads/'')) || contains(github.event.pull_request.labels.*.name, ''test: windows'')) && !(github.event_name == ''workflow_call'' && inputs.skip_windows)) && fromJSON(''["blacksmith-4vcpu-ubuntu-2404","windows-latest"]'') || fromJSON(''["blacksmith-4vcpu-ubuntu-2404"]'') }}'
+        # Unit tests and two integration shards run on separate runners. Each integration
+        # shard builds its own checkout first, so generated playground state is never shared.
+        shard: [unit, '1/2', '2/2']
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
@@ -66,13 +70,31 @@ jobs:
           node-version-file: .node-version
           cache: true
 
-      - run: vp exec playwright install --with-deps chromium
-        if: ${{ !contains(matrix.os, 'windows') }}
-
+      # Both runner images already provide Chromium's shared-library dependencies. Avoid
+      # `--with-deps` here: it runs apt on Linux and makes test startup depend on the external
+      # Ubuntu mirrors even though no OS packages are needed by these runners.
       - run: vp exec playwright install chromium
-        if: ${{ contains(matrix.os, 'windows') }}
+        if: ${{ matrix.shard != 'unit' }}
 
-      - run: vp run test:all
+      - run: vp check
+        if: ${{ matrix.shard == 'unit' }}
+
+      # Unit suites import the core package through its public `void/*` exports and exercise
+      # generated CLI assets, so they need the core build even though they skip playground builds.
+      - run: vp run build:core
+        if: ${{ matrix.shard == 'unit' }}
+
+      - run: vp test run --project unit
+        if: ${{ matrix.shard == 'unit' }}
+
+      - run: vp run build:all
+        if: ${{ matrix.shard != 'unit' }}
+
+      - run: vp run check
+        if: ${{ matrix.shard == '1/2' }}
+
+      - run: vp test run --project parallel-integration --shard=${{ matrix.shard }}
+        if: ${{ matrix.shard != 'unit' }}
 
   # Credentialed live Cloudflare deploy e2e, ISOLATED from `test` so the account token exists ONLY in
   # a job bound to the `cloudflare-e2e` GitHub Environment. That environment's deployment branch policy

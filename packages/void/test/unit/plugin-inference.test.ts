@@ -449,7 +449,7 @@ describe('detectFramework', () => {
     }
   });
 
-  it('fails client builds that import void/live', () => {
+  it('fails client builds that import server-only state runtimes', () => {
     const root = createTempRoot();
     writeCompatConfig(root);
     const cwd = vi.spyOn(process, 'cwd').mockReturnValue(root);
@@ -474,6 +474,17 @@ describe('detectFramework', () => {
           'void/live',
         ),
       ).toThrow('void/live is server-only');
+      expect(() =>
+        resolveId.call(
+          {
+            environment: { name: 'client' },
+            error(message: string): never {
+              throw new Error(message);
+            },
+          },
+          'void/durable',
+        ),
+      ).toThrow('void/durable is server-only');
     } finally {
       cwd.mockRestore();
     }
@@ -592,6 +603,53 @@ describe('detectFramework', () => {
       expect(entry).toContain('VoidLiveStreamDurableObject');
       expect(entry).toContain('export { VoidLiveStreamDurableObject };');
       expect(entry).toContain('__setLiveBindingName("VOID_LIVE");');
+    } finally {
+      cwd.mockRestore();
+    }
+  });
+
+  it('exports convention-based typed Durable Objects from the worker entry', () => {
+    const root = createTempRoot();
+    mkdirSync(join(root, 'routes'), { recursive: true });
+    mkdirSync(join(root, 'durable-objects'), { recursive: true });
+    writeFileSync(join(root, 'routes', 'index.ts'), 'export const GET = () => new Response("ok");');
+    writeFileSync(
+      join(root, 'durable-objects', 'shopping-cart.ts'),
+      'export default { class: class ShoppingCart {}, __bind() {} }',
+    );
+    const cwd = vi.spyOn(process, 'cwd').mockReturnValue(root);
+
+    try {
+      voidPlugin();
+      const entry = readFileSync(join(root, '.void', 'entry.ts'), 'utf-8');
+      expect(entry).toContain('import __voidDurableObject0 from');
+      expect(entry).toContain('/durable-objects/shopping-cart.ts');
+      expect(entry).toContain('__voidDurableObject0.__bind("SHOPPING_CART")');
+      expect(entry).toContain(
+        'export const ShoppingCartDurableObject = __voidDurableObject0.class',
+      );
+    } finally {
+      cwd.mockRestore();
+    }
+  });
+
+  it('rejects typed Durable Object modules in framework adapter mode', () => {
+    const root = createTempRoot();
+    mkdirSync(join(root, 'durable-objects'), { recursive: true });
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ dependencies: { '@sveltejs/kit': '^2.0.0' } }),
+    );
+    writeFileSync(
+      join(root, 'durable-objects', 'counter.ts'),
+      'export default { class: class Counter {}, __bind() {} }',
+    );
+    const cwd = vi.spyOn(process, 'cwd').mockReturnValue(root);
+
+    try {
+      expect(() => voidPlugin()).toThrow(
+        'durable-objects/ is currently supported in Void apps only',
+      );
     } finally {
       cwd.mockRestore();
     }

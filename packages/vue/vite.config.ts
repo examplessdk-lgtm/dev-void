@@ -13,6 +13,7 @@ export default defineConfig({
     dts: true,
     clean: true,
     deps: {
+      resolveDepSubpath: true,
       neverBundle: ['vue', 'vue/server-renderer', 'vite', 'void', 'void/*', '@vitejs/plugin-vue'],
     },
   },

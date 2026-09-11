@@ -28,6 +28,7 @@ const mockConfirm = vi.fn();
 const mockText = vi.fn();
 const mockNote = vi.fn();
 const mockOutro = vi.fn();
+const mockLogWarn = vi.fn();
 const mockGetToken = vi.fn();
 const mockRunLogin = vi.fn();
 const mockSaveToken = vi.fn();
@@ -49,7 +50,13 @@ vi.mock('@clack/prompts', () => ({
   intro: vi.fn(),
   outro: (...args: Array<unknown>) => mockOutro(...args),
   note: (...args: Array<unknown>) => mockNote(...args),
-  log: { success: vi.fn(), warn: vi.fn(), error: vi.fn(), info: vi.fn(), step: vi.fn() },
+  log: {
+    success: vi.fn(),
+    warn: (...args: Array<unknown>) => mockLogWarn(...args),
+    error: vi.fn(),
+    info: vi.fn(),
+    step: vi.fn(),
+  },
   confirm: (...args: Array<unknown>) => mockConfirm(...args),
   select: (...args: Array<unknown>) => mockSelect(...args),
   text: (...args: Array<unknown>) => mockText(...args),
@@ -148,6 +155,46 @@ function listMigrationSqlFiles(root: string): Array<string> {
     .sort();
 }
 
+function writeExistingAstroProject(root: string): void {
+  writeFileSync(
+    join(root, 'package.json'),
+    JSON.stringify(
+      { name: 'existing-astro-app', private: true, dependencies: { astro: '^5.0.0' } },
+      null,
+      2,
+    ) + '\n',
+  );
+}
+
+function selectCloudflareDuringInit(accountId?: string): void {
+  mockSelect.mockImplementation((options: { message?: string }) => {
+    switch (options.message) {
+      case 'Choose a database setup for this project:':
+        return 'none';
+      case 'Could not detect your coding agent. Which one are you using?':
+        return 'generic';
+      case 'Where should this project deploy?':
+        return 'cloudflare';
+      case 'Choose a Cloudflare account:':
+        return accountId;
+      default:
+        return undefined;
+    }
+  });
+}
+
+function wranglerWhoamiResult(accounts: Array<{ id: string; name: string }>): {
+  status: number;
+  stdout: string;
+  stderr: string;
+} {
+  return {
+    status: 0,
+    stdout: JSON.stringify({ loggedIn: true, accounts }),
+    stderr: '',
+  };
+}
+
 afterEach(() => {
   mockSpawnSync.mockReset();
   mockSelect.mockReset();
@@ -155,6 +202,7 @@ afterEach(() => {
   mockText.mockReset();
   mockNote.mockReset();
   mockOutro.mockReset();
+  mockLogWarn.mockReset();
   mockGetToken.mockReset();
   mockRunLogin.mockReset();
   mockSaveToken.mockReset();
@@ -164,6 +212,9 @@ afterEach(() => {
 });
 
 beforeEach(() => {
+  mockSelect.mockImplementation((options: { message?: string }) =>
+    options.message === 'Where should this project deploy?' ? 'void' : undefined,
+  );
   mockSpawnSync.mockImplementation((command, args, options) => {
     if (
       command === process.execPath &&
@@ -997,7 +1048,7 @@ describe('isScaffoldableEmptyProject', () => {
               '@void/svelte': '^0.2.3',
               vite: '^8.0.10',
               'vite-plus': '^0.1.21',
-              typescript: '^5.9.3',
+              typescript: '^7.0.2',
             },
           },
           null,
@@ -1099,20 +1150,20 @@ describe('isScaffoldableEmptyProject', () => {
       expect(pkg.devDependencies.void).toBeDefined();
       expect(pkg.devDependencies.typescript).toBeDefined();
       expect(pkg.devDependencies['@void/react']).toBeDefined();
-      expect(pkg.devDependencies['@rolldown/plugin-babel']).toBeDefined();
       expect(pkg.devDependencies['@types/react']).toBeDefined();
       expect(pkg.devDependencies['@types/react-dom']).toBeDefined();
-      expect(pkg.devDependencies['@vitejs/plugin-react']).toBeDefined();
-      expect(pkg.devDependencies['babel-plugin-react-compiler']).toBeDefined();
+      expect(pkg.devDependencies['oxc-transform-react']).toBeDefined();
+      expect(pkg.devDependencies['@rolldown/plugin-babel']).toBeUndefined();
+      expect(pkg.devDependencies['@vitejs/plugin-react']).toBeUndefined();
+      expect(pkg.devDependencies['babel-plugin-react-compiler']).toBeUndefined();
       expect(pkg.scripts.dev).toBe('vp dev');
       expect(pkg.scripts.build).toBe('vp build');
       expect(pkg.scripts.preview).toBe('vp preview');
 
       const reactViteConfig = readFileSync(join(root, 'vite.config.ts'), 'utf-8');
-      expect(reactViteConfig).toContain('from "@rolldown/plugin-babel"');
       expect(reactViteConfig).toContain('from "@void/react/plugin"');
-      expect(reactViteConfig).toContain('reactCompilerPreset()');
-      expect(reactViteConfig).toContain('voidReact()');
+      expect(reactViteConfig).toContain('voidReact({ react: { compiler: true } })');
+      expect(reactViteConfig).not.toContain('babel');
       expect(readFileSync(join(root, 'pages', 'index.tsx'), 'utf-8')).toContain('Welcome to Void');
       expect(readFileSync(join(root, 'pages', 'index.server.ts'), 'utf-8')).toContain(
         'import { messages } from "@schema";',
@@ -1249,6 +1300,11 @@ describe('isScaffoldableEmptyProject', () => {
           hint: 'Scaffolds the same starter with PostgreSQL, a generated migration, a seed file, and writes "database": "pg" to void.json.',
         },
         {
+          value: 'mysql',
+          label: 'MySQL',
+          hint: 'Scaffolds the same starter with MySQL, a generated migration, a seed file, and writes "database": "mysql" to void.json.',
+        },
+        {
           value: 'static',
           label: 'Static Pages',
           hint: 'No database or server starter files yet. Good for content sites; add Void features later.',
@@ -1278,7 +1334,7 @@ describe('isScaffoldableEmptyProject', () => {
       expect(pkg.devDependencies.void).toBeDefined();
       expect(pkg.devDependencies['@void/react']).toBeDefined();
       expect(pkg.devDependencies['vite-plus']).toBe('^0.1.21');
-      expect(pkg.packageManager).toBe('pnpm@11.0.9');
+      expect(pkg.packageManager).toBe('pnpm@^12.4.1');
       expect(pkg.scripts.dev).toBe('vp dev');
 
       expect(readFileSync(join(root, 'pages', 'index.tsx'), 'utf-8')).toContain(
@@ -1371,7 +1427,9 @@ describe('isScaffoldableEmptyProject', () => {
       expect(pkg.scripts.dev).toBe('vp dev');
       expect(pkg.devDependencies['vite-plus']).toBe('^0.1.21');
       expect(pkg.devDependencies.void).toBe('^0.8.9');
-      expect(readFileSync(join(root, 'vite.config.ts'), 'utf-8')).toContain('voidReact()');
+      expect(readFileSync(join(root, 'vite.config.ts'), 'utf-8')).toContain(
+        'voidReact({ react: { compiler: true } })',
+      );
       expectPnpmAllowBuilds(root);
 
       expect(mockSelect.mock.calls[0]?.[0].message).toBe('Choose a Pages scaffold toolchain:');
@@ -1526,8 +1584,8 @@ describe('isScaffoldableEmptyProject', () => {
       expect(yaml).toContain("VOID_API_URL: ${{ vars.VOID_API_URL || 'https://api.void.cloud' }}");
       // npm project → npx runner, deploy passes the project slug (the only step
       // that runs void).
-      expect(yaml).toContain('npx void deploy --project "$VOID_PROJECT"');
-      expect(yaml.match(/deploy --project "\$VOID_PROJECT"/g)).toHaveLength(1);
+      expect(yaml).toContain('npx void deploy --platform void --project "$VOID_PROJECT"');
+      expect(yaml.match(/deploy --platform void --project "\$VOID_PROJECT"/g)).toHaveLength(1);
       // Latest-push-wins concurrency keyed by repo + ref (no env context, which
       // is unavailable to workflow-level concurrency).
       expect(yaml).toContain('concurrency:');
@@ -1607,6 +1665,7 @@ describe('isScaffoldableEmptyProject', () => {
       mockSelect
         .mockResolvedValueOnce('none')
         .mockResolvedValueOnce('generic')
+        .mockResolvedValueOnce('void')
         .mockResolvedValueOnce('proj_789');
       // GitHub Actions confirm → true; deploy-setup link confirm → true;
       // overwrite-existing-project confirm → true.
@@ -1619,6 +1678,7 @@ describe('isScaffoldableEmptyProject', () => {
 
       // The link was written...
       expect(JSON.parse(readFileSync(join(root, '.void', 'project.json'), 'utf-8'))).toEqual({
+        platform: 'void',
         projectId: 'proj_789',
         slug: 'linked-app',
       });
@@ -1666,7 +1726,7 @@ jobs:
       expect(workflows).toEqual(['deploy.yml', 'void-deploy.yml']);
       const oidc = readFileSync(join(root, '.github', 'workflows', 'void-deploy.yml'), 'utf-8');
       expect(oidc).toContain('name: Deploy to Void');
-      expect(oidc).toContain('npx void deploy --project "$VOID_PROJECT"');
+      expect(oidc).toContain('npx void deploy --platform void --project "$VOID_PROJECT"');
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -2038,6 +2098,8 @@ export default config;
       expect(gitignore).toContain('node_modules');
       expect(gitignore).toContain('.void');
       expect(gitignore).toContain('.wrangler');
+      expect(gitignore).toContain('.env.local');
+      expect(gitignore).toContain('.env.*.local');
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -2054,6 +2116,8 @@ export default config;
       expect(gitignore).toContain('custom-cache');
       expect(gitignore).toContain('.void');
       expect(gitignore).toContain('.wrangler');
+      expect(gitignore).toContain('.env.local');
+      expect(gitignore).toContain('.env.*.local');
       expect(gitignore.match(/^node_modules$/gm)).toHaveLength(1);
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -2298,16 +2362,16 @@ export default config;
       expect(pkg.devDependencies['vite-plus']).toBe('^0.1.21');
       expect(pkg.devDependencies.void).toBe('^0.2.3');
       expect(pkg.devDependencies['@void/react']).toBe('^0.2.3');
-      expect(pkg.devDependencies['@rolldown/plugin-babel']).toBe('^0.2.3');
-      expect(pkg.devDependencies['@vitejs/plugin-react']).toBe('^6.0.1');
-      expect(pkg.devDependencies['babel-plugin-react-compiler']).toBe('^1.0.0');
+      expect(pkg.devDependencies['oxc-transform-react']).toBe('^0.149.0');
+      expect(pkg.devDependencies['@rolldown/plugin-babel']).toBeUndefined();
+      expect(pkg.devDependencies['@vitejs/plugin-react']).toBeUndefined();
+      expect(pkg.devDependencies['babel-plugin-react-compiler']).toBeUndefined();
       expectPnpmAllowBuilds(root);
 
       const reactViteConfig = readFileSync(join(root, 'vite.config.ts'), 'utf-8');
-      expect(reactViteConfig).toContain('from "@rolldown/plugin-babel"');
       expect(reactViteConfig).toContain('from "@void/react/plugin"');
-      expect(reactViteConfig).toContain('reactCompilerPreset()');
-      expect(reactViteConfig).toContain('voidReact()');
+      expect(reactViteConfig).toContain('voidReact({ react: { compiler: true } })');
+      expect(reactViteConfig).not.toContain('babel');
 
       expect(mockSelect.mock.calls[0]?.[0].message).toBe('Choose a Pages scaffold toolchain:');
       expect(mockSelect.mock.calls[0]?.[0].initialValue).toBe('vite-plus');
@@ -2417,6 +2481,7 @@ export default config;
         .mockResolvedValueOnce('react')
         .mockResolvedValueOnce('sqlite')
         .mockResolvedValueOnce('generic')
+        .mockResolvedValueOnce('void')
         .mockResolvedValueOnce('github');
       mockConfirm.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
       mockText.mockResolvedValueOnce('my-live-app');
@@ -2432,6 +2497,7 @@ export default config;
       expect(mockListProjects).toHaveBeenCalledOnce();
       expect(mockCreateProject).toHaveBeenCalledWith('my-live-app');
       expect(JSON.parse(readFileSync(join(root, '.void', 'project.json'), 'utf-8'))).toEqual({
+        platform: 'void',
         projectId: 'proj_live',
         slug: 'my-live-app',
       });
@@ -2448,6 +2514,7 @@ export default config;
         .mockResolvedValueOnce('react')
         .mockResolvedValueOnce('sqlite')
         .mockResolvedValueOnce('generic')
+        .mockResolvedValueOnce('void')
         .mockResolvedValueOnce('github');
       mockConfirm.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
       mockText.mockResolvedValueOnce('my-live-app');
@@ -2488,6 +2555,7 @@ export default config;
         .mockResolvedValueOnce('react')
         .mockResolvedValueOnce('sqlite')
         .mockResolvedValueOnce('generic')
+        .mockResolvedValueOnce('void')
         .mockResolvedValueOnce('proj_456');
       mockConfirm
         .mockResolvedValueOnce(false)
@@ -2507,9 +2575,249 @@ export default config;
       expect(mockSaveToken).not.toHaveBeenCalled();
       expect(mockCreateProject).not.toHaveBeenCalled();
       expect(JSON.parse(readFileSync(join(root, '.void', 'project.json'), 'utf-8'))).toEqual({
+        platform: 'void',
         projectId: 'proj_456',
         slug: 'existing-app',
       });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('defaults deployment setup to Cloudflare and skips Void-specific setup', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-init-'));
+    try {
+      writeExistingAstroProject(root);
+      selectCloudflareDuringInit();
+      mockSpawnSync.mockImplementation((_command, args) =>
+        Array.isArray(args) && args.includes('whoami')
+          ? { status: 1, stdout: '', stderr: 'Not authenticated' }
+          : { status: 0, stdout: '', stderr: '' },
+      );
+      mockConfirm.mockImplementation((options: { message?: string }) =>
+        options.message === 'Log in to Cloudflare with Wrangler now?' ? false : undefined,
+      );
+
+      await runInitCommand(root);
+
+      const platformPrompt = mockSelect.mock.calls.find(
+        ([options]) => options.message === 'Where should this project deploy?',
+      )?.[0];
+      expect(platformPrompt).toMatchObject({ initialValue: 'cloudflare' });
+      expect(JSON.parse(readFileSync(join(root, '.void', 'project.json'), 'utf-8'))).toEqual({
+        platform: 'cloudflare',
+      });
+      expect(JSON.parse(readFileSync(join(root, 'wrangler.jsonc'), 'utf-8'))).toEqual({
+        compatibility_date: getTodayCompatDate(),
+        compatibility_flags: ['nodejs_als'],
+      });
+      expect(mockSpawnSync).toHaveBeenCalledWith(
+        process.execPath,
+        expect.arrayContaining(['whoami', '--json', '-c', join(root, 'wrangler.jsonc')]),
+        expect.objectContaining({ cwd: root, stdio: ['ignore', 'pipe', 'pipe'] }),
+      );
+      expect(mockSpawnSync).not.toHaveBeenCalledWith(
+        process.execPath,
+        expect.arrayContaining(['login']),
+        expect.anything(),
+      );
+      expect(mockNote).toHaveBeenCalledWith(
+        expect.stringContaining('Run `wrangler login`'),
+        'Cloudflare deployment',
+      );
+      expect(mockGetToken).not.toHaveBeenCalled();
+      expect(mockListProjects).not.toHaveBeenCalled();
+      expect(existsSync(join(root, '.github', 'workflows', 'void-deploy.yml'))).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('stores the only authenticated Cloudflare account and preserves Wrangler JSONC', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-init-'));
+    try {
+      writeExistingAstroProject(root);
+      writeFileSync(
+        join(root, 'wrangler.jsonc'),
+        '{\n  // Keep this comment.\n  "name": "existing-worker",\n  "vars": { "EXAMPLE": "yes" }\n}\n',
+      );
+      selectCloudflareDuringInit();
+      mockSpawnSync.mockImplementation((_command, args) =>
+        Array.isArray(args) && args.includes('whoami')
+          ? wranglerWhoamiResult([{ id: 'account-1', name: 'My account' }])
+          : { status: 0, stdout: '', stderr: '' },
+      );
+
+      await runInitCommand(root);
+
+      const wrangler = readFileSync(join(root, 'wrangler.jsonc'), 'utf-8');
+      expect(wrangler).toContain('// Keep this comment.');
+      expect(wrangler).toContain('"name": "existing-worker"');
+      expect(wrangler).toContain('"EXAMPLE": "yes"');
+      expect(wrangler).toContain('"compatibility_date":');
+      expect(wrangler).toContain('"account_id": "account-1"');
+      expect(mockConfirm).not.toHaveBeenCalledWith(
+        expect.objectContaining({ message: 'Log in to Cloudflare with Wrangler now?' }),
+      );
+      expect(mockSelect).not.toHaveBeenCalledWith(
+        expect.objectContaining({ message: 'Choose a Cloudflare account:' }),
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('logs in with Wrangler, rereads accounts, and stores the selected account', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-init-'));
+    try {
+      writeExistingAstroProject(root);
+      selectCloudflareDuringInit('account-2');
+      mockConfirm.mockImplementation((options: { message?: string }) =>
+        options.message === 'Log in to Cloudflare with Wrangler now?' ? true : undefined,
+      );
+      let whoamiCalls = 0;
+      mockSpawnSync.mockImplementation((_command, args) => {
+        if (Array.isArray(args) && args.includes('whoami')) {
+          whoamiCalls++;
+          return whoamiCalls === 1
+            ? { status: 1, stdout: '', stderr: 'Not authenticated' }
+            : wranglerWhoamiResult([
+                { id: 'account-1', name: 'First account' },
+                { id: 'account-2', name: 'Second account' },
+              ]);
+        }
+        return { status: 0, stdout: '', stderr: '' };
+      });
+
+      await runInitCommand(root);
+
+      expect(whoamiCalls).toBe(2);
+      expect(mockSpawnSync).toHaveBeenCalledWith(
+        process.execPath,
+        expect.arrayContaining(['login']),
+        expect.objectContaining({ cwd: root, stdio: 'inherit' }),
+      );
+      const accountPrompt = mockSelect.mock.calls.find(
+        ([options]) => options.message === 'Choose a Cloudflare account:',
+      )?.[0];
+      expect(accountPrompt).toMatchObject({ initialValue: 'account-1' });
+      expect(accountPrompt.options).toEqual([
+        { value: 'account-1', label: 'First account', hint: 'account-1' },
+        { value: 'account-2', label: 'Second account', hint: 'account-2' },
+      ]);
+      expect(readFileSync(join(root, 'wrangler.jsonc'), 'utf-8')).toContain(
+        '"account_id": "account-2"',
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps an existing valid Cloudflare account without asking again', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-init-'));
+    try {
+      writeExistingAstroProject(root);
+      writeFileSync(
+        join(root, 'wrangler.jsonc'),
+        JSON.stringify(
+          { compatibility_date: '2026-01-02', account_id: 'account-2', name: 'my-worker' },
+          null,
+          2,
+        ) + '\n',
+      );
+      selectCloudflareDuringInit('account-1');
+      mockSpawnSync.mockImplementation((_command, args) =>
+        Array.isArray(args) && args.includes('whoami')
+          ? wranglerWhoamiResult([
+              { id: 'account-1', name: 'First account' },
+              { id: 'account-2', name: 'Second account' },
+            ])
+          : { status: 0, stdout: '', stderr: '' },
+      );
+
+      await runInitCommand(root);
+
+      expect(mockSelect).not.toHaveBeenCalledWith(
+        expect.objectContaining({ message: 'Choose a Cloudflare account:' }),
+      );
+      expect(JSON.parse(readFileSync(join(root, 'wrangler.jsonc'), 'utf-8'))).toEqual({
+        compatibility_date: '2026-01-02',
+        account_id: 'account-2',
+        name: 'my-worker',
+        compatibility_flags: ['nodejs_als'],
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('continues without an account when Wrangler login fails', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-init-'));
+    try {
+      writeExistingAstroProject(root);
+      selectCloudflareDuringInit();
+      mockConfirm.mockImplementation((options: { message?: string }) =>
+        options.message === 'Log in to Cloudflare with Wrangler now?' ? true : undefined,
+      );
+      mockSpawnSync.mockImplementation((_command, args) =>
+        Array.isArray(args) && args.includes('login')
+          ? { status: 1, stdout: '', stderr: 'Login failed' }
+          : Array.isArray(args) && args.includes('whoami')
+            ? { status: 1, stdout: '', stderr: 'Not authenticated' }
+            : { status: 0, stdout: '', stderr: '' },
+      );
+
+      await runInitCommand(root);
+
+      expect(JSON.parse(readFileSync(join(root, 'wrangler.jsonc'), 'utf-8'))).toEqual({
+        compatibility_date: getTodayCompatDate(),
+        compatibility_flags: ['nodejs_als'],
+      });
+      expect(
+        mockSpawnSync.mock.calls.filter(
+          ([, args]) => Array.isArray(args) && args.includes('whoami'),
+        ),
+      ).toHaveLength(1);
+      expect(mockLogWarn).toHaveBeenCalledWith(
+        'Wrangler login did not complete. Run `wrangler login`, then rerun `void init`.',
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('persists skipped deployment setup without prompting for Void setup', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-init-'));
+    try {
+      writeFileSync(
+        join(root, 'package.json'),
+        JSON.stringify(
+          { name: 'existing-astro-app', private: true, dependencies: { astro: '^5.0.0' } },
+          null,
+          2,
+        ) + '\n',
+      );
+      mockSelect
+        .mockResolvedValueOnce('none')
+        .mockResolvedValueOnce('generic')
+        .mockResolvedValueOnce('none');
+
+      await runInitCommand(root);
+
+      expect(JSON.parse(readFileSync(join(root, '.void', 'project.json'), 'utf-8'))).toEqual({
+        platform: 'none',
+      });
+      expect(mockGetToken).not.toHaveBeenCalled();
+      expect(mockListProjects).not.toHaveBeenCalled();
+      expect(existsSync(join(root, '.github', 'workflows', 'void-deploy.yml'))).toBe(false);
+      expect(
+        mockSpawnSync.mock.calls.some(
+          ([, args]) => Array.isArray(args) && (args.includes('whoami') || args.includes('login')),
+        ),
+      ).toBe(false);
+      expect(mockConfirm).not.toHaveBeenCalledWith(
+        expect.objectContaining({ message: 'Log in to Cloudflare with Wrangler now?' }),
+      );
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -2552,9 +2860,14 @@ export default config;
           hint: 'Bring your own Postgres via Hyperdrive; best for write-heavy apps, complex queries, or existing infra.',
         },
         {
+          value: 'mysql',
+          label: 'MySQL',
+          hint: 'Bring your own MySQL via Hyperdrive; ideal for existing MySQL infrastructure and compatible providers.',
+        },
+        {
           value: 'none',
           label: 'No Database Yet',
-          hint: 'Skip database setup for now. You can add D1 or PostgreSQL later as your app grows.',
+          hint: 'Skip database setup for now. You can add D1, PostgreSQL, or MySQL later as your app grows.',
         },
       ]);
     } finally {
@@ -4380,7 +4693,7 @@ export default config;
       writeFileSync(
         join(wsroot, 'package.json'),
         JSON.stringify(
-          { name: 'workspace-root', private: true, packageManager: 'pnpm@11.0.9' },
+          { name: 'workspace-root', private: true, packageManager: 'pnpm@^12.4.1' },
           null,
           2,
         ) + '\n',
@@ -4423,7 +4736,7 @@ export default config;
       writeFileSync(
         join(wsroot, 'package.json'),
         JSON.stringify(
-          { name: 'workspace-root', private: true, packageManager: 'pnpm@11.0.9' },
+          { name: 'workspace-root', private: true, packageManager: 'pnpm@^12.4.1' },
           null,
           2,
         ) + '\n',
@@ -4467,7 +4780,7 @@ export default config;
 
       const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf-8'));
       expectPnpmAllowBuilds(root);
-      expect(pkg.packageManager).toBe('pnpm@11.0.9');
+      expect(pkg.packageManager).toBe('pnpm@^12.4.1');
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

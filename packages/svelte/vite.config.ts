@@ -7,6 +7,7 @@ export default defineConfig({
     dts: true,
     clean: true,
     deps: {
+      resolveDepSubpath: true,
       neverBundle: ['svelte', 'svelte/*', 'vite', 'void', 'void/*', '@sveltejs/vite-plugin-svelte'],
     },
   },

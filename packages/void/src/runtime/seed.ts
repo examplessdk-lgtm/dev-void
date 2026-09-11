@@ -1,4 +1,5 @@
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
+import type { MySql2Database } from 'drizzle-orm/mysql2';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 
 export type SqliteSeedContext<TSchema extends Record<string, unknown> = Record<string, never>> = {
@@ -10,6 +11,12 @@ export type SqliteSeedContext<TSchema extends Record<string, unknown> = Record<s
 export type PostgresSeedContext<TSchema extends Record<string, unknown> = Record<string, never>> = {
   dialect: 'postgresql';
   db: NodePgDatabase<TSchema>;
+  schema: TSchema;
+};
+
+export type MySqlSeedContext<TSchema extends Record<string, unknown> = Record<string, never>> = {
+  dialect: 'mysql';
+  db: MySql2Database<TSchema>;
   schema: TSchema;
 };
 
@@ -37,16 +44,24 @@ type SchemaHasPostgresTables<TSchema extends Record<string, unknown>> = SchemaHa
   'pg'
 >;
 
+type SchemaHasMySqlTables<TSchema extends Record<string, unknown>> = SchemaHasTableDialect<
+  TSchema,
+  'mysql'
+>;
+
 type FallbackSeedContext<TSchema extends Record<string, unknown>> =
   SchemaHasSqliteTables<TSchema> extends false
     ? SchemaHasPostgresTables<TSchema> extends false
-      ? SqliteSeedContext<TSchema> | PostgresSeedContext<TSchema>
+      ? SchemaHasMySqlTables<TSchema> extends false
+        ? SqliteSeedContext<TSchema> | PostgresSeedContext<TSchema> | MySqlSeedContext<TSchema>
+        : never
       : never
     : never;
 
 export type SeedContext<TSchema extends Record<string, unknown> = Record<string, never>> =
   | (SchemaHasSqliteTables<TSchema> extends true ? SqliteSeedContext<TSchema> : never)
   | (SchemaHasPostgresTables<TSchema> extends true ? PostgresSeedContext<TSchema> : never)
+  | (SchemaHasMySqlTables<TSchema> extends true ? MySqlSeedContext<TSchema> : never)
   | FallbackSeedContext<TSchema>;
 
 export type SeedFn<TSchema extends Record<string, unknown> = Record<string, never>> = (

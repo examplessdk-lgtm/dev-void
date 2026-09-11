@@ -5,6 +5,16 @@
 // worker bundle acquires unwanted transitive dependencies.
 
 /**
+ * Marks the isolated probes and Vite build run by
+ * `void deploy --platform cloudflare`.
+ *
+ * Kept here so the deploy orchestrator and Vite plugin share one spelling.
+ * The marker is passed through child-process env only; it is never a Worker
+ * binding and is not set for `void dev` or ordinary `vite build` commands.
+ */
+export const CLOUDFLARE_DEPLOY_BUILD_ENV = 'VOID_CLOUDFLARE_DEPLOY_BUILD';
+
+/**
  * Strip shell environment pollution from a Vite `loadEnv(mode, root, '')`
  * result. Vite returns `.env`-file entries AND every `process.env` entry
  * when called with an empty prefix; we want only the keys that came from

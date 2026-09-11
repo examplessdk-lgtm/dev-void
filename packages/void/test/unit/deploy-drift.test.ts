@@ -11,8 +11,10 @@ import {
 import { fileURLToPath } from 'node:url';
 import { join, relative } from 'pathslash';
 import { afterEach, describe, expect, it } from 'vite-plus/test';
-import { hasDeploySchemaDrift } from '../../src/cli/deploy.ts';
+import { generateVoidAuthDrizzleSchema } from '../../src/auth/drizzle.ts';
+import { hasDeploySchemaDrift, validateAuthMigrationSchema } from '../../src/cli/deploy.ts';
 import { writeDrizzleConfig } from '../../src/drizzle/config.ts';
+import { collectMigrations } from '../../src/migrations/collect.ts';
 
 const packageRoot = fileURLToPath(new URL('../..', import.meta.url));
 const drizzleKitBin = join(fileURLToPath(import.meta.resolve('drizzle-kit')), '..', 'bin.cjs');
@@ -68,6 +70,47 @@ describe('hasDeploySchemaDrift', () => {
     expect(hasDeploySchemaDrift(root, 'sqlite')).toBe(true);
     expect(snapshotDir(migrationsDir)).toEqual(before);
     expect(existsSync(join(root, '.void', 'deploy-drift-check'))).toBe(false);
+  });
+
+  it('keeps generated Better Auth tables in the deploy drift check', () => {
+    const root = createTempApp();
+    writeSqliteSchema(root);
+    writeAuthSchema(root);
+    generateMigrations(root, { includeAuth: true });
+
+    expect(hasDeploySchemaDrift(root, 'sqlite')).toBe(false);
+    expect(existsSync(join(root, '.void', 'deploy-drift-check'))).toBe(false);
+  });
+
+  it('checks auth-only migration history without requiring an application schema', () => {
+    const root = createTempApp();
+    writeAuthSchema(root);
+    generateMigrations(root, { includeAuth: true });
+
+    expect(hasDeploySchemaDrift(root, 'sqlite')).toBe(false);
+
+    writeAuthSchema(root, { includeDisplayName: true });
+    expect(hasDeploySchemaDrift(root, 'sqlite')).toBe(true);
+  });
+
+  it('generates SQL that satisfies the production Better Auth deploy gate', async () => {
+    const root = createTempApp();
+    const outDir = join(root, '.void');
+    mkdirSync(outDir, { recursive: true });
+    const generated = generateVoidAuthDrizzleSchema({
+      dialect: 'sqlite',
+      providers: ['email'],
+    }).replace('"void/schema-d1"', '"drizzle-orm/sqlite-core"');
+    writeFileSync(join(outDir, 'better-auth-schema.ts'), generated);
+
+    generateMigrations(root, { includeAuth: true });
+
+    const migrations = collectMigrations(join(root, 'db', 'migrations'));
+    expect(migrations).toHaveLength(1);
+    expect(migrations[0].sql).toContain('CREATE TABLE `user`');
+    expect(migrations[0].sql).toContain('CREATE TABLE `session`');
+    await expect(validateAuthMigrationSchema(root, migrations)).resolves.toBeUndefined();
+    expect(hasDeploySchemaDrift(root, 'sqlite')).toBe(false);
   });
 
   it('spawns drizzle-kit without any wrangler auth credential (it loads user schema code)', () => {
@@ -165,8 +208,31 @@ function writeSqliteSchema(root: string, options?: { includeEmail?: boolean }): 
   );
 }
 
-function generateMigrations(root: string): void {
-  const configPath = writeDrizzleConfig(root, ':memory:');
+function writeAuthSchema(root: string, options?: { includeDisplayName?: boolean }): void {
+  const outDir = join(root, '.void');
+  mkdirSync(outDir, { recursive: true });
+  const extraColumn = options?.includeDisplayName ? '  displayName: text("display_name"),\n' : '';
+  writeFileSync(
+    join(outDir, 'better-auth-schema.ts'),
+    [
+      'import { sqliteTable, text } from "drizzle-orm/sqlite-core";',
+      '',
+      'export const user = sqliteTable("user", {',
+      '  id: text("id").primaryKey().notNull(),',
+      extraColumn.trimEnd(),
+      '});',
+      '',
+    ]
+      .filter(Boolean)
+      .join('\n'),
+  );
+}
+
+function generateMigrations(root: string, options?: { includeAuth?: boolean }): void {
+  const authSchemaPath = join(root, '.void', 'better-auth-schema.ts');
+  const configPath = writeDrizzleConfig(root, ':memory:', 'sqlite', {
+    additionalSchemas: options?.includeAuth ? [authSchemaPath] : undefined,
+  });
   execFileSync(process.execPath, [drizzleKitBin, 'generate', '--config', configPath], {
     cwd: root,
     stdio: 'pipe',

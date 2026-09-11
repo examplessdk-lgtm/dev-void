@@ -3,6 +3,10 @@ import spawn from 'cross-spawn';
 import { join, normalize } from 'pathslash';
 import { afterAll, beforeAll, describe, expect, it } from 'vite-plus/test';
 import {
+  createIsolatedPlayground,
+  type IsolatedPlayground,
+} from '../../../../test/integration-helpers.ts';
+import {
   computeDesiredCloudflareResources,
   parseRootWranglerConfig,
   reconstructExpectedContainers,
@@ -27,13 +31,14 @@ import { readConfig } from '../../src/config.ts';
 // write it back to the path the guard reads, and assert it is REJECTED — real-shape teeth.
 
 const ROOT = join(import.meta.dirname, '..', '..', '..', '..');
-const PLAYGROUND = 'playground/kitchen-sink';
-const PG = join(ROOT, PLAYGROUND);
-const CONFIG_PATH = join(PG, 'wrangler.jsonc');
-const EMITTED_PATH = join(PG, 'dist', 'ssr', 'wrangler.json');
+const SOURCE_PLAYGROUND = 'playground/kitchen-sink';
+let playground: IsolatedPlayground;
+let pg = '';
+let configPath = '';
+let emittedPath = '';
 
 // Real-SHAPED ids the guard treats as genuine (`isRealD1Id` UUID / `isRealKvId` 32-hex). Because
-// `void deploy --provision` writes real ids into the root config before the build, and the build
+// Provisioning writes real ids into the root config before the build, and the build
 // merges the root config into the emitted artifact, an overlaid root `wrangler.jsonc` carrying
 // these ids yields an emitted artifact whose id-bearing bindings match the pinned snapshot — the
 // exact clean-deploy condition the guard authorizes.
@@ -96,25 +101,30 @@ function guardOnTamper(mutate: (config: Record<string, unknown>) => void): {
 } {
   const tampered = cloneEmitted();
   mutate(tampered);
-  writeFileSync(EMITTED_PATH, JSON.stringify(tampered));
+  writeFileSync(emittedPath, JSON.stringify(tampered));
   try {
-    return verifyGeneratedDeployConfig(PG, expectedPayload);
+    return verifyGeneratedDeployConfig(pg, expectedPayload);
   } finally {
-    writeFileSync(EMITTED_PATH, JSON.stringify(pristineEmitted));
+    writeFileSync(emittedPath, JSON.stringify(pristineEmitted));
   }
 }
 
 describe('playground/kitchen-sink --backend cloudflare real-build deploy guard', () => {
   beforeAll(async () => {
+    playground = createIsolatedPlayground(ROOT, SOURCE_PLAYGROUND);
+    pg = playground.root;
+    configPath = join(pg, 'wrangler.jsonc');
+    emittedPath = join(pg, 'dist', 'ssr', 'wrangler.json');
+
     // Snapshot BEFORE any other filesystem work.
-    wranglerOriginal = existsSync(CONFIG_PATH) ? readFileSync(CONFIG_PATH, 'utf-8') : undefined;
+    wranglerOriginal = existsSync(configPath) ? readFileSync(configPath, 'utf-8') : undefined;
     wranglerSnapshotTaken = true;
 
-    writeFileSync(CONFIG_PATH, `${JSON.stringify(OVERLAY_WRANGLER, null, 2)}\n`);
+    writeFileSync(configPath, `${JSON.stringify(OVERLAY_WRANGLER, null, 2)}\n`);
     // Fresh build inputs: drop the previous dist + the stale CF-plugin deploy pointer so the guard
     // trusts only a pointer this build wrote.
-    rmSync(join(PG, 'dist'), { recursive: true, force: true });
-    rmSync(join(PG, '.wrangler', 'deploy', 'config.json'), { force: true });
+    rmSync(join(pg, 'dist'), { recursive: true, force: true });
+    rmSync(join(pg, '.wrangler', 'deploy', 'config.json'), { force: true });
 
     // Reconstruct `expected` EXACTLY as runCloudflareDeploy does (steps 1 + 5/6): the desired set +
     // signals from `computeDesiredCloudflareResources`, and the four snapshots + container set from
@@ -122,10 +132,10 @@ describe('playground/kitchen-sink --backend cloudflare real-build deploy guard',
     // Doing this AFTER the build would let build-time code that rewrote the root config launder a
     // tampered binding set into `expected`, so the FP-safety lock could pass an artifact that
     // production (which snapshots pre-build) would reject.
-    const voidConfig = readConfig(PG);
+    const voidConfig = readConfig(pg);
     const { desired, needsAI, needsSandbox, expectedCrons } =
-      await computeDesiredCloudflareResources(PG, voidConfig, CONFIG_PATH);
-    const rootConfig = parseRootWranglerConfig(CONFIG_PATH);
+      await computeDesiredCloudflareResources(pg, voidConfig, configPath);
+    const rootConfig = parseRootWranglerConfig(configPath);
     expectedPayload = {
       accountId: ACCOUNT_ID,
       workerName: WORKER_NAME,
@@ -134,11 +144,11 @@ describe('playground/kitchen-sink --backend cloudflare real-build deploy guard',
       passthroughIdentitySnapshot: snapshotPassthroughIdentities(rootConfig),
       passthroughRawFields: snapshotPassthroughRawFields(rootConfig),
       needsAI,
-      expectedContainers: reconstructExpectedContainers(voidConfig, PG, rootConfig, needsSandbox),
+      expectedContainers: reconstructExpectedContainers(voidConfig, pg, rootConfig, needsSandbox),
       expectedCrons,
     };
 
-    const result = spawn.sync('vp', ['run', '--filter', `./${PLAYGROUND}`, 'build'], {
+    const result = spawn.sync('vp', ['run', '--filter', `./${playground.workspacePath}`, 'build'], {
       cwd: ROOT,
       encoding: 'utf8',
       maxBuffer: 10 * 1024 * 1024,
@@ -147,25 +157,27 @@ describe('playground/kitchen-sink --backend cloudflare real-build deploy guard',
     buildOutput = `${result.stdout ?? ''}${result.stderr ?? ''}`;
     expect(buildStatus, buildOutput).toBe(0);
 
-    pristineEmitted = JSON.parse(readFileSync(EMITTED_PATH, 'utf-8')) as Record<string, unknown>;
+    pristineEmitted = JSON.parse(readFileSync(emittedPath, 'utf-8')) as Record<string, unknown>;
   });
 
   afterAll(() => {
     if (!wranglerSnapshotTaken) {
+      playground?.cleanup();
       return;
     }
     if (wranglerOriginal === undefined) {
-      rmSync(CONFIG_PATH, { force: true });
+      rmSync(configPath, { force: true });
     } else {
-      writeFileSync(CONFIG_PATH, wranglerOriginal);
+      writeFileSync(configPath, wranglerOriginal);
     }
+    playground.cleanup();
   });
 
   // --- Proof this is a REAL build (not a hand-written facsimile) ---------------------------------
 
   it('emits the CF-plugin deploy pointer the guard follows', () => {
     const pointer = JSON.parse(
-      readFileSync(join(PG, '.wrangler', 'deploy', 'config.json'), 'utf-8'),
+      readFileSync(join(pg, '.wrangler', 'deploy', 'config.json'), 'utf-8'),
     ) as { configPath?: string };
     // The CF plugin writes this with node:path.relative, so the separator is PLATFORM-NATIVE
     // (`..\..\dist\ssr\wrangler.json` on Windows). The guard that consumes it resolves through
@@ -216,7 +228,7 @@ describe('playground/kitchen-sink --backend cloudflare real-build deploy guard',
   // --- Positive: the real emission passes the real guard unmodified (FP-lock) -------------------
 
   it('the real emitted config passes verifyGeneratedDeployConfig unmodified', () => {
-    expect(verifyGeneratedDeployConfig(PG, expectedPayload)).toEqual({ ok: true });
+    expect(verifyGeneratedDeployConfig(pg, expectedPayload)).toEqual({ ok: true });
   });
 
   // --- Negative: the SAME real emission, minimally tampered, is rejected (teeth) -----------------

@@ -211,7 +211,7 @@ export interface EmailCloudflareCommandDeps {
  * apply → write the root wrangler.jsonc. It exists for CI: a non-interactive deploy that
  * finds email not ready prints the checklist and says to run this once, commit
  * wrangler.jsonc, and redeploy. Rules and the catch-all stay wrangler's job — the next
- * `void deploy --backend cloudflare` applies the plan from the written `addresses`.
+ * `void deploy --platform cloudflare` applies the plan from the written `addresses`.
  *
  * `status` is the preflight alone, printed, exit 1 when not ready.
  */
@@ -257,7 +257,7 @@ export async function runEmailCloudflareCommand(
       [
         'email: no Cloudflare account is pinned.',
         'Set `account_id` in your root wrangler.jsonc, or export CLOUDFLARE_ACCOUNT_ID —',
-        'the same pin `void deploy --backend cloudflare` needs.',
+        'the same pin `void deploy --platform cloudflare` needs.',
       ].join('\n'),
     );
   }
@@ -371,7 +371,7 @@ export async function runEmailCloudflareCommand(
   }
   if ((out.patch.addresses ?? []).length > 0) {
     log.info(
-      'Routing rules are created by the next `void deploy --backend cloudflare` (wrangler applies the Email Routing plan on deploy).',
+      'Routing rules are created by the next `void deploy --platform cloudflare` (wrangler applies the Email Routing plan on deploy).',
     );
   }
   log.success(`Email set up on ${pre.domain}.`);

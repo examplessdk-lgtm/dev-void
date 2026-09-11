@@ -72,6 +72,7 @@ export default defineConfig({
   pack: {
     entry: [
       'src/index.ts',
+      'src/database-provider.ts',
       'src/runtime/handler.ts',
       'src/runtime/response.ts',
       'src/runtime/validator.ts',
@@ -96,18 +97,22 @@ export default defineConfig({
       'src/runtime/auth-client-solid.ts',
       'src/runtime/better-auth.ts',
       'src/runtime/better-auth-pg.ts',
+      'src/runtime/better-auth-mysql.ts',
       'src/runtime/env.ts',
       'src/runtime/env-public.ts',
       'src/runtime/env-public-client.ts',
       'src/runtime/env-helpers.ts',
       'src/runtime/db.ts',
       'src/runtime/db-pg.ts',
+      'src/runtime/db-mysql.ts',
+      'src/runtime/durable.ts',
       'src/runtime/seed.ts',
       'src/runtime/drizzle-zod.ts',
       'src/runtime/drizzle-valibot.ts',
       'src/runtime/drizzle-arktype.ts',
       'src/runtime/schema-d1.ts',
       'src/runtime/schema-pg.ts',
+      'src/runtime/schema-mysql.ts',
       'src/runtime/kv.ts',
       'src/runtime/queues.ts',
       'src/runtime/storage.ts',
@@ -122,6 +127,7 @@ export default defineConfig({
       'src/runtime/remote/binding-handler.ts',
       'src/runtime/migration-handler.ts',
       'src/runtime/migration-handler-pg.ts',
+      'src/runtime/migration-handler-mysql.ts',
       'src/runtime/ws-server.ts',
       'src/runtime/live-server.ts',
       'src/sveltekit.ts',
@@ -144,6 +150,7 @@ export default defineConfig({
     clean: true,
     plugins: [stripUseAsmPlugin(), injectWorkersTypesReferencePlugin()],
     deps: {
+      resolveDepSubpath: true,
       neverBundle: [
         // This module is augmented by users, keep it as external so tsdown does not rewrite it.
         'void/routes',
@@ -178,6 +185,9 @@ export default defineConfig({
         'picocolors',
         'ofetch',
         'pathslash',
+        // Dependency-free; bundled like the other CLI-only helpers so the deploy's wrangler-compatible
+        // interactivity gate (`isWranglerNonInteractiveOrCI`) adds no runtime dependency.
+        'ci-info',
       ],
     },
   },

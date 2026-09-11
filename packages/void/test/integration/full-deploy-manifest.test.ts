@@ -11,6 +11,10 @@ import {
   it,
   vi,
 } from 'vite-plus/test';
+import {
+  createIsolatedPlayground,
+  type IsolatedPlayground,
+} from '../../../../test/integration-helpers.ts';
 import type { DetectedFramework } from '../../src/plugin-inference.ts';
 
 // @clack/prompts + the output-spinner wrapper are TTY-bound; noop them (same as
@@ -78,9 +82,10 @@ vi.mock('../../src/plugin-inference.ts', async () => {
 const { runDeploy } = await import('../../src/cli/deploy.ts');
 
 const ROOT = join(import.meta.dirname, '..', '..', '..', '..');
-const PLAYGROUND = 'playground/named-layouts';
-const FIXTURE = join(ROOT, PLAYGROUND);
-const PROJECT_JSON = join(FIXTURE, '.void', 'project.json');
+const SOURCE_PLAYGROUND = 'playground/named-layouts';
+let playground: IsolatedPlayground;
+let fixture = '';
+let projectJson = '';
 
 const fetchMock = vi.fn();
 let originalFetch: typeof globalThis.fetch | undefined;
@@ -162,9 +167,13 @@ function ndjson(events: Array<unknown>): Response {
 // `buildVoidManifest({ … })` drops `pages` and turns this RED.
 describe('runFullDeploy emits manifest.pages (Void pages app, end-to-end)', () => {
   beforeAll(() => {
+    playground = createIsolatedPlayground(ROOT, SOURCE_PLAYGROUND);
+    fixture = playground.root;
+    projectJson = join(fixture, '.void', 'project.json');
+
     // Real build of the minimal React pages fixture so runDeploy(skipBuild:true)
     // finds dist/client/.vite/manifest.json + dist/ssr/{index.js,wrangler.json}.
-    const result = spawn.sync('vp', ['run', '--filter', `./${PLAYGROUND}`, 'build'], {
+    const result = spawn.sync('vp', ['run', '--filter', `./${playground.workspacePath}`, 'build'], {
       cwd: ROOT,
       encoding: 'utf8',
       maxBuffer: 10 * 1024 * 1024,
@@ -174,26 +183,26 @@ describe('runFullDeploy emits manifest.pages (Void pages app, end-to-end)', () =
 
     // Link the fixture to a fake project (snapshot any real link first so we
     // restore developer-local state exactly on teardown).
-    projectJsonSnapshot = existsSync(PROJECT_JSON)
-      ? readFileSync(PROJECT_JSON, 'utf-8')
-      : undefined;
+    projectJsonSnapshot = existsSync(projectJson) ? readFileSync(projectJson, 'utf-8') : undefined;
     projectJsonSnapshotTaken = true;
-    mkdirSync(join(FIXTURE, '.void'), { recursive: true });
+    mkdirSync(join(fixture, '.void'), { recursive: true });
     writeFileSync(
-      PROJECT_JSON,
+      projectJson,
       JSON.stringify({ projectId: 'proj_named_layouts_test', slug: 'named-layouts-test' }),
     );
   }, 180_000);
 
   afterAll(() => {
     if (!projectJsonSnapshotTaken) {
+      playground?.cleanup();
       return;
     }
     if (projectJsonSnapshot === undefined) {
-      rmSync(PROJECT_JSON, { force: true });
+      rmSync(projectJson, { force: true });
     } else {
-      writeFileSync(PROJECT_JSON, projectJsonSnapshot);
+      writeFileSync(projectJson, projectJsonSnapshot);
     }
+    playground.cleanup();
   });
 
   beforeEach(() => {
@@ -232,7 +241,7 @@ describe('runFullDeploy emits manifest.pages (Void pages app, end-to-end)', () =
   it('forwards the page scan into the finalize manifest.pages (incl. the ISR page)', async () => {
     const captured = installPlatformMocks();
 
-    await runDeploy(FIXTURE, { skipBuild: true });
+    await runDeploy(fixture, { skipBuild: true });
 
     expect(captured.finalizeBody).not.toBeNull();
     const pages = captured.finalizeBody!.manifest?.pages as
@@ -280,7 +289,7 @@ describe('runFullDeploy emits manifest.pages (Void pages app, end-to-end)', () =
     mockDetectFramework.mockReturnValue({ name: 'vinext-pages', class: 'a' });
     const captured = installPlatformMocks();
 
-    await runDeploy(FIXTURE, { skipBuild: true });
+    await runDeploy(fixture, { skipBuild: true });
 
     // The deploy still finalizes (manifest present)...
     expect(captured.finalizeBody).not.toBeNull();

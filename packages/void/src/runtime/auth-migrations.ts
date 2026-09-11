@@ -17,8 +17,18 @@ export type PgMigrationRunner = {
   run(sql: string, params?: Array<unknown>): Promise<void>;
 };
 
-function quoteIdentifier(name: string): string {
-  return `"${name.replaceAll('"', '""')}"`;
+export type MySqlMigrationRunner = {
+  all<T extends Record<string, unknown> = Record<string, unknown>>(
+    sql: string,
+    params?: Array<unknown>,
+  ): Promise<Array<T>>;
+  run(sql: string, params?: Array<unknown>): Promise<void>;
+};
+
+function quoteIdentifier(name: string, dialect: VoidAuthMigrationSchema['dialect']): string {
+  return dialect === 'mysql'
+    ? `\`${name.replaceAll('`', '``')}\``
+    : `"${name.replaceAll('"', '""')}"`;
 }
 
 function quotePragmaArg(name: string): string {
@@ -30,12 +40,38 @@ function createIndexName(tableName: string, fieldName: string, unique: boolean):
 }
 
 function resolveColumnType(
-  dialect: 'sqlite' | 'postgresql',
+  dialect: 'sqlite' | 'postgresql' | 'mysql',
   idStrategy: VoidAuthMigrationSchema['idStrategy'],
   fieldName: string,
   field: VoidAuthMigrationField,
 ): string {
   const useIdType = fieldName === 'id' || field.references?.field === 'id';
+
+  if (dialect === 'mysql') {
+    if (useIdType) {
+      if (fieldName === 'id' && idStrategy === 'serial') {
+        return 'int AUTO_INCREMENT';
+      }
+      return idStrategy === 'serial'
+        ? 'int'
+        : idStrategy === 'uuid'
+          ? 'varchar(36)'
+          : 'varchar(255)';
+    }
+    if (field.type === 'boolean') {
+      return 'boolean';
+    }
+    if (field.type === 'date') {
+      return 'datetime(3)';
+    }
+    if (field.type === 'number') {
+      return field.bigint ? 'bigint' : 'int';
+    }
+    if (field.type === 'json' || field.type === 'string[]' || field.type === 'number[]') {
+      return 'json';
+    }
+    return 'varchar(255)';
+  }
 
   if (dialect === 'postgresql') {
     if (useIdType) {
@@ -78,14 +114,14 @@ function resolveColumnType(
 }
 
 function buildColumnDefinition(
-  dialect: 'sqlite' | 'postgresql',
+  dialect: 'sqlite' | 'postgresql' | 'mysql',
   schema: VoidAuthMigrationSchema,
   fieldName: string,
   field: VoidAuthMigrationField,
   options: { primaryKey?: boolean } = {},
 ): string {
   const parts = [
-    `${quoteIdentifier(fieldName)} ${resolveColumnType(dialect, schema.idStrategy, fieldName, field)}`,
+    `${quoteIdentifier(fieldName, dialect)} ${resolveColumnType(dialect, schema.idStrategy, fieldName, field)}`,
   ];
 
   if (options.primaryKey) {
@@ -96,8 +132,9 @@ function buildColumnDefinition(
   }
   if (field.references) {
     parts.push(
-      `REFERENCES ${quoteIdentifier(field.references.table)}(${quoteIdentifier(
+      `REFERENCES ${quoteIdentifier(field.references.table, dialect)}(${quoteIdentifier(
         field.references.field,
+        dialect,
       )}) ON DELETE ${String(field.references.onDelete ?? 'cascade').toUpperCase()}`,
     );
   }
@@ -129,7 +166,7 @@ function buildCreateTableSql(
     ),
   ];
 
-  return `CREATE TABLE IF NOT EXISTS ${quoteIdentifier(table.name)} (${columns.join(', ')})`;
+  return `CREATE TABLE IF NOT EXISTS ${quoteIdentifier(table.name, dialect)} (${columns.join(', ')})`;
 }
 
 function buildAddColumnSql(
@@ -138,8 +175,8 @@ function buildAddColumnSql(
   fieldName: string,
   field: VoidAuthMigrationField,
 ): string {
-  const ifNotExists = schema.dialect === 'postgresql' ? ' IF NOT EXISTS' : '';
-  return `ALTER TABLE ${quoteIdentifier(tableName)} ADD COLUMN${ifNotExists} ${buildColumnDefinition(
+  const ifNotExists = schema.dialect === 'sqlite' ? '' : ' IF NOT EXISTS';
+  return `ALTER TABLE ${quoteIdentifier(tableName, schema.dialect)} ADD COLUMN${ifNotExists} ${buildColumnDefinition(
     schema.dialect,
     schema,
     fieldName,
@@ -147,10 +184,16 @@ function buildAddColumnSql(
   )}`;
 }
 
-function buildCreateIndexSql(tableName: string, fieldName: string, unique: boolean): string {
-  return `CREATE ${unique ? 'UNIQUE ' : ''}INDEX IF NOT EXISTS ${quoteIdentifier(
+function buildCreateIndexSql(
+  dialect: VoidAuthMigrationSchema['dialect'],
+  tableName: string,
+  fieldName: string,
+  unique: boolean,
+): string {
+  return `CREATE ${unique ? 'UNIQUE ' : ''}INDEX${dialect === 'mysql' ? '' : ' IF NOT EXISTS'} ${quoteIdentifier(
     createIndexName(tableName, fieldName, unique),
-  )} ON ${quoteIdentifier(tableName)} (${quoteIdentifier(fieldName)})`;
+    dialect,
+  )} ON ${quoteIdentifier(tableName, dialect)} (${quoteIdentifier(fieldName, dialect)})`;
 }
 
 async function ensureSqliteIndexes(
@@ -170,7 +213,7 @@ async function ensureSqliteIndexes(
     if (existingIndexes.has(indexName)) {
       continue;
     }
-    await runner.run(buildCreateIndexSql(table.name, fieldName, field.unique));
+    await runner.run(buildCreateIndexSql('sqlite', table.name, fieldName, field.unique));
   }
 }
 
@@ -193,7 +236,7 @@ async function ensurePgIndexes(
     if (existingIndexes.has(indexName)) {
       continue;
     }
-    await runner.run(buildCreateIndexSql(table.name, fieldName, field.unique));
+    await runner.run(buildCreateIndexSql('postgresql', table.name, fieldName, field.unique));
   }
 }
 
@@ -264,5 +307,53 @@ export async function applyPgAuthMigrations(
     }
 
     await ensurePgIndexes(runner, schemaName, table);
+  }
+}
+
+export async function applyMySqlAuthMigrations(
+  runner: MySqlMigrationRunner,
+  schema: VoidAuthMigrationSchema,
+): Promise<void> {
+  const databaseRows = await runner.all<{ database_name?: string }>(
+    'SELECT DATABASE() AS database_name',
+  );
+  const databaseName = String(databaseRows[0]?.database_name ?? '');
+  const tableRows = await runner.all<{ table_name?: string }>(
+    "SELECT table_name FROM information_schema.tables WHERE table_schema = ? AND table_type = 'BASE TABLE'",
+    [databaseName],
+  );
+  const existingTables = new Set(tableRows.map((row) => String(row.table_name)));
+
+  for (const table of schema.tables) {
+    if (!existingTables.has(table.name)) {
+      await runner.run(buildCreateTableSql(schema, table));
+      existingTables.add(table.name);
+    } else {
+      const columnRows = await runner.all<{ column_name?: string }>(
+        'SELECT column_name FROM information_schema.columns WHERE table_schema = ? AND table_name = ?',
+        [databaseName, table.name],
+      );
+      const existingColumns = new Set(columnRows.map((row) => String(row.column_name)));
+      for (const [fieldName, field] of Object.entries(table.fields)) {
+        if (!existingColumns.has(fieldName)) {
+          await runner.run(buildAddColumnSql(schema, table.name, fieldName, field));
+        }
+      }
+    }
+
+    const indexRows = await runner.all<{ index_name?: string }>(
+      'SELECT index_name FROM information_schema.statistics WHERE table_schema = ? AND table_name = ?',
+      [databaseName, table.name],
+    );
+    const existingIndexes = new Set(indexRows.map((row) => String(row.index_name)));
+    for (const [fieldName, field] of Object.entries(table.fields)) {
+      if (!field.index && !field.unique) {
+        continue;
+      }
+      const indexName = createIndexName(table.name, fieldName, field.unique);
+      if (!existingIndexes.has(indexName)) {
+        await runner.run(buildCreateIndexSql('mysql', table.name, fieldName, field.unique));
+      }
+    }
   }
 }

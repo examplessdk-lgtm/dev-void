@@ -2227,6 +2227,22 @@ describe('default-target dev parity', () => {
 });
 
 describe('compileWorkerEntry', () => {
+  it('re-exports typed Durable Object modules as worker classes', () => {
+    const code = compileWorkerEntry({
+      durableObjects: [
+        {
+          bindingName: 'COUNTER',
+          className: 'CounterDurableObject',
+          filePath: '/app/durable-objects/counter.ts',
+        },
+      ],
+    });
+
+    expect(code).toContain('import __voidDurableObject0 from "/app/durable-objects/counter.ts";');
+    expect(code).toContain('__voidDurableObject0.__bind("COUNTER");');
+    expect(code).toContain('export const CounterDurableObject = __voidDurableObject0.class;');
+  });
+
   it('generates valid worker entry code without queues', () => {
     const code = compileWorkerEntry();
 

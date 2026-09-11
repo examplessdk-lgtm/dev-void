@@ -2,6 +2,10 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync
 import spawn from 'cross-spawn';
 import { join } from 'pathslash';
 import { afterAll, beforeAll, describe, expect, it } from 'vite-plus/test';
+import {
+  createIsolatedPlayground,
+  type IsolatedPlayground,
+} from '../../../../test/integration-helpers.ts';
 import { assembleVoidManifest } from '../../src/cli/deploy.ts';
 import { readConfig } from '../../src/config.ts';
 import { scanPages } from '../../src/pages/scan.ts';
@@ -9,30 +13,20 @@ import { resolveProjectPaths } from '../../src/project-paths.ts';
 import { toSlash } from '../../src/shared/utils.ts';
 
 const ROOT = join(import.meta.dirname, '..', '..', '..', '..');
-const PLAYGROUND = 'playground/kitchen-sink';
-const DIST = join(ROOT, PLAYGROUND, 'dist');
+const SOURCE_PLAYGROUND = 'playground/kitchen-sink';
+let playground: IsolatedPlayground;
+let dist: string;
 
 let buildOutput = '';
-// Backup of any pre-existing .env.production so the test doesn't clobber
-// developer-local files and can restore exact state on teardown.
-// `snapshotTaken` guards against an early beforeAll failure: if we never
-// reached the snapshot step, afterAll must leave the file alone entirely
-// rather than delete a developer-local copy it never saw.
-let envProductionSnapshotTaken = false;
-let envProductionOriginal: string | undefined;
 
 describe('playground/kitchen-sink build', () => {
   beforeAll(() => {
-    const pg = join(ROOT, PLAYGROUND);
-
-    // Snapshot BEFORE any other filesystem work so a failure in the
-    // subsequent rmSync/mkdirSync calls can't leave a developer-local
-    // .env.production unbacked-up.
+    playground = createIsolatedPlayground(ROOT, SOURCE_PLAYGROUND);
+    const pg = playground.root;
+    dist = join(pg, 'dist');
     const envProductionPath = join(pg, '.env.production');
-    envProductionOriginal = existsSync(envProductionPath)
-      ? readFileSync(envProductionPath, 'utf-8')
-      : undefined;
-    envProductionSnapshotTaken = true;
+    const envLocalPath = join(pg, '.env.local');
+    const envProductionLocalPath = join(pg, '.env.production.local');
 
     rmSync(join(pg, 'dist'), { recursive: true, force: true });
     rmSync(join(pg, '.void'), { recursive: true, force: true });
@@ -52,12 +46,26 @@ describe('playground/kitchen-sink build', () => {
         'LEGIT_USER_VAR=kept',
       ].join('\n') + '\n',
     );
+    writeFileSync(
+      envLocalPath,
+      ['LOCAL_ONLY_VAR=must-not-ship', 'LEGIT_USER_VAR=local-override'].join('\n') + '\n',
+    );
+    writeFileSync(
+      envProductionLocalPath,
+      ['PRODUCTION_LOCAL_ONLY_VAR=must-not-ship', 'LEGIT_USER_VAR=production-local-override'].join(
+        '\n',
+      ) + '\n',
+    );
 
-    const result = spawn.sync('vp', ['run', '--filter', `./${PLAYGROUND}`, 'build'], {
+    const result = spawn.sync('vp', ['run', '--filter', `./${playground.workspacePath}`, 'build'], {
       cwd: ROOT,
       encoding: 'utf8',
       maxBuffer: 10 * 1024 * 1024,
-      env: { ...process.env, VOID_TOKEN: 'test-leak-token-do-not-use' },
+      env: {
+        ...process.env,
+        VOID_TOKEN: 'test-leak-token-do-not-use',
+        VOID_CLOUDFLARE_DEPLOY_BUILD: '1',
+      },
     });
 
     buildOutput = `${result.stdout ?? ''}${result.stderr ?? ''}`;
@@ -65,19 +73,11 @@ describe('playground/kitchen-sink build', () => {
   });
 
   afterAll(() => {
-    if (!envProductionSnapshotTaken) {
-      return;
-    }
-    const envProductionPath = join(ROOT, PLAYGROUND, '.env.production');
-    if (envProductionOriginal === undefined) {
-      rmSync(envProductionPath, { force: true });
-    } else {
-      writeFileSync(envProductionPath, envProductionOriginal);
-    }
+    playground?.cleanup();
   });
 
   it('emits the SSR worker entry', () => {
-    expect(existsSync(join(DIST, 'ssr/index.js'))).toBe(true);
+    expect(existsSync(join(dist, 'ssr/index.js'))).toBe(true);
   });
 
   it('does not warn about unexpected Node.js imports', () => {
@@ -86,7 +86,7 @@ describe('playground/kitchen-sink build', () => {
   });
 
   it('does not emit deploy-blocking top-level await in env or db runtime chunks', () => {
-    const jsFiles = collectFiles(join(DIST, 'ssr')).filter((file) => file.endsWith('.js'));
+    const jsFiles = collectFiles(join(dist, 'ssr')).filter((file) => file.endsWith('.js'));
     const runtimeFiles = jsFiles.filter(
       (file) => /\/env-[^/]+\.js$/.test(file) || /\/_virtual_void-db-[^/]+\.js$/.test(file),
     );
@@ -99,7 +99,7 @@ describe('playground/kitchen-sink build', () => {
   });
 
   it('does not leak __VOID_* credentials into dist/ssr/wrangler.json', () => {
-    const wranglerConfig = JSON.parse(readFileSync(join(DIST, 'ssr', 'wrangler.json'), 'utf-8'));
+    const wranglerConfig = JSON.parse(readFileSync(join(dist, 'ssr', 'wrangler.json'), 'utf-8'));
     const vars = (wranglerConfig.vars ?? {}) as Record<string, unknown>;
     // `__VOID_AI_GATEWAY` is a legitimate, non-credential runtime var emitted from
     // `ai.gateway` in void.json (asserted below) — exclude it from the leak filter.
@@ -110,7 +110,7 @@ describe('playground/kitchen-sink build', () => {
   });
 
   it('binds Workers AI and emits the AI Gateway var for self-host deploys', () => {
-    const wranglerConfig = JSON.parse(readFileSync(join(DIST, 'ssr', 'wrangler.json'), 'utf-8'));
+    const wranglerConfig = JSON.parse(readFileSync(join(dist, 'ssr', 'wrangler.json'), 'utf-8'));
     // kitchen-sink imports `void/ai` at request time, so the build infers
     // `needsAI` and injects the Workers AI binding on `command === 'build'`.
     expect(wranglerConfig.ai).toEqual({ binding: 'AI' });
@@ -121,8 +121,24 @@ describe('playground/kitchen-sink build', () => {
   });
 
   it('keeps non-internal .env.production vars in dist/ssr/wrangler.json', () => {
-    const wranglerConfig = JSON.parse(readFileSync(join(DIST, 'ssr', 'wrangler.json'), 'utf-8'));
+    const wranglerConfig = JSON.parse(readFileSync(join(dist, 'ssr', 'wrangler.json'), 'utf-8'));
     const vars = (wranglerConfig.vars ?? {}) as Record<string, unknown>;
+    expect(vars.LEGIT_USER_VAR).toBe('kept');
+  });
+
+  it('requires auth deployments to inherit BETTER_AUTH_SECRET without emitting plaintext', () => {
+    const wranglerConfig = JSON.parse(readFileSync(join(dist, 'ssr', 'wrangler.json'), 'utf-8'));
+    const vars = (wranglerConfig.vars ?? {}) as Record<string, unknown>;
+    expect(wranglerConfig.secrets?.required).toContain('BETTER_AUTH_SECRET');
+    expect(vars.BETTER_AUTH_SECRET).toBeUndefined();
+  });
+
+  it('excludes local dotenv files from Cloudflare deploy worker vars', () => {
+    const wranglerConfig = JSON.parse(readFileSync(join(dist, 'ssr', 'wrangler.json'), 'utf-8'));
+    const vars = (wranglerConfig.vars ?? {}) as Record<string, unknown>;
+    expect(vars.LOCAL_ONLY_VAR).toBeUndefined();
+    expect(vars.PRODUCTION_LOCAL_ONLY_VAR).toBeUndefined();
+    // A local override must not replace the portable production value.
     expect(vars.LEGIT_USER_VAR).toBe('kept');
   });
 
@@ -133,7 +149,7 @@ describe('playground/kitchen-sink build', () => {
     // owns `scanPages` result → collectPages → manifest.pages) against the real
     // kitchen-sink pages to prove the A3 wiring emits `manifest.pages` for a Void
     // pages app (which includes an ISR page).
-    const pg = join(ROOT, PLAYGROUND);
+    const pg = playground.root;
     const deployConfig = readConfig(pg);
     const paths = resolveProjectPaths(pg, deployConfig);
     const pageScan = await scanPages(pg, { output: deployConfig.output, paths });
@@ -161,7 +177,7 @@ describe('playground/kitchen-sink build', () => {
   });
 
   it('includes sandbox bindings and container metadata', () => {
-    const wranglerConfig = JSON.parse(readFileSync(join(DIST, 'ssr', 'wrangler.json'), 'utf-8'));
+    const wranglerConfig = JSON.parse(readFileSync(join(dist, 'ssr', 'wrangler.json'), 'utf-8'));
     expect(wranglerConfig.compatibility_flags).toContain('nodejs_compat');
     expect(wranglerConfig.durable_objects.bindings).toContainEqual({
       name: 'SANDBOX',

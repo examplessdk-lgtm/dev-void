@@ -1,0 +1,292 @@
+import { requireRuntimeBinding } from './env.ts';
+
+const DEFAULT_STORAGE_KEY = '__void_durable_state';
+
+export type DurableStateContext<TState, TEnv extends Record<string, unknown>> = {
+  state: TState;
+  readonly env: TEnv;
+  readonly id: DurableObjectId;
+  readonly storage: DurableObjectStorage;
+  setAlarm(scheduledTime: number | Date): Promise<void>;
+  deleteAlarm(): Promise<void>;
+};
+
+export type DurableStateMethod<
+  TState,
+  TEnv extends Record<string, unknown>,
+  TArgs extends Array<unknown> = Array<unknown>,
+  TResult = unknown,
+> = (context: DurableStateContext<TState, TEnv>, ...args: TArgs) => TResult | Promise<TResult>;
+
+export type DurableStateMethods<TState, TEnv extends Record<string, unknown>> = Record<
+  string,
+  DurableStateMethod<TState, TEnv, Array<never>, unknown>
+>;
+
+export type DurableStateMigration<TState> = {
+  /** State version produced by this migration. Versions must be contiguous and start at 1. */
+  version: number;
+  migrate(state: unknown): TState | Promise<TState>;
+};
+
+type MethodArguments<TMethod> = TMethod extends (
+  context: infer _TContext,
+  ...args: infer TArgs
+) => infer _TResult
+  ? TArgs
+  : never;
+
+type MethodResult<TMethod> = TMethod extends (...args: infer _TArgs) => infer TResult
+  ? Awaited<TResult>
+  : never;
+
+export type DurableStateRpc<TMethods> = {
+  [TName in keyof TMethods]: (
+    ...args: MethodArguments<TMethods[TName]>
+  ) => Promise<MethodResult<TMethods[TName]>>;
+};
+
+export type TypedDurableObjectStub<TMethods> = DurableObjectStub & DurableStateRpc<TMethods>;
+
+export type DurableStateClass<TMethods> = {
+  new (
+    state: DurableObjectState,
+    env: Record<string, unknown>,
+  ): DurableObject &
+    DurableStateRpc<TMethods> & {
+      fetch(request: Request): Promise<Response>;
+      alarm(): Promise<void>;
+    };
+};
+
+export type DurableStateDefinition<
+  TState,
+  TEnv extends Record<string, unknown>,
+  TMethods extends DurableStateMethods<TState, TEnv>,
+> = {
+  initialState: TState | ((env: TEnv) => TState | Promise<TState>);
+  /** Current persisted state version. Defaults to 0. */
+  version?: number;
+  migrations?: ReadonlyArray<DurableStateMigration<TState>>;
+  methods: TMethods;
+  fetch?: DurableStateMethod<TState, TEnv, [request: Request], Response>;
+  alarm?: DurableStateMethod<TState, TEnv, [], void>;
+  storageKey?: string;
+};
+
+export type DurableStateApi<TMethods> = {
+  class: DurableStateClass<TMethods>;
+  /** @internal Called by Void's generated worker entry. */
+  __bind(bindingName: string): void;
+  get(name: string): TypedDurableObjectStub<TMethods>;
+  get(namespace: DurableObjectNamespace, name: string): TypedDurableObjectStub<TMethods>;
+  getById(id: DurableObjectId): TypedDurableObjectStub<TMethods>;
+  getById(namespace: DurableObjectNamespace, id: DurableObjectId): TypedDurableObjectStub<TMethods>;
+};
+
+type StoredState<TState> = {
+  __voidDurableState: true;
+  version: number;
+  value: TState;
+};
+
+function cloneInitialState<TState>(state: TState): TState {
+  return structuredClone(state);
+}
+
+function assertMigrations<TState>(
+  version: number,
+  migrations: ReadonlyArray<DurableStateMigration<TState>>,
+): Map<number, DurableStateMigration<TState>> {
+  const byVersion = new Map<number, DurableStateMigration<TState>>();
+  for (const migration of migrations) {
+    if (!Number.isInteger(migration.version) || migration.version < 1) {
+      throw new Error('durable: migration versions must be positive integers.');
+    }
+    if (migration.version > version) {
+      throw new Error(
+        `durable: migration version ${migration.version} exceeds the current state version ${version}.`,
+      );
+    }
+    if (byVersion.has(migration.version)) {
+      throw new Error(`durable: duplicate migration version ${migration.version}.`);
+    }
+    byVersion.set(migration.version, migration);
+  }
+  for (let expected = 1; expected <= version; expected++) {
+    if (!byVersion.has(expected)) {
+      throw new Error(`durable: missing state migration for version ${expected}.`);
+    }
+  }
+  return byVersion;
+}
+
+export function defineDurableState<
+  TState,
+  TEnv extends Record<string, unknown> = Record<string, unknown>,
+  const TMethods extends DurableStateMethods<TState, TEnv> = DurableStateMethods<TState, TEnv>,
+>(definition: DurableStateDefinition<TState, TEnv, TMethods>): DurableStateApi<TMethods> {
+  const version = definition.version ?? 0;
+  if (!Number.isInteger(version) || version < 0) {
+    throw new Error('durable: version must be a non-negative integer.');
+  }
+  const migrations = assertMigrations(version, definition.migrations ?? []);
+  const storageKey = definition.storageKey ?? DEFAULT_STORAGE_KEY;
+  let bindingName: string | undefined;
+
+  function boundNamespace(): DurableObjectNamespace {
+    if (!bindingName) {
+      throw new Error(
+        'durable: this state definition is not bound. Default-export it from a file in durable-objects/.',
+      );
+    }
+    return requireRuntimeBinding<DurableObjectNamespace>(bindingName);
+  }
+
+  class VoidDurableState {
+    private value!: TState;
+    private ready: Promise<void>;
+    private queue: Promise<void> = Promise.resolve();
+
+    constructor(
+      private readonly objectState: DurableObjectState,
+      private readonly env: TEnv,
+    ) {
+      this.ready = objectState.blockConcurrencyWhile(() => this.load());
+    }
+
+    private async load(): Promise<void> {
+      const stored = await this.objectState.storage.get<StoredState<TState>>(storageKey);
+      if (!stored) {
+        const initial =
+          typeof definition.initialState === 'function'
+            ? await (definition.initialState as (env: TEnv) => TState | Promise<TState>)(this.env)
+            : cloneInitialState(definition.initialState);
+        this.value = initial;
+        await this.persist();
+        return;
+      }
+      if (stored.__voidDurableState !== true || !Number.isInteger(stored.version)) {
+        throw new Error(`durable: invalid state record at storage key '${storageKey}'.`);
+      }
+      if (stored.version > version) {
+        throw new Error(
+          `durable: stored state version ${stored.version} is newer than supported version ${version}.`,
+        );
+      }
+
+      let value: unknown = stored.value;
+      for (let nextVersion = stored.version + 1; nextVersion <= version; nextVersion++) {
+        const migration = migrations.get(nextVersion);
+        if (!migration) {
+          throw new Error(`durable: missing state migration for version ${nextVersion}.`);
+        }
+        value = await migration.migrate(value);
+      }
+      this.value = value as TState;
+      if (stored.version !== version) {
+        await this.persist();
+      }
+    }
+
+    private persist(): Promise<void> {
+      return this.objectState.storage.put(storageKey, {
+        __voidDurableState: true,
+        version,
+        value: this.value,
+      } satisfies StoredState<TState>);
+    }
+
+    private context(): DurableStateContext<TState, TEnv> {
+      const instance = this;
+      return {
+        get state() {
+          return instance.value;
+        },
+        set state(value: TState) {
+          instance.value = value;
+        },
+        env: this.env,
+        id: this.objectState.id,
+        storage: this.objectState.storage,
+        setAlarm: (scheduledTime) => this.objectState.storage.setAlarm(scheduledTime),
+        deleteAlarm: () => this.objectState.storage.deleteAlarm(),
+      };
+    }
+
+    private run<TResult>(operation: () => Promise<TResult>): Promise<TResult> {
+      const result = this.queue.then(async () => {
+        await this.ready;
+        const previousValue = structuredClone(this.value);
+        try {
+          const operationResult = await operation();
+          await this.persist();
+          return operationResult;
+        } catch (error) {
+          this.value = previousValue;
+          throw error;
+        }
+      });
+      this.queue = result.then(
+        () => undefined,
+        () => undefined,
+      );
+      return result;
+    }
+
+    fetch(request: Request): Promise<Response> {
+      if (!definition.fetch) {
+        return Promise.resolve(new Response('Not Found', { status: 404 }));
+      }
+      return this.run(async () => {
+        return definition.fetch!(this.context(), request);
+      });
+    }
+
+    alarm(): Promise<void> {
+      if (!definition.alarm) {
+        return Promise.resolve();
+      }
+      return this.run(async () => {
+        await definition.alarm!(this.context());
+      });
+    }
+  }
+
+  for (const [name, method] of Object.entries(definition.methods)) {
+    if (name === 'fetch' || name === 'alarm' || name === 'constructor') {
+      throw new Error(`durable: method name '${name}' is reserved.`);
+    }
+    Object.defineProperty(VoidDurableState.prototype, name, {
+      enumerable: false,
+      value(this: VoidDurableState, ...args: Array<unknown>) {
+        return this['run'](async () => {
+          const runtimeMethod = method as DurableStateMethod<TState, TEnv, Array<unknown>, unknown>;
+          return runtimeMethod(this['context'](), ...args);
+        });
+      },
+    });
+  }
+
+  return {
+    class: VoidDurableState as unknown as DurableStateClass<TMethods>,
+    __bind(name) {
+      if (bindingName && bindingName !== name) {
+        throw new Error(
+          `durable: state definition is already bound to '${bindingName}' and cannot also bind to '${name}'.`,
+        );
+      }
+      bindingName = name;
+    },
+    get(namespaceOrName: DurableObjectNamespace | string, maybeName?: string) {
+      const namespace = typeof namespaceOrName === 'string' ? boundNamespace() : namespaceOrName;
+      const name = typeof namespaceOrName === 'string' ? namespaceOrName : maybeName!;
+      return namespace.get(namespace.idFromName(name)) as TypedDurableObjectStub<TMethods>;
+    },
+    getById(namespaceOrId: DurableObjectNamespace | DurableObjectId, maybeId?: DurableObjectId) {
+      const namespace = maybeId ? (namespaceOrId as DurableObjectNamespace) : boundNamespace();
+      const id = maybeId ?? (namespaceOrId as DurableObjectId);
+      return namespace.get(id) as TypedDurableObjectStub<TMethods>;
+    },
+  };
+}

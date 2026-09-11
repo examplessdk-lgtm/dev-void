@@ -1,0 +1,1 @@
+ALTER TABLE "builds" ADD COLUMN "check_run_id" text;

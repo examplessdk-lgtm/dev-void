@@ -11,7 +11,7 @@ import {
 } from '../auth/providers.ts';
 import { authContext, type AuthState, type VoidAuthConfig } from './auth.ts';
 
-export type VoidAuthDialect = 'sqlite' | 'postgresql';
+export type VoidAuthDialect = 'sqlite' | 'postgresql' | 'mysql';
 
 export type VoidAuthRuntimeOptions = {
   dialect: VoidAuthDialect;
@@ -217,17 +217,15 @@ function resolveSocialProviders(
   return Object.keys(providers).length > 0 ? providers : undefined;
 }
 
-function appendAuthHeaders(target: Headers, source?: Headers): void {
+function appendAuthHeaders(c: Context, source?: Headers): void {
   if (!source) {
     return;
   }
 
   source.forEach((value, key) => {
-    if (key.toLowerCase() === 'set-cookie') {
-      target.append(key, value);
-      return;
-    }
-    target.set(key, value);
+    c.header(key, value, {
+      append: key.toLowerCase() === 'set-cookie',
+    });
   });
 }
 
@@ -397,7 +395,7 @@ export function createVoidAuthRuntime(
         await next();
       });
 
-      appendAuthHeaders(c.res.headers, result.headers);
+      appendAuthHeaders(c, result.headers);
     } finally {
       await dispose();
     }

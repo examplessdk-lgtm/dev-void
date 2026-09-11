@@ -24,7 +24,7 @@ export type WrapperFeatures = {
   /** Whether migrations are present (framework deploys need a /__void/migrate endpoint). */
   hasMigrations?: boolean;
   /** Database dialect for migration handler. */
-  migrationDialect?: 'sqlite' | 'postgresql';
+  migrationDialect?: 'sqlite' | 'postgresql' | 'mysql';
 };
 
 export type WrapperResult = {
@@ -121,7 +121,11 @@ export async function generateWrapper(
     migrationPlanBundle =
       features.migrationDialect === 'sqlite' ? buildMigrationPlanBundle(migrations) : undefined;
     const handlerName =
-      features.migrationDialect === 'postgresql' ? 'migration-handler-pg' : 'migration-handler';
+      features.migrationDialect === 'postgresql'
+        ? 'migration-handler-pg'
+        : features.migrationDialect === 'mysql'
+          ? 'migration-handler-mysql'
+          : 'migration-handler';
     const handlerFilename_ = `${handlerName}.mjs`;
     let handlerPath = join(import.meta.dirname, '..', 'runtime', `${handlerName}.ts`);
     if (!existsSync(handlerPath)) {
@@ -162,12 +166,13 @@ async function bundleMigrationHandler(
   root: string,
   workerDir: string,
   handlerPath: string,
-  dialect: 'sqlite' | 'postgresql',
+  dialect: 'sqlite' | 'postgresql' | 'mysql',
 ): Promise<void> {
   const tmpDir = join(root, '.void', 'migration-handler');
   mkdirSync(tmpDir, { recursive: true });
   const outDir = join(tmpDir, 'out');
   const isPostgresql = dialect === 'postgresql';
+  const isMysql = dialect === 'mysql';
   await build({
     root: tmpDir,
     logLevel: 'silent',
@@ -187,7 +192,9 @@ async function bundleMigrationHandler(
             conditions: ['workerd', 'worker', 'browser', 'module', 'import', 'default'],
           },
         }
-      : undefined,
+      : isMysql
+        ? { noExternal: ['mysql2'] }
+        : undefined,
     build: {
       outDir,
       emptyOutDir: true,
@@ -333,27 +340,11 @@ export async function bundleEntry(root: string, entry: string): Promise<WrapperR
   return { entryFilename, outputDir: outDir };
 }
 
-/**
- * Clean up generated wrapper/bundle files. Preserves `dev-trigger-token`
- * across the wipe so that subsequent `void dev` sessions keep using the
- * same UUID — invalidating it on every deploy would force users to update
- * any saved curl scripts that exercise `/__void/{scheduled,queue}`.
- */
+/** Clean up the temporary directories created while generating a deploy wrapper. */
 export function cleanupWrapper(root: string): void {
   const voidDir = join(root, '.void');
-  const tokenPath = join(voidDir, 'dev-trigger-token');
-  let preservedToken: string | undefined;
-  if (existsSync(tokenPath)) {
-    try {
-      preservedToken = readFileSync(tokenPath, 'utf-8');
-    } catch {
-      // Best-effort — fall through and let the next dev session regenerate.
-    }
-  }
-  rmSync(voidDir, { recursive: true, force: true });
-  if (preservedToken !== undefined) {
-    mkdirSync(voidDir, { recursive: true });
-    writeFileSync(tokenPath, preservedToken);
+  for (const directory of ['handlers', 'migration-handler', 'bundle']) {
+    rmSync(join(voidDir, directory), { recursive: true, force: true });
   }
 }
 

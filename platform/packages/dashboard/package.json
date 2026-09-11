@@ -1,0 +1,35 @@
+{
+  "name": "@voidcloud/dashboard",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "vp build",
+    "deploy": "node ../../scripts/wrangler-deploy.ts --build",
+    "deploy:staging": "node ../../scripts/wrangler-deploy.ts --build --env staging",
+    "dev": "node scripts/refresh-access-token.mjs && vp dev",
+    "preview": "vp preview",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@nkzw/stack": "2.3.2",
+    "@voidcloud/ui": "workspace:*",
+    "hono": "catalog:platform",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "catalog:platform",
+    "@tailwindcss/vite": "^4.3.3",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@void/react": "workspace:*",
+    "@voidcloud/api": "workspace:*",
+    "tailwindcss": "^4.3.3",
+    "typescript": "catalog:",
+    "vite": "catalog:",
+    "vite-plus": "catalog:",
+    "void": "workspace:*",
+    "wrangler": "catalog:platform"
+  }
+}

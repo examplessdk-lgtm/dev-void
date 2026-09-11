@@ -25,6 +25,7 @@ import {
   readExistingLiveBindingConfig,
   resolveLiveBindingConfig,
   syncWranglerBindings,
+  syncWranglerDurableObjects,
 } from './cli/wrangler.ts';
 import { writeFileIfChanged } from './codegen/write-if-changed.ts';
 import {
@@ -35,6 +36,7 @@ import {
   type NotFoundHandling,
 } from './config.ts';
 import { scanJobsSync } from './crons/scan.ts';
+import { scanDurableObjectModules } from './durable/scan.ts';
 import { inferBindingsFromSource } from './inference/walk.ts';
 import { voidLog, voidWarn, voidError } from './log.ts';
 import { pagesDevCssAssetsPlugin } from './pages/dev-css-assets.ts';
@@ -74,7 +76,13 @@ import { scanMiddlewareSync, scanRoutePatternsSync } from './router/scan.ts';
 import { scanWebSocketRoutesSync } from './router/websocket.ts';
 import { DEV_INBOX_ENV_VAR } from './runtime/email/dev-inbox.ts';
 import { SANDBOX_MIGRATION_TAG, isSandboxEnabled, resolveSandboxConfig } from './sandbox/config.ts';
-import { filterLoadedEnv, resolveRemoteMode, stripInternalEnvKeys } from './shared/env.ts';
+import { mergeAndExpand, parseDotenvFile } from './shared/dotenv.ts';
+import {
+  CLOUDFLARE_DEPLOY_BUILD_ENV,
+  filterLoadedEnv,
+  resolveRemoteMode,
+  stripInternalEnvKeys,
+} from './shared/env.ts';
 import { DEFAULT_PROXY_URL, STAGING_PROXY_URL } from './shared/proxy.ts';
 import { validateSsrEntry } from './ssr/entry.ts';
 
@@ -634,7 +642,7 @@ async function runAiSetupPrompt(
             initialValue: defaultSlug,
             validate: validateProjectSlug,
           });
-          if (isCancel(slugResult)) {
+          if (isCancel(slugResult) || typeof slugResult === 'symbol') {
             return undefined;
           }
           return slugResult.trim();
@@ -807,6 +815,7 @@ export function voidPlugin(options?: {
       export const createInboundTestHarness = serverOnly('createInboundTestHarness');
     `,
     'void/live': '',
+    'void/durable': '',
   };
   const STUB_RESOLVE_FILTER = new RegExp(
     `^(${Object.keys(SERVER_ONLY_STUBS).join('|').replaceAll('/', '\\/')})$`,
@@ -821,9 +830,11 @@ export function voidPlugin(options?: {
       filter: { id: STUB_RESOLVE_FILTER },
       handler(id) {
         if (this.environment?.name === 'client') {
-          if (id === 'void/live') {
+          if (id === 'void/live' || id === 'void/durable') {
             this.error(
-              'void/live is server-only and cannot be imported by browser code. Import void/live/client instead.',
+              id === 'void/live'
+                ? 'void/live is server-only and cannot be imported by browser code. Import void/live/client instead.'
+                : 'void/durable is server-only and cannot be imported by browser code.',
             );
           }
           return STUB_PREFIX + id;
@@ -849,12 +860,43 @@ export function voidPlugin(options?: {
   // reserve names re-filter by `routeEnvironment` (see `mergeBindings` and
   // `resolveConfiguredAssetRoutingPolicy`).
   const websocketRoutes = framework ? [] : scanWebSocketRoutesSync(root, paths);
+  const durableObjects = scanDurableObjectModules(root);
+  if (detected && durableObjects.length > 0) {
+    throw new Error(
+      'durable: durable-objects/ is currently supported in Void apps only, not framework adapter mode.',
+    );
+  }
+  for (const module of durableObjects) {
+    const websocketCollision = websocketRoutes.find(
+      (route) => route.bindingName === module.bindingName || route.className === module.className,
+    );
+    if (websocketCollision) {
+      throw new Error(
+        `durable: durable-objects/${module.filePath.split('/').pop()} conflicts with WebSocket route '${websocketCollision.filePath}'. Rename one of the files.`,
+      );
+    }
+    if (
+      sandboxConfig &&
+      (sandboxConfig.binding === module.bindingName || sandboxConfig.className === module.className)
+    ) {
+      throw new Error(
+        `durable: durable-objects/${module.filePath.split('/').pop()} conflicts with the configured Sandbox binding or class. Rename the Durable Object file.`,
+      );
+    }
+  }
+  if (!isNodeTarget(config.target)) {
+    syncWranglerDurableObjects(root, durableObjects);
+  }
   const liveConfig = !isNodeTarget(config.target)
     ? bindings.needsLive
       ? resolveLiveBindingConfig(root, {
-          reservedBindings: websocketRoutes.map((route) => route.bindingName),
+          reservedBindings: [
+            ...websocketRoutes.map((route) => route.bindingName),
+            ...durableObjects.map((module) => module.bindingName),
+          ],
           reservedClasses: [
             ...websocketRoutes.map((route) => route.className),
+            ...durableObjects.map((module) => module.className),
             sandboxConfig?.className,
           ],
         })
@@ -1088,6 +1130,19 @@ export function voidPlugin(options?: {
     );
     const result: Record<string, unknown> = { ...workerConfig };
 
+    // Direct Cloudflare deploys create BETTER_AUTH_SECRET before upload. Tell
+    // Wrangler to inherit that remote secret into the new Worker version;
+    // otherwise a normal deploy can replace the version without carrying the
+    // secret forward. Scope this to the Void CLI's Cloudflare build marker so
+    // local dev, managed Void deploys, and bare user builds keep their existing
+    // behavior. Preserve and dedupe any user-declared required secrets.
+    if (authEnabled && process.env[CLOUDFLARE_DEPLOY_BUILD_ENV] === '1') {
+      const resolvedSecrets = (resolved as { secrets?: { required?: Array<string> } }).secrets;
+      if (!resolvedSecrets?.required?.includes('BETTER_AUTH_SECRET')) {
+        result.secrets = { required: ['BETTER_AUTH_SECRET'] };
+      }
+    }
+
     // Void owns the generated asset routing policy. Replace stale root
     // wrangler settings instead of letting the Cloudflare plugin concatenate
     // them with generated rules. This preserves static-first behavior for
@@ -1171,7 +1226,7 @@ export function voidPlugin(options?: {
     }
 
     // Serve never carries a `send_email` binding, so the dev inbox stays the
-    // only sink. `void deploy --backend cloudflare` writes
+    // only sink. `void deploy --platform cloudflare` writes
     // `send_email: [{ name: "SEND_EMAIL" }]` into the root wrangler.jsonc, and
     // `sendEmail` falls through to `env.SEND_EMAIL` whenever the inbox is not
     // armed — under miniflare that binding writes .eml files to disk, or with
@@ -1185,7 +1240,7 @@ export function voidPlugin(options?: {
     // Default sender for `sendEmail()` from void.json `email.from`. Serve-only,
     // the same gate as `__VOID_TOKEN` — not because it is a credential, but
     // because on a build the root wrangler.jsonc already owns the var:
-    // `void deploy --backend cloudflare` writes the same `__VOID_EMAIL_FROM`
+    // `void deploy --platform cloudflare` writes the same `__VOID_EMAIL_FROM`
     // there once the domain's routing or sending is ready, and that entry
     // reaches `dist/ssr/wrangler.json` through `resolved.vars`. Injecting it on
     // build too would advertise a sender on an account nothing was set up on.
@@ -1243,6 +1298,79 @@ export function voidPlugin(options?: {
             tag: 'void-ws-v1',
             new_classes: environmentWebsocketRoutes.map((route) => route.className),
           },
+        ];
+      }
+    }
+
+    if (durableObjects.length > 0) {
+      const currentDurableObjects =
+        ((result as Record<string, unknown>).durable_objects as
+          | { bindings?: Array<{ name: string; class_name: string }> }
+          | undefined) ??
+        ((resolved as Record<string, unknown>).durable_objects as
+          | { bindings?: Array<{ name: string; class_name: string }> }
+          | undefined);
+      const existingBindings = currentDurableObjects?.bindings ?? [];
+      for (const module of durableObjects) {
+        const conflict = existingBindings.find(
+          (binding) =>
+            binding.name === module.bindingName && binding.class_name !== module.className,
+        );
+        if (conflict) {
+          throw new Error(
+            `durable: binding '${module.bindingName}' is already configured for class '${conflict.class_name}', but durable-objects/ requires '${module.className}'.`,
+          );
+        }
+      }
+      const additions = durableObjects
+        .filter(
+          (module) => !existingBindings.some((binding) => binding.name === module.bindingName),
+        )
+        .map((module) => ({ name: module.bindingName, class_name: module.className }));
+      if (additions.length > 0) {
+        (result as Record<string, unknown>).durable_objects = {
+          bindings: [...existingBindings, ...additions],
+        };
+      }
+
+      const currentMigrations =
+        (result as Record<string, unknown>).migrations ??
+        (resolved as Record<string, unknown>).migrations;
+      const existingMigrations = Array.isArray(currentMigrations)
+        ? (currentMigrations as Array<{
+            tag?: string;
+            new_sqlite_classes?: Array<string>;
+          }>)
+        : [];
+      for (const module of durableObjects) {
+        const tagConflict = existingMigrations.find(
+          (migration) =>
+            migration.tag === module.migrationTag &&
+            !migration.new_sqlite_classes?.includes(module.className),
+        );
+        if (tagConflict) {
+          throw new Error(
+            `durable: migration tag '${module.migrationTag}' is already used by another Durable Object migration.`,
+          );
+        }
+      }
+      const migrationAdditions = durableObjects
+        .filter(
+          (module) =>
+            !existingMigrations.some(
+              (migration) =>
+                migration.tag === module.migrationTag ||
+                migration.new_sqlite_classes?.includes(module.className),
+            ),
+        )
+        .map((module) => ({
+          tag: module.migrationTag,
+          new_sqlite_classes: [module.className],
+        }));
+      if (migrationAdditions.length > 0) {
+        (result as Record<string, unknown>).migrations = [
+          ...existingMigrations,
+          ...migrationAdditions,
         ];
       }
     }
@@ -1427,11 +1555,50 @@ export function voidPlugin(options?: {
     workerConfig.vars = vars;
   }
 
+  // A direct Cloudflare deploy promotes only explicitly `.secret()`-marked
+  // schema values to Worker secrets. Make production-local and CI shell values
+  // available to the post-build validator/uploader without exposing unrelated
+  // machine env or changing ordinary Vite build behaviour.
+  function applySchemaSecretsToWorkerVars(secretKeys: Array<string>): void {
+    if (process.env[CLOUDFLARE_DEPLOY_BUILD_ENV] !== '1' || secretKeys.length === 0) {
+      return;
+    }
+    const mode = voidDeployBuildConfig?.mode ?? 'production';
+    const rawEnvDir = voidDeployBuildConfig?.envDir;
+    const envDir = rawEnvDir ? join(root, rawEnvDir) : root;
+    const local = mergeAndExpand(
+      [parseDotenvFile(join(envDir, `.env.${mode}.local`), { expand: false })],
+      { onWarn: (message) => voidWarn(message) },
+    );
+    const selected: Record<string, string> = {};
+    for (const key of secretKeys) {
+      if (authEnabled && key === 'BETTER_AUTH_SECRET') {
+        continue;
+      }
+      if (Object.prototype.hasOwnProperty.call(local, key)) {
+        selected[key] = local[key]!;
+      }
+      if (process.env[key] !== undefined) {
+        selected[key] = process.env[key]!;
+      }
+    }
+    const { sanitized, stripped } = stripInternalEnvKeys(selected);
+    if (stripped.length > 0) {
+      voidWarn(
+        `Ignoring schema secret keys reserved for Void runtime use: ${stripped.join(', ')}.`,
+      );
+    }
+    workerConfig.vars = {
+      ...(workerConfig.vars as Record<string, string> | undefined),
+      ...sanitized,
+    };
+  }
+
   // Plugin that loads .env files and merges them into workerConfig.vars.
   // Runs before the Cloudflare plugin so vars are available as worker bindings.
   //
   // The `{ mode, envDir }` this hook OBSERVES (raw, root-relative) is exposed via `api` so the
-  // self-host `void deploy --backend cloudflare` secret preflight can validate the SAME `.env*`
+  // self-host `void deploy --platform cloudflare` secret preflight can validate the SAME `.env*`
   // set the build ships. It must be captured HERE, at this hook's position, not read off the
   // final `resolved.envDir`: config hooks run in sequence, and a LATER plugin's `config` hook
   // that returns a different `envDir` would change `resolved.envDir` while this hook already
@@ -1475,12 +1642,34 @@ export function voidPlugin(options?: {
           : undefined;
       voidDeployBuildConfig = { mode, envDir: rawEnvDir };
       const envDir = rawEnvDir ? join(root, rawEnvDir) : root;
-      // loadEnv with prefix "" returns .env file vars AND all process.env vars.
-      // filterLoadedEnv strips shell pollution (PATH, HOME, etc.) so only
-      // .env-file vars reach worker bindings. stripInternalEnvKeys then
-      // removes any internal Void keys a user may have set in their .env
-      // files, so they can't hijack credential-shaped worker bindings.
-      const filtered = filterLoadedEnv(loadEnv(mode, envDir, ''));
+      // Direct Cloudflare deploys must never turn machine-local dotenv files
+      // into plaintext Worker vars. Rebuild the deploy env from the two
+      // portable files instead of trying to delete `.local` keys from Vite's
+      // already-merged result: a key overridden by `.env.production.local`
+      // must fall back to its `.env.production` value, not disappear or retain
+      // the local override. Development and ordinary Vite builds keep Vite's
+      // standard four-file loading for compatibility.
+      let filtered: Record<string, string>;
+      if (process.env[CLOUDFLARE_DEPLOY_BUILD_ENV] === '1') {
+        const deployFiles = ['.env', `.env.${mode}`];
+        filtered = mergeAndExpand(
+          deployFiles.map((file) => parseDotenvFile(join(envDir, file), { expand: false })),
+          { onWarn: (message) => voidWarn(message) },
+        );
+        // Vite gives the shell precedence over dotenv, after which
+        // filterLoadedEnv removes those shell-sourced keys. Preserve that
+        // invariant so credentials exported for the CLI never become vars.
+        for (const key of Object.keys(process.env)) {
+          delete filtered[key];
+        }
+      } else {
+        // loadEnv with prefix "" returns .env file vars AND all process.env
+        // vars. filterLoadedEnv strips shell pollution (PATH, HOME, etc.) so
+        // only .env-file vars reach worker bindings.
+        filtered = filterLoadedEnv(loadEnv(mode, envDir, ''));
+      }
+      // Remove any internal Void keys a user may have set in portable env
+      // files so they cannot hijack credential-shaped Worker bindings.
       const { sanitized: env, stripped } = stripInternalEnvKeys(filtered);
       if (stripped.length > 0) {
         voidWarn(
@@ -1780,7 +1969,10 @@ export function voidPlugin(options?: {
       bindingWatchPlugin,
       ...(bindings.needsEmail ? [emailDevInboxPlugin()] : []),
       envPlugin,
-      envSchemaPlugin(root, { onDefaults: applySchemaDefaultsToWorkerVars }),
+      envSchemaPlugin(root, {
+        onDefaults: applySchemaDefaultsToWorkerVars,
+        onSecrets: applySchemaSecretsToWorkerVars,
+      }),
       envClientGuardPlugin(root),
       envClientFoldPlugin(),
       clientStubsPlugin,
@@ -1834,6 +2026,11 @@ export function voidPlugin(options?: {
         `live: void/live requires target: "cloudflare". It is not available with target: '${config.target}'.`,
       );
     }
+    if (durableObjects.length > 0) {
+      throw new Error(
+        `durable: durable-objects/ requires target: "cloudflare". It is not available with target: '${config.target}'.`,
+      );
+    }
     if (config.routing?.revalidate) {
       voidWarn(
         '"routing.revalidate" in void.json is ignored with target: "' +
@@ -1870,7 +2067,7 @@ export function voidPlugin(options?: {
   // Cloudflare's Sandbox SDK also imports Node built-ins.
   // Other apps only need nodejs_als for AsyncLocalStorage (isomorphic fetch context threading).
   const existingFlags = (workerConfig.compatibility_flags as Array<string> | undefined) ?? [];
-  const needsNodejsCompat = authEnabled || dialect === 'postgresql' || bindings.needsSandbox;
+  const needsNodejsCompat = authEnabled || dialect !== 'sqlite' || bindings.needsSandbox;
   const normalizedFlags = normalizeWranglerCompatibilityFlags(existingFlags, {
     needsNodejsCompat,
   });
@@ -1952,7 +2149,10 @@ export function voidPlugin(options?: {
     bindingWatchPlugin,
     ...(bindings.needsEmail ? [emailDevInboxPlugin()] : []),
     envPlugin,
-    envSchemaPlugin(root, { onDefaults: applySchemaDefaultsToWorkerVars }),
+    envSchemaPlugin(root, {
+      onDefaults: applySchemaDefaultsToWorkerVars,
+      onSecrets: applySchemaSecretsToWorkerVars,
+    }),
     envClientGuardPlugin(root),
     envClientFoldPlugin(),
     clientStubsPlugin,
@@ -1977,6 +2177,7 @@ export function voidPlugin(options?: {
       sandboxBindingName: sandboxConfig?.binding,
       sandboxClassName: sandboxConfig?.className,
       live: liveConfig,
+      durableObjects,
       onDevAssetRoutingPolicyChange: updateDevAssetRoutingPolicy,
     }),
     drizzlePlugin(root, true, dialect, {

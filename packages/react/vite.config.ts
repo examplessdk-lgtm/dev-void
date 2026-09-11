@@ -14,6 +14,7 @@ export default defineConfig({
     dts: true,
     clean: true,
     deps: {
+      resolveDepSubpath: true,
       neverBundle: [
         'react',
         'react/jsx-runtime',

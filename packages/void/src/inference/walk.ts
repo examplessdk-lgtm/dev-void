@@ -46,7 +46,7 @@ export function inferBindingsFromSource(code: string, filename: string): Inferre
   try {
     const [imports] = parse(code);
     for (const imp of imports) {
-      const source = imp.n;
+      const source = imp.specifier;
       if (!source) {
         continue;
       }
@@ -77,7 +77,7 @@ export function inferBindingsFromSource(code: string, filename: string): Inferre
           result.needsEmail = true;
           break;
         case 'void/live':
-          if (!isTypeOnlyImportStatement(code.slice(imp.ss, imp.se + 1))) {
+          if (!isTypeOnlyImportStatement(code.slice(imp.importStart, imp.importEnd + 1))) {
             result.needsLive = true;
           }
           break;
@@ -87,7 +87,7 @@ export function inferBindingsFromSource(code: string, filename: string): Inferre
         case 'void/client/svelte':
         case 'void/client/solid': {
           // Check if the `auth` specifier is imported (not just `fetch`)
-          const stmt = code.slice(imp.ss, imp.se + 1);
+          const stmt = code.slice(imp.importStart, imp.importEnd + 1);
           if (/\bauth\b/.test(stmt)) {
             result.needsAuth = true;
           }

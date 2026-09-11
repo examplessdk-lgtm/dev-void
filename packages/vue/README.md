@@ -115,4 +115,4 @@ request.
 - `test/unit/prefetch.test.ts`
 - `test/integration/vue-pages-client.test.ts`
 
-Cross-package SSR/protocol coverage for Vue pages mode also lives in `framework/packages/void/test/integration/*`.
+Cross-package SSR/protocol coverage for Vue pages mode also lives in `packages/void/test/integration/*`.

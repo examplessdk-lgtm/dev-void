@@ -16,7 +16,6 @@ TODOs.md
 playground/*/.node-version
 .tanstack
 .worktrees
-.playwright-mcp
 playground-local
 .worktrees
 .svelte-kit/

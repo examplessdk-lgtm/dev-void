@@ -4,7 +4,7 @@ import { join } from 'pathslash';
 import { afterAll, beforeAll, describe, expect, it } from 'vite-plus/test';
 
 // ---------------------------------------------------------------------------------------------
-// Gated live-account e2e for the self-host `void deploy --backend cloudflare` path.
+// Gated live-account e2e for the `void deploy --platform cloudflare` path.
 //
 // Runs whenever BOTH env vars are present, and cleanly SKIPS (per test, at runtime) otherwise:
 //   - VOID_E2E_CF_TOKEN       a Cloudflare API token with permissions to create + delete Workers
@@ -17,13 +17,9 @@ import { afterAll, beforeAll, describe, expect, it } from 'vite-plus/test';
 // same worker or D1/KV. Each run owns a fresh, exclusively-named set that teardown deletes, then
 // asserts the live worker answers HTTP 200.
 //
-// Why it does NOT drive `--provision`: `void deploy --provision` fails closed in non-interactive
-// shells by design (a spawned CLI has no TTY, and CI cannot commit back the ids a create would
-// mint). A subprocess can never satisfy that gate, so the test plays the role the provisioner
-// would: it creates the id-bearing D1 + KV directly (`wrangler d1/kv … create`), writes their real
-// ids into the root config exactly as `--provision` would, then runs the CI-safe
-// `void deploy --backend cloudflare` (no `--provision`) — exercising the real build → tamper-guard
-// → remote-migrations → `wrangler deploy` pipeline end to end against a live account.
+// The root config starts with no D1/KV ids. The deploy must automatically create both resources,
+// write their ids into the config, build, migrate D1, and upload the worker — this is the live lock
+// for the first-party one-command path, including non-interactive CI.
 //
 // In CI the two vars come from repo secrets (same-repo pushes/PRs); fork PRs get no secrets and skip.
 // Do not commit a token; to exercise the real path locally, export the two vars:
@@ -126,15 +122,6 @@ function computeResourceNames(): void {
   KV_TITLE = `${WORKER_NAME}-kv`;
 }
 
-// Binding names the SPA app resolves for its D1 + KV (Void's defaults: `void/db` → DB, `env.KV` →
-// KV). The pre-created resources must be written into the root config under THESE bindings so the
-// deploy's desired-set / drift-check sees them as satisfied.
-const D1_BINDING = 'DB';
-const KV_BINDING = 'KV';
-// Where Void keeps D1 migrations — the deploy's no-provision path REQUIRES `migrations_dir` on the
-// D1 entry (else it hard-errors), and `wrangler d1 migrations apply --remote` reads it. Matches what
-// the provisioner stamps.
-const MIGRATIONS_DIR = './db/migrations';
 const COMPAT_DATE = '2026-02-24';
 
 let wranglerSnapshotTaken = false;
@@ -244,67 +231,6 @@ async function workerExistence(): Promise<'exists' | 'absent' | 'unknown'> {
     }
   }
   return 'unknown';
-}
-
-/**
- * Create the throwaway D1 database directly and return its real id — the id-bearing half of what
- * `--provision` would do, but runnable non-interactively. `d1 create` has no JSON flag, so the id is
- * resolved from `d1 list --json` by EXACT name. Throws on any failure so `beforeAll` surfaces a
- * clear cause (teardown still deletes whatever got created).
- */
-function createD1Database(): string {
-  const created = wrangler(['d1', 'create', D1_NAME]);
-  if (created.status !== 0) {
-    throw new Error(
-      `live e2e setup: "wrangler d1 create ${D1_NAME}" failed:\n${created.output.trim()}`,
-    );
-  }
-  const list = wrangler(['d1', 'list', '--json']);
-  if (list.status !== 0) {
-    throw new Error(`live e2e setup: "wrangler d1 list" failed:\n${list.output.trim()}`);
-  }
-  let databases: Array<{ uuid: string; name: string }>;
-  try {
-    databases = JSON.parse(list.stdout) as Array<{ uuid: string; name: string }>;
-  } catch {
-    throw new Error(`live e2e setup: "wrangler d1 list" returned non-JSON:\n${list.output.trim()}`);
-  }
-  const db = databases.find((d) => d.name === D1_NAME);
-  if (!db?.uuid) {
-    throw new Error(`live e2e setup: D1 ${D1_NAME} not found in the account after create`);
-  }
-  return db.uuid;
-}
-
-/**
- * Create the throwaway KV namespace directly and return its real id. `kv namespace create <title>`
- * makes a namespace whose title is EXACTLY the argument (no worker prefix); the id is resolved from
- * `kv namespace list` by EXACT title. Throws on any failure.
- */
-function createKvNamespace(): string {
-  const created = wrangler(['kv', 'namespace', 'create', KV_TITLE]);
-  if (created.status !== 0) {
-    throw new Error(
-      `live e2e setup: "wrangler kv namespace create ${KV_TITLE}" failed:\n${created.output.trim()}`,
-    );
-  }
-  const list = wrangler(['kv', 'namespace', 'list']);
-  if (list.status !== 0) {
-    throw new Error(`live e2e setup: "wrangler kv namespace list" failed:\n${list.output.trim()}`);
-  }
-  let namespaces: Array<{ id: string; title: string }>;
-  try {
-    namespaces = JSON.parse(list.stdout) as Array<{ id: string; title: string }>;
-  } catch {
-    throw new Error(
-      `live e2e setup: "wrangler kv namespace list" returned non-JSON:\n${list.output.trim()}`,
-    );
-  }
-  const ns = namespaces.find((n) => n.title === KV_TITLE);
-  if (!ns?.id) {
-    throw new Error(`live e2e setup: KV ${KV_TITLE} not found in the account after create`);
-  }
-  return ns.id;
 }
 
 /** Extract the deployed workers.dev URL the CLI prints on a successful deploy. */
@@ -429,7 +355,7 @@ async function cfWorkerApi(path: string, signal?: AbortSignal): Promise<Response
   );
 }
 
-describe('void deploy --backend cloudflare (live account)', () => {
+describe('void deploy --platform cloudflare (live account)', () => {
   beforeAll(async () => {
     // Gate at execution time (see the credential note): when the token/account are absent the suite is
     // a no-op — the tests below skip too. Compute the unique resource names now, from the injected env.
@@ -443,7 +369,7 @@ describe('void deploy --backend cloudflare (live account)', () => {
     computeResourceNames();
 
     // Ownership gate — refuse to run if any of this run's resources ALREADY exist in the target account.
-    // `--provision` ADOPTS an exact-name D1/KV (it would migrate pre-existing data), and teardown
+    // Automatic provisioning ADOPTS an exact-name D1/KV (it would migrate pre-existing data), and teardown
     // deletes by these exact names, so a collision with a real resource risks destroying data this
     // test does not own. Only after proving the names are exclusively ours do we set
     // `ownershipVerified` — the sole condition under which teardown deletes anything.
@@ -516,32 +442,19 @@ describe('void deploy --backend cloudflare (live account)', () => {
     wranglerOriginal = existsSync(APP_WRANGLER) ? readFileSync(APP_WRANGLER, 'utf-8') : undefined;
     wranglerSnapshotTaken = true;
 
-    // Play the provisioner's role: create the id-bearing D1 + KV directly (non-interactive), then
-    // write their REAL ids into the root config exactly as `--provision` would — including the D1
-    // `migrations_dir` the no-provision deploy requires. `account_id` is pinned so the deploy's
-    // whoami / migrate / deploy all target the intended account.
-    const databaseId = createD1Database();
-    const kvId = createKvNamespace();
+    // Start from an intentionally incomplete config. The deploy itself must create D1 + KV and
+    // persist their real ids/migrations_dir before continuing. `account_id` pins whoami,
+    // provisioning, migration, and deploy to the intended account.
     const overlay = {
       name: WORKER_NAME,
       compatibility_date: COMPAT_DATE,
       account_id: cfAccountId(),
-      d1_databases: [
-        {
-          binding: D1_BINDING,
-          database_name: D1_NAME,
-          database_id: databaseId,
-          migrations_dir: MIGRATIONS_DIR,
-        },
-      ],
-      kv_namespaces: [{ binding: KV_BINDING, id: kvId }],
     };
     writeFileSync(APP_WRANGLER, `${JSON.stringify(overlay, null, 2)}\n`);
 
-    // The CI-safe path: no `--provision`. The root config now covers every desired id-bearing
-    // resource, so the drift-check passes; this exercises build → tamper-guard → remote migrations →
-    // `wrangler deploy` against the live account.
-    const res = spawn.sync('node', [CLI_ENTRY, 'deploy', '--backend', 'cloudflare'], {
+    // No extra flag: this exercises automatic provision → build → tamper guard → remote migrations
+    // → `wrangler deploy` against the live account.
+    const res = spawn.sync('node', [CLI_ENTRY, 'deploy', '--platform', 'cloudflare'], {
       cwd: APP,
       encoding: 'utf8',
       maxBuffer: 20 * 1024 * 1024,
@@ -762,7 +675,7 @@ describe('void deploy --backend cloudflare (live account)', () => {
     // drift-check still passes (the overlay covers every id), the remote migration is already applied
     // (a no-op), and the worker is updated in place. The overlay wrangler.jsonc is still on disk
     // (afterAll restores it only after every test), so this reuses it. Runs LAST for that reason.
-    const res = spawn.sync('node', [CLI_ENTRY, 'deploy', '--backend', 'cloudflare'], {
+    const res = spawn.sync('node', [CLI_ENTRY, 'deploy', '--platform', 'cloudflare'], {
       cwd: APP,
       encoding: 'utf8',
       maxBuffer: 20 * 1024 * 1024,

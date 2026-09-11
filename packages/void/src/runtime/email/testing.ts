@@ -127,7 +127,7 @@ export interface InboundTestHarnessOptions {
    * configuration.
    *
    * `null` means NO platform prefix at all — a worker deployed on your own
-   * Cloudflare account (`void deploy --backend cloudflare`) receives the
+   * Cloudflare account (`void deploy --platform cloudflare`) receives the
    * address the handler author wrote, and the dispatcher matches the full
    * local part: `support@mail.acme.com` reaches `support`, and
    * `support+T-42@mail.acme.com` reaches `support+[ticket]` with `T-42`.

@@ -1,0 +1,20 @@
+{
+  "name": "@voidcloud/proxy",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "deploy": "node ../../scripts/wrangler-deploy.ts",
+    "dev": "wrangler dev",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@voidcloud/api": "workspace:*",
+    "hono": "catalog:platform"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "catalog:platform",
+    "typescript": "catalog:",
+    "vite-plus": "catalog:",
+    "wrangler": "catalog:platform"
+  }
+}

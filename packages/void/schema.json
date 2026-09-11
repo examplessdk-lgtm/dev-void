@@ -383,8 +383,8 @@
     },
     "database": {
       "type": "string",
-      "enum": ["pg"],
-      "description": "Database backend. Omit for D1 (SQLite, default). Set to \"pg\" for PostgreSQL via Hyperdrive."
+      "enum": ["pg", "mysql"],
+      "description": "Database backend. Omit for D1 (SQLite, default). Set to \"pg\" for PostgreSQL or \"mysql\" for MySQL via Hyperdrive."
     },
     "ai": {
       "type": "object",

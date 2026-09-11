@@ -168,7 +168,7 @@ export type DeployManifest = {
     hyperdrive?: Array<string>;
   };
   migrations?: {
-    dialect: 'sqlite' | 'postgresql';
+    dialect: 'sqlite' | 'postgresql' | 'mysql';
     pending: number;
     protocolVersion?: 2;
     classifierVersion?: number;

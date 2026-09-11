@@ -1,4 +1,5 @@
 import { availableParallelism } from 'node:os';
+import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vite-plus';
 
 const maxWorkers = process.env.CI ? 2 : Math.max(2, Math.floor(availableParallelism() * 0.75));
@@ -19,45 +20,29 @@ const ciTimeoutScale = process.platform === 'win32' ? 3 : 1;
 const testTimeout = 120_000 * ciTimeoutScale;
 const hookTimeout = 120_000 * ciTimeoutScale;
 
-// Integration files that share a playground directory with another file in the same project. A
-// parallel run lets one file's build wipe state (.void/, dist/) that another is actively using —
-// e.g. kitchen-sink-build.test.ts deletes .void/, destroying the miniflare persistence that
-// kitchen-sink.test.ts's dev server depends on. These run serially in their own project so the
-// rest of the integration suite does not have to.
-const sharedPlayground = [
-  // playground/kitchen-sink
-  'packages/void/test/integration/kitchen-sink.test.ts',
-  'packages/void/test/integration/kitchen-sink-build.test.ts',
-  'packages/void/test/integration/cloudflare-deploy-build.test.ts',
-  // playground/named-layouts
-  'packages/void/test/integration/named-layouts.test.ts',
-  'packages/void/test/integration/full-deploy-manifest.test.ts',
-  // playground/spa — both rewrite its wrangler.jsonc. The live suite only runs when its
-  // credentials are set, which is never the case in the `test` job, but is the case for a local
-  // `test:all` run — the scenario the credential forwarding below exists to support.
-  'packages/void/test/integration/spa-middleware-auth.test.ts',
-  'packages/void/test/e2e/cloudflare-deploy-live.test.ts',
-];
-
-const metaframeworks = [
-  'packages/void/test/integration/analog.test.ts',
-  'packages/void/test/integration/astro.test.ts',
-  'packages/void/test/integration/nuxt.test.ts',
-  'packages/void/test/integration/sveltekit.test.ts',
-  'packages/void/test/integration/tanstack-start.test.ts',
-  'packages/void/test/integration/vinext-pages.test.ts',
-  'packages/void/test/integration/vinext-app.test.ts',
-  'packages/void/test/integration/react-router.test.ts',
-];
+const platformAlias = {
+  // cloudflare:workers is only available in the Workers runtime.
+  'cloudflare:workers': fileURLToPath(
+    new URL('platform/packages/api/test/__mocks__/cloudflare-workers.ts', import.meta.url),
+  ),
+  'vite-plus/test': fileURLToPath(
+    new URL('node_modules/vite-plus/dist/test/index.js', import.meta.url),
+  ),
+};
 
 export default defineConfig({
   run: {
     tasks: {
       'build:all': {
-        command: "vp run build && vp run --filter './playground/**' --parallel build",
+        command:
+          "vp run build && vp run --filter './platform/packages/**' build && vp run --filter './playground/**' --parallel build",
+      },
+      'lint:platform': {
+        command: 'vp lint platform --type-aware --tsconfig platform/tsconfig.json',
       },
       'test:all': {
-        command: 'vp check && vp run build:all && vp run check && vp test run',
+        command:
+          'vp fmt --check && vp lint && vp run lint:platform && vp run build:all && vp run check && vp test run',
         // `vp run` passes ONLY the env vars a task declares to that task — not the full environment.
         // Without this, the gated live Cloudflare e2e's credentials never reach `vp test run`, so it
         // skips even when the CI job injects them. `untrackedEnv` forwards them without folding them
@@ -111,7 +96,7 @@ export default defineConfig({
         specifier: 'eslint-plugin-react-hooks',
       },
     ],
-    plugins: ['typescript', 'import', 'react', 'unicorn', 'vitest', 'node'],
+    plugins: ['typescript', 'import', 'react', 'unicorn', 'vitest', 'node', 'jsdoc'],
     ignorePatterns: [
       '**/node_modules/**',
       '**/dist/**',
@@ -195,6 +180,14 @@ export default defineConfig({
         files: ['**/*.vue'],
         rules: {
           'no-undef': 'off',
+        },
+      },
+      {
+        files: ['platform/**/*'],
+        rules: {
+          // The hosted platform historically used Node's native path module.
+          // Keep its existing lint contract while shared SDK code uses pathslash.
+          'no-restricted-imports': 'off',
         },
       },
       {
@@ -345,6 +338,7 @@ export default defineConfig({
       typeCheck: false,
     },
   },
+  resolve: { alias: platformAlias },
   test: {
     silent: 'passed-only',
     projects: [
@@ -352,18 +346,44 @@ export default defineConfig({
         test: {
           name: 'unit',
           include: ['packages/*/test/unit/**/*.test.ts'],
-          sequence: { groupOrder: 1 },
+          // Share one worker pool with independent integrations. This lets long integration
+          // startups begin immediately while short unit files fill otherwise-idle workers.
+          sequence: { groupOrder: 2 },
+          maxWorkers,
+        },
+      },
+      {
+        resolve: { alias: platformAlias },
+        test: {
+          name: 'platform-unit',
+          include: ['platform/packages/*/test/**/*.test.ts'],
+          exclude: ['platform/packages/api/test/integration/**'],
+          maxWorkers,
+        },
+      },
+      {
+        resolve: { alias: platformAlias },
+        test: {
+          name: 'platform-api-integration',
+          include: ['platform/packages/api/test/integration/**/*.test.ts'],
+          globalSetup: ['platform/packages/api/test/integration/global-setup.ts'],
+          setupFiles: ['platform/packages/api/test/integration/setup.ts'],
+          ...(process.env.VOID_TEST_DATABASE_URL ? { fileParallelism: false } : {}),
+          maxWorkers,
         },
       },
       {
         test: {
-          name: 'core-markdown',
-          sequence: { groupOrder: 3 },
+          // Every integration file here owns its fixture directory, so one worker pool can
+          // schedule the longest files first and fill idle slots across package boundaries.
+          name: 'parallel-integration',
+          sequence: { groupOrder: 2 },
           testTimeout,
           hookTimeout,
           // Kept alongside the e2e glob below so a newly added e2e file gets its credentials
           // forwarded past vitest's worker env filter here too (see e2eWorkerEnv). The one
-          // existing e2e file drives playground/spa, so it is in `shared-playground` instead.
+          // existing e2e file drives playground/spa, while the other SPA integration uses an
+          // isolated playground-local copy so both remain safe when credentials are present.
           env: e2eWorkerEnv,
           include: [
             'packages/void/test/integration/**/*.test.ts',
@@ -371,64 +391,12 @@ export default defineConfig({
             // (no token) rather than silently undiscovered; runs only when its env vars are set.
             'packages/void/test/e2e/**/*.test.ts',
             'packages/md/test/integration/**/*.test.ts',
-          ],
-          exclude: [...metaframeworks, ...sharedPlayground],
-          maxWorkers,
-        },
-      },
-      {
-        test: {
-          // The only integration files that share a playground directory. Serialized among
-          // themselves so one file's build cannot delete state another is mid-way through using.
-          // This needs its own group order: `fileParallelism: false` resolves to `maxWorkers: 1`,
-          // and vitest rejects projects that share a group order but disagree on `maxWorkers`.
-          name: 'shared-playground',
-          sequence: { groupOrder: 4 },
-          include: sharedPlayground,
-          // The live-e2e suite lives here, so this project — not core-markdown — is the one that
-          // has to forward its credentials past vitest's worker env filter (see e2eWorkerEnv).
-          // Without this the suite reads empty credentials and self-skips, quietly turning the
-          // live deployment gate into a green no-op.
-          env: e2eWorkerEnv,
-          testTimeout,
-          hookTimeout,
-          fileParallelism: false,
-        },
-      },
-      {
-        test: {
-          name: 'metaframeworks',
-          sequence: { groupOrder: 2 },
-          include: metaframeworks,
-          maxWorkers,
-          testTimeout,
-          hookTimeout,
-        },
-      },
-      {
-        test: {
-          name: 'pages-react-vue',
-          sequence: { groupOrder: 2 },
-          include: [
             'packages/react/test/integration/**/*.test.ts',
             'packages/vue/test/integration/**/*.test.ts',
-          ],
-          maxWorkers,
-          testTimeout,
-          hookTimeout,
-        },
-      },
-      {
-        test: {
-          name: 'pages-svelte-solid',
-          sequence: { groupOrder: 2 },
-          include: [
             'packages/svelte/test/integration/**/*.test.ts',
             'packages/solid/test/integration/**/*.test.ts',
           ],
           maxWorkers,
-          testTimeout,
-          hookTimeout,
         },
       },
     ],

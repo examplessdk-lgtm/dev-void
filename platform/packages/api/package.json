@@ -1,0 +1,57 @@
+{
+  "name": "@voidcloud/api",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./db": "./src/db.ts",
+    "./types": "./src/types.ts",
+    "./id": "./src/id.ts",
+    "./tiers": "./src/tiers.ts",
+    "./auth/jwt": "./src/auth/jwt.ts",
+    "./auth/dashboard": "./src/auth/dashboard.ts",
+    "./auth/github": "./src/auth/github.ts",
+    "./auth/google": "./src/auth/google.ts",
+    "./usage": "./src/routes/usage.ts",
+    "./api": "./src/api.ts",
+    "./env": "./src/env.ts",
+    "./suspension": "./src/suspension.ts",
+    "./routing": "./src/routing.ts"
+  },
+  "scripts": {
+    "db:generate": "drizzle-kit generate",
+    "db:push": "drizzle-kit push",
+    "deploy": "node ../../scripts/wrangler-deploy.ts",
+    "dev": "wrangler dev",
+    "migrate": "drizzle-kit migrate",
+    "migrate:staging": "DATABASE_URL=$STAGING_DATABASE_URL drizzle-kit migrate",
+    "setup": "node scripts/setup-local.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@cloudflare/containers": "0.3.7",
+    "@cloudflare/sandbox": "0.12.9",
+    "@voidcloud/isr-shared": "workspace:*",
+    "@xterm/headless": "^6.0.0",
+    "aws4fetch": "^1.0.20",
+    "blake3-jit": "^1.1.0",
+    "cron-parser": "5.10.0",
+    "drizzle-orm": "^0.45.2",
+    "hono": "catalog:platform",
+    "jose": "6.2.12",
+    "mime": "^4.1.0",
+    "pg": "8.23.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "catalog:platform",
+    "@electric-sql/pglite": "0.5.8",
+    "@types/pg": "8.23.1",
+    "drizzle-kit": "^0.31.10",
+    "miniflare": "^4.20260421.0",
+    "typescript": "catalog:",
+    "vite-plus": "catalog:",
+    "wrangler": "catalog:platform"
+  },
+  "optionalDependencies": {
+    "@clack/prompts": "^1.8.0"
+  }
+}

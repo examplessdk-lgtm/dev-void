@@ -14,6 +14,7 @@ import {
   readWranglerCompat,
   resolveLiveBindingConfig,
   syncWranglerBindings,
+  syncWranglerDurableObjects,
   writeProvisionedWranglerConfig,
 } from '../../src/cli/wrangler.ts';
 import type { VoidConfig } from '../../src/config.ts';
@@ -475,6 +476,31 @@ describe('syncWranglerBindings', () => {
     ]);
   });
 
+  it('appends typed Durable Object migrations when new files sort earlier', () => {
+    setup('wrangler.jsonc', '{ "name": "test" }');
+    const zeta = {
+      filePath: join(tmpDir, 'durable-objects', 'zeta.ts'),
+      bindingName: 'ZETA',
+      className: 'ZetaDurableObject',
+      migrationTag: 'void-durable-zeta-v1',
+    };
+    const alpha = {
+      filePath: join(tmpDir, 'durable-objects', 'alpha.ts'),
+      bindingName: 'ALPHA',
+      className: 'AlphaDurableObject',
+      migrationTag: 'void-durable-alpha-v1',
+    };
+
+    expect(syncWranglerDurableObjects(tmpDir, [zeta])).toBe(true);
+    expect(syncWranglerDurableObjects(tmpDir, [alpha, zeta])).toBe(true);
+    const parsed = JSON.parse(readFileSync(join(tmpDir, 'wrangler.jsonc'), 'utf-8'));
+
+    expect(parsed.migrations).toEqual([
+      { tag: 'void-durable-zeta-v1', new_sqlite_classes: ['ZetaDurableObject'] },
+      { tag: 'void-durable-alpha-v1', new_sqlite_classes: ['AlphaDurableObject'] },
+    ]);
+  });
+
   it('adds live durable object and SQLite migration metadata', () => {
     setup('wrangler.jsonc', '{ "name": "test" }');
     const result = syncWranglerBindings(tmpDir, { ...noBindings, needsLive: true });
@@ -675,6 +701,42 @@ describe('writeProvisionedWranglerConfig', () => {
     expect(parsed.name).toBe('user-chosen-name');
     expect(parsed.compatibility_date).toBe('2025-01-01');
     expect(readRaw('wrangler.jsonc')).toContain('// user-owned fields');
+  });
+
+  it('adds compatibility flags without removing existing flags or comments', () => {
+    setup(
+      'wrangler.jsonc',
+      `{
+  "compatibility_flags": [
+    "nodejs_compat" // user-selected runtime mode
+  ]
+}`,
+    );
+
+    const result = writeProvisionedWranglerConfig(tmpDir, {
+      compatibilityFlags: ['nodejs_als', 'nodejs_compat'],
+    });
+
+    expect(result.modified).toBe(true);
+    expect(parseRaw('wrangler.jsonc').compatibility_flags).toEqual(['nodejs_compat', 'nodejs_als']);
+    expect(readRaw('wrangler.jsonc')).toContain('// user-selected runtime mode');
+  });
+
+  it('creates compatibility_flags idempotently when the field is absent', () => {
+    setup('wrangler.jsonc', '{\n  "name": "my-worker"\n}');
+
+    const first = writeProvisionedWranglerConfig(tmpDir, {
+      compatibilityFlags: ['nodejs_als'],
+    });
+    const afterFirst = readRaw('wrangler.jsonc');
+    const second = writeProvisionedWranglerConfig(tmpDir, {
+      compatibilityFlags: ['nodejs_als'],
+    });
+
+    expect(first.modified).toBe(true);
+    expect(second.modified).toBe(false);
+    expect(parseRaw('wrangler.jsonc').compatibility_flags).toEqual(['nodejs_als']);
+    expect(readRaw('wrangler.jsonc')).toBe(afterFirst);
   });
 
   it('adds migrations_dir to the D1 entry matched by binding, leaving others untouched', () => {

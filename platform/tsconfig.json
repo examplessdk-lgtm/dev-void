@@ -1,0 +1,12 @@
+// Used by oxlint --type-aware for type-aware linting
+{
+  "files": [],
+  "references": [
+    { "path": "packages/api" },
+    { "path": "packages/dashboard" },
+    { "path": "packages/dispatch" },
+    { "path": "packages/isr-shared" },
+    { "path": "packages/proxy" },
+    { "path": "packages/tail" }
+  ]
+}

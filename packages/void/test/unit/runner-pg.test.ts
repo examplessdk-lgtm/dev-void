@@ -1,16 +1,20 @@
 import { PGlite } from '@electric-sql/pglite';
-import { describe, it, expect, beforeEach, afterEach } from 'vite-plus/test';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vite-plus/test';
 import { applyPgMigrations, type PgClient } from '../../src/migrations/runner-pg.ts';
 
 let pglite: PGlite;
 let client: PgClient;
 
-beforeEach(async () => {
+beforeAll(() => {
   pglite = new PGlite();
   client = pglite;
 });
 
-afterEach(async () => {
+beforeEach(async () => {
+  await pglite.exec('DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public');
+});
+
+afterAll(async () => {
   await pglite.close();
 });
 

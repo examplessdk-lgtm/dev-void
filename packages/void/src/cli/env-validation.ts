@@ -856,27 +856,7 @@ export async function dischargeSelfHostEnvContext(
     return { hasSchema: true, remoteSecretNames: null };
   }
 
-  // Reconcile the pinned worker NAME against the config BEFORE any wrangler spawn:
-  // `wrangler secret list` resolves the worker from the config's `name`, which a
-  // post-build probe can rewrite, so a config `name` that no longer matches the
-  // pinned one fails closed here (mirrors the account reconcile below).
-  reconcileSelfHostWorkerName(options.configPath, options.workerName);
-
-  // Reconcile the effective account BEFORE any wrangler spawn (config `account_id`
-  // wins over CLOUDFLARE_ACCOUNT_ID, so a mismatch could list a different account).
-  const effectiveAccountId = reconcileSelfHostAccount(options.configPath, options.accountId);
-
-  const run =
-    options.runWrangler ??
-    createDefaultSecretListRunner(options.root, {
-      accountId: effectiveAccountId,
-      timeoutMs: options.timeoutMs,
-    });
-  const remoteSecretNames = await fetchSelfHostSecretNames(
-    run,
-    options.configPath,
-    context.absentRequired,
-  );
+  const remoteSecretNames = await listSelfHostSecretNames(options, context.absentRequired);
 
   const remoteSet = new Set(remoteSecretNames);
   const stillMissing = context.absentRequired.filter((key) => !remoteSet.has(key));
@@ -1336,6 +1316,36 @@ async function fetchSelfHostSecretNames(
     names.push(name);
   }
   return names;
+}
+
+/**
+ * List one pinned self-host Worker's remote secret names. Reconciles the root
+ * config's worker/account identity before spawning wrangler, then delegates to
+ * the same strict, values-free parser used by the production env gate.
+ *
+ * Exported so deploy-owned secret provisioning can share the exact same
+ * first-deploy and malformed-output classification without duplicating it.
+ */
+export async function listSelfHostSecretNames(
+  options: {
+    root: string;
+    configPath: string;
+    accountId?: string;
+    workerName?: string;
+    runWrangler?: RunSecretList;
+    timeoutMs?: number;
+  },
+  missingKeys: Array<string> = [],
+): Promise<Array<string>> {
+  reconcileSelfHostWorkerName(options.configPath, options.workerName);
+  const effectiveAccountId = reconcileSelfHostAccount(options.configPath, options.accountId);
+  const run =
+    options.runWrangler ??
+    createDefaultSecretListRunner(options.root, {
+      accountId: effectiveAccountId,
+      timeoutMs: options.timeoutMs,
+    });
+  return fetchSelfHostSecretNames(run, options.configPath, missingKeys);
 }
 
 /**

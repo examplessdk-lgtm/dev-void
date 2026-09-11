@@ -14,6 +14,7 @@ import {
 } from 'jsonc-parser';
 import { join, normalize } from 'pathslash';
 import type { VoidConfig } from '../config.ts';
+import type { DurableObjectModule } from '../durable/scan.ts';
 import type { InferredBindings } from '../inference/walk.ts';
 import type { WebSocketRouteDefinition } from '../router/websocket.ts';
 import {
@@ -409,6 +410,7 @@ export function syncWranglerBindings(
   bindings: InferredBindings,
   options?: {
     bindingNames?: { d1?: string; kv?: string; r2?: string; sandbox?: string };
+    durableObjects?: Array<DurableObjectModule>;
     websockets?: Array<WebSocketRouteDefinition>;
     sandbox?: ResolvedSandboxConfig;
     live?: boolean | LiveBindingConfig;
@@ -495,6 +497,58 @@ export function syncWranglerBindings(
         },
       ];
       modified = true;
+    }
+  }
+
+  if (options?.durableObjects && options.durableObjects.length > 0) {
+    const existingBindings =
+      ((
+        parsed.durable_objects as
+          | { bindings?: Array<{ name: string; class_name: string }> }
+          | undefined
+      )?.bindings as Array<{ name: string; class_name: string }> | undefined) ?? [];
+    for (const module of options.durableObjects) {
+      const conflict = existingBindings.find(
+        (binding) => binding.name === module.bindingName && binding.class_name !== module.className,
+      );
+      if (conflict) {
+        throw new Error(
+          `durable: binding '${module.bindingName}' is already configured for class '${conflict.class_name}', but durable-objects/ requires '${module.className}'.`,
+        );
+      }
+    }
+    const additions = options.durableObjects
+      .filter((module) => !existingBindings.some((binding) => binding.name === module.bindingName))
+      .map((module) => ({ name: module.bindingName, class_name: module.className }));
+    if (additions.length > 0) {
+      parsed.durable_objects = { bindings: [...existingBindings, ...additions] };
+      modified = true;
+    }
+
+    const migrations = Array.isArray(parsed.migrations)
+      ? (parsed.migrations as Array<DurableObjectMigration>)
+      : [];
+    for (const module of options.durableObjects) {
+      const tagConflict = migrations.find(
+        (migration) =>
+          migration.tag === module.migrationTag &&
+          !migration.new_sqlite_classes?.includes(module.className),
+      );
+      if (tagConflict) {
+        throw new Error(
+          `durable: migration tag '${module.migrationTag}' is already used by another Durable Object migration.`,
+        );
+      }
+      if (!hasDurableObjectSqliteMigration(migrations, module.className)) {
+        migrations.push({
+          tag: module.migrationTag,
+          new_sqlite_classes: [module.className],
+        });
+        modified = true;
+      }
+    }
+    if (modified) {
+      parsed.migrations = migrations;
     }
   }
 
@@ -617,6 +671,28 @@ export function syncWranglerBindings(
   }
 
   return created || modified;
+}
+
+const NO_INFERRED_BINDINGS: InferredBindings = {
+  needsD1: false,
+  needsKV: false,
+  needsR2: false,
+  needsAuth: false,
+  needsQueues: false,
+  needsAI: false,
+  needsSandbox: false,
+  needsLive: false,
+};
+
+/** Persist convention-derived Durable Object bindings and append-only migration history. */
+export function syncWranglerDurableObjects(
+  root: string,
+  durableObjects: Array<DurableObjectModule>,
+): boolean {
+  if (durableObjects.length === 0) {
+    return false;
+  }
+  return syncWranglerBindings(root, NO_INFERRED_BINDINGS, { durableObjects });
 }
 
 /**
@@ -742,6 +818,8 @@ export type ProvisionedWranglerPatch = {
   name?: string;
   /** Compatibility date → top-level `compatibility_date` (only written when absent). */
   compatibilityDate?: string;
+  /** Compatibility flags to add without removing existing flags. */
+  compatibilityFlags?: Array<string>;
   /**
    * Adds `migrations_dir` to the `d1_databases[]` entry whose `binding` matches.
    * The D1 entry itself is created by `wrangler d1 create --update-config`; this
@@ -924,6 +1002,28 @@ export function writeProvisionedWranglerConfig(
   }
   if (patch.compatibilityDate !== undefined && parsed.compatibility_date === undefined) {
     set(['compatibility_date'], patch.compatibilityDate);
+  }
+  if (patch.compatibilityFlags !== undefined) {
+    const existingFlags = parsed.compatibility_flags;
+    if (
+      existingFlags !== undefined &&
+      (!Array.isArray(existingFlags) ||
+        !existingFlags.every((flag): flag is string => typeof flag === 'string'))
+    ) {
+      throw new Error(
+        `deploy: cannot update "${configPath}" — "compatibility_flags" must be an array of strings.`,
+      );
+    }
+    const flags = existingFlags ?? [];
+    for (const flag of patch.compatibilityFlags) {
+      if (!flags.includes(flag)) {
+        text = applyMemberEdit(text, ['compatibility_flags', flags.length], flag, {
+          formattingOptions,
+          isArrayInsertion: true,
+        });
+        flags.push(flag);
+      }
+    }
   }
 
   // Lazily-built map of EVERY binding name already used anywhere in the config

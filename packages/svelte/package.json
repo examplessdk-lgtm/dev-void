@@ -38,15 +38,15 @@
   "scripts": {
     "build": "vp pack",
     "dev": "vp pack --watch",
-    "typecheck": "tsgo --noEmit"
+    "typecheck": "tsc --noEmit --rootDir ../.."
   },
   "dependencies": {
-    "@sveltejs/vite-plugin-svelte": "^7.1.2"
+    "@sveltejs/vite-plugin-svelte": "^7.3.0"
   },
   "devDependencies": {
     "@types/node": "catalog:",
     "pathslash": "catalog:",
-    "svelte": "^5.56.4",
+    "svelte": "^5.57.0",
     "vite": "catalog:",
     "vite-plus": "catalog:",
     "void": "workspace:*"

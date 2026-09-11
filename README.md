@@ -2,7 +2,7 @@
 
 Fullstack SDK for Cloudflare Workers, powered by [Vite](https://vite.dev).
 
-Add a single plugin to your `vite.config.ts` and get file-based API routing, server-rendered pages, URL rewrites and redirects, D1 database, KV storage, R2 object storage, AI inference, and one-command deploys — all auto-provisioned from your imports.
+Add a single plugin to your `vite.config.ts` and get file-based API routing, server-rendered pages, URL rewrites and redirects, D1/PostgreSQL/MySQL databases, typed Durable Object state, KV storage, R2 object storage, AI inference, and one-command deploys.
 
 ```ts
 // vite.config.ts
@@ -69,9 +69,11 @@ pnpm void deploy
 
 - **Zero config** — no `wrangler.json`, no dashboard clicks
 - **Automatic provisioning** — import `db`, `kv`, `storage`, or `ai` from `void` and resources are created on deploy
+- **Typed secrets** — mark env schema keys with `.secret()`; direct Cloudflare deploys upload them as encrypted Worker secrets instead of plaintext vars
 - **File-based routing** — drop a file in `routes/`, get an endpoint with method exports, dynamic params, middleware, and [Standard Schema](https://standardschema.dev/) validation
 - **Full-stack pages** — `pages/` directory for server-rendered UI with co-located data loading, SPA navigation, and typed forms (React, Vue, Svelte, Solid)
 - **End-to-end type safety** — SQL migrations generate DB types, route handlers infer return types, typed fetch client checks everything at the call site
+- **Typed durable state** — modules in `durable-objects/` get inferred SQLite-backed bindings and typed RPC methods
 - **Local dev parity** — `vite dev` runs handlers in the real `workerd` runtime with local D1, KV, and R2
 
 ## Documentation
@@ -93,6 +95,7 @@ vp run build:all
 
 ```sh
 vp test run            # run tests
+vpr test:all           # format, lint, build, typecheck, and run every SDK/platform test
 vp lint                # oxlint via Vite+
 vp fmt                 # oxfmt via Vite+
 vp run check           # typecheck all packages
@@ -101,15 +104,18 @@ vp run dev:docs        # local docs dev server
 
 ### Project Structure
 
-| Package           | Purpose                         |
-| ----------------- | ------------------------------- |
-| `packages/void`   | Core Vite plugin + CLI          |
-| `packages/react`  | React framework adapter         |
-| `packages/vue`    | Vue framework adapter           |
-| `packages/svelte` | Svelte 5 framework adapter      |
-| `packages/solid`  | SolidJS framework adapter       |
-| `docs`            | Documentation (VitePress)       |
-| `playground/*`    | Test apps for local development |
+| Path                | Purpose                                                           |
+| ------------------- | ----------------------------------------------------------------- |
+| `packages/void`     | Core Vite plugin + CLI                                            |
+| `packages/react`    | React framework adapter                                           |
+| `packages/vue`      | Vue framework adapter                                             |
+| `packages/svelte`   | Svelte 5 framework adapter                                        |
+| `packages/solid`    | SolidJS framework adapter                                         |
+| `platform/packages` | Hosted Void control plane, routing, proxy, logging, and dashboard |
+| `docs`              | Documentation (VitePress)                                         |
+| `playground/*`      | Test apps for local development                                   |
+
+Public SDK packages must not import from `platform/`. Hosted platform packages may depend on public or shared workspace packages.
 
 ## GitHub Deployment
 

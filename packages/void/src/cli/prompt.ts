@@ -29,7 +29,7 @@ export async function promptProjectSetupAction(
     ],
   });
 
-  if (isCancel(result)) {
+  if (isCancel(result) || typeof result === 'symbol') {
     cancel('Deploy cancelled.');
     process.exit(0);
   }
@@ -90,7 +90,7 @@ export async function promptProjectSlug(defaultSlug: string): Promise<string> {
     validate: validateProjectSlug,
   });
 
-  if (isCancel(result)) {
+  if (isCancel(result) || typeof result === 'symbol') {
     cancel('Deploy cancelled.');
     process.exit(0);
   }

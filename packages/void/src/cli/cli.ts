@@ -102,6 +102,7 @@ if (helpPath) {
       spa: deployArgs.spa,
       skipBuild: deployArgs.skipBuild,
       debug: deployArgs.debug,
+      platform: deployArgs.platform,
       backend: deployArgs.backend,
       provision: deployArgs.provision,
       requireEmail: deployArgs.requireEmail,
@@ -181,10 +182,6 @@ if (helpPath) {
       process.exit(1);
     });
   });
-} else if (command === 'mcp') {
-  import('./mcp.ts').then(({ runMcp }) => {
-    runMcp();
-  });
 } else if (command === '-v' || command === '--version') {
   const version = JSON.parse(readFileSync(join(getPackageDir(), 'package.json'), 'utf-8')).version;
   console.log(version);
@@ -195,7 +192,7 @@ if (helpPath) {
   // Interactive top-level prompt
   const topLevelCommands: Array<SubcommandDef> = [
     { name: 'init', description: 'Set up void in a new or existing project' },
-    { name: 'deploy', description: 'Build and deploy to Void' },
+    { name: 'deploy', description: 'Build and deploy to the configured platform' },
     {
       name: 'auth',
       hint: 'login | logout | whoami | token',
@@ -229,7 +226,7 @@ if (helpPath) {
     },
     {
       name: 'db',
-      hint: 'status | reset | seed | execute | migrate | studio | export | rename-migrations',
+      hint: 'connect | status | reset | seed | execute | migrate | studio | export',
       description: 'Database migrations and management',
     },
     {
@@ -246,7 +243,6 @@ if (helpPath) {
       name: 'prepare',
       description: 'Generate .void artifacts without starting Vite',
     },
-    { name: 'mcp', description: 'Start MCP server (for AI agents)' },
     { name: 'help', description: 'Show help message' },
   ];
 
@@ -271,11 +267,6 @@ if (helpPath) {
       case 'deploy': {
         const { runDeploy } = await import('./deploy.ts');
         await runDeploy(root);
-        return;
-      }
-      case 'mcp': {
-        const { runMcp } = await import('./mcp.ts');
-        runMcp();
         return;
       }
       case 'auth':

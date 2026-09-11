@@ -65,7 +65,7 @@ const SUPPORTED_CLASSIFIER_VERSION = 1;
 export function createMigrationHandler(
   env: Record<string, unknown>,
   migrations: Array<MigrationEntry> | undefined,
-  _dialect: 'sqlite' | 'postgresql',
+  _dialect: 'sqlite' | 'postgresql' | 'mysql',
   runAuthMigrations?: () => Promise<void>,
   planBundle?: MigrationPlanBundle,
 ) {

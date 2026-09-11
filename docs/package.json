@@ -9,11 +9,11 @@
   },
   "devDependencies": {
     "@iconify/vue": "5.0.1",
-    "@voidzero-dev/vitepress-theme": "^4.8.4",
-    "oxc-minify": "^0.138.0",
-    "reka-ui": "2.10.1",
+    "@voidzero-dev/vitepress-theme": "catalog:",
+    "oxc-minify": "^0.149.0",
+    "reka-ui": "2.10.4",
     "vitepress": "2.0.0-alpha.16",
-    "vitepress-plugin-group-icons": "^1.7.5",
+    "vitepress-plugin-group-icons": "^1.7.6",
     "void": "workspace:*"
   }
 }

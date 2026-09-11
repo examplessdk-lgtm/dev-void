@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vite-plus/test';
 import { isCliOutdatedError, PlatformApiError, readCliVersion } from '../../src/cli/client.ts';
 import { formatStreamDeployError } from '../../src/cli/deploy-errors.ts';
 

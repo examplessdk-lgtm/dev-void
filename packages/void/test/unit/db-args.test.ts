@@ -181,15 +181,53 @@ describe('parseDbArgs', () => {
     expect(() => parseDbArgs(['studio', 'extra'])).toThrow("db: Unexpected argument 'extra'.");
   });
 
+  it('parses a direct database connection', () => {
+    expect(parseDbArgs(['connect', 'postgresql://localhost/app', '--local-only'])).toEqual({
+      action: 'connect',
+      url: 'postgresql://localhost/app',
+      provider: undefined,
+      name: undefined,
+      region: undefined,
+      localOnly: true,
+    });
+  });
+
+  it('parses provider provisioning options', () => {
+    expect(
+      parseDbArgs([
+        'connect',
+        '--provider',
+        'neon',
+        '--name',
+        'my-app',
+        '--region',
+        'aws-us-east-1',
+      ]),
+    ).toEqual({
+      action: 'connect',
+      url: undefined,
+      provider: 'neon',
+      name: 'my-app',
+      region: 'aws-us-east-1',
+      localOnly: undefined,
+    });
+  });
+
+  it('rejects a URL combined with a provider', () => {
+    expect(() =>
+      parseDbArgs(['connect', 'postgresql://localhost/app', '--provider', 'neon']),
+    ).toThrow('Provide either a connection string or --provider');
+  });
+
   it('errors on unknown subcommand', () => {
     expect(() => parseDbArgs(['unknown'])).toThrow(
-      'db: Usage: void db <push|generate|status|reset|seed|execute|migrate|studio|export|set-url|rename-migrations>.',
+      'db: Usage: void db <push|generate|status|reset|seed|execute|migrate|studio|export|connect|set-url|rename-migrations>.',
     );
   });
 
   it('errors on no subcommand', () => {
     expect(() => parseDbArgs([])).toThrow(
-      'db: Usage: void db <push|generate|status|reset|seed|execute|migrate|studio|export|set-url|rename-migrations>.',
+      'db: Usage: void db <push|generate|status|reset|seed|execute|migrate|studio|export|connect|set-url|rename-migrations>.',
     );
   });
 

@@ -1,9 +1,15 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'pathslash';
-import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 
 const tempHomes: Array<string> = [];
+const mockGetToken = vi.fn<() => string | null>();
+
+vi.mock('../../src/cli/auth', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../src/cli/auth.ts')>()),
+  getToken: () => mockGetToken(),
+}));
 
 function setIsolatedHome(): void {
   const dir = mkdtempSync(join(tmpdir(), 'void-home-'));
@@ -44,6 +50,10 @@ function captureOutput(): { output: () => string; restore: () => void } {
 }
 
 describe('runListCommand', () => {
+  beforeEach(() => {
+    mockGetToken.mockReset().mockReturnValue(null);
+  });
+
   afterEach(() => {
     delete process.env.VOID_TOKEN;
     delete process.env.VOID_API_URL;
@@ -78,7 +88,7 @@ describe('runListCommand', () => {
 
   it('exits with error when no linked project and no slug', async () => {
     setIsolatedHome();
-    process.env.VOID_TOKEN = 'test-token';
+    mockGetToken.mockReturnValue('test-token');
 
     const capture = captureOutput();
     const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {

@@ -39,20 +39,20 @@ Void provides a first-class [Drizzle ORM](https://orm.drizzle.team) integration.
 
 ## Choosing a Dialect
 
-Void supports two database backends. Both use the same Drizzle-based workflow for schema definition, querying, and migrations.
+Void supports three database backends. All use the same Drizzle-based workflow for schema definition, querying, and migrations.
 
-`void init` can start you with D1, PostgreSQL, or no database yet. Choosing D1 keeps the default implicit; choosing PostgreSQL writes `"database": "pg"` to `void.json`; choosing no database lets you start with static Pages and adopt data features later.
+`void init` can start you with D1, PostgreSQL, MySQL, or no database yet. D1 stays implicit; PostgreSQL writes `"database": "pg"`; MySQL writes `"database": "mysql"`.
 
-|            | [D1 (SQLite)](./database/d1) | [PostgreSQL](./database/postgresql)          |
-| ---------- | ---------------------------- | -------------------------------------------- |
-| Config     | Default (no config needed)   | `"database": "pg"` in `void.json`            |
-| Managed by | Void (fully managed)         | Bring your own database                      |
-| Best for   | Read-heavy apps, prototyping | Write-heavy, complex queries, existing infra |
-| Connection | Automatic D1 binding         | Hyperdrive connection pooling                |
+|            | [D1 (SQLite)](./database/d1) | [PostgreSQL](./database/postgresql) | [MySQL](./database/mysql)     |
+| ---------- | ---------------------------- | ----------------------------------- | ----------------------------- |
+| Config     | Default                      | `"database": "pg"`                  | `"database": "mysql"`         |
+| Managed by | Void                         | Bring your own database             | Bring your own database       |
+| Best for   | Prototypes, read-heavy apps  | Complex queries, existing Postgres  | Existing MySQL infrastructure |
+| Connection | Automatic D1 binding         | Hyperdrive                          | Hyperdrive                    |
 
 ## Schema Definition
 
-Define your tables in `db/schema.ts` using column helpers from `void/schema-d1` or `void/schema-pg`. This file is the source of truth for your database structure:
+Define your tables in `db/schema.ts` using column helpers from `void/schema-d1`, `void/schema-pg`, or `void/schema-mysql`.
 
 ::: code-group
 
@@ -81,6 +81,18 @@ export const users = pgTable('users', {
   name: text('name').notNull(),
   email: text('email').notNull().unique(),
   role: text('role').notNull().default('user'),
+  createdAt: timestamp('created_at').notNull().defaultNow(),
+});
+```
+
+```ts [MySQL]
+// db/schema.ts
+import { int, mysqlTable, text, timestamp } from 'void/schema-mysql';
+
+export const users = mysqlTable('users', {
+  id: int('id').autoincrement().primaryKey(),
+  name: text('name').notNull(),
+  email: text('email').notNull(),
   createdAt: timestamp('created_at').notNull().defaultNow(),
 });
 ```
@@ -385,24 +397,25 @@ npm install arktype
 
 ## CLI Commands
 
-| Command            | Purpose                                                       |
-| ------------------ | ------------------------------------------------------------- |
-| `void db push`     | Apply schema directly to local database (no migration files)  |
-| `void db generate` | Generate SQL migration files from schema changes              |
-| `void db migrate`  | Apply pending migrations locally                              |
-| `void db status`   | Show schema drift and pending migrations                      |
-| `void db reset`    | Drop the local DB and re-apply all migrations                 |
-| `void db seed`     | Reset + run seed file (`--file <path>`)                       |
-| `void db execute`  | Run ad-hoc SQL against local DB (`--file <path>`)             |
-| `void db studio`   | Open Drizzle Studio for the local database                    |
-| `void db export`   | Dump local DB as SQL (`--output`, `--no-data`, `--no-schema`) |
-| `void db set-url`  | Update the PostgreSQL connection string for deployment        |
+| Command            | Purpose                                                         |
+| ------------------ | --------------------------------------------------------------- |
+| `void db push`     | Apply schema directly to local database (no migration files)    |
+| `void db connect`  | Connect or provision PostgreSQL/MySQL and save `DATABASE_URL`   |
+| `void db generate` | Generate app and Better Auth SQL migrations for production      |
+| `void db migrate`  | Apply pending migrations locally                                |
+| `void db status`   | Show schema drift and pending migrations                        |
+| `void db reset`    | Drop the local DB and re-apply all migrations                   |
+| `void db seed`     | Reset + run seed file (`--file <path>`)                         |
+| `void db execute`  | Run ad-hoc SQL against local DB (`--file <path>`)               |
+| `void db studio`   | Open Drizzle Studio for the local database                      |
+| `void db export`   | Dump local DB as SQL (`--output`, `--no-data`, `--no-schema`)   |
+| `void db set-url`  | Update the PostgreSQL or MySQL connection string for deployment |
 
 See the [CLI reference](../reference/cli.md#database) for details.
 
 ## Scaffolding
 
-The `void gen model` command scaffolds a Drizzle table definition and updates your barrel export. It generates dialect-appropriate code: `sqliteTable` for D1 and `pgTable` for PostgreSQL.
+The `void gen model` command generates dialect-appropriate `sqliteTable`, `pgTable`, or `mysqlTable` definitions.
 
 ```bash
 void gen model post title:string body:text published:boolean

@@ -93,6 +93,7 @@ type RoutingPluginOptions = {
   sandboxBindingName?: string;
   sandboxClassName?: string;
   live?: { bindingName: string; className: string };
+  durableObjects?: Array<{ bindingName: string; className: string; filePath: string }>;
   onDevAssetRoutingPolicyChange?: (policy: AssetRoutingPolicy) => boolean;
 };
 
@@ -266,7 +267,9 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
       authRuntimePath:
         dialect === 'postgresql'
           ? join(runtimeDir, 'better-auth-pg.mjs')
-          : join(runtimeDir, 'better-auth.mjs'),
+          : dialect === 'mysql'
+            ? join(runtimeDir, 'better-auth-mysql.mjs')
+            : join(runtimeDir, 'better-auth.mjs'),
       authConfigPath,
       authDatabasePath: null,
       authSchemaPath: null,
@@ -451,6 +454,7 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
             }
           : false,
         live: options.live,
+        durableObjects: options.durableObjects,
       }),
     );
   }
@@ -535,7 +539,9 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
           compileOptions.migrationHandlerPath = resolveFile(
             dialect === 'postgresql'
               ? '#self/runtime/migration-handler-pg'
-              : '#self/runtime/migration-handler',
+              : dialect === 'mysql'
+                ? '#self/runtime/migration-handler-mysql'
+                : '#self/runtime/migration-handler',
           );
           compileOptions.migrations = migrations;
           compileOptions.migrationPlanBundle =
@@ -593,6 +599,7 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
             live: options.live,
             isr: isr,
             notFound: currentNotFoundHandling(),
+            durableObjects: options.durableObjects,
           }),
         );
       }
@@ -733,6 +740,7 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
               live: options.live,
               isr: undefined,
               notFound: currentNotFoundHandling(),
+              durableObjects: options.durableObjects,
             }),
           );
         }

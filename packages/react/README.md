@@ -223,4 +223,4 @@ export const loader = defineHandler(() => ({ title: 'Home' }));
 - `test/unit/link.test.ts`
 - `test/integration/react-pages-client.test.ts`
 
-Cross-package SSR/protocol coverage for React pages mode also lives in `framework/packages/void/test/integration/*`.
+Cross-package SSR/protocol coverage for React pages mode also lives in `packages/void/test/integration/*`.

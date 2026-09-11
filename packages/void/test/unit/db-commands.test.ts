@@ -280,6 +280,69 @@ describe('void db drizzle-kit subprocesses', () => {
     expect(options).toEqual({ cwd: root, stdio: 'inherit' });
   });
 
+  it('includes generated Better Auth tables in migration generation', async () => {
+    const root = createDrizzleProjectRoot();
+    writeFileSync(
+      join(root, 'void.json'),
+      JSON.stringify({ auth: { providers: ['email'] } }, null, 2),
+    );
+
+    await runDbCommand(root, { action: 'generate' });
+
+    const config = JSON.parse(readFileSync(join(root, '.void', 'drizzle.config.json'), 'utf-8'));
+    expect(config.schema).toEqual(['./db/schema.ts', './.void/better-auth-schema.ts']);
+    const authSchema = readFileSync(join(root, '.void', 'better-auth-schema.ts'), 'utf-8');
+    expect(authSchema).toContain('export const userTable = sqliteTable("user"');
+    expect(authSchema).toContain('export const sessionTable = sqliteTable("session"');
+    expect(authSchema).toContain('export const accountTable = sqliteTable("account"');
+    expect(authSchema).toContain('export const verificationTable = sqliteTable("verification"');
+  });
+
+  it('generates Better Auth migrations for an auth-only project', async () => {
+    const root = createDrizzleProjectRoot();
+    rmSync(join(root, 'db', 'schema.ts'));
+    writeFileSync(
+      join(root, 'void.json'),
+      JSON.stringify({ auth: { providers: ['email'] } }, null, 2),
+    );
+
+    await runDbCommand(root, { action: 'generate' });
+
+    const config = JSON.parse(readFileSync(join(root, '.void', 'drizzle.config.json'), 'utf-8'));
+    expect(config.schema).toBe('./.void/better-auth-schema.ts');
+    expect(mockExecFileSync).toHaveBeenCalledOnce();
+  });
+
+  it('resolves function-based Better Auth schemas with production env values', async () => {
+    const root = createDrizzleProjectRoot();
+    const voidStubDir = join(root, 'node_modules', 'void');
+    mkdirSync(voidStubDir, { recursive: true });
+    writeFileSync(
+      join(voidStubDir, 'package.json'),
+      JSON.stringify({ type: 'module', exports: { './auth': './auth.js' } }),
+    );
+    writeFileSync(join(voidStubDir, 'auth.js'), 'export const defineAuth = (config) => config;\n');
+    writeFileSync(
+      join(root, 'auth.js'),
+      [
+        'import { defineAuth } from "void/auth";',
+        'export default defineAuth(({ defaults, env }) => ({',
+        '  ...defaults,',
+        '  user: { modelName: env.AUTH_USER_TABLE },',
+        '}));',
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(join(root, '.env'), 'AUTH_USER_TABLE=development_users\n');
+    writeFileSync(join(root, '.env.production'), 'AUTH_USER_TABLE=production_users\n');
+
+    await runDbCommand(root, { action: 'generate' });
+
+    const authSchema = readFileSync(join(root, '.void', 'better-auth-schema.ts'), 'utf-8');
+    expect(authSchema).toContain('sqliteTable("production_users"');
+    expect(authSchema).not.toContain('sqliteTable("development_users"');
+  });
+
   it('uses the framework emulator store for SQLite push in SvelteKit apps', async () => {
     const root = createDrizzleProjectRoot();
     writeFileSync(

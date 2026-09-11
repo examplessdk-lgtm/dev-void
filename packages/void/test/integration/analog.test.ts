@@ -131,7 +131,9 @@ describe('playground/analog dev', () => {
 
     child.stderr!.on('data', () => {});
 
-    await waitForServer(DEV_BASE, 30_000);
+    // Analog's first dev boot compiles the Angular app. Under a fully parallel test run that can
+    // exceed the normal 30s readiness window even though subsequent requests are fast.
+    await waitForServer(DEV_BASE, 60_000);
   });
 
   afterAll(async () => {

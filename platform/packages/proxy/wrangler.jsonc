@@ -1,0 +1,111 @@
+{
+  "name": "void-proxy",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-02-12",
+  "compatibility_flags": ["nodejs_compat"],
+  "ai": { "binding": "AI" },
+  "kv_namespaces": [
+    {
+      "binding": "ROUTING",
+      "id": "9250c33f3db6494ebe8ad6272812c8c0",
+    },
+  ],
+  "services": [
+    {
+      "binding": "API",
+      "service": "void-api",
+    },
+  ],
+  "dispatch_namespaces": [
+    {
+      "binding": "DISPATCH",
+      "namespace": "void-users",
+    },
+  ],
+  // Cross-script DO binding into the api worker's SandboxConcurrencyCounter.
+  // Both top-level and per-env declarations must stay in sync — top-level is
+  // used by `wrangler dev` (no --env), per-env entries by deploys.
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "SANDBOX_CONCURRENCY_COUNTER",
+        "class_name": "SandboxConcurrencyCounter",
+        "script_name": "void-api",
+      },
+    ],
+  },
+  // Secrets (via `wrangler secret put`): JWT_SECRET, CF_ACCOUNT_ID, CF_API_TOKEN
+  "observability": {
+    "logs": {
+      "enabled": true,
+      "invocation_logs": true,
+    },
+  },
+  "routes": [{ "pattern": "proxy.void.cloud", "custom_domain": true }],
+  "env": {
+    "production": {
+      "name": "void-proxy",
+      "ai": { "binding": "AI" },
+      "kv_namespaces": [
+        {
+          "binding": "ROUTING",
+          "id": "9250c33f3db6494ebe8ad6272812c8c0",
+        },
+      ],
+      "services": [
+        {
+          "binding": "API",
+          "service": "void-api",
+        },
+      ],
+      "dispatch_namespaces": [
+        {
+          "binding": "DISPATCH",
+          "namespace": "void-users",
+        },
+      ],
+      "durable_objects": {
+        "bindings": [
+          {
+            "name": "SANDBOX_CONCURRENCY_COUNTER",
+            "class_name": "SandboxConcurrencyCounter",
+            "script_name": "void-api",
+          },
+        ],
+      },
+      "routes": [{ "pattern": "proxy.void.cloud", "custom_domain": true }],
+    },
+    "staging": {
+      "name": "void-proxy-staging",
+      "ai": { "binding": "AI" },
+      "kv_namespaces": [
+        {
+          "binding": "ROUTING",
+          "id": "60240eecea804f39bf8b7395cd6c6b08",
+        },
+      ],
+      "services": [
+        {
+          "binding": "API",
+          "service": "void-api-staging",
+        },
+      ],
+      "dispatch_namespaces": [
+        {
+          "binding": "DISPATCH",
+          "namespace": "void-users-staging",
+        },
+      ],
+      "durable_objects": {
+        "bindings": [
+          {
+            "name": "SANDBOX_CONCURRENCY_COUNTER",
+            "class_name": "SandboxConcurrencyCounter",
+            "script_name": "void-api-staging",
+          },
+        ],
+      },
+      "routes": [{ "pattern": "proxy.staging.void.cloud", "custom_domain": true }],
+    },
+  },
+}

@@ -1,0 +1,48 @@
+name: Platform Smoke Test
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  smoke-test:
+    if: ${{ vars.VOID_PLATFORM_DEPLOY_ENABLED == 'true' }}
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    environment: Staging
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: voidzero-dev/setup-vp@1b32467adbe183473499fd9d5d372c3ed9641754 # v1.18.0
+        with:
+          cache: true
+          node-version-file: .node-version
+      - run: vp run build
+      - name: Deploy kitchen-sink
+        working-directory: playground/kitchen-sink
+        run: node ../../packages/void/dist/cli/cli.mjs deploy --project kitchen-sink
+        env:
+          VOID_TOKEN: ${{ secrets.VOID_TOKEN_STAGING }}
+          VOID_API_URL: https://api.staging.void.cloud
+          STAGING: '1'
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID_STAGING }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET_STAGING }}
+      - run: vp exec playwright install chromium
+      - name: Reset app state
+        run: |
+          curl -sf -X POST https://kitchen-sink.staging.void.app/api/reset \
+            -H "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID" \
+            -H "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET"
+        env:
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID_STAGING }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET_STAGING }}
+      - name: Run smoke tests
+        run: node --test-timeout=120000 --test platform/scripts/kitchen-sink-smoke-test.ts
+        env:
+          SMOKE_URL: https://kitchen-sink.staging.void.app
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID_STAGING }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET_STAGING }}

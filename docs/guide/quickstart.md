@@ -34,7 +34,7 @@ bun add -D void
 
 In an empty directory, `void init` adds the matching Pages adapter and starter dependencies after you choose a scaffold toolchain and framework. Vite+ is the default toolchain and uses `vp` scripts.
 
-As part of `void init`, you'll choose Vite+ or plain Vite, then a Pages framework (React, Vue, Svelte, or Solid) and a starter type. D1 is the default top option and scaffolds a DB-backed page loader, schema, generated migration, `db/seed.ts`, and API route. PostgreSQL scaffolds the same starter and writes `"database": "pg"` to `void.json`. Static Pages skips the database and server starter files so you can start with static content and add Void features later.
+As part of `void init`, you'll choose Vite+ or plain Vite, then a Pages framework and starter type. D1 is the default; PostgreSQL and MySQL scaffold the same database-backed starter and write the corresponding database choice to `void.json`. Static Pages skips database and server files.
 
 After installation, run the setup flow:
 
@@ -60,7 +60,7 @@ bunx void init
 
 At the end of the full interactive flow, `void init` can also handle Void project setup by logging you in and linking or creating your Void project. That means the default first-time path is install packages, run `void init`, then `void deploy`.
 
-For the database-backed starters, D1 is the zero-config default for prototyping and read-heavy apps, while PostgreSQL is better when you already have Postgres infrastructure or need heavier writes and more complex queries.
+For database-backed starters, D1 is the zero-config default. Choose PostgreSQL or MySQL when you already have compatible infrastructure or need an external relational database.
 
 <details>
 <summary style="cursor:pointer">
@@ -79,7 +79,7 @@ We do not recommend installing `void` globally, because the CLI needs to be in s
 
 ## Using with Coding Agents
 
-`void init` detects your agent once and reuses that choice for instructions, skills linking, and MCP config.
+`void init` detects your agent once and reuses that choice for instructions and skills linking.
 
 If auto-detection fails, `void init` asks you to choose from a short list (Claude, Cursor, Codex, Gemini CLI, Generic).
 

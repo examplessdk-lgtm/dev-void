@@ -10,7 +10,7 @@
  *   applyEmailSetup      preflight             →  only the rows not ready, in order,
  *                                                  returning the wrangler.jsonc patch
  *
- * Both callers (`void deploy --backend cloudflare` step 3b-ii and `void email
+ * Both callers (`void deploy --platform cloudflare` step 3b-ii and `void email
  * setup|status --backend cloudflare`) borrow the session bearer through the deploy
  * runner's `runWranglerAuthToken` and gate the prompt on `isWranglerNonInteractiveOrCI`
  * (both in `cli/deploy.ts`), so the two never disagree.

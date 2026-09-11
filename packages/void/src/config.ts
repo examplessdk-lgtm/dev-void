@@ -17,7 +17,7 @@ import type { SandboxConfig, SandboxInstanceType } from './sandbox/config.ts';
 export type RedirectDestination = string | { to: string; status?: 301 | 302 | 303 | 307 | 308 };
 
 /** Supported database dialects (internal representation). */
-export type DatabaseDialect = 'sqlite' | 'postgresql';
+export type DatabaseDialect = 'sqlite' | 'postgresql' | 'mysql';
 
 /** Curated wrangler fields that can be set via void.json. */
 export type WranglerConfig = {
@@ -86,7 +86,7 @@ export type AiConfig = {
 /**
  * Email configuration. `from` is the default sender for `sendEmail()` — one
  * address, optionally with a display name (`Acme <noreply@mail.acme.com>`) —
- * and, on `void deploy --backend cloudflare`, its host is the domain the CLI
+ * and, on `void deploy --platform cloudflare`, its host is the domain the CLI
  * sets Email Routing and Email Sending up on.
  */
 export type EmailConfig = {
@@ -106,7 +106,7 @@ export type VoidConfig = {
   sandbox?: boolean | SandboxConfig;
   remote?: boolean;
   worker?: WranglerConfig;
-  database?: 'pg';
+  database?: 'pg' | 'mysql';
   ai?: AiConfig;
   email?: EmailConfig;
 };
@@ -132,7 +132,7 @@ export const VALID_NOT_FOUND_HANDLING: Set<string> = new Set([
  * cacheable-safe / are deprecated.
  */
 export const VALID_REDIRECT_STATUSES: Set<number> = new Set([301, 302, 303, 307, 308]);
-const VALID_DATABASE_VALUES = new Set(['pg']);
+const VALID_DATABASE_VALUES = new Set(['pg', 'mysql']);
 /** Cloudflare's hard maximum for Workers CPU time per request (5 minutes). */
 const MAX_WORKER_CPU_MS = 300000;
 const VALID_SANDBOX_INSTANCE_TYPES = new Set<SandboxInstanceType>([
@@ -962,7 +962,7 @@ export function readConfig(root: string): VoidConfig {
   // Validate database
   if (obj.database !== undefined) {
     if (typeof obj.database !== 'string' || !VALID_DATABASE_VALUES.has(obj.database)) {
-      throw new Error(`config: "database" in ${CONFIG_FILE} must be "pg".`);
+      throw new Error(`config: "database" in ${CONFIG_FILE} must be "pg" or "mysql".`);
     }
   }
 
@@ -1029,7 +1029,7 @@ function parseEmailFrom(value: unknown): { email: string; name?: string } {
 }
 
 /**
- * The host of `email.from`, lowercased — the domain `void deploy --backend
+ * The host of `email.from`, lowercased — the domain `void deploy --platform
  * cloudflare` sets email up on. `undefined` when `email.from` is not set.
  */
 export function getEmailFromHost(config: VoidConfig): string | undefined {
@@ -1076,7 +1076,13 @@ export function resolveBindingNames(
  * Get the database dialect from config. Defaults to "sqlite".
  */
 export function getDatabaseDialect(config: VoidConfig): DatabaseDialect {
-  return config.database === 'pg' ? 'postgresql' : 'sqlite';
+  if (config.database === 'pg') {
+    return 'postgresql';
+  }
+  if (config.database === 'mysql') {
+    return 'mysql';
+  }
+  return 'sqlite';
 }
 
 /**

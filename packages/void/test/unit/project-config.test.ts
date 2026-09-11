@@ -5,7 +5,9 @@ import { afterEach, describe, expect, it } from 'vite-plus/test';
 import { getApiUrl } from '../../src/cli/auth.ts';
 import {
   isVoidInternalStaging,
+  readDeploymentPlatform,
   readProjectConfig,
+  writeDeploymentPlatform,
   writeProjectConfig,
 } from '../../src/cli/project.ts';
 
@@ -37,6 +39,44 @@ describe('project config', () => {
 
     expect(readProjectConfig(root)).toBeNull();
     expect(isVoidInternalStaging(root)).toBe(true);
+    expect(readDeploymentPlatform(root)).toBeNull();
+  });
+
+  it('infers Void for legacy linked project files', () => {
+    const root = makeRoot();
+    writeProjectJson(root, { projectId: 'proj_123', slug: 'demo' });
+
+    expect(readDeploymentPlatform(root)).toBe('void');
+  });
+
+  it('stores a platform without requiring a Void project link', () => {
+    const root = makeRoot();
+
+    writeDeploymentPlatform(root, 'cloudflare');
+
+    expect(readDeploymentPlatform(root)).toBe('cloudflare');
+    expect(readProjectConfig(root)).toBeNull();
+    expect(JSON.parse(readFileSync(join(root, '.void', 'project.json'), 'utf-8'))).toEqual({
+      platform: 'cloudflare',
+    });
+  });
+
+  it('preserves an existing Void project link when changing platforms', () => {
+    const root = makeRoot();
+    writeProjectJson(root, {
+      projectId: 'proj_123',
+      slug: 'demo',
+      voidInternalStaging: true,
+    });
+
+    writeDeploymentPlatform(root, 'none');
+
+    expect(readDeploymentPlatform(root)).toBe('none');
+    expect(readProjectConfig(root)).toEqual({
+      projectId: 'proj_123',
+      slug: 'demo',
+      voidInternalStaging: true,
+    });
   });
 
   it('preserves the internal staging flag when linking a project', () => {
@@ -51,6 +91,7 @@ describe('project config', () => {
       voidInternalStaging: true,
     });
     expect(JSON.parse(readFileSync(join(root, '.void', 'project.json'), 'utf-8'))).toEqual({
+      platform: 'void',
       projectId: 'proj_123',
       slug: 'demo',
       voidInternalStaging: true,

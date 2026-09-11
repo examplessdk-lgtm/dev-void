@@ -702,7 +702,7 @@ export class PlatformClient {
 
   async getMigrationStatus(
     projectId: string,
-    dialect?: 'sqlite' | 'postgresql',
+    dialect?: 'sqlite' | 'postgresql' | 'mysql',
   ): Promise<{ applied: Array<{ name: string; applied_at: string }> }> {
     const url = new URL(`${this.baseUrl}/projects/${projectId}/migrations`);
     if (dialect) {

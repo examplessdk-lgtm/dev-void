@@ -1,10 +1,16 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'pathslash';
-import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 
 const tempHomes: Array<string> = [];
 const tempRoots: Array<string> = [];
+const mockGetToken = vi.fn<() => string | null>();
+
+vi.mock('../../src/cli/auth', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../src/cli/auth.ts')>()),
+  getToken: () => mockGetToken(),
+}));
 
 function setIsolatedHome(): void {
   const dir = mkdtempSync(join(tmpdir(), 'void-home-'));
@@ -54,6 +60,10 @@ async function importRunPurgeCacheCommand() {
 }
 
 describe('runPurgeCacheCommand', () => {
+  beforeEach(() => {
+    mockGetToken.mockReset().mockReturnValue(null);
+  });
+
   afterEach(() => {
     delete process.env.VOID_TOKEN;
     delete process.env.VOID_API_URL;
@@ -73,7 +83,7 @@ describe('runPurgeCacheCommand', () => {
 
   it('purges cache for linked project', async () => {
     setIsolatedHome();
-    process.env.VOID_TOKEN = 'test-token';
+    mockGetToken.mockReturnValue('test-token');
     process.env.VOID_API_URL = 'https://api.example.test';
 
     const root = mkdtempSync(join(tmpdir(), 'void-root-'));
@@ -106,7 +116,7 @@ describe('runPurgeCacheCommand', () => {
 
   it('purges cache using --project slug', async () => {
     setIsolatedHome();
-    process.env.VOID_TOKEN = 'test-token';
+    mockGetToken.mockReturnValue('test-token');
     process.env.VOID_API_URL = 'https://api.example.test';
 
     const root = mkdtempSync(join(tmpdir(), 'void-root-'));
@@ -138,7 +148,7 @@ describe('runPurgeCacheCommand', () => {
 
   it('exits with error when --project slug not found', async () => {
     setIsolatedHome();
-    process.env.VOID_TOKEN = 'test-token';
+    mockGetToken.mockReturnValue('test-token');
     process.env.VOID_API_URL = 'https://api.example.test';
 
     const root = mkdtempSync(join(tmpdir(), 'void-root-'));
@@ -185,7 +195,7 @@ describe('runPurgeCacheCommand', () => {
 
   it('exits with error when no linked project', async () => {
     setIsolatedHome();
-    process.env.VOID_TOKEN = 'test-token';
+    mockGetToken.mockReturnValue('test-token');
 
     const root = mkdtempSync(join(tmpdir(), 'void-root-'));
     tempRoots.push(root);
@@ -206,7 +216,7 @@ describe('runPurgeCacheCommand', () => {
 
   it('exits with error when API returns an error', async () => {
     setIsolatedHome();
-    process.env.VOID_TOKEN = 'test-token';
+    mockGetToken.mockReturnValue('test-token');
     process.env.VOID_API_URL = 'https://api.example.test';
 
     const root = mkdtempSync(join(tmpdir(), 'void-root-'));

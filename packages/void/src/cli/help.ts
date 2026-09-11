@@ -26,7 +26,7 @@ const HELP_TREE: HelpTree = {
     summary: 'Set up Void in a new or existing project.',
     usage: ['void init [options]'],
     options: [
-      { command: '--agents', description: 'Set up agent instructions, skills, and MCP config' },
+      { command: '--agents', description: 'Set up agent instructions and skills' },
       { command: '--tsconfig', description: 'Only update tsconfig.json' },
       {
         command: '--github',
@@ -35,12 +35,12 @@ const HELP_TREE: HelpTree = {
     ],
     examples: [
       { command: 'void init', description: 'Scaffold or configure the current project' },
-      { command: 'void init --agents', description: 'Install agent instructions and MCP config' },
+      { command: 'void init --agents', description: 'Install agent instructions and skills' },
       { command: 'void init --github', description: 'Scaffold the GitHub Actions deploy workflow' },
     ],
   },
   deploy: {
-    summary: 'Build and deploy the current project to Void.',
+    summary: 'Build and deploy the current project to its configured platform.',
     usage: ['void deploy [options]'],
     options: [
       { command: '--project <name>', description: 'Deploy target project name' },
@@ -48,21 +48,16 @@ const HELP_TREE: HelpTree = {
       { command: '--spa', description: 'Use SPA mode for static deploys' },
       {
         command: '--skip-build',
-        description: 'Skip the build step and use existing output (not with --backend cloudflare)',
+        description: 'Skip the build step and use existing output (not with --platform cloudflare)',
       },
       {
-        command: '--backend cloudflare',
-        description: 'Deploy to your own Cloudflare account instead of the Void platform',
-      },
-      {
-        command: '--provision',
-        description:
-          'Create missing D1/KV/R2/Queue/Hyperdrive resources (with --backend cloudflare)',
+        command: '--platform <cloudflare|void>',
+        description: 'Override the platform saved by void init',
       },
       {
         command: '--require-email',
         description:
-          'Fail instead of deploying without email when the mail domain is not set up (with --backend cloudflare)',
+          'Fail instead of deploying without email when the mail domain is not set up (with --platform cloudflare)',
       },
       {
         command: '--debug',
@@ -74,12 +69,8 @@ const HELP_TREE: HelpTree = {
       { command: 'void deploy --project my-app', description: 'Deploy to a specific project' },
       { command: 'void deploy --dir dist --spa', description: 'Deploy a static SPA directory' },
       {
-        command: 'void deploy --backend cloudflare',
+        command: 'void deploy --platform cloudflare',
         description: 'Deploy to your own Cloudflare account',
-      },
-      {
-        command: 'void deploy --backend cloudflare --provision',
-        description: 'Provision missing resources, then deploy to Cloudflare',
       },
     ],
   },
@@ -508,7 +499,8 @@ const HELP_TREE: HelpTree = {
       { command: 'migrate', description: 'Apply pending migrations' },
       { command: 'studio', description: 'Open Drizzle Studio (--remote for deployed PG)' },
       { command: 'export', description: 'Export local database as SQL' },
-      { command: 'set-url', description: 'Update the PostgreSQL connection string' },
+      { command: 'connect', description: 'Connect or provision an external database' },
+      { command: 'set-url', description: 'Update the external database URL' },
       { command: 'rename-migrations', description: 'Rename migrations to timestamp format' },
     ],
     children: {
@@ -576,8 +568,31 @@ const HELP_TREE: HelpTree = {
           { command: '--table <name>', description: 'Export a single table' },
         ],
       },
+      connect: {
+        summary: 'Connect or provision an external PostgreSQL/MySQL database.',
+        usage: [
+          'void db connect [connection-string]',
+          'void db connect --provider <name-or-module> [options]',
+        ],
+        options: [
+          { command: '--provider <name-or-module>', description: 'Provision with an adapter' },
+          { command: '--name <name>', description: 'Provider project/database name' },
+          { command: '--region <region>', description: 'Provider region identifier' },
+          { command: '--local-only', description: 'Do not sync a linked Void project' },
+        ],
+        examples: [
+          {
+            command: 'void db connect "postgresql://user:pass@host/db"',
+            description: 'Connect an existing database',
+          },
+          {
+            command: 'void db connect --provider neon --name my-app',
+            description: 'Provision a Neon database using NEON_API_KEY',
+          },
+        ],
+      },
       'set-url': basicSubcommand(
-        'Update the PostgreSQL connection string for deployment.',
+        'Update the external database connection string for deployment.',
         'void db set-url',
       ),
       'rename-migrations': basicSubcommand(
@@ -667,10 +682,6 @@ const HELP_TREE: HelpTree = {
     usage: ['void prepare'],
     examples: [{ command: 'void prepare', description: 'Refresh generated project types' }],
   },
-  mcp: {
-    summary: 'Start the Void MCP server over stdio for AI agents.',
-    usage: ['void mcp'],
-  },
 };
 
 function basicSubcommand(summary: string, usage: string, example?: string): HelpPage {
@@ -734,7 +745,6 @@ export function printGlobalHelp(): void {
       '',
       categoryTitle('agent'),
       helpLine('void init --agents', requiredOption(['init'], '--agents').description),
-      globalCommandLine(['mcp'], 'void mcp'),
       '',
       categoryTitle('help'),
       helpLine('void help <command>', 'Show command-specific help'),

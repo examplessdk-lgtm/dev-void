@@ -552,10 +552,10 @@ export async function getVoidPagesDevCss(request, env, payload) {
         }
         const edges: Array<string> = [];
         for (const item of imports) {
-          if (item.d !== -1 || !item.n) {
+          if ((item.type !== 'static' && item.type !== 'reexport-star') || !item.specifier) {
             continue;
           }
-          const resolved = await this.resolve(item.n, id, { skipSelf: true });
+          const resolved = await this.resolve(item.specifier, id, { skipSelf: true });
           if (resolved?.id) {
             edges.push(normalizeDevCssUrl(resolved.id, root));
           }

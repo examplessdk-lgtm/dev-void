@@ -8,16 +8,16 @@
     "preview": "vp preview"
   },
   "dependencies": {
-    "hono": "^4.12.27",
-    "react": "^19.2.7",
-    "react-dom": "^19.2.7"
+    "hono": "^4.13.7",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
   },
   "devDependencies": {
-    "@types/react": "^19.2.17",
-    "@types/react-dom": "^19.2.3",
-    "@typescript/native-preview": "catalog:",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
     "@void/md": "workspace:*",
     "@void/react": "workspace:*",
+    "typescript": "catalog:",
     "vite": "catalog:",
     "vite-plus": "catalog:",
     "void": "workspace:*"

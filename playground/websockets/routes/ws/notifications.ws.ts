@@ -63,7 +63,16 @@ type NotificationState = {
   pending: number;
 };
 
-const STREAM_DELAY_MS = 1000;
+declare global {
+  interface ImportMeta {
+    readonly env: { readonly VITE_VOID_NOTIFICATION_STREAM_DELAY_MS?: string };
+  }
+}
+
+const configuredStreamDelay = Number(
+  import.meta.env.VITE_VOID_NOTIFICATION_STREAM_DELAY_MS ?? '1000',
+);
+const STREAM_DELAY_MS = Number.isFinite(configuredStreamDelay) ? configuredStreamDelay : 1000;
 
 function readState(socket: WebSocketConnection<NotificationServerEvent>): NotificationState {
   const state = socket.state as Partial<NotificationState> | undefined;

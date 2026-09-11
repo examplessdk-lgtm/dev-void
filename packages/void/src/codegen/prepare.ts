@@ -21,6 +21,11 @@ export type PrepareProjectResult = {
   removed: Array<string>;
 };
 
+export type PrepareProjectOptions = {
+  /** Vite env mode used while resolving a function-based auth config. */
+  mode?: string;
+};
+
 function writeGeneratedFile(
   outDir: string,
   fileName: string,
@@ -42,7 +47,10 @@ function removeGeneratedFile(outDir: string, fileName: string, removed: Array<st
   removed.push(join('.void', fileName));
 }
 
-export async function prepareProject(root: string): Promise<PrepareProjectResult> {
+export async function prepareProject(
+  root: string,
+  options?: PrepareProjectOptions,
+): Promise<PrepareProjectResult> {
   const config = readConfig(root);
   const paths = resolveProjectPaths(root, config);
   const outDir = join(root, '.void');
@@ -103,7 +111,7 @@ export async function prepareProject(root: string): Promise<PrepareProjectResult
       providers: config.auth?.providers ?? null,
       userConfig: await loadVoidAuthConfig(authConfigPath),
     };
-    const env = loadEnv('development', root, '') as Record<string, unknown>;
+    const env = loadEnv(options?.mode ?? 'development', root, '') as Record<string, unknown>;
     const schemaPath = join(outDir, 'better-auth-schema.ts');
     const databasePath = join(outDir, 'better-auth-db.ts');
     const drizzleAdapterPath = fileURLToPath(import.meta.resolve('better-auth/adapters/drizzle'));

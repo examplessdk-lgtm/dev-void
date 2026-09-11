@@ -39,7 +39,7 @@ function readDatabaseUrl(root: string): string | undefined {
 /**
  * Vite plugin that runs local migrations on dev server startup.
  * For SQLite/D1: applies migrations to the local miniflare database.
- * For PostgreSQL: connects via DATABASE_URL from .env.local.
+ * For PostgreSQL/MySQL: connects via DATABASE_URL from .env.local.
  */
 export function migrationPlugin(
   root: string,
@@ -61,13 +61,15 @@ export function migrationPlugin(
       }
 
       try {
-        if (hasSqlMigrations && dialect === 'postgresql') {
+        if (hasSqlMigrations && dialect !== 'sqlite') {
           const url = readDatabaseUrl(root);
           if (!url) {
             // Defer warning until after Vite prints "ready" so it's visible.
             const warn = () => {
               console.log();
-              voidError('DATABASE_URL not found in .env.local — skipping PostgreSQL migrations.');
+              voidError(
+                `DATABASE_URL not found in .env.local — skipping ${dialect === 'mysql' ? 'MySQL' : 'PostgreSQL'} migrations.`,
+              );
             };
             if (server.httpServer) {
               server.httpServer.once('listening', () => setTimeout(warn, 100));
@@ -76,24 +78,36 @@ export function migrationPlugin(
             }
             return;
           }
-          const { runPgMigrations, getPgAppliedMigrations } =
-            await import('./migrations/runner-pg.ts');
           const { collectMigrations } = await import('./migrations/collect.ts');
           const { validateMigrations } = await import('./migrations/validate.ts');
 
           const allMigrations = collectMigrations(migrationsDir);
-          const pgApplied = await getPgAppliedMigrations(url);
-          const pgAppliedSet = new Set(pgApplied);
-          const pgPending = allMigrations.filter((m) => !pgAppliedSet.has(m.name));
-          if (pgPending.length > 0) {
+          const appliedNames =
+            dialect === 'mysql'
+              ? await import('./migrations/runner-mysql.ts').then((runner) =>
+                  runner.getMySqlAppliedMigrations(url),
+                )
+              : await import('./migrations/runner-pg.ts').then((runner) =>
+                  runner.getPgAppliedMigrations(url),
+                );
+          const appliedSet = new Set(appliedNames);
+          const pending = allMigrations.filter((migration) => !appliedSet.has(migration.name));
+          if (pending.length > 0) {
             try {
-              validateMigrations(pgPending);
+              validateMigrations(pending);
             } catch (err) {
               voidWarn(err instanceof Error ? err.message : String(err));
             }
           }
 
-          const applied = await runPgMigrations(migrationsDir, url);
+          const applied =
+            dialect === 'mysql'
+              ? await import('./migrations/runner-mysql.ts').then((runner) =>
+                  runner.runMySqlMigrations(migrationsDir, url),
+                )
+              : await import('./migrations/runner-pg.ts').then((runner) =>
+                  runner.runPgMigrations(migrationsDir, url),
+                );
           if (applied.length > 0) {
             voidLog(`Applied ${applied.length} migration(s): ${applied.join(', ')}`);
           }

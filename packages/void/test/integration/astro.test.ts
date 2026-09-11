@@ -87,13 +87,10 @@ describe('playground/astro dev', () => {
     const pg = join(ROOT, PLAYGROUND);
     rmSync(join(pg, '.void'), { recursive: true, force: true });
     rmSync(join(pg, '.wrangler'), { recursive: true, force: true });
-    removeWranglerConfig(pg);
 
-    // First boot: void plugin syncs inferred bindings to wrangler.jsonc.
-    await startDev();
-    await killChild(child);
-
-    // Second boot: adapter reads synced config so runtime bindings are available.
+    // The build suite above already synced the inferred bindings into wrangler.jsonc. Start dev
+    // once with that real generated config instead of booting only to generate it, stopping, and
+    // booting again. The assertions below still cover both config sync and runtime bindings.
     await startDev();
   });
 

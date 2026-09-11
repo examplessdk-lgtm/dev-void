@@ -8,8 +8,8 @@
     "preview": "vp preview"
   },
   "dependencies": {
-    "hono": "^4.12.27",
-    "vue": "^3.5.39"
+    "hono": "^4.13.7",
+    "vue": "^3.5.42"
   },
   "devDependencies": {
     "@void/vue": "workspace:*",

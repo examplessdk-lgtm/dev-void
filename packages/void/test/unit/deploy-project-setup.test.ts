@@ -76,7 +76,10 @@ describe('promptDeployProjectConfig', () => {
     });
     expect(client.createProject).toHaveBeenCalledWith('new-app');
     expect(config).toEqual({ projectId: 'proj_new', slug: 'new-app' });
-    expect(JSON.parse(readFileSync(join(root, '.void', 'project.json'), 'utf-8'))).toEqual(config);
+    expect(JSON.parse(readFileSync(join(root, '.void', 'project.json'), 'utf-8'))).toEqual({
+      platform: 'void',
+      ...config,
+    });
   });
 
   it('accepts short slugs at the prompt and lets the server enforce plan limits', async () => {

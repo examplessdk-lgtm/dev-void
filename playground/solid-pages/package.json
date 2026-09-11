@@ -6,16 +6,16 @@
     "build": "vp build",
     "dev": "vp dev",
     "preview": "vp preview",
-    "typecheck": "tsgo --noEmit"
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "hono": "^4.12.27",
-    "solid-js": "^1.9.14",
-    "valibot": "^1.4.2"
+    "hono": "^4.13.7",
+    "solid-js": "^1.9.15",
+    "valibot": "^1.5.0"
   },
   "devDependencies": {
-    "@typescript/native-preview": "catalog:",
     "@void/solid": "workspace:*",
+    "typescript": "catalog:",
     "vite": "catalog:",
     "vite-plus": "catalog:",
     "void": "workspace:*"

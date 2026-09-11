@@ -14,6 +14,7 @@ const drizzleD1Resolved = fileURLToPath(import.meta.resolve('drizzle-orm/d1'));
 const drizzleOrmResolved = fileURLToPath(import.meta.resolve('drizzle-orm'));
 const envModuleResolved = fileURLToPath(import.meta.resolve('#self/_env'));
 const drizzleNodePgResolved = fileURLToPath(import.meta.resolve('drizzle-orm/node-postgres'));
+const drizzleMysql2Resolved = fileURLToPath(import.meta.resolve('drizzle-orm/mysql2'));
 const pgResolved = fileURLToPath(import.meta.resolve('pg'));
 
 const VIRTUAL_DB_ID = '\0virtual:void-db';
@@ -39,7 +40,7 @@ type DrizzlePluginOptions = {
 export function drizzlePlugin(
   root: string,
   hasRouteTypes: boolean,
-  dialect: 'sqlite' | 'postgresql' = 'sqlite',
+  dialect: 'sqlite' | 'postgresql' | 'mysql' = 'sqlite',
   options: DrizzlePluginOptions = {},
 ): Plugin {
   const outDir = join(root, '.void');
@@ -145,7 +146,48 @@ export function createDb() {
         const schemaImport = schema
           ? `import * as schema from ${JSON.stringify(schema.path)};`
           : '';
-        const drizzleConfig = schema ? ', { schema }' : '';
+        const drizzleConfig = schema
+          ? dialect === 'mysql'
+            ? ', { schema, mode: "default" }'
+            : ', { schema }'
+          : '';
+
+        if (dialect === 'mysql') {
+          return `
+import { drizzle } from ${JSON.stringify(drizzleMysql2Resolved)};
+import { getRuntimeBinding } from ${JSON.stringify(envModuleResolved)};
+${schemaImport}
+export { ${DRIZZLE_OPERATORS} } from ${JSON.stringify(drizzleOrmResolved)};
+
+let _prodInstance;
+
+function getConnectionString() {
+  const url = getRuntimeBinding("DATABASE_URL");
+  if (url) return url;
+  const hd = getRuntimeBinding("HYPERDRIVE");
+  if (hd?.connectionString) return hd.connectionString;
+  throw new Error("db: MySQL is not configured. Add DATABASE_URL to .env.local for local dev, or configure Hyperdrive for production.");
+}
+
+function getInstance() {
+  if (getRuntimeBinding("DATABASE_URL")) {
+    return drizzle(getRuntimeBinding("DATABASE_URL")${drizzleConfig});
+  }
+  _prodInstance ??= drizzle(getConnectionString()${drizzleConfig});
+  return _prodInstance;
+}
+
+export const db = new Proxy({}, {
+  get(_, prop) {
+    return Reflect.get(getInstance(), prop);
+  },
+});
+
+export function createDb(connectionString) {
+  return drizzle(connectionString${drizzleConfig});
+}
+`;
+        }
 
         if (dialect === 'postgresql') {
           return `

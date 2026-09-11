@@ -1,14 +1,16 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { confirm, intro, isCancel, outro, log } from '@clack/prompts';
-import { extname, join, relative, resolve } from 'pathslash';
+import { basename, extname, join, relative, resolve } from 'pathslash';
 import {
   readConfig,
   getDatabaseDialect,
   resolveBindingNames,
   type DatabaseDialect,
 } from '../config.ts';
+import type { DatabaseProviderAdapter, DatabaseProviderDialect } from '../database-provider.ts';
 import {
   collectMigrations,
   readJournal,
@@ -71,6 +73,14 @@ type PgClient = {
   ): Promise<{ rows: Array<T> }>;
 };
 
+type MySqlClient = {
+  end(): Promise<void>;
+  query<T extends Array<Record<string, unknown>> = Array<Record<string, unknown>>>(
+    sql: string,
+    params?: Array<unknown>,
+  ): Promise<T>;
+};
+
 function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -115,11 +125,46 @@ function getPgUrl(root: string): string {
   return url;
 }
 
+function getMySqlUrl(root: string): string {
+  const url = readEnvLocal(root).DATABASE_URL;
+  if (!url) {
+    throw new Error(
+      'DATABASE_URL not found in .env.local. Add it to connect to your MySQL database.',
+    );
+  }
+  return url;
+}
+
 async function withPgClient<T>(root: string, fn: (client: PgClient) => Promise<T>): Promise<T> {
   const url = getPgUrl(root);
   const { Client } = await import('pg');
   const client: PgClient = new Client({ connectionString: url });
   await client.connect();
+  try {
+    return await fn(client);
+  } finally {
+    await client.end();
+  }
+}
+
+async function withMySqlClient<T>(
+  root: string,
+  fn: (client: MySqlClient) => Promise<T>,
+): Promise<T> {
+  const { createConnection } = await import('mysql2/promise');
+  const connection = await createConnection({ uri: getMySqlUrl(root), multipleStatements: true });
+  const client: MySqlClient = {
+    async query<T extends Array<Record<string, unknown>> = Array<Record<string, unknown>>>(
+      sql: string,
+      params?: Array<unknown>,
+    ): Promise<T> {
+      const [rows] = await connection.query(sql, params);
+      return (Array.isArray(rows) ? rows : []) as T;
+    },
+    async end() {
+      await connection.end();
+    },
+  };
   try {
     return await fn(client);
   } finally {
@@ -168,6 +213,8 @@ export async function runDbCommand(root: string, args: DbArgs): Promise<void> {
     await runStudio(root, dialect, args.remote);
   } else if (args.action === 'set-url') {
     await runSetUrl(root);
+  } else if (args.action === 'connect') {
+    await runConnect(root, dialect, args);
   } else if (args.action === 'rename-migrations') {
     await runRenameMigrations(root, dialect);
   } else {
@@ -175,16 +222,163 @@ export async function runDbCommand(root: string, args: DbArgs): Promise<void> {
   }
 }
 
+export function writeLocalDatabaseUrl(root: string, connectionString: string): void {
+  const envPath = join(root, '.env.local');
+  const original = existsSync(envPath) ? readFileSync(envPath, 'utf-8') : '';
+  const lines = original ? original.replace(/\r\n/g, '\n').split('\n') : [];
+  const assignment = `DATABASE_URL=${JSON.stringify(connectionString)}`;
+  const index = lines.findIndex((line) => /^\s*(?:export\s+)?DATABASE_URL\s*=/.test(line));
+  if (index === -1) {
+    while (lines.at(-1) === '') {
+      lines.pop();
+    }
+    if (lines.length > 0) {
+      lines.push('');
+    }
+    lines.push(assignment);
+  } else {
+    lines[index] = assignment;
+    for (let i = lines.length - 1; i > index; i--) {
+      if (/^\s*(?:export\s+)?DATABASE_URL\s*=/.test(lines[i])) {
+        lines.splice(i, 1);
+      }
+    }
+  }
+  while (lines.at(-1) === '') {
+    lines.pop();
+  }
+  writeFileSync(envPath, `${lines.join('\n')}\n`);
+}
+
+function assertDatabaseProvider(value: unknown, source: string): DatabaseProviderAdapter {
+  if (!value || typeof value !== 'object') {
+    throw new Error(`Database provider '${source}' did not export an adapter object.`);
+  }
+  const adapter = value as Partial<DatabaseProviderAdapter>;
+  if (
+    typeof adapter.id !== 'string' ||
+    typeof adapter.label !== 'string' ||
+    !Array.isArray(adapter.dialects) ||
+    typeof adapter.provision !== 'function'
+  ) {
+    throw new Error(`Database provider '${source}' does not implement DatabaseProviderAdapter.`);
+  }
+  return adapter as DatabaseProviderAdapter;
+}
+
+export async function loadDatabaseProvider(
+  root: string,
+  provider: string,
+): Promise<DatabaseProviderAdapter> {
+  if (provider === 'neon') {
+    const { createNeonDatabaseProvider } = await import('../database-providers/neon.ts');
+    return createNeonDatabaseProvider();
+  }
+
+  const requireFromProject = createRequire(join(root, 'package.json'));
+  let resolved: string;
+  try {
+    resolved =
+      provider.startsWith('.') || provider.startsWith('/')
+        ? resolve(root, provider)
+        : requireFromProject.resolve(provider);
+  } catch {
+    throw new Error(
+      `Could not resolve database provider adapter '${provider}' from this project. Install it first or pass a file path.`,
+    );
+  }
+  const mod = (await import(pathToFileURL(resolved).href)) as Record<string, unknown>;
+  return assertDatabaseProvider(mod.default ?? mod.databaseProvider, provider);
+}
+
+async function runConnect(
+  root: string,
+  dialect: DatabaseDialect,
+  args: {
+    url?: string;
+    provider?: string;
+    name?: string;
+    region?: string;
+    localOnly?: boolean;
+  },
+): Promise<void> {
+  if (dialect === 'sqlite') {
+    log.error(
+      'db: `void db connect` requires an external database. Set "database" to "pg" or "mysql" in void.json first.',
+    );
+    process.exit(1);
+  }
+
+  let connectionString = args.url;
+  if (args.provider) {
+    const adapter = await loadDatabaseProvider(root, args.provider);
+    if (!adapter.dialects.includes(dialect as DatabaseProviderDialect)) {
+      throw new Error(`${adapter.label} does not support the configured ${dialect} dialect.`);
+    }
+    log.info(`Provisioning ${adapter.label} database...`);
+    const result = await adapter.provision({
+      name: args.name ?? basename(root),
+      dialect,
+      region: args.region,
+    });
+    connectionString = result.connectionString;
+    log.success(`Provisioned ${adapter.label} database.`);
+    if (result.dashboardUrl) {
+      log.info(`Dashboard: ${result.dashboardUrl}`);
+    }
+  }
+
+  if (!connectionString) {
+    const { text: promptText, isCancel: isCancelCheck } = await import('@clack/prompts');
+    const answer = await promptText({
+      message: `Enter your ${dialect === 'mysql' ? 'MySQL' : 'PostgreSQL'} connection string:`,
+      placeholder:
+        dialect === 'mysql'
+          ? 'mysql://user:pass@host:3306/database'
+          : 'postgresql://user:pass@host:5432/database',
+    });
+    if (isCancelCheck(answer)) {
+      process.exit(0);
+    }
+    connectionString = answer as string;
+  }
+
+  const parsed = new URL(connectionString);
+  const allowedProtocols = dialect === 'mysql' ? ['mysql:'] : ['postgres:', 'postgresql:'];
+  if (!allowedProtocols.includes(parsed.protocol)) {
+    throw new Error(
+      `Connection string protocol '${parsed.protocol}' does not match the configured ${dialect} dialect.`,
+    );
+  }
+
+  writeLocalDatabaseUrl(root, connectionString);
+  log.success('Saved DATABASE_URL to .env.local.');
+
+  if (!args.localOnly) {
+    const token = getToken(root);
+    const projectConfig = readProjectConfig(root);
+    if (token && projectConfig) {
+      const client = new PlatformClient(token, { root });
+      await client.setDatabaseUrl(projectConfig.projectId, connectionString);
+      log.success('Updated the linked Void project database URL.');
+    } else {
+      log.info('No authenticated Void project is linked, so only local configuration was updated.');
+    }
+  }
+
+  outro('Database connected.');
+}
+
 async function runPush(root: string, dialect: DatabaseDialect): Promise<void> {
   const { writeDrizzleConfig } = await import('../drizzle/config.ts');
 
   let configPath: string;
-  if (dialect === 'postgresql') {
-    const url = getPgUrl(root);
-    configPath = writeDrizzleConfig(root, url, 'postgresql');
+  if (dialect !== 'sqlite') {
+    const url = dialect === 'mysql' ? getMySqlUrl(root) : getPgUrl(root);
+    configPath = writeDrizzleConfig(root, url, dialect);
   } else {
     const { mkdirSync } = await import('node:fs');
-    const { dirname } = await import('node:path');
+    const { dirname } = await import('pathslash');
     const { getMiniflareDatabasePath } = await import('../migrations/runner.ts');
     const persistRoot = getLocalD1PersistRoot(root);
     const dbPath = getMiniflareDatabasePath(persistRoot, 'local');
@@ -201,12 +395,27 @@ async function runPush(root: string, dialect: DatabaseDialect): Promise<void> {
 }
 
 async function runGenerate(root: string, dialect: DatabaseDialect): Promise<void> {
+  const { prepareProject } = await import('../codegen/prepare.ts');
   const { writeDrizzleConfig } = await import('../drizzle/config.ts');
 
-  const configPath =
+  // Generate the auth schema using the same production env mode Cloudflare deploy
+  // builds with, then include those tables in Drizzle Kit's schema input. This makes
+  // Better Auth tables ordinary, reviewable migration SQL instead of a deploy-time
+  // side effect. `prepareProject` removes a stale file when auth is no longer enabled.
+  await prepareProject(root, { mode: 'production' });
+  const authSchemaPath = join(root, '.void', 'better-auth-schema.ts');
+  const additionalSchemas = existsSync(authSchemaPath) ? [authSchemaPath] : undefined;
+
+  const configPath = writeDrizzleConfig(
+    root,
     dialect === 'postgresql'
-      ? writeDrizzleConfig(root, 'postgresql://dummy', 'postgresql')
-      : writeDrizzleConfig(root, ':memory:');
+      ? 'postgresql://dummy'
+      : dialect === 'mysql'
+        ? 'mysql://dummy'
+        : ':memory:',
+    dialect,
+    { additionalSchemas },
+  );
 
   try {
     runDrizzleKit(root, ['generate', '--config', configPath]);
@@ -243,6 +452,20 @@ async function runStatus(root: string, dialect: DatabaseDialect): Promise<void> 
             'SELECT name FROM _void_migrations ORDER BY name',
           );
           return result.rows;
+        } catch {
+          return [];
+        }
+      });
+    } catch {
+      localApplied = [];
+    }
+  } else if (dialect === 'mysql') {
+    try {
+      localApplied = await withMySqlClient(root, async (client) => {
+        try {
+          return (await client.query(
+            'SELECT `name` FROM `_void_migrations` ORDER BY `name`',
+          )) as Array<{ name: string }>;
         } catch {
           return [];
         }
@@ -355,6 +578,28 @@ async function resetDatabase(root: string, dialect: DatabaseDialect): Promise<nu
     return migrations.length;
   }
 
+  if (dialect === 'mysql') {
+    await withMySqlClient(root, async (client) => {
+      const tables = await client.query(
+        "SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE'",
+      );
+      await client.query('SET FOREIGN_KEY_CHECKS = 0');
+      try {
+        for (const row of tables) {
+          const table = String(row.table_name).replaceAll('`', '``');
+          await client.query(`DROP TABLE IF EXISTS \`${table}\``);
+        }
+      } finally {
+        await client.query('SET FOREIGN_KEY_CHECKS = 1');
+      }
+    });
+    if (migrations.length > 0) {
+      const { applyMySqlMigrations } = await import('../migrations/runner-mysql.ts');
+      await withMySqlClient(root, (client) => applyMySqlMigrations(client, migrations));
+    }
+    return migrations.length;
+  }
+
   const { getMiniflareDatabasePath, runMigrations } = await import('../migrations/runner.ts');
   const persistRoot = getLocalD1PersistRoot(root);
   const dbPath = getMiniflareDatabasePath(persistRoot, 'local');
@@ -370,7 +615,7 @@ async function resetDatabase(root: string, dialect: DatabaseDialect): Promise<nu
 async function runReset(root: string, dialect: DatabaseDialect): Promise<void> {
   const count = await resetDatabase(root, dialect);
   log.success(`Database reset. Applied ${count} migration(s).`);
-  if (dialect !== 'postgresql') {
+  if (dialect === 'sqlite') {
     log.info(dim("Restart your dev server if it's running."));
   }
   outro('Done.');
@@ -392,6 +637,15 @@ async function runSeed(
 
     if (dialect === 'postgresql') {
       await withPgClient(root, async (client) => {
+        await client.query(sql);
+      });
+      log.success(`Seeded from ${seed.displayPath}.`);
+      outro('Done.');
+      return;
+    }
+
+    if (dialect === 'mysql') {
+      await withMySqlClient(root, async (client) => {
         await client.query(sql);
       });
       log.success(`Seeded from ${seed.displayPath}.`);
@@ -523,7 +777,7 @@ async function runExecute(
 ): Promise<void> {
   if (remote) {
     // Reject --file with --remote D1 before reading the file or prompting.
-    if (dialect !== 'postgresql' && file) {
+    if (dialect === 'sqlite' && file) {
       log.error(
         '--file is not yet supported with --remote D1; pipe statements through stdin or run them one at a time.',
       );
@@ -550,23 +804,38 @@ async function runExecute(
       process.exit(0);
     }
 
-    if (dialect === 'postgresql') {
-      // PG remote: fetch the connection string from the platform, then connect directly.
+    if (dialect !== 'sqlite') {
+      // External database: fetch the connection string from the platform, then connect directly.
       const client = new PlatformClient(token, { root });
       const dbUrl = await fetchRemoteDatabaseUrl(client, projectConfig.projectId);
 
-      const { Client } = await import('pg');
-      const pgClient: PgClient = new Client({ connectionString: dbUrl });
-      await pgClient.connect();
-      try {
-        const result = await pgClient.query(sql);
-        if (result.rows && result.rows.length > 0) {
-          printTable(result.rows);
-        } else {
-          log.success('Executed successfully.');
+      if (dialect === 'postgresql') {
+        const { Client } = await import('pg');
+        const pgClient: PgClient = new Client({ connectionString: dbUrl });
+        await pgClient.connect();
+        try {
+          const result = await pgClient.query(sql);
+          if (result.rows && result.rows.length > 0) {
+            printTable(result.rows);
+          } else {
+            log.success('Executed successfully.');
+          }
+        } finally {
+          await pgClient.end();
         }
-      } finally {
-        await pgClient.end();
+      } else {
+        const { createConnection } = await import('mysql2/promise');
+        const mySqlClient = await createConnection({ uri: dbUrl, multipleStatements: true });
+        try {
+          const [rows] = await mySqlClient.query(sql);
+          if (Array.isArray(rows) && rows.length > 0) {
+            printTable(rows as Array<Record<string, unknown>>);
+          } else {
+            log.success('Executed successfully.');
+          }
+        } finally {
+          await mySqlClient.end();
+        }
       }
       outro('Done.');
       return;
@@ -634,6 +903,20 @@ async function runExecute(
       const result = await client.query(sql);
       if (result.rows && result.rows.length > 0) {
         printTable(result.rows);
+      } else {
+        log.success('Executed successfully.');
+      }
+    });
+    outro('Done.');
+    return;
+  }
+
+  if (dialect === 'mysql') {
+    const sql = file ? readFileSync(join(root, file), 'utf-8') : command!;
+    await withMySqlClient(root, async (client) => {
+      const rows = await client.query(sql);
+      if (rows.length > 0) {
+        printTable(rows);
       } else {
         log.success('Executed successfully.');
       }
@@ -712,9 +995,9 @@ async function runMigrate(root: string, dialect: DatabaseDialect, remote?: boole
   }
 
   if (remote) {
-    if (dialect === 'postgresql') {
+    if (dialect !== 'sqlite') {
       log.error(
-        'db: `void db migrate --remote` is only supported for D1 projects. PostgreSQL remote migrations run during `void deploy` through the project Hyperdrive binding.',
+        `db: \`void db migrate --remote\` is only supported for D1 projects. ${dialect === 'mysql' ? 'MySQL' : 'PostgreSQL'} remote migrations run during \`void deploy\` through the project Hyperdrive binding.`,
       );
       process.exit(1);
     }
@@ -826,6 +1109,40 @@ async function runMigrate(root: string, dialect: DatabaseDialect, remote?: boole
     return;
   }
 
+  if (dialect === 'mysql') {
+    const { applyMySqlMigrations } = await import('../migrations/runner-mysql.ts');
+    const applied = await withMySqlClient(root, async (client) => {
+      let existingRows: Array<{ name: string }> = [];
+      try {
+        existingRows = await client.query<Array<{ name: string }>>(
+          'SELECT `name` FROM `_void_migrations`',
+        );
+      } catch {
+        existingRows = [];
+      }
+
+      try {
+        validatePendingMigrations(rawMigrations, new Set(existingRows.map((row) => row.name)));
+      } catch (err: unknown) {
+        log.error(getErrorMessage(err));
+        process.exit(1);
+      }
+
+      return applyMySqlMigrations(client, rawMigrations);
+    });
+
+    if (applied.length === 0) {
+      log.info('All migrations are up to date.');
+    } else {
+      for (const name of applied) {
+        log.step(name);
+      }
+      log.success(`Applied ${applied.length} migration(s).`);
+    }
+    outro('Done.');
+    return;
+  }
+
   const { getMiniflareDatabasePath, getAppliedMigrations, runMigrations } =
     await import('../migrations/runner.ts');
   const persistRoot = getLocalD1PersistRoot(root);
@@ -854,14 +1171,14 @@ async function runMigrate(root: string, dialect: DatabaseDialect, remote?: boole
 
 async function runStudio(root: string, dialect: DatabaseDialect, remote?: boolean): Promise<void> {
   if (remote) {
-    if (dialect !== 'postgresql') {
+    if (dialect === 'sqlite') {
       log.error(
         'Remote D1 studio is not yet supported. Use `void db execute --remote` for ad-hoc queries against your deployed D1 database.',
       );
       process.exit(1);
     }
 
-    // PG remote: fetch the connection URL from the platform, then open Studio against it.
+    // External database: fetch the connection URL, then open Studio against it.
     const token = getToken(root);
     if (!token) {
       log.error('Not logged in. Run `void auth login` first.');
@@ -878,7 +1195,7 @@ async function runStudio(root: string, dialect: DatabaseDialect, remote?: boolea
     const dbUrl = await fetchRemoteDatabaseUrl(client, projectConfig.projectId);
 
     const { writeDrizzleConfig } = await import('../drizzle/config.ts');
-    const configPath = writeDrizzleConfig(root, dbUrl, 'postgresql');
+    const configPath = writeDrizzleConfig(root, dbUrl, dialect);
 
     log.info('Opening Drizzle Studio (remote)...');
     try {
@@ -889,10 +1206,10 @@ async function runStudio(root: string, dialect: DatabaseDialect, remote?: boolea
     return;
   }
 
-  if (dialect === 'postgresql') {
+  if (dialect !== 'sqlite') {
     const { writeDrizzleConfig } = await import('../drizzle/config.ts');
-    const url = getPgUrl(root);
-    const configPath = writeDrizzleConfig(root, url, 'postgresql');
+    const url = dialect === 'mysql' ? getMySqlUrl(root) : getPgUrl(root);
+    const configPath = writeDrizzleConfig(root, url, dialect);
 
     log.info('Opening Drizzle Studio...');
     try {
@@ -1319,6 +1636,40 @@ async function runRenameMigrations(root: string, dialect: DatabaseDialect): Prom
       log.error(String(err));
       process.exit(1);
     }
+  } else if (dialect === 'mysql') {
+    try {
+      await withMySqlClient(root, async (client) => {
+        const rows = await client.query<Array<{ table_name: string }>>(
+          "SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = '_void_migrations' LIMIT 1",
+        );
+        if (rows.length === 0) {
+          return;
+        }
+        for (const { from, to } of renames) {
+          await client.query('UPDATE `_void_migrations` SET `name` = ? WHERE `name` = ?', [
+            to,
+            from,
+          ]);
+        }
+      });
+    } catch (err) {
+      reverseSnapshotRenames();
+      for (const { from, to } of renames) {
+        try {
+          renameSync(join(migrationsDir, to), join(migrationsDir, from));
+        } catch {
+          // best-effort rollback
+        }
+      }
+      restoreJournal();
+      await reverseRemote();
+      log.error(
+        'db: Failed to update MySQL tracking table. File renames have been reverted.\n' +
+          'Fix the database connection and run `void db rename-migrations` again.',
+      );
+      log.error(String(err));
+      process.exit(1);
+    }
   } else {
     const { getMiniflareDatabasePath, openSqliteDatabase } =
       await import('../migrations/runner.ts');
@@ -1373,6 +1724,23 @@ async function runRenameMigrations(root: string, dialect: DatabaseDialect): Prom
 
   log.success(`Renamed ${renames.length} migration(s) to timestamp format.`);
   outro('Done.');
+}
+
+function formatMySqlExportValue(value: unknown): string {
+  if (value === null || value === undefined) {
+    return 'NULL';
+  }
+  if (typeof value === 'number' || typeof value === 'bigint') {
+    return String(value);
+  }
+  if (typeof value === 'boolean') {
+    return value ? '1' : '0';
+  }
+  if (value instanceof Uint8Array) {
+    return `X'${Array.from(value, (byte) => byte.toString(16).padStart(2, '0')).join('')}'`;
+  }
+  const serialized = value instanceof Date ? value.toISOString() : String(value);
+  return `'${serialized.replaceAll('\\', '\\\\').replaceAll("'", "''")}'`;
 }
 
 async function runExport(
@@ -1437,6 +1805,65 @@ async function runExport(
               return `'${String(value).replace(/'/g, "''")}'`;
             });
             parts.push(`INSERT INTO "${table}" (${cols.join(', ')}) VALUES (${vals.join(', ')});`);
+          }
+        }
+        parts.push('');
+      }
+    });
+
+    const output = parts.join('\n');
+    if (args.output) {
+      writeFileSync(join(root, args.output), output);
+      log.success(`Exported to ${args.output}`);
+      outro('Done.');
+    } else {
+      process.stdout.write(output);
+    }
+    return;
+  }
+
+  if (dialect === 'mysql') {
+    const parts: Array<string> = [];
+    await withMySqlClient(root, async (client) => {
+      let tables: Array<string>;
+      if (args.table) {
+        const rows = await client.query<Array<{ table_name: string }>>(
+          'SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?',
+          [args.table],
+        );
+        if (rows.length === 0) {
+          log.error(`db: Table '${args.table}' not found.`, errOut);
+          process.exit(1);
+        }
+        tables = [args.table];
+      } else {
+        const rows = await client.query<Array<{ table_name: string }>>(
+          "SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE' AND table_name NOT LIKE '\\_%' ORDER BY table_name",
+        );
+        tables = rows.map((row) => String(row.table_name));
+      }
+
+      for (const table of tables) {
+        const escapedTable = table.replaceAll('`', '``');
+        if (!args.noSchema) {
+          const rows = await client.query<Array<Record<string, unknown>>>(
+            `SHOW CREATE TABLE \`${escapedTable}\``,
+          );
+          const createSql = rows[0]?.['Create Table'];
+          if (createSql) {
+            parts.push(`${String(createSql)};`);
+          }
+        }
+
+        if (!args.noData) {
+          const rows = await client.query(`SELECT * FROM \`${escapedTable}\``);
+          for (const row of rows) {
+            const columns = Object.keys(row);
+            const values = columns.map((column) => formatMySqlExportValue(row[column]));
+            const names = columns.map((column) => `\`${column.replaceAll('`', '``')}\``);
+            parts.push(
+              `INSERT INTO \`${escapedTable}\` (${names.join(', ')}) VALUES (${values.join(', ')});`,
+            );
           }
         }
         parts.push('');
@@ -1536,9 +1963,9 @@ async function runSetUrl(root: string): Promise<void> {
   const config = readVoidConfig(root);
   const dialect = getDialect(config);
 
-  if (dialect !== 'postgresql') {
+  if (dialect === 'sqlite') {
     log.error(
-      'db: This command is only for PostgreSQL projects. Set "database": "pg" in void.json.',
+      'db: This command is only for PostgreSQL and MySQL projects. Set "database" to "pg" or "mysql" in void.json.',
     );
     process.exit(1);
   }
@@ -1558,10 +1985,17 @@ async function runSetUrl(root: string): Promise<void> {
   const { text: promptText, isCancel: isCancelCheck } = await import('@clack/prompts');
 
   const connectionString = await promptText({
-    message: 'Enter your PostgreSQL connection string:',
-    placeholder: 'postgresql://user:pass@host:5432/dbname',
+    message: `Enter your ${dialect === 'mysql' ? 'MySQL' : 'PostgreSQL'} connection string:`,
+    placeholder:
+      dialect === 'mysql'
+        ? 'mysql://user:pass@host:3306/dbname'
+        : 'postgresql://user:pass@host:5432/dbname',
     validate(value = '') {
-      if (!value.startsWith('postgres://') && !value.startsWith('postgresql://')) {
+      if (dialect === 'mysql') {
+        if (!value.startsWith('mysql://')) {
+          return 'Connection string must start with "mysql://"';
+        }
+      } else if (!value.startsWith('postgres://') && !value.startsWith('postgresql://')) {
         return 'Connection string must start with "postgres://" or "postgresql://"';
       }
     },
@@ -1640,6 +2074,22 @@ async function runSeedModule(
       const db = options ? drizzle(drizzleClient, options) : drizzle(drizzleClient);
       await seed({ dialect, db, schema });
     });
+    return;
+  }
+
+  if (dialect === 'mysql') {
+    const { drizzle } = await import('drizzle-orm/mysql2');
+    const { createConnection } = await import('mysql2/promise');
+    const connection = await createConnection(getMySqlUrl(root));
+    try {
+      const options = getDrizzleSchemaOptions(schema);
+      const db = options
+        ? drizzle(connection, { ...options, mode: 'default' })
+        : drizzle(connection);
+      await seed({ dialect, db, schema });
+    } finally {
+      await connection.end();
+    }
     return;
   }
 

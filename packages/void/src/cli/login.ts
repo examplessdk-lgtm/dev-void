@@ -19,7 +19,7 @@ export async function promptForLoginToken(root: string = process.cwd()): Promise
     ],
   });
 
-  if (isCancel(provider)) {
+  if (isCancel(provider) || typeof provider === 'symbol') {
     cancel('Login cancelled.');
     process.exit(0);
   }

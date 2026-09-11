@@ -1,0 +1,78 @@
+name: Platform CI
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'platform/**'
+      - 'packages/**'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - 'vite.config.ts'
+      - '.github/workflows/platform-*.yml'
+  workflow_call:
+
+permissions: {}
+
+jobs:
+  build-api-container:
+    if: github.event_name == 'pull_request'
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build API build container
+        run: docker build --pull --tag void-api-build-container:ci platform/packages/api/container
+
+  lint-build-check:
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: voidzero-dev/setup-vp@1b32467adbe183473499fd9d5d372c3ed9641754 # v1.18.0
+        with:
+          cache: true
+          node-version-file: .node-version
+      - run: vp fmt --check
+      - run: vp lint
+      - run: vp run lint:platform
+      - run: vp run build
+      - run: vp run --filter './platform/packages/**' build
+      - run: vp run check
+
+  test:
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [platform-unit, platform-api-integration]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: voidzero-dev/setup-vp@1b32467adbe183473499fd9d5d372c3ed9641754 # v1.18.0
+        with:
+          cache: true
+          node-version-file: .node-version
+      - run: vp run build
+      - run: vp run --filter './platform/packages/**' build
+      - run: vp test run --project ${{ matrix.project }}
+
+  # The former repository compared migrations against its `prod` branch. The merged repository's
+  # production ref has intentionally not been chosen yet, so this job remains visible but inert
+  # until the deployment-cutover change supplies the authoritative ref.
+  schema-compat:
+    if: ${{ false }}
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - run: echo 'Enable after choosing the merged repository production ref.'

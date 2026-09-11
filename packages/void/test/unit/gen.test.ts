@@ -1044,10 +1044,9 @@ describe('gen migration', () => {
     expect(generateCall!.args).toContain('--name');
   });
 
-  it('refuses when the journal dialect is not sqlite or postgresql', async () => {
-    // Round 42: whitelist the two dialects void actually supports. A
-    // hand-edited or merge-corrupted journal with e.g. `mysql`,
-    // `mariadb`, `pg`, or an empty string must not be silently
+  it('refuses when the journal dialect is unsupported', async () => {
+    // A hand-edited or merge-corrupted journal with e.g. `mariadb`,
+    // `pg`, or an empty string must not be silently
     // coerced to sqlite. The refusal happens BEFORE the dialect
     // cross-check against `void.json`, so the user sees a clear
     // "unsupported dialect" error regardless of what `void.json`
@@ -1058,7 +1057,7 @@ describe('gen migration', () => {
     const journalPath = join(migrationsDir, 'meta', '_journal.json');
     const initialJournal = {
       version: '7',
-      dialect: 'mysql',
+      dialect: 'mariadb',
       entries: [
         {
           idx: 0,
@@ -1076,7 +1075,7 @@ describe('gen migration', () => {
       JSON.stringify(
         {
           version: '6',
-          dialect: 'mysql',
+          dialect: 'mariadb',
           id: '33333333-3333-3333-3333-333333333333',
           prevId: '00000000-0000-0000-0000-000000000000',
           tables: { users: { name: 'users' } },
@@ -1086,7 +1085,7 @@ describe('gen migration', () => {
       ),
     );
     // `void.json` dialect is irrelevant — the whitelist fires first.
-    writeFileSync(join(TMP, 'void.json'), JSON.stringify({ database: 'd1' }));
+    writeFileSync(join(TMP, 'void.json'), JSON.stringify({}));
 
     const { log } = await import('@clack/prompts');
     const errorMock = log.error as ReturnType<typeof vi.fn>;
@@ -1104,7 +1103,7 @@ describe('gen migration', () => {
     // offending value so the user knows which field to reconcile.
     const errorMessages = errorMock.mock.calls.map((call) => String(call[0])).join('\n');
     expect(errorMessages).toContain('unsupported dialect');
-    expect(errorMessages).toContain('mysql');
+    expect(errorMessages).toContain('mariadb');
     expect(errorMessages).toContain('_journal.json');
 
     // Drizzle-kit must NOT have been spawned — whitelist fires before
@@ -2340,5 +2339,30 @@ describe('gen model (postgresql)', () => {
 
     const barrel = read('db/schema.ts');
     expect(barrel).toContain('export * from "./schema/posts"');
+  });
+});
+
+describe('gen model (mysql)', () => {
+  it('generates mysqlTable definitions with native MySQL columns', async () => {
+    writePkg({ valibot: '^1.0.0' });
+    writeFileSync(join(TMP, 'void.json'), JSON.stringify({ database: 'mysql' }));
+
+    await runGenCommand(TMP, {
+      subcommand: 'model',
+      name: 'products',
+      columns: [
+        { name: 'title', type: 'string', nullable: false },
+        { name: 'active', type: 'boolean', nullable: false },
+        { name: 'price', type: 'real', nullable: false },
+      ],
+    });
+
+    const schema = read('db/schema/products.ts');
+    expect(schema).toContain('mysqlTable');
+    expect(schema).toContain('from "void/schema-mysql"');
+    expect(schema).toContain('int("id").autoincrement().primaryKey()');
+    expect(schema).toContain('boolean("active")');
+    expect(schema).toContain('double("price")');
+    expect(schema).not.toContain('sqliteTable');
   });
 });

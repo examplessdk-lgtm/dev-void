@@ -7,11 +7,11 @@
     "dev": "nuxt dev"
   },
   "dependencies": {
-    "nuxt": "^4.4.8"
+    "nuxt": "^4.5.2"
   },
   "devDependencies": {
-    "@typescript/native-preview": "catalog:",
     "pathslash": "catalog:",
+    "typescript": "catalog:",
     "vite": "catalog:",
     "vite-plus": "catalog:",
     "void": "workspace:*",

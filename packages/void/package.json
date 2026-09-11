@@ -42,6 +42,7 @@
     "#self/runtime/isr-cache": "./dist/runtime/isr-cache.mjs",
     "#self/runtime/migration-handler": "./dist/runtime/migration-handler.mjs",
     "#self/runtime/migration-handler-pg": "./dist/runtime/migration-handler-pg.mjs",
+    "#self/runtime/migration-handler-mysql": "./dist/runtime/migration-handler-mysql.mjs",
     "#self/runtime/ws-server": "./dist/runtime/ws-server.mjs"
   },
   "exports": {
@@ -51,6 +52,11 @@
       "require": "./dist/index.mjs"
     },
     "./schema.json": "./schema.json",
+    "./database-provider": {
+      "types": "./dist/database-provider.d.mts",
+      "import": "./dist/database-provider.mjs",
+      "require": "./dist/database-provider.mjs"
+    },
     "./handler": {
       "types": "./dist/runtime/handler.d.mts",
       "import": "./dist/runtime/handler.mjs",
@@ -144,6 +150,11 @@
       "import": "./dist/runtime/db.mjs",
       "require": "./dist/runtime/db.mjs"
     },
+    "./durable": {
+      "types": "./dist/runtime/durable.d.mts",
+      "import": "./dist/runtime/durable.mjs",
+      "require": "./dist/runtime/durable.mjs"
+    },
     "./seed": {
       "types": "./dist/runtime/seed.d.mts",
       "import": "./dist/runtime/seed.mjs",
@@ -173,6 +184,11 @@
       "types": "./dist/runtime/schema-pg.d.mts",
       "import": "./dist/runtime/schema-pg.mjs",
       "require": "./dist/runtime/schema-pg.mjs"
+    },
+    "./schema-mysql": {
+      "types": "./dist/runtime/schema-mysql.d.mts",
+      "import": "./dist/runtime/schema-mysql.mjs",
+      "require": "./dist/runtime/schema-mysql.mjs"
     },
     "./kv": {
       "types": "./dist/runtime/kv.d.mts",
@@ -238,6 +254,11 @@
       "types": "./dist/runtime/migration-handler-pg.d.mts",
       "import": "./dist/runtime/migration-handler-pg.mjs",
       "require": "./dist/runtime/migration-handler-pg.mjs"
+    },
+    "./runtime/migration-handler-mysql": {
+      "types": "./dist/runtime/migration-handler-mysql.d.mts",
+      "import": "./dist/runtime/migration-handler-mysql.mjs",
+      "require": "./dist/runtime/migration-handler-mysql.mjs"
     },
     "./runtime/ws-server": {
       "types": "./dist/runtime/ws-server.d.mts",
@@ -317,57 +338,63 @@
       "types": "./dist/runtime/db-pg.d.mts",
       "import": "./dist/runtime/db-pg.mjs",
       "require": "./dist/runtime/db-pg.mjs"
+    },
+    "./_db-mysql": {
+      "types": "./dist/runtime/db-mysql.d.mts",
+      "import": "./dist/runtime/db-mysql.mjs",
+      "require": "./dist/runtime/db-mysql.mjs"
     }
   },
   "scripts": {
     "build": "node scripts/sync-skill-docs.mjs && vp pack",
     "dev": "vp pack --watch",
-    "typecheck": "tsgo --noEmit"
+    "typecheck": "tsc --noEmit --rootDir ../.."
   },
   "dependencies": {
-    "@cloudflare/sandbox": "^0.12.3",
-    "@cloudflare/vite-plugin": "^1.54.7",
+    "@cloudflare/sandbox": "^0.12.9",
+    "@cloudflare/vite-plugin": "1.54.7",
     "@cloudflare/workers-types": "catalog:",
-    "@hono/oauth-providers": "^0.8.5",
-    "@napi-rs/keyring": "1.3.0",
-    "better-auth": "^1.6.23",
-    "better-sqlite3": "^12.11.1",
+    "@hono/oauth-providers": "^0.9.0",
+    "@napi-rs/keyring": "2.0.0",
+    "better-auth": "^1.7.3",
+    "better-sqlite3": "^13.0.3",
     "blake3-jit": "^1.1.0",
     "drizzle-arktype": "^0.1.3",
     "drizzle-kit": "^0.31.10",
     "drizzle-orm": "^0.45.2",
     "drizzle-valibot": "^0.4.2",
     "drizzle-zod": "^0.8.3",
-    "es-module-lexer": "^2.3.0",
-    "hono": "^4.12.27",
-    "ignore": "^7.0.5",
+    "es-module-lexer": "^3.0.2",
+    "hono": "^4.13.7",
+    "ignore": "^7.0.9",
     "jsonc-parser": "3.3.1",
-    "pg": "8.22.0",
+    "mysql2": "3.24.4",
+    "pg": "8.23.0",
     "postal-mime": "^2.7.4",
     "proper-lockfile": "^4.1.2",
     "wrangler": "catalog:"
   },
   "devDependencies": {
     "@clack/prompts": "catalog:",
-    "@electric-sql/pglite": "0.5.4",
-    "@types/better-sqlite3": "^7.6.13",
+    "@electric-sql/pglite": "0.5.8",
+    "@types/better-sqlite3": "^9.6.0",
     "@types/node": "catalog:",
-    "@types/pg": "^8.20.0",
+    "@types/pg": "^8.23.1",
     "@types/proper-lockfile": "^4.1.4",
-    "@typescript/native-preview": "catalog:",
-    "arktype": "^2.2.2",
+    "arktype": "^2.2.3",
     "ci-info": "^4.4.0",
     "estree-walker": "^3.0.3",
-    "magic-string": "^0.30.21",
+    "magic-string": "^1.3.1",
     "ofetch": "2.0.0-alpha.3",
     "pathslash": "catalog:",
     "pglite-server": "0.1.5",
     "picocolors": "^1.1.1",
     "tinyglobby": "^0.2.17",
-    "valibot": "^1.4.2",
+    "typescript": "catalog:",
+    "valibot": "^1.5.0",
     "vite": "catalog:",
     "vite-plus": "catalog:",
-    "zod": "^4.4.3"
+    "zod": "^4.6.1"
   },
   "peerDependencies": {
     "@void/md": "workspace:*",

@@ -20,18 +20,17 @@ import { getDatabaseDialect, readConfig, type DatabaseDialect } from '../config.
 import { writeDrizzleConfig } from '../drizzle/config.ts';
 import { detectFramework, type DetectedFramework } from '../plugin-inference.ts';
 import { readProjectPaths } from '../project-paths.ts';
-import {
-  detectAgents,
-  getAgentById,
-  getPackageDir,
-  type AgentConfig,
-  type McpConfigTarget,
-} from './agents.ts';
+import { detectAgents, getAgentById, getPackageDir, type AgentConfig } from './agents.ts';
 import { maybeSetupDeployProject } from './deploy-setup.ts';
 import { maybeScaffoldEnvTs } from './env-scaffold.ts';
 import { cliTitle } from './output.ts';
-import { formatProjectCommand } from './preset.ts';
-import { readProjectConfig } from './project.ts';
+import { formatProjectCommand, resolveWranglerArgv } from './preset.ts';
+import {
+  readDeploymentPlatform,
+  readProjectConfig,
+  writeDeploymentPlatform,
+  type DeploymentPlatform,
+} from './project.ts';
 import {
   createPagesStarterTemplate,
   detectScaffoldFrameworkFromDependencies,
@@ -45,6 +44,7 @@ import {
   type ScaffoldStarterMode,
   type ScaffoldToolchain,
 } from './template.ts';
+import { writeProvisionedWranglerConfig } from './wrangler.ts';
 import {
   buildDrizzleKitSpawnEnv,
   findInstalledYarnPnpRuntime,
@@ -134,10 +134,10 @@ const EMPTY_PROJECT_ALLOWED_PACKAGES = new Set([
   'vite',
   'vite-plus',
   'typescript',
-  '@typescript/native-preview',
   '@rolldown/plugin-babel',
   '@vitejs/plugin-react',
   'babel-plugin-react-compiler',
+  'oxc-transform-react',
   '@types/react',
   '@types/react-dom',
   'react',
@@ -599,7 +599,7 @@ async function resolveInitRoot(root: string): Promise<string> {
     validate: (value) => validateSubfolderName(root, value),
   });
 
-  if (isCancel(folder)) {
+  if (isCancel(folder) || typeof folder === 'symbol') {
     cancel('Setup cancelled.');
     process.exit(0);
   }
@@ -1271,7 +1271,7 @@ export function detectProjectState(root: string): ProjectState {
       ...(asRecord(pkgRecord.dependencies) ?? {}),
       ...(asRecord(pkgRecord.devDependencies) ?? {}),
     };
-    hasTypescript = 'typescript' in allDeps || '@typescript/native-preview' in allDeps;
+    hasTypescript = 'typescript' in allDeps;
   } catch {
     // no package.json
   }
@@ -1589,60 +1589,22 @@ function setupWranglerConfig(root: string, framework: DetectedFramework): void {
     return;
   }
 
-  let configPath: string | undefined;
-  let parsed: Record<string, unknown> | undefined;
-  let created = false;
+  const hadConfig = ['wrangler.jsonc', 'wrangler.json'].some((name) =>
+    existsSync(join(root, name)),
+  );
+  const result = writeProvisionedWranglerConfig(root, {
+    compatibilityDate: getTodayCompatDate(),
+    compatibilityFlags: ['nodejs_als'],
+  });
 
-  for (const name of ['wrangler.jsonc', 'wrangler.json']) {
-    const p = join(root, name);
-    if (existsSync(p)) {
-      configPath = p;
-      try {
-        const raw = readFileSync(p, 'utf-8');
-        const errors: Array<ParseError> = [];
-        parsed = parse(raw, errors);
-        if (errors.length > 0) {
-          throw new SyntaxError('Failed to parse JSONC');
-        }
-      } catch {
-        // unparseable — start fresh
-      }
-      break;
-    }
-  }
-
-  if (!configPath || !parsed) {
-    configPath = join(root, 'wrangler.jsonc');
-    parsed = {};
-    created = true;
-  }
-
-  let modified = false;
-
-  // Ensure compatibility_date
-  if (!parsed.compatibility_date) {
-    parsed.compatibility_date = getTodayCompatDate();
-    modified = true;
-  }
-
-  // Ensure nodejs_als flag
-  const flags = Array.isArray(parsed.compatibility_flags)
-    ? (parsed.compatibility_flags as Array<string>)
-    : [];
-  if (!flags.includes('nodejs_als')) {
-    parsed.compatibility_flags = [...flags, 'nodejs_als'];
-    modified = true;
-  }
-
-  if (created || modified) {
-    writeFileSync(configPath, JSON.stringify(parsed, null, 2) + '\n');
-    if (created) {
-      log.success('Created wrangler.jsonc with compatibility_date and nodejs_als');
-    } else {
-      log.success('Updated wrangler.jsonc with compatibility_date and nodejs_als');
-    }
+  if (result.modified) {
+    log.success(
+      hadConfig
+        ? 'Updated wrangler config with compatibility_date and nodejs_als'
+        : 'Created wrangler.jsonc with compatibility_date and nodejs_als',
+    );
   } else {
-    log.success('wrangler.jsonc looks good');
+    log.success(`${basename(result.configPath)} looks good`);
   }
 }
 
@@ -1688,7 +1650,7 @@ function clearConfiguredDatabase(
   const config = readConfig(root) as Record<string, unknown>;
   const configPath = join(root, VOID_CONFIG_FILE);
 
-  if (config.database !== 'pg') {
+  if (config.database !== 'pg' && config.database !== 'mysql') {
     log.info(messages.unchanged);
     return;
   }
@@ -1720,6 +1682,18 @@ function applyDatabaseDialect(root: string, dialect: DatabaseDialect): void {
     return;
   }
 
+  if (dialect === 'mysql') {
+    if (config.database === 'mysql') {
+      log.info('MySQL already configured in void.json');
+      return;
+    }
+
+    config.database = 'mysql';
+    writeVoidConfig(root, config);
+    log.success('Configured MySQL in void.json');
+    return;
+  }
+
   clearConfiguredDatabase(root, {
     unchanged: 'Using default D1 (SQLite) configuration',
     updated: 'Updated void.json to use the default D1 (SQLite) configuration',
@@ -1727,8 +1701,9 @@ function applyDatabaseDialect(root: string, dialect: DatabaseDialect): void {
 }
 
 function detectDatabaseSetup(root: string): DatabaseSetupChoice {
-  if (getDatabaseDialect(readConfig(root)) === 'postgresql') {
-    return 'postgresql';
+  const dialect = getDatabaseDialect(readConfig(root));
+  if (dialect !== 'sqlite') {
+    return dialect;
   }
   if (
     hasDrizzleSchema(root) ||
@@ -1767,6 +1742,11 @@ async function promptStarterMode(): Promise<ScaffoldStarterMode> {
         hint: 'Scaffolds the same starter with PostgreSQL, a generated migration, a seed file, and writes "database": "pg" to void.json.',
       },
       {
+        value: 'mysql',
+        label: 'MySQL',
+        hint: 'Scaffolds the same starter with MySQL, a generated migration, a seed file, and writes "database": "mysql" to void.json.',
+      },
+      {
         value: 'static',
         label: 'Static Pages',
         hint: 'No database or server starter files yet. Good for content sites; add Void features later.',
@@ -1774,7 +1754,7 @@ async function promptStarterMode(): Promise<ScaffoldStarterMode> {
     ],
   });
 
-  if (isCancel(choice)) {
+  if (isCancel(choice) || typeof choice === 'symbol') {
     cancel('Setup cancelled.');
     process.exit(0);
   }
@@ -1830,9 +1810,14 @@ async function promptDatabaseSetup(root: string): Promise<DatabaseSetupChoice> {
         hint: 'Bring your own Postgres via Hyperdrive; best for write-heavy apps, complex queries, or existing infra.',
       },
       {
+        value: 'mysql',
+        label: currentSetup === 'mysql' ? 'MySQL [current]' : 'MySQL',
+        hint: 'Bring your own MySQL via Hyperdrive; ideal for existing MySQL infrastructure and compatible providers.',
+      },
+      {
         value: 'none',
         label: 'No Database Yet',
-        hint: 'Skip database setup for now. You can add D1 or PostgreSQL later as your app grows.',
+        hint: 'Skip database setup for now. You can add D1, PostgreSQL, or MySQL later as your app grows.',
       },
     ],
   });
@@ -1843,6 +1828,178 @@ async function promptDatabaseSetup(root: string): Promise<DatabaseSetupChoice> {
   }
 
   return choice as DatabaseSetupChoice;
+}
+
+async function promptDeploymentPlatform(root: string): Promise<DeploymentPlatform> {
+  const current = readDeploymentPlatform(root);
+  const choice = await select({
+    message: 'Where should this project deploy?',
+    initialValue: current ?? 'cloudflare',
+    options: [
+      {
+        value: 'cloudflare',
+        label: current === 'cloudflare' ? 'Cloudflare [current]' : 'Cloudflare',
+        hint: 'Deploy to your own Cloudflare account. (default)',
+      },
+      {
+        value: 'void',
+        label: current === 'void' ? 'Void [current]' : 'Void',
+        hint: 'Deploy to the managed Void Platform.',
+      },
+      {
+        value: 'none',
+        label: current === 'none' ? 'Skip deployment setup [current]' : 'Skip deployment setup',
+        hint: 'Use Void locally or deploy another way.',
+      },
+    ],
+  });
+
+  if (isCancel(choice) || typeof choice === 'symbol') {
+    cancel('Setup cancelled.');
+    process.exit(0);
+  }
+
+  const platform = choice as DeploymentPlatform;
+  writeDeploymentPlatform(root, platform);
+  return platform;
+}
+
+type CloudflareAccount = {
+  id: string;
+  name: string;
+};
+
+function parseCloudflareAccounts(stdout: string): Array<CloudflareAccount> | null {
+  let value: unknown;
+  try {
+    value = JSON.parse(stdout.trim());
+  } catch {
+    return null;
+  }
+  const record = asRecord(value);
+  if (record?.loggedIn !== true || !Array.isArray(record.accounts)) {
+    return null;
+  }
+
+  const accounts: Array<CloudflareAccount> = [];
+  for (const account of record.accounts) {
+    const item = asRecord(account);
+    if (!item || typeof item.id !== 'string' || item.id.length === 0) {
+      continue;
+    }
+    accounts.push({
+      id: item.id,
+      name:
+        typeof item.name === 'string' && item.name.length > 0 ? item.name : 'Cloudflare account',
+    });
+  }
+  return accounts;
+}
+
+function runInitWrangler(
+  root: string,
+  args: Array<string>,
+  capture: boolean,
+): { status: number | null; stdout: string; stderr: string } {
+  const [command, ...prefix] = resolveWranglerArgv(root);
+  const result = spawnSync(command, [...prefix, ...args], {
+    cwd: root,
+    encoding: 'utf-8',
+    stdio: capture ? ['ignore', 'pipe', 'pipe'] : 'inherit',
+  });
+  return {
+    status: result.status,
+    stdout: typeof result.stdout === 'string' ? result.stdout : '',
+    stderr: typeof result.stderr === 'string' ? result.stderr : '',
+  };
+}
+
+async function setupCloudflareDeployment(root: string): Promise<void> {
+  const compatibilityDate = readProjectWranglerCompatDate(root) ?? getTodayCompatDate();
+  const initialWrite = writeProvisionedWranglerConfig(root, { compatibilityDate });
+  if (initialWrite.modified) {
+    log.success(
+      `Created or updated ${basename(initialWrite.configPath)} for Cloudflare deployment`,
+    );
+  } else {
+    log.info(`${basename(initialWrite.configPath)} is ready for Cloudflare deployment`);
+  }
+
+  const readAccounts = (): Array<CloudflareAccount> | null => {
+    const result = runInitWrangler(root, ['whoami', '--json', '-c', initialWrite.configPath], true);
+    return result.status === 0 ? parseCloudflareAccounts(result.stdout) : null;
+  };
+
+  let accounts = readAccounts();
+  if (!accounts) {
+    const shouldLogin = await confirm({
+      message: 'Log in to Cloudflare with Wrangler now?',
+      initialValue: true,
+    });
+    if (isCancel(shouldLogin)) {
+      cancel('Setup cancelled.');
+      process.exit(0);
+    }
+    if (!shouldLogin) {
+      note(
+        `Run \`wrangler login\`, then rerun \`void init\` to select an account.\n${basename(initialWrite.configPath)} is already created.`,
+        'Cloudflare deployment',
+      );
+      return;
+    }
+
+    const login = runInitWrangler(root, ['login'], false);
+    if (login.status !== 0) {
+      log.warn('Wrangler login did not complete. Run `wrangler login`, then rerun `void init`.');
+      return;
+    }
+    accounts = readAccounts();
+    if (!accounts) {
+      log.warn(
+        'Wrangler login completed, but the Cloudflare account could not be read. Rerun `void init`.',
+      );
+      return;
+    }
+  }
+
+  if (accounts.length === 0) {
+    log.warn('Wrangler is authenticated but returned no Cloudflare accounts.');
+    return;
+  }
+
+  const existingConfig = parseJsoncFile(initialWrite.configPath);
+  const existingAccountId =
+    typeof existingConfig?.account_id === 'string' ? existingConfig.account_id : undefined;
+  const existingAccount = accounts.find((account) => account.id === existingAccountId);
+  let account = existingAccount ?? accounts[0];
+
+  if (!existingAccount && accounts.length > 1) {
+    const accountId = await select({
+      message: 'Choose a Cloudflare account:',
+      initialValue: accounts[0].id,
+      options: accounts.map((candidate) => ({
+        value: candidate.id,
+        label: candidate.name,
+        hint: candidate.id,
+      })),
+    });
+    if (isCancel(accountId) || typeof accountId === 'symbol') {
+      cancel('Setup cancelled.');
+      process.exit(0);
+    }
+    account = accounts.find((candidate) => candidate.id === accountId) ?? accounts[0];
+  }
+
+  const accountWrite = writeProvisionedWranglerConfig(
+    root,
+    { accountId: account.id },
+    { configPath: initialWrite.configPath },
+  );
+  if (accountWrite.modified) {
+    log.success(`Configured Cloudflare account: ${account.name}`);
+  } else {
+    log.info(`Cloudflare account already configured: ${account.name}`);
+  }
 }
 
 /** Get the dev command for a detected framework. */
@@ -1976,7 +2133,7 @@ jobs:
 ${setup}
 ${install}
       - name: Deploy
-        run: ${runner} deploy --project "$VOID_PROJECT"
+        run: ${runner} deploy --platform void --project "$VOID_PROJECT"
 `;
 }
 
@@ -2199,10 +2356,14 @@ export function generateStarterMigration(
   root: string,
   starterMode: Exclude<ScaffoldStarterMode, 'static'>,
 ): void {
-  const dialect = starterMode === 'postgresql' ? 'postgresql' : 'sqlite';
+  const dialect = starterMode;
   const configPath = writeDrizzleConfig(
     root,
-    dialect === 'postgresql' ? 'postgresql://dummy' : ':memory:',
+    dialect === 'postgresql'
+      ? 'postgresql://dummy'
+      : dialect === 'mysql'
+        ? 'mysql://dummy'
+        : ':memory:',
     dialect,
   );
 
@@ -2438,7 +2599,7 @@ function scaffoldPagesApp(
     resolveWorkspaceDeferral(root, pkg) === undefined &&
     (!pkg.packageManager || typeof pkg.packageManager !== 'string')
   ) {
-    pkg.packageManager = 'pnpm@11.0.9';
+    pkg.packageManager = 'pnpm@^12.4.1';
   }
 
   writeFileSync(packageJsonPath, JSON.stringify(pkg, null, 2) + '\n');
@@ -2459,6 +2620,13 @@ function scaffoldPagesApp(
       `Add DATABASE_URL to .env.local before running \`${devCommand}\`.\n` +
         'Void uses that direct connection for local PostgreSQL development.',
       'PostgreSQL local dev',
+    );
+  } else if (starterMode === 'mysql') {
+    const devCommand = getDevCommand(root);
+    note(
+      `Add DATABASE_URL to .env.local before running \`${devCommand}\`.\n` +
+        'Void uses that direct connection for local MySQL development.',
+      'MySQL local dev',
     );
   }
 
@@ -3264,7 +3432,7 @@ async function pickAgentWhenUndetected(): Promise<AgentSetupSelection> {
       { value: 'generic', label: 'Generic' },
     ],
   });
-  if (isCancel(choice)) {
+  if (isCancel(choice) || typeof choice === 'symbol') {
     cancel('Setup cancelled.');
     process.exit(0);
   }
@@ -3342,89 +3510,6 @@ function injectAgentBlock(root: string, filePath: string): void {
   } else {
     writeFileSync(fullPath, block + '\n');
     log.success(`Created ${filePath} with Void instructions`);
-  }
-}
-
-function writeMcpConfigForTarget(root: string, target: McpConfigTarget): void {
-  const fullPath = join(root, target.filePath);
-  let existing: JsonObject = {};
-  if (existsSync(fullPath)) {
-    try {
-      existing = asRecord(JSON.parse(readFileSync(fullPath, 'utf-8'))) ?? {};
-    } catch {
-      // unparseable — start fresh
-    }
-  }
-
-  const rootConfig = asRecord(existing[target.rootKey]) ?? {};
-  existing[target.rootKey] = rootConfig;
-
-  if (rootConfig['void']) {
-    log.info(`${target.filePath} already has void MCP config`);
-    return;
-  }
-
-  rootConfig['void'] = {
-    command: 'npx',
-    args: ['void', 'mcp'],
-    ...target.extraFields,
-  };
-
-  mkdirSync(dirname(fullPath), { recursive: true });
-  writeFileSync(fullPath, JSON.stringify(existing, null, 2) + '\n');
-  log.success(`Added void MCP server to ${target.filePath}`);
-}
-
-function pickMcpTarget(root: string, targets: Array<McpConfigTarget>): McpConfigTarget {
-  if (targets.length === 1) {
-    return targets[0];
-  }
-  const existingTargets = targets.filter((t) => existsSync(join(root, t.filePath)));
-  if (existingTargets.length > 0) {
-    return existingTargets[0];
-  }
-  return targets[0];
-}
-
-function setupMcpConfig(root: string, selectedAgents: Array<AgentConfig>): void {
-  const mcpAgents: Array<{ agent: AgentConfig; targets: Array<McpConfigTarget> }> = [];
-  const hintAgents: Array<{ agent: AgentConfig; hint: string }> = [];
-
-  for (const agent of selectedAgents) {
-    if (agent.mcpConfig) {
-      mcpAgents.push({ agent, targets: agent.mcpConfig });
-    } else if (agent.mcpHint) {
-      hintAgents.push({ agent, hint: agent.mcpHint });
-    }
-  }
-
-  if (selectedAgents.length === 0) {
-    note(
-      JSON.stringify(
-        {
-          void: {
-            command: 'npx',
-            args: ['void', 'mcp'],
-          },
-        },
-        null,
-        2,
-      ),
-      'Add this MCP server config to your agent',
-    );
-    return;
-  }
-
-  // Print hints for agents without project-level config
-  for (const { agent, hint } of hintAgents) {
-    log.info(`${agent.displayName}: ${hint}`);
-  }
-
-  // Write config for agents with project-level support
-  for (const { agent, targets } of mcpAgents) {
-    const target = pickMcpTarget(root, targets);
-    log.info(`${agent.displayName} MCP target: ${target.filePath}`);
-    writeMcpConfigForTarget(root, target);
   }
 }
 
@@ -3575,7 +3660,7 @@ export async function runInitCommand(root: string, initArgs?: InitArgs): Promise
     applyDatabaseSetup(root, await promptDatabaseSetup(root));
   }
 
-  // Steps 4–6: Agent instructions, skills, MCP config
+  // Steps 4–5: Agent instructions and skills
   if (!targeted || initArgs?.agents) {
     const agentSetup = await resolveAgentSetup(root);
 
@@ -3589,12 +3674,9 @@ export async function runInitCommand(root: string, initArgs?: InitArgs): Promise
     } else {
       log.info('Skills linking skipped for generic agent setup');
     }
-
-    // Step 6: MCP config
-    setupMcpConfig(root, agentSetup.agents);
   }
 
-  // Step 7: Demo code (only in full interactive flow, not for meta-frameworks)
+  // Step 6: Demo code (only in full interactive flow, not for meta-frameworks)
   if (!targeted && !framework) {
     if (didScaffoldStarter || state.hasRoutes || state.hasMigrations || state.hasPages) {
       log.info('Project already has pages, routes, or migrations, skipping demo');
@@ -3671,7 +3753,17 @@ export async function runInitCommand(root: string, initArgs?: InitArgs): Promise
     }
   }
 
-  // Step 8: GitHub Actions
+  // Step 8: Deployment platform. Targeted init commands retain their focused,
+  // non-interactive behavior and do not change the saved preference.
+  const deploymentPlatform = !targeted
+    ? await promptDeploymentPlatform(root)
+    : readDeploymentPlatform(root);
+
+  if (!targeted && deploymentPlatform === 'cloudflare') {
+    await setupCloudflareDeployment(root);
+  }
+
+  // Step 9: GitHub Actions (the built-in workflow currently targets Void).
   // Skip when `root` is a workspace subpackage: `setupGithubActions` would
   // write `.github/workflows/deploy.yml` under the subpackage root, but
   // GitHub only reads `.github/workflows/*` from the repository root, so
@@ -3686,7 +3778,8 @@ export async function runInitCommand(root: string, initArgs?: InitArgs): Promise
   // subpackage-membership signal directly so both targeted and
   // interactive modes agree.
   const githubStepSkipForSubpackage = isInsideWorkspaceSubpackage(root);
-  if ((!targeted || initArgs?.github) && !githubStepSkipForSubpackage) {
+  const shouldSetupGithub = targeted ? initArgs?.github === true : deploymentPlatform === 'void';
+  if (shouldSetupGithub && !githubStepSkipForSubpackage) {
     // `setupGithubActions` writes `void-deploy.yml` (skipping with a warning if
     // it already exists). It does not touch any pre-existing `deploy.yml`.
     if (targeted) {
@@ -3704,7 +3797,7 @@ export async function runInitCommand(root: string, initArgs?: InitArgs): Promise
         setupGithubActions(root, state);
       }
     }
-  } else if (githubStepSkipForSubpackage && (initArgs?.github || !targeted)) {
+  } else if (githubStepSkipForSubpackage && shouldSetupGithub) {
     log.info(
       'Skipping GitHub Actions setup: workflow files must live at the repo root, not in a workspace subpackage.',
     );
@@ -3735,7 +3828,7 @@ export async function runInitCommand(root: string, initArgs?: InitArgs): Promise
     generateStarterMigration(root, scaffoldedStarterMode);
   }
 
-  if (!targeted) {
+  if (!targeted && deploymentPlatform === 'void') {
     const linked = await maybeSetupDeployProject(root);
     // Step 8 wrote `void-deploy.yml` before the project was linked, so it baked
     // in the `${{ vars.VOID_PROJECT }}` placeholder. Now that linking resolved a

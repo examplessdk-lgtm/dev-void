@@ -14,9 +14,11 @@ import {
   DEPLOY_PASSTHROUGH_ASSERT_FIELDS,
   DEPLOY_PASSTHROUGH_EXCLUDE_FIELDS,
   DEPLOY_WHOLE_OBJECT_PINNED_FIELDS,
+  ensureCloudflareAuthSecret,
   hashWranglerUploader,
   runCloudflareDeploy,
   runWranglerAuthToken,
+  syncCloudflareSchemaSecrets,
   snapshotBindingIdentities,
   snapshotPassthroughIdentities,
   snapshotPassthroughRawFields,
@@ -46,9 +48,14 @@ import { readConfig } from '../../src/config.ts';
 
 const tmpDir = join(import.meta.dirname, '.tmp-cf-deploy-test');
 
+function removeProjectFixture(): void {
+  // Windows can briefly retain handles opened by the real env-schema probe subprocesses.
+  rmSync(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+}
+
 /** Write a project fixture: a map of relative path → file contents. */
 function makeProject(files: Record<string, string>): string {
-  rmSync(tmpDir, { recursive: true, force: true });
+  removeProjectFixture();
   mkdirSync(tmpDir, { recursive: true });
   for (const [rel, content] of Object.entries(files)) {
     const abs = join(tmpDir, rel);
@@ -59,7 +66,8 @@ function makeProject(files: Record<string, string>): string {
 }
 
 afterEach(() => {
-  rmSync(tmpDir, { recursive: true, force: true });
+  removeProjectFixture();
+  delete process.env.DATABASE_URL;
 });
 
 const silentCliLog: CliLogger = {
@@ -246,7 +254,6 @@ function harness(overrides: Partial<CloudflareDeployDeps> = {}): {
     return cleanExit;
   };
   const deps: CloudflareDeployDeps = {
-    isCI: false,
     exit: (code: number) => {
       exitCalls.push(code);
       throw new ExitError(code);
@@ -283,6 +290,20 @@ function harness(overrides: Partial<CloudflareDeployDeps> = {}): {
       trace.push('gate');
       return { hasSchema: false, remoteSecretNames: null };
     }) as CloudflareDeployDeps['dischargeSelfHostEnv'],
+    // Persistent auth-secret provisioning. Dedicated tests exercise the real
+    // list/put/verify lifecycle; orchestration tests record only its position.
+    ensureAuthSecret: (async () => {
+      trace.push('auth-secret');
+      return { created: false };
+    }) as CloudflareDeployDeps['ensureAuthSecret'],
+    syncSchemaSecrets: (async ({ emittedVars, secretKeys }) => ({
+      requiredSecretNames: secretKeys.filter(
+        (key) => typeof emittedVars[key] === 'string' && emittedVars[key] !== '',
+      ),
+      uploaded: secretKeys.filter(
+        (key) => typeof emittedVars[key] === 'string' && emittedVars[key] !== '',
+      ).length,
+    })) as CloudflareDeployDeps['syncSchemaSecrets'],
     // The stubbed build never writes dist/ssr/wrangler.json, so the real config
     // verification would have nothing to read — pass it by default; dedicated tests
     // exercise the real verifier and the fail-closed branch.
@@ -296,6 +317,10 @@ function harness(overrides: Partial<CloudflareDeployDeps> = {}): {
     // Stub the migration apply-set equality gate so orchestration tests need no on-disk
     // migration dir; a dedicated suite exercises the real `checkWranglerMigrationApplySet`.
     checkMigrationApplySet: async () => ({ ok: true }),
+    applyPostgresMigrations: async () => {
+      trace.push('postgres-migrate');
+      return [];
+    },
     // Stub auth-schema validation so orchestration tests never load Better Auth; dedicated
     // tests exercise the real `validateAuthMigrationSchema` + `assertMigrationsProduceAuthSchema`.
     validateAuthMigrations: async () => {},
@@ -303,6 +328,260 @@ function harness(overrides: Partial<CloudflareDeployDeps> = {}): {
   };
   return { deps, trace, wranglerArgs, exitCalls };
 }
+
+describe('ensureCloudflareAuthSecret', () => {
+  function authSecretProject(): string {
+    return makeProject({
+      'package.json': JSON.stringify({ name: 'authapp' }),
+      'wrangler.jsonc': JSON.stringify({ account_id: 'acc123', name: 'authapp' }),
+    });
+  }
+
+  it('preserves an existing remote secret without writing it again', async () => {
+    const root = authSecretProject();
+    const calls: Array<Array<string>> = [];
+    const result = await ensureCloudflareAuthSecret({
+      root,
+      configPath: join(root, 'wrangler.jsonc'),
+      accountId: 'acc123',
+      workerName: 'authapp',
+      runWrangler: (args) => {
+        calls.push(args);
+        return {
+          ...cleanExit,
+          stdout: JSON.stringify([{ name: 'BETTER_AUTH_SECRET', type: 'secret_text' }]),
+        };
+      },
+    });
+
+    expect(result).toEqual({ created: false });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual([
+      'secret',
+      'list',
+      '--format=json',
+      '-c',
+      join(root, 'wrangler.jsonc'),
+      '--env=',
+    ]);
+  });
+
+  it('creates a missing secret through stdin and verifies it before returning', async () => {
+    const root = authSecretProject();
+    const calls: Array<{
+      args: Array<string>;
+      opts: Parameters<DeployWranglerRun>[1];
+    }> = [];
+    let listCount = 0;
+    const result = await ensureCloudflareAuthSecret({
+      root,
+      configPath: join(root, 'wrangler.jsonc'),
+      accountId: 'acc123',
+      workerName: 'authapp',
+      runWrangler: (args, opts) => {
+        calls.push({ args, opts });
+        if (args[1] === 'list') {
+          listCount++;
+          return {
+            ...cleanExit,
+            stdout: listCount === 1 ? '[]' : JSON.stringify([{ name: 'BETTER_AUTH_SECRET' }]),
+          };
+        }
+        return cleanExit;
+      },
+    });
+
+    expect(result).toEqual({ created: true });
+    expect(calls.map((call) => call.args.slice(0, 3))).toEqual([
+      ['secret', 'list', '--format=json'],
+      ['secret', 'put', 'BETTER_AUTH_SECRET'],
+      ['secret', 'list', '--format=json'],
+    ]);
+    const put = calls[1]!;
+    expect(put.opts.capture).toBe(true);
+    expect(put.opts.input).toMatch(/^[0-9a-f]{64}\n$/);
+    expect(put.args.join(' ')).not.toContain(put.opts.input!.trim());
+  });
+
+  it('bootstraps the secret when the Worker has not been deployed yet', async () => {
+    const root = authSecretProject();
+    let call = 0;
+    const result = await ensureCloudflareAuthSecret({
+      root,
+      configPath: join(root, 'wrangler.jsonc'),
+      accountId: 'acc123',
+      workerName: 'authapp',
+      runWrangler: (args) => {
+        call++;
+        if (call === 1) {
+          return {
+            ...cleanExit,
+            status: 1,
+            stderr: [
+              'Worker "authapp" not found.',
+              'If this is a new Worker, run `wrangler deploy` first to create it.',
+              "Otherwise, check that the Worker name is correct and you're logged into the right account.",
+            ].join('\n'),
+          };
+        }
+        if (args[1] === 'list') {
+          return { ...cleanExit, stdout: JSON.stringify([{ name: 'BETTER_AUTH_SECRET' }]) };
+        }
+        return cleanExit;
+      },
+    });
+
+    expect(result).toEqual({ created: true });
+    expect(call).toBe(3);
+  });
+
+  it('fails closed when secret creation fails without surfacing the generated value', async () => {
+    const root = authSecretProject();
+    let generated = '';
+    const promise = ensureCloudflareAuthSecret({
+      root,
+      configPath: join(root, 'wrangler.jsonc'),
+      accountId: 'acc123',
+      workerName: 'authapp',
+      runWrangler: (args, opts) => {
+        if (args[1] === 'list') {
+          return { ...cleanExit, stdout: '[]' };
+        }
+        generated = opts.input?.trim() ?? '';
+        return { ...cleanExit, status: 1, stderr: `unsafe diagnostic ${generated}` };
+      },
+    });
+
+    await expect(promise).rejects.toMatchObject({ reason: 'put-failed' });
+    await expect(promise).rejects.not.toThrow(generated);
+  });
+
+  it('fails closed when the secret is still absent after a successful put', async () => {
+    const root = authSecretProject();
+    await expect(
+      ensureCloudflareAuthSecret({
+        root,
+        configPath: join(root, 'wrangler.jsonc'),
+        accountId: 'acc123',
+        workerName: 'authapp',
+        runWrangler: (args) => (args[1] === 'list' ? { ...cleanExit, stdout: '[]' } : cleanExit),
+      }),
+    ).rejects.toMatchObject({ reason: 'verification-failed' });
+  });
+});
+
+describe('syncCloudflareSchemaSecrets', () => {
+  function schemaSecretProject(): string {
+    return makeProject({
+      'package.json': JSON.stringify({ name: 'app' }),
+      'wrangler.jsonc': JSON.stringify({ account_id: 'acc123', name: 'app' }),
+      '.wrangler/deploy/config.json': JSON.stringify({
+        configPath: '../../dist/ssr/wrangler.json',
+      }),
+      'dist/ssr/wrangler.json': JSON.stringify({
+        account_id: 'acc123',
+        name: 'app',
+        vars: { API_TOKEN: 'local-token', ORDINARY: 'visible' },
+        secrets: { required: ['MANUAL_SECRET'] },
+      }),
+    });
+  }
+
+  it('uploads marked values through stdin and removes them from plaintext vars', async () => {
+    const root = schemaSecretProject();
+    const calls: Array<{ args: Array<string>; input?: string }> = [];
+    let listCount = 0;
+    const result = await syncCloudflareSchemaSecrets({
+      root,
+      configPath: join(root, 'wrangler.jsonc'),
+      accountId: 'acc123',
+      workerName: 'app',
+      emittedVars: { API_TOKEN: 'local-token', ORDINARY: 'visible' },
+      secretKeys: ['API_TOKEN', 'REMOTE_ONLY'],
+      runWrangler: (args, opts) => {
+        calls.push({ args, input: opts.input });
+        if (args[1] === 'list') {
+          listCount++;
+          return {
+            ...cleanExit,
+            stdout: JSON.stringify(
+              listCount === 1
+                ? [{ name: 'REMOTE_ONLY' }, { name: 'UNMARKED_REMOTE' }]
+                : [{ name: 'API_TOKEN' }, { name: 'REMOTE_ONLY' }],
+            ),
+          };
+        }
+        return cleanExit;
+      },
+    });
+
+    expect(result).toEqual({
+      requiredSecretNames: ['API_TOKEN', 'REMOTE_ONLY'],
+      uploaded: 1,
+    });
+    const bulk = calls.find((call) => call.args[1] === 'bulk')!;
+    expect(bulk.args).toEqual(['secret', 'bulk', '-c', join(root, 'wrangler.jsonc'), '--env=']);
+    expect(JSON.parse(bulk.input!)).toEqual({ API_TOKEN: 'local-token' });
+    expect(bulk.args.join(' ')).not.toContain('local-token');
+    const generated = JSON.parse(readFileSync(join(root, 'dist/ssr/wrangler.json'), 'utf-8'));
+    expect(generated.vars).toEqual({ ORDINARY: 'visible' });
+    expect(generated.secrets.required).toEqual(['API_TOKEN', 'MANUAL_SECRET', 'REMOTE_ONLY']);
+  });
+
+  it('bootstraps a first deploy and skips an absent optional marked secret', async () => {
+    const root = schemaSecretProject();
+    let call = 0;
+    const result = await syncCloudflareSchemaSecrets({
+      root,
+      configPath: join(root, 'wrangler.jsonc'),
+      accountId: 'acc123',
+      workerName: 'app',
+      emittedVars: { API_TOKEN: 'local-token' },
+      secretKeys: ['API_TOKEN', 'OPTIONAL_TOKEN'],
+      runWrangler: (args) => {
+        call++;
+        if (call === 1) {
+          return {
+            ...cleanExit,
+            status: 1,
+            stderr: [
+              'Worker "app" not found.',
+              'If this is a new Worker, run `wrangler deploy` first to create it.',
+              "Otherwise, check that the Worker name is correct and you're logged into the right account.",
+            ].join('\n'),
+          };
+        }
+        if (args[1] === 'list') {
+          return { ...cleanExit, stdout: JSON.stringify([{ name: 'API_TOKEN' }]) };
+        }
+        return cleanExit;
+      },
+    });
+
+    expect(result).toEqual({ requiredSecretNames: ['API_TOKEN'], uploaded: 1 });
+    expect(call).toBe(3);
+  });
+
+  it('fails without echoing a value when bulk upload fails', async () => {
+    const root = schemaSecretProject();
+    const secret = 'never-print-this';
+    const promise = syncCloudflareSchemaSecrets({
+      root,
+      configPath: join(root, 'wrangler.jsonc'),
+      accountId: 'acc123',
+      workerName: 'app',
+      emittedVars: { API_TOKEN: secret },
+      secretKeys: ['API_TOKEN'],
+      runWrangler: (args) =>
+        args[1] === 'list'
+          ? { ...cleanExit, stdout: '[]' }
+          : { ...cleanExit, status: 1, stderr: secret },
+    });
+
+    await expect(promise).rejects.toMatchObject({ reason: 'bulk-failed' });
+    await expect(promise).rejects.not.toThrow(secret);
+  });
+});
 
 /** A worker-bearing D1 app fixture with a fully-provisioned wrangler.jsonc. */
 function d1Project(
@@ -573,15 +852,11 @@ describe('computeDesiredCloudflareResources — desired set from source', () => 
 });
 
 // ---------------------------------------------------------------------------
-// PostgreSQL checked-in migration guard: this backend applies only remote D1
-// (SQLite) migrations — the remote-migrate step is gated on `desired.d1`, which
-// a pg app never has. The managed platform DOES apply a pg app's migrations over
-// Hyperdrive at deploy, so a pg app WITH checked-in migrations must be rejected
-// (else it would ship against an unmigrated database), while a pg app WITHOUT
-// migrations (externally-managed schema) is still deployable.
+// PostgreSQL checked-in migrations: direct Cloudflare deploy validates and applies
+// them transactionally before uploading the Worker.
 // ---------------------------------------------------------------------------
 
-describe('runCloudflareDeploy — PostgreSQL checked-in migration guard', () => {
+describe('runCloudflareDeploy — PostgreSQL checked-in migrations', () => {
   /** A worker-bearing pg app with a provisioned Hyperdrive config (drift-clean). */
   function pgProject(extraFiles: Record<string, string> = {}): string {
     return makeProject({
@@ -601,10 +876,7 @@ describe('runCloudflareDeploy — PostgreSQL checked-in migration guard', () => 
     });
   }
 
-  it('rejects a pg app that has checked-in migrations BEFORE any account operation', async () => {
-    // The remote-migrate path is gated on `desired.d1`; a pg app desires `hyperdrive` instead, so
-    // its db/migrations/*.sql would never run here and the worker would hit an unmigrated database.
-    // (Reverting the guard lets this app build + deploy against an unmigrated DB.)
+  it('requires DATABASE_URL before any account operation when pg migrations are checked in', async () => {
     const root = pgProject({
       'db/migrations/0000_init.sql': 'CREATE TABLE notes (id integer primary key);',
     });
@@ -613,9 +885,31 @@ describe('runCloudflareDeploy — PostgreSQL checked-in migration guard', () => 
       runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
     ).rejects.toBeInstanceOf(ExitError);
     expect(exitCalls).toEqual([1]);
-    // Rejected pre-account-op: no whoami/provision/build/deploy seam ran.
     expect(wranglerArgs).toEqual([]);
     expect(trace).toEqual([]);
+  });
+
+  it('validates and applies pg migrations before uploading the Worker', async () => {
+    process.env.DATABASE_URL = 'postgresql://prod.example/app';
+    const root = pgProject({
+      'db/migrations/0000_init.sql': 'CREATE TABLE notes (id integer primary key);',
+    });
+    const applied: Array<{ dir: string; url: string }> = [];
+    const { deps, trace, wranglerArgs, exitCalls } = harness({
+      applyPostgresMigrations: async (dir, url) => {
+        applied.push({ dir, url });
+        trace.push('postgres-migrate');
+        return ['0000_init.sql'];
+      },
+    });
+    await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+    expect(exitCalls).toEqual([]);
+    expect(applied).toEqual([
+      { dir: join(root, 'db', 'migrations'), url: 'postgresql://prod.example/app' },
+    ]);
+    expect(trace.indexOf('migrate-gate')).toBeLessThan(trace.indexOf('postgres-migrate'));
+    expect(trace.indexOf('postgres-migrate')).toBeLessThan(trace.indexOf('wrangler:deploy'));
+    expect(wranglerArgs.some((a) => a[0] === 'd1')).toBe(false);
   });
 
   it('still deploys a pg app WITHOUT checked-in migrations (external schema — no false-reject)', async () => {
@@ -628,12 +922,10 @@ describe('runCloudflareDeploy — PostgreSQL checked-in migration guard', () => 
     expect(wranglerArgs.some((a) => a[0] === 'd1' && a[2] === 'apply')).toBe(false);
   });
 
-  it('rejects a pg app whose BUILD writes checked-in migrations (post-build re-check)', async () => {
-    // Empty pre-build (the fail-fast guard passes), but the build plugin writes db/migrations/*.sql
-    // during `vite build`. The remote-migrate/apply gates are `desired.d1`-only, so without the
-    // post-build re-check these files would ship UNRUN and the worker would hit an unmigrated DB.
+  it('applies a pg migration added by the build before uploading', async () => {
+    process.env.DATABASE_URL = 'postgresql://prod.example/app';
     const root = pgProject();
-    const { deps, wranglerArgs, exitCalls } = harness({
+    const { deps, trace, wranglerArgs, exitCalls } = harness({
       runBuild: () => {
         mkdirSync(join(root, 'db', 'migrations'), { recursive: true });
         writeFileSync(
@@ -642,12 +934,10 @@ describe('runCloudflareDeploy — PostgreSQL checked-in migration guard', () => 
         );
       },
     });
-    await expect(
-      runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
-    ).rejects.toBeInstanceOf(ExitError);
-    expect(exitCalls).toEqual([1]);
-    // Rejected AFTER the build but BEFORE any remote mutation — nothing deployed, no D1 migrate.
-    expect(wranglerArgs.some((a) => a[0] === 'deploy')).toBe(false);
+    await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+    expect(exitCalls).toEqual([]);
+    expect(trace).toContain('postgres-migrate');
+    expect(wranglerArgs.some((a) => a[0] === 'deploy')).toBe(true);
     expect(wranglerArgs.some((a) => a[0] === 'd1' && a[2] === 'apply')).toBe(false);
   });
 
@@ -983,19 +1273,24 @@ describe('runCloudflareDeploy — app-class guard (narrowed to full Void apps)',
     expect(trace).toEqual([]);
   });
 
-  it('rejects a PostgreSQL app with auth enabled (pg + auth) before any account op', async () => {
+  it('deploys a PostgreSQL app with auth after migrations and secret setup', async () => {
+    process.env.DATABASE_URL = 'postgresql://prod.example/app';
     const root = makeProject({
       'package.json': JSON.stringify({ name: 'pgauth' }),
       'void.json': JSON.stringify({ database: 'pg', auth: {} }),
       'routes/index.ts': `export const GET = () => new Response('ok');`,
+      'db/migrations/0000_auth.sql': 'CREATE TABLE "user" (id text primary key);',
+      'wrangler.jsonc': JSON.stringify({
+        account_id: 'acc123',
+        name: 'pgauth',
+        hyperdrive: [{ binding: 'HYPERDRIVE', id: REAL_KV_ID }],
+      }),
     });
     const { deps, trace, exitCalls } = harness();
-    await expect(
-      runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
-    ).rejects.toBeInstanceOf(ExitError);
-    expect(exitCalls).toEqual([1]);
-    // Rejected at the pg+auth guard (after the desired set, before whoami/provision).
-    expect(trace).toEqual([]);
+    await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+    expect(exitCalls).toEqual([]);
+    expect(trace.indexOf('auth-secret')).toBeLessThan(trace.indexOf('postgres-migrate'));
+    expect(trace.indexOf('postgres-migrate')).toBeLessThan(trace.indexOf('wrangler:deploy'));
   });
 
   it('rejects a pages app with output:"static" (SSG) — the signal the build itself branches on', async () => {
@@ -1155,22 +1450,38 @@ describe('runCloudflareDeploy — preflight', () => {
   });
 });
 
-describe('runCloudflareDeploy — drift check (no --provision)', () => {
-  it('blocks with exit(1) when a desired resource is missing, naming it; never builds/deploys', async () => {
-    // App also uses KV (env.KV) but wrangler.jsonc only has the D1 → KV drifts.
-    const root = makeProject({
-      'package.json': JSON.stringify({ name: 'myapp' }),
-      'void.json': JSON.stringify({}),
-      'routes/index.ts': `export const GET = (c) => c.env.KV.get('k');`,
-      'wrangler.jsonc': JSON.stringify(PROVISIONED_D1, null, 2),
+describe('runCloudflareDeploy — resource provisioning', () => {
+  it('automatically provisions a missing D1 database and continues the deploy', async () => {
+    const root = d1Project({ account_id: 'acc123', name: 'myapp' });
+    let capturedDesired: Parameters<NonNullable<CloudflareDeployDeps['provision']>>[2] | undefined;
+    const provisionTrace: Array<string> = [];
+    const { deps, trace } = harness({
+      provision: (async (_root, configPath, desired): Promise<ProvisionResult> => {
+        provisionTrace.push('provision');
+        capturedDesired = desired;
+        writeFileSync(configPath, JSON.stringify(PROVISIONED_D1, null, 2));
+        return {
+          resources: [
+            {
+              kind: 'd1',
+              binding: 'DB',
+              name: desired.d1!.name,
+              action: 'created',
+              id: REAL_D1_ID,
+            },
+          ],
+          configPath,
+          accountIdWritten: false,
+        };
+      }) as CloudflareDeployDeps['provision'],
     });
-    const { deps, trace, exitCalls } = harness();
-    await expect(
-      runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
-    ).rejects.toBeInstanceOf(ExitError);
-    expect(exitCalls).toEqual([1]);
-    // whoami ran (preflight), but no migrate/build/deploy.
-    expect(trace).toEqual(['wrangler:whoami']);
+
+    await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+
+    expect(capturedDesired?.d1).toMatchObject({ binding: 'DB', name: 'myapp-db' });
+    expect(provisionTrace).toEqual(['provision']);
+    expect(trace).toContain('build');
+    expect(trace).toContain('wrangler:deploy');
   });
 
   it('proceeds through whoami → build → gate → migrate-gate → remote-migrate → deploy when fully provisioned', async () => {
@@ -1249,37 +1560,43 @@ describe('runCloudflareDeploy — provision path', () => {
   });
 });
 
-describe('runCloudflareDeploy — CI provision gate', () => {
-  it('fails closed under CI when the committed config is incomplete', async () => {
-    // Needs KV but the committed config only has D1 → not a provable no-op.
+describe('runCloudflareDeploy — backwards-compatible provision flag', () => {
+  it('still provisions an incomplete config when the legacy flag is present', async () => {
     const root = makeProject({
       'package.json': JSON.stringify({ name: 'myapp' }),
       'void.json': JSON.stringify({}),
       'routes/index.ts': `export const GET = (c) => c.env.KV.get('k');`,
       'wrangler.jsonc': JSON.stringify(PROVISIONED_D1, null, 2),
     });
-    const { deps, trace, exitCalls } = harness({ isCI: true });
-    await expect(
-      runCloudflareDeploy(root, { backend: 'cloudflare', provision: true }, silentCliLog, deps),
-    ).rejects.toBeInstanceOf(ExitError);
-    expect(exitCalls).toEqual([1]);
-    expect(trace).toEqual(['wrangler:whoami']); // gated before provisioning
-  });
-
-  it('allows a provable no-op under CI when the committed config already covers everything', async () => {
-    const root = makeProject({
-      'package.json': JSON.stringify({ name: 'myapp' }),
-      'void.json': JSON.stringify({}),
-      'routes/index.ts': `export const GET = (c) => c.env.KV.get('k');`,
-      'wrangler.jsonc': JSON.stringify(
-        { ...PROVISIONED_D1, kv_namespaces: [{ binding: 'KV', id: REAL_KV_ID }] },
-        null,
-        2,
-      ),
+    const provisionTrace: Array<string> = [];
+    const { deps, trace } = harness({
+      provision: (async (_root, configPath, desired): Promise<ProvisionResult> => {
+        provisionTrace.push('provision');
+        writeFileSync(
+          configPath,
+          JSON.stringify(
+            { ...PROVISIONED_D1, kv_namespaces: [{ binding: 'KV', id: REAL_KV_ID }] },
+            null,
+            2,
+          ),
+        );
+        return {
+          resources: [
+            {
+              kind: 'kv',
+              binding: 'KV',
+              name: desired.kvNamespaces[0].title,
+              action: 'created',
+              id: REAL_KV_ID,
+            },
+          ],
+          configPath,
+          accountIdWritten: false,
+        };
+      }) as CloudflareDeployDeps['provision'],
     });
-    const { deps, trace } = harness({ isCI: true });
     await runCloudflareDeploy(root, { backend: 'cloudflare', provision: true }, silentCliLog, deps);
-    expect(trace).toContain('provision');
+    expect(provisionTrace).toEqual(['provision']);
     expect(trace).toContain('wrangler:deploy');
   });
 });
@@ -1364,10 +1681,7 @@ describe('runCloudflareDeploy — pg/Hyperdrive app skips D1 migrations', () => 
 });
 
 describe('runCloudflareDeploy — D1 migrations_dir gate', () => {
-  it('fails closed (no `d1 migrations apply`) when migrations_dir is absent', async () => {
-    // Real D1 id (drift passes) + a checked-in migration, but the entry declares no
-    // migrations_dir — running wrangler would default to `./migrations` and apply an
-    // unrelated folder.
+  it('automatically reconciles a missing migrations_dir before applying D1 migrations', async () => {
     const root = d1Project(
       {
         account_id: 'acc123',
@@ -1376,16 +1690,32 @@ describe('runCloudflareDeploy — D1 migrations_dir gate', () => {
       },
       INIT_MIGRATION,
     );
-    const { deps, wranglerArgs, trace, exitCalls } = harness();
-    await expect(
-      runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
-    ).rejects.toBeInstanceOf(ExitError);
-    expect(exitCalls).toEqual([1]);
-    // The migrations_dir gate runs POST-build now (against the live files), so the build ran —
-    // but it fails closed before any `d1 migrations apply` and before the deploy.
-    expect(wranglerArgs.some((a) => a[0] === 'd1')).toBe(false);
+    const provisionTrace: Array<string> = [];
+    const { deps, wranglerArgs, trace, exitCalls } = harness({
+      provision: (async (_root, configPath): Promise<ProvisionResult> => {
+        provisionTrace.push('provision');
+        writeFileSync(configPath, JSON.stringify(PROVISIONED_D1, null, 2));
+        return {
+          resources: [
+            {
+              kind: 'd1',
+              binding: 'DB',
+              name: 'myapp-db',
+              action: 'reused',
+              id: REAL_D1_ID,
+            },
+          ],
+          configPath,
+          accountIdWritten: false,
+        };
+      }) as CloudflareDeployDeps['provision'],
+    });
+    await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+    expect(exitCalls).toEqual([]);
+    expect(provisionTrace).toEqual(['provision']);
+    expect(wranglerArgs.some((a) => a[0] === 'd1' && a[2] === 'apply')).toBe(true);
     expect(trace).toContain('build');
-    expect(trace).not.toContain('wrangler:deploy');
+    expect(trace).toContain('wrangler:deploy');
   });
 });
 
@@ -1475,32 +1805,19 @@ describe('runCloudflareDeploy — pre-build queue existence probe', () => {
     expect(trace).toContain('wrangler:deploy');
   });
 
-  it('fails closed naming the queue when the probe confirms it does not exist', async () => {
+  it('automatically provisions a queue when the probe confirms it does not exist', async () => {
     const root = queueProject();
     const { deps, trace, exitCalls } = queueHarness((name) => ({
       ...cleanExit,
       status: 1,
       stderr: `✘ [ERROR] Queue "${name}" does not exist.\n`,
     }));
-    const messages: Array<string> = [];
-    const restore = log.error;
-    log.error = (msg: string) => {
-      messages.push(msg);
-    };
-    try {
-      await expect(
-        runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
-      ).rejects.toBeInstanceOf(ExitError);
-    } finally {
-      log.error = restore;
-    }
-    expect(exitCalls).toEqual([1]);
-    // Nothing past step 4 ran: no build, no remote D1 apply, no upload.
-    expect(trace).toEqual(['wrangler:whoami', 'wrangler:queues']);
-    const joined = messages.join('\n');
-    expect(joined).toContain('jobs');
-    expect(joined).toContain('--provision');
-    expect(joined).toContain('wrangler queues create jobs');
+    await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+    expect(exitCalls).toEqual([]);
+    expect(trace).toContain('wrangler:queues');
+    expect(trace).toContain('provision');
+    expect(trace).toContain('build');
+    expect(trace).toContain('wrangler:deploy');
   });
 
   it('proceeds when the probe fails for a reason other than the queue being absent', async () => {
@@ -1656,26 +1973,6 @@ describe('runCloudflareDeploy — pre-build queue name validation', () => {
     ]);
     expect(trace.indexOf('wrangler:queues')).toBeLessThan(trace.indexOf('build'));
     expect(trace).toContain('wrangler:deploy');
-  });
-});
-
-describe('runCloudflareDeploy — CI queue provision gate', () => {
-  it('fails closed on a queue under CI --provision (queues cannot be proven created)', async () => {
-    const root = makeProject({
-      'package.json': JSON.stringify({ name: 'qapp' }),
-      'void.json': JSON.stringify({}),
-      'routes/index.ts': `export const GET = () => new Response('ok');`,
-      'queues/jobs.ts': `export default {};`,
-      'wrangler.jsonc': JSON.stringify({ account_id: 'acc123', name: 'qapp' }, null, 2),
-    });
-    const { deps, trace, exitCalls } = harness({ isCI: true });
-    await expect(
-      runCloudflareDeploy(root, { backend: 'cloudflare', provision: true }, silentCliLog, deps),
-    ).rejects.toBeInstanceOf(ExitError);
-    expect(exitCalls).toEqual([1]);
-    // Gated after preflight, before provisioning — no `queues create`.
-    expect(trace).toEqual(['wrangler:whoami']);
-    expect(trace).not.toContain('provision');
   });
 });
 
@@ -2113,6 +2410,28 @@ describe('verifyGeneratedDeployConfig', () => {
     );
   });
 
+  it('requires every promoted schema secret to be inherited', () => {
+    const root = deployConfigProject({
+      account_id: 'acc123',
+      name: 'myapp',
+      secrets: { required: ['API_TOKEN'] },
+    });
+    expect(
+      verifyGeneratedDeployConfig(root, {
+        accountId: 'acc123',
+        workerName: 'myapp',
+        requiredSecretNames: ['API_TOKEN'],
+      }),
+    ).toEqual({ ok: true });
+    const missing = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      requiredSecretNames: ['API_TOKEN', 'REMOTE_ONLY'],
+    });
+    expect(missing.ok).toBe(false);
+    expect(missing.reason).toMatch(/REMOTE_ONLY.*secrets\.required/);
+  });
+
   it('fails when the generated account_id differs (named-env redirect)', () => {
     const root = deployConfigProject({ account_id: 'other-acc', name: 'myapp' });
     const result = verifyGeneratedDeployConfig(root, { accountId: 'acc123', workerName: 'myapp' });
@@ -2125,6 +2444,32 @@ describe('verifyGeneratedDeployConfig', () => {
     const result = verifyGeneratedDeployConfig(root, { accountId: 'acc123', workerName: 'myapp' });
     expect(result.ok).toBe(false);
     expect(result.reason).toMatch(/worker name/);
+  });
+
+  it('requires auth-enabled builds to inherit BETTER_AUTH_SECRET', () => {
+    const root = deployConfigProject({ account_id: 'acc123', name: 'myapp' });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      authEnabled: true,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/BETTER_AUTH_SECRET.*secrets\.required/);
+  });
+
+  it('accepts auth inheritance while preserving other required secrets', () => {
+    const root = deployConfigProject({
+      account_id: 'acc123',
+      name: 'myapp',
+      secrets: { required: ['API_KEY', 'BETTER_AUTH_SECRET'] },
+    });
+    expect(
+      verifyGeneratedDeployConfig(root, {
+        accountId: 'acc123',
+        workerName: 'myapp',
+        authEnabled: true,
+      }),
+    ).toEqual({ ok: true });
   });
 
   it('fails closed when the deploy config was not emitted', () => {
@@ -4202,8 +4547,8 @@ describe('runCloudflareDeploy — id-bearing binding identity pin', () => {
 
 // ---------------------------------------------------------------------------
 // Config laundering by a probe that runs project code around the build:
-//   • the PRE-BUILD env-schema probe (step 3c) rewriting the root bindings, which
-//     would otherwise be captured as the step-6 "trusted" baseline (no-provision only);
+//   • the PRE-BUILD env-schema probe (step 3c) rewriting the root config before an
+//     authenticated Cloudflare command or automatic provisioning runs;
 //   • the POST-build validate-emitted probe (step 8b) rewriting the root worker `name`,
 //     which the secrets gate resolves the worker from.
 // ---------------------------------------------------------------------------
@@ -4220,12 +4565,11 @@ describe('runCloudflareDeploy — config laundering by a build-adjacent probe', 
     writeFileSync(configPath, JSON.stringify(config, null, 2));
   }
 
-  // --- FIX 2: a PRE-BUILD probe that laundered the root bindings (no-provision only) ---
+  // --- FIX 2: a PRE-BUILD probe that laundered the root config ---
 
-  it('no-provision: fails closed at step 6 when the pre-build probe SWAPS a binding id', async () => {
-    // The env-schema probe (step 3c) runs BEFORE the step-6 binding snapshot. It rewrites the
-    // provisioned DB id in the root config; without the pre-probe comparison the laundered id would
-    // be captured as the trusted baseline. Fails closed BEFORE the build (step 7) even runs.
+  it('fails closed before whoami when the pre-build probe SWAPS a binding id', async () => {
+    // The env-schema probe rewrites the provisioned DB id in the root config. Reject it before the
+    // config reaches any authenticated Cloudflare command or becomes a trusted build baseline.
     const root = d1Project(PROVISIONED_D1);
     const { deps, trace, wranglerArgs, exitCalls } = harness({
       resolveSchemaFacts: (() => {
@@ -4239,12 +4583,12 @@ describe('runCloudflareDeploy — config laundering by a build-adjacent probe', 
       runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
     ).rejects.toBeInstanceOf(ExitError);
     expect(exitCalls).toEqual([1]);
-    // Caught at step 6 — before the build ran and before anything deployed.
+    expect(trace).not.toContain('wrangler:whoami');
     expect(trace).not.toContain('build');
     expect(wranglerArgs.some((a) => a[0] === 'deploy')).toBe(false);
   });
 
-  it('no-provision: fails closed at step 6 when the pre-build probe ADDS an id-bearing binding', async () => {
+  it('fails closed before whoami when the pre-build probe ADDS an id-bearing binding', async () => {
     // The probe injects an EXTRA_KV the source never declared — a same-account data store the
     // deployed worker would gain. The desired loop only walks {DB}; the pre-probe snapshot is what
     // rejects the injected binding.
@@ -4265,7 +4609,7 @@ describe('runCloudflareDeploy — config laundering by a build-adjacent probe', 
     expect(wranglerArgs.some((a) => a[0] === 'deploy')).toBe(false);
   });
 
-  it('no-provision: fails closed at step 6 when the pre-build probe INJECTS a services binding', async () => {
+  it('fails closed before whoami when the pre-build probe INJECTS a services binding', async () => {
     // A pass-through binding Void never emits — the probe grants the deployed worker a service
     // binding to another same-account worker. Caught by the pass-through snapshot comparison.
     const root = d1Project(PROVISIONED_D1);
@@ -4285,9 +4629,7 @@ describe('runCloudflareDeploy — config laundering by a build-adjacent probe', 
     expect(wranglerArgs.some((a) => a[0] === 'deploy')).toBe(false);
   });
 
-  it('no-provision: passes when the pre-build probe leaves the root config untouched', async () => {
-    // The critical no-regression case: an inert probe means the pre-probe and step-6 snapshots are
-    // identical, so the new assertion never fires and the deploy proceeds normally.
+  it('passes when the pre-build probe leaves the root config untouched', async () => {
     const root = d1Project(PROVISIONED_D1, INIT_MIGRATION);
     const { deps, wranglerArgs, exitCalls } = harness();
     await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
@@ -4295,12 +4637,11 @@ describe('runCloudflareDeploy — config laundering by a build-adjacent probe', 
     expect(wranglerArgs.some((a) => a[0] === 'deploy')).toBe(true);
   });
 
-  it('--provision: fails closed at step 6 when the pre-build probe injects `addresses`, `services` or `routes`', async () => {
-    // Under --provision only the id-bearing binding comparison is skipped (the provisioner writes
-    // real ids after the probe). The pass-through-entry, raw-field and containers comparisons
-    // are provision-independent and MUST still run: an injected `addresses` entry is an `added`
-    // plan change wrangler applies with no prompt, even in CI — the account's inbound mail for
-    // that address would be routed to the deployed worker.
+  it('fails closed before whoami when the pre-build probe injects `addresses`, `services` or `routes` — with --provision too', async () => {
+    // The post-probe laundering guard compares the WHOLE root config, so it is provision-
+    // independent: an injected `addresses` entry is an `added` plan change wrangler applies with
+    // no prompt, even in CI — the account's inbound mail for that address would be routed to the
+    // deployed worker. `--provision` must not open a path around it.
     const injections: Array<(c: Record<string, unknown>) => void> = [
       (c) => {
         c.addresses = ['ceo@acme.com'];
@@ -4324,29 +4665,29 @@ describe('runCloudflareDeploy — config laundering by a build-adjacent probe', 
         runCloudflareDeploy(root, { backend: 'cloudflare', provision: true }, silentCliLog, deps),
       ).rejects.toBeInstanceOf(ExitError);
       expect(exitCalls).toEqual([1]);
+      expect(trace).not.toContain('wrangler:whoami');
       expect(trace).not.toContain('build');
       expect(wranglerArgs.some((a) => a[0] === 'deploy')).toBe(false);
     }
   });
 
-  it('--provision: only the id-bearing binding comparison is SKIPPED (the provisioner writes ids after the probe)', async () => {
-    // Under --provision the provisioner legitimately writes real ids into the config AFTER the
-    // probe, so pre-probe ≠ step-6 by design for the BINDING snapshot and that one comparison
-    // must NOT run (that path is the residual tracked in #283). Prove it by making the probe
-    // swap the DB id — the SAME mutation the no-provision case rejects — and confirming a
-    // --provision run proceeds to deploy instead.
-    const root = d1Project(PROVISIONED_D1);
-    const { deps, wranglerArgs, exitCalls } = harness({
+  it('automatic provisioning rejects a probe rewrite before creating resources', async () => {
+    const root = d1Project({ account_id: 'acc123', name: 'myapp' });
+    const { deps, trace, wranglerArgs, exitCalls } = harness({
       resolveSchemaFacts: (() => {
         rewriteRootConfig(root, (c) => {
-          (c.d1_databases as Array<Record<string, unknown>>)[0].database_id = OTHER_D1_ID;
+          c.services = [{ binding: 'EVIL', service: 'someone-elses-worker' }];
         });
         return okSchemaFacts();
       }) as CloudflareDeployDeps['resolveSchemaFacts'],
     });
-    await runCloudflareDeploy(root, { backend: 'cloudflare', provision: true }, silentCliLog, deps);
-    expect(exitCalls).toEqual([]);
-    expect(wranglerArgs.some((a) => a[0] === 'deploy')).toBe(true);
+    await expect(
+      runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
+    ).rejects.toBeInstanceOf(ExitError);
+    expect(exitCalls).toEqual([1]);
+    expect(trace).not.toContain('wrangler:whoami');
+    expect(trace).not.toContain('provision');
+    expect(wranglerArgs.some((a) => a[0] === 'deploy')).toBe(false);
   });
 
   // --- FIX 1: a POST-build probe that rewrote the pinned worker NAME ---
@@ -4710,6 +5051,8 @@ describe('runCloudflareDeploy — migrations dir / count / auth', () => {
     // schema check; here we assert the guard lets a satisfied auth app proceed to deploy.
     const { deps, trace } = harness();
     await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+    expect(trace).toContain('auth-secret');
+    expect(trace.indexOf('auth-secret')).toBeLessThan(trace.indexOf('wrangler:d1'));
     expect(trace).toContain('wrangler:deploy');
   });
 });
@@ -6068,6 +6411,78 @@ describe('compareWranglerMigrationPaths (wrangler 4.131 numeric-prefix comparato
 // ---------------------------------------------------------------------------
 
 describe('runCloudflareDeploy — post-build ground-truth secret gate', () => {
+  it('promotes marked secrets after migration gates and before Worker upload', async () => {
+    const root = d1Project(PROVISIONED_D1);
+    const { deps, trace } = harness({
+      resolveSchemaFacts: (() =>
+        okSchemaFacts({
+          hasSchema: true,
+          requiredKeys: ['API_TOKEN'],
+          secretKeys: ['API_TOKEN'],
+        })) as CloudflareDeployDeps['resolveSchemaFacts'],
+      readEmittedWorkerVars: (() =>
+        emittedVars({ API_TOKEN: 'secret' })) as CloudflareDeployDeps['readEmittedWorkerVars'],
+      syncSchemaSecrets: (async () => {
+        trace.push('schema-secrets');
+        return { requiredSecretNames: ['API_TOKEN'], uploaded: 1 };
+      }) as CloudflareDeployDeps['syncSchemaSecrets'],
+    });
+
+    await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+    expect(trace.indexOf('migrate-gate')).toBeLessThan(trace.indexOf('schema-secrets'));
+    expect(trace.indexOf('schema-secrets')).toBeLessThan(trace.indexOf('wrangler:deploy'));
+  });
+
+  it('rejects a plaintext BETTER_AUTH_SECRET before provisioning or upload', async () => {
+    const root = d1Project(PROVISIONED_D1, {
+      'void.json': JSON.stringify({ auth: {} }),
+    });
+    const { deps, trace, wranglerArgs, exitCalls } = harness({
+      readEmittedWorkerVars: (() =>
+        emittedVars({
+          BETTER_AUTH_SECRET: 'plaintext-secret',
+        })) as CloudflareDeployDeps['readEmittedWorkerVars'],
+    });
+
+    await expect(
+      runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
+    ).rejects.toBeInstanceOf(ExitError);
+    expect(exitCalls).toEqual([1]);
+    expect(trace).toContain('build');
+    expect(trace).not.toContain('auth-secret');
+    expect(trace).not.toContain('wrangler:deploy');
+    expect(wranglerArgs.some((args) => args[0] === 'secret')).toBe(false);
+  });
+
+  it('removes BETTER_AUTH_SECRET from the generic schema gate because deploy owns it', async () => {
+    const root = d1Project(PROVISIONED_D1, {
+      'void.json': JSON.stringify({ auth: {} }),
+    });
+    let captured: SelfHostEnvContext | undefined;
+    const { deps, trace } = harness({
+      resolveSchemaFacts: (() =>
+        okSchemaFacts({
+          hasSchema: true,
+          requiredKeys: ['BETTER_AUTH_SECRET'],
+          secretKeys: ['BETTER_AUTH_SECRET'],
+        })) as CloudflareDeployDeps['resolveSchemaFacts'],
+      validateEmittedVars: (async () => ({
+        kind: 'invalid-keys',
+        invalidKeys: ['BETTER_AUTH_SECRET'],
+      })) as CloudflareDeployDeps['validateEmittedVars'],
+      dischargeSelfHostEnv: (async (ctx: SelfHostEnvContext) => {
+        captured = ctx;
+        return { hasSchema: true, remoteSecretNames: null };
+      }) as CloudflareDeployDeps['dischargeSelfHostEnv'],
+    });
+
+    await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+    expect(captured?.absentRequired).toEqual([]);
+    expect(captured?.invalidKeys).toEqual([]);
+    expect(trace).toContain('auth-secret');
+    expect(trace).toContain('wrangler:deploy');
+  });
+
   it('discharges a context DERIVED from the REAL emitted vars + env-insensitive required names', async () => {
     const root = d1Project(PROVISIONED_D1);
     let captured: SelfHostEnvContext | undefined;
@@ -6204,66 +6619,42 @@ describe('runCloudflareDeploy — post-build ground-truth secret gate', () => {
 
 describe('runCloudflareDeploy — envDir / mode narrowing (rejected pre-account)', () => {
   it('rejects a custom Vite envDir pre-account — no whoami / provision / build (REAL probe)', async () => {
-    const savedNodeOptions = process.env.NODE_OPTIONS;
-    process.env.NODE_OPTIONS = [process.env.NODE_OPTIONS, '--experimental-transform-types']
-      .filter(Boolean)
-      .join(' ');
-    try {
-      // A REAL vite.config sets a custom envDir; the facts probe resolves the config in the
-      // isolated subprocess, reads the effective envDir, and rejects before any account op.
-      const root = d1Project(PROVISIONED_D1, {
-        'package.json': JSON.stringify({ name: 'myapp', type: 'module' }),
-        'vite.config.ts': `export default { envDir: './cfg' };`,
-        'cfg/.gitkeep': '',
-      });
-      const { deps, trace, wranglerArgs, exitCalls } = harness({ resolveSchemaFacts: undefined });
-      await expect(
-        runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
-      ).rejects.toBeInstanceOf(ExitError);
-      expect(exitCalls).toEqual([1]);
-      // Pre-account: nothing ran — no whoami, no provision, no build, no deploy.
-      expect(trace).toEqual([]);
-      expect(wranglerArgs).toEqual([]);
-    } finally {
-      if (savedNodeOptions === undefined) {
-        delete process.env.NODE_OPTIONS;
-      } else {
-        process.env.NODE_OPTIONS = savedNodeOptions;
-      }
-    }
+    // A REAL vite.config sets a custom envDir; the facts probe resolves the config in the
+    // isolated subprocess, reads the effective envDir, and rejects before any account op.
+    const root = d1Project(PROVISIONED_D1, {
+      'package.json': JSON.stringify({ name: 'myapp', type: 'module' }),
+      'vite.config.ts': `export default { envDir: './cfg' };`,
+      'cfg/.gitkeep': '',
+    });
+    const { deps, trace, wranglerArgs, exitCalls } = harness({ resolveSchemaFacts: undefined });
+    await expect(
+      runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
+    ).rejects.toBeInstanceOf(ExitError);
+    expect(exitCalls).toEqual([1]);
+    // Pre-account: nothing ran — no whoami, no provision, no build, no deploy.
+    expect(trace).toEqual([]);
+    expect(wranglerArgs).toEqual([]);
   });
 
   it('rejects an ABSOLUTE envDir equal to the project root pre-account — the build mis-loads it (REAL probe)', async () => {
-    const savedNodeOptions = process.env.NODE_OPTIONS;
-    process.env.NODE_OPTIONS = [process.env.NODE_OPTIONS, '--experimental-transform-types']
-      .filter(Boolean)
-      .join(' ');
-    try {
-      // Vite normalizes `envDir` via `path.resolve(root, envDir)`, so an ABSOLUTE envDir equal
-      // to the root collapses to `resolved.root` and Vite's own view would ACCEPT. But the build
-      // loads worker vars with `join(root, rawEnvDir)`, which DUPLICATES an absolute path
-      // (`/proj/proj`) → the build reads vars from the wrong dir. The probe now reads the RAW
-      // envDir the `void:env` hook captured and rejects via the build's own computation, before
-      // any account op. `import.meta.dirname` in the config === the project root (absolute).
-      const root = d1Project(PROVISIONED_D1, {
-        'package.json': JSON.stringify({ name: 'myapp', type: 'module' }),
-        'vite.config.ts': viteConfigWithVoidEnvStub('import.meta.dirname'),
-      });
-      const { deps, trace, wranglerArgs, exitCalls } = harness({ resolveSchemaFacts: undefined });
-      await expect(
-        runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
-      ).rejects.toBeInstanceOf(ExitError);
-      expect(exitCalls).toEqual([1]);
-      // Pre-account: nothing ran — no whoami, no provision, no build, no deploy.
-      expect(trace).toEqual([]);
-      expect(wranglerArgs).toEqual([]);
-    } finally {
-      if (savedNodeOptions === undefined) {
-        delete process.env.NODE_OPTIONS;
-      } else {
-        process.env.NODE_OPTIONS = savedNodeOptions;
-      }
-    }
+    // Vite normalizes `envDir` via `path.resolve(root, envDir)`, so an ABSOLUTE envDir equal
+    // to the root collapses to `resolved.root` and Vite's own view would ACCEPT. But the build
+    // loads worker vars with `join(root, rawEnvDir)`, which DUPLICATES an absolute path
+    // (`/proj/proj`) → the build reads vars from the wrong dir. The probe now reads the RAW
+    // envDir the `void:env` hook captured and rejects via the build's own computation, before
+    // any account op. `import.meta.dirname` in the config === the project root (absolute).
+    const root = d1Project(PROVISIONED_D1, {
+      'package.json': JSON.stringify({ name: 'myapp', type: 'module' }),
+      'vite.config.ts': viteConfigWithVoidEnvStub('import.meta.dirname'),
+    });
+    const { deps, trace, wranglerArgs, exitCalls } = harness({ resolveSchemaFacts: undefined });
+    await expect(
+      runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
+    ).rejects.toBeInstanceOf(ExitError);
+    expect(exitCalls).toEqual([1]);
+    // Pre-account: nothing ran — no whoami, no provision, no build, no deploy.
+    expect(trace).toEqual([]);
+    expect(wranglerArgs).toEqual([]);
   });
 
   it('rejects a non-production build mode pre-account — no whoami / provision / build', async () => {
@@ -6330,6 +6721,26 @@ describe('runCloudflareDeploy — schema probe runs under the build NODE_ENV', (
         process.env.NODE_ENV = savedNodeEnv;
       }
     }
+  });
+
+  it('marks both schema probes and the build as a Cloudflare deploy build', async () => {
+    const root = d1Project(PROVISIONED_D1);
+    let probeMarker: string | undefined;
+    let buildMarker: string | undefined;
+    const { deps } = harness({
+      resolveSchemaFacts: ((_input, env) => {
+        probeMarker = env.VOID_CLOUDFLARE_DEPLOY_BUILD;
+        return okSchemaFacts();
+      }) as CloudflareDeployDeps['resolveSchemaFacts'],
+      runBuild: (env) => {
+        buildMarker = env.VOID_CLOUDFLARE_DEPLOY_BUILD;
+      },
+    });
+
+    await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+
+    expect(probeMarker).toBe('1');
+    expect(buildMarker).toBe('1');
   });
 });
 
@@ -6523,14 +6934,8 @@ describe('runCloudflareDeploy — migration gates re-checked post-build', () => 
 // ---------------------------------------------------------------------------
 
 describe('env-schema probe (real subprocess)', () => {
-  // The probe spawns a plain `node` on THIS repo's SOURCE `.ts`. `env-public.ts` (imported at
-  // runtime to read the registered schema) uses a TS parameter property, which Node's default
-  // strip-only mode rejects — so enable full type transform for the child, mirroring how
-  // production runs the compiled `dist`. `provisionEnv`/`deployChildEnv` never scrub NODE_OPTIONS.
-  const withTransform = (base: NodeJS.ProcessEnv): NodeJS.ProcessEnv => ({
-    ...base,
-    NODE_OPTIONS: [base.NODE_OPTIONS, '--experimental-transform-types'].filter(Boolean).join(' '),
-  });
+  // The probe spawns a plain `node` on this repo's source `.ts`, so its runtime imports must use
+  // type-strippable syntax supported by Node without extra NODE_OPTIONS flags.
 
   it('derives required + `.secret()` facts and the fd-3 result survives noisy stdout', async () => {
     const root = makeProject({
@@ -6543,7 +6948,7 @@ describe('env-schema probe (real subprocess)', () => {
         `export default defineEnv({ STRIPE_KEY: string().secret(), API_URL: string() });`,
       ].join('\n'),
     });
-    const r = await resolveEnvSchemaFactsViaSubprocess({ root }, withTransform({ ...process.env }));
+    const r = await resolveEnvSchemaFactsViaSubprocess({ root }, { ...process.env });
     expect(r.kind).toBe('ok');
     if (r.kind === 'ok') {
       expect(r.facts.hasSchema).toBe(true);
@@ -6568,7 +6973,7 @@ describe('env-schema probe (real subprocess)', () => {
         `export default defineEnv({ FOO: string() });`,
       ].join('\n'),
     });
-    const env = withTransform({ ...process.env });
+    const env = { ...process.env };
     delete env.CLOUDFLARE_API_TOKEN;
     delete env.CF_ACCESS_CLIENT_ID;
     await resolveEnvSchemaFactsViaSubprocess({ root }, env);
@@ -6585,15 +6990,9 @@ describe('env-schema probe (real subprocess)', () => {
     const savedToken = process.env.CLOUDFLARE_API_TOKEN;
     const savedId = process.env.CF_ACCESS_CLIENT_ID;
     const savedSecret = process.env.CF_ACCESS_CLIENT_SECRET;
-    const savedNodeOptions = process.env.NODE_OPTIONS;
     process.env.CLOUDFLARE_API_TOKEN = 'super-secret-token';
     process.env.CF_ACCESS_CLIENT_ID = 'super-secret-id';
     process.env.CF_ACCESS_CLIENT_SECRET = 'super-secret-secret';
-    // The orchestrator copies process.env (unscrubbed NODE_OPTIONS) into the probe child env, so
-    // enable full type transform for the plain-node child running SOURCE .ts (see withTransform).
-    process.env.NODE_OPTIONS = [process.env.NODE_OPTIONS, '--experimental-transform-types']
-      .filter(Boolean)
-      .join(' ');
     const leakFile = join(tmpDir, 'orchestrator-leak.json');
     try {
       // The env.ts LEAKS the three parent creds to a file; the orchestrator spawns the REAL
@@ -6643,11 +7042,6 @@ describe('env-schema probe (real subprocess)', () => {
       } else {
         process.env.CF_ACCESS_CLIENT_SECRET = savedSecret;
       }
-      if (savedNodeOptions === undefined) {
-        delete process.env.NODE_OPTIONS;
-      } else {
-        process.env.NODE_OPTIONS = savedNodeOptions;
-      }
     }
   });
 
@@ -6656,7 +7050,7 @@ describe('env-schema probe (real subprocess)', () => {
       'package.json': JSON.stringify({ name: 'envapp', type: 'module' }),
       'env.ts': `throw new Error('SUPER_SECRET_LEAK_9999');\nexport default {};`,
     });
-    const r = await resolveEnvSchemaFactsViaSubprocess({ root }, withTransform({ ...process.env }));
+    const r = await resolveEnvSchemaFactsViaSubprocess({ root }, { ...process.env });
     expect(r.kind).toBe('schema-error');
     // The values-free boundary drops the original message, so the leak never reaches the result.
     expect(JSON.stringify(r)).not.toContain('SUPER_SECRET_LEAK_9999');
@@ -6697,7 +7091,7 @@ describe('env-schema probe (real subprocess)', () => {
       'vite.config.ts': `export default { envDir: './cfg' };`,
       'cfg/.gitkeep': '',
     });
-    const r = await resolveEnvSchemaFactsViaSubprocess({ root }, withTransform({ ...process.env }));
+    const r = await resolveEnvSchemaFactsViaSubprocess({ root }, { ...process.env });
     expect(r.kind).toBe('reject');
     if (r.kind === 'reject') {
       // Only the fixed reason code crosses the boundary — never the raw resolved envDir string.
@@ -6714,7 +7108,7 @@ describe('env-schema probe (real subprocess)', () => {
       // duplicates the path — the probe reads the RAW envDir and rejects via that computation.
       'vite.config.ts': viteConfigWithVoidEnvStub('import.meta.dirname'),
     });
-    const r = await resolveEnvSchemaFactsViaSubprocess({ root }, withTransform({ ...process.env }));
+    const r = await resolveEnvSchemaFactsViaSubprocess({ root }, { ...process.env });
     expect(r.kind).toBe('reject');
     if (r.kind === 'reject') {
       expect(r.reason).toBe('custom-envdir');
@@ -6734,7 +7128,7 @@ describe('env-schema probe (real subprocess)', () => {
       // `join(root, '.') === root` and `resolve(root, '.') === root` — both views accept.
       'vite.config.ts': viteConfigWithVoidEnvStub(`'.'`),
     });
-    const r = await resolveEnvSchemaFactsViaSubprocess({ root }, withTransform({ ...process.env }));
+    const r = await resolveEnvSchemaFactsViaSubprocess({ root }, { ...process.env });
     expect(r.kind).toBe('ok');
   });
 
@@ -6747,7 +7141,7 @@ describe('env-schema probe (real subprocess)', () => {
         `export default defineEnv({ API_URL: string() });`,
       ].join('\n'),
     });
-    const r = await resolveEnvSchemaFactsViaSubprocess({ root }, withTransform({ ...process.env }));
+    const r = await resolveEnvSchemaFactsViaSubprocess({ root }, { ...process.env });
     expect(r.kind).toBe('ok');
   });
 
@@ -6764,7 +7158,7 @@ describe('env-schema probe (real subprocess)', () => {
       ].join('\n'),
     });
     const under = async (nodeEnv: string): Promise<Array<string>> => {
-      const env = withTransform({ ...process.env, NODE_ENV: nodeEnv });
+      const env = { ...process.env, NODE_ENV: nodeEnv };
       const r = await resolveEnvSchemaFactsViaSubprocess({ root }, env);
       return r.kind === 'ok' ? [...r.facts.requiredKeys].sort() : [`<${r.kind}>`];
     };
@@ -6790,7 +7184,7 @@ describe('env-schema probe (real subprocess)', () => {
         vars: { PORT: 'not-a-number', API_URL: 'https://example.com' },
       }),
     });
-    const r = await validateEmittedVarsViaSubprocess({ root }, withTransform({ ...process.env }));
+    const r = await validateEmittedVarsViaSubprocess({ root }, { ...process.env });
     expect(r.kind).toBe('invalid-keys');
     if (r.kind === 'invalid-keys') {
       expect(r.invalidKeys).toEqual(['PORT']);
@@ -6810,7 +7204,7 @@ describe('env-schema probe (real subprocess)', () => {
       }),
       'dist/ssr/wrangler.json': JSON.stringify({ vars: { PORT: '8080' } }),
     });
-    const r = await validateEmittedVarsViaSubprocess({ root }, withTransform({ ...process.env }));
+    const r = await validateEmittedVarsViaSubprocess({ root }, { ...process.env });
     expect(r.kind).toBe('invalid-keys');
     if (r.kind === 'invalid-keys') {
       expect(r.invalidKeys).toEqual([]);
@@ -6818,7 +7212,6 @@ describe('env-schema probe (real subprocess)', () => {
   });
 
   it('the child env carries NONE of the full wrangler-auth credential set (all aliases scrubbed)', async () => {
-    const savedNodeOptions = process.env.NODE_OPTIONS;
     // The FULL wrangler-auth credential set + aliases set on the parent; a d1 app whose
     // env.ts leaks them.
     const authVars = WRANGLER_AUTH_VARS;
@@ -6827,9 +7220,6 @@ describe('env-schema probe (real subprocess)', () => {
       saved[name] = process.env[name];
       process.env[name] = `secret-${name}`;
     }
-    process.env.NODE_OPTIONS = [process.env.NODE_OPTIONS, '--experimental-transform-types']
-      .filter(Boolean)
-      .join(' ');
     const leakFile = join(tmpDir, 'auth-scrub-leak.json');
     try {
       const root = d1Project(PROVISIONED_D1, {
@@ -6863,11 +7253,6 @@ describe('env-schema probe (real subprocess)', () => {
           process.env[name] = saved[name];
         }
       }
-      if (savedNodeOptions === undefined) {
-        delete process.env.NODE_OPTIONS;
-      } else {
-        process.env.NODE_OPTIONS = savedNodeOptions;
-      }
     }
   });
 
@@ -6883,7 +7268,7 @@ describe('env-schema probe (real subprocess)', () => {
         `export default defineEnv({ API_URL: string() });`,
       ].join('\n'),
     });
-    const r = await resolveEnvSchemaFactsViaSubprocess({ root }, withTransform({ ...process.env }));
+    const r = await resolveEnvSchemaFactsViaSubprocess({ root }, { ...process.env });
     // fd 3 is a separate pipe, so the result parses cleanly despite the stdout/stderr noise…
     expect(r.kind).toBe('ok');
     if (r.kind === 'ok') {
@@ -6951,7 +7336,7 @@ describe('runCloudflareDeploy — --skip-build is rejected', () => {
     }
     const joined = messages.join('\n');
     expect(joined).toContain('--skip-build');
-    expect(joined).toContain('--backend cloudflare');
+    expect(joined).toContain('--platform cloudflare');
     expect(joined).toMatch(/validat/i);
   });
 

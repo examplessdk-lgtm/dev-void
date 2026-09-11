@@ -32,7 +32,7 @@ features:
     details: React, Vue, Svelte, Solid, Vite-based meta-frameworks. SSR, SSG, ISR, islands with partial hydration, and markdown.
   - iconify: lucide:bot
     title: AI-Native
-    details: Built-in skills, MCP support, and reference prompts let coding agents scaffold and ship full-stack apps in a single prompt.
+    details: Built-in skills and reference prompts let coding agents scaffold and ship full-stack apps in a single prompt.
 
 footer_heading: Deploy at Warp Speed
 footer_subheading: Vite. Optimized. Isomorphic. Deploy.

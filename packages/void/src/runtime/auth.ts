@@ -14,7 +14,7 @@ export type AuthState = {
 export type VoidAuthConfigContext = {
   defaults: BetterAuthOptions;
   env: Record<string, unknown>;
-  dialect: 'sqlite' | 'postgresql';
+  dialect: 'sqlite' | 'postgresql' | 'mysql';
   request: Request;
 };
 

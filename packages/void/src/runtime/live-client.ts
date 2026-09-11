@@ -258,16 +258,14 @@ export function connectLiveStream(
         operations = [
           ...[...subscriptions.values()]
             .filter((subscription) => !pendingIds.has(subscription.id))
-            .map(
-              (subscription): LiveControlOperation => ({
-                kind: 'subscribe',
-                id: subscription.id,
-                topic: subscription.topic,
-                ...(subscription.lastEventId !== undefined && {
-                  lastEventId: subscription.lastEventId,
-                }),
+            .map((subscription): LiveControlOperation => ({
+              kind: 'subscribe',
+              id: subscription.id,
+              topic: subscription.topic,
+              ...(subscription.lastEventId !== undefined && {
+                lastEventId: subscription.lastEventId,
               }),
-            ),
+            })),
           ...operations,
         ];
       }

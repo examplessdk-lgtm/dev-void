@@ -18,13 +18,14 @@
   },
   "scripts": {
     "build": "vp pack",
-    "typecheck": "tsgo --noEmit"
+    "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
     "@clack/prompts": "catalog:",
     "@types/node": "catalog:",
     "pathslash": "catalog:",
     "picocolors": "^1.1.1",
+    "vite": "catalog:",
     "vite-plus": "catalog:"
   }
 }

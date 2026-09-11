@@ -5,6 +5,7 @@ import { findEnvFile, generateEnvTypes } from './codegen/env-types.ts';
 import { writeFileIfChanged } from './codegen/write-if-changed.ts';
 import { loadUserEnvFile } from './host/load-user-env.ts';
 import { voidLog, voidWarn } from './log.ts';
+import { getSecretOverride } from './runtime/env-helpers.ts';
 import { filterLoadedEnv } from './shared/env.ts';
 
 type RegisteredSchemaModule = {
@@ -31,6 +32,8 @@ export type EnvSchemaPluginOptions = {
    * "skip if already set" semantics.
    */
   onDefaults?: (defaults: Record<string, string>) => void;
+  /** Called with keys explicitly marked `.secret()` in the registered schema. */
+  onSecrets?: (secretKeys: Array<string>) => void;
 };
 
 let cachedSchemaModule: RegisteredSchemaModule | null = null;
@@ -77,15 +80,20 @@ export function envSchemaPlugin(root: string, options: EnvSchemaPluginOptions = 
   let envDir = root;
   const appliedClientDefaults = new Map<string, string>();
 
-  async function emitDefaults() {
-    if (!envFile || !options.onDefaults) {
+  async function emitSchemaMetadata() {
+    if (!envFile || (!options.onDefaults && !options.onSecrets)) {
       return;
     }
-    const { _hasRegisteredSchema, _getSchemaDefaults } = await loadSchemaModule();
+    const { _hasRegisteredSchema, _getRegisteredSchema, _getSchemaDefaults } =
+      await loadSchemaModule();
     if (!_hasRegisteredSchema()) {
       return;
     }
-    options.onDefaults(_getSchemaDefaults());
+    options.onDefaults?.(_getSchemaDefaults());
+    const schema = _getRegisteredSchema() ?? {};
+    options.onSecrets?.(
+      Object.keys(schema).filter((key) => getSecretOverride(schema[key]) === 'secret'),
+    );
   }
 
   function regenerateTypes() {
@@ -206,7 +214,7 @@ export function envSchemaPlugin(root: string, options: EnvSchemaPluginOptions = 
       // Import env.ts at config time so onDefaults can fire before the
       // Cloudflare plugin's mergeBindings reads workerConfig.vars.
       await importUserEnv();
-      await emitDefaults();
+      await emitSchemaMetadata();
     },
     async configResolved(config) {
       viteMode = config.mode;
@@ -242,7 +250,7 @@ export function envSchemaPlugin(root: string, options: EnvSchemaPluginOptions = 
           voidLog('env.ts changed — regenerating types');
           regenerateTypes();
           await importUserEnv();
-          await emitDefaults();
+          await emitSchemaMetadata();
           await applyClientDefaultsToViteEnv(server.config);
           await validateAndWarn();
           server.ws.send({ type: 'full-reload' });

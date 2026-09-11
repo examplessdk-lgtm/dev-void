@@ -36,13 +36,13 @@ export type VoidAuthMigrationTable = {
 };
 
 export type VoidAuthMigrationSchema = {
-  dialect: 'sqlite' | 'postgresql';
+  dialect: 'sqlite' | 'postgresql' | 'mysql';
   idStrategy: AuthIdStrategy;
   tables: Array<VoidAuthMigrationTable>;
 };
 
 type GenerateVoidAuthDatabaseModuleOptions = {
-  dialect: 'sqlite' | 'postgresql';
+  dialect: 'sqlite' | 'postgresql' | 'mysql';
   schemaImportPath: string;
   drizzleAdapterPath: string;
 };
@@ -81,7 +81,7 @@ function resolvePlaceholderSocialProviders(
 function resolveSchemaUserConfig(
   userConfig: VoidAuthConfig | undefined,
   defaults: BetterAuthOptions,
-  dialect: 'sqlite' | 'postgresql',
+  dialect: 'sqlite' | 'postgresql' | 'mysql',
   env: Record<string, unknown>,
 ): BetterAuthOptions {
   if (!userConfig) {
@@ -161,12 +161,38 @@ function resolveReferenceFieldName(
 }
 
 function createColumnBuilder(
-  dialect: 'sqlite' | 'postgresql',
+  dialect: 'sqlite' | 'postgresql' | 'mysql',
   idStrategy: AuthIdStrategy,
   fieldName: string,
   field: DBFieldAttribute,
 ): string {
   const useIdType = fieldName === 'id' || field.references?.field === 'id';
+
+  if (dialect === 'mysql') {
+    if (useIdType) {
+      return idStrategy === 'serial'
+        ? `int(${JSON.stringify(fieldName)})`
+        : `varchar(${JSON.stringify(fieldName)}, { length: ${idStrategy === 'uuid' ? 36 : 255} })`;
+    }
+    if (Array.isArray(field.type)) {
+      return `varchar(${JSON.stringify(fieldName)}, { length: 255, enum: ${renderEnumValues(field.type)} })`;
+    }
+    if (isJsonField(field)) {
+      return `json(${JSON.stringify(fieldName)})`;
+    }
+    switch (field.type) {
+      case 'boolean':
+        return `boolean(${JSON.stringify(fieldName)})`;
+      case 'date':
+        return `timestamp(${JSON.stringify(fieldName)}, { mode: "date", fsp: 3 })`;
+      case 'number':
+        return field.bigint
+          ? `bigint(${JSON.stringify(fieldName)}, { mode: "number" })`
+          : `int(${JSON.stringify(fieldName)})`;
+      default:
+        return `varchar(${JSON.stringify(fieldName)}, { length: 255 })`;
+    }
+  }
 
   if (dialect === 'postgresql') {
     if (useIdType) {
@@ -227,7 +253,7 @@ function createColumnBuilder(
 }
 
 function createColumnDefinition(
-  dialect: 'sqlite' | 'postgresql',
+  dialect: 'sqlite' | 'postgresql' | 'mysql',
   schema: BetterAuthDBSchema,
   idStrategy: AuthIdStrategy,
   defaultToVariable: Map<string, string>,
@@ -239,6 +265,9 @@ function createColumnDefinition(
 
   if (actualFieldName === 'id') {
     parts.push('.primaryKey()');
+    if (dialect === 'mysql' && idStrategy === 'serial') {
+      parts.push('.autoincrement()');
+    }
   }
   if (field.required !== false || actualFieldName === 'id') {
     parts.push('.notNull()');
@@ -270,14 +299,17 @@ function createColumnDefinition(
 }
 
 function collectCoreImports(
-  dialect: 'sqlite' | 'postgresql',
+  dialect: 'sqlite' | 'postgresql' | 'mysql',
   schema: BetterAuthDBSchema,
   idStrategy: AuthIdStrategy,
 ): Array<string> {
-  const imports = new Set<string>([dialect === 'postgresql' ? 'pgTable' : 'sqliteTable', 'text']);
+  const imports = new Set<string>([
+    dialect === 'postgresql' ? 'pgTable' : dialect === 'mysql' ? 'mysqlTable' : 'sqliteTable',
+    dialect === 'mysql' ? 'varchar' : 'text',
+  ]);
 
   if (idStrategy === 'serial') {
-    imports.add('integer');
+    imports.add(dialect === 'mysql' ? 'int' : 'integer');
   }
   if (idStrategy === 'uuid' && dialect === 'postgresql') {
     imports.add('uuid');
@@ -301,24 +333,28 @@ function collectCoreImports(
       }
 
       if (Array.isArray(field.type) || field.type === 'string') {
-        imports.add('text');
+        imports.add(dialect === 'mysql' ? 'varchar' : 'text');
         continue;
       }
       if (isJsonField(field)) {
-        imports.add(dialect === 'postgresql' ? 'jsonb' : 'text');
+        imports.add(dialect === 'postgresql' ? 'jsonb' : dialect === 'mysql' ? 'json' : 'text');
         continue;
       }
       if (field.type === 'boolean') {
-        imports.add(dialect === 'postgresql' ? 'boolean' : 'integer');
+        imports.add(
+          dialect === 'postgresql' ? 'boolean' : dialect === 'mysql' ? 'boolean' : 'integer',
+        );
         continue;
       }
       if (field.type === 'date') {
-        imports.add(dialect === 'postgresql' ? 'timestamp' : 'integer');
+        imports.add(
+          dialect === 'postgresql' ? 'timestamp' : dialect === 'mysql' ? 'timestamp' : 'integer',
+        );
         continue;
       }
       if (field.type === 'number') {
-        imports.add('integer');
-        if (field.bigint && dialect === 'postgresql') {
+        imports.add(dialect === 'mysql' ? 'int' : 'integer');
+        if (field.bigint && dialect !== 'sqlite') {
           imports.add('bigint');
         }
       }
@@ -346,8 +382,18 @@ export function generateVoidAuthDrizzleSchema(
     defaultToVariable.set(defaultModelName, `${sanitizeIdentifier(defaultModelName)}Table`);
   }
 
-  const tableFactory = runtime.dialect === 'postgresql' ? 'pgTable' : 'sqliteTable';
-  const importPath = runtime.dialect === 'postgresql' ? 'void/schema-pg' : 'void/schema-d1';
+  const tableFactory =
+    runtime.dialect === 'postgresql'
+      ? 'pgTable'
+      : runtime.dialect === 'mysql'
+        ? 'mysqlTable'
+        : 'sqliteTable';
+  const importPath =
+    runtime.dialect === 'postgresql'
+      ? 'void/schema-pg'
+      : runtime.dialect === 'mysql'
+        ? 'void/schema-mysql'
+        : 'void/schema-d1';
   const imports = collectCoreImports(runtime.dialect, schema, idStrategy);
   const lines = [
     '// Auto-generated by void — do not edit',
@@ -464,7 +510,8 @@ export function generateVoidAuthDatabaseModule(
   options: GenerateVoidAuthDatabaseModuleOptions,
 ): string {
   const schemaImport = JSON.stringify(options.schemaImportPath);
-  const provider = options.dialect === 'postgresql' ? 'pg' : 'sqlite';
+  const provider =
+    options.dialect === 'postgresql' ? 'pg' : options.dialect === 'mysql' ? 'mysql' : 'sqlite';
 
   return [
     '// Auto-generated by void — do not edit',

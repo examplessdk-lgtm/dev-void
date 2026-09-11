@@ -39,7 +39,7 @@ async function main() {
         }
       },
     });
-    if (p.isCancel(name)) {
+    if (p.isCancel(name) || typeof name !== 'string') {
       p.cancel('Cancelled.');
       process.exit(0);
     }

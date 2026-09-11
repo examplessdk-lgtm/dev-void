@@ -228,16 +228,18 @@ export function _getSchemaDefaults(): Record<string, string> {
 }
 
 export class EnvValidationError extends Error {
-  constructor(
-    public readonly key: string,
-    public readonly issues: Array<StandardSchemaV1.Issue>,
-  ) {
+  readonly key: string;
+  readonly issues: Array<StandardSchemaV1.Issue>;
+
+  constructor(key: string, issues: Array<StandardSchemaV1.Issue>) {
     // Messages supplied to this constructor are expected to be pre-redacted
     // by the caller (readKey / _validateEnvOnce / validateAllEnvWithValues).
     // We intentionally don't re-scan here — we don't know the raw value at
     // this point in the chain — so the contract is enforced upstream.
     super(`Invalid env "${key}": ${issues.map((i) => i.message).join(', ')}`);
     this.name = 'EnvValidationError';
+    this.key = key;
+    this.issues = issues;
   }
 }
 
