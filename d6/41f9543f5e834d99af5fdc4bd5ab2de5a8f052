@@ -1,0 +1,27 @@
+packages/deploy-core/src/artifact.ts
+  s_0add8c35799930::t_01e2c0b973c3a4 3-4,15-18,20-21,32-36,47-75
+packages/deploy-core/src/index.ts
+  s_0add8c35799930::t_59dbd22704b80e 185-189
+packages/deploy-core/test/unit/artifact.test.ts
+  s_0add8c35799930::t_2191c5cb22e3bf 1-60
+packages/void/src/cli/deploy.ts
+  s_0add8c35799930::t_658fe151521426 28,5606-5613,5616-5618,5625
+platform/packages/api/src/provisioning/provision.ts
+  s_0add8c35799930::t_6ad5b4eec08236 1,44
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "d641f9543f5e834d99af5fdc4bd5ab2de5a8f052",
+  "prompts": {},
+  "sessions": {
+    "s_0add8c35799930": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0903e-9700-76f0-a4db-b5c9ea737ea9",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
