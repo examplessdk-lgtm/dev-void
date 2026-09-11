@@ -973,6 +973,88 @@ describe('reply threading survives a hostile inbound header', () => {
   });
 });
 
+describe('reply subject survives a hostile inbound header', () => {
+  // The default reply subject is decoded from the inbound `Subject`, which
+  // the remote sender controls. `normalizeEmail` rejects CR, LF and NUL and
+  // `buildMime` rejects any line over 998 octets, so a subject carrying
+  // either would make the app's reply throw — and in production that
+  // rejects the whole delivery, replies AND forwards. Like threading, the
+  // subject is best-effort: repair what can be repaired, fall back to
+  // `Re:` for what cannot, and always send the reply.
+  const FROM = 'acme+noreply@x.dev';
+
+  function inbound(subject: string) {
+    const raw = new TextEncoder().encode('Subject: hi\r\n\r\nbody\r\n');
+    return createMessageProxy(
+      {
+        from: 'sender@remote.dev',
+        to: 'acme+support@mail.void.cloud',
+        headers: { subject },
+        raw,
+        rawSize: raw.length,
+      },
+      { slug: 'acme' },
+    ).message;
+  }
+
+  function maxLine(reply: { raw: Uint8Array }): number {
+    return Math.max(
+      ...new TextDecoder()
+        .decode(reply.raw)
+        .split('\r\n')
+        .map((l) => l.length),
+    );
+  }
+
+  // The reviewer's case. `parseInt('0G', 16)` is 0, not NaN, so the old
+  // predicate synthesised a NUL from a malformed escape. RFC 2045 §6.7 says
+  // a robust decoder keeps the `=` and the following characters as-is.
+  it('keeps a malformed Q escape literal instead of decoding half of it', async () => {
+    const reply = await buildReplyMessage(inbound('=?UTF-8?Q?bad=0Gsubject?='), {
+      text: 'thanks',
+      from: FROM,
+    });
+    expect(reply.subject).toBe('Re: bad=0Gsubject');
+  });
+
+  it.each([
+    ['a well-formed Q-encoded NUL', '=?UTF-8?Q?bad=00subject?='],
+    ['a well-formed Q-encoded LF', '=?UTF-8?Q?bad=0Asubject?='],
+    ['a well-formed Q-encoded CR', '=?UTF-8?Q?bad=0Dsubject?='],
+    // base64('bad\0subject')
+    ['a B-encoded NUL', '=?UTF-8?B?YmFkAHN1YmplY3Q=?='],
+  ])('replaces %s with a space rather than failing the reply', async (_label, subject) => {
+    const reply = await buildReplyMessage(inbound(subject), { text: 'thanks', from: FROM });
+    expect(reply.subject).toBe('Re: bad subject');
+  });
+
+  it('falls back to a bare Re: for an ASCII subject no line can hold', async () => {
+    const reply = await buildReplyMessage(inbound('x'.repeat(1100)), {
+      text: 'thanks',
+      from: FROM,
+    });
+    expect(reply.subject).toBe('Re:');
+    expect(maxLine(reply)).toBeLessThanOrEqual(998);
+  });
+
+  // The fit check must not over-reject: a non-ASCII subject is chunked
+  // into 75-character encoded-words that fold, however long it is.
+  it('keeps a long non-ASCII subject, which encodes into foldable words', async () => {
+    const subject = 'é'.repeat(600);
+    const reply = await buildReplyMessage(inbound(subject), { text: 'thanks', from: FROM });
+    expect(reply.subject).toBe(`Re: ${subject}`);
+    expect(maxLine(reply)).toBeLessThanOrEqual(998);
+  });
+
+  it('still prefixes an ordinary subject', async () => {
+    const reply = await buildReplyMessage(inbound('=?UTF-8?Q?good=20subject?='), {
+      text: 'thanks',
+      from: FROM,
+    });
+    expect(reply.subject).toBe('Re: good subject');
+  });
+});
+
 describe('parseEmail error contract', () => {
   // `PARSE_FAILED` was declared in the code union but never constructed, so
   // the one thing that does make postal-mime reject — a deeply nested

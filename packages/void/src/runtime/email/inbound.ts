@@ -438,7 +438,12 @@ export interface ReplyEmailOptions {
    * single-recipient message — for fan-out, build a fresh `sendEmail()` call.
    */
   to?: Address;
-  /** Defaults to `Re: <original-subject>` (no double-prefix). */
+  /**
+   * Defaults to `Re: <original-subject>` (no double-prefix). The original is
+   * remote-sender controlled, so the default is best-effort: control
+   * characters become a space, and an ASCII subject too long to fold falls
+   * back to a bare `Re:`. Pass `subject` to control it exactly.
+   */
   subject?: string;
   text?: string;
   html?: string;
@@ -453,14 +458,31 @@ function prefixReplySubject(original: string): string {
   // becoming `Re: Re: foo` after the recipient's mailer decodes), and
   // (b) re-encode cleanly via buildMime's encodeWord on the prefixed
   // string instead of stacking encoded-words.
-  const decoded = decodeRfc2047(original).trim();
+  //
+  // The inbound subject is remote-sender controlled, and two things
+  // downstream throw on it: `normalizeEmail` rejects CR, LF and NUL, and
+  // `buildMime` rejects a header line over 998 octets. A throw here is
+  // not the app's fault, and in production it rejects the whole delivery
+  // — the reply AND any forward the handler queued. So, as with the
+  // threading headers below, the subject is best-effort: C0 controls
+  // (a decoded `=00`, `=0A`, or a B-encoded NUL) become a single space,
+  // and a subject no line can carry falls back to a bare `Re:`.
+  const decoded = decodeRfc2047(original)
+    // eslint-disable-next-line no-control-regex -- C0 controls and DEL are the point
+    .replace(/[\x00-\x1f\x7f]+/g, ' ')
+    .replace(/ {2,}/g, ' ')
+    .trim();
   if (!decoded) {
     return 'Re:';
   }
-  if (/^re:/i.test(decoded)) {
-    return decoded;
+  const prefixed = /^re:/i.test(decoded) ? decoded : `Re: ${decoded}`;
+  // Only a pure-ASCII subject can fail to fold: anything else goes through
+  // `encodeWord`, which splits it into 75-character encoded-words joined
+  // by spaces, and those fold. An ASCII token wider than a line cannot.
+  if (/^[\x20-\x7e]*$/.test(prefixed) && !fitsHeaderLine('Subject', prefixed)) {
+    return 'Re:';
   }
-  return `Re: ${decoded}`;
+  return prefixed;
 }
 
 /**
@@ -521,10 +543,14 @@ function quotedPrintableDecode(qp: string): Uint8Array {
     if (ch === 0x5f /* _ */) {
       bytes.push(0x20);
     } else if (ch === 0x3d /* = */ && i + 2 < qp.length) {
+      // Both characters must be hex. `parseInt('0G', 16)` is 0, not NaN,
+      // so a finiteness check accepted any pair that merely STARTED with
+      // a hex digit and synthesised a single-nibble byte from it — `=0G`
+      // became NUL. A malformed escape stays literal, which is what
+      // RFC 2045 §6.7 asks of a robust decoder and what postal-mime does.
       const hex = qp.slice(i + 1, i + 3);
-      const v = parseInt(hex, 16);
-      if (Number.isFinite(v)) {
-        bytes.push(v);
+      if (/^[0-9A-Fa-f]{2}$/.test(hex)) {
+        bytes.push(parseInt(hex, 16));
         i += 2;
       } else {
         bytes.push(ch);
