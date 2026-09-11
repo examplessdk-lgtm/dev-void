@@ -1,0 +1,19 @@
+vite.config.ts
+  s_5a06e7c4c4ad3d::t_cb414e38894fd8 349-353,366-369,371,382
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "41013551c9bfe91db0bb9eb4956fcd8f9f68f7d0",
+  "prompts": {},
+  "sessions": {
+    "s_5a06e7c4c4ad3d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08e6e-3b48-7183-ac5e-670cd59a2ddc",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
