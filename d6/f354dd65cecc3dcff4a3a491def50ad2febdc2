@@ -1,0 +1,39 @@
+packages/react/test/integration/react-pages-client.test.ts
+  s_5a06e7c4c4ad3d::t_a1ebf096d50bb5 1081,1387,1434,1472
+packages/solid/test/integration/solid-pages-playground.test.ts
+  s_5a06e7c4c4ad3d::t_49074ef8566280 912,948
+packages/svelte/test/integration/svelte-pages-client.test.ts
+  s_5a06e7c4c4ad3d::t_7e646d34fb6fea 875,911
+packages/void/test/integration/websockets-playground.test.ts
+  s_49924b61fcb678::t_cfd490a19e6a95 98
+packages/vue/test/integration/vue-pages-client.test.ts
+  s_5a06e7c4c4ad3d::t_0973bf469cf6f2 932-934,984,1022
+playground/websockets/routes/ws/notifications.ws.ts
+  s_5a06e7c4c4ad3d::t_4238d5ef0ec667 66-75
+test/integration-helpers.ts
+  s_49924b61fcb678::t_9265a3177fa685 117-123,146-151,155-158
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "d6f354dd65cecc3dcff4a3a491def50ad2febdc2",
+  "prompts": {},
+  "sessions": {
+    "s_49924b61fcb678": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08ed1-7cc4-74d1-9ff0-9ec8800e8b6c",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    },
+    "s_5a06e7c4c4ad3d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08e6e-3b48-7183-ac5e-670cd59a2ddc",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
