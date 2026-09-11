@@ -1,0 +1,37 @@
+packages/isr/README.md
+  s_0add8c35799930::t_dedca831c64091 17-22
+packages/isr/package.json
+  s_0add8c35799930::t_3f876a6eef9382 18-21
+packages/isr/src/core.ts
+  s_0add8c35799930::t_9b67f3f6314461 1-212
+packages/isr/src/index.ts
+  s_0add8c35799930::t_6a8488ecdc1822 46,52,80
+packages/isr/src/runtime.ts
+  s_0add8c35799930::t_d8e2546d618600 1-34,85,88,90-92,103,122,130,163
+packages/isr/vite.config.ts
+  s_0add8c35799930::t_5234c964e08037 34
+packages/void/src/runtime/isr.ts
+  s_0add8c35799930::t_ac4f60bb562737 5,49,70-71
+packages/void/test/unit/isr-cache.test.ts
+  s_0add8c35799930::t_ed19ec92b79e20 10,30,238-241,246,252-253,264,266,581,583,622,998-999,1095,1126
+packages/void/test/unit/isr.test.ts
+  s_0add8c35799930::t_0df9f8f0dff067 1,250,287
+platform/packages/dispatch/src/isr.ts
+  s_0add8c35799930::t_b9ff87818ca3ce 2-15,20-33,67
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "4a98cd9d4f26dcccfc22299739cbfbc31bb5e2f6",
+  "prompts": {},
+  "sessions": {
+    "s_0add8c35799930": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0903e-9700-76f0-a4db-b5c9ea737ea9",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
