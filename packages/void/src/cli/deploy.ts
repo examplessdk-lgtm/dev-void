@@ -4274,10 +4274,11 @@ export async function runCloudflareDeploy(
   if (options.provision || initiallyMissing.length > 0 || d1NeedsConfigReconciliation) {
     await provisionAndVerify();
   } else {
-    // Queue names are taken VERBATIM from filenames (`queues/<name>.ts` → `<name>`, see
-    // `queues/scan.ts`) with no sanitization, and the probe below passes each one to wrangler
-    // as an ARGV positional. Gate them on the SAME `assertValidResourceName('queue', …)` the
-    // provisioner applies, BEFORE the probe runs: a name beginning with `-` is
+    // Queue names come from file paths (`queues/order/jobs.ts` → `order-jobs`, see
+    // `queues/scan.ts`), and the probe below passes each one to wrangler as an ARGV positional.
+    // Apart from joining path segments, names are not sanitized. Gate them on the SAME
+    // `assertValidResourceName('queue', …)` the provisioner applies, BEFORE the probe runs:
+    // a name beginning with `-` is
     // parsed by wrangler as a FLAG (`queues info --help` exits 0 printing usage), which the
     // probe would classify as inconclusive and wave through — silently forfeiting the
     // early-ordering guarantee this whole step exists to provide. Collect EVERY offending name
@@ -4296,7 +4297,7 @@ export async function runCloudflareDeploy(
           'Deploy blocked — these queue names are not valid Cloudflare queue names:',
           ...invalidQueues.map((name) => `  • ${name} (queue)`),
           '',
-          'A queue takes its name from its filename in queues/ (queues/<name>.ts → "<name>").',
+          'A queue takes its name from its path in queues/; nested segments are joined with "-".',
           'A queue name must be 1–63 characters, contain only letters, digits and "-", and',
           'begin and end with a letter or digit.',
           '',

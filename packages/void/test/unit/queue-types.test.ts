@@ -19,14 +19,14 @@ describe('generateQueueTypes', () => {
       { filePath: 'emails.ts', name: 'emails', bindingName: 'QUEUE_EMAILS' },
       {
         filePath: 'order/notifications.ts',
-        name: 'order/notifications',
+        name: 'order-notifications',
         bindingName: 'QUEUE_ORDER_NOTIFICATIONS',
       },
     ];
 
     const result = generateQueueTypes(queues, '/project/queues', '/project/.void');
     expect(result).toContain('"emails": Queue<');
-    expect(result).toContain('"order/notifications": Queue<');
+    expect(result).toContain('"order-notifications": Queue<');
     expect(result).toContain('import("../queues/order/notifications.ts")');
   });
 

@@ -8,11 +8,9 @@ Use queues to process work asynchronously, such as sending emails or handling up
 
 ## Defining queues
 
-Create a file such as `queues/emails.ts` or `queues/order-notifications.ts`. The filename becomes the queue name. `.mts`, `.js`, and `.mjs` files are also supported.
+Create files in `queues/**/*.ts`; `.mts`, `.js`, and `.mjs` also work. The queue name is inferred from its path, with nested path segments joined by `-`. For example, `queues/emails.ts` creates a queue named `"emails"`, and `queues/order/notifications.ts` creates `"order-notifications"`. A nested path must not normalize to the same name as another file: `queues/order/notifications.ts` and `queues/order-notifications.ts` conflict, so Void reports the collision and asks you to rename one.
 
-::: warning Keep deployable queue files in one directory
-Nested paths become part of the queue name: `queues/order/notifications.ts` produces `"order/notifications"`. That works locally, but Cloudflare rejects `/` in queue names. Use `queues/order-notifications.ts` for a queue you intend to deploy.
-:::
+The resulting name must follow Cloudflare's queue naming rules: 1–63 characters, only letters, digits, and `-`, beginning and ending with a letter or digit.
 
 Each queue file should export a default handler wrapped with [`defineQueue`](../reference/api.md#definequeue-t-handler). The generic `<T>` parameter defines the message body type. That is the type of each `msg.body` in the batch, and it is also used by the typed `queues` proxy for `send()` calls.
 
@@ -56,7 +54,7 @@ export const POST = defineHandler(async (c) => {
 });
 ```
 
-The binding name is derived automatically: `QUEUE_` + queue name uppercased with non-alphanumeric characters replaced by `_`. For example, `queues/emails.ts` creates binding `QUEUE_EMAILS`.
+The binding name is derived automatically: `QUEUE_` + queue name uppercased with non-alphanumeric characters replaced by `_`. For example, `queues/emails.ts` creates binding `QUEUE_EMAILS`, while `queues/order/notifications.ts` creates binding `QUEUE_ORDER_NOTIFICATIONS`.
 
 ## Per-message acknowledgment
 

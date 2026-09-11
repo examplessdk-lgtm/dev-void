@@ -62,4 +62,34 @@ export default defineQueue(async (batch, env) => {});`,
     expect(queues[0].maxRetries).toBe(3);
     expect(queues[0].retryDelay).toBe(60);
   });
+
+  it('normalizes nested paths while preserving binding derivation', () => {
+    mkdirSync(join(root, 'queues', 'order'), { recursive: true });
+    writeFileSync(
+      join(root, 'queues', 'order', 'notifications.ts'),
+      `export default async () => {};`,
+    );
+
+    expect(scanQueuesSync(root)).toEqual([
+      {
+        filePath: 'order/notifications.ts',
+        name: 'order-notifications',
+        bindingName: 'QUEUE_ORDER_NOTIFICATIONS',
+      },
+    ]);
+  });
+
+  it('reports normalized name collisions in deterministic path order', () => {
+    mkdirSync(join(root, 'queues', 'order'), { recursive: true });
+    writeFileSync(join(root, 'queues', 'order-notifications.ts'), 'export default {};');
+    writeFileSync(join(root, 'queues', 'order', 'notifications.ts'), 'export default {};');
+
+    expect(() => scanQueuesSync(root)).toThrow(
+      [
+        'queue: Multiple queue files resolve to the same queue name:',
+        '  "order-notifications": "order-notifications.ts", "order/notifications.ts"',
+        'Rename the conflicting files so each queue has a unique name.',
+      ].join('\n'),
+    );
+  });
 });
