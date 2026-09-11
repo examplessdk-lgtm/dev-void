@@ -1,0 +1,17 @@
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "4dbb3e80b048243c74023bfb918cffa02f98f2c7",
+  "prompts": {},
+  "sessions": {
+    "s_6fad3210e8b947": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08dcf-962b-7e53-83c1-618db15ce3a4",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
