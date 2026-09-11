@@ -6,9 +6,11 @@ import { clearCronScheduler } from '../cron-scheduler-client.ts';
 import {
   TERMINAL_DEPLOYMENT_STATUSES,
   type Db,
+  countProjectsUsingDestination,
   deleteProjectCascade,
   getAllProjectDeployments,
   getDomainsByProjectId,
+  getEmailDestinationsByProjectId,
   getProject,
   getProjectResources,
   terminateBuildsForProject,
@@ -35,6 +37,7 @@ import {
   findContainerApplication,
   perDeployContainerApplicationName,
 } from './containers.ts';
+import { deleteDestination } from './email-routing.ts';
 
 function deleteCloudflareResource(
   accountId: string,
@@ -481,6 +484,13 @@ export async function teardownProject(
     projectId,
     project,
   );
+  // MUST run before `deleteProjectCascade`: the cascade destroys the
+  // `email_destinations` rows the cross-project reference count is computed
+  // from, so afterwards there is no way to tell whether an account-level CF
+  // destination is still in use — the orphan becomes unrecoverable. Lives
+  // here rather than in `routes/delete.ts` so the two admin teardown paths
+  // (admin project delete, admin user delete) get it too.
+  await cleanupProjectEmailDestinations(context, projectId);
   // deleteProjectCascade re-terminalizes under the project lock to catch a build
   // that raced in after step 1 committed (build creation takes the same lock),
   // and returns both that build and every resource row it deleted.
@@ -499,4 +509,68 @@ export async function teardownProject(
     cleanedCfIds,
   );
   return { warnings: [...bestEffortWarnings, ...orphanWarnings] };
+}
+
+/**
+ * Best-effort teardown of the Cloudflare Email Routing destinations this
+ * project is the last holder of, plus the project's KV mirrors.
+ *
+ * CF destinations are ACCOUNT-level: one address added for project A is a
+ * valid `send_email` recipient for every worker in the account. The
+ * `email_destinations` table is what maps them back to projects, so
+ * "is anyone else still using this address?" is a query over those rows —
+ * and `deleteProjectCascade` deletes them. Run this BEFORE the cascade or
+ * the answer is unknowable and the CF destination leaks forever.
+ *
+ * `refs <= 1` means this project is the only referent (1 = us; 0 would mean
+ * the row vanished under us, which is equally safe to delete). A shared
+ * address stays on the account for the projects that still reference it.
+ *
+ * Never throws: a CF orphan is recoverable by a sweep, but a project
+ * delete that 5xx's on CF availability leaves a half-torn-down project.
+ */
+async function cleanupProjectEmailDestinations(
+  context: Context<ApiEnv>,
+  projectId: string,
+): Promise<void> {
+  const db = context.get('db');
+  const kv = context.env.ROUTING;
+  let destinations: Awaited<ReturnType<typeof getEmailDestinationsByProjectId>> = [];
+  try {
+    destinations = await getEmailDestinationsByProjectId(db, projectId);
+  } catch (err) {
+    console.error(`[cleanup] email destination lookup failed for project=${projectId}:`, err);
+  }
+  for (const destination of destinations) {
+    const cfDestinationId = destination.cf_destination_id;
+    if (!cfDestinationId) {
+      continue;
+    }
+    try {
+      const refs = await countProjectsUsingDestination(db, cfDestinationId);
+      if (refs <= 1) {
+        await deleteDestination(
+          context.env.CF_ACCOUNT_ID,
+          context.env.CF_API_TOKEN,
+          cfDestinationId,
+        );
+      }
+    } catch (err) {
+      console.error(
+        `[cleanup] CF destination cleanup failed for project=${projectId} dest=${cfDestinationId}:`,
+        err,
+      );
+    }
+  }
+  // Drop the proxy's read caches for this project. `email-allowlist:` is the
+  // verified-recipient mirror; `email-slug:` is the projectId→slug mapping the
+  // proxy uses to pin outbound `from` addresses. Project ids are never reused,
+  // so this is storage hygiene rather than a security boundary.
+  for (const key of [`email-allowlist:${projectId}`, `email-slug:${projectId}`]) {
+    try {
+      await kv.delete(key);
+    } catch (err) {
+      console.error(`[cleanup] KV delete failed for ${key}:`, err);
+    }
+  }
 }

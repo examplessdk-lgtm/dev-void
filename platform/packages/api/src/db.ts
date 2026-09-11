@@ -1,6 +1,7 @@
 import {
   and,
   count,
+  countDistinct,
   desc,
   asc,
   eq,
@@ -28,6 +29,7 @@ import {
   projectSecrets,
   resources,
   domains,
+  emailDestinations,
   platformEvents,
   invitations,
   oauthNonces,
@@ -50,6 +52,7 @@ import type {
   Deployment,
   DeploymentStatus,
   Domain,
+  EmailDestination,
   GitHubConnection,
   GitHubInstallation,
   GitHubInstallationMember,
@@ -316,9 +319,38 @@ export async function countUserDeploymentsToday(db: Db, userId: string): Promise
 
 // --- Projects ---
 
-export async function createProject(db: Db, userId: string, slug: string): Promise<Project> {
+export async function createProject(
+  db: Db,
+  userId: string,
+  slug: string,
+  routing?: KVNamespace,
+): Promise<Project> {
   const id = generateId('proj');
   const [row] = await db.insert(projects).values({ id, user_id: userId, slug }).returning();
+  // Mirror projectId -> slug into KV so the email proxy can validate that
+  // outbound `from` addresses belong to the calling project (the
+  // account-level send_email binding has no per-project constraint, so
+  // this mapping is the only thing preventing cross-project sender
+  // spoofing). Slug is immutable today — written once at create-time.
+  //
+  // INVARIANT: project slugs are immutable. If a slug-rename feature
+  // ever ships, every code path that mutates `projects.slug` MUST also
+  //   (1) update `email-slug:<projectId>` in ROUTING KV (this key), AND
+  //   (2) validate no `<oldslug>+...` send is in flight before the
+  //       rename completes (otherwise an in-flight outbound POST could
+  //       slip through with the old slug, then the proxy maps it back
+  //       and the new owner of that slug appears to send mail).
+  // TODO: revisit if/when project rename ships.
+  if (routing) {
+    try {
+      await routing.put(`email-slug:${id}`, slug);
+    } catch (err) {
+      // Don't fail project creation on a transient KV blip. The proxy
+      // will refuse sends with `project slug unknown` until this
+      // converges, and the hourly cron backfill re-writes the mirror.
+      console.error(`[createProject] failed to write email-slug:${id}:`, err);
+    }
+  }
   return row;
 }
 
@@ -1443,6 +1475,309 @@ export async function deleteDomainIfPending(db: Db, id: string): Promise<boolean
 
 export async function deleteProjectDomains(db: Db, projectId: string): Promise<void> {
   await db.delete(domains).where(eq(domains.project_id, projectId));
+}
+
+// --- Email destinations ---
+
+/**
+ * The human whose CF-side consent an owner-relaxed row inherits, captured
+ * at insert-time. See `emailDestinations.verified_by_*` in `schema.ts`.
+ */
+export interface OwnerVerificationAudit {
+  /** users.id of the human whose CF-side consent we inherited. */
+  userId: string;
+  /** That user's email address at insert-time (snapshot for revocation). */
+  emailSnapshot: string;
+}
+
+/**
+ * Insert a destination row, returning whether THIS call did the insert.
+ *
+ * Uses ON CONFLICT DO NOTHING + RETURNING so the inserter is
+ * unambiguously identified. Two concurrent POSTs for the same
+ * (project_id, address) would otherwise both pass through
+ * `createEmailDestination` + the unique-constraint catch — but the loser
+ * would then read back the winner's pending/platform row and ALSO fire a
+ * platform-side verification email. With `inserted=false`, the route can
+ * correctly gate the email send on the inserter only.
+ *
+ * Returns:
+ *   { row, inserted: true }  — this call did the INSERT.
+ *   { row, inserted: false } — a sibling call already inserted; we read
+ *                              back their row.
+ *   { row: null }            — extremely unlikely race where the row was
+ *                              deleted between insert-failure and select.
+ *                              Caller must treat as a hard error.
+ */
+export async function tryCreateEmailDestination(
+  db: Db,
+  projectId: string,
+  address: string,
+  cfDestinationId: string | null,
+  status: EmailDestination['status'] = 'pending',
+  verifiedAt?: string | null,
+  verificationSource: EmailDestination['verification_source'] = 'cf',
+  /**
+   * Audit columns populated only on the owner-relaxed CF reuse branch
+   * (Option C in design doc 0078) — when we inherit the project owner's
+   * prior consent on a different project for THIS project. Pass
+   * `undefined` for every other path; the helper writes NULL columns
+   * so revocation only touches inherited-consent rows.
+   */
+  ownerAudit?: OwnerVerificationAudit,
+): Promise<{ row: EmailDestination | null; inserted: boolean }> {
+  const id = generateId('edst');
+  const resolvedVerifiedAt =
+    status === 'verified' ? (verifiedAt ?? new Date().toISOString()) : null;
+  const inserted = await db
+    .insert(emailDestinations)
+    .values({
+      id,
+      project_id: projectId,
+      address: address.toLowerCase(),
+      cf_destination_id: cfDestinationId,
+      status,
+      verified_at: resolvedVerifiedAt,
+      verification_source: verificationSource,
+      verified_by_user_id: ownerAudit?.userId ?? null,
+      verified_by_email_snapshot: ownerAudit?.emailSnapshot ?? null,
+    })
+    .onConflictDoNothing({ target: [emailDestinations.project_id, emailDestinations.address] })
+    .returning();
+  if (inserted.length > 0) {
+    return { row: inserted[0]!, inserted: true };
+  }
+  // ON CONFLICT DO NOTHING didn't return a row, which means a sibling
+  // request inserted concurrently. Read it back. If the sibling DELETED
+  // their own row between insert-failure and select (extremely unlikely
+  // — only the project owner can DELETE), we return `{ row: null }`.
+  // The caller treats that as "concurrently modified, retry once".
+  const existing = await getEmailDestinationByAddress(db, projectId, address);
+  return { row: existing, inserted: false };
+}
+
+export async function createEmailDestination(
+  db: Db,
+  projectId: string,
+  address: string,
+  cfDestinationId: string | null,
+  status: EmailDestination['status'] = 'pending',
+  /**
+   * Audit timestamp. Pass CF's `verified` field when recovering an
+   * already-verified destination so the audit trail reflects the real
+   * verification time rather than local now(). Omit / pass null to use
+   * now() when status is verified.
+   */
+  verifiedAt?: string | null,
+  /**
+   * 'cf'       — the CF Email Routing verification email is the source of
+   *              truth (the default; covers fresh adds AND owner-relaxed
+   *              reuse, where the project owner had already verified the
+   *              address on a prior project).
+   * 'platform' — CF already had the address verified by a different
+   *              project. We're issuing our own confirmation email; the
+   *              row stays 'pending' until that link is clicked.
+   *
+   * Defaults to 'cf' to preserve the historical create-path behavior.
+   */
+  verificationSource: EmailDestination['verification_source'] = 'cf',
+  /**
+   * Audit columns for owner-relaxed CF reuse (Option C). See
+   * `tryCreateEmailDestination` for the populate / NULL rules.
+   */
+  ownerAudit?: OwnerVerificationAudit,
+): Promise<EmailDestination> {
+  const id = generateId('edst');
+  const resolvedVerifiedAt =
+    status === 'verified' ? (verifiedAt ?? new Date().toISOString()) : null;
+  const [row] = await db
+    .insert(emailDestinations)
+    .values({
+      id,
+      project_id: projectId,
+      address: address.toLowerCase(),
+      cf_destination_id: cfDestinationId,
+      status,
+      verified_at: resolvedVerifiedAt,
+      verification_source: verificationSource,
+      verified_by_user_id: ownerAudit?.userId ?? null,
+      verified_by_email_snapshot: ownerAudit?.emailSnapshot ?? null,
+    })
+    .returning();
+  return row;
+}
+
+/**
+ * Revoke owner-inherited CF verification when the project owner's email
+ * identity changes (e.g. OAuth email update on a re-link).
+ *
+ * Affects only rows where:
+ *   - `verification_source = 'cf'` (we inherited a CF flag, not a
+ *     platform-side click)
+ *   - `verified_by_user_id = userId` (the same human consented)
+ *   - `verified_by_email_snapshot = oldEmail` (the address they used)
+ *
+ * Such rows trace back to the owner-relaxed branch in `routes/email.ts`
+ * (Option C). When the owner's email changes, the consent that
+ * authorized those rows no longer represents the current identity, so
+ * we flip them back to 'pending' (rather than hard-deleting) to give
+ * the user a re-confirm path: re-clicking CF's existing verification
+ * link OR triggering a fresh platform-side flow keeps the destination
+ * usable without losing the row's history. We also clear the audit
+ * columns so the row no longer claims to be owner-verified by a stale
+ * identity.
+ *
+ * Returns the list of distinct project ids whose rows were touched, so
+ * the caller can sync each project's allowlist KV (verified rows we
+ * just demoted must drop out of `email-allowlist:<projectId>` so the
+ * proxy stops accepting sends to them).
+ *
+ * NOTE: today users.email is set once on signup and never mutated
+ * (`updateUser` is only called from the OAuth callback for the user's
+ * primary provider, with a verified email — see `routes/auth.ts`). This
+ * helper exists for the moment we add an OAuth re-link / email-change
+ * flow. Wire it into that flow when the flow ships; today it's
+ * exported and tested but never invoked from a write path.
+ */
+export async function revokeOwnerVerifiedDestinationsForUserChange(
+  db: Db,
+  userId: string,
+  oldEmail: string,
+): Promise<Array<string>> {
+  const lowered = oldEmail.toLowerCase();
+  const updated = await db
+    .update(emailDestinations)
+    .set({
+      status: 'pending',
+      verified_at: null,
+      verified_by_user_id: null,
+      verified_by_email_snapshot: null,
+    })
+    .where(
+      and(
+        eq(emailDestinations.verified_by_user_id, userId),
+        sql`lower(${emailDestinations.verified_by_email_snapshot}) = ${lowered}`,
+        eq(emailDestinations.verification_source, 'cf'),
+      ),
+    )
+    .returning({ project_id: emailDestinations.project_id });
+  return Array.from(new Set(updated.map((r) => r.project_id)));
+}
+
+export async function getEmailDestinationsByProjectId(
+  db: Db,
+  projectId: string,
+): Promise<Array<EmailDestination>> {
+  return db
+    .select()
+    .from(emailDestinations)
+    .where(eq(emailDestinations.project_id, projectId))
+    .orderBy(asc(emailDestinations.created_at));
+}
+
+export async function getVerifiedEmailDestinationsByProjectId(
+  db: Db,
+  projectId: string,
+): Promise<Array<EmailDestination>> {
+  return db
+    .select()
+    .from(emailDestinations)
+    .where(
+      and(eq(emailDestinations.project_id, projectId), eq(emailDestinations.status, 'verified')),
+    )
+    .orderBy(asc(emailDestinations.created_at));
+}
+
+export async function getEmailDestinationByAddress(
+  db: Db,
+  projectId: string,
+  address: string,
+): Promise<EmailDestination | null> {
+  const [row] = await db
+    .select()
+    .from(emailDestinations)
+    .where(
+      and(
+        eq(emailDestinations.project_id, projectId),
+        eq(emailDestinations.address, address.toLowerCase()),
+      ),
+    )
+    .limit(1);
+  return row ?? null;
+}
+
+/**
+ * Look up a single destination by its primary key. Used by the public
+ * confirm endpoint to validate a token's `did` claim against the DB row.
+ */
+export async function getEmailDestinationById(
+  db: Db,
+  id: string,
+): Promise<EmailDestination | null> {
+  const [row] = await db
+    .select()
+    .from(emailDestinations)
+    .where(eq(emailDestinations.id, id))
+    .limit(1);
+  return row ?? null;
+}
+
+export async function updateEmailDestinationStatus(
+  db: Db,
+  id: string,
+  status: EmailDestination['status'],
+  cfDestinationId?: string | null,
+  /**
+   * Audit timestamp from CF's `verified` field. When status flips to
+   * 'verified' and no value is supplied, defaults to now().
+   */
+  verifiedAt?: string | null,
+  /**
+   * Optional override for the row's `verification_source`. Useful when
+   * promoting a 'platform' pending row to verified after the recipient
+   * clicks the platform-side confirmation link — leave undefined to
+   * preserve the existing source value rather than overwriting it.
+   */
+  verificationSource?: EmailDestination['verification_source'],
+): Promise<void> {
+  const patch: {
+    status: EmailDestination['status'];
+    verified_at?: string | null;
+    cf_destination_id?: string | null;
+    verification_source?: EmailDestination['verification_source'];
+  } = {
+    status,
+  };
+  if (status === 'verified') {
+    patch.verified_at = verifiedAt ?? new Date().toISOString();
+  }
+  if (cfDestinationId !== undefined) {
+    patch.cf_destination_id = cfDestinationId;
+  }
+  if (verificationSource !== undefined) {
+    patch.verification_source = verificationSource;
+  }
+  await db.update(emailDestinations).set(patch).where(eq(emailDestinations.id, id));
+}
+
+export async function deleteEmailDestination(db: Db, id: string): Promise<void> {
+  await db.delete(emailDestinations).where(eq(emailDestinations.id, id));
+}
+
+/**
+ * How many DISTINCT projects still reference a CF destination. CF
+ * destinations are account-level, so the CF-side address may only be
+ * deleted once the last project stops referencing it.
+ */
+export async function countProjectsUsingDestination(
+  db: Db,
+  cfDestinationId: string,
+): Promise<number> {
+  const result = await db
+    .select({ n: countDistinct(emailDestinations.project_id) })
+    .from(emailDestinations)
+    .where(eq(emailDestinations.cf_destination_id, cfDestinationId));
+  return Number(result[0]?.n ?? 0);
 }
 
 // --- Deletion ---

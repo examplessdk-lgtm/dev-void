@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { adminAuthMiddleware } from './admin/middleware/auth.ts';
 import adminBuilds from './admin/routes/builds.tsx';
 import adminDeployments from './admin/routes/deployments.tsx';
+import adminEmail from './admin/routes/email.tsx';
 import adminInvitations from './admin/routes/invitations.tsx';
 import adminLogin from './admin/routes/login.ts';
 import adminPlatform from './admin/routes/platform.tsx';
@@ -49,6 +50,8 @@ import auth from './routes/auth.ts';
 import deleteRoute from './routes/delete.ts';
 import deploy from './routes/deploy.ts';
 import domains from './routes/domains.ts';
+import emailConfirm from './routes/email-confirm.ts';
+import emailRoutes from './routes/email.ts';
 import { githubProjectRoutes, githubRoutes } from './routes/github.ts';
 import internalResolveResource from './routes/internal-resolve-resource.ts';
 import internalResolveWorker from './routes/internal-resolve-worker.ts';
@@ -133,6 +136,10 @@ const app = new Hono<ApiEnv>()
   .route('/internal/verify-owner', internalVerifyOwner)
   .route('/webhooks', webhookRoutes)
   .route('/github', githubRoutes)
+  // Public: the HMAC-signed token in `?token=` IS the auth. Mounted
+  // BEFORE the `/projects/*` auth middleware so recipients (third
+  // parties, not Void users) can click without logging in.
+  .route('/email', emailConfirm)
   .use('/me', authMiddleware)
   .route('/me', me)
   .use('/projects/*', authMiddleware)
@@ -142,6 +149,7 @@ const app = new Hono<ApiEnv>()
   .route('/projects', revalidate)
   .route('/projects', secrets)
   .route('/projects', domains)
+  .route('/projects', emailRoutes)
   .route('/projects', githubProjectRoutes)
   .route('/projects', projectUsage)
   .use('/usage', authMiddleware)
@@ -153,6 +161,7 @@ app.use('/admin/*', adminAuthMiddleware);
 app.get('/admin/', adminAuthMiddleware, dashboardHandler);
 app.route('/admin/users', adminUsers);
 app.route('/admin/projects', adminProjects);
+app.route('/admin/email', adminEmail);
 app.route('/admin/builds', adminBuilds);
 app.route('/admin/deployments', adminDeployments);
 app.route('/admin/signup-control', adminSignupControl);
@@ -570,6 +579,22 @@ async function processUserRollover(
       if (!routing.userId) {
         routing.userId = user.id;
         await env.ROUTING.put(project.slug, JSON.stringify(routing));
+      }
+    }
+
+    // Backfill the `email-slug:<projectId>` mirror. It is written
+    // best-effort at createProject time, so a transient KV blip during
+    // create would leave a project permanently unsendable (the proxy's
+    // /email/send answers 502 'project slug unknown' without it).
+    // Re-write it idempotently on every hourly pass so a missing — or
+    // stale, after a project rename — mirror heals with no operator
+    // action. Inside the same try/catch as the routing backfill above:
+    // one bad entry must not block rollover/unsuspension.
+    for (const project of userProjects) {
+      const emailSlugKey = `email-slug:${project.id}`;
+      const existingSlug = await env.ROUTING.get(emailSlugKey);
+      if (existingSlug !== project.slug) {
+        await env.ROUTING.put(emailSlugKey, project.slug);
       }
     }
 

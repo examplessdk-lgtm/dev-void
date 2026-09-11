@@ -38,6 +38,30 @@ export async function provisionBindings(
   manifest: DeployManifest,
   jwtSecret: string,
   aiProxyService: string,
+  /**
+   * Per-project platform identity injected into every worker. Grouped into
+   * an object rather than two more trailing strings — `projectId`,
+   * `accountId`, `apiToken` and `projectSlug` are all bare strings, and a
+   * transposed pair would provision against the wrong project silently.
+   */
+  platform: {
+    /** Project slug. Framework reads it as `__VOID_PROJECT_SLUG`. */
+    projectSlug: string;
+    /**
+     * Platform mail domain for this environment (`EMAIL_SENDER_DOMAIN` on
+     * the api worker — `mail.void.cloud` in production,
+     * `mail.staging.void.cloud` in staging). Never hard-coded: the proxy
+     * validates outbound senders against its own copy of the same value,
+     * so a baked-in production domain would make staging unsendable.
+     *
+     * Optional so a deployment environment with email unconfigured still
+     * deploys. When absent the binding is omitted entirely rather than
+     * injected empty — the framework's `sendEmail`/`replyEmail` then fail
+     * naming `__VOID_EMAIL_DOMAIN`, which is a far better error than a
+     * malformed `slug+noreply@` the proxy rejects for a different reason.
+     */
+    emailSenderDomain?: string;
+  },
 ): Promise<ReadonlyArray<WorkerBinding>> {
   const existing = await getProjectResources(db, projectId);
 
@@ -94,12 +118,28 @@ export async function provisionBindings(
 
   const bindings = await Promise.all(tasks);
 
-  // Always inject proxy bindings — used by AI, revalidation, and future platform features.
-  // The AI-specific usage limit check stays in the proxy (/ai/* middleware).
+  // Always inject proxy bindings — used by AI, revalidation, email, and future
+  // platform features. The AI-specific usage limit check stays in the proxy
+  // (/ai/* middleware).
   const proxyToken = await hmacSignState(projectId, jwtSecret);
   bindings.push({ type: 'service', name: '__VOID_PROXY', service: aiProxyService });
   bindings.push({ type: 'plain_text', name: '__PROJECT_ID', text: projectId });
   bindings.push({ type: 'plain_text', name: '__VOID_PROXY_TOKEN', text: proxyToken });
+  // Project slug — the SINGLE producer of `__VOID_PROJECT_SLUG`. It used to
+  // be emitted by `buildSandboxIdentityBindings` for sandbox projects only;
+  // `void/email` needs it on every worker to default an outbound `from` to
+  // `<slug>+noreply@<domain>`, and the sandbox runtime reads the same name,
+  // so one unconditional producer here replaces the sandbox-only one.
+  // Emitted after the user's vars in the upload array, so it also stops
+  // being shadowable — see `reserved-bindings.ts`.
+  bindings.push({ type: 'plain_text', name: '__VOID_PROJECT_SLUG', text: platform.projectSlug });
+  if (platform.emailSenderDomain) {
+    bindings.push({
+      type: 'plain_text',
+      name: '__VOID_EMAIL_DOMAIN',
+      text: platform.emailSenderDomain,
+    });
+  }
 
   return bindings;
 }

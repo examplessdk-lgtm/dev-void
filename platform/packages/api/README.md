@@ -57,9 +57,9 @@ src/
     domains.ts
     usage.ts
   admin/
-    routes/                   # Admin pages: users/projects/deployments/platform/signup-control, plus builds.tsx (build detail page + /logs poll endpoint)
+    routes/                   # Admin pages: users/projects/deployments/platform/signup-control, plus builds.tsx (build detail page + /logs poll endpoint) and email.tsx (per-project email control plane)
     views/                    # Hono JSX view layer (incl. build-table.tsx, build-logs.tsx)
-    middleware/auth.ts
+    middleware/auth.ts        # Admin cookie auth + same-origin guard on every write
 container/
   Dockerfile                  # node:26-slim + pinned corepack + bun build image
   build-agent.mjs             # Downloads source tarball, installs deps, runs `npx void deploy`
@@ -87,6 +87,7 @@ drizzle/
   - usage
   - PostgreSQL and MySQL project database provisioning/update
   - `/projects/:id/github` — connect/inspect/update/disconnect the GitHub repo (POST/GET/PATCH/DELETE; auth + ownership)
+  - `/projects/:id/email/*` — monthly usage, and the verified-recipient list the project may send to (`GET|POST|DELETE`). Adding a recipient triggers a verification email; the address only becomes sendable once the recipient consents. See [Email](#email).
 - `GET /usage`
 
 ### Deploy on GitHub
@@ -112,6 +113,7 @@ The webhook and OIDC endpoints return `503` when the GitHub App secrets are unse
 - `/admin/builds/:id` — build detail page (live log panel for container builds; GitHub link for `github_actions`)
 - `/admin/builds/:id/logs?since=N` — build-log poll endpoint backing the live tail; container builds front the `BuildManager`/`BuildManagerLarge` DO's read-only `GET /logs?since=N` (routed by `instance_type` via `buildManagerNamespace`), `github_actions` builds return the external `logs_url`
 - `/admin/deployments`
+- `/admin/email/:projectId` — per-project email usage, caps, outbound kill switch, and destination list
 - `/admin/signup-control`
 - `/admin/platform`
 
@@ -169,6 +171,49 @@ Connect a repo through a GitHub App; a `git push` then builds and deploys automa
 - **Check Run**: container builds publish a "Void Build" GitHub Check Run (head SHA = the build's `commit_sha`/webhook `after`), created `in_progress` at build start and finalized `success`/`failure`/`cancelled` at every terminal site. Best-effort — a Check Run API error never fails or perturbs a build/deploy. `details_url` is the project's dashboard URL `https://{projectSlug}.void.app` for the in-progress/success/failure states (omitted on cancel). The helper (`github/check-run.ts`) is executor-agnostic; Actions check-runs are deferred (the native workflow check already covers them) and the helper is ready for a future PR. `Checks: Write` is already granted, so no permission change was needed. `builds.check_run_id` has no index (nothing queries by it — deferred).
 - **Build logs**: `BuildManager` pulls container stdout/stderr into the DO with a `pollLogs()` loop — a non-starting `getTcpPort().fetch()` against the agent's paged `GET /logs?since=N` (deliberately NOT `containerFetch`, which would auto-resurrect an exited container) on a ~1s cadence, advancing its cursor only after SQLite ingestion and feeding the SQLite `logs` table + WebSocket fan-out. On natural exit, the agent keeps its control server alive with an 8s idle deadline that resets only when the acknowledged cursor advances and a 120s non-resettable absolute cap. After a moving final page, the same pull callback sends one empty follow-up request so `since=<last ingested seq>` acknowledges durable ingestion without waiting another tick. Forced teardown instead single-flights the whole join, fresh bounded pull, liveness recheck, and signal sequence so concurrent callers cannot ingest after the termination marker. The DO also serves a read-only `GET /logs?since=N` -> `{ lines, lastSeq }`. The admin build views (below) consume this; `github_actions` builds have no DO log store and link out to their GitHub Actions run.
 
+## Email
+
+Projects send and receive mail through `void/email`. The API owns consent and quota policy; the proxy worker (`packages/proxy/src/email.ts`) owns the send/receive path and every counter.
+
+### Sender identity is per-environment
+
+The platform mail domain is a configured var, `EMAIL_SENDER_DOMAIN` — never a literal in code. Production and staging run different domains (`mail.void.cloud` / `mail.staging.void.cloud`), and the proxy builds its sender regex from the same var, so a hard-coded domain would make a staging send unroutable.
+
+A project's sender address is `<slug>+noreply@<EMAIL_SENDER_DOMAIN>`. Deployed user workers receive the two halves as plain-text bindings:
+
+- `__VOID_EMAIL_DOMAIN` — the value of `EMAIL_SENDER_DOMAIN`
+- `__VOID_PROJECT_SLUG` — the project slug, injected for **every** project (it predates this feature but used to be sandbox-only)
+
+The runtime defaults `from` from those two bindings and refuses to send when either is missing, rather than falling back to a baked-in domain.
+
+### Who a project may send to
+
+`email_destinations` in Postgres is the source of truth: one row per (project, recipient), `pending` until the recipient consents. `email-allowlist:<projectId>` in `ROUTING` KV is a denormalized read-cache of the **verified** rows, which is what the proxy enforces on every send. Every destination mutation re-syncs that key; an empty list deletes it.
+
+Cloudflare Email Routing destination addresses are account-level, so a row is only deleted upstream when no other project still references the same address.
+
+### Quotas and counters
+
+All of it lives in `ROUTING` KV, written by the proxy and read (and overridden) by the admin page:
+
+| Key                                | Meaning                                                                |
+| ---------------------------------- | ---------------------------------------------------------------------- |
+| `email-sent:<projectId>:<YYYY-MM>` | Outbound count for the UTC month; expires shortly after the month ends |
+| `email-recv:<projectId>:<YYYY-MM>` | Inbound count for the UTC month                                        |
+| `email-suspended:<projectId>`      | Presence is the outbound kill switch; inbound is unaffected            |
+| `email-limit:<projectId>`          | Monthly outbound override; absent means the platform default (200)     |
+| `email-burst-limit:<projectId>`    | Per-minute override; absent means the platform default (10)            |
+
+The defaults live in the proxy and are mirrored in `admin/routes/email.tsx` so the page can label a cap `default` or `override`. Nothing at build time catches a drift between the two — change them together.
+
+### Operator page
+
+`/admin/email/:projectId` is the whole control plane in one page: this month's outbound/inbound counts against the effective caps, the resolved sender address, the suspend/unsuspend kill switch, monthly and burst overrides (submit a blank value to drop an override back to the default), a counter reset, and the destination list with per-row revoke.
+
+The counter reset is guarded server-side — the operator types the project slug — so it cannot be triggered by a POST that never rendered the page. There is deliberately no operator-side "add destination": consent belongs to the recipient, and the owner-facing `POST /projects/:id/email/destinations` is the only path that asks for it.
+
+Every admin write is additionally same-origin checked in `admin/middleware/auth.ts` before authentication runs; a `POST` whose `Origin` (or, failing that, `Referer`) does not match the request host is rejected with `403`, as is one that carries neither.
+
 ## Usage and Plan Enforcement
 
 - **Deploy/day limits** are checked from the platform Postgres database.
@@ -186,8 +231,11 @@ Notable sections:
 - project and deployment inspection
 - deployment log viewing
 - per-project Builds section (ongoing build highlighted) plus a build detail page with a client-side polling live-log tail for container builds (mirrors the deployment live-tail; not a WebSocket), or a GitHub Actions link for `github_actions` builds. The tail polls `GET /admin/builds/:id/logs?since=N`, which fronts the `BuildManager`/`BuildManagerLarge` DO's read-only `GET /logs?since=N` (DO chosen by `instance_type` via `buildManagerNamespace`).
+- per-project email page (linked from the project detail view): usage, caps, outbound kill switch, destinations
 - signup allowlist/private-beta controls
 - platform worker version history and orchestrated rollback
+
+Admin writes are same-origin guarded: `admin/middleware/auth.ts` rejects any non-`GET` request whose `Origin`/`Referer` host does not match the request host, before the cookie is even read.
 
 ## Local Setup and Secrets
 
@@ -237,6 +285,7 @@ Optional vars:
 - `GITHUB_PREVIEW_REPO_PAT`
 - `VOID_PROXY_SERVICE`
 - `SITE_DOMAIN`
+- `EMAIL_SENDER_DOMAIN` — platform mail domain for this environment (`mail.void.cloud` in production). Set on the proxy worker too, and handed to deployed user workers as `__VOID_EMAIL_DOMAIN`. See [Email](#email).
 - `GITHUB_APP_ID` — Deploy-on-GitHub App identifier
 - `GITHUB_APP_PRIVATE_KEY` — PKCS#8 PEM (convert GitHub's PKCS#1 with `openssl pkcs8 -topk8 -nocrypt`)
 - `GITHUB_APP_SLUG` — App slug, used to build the install URL

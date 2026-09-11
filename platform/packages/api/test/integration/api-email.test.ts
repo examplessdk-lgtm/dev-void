@@ -1,0 +1,1716 @@
+/**
+ * Control-plane coverage for `void/email`.
+ *
+ * Routes under test (all mounted in `src/index.ts`):
+ *   - `GET    /projects/:id/email/usage`
+ *   - `GET    /projects/:id/email/logs`
+ *   - `GET    /projects/:id/email/destinations`
+ *   - `POST   /projects/:id/email/destinations`
+ *   - `DELETE /projects/:id/email/destinations/:destId`
+ *   - `GET    /email/destinations/confirm`  (public — the token IS the auth)
+ *
+ * Two contracts run through the whole file and are worth stating once:
+ *
+ * 1. **The mail domain is configured, never baked in.** `EMAIL_SENDER_DOMAIN`
+ *    is a per-environment var; `setupEnv()` deliberately leaves it UNSET so
+ *    the fail-closed branch stays reachable. Anything that sends mail must
+ *    opt in via `emailEnv()`, and the verification sender is
+ *    `noreply@<EMAIL_SENDER_DOMAIN>` — asserted against the var, never
+ *    against a literal.
+ *
+ * 2. **Per-project consent (Options C + B from the email design doc).** CF
+ *    Email Routing verification is ACCOUNT-level. When CF already has an
+ *    address verified we either inherit that consent (Option C — it is the
+ *    project owner's own address, same human) or refuse to (Option B — some
+ *    other project verified it, so we mail our own confirmation link and the
+ *    row stays `pending` / `platform` until the recipient clicks).
+ */
+
+import { eq } from 'drizzle-orm';
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vite-plus/test';
+import { signConfirmToken } from '../../src/auth/confirm-token.ts';
+import { revokeOwnerVerifiedDestinationsForUserChange } from '../../src/db.ts';
+import {
+  hashSendContent,
+  PLATFORM_INTERNAL_EMAIL_SENTINEL,
+} from '../../src/email/send-verification.ts';
+import app from '../../src/index.ts';
+import { emailDestinations, projects, users } from '../../src/schema.ts';
+import {
+  cfError,
+  cfSuccess,
+  clearTables,
+  createTestProject,
+  createTestUser,
+  mockCfApi,
+  setupEnv,
+  teardownEnv,
+  type TestEnv,
+} from './helpers.ts';
+
+let env: TestEnv;
+
+/**
+ * The environment's platform mail zone. Staging's value on purpose: a test
+ * that hard-coded production's would pass against a route that ignored the
+ * var entirely.
+ */
+const MAIL_DOMAIN = 'mail.staging.void.cloud';
+
+/** Bindings with the platform mail zone configured. */
+function emailEnv(domain: string = MAIL_DOMAIN): TestEnv {
+  return { ...env, EMAIL_SENDER_DOMAIN: domain };
+}
+
+beforeAll(async () => {
+  env = await setupEnv();
+});
+
+afterAll(async () => {
+  await teardownEnv();
+});
+
+beforeEach(async () => {
+  await clearTables(env.db);
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
+
+// ---------------------------------------------------------------------------
+// Request helpers
+// ---------------------------------------------------------------------------
+
+function listDestinations(projectId: string, jwt: string, bindings: TestEnv = env) {
+  return app.fetch(
+    new Request(`http://localhost/projects/${projectId}/email/destinations`, {
+      headers: { Authorization: `Bearer ${jwt}` },
+    }),
+    bindings,
+  );
+}
+
+async function addDestination(
+  projectId: string,
+  jwt: string,
+  address: unknown,
+  bindings: TestEnv = env,
+): Promise<Response> {
+  return app.fetch(
+    new Request(`http://localhost/projects/${projectId}/email/destinations`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${jwt}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ address }),
+    }),
+    bindings,
+  );
+}
+
+async function removeDestination(
+  projectId: string,
+  destId: string,
+  jwt: string,
+  bindings: TestEnv = env,
+): Promise<Response> {
+  return app.fetch(
+    new Request(`http://localhost/projects/${projectId}/email/destinations/${destId}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${jwt}` },
+    }),
+    bindings,
+  );
+}
+
+function rowsFor(projectId: string) {
+  return env.db.select().from(emailDestinations).where(eq(emailDestinations.project_id, projectId));
+}
+
+async function setUserEmail(userId: string, email: string): Promise<string> {
+  await env.db.update(users).set({ email }).where(eq(users.id, userId));
+  return email;
+}
+
+async function readAllowlist(projectId: string): Promise<Array<string>> {
+  const raw = await env.ROUTING.get(`email-allowlist:${projectId}`);
+  if (!raw) {
+    return [];
+  }
+  const parsed = JSON.parse(raw as string) as unknown;
+  return Array.isArray(parsed) ? parsed.filter((s): s is string => typeof s === 'string') : [];
+}
+
+/**
+ * Two verified rows plus the matching mirror, the shape a live project has
+ * once both recipients confirmed.
+ */
+async function seedVerifiedPair(projectId: string): Promise<void> {
+  await env.db.insert(emailDestinations).values([
+    {
+      id: 'edst_v1',
+      project_id: projectId,
+      address: 'keep@example.com',
+      status: 'verified',
+      cf_destination_id: 'cf-tag-keep',
+      verified_at: '2026-04-29T00:00:00Z',
+    },
+    {
+      id: 'edst_v2',
+      project_id: projectId,
+      address: 'gone@example.com',
+      status: 'verified',
+      cf_destination_id: 'cf-tag-gone',
+      verified_at: '2026-04-29T00:00:00Z',
+    },
+  ]);
+  await env.ROUTING.put(
+    `email-allowlist:${projectId}`,
+    JSON.stringify(['keep@example.com', 'gone@example.com']),
+  );
+}
+
+/**
+ * Fail this project's allowlist mirror write (both branches — the `put` and
+ * the delete-on-empty), leaving every other KV op intact. Restored by the
+ * file-level `vi.restoreAllMocks()`.
+ */
+function breakAllowlistWrites(projectId: string): void {
+  const key = `email-allowlist:${projectId}`;
+  const originalPut = env.ROUTING.put.bind(env.ROUTING);
+  const originalDelete = env.ROUTING.delete.bind(env.ROUTING);
+  vi.spyOn(env.ROUTING, 'put').mockImplementation((async (
+    k: string,
+    value: string | ArrayBuffer | ArrayBufferView | ReadableStream,
+    options?: KVNamespacePutOptions,
+  ) => {
+    if (k === key) {
+      throw new Error('forced allowlist KV failure for test');
+    }
+    return originalPut(k, value as never, options as never);
+  }) as typeof env.ROUTING.put);
+  vi.spyOn(env.ROUTING, 'delete').mockImplementation((async (k: string) => {
+    if (k === key) {
+      throw new Error('forced allowlist KV failure for test');
+    }
+    return originalDelete(k as never);
+  }) as typeof env.ROUTING.delete);
+}
+
+/**
+ * Call `observe` with the addresses this project's mirror was just set to
+ * (`null` when the key was cleared), still INSIDE the awaited KV call — so an
+ * observer can read what the database looked like at that instant.
+ */
+function observeAllowlistWrites(
+  projectId: string,
+  observe: (written: Array<string> | null) => Promise<void>,
+): void {
+  const key = `email-allowlist:${projectId}`;
+  const originalPut = env.ROUTING.put.bind(env.ROUTING);
+  const originalDelete = env.ROUTING.delete.bind(env.ROUTING);
+  vi.spyOn(env.ROUTING, 'put').mockImplementation((async (
+    k: string,
+    value: string | ArrayBuffer | ArrayBufferView | ReadableStream,
+    options?: KVNamespacePutOptions,
+  ) => {
+    await originalPut(k, value as never, options as never);
+    if (k === key) {
+      await observe(JSON.parse(String(value)) as Array<string>);
+    }
+  }) as typeof env.ROUTING.put);
+  vi.spyOn(env.ROUTING, 'delete').mockImplementation((async (k: string) => {
+    await originalDelete(k as never);
+    if (k === key) {
+      await observe(null);
+    }
+  }) as typeof env.ROUTING.delete);
+}
+
+/** A CF list row for `address`, verified at `verified` (null = still pending). */
+function cfRow(tag: string, email: string, verified: string | null) {
+  return {
+    tag,
+    email,
+    verified,
+    created: '2026-04-25T00:00:00Z',
+    modified: '2026-04-26T00:00:00Z',
+  };
+}
+
+function cfCalls(
+  fetchMock: ReturnType<typeof mockCfApi> | ReturnType<typeof vi.fn>,
+  method: string,
+  fragment: string,
+): Array<Array<unknown>> {
+  return (fetchMock.mock.calls as Array<Array<unknown>>).filter((call) => {
+    const url = typeof call[0] === 'string' ? call[0] : String(call[0]);
+    const init = call[1] as RequestInit | undefined;
+    return url.includes(fragment) && (init?.method ?? 'GET') === method;
+  });
+}
+
+/**
+ * `mockCfApi` plus a passthrough for the proxy's `/email/internal/send`. The
+ * CF mock throws on any unmocked URL, and the platform verification email is
+ * the one non-CF fetch the api makes.
+ */
+function mockCfWithProxy(
+  overrides: Parameters<typeof mockCfApi>[0] = {},
+  respond: () => Response = () => Response.json({ ok: true }),
+): ReturnType<typeof vi.fn> {
+  const cfMock = mockCfApi(overrides) as unknown as (
+    input: string | URL | Request,
+    init?: RequestInit,
+  ) => Promise<Response>;
+  const wrapper = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+    const url =
+      typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+    if (url.includes('/email/internal/send')) {
+      return respond();
+    }
+    return cfMock(input, init);
+  });
+  vi.stubGlobal('fetch', wrapper);
+  return wrapper;
+}
+
+type ProxySend = {
+  url: string;
+  body: {
+    platformToken?: unknown;
+    platformTimestamp?: unknown;
+    from?: unknown;
+    to?: unknown;
+    mimeBase64?: unknown;
+  };
+};
+
+function proxySends(fetchMock: ReturnType<typeof vi.fn>): Array<ProxySend> {
+  return (fetchMock.mock.calls as Array<Array<unknown>>)
+    .filter((call) => {
+      const url = typeof call[0] === 'string' ? call[0] : String(call[0]);
+      return url.includes('/email/internal/send');
+    })
+    .map((call) => {
+      const url = typeof call[0] === 'string' ? call[0] : String(call[0]);
+      const init = call[1] as RequestInit | undefined;
+      const body = typeof init?.body === 'string' ? JSON.parse(init.body) : {};
+      return { url, body } as ProxySend;
+    });
+}
+
+/**
+ * CF mock shaped for "the address is already on the account, verified by
+ * someone". `addDestination` reports the conflict; recovery lists and finds it.
+ */
+function cfAlreadyVerified(tag: string, email: string) {
+  return {
+    addEmailDestination: () => cfError('address already exists'),
+    listEmailDestinations: () => cfSuccess([cfRow(tag, email, '2026-04-26T00:00:00Z')]),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// POST /projects/:id/email/destinations
+// ---------------------------------------------------------------------------
+
+describe('POST /projects/:id/email/destinations', () => {
+  it('returns 401 without auth', async () => {
+    const res = await app.fetch(
+      new Request('http://localhost/projects/proj_x/email/destinations', { method: 'POST' }),
+      env,
+    );
+    expect(res.status).toBe(401);
+  });
+
+  it('returns 404 for an unknown project', async () => {
+    const user = await createTestUser(env.db);
+    const res = await addDestination('proj_missing', user.jwt, 'a@b.com');
+    expect(res.status).toBe(404);
+  });
+
+  it('returns 403 when the caller does not own the project', async () => {
+    const owner = await createTestUser(env.db, 'owner');
+    const intruder = await createTestUser(env.db, 'intruder');
+    const project = await createTestProject(env.db, owner.id);
+    const fetchMock = mockCfApi();
+
+    const res = await addDestination(project.id, intruder.jwt, 'a@b.com');
+
+    expect(res.status).toBe(403);
+    // The ownership check must run BEFORE anything reaches Cloudflare —
+    // otherwise a stranger can register account-level addresses.
+    expect(cfCalls(fetchMock, 'POST', '/email/routing/addresses')).toHaveLength(0);
+    expect(await rowsFor(project.id)).toHaveLength(0);
+  });
+
+  it('returns 409 once the project is being torn down', async () => {
+    // Teardown snapshots the CF destination tags it has to clean up ONCE. A
+    // destination registered after that snapshot but before the cascade drops
+    // our rows leaves an account-level CF handle nothing can find again.
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    await env.db.update(projects).set({ status: 'deleting' }).where(eq(projects.id, project.id));
+    const fetchMock = mockCfApi();
+
+    const res = await addDestination(project.id, user.jwt, 'late@example.com');
+
+    expect(res.status).toBe(409);
+    expect(cfCalls(fetchMock, 'POST', '/email/routing/addresses')).toHaveLength(0);
+    expect(await rowsFor(project.id)).toHaveLength(0);
+  });
+
+  it('returns 400 for an invalid email', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    mockCfApi();
+    const res = await addDestination(project.id, user.jwt, 'not-an-email');
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: 'invalid address' });
+  });
+
+  it('returns 400 for a malformed JSON body rather than a 500', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    mockCfApi();
+    const res = await app.fetch(
+      new Request(`http://localhost/projects/${project.id}/email/destinations`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${user.jwt}`, 'Content-Type': 'application/json' },
+        body: '{not json',
+      }),
+      env,
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it('creates a pending row and calls CF on the first add', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    const fetchMock = mockCfApi();
+
+    const res = await addDestination(project.id, user.jwt, 'Owner@Example.com');
+
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { address: string; status: string };
+    // Address is lowercased on insert.
+    expect(body.address).toBe('owner@example.com');
+    expect(body.status).toBe('pending');
+
+    const rows = await rowsFor(project.id);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.cf_destination_id).toBe('cf-tag-owner@example.com');
+    expect(rows[0]?.verification_source).toBe('cf');
+    expect(cfCalls(fetchMock, 'POST', '/email/routing/addresses')).toHaveLength(1);
+  });
+
+  it('returns the existing row without calling CF when the address is already in the DB', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    const fetchMock = mockCfApi();
+
+    const first = await addDestination(project.id, user.jwt, 'a@b.com');
+    expect(first.status).toBe(201);
+
+    const second = await addDestination(project.id, user.jwt, 'a@b.com');
+    expect(second.status).toBe(200);
+
+    // CF is touched once — the duplicate is fully short-circuited, so the
+    // recipient gets one verification email rather than one per click.
+    expect(cfCalls(fetchMock, 'POST', '/email/routing/addresses')).toHaveLength(1);
+    expect(await rowsFor(project.id)).toHaveLength(1);
+  });
+
+  it('recovers via list when CF reports "already exists"', async () => {
+    // The address does not match the owner's email (the fixture leaves it
+    // null), so CF's verified flag cannot be inherited: Option B applies and
+    // the row lands platform-pending.
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    const fetchMock = mockCfWithProxy(cfAlreadyVerified('recovered-tag', 'shared@example.com'));
+
+    const res = await addDestination(project.id, user.jwt, 'shared@example.com', emailEnv());
+    expect(res.status).toBe(201);
+
+    const rows = await rowsFor(project.id);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.cf_destination_id).toBe('recovered-tag');
+    expect(rows[0]?.status).toBe('pending');
+    expect(rows[0]?.verification_source).toBe('platform');
+    expect(proxySends(fetchMock)).toHaveLength(1);
+  });
+
+  it('returns 502 when CF fails for any reason other than "already exists"', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    mockCfApi({ addEmailDestination: () => cfError('Authentication error', 401) });
+
+    const res = await addDestination(project.id, user.jwt, 'a@b.com');
+
+    expect(res.status).toBe(502);
+    // No row: a destination we could not register with CF would be a
+    // permanently-pending entry the recipient can never confirm.
+    expect(await rowsFor(project.id)).toHaveLength(0);
+  });
+
+  it('returns 502 when CF claims the address exists but the list does not contain it', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    mockCfApi({
+      addEmailDestination: () => cfError('address already exists'),
+      listEmailDestinations: () => cfSuccess([]),
+    });
+
+    const res = await addDestination(project.id, user.jwt, 'ghost@example.com');
+    expect(res.status).toBe(502);
+    expect(await rowsFor(project.id)).toHaveLength(0);
+  });
+
+  it('rate-limits to 5 adds per minute', async () => {
+    mockCfApi();
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+
+    for (let i = 0; i < 5; i++) {
+      const res = await addDestination(project.id, user.jwt, `r${i}@example.com`);
+      expect(res.status).toBe(201);
+    }
+
+    const res = await addDestination(project.id, user.jwt, 'r5@example.com');
+    expect(res.status).toBe(429);
+    expect((await res.json()) as { error: string }).toEqual({
+      error: expect.stringMatching(/per minute|limit/i),
+    });
+  });
+
+  it('rate-limits to 50 adds per day', async () => {
+    // Pre-seed the day counter rather than firing 50 requests. The reader is
+    // NaN-poison-resistant, so any non-negative integer string counts.
+    mockCfApi();
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+
+    const now = new Date();
+    const dayBucket = `${now.getUTCFullYear()}${String(now.getUTCMonth() + 1).padStart(2, '0')}${String(now.getUTCDate()).padStart(2, '0')}`;
+    await env.ROUTING.put(`email-add-rate:${project.id}:${dayBucket}`, '50');
+
+    const res = await addDestination(project.id, user.jwt, 'over-the-cap@example.com');
+    expect(res.status).toBe(429);
+    expect((await res.json()) as { error: string }).toEqual({
+      error: expect.stringMatching(/today|day/i),
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET /projects/:id/email/destinations
+// ---------------------------------------------------------------------------
+
+describe('GET /projects/:id/email/destinations', () => {
+  it('returns 401 without auth', async () => {
+    const res = await app.fetch(
+      new Request('http://localhost/projects/proj_x/email/destinations'),
+      env,
+    );
+    expect(res.status).toBe(401);
+  });
+
+  it('returns 404 for an unknown project', async () => {
+    const user = await createTestUser(env.db);
+    const res = await listDestinations('proj_missing', user.jwt);
+    expect(res.status).toBe(404);
+  });
+
+  it("returns 403 and leaks nothing for another user's project", async () => {
+    const owner = await createTestUser(env.db, 'owner');
+    const intruder = await createTestUser(env.db, 'intruder');
+    const project = await createTestProject(env.db, owner.id);
+    await env.db.insert(emailDestinations).values({
+      id: 'edst_secret',
+      project_id: project.id,
+      address: 'secret@example.com',
+      status: 'verified',
+      cf_destination_id: 'cf-tag-secret',
+      verified_at: '2026-04-29T00:00:00Z',
+    });
+    mockCfApi();
+
+    const res = await listDestinations(project.id, intruder.jwt);
+
+    expect(res.status).toBe(403);
+    expect(await res.text()).not.toContain('secret@example.com');
+  });
+
+  it('refreshes pending rows that CF now reports verified', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    mockCfApi();
+    await addDestination(project.id, user.jwt, 'pending@example.com');
+
+    mockCfApi({
+      listEmailDestinations: () =>
+        cfSuccess([
+          cfRow('cf-tag-pending@example.com', 'pending@example.com', '2026-04-27T01:00:00Z'),
+        ]),
+    });
+
+    const res = await listDestinations(project.id, user.jwt);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Array<{ address: string; status: string }>;
+    expect(body).toHaveLength(1);
+    expect(body[0]?.status).toBe('verified');
+
+    const rows = await rowsFor(project.id);
+    expect(rows[0]?.status).toBe('verified');
+    expect(rows[0]?.verified_at).toBeTruthy();
+  });
+
+  it('still returns the cached view when the CF list call fails', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    mockCfApi();
+    await addDestination(project.id, user.jwt, 'a@b.com');
+
+    mockCfApi({ listEmailDestinations: () => cfError('CF down', 503) });
+
+    const res = await listDestinations(project.id, user.jwt);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Array<{ address: string; status: string }>;
+    expect(body).toHaveLength(1);
+    expect(body[0]?.status).toBe('pending');
+  });
+
+  it('skips CF refresh for platform-pending rows', async () => {
+    // CF says verified — a DIFFERENT project earned that. The per-project
+    // consent gate is our own confirmation click, so the refresh must not
+    // flip this row or the whole Option B path is bypassable.
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    await env.db.insert(emailDestinations).values({
+      id: 'edst_platform_pending',
+      project_id: project.id,
+      address: 'shared@example.com',
+      status: 'pending',
+      cf_destination_id: 'cf-tag-shared',
+      verified_at: null,
+      verification_source: 'platform',
+    });
+
+    mockCfApi({
+      listEmailDestinations: () =>
+        cfSuccess([cfRow('cf-tag-shared', 'shared@example.com', '2026-04-29T00:00:00Z')]),
+    });
+
+    const res = await listDestinations(project.id, user.jwt);
+    expect(res.status).toBe(200);
+    const list = (await res.json()) as Array<{ status: string; verification_source: string }>;
+    expect(list[0]?.status).toBe('pending');
+    expect(list[0]?.verification_source).toBe('platform');
+    expect(await readAllowlist(project.id)).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// DELETE /projects/:id/email/destinations/:destId
+// ---------------------------------------------------------------------------
+
+describe('DELETE /projects/:id/email/destinations/:destId', () => {
+  it('returns 401 without auth', async () => {
+    const res = await app.fetch(
+      new Request('http://localhost/projects/proj_x/email/destinations/edst_x', {
+        method: 'DELETE',
+      }),
+      env,
+    );
+    expect(res.status).toBe(401);
+  });
+
+  it("returns 403 and keeps the row for another user's project", async () => {
+    const owner = await createTestUser(env.db, 'owner');
+    const intruder = await createTestUser(env.db, 'intruder');
+    const project = await createTestProject(env.db, owner.id);
+    mockCfApi();
+    const created = await addDestination(project.id, owner.jwt, 'a@b.com');
+    const dest = (await created.json()) as { id: string };
+
+    const res = await removeDestination(project.id, dest.id, intruder.jwt);
+
+    expect(res.status).toBe(403);
+    expect(await rowsFor(project.id)).toHaveLength(1);
+  });
+
+  it('returns 409 once the project is being torn down', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    mockCfApi();
+    const created = await addDestination(project.id, user.jwt, 'a@b.com');
+    const dest = (await created.json()) as { id: string };
+    await env.db.update(projects).set({ status: 'deleting' }).where(eq(projects.id, project.id));
+
+    const res = await removeDestination(project.id, dest.id, user.jwt);
+
+    expect(res.status).toBe(409);
+    expect(await rowsFor(project.id)).toHaveLength(1);
+  });
+
+  it('returns 404 for an unknown destination', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    mockCfApi();
+    const res = await removeDestination(project.id, 'missing-id', user.jwt);
+    expect(res.status).toBe(404);
+  });
+
+  it('returns 404 when the destination belongs to another project', async () => {
+    const user = await createTestUser(env.db);
+    const projectA = await createTestProject(env.db, user.id, 'project-a');
+    const projectB = await createTestProject(env.db, user.id, 'project-b');
+    mockCfApi();
+
+    const created = await addDestination(projectA.id, user.jwt, 'a@b.com');
+    const dest = (await created.json()) as { id: string };
+
+    // Same owner, wrong project in the path — must 404, not delete.
+    const res = await removeDestination(projectB.id, dest.id, user.jwt);
+    expect(res.status).toBe(404);
+
+    const rows = await env.db
+      .select()
+      .from(emailDestinations)
+      .where(eq(emailDestinations.id, dest.id));
+    expect(rows).toHaveLength(1);
+  });
+
+  it('deletes from CF when no other project references the tag', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    const fetchMock = mockCfApi();
+
+    const created = await addDestination(project.id, user.jwt, 'a@b.com');
+    const dest = (await created.json()) as { id: string };
+
+    const res = await removeDestination(project.id, dest.id, user.jwt);
+    expect(res.status).toBe(200);
+
+    expect(cfCalls(fetchMock, 'DELETE', '/email/routing/addresses/')).toHaveLength(1);
+    expect(await rowsFor(project.id)).toHaveLength(0);
+  });
+
+  it('skips the CF delete while another project still references the tag', async () => {
+    // Destinations are ACCOUNT-level on Cloudflare. Deleting the CF address
+    // because one project dropped it would silently break every sibling
+    // project that still has it verified.
+    const user = await createTestUser(env.db);
+    const projectA = await createTestProject(env.db, user.id, 'project-a');
+    const projectB = await createTestProject(env.db, user.id, 'project-b');
+    const fetchMock = mockCfApi();
+
+    for (const p of [projectA, projectB]) {
+      const res = await addDestination(p.id, user.jwt, 'shared@example.com');
+      expect(res.status).toBe(201);
+    }
+
+    const aRows = await rowsFor(projectA.id);
+    expect(aRows[0]?.cf_destination_id).toBe('cf-tag-shared@example.com');
+
+    const res = await removeDestination(projectA.id, aRows[0]!.id, user.jwt);
+    expect(res.status).toBe(200);
+
+    expect(cfCalls(fetchMock, 'DELETE', '/email/routing/addresses/')).toHaveLength(0);
+    expect(await rowsFor(projectA.id)).toHaveLength(0);
+    expect(await rowsFor(projectB.id)).toHaveLength(1);
+  });
+
+  it('still removes the DB row when the CF delete fails', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    mockCfApi();
+    const created = await addDestination(project.id, user.jwt, 'a@b.com');
+    const dest = (await created.json()) as { id: string };
+
+    mockCfApi({ deleteEmailDestination: () => cfError('CF outage', 500) });
+
+    const res = await removeDestination(project.id, dest.id, user.jwt);
+    expect(res.status).toBe(200);
+
+    const rows = await env.db
+      .select()
+      .from(emailDestinations)
+      .where(eq(emailDestinations.id, dest.id));
+    expect(rows).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// email-allowlist KV mirror
+//
+// The proxy reads `email-allowlist:<projectId>` from ROUTING KV on every send.
+// Postgres is the source of truth; KV is a denormalized read-cache that every
+// destinations CRUD re-syncs.
+// ---------------------------------------------------------------------------
+
+describe('email-allowlist KV sync', () => {
+  it('writes the address when CF reports it verified AND it matches the project owner', async () => {
+    // Option C — owner-relaxed reuse. Same human, same consent.
+    const user = await createTestUser(env.db);
+    await setUserEmail(user.id, 'verified@example.com');
+    const project = await createTestProject(env.db, user.id);
+    mockCfApi(cfAlreadyVerified('cf-recovered-tag', 'verified@example.com'));
+
+    const res = await addDestination(project.id, user.jwt, 'verified@example.com', emailEnv());
+    expect(res.status).toBe(201);
+    expect(await readAllowlist(project.id)).toEqual(['verified@example.com']);
+
+    const rows = await rowsFor(project.id);
+    expect(rows[0]?.status).toBe('verified');
+    expect(rows[0]?.verification_source).toBe('cf');
+  });
+
+  it('does NOT write a pending (unverified) destination', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    mockCfApi(); // default: `verified: null`
+
+    const res = await addDestination(project.id, user.jwt, 'pending@example.com');
+    expect(res.status).toBe(201);
+    expect(await readAllowlist(project.id)).toEqual([]);
+  });
+
+  it('flips KV when the GET refresh observes CF verification', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+
+    mockCfApi();
+    const created = await addDestination(project.id, user.jwt, 'flip@example.com');
+    expect(created.status).toBe(201);
+    expect(await readAllowlist(project.id)).toEqual([]);
+
+    mockCfApi({
+      listEmailDestinations: () =>
+        cfSuccess([cfRow('cf-tag-flip@example.com', 'flip@example.com', '2026-04-29T00:00:00Z')]),
+    });
+    const refresh = await listDestinations(project.id, user.jwt);
+    expect(refresh.status).toBe(200);
+
+    expect(await readAllowlist(project.id)).toEqual(['flip@example.com']);
+  });
+
+  it('deletes the key when the last verified destination goes away', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    await env.db.insert(emailDestinations).values({
+      id: 'edst_v1',
+      project_id: project.id,
+      address: 'doomed@example.com',
+      status: 'verified',
+      cf_destination_id: 'cf-tag-doomed',
+      verified_at: '2026-04-29T00:00:00Z',
+    });
+    await env.ROUTING.put(`email-allowlist:${project.id}`, JSON.stringify(['doomed@example.com']));
+
+    mockCfApi();
+    const res = await removeDestination(project.id, 'edst_v1', user.jwt);
+    expect(res.status).toBe(200);
+    // Deleted, not left as an empty array.
+    expect(await env.ROUTING.get(`email-allowlist:${project.id}`)).toBeNull();
+  });
+
+  it('keeps the other verified addresses after deleting one', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    await env.db.insert(emailDestinations).values([
+      {
+        id: 'edst_v1',
+        project_id: project.id,
+        address: 'keep@example.com',
+        status: 'verified',
+        cf_destination_id: 'cf-tag-keep',
+        verified_at: '2026-04-29T00:00:00Z',
+      },
+      {
+        id: 'edst_v2',
+        project_id: project.id,
+        address: 'gone@example.com',
+        status: 'verified',
+        cf_destination_id: 'cf-tag-gone',
+        verified_at: '2026-04-29T00:00:00Z',
+      },
+    ]);
+    await env.ROUTING.put(
+      `email-allowlist:${project.id}`,
+      JSON.stringify(['keep@example.com', 'gone@example.com']),
+    );
+
+    mockCfApi();
+    const res = await removeDestination(project.id, 'edst_v2', user.jwt);
+    expect(res.status).toBe(200);
+    expect(await readAllowlist(project.id)).toEqual(['keep@example.com']);
+  });
+
+  it('tightens the mirror while the revoked row is still present', async () => {
+    // Ordering is the whole point. The mirror is what the proxy enforces, and
+    // the row is what a retry would re-derive that mirror from. So the write
+    // lands FIRST, and it must already EXCLUDE the row being revoked —
+    // `getVerifiedEmailDestinationsByProjectId` still returns it at that
+    // moment, so a plain re-sync would write the revoked address straight back.
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    await seedVerifiedPair(project.id);
+
+    const observed: Array<{ written: Array<string> | null; rowIds: Array<string> }> = [];
+    observeAllowlistWrites(project.id, async (written) => {
+      const rows = await rowsFor(project.id);
+      observed.push({ written, rowIds: rows.map((r) => r.id).sort() });
+    });
+
+    mockCfApi();
+    const res = await removeDestination(project.id, 'edst_v2', user.jwt);
+    expect(res.status).toBe(200);
+
+    expect(observed).toHaveLength(1);
+    expect(observed[0]?.written).toEqual(['keep@example.com']);
+    expect(observed[0]?.rowIds).toEqual(['edst_v1', 'edst_v2']);
+    expect(await readAllowlist(project.id)).toEqual(['keep@example.com']);
+    expect(await rowsFor(project.id)).toHaveLength(1);
+  });
+
+  it('keeps the row and fails the revoke when the mirror write fails', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    await seedVerifiedPair(project.id);
+    breakAllowlistWrites(project.id);
+
+    const fetchMock = mockCfApi();
+    const res = await removeDestination(project.id, 'edst_v2', user.jwt);
+
+    // Non-2xx, and nothing destructive ran: DELETE stays retryable. Dropping
+    // the row first and swallowing the KV error would strand
+    // `gone@example.com` in the allowlist forever — no row left for a retry
+    // to re-derive the mirror from, so the proxy keeps delivering to a
+    // revoked recipient.
+    expect(res.status).toBe(503);
+    expect((await rowsFor(project.id)).map((r) => r.id).sort()).toEqual(['edst_v1', 'edst_v2']);
+    expect(await readAllowlist(project.id)).toEqual(['keep@example.com', 'gone@example.com']);
+    expect(cfCalls(fetchMock, 'DELETE', '/email/routing/addresses/')).toHaveLength(0);
+  });
+
+  it('keeps the row when clearing the last address fails', async () => {
+    // Same inversion on the delete-on-empty branch of the mirror sync.
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    await env.db.insert(emailDestinations).values({
+      id: 'edst_v1',
+      project_id: project.id,
+      address: 'only@example.com',
+      status: 'verified',
+      cf_destination_id: 'cf-tag-only',
+      verified_at: '2026-04-29T00:00:00Z',
+    });
+    await env.ROUTING.put(`email-allowlist:${project.id}`, JSON.stringify(['only@example.com']));
+    breakAllowlistWrites(project.id);
+
+    mockCfApi();
+    const res = await removeDestination(project.id, 'edst_v1', user.jwt);
+
+    expect(res.status).toBe(503);
+    expect(await rowsFor(project.id)).toHaveLength(1);
+    expect(await readAllowlist(project.id)).toEqual(['only@example.com']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Per-project verification: Option C (inherit) vs Option B (re-verify)
+// ---------------------------------------------------------------------------
+
+describe('per-project verification (Option C + Option B)', () => {
+  it("Option C: the owner's own CF-verified address is inherited, with no platform email", async () => {
+    const user = await createTestUser(env.db);
+    await setUserEmail(user.id, 'owner@example.com');
+    const project = await createTestProject(env.db, user.id);
+    const fetchMock = mockCfWithProxy(cfAlreadyVerified('cf-tag-owner', 'owner@example.com'));
+
+    const res = await addDestination(project.id, user.jwt, 'owner@example.com', emailEnv());
+
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { status: string; verification_source: string };
+    expect(body.status).toBe('verified');
+    expect(body.verification_source).toBe('cf');
+
+    expect(await readAllowlist(project.id)).toEqual(['owner@example.com']);
+    // No platform-side confirmation mail — that is the Option B path only.
+    expect(proxySends(fetchMock)).toHaveLength(0);
+  });
+
+  it('Option C: records who consented and which address they used', async () => {
+    // The audit columns are what makes an inherited consent revocable when
+    // the granter's identity later changes.
+    const user = await createTestUser(env.db);
+    await setUserEmail(user.id, 'owner@example.com');
+    const project = await createTestProject(env.db, user.id);
+    mockCfApi(cfAlreadyVerified('cf-tag-owner', 'owner@example.com'));
+
+    const res = await addDestination(project.id, user.jwt, 'owner@example.com', emailEnv());
+    expect(res.status).toBe(201);
+
+    const rows = await rowsFor(project.id);
+    expect(rows[0]?.status).toBe('verified');
+    expect(rows[0]?.verification_source).toBe('cf');
+    expect(rows[0]?.verified_by_user_id).toBe(user.id);
+    expect(rows[0]?.verified_by_email_snapshot).toBe('owner@example.com');
+  });
+
+  it('Option B: a non-owner CF-verified address stays pending, mails a link, and is NOT allow-listed', async () => {
+    const user = await createTestUser(env.db);
+    await setUserEmail(user.id, 'owner@example.com');
+    const project = await createTestProject(env.db, user.id);
+    const fetchMock = mockCfWithProxy(cfAlreadyVerified('cf-tag-shared', 'shared@example.com'));
+
+    const res = await addDestination(project.id, user.jwt, 'shared@example.com', emailEnv());
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as {
+      status: string;
+      verification_source: string;
+      platformVerificationPending?: boolean;
+    };
+    expect(body.status).toBe('pending');
+    expect(body.verification_source).toBe('platform');
+    expect(body.platformVerificationPending).toBe(true);
+
+    // Still pending, so the proxy must refuse sends to it.
+    expect(await env.ROUTING.get(`email-allowlist:${project.id}`)).toBeNull();
+
+    const sends = proxySends(fetchMock);
+    expect(sends).toHaveLength(1);
+    expect(sends[0]!.body.to).toBe('shared@example.com');
+    // The sender is derived from the CONFIGURED domain, never a literal.
+    expect(sends[0]!.body.from).toBe(`noreply@${MAIL_DOMAIN}`);
+    // The proxy rejects a timestamp outside a 5-minute window.
+    const ts = sends[0]!.body.platformTimestamp;
+    expect(typeof ts).toBe('number');
+    expect(Math.abs(Math.floor(Date.now() / 1000) - (ts as number))).toBeLessThan(60);
+  });
+
+  it('Option B: does NOT populate the audit columns (consent was per-recipient)', async () => {
+    const user = await createTestUser(env.db);
+    await setUserEmail(user.id, 'owner@example.com');
+    const project = await createTestProject(env.db, user.id);
+    mockCfWithProxy(cfAlreadyVerified('cf-tag-shared', 'shared@example.com'));
+
+    const res = await addDestination(project.id, user.jwt, 'shared@example.com', emailEnv());
+    expect(res.status).toBe(201);
+
+    const rows = await rowsFor(project.id);
+    expect(rows[0]?.verification_source).toBe('platform');
+    // Nothing was inherited, so there is no identity to revoke later.
+    expect(rows[0]?.verified_by_user_id).toBeNull();
+    expect(rows[0]?.verified_by_email_snapshot).toBeNull();
+  });
+
+  it('Option B: parallel POSTs for the same address send exactly one platform email', async () => {
+    const user = await createTestUser(env.db);
+    await setUserEmail(user.id, 'owner@example.com');
+    const project = await createTestProject(env.db, user.id);
+    const fetchMock = mockCfWithProxy(cfAlreadyVerified('cf-tag-shared', 'shared@example.com'));
+
+    // The unique constraint on (project_id, address) lets exactly one INSERT
+    // win; ON CONFLICT DO NOTHING + RETURNING is what tells the loser it did
+    // not insert, and only the inserter mails the recipient.
+    const [resA, resB] = await Promise.all([
+      addDestination(project.id, user.jwt, 'shared@example.com', emailEnv()),
+      addDestination(project.id, user.jwt, 'shared@example.com', emailEnv()),
+    ]);
+    expect([200, 201]).toContain(resA.status);
+    expect([200, 201]).toContain(resB.status);
+
+    const sends = proxySends(fetchMock);
+    expect(sends).toHaveLength(1);
+    expect(sends[0]!.body.to).toBe('shared@example.com');
+    expect(await rowsFor(project.id)).toHaveLength(1);
+  });
+
+  it('does not swallow a missing EMAIL_SENDER_DOMAIN into a delivery-failure log', async () => {
+    // Every reader fails closed on the unset var. `sendPlatformVerificationEmail`
+    // resolves the sender OUTSIDE its try, so the misconfiguration surfaces
+    // instead of looking like a transient proxy error. In this harness there
+    // is no ExecutionContext, so the inline-await fallback carries the throw
+    // into the response — in production it lands in `waitUntil`.
+    const user = await createTestUser(env.db);
+    await setUserEmail(user.id, 'owner@example.com');
+    const project = await createTestProject(env.db, user.id);
+    const fetchMock = mockCfWithProxy(cfAlreadyVerified('cf-tag-shared', 'shared@example.com'));
+
+    // `env` as-is — EMAIL_SENDER_DOMAIN unset.
+    const res = await addDestination(project.id, user.jwt, 'shared@example.com', env);
+
+    expect(res.status).toBe(500);
+    // Nothing was mailed, and nothing was allow-listed.
+    expect(proxySends(fetchMock)).toHaveLength(0);
+    expect(await env.ROUTING.get(`email-allowlist:${project.id}`)).toBeNull();
+    // But the row was already committed before the sender was resolved, so
+    // the misconfigured environment leaves behind a destination nobody can
+    // ever confirm: no link was mailed, and a retry short-circuits on the
+    // existing row instead of re-attempting the send. Reported, not fixed.
+    const stranded = await rowsFor(project.id);
+    expect(stranded).toHaveLength(1);
+    expect(stranded[0]?.status).toBe('pending');
+    expect(stranded[0]?.verification_source).toBe('platform');
+
+    const retry = await addDestination(project.id, user.jwt, 'shared@example.com', emailEnv());
+    expect(retry.status).toBe(200);
+    expect(proxySends(fetchMock)).toHaveLength(0);
+  });
+
+  it("defaults verification_source to 'cf' for rows that predate the column", async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    await env.db.insert(emailDestinations).values({
+      id: 'edst_legacy',
+      project_id: project.id,
+      address: 'legacy@example.com',
+      status: 'verified',
+      cf_destination_id: 'cf-tag-legacy',
+      verified_at: '2026-04-01T00:00:00Z',
+      // verification_source omitted on purpose — the column default applies.
+    });
+    const [row] = await env.db
+      .select()
+      .from(emailDestinations)
+      .where(eq(emailDestinations.id, 'edst_legacy'));
+    expect(row?.verification_source).toBe('cf');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Owner auto-add on project create
+// ---------------------------------------------------------------------------
+
+describe('POST /projects — owner destination auto-add', () => {
+  async function createProject(jwt: string, slug: string, bindings: TestEnv): Promise<Response> {
+    return app.fetch(
+      new Request('http://localhost/projects', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${jwt}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ slug }),
+      }),
+      bindings,
+    );
+  }
+
+  it("inherits CF's verification for the owner's own address and primes the allowlist", async () => {
+    // A second-or-later project for the same owner: CF already has the
+    // address, so the row starts verified with `verification_source='cf'`
+    // and the audit columns naming whose consent was inherited.
+    const user = await createTestUser(env.db);
+    await setUserEmail(user.id, 'owner@example.com');
+    mockCfApi(cfAlreadyVerified('cf-tag-owner', 'owner@example.com'));
+
+    const res = await createProject(user.jwt, 'email-autoadd-inherited', emailEnv());
+    expect(res.status).toBe(201);
+    const project = (await res.json()) as { id: string };
+
+    const rows = await rowsFor(project.id);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      address: 'owner@example.com',
+      cf_destination_id: 'cf-tag-owner',
+      status: 'verified',
+      verification_source: 'cf',
+      verified_by_user_id: user.id,
+      verified_by_email_snapshot: 'owner@example.com',
+    });
+    expect(await readAllowlist(project.id)).toEqual(['owner@example.com']);
+  });
+
+  it('leaves a fresh CF registration pending, with nothing allow-listed and no consent attributed', async () => {
+    const user = await createTestUser(env.db);
+    await setUserEmail(user.id, 'Owner@Example.com');
+    mockCfApi();
+
+    const res = await createProject(user.jwt, 'email-autoadd-fresh', emailEnv());
+    expect(res.status).toBe(201);
+    const project = (await res.json()) as { id: string };
+
+    const rows = await rowsFor(project.id);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      // Lowercased regardless of how the OAuth provider cased it.
+      address: 'owner@example.com',
+      status: 'pending',
+      verification_source: 'cf',
+    });
+    expect(rows[0]?.verified_by_user_id).toBeNull();
+    expect(await readAllowlist(project.id)).toEqual([]);
+  });
+
+  it('registers nothing when the environment has no platform mail domain', async () => {
+    const user = await createTestUser(env.db);
+    await setUserEmail(user.id, 'owner@example.com');
+    const fetchMock = mockCfApi();
+
+    // `env` as-is — EMAIL_SENDER_DOMAIN unset. There is no sender to
+    // allow-list a recipient for, so the auto-add stays inert.
+    const res = await createProject(user.jwt, 'email-autoadd-nodomain', env);
+    expect(res.status).toBe(201);
+    const project = (await res.json()) as { id: string };
+
+    expect(cfCalls(fetchMock, 'POST', '/email/routing/addresses')).toHaveLength(0);
+    expect(await rowsFor(project.id)).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Audit-driven revocation
+// ---------------------------------------------------------------------------
+
+describe('revokeOwnerVerifiedDestinationsForUserChange', () => {
+  it('demotes only the rows that inherited THIS identity', async () => {
+    const user = await createTestUser(env.db);
+    const projectA = await createTestProject(env.db, user.id, 'rev-a');
+    const projectB = await createTestProject(env.db, user.id, 'rev-b');
+
+    await env.db.insert(emailDestinations).values([
+      {
+        id: 'edst_owner_a',
+        project_id: projectA.id,
+        address: 'owner@example.com',
+        status: 'verified',
+        cf_destination_id: 'cf-tag-owner',
+        verified_at: '2026-04-25T00:00:00Z',
+        verification_source: 'cf',
+        verified_by_user_id: user.id,
+        verified_by_email_snapshot: 'owner@example.com',
+      },
+      {
+        id: 'edst_owner_b',
+        project_id: projectB.id,
+        address: 'owner@example.com',
+        status: 'verified',
+        cf_destination_id: 'cf-tag-owner',
+        verified_at: '2026-04-25T00:00:00Z',
+        verification_source: 'cf',
+        verified_by_user_id: user.id,
+        verified_by_email_snapshot: 'owner@example.com',
+      },
+      // Platform-source: consent was per-recipient, independent of the
+      // owner's identity. Must stay verified.
+      {
+        id: 'edst_platform_a',
+        project_id: projectA.id,
+        address: 'shared@example.com',
+        status: 'verified',
+        cf_destination_id: 'cf-tag-shared',
+        verified_at: '2026-04-25T00:00:00Z',
+        verification_source: 'platform',
+        verified_by_user_id: null,
+        verified_by_email_snapshot: null,
+      },
+      // Same user, DIFFERENT snapshot — matching on user_id alone would
+      // wrongly revoke this one.
+      {
+        id: 'edst_owner_other',
+        project_id: projectA.id,
+        address: 'old@example.com',
+        status: 'verified',
+        cf_destination_id: 'cf-tag-old',
+        verified_at: '2026-04-25T00:00:00Z',
+        verification_source: 'cf',
+        verified_by_user_id: user.id,
+        verified_by_email_snapshot: 'old@example.com',
+      },
+    ]);
+
+    const affected = await revokeOwnerVerifiedDestinationsForUserChange(
+      env.db,
+      user.id,
+      'owner@example.com',
+    );
+    expect([...affected].sort()).toEqual([projectA.id, projectB.id].sort());
+
+    const after = await env.db.select().from(emailDestinations);
+    const byId = new Map(after.map((r) => [r.id, r]));
+
+    expect(byId.get('edst_owner_a')?.status).toBe('pending');
+    expect(byId.get('edst_owner_a')?.verified_at).toBeNull();
+    expect(byId.get('edst_owner_a')?.verified_by_user_id).toBeNull();
+    expect(byId.get('edst_owner_a')?.verified_by_email_snapshot).toBeNull();
+    expect(byId.get('edst_owner_b')?.status).toBe('pending');
+
+    expect(byId.get('edst_platform_a')?.status).toBe('verified');
+    expect(byId.get('edst_platform_a')?.verification_source).toBe('platform');
+
+    expect(byId.get('edst_owner_other')?.status).toBe('verified');
+    expect(byId.get('edst_owner_other')?.verified_by_email_snapshot).toBe('old@example.com');
+  });
+
+  it('matches the email snapshot case-insensitively', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    await env.db.insert(emailDestinations).values({
+      id: 'edst_case',
+      project_id: project.id,
+      address: 'mixedcase@example.com',
+      status: 'verified',
+      cf_destination_id: 'cf-tag-mixed',
+      verified_at: '2026-04-25T00:00:00Z',
+      verification_source: 'cf',
+      verified_by_user_id: user.id,
+      verified_by_email_snapshot: 'MixedCase@Example.com',
+    });
+
+    const affected = await revokeOwnerVerifiedDestinationsForUserChange(
+      env.db,
+      user.id,
+      'mixedcase@example.com',
+    );
+    expect(affected).toEqual([project.id]);
+
+    const [row] = await env.db
+      .select()
+      .from(emailDestinations)
+      .where(eq(emailDestinations.id, 'edst_case'));
+    expect(row?.status).toBe('pending');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET /email/destinations/confirm — public; the HMAC-signed token IS the auth
+// ---------------------------------------------------------------------------
+
+describe('GET /email/destinations/confirm', () => {
+  async function seedPlatformPending(
+    address: string,
+    project: { id: string },
+    id = `edst_${Math.random().toString(36).slice(2, 10)}`,
+  ): Promise<string> {
+    await env.db.insert(emailDestinations).values({
+      id,
+      project_id: project.id,
+      address,
+      status: 'pending',
+      cf_destination_id: 'cf-tag-shared',
+      verified_at: null,
+      verification_source: 'platform',
+    });
+    return id;
+  }
+
+  function makeToken(
+    pid: string,
+    did: string,
+    addr: string,
+    overrides: { exp?: number; iat?: number } = {},
+  ): Promise<string> {
+    const now = Math.floor(Date.now() / 1000);
+    return signConfirmToken(
+      {
+        v: 1,
+        pid,
+        did,
+        addr,
+        iat: overrides.iat ?? now,
+        exp: overrides.exp ?? now + 24 * 60 * 60,
+      },
+      env.JWT_SECRET,
+    );
+  }
+
+  async function confirm(token: string): Promise<Response> {
+    return app.fetch(
+      new Request(`http://localhost/email/destinations/confirm?token=${encodeURIComponent(token)}`),
+      env,
+    );
+  }
+
+  it('flips the row to verified, syncs KV, and renders the success page', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    const did = await seedPlatformPending('shared@example.com', project);
+    const token = await makeToken(project.id, did, 'shared@example.com');
+
+    const res = await confirm(token);
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain('Confirmed');
+    expect(html).toContain('shared@example.com');
+
+    const [row] = await env.db
+      .select()
+      .from(emailDestinations)
+      .where(eq(emailDestinations.id, did));
+    expect(row?.status).toBe('verified');
+    expect(row?.verified_at).toBeTruthy();
+    // Audit trail: the recipient clicked OUR link, not CF's.
+    expect(row?.verification_source).toBe('platform');
+
+    expect(await readAllowlist(project.id)).toEqual(['shared@example.com']);
+  });
+
+  it('sets no-store and no-referrer on the success page', async () => {
+    // The single-use token is in the URL. A shared cache or a `Referer`
+    // leak would let a later visitor consume it.
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    const did = await seedPlatformPending('shared@example.com', project);
+    const res = await confirm(await makeToken(project.id, did, 'shared@example.com'));
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get('cache-control')).toBe('no-store');
+    expect(res.headers.get('referrer-policy')).toBe('no-referrer');
+  });
+
+  it('returns 400 for a missing token', async () => {
+    const res = await app.fetch(new Request('http://localhost/email/destinations/confirm'), env);
+    expect(res.status).toBe(400);
+  });
+
+  it('returns 400 for an invalid signature', async () => {
+    const res = await confirm('not-a-real-token');
+    expect(res.status).toBe(400);
+  });
+
+  it('returns 400 for a token signed with the wrong secret', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    const did = await seedPlatformPending('shared@example.com', project);
+    const now = Math.floor(Date.now() / 1000);
+    const forged = await signConfirmToken(
+      { v: 1, pid: project.id, did, addr: 'shared@example.com', iat: now, exp: now + 3600 },
+      'not-the-platform-secret',
+    );
+
+    const res = await confirm(forged);
+    expect(res.status).toBe(400);
+
+    const [row] = await env.db
+      .select()
+      .from(emailDestinations)
+      .where(eq(emailDestinations.id, did));
+    expect(row?.status).toBe('pending');
+  });
+
+  it('returns 400 for an expired token and leaves the row pending', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    const did = await seedPlatformPending('shared@example.com', project);
+    const now = Math.floor(Date.now() / 1000);
+    const expired = await makeToken(project.id, did, 'shared@example.com', {
+      iat: now - 25 * 60 * 60,
+      exp: now - 60 * 60,
+    });
+
+    const res = await confirm(expired);
+    expect(res.status).toBe(400);
+
+    const [row] = await env.db
+      .select()
+      .from(emailDestinations)
+      .where(eq(emailDestinations.id, did));
+    expect(row?.status).toBe('pending');
+  });
+
+  it('returns 404 for an unknown destination id', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    const res = await confirm(
+      await makeToken(project.id, 'edst_does_not_exist', 'shared@example.com'),
+    );
+    expect(res.status).toBe(404);
+  });
+
+  it('returns 404 when the row was deleted after the link was mailed', async () => {
+    // Re-adding the address mints a NEW edst_* id, so the old token stays
+    // dead rather than confirming the replacement row.
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    const did = await seedPlatformPending('shared@example.com', project);
+    const token = await makeToken(project.id, did, 'shared@example.com');
+
+    await env.db.delete(emailDestinations).where(eq(emailDestinations.id, did));
+
+    expect((await confirm(token)).status).toBe(404);
+  });
+
+  it('returns 404 when the token claims a different address than the row', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    const did = await seedPlatformPending('shared@example.com', project);
+
+    const res = await confirm(await makeToken(project.id, did, 'someone-else@example.com'));
+    expect(res.status).toBe(404);
+
+    const [row] = await env.db
+      .select()
+      .from(emailDestinations)
+      .where(eq(emailDestinations.id, did));
+    expect(row?.status).toBe('pending');
+  });
+
+  it('returns 404 when the token claims project A but the row lives in project B', async () => {
+    // Replay across projects: an attacker holding a valid token for their
+    // OWN project must not be able to confirm someone else's row.
+    const user = await createTestUser(env.db);
+    const projectA = await createTestProject(env.db, user.id, 'pid-a');
+    const projectB = await createTestProject(env.db, user.id, 'pid-b');
+    const didInB = await seedPlatformPending('shared@example.com', projectB);
+
+    const res = await confirm(await makeToken(projectA.id, didInB, 'shared@example.com'));
+    expect(res.status).toBe(404);
+
+    const [row] = await env.db
+      .select()
+      .from(emailDestinations)
+      .where(eq(emailDestinations.id, didInB));
+    expect(row?.status).toBe('pending');
+    expect(await readAllowlist(projectB.id)).toEqual([]);
+  });
+
+  it('is idempotent on an already-verified row', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    await env.db.insert(emailDestinations).values({
+      id: 'edst_already_verified',
+      project_id: project.id,
+      address: 'shared@example.com',
+      status: 'verified',
+      cf_destination_id: 'cf-tag-shared',
+      verified_at: '2026-04-29T00:00:00Z',
+      verification_source: 'platform',
+    });
+
+    const res = await confirm(
+      await makeToken(project.id, 'edst_already_verified', 'shared@example.com'),
+    );
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain('Already confirmed');
+  });
+
+  it('confirms end to end: the emailed link is the one that flips the row', async () => {
+    // Full Option B loop — the token in the mail body is the same token the
+    // public endpoint accepts. Anything that drifts between signer and
+    // verifier (payload shape, encoding, secret) breaks here.
+    const user = await createTestUser(env.db);
+    await setUserEmail(user.id, 'owner@example.com');
+    const project = await createTestProject(env.db, user.id);
+    const fetchMock = mockCfWithProxy(cfAlreadyVerified('cf-tag-shared', 'shared@example.com'));
+
+    const added = await addDestination(project.id, user.jwt, 'shared@example.com', emailEnv());
+    expect(added.status).toBe(201);
+
+    const [send] = proxySends(fetchMock);
+    const mime = new TextDecoder().decode(
+      Uint8Array.from(atob(send!.body.mimeBase64 as string), (ch) => ch.charCodeAt(0)),
+    );
+    const link = /https:\/\/\S*\/email\/destinations\/confirm\?token=(\S+)/.exec(mime);
+    expect(link, `no confirm link in the mail body:\n${mime}`).not.toBeNull();
+
+    // Stop mocking fetch before the confirm request — nothing outbound is
+    // expected on that path.
+    vi.unstubAllGlobals();
+    const res = await confirm(decodeURIComponent(link![1]!));
+    expect(res.status).toBe(200);
+
+    const rows = await rowsFor(project.id);
+    expect(rows[0]?.status).toBe('verified');
+    expect(rows[0]?.verification_source).toBe('platform');
+    expect(await readAllowlist(project.id)).toEqual(['shared@example.com']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET /projects/:id/email/usage
+// ---------------------------------------------------------------------------
+
+describe('GET /projects/:id/email/usage', () => {
+  async function usage(projectId: string, jwt: string): Promise<Response> {
+    return app.fetch(
+      new Request(`http://localhost/projects/${projectId}/email/usage`, {
+        headers: { Authorization: `Bearer ${jwt}` },
+      }),
+      env,
+    );
+  }
+
+  function monthBucket(): string {
+    const d = new Date();
+    return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+  }
+
+  it('returns 401 without auth', async () => {
+    const res = await app.fetch(new Request('http://localhost/projects/proj_x/email/usage'), env);
+    expect(res.status).toBe(401);
+  });
+
+  it('returns 404 for an unknown project', async () => {
+    const user = await createTestUser(env.db);
+    expect((await usage('proj_missing', user.jwt)).status).toBe(404);
+  });
+
+  it("returns 403 for another user's project", async () => {
+    const owner = await createTestUser(env.db, 'owner');
+    const intruder = await createTestUser(env.db, 'intruder');
+    const project = await createTestProject(env.db, owner.id);
+    expect((await usage(project.id, intruder.jwt)).status).toBe(403);
+  });
+
+  it('reports zeroes and the default limit for a project that has never sent', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+
+    const res = await usage(project.id, user.jwt);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      month: monthBucket(),
+      sent: 0,
+      received: 0,
+      limit: 200,
+      remaining: 200,
+      suspended: false,
+    });
+  });
+
+  it('reads the month counters, the per-project limit override, and the suspend flag', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    const month = monthBucket();
+    await env.ROUTING.put(`email-sent:${project.id}:${month}`, '7');
+    await env.ROUTING.put(`email-recv:${project.id}:${month}`, '3');
+    await env.ROUTING.put(`email-limit:${project.id}`, '50');
+    await env.ROUTING.put(`email-suspended:${project.id}`, '1');
+
+    const res = await usage(project.id, user.jwt);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      month,
+      sent: 7,
+      received: 3,
+      limit: 50,
+      remaining: 43,
+      suspended: true,
+    });
+  });
+
+  it('treats a poisoned counter as zero and never reports a negative remaining', async () => {
+    // `parseInt('NaN', 10)` is NaN — an unguarded reader would propagate it
+    // straight into the response and into every `>=` comparison downstream.
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    const month = monthBucket();
+    await env.ROUTING.put(`email-sent:${project.id}:${month}`, 'NaN');
+    await env.ROUTING.put(`email-limit:${project.id}`, '-5');
+
+    const res = await usage(project.id, user.jwt);
+    const body = (await res.json()) as { sent: number; limit: number; remaining: number };
+    expect(body.sent).toBe(0);
+    // A non-positive override is ignored in favour of the default.
+    expect(body.limit).toBe(200);
+    expect(body.remaining).toBe(200);
+  });
+
+  it('clamps remaining at zero once the limit is exceeded', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    await env.ROUTING.put(`email-sent:${project.id}:${monthBucket()}`, '500');
+
+    const body = (await (await usage(project.id, user.jwt)).json()) as { remaining: number };
+    expect(body.remaining).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET /projects/:id/email/logs
+// ---------------------------------------------------------------------------
+
+describe('GET /projects/:id/email/logs', () => {
+  async function logs(projectId: string, jwt: string): Promise<Response> {
+    return app.fetch(
+      new Request(`http://localhost/projects/${projectId}/email/logs`, {
+        headers: { Authorization: `Bearer ${jwt}` },
+      }),
+      env,
+    );
+  }
+
+  it('returns 401 without auth', async () => {
+    const res = await app.fetch(new Request('http://localhost/projects/proj_x/email/logs'), env);
+    expect(res.status).toBe(401);
+  });
+
+  it('returns 404 for an unknown project', async () => {
+    const user = await createTestUser(env.db);
+    expect((await logs('proj_missing', user.jwt)).status).toBe(404);
+  });
+
+  it("returns 403 for another user's project", async () => {
+    const owner = await createTestUser(env.db, 'owner');
+    const intruder = await createTestUser(env.db, 'intruder');
+    const project = await createTestProject(env.db, owner.id);
+    expect((await logs(project.id, intruder.jwt)).status).toBe(403);
+  });
+
+  it('returns an empty list marked pending until AE-backed storage is wired', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+
+    const res = await logs(project.id, user.jwt);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { logs: Array<unknown>; pending: boolean };
+    expect(body.logs).toEqual([]);
+    // The marker is the contract consumers branch on — dropping it would
+    // make "no logs yet" indistinguishable from "this project sent none".
+    expect(body.pending).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// api <-> proxy platform-internal send contract
+// ---------------------------------------------------------------------------
+
+describe('platform-internal send token (as produced by the route)', () => {
+  it('signs sentinel.timestamp.sha256(from|to|mimeBase64) with JWT_SECRET', async () => {
+    const user = await createTestUser(env.db);
+    await setUserEmail(user.id, 'owner@example.com');
+    const project = await createTestProject(env.db, user.id);
+    const fetchMock = mockCfWithProxy(cfAlreadyVerified('cf-tag-shared', 'shared@example.com'));
+
+    const res = await addDestination(project.id, user.jwt, 'shared@example.com', emailEnv());
+    expect(res.status).toBe(201);
+
+    const [send] = proxySends(fetchMock);
+    expect(send).toBeDefined();
+
+    const expectedHash = await hashSendContent(
+      `noreply@${MAIL_DOMAIN}`,
+      'shared@example.com',
+      send!.body.mimeBase64 as string,
+    );
+    expect(expectedHash).toMatch(/^[0-9a-f]{64}$/);
+
+    const enc = new TextEncoder();
+    const signed = `${PLATFORM_INTERNAL_EMAIL_SENTINEL}.${send!.body.platformTimestamp}.${expectedHash}`;
+    const key = await crypto.subtle.importKey(
+      'raw',
+      enc.encode(env.JWT_SECRET),
+      { name: 'HMAC', hash: 'SHA-256' },
+      false,
+      ['sign'],
+    );
+    const sig = new Uint8Array(await crypto.subtle.sign('HMAC', key, enc.encode(signed)));
+    let binary = '';
+    for (const b of sig) {
+      binary += String.fromCharCode(b);
+    }
+    const expectedToken = btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+    expect(send!.body.platformToken).toBe(expectedToken);
+  });
+});

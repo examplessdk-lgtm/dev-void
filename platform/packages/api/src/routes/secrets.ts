@@ -17,6 +17,7 @@ import {
   getVersionedWorkerName,
   putWorkerSecret,
 } from '../project-secrets.ts';
+import { isReservedBindingName } from '../reserved-bindings.ts';
 
 function isValidSecretName(name: string): boolean {
   return /^[A-Z][A-Z0-9_]*$/.test(name);
@@ -45,6 +46,13 @@ const app = new Hono<ApiEnv>()
     }
     if (secretName.length > MAX_SECRET_NAME_LENGTH) {
       return context.json({ error: 'secret name too long' }, 400);
+    }
+    // Reject before we encrypt and persist. The deploy pipeline rejects the
+    // same set, but only at the next deploy — far from the action that caused
+    // it. DELETE deliberately stays unguarded so a row stored before this
+    // guard existed can still be cleaned up.
+    if (isReservedBindingName(secretName)) {
+      return context.json({ error: 'reserved binding name' }, 400);
     }
 
     const project = await getProject(context.get('db'), projectId);

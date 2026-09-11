@@ -25,6 +25,11 @@ const platformAlias = {
   'cloudflare:workers': fileURLToPath(
     new URL('platform/packages/api/test/__mocks__/cloudflare-workers.ts', import.meta.url),
   ),
+  // cloudflare:email is a workerd built-in with no npm shim, so any module
+  // importing it is unloadable in the plain-node unit runner.
+  'cloudflare:email': fileURLToPath(
+    new URL('platform/packages/api/test/__mocks__/cloudflare-email.ts', import.meta.url),
+  ),
   'vite-plus/test': fileURLToPath(
     new URL('node_modules/vite-plus/dist/test/index.js', import.meta.url),
   ),

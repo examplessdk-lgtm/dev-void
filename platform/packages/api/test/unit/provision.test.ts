@@ -51,6 +51,7 @@ import {
 const ACCOUNT_ID = 'test-account';
 const API_TOKEN = 'test-token';
 const PROJECT_ID = 'proj_abc123';
+const PROJECT_SLUG = 'test-slug';
 const JWT_SECRET = 'test-jwt-secret';
 const mockDb = {} as Db;
 
@@ -71,13 +72,14 @@ describe('provisionBindings', () => {
       manifest,
       JWT_SECRET,
       'void-proxy',
+      { projectSlug: PROJECT_SLUG },
     );
 
     expect(createD1Database).toHaveBeenCalledWith(ACCOUNT_ID, API_TOKEN, 'proj-abc123-db');
     expect(createResource).toHaveBeenCalledWith(mockDb, PROJECT_ID, 'd1', 'd1-uuid-123', 'DB');
     expect(bindings[0]).toEqual({ type: 'd1', name: 'DB', id: 'd1-uuid-123' });
-    // + 3 always-injected proxy bindings
-    expect(bindings).toHaveLength(4);
+    // + 4 always-injected platform bindings
+    expect(bindings).toHaveLength(5);
   });
 
   it('rolls back the CF resource it created when the resources-row INSERT fails', async () => {
@@ -96,6 +98,7 @@ describe('provisionBindings', () => {
         manifest,
         JWT_SECRET,
         'void-proxy',
+        { projectSlug: PROJECT_SLUG },
       ),
     ).rejects.toThrow('insert failed');
 
@@ -122,6 +125,7 @@ describe('provisionBindings', () => {
         manifest,
         JWT_SECRET,
         'void-proxy',
+        { projectSlug: PROJECT_SLUG },
       ),
     ).rejects.toThrow('insert failed');
 
@@ -139,12 +143,13 @@ describe('provisionBindings', () => {
       manifest,
       JWT_SECRET,
       'void-proxy',
+      { projectSlug: PROJECT_SLUG },
     );
 
     expect(createKVNamespace).toHaveBeenCalledWith(ACCOUNT_ID, API_TOKEN, 'proj-abc123-kv');
     expect(createResource).toHaveBeenCalledWith(mockDb, PROJECT_ID, 'kv', 'kv-id-456', 'KV');
     expect(bindings[0]).toEqual({ type: 'kv_namespace', name: 'KV', namespace_id: 'kv-id-456' });
-    expect(bindings).toHaveLength(4);
+    expect(bindings).toHaveLength(5);
   });
 
   it('provisions R2 when manifest requires it', async () => {
@@ -158,6 +163,7 @@ describe('provisionBindings', () => {
       manifest,
       JWT_SECRET,
       'void-proxy',
+      { projectSlug: PROJECT_SLUG },
     );
 
     expect(createR2Bucket).toHaveBeenCalledWith(ACCOUNT_ID, API_TOKEN, 'proj-abc123-storage');
@@ -173,7 +179,7 @@ describe('provisionBindings', () => {
       name: 'STORAGE',
       bucket_name: 'test-STORAGE',
     });
-    expect(bindings).toHaveLength(4);
+    expect(bindings).toHaveLength(5);
   });
 
   it('provisions queue and stores queue_id (UUID) as cf_id', async () => {
@@ -191,6 +197,7 @@ describe('provisionBindings', () => {
       manifest,
       JWT_SECRET,
       'void-proxy',
+      { projectSlug: PROJECT_SLUG },
     );
 
     expect(createQueue).toHaveBeenCalledWith(ACCOUNT_ID, API_TOKEN, 'proj-abc123-emails');
@@ -207,7 +214,7 @@ describe('provisionBindings', () => {
       queue_name: 'proj-abc123-emails',
       queue_id: 'queue-id-789',
     });
-    expect(bindings).toHaveLength(4);
+    expect(bindings).toHaveLength(5);
   });
 
   it('skips provisioning when resources already exist', async () => {
@@ -233,12 +240,13 @@ describe('provisionBindings', () => {
       manifest,
       JWT_SECRET,
       'void-proxy',
+      { projectSlug: PROJECT_SLUG },
     );
 
     expect(createD1Database).not.toHaveBeenCalled();
     expect(createResource).not.toHaveBeenCalled();
     expect(bindings[0]).toEqual({ type: 'd1', name: 'DB', id: 'existing-d1-id' });
-    expect(bindings).toHaveLength(4);
+    expect(bindings).toHaveLength(5);
   });
 
   it('handles multiple bindings in one deploy', async () => {
@@ -255,13 +263,14 @@ describe('provisionBindings', () => {
       manifest,
       JWT_SECRET,
       'void-proxy',
+      { projectSlug: PROJECT_SLUG },
     );
 
     expect(createD1Database).toHaveBeenCalledOnce();
     expect(createKVNamespace).toHaveBeenCalledOnce();
     expect(createR2Bucket).toHaveBeenCalledOnce();
-    // 3 provisioned + 3 always-injected proxy bindings
-    expect(bindings).toHaveLength(6);
+    // 3 provisioned + 4 always-injected platform bindings
+    expect(bindings).toHaveLength(7);
     expect(bindings[0]).toEqual({ type: 'd1', name: 'DB', id: 'd1-uuid-123' });
     expect(bindings[1]).toEqual({ type: 'kv_namespace', name: 'KV', namespace_id: 'kv-id-456' });
     expect(bindings[2]).toEqual({
@@ -282,6 +291,7 @@ describe('provisionBindings', () => {
       manifest,
       JWT_SECRET,
       'void-proxy',
+      { projectSlug: PROJECT_SLUG },
     );
 
     expect(createD1Database).not.toHaveBeenCalled();
@@ -289,7 +299,7 @@ describe('provisionBindings', () => {
     expect(createR2Bucket).not.toHaveBeenCalled();
     expect(createResource).not.toHaveBeenCalled();
     // Proxy bindings are always injected
-    expect(bindings).toHaveLength(3);
+    expect(bindings).toHaveLength(4);
     expect(bindings[0]).toEqual({ type: 'service', name: '__VOID_PROXY', service: 'void-proxy' });
   });
 
@@ -304,9 +314,10 @@ describe('provisionBindings', () => {
       manifest,
       JWT_SECRET,
       'void-proxy',
+      { projectSlug: PROJECT_SLUG },
     );
 
-    expect(bindings).toHaveLength(3);
+    expect(bindings).toHaveLength(4);
     expect(bindings[0]).toEqual({ type: 'service', name: '__VOID_PROXY', service: 'void-proxy' });
     expect(bindings[1]).toEqual({ type: 'plain_text', name: '__PROJECT_ID', text: PROJECT_ID });
     expect(bindings[2].type).toBe('plain_text');
@@ -314,6 +325,75 @@ describe('provisionBindings', () => {
     // Token should be a non-empty string (HMAC signature)
     expect(typeof bindings[2].text).toBe('string');
     expect(bindings[2].text!.length).toBeGreaterThan(0);
+  });
+
+  it('always injects __VOID_PROJECT_SLUG, for sandbox and non-sandbox projects alike', async () => {
+    // `buildSandboxIdentityBindings` used to emit this for sandbox projects
+    // only. `void/email` defaults an outbound `from` to
+    // `<slug>+noreply@<domain>` on EVERY worker, so this is now the single
+    // unconditional producer — and the sandbox runtime reads the same name.
+    const manifest: DeployManifest = { version: 1, bindings: {} };
+
+    const bindings = await provisionBindings(
+      mockDb,
+      ACCOUNT_ID,
+      API_TOKEN,
+      PROJECT_ID,
+      manifest,
+      JWT_SECRET,
+      'void-proxy',
+      { projectSlug: PROJECT_SLUG },
+    );
+
+    expect(bindings).toContainEqual({
+      type: 'plain_text',
+      name: '__VOID_PROJECT_SLUG',
+      text: PROJECT_SLUG,
+    });
+  });
+
+  it('injects __VOID_EMAIL_DOMAIN from the configured platform mail domain', async () => {
+    // Per-environment, never hard-coded: production is `mail.void.cloud` and
+    // staging `mail.staging.void.cloud`, and the proxy validates senders
+    // against its own copy of the same value.
+    const manifest: DeployManifest = { version: 1, bindings: {} };
+
+    const bindings = await provisionBindings(
+      mockDb,
+      ACCOUNT_ID,
+      API_TOKEN,
+      PROJECT_ID,
+      manifest,
+      JWT_SECRET,
+      'void-proxy',
+      { projectSlug: PROJECT_SLUG, emailSenderDomain: 'mail.staging.void.cloud' },
+    );
+
+    expect(bindings).toContainEqual({
+      type: 'plain_text',
+      name: '__VOID_EMAIL_DOMAIN',
+      text: 'mail.staging.void.cloud',
+    });
+  });
+
+  it('omits __VOID_EMAIL_DOMAIN entirely when no mail domain is configured', async () => {
+    // Injecting an empty string would build a malformed `slug+noreply@` the
+    // proxy rejects for an unrelated reason. Omitted, the framework fails
+    // naming `__VOID_EMAIL_DOMAIN`, which points straight at the misconfig.
+    const manifest: DeployManifest = { version: 1, bindings: {} };
+
+    const bindings = await provisionBindings(
+      mockDb,
+      ACCOUNT_ID,
+      API_TOKEN,
+      PROJECT_ID,
+      manifest,
+      JWT_SECRET,
+      'void-proxy',
+      { projectSlug: PROJECT_SLUG, emailSenderDomain: '' },
+    );
+
+    expect(bindings.some((b) => b.name === '__VOID_EMAIL_DOMAIN')).toBe(false);
   });
 
   it('injects proxy bindings alongside other provisioned bindings', async () => {
@@ -327,10 +407,11 @@ describe('provisionBindings', () => {
       manifest,
       JWT_SECRET,
       'void-proxy',
+      { projectSlug: PROJECT_SLUG },
     );
 
-    // D1 + 3 proxy bindings
-    expect(bindings).toHaveLength(4);
+    // D1 + 4 platform bindings
+    expect(bindings).toHaveLength(5);
     expect(bindings[0]).toEqual({ type: 'd1', name: 'DB', id: 'd1-uuid-123' });
     expect(bindings[1]).toEqual({ type: 'service', name: '__VOID_PROXY', service: 'void-proxy' });
     expect(bindings[2]).toEqual({ type: 'plain_text', name: '__PROJECT_ID', text: PROJECT_ID });
@@ -364,12 +445,13 @@ describe('provisionBindings', () => {
       manifest,
       JWT_SECRET,
       'void-proxy',
+      { projectSlug: PROJECT_SLUG },
     );
 
     expect(createD1Database).not.toHaveBeenCalled();
     expect(createKVNamespace).toHaveBeenCalledOnce();
-    // 2 provisioned + 3 always-injected proxy bindings
-    expect(bindings).toHaveLength(5);
+    // 2 provisioned + 4 always-injected platform bindings
+    expect(bindings).toHaveLength(6);
     expect(bindings[0]).toEqual({ type: 'd1', name: 'DB', id: 'existing-d1-id' });
     expect(bindings[1]).toEqual({ type: 'kv_namespace', name: 'KV', namespace_id: 'kv-id-456' });
   });
@@ -390,6 +472,7 @@ describe('ensureResource — already exists fallback', () => {
       manifest,
       JWT_SECRET,
       'void-proxy',
+      { projectSlug: PROJECT_SLUG },
     );
 
     expect(createD1Database).toHaveBeenCalledOnce();
@@ -412,6 +495,7 @@ describe('ensureResource — already exists fallback', () => {
       manifest,
       JWT_SECRET,
       'void-proxy',
+      { projectSlug: PROJECT_SLUG },
     );
 
     expect(createKVNamespace).toHaveBeenCalledOnce();
@@ -437,6 +521,7 @@ describe('ensureResource — already exists fallback', () => {
       manifest,
       JWT_SECRET,
       'void-proxy',
+      { projectSlug: PROJECT_SLUG },
     );
 
     expect(createQueue).toHaveBeenCalledOnce();
@@ -464,6 +549,7 @@ describe('ensureResource — already exists fallback', () => {
         manifest,
         JWT_SECRET,
         'void-proxy',
+        { projectSlug: PROJECT_SLUG },
       ),
     ).rejects.toThrow('rate limit exceeded');
 

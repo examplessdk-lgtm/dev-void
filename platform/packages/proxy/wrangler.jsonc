@@ -34,6 +34,18 @@
       },
     ],
   },
+  // Account-level send_email binding. No allowed_destination_addresses or
+  // destination_address — the proxy enforces per-project allowlists itself by
+  // reading email-allowlist:<projectId> from ROUTING KV. CF accepts sends to
+  // any verified destination on the platform CF account.
+  //
+  // Wrangler does NOT inherit send_email (or vars) into a named env, and
+  // `deploy` runs `--env production`, so every scope below repeats both.
+  "send_email": [{ "name": "SEND_EMAIL" }],
+  // Platform mail zone for this environment. Read by src/email.ts and
+  // src/email-router.ts; mirrored to deployed user workers as the
+  // __VOID_EMAIL_DOMAIN binding. Never defaulted in code.
+  "vars": { "EMAIL_SENDER_DOMAIN": "mail.void.cloud" },
   // Secrets (via `wrangler secret put`): JWT_SECRET, CF_ACCOUNT_ID, CF_API_TOKEN
   "observability": {
     "logs": {
@@ -73,6 +85,8 @@
           },
         ],
       },
+      "send_email": [{ "name": "SEND_EMAIL" }],
+      "vars": { "EMAIL_SENDER_DOMAIN": "mail.void.cloud" },
       "routes": [{ "pattern": "proxy.void.cloud", "custom_domain": true }],
     },
     "staging": {
@@ -105,6 +119,8 @@
           },
         ],
       },
+      "send_email": [{ "name": "SEND_EMAIL" }],
+      "vars": { "EMAIL_SENDER_DOMAIN": "mail.staging.void.cloud" },
       "routes": [{ "pattern": "proxy.staging.void.cloud", "custom_domain": true }],
     },
   },

@@ -8,6 +8,22 @@
 - Commands: avoid HEREDOC commit messages with apostrophes; run `pnpm test <path-or-pattern>` without `--`; from the repository root, use `vp run build:all` for a full SDK + platform build.
 - `vp run` argv: unlike `pnpm`, `vp run <script> -- <args>` forwards the literal `--` to the script. For wrangler the `--` separator hides `--env`, so the deploy silently targets the top-level (prod) env. Always write `vp run --filter <pkg> deploy --env production|staging` (no `--` separator), and require production deploys to pass `--env production` explicitly.
 
+## Re-Landing A Stale Branch
+
+- Re-apply, do not rebase, once a branch is a few hundred commits behind. Reversal commits inside the branch (a binding added then removed, an RPC method renamed then reverted) get replayed against ground `main` rewrote, and the hardest file then has to be rewritten inside conflict markers.
+- The dangerous drift is the kind git merges cleanly. A signature that GREW parameters is the worst case: converting it to an options object from the branch's old parameter list silently deletes everything `main` added. Rebuild the option type from `main`'s CURRENT signature, then diff the generated output to prove each interpolation survived.
+- Give a new option a NAMED home, never a new positional slot. The branch inserted `emailDir` at slot 6 of a 9-argument call with ~68 call sites; every later argument would have shifted by one, and a same-typed shift binds silently. It belonged on the options object the function already took.
+- Check whether the branch's hard-coded path still matches `main`'s conventions. The branch used `join(root, 'email')`; `main` had since introduced `readProjectPaths` with a source-root concept, so the branch's version would have broken every project using a `src/` layout.
+- When a positional-to-named codemod runs over tests, strip each argument's trailing line comment. `false, // hasQueues` otherwise becomes `remote: // hasQueues`, which still parses, still typechecks, and now documents the wrong parameter.
+
+## Email And Address Routing
+
+- Strip a platform address prefix in exactly ONE place. `createMessageProxy` removed the `<slug>+` prefix so handler authors see the address they wrote, and the generated dispatcher removed it again before matching, leaving an empty tag that no anchored pattern could match. Both halves were individually correct; the seam was untested. Route on the preserved wire address (`__voidPlatformTo`) and let the user-visible field stay stripped.
+- Lowercasing an address to match it case-insensitively also lowercases the CAPTURED groups. `support+T-42@` reached the handler as `t-42`, quietly corrupting any case-sensitive tag. Match with the `i` flag against the original string instead.
+- A Cloudflare zone setting is not a Cloudflare default. "Subaddressing means a rule for `support@` captures `support+tag@`" was written into the design from the docs' description of the feature; `GET /zones/{z}/email/routing` reads `support_subaddress: false` on every zone we own. Before a design leans on a provider behaviour, read the setting on a real zone.
+- "Other tools cannot read wrangler's token" was asserted from the encrypted file on disk without listing wrangler's own commands. `wrangler auth token --json` has been a stable, documented hand-off since 4.57.0, and the encryption is opt-in. Before claiming a tool has no way to do X, read its command table and CHANGELOG — the tool's authors usually solved X already.
+- Assert on generated code by RUNNING it, not by searching it for substrings. Every codegen test for the dispatcher passed while it could not route a single real message. Stub the dynamic imports, feed it a message built by the real proxy, and assert which handler ran.
+
 ## Framework And Schema
 
 - `void.json` changes must update `packages/void/schema.json`, `docs/config.md`, and related types, validation, or README references.

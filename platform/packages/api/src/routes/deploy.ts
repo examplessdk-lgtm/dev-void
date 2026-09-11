@@ -70,6 +70,7 @@ import {
 } from '../provisioning/containers.ts';
 import { provisionBindings } from '../provisioning/provision.ts';
 import { presignAssetPut } from '../r2-presign.ts';
+import { RESERVED_BINDING_NAMES } from '../reserved-bindings.ts';
 import {
   buildRoutingJson,
   buildStaticRoutingJson,
@@ -1522,19 +1523,19 @@ export function buildSandboxPlatformBindings(
  * sandbox runtime reads when emitting metering messages to
  * `USAGE_EVENTS_QUEUE` (see `packages/void/src/runtime/sandbox.ts`).
  * Project id is read from the shared `__PROJECT_ID` slot injected by
- * `provisionBindings` for AI/ISR.
+ * `provisionBindings` for AI/ISR, and `__VOID_PROJECT_SLUG` likewise — it
+ * moved there when `void/email` made it needed on every worker, not just
+ * sandbox ones. Two producers of one binding name would upload the name
+ * twice, so this builder deliberately no longer emits it.
  */
 export function buildSandboxIdentityBindings(
   sandbox: DeployManifest['sandbox'] | undefined,
-  identity: { userId: string; projectSlug: string },
+  identity: { userId: string },
 ): ReadonlyArray<{ type: 'plain_text'; name: string; text: string }> {
   if (!sandbox) {
     return [];
   }
-  return [
-    { type: 'plain_text', name: '__VOID_USER_ID', text: identity.userId },
-    { type: 'plain_text', name: '__VOID_PROJECT_SLUG', text: identity.projectSlug },
-  ];
+  return [{ type: 'plain_text', name: '__VOID_USER_ID', text: identity.userId }];
 }
 
 export function enrichWebSocketManifest(
@@ -3143,6 +3144,10 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
           manifest,
           context.env.JWT_SECRET,
           context.env.VOID_PROXY_SERVICE ?? 'void-proxy',
+          {
+            projectSlug: project.slug,
+            emailSenderDomain: context.env.EMAIL_SENDER_DOMAIN,
+          },
         );
         await assertDeploymentNotCanceled(context.get('db'), deployment.id);
         await assertProjectNotDeleting(context.get('db'), projectId);
@@ -3319,21 +3324,26 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
         const workerFormData = new FormData();
         emit({ event: 'worker_upload', modules: workerFiles.length });
 
-        const RESERVED_BINDING_NAMES = new Set([
-          '__VOID_PROXY',
-          '__PROJECT_ID',
-          '__VOID_PROXY_TOKEN',
-          '__VOID_USER_ID',
-          '__VOID_PROJECT_SLUG',
-          'USAGE_EVENTS_QUEUE',
-          'ASSETS',
-        ]);
+        // Reserved-name set lives in `../reserved-bindings.ts` so the secrets
+        // route can reject before persisting; see the invariant test there.
         const userVarNames = Object.keys(manifest.vars ?? {});
-        const reserved = userVarNames.filter((n) => RESERVED_BINDING_NAMES.has(n));
+        const userSecretNames = secretBindings.map((s) => s.name);
+        // Check BOTH vars and project secrets. A secret is uploaded in the
+        // same `metadata.bindings` array, so a secret named e.g. `SEND_EMAIL`
+        // or `__VOID_PROJECT_SLUG` either shadows a platform binding or is
+        // shadowed by one — CF resolves duplicates last-wins with no error.
+        // The secrets route now rejects these at PUT time, but rows stored
+        // before that guard existed still reach here. Failing the deploy with
+        // a named binding beats shipping a worker that silently reads the
+        // wrong value.
+        const reserved = [
+          ...userVarNames.filter((n) => RESERVED_BINDING_NAMES.has(n)).map((n) => `vars.${n}`),
+          ...userSecretNames.filter((n) => RESERVED_BINDING_NAMES.has(n)).map((n) => `secret.${n}`),
+        ];
         if (reserved.length > 0) {
           throw new Error(`reserved binding names: ${reserved.join(', ')}`);
         }
-        const secretNames = new Set(secretBindings.map((s) => s.name));
+        const secretNames = new Set(userSecretNames);
         const collisions = userVarNames.filter((n) => secretNames.has(n));
         if (collisions.length > 0) {
           logger.warn('worker_upload', 'var_secret_collisions', { collisions });
@@ -3349,8 +3359,13 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
         const sandboxPlatformBindings = buildSandboxPlatformBindings(context.env, manifest.sandbox);
         const sandboxIdentityBindings = buildSandboxIdentityBindings(manifest.sandbox, {
           userId: user.id,
-          projectSlug: project.slug,
         });
+        // No per-project `send_email` binding is uploaded. The framework's
+        // `sendEmail()` POSTs MIME + recipients to `__VOID_PROXY/email/send`;
+        // the proxy holds the account-level send_email binding and enforces
+        // the per-project verified-destination allowlist from the
+        // `email-allowlist:<projectId>` KV mirror. See
+        // `meta/design-docs/0078-email-cf-native.md` and `packages/proxy/src/email.ts`.
         const allBindings = [
           ...sandboxIdentityBindings,
           ...sandboxPlatformBindings,

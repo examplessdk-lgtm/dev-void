@@ -1,0 +1,1842 @@
+/**
+ * Tests for the proxy worker's inbound email router (`email-router.ts`).
+ *
+ * Bound as the catch-all CF Email Routing rule on the zone named by the
+ * `EMAIL_SENDER_DOMAIN` var (`mail.void.cloud` in production,
+ * `mail.staging.void.cloud` in staging). The router parses `<slug>+<tag>`
+ * from the recipient, looks up the project's worker name in `ROUTING` KV,
+ * dispatches into the user worker via the WfP namespace stub's
+ * `email(envelope)` RPC method, and enacts the returned action queue on the
+ * real `ForwardableEmailMessage`.
+ *
+ * These tests cover the seams the neighbouring `email.test.ts` doesn't:
+ * slug parsing, KV lookup misses / corruption, platform suspension, the
+ * email-only suspend kill-switch, per-project dispatch limits, size caps,
+ * dispatch error classification, action enaction (terminal-reject,
+ * declaration-order enaction, address validation, header injection guards),
+ * the per-project allowlist + quota gate on forward/reply (HIGH H1), and
+ * the two-phase validate/enact split (HIGH H2).
+ *
+ * Patterns mirror `email.test.ts`: in-memory KV mock, vi.fn'd dispatch
+ * stub, fake `ForwardableEmailMessage`. We never spin up a real worker —
+ * we exercise `routeInbound` directly with synthetic message objects.
+ *
+ * Time is frozen (`toFake: ['Date']` only — real timers still run) so the
+ * minute/month quota buckets are deterministic instead of racing a bucket
+ * rollover between seeding KV and reading it back.
+ */
+
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
+import { routeInbound } from '../../src/email-router.ts';
+import type { Env } from '../../src/types.ts';
+
+// -----------------------------------------------------------------------
+// Fixtures
+// -----------------------------------------------------------------------
+
+const PROD_DOMAIN = 'mail.void.cloud';
+const STAGING_DOMAIN = 'mail.staging.void.cloud';
+
+/** Frozen clock. Drives both quota buckets below. */
+const FIXED_NOW = new Date('2026-04-29T12:34:56.000Z');
+const MONTH_BUCKET = '2026-04';
+const MINUTE_BUCKET = '20260429T1234';
+
+const SENT_KEY = `email-sent:p_test:${MONTH_BUCKET}`;
+const BURST_KEY = `email-burst:p_test:${MINUTE_BUCKET}`;
+const RECV_KEY = `email-recv:p_test:${MONTH_BUCKET}`;
+
+/** Default routing entry: project p_test, worker user-worker, no limits. */
+const DEFAULT_ROUTING = JSON.stringify({
+  workerName: 'user-worker',
+  projectId: 'p_test',
+});
+
+// -----------------------------------------------------------------------
+// KV mock — the inbound router only touches `get` + `put`.
+// -----------------------------------------------------------------------
+
+interface KvWrite {
+  key: string;
+  value: string;
+  options?: { expirationTtl?: number };
+}
+
+function createMockKv(seed: Record<string, string> = {}, failGetKeys: Array<string> = []) {
+  const store = new Map<string, string>(Object.entries(seed));
+  const writes: Array<KvWrite> = [];
+  const failures = new Set(failGetKeys);
+  const kv = {
+    store,
+    writes,
+    get: vi.fn(async (key: string, _opts?: { cacheTtl?: number }) => {
+      if (failures.has(key)) {
+        throw new Error(`KV get failed for ${key}`);
+      }
+      return store.get(key) ?? null;
+    }),
+    put: vi.fn(async (key: string, value: string, options?: { expirationTtl?: number }) => {
+      store.set(key, value);
+      writes.push({ key, value, options });
+    }),
+    delete: vi.fn(async (key: string) => {
+      store.delete(key);
+    }),
+  };
+  return kv;
+}
+
+// -----------------------------------------------------------------------
+// Fake ForwardableEmailMessage. Records every method call — and their
+// interleaved ORDER — so tests can assert on action enaction sequencing
+// as well as side effects.
+// -----------------------------------------------------------------------
+
+interface RecordedForward {
+  to: string;
+  headers?: Headers;
+}
+
+interface RecordedReply {
+  from: string;
+  to: string;
+  raw: unknown;
+}
+
+interface FakeMessage {
+  message: ForwardableEmailMessage;
+  rejectCalls: Array<string>;
+  forwardCalls: Array<RecordedForward>;
+  replyCalls: Array<RecordedReply>;
+  /** Interleaved log across reject/forward/reply, in call order. */
+  order: Array<string>;
+}
+
+function createFakeMessage(opts: {
+  to: string;
+  from?: string;
+  rawBytes?: Uint8Array;
+  rawSize?: number;
+  subject?: string;
+  /** When set, throws this error from every `forward()` call. */
+  forwardError?: Error;
+  /** When set, throws this error from every `reply()` call. */
+  replyError?: Error;
+}): FakeMessage {
+  const rawBytes = opts.rawBytes ?? new TextEncoder().encode('Subject: hi\r\n\r\nbody\r\n');
+  const rejectCalls: Array<string> = [];
+  const forwardCalls: Array<RecordedForward> = [];
+  const replyCalls: Array<RecordedReply> = [];
+  const order: Array<string> = [];
+  const headers = new Headers();
+  if (opts.subject) {
+    headers.set('Subject', opts.subject);
+  }
+  const message: Partial<ForwardableEmailMessage> & Record<string, unknown> = {
+    from: opts.from ?? 'sender@example.com',
+    to: opts.to,
+    rawSize: opts.rawSize ?? rawBytes.byteLength,
+    headers,
+    raw: new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(rawBytes);
+        controller.close();
+      },
+    }),
+    setReject(reason: string) {
+      rejectCalls.push(reason);
+      order.push(`reject:${reason}`);
+    },
+    async forward(to: string, h?: Headers) {
+      if (opts.forwardError) {
+        throw opts.forwardError;
+      }
+      forwardCalls.push({ to, headers: h });
+      order.push(`forward:${to}`);
+    },
+    async reply(reply: unknown) {
+      const r = reply as RecordedReply;
+      if (opts.replyError) {
+        throw opts.replyError;
+      }
+      replyCalls.push(r);
+      order.push(`reply:${r.from}->${r.to}`);
+    },
+  };
+  return {
+    message: message as ForwardableEmailMessage,
+    rejectCalls,
+    forwardCalls,
+    replyCalls,
+    order,
+  };
+}
+
+// -----------------------------------------------------------------------
+// ExecutionContext fake — captures `waitUntil` promises so we can assert
+// log-recv was scheduled.
+// -----------------------------------------------------------------------
+
+function createCtx() {
+  const waited: Array<Promise<unknown>> = [];
+  const ctx: ExecutionContext = {
+    waitUntil(p: Promise<unknown>) {
+      waited.push(p);
+    },
+    passThroughOnException() {},
+    props: {},
+  } as unknown as ExecutionContext;
+  return { ctx, waited };
+}
+
+// -----------------------------------------------------------------------
+// Env factory.
+// -----------------------------------------------------------------------
+
+interface MakeEnvOptions {
+  kvSeed?: Record<string, string>;
+  /** KV keys whose `get` throws — used to exercise fail-closed paths. */
+  kvGetFailures?: Array<string>;
+  /** When provided, the dispatch stub's `email()` returns this value. */
+  emailReturn?: unknown;
+  /** When provided, the dispatch stub's `email()` throws this. */
+  emailThrow?: Error;
+  /** When provided, env.DISPATCH.get itself throws. */
+  dispatchGetThrow?: Error;
+  /**
+   * `EMAIL_SENDER_DOMAIN`. Defaults to the production zone. Pass `null` to
+   * omit the var entirely (the router must still route — see the
+   * "sender domain is configuration" describe block).
+   */
+  senderDomain?: string | null;
+}
+
+function makeEnv(options: MakeEnvOptions = {}) {
+  const kv = createMockKv(options.kvSeed ?? {}, options.kvGetFailures ?? []);
+  const emailFn = vi.fn(async (_envelope: unknown) => {
+    if (options.emailThrow) {
+      throw options.emailThrow;
+    }
+    return options.emailReturn;
+  });
+  const dispatchGet = vi.fn((_name: string, _args?: unknown, _opts?: unknown) => {
+    if (options.dispatchGetThrow) {
+      throw options.dispatchGetThrow;
+    }
+    return { email: emailFn };
+  });
+  const senderDomain = options.senderDomain === undefined ? PROD_DOMAIN : options.senderDomain;
+  const env = {
+    AI: {},
+    JWT_SECRET: 'test-secret',
+    ROUTING: kv,
+    CF_ACCOUNT_ID: 'acct',
+    CF_API_TOKEN: 'token',
+    API: { fetch: vi.fn() },
+    DISPATCH: { get: dispatchGet },
+    SANDBOX_CONCURRENCY_COUNTER: {},
+    SEND_EMAIL: { send: vi.fn() },
+    ...(senderDomain === null ? {} : { EMAIL_SENDER_DOMAIN: senderDomain }),
+  } as unknown as Env;
+  return { env, kv, emailFn, dispatchGet };
+}
+
+/** Routing + allowlist seed for the happy outbound-gate path. */
+function withAllowlist(
+  addresses: Array<string> = ['admin@example.com', 'support@example.com'],
+  extra: Record<string, string> = {},
+): Record<string, string> {
+  return {
+    myslug: DEFAULT_ROUTING,
+    'email-allowlist:p_test': JSON.stringify(addresses),
+    ...extra,
+  };
+}
+
+// -----------------------------------------------------------------------
+// Console spies + frozen clock. Every test runs under these.
+// -----------------------------------------------------------------------
+
+let errorSpy: ReturnType<typeof vi.spyOn>;
+let warnSpy: ReturnType<typeof vi.spyOn>;
+let logSpy: ReturnType<typeof vi.spyOn>;
+
+beforeEach(() => {
+  // Only `Date` is faked — setTimeout/queueMicrotask stay real so stream
+  // reads and vitest's own timeouts are unaffected.
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(FIXED_NOW);
+  errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+  warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+});
+
+afterEach(() => {
+  errorSpy.mockRestore();
+  warnSpy.mockRestore();
+  logSpy.mockRestore();
+  vi.useRealTimers();
+});
+
+// -----------------------------------------------------------------------
+// Slug parsing + KV lookup
+// -----------------------------------------------------------------------
+
+describe('routeInbound — slug parsing + KV lookup', () => {
+  it('rejects when recipient has no slug (bare +tag@…)', async () => {
+    const { env, dispatchGet } = makeEnv();
+    const { message, rejectCalls } = createFakeMessage({ to: `+orphan@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(rejectCalls).toHaveLength(1);
+    expect(rejectCalls[0]).toContain('missing project slug');
+    expect(dispatchGet).not.toHaveBeenCalled();
+  });
+
+  it('rejects when slug is missing in ROUTING KV', async () => {
+    const { env, dispatchGet } = makeEnv();
+    const { message, rejectCalls } = createFakeMessage({ to: `unknown+tag@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(rejectCalls).toHaveLength(1);
+    expect(rejectCalls[0]).toContain('no project found');
+    expect(rejectCalls[0]).toContain('unknown');
+    expect(dispatchGet).not.toHaveBeenCalled();
+  });
+
+  it('rejects when routing JSON is corrupt', async () => {
+    const { env } = makeEnv({ kvSeed: { myslug: '{this is not json' } });
+    const { message, rejectCalls } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(rejectCalls).toHaveLength(1);
+    expect(rejectCalls[0]).toContain('routing data corrupt');
+  });
+
+  // `JSON.parse` succeeds on `null`, on a bare number and on a string, none of
+  // which carry a suspension marker to read. Reaching for `.suspended` on
+  // `null` throws out of the handler, and a non-string marker crashes the
+  // reject formatter. Both are the same defect as the outbound `corrupt`
+  // case: the suspension state is unknown, so the message must be refused.
+  it('rejects a routing blob that parses to null', async () => {
+    const { env, dispatchGet } = makeEnv({ kvSeed: { myslug: 'null' } });
+    const { message, rejectCalls } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(rejectCalls).toHaveLength(1);
+    expect(rejectCalls[0]).toContain('routing data corrupt');
+    expect(dispatchGet).not.toHaveBeenCalled();
+  });
+
+  it('rejects a routing blob that parses to a non-object', async () => {
+    const { env, dispatchGet } = makeEnv({ kvSeed: { myslug: '42' } });
+    const { message, rejectCalls } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(rejectCalls).toHaveLength(1);
+    expect(rejectCalls[0]).toContain('routing data corrupt');
+    expect(dispatchGet).not.toHaveBeenCalled();
+  });
+
+  it('rejects a non-string suspension marker instead of crashing the formatter', async () => {
+    const { env, dispatchGet } = makeEnv({
+      kvSeed: {
+        myslug: JSON.stringify({ workerName: 'w_test', projectId: 'p_test', suspended: 1 }),
+      },
+    });
+    const { message, rejectCalls } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(rejectCalls).toHaveLength(1);
+    expect(rejectCalls[0]).toContain('suspended');
+    expect(dispatchGet).not.toHaveBeenCalled();
+  });
+
+  it('rejects when routing.workerName is missing (static deploy)', async () => {
+    const { env, dispatchGet } = makeEnv({
+      kvSeed: { myslug: JSON.stringify({ projectId: 'p_test' }) },
+    });
+    const { message, rejectCalls } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(rejectCalls).toHaveLength(1);
+    expect(rejectCalls[0]).toContain('no worker (static deploy)');
+    expect(dispatchGet).not.toHaveBeenCalled();
+  });
+
+  it('routes a tag-less recipient (whole local-part is the slug)', async () => {
+    const { env, emailFn } = makeEnv({ kvSeed: { myslug: DEFAULT_ROUTING }, emailReturn: [] });
+    const { message, rejectCalls } = createFakeMessage({ to: `myslug@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(rejectCalls).toHaveLength(0);
+    expect(emailFn).toHaveBeenCalledTimes(1);
+    // The user worker sees the full, untruncated recipient.
+    const envelope = emailFn.mock.calls[0]?.[0] as { to: string };
+    expect(envelope.to).toBe(`myslug@${PROD_DOMAIN}`);
+  });
+
+  it('uppercase recipients are lowercased before the slug lookup', async () => {
+    const { env, emailFn } = makeEnv({ kvSeed: { myslug: DEFAULT_ROUTING }, emailReturn: [] });
+    const { message, rejectCalls } = createFakeMessage({ to: `MySlug+Tag@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(rejectCalls).toHaveLength(0);
+    expect(emailFn).toHaveBeenCalledTimes(1);
+  });
+});
+
+// -----------------------------------------------------------------------
+// The mail zone is CONFIGURATION, not a baked-in constant.
+//
+// Re-land contract change: `EMAIL_SENDER_DOMAIN` names the zone. The
+// inbound router uses it only as the bounce LABEL, and deliberately does
+// NOT fail closed when it's absent — nothing about routing depends on the
+// domain, so dropping legitimate mail over a cosmetic var would be worse.
+// -----------------------------------------------------------------------
+
+describe('routeInbound — sender domain is configuration, not a constant', () => {
+  it('prefixes reject reasons with the configured production zone', async () => {
+    const { env } = makeEnv({ senderDomain: PROD_DOMAIN });
+    const { message, rejectCalls } = createFakeMessage({ to: `unknown@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(rejectCalls[0]).toMatch(new RegExp(`^${PROD_DOMAIN.replace(/\./g, '\\.')}: `));
+  });
+
+  it('prefixes reject reasons with the configured staging zone', async () => {
+    const { env } = makeEnv({ senderDomain: STAGING_DOMAIN });
+    const { message, rejectCalls } = createFakeMessage({ to: `unknown@${STAGING_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(rejectCalls[0]).toMatch(new RegExp(`^${STAGING_DOMAIN.replace(/\./g, '\\.')}: `));
+    // No baked-in production domain leaks into a staging bounce.
+    expect(rejectCalls[0]).not.toContain(`${PROD_DOMAIN}:`);
+  });
+
+  it('falls back to a neutral label when the var is missing — and still routes', async () => {
+    const { env, emailFn } = makeEnv({
+      senderDomain: null,
+      kvSeed: { myslug: DEFAULT_ROUTING },
+      emailReturn: [],
+    });
+    const { message, rejectCalls } = createFakeMessage({ to: `myslug@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    // Deliberately NOT fail-closed: inbound routing doesn't depend on the
+    // zone name, so a missing var must not drop legitimate mail.
+    expect(rejectCalls).toHaveLength(0);
+    expect(emailFn).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses the neutral label (never a baked-in domain) in bounces when unset', async () => {
+    const { env } = makeEnv({ senderDomain: null });
+    const { message, rejectCalls } = createFakeMessage({ to: `unknown@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(rejectCalls[0]).toMatch(/^void email: /);
+    expect(rejectCalls[0]).not.toContain(PROD_DOMAIN);
+  });
+
+  it('treats a blank sender domain as unset', async () => {
+    const { env } = makeEnv({ senderDomain: '   ' });
+    const { message, rejectCalls } = createFakeMessage({ to: `unknown@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(rejectCalls[0]).toMatch(/^void email: /);
+  });
+});
+
+// -----------------------------------------------------------------------
+// Platform suspension (`routing.suspended`) — NEW in the re-land.
+//
+// The same marker `applyRoutingSuspension` writes and `packages/dispatch`
+// answers with a 429. Running a suspended tenant's code on platform CPU
+// is exactly what suspension exists to stop, so inbound mail must honour
+// it too — and it is a SEPARATE control from `email-suspended:<projectId>`.
+// -----------------------------------------------------------------------
+
+describe('routeInbound — platform suspension via routing.suspended', () => {
+  const SUSPENDED_ROUTING = JSON.stringify({
+    workerName: 'user-worker',
+    projectId: 'p_test',
+    suspended: 'abuse',
+  });
+
+  it('rejects and never dispatches when routing.suspended is set', async () => {
+    const { env, emailFn, dispatchGet } = makeEnv({
+      kvSeed: { myslug: SUSPENDED_ROUTING },
+      emailReturn: [{ type: 'forward', to: 'admin@example.com' }],
+    });
+    const { message, rejectCalls, forwardCalls } = createFakeMessage({
+      to: `myslug+tag@${PROD_DOMAIN}`,
+    });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(rejectCalls).toHaveLength(1);
+    expect(rejectCalls[0]).toContain('is suspended');
+    expect(rejectCalls[0]).toContain('abuse');
+    // The tenant's worker must not be resolved at all, let alone run.
+    expect(dispatchGet).not.toHaveBeenCalled();
+    expect(emailFn).not.toHaveBeenCalled();
+    expect(forwardCalls).toHaveLength(0);
+  });
+
+  it('platform suspension alone is enough — no email-suspended key needed', async () => {
+    const { env, kv, dispatchGet } = makeEnv({ kvSeed: { myslug: SUSPENDED_ROUTING } });
+    const { message, rejectCalls } = createFakeMessage({ to: `myslug@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(kv.store.has('email-suspended:p_test')).toBe(false);
+    expect(rejectCalls).toHaveLength(1);
+    expect(dispatchGet).not.toHaveBeenCalled();
+  });
+
+  it('email-only suspension alone is enough — no routing.suspended needed', async () => {
+    const { env, emailFn, dispatchGet } = makeEnv({
+      kvSeed: {
+        myslug: DEFAULT_ROUTING,
+        'email-suspended:p_test': '2026-04-29T00:00:00Z',
+      },
+    });
+    const { message, rejectCalls } = createFakeMessage({ to: `myslug@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(rejectCalls).toHaveLength(1);
+    expect(rejectCalls[0]).toContain('inbound is suspended');
+    expect(dispatchGet).not.toHaveBeenCalled();
+    expect(emailFn).not.toHaveBeenCalled();
+  });
+
+  it('platform suspension takes precedence when BOTH switches are set', async () => {
+    const { env } = makeEnv({
+      kvSeed: {
+        myslug: SUSPENDED_ROUTING,
+        'email-suspended:p_test': '1',
+      },
+    });
+    const { message, rejectCalls } = createFakeMessage({ to: `myslug@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(rejectCalls).toHaveLength(1);
+    // The platform-suspension bounce, not the email-only one.
+    expect(rejectCalls[0]).toContain('abuse');
+    expect(rejectCalls[0]).not.toContain('inbound is suspended');
+  });
+
+  it('platform suspension outranks the static-deploy check', async () => {
+    const { env } = makeEnv({
+      kvSeed: {
+        myslug: JSON.stringify({ projectId: 'p_test', suspended: 'abuse' }),
+      },
+    });
+    const { message, rejectCalls } = createFakeMessage({ to: `myslug@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(rejectCalls[0]).toContain('is suspended');
+    expect(rejectCalls[0]).not.toContain('static deploy');
+  });
+
+  it('sanitizes a control-char suspension reason before it reaches the MTA', async () => {
+    const { env } = makeEnv({
+      kvSeed: {
+        myslug: JSON.stringify({
+          workerName: 'user-worker',
+          projectId: 'p_test',
+          suspended: 'abuse\r\nX-Inject: y\x00',
+        }),
+      },
+    });
+    const { message, rejectCalls } = createFakeMessage({ to: `myslug@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(rejectCalls).toHaveLength(1);
+    // oxlint-disable-next-line no-control-regex
+    expect(rejectCalls[0]).not.toMatch(new RegExp('[\\r\\n\\u0000]'));
+  });
+
+  it('a falsy/absent suspended field does not block routing', async () => {
+    const { env, emailFn } = makeEnv({
+      kvSeed: {
+        myslug: JSON.stringify({ workerName: 'user-worker', projectId: 'p_test', suspended: '' }),
+      },
+      emailReturn: [],
+    });
+    const { message, rejectCalls } = createFakeMessage({ to: `myslug@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(rejectCalls).toHaveLength(0);
+    expect(emailFn).toHaveBeenCalledTimes(1);
+  });
+});
+
+// -----------------------------------------------------------------------
+// Per-project dispatch limits — NEW in the re-land.
+//
+// Inbound mail dispatches into the same tenant worker as HTTP, so it has
+// to pass the same `{ limits }` `packages/dispatch` passes. Without it,
+// anyone who can send mail to a project's address runs that tenant's
+// worker at the namespace default instead of its configured ceiling.
+// -----------------------------------------------------------------------
+
+describe('routeInbound — per-project dispatch limits', () => {
+  it('passes routing.limits through to DISPATCH.get as the third argument', async () => {
+    const limits = { cpuMs: 1234, subRequests: 60 };
+    const { env, emailFn, dispatchGet } = makeEnv({
+      kvSeed: {
+        myslug: JSON.stringify({ workerName: 'user-worker', projectId: 'p_test', limits }),
+      },
+      emailReturn: [],
+    });
+    const { message } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(dispatchGet).toHaveBeenCalledTimes(1);
+    const call = dispatchGet.mock.calls[0] as [string, unknown, unknown];
+    expect(call[0]).toBe('user-worker');
+    expect(call[1]).toEqual({});
+    // The point of the case: the limits object itself, not just that a
+    // dispatch happened.
+    expect(call[2]).toEqual({ limits });
+    expect(emailFn).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not fabricate a limits object when routing carries none', async () => {
+    const { env, emailFn, dispatchGet } = makeEnv({
+      kvSeed: { myslug: DEFAULT_ROUTING },
+      emailReturn: [],
+    });
+    const { message } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(dispatchGet).toHaveBeenCalledTimes(1);
+    // Exactly one argument — no `{ limits: undefined }` handed to the
+    // namespace, which is not the same thing as "no limits".
+    expect(dispatchGet.mock.calls[0]).toEqual(['user-worker']);
+    expect(emailFn).toHaveBeenCalledTimes(1);
+  });
+
+  it('a suspended project never reaches DISPATCH.get, limits or not', async () => {
+    const { env, dispatchGet } = makeEnv({
+      kvSeed: {
+        myslug: JSON.stringify({
+          workerName: 'user-worker',
+          projectId: 'p_test',
+          limits: { cpuMs: 50 },
+          suspended: 'abuse',
+        }),
+      },
+    });
+    const { message } = createFakeMessage({ to: `myslug@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(dispatchGet).not.toHaveBeenCalled();
+  });
+});
+
+// -----------------------------------------------------------------------
+// Size guards
+// -----------------------------------------------------------------------
+
+describe('routeInbound — message size guards', () => {
+  it('rejects messages exceeding rawSize > 10MB before streaming', async () => {
+    const { env, emailFn } = makeEnv({ kvSeed: { myslug: DEFAULT_ROUTING } });
+    const { message, rejectCalls } = createFakeMessage({
+      to: `myslug+tag@${PROD_DOMAIN}`,
+      rawBytes: new Uint8Array(0),
+      // Lie about size: pre-stream rawSize > cap.
+      rawSize: 11 * 1024 * 1024,
+    });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(rejectCalls).toHaveLength(1);
+    expect(rejectCalls[0]).toContain('too large');
+    expect(emailFn).not.toHaveBeenCalled();
+  });
+
+  it('rejects when stream overflow exceeds cap (rawSize lied)', async () => {
+    const { env, emailFn } = makeEnv({ kvSeed: { myslug: DEFAULT_ROUTING } });
+    // rawSize claims 1KB but the stream actually carries 11MB.
+    const big = new Uint8Array(11 * 1024 * 1024);
+    const { message, rejectCalls } = createFakeMessage({
+      to: `myslug+tag@${PROD_DOMAIN}`,
+      rawBytes: big,
+      rawSize: 1024,
+    });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(rejectCalls).toHaveLength(1);
+    expect(rejectCalls[0]).toContain('too large');
+    expect(emailFn).not.toHaveBeenCalled();
+  });
+
+  it('accepts a message just under the cap', async () => {
+    const { env, emailFn } = makeEnv({ kvSeed: { myslug: DEFAULT_ROUTING }, emailReturn: [] });
+    const { message, rejectCalls } = createFakeMessage({
+      to: `myslug@${PROD_DOMAIN}`,
+      rawBytes: new Uint8Array(10 * 1024 * 1024),
+    });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(rejectCalls).toHaveLength(0);
+    expect(emailFn).toHaveBeenCalledTimes(1);
+  });
+});
+
+// -----------------------------------------------------------------------
+// Dispatch result handling
+// -----------------------------------------------------------------------
+
+describe('routeInbound — dispatch result handling', () => {
+  it('treats undefined return as empty action list (no crash)', async () => {
+    const { env, emailFn } = makeEnv({
+      kvSeed: { myslug: DEFAULT_ROUTING },
+      emailReturn: undefined,
+    });
+    const { message, rejectCalls, forwardCalls, replyCalls } = createFakeMessage({
+      to: `myslug+tag@${PROD_DOMAIN}`,
+    });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(emailFn).toHaveBeenCalled();
+    expect(rejectCalls).toHaveLength(0);
+    expect(forwardCalls).toHaveLength(0);
+    expect(replyCalls).toHaveLength(0);
+  });
+
+  it('treats null return as empty action list', async () => {
+    const { env } = makeEnv({
+      kvSeed: { myslug: DEFAULT_ROUTING },
+      emailReturn: null,
+    });
+    const { message, rejectCalls } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(rejectCalls).toHaveLength(0);
+  });
+
+  it('treats non-array return as empty action list (logs warning)', async () => {
+    const { env } = makeEnv({
+      kvSeed: { myslug: DEFAULT_ROUTING },
+      emailReturn: { actions: [] },
+    });
+    const { message, rejectCalls } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(rejectCalls).toHaveLength(0);
+    expect(warnSpy).toHaveBeenCalled();
+  });
+
+  it('classifies workerd "does not implement the method" as no-handler reject', async () => {
+    const { env } = makeEnv({
+      kvSeed: { myslug: DEFAULT_ROUTING },
+      emailThrow: new TypeError('The RPC receiver does not implement the method "email"'),
+    });
+    const { message, rejectCalls } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(rejectCalls).toHaveLength(1);
+    expect(rejectCalls[0]).toContain('no email handler');
+  });
+
+  it('classifies other dispatch errors as project handler error', async () => {
+    const { env } = makeEnv({
+      kvSeed: { myslug: DEFAULT_ROUTING },
+      emailThrow: new Error('something else'),
+    });
+    const { message, rejectCalls } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(rejectCalls).toHaveLength(1);
+    expect(rejectCalls[0]).toContain('project handler error');
+  });
+
+  it('rejects when DISPATCH.get itself throws', async () => {
+    const { env } = makeEnv({
+      kvSeed: { myslug: DEFAULT_ROUTING },
+      dispatchGetThrow: new Error('namespace unavailable'),
+    });
+    const { message, rejectCalls } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(rejectCalls).toHaveLength(1);
+    expect(rejectCalls[0]).toContain('worker unavailable');
+  });
+});
+
+// -----------------------------------------------------------------------
+// Action enaction
+// -----------------------------------------------------------------------
+
+describe('routeInbound — action enaction', () => {
+  it('reject is terminal: forward and reply after a reject do NOT fire', async () => {
+    const { env } = makeEnv({
+      kvSeed: withAllowlist(),
+      emailReturn: [
+        { type: 'reject', reason: 'spam' },
+        { type: 'forward', to: 'admin@example.com' },
+        {
+          type: 'reply',
+          from: `myslug+support@${PROD_DOMAIN}`,
+          to: 'sender@example.com',
+          raw: new TextEncoder().encode('reply body'),
+        },
+      ],
+    });
+    const { message, rejectCalls, forwardCalls, replyCalls } = createFakeMessage({
+      to: `myslug+tag@${PROD_DOMAIN}`,
+    });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(rejectCalls).toEqual(['spam']);
+    expect(forwardCalls).toHaveLength(0);
+    expect(replyCalls).toHaveLength(0);
+  });
+
+  it('a reject with no reason gets the default reason', async () => {
+    const { env } = makeEnv({
+      kvSeed: { myslug: DEFAULT_ROUTING },
+      emailReturn: [{ type: 'reject' }],
+    });
+    const { message, rejectCalls } = createFakeMessage({ to: `myslug@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(rejectCalls).toEqual(['rejected by handler']);
+  });
+
+  it('forward followed by reply: both fire in order', async () => {
+    // Both targets must be in the per-project allowlist (HIGH H1).
+    const { env } = makeEnv({
+      kvSeed: withAllowlist(),
+      emailReturn: [
+        { type: 'forward', to: 'admin@example.com' },
+        {
+          type: 'reply',
+          from: `myslug+support@${PROD_DOMAIN}`,
+          to: 'admin@example.com',
+          raw: new TextEncoder().encode('reply body'),
+        },
+      ],
+    });
+    const { message, forwardCalls, replyCalls, order } = createFakeMessage({
+      to: `myslug+tag@${PROD_DOMAIN}`,
+    });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(forwardCalls).toHaveLength(1);
+    expect(forwardCalls[0]?.to).toBe('admin@example.com');
+    expect(replyCalls).toHaveLength(1);
+    expect(order).toEqual([
+      'forward:admin@example.com',
+      `reply:myslug+support@${PROD_DOMAIN}->admin@example.com`,
+    ]);
+  });
+
+  it('enacts the list in DECLARATION order across mixed action types', async () => {
+    const { env } = makeEnv({
+      kvSeed: withAllowlist(['admin@example.com', 'support@example.com', 'ops@example.com']),
+      emailReturn: [
+        { type: 'forward', to: 'admin@example.com' },
+        {
+          type: 'reply',
+          from: `myslug+support@${PROD_DOMAIN}`,
+          to: 'ops@example.com',
+          raw: new TextEncoder().encode('r'),
+        },
+        { type: 'forward', to: 'ops@example.com' },
+      ],
+    });
+    const { message, order } = createFakeMessage({ to: `myslug@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(order).toEqual([
+      'forward:admin@example.com',
+      `reply:myslug+support@${PROD_DOMAIN}->ops@example.com`,
+      'forward:ops@example.com',
+    ]);
+  });
+
+  it('a reject after a successful forward still flushes the quota counters', async () => {
+    const { env, kv } = makeEnv({
+      kvSeed: withAllowlist(['admin@example.com']),
+      emailReturn: [
+        { type: 'forward', to: 'admin@example.com' },
+        { type: 'reject', reason: 'done' },
+      ],
+    });
+    const { message, forwardCalls, rejectCalls, order } = createFakeMessage({
+      to: `myslug@${PROD_DOMAIN}`,
+    });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(order).toEqual(['forward:admin@example.com', 'reject:done']);
+    expect(forwardCalls).toHaveLength(1);
+    expect(rejectCalls).toEqual(['done']);
+    // The forward that already fired must be charged before the terminal
+    // reject returns.
+    expect(kv.store.get(SENT_KEY)).toBe('1');
+    expect(kv.store.get(BURST_KEY)).toBe('1');
+  });
+
+  it('forward with invalid `to` is dropped with console.error', async () => {
+    const { env } = makeEnv({
+      kvSeed: withAllowlist(),
+      emailReturn: [
+        { type: 'forward', to: 'not-an-email' },
+        { type: 'forward', to: 'has\x00control@example.com' },
+        { type: 'forward', to: 'no-at-sign-here' },
+        { type: 'forward', to: 'admin@example.com' },
+      ],
+    });
+    const { message, forwardCalls } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    // Only the valid one fires.
+    expect(forwardCalls).toHaveLength(1);
+    expect(forwardCalls[0]?.to).toBe('admin@example.com');
+    expect(errorSpy).toHaveBeenCalled();
+  });
+
+  it('reply with invalid from/to is dropped with console.error', async () => {
+    const { env } = makeEnv({
+      kvSeed: withAllowlist(),
+      emailReturn: [
+        {
+          type: 'reply',
+          from: 'not-an-email',
+          to: 'admin@example.com',
+          raw: new Uint8Array(),
+        },
+        {
+          type: 'reply',
+          from: `myslug+support@${PROD_DOMAIN}`,
+          to: 'no-at-sign',
+          raw: new Uint8Array(),
+        },
+      ],
+    });
+    const { message, replyCalls } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(replyCalls).toHaveLength(0);
+    expect(errorSpy).toHaveBeenCalled();
+  });
+
+  it('reject reason with CR/LF/NUL is sanitized', async () => {
+    const { env } = makeEnv({
+      kvSeed: { myslug: DEFAULT_ROUTING },
+      emailReturn: [
+        {
+          type: 'reject',
+          reason: 'spam\r\nX-Inject: foo\nbar\x00null',
+        },
+      ],
+    });
+    const { message, rejectCalls } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(rejectCalls).toHaveLength(1);
+    // No CR, LF, or NUL bytes left. Build via RegExp() to satisfy
+    // oxlint's no-control-regex rule (mirrors the production-side
+    // dodge in src/email-router.ts).
+    // oxlint-disable-next-line no-control-regex
+    expect(rejectCalls[0]).not.toMatch(new RegExp('[\\r\\n\\u0000]'));
+  });
+
+  it('unknown action types are warned about and skipped, list continues', async () => {
+    const { env } = makeEnv({
+      kvSeed: withAllowlist(['admin@example.com']),
+      emailReturn: [
+        { type: 'quarantine', to: 'admin@example.com' },
+        { type: 'forward', to: 'admin@example.com' },
+      ],
+    });
+    const { message, forwardCalls } = createFakeMessage({ to: `myslug@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(warnSpy).toHaveBeenCalled();
+    expect(forwardCalls).toHaveLength(1);
+  });
+
+  it('non-object entries are dropped without aborting the list', async () => {
+    const { env } = makeEnv({
+      kvSeed: withAllowlist(['admin@example.com']),
+      emailReturn: [null, 'reject', { type: 'forward', to: 'admin@example.com' }],
+    });
+    const { message, forwardCalls, rejectCalls } = createFakeMessage({
+      to: `myslug@${PROD_DOMAIN}`,
+    });
+    const { ctx, waited } = createCtx();
+    await routeInbound(message, env, ctx);
+    // `logRecv` currently throws on this input (see the log-recv describe
+    // block below). Swallow it here so the enaction assertions aren't
+    // masked by an unhandled rejection.
+    await Promise.allSettled(waited);
+    expect(rejectCalls).toHaveLength(0);
+    expect(forwardCalls).toHaveLength(1);
+    expect(errorSpy).toHaveBeenCalled();
+  });
+
+  it('a throwing forward is logged, charges no quota, and does not abort the list', async () => {
+    const { env, kv } = makeEnv({
+      kvSeed: withAllowlist(),
+      emailReturn: [
+        { type: 'forward', to: 'admin@example.com' },
+        {
+          type: 'reply',
+          from: `myslug+support@${PROD_DOMAIN}`,
+          to: 'admin@example.com',
+          raw: new TextEncoder().encode('r'),
+        },
+      ],
+    });
+    const { message, forwardCalls, replyCalls } = createFakeMessage({
+      to: `myslug@${PROD_DOMAIN}`,
+      forwardError: new Error('destination not verified'),
+    });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(forwardCalls).toHaveLength(0);
+    // The later reply still fires…
+    expect(replyCalls).toHaveLength(1);
+    // …and only IT is charged — the failed forward isn't.
+    expect(kv.store.get(SENT_KEY)).toBe('1');
+    expect(errorSpy).toHaveBeenCalled();
+  });
+
+  it('reply carries the action bytes through EmailMessage, not a decoded string', async () => {
+    const { env } = makeEnv({
+      kvSeed: withAllowlist(),
+      emailReturn: [
+        {
+          type: 'reply',
+          from: `myslug+support@${PROD_DOMAIN}`,
+          to: 'admin@example.com',
+          raw: new TextEncoder().encode('reply body'),
+        },
+      ],
+    });
+    const { message, replyCalls } = createFakeMessage({ to: `myslug@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(replyCalls).toHaveLength(1);
+    expect(replyCalls[0]?.from).toBe(`myslug+support@${PROD_DOMAIN}`);
+    expect(replyCalls[0]?.to).toBe('admin@example.com');
+    expect(replyCalls[0]?.raw).toBeInstanceOf(ReadableStream);
+  });
+});
+
+// -----------------------------------------------------------------------
+// HIGH H2 — two-phase validate-then-enact split.
+//
+// Header construction (`new Headers(...)`) throws on CRLF / NUL. Under a
+// single-pass impl an earlier forward/reply would already have fired by
+// the time the bad headers are reached. Validation therefore runs over
+// the WHOLE list first, and any header failure drops everything.
+// -----------------------------------------------------------------------
+
+describe('routeInbound — header construction safety (HIGH H2)', () => {
+  it('drops the entire action list when forward headers contain CRLF (cannot partial-enact)', async () => {
+    const { env } = makeEnv({
+      kvSeed: withAllowlist(['admin@example.com']),
+      emailReturn: [
+        // First action: a forward with malformed headers — should drop
+        // the whole list. CRLF in a header VALUE is what `new Headers()`
+        // throws on.
+        {
+          type: 'forward',
+          to: 'admin@example.com',
+          headers: { 'X-Foo': 'a\r\nInjected: y' },
+        },
+        // Second action: a reply that would otherwise fire — must NOT
+        // fire because validation aborted the whole list.
+        {
+          type: 'reply',
+          from: `myslug+support@${PROD_DOMAIN}`,
+          to: 'admin@example.com',
+          raw: new Uint8Array(),
+        },
+      ],
+    });
+    const { message, forwardCalls, replyCalls } = createFakeMessage({
+      to: `myslug+tag@${PROD_DOMAIN}`,
+    });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(forwardCalls).toHaveLength(0);
+    expect(replyCalls).toHaveLength(0);
+    expect(errorSpy).toHaveBeenCalled();
+  });
+
+  it('a VALID action DECLARED BEFORE the bad headers also does not fire', async () => {
+    // This is the case that distinguishes two-phase from single-pass: a
+    // single-pass enactor would already have forwarded to admin@ before
+    // reaching the poisoned headers.
+    const { env, kv } = makeEnv({
+      kvSeed: withAllowlist(['admin@example.com', 'ops@example.com']),
+      emailReturn: [
+        { type: 'forward', to: 'admin@example.com' },
+        {
+          type: 'forward',
+          to: 'ops@example.com',
+          headers: { 'X-Foo': 'a\r\nInjected: y' },
+        },
+      ],
+    });
+    const { message, forwardCalls, replyCalls, rejectCalls, order } = createFakeMessage({
+      to: `myslug@${PROD_DOMAIN}`,
+    });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(order).toEqual([]);
+    expect(forwardCalls).toHaveLength(0);
+    expect(replyCalls).toHaveLength(0);
+    // The message is still ACCEPTED by CF — dropping the list is not a bounce.
+    expect(rejectCalls).toHaveLength(0);
+    // Phase A has no side effects: no quota was charged and no counter
+    // was written back.
+    expect(kv.writes.filter((w) => w.key.startsWith('email-sent:'))).toHaveLength(0);
+    expect(kv.writes.filter((w) => w.key.startsWith('email-burst:'))).toHaveLength(0);
+  });
+
+  it('valid forward headers are constructed once and handed to forward()', async () => {
+    const { env } = makeEnv({
+      kvSeed: withAllowlist(['admin@example.com']),
+      emailReturn: [
+        {
+          type: 'forward',
+          to: 'admin@example.com',
+          headers: { 'X-Void-Tag': 'support' },
+        },
+      ],
+    });
+    const { message, forwardCalls } = createFakeMessage({ to: `myslug+support@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(forwardCalls).toHaveLength(1);
+    expect(forwardCalls[0]?.headers).toBeInstanceOf(Headers);
+    expect(forwardCalls[0]?.headers?.get('X-Void-Tag')).toBe('support');
+  });
+});
+
+// -----------------------------------------------------------------------
+// Prototype pollution guard
+// -----------------------------------------------------------------------
+
+describe('routeInbound — Object.create(null) header bag (prototype pollution guard)', () => {
+  it('survives a __proto__ header in the inbound message', async () => {
+    // Inject a __proto__-named header on the inbound side. The router
+    // pre-buffers headers into Object.create(null) so the framework
+    // sees it as a plain string property, not as a prototype mutation.
+    const { env, emailFn } = makeEnv({
+      kvSeed: { myslug: DEFAULT_ROUTING },
+      emailReturn: [],
+    });
+    const { message } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
+    // Force-add a proto-named header.
+    message.headers.set('__proto__', 'evil');
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    // Pull the envelope passed into emailFn; assert the header bag has
+    // a null prototype + that the __proto__ key is a real own property
+    // (not a prototype mutation that affects {}).
+    const envelope = emailFn.mock.calls[0]?.[0] as { headers: Record<string, string> };
+    expect(Object.getPrototypeOf(envelope.headers)).toBeNull();
+    expect(Object.prototype.hasOwnProperty.call(envelope.headers, '__proto__')).toBe(true);
+    expect(envelope.headers['__proto__']).toBe('evil');
+    // Nothing leaked onto Object.prototype.
+    expect(Object.getPrototypeOf({})).toBe(Object.prototype);
+    expect(({} as Record<string, unknown>)['evil']).toBeUndefined();
+  });
+
+  it('serializes the envelope with RPC-safe primitives only', async () => {
+    const { env, emailFn } = makeEnv({
+      kvSeed: { myslug: DEFAULT_ROUTING },
+      emailReturn: [],
+    });
+    const body = new TextEncoder().encode('Subject: hi\r\n\r\nbody\r\n');
+    const { message } = createFakeMessage({
+      to: `myslug+tag@${PROD_DOMAIN}`,
+      from: 'sender@example.com',
+      rawBytes: body,
+      subject: 'hi',
+    });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    const envelope = emailFn.mock.calls[0]?.[0] as {
+      from: string;
+      to: string;
+      raw: Uint8Array;
+      rawSize: number;
+      headers: Record<string, string>;
+    };
+    expect(envelope.from).toBe('sender@example.com');
+    expect(envelope.to).toBe(`myslug+tag@${PROD_DOMAIN}`);
+    // Pre-buffered bytes, not a stream — the framework must be able to
+    // replay them after parseEmail consumes a copy.
+    expect(envelope.raw).toBeInstanceOf(Uint8Array);
+    expect(envelope.raw.byteLength).toBe(body.byteLength);
+    expect(envelope.rawSize).toBe(body.byteLength);
+    expect(envelope.headers['subject']).toBe('hi');
+  });
+});
+
+// -----------------------------------------------------------------------
+// log-recv via ctx.waitUntil
+// -----------------------------------------------------------------------
+
+describe('routeInbound — log-recv via ctx.waitUntil', () => {
+  it('schedules log-recv after a successful dispatch', async () => {
+    const { env, kv } = makeEnv({
+      kvSeed: { myslug: DEFAULT_ROUTING },
+      emailReturn: [],
+    });
+    const { message } = createFakeMessage({
+      to: `myslug+tag@${PROD_DOMAIN}`,
+      subject: 'hello',
+    });
+    const { ctx, waited } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(waited).toHaveLength(1);
+    await Promise.all(waited);
+    // recordInboundDelivery wrote a recv counter.
+    expect(kv.store.get(RECV_KEY)).toBe('1');
+  });
+
+  it('schedules log-recv even when the dispatch threw (no-handler reject path)', async () => {
+    const { env, kv } = makeEnv({
+      kvSeed: { myslug: DEFAULT_ROUTING },
+      emailThrow: new TypeError('The RPC receiver does not implement the method "email"'),
+    });
+    const { message } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
+    const { ctx, waited } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(waited).toHaveLength(1);
+    await Promise.all(waited);
+    expect(kv.store.get(RECV_KEY)).toBe('1');
+  });
+
+  it('schedules log-recv on the generic dispatch-error reject path', async () => {
+    const { env, kv } = makeEnv({
+      kvSeed: { myslug: DEFAULT_ROUTING },
+      emailThrow: new Error('boom'),
+    });
+    const { message } = createFakeMessage({ to: `myslug@${PROD_DOMAIN}` });
+    const { ctx, waited } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(waited).toHaveLength(1);
+    await Promise.all(waited);
+    expect(kv.store.get(RECV_KEY)).toBe('1');
+  });
+
+  // FINDING (pre-existing, also present in pr117): `logRecv` reads
+  // `a.type` straight off the RAW action array, while `validateActions`
+  // defends against non-object entries. A user worker that returns an
+  // array containing `null` therefore crashes the metering log inside
+  // `ctx.waitUntil` — the recv counter is never written and the audit
+  // line for that delivery is silently lost (as an UNHANDLED rejection,
+  // outside logRecv's own try/catch). Expressed as the correct
+  // expectation; this test fails until logRecv guards the entry.
+  it('logs the inbound delivery even when the action list carries a non-object entry', async () => {
+    const { env, kv } = makeEnv({
+      kvSeed: withAllowlist(['admin@example.com']),
+      emailReturn: [null, { type: 'forward', to: 'admin@example.com' }],
+    });
+    const { message } = createFakeMessage({ to: `myslug@${PROD_DOMAIN}` });
+    const { ctx, waited } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(waited).toHaveLength(1);
+    await Promise.allSettled(waited);
+    expect(kv.store.get(RECV_KEY)).toBe('1');
+  });
+
+  it('does NOT log-recv for messages rejected before dispatch (suspended)', async () => {
+    const { env, kv } = makeEnv({
+      kvSeed: {
+        myslug: JSON.stringify({
+          workerName: 'user-worker',
+          projectId: 'p_test',
+          suspended: 'abuse',
+        }),
+      },
+    });
+    const { message } = createFakeMessage({ to: `myslug@${PROD_DOMAIN}` });
+    const { ctx, waited } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(waited).toHaveLength(0);
+    expect(kv.store.get(RECV_KEY)).toBeUndefined();
+  });
+});
+
+// -----------------------------------------------------------------------
+// HIGH H1 — per-project allowlist + quota gating on forward/reply
+//
+// CF Email Routing destinations are account-wide. Without these gates,
+// inbound mail is a fan-out primitive against any tenant's verified
+// addresses. The platform's per-project allowlist is the security
+// boundary; CF's account-wide verified flag is NOT a substitute.
+// -----------------------------------------------------------------------
+
+describe('routeInbound — per-project gating on forward/reply (HIGH H1)', () => {
+  it('drops forward to an address not in the per-project allowlist', async () => {
+    const { env } = makeEnv({
+      kvSeed: withAllowlist(['admin@example.com']),
+      emailReturn: [
+        // CF would accept this account-wide; the project allowlist
+        // doesn't include it, so we drop.
+        { type: 'forward', to: 'someone-elses-verified@example.com' },
+      ],
+    });
+    const { message, forwardCalls } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(forwardCalls).toHaveLength(0);
+  });
+
+  it('drops reply to an address not in the per-project allowlist', async () => {
+    const { env } = makeEnv({
+      kvSeed: withAllowlist(['admin@example.com']),
+      emailReturn: [
+        {
+          type: 'reply',
+          from: `myslug+support@${PROD_DOMAIN}`,
+          to: 'someone-elses-verified@example.com',
+          raw: new Uint8Array(),
+        },
+      ],
+    });
+    const { message, replyCalls } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(replyCalls).toHaveLength(0);
+  });
+
+  it('drops every forward/reply when the project has no allowlist at all', async () => {
+    const { env } = makeEnv({
+      kvSeed: { myslug: DEFAULT_ROUTING },
+      emailReturn: [
+        { type: 'forward', to: 'admin@example.com' },
+        {
+          type: 'reply',
+          from: `myslug+support@${PROD_DOMAIN}`,
+          to: 'admin@example.com',
+          raw: new Uint8Array(),
+        },
+      ],
+    });
+    const { message, forwardCalls, replyCalls } = createFakeMessage({
+      to: `myslug@${PROD_DOMAIN}`,
+    });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(forwardCalls).toHaveLength(0);
+    expect(replyCalls).toHaveLength(0);
+  });
+
+  it('matches the allowlist case-insensitively', async () => {
+    const { env } = makeEnv({
+      kvSeed: withAllowlist(['Admin@Example.com']),
+      emailReturn: [{ type: 'forward', to: 'ADMIN@example.com' }],
+    });
+    const { message, forwardCalls } = createFakeMessage({ to: `myslug@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(forwardCalls).toHaveLength(1);
+  });
+
+  it('fails CLOSED when the routing entry has no projectId', async () => {
+    // No projectId → no per-project guard is available, so forward/reply
+    // must be refused rather than falling back to CF's account-wide flag.
+    const { env, emailFn } = makeEnv({
+      kvSeed: { myslug: JSON.stringify({ workerName: 'user-worker' }) },
+      emailReturn: [{ type: 'forward', to: 'admin@example.com' }],
+    });
+    const { message, forwardCalls } = createFakeMessage({ to: `myslug@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(emailFn).toHaveBeenCalledTimes(1);
+    expect(forwardCalls).toHaveLength(0);
+    expect(errorSpy).toHaveBeenCalled();
+  });
+
+  it('fails CLOSED when the gate cannot be loaded (KV read error)', async () => {
+    const { env, emailFn } = makeEnv({
+      kvSeed: withAllowlist(['admin@example.com']),
+      kvGetFailures: ['email-allowlist:p_test'],
+      emailReturn: [{ type: 'forward', to: 'admin@example.com' }],
+    });
+    const { message, forwardCalls, rejectCalls } = createFakeMessage({
+      to: `myslug@${PROD_DOMAIN}`,
+    });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(emailFn).toHaveBeenCalledTimes(1);
+    expect(forwardCalls).toHaveLength(0);
+    // Quota/gate failures never turn into a bounce.
+    expect(rejectCalls).toHaveLength(0);
+  });
+
+  it('drops forward when burst limit would be exceeded', async () => {
+    const { env, kv } = makeEnv({
+      kvSeed: withAllowlist(['admin@example.com'], {
+        'email-burst-limit:p_test': '1',
+        // Pre-seed counter at the limit so +1 trips.
+        [BURST_KEY]: '1',
+      }),
+      emailReturn: [{ type: 'forward', to: 'admin@example.com' }],
+    });
+    const { message, forwardCalls } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(forwardCalls).toHaveLength(0);
+    // Counter not advanced.
+    expect(kv.store.get(BURST_KEY)).toBe('1');
+  });
+
+  it('drops forward when monthly limit would be exceeded', async () => {
+    const { env, kv } = makeEnv({
+      kvSeed: withAllowlist(['admin@example.com'], {
+        'email-limit:p_test': '5',
+        [SENT_KEY]: '5',
+      }),
+      emailReturn: [{ type: 'forward', to: 'admin@example.com' }],
+    });
+    const { message, forwardCalls } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(forwardCalls).toHaveLength(0);
+    expect(kv.store.get(SENT_KEY)).toBe('5');
+  });
+
+  it('once quota is exhausted, further forward/reply are also dropped', async () => {
+    const { env } = makeEnv({
+      kvSeed: withAllowlist(['admin@example.com', 'support@example.com'], {
+        'email-limit:p_test': '5',
+        [SENT_KEY]: '5',
+      }),
+      emailReturn: [
+        { type: 'forward', to: 'admin@example.com' },
+        {
+          type: 'reply',
+          from: `myslug+support@${PROD_DOMAIN}`,
+          to: 'admin@example.com',
+          raw: new Uint8Array(),
+        },
+      ],
+    });
+    const { message, forwardCalls, replyCalls } = createFakeMessage({
+      to: `myslug+tag@${PROD_DOMAIN}`,
+    });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(forwardCalls).toHaveLength(0);
+    expect(replyCalls).toHaveLength(0);
+  });
+
+  it('quota exhaustion does not bounce the inbound message', async () => {
+    const { env } = makeEnv({
+      kvSeed: withAllowlist(['admin@example.com'], {
+        'email-limit:p_test': '1',
+        [SENT_KEY]: '1',
+      }),
+      emailReturn: [{ type: 'forward', to: 'admin@example.com' }],
+    });
+    const { message, rejectCalls } = createFakeMessage({ to: `myslug@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(rejectCalls).toHaveLength(0);
+  });
+
+  it('charges quota per action — two forwards cost two', async () => {
+    const { env, kv } = makeEnv({
+      kvSeed: withAllowlist(['admin@example.com', 'support@example.com']),
+      emailReturn: [
+        { type: 'forward', to: 'admin@example.com' },
+        { type: 'forward', to: 'support@example.com' },
+      ],
+    });
+    const { message, forwardCalls } = createFakeMessage({ to: `myslug@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(forwardCalls).toHaveLength(2);
+    expect(kv.store.get(SENT_KEY)).toBe('2');
+    expect(kv.store.get(BURST_KEY)).toBe('2');
+  });
+
+  it('the burst limit cuts a run of forwards off mid-list', async () => {
+    const { env, kv } = makeEnv({
+      kvSeed: withAllowlist(['admin@example.com', 'support@example.com'], {
+        'email-burst-limit:p_test': '1',
+      }),
+      emailReturn: [
+        { type: 'forward', to: 'admin@example.com' },
+        { type: 'forward', to: 'support@example.com' },
+      ],
+    });
+    const { message, forwardCalls } = createFakeMessage({ to: `myslug@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(forwardCalls).toHaveLength(1);
+    expect(forwardCalls[0]?.to).toBe('admin@example.com');
+    expect(kv.store.get(BURST_KEY)).toBe('1');
+  });
+
+  it('successful forward increments burst + monthly counters', async () => {
+    const { env, kv } = makeEnv({
+      kvSeed: withAllowlist(['admin@example.com']),
+      emailReturn: [{ type: 'forward', to: 'admin@example.com' }],
+    });
+    const { message, forwardCalls } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(forwardCalls).toHaveLength(1);
+    expect(kv.store.get(SENT_KEY)).toBe('1');
+    const burstWrite = kv.writes.find((w) => w.key.startsWith('email-burst:p_test:'));
+    expect(burstWrite?.key).toBe(BURST_KEY);
+    expect(burstWrite?.value).toBe('1');
+    // Burst window is short-lived; the monthly counter outlives the month.
+    expect(burstWrite?.options?.expirationTtl).toBe(5 * 60);
+    const monthWrite = kv.writes.find((w) => w.key === SENT_KEY);
+    expect(monthWrite?.options?.expirationTtl).toBeGreaterThan(60);
+  });
+
+  it('successful reply increments counters', async () => {
+    const { env, kv } = makeEnv({
+      kvSeed: withAllowlist(),
+      emailReturn: [
+        {
+          type: 'reply',
+          from: `myslug+support@${PROD_DOMAIN}`,
+          to: 'admin@example.com',
+          raw: new TextEncoder().encode('reply'),
+        },
+      ],
+    });
+    const { message, replyCalls } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(replyCalls).toHaveLength(1);
+    expect(kv.store.get(SENT_KEY)).toBe('1');
+  });
+
+  it('a NaN-poisoned counter reads as zero rather than disabling the gate', async () => {
+    const { env, kv } = makeEnv({
+      kvSeed: withAllowlist(['admin@example.com'], { [SENT_KEY]: 'not-a-number' }),
+      emailReturn: [{ type: 'forward', to: 'admin@example.com' }],
+    });
+    const { message, forwardCalls } = createFakeMessage({ to: `myslug@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(forwardCalls).toHaveLength(1);
+    expect(kv.store.get(SENT_KEY)).toBe('1');
+  });
+
+  // Suspended is already covered above (it rejects before dispatch); the
+  // gate's "suspended drops both" assertion is implicit — no dispatch
+  // happens, so no forward/reply runs. This test pins it explicitly.
+  it('suspended project: dispatch never runs and forward/reply are not enacted', async () => {
+    const { env, emailFn } = makeEnv({
+      kvSeed: withAllowlist(['admin@example.com'], { 'email-suspended:p_test': '1' }),
+      emailReturn: [{ type: 'forward', to: 'admin@example.com' }],
+    });
+    const { message, forwardCalls } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(emailFn).not.toHaveBeenCalled();
+    expect(forwardCalls).toHaveLength(0);
+  });
+
+  it('platform-suspended project: dispatch never runs and forward/reply are not enacted', async () => {
+    const { env, emailFn } = makeEnv({
+      kvSeed: {
+        myslug: JSON.stringify({
+          workerName: 'user-worker',
+          projectId: 'p_test',
+          suspended: 'abuse',
+        }),
+        'email-allowlist:p_test': JSON.stringify(['admin@example.com']),
+      },
+      emailReturn: [{ type: 'forward', to: 'admin@example.com' }],
+    });
+    const { message, forwardCalls } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(emailFn).not.toHaveBeenCalled();
+    expect(forwardCalls).toHaveLength(0);
+  });
+});
+
+// -----------------------------------------------------------------------
+// F1 — reply sender pin
+//
+// The reply branch builds `new EmailMessage(action.from, …)` from a value
+// the tenant's worker returned over RPC. CF Email Routing's own reply rule
+// is DOMAIN-level only, and every tenant plus the platform's reserved
+// `noreply` slug share one mail zone — so without a pin here any project
+// can emit mail as any other project, or as the platform. This is the
+// inbound analogue of the outbound `from` pin in `email.ts` (strict shape
+// + local-part-before-`+` equals the project's slug).
+//
+// The expected DOMAIN comes from the RECEIVED `message.to`, not from
+// `EMAIL_SENDER_DOMAIN`: that is the domain CF pinned when it accepted the
+// message, and `routeInbound` deliberately treats a missing
+// `EMAIL_SENDER_DOMAIN` as non-fatal (a cosmetic var must not stop mail).
+// -----------------------------------------------------------------------
+
+describe('routeInbound — reply sender pin (F1)', () => {
+  it("drops a reply that claims ANOTHER project's slug", async () => {
+    const { env } = makeEnv({
+      kvSeed: withAllowlist(['admin@example.com']),
+      emailReturn: [
+        {
+          type: 'reply',
+          // `otherproject` is a different tenant on the same mail zone.
+          from: `otherproject+support@${PROD_DOMAIN}`,
+          to: 'admin@example.com',
+          raw: new TextEncoder().encode('r'),
+        },
+      ],
+    });
+    const { message, replyCalls } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(replyCalls).toHaveLength(0);
+    expect(errorSpy).toHaveBeenCalled();
+  });
+
+  it('drops a reply as the platform noreply address', async () => {
+    // `noreply` is a RESERVED slug, so this inbound reply path is the only
+    // way to emit it at all — the outbound `/email/send` pin can't be
+    // satisfied by any project for it.
+    const { env } = makeEnv({
+      kvSeed: withAllowlist(['admin@example.com']),
+      emailReturn: [
+        {
+          type: 'reply',
+          from: `noreply@${PROD_DOMAIN}`,
+          to: 'admin@example.com',
+          raw: new TextEncoder().encode('r'),
+        },
+      ],
+    });
+    const { message, replyCalls } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(replyCalls).toHaveLength(0);
+  });
+
+  it("accepts replyEmail's default sender, <slug>+noreply@<domain>", async () => {
+    const { env } = makeEnv({
+      kvSeed: withAllowlist(['admin@example.com']),
+      emailReturn: [
+        {
+          type: 'reply',
+          from: `myslug+noreply@${PROD_DOMAIN}`,
+          to: 'admin@example.com',
+          raw: new TextEncoder().encode('r'),
+        },
+      ],
+    });
+    const { message, replyCalls } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(replyCalls).toHaveLength(1);
+    expect(replyCalls[0]?.from).toBe(`myslug+noreply@${PROD_DOMAIN}`);
+  });
+
+  it('accepts the tag-less <slug>@<domain> form', async () => {
+    const { env } = makeEnv({
+      kvSeed: withAllowlist(['admin@example.com']),
+      emailReturn: [
+        {
+          type: 'reply',
+          from: `myslug@${PROD_DOMAIN}`,
+          to: 'admin@example.com',
+          raw: new TextEncoder().encode('r'),
+        },
+      ],
+    });
+    const { message, replyCalls } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(replyCalls).toHaveLength(1);
+  });
+
+  // DECISION — a bare `<tag>@<domain>` reply is REFUSED.
+  //
+  // The framework strips the `<slug>+` prefix from `message.to` before the
+  // handler sees it, so a handler that hand-rolls `from: message.to` emits
+  // `<tag>@<domain>`. CF accepts that today, so refusing it is a
+  // deliberate, breaking narrowing. It has to be: a bare local-part is
+  // indistinguishable from another tenant's slug (`otherproject@<domain>`)
+  // and from the platform's reserved `noreply@<domain>`, so allowing the
+  // shape at all would re-open exactly the impersonation this pin closes.
+  // `replyEmail`'s default (`<slug>+noreply@<domain>`) and the wire form
+  // `<slug>+<tag>@<domain>` both keep working; a hand-rolled sender must
+  // use the preserved `message.__voidPlatformTo` (the un-stripped
+  // recipient) or an explicit `<slug>+…` address.
+  it('drops a bare <tag>@<domain> reply (the slug-stripped message.to)', async () => {
+    const { env } = makeEnv({
+      kvSeed: withAllowlist(['admin@example.com']),
+      emailReturn: [
+        {
+          type: 'reply',
+          // What `from: message.to` yields inside a handler: the framework
+          // stripped `myslug+` before the handler ever saw the address.
+          from: `tag@${PROD_DOMAIN}`,
+          to: 'admin@example.com',
+          raw: new TextEncoder().encode('r'),
+        },
+      ],
+    });
+    const { message, replyCalls } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(replyCalls).toHaveLength(0);
+  });
+
+  it('matches the slug case-insensitively (the routed slug is lowercased, action.from is not)', async () => {
+    const { env } = makeEnv({
+      kvSeed: withAllowlist(['admin@example.com']),
+      emailReturn: [
+        {
+          type: 'reply',
+          from: `MySlug+Support@${PROD_DOMAIN.toUpperCase()}`,
+          to: 'admin@example.com',
+          raw: new TextEncoder().encode('r'),
+        },
+      ],
+    });
+    const { message, replyCalls } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(replyCalls).toHaveLength(1);
+    // The address is handed to EmailMessage VERBATIM — we compare folded,
+    // we do not rewrite the tenant's sender.
+    expect(replyCalls[0]?.from).toBe(`MySlug+Support@${PROD_DOMAIN.toUpperCase()}`);
+  });
+
+  it('drops a local-part that only case-FOLDS to the slug (U+212A KELVIN SIGN)', async () => {
+    // `'K'.toLowerCase() === 'k'`, so a lowercased compare alone would
+    // accept this while `EmailMessage` still receives the non-ASCII bytes
+    // verbatim. Same reasoning as the printable-ASCII guard in email.ts.
+    const { env } = makeEnv({
+      kvSeed: {
+        kslug: DEFAULT_ROUTING,
+        'email-allowlist:p_test': JSON.stringify(['admin@example.com']),
+      },
+      emailReturn: [
+        {
+          type: 'reply',
+          from: `Kslug@${PROD_DOMAIN}`,
+          to: 'admin@example.com',
+          raw: new TextEncoder().encode('r'),
+        },
+      ],
+    });
+    const { message, replyCalls } = createFakeMessage({ to: `kslug+tag@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(replyCalls).toHaveLength(0);
+  });
+
+  it('pins the domain to the RECEIVED recipient, not EMAIL_SENDER_DOMAIN', async () => {
+    // A message received on the staging zone may only be replied to from
+    // the staging zone — even though EMAIL_SENDER_DOMAIN says production.
+    const { env } = makeEnv({
+      senderDomain: PROD_DOMAIN,
+      kvSeed: withAllowlist(['admin@example.com']),
+      emailReturn: [
+        {
+          type: 'reply',
+          from: `myslug+support@${PROD_DOMAIN}`,
+          to: 'admin@example.com',
+          raw: new TextEncoder().encode('r'),
+        },
+        {
+          type: 'reply',
+          from: `myslug+support@${STAGING_DOMAIN}`,
+          to: 'admin@example.com',
+          raw: new TextEncoder().encode('r'),
+        },
+      ],
+    });
+    const { message, replyCalls } = createFakeMessage({ to: `myslug+tag@${STAGING_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(replyCalls).toHaveLength(1);
+    expect(replyCalls[0]?.from).toBe(`myslug+support@${STAGING_DOMAIN}`);
+  });
+
+  it('still pins the sender when EMAIL_SENDER_DOMAIN is unset', async () => {
+    // The var is cosmetic here (it only labels reject reasons), so the pin
+    // must not acquire a dependency on it — routing keeps working without.
+    const { env } = makeEnv({
+      senderDomain: null,
+      kvSeed: withAllowlist(['admin@example.com']),
+      emailReturn: [
+        {
+          type: 'reply',
+          from: `noreply@${PROD_DOMAIN}`,
+          to: 'admin@example.com',
+          raw: new TextEncoder().encode('r'),
+        },
+        {
+          type: 'reply',
+          from: `myslug+noreply@${PROD_DOMAIN}`,
+          to: 'admin@example.com',
+          raw: new TextEncoder().encode('r'),
+        },
+      ],
+    });
+    const { message, replyCalls } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(replyCalls).toHaveLength(1);
+    expect(replyCalls[0]?.from).toBe(`myslug+noreply@${PROD_DOMAIN}`);
+  });
+
+  it('a dropped reply consumes NO quota', async () => {
+    const { env, kv } = makeEnv({
+      kvSeed: withAllowlist(['admin@example.com']),
+      emailReturn: [
+        {
+          type: 'reply',
+          from: `otherproject+support@${PROD_DOMAIN}`,
+          to: 'admin@example.com',
+          raw: new TextEncoder().encode('r'),
+        },
+      ],
+    });
+    const { message, replyCalls } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(replyCalls).toHaveLength(0);
+    expect(kv.store.get(SENT_KEY)).toBeUndefined();
+    expect(kv.store.get(BURST_KEY)).toBeUndefined();
+    expect(kv.writes.filter((w) => w.key.startsWith('email-sent:'))).toHaveLength(0);
+    expect(kv.writes.filter((w) => w.key.startsWith('email-burst:'))).toHaveLength(0);
+  });
+
+  it('a dropped reply does not abort the rest of the list', async () => {
+    const { env } = makeEnv({
+      kvSeed: withAllowlist(['admin@example.com']),
+      emailReturn: [
+        {
+          type: 'reply',
+          from: `noreply@${PROD_DOMAIN}`,
+          to: 'admin@example.com',
+          raw: new TextEncoder().encode('r'),
+        },
+        { type: 'forward', to: 'admin@example.com' },
+      ],
+    });
+    const { message, replyCalls, forwardCalls } = createFakeMessage({
+      to: `myslug+tag@${PROD_DOMAIN}`,
+    });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(replyCalls).toHaveLength(0);
+    expect(forwardCalls).toHaveLength(1);
+  });
+});

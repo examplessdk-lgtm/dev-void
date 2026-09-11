@@ -1,5 +1,5 @@
 import { sql as drizzleSql } from 'drizzle-orm';
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import { hmacSignState } from '../auth/hmac.ts';
 import { buildManagerNamespace } from '../build-namespace.ts';
 import { isTerminalBuildStatus } from '../build-status.ts';
@@ -34,6 +34,7 @@ import {
   invalidateMigrationRenamesForOldName,
   upsertProjectDatabaseUrl,
   getProjectDatabaseUrl,
+  tryCreateEmailDestination,
 } from '../db.ts';
 import { type ApiEnv, isDevBypass } from '../env.ts';
 import { validateSubmittedExecutionPlans } from '../migrations/execution-plan.ts';
@@ -45,13 +46,36 @@ import {
   InvalidHyperdriveConnectionStringError,
   getDispatchWorkerProxyToken,
 } from '../provisioning/cloudflare-api.ts';
+import { syncProjectAllowlistKvBestEffort } from '../provisioning/email-allowlist.ts';
+import {
+  addDestination,
+  listDestinations,
+  // This module has its own `isAlreadyExistsError` for CF resource
+  // provisioning (see the bottom of this file); alias the Email Routing one
+  // rather than shadowing it — they match different CF error wordings.
+  isAlreadyExistsError as isDestinationAlreadyExistsError,
+} from '../provisioning/email-routing.ts';
 import { buildRoutingJson, buildStaticRoutingJson, computeDispatchLimits } from '../routing.ts';
 import { tokenizeSql } from '../sql/tokenize.ts';
 import { getPlanLimits } from '../tiers.ts';
 import type { Build, DeployManifest } from '../types.ts';
 import { getRequestsDataset, queryProjectRequestOverview } from './usage.ts';
 
+/**
+ * Slugs no project may claim. Two overlapping reasons:
+ *
+ *  - hostname collisions on `*.void.app` (`www`, `api`, `dash`, `cname`, …);
+ *  - EMAIL sender identity. A project's outbound `from` is
+ *    `<slug>[+tag]@<EMAIL_SENDER_DOMAIN>`, so owning a slug owns that
+ *    mailbox. `noreply` is the platform's own verification sender (the
+ *    proxy's internal allow-list is exactly `noreply@<domain>`), and
+ *    `postmaster`/`abuse`/`bounce`/`security` are the addresses recipients
+ *    and mail providers treat as authoritative for the whole domain.
+ *    Without them here, a user registering `noreply` could send mail that
+ *    is indistinguishable from ours.
+ */
 export const RESERVED_SLUGS = new Set([
+  'abuse',
   'admin',
   'api',
   'app',
@@ -59,6 +83,7 @@ export const RESERVED_SLUGS = new Set([
   'auth',
   'billing',
   'blog',
+  'bounce',
   'cdn',
   'cname',
   'dash',
@@ -70,14 +95,17 @@ export const RESERVED_SLUGS = new Set([
   'imap',
   'login',
   'mail',
+  'noreply',
   'ns1',
   'ns2',
   'ns3',
   'ns4',
   'oauth',
   'pop',
+  'postmaster',
   'proxy',
   'register',
+  'security',
   'signup',
   'smtp',
   'sso',
@@ -571,7 +599,42 @@ const app = new Hono<ApiEnv>()
 
     const userId = context.get('user').id;
     try {
-      const project = await createProject(context.get('db'), userId, body.slug);
+      // ROUTING carries the `email-slug:<projectId>` mirror the email proxy
+      // reads to pin a project's outbound `from` to its own slug.
+      const project = await createProject(
+        context.get('db'),
+        userId,
+        body.slug,
+        context.env.ROUTING,
+      );
+      // Pre-seed the owner's own address as a destination so mail to
+      // themselves works from the first deploy. CF sends them a verification
+      // link; the row stays `pending` until they click it.
+      //
+      // Gated on EMAIL_SENDER_DOMAIN: the row's only purpose is to allow-list
+      // a recipient for sends from `<slug>[+tag]@<domain>`, so in an
+      // environment with no platform mail domain there is nothing it could
+      // ever authorize — and registering it would still cost CF a
+      // verification email to the owner.
+      const ownerEmail = context.get('user').email;
+      if (context.env.EMAIL_SENDER_DOMAIN && ownerEmail && !isSyntheticProviderEmail(ownerEmail)) {
+        // Off the response path: CF Email Routing has no timeout in
+        // `cfFetch`, and project creation must not wait on it. Nothing
+        // downstream depends on the row existing yet — a pending row emits
+        // no allowlist entry either way.
+        await scheduleAfterResponse(
+          context,
+          autoAddOwnerDestination(
+            context.env.CF_ACCOUNT_ID,
+            context.env.CF_API_TOKEN,
+            context.get('db'),
+            context.env.ROUTING,
+            project.id,
+            ownerEmail.toLowerCase(),
+            userId,
+          ),
+        );
+      }
       return context.json(project, 201);
     } catch (err) {
       // Unique constraint violation — slug was taken between check and insert
@@ -2427,6 +2490,105 @@ function tryParse(json: string): ReadonlyArray<unknown> {
   } catch {
     return [];
   }
+}
+
+/**
+ * Run `work` after the response is sent. Falls back to inline `await` when
+ * there is no ExecutionContext — a test harness calling `app.fetch(req, env)`
+ * with two arguments — so the side effect still happens and stays observable.
+ *
+ * Only the missing-context error is recovered; anything else propagates so a
+ * real bug inside `waitUntil` is not swallowed. `work` must handle its own
+ * failures: on the fallback path a rejection would surface as a 5xx.
+ */
+async function scheduleAfterResponse(
+  context: Context<ApiEnv>,
+  work: Promise<unknown>,
+): Promise<void> {
+  try {
+    context.executionCtx.waitUntil(work);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : '';
+    if (/has no ExecutionContext|ExecutionContext is not available/i.test(message)) {
+      await work;
+      return;
+    }
+    throw err;
+  }
+}
+
+/**
+ * Register the project owner's own email as a destination for a new project.
+ *
+ * Entirely best-effort — the outer catch is the point, not an oversight. A
+ * degraded CF Email Routing must not fail project creation, and the owner can
+ * re-add the address from the dashboard.
+ *
+ * On a second-or-later project the address is already on the CF account, so
+ * `addDestination` reports "already exists"; we recover by listing and reusing
+ * the existing tag along with any `verified` status the owner earned earlier.
+ * Without that recovery every additional project would start with an empty
+ * allowlist.
+ *
+ * Trusting CF's `verified` flag is sound here only because the address IS the
+ * project owner's own — the same human already consented on a prior project
+ * (owner-relaxed reuse, Option C in design doc 0078). `verification_source`
+ * stays `'cf'` and the audit columns record whose consent was inherited, so a
+ * later email change can revoke exactly these rows. A `pending` row inherits
+ * nothing and therefore carries no audit.
+ */
+async function autoAddOwnerDestination(
+  accountId: string,
+  apiToken: string,
+  db: Db,
+  kv: KVNamespace,
+  projectId: string,
+  address: string,
+  ownerUserId: string,
+): Promise<void> {
+  try {
+    let cfRow;
+    try {
+      cfRow = await addDestination(accountId, apiToken, address);
+    } catch (err) {
+      if (!isDestinationAlreadyExistsError(err)) {
+        throw err;
+      }
+      const all = await listDestinations(accountId, apiToken);
+      const found = all.find((row) => row.email.toLowerCase() === address);
+      if (!found) {
+        throw err;
+      }
+      cfRow = found;
+    }
+    const status = cfRow.verified ? 'verified' : 'pending';
+    await tryCreateEmailDestination(
+      db,
+      projectId,
+      address,
+      cfRow.tag,
+      status,
+      cfRow.verified ?? null,
+      'cf',
+      status === 'verified' ? { userId: ownerUserId, emailSnapshot: address } : undefined,
+    );
+    // Already verified on a prior project — push it into the allowlist mirror
+    // now so the proxy accepts the first send without a manual refresh.
+    if (status === 'verified') {
+      await syncProjectAllowlistKvBestEffort(db, kv, projectId);
+    }
+  } catch (err) {
+    console.error('[projects] auto-add owner email destination failed:', err);
+  }
+}
+
+/**
+ * OAuth-provider synthetic addresses that are not real mailboxes — registering
+ * one would only generate an undeliverable CF verification email. Today just
+ * GitHub's; add patterns as providers ship.
+ */
+function isSyntheticProviderEmail(email: string): boolean {
+  return /@users\.noreply\.github\.com$/i.test(email);
 }
 
 export default app;

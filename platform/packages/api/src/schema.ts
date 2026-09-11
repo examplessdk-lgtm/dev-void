@@ -1,6 +1,7 @@
 import { sql } from 'drizzle-orm';
 import {
   boolean,
+  check,
   index,
   integer,
   jsonb,
@@ -207,6 +208,97 @@ export const domains = pgTable(
     created_at: timestamp('created_at', { mode: 'string' }).notNull().defaultNow(),
   },
   (table) => [index('idx_domains_project_id').on(table.project_id, table.created_at)],
+);
+
+// ---------------------------------------------------------------------------
+// email_destinations
+// Per-project verified destination addresses for outbound email via the
+// shared platform sender (`EMAIL_SENDER_DOMAIN`, e.g. `mail.void.cloud` in
+// production and `mail.staging.void.cloud` in staging — never hard-coded).
+// Each row tracks the lifecycle of one recipient address — from "the user
+// added it" -> CF sends a verification email -> recipient clicks the link ->
+// status flips to "verified" and the next deploy puts the address into the
+// worker's `send_email` binding `allowed_destination_addresses` allowlist.
+//
+// `cf_destination_id` is CF's account-level identifier for the address —
+// destinations are account-wide on CF's side; per-project scoping is
+// enforced via the binding allowlist injected at deploy.
+// ---------------------------------------------------------------------------
+export const emailDestinations = pgTable(
+  'email_destinations',
+  {
+    id: text('id').primaryKey(),
+    project_id: text('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    address: text('address').notNull(),
+    status: text('status').notNull().default('pending').$type<'pending' | 'verified'>(),
+    // Always populated by `createEmailDestination` after a successful CF
+    // addDestination call. Nullable in schema only for forward-compat with
+    // future async-tag flows (e.g. status='pending' rows created before the
+    // CF API has returned a tag).
+    cf_destination_id: text('cf_destination_id'),
+    // Audit timestamp: set the moment status first transitions to 'verified',
+    // never cleared. Use `status === 'verified'` for current state, not
+    // `verified_at !== null`.
+    verified_at: timestamp('verified_at', { mode: 'string' }),
+    // How the row reached `status='verified'`:
+    //   - 'cf'       — Cloudflare Email Routing's verification email was
+    //                   clicked (the default path). Includes the project
+    //                   owner's own email when CF already had it verified
+    //                   on a prior project (Option C: owner-relaxed reuse).
+    //   - 'platform' — CF already had the address verified by a *different*
+    //                   project. We cannot trust CF's verification flag for
+    //                   per-project consent here, so we issue our own
+    //                   single-use confirmation link to the recipient and
+    //                   keep the row 'pending' until they click it. Once
+    //                   the platform link is clicked, status flips to
+    //                   'verified' but `verification_source` stays
+    //                   'platform' for the audit trail.
+    verification_source: text('verification_source')
+      .notNull()
+      .default('cf')
+      .$type<'cf' | 'platform'>(),
+    // Audit columns for owner-relaxed CF reuse (Option C in design doc
+    // 0078). Populated only when:
+    //   - `verification_source = 'cf'` AND
+    //   - the row was inserted via the owner-relaxed branch (the
+    //     address matched the project owner's `users.email` at
+    //     insert-time and CF already had it verified).
+    //
+    // NULL for `verification_source = 'platform'` rows (no inheritance
+    // — consent was per-recipient via the platform-side click) and for
+    // fresh-CF-verification rows (no prior consent inherited).
+    //
+    // `verified_by_email_snapshot` is the email value the granter held
+    // at insert-time. If the granter's `users.email` later changes, the
+    // snapshot is how `revokeOwnerVerifiedDestinationsForUserChange`
+    // identifies which inherited-consent rows to invalidate (the
+    // identity that consented is no longer the user's identity).
+    verified_by_user_id: text('verified_by_user_id').references(() => users.id, {
+      onDelete: 'set null',
+    }),
+    verified_by_email_snapshot: text('verified_by_email_snapshot'),
+    created_at: timestamp('created_at', { mode: 'string' }).notNull().defaultNow(),
+  },
+  (table) => [
+    unique('email_destinations_project_address_uq').on(table.project_id, table.address),
+    index('idx_email_destinations_project_id').on(table.project_id),
+    index('idx_email_destinations_cf_destination_id').on(table.cf_destination_id),
+    index('idx_email_destinations_verified_by_user_id').on(
+      table.verified_by_user_id,
+      table.verified_by_email_snapshot,
+    ),
+    // CHECK constraints are declared HERE, not only in raw migration SQL.
+    // A `drizzle-kit generate` run diffs the schema against the previous
+    // snapshot: an undeclared constraint reads as "dropped" and the next
+    // migration would silently widen the consent gate.
+    check('email_destinations_status_check', sql`${table.status} IN ('pending', 'verified')`),
+    check(
+      'email_destinations_verification_source_check',
+      sql`${table.verification_source} IN ('cf', 'platform')`,
+    ),
+  ],
 );
 
 // ---------------------------------------------------------------------------

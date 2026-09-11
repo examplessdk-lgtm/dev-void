@@ -178,15 +178,16 @@ openssl rand -base64 32
 
 Account-level:
 
-| Permission         | Access | Operations                                                       |
-| ------------------ | ------ | ---------------------------------------------------------------- |
-| Workers Scripts    | Edit   | Upload/delete user workers in dispatch namespace                 |
-| Workers Tail       | Read   | Create/delete tail sessions for live log streaming               |
-| D1                 | Edit   | Create/delete user project D1 databases, execute user migrations |
-| Workers KV Storage | Edit   | Create/delete KV namespaces                                      |
-| Workers R2 Storage | Edit   | Create/delete R2 buckets                                         |
-| Queues             | Edit   | Create/delete queues, manage queue consumers                     |
-| Account Analytics  | Read   | Query Analytics Engine SQL API for usage metering                |
+| Permission         | Access | Operations                                                            |
+| ------------------ | ------ | --------------------------------------------------------------------- |
+| Workers Scripts    | Edit   | Upload/delete user workers in dispatch namespace                      |
+| Workers Tail       | Read   | Create/delete tail sessions for live log streaming                    |
+| D1                 | Edit   | Create/delete user project D1 databases, execute user migrations      |
+| Email Routing      | Edit   | Manage account-wide verified destinations and the shared inbound zone |
+| Workers KV Storage | Edit   | Create/delete KV namespaces                                           |
+| Workers R2 Storage | Edit   | Create/delete R2 buckets                                              |
+| Queues             | Edit   | Create/delete queues, manage queue consumers                          |
+| Account Analytics  | Read   | Query Analytics Engine SQL API for usage metering                     |
 
 Zone-level (on `void.app`):
 
@@ -534,17 +535,120 @@ pnpm health:staging    # Check staging API health
 
 ## DNS Setup
 
-| Record                     | Zone         | Points To                                  |
-| -------------------------- | ------------ | ------------------------------------------ |
-| `api.void.cloud`           | `void.cloud` | API worker                                 |
-| `dash.void.cloud`          | `void.cloud` | Dashboard worker                           |
-| `*.void.app`               | `void.app`   | Dispatch worker (wildcard route)           |
-| `cname.void.app`           | `void.app`   | CF for SaaS fallback origin (AAAA `100::`) |
-| `proxy.void.cloud`         | `void.cloud` | Proxy worker                               |
-| `api.staging.void.cloud`   | `void.cloud` | Staging API worker                         |
-| `dash.staging.void.cloud`  | `void.cloud` | Staging dashboard worker                   |
-| `*.staging.void.app`       | `void.app`   | Staging dispatch worker (wildcard route)   |
-| `proxy.staging.void.cloud` | `void.cloud` | Staging proxy worker                       |
+| Record                     | Zone         | Points To                                        |
+| -------------------------- | ------------ | ------------------------------------------------ |
+| `api.void.cloud`           | `void.cloud` | API worker                                       |
+| `dash.void.cloud`          | `void.cloud` | Dashboard worker                                 |
+| `*.void.app`               | `void.app`   | Dispatch worker (wildcard route)                 |
+| `cname.void.app`           | `void.app`   | CF for SaaS fallback origin (AAAA `100::`)       |
+| `proxy.void.cloud`         | `void.cloud` | Proxy worker                                     |
+| `api.staging.void.cloud`   | `void.cloud` | Staging API worker                               |
+| `dash.staging.void.cloud`  | `void.cloud` | Staging dashboard worker                         |
+| `*.staging.void.app`       | `void.app`   | Staging dispatch worker (wildcard route)         |
+| `proxy.staging.void.cloud` | `void.cloud` | Staging proxy worker                             |
+| `mail.void.cloud`          | `void.cloud` | Email Routing subdomain (catch-all to the proxy) |
+
+## Email
+
+The platform runs one shared mail facility for every project. A project sends
+as `<slug>[+tag]@<mail domain>` and receives at `<slug>+anything@<mail domain>`.
+No per-project DNS work.
+
+The mail domain is a var, not a constant. The api worker and the proxy worker
+each declare `EMAIL_SENDER_DOMAIN`, and deployed user workers receive it as the
+`__VOID_EMAIL_DOMAIN` binding. **The two worker values must match.** The proxy
+validates every sender against its own copy, so a mismatch makes the api's own
+verification mail fail with `INVALID_FROM` from our own proxy. Production is
+`mail.void.cloud`; staging is `mail.staging.void.cloud`.
+
+Every reader fails closed when the var is absent. Nothing falls back to a
+baked-in domain.
+
+### One-time zone setup, per environment
+
+Do these in order. Step 4 before step 5, or the catch-all points at a worker
+with no `email()` export.
+
+The mail domain is a **subdomain of the existing `void.cloud` zone**, not a
+zone of its own. `void.cloud` is already on Cloudflare DNS with Email Routing
+enabled (MX → `route*.mx.cloudflare.net`, SPF present — checked 2026-09-11).
+There is no registration and no nameserver change. As of 2026-09-11 neither
+`mail.void.cloud` nor `mail.staging.void.cloud` has any DNS record, so nothing
+below has been done yet in either environment.
+
+1. **Extend `CF_API_TOKEN` with `Email Routing: Edit`.** Without it every
+   `addDestination` returns 403. That reaches a CLI user as a 502, and the
+   auto-add on project create swallows it entirely — the owner never gets a
+   verification mail and cannot send to their own address.
+2. **Add the subdomain to Email Routing.** Dashboard: Compute → Email
+   Service → Email Routing → `void.cloud` → Settings → Subdomains → enter
+   `mail.void.cloud` (or `mail.staging.void.cloud`). Cloudflare adds and locks
+   the MX, SPF and DKIM records on the subdomain. This step is dashboard-only:
+   neither the REST API nor `wrangler email routing enable` documents a
+   subdomain form. **Unverified:** the docs show one-label examples only;
+   confirm the two-label staging name is accepted before writing it anywhere
+   else.
+3. **Onboard the same name to Email Sending.** Dashboard: Email Service →
+   Email Sending → Onboard Domain, or `wrangler email sending enable
+mail.void.cloud`. This adds the `cf-bounce` MX, SPF, DKIM and DMARC
+   records. Without it the binding can send **only to verified destination
+   addresses, and those are capped at 200 per account, shared across every
+   domain and every project** — a platform-wide ceiling. With it the binding
+   sends to any recipient; per-project consent stays in our own allowlist.
+   Requires the Workers Paid plan.
+4. **Deploy the proxy** with `send_email` bound and the `email()` export live.
+   Check all three scopes in `packages/proxy/wrangler.jsonc`: the top level,
+   `env.production` and `env.staging`. Wrangler does not inherit `send_email`
+   into a named env, and `deploy:proxy` runs `--env production`.
+5. **Create the catch-all rule** on the subdomain. Action _Send to a Worker_,
+   destination `void-proxy` (or `void-proxy-staging`). `PUT
+/zones/{zone}/email/routing/rules/catch_all` with
+   `{ "type": "worker", "value": ["void-proxy"] }` also works; wrangler has no
+   catch-all command, and the `addresses` array wrangler ≥ 4.113 applies on
+   `wrangler deploy` cannot write it either — its `*@` catch-all is apex-only,
+   and the mail domain is a subdomain. This rule is the real kill switch:
+   deleting it stops all inbound immediately.
+   Do not touch the zone's **subaddressing** setting (`support_subaddress`,
+   `false` on `void.cloud` as of 2026-09-11). The catch-all takes every
+   address on the subdomain, so `<slug>+tag@` needs no per-zone setting
+   here; the setting matters only for literal rules (own-account deploys).
+6. **Slug mirror.** The proxy resolves a sender through
+   `email-slug:<projectId>` in `ROUTING` KV. `createProject` writes it, and
+   the hourly rollover (`packages/api/src/index.ts`, `processUserRollover`)
+   rewrites it for every project, so a project that predates this feature is
+   covered within an hour of the api deploy. Until then its sends return a 502
+   `project slug unknown`. No manual pass is needed.
+7. **Verify.** `wrangler tail void-proxy`, then send to
+   `<test-slug>+test@<mail domain>`. Expect an `[email-router]` line and either
+   a dispatch or a `setReject` with a readable reason. Note that outbound sent
+   through the binding shows as **dropped** in the Email Routing summary even
+   when delivered; read Email Sending metrics or the tail instead.
+
+### Deploy order
+
+Deploy the **proxy before the api**. The api's verification mail posts to the
+proxy's `/email/internal/send`, so an api-first deploy leaves that mail silently
+dark until the proxy catches up. `vp run deploy` runs api first, so run the two
+as explicit steps for the release that turns email on.
+
+### Rollback
+
+- Delete the catch-all rule to stop inbound.
+- Redeploy the proxy without `send_email` to stop outbound.
+
+### Before you deploy this the first time
+
+Two changes are retroactive and server-side. Check production first.
+
+- `SEND_EMAIL`, `__VOID_EMAIL_DOMAIN` and `__VOID_PROJECT_SLUG` are now
+  reserved binding names. A project holding one as a var or a stored secret
+  starts failing deploys with `reserved binding names: ...`, and a user cannot
+  remove a stored secret from the manifest. Query
+  `project_secrets.name IN (...)` before deploying the api.
+- `noreply`, `postmaster`, `abuse`, `bounce` and `security` are now reserved
+  slugs. That gates creation only, so a project already holding one keeps it —
+  and `noreply` is the platform's own verification sender. Check for existing
+  holders.
 
 ## Fresh Environment Setup
 

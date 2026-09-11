@@ -7,6 +7,7 @@ import type {
   projectSecrets,
   resources,
   domains,
+  emailDestinations,
   platformEvents,
   invitations,
   projectMigrations,
@@ -28,6 +29,7 @@ export type DeploymentStatus = Deployment['status'];
 export type ProjectSecret = InferSelectModel<typeof projectSecrets>;
 export type Resource = InferSelectModel<typeof resources>;
 export type Domain = InferSelectModel<typeof domains>;
+export type EmailDestination = InferSelectModel<typeof emailDestinations>;
 export type PlatformEvent = InferSelectModel<typeof platformEvents>;
 export type Invitation = InferSelectModel<typeof invitations>;
 export type ProjectMigration = InferSelectModel<typeof projectMigrations>;
