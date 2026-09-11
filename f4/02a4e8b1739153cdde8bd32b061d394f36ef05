@@ -1,0 +1,19 @@
+.github/workflows/ci.yml
+  s_5a06e7c4c4ad3d::t_d8c6bdaa2d780b 20,33-35,74,77,79-92
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "f402a4e8b1739153cdde8bd32b061d394f36ef05",
+  "prompts": {},
+  "sessions": {
+    "s_5a06e7c4c4ad3d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08e6e-3b48-7183-ac5e-670cd59a2ddc",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
