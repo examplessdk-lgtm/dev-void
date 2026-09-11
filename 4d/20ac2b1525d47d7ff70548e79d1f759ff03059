@@ -1,0 +1,41 @@
+docs/guide/env-vars.md
+  s_5fdb66f3699768::t_d138a1205f4bd8 117,119,123
+docs/integrations/cloudflare.md
+  s_5fdb66f3699768::t_fe809a4acb906d 263
+docs/reference/cli.md
+  s_5fdb66f3699768::t_eb160495b89fe7 330
+packages/void/AGENT_PROMPT.md
+  s_5fdb66f3699768::t_6ee6ba506af06e 17
+packages/void/getting-started-prompt.txt
+  s_5fdb66f3699768::t_4efdb268148411 18
+packages/void/src/cli/deploy.ts
+  s_5fdb66f3699768::t_8f9323eba8c57f 67-71,1393-1398,4063-4067
+packages/void/src/cli/template.ts
+  s_5fdb66f3699768::t_4c0d4dbba88251 6-7
+packages/void/src/index.ts
+  s_5fdb66f3699768::t_e564b5e3fc70b0 74-80,1357-1384
+packages/void/src/shared/env.ts
+  s_5fdb66f3699768::t_e29d42c3b811f7 7-16
+packages/void/test/integration/kitchen-sink-build.test.ts
+  s_5fdb66f3699768::t_d9c59e6acd6d76 28-29,49-58,64-68,129-137
+packages/void/test/unit/cloudflare-deploy.test.ts
+  s_5fdb66f3699768::t_e46071ce46feca 6269-6288
+packages/void/test/unit/init.test.ts
+  s_5fdb66f3699768::t_382af2ff99c523 2043-2044,2061-2062
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "4d20ac2b1525d47d7ff70548e79d1f759ff03059",
+  "prompts": {},
+  "sessions": {
+    "s_5fdb66f3699768": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08ef5-1140-76b2-befa-9b076fe9f89e",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
