@@ -1197,9 +1197,11 @@ inbound continuing until they delete the rule themselves.
 
 - `email_domains` — `project_id`, `domain` (the address domain, apex or
   subdomain), `zone_id`, `account_id`, `mode: 'apex' | 'subdomain'`, `status:
-'pending' | 'active' | 'token_revoked' | 'failed'`, `bridge_address`,
+'pending' | 'active' | 'token_revoked' | 'token_expired' | 'failed'`, `bridge_address`,
   `bridge_destination_id`, `verification_data` (which steps remain, and the
-  verification link once captured), timestamps.
+  verification link once captured), `token_id` and `token_expires_on` from
+  `GET /user/tokens/verify` (so `status` can name the token to revoke and
+  warn before a TTL runs out), timestamps.
 - The token is stored with `encryptProjectSecret` under the project's
   envelope key, per domain, and only the api and proxy ever decrypt it. It
   is never written to a worker, a manifest or a log.
@@ -1238,6 +1240,50 @@ CLI                                   browser                       CLI
  │ send over TLS → platform stores with encryptProjectSecret          │
  │ drop it from memory · continue with Zone / Routing …               │
 ```
+
+**The whole grant, with its branches.** Five parties; the developer
+clicks three times and types nothing.
+
+```
+developer      void CLI                       Cloudflare dashboard        Cloudflare API                Void platform
+─────────      ────────                       ────────────────────        ──────────────                ─────────────
+add acme.com ▶ MX lookup (public DNS)
+               apex or mail.acme.com
+               build the link (keys fit the path)
+               snapshot the clipboard
+               open ───────────────────────▶ login if needed ¹
+                                             form pre-filled
+click 1 ───────────────────────────────────▶ Continue to summary
+                                             (narrow account / zone here)
+click 2 ───────────────────────────────────▶ Create Token ────────────▶ user-owned token created
+click 3 ───────────────────────────────────▶ Copy → clipboard
+               poll the clipboard ≤ 10 min
+               new value · 40 chars · no vendor prefix
+               ──────────────────────────────────────────────────────▶ GET /user/tokens/verify
+               ◀────────────────────────────────────────────────────── status active · id · expires_on
+               clear the clipboard
+               POST /projects/:id/email-domains { domain, token } ─────────────────────────────────▶ encryptProjectSecret
+               drop the token from memory                                                            row pending · token_id · expires_on
+                                                                      ◀────────────────────────────── GET /zones?name=acme.com   (zone:read)
+                                                                      ◀────────────────────────────── one read per needed endpoint ²
+                                                                                                     all green → setup steps with the stored token
+◀───────────── pending · the next human step ◀───────────────────────────────────────────────────────┘
+                                                                      ◀────────────────────────────── runtime: proxy decrypts, send_raw
+```
+
+¹ Whether the pre-fill survives a login redirect is unverified.
+² Rules, addresses, sending, and zone settings on the apex path. A 403
+names the missing group; the CLI re-runs the link with that key added.
+
+| Branch                                | What the developer sees                                                                      |
+| ------------------------------------- | -------------------------------------------------------------------------------------------- |
+| clipboard unchanged, or wrong shape   | nothing; still waiting. Enter switches to the paste prompt                                   |
+| verify says not active                | "that is not an active Cloudflare token — still waiting"                                     |
+| 10 minutes, nothing                   | the paste prompt; Esc cancels with nothing stored anywhere                                   |
+| zone not found with this token        | `failed · acme.com is not in an account this token can see` → re-run `add`                   |
+| 403 on a scope probe                  | `failed · missing Email Routing Addresses Edit` → re-run `add`; the link carries the key     |
+| `expires_on` passed, or revoked at CF | `status` reads `token expired` / `token revoked`; `add` again replaces the token, rules stay |
+| `remove`                              | rule and bridge destination deleted with the token, best effort; then the row and ciphertext |
 
 **The clipboard watch.** The write side already exists — `void auth token`
 runs `pbcopy` / `clip` / `xclip -selection clipboard`
