@@ -1,0 +1,23 @@
+docs/reference/cli.md
+  s_0add8c35799930::t_45153ed1c9be96 905
+packages/void/src/cli/cloudflare-operations.ts
+  s_0add8c35799930::t_f79e73bc361299 399-407,409
+packages/void/test/unit/cloudflare-operations.test.ts
+  s_0add8c35799930::t_2ca0c0e811033f 291-305,313,315
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "a5992cd06694e3803b90b7361a4a30ff9aaa263f",
+  "prompts": {},
+  "sessions": {
+    "s_0add8c35799930": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0903e-9700-76f0-a4db-b5c9ea737ea9",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
