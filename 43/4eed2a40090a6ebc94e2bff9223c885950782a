@@ -1,0 +1,39 @@
+packages/isr/package.json
+  s_0add8c35799930::t_93b3a10bf2d0d8 17-20,31-33
+packages/isr/src/runtime.ts
+  s_0add8c35799930::t_e39772e0c24ee2 930-933
+packages/isr/vite.config.ts
+  s_0add8c35799930::t_a7d9dbb8b16045 1-40
+packages/void/AGENTS.md
+  s_0add8c35799930::t_64c6c3bd833bf3 107
+packages/void/package.json
+  s_0add8c35799930::t_ba371af8e41736 355
+packages/void/src/plugin-routing.ts
+  s_0add8c35799930::t_7941b2b484bb4b 575
+packages/void/src/runtime/isr.ts
+  s_0add8c35799930::t_22d59d740f0513 1-7
+packages/void/test/unit/isr-cache.test.ts
+  s_0add8c35799930::t_d166b47473d68f 25-26
+packages/void/test/unit/isr-config.test.ts
+  s_0add8c35799930::t_cf92069dc8e13f 1
+packages/void/test/unit/isr.test.ts
+  s_0add8c35799930::t_71fe2dff08618b 1
+pnpm-lock.yaml
+  s_0add8c35799930::t_cd76f02f9d8cf0 348-351,528-530
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "434eed2a40090a6ebc94e2bff9223c885950782a",
+  "prompts": {},
+  "sessions": {
+    "s_0add8c35799930": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0903e-9700-76f0-a4db-b5c9ea737ea9",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
