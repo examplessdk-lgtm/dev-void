@@ -1,0 +1,21 @@
+packages/deploy-core/src/validate.ts
+  s_0add8c35799930::t_a10cc0a866ce38 542-554
+packages/deploy-core/test/unit/validate.test.ts
+  s_0add8c35799930::t_3e2a95a38af28d 1-45
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "2b00d497f324db3344dcbf0a4659ccc109df3bf5",
+  "prompts": {},
+  "sessions": {
+    "s_0add8c35799930": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0903e-9700-76f0-a4db-b5c9ea737ea9",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
