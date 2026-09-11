@@ -788,6 +788,32 @@ export type ProvisionedWranglerPatch = {
     producers?: Array<WranglerQueueProducer>;
     consumers?: Array<WranglerQueueConsumer>;
   };
+  /**
+   * Email (Mode B — the developer's own Cloudflare account; design doc 0078).
+   *
+   * `sendEmail` upserts `{ name }` into the top-level `send_email[]` array, keyed by
+   * `name` (wrangler's identity for that field — it has no `.binding`). A matched
+   * entry is left exactly as it is (its `destination_address` /
+   * `allowed_destination_addresses` are user-owned); a missing one is appended and
+   * the array is created when absent. Other entries are never touched.
+   */
+  sendEmail?: { name: string };
+  /**
+   * The top-level `addresses` string array wrangler ≥ 4.113 reconciles Email
+   * Routing rules from on `wrangler deploy`. Void OWNS the whole array in Mode B
+   * (decision 13), so this is a whole-array write, not a merge:
+   *   - `string[]` → set the array to exactly this value (rewritten every run);
+   *   - `null`     → delete the key (routing is not ready — an EMPTY array would
+   *                  delete every rule wrangler owns, so the key must go instead);
+   *   - `undefined`→ untouched.
+   */
+  addresses?: Array<string> | null;
+  /**
+   * Top-level `vars` to upsert by key (e.g. `__VOID_EMAIL_FROM`). Existing keys
+   * with a different value are overwritten; other keys are untouched; the `vars`
+   * object is created when absent.
+   */
+  vars?: Record<string, string>;
 };
 
 export type WriteProvisionedWranglerResult = {
@@ -807,7 +833,9 @@ export type WriteProvisionedWranglerResult = {
 /**
  * Fill the parts of the root wrangler config that `wrangler <res> create
  * --update-config` leaves blank: top-level `account_id`, `name`,
- * `compatibility_date`, and `migrations_dir` on a specific D1 entry.
+ * `compatibility_date`, and `migrations_dir` on a specific D1 entry — plus the
+ * Mode B email fields (`send_email`, `addresses`, `vars`) that have no wrangler
+ * command at all.
  *
  * Comment-preserving: uses `jsonc-parser` `modify()` + `applyEdits()` so
  * comments and unrelated content survive (unlike `syncWranglerBindings`, which
@@ -921,10 +949,15 @@ export function writeProvisionedWranglerConfig(
   //     var, a secret, a QUEUE PRODUCER, … — whether we are APPENDING a new entry
   //     OR UPDATING an existing matched one → fail closed (a cross-type duplicate
   //     binding name wrangler rejects at deploy).
+  //
+  // `identityKey` is the member property wrangler keys the field on: `binding` for
+  // the id-bearing resources, `name` for `send_email` (which has no `.binding` —
+  // see `nameKeyedBindingNames`).
   const upsertAdoptedBinding = (
     field: string,
     binding: string,
     properties: Record<string, string>,
+    identityKey: 'binding' | 'name' = 'binding',
   ): void => {
     // Re-parse the CURRENT text (not the initial `parsed`) so this sees any adopt
     // appended earlier in THIS call — a stale map would let a multi-field patch
@@ -942,15 +975,15 @@ export function writeProvisionedWranglerConfig(
     const matches: Array<number> = [];
     for (let i = 0; i < currentList.length; i++) {
       const entry = currentList[i];
-      if (isRecord(entry) && entry.binding === binding) {
+      if (isRecord(entry) && entry[identityKey] === binding) {
         matches.push(i);
       }
     }
     if (matches.length > 1) {
       throw new Error(
         `deploy: cannot update "${configPath}" — binding ${JSON.stringify(binding)} is declared ` +
-          `${matches.length} times in "${field}". Adoption cannot choose which entry to write the ` +
-          `real id into, and wrangler rejects duplicate binding names. Remove the duplicate and retry.`,
+          `${matches.length} times in "${field}". Void cannot choose which entry to update, and ` +
+          `wrangler rejects duplicate binding names. Remove the duplicate and retry.`,
       );
     }
     // Worker-wide cross-type uniqueness — checked for BOTH the matched (existing
@@ -984,7 +1017,7 @@ export function writeProvisionedWranglerConfig(
       text = applyMemberEdit(
         text,
         [field, currentList.length],
-        { binding, ...properties },
+        { [identityKey]: binding, ...properties },
         {
           formattingOptions,
           isArrayInsertion: true,
@@ -1006,6 +1039,12 @@ export function writeProvisionedWranglerConfig(
   }
   if (patch.hyperdrive) {
     upsertAdoptedBinding('hyperdrive', patch.hyperdrive.binding, { id: patch.hyperdrive.id });
+  }
+  // send_email — the same name-keyed upsert: `{ name }` only, so a matched entry
+  // keeps whatever destination restrictions the user put on it, and the worker-wide
+  // uniqueness guard rejects a `SEND_EMAIL` name already held by another binding.
+  if (patch.sendEmail) {
+    upsertAdoptedBinding('send_email', patch.sendEmail.name, {}, 'name');
   }
 
   // migrations_dir — upsert onto the D1 entry matched by binding. Indices are
@@ -1270,6 +1309,50 @@ export function writeProvisionedWranglerConfig(
     upsertQueueEntries('consumers', patch.queues.consumers);
   }
 
+  // vars — per-key upsert into the top-level `vars` object (created when absent).
+  // Only the keys this patch names are written, and only when their value differs,
+  // so sibling vars and their comments stay byte-identical. A var name is a worker
+  // binding name too (wrangler folds `vars` into `validateBindingsHaveUniqueNames`),
+  // so a key already held by ANOTHER binding type fails closed like the adopt path.
+  if (patch.vars) {
+    const currentConfig = parseJsonc(text);
+    // Validates the outer shape: a present-but-non-object `vars` throws (fail closed)
+    // rather than being replaced wholesale.
+    bindingNamesForField('vars', currentConfig.vars);
+    const currentVars = isRecord(currentConfig.vars) ? currentConfig.vars : {};
+    const owners = collectWorkerBindingNames(configWithoutField(currentConfig, 'vars'));
+    addQueueProducerOwners(owners, currentConfig);
+    for (const [key, value] of Object.entries(patch.vars)) {
+      const owner = owners.get(key);
+      if (owner !== undefined) {
+        throw new Error(
+          `deploy: cannot update "${configPath}" — cannot write var ${JSON.stringify(key)} because ` +
+            `that binding name is already used by a ${owner} binding. Wrangler requires every ` +
+            `binding name to be unique across the whole worker, so this would make the config ` +
+            `undeployable. Rename the conflicting binding and retry.`,
+        );
+      }
+      if (!jsonEqual(currentVars[key], value)) {
+        set(['vars', key], value);
+      }
+    }
+  }
+
+  // addresses — Void owns the WHOLE top-level array in Mode B, so a `string[]`
+  // replaces the value outright (skipped when already equal, so a re-run is
+  // byte-identical) and `null` removes the key. Neither goes through `set()`:
+  // the array is composite by design, so the final gate's "expected a string"
+  // diagnosis would be wrong for it — a comment nested inside a user-edited
+  // `addresses` still trips the generic drop check below and fails closed.
+  if (patch.addresses !== undefined) {
+    const currentAddresses = parseJsonc(text).addresses;
+    if (patch.addresses === null) {
+      text = removeMember(text, ['addresses'], { formattingOptions });
+    } else if (!jsonEqual(currentAddresses, patch.addresses)) {
+      text = applyMemberEdit(text, ['addresses'], patch.addresses, { formattingOptions });
+    }
+  }
+
   // FINAL GATE — global comment-text-preservation invariant. The writer's
   // contract is that every comment's TEXT survives a write. Relocation only
   // MOVES a comment (identical text, new position), so the multiset of comment
@@ -1488,6 +1571,102 @@ function applyMemberEdit(
     return plainResult;
   }
   return relocated;
+}
+
+/**
+ * Remove one object member (the property at `path`), keeping every comment.
+ *
+ * jsonc-parser's `modify(text, path, undefined)` deletes from the END of the
+ * previous member to the end of the removed one — so the previous sibling's
+ * trailing comment, a full-line comment above the member, and the member's own
+ * trailing comment all vanish (measured on 4.x). The final comment gate would
+ * then refuse the write for the common `"name": "app", // worker` shape. Here
+ * the property node's exact source range is spliced out instead, plus ONE
+ * separating comma (the following one when present, else the preceding one so
+ * a strict `.json` file never gains a trailing comma) and the now-blank line it
+ * sat on. Comments are never inside those ranges, so they all stay put; a
+ * comment that was attached to the removed member is left orphaned on its line.
+ *
+ * Validate-before-return backstop: the spliced text must parse and equal the
+ * plain `modify()` result's data; otherwise the plain edit is returned and the
+ * final gate decides. An absent member is a no-op.
+ */
+function removeMember(
+  text: string,
+  path: Array<string | number>,
+  options: { formattingOptions: FormattingOptions },
+): string {
+  const root = parseTree(text, undefined, { allowTrailingComma: true });
+  const valueNode = root ? findNodeAtLocation(root, path) : undefined;
+  const property = valueNode?.parent;
+  if (!root || !valueNode || !property || property.type !== 'property') {
+    return valueNode ? applyEdits(text, modify(text, path, undefined, options)) : text;
+  }
+  const start = property.offset;
+  const end = property.offset + property.length;
+
+  // Tokenize once so comments and whitespace are skipped by KIND, never by regex.
+  const scanner = createScanner(text, false);
+  const tokens: Array<{ kind: SyntaxKind; offset: number; length: number }> = [];
+  for (let kind = scanner.scan(); kind !== SyntaxKind.EOF; kind = scanner.scan()) {
+    tokens.push({ kind, offset: scanner.getTokenOffset(), length: scanner.getTokenLength() });
+  }
+  const isTrivia = (kind: SyntaxKind): boolean =>
+    kind === SyntaxKind.Trivia ||
+    kind === SyntaxKind.LineBreakTrivia ||
+    kind === SyntaxKind.LineCommentTrivia ||
+    kind === SyntaxKind.BlockCommentTrivia;
+  const following = tokens.find((token) => token.offset >= end && !isTrivia(token.kind));
+  const preceding = [...tokens]
+    .reverse()
+    .find((token) => token.offset + token.length <= start && !isTrivia(token.kind));
+  const comma =
+    following?.kind === SyntaxKind.CommaToken
+      ? following
+      : preceding?.kind === SyntaxKind.CommaToken
+        ? preceding
+        : undefined;
+
+  // Splice the higher range first so the lower offsets stay valid.
+  const ranges = [{ offset: start, length: end - start }];
+  if (comma) {
+    ranges.push({ offset: comma.offset, length: comma.length });
+  }
+  ranges.sort((a, b) => b.offset - a.offset);
+  let spliced = text;
+  for (const range of ranges) {
+    spliced = spliced.slice(0, range.offset) + spliced.slice(range.offset + range.length);
+  }
+
+  // Drop the line the member sat on when nothing but whitespace is left of it
+  // (its trailing comment, if any, keeps the line alive). Handles LF, CRLF and
+  // CR-only endings. `cursor` is the member's start in the spliced text — shifted
+  // left when the removed comma sat before it.
+  const cursor = comma && comma.offset < start ? start - comma.length : start;
+  let lineStart = cursor;
+  while (lineStart > 0 && spliced[lineStart - 1] !== '\n' && spliced[lineStart - 1] !== '\r') {
+    lineStart--;
+  }
+  let lineEnd = cursor;
+  while (lineEnd < spliced.length && spliced[lineEnd] !== '\n' && spliced[lineEnd] !== '\r') {
+    lineEnd++;
+  }
+  if (spliced.slice(lineStart, lineEnd).trim() === '') {
+    const terminator = spliced.startsWith('\r\n', lineEnd) ? 2 : lineEnd < spliced.length ? 1 : 0;
+    spliced = spliced.slice(0, lineStart) + spliced.slice(lineEnd + terminator);
+  }
+
+  const plainResult = applyEdits(text, modify(text, path, undefined, options));
+  let splicedParsed: Record<string, unknown>;
+  try {
+    splicedParsed = parseJsonc(spliced);
+  } catch {
+    return plainResult;
+  }
+  if (!jsonEqual(splicedParsed, parseJsonc(plainResult))) {
+    return plainResult;
+  }
+  return spliced;
 }
 
 /**
@@ -1890,6 +2069,15 @@ export function readProvisionedBindingEntry(
  *   | namespace-array  | kv_namespaces/d1_databases/… `[{ binding }]` | member `.binding` | `.binding` req |
  *   | singleton        | ai/browser/…/version_metadata `{ binding }`  | `.binding`   | req (assets: optional) |
  *   | binding-list     | durable_objects/logfwdr/unsafe `{ bindings: [{ name }] }` | member `.name` | `bindings` req (unsafe: optional) |
+ *   | whole-object     | addresses `string[]`                   | none            | —               |
+ *
+ * `whole-object` is a top-level field Void WRITES (`writeProvisionedWranglerConfig`)
+ * that is NOT a binding — it declares no name wrangler folds into
+ * `validateBindingsHaveUniqueNames`, so it is absent from `FRIENDLY_BINDING_NAMES`
+ * and contributes nothing here. `addresses` reconciles Email Routing rules on
+ * `wrangler deploy` (≥ 4.113), so the deploy verifier pins it WHOLE against the
+ * pre-build root (`DEPLOY_WHOLE_OBJECT_PINNED_FIELDS` in `deploy.ts`) instead of
+ * per entry: a build that injects one redirects the account's inbound mail.
  *
  * `namespace-array` is the DEFAULT for every `FRIENDLY_BINDING_NAMES` field not listed
  * in {@link BINDING_FIELD_SHAPES}. `secrets.required` (a `string[]`) is folded in
@@ -1901,7 +2089,8 @@ type BindingFieldShape =
   | { kind: 'name-keyed-array' }
   | { kind: 'namespace-array' }
   | { kind: 'singleton'; bindingRequired: boolean }
-  | { kind: 'binding-list'; bindingsRequired: boolean };
+  | { kind: 'binding-list'; bindingsRequired: boolean }
+  | { kind: 'whole-object' };
 
 /**
  * Explicit per-field shape metadata (see {@link BindingFieldShape}), transcribed
@@ -1920,6 +2109,9 @@ const BINDING_FIELD_SHAPES: Record<string, BindingFieldShape> = {
   // these; `validateSendEmailBinding`/`validateRateLimitBinding` require `.name`).
   send_email: { kind: 'name-keyed-array' },
   ratelimits: { kind: 'name-keyed-array' },
+  // Whole-object — no per-entry binding identity; the deploy verifier compares the
+  // whole value against the pre-build root (see the shape table).
+  addresses: { kind: 'whole-object' },
   // Singletons `{ binding }` — `binding` REQUIRED per schema for all except `assets`
   // (`validateAssetsConfig`, where a binding-less assets-only-directory is legal).
   ai: { kind: 'singleton', bindingRequired: true },
@@ -1961,6 +2153,8 @@ export function bindingNamesForField(field: string, value: unknown): Array<strin
       return singletonBindingName(field, value, shape.bindingRequired);
     case 'binding-list':
       return bindingListNames(field, value, shape.bindingsRequired);
+    case 'whole-object':
+      return [];
   }
 }
 
@@ -1993,6 +2187,8 @@ export function bindingEntriesForField(
       return singletonBindingEntry(field, value, shape.bindingRequired);
     case 'binding-list':
       return bindingListEntries(field, value, shape.bindingsRequired);
+    case 'whole-object':
+      return [];
   }
 }
 

@@ -2786,6 +2786,354 @@ describe('writeProvisionedWranglerConfig', () => {
   });
 });
 
+describe('writeProvisionedWranglerConfig — email (Mode B): sendEmail / addresses / vars', () => {
+  const readRaw = (f: string): string => readFileSync(join(tmpDir, f), 'utf-8');
+  const parseRaw = (f: string): Record<string, unknown> =>
+    parseJsoncRaw(readRaw(f), undefined, { allowTrailingComma: true }) as Record<string, unknown>;
+
+  // Comments everywhere a jsonc edit could disturb them, and trailing commas at
+  // every level — the shape a hand-edited wrangler.jsonc really has.
+  const emailFixture = `{
+  // Void manages this file — every comment below must survive.
+  "name": "acme-support", // worker name
+  "vars": {
+    "APP_ENV": "production", // user var
+  },
+  /* Email Sending binding, hand-declared with a destination restriction. */
+  "send_email": [
+    { "name": "SEND_EMAIL", "destination_address": "ops@acme.com" }, // restricted
+  ],
+  "addresses": [
+    "support@mail.acme.com", // routed here
+  ],
+  "kv_namespaces": [
+    { "binding": "KV", "id": "abc" }, // cache
+  ],
+}`;
+
+  it('sendEmail: creates the send_email array with exactly one { name } entry when absent, keeping comments', () => {
+    setup(
+      'wrangler.jsonc',
+      `{
+  // header
+  "name": "acme-support", // worker name
+}`,
+    );
+    const result = writeProvisionedWranglerConfig(tmpDir, { sendEmail: { name: 'SEND_EMAIL' } });
+    expect(result.modified).toBe(true);
+    const raw = readRaw('wrangler.jsonc');
+    expect(raw).toContain('// header');
+    expect(raw).toContain('// worker name');
+    expect(parseRaw('wrangler.jsonc').send_email).toEqual([{ name: 'SEND_EMAIL' }]);
+  });
+
+  it('sendEmail: never duplicates a matching entry and leaves its user-owned fields alone (byte-identical)', () => {
+    setup('wrangler.jsonc', emailFixture);
+    const before = readRaw('wrangler.jsonc');
+    const result = writeProvisionedWranglerConfig(tmpDir, { sendEmail: { name: 'SEND_EMAIL' } });
+    expect(result.modified).toBe(false);
+    expect(readRaw('wrangler.jsonc')).toBe(before);
+    expect(parseRaw('wrangler.jsonc').send_email).toEqual([
+      { name: 'SEND_EMAIL', destination_address: 'ops@acme.com' },
+    ]);
+  });
+
+  it('sendEmail: appends beside a differently-named entry without touching it, and is idempotent', () => {
+    setup(
+      'wrangler.jsonc',
+      `{
+  "send_email": [
+    { "name": "NOTIFY", "destination_address": "ops@acme.com" }, // theirs
+  ],
+}`,
+    );
+    const patch = { sendEmail: { name: 'SEND_EMAIL' } };
+    expect(writeProvisionedWranglerConfig(tmpDir, patch).modified).toBe(true);
+    const raw = readRaw('wrangler.jsonc');
+    expect(raw).toContain('// theirs');
+    expect(parseRaw('wrangler.jsonc').send_email).toEqual([
+      { name: 'NOTIFY', destination_address: 'ops@acme.com' },
+      { name: 'SEND_EMAIL' },
+    ]);
+    expect(writeProvisionedWranglerConfig(tmpDir, patch).modified).toBe(false);
+    expect(readRaw('wrangler.jsonc')).toBe(raw);
+  });
+
+  it('sendEmail: fails closed when the name is already held by another binding type — no write', () => {
+    setup('wrangler.jsonc', `{ "kv_namespaces": [{ "binding": "SEND_EMAIL", "id": "abc" }] }`);
+    const before = readRaw('wrangler.jsonc');
+    expect(() =>
+      writeProvisionedWranglerConfig(tmpDir, { sendEmail: { name: 'SEND_EMAIL' } }),
+    ).toThrow(
+      /cannot adopt "SEND_EMAIL" into "send_email".*already used by a KV Namespace binding/s,
+    );
+    expect(readRaw('wrangler.jsonc')).toBe(before);
+  });
+
+  it('sendEmail: fails closed when send_email already declares the name twice — no write', () => {
+    setup(
+      'wrangler.jsonc',
+      `{ "send_email": [{ "name": "SEND_EMAIL" }, { "name": "SEND_EMAIL" }] }`,
+    );
+    const before = readRaw('wrangler.jsonc');
+    expect(() =>
+      writeProvisionedWranglerConfig(tmpDir, { sendEmail: { name: 'SEND_EMAIL' } }),
+    ).toThrow(/binding "SEND_EMAIL" is declared 2 times in "send_email"/);
+    expect(readRaw('wrangler.jsonc')).toBe(before);
+  });
+
+  it('addresses: sets the whole array (creating it), keeping every comment and trailing commas', () => {
+    setup(
+      'wrangler.jsonc',
+      `{
+  // header
+  "name": "acme-support", // worker name
+  "vars": {
+    "APP_ENV": "production", // user var
+  },
+}`,
+    );
+    const result = writeProvisionedWranglerConfig(tmpDir, {
+      addresses: ['support@mail.acme.com', '*@acme.com'],
+    });
+    expect(result.modified).toBe(true);
+    const raw = readRaw('wrangler.jsonc');
+    expect(raw).toContain('// header');
+    expect(raw).toContain('// worker name');
+    expect(raw).toContain('// user var');
+    const parsed = parseRaw('wrangler.jsonc');
+    expect(parsed.addresses).toEqual(['support@mail.acme.com', '*@acme.com']);
+    expect(parsed.vars).toEqual({ APP_ENV: 'production' });
+  });
+
+  it('addresses: replaces an existing array outright (Void owns it) and is byte-identical on re-run', () => {
+    setup(
+      'wrangler.jsonc',
+      `{
+  "name": "acme-support", // worker name
+  "addresses": ["old@mail.acme.com", "gone@mail.acme.com"],
+  "kv_namespaces": [
+    { "binding": "KV", "id": "abc" }, // cache
+  ],
+}`,
+    );
+    const patch = { addresses: ['support@mail.acme.com'] };
+    expect(writeProvisionedWranglerConfig(tmpDir, patch).modified).toBe(true);
+    const raw = readRaw('wrangler.jsonc');
+    expect(raw).toContain('// worker name');
+    expect(raw).toContain('// cache');
+    expect(parseRaw('wrangler.jsonc').addresses).toEqual(['support@mail.acme.com']);
+    expect(writeProvisionedWranglerConfig(tmpDir, patch).modified).toBe(false);
+    expect(readRaw('wrangler.jsonc')).toBe(raw);
+  });
+
+  it('addresses: an equal array is a no-op even when it carries comments inside', () => {
+    setup('wrangler.jsonc', emailFixture);
+    const before = readRaw('wrangler.jsonc');
+    const result = writeProvisionedWranglerConfig(tmpDir, {
+      addresses: ['support@mail.acme.com'],
+    });
+    expect(result.modified).toBe(false);
+    expect(readRaw('wrangler.jsonc')).toBe(before);
+  });
+
+  it('addresses: a DIFFERENT array cannot be written over comments nested inside the old one — throws without writing', () => {
+    // Void owns the array, but the writer never drops a comment: the generic
+    // comment gate refuses instead of silently discarding `// routed here`.
+    setup('wrangler.jsonc', emailFixture);
+    const before = readRaw('wrangler.jsonc');
+    expect(() =>
+      writeProvisionedWranglerConfig(tmpDir, { addresses: ['sales@mail.acme.com'] }),
+    ).toThrow(/would drop a comment \(\/\/ routed here\)/);
+    expect(readRaw('wrangler.jsonc')).toBe(before);
+  });
+
+  it('addresses: null deletes the key, keeps the previous sibling’s trailing comment and the blank line is gone', () => {
+    setup(
+      'wrangler.jsonc',
+      `{
+  "name": "acme-support", // worker name
+  "addresses": ["support@mail.acme.com"],
+  "kv_namespaces": [
+    { "binding": "KV", "id": "abc" }, // cache
+  ],
+}`,
+    );
+    const result = writeProvisionedWranglerConfig(tmpDir, { addresses: null });
+    expect(result.modified).toBe(true);
+    const raw = readRaw('wrangler.jsonc');
+    expect(raw).toBe(`{
+  "name": "acme-support", // worker name
+  "kv_namespaces": [
+    { "binding": "KV", "id": "abc" }, // cache
+  ],
+}`);
+    expect(parseRaw('wrangler.jsonc')).not.toHaveProperty('addresses');
+    // Deleting an absent key is a no-op.
+    expect(writeProvisionedWranglerConfig(tmpDir, { addresses: null }).modified).toBe(false);
+    expect(readRaw('wrangler.jsonc')).toBe(raw);
+  });
+
+  it('addresses: null on the LAST member of a strict .json file removes the preceding comma (no trailing comma left)', () => {
+    setup(
+      'wrangler.json',
+      `{
+  "name": "acme-support",
+  "addresses": ["support@mail.acme.com"]
+}`,
+    );
+    writeProvisionedWranglerConfig(tmpDir, { addresses: null });
+    const raw = readRaw('wrangler.json');
+    expect(raw).toBe(`{
+  "name": "acme-support"
+}`);
+    expect(JSON.parse(raw)).toEqual({ name: 'acme-support' });
+  });
+
+  it('addresses: null keeps the removed member’s own trailing comment and a full-line comment above it', () => {
+    setup(
+      'wrangler.jsonc',
+      `{
+  "name": "acme-support",
+  // inbound mail
+  "addresses": ["support@mail.acme.com"], // managed by void
+  "vars": { "A": "1" },
+}`,
+    );
+    writeProvisionedWranglerConfig(tmpDir, { addresses: null });
+    const raw = readRaw('wrangler.jsonc');
+    expect(raw).toContain('// inbound mail');
+    expect(raw).toContain('// managed by void');
+    expect(parseRaw('wrangler.jsonc')).toEqual({ name: 'acme-support', vars: { A: '1' } });
+  });
+
+  it('addresses: null with CR-only line endings stays valid and keeps the trailing comment', () => {
+    const crOnly = `{\r  "name": "acme-support", // worker name\r  "addresses": ["support@mail.acme.com"],\r  "vars": { "A": "1" },\r}`;
+    setup('wrangler.jsonc', crOnly);
+    writeProvisionedWranglerConfig(tmpDir, { addresses: null });
+    const raw = readRaw('wrangler.jsonc');
+    expect(parseErrors(raw)).toBe(0);
+    expect(raw).toContain('// worker name');
+    expect(raw).not.toContain('\n');
+    expect(parseRaw('wrangler.jsonc')).toEqual({ name: 'acme-support', vars: { A: '1' } });
+  });
+
+  it('vars: creates the vars object when absent, keeping the trailing comment on the last member', () => {
+    setup(
+      'wrangler.jsonc',
+      `{
+  "name": "acme-support", // worker name
+}`,
+    );
+    const result = writeProvisionedWranglerConfig(tmpDir, {
+      vars: { __VOID_EMAIL_FROM: 'support@mail.acme.com' },
+    });
+    expect(result.modified).toBe(true);
+    const raw = readRaw('wrangler.jsonc');
+    expect(raw).toContain('"name": "acme-support", // worker name');
+    expect(parseRaw('wrangler.jsonc').vars).toEqual({ __VOID_EMAIL_FROM: 'support@mail.acme.com' });
+  });
+
+  it('vars: upserts only the named keys — a changed value is overwritten, siblings and their comments stay, idempotent', () => {
+    setup(
+      'wrangler.jsonc',
+      `{
+  "vars": {
+    "APP_ENV": "production", // user var
+    "__VOID_EMAIL_FROM": "old@mail.acme.com",
+  },
+}`,
+    );
+    const patch = { vars: { __VOID_EMAIL_FROM: 'support@mail.acme.com' } };
+    expect(writeProvisionedWranglerConfig(tmpDir, patch).modified).toBe(true);
+    const raw = readRaw('wrangler.jsonc');
+    expect(raw).toContain('// user var');
+    expect(parseRaw('wrangler.jsonc').vars).toEqual({
+      APP_ENV: 'production',
+      __VOID_EMAIL_FROM: 'support@mail.acme.com',
+    });
+    expect(writeProvisionedWranglerConfig(tmpDir, patch).modified).toBe(false);
+    expect(readRaw('wrangler.jsonc')).toBe(raw);
+  });
+
+  it('vars: fails closed when the key is already another binding’s name, or when vars is not an object — no write', () => {
+    setup(
+      'wrangler.jsonc',
+      `{ "kv_namespaces": [{ "binding": "__VOID_EMAIL_FROM", "id": "abc" }] }`,
+    );
+    let before = readRaw('wrangler.jsonc');
+    expect(() =>
+      writeProvisionedWranglerConfig(tmpDir, { vars: { __VOID_EMAIL_FROM: 'x@y' } }),
+    ).toThrow(/cannot write var "__VOID_EMAIL_FROM".*already used by a KV Namespace binding/s);
+    expect(readRaw('wrangler.jsonc')).toBe(before);
+
+    setup('wrangler.jsonc', `{ "vars": ["not", "an", "object"] }`);
+    before = readRaw('wrangler.jsonc');
+    expect(() =>
+      writeProvisionedWranglerConfig(tmpDir, { vars: { __VOID_EMAIL_FROM: 'x@y' } }),
+    ).toThrow(/"vars" must be an object mapping names to values/);
+    expect(readRaw('wrangler.jsonc')).toBe(before);
+  });
+
+  it('the full Mode B patch composes: send_email + addresses + vars in one write, every comment survives, idempotent', () => {
+    setup(
+      'wrangler.jsonc',
+      `{
+  // Void manages this file — every comment below must survive.
+  "name": "acme-support", // worker name
+  "vars": {
+    "APP_ENV": "production", // user var
+  },
+  "kv_namespaces": [
+    { "binding": "KV", "id": "abc" }, // cache
+  ],
+}`,
+    );
+    const patch = {
+      sendEmail: { name: 'SEND_EMAIL' },
+      addresses: ['support@mail.acme.com'],
+      vars: { __VOID_EMAIL_FROM: 'support@mail.acme.com' },
+    };
+    expect(writeProvisionedWranglerConfig(tmpDir, patch).modified).toBe(true);
+    const raw = readRaw('wrangler.jsonc');
+    for (const comment of [
+      '// Void manages this file',
+      '// worker name',
+      '// user var',
+      '// cache',
+    ]) {
+      expect(raw).toContain(comment);
+    }
+    expect(parseRaw('wrangler.jsonc')).toEqual({
+      name: 'acme-support',
+      vars: { APP_ENV: 'production', __VOID_EMAIL_FROM: 'support@mail.acme.com' },
+      kv_namespaces: [{ binding: 'KV', id: 'abc' }],
+      send_email: [{ name: 'SEND_EMAIL' }],
+      addresses: ['support@mail.acme.com'],
+    });
+    expect(writeProvisionedWranglerConfig(tmpDir, patch).modified).toBe(false);
+    expect(readRaw('wrangler.jsonc')).toBe(raw);
+
+    // A later preflight finding routing off withdraws `addresses` only.
+    expect(writeProvisionedWranglerConfig(tmpDir, { addresses: null }).modified).toBe(true);
+    const withdrawn = readRaw('wrangler.jsonc');
+    for (const comment of [
+      '// Void manages this file',
+      '// worker name',
+      '// user var',
+      '// cache',
+    ]) {
+      expect(withdrawn).toContain(comment);
+    }
+    expect(parseRaw('wrangler.jsonc')).toEqual({
+      name: 'acme-support',
+      vars: { APP_ENV: 'production', __VOID_EMAIL_FROM: 'support@mail.acme.com' },
+      kv_namespaces: [{ binding: 'KV', id: 'abc' }],
+      send_email: [{ name: 'SEND_EMAIL' }],
+    });
+  });
+});
+
 describe('writeProvisionedWranglerConfig — producer collision on EVERY upsert', () => {
   const readRaw = (f: string): string => readFileSync(join(tmpDir, f), 'utf-8');
   const parseRaw = (f: string): Record<string, unknown> =>
@@ -3178,6 +3526,8 @@ describe('bindingEntriesForField — entry reader parity with bindingNamesForFie
     { field: 'browser', value: { binding: 'BROWSER', remote: true } },
     // binding-list
     { field: 'unsafe', value: { bindings: [{ name: 'X', type: 'secret_text' }] } },
+    // whole-object (not a binding — pinned whole by the deploy verifier)
+    { field: 'addresses', value: ['support@mail.acme.com', '*@acme.com'] },
   ];
 
   it('yields the SAME names as bindingNamesForField for a representative value of each shape', () => {
@@ -3224,6 +3574,17 @@ describe('bindingEntriesForField — entry reader parity with bindingNamesForFie
     expect(() => bindingEntriesForField('unsafe', { bindings: [{ type: 'secret_text' }] })).toThrow(
       /malformed entry at index 0 \(missing a non-empty string "name"\)/,
     );
+  });
+
+  it('addresses is a whole-object field: no binding names, no entries, never misread as a namespace-array', () => {
+    // `addresses` is `string[]` (wrangler ≥ 4.113 Email Routing rules). The default
+    // namespace-array reader would throw on its string members; the registry names it
+    // whole-object so neither reader sees a binding in it — the deploy verifier pins the
+    // value WHOLE instead (DEPLOY_WHOLE_OBJECT_PINNED_FIELDS).
+    const value = ['support@mail.acme.com', '*@acme.com'];
+    expect(bindingNamesForField('addresses', value)).toEqual([]);
+    expect(bindingEntriesForField('addresses', value)).toEqual([]);
+    expect(bindingNamesForField('addresses', undefined)).toEqual([]);
   });
 
   it('fails closed when a key-map field is routed here (unreachable — asserts fail-closed)', () => {
