@@ -1,0 +1,23 @@
+packages/void/test/integration/list-command.test.ts
+  s_ba54d5e08b4e84::t_d7b44aecbe4f61 4,7-12,53-56,91
+packages/void/test/integration/projects-command.test.ts
+  s_ba54d5e08b4e84::t_cb44b5ce9393bd 4,7-12,64-67,84,126
+packages/void/test/integration/purge-cache-command.test.ts
+  s_ba54d5e08b4e84::t_9184870a2738f0 4,8-13,63-66,86,119,151,198,219
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "a9f598b37d081460624a43b0b10973b831590bfa",
+  "prompts": {},
+  "sessions": {
+    "s_ba54d5e08b4e84": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08e59-7bec-7ac3-bd81-5ccacf4755d8",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
