@@ -668,7 +668,10 @@ export async function preflightEmail(inputs: EmailCloudflareInputs): Promise<Ema
     pre.mode = pre.apex === domain ? 'apex' : 'subdomain';
     pre.zone = { state: 'found', zoneId: settings.tag };
   } else if (settingsMiss) {
-    block('all', 'could not read Email Routing settings — unknown — run `void email setup`');
+    block(
+      'all',
+      'could not read Email Routing settings — unknown — run `void email setup --backend cloudflare`',
+    );
   } else if (pre.session.state === 'ok') {
     pre.zone.state = 'not-found';
   }
@@ -826,7 +829,7 @@ export async function preflightEmail(inputs: EmailCloudflareInputs): Promise<Ema
     } else if (pre.domainMx.state === 'unknown') {
       block(
         'all',
-        `could not read the MX records of ${domain} — unknown — run \`void email setup\``,
+        `could not read the MX records of ${domain} — unknown — run \`void email setup --backend cloudflare\``,
       );
     }
   }
@@ -840,7 +843,10 @@ export async function preflightEmail(inputs: EmailCloudflareInputs): Promise<Ema
       : parseRoutingRules(rulesResult.stdout);
   if (!rules) {
     pre.rules.state = 'unknown';
-    block('all', 'could not read Email Routing rules — unknown — run `void email setup`');
+    block(
+      'all',
+      'could not read Email Routing rules — unknown — run `void email setup --backend cloudflare`',
+    );
   } else {
     const workerToken = `worker:${inputs.workerName}`;
     for (const address of pre.derived.addresses) {
@@ -881,7 +887,10 @@ export async function preflightEmail(inputs: EmailCloudflareInputs): Promise<Ema
     pre.sending.state = 'unknown';
   }
   if (pre.sending.state === 'unknown') {
-    block('sending', 'could not read Email Sending settings — unknown — run `void email setup`');
+    block(
+      'sending',
+      'could not read Email Sending settings — unknown — run `void email setup --backend cloudflare`',
+    );
   } else if (pre.sending.state === 'pending' && pre.sending.dnsConflicts.length > 0) {
     block(
       'sending',
@@ -995,7 +1004,7 @@ export function renderEmailChecklist(pre: EmailPreflight): string {
     pre.routing.state === 'ready'
       ? 'enabled'
       : pre.routing.state === 'unknown'
-        ? 'unknown — run void email setup'
+        ? 'unknown — run void email setup --backend cloudflare'
         : `not enabled${pre.mode === 'apex' && pre.routing.status && pre.routing.status !== 'unconfigured' ? ` (${pre.routing.status})` : ''}`;
   const subWord =
     pre.subaddressing.state === 'on'
@@ -1006,7 +1015,7 @@ export function renderEmailChecklist(pre: EmailPreflight): string {
   row('routing', `${pre.domain}  ${routingWord} · ${subWord}`);
   row(
     'sending',
-    `${pre.domain}  ${pre.sending.state === 'ready' ? 'onboarded' : pre.sending.state === 'unknown' ? 'unknown — run void email setup' : 'not onboarded'}`,
+    `${pre.domain}  ${pre.sending.state === 'ready' ? 'onboarded' : pre.sending.state === 'unknown' ? 'unknown — run void email setup --backend cloudflare' : 'not onboarded'}`,
   );
   if (pre.derived.addresses.length === 0) {
     row('rules', '(none — no email/ handlers)');
@@ -1210,7 +1219,9 @@ export async function applyEmailSetup(
       lines.push(`  ✘ ${b.message}`);
     }
     if (blocked.length === 0) {
-      lines.push('  ✘ email: the zone could not be resolved — unknown — run `void email setup`');
+      lines.push(
+        '  ✘ email: the zone could not be resolved — unknown — run `void email setup --backend cloudflare`',
+      );
     }
     return result;
   }

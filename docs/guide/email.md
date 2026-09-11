@@ -36,7 +36,7 @@ hits first, because a recipient you have not verified yet fails per-recipient.
 
 ## Setup
 
-Zero config. Every Void project ships with:
+Zero config on the Void platform (`void deploy`). Every Void project ships with:
 
 - **Sender** — `<your-slug>+noreply@mail.void.cloud`. Used as the default `from` if you omit it. The platform owns the zone with Email Routing + DKIM + SPF + DMARC set up; you do nothing.
 - **No worker binding to add** — outbound mail is sent by the Void proxy, which holds the
@@ -44,9 +44,7 @@ Zero config. Every Void project ships with:
 
 That's it. `sendEmail({ to: '...', subject: '...', text: '...' })` works on first deploy.
 
-::: warning Not on `void deploy --backend cloudflare` yet
-Email is a platform feature today. On a deploy to your own Cloudflare account, `sendEmail` returns `BINDING_MISSING`, and `email/` handlers are not wired: the deploy succeeds, but no Email Routing rule points at your worker, and a handler's `setReject` / `forward` / `reply` actions are not applied even if you add a rule yourself. Email setup on your own account is a follow-up — planned as one prompt on the first deploy, driven by your `wrangler login` session. Until then, deploy with `void deploy`.
-:::
+Deploying to your own Cloudflare account instead (`void deploy --backend cloudflare`) takes one line of `void.json` and one Enter on the first deploy — see [Your own Cloudflare account](#your-own-cloudflare-account).
 
 ## Adding recipients
 
@@ -67,7 +65,7 @@ The project owner's email (the GitHub address you signed up with) is added autom
 ::: warning When this is the right fit
 The shared sender is great for: ops alerts to the team, notifications to the project owner, reply-by-email flows on top of inbound, internal/app-internal mail.
 
-For SaaS sending to arbitrary end-users (every signup gets a welcome email), the per-recipient verification model doesn't fit. Use [Resend](https://resend.com), [Postmark](https://postmarkapp.com), or [SES](https://aws.amazon.com/ses/) directly — install their SDK and call it from your handler. We may formalize this with a provider abstraction later if there is demand; until then, calling the SDK directly is simple enough that the wrapper would not earn its keep.
+For SaaS sending to arbitrary end-users (every signup gets a welcome email), the per-recipient verification model doesn't fit. On [your own Cloudflare account](#your-own-cloudflare-account) with Workers Paid, Void onboards your mail domain for Email Sending, which lifts the verified-recipient gate. Otherwise use [Resend](https://resend.com), [Postmark](https://postmarkapp.com), or [SES](https://aws.amazon.com/ses/) directly — install their SDK and call it from your handler. We may formalize this with a provider abstraction later if there is demand; until then, calling the SDK directly is simple enough that the wrapper would not earn its keep.
 :::
 
 ## Options
@@ -86,7 +84,9 @@ For SaaS sending to arbitrary end-users (every signup gets a welcome email), the
 
 `Address` accepts either a string (`"hello@acme.dev"` or `"Name <hello@acme.dev>"`) or an object (`{ email, name? }`). Display names with non-ASCII characters are RFC 2047 encoded automatically.
 
-The sender is pinned to your project. `from` must be your project's own platform address — `<project-slug>@mail.void.cloud` or `<project-slug>+<tag>@mail.void.cloud`, optionally with a display name (`Acme <acme+noreply@mail.void.cloud>`). Anything else is rejected with `INVALID_FROM`. Omit `from` and Void fills in `<project-slug>+noreply@mail.void.cloud` for you. Sending from your own domain is not supported yet.
+On the platform the sender is pinned to your project. `from` must be your project's own platform address — `<project-slug>@mail.void.cloud` or `<project-slug>+<tag>@mail.void.cloud`, optionally with a display name (`Acme <acme+noreply@mail.void.cloud>`). Anything else is rejected with `INVALID_FROM`. Omit `from` and Void fills in `<project-slug>+noreply@mail.void.cloud` for you. Sending from your own domain on the platform is not supported yet.
+
+On your own Cloudflare account, `from` defaults to `email.from` from `void.json` and must be on a domain your account can send from; Cloudflare rejects any other sender and `sendEmail` reports it as `INVALID_FROM`.
 
 ## Attachments
 
@@ -170,15 +170,15 @@ if (result.ok) {
 
 Error codes:
 
-| Code                     | Meaning                                                                                                            |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------------ |
-| `BINDING_MISSING`        | No email transport: a `--backend cloudflare` deploy, a Class B/C dev server, or the platform proxy is unavailable. |
-| `INVALID_FROM`           | `from` was missing, malformed, or not the project sender.                                                          |
-| `INVALID_TO`             | `to` was empty or contained an invalid address.                                                                    |
-| `UNVERIFIED_DESTINATION` | Cloudflare rejected the recipient as unverified.                                                                   |
-| `MIME_ERROR`             | Failed to build the MIME message (oversize attachments, malformed input).                                          |
-| `QUOTA_EXCEEDED`         | Platform quota for outbound email reached. Retry next billing period.                                              |
-| `UPSTREAM_ERROR`         | Other binding failure; the original error is attached as `error.cause`.                                            |
+| Code                     | Meaning                                                                                                                                                                        |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `BINDING_MISSING`        | No email transport: neither the worker's own `SEND_EMAIL` binding (an own-account deploy without `email.from`) nor the platform proxy is available, or a Class B/C dev server. |
+| `INVALID_FROM`           | `from` was missing, malformed, not the project sender (platform), or a sender Cloudflare would not accept (own account).                                                       |
+| `INVALID_TO`             | `to` was empty or contained an invalid address.                                                                                                                                |
+| `UNVERIFIED_DESTINATION` | Cloudflare rejected the recipient as unverified.                                                                                                                               |
+| `MIME_ERROR`             | Failed to build the MIME message (oversize attachments, malformed input).                                                                                                      |
+| `QUOTA_EXCEEDED`         | Platform quota for outbound email reached (retry next billing period), or Cloudflare's own rate or daily limit on your own account.                                            |
+| `UPSTREAM_ERROR`         | Other binding failure; the original error is attached as `error.cause`.                                                                                                        |
 
 Which branch carries the code depends on when the send failed.
 `BINDING_MISSING`, `INVALID_FROM`, `INVALID_TO` and `MIME_ERROR` are pre-flight,
@@ -347,6 +347,8 @@ never throws, while `replyEmail` throws when it cannot determine a sender.
 
 In production, inbound runs on one shared mail facility. The platform routes `<slug>+anything@<mail domain>` to your worker's `email()` export — **there is nothing to configure in the Cloudflare dashboard and no per-project DNS work**. Your handlers are live as soon as the deploy lands.
 
+On your own Cloudflare account there is no shared facility: the deploy derives one Email Routing rule per handler and writes it into `wrangler.jsonc` for you — see [Your own Cloudflare account](#your-own-cloudflare-account).
+
 There is no local inbound trigger yet — `void dev` serves the outbound dev inbox only, so test inbound handlers with `createInboundTestHarness` below.
 
 ### Testing inbound handlers
@@ -359,7 +361,11 @@ The harness strips the `<slug>+` prefix before matching, exactly as the
 generated dispatcher does, so `acme+support+abc-123@acme.dev` is what matches
 `email/support+[ticket].ts`. Pass the user-facing `support+abc-123@acme.dev`
 and the harness reads `support` as the slug, leaving `abc-123` to match — which
-falls through to `_default`.
+falls through to `_default`. A worker on your own Cloudflare account receives
+no slug and matches the full local part, but the harness still reads the label
+before the first `+` as one, so exercise `support+abc-123@mail.acme.com` through
+it as `<anything>+support+abc-123@mail.acme.com`; a plain `support@mail.acme.com`
+has no `+` and needs no prefix.
 
 ```ts
 import { describe, it, expect } from 'vitest';
@@ -396,3 +402,153 @@ describe('email handlers', () => {
 ```
 
 The harness uses the same precedence rules as the production dispatcher. Reserved key `_default` mirrors `email/_default.ts`.
+
+## Your own Cloudflare account
+
+`void deploy --backend cloudflare` sets email up on a zone **you** own, through your `wrangler login` session. You never handle a Cloudflare object — no zone id, no routing rule, no token scope. You type one address, read one checklist, and press Enter once.
+
+### Two things to type, once
+
+1. **`email.from` in `void.json`** — the default sender, and the domain Void sets up:
+
+   ```json
+   {
+     "email": {
+       "from": "Acme <support@mail.acme.com>"
+     }
+   }
+   ```
+
+   The host (`mail.acme.com`) must be a zone in the Cloudflare account your deploy is pinned to, or sit under one. Without `email.from`, a deploy that uses email prints `add "email": { "from": "you@mail.acme.com" } to void.json` and deploys without it. Void does not pick a zone for you — wrangler cannot list them — and it never writes `void.json`.
+
+2. **`wrangler login`** on wrangler 4.81 or newer. A session from an older wrangler lacks the two email scopes; the deploy tells you to log in again (one browser Allow) and skips the email step.
+
+### The first deploy
+
+Before any of your project code runs, the deploy **reads** — the session, the zone, public DNS (MX on the mail domain and on the apex, `_dmarc`, `cf-bounce`), Email Routing status, the zone's subaddressing setting, the routing rules on your addresses, Email Sending, and what `wrangler.jsonc` already holds — and prints what it found and what it would change:
+
+```
+  Email in use   email/support+[ticket].ts · email/_default.ts · sendEmail() in 2 files
+    domain    mail.acme.com          (void.json email.from)
+    zone      acme.com               account Acme (f721b8e5…) · session dev@acme.com
+    apex MX   aspmx.l.google.com     left alone — mail lives on the subdomain
+    routing   mail.acme.com  not enabled · subaddressing off
+    sending   mail.acme.com  not onboarded
+    rules     support@mail.acme.com → acme-support   (absent)
+    binding   SEND_EMAIL             (absent)
+
+  This changes YOUR Cloudflare account. acme.com itself is not touched.
+    + enable Email Routing on mail.acme.com       Cloudflare writes and locks 3 MX + 1 SPF record there
+    + turn on subaddressing for acme.com          support+anything@ reaches support@
+    + onboard mail.acme.com for Email Sending     MX/SPF/DKIM on cf-bounce.mail.acme.com, _dmarc.mail.acme.com (p=reject)
+    + wrangler.jsonc                              send_email: [{ name: "SEND_EMAIL" }], addresses: ["support@mail.acme.com"]
+    + routing rule (applied by wrangler deploy)   support@mail.acme.com → acme-support
+    ! email/_default.ts                           a catch-all exists only on an apex; other @mail.acme.com mail bounces
+
+◆  Set up email on mail.acme.com?  ● Yes / ○ No
+```
+
+Enter (Yes is the default) applies only the `+` rows that are not ready, then the deploy continues as usual: the build, `wrangler deploy` — which creates the routing rules from the `addresses` array wrangler now finds in your config and prints its own `Email Routing plan:` — and finally the address map:
+
+```
+  ✔ deployed  acme-support
+    inbound   support@mail.acme.com  →  email/support+[ticket].ts
+    outbound  sendEmail() from support@mail.acme.com
+```
+
+On the second deploy every row reads ready: no prompt, no writes, and wrangler reports `Email Routing rules are up to date.` Answer No, and the deploy continues without email.
+
+### Subdomain or apex
+
+Put mail on a **subdomain** (`mail.acme.com`) unless you have a reason not to. Cloudflare writes its MX and SPF records there and locks them; `acme.com` itself is not touched, so mail you already receive on the apex keeps flowing. The one rule Void enforces: **it never enables routing over live mail.** If the mail domain already has MX records that are not Cloudflare's, the email step stops:
+
+```
+acme.com already receives mail (aspmx.l.google.com). Void never enables routing over live mail. Use something@mail.acme.com.
+```
+
+The apex path (`email.from` on `acme.com` itself) is allowed with the same one Enter when the apex receives no mail yet (no MX records, or only Cloudflare's own). It is the only path with a catch-all — see the derivation table below.
+
+**Subaddressing** is a per-zone Cloudflare setting, and it is off by default. Until it is on, a rule for `support@mail.acme.com` does not match `support+T-42@mail.acme.com`. The checklist's `turn on subaddressing for acme.com` row flips it for the whole zone — on the apex and every subdomain — so `email/support+[ticket].ts` works the way it does on the platform.
+
+### What Void writes into `wrangler.jsonc`
+
+```jsonc
+{
+  "send_email": [{ "name": "SEND_EMAIL" }],
+  "vars": { "__VOID_EMAIL_FROM": "Acme <support@mail.acme.com>" },
+  "addresses": ["support@mail.acme.com"],
+}
+```
+
+- **`send_email`** — the binding `sendEmail()` delivers through, one `EmailMessage` per recipient. It is written once routing is enabled or sending is onboarded, never on a bare account. An existing `send_email` entry under another name is refused with the rename — a second binding would be silent.
+- **`__VOID_EMAIL_FROM`** — your `email.from`, so the worker knows its default sender.
+- **`addresses`** — derived from your `email/` directory. `wrangler deploy` turns each entry into an Email Routing rule pointing at this worker (a literal address → this worker; `*@acme.com` → the zone's catch-all). Rules and the catch-all are wrangler's job; Void only derives the list.
+
+**Void owns the `addresses` array.** It is rewritten on every deploy from the current `email/` scan, and deleted — never emptied to `[]`, which would remove every rule wrangler owns — when a later preflight finds routing not ready, with the reason printed. Two consequences:
+
+- An address already routed to another worker or to a forwarding rule is **pruned** from the array and reported (`! support@mail.acme.com  already routed to …; left alone, not in addresses`). wrangler's plan is never destructive on your account because of something Void derived.
+- If the array holds entries Void did not derive, the deploy prints which ones and **skips the email step for that deploy** — the deploy itself continues and the array is left untouched. Remove them, or manage `addresses` by hand and leave `email.from` unset.
+
+Deleting a handler removes its rule from the plan on the next deploy; that deletion is wrangler's own y/n (default No) in a terminal, and an error in CI.
+
+How handlers become addresses, with `email.from` on `mail.acme.com` under the zone `acme.com`:
+
+| Handler                                                         | Address on a subdomain                               | Address on the apex          |
+| --------------------------------------------------------------- | ---------------------------------------------------- | ---------------------------- |
+| `email/support.ts`, `email/support+[ticket].ts`                 | `support@mail.acme.com`                              | `support@acme.com`           |
+| `email/_default.ts`                                             | **none** — a catch-all exists only on an apex        | `*@acme.com` (the catch-all) |
+| `email/[user].ts`, `email/[user]+[tag].ts` (dynamic local part) | **refused** — a dynamic local part needs a catch-all | `*@acme.com` (the catch-all) |
+
+On a subdomain, `email/_default.ts` gets no rule and never runs: mail to any other `@mail.acme.com` address bounces at Cloudflare. The checklist says so in a `!` row, and the handler is absent from the address map.
+
+Inside the worker, a message reaches your handlers exactly as addressed — `support+T-42@mail.acme.com` matches `email/support+[ticket].ts` with `info.params.ticket === "T-42"` — and `setReject`, `forward` and `replyEmail` act on the real message. `replyEmail` defaults `from` to `message.to`, the address on your zone the mail was delivered to.
+
+### Sending
+
+`sendEmail()` uses the worker's own `SEND_EMAIL` binding; there is no proxy hop and no platform quota — Cloudflare's own limits apply, reported as `QUOTA_EXCEEDED`. The `void email usage`, `logs`, `destinations`, `allow` and `disallow` commands are platform commands and do not apply here.
+
+Who you can send to depends on your Workers plan. Onboarding the mail domain for Email Sending is what allows **arbitrary recipients**, and it needs **Workers Paid** — billing is dashboard-only, so Void cannot do that for you. On Workers Free the onboarding row fails and the deploy prints:
+
+```
+Workers Paid needed for arbitrary recipients. Inbound works; sendEmail() to verified destinations only.
+```
+
+Everything else — routing, rules, the binding — still goes through, and the address map ends with `outbound  sendEmail() from support@mail.acme.com   (verified destinations only)`. Verified destinations are the addresses under **Email Routing → Destination addresses** in your Cloudflare dashboard; a handler that `forward()`s to a new address needs the same verification click.
+
+If `_dmarc.mail.acme.com` or `cf-bounce.mail.acme.com` already has a TXT record, sending onboarding is refused — it writes its own `_dmarc` (`p=reject`) and DKIM records and Cloudflare would answer with a conflict. Inbound is unaffected; remove the records or keep sending off.
+
+### CI
+
+The email prompt follows wrangler's own interactivity rule: a CI environment as wrangler detects it, or stdin or stdout not a terminal, means non-interactive. A non-interactive deploy that finds something not ready prints the checklist and
+
+```
+deploy: email on mail.acme.com is not set up, and this shell cannot ask.
+Run `void email setup --backend cloudflare` once locally, commit wrangler.jsonc, then redeploy — deploying without email.
+```
+
+then deploys **without** email. Pass `--require-email` to fail instead. `--provision` is not an escape hatch; it fails closed in CI too. To read the rows without deploying or being asked anything, run `void email status --backend cloudflare`.
+
+So the CI story is: run `void email setup --backend cloudflare` once on your machine (it runs the same preflight, checklist and prompt as the first deploy, then writes `wrangler.jsonc`, without deploying), commit `wrangler.jsonc`, and let CI run `void deploy --backend cloudflare --require-email`. With the binding and `addresses` committed, every row reads ready and nothing is asked.
+
+### If the subdomain step is refused
+
+Enabling routing on a subdomain and switching subaddressing on have no wrangler command, and neither does reading the subaddressing flag or telling a zone in another account from one not on Cloudflare. For those calls Void borrows your session's bearer through `wrangler auth token --json`, uses it inside one function, and drops it — nothing is stored, refreshed or written to disk (the child runs with `WRANGLER_WRITE_LOGS=false`, because wrangler would otherwise log the token). Every other read and write goes through Void's own pinned wrangler.
+
+When either call is refused, or the token cannot be read, the deploy does not fail. It prints what Cloudflare answered and the one-time dashboard step:
+
+```
+✘ routing   mail.acme.com: Cloudflare answered 403 …
+  Cloudflare dashboard → your zone → Email → Settings → Subdomains → add the subdomain, then redeploy
+```
+
+and **withholds `addresses` for that run** — no routing rule is created, so nothing points at a worker on a subdomain that does not yet receive mail. Do the dashboard step once and redeploy; the routing row then reads ready and `addresses` is written.
+
+### What stays manual
+
+1. One Enter on the first deploy — it changes your account and locks DNS records.
+2. `wrangler login` once, on wrangler 4.81 or newer.
+3. `email.from` typed once.
+4. Workers Paid, if you need `sendEmail()` to arbitrary recipients.
+5. A verification click when a handler `forward()`s to a new destination.
+6. The Subdomains form in the dashboard, only if the subdomain step above is refused.
+7. A y/n when a deploy would delete a routing rule — wrangler's own semantics.

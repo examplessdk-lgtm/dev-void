@@ -3666,14 +3666,14 @@ async function runCloudflareEmailStep(
     log.warn(
       [
         `deploy: email on ${pre.domain} is not set up, and this shell cannot ask.`,
-        'Run `void email setup` once locally, commit wrangler.jsonc, then redeploy — deploying without email.',
+        'Run `void email setup --backend cloudflare` once locally, commit wrangler.jsonc, then redeploy — deploying without email.',
       ].join('\n'),
     );
     return without;
   }
   if (!(await input.confirm(`Set up email on ${pre.domain}?`))) {
     log.warn(
-      'deploy: email setup skipped — run `void email setup` later. Deploying without email.',
+      'deploy: email setup skipped — run `void email setup --backend cloudflare` later. Deploying without email.',
     );
     return without;
   }
