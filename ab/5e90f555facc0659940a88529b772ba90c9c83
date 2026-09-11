@@ -1,0 +1,33 @@
+packages/void/test/unit/provision-lock-durability.test.ts
+  s_5a06e7c4c4ad3d::t_e3794d01dee45e 1-3
+packages/void/test/unit/provision-lock-recovery.test.ts
+  s_5a06e7c4c4ad3d::t_bbf8fc02ca141d 1-3
+packages/void/test/unit/provision-locking.test.ts
+  s_5a06e7c4c4ad3d::t_5ca47861282da2 1-3
+packages/void/test/unit/provision-resources.test.ts
+  s_5a06e7c4c4ad3d::t_d190a348135b4e 1-3
+packages/void/test/unit/provision-runner-signals.test.ts
+  s_5a06e7c4c4ad3d::t_8db753660d9e1f 1-3
+packages/void/test/unit/provision-runner-timeouts.test.ts
+  s_5a06e7c4c4ad3d::t_10641046a11614 1-3
+packages/void/test/unit/provision-test-shard.ts
+  s_5a06e7c4c4ad3d::t_da01b039571777 1-24
+packages/void/test/unit/provision.cases.ts
+  s_5a06e7c4c4ad3d::t_c08ef99afab419 22,38-73,81
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "ab5e90f555facc0659940a88529b772ba90c9c83",
+  "prompts": {},
+  "sessions": {
+    "s_5a06e7c4c4ad3d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08e6e-3b48-7183-ac5e-670cd59a2ddc",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
