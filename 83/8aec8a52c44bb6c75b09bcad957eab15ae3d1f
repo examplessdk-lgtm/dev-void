@@ -1,0 +1,21 @@
+packages/void/src/plugin-drizzle.ts
+  s_21e37aad7ca081::t_535a60e945eaae 149-153
+packages/void/test/unit/plugin-drizzle.test.ts
+  s_21e37aad7ca081::t_e023899ffc6b0f 83-96
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "838aec8a52c44bb6c75b09bcad957eab15ae3d1f",
+  "prompts": {},
+  "sessions": {
+    "s_21e37aad7ca081": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08f34-5783-7541-af26-16a1cb0340d6",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
