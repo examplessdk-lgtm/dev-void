@@ -1374,6 +1374,63 @@ What this does not do, so nobody expects it:
   wrangler command, and wrangler 4.130 keeps the OAuth token in an encrypted
   `default.enc` that other CLIs cannot read.
 
+### If Void had a Cloudflare OAuth client
+
+_(added 2026-09-11)_ "A Cloudflare app" can mean four things. One of them
+removes the token step entirely; Void cannot self-serve it.
+
+| What                                        | What it is                                                                 | Can Void get it?                                        | Helps here?                                                |
+| ------------------------------------------- | -------------------------------------------------------------------------- | ------------------------------------------------------- | ---------------------------------------------------------- |
+| Cloudflare Apps marketplace                 | JS widgets injected into sites; installs ended 2024-01, sunset 2024-08-31  | no — gone                                               | no                                                         |
+| **OAuth client** (what `wrangler login` is) | the customer clicks **Allow**; Void receives an access + refresh token     | not self-service; a partner arrangement with Cloudflare | **yes** — the token step becomes one click                 |
+| Tenant API                                  | Channel/Alliance partners create and own Cloudflare accounts for customers | partner agreement                                       | only for accounts Void creates — not a customer's own zone |
+| Access / OIDC                               | identity for humans                                                        | yes                                                     | no — not API access                                        |
+
+With the client, the grant collapses to this, and every step after "stored"
+is unchanged:
+
+```
+$ void email domain add acme.com
+  Cloudflare  opening the consent page…   [Allow]   (one click; pick the account if you have several)
+              ◀ access token + refresh token · scopes zone:read · email_routing:write · email_sending:write
+  Stored      refresh token encrypted for this project · the platform refreshes it; nothing on this machine
+  Zone        acme.com found in account …f721
+  …
+```
+
+The web variant is better still: a **Connect Cloudflare** button in the
+dashboard's Email section, with the callback on `api.void.cloud`, so the
+grant never passes through the developer's machine at all. The CLI variant
+uses a `localhost` callback, as wrangler does (`http://localhost:8976/oauth/callback`).
+
+What it costs, so the owner can weigh the ask:
+
+- **Breadth.** An OAuth grant is user-wide — every account the user belongs
+  to, every zone in them, for the granted scopes. `wrangler whoami` shows
+  this today. A template-link token can be narrowed to one zone; a grant
+  cannot. Keep the token path as the narrow option for a company with many
+  zones; OAuth is the default for everyone else.
+- **Refresh.** The access token is short-lived; the platform stores the
+  refresh token (`encryptProjectSecret`, same envelope) and refreshes at
+  `POST /oauth2/token`. A revoked grant is the existing `token_revoked`
+  path. `POST /oauth2/revoke` on `remove`.
+- **Scopes exist already.** Cloudflare's consent catalogue has
+  `email_routing:write` ("settings, rules, and destination addresses"),
+  `email_sending:write` and `zone:read` — they are what wrangler asks for.
+  Nothing new has to be built on Cloudflare's side except the client.
+
+Why not reuse wrangler's client id: the OAuth endpoints are public and the
+client is a public PKCE client, so it works, and PartyKit (before its
+acquisition), `every-app` (2026-08), `orangeshell`, `corral`, `BPB-Wizard`
+and others do exactly that. The consent screen is Cloudflare's for wrangler,
+the scope set is wrangler's, and Cloudflare can cut it off any day. Not a
+basis for a product. NuxtHub, Orange, Prowler and erxes chose the template
+link instead — the same choice as this document until the client exists.
+
+The ask, in one line: an OAuth client for Void with scopes `zone:read`,
+`email_routing:write`, `email_sending:write` and two redirect URIs —
+`https://api.void.cloud/cloudflare/callback` and `http://localhost:<port>/oauth/callback`.
+
 The same link and paste field belong in the dashboard's Email section
 (Mode A) as a **Create token at Cloudflare** button next to a paste box;
 the CLI and the dashboard share the link builder. The account-token form
@@ -1598,8 +1655,10 @@ owner's.
    version).
 8. **Ask Cloudflare for an OAuth client** (the mechanism behind
    `wrangler login`), so a custom domain is one **Allow** click with no
-   token to paste. Not self-service; a partner ask. Recommended to ask,
-   not to wait — the three-click template link ships first either way.
+   token to paste — see [If Void had a Cloudflare OAuth client](#if-void-had-a-cloudflare-oauth-client).
+   Not self-service; a partner ask. Recommended to ask, not to wait — the
+   three-click template link ships first either way, and stays as the
+   narrow-scope option.
 
 ## Open questions
 
@@ -1743,7 +1802,15 @@ Evidence for the 2026-09-11 sections (framework paths under
   Paste-back pattern: `orange-framework/orange-js` `packages/cli/src/cf-auth.ts`,
   `cloudflare/deploy.workers.cloudflare.com` `configure-account.js`.
   Email Sending REST errors: `email-service/api/send-emails/rest-api/`
-  (`10103 bad_token_type`). `GET /user/tokens/permission_groups` needs
+  (`10103 bad_token_type`). OAuth: wrangler 4.125 `wrangler-dist/cli.js`
+  (client `54d11594-…`, `dash.cloudflare.com/oauth2/{auth,token,revoke}`,
+  redirect `localhost:8976/oauth/callback`, scope catalogue incl.
+  `email_routing:write`, `email_sending:write`); third-party reuse found by
+  code search for that client id (`partykit/partykit`
+  `cf-auth/auth-variables.ts`, `every-app/every-app`
+  `cli/src/lib/cloudflare/auth.ts`); Cloudflare Apps discontinuation notice
+  (2024-08-31); Tenant docs `tenant/get-started/` ("after you sign your
+  partner agreement"). `GET /user/tokens/permission_groups` needs
   `API Tokens: Read`; none of our stored tokens has it, so the dump stands in.
 - Compatibility date: workerd 1.20260701.1 via Miniflare; a
   `WorkerEntrypoint` subclass returns 200 at `2021-11-03` and `2024-01-01`
