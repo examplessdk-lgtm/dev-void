@@ -1,0 +1,33 @@
+packages/deploy-cloudflare/src/static.ts
+  s_0add8c35799930::t_ce6be580cf7152 17,28
+packages/deploy-cloudflare/test/unit/static.test.ts
+  s_0add8c35799930::t_310a784121de98 18
+packages/void/package.json
+  s_0add8c35799930::t_2b79a5c591a7e5 59-63,355
+packages/void/src/cli/deploy.ts
+  s_0add8c35799930::t_a24bd2c103bbe7 26,28,2317-2318,3674-3679,4823-4987,4997-4998
+packages/void/src/edge.ts
+  s_0add8c35799930::t_b7fa050ddc3db8 1-7
+packages/void/test/unit/cloudflare-deploy.test.ts
+  s_0add8c35799930::t_a8beb7d5b09a36 19,1203-1204,1208-1209,1211-1230,1233,1237,1240-1251,1268,1272-1273,1277-1283
+packages/void/vite.config.ts
+  s_0add8c35799930::t_79f4c5f5d5ba16 74
+pnpm-lock.yaml
+  s_0add8c35799930::t_39bf812fc6dc75 509-511
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "68944b0c38e27213ef5838227791ecfa41ef6709",
+  "prompts": {},
+  "sessions": {
+    "s_0add8c35799930": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0903e-9700-76f0-a4db-b5c9ea737ea9",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
