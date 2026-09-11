@@ -1163,8 +1163,10 @@ $ void email domain add acme.com
             https://dash.cloudflare.com/profile/api-tokens?permissionGroupKeys=…&name=Void%20email%20%E2%80%94%20acme.com
             in the browser: Continue to summary → Create Token → Copy
             (a TTL is fine — the platform reports when it expires)
-  Paste     ▸ ●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●
+  Clipboard watching for the token — or press Enter to paste it instead
+            got it · clipboard cleared
   Verify    token active · zone acme.com found in account …f721 · scopes ok
+  Stored    on the platform, encrypted for this project · nothing kept on this machine
   Routing   mail.acme.com is not on Email Routing yet
             → add it: Email Routing → acme.com → Settings → Subdomains  (dashboard only)
   Sending   mail.acme.com onboarded — cf-bounce MX, SPF, DKIM, DMARC added
@@ -1215,23 +1217,63 @@ do, so it is the step to make short. Cloudflare's dashboard accepts a
 [template URL](https://developers.cloudflare.com/fundamentals/api/how-to/account-owned-token-template/)
 that pre-fills the token form — name, permission groups, resources. The CLI
 opens it; the customer clicks **Continue to summary**, **Create Token**,
-**Copy**, and pastes into the masked prompt. Three clicks and one paste
-(plus a login if the browser has none). This is the pattern Cloudflare's own
-`deploy.workers.cloudflare.com` and several third-party CLIs already use.
+**Copy** — and the CLI takes the token from the clipboard. Three clicks,
+nothing typed (plus a login if the browser has none). The link is the
+pattern Cloudflare's own `deploy.workers.cloudflare.com` and several
+third-party CLIs already use; those CLIs stop at a paste prompt, which stays
+here as the fallback.
 
 ```
 CLI                                   browser                       CLI
  │ MX check over public DNS            │                              │
  │ → apex or subdomain decided         │                              │
  │ build the link (scopes fit the path)│                              │
+ │ snapshot the clipboard              │                              │
  │ open ─────────────────────────────▶ │ form is pre-filled           │
- │                                     │ 1 Continue to summary        │
+ │ watch the clipboard (≤ 10 min)      │ 1 Continue to summary        │
  │                                     │ 2 Create Token               │
- │                                     │ 3 Copy                       │
- │ ◀──────────────────────────── paste │                              │
- │ GET /user/tokens/verify · GET /zones?name=acme.com · scope check   │
- │ store with encryptProjectSecret · continue with Zone / Routing …   │
+ │ ◀──────────────────────── clipboard │ 3 Copy                       │
+ │ shape ok → GET /user/tokens/verify → clear the clipboard           │
+ │ GET /zones?name=acme.com · scope check                             │
+ │ send over TLS → platform stores with encryptProjectSecret          │
+ │ drop it from memory · continue with Zone / Routing …               │
 ```
+
+**The clipboard watch.** The write side already exists — `void auth token`
+runs `pbcopy` / `clip` / `xclip -selection clipboard`
+(`cli/auth-cmd.ts:38-51`); the read side is the mirror: `pbpaste`,
+`powershell -NoProfile -Command Get-Clipboard`, `xclip -o -selection
+clipboard` or `wl-paste`. The rules that keep it from being creepy:
+
+- The CLI reads only between opening the link and getting a token, never
+  otherwise, and says so on screen.
+- It ignores whatever was on the clipboard before the link opened
+  (the snapshot), and accepts only a _new_ value shaped like a Cloudflare
+  token: 40 characters of `[A-Za-z0-9_-]`, no vendor prefix (`ghp_`,
+  `github_pat_`, `sk-`, `xox` are the same length or longer and are refused
+  without a network call). Only a value that passes the shape check is sent
+  to `GET /user/tokens/verify`, and only `status: active` is accepted.
+- It clears the clipboard once it has the token (`pbcopy </dev/null` and
+  the platform equivalents), so the token does not sit there for the next
+  paste. A clipboard manager's history is outside our reach; the CLI says
+  so once.
+- Enter at any time switches to the masked paste prompt; no clipboard tool
+  (SSH, CI, a Wayland session without `wl-paste`) falls back to it
+  silently. Nothing on the clipboard is ever printed or logged.
+
+**Where the token lives.** On the platform, encrypted per project with
+`encryptProjectSecret` — the proxy sends with it at runtime and the api
+re-probes with it, so that copy is the one that must exist. On the
+developer's machine: nowhere. The CLI holds it in memory, hands it to the
+platform over TLS as its first call, and drops it; every later step
+(`status`, `remove`, repair) goes through the platform. The CLI already
+keeps its own login in the OS keychain (`@napi-rs/keyring`, service
+`dev.void.cli`, `cli/auth.ts:13`), so a local keychain copy is one line —
+but nothing on the machine would ever read it, and a second copy is a
+second place to leak from. Not stored. The one thing the platform copy
+does not solve is a **TTL** the customer set on the form: sends stop when it
+expires, `status` reads `token expired`, and `void email domain add` again
+is the renewal.
 
 The link:
 
@@ -1341,6 +1383,8 @@ already covers it.
    account-owned token, or only a user-owned one (`10103 bad_token_type`).
 7. Whether `zoneId=<zone id>` in the template URL narrows the form to that
    zone, or only `all` is honoured.
+8. Whether the dashboard's **Copy** button places the bare token on the
+   clipboard (no label, no trailing newline) on macOS, Windows and Linux.
 
 ## Backwards Compat
 
@@ -1524,7 +1568,7 @@ _(added 2026-09-11)_ Only a live probe settles these.
   the path Mode B uses.
 - Whether `mail.staging.void.cloud`, two labels deep, is accepted by the
   subdomain form. The docs show one-label examples only.
-- The seven custom-domain probes listed under
+- The eight custom-domain probes listed under
   [Probes before building](#probes-before-building).
 
 ## Future Work
