@@ -1,0 +1,10 @@
+
+ ⛅️ wrangler 4.131.0
+────────────────────
+Email Sending for void.cloud:
+  Enabled:            true
+  Tag:                19af4fdbee924a92916afea0de5a8fdd
+  Created:            2026-03-30T16:39:39.300911Z
+  Modified:           2026-03-30T16:39:39.300911Z
+  DKIM selector:      cf-bounce
+  Return-path domain: cf-bounce.void.cloud

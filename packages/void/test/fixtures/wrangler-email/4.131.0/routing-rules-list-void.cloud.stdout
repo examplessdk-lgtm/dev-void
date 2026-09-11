@@ -1,0 +1,7 @@
+
+ ⛅️ wrangler 4.131.0
+────────────────────
+No custom routing rules found.
+
+Catch-all rule: disabled, action: drop
+  (use `wrangler email routing rules get catch-all` to view details)
