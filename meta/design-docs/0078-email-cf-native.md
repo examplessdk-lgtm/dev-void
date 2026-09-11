@@ -1,5 +1,5 @@
 ---
-title: Email — CF-Native (outbound, inbound, shared sender)
+title: Email — CF-Native (outbound, inbound, shared sender, lifecycle and UX)
 status: draft
 created: 2026-04-24
 updated: 2026-09-11
@@ -112,10 +112,13 @@ supersedes: 0047-email.md
 
 # Email — CF-Native (outbound, inbound, shared sender)
 
-> **2026-09-11.** The lifecycle and UX across the three hosting modes — the
-> managed platform, `void deploy --backend cloudflare`, and a self-hosted
-> platform — are in [0079](./0079-email-lifecycle-and-ux.md). It also lists
-> the statements below that later evidence corrected; each is marked inline.
+> **2026-09-11 extension.** Sections [Hosting modes and
+> lifecycle](#hosting-modes-and-lifecycle), [Open decisions](#open-decisions)
+> and [Open questions](#open-questions) were added from evidence gathered on
+> 2026-09-10 and 2026-09-11, after the re-land. Claims elsewhere that the
+> evidence contradicted were rewritten in place; each carries a _(corrected
+> 2026-09-11)_ mark. Claims marked _(measured)_ were verified by reading
+> source or by execution — pointers are in [References](#references).
 
 ## Context
 
@@ -162,28 +165,32 @@ Single rollout covering outbound, inbound, and the platform infrastructure that 
 - **Provider abstraction (Resend / SES / Postmark) wrapper.** Users can call those SDKs directly today; the wrapper would not earn its keep without concrete demand. See [Future work](#future-work) for the trigger conditions.
 - **Templating** (React Email / Vue components / MJML).
 - **Typed verified-sender codegen.**
-- **User-facing dashboard pages.** Dashboard work is currently deferred per `CLAUDE.md`; the admin UI covers operational observability. User-facing pages land when dashboard work resumes.
+- **User-facing dashboard pages** — _(corrected 2026-09-11)_ one small Email section on the project page is in scope; see [Mode A — developer surfaces](#developer-surfaces). Broader dashboard work stays deferred per `CLAUDE.md`.
 - **Bounce handling.** CF doesn't deliver bounces to Email Workers; needs VERP or provider-side webhooks.
 - **Cost-passthrough billing for outbound.** CF email is free at our volumes.
-- **Programmatic Email Routing _rule_ creation.** The shared `mail.void.cloud` catch-all is a one-time setup; per-project routing rules aren't needed.
+- **Programmatic Email Routing _rule_ creation on the managed platform.** The shared catch-all is a one-time setup; per-project routing rules aren't needed there. _(corrected 2026-09-11)_ Rule creation IS the plan for `void deploy --backend cloudflare`, where the developer owns the zone — see [Mode B](#mode-b--the-developers-own-cloudflare-account).
 
 ## Cloudflare's Constraints (Be Honest)
 
-> **Corrected 2026-09-11.** Two claims below predate Cloudflare's Email
-> Sending onboarding. Onboarding the mail domain lets the binding send to
-> any recipient; without it the constraint that remains is 200 verified
-> destinations per account, shared across every domain. And routing enable
-> adds MX, SPF and DKIM only — DMARC comes from Email Sending onboarding.
-> See 0079, "Verified destinations and Email Sending".
+_(corrected 2026-09-11 — the original predated Email Sending onboarding.)_
 
-The `send_email` binding is **not a general transactional-email sender**:
+The `send_email` binding has two regimes, and which one an account is in
+decides who it can reach:
 
-- **From-domain:** must be a zone the user owns, with Email Routing enabled. DKIM/SPF/DMARC are set up automatically when Email Routing is enabled.
-- **To-address restrictions:**
-  - `destination_address: "x@example.com"` — can only send to that one verified address
-  - `allowed_destination_addresses: [...]` — can only send to those verified addresses
-  - **Neither set** — can send to any address that has been verified as a destination in the sender's Email Routing account, or to addresses on domains that accept mail via CF Email Routing. You cannot yet spray arbitrary transactional mail to cold recipients the way Resend/SES allows.
-- **Practical implication:** CF-native outbound fits "app-internal" use cases well (notifications to the account owner, ops alerts, forms piped to a verified inbox, reply-by-email flows on top of inbound). It does **not** yet fit "SaaS sending receipts to every end-user" without additional work — that's the future-work provider abstraction.
+|                  | Email Routing only                                                          | + mail domain onboarded to **Email Sending** |
+| ---------------- | --------------------------------------------------------------------------- | -------------------------------------------- |
+| sender           | any address on a routing domain the account owns                            | same                                         |
+| who can receive  | **verified destination addresses only**                                     | anyone                                       |
+| account ceiling  | **200 verified destinations, shared across every domain and every project** | none                                         |
+| DNS added        | MX + SPF + DKIM, added and locked on enable                                 | `cf-bounce` MX, SPF, DKIM, DMARC             |
+| plan             | Workers Free or Paid                                                        | Workers Paid                                 |
+| our consent gate | allowlist + HMAC link                                                       | unchanged                                    |
+
+- **From-domain:** must be a zone on Cloudflare DNS that the account owns, with Email Routing enabled. A subdomain of an existing zone (`mail.example.com`) is allowed for both routing and sending. There is no email without a zone — `workers.dev` alone cannot send or receive.
+- **Binding restrictions:** `destination_address` pins one recipient; `allowed_destination_addresses` pins a list; `allowed_sender_addresses` pins the from side. With none set, the binding reaches whatever the regime above allows.
+- **The 200-destination cap is the real constraint.** It is per account, not per domain or per project, so on a shared platform it is a ceiling on the whole platform's distinct recipients until the mail domain is onboarded to Email Sending. Onboarding lifts Cloudflare's gate; per-project consent stays in our own allowlist, which is a product rule rather than a Cloudflare one.
+- **Two operational quirks:** outbound sent through the binding shows as _dropped_ in the Email Routing summary even when delivered (read Email Sending metrics or the proxy tail), and `message.reply()` throws when the inbound message carries more than 100 `References` entries.
+- **Practical implication:** without onboarding, CF-native outbound fits app-internal use (notifications to the owner, ops alerts, forms piped to a verified inbox, reply-by-email on top of inbound). With onboarding it reaches end users too; reputation is still pooled on the shared domain, which is what the provider abstraction in [Future Work](#future-work) is for.
 
 ## DX Papercuts → What Void Fixes
 
@@ -309,7 +316,7 @@ Retry rule: on `deliveries`, retry only recipients with `ok: false`. On pre-flig
 
 #### Default sender resolution
 
-When `from` is omitted, the framework reads `env.VOID_PROJECT_SLUG` (injected at deploy by the platform) and substitutes `<slug>+noreply@mail.void.cloud`. Explicit `from` values pass through unchanged. If the slug isn't injected (local dev without the platform, tests), the call returns `INVALID_FROM` with a clear message.
+When `from` is omitted, the framework reads `env.__VOID_PROJECT_SLUG` and `env.__VOID_EMAIL_DOMAIN` (both injected at deploy by the platform) and substitutes `<slug>+noreply@<domain>`. Explicit `from` values pass through unchanged. If either binding is absent, the call returns `INVALID_FROM` with a clear message — and _(measured 2026-09-11)_ that is what happens under `void dev` today, because neither binding is injected there; see [Known gaps](#known-gaps).
 
 #### Binding inference
 
@@ -331,7 +338,7 @@ binding (see `packages/proxy/wrangler.jsonc`).
 
 #### MIME construction
 
-Uses [`mimetext`](https://www.npmjs.com/package/mimetext) — small, edge-friendly, popular in the CF Email Workers ecosystem. Wrapped internally in `runtime/email/mime.ts` so we can swap later without breaking the public API. Attachment totals are pre-checked against CF's ~10MB base64-inflated cap; oversize payloads surface as `MIME_ERROR` with measured-vs-allowed bytes rather than a generic upstream failure.
+_(corrected 2026-09-11)_ The re-land ships its own builder in `runtime/email/mime.ts` — `buildMime`, `encodeWord`, `foldHeader` — rather than `mimetext`, because six review rounds ended with rules no small library exposes: RFC 5322 §2.1.1's 998-octet line limit enforced on every rendered line, address lists folded at commas, RFC 2047 words chunked by code point, quoted parameters escaped, and a rejection rather than an illegal encoding when a value cannot be folded. Attachment totals are pre-checked against CF's ~10MB base64-inflated cap; oversize payloads surface as `MIME_ERROR` with measured-vs-allowed bytes rather than a generic upstream failure.
 
 Unicode display-name fixture exercises RFC 2047 encoded-words (e.g. `"Jürgen Müller" <j@x.dev>`, Japanese, emoji) — locks behavior in and guards against regressions if the MIME backend is ever swapped.
 
@@ -398,6 +405,16 @@ export default defineEmail(async (message, env, ctx, info) => {
 
 Defaults: `from = message.to`, `to = message.from`, `subject = "Re: <original>"`. Override any in opts.
 
+#### Framework boundary — inbound is Void-app-only
+
+_(measured 2026-09-11)_ Inbound handlers compile through `routingPlugin`, which no framework branch of `voidPlugin()` installs; the framework wrapper (`plugin-framework-triggers.ts`) wires crons and queues only. So under TanStack Start, React Router, vinext, SvelteKit, Nuxt, Analog and Astro there is nowhere to attach an `email()` export. Rather than let those projects ship dead handlers and bounce real mail, an `email/` directory under a detected framework is a **build error**, next to the existing auth / sandbox / live guards. The guard keys on the handler directory, not on `bindings.needsEmail`: outbound `sendEmail` is a binding and works in every framework. Wiring inbound into the framework entries needs the `WorkerEntrypoint` conversion below applied to each wrapper and is separate work.
+
+|                           | Void app | Class A (TanStack Start, React Router)         | Class B/C (SvelteKit, Nuxt, Analog, Astro) |
+| ------------------------- | -------- | ---------------------------------------------- | ------------------------------------------ |
+| `sendEmail` in production | yes      | yes                                            | yes                                        |
+| dev inbox                 | yes      | yes, once the app declares an `assets` binding | no — `BINDING_MISSING`; use the harness    |
+| `email/` inbound handlers | yes      | build error                                    | build error                                |
+
 #### Codegen
 
 `packages/void/src/router/email.ts` scans `email/*.{ts,mts,js,mjs}` (top-level) and produces an `EmailHandlersScan`:
@@ -459,6 +476,8 @@ The worker entry (`compileWorkerEntry`) imports `__emailHandler`, builds the mes
 WfP dispatch namespace stubs are typed as `Fetcher` — `.fetch()` and `.connect()` only. A plain default-export object like `export default { fetch, email, queue }` exposes **only `.fetch()`** through the namespace stub. The user worker extends `WorkerEntrypoint` from `cloudflare:workers` so its class methods become `Rpc.Provider<T>` entries on `Fetcher<EntrypointBranded>`, making `.email()` / `.queue()` / `.scheduled()` callable from the router.
 
 `compileWorkerEntry` emits this shape for every WfP-deployed worker, not just email-handling ones. Cron and queue handlers also become RPC-callable from the platform side as a bonus, useful for future platform features.
+
+**Compatibility dates.** Void preserves the user's `compatibility_date` with no floor, and a review asked whether the class shape breaks workers pinned before the 2024-04-03 RPC date. It does not: the `rpc` flag gates the **caller's** `Fetcher` stub, not the callee's class. _(measured)_ In workerd 1.20260701.1 a `WorkerEntrypoint` subclass serves `fetch`, `scheduled`, `queue` and RPC `email()` at dates back to 2021-11-03 and under an explicit `no_rpc`. The only caller is the platform proxy, at 2026-02-12.
 
 #### Why the user worker can't receive a real `ForwardableEmailMessage`
 
@@ -620,14 +639,15 @@ Both work in Vitest without any worker-runtime mocking. The inbound harness uses
 
 #### Default sender setup (`mail.void.cloud`)
 
-One-time platform infrastructure (see [`meta/operations.md`](../operations.md#email-mailvoidcloud) for the runbook):
+One-time platform infrastructure, per environment (see [`meta/operations.md`](../operations.md#email) for the runbook). _(corrected 2026-09-11)_
 
-- `mail.void.cloud` registered as a CF zone in the platform account, Email Routing enabled
-- DKIM/SPF/DMARC auto-configured by CF on enable
-- Catch-all routing rule on the zone → `void-proxy` worker (the proxy's `email()` export is bound by the `email-router.ts` module)
-- Standard `pnpm run deploy` ships the proxy with the new code
+- The mail domain is a **subdomain of the existing `void.cloud` zone** — `mail.void.cloud`, `mail.staging.void.cloud` — added through Email Routing's subdomain setting. `void.cloud` already has Email Routing on. No zone registration, no nameserver change. As of 2026-09-11 neither subdomain has any DNS record.
+- Cloudflare adds and locks MX, SPF and DKIM on the subdomain.
+- The same name is onboarded to **Email Sending**, which adds the `cf-bounce` MX, SPF, DKIM and DMARC records and lifts the 200-destination account cap.
+- Catch-all routing rule on the subdomain → `void-proxy` worker (the proxy's `email()` export is bound by the `email-router.ts` module). Wrangler has no catch-all command; it is the dashboard or `PUT /zones/{z}/email/routing/rules/catch_all`.
+- Standard `pnpm run deploy` ships the proxy with the new code.
 
-Per-project setup: nothing. Every project deployed with the new framework codegen is automatically reachable. Existing pre-`WorkerEntrypoint` deployments will hit the "no email handler" reject path; they need to redeploy.
+Per-project setup: nothing. Every project deployed with the new framework codegen is automatically reachable, and the hourly rollover rewrites every project's `email-slug:` mirror so older projects are covered within an hour of the api deploy. Existing pre-`WorkerEntrypoint` deployments will hit the "no email handler" reject path; they need to redeploy.
 
 **Reputation pooling.** All `*.void.app` projects share `mail.void.cloud`'s sender reputation. Mitigations:
 
@@ -705,10 +725,10 @@ CF's `send_email` only delivers to addresses verified as destinations on the sen
 - **CF API client** — `packages/api/src/provisioning/email-routing.ts` wraps `POST/GET/DELETE /accounts/:id/email/routing/addresses`.
 - **API routes** — `GET|POST|DELETE /projects/:id/email/destinations[/:id]`. POST triggers CF to email the recipient with a verification link; GET refreshes status from CF for any rows still `pending`.
 - **Auto-verify project owner** — `packages/api/src/routes/projects.ts` calls `addDestination(user.email)` when a project is created (via `ctx.waitUntil`, non-blocking). The owner gets the verification email in their GitHub-OAuth-linked inbox; one click and their project can send to itself out of the box.
-- **Per-project allowlist enforcement at deploy** — `packages/api/src/routes/deploy.ts` reads `email_destinations` where `status='verified'` and emits `{ type: 'send_email', name: 'SEND_EMAIL', allowed_destination_addresses: [...] }` on the worker upload. CF enforces at the binding level — even though destinations are account-wide on CF's side, projects can only send to their own declared addresses.
+- **Per-project allowlist enforcement in the proxy** — _(re-land)_ the user worker carries no `send_email` binding. The api mirrors each project's verified rows into `email-allowlist:<projectId>` in `ROUTING` KV (`provisioning/email-allowlist.ts`), and the proxy checks every send and every inbound reply against that mirror. Both revoke paths tighten the mirror before deleting the row. Destinations are account-wide on CF's side; the mirror is what makes consent per project.
 - **Cross-project safety on delete** — destinations are CF account-wide; before calling `deleteDestination` we check `countProjectsUsingDestination` and only remove from CF if no other project references the same `cf_destination_id`.
 
-The platform/team never opens the CF dashboard. The recipient (the person receiving the verification email) is the only human in the loop, and they only click a link in their own inbox.
+The platform/team never opens the CF dashboard. The recipient (the person receiving the verification email) is the only human in the loop, and they only click a link in their own inbox. For every address except the owner's own, that mail is **ours** — HMAC-signed link, sent from `noreply@<mail domain>`, resendable — because Cloudflare's verification is per account rather than per project, and Cloudflare has no API to resend its mail.
 
 #### Admin UI — `packages/api/src/admin/routes/email.tsx`
 
@@ -720,7 +740,7 @@ Per-project page at `/admin/email/:projectId`:
 - "Reset counter" button for the current month
 - Verified-destinations table with add / remove
 
-Mirrors the existing admin route patterns (e.g. `packages/api/src/admin/routes/deployments.tsx`). Direct KV/DB reads + writes; no API layer between admin and storage. User-facing dashboard pages are deferred to whenever broader dashboard work resumes.
+Mirrors the existing admin route patterns (e.g. `packages/api/src/admin/routes/deployments.tsx`). Direct KV/DB reads + writes; no API layer between admin and storage. An environment-level page beside it is designed in [Operator surfaces](#operator-surfaces).
 
 #### CLI — `void email`
 
@@ -732,7 +752,317 @@ void email allow <address>            # add recipient + trigger CF verification
 void email disallow <address>         # remove recipient
 ```
 
-Hits the API routes above. Output formatted for the terminal — useful for power users debugging "did my mail go out?" or wiring a new recipient without an admin trip.
+Hits the API routes above. Output formatted for the terminal — useful for power users debugging "did my mail go out?" or wiring a new recipient without an admin trip. _(measured 2026-09-11)_ None of these print the project's own address; `void email status` in [Developer surfaces](#developer-surfaces) is the fix.
+
+## Hosting modes and lifecycle
+
+_(added 2026-09-11)_
+
+Void projects run in three places, and email has a different shape in each:
+
+| Mode                                                    | Who owns the Cloudflare account | Mail domain                             | Who does the zone work           |
+| ------------------------------------------------------- | ------------------------------- | --------------------------------------- | -------------------------------- |
+| **A. Managed platform** — `void deploy`                 | VoidZero                        | `mail.void.cloud` (one per environment) | VoidZero, once                   |
+| **B. Own account** — `void deploy --backend cloudflare` | the developer                   | a zone the developer owns               | the developer, helped by the CLI |
+| **C. Self-hosted platform**                             | the company                     | `mail.<company>` (one per environment)  | the company's operator, once     |
+
+One rule holds in all three: **a developer never sees a Cloudflare object.**
+No zone, no routing rule, no destination id, no token scope. A developer sees
+an address, a list of recipients, a counter, and an error code. Everything
+else belongs to whoever owns the account — VoidZero in A, the developer's own
+`wrangler login` session in B, the company's operator in C.
+
+Three findings changed the plan and are worth stating up front:
+
+1. **A `wrangler login` session already carries `email_routing (write)` and
+   `email_sending (write)`**, and wrangler 4.107+ ships a full `wrangler email`
+   command group. Mode B needs no new token and no direct API client for most
+   of the setup. _(measured)_
+2. **Verified destinations are capped at 200 per Cloudflare account, shared
+   across every domain and every project.** Onboarding the mail domain to
+   Email Sending removes that gate; per-project consent stays in our own
+   allowlist.
+3. **Nothing today tells a developer their own address.** Not the CLI, not
+   the dashboard, not the API, and the two bindings are neither typed nor
+   injected in `void dev`. _(measured)_ This is the single largest UX gap and
+   it is the same gap in all three modes.
+
+### The lifetime
+
+```
+              DEVELOP            DEPLOY             CONFIGURE            VERIFY              OPERATE              TEARDOWN
+              ───────            ──────             ─────────            ──────              ───────              ────────
+developer     void dev           void deploy        add recipient        void email status   void email usage     void project delete
+              dev inbox          prints the         (consent link)       send a test         dashboard Email tab   → destinations
+              harnesses          address map                                                  error codes            revoked, rows
+                                                                                                                     gone
+operator      —                  —                  one-time env setup   health checklist    kill switch          delete catch-all
+(A, C)                                              (script → admin)     send + receive       caps, suspend         (stops inbound)
+                                                                          probe
+own account   void dev           void deploy        prompt on the        wrangler tail        CF dashboard         wrangler email
+(B)           dev inbox          --backend cf       first deploy         address map                                routing disable
+                                 detects state      (wrangler email …)
+```
+
+The developer lane is the same in all three modes. That is deliberate: the
+address changes, the commands do not.
+
+### Personas
+
+**Developer.** Writes `sendEmail(...)` and `email/*.ts`. Wants to know: what is
+my address, who can I send to, did it work. Must never need a Cloudflare
+account (A, C) or a Cloudflare concept (B).
+
+**Operator.** Owns the platform account in A or C. Does the zone work once
+per environment, watches health, holds the kill switch. Is a human at
+VoidZero in A and a platform admin at the company in C.
+
+**Own-account developer (B).** Both roles in one person, but the split still
+holds in time: the setup prompt happens once, then they are a developer.
+
+### Mode A — managed platform
+
+#### Developer surfaces
+
+The address comes first, on every surface, because it is the thing nobody
+can find today.
+
+**`void email status`** — new, and the default subcommand when none is given:
+
+```
+Sender       acme+noreply@mail.void.cloud
+Inbound      acme+<anything>@mail.void.cloud
+             email/support+[ticket].ts   ←  acme+support+<ticket>@…
+             email/_default.ts           ←  everything else
+Recipients   alice@acme.dev     verified
+             ops@acme.dev       pending — resend?  void email allow ops@acme.dev --resend
+This month   12 / 200 sent · 3 received
+```
+
+Backed by `GET /projects/:id/email/usage` gaining `domain`, `sender`, and
+`inbound` fields. `usage`, `destinations`, `allow`, `disallow`, `logs` stay.
+
+**`void deploy`** prints the inbound map at the end whenever `email/` handlers
+ship. That is the moment the developer cares:
+
+```
+◆  Deployed acme
+│  Inbound email
+│    acme+support+<ticket>@mail.void.cloud  →  email/support+[ticket].ts
+│    acme+*@mail.void.cloud                 →  email/_default.ts
+```
+
+**Dashboard → project → Email.** Same data as `void email status`, plus
+"Add recipient" and "Resend". This section is small, follows the existing
+per-section loader fan-out on the project page, and is the only place a
+non-CLI user can add a recipient.
+
+**`void dev`.** Inject `__VOID_PROJECT_SLUG` and `__VOID_EMAIL_DOMAIN` from the
+linked project, and type both in `.void/env.d.ts`. See [Known gaps](#known-gaps).
+
+#### Operator surfaces
+
+**One-time environment setup, as a script first.** The seven manual steps in
+`operations.md` become `vp run email:setup --env <name> --check | --apply`
+in the platform repo. `--check` runs the probes below and prints a
+checklist; `--apply` runs the idempotent fixes. It exists because VoidZero's
+own staging needs it now — the mail domains do not exist yet — and because
+the admin page reuses the same module.
+
+**`/admin/email`, environment level.** Today `/admin/email/:projectId` is
+per-project. Add the environment page beside it, shaped like
+`signup-control.tsx`, and feed its rows into `/admin/health` so the banner
+shows email:
+
+| Row                     | Probe                                                                    | Fix                                                                                                 |
+| ----------------------- | ------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------- |
+| domain agrees           | api `EMAIL_SENDER_DOMAIN` vs proxy `/health` (make the boolean a string) | edit wrangler vars                                                                                  |
+| routing ready           | `GET /zones/{z}/email/routing` → `status`                                | `POST …/routing/dns`                                                                                |
+| catch-all → proxy       | `GET …/rules/catch_all` names `void-proxy[-staging]`                     | `PUT …/rules/catch_all`                                                                             |
+| `send_email` bound      | proxy `/health` `sendEmail`                                              | redeploy proxy                                                                                      |
+| Email Sending onboarded | `GET …/sending/subdomains/{id}/dns/status`                               | `POST …/sending/subdomains` (permission group undocumented — see [Open questions](#open-questions)) |
+| slug mirror             | count of projects lacking `email-slug:`                                  | already self-heals hourly; button runs it now                                                       |
+| token scope             | a 403 on any read above, mapped to the permission's name                 | extend `CF_API_TOKEN`                                                                               |
+
+Plus **Send test mail** to the operator's address, and **Suspend all
+sending**, which already exists as the `routing.suspended` marker.
+
+### Mode B — the developer's own Cloudflare account
+
+#### What happens today _(measured)_
+
+```
+void deploy --backend cloudflare   +   email/ handlers   +   sendEmail()
+        │
+        ├─ deploy    no warning · no send_email binding · no email vars
+        ├─ outbound  sendEmail() → BINDING_MISSING
+        └─ inbound   handler runs, then every action is LOST
+                       support+T-42@zone → _default.ts       (wrong handler: the
+                                                              dispatcher strips after
+                                                              the first `+` unconditionally)
+                       setReject / forward / reply → returned as RPC data → CF ignores it
+                       → message ACCEPTED, then DISCARDED. No bounce. No log.
+```
+
+The inbound half is worse than unsupported. Cloudflare delivers, the worker
+reports success, and the mail vanishes.
+
+#### Runtime changes (framework, ~200–250 lines)
+
+```
+sendEmail ──► dev inbox? ──► env.SEND_EMAIL? ──► __VOID_PROXY? ──► BINDING_MISSING
+                                  │ NEW
+                                  └─ import('cloudflare:email') → one EmailMessage per recipient
+```
+
+1. **Direct `SEND_EMAIL` transport** in `runtime/email.ts`, tried after the dev
+   inbox and before the proxy. The MIME builder is shared.
+2. **Provision the binding.** `computeDesiredCloudflareResources` adds
+   `send_email: [{ name: "SEND_EMAIL" }]` to the root `wrangler.jsonc` when
+   `needsEmail`. Root entries already pass through the verifier verbatim.
+3. **Sender default.** `void.json` gains `email.from`. Replies default to
+   `message.to` when there is no slug — in this mode `message.to` is a real
+   address on the developer's own zone.
+4. **No-prefix inbound.** When `__voidPlatformTo` is absent, the dispatcher
+   matches the full local part, so `support+T-42@zone` reaches
+   `email/support+[ticket].ts`.
+5. **Enact actions on a native message.** When the envelope is a real
+   `ForwardableEmailMessage`, apply reject / forward / reply on it instead of
+   returning them.
+6. **Deploy guidance** — the detection and prompt below.
+
+#### Detection on every deploy
+
+Detection needs Read scopes only, so it runs unconditionally and costs a
+few subprocess calls:
+
+```
+void deploy --backend cloudflare
+   │
+   ├─ no email/ and no sendEmail() ──▶ skip, nothing printed
+   │
+   └─ email in use
+        ├─ PREFLIGHT (read-only)
+        │     zone        email.from → walk up labels → `wrangler email routing settings <zone>`
+        │     mx          node:dns resolveMx(zone)        ← needs no Cloudflare access
+        │     rules       `wrangler email routing rules list <zone>`
+        │     recipients  `wrangler email routing addresses list`
+        │     sending     `wrangler email sending settings <domain>`
+        │     binding     send_email in the root wrangler.jsonc
+        │
+        ├─ READY ──▶ print the address map, continue
+        │
+        └─ NOT READY
+              TTY ──▶ checklist, then prompt
+                        [1] Configure now     runs the wrangler commands below
+                        [2] Deploy anyway     the app works; email stays off with clear error codes
+                        [3] Cancel
+              CI  ──▶ no prompt; checklist + `void email setup`; deploy anyway
+                      (--require-email fails the deploy instead)
+```
+
+"Ready" per row:
+
+| Row        | Ready when                                                                                                                                 |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| zone       | a zone in the account matches the mail domain, walking up labels                                                                           |
+| routing    | `Status: ready`                                                                                                                            |
+| rules      | one literal rule per `email/<name>+[p].ts` pointing at **this** worker; a catch-all pointing at this worker only when `_default.ts` exists |
+| recipients | at least one verified address, or Email Sending onboarded                                                                                  |
+| sending    | `dns` status ready                                                                                                                         |
+| binding    | present in the root config                                                                                                                 |
+
+Rules carry the worker name they route to, so the check distinguishes
+"points at me", "points at another worker", and "absent". That is the same
+shape as the existing drift check for D1, KV, and R2: compute the desired set
+from the `email/` scan, read the actual set, report the diff.
+
+#### The fix, through wrangler
+
+Void already drives wrangler through one `runWrangler` choke point in
+`provision.ts`. The fix is more calls through the same seam. Void never holds
+the token.
+
+```
+wrangler email routing enable <zone>                              only when MX is empty or Cloudflare's
+wrangler email routing rules create <zone> \
+    --match-type literal --match-field to --match-value support@<zone> \
+    --action-type worker --action-value <worker-name>                one per email/<name>+[p].ts
+wrangler email routing addresses create <email>                   then the human clicks
+wrangler email sending enable mail.<zone>                         subdomain-aware
+```
+
+Cloudflare's subaddressing means a rule for `support@zone` already captures
+`support+anything@zone`, so each handler file is one literal rule. A project
+with no `_default.ts` gets no catch-all, and unknown addresses bounce at
+Cloudflare — which is correct.
+
+#### Three refusals, as code
+
+1. **Never enable routing on an apex that has foreign MX.** `resolveMx`
+   first. Foreign records mean the domain carries someone's real mail;
+   routing enable locks MX and would take it down. Print the dashboard link
+   for the `mail.<zone>` subdomain and stop.
+2. **Never replace an existing catch-all.** Per-address rules take priority
+   over it, so the named handlers still work; only `_default.ts` stays
+   unbound, and the checklist says so.
+3. **Never touch a rule that points at another worker.** Report the conflict.
+
+On a dedicated subdomain none of these fire. On a bare apex the prompt says
+plainly what a catch-all claims: every address on that domain.
+
+#### Residuals — where a human step stays
+
+| Gap                              | Why                                                                                                          | What the CLI does                                                                                  |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------- |
+| catch-all → worker               | wrangler has no create command; `rules list` only shows one                                                  | print the dashboard link; re-check on the next deploy; use REST when `CLOUDFLARE_API_TOKEN` is set |
+| routing on `mail.<zone>`         | `wrangler email routing enable` resolves the zone by exact name; REST does not document a subdomain endpoint | same treatment, or route on the apex when its MX is empty                                          |
+| verification click               | no API to verify or resend Cloudflare's mail                                                                 | show `pending`; the human clicks                                                                   |
+| `wrangler email` output is prose | no `--json`                                                                                                  | parse per pinned version; on a miss print "unknown — run `void email setup`"                       |
+
+#### Token blast radius
+
+`Email Routing Rules Edit` on a zone can redirect every inbound message on
+that zone. In this mode the scope lives in the developer's own OAuth session,
+which they already trust for `wrangler deploy`, and Void never extracts it.
+If Void ever needs the REST endpoint directly, it must use
+`CLOUDFLARE_API_TOKEN` only, and the docs must say that token deserves a
+short life.
+
+### Mode C — self-hosted platform
+
+#### State today _(measured)_
+
+Self-hosting is not a supported story in the repo. Every setup document is
+written for VoidZero's own account. On the email path, three code sites pin
+VoidZero hosts; everything else already follows `EMAIL_SENDER_DOMAIN`:
+
+| Site                                                     | What it pins                                                                                                                      |
+| -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/api/src/email/send-verification.ts:76-84`      | the api host in the confirmation link                                                                                             |
+| `packages/api/src/email/send-verification.ts:90-95`      | the proxy origin the api posts verification mail to                                                                               |
+| `packages/api/src/email.ts:1` + `api/wrangler.jsonc:152` | the legacy `Void <noreply@void.cloud>` sender for welcome / invite / alert mail, on a different domain from `EMAIL_SENDER_DOMAIN` |
+
+The prose in `getting-started-prompt.txt` and `docs/guide/email.md` also names
+`mail.void.cloud` literally, so an Acme developer would read the wrong
+address.
+
+#### Design
+
+- **Config surface** — `EMAIL_SENDER_DOMAIN` on api and proxy, as today, plus
+  `API_ORIGIN` / `PROXY_ORIGIN` (or a service binding) for the two
+  hard-coded hosts, and the platform sender derived from
+  `EMAIL_SENDER_DOMAIN` so the legacy `noreply@void.cloud` folds into it.
+- **Operator surfaces** — identical to Mode A: the setup script and the
+  environment-level admin page. The company's mail domain _is_ the platform
+  domain; nothing per project changes.
+- **Developer surfaces** — identical to Mode A, with the address computed
+  from the environment's domain, never from prose.
+- **Docs** — every literal `mail.void.cloud` in the guide and the prompts
+  becomes `<mail domain>`, and the CLI prints the real one.
+
+Per-project custom domains stay out, for the reason the next section gives:
+a company's apex carries its corporate MX.
 
 ## Why custom domains aren't included
 
@@ -847,11 +1177,76 @@ Single ordered sequence. Each step is independently testable; later steps depend
 9. **Platform: `send_email` binding emit at deploy.** `routes/deploy.ts` reads verified destinations and emits `{ type: 'send_email', allowed_destination_addresses: [...] }` per project.
 10. **Platform: API + admin UI.** `GET /projects/:id/email/{usage,logs}` + `admin/routes/email.tsx` (usage, suspend, limits, destinations).
 11. **Framework: `void email usage|logs|destinations|allow|disallow` CLI.**
-12. **Ops: `mail.void.cloud` zone setup.** ~~Register zone in CF~~ — corrected 2026-09-11: `mail.void.cloud` is a subdomain of the existing `void.cloud` zone, which already has Email Routing on; no registration or nameserver change. Enable routing on the subdomain, onboard it to Email Sending, add the catch-all rule pointing at the proxy worker. One-time human action — see [`meta/operations.md`](../operations.md#email).
+12. **Ops: mail subdomain setup.** _(corrected 2026-09-11)_ Add `mail.void.cloud` as an Email Routing subdomain of the existing `void.cloud` zone, onboard it to Email Sending, add the catch-all rule pointing at the proxy worker. No zone registration, no nameserver change. One-time human action per environment — see [`meta/operations.md`](../operations.md#email).
 13. **Deploy.** `pnpm run deploy:staging` first to validate the dispatch path against real WfP runtime; then production.
 14. **Tag release.**
 
 Steps 1–5 + 11 ship in the framework via the normal release. Steps 6–10 are platform changes. Step 12 is the only ops gate before production sending works.
+
+### After the re-land merges _(added 2026-09-11)_
+
+15. **Operator, before any production send:** the setup script, run against
+    staging first; Email Sending onboarding; the three checks in the
+    operations.md "Before you deploy this the first time" list.
+16. **Developer surfaces:** `usage` fields → `void email status` → deploy
+    output → dashboard section. Each is independently shippable.
+17. **Mode B:** runtime items 1–5, then detection, then the prompt and
+    wrangler-driven fix, then the three refusals as tests.
+18. **Mode C:** the three code sites and the config surface; the docs pass;
+    the environment-level admin page.
+
+## Known gaps
+
+_(added 2026-09-11)_ Defects found while designing the lifecycle. The first
+group is ours to fix inside the current PRs, because the claim or the code is
+ours; the second is tracked follow-up work.
+
+| Where                                               | Defect                                                                                                                                                | Fix in                |
+| --------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------- |
+| `void dev`                                          | `sendEmail` without `from` returns `INVALID_FROM` — the slug and domain bindings are not injected in dev, and the shipped prompt promises the default | void#160 (decision 5) |
+| `docs/guide/email.md`, `getting-started-prompt.txt` | name `mail.void.cloud` as if it were the only possible domain                                                                                         | void#160              |
+| `meta/operations.md`                                | said the mail zone needs registration and nameservers; said the slug backfill is a one-time pass; omitted the 200-destination cap and Email Sending   | done, `814423a0`      |
+
+Follow-ups: the Mode B runtime (six items), Mode B detection and prompt,
+`void email status` and the `usage` fields, the dashboard Email section, dev
+injection and typing of the two bindings, the environment-level admin page
+and setup script, the three Mode C code sites, and the proxy's bounce text
+for a framework-type project (the routing blob already carries `type`;
+`email-router.ts` never reads it, so the bounce says "needs redeploy" to a
+user for whom redeploying cannot help).
+
+## Open decisions
+
+_(added 2026-09-11)_ Recommendations are the author's; the decision is the
+owner's.
+
+1. **Mode B setup: inside `void deploy --backend cloudflare` behind detection
+   and a prompt (recommended, now that the wrangler session has the scopes),
+   or a separate `void email setup` only.** The separate command still exists
+   for CI and for re-runs; the question is whether the first deploy offers it.
+2. **Mode B apex policy: refuse an apex with foreign MX (recommended), or
+   prompt.**
+3. **Operator tooling: script first, admin page second (recommended), or the
+   reverse.**
+4. **Fold the legacy `noreply@void.cloud` platform sender under
+   `EMAIL_SENDER_DOMAIN` (recommended — it is the third Mode C blocker and a
+   second domain to keep DNS for).**
+5. **Fix the `void dev` `INVALID_FROM` gap inside void#160 now (recommended,
+   it is small and the prompt already promises it), or track it.**
+
+## Open questions
+
+_(added 2026-09-11)_ Only a live probe settles these.
+
+- Whether `POST /zones/{z}/email/routing/dns` with `name: "mail.example.com"`
+  enables routing on a subdomain. The REST docs do not say; the dashboard
+  does it; `wrangler email routing enable` resolves the zone by exact name.
+- Which token permission group the Email Sending subdomain endpoints accept.
+  The OpenAPI schema lists none. The wrangler OAuth scope
+  `email_sending (write)` works for `wrangler email sending enable`, which is
+  the path Mode B uses.
+- Whether `mail.staging.void.cloud`, two labels deep, is accepted by the
+  subdomain form. The docs show one-label examples only.
 
 ## Future Work
 
@@ -925,10 +1320,45 @@ Surfaces "you can't send from this address yet" as a TypeScript error at edit ti
 - workerd RPC types: `types/defines/rpc.d.ts` (BaseType allowlist), `types/defines/wfp.d.ts` (DispatchNamespace), `types/defines/email.d.ts` (ForwardableEmailMessage)
 - workerd RPC implementation: `src/workerd/api/worker-rpc.c++`, `src/workerd/jsg/ser.c++`, `src/workerd/io/worker-interface.capnp`
 - `postal-mime` — inbound parser
-- `mimetext` — outbound MIME builder
+- `runtime/email/mime.ts` — outbound MIME builder (own implementation; `mimetext` was the original plan)
 - `react-email` / `@react-email/components` — templating prior art (future work)
 - `packages/void/src/runtime/env.ts:70` — `requireRuntimeBinding` shared helper
 - `packages/void/src/inference/walk.ts:6-103` — existing binding inference pattern
 - `packages/void/src/cli/wrangler.ts:179-244` — existing wrangler-sync pattern
 - `packages/proxy/src/*` — AI proxy + unified `__VOID_PROXY` pattern that this design extends
 - `packages/api/src/admin/routes/deployments.tsx` — admin page pattern this design follows
+
+Evidence for the 2026-09-11 sections (framework paths under
+`framework/packages/void/src`; platform paths under `packages/`):
+
+- Wrangler scopes and commands: `wrangler whoami` on 2026-09-11 lists
+  `email_routing (write)`, `email_sending (write)`; `wrangler email` exists in
+  4.107.0 (the framework pin) and 4.130.0. `rules create` takes
+  `--action-type worker`; `routing enable` resolves the zone by exact name
+  (`getZoneIdByDomain`); `sending enable` walks up labels (`resolveDomain`).
+- Mode B today: `runtime/email.ts:505-516` (`BINDING_MISSING`),
+  `router/compile.ts:1603-1611` (strip after first `+`),
+  `compile.ts:2856-2862` + `runtime/email/inbound.ts:296-361` (actions
+  returned as data), `cli/deploy.ts:2468-2681` (no email in desired
+  resources). All executed against a scratch copy of `playground/kitchen-sink`.
+- Address discovery gap: `cli/email.ts` prints no sender;
+  `packages/dashboard/pages/projects/[id].tsx` has no email section;
+  `routes/email.ts:77-84` returns no domain; `codegen/env-types.ts` does not
+  type the bindings; `index.ts` / `plugin-*.ts` do not inject them in dev;
+  `runtime/email.ts:441-447` returns `INVALID_FROM` before the inbox at `:493`.
+- Mode C blockers: `packages/api/src/email/send-verification.ts:76-95`,
+  `packages/api/src/email.ts:1`, `packages/api/wrangler.jsonc:152`.
+- Slug mirror self-heal: `packages/api/src/index.ts:585-600` inside the hourly
+  rollover.
+- Admin patterns: `admin/routes/signup-control.tsx`, `admin/routes/system.tsx:140-178`,
+  `admin/views/dashboard.tsx:49-86`.
+- Cloudflare docs: Email Routing subdomains (dashboard flow); send bindings
+  ("the sender address must always belong to a domain you have onboarded");
+  limits ("Destination addresses per account: 200 … shared across all
+  domains"; "Before you onboard a sending domain, you can send emails only to
+  verified destination addresses"); catch-all `PUT …/rules/catch_all` with
+  `{ type: "worker", value: ["<name>"] }`; local inbound trigger
+  `POST /cdn-cgi/local/email`.
+- Compatibility date: workerd 1.20260701.1 via Miniflare; a
+  `WorkerEntrypoint` subclass returns 200 at `2021-11-03` and `2024-01-01`
+  with no flags.
