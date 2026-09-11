@@ -1002,7 +1002,7 @@ describe('provisionCloudflareResources — R2', () => {
   });
 
   it('does NOT create on an R2 info failure that is not a confirmed not-found (auth/metrics) — surfaces the error', async () => {
-    // wrangler 4.107 `r2 bucket info` also runs a metrics/GraphQL query, so an
+    // wrangler 4.131 `r2 bucket info` also runs a metrics/GraphQL query, so an
     // EXISTING bucket can exit non-zero on an auth/metrics failure. The prior
     // "auth error → create" behavior is REVERSED: never create on such a signal.
     setup(JSON.stringify({ name: 'app' }));
@@ -1983,7 +1983,7 @@ describe('provisionCloudflareResources — pinned transport (one base for wrangl
   });
 
   it('the lister URL uses the pinned base with wrangler-EXACT concatenation (no trailing-slash trim)', async () => {
-    // wrangler 4.107's `performApiFetchBase` fetches
+    // wrangler 4.131's `performApiFetchBase` fetches
     // `${getCloudflareApiBaseUrl(...)}${resource}${queryString}` with the direct env
     // base used VERBATIM and the resource `/accounts/${accountId}/hyperdrive/configs`
     // interpolated RAW. A base ending in `/` therefore yields `…//accounts/…` for
@@ -2987,7 +2987,7 @@ describe('provisionCloudflareResources — strict D1 identity', () => {
 
 describe('provisionCloudflareResources — top-level env pin via --env=', () => {
   it('pins the top-level env on EVERY wrangler call even when CLOUDFLARE_ENV names a different env/account', async () => {
-    // wrangler 4.107 reloads a project `.env`/`.env.local` into process.env on every
+    // wrangler 4.131 reloads a project `.env`/`.env.local` into process.env on every
     // command, so a project `.env` with `CLOUDFLARE_ENV=staging` would reselect the
     // `env.staging` block (and ITS account) for discovery/create even though
     // `provisionEnv` deleted the var — while `--update-config` patches the TOP-LEVEL

@@ -419,7 +419,7 @@ describe('resolveWranglerArgv (module-resolution launcher)', () => {
   it("prefers void's own wrangler over an incompatible app-root wrangler, resolving its REAL cli.js", () => {
     // The app root pins its OWN (potentially older/incompatible) wrangler, and a
     // separate "void-nested" wrangler is resolvable via module resolution. The
-    // provisioner targets wrangler 4.107's exact flags/JSON/errors, so void's own
+    // provisioner targets wrangler 4.131's exact flags/JSON/errors, so void's own
     // wrangler MUST win — the app-root one must not shadow it. The resolved entry
     // is the `main` CLI (`wrangler-dist/cli.js`), NOT the `bin.wrangler` wrapper.
     const root = setupProject({

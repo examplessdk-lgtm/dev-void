@@ -365,7 +365,7 @@ export class SelfHostSecretListError extends Error {
 /**
  * FIRST-DEPLOY specialization of {@link SelfHostSecretListError}: the remote
  * secret list could not be fetched because the worker has NOT been deployed
- * yet. wrangler 4.107's `secret list` catches the API worker-not-found error
+ * yet. wrangler 4.131's `secret list` catches the API worker-not-found error
  * (codes 10007 / 10090 — `WORKER_NOT_FOUND` / `WORKER_LEGACY_ENVIRONMENT_NOT_FOUND`,
  * per `isWorkerNotFoundError` in wrangler-dist/cli.js) and rethrows a `UserError`
  * ("… not found. If this is a new Worker, run `wrangler deploy` first to create
@@ -889,7 +889,7 @@ export async function dischargeSelfHostEnvContext(
 /**
  * Read the pinned config's top-level `account_id` and reconcile it with
  * the caller's requested account, mirroring the provisioner's account gate
- * (provision.ts `provisionCloudflareResourcesLocked`). wrangler 4.107 gives the
+ * (provision.ts `provisionCloudflareResourcesLocked`). wrangler 4.131 gives the
  * config's `account_id` PRECEDENCE over `CLOUDFLARE_ACCOUNT_ID`, so a real
  * config-vs-requested mismatch is a fail-closed error (thrown BEFORE any spawn).
  * Returns the ONE effective account to pin (config wins, else requested), or
@@ -1095,7 +1095,7 @@ function describeVarSource(source: VarSource | undefined): string {
  * The hard error for a REQUIRED key set to an EMPTY value (`FOO=""`) in
  * the effective build map. Values-free (key names + source KIND/filename only),
  * thrown ALWAYS — independent of whether the key exists as a remote secret. The
- * build bakes the empty string into plaintext `vars`, and wrangler 4.107 gives a
+ * build bakes the empty string into plaintext `vars`, and wrangler 4.131 gives a
  * config var precedence over a same-named remote secret (`checkRemoteSecretsOverride`
  * in wrangler-dist/cli.js warns "… will replace these remote secrets with the
  * configuration values"), so shipping this would ship an empty value for a
@@ -1157,7 +1157,7 @@ function firstDeployMessage(missingKeys: Array<string>): string {
 }
 
 /**
- * The exact `wrangler secret list` argv. Verified against the wrangler 4.107.0
+ * The exact `wrangler secret list` argv. Verified against the wrangler 4.131.0
  * bundle (`wrangler-dist/cli.js`, `secretListCommand`):
  *   - `secret list` accepts `--format` with choices `json`/`pretty`; `json` is
  *     the default AND suppresses the banner (`printBanner` is format==='pretty'),
@@ -1178,7 +1178,7 @@ function secretListArgs(configPath: string): Array<string> {
 }
 
 /**
- * wrangler 4.107's `secret list` worker-not-found signal. When the worker has
+ * wrangler 4.131's `secret list` worker-not-found signal. When the worker has
  * never been deployed, `fetchSecrets` throws the API worker-not-found error and
  * `secretListCommand.handler` — ONLY when `isWorkerNotFoundError(e)` is true
  * (`e.code === 10007` WORKER_NOT_FOUND or `10090`

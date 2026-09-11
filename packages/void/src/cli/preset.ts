@@ -207,7 +207,7 @@ export function resolveWranglerCommand(root: string, subcommand: string): string
  * cross-platform (it sidesteps the Windows `.cmd`/`.ps1` shim that Node cannot
  * spawn with `shell: false`):
  *   1. MODULE RESOLUTION of `wrangler/package.json` relative to THIS module (the
- *      `void` package). The provisioner targets wrangler 4.107's EXACT flags,
+ *      `void` package). The provisioner targets wrangler 4.131's EXACT flags,
  *      `--json` shapes, and error strings, so void's own pinned wrangler must be
  *      PREFERRED — an app that hoists an older, incompatible wrangler at its root
  *      must not shadow it. Under strict pnpm (void + consumers use pnpm) void's
@@ -284,7 +284,7 @@ function resolveLocalWranglerJsBin(
   resolveWranglerPackageJson: () => string | undefined,
 ): string | undefined {
   // Prefer void's own wrangler (module resolution relative to preset.ts): the
-  // provisioner targets its exact 4.107 flags/JSON/errors, so an older app-root
+  // provisioner targets its exact 4.131 flags/JSON/errors, so an older app-root
   // wrangler must not win over it.
   const fromVoid = wranglerCliEntryFromPackageJson(resolveWranglerPackageJson());
   if (fromVoid) {
@@ -325,7 +325,7 @@ function wranglerCliEntryFromPackageJson(pkgPath: string | undefined): string | 
 }
 
 /**
- * The relative CLI entry from a wrangler manifest: `main` first (wrangler 4.107 sets it
+ * The relative CLI entry from a wrangler manifest: `main` first (wrangler 4.131 sets it
  * to `wrangler-dist/cli.js`, which equals `exports["."].default`), then the `.` export
  * (`{ default: string }` or a bare string). Returns `undefined` when neither is a string.
  */

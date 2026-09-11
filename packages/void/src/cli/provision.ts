@@ -209,7 +209,7 @@ export interface HyperdriveConfig {
 }
 
 /**
- * Seam over listing the account's Hyperdrive configs (wrangler 4.107 has NO
+ * Seam over listing the account's Hyperdrive configs (wrangler 4.131 has NO
  * machine-readable `hyperdrive list` and no get-by-name, so existence is checked
  * via the Cloudflare REST API). The default implementation
  * ({@link createDefaultListHyperdriveConfigs}) calls
@@ -296,7 +296,7 @@ const R2_BUCKET_NAME_PLACEHOLDER = 'default';
 // hard error) instead of being recorded as a real resource.
 const D1_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const HEX32_ID_RE = /^[0-9a-f]{32}$/i;
-/** R2 bucket names ARE the identity: wrangler 4.107's `isValidR2BucketName`. */
+/** R2 bucket names ARE the identity: wrangler 4.131's `isValidR2BucketName`. */
 const R2_BUCKET_NAME_RE = /^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/;
 
 /**
@@ -340,7 +340,7 @@ const defaultLogger: ProvisionLogger = {
 };
 
 /**
- * The transport-redirecting env vars wrangler 4.107 honors. Each can point
+ * The transport-redirecting env vars wrangler 4.131 honors. Each can point
  * wrangler's authenticated API transport at a DIFFERENT endpoint (or select a
  * different env-block/account) than the ONE this provision pinned:
  *   - `CLOUDFLARE_API_BASE_URL` / `CF_API_BASE_URL` — override the API base URL directly
@@ -360,7 +360,7 @@ const TRANSPORT_REDIRECT_ENV_VARS = [
 ] as const;
 
 /**
- * Wrangler 4.107's diagnostic-output sinks that would PERSIST the raw provisioning
+ * Wrangler 4.131's diagnostic-output sinks that would PERSIST the raw provisioning
  * argv (including a Hyperdrive connection string, password and all) to disk:
  *   - `WRANGLER_OUTPUT_FILE_PATH` / `WRANGLER_OUTPUT_FILE_DIRECTORY` — when either is set
  *     (`getOutputFilePathFromEnv`/`getOutputFileDirectoryFromEnv`), wrangler's startup
@@ -382,7 +382,7 @@ const OUTPUT_FILE_ENV_VARS = [
 
 /**
  * Resolve the ONE Cloudflare API base URL this provision is pinned to, mirroring
- * wrangler 4.107's `getCloudflareApiBaseUrl` EXACTLY (wrangler-dist/cli.js) so the
+ * wrangler 4.131's `getCloudflareApiBaseUrl` EXACTLY (wrangler-dist/cli.js) so the
  * Hyperdrive REST lister and the spawned wrangler agree on the endpoint:
  *
  *   getCloudflareApiBaseUrl = (complianceConfig) =>
@@ -436,7 +436,7 @@ export function resolvePinnedApiBaseUrl(
 }
 
 /**
- * Mirror wrangler 4.107's `getCloudflareApiEnvironmentFromEnv` (env factory with
+ * Mirror wrangler 4.131's `getCloudflareApiEnvironmentFromEnv` (env factory with
  * `choices: ["production", "staging"]`, default `"production"`): an ABSENT variable
  * defaults to production; a PRESENT value outside the choices — `"stagng"`, an empty
  * string — makes wrangler's `assertOneOf` throw, so we fail closed identically instead of
@@ -457,7 +457,7 @@ function resolveApiEnvironment(env: NodeJS.ProcessEnv): 'production' | 'staging'
   return raw;
 }
 
-/** The compliance-region choices wrangler 4.107 accepts (`getCloudflareComplianceRegionFromEnv`). */
+/** The compliance-region choices wrangler 4.131 accepts (`getCloudflareComplianceRegionFromEnv`). */
 const COMPLIANCE_REGIONS = ['public', 'fedramp_high'] as const;
 type ComplianceRegion = (typeof COMPLIANCE_REGIONS)[number];
 
@@ -473,7 +473,7 @@ function assertComplianceChoice(value: string, source: string): ComplianceRegion
 }
 
 /**
- * Reconcile the effective Cloudflare compliance region, mirroring wrangler 4.107's
+ * Reconcile the effective Cloudflare compliance region, mirroring wrangler 4.131's
  * `getCloudflareComplianceRegion(complianceConfig)` EXACTLY (evaluated only on the
  * DERIVED-base branch — with a direct base override wrangler never calls it):
  *   - reads `CLOUDFLARE_COMPLIANCE_REGION` by PRESENCE and validates it against the
@@ -514,7 +514,7 @@ function resolveComplianceRegion(
 export { scanWranglerDotenvKeys };
 
 /**
- * Mirror wrangler 4.107's `getDefaultEnvFiles(env)`: base `.env`/`.env.local`, then —
+ * Mirror wrangler 4.131's `getDefaultEnvFiles(env)`: base `.env`/`.env.local`, then —
  * when the environment argument is DEFINED (we always pass `--env=`, so wrangler sees
  * `args.env === ""`, which is `!== undefined`) — the per-env pair `.env.${env}`/`.env.${env}.local`.
  * With the empty environment those are the empty-env filenames `.env.` and `.env..local`.
@@ -525,7 +525,7 @@ function defaultWranglerEnvFiles(env: string): Array<string> {
 
 /**
  * FAIL CLOSED when the project's dotenv files declare a transport-redirecting
- * variable. wrangler 4.107 reloads `.env`/`.env.local` (and the dev-vars files) from the
+ * variable. wrangler 4.131 reloads `.env`/`.env.local` (and the dev-vars files) from the
  * project root into `process.env` on EVERY command with `override: true`, so a repo `.env`
  * setting `CLOUDFLARE_API_BASE_URL` / `WRANGLER_API_ENVIRONMENT` /
  * `CLOUDFLARE_COMPLIANCE_REGION` / `CLOUDFLARE_ENV` would redirect wrangler's authenticated
@@ -543,7 +543,7 @@ export function assertNoTransportRedirectInProjectDotenv(
   root: string,
   platform: NodeJS.Platform = process.platform,
 ): void {
-  // Scan the EXACT files wrangler 4.107 loads for the
+  // Scan the EXACT files wrangler 4.131 loads for the
   // provisioner's `--env=` (EMPTY environment string), with wrangler's own per-family
   // SELECTION and CASE semantics, using a KEY scanner that mirrors wrangler's dotenv
   // parser (accepts the optional `export ` prefix + quoting):
@@ -1909,7 +1909,7 @@ function createDefaultListHyperdriveConfigs(apiToken?: string): ListHyperdriveCo
   // account at the SAME endpoint the spawned wrangler uses (never a hardcoded prod base
   // while wrangler was redirected to staging/FedRAMP/an arbitrary endpoint).
   return async ({ accountId, apiBaseUrl, signal }) => {
-    // Build every request URL with wrangler 4.107's EXACT concatenation
+    // Build every request URL with wrangler 4.131's EXACT concatenation
     // semantics. wrangler's `performApiFetchBase` (wrangler-dist/cli.js) fetches
     //   `${getCloudflareApiBaseUrl(complianceConfig)}${resource}${queryString}`
     // where the pinned base is used VERBATIM (a direct CLOUDFLARE_API_BASE_URL override
@@ -3171,7 +3171,7 @@ function isConfirmedAbsent(result: RunWranglerResult, kind: 'r2' | 'queue', name
       // CF API error code 10006 is the exact code wrangler treats as "bucket absent"
       // (its `getR2Bucket`/`isConnectedToExistingResource` branch on `err.code === 10006`).
       // wrangler renders an `APIError` as `${message} [code: ${err.code}]` (its `renderError`
-      // in wrangler 4.107), so a genuine 10006 ALWAYS surfaces as the STRUCTURED token
+      // in wrangler 4.131), so a genuine 10006 ALWAYS surfaces as the STRUCTURED token
       // `[code: 10006]` in the error output. We require that bracketed token — NOT a bare
       // `10006` anywhere in output: a bucket NAME that merely contains those digits (e.g.
       // `archive-10006-prod`) inside an unrelated auth/service/network failure would falsely
@@ -3206,7 +3206,7 @@ export function isQueueConfirmedAbsent(result: RunWranglerResult, name: string):
  * `code === null → exit(0)`), so a KILLED probe/create can surface a clean exit 0
  * with empty/partial output. A bare clean 0 is therefore NOT proof the queue exists.
  * We require BOTH a clean success (numeric exit 0, no signal/spawn error — the
- * provenance rule) AND the output to name THIS exact queue: wrangler 4.107's
+ * provenance rule) AND the output to name THIS exact queue: wrangler 4.131's
  * `queues info` prints `Queue Name: <queue_name>` for the queue it fetched by name
  * (account-unique), so an exact `Queue Name: <name>` line is the positive signal.
  * Used for BOTH the reuse probe and the post-create verify probe.
@@ -3270,7 +3270,7 @@ interface CreatePostcondition {
 
 /**
  * Backstop — verify a create's POSTCONDITION, RESOURCE-SPECIFICALLY + identity
- * checked. wrangler 4.107's `bin.wrangler` is a WRAPPER that spawns
+ * checked. wrangler 4.131's `bin.wrangler` is a WRAPPER that spawns
  * `wrangler-dist/cli.js` and maps a signal-killed child (`code === null`) to
  * `process.exit(0)`, so `spawnSync` can see a `create` report "success" though the
  * real CLI was killed and `--update-config` wrote NO id. After every config-writing
@@ -3307,7 +3307,7 @@ function assertCreateWroteRealId(
 
 // --- Option-injection guard SEPARATE from per-resource service grammar -----
 // The old single regex `^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$` was applied to EVERY
-// resource, but wrangler 4.107 forwards the KV namespace positional VERBATIM as the KV
+// resource, but wrangler 4.131 forwards the KV namespace positional VERBATIM as the KV
 // TITLE, and Cloudflare permits titles like "My Own Namespace" (spaces) — so valid KV
 // namespaces were REJECTED before discovery. It was also wrong for R2 (whose real
 // grammar is lowercase DNS-like). We therefore split the two concerns:
@@ -3426,7 +3426,7 @@ export function assertValidResourceName(kind: ResourceNameKind, name: string): v
  * ONCE so no call site can forget them:
  *   - `-c <configPath>` pins the ONE resolved config (no split-brain reads/writes);
  *   - `--env=` (an explicit EMPTY environment) FORCES wrangler onto the top-level
- *     config environment. wrangler 4.107 selects its config env as
+ *     config environment. wrangler 4.131 selects its config env as
  *     `args.env ?? getCloudflareEnv()`; passing an explicit empty `args.env`
  *     short-circuits the `??` so a project `.env`/`.env.local` that sets
  *     `CLOUDFLARE_ENV` (reloaded into `process.env` on every wrangler command)
@@ -4124,7 +4124,7 @@ async function provisionCloudflareResourcesLocked(
 
   // --- Resolve + pin the ONE effective Cloudflare account ---------------
   // Precedence: the resolved config's `account_id` > `opts.accountId` > the ambient
-  // `CLOUDFLARE_ACCOUNT_ID`. wrangler 4.107 gives the resolved config's account_id
+  // `CLOUDFLARE_ACCOUNT_ID`. wrangler 4.131 gives the resolved config's account_id
   // PRECEDENCE over the env var, so if the config pins X while `opts.accountId`
   // requests Y, wrangler create/list would target X while the Hyperdrive REST check
   // targets Y — a cross-account create/orphan. Fail closed on a real mismatch;
@@ -4209,7 +4209,7 @@ async function provisionCloudflareResourcesLocked(
   // --- Hyperdrive blockers that are knowable BEFORE any account mutation ---
   // Unlike D1/KV/R2/queues — each of which has a machine-readable wrangler probe that
   // works under ANY wrangler credential, including a `wrangler login` OAuth session —
-  // Hyperdrive has none (wrangler 4.107 prints a human table and offers no get-by-name;
+  // Hyperdrive has none (wrangler 4.131 prints a human table and offers no get-by-name;
   // see the Hyperdrive block below). Its existence check is therefore a direct Cloudflare
   // REST call, which needs an API token of its own. Without one there is no way to tell
   // "config absent" from "cannot look", and `hyperdrive create` silently mints a DUPLICATE
@@ -4715,7 +4715,7 @@ async function provisionCloudflareResourcesLocked(
   }
 
   // --- Hyperdrive ----------------------------------------------------------
-  // wrangler 4.107 has NO machine-readable Hyperdrive list (`hyperdrive list`
+  // wrangler 4.131 has NO machine-readable Hyperdrive list (`hyperdrive list`
   // prints a cli-table3 box table; there is no `--json`, and `hyperdrive get`
   // takes an id, not a name). `hyperdrive create` on a NON-UNIQUE name silently
   // mints a DUPLICATE config (new UUID), so a re-run without the id in config

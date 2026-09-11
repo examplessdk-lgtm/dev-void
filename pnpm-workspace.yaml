@@ -20,6 +20,10 @@ allowBuilds:
 
 catalog:
   '@clack/prompts': ^1.7.0
+  # Stays on 4.x on purpose: wrangler 4.131 lists workers-types ^5 as an OPTIONAL peer, and
+  # every 5.x since 5.20260807.2 declares global `Buffer`/`process` as `any`, which collides
+  # with `@types/node` under packages/void's `types: ["node", "@cloudflare/workers-types"]`
+  # (Buffer loses its members; ~30 typecheck errors). Revisit when upstream drops those globals.
   '@cloudflare/workers-types': ^4.20260702.1
   '@types/node': ^26.1.0
   '@typescript/native-preview': 7.0.0-dev.20260507.1
@@ -27,7 +31,7 @@ catalog:
   vite: npm:@voidzero-dev/vite-plus-core@0.2.2
   vite-plus: ^0.2.2
   vitest: ^4.1.9
-  wrangler: ^4.107.0
+  wrangler: ^4.131.0
 
 overrides:
   esbuild: ^0.27.3

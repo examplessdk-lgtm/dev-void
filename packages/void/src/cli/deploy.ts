@@ -535,7 +535,7 @@ const MANAGED_DEPLOY_BUILD_ENV = { VOID_DEPLOY_BUILD: '1' } as const;
  * top-level config this flow provisions + preflights. Scrubbed from every child env
  * and fenced in the project dotenv (see below), on top of the provisioner's transport
  * scrub/fence which owns the endpoint-redirect + `CLOUDFLARE_ENV` vars:
- *   - `WRANGLER_CI_OVERRIDE_NAME` — wrangler 4.107 applies it AFTER config load
+ *   - `WRANGLER_CI_OVERRIDE_NAME` — wrangler 4.131 applies it AFTER config load
  *     (`mergeSharedConfigArgs` → `getCIOverrideName()`), REPLACING the upload name, so a
  *     bare `wrangler deploy` uploads a worker whose name the generated-config check never
  *     validated.
@@ -549,7 +549,7 @@ const DEPLOY_CONFIG_OVERRIDE_ENV_VARS = [
 ] as const;
 
 /**
- * The dotenv files wrangler 4.107 reloads into `process.env` (`override: true`) for
+ * The dotenv files wrangler 4.131 reloads into `process.env` (`override: true`) for
  * the orchestrator's `--env=` calls (`getDefaultEnvFiles("")`), so a repo dotenv here
  * would resurrect `WRANGLER_CI_OVERRIDE_NAME` at the DEPLOY step after the child-env
  * scrub removed it.
@@ -1352,7 +1352,7 @@ function deployPointerPath(root: string): string {
 }
 
 /**
- * Wrangler 4.107's FULL credential env-var set, verified against
+ * Wrangler 4.131's FULL credential env-var set, verified against
  * `wrangler-dist/cli.js`. It covers every env var wrangler reads to authenticate —
  * the API-client auth inputs (`apiToken`/`apiKey`/`apiEmail`/`userServiceKey`) plus
  * the `getEnvironmentVariableFactory` auth tokens — each canonical name AND its
@@ -2228,7 +2228,7 @@ function readStoredResourceName(
  * value, INCLUDING an empty string. Distinct from {@link readStoredResourceName}
  * (which collapses both "absent" and "empty string" to `undefined`): a
  * present-but-empty `migrations_pattern: ""` is still a CUSTOM pattern — wrangler
- * 4.107 takes its non-default branch for any value that is not `undefined`
+ * 4.131 takes its non-default branch for any value that is not `undefined`
  * (`rawPattern !== void 0`), so an empty pattern diverges from the default flat
  * `*.sql` enumeration this backend validates against. v1 therefore rejects a
  * custom pattern on PRESENCE, not on a non-empty length. Returns the raw value so
@@ -2269,7 +2269,7 @@ function readD1EntryString(entry: unknown, field: string): string | undefined {
 
 /**
  * Resolve the token to pass to `wrangler d1 migrations apply` so wrangler's OWN
- * resolution (`getDatabaseInfoFromConfig`, wrangler 4.107 src/d1/utils.ts) selects
+ * resolution (`getDatabaseInfoFromConfig`, wrangler 4.131 src/d1/utils.ts) selects
  * EXACTLY the `d1_databases` entry the gate validated (matched by `binding`). wrangler
  * iterates the array and returns the FIRST entry where
  * `token === database_name || token === binding`, then uses that entry's `migrations_dir`.
@@ -3221,7 +3221,7 @@ export function assertRemoteMigrationsDeployable(
 }
 
 /**
- * wrangler 4.107's own migration-file order comparator, reproduced EXACTLY
+ * wrangler 4.131's own migration-file order comparator, reproduced EXACTLY
  * (`compareMigrationPaths` / `compareSegments` / `leadingMigrationNumber`,
  * `wrangler-dist/cli.js` `src/d1/migrations/helpers.ts`): segment-by-segment, comparing each
  * segment's LEADING NUMERIC PREFIX (`parseInt(segment.split('_')[0], 10)`) numerically first,
@@ -3273,7 +3273,7 @@ export function compareWranglerMigrationPaths(a: string, b: string): number {
 }
 
 /**
- * Assert the migration files wrangler 4.107 will APPLY — in the ORDER it applies them — equal
+ * Assert the migration files wrangler 4.131 will APPLY — in the ORDER it applies them — equal
  * the gated source set. wrangler resolves its OWN files from the D1 entry's `migrations_dir`
  * (relative to the config-file dir) with the DEFAULT pattern `<dir>/*.sql` (a custom
  * `migrations_pattern` is rejected pre-account, so only the default flat `*.sql` enumeration —
@@ -4359,7 +4359,7 @@ export async function runCloudflareDeploy(
     }
 
     // Resolve + validate the migrate target ONLY when there ARE checked-in migrations: a D1
-    // desired purely from DB-use or auth can have no `db/migrations`, and wrangler 4.107
+    // desired purely from DB-use or auth can have no `db/migrations`, and wrangler 4.131
     // HARD-FAILS `d1 migrations apply` on a missing/empty folder (it never no-ops).
     if (migrations.length > 0) {
       // `migrations_dir` must be present in the config: wrangler defaults a missing value to
@@ -4383,7 +4383,7 @@ export async function runCloudflareDeploy(
         );
         return exit(1);
       }
-      // wrangler 4.107 resolves the migrate target by FIRST-matching the passed token
+      // wrangler 4.131 resolves the migrate target by FIRST-matching the passed token
       // against `database_name` OR `binding` (getDatabaseInfoFromConfig, src/d1/utils.ts)
       // and reads THAT entry's `migrations_dir`. The gate validated the entry matched by
       // BINDING, so migrate by a token that resolves to exactly that entry — fail closed
@@ -4574,14 +4574,14 @@ export async function runCloudflareDeploy(
   // dist/ssr/wrangler.json (which carries the real ids + pinned account). `--env=` pins
   // the top-level env so an ambient CLOUDFLARE_ENV cannot reselect a named one.
   // `--experimental-provision=false` / `--experimental-auto-create=false` disable
-  // wrangler 4.107's OWN resource provisioning (both default true, deployCommand +
+  // wrangler 4.131's OWN resource provisioning (both default true, deployCommand +
   // globalFlags, wrangler-dist/cli.js), so ONLY `provisionCloudflareResources` may create
   // resources — a bare deploy can never auto-create a missing binding (e.g. an R2 bucket
   // absent remotely but passing the local drift predicate), even in CI.
-  // `--autoconfig=false` disables wrangler 4.107's framework detection + auto-config
-  // (`autoconfig` defaults true, deployCommand cli.js:292315). Without it, and because we
+  // `--autoconfig=false` disables wrangler 4.131's framework detection + auto-config
+  // (`autoconfig` defaults true, deployCommand cli.js:283108). Without it, and because we
   // pass no `-c`, a detected framework marker (e.g. OpenNext) makes wrangler DELEGATE the
-  // deploy to another tool (`maybeDelegateToOpenNextDeployCommand`, cli.js:292343) — which
+  // deploy to another tool (`maybeDelegateToOpenNextDeployCommand`, cli.js:282991) — which
   // would upload something OTHER than the artifact Void just built and verified. Forcing it
   // off guarantees wrangler uploads exactly the verified `dist/ssr/wrangler.json`.
   //

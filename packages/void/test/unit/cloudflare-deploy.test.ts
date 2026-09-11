@@ -1043,7 +1043,7 @@ describe('runCloudflareDeploy — app-class guard (narrowed to full Void apps)',
   it('A1: rejects a PRESENT-but-EMPTY migrations_pattern ("") before any account op', async () => {
     // `migrations_pattern: ""` is present-but-empty. readStoredResourceName collapses it to
     // `undefined` (== absent), so a length-based guard would wave it through as "default" — but
-    // wrangler 4.107 takes its non-default branch for ANY value that is not `undefined`, so an
+    // wrangler 4.131 takes its non-default branch for ANY value that is not `undefined`, so an
     // empty pattern diverges from the flat `*.sql` set this backend validates. Reject on presence.
     const root = d1Project({
       ...PROVISIONED_D1,
@@ -4598,7 +4598,7 @@ describe('runCloudflareDeploy — migrations dir / count / auth', () => {
     const { deps, wranglerArgs, trace } = harness();
     await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
     // B2: the managed drift/journal gate runs for EVERY D1 app (a schema.ts with no
-    // generated migration is drift), but wrangler 4.107 hard-fails on an empty/absent
+    // generated migration is drift), but wrangler 4.131 hard-fails on an empty/absent
     // folder — so the apply/list is skipped.
     expect(trace).toContain('migrate-gate');
     expect(wranglerArgs.some((a) => a[0] === 'd1')).toBe(false);
@@ -6009,7 +6009,7 @@ describe('checkWranglerMigrationApplySet', () => {
   });
 });
 
-describe('compareWranglerMigrationPaths (wrangler 4.107 numeric-prefix comparator)', () => {
+describe('compareWranglerMigrationPaths (wrangler 4.131 numeric-prefix comparator)', () => {
   it('sorts by leading numeric prefix (2 before 10), matching wrangler', () => {
     const sorted = ['10_b.sql', '2_a.sql', '1_z.sql'].sort(compareWranglerMigrationPaths);
     expect(sorted).toEqual(['1_z.sql', '2_a.sql', '10_b.sql']);

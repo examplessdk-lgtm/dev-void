@@ -289,11 +289,18 @@ async function createCloudflarePrerenderRunner(options: {
   const wranglerUrl = import.meta.resolve('wrangler/package.json');
   const require = createRequire(wranglerUrl);
   const miniflarePath = require.resolve('miniflare');
-  const { Miniflare } = (await import(pathToFileURL(miniflarePath).href)) as {
+  // miniflare 5 (bundled with wrangler >= 4.131) only accepts its new multi-worker
+  // config shape; the flat single-worker options below are the v4 shape, which it
+  // still exports a converter for. `@cloudflare/vite-plugin` 1.54 builds its own
+  // Miniflare instances the same way (`new Miniflare(convertV4MiniflareOptions(...))`).
+  const { Miniflare, convertV4MiniflareOptions } = (await import(
+    pathToFileURL(miniflarePath).href
+  )) as {
     Miniflare: new (options: Record<string, unknown>) => {
       dispatchFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
       dispose(): Promise<void>;
     };
+    convertV4MiniflareOptions: (options: Record<string, unknown>) => Record<string, unknown>;
   };
 
   const mfOptions: Record<string, unknown> = {
@@ -303,7 +310,6 @@ async function createCloudflarePrerenderRunner(options: {
     compatibilityFlags: wranglerCompat.compatibilityFlags ?? [],
     bindings,
   };
-
   if (clientDir) {
     mfOptions.serviceBindings = {
       [wranglerConfig.assets?.binding ?? 'ASSETS'](request: Request) {
@@ -326,7 +332,6 @@ async function createCloudflarePrerenderRunner(options: {
       databases[db.binding] = db.database_id;
     }
     mfOptions.d1Databases = databases;
-    mfOptions.d1Persist = persistDir;
   }
 
   const kv = wranglerConfig.kv_namespaces;
@@ -336,7 +341,6 @@ async function createCloudflarePrerenderRunner(options: {
       namespaces[ns.binding] = ns.id;
     }
     mfOptions.kvNamespaces = namespaces;
-    mfOptions.kvPersist = persistDir;
   }
 
   const r2 = wranglerConfig.r2_buckets;
@@ -346,10 +350,17 @@ async function createCloudflarePrerenderRunner(options: {
       buckets[bucket.binding] = bucket.bucket_name;
     }
     mfOptions.r2Buckets = buckets;
-    mfOptions.r2Persist = persistDir;
   }
 
-  const mf = new Miniflare(mfOptions);
+  // One persistence root for every local resource: miniflare 5 replaced the
+  // per-product `d1Persist`/`kvPersist`/`r2Persist` with `resourcePersistencePath`,
+  // which it splits into `<root>/d1`, `<root>/kv`, `<root>/r2`. Set only when a
+  // resource is bound, as the per-product options were.
+  if (mfOptions.d1Databases || mfOptions.kvNamespaces || mfOptions.r2Buckets) {
+    mfOptions.resourcePersistencePath = persistDir;
+  }
+
+  const mf = new Miniflare(convertV4MiniflareOptions(mfOptions));
   const allBindings = mfOptions.bindings as Record<string, unknown> | undefined;
   const proxyToken = allBindings?.__VOID_PROXY_TOKEN as string | undefined;
 

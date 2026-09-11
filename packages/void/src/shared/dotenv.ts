@@ -241,7 +241,7 @@ export function mergeAndExpand(
 }
 
 /**
- * Wrangler 4.107's bundled `dotenv` LINE regex (verbatim), used ONLY to detect the
+ * Wrangler 4.131's bundled `dotenv` LINE regex (verbatim), used ONLY to detect the
  * declared KEYS wrangler would load — including the OPTIONAL `export ` prefix, the `KEY: val`
  * form, and single/double/backtick quoting — so a transport-redirect / config-override fence
  * sees exactly what wrangler's per-command dotenv reload would. We read keys, never values.

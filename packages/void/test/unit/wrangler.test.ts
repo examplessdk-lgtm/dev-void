@@ -1347,7 +1347,7 @@ describe('writeProvisionedWranglerConfig', () => {
   });
 
   it('fails closed when an ARRAY-shaped `queues` (present) would hide a producer/D1 binding collision on adopt — throws without writing', () => {
-    // wrangler 4.107 REQUIRES `queues` to be an OBJECT `{ producers, consumers }`.
+    // wrangler 4.131 REQUIRES `queues` to be an OBJECT `{ producers, consumers }`.
     // A PRESENT array-shaped `queues` makes the old `isRecord(queues)` guard in
     // `addQueueProducerOwners` return early, so a producer-like `{ binding: "DB" }`
     // is NOT collected — and a D1 adopt of binding `DB` would then slip through the
@@ -3028,7 +3028,7 @@ describe('name-keyed collector — send_email/ratelimits identity is `.name` onl
     });
 
   it('a send_email entry carrying an optional `.binding` does NOT collide with a DIFFERENT resource using that string', () => {
-    // wrangler 4.107 keys send_email on `.name` ONLY (config-schema.json has no `.binding`
+    // wrangler 4.131 keys send_email on `.name` ONLY (config-schema.json has no `.binding`
     // property; upload keys by `output[name]`). A mixed array `[{name,binding},{name}]` must
     // therefore leave the `.binding` string ("QUEUE_JOBS") FREE for a queue producer — the old
     // union of `.binding` invented a false "Send Email" collision and blocked the append.

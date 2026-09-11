@@ -1796,7 +1796,7 @@ function assertValidQueueProducers(producers: unknown): Array<Record<string, unk
 }
 
 /**
- * Validate the OUTER shape of a wrangler container field that wrangler 4.107
+ * Validate the OUTER shape of a wrangler container field that wrangler 4.131
  * requires to be an OBJECT (`queues`, `secrets`). A PRESENT-but-non-object container
  * (array/string/number/null) is malformed for wrangler AND would bypass the binding
  * collectors, HIDING a real cross-type binding collision — so it THROWS (fail closed).
@@ -1881,7 +1881,7 @@ export function readProvisionedBindingEntry(
  * binding NAMES by KNOWN structure instead of GUESSING from a value's content (which
  * misreads a `vars` value that happens to look like a binding list/object, and lets a
  * required-but-missing binding pass). Each variant + its required-ness is derived
- * DIRECTLY from wrangler 4.107's config-schema.json (`RawConfig.properties`):
+ * DIRECTLY from wrangler 4.131's config-schema.json (`RawConfig.properties`):
  *
  *   | shape            | schema example                         | binding name is | required        |
  *   | ---------------- | -------------------------------------- | --------------- | --------------- |
@@ -1905,7 +1905,7 @@ type BindingFieldShape =
 
 /**
  * Explicit per-field shape metadata (see {@link BindingFieldShape}), transcribed
- * from wrangler 4.107's config schema. Any `FRIENDLY_BINDING_NAMES` field absent here is
+ * from wrangler 4.131's config schema. Any `FRIENDLY_BINDING_NAMES` field absent here is
  * a `namespace-array` (`[{ binding }]`) — the shape wrangler's `getBindingNames` reads
  * via its `isNamespaceList` branch.
  */
@@ -2190,7 +2190,7 @@ function namespaceArrayBindingNames(field: string, value: unknown): Array<string
  * nothing. Every array member is strictly validated (a malformed one rejects the whole
  * config).
  *
- * Identity is the `.name` ONLY. Verified against wrangler 4.107's bundle +
+ * Identity is the `.name` ONLY. Verified against wrangler 4.131's bundle +
  * `config-schema.json`: NEITHER `send_email` NOR `ratelimits` has a `.binding` property in
  * the schema, and on UPLOAD wrangler keys them by `.name` (send_email:
  * `output[name] = { type: "send_email", ...}`; ratelimits push `{ name: binding.name, … }`).

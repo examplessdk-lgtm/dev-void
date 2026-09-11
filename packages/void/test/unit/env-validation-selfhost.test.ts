@@ -753,7 +753,7 @@ describe('dischargeSelfHostEnvContext — ground-truth secret gate', () => {
   // --- first-deploy (worker-not-found) surfaces a structured, actionable error ---
 
   describe('first-deploy worker-not-found', () => {
-    // The EXACT UserError wrangler 4.107 emits from `secret list` when the worker
+    // The EXACT UserError wrangler 4.131 emits from `secret list` when the worker
     // does not exist yet — the full fixed block rethrown after isWorkerNotFoundError.
     const WORKER_NOT_FOUND_STDERR =
       'Worker "app" not found.\n\n' +
