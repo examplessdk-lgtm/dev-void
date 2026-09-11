@@ -928,109 +928,248 @@ sendEmail ──► dev inbox? ──► env.SEND_EMAIL? ──► __VOID_PROXY?
    address on the developer's own zone.
 4. **No-prefix inbound.** When `__voidPlatformTo` is absent, the dispatcher
    matches the full local part, so `support+T-42@zone` reaches
-   `email/support+[ticket].ts`.
+   `email/support+[ticket].ts` — once the zone's subaddressing setting is
+   on; see below, it is off by default.
 5. **Enact actions on a native message.** When the envelope is a real
    `ForwardableEmailMessage`, apply reject / forward / reply on it instead of
    returning them.
 6. **Deploy guidance** — the detection and prompt below.
 
-#### Detection on every deploy
+#### One keystroke, measured _(rewritten 2026-09-11 after the deep research)_
 
-Detection needs Read scopes only, so it runs unconditionally and costs a
-few subprocess calls:
+Three facts, all read from wrangler's source and Cloudflare's OpenAPI schema
+this day, change the shape of Mode B from "prompt, then a dashboard visit"
+to **one Enter on the first deploy, zero on the next**:
 
-```
-void deploy --backend cloudflare
-   │
-   ├─ no email/ and no sendEmail() ──▶ skip, nothing printed
-   │
-   └─ email in use
-        ├─ PREFLIGHT (read-only)
-        │     zone        email.from → walk up labels → `wrangler email routing settings <zone>`
-        │     mx          node:dns resolveMx(zone)        ← needs no Cloudflare access
-        │     rules       `wrangler email routing rules list <zone>`
-        │     recipients  `wrangler email routing addresses list`
-        │     sending     `wrangler email sending settings <domain>`
-        │     binding     send_email in the root wrangler.jsonc
-        │
-        ├─ READY ──▶ print the address map, continue
-        │
-        └─ NOT READY
-              TTY ──▶ checklist, then prompt
-                        [1] Configure now     runs the wrangler commands below
-                        [2] Deploy anyway     the app works; email stays off with clear error codes
-                        [3] Cancel
-              CI  ──▶ no prompt; checklist + `void email setup`; deploy anyway
-                      (--require-email fails the deploy instead)
-```
+| Fact                                                                                                                                                                                                           | Where it was read                                                                                                                                                                             |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `wrangler auth token --json` is a stable, documented command "for use with other tools and scripts" (since 4.57.0). It prints the session's OAuth bearer, refreshed if expired.                                | wrangler 4.107/4.130 `cli.js` `authTokenCommand` (`status: "stable"`); docs `workers/wrangler/commands/general` "auth token". Measured: `{type:"oauth",token:"cfoa…"}`                        |
+| That bearer works against `api.cloudflare.com` like any token. Keyring storage (`default.enc`) is **opt-in**; the default is plaintext `default.toml`.                                                         | measured `GET /zones`, `GET /zones/{z}/email/routing/*` with it; `cli.js` `wantsKeyring = envOverride ?? isKeyringEnabled() ?? false`; CHANGELOG 4.107.0 (#14156)                             |
+| wrangler ≥ 4.113 makes `wrangler deploy` **reconcile Email Routing rules** from a top-level `addresses` array: literal → this worker, `*@apex` → catch-all, via `POST /accounts/{a}/email/routing/rules/plan`. | CHANGELOG 4.112.0 (#14470) + 4.113.0 (#14471); 4.130 `cli.js` `applyEmailRoutingAddresses`; OpenAPI operation `email-routing-routing-rules-plan-account-routing-rules` (GA, `x-forge-hidden`) |
 
-"Ready" per row:
-
-| Row        | Ready when                                                                                                                                 |
-| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| zone       | a zone in the account matches the mail domain, walking up labels                                                                           |
-| routing    | `Status: ready`                                                                                                                            |
-| rules      | one literal rule per `email/<name>+[p].ts` pointing at **this** worker; a catch-all pointing at this worker only when `_default.ts` exists |
-| recipients | at least one verified address, or Email Sending onboarded                                                                                  |
-| sending    | `dns` status ready                                                                                                                         |
-| binding    | present in the root config                                                                                                                 |
-
-Rules carry the worker name they route to, so the check distinguishes
-"points at me", "points at another worker", and "absent". That is the same
-shape as the existing drift check for D1, KV, and R2: compute the desired set
-from the `email/` scan, read the actual set, report the diff.
-
-#### The fix, through wrangler
-
-Void already drives wrangler through one `runWrangler` choke point in
-`provision.ts`. The fix is more calls through the same seam. Void never holds
-the token.
+And one fact that breaks an assumption this document made:
+**subaddressing is a per-zone setting, OFF by default.** `GET
+/zones/{z}/email/routing` reads `support_subaddress: false` on `void.cloud`,
+`void.app` and a third zone. A literal rule for `support@zone` does **not**
+match `support+T-42@zone` until the zone's setting is on (`PATCH
+/zones/{z}/email/routing { support_subaddress: true }`, `Zone Settings
+Write`; no wrangler command). Mode A is unaffected — its catch-all takes
+everything — but Mode B's flagship `email/support+[ticket].ts` needs the
+setting flipped, and the one-Enter flow does that.
 
 ```
-wrangler email routing enable <zone>                              only when MX is empty or Cloudflare's
-wrangler email routing rules create <zone> \
-    --match-type literal --match-field to --match-value support@<zone> \
-    --action-type worker --action-value <worker-name>                one per email/<name>+[p].ts
-wrangler email routing addresses create <email>                   then the human clicks
-wrangler email sending enable mail.<zone>                         subdomain-aware
+$ void deploy --backend cloudflare
+
+  Email in use   email/support+[ticket].ts · email/_default.ts · sendEmail() in 2 files
+    domain    mail.acme.com          (void.json email.from)
+    zone      acme.com               account Acme (f721b8e5…) · session dev@acme.com
+    apex MX   aspmx.l.google.com     left alone — mail lives on the subdomain
+    routing   mail.acme.com  not enabled · subaddressing off
+    sending   mail.acme.com  not onboarded
+    rules     support@mail.acme.com → acme-support   (absent)
+    binding   SEND_EMAIL             (absent)
+
+  This changes YOUR Cloudflare account. acme.com itself is not touched.
+    + enable Email Routing on mail.acme.com      Cloudflare writes and locks 3 MX + 1 SPF record there
+    + turn on subaddressing for acme.com         support+anything@ reaches support@
+    + onboard mail.acme.com for Email Sending    MX/SPF/DKIM on cf-bounce.mail.acme.com, _dmarc.mail.acme.com (p=reject)
+    + wrangler.jsonc                              send_email: [{ name: "SEND_EMAIL" }], addresses: ["support@mail.acme.com"]
+    + routing rule (applied by wrangler deploy)   support@mail.acme.com → acme-support
+    ! email/_default.ts                           a catch-all exists only on an apex; other @mail.acme.com mail bounces
+
+◆  Set up email on mail.acme.com?  ● Yes / ○ No          ⏎      ← the one keystroke
+
+  ✔ routing   mail.acme.com enabled · subaddressing on
+  ✔ sending   mail.acme.com onboarded
+  ✔ config    wrangler.jsonc updated
+  …
+  Email Routing plan:                                            ← wrangler's own output
+    mail.acme.com
+      + support@mail.acme.com -> worker (acme-support)
+  Email Routing addresses applied.
+
+  ✔ deployed  acme-support
+    inbound   support@mail.acme.com  →  email/support+[ticket].ts
+    outbound  sendEmail() from support@mail.acme.com
 ```
 
-Cloudflare's subaddressing means a rule for `support@zone` already captures
-`support+anything@zone`, so each handler file is one literal rule. A project
-with no `_default.ts` gets no catch-all, and unknown addresses bounce at
-Cloudflare — which is correct.
+Second deploy, nothing changed: every row reads ready, no prompt, no
+writes, `Email Routing rules are up to date.` Zero keystrokes.
 
-#### Three refusals, as code
+#### The flow, by lane
 
-1. **Never enable routing on an apex that has foreign MX.** `resolveMx`
-   first. Foreign records mean the domain carries someone's real mail;
-   routing enable locks MX and would take it down. Print the dashboard link
-   for the `mail.<zone>` subdomain and stop.
-2. **Never replace an existing catch-all.** Per-address rules take priority
-   over it, so the named handlers still work; only `_default.ts` stays
-   unbound, and the checklist says so.
-3. **Never touch a rule that points at another worker.** Report the conflict.
+```
+developer   void CLI (deploy.ts, step 3b-ii — before any project code runs)   void's pinned wrangler          Cloudflare API                           dashboard
+─────────   ────────────────────────────────────────────────────────────────   ─────────────────────          ──────────────                           ─────────
+deploy ───▶ needsEmail · scanEmailHandlersSync · domain = host(email.from)
+            PREFLIGHT, read-only
+              resolveMx(domain), resolveMx(apex), resolveTxt(_dmarc.*)  ── public DNS
+              whoami --json ──────────────────────────────────────────▶ tokenPermissions has email_routing:write + email_sending:write?
+              email routing settings <apex> ────────────────────────▶ GET /zones?name= · GET …/email/routing ──▶ Status · support_subaddress
+              email routing rules list <apex> ──────────────────────▶ GET …/rules · …/rules/catch_all   ──▶ mine · foreign · absent
+              email sending settings <domain> ──────────────────────▶ GET …/email/sending/subdomains    ──▶ Enabled · not found
+            checklist
+[Enter] ◀── confirm(default Yes)        CI/non-TTY: checklist + "run `void email setup`", deploy without email
+            APPLY, only rows not ready
+              [apex]  email routing enable <apex> ───────────────────▶ POST …/email/routing/enable {}       ──▶ MX ×3 + SPF, locked
+              [sub]   auth token --json  (env WRANGLER_WRITE_LOGS=false) ─▶ {type,token}   held in a closure, seconds
+                      fetch POST /zones/{z}/email/routing/dns {name:"mail.<apex>"} ─────────────────────────▶ MX ×3 + SPF on the subdomain   [UNVERIFIED]
+                      fetch PATCH /zones/{z}/email/routing {support_subaddress:true} ───────────────────────▶ subaddressing on            [UNVERIFIED]
+                      non-2xx → print the Settings → Subdomains line; withhold `addresses` this run ─────────────────────────────────────▶ (fallback only)
+              [send]  email sending enable <domain> ─────────────────▶ POST …/email/sending/subdomains {name} ──▶ cf-bounce MX/SPF/DKIM + _dmarc
+              write wrangler.jsonc: send_email [{name:"SEND_EMAIL"}] · addresses [...]; re-parse rootConfig
+            build (send_email + addresses pass through to dist/ssr/wrangler.json; verifier pins `addresses` whole-object)
+            wrangler deploy ─────────────────────────────────────────▶ PUT script (send_email in metadata)
+                                                                        POST /accounts/{a}/email/routing/rules/plan {owner_worker_tag, rules, catch_all_rules}
+                                                                        POST …/rules (literal → worker, source:wrangler) · PUT …/rules/catch_all (*@apex)
+            print the address map                                                                                                          (never visited on the happy path)
+```
 
-On a dedicated subdomain none of these fire. On a bare apex the prompt says
-plainly what a catch-all claims: every address on that domain.
+Rules that hold the whole thing together:
 
-#### Residuals — where a human step stays
+- **Void never refreshes, stores or forwards a token.** Everything with a
+  wrangler command goes through void's own pinned wrangler (the deploy
+  runner, `createDeployWranglerRunner`, `assertUploaderStillPinned`). The
+  session bearer is borrowed through `wrangler auth token --json` for the
+  two calls that have no command — subdomain routing enable and the
+  subaddressing PATCH — inside one closure, and dropped. The child gets
+  `WRANGLER_WRITE_LOGS=false`: without it, wrangler appends the token to
+  `~/.wrangler/logs/wrangler-*.log`, mode `-rw-r--r--` (read in
+  `shouldLogToDisk`). This reverses the earlier "REST from Void must use
+  `CLOUDFLARE_API_TOKEN` only" rule, on purpose.
+- **Slot 3b-ii**: after the bundle hash, before the env-schema probe, so no
+  project code has run when a credentialed call is made, and `rootConfig`
+  is re-parsed after the write so the laundering guard needs no exception.
+- **Rules and catch-all are wrangler's job.** Void derives `addresses` from
+  the `email/` scan and writes the root `wrangler.jsonc`; the existing
+  `wrangler deploy` applies the plan. Added and updated changes apply
+  silently; deleted and conflict changes get one default-No prompt in a
+  TTY and a `UserError` in CI — after the upload. Void prunes foreign
+  addresses at preflight so the plan is never destructive on its account.
+- **`addresses` is written only when routing is ready for every listed
+  domain, and rewritten every run** — deleted (never `[]`, which deletes
+  every owned rule) when a later preflight finds routing off, with the
+  reason printed. Otherwise the plan 400s with `2062` after the upload on
+  every deploy.
+- **Derivation.** `email/<literal>.ts` and `email/<literal>+[tag].ts` →
+  `<literal>@<domain>`. `email/_default.ts` → `*@<apex>`, apex path only.
+  `email/[name].ts` (dynamic local part) needs a catch-all, so it is
+  **refused on a subdomain** with a message.
+- **`send_email: [{ name: "SEND_EMAIL" }]`** is written only when routing is
+  ready or sending is onboarded — a bare account never carries the binding,
+  because what `wrangler deploy` does with it there is unmeasured. Under
+  `void dev`, `mergeBindings` strips it so the dev inbox stays the only
+  sink.
+- **`addresses` joins `DEPLOY_WHOLE_OBJECT_PINNED_FIELDS`.** Today it fails
+  open: the plugin's config customizer passes unknown keys through
+  (reproduced), so a build could redirect the account's inbound mail via
+  `dist/ssr/wrangler.json`.
+- **The interactivity gate must match wrangler's**: `ci-info.isCI ||
+!(stdin.isTTY && stdout.isTTY)`. Void's `isCI` (stdin only, or
+  `VOID_TOKEN`) disagrees when stdout is piped or `CI=1` is exported, and
+  the two halves of one deploy would then call the same run interactive and
+  not.
 
-| Gap                              | Why                                                                                                          | What the CLI does                                                                                  |
-| -------------------------------- | ------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------- |
-| catch-all → worker               | wrangler has no create command; `rules list` only shows one                                                  | print the dashboard link; re-check on the next deploy; use REST when `CLOUDFLARE_API_TOKEN` is set |
-| routing on `mail.<zone>`         | `wrangler email routing enable` resolves the zone by exact name; REST does not document a subdomain endpoint | same treatment, or route on the apex when its MX is empty                                          |
-| verification click               | no API to verify or resend Cloudflare's mail                                                                 | show `pending`; the human clicks                                                                   |
-| `wrangler email` output is prose | no `--json`                                                                                                  | parse per pinned version; on a miss print "unknown — run `void email setup`"                       |
+#### Refusals and degraded branches
 
-#### Token blast radius
+| Branch                                                     | What the developer sees                                                                                                                                          |
+| ---------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| no `email.from`                                            | `add "email": { "from": "you@mail.acme.com" } to void.json` — deploying without email                                                                            |
+| apex has foreign MX, `email.from` on the apex              | `acme.com already receives mail (aspmx.l.google.com). Void never enables routing over live mail. Use something@mail.acme.com.` stop                              |
+| session predates 4.81 (no email scopes)                    | `wrangler login` (one browser Allow) — stop                                                                                                                      |
+| routing status `unlocked` / `misconfigured*`               | print the status, stop — never re-lock records a developer unlocked                                                                                              |
+| `_dmarc.<name>` / `cf-bounce.<name>` TXT exists            | refuse sending onboarding; onboarding writes its own `_dmarc` `p=reject` and the API 409s (`dmarc.multiple`, `dkim.conflict`…)                                   |
+| sending enable fails (Free)                                | `Workers Paid needed for arbitrary recipients. Inbound works; sendEmail() to verified destinations only.` continue without it                                    |
+| subdomain POST refused                                     | one-time dashboard step printed (`Email → Settings → Subdomains → add mail.acme.com`); `addresses` withheld this run                                             |
+| rule on my address owned elsewhere                         | address pruned from `addresses`, reported; wrangler's plan stays non-destructive                                                                                 |
+| existing `send_email` entry not named `SEND_EMAIL`         | refuse with the rename — a second binding would be silent                                                                                                        |
+| zone in another account / not on Cloudflare / partial zone | distinguished via `GET /zones?name=` without `account.id`; `partial`/`secondary` refused                                                                         |
+| CI / non-TTY, not ready                                    | checklist + `run void email setup once, commit wrangler.jsonc, redeploy`; `--require-email` fails instead. `--provision` is NOT an escape: it fails closed in CI |
 
-`Email Routing Rules Edit` on a zone can redirect every inbound message on
-that zone. In this mode the scope lives in the developer's own OAuth session,
-which they already trust for `wrangler deploy`, and Void never extracts it.
-If Void ever needs the REST endpoint directly, it must use
-`CLOUDFLARE_API_TOKEN` only, and the docs must say that token deserves a
-short life.
+#### Human steps that remain, and why
+
+1. One Enter on the first deploy — it changes their account and locks DNS.
+2. `wrangler login` once, ≥ 4.81 — the session is the credential.
+3. `email.from` typed once — wrangler cannot enumerate zones (`email
+routing list` shows routing-enabled zones only); auto-pick is decision 9.
+4. Workers Paid for `sendEmail()` to arbitrary recipients — billing is
+   dashboard-only.
+5. A verification click only when a handler `forward()`s to a destination.
+6. The Subdomains form only if the subdomain POST is refused.
+7. A y/n on destructive rule changes — wrangler's own semantics.
+
+#### Build list
+
+Land first, own PR: bump `wrangler` (`framework/pnpm-workspace.yaml:30`,
+`^4.107.0` → ≥ 4.113, recommend the `@cloudflare/vite-plugin` 1.54.7 /
+wrangler 4.131 pair so one wrangler exists in the tree; minimum pair
+1.46.0 / 4.113.0). Re-fixture the `--json` parsers and deploy flags; add a
+bundled-`cli.js` grep test for `Email Routing plan:` and `authTokenCommand`.
+
+Feature PR, `framework/packages/void/src`:
+
+| File                                    | Change                                                                                                                                                                                                                                                                                  |
+| --------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cli/email-cloudflare.ts` _(new)_       | preflight (DNS probes, prose parsers pinned to the shipped wrangler with fixtures), `addresses` derivation, conflict pruning, checklist + address-map renderers, apply steps, `fetchWithSessionBearer` — the only function that ever sees the token; error map (2062, 2040, 2036/10105) |
+| `cli/deploy.ts`                         | `computeDesiredCloudflareResources` returns `needsEmail` + handlers; step 3b-ii; `addresses` in `DEPLOY_WHOLE_OBJECT_PINNED_FIELDS` and `verifyGeneratedDeployConfig`; `--require-email`; address map after deploy; wrangler-compatible interactivity gate                              |
+| `cli/wrangler.ts`                       | `ProvisionedWranglerPatch` gains `sendEmail` (name-keyed upsert) and `addresses` (whole-array); comment-preserving jsonc writes; registry entry `addresses: whole-object`                                                                                                               |
+| `cli/deploy.ts` runner                  | `runWranglerAuthToken()` — capture, `WRANGLER_WRITE_LOGS=false`, stdout never logged, never placed in env                                                                                                                                                                               |
+| `cli/email.ts`                          | `void email setup [--backend cloudflare]`; Mode B block in `void email status`                                                                                                                                                                                                          |
+| `config.ts`, `schema.json`              | `email.from`                                                                                                                                                                                                                                                                            |
+| `index.ts` `mergeBindings`              | strip `send_email` under serve                                                                                                                                                                                                                                                          |
+| `runtime/email.ts`, `router/compile.ts` | the runtime items 1, 4, 5 above                                                                                                                                                                                                                                                         |
+| tests                                   | derivation table; prose fixtures per wrangler version; 3b-ii ordering; `addresses` pin; token never in env/stdout; CI branches; 2040/2036; argv per branch                                                                                                                              |
+
+Upstream, in parallel: a workers-sdk PR adding `--subdomain` to `wrangler
+email routing enable` and a `--subaddressing` switch; when the pinned
+wrangler carries them, delete `fetchWithSessionBearer`.
+
+#### Still unverified — one staging session settles most of it
+
+1. `POST /zones/{z}/email/routing/dns { name: "mail.<zone>" }` enables
+   routing on the subdomain, with the OAuth session, and what a repeat
+   POST does. Attested by the OpenAPI body field (`name`, not deprecated)
+   and a Support quote in `terraform-provider-cloudflare#5890`; never
+   executed. wrangler's own `routing enable` calls the **deprecated**
+   `POST …/routing/enable`; `…/routing/dns` is the current one.
+2. `PATCH /zones/{z}/email/routing { support_subaddress: true }` with the
+   session (same permission group as 1).
+3. The other writes on the session (`sending enable`, rules, catch-all) —
+   inferred from wrangler's own commands, never run here.
+4. End-to-end `wrangler deploy --env= …` applying `addresses` from the
+   redirected `dist/ssr/wrangler.json`; only `--dry-run` on 4.107 was run.
+5. How to READ "is `mail.<zone>` a routing subdomain": `dig MX` is empty
+   on `mail.void.cloud` today, `GET …/routing/dns?subdomain=` is now
+   formally deprecated, and the plan endpoint accepted a literal on an
+   unregistered subdomain as `added` — so the plan is not a readiness check.
+6. Workers Free: what `sending enable`, `sending settings`, and a deploy
+   with a bare `send_email` binding do. `401 / 2036` on
+   `GET /accounts/{a}/email/sending/zones` was seen on one account with no
+   onboarded domain and an unread plan; the documented not-entitled code
+   is `403 / 10105`. Used as a hint line only.
+7. The API-token permission set for the plan endpoint (`x-api-token-group:
+null`) — the CI story runs on `CLOUDFLARE_API_TOKEN`.
+8. Two-label subdomains; what the plan reports after a dashboard edit of a
+   wrangler-owned rule; a worker rename (rules stay with the old tag →
+   `conflict`).
+
+#### Decisions handed back
+
+- **9. Domain input**: require `email.from` (recommended, zero writes to
+  `void.json`) vs. pick the zone through the bearer and write
+  `email.from = noreply@<domain>` back.
+- **10. Apex path**: allow with the one Enter when apex MX is empty
+  (recommended; the checklist names the catch-all claim and `_dmarc`
+  `p=reject`) vs. require `--apex`.
+- **11. Ship the session-bearer bridge now** behind the live-POST
+  verification, file the upstream wrangler PR in parallel, retire the
+  bridge when the pin carries it (recommended) vs. wait.
+- **12. Two projects on one zone** (`addresses` is top-level only, one
+  catch-all per apex): per-environment `email.from`, or a hard refusal
+  when a desired address is already routed elsewhere instead of a prune.
+- **13. Ownership of a hand-written `addresses` array**: Void owns the whole
+  array in Mode B (recommended; refuse when it holds entries Void did not
+  derive) vs. record managed entries and merge.
 
 ### Mode C — self-hosted platform
 
@@ -1369,10 +1508,17 @@ What this does not do, so nobody expects it:
   get one, this whole subsection collapses to "click Allow" — decision 8.
 - Creating the token by API (`POST /accounts/{id}/tokens`) needs a token
   with `API Tokens: Edit` first — the same chicken, one egg earlier.
-- The developer's local `wrangler login` session cannot substitute: its
-  scopes cover routing and sending, but the catch-all → bridge rule has no
-  wrangler command, and wrangler 4.130 keeps the OAuth token in an encrypted
-  `default.enc` that other CLIs cannot read.
+- The developer's local `wrangler login` session cannot replace the
+  platform's token, but not for the reason first written here. `wrangler
+auth token --json` hands the session bearer to other tools by design
+  (keyring storage is opt-in; see Mode B), so the CLI _could_ do the
+  one-time setup from the developer's machine — the catch-all → bridge
+  forward via REST, the destination via `wrangler email routing addresses
+create`. What it cannot do is send at runtime: the platform's proxy needs
+  a credential of its own for `send_raw`, and the OAuth bearer expires in
+  an hour with the refresh token staying wrangler's. Option for later:
+  setup through the session, and a pasted token narrowed to `Email
+Sending: Edit` only.
 
 ### If Void had a Cloudflare OAuth client
 
@@ -1659,18 +1805,27 @@ owner's.
    Not self-service; a partner ask. Recommended to ask, not to wait — the
    three-click template link ships first either way, and stays as the
    narrow-scope option.
+9. – 13. **Mode B one-keystroke flow** — domain input, apex path, the
+   session-bearer bridge, two projects on one zone, ownership of a
+   hand-written `addresses` array. Listed with recommendations under
+   [Decisions handed back](#decisions-handed-back).
 
 ## Open questions
 
 _(added 2026-09-11)_ Only a live probe settles these.
 
 - Whether `POST /zones/{z}/email/routing/dns` with `name: "mail.example.com"`
-  enables routing on a subdomain. The REST docs do not say; the dashboard
-  does it; `wrangler email routing enable` resolves the zone by exact name.
+  enables routing on a subdomain. The OpenAPI body has the `name` field
+  ("Domain of your zone", not deprecated) and a Support quote in
+  `terraform-provider-cloudflare#5890` says it does; nobody has executed it.
+  `wrangler email routing enable` calls the deprecated `…/routing/enable`.
 - Which token permission group the Email Sending subdomain endpoints accept.
   The OpenAPI schema lists none. The wrangler OAuth scope
-  `email_sending (write)` works for `wrangler email sending enable`, which is
-  the path Mode B uses.
+  `email_sending (write)` is what `wrangler email sending enable` uses;
+  the enable itself was not run here. `GET /accounts/{a}/email/sending/zones`
+  answered `401 / 2036 Unauthorized` on an account with no onboarded
+  sending domain (plan unread) and `200` on two accounts with one — the
+  endpoint and the code are in neither the schema nor the docs.
 - Whether `mail.staging.void.cloud`, two labels deep, is accepted by the
   subdomain form. The docs show one-label examples only.
 - The eight custom-domain probes listed under
@@ -1799,6 +1954,23 @@ Evidence for the 2026-09-11 sections (framework paths under
   `MailConfigUpdate.tsx` (`email_sending`, `email_routing_rule`),
   `Cloudflare-Mining/Cloudflare-Datamining` `data/types/src/api/apiToken.ts`
   (`ApiTokensAdhocTemplate { permissionGroupKeys, accountId?, mode?, zoneId? }`).
+  Mode B deep research (2026-09-11, 16 agents, read-only): wrangler 4.107 /
+  4.125 / 4.130 `wrangler-dist/cli.js` (`authTokenCommand` stable since 4.57.0
+  #11682; keyring opt-in `wantsKeyring = envOverride ?? isKeyringEnabled() ?? false`;
+  `shouldLogToDisk` + `WRANGLER_WRITE_LOGS`; `applyEmailRoutingAddresses`,
+  `fetchEmailRoutingPlan`, `isNonInteractiveOrCI`), workers-sdk
+  `packages/wrangler/CHANGELOG.md` 4.112.0 #14470 / 4.113.0 #14471,
+  `packages/wrangler/src/email-routing/{client,enable,dns-get}.ts`, docs PR
+  cloudflare-docs#31772 (unpublished `addresses` page: "Catch-all entries
+  support apex domains only"), `cloudflare/api-schemas` `openapi.json`
+  (`email_email_setting_dns_request_body.name`; GET `?subdomain=` deprecated
+  2026-09; plan operation `x-forge-hidden`; `email_email_setting_status`
+  enum; sending 409 codes), measured reads with the session bearer on
+  three accounts (`support_subaddress: false` on every zone; `401 / 2036`
+  on `…/email/sending/zones`), `@cloudflare/vite-plugin` 1.43.0 `dist/index.mjs`
+  (config customizer passes unknown keys through — reproduced with a scratch
+  build), framework `cli/deploy.ts:3729-3865` (slot 3b-ii, `--provision` CI
+  gate), `cli/preset.ts:238` (`resolveWranglerArgv`).
   Paste-back pattern: `orange-framework/orange-js` `packages/cli/src/cf-auth.ts`,
   `cloudflare/deploy.workers.cloudflare.com` `configure-account.js`.
   Email Sending REST errors: `email-service/api/send-emails/rest-api/`
