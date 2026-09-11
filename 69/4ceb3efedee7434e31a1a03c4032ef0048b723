@@ -1,0 +1,19 @@
+packages/void/test/unit/runner-pg.test.ts
+  s_5a06e7c4c4ad3d::t_8852fa68f2eef1 2,8,13-17
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "694ceb3efedee7434e31a1a03c4032ef0048b723",
+  "prompts": {},
+  "sessions": {
+    "s_5a06e7c4c4ad3d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08e6e-3b48-7183-ac5e-670cd59a2ddc",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
