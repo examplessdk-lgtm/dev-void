@@ -1,0 +1,19 @@
+packages/void/src/cli/wrapper.ts
+  s_50a8c884c9b42c::t_4abaa9bbfe3ba5 336,339-340
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "2d267fccc63c1e6c6e2aea5da113ee6e704c9ba9",
+  "prompts": {},
+  "sessions": {
+    "s_50a8c884c9b42c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08ee2-c2db-7d72-933c-70406f5c48a6",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
