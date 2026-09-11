@@ -1,0 +1,19 @@
+pnpm-workspace.yaml
+  s_b5e19775e502a3::t_1ae4057b071c91 12
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "a26166df3855ba6ead61d27b64aeeb066e66eb0c",
+  "prompts": {},
+  "sessions": {
+    "s_b5e19775e502a3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08e9c-eb3e-7512-b496-36c50161a94f",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
