@@ -1,0 +1,21 @@
+packages/isr/src/core.ts
+  s_0add8c35799930::t_7be62a3a4b974f 1,24-84
+platform/packages/dispatch/src/variant-key.ts
+  s_0add8c35799930::t_3a8d5bd93b4f6f 1
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "1e7e85cc1ce0055fceed4417d1adb4c0e7748405",
+  "prompts": {},
+  "sessions": {
+    "s_0add8c35799930": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0903e-9700-76f0-a4db-b5c9ea737ea9",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
