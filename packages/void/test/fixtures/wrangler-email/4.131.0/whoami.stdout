@@ -1,0 +1,98 @@
+{
+    "loggedIn": true,
+    "authType": "OAuth Token",
+    "email": "dev@example.com",
+    "accounts": [
+        {
+            "id": "1111111111111111111111111111aaaa",
+            "name": "Personal Account",
+            "type": "standard",
+            "settings": {
+                "enforce_twofactor": false,
+                "api_access_enabled": null,
+                "access_approval_expiry": null,
+                "abuse_contact_email": null,
+                "oauth_app_access_enabled": true
+            },
+            "legacy_flags": {
+                "enterprise_zone_quota": {
+                    "maximum": 0,
+                    "current": 0,
+                    "available": 0
+                }
+            },
+            "created_on": "2025-09-27T13:18:28.403722Z"
+        },
+        {
+            "id": "2222222222222222222222222222bbbb",
+            "name": "Second Personal Account",
+            "type": "standard",
+            "settings": {
+                "enforce_twofactor": false,
+                "api_access_enabled": null,
+                "access_approval_expiry": null,
+                "abuse_contact_email": null,
+                "oauth_app_access_enabled": true
+            },
+            "legacy_flags": {
+                "enterprise_zone_quota": {
+                    "maximum": 0,
+                    "current": 0,
+                    "available": 0
+                }
+            },
+            "created_on": "2020-05-09T08:15:53.092997Z"
+        },
+        {
+            "id": "f721b8e5f721b8e5f721b8e5f721b8e5",
+            "name": "Acme",
+            "type": "standard",
+            "settings": {
+                "enforce_twofactor": true,
+                "api_access_enabled": null,
+                "access_approval_expiry": null,
+                "abuse_contact_email": null,
+                "oauth_app_access_enabled": true
+            },
+            "legacy_flags": {
+                "enterprise_zone_quota": {
+                    "maximum": 3,
+                    "current": 2,
+                    "available": 1
+                }
+            },
+            "created_on": "2023-09-01T04:33:20.498384Z"
+        }
+    ],
+    "tokenPermissions": [
+        "user:read",
+        "offline_access",
+        "account:read",
+        "workers:write",
+        "workers_kv:write",
+        "workers_routes:write",
+        "workers_scripts:write",
+        "workers_tail:read",
+        "d1:write",
+        "pages:write",
+        "zone:read",
+        "ssl_certs:write",
+        "ai:write",
+        "ai-search:write",
+        "ai-search:run",
+        "websearch.run",
+        "agent-memory:write",
+        "queues:write",
+        "pipelines:write",
+        "secrets_store:write",
+        "artifacts:write",
+        "flagship:write",
+        "containers:write",
+        "cloudchamber:write",
+        "connectivity:admin",
+        "email_routing:write",
+        "email_sending:write",
+        "browser:write",
+        "challenge-widgets.write"
+    ]
+}
