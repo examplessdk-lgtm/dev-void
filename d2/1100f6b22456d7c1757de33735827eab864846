@@ -1,0 +1,25 @@
+packages/deploy-core/test/unit/durable-migrations.test.ts
+  s_0add8c35799930::t_db376b3673450f 1-67
+packages/void/src/cli/cloudflare-deploy/classify.ts
+  s_0add8c35799930::t_0276b6d4e8590c 9,82
+packages/void/test/unit/cloudflare-deploy.test.ts
+  s_0add8c35799930::t_56474c3c756b05 1413,1417,1422-1428,1432
+platform/packages/api/src/routes/deploy.ts
+  s_0add8c35799930::t_11f8d8c9109a12 4,635,670-672,734,745-750,885-890,892,902-903,917-918,922
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "d21100f6b22456d7c1757de33735827eab864846",
+  "prompts": {},
+  "sessions": {
+    "s_0add8c35799930": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0903e-9700-76f0-a4db-b5c9ea737ea9",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
