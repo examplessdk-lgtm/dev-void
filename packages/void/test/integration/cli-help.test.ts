@@ -16,7 +16,7 @@ function createProject(): string {
 }
 
 function runVoid(root: string, args: Array<string>): { output: string; status: number } {
-  const res = spawnSync(process.execPath, [CLI_ENTRY, ...args], {
+  const res = spawnSync('node', [CLI_ENTRY, ...args], {
     cwd: root,
     encoding: 'utf8',
     env: {

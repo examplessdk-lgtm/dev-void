@@ -62,7 +62,10 @@ jobs:
           }
 
       - uses: voidzero-dev/setup-vp@2dec1e33f4ab2c6d5bce1b0c4607961bb1a3f7a1 # v1.12.0
+        env:
+          VP_PR_VERSION: 0e24d6c2139ea8733ee4a1dd70e4a2a1ba8b4a4a
         with:
+          version: 0.0.0-commit.0e24d6c2139ea8733ee4a1dd70e4a2a1ba8b4a4a
           node-version-file: .node-version
           cache: true
 
@@ -100,7 +103,10 @@ jobs:
         with:
           persist-credentials: false
       - uses: voidzero-dev/setup-vp@2dec1e33f4ab2c6d5bce1b0c4607961bb1a3f7a1 # v1.12.0
+        env:
+          VP_PR_VERSION: 0e24d6c2139ea8733ee4a1dd70e4a2a1ba8b4a4a
         with:
+          version: 0.0.0-commit.0e24d6c2139ea8733ee4a1dd70e4a2a1ba8b4a4a
           node-version-file: .node-version
           cache: true
       # Fail closed BEFORE the build: a missing/empty credential must fail this job, not self-skip. The

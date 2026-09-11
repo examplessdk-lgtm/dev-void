@@ -82,6 +82,10 @@ Full docs at [void.cloud](https://void.cloud). Run `vp run dev:docs` in this rep
 
 ### Setup
 
+This branch uses Vite+ preview commit `0e24d6c`. Install the matching CLI from the
+[preview build instructions](https://github.com/voidzero-dev/vite-plus/pull/2665#issuecomment-5629721393)
+before running the setup commands below.
+
 ```sh
 git clone https://github.com/nicepkg/void.git
 cd void

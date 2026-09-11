@@ -25,8 +25,8 @@ catalog:
   typescript: 7.0.2
   '@voidzero-dev/vitepress-theme': ^5.0.7
   pathslash: ^0.1.0
-  vite: npm:@voidzero-dev/vite-plus-core@0.3.1
-  vite-plus: 0.3.1
+  vite: npm:@voidzero-dev/vite-plus-core@0.0.0-commit.0e24d6c2139ea8733ee4a1dd70e4a2a1ba8b4a4a
+  vite-plus: 0.0.0-commit.0e24d6c2139ea8733ee4a1dd70e4a2a1ba8b4a4a
   wrangler: 4.107.0
 
 catalogs:
@@ -51,3 +51,15 @@ peerDependencyRules:
   allowedVersions:
     tailwindcss: '*'
     vite: '*'
+
+minimumReleaseAgeExclude:
+  - '@voidzero-dev/vite-plus-core@0.0.0-commit.0e24d6c2139ea8733ee4a1dd70e4a2a1ba8b4a4a'
+  - '@voidzero-dev/vite-plus-darwin-arm64@0.0.0-commit.0e24d6c2139ea8733ee4a1dd70e4a2a1ba8b4a4a'
+  - '@voidzero-dev/vite-plus-darwin-x64@0.0.0-commit.0e24d6c2139ea8733ee4a1dd70e4a2a1ba8b4a4a'
+  - '@voidzero-dev/vite-plus-linux-arm64-gnu@0.0.0-commit.0e24d6c2139ea8733ee4a1dd70e4a2a1ba8b4a4a'
+  - '@voidzero-dev/vite-plus-linux-arm64-musl@0.0.0-commit.0e24d6c2139ea8733ee4a1dd70e4a2a1ba8b4a4a'
+  - '@voidzero-dev/vite-plus-linux-x64-gnu@0.0.0-commit.0e24d6c2139ea8733ee4a1dd70e4a2a1ba8b4a4a'
+  - '@voidzero-dev/vite-plus-linux-x64-musl@0.0.0-commit.0e24d6c2139ea8733ee4a1dd70e4a2a1ba8b4a4a'
+  - '@voidzero-dev/vite-plus-win32-arm64-msvc@0.0.0-commit.0e24d6c2139ea8733ee4a1dd70e4a2a1ba8b4a4a'
+  - '@voidzero-dev/vite-plus-win32-x64-msvc@0.0.0-commit.0e24d6c2139ea8733ee4a1dd70e4a2a1ba8b4a4a'
+  - vite-plus@0.0.0-commit.0e24d6c2139ea8733ee4a1dd70e4a2a1ba8b4a4a

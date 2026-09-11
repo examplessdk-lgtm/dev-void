@@ -46,7 +46,7 @@ function runVoid(
   root: string,
   args: Array<string>,
 ): { stdout: string; stderr: string; status: number } {
-  const res = spawnSync(process.execPath, [CLI_ENTRY, ...args], {
+  const res = spawnSync('node', [CLI_ENTRY, ...args], {
     cwd: root,
     encoding: 'utf8',
     env: {

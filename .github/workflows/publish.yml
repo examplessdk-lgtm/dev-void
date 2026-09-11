@@ -35,3 +35,5 @@ jobs:
 
       - run: npm install -g npm@11
       - run: vp pm publish -r --access public --tag latest --no-git-checks
+        env:
+          NPM_CONFIG_REGISTRY: https://registry.npmjs.org
