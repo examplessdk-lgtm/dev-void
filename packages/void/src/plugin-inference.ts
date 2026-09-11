@@ -88,7 +88,7 @@ export type InferenceOptions = {
     db?: boolean | string;
     kv?: boolean | string;
     storage?: boolean | string;
-    ai?: boolean;
+    ai?: boolean | string;
   };
   paths?: ProjectPaths;
 };

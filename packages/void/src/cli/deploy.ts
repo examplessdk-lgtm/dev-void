@@ -955,8 +955,8 @@ const DEPLOY_RAW_SNAPSHOT_FIELDS: ReadonlyArray<string> = [
   'migrations',
 ];
 
-/** Void's own injected Workers AI binding shape (`mergeBindings` in index.ts). */
-const VOID_EMITTED_AI_BINDING = { binding: 'AI' };
+/** Void's default injected Workers AI binding name (`mergeBindings` in index.ts). */
+const DEFAULT_VOID_AI_BINDING = 'AI';
 
 /**
  * Sub-fields on a `durable_objects` binding that make it target ANOTHER worker's Durable Objects.
@@ -1808,12 +1808,14 @@ export function verifyGeneratedDeployConfig(
     passthroughRawFields?: Map<string, unknown>;
     /**
      * Whether the pre-build inference found Workers AI use in the source (the SAME `needsAI`
-     * signal `shouldBindWorkersAi` gates on in index.ts). Authorizes an emitted `{binding:'AI'}`
-     * ai binding when the root config declares no ai binding: only an AI-using app legitimately
-     * receives Void's injected Workers AI binding, so a build that injects one into a non-AI app
-     * (billable inference the source never asked for) fails closed.
+     * signal `shouldBindWorkersAi` gates on in index.ts). Authorizes Void's emitted AI binding
+     * (default `AI`, or `aiBindingName`) when the root config declares none: only an AI-using app
+     * legitimately receives one, so a build that injects it into a non-AI app (billable inference
+     * the source never asked for) fails closed.
      */
     needsAI?: boolean;
+    /** Custom `inference.bindings.ai` name authorized for Void's emitted AI binding. */
+    aiBindingName?: string;
     /**
      * Auth-enabled Cloudflare builds must emit `secrets.required` with
      * BETTER_AUTH_SECRET so Wrangler inherits the persistent remote value into
@@ -2085,9 +2087,9 @@ export function verifyGeneratedDeployConfig(
   //     worker's DOs; Void's own DOs are always LOCAL, so it must match a root binding.
   //   • `ai` — when the root declared its own ai binding it must SURVIVE byte-identical (a build
   //     that REMOVED or rewrote it is rejected); otherwise the emitted binding must be ABSENT or —
-  //     ONLY when the source's pre-build inference says the app uses Workers AI — Void's own
-  //     `{binding:'AI'}`. An injected `{binding:'AI'}` on an app that does not use AI would incur
-  //     account-billed inference from build-injected worker code.
+  //     ONLY when the source's pre-build inference says the app uses Workers AI — Void's
+  //     configured Workers AI binding. An injected AI binding on an app that does not use AI would
+  //     incur account-billed inference from build-injected worker code.
   //   • `migrations` — an emitted Durable Object migration carrying a DESTRUCTIVE key (deleting,
   //     renaming, or transferring classes) must match a root-declared migration byte-for-byte;
   //     Void emits only creation-key migrations, so a destructive one is a build injection that
@@ -2131,10 +2133,10 @@ export function verifyGeneratedDeployConfig(
         };
       }
     } else if (emittedAi !== undefined) {
-      // No root ai binding: the only ai binding Void's own build emits is `{binding:'AI'}`, and
-      // ONLY when the pre-build inference says the source uses Workers AI (the SAME signal
-      // `shouldBindWorkersAi` gates on). Anything else here is a build-injected billable binding.
-      if (!(expected.needsAI === true && deepEqual(emittedAi, VOID_EMITTED_AI_BINDING))) {
+      // No root ai binding: Void emits the configured binding name (default `AI`) ONLY when
+      // pre-build inference says the source uses Workers AI. Anything else is build-injected.
+      const expectedAi = { binding: expected.aiBindingName ?? DEFAULT_VOID_AI_BINDING };
+      if (!(expected.needsAI === true && deepEqual(emittedAi, expectedAi))) {
         return {
           ok: false,
           reason: `generated config declares an ai binding the build injected — the pre-build inference found no Workers AI use in the source and the root config declares no ai binding.`,
@@ -2674,10 +2676,12 @@ export async function computeDesiredCloudflareResources(
   migrations: Array<{ name: string; sql: string }>;
   /**
    * Whether the pre-build inference found Workers AI use in the source — the SAME `needsAI`
-   * signal `shouldBindWorkersAi` (index.ts) gates the emitted `{binding:'AI'}` on. Threaded
-   * into {@link verifyGeneratedDeployConfig} to authorize that emitted ai binding.
+   * signal `shouldBindWorkersAi` (index.ts) gates the emitted AI binding on. Threaded into
+   * {@link verifyGeneratedDeployConfig} to authorize that binding.
    */
   needsAI: boolean;
+  /** Workers AI binding emitted by the build (default `AI`). */
+  aiBindingName: string;
   /**
    * Whether Void's build emits the sandbox container application — the SAME signal `mergeBindings`
    * (index.ts) gates emission on: `isSandboxEnabled(config)` (a `sandbox` field in `void.json`) OR
@@ -2838,6 +2842,7 @@ export async function computeDesiredCloudflareResources(
     migrationsDir: paths.migrationsDir,
     migrations,
     needsAI: bindings.needsAI,
+    aiBindingName: bindingNames?.ai ?? DEFAULT_VOID_AI_BINDING,
     expectedCrons,
     // Mirror index.ts's emission signal EXACTLY (line 658): the sandbox container is emitted when
     // `void.json` enables it OR the source imports `void/sandbox` (the import-walk signal). Using
@@ -3931,6 +3936,7 @@ export async function runCloudflareDeploy(
     migrationsDir,
     migrations: preBuildMigrations,
     needsAI,
+    aiBindingName,
     needsSandbox,
     expectedCrons,
   } = await computeDesiredCloudflareResources(root, voidConfig, configPath);
@@ -4863,6 +4869,7 @@ export async function runCloudflareDeploy(
       passthroughIdentitySnapshot,
       passthroughRawFields,
       needsAI,
+      aiBindingName,
       authEnabled,
       expectedContainers,
       expectedCrons,
@@ -5079,6 +5086,7 @@ export async function runCloudflareDeploy(
     passthroughIdentitySnapshot,
     passthroughRawFields,
     needsAI,
+    aiBindingName,
     authEnabled,
     requiredSecretNames: requiredSchemaSecretNames,
     expectedContainers,

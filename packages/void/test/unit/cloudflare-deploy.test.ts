@@ -1109,6 +1109,21 @@ describe('computeDesiredCloudflareResources — desired set from source', () => 
     });
   });
 
+  it('carries a custom Workers AI name into deploy verification expectations', async () => {
+    const root = makeProject({
+      'package.json': JSON.stringify({ name: 'myapp' }),
+      'void.json': JSON.stringify({ inference: { bindings: { ai: 'MY_AI' } } }),
+      'routes/index.ts': `export const GET = () => new Response('ok');`,
+    });
+    const resources = await computeDesiredCloudflareResources(
+      root,
+      readConfig(root),
+      join(root, 'wrangler.jsonc'),
+    );
+    expect(resources.needsAI).toBe(true);
+    expect(resources.aiBindingName).toBe('MY_AI');
+  });
+
   it('desires D1 for a migration-only SQLite app (no env.DB use, no auth)', async () => {
     const root = makeProject({
       'package.json': JSON.stringify({ name: 'myapp' }),
@@ -4339,6 +4354,24 @@ describe('verifyGeneratedDeployConfig', () => {
       passthroughIdentitySnapshot: snapshotPassthroughIdentities({}),
       passthroughRawFields: snapshotPassthroughRawFields({}),
       needsAI: true,
+    });
+    expect(result).toEqual({ ok: true });
+  });
+
+  it('passes a configured custom emitted ai binding when the source uses AI', () => {
+    const root = deployConfigProject({
+      account_id: 'acc123',
+      name: 'myapp',
+      ai: { binding: 'MY_AI' },
+    });
+    const result = verifyGeneratedDeployConfig(root, {
+      accountId: 'acc123',
+      workerName: 'myapp',
+      desired: { kvNamespaces: [], queues: [] },
+      passthroughIdentitySnapshot: snapshotPassthroughIdentities({}),
+      passthroughRawFields: snapshotPassthroughRawFields({}),
+      needsAI: true,
+      aiBindingName: 'MY_AI',
     });
     expect(result).toEqual({ ok: true });
   });

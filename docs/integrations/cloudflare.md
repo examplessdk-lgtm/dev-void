@@ -99,12 +99,12 @@ Bindings are [inferred automatically](../reference/resource-inference.md) by sca
 ```json
 {
   "inference": {
-    "bindings": { "db": true, "kv": true, "storage": false, "ai": true }
+    "bindings": { "db": true, "kv": true, "storage": false, "ai": "MY_AI" }
   }
 }
 ```
 
-`db`, `kv`, and `storage` accept a string to customize the binding name (e.g. `"db": "MY_DB"`). `ai` only accepts a boolean.
+Every binding accepts a string to customize its name (for example, `"db": "MY_DB"` or `"ai": "MY_AI"`).
 
 See [Configuration](../reference/config.md) for details.
 
@@ -364,7 +364,7 @@ These checks detect changes to the deployment target or uploader, but they don't
 
 `void/ai` works on your own Cloudflare account, along two paths:
 
-- **Workers AI** (`ai.run`, `ai.stream`, `ai.image`) works out of the box. When your app imports `void/ai`, `vite build` infers that you need AI and adds a Workers AI binding (`env.AI`) to the generated `wrangler.json` automatically -- you do **not** add it to `wrangler.jsonc`.
+- **Workers AI** (`ai.run`, `ai.stream`, `ai.image`) works out of the box. When your app imports `void/ai`, `vite build` infers that you need AI and adds a Workers AI binding (`env.AI`) to the generated `wrangler.json` automatically -- you do **not** add it to `wrangler.jsonc`. Set `inference.bindings.ai` to a string to use a custom name.
 - **Provider models** (`ai.provider("openai").fetch(...)`) route through _your own_ Cloudflare AI Gateway. Set its id in `void.json` and add the provider's API key as a Worker secret.
 
 ```jsonc
@@ -387,7 +387,7 @@ import { defineHandler } from 'void';
 import { ai } from 'void/ai';
 
 export const POST = defineHandler(async (c) => {
-  // Workers AI -- uses env.AI directly
+  // Workers AI -- uses the inferred or configured AI binding directly
   const summary = await ai.run('@cf/meta/llama-3.1-8b-instruct', {
     prompt: 'Summarize the changelog.',
   });
@@ -408,7 +408,7 @@ Set `ai.gateway` before calling `ai.provider().fetch()`; otherwise it returns `5
 Notes:
 
 - **No cross-tenant usage metering.** On the Void platform, AI calls are metered and billed through a shared proxy. Self-hosted, there is no metering -- you get your own [Cloudflare AI Gateway analytics](https://developers.cloudflare.com/ai-gateway/) instead.
-- **The runtime reads the `env.AI` binding by name** -- a custom-named root AI binding is not supported.
+- **Custom AI binding names are supported.** Configure `"inference": { "bindings": { "ai": "MY_AI" } }`, or declare the custom `ai.binding` in your root Wrangler config; the generated worker records the resolved name for `void/ai` automatically.
 - **`void dev` has no local Workers AI emulation.** In development, AI still routes through Void, so `void dev` AI requires `void auth login` even when you deploy self-hosted.
 
 ### ISR (self-host)

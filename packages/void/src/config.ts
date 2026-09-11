@@ -63,7 +63,7 @@ export type InferenceConfig = {
     db?: boolean | string;
     kv?: boolean | string;
     storage?: boolean | string;
-    ai?: boolean;
+    ai?: boolean | string;
   };
   scanDirs?: ReadonlyArray<string>;
   build?: string;
@@ -762,18 +762,10 @@ export function readConfig(root: string): VoidConfig {
             `config: Unknown binding '${key}' in ${CONFIG_FILE}. Valid: db, kv, storage, ai.`,
           );
         }
-        if (key === 'ai') {
-          if (typeof b[key] !== 'boolean') {
-            throw new Error(
-              `config: "inference.bindings.${key}" in ${CONFIG_FILE} must be a boolean.`,
-            );
-          }
-        } else {
-          if (typeof b[key] !== 'boolean' && typeof b[key] !== 'string') {
-            throw new Error(
-              `config: "inference.bindings.${key}" in ${CONFIG_FILE} must be a boolean or a string custom binding name.`,
-            );
-          }
+        if (typeof b[key] !== 'boolean' && typeof b[key] !== 'string') {
+          throw new Error(
+            `config: "inference.bindings.${key}" in ${CONFIG_FILE} must be a boolean or a string custom binding name.`,
+          );
         }
       }
     }
@@ -988,11 +980,11 @@ export function isNodeTarget(target: VoidConfig['target']): boolean {
  */
 export function resolveBindingNames(
   bindings: InferenceConfig['bindings'],
-): { d1?: string; kv?: string; r2?: string } | undefined {
+): { d1?: string; kv?: string; r2?: string; ai?: string } | undefined {
   if (!bindings) {
     return undefined;
   }
-  const names: { d1?: string; kv?: string; r2?: string } = {};
+  const names: { d1?: string; kv?: string; r2?: string; ai?: string } = {};
   let hasCustom = false;
   if (typeof bindings.db === 'string') {
     names.d1 = bindings.db;
@@ -1004,6 +996,10 @@ export function resolveBindingNames(
   }
   if (typeof bindings.storage === 'string') {
     names.r2 = bindings.storage;
+    hasCustom = true;
+  }
+  if (typeof bindings.ai === 'string') {
+    names.ai = bindings.ai;
     hasCustom = true;
   }
   return hasCustom ? names : undefined;

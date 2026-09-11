@@ -378,6 +378,19 @@ describe('runtime ai', () => {
       expect(fetchMock).not.toHaveBeenCalled();
     });
 
+    it('selects a custom binding named by the generated runtime variable', async () => {
+      vi.resetModules();
+      const { envContext } = await import('../../src/runtime/env-raw.ts');
+      const { ai } = await import('../../src/runtime/ai.ts');
+      const direct = makeDirectAi();
+
+      await envContext.run({ MY_AI: direct.AI, __VOID_AI_BINDING: 'MY_AI' }, async () => {
+        expect(await ai.run('@cf/meta/llama', { prompt: 'Hi' })).toEqual({ ok: true });
+      });
+
+      expect(direct.run).toHaveBeenCalledWith('@cf/meta/llama', { prompt: 'Hi' });
+    });
+
     it('provider().fetch hits the user gateway with provider auth and no metering header', async () => {
       vi.resetModules();
       const { envContext } = await import('../../src/runtime/env-raw.ts');

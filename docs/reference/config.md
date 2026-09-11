@@ -423,7 +423,7 @@ Explicitly control inferred Cloudflare bindings. If omitted, bindings are [autom
 Each binding accepts `true` (use default name), `false` (disable), or a string (custom binding name):
 
 ```json
-{ "inference": { "bindings": { "db": true, "kv": false, "storage": "MY_BUCKET" } } }
+{ "inference": { "bindings": { "db": true, "kv": false, "storage": "MY_BUCKET", "ai": "MY_AI" } } }
 ```
 
 | Key       | Default Binding | Type          | Custom Name              |
@@ -431,9 +431,9 @@ Each binding accepts `true` (use default name), `false` (disable), or a string (
 | `db`      | `DB`            | `D1Database`  | `"db": "MY_DB"`          |
 | `kv`      | `KV`            | `KVNamespace` | `"kv": "MY_KV"`          |
 | `storage` | `STORAGE`       | `R2Bucket`    | `"storage": "MY_BUCKET"` |
-| `ai`      | `AI`            | `Ai`          | Boolean only             |
+| `ai`      | `AI`            | `Ai`          | `"ai": "MY_AI"`          |
 
-Custom names are used in deploy-manifest and Cloudflare-config generation, remote binding proxying, internal migrations, and generated runtime helpers such as `void/db`, `void/kv`, and `void/storage`.
+Custom resource binding names flow through deploy manifests, Cloudflare config generation, remote binding proxying, internal migrations, and generated runtime helpers such as `void/db`, `void/kv`, and `void/storage`. Custom AI names apply to generated Cloudflare configuration and `void/ai` runtime resolution for direct Cloudflare builds; managed Workers AI continues to use Void's service proxy.
 
 #### `inference.build`
 

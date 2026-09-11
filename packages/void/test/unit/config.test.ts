@@ -184,22 +184,25 @@ describe('readConfig', () => {
     cleanup();
   });
 
-  it('accepts string binding names for db/kv/storage', () => {
+  it('accepts string binding names for db/kv/storage/ai', () => {
     setup(
       JSON.stringify({
-        inference: { bindings: { db: 'MY_DB', kv: 'MY_KV', storage: 'MY_R2' } },
+        inference: {
+          bindings: { db: 'MY_DB', kv: 'MY_KV', storage: 'MY_R2', ai: 'MY_AI' },
+        },
       }),
     );
     const config = readConfig(tmpDir);
     expect(config.inference?.bindings?.db).toBe('MY_DB');
     expect(config.inference?.bindings?.kv).toBe('MY_KV');
     expect(config.inference?.bindings?.storage).toBe('MY_R2');
+    expect(config.inference?.bindings?.ai).toBe('MY_AI');
     cleanup();
   });
 
-  it('throws on non-boolean ai binding value', () => {
-    setup(JSON.stringify({ inference: { bindings: { ai: 'yes' } } }));
-    expect(() => readConfig(tmpDir)).toThrow('must be a boolean');
+  it('throws on invalid ai binding value', () => {
+    setup(JSON.stringify({ inference: { bindings: { ai: 42 } } }));
+    expect(() => readConfig(tmpDir)).toThrow('must be a boolean or a string');
     cleanup();
   });
 
@@ -1618,10 +1621,11 @@ describe('resolveBindingNames', () => {
   });
 
   it('returns all custom names', () => {
-    expect(resolveBindingNames({ db: 'D', kv: 'K', storage: 'S' })).toEqual({
+    expect(resolveBindingNames({ db: 'D', kv: 'K', storage: 'S', ai: 'A' })).toEqual({
       d1: 'D',
       kv: 'K',
       r2: 'S',
+      ai: 'A',
     });
   });
 });

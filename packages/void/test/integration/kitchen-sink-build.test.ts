@@ -101,10 +101,11 @@ describe('playground/kitchen-sink build', () => {
   it('does not leak __VOID_* credentials into dist/ssr/wrangler.json', () => {
     const wranglerConfig = JSON.parse(readFileSync(join(dist, 'ssr', 'wrangler.json'), 'utf-8'));
     const vars = (wranglerConfig.vars ?? {}) as Record<string, unknown>;
-    // `__VOID_AI_GATEWAY` is a legitimate, non-credential runtime var emitted from
-    // `ai.gateway` in void.json (asserted below) — exclude it from the leak filter.
+    // These are legitimate, non-credential runtime routing vars for a custom Workers AI
+    // binding / AI Gateway. Exclude them from the credential leak filter.
+    const allowedRuntimeMarkers = new Set(['__VOID_AI_BINDING', '__VOID_AI_GATEWAY']);
     const leakedKeys = Object.keys(vars).filter(
-      (key) => key.startsWith('__VOID_') && key !== '__VOID_AI_GATEWAY',
+      (key) => key.startsWith('__VOID_') && !allowedRuntimeMarkers.has(key),
     );
     expect(leakedKeys).toEqual([]);
   });

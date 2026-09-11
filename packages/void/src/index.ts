@@ -394,6 +394,17 @@ export function shouldBindWorkersAi(
   return needsAI && command === 'build' && !resultAi && !resolvedAi;
 }
 
+/** Resolve the runtime Workers AI binding, preserving a root Wrangler declaration. */
+export function resolveWorkersAiBindingName(resolvedAi: unknown, configuredName?: string): string {
+  if (typeof resolvedAi === 'object' && resolvedAi !== null) {
+    const binding = (resolvedAi as { binding?: unknown }).binding;
+    if (typeof binding === 'string') {
+      return binding;
+    }
+  }
+  return configuredName ?? 'AI';
+}
+
 const CLOUDFLARE_BUILTIN_IMPORT = /^cloudflare:/;
 const SANDBOX_SDK_IMPORT = '@cloudflare/sandbox';
 const SANDBOX_SDK_IMPORT_FILTER = /^@cloudflare\/sandbox$/;
@@ -1129,22 +1140,29 @@ export function voidPlugin(options?: {
     // wins, so `!resolvedAi` is load-bearing (prevents clobbering a user's own
     // root-wrangler `ai` binding); `!resultAi` is harmless defense-in-depth
     // (nothing else in mergeBindings ever sets `result.ai`).
+    const resolvedAi = (resolved as { ai?: unknown }).ai;
+    const aiBindingName = resolveWorkersAiBindingName(resolvedAi, bindingNames?.ai);
     if (
       shouldBindWorkersAi(
         viteCommand,
         bindings.needsAI,
-        (resolved as { ai?: unknown }).ai,
+        resolvedAi,
         (result as { ai?: unknown }).ai,
       )
     ) {
-      (result as Record<string, unknown>).ai = { binding: 'AI' };
+      (result as Record<string, unknown>).ai = { binding: aiBindingName };
     }
 
-    // AI Gateway id → runtime var (harmless in serve; only read by the P3 direct
-    // backend that routes Workers AI inference through the user's own Gateway).
-    if (config.ai?.gateway) {
+    // AI binding name / Gateway id → runtime vars (harmless in serve; only read
+    // by the P3 direct backend). The default binding needs no extra variable.
+    if (aiBindingName !== 'AI' || config.ai?.gateway) {
       const vars = (result.vars as Record<string, string>) ?? {};
-      vars.__VOID_AI_GATEWAY = config.ai.gateway;
+      if (aiBindingName !== 'AI') {
+        vars.__VOID_AI_BINDING = aiBindingName;
+      }
+      if (config.ai?.gateway) {
+        vars.__VOID_AI_GATEWAY = config.ai.gateway;
+      }
       result.vars = vars;
     }
 
