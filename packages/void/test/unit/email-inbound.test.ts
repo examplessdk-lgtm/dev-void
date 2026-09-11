@@ -1,6 +1,6 @@
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'pathslash';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 import { compileRouteTable } from '../../src/router/compile.ts';
 import { compileWorkerEntry } from '../../src/router/compile.ts';
 import {

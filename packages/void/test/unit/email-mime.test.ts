@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vite-plus/test';
 import { buildMime, MimeError, normalizeEmail } from '../../src/runtime/email/mime.ts';
 
 function decode(bytes: Uint8Array): string {

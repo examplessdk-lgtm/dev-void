@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vite-plus/test';
 import { sendEmail } from '../../src/runtime/email.ts';
 import { clearDevBuffer, listDevMessages } from '../../src/runtime/email/dev-inbox.ts';
 import { createEmailTestHarness } from '../../src/runtime/email/testing.ts';

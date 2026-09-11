@@ -16,7 +16,7 @@
  * `env.ASSETS` to in dev (`{ node: (req, res) => viteDevServer.middlewares(req, res) }`).
  */
 import { Readable } from 'node:stream';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vite-plus/test';
 import { shouldInjectEmailDevInboxVar } from '../../src/index.ts';
 import { emailDevInboxPlugin } from '../../src/plugin-email-dev-inbox.ts';
 import { sendEmail } from '../../src/runtime/email.ts';

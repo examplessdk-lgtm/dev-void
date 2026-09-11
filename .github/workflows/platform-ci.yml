@@ -43,9 +43,11 @@ jobs:
           node-version-file: .node-version
       - run: vp fmt --check
       - run: vp lint
-      - run: vp run lint:platform
       - run: vp run build
       - run: vp run --filter './platform/packages/**' build
+      # After the builds: the type-aware platform lint reads the dashboard's generated
+      # `.void/tsconfig.json`, which only exists once the dashboard has been built.
+      - run: vp run lint:platform
       - run: vp run check
 
   test:

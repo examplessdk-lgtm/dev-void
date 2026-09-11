@@ -11,7 +11,7 @@
  *             `ForwardableEmailMessage` and ignores the return value, so the
  *             generated entry must ENACT the recorded actions on it
  */
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 import { compileWorkerEntry } from '../../src/router/compile.ts';
 import { sendEmail } from '../../src/runtime/email.ts';
 import {
