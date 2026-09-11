@@ -1,0 +1,1125 @@
+.github/renovate.json
+  s_c4fcc864caec3f::t_afd9403ef0ab35 3-10
+.github/workflows/platform-ci.yml
+  s_c4fcc864caec3f::t_65e85c95c5211e 1-78
+.github/workflows/platform-deploy-staging.yml
+  s_c4fcc864caec3f::t_c64554ae7796fe 1-34
+.github/workflows/platform-deploy.yml
+  s_c4fcc864caec3f::t_3f89e13d66cb51 1-34
+.github/workflows/platform-smoke-test.yml
+  s_c4fcc864caec3f::t_2da8a267ffdd9f 1-48
+AGENTS.md
+  s_c4fcc864caec3f::t_a9b2b4086c1707 44,64,67-68
+README.md
+  s_c4fcc864caec3f::t_8e11e87a9b6926 98,107-118
+package.json
+  s_c4fcc864caec3f::t_00c75c6e428db2 8,10,12,21
+packages/react/README.md
+  s_c4fcc864caec3f::t_a6ce5cb6e731e6 226
+packages/svelte/README.md
+  s_c4fcc864caec3f::t_5d5a7d4948f8c9 117
+packages/vue/README.md
+  s_c4fcc864caec3f::t_e63134ab64d7c3 118
+platform/.gitignore
+  s_c4fcc864caec3f::t_13eb5fa91e5083 1-15
+platform/AGENTS.md
+  s_c4fcc864caec3f::t_c5ad360b53c5ac 1
+platform/CLAUDE.md
+  s_c4fcc864caec3f::t_911cd4d48c3b71 1
+platform/README.md
+  s_c4fcc864caec3f::t_a41c7b66cade8e 1-298
+platform/meta/architecture.md
+  s_c4fcc864caec3f::t_b0d5e36b89b99e 1-214
+platform/meta/design-docs/0001-design.md
+  s_c4fcc864caec3f::t_515cff6031d800 1-448
+platform/meta/design-docs/0002-routing-redesign.md
+  s_c4fcc864caec3f::t_3c6f25dab05083 1-122
+platform/meta/design-docs/0003-feature-roadmap.md
+  s_c4fcc864caec3f::t_12b151ad1caec7 1-88
+platform/meta/design-docs/0004-frameworks.md
+  s_c4fcc864caec3f::t_f1972ccce12357 1-111
+platform/meta/design-docs/0005-raw-cf.md
+  s_c4fcc864caec3f::t_ed9cba1c682b98 1-62
+platform/meta/design-docs/0006-db.md
+  s_c4fcc864caec3f::t_0f9b9240e3a521 1-63
+platform/meta/design-docs/0007-db-enhancements.md
+  s_c4fcc864caec3f::t_45a0d29be4b2b8 1-18
+platform/meta/design-docs/0008-isr.md
+  s_c4fcc864caec3f::t_71cb6fdc9e55f2 1-116
+platform/meta/design-docs/0009-paid-features.md
+  s_c4fcc864caec3f::t_0d893b6d802edb 1-171
+platform/meta/design-docs/0010-builds.md
+  s_c4fcc864caec3f::t_223247e85060a0 1-747
+platform/meta/design-docs/0011-builds-implementation-plan.md
+  s_c4fcc864caec3f::t_a737d620f84abf 1-960
+platform/meta/design-docs/0012-drizzle-migration.md
+  s_c4fcc864caec3f::t_8a48e30edbbf16 1-162
+platform/meta/design-docs/0013-pages.md
+  s_c4fcc864caec3f::t_cd6d1fb9f1ea75 1-670
+platform/meta/design-docs/0014-drizzle-support.md
+  s_c4fcc864caec3f::t_0e3cbebd1d8401 1-361
+platform/meta/design-docs/0015-platform-d1-to-planetscale.md
+  s_c4fcc864caec3f::t_fa41d1004418d6 1-451
+platform/meta/design-docs/0016-typed-useform.md
+  s_c4fcc864caec3f::t_eb8f9cd88c71d5 1-177
+platform/meta/design-docs/0017-view-transitions.md
+  s_c4fcc864caec3f::t_7fb6b41dd93387 1-103
+platform/meta/design-docs/0018-open-source-split.md
+  s_c4fcc864caec3f::t_6b4ec75f472087 1-169
+platform/meta/design-docs/0019-workers-ai.md
+  s_c4fcc864caec3f::t_49fce1a4c73628 1-537
+platform/meta/design-docs/0020-prerender.md
+  s_c4fcc864caec3f::t_c170bb62c68b9f 1-141
+platform/meta/design-docs/0021-user-dashboard.md
+  s_c4fcc864caec3f::t_eaf5fb792721f6 1-73
+platform/meta/design-docs/0022-islands-design.md
+  s_c4fcc864caec3f::t_2b6497565514cc 1-446
+platform/meta/design-docs/0023-codex-architecture-review.md
+  s_c4fcc864caec3f::t_17eefa7a55ad63 1-233
+platform/meta/design-docs/0024-event-driven-usage-enforcement.md
+  s_c4fcc864caec3f::t_8e45f5af8d5555 1-228
+platform/meta/design-docs/0025-deferred-props.md
+  s_c4fcc864caec3f::t_17aad360ba6db7 1-218
+platform/meta/design-docs/0026-multi-framework-support.md
+  s_c4fcc864caec3f::t_404a1f00d9a7cb 1-400
+platform/meta/design-docs/0027-markdown-pages.md
+  s_c4fcc864caec3f::t_33f6152727b810 1-329
+platform/meta/design-docs/0028-per-worker-assets.md
+  s_c4fcc864caec3f::t_5a0fcfd2c95d91 1-354
+platform/meta/design-docs/0029-prefetch.md
+  s_c4fcc864caec3f::t_b3ab87fa11ad44 1-243
+platform/meta/design-docs/0030-md-client-scripts.md
+  s_c4fcc864caec3f::t_c4aecb33f5e104 1-123
+platform/meta/design-docs/0031-local-ssg.md
+  s_c4fcc864caec3f::t_52ebe87d2bf37b 1-233
+platform/meta/design-docs/0032-headers-redirects.md
+  s_c4fcc864caec3f::t_058ef727012d32 1-99
+platform/meta/design-docs/0033-head-management.md
+  s_c4fcc864caec3f::t_fb636f347f8755 1-158
+platform/meta/design-docs/0034-named-layouts.md
+  s_c4fcc864caec3f::t_21c6ad97414d2a 1-288
+platform/meta/design-docs/0035-themes.md
+  s_c4fcc864caec3f::t_d69eb2974fd71a 1-402
+platform/meta/design-docs/0036-remote-bindings.md
+  s_c4fcc864caec3f::t_eba0a003e844a5 1-318
+platform/meta/design-docs/0036b-fix-proxy-resource-resolution.md
+  s_c4fcc864caec3f::t_674f969f4edd96 1-251
+platform/meta/design-docs/0037-node-target.md
+  s_c4fcc864caec3f::t_80d871735125b8 1-178
+platform/meta/design-docs/0038-image-optimization.md
+  s_c4fcc864caec3f::t_3c137cdd031327 1-171
+platform/meta/design-docs/0039-deploy-asset-dedup.md
+  s_c4fcc864caec3f::t_6558c9078fe7d9 1-304
+platform/meta/design-docs/0040-worker-observability.md
+  s_c4fcc864caec3f::t_5775ed37f7de74 1-135
+platform/meta/design-docs/0042-dispatch-asset-caching.md
+  s_c4fcc864caec3f::t_dd43c5e9698769 1-193
+platform/meta/design-docs/0043-tail-worker.md
+  s_c4fcc864caec3f::t_95ef4b70d4f2f7 1-106
+platform/meta/design-docs/0044-vinext-support.md
+  s_c4fcc864caec3f::t_fa9f4061fff8fe 1-126
+platform/meta/design-docs/0045-deploy-status-streaming.md
+  s_c4fcc864caec3f::t_402456ef570362 1-194
+platform/meta/design-docs/0046-cron-scheduler.md
+  s_c4fcc864caec3f::t_9b13e911573f69 1-123
+platform/meta/design-docs/0047-email.md
+  s_c4fcc864caec3f::t_0372bdf57226f1 1-60
+platform/meta/design-docs/0048-isr-kv-cache.md
+  s_c4fcc864caec3f::t_a831e4031e44ce 1-96
+platform/meta/design-docs/0049-multi-provider-ai.md
+  s_c4fcc864caec3f::t_83e3179e991766 1-336
+platform/meta/design-docs/0050-drizzle-first-class.md
+  s_c4fcc864caec3f::t_e8198212b41cc1 1-286
+platform/meta/design-docs/0051-websockets.md
+  s_c4fcc864caec3f::t_80e7a499675e8d 1-472
+platform/meta/design-docs/0052-postgres-hyperdrive.md
+  s_c4fcc864caec3f::t_4e734e7e5c7589 1-195
+platform/meta/design-docs/0053-mcp-code-mode.md
+  s_c4fcc864caec3f::t_53b06e2acd9003 1-130
+platform/meta/design-docs/0054-versioned-deployments.md
+  s_c4fcc864caec3f::t_926753f233e738 1-75
+platform/meta/design-docs/0055-kv-r2-static-deployments.md
+  s_c4fcc864caec3f::t_395fb0b698bb89 1-61
+platform/meta/design-docs/0056-named-page-actions.md
+  s_c4fcc864caec3f::t_baaef688bcc517 1-240
+platform/meta/design-docs/0057-better-auth-integration.md
+  s_c4fcc864caec3f::t_4754a0e267ac4e 1-508
+platform/meta/design-docs/0058-project-secret-storage-transition.md
+  s_c4fcc864caec3f::t_4613a5e11c183f 1-396
+platform/meta/design-docs/0059-scroll-restoration.md
+  s_c4fcc864caec3f::t_2e4a70f88f4259 1-123
+platform/meta/design-docs/0060-drizzle-native-better-auth-integration.md
+  s_c4fcc864caec3f::t_24c989ccbdfcf9 1-375
+platform/meta/design-docs/0061-realtime-5xx-alerting.md
+  s_c4fcc864caec3f::t_5f7b7746ba2d73 1-212
+platform/meta/design-docs/0062-transactional-queue-setup.md
+  s_c4fcc864caec3f::t_ea8553a89db87a 1-86
+platform/meta/design-docs/0063-backfill-concurrency-safety.md
+  s_c4fcc864caec3f::t_81f3fc1f411e3c 1-77
+platform/meta/design-docs/0064-rewrites.md
+  s_c4fcc864caec3f::t_98d46689608812 1-216
+platform/meta/design-docs/0065-cloudflare-asset-dedupe-poisoning.md
+  s_c4fcc864caec3f::t_5f6c33e93c30a0 1-110
+platform/meta/design-docs/0066-host-prefixed-redirect-sources.md
+  s_c4fcc864caec3f::t_fed30d19eb836e 1-114
+platform/meta/design-docs/0066-wfp-asset-r2-fallback.md
+  s_c4fcc864caec3f::t_9255b49e6dc71f 1-150
+platform/meta/design-docs/0067-cross-script-do-host-architecture.md
+  s_c4fcc864caec3f::t_5e4187ca5d0e40 1-523
+platform/meta/design-docs/0068-direct-r2-asset-upload.md
+  s_c4fcc864caec3f::t_72f4c572ab784d 1-424
+platform/meta/design-docs/0069-sse-helpers.md
+  s_c4fcc864caec3f::t_1eee1ac83cb0c1 1-469
+platform/meta/design-docs/0070-live-event-streams.md
+  s_c4fcc864caec3f::t_6e6c224768b8eb 1-1392
+platform/meta/design-docs/0071-dev-css-asset-collection-fouc-prevention.md
+  s_c4fcc864caec3f::t_50a4abf7c6438f 1-527
+platform/meta/design-docs/0072-custom-domain-verification-ux-improvements.md
+  s_c4fcc864caec3f::t_6208ecadefd646 1-169
+platform/meta/design-docs/0072-migration-runner-stability.md
+  s_c4fcc864caec3f::t_6eb6847b270bb9 1-1108
+platform/meta/design-docs/0073-custom-domain-http-dcv-migration.md
+  s_c4fcc864caec3f::t_4c522211546d33 1-207
+platform/meta/design-docs/0074-github-deploy-identity-linking.md
+  s_c4fcc864caec3f::t_61eeb7e61ae520 1-326
+platform/meta/design-docs/0075-compare-failure-logging-github-check-runs.md
+  s_c4fcc864caec3f::t_48fd1e783cf1c5 1-710
+platform/meta/design-docs/0076-build-logs.md
+  s_c4fcc864caec3f::t_c3797ff74b69e8 1-1393
+platform/meta/design-docs/0077-route-aware-isr-ttl.md
+  s_c4fcc864caec3f::t_873e0d594ee4c1 1-912
+platform/meta/lessons.md
+  s_c4fcc864caec3f::t_526d91a0548023 1-74
+platform/meta/operations.md
+  s_c4fcc864caec3f::t_cb1737bd7b3806 1-730
+platform/meta/progress.md
+  s_c4fcc864caec3f::t_11488d9db81ab9 1-168
+platform/package.json
+  s_c4fcc864caec3f::t_16a8b75554b4e1 1-34
+platform/packages/api/README.md
+  s_c4fcc864caec3f::t_36bb82d5344b02 1-261
+platform/packages/api/container/Dockerfile
+  s_c4fcc864caec3f::t_28f0f78d79a6f3 1-95
+platform/packages/api/container/build-agent.d.mts
+  s_c4fcc864caec3f::t_499533f5b44d44 1-248
+platform/packages/api/container/build-agent.mjs
+  s_c4fcc864caec3f::t_108ea6bf0c70d8 1-2318
+platform/packages/api/drizzle.config.ts
+  s_c4fcc864caec3f::t_655e6983b00cfb 1-10
+platform/packages/api/drizzle/0000_confused_starjammers.sql
+  s_c4fcc864caec3f::t_40c5d2fa546ebb 1-66
+platform/packages/api/drizzle/0001_famous_magus.sql
+  s_c4fcc864caec3f::t_208c3231446148 1-15
+platform/packages/api/drizzle/0002_glorious_morgan_stark.sql
+  s_c4fcc864caec3f::t_57cd9e4fc3777a 1-17
+platform/packages/api/drizzle/0003_awesome_ares.sql
+  s_c4fcc864caec3f::t_c4ba1171736d1c 1-3
+platform/packages/api/drizzle/0004_talented_mimic.sql
+  s_c4fcc864caec3f::t_e4d5eae5ccb75e 1
+platform/packages/api/drizzle/0005_legal_red_ghost.sql
+  s_c4fcc864caec3f::t_26483d887ca9c0 1-15
+platform/packages/api/drizzle/0006_wonderful_madame_masque.sql
+  s_c4fcc864caec3f::t_5044edeadfd76a 1-17
+platform/packages/api/drizzle/0007_normal_skin.sql
+  s_c4fcc864caec3f::t_d5565561d38c6f 1-4
+platform/packages/api/drizzle/0008_auth_codes.sql
+  s_c4fcc864caec3f::t_d2fb46f8fbb94a 1-5
+platform/packages/api/drizzle/0009_chubby_masked_marvel.sql
+  s_c4fcc864caec3f::t_adca86dad35915 1
+platform/packages/api/drizzle/0010_wild_aqueduct.sql
+  s_c4fcc864caec3f::t_eece9e59530f9e 1-10
+platform/packages/api/drizzle/0011_curly_stryfe.sql
+  s_c4fcc864caec3f::t_ef8d6973e5070c 1-2
+platform/packages/api/drizzle/0012_eminent_mystique.sql
+  s_c4fcc864caec3f::t_91d70bacf2dba7 1
+platform/packages/api/drizzle/0013_quick_selene.sql
+  s_c4fcc864caec3f::t_0f511d5c55f9b2 1-3
+platform/packages/api/drizzle/0014_mysterious_medusa.sql
+  s_c4fcc864caec3f::t_db6ea3195c2afe 1
+platform/packages/api/drizzle/0015_backfill_accepted_invitations.sql
+  s_c4fcc864caec3f::t_87a41a996ba96c 1-14
+platform/packages/api/drizzle/0016_verified_phoenix.sql
+  s_c4fcc864caec3f::t_154fd87fa0c5c9 1
+platform/packages/api/drizzle/0017_gorgeous_johnny_blaze.sql
+  s_c4fcc864caec3f::t_c4a5e0f39817a9 1-3
+platform/packages/api/drizzle/0018_project_migrations.sql
+  s_c4fcc864caec3f::t_072bd9c828507f 1-21
+platform/packages/api/drizzle/0019_project_database_credentials.sql
+  s_c4fcc864caec3f::t_44b3ca99f5023d 1-10
+platform/packages/api/drizzle/0027_github_deploy.sql
+  s_c4fcc864caec3f::t_6d703b274fd38b 1-82
+platform/packages/api/drizzle/0028_check_runs.sql
+  s_c4fcc864caec3f::t_a01591ad12e19b 1
+platform/packages/api/drizzle/0029_fluffy_justin_hammer.sql
+  s_c4fcc864caec3f::t_9fcfcae4ea6fcc 1
+platform/packages/api/drizzle/0030_smooth_marvel_boy.sql
+  s_c4fcc864caec3f::t_f91ba7012435a5 1-13
+platform/packages/api/drizzle/0031_thankful_madame_masque.sql
+  s_c4fcc864caec3f::t_e2c627c9d8f74e 1-9
+platform/packages/api/drizzle/0032_remarkable_skullbuster.sql
+  s_c4fcc864caec3f::t_9bb71f48b93adb 1-10
+platform/packages/api/drizzle/meta/0000_snapshot.json
+  s_c4fcc864caec3f::t_a06581724480b4 1-511
+platform/packages/api/drizzle/meta/0001_snapshot.json
+  s_c4fcc864caec3f::t_8327ce900e8dec 1-602
+platform/packages/api/drizzle/meta/0002_snapshot.json
+  s_c4fcc864caec3f::t_09131dec04af26 1-726
+platform/packages/api/drizzle/meta/0003_snapshot.json
+  s_c4fcc864caec3f::t_897edaa2a11187 1-745
+platform/packages/api/drizzle/meta/0004_snapshot.json
+  s_c4fcc864caec3f::t_1ec69fc4d73fc7 1-752
+platform/packages/api/drizzle/meta/0005_snapshot.json
+  s_c4fcc864caec3f::t_c82a1577885722 1-853
+platform/packages/api/drizzle/meta/0006_snapshot.json
+  s_c4fcc864caec3f::t_5ed9980e0b66db 1-981
+platform/packages/api/drizzle/meta/0007_snapshot.json
+  s_c4fcc864caec3f::t_43d6114cf01bcd 1-1006
+platform/packages/api/drizzle/meta/0008_snapshot.json
+  s_c4fcc864caec3f::t_dec83a060a7055 1-1037
+platform/packages/api/drizzle/meta/0009_snapshot.json
+  s_c4fcc864caec3f::t_ed2c5ec56663ec 1-1044
+platform/packages/api/drizzle/meta/0010_snapshot.json
+  s_c4fcc864caec3f::t_e5e76f84dbbfc9 1-1113
+platform/packages/api/drizzle/meta/0011_snapshot.json
+  s_c4fcc864caec3f::t_bfe493c9914682 1-1127
+platform/packages/api/drizzle/meta/0012_snapshot.json
+  s_c4fcc864caec3f::t_941d99a3eccde7 1-1134
+platform/packages/api/drizzle/meta/0013_snapshot.json
+  s_c4fcc864caec3f::t_01a35b2756875c 1-1152
+platform/packages/api/drizzle/meta/0014_snapshot.json
+  s_c4fcc864caec3f::t_deadaf8eade096 1-1158
+platform/packages/api/drizzle/meta/0016_snapshot.json
+  s_c4fcc864caec3f::t_d920563f00df99 1-1164
+platform/packages/api/drizzle/meta/0017_snapshot.json
+  s_c4fcc864caec3f::t_53f8e2e84fb6e6 1-1182
+platform/packages/api/drizzle/meta/0018_snapshot.json
+  s_c4fcc864caec3f::t_c60be4f3ad11b4 1-1273
+platform/packages/api/drizzle/meta/0019_snapshot.json
+  s_c4fcc864caec3f::t_f097433c3794d7 1-1334
+platform/packages/api/drizzle/meta/0027_snapshot.json
+  s_c4fcc864caec3f::t_f84e4577c590eb 1-1836
+platform/packages/api/drizzle/meta/0028_snapshot.json
+  s_c4fcc864caec3f::t_88967f7199e138 1-1842
+platform/packages/api/drizzle/meta/0029_snapshot.json
+  s_c4fcc864caec3f::t_dce9c49cbdd412 1-1849
+platform/packages/api/drizzle/meta/0030_snapshot.json
+  s_c4fcc864caec3f::t_501b57d6dc44c5 1-1953
+platform/packages/api/drizzle/meta/0031_snapshot.json
+  s_c4fcc864caec3f::t_0e70c7b40dcd01 1-2020
+platform/packages/api/drizzle/meta/0032_snapshot.json
+  s_c4fcc864caec3f::t_920ea75f1bccd2 1-2086
+platform/packages/api/drizzle/meta/_journal.json
+  s_c4fcc864caec3f::t_67d1b142d1cb59 1-188
+platform/packages/api/package.json
+  s_c4fcc864caec3f::t_9323eff5ea4df8 1-57
+platform/packages/api/scripts/dcv-http-spike.ts
+  s_c4fcc864caec3f::t_db12dbc8b2dfd0 1-477
+platform/packages/api/scripts/health.ts
+  s_c4fcc864caec3f::t_f390022fd7e238 1-262
+platform/packages/api/scripts/seed.sql
+  s_c4fcc864caec3f::t_b4abc43e503c02 1-50
+platform/packages/api/scripts/setup-local.ts
+  s_c4fcc864caec3f::t_24fcb60befae25 1-272
+platform/packages/api/src/admin/backfill-queue-tokens.ts
+  s_c4fcc864caec3f::t_c85e428a322ae9 1-149
+platform/packages/api/src/admin/middleware/auth.ts
+  s_c4fcc864caec3f::t_44f78c33614029 1-36
+platform/packages/api/src/admin/platform-workers.ts
+  s_c4fcc864caec3f::t_22359d0f233a64 1-76
+platform/packages/api/src/admin/routes/builds.tsx
+  s_c4fcc864caec3f::t_7cbc9927cd71d8 1-160
+platform/packages/api/src/admin/routes/deployments.tsx
+  s_c4fcc864caec3f::t_16aff0028f0509 1-449
+platform/packages/api/src/admin/routes/invitations.tsx
+  s_c4fcc864caec3f::t_4c51d8aedfd155 1-147
+platform/packages/api/src/admin/routes/login.ts
+  s_c4fcc864caec3f::t_d9109c1bfab24c 1-150
+platform/packages/api/src/admin/routes/platform.tsx
+  s_c4fcc864caec3f::t_c2079eb3a0da4c 1-353
+platform/packages/api/src/admin/routes/projects.tsx
+  s_c4fcc864caec3f::t_f43ec94232f83a 1-211
+platform/packages/api/src/admin/routes/signup-control.tsx
+  s_c4fcc864caec3f::t_a5c5fd6e6d0386 1-76
+platform/packages/api/src/admin/routes/system.tsx
+  s_c4fcc864caec3f::t_9f6084c60ebe24 1-198
+platform/packages/api/src/admin/routes/users.tsx
+  s_c4fcc864caec3f::t_c887933328a79f 1-288
+platform/packages/api/src/admin/views/build-logs.tsx
+  s_c4fcc864caec3f::t_41adce4c60c69b 1-122
+platform/packages/api/src/admin/views/build-table.tsx
+  s_c4fcc864caec3f::t_8682e8f05ca87c 1-100
+platform/packages/api/src/admin/views/cli-versions.tsx
+  s_c4fcc864caec3f::t_bb26ba20949697 1-69
+platform/packages/api/src/admin/views/dashboard.tsx
+  s_c4fcc864caec3f::t_21c74c83bcda81 1-209
+platform/packages/api/src/admin/views/deployment-logs.tsx
+  s_c4fcc864caec3f::t_5873117d518534 1-231
+platform/packages/api/src/admin/views/deployment-table.tsx
+  s_c4fcc864caec3f::t_cba9f4416782b6 1-127
+platform/packages/api/src/admin/views/deployments-list.tsx
+  s_c4fcc864caec3f::t_15e4f9be20d3e2 1-62
+platform/packages/api/src/admin/views/format.ts
+  s_c4fcc864caec3f::t_8f64f809c56610 1-57
+platform/packages/api/src/admin/views/invitations.tsx
+  s_c4fcc864caec3f::t_4190732d7f5153 1-100
+platform/packages/api/src/admin/views/layout.tsx
+  s_c4fcc864caec3f::t_dc30ecdbd375af 1-62
+platform/packages/api/src/admin/views/pagination.tsx
+  s_c4fcc864caec3f::t_57fe725f8f126c 1-22
+platform/packages/api/src/admin/views/platform-rollback-result.tsx
+  s_c4fcc864caec3f::t_698f51d2ac0929 1-97
+platform/packages/api/src/admin/views/platform-worker-detail.tsx
+  s_c4fcc864caec3f::t_965d6e7fc95a49 1-139
+platform/packages/api/src/admin/views/platform.tsx
+  s_c4fcc864caec3f::t_60f518f58d8201 1-320
+platform/packages/api/src/admin/views/projects-list.tsx
+  s_c4fcc864caec3f::t_e5439ba3ea3e03 1-62
+platform/packages/api/src/admin/views/projects-table.tsx
+  s_c4fcc864caec3f::t_d44fa2851ad26f 1-79
+platform/packages/api/src/admin/views/signup-control.tsx
+  s_c4fcc864caec3f::t_e890396f35e1fb 1-101
+platform/packages/api/src/admin/views/user-detail.tsx
+  s_c4fcc864caec3f::t_2073059483870d 1-216
+platform/packages/api/src/admin/views/users-list.tsx
+  s_c4fcc864caec3f::t_b6feeb0fadfd2a 1-82
+platform/packages/api/src/api.ts
+  s_c4fcc864caec3f::t_d42af8e4c7b878 1-21
+platform/packages/api/src/assets.ts
+  s_c4fcc864caec3f::t_3b61957a4ae66e 1-875
+platform/packages/api/src/auth/dashboard.ts
+  s_c4fcc864caec3f::t_6547191079cfa9 1-31
+platform/packages/api/src/auth/deploy-token.ts
+  s_c4fcc864caec3f::t_4a0e26b40b6e53 1-77
+platform/packages/api/src/auth/github-preview.ts
+  s_c4fcc864caec3f::t_23e0ab7d6bd135 1-119
+platform/packages/api/src/auth/github.ts
+  s_c4fcc864caec3f::t_57d00b64a0b19a 1-92
+platform/packages/api/src/auth/google.ts
+  s_c4fcc864caec3f::t_90ee58bdf1f253 1-73
+platform/packages/api/src/auth/hmac.ts
+  s_c4fcc864caec3f::t_665bd8a98fd1dc 1-62
+platform/packages/api/src/auth/jwt.ts
+  s_c4fcc864caec3f::t_a08322bf280544 1-140
+platform/packages/api/src/auth/pkce.ts
+  s_c4fcc864caec3f::t_94157cb6824658 1-34
+platform/packages/api/src/build-manager.ts
+  s_c4fcc864caec3f::t_7e0f5a9c1468a3 1-3310
+platform/packages/api/src/build-namespace.ts
+  s_c4fcc864caec3f::t_22c0f7165dd255 1-27
+platform/packages/api/src/build-scheduler.ts
+  s_c4fcc864caec3f::t_7b8d8863619eb2 1-347
+platform/packages/api/src/build-status.ts
+  s_c4fcc864caec3f::t_ab77b1ea12a333 1-12
+platform/packages/api/src/build-types.ts
+  s_c4fcc864caec3f::t_55c592b7f4da2b 1-65
+platform/packages/api/src/cf-api.ts
+  s_c4fcc864caec3f::t_61b46be6567aaf 1-38
+platform/packages/api/src/concurrency.ts
+  s_c4fcc864caec3f::t_309323ca43387c 1-16
+platform/packages/api/src/constants.ts
+  s_c4fcc864caec3f::t_4c3c5bb6185e4f 1-11
+platform/packages/api/src/cron-fires-queue.ts
+  s_c4fcc864caec3f::t_a906685f863eb4 1-165
+platform/packages/api/src/cron-scheduler-client.ts
+  s_c4fcc864caec3f::t_c5e870ca763954 1-96
+platform/packages/api/src/cron-scheduler.ts
+  s_c4fcc864caec3f::t_a38cd9cb7b8a18 1-317
+platform/packages/api/src/db.ts
+  s_c4fcc864caec3f::t_40875cb5d1b1f4 1-4552
+platform/packages/api/src/email.ts
+  s_c4fcc864caec3f::t_a903c2a0f72125 1-165
+platform/packages/api/src/env.ts
+  s_c4fcc864caec3f::t_6c4c58bbc95a96 1-181
+platform/packages/api/src/error-alert-monitor.ts
+  s_c4fcc864caec3f::t_326816266813de 1-180
+platform/packages/api/src/github/app-jwt.ts
+  s_c4fcc864caec3f::t_efcf877cf43427 1-33
+platform/packages/api/src/github/cancel-builds.ts
+  s_c4fcc864caec3f::t_2ab5b99bc07754 1-55
+platform/packages/api/src/github/check-run.ts
+  s_c4fcc864caec3f::t_bcc3c198ccd8ef 1-396
+platform/packages/api/src/github/installation-repos.ts
+  s_c4fcc864caec3f::t_fb819c2e1cdebb 1-99
+platform/packages/api/src/github/installation-token.ts
+  s_c4fcc864caec3f::t_16cf92bafcafe3 1-421
+platform/packages/api/src/github/oidc-verify.ts
+  s_c4fcc864caec3f::t_b011d7ced556fc 1-83
+platform/packages/api/src/github/user-installations.ts
+  s_c4fcc864caec3f::t_3063dc814443d1 1-344
+platform/packages/api/src/github/webhook-deliveries.ts
+  s_c4fcc864caec3f::t_632beeee56b76c 1-272
+platform/packages/api/src/github/webhook-verify.ts
+  s_c4fcc864caec3f::t_9a5a85c1b48fa0 1-60
+platform/packages/api/src/html-redirect.ts
+  s_c4fcc864caec3f::t_b1e2be39e0d4b5 1-39
+platform/packages/api/src/id.ts
+  s_c4fcc864caec3f::t_4024cf251f6e20 1-16
+platform/packages/api/src/index.ts
+  s_c4fcc864caec3f::t_162229d1eada1c 1-707
+platform/packages/api/src/isr-cache.ts
+  s_c4fcc864caec3f::t_c5ed3cfc18bb58 1-74
+platform/packages/api/src/middleware/auth.ts
+  s_c4fcc864caec3f::t_ec4680c6d8fc20 1-139
+platform/packages/api/src/middleware/cli-version.ts
+  s_c4fcc864caec3f::t_d70e75860c876d 1-134
+platform/packages/api/src/migrations/canonical-json.ts
+  s_c4fcc864caec3f::t_54f1be472e6446 1-20
+platform/packages/api/src/migrations/execution-plan.ts
+  s_c4fcc864caec3f::t_b83998892ec84c 1-256
+platform/packages/api/src/migrations/remote-runner.ts
+  s_c4fcc864caec3f::t_faf6051f14f2ff 1-502
+platform/packages/api/src/naming.ts
+  s_c4fcc864caec3f::t_1f7920b7329b46 1-11
+platform/packages/api/src/observability/logger.ts
+  s_c4fcc864caec3f::t_3ba462d751223e 1-152
+platform/packages/api/src/project-secrets.ts
+  s_c4fcc864caec3f::t_387a95f74fc083 1-253
+platform/packages/api/src/provisioning/activate-domain.ts
+  s_c4fcc864caec3f::t_b8a685a9dbdee2 1-147
+platform/packages/api/src/provisioning/cleanup.ts
+  s_c4fcc864caec3f::t_f2e65c5ac56507 1-502
+platform/packages/api/src/provisioning/cloudflare-api.ts
+  s_c4fcc864caec3f::t_2b539e10b5ed32 1-639
+platform/packages/api/src/provisioning/containers.ts
+  s_c4fcc864caec3f::t_a02b9530c92d5b 1-281
+platform/packages/api/src/provisioning/provision.ts
+  s_c4fcc864caec3f::t_b323c84a7bd095 1-262
+platform/packages/api/src/provisioning/workers-versions.ts
+  s_c4fcc864caec3f::t_61d118d28083ed 1-63
+platform/packages/api/src/r2-presign.ts
+  s_c4fcc864caec3f::t_a68c46849d3c1d 1-145
+platform/packages/api/src/revalidate-core.ts
+  s_c4fcc864caec3f::t_944c6bfdf4c539 1-377
+platform/packages/api/src/routes/auth-oidc.ts
+  s_c4fcc864caec3f::t_19f55dbc85bcf2 1-438
+platform/packages/api/src/routes/auth.ts
+  s_c4fcc864caec3f::t_aa94adfae21dc8 1-492
+platform/packages/api/src/routes/delete.ts
+  s_c4fcc864caec3f::t_318e39b4c15008 1-35
+platform/packages/api/src/routes/deploy.ts
+  s_c4fcc864caec3f::t_796f0d09dcbd66 1-4841
+platform/packages/api/src/routes/domains.ts
+  s_c4fcc864caec3f::t_1e06ff7c539445 1-308
+platform/packages/api/src/routes/github.ts
+  s_c4fcc864caec3f::t_7feac5e377f70e 1-1922
+platform/packages/api/src/routes/internal-resolve-resource.ts
+  s_c4fcc864caec3f::t_3145c4b6f908ba 1-43
+platform/packages/api/src/routes/internal-resolve-worker.ts
+  s_c4fcc864caec3f::t_088955951f2305 1-35
+platform/packages/api/src/routes/internal-revalidate.ts
+  s_c4fcc864caec3f::t_e53486ce0278aa 1-34
+platform/packages/api/src/routes/internal-verify-owner.ts
+  s_c4fcc864caec3f::t_7acac63bb297d8 1-41
+platform/packages/api/src/routes/me.ts
+  s_c4fcc864caec3f::t_8e1b948f74b214 1-22
+platform/packages/api/src/routes/projects.ts
+  s_c4fcc864caec3f::t_4fb98a12b35216 1-2432
+platform/packages/api/src/routes/revalidate.ts
+  s_c4fcc864caec3f::t_f94bf28a3eb4c7 1-23
+platform/packages/api/src/routes/secrets.ts
+  s_c4fcc864caec3f::t_9f901c8317cde3 1-140
+platform/packages/api/src/routes/usage.ts
+  s_c4fcc864caec3f::t_f35bd1c089930b 1-499
+platform/packages/api/src/routes/webhooks.ts
+  s_c4fcc864caec3f::t_8fe25926f4c851 1-1572
+platform/packages/api/src/routing.ts
+  s_c4fcc864caec3f::t_2fe4d52b4501a7 1-285
+platform/packages/api/src/sandbox-concurrency-counter.ts
+  s_c4fcc864caec3f::t_6040fc6bb684f9 1-171
+platform/packages/api/src/schema.ts
+  s_c4fcc864caec3f::t_21732e81bf8cc7 1-677
+platform/packages/api/src/signup-allowlist.ts
+  s_c4fcc864caec3f::t_a599e334109f17 1-49
+platform/packages/api/src/sql/tokenize.ts
+  s_c4fcc864caec3f::t_c5931c72bec18b 1-140
+platform/packages/api/src/suspension.ts
+  s_c4fcc864caec3f::t_1bb17955bad3b4 1-13
+platform/packages/api/src/tiers.ts
+  s_c4fcc864caec3f::t_0fd627b6775230 1-204
+platform/packages/api/src/types.ts
+  s_c4fcc864caec3f::t_66e08a24241c83 1-263
+platform/packages/api/src/usage-counter.ts
+  s_c4fcc864caec3f::t_cc19c9b3d7a848 1-446
+platform/packages/api/src/usage-queue.ts
+  s_c4fcc864caec3f::t_50239f1194a8e4 1-135
+platform/packages/api/src/webhook-replay.ts
+  s_c4fcc864caec3f::t_6049c58109da12 1-78
+platform/packages/api/test/__mocks__/cloudflare-workers.ts
+  s_c4fcc864caec3f::t_692de6bd1a1710 1-10
+platform/packages/api/test/integration/admin-builds.test.ts
+  s_c4fcc864caec3f::t_2b2c5556532584 1-353
+platform/packages/api/test/integration/admin-dashboard.test.ts
+  s_c4fcc864caec3f::t_99229e33c682dd 1-1601
+platform/packages/api/test/integration/api-builds.test.ts
+  s_c4fcc864caec3f::t_5373aa2ebae7b6 1-246
+platform/packages/api/test/integration/api-check-runs.test.ts
+  s_c4fcc864caec3f::t_0b2fe2958f6113 1-1455
+platform/packages/api/test/integration/api-delete.test.ts
+  s_c4fcc864caec3f::t_8c4af27410aac5 1-493
+platform/packages/api/test/integration/api-deploy.test.ts
+  s_c4fcc864caec3f::t_1c9068e57d22b1 1-4164
+platform/packages/api/test/integration/api-domains.test.ts
+  s_c4fcc864caec3f::t_90a5144e19685c 1-2677
+platform/packages/api/test/integration/api-github.test.ts
+  s_c4fcc864caec3f::t_1b565b2c611084 1-4078
+platform/packages/api/test/integration/api-health.test.ts
+  s_c4fcc864caec3f::t_ebb93e68a67b31 1-21
+platform/packages/api/test/integration/api-me.test.ts
+  s_c4fcc864caec3f::t_6a7c9327a2e1ea 1-148
+platform/packages/api/test/integration/api-migrations.test.ts
+  s_c4fcc864caec3f::t_8deb78bb8d0fb7 1-5866
+platform/packages/api/test/integration/api-oidc.test.ts
+  s_c4fcc864caec3f::t_ce96272af4210c 1-2535
+platform/packages/api/test/integration/api-projects.test.ts
+  s_c4fcc864caec3f::t_c3235f1909163e 1-2082
+platform/packages/api/test/integration/api-revalidate.test.ts
+  s_c4fcc864caec3f::t_9b3ed1777ac2f1 1-1360
+platform/packages/api/test/integration/api-sandbox.test.ts
+  s_c4fcc864caec3f::t_2b972f7f542bb5 1-904
+platform/packages/api/test/integration/api-secrets.test.ts
+  s_c4fcc864caec3f::t_4f74704681ba33 1-263
+platform/packages/api/test/integration/api-webhooks.test.ts
+  s_c4fcc864caec3f::t_cb1b3f3a3cebf2 1-5442
+platform/packages/api/test/integration/auth-bypass-guard.test.ts
+  s_c4fcc864caec3f::t_4425a25e40f101 1-65
+platform/packages/api/test/integration/auth-dashboard-code.test.ts
+  s_c4fcc864caec3f::t_1c5f5cc64ce319 1-284
+platform/packages/api/test/integration/auth-dev-login.test.ts
+  s_c4fcc864caec3f::t_4e3bf7e55fc5f8 1-180
+platform/packages/api/test/integration/auth-email-verification.test.ts
+  s_c4fcc864caec3f::t_e9628aa0ff0b76 1-525
+platform/packages/api/test/integration/cli-version-gate.test.ts
+  s_c4fcc864caec3f::t_dd8335736be3e2 1-385
+platform/packages/api/test/integration/db-builds.test.ts
+  s_c4fcc864caec3f::t_e6c2931b1d3387 1-3216
+platform/packages/api/test/integration/db-github-members.test.ts
+  s_c4fcc864caec3f::t_14c497e7eb57a5 1-650
+platform/packages/api/test/integration/db-resources.test.ts
+  s_c4fcc864caec3f::t_bf154217a0343a 1-150
+platform/packages/api/test/integration/db-template.ts
+  s_c4fcc864caec3f::t_dfe41a9402bb96 1-83
+platform/packages/api/test/integration/db-webhook-redeliveries.test.ts
+  s_c4fcc864caec3f::t_01e9cbf214346d 1-101
+platform/packages/api/test/integration/deploy-collision-warning.test.ts
+  s_c4fcc864caec3f::t_21ce11e7d8ac1d 1-97
+platform/packages/api/test/integration/deploy-direct-r2.test.ts
+  s_c4fcc864caec3f::t_e3963327ae134f 1-1388
+platform/packages/api/test/integration/deploy-token-scope.test.ts
+  s_c4fcc864caec3f::t_974d5f61a9cb7a 1-653
+platform/packages/api/test/integration/github-connect-authorize-routes.test.ts
+  s_c4fcc864caec3f::t_d2764b8f9cf458 1-599
+platform/packages/api/test/integration/github-identity-link-routes.test.ts
+  s_c4fcc864caec3f::t_b989722a3aa8da 1-720
+platform/packages/api/test/integration/github-identity-link.test.ts
+  s_c4fcc864caec3f::t_89667a89b18a81 1-132
+platform/packages/api/test/integration/github-join-routes.test.ts
+  s_c4fcc864caec3f::t_e9bd02ce6412d7 1-1085
+platform/packages/api/test/integration/global-setup.ts
+  s_c4fcc864caec3f::t_b1a46be2967764 1-5
+platform/packages/api/test/integration/helpers.ts
+  s_c4fcc864caec3f::t_6c51ea2b716691 1-1577
+platform/packages/api/test/integration/scheduled.test.ts
+  s_c4fcc864caec3f::t_13a92a8ce51627 1-521
+platform/packages/api/test/integration/secret-limits.test.ts
+  s_c4fcc864caec3f::t_c26a4d2c2b3d30 1-83
+platform/packages/api/test/integration/setup.ts
+  s_c4fcc864caec3f::t_0b1a77ba42f4b8 1-89
+platform/packages/api/test/integration/webhook-replay.test.ts
+  s_c4fcc864caec3f::t_cace26fd84508b 1-174
+platform/packages/api/test/unit/assets.test.ts
+  s_c4fcc864caec3f::t_eb00794c67ae82 1-1079
+platform/packages/api/test/unit/backfill-queue-tokens.test.ts
+  s_c4fcc864caec3f::t_a230e624938a23 1-257
+platform/packages/api/test/unit/build-agent-exit-path.test.ts
+  s_c4fcc864caec3f::t_01595fc0107275 1-80
+platform/packages/api/test/unit/build-agent-flush.test.ts
+  s_c4fcc864caec3f::t_5536494e459502 1-51
+platform/packages/api/test/unit/build-agent-source-download.test.ts
+  s_c4fcc864caec3f::t_6f0272fd1d979f 1-1190
+platform/packages/api/test/unit/build-manager.test.ts
+  s_c4fcc864caec3f::t_5fa6fdb2200ac1 1-7462
+platform/packages/api/test/unit/build-namespace.test.ts
+  s_c4fcc864caec3f::t_089784ae049fac 1-38
+platform/packages/api/test/unit/build-scheduler.test.ts
+  s_c4fcc864caec3f::t_e19c557cc8f732 1-1074
+platform/packages/api/test/unit/build-status.test.ts
+  s_c4fcc864caec3f::t_d49a2064597038 1-21
+platform/packages/api/test/unit/callback-token-guard.test.ts
+  s_c4fcc864caec3f::t_1471827344d926 1-25
+platform/packages/api/test/unit/cancel-builds.test.ts
+  s_c4fcc864caec3f::t_eccae7fa1c9b00 1-109
+platform/packages/api/test/unit/canonical-json.test.ts
+  s_c4fcc864caec3f::t_b6304f6860d4ac 1-25
+platform/packages/api/test/unit/check-run.test.ts
+  s_c4fcc864caec3f::t_aff68d6a5e2683 1-568
+platform/packages/api/test/unit/clear-isr-cache.test.ts
+  s_c4fcc864caec3f::t_a2350d62b7f080 1-59
+platform/packages/api/test/unit/cli-version.test.ts
+  s_c4fcc864caec3f::t_d5369933127ea9 1-170
+platform/packages/api/test/unit/cloudflare-api.test.ts
+  s_c4fcc864caec3f::t_465909e26b28dd 1-274
+platform/packages/api/test/unit/cron-fires-queue.test.ts
+  s_c4fcc864caec3f::t_becbe5d336cd9f 1-207
+platform/packages/api/test/unit/cron-scheduler.test.ts
+  s_c4fcc864caec3f::t_87114010128cd0 1-420
+platform/packages/api/test/unit/dashboard-auth.test.ts
+  s_c4fcc864caec3f::t_89fa0954914603 1-46
+platform/packages/api/test/unit/deploy-durable-objects.test.ts
+  s_c4fcc864caec3f::t_0dc663c07a2979 1-759
+platform/packages/api/test/unit/deploy-manifest.test.ts
+  s_c4fcc864caec3f::t_90f0a48402fd44 1-71
+platform/packages/api/test/unit/deploy-token.test.ts
+  s_c4fcc864caec3f::t_6dac878967b40d 1-70
+platform/packages/api/test/unit/email.test.ts
+  s_c4fcc864caec3f::t_99ae240d8ca0de 1-106
+platform/packages/api/test/unit/error-alert-monitor.test.ts
+  s_c4fcc864caec3f::t_0b2327794a3742 1-257
+platform/packages/api/test/unit/github-oidc-verify.test.ts
+  s_c4fcc864caec3f::t_267380e89f04e3 1-124
+platform/packages/api/test/unit/github-webhook-verify.test.ts
+  s_c4fcc864caec3f::t_64bd7eca5a1df7 1-59
+platform/packages/api/test/unit/hmac.test.ts
+  s_c4fcc864caec3f::t_1f3f4869b2d548 1-20
+platform/packages/api/test/unit/html-redirect.test.ts
+  s_c4fcc864caec3f::t_6909df1d1c7925 1-37
+platform/packages/api/test/unit/installation-token.test.ts
+  s_c4fcc864caec3f::t_068261b69ada91 1-371
+platform/packages/api/test/unit/jwt.test.ts
+  s_c4fcc864caec3f::t_81c9a8f42dd98a 1-56
+platform/packages/api/test/unit/manifest-rule-limits.test.ts
+  s_c4fcc864caec3f::t_4f83219879f1a8 1-103
+platform/packages/api/test/unit/migration-execution-plan.test.ts
+  s_c4fcc864caec3f::t_ef1ab9f84dcff2 1-83
+platform/packages/api/test/unit/provision-per-deploy-container.test.ts
+  s_c4fcc864caec3f::t_274dac78adb3e3 1-208
+platform/packages/api/test/unit/provision.test.ts
+  s_c4fcc864caec3f::t_e89ffd40460548 1-472
+platform/packages/api/test/unit/r2-presign.test.ts
+  s_c4fcc864caec3f::t_dd75789605c34d 1-66
+platform/packages/api/test/unit/redirect-validation.test.ts
+  s_c4fcc864caec3f::t_ba1b245c3df07f 1-59
+platform/packages/api/test/unit/remote-runner.test.ts
+  s_c4fcc864caec3f::t_7fe034ae0dff67 1-982
+platform/packages/api/test/unit/reserved-slugs.test.ts
+  s_c4fcc864caec3f::t_513b5d8f33069a 1-30
+platform/packages/api/test/unit/routing.test.ts
+  s_c4fcc864caec3f::t_60231ac9dc9bc8 1-475
+platform/packages/api/test/unit/sandbox-concurrency-counter.test.ts
+  s_c4fcc864caec3f::t_d9c68a8b71a06e 1-272
+platform/packages/api/test/unit/sanitize-log-line-oracle.test.ts
+  s_c4fcc864caec3f::t_0394a630bb6997 1-352
+platform/packages/api/test/unit/signup-allowlist.test.ts
+  s_c4fcc864caec3f::t_4d66354b5179ce 1-58
+platform/packages/api/test/unit/suspension.test.ts
+  s_c4fcc864caec3f::t_bfb560514bae7b 1-109
+platform/packages/api/test/unit/tiers.test.ts
+  s_c4fcc864caec3f::t_816c2c667c88a0 1-256
+platform/packages/api/test/unit/usage-counter.test.ts
+  s_c4fcc864caec3f::t_c12c9243851929 1-859
+platform/packages/api/test/unit/usage-queue.test.ts
+  s_c4fcc864caec3f::t_b204ad2b7ca5e6 1-241
+platform/packages/api/test/unit/user-installations.test.ts
+  s_c4fcc864caec3f::t_62893a6e67e825 1-239
+platform/packages/api/test/unit/webhook-deliveries.test.ts
+  s_c4fcc864caec3f::t_8b74c2e92c3fe4 1-339
+platform/packages/api/tsconfig.json
+  s_c4fcc864caec3f::t_c80dd5b7160bca 1-16
+platform/packages/api/wrangler.jsonc
+  s_c4fcc864caec3f::t_899b9ef2f44ffe 1-423
+platform/packages/dashboard/README.md
+  s_c4fcc864caec3f::t_5788774c26221b 1-93
+platform/packages/dashboard/app.css
+  s_c4fcc864caec3f::t_982a1fa7c801c8 1-51
+platform/packages/dashboard/lib/api.ts
+  s_c4fcc864caec3f::t_2f8cf143c0081f 1-222
+platform/packages/dashboard/lib/assets.d.ts
+  s_c4fcc864caec3f::t_1b54da780af398 1-3
+platform/packages/dashboard/lib/preventDragging.ts
+  s_c4fcc864caec3f::t_00d8b7c9fb513f 1-14
+platform/packages/dashboard/middleware/01.auth.ts
+  s_c4fcc864caec3f::t_d0ef0236b8738c 1-67
+platform/packages/dashboard/package.json
+  s_c4fcc864caec3f::t_f9f4bbe5983f4e 1-35
+platform/packages/dashboard/pages/auth/callback.server.ts
+  s_c4fcc864caec3f::t_e585f999319d18 1-93
+platform/packages/dashboard/pages/auth/callback.tsx
+  s_c4fcc864caec3f::t_2f666d595ed511 1-3
+platform/packages/dashboard/pages/index.server.ts
+  s_c4fcc864caec3f::t_3aa359000b35e0 1-40
+platform/packages/dashboard/pages/index.tsx
+  s_c4fcc864caec3f::t_5a2fa901b8db66 1-285
+platform/packages/dashboard/pages/layout.tsx
+  s_c4fcc864caec3f::t_89e17c10bcea17 1-86
+platform/packages/dashboard/pages/login.server.ts
+  s_c4fcc864caec3f::t_f84075bfe81487 1-61
+platform/packages/dashboard/pages/login.tsx
+  s_c4fcc864caec3f::t_bf60e721219190 1-103
+platform/packages/dashboard/pages/logout.server.ts
+  s_c4fcc864caec3f::t_7caf98e7f8b2bc 1-7
+platform/packages/dashboard/pages/logout.tsx
+  s_c4fcc864caec3f::t_0f93dc47557759 1-3
+platform/packages/dashboard/pages/projects/[id].server.ts
+  s_c4fcc864caec3f::t_2784d6d8487deb 1-123
+platform/packages/dashboard/pages/projects/[id].tsx
+  s_c4fcc864caec3f::t_283b17053a8ab1 1-448
+platform/packages/dashboard/pages/settings.server.ts
+  s_c4fcc864caec3f::t_b0f2a66deacac6 1-10
+platform/packages/dashboard/pages/settings.tsx
+  s_c4fcc864caec3f::t_f9d9274a2ba7fd 1-62
+platform/packages/dashboard/scripts/refresh-access-token.mjs
+  s_c4fcc864caec3f::t_39151de4a4b11b 1-119
+platform/packages/dashboard/test/unit/api.test.ts
+  s_c4fcc864caec3f::t_b9ac71690f9e7a 1-44
+platform/packages/dashboard/test/unit/auth-callback.test.ts
+  s_c4fcc864caec3f::t_0366332ec1bf32 1-207
+platform/packages/dashboard/test/unit/auth-middleware.test.ts
+  s_c4fcc864caec3f::t_7e4551207f8747 1-19
+platform/packages/dashboard/tsconfig.json
+  s_c4fcc864caec3f::t_5630e5b0657418 1-16
+platform/packages/dashboard/vite.config.ts
+  s_c4fcc864caec3f::t_337230ce893482 1-15
+platform/packages/dashboard/wrangler.jsonc
+  s_c4fcc864caec3f::t_0ea675244fe99c 1-25
+platform/packages/dispatch/README.md
+  s_c4fcc864caec3f::t_2dea38568d8ee1 1-115
+platform/packages/dispatch/package.json
+  s_c4fcc864caec3f::t_5ac1ef833a13c7 1-19
+platform/packages/dispatch/src/constants.ts
+  s_c4fcc864caec3f::t_42cbeb7f666d1b 1
+platform/packages/dispatch/src/env.ts
+  s_c4fcc864caec3f::t_e9f92817c2524e 1-14
+platform/packages/dispatch/src/error-page.ts
+  s_c4fcc864caec3f::t_c7ecfaeb628779 1-114
+platform/packages/dispatch/src/headers.ts
+  s_c4fcc864caec3f::t_16696126f8b5b7 1-189
+platform/packages/dispatch/src/hostname.ts
+  s_c4fcc864caec3f::t_4073016602d5af 1-32
+platform/packages/dispatch/src/index.ts
+  s_c4fcc864caec3f::t_4f76773ace8060 1-2274
+platform/packages/dispatch/src/isr.ts
+  s_c4fcc864caec3f::t_1d48550bdba27e 1-534
+platform/packages/dispatch/src/metering.ts
+  s_c4fcc864caec3f::t_a86948abe475ec 1-197
+platform/packages/dispatch/src/pattern.ts
+  s_c4fcc864caec3f::t_e7ded47c0d6140 1-259
+platform/packages/dispatch/src/request-type.ts
+  s_c4fcc864caec3f::t_9c36e548d7ff64 1-26
+platform/packages/dispatch/src/routing-rules.ts
+  s_c4fcc864caec3f::t_e5ab6d7650c090 1-114
+platform/packages/dispatch/src/static.ts
+  s_c4fcc864caec3f::t_7daf2c5ff23216 1-297
+platform/packages/dispatch/src/variant-key.ts
+  s_c4fcc864caec3f::t_e1007d2c29d2b7 1-87
+platform/packages/dispatch/src/with-timeout.ts
+  s_c4fcc864caec3f::t_e847fdb55db99f 1-237
+platform/packages/dispatch/test/request-type.test.ts
+  s_c4fcc864caec3f::t_d5ebf21d504d05 1-54
+platform/packages/dispatch/test/unit/error-page.test.ts
+  s_c4fcc864caec3f::t_151a180234c6d6 1-33
+platform/packages/dispatch/test/unit/fallback-rules.test.ts
+  s_c4fcc864caec3f::t_6b982068d5cc64 1-738
+platform/packages/dispatch/test/unit/framework-contract.test.ts
+  s_c4fcc864caec3f::t_e8d75e3837ce5c 1-76
+platform/packages/dispatch/test/unit/headers.test.ts
+  s_c4fcc864caec3f::t_f2aeaa7610213c 1-309
+platform/packages/dispatch/test/unit/hostname.test.ts
+  s_c4fcc864caec3f::t_069aa27bf8a394 1-78
+platform/packages/dispatch/test/unit/index.test.ts
+  s_c4fcc864caec3f::t_ee65886fe5b524 1-5476
+platform/packages/dispatch/test/unit/internal-routes.test.ts
+  s_c4fcc864caec3f::t_14fc492f0a7b41 1-126
+platform/packages/dispatch/test/unit/isr.test.ts
+  s_c4fcc864caec3f::t_3c278f60084fed 1-890
+platform/packages/dispatch/test/unit/metering.test.ts
+  s_c4fcc864caec3f::t_0e6093c436d183 1-132
+platform/packages/dispatch/test/unit/pattern.test.ts
+  s_c4fcc864caec3f::t_eaac196ee94c78 1-374
+platform/packages/dispatch/test/unit/platform-log.test.ts
+  s_c4fcc864caec3f::t_f21bb0219898d8 1-329
+platform/packages/dispatch/test/unit/routing-rules.test.ts
+  s_c4fcc864caec3f::t_8cf34b77b8b088 1-306
+platform/packages/dispatch/test/unit/sse.test.ts
+  s_c4fcc864caec3f::t_2f0b08c3460b79 1-176
+platform/packages/dispatch/test/unit/static.test.ts
+  s_c4fcc864caec3f::t_f3daf31e5eb25e 1-329
+platform/packages/dispatch/test/unit/variant-key.test.ts
+  s_c4fcc864caec3f::t_4c34d44bab8b49 1-122
+platform/packages/dispatch/test/unit/wfp-asset-fallback.test.ts
+  s_c4fcc864caec3f::t_b748b89fc3d11d 1-1001
+platform/packages/dispatch/test/with-timeout.test.ts
+  s_c4fcc864caec3f::t_2fb17bbbe100b0 1-333
+platform/packages/dispatch/tsconfig.json
+  s_c4fcc864caec3f::t_733de4a97ff60e 1-15
+platform/packages/dispatch/wrangler.jsonc
+  s_c4fcc864caec3f::t_f78c9558754690 1-174
+platform/packages/isr-shared/README.md
+  s_c4fcc864caec3f::t_2513336c42b82f 1-79
+platform/packages/isr-shared/package.json
+  s_c4fcc864caec3f::t_b51860ff459793 1-19
+platform/packages/isr-shared/src/index.ts
+  s_c4fcc864caec3f::t_7f7b2c28b4a503 1-363
+platform/packages/isr-shared/test/unit/variant-hash.test.ts
+  s_c4fcc864caec3f::t_4bb36139f80242 1-157
+platform/packages/isr-shared/tsconfig.json
+  s_c4fcc864caec3f::t_c1ceadcf78b1cb 1-15
+platform/packages/proxy/README.md
+  s_c4fcc864caec3f::t_7488d41481c0b5 1-124
+platform/packages/proxy/package.json
+  s_c4fcc864caec3f::t_5f34594bd0ffe3 1-20
+platform/packages/proxy/src/ai.ts
+  s_c4fcc864caec3f::t_f5f923090f70c3 1-446
+platform/packages/proxy/src/body.ts
+  s_c4fcc864caec3f::t_444c5f91b3f510 1-17
+platform/packages/proxy/src/d1.ts
+  s_c4fcc864caec3f::t_bcdb2c033da09e 1-137
+platform/packages/proxy/src/dispatch.ts
+  s_c4fcc864caec3f::t_ea2f531dee96fd 1-111
+platform/packages/proxy/src/index.ts
+  s_c4fcc864caec3f::t_285e41b6fc72cd 1-194
+platform/packages/proxy/src/kv.ts
+  s_c4fcc864caec3f::t_d1ef131ceb11b9 1-230
+platform/packages/proxy/src/r2.ts
+  s_c4fcc864caec3f::t_a28a26836089dc 1-312
+platform/packages/proxy/src/resolve.ts
+  s_c4fcc864caec3f::t_7c48bf291ffe01 1-100
+platform/packages/proxy/src/revalidate.ts
+  s_c4fcc864caec3f::t_e934fd369ca2c9 1-34
+platform/packages/proxy/src/sandbox.ts
+  s_c4fcc864caec3f::t_1e5dccec26b1c6 1-190
+platform/packages/proxy/src/types.ts
+  s_c4fcc864caec3f::t_9bfe98fdb81d0e 1-67
+platform/packages/proxy/test/unit/d1.test.ts
+  s_c4fcc864caec3f::t_b265843862e302 1-344
+platform/packages/proxy/test/unit/dispatch.test.ts
+  s_c4fcc864caec3f::t_e119bc0cfce17f 1-406
+platform/packages/proxy/test/unit/kv.test.ts
+  s_c4fcc864caec3f::t_856743c0d3cdbc 1-414
+platform/packages/proxy/test/unit/proxy.test.ts
+  s_c4fcc864caec3f::t_99ab6f441179b4 1-1146
+platform/packages/proxy/test/unit/r2.test.ts
+  s_c4fcc864caec3f::t_57c30147b2d240 1-456
+platform/packages/proxy/test/unit/resolve.test.ts
+  s_c4fcc864caec3f::t_f95948419ff509 1-72
+platform/packages/proxy/test/unit/sandbox.test.ts
+  s_c4fcc864caec3f::t_015ea35323c7f9 1-463
+platform/packages/proxy/tsconfig.json
+  s_c4fcc864caec3f::t_2d7b064e8efdd8 1-15
+platform/packages/proxy/wrangler.jsonc
+  s_c4fcc864caec3f::t_e87b3f73560c79 1-111
+platform/packages/tail/README.md
+  s_c4fcc864caec3f::t_04173aa98cc418 1-50
+platform/packages/tail/package.json
+  s_c4fcc864caec3f::t_b1121638661d3c 1-16
+platform/packages/tail/src/index.ts
+  s_c4fcc864caec3f::t_3e73f3a58673ee 1-67
+platform/packages/tail/test/parse-script-name.test.ts
+  s_c4fcc864caec3f::t_2296134f28fece 1-45
+platform/packages/tail/tsconfig.json
+  s_c4fcc864caec3f::t_6877242f069cb6 1-15
+platform/packages/tail/wrangler.jsonc
+  s_c4fcc864caec3f::t_b3cd97023de416 1-34
+platform/packages/ui/README.md
+  s_c4fcc864caec3f::t_3a3e78dd8cc6fb 1-13
+platform/packages/ui/package.json
+  s_c4fcc864caec3f::t_c5353d81701bac 1-31
+platform/packages/ui/src/assets/checkmark.svg
+  s_c4fcc864caec3f::t_f71f43e4ba4841 1
+platform/packages/ui/src/assets/clients/airbnb.svg
+  s_c4fcc864caec3f::t_38d7ce7d9fcbc3 1-28
+platform/packages/ui/src/assets/clients/bolt.svg
+  s_c4fcc864caec3f::t_a3060fda156669 1-5
+platform/packages/ui/src/assets/clients/clickup.svg
+  s_c4fcc864caec3f::t_3b35c268cac499 1-5
+platform/packages/ui/src/assets/clients/cloudflare.svg
+  s_c4fcc864caec3f::t_468b85728d0780 1-26
+platform/packages/ui/src/assets/clients/framer.svg
+  s_c4fcc864caec3f::t_300b1033a4be4a 1-16
+platform/packages/ui/src/assets/clients/hugging-face.svg
+  s_c4fcc864caec3f::t_3cc62fbe13a145 1-9
+platform/packages/ui/src/assets/clients/linear.svg
+  s_c4fcc864caec3f::t_6def9ea972cf5f 1-7
+platform/packages/ui/src/assets/clients/mercedes.svg
+  s_c4fcc864caec3f::t_b044dddb0ca4e4 1-2865
+platform/packages/ui/src/assets/clients/openai.svg
+  s_c4fcc864caec3f::t_18adc8049751ef 1
+platform/packages/ui/src/assets/clients/paramount.svg
+  s_c4fcc864caec3f::t_67028d91e302e6 1
+platform/packages/ui/src/assets/clients/plaid.svg
+  s_c4fcc864caec3f::t_f8e6e547d7f9a2 1-7
+platform/packages/ui/src/assets/clients/shopify.svg
+  s_c4fcc864caec3f::t_da5385fbdb61f1 1-30
+platform/packages/ui/src/assets/clients/stripe.svg
+  s_c4fcc864caec3f::t_362e0802e6093f 1-3
+platform/packages/ui/src/assets/icons/oxc-dark.svg
+  s_c4fcc864caec3f::t_364e89d80f0fc7 1-124
+platform/packages/ui/src/assets/icons/oxc-light.svg
+  s_c4fcc864caec3f::t_24f12aac468dee 1-124
+platform/packages/ui/src/assets/icons/oxc-mono.svg
+  s_c4fcc864caec3f::t_3179a22c2426f6 1-5
+platform/packages/ui/src/assets/icons/rolldown-dark.svg
+  s_c4fcc864caec3f::t_ae442744fe3b3d 1-92
+platform/packages/ui/src/assets/icons/rolldown-light.svg
+  s_c4fcc864caec3f::t_f6e50e7693f6ac 1-92
+platform/packages/ui/src/assets/icons/rolldown-mono.svg
+  s_c4fcc864caec3f::t_51e946b97a6434 1-5
+platform/packages/ui/src/assets/icons/vite-dark.svg
+  s_c4fcc864caec3f::t_bf0376950ddcfa 1-132
+platform/packages/ui/src/assets/icons/vite-light.svg
+  s_c4fcc864caec3f::t_c61899db66a661 1-132
+platform/packages/ui/src/assets/icons/vite-mono.svg
+  s_c4fcc864caec3f::t_2e17e388f8eb26 1-5
+platform/packages/ui/src/assets/icons/viteplus-dark.svg
+  s_c4fcc864caec3f::t_59e59786f29db1 1-133
+platform/packages/ui/src/assets/icons/viteplus-light.svg
+  s_c4fcc864caec3f::t_0993ed92b1c5e1 1-133
+platform/packages/ui/src/assets/icons/viteplus-mono.svg
+  s_c4fcc864caec3f::t_dca97d75f0aa0a 1-6
+platform/packages/ui/src/assets/icons/vitest-dark.svg
+  s_c4fcc864caec3f::t_dd2c3babd90c57 1-52
+platform/packages/ui/src/assets/icons/vitest-light.svg
+  s_c4fcc864caec3f::t_2c759d39084fce 1-52
+platform/packages/ui/src/assets/icons/vitest-mono.svg
+  s_c4fcc864caec3f::t_8008545be02b8f 1-5
+platform/packages/ui/src/assets/icons/void-icon.svg
+  s_c4fcc864caec3f::t_a7fb86dd5f9fd1 1-20
+platform/packages/ui/src/assets/logos/oxc-dark.svg
+  s_c4fcc864caec3f::t_78e00004aa2c99 1-125
+platform/packages/ui/src/assets/logos/oxc-light.svg
+  s_c4fcc864caec3f::t_178f18cbcfd683 1-125
+platform/packages/ui/src/assets/logos/rolldown-dark.svg
+  s_c4fcc864caec3f::t_ae2aad1d0547f0 1-93
+platform/packages/ui/src/assets/logos/rolldown-light.svg
+  s_c4fcc864caec3f::t_914a856e7910a4 1-93
+platform/packages/ui/src/assets/logos/vite-dark.svg
+  s_c4fcc864caec3f::t_1ac7894acd5bfb 1-133
+platform/packages/ui/src/assets/logos/vite-light.svg
+  s_c4fcc864caec3f::t_4317532412d736 1-133
+platform/packages/ui/src/assets/logos/viteplus-dark.svg
+  s_c4fcc864caec3f::t_e2f17f2cca5135 1-133
+platform/packages/ui/src/assets/logos/viteplus-light.svg
+  s_c4fcc864caec3f::t_dfc119a274234b 1-133
+platform/packages/ui/src/assets/logos/vitest-dark.svg
+  s_c4fcc864caec3f::t_488396e1282bb8 1-53
+platform/packages/ui/src/assets/logos/vitest-light.svg
+  s_c4fcc864caec3f::t_643b2f9efecd88 1-53
+platform/packages/ui/src/assets/logos/void-dark.svg
+  s_c4fcc864caec3f::t_4bb5525a7da405 1-4
+platform/packages/ui/src/assets/logos/void-light.svg
+  s_c4fcc864caec3f::t_feb092eaeca94b 1-4
+platform/packages/ui/src/assets/logos/voidzero-dark.svg
+  s_c4fcc864caec3f::t_d81c97706ae654 1-3
+platform/packages/ui/src/assets/logos/voidzero-light.svg
+  s_c4fcc864caec3f::t_791e75d7c0433f 1-3
+platform/packages/ui/src/assets/rolldown/hero-terminal.svg
+  s_c4fcc864caec3f::t_1a945938f0ade5 1-9
+platform/packages/ui/src/assets/vite/vite-ci.svg
+  s_c4fcc864caec3f::t_d6f9095ab5a4ea 1-37
+platform/packages/ui/src/assets/vite/vite-featurepanel-1-terminal.svg
+  s_c4fcc864caec3f::t_9d2e1a2d0d0812 1-17
+platform/packages/ui/src/assets/vite/vite-featurepanel-4-terminal.svg
+  s_c4fcc864caec3f::t_ce8c2a28ae3ba1 1-13
+platform/packages/ui/src/assets/vite/vite-typed-api.svg
+  s_c4fcc864caec3f::t_b572aa27109d84 1-40
+platform/packages/ui/src/assets/viteplus/logo-dark.svg
+  s_c4fcc864caec3f::t_04f970018c1c3b 1
+platform/packages/ui/src/assets/viteplus/logo.svg
+  s_c4fcc864caec3f::t_c5501c9d4925d8 1
+platform/packages/ui/src/base.css
+  s_c4fcc864caec3f::t_12787746dcbe4d 1
+platform/packages/ui/src/components/AppHeader.tsx
+  s_c4fcc864caec3f::t_2096912517c84b 1-158
+platform/packages/ui/src/components/Badge.tsx
+  s_c4fcc864caec3f::t_21816a9bc79c78 1-31
+platform/packages/ui/src/components/oss/CTAShaderBackground.tsx
+  s_c4fcc864caec3f::t_19e866bed32bdb 1-54
+platform/packages/ui/src/components/oss/FeatureGrid.tsx
+  s_c4fcc864caec3f::t_4244812124a6c5 1-49
+platform/packages/ui/src/components/oss/Footer.tsx
+  s_c4fcc864caec3f::t_fdb1877ba47813 1-47
+platform/packages/ui/src/components/oss/FooterNav.tsx
+  s_c4fcc864caec3f::t_2fc9c4cb39087d 1-100
+platform/packages/ui/src/components/oss/Header.tsx
+  s_c4fcc864caec3f::t_e2cfc9c0da23bf 1-739
+platform/packages/ui/src/components/oss/HeadingSection.tsx
+  s_c4fcc864caec3f::t_8e7405251fe7b5 1-17
+platform/packages/ui/src/components/oss/Hero.tsx
+  s_c4fcc864caec3f::t_5bfffb5e03a47f 1-68
+platform/packages/ui/src/components/oss/Sponsors.tsx
+  s_c4fcc864caec3f::t_49e9911faa6c61 1-323
+platform/packages/ui/src/components/oss/TopBanner.tsx
+  s_c4fcc864caec3f::t_69ed912ec76872 1-162
+platform/packages/ui/src/components/oss/TrustedBy.tsx
+  s_c4fcc864caec3f::t_8357bf4a4f3b73 1-38
+platform/packages/ui/src/components/shared/CodeGroup.tsx
+  s_c4fcc864caec3f::t_15b9fa227b4930 1-56
+platform/packages/ui/src/components/shared/Eyebrow.tsx
+  s_c4fcc864caec3f::t_00a1cb4d768ed7 1-16
+platform/packages/ui/src/components/shared/LogoGrid.tsx
+  s_c4fcc864caec3f::t_c11fc7a2bab5eb 1-155
+platform/packages/ui/src/components/shared/NewsletterForm.tsx
+  s_c4fcc864caec3f::t_03ec7f3e07b86e 1-150
+platform/packages/ui/src/components/shared/PerformanceBar.tsx
+  s_c4fcc864caec3f::t_9fe19aaa275794 1-61
+platform/packages/ui/src/components/shared/ShaderBackground.tsx
+  s_c4fcc864caec3f::t_66677408e7cd6e 1-3
+platform/packages/ui/src/components/shared/Spacer.tsx
+  s_c4fcc864caec3f::t_3f54dd15eec771 1-3
+platform/packages/ui/src/components/viteplus/Header.tsx
+  s_c4fcc864caec3f::t_46fb6772357894 1-41
+platform/packages/ui/src/components/vitest/Hero.tsx
+  s_c4fcc864caec3f::t_d2ba858cf703fd 1-44
+platform/packages/ui/src/components/vitest/Intro.tsx
+  s_c4fcc864caec3f::t_a398c14a852cd6 1-60
+platform/packages/ui/src/context/ThemeContext.tsx
+  s_c4fcc864caec3f::t_323b24062bf7e3 1-21
+platform/packages/ui/src/index.ts
+  s_c4fcc864caec3f::t_644877916ed078 1-32
+platform/packages/ui/src/lib/cx.tsx
+  s_c4fcc864caec3f::t_6c87a5027dc718 1-6
+platform/packages/ui/src/styles/base.css
+  s_c4fcc864caec3f::t_fb82835630991a 1-292
+platform/packages/ui/src/styles/index.css
+  s_c4fcc864caec3f::t_dec26ffd45824a 1-37
+platform/packages/ui/src/styles/marketing.css
+  s_c4fcc864caec3f::t_d57a2fc60aad09 1-495
+platform/packages/ui/src/styles/tokens.css
+  s_c4fcc864caec3f::t_0ee0a21c99de38 1-330
+platform/packages/ui/src/theme.css
+  s_c4fcc864caec3f::t_2d45a85c54e88f 1
+platform/packages/ui/src/types/sponsors.ts
+  s_c4fcc864caec3f::t_0eb94fe2078a19 1-14
+platform/packages/ui/src/types/theme-config.ts
+  s_c4fcc864caec3f::t_b9b48a5dacaa1d 1-55
+platform/packages/ui/src/types/theme-context.ts
+  s_c4fcc864caec3f::t_c7578f08c25bd5 1-7
+platform/scripts/kitchen-sink-smoke-test.md
+  s_c4fcc864caec3f::t_bd91c353085c6f 1-157
+platform/scripts/kitchen-sink-smoke-test.ts
+  s_c4fcc864caec3f::t_6b44f2aa71f79c 1-545
+platform/scripts/wrangler-deploy.ts
+  s_c4fcc864caec3f::t_36f63bb94796ed 1-47
+platform/tsconfig.json
+  s_c4fcc864caec3f::t_7689abe8318078 1-12
+pnpm-lock.yaml
+  s_c4fcc864caec3f::t_6b6550384182e2 195-197,201-210,588-821,1073,2082-2108,2653-2655,2659-2667,2671-2673,2721-2725,3563-3574,6272-6274,7011-7014,8033-8035,8333-8336,9374-9376,9805-9807,11372-11394,11591,11825-11828,11834-11844,11847-11848,11897-11901,12509-12512,12592,12622,12687,12704,12706,12714,12789,12807,13919-13925,14845-14856,14920-14936,14987-14994,15108-15134,15522-15523,16230-16233,16480-16490,17179-17180,17437-17438,17829,17896,17995,17999,18001,18004,18419-18444,18576-18599,19204-19205,19845-19846,20265,20739-20795,21069-21096
+pnpm-workspace.yaml
+  s_c4fcc864caec3f::t_3e34349a6391ea 4-5,32,38-41
+vite.config.ts
+  s_c4fcc864caec3f::t_6c11b3e2968cc2 2,23-32,37-41,44-45,99,185-192,341,355-374
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "05782493ac68bb270558ecd71dde5ef351be1a64",
+  "prompts": {},
+  "sessions": {
+    "s_c4fcc864caec3f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08f33-9d52-76f0-b044-cd5a424c5737",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
