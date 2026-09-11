@@ -80,12 +80,12 @@ supersedes: 0047-email.md
 > - Migration `0013_email_verification_source.sql` adds
 >   `verification_source TEXT NOT NULL DEFAULT 'cf'` with a check
 >   constraint of `('cf' | 'platform')`. Existing rows default to `'cf'`.
-> - Token helper `packages/api/src/auth/confirm-token.ts` —
+> - Token helper `platform/packages/api/src/auth/confirm-token.ts` —
 >   `base64url(JSON) + '.' + base64url(HMAC-SHA256)` carrying
 >   `(v, pid, did, addr, iat, exp)` with 24h TTL. Single-use is enforced
 >   by DB state (clicking flips status; re-clicks find an
 >   already-verified row and return idempotent success).
-> - Platform email helper `packages/api/src/email/send-verification.ts`
+> - Platform email helper `platform/packages/api/src/email/send-verification.ts`
 >   POSTs to the proxy's new `/email/internal/send` endpoint, which is
 >   gated by HMAC of the sentinel string
 >   `void-platform-internal-email-v1` under `JWT_SECRET`. Only the api
@@ -149,14 +149,14 @@ Single rollout covering outbound, inbound, and the platform infrastructure that 
 - Binding inference (drives `manifest.bindings.email` for the dev-inbox plugin and analytics; no on-worker `send_email` binding)
 - `void email usage|logs` CLI
 
-**Platform (`packages/proxy`, `packages/api`):**
+**Platform (`platform/packages/proxy`, `platform/packages/api`):**
 
 - `mail.void.cloud` shared sender zone (one-time CF Email Routing setup)
-- Inbound router worker (`packages/proxy/src/email-router.ts`) — receives all mail at `mail.void.cloud`, parses `<slug>+<tag>`, dispatches into the user worker via WfP RPC
+- Inbound router worker (`platform/packages/proxy/src/email-router.ts`) — receives all mail at `mail.void.cloud`, parses `<slug>+<tag>`, dispatches into the user worker via WfP RPC
 - `/email/check-quota`, `/email/log-send`, `/email/log-recv` proxy endpoints with KV-backed monthly counters, per-minute burst cap, and suspend kill-switch
 - `VOID_PROJECT_SLUG` env injection at deploy
 - **Verified destinations** — `email_destinations` table per project; `POST /projects/:id/email/destinations` triggers the CF verification email; per-project allowlist injected as `allowed_destination_addresses` on the worker's `send_email` binding at deploy time. Project owner's email is auto-added on project create.
-- Admin UI page (`packages/api/src/admin/routes/email.tsx`): per-project usage, suspend toggle, monthly + burst limit overrides, counter reset, destinations list with add/remove
+- Admin UI page (`platform/packages/api/src/admin/routes/email.tsx`): per-project usage, suspend toggle, monthly + burst limit overrides, counter reset, destinations list with add/remove
 - API routes: `GET /projects/:id/email/{usage,logs}`, `GET|POST|DELETE /projects/:id/email/destinations[/:id]`
 
 ## Non-Goals
@@ -334,7 +334,7 @@ local dev-inbox plugin) and the `email/` directory inclusion in the
 default scan dirs. Opt-out via `bindings: { email: false }` in plugin
 options. Wrangler sync **does not emit** `[[send_email]]` on user
 projects — the proxy worker carries the platform's account-level
-binding (see `packages/proxy/wrangler.jsonc`).
+binding (see `platform/packages/proxy/wrangler.jsonc`).
 
 #### MIME construction
 
@@ -567,7 +567,7 @@ quota bypass surface.
 ```
 external sender → mail.void.cloud MX
   → CF Email Routing catch-all rule on mail.void.cloud
-  → email-router worker (packages/proxy/src/email-router.ts)
+  → email-router worker (platform/packages/proxy/src/email-router.ts)
       ├─ 1. Parse local-part: <slug>+<tag>
       ├─ 2. Look up project by slug (ROUTING KV)
       ├─ 3. Pre-buffer raw to Uint8Array; serialize envelope
@@ -657,7 +657,7 @@ Per-project setup: nothing. Every project deployed with the new framework codege
 
 Per-project DKIM signing isn't possible on the shared domain, so reputation pooling is unavoidable there. _(scope change 2026-09-11)_ A project with reputation-sensitive sending brings its own Cloudflare zone — [Custom domains on Cloudflare](#custom-domains-on-cloudflare) — and signs with its own domain.
 
-#### Inbound router worker (`packages/proxy/src/email-router.ts`)
+#### Inbound router worker (`platform/packages/proxy/src/email-router.ts`)
 
 Bound as the proxy worker's `email()` export. Receives all inbound mail at `mail.void.cloud`:
 
@@ -682,7 +682,7 @@ Reuses the unified service binding pattern the AI proxy + revalidation already u
 
 Auth pattern: caller sends `{ projectId, aiToken, ... }` JSON body; the proxy's middleware verifies `aiToken` is HMAC of `projectId` with the shared `JWT_SECRET`. Same auth as every other proxy route — no email-specific token plumbing.
 
-Three endpoints in `packages/proxy/src/email.ts`:
+Three endpoints in `platform/packages/proxy/src/email.ts`:
 
 - `POST /email/check-quota` — pre-flight outbound quota check. Returns 429 if denied; suspend kill-switch denied first
 - `POST /email/log-send` — async per-recipient delivery log
@@ -722,15 +722,15 @@ CF caps message size at ~25MB raw / ~10MB base64-inflated for `send_email`. The 
 CF's `send_email` only delivers to addresses verified as destinations on the sender account, so the platform manages a per-project allowlist on top of CF's account-wide list:
 
 - **Schema** — `email_destinations` table (`id`, `project_id`, `address`, `status: 'pending' | 'verified' | 'failed'`, `cf_destination_id`, `verified_at`).
-- **CF API client** — `packages/api/src/provisioning/email-routing.ts` wraps `POST/GET/DELETE /accounts/:id/email/routing/addresses`.
+- **CF API client** — `platform/packages/api/src/provisioning/email-routing.ts` wraps `POST/GET/DELETE /accounts/:id/email/routing/addresses`.
 - **API routes** — `GET|POST|DELETE /projects/:id/email/destinations[/:id]`. POST triggers CF to email the recipient with a verification link; GET refreshes status from CF for any rows still `pending`.
-- **Auto-verify project owner** — `packages/api/src/routes/projects.ts` calls `addDestination(user.email)` when a project is created (via `ctx.waitUntil`, non-blocking). The owner gets the verification email in their GitHub-OAuth-linked inbox; one click and their project can send to itself out of the box.
+- **Auto-verify project owner** — `platform/packages/api/src/routes/projects.ts` calls `addDestination(user.email)` when a project is created (via `ctx.waitUntil`, non-blocking). The owner gets the verification email in their GitHub-OAuth-linked inbox; one click and their project can send to itself out of the box.
 - **Per-project allowlist enforcement in the proxy** — _(re-land)_ the user worker carries no `send_email` binding. The api mirrors each project's verified rows into `email-allowlist:<projectId>` in `ROUTING` KV (`provisioning/email-allowlist.ts`), and the proxy checks every send and every inbound reply against that mirror. Both revoke paths tighten the mirror before deleting the row. Destinations are account-wide on CF's side; the mirror is what makes consent per project.
 - **Cross-project safety on delete** — destinations are CF account-wide; before calling `deleteDestination` we check `countProjectsUsingDestination` and only remove from CF if no other project references the same `cf_destination_id`.
 
 The platform/team never opens the CF dashboard. The recipient (the person receiving the verification email) is the only human in the loop, and they only click a link in their own inbox. For every address except the owner's own, that mail is **ours** — HMAC-signed link, sent from `noreply@<mail domain>`, resendable — because Cloudflare's verification is per account rather than per project, and Cloudflare has no API to resend its mail.
 
-#### Admin UI — `packages/api/src/admin/routes/email.tsx`
+#### Admin UI — `platform/packages/api/src/admin/routes/email.tsx`
 
 Per-project page at `/admin/email/:projectId`:
 
@@ -740,7 +740,7 @@ Per-project page at `/admin/email/:projectId`:
 - "Reset counter" button for the current month
 - Verified-destinations table with add / remove
 
-Mirrors the existing admin route patterns (e.g. `packages/api/src/admin/routes/deployments.tsx`). Direct KV/DB reads + writes; no API layer between admin and storage. An environment-level page beside it is designed in [Operator surfaces](#operator-surfaces).
+Mirrors the existing admin route patterns (e.g. `platform/packages/api/src/admin/routes/deployments.tsx`). Direct KV/DB reads + writes; no API layer between admin and storage. An environment-level page beside it is designed in [Operator surfaces](#operator-surfaces).
 
 #### CLI — `void email`
 
@@ -926,10 +926,10 @@ sendEmail ──► dev inbox? ──► env.SEND_EMAIL? ──► __VOID_PROXY?
 3. **Sender default.** `void.json` gains `email.from`. Replies default to
    `message.to` when there is no slug — in this mode `message.to` is a real
    address on the developer's own zone.
-4. **No-prefix inbound.** When `__voidPlatformTo` is absent, the dispatcher
-   matches the full local part, so `support+T-42@zone` reaches
-   `email/support+[ticket].ts` — once the zone's subaddressing setting is
-   on; see below, it is off by default.
+4. **No-prefix inbound.** When no `__VOID_PROJECT_SLUG` is configured (an
+   own-account worker), the dispatcher matches the full local part, so
+   `support+T-42@zone` reaches `email/support+[ticket].ts` — once the zone's
+   subaddressing setting is on; see below, it is off by default.
 5. **Enact actions on a native message.** When the envelope is a real
    `ForwardableEmailMessage`, apply reject / forward / reply on it instead of
    returning them.
@@ -1100,13 +1100,13 @@ routing list` shows routing-enabled zones only); auto-pick is decision 9.
 
 #### Build list
 
-Land first, own PR: bump `wrangler` (`framework/pnpm-workspace.yaml:30`,
+Land first, own PR: bump `wrangler` (`pnpm-workspace.yaml:30`,
 `^4.107.0` → ≥ 4.113, recommend the `@cloudflare/vite-plugin` 1.54.7 /
 wrangler 4.131 pair so one wrangler exists in the tree; minimum pair
 1.46.0 / 4.113.0). Re-fixture the `--json` parsers and deploy flags; add a
 bundled-`cli.js` grep test for `Email Routing plan:` and `authTokenCommand`.
 
-Feature PR, `framework/packages/void/src`:
+Feature PR, `packages/void/src`:
 
 | File                                    | Change                                                                                                                                                                                                                                                                                  |
 | --------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -1128,7 +1128,9 @@ wrangler carries them, delete `fetchWithSessionBearer`.
 
 1. `POST /zones/{z}/email/routing/dns { name: "mail.<zone>" }` enables
    routing on the subdomain, with the OAuth session, and what a repeat
-   POST does. Attested by the OpenAPI body field (`name`, not deprecated)
+   POST does. The code issues it only when the apex zone already has
+   routing enabled; a disabled zone plus a subdomain `name` is a case the
+   code never sends and the probe should still record. Attested by the OpenAPI body field (`name`, not deprecated)
    and a Support quote in `terraform-provider-cloudflare#5890`; never
    executed. wrangler's own `routing enable` calls the **deprecated**
    `POST …/routing/enable`; `…/routing/dns` is the current one.
@@ -1179,11 +1181,11 @@ Self-hosting is not a supported story in the repo. Every setup document is
 written for VoidZero's own account. On the email path, three code sites pin
 VoidZero hosts; everything else already follows `EMAIL_SENDER_DOMAIN`:
 
-| Site                                                     | What it pins                                                                                                                      |
-| -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| `packages/api/src/email/send-verification.ts:76-84`      | the api host in the confirmation link                                                                                             |
-| `packages/api/src/email/send-verification.ts:90-95`      | the proxy origin the api posts verification mail to                                                                               |
-| `packages/api/src/email.ts:1` + `api/wrangler.jsonc:152` | the legacy `Void <noreply@void.cloud>` sender for welcome / invite / alert mail, on a different domain from `EMAIL_SENDER_DOMAIN` |
+| Site                                                              | What it pins                                                                                                                      |
+| ----------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `platform/packages/api/src/email/send-verification.ts:76-84`      | the api host in the confirmation link                                                                                             |
+| `platform/packages/api/src/email/send-verification.ts:90-95`      | the proxy origin the api posts verification mail to                                                                               |
+| `platform/packages/api/src/email.ts:1` + `api/wrangler.jsonc:152` | the legacy `Void <noreply@void.cloud>` sender for welcome / invite / alert mail, on a different domain from `EMAIL_SENDER_DOMAIN` |
 
 The prose in `getting-started-prompt.txt` and `docs/guide/email.md` also names
 `mail.void.cloud` literally, so an Acme developer would read the wrong
@@ -1685,7 +1687,7 @@ packages/void/                            (framework, in ../void)
     └── email-inbound.test.ts             # scanner, compile emit, defineEmail, parseEmail,
                                           #   buildReplyMessage, createInboundTestHarness
 
-packages/api/src/                         (platform)
+platform/packages/api/src/                         (platform)
 ├── schema.ts                             # MODIFIED — add email_destinations table
 ├── drizzle/0011_add_email_destinations.sql
 ├── db.ts                                 # MODIFIED — destination CRUD helpers
@@ -1699,7 +1701,7 @@ packages/api/src/                         (platform)
 │   └── provision.ts                      # MODIFIED — inject VOID_PROJECT_SLUG plain_text binding
 └── routes/deploy.ts                      # MODIFIED — emit send_email with allowed_destination_addresses
 
-packages/proxy/src/                       (platform)
+platform/packages/proxy/src/                       (platform)
 ├── email.ts                              # /email/check-quota, /email/log-send, /email/log-recv
 ├── email-router.ts                       # email() export — slug+tag parse, dispatch, enact actions
 ├── body.ts                               # MODIFIED — asNumber helper
@@ -1723,8 +1725,8 @@ Single ordered sequence. Each step is independently testable; later steps depend
 3. **Framework: `WorkerEntrypoint` codegen migration.** `compileWorkerEntry` emits the class form with `email(envelope)` returning actions. Affects all WfP-deployed workers.
 4. **Framework: default-from + `__VOID_PROXY` integration.** `from` defaults to `<slug>+noreply@mail.void.cloud`; pre-flight quota + async log via the unified proxy. Fail-open when proxy is unbound.
 5. **Framework: `bindings.email` flag in deploy manifest.** `packageBuild` / `packageFrameworkBuild` set `manifest.bindings.email = true` when `needsEmail` is detected, so the platform knows to emit `send_email` on the worker.
-6. **Platform: `VOID_PROJECT_SLUG` injection.** `packages/api/src/provisioning/provision.ts` adds the plain-text binding alongside the existing proxy bindings.
-7. **Platform: proxy email handlers + router worker.** `/email/check-quota`, `/log-send`, `/log-recv` in `packages/proxy/src/email.ts` (with monthly + per-minute burst caps + suspend kill-switch); `email-router.ts` wired as the proxy's `email()` export.
+6. **Platform: `VOID_PROJECT_SLUG` injection.** `platform/packages/api/src/provisioning/provision.ts` adds the plain-text binding alongside the existing proxy bindings.
+7. **Platform: proxy email handlers + router worker.** `/email/check-quota`, `/log-send`, `/log-recv` in `platform/packages/proxy/src/email.ts` (with monthly + per-minute burst caps + suspend kill-switch); `email-router.ts` wired as the proxy's `email()` export.
 8. **Platform: destinations schema + CF API client + API routes.** `email_destinations` table; `provisioning/email-routing.ts`; `GET|POST|DELETE /projects/:id/email/destinations[/:id]`. Auto-add project owner's email on project create.
 9. **Platform: `send_email` binding emit at deploy.** `routes/deploy.ts` reads verified destinations and emits `{ type: 'send_email', allowed_destination_addresses: [...] }` per project.
 10. **Platform: API + admin UI.** `GET /projects/:id/email/{usage,logs}` + `admin/routes/email.tsx` (usage, suspend, limits, destinations).
@@ -1912,11 +1914,11 @@ Surfaces "you can't send from this address yet" as a TypeScript error at edit ti
 - `packages/void/src/runtime/env.ts:70` — `requireRuntimeBinding` shared helper
 - `packages/void/src/inference/walk.ts:6-103` — existing binding inference pattern
 - `packages/void/src/cli/wrangler.ts:179-244` — existing wrangler-sync pattern
-- `packages/proxy/src/*` — AI proxy + unified `__VOID_PROXY` pattern that this design extends
-- `packages/api/src/admin/routes/deployments.tsx` — admin page pattern this design follows
+- `platform/packages/proxy/src/*` — AI proxy + unified `__VOID_PROXY` pattern that this design extends
+- `platform/packages/api/src/admin/routes/deployments.tsx` — admin page pattern this design follows
 
 Evidence for the 2026-09-11 sections (framework paths under
-`framework/packages/void/src`; platform paths under `packages/`):
+`packages/void/src`; platform paths under `platform/packages/`):
 
 - Wrangler scopes and commands: `wrangler whoami` on 2026-09-11 lists
   `email_routing (write)`, `email_sending (write)`; `wrangler email` exists in
@@ -1929,13 +1931,13 @@ Evidence for the 2026-09-11 sections (framework paths under
   returned as data), `cli/deploy.ts:2468-2681` (no email in desired
   resources). All executed against a scratch copy of `playground/kitchen-sink`.
 - Address discovery gap: `cli/email.ts` prints no sender;
-  `packages/dashboard/pages/projects/[id].tsx` has no email section;
+  `platform/packages/dashboard/pages/projects/[id].tsx` has no email section;
   `routes/email.ts:77-84` returns no domain; `codegen/env-types.ts` does not
   type the bindings; `index.ts` / `plugin-*.ts` do not inject them in dev;
   `runtime/email.ts:441-447` returns `INVALID_FROM` before the inbox at `:493`.
-- Mode C blockers: `packages/api/src/email/send-verification.ts:76-95`,
-  `packages/api/src/email.ts:1`, `packages/api/wrangler.jsonc:152`.
-- Slug mirror self-heal: `packages/api/src/index.ts:585-600` inside the hourly
+- Mode C blockers: `platform/packages/api/src/email/send-verification.ts:76-95`,
+  `platform/packages/api/src/email.ts:1`, `platform/packages/api/wrangler.jsonc:152`.
+- Slug mirror self-heal: `platform/packages/api/src/index.ts:585-600` inside the hourly
   rollover.
 - Admin patterns: `admin/routes/signup-control.tsx`, `admin/routes/system.tsx:140-178`,
   `admin/views/dashboard.tsx:49-86`.

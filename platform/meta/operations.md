@@ -597,7 +597,7 @@ mail.void.cloud`. This adds the `cf-bounce` MX, SPF, DKIM and DMARC
    sends to any recipient; per-project consent stays in our own allowlist.
    Requires the Workers Paid plan.
 4. **Deploy the proxy** with `send_email` bound and the `email()` export live.
-   Check all three scopes in `packages/proxy/wrangler.jsonc`: the top level,
+   Check all three scopes in `platform/packages/proxy/wrangler.jsonc`: the top level,
    `env.production` and `env.staging`. Wrangler does not inherit `send_email`
    into a named env, and `deploy:proxy` runs `--env production`.
 5. **Create the catch-all rule** on the subdomain. Action _Send to a Worker_,
@@ -614,7 +614,7 @@ mail.void.cloud`. This adds the `cf-bounce` MX, SPF, DKIM and DMARC
    here; the setting matters only for literal rules (own-account deploys).
 6. **Slug mirror.** The proxy resolves a sender through
    `email-slug:<projectId>` in `ROUTING` KV. `createProject` writes it, and
-   the hourly rollover (`packages/api/src/index.ts`, `processUserRollover`)
+   the hourly rollover (`platform/packages/api/src/index.ts`, `processUserRollover`)
    rewrites it for every project, so a project that predates this feature is
    covered within an hour of the api deploy. Until then its sends return a 502
    `project slug unknown`. No manual pass is needed.
