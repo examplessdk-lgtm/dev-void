@@ -1,0 +1,21 @@
+AGENTS.md
+  s_0add8c35799930::t_9d035c145c9311 56-69
+platform/meta/design-docs/0077-route-aware-isr-ttl.md
+  s_0add8c35799930::t_07e3e233097f05 898,901
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "4cce81daa4bfbc715f272cb9e56a3c4b6428bd2e",
+  "prompts": {},
+  "sessions": {
+    "s_0add8c35799930": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0903e-9700-76f0-a4db-b5c9ea737ea9",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
