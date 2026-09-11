@@ -1,0 +1,21 @@
+packages/void/test/integration/websockets-playground.test.ts
+  s_5a06e7c4c4ad3d::t_6fee2fbd569d49 29-47,128,164
+packages/void/test/unit/provision.cases.ts
+  s_5a06e7c4c4ad3d::t_cd08ba6a80b749 5559-5568,5579-5580
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "b893eb80ed40d1ada9c4f00477229cf3c8d4f704",
+  "prompts": {},
+  "sessions": {
+    "s_5a06e7c4c4ad3d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08e6e-3b48-7183-ac5e-670cd59a2ddc",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
