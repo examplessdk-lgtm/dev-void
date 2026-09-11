@@ -18,6 +18,7 @@ import {
   replyEmail,
   type EmailEnvelope,
 } from '../../src/runtime/email/inbound.ts';
+import { MAX_MESSAGE_BYTES } from '../../src/runtime/email/mime.ts';
 import { createInboundTestHarness } from '../../src/runtime/email/testing.ts';
 import { envContext } from '../../src/runtime/env-raw.ts';
 
@@ -1634,6 +1635,48 @@ describe('end-to-end: envelope → handler → action queue', () => {
     } finally {
       warn.mockRestore();
     }
+  });
+
+  it('reply() rejects a Uint8Array raw over MAX_MESSAGE_BYTES', async () => {
+    const handler = defineEmail(async (message) => {
+      await message.reply({
+        from: 'support@app.dev',
+        to: 'sender@example.com',
+        raw: new Uint8Array(MAX_MESSAGE_BYTES + 1),
+      } as unknown as Parameters<ForwardableEmailMessage['reply']>[0]);
+    });
+    await expect(dispatchToHandler(makeEnvelope(), handler)).rejects.toThrow(
+      /exceeds Cloudflare limit/,
+    );
+  });
+
+  it('reply() stops reading a stream raw once MAX_MESSAGE_BYTES is exceeded', async () => {
+    // A stream that never closes: without the bound, reply() would buffer forever.
+    let pulls = 0;
+    let cancelled = false;
+    const chunk = new Uint8Array(1024 * 1024);
+    const raw = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulls++;
+        controller.enqueue(chunk);
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const handler = defineEmail(async (message) => {
+      await message.reply({
+        from: 'support@app.dev',
+        to: 'sender@example.com',
+        raw,
+      } as unknown as Parameters<ForwardableEmailMessage['reply']>[0]);
+    });
+    await expect(dispatchToHandler(makeEnvelope(), handler)).rejects.toThrow(
+      /exceeds Cloudflare limit/,
+    );
+    expect(cancelled).toBe(true);
+    // 10 MiB limit + the chunk that crosses it + the stream's own read-ahead.
+    expect(pulls).toBeLessThanOrEqual(12);
   });
 
   it('parseEmail can be called multiple times (cache replays)', async () => {

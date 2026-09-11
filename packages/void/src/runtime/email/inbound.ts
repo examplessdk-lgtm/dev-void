@@ -10,7 +10,7 @@
 
 import type { Email as PostalMimeEmail } from 'postal-mime';
 import { getRawRuntimeEnv } from '../env-raw.ts';
-import { buildMime, MAX_MESSAGE_BYTES, normalizeEmail } from './mime.ts';
+import { buildMime, MAX_MESSAGE_BYTES, MimeError, normalizeEmail } from './mime.ts';
 import type { Address, Attachment } from './types.ts';
 
 // Mirror the slug-validity rule from runtime/email.ts so a malformed
@@ -209,7 +209,17 @@ function stripSlugFromAddress(address: string, slug: string | undefined): string
   return address;
 }
 
-async function readStreamToBytes(stream: ReadableStream<Uint8Array>): Promise<Uint8Array> {
+function replyTooLarge(size: number): MimeError {
+  return new MimeError(
+    'MIME_ERROR',
+    `reply: message size ${size} bytes exceeds Cloudflare limit of ${MAX_MESSAGE_BYTES} bytes.`,
+  );
+}
+
+async function readStreamToBytes(
+  stream: ReadableStream<Uint8Array>,
+  limit = Infinity,
+): Promise<Uint8Array> {
   const reader = stream.getReader();
   const chunks: Array<Uint8Array> = [];
   let total = 0;
@@ -218,8 +228,13 @@ async function readStreamToBytes(stream: ReadableStream<Uint8Array>): Promise<Ui
     if (done) {
       break;
     }
-    chunks.push(value);
     total += value.byteLength;
+    if (total > limit) {
+      // Stop pulling: the producer would otherwise keep filling memory.
+      await reader.cancel().catch(() => {});
+      throw replyTooLarge(total);
+    }
+    chunks.push(value);
   }
   const out = new Uint8Array(total);
   let offset = 0;
@@ -382,8 +397,17 @@ export function createMessageProxy(
         );
         return;
       }
-      const rawBytes =
-        reply.raw instanceof Uint8Array ? reply.raw : await readStreamToBytes(reply.raw);
+      // `replyEmail()` is bounded by `buildMime`; a hand-built reply is not, so
+      // bound it here before the bytes travel to the proxy (or to native reply).
+      let rawBytes: Uint8Array;
+      if (reply.raw instanceof Uint8Array) {
+        if (reply.raw.byteLength > MAX_MESSAGE_BYTES) {
+          throw replyTooLarge(reply.raw.byteLength);
+        }
+        rawBytes = reply.raw;
+      } else {
+        rawBytes = await readStreamToBytes(reply.raw, MAX_MESSAGE_BYTES);
+      }
       actions.push({ type: 'reply', from: reply.from, to: reply.to, raw: rawBytes });
     },
   } as unknown as ForwardableEmailMessage;
