@@ -7,7 +7,7 @@
 // and verified-destinations allowlist (mirrored from `email_destinations`
 // into KV by the API on every CRUD).
 //
-// On the developer's own Cloudflare account (`void deploy --backend
+// On the developer's own Cloudflare account (`void deploy --platform
 // cloudflare`) there is no proxy: the deploy provisions a `send_email`
 // binding named `SEND_EMAIL` on the worker itself and the same MIME goes
 // straight through `cloudflare:email`, one `EmailMessage` per recipient.

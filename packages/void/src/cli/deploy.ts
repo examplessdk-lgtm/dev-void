@@ -251,7 +251,7 @@ export type RunDeployOptions = {
   /**
    * Mode B email (0078): fail the deploy — before any upload — instead of continuing
    * without email when the mail domain is not set up and the step cannot finish it
-   * (CI / non-TTY, a blocker, a declined prompt). `--backend cloudflare` only.
+   * (CI / non-TTY, a blocker, a declined prompt). `--platform cloudflare` only.
    */
   requireEmail?: boolean;
 };
@@ -4040,12 +4040,14 @@ async function runCloudflareEmailStep(
     return leaveAccount(
       [
         `email on ${pre.domain} is not ${shipsBinding ? 'fully ' : ''}set up, and this shell cannot ask.`,
-        'Run `void email setup --backend cloudflare` once locally, commit wrangler.jsonc, then redeploy.',
+        'Run `void email setup --platform cloudflare` once locally, commit wrangler.jsonc, then redeploy.',
       ].join('\n'),
     );
   }
   if (!(await input.confirm(`Set up email on ${pre.domain}?`))) {
-    return leaveAccount('email setup skipped — run `void email setup --backend cloudflare` later.');
+    return leaveAccount(
+      'email setup skipped — run `void email setup --platform cloudflare` later.',
+    );
   }
 
   const out = await applyEmailSetup(pre, inputs);

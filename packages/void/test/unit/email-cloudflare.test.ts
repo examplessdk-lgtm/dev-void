@@ -1083,7 +1083,7 @@ describe('preflightEmail', () => {
       {
         scope: 'all',
         message:
-          'could not read Email Routing rules — unknown — run `void email setup --backend cloudflare`',
+          'could not read Email Routing rules — unknown — run `void email setup --platform cloudflare`',
       },
     ]);
   });
@@ -1135,7 +1135,7 @@ describe('preflightEmail', () => {
       {
         scope: 'all',
         message:
-          'could not read the MX records of mail.acme.com — unknown — run `void email setup --backend cloudflare`',
+          'could not read the MX records of mail.acme.com — unknown — run `void email setup --platform cloudflare`',
       },
     ]);
   });

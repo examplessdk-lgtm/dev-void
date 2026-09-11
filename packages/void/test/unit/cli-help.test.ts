@@ -116,20 +116,21 @@ describe('rendered help advertises the flags the parser honours', () => {
   });
 
   // Mode B: `status` / `setup` read the local project + wrangler session, never a Void
-  // project, so their pages carry `--backend cloudflare` and no `--project`.
-  it('shows --backend cloudflare, and no --project, on `email status` and `email setup`', () => {
+  // project, so their pages carry `--platform cloudflare` and no `--project`.
+  it('shows --platform cloudflare, and no --project, on `email status` and `email setup`', () => {
     for (const sub of ['status', 'setup']) {
-      expect(parseEmailArgs([sub, '--backend', 'cloudflare'])).toMatchObject({
+      expect(parseEmailArgs([sub, '--platform', 'cloudflare'])).toMatchObject({
         subcommand: sub,
-        backend: 'cloudflare',
+        platform: 'cloudflare',
       });
       const page = render(['email', sub]);
-      expect(page).toContain(`void email ${sub} --backend cloudflare`);
-      expect(page).toContain('--backend cloudflare');
+      expect(page).toContain(`void email ${sub} --platform cloudflare`);
+      expect(page).toContain('--platform cloudflare');
+      expect(page).not.toContain('--backend');
       expect(page).not.toContain('--project');
     }
     const group = render(['email']);
-    expect(group).toContain('status --backend cloudflare');
-    expect(group).toContain('setup --backend cloudflare');
+    expect(group).toContain('status --platform cloudflare');
+    expect(group).toContain('setup --platform cloudflare');
   });
 });

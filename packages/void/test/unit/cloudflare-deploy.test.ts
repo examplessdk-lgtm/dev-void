@@ -7881,7 +7881,7 @@ describe('runCloudflareDeploy — Mode B email step (3b-ii)', () => {
     const printed = output.lines.join('\n');
     expect(printed).toContain('This changes YOUR Cloudflare account.');
     expect(printed).toContain(
-      'Run `void email setup --backend cloudflare` once locally, commit wrangler.jsonc, then redeploy',
+      'Run `void email setup --platform cloudflare` once locally, commit wrangler.jsonc, then redeploy',
     );
     // No apply: no bearer writes, no `sending enable`, no config write.
     expect(fetchCalls.filter((c) => c.method !== 'GET')).toEqual([]);

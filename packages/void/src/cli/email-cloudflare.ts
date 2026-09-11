@@ -1,5 +1,5 @@
 /**
- * Mode B email — the developer's OWN Cloudflare account (`void deploy --backend
+ * Mode B email — the developer's OWN Cloudflare account (`void deploy --platform
  * cloudflare`). Design doc 0078, "Mode B — the developer's own Cloudflare account".
  *
  * Four pure-ish units, every Cloudflare touch injected so unit tests run on fakes:
@@ -11,7 +11,7 @@
  *                                                  returning the wrangler.jsonc patch
  *
  * Both callers (`void deploy --platform cloudflare` step 3b-ii and `void email
- * setup|status --backend cloudflare`) borrow the session bearer through the deploy
+ * setup|status --platform cloudflare`) borrow the session bearer through the deploy
  * runner's `runWranglerAuthToken` and gate the prompt on `isWranglerNonInteractiveOrCI`
  * (both in `cli/deploy.ts`), so the two never disagree.
  *
@@ -779,7 +779,7 @@ export async function preflightEmail(inputs: EmailCloudflareInputs): Promise<Ema
   } else if (settingsMiss) {
     block(
       'all',
-      `could not read Email Routing settings — unknown — run \`void email setup --backend cloudflare\`${tokenHint}`,
+      `could not read Email Routing settings — unknown — run \`void email setup --platform cloudflare\`${tokenHint}`,
     );
   } else if (pre.session.state === 'ok') {
     pre.zone.state = 'not-found';
@@ -938,7 +938,7 @@ export async function preflightEmail(inputs: EmailCloudflareInputs): Promise<Ema
     } else if (pre.domainMx.state === 'unknown') {
       block(
         'all',
-        `could not read the MX records of ${domain} — unknown — run \`void email setup --backend cloudflare\``,
+        `could not read the MX records of ${domain} — unknown — run \`void email setup --platform cloudflare\``,
       );
     }
   }
@@ -954,7 +954,7 @@ export async function preflightEmail(inputs: EmailCloudflareInputs): Promise<Ema
     pre.rules.state = 'unknown';
     block(
       'all',
-      `could not read Email Routing rules — unknown — run \`void email setup --backend cloudflare\`${tokenHint}`,
+      `could not read Email Routing rules — unknown — run \`void email setup --platform cloudflare\`${tokenHint}`,
     );
   } else {
     const workerToken = `worker:${inputs.workerName}`;
@@ -998,7 +998,7 @@ export async function preflightEmail(inputs: EmailCloudflareInputs): Promise<Ema
   if (pre.sending.state === 'unknown') {
     block(
       'sending',
-      `could not read Email Sending settings — unknown — run \`void email setup --backend cloudflare\`${tokenHint}`,
+      `could not read Email Sending settings — unknown — run \`void email setup --platform cloudflare\`${tokenHint}`,
     );
   } else if (pre.sending.state === 'pending' && pre.sending.dnsConflicts.length > 0) {
     block(
@@ -1131,7 +1131,7 @@ export function renderEmailChecklist(pre: EmailPreflight): string {
     pre.routing.state === 'ready'
       ? 'enabled'
       : pre.routing.state === 'unknown'
-        ? 'unknown — run void email setup --backend cloudflare'
+        ? 'unknown — run void email setup --platform cloudflare'
         : `not enabled${pre.mode === 'apex' && pre.routing.status && pre.routing.status !== 'unconfigured' ? ` (${pre.routing.status})` : ''}`;
   const subWord =
     pre.subaddressing.state === 'on'
@@ -1142,7 +1142,7 @@ export function renderEmailChecklist(pre: EmailPreflight): string {
   row('routing', `${pre.domain}  ${routingWord} · ${subWord}`);
   row(
     'sending',
-    `${pre.domain}  ${pre.sending.state === 'ready' ? 'onboarded' : pre.sending.state === 'unknown' ? 'unknown — run void email setup --backend cloudflare' : 'not onboarded'}`,
+    `${pre.domain}  ${pre.sending.state === 'ready' ? 'onboarded' : pre.sending.state === 'unknown' ? 'unknown — run void email setup --platform cloudflare' : 'not onboarded'}`,
   );
   if (pre.derived.addresses.length === 0) {
     row('rules', '(none — no email/ handlers)');
@@ -1364,7 +1364,7 @@ export async function applyEmailSetup(
     }
     if (blocked.length === 0) {
       lines.push(
-        '  ✘ email: the zone could not be resolved — unknown — run `void email setup --backend cloudflare`',
+        '  ✘ email: the zone could not be resolved — unknown — run `void email setup --platform cloudflare`',
       );
     }
     return result;

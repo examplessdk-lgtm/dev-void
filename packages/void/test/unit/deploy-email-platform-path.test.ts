@@ -3,7 +3,7 @@ import { dirname, join } from 'pathslash';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 import { runDeploy } from '../../src/cli/deploy.ts';
 
-// The Mode B email step (design doc 0078) belongs to `void deploy --backend cloudflare` ONLY.
+// The Mode B email step (design doc 0078) belongs to `void deploy --platform cloudflare` ONLY.
 // This drives the MANAGED path on a project that uses email in every way the step detects
 // (an `email/` handler AND `void.json` `email.from`) far enough to reach the full-deploy branch,
 // and proves the email module was never invoked — no preflight, no apply, no bearer, no prompt.

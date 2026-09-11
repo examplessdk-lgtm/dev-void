@@ -1,5 +1,5 @@
 /**
- * Email on the developer's OWN Cloudflare account (`void deploy --backend
+ * Email on the developer's OWN Cloudflare account (`void deploy --platform
  * cloudflare`, design-doc 0078 "Mode B").
  *
  * Two things differ from the managed platform and both are exercised here

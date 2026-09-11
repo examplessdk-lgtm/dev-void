@@ -97,7 +97,7 @@ async function resolveCloudflareConfig(
 const SERVE: import('vite').ConfigEnv = { command: 'serve', mode: 'development' };
 const BUILD: import('vite').ConfigEnv = { command: 'build', mode: 'production' };
 
-/** A root wrangler.jsonc as `void deploy --backend cloudflare` leaves it. */
+/** A root wrangler.jsonc as `void deploy --platform cloudflare` leaves it. */
 function provisionedRootConfig(): Record<string, unknown> {
   return {
     assets: { binding: 'ASSETS' },

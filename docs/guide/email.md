@@ -536,12 +536,12 @@ The email prompt follows wrangler's own interactivity rule: a CI environment as 
 
 ```
 deploy: email on mail.acme.com is not set up, and this shell cannot ask.
-Run `void email setup --backend cloudflare` once locally, commit wrangler.jsonc, then redeploy — deploying without email.
+Run `void email setup --platform cloudflare` once locally, commit wrangler.jsonc, then redeploy — deploying without email.
 ```
 
-then deploys **without** email. Pass `--require-email` to fail instead. Automatic resource provisioning is not an escape hatch: it creates D1/KV/R2/Queue/Hyperdrive resources, never a mail setup. To read the rows without deploying or being asked anything, run `void email status --backend cloudflare`.
+then deploys **without** email. Pass `--require-email` to fail instead. Automatic resource provisioning is not an escape hatch: it creates D1/KV/R2/Queue/Hyperdrive resources, never a mail setup. To read the rows without deploying or being asked anything, run `void email status --platform cloudflare`.
 
-So the CI story is: run `void email setup --backend cloudflare` once on your machine (it runs the same preflight, checklist and prompt as the first deploy, then writes `wrangler.jsonc`, without deploying), commit `wrangler.jsonc`, and let CI run `void deploy --platform cloudflare --require-email`. With the binding and `addresses` committed, every row reads ready and nothing is asked.
+So the CI story is: run `void email setup --platform cloudflare` once on your machine (it runs the same preflight, checklist and prompt as the first deploy, then writes `wrangler.jsonc`, without deploying), commit `wrangler.jsonc`, and let CI run `void deploy --platform cloudflare --require-email`. With the binding and `addresses` committed, every row reads ready and nothing is asked.
 
 ### If the subdomain step is refused
 

@@ -10,7 +10,7 @@ import {
 import { runEmailCloudflareCommand, runEmailCommand } from '../../src/cli/email.ts';
 
 /**
- * `void email setup|status --backend cloudflare` on the 0078 transcript project:
+ * `void email setup|status --platform cloudflare` on the 0078 transcript project:
  * `email/support+[ticket].ts` + `email/_default.ts`, `email.from = noreply@mail.acme.com`,
  * zone `acme.com` (routing ready on the apex, Google MX there), nothing on `mail.acme.com`.
  * Every Cloudflare touch is a fake; the wrangler prose comes from the pinned fixtures.
@@ -143,7 +143,7 @@ async function run(
   try {
     await runEmailCloudflareCommand(
       root,
-      { subcommand, backend: 'cloudflare' },
+      { subcommand, platform: 'cloudflare' },
       {
         ...deps,
         exit: (code: number): never => {
@@ -239,7 +239,7 @@ afterEach(() => {
   }
 });
 
-describe('void email setup --backend cloudflare', () => {
+describe('void email setup --platform cloudflare', () => {
   it('first run: checklist, one confirm, exact argv + REST calls, wrangler.jsonc written', async () => {
     const root = makeProject();
     roots.push(root);
@@ -484,7 +484,7 @@ describe('void email setup --backend cloudflare', () => {
   });
 });
 
-describe('void email status --backend cloudflare', () => {
+describe('void email status --platform cloudflare', () => {
   it('not ready: status rows + address map, exit 1, read-only', async () => {
     const root = makeProject();
     roots.push(root);
@@ -638,7 +638,7 @@ describe('void email status --backend cloudflare', () => {
   });
 });
 
-describe('void email setup|status without --backend', () => {
+describe('void email setup|status without --platform cloudflare', () => {
   let exitSpy: ReturnType<typeof vi.spyOn>;
   beforeEach(() => {
     exitSpy = vi.spyOn(process, 'exit').mockImplementation(((code: number) => {
@@ -654,6 +654,11 @@ describe('void email setup|status without --backend', () => {
     roots.push(root);
     for (const subcommand of ['setup', 'status'] as const) {
       await expect(runEmailCommand(root, { subcommand })).rejects.toBeInstanceOf(ExitSignal);
+      expect(exitSpy).toHaveBeenLastCalledWith(1);
+      // `--platform void` is that default spelled out: the same exit, still no platform call.
+      await expect(runEmailCommand(root, { subcommand, platform: 'void' })).rejects.toBeInstanceOf(
+        ExitSignal,
+      );
       expect(exitSpy).toHaveBeenLastCalledWith(1);
     }
   });

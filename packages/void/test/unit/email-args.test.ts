@@ -90,32 +90,76 @@ describe('parseEmailArgs', () => {
     );
   });
 
-  // Mode B (design doc 0078): `status` and `setup` take `--backend cloudflare` and
+  // Mode B (design doc 0078): `status` and `setup` take `--platform cloudflare` and
   // read the local project, never a Void project.
-  it('parses status and setup with --backend cloudflare (space and = forms)', () => {
-    expect(parseEmailArgs(['status', '--backend', 'cloudflare'])).toEqual({
+  it('parses status and setup with --platform cloudflare (space and = forms)', () => {
+    expect(parseEmailArgs(['status', '--platform', 'cloudflare'])).toEqual({
       subcommand: 'status',
       projectSlug: undefined,
       limit: undefined,
       address: undefined,
-      backend: 'cloudflare',
+      platform: 'cloudflare',
     });
-    expect(parseEmailArgs(['setup', '--backend=cloudflare'])).toEqual({
+    expect(parseEmailArgs(['setup', '--platform=cloudflare'])).toEqual({
       subcommand: 'setup',
       projectSlug: undefined,
       limit: undefined,
       address: undefined,
-      backend: 'cloudflare',
+      platform: 'cloudflare',
     });
   });
 
-  it('parses status and setup without a backend (the platform shape)', () => {
+  // The legacy spelling `void deploy` also keeps: same field, same value.
+  it('accepts --backend cloudflare as an alias of --platform cloudflare (space and = forms)', () => {
+    expect(parseEmailArgs(['status', '--backend', 'cloudflare'])).toEqual(
+      parseEmailArgs(['status', '--platform', 'cloudflare']),
+    );
+    expect(parseEmailArgs(['setup', '--backend=cloudflare'])).toMatchObject({
+      subcommand: 'setup',
+      platform: 'cloudflare',
+    });
+  });
+
+  it('parses --platform void as the platform shape (the "not available yet" exit for setup/status)', () => {
+    expect(parseEmailArgs(['setup', '--platform', 'void'])).toEqual({
+      subcommand: 'setup',
+      projectSlug: undefined,
+      limit: undefined,
+      address: undefined,
+      platform: 'void',
+    });
+    expect(parseEmailArgs(['status', '--platform=void']).platform).toBe('void');
+    // The platform-only subcommands are the platform already, so naming it is a no-op
+    // there — unlike `cloudflare`, which they reject.
+    expect(parseEmailArgs(['usage', '--platform', 'void', '--project', 'my-app'])).toMatchObject({
+      subcommand: 'usage',
+      projectSlug: 'my-app',
+      platform: 'void',
+    });
+  });
+
+  it('parses status and setup without a platform (the platform shape)', () => {
     expect(parseEmailArgs(['status'])).toMatchObject({ subcommand: 'status' });
-    expect(parseEmailArgs(['status']).backend).toBeUndefined();
+    expect(parseEmailArgs(['status']).platform).toBeUndefined();
     expect(parseEmailArgs(['setup', '--project', 'my-app'])).toMatchObject({
       subcommand: 'setup',
       projectSlug: 'my-app',
     });
+  });
+
+  it('errors on --platform without a value or with another value', () => {
+    expect(() => parseEmailArgs(['setup', '--platform'])).toThrow(
+      "email: --platform requires a value ('cloudflare' or 'void').",
+    );
+    expect(() => parseEmailArgs(['setup', '--platform', '--limit', '3'])).toThrow(
+      /--platform requires a value/,
+    );
+    expect(() => parseEmailArgs(['setup', '--platform=', 'cloudflare'])).toThrow(
+      "email: --platform must be 'cloudflare' or 'void'.",
+    );
+    expect(() => parseEmailArgs(['setup', '--platform', 'vercel'])).toThrow(
+      "email: --platform must be 'cloudflare' or 'void'.",
+    );
   });
 
   it('errors on --backend without a value or with another value', () => {
@@ -128,25 +172,60 @@ describe('parseEmailArgs', () => {
     expect(() => parseEmailArgs(['setup', '--backend', 'vercel'])).toThrow(
       /--backend must be 'cloudflare'/,
     );
+    // `void` is a --platform value, not a --backend one: the alias only ever spelled cloudflare.
+    expect(() => parseEmailArgs(['setup', '--backend', 'void'])).toThrow(
+      /--backend must be 'cloudflare'/,
+    );
   });
 
-  it('rejects --backend cloudflare on the platform-only subcommands', () => {
+  // Same rules as `void deploy`: each flag at most once, and never both together.
+  it('errors when --platform and --backend are used together', () => {
+    expect(() =>
+      parseEmailArgs(['setup', '--platform', 'cloudflare', '--backend', 'cloudflare']),
+    ).toThrow('email: --platform and --backend cannot be used together.');
+    expect(() => parseEmailArgs(['status', '--backend=cloudflare', '--platform=void'])).toThrow(
+      'email: --platform and --backend cannot be used together.',
+    );
+  });
+
+  it('errors when --platform or --backend is repeated, even if the final value is valid', () => {
+    expect(() =>
+      parseEmailArgs(['setup', '--platform', 'cloudflare', '--platform', 'cloudflare']),
+    ).toThrow('email: --platform can only be specified once.');
+    expect(() => parseEmailArgs(['setup', '--platform', 'other', '--platform', 'void'])).toThrow(
+      'email: --platform can only be specified once.',
+    );
+    expect(() =>
+      parseEmailArgs(['setup', '--backend', 'cloudflare', '--backend', 'cloudflare']),
+    ).toThrow('email: --backend can only be specified once.');
+    expect(() => parseEmailArgs(['setup', '--backend', 'node', '--backend=cloudflare'])).toThrow(
+      'email: --backend can only be specified once.',
+    );
+  });
+
+  it('rejects --platform cloudflare (and the alias) on the platform-only subcommands', () => {
     for (const sub of ['usage', 'logs', 'destinations']) {
+      expect(() => parseEmailArgs([sub, '--platform', 'cloudflare'])).toThrow(
+        /--platform cloudflare applies to `void email status` and `void email setup` only/,
+      );
       expect(() => parseEmailArgs([sub, '--backend', 'cloudflare'])).toThrow(
         /applies to `void email status` and `void email setup` only/,
       );
     }
-    expect(() => parseEmailArgs(['allow', 'a@x.dev', '--backend', 'cloudflare'])).toThrow(
+    expect(() => parseEmailArgs(['allow', 'a@x.dev', '--platform', 'cloudflare'])).toThrow(
       /applies to `void email status` and `void email setup` only/,
     );
   });
 
-  it('rejects --project and a positional argument with --backend cloudflare', () => {
-    expect(() => parseEmailArgs(['setup', '--backend', 'cloudflare', '--project', 'x'])).toThrow(
-      /--project cannot be combined with --backend cloudflare/,
+  it('rejects --project and a positional argument with --platform cloudflare', () => {
+    expect(() => parseEmailArgs(['setup', '--platform', 'cloudflare', '--project', 'x'])).toThrow(
+      /--project cannot be combined with --platform cloudflare/,
     );
-    expect(() => parseEmailArgs(['status', 'acme.com', '--backend', 'cloudflare'])).toThrow(
-      /takes no argument/,
+    expect(() => parseEmailArgs(['setup', '--backend', 'cloudflare', '--project', 'x'])).toThrow(
+      /--project cannot be combined with --platform cloudflare/,
+    );
+    expect(() => parseEmailArgs(['status', 'acme.com', '--platform', 'cloudflare'])).toThrow(
+      /`void email status --platform cloudflare` takes no argument/,
     );
   });
 });

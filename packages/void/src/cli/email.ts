@@ -35,18 +35,18 @@ import { writeProvisionedWranglerConfig } from './wrangler.ts';
 
 export async function runEmailCommand(root: string, args: EmailArgs): Promise<void> {
   // Mode B (design doc 0078) never touches the Void platform: no token, no project.
-  if (args.backend === 'cloudflare') {
+  if (args.platform === 'cloudflare') {
     return runEmailCloudflareCommand(root, args);
   }
   if (args.subcommand === 'setup') {
     log.error(
-      'email: `void email setup` sets email up on your OWN Cloudflare account — run it with `--backend cloudflare`. The Void platform needs no setup: deploy, and `void email usage` shows your address.',
+      'email: `void email setup` sets email up on your OWN Cloudflare account — run it with `--platform cloudflare`. The Void platform needs no setup: deploy, and `void email usage` shows your address.',
     );
     process.exit(1);
   }
   if (args.subcommand === 'status') {
     log.error(
-      'email: `void email status` is available with `--backend cloudflare` today. On the Void platform use `void email usage` and `void email destinations`.',
+      'email: `void email status` is available with `--platform cloudflare` today. On the Void platform use `void email usage` and `void email destinations`.',
     );
     process.exit(1);
   }
@@ -205,7 +205,7 @@ export interface EmailCloudflareCommandDeps {
 }
 
 /**
- * `void email setup --backend cloudflare` and `void email status --backend cloudflare`.
+ * `void email setup --platform cloudflare` and `void email status --platform cloudflare`.
  *
  * `setup` is the deploy's step 3b-ii on its own: preflight → checklist → the one Enter →
  * apply → write the root wrangler.jsonc. It exists for CI: a non-interactive deploy that
@@ -238,7 +238,7 @@ export async function runEmailCloudflareCommand(
   const paths = readProjectPaths(root);
   const handlers = scanEmailHandlersSync(paths.sourceRoot);
 
-  // 2. The same pinned transport + account + worker name as `void deploy --backend
+  // 2. The same pinned transport + account + worker name as `void deploy --platform
   //    cloudflare`, so every wrangler child here consults the account the deploy will.
   const configPath = discoverRootWranglerConfig(root);
   const rootConfig = parseRootWranglerConfig(configPath);
@@ -312,7 +312,7 @@ export async function runEmailCloudflareCommand(
       return;
     }
     log.warn(
-      `Email is not set up on ${pre.domain} yet — run \`void email setup --backend cloudflare\`.`,
+      `Email is not set up on ${pre.domain} yet — run \`void email setup --platform cloudflare\`.`,
     );
     return exit(1);
   }
@@ -365,7 +365,7 @@ export async function runEmailCloudflareCommand(
   );
   if (!out.routingReady) {
     log.warn(
-      `Email routing on ${pre.domain} is not ready yet — finish the step above, then rerun \`void email setup --backend cloudflare\`.`,
+      `Email routing on ${pre.domain} is not ready yet — finish the step above, then rerun \`void email setup --platform cloudflare\`.`,
     );
     return exit(1);
   }
