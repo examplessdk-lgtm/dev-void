@@ -146,13 +146,19 @@ export interface DerivedEmailAddresses {
   routes: Array<{ address: string; handler: string }>;
 }
 
-/** Host part of `email.from`, lowercased; `null` when it is not `local@host`. */
+/**
+ * Host part of `email.from`, lowercased; `null` when it is not `local@host`. `void.json`
+ * also accepts the display-name form (`Acme <noreply@mail.acme.com>`, see `config.ts`),
+ * so the address inside `<…>` is read when present.
+ */
 export function emailFromDomain(from: string): string | null {
-  const at = from.lastIndexOf('@');
-  if (at <= 0 || at === from.length - 1) {
+  const bracketed = /<([^<>]*)>\s*$/.exec(from);
+  const address = bracketed ? (bracketed[1] as string) : from;
+  const at = address.lastIndexOf('@');
+  if (at <= 0 || at === address.length - 1) {
     return null;
   }
-  const host = from
+  const host = address
     .slice(at + 1)
     .trim()
     .toLowerCase();

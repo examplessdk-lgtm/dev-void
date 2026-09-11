@@ -1,0 +1,139 @@
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'pathslash';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
+import { runDeploy } from '../../src/cli/deploy.ts';
+
+// The Mode B email step (design doc 0078) belongs to `void deploy --backend cloudflare` ONLY.
+// This drives the MANAGED path on a project that uses email in every way the step detects
+// (an `email/` handler AND `void.json` `email.from`) far enough to reach the full-deploy branch,
+// and proves the email module was never invoked — no preflight, no apply, no bearer, no prompt.
+
+const { emailModule, mockConfirm, mockPreflight, mockListProjects, mockClientCtor } = vi.hoisted(
+  () => {
+    const never = (): never => {
+      throw new Error('the email module must never run on the managed platform path');
+    };
+    return {
+      emailModule: {
+        preflightEmail: vi.fn(never),
+        applyEmailSetup: vi.fn(never),
+        renderEmailChecklist: vi.fn(never),
+        renderAddressMap: vi.fn(never),
+        deriveAddresses: vi.fn(never),
+        fetchWithSessionBearer: vi.fn(never),
+        createNodeEmailDns: vi.fn(never),
+      },
+      mockConfirm: vi.fn(),
+      mockPreflight: vi.fn(),
+      mockListProjects: vi.fn(),
+      mockClientCtor: vi.fn(),
+    };
+  },
+);
+
+vi.mock('../../src/cli/email-cloudflare.ts', () => emailModule);
+
+vi.mock('@clack/prompts', () => ({
+  intro: vi.fn(),
+  outro: vi.fn(),
+  note: vi.fn(),
+  spinner: () => ({ start: vi.fn(), stop: vi.fn(), message: vi.fn() }),
+  isCI: () => false,
+  confirm: (...args: Array<unknown>) => mockConfirm(...args),
+  isCancel: () => false,
+  log: {
+    error: vi.fn(),
+    info: vi.fn(),
+    step: vi.fn(),
+    warn: vi.fn(),
+    success: vi.fn(),
+    message: vi.fn(),
+  },
+}));
+
+vi.mock('../../src/cli/auth', () => ({
+  getToken: () => 'token',
+  getTokenSource: () => 'manual',
+  getApiUrl: () => 'https://api.test',
+}));
+
+vi.mock('../../src/cli/github-oidc', () => ({
+  isGithubActionsOidcAvailable: () => false,
+  exchangeGithubOidcForDeployToken: vi.fn(),
+  maskGithubActionsSecret: vi.fn(),
+}));
+
+vi.mock('../../src/cli/client', () => ({
+  PlatformClient: class {
+    constructor(...args: Array<unknown>) {
+      mockClientCtor(...args);
+    }
+    listProjects(...args: Array<unknown>) {
+      return mockListProjects(...args);
+    }
+    preflight(...args: Array<unknown>) {
+      return mockPreflight(...args);
+    }
+  },
+  isExpiredTokenError: () => false,
+}));
+
+const tmpDir = join(import.meta.dirname, '.tmp-deploy-email-platform-path');
+
+function makeProject(files: Record<string, string>): string {
+  rmSync(tmpDir, { recursive: true, force: true });
+  mkdirSync(tmpDir, { recursive: true });
+  for (const [rel, content] of Object.entries(files)) {
+    const abs = join(tmpDir, rel);
+    mkdirSync(dirname(abs), { recursive: true });
+    writeFileSync(abs, content);
+  }
+  return tmpDir;
+}
+
+beforeEach(() => {
+  for (const spy of Object.values(emailModule)) {
+    spy.mockClear();
+  }
+  mockConfirm.mockReset();
+  mockClientCtor.mockReset();
+  mockListProjects.mockReset();
+  mockPreflight.mockReset();
+  mockListProjects.mockResolvedValue([{ id: 'proj_1', slug: 'my-app', name: 'my-app' }]);
+  // The first UPLOAD call inside the full-deploy branch — a distinctive stop so the test proves
+  // how far the managed path ran without a real build or network.
+  mockPreflight.mockRejectedValue(new Error('stop-here: reached the managed upload'));
+});
+
+afterEach(() => {
+  rmSync(tmpDir, { recursive: true, force: true });
+});
+
+describe('managed `void deploy` never runs the Mode B email step', () => {
+  it('reaches the full-deploy branch on an email-using project without touching the email module', async () => {
+    // `dist/ssr` stands in for a built worker so `skipBuild` gets past the output check without
+    // running Vite; the path then runs config, inference (which sees the `void/email` import),
+    // the migration gates, and asset collection before its first upload call, `preflight`.
+    const root = makeProject({
+      'package.json': JSON.stringify({ name: 'myapp' }),
+      'void.json': JSON.stringify({ email: { from: 'noreply@mail.acme.com' } }),
+      'routes/index.ts': `import { sendEmail } from 'void/email';\nexport const GET = () => sendEmail({});`,
+      'email/support+[ticket].ts': `export default async () => {};`,
+      'wrangler.jsonc': JSON.stringify({ name: 'myapp', account_id: 'acc123' }),
+      'dist/ssr/index.js': 'export default {};',
+      'dist/client/index.html': '<!doctype html>',
+    });
+    await expect(runDeploy(root, { projectSlug: 'my-app', skipBuild: true })).rejects.toThrow(
+      /stop-here: reached the managed upload/,
+    );
+    // The managed path DID run: it built a platform client and resolved the project.
+    expect(mockClientCtor).toHaveBeenCalledTimes(1);
+    expect(mockListProjects).toHaveBeenCalledTimes(1);
+    expect(mockPreflight).toHaveBeenCalledTimes(1);
+    // …and never asked the email module — or the developer — anything.
+    for (const [name, spy] of Object.entries(emailModule)) {
+      expect(spy, name).not.toHaveBeenCalled();
+    }
+    expect(mockConfirm).not.toHaveBeenCalled();
+  });
+});

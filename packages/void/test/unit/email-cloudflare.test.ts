@@ -349,6 +349,11 @@ describe('emailFromDomain', () => {
     expect(emailFromDomain('a@')).toBeNull();
     expect(emailFromDomain('a@localhost')).toBeNull();
   });
+
+  it('reads the address inside a display-name form (the shape void.json accepts)', () => {
+    expect(emailFromDomain('Acme Support <NoReply@Mail.Acme.com>')).toBe('mail.acme.com');
+    expect(emailFromDomain('Acme <bad>')).toBeNull();
+  });
 });
 
 // ── Prose parsers pinned to the shipped wrangler ─────────────────────────────────

@@ -8,6 +8,7 @@ export type DeployArgs = {
   debug?: boolean;
   backend?: 'cloudflare';
   provision?: boolean;
+  requireEmail?: boolean;
 };
 
 export function parseDeployArgs(args: Array<string>): DeployArgs {
@@ -23,6 +24,7 @@ export function parseDeployArgs(args: Array<string>): DeployArgs {
         debug: { type: 'boolean' },
         backend: { type: 'string' },
         provision: { type: 'boolean' },
+        'require-email': { type: 'boolean' },
       },
       allowPositionals: true,
       strict: true,
@@ -89,6 +91,14 @@ export function parseDeployArgs(args: Array<string>): DeployArgs {
     throw new Error('deploy: --provision requires --backend cloudflare.');
   }
 
+  // Mode B email (design doc 0078): fail the deploy — before any upload — instead of
+  // continuing without email when the domain is not set up and nobody can press Enter
+  // (CI / non-TTY). Only the Cloudflare backend runs the email step.
+  const requireEmail = parsed.values['require-email'] === true ? true : undefined;
+  if (requireEmail && backend !== 'cloudflare') {
+    throw new Error('deploy: --require-email requires --backend cloudflare.');
+  }
+
   // The Cloudflare backend deploys the built worker to the user's OWN Cloudflare account
   // via their local wrangler auth — it never resolves a Void project, and it never takes
   // the managed static-site path. `--project`, `--dir` and `--spa` all read as instructions
@@ -116,5 +126,5 @@ export function parseDeployArgs(args: Array<string>): DeployArgs {
     }
   }
 
-  return { projectSlug, dir, spa, skipBuild, debug, backend, provision };
+  return { projectSlug, dir, spa, skipBuild, debug, backend, provision, requireEmail };
 }
