@@ -20,6 +20,8 @@
 
 - Strip a platform address prefix in exactly ONE place. `createMessageProxy` removed the `<slug>+` prefix so handler authors see the address they wrote, and the generated dispatcher removed it again before matching, leaving an empty tag that no anchored pattern could match. Both halves were individually correct; the seam was untested. Route on the preserved wire address (`__voidPlatformTo`) and let the user-visible field stay stripped.
 - Lowercasing an address to match it case-insensitively also lowercases the CAPTURED groups. `support+T-42@` reached the handler as `t-42`, quietly corrupting any case-sensitive tag. Match with the `i` flag against the original string instead.
+- A Cloudflare zone setting is not a Cloudflare default. "Subaddressing means a rule for `support@` captures `support+tag@`" was written into the design from the docs' description of the feature; `GET /zones/{z}/email/routing` reads `support_subaddress: false` on every zone we own. Before a design leans on a provider behaviour, read the setting on a real zone.
+- "Other tools cannot read wrangler's token" was asserted from the encrypted file on disk without listing wrangler's own commands. `wrangler auth token --json` has been a stable, documented hand-off since 4.57.0, and the encryption is opt-in. Before claiming a tool has no way to do X, read its command table and CHANGELOG — the tool's authors usually solved X already.
 - Assert on generated code by RUNNING it, not by searching it for substrings. Every codegen test for the dispatcher passed while it could not route a single real message. Stub the dynamic imports, feed it a message built by the real proxy, and assert which handler ran.
 
 ## Framework And Schema

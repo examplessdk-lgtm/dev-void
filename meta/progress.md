@@ -63,7 +63,7 @@
 - [x] Remote bindings (`remote: true` — D1/KV/R2 via proxy for local dev)
 - [x] Better Auth integration
 - [x] Cloudflare Sandboxes (`void/sandbox` with platform container provisioning)
-- [x] Email (`void/email` — outbound send and inbound handlers on a shared platform sender; see `meta/design-docs/0078-email-cf-native.md`). Code complete; the mail subdomain, its Email Sending onboarding and the catch-all rule are not provisioned yet, so it is unshipped. Lifecycle, UX and the own-account / self-hosted modes are designed in the same doc ("Hosting modes and lifecycle"); nothing from that section is built.
+- [x] Email (`void/email` — outbound send and inbound handlers on a shared platform sender; see `meta/design-docs/0078-email-cf-native.md`). Code complete; the mail subdomain, its Email Sending onboarding and the catch-all rule are not provisioned yet, so it is unshipped. Lifecycle, UX and the own-account / self-hosted modes are designed in the same doc ("Hosting modes and lifecycle"); nothing from that section is built. Public docs say email is platform-only today (`--backend cloudflare`: `sendEmail` → `BINDING_MISSING`, `email/` handlers not routed).
 
 ### Remaining
 
@@ -136,7 +136,8 @@
 
 ### Platform
 
-- [ ] Email — custom domains on Cloudflare per project (customer's zone, scoped token, own DKIM; designed in `0078` "Custom domains on Cloudflare", four probes pending), and a provider abstraction for domains not on Cloudflare DNS. Follow-up to the shared-sender rollout.
+- [ ] Email — own Cloudflare account (`void deploy --backend cloudflare`): one Enter on the first deploy, zero after; designed and researched in `0078` "Mode B — One keystroke, measured". Prerequisites in order: bump the framework `wrangler` catalog `^4.107.0` → ≥ 4.113 (own PR; `addresses` reconciliation), two staging probes with the session bearer (`POST /zones/{z}/email/routing/dns {name}` for a subdomain; `PATCH …/email/routing {support_subaddress:true}`), then the feature PR (`cli/email-cloudflare.ts` + the runtime items). Decisions 9–13 pending.
+- [ ] Email — custom domains on Cloudflare per project (customer's zone, scoped token created through the dashboard template link in three clicks, own DKIM; designed in `0078` "Custom domains on Cloudflare", eight probes pending), and a provider abstraction for domains not on Cloudflare DNS. Follow-up to the shared-sender rollout.
 - [ ] Durable Object session abstraction
 - [ ] Preview environments with database forks (cloned D1 per PR)
 - [ ] Integration marketplace (Resend, Stripe plugin architecture)

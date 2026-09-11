@@ -604,8 +604,14 @@ mail.void.cloud`. This adds the `cf-bounce` MX, SPF, DKIM and DMARC
    destination `void-proxy` (or `void-proxy-staging`). `PUT
 /zones/{zone}/email/routing/rules/catch_all` with
    `{ "type": "worker", "value": ["void-proxy"] }` also works; wrangler has no
-   catch-all command. This rule is the real kill switch: deleting it stops
-   all inbound immediately.
+   catch-all command, and the `addresses` array wrangler ≥ 4.113 applies on
+   `wrangler deploy` cannot write it either — its `*@` catch-all is apex-only,
+   and the mail domain is a subdomain. This rule is the real kill switch:
+   deleting it stops all inbound immediately.
+   Do not touch the zone's **subaddressing** setting (`support_subaddress`,
+   `false` on `void.cloud` as of 2026-09-11). The catch-all takes every
+   address on the subdomain, so `<slug>+tag@` needs no per-zone setting
+   here; the setting matters only for literal rules (own-account deploys).
 6. **Slug mirror.** The proxy resolves a sender through
    `email-slug:<projectId>` in `ROUTING` KV. `createProject` writes it, and
    the hourly rollover (`packages/api/src/index.ts`, `processUserRollover`)

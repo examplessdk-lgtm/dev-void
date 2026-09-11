@@ -1742,8 +1742,12 @@ Steps 1–5 + 11 ship in the framework via the normal release. Steps 6–10 are 
     operations.md "Before you deploy this the first time" list.
 16. **Developer surfaces:** `usage` fields → `void email status` → deploy
     output → dashboard section. Each is independently shippable.
-17. **Mode B:** runtime items 1–5, then detection, then the prompt and
-    wrangler-driven fix, then the three refusals as tests.
+17. **Mode B:** (a) the wrangler catalog bump to ≥ 4.113 as its own PR;
+    (b) one staging session for the two unexecuted writes (subdomain
+    routing POST, subaddressing PATCH) with the session bearer; (c) the
+    feature PR — runtime items 1–5, `cli/email-cloudflare.ts`, the 3b-ii
+    step, the `addresses` pin, the refusals as tests — per the build list
+    under "One keystroke, measured".
 18. **Mode C:** the three code sites and the config surface; the docs pass;
     the environment-level admin page.
 19. **Custom domains on Cloudflare:** the four probes on a test zone first;
