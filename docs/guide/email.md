@@ -320,11 +320,13 @@ export default defineEmail(async (message, env, ctx, info) => {
 
 Everything taken from the inbound message is best-effort, because the remote sender controls it. A `Message-ID` or `References` value too long for a header line is dropped rather than threaded. Control characters in the subject become a space, and an ASCII subject too long to fold falls back to a bare `Re:`. The reply is always sent; pass `subject` to control it exactly.
 
-The `from` default is **not** `message.to`. A reply is sent from your project's
-own slug on the platform mail zone — `<slug>+noreply@<domain>` — built from the
-`__VOID_PROJECT_SLUG` and `__VOID_EMAIL_DOMAIN` bindings the platform injects.
-`replyEmail` throws when those are absent and you omitted `from`, rather than
-guessing a sender.
+On the platform the `from` default is **not** `message.to`. A reply is sent from
+your project's own slug on the platform mail zone — `<slug>+noreply@<domain>` —
+built from the `__VOID_PROJECT_SLUG` and `__VOID_EMAIL_DOMAIN` bindings the
+platform injects. `replyEmail` throws when the slug is set but the domain is
+absent and you omitted `from`, rather than guessing a sender. With no slug at
+all — a worker on your own Cloudflare account — the reply is sent from
+`message.to`, the address on your own zone the message was delivered to.
 
 ::: warning The platform pins the reply sender
 You may override `from`, but only with an address on your own slug. The proxy

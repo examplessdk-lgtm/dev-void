@@ -1556,12 +1556,12 @@ window.__vite_plugin_react_preamble_installed__ = true;
   // Slug stripping: the shared platform sender rewrites every recipient to
   // `<slug>+<tag>@<platform mail domain>`, where `<slug>` is the
   // project slug. User-defined handlers are written against the `<tag>` only
-  // (the slug is invisible to them — see design-doc 0078). The dispatcher
-  // therefore strips everything up to and including the first `+` from the
-  // local-part before running it through the pattern table. If the recipient
-  // arrived without a `+` (e.g. local-dev edge cases or future custom-domain
-  // routing), the stripped value is empty, no anchored pattern matches, and
-  // we fall through to `_default`.
+  // (the slug is invisible to them — see design-doc 0078). When a message
+  // carries that prefix the dispatcher strips everything up to and including
+  // the first `+` from the local-part before running it through the pattern
+  // table. A message that never carried it — delivered straight to a worker
+  // on the developer's own zone — is matched on its full local part, so
+  // `support+T-42@zone` reaches `email/support+[ticket].ts` there too.
   const email = scan.email;
   const emailDir = options.emailDir;
   if (emailDir && email && (email.addresses.length > 0 || email.defaultHandler)) {
@@ -1600,16 +1600,20 @@ window.__vite_plugin_react_preamble_installed__ = true;
     // Lowercasing the address first would lowercase the captured groups too,
     // silently corrupting a case-sensitive tag such as a ticket id or a token
     // (`support+T-42@` reached the handler as `t-42`).
-    lines.push(
-      '  const __to = String((message && (message.__voidPlatformTo ?? message.to)) || "");',
-    );
+    lines.push('  const __platformTo = message ? message.__voidPlatformTo : undefined;');
+    lines.push('  const __to = String((__platformTo ?? (message && message.to)) || "");');
     lines.push('  const __localFull = __to.split("@")[0] || "";');
-    // Strip the platform-injected `<slug>+` prefix. The shared sender
-    // rewrites every recipient to `<slug>+<tag>`; user-defined
-    // handlers match on the `<tag>` only. If there is no `+` (recipient came
-    // in without sub-addressing), tag is empty — falls through to `_default`.
-    lines.push('  const __plus = __localFull.indexOf("+");');
-    lines.push('  const __local = __plus === -1 ? "" : __localFull.slice(__plus + 1);');
+    // Strip the platform-injected `<slug>+` prefix only when
+    // `createMessageProxy` recorded one. `__voidPlatformTo` exists exactly
+    // when a slug was removed from `message.to`, so its absence means the
+    // wire address IS the address the handler author wrote: match all of it.
+    // With the prefix present and no `+` after it there is no tag, and the
+    // empty string falls through to `_default`.
+    lines.push('  let __local = __localFull;');
+    lines.push('  if (__platformTo !== undefined) {');
+    lines.push('    const __plus = __localFull.indexOf("+");');
+    lines.push('    __local = __plus === -1 ? "" : __localFull.slice(__plus + 1);');
+    lines.push('  }');
     if (email.addresses.length > 0) {
       lines.push('  for (const __p of __emailPatterns) {');
       lines.push('    const __m = __p.re.exec(__local);');
@@ -2833,10 +2837,17 @@ ${envValidateCall}${isrDeploymentStamp}  const userEnv = __filterInternalBinding
   // platform router serializes the message to an `EmailEnvelope`, this worker's
   // `email()` method rebuilds a proxy through `createMessageProxy`, runs the user
   // handler, and returns the recorded `EmailAction[]` for the router to enact.
+  //
+  // On the developer's own account Cloudflare calls `email()` with the real
+  // message and ignores the return value, so the actions would be lost: the
+  // message is accepted, then silently discarded. The same proxy runs the
+  // handler there (the native message satisfies the envelope shape, and the
+  // proxy makes `raw` replayable), and `enactEmailActions` replays what was
+  // recorded on the real message before returning.
   const emailImport = hasEmail ? ', __emailHandler' : '';
   const emailRuntimePath = runtimeEmailPath ?? deriveEmailRuntimePath(runtimeEnvPath);
   const emailProxyImport = hasEmail
-    ? `import { createMessageProxy as __createMessageProxy } from ${JSON.stringify(emailRuntimePath)};\n`
+    ? `import { createMessageProxy as __createMessageProxy, enactEmailActions as __enactEmailActions, isForwardableEmailMessage as __isForwardableEmailMessage } from ${JSON.stringify(emailRuntimePath)};\n`
     : '';
   // `__VOID_PROJECT_SLUG` is the same binding the outbound `sendEmail` reads to
   // default `from`. It is passed to `createMessageProxy` so the user-visible
@@ -2851,14 +2862,18 @@ ${envValidateCall}  if (env.__VOID_REMOTE === "1") env = ${createRemoteEnvCall};
   const __slug = typeof env.__VOID_PROJECT_SLUG === "string" && env.__VOID_PROJECT_SLUG.length > 0 ? env.__VOID_PROJECT_SLUG : undefined;
   const { message, getActions } = __createMessageProxy(envelope, { slug: __slug });
   await __withRawEnv(env, () => withRuntimeEnv(env, () => __emailHandler(message, userEnv, ctx)));
-  return getActions();
+  const __actions = getActions();
+  if (__isForwardableEmailMessage(envelope)) await __enactEmailActions(envelope, __actions);
+  return __actions;
 }`
       : `async function handleEmail(envelope, env, ctx) {
 ${envValidateCall}  const userEnv = __filterInternalBindings(env);
   const __slug = typeof env.__VOID_PROJECT_SLUG === "string" && env.__VOID_PROJECT_SLUG.length > 0 ? env.__VOID_PROJECT_SLUG : undefined;
   const { message, getActions } = __createMessageProxy(envelope, { slug: __slug });
   await __withRawEnv(env, () => withRuntimeEnv(env, () => __emailHandler(message, userEnv, ctx)));
-  return getActions();
+  const __actions = getActions();
+  if (__isForwardableEmailMessage(envelope)) await __enactEmailActions(envelope, __actions);
+  return __actions;
 }`
     : '';
 

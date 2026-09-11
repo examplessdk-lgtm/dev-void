@@ -2,6 +2,11 @@
 // platform router serializes it into an `EmailEnvelope` and the worker returns
 // `EmailAction[]` describing what the handler decided. The router enacts the
 // actions on the real message.
+//
+// On the developer's own Cloudflare account there is no router: Cloudflare
+// calls the worker's `email()` with the real message. The same proxy runs the
+// handler, and `enactEmailActions` replays the recorded actions on the native
+// message, whose return value Cloudflare ignores.
 
 import type { Email as PostalMimeEmail } from 'postal-mime';
 import { getRawRuntimeEnv } from '../env-raw.ts';
@@ -423,14 +428,19 @@ function fitsHeaderLine(name: string, value: string | undefined): value is strin
 
 export interface ReplyEmailOptions {
   /**
-   * Defaults to `<__VOID_PROJECT_SLUG>+noreply@<__VOID_EMAIL_DOMAIN>`, and
-   * THROWS when those bindings are absent — a reply sender is never guessed.
+   * On the managed platform (a `__VOID_PROJECT_SLUG` is injected) defaults
+   * to `<__VOID_PROJECT_SLUG>+noreply@<__VOID_EMAIL_DOMAIN>`, and THROWS
+   * when the domain binding is absent — a reply sender is never guessed.
    *
-   * An override must stay on your own slug. The platform accepts a reply
-   * sender whose local-part before the first `+` equals the slug the message
-   * was delivered to; anything else is dropped silently. In particular
-   * `message.to` is the STRIPPED address (`<tag>@<domain>`), so passing it
-   * here is exactly the shape the platform rejects.
+   * There, an override must stay on your own slug. The platform accepts a
+   * reply sender whose local-part before the first `+` equals the slug the
+   * message was delivered to; anything else is dropped silently. In
+   * particular `message.to` is the STRIPPED address (`<tag>@<domain>`), so
+   * passing it here is exactly the shape the platform rejects.
+   *
+   * Without a slug (your own Cloudflare account, local harnesses) the
+   * default is the address the message was delivered to, `message.to` —
+   * a real address on your own zone.
    */
   from?: Address;
   /**
@@ -577,31 +587,38 @@ export async function buildReplyMessage(
   const originalMessageId = headers.get('Message-ID') ?? '';
   const originalReferences = headers.get('References') ?? '';
 
-  // Default `from` for the reply: build `<slug>+noreply@<domain>` from
-  // the platform-injected slug and mail domain. Falling back to
-  // `message.to` would reply from the user-visible (slug-stripped)
-  // address, which the platform's slug-pin rejects — every outbound on
-  // the shared sender must carry `<slug>+...@<domain>`. If either
-  // binding is missing (local tests without env, etc.) and the caller
-  // didn't provide an explicit `from`, surface a clear error rather than
-  // building an invalid envelope. There is deliberately no baked-in
-  // domain default: guessing the production zone is exactly the bug the
-  // binding exists to prevent.
+  // Default `from` for the reply. On the platform (a slug is injected),
+  // build `<slug>+noreply@<domain>` from the slug and mail domain. Falling
+  // back to `message.to` there would reply from the user-visible
+  // (slug-stripped) address, which the platform's slug-pin rejects — every
+  // outbound on the shared sender must carry `<slug>+...@<domain>`. If the
+  // domain binding is missing and the caller didn't provide an explicit
+  // `from`, surface a clear error rather than building an invalid
+  // envelope. There is deliberately no baked-in domain default: guessing
+  // the production zone is exactly the bug the binding exists to prevent.
+  //
+  // With no slug there is no shared sender to pin to: the message was
+  // delivered to a real address on the developer's own zone, and replying
+  // from that address is what a reply means.
   let fromAddr: Address;
   if (opts.from !== undefined) {
     fromAddr = opts.from;
   } else {
     const slug = tryReadProjectSlug();
-    const domain = tryReadEmailDomain();
-    if (!slug || !domain) {
-      throw new Error(
-        "replyEmail: 'from' is required when __VOID_PROJECT_SLUG and " +
-          '__VOID_EMAIL_DOMAIN are not set. Set `from` explicitly, or deploy ' +
-          'via Void so the platform-injected __VOID_PROJECT_SLUG and ' +
-          '__VOID_EMAIL_DOMAIN can default it to <slug>+noreply@<domain>.',
-      );
+    if (slug) {
+      const domain = tryReadEmailDomain();
+      if (!domain) {
+        throw new Error(
+          "replyEmail: 'from' is required when __VOID_PROJECT_SLUG is set " +
+            'but __VOID_EMAIL_DOMAIN is not. Set `from` explicitly, or deploy ' +
+            'via Void so the platform-injected __VOID_PROJECT_SLUG and ' +
+            '__VOID_EMAIL_DOMAIN can default it to <slug>+noreply@<domain>.',
+        );
+      }
+      fromAddr = `${slug}+noreply@${domain}`;
+    } else {
+      fromAddr = message.to;
     }
-    fromAddr = `${slug}+noreply@${domain}`;
   }
   const toAddr: Address = opts.to ?? message.from;
   const subject = opts.subject ?? prefixReplySubject(originalSubject);
@@ -666,4 +683,53 @@ export async function replyEmail(
       reply(arg: { from: string; to: string; raw: Uint8Array }): Promise<void>;
     }
   ).reply({ from, to, raw });
+}
+
+/**
+ * Whether `value` is a real `ForwardableEmailMessage` — one Cloudflare
+ * delivered to this worker's `email()` directly — rather than an
+ * `EmailEnvelope` from the platform router. Functions do not survive RPC,
+ * so their presence is the discriminator.
+ */
+export function isForwardableEmailMessage(value: unknown): value is ForwardableEmailMessage {
+  if (typeof value !== 'object' || value === null) {
+    return false;
+  }
+  const m = value as { setReject?: unknown; forward?: unknown; reply?: unknown };
+  return (
+    typeof m.setReject === 'function' &&
+    typeof m.forward === 'function' &&
+    typeof m.reply === 'function'
+  );
+}
+
+/**
+ * Replay recorded `EmailAction`s on a real `ForwardableEmailMessage`, in
+ * order. The proxy already made `setReject` terminal (earlier forward/reply
+ * entries are purged, later ones dropped), so a reject is never followed by
+ * anything. `reply` needs a genuine `EmailMessage` — Cloudflare rejects a
+ * duck-typed object — so `cloudflare:email` is loaded here, and only when
+ * a reply was recorded.
+ */
+export async function enactEmailActions(
+  message: ForwardableEmailMessage,
+  actions: ReadonlyArray<EmailAction>,
+): Promise<void> {
+  for (const action of actions) {
+    switch (action.type) {
+      case 'reject':
+        message.setReject(action.reason);
+        break;
+      case 'forward':
+        await message.forward(action.to, action.headers ? new Headers(action.headers) : undefined);
+        break;
+      case 'reply': {
+        const { EmailMessage } = await import('cloudflare:email');
+        await message.reply(
+          new EmailMessage(action.from, action.to, bytesToReadableStream(action.raw)),
+        );
+        break;
+      }
+    }
+  }
 }

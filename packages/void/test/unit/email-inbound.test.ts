@@ -510,10 +510,10 @@ describe('generated __emailHandler dispatch (behavioural)', () => {
     expect(seen).toEqual([{ ticket: 'T-42' }]);
   });
 
-  it('falls through when the recipient carries no <slug>+ prefix', async () => {
-    // The platform router resolves the project FROM the slug prefix, so a bare
-    // `support@` is never delivered to a worker. The dispatcher therefore
-    // treats "no `+`" as "no tag" and falls through rather than guessing.
+  it('matches the full local part when the recipient carries no <slug>+ prefix', async () => {
+    // Own-account delivery: Cloudflare hands the worker the address the
+    // handler author wrote, with no platform slug in front of it. Nothing
+    // was stripped, so nothing is stripped again — `support@` is `support`.
     const hits: Array<string> = [];
     const dispatch = buildEmailDispatcher(compile({ ...SUPPORT, defaultHandler: '_default.ts' }), {
       '/e/support.ts': { default: () => hits.push('support') },
@@ -523,11 +523,87 @@ describe('generated __emailHandler dispatch (behavioural)', () => {
 
     const { message } = createMessageProxy({
       from: 'sender@example.com',
-      to: 'support@mail.void.cloud',
+      to: 'support@mail.acme.com',
       headers: {},
       raw: new Uint8Array(),
       rawSize: 0,
     });
+
+    await dispatch(message, {}, {});
+
+    expect(hits).toEqual(['support']);
+  });
+
+  it('keeps the tag of an unprefixed recipient: support+T-42@zone reaches support+[ticket]', async () => {
+    // The flagship own-account case. The first `+` here belongs to the
+    // TAG, not to a platform slug; stripping through it (the platform rule)
+    // would leave `T-42`, which matches nothing, and the mail would land in
+    // `_default`. Case is preserved in the captured param.
+    const seen: Array<unknown> = [];
+    const dispatch = buildEmailDispatcher(compile({ ...SUPPORT, defaultHandler: '_default.ts' }), {
+      '/e/support.ts': { default: () => seen.push('static') },
+      '/e/support+[ticket].ts': {
+        default: (_m: unknown, _e: unknown, _c: unknown, info: { params: unknown }) =>
+          seen.push(info.params),
+      },
+      '/e/_default.ts': { default: () => seen.push('default') },
+    });
+
+    const { message } = createMessageProxy({
+      from: 'sender@example.com',
+      to: 'support+T-42@mail.acme.com',
+      headers: {},
+      raw: new Uint8Array(),
+      rawSize: 0,
+    });
+
+    await dispatch(message, {}, {});
+
+    expect(seen).toEqual([{ ticket: 'T-42' }]);
+  });
+
+  it('routes an unprefixed recipient nothing matches to _default', async () => {
+    const hits: Array<string> = [];
+    const dispatch = buildEmailDispatcher(compile({ ...SUPPORT, defaultHandler: '_default.ts' }), {
+      '/e/support.ts': { default: () => hits.push('support') },
+      '/e/support+[ticket].ts': { default: () => hits.push('ticket') },
+      '/e/_default.ts': { default: () => hits.push('default') },
+    });
+
+    const { message } = createMessageProxy({
+      from: 'sender@example.com',
+      to: 'billing@mail.acme.com',
+      headers: {},
+      raw: new Uint8Array(),
+      rawSize: 0,
+    });
+
+    await dispatch(message, {}, {});
+
+    expect(hits).toEqual(['default']);
+  });
+
+  it('still strips the platform prefix when a slug was removed and no tag follows', async () => {
+    // `<slug>@<domain>` with the slug injected: the prefix is recorded as
+    // `__voidPlatformTo`, the tag after it is empty, and the empty string
+    // must fall through to `_default` rather than match `support`.
+    const hits: Array<string> = [];
+    const dispatch = buildEmailDispatcher(compile({ ...SUPPORT, defaultHandler: '_default.ts' }), {
+      '/e/support.ts': { default: () => hits.push('support') },
+      '/e/support+[ticket].ts': { default: () => hits.push('ticket') },
+      '/e/_default.ts': { default: () => hits.push('default') },
+    });
+
+    const { message } = createMessageProxy(
+      {
+        from: 'sender@example.com',
+        to: 'acme+@mail.void.cloud',
+        headers: {},
+        raw: new Uint8Array(),
+        rawSize: 0,
+      },
+      { slug: 'acme' },
+    );
 
     await dispatch(message, {}, {});
 
@@ -1391,17 +1467,14 @@ describe('end-to-end: envelope → handler → action queue', () => {
     } as unknown as ForwardableEmailMessage;
   }
 
-  it('replyEmail without from errors when __VOID_PROJECT_SLUG is unavailable', async () => {
-    // After F2/F3 the default `from = message.to` path is gone — the
-    // user-visible `message.to` is `<tag>@<domain>` (bare local-part)
-    // which the platform's slug-pin would reject. Without an explicit
-    // `from` and no __VOID_PROJECT_SLUG to default from, the call must
-    // fail loudly rather than silently constructing an invalid envelope.
-    await expect(
-      envContext.run({ __VOID_EMAIL_DOMAIN: 'mail.staging.void.cloud' }, () =>
-        replyEmail(replyTestMessage(), { text: 'ack' }),
-      ),
-    ).rejects.toThrow(/__VOID_PROJECT_SLUG/);
+  it('replyEmail without from replies from message.to when there is no __VOID_PROJECT_SLUG', async () => {
+    // No slug means no platform slug-pin to satisfy: the message reached a
+    // real address on the developer's own zone, and that address is the
+    // reply sender. A domain binding on its own does not change that.
+    const built = await envContext.run({ __VOID_EMAIL_DOMAIN: 'mail.staging.void.cloud' }, () =>
+      buildReplyMessage(replyTestMessage(), { text: 'ack' }),
+    );
+    expect(built.from).toBe('support@mail.example.dev');
   });
 
   it('replyEmail without from errors when __VOID_EMAIL_DOMAIN is unavailable', async () => {
