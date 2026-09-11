@@ -1,0 +1,21 @@
+packages/solid/test/integration/solid-pages-playground.test.ts
+  s_c4fcc864caec3f::t_9bf29d922eb6fe 488-494
+packages/void/test/unit/cloudflare-deploy.test.ts
+  s_c4fcc864caec3f::t_024da4decc1a1e 49-53,56,67
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "49038ea4604ba445f2bc5bb498c379e1f336a9da",
+  "prompts": {},
+  "sessions": {
+    "s_c4fcc864caec3f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08f33-9d52-76f0-b044-cd5a424c5737",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
