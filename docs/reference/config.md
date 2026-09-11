@@ -131,6 +131,28 @@ When using `"pg"`:
 - `void/db` connects via Hyperdrive in production, direct connection locally
 - `void gen model` generates `pgTable` with `serial`, `timestamp`, etc.
 
+### `email`
+
+Configuration for the [email integration](../guide/email.md).
+
+```json
+{
+  "email": {
+    "from": "Acme <noreply@mail.acme.com>"
+  }
+}
+```
+
+| Field  | Type     | Description                                                                                                    |
+| ------ | -------- | -------------------------------------------------------------------------------------------------------------- |
+| `from` | `string` | Default sender for `sendEmail()`: one address, optionally with a display name (`Acme <noreply@mail.acme.com>`) |
+
+What `from` does depends on where the app runs:
+
+- **`void dev`** — becomes the default `from` of every `sendEmail()` call, captured in the dev inbox; no mail leaves the machine.
+- **`void deploy`** (managed platform) — not used: the sender is pinned to your project's own platform address, which Void fills in for you.
+- **`void deploy --backend cloudflare`** (your own Cloudflare account) — the address host (`mail.acme.com`) is the domain Void sets Email Routing and Email Sending up on, and the address becomes the default `from`.
+
 ### `head`
 
 Site-wide HTML `<head>` defaults for pages mode. Sets a title template, default meta tags, links, scripts, and HTML/body attributes. Per-page `head()` exports and middleware defaults merge on top of these with clear precedence: **page > middleware > config**.

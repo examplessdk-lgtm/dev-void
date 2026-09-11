@@ -10,6 +10,7 @@ import {
 } from './auth/providers.ts';
 import type { HeadConfig } from './pages/head.ts';
 import { validateSourceDir } from './project-paths.ts';
+import { MimeError, parseAddress } from './runtime/email/mime.ts';
 import type { SandboxConfig, SandboxInstanceType } from './sandbox/config.ts';
 
 /** Redirect destination — string (302) or object with explicit status. */
@@ -82,6 +83,16 @@ export type AiConfig = {
   gateway?: string;
 };
 
+/**
+ * Email configuration. `from` is the default sender for `sendEmail()` — one
+ * address, optionally with a display name (`Acme <noreply@mail.acme.com>`) —
+ * and, on `void deploy --backend cloudflare`, its host is the domain the CLI
+ * sets Email Routing and Email Sending up on.
+ */
+export type EmailConfig = {
+  from?: string;
+};
+
 /** Shape of the `void.json` config file. All fields optional. */
 export type VoidConfig = {
   $schema?: string;
@@ -97,6 +108,7 @@ export type VoidConfig = {
   worker?: WranglerConfig;
   database?: 'pg';
   ai?: AiConfig;
+  email?: EmailConfig;
 };
 
 const CONFIG_FILE = 'void.json';
@@ -975,7 +987,57 @@ export function readConfig(root: string): VoidConfig {
     }
   }
 
+  // Validate email
+  if (obj.email !== undefined) {
+    if (typeof obj.email !== 'object' || obj.email === null || Array.isArray(obj.email)) {
+      throw new Error(`config: "email" in ${CONFIG_FILE} must be an object.`);
+    }
+
+    const emailCfg = obj.email as Record<string, unknown>;
+    for (const key of Object.keys(emailCfg)) {
+      if (key !== 'from') {
+        throw new Error(`config: Unknown key 'email.${key}' in ${CONFIG_FILE}. Valid: from.`);
+      }
+    }
+
+    if (emailCfg.from !== undefined) {
+      parseEmailFrom(emailCfg.from);
+    }
+  }
+
   return obj as VoidConfig;
+}
+
+/**
+ * Parse `email.from` with the runtime's own address parser, so the config
+ * accepts exactly what `sendEmail()` accepts: one address, optionally with a
+ * display name, and nothing that could split into two recipients or smuggle a
+ * header. A sender that passes here cannot later fail `INVALID_FROM` on shape.
+ */
+function parseEmailFrom(value: unknown): { email: string; name?: string } {
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new Error(`config: "email.from" in ${CONFIG_FILE} must be a non-empty string.`);
+  }
+  try {
+    return parseAddress(value, 'email.from');
+  } catch (error) {
+    const detail = error instanceof MimeError ? ` ${error.message}` : '';
+    throw new Error(
+      `config: "email.from" in ${CONFIG_FILE} must be a single email address, optionally with a display name (e.g. "Acme <noreply@mail.acme.com>").${detail}`,
+    );
+  }
+}
+
+/**
+ * The host of `email.from`, lowercased — the domain `void deploy --backend
+ * cloudflare` sets email up on. `undefined` when `email.from` is not set.
+ */
+export function getEmailFromHost(config: VoidConfig): string | undefined {
+  if (config.email?.from === undefined) {
+    return undefined;
+  }
+  const { email } = parseEmailFrom(config.email.from);
+  return email.slice(email.indexOf('@') + 1).toLowerCase();
 }
 
 /** Returns true if the target is a non-Cloudflare runtime (Node.js, Bun, Deno). */

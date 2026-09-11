@@ -17,6 +17,7 @@ import {
   resolveBindingNames,
   isNodeTarget,
   getDatabaseDialect,
+  getEmailFromHost,
   VALID_REDIRECT_STATUSES,
   countSplats,
 } from '../../src/config.ts';
@@ -1609,5 +1610,116 @@ describe('resolveBindingNames', () => {
       kv: 'K',
       r2: 'S',
     });
+  });
+});
+
+describe('top-level email config validation', () => {
+  it('accepts a bare email.from address', () => {
+    setup(JSON.stringify({ email: { from: 'noreply@mail.acme.com' } }));
+    expect(readConfig(tmpDir).email?.from).toBe('noreply@mail.acme.com');
+    cleanup();
+  });
+
+  it('accepts email.from with a display name', () => {
+    setup(JSON.stringify({ email: { from: 'Acme <noreply@mail.acme.com>' } }));
+    expect(readConfig(tmpDir).email?.from).toBe('Acme <noreply@mail.acme.com>');
+    cleanup();
+  });
+
+  it('accepts email.from with a quoted display name', () => {
+    setup(JSON.stringify({ email: { from: '"Acme, Inc." <noreply@mail.acme.com>' } }));
+    expect(readConfig(tmpDir).email?.from).toBe('"Acme, Inc." <noreply@mail.acme.com>');
+    cleanup();
+  });
+
+  it('accepts an empty top-level email object', () => {
+    setup(JSON.stringify({ email: {} }));
+    expect(readConfig(tmpDir).email).toEqual({});
+    cleanup();
+  });
+
+  it('throws when email is not an object', () => {
+    setup(JSON.stringify({ email: 'noreply@mail.acme.com' }));
+    expect(() => readConfig(tmpDir)).toThrow('"email" in void.json must be an object');
+    setup(JSON.stringify({ email: ['noreply@mail.acme.com'] }));
+    expect(() => readConfig(tmpDir)).toThrow('"email" in void.json must be an object');
+    cleanup();
+  });
+
+  it('throws when email.from is not a non-empty string', () => {
+    setup(JSON.stringify({ email: { from: 123 } }));
+    expect(() => readConfig(tmpDir)).toThrow(
+      '"email.from" in void.json must be a non-empty string',
+    );
+    setup(JSON.stringify({ email: { from: '' } }));
+    expect(() => readConfig(tmpDir)).toThrow(
+      '"email.from" in void.json must be a non-empty string',
+    );
+    cleanup();
+  });
+
+  // The same shapes `sendEmail()` refuses for `from`: no `@`, two addresses,
+  // a list, whitespace, a smuggled header, an `@` in the display name.
+  it.each([
+    'noreply',
+    'noreply@',
+    '@mail.acme.com',
+    'a@mail.acme.com,b@mail.acme.com',
+    'a@mail.acme.com b@mail.acme.com',
+    'Acme <noreply@mail.acme.com>, Sales <sales@mail.acme.com>',
+    'noreply@mail.acme.com\r\nBcc: x@evil.example',
+    'a@x.dev<b@evil.dev>',
+    '"Acme <noreply@mail.acme.com>',
+  ])('rejects email.from %j', (from) => {
+    setup(JSON.stringify({ email: { from } }));
+    expect(() => readConfig(tmpDir)).toThrow(
+      '"email.from" in void.json must be a single email address, optionally with a display name',
+    );
+    cleanup();
+  });
+
+  it('rejects an unknown email.* key', () => {
+    setup(JSON.stringify({ email: { from: 'noreply@mail.acme.com', domain: 'mail.acme.com' } }));
+    expect(() => readConfig(tmpDir)).toThrow("Unknown key 'email.domain'");
+    cleanup();
+  });
+
+  it('allows email.from and inference.bindings.email to coexist', () => {
+    setup(
+      JSON.stringify({
+        email: { from: 'noreply@mail.acme.com' },
+        inference: { bindings: { email: true } },
+      }),
+    );
+    const config = readConfig(tmpDir);
+    expect(config.email?.from).toBe('noreply@mail.acme.com');
+    expect(config.inference?.bindings?.email).toBe(true);
+    cleanup();
+  });
+});
+
+describe('getEmailFromHost', () => {
+  it('returns the lowercased host of a bare address', () => {
+    expect(getEmailFromHost({ email: { from: 'noreply@Mail.Acme.com' } })).toBe('mail.acme.com');
+  });
+
+  it('returns the host from behind a display name', () => {
+    expect(getEmailFromHost({ email: { from: 'Acme <noreply@mail.acme.com>' } })).toBe(
+      'mail.acme.com',
+    );
+    expect(getEmailFromHost({ email: { from: '"Acme, Inc." <noreply@acme.com>' } })).toBe(
+      'acme.com',
+    );
+  });
+
+  it('returns undefined when email.from is not set', () => {
+    expect(getEmailFromHost({})).toBeUndefined();
+    expect(getEmailFromHost({ email: {} })).toBeUndefined();
+  });
+
+  it('throws the config error for an unparsable address', () => {
+    expect(() => getEmailFromHost({ email: { from: 'noreply' } })).toThrow(
+      '"email.from" in void.json must be a single email address',
+    );
   });
 });
