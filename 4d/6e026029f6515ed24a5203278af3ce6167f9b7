@@ -1,0 +1,19 @@
+packages/void/src/database-providers/neon.ts
+  s_21e37aad7ca081::t_8352ca2cc3de1b 1-90
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "4d6e026029f6515ed24a5203278af3ce6167f9b7",
+  "prompts": {},
+  "sessions": {
+    "s_21e37aad7ca081": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08f34-5783-7541-af26-16a1cb0340d6",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
