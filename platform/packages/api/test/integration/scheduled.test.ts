@@ -104,6 +104,35 @@ describe('scheduled()', () => {
     expect(routing.userId).toBe(id);
   });
 
+  it('backfills a missing email-slug mirror for a legacy project', async () => {
+    const { id } = await createTestUser(env.db, 'emailslug', 'github', undefined, 'free');
+    // createTestProject inserts the DB row only — no `email-slug:<id>` mirror,
+    // exactly like a project created before the mirror existed.
+    const proj = await createTestProject(env.db, id);
+    await env.ROUTING.put(proj.slug, JSON.stringify({ worker: 'test', projectId: proj.id }));
+    expect(await env.ROUTING.get(`email-slug:${proj.id}`)).toBeNull();
+
+    await scheduled(mockController, makeBindings(env), mockCtx);
+
+    expect(await env.ROUTING.get(`email-slug:${proj.id}`)).toBe(proj.slug);
+  });
+
+  it('still backfills the email-slug mirror when a sibling routing entry is malformed JSON', async () => {
+    const { id } = await createTestUser(env.db, 'emailslugbad', 'github', undefined, 'free');
+    const bad = await createTestProject(env.db, id);
+    const good = await createTestProject(env.db, id);
+    // The routing-JSON backfill throws on this entry every hourly pass. That
+    // must not hold the email-slug mirror hostage for the rest of the user's
+    // projects — nor for this one, whose mirror does not depend on the entry.
+    await env.ROUTING.put(bad.slug, '{not json');
+    await env.ROUTING.put(good.slug, JSON.stringify({ worker: 'test', projectId: good.id }));
+
+    await expect(scheduled(mockController, makeBindings(env), mockCtx)).resolves.toBeUndefined();
+
+    expect(await env.ROUTING.get(`email-slug:${bad.id}`)).toBe(bad.slug);
+    expect(await env.ROUTING.get(`email-slug:${good.id}`)).toBe(good.slug);
+  });
+
   it('does not overwrite existing userId in routing entries', async () => {
     const { id } = await createTestUser(env.db, 'existing', 'github', undefined, 'free');
     const proj = await createTestProject(env.db, id);

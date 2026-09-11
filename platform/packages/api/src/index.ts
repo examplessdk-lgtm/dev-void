@@ -567,6 +567,29 @@ async function processUserRollover(
   user: { id: string; plan: string; billing_cycle_start: string; suspended_reason: string | null },
   userProjects: ReadonlyArray<{ id: string; slug: string }>,
 ): Promise<void> {
+  // Backfill the `email-slug:<projectId>` mirror. It is written
+  // best-effort at createProject time, so a transient KV blip during
+  // create would leave a project permanently unsendable (the proxy's
+  // /email/send answers 502 'project slug unknown' without it).
+  // Re-write it idempotently on every hourly pass so a missing — or
+  // stale, after a project rename — mirror heals with no operator
+  // action. In its own try/catch, ahead of the routing-JSON backfill
+  // below: that block throws out on a malformed routing entry every
+  // pass, so sharing its try/catch would hold the mirror hostage to one
+  // bad entry (and vice versa) — neither may block the other, and
+  // neither may block rollover/unsuspension.
+  try {
+    for (const project of userProjects) {
+      const emailSlugKey = `email-slug:${project.id}`;
+      const existingSlug = await env.ROUTING.get(emailSlugKey);
+      if (existingSlug !== project.slug) {
+        await env.ROUTING.put(emailSlugKey, project.slug);
+      }
+    }
+  } catch (err) {
+    console.error(`[backfill] email-slug backfill failed for user ${user.id}:`, err);
+  }
+
   // Backfill userId into old KV routing entries (all plans, before early return).
   // Wrapped in try/catch so a malformed KV entry doesn't block rollover/unsuspension.
   try {
@@ -579,22 +602,6 @@ async function processUserRollover(
       if (!routing.userId) {
         routing.userId = user.id;
         await env.ROUTING.put(project.slug, JSON.stringify(routing));
-      }
-    }
-
-    // Backfill the `email-slug:<projectId>` mirror. It is written
-    // best-effort at createProject time, so a transient KV blip during
-    // create would leave a project permanently unsendable (the proxy's
-    // /email/send answers 502 'project slug unknown' without it).
-    // Re-write it idempotently on every hourly pass so a missing — or
-    // stale, after a project rename — mirror heals with no operator
-    // action. Inside the same try/catch as the routing backfill above:
-    // one bad entry must not block rollover/unsuspension.
-    for (const project of userProjects) {
-      const emailSlugKey = `email-slug:${project.id}`;
-      const existingSlug = await env.ROUTING.get(emailSlugKey);
-      if (existingSlug !== project.slug) {
-        await env.ROUTING.put(emailSlugKey, project.slug);
       }
     }
 
