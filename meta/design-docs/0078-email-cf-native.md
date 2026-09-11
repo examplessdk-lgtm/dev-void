@@ -1157,13 +1157,14 @@ instructions for the steps only a human can do, and `status` to poll.
 
 ```
 $ void email domain add acme.com
-  Token     paste a Cloudflare API token for zone acme.com with:
-              Email Routing Rules Edit · Email Routing Addresses Edit ·
-              Email Sending Edit · Zone Settings Edit (apex only)
-            (a TTL is fine — the platform reports when it expires)
-  Zone      acme.com found in account …f721
   MX        acme.com carries MX for google.com → apex is off limits
             using mail.acme.com  [change with --subdomain]
+  Token     opening the Cloudflare token form, pre-filled for this domain…
+            https://dash.cloudflare.com/profile/api-tokens?permissionGroupKeys=…&name=Void%20email%20%E2%80%94%20acme.com
+            in the browser: Continue to summary → Create Token → Copy
+            (a TTL is fine — the platform reports when it expires)
+  Paste     ▸ ●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●
+  Verify    token active · zone acme.com found in account …f721 · scopes ok
   Routing   mail.acme.com is not on Email Routing yet
             → add it: Email Routing → acme.com → Settings → Subdomains  (dashboard only)
   Sending   mail.acme.com onboarded — cf-bounce MX, SPF, DKIM, DMARC added
@@ -1173,16 +1174,16 @@ $ void email domain add acme.com
 
 Who does what:
 
-| Step                     | Who                  | How                                                                                                                                                             |
-| ------------------------ | -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| token                    | customer, once       | Cloudflare dashboard; scopes printed by the CLI                                                                                                                 |
-| zone lookup, MX check    | platform             | `GET /zones?name=`, public DNS — no token needed for MX                                                                                                         |
-| routing on the apex      | platform             | `POST /zones/{z}/email/routing/dns`, only when MX is empty                                                                                                      |
-| routing on a subdomain   | customer, once       | dashboard — no API exists; the CLI prints the exact path and polls                                                                                              |
-| Email Sending onboarding | platform             | `POST /zones/{z}/email/sending/subdomains { name }` (token auth undocumented — probe)                                                                           |
-| bridge destination       | platform + one click | `POST /accounts/{c}/email/routing/addresses`; the verification mail lands in our router, which surfaces the link in `status` — auto-completing it is decision 7 |
-| catch-all → bridge       | platform             | `PUT /zones/{z}/email/routing/rules/catch_all` once the bridge is verified                                                                                      |
-| status → active          | platform             | every probe green; the map printed                                                                                                                              |
+| Step                     | Who                  | How                                                                                                                                                                     |
+| ------------------------ | -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| token                    | customer, once       | three clicks: the CLI opens the dashboard form pre-filled with name and scopes; the customer clicks through and pastes — [details](#creating-the-token-in-three-clicks) |
+| zone lookup, MX check    | platform             | `GET /zones?name=`, public DNS — no token needed for MX                                                                                                                 |
+| routing on the apex      | platform             | `POST /zones/{z}/email/routing/dns`, only when MX is empty                                                                                                              |
+| routing on a subdomain   | customer, once       | dashboard — no API exists; the CLI prints the exact path and polls                                                                                                      |
+| Email Sending onboarding | platform             | `POST /zones/{z}/email/sending/subdomains { name }` (token auth undocumented — probe)                                                                                   |
+| bridge destination       | platform + one click | `POST /accounts/{c}/email/routing/addresses`; the verification mail lands in our router, which surfaces the link in `status` — auto-completing it is decision 7         |
+| catch-all → bridge       | platform             | `PUT /zones/{z}/email/routing/rules/catch_all` once the bridge is verified                                                                                              |
+| status → active          | platform             | every probe green; the map printed                                                                                                                                      |
 
 `void email domain status`, `list`, `remove`. `remove` deletes the rule and
 the bridge destination in the customer's account best-effort, then the row
@@ -1200,11 +1201,98 @@ inbound continuing until they delete the rule themselves.
 - The token is stored with `encryptProjectSecret` under the project's
   envelope key, per domain, and only the api and proxy ever decrypt it. It
   is never written to a worker, a manifest or a log.
-- Scopes, minimum: zone-scoped `Email Routing Rules Edit`; account-scoped
-  `Email Routing Addresses Edit` and `Email Sending Edit`; `Zone Settings
-Edit` only for the apex path. `DNS Read` is not needed — MX is read over
-  public DNS. Account-level scopes are necessarily account-wide; the CLI says
-  so when it prints the list.
+- Scopes, minimum: zone-scoped `Zone Read` (to find the zone id) and
+  `Email Routing Rules Edit`; account-scoped `Email Routing Addresses Edit`
+  and `Email Sending Edit`; `Zone Settings Edit` only for the apex path.
+  `DNS Read` is not needed — MX is read over public DNS. Account-level
+  scopes are necessarily account-wide; the token summary page shows that
+  before the customer clicks **Create Token**.
+
+### Creating the token in three clicks
+
+_(added 2026-09-11)_ The token is the one step that only the customer can
+do, so it is the step to make short. Cloudflare's dashboard accepts a
+[template URL](https://developers.cloudflare.com/fundamentals/api/how-to/account-owned-token-template/)
+that pre-fills the token form — name, permission groups, resources. The CLI
+opens it; the customer clicks **Continue to summary**, **Create Token**,
+**Copy**, and pastes into the masked prompt. Three clicks and one paste
+(plus a login if the browser has none). This is the pattern Cloudflare's own
+`deploy.workers.cloudflare.com` and several third-party CLIs already use.
+
+```
+CLI                                   browser                       CLI
+ │ MX check over public DNS            │                              │
+ │ → apex or subdomain decided         │                              │
+ │ build the link (scopes fit the path)│                              │
+ │ open ─────────────────────────────▶ │ form is pre-filled           │
+ │                                     │ 1 Continue to summary        │
+ │                                     │ 2 Create Token               │
+ │                                     │ 3 Copy                       │
+ │ ◀──────────────────────────── paste │                              │
+ │ GET /user/tokens/verify · GET /zones?name=acme.com · scope check   │
+ │ store with encryptProjectSecret · continue with Zone / Routing …   │
+```
+
+The link:
+
+```
+https://dash.cloudflare.com/profile/api-tokens
+  ?permissionGroupKeys=<url-encoded JSON below>
+  &accountId=*            # required by the form; "all accounts" — the customer narrows it in the summary if they like
+  &zoneId=all             # required by the form; narrow to acme.com in the summary (probe 7 asks whether a zone id here is honoured)
+  &name=Void%20email%20%E2%80%94%20acme.com
+```
+
+```json
+[
+  { "key": "zone", "type": "read" },
+  { "key": "email_routing_rule", "type": "edit" },
+  { "key": "email_routing_address", "type": "edit" },
+  { "key": "email_sending", "type": "edit" },
+  { "key": "zone_settings", "type": "edit" }
+]
+```
+
+`zone_settings` is added only on the apex path — the MX check runs over
+public DNS before the link is built, so the CLI already knows which path it
+is on. `zone: read` is what `GET /zones?name=` needs to find the zone id;
+the earlier scope list forgot it.
+
+Where the keys come from, because the documented key table stops at
+`workers_*`, `d1`, `queues`, `dns`, `zone`, `zone_settings`:
+
+| Key                     | Permission group (dashboard label)                      | Evidence                                                                                                                                                                                                                                        |
+| ----------------------- | ------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `email_routing_rule`    | Email Routing Rules Read/Write (`email_routing_rule_*`) | dashboard permission-group dump in `Cloudflare-Mining/Cloudflare-Datamining` (`data/account/token_permission_groups_dash.json`, 2024-12-29): every group's `label` is `<key>_read` / `<key>_write`; used in the wild by GhostMail iOS and erxes |
+| `email_routing_address` | Email Routing Addresses Read/Write                      | same dump; GhostMail iOS                                                                                                                                                                                                                        |
+| `email_sending`         | Email Sending                                           | **one source only** — erxes `MailConfigUpdate.tsx` (2026-09-01); the product launched after the dump. Probe 5                                                                                                                                   |
+| `zone`, `zone_settings` | Zone Read, Zone Settings Read/Write                     | documented; same dump                                                                                                                                                                                                                           |
+
+What this does not do, so nobody expects it:
+
+- The dashboard never hands the token back. There is no redirect, no
+  callback, no local listener to receive it — the paste is the transport.
+  Cloudflare's own docs: "Template URLs only pre-fill the token creation
+  form. Users must still complete the token creation process in the
+  dashboard."
+- A two-click **Allow** page (OAuth, the way `wrangler login` works) needs
+  an OAuth client registered by Cloudflare. No self-service registration is
+  documented; wrangler's client id is a partner arrangement. If VoidZero can
+  get one, this whole subsection collapses to "click Allow" — decision 8.
+- Creating the token by API (`POST /accounts/{id}/tokens`) needs a token
+  with `API Tokens: Edit` first — the same chicken, one egg earlier.
+- The developer's local `wrangler login` session cannot substitute: its
+  scopes cover routing and sending, but the catch-all → bridge rule has no
+  wrangler command, and wrangler 4.130 keeps the OAuth token in an encrypted
+  `default.enc` that other CLIs cannot read.
+
+The same link and paste field belong in the dashboard's Email section
+(Mode A) as a **Create token at Cloudflare** button next to a paste box;
+the CLI and the dashboard share the link builder. The account-token form
+(`/?to=/:account/api-tokens&…`) is the better home for a company, because
+the token survives the employee — but it needs an Administrator, and the
+send endpoint documents a `10103 bad_token_type` error without saying which
+type it rejects. User token is the default until probe 6 answers that.
 
 ### What changes in the existing rules
 
@@ -1224,8 +1312,9 @@ Edit` only for the apex path. `DNS Read` is not needed — MX is read over
 
 - The customer's account must be on **Workers Paid** to send; routing alone
   works on Free.
-- Two steps stay human: the routing-subdomain dashboard form, and the
-  verification click (until decision 7 automates it).
+- Three steps stay human: the token (three clicks and a paste), the
+  routing-subdomain dashboard form, and the verification click (until
+  decision 7 automates it).
 - A BCC'd message cannot be routed to a named handler; it reaches
   `_default.ts`.
 - A domain that is not on Cloudflare DNS is not covered.
@@ -1245,6 +1334,13 @@ already covers it.
 3. Whether the original `To:` header survives a plain forward.
 4. Whether an API token with `Email Sending: Edit` can call
    `POST /zones/{z}/email/sending/subdomains`.
+5. Whether `{ "key": "email_sending", "type": "edit" }` pre-fills the
+   Email Sending permission in the dashboard form (one third-party source
+   only; the routing keys have two plus the dashboard dump).
+6. Whether `POST /accounts/{id}/email/sending/send_raw` accepts an
+   account-owned token, or only a user-owned one (`10103 bad_token_type`).
+7. Whether `zoneId=<zone id>` in the template URL narrows the form to that
+   zone, or only `all` is honoured.
 
 ## Backwards Compat
 
@@ -1410,6 +1506,10 @@ owner's.
    host (recommended once probe 2 pins the format), **or surface the link**
    in `void email domain status` for the developer to click (the safe first
    version).
+8. **Ask Cloudflare for an OAuth client** (the mechanism behind
+   `wrangler login`), so a custom domain is one **Allow** click with no
+   token to paste. Not self-service; a partner ask. Recommended to ask,
+   not to wait — the three-click template link ships first either way.
 
 ## Open questions
 
@@ -1424,7 +1524,7 @@ _(added 2026-09-11)_ Only a live probe settles these.
   the path Mode B uses.
 - Whether `mail.staging.void.cloud`, two labels deep, is accepted by the
   subdomain form. The docs show one-label examples only.
-- The four custom-domain probes listed under
+- The seven custom-domain probes listed under
   [Probes before building](#probes-before-building).
 
 ## Future Work
@@ -1538,6 +1638,23 @@ Evidence for the 2026-09-11 sections (framework paths under
   verified destination addresses"); catch-all `PUT …/rules/catch_all` with
   `{ type: "worker", value: ["<name>"] }`; local inbound trigger
   `POST /cdn-cgi/local/email`.
+- Token template link: Cloudflare docs "API token template URLs"
+  (`fundamentals/api/how-to/account-owned-token-template/`) — user and
+  account URL formats, `[{ key, type }]` encoding, "only pre-fill the token
+  creation form". Key names beyond the documented table:
+  `Cloudflare-Mining/Cloudflare-Datamining`
+  `data/account/token_permission_groups_dash.json` (labels
+  `email_routing_rule_write`, `email_routing_address_write`,
+  `zone_settings_write`, …), `sendmebits/ghostmail-ios` README
+  (`email_routing_address`, `email_routing_rule`), `erxes/erxes`
+  `MailConfigUpdate.tsx` (`email_sending`, `email_routing_rule`),
+  `Cloudflare-Mining/Cloudflare-Datamining` `data/types/src/api/apiToken.ts`
+  (`ApiTokensAdhocTemplate { permissionGroupKeys, accountId?, mode?, zoneId? }`).
+  Paste-back pattern: `orange-framework/orange-js` `packages/cli/src/cf-auth.ts`,
+  `cloudflare/deploy.workers.cloudflare.com` `configure-account.js`.
+  Email Sending REST errors: `email-service/api/send-emails/rest-api/`
+  (`10103 bad_token_type`). `GET /user/tokens/permission_groups` needs
+  `API Tokens: Read`; none of our stored tokens has it, so the dump stands in.
 - Compatibility date: workerd 1.20260701.1 via Miniflare; a
   `WorkerEntrypoint` subclass returns 200 at `2021-11-03` and `2024-01-01`
   with no flags.
