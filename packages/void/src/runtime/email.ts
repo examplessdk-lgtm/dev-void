@@ -1,11 +1,17 @@
-// void/email — outbound email via the platform proxy.
+// void/email — outbound email via the platform proxy or a direct binding.
 //
-// User worker code never holds a `send_email` binding directly. The
-// framework builds MIME locally, then POSTs to `__VOID_PROXY/email/send`.
-// The proxy worker holds the platform-level `send_email` binding and
-// enforces per-project quotas, suspend kill-switch, and verified-
-// destinations allowlist (mirrored from `email_destinations` into KV by
-// the API on every CRUD).
+// On the managed platform, user worker code never holds a `send_email`
+// binding directly. The framework builds MIME locally, then POSTs to
+// `__VOID_PROXY/email/send`. The proxy worker holds the platform-level
+// `send_email` binding and enforces per-project quotas, suspend kill-switch,
+// and verified-destinations allowlist (mirrored from `email_destinations`
+// into KV by the API on every CRUD).
+//
+// On the developer's own Cloudflare account (`void deploy --backend
+// cloudflare`) there is no proxy: the deploy provisions a `send_email`
+// binding named `SEND_EMAIL` on the worker itself and the same MIME goes
+// straight through `cloudflare:email`, one `EmailMessage` per recipient.
+// Transports are tried in order: dev inbox, `SEND_EMAIL`, `__VOID_PROXY`.
 //
 // In `void dev` (no `__VOID_PROXY`) sends are captured by the dev inbox;
 // pass `sendInDev: true` for a single call to bypass. The dev inbox buffer
@@ -48,7 +54,14 @@ export type {
   SendEmailResult,
 } from './email/types.ts';
 
-export { createMessageProxy, defineEmail, parseEmail, replyEmail } from './email/inbound.ts';
+export {
+  createMessageProxy,
+  defineEmail,
+  enactEmailActions,
+  isForwardableEmailMessage,
+  parseEmail,
+  replyEmail,
+} from './email/inbound.ts';
 export type {
   EmailAction,
   EmailEnvelope,
@@ -111,10 +124,158 @@ function readEmailDomain(): string | undefined {
   return typeof raw === 'string' && raw.length > 0 ? raw : undefined;
 }
 
+// The project's own default sender, written into the worker's `vars` by
+// `void deploy --backend cloudflare` from `email.from` in void.json. It is a
+// full address on a zone the developer owns, so there is no slug to
+// substitute; `normalizeEmail` validates it like any explicit `from`.
+function readEmailFrom(): string | undefined {
+  const raw = tryGetRawRuntimeEnv()?.__VOID_EMAIL_FROM;
+  return typeof raw === 'string' && raw.length > 0 ? raw : undefined;
+}
+
 interface ProxyEnv {
   __VOID_PROXY?: { fetch(req: Request | string, init?: RequestInit): Promise<Response> };
   __VOID_PROXY_TOKEN?: string;
   __PROJECT_ID?: string;
+}
+
+// The `send_email` binding `void deploy --backend cloudflare` provisions
+// (`cli/email-cloudflare.ts` writes the same name into wrangler.jsonc).
+const SEND_EMAIL_BINDING_NAME = 'SEND_EMAIL';
+
+// The legacy `EmailMessage` overload of `SendEmail.send`. Only `messageId`
+// is read, and defensively: some builds have returned nothing.
+interface SendEmailBinding {
+  send(message: EmailMessage): Promise<{ messageId?: unknown } | undefined | void>;
+}
+
+function resolveSendEmailBinding(
+  env: Record<string, unknown> | undefined,
+): SendEmailBinding | undefined {
+  const binding = env?.[SEND_EMAIL_BINDING_NAME];
+  if (typeof binding !== 'object' || binding === null) {
+    return undefined;
+  }
+  return typeof (binding as { send?: unknown }).send === 'function'
+    ? (binding as SendEmailBinding)
+    : undefined;
+}
+
+/**
+ * Map an error thrown by the `send_email` binding to a framework code.
+ *
+ * Email Service throws `Error`s carrying a `code` (the `E_*` table in
+ * Cloudflare's Workers API reference); the older Email Routing sender
+ * throws message-only errors, so the destination-verification phrasing the
+ * platform proxy already keys on is kept as a fallback. Anything else is
+ * `UPSTREAM_ERROR` with the original error as `cause` — the framework has
+ * no way to act on a delivery failure or a service outage beyond
+ * reporting it.
+ */
+function classifyBindingError(e: unknown): SendEmailError {
+  const message = e instanceof Error ? e.message : String(e);
+  const code =
+    typeof (e as { code?: unknown })?.code === 'string' ? (e as { code: string }).code : '';
+  switch (code) {
+    case 'E_RECIPIENT_NOT_ALLOWED':
+      return makeError('UNVERIFIED_DESTINATION', message, e);
+    case 'E_SENDER_NOT_VERIFIED':
+    case 'E_SENDER_DOMAIN_NOT_AVAILABLE':
+      return makeError('INVALID_FROM', message, e);
+    case 'E_RATE_LIMIT_EXCEEDED':
+    case 'E_DAILY_LIMIT_EXCEEDED':
+      return makeError('QUOTA_EXCEEDED', message, e);
+    default:
+      break;
+  }
+  if (UNVERIFIED_DESTINATION_RE.test(message)) {
+    return makeError('UNVERIFIED_DESTINATION', message, e);
+  }
+  return makeError('UPSTREAM_ERROR', message, e);
+}
+
+// Anchored to Cloudflare's own phrasing ("destination address … not (yet)
+// verified"), with bounded runs so a long preamble or a multi-line stack
+// cannot drag an unrelated mention of the address into a false positive.
+// Mirrors `classifyUpstream` in the platform proxy.
+const UNVERIFIED_DESTINATION_RE =
+  /^[^\n]{0,200}destination address[^\n]{0,200}not (?:yet )?verified/i;
+
+function bytesToReadableStream(bytes: Uint8Array): ReadableStream<Uint8Array> {
+  return new ReadableStream({
+    start(controller) {
+      controller.enqueue(bytes);
+      controller.close();
+    },
+  });
+}
+
+/**
+ * Deliver through the worker's own `SEND_EMAIL` binding. One `EmailMessage`
+ * per recipient, every recipient attempted, and the same `deliveries` shape
+ * the proxy returns so a caller retries the failed ones the same way in both
+ * modes. The stream is rebuilt per send because a `ReadableStream` is
+ * one-shot.
+ */
+async function sendViaBinding(
+  binding: SendEmailBinding,
+  from: string,
+  recipients: ReadonlyArray<string>,
+  raw: Uint8Array,
+  fallbackId: string,
+): Promise<SendEmailResult> {
+  let EmailMessage: (typeof import('cloudflare:email'))['EmailMessage'];
+  try {
+    ({ EmailMessage } = await import('cloudflare:email'));
+  } catch (e) {
+    return err(
+      'UPSTREAM_ERROR',
+      `email: SEND_EMAIL is bound but cloudflare:email could not be loaded: ${e instanceof Error ? e.message : String(e)}`,
+      e,
+    );
+  }
+  const deliveries: Array<SendEmailRecipientResult> = [];
+  for (const recipient of recipients) {
+    try {
+      const result = await binding.send(
+        new EmailMessage(from, recipient, bytesToReadableStream(raw)),
+      );
+      const mid = typeof result?.messageId === 'string' ? result.messageId : '';
+      deliveries.push({ recipient, ok: true, messageId: mid || fallbackId });
+    } catch (e) {
+      deliveries.push({ recipient, ok: false, error: classifyBindingError(e) });
+    }
+  }
+  if (deliveries.some((d) => !d.ok)) {
+    return { ok: false, deliveries };
+  }
+  return {
+    ok: true,
+    ids: deliveries.map((d) => ({
+      recipient: d.recipient,
+      messageId: (d as { messageId: string }).messageId,
+    })),
+  };
+}
+
+/**
+ * Dedup recipients by lowercased email (CF won't collapse duplicate
+ * envelopes for us, and double-billing the quota for the same recipient
+ * is worse than the rare case where a user actually wanted Cc + Bcc to
+ * the same address — which doesn't change delivery semantics anyway).
+ */
+function uniqueRecipients(normalized: NormalizedEmail): Array<string> {
+  const seen = new Set<string>();
+  const recipients: Array<string> = [];
+  for (const r of [...normalized.to, ...normalized.cc, ...normalized.bcc]) {
+    const lower = r.email.toLowerCase();
+    if (seen.has(lower)) {
+      continue;
+    }
+    seen.add(lower);
+    recipients.push(lower);
+  }
+  return recipients;
 }
 
 function newRequestId(): string {
@@ -140,6 +301,13 @@ function resolveDefaultFrom(opts: SendEmailOptions): SendEmailOptions {
     (typeof supplied === 'object' && supplied !== null && !('email' in supplied));
   if (!isEmpty) {
     return opts;
+  }
+  // `__VOID_EMAIL_FROM` (own-account deploys) wins over the platform's
+  // `<slug>+noreply@<domain>`: a project that carries both is one whose
+  // void.json names a sender on purpose.
+  const configured = readEmailFrom();
+  if (configured) {
+    return { ...opts, from: configured };
   }
   const slug = readProjectSlug();
   const domain = readEmailDomain();
@@ -502,6 +670,18 @@ export async function sendEmail(opts: SendEmailOptions): Promise<SendEmailResult
     return err('UPSTREAM_ERROR', message);
   }
 
+  const recipients = uniqueRecipients(normalized);
+  if (recipients.length === 0) {
+    return err('INVALID_TO', "email: 'to' must include at least one recipient.");
+  }
+
+  // Own-account deploy: the worker holds the binding itself, so there is no
+  // proxy hop and no platform quota — Cloudflare's own limits apply.
+  const sendBinding = resolveSendEmailBinding(rawEnv);
+  if (sendBinding) {
+    return sendViaBinding(sendBinding, normalized.from.email, recipients, raw, messageId);
+  }
+
   const env = rawEnv as ProxyEnv | undefined;
   const proxy = env?.__VOID_PROXY;
   const projectId = env?.__PROJECT_ID;
@@ -509,28 +689,11 @@ export async function sendEmail(opts: SendEmailOptions): Promise<SendEmailResult
   if (!proxy || !projectId || !proxyToken) {
     return err(
       'BINDING_MISSING',
-      'email: __VOID_PROXY is not available, so nothing was sent. Deploy via Void to bind the platform proxy. ' +
+      'email: neither SEND_EMAIL nor __VOID_PROXY is available, so nothing was sent. Deploy via Void to bind the platform proxy, ' +
+        'or set `email.from` in void.json so `void deploy --backend cloudflare` provisions the SEND_EMAIL binding. ' +
         'Under `void dev` messages are captured by the local inbox at /__void/inbox instead — reaching this error there means ' +
         'that path was bypassed (`sendInDev: true`) or unavailable (the worker has no assets binding to reach the dev server through).',
     );
-  }
-
-  // Dedup recipients by lowercased email (CF won't collapse duplicate
-  // envelopes for us, and double-billing the quota for the same recipient
-  // is worse than the rare case where a user actually wanted Cc + Bcc to
-  // the same address — which doesn't change delivery semantics anyway).
-  const seen = new Set<string>();
-  const recipients: Array<string> = [];
-  for (const r of [...normalized.to, ...normalized.cc, ...normalized.bcc]) {
-    const lower = r.email.toLowerCase();
-    if (seen.has(lower)) {
-      continue;
-    }
-    seen.add(lower);
-    recipients.push(lower);
-  }
-  if (recipients.length === 0) {
-    return err('INVALID_TO', "email: 'to' must include at least one recipient.");
   }
 
   const requestId = newRequestId();

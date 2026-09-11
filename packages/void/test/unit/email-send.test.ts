@@ -186,6 +186,53 @@ describe('sendEmail (from defaulting)', () => {
     }
   });
 
+  it('defaults from to __VOID_EMAIL_FROM when omitted (own-account deploys)', async () => {
+    const harness = createEmailTestHarness();
+    try {
+      const result = await withRuntimeEnv(
+        { __VOID_EMAIL_FROM: 'Acme <noreply@mail.acme.com>' },
+        () => sendEmail({ to: 'b@y.dev', subject: 's', text: 't' }),
+      );
+      expect(result.ok).toBe(true);
+      expect(harness.messages[0].from).toEqual({ email: 'noreply@mail.acme.com', name: 'Acme' });
+    } finally {
+      harness.dispose();
+    }
+  });
+
+  it('prefers __VOID_EMAIL_FROM over the platform slug default', async () => {
+    const harness = createEmailTestHarness();
+    try {
+      await withRuntimeEnv(
+        {
+          __VOID_EMAIL_FROM: 'noreply@mail.acme.com',
+          __VOID_PROJECT_SLUG: 'acme',
+          __VOID_EMAIL_DOMAIN: MAIL_DOMAIN,
+        },
+        () => sendEmail({ to: 'b@y.dev', subject: 's', text: 't' }),
+      );
+      expect(harness.messages[0].from.email).toBe('noreply@mail.acme.com');
+    } finally {
+      harness.dispose();
+    }
+  });
+
+  it('returns INVALID_FROM for a malformed __VOID_EMAIL_FROM instead of guessing', async () => {
+    const harness = createEmailTestHarness();
+    try {
+      const result = await withRuntimeEnv({ __VOID_EMAIL_FROM: 'not-an-address' }, () =>
+        sendEmail({ to: 'b@y.dev', subject: 's', text: 't' }),
+      );
+      expect(result.ok).toBe(false);
+      if (!result.ok && 'error' in result) {
+        expect(result.error.code).toBe('INVALID_FROM');
+      }
+      expect(harness.messages).toHaveLength(0);
+    } finally {
+      harness.dispose();
+    }
+  });
+
   it('respects explicit from even when both bindings are set', async () => {
     const harness = createEmailTestHarness();
     try {
