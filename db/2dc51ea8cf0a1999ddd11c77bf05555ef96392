@@ -1,0 +1,35 @@
+docs/integrations/cloudflare.md
+  s_0add8c35799930::t_c91351bb98e09e 258
+packages/isr/README.md
+  s_0add8c35799930::t_7d422366d12904 20-21
+packages/isr/src/runtime.ts
+  s_0add8c35799930::t_7a37cd60755b87 3,16,18,84,87-88,107-117,135-141,148-154,171,177,203,217-221,224,240-256,316,323,482,493,511,550,582-583,588,608-609,626,644,666
+packages/void/src/plugin-routing.ts
+  s_0add8c35799930::t_aa163d314edb22 562-563,576-581
+packages/void/src/router/compile.ts
+  s_0add8c35799930::t_08d95e9771915e 2484,2623
+packages/void/src/runtime/isr.ts
+  s_0add8c35799930::t_9c28000a85c9d2 1,6,54-60,66-67,72-83,99-101,119
+packages/void/test/unit/compile.test.ts
+  s_0add8c35799930::t_b8f090870033eb 2945,2957
+packages/void/test/unit/isr-cache.test.ts
+  s_0add8c35799930::t_ea72799e1be74f 558-593
+packages/void/test/unit/isr.test.ts
+  s_0add8c35799930::t_7350888592e83c 177-200
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "db2dc51ea8cf0a1999ddd11c77bf05555ef96392",
+  "prompts": {},
+  "sessions": {
+    "s_0add8c35799930": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0903e-9700-76f0-a4db-b5c9ea737ea9",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
