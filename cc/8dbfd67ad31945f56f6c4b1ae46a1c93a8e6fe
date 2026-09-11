@@ -1,0 +1,23 @@
+docs/reference/cli.md
+  s_0add8c35799930::t_dd13a31aa1f139 376
+packages/void/src/cli/db.ts
+  s_0add8c35799930::t_0d1bbbfdcb4a56 488,490-511
+packages/void/test/unit/db-migrate.test.ts
+  s_0add8c35799930::t_4198524529840b 253-280
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "cc8dbfd67ad31945f56f6c4b1ae46a1c93a8e6fe",
+  "prompts": {},
+  "sessions": {
+    "s_0add8c35799930": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0903e-9700-76f0-a4db-b5c9ea737ea9",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
