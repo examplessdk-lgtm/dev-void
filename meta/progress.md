@@ -136,7 +136,7 @@
 
 ### Platform
 
-- [ ] Email — custom sender domains per project (DKIM), and a provider abstraction. Follow-up to the shared-sender rollout.
+- [ ] Email — custom domains on Cloudflare per project (customer's zone, scoped token, own DKIM; designed in `0078` "Custom domains on Cloudflare", four probes pending), and a provider abstraction for domains not on Cloudflare DNS. Follow-up to the shared-sender rollout.
 - [ ] Durable Object session abstraction
 - [ ] Preview environments with database forks (cloned D1 per PR)
 - [ ] Integration marketplace (Resend, Stripe plugin architecture)

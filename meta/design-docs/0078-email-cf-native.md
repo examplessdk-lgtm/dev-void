@@ -161,7 +161,7 @@ Single rollout covering outbound, inbound, and the platform infrastructure that 
 
 ## Non-Goals
 
-- **Custom-domain email** — see [Why custom domains aren't included](#why-custom-domains-arent-included).
+- **Custom-domain email for domains NOT on Cloudflare DNS** — a CNAME-only custom hostname cannot carry MX. _(scope change 2026-09-11)_ Domains on a Cloudflare zone are in scope; see [Custom domains on Cloudflare](#custom-domains-on-cloudflare).
 - **Provider abstraction (Resend / SES / Postmark) wrapper.** Users can call those SDKs directly today; the wrapper would not earn its keep without concrete demand. See [Future work](#future-work) for the trigger conditions.
 - **Templating** (React Email / Vue components / MJML).
 - **Typed verified-sender codegen.**
@@ -190,7 +190,7 @@ decides who it can reach:
 - **Binding restrictions:** `destination_address` pins one recipient; `allowed_destination_addresses` pins a list; `allowed_sender_addresses` pins the from side. With none set, the binding reaches whatever the regime above allows.
 - **The 200-destination cap is the real constraint.** It is per account, not per domain or per project, so on a shared platform it is a ceiling on the whole platform's distinct recipients until the mail domain is onboarded to Email Sending. Onboarding lifts Cloudflare's gate; per-project consent stays in our own allowlist, which is a product rule rather than a Cloudflare one.
 - **Two operational quirks:** outbound sent through the binding shows as _dropped_ in the Email Routing summary even when delivered (read Email Sending metrics or the proxy tail), and `message.reply()` throws when the inbound message carries more than 100 `References` entries.
-- **Practical implication:** without onboarding, CF-native outbound fits app-internal use (notifications to the owner, ops alerts, forms piped to a verified inbox, reply-by-email on top of inbound). With onboarding it reaches end users too; reputation is still pooled on the shared domain, which is what the provider abstraction in [Future Work](#future-work) is for.
+- **Practical implication:** without onboarding, CF-native outbound fits app-internal use (notifications to the owner, ops alerts, forms piped to a verified inbox, reply-by-email on top of inbound). With onboarding it reaches end users too. Reputation is pooled on the shared domain; a project that needs its own signs with its own domain through [Custom domains on Cloudflare](#custom-domains-on-cloudflare).
 
 ## DX Papercuts → What Void Fixes
 
@@ -655,7 +655,7 @@ Per-project setup: nothing. Every project deployed with the new framework codege
 - Burst-rate cap per project (sliding-window in proxy)
 - Manual suspend kill-switch in the admin UI
 
-Per-project DKIM signing isn't possible without per-project zones, so reputation pooling is unavoidable here. Custom-domain email (future work) gives projects with reputation-sensitive sending a clean path off shared.
+Per-project DKIM signing isn't possible on the shared domain, so reputation pooling is unavoidable there. _(scope change 2026-09-11)_ A project with reputation-sensitive sending brings its own Cloudflare zone — [Custom domains on Cloudflare](#custom-domains-on-cloudflare) — and signs with its own domain.
 
 #### Inbound router worker (`packages/proxy/src/email-router.ts`)
 
@@ -841,6 +841,9 @@ This month   12 / 200 sent · 3 received
 
 Backed by `GET /projects/:id/email/usage` gaining `domain`, `sender`, and
 `inbound` fields. `usage`, `destinations`, `allow`, `disallow`, `logs` stay.
+A project with a custom domain gets a second block per domain — sender,
+inbound map, and the domain's status — and `void email domain add | status |
+list | remove` beside them.
 
 **`void deploy`** prints the inbound map at the end whenever `email/` handlers
 ship. That is the moment the developer cares:
@@ -1061,27 +1064,187 @@ address.
 - **Docs** — every literal `mail.void.cloud` in the guide and the prompts
   becomes `<mail domain>`, and the CLI prints the real one.
 
-Per-project custom domains stay out, for the reason the next section gives:
-a company's apex carries its corporate MX.
+Per-project custom domains follow [Custom domains on Cloudflare](#custom-domains-on-cloudflare)
+unchanged: the customer's zone, the customer's token, a subdomain when the
+apex carries corporate MX. The company's mail domain remains the platform
+domain for every project that brings no zone of its own.
 
-## Why custom domains aren't included
+## Custom domains on Cloudflare
 
-The current `void domain add` flow uses CF for SaaS / Custom Hostnames — CNAME-based, with the user's DNS staying at their existing provider. That model **cannot support Email Routing** because:
+_(scope change 2026-09-11 — this section replaces "Why custom domains aren't
+included". The reasons that section gave still hold for the models it
+rejected; a third model, which it dismissed on a premise this design no
+longer keeps, is the one adopted here.)_
 
-- Email Routing requires MX records on the receiving domain pointing at CF's MTA
-- For those MX records to deliver into a CF Email Worker, the domain must be a CF-hosted zone with Email Routing enabled
-- The user's domain isn't a CF zone — they only CNAMEd it
-- RFC 2181 also forbids CNAME and MX coexisting at the same name
+A project can send as and receive at its own domain — `support@acme.com`,
+`noreply@mail.acme.com` — when that domain's DNS zone is on Cloudflare. The
+zone stays in the customer's own Cloudflare account. The customer grants the
+platform a scoped API token once; the platform configures the zone and runs
+both directions on the customer's behalf.
 
-Adding custom-domain email here would mean building one of:
+"On Cloudflare" means a zone under Cloudflare DNS in an account the customer
+controls. A domain that only CNAMEs to Void through Cloudflare for SaaS is
+**not** on Cloudflare in this sense and stays out of scope: Email Routing
+needs MX records on a Cloudflare zone, and RFC 2181 forbids MX beside a
+CNAME. Those customers keep the provider path in [Future Work](#future-work).
 
-- **NS delegation flow** (full or subdomain) — entirely greenfield infrastructure. No NS handling exists in `packages/api` today; only `createCustomHostname` for CF for SaaS. Adds a second `void domain add`-shaped flow with status polling, zone creation, etc.
-- **BYO CF account** — user creates a scoped CF API token, pastes it in. Violates the "users never touch CF" premise.
-- **Self-hosted SMTP relay** — huge work; reinvents what CF Email Routing already gives us for free.
+### Why this model
 
-For now: users who need apex-domain sending (`noreply@acme.com` not `<slug>+noreply@mail.void.cloud`) install a third-party SDK directly in their handler — Resend, SES, Postmark, etc. ~3 lines of code. No platform involvement.
+| Model                                            | What it needs from the customer                                                       | Why it is or is not the one                                                                                                                     |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Bring your zone — a scoped token** _(adopted)_ | create one API token, click one verification mail, one dashboard step for a subdomain | zone stays theirs; apex MX untouched; works on Free for routing, Paid for sending; the domain signs its own DKIM, so reputation is per customer |
+| NS delegation of the whole domain to our account | move all of their DNS to us                                                           | we would own and have to manage every record they have; greenfield DNS UI                                                                       |
+| `mail.acme.com` as its own zone in our account   | delegate one subdomain                                                                | Cloudflare's subdomain setup is **Enterprise-only**                                                                                             |
+| Self-hosted SMTP relay                           | nothing                                                                               | reinvents what Email Routing gives for free                                                                                                     |
 
-If usage shows enough demand for a first-class apex-domain story, the cleanest implementation is a thin provider wrapper that signs outbound with DKIM (TXT records on the user's existing DNS, no NS delegation, no CF zone ownership). See [Future work](#future-work).
+0078 rejected the token model for violating "users never touch Cloudflare".
+That premise is kept for the **managed platform's shared sender** and
+dropped for a customer's **own domain**: the customer already touches
+Cloudflare to own the zone, and the token is the same act of trust they give
+`wrangler login`. The rule that survives is the one from [Hosting modes and
+lifecycle](#hosting-modes-and-lifecycle): after the one-time grant, a
+developer sees an address, recipients, a counter and an error code — never a
+zone, a rule or a token scope.
+
+### The two paths
+
+A routing rule can only name a worker in its own account — the rule's action
+value is a bare worker name, and worker names are unique per account — so
+inbound from a customer zone cannot reach `void-proxy` directly. It crosses
+accounts as a **forward** to an address we own, and outbound crosses back as
+a **REST send** with the customer's token.
+
+```
+INBOUND   support+T-42@acme.com
+            │   MX in the customer's account (mail.acme.com, or the apex when its MX is empty)
+            ▼
+          catch-all rule: forward → acme+inbound@mail.void.cloud
+            │   one verified destination address in the customer's account, per project domain
+            │   SRS rewrites the envelope sender · ARC seal · `From:` kept · `To:` kept (probe)
+            ▼
+          mail.void.cloud MX (our account) → catch-all → void-proxy router
+            │   recognises the bridge address, reads the original recipient from `To:`
+            ▼
+          project worker  email()   to = support+T-42@acme.com   viaDomain = acme.com
+                                    dispatcher runs in no-prefix mode (Mode B item 4)
+
+OUTBOUND  sendEmail({ from: "noreply@acme.com", … })
+            │   proxy: from-domain is registered to this project → use that domain's token
+            ▼
+          POST /accounts/{customer}/email/sending/send_raw   { from, recipients, mime_message }
+                DKIM = acme.com (or mail.acme.com) · quota = the customer's · message_id returned
+```
+
+**Inbound identity.** The bridge is one address per project domain,
+`<slug>+inbound@<shared domain>` — one verification click per domain rather
+than one per handler. The router recovers the recipient the sender wrote from
+the `To:` header; when no address on a registered domain is there (a BCC),
+the message goes to `_default.ts` with the bridge address as `to`. That is
+the one loss in the design, and it is documented rather than papered over.
+`replyEmail` on a bridged message defaults `from` to the address that
+received it, on the customer domain, and goes out over the REST path.
+
+**Trust.** The router asserts `viaDomain` only when the inbound
+`Authentication-Results` shows the forwarder's DKIM pass; a message sent
+straight to the bridge address is handled as ordinary shared-domain mail. The
+reply-sender pin gains a second accepted shape: any address on a domain
+registered to the receiving project.
+
+### The flow — `void email domain add acme.com`
+
+Mirrors `void domain add`: a row that goes `pending → active`, printed
+instructions for the steps only a human can do, and `status` to poll.
+
+```
+$ void email domain add acme.com
+  Token     paste a Cloudflare API token for zone acme.com with:
+              Email Routing Rules Edit · Email Routing Addresses Edit ·
+              Email Sending Edit · Zone Settings Edit (apex only)
+            (a TTL is fine — the platform reports when it expires)
+  Zone      acme.com found in account …f721
+  MX        acme.com carries MX for google.com → apex is off limits
+            using mail.acme.com  [change with --subdomain]
+  Routing   mail.acme.com is not on Email Routing yet
+            → add it: Email Routing → acme.com → Settings → Subdomains  (dashboard only)
+  Sending   mail.acme.com onboarded — cf-bounce MX, SPF, DKIM, DMARC added
+  Bridge    acme+inbound@mail.void.cloud added as a destination — waiting for the verification click
+  Status    pending · run `void email domain status acme.com`
+```
+
+Who does what:
+
+| Step                     | Who                  | How                                                                                                                                                             |
+| ------------------------ | -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| token                    | customer, once       | Cloudflare dashboard; scopes printed by the CLI                                                                                                                 |
+| zone lookup, MX check    | platform             | `GET /zones?name=`, public DNS — no token needed for MX                                                                                                         |
+| routing on the apex      | platform             | `POST /zones/{z}/email/routing/dns`, only when MX is empty                                                                                                      |
+| routing on a subdomain   | customer, once       | dashboard — no API exists; the CLI prints the exact path and polls                                                                                              |
+| Email Sending onboarding | platform             | `POST /zones/{z}/email/sending/subdomains { name }` (token auth undocumented — probe)                                                                           |
+| bridge destination       | platform + one click | `POST /accounts/{c}/email/routing/addresses`; the verification mail lands in our router, which surfaces the link in `status` — auto-completing it is decision 7 |
+| catch-all → bridge       | platform             | `PUT /zones/{z}/email/routing/rules/catch_all` once the bridge is verified                                                                                      |
+| status → active          | platform             | every probe green; the map printed                                                                                                                              |
+
+`void email domain status`, `list`, `remove`. `remove` deletes the rule and
+the bridge destination in the customer's account best-effort, then the row
+and the token. The customer can also revoke the token at Cloudflare at any
+time; the next probe sees the 403 and the row reads `token revoked`, with
+inbound continuing until they delete the rule themselves.
+
+### Data and the token
+
+- `email_domains` — `project_id`, `domain` (the address domain, apex or
+  subdomain), `zone_id`, `account_id`, `mode: 'apex' | 'subdomain'`, `status:
+'pending' | 'active' | 'token_revoked' | 'failed'`, `bridge_address`,
+  `bridge_destination_id`, `verification_data` (which steps remain, and the
+  verification link once captured), timestamps.
+- The token is stored with `encryptProjectSecret` under the project's
+  envelope key, per domain, and only the api and proxy ever decrypt it. It
+  is never written to a worker, a manifest or a log.
+- Scopes, minimum: zone-scoped `Email Routing Rules Edit`; account-scoped
+  `Email Routing Addresses Edit` and `Email Sending Edit`; `Zone Settings
+Edit` only for the apex path. `DNS Read` is not needed — MX is read over
+  public DNS. Account-level scopes are necessarily account-wide; the CLI says
+  so when it prints the list.
+
+### What changes in the existing rules
+
+- **Reply-sender pin** — accepts the receiving slug on the shared domain
+  _or_ any address on a domain registered to the project.
+- **Recipient allowlist** — Cloudflare's verified-destination gate does not
+  apply once the customer's domain is onboarded for sending, and the
+  reputation at stake is the customer's own. Whether our allowlist still
+  gates custom-domain sends is decision 6.
+- **Quotas and kill switch** — the platform's burst cap and suspend switch
+  keep applying to every send that passes through the proxy, custom domain
+  or not; the daily quota is the customer's account's.
+- **The 200-destination cap** — the bridge consumes one destination in the
+  _customer's_ account per project domain, not one in ours.
+
+### Limits, stated plainly
+
+- The customer's account must be on **Workers Paid** to send; routing alone
+  works on Free.
+- Two steps stay human: the routing-subdomain dashboard form, and the
+  verification click (until decision 7 automates it).
+- A BCC'd message cannot be routed to a named handler; it reaches
+  `_default.ts`.
+- A domain that is not on Cloudflare DNS is not covered.
+
+### Mode B
+
+The developer's own zone needs none of this. Their worker holds the
+`send_email` binding, the rules target their worker directly, and there is
+no bridge and no stored token — [Mode B](#mode-b--the-developers-own-cloudflare-account)
+already covers it.
+
+### Probes before building
+
+1. Whether `+` is accepted in a destination address (`acme+inbound@…`).
+2. The verification mail's sender and link shape, so the router can
+   recognise it and, if decision 7 says so, fetch it against a pinned host.
+3. Whether the original `To:` header survives a plain forward.
+4. Whether an API token with `Email Sending: Edit` can call
+   `POST /zones/{z}/email/sending/subdomains`.
 
 ## Backwards Compat
 
@@ -1194,6 +1357,11 @@ Steps 1–5 + 11 ship in the framework via the normal release. Steps 6–10 are 
     wrangler-driven fix, then the three refusals as tests.
 18. **Mode C:** the three code sites and the config surface; the docs pass;
     the environment-level admin page.
+19. **Custom domains on Cloudflare:** the four probes on a test zone first;
+    then `email_domains` + token storage, the REST send path in the proxy,
+    the bridge recognition in the router and the no-prefix dispatch (shared
+    with Mode B item 4), the `void email domain` commands, the dashboard
+    rows. Ships after 16 and 17, since it reuses both.
 
 ## Known gaps
 
@@ -1233,6 +1401,15 @@ owner's.
    second domain to keep DNS for).**
 5. **Fix the `void dev` `INVALID_FROM` gap inside void#160 now (recommended,
    it is small and the prompt already promises it), or track it.**
+6. **Custom domains: does our recipient allowlist still gate sends from a
+   customer's own domain?** Recommended: no — Cloudflare's gate is lifted by
+   their onboarding and the reputation is theirs; keep the burst cap and the
+   kill switch, which protect us.
+7. **Custom domains: auto-complete the bridge verification** by fetching the
+   link Cloudflare mails to our router, against a pinned sender and link
+   host (recommended once probe 2 pins the format), **or surface the link**
+   in `void email domain status` for the developer to click (the safe first
+   version).
 
 ## Open questions
 
@@ -1247,14 +1424,16 @@ _(added 2026-09-11)_ Only a live probe settles these.
   the path Mode B uses.
 - Whether `mail.staging.void.cloud`, two labels deep, is accepted by the
   subdomain form. The docs show one-label examples only.
+- The four custom-domain probes listed under
+  [Probes before building](#probes-before-building).
 
 ## Future Work
 
 Things we deliberately did not build. Listed for context, not as a roadmap commitment — each will only get built if real usage shows the demand.
 
-### Provider abstraction + custom-domain email
+### Provider abstraction for domains not on Cloudflare
 
-If apex-domain sending (`noreply@acme.com`) becomes a frequent ask, the cleanest path is a thin wrapper over Resend / SES / Postmark. Providers sign with DKIM, so verification is just TXT records on the user's existing DNS — no NS delegation, no CF zone ownership, no second `void domain add`-shaped flow. Sender stays at the apex.
+_(narrowed 2026-09-11 — domains on a Cloudflare zone are covered by [Custom domains on Cloudflare](#custom-domains-on-cloudflare).)_ If sending from a domain whose DNS is elsewhere becomes a frequent ask, the cleanest path is a thin wrapper over Resend / SES / Postmark. Providers sign with DKIM, so verification is just TXT records on the user's existing DNS — no NS delegation, no CF zone ownership, no second `void domain add`-shaped flow. Sender stays at the apex.
 
 Until then: users install the provider's SDK directly in their handler. Three lines. No platform involvement, no wrapper that has to track API changes.
 
@@ -1362,3 +1541,12 @@ Evidence for the 2026-09-11 sections (framework paths under
 - Compatibility date: workerd 1.20260701.1 via Miniflare; a
   `WorkerEntrypoint` subclass returns 200 at `2021-11-03` and `2024-01-01`
   with no flags.
+- Custom domains: rule action `value` is a bare worker name (`maxItems: 1`,
+  no account field) — no cross-account path; "Forward actions require
+  exactly one verified destination address"; forwarding applies SRS and an
+  ARC seal and "The `From:` header of the message is not modified" (`To:`
+  not stated); `POST /accounts/{id}/email/sending/send_raw` takes `from`,
+  `recipients`, `mime_message` and accepts an API token with "Email Sending:
+  Edit"; `POST /zones/{z}/email/sending/subdomains` gives a subdomain its
+  own `dkim_selector` and `return_path_domain`; Cloudflare subdomain setup is
+  Enterprise-only; API tokens can be zone-scoped and carry `expires_on`.
