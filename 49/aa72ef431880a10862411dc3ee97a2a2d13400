@@ -1,0 +1,45 @@
+packages/isr/README.md
+  s_0add8c35799930::t_5eda8112c8fea1 1,3,5,70,72-74
+packages/isr/package.json
+  s_0add8c35799930::t_4168a31d7bdf9e 2-8,10,14-20,23-24,28
+packages/isr/tsconfig.json
+  s_0add8c35799930::t_90d64979f74d31 10-11,15
+packages/void/src/runtime/isr-cache.ts
+  s_0add8c35799930::t_66dcb3172d89fe 25
+platform/packages/api/package.json
+  s_0add8c35799930::t_fa5343b178d35c 34
+platform/packages/api/src/isr-cache.ts
+  s_0add8c35799930::t_72c0e0f2e9b734 3
+platform/packages/api/src/revalidate-core.ts
+  s_0add8c35799930::t_ee73605aafc65c 12
+platform/packages/api/src/routes/deploy.ts
+  s_0add8c35799930::t_be9ecfa56ed87f 7-8
+platform/packages/api/test/integration/api-revalidate.test.ts
+  s_0add8c35799930::t_bc3b4b0c949849 1
+platform/packages/api/test/unit/clear-isr-cache.test.ts
+  s_0add8c35799930::t_abdf4c269a2fd3 1
+platform/packages/dispatch/package.json
+  s_0add8c35799930::t_e2e07aa770b337 13
+platform/packages/dispatch/src/isr.ts
+  s_0add8c35799930::t_a6f55869e692a9 1-2
+platform/packages/dispatch/test/unit/index.test.ts
+  s_0add8c35799930::t_1bcb688c2528c0 1
+pnpm-lock.yaml
+  s_0add8c35799930::t_006bb791339f34 347-358,685,687,808,810
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "49aa72ef431880a10862411dc3ee97a2a2d13400",
+  "prompts": {},
+  "sessions": {
+    "s_0add8c35799930": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0903e-9700-76f0-a4db-b5c9ea737ea9",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
