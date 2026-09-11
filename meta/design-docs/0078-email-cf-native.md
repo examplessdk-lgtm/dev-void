@@ -2,7 +2,7 @@
 title: Email — CF-Native (outbound, inbound, shared sender)
 status: draft
 created: 2026-04-24
-updated: 2026-08-30
+updated: 2026-09-11
 supersedes: 0047-email.md
 ---
 
@@ -112,6 +112,11 @@ supersedes: 0047-email.md
 
 # Email — CF-Native (outbound, inbound, shared sender)
 
+> **2026-09-11.** The lifecycle and UX across the three hosting modes — the
+> managed platform, `void deploy --backend cloudflare`, and a self-hosted
+> platform — are in [0079](./0079-email-lifecycle-and-ux.md). It also lists
+> the statements below that later evidence corrected; each is marked inline.
+
 ## Context
 
 [`0047-email.md`](./0047-email.md) designed a full Resend-based integration and was **deferred** because the outbound value over a plain Resend SDK install was too thin, the inbound-via-webhooks path was real platform work but couldn't justify the build on its own, and the Scale plan carried a $90/mo floor regardless of usage.
@@ -163,6 +168,13 @@ Single rollout covering outbound, inbound, and the platform infrastructure that 
 - **Programmatic Email Routing _rule_ creation.** The shared `mail.void.cloud` catch-all is a one-time setup; per-project routing rules aren't needed.
 
 ## Cloudflare's Constraints (Be Honest)
+
+> **Corrected 2026-09-11.** Two claims below predate Cloudflare's Email
+> Sending onboarding. Onboarding the mail domain lets the binding send to
+> any recipient; without it the constraint that remains is 200 verified
+> destinations per account, shared across every domain. And routing enable
+> adds MX, SPF and DKIM only — DMARC comes from Email Sending onboarding.
+> See 0079, "Verified destinations and Email Sending".
 
 The `send_email` binding is **not a general transactional-email sender**:
 
@@ -835,7 +847,7 @@ Single ordered sequence. Each step is independently testable; later steps depend
 9. **Platform: `send_email` binding emit at deploy.** `routes/deploy.ts` reads verified destinations and emits `{ type: 'send_email', allowed_destination_addresses: [...] }` per project.
 10. **Platform: API + admin UI.** `GET /projects/:id/email/{usage,logs}` + `admin/routes/email.tsx` (usage, suspend, limits, destinations).
 11. **Framework: `void email usage|logs|destinations|allow|disallow` CLI.**
-12. **Ops: `mail.void.cloud` zone setup.** Register zone in CF, enable Email Routing, add catch-all rule pointing at the proxy worker. One-time human action — see [`meta/operations.md`](../operations.md#email-mailvoidcloud).
+12. **Ops: `mail.void.cloud` zone setup.** ~~Register zone in CF~~ — corrected 2026-09-11: `mail.void.cloud` is a subdomain of the existing `void.cloud` zone, which already has Email Routing on; no registration or nameserver change. Enable routing on the subdomain, onboard it to Email Sending, add the catch-all rule pointing at the proxy worker. One-time human action — see [`meta/operations.md`](../operations.md#email).
 13. **Deploy.** `pnpm run deploy:staging` first to validate the dispatch path against real WfP runtime; then production.
 14. **Tag release.**
 

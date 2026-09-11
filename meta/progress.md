@@ -63,7 +63,7 @@
 - [x] Remote bindings (`remote: true` — D1/KV/R2 via proxy for local dev)
 - [x] Better Auth integration
 - [x] Cloudflare Sandboxes (`void/sandbox` with platform container provisioning)
-- [x] Email (`void/email` — outbound send and inbound handlers on a shared platform sender; see `meta/design-docs/0078-email-cf-native.md`). Code complete; the mail zone and its catch-all rule are not provisioned yet, so it is unshipped.
+- [x] Email (`void/email` — outbound send and inbound handlers on a shared platform sender; see `meta/design-docs/0078-email-cf-native.md`). Code complete; the mail subdomain, its Email Sending onboarding and the catch-all rule are not provisioned yet, so it is unshipped. Lifecycle, UX and the own-account / self-hosted modes are designed in `meta/design-docs/0079-email-lifecycle-and-ux.md`; nothing from it is built.
 
 ### Remaining
 
