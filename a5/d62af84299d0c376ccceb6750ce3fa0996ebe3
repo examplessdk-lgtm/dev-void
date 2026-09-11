@@ -1,0 +1,45 @@
+packages/edge/README.md
+  s_0add8c35799930::t_329739b972a454 1-8
+packages/edge/package.json
+  s_0add8c35799930::t_94a3cbece570c6 1-35
+packages/edge/src/headers.ts
+  s_0add8c35799930::t_ef05cfeb293755 1-187
+packages/edge/src/index.ts
+  s_0add8c35799930::t_ec878abfd0f22e 1-30
+packages/edge/src/pattern.ts
+  s_0add8c35799930::t_6c4bf0a7b41a59 1-259
+packages/edge/src/routing-rules.ts
+  s_0add8c35799930::t_41a32e9c97b8a4 1-103
+packages/edge/src/static.ts
+  s_0add8c35799930::t_5519c9752bdc77 1-296
+packages/edge/tsconfig.json
+  s_0add8c35799930::t_c8c5c6caee28ee 1-16
+platform/packages/dispatch/package.json
+  s_0add8c35799930::t_af7a361309d826 12
+platform/packages/dispatch/src/headers.ts
+  s_0add8c35799930::t_467de41f723ece 1-7
+platform/packages/dispatch/src/pattern.ts
+  s_0add8c35799930::t_625d6b70a76d29 1-9
+platform/packages/dispatch/src/routing-rules.ts
+  s_0add8c35799930::t_1dc37151ffdd25 1-6
+platform/packages/dispatch/src/static.ts
+  s_0add8c35799930::t_2b80a13e767ebe 1-8
+pnpm-lock.yaml
+  s_0add8c35799930::t_8657f600f63937 322-337,781-783
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "a5d62af84299d0c376ccceb6750ce3fa0996ebe3",
+  "prompts": {},
+  "sessions": {
+    "s_0add8c35799930": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0903e-9700-76f0-a4db-b5c9ea737ea9",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
