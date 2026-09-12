@@ -1,0 +1,43 @@
+docs/integrations/cloudflare.md
+  s_b7265a66cdfeb2::t_ba9d983bbdea69 243,268
+docs/reference/cli.md
+  s_b7265a66cdfeb2::t_f746058379aea1 343
+docs/reference/config.md
+  s_b7265a66cdfeb2::t_8b4c4b7891c9eb 228
+packages/deploy-cloudflare/src/version.ts
+  s_b7265a66cdfeb2::t_759f575f552812 42-43,155,404,452-461
+packages/deploy-cloudflare/test/unit/version.test.ts
+  s_bb01f4eeabe082::t_99dfdf8de27eb2 667-722
+packages/void/AGENTS.md
+  s_b7265a66cdfeb2::t_47f9fed38671dd 98
+packages/void/skills/void/SKILL.md
+  s_b7265a66cdfeb2::t_9e66f7d8f80f3b 16
+packages/void/src/cli/deploy.ts
+  s_bb01f4eeabe082::t_aca2e2bcfa3eab 2457-2488,4061-4082,5024-5028
+packages/void/test/unit/cloudflare-deploy.test.ts
+  s_bb01f4eeabe082::t_24b57132115424 668-680,1741-1830
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "e3487b8076007ef7241216c919b9733c53e84a76",
+  "prompts": {},
+  "sessions": {
+    "s_b7265a66cdfeb2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0952d-d4bb-7a33-a0f4-afb83adff0b1",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    },
+    "s_bb01f4eeabe082": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0952b-556f-7753-8894-3f9643099a62",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
