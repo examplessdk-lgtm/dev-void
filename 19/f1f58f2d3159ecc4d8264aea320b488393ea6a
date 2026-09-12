@@ -1,0 +1,21 @@
+packages/void/src/index.ts
+  s_0add8c35799930::t_61dc366237d609 1001-1006
+packages/void/test/integration/tanstack-start.test.ts
+  s_0add8c35799930::t_f34b873ec0b254 37,43
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "19f1f58f2d3159ecc4d8264aea320b488393ea6a",
+  "prompts": {},
+  "sessions": {
+    "s_0add8c35799930": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0903e-9700-76f0-a4db-b5c9ea737ea9",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
