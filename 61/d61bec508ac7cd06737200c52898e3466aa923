@@ -1,0 +1,27 @@
+docs/guide/sandboxes.md
+  s_0add8c35799930::t_dc7af84726839f 26,43-52
+docs/reference/config.md
+  s_0add8c35799930::t_3146fb001e3cbf 217-228
+packages/void/src/sandbox/config.ts
+  s_0add8c35799930::t_cec68e999261fd 50
+packages/void/test/unit/config.test.ts
+  s_0add8c35799930::t_562bed5d997019 258-264
+packages/void/test/unit/wrangler.test.ts
+  s_0add8c35799930::t_0d750a5ccdc074 506
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "61d61bec508ac7cd06737200c52898e3466aa923",
+  "prompts": {},
+  "sessions": {
+    "s_0add8c35799930": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0903e-9700-76f0-a4db-b5c9ea737ea9",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
