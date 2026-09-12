@@ -1,0 +1,21 @@
+platform/packages/api/src/routes/deploy.ts
+  s_888eeec546f468::t_5e7b16176b02b0 2455-2460
+platform/packages/api/test/integration/api-deploy.test.ts
+  s_888eeec546f468::t_0b400a8b1ea679 13,2860-2894
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "e1c92a4b8102ad3fbd2667505483760f2721d9c0",
+  "prompts": {},
+  "sessions": {
+    "s_888eeec546f468": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a095ce-08e9-7251-a738-01866c0cfa83",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
