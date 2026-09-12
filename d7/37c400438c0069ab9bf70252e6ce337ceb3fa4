@@ -1,0 +1,23 @@
+playground/kitchen-sink/db/migrations/20260912002834_whole_serpent_society.sql
+  s_0add8c35799930::t_3645ef151238e5 1-53
+playground/kitchen-sink/db/migrations/meta/20260912002834_snapshot.json
+  s_0add8c35799930::t_119c456bdc3014 1-425
+playground/kitchen-sink/db/migrations/meta/_journal.json
+  s_0add8c35799930::t_a3761e3496a914 11-17
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "d737c400438c0069ab9bf70252e6ce337ceb3fa4",
+  "prompts": {},
+  "sessions": {
+    "s_0add8c35799930": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0903e-9700-76f0-a4db-b5c9ea737ea9",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
