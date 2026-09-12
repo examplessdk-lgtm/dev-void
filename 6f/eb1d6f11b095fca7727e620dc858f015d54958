@@ -1,0 +1,19 @@
+AGENTS.md
+  s_bb01f4eeabe082::t_e7d5604a8d0652 19
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "6feb1d6f11b095fca7727e620dc858f015d54958",
+  "prompts": {},
+  "sessions": {
+    "s_bb01f4eeabe082": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0952b-556f-7753-8894-3f9643099a62",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
