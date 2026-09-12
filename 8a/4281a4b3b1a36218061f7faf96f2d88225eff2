@@ -1,0 +1,21 @@
+packages/void/test/integration/vinext-app.test.ts
+  s_0add8c35799930::t_4a973a456c15bf 13,45
+packages/void/test/integration/vinext-pages.test.ts
+  s_0add8c35799930::t_201e3fc3a69da4 13,45
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "8a4281a4b3b1a36218061f7faf96f2d88225eff2",
+  "prompts": {},
+  "sessions": {
+    "s_0add8c35799930": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0903e-9700-76f0-a4db-b5c9ea737ea9",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
