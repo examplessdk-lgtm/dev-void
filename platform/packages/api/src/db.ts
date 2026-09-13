@@ -1620,24 +1620,21 @@ export async function createEmailDestination(
  * Such rows trace back to the owner-relaxed branch in `routes/email.ts`
  * (Option C). When the owner's email changes, the consent that
  * authorized those rows no longer represents the current identity, so
- * we flip them back to 'pending' (rather than hard-deleting) to give
- * the user a re-confirm path: re-clicking CF's existing verification
- * link OR triggering a fresh platform-side flow keeps the destination
- * usable without losing the row's history. We also clear the audit
- * columns so the row no longer claims to be owner-verified by a stale
- * identity.
+ * we flip them back to 'pending' / 'platform' (rather than
+ * hard-deleting) to give the user a re-confirm path: a repeat
+ * `void email allow <address>` re-sends our own confirmation link and
+ * the confirm route flips the row back, without losing its history. We
+ * also clear the audit columns so the row no longer claims to be
+ * owner-verified by a stale identity.
  *
  * Returns the list of distinct project ids whose rows were touched, so
  * the caller can sync each project's allowlist KV (verified rows we
  * just demoted must drop out of `email-allowlist:<projectId>` so the
  * proxy stops accepting sends to them).
  *
- * NOTE: today users.email is set once on signup and never mutated
- * (`updateUser` is only called from the OAuth callback for the user's
- * primary provider, with a verified email — see `routes/auth.ts`). This
- * helper exists for the moment we add an OAuth re-link / email-change
- * flow. Wire it into that flow when the flow ships; today it's
- * exported and tested but never invoked from a write path.
+ * Called from the OAuth callback in `routes/auth.ts`, which re-reads the
+ * provider's current email on every login and writes it straight back
+ * via `updateUser` — so the stored address really does change under us.
  */
 export async function revokeOwnerVerifiedDestinationsForUserChange(
   db: Db,
@@ -1652,6 +1649,24 @@ export async function revokeOwnerVerifiedDestinationsForUserChange(
       verified_at: null,
       verified_by_user_id: null,
       verified_by_email_snapshot: null,
+      // Re-sourcing the row to 'platform' is what makes the demotion
+      // STICK. The destinations GET in `routes/email.ts` refreshes every
+      // row matching `status = 'pending' && verification_source !== 'platform'`
+      // against CF's account-level list — and nothing deleted the address
+      // on CF's side, so CF still reports it verified. A row left as 'cf'
+      // therefore drops straight back into that filter and the very next
+      // `void email destinations` re-promotes it to 'verified' and
+      // re-mirrors the address into `email-allowlist:<projectId>`, undoing
+      // this revoke entirely. 'platform' is also the correct state on the
+      // merits: the account-level CF flag is exactly the consent we just
+      // decided we can no longer inherit, so the only thing that may
+      // re-verify the row is a per-recipient click on our own confirmation
+      // link (a repeat `void email allow <address>` re-sends it).
+      //
+      // Safe inside this statement: Postgres evaluates the WHERE predicate
+      // against the PRE-update row, so narrowing `verification_source` to
+      // 'platform' here cannot de-select the `= 'cf'` clause below.
+      verification_source: 'platform',
     })
     .where(
       and(

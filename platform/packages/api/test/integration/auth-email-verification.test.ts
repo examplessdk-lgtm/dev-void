@@ -16,12 +16,19 @@ import {
   upsertGitHubInstallation,
 } from '../../src/db.ts';
 import app from '../../src/index.ts';
-import { githubInstallations, invitations, oauthAccounts, users } from '../../src/schema.ts';
+import {
+  emailDestinations,
+  githubInstallations,
+  invitations,
+  oauthAccounts,
+  users,
+} from '../../src/schema.ts';
 import {
   setupEnv,
   teardownEnv,
   clearTables,
   createTestUser,
+  createTestProject,
   createMockExecutionContext,
   seedOAuthNonce,
   JWT_SECRET,
@@ -521,5 +528,154 @@ describe('email verification gating on account linking', () => {
       'https://api.github.com/repos/void-sdk/void/collaborators/pending-preview-gh-user',
       expect.objectContaining({ method: 'PUT' }),
     );
+  });
+
+  it('revokes owner-inherited email destinations when the verified primary email changes', async () => {
+    // `users.email` is NOT a signup-time constant: this callback re-reads the
+    // provider's current primary address on every login and writes it straight
+    // back. Destination rows minted by the Option C owner branch
+    // (`routes/email.ts`) and by `autoAddOwnerDestination`
+    // (`routes/projects.ts`) are verified purely on "this address IS the
+    // owner's" — so once the owner's address moves, the old mailbox (possibly
+    // reassigned to someone else) must lose its per-project send grant.
+    const existing = await createTestUser(env.db, 'rotating-user', 'github', '717171');
+    await env.db
+      .update(users)
+      .set({ email: 'old-owner@example.com' })
+      .where(eq(users.id, existing.id));
+    const project = await createTestProject(env.db, existing.id, 'owner-email-rotate');
+
+    await env.db.insert(emailDestinations).values([
+      {
+        id: 'edst_owner_inherited',
+        project_id: project.id,
+        address: 'old-owner@example.com',
+        status: 'verified',
+        cf_destination_id: 'cf-tag-old-owner',
+        verified_at: '2026-04-25T00:00:00Z',
+        verification_source: 'cf',
+        verified_by_user_id: existing.id,
+        verified_by_email_snapshot: 'Old-Owner@Example.com',
+      },
+      // Per-recipient consent — independent of who the owner is. Must survive.
+      {
+        id: 'edst_third_party',
+        project_id: project.id,
+        address: 'teammate@example.com',
+        status: 'verified',
+        cf_destination_id: 'cf-tag-teammate',
+        verified_at: '2026-04-25T00:00:00Z',
+        verification_source: 'platform',
+      },
+    ]);
+    await env.ROUTING.put(
+      `email-allowlist:${project.id}`,
+      JSON.stringify(['old-owner@example.com', 'teammate@example.com']),
+    );
+
+    const state = await buildSignedState('github');
+    await seedOAuthNonce(env.db, 'test-nonce');
+    // Same GitHub identity, DIFFERENT verified primary email.
+    vi.stubGlobal(
+      'fetch',
+      mockGitHubApi({
+        id: 717171,
+        login: 'rotating-user',
+        email: 'new-owner@example.com',
+        emailVerified: true,
+      }),
+    );
+
+    const res = await app.fetch(
+      new Request(`http://localhost/auth/callback?code=test-code&state=${state}`, {
+        headers: { Cookie: 'oauth_nonce=test-nonce' },
+      }),
+      env,
+      executionCtx,
+    );
+
+    // Login still succeeds, as the same user.
+    expect(res.status).toBe(302);
+    const location = res.headers.get('Location')!;
+    const token = new URL(location).searchParams.get('token')!;
+    const { verifyJwt } = await import('../../src/auth/jwt.ts');
+    const payload = await verifyJwt(token, JWT_SECRET);
+    expect(payload!.sub).toBe(existing.id);
+
+    const [updated] = await env.db.select().from(users).where(eq(users.id, existing.id));
+    expect(updated!.email).toBe('new-owner@example.com');
+
+    const rows = await env.db
+      .select()
+      .from(emailDestinations)
+      .where(eq(emailDestinations.project_id, project.id));
+    const byId = new Map(rows.map((r) => [r.id, r]));
+
+    const revoked = byId.get('edst_owner_inherited');
+    expect(revoked?.status).toBe('pending');
+    // 'platform' is load-bearing: a row left at 'cf' falls back into the
+    // destinations GET's CF refresh filter and is re-promoted on the next
+    // listing, because CF still reports the address verified.
+    expect(revoked?.verification_source).toBe('platform');
+    expect(revoked?.verified_at).toBeNull();
+    expect(revoked?.verified_by_user_id).toBeNull();
+    expect(revoked?.verified_by_email_snapshot).toBeNull();
+
+    expect(byId.get('edst_third_party')?.status).toBe('verified');
+
+    // The proxy's per-project send boundary dropped the stale address.
+    const mirror = JSON.parse(
+      (await env.ROUTING.get(`email-allowlist:${project.id}`))!,
+    ) as Array<string>;
+    expect(mirror).toEqual(['teammate@example.com']);
+  });
+
+  it('leaves owner-inherited destinations alone when the primary email is unchanged', async () => {
+    const existing = await createTestUser(env.db, 'stable-user', 'github', '818181');
+    await env.db
+      .update(users)
+      .set({ email: 'stable-owner@example.com' })
+      .where(eq(users.id, existing.id));
+    const project = await createTestProject(env.db, existing.id, 'owner-email-stable');
+    await env.db.insert(emailDestinations).values({
+      id: 'edst_owner_stable',
+      project_id: project.id,
+      address: 'stable-owner@example.com',
+      status: 'verified',
+      cf_destination_id: 'cf-tag-stable',
+      verified_at: '2026-04-25T00:00:00Z',
+      verification_source: 'cf',
+      verified_by_user_id: existing.id,
+      verified_by_email_snapshot: 'stable-owner@example.com',
+    });
+
+    const state = await buildSignedState('github');
+    await seedOAuthNonce(env.db, 'test-nonce');
+    vi.stubGlobal(
+      'fetch',
+      mockGitHubApi({
+        id: 818181,
+        login: 'stable-user',
+        // Same address, different case — a case flip is not a reassignment.
+        email: 'Stable-Owner@Example.com',
+        emailVerified: true,
+      }),
+    );
+
+    const res = await app.fetch(
+      new Request(`http://localhost/auth/callback?code=test-code&state=${state}`, {
+        headers: { Cookie: 'oauth_nonce=test-nonce' },
+      }),
+      env,
+      executionCtx,
+    );
+
+    expect(res.status).toBe(302);
+    const [row] = await env.db
+      .select()
+      .from(emailDestinations)
+      .where(eq(emailDestinations.id, 'edst_owner_stable'));
+    expect(row?.status).toBe('verified');
+    expect(row?.verification_source).toBe('cf');
   });
 });

@@ -33,12 +33,15 @@ import {
   consumeCliAuthCode,
   linkGitHubInstallationToUser,
   linkGitHubIdentity,
+  revokeOwnerVerifiedDestinationsForUserChange,
   GitHubIdentityAlreadyLinkedError,
+  type Db,
 } from '../db.ts';
 import { sendWelcomeEmail } from '../email.ts';
 import type { ApiEnv } from '../env.ts';
 import { isDevBypass } from '../env.ts';
 import { localhostRedirectResponse } from '../html-redirect.ts';
+import { syncProjectAllowlistKvBestEffort } from '../provisioning/email-allowlist.ts';
 import { users } from '../schema.ts';
 import { isSignupAllowed, getAllowlist } from '../signup-allowlist.ts';
 
@@ -195,6 +198,51 @@ app.get('/dev-login', async (context) => {
   return localhostRedirectResponse(url.toString(), 'Dev login');
 });
 
+/**
+ * Drop owner-inherited email destinations when the owner's provider email
+ * changes underneath us.
+ *
+ * `updateUser` above runs on EVERY login for the user's primary provider and
+ * writes back whatever the provider currently reports, so `users.email` is a
+ * mutable field, not a signup-time constant. Two places mint destination rows
+ * that are verified purely on "this address IS the project owner's" — the
+ * Option C owner branch in `routes/email.ts` and `autoAddOwnerDestination` in
+ * `routes/projects.ts`. Once the owner's address changes, that claim is stale:
+ * the old mailbox may have been handed to someone else, while the row stays
+ * `verified` and stays in the project's `email-allowlist:<projectId>` mirror,
+ * which is the ONLY per-project send boundary the proxy enforces. So demote
+ * those rows and re-derive each affected project's mirror from the remaining
+ * verified rows.
+ *
+ * Entirely best-effort: a Postgres or KV blip here must never block sign-in.
+ */
+async function revokeOwnerInheritedDestinations(
+  db: Db,
+  kv: KVNamespace,
+  userId: string,
+  previousEmail: string | null,
+  nextEmail: string | null,
+): Promise<void> {
+  // Only a real address-to-address change revokes. A first-ever email (no
+  // previous) grants nothing to revoke, and a provider that stops reporting
+  // one is a data gap, not a reassignment.
+  if (!previousEmail || !nextEmail || previousEmail.toLowerCase() === nextEmail.toLowerCase()) {
+    return;
+  }
+  try {
+    const projectIds = await revokeOwnerVerifiedDestinationsForUserChange(
+      db,
+      userId,
+      previousEmail,
+    );
+    for (const projectId of projectIds) {
+      await syncProjectAllowlistKvBestEffort(db, kv, projectId);
+    }
+  } catch (err) {
+    console.error(`[email-allowlist] owner email-change revoke failed for user=${userId}:`, err);
+  }
+}
+
 // GET /auth/callback?code=...&state=...
 app.get('/callback', async (context) => {
   const code = context.req.query('code');
@@ -302,7 +350,15 @@ app.get('/callback', async (context) => {
       // Only overwrite stored email when the new one is verified;
       // a transient /user/emails failure must not wipe the existing email.
       if (emailVerified) {
+        const previousEmail = user.email;
         await updateUser(db, user.id, login, email);
+        await revokeOwnerInheritedDestinations(
+          db,
+          context.env.ROUTING,
+          user.id,
+          previousEmail,
+          email,
+        );
       } else {
         await updateUser(db, user.id, login, user.email);
       }
