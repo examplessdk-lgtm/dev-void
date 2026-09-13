@@ -29,6 +29,7 @@ import {
   hasActiveSink,
   listDevMessages,
   parseCapturedMessage,
+  pushToDevBuffer,
   serializeCapturedMessage,
   type CapturedMessage,
 } from '../../src/runtime/email/dev-inbox.ts';
@@ -365,5 +366,71 @@ describe('shouldInjectEmailDevInboxVar (dev-only gate)', () => {
   it('does not inject when there is no assets binding to loop back through', () => {
     expect(shouldInjectEmailDevInboxVar('dev', true, undefined)).toBe(false);
     expect(shouldInjectEmailDevInboxVar('dev', true, '')).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Buffer bounds. The dev buffer lives in the Vite dev server's NODE process,
+// and it retains each message's full raw MIME plus its decoded text and html.
+// A count-only cap of 100 therefore bounds the buffer at ~100 x
+// MAX_MESSAGE_BYTES, i.e. gigabytes — enough to OOM `void dev` itself.
+// ---------------------------------------------------------------------------
+
+const MIB = 1024 * 1024;
+
+function capturedOfSize(id: string, rawBytes: number, htmlChars = 0): CapturedMessage {
+  return {
+    id,
+    capturedAt: Date.now(),
+    raw: new Uint8Array(rawBytes),
+    messageId: `<${id}@x>`,
+    from: { email: 'a@x.dev' },
+    to: [{ email: 'b@y.dev' }],
+    cc: [],
+    bcc: [],
+    subject: id,
+    ...(htmlChars > 0 && { html: 'x'.repeat(htmlChars) }),
+    headers: {},
+    attachments: [],
+  };
+}
+
+describe('dev inbox buffer bounds', () => {
+  it('evicts on the retained-byte budget well below the count cap', () => {
+    // 8 MiB of raw MIME + 8 MiB of decoded html is 16 MiB charged per message,
+    // so the fifth push crosses the 64 MiB budget and evicts — at a count of
+    // five, nowhere near the 100-item cap that used to be the only bound.
+    for (let i = 1; i <= 5; i++) {
+      pushToDevBuffer(capturedOfSize(`msg-${i}`, 8 * MIB, 8 * MIB));
+    }
+    const retained = listDevMessages();
+    expect(retained).toHaveLength(4);
+    // listDevMessages() is newest-first: the send that just happened survives,
+    // and the oldest is the one that went.
+    expect(retained[0].id).toBe('msg-5');
+    expect(retained.map((m) => m.id)).not.toContain('msg-1');
+  });
+
+  it('keeps the newest message even when it alone exceeds the budget', () => {
+    pushToDevBuffer(capturedOfSize('small', 1024));
+    pushToDevBuffer(capturedOfSize('huge', 1024, 70 * MIB));
+    // A send must always be visible in the inbox, whatever its size.
+    const retained = listDevMessages();
+    expect(retained).toHaveLength(1);
+    expect(retained[0].id).toBe('huge');
+  });
+
+  it('resets the byte accounting in clearDevBuffer', () => {
+    for (let i = 1; i <= 5; i++) {
+      pushToDevBuffer(capturedOfSize(`big-${i}`, 8 * MIB, 8 * MIB));
+    }
+    clearDevBuffer();
+    // A stale counter would leave the buffer permanently over budget, so every
+    // later push would evict its predecessor and the inbox would silently show
+    // exactly one message.
+    for (let i = 1; i <= 3; i++) {
+      pushToDevBuffer(capturedOfSize(`small-${i}`, 1024));
+    }
+    expect(listDevMessages().map((m) => m.id)).toEqual(['small-3', 'small-2', 'small-1']);
   });
 });

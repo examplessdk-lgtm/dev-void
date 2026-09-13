@@ -9,6 +9,7 @@ import {
   scanEmailHandlers,
   scanEmailHandlersSync,
 } from '../../src/router/email.ts';
+import * as emailBarrel from '../../src/runtime/email.ts';
 import {
   buildReplyMessage,
   createMessageProxy,
@@ -18,7 +19,7 @@ import {
   replyEmail,
   type EmailEnvelope,
 } from '../../src/runtime/email/inbound.ts';
-import { MAX_MESSAGE_BYTES } from '../../src/runtime/email/mime.ts';
+import { MAX_MESSAGE_BYTES, MimeError } from '../../src/runtime/email/mime.ts';
 import { createInboundTestHarness } from '../../src/runtime/email/testing.ts';
 import { envContext } from '../../src/runtime/env-raw.ts';
 
@@ -1278,6 +1279,37 @@ describe('parseEmail error contract', () => {
     await expect(parseEmail(message)).rejects.toSatisfy(
       (e: unknown) => e instanceof ParseEmailError && e.code === 'INBOUND_TOO_LARGE',
     );
+  });
+});
+
+describe('void/email barrel exports the error classes it throws', () => {
+  // `package.json` exposes only `./email` and `./email/testing` — there is no
+  // wildcard subpath — so a class a handler author cannot reach through the
+  // barrel is a class they cannot `instanceof` at all, however well it is
+  // documented. The barrel exports two throwing entrypoints (`parseEmail`,
+  // `createEmail`); both error classes have to come with them.
+  it('re-exports ParseEmailError as the same class parseEmail throws', async () => {
+    expect(emailBarrel.ParseEmailError).toBe(ParseEmailError);
+
+    const raw = new TextEncoder().encode('Subject: hi\r\n\r\nbody\r\n');
+    const { message } = createMessageProxy(
+      {
+        from: 'a@b.dev',
+        to: 'acme+x@mail.void.cloud',
+        headers: {},
+        raw,
+        rawSize: 100 * 1024 * 1024,
+      },
+      { slug: 'acme' },
+    );
+
+    await expect(parseEmail(message)).rejects.toSatisfy(
+      (e: unknown) => e instanceof emailBarrel.ParseEmailError && e.code === 'INBOUND_TOO_LARGE',
+    );
+  });
+
+  it('re-exports MimeError as the same class createEmail throws', () => {
+    expect(emailBarrel.MimeError).toBe(MimeError);
   });
 });
 

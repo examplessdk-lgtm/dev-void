@@ -74,7 +74,9 @@ export function inferBindingsFromSource(code: string, filename: string): Inferre
           result.needsSandbox = true;
           break;
         case 'void/email':
-          result.needsEmail = true;
+          if (!isTypeOnlyImportStatement(code.slice(imp.importStart, imp.importEnd + 1))) {
+            result.needsEmail = true;
+          }
           break;
         case 'void/live':
           if (!isTypeOnlyImportStatement(code.slice(imp.importStart, imp.importEnd + 1))) {
@@ -118,7 +120,7 @@ export function inferBindingsFromSource(code: string, filename: string): Inferre
     if (/\bfrom\s+["']void\/sandbox["']/.test(code)) {
       result.needsSandbox = true;
     }
-    if (/\bfrom\s+["']void\/email["']/.test(code)) {
+    if (hasRuntimeImportFrom(code, 'void/email')) {
       result.needsEmail = true;
     }
     if (hasRuntimeImportFrom(code, 'void/live')) {

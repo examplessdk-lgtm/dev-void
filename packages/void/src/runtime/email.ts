@@ -60,6 +60,7 @@ export {
   enactEmailActions,
   isForwardableEmailMessage,
   parseEmail,
+  ParseEmailError,
   replyEmail,
 } from './email/inbound.ts';
 export type {
@@ -69,8 +70,16 @@ export type {
   EmailHandlerInfo,
   MessageProxy,
   ParsedEmail,
+  ParseEmailErrorCode,
   ReplyEmailOptions,
 } from './email/inbound.ts';
+
+// `createEmail` below throws `MimeError`, and `sendEmail` reports its `code`.
+// The barrel is the only supported entry point (`package.json` exposes
+// `./email` and `./email/testing`, with no wildcard subpath), so the error
+// classes have to ship with the functions that throw them.
+export { MimeError } from './email/mime.ts';
+export type { MimeErrorCode } from './email/mime.ts';
 
 // Slug shape we'll accept when substituting into the default `from`. The
 // platform owns slug allocation and validates at create-time, but we don't
@@ -692,7 +701,8 @@ export async function sendEmail(opts: SendEmailOptions): Promise<SendEmailResult
       'email: neither SEND_EMAIL nor __VOID_PROXY is available, so nothing was sent. Deploy via Void to bind the platform proxy, ' +
         'or set `email.from` in void.json so `void deploy --platform cloudflare` provisions the SEND_EMAIL binding. ' +
         'Under `void dev` messages are captured by the local inbox at /__void/inbox instead — reaching this error there means ' +
-        'that path was bypassed (`sendInDev: true`) or unavailable (the worker has no assets binding to reach the dev server through).',
+        'that path was bypassed (`sendInDev: true`, which does not deliver: `void dev` binds no send transport at all, so there is ' +
+        'nothing to fall through to) or unavailable (the worker has no assets binding to reach the dev server through).',
     );
   }
 

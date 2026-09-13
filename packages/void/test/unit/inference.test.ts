@@ -1,3 +1,4 @@
+import { parse } from 'es-module-lexer/js';
 import { describe, expect, it } from 'vite-plus/test';
 import { inferBindingsFromSource, mergeBindings } from '../../src/inference/walk.ts';
 
@@ -336,6 +337,73 @@ describe('inferBindingsFromSource', () => {
     `;
     const result = inferBindingsFromSource(code, 'test.ts');
     expect(result.needsEmail).toBe(false);
+  });
+
+  // A type-only import arms nothing at runtime, but `needsEmail` is ORed with
+  // `hasEmailHandlers` in `cli/deploy.ts` to gate the email deploy step: an app
+  // that only imports `SendEmailOptions` would warn with no `email.from`, and
+  // exit 1 under `--require-email`, having never sent an email.
+  it("does not detect email from type-only 'void/email' imports", () => {
+    const code = `
+      import type { SendEmailOptions } from "void/email";
+      export type Options = SendEmailOptions;
+    `;
+    const result = inferBindingsFromSource(code, 'types.ts');
+    expect(result.needsEmail).toBe(false);
+  });
+
+  it("does not detect email from inline type-only 'void/email' imports", () => {
+    const code = `
+      import { type SendEmailOptions, type SendEmailResult } from "void/email";
+      export type Options = SendEmailOptions;
+      export type Result = SendEmailResult;
+    `;
+    const result = inferBindingsFromSource(code, 'types.ts');
+    expect(result.needsEmail).toBe(false);
+  });
+
+  it("detects email from mixed inline type and value 'void/email' imports", () => {
+    const code = `
+      import { type SendEmailOptions, sendEmail } from "void/email";
+      export const send = (o: SendEmailOptions) => sendEmail(o);
+    `;
+    const result = inferBindingsFromSource(code, 'send.ts');
+    expect(result.needsEmail).toBe(true);
+  });
+
+  // TSX is exactly where a component importing a type lands, and it is served
+  // by the regex fallback rather than the lexer — so the guard has to exist on
+  // BOTH paths. The `parse` assertion pins that this fixture really does take
+  // the fallback; if es-module-lexer ever learns JSX, this test would silently
+  // stop covering it.
+  it("does not detect email from a type-only 'void/email' import in .tsx", () => {
+    const code = `
+      import type { SendEmailOptions } from "void/email";
+      export const Compose = (props: { options: SendEmailOptions }) => (
+        <form className="compose" data-subject={props.options.subject}>
+          <button>Send</button>
+        </form>
+      );
+    `;
+    expect(() => parse(code)).toThrow();
+    const result = inferBindingsFromSource(code, 'Compose.tsx');
+    expect(result.needsEmail).toBe(false);
+  });
+
+  it("still detects a runtime 'void/email' import in .tsx", () => {
+    const code = `
+      import { sendEmail } from "void/email";
+      export const Compose = (props: { subject: string }) => (
+        <form className="compose" data-subject={props.subject}>
+          <button onClick={() => sendEmail({ from: "a@x.dev", to: "b@y.dev", subject: props.subject, text: "hi" })}>
+            Send
+          </button>
+        </form>
+      );
+    `;
+    expect(() => parse(code)).toThrow();
+    const result = inferBindingsFromSource(code, 'Compose.tsx');
+    expect(result.needsEmail).toBe(true);
   });
 
   it('does not detect needsAI from unrelated identifiers', () => {

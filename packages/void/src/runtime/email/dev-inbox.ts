@@ -204,8 +204,21 @@ const SINK_KEY = '__voidEmailSinks__';
 const BUFFER_KEY = '__voidEmailDevBuffer__';
 const DEFAULT_BUFFER_LIMIT = 100;
 
+/**
+ * Retained-byte budget for the buffer, alongside the count cap.
+ *
+ * A count cap alone does not bound the buffer: every item holds its full raw
+ * MIME plus the decoded `text`/`html`, and a single message may reach
+ * `MAX_MESSAGE_BYTES` (10 MiB), so 100 html-heavy messages is on the order of
+ * gigabytes. This buffer lives in the Vite dev server's Node process — not in
+ * workerd — so that is the dev server's own heap.
+ */
+const DEFAULT_BUFFER_BYTES = 64 * 1024 * 1024;
+
 interface DevBuffer {
   limit: number;
+  /** Running total of {@link messageBytes} over `items`. */
+  bytes: number;
   items: Array<CapturedMessage>;
 }
 
@@ -256,17 +269,29 @@ export function getDevBuffer(limit: number = DEFAULT_BUFFER_LIMIT): DevBuffer {
   const g = globalThis as unknown as Record<string, DevBuffer | undefined>;
   let b = g[BUFFER_KEY];
   if (!b) {
-    b = { limit, items: [] };
+    b = { limit, bytes: 0, items: [] };
     g[BUFFER_KEY] = b;
   }
   return b;
 }
 
+/** What a retained message costs: the raw MIME plus both decoded bodies. */
+function messageBytes(message: CapturedMessage): number {
+  return message.raw.byteLength + (message.text?.length ?? 0) + (message.html?.length ?? 0);
+}
+
 export function pushToDevBuffer(message: CapturedMessage): void {
   const b = getDevBuffer();
   b.items.push(message);
-  while (b.items.length > b.limit) {
-    b.items.shift();
+  b.bytes += messageBytes(message);
+  // Oldest-first on either bound. The `items.length > 1` guard keeps the
+  // newest message even when it alone blows the budget: a send the developer
+  // just made must always be visible in the inbox.
+  while (b.items.length > b.limit || (b.bytes > DEFAULT_BUFFER_BYTES && b.items.length > 1)) {
+    const evicted = b.items.shift();
+    if (evicted) {
+      b.bytes -= messageBytes(evicted);
+    }
   }
 }
 
@@ -279,7 +304,11 @@ export function findDevMessage(id: string): CapturedMessage | undefined {
 }
 
 export function clearDevBuffer(): void {
-  getDevBuffer().items.length = 0;
+  const b = getDevBuffer();
+  b.items.length = 0;
+  // Without this the counter goes stale and the buffer silently collapses to a
+  // single item on every later push.
+  b.bytes = 0;
 }
 
 export function captureMessage(
