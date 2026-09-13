@@ -769,6 +769,108 @@ describe('routeInbound — dispatch result handling', () => {
 // -----------------------------------------------------------------------
 
 describe('routeInbound — action enaction', () => {
+  it('drops the WHOLE list when a tenant returns more than 100 actions', async () => {
+    // The tenant worker is not trusted to have capped its own queue: on WfP
+    // it can ship any WorkerEntrypoint whose email() returns any array. The
+    // list is walked HERE, in the shared proxy isolate, before any quota gate
+    // has charged for it — so the count is checked before the loop.
+    const { env, kv } = makeEnv({
+      kvSeed: withAllowlist(['admin@example.com']),
+      emailReturn: Array.from({ length: 101 }, () => ({
+        type: 'forward',
+        to: 'admin@example.com',
+      })),
+    });
+    const { message, forwardCalls, replyCalls, rejectCalls } = createFakeMessage({
+      to: `myslug+tag@${PROD_DOMAIN}`,
+    });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(forwardCalls).toHaveLength(0);
+    expect(replyCalls).toHaveLength(0);
+    // Dropping the list is not a bounce — CF still accepted the message.
+    expect(rejectCalls).toHaveLength(0);
+    // Nothing was charged: the list never reached the gate.
+    expect(kv.writes.filter((w) => w.key.startsWith('email-sent:'))).toHaveLength(0);
+    expect(kv.writes.filter((w) => w.key.startsWith('email-burst:'))).toHaveLength(0);
+    expect(errorSpy).toHaveBeenCalled();
+  });
+
+  it('enacts a list of exactly 100 actions', async () => {
+    // The bound is > MAX_ACTIONS, not >=.
+    const { env } = makeEnv({
+      kvSeed: withAllowlist(['admin@example.com'], {
+        // Burst/month caps must clear 100 for this to be about the action
+        // count rather than the quota.
+        'email-burst-limit:p_test': '1000',
+        'email-limit:p_test': '1000',
+      }),
+      emailReturn: Array.from({ length: 100 }, () => ({
+        type: 'forward',
+        to: 'admin@example.com',
+      })),
+    });
+    const { message, forwardCalls } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(forwardCalls).toHaveLength(100);
+  });
+
+  it('drops a forward whose `to` is a megabyte long', async () => {
+    // The address matches VALID_ADDRESS_RE and is IN the allowlist, so
+    // nothing downstream would have stopped it: the only thing standing
+    // between a 1 MiB string and the address regex is the length check.
+    const hugeTo = `${'a'.repeat(1024 * 1024)}@example.com`;
+    const { env } = makeEnv({
+      kvSeed: withAllowlist([hugeTo, 'admin@example.com']),
+      emailReturn: [{ type: 'forward', to: hugeTo }],
+    });
+    const { message, forwardCalls } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(forwardCalls).toHaveLength(0);
+    expect(errorSpy).toHaveBeenCalled();
+  });
+
+  it('drops the WHOLE list when a forward carries too many headers', async () => {
+    // Same response as header construction throwing: an oversized bag says
+    // the handler is hostile, and partially enacting its list is worse.
+    const headers: Record<string, string> = {};
+    for (let i = 0; i < 33; i++) {
+      headers[`X-Void-${i}`] = 'v';
+    }
+    const { env } = makeEnv({
+      kvSeed: withAllowlist(['admin@example.com', 'ops@example.com']),
+      emailReturn: [
+        { type: 'forward', to: 'admin@example.com', headers },
+        { type: 'forward', to: 'ops@example.com' },
+      ],
+    });
+    const { message, forwardCalls } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(forwardCalls).toHaveLength(0);
+    expect(errorSpy).toHaveBeenCalled();
+  });
+
+  it('drops the WHOLE list when a forward header value is over-long', async () => {
+    const { env } = makeEnv({
+      kvSeed: withAllowlist(['admin@example.com']),
+      emailReturn: [
+        {
+          type: 'forward',
+          to: 'admin@example.com',
+          headers: { 'X-Void-Tag': 'v'.repeat(1025) },
+        },
+      ],
+    });
+    const { message, forwardCalls } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(forwardCalls).toHaveLength(0);
+    expect(errorSpy).toHaveBeenCalled();
+  });
+
   it('reject is terminal: forward and reply after a reject do NOT fire', async () => {
     const { env } = makeEnv({
       kvSeed: withAllowlist(),

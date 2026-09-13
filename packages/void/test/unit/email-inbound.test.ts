@@ -1737,6 +1737,130 @@ describe('end-to-end: envelope → handler → action queue', () => {
     expect(pulls).toBeLessThanOrEqual(12);
   });
 
+  it('refuses the 101st queued action and leaves the queue at 100', async () => {
+    // The queue crosses the RPC boundary into the SHARED proxy isolate, where
+    // it is walked entry by entry before any quota gate has looked at it.
+    // The router enforces the same 100; this is the fast, precise failure.
+    let thrown: unknown;
+    const handler = defineEmail(async (message) => {
+      for (let i = 0; i < 100; i++) {
+        await message.forward(`box${i}@example.com`);
+      }
+      try {
+        await message.forward('overflow@example.com');
+      } catch (e) {
+        thrown = e;
+      }
+    });
+    const actions = await dispatchToHandler(makeEnvelope(), handler);
+    expect(actions).toHaveLength(100);
+    expect(actions.every((a) => a.type === 'forward')).toBe(true);
+    expect(thrown).toBeInstanceOf(MimeError);
+    expect((thrown as MimeError).message).toMatch(/more than 100 actions/);
+  });
+
+  it('refuses a third reply once the cumulative reply budget is spent', async () => {
+    // This is what the per-reply cap does NOT catch: each of the first two
+    // replies is exactly at MAX_MESSAGE_BYTES and legal on its own, and the
+    // third is a single byte — but 2 x MAX_MESSAGE_BYTES is the whole budget
+    // for one delivery, so the byte is refused.
+    let thrown: unknown;
+    const handler = defineEmail(async (message) => {
+      const send = (raw: Uint8Array) =>
+        message.reply({
+          from: 'support@app.dev',
+          to: 'sender@example.com',
+          raw,
+        } as unknown as Parameters<ForwardableEmailMessage['reply']>[0]);
+      await send(new Uint8Array(MAX_MESSAGE_BYTES));
+      await send(new Uint8Array(MAX_MESSAGE_BYTES));
+      try {
+        await send(new Uint8Array(1));
+      } catch (e) {
+        thrown = e;
+      }
+    });
+    const actions = await dispatchToHandler(makeEnvelope(), handler);
+    // Both full-size replies are legal and queued; only the third is refused.
+    expect(actions).toHaveLength(2);
+    expect(thrown).toBeInstanceOf(MimeError);
+    expect((thrown as MimeError).message).toMatch(/cumulative reply size/);
+  });
+
+  it('cancels a stream reply at the REMAINING budget, not the per-reply cap', async () => {
+    // 15 MiB already spent out of the 20 MiB budget, so 5 MiB is left. A
+    // stream bounded by the per-reply cap would keep pulling to 10 MiB and
+    // report the wrong limit; the pull count and the message both pin that
+    // the remaining budget is what stopped it.
+    //
+    // Two prior replies, not one: after a single full-size reply the
+    // remaining budget is exactly MAX_MESSAGE_BYTES, which cannot be told
+    // apart from the per-reply cap.
+    let pulls = 0;
+    let cancelled = false;
+    const chunk = new Uint8Array(1024 * 1024);
+    const raw = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulls++;
+        controller.enqueue(chunk);
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    let thrown: unknown;
+    const handler = defineEmail(async (message) => {
+      const send = (body: Uint8Array | ReadableStream<Uint8Array>) =>
+        message.reply({
+          from: 'support@app.dev',
+          to: 'sender@example.com',
+          raw: body,
+        } as unknown as Parameters<ForwardableEmailMessage['reply']>[0]);
+      await send(new Uint8Array(MAX_MESSAGE_BYTES));
+      await send(new Uint8Array(5 * 1024 * 1024));
+      try {
+        await send(raw);
+      } catch (e) {
+        thrown = e;
+      }
+    });
+    const actions = await dispatchToHandler(makeEnvelope(), handler);
+    expect(actions).toHaveLength(2);
+    expect(cancelled).toBe(true);
+    // 5 MiB of remaining budget + the chunk that crosses it + read-ahead —
+    // NOT the ~11 a 10 MiB per-reply cap would have allowed.
+    expect(pulls).toBeLessThanOrEqual(7);
+    expect(thrown).toBeInstanceOf(MimeError);
+    expect((thrown as MimeError).message).toMatch(/cumulative reply size/);
+  });
+
+  it('refuses a forward address over the address-length limit', async () => {
+    const handler = defineEmail(async (message) => {
+      await message.forward(`${'a'.repeat(320)}@example.com`);
+    });
+    await expect(dispatchToHandler(makeEnvelope(), handler)).rejects.toThrow(
+      /over the 320-character limit/,
+    );
+  });
+
+  it('setReject still works with a full queue (it shrinks the queue, so it is exempt)', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const handler = defineEmail(async (message) => {
+        for (let i = 0; i < 100; i++) {
+          await message.forward(`box${i}@example.com`);
+        }
+        // The queue is at MAX_ACTIONS; setReject must not throw here — it
+        // purges the 100 forwards and leaves one reject behind.
+        message.setReject('not allowed');
+      });
+      const actions = await dispatchToHandler(makeEnvelope(), handler);
+      expect(actions).toEqual([{ type: 'reject', reason: 'not allowed' }]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it('parseEmail can be called multiple times (cache replays)', async () => {
     // parseEmail caches the buffered raw bytes in a WeakMap keyed by the
     // proxy, so handlers can call it repeatedly without the underlying

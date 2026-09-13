@@ -18,6 +18,36 @@ import type { Address, Attachment } from './types.ts';
 // the default reply `from` address.
 const VALID_SLUG = /^[a-z0-9](?:[a-z0-9-]{0,54}[a-z0-9])?$/;
 
+/**
+ * Guardrails on what one handler may queue.
+ *
+ * These are NOT the security boundary. Recording happens inside the tenant's
+ * own worker, and on the platform a Workers-for-Platforms tenant can ship any
+ * `WorkerEntrypoint` whose `email()` returns any array at all, bypassing this
+ * file entirely — so the load-bearing caps are the matching ones in the
+ * platform router (`MAX_ACTIONS` / `MAX_ACTION_ADDRESS_LENGTH` in
+ * `email-router.ts`). What these buy is a fast, precise failure at the call
+ * that went wrong, instead of a whole action list silently dropped at the
+ * router with only a platform-side log to show for it.
+ */
+const MAX_ACTIONS = 100;
+const MAX_ACTION_ADDRESS_LENGTH = 320;
+
+/**
+ * Cumulative reply-byte budget for ONE dispatch.
+ *
+ * `MAX_MESSAGE_BYTES` bounds a single `reply()` call, not the queue: N replies
+ * at the cap is N x 10 MiB of `Uint8Array` riding one RPC response. workerd
+ * caps a serialized RPC payload at 32 MiB, so the queue that clears our
+ * per-reply check still fails at the boundary — opaquely. The router cannot
+ * tell that failure from any other dispatch error, so the whole message comes
+ * back to the sender as a generic "project handler error" reject with nothing
+ * in it a handler author could act on. Two full-size replies is already well
+ * past any legitimate use, and failing here names the exact call that
+ * overran.
+ */
+const MAX_REPLY_BYTES_TOTAL = 2 * MAX_MESSAGE_BYTES;
+
 function tryReadProjectSlug(): string | undefined {
   let raw: unknown;
   try {
@@ -216,9 +246,36 @@ function replyTooLarge(size: number): MimeError {
   );
 }
 
+function replyBudgetExhausted(size: number): MimeError {
+  return new MimeError(
+    'MIME_ERROR',
+    `reply: cumulative reply size ${size} bytes exceeds this delivery's budget of ` +
+      `${MAX_REPLY_BYTES_TOTAL} bytes.`,
+  );
+}
+
+function queueFull(): MimeError {
+  return new MimeError(
+    'MIME_ERROR',
+    `email: handler queued more than ${MAX_ACTIONS} actions for one message.`,
+  );
+}
+
+function addressTooLong(field: 'from' | 'to', length: number): MimeError {
+  return new MimeError(
+    field === 'from' ? 'INVALID_FROM' : 'INVALID_TO',
+    `${field} address is ${length} characters, over the ${MAX_ACTION_ADDRESS_LENGTH}-character limit.`,
+  );
+}
+
 async function readStreamToBytes(
   stream: ReadableStream<Uint8Array>,
   limit = Infinity,
+  // The caller decides what crossing `limit` MEANS: a single reply over
+  // `MAX_MESSAGE_BYTES`, or the cumulative budget running out mid-stream.
+  // Without this the second case would be reported as the first, naming a
+  // limit the reply never reached.
+  onOverflow: (total: number) => MimeError = replyTooLarge,
 ): Promise<Uint8Array> {
   const reader = stream.getReader();
   const chunks: Array<Uint8Array> = [];
@@ -232,7 +289,7 @@ async function readStreamToBytes(
     if (total > limit) {
       // Stop pulling: the producer would otherwise keep filling memory.
       await reader.cancel().catch(() => {});
-      throw replyTooLarge(total);
+      throw onOverflow(total);
     }
     chunks.push(value);
   }
@@ -315,6 +372,15 @@ export function createMessageProxy(
   }
 
   let rejected = false;
+  let replyBytesUsed = 0;
+
+  // `actions` only ever grows through forward/reply, and `setReject` purges
+  // both, so length IS the queue depth.
+  function assertQueueHasRoom(): void {
+    if (actions.length >= MAX_ACTIONS) {
+      throw queueFull();
+    }
+  }
 
   const message = {
     from: envelope.from,
@@ -345,6 +411,11 @@ export function createMessageProxy(
         return; // already rejected; ignore second reject
       }
       rejected = true;
+      // Deliberately NOT bounded by MAX_ACTIONS. The purge below makes this
+      // the one call that SHRINKS the queue, so it can never be what overruns
+      // it — and throwing out of "refuse this mail" would cost the handler its
+      // reject and hand the message back to the sender as a dispatch error,
+      // which is strictly worse than whatever the oversized queue was.
       // Walk back through the queue and drop any prior forward/reply: CF
       // (and the platform router) treats setReject as terminal — preceding
       // actions in this dispatch never execute. Without this purge the
@@ -376,6 +447,10 @@ export function createMessageProxy(
         );
         return;
       }
+      assertQueueHasRoom();
+      if (to.length > MAX_ACTION_ADDRESS_LENGTH) {
+        throw addressTooLong('to', to.length);
+      }
       // Accept both `Headers` (matches CF's runtime signature) and a plain
       // `Record<string, string>`. `Headers.entries()` lowercases keys per
       // spec; users who care about preserving header casing in the wire
@@ -397,17 +472,39 @@ export function createMessageProxy(
         );
         return;
       }
+      // Everything cheap first, so a doomed reply never buffers its stream.
+      assertQueueHasRoom();
+      if (reply.from.length > MAX_ACTION_ADDRESS_LENGTH) {
+        throw addressTooLong('from', reply.from.length);
+      }
+      if (reply.to.length > MAX_ACTION_ADDRESS_LENGTH) {
+        throw addressTooLong('to', reply.to.length);
+      }
       // `replyEmail()` is bounded by `buildMime`; a hand-built reply is not, so
       // bound it here before the bytes travel to the proxy (or to native reply).
+      const remaining = MAX_REPLY_BYTES_TOTAL - replyBytesUsed;
       let rawBytes: Uint8Array;
       if (reply.raw instanceof Uint8Array) {
         if (reply.raw.byteLength > MAX_MESSAGE_BYTES) {
           throw replyTooLarge(reply.raw.byteLength);
         }
+        if (reply.raw.byteLength > remaining) {
+          throw replyBudgetExhausted(replyBytesUsed + reply.raw.byteLength);
+        }
         rawBytes = reply.raw;
       } else {
-        rawBytes = await readStreamToBytes(reply.raw, MAX_MESSAGE_BYTES);
+        // The REMAINING budget, not the per-reply cap — an earlier reply has
+        // already spent part of it, and the stream must stop where the budget
+        // does. Whichever bound is lower is the one that fires, so the
+        // callback names the one that actually bound this read.
+        const limit = Math.min(MAX_MESSAGE_BYTES, remaining);
+        rawBytes = await readStreamToBytes(reply.raw, limit, (total) =>
+          limit === MAX_MESSAGE_BYTES
+            ? replyTooLarge(total)
+            : replyBudgetExhausted(replyBytesUsed + total),
+        );
       }
+      replyBytesUsed += rawBytes.byteLength;
       actions.push({ type: 'reply', from: reply.from, to: reply.to, raw: rawBytes });
     },
   } as unknown as ForwardableEmailMessage;

@@ -103,6 +103,51 @@ const MAX_INBOUND_BYTES = 10 * 1024 * 1024;
 /** Cap user-supplied reject reasons — surfaced to remote MTAs and our logs. */
 const MAX_REJECT_REASON_LENGTH = 1000;
 
+/**
+ * Cap the number of actions one dispatch may return.
+ *
+ * The list arrives over RPC from a tenant worker and is walked here, in the
+ * SHARED proxy isolate, before `checkOutboundGate` has looked at a single
+ * entry — so an unbounded list is per-entry validation work (address regex,
+ * `new Headers()`, `sanitize()` on every drop log) that is never metered and,
+ * because the drop path just `continue`s, endlessly repeatable by anyone who
+ * can send mail to the project's address. The framework caps the queue at the
+ * same number, but that cap lives inside the tenant's own worker: a
+ * Workers-for-Platforms tenant can ship any `WorkerEntrypoint` whose `email()`
+ * returns any array at all, so the framework-side cap is a developer-experience
+ * guardrail and THIS one is the boundary. Same belt-and-suspenders split as
+ * `MAX_RECIPIENTS` on the outbound path in `email.ts`.
+ *
+ * Checked against the RAW list BEFORE the loop allocates, for the same reason
+ * `MAX_RECIPIENTS` is checked before normalization: the loop is what costs.
+ *
+ * Matches the outbound `MAX_RECIPIENTS` deliberately. An inbound forward or
+ * reply IS the outbound fan-out primitive — same per-project allowlist, same
+ * burst and monthly counters — so the two paths must not offer different
+ * ceilings on the same capability.
+ */
+const MAX_ACTIONS = 100;
+
+/**
+ * Cap a single address inside an action (`forward.to`, `reply.from`,
+ * `reply.to`). `MAX_ACTIONS` alone still leaves a 100 x <address length>
+ * amplifier: every address is scanned by `VALID_ADDRESS_RE` and, on the drop
+ * path, copied twice more by `sanitize()`. Checked BEFORE the regex for
+ * exactly that reason. RFC 5321 caps a forward-path at 256 octets, so 320 is
+ * generous for anything deliverable — and it is the outbound
+ * `MAX_RECIPIENT_LENGTH` value, for the reason given above.
+ */
+const MAX_ACTION_ADDRESS_LENGTH = 320;
+
+/**
+ * Bound a forward's header bag. `new Headers(...)` lowercases and copies
+ * every name and validates every value, so an unbounded bag is the same
+ * unmetered work as an unbounded address list — and it survives RPC as a
+ * plain object, so nothing upstream has looked at its size.
+ */
+const MAX_FORWARD_HEADERS = 32;
+const MAX_FORWARD_HEADER_LENGTH = 1024;
+
 // workerd's RPC layer throws TypeError with messages like
 // "The RPC receiver does not implement the method 'X'". Match a couple of
 // shapes to survive minor wording shifts in workerd. Lessons.md notes this
@@ -130,7 +175,56 @@ function isValidEmailAddress(s: unknown): s is string {
   // obvious whitespace/angle-bracket cases. CF does strict validation on
   // forward/reply but we want to fail fast and not let address fragments
   // reach `EmailMessage` / SMTP layers downstream.
-  return typeof s === 'string' && VALID_ADDRESS_RE.test(s);
+  //
+  // Length FIRST: the regex below scans the whole string, so testing it on an
+  // unbounded address is the work `MAX_ACTION_ADDRESS_LENGTH` exists to stop.
+  // Guarding here covers `forward.to`, `reply.from` and `reply.to` at every
+  // call site.
+  return typeof s === 'string' && s.length <= MAX_ACTION_ADDRESS_LENGTH && VALID_ADDRESS_RE.test(s);
+}
+
+/**
+ * Render a rejected address for a log line. Truncates BEFORE `sanitize`,
+ * which replaces across the whole string and only then slices — logging a
+ * hostile megabyte address at full length would pay exactly the cost the
+ * length check just refused.
+ */
+function logAddress(value: unknown): string {
+  return sanitize(String(value).slice(0, MAX_ACTION_ADDRESS_LENGTH), MAX_ACTION_ADDRESS_LENGTH);
+}
+
+/**
+ * True when a forward's header bag is within bounds. Logs and returns false
+ * otherwise, which DROPS THE WHOLE LIST at the call site — the same response
+ * `new Headers()` throwing already gets, and for the same reason: an
+ * over-sized bag on one forward says the handler is hostile, and partially
+ * enacting the rest of its list is the worse failure mode.
+ */
+function forwardHeadersWithinBounds(headers: Record<string, string>): boolean {
+  const entries = Object.entries(headers);
+  if (entries.length > MAX_FORWARD_HEADERS) {
+    console.error(
+      `[email-router] action list dropped: forward has ${entries.length} headers (max ${MAX_FORWARD_HEADERS})`,
+    );
+    return false;
+  }
+  for (const [name, value] of entries) {
+    // The NAME is bounded too: `new Headers()` accepts an arbitrarily long
+    // token, so an unbounded name is the same amplifier as an unbounded value.
+    if (name.length > MAX_FORWARD_HEADER_LENGTH) {
+      console.error(
+        `[email-router] action list dropped: forward header name exceeds ${MAX_FORWARD_HEADER_LENGTH} characters`,
+      );
+      return false;
+    }
+    if (typeof value === 'string' && value.length > MAX_FORWARD_HEADER_LENGTH) {
+      console.error(
+        `[email-router] action list dropped: forward header "${sanitize(name, 64)}" value exceeds ${MAX_FORWARD_HEADER_LENGTH} characters`,
+      );
+      return false;
+    }
+  }
+  return true;
 }
 
 /**
@@ -716,6 +810,16 @@ function validateActions(
   actions: Array<EmailAction>,
   replySender: ReplySenderPin,
 ): Array<SanitizedAction> | null {
+  // Before the loop allocates anything. `out` is not even built yet: the
+  // per-entry work below (address regex, `new Headers()`, `sanitize()` on
+  // every drop log) is what an over-long list is buying, and it is bought in
+  // the shared proxy isolate ahead of any quota gate.
+  if (actions.length > MAX_ACTIONS) {
+    console.error(
+      `[email-router] action list dropped: ${actions.length} actions returned (max ${MAX_ACTIONS})`,
+    );
+    return null;
+  }
   const out: Array<SanitizedAction> = [];
   for (const action of actions) {
     if (!action || typeof action !== 'object') {
@@ -736,12 +840,15 @@ function validateActions(
     if (action.type === 'forward') {
       if (!isValidEmailAddress(action.to)) {
         console.error(
-          `[email-router] forward dropped: invalid "to" address ${sanitize(String(action.to), 320)}`,
+          `[email-router] forward dropped: invalid "to" address ${logAddress(action.to)}`,
         );
         continue;
       }
       let headers: Headers | undefined;
       if (action.headers) {
+        if (!forwardHeadersWithinBounds(action.headers)) {
+          return null;
+        }
         try {
           headers = new Headers(action.headers);
         } catch (e) {
@@ -761,7 +868,7 @@ function validateActions(
     } else if (action.type === 'reply') {
       if (!isValidEmailAddress(action.from) || !isValidEmailAddress(action.to)) {
         console.error(
-          `[email-router] reply dropped: invalid address (from=${sanitize(String(action.from), 320)} to=${sanitize(String(action.to), 320)})`,
+          `[email-router] reply dropped: invalid address (from=${logAddress(action.from)} to=${logAddress(action.to)})`,
         );
         continue;
       }
@@ -771,7 +878,7 @@ function validateActions(
       // reaches the quota counters.
       if (!isPermittedReplySender(action.from, replySender)) {
         console.error(
-          `[email-router] reply dropped: sender not owned by project "${sanitize(replySender.slug, 64)}" (from=${sanitize(String(action.from), 320)})`,
+          `[email-router] reply dropped: sender not owned by project "${sanitize(replySender.slug, 64)}" (from=${logAddress(action.from)})`,
         );
         continue;
       }
