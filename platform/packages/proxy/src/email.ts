@@ -13,6 +13,37 @@ const app = new Hono<ProxyEnv>();
 const MAX_MIME_BYTES = 10 * 1024 * 1024;
 
 /**
+ * Cap the recipient list. Every entry costs a trimmed+lowercased copy, a
+ * `seen` Set entry, and — for an address this project's allowlist rejects —
+ * one delivery object whose message interpolates the address, all of which
+ * is then serialized into the response. That is ~360 bytes of isolate heap
+ * per recipient, so an uncapped list reaches the 128 MB per-isolate ceiling
+ * from a ~2.5 MB request body. A tenant worker holds a valid project HMAC,
+ * so it can POST that body to the public proxy hostname, and the
+ * all-rejected path returns ABOVE the burst and monthly gates — the work is
+ * never metered and the request is endlessly repeatable. The proxy isolate
+ * is shared with every other tenant's in-flight AI/D1/KV/R2 traffic, so the
+ * kill is cross-tenant. The MIME cap does not bound this: `bcc` recipients
+ * are deliberately kept out of the rendered headers, so a huge bcc list
+ * costs nothing against `MAX_MIME_BYTES`.
+ *
+ * Checked against the RAW array BEFORE the normalization loop below. The
+ * loop is what allocates, so deduping first would already have paid the
+ * per-entry cost for a list of duplicates.
+ */
+const MAX_RECIPIENTS = 100;
+
+/**
+ * Cap a single recipient string. `MAX_RECIPIENTS` alone still leaves a
+ * 100 x <address length> amplifier, because `.trim().toLowerCase()` copies
+ * the entry — and the allowlist-rejection message interpolates it a second
+ * time — before anything has looked at its size. Checked BEFORE that
+ * normalization for exactly that reason. RFC 5321 caps a forward-path at
+ * 256 octets, so 320 is generous for any address that could be delivered.
+ */
+const MAX_RECIPIENT_LENGTH = 320;
+
+/**
  * The platform mail domain for this environment — `mail.void.cloud` in
  * production, `mail.staging.void.cloud` in staging. Configured as the
  * `EMAIL_SENDER_DOMAIN` var on both the proxy and api workers, and mirrored
@@ -220,6 +251,23 @@ app.post('/send', async (context) => {
     );
   }
 
+  // Bound the list before the normalization loop below allocates per entry.
+  // Answered with the same 413 the MIME size guard uses — the framework
+  // dispatches on `error.code`, not the status, and INVALID_TO is already
+  // its code for an unusable recipient set.
+  if (recipientsRaw.length > MAX_RECIPIENTS) {
+    return context.json(
+      {
+        ok: false,
+        error: {
+          code: 'INVALID_TO',
+          message: `too many recipients (max ${MAX_RECIPIENTS}, got ${recipientsRaw.length})`,
+        },
+      },
+      413,
+    );
+  }
+
   // Fail closed on missing sender configuration — never fall back to a
   // baked-in domain (see readSenderDomain). Resolved before any KV work so a
   // misconfigured environment can't burn quota counters on a send that can't
@@ -262,6 +310,20 @@ app.post('/send', async (context) => {
   for (const r of recipientsRaw) {
     if (typeof r !== 'string') {
       continue;
+    }
+    // Before `.trim().toLowerCase()` — that call is the allocation.
+    // The address is deliberately not echoed back.
+    if (r.length > MAX_RECIPIENT_LENGTH) {
+      return context.json(
+        {
+          ok: false,
+          error: {
+            code: 'INVALID_TO',
+            message: `recipient exceeds ${MAX_RECIPIENT_LENGTH} characters`,
+          },
+        },
+        413,
+      );
     }
     const lower = r.trim().toLowerCase();
     if (!lower || seen.has(lower)) {
@@ -676,8 +738,10 @@ function logSend(projectId: string, requestId: string, deliveries: Array<Recipie
 
 /**
  * Reads `email-allowlist:<projectId>` from ROUTING KV. The API writes a JSON
- * array of lowercased verified addresses on every destination CRUD + on
- * deploy. cacheTtl bounds per-colo convergence at ~60s.
+ * array of lowercased verified addresses on every destination CRUD, on the
+ * platform confirmation click, and — as the repair for a write it swallowed —
+ * on a destinations listing that finds the key stale. Never on deploy.
+ * cacheTtl bounds per-colo convergence at ~60s.
  */
 async function readAllowlist(kv: KVNamespace, projectId: string): Promise<Set<string>> {
   const raw = await kv.get(`email-allowlist:${projectId}`, { cacheTtl: 60 });

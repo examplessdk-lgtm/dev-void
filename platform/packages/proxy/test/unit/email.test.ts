@@ -727,6 +727,80 @@ describe('POST /email/send — request validation', () => {
     const res = await postSend(env, await sendBody({ aiToken: undefined }));
     expect(res.status).toBe(400);
   });
+
+  // A tenant worker holds a valid project HMAC (`__VOID_PROXY_TOKEN` is baked
+  // in as a plain-text binding), so it can POST any body to the public proxy
+  // hostname. Every recipient costs a normalized copy, a `seen` Set entry,
+  // and — when the allowlist rejects it — a delivery object interpolating the
+  // address, all of it then serialized into the response. Uncapped, a ~2.5 MB
+  // body reaches the 128 MB per-isolate ceiling, and the all-rejected path
+  // returns ABOVE the quota gates so the work is never metered and is
+  // endlessly repeatable. The proxy isolate is shared with every other
+  // tenant's in-flight traffic, so the kill is cross-tenant.
+  it('rejects a recipient list one over the cap, before any KV read', async () => {
+    const MAX_RECIPIENTS = 100;
+    const kv = happyPathKv();
+    const sender = createSender();
+    const env = createMockEnv(kv, { SEND_EMAIL: sender.binding });
+    const res = await postSend(
+      env,
+      await sendBody({
+        recipients: Array.from({ length: MAX_RECIPIENTS + 1 }, (_, i) => `dev${i}@example.com`),
+      }),
+    );
+
+    expect(res.status).toBe(413);
+    const body = await readSend(res);
+    expect(body.error?.code).toBe('INVALID_TO');
+    // Refused above the normalization loop, so not one per-recipient
+    // delivery object was built.
+    expect(body.deliveries).toBeUndefined();
+    expect(kv.get).not.toHaveBeenCalled();
+    expect(kv.put).not.toHaveBeenCalled();
+    expect(sender.calls).toHaveLength(0);
+  });
+
+  it('still sends a recipient list sitting exactly at the cap', async () => {
+    const MAX_RECIPIENTS = 100;
+    const recipients = Array.from({ length: MAX_RECIPIENTS }, (_, i) => `dev${i}@example.com`);
+    const kv = createMockKv({
+      'email-slug:proj_1': 'acme',
+      'email-allowlist:proj_1': JSON.stringify(recipients),
+      // Raised so the burst + monthly gates cannot answer first and hide
+      // whether the cap itself let the list through.
+      'email-burst-limit:proj_1': '1000',
+      'email-limit:proj_1': '1000',
+    });
+    const sender = createSender();
+    const env = createMockEnv(kv, { SEND_EMAIL: sender.binding });
+    const res = await postSend(env, await sendBody({ recipients }));
+
+    expect((await readSend(res)).ok).toBe(true);
+    expect(sender.recipients()).toEqual(recipients);
+    expect(kv.store.get(monthKeyFor('proj_1'))).toBe(String(MAX_RECIPIENTS));
+  });
+
+  // `MAX_RECIPIENTS` alone still leaves a 100 x <address length> amplifier,
+  // because `.trim().toLowerCase()` copies each entry before anything has
+  // looked at its size.
+  it('rejects an over-long recipient before normalization allocates', async () => {
+    const MAX_RECIPIENT_LENGTH = 320;
+    const kv = happyPathKv();
+    const sender = createSender();
+    const env = createMockEnv(kv, { SEND_EMAIL: sender.binding });
+    const res = await postSend(
+      env,
+      await sendBody({ recipients: [`${'a'.repeat(MAX_RECIPIENT_LENGTH)}@example.com`] }),
+    );
+
+    expect(res.status).toBe(413);
+    const body = await readSend(res);
+    expect(body.error?.code).toBe('INVALID_TO');
+    expect(body.deliveries).toBeUndefined();
+    expect(kv.get).not.toHaveBeenCalled();
+    expect(kv.put).not.toHaveBeenCalled();
+    expect(sender.calls).toHaveLength(0);
+  });
 });
 
 describe('POST /email/send — sender pinning (cross-project tenancy)', () => {
