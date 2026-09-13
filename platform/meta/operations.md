@@ -459,7 +459,7 @@ Callers:
 
 ### Deploy Scripts
 
-Root `package.json` orchestrates deployment:
+`platform/package.json` orchestrates deployment. Run these from `platform/`, or from the repository root as `vp run --filter @voidcloud/platform <script>`. A fresh checkout needs the SDK build first (`vp run build` from the repository root; from `platform/` that name is the dashboard build) because the dashboard bundles the SDK from `dist/`.
 
 ```
 vp run deploy           # Production: same with --env production
