@@ -1259,10 +1259,10 @@ describe('routeInbound — header construction safety (HIGH H2)', () => {
 // Prototype pollution guard
 // -----------------------------------------------------------------------
 
-describe('routeInbound — Object.create(null) header bag (prototype pollution guard)', () => {
+describe('routeInbound — envelope header bag (prototype pollution guard)', () => {
   it('survives a __proto__ header in the inbound message', async () => {
     // Inject a __proto__-named header on the inbound side. The router
-    // pre-buffers headers into Object.create(null) so the framework
+    // pre-buffers headers with Object.fromEntries so the framework
     // sees it as a plain string property, not as a prototype mutation.
     const { env, emailFn } = makeEnv({
       kvSeed: { myslug: DEFAULT_ROUTING },
@@ -1273,11 +1273,12 @@ describe('routeInbound — Object.create(null) header bag (prototype pollution g
     message.headers.set('__proto__', 'evil');
     const { ctx } = createCtx();
     await routeInbound(message, env, ctx);
-    // Pull the envelope passed into emailFn; assert the header bag has
-    // a null prototype + that the __proto__ key is a real own property
-    // (not a prototype mutation that affects {}).
+    // Pull the envelope passed into emailFn; assert the header bag is an
+    // ORDINARY object (workerd RPC refuses to serialize a null-prototype
+    // one) and that the __proto__ key is a real own property (not a
+    // prototype mutation that affects {}).
     const envelope = emailFn.mock.calls[0]?.[0] as { headers: Record<string, string> };
-    expect(Object.getPrototypeOf(envelope.headers)).toBeNull();
+    expect(Object.getPrototypeOf(envelope.headers)).toBe(Object.prototype);
     expect(Object.prototype.hasOwnProperty.call(envelope.headers, '__proto__')).toBe(true);
     expect(envelope.headers['__proto__']).toBe('evil');
     // Nothing leaked onto Object.prototype.

@@ -746,16 +746,14 @@ async function logRecv(
 
 async function buildEnvelope(message: ForwardableEmailMessage): Promise<EmailEnvelope> {
   const raw = await readStreamToBytes(message.raw);
-  // `Object.create(null)` rather than `{}` so an attacker-controlled
-  // header named `__proto__` / `constructor` can't pollute the
-  // prototype chain. CF's headers are strings today (non-object values
-  // wouldn't trigger pollution anyway), but the framework-side
-  // `new Headers(envelope.headers)` and any user-handler `for…in` loop
-  // become safer with no prototype to walk into.
-  const headers: Record<string, string> = Object.create(null);
-  message.headers.forEach((value, key) => {
-    headers[key] = value;
-  });
+  // `Object.fromEntries`, NOT `Object.create(null)`: workerd's RPC
+  // serializer refuses any object whose prototype is not `Object.prototype`
+  // ("Could not serialize object of type \"Object\""), so a null-prototype
+  // bag made every `stub.email(envelope)` throw. `fromEntries` defines each
+  // key as an OWN data property (`CreateDataProperty`), so a remote header
+  // named `__proto__` becomes a plain key on both sides of the RPC and never
+  // touches the prototype chain — verified over a real workerd RPC hop.
+  const headers: Record<string, string> = Object.fromEntries(message.headers);
   return {
     from: String(message.from ?? ''),
     to: String(message.to ?? ''),
