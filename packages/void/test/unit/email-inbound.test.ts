@@ -1731,6 +1731,21 @@ describe('end-to-end: envelope → handler → action queue', () => {
     }
   });
 
+  it('reply() refuses a native EmailMessage with a named error', async () => {
+    // What workerd's `EmailMessage` looks like to JS: `from` and `to` only —
+    // workers-types declares nothing else and the body has no accessor, so
+    // the proxy cannot record it as bytes. It used to die on
+    // `undefined.getReader()`, since the first commit of this file.
+    const native = Object.freeze({ from: 'support@app.dev', to: 'sender@example.com' });
+    const handler = defineEmail(async (message) => {
+      await message.reply(native as unknown as Parameters<ForwardableEmailMessage['reply']>[0]);
+    });
+    const failure = dispatchToHandler(makeEnvelope(), handler);
+    await expect(failure).rejects.toBeInstanceOf(MimeError);
+    await expect(failure).rejects.toThrow(/native EmailMessage cannot be replayed/);
+    await expect(failure).rejects.toThrow(/replyEmail\(\)/);
+  });
+
   it('reply() rejects a Uint8Array raw over MAX_MESSAGE_BYTES', async () => {
     const handler = defineEmail(async (message) => {
       await message.reply({

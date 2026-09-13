@@ -323,9 +323,13 @@ function bytesToReadableStream(bytes: Uint8Array): ReadableStream<Uint8Array> {
  * record `EmailAction` entries that the router (which holds the real
  * message) enacts after the handler returns.
  *
- * `reply()` accepts either a CF `EmailMessage`-shaped object (for native
- * compatibility) or any duck-typed `{ from, to, raw }`. The reply MIME bytes
- * are buffered before being recorded so the action is fully self-contained.
+ * `reply()` accepts a duck-typed `{ from, to, raw }` with `raw` a
+ * `Uint8Array` or `ReadableStream` — what `replyEmail()` passes. It does NOT
+ * accept a native `EmailMessage` from `cloudflare:email`: that class exposes
+ * only `from` and `to` (workers-types declares nothing else, and the body
+ * has no public accessor), so its bytes cannot be recorded here, and nothing
+ * could carry them over RPC to the platform router. The reply MIME bytes are
+ * buffered before being recorded so the action is fully self-contained.
  *
  * When `opts.slug` is provided, `message.to` is rewritten to remove the
  * platform-injected `<slug>+` prefix so handlers see `<tag>@<domain>`
@@ -499,6 +503,23 @@ export function createMessageProxy(
         }
         rawBytes = reply.raw;
       } else {
+        // A native `EmailMessage` lands here: `from` and `to` only, no `raw`.
+        // Name the problem instead of failing on `undefined.getReader()`,
+        // which in platform mode is a generic "project handler error" bounce
+        // with nothing a handler author could act on.
+        const raw: unknown = reply.raw;
+        if (
+          typeof raw !== 'object' ||
+          raw === null ||
+          typeof (raw as ReadableStream<Uint8Array>).getReader !== 'function'
+        ) {
+          throw new MimeError(
+            'MIME_ERROR',
+            'reply: expected { from, to, raw } with raw as a Uint8Array or ReadableStream. ' +
+              'A native EmailMessage cannot be replayed from a Void handler — its body has ' +
+              'no public accessor. Use replyEmail() from void/email, or pass the MIME bytes as raw.',
+          );
+        }
         // The REMAINING budget, not the per-reply cap — an earlier reply has
         // already spent part of it, and the stream must stop where the budget
         // does. Whichever bound is lower is the one that fires, so the
