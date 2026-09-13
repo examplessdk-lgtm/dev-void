@@ -188,7 +188,9 @@ The runtime defaults `from` from those two bindings and refuses to send when eit
 
 ### Who a project may send to
 
-`email_destinations` in Postgres is the source of truth: one row per (project, recipient), `pending` until the recipient consents. `email-allowlist:<projectId>` in `ROUTING` KV is a denormalized read-cache of the **verified** rows, which is what the proxy enforces on every send. Every destination mutation re-syncs that key; an empty list deletes it.
+`email_destinations` in Postgres is the source of truth: one row per (project, recipient), `pending` until the recipient consents. `email-allowlist:<projectId>` in `ROUTING` KV is a denormalized read-cache of the **verified** rows, which is what the proxy enforces on every send. Every destination mutation re-syncs that key — the owner-facing add/revoke routes, the admin revoke, the project-create auto-add of the owner's own address, and the recipient's click on a platform confirmation link; an empty list deletes it. **Nothing syncs it on deploy.**
+
+Those writes are best-effort, so one swallowed KV failure after Postgres already committed `verified` would otherwise be unrecoverable — the proxy reads a missing key as deny-all, and the owner sees a `verified` destination whose every send is rejected as unverified. `GET /projects/:id/email/destinations` is the repair: it compares the mirror against the verified rows and rewrites it only when they differ (one KV read per listing; never a write on every listing). Same read-compare-write self-heal shape as the hourly `email-slug:` backfill in `index.ts`.
 
 Cloudflare Email Routing destination addresses are account-level, so a row is only deleted upstream when no other project still references the same address.
 
@@ -196,13 +198,13 @@ Cloudflare Email Routing destination addresses are account-level, so a row is on
 
 All of it lives in `ROUTING` KV, written by the proxy and read (and overridden) by the admin page:
 
-| Key                                | Meaning                                                                |
-| ---------------------------------- | ---------------------------------------------------------------------- |
-| `email-sent:<projectId>:<YYYY-MM>` | Outbound count for the UTC month; expires shortly after the month ends |
-| `email-recv:<projectId>:<YYYY-MM>` | Inbound count for the UTC month                                        |
-| `email-suspended:<projectId>`      | Presence is the outbound kill switch; inbound is unaffected            |
-| `email-limit:<projectId>`          | Monthly outbound override; absent means the platform default (200)     |
-| `email-burst-limit:<projectId>`    | Per-minute override; absent means the platform default (10)            |
+| Key                                | Meaning                                                                 |
+| ---------------------------------- | ----------------------------------------------------------------------- |
+| `email-sent:<projectId>:<YYYY-MM>` | Outbound count for the UTC month; expires shortly after the month ends  |
+| `email-recv:<projectId>:<YYYY-MM>` | Inbound count for the UTC month                                         |
+| `email-suspended:<projectId>`      | Presence stops mail both ways: outbound sends fail, inbound is rejected |
+| `email-limit:<projectId>`          | Monthly outbound override; absent means the platform default (200)      |
+| `email-burst-limit:<projectId>`    | Per-minute override; absent means the platform default (10)             |
 
 The defaults live in the proxy and are mirrored in `admin/routes/email.tsx` so the page can label a cap `default` or `override`. Nothing at build time catches a drift between the two — change them together.
 

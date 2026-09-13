@@ -133,10 +133,12 @@ app.get('/:projectId', async (context) => {
             double-click cannot race two toggles and flip the switch back on. */}
         <input type="hidden" name="state" value={isSuspended ? 'active' : 'suspended'} />
         <button type="submit" class={isSuspended ? '' : 'danger'}>
-          {isSuspended ? 'Unsuspend outbound' : 'Suspend outbound'}
+          {isSuspended ? 'Unsuspend email' : 'Suspend email'}
         </button>{' '}
         <span style={META}>
-          Suspending blocks every outbound send immediately. Inbound routing is unaffected.
+          Suspending stops mail in both directions immediately. Outbound sends fail, and inbound
+          messages are rejected with a permanent SMTP error, so the sender gets a bounce rather than
+          a silent drop. There is no per-direction switch.
         </span>
       </form>
 

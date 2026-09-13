@@ -212,7 +212,7 @@ describe('GET /admin/email/:projectId', () => {
     expect(html).toContain(slug);
     expect(html).toContain('7 / 200');
     expect(html).toContain('(default)');
-    expect(html).toContain('Suspend outbound');
+    expect(html).toContain('Suspend email');
     expect(html).toContain('No destinations yet.');
   });
 
@@ -226,7 +226,7 @@ describe('GET /admin/email/:projectId', () => {
     expect(html).toContain('0 / 1000');
     expect(html).toContain('(override)');
     expect(html).toContain('SUSPENDED');
-    expect(html).toContain('Unsuspend outbound');
+    expect(html).toContain('Unsuspend email');
   });
 
   test('404s for an unknown project', async () => {
