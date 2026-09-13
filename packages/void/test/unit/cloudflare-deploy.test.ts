@@ -7862,6 +7862,46 @@ describe('runCloudflareDeploy — Mode B email step (3b-ii)', () => {
     expect(spawns.some((s) => s.args[0] === 'deploy')).toBe(true);
   });
 
+  it('--require-email fails when the apply wrote the binding but routing failed and addresses were withheld', async () => {
+    // The SAME run as the test above, with the flag: `auth token` fails, so the subdomain
+    // routing POST is never made and `addresses` is withheld. The worker would ship a
+    // SEND_EMAIL binding with NO inbound rule behind it — binding presence is not "set up".
+    const root = emailProject();
+    const { deps, spawns, exitCalls, trace } = emailHarness({
+      runner: {
+        'auth token --json': {
+          ...cleanExit,
+          status: 1,
+          stderr: '✘ [ERROR] Not logged in. Please run `wrangler login` to authenticate.\n',
+        },
+      },
+    });
+    const output = captureOutput();
+    try {
+      await expect(
+        runCloudflareDeploy(
+          root,
+          { backend: 'cloudflare', requireEmail: true },
+          silentCliLog,
+          deps,
+        ),
+      ).rejects.toBeInstanceOf(ExitError);
+    } finally {
+      output.restore();
+    }
+    expect(exitCalls).toEqual([1]);
+    const printed = output.lines.join('\n');
+    expect(printed).toContain('addresses withheld this run');
+    expect(printed).toContain('--require-email');
+    // Nothing was built or uploaded; the config still records what the apply did manage.
+    expect(trace).not.toContain('probe');
+    expect(trace).not.toContain('build');
+    expect(spawns.some((s) => s.args[0] === 'deploy')).toBe(false);
+    const written = readRootConfig(root);
+    expect(written.send_email).toEqual([{ name: 'SEND_EMAIL' }]);
+    expect(written.addresses).toBeUndefined();
+  });
+
   it('CI / non-TTY: prints the checklist + `void email setup` line, asks nothing, writes nothing, deploys without email', async () => {
     const root = emailProject();
     const before = readFileSync(join(root, 'wrangler.jsonc'), 'utf-8');
@@ -8128,6 +8168,75 @@ describe('runCloudflareDeploy — Mode B email step (3b-ii)', () => {
       'inbound   support@mail.acme.com  →  email/support+[ticket].ts   (rule created by this deploy)',
     );
     expect(readRootConfig(root).addresses).toEqual(['support@mail.acme.com']);
+  });
+
+  it('--require-email fails on Workers Free: routing is up, but `sending enable` answers 10105', async () => {
+    // Every other row is ready; only Email Sending is refused (no entitlement). The
+    // preflight does NOT treat that as settled — no sending-scoped blocker exists for it,
+    // so the row stays pending on every deploy (`sendingSettled` in preflightEmail). The
+    // apply still writes the binding, and this pins that --require-email refuses anyway.
+    const root = emailProject();
+    const { deps, spawns, exitCalls, trace } = emailHarness({
+      ...readyRows,
+      runner: {
+        'email sending enable mail.acme.com': {
+          ...cleanExit,
+          status: 1,
+          stderr: `${BETA_WARNING}✘ [ERROR] A request to the Cloudflare API (/zones/${ZONE_ID}/email/sending/subdomains) failed.\n\n  something went wrong [code: 10105]\n`,
+        },
+      },
+      confirm: async () => true,
+    });
+    const output = captureOutput();
+    try {
+      await expect(
+        runCloudflareDeploy(
+          root,
+          { backend: 'cloudflare', requireEmail: true },
+          silentCliLog,
+          deps,
+        ),
+      ).rejects.toBeInstanceOf(ExitError);
+    } finally {
+      output.restore();
+    }
+    expect(exitCalls).toEqual([1]);
+    const printed = output.lines.join('\n');
+    expect(printed).toContain('[code: 10105]');
+    expect(printed).toContain('--require-email');
+    expect(trace).not.toContain('build');
+    expect(spawns.some((s) => s.args[0] === 'deploy')).toBe(false);
+    // Inbound DID come up, and the config records it — the refusal is about sending only.
+    const written = readRootConfig(root);
+    expect(written.send_email).toEqual([{ name: 'SEND_EMAIL' }]);
+    expect(written.addresses).toEqual(['support@mail.acme.com']);
+  });
+
+  it('--require-email passes on a fully ready second deploy: nothing to apply, zero keystrokes', async () => {
+    // The headline flow. No apply runs, so readiness comes from the PREFLIGHT result.
+    const root = emailProject(COMMITTED_EMAIL);
+    const { deps, spawns, fetchCalls, confirms, exitCalls, trace } = emailHarness({
+      ...readyRows,
+      runner: { ...readyRows.runner, 'email routing rules list acme.com': myRule },
+    });
+    const output = captureOutput();
+    try {
+      await runCloudflareDeploy(
+        root,
+        { backend: 'cloudflare', requireEmail: true },
+        silentCliLog,
+        deps,
+      );
+    } finally {
+      output.restore();
+    }
+    expect(exitCalls).toEqual([]);
+    expect(confirms).toEqual([]);
+    expect(fetchCalls.filter((c) => c.method !== 'GET')).toEqual([]);
+    expect(spawns.some((s) => s.args[0] === 'email' && s.args[2] === 'enable')).toBe(false);
+    expect(trace).toContain('build');
+    expect(spawns.some((s) => s.args[0] === 'deploy')).toBe(true);
+    expect(output.lines.join('\n')).not.toContain('--require-email');
   });
 
   it('ready path: a committed `addresses` entry no longer in the pruned set is rewritten BEFORE `wrangler deploy`, without a prompt', async () => {

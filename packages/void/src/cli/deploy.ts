@@ -4074,8 +4074,28 @@ async function runCloudflareEmailStep(
   }
   const bindingPresent = shipsBinding || out.patch.sendEmail !== undefined;
   const written = out.patch.addresses ?? [];
+  // `satisfied` is post-apply READINESS, not binding presence. `applyEmailSetup` writes
+  // `patch.sendEmail` as soon as EITHER routing or sending came up, and withholds
+  // `addresses` when the bearer failed or routing is off — so a run whose subdomain
+  // routing POST failed ships the binding with no inbound rule behind it, which is
+  // exactly the end state the `leaveAccount` branch above already returns as
+  // `satisfied: false`. Gating `--require-email` on the binding would contradict both
+  // that branch and the error text ("not fully set up … refusing to deploy"), so this
+  // mirrors `preflightEmail`'s own `ready` predicate instead: routing + subaddressing +
+  // a settled sending + the binding, with `addresses` actually written. A sending-scoped
+  // blocker is settled there (Void cannot act on it) and is settled here; a plain
+  // `sending enable` refusal (Workers Free) is NOT, on either side. `map` stays on
+  // `bindingPresent`: the worker DOES ship with email, and a deploy may ship with email
+  // while `satisfied` is false.
+  const sendingSettled = out.sendingReady || pre.blockers.some((b) => b.scope === 'sending');
+  const satisfied =
+    bindingPresent &&
+    out.routingReady &&
+    out.subaddressingReady &&
+    !out.addressesWithheld &&
+    sendingSettled;
   return {
-    satisfied: bindingPresent,
+    satisfied,
     configWritten,
     map: bindingPresent
       ? mapFor(
