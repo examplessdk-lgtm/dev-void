@@ -144,7 +144,7 @@ Void is one repository with an explicit dependency boundary:
 | User-facing dashboard                                                         | `packages/dashboard/pages/*`, `packages/dashboard/middleware/01.auth.ts`, `packages/dashboard/lib/api.ts`                                                                                                                              |
 | Shared internal styling                                                       | `packages/ui/src/base.css`, `packages/ui/src/theme.css`                                                                                                                                                                                |
 
-The dashboard depends on `void` and `@void/react` through normal `workspace:*` dependencies. The monorepo task graph builds those packages before the dashboard when required.
+The dashboard depends on `void` and `@void/react` through normal `workspace:*` dependencies. Those packages export only their `dist/` output, so run `vp run build` before `vp run --filter @voidcloud/platform deploy` on a fresh checkout. The platform workflows do this; the task graph does not.
 
 ## SDK overview
 

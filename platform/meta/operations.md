@@ -27,10 +27,10 @@ Five Cloudflare Workers:
 
 Two fully isolated environments. Each has its own CF resources (KV, R2, dispatch namespace, analytics engine) and a separate Hyperdrive configuration pointing to its own PlanetScale PostgreSQL database.
 
-| Environment    | API URL                  | Dashboard                 | User Sites           | Trigger                      |
-| -------------- | ------------------------ | ------------------------- | -------------------- | ---------------------------- |
-| **Production** | `api.void.cloud`         | `dash.void.cloud`         | `*.void.app`         | Push to `prod` branch        |
-| **Staging**    | `api.staging.void.cloud` | `dash.staging.void.cloud` | `*.staging.void.app` | Push to `main` branch (auto) |
+| Environment    | API URL                  | Dashboard                 | User Sites           | Trigger                                       |
+| -------------- | ------------------------ | ------------------------- | -------------------- | --------------------------------------------- |
+| **Production** | `api.void.cloud`         | `dash.void.cloud`         | `*.void.app`         | Manual: "Deploy Platform Production" workflow |
+| **Staging**    | `api.staging.void.cloud` | `dash.staging.void.cloud` | `*.staging.void.app` | Manual: "Deploy Platform Staging" workflow    |
 
 ## Cloudflare Resources
 
@@ -231,7 +231,7 @@ Two GitHub environments (`Prod` and `Staging`) share the same repo-level secrets
 | `CF_ACCESS_CLIENT_ID_STAGING`     | Staging     | CF Access service-token client id for reaching staging (see Staging Access Control) |
 | `CF_ACCESS_CLIENT_SECRET_STAGING` | Staging     | CF Access service-token client secret for reaching staging                          |
 
-`deploy.yml` (push to `prod`) uses the `Prod` environment; `deploy-staging.yml` (push to `main`) uses `Staging`.
+`platform-deploy.yml` uses the `Prod` environment; `platform-deploy-staging.yml` uses `Staging`. Both run only on manual dispatch and only when the repository variable `VOID_PLATFORM_DEPLOY_ENABLED` is `true`.
 
 **GitHub Actions `CF_API_TOKEN` permissions** — narrower-scope token used only for wrangler deploys. Separate from the API worker runtime token.
 
@@ -502,28 +502,31 @@ This is a clean cutover. The API only reads project secrets from `project_secret
 
 ### GitHub Actions
 
-Three workflows in `.github/workflows/`:
+Four platform workflows live in the repository-level `.github/workflows/` directory, prefixed `platform-`. Every deploy and smoke-test job is gated on the repository variable `VOID_PLATFORM_DEPLOY_ENABLED == 'true'`.
 
-**`ci.yml`** — runs on PRs to `main` and as a reusable workflow:
+**`platform-ci.yml`** — runs on PRs to `main` that touch `platform/**`, `packages/**`, or the root manifests, and as a reusable workflow:
 
-1. Set up Vite+ and Node.js (from `.node-version`)
-2. `vp install --frozen-lockfile`
-3. `vp run build:all` (build all platform surfaces that define a build)
-4. `vp lint` (oxlint through Vite+)
-5. `vp run check` (typecheck all packages)
-6. `vp test run` (full test suite)
+1. Set up Vite+ and Node.js (from `.node-version`); `setup-vp` runs `vp install`
+2. `vp fmt --check`, `vp lint`
+3. `vp run build` (SDK packages), then `vp run --filter './platform/packages/**' build`
+4. `vp run lint:platform` (type-aware lint; needs the dashboard build output)
+5. `vp run check:platform` (typecheck platform packages only)
+6. `vp test run --project platform-unit` and `--project platform-api-integration`
+7. Builds the API build container image (PRs only)
 
-**`deploy.yml`** — runs on push to `prod` (production, environment: `Prod`):
+**`platform-deploy.yml`** — manual dispatch (production, environment: `Prod`):
 
-1. Runs CI workflow first
-2. Builds the framework packages used by the dashboard
-3. `vp run deploy` (api with drizzle-kit migrations, proxy, tail, dispatch, dashboard)
+1. Runs `platform-ci.yml` first
+2. `vp run build` (SDK packages the dashboard bundles)
+3. `vp run --filter @voidcloud/platform deploy` (api with drizzle-kit migrations, proxy, tail, dispatch, dashboard)
 
-**`deploy-staging.yml`** — runs on push to `main` (staging, environment: `Staging`):
+**`platform-deploy-staging.yml`** — manual dispatch (staging, environment: `Staging`):
 
-1. Runs CI workflow first
-2. Builds the framework packages used by the dashboard
-3. `vp run deploy:staging` (api with drizzle-kit migrations, proxy, tail, dispatch, dashboard — all to staging)
+1. Runs `platform-ci.yml` first
+2. `vp run build`
+3. `vp run --filter @voidcloud/platform deploy:staging` (same order, all to staging)
+
+**`platform-smoke-test.yml`** — manual dispatch (environment: `Staging`): builds the SDK, deploys `playground/kitchen-sink` to staging with `void deploy`, resets its state, and runs `platform/scripts/kitchen-sink-smoke-test.ts` against `https://kitchen-sink.staging.void.app`.
 
 ### Health Checks
 
