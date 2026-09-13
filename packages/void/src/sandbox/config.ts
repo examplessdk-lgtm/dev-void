@@ -47,7 +47,7 @@ export function isSandboxEnabled(config: VoidConfig): boolean {
 }
 
 export function getDefaultSandboxImage(): string {
-  return join(getSandboxPackageRoot(), 'Dockerfile');
+  return getDefaultSandboxPlatformImage();
 }
 
 export function getDefaultSandboxPlatformImage(): string {

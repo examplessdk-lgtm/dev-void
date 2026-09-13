@@ -1,6 +1,6 @@
 /**
  * API-side ISR helpers that touch `KVNamespace`. Pure key/URL helpers live in
- * `@voidcloud/isr-shared` — import from there directly.
+ * `@void/isr` — import from there directly.
  */
 
 export type IsrRoutingTarget = Readonly<{

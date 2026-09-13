@@ -112,6 +112,22 @@ describe('runDeploy auth failures', () => {
     );
   });
 
+  it('prints the resolved Void deployment target before authentication', async () => {
+    await expect(
+      runDeploy(process.cwd(), { platform: 'void', projectSlug: 'my-app' }),
+    ).rejects.toThrow();
+
+    expect(mockInfo).toHaveBeenCalledWith('Deployment target: Void');
+  });
+
+  it('prints the resolved Cloudflare deployment target before target validation', async () => {
+    await expect(
+      runDeploy(process.cwd(), { platform: 'cloudflare', projectSlug: 'my-app' }),
+    ).rejects.toThrow('--project is not supported with platform cloudflare');
+
+    expect(mockInfo).toHaveBeenCalledWith('Deployment target: Cloudflare');
+  });
+
   it('reauthenticates and retries once for expired local auth tokens in interactive mode', async () => {
     Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
     mockListProjects
@@ -326,30 +342,44 @@ describe('runDeploy keeps the CF Access service token in process.env', () => {
   });
 });
 
-// The build child env must omit the CF Access service-token pair even though
-// process.env still carries it, so untrusted build code can't read the shared
-// staging credential.
+// The build child env must omit every deploy credential even though process.env
+// keeps them. Managed prerender obtains a separate proxy-only token afterward.
 describe('buildEnv', () => {
-  it('omits CF_ACCESS_CLIENT_ID/SECRET while process.env keeps them', () => {
+  it('omits Cloudflare and Access credentials while process.env keeps them', () => {
     const savedId = process.env.CF_ACCESS_CLIENT_ID;
     const savedSecret = process.env.CF_ACCESS_CLIENT_SECRET;
     const savedToken = process.env.CF_ACCESS_TOKEN;
+    const savedCloudflareToken = process.env.CLOUDFLARE_API_TOKEN;
+    const savedVoidToken = process.env.VOID_TOKEN;
+    const savedDatabaseUrl = process.env.DATABASE_URL;
+    const savedActionsOidcUrl = process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
+    const savedActionsOidcToken = process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN;
     try {
       process.env.CF_ACCESS_CLIENT_ID = 'svc-id.access';
       process.env.CF_ACCESS_CLIENT_SECRET = 'svc-secret';
-      process.env.CF_ACCESS_TOKEN = 'jwt-keep-me';
+      process.env.CF_ACCESS_TOKEN = 'access-jwt';
+      process.env.CLOUDFLARE_API_TOKEN = 'cloudflare-token';
+      process.env.VOID_TOKEN = 'project-token';
+      process.env.DATABASE_URL = 'postgresql://production:secret@db.example.com/app';
+      process.env.ACTIONS_ID_TOKEN_REQUEST_URL = 'https://actions.example.com/oidc';
+      process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN = 'actions-oidc-bearer';
 
       const childEnv = buildEnv({ VOID_DEPLOY_PROJECT_ID: 'proj_1' });
 
       // Pair scrubbed from the CHILD env...
       expect(childEnv.CF_ACCESS_CLIENT_ID).toBeUndefined();
       expect(childEnv.CF_ACCESS_CLIENT_SECRET).toBeUndefined();
-      // ...the cloudflared JWT (dev path) and extras pass through...
-      expect(childEnv.CF_ACCESS_TOKEN).toBe('jwt-keep-me');
+      expect(childEnv.CF_ACCESS_TOKEN).toBeUndefined();
+      expect(childEnv.CLOUDFLARE_API_TOKEN).toBeUndefined();
+      expect(childEnv.VOID_TOKEN).toBeUndefined();
+      expect(childEnv.DATABASE_URL).toBeUndefined();
+      expect(childEnv.ACTIONS_ID_TOKEN_REQUEST_URL).toBeUndefined();
+      expect(childEnv.ACTIONS_ID_TOKEN_REQUEST_TOKEN).toBeUndefined();
       expect(childEnv.VOID_DEPLOY_PROJECT_ID).toBe('proj_1');
       // ...and process.env is untouched.
       expect(process.env.CF_ACCESS_CLIENT_ID).toBe('svc-id.access');
       expect(process.env.CF_ACCESS_CLIENT_SECRET).toBe('svc-secret');
+      expect(process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN).toBe('actions-oidc-bearer');
     } finally {
       const restore = (key: string, value: string | undefined): void => {
         if (value === undefined) {
@@ -361,7 +391,17 @@ describe('buildEnv', () => {
       restore('CF_ACCESS_CLIENT_ID', savedId);
       restore('CF_ACCESS_CLIENT_SECRET', savedSecret);
       restore('CF_ACCESS_TOKEN', savedToken);
+      restore('CLOUDFLARE_API_TOKEN', savedCloudflareToken);
+      restore('VOID_TOKEN', savedVoidToken);
+      restore('DATABASE_URL', savedDatabaseUrl);
+      restore('ACTIONS_ID_TOKEN_REQUEST_URL', savedActionsOidcUrl);
+      restore('ACTIONS_ID_TOKEN_REQUEST_TOKEN', savedActionsOidcToken);
     }
+  });
+
+  it('scrubs database credentials case-insensitively', () => {
+    const childEnv = buildEnv({ DaTaBaSe_Url: 'postgresql://production:secret@db/app' });
+    expect(Object.keys(childEnv).some((key) => key.toLowerCase() === 'database_url')).toBe(false);
   });
 });
 

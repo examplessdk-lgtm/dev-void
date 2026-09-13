@@ -94,6 +94,8 @@ type RoutingPluginOptions = {
   sandboxClassName?: string;
   live?: { bindingName: string; className: string };
   durableObjects?: Array<{ bindingName: string; className: string; filePath: string }>;
+  /** Data-preserving exports for removed WebSocket Durable Object routes. */
+  websocketTombstones?: Array<string>;
   onDevAssetRoutingPolicyChange?: (policy: AssetRoutingPolicy) => boolean;
 };
 
@@ -214,6 +216,7 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
     webSocketRuntimePath: resolveFile('#self/runtime/ws-server'),
     liveRuntimePath: resolveFile('#self/runtime/live-server'),
     hasLive: options.live !== undefined,
+    webSocketTombstones: options.websocketTombstones,
     reactRefresh: false,
     dev: false,
     devTriggerToken: options.devTriggerToken,
@@ -443,6 +446,7 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
       join(outDir, 'entry.ts'),
       compileWorkerEntry({
         remote,
+        webSocketClasses: options.websocketTombstones,
         runtimeEnvPath: compileOptions.runtimeEnvPath,
         runtimeEmailPath: compileOptions.runtimeEmailPath,
         envSchemaModule: getEnvSchemaModule(),
@@ -563,7 +567,8 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
         // it, and non-CF targets took the branch above. Read the command from
         // `resolvedConfig` (set in configResolved, available here) — not a stale
         // captured value.
-        const merged = collectRevalidate(readConfig(root), scan!.pages);
+        const buildConfig = readConfig(root);
+        const merged = collectRevalidate(buildConfig, scan!.pages);
         const emitIsr =
           !options.target &&
           resolvedConfig?.command === 'build' &&
@@ -576,14 +581,22 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
         isrRevalidate = emitIsr ? merged : undefined;
         // Resolve the ISR runtime path LAZILY — only when ISR is actually emitted
         // — so non-ISR/managed/dev builds never depend on it.
-        const isr = emitIsr ? { runtimePath: resolveFile('#self/runtime/isr-cache') } : undefined;
+        const isr = emitIsr
+          ? {
+              runtimePath: resolveFile('@void/isr/runtime'),
+              queryAllowlist: buildConfig.routing?.revalidateQueryAllowlist,
+            }
+          : undefined;
         writeFileIfChanged(
           join(outDir, 'entry.ts'),
           compileWorkerEntry({
             hasQueues: scan!.queues.length > 0,
             remote,
             assetsDir: resolvedConfig?.build.assetsDir,
-            webSocketClasses: (scan!.websockets ?? []).map((route) => route.className),
+            webSocketClasses: [
+              ...(scan!.websockets ?? []).map((route) => route.className),
+              ...(options.websocketTombstones ?? []),
+            ],
             runtimeEnvPath: compileOptions.runtimeEnvPath,
             runtimeEmailPath: compileOptions.runtimeEmailPath,
             envSchemaModule: getEnvSchemaModule(),
@@ -724,7 +737,10 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
               hasQueues: scan!.queues.length > 0,
               remote,
               assetsDir: resolvedConfig?.build.assetsDir,
-              webSocketClasses: (scan!.websockets ?? []).map((route) => route.className),
+              webSocketClasses: [
+                ...(scan!.websockets ?? []).map((route) => route.className),
+                ...(options.websocketTombstones ?? []),
+              ],
               runtimeEnvPath: compileOptions.runtimeEnvPath,
               runtimeEmailPath: compileOptions.runtimeEmailPath,
               envSchemaModule: getEnvSchemaModule(),

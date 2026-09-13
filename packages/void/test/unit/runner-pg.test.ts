@@ -1,6 +1,10 @@
 import { PGlite } from '@electric-sql/pglite';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vite-plus/test';
-import { applyPgMigrations, type PgClient } from '../../src/migrations/runner-pg.ts';
+import {
+  applyPgMigrations,
+  readPgAppliedMigrations,
+  type PgClient,
+} from '../../src/migrations/runner-pg.ts';
 
 let pglite: PGlite;
 let client: PgClient;
@@ -157,5 +161,25 @@ describe('applyPgMigrations', () => {
     // No tracking entry
     const tracking = await pglite.query('SELECT name FROM _void_migrations');
     expect(tracking.rows).toHaveLength(0);
+  });
+});
+
+describe('readPgAppliedMigrations', () => {
+  it('reads status without creating the tracking table', async () => {
+    await expect(readPgAppliedMigrations(client)).resolves.toEqual([]);
+    const tracking = await pglite.query(
+      "SELECT table_name FROM information_schema.tables WHERE table_name = '_void_migrations'",
+    );
+    expect(tracking.rows).toEqual([]);
+  });
+
+  it('fails closed on errors other than a missing tracking table', async () => {
+    const permissionError = Object.assign(new Error('permission denied'), { code: '42501' });
+    const failing: PgClient = {
+      query: async () => {
+        throw permissionError;
+      },
+    };
+    await expect(readPgAppliedMigrations(failing)).rejects.toBe(permissionError);
   });
 });

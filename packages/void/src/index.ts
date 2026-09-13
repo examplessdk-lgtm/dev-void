@@ -1,6 +1,7 @@
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, writeSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { cloudflare, type PluginConfig, type WorkerConfig } from '@cloudflare/vite-plugin';
+import { appendSqliteClassMigration } from '@void/deploy-core';
 import { join } from 'pathslash';
 import pc from 'picocolors';
 import { loadEnv, type Plugin } from 'vite';
@@ -22,10 +23,12 @@ import {
   normalizeWranglerCompatibilityFlags,
   nextDurableObjectMigrationTag,
   readWranglerCompat,
+  readWranglerWebSocketTombstones,
   readExistingLiveBindingConfig,
   resolveLiveBindingConfig,
   syncWranglerBindings,
   syncWranglerDurableObjects,
+  syncWranglerWebSockets,
 } from './cli/wrangler.ts';
 import { writeFileIfChanged } from './codegen/write-if-changed.ts';
 import {
@@ -884,8 +887,14 @@ export function voidPlugin(options?: {
       );
     }
   }
+  let websocketTombstones: Array<string> = [];
   if (!isNodeTarget(config.target)) {
     syncWranglerDurableObjects(root, durableObjects);
+    const productionWebSocketRoutes = websocketRoutes.filter((route) =>
+      isRouteEnabledForEnvironment(route, 'prod'),
+    );
+    syncWranglerWebSockets(root, productionWebSocketRoutes);
+    websocketTombstones = readWranglerWebSocketTombstones(root, productionWebSocketRoutes);
   }
   const liveConfig = !isNodeTarget(config.target)
     ? bindings.needsLive
@@ -1075,6 +1084,12 @@ export function voidPlugin(options?: {
   // Core worker config — always set by voidPlugin (main, triggers, assets).
   // Bindings are handled separately in the config function below.
   const workerConfig: Record<string, unknown> = {};
+  const jobs = scanJobsSync(root, paths.cronsDir);
+  if (jobs.length > 0) {
+    workerConfig.triggers = {
+      crons: jobs.flatMap((job) => job.crons),
+    };
+  }
   let assetRouting: AssetRoutingPolicy;
   if (config.worker?.vars) {
     workerConfig.vars = { ...config.worker.vars };
@@ -1276,6 +1291,16 @@ export function voidPlugin(options?: {
         ((resolved as DurableObjectBindingsConfig).durable_objects?.bindings as
           | Array<{ name: string; class_name: string }>
           | undefined) ?? [];
+      for (const route of environmentWebsocketRoutes) {
+        const conflict = existingDurableObjectBindings.find(
+          (binding) => binding.name === route.bindingName && binding.class_name !== route.className,
+        );
+        if (conflict) {
+          throw new Error(
+            `websocket: binding '${route.bindingName}' is already configured for class '${conflict.class_name}', but '${route.filePath}' requires '${route.className}'.`,
+          );
+        }
+      }
       const missingDurableObjectBindings = environmentWebsocketRoutes
         .filter(
           (route) =>
@@ -1292,13 +1317,15 @@ export function voidPlugin(options?: {
         };
       }
 
-      if (!Array.isArray((resolved as Record<string, unknown>).migrations)) {
-        (result as Record<string, unknown>).migrations = [
-          {
-            tag: 'void-ws-v1',
-            new_classes: environmentWebsocketRoutes.map((route) => route.className),
-          },
-        ];
+      const currentMigrations = (resolved as Record<string, unknown>).migrations;
+      const planned = appendSqliteClassMigration(
+        Array.isArray(currentMigrations) ? currentMigrations : [],
+        environmentWebsocketRoutes.map((route) => route.className),
+        'void-ws-v1',
+        existingDurableObjectBindings.map((binding) => binding.class_name),
+      );
+      if (planned.added) {
+        (result as Record<string, unknown>).migrations = planned.migrations;
       }
     }
 
@@ -2075,7 +2102,6 @@ export function voidPlugin(options?: {
     workerConfig.compatibility_flags = normalizedFlags;
   }
 
-  const jobs = scanJobsSync(root, paths.cronsDir);
   const ssrEntry = validateSsrEntry(root, paths);
   const hasPages = existsSync(paths.pagesDir);
   const hasMiddleware = scanMiddlewareSync(root, paths).length > 0;
@@ -2109,12 +2135,6 @@ export function voidPlugin(options?: {
   assetRouting = resolveConfiguredAssetRoutingPolicy();
 
   workerConfig.main = join(root, '.void', 'entry.ts');
-
-  if (jobs.length > 0) {
-    workerConfig.triggers = {
-      crons: jobs.flatMap((job) => job.crons),
-    };
-  }
 
   function applyAssetRoutingPolicy(policy: AssetRoutingPolicy): void {
     workerConfig.assets = {
@@ -2178,6 +2198,7 @@ export function voidPlugin(options?: {
       sandboxClassName: sandboxConfig?.className,
       live: liveConfig,
       durableObjects,
+      websocketTombstones,
       onDevAssetRoutingPolicyChange: updateDevAssetRoutingPolicy,
     }),
     drizzlePlugin(root, true, dialect, {

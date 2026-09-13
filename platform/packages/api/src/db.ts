@@ -556,9 +556,81 @@ export async function updateDeploymentStatus(
     );
 }
 
+/** Claim a protected cutover for compensation before reverting external state. */
+export async function beginDeploymentCompensation(db: Db, id: string): Promise<boolean> {
+  const updated = await db
+    .update(deployments)
+    .set({ status: 'compensating', updated_at: sql`now()` })
+    .where(and(eq(deployments.id, id), eq(deployments.status, 'cutover')))
+    .returning({ id: deployments.id });
+  return updated.length === 1;
+}
+
+/** Atomically protect an owned nonterminal deployment before external cutover. */
+export async function beginDeploymentCutover(db: Db, id: string): Promise<boolean> {
+  const updated = await db
+    .update(deployments)
+    .set({ status: 'cutover', updated_at: sql`now()` })
+    .where(
+      and(
+        eq(deployments.id, id),
+        inArray(deployments.status, ['pending', 'uploading', 'migrating', 'prerendering']),
+      ),
+    )
+    .returning({ id: deployments.id });
+  return updated.length === 1;
+}
+
 export async function getDeployment(db: Db, id: string): Promise<Deployment | null> {
   const [row] = await db.select().from(deployments).where(eq(deployments.id, id)).limit(1);
   return row ?? null;
+}
+
+/** Remove an internal rollback fence only when this request still owns it. */
+export async function deleteRollbackLease(db: Db, id: string, ownerId: string): Promise<boolean> {
+  const deleted = await db
+    .delete(deployments)
+    .where(
+      and(
+        eq(deployments.id, id),
+        eq(deployments.source, 'rollback-lease'),
+        sql`${deployments.manifest}::jsonb ->> 'ownerId' = ${ownerId}`,
+      ),
+    )
+    .returning({ id: deployments.id });
+  return deleted.length === 1;
+}
+
+export async function updateRollbackLeaseState(
+  db: Db,
+  id: string,
+  targetDeploymentId: string,
+  state: 'running' | 'retryable' | 'applied',
+  ownerId: string,
+  expectedOwnerId: string,
+  migrationDiff?: ReadonlyArray<string>,
+): Promise<boolean> {
+  const updated = await db
+    .update(deployments)
+    .set({
+      manifest: JSON.stringify({
+        version: 1,
+        targetDeploymentId,
+        state,
+        ownerId,
+        ...(migrationDiff ? { migrationDiff } : {}),
+      }),
+      updated_at: sql`now()`,
+    })
+    .where(
+      and(
+        eq(deployments.id, id),
+        eq(deployments.source, 'rollback-lease'),
+        sql`${deployments.manifest}::jsonb ->> 'ownerId' = ${expectedOwnerId}`,
+      ),
+    )
+    .returning({ id: deployments.id });
+  return updated.length === 1;
 }
 
 export async function getProjectDeployments(
@@ -569,7 +641,12 @@ export async function getProjectDeployments(
   return db
     .select()
     .from(deployments)
-    .where(eq(deployments.project_id, projectId))
+    .where(
+      and(
+        eq(deployments.project_id, projectId),
+        or(isNull(deployments.source), ne(deployments.source, 'rollback-lease')),
+      ),
+    )
     .orderBy(desc(deployments.created_at))
     .limit(limit);
 }
@@ -621,6 +698,9 @@ export async function failStaleDeployments(db: Db): Promise<number> {
     .where(
       and(
         notInArray(deployments.status, TERMINAL_DEPLOYMENT_STATUSES),
+        ne(deployments.status, 'cutover'),
+        ne(deployments.status, 'compensating'),
+        or(isNull(deployments.source), ne(deployments.source, 'rollback-lease')),
         sql`${deployments.updated_at} < now() - interval '30 minutes'`,
       ),
     );
@@ -642,6 +722,20 @@ export async function getActiveDeployment(db: Db, projectId: string): Promise<De
   return row ?? null;
 }
 
+/** Newest historical live row, used only to backfill legacy project pointers. */
+export async function getLatestLiveDeployment(
+  db: Db,
+  projectId: string,
+): Promise<Deployment | null> {
+  const [row] = await db
+    .select()
+    .from(deployments)
+    .where(and(eq(deployments.project_id, projectId), eq(deployments.status, 'live')))
+    .orderBy(desc(deployments.created_at))
+    .limit(1);
+  return row ?? null;
+}
+
 export async function cancelDeployment(
   db: Db,
   deploymentId: string,
@@ -657,6 +751,9 @@ export async function cancelDeployment(
     .where(
       and(
         eq(deployments.id, deploymentId),
+        ne(deployments.status, 'cutover'),
+        ne(deployments.status, 'compensating'),
+        or(isNull(deployments.source), ne(deployments.source, 'rollback-lease')),
         notInArray(deployments.status, TERMINAL_DEPLOYMENT_STATUSES),
       ),
     )
@@ -668,17 +765,37 @@ export async function getLastLiveAssetManifest(
   db: Db,
   projectId: string,
 ): Promise<Record<string, { hash: string; size: number }> | null> {
-  const [row] = await db
+  // Rollback can make an older deployment authoritative while newer rows keep
+  // status='live' for history. Asset carry-forward must follow the deployment
+  // actually serving the project, otherwise an identical redeploy of that
+  // newer row treats its hashes as cached even when the active serving
+  // manifest does not contain them and publishes missing paths.
+  const [activeRow] = await db
+    .select({ asset_hashes: deployments.asset_hashes })
+    .from(projects)
+    .innerJoin(deployments, eq(projects.active_deployment_id, deployments.id))
+    .where(and(eq(projects.id, projectId), eq(deployments.status, 'live')))
+    .limit(1);
+
+  if (activeRow) {
+    return activeRow.asset_hashes ? JSON.parse(activeRow.asset_hashes) : null;
+  }
+
+  // Legacy projects created before active_deployment_id was authoritative may
+  // still have a live row and routing entry but no project pointer. Preserve
+  // their old dedup behavior; returning every asset as needed would be safe but
+  // would cause an unnecessary one-time full upload.
+  const [legacyRow] = await db
     .select({ asset_hashes: deployments.asset_hashes })
     .from(deployments)
     .where(and(eq(deployments.project_id, projectId), eq(deployments.status, 'live')))
     .orderBy(desc(deployments.created_at))
     .limit(1);
 
-  if (!row?.asset_hashes) {
+  if (!legacyRow?.asset_hashes) {
     return null;
   }
-  return JSON.parse(row.asset_hashes);
+  return JSON.parse(legacyRow.asset_hashes);
 }
 
 export async function setActiveDeployment(

@@ -492,25 +492,36 @@ describe('per-deploy sandbox integration', () => {
     const project = await createTestProject(env.db, user.id, 'sb-teardown-race');
     const cf = mockCfApi();
 
-    // Hook: AFTER the slug ROUTING.put commits (routingSwitched=true), flip
-    // projects.status='deleting' so the very next FOR UPDATE check throws
-    // PROJECT_DELETING_ERROR_MESSAGE — which lands in the teardownRaceLost
-    // branch of the outer catch.
+    const previousRouting = JSON.stringify({ type: 'static', deploymentId: 'previous' });
+    await env.ROUTING.put(project.slug, previousRouting);
+
+    // Hook: AFTER the slug ROUTING.put commits (routingSwitched=true), model
+    // teardown taking authority: flip projects.status='deleting' and perform
+    // teardown's routing deletion before the deploy reaches its final
+    // FOR UPDATE check. The deploy compensation must not restore the previous
+    // value after teardown's one deletion pass.
     const originalPut = env.ROUTING.put.bind(env.ROUTING);
+    const originalDelete = env.ROUTING.delete.bind(env.ROUTING);
+    let teardownTriggered = false;
+    let teardownPromise: Promise<unknown> | undefined;
     const putSpy = vi.spyOn(env.ROUTING, 'put').mockImplementation((async (
       key: string,
       value: string | ArrayBuffer | ArrayBufferView | ReadableStream,
       options?: KVNamespacePutOptions,
     ) => {
       const result = await originalPut(key, value as never, options as never);
-      if (key === project.slug) {
-        // Flip status='deleting' AFTER the slug routing flips. The next
-        // FOR UPDATE re-check inside deploy.ts will throw and trigger the
-        // teardownRaceLost branch.
-        await env.db
+      if (key === project.slug && !teardownTriggered) {
+        teardownTriggered = true;
+        // Queue teardown behind the cutover's project-row lock. Do not await
+        // it here: PGlite uses one connection, so awaiting a second query from
+        // inside the transaction-backed ROUTING mock would deadlock the test.
+        // The queued query runs as soon as the cutover transaction releases
+        // the lock, before deploy's following database-finalize transaction.
+        teardownPromise = env.db
           .update(projects)
           .set({ status: 'deleting' })
-          .where(eq(projects.id, project.id));
+          .where(eq(projects.id, project.id))
+          .then(() => originalDelete(project.slug));
       }
       return result;
     }) as typeof env.ROUTING.put);
@@ -527,6 +538,13 @@ describe('per-deploy sandbox integration', () => {
         typeof e === 'object' && e !== null && (e as { event?: unknown }).event === 'error',
     );
     expect(errorEvent).toBeDefined();
+    await teardownPromise;
+
+    // Teardown's deletion remains authoritative. Before the compensation
+    // fence, restoreTrackedRouting() put `previousRouting` back here and a
+    // deleted project (or a later tenant reusing the slug) could be served by
+    // dispatch without consulting PostgreSQL.
+    expect(await env.ROUTING.get(project.slug)).toBeNull();
 
     putSpy.mockRestore();
 

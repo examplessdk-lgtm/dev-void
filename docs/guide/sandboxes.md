@@ -23,7 +23,7 @@ Importing from `void/sandbox` enables the `SANDBOX` Durable Object binding, expo
 
 ## Configuration
 
-Most apps do not need config. The default binding is `SANDBOX`, the Durable Object class is `Sandbox`, local development uses the Dockerfile bundled with `@cloudflare/sandbox`, and `void deploy` uses the matching published sandbox image.
+Most apps do not need config. The default binding is `SANDBOX`, the Durable Object class is `Sandbox`, and local Wrangler, native Cloudflare deploys, and Void Platform all use the published image matching the installed `@cloudflare/sandbox` version.
 
 Use `void.json` when you need a custom image or container size:
 
@@ -40,16 +40,16 @@ Use `void.json` when you need a custom image or container size:
 
 Available fields:
 
-| Field               | Default                        | Description                                              |
-| ------------------- | ------------------------------ | -------------------------------------------------------- |
-| `binding`           | `SANDBOX`                      | Worker binding name                                      |
-| `className`         | `Sandbox`                      | Durable Object class exported by the Worker              |
-| `containerName`     | `void-sandbox`                 | Cloudflare container app name                            |
-| `image`             | Bundled sandbox SDK Dockerfile | Dockerfile path or registry image used by Wrangler/local |
-| `imageBuildContext` | Directory of `image`           | Docker build context for Wrangler/local                  |
-| `platformImage`     | Matching sandbox SDK image     | Registry image used by `void deploy`                     |
-| `instanceType`      | `lite` on Void deploy          | Container size, such as `lite`, `basic`, `standard-1`    |
-| `maxInstances`      | `20` on Void deploy            | Maximum number of container instances                    |
+| Field               | Default                    | Description                                              |
+| ------------------- | -------------------------- | -------------------------------------------------------- |
+| `binding`           | `SANDBOX`                  | Worker binding name                                      |
+| `className`         | `Sandbox`                  | Durable Object class exported by the Worker              |
+| `containerName`     | `void-sandbox`             | Cloudflare container app name                            |
+| `image`             | Matching sandbox SDK image | Dockerfile path or registry image used by Wrangler/local |
+| `imageBuildContext` | Directory of `image`       | Docker build context for Wrangler/local                  |
+| `platformImage`     | Matching sandbox SDK image | Registry image used by `void deploy`                     |
+| `instanceType`      | `lite` on Void deploy      | Container size, such as `lite`, `basic`, `standard-1`    |
+| `maxInstances`      | `20` on Void deploy        | Maximum number of container instances                    |
 
 ## Runtime API
 

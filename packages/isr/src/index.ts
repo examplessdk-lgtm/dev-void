@@ -43,20 +43,13 @@ const ISR_LEGACY_CACHE_KEY_VERSION = 'v2';
  * `satisfies IsrCacheMetadata`. Keep the fields terse — this is stored on every
  * KV entry.
  */
-export type IsrCacheMetadata = Readonly<{
-  /** HTTP status code */
-  s: number;
-  /** createdAt (ms) */
-  c: number;
-  /** TTL (seconds) */
-  t: number;
-}>;
+export type { IsrCacheMetadata } from './core.ts';
 
 /**
  * Build the normalized path segment for an ISR-cached page.
  * Root path `/` maps to `__index__` to avoid trailing-slash ambiguity.
  */
-function normalizeIsrPath(pathname: string): string {
+export function normalizeIsrPath(pathname: string): string {
   let normalized = pathname;
   if (normalized === '/') {
     normalized = '__index__';
@@ -84,7 +77,7 @@ export function denormalizeIsrPath(normalized: string): string {
  * Equivalent to `denormalizeIsrPath(normalizeIsrPath(pathname))` — strips any
  * trailing slash except for root.
  */
-function canonicalIsrPathname(pathname: string): string {
+export function canonicalIsrPathname(pathname: string): string {
   return denormalizeIsrPath(normalizeIsrPath(pathname));
 }
 

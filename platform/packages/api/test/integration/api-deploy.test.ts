@@ -10,7 +10,15 @@ import {
   vi,
 } from 'vite-plus/test';
 import { computeAssetHash } from '../../src/assets.ts';
-import { updateDeploymentStatus } from '../../src/db.ts';
+import {
+  beginDeploymentCutover,
+  cancelDeployment,
+  failStaleDeployments,
+  getDeployment,
+  getProject,
+  updateDeploymentStatus,
+  type Db,
+} from '../../src/db.ts';
 import app from '../../src/index.ts';
 import { validateManifestShape } from '../../src/routes/deploy.ts';
 import {
@@ -37,6 +45,7 @@ import {
   CF_ACCOUNT_ID,
   type TestEnv,
 } from './helpers.ts';
+import { setTestDb } from './setup.ts';
 
 const nativeSetTimeout = globalThis.setTimeout.bind(globalThis);
 const enc = new TextEncoder();
@@ -68,6 +77,46 @@ function bytesToBase64(bytes: Uint8Array): string {
     binary += String.fromCharCode(bytes[i]);
   }
   return btoa(binary);
+}
+
+function injectLostGoLiveCommitAcknowledgement(projectId: string): {
+  wasInjected: () => boolean;
+  restore: () => void;
+} {
+  const realDb = env.db;
+  const realTransaction = realDb.transaction.bind(realDb);
+  let injected = false;
+  const wrappedDb = new Proxy(realDb, {
+    get(target, prop, receiver) {
+      if (prop === 'transaction') {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        return (async (fn: any) => {
+          const result = await realTransaction(fn);
+          if (!injected) {
+            const [project] = await realDb
+              .select({ activeDeploymentId: projects.active_deployment_id })
+              .from(projects)
+              .where(eq(projects.id, projectId))
+              .limit(1);
+            const active = project?.activeDeploymentId
+              ? await getDeployment(realDb, project.activeDeploymentId)
+              : null;
+            if (active?.status === 'live') {
+              injected = true;
+              throw new Error('database connection lost after COMMIT');
+            }
+          }
+          return result;
+        }) as unknown as typeof realDb.transaction;
+      }
+      return Reflect.get(target, prop, receiver);
+    },
+  }) as Db;
+  setTestDb(wrappedDb);
+  return {
+    wasInjected: () => injected,
+    restore: () => setTestDb(realDb),
+  };
 }
 
 /**
@@ -421,7 +470,6 @@ describe('POST /projects/:id/deploy', () => {
         },
       }),
     } as unknown as DurableObjectNamespace;
-
     const testEnv = { ...env, CRON_SCHEDULER: cronSchedulerMock };
     // Cron sync runs in waitUntil — capture and await it before assertions.
     const { ctx, pending } = createWaitUntilTrackingCtx();
@@ -449,6 +497,72 @@ describe('POST /projects/:id/deploy', () => {
     expect(payload.schedules).toEqual([{ name: 'sync', cron: '0 * * * *' }]);
     expect(payload.proxyToken).toEqual(expect.any(String));
     expect(payload.proxyToken.length).toBeGreaterThan(0);
+  });
+
+  it('fails cutover and restores routing and cron state when cron sync is unavailable', async () => {
+    mockSetTimeout();
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'cron-sync-failure');
+    mockCfApi();
+    const previousRouting = JSON.stringify({
+      workerName: 'user-cron-sync-failure-dpl_live',
+      projectId: project.id,
+      version: 'dpl_live',
+      hasCrons: true,
+    });
+    await env.ROUTING.put(project.slug, previousRouting);
+    const previousCronState = {
+      workerName: 'user-cron-sync-failure-dpl_live',
+      schedules: [{ name: 'old', cron: '0 * * * *' }],
+      proxyToken: 'old-token',
+    };
+    const syncedStates: Array<typeof previousCronState> = [];
+    const cronSchedulerMock = {
+      idFromName: (name: string) => ({ toString: () => name }),
+      get: (_id: unknown) => ({
+        fetch: async (request: Request) => {
+          if (new URL(request.url).pathname === '/snapshot') {
+            return Response.json({ state: previousCronState });
+          }
+          const state = (await request.json()) as typeof previousCronState;
+          syncedStates.push(state);
+          if (state.workerName !== previousCronState.workerName) {
+            return new Response('unavailable', { status: 503 });
+          }
+          return Response.json({ ok: true });
+        },
+      }),
+    } as unknown as DurableObjectNamespace;
+    const originalDelete = env.ROUTING.delete.bind(env.ROUTING);
+    const projectAccountKey = `project:${project.id}`;
+    let projectAccountRestoreFailed = false;
+    vi.spyOn(env.ROUTING, 'delete').mockImplementation(async (key) => {
+      if (key === projectAccountKey && !projectAccountRestoreFailed) {
+        projectAccountRestoreFailed = true;
+        throw new Error('injected first compensation failure');
+      }
+      return originalDelete(key);
+    });
+
+    const res = await app.fetch(
+      await buildDeployRequest(env, project.id, user.jwt, {
+        manifest: {
+          version: 3,
+          bindings: {},
+          schedules: [{ name: 'new', cron: '*/5 * * * *' }],
+        },
+      }),
+      { ...env, CRON_SCHEDULER: cronSchedulerMock },
+    );
+    const events = await readAllEvents(res);
+
+    expect(events.some((event) => (event as DeployEvent).event === 'done')).toBe(false);
+    expect(events.some((event) => (event as DeployEvent).event === 'error')).toBe(true);
+    expect(projectAccountRestoreFailed).toBe(true);
+    // The failed project-account undo is first in reverse order. The slug
+    // restoration must still run instead of being skipped after that error.
+    expect(await env.ROUTING.get(project.slug)).toBe(previousRouting);
+    expect(syncedStates.at(-1)).toEqual(previousCronState);
   });
 
   it('clears cron schedules when previous deploy had crons', async () => {
@@ -1279,6 +1393,78 @@ describe('POST /projects/:id/deploy', () => {
       proxyToken: expect.any(String),
     });
     expect(queueRouting?.proxyToken.length ?? 0).toBeGreaterThan(0);
+  });
+
+  it('removes queue routing entries omitted by the next deployment', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'queue-route-removal');
+    mockCfApi();
+
+    const first = await app.fetch(
+      await buildDeployRequest(env, project.id, user.jwt, {
+        manifest: {
+          version: 3,
+          bindings: {},
+          queues: [{ name: 'emails', bindingName: 'QUEUE_EMAILS' }],
+        },
+      }),
+      env,
+    );
+    await first.text();
+
+    const routingKey = `queue:${project.id.toLowerCase().replaceAll('_', '-')}-emails`;
+    expect(await env.ROUTING.get(routingKey)).not.toBeNull();
+
+    const second = await app.fetch(
+      await buildDeployRequest(env, project.id, user.jwt, {
+        manifest: { version: 3, bindings: {} },
+      }),
+      env,
+    );
+    const events = await readAllEvents(second);
+
+    expect(events.some((event) => (event as DeployEvent).event === 'done')).toBe(true);
+    expect(await env.ROUTING.get(routingKey)).toBeNull();
+  });
+
+  it('restores exact queue routing after a later routing switch fails', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'queue-route-restore');
+    mockCfApi();
+    const manifest = {
+      version: 3,
+      bindings: {},
+      queues: [{ name: 'emails', bindingName: 'QUEUE_EMAILS' }],
+    };
+
+    const first = await app.fetch(
+      await buildDeployRequest(env, project.id, user.jwt, { manifest }),
+      env,
+    );
+    await first.text();
+
+    const routingKey = `queue:${project.id.toLowerCase().replaceAll('_', '-')}-emails`;
+    const previousQueueRouting = await env.ROUTING.get(routingKey);
+    expect(previousQueueRouting).not.toBeNull();
+
+    const originalPut = env.ROUTING.put.bind(env.ROUTING);
+    let failedSlugWrite = false;
+    vi.spyOn(env.ROUTING, 'put').mockImplementation(async (key, value, options) => {
+      if (key === project.slug && !failedSlugWrite) {
+        failedSlugWrite = true;
+        throw new Error('injected routing switch failure');
+      }
+      return originalPut(key, value, options);
+    });
+
+    const second = await app.fetch(
+      await buildDeployRequest(env, project.id, user.jwt, { manifest }),
+      env,
+    );
+    const events = await readAllEvents(second);
+
+    expect(events.some((event) => (event as DeployEvent).event === 'done')).toBe(false);
+    expect(await env.ROUTING.get(routingKey)).toBe(previousQueueRouting);
   });
 
   it('does not overwrite live queue KV when a conflicting deploy fails', async () => {
@@ -2512,31 +2698,46 @@ describe('Deploy serialization (concurrent deploy guard)', () => {
     expect(body.deployment).toBe('dpl_active');
   });
 
-  it('auto-fails stale deployment (>10 min) and allows new deploy', async () => {
+  it('fences a stale deployment before allowing a replacement deploy', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id, 'stale-app');
     mockCfApi();
 
-    // Insert a stale active deployment (created 15 minutes ago)
+    // Insert a stale active deployment whose handler may still be running.
     const staleTime = new Date(Date.now() - 15 * 60 * 1000).toISOString();
     await env.db.insert(deployments).values({
       id: 'dpl_stale',
       project_id: project.id,
       status: 'uploading',
       created_at: staleTime,
+      updated_at: staleTime,
     });
 
     const res = await app.fetch(await buildDeployRequest(env, project.id, user.jwt), env);
-    expect(res.status).toBe(200);
-    await res.text();
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({
+      error: 'deploy cancellation requested',
+      deployment: 'dpl_stale',
+    });
 
-    // Verify stale deployment was auto-failed
+    // The first request only fences the old handler; it does not admit a
+    // concurrent pipeline that could still mutate routing or triggers.
     const [stale] = await env.db
       .select({ status: deployments.status, error_message: deployments.error_message })
       .from(deployments)
       .where(eq(deployments.id, 'dpl_stale'));
-    expect(stale?.status).toBe('failed');
+    expect(stale?.status).toBe('canceling');
     expect(stale?.error_message).toBe('timed out');
+
+    const retry = await app.fetch(await buildDeployRequest(env, project.id, user.jwt), env);
+    expect(retry.status).toBe(409);
+
+    // Once the old handler acknowledges cancellation, a retry may claim and
+    // complete the deployment normally.
+    await updateDeploymentStatus(env.db, 'dpl_stale', 'canceled', 'timed out', { force: true });
+    const replacement = await app.fetch(await buildDeployRequest(env, project.id, user.jwt), env);
+    expect(replacement.status).toBe(200);
+    expect(parseDeployStream(await replacement.text()).at(-1)).toMatchObject({ event: 'done' });
   });
 
   it('keeps a canceling deployment active until the deploy handler observes cancellation', async () => {
@@ -2629,6 +2830,30 @@ describe('Deploy serialization (concurrent deploy guard)', () => {
     // Drain the NDJSON stream so the deploy IIFE (which holds deployments-table
     // writes) finishes before the next beforeEach runs clearTables.
     await readAllEvents(res);
+  });
+
+  it('persists WfP fallback placement before the deployment goes live', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'wfp-final-asset-fence');
+    const content = '<html>worker fallback must survive</html>';
+    const bytes = new TextEncoder().encode(content);
+    const hash = computeAssetHash(bytes.buffer as ArrayBuffer, '/index.html');
+    mockCfApi();
+
+    const response = await app.fetch(
+      await buildDeployRequest(env, project.id, user.jwt, {
+        assets: { 'index.html': content },
+      }),
+      env,
+    );
+    expect(response.status).toBe(200);
+    expect(parseDeployStream(await response.text()).at(-1)).toMatchObject({ event: 'done' });
+    const activeId = (await getProject(env.db, project.id))?.active_deployment_id;
+    expect(activeId).toBeTruthy();
+    const active = await getDeployment(env.db, activeId!);
+    expect(JSON.parse(active!.asset_hashes!)).toMatchObject({
+      '/index.html': { hash, store: 'r2' },
+    });
   });
 });
 
@@ -2731,6 +2956,1035 @@ describe('POST /projects/:id/deploy (static)', () => {
       .from(projects)
       .where(eq(projects.id, project.id));
     expect(row?.type).toBe('static');
+  });
+
+  it('publishes freshly uploaded unchanged assets when converting legacy WfP to static', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'legacy-wfp-to-static');
+    const source = await createTestDeployment(env.db, project.id, 'live');
+    const content = '<html>same asset, new backend</html>';
+    const bytes = new TextEncoder().encode(content);
+    const hash = computeAssetHash(bytes.buffer as ArrayBuffer, '/index.html');
+    await env.db
+      .update(deployments)
+      .set({
+        retained: true,
+        manifest: JSON.stringify({ version: 3, bindings: {} }),
+        asset_hashes: JSON.stringify({ '/index.html': { hash, size: bytes.length } }),
+      })
+      .where(eq(deployments.id, source.id));
+    await env.db
+      .update(projects)
+      .set({ active_deployment_id: source.id, type: 'void' })
+      .where(eq(projects.id, project.id));
+    await env.ROUTING.put(
+      project.slug,
+      JSON.stringify({
+        workerName: `user-${project.slug}-${source.id}`,
+        projectId: project.id,
+        userId: user.id,
+        version: source.id,
+      }),
+    );
+    // Legacy WfP deployments predate serving-manifest mirroring.
+    expect(await env.ROUTING.get(`manifest:${source.id}`)).toBeNull();
+
+    const preflight = await app.fetch(
+      new Request(`http://localhost/projects/${project.id}/deploy/preflight`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${user.jwt}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          hasWorker: false,
+          assetManifest: { '/index.html': { hash, size: bytes.length } },
+        }),
+      }),
+      env,
+    );
+    expect(await preflight.json()).toEqual({
+      needed: ['/index.html'],
+      total: 1,
+      skipped: 0,
+    });
+
+    mockCfApi();
+    const response = await app.fetch(
+      await buildDeployRequest(env, project.id, user.jwt, {
+        manifest: {
+          version: 3,
+          type: 'static',
+          bindings: {},
+          assetConfig: { not_found_handling: '404-page' },
+        },
+        assets: { 'index.html': content },
+        omitDefaultWorker: true,
+        preflight: 'true',
+      }),
+      env,
+    );
+    expect(response.status).toBe(200);
+    const events = parseDeployStream(await response.text());
+    expect(events.at(-1)).toMatchObject({ event: 'done' });
+    const done = events.at(-1) as { deployment: string };
+    expect(await env.ROUTING.get(`manifest:${done.deployment}`, 'json')).toEqual({
+      '/index.html': `!${hash}`,
+    });
+  });
+
+  it('rejects WfP to static conversion when an unchanged asset was not re-uploaded', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'wfp-to-static-missing-upload');
+    const source = await createTestDeployment(env.db, project.id, 'live');
+    const hash = '8'.repeat(32);
+    await env.db
+      .update(deployments)
+      .set({
+        retained: true,
+        manifest: JSON.stringify({ version: 3, type: 'void', bindings: {} }),
+        asset_hashes: JSON.stringify({ '/index.html': { hash, size: 100 } }),
+      })
+      .where(eq(deployments.id, source.id));
+    await env.db
+      .update(projects)
+      .set({ active_deployment_id: source.id, type: 'void' })
+      .where(eq(projects.id, project.id));
+    await env.ROUTING.put(
+      project.slug,
+      JSON.stringify({
+        workerName: `user-${project.slug}-${source.id}`,
+        projectId: project.id,
+        userId: user.id,
+        version: source.id,
+      }),
+    );
+
+    const response = await app.fetch(
+      await buildDeployRequest(env, project.id, user.jwt, {
+        manifest: {
+          version: 3,
+          type: 'static',
+          bindings: {},
+          assetConfig: { not_found_handling: '404-page' },
+        },
+        omitDefaultWorker: true,
+        assetManifest: { '/index.html': { hash, size: 100 } },
+      }),
+      env,
+    );
+    expect(response.status).toBe(200);
+    expect(parseDeployStream(await response.text()).at(-1)).toMatchObject({
+      event: 'error',
+      message: expect.stringContaining('declared asset hash not found in R2'),
+    });
+    expect((await getProject(env.db, project.id))?.active_deployment_id).toBe(source.id);
+    expect(await env.ROUTING.get(project.slug, 'json')).toMatchObject({
+      workerName: `user-${project.slug}-${source.id}`,
+    });
+  });
+
+  it('persists static R2 placement before the deployment goes live', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'static-final-asset-fence');
+    const content = '<html>must survive until commit</html>';
+    const bytes = new TextEncoder().encode(content);
+    const hash = computeAssetHash(bytes.buffer as ArrayBuffer, '/index.html');
+    mockCfApi();
+
+    const response = await app.fetch(
+      await buildStaticDeployRequest(env, project.id, user.jwt, {
+        type: 'static',
+        assets: { 'index.html': content },
+      }),
+      env,
+    );
+    expect(response.status).toBe(200);
+    expect(parseDeployStream(await response.text()).at(-1)).toMatchObject({ event: 'done' });
+    const activeId = (await getProject(env.db, project.id))?.active_deployment_id;
+    expect(activeId).toBeTruthy();
+    const active = await getDeployment(env.db, activeId!);
+    expect(JSON.parse(active!.asset_hashes!)).toEqual({
+      '/index.html': { hash, size: bytes.length, store: 'r2' },
+    });
+  });
+
+  it('keeps an aged asset claimed by a deployment that becomes in-flight during GC', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'static-inflight-asset-fence');
+    const protectedDeployment = await createTestDeployment(env.db, project.id, 'failed');
+    const protectedHash = '9'.repeat(32);
+    const protectedKey = `assets/${project.id}/${protectedHash}`;
+    await env.db
+      .update(deployments)
+      .set({
+        asset_hashes: JSON.stringify({
+          '/pending.js': { hash: protectedHash, size: 100, store: 'r2' },
+        }),
+      })
+      .where(eq(deployments.id, protectedDeployment.id));
+    await env.STATIC_ASSETS_R2.put(protectedKey, new TextEncoder().encode('pending asset'));
+
+    const oldUpload = new Date(Date.now() - 2 * 60 * 60 * 1000);
+    const originalList = env.STATIC_ASSETS_R2.list.bind(env.STATIC_ASSETS_R2);
+    const originalHead = env.STATIC_ASSETS_R2.head.bind(env.STATIC_ASSETS_R2);
+    let transactionDepth = 0;
+    const listSpy = vi.spyOn(env.STATIC_ASSETS_R2, 'list').mockImplementation(async (options) => {
+      expect(transactionDepth).toBe(0);
+      const result = await originalList(options);
+      for (const object of result.objects) {
+        if (object.key === protectedKey) {
+          Object.defineProperty(object, 'uploaded', { configurable: true, value: oldUpload });
+        }
+      }
+      return result;
+    });
+    const headSpy = vi.spyOn(env.STATIC_ASSETS_R2, 'head').mockImplementation(async (key) => {
+      const object = await originalHead(key);
+      if (object && key === protectedKey) {
+        Object.defineProperty(object, 'uploaded', { configurable: true, value: oldUpload });
+      }
+      return object;
+    });
+
+    const realDb = env.db;
+    const realTransaction = realDb.transaction.bind(realDb);
+    const wrappedDb = new Proxy(realDb, {
+      get(target, property, receiver) {
+        if (property === 'transaction') {
+          return (async (callback: Parameters<typeof realTransaction>[0]) =>
+            realTransaction(async (tx) => {
+              transactionDepth++;
+              try {
+                return await callback(tx);
+              } finally {
+                transactionDepth--;
+              }
+            })) as typeof realDb.transaction;
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    }) as Db;
+    setTestDb(wrappedDb);
+
+    mockCfApi({
+      deleteWorker: async (url) => {
+        if (url.endsWith(`/scripts/user-${project.slug}`)) {
+          await realDb
+            .update(deployments)
+            .set({ status: 'pending' })
+            .where(eq(deployments.id, protectedDeployment.id));
+        }
+        return cfSuccess(null);
+      },
+    });
+
+    try {
+      const response = await app.fetch(
+        await buildStaticDeployRequest(env, project.id, user.jwt, { type: 'static' }),
+        env,
+      );
+      expect(response.status).toBe(200);
+      expect(parseDeployStream(await response.text()).at(-1)).toMatchObject({ event: 'done' });
+      expect(await env.STATIC_ASSETS_R2.head(protectedKey)).not.toBeNull();
+    } finally {
+      setTestDb(realDb);
+      listSpy.mockRestore();
+      headSpy.mockRestore();
+    }
+  });
+
+  it('preserves retained Worker scripts for rollback after a static deploy', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'static-retains-worker');
+    const workerDeploymentId = 'dpl_retained_worker';
+    await env.db.insert(deployments).values({
+      id: workerDeploymentId,
+      project_id: project.id,
+      status: 'live',
+      manifest: JSON.stringify({ version: 4, type: 'void', bindings: {} }),
+      retained: true,
+      deployed_at: sql`now()`,
+    });
+    await env.db
+      .update(projects)
+      .set({ active_deployment_id: workerDeploymentId, type: 'void' })
+      .where(eq(projects.id, project.id));
+    const fetchMock = mockCfApi();
+
+    const res = await app.fetch(
+      await buildStaticDeployRequest(env, project.id, user.jwt, { type: 'static' }),
+      env,
+    );
+    expect(res.status).toBe(200);
+    expect(parseDeployStream(await res.text()).at(-1)).toMatchObject({ event: 'done' });
+
+    const retainedWorkerUrl = `/scripts/user-${project.slug}-${workerDeploymentId}`;
+    const retainedWorkerDeletes = fetchMock.mock.calls.filter((call: Array<unknown>) => {
+      const url = typeof call[0] === 'string' ? call[0] : '';
+      const init = call[1] as RequestInit | undefined;
+      return url.includes(retainedWorkerUrl) && init?.method === 'DELETE';
+    });
+    expect(retainedWorkerDeletes).toHaveLength(0);
+    expect((await getDeployment(env.db, workerDeploymentId))?.retained).toBe(true);
+  });
+
+  it('does not evict a retained Worker that a concurrent rollback made active', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'static-retention-rollback-race');
+    const rollbackAssetBody = new TextEncoder().encode('live rollback asset');
+    const rollbackAssetHash = computeAssetHash(
+      rollbackAssetBody.buffer as ArrayBuffer,
+      '/rollback.txt',
+    );
+    const retainedRows = Array.from({ length: 100 }, (_, index) => {
+      const timestamp = new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString();
+      return {
+        id: `dpl_static_retained_${index.toString().padStart(3, '0')}`,
+        project_id: project.id,
+        status: 'live' as const,
+        manifest: JSON.stringify({ version: 4, type: 'void', bindings: {} }),
+        asset_hashes:
+          index === 0
+            ? JSON.stringify({
+                '/rollback.txt': { hash: rollbackAssetHash, size: rollbackAssetBody.length },
+              })
+            : null,
+        retained: true,
+        created_at: timestamp,
+        updated_at: timestamp,
+        deployed_at: timestamp,
+      };
+    });
+    const rollbackTarget = retainedRows[0];
+    await env.db.insert(deployments).values(retainedRows);
+    await env.STATIC_ASSETS_R2.put(
+      `assets/${project.id}/${rollbackAssetHash}`,
+      rollbackAssetBody as unknown as ArrayBuffer,
+    );
+    await env.db
+      .update(projects)
+      .set({ active_deployment_id: rollbackTarget.id, type: 'void' })
+      .where(eq(projects.id, project.id));
+
+    // A static deploy deletes the obsolete unversioned legacy Worker just
+    // before it computes retention. Use that boundary to model a rollback
+    // committing after the static cutover but before the eviction pass.
+    const fetchMock = mockCfApi({
+      deleteWorker: async (url) => {
+        if (url.endsWith(`/scripts/user-${project.slug}`)) {
+          await env.db
+            .update(projects)
+            .set({ active_deployment_id: rollbackTarget.id, type: 'void' })
+            .where(eq(projects.id, project.id));
+        }
+        return cfSuccess(null);
+      },
+    });
+
+    const res = await app.fetch(
+      await buildStaticDeployRequest(env, project.id, user.jwt, { type: 'static' }),
+      env,
+    );
+    expect(res.status).toBe(200);
+    expect(parseDeployStream(await res.text()).at(-1)).toMatchObject({ event: 'done' });
+
+    const targetWorkerUrl = `/scripts/user-${project.slug}-${rollbackTarget.id}`;
+    const targetDeletes = fetchMock.mock.calls.filter((call: Array<unknown>) => {
+      const url = typeof call[0] === 'string' ? call[0] : '';
+      const init = call[1] as RequestInit | undefined;
+      return url.includes(targetWorkerUrl) && init?.method === 'DELETE';
+    });
+    expect(targetDeletes).toHaveLength(0);
+    expect((await getDeployment(env.db, rollbackTarget.id))?.retained).toBe(true);
+    const retainedAsset = await env.STATIC_ASSETS_R2.get(
+      `assets/${project.id}/${rollbackAssetHash}`,
+    );
+    expect(retainedAsset).not.toBeNull();
+    expect(new Uint8Array(await retainedAsset!.arrayBuffer())).toEqual(rollbackAssetBody);
+  });
+});
+
+describe('ambiguous go-live commit outcomes', () => {
+  it('never resurrects a terminal deployment into protected cutover', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'cutover-cas-terminal');
+    const deployment = await createTestDeployment(env.db, project.id, 'failed');
+
+    expect(await beginDeploymentCutover(env.db, deployment.id)).toBe(false);
+    expect((await getDeployment(env.db, deployment.id))?.status).toBe('failed');
+  });
+
+  it('replays a stale protected intent before accepting a fresh deployment', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'stale-cutover-replay');
+    const source = await createTestDeployment(env.db, project.id, 'live');
+    await env.db
+      .update(deployments)
+      .set({ retained: true, manifest: JSON.stringify({ version: 3, type: 'void', bindings: {} }) })
+      .where(eq(deployments.id, source.id));
+    await env.db
+      .update(projects)
+      .set({ active_deployment_id: source.id, type: 'void' })
+      .where(eq(projects.id, project.id));
+    const abandoned = await createTestDeployment(env.db, project.id, 'pending');
+    await env.db
+      .update(deployments)
+      .set({
+        status: 'cutover',
+        manifest: JSON.stringify({
+          version: 3,
+          type: 'static',
+          bindings: {},
+          assetConfig: { not_found_handling: '404-page' },
+        }),
+        updated_at: '2020-01-01T00:00:00.000Z',
+      })
+      .where(eq(deployments.id, abandoned.id));
+    await env.ROUTING.put(
+      `cutover-intent:${abandoned.id}`,
+      JSON.stringify({ projectId: project.id, ownerId: 'dead-owner', buildId: null }),
+    );
+    // Model a crash after only the slug route changed: there is no ready
+    // marker, so recovery must replay the abandoned manifest rather than
+    // promoting it blindly or wedging the project forever.
+    await env.ROUTING.put(
+      project.slug,
+      JSON.stringify({ projectId: project.id, deploymentId: abandoned.id }),
+    );
+
+    const response = await app.fetch(
+      await buildStaticDeployRequest(env, project.id, user.jwt, {
+        type: 'spa',
+        assets: { 'index.html': 'fresh deployment' },
+      }),
+      env,
+    );
+    expect(response.status).toBe(200);
+    const events = parseDeployStream(await response.text());
+    expect(events.at(-1)).toMatchObject({ event: 'done' });
+    expect(await getDeployment(env.db, abandoned.id)).toMatchObject({
+      status: 'live',
+      retained: true,
+    });
+    const done = events.at(-1) as { deployment: string };
+    expect(done.deployment).not.toBe(abandoned.id);
+  });
+
+  it('restores the committed deployment when stale cutover replay fails mid-surface', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'stale-cutover-replay-failure');
+    const source = await createTestDeployment(env.db, project.id, 'live');
+    await env.db
+      .update(deployments)
+      .set({
+        retained: true,
+        manifest: JSON.stringify({ version: 3, type: 'static', bindings: {} }),
+      })
+      .where(eq(deployments.id, source.id));
+    const abandoned = await createTestDeployment(env.db, project.id, 'pending');
+    await env.db
+      .update(deployments)
+      .set({
+        status: 'cutover',
+        manifest: JSON.stringify({ version: 3, type: 'static', bindings: {} }),
+        updated_at: '2020-01-01T00:00:00.000Z',
+      })
+      .where(eq(deployments.id, abandoned.id));
+    await env.ROUTING.put(
+      `cutover-intent:${abandoned.id}`,
+      JSON.stringify({ projectId: project.id, ownerId: 'dead-owner', buildId: null }),
+    );
+    await env.ROUTING.put(
+      project.slug,
+      JSON.stringify({ projectId: project.id, deploymentId: source.id }),
+    );
+    mockCfApi();
+
+    const originalPut = env.ROUTING.put.bind(env.ROUTING);
+    let injected = false;
+    const putSpy = vi.spyOn(env.ROUTING, 'put').mockImplementation(async (key, value, options) => {
+      if (key === `project:${project.id}` && !injected) {
+        injected = true;
+        throw new Error('injected stale replay surface failure');
+      }
+      return originalPut(key, value, options);
+    });
+    try {
+      const response = await app.fetch(
+        await buildStaticDeployRequest(env, project.id, user.jwt, {
+          type: 'static',
+          assets: { 'index.html': 'fresh after recovered replay' },
+        }),
+        env,
+      );
+      expect(response.status).toBe(200);
+      const events = parseDeployStream(await response.text());
+      expect(events.at(-1)).toMatchObject({ event: 'done' });
+      expect(injected).toBe(true);
+      expect(await getDeployment(env.db, abandoned.id)).toMatchObject({ status: 'failed' });
+      const done = events.at(-1) as { deployment: string };
+      expect(await env.ROUTING.get(project.slug)).toContain(done.deployment);
+    } finally {
+      putSpy.mockRestore();
+    }
+  });
+
+  it('keeps failed stale-cutover compensation retryable without the 90-minute wait', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'stale-cutover-compensation-retry');
+    const source = await createTestDeployment(env.db, project.id, 'live');
+    await env.db
+      .update(deployments)
+      .set({
+        retained: true,
+        manifest: JSON.stringify({ version: 3, type: 'static', bindings: {} }),
+      })
+      .where(eq(deployments.id, source.id));
+    const abandoned = await createTestDeployment(env.db, project.id, 'pending');
+    await env.db
+      .update(deployments)
+      .set({
+        status: 'cutover',
+        manifest: JSON.stringify({ version: 3, type: 'static', bindings: {} }),
+        updated_at: '2020-01-01T00:00:00.000Z',
+      })
+      .where(eq(deployments.id, abandoned.id));
+    await env.ROUTING.put(
+      `cutover-intent:${abandoned.id}`,
+      JSON.stringify({ projectId: project.id, ownerId: 'dead-owner', buildId: null }),
+    );
+    mockCfApi();
+
+    const originalPut = env.ROUTING.put.bind(env.ROUTING);
+    let failuresRemaining = 2;
+    const putSpy = vi.spyOn(env.ROUTING, 'put').mockImplementation(async (key, value, options) => {
+      if (key === `project:${project.id}` && failuresRemaining > 0) {
+        failuresRemaining--;
+        throw new Error('injected replay and compensation failure');
+      }
+      return originalPut(key, value, options);
+    });
+    const request = () =>
+      buildStaticDeployRequest(env, project.id, user.jwt, {
+        type: 'static',
+        assets: { 'index.html': 'fresh after compensation retry' },
+      });
+    const first = await app.fetch(await request(), env);
+    expect(first.status).toBe(503);
+    expect(await getDeployment(env.db, abandoned.id)).toMatchObject({ status: 'compensating' });
+    expect(failuresRemaining).toBe(0);
+
+    putSpy.mockRestore();
+    const second = await app.fetch(await request(), env);
+    expect(second.status).toBe(200);
+    expect(parseDeployStream(await second.text()).at(-1)).toMatchObject({ event: 'done' });
+    expect(await getDeployment(env.db, abandoned.id)).toMatchObject({ status: 'failed' });
+  });
+
+  it('preserves and backfills a legacy live deployment during protected recovery', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'legacy-cutover-compensation');
+    const source = await createTestDeployment(env.db, project.id, 'live');
+    await env.db
+      .update(deployments)
+      .set({
+        retained: true,
+        // Legacy Worker rows predate both manifest.type and bundle_stored.
+        manifest: JSON.stringify({ version: 3, bindings: {} }),
+      })
+      .where(eq(deployments.id, source.id));
+    await env.ROUTING.put(
+      project.slug,
+      JSON.stringify({
+        workerName: `user-${project.slug}-${source.id}`,
+        projectId: project.id,
+        userId: user.id,
+        version: source.id,
+      }),
+    );
+
+    // Legacy projects can have a valid live route while their nullable active
+    // pointer is still unset. Model an interrupted compensation on top of that
+    // state, then make the fresh deploy fail after precheck so the recovered
+    // pointer and route remain directly observable.
+    const abandoned = await createTestDeployment(env.db, project.id, 'pending');
+    await env.db
+      .update(deployments)
+      .set({
+        status: 'compensating',
+        manifest: JSON.stringify({ version: 3, type: 'static', bindings: {} }),
+        updated_at: '2020-01-01T00:00:00.000Z',
+      })
+      .where(eq(deployments.id, abandoned.id));
+    await env.db
+      .update(projects)
+      .set({ active_deployment_id: null, type: 'void' })
+      .where(eq(projects.id, project.id));
+    await env.ROUTING.put(
+      `cutover-intent:${abandoned.id}`,
+      JSON.stringify({ projectId: project.id, ownerId: 'dead-owner', buildId: null }),
+    );
+
+    const response = await app.fetch(
+      await buildDeployRequest(env, project.id, user.jwt, {
+        manifest: {
+          version: 3,
+          type: 'static',
+          bindings: {},
+          assetConfig: { not_found_handling: '404-page' },
+        },
+        omitDefaultWorker: true,
+        assetManifest: {
+          '/missing.html': { hash: 'a'.repeat(32), size: 123 },
+        },
+      }),
+      env,
+    );
+    expect(response.status).toBe(200);
+    expect(parseDeployStream(await response.text()).at(-1)).toMatchObject({ event: 'error' });
+    expect(await getDeployment(env.db, abandoned.id)).toMatchObject({ status: 'failed' });
+    expect((await getProject(env.db, project.id))?.active_deployment_id).toBe(source.id);
+    expect(JSON.parse((await env.ROUTING.get(project.slug))!)).toMatchObject({
+      workerName: `user-${project.slug}-${source.id}`,
+      projectId: project.id,
+      version: source.id,
+    });
+  });
+
+  it('does not recover a v2 cutover with missing placement metadata', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'ready-cutover-missing-assets');
+    const source = await createTestDeployment(env.db, project.id, 'live');
+    await env.db
+      .update(deployments)
+      .set({
+        retained: true,
+        manifest: JSON.stringify({ version: 3, type: 'static', bindings: {} }),
+      })
+      .where(eq(deployments.id, source.id));
+    const abandoned = await createTestDeployment(env.db, project.id, 'pending');
+    const missingHash = 'b'.repeat(32);
+    await env.db
+      .update(deployments)
+      .set({
+        status: 'cutover',
+        manifest: JSON.stringify({
+          version: 3,
+          type: 'static',
+          assetManifestVersion: 2,
+          bindings: {},
+        }),
+        asset_hashes: JSON.stringify({
+          '/missing.html': { hash: missingHash, size: 123 },
+        }),
+      })
+      .where(eq(deployments.id, abandoned.id));
+    const marker = JSON.stringify({
+      projectId: project.id,
+      ownerId: 'interrupted-owner',
+      buildId: null,
+    });
+    await env.ROUTING.put(`cutover-intent:${abandoned.id}`, marker);
+    await env.ROUTING.put(`cutover-ready:${abandoned.id}`, marker);
+    await env.ROUTING.put(
+      project.slug,
+      JSON.stringify({
+        staticDeploymentId: abandoned.id,
+        projectId: project.id,
+        userId: user.id,
+      }),
+    );
+    mockCfApi();
+
+    // Fail the fresh request after recovery so the committed source restored
+    // by compensation remains observable.
+    const response = await app.fetch(
+      await buildDeployRequest(env, project.id, user.jwt, {
+        manifest: { version: 3, type: 'static', bindings: {} },
+        omitDefaultWorker: true,
+        assetManifest: {
+          '/fresh-missing.html': { hash: 'c'.repeat(32), size: 456 },
+        },
+      }),
+      env,
+    );
+    expect(response.status).toBe(200);
+    expect(parseDeployStream(await response.text()).at(-1)).toMatchObject({ event: 'error' });
+    expect(await getDeployment(env.db, abandoned.id)).toMatchObject({ status: 'failed' });
+    expect((await getProject(env.db, project.id))?.active_deployment_id).toBe(source.id);
+    expect(await env.ROUTING.get(project.slug, 'json')).toMatchObject({
+      staticDeploymentId: source.id,
+      projectId: project.id,
+      userId: user.id,
+    });
+  });
+
+  it('reconstructs legacy KV/R2 and persisted direct placement when KV propagation lags', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'ready-cutover-lagging-manifest');
+    const protectedDeployment = await createTestDeployment(env.db, project.id, 'pending');
+    const smallLegacyHash = '1'.repeat(32);
+    const largeLegacyHash = '2'.repeat(32);
+    const directR2Hash = '3'.repeat(32);
+    await env.db
+      .update(deployments)
+      .set({
+        status: 'cutover',
+        manifest: JSON.stringify({ version: 3, type: 'static', bindings: {} }),
+        asset_hashes: JSON.stringify({
+          '/legacy-small.js': { hash: smallLegacyHash, size: 100 },
+          '/legacy-large.wasm': { hash: largeLegacyHash, size: 2 * 1024 * 1024 },
+          '/direct-small.js': { hash: directR2Hash, size: 100, store: 'r2' },
+        }),
+      })
+      .where(eq(deployments.id, protectedDeployment.id));
+    const marker = JSON.stringify({
+      projectId: project.id,
+      ownerId: 'interrupted-owner',
+      buildId: null,
+    });
+    await env.ROUTING.put(`cutover-intent:${protectedDeployment.id}`, marker);
+    await env.ROUTING.put(`cutover-ready:${protectedDeployment.id}`, marker);
+    expect(await env.ROUTING.get(`manifest:${protectedDeployment.id}`)).toBeNull();
+
+    const response = await app.fetch(
+      await buildDeployRequest(env, project.id, user.jwt, {
+        manifest: { version: 3, type: 'static', bindings: {} },
+        omitDefaultWorker: true,
+        assetManifest: {
+          '/fresh-missing.html': { hash: 'd'.repeat(32), size: 456 },
+        },
+      }),
+      env,
+    );
+    expect(response.status).toBe(200);
+    expect(parseDeployStream(await response.text()).at(-1)).toMatchObject({ event: 'error' });
+    expect(await getDeployment(env.db, protectedDeployment.id)).toMatchObject({
+      status: 'live',
+      retained: true,
+    });
+    expect((await getProject(env.db, project.id))?.active_deployment_id).toBe(
+      protectedDeployment.id,
+    );
+    expect(await env.ROUTING.get(`manifest:${protectedDeployment.id}`, 'json')).toEqual({
+      '/legacy-small.js': smallLegacyHash,
+      '/legacy-large.wasm': `!${largeLegacyHash}`,
+      '/direct-small.js': `!${directR2Hash}`,
+    });
+  });
+
+  it('protects and rolls forward a cutover when the final transaction does not commit', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'static-cutover-reconcile');
+    const realDb = env.db;
+    const realTransaction = realDb.transaction.bind(realDb);
+    let rejectedFinalCommit = false;
+    const wrappedDb = new Proxy(realDb, {
+      get(target, prop, receiver) {
+        if (prop === 'transaction') {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          return (async (fn: any) =>
+            realTransaction(async (tx) => {
+              const result = await fn(tx);
+              const [lockedProject] = await tx
+                .select({ activeDeploymentId: projects.active_deployment_id })
+                .from(projects)
+                .where(eq(projects.id, project.id));
+              if (!rejectedFinalCommit && lockedProject?.activeDeploymentId) {
+                rejectedFinalCommit = true;
+                throw new Error('injected final commit rejection');
+              }
+              return result;
+            })) as unknown as typeof realDb.transaction;
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    }) as Db;
+    setTestDb(wrappedDb);
+
+    let cutoverDeploymentId: string;
+    try {
+      const first = await app.fetch(
+        await buildStaticDeployRequest(env, project.id, user.jwt, {
+          type: 'static',
+          assets: { 'index.html': 'protected cutover' },
+        }),
+        env,
+      );
+      expect(first.status).toBe(200);
+      expect(parseDeployStream(await first.text()).at(-1)).toMatchObject({ event: 'error' });
+      expect(rejectedFinalCommit).toBe(true);
+
+      const [cutover] = await realDb
+        .select()
+        .from(deployments)
+        .where(eq(deployments.status, 'cutover'));
+      expect(cutover).toBeDefined();
+      cutoverDeploymentId = cutover!.id;
+      expect(await env.ROUTING.get(project.slug)).toContain(cutoverDeploymentId);
+    } finally {
+      setTestDb(realDb);
+    }
+
+    // Neither background timeouts nor explicit cancellation may terminalize
+    // a deployment whose external cutover is already authoritative.
+    await realDb
+      .update(deployments)
+      .set({ updated_at: '2020-01-01T00:00:00.000Z' })
+      .where(eq(deployments.id, cutoverDeploymentId!));
+    await failStaleDeployments(realDb);
+    expect((await getDeployment(realDb, cutoverDeploymentId!))?.status).toBe('cutover');
+    expect(await cancelDeployment(realDb, cutoverDeploymentId!)).toBeNull();
+
+    // The next deploy claims the project only after atomically rolling the
+    // protected cutover forward in PostgreSQL.
+    const second = await app.fetch(
+      await buildStaticDeployRequest(env, project.id, user.jwt, {
+        type: 'static',
+        assets: { 'index.html': 'next deployment' },
+      }),
+      env,
+    );
+    expect(second.status).toBe(200);
+    expect(parseDeployStream(await second.text()).at(-1)).toMatchObject({ event: 'done' });
+    expect(await getDeployment(realDb, cutoverDeploymentId!)).toMatchObject({
+      status: 'live',
+      retained: true,
+    });
+  });
+
+  it('preserves a committed static route when the COMMIT acknowledgement is lost', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'static-lost-commit-ack');
+    const fault = injectLostGoLiveCommitAcknowledgement(project.id);
+
+    try {
+      const res = await app.fetch(
+        await buildStaticDeployRequest(env, project.id, user.jwt, {
+          type: 'static',
+          assets: { 'index.html': 'committed static asset' },
+        }),
+        env,
+      );
+      expect(res.status).toBe(200);
+      const events = parseDeployStream(await res.text());
+      expect(events.at(-1)).toMatchObject({ event: 'done' });
+      expect(fault.wasInjected()).toBe(true);
+
+      const done = events.at(-1) as { deployment: string };
+      const routing = await env.ROUTING.get(project.slug);
+      expect(routing).toContain(done.deployment);
+      expect(await env.ROUTING.get(`manifest:${done.deployment}`)).not.toBeNull();
+      expect((await getDeployment(env.db, done.deployment))?.status).toBe('live');
+    } finally {
+      fault.restore();
+    }
+  });
+
+  it('preserves a committed Worker when the COMMIT acknowledgement is lost', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'worker-lost-commit-ack');
+    const fetchMock = mockCfApi();
+    const fault = injectLostGoLiveCommitAcknowledgement(project.id);
+
+    try {
+      const res = await app.fetch(await buildDeployRequest(env, project.id, user.jwt), env);
+      expect(res.status).toBe(200);
+      const events = parseDeployStream(await res.text());
+      expect(events.at(-1)).toMatchObject({ event: 'done' });
+      expect(fault.wasInjected()).toBe(true);
+
+      const done = events.at(-1) as { deployment: string };
+      const routing = await env.ROUTING.get(project.slug);
+      expect(routing).toContain(done.deployment);
+      const workerDeletes = fetchMock.mock.calls.filter((call: Array<unknown>) => {
+        const url = typeof call[0] === 'string' ? call[0] : '';
+        const init = call[1] as RequestInit | undefined;
+        return url.includes(`user-${project.slug}-${done.deployment}`) && init?.method === 'DELETE';
+      });
+      expect(workerDeletes).toHaveLength(0);
+      expect((await getDeployment(env.db, done.deployment))?.status).toBe('live');
+    } finally {
+      fault.restore();
+    }
+  });
+});
+
+describe('failed deploy compensation provenance', () => {
+  it('restores prior routing when a KV write lands but its acknowledgement is lost', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'routing-lost-ack');
+    const source = await createTestDeployment(env.db, project.id, 'live');
+    await env.db
+      .update(deployments)
+      .set({
+        retained: true,
+        manifest: JSON.stringify({ version: 3, type: 'static', bindings: {} }),
+      })
+      .where(eq(deployments.id, source.id));
+    await env.db
+      .update(projects)
+      .set({ active_deployment_id: source.id, type: 'static' })
+      .where(eq(projects.id, project.id));
+    const sourceRouting = JSON.stringify({
+      staticDeploymentId: source.id,
+      projectId: project.id,
+      userId: user.id,
+    });
+    await env.ROUTING.put(project.slug, sourceRouting);
+    mockCfApi();
+
+    const originalPut = env.ROUTING.put.bind(env.ROUTING);
+    let acknowledgementLost = false;
+    const putSpy = vi.spyOn(env.ROUTING, 'put').mockImplementation(async (key, value, options) => {
+      await originalPut(key, value, options);
+      if (key === project.slug && !acknowledgementLost) {
+        acknowledgementLost = true;
+        throw new Error('injected lost KV acknowledgement');
+      }
+    });
+
+    try {
+      const response = await app.fetch(
+        await buildStaticDeployRequest(env, project.id, user.jwt, {
+          type: 'static',
+          assets: { 'index.html': 'doomed replacement' },
+        }),
+        env,
+      );
+      expect(response.status).toBe(200);
+      expect(parseDeployStream(await response.text()).at(-1)).toMatchObject({ event: 'error' });
+      expect(acknowledgementLost).toBe(true);
+      expect(await env.ROUTING.get(project.slug)).toBe(sourceRouting);
+      expect((await getProject(env.db, project.id))?.active_deployment_id).toBe(source.id);
+    } finally {
+      putSpy.mockRestore();
+    }
+  });
+
+  it('does not restore stale routing over a newer project cutover', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'compensation-provenance');
+    const source = await createTestDeployment(env.db, project.id, 'live');
+    const newer = await createTestDeployment(env.db, project.id, 'live');
+    await env.db.update(deployments).set({ retained: true }).where(eq(deployments.id, newer.id));
+    await env.db
+      .update(projects)
+      .set({ active_deployment_id: source.id })
+      .where(eq(projects.id, project.id));
+
+    const sourceRouting = JSON.stringify({ deploymentId: source.id, type: 'static' });
+    const newerRouting = JSON.stringify({ deploymentId: newer.id, type: 'static' });
+    await env.ROUTING.put(project.slug, sourceRouting);
+    mockCfApi();
+
+    const originalPut = env.ROUTING.put.bind(env.ROUTING);
+    let overtakePromise: Promise<unknown> | undefined;
+    const putSpy = vi.spyOn(env.ROUTING, 'put').mockImplementation((async (
+      key: string,
+      value: string | ArrayBuffer | ArrayBufferView | ReadableStream,
+      options?: KVNamespacePutOptions,
+    ) => {
+      const result = await originalPut(key, value as never, options as never);
+      if (key === project.slug && !overtakePromise) {
+        // Queue a newer cutover behind the failed deploy's project lock.
+        // Once the lock releases, it becomes authoritative before the catch
+        // path takes the compensation lock.
+        overtakePromise = env.db
+          .update(projects)
+          .set({ active_deployment_id: newer.id })
+          .where(eq(projects.id, project.id))
+          .then(() => originalPut(project.slug, newerRouting));
+        throw new Error('injected routing cutover failure');
+      }
+      return result;
+    }) as typeof env.ROUTING.put);
+
+    try {
+      const res = await app.fetch(
+        await buildStaticDeployRequest(env, project.id, user.jwt, { type: 'static' }),
+        env,
+      );
+      expect(res.status).toBe(200);
+      expect(parseDeployStream(await res.text()).at(-1)).toMatchObject({ event: 'error' });
+      await overtakePromise;
+      expect(await env.ROUTING.get(project.slug)).toBe(newerRouting);
+      const [updatedProject] = await env.db
+        .select({ activeDeploymentId: projects.active_deployment_id })
+        .from(projects)
+        .where(eq(projects.id, project.id));
+      expect(updatedProject?.activeDeploymentId).toBe(newer.id);
+    } finally {
+      putSpy.mockRestore();
+    }
+  });
+
+  it('reconciles a domain activated after the cutover snapshot to the committed deployment', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'compensation-new-domain');
+    const source = await createTestDeployment(env.db, project.id, 'live');
+    await env.db
+      .update(deployments)
+      .set({
+        retained: true,
+        manifest: JSON.stringify({ version: 3, type: 'static', bindings: {} }),
+      })
+      .where(eq(deployments.id, source.id));
+    await env.db
+      .update(projects)
+      .set({ active_deployment_id: source.id, type: 'static' })
+      .where(eq(projects.id, project.id));
+    await env.ROUTING.put(
+      project.slug,
+      JSON.stringify({ projectId: project.id, deploymentId: source.id }),
+    );
+    mockCfApi();
+
+    const hostname = 'late-activation.example.com';
+    const originalPut = env.ROUTING.put.bind(env.ROUTING);
+    let activated = false;
+    const putSpy = vi.spyOn(env.ROUTING, 'put').mockImplementation((async (
+      key: string,
+      value: string | ArrayBuffer | ArrayBufferView | ReadableStream,
+      options?: KVNamespacePutOptions,
+    ) => {
+      if (key.startsWith('cutover-ready:') && !activated) {
+        activated = true;
+        // Model tryActivateDomain acquiring the project lock after the routing
+        // switch fence released: it copies the new (doomed) slug route into a
+        // domain that was absent from the deploy's earlier snapshot.
+        await env.db.transaction(async (tx) => {
+          await tx.execute(sql`SELECT id FROM projects WHERE id = ${project.id} FOR UPDATE`);
+          await tx.insert(domains).values({
+            id: 'dom_late_compensation',
+            project_id: project.id,
+            hostname,
+            cf_hostname_id: 'ch-late-compensation',
+            status: 'active',
+          });
+          const doomedRoute = await env.ROUTING.get(project.slug);
+          expect(doomedRoute).not.toBeNull();
+          await originalPut(`domain:${hostname}`, doomedRoute!);
+        });
+        throw new Error('injected failure after late domain activation');
+      }
+      return originalPut(key, value as never, options as never);
+    }) as typeof env.ROUTING.put);
+
+    try {
+      const response = await app.fetch(
+        await buildStaticDeployRequest(env, project.id, user.jwt, { type: 'static' }),
+        env,
+      );
+      expect(response.status).toBe(200);
+      expect(parseDeployStream(await response.text()).at(-1)).toMatchObject({ event: 'error' });
+      expect(activated).toBe(true);
+      expect(await env.ROUTING.get(`domain:${hostname}`)).toContain(source.id);
+      expect((await getDeployment(env.db, source.id))?.status).toBe('live');
+    } finally {
+      putSpy.mockRestore();
+    }
   });
 });
 
@@ -3302,7 +4556,7 @@ describe('Deploy with prerendering', () => {
     expect(dpl?.status).toBe('live');
   });
 
-  it('sets prerendering status during prerender phase', async () => {
+  it('keeps the protected cutover status during post-queue prerendering', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id, 'prerender-status');
 
@@ -3335,7 +4589,7 @@ describe('Deploy with prerendering', () => {
     );
     expect(res.status).toBe(200);
     await res.text();
-    expect(statusDuringPrerender).toBe('prerendering');
+    expect(statusDuringPrerender).toBe('cutover');
   });
 
   it('prewarms a pages-only manifest (ISR TTLs live only in manifest.pages, no flat revalidate)', async () => {
@@ -3729,6 +4983,132 @@ describe('POST /projects/:id/deploy/preflight', () => {
     expect(data.skipped).toBe(1);
   });
 
+  it('deduplicates against the active deployment after rollback, not newer history', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'preflight-after-rollback');
+    const active = await createTestDeployment(env.db, project.id, 'live');
+    const activeManifest = {
+      '/index.html': { hash: 'a'.repeat(32), size: 100 },
+    };
+    await env.db
+      .update(deployments)
+      .set({
+        retained: true,
+        asset_hashes: JSON.stringify(activeManifest),
+        manifest: JSON.stringify({ version: 3, type: 'static', bindings: {} }),
+      })
+      .where(eq(deployments.id, active.id));
+
+    const newerHistory = await createTestDeployment(env.db, project.id, 'live');
+    const newerManifest = {
+      '/index.html': { hash: 'b'.repeat(32), size: 100 },
+    };
+    await env.db
+      .update(deployments)
+      .set({
+        retained: true,
+        asset_hashes: JSON.stringify(newerManifest),
+        manifest: JSON.stringify({ version: 3, type: 'static', bindings: {} }),
+      })
+      .where(eq(deployments.id, newerHistory.id));
+    // Model rollback to the older deployment while the newer deployment
+    // remains a retained live history row.
+    await env.db
+      .update(projects)
+      .set({ active_deployment_id: active.id, type: 'static' })
+      .where(eq(projects.id, project.id));
+    await env.ROUTING.put(
+      project.slug,
+      JSON.stringify({
+        staticDeploymentId: active.id,
+        projectId: project.id,
+        userId: user.id,
+      }),
+    );
+
+    const response = await app.fetch(
+      new Request(`http://localhost/projects/${project.id}/deploy/preflight`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${user.jwt}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ assetManifest: newerManifest }),
+      }),
+      env,
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      needed: ['/index.html'],
+      total: 1,
+      skipped: 0,
+    });
+  });
+
+  it('backfills a legacy rollback target before preflight deduplication', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'legacy-preflight-rollback');
+    const rollbackTarget = await createTestDeployment(env.db, project.id, 'live');
+    await env.db
+      .update(deployments)
+      .set({
+        retained: true,
+        asset_hashes: JSON.stringify({
+          '/index.html': { hash: 'a'.repeat(32), size: 100 },
+        }),
+        manifest: JSON.stringify({ version: 3, type: 'static', bindings: {} }),
+      })
+      .where(eq(deployments.id, rollbackTarget.id));
+
+    const newerHistory = await createTestDeployment(env.db, project.id, 'live');
+    const newerManifest = {
+      '/index.html': { hash: 'b'.repeat(32), size: 100 },
+    };
+    await env.db
+      .update(deployments)
+      .set({
+        retained: true,
+        asset_hashes: JSON.stringify(newerManifest),
+        manifest: JSON.stringify({ version: 3, type: 'static', bindings: {} }),
+      })
+      .where(eq(deployments.id, newerHistory.id));
+    await env.db
+      .update(projects)
+      .set({ active_deployment_id: null, type: 'static' })
+      .where(eq(projects.id, project.id));
+
+    // The route records a legacy rollback to the older deployment while the
+    // project pointer is still null. History ordering alone would choose the
+    // newer manifest and incorrectly skip this upload.
+    await env.ROUTING.put(
+      project.slug,
+      JSON.stringify({
+        staticDeploymentId: rollbackTarget.id,
+        projectId: project.id,
+        userId: user.id,
+      }),
+    );
+
+    const response = await app.fetch(
+      new Request(`http://localhost/projects/${project.id}/deploy/preflight`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${user.jwt}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ assetManifest: newerManifest }),
+      }),
+      env,
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      needed: ['/index.html'],
+      total: 1,
+      skipped: 0,
+    });
+    expect((await getProject(env.db, project.id))?.active_deployment_id).toBe(rollbackTarget.id);
+  });
+
   // Removed: "merges previous asset manifest when preflight flag is set on
   // deploy" tested platform-side delta-merge behaviour from the multipart
   // path. Direct-to-R2 deploys put the merge responsibility on the CLI —
@@ -3807,7 +5187,7 @@ describe('POST /projects/:id/deploy/preflight', () => {
     expect(capturedMetadata!.tail_consumers).toEqual([{ service: 'void-tail-staging' }]);
   });
 
-  it('serializes websocket durable object migrations in Cloudflare upload format', async () => {
+  it('serializes new websocket durable objects as SQLite class migrations', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id, 'ws-migrations-proj');
 
@@ -3868,7 +5248,7 @@ describe('POST /projects/:id/deploy/preflight', () => {
     expect(capturedMetadata).not.toHaveProperty('durable_objects');
     expect(capturedMetadata!.migrations).toEqual({
       new_tag: 'ws-v1',
-      steps: [{ new_classes: ['WsChatRoomWs', 'WsPresenceWs'] }],
+      steps: [{ new_sqlite_classes: ['WsChatRoomWs', 'WsPresenceWs'] }],
     });
   });
 

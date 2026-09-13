@@ -31,7 +31,7 @@ Then run:
 ```sh
 pnpm void init
 pnpm dev             # local dev with workerd runtime
-pnpm void deploy     # deploy to void.app
+pnpm void deploy     # deploy to the saved Cloudflare or Void target
 ```
 
 ## Adding Void to an Existing Project
@@ -59,7 +59,7 @@ export default defineConfig({
 pnpm void init
 ```
 
-4. Deploy to void.app:
+4. Deploy to the target selected during setup:
 
 ```sh
 pnpm void deploy
@@ -67,8 +67,8 @@ pnpm void deploy
 
 ## Features
 
-- **Zero config** — no `wrangler.json`, no dashboard clicks
-- **Automatic provisioning** — import `db`, `kv`, `storage`, or `ai` from `void` and resources are created on deploy
+- **One target-aware CLI** — deploy and operate the same app on your Cloudflare account or the hosted Void platform
+- **Automatic provisioning** — import `db`, `kv`, `storage`, or `ai` from `void` and resources are created on either deployment target
 - **Typed secrets** — mark env schema keys with `.secret()`; direct Cloudflare deploys upload them as encrypted Worker secrets instead of plaintext vars
 - **File-based routing** — drop a file in `routes/`, get an endpoint with method exports, dynamic params, middleware, and [Standard Schema](https://standardschema.dev/) validation
 - **Full-stack pages** — `pages/` directory for server-rendered UI with co-located data loading, SPA navigation, and typed forms (React, Vue, Svelte, Solid)
@@ -102,18 +102,25 @@ vp run check           # typecheck all packages
 vp run dev:docs        # local docs dev server
 ```
 
+See [TESTING.md](./TESTING.md) for targeted verification and the account-neutral, non-destructive
+native Cloudflare live E2E procedure.
+
 ### Project Structure
 
-| Path                | Purpose                                                           |
-| ------------------- | ----------------------------------------------------------------- |
-| `packages/void`     | Core Vite plugin + CLI                                            |
-| `packages/react`    | React framework adapter                                           |
-| `packages/vue`      | Vue framework adapter                                             |
-| `packages/svelte`   | Svelte 5 framework adapter                                        |
-| `packages/solid`    | SolidJS framework adapter                                         |
-| `platform/packages` | Hosted Void control plane, routing, proxy, logging, and dashboard |
-| `docs`              | Documentation (VitePress)                                         |
-| `playground/*`      | Test apps for local development                                   |
+| Path                         | Purpose                                                           |
+| ---------------------------- | ----------------------------------------------------------------- |
+| `packages/void`              | Core Vite plugin + CLI                                            |
+| `packages/deploy-core`       | Shared deploy contracts, artifacts, planning, and target boundary |
+| `packages/deploy-cloudflare` | Public direct-Cloudflare deployment primitives                    |
+| `packages/edge`              | Shared edge routing and static asset runtime                      |
+| `packages/isr`               | Shared ISR protocol, core, and direct runtime                     |
+| `packages/react`             | React framework adapter                                           |
+| `packages/vue`               | Vue framework adapter                                             |
+| `packages/svelte`            | Svelte 5 framework adapter                                        |
+| `packages/solid`             | SolidJS framework adapter                                         |
+| `platform/packages`          | Hosted Void control plane, routing, proxy, logging, and dashboard |
+| `docs`                       | Documentation (VitePress)                                         |
+| `playground/*`               | Test apps for local development                                   |
 
 Public SDK packages must not import from `platform/`. Hosted platform packages may depend on public or shared workspace packages.
 

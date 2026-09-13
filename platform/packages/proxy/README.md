@@ -30,9 +30,12 @@ Two auth paths are supported:
 | Path            | When               | Auth                                      |
 | --------------- | ------------------ | ----------------------------------------- |
 | Service binding | Deployed Void apps | HMAC-signed `projectId` token (`aiToken`) |
-| HTTPS           | Local development  | `Authorization: Bearer <jwt>`             |
+| HTTPS           | Local development  | `Authorization: Bearer <api-jwt>`         |
+| HTTPS           | Managed prerender  | Five-minute, project-scoped prerender JWT |
 
-All routes require `projectId` in the JSON body.
+All routes require `projectId` in the JSON body. Prerender JWTs are accepted only
+when their signed project claim exactly matches that value; they are not valid
+at deployment or project-management APIs.
 
 ## Endpoints
 

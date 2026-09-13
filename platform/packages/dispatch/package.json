@@ -8,7 +8,9 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@voidcloud/isr-shared": "workspace:*"
+    "@void/deploy-core": "workspace:*",
+    "@void/edge": "workspace:*",
+    "@void/isr": "workspace:*"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "catalog:platform",

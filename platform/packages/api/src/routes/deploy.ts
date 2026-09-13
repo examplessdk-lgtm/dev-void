@@ -1,5 +1,11 @@
-import { isrCacheKey, isrCachePrefix, isrLegacyCachePrefix } from '@voidcloud/isr-shared';
-import type { IsrCacheMetadata } from '@voidcloud/isr-shared';
+import {
+  MAX_REVALIDATE_QUERY_ALLOWLIST_ENTRIES,
+  MAX_ROUTING_RULES,
+  planWebSocketMigrations,
+  validateManifestShape,
+} from '@void/deploy-core';
+import { isrCacheKey, isrCachePrefix, isrLegacyCachePrefix } from '@void/isr';
+import type { IsrCacheMetadata } from '@void/isr';
 import { eq, sql as drizzleSql } from 'drizzle-orm';
 import { Hono, type Context } from 'hono';
 import {
@@ -7,8 +13,9 @@ import {
   computeAssetHash,
   createAssetUploadSession,
   deleteWorkerBundle,
+  KV_THRESHOLD,
   normalizeForCfAssetSession,
-  sweepProjectAssetOrphans,
+  scanProjectAssetOrphanCandidates,
   uploadAssetBuckets,
   buildAssetMetadata,
   uploadStaticAssets,
@@ -18,22 +25,32 @@ import {
   type AssetEntry,
   type AssetManifestEntry,
 } from '../assets.ts';
+import { hmacSignState } from '../auth/hmac.ts';
 import { deleteDispatchScript, retryWithBackoff } from '../cf-api.ts';
 import { R2_CONCURRENCY, uploadPool } from '../concurrency.ts';
 import { SITE_DOMAIN } from '../constants.ts';
 import { DEFAULT_DASHBOARD_URL } from '../constants.ts';
-import { clearCronScheduler, syncCronScheduler } from '../cron-scheduler-client.ts';
+import {
+  clearCronScheduler,
+  restoreCronScheduler,
+  snapshotCronScheduler,
+  syncCronScheduler,
+  type CronSyncState,
+} from '../cron-scheduler-client.ts';
 import {
   getProject,
   getDeployment,
   createDeployment,
   updateDeploymentManifest,
   updateDeploymentStatus,
+  beginDeploymentCompensation,
+  beginDeploymentCutover,
   updateProjectType,
   updateProjectWebSocketVersion,
   getDomainsByProjectId,
   countUserDeploymentsToday,
   getActiveDeployment,
+  getLatestLiveDeployment,
   getInFlightDeploymentsExcluding,
   getLastLiveAssetManifest,
   setActiveDeployment,
@@ -44,16 +61,20 @@ import {
   getRetainedDeployments,
   getRetainedDeploymentsExcluding,
   getProjectSecrets,
+  getProjectResources,
+  getAllProjectDeployments,
   upsertProjectSecret,
   getBuild,
   ACTIVE_BUILD_STATUSES,
   CANCELLATION_REQUESTED_DEPLOYMENT_STATUSES,
+  TERMINAL_DEPLOYMENT_STATUSES,
   type Db,
 } from '../db.ts';
 import { sendDeployFailedEmail } from '../email.ts';
 import type { ApiEnv } from '../env.ts';
 import { generateId } from '../id.ts';
 import { checkCliVersionOrRespond } from '../middleware/cli-version.ts';
+import { getProjectQueueName } from '../naming.ts';
 import { createDeployLogger, type DeployLogger } from '../observability/logger.ts';
 import {
   BETTER_AUTH_SECRET_NAME,
@@ -61,7 +82,14 @@ import {
   generateManagedAuthSecret,
   encryptProjectSecret,
 } from '../project-secrets.ts';
-import { addQueueConsumer } from '../provisioning/cloudflare-api.ts';
+import {
+  addQueueConsumer,
+  removeQueueConsumer,
+  restoreQueueConsumer,
+  snapshotQueueConsumer,
+  getDispatchWorkerProxyToken,
+  type QueueConsumerInfo,
+} from '../provisioning/cloudflare-api.ts';
 import {
   deleteContainerApplicationIdempotent,
   findContainerApplication,
@@ -74,25 +102,350 @@ import { RESERVED_BINDING_NAMES } from '../reserved-bindings.ts';
 import {
   buildRoutingJson,
   buildStaticRoutingJson,
+  buildProjectAccountJson,
   computeDispatchLimits,
   projectAccountKey,
-  writeProjectAccountEntry,
+  resolveRoutingUndo,
 } from '../routing.ts';
 import { builds, deployments } from '../schema.ts';
-import { getPlanLimits, isWithinLimit, STATIC_RETENTION_LIMIT } from '../tiers.ts';
+import { getPlanLimits, isWithinLimit, STATIC_RETENTION_LIMIT, type PlanId } from '../tiers.ts';
 import {
-  MANIFEST_REDIRECT_RULE_STATUSES,
   SUPPORTED_MANIFEST_VERSIONS,
   type DeployManifest,
   type DeployEvent,
+  type Deployment,
+  type Project,
   type DeploymentStatus,
   type LiveMigrationMeta,
   type SandboxMigrationMeta,
   type WebSocketMigrationMeta,
 } from '../types.ts';
 
+export { MAX_REVALIDATE_QUERY_ALLOWLIST_ENTRIES, MAX_ROUTING_RULES, validateManifestShape };
+
 const DEFAULT_DISPATCH_NAMESPACE = 'void-users';
 const DEFAULT_TAIL_SERVICE_NAME = 'void-tail';
+const CUTOVER_RECOVERY_STALE_MS = 90 * 60 * 1000;
+const cutoverIntentKey = (deploymentId: string): string => `cutover-intent:${deploymentId}`;
+const cutoverReadyKey = (deploymentId: string): string => `cutover-ready:${deploymentId}`;
+const cutoverCompensatedKey = (deploymentId: string): string =>
+  `cutover-compensated:${deploymentId}`;
+
+type CutoverMarker = {
+  projectId: string;
+  ownerId: string;
+  buildId: string | null;
+};
+
+function parseCutoverMarker(raw: string | null): CutoverMarker | null {
+  if (!raw) {
+    return null;
+  }
+  try {
+    const marker = JSON.parse(raw) as Partial<CutoverMarker>;
+    if (
+      typeof marker.projectId !== 'string' ||
+      typeof marker.ownerId !== 'string' ||
+      (marker.buildId !== null && typeof marker.buildId !== 'string')
+    ) {
+      return null;
+    }
+    return marker as CutoverMarker;
+  } catch {
+    return null;
+  }
+}
+
+function resolvePersistedDeploymentType(
+  manifest: DeployManifest,
+  deployment: Deployment,
+  committedProjectType?: Project['type'],
+): 'void' | 'spa' | 'static' | 'framework' {
+  if (manifest.type) {
+    return manifest.type;
+  }
+  if (manifest.framework) {
+    return 'framework';
+  }
+  if (deployment.bundle_stored || manifest.workerMain) {
+    return 'void';
+  }
+  // Retained platform deployments can predate both `manifest.type` and the
+  // `bundle_stored` column. When replaying the committed active deployment,
+  // projects.mode is the only durable discriminator that survives from that
+  // era. Treat the legacy database value `worker` as `void`; it was the old
+  // default before the current project-type vocabulary was introduced.
+  if (committedProjectType) {
+    if (
+      committedProjectType === 'static' ||
+      committedProjectType === 'spa' ||
+      committedProjectType === 'framework'
+    ) {
+      return committedProjectType;
+    }
+    return 'void';
+  }
+  return manifest.assetConfig?.not_found_handling === 'single-page-application' ? 'spa' : 'static';
+}
+
+/** Resolve the deployment serving a legacy project whose active pointer is null. */
+async function resolveLegacyActiveDeployment(
+  env: ApiEnv['Bindings'],
+  db: Db,
+  project: Project,
+): Promise<Deployment | null> {
+  const routingRaw = await env.ROUTING.get(project.slug);
+  if (routingRaw) {
+    try {
+      const entry = JSON.parse(routingRaw) as {
+        staticDeploymentId?: unknown;
+        deploymentId?: unknown;
+        version?: unknown;
+      };
+      const candidate = [entry.staticDeploymentId, entry.deploymentId, entry.version].find(
+        (value): value is string => typeof value === 'string',
+      );
+      if (candidate) {
+        const row = await getDeployment(db, candidate);
+        if (row?.project_id === project.id && row.status === 'live') {
+          return row;
+        }
+      }
+    } catch {
+      // Malformed or older routing entries fall back to deployment history.
+    }
+  }
+  return getLatestLiveDeployment(db, project.id);
+}
+
+async function resolveCutoverProxyToken(
+  env: ApiEnv['Bindings'],
+  workerName: string,
+  projectId: string,
+): Promise<string> {
+  const lookup = await getDispatchWorkerProxyToken(
+    env.CF_ACCOUNT_ID,
+    env.CF_API_TOKEN,
+    env.DISPATCH_NAMESPACE ?? DEFAULT_DISPATCH_NAMESPACE,
+    workerName,
+  );
+  if (lookup.kind === 'found') {
+    return lookup.token;
+  }
+  if (lookup.kind === 'error') {
+    throw lookup.error;
+  }
+  return hmacSignState(projectId, env.JWT_SECRET);
+}
+
+/** Make every persisted custom-domain key match one authoritative route. */
+async function reconcileProjectDomainRoutes(
+  env: ApiEnv['Bindings'],
+  domains: Awaited<ReturnType<typeof getDomainsByProjectId>>,
+  routingJson: string | null,
+): Promise<void> {
+  for (const domain of domains) {
+    const key = `domain:${domain.hostname}`;
+    if (domain.status === 'active' && routingJson !== null) {
+      await env.ROUTING.put(key, routingJson);
+    } else {
+      // A hostname can become active at Cloudflare and have its route written
+      // immediately before the PostgreSQL status update is interrupted. Treat
+      // every persisted domain row as an authoritative key inventory so
+      // recovery removes that pending-row/live-KV crash residue as well as
+      // updating currently active domains.
+      await env.ROUTING.delete(key);
+    }
+  }
+}
+
+/** Idempotently make every authoritative external surface match one deployment. */
+async function replayDeploymentCutover(
+  env: ApiEnv['Bindings'],
+  db: Db,
+  project: Project,
+  deployment: Deployment,
+  plan: PlanId,
+  committedProjectType?: Project['type'],
+): Promise<void> {
+  const planLimits = getPlanLimits(plan);
+  if (!deployment.manifest) {
+    throw new Error(`deployment ${deployment.id} has no manifest for cutover recovery`);
+  }
+  const manifest = JSON.parse(deployment.manifest) as DeployManifest;
+  const targetType = resolvePersistedDeploymentType(manifest, deployment, committedProjectType);
+  const isStatic = targetType === 'static' || targetType === 'spa';
+  const workerName = `user-${project.slug}-${deployment.id}`;
+  const existingRouting = await env.ROUTING.get(project.slug);
+  const existingEntry = existingRouting
+    ? (JSON.parse(existingRouting) as { suspended?: string })
+    : {};
+  let hasAssets = false;
+  if (deployment.asset_hashes) {
+    const assetHashes = JSON.parse(deployment.asset_hashes) as Record<string, unknown>;
+    hasAssets = Object.keys(assetHashes).length > 0;
+  }
+  const routingJson = isStatic
+    ? buildStaticRoutingJson({
+        projectId: project.id,
+        userId: project.user_id,
+        deploymentId: deployment.id,
+        assetConfig:
+          manifest.assetConfig ??
+          ({
+            not_found_handling: targetType === 'spa' ? 'single-page-application' : '404-page',
+          } as const),
+        manifest,
+        suspended: existingEntry.suspended,
+      })
+    : buildRoutingJson({
+        workerName,
+        projectId: project.id,
+        userId: project.user_id,
+        manifest,
+        deploymentId: deployment.id,
+        dispatchLimits: computeDispatchLimits(planLimits, manifest.limits),
+        suspended: existingEntry.suspended,
+        hasCrons: !!manifest.schedules?.length,
+        assetManifestId: hasAssets ? deployment.id : undefined,
+        assetConfig: hasAssets ? manifest.assetConfig : undefined,
+      });
+
+  // Complete every PostgreSQL read and validation before the first external
+  // mutation. A failed statement aborts its surrounding recovery transaction;
+  // if it happened after a KV/DO/Queue write, that same transaction could no
+  // longer persist `compensating` or restore the authoritative deployment.
+  const domains = await getDomainsByProjectId(db, project.id);
+  const resources = await getProjectResources(db, project.id);
+  const historicalQueueNames = new Set<string>();
+  for (const row of await getAllProjectDeployments(db, project.id)) {
+    try {
+      const rowManifest = row.manifest ? (JSON.parse(row.manifest) as DeployManifest) : null;
+      for (const queue of rowManifest?.queues ?? []) {
+        historicalQueueNames.add(queue.name);
+      }
+    } catch {
+      // Corrupt historical metadata cannot authorize a queue write.
+    }
+  }
+  const desiredQueues = isStatic ? [] : (manifest.queues ?? []);
+  const desiredQueueNames = new Set(desiredQueues.map((queue) => queue.name));
+  const desiredQueueResources = new Map<string, (typeof resources)[number]>();
+  for (const queue of desiredQueues) {
+    const resource = resources.find(
+      (entry) => entry.type === 'queue' && entry.binding_name === queue.name,
+    );
+    if (!resource) {
+      throw new Error(`cutover recovery is missing queue resource ${queue.name}`);
+    }
+    desiredQueueResources.set(queue.name, resource);
+  }
+  const needsProxyToken = !isStatic && (!!manifest.schedules?.length || desiredQueues.length > 0);
+  const proxyToken = needsProxyToken
+    ? await resolveCutoverProxyToken(env, workerName, project.id)
+    : null;
+
+  await env.ROUTING.put(project.slug, routingJson);
+  await env.ROUTING.put(
+    projectAccountKey(project.id),
+    buildProjectAccountJson({ userId: project.user_id, plan }),
+  );
+  await reconcileProjectDomainRoutes(env, domains, routingJson);
+  if (!isStatic && manifest.schedules?.length) {
+    await syncCronScheduler(env, project.id, {
+      workerName,
+      schedules: manifest.schedules,
+      proxyToken: proxyToken!,
+    });
+  } else {
+    await clearCronScheduler(env, project.id);
+  }
+
+  const dispatchWorkerName = env.DISPATCH_WORKER_NAME ?? 'void-dispatch';
+  for (const queue of desiredQueues) {
+    const resource = desiredQueueResources.get(queue.name)!;
+    const consumer = await addQueueConsumer(
+      env.CF_ACCOUNT_ID,
+      env.CF_API_TOKEN,
+      resource.cf_id,
+      dispatchWorkerName,
+      {
+        ...(queue.maxBatchSize != null && { batch_size: queue.maxBatchSize }),
+        ...(queue.maxBatchTimeout != null && { max_wait_time_ms: queue.maxBatchTimeout * 1000 }),
+        ...(queue.maxRetries != null && { max_retries: queue.maxRetries }),
+        ...(queue.retryDelay != null && { retry_delay: queue.retryDelay }),
+      },
+    );
+    if (consumer.status === 'conflict') {
+      throw new Error(`queue consumer conflict: ${queue.name} owned by ${consumer.ownerScript}`);
+    }
+    await env.ROUTING.put(
+      `queue:${getProjectQueueName(project.id, queue.name)}`,
+      JSON.stringify({ workerName, projectId: project.id, queueName: queue.name, proxyToken }),
+    );
+  }
+
+  for (const queueName of historicalQueueNames) {
+    if (desiredQueueNames.has(queueName)) {
+      continue;
+    }
+    const resource = resources.find(
+      (entry) => entry.type === 'queue' && entry.binding_name === queueName,
+    );
+    if (resource) {
+      await removeQueueConsumer(
+        env.CF_ACCOUNT_ID,
+        env.CF_API_TOKEN,
+        resource.cf_id,
+        dispatchWorkerName,
+      );
+    }
+    await env.ROUTING.delete(`queue:${getProjectQueueName(project.id, queueName)}`);
+  }
+}
+
+async function clearProjectExternalState(
+  env: ApiEnv['Bindings'],
+  db: Db,
+  project: Project,
+): Promise<void> {
+  // As in replayDeploymentCutover, finish DB work before any external delete
+  // so a PostgreSQL error cannot strand a partially-cleared project while also
+  // preventing the caller from persisting its compensation fence.
+  const domains = await getDomainsByProjectId(db, project.id);
+  const resources = await getProjectResources(db, project.id);
+  const queueNames = new Set<string>();
+  for (const row of await getAllProjectDeployments(db, project.id)) {
+    try {
+      const rowManifest = row.manifest ? (JSON.parse(row.manifest) as DeployManifest) : null;
+      for (const queue of rowManifest?.queues ?? []) {
+        queueNames.add(queue.name);
+      }
+    } catch {
+      // Invalid historical metadata cannot authorize a queue write.
+    }
+  }
+
+  await env.ROUTING.delete(project.slug);
+  await env.ROUTING.delete(projectAccountKey(project.id));
+  await reconcileProjectDomainRoutes(env, domains, null);
+  await clearCronScheduler(env, project.id);
+  const dispatchWorkerName = env.DISPATCH_WORKER_NAME ?? 'void-dispatch';
+  for (const queueName of queueNames) {
+    const resource = resources.find(
+      (entry) => entry.type === 'queue' && entry.binding_name === queueName,
+    );
+    if (resource) {
+      await removeQueueConsumer(
+        env.CF_ACCOUNT_ID,
+        env.CF_API_TOKEN,
+        resource.cf_id,
+        dispatchWorkerName,
+      );
+    }
+    await env.ROUTING.delete(`queue:${getProjectQueueName(project.id, queueName)}`);
+  }
+}
 
 // CF's worker script size limit (free plan 1 MiB, paid plan 10 MiB compressed).
 // Enforced per worker module so a single runaway worker file cannot OOM the
@@ -414,684 +767,8 @@ async function deleteContainerApplicationWithRetry(
 
 const app = new Hono<ApiEnv>();
 
-function sameClassSet(
-  leftClasses: ReadonlyArray<string>,
-  rightClasses: ReadonlyArray<string>,
-): boolean {
-  return (
-    leftClasses.length === rightClasses.length &&
-    leftClasses.every((value, index) => value === rightClasses[index])
-  );
-}
-
 function sortUnique(values: ReadonlyArray<string> | undefined): ReadonlyArray<string> {
   return [...new Set(values ?? [])].sort((left, right) => left.localeCompare(right));
-}
-
-// Runtime shape validation for incoming deploy manifests. Downstream code
-// indexes deeply into the manifest (bindings.d1, queues[i].name,
-// websocket.classes, etc.) without re-guarding, so a malformed-but-JSON-valid
-// payload would otherwise crash with a 500 — sometimes after a deployment row
-// or CF resources were created. Everything the deploy pipeline reads must be
-// validated here BEFORE createDeployment runs.
-// Caps on user-supplied routing rule lists. Each rule compiles a regex per
-// request in dispatch (see `routing-rules.ts`), so an unbounded list lets a
-// 100k-entry manifest exhaust CPU on every request to the project. The limit
-// is per-list (redirect + fallback are independent), well above what real
-// frameworks emit (Vercel/Netlify both ship in the low thousands at most),
-// and validated at deploy ingest so dispatch never sees an oversized list.
-export const MAX_ROUTING_RULES = 2000;
-export const MAX_REVALIDATE_QUERY_ALLOWLIST_ENTRIES = MAX_ROUTING_RULES;
-const MAX_PAGES = 5000;
-
-/**
- * Strict literal-hostname regex used to validate `redirectRules[].host` /
- * `fallbackRules[].host` on the deploy manifest. Mirrors the regex in
- * `routes/domains.ts` (custom-domain create endpoint) — the source of truth
- * for what counts as a valid project-owned hostname. Rejects scheme prefixes,
- * ports, paths, whitespace, control chars, wildcards, single-label hosts,
- * IPv4 literals, and userinfo. Hostnames are lowercased before testing so
- * the same byte-exact form is what dispatch compares against `url.hostname`
- * (also lowercase per WHATWG).
- */
-const LITERAL_HOSTNAME_REGEX = /^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/;
-
-/**
- * Validate and lowercase-normalize an optional `host` field on a redirect or
- * fallback rule. Mutates `ruleObject.host` in place so the persisted manifest carries
- * the canonical form. Returns an error message string on failure, or `null`
- * on success (including the absent-field case).
- */
-function validateRuleHost(
-  ruleObject: Record<string, unknown>,
-  ruleKind: 'redirectRules' | 'fallbackRules',
-  sourceRef: string,
-): string | null {
-  if (ruleObject.host === undefined) {
-    return null;
-  }
-  if (typeof ruleObject.host !== 'string') {
-    return `invalid manifest shape: ${ruleKind} entry ${sourceRef} host must be a string`;
-  }
-  const normalized = ruleObject.host.toLowerCase();
-  if (!LITERAL_HOSTNAME_REGEX.test(normalized)) {
-    return `invalid manifest shape: ${ruleKind} entry ${sourceRef} host must be a literal hostname (e.g. "www.example.com"; no scheme, port, path, or wildcards): ${JSON.stringify(ruleObject.host)}`;
-  }
-  ruleObject.host = normalized;
-  return null;
-}
-
-export function validateManifestShape(parsed: unknown): string | null {
-  if (parsed == null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    return 'invalid manifest shape: expected a JSON object';
-  }
-  const manifest = parsed as Record<string, unknown>;
-
-  if (
-    manifest.bindings == null ||
-    typeof manifest.bindings !== 'object' ||
-    Array.isArray(manifest.bindings)
-  ) {
-    return 'invalid manifest shape: bindings must be an object';
-  }
-  const bindings = manifest.bindings as Record<string, unknown>;
-  for (const key of ['d1', 'kv', 'r2', 'hyperdrive'] as const) {
-    const bindingValue = bindings[key];
-    if (bindingValue === undefined) {
-      continue;
-    }
-    if (!Array.isArray(bindingValue) || !bindingValue.every((value) => typeof value === 'string')) {
-      return `invalid manifest shape: bindings.${key} must be an array of strings`;
-    }
-  }
-
-  if (manifest.queues !== undefined) {
-    if (!Array.isArray(manifest.queues)) {
-      return 'invalid manifest shape: queues must be an array';
-    }
-    for (const queue of manifest.queues) {
-      if (queue == null || typeof queue !== 'object' || Array.isArray(queue)) {
-        return 'invalid manifest shape: queues entries must be objects';
-      }
-      const queueObject = queue as Record<string, unknown>;
-      if (typeof queueObject.name !== 'string' || typeof queueObject.bindingName !== 'string') {
-        return 'invalid manifest shape: queues entries must have string name and bindingName';
-      }
-      for (const tuning of [
-        'maxBatchSize',
-        'maxBatchTimeout',
-        'maxRetries',
-        'retryDelay',
-      ] as const) {
-        const tuningValue = queueObject[tuning];
-        if (tuningValue === undefined) {
-          continue;
-        }
-        if (typeof tuningValue !== 'number' || !Number.isFinite(tuningValue)) {
-          return `invalid manifest shape: queues entry ${tuning} must be a finite number`;
-        }
-      }
-    }
-  }
-
-  if (manifest.schedules !== undefined) {
-    if (!Array.isArray(manifest.schedules)) {
-      return 'invalid manifest shape: schedules must be an array';
-    }
-    for (const schedule of manifest.schedules) {
-      if (schedule == null || typeof schedule !== 'object' || Array.isArray(schedule)) {
-        return 'invalid manifest shape: schedules entries must be objects';
-      }
-      const scheduleObject = schedule as Record<string, unknown>;
-      if (typeof scheduleObject.name !== 'string' || typeof scheduleObject.cron !== 'string') {
-        return 'invalid manifest shape: schedules entries must have string name and cron';
-      }
-    }
-  }
-
-  if (manifest.prerender !== undefined) {
-    if (
-      !Array.isArray(manifest.prerender) ||
-      !manifest.prerender.every((x) => typeof x === 'string')
-    ) {
-      return 'invalid manifest shape: prerender must be an array of strings';
-    }
-  }
-
-  if (manifest.vars !== undefined) {
-    if (
-      manifest.vars == null ||
-      typeof manifest.vars !== 'object' ||
-      Array.isArray(manifest.vars)
-    ) {
-      return 'invalid manifest shape: vars must be an object';
-    }
-    for (const [k, v] of Object.entries(manifest.vars as Record<string, unknown>)) {
-      if (typeof v !== 'string') {
-        return `invalid manifest shape: vars.${k} must be a string`;
-      }
-    }
-  }
-
-  if (manifest.migrations !== undefined) {
-    if (
-      manifest.migrations == null ||
-      typeof manifest.migrations !== 'object' ||
-      Array.isArray(manifest.migrations)
-    ) {
-      return 'invalid manifest shape: migrations must be an object';
-    }
-    const mig = manifest.migrations as Record<string, unknown>;
-    // `dialect` and `pending` are read unconditionally by the migration
-    // dispatch path (`manifest.migrations.pending > 0`). A wrong-typed value
-    // would reach the CF migration runner and crash mid-deploy.
-    if (mig.dialect !== undefined) {
-      const allowed = ['sqlite', 'postgresql', 'mysql'];
-      if (typeof mig.dialect !== 'string' || !allowed.includes(mig.dialect)) {
-        return `invalid manifest shape: migrations.dialect must be one of ${allowed.join(', ')}`;
-      }
-    }
-    if (mig.pending !== undefined) {
-      if (typeof mig.pending !== 'number' || !Number.isInteger(mig.pending) || mig.pending < 0) {
-        return 'invalid manifest shape: migrations.pending must be a non-negative integer';
-      }
-    }
-    if (mig.protocolVersion !== undefined && mig.protocolVersion !== 2) {
-      return 'invalid manifest shape: migrations.protocolVersion must be 2';
-    }
-    if (
-      mig.classifierVersion !== undefined &&
-      (typeof mig.classifierVersion !== 'number' || !Number.isInteger(mig.classifierVersion))
-    ) {
-      return 'invalid manifest shape: migrations.classifierVersion must be an integer';
-    }
-    if (mig.migrationListHash !== undefined && typeof mig.migrationListHash !== 'string') {
-      return 'invalid manifest shape: migrations.migrationListHash must be a string';
-    }
-    if (mig.stability !== undefined && mig.stability !== 'stable' && mig.stability !== 'legacy') {
-      return 'invalid manifest shape: migrations.stability must be stable or legacy';
-    }
-  }
-
-  if (manifest.auth !== undefined && typeof manifest.auth !== 'boolean') {
-    return 'invalid manifest shape: auth must be a boolean';
-  }
-
-  if (manifest.ssr !== undefined && typeof manifest.ssr !== 'boolean') {
-    return 'invalid manifest shape: ssr must be a boolean';
-  }
-
-  for (const key of [
-    'workerMain',
-    'compatibilityDate',
-    'hashedAssetsPrefix',
-    'framework',
-  ] as const) {
-    if (manifest[key] !== undefined && typeof manifest[key] !== 'string') {
-      return `invalid manifest shape: ${key} must be a string`;
-    }
-  }
-
-  if (manifest.assetManifestVersion !== undefined) {
-    // Direct-to-R2 deploys require v2 (declares blake3 + md5 + size per asset).
-    // The handler enforces v2 with its own error message; this shape check
-    // accepts 1 here so the layered error is the one users see.
-    if (manifest.assetManifestVersion !== 1 && manifest.assetManifestVersion !== 2) {
-      return 'invalid manifest shape: assetManifestVersion must be 1 or 2';
-    }
-  }
-
-  if (manifest.compatibilityFlags !== undefined) {
-    if (
-      !Array.isArray(manifest.compatibilityFlags) ||
-      !manifest.compatibilityFlags.every((x) => typeof x === 'string')
-    ) {
-      return 'invalid manifest shape: compatibilityFlags must be an array of strings';
-    }
-  }
-
-  // Per-project worker limit overrides (void.json `worker.limits`). Shape-only
-  // here; the plan ceiling (`maxCpuMsPerRequest`) is enforced by the deploy
-  // handler once the authenticated user's plan is in scope.
-  if (manifest.limits !== undefined) {
-    if (
-      manifest.limits == null ||
-      typeof manifest.limits !== 'object' ||
-      Array.isArray(manifest.limits)
-    ) {
-      return 'invalid manifest shape: limits must be an object';
-    }
-    const limits = manifest.limits as Record<string, unknown>;
-    if (limits.cpuMs !== undefined) {
-      if (
-        typeof limits.cpuMs !== 'number' ||
-        !Number.isSafeInteger(limits.cpuMs) ||
-        limits.cpuMs < 1
-      ) {
-        return 'invalid manifest shape: limits.cpuMs must be a positive integer';
-      }
-    }
-  }
-
-  if (manifest.type !== undefined) {
-    const allowed = ['void', 'spa', 'static', 'framework'];
-    if (typeof manifest.type !== 'string' || !allowed.includes(manifest.type)) {
-      return `invalid manifest shape: type must be one of ${allowed.join(', ')}`;
-    }
-  }
-
-  if (manifest.assetConfig !== undefined) {
-    if (
-      manifest.assetConfig == null ||
-      typeof manifest.assetConfig !== 'object' ||
-      Array.isArray(manifest.assetConfig)
-    ) {
-      return 'invalid manifest shape: assetConfig must be an object';
-    }
-    const assetConfig = manifest.assetConfig as Record<string, unknown>;
-    if (
-      assetConfig.not_found_handling !== undefined &&
-      !['none', 'single-page-application', '404-page'].includes(
-        assetConfig.not_found_handling as string,
-      )
-    ) {
-      return 'invalid manifest shape: assetConfig.not_found_handling must be one of none, single-page-application, 404-page';
-    }
-    if (
-      assetConfig.html_handling !== undefined &&
-      !['auto-trailing-slash', 'force-trailing-slash', 'drop-trailing-slash', 'none'].includes(
-        assetConfig.html_handling as string,
-      )
-    ) {
-      return 'invalid manifest shape: assetConfig.html_handling must be one of auto-trailing-slash, force-trailing-slash, drop-trailing-slash, none';
-    }
-  }
-
-  if (manifest.revalidate !== undefined) {
-    if (typeof manifest.revalidate === 'number') {
-      // ok
-    } else if (
-      manifest.revalidate == null ||
-      typeof manifest.revalidate !== 'object' ||
-      Array.isArray(manifest.revalidate)
-    ) {
-      return 'invalid manifest shape: revalidate must be a number or object';
-    } else {
-      for (const [pathname, value] of Object.entries(
-        manifest.revalidate as Record<string, unknown>,
-      )) {
-        if (typeof value !== 'number') {
-          return `invalid manifest shape: revalidate.${pathname} must be a number`;
-        }
-      }
-    }
-  }
-
-  if (manifest.headerRules !== undefined) {
-    if (!Array.isArray(manifest.headerRules)) {
-      return 'invalid manifest shape: headerRules must be an array';
-    }
-    for (const rule of manifest.headerRules) {
-      if (rule == null || typeof rule !== 'object' || Array.isArray(rule)) {
-        return 'invalid manifest shape: headerRules entries must be objects';
-      }
-      const ruleObject = rule as Record<string, unknown>;
-      if (typeof ruleObject.pattern !== 'string') {
-        return 'invalid manifest shape: headerRules entries must have a string pattern';
-      }
-      if (!Array.isArray(ruleObject.headers)) {
-        return 'invalid manifest shape: headerRules entries must have a headers array';
-      }
-      for (const pair of ruleObject.headers) {
-        if (
-          !Array.isArray(pair) ||
-          pair.length !== 2 ||
-          typeof pair[0] !== 'string' ||
-          typeof pair[1] !== 'string'
-        ) {
-          return 'invalid manifest shape: headerRules headers entries must be [name, value] string pairs';
-        }
-      }
-    }
-  }
-
-  // redirectRules is the pre-asset rule list. `status: 200` means a force
-  // rewrite (internal URL rewrite, no Location header); `status: 3xx` means a
-  // redirect. Destinations may not contain `?` — request query is merged
-  // separately at dispatch time (see `mergeQueryIntoLocation`).
-  if (manifest.redirectRules !== undefined) {
-    if (!Array.isArray(manifest.redirectRules)) {
-      return 'invalid manifest shape: redirectRules must be an array';
-    }
-    if (manifest.redirectRules.length > MAX_ROUTING_RULES) {
-      return `invalid manifest shape: redirectRules has ${manifest.redirectRules.length} entries, exceeds the ${MAX_ROUTING_RULES} per-list limit`;
-    }
-    for (const rule of manifest.redirectRules) {
-      if (rule == null || typeof rule !== 'object' || Array.isArray(rule)) {
-        return 'invalid manifest shape: redirectRules entries must be objects';
-      }
-      const ruleObject = rule as Record<string, unknown>;
-      if (
-        typeof ruleObject.source !== 'string' ||
-        typeof ruleObject.destination !== 'string' ||
-        typeof ruleObject.status !== 'number'
-      ) {
-        return 'invalid manifest shape: redirectRules entries must have string source, string destination, and numeric status';
-      }
-      // `JSON.stringify` safely quotes and escapes the user-supplied source
-      // string in the error message (handles embedded quotes, newlines, etc).
-      const sourceRef = JSON.stringify(ruleObject.source as string);
-      if (!MANIFEST_REDIRECT_RULE_STATUSES.has(ruleObject.status)) {
-        return `invalid manifest shape: redirectRules entry ${sourceRef} status must be one of ${[...MANIFEST_REDIRECT_RULE_STATUSES].join(', ')} (200 = rewrite, 3xx = redirect)`;
-      }
-      // Rewrites (status=200) must stay internal: no query string, path-absolute,
-      // and not protocol-relative (`//evil.com/x` parses cross-origin). 3xx
-      // redirects may include query strings and external Location values.
-      const destination = ruleObject.destination as string;
-      const isRewrite = ruleObject.status === 200;
-      if (isRewrite && destination.includes('?')) {
-        return `invalid manifest shape: redirectRules entry ${sourceRef} destination must not contain a query string when status is 200`;
-      }
-      if (isRewrite && !destination.startsWith('/')) {
-        return `invalid manifest shape: redirectRules entry ${sourceRef} destination must be path-absolute (start with "/") when status is 200`;
-      }
-      if (isRewrite && destination.startsWith('//')) {
-        return `invalid manifest shape: redirectRules entry ${sourceRef} destination must not start with "//" (protocol-relative URLs parse cross-origin; use a single-slash path-absolute destination)`;
-      }
-      const hostError = validateRuleHost(ruleObject, 'redirectRules', sourceRef);
-      if (hostError) {
-        return hostError;
-      }
-    }
-  }
-
-  // revalidateQueryAllowlist gates which query params participate in the
-  // ISR variant key on a rewrite. Shape: `{ "<pathPattern>": ["param", …] }`.
-  // The default (no entry / no allowlist) drops every param so a fanout
-  // attack via `?utm=…`/`?cb=…` can't multiply cache slots. The validator
-  // only enforces shape; semantic correctness (does the pattern match a
-  // real route?) is the user's responsibility.
-  if (manifest.revalidateQueryAllowlist !== undefined) {
-    if (
-      manifest.revalidateQueryAllowlist == null ||
-      typeof manifest.revalidateQueryAllowlist !== 'object' ||
-      Array.isArray(manifest.revalidateQueryAllowlist)
-    ) {
-      return 'invalid manifest shape: revalidateQueryAllowlist must be an object';
-    }
-    const entries = Object.entries(manifest.revalidateQueryAllowlist as Record<string, unknown>);
-    if (entries.length > MAX_REVALIDATE_QUERY_ALLOWLIST_ENTRIES) {
-      return `invalid manifest shape: revalidateQueryAllowlist has ${entries.length} entries, exceeds the ${MAX_REVALIDATE_QUERY_ALLOWLIST_ENTRIES} entry limit`;
-    }
-    for (const [pattern, value] of entries) {
-      if (pattern === '') {
-        return 'invalid manifest shape: revalidateQueryAllowlist must not include an empty pattern';
-      }
-      if (!Array.isArray(value)) {
-        return `invalid manifest shape: revalidateQueryAllowlist entry ${JSON.stringify(pattern)} must be an array of strings`;
-      }
-      for (const param of value) {
-        if (typeof param !== 'string') {
-          return `invalid manifest shape: revalidateQueryAllowlist entry ${JSON.stringify(pattern)} must contain only strings`;
-        }
-      }
-    }
-  }
-
-  // pages is the ordered route table (`[{ pattern, revalidate? }]`) the
-  // framework emits so dispatch can resolve a per-route ISR TTL by segment
-  // pattern. Validator only enforces shape; the framework owns the ordering
-  // and pattern semantics.
-  if (manifest.pages !== undefined) {
-    if (!Array.isArray(manifest.pages)) {
-      return 'invalid manifest shape: pages must be an array';
-    }
-    if (manifest.pages.length > MAX_PAGES) {
-      return `invalid manifest shape: pages has ${manifest.pages.length} entries, exceeds the ${MAX_PAGES} entry limit`;
-    }
-    for (const entry of manifest.pages as Array<unknown>) {
-      if (entry == null || typeof entry !== 'object' || Array.isArray(entry)) {
-        return 'invalid manifest shape: each pages entry must be an object';
-      }
-      const e = entry as Record<string, unknown>;
-      if (typeof e.pattern !== 'string' || e.pattern === '') {
-        return 'invalid manifest shape: pages entry pattern must be a string';
-      }
-      if (e.revalidate !== undefined && typeof e.revalidate !== 'number') {
-        return 'invalid manifest shape: pages entry revalidate must be a number';
-      }
-    }
-  }
-
-  // pathRevalidate is the RAW per-path OBJECT config shipped alongside `pages`
-  // so dispatch can resolve an inherit-eligible page (a pages entry with no
-  // baked revalidate) against the real request path. Same shape as the object
-  // form of `revalidate`: a map of pattern → number.
-  if (manifest.pathRevalidate !== undefined) {
-    if (
-      manifest.pathRevalidate == null ||
-      typeof manifest.pathRevalidate !== 'object' ||
-      Array.isArray(manifest.pathRevalidate)
-    ) {
-      return 'invalid manifest shape: pathRevalidate must be an object';
-    }
-    for (const [pathname, value] of Object.entries(
-      manifest.pathRevalidate as Record<string, unknown>,
-    )) {
-      if (typeof value !== 'number') {
-        return `invalid manifest shape: pathRevalidate.${pathname} must be a number`;
-      }
-    }
-  }
-
-  // fallbackRules fire after the static asset resolver 404s. Rewrites only,
-  // so every entry carries the same internal-destination constraints as a
-  // status=200 redirectRule.
-  if (manifest.fallbackRules !== undefined) {
-    if (!Array.isArray(manifest.fallbackRules)) {
-      return 'invalid manifest shape: fallbackRules must be an array';
-    }
-    if (manifest.fallbackRules.length > MAX_ROUTING_RULES) {
-      return `invalid manifest shape: fallbackRules has ${manifest.fallbackRules.length} entries, exceeds the ${MAX_ROUTING_RULES} per-list limit`;
-    }
-    for (const rule of manifest.fallbackRules) {
-      if (rule == null || typeof rule !== 'object' || Array.isArray(rule)) {
-        return 'invalid manifest shape: fallbackRules entries must be objects';
-      }
-      const ruleObject = rule as Record<string, unknown>;
-      if (
-        typeof ruleObject.source !== 'string' ||
-        typeof ruleObject.destination !== 'string' ||
-        typeof ruleObject.status !== 'number'
-      ) {
-        return 'invalid manifest shape: fallbackRules entries must have string source, string destination, and numeric status';
-      }
-      const sourceRef = JSON.stringify(ruleObject.source as string);
-      if (ruleObject.status !== 200) {
-        return `invalid manifest shape: fallbackRules entry ${sourceRef} status must be 200 (fallbacks are rewrites only)`;
-      }
-      const destination = ruleObject.destination as string;
-      if (destination.includes('?')) {
-        return `invalid manifest shape: fallbackRules entry ${sourceRef} destination must not contain a query string`;
-      }
-      if (!destination.startsWith('/')) {
-        return `invalid manifest shape: fallbackRules entry ${sourceRef} destination must be path-absolute (start with "/")`;
-      }
-      if (destination.startsWith('//')) {
-        return `invalid manifest shape: fallbackRules entry ${sourceRef} destination must not start with "//" (protocol-relative URLs parse cross-origin; use a single-slash path-absolute destination)`;
-      }
-      const hostError = validateRuleHost(ruleObject, 'fallbackRules', sourceRef);
-      if (hostError) {
-        return hostError;
-      }
-    }
-  }
-
-  if (manifest.websocket !== undefined) {
-    if (
-      manifest.websocket == null ||
-      typeof manifest.websocket !== 'object' ||
-      Array.isArray(manifest.websocket)
-    ) {
-      return 'invalid manifest shape: websocket must be an object';
-    }
-    const websocket = manifest.websocket as Record<string, unknown>;
-    if (!Array.isArray(websocket.routes)) {
-      return 'invalid manifest shape: websocket.routes must be an array';
-    }
-    for (const route of websocket.routes) {
-      if (route == null || typeof route !== 'object' || Array.isArray(route)) {
-        return 'invalid manifest shape: websocket.routes entries must be objects';
-      }
-      const routeObject = route as Record<string, unknown>;
-      if (typeof routeObject.className !== 'string') {
-        return 'invalid manifest shape: websocket.routes entries must have a string className';
-      }
-      if (routeObject.bindingName !== undefined && typeof routeObject.bindingName !== 'string') {
-        return 'invalid manifest shape: websocket.routes entry bindingName must be a string';
-      }
-    }
-    if (
-      !Array.isArray(websocket.classes) ||
-      !websocket.classes.every((x) => typeof x === 'string')
-    ) {
-      return 'invalid manifest shape: websocket.classes must be an array of strings';
-    }
-    if (websocket.migrations !== undefined) {
-      if (!Array.isArray(websocket.migrations)) {
-        return 'invalid manifest shape: websocket.migrations must be an array';
-      }
-      for (const migration of websocket.migrations) {
-        if (migration == null || typeof migration !== 'object' || Array.isArray(migration)) {
-          return 'invalid manifest shape: websocket.migrations entries must be objects';
-        }
-      }
-    }
-  }
-
-  if (manifest.sandbox !== undefined) {
-    // sandbox is meaningless without a user worker. Static/SPA deploys are
-    // served straight from KV/R2 by dispatch — no script is created, so a
-    // `sandbox` block can't be wired to anything. Reject up-front rather
-    // than silently dropping the block; a stale manifest carrying `sandbox`
-    // after the project type flips would otherwise surface as a confusing
-    // runtime no-op rather than a clear deploy-time error.
-    if (manifest.type === 'static' || manifest.type === 'spa') {
-      return 'sandbox is not supported for static/spa deployments';
-    }
-    if (
-      manifest.sandbox == null ||
-      typeof manifest.sandbox !== 'object' ||
-      Array.isArray(manifest.sandbox)
-    ) {
-      return 'invalid manifest shape: sandbox must be an object';
-    }
-    const sandbox = manifest.sandbox as Record<string, unknown>;
-    for (const key of ['bindingName', 'className', 'containerName', 'image']) {
-      if (typeof sandbox[key] !== 'string' || sandbox[key].length === 0) {
-        return `invalid manifest shape: sandbox.${key} must be a non-empty string`;
-      }
-    }
-    if (isLocalImageReference(sandbox.image as string)) {
-      return 'invalid manifest shape: sandbox.image must be a registry image reference';
-    }
-    if (sandbox.instanceType !== undefined && typeof sandbox.instanceType !== 'string') {
-      return 'invalid manifest shape: sandbox.instanceType must be a string';
-    }
-    if (
-      sandbox.maxInstances !== undefined &&
-      (typeof sandbox.maxInstances !== 'number' ||
-        !Number.isInteger(sandbox.maxInstances) ||
-        sandbox.maxInstances < 1)
-    ) {
-      return 'invalid manifest shape: sandbox.maxInstances must be a positive integer';
-    }
-    if (sandbox.migrations !== undefined) {
-      if (!Array.isArray(sandbox.migrations)) {
-        return 'invalid manifest shape: sandbox.migrations must be an array';
-      }
-      for (const migration of sandbox.migrations) {
-        if (migration == null || typeof migration !== 'object' || Array.isArray(migration)) {
-          return 'invalid manifest shape: sandbox.migrations entries must be objects';
-        }
-        const migrationObject = migration as Record<string, unknown>;
-        if (typeof migrationObject.tag !== 'string') {
-          return 'invalid manifest shape: sandbox.migrations entries must have a string tag';
-        }
-        if (
-          migrationObject.newSqliteClasses !== undefined &&
-          (!Array.isArray(migrationObject.newSqliteClasses) ||
-            !migrationObject.newSqliteClasses.every((value) => typeof value === 'string'))
-        ) {
-          return 'invalid manifest shape: sandbox.migrations newSqliteClasses must be an array of strings';
-        }
-        if (
-          migrationObject.deletedClasses !== undefined &&
-          (!Array.isArray(migrationObject.deletedClasses) ||
-            !migrationObject.deletedClasses.every((value) => typeof value === 'string'))
-        ) {
-          return 'invalid manifest shape: sandbox.migrations deletedClasses must be an array of strings';
-        }
-      }
-    }
-  }
-
-  if (manifest.live !== undefined) {
-    if (
-      manifest.live == null ||
-      typeof manifest.live !== 'object' ||
-      Array.isArray(manifest.live)
-    ) {
-      return 'invalid manifest shape: live must be an object';
-    }
-    const live = manifest.live as Record<string, unknown>;
-    for (const key of ['bindingName', 'className']) {
-      if (typeof live[key] !== 'string' || live[key].length === 0) {
-        return `invalid manifest shape: live.${key} must be a non-empty string`;
-      }
-    }
-    if (live.storage !== 'sqlite') {
-      return 'invalid manifest shape: live.storage must be "sqlite"';
-    }
-    if (!Array.isArray(live.classes) || !live.classes.every((x) => typeof x === 'string')) {
-      return 'invalid manifest shape: live.classes must be an array of strings';
-    }
-    if (live.migrations !== undefined) {
-      if (!Array.isArray(live.migrations)) {
-        return 'invalid manifest shape: live.migrations must be an array';
-      }
-      for (const migration of live.migrations) {
-        if (migration == null || typeof migration !== 'object' || Array.isArray(migration)) {
-          return 'invalid manifest shape: live.migrations entries must be objects';
-        }
-        const migrationObject = migration as Record<string, unknown>;
-        if (typeof migrationObject.tag !== 'string') {
-          return 'invalid manifest shape: live.migrations entries must have a string tag';
-        }
-        if (
-          migrationObject.newSqliteClasses !== undefined &&
-          (!Array.isArray(migrationObject.newSqliteClasses) ||
-            !migrationObject.newSqliteClasses.every((value) => typeof value === 'string'))
-        ) {
-          return 'invalid manifest shape: live.migrations newSqliteClasses must be an array of strings';
-        }
-      }
-    }
-  }
-
-  return null;
-}
-
-function isLocalImageReference(image: string): boolean {
-  const lowerImage = image.toLowerCase();
-  return (
-    image.startsWith('.') ||
-    image.startsWith('/') ||
-    lowerImage === 'dockerfile' ||
-    lowerImage.includes('dockerfile') ||
-    lowerImage.endsWith('/dockerfile') ||
-    lowerImage.endsWith('\\dockerfile')
-  );
 }
 
 function parseManifest(raw: string | null | undefined): DeployManifest | null {
@@ -1207,7 +884,12 @@ function sanitizeDeployErrorMessage(message: string): string {
 
 async function assertDeploymentNotCanceled(db: Db, deploymentId: string): Promise<void> {
   const latest = await getDeployment(db, deploymentId);
-  if (latest && CANCELLATION_REQUESTED_DEPLOYMENT_STATUSES.includes(latest.status)) {
+  if (
+    !latest ||
+    latest.status === 'compensating' ||
+    CANCELLATION_REQUESTED_DEPLOYMENT_STATUSES.includes(latest.status) ||
+    TERMINAL_DEPLOYMENT_STATUSES.includes(latest.status)
+  ) {
     throw new Error('deployment canceled');
   }
 }
@@ -1234,6 +916,141 @@ class ConcurrentDeployError extends Error {
     super(`deploy in progress: ${deploymentId}`);
     this.name = 'ConcurrentDeployError';
   }
+}
+
+class StaticAssetDisappearedError extends Error {
+  constructor(hashes: ReadonlyArray<string>) {
+    super(`static assets disappeared before cutover: ${hashes.slice(0, 10).join(', ')}`);
+    this.name = 'StaticAssetDisappearedError';
+  }
+}
+
+async function findR2Assets(
+  r2: R2Bucket,
+  projectId: string,
+  requiredHashes: ReadonlySet<string>,
+): Promise<Map<string, R2Object>> {
+  const found = new Map<string, R2Object>();
+  if (requiredHashes.size === 0) {
+    return found;
+  }
+  const prefix = `assets/${projectId}/`;
+  let cursor: string | undefined;
+  do {
+    const listed = await r2.list({ prefix, cursor, limit: 1000 });
+    for (const object of listed.objects) {
+      const hash = object.key.slice(prefix.length);
+      if (requiredHashes.has(hash)) {
+        found.set(hash, object);
+      }
+    }
+    if (found.size === requiredHashes.size) {
+      break;
+    }
+    cursor = listed.truncated ? listed.cursor : undefined;
+  } while (cursor !== undefined);
+  return found;
+}
+
+function inferPersistedAssetStore(
+  entry: { size?: unknown; store?: unknown },
+  manifest: DeployManifest | null,
+): 'kv' | 'r2' | null {
+  if (entry.store === 'kv' || entry.store === 'r2') {
+    return entry.store;
+  }
+  if (typeof entry.size !== 'number' || !Number.isFinite(entry.size) || entry.size < 0) {
+    return null;
+  }
+  // New JSON/direct-upload cutovers persist placement before publishing the
+  // ready marker. A v2 row without it is incomplete/corrupt: it may contain a
+  // small legacy KV carry-forward, so guessing R2 would publish a broken path.
+  if (manifest?.assetManifestVersion === 2) {
+    return null;
+  }
+  // Older multipart deployments did not persist placement and deterministically
+  // used the static uploader's 2 MiB size split.
+  return entry.size >= KV_THRESHOLD ? 'r2' : 'kv';
+}
+
+function attachServingStoreMetadata(
+  assetManifest: Readonly<Record<string, AssetManifestEntry>>,
+  servingManifest: Readonly<Record<string, string>>,
+): Record<string, AssetManifestEntry> {
+  const persisted: Record<string, AssetManifestEntry> = {};
+  const missing: Array<string> = [];
+  for (const [path, entry] of Object.entries(assetManifest)) {
+    if (path.startsWith('/.void-deploy/')) {
+      persisted[path] = entry;
+      continue;
+    }
+    const serving = servingManifest[path];
+    const hash = serving?.startsWith('!') ? serving.slice(1) : serving;
+    if (!serving || hash !== entry.hash) {
+      missing.push(path);
+      continue;
+    }
+    persisted[path] = { ...entry, store: serving.startsWith('!') ? 'r2' : 'kv' };
+  }
+  if (missing.length > 0) {
+    throw new StaticAssetDisappearedError(missing);
+  }
+  return persisted;
+}
+
+function reconstructPersistedServingManifest(
+  deployment: Deployment,
+  assetManifest: Readonly<Record<string, { hash?: unknown; size?: unknown; store?: unknown }>>,
+): Record<string, string> {
+  const deployManifest = parseManifest(deployment.manifest);
+  const servingManifest: Record<string, string> = {};
+  const invalid: Array<string> = [];
+  for (const [path, entry] of Object.entries(assetManifest)) {
+    if (path.startsWith('/.void-deploy/')) {
+      continue;
+    }
+    const store = inferPersistedAssetStore(entry, deployManifest);
+    if (typeof entry.hash !== 'string' || !store) {
+      invalid.push(path);
+      continue;
+    }
+    servingManifest[path] = store === 'r2' ? `!${entry.hash}` : entry.hash;
+  }
+  if (invalid.length > 0) {
+    throw new StaticAssetDisappearedError(invalid);
+  }
+  return servingManifest;
+}
+
+async function assertPersistedDeploymentServingAssetsExist(
+  env: ApiEnv['Bindings'],
+  deployment: Deployment,
+): Promise<void> {
+  const assetManifest = deployment.asset_hashes
+    ? (JSON.parse(deployment.asset_hashes) as Record<string, { hash?: unknown }>)
+    : null;
+  if (!assetManifest || Object.keys(assetManifest).length === 0) {
+    return;
+  }
+  const servingManifestKey = `manifest:${deployment.id}`;
+  const servingManifestRaw = await env.ROUTING.get(servingManifestKey);
+  let servingManifest: Record<string, string>;
+  if (servingManifestRaw) {
+    servingManifest = JSON.parse(servingManifestRaw) as Record<string, string>;
+  } else {
+    // The ready marker and serving manifest are separate KV keys and can
+    // propagate at different speeds. Reconstruct a missing read from the
+    // durable path/hash manifest instead of compensating a healthy cutover
+    // merely because this colo saw `ready` first. New rows persist placement;
+    // legacy multipart rows deterministically used the 2 MiB KV/R2 split.
+    servingManifest = reconstructPersistedServingManifest(deployment, assetManifest);
+    await env.ROUTING.put(servingManifestKey, JSON.stringify(servingManifest));
+  }
+  // Verify metadata coherence, not object-store presence. Platform GC is
+  // serialized on the project row and protects every nonterminal deployment;
+  // legacy unscoped keys are never collected. Out-of-band bucket deletion
+  // cannot be diagnosed with bounded per-request probes for a 5,000-file app.
+  attachServingStoreMetadata(assetManifest as Record<string, AssetManifestEntry>, servingManifest);
 }
 
 async function assertProjectNotDeleting(db: Db, projectId: string): Promise<void> {
@@ -1302,6 +1119,7 @@ export function buildWebSocketUploadMigrations(
       new_tag: string;
       steps: ReadonlyArray<{
         new_classes?: ReadonlyArray<string>;
+        new_sqlite_classes?: ReadonlyArray<string>;
         deleted_classes?: ReadonlyArray<string>;
       }>;
     }
@@ -1336,6 +1154,9 @@ export function buildDurableObjectUploadMigrations(
       tag: migration.tag,
       index: steps.length,
       ...(migration.newClasses?.length ? { new_classes: migration.newClasses } : {}),
+      ...(migration.newSqliteClasses?.length
+        ? { new_sqlite_classes: migration.newSqliteClasses }
+        : {}),
       ...(migration.deletedClasses?.length ? { deleted_classes: migration.deletedClasses } : {}),
     });
   }
@@ -1397,6 +1218,7 @@ export function buildLegacyWebSocketUploadMigrations(
       new_tag: string;
       steps: ReadonlyArray<{
         new_classes?: ReadonlyArray<string>;
+        new_sqlite_classes?: ReadonlyArray<string>;
         deleted_classes?: ReadonlyArray<string>;
       }>;
     }
@@ -1407,9 +1229,12 @@ export function buildLegacyWebSocketUploadMigrations(
 
   return {
     new_tag: migrations[migrations.length - 1].tag,
-    steps: migrations.map((migration) =>
-      migration.newClasses?.length ? { new_classes: migration.newClasses } : {},
-    ),
+    steps: migrations.map((migration) => ({
+      ...(migration.newClasses?.length ? { new_classes: migration.newClasses } : {}),
+      ...(migration.newSqliteClasses?.length
+        ? { new_sqlite_classes: migration.newSqliteClasses }
+        : {}),
+    })),
   };
 }
 
@@ -1543,12 +1368,15 @@ export function enrichWebSocketManifest(
   previousManifest: DeployManifest | null,
   currentVersion: number,
 ): { manifest: DeployManifest; changed: boolean; nextVersion: number } {
-  const nextClasses = sortUnique(manifest.websocket?.classes);
-  const previousClasses = sortUnique(previousManifest?.websocket?.classes);
   const previousMigrations = previousManifest?.websocket?.migrations ?? [];
-  const changed = !sameClassSet(nextClasses, previousClasses);
+  const planned = planWebSocketMigrations({
+    nextClasses: manifest.websocket?.classes,
+    previousClasses: previousManifest?.websocket?.classes,
+    previousMigrations,
+    currentVersion,
+  });
 
-  if (!changed) {
+  if (!planned.changed) {
     if (!manifest.websocket && previousMigrations.length === 0) {
       return { manifest, changed: false, nextVersion: currentVersion };
     }
@@ -1558,8 +1386,8 @@ export function enrichWebSocketManifest(
         websocket: manifest.websocket
           ? {
               ...manifest.websocket,
-              classes: nextClasses,
-              migrations: previousMigrations,
+              classes: planned.classes,
+              migrations: planned.migrations,
             }
           : previousManifest?.websocket,
       },
@@ -1568,55 +1396,17 @@ export function enrichWebSocketManifest(
     };
   }
 
-  // Compute classes that currently exist in Cloudflare by replaying
-  // migration history: add from newClasses, remove from deletedClasses.
-  // Also include previousClasses as fallback for legacy projects that
-  // predate the migration system.
-  const existingClasses = new Set(previousClasses);
-  for (const m of previousMigrations) {
-    for (const name of m.newClasses ?? []) {
-      existingClasses.add(name);
-    }
-    for (const name of m.deletedClasses ?? []) {
-      existingClasses.delete(name);
-    }
-  }
-  const newClasses = nextClasses.filter((name) => !existingClasses.has(name));
-
-  // If no new classes to create, no migration step is needed.
-  // The class list update is still recorded in the manifest.
-  if (newClasses.length === 0) {
-    return {
-      manifest: {
-        ...manifest,
-        websocket: {
-          routes: manifest.websocket?.routes ?? [],
-          classes: nextClasses,
-          migrations: previousMigrations,
-        },
-      },
-      changed: true,
-      nextVersion: currentVersion,
-    };
-  }
-
-  const nextVersion = currentVersion + 1;
-  const migration: WebSocketMigrationMeta = {
-    tag: `ws-v${nextVersion}`,
-    newClasses,
-  };
-
   return {
     manifest: {
       ...manifest,
       websocket: {
         routes: manifest.websocket?.routes ?? [],
-        classes: nextClasses,
-        migrations: [...previousMigrations, migration],
+        classes: planned.classes,
+        migrations: planned.migrations,
       },
     },
     changed: true,
-    nextVersion,
+    nextVersion: planned.nextVersion,
   };
 }
 
@@ -1794,6 +1584,13 @@ const PRESIGN_BATCH_CONCURRENCY = 50;
 // assets at this concurrency completes in well under the deploy heartbeat
 // interval.
 const R2_HEAD_VERIFY_CONCURRENCY = 20;
+// Keep each project-row-lock tenure bounded while reconciling external asset
+// stores. A fresh retained/in-flight hash snapshot is taken for every batch.
+const ASSET_GC_LOCK_BATCH = 100;
+// Retention is post-cutover and best-effort. Bound all eviction + orphan work
+// across one request so cleanup can never consume the Worker's 1,000 external
+// operation budget before the already-live deployment emits `done`.
+const ASSET_GC_MAX_HASHES_PER_DEPLOY = 200;
 // Per-blake3 / per-md5 validation: 32 lowercase hex characters.
 const HEX_32_REGEX = /^[0-9a-f]{32}$/;
 // Generous body cap for JSON-mode deploy POSTs. The body is dominated by
@@ -2431,44 +2228,315 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
   // reaper, placeholder insert. Once the placeholder row exists, every
   // later failure must route through the catch / finally below to avoid
   // leaving it stranded in `pending`.
-  const currentLiveDeployment = project.active_deployment_id
-    ? await getDeployment(context.get('db'), project.active_deployment_id)
-    : null;
-
-  let preDeployment: Awaited<ReturnType<typeof createDeployment>>;
+  const cutoverOwnerId = crypto.randomUUID();
+  let precheckResult:
+    | {
+        deployment: Awaited<ReturnType<typeof createDeployment>>;
+        currentLiveDeployment: Awaited<ReturnType<typeof getDeployment>>;
+        reconciledMarkerKeys?: ReadonlyArray<string>;
+      }
+    | { canceling: string }
+    | { recoveryFailed: string };
   try {
-    preDeployment = await context.get('db').transaction(async (tx) => {
+    precheckResult = await context.get('db').transaction(async (tx) => {
       await tx.execute(drizzleSql`SELECT id FROM projects WHERE id = ${projectId} FOR UPDATE`);
       const txDb = tx as unknown as Db;
       const lockedProject = await getProject(txDb, projectId);
       if (!lockedProject || lockedProject.status === 'deleting') {
         throw new Error(PROJECT_DELETING_ERROR_MESSAGE);
       }
-      const activeDeploy = await getActiveDeployment(txDb, projectId);
+      let committedActiveDeploymentId = lockedProject.active_deployment_id;
+      if (!committedActiveDeploymentId) {
+        // active_deployment_id was introduced nullable and older projects were
+        // not backfilled. Prefer the deployment named by the actual serving
+        // route (important after a legacy rollback); if a stale protected
+        // cutover already replaced that route, its non-live row is rejected and
+        // we fall back to the newest historical live deployment. Persist the
+        // result under the project lock before recovery can clear or replay any
+        // external state.
+        const legacyActive = await resolveLegacyActiveDeployment(context.env, txDb, lockedProject);
+        if (legacyActive) {
+          committedActiveDeploymentId = legacyActive.id;
+          await setActiveDeployment(txDb, projectId, legacyActive.id);
+        }
+      }
+      let activeDeploy = await getActiveDeployment(txDb, projectId);
+      let recoveredCutover: Deployment | null = null;
+      let recoveryFailedDeploymentId: string | null = null;
+      const reconciledMarkerKeys: Array<string> = [];
+      if (
+        activeDeploy &&
+        (activeDeploy.status === 'cutover' || activeDeploy.status === 'compensating')
+      ) {
+        const protectedDeployment = activeDeploy;
+        const [intentRaw, readyRaw, compensated] = await Promise.all([
+          context.env.ROUTING.get(cutoverIntentKey(protectedDeployment.id)),
+          context.env.ROUTING.get(cutoverReadyKey(protectedDeployment.id)),
+          context.env.ROUTING.get(cutoverCompensatedKey(protectedDeployment.id)),
+        ]);
+        const intent = parseCutoverMarker(intentRaw);
+        const ready = parseCutoverMarker(readyRaw);
+        const readyMatchesIntent =
+          protectedDeployment.status === 'cutover' &&
+          intent?.projectId === projectId &&
+          ready?.projectId === projectId &&
+          ready.ownerId === intent.ownerId;
+        let protectedBuildInactive = false;
+        let protectedAssetsMissing = false;
+
+        if (compensated === projectId) {
+          await updateDeploymentStatus(
+            txDb,
+            protectedDeployment.id,
+            'failed',
+            'cutover compensation completed',
+            { force: true },
+          );
+          reconciledMarkerKeys.push(
+            cutoverIntentKey(protectedDeployment.id),
+            cutoverReadyKey(protectedDeployment.id),
+            cutoverCompensatedKey(protectedDeployment.id),
+          );
+          activeDeploy = null;
+        }
+
+        if (activeDeploy && readyMatchesIntent) {
+          let buildIsActive = true;
+          if (ready.buildId) {
+            try {
+              await assertBoundBuildStillActive(txDb, ready.buildId, projectId);
+            } catch (error) {
+              if (error instanceof Error && error.message === SUPERSEDED_BUILD_ERROR_MESSAGE) {
+                buildIsActive = false;
+                protectedBuildInactive = true;
+              } else {
+                throw error;
+              }
+            }
+          }
+          if (buildIsActive) {
+            try {
+              await assertPersistedDeploymentServingAssetsExist(context.env, protectedDeployment);
+            } catch (error) {
+              if (error instanceof StaticAssetDisappearedError) {
+                buildIsActive = false;
+                protectedAssetsMissing = true;
+              } else {
+                throw error;
+              }
+            }
+            if (buildIsActive) {
+              const cutoverManifest = JSON.parse(protectedDeployment.manifest!) as DeployManifest;
+              await updateDeploymentStatus(txDb, protectedDeployment.id, 'live', undefined, {
+                force: true,
+              });
+              await updateProjectType(
+                txDb,
+                projectId,
+                resolvePersistedDeploymentType(cutoverManifest, protectedDeployment),
+              );
+              await setActiveDeployment(txDb, projectId, protectedDeployment.id);
+              await markDeploymentRetained(txDb, protectedDeployment.id, true);
+              recoveredCutover = { ...protectedDeployment, status: 'live', retained: true };
+              reconciledMarkerKeys.push(
+                cutoverIntentKey(protectedDeployment.id),
+                cutoverReadyKey(protectedDeployment.id),
+              );
+              activeDeploy = null;
+            }
+          }
+        }
+
+        if (activeDeploy) {
+          if (!protectedBuildInactive && intent?.buildId) {
+            try {
+              await assertBoundBuildStillActive(txDb, intent.buildId, projectId);
+            } catch (error) {
+              if (error instanceof Error && error.message === SUPERSEDED_BUILD_ERROR_MESSAGE) {
+                protectedBuildInactive = true;
+              } else {
+                throw error;
+              }
+            }
+          }
+          const updatedAt = protectedDeployment.updated_at.includes('T')
+            ? protectedDeployment.updated_at
+            : `${protectedDeployment.updated_at.replace(' ', 'T')}Z`;
+          if (
+            protectedDeployment.status !== 'compensating' &&
+            !protectedBuildInactive &&
+            !protectedAssetsMissing &&
+            Date.now() - new Date(updatedAt).getTime() < CUTOVER_RECOVERY_STALE_MS
+          ) {
+            throw new ConcurrentDeployError(protectedDeployment.id);
+          }
+
+          // Take ownership from a request that has exceeded the platform's
+          // maximum build lifetime. The old owner validates this marker before
+          // every later external/final/compensation step and must stand down.
+          const recoveryMarker: CutoverMarker = {
+            projectId,
+            ownerId: cutoverOwnerId,
+            buildId: intent?.buildId ?? null,
+          };
+          await context.env.ROUTING.put(
+            cutoverIntentKey(protectedDeployment.id),
+            JSON.stringify(recoveryMarker),
+          );
+
+          const committedActive = committedActiveDeploymentId
+            ? await getDeployment(txDb, committedActiveDeploymentId)
+            : null;
+          const compensateRecovery = async (
+            reason: string,
+            originalError?: unknown,
+          ): Promise<boolean> => {
+            try {
+              if (committedActive) {
+                await replayDeploymentCutover(
+                  context.env,
+                  txDb,
+                  lockedProject,
+                  committedActive,
+                  user.plan,
+                  lockedProject.type,
+                );
+              } else {
+                await clearProjectExternalState(context.env, txDb, lockedProject);
+              }
+              // Write the durable marker before the PostgreSQL transition. If
+              // COMMIT acknowledgement is lost, the next recovery knows the
+              // authoritative deployment was already restored and must never
+              // replay the abandoned target again.
+              await context.env.ROUTING.put(
+                cutoverCompensatedKey(protectedDeployment.id),
+                projectId,
+              );
+            } catch (compensationError) {
+              await updateDeploymentStatus(
+                txDb,
+                protectedDeployment.id,
+                'compensating',
+                'cutover recovery compensation incomplete',
+                { force: true },
+              );
+              recoveryFailedDeploymentId = protectedDeployment.id;
+              logger.error('precheck', 'cutover_recovery_compensation_failed', compensationError, {
+                deploymentId: protectedDeployment.id,
+                ...(originalError !== undefined && {
+                  originalError:
+                    originalError instanceof Error ? originalError.message : String(originalError),
+                }),
+              });
+              return false;
+            }
+            await updateDeploymentStatus(txDb, protectedDeployment.id, 'failed', reason, {
+              force: true,
+            });
+            return true;
+          };
+          let replayProtectedDeployment =
+            protectedDeployment.status === 'cutover' &&
+            !protectedBuildInactive &&
+            !protectedAssetsMissing;
+          if (replayProtectedDeployment && recoveryMarker.buildId) {
+            try {
+              await assertBoundBuildStillActive(txDb, recoveryMarker.buildId, projectId);
+            } catch (error) {
+              if (error instanceof Error && error.message === SUPERSEDED_BUILD_ERROR_MESSAGE) {
+                replayProtectedDeployment = false;
+              } else {
+                throw error;
+              }
+            }
+          }
+          if (replayProtectedDeployment) {
+            let replayError: unknown;
+            try {
+              await replayDeploymentCutover(
+                context.env,
+                txDb,
+                lockedProject,
+                protectedDeployment,
+                user.plan,
+              );
+              await assertPersistedDeploymentServingAssetsExist(context.env, protectedDeployment);
+              await context.env.ROUTING.put(
+                cutoverReadyKey(protectedDeployment.id),
+                JSON.stringify(recoveryMarker),
+              );
+            } catch (error) {
+              replayError = error;
+            }
+            if (replayError === undefined) {
+              const cutoverManifest = JSON.parse(protectedDeployment.manifest!) as DeployManifest;
+              await updateDeploymentStatus(txDb, protectedDeployment.id, 'live', undefined, {
+                force: true,
+              });
+              await updateProjectType(
+                txDb,
+                projectId,
+                resolvePersistedDeploymentType(cutoverManifest, protectedDeployment),
+              );
+              await setActiveDeployment(txDb, projectId, protectedDeployment.id);
+              await markDeploymentRetained(txDb, protectedDeployment.id, true);
+              recoveredCutover = { ...protectedDeployment, status: 'live', retained: true };
+            } else {
+              await compensateRecovery('cutover replay failed and was compensated', replayError);
+            }
+          } else {
+            await compensateRecovery(
+              compensated === projectId
+                ? 'cutover compensation recovered'
+                : 'abandoned cutover recovered',
+            );
+          }
+          reconciledMarkerKeys.push(
+            cutoverIntentKey(protectedDeployment.id),
+            cutoverReadyKey(protectedDeployment.id),
+            cutoverCompensatedKey(protectedDeployment.id),
+          );
+          activeDeploy = null;
+        }
+      }
+      if (recoveryFailedDeploymentId) {
+        return { recoveryFailed: recoveryFailedDeploymentId } as const;
+      }
       if (activeDeploy) {
-        const createdAt = activeDeploy.created_at.includes('T')
-          ? activeDeploy.created_at
-          : activeDeploy.created_at.replace(' ', 'T') + 'Z';
-        const ageMs = Date.now() - new Date(createdAt).getTime();
+        if (activeDeploy.source === 'rollback-lease') {
+          throw new ConcurrentDeployError(activeDeploy.id);
+        }
+        const updatedAt = activeDeploy.updated_at.includes('T')
+          ? activeDeploy.updated_at
+          : activeDeploy.updated_at.replace(' ', 'T') + 'Z';
+        const ageMs = Date.now() - new Date(updatedAt).getTime();
         if (ageMs < 10 * 60 * 1000) {
           throw new ConcurrentDeployError(activeDeploy.id);
         }
-        const staleNext = activeDeploy.status === 'canceling' ? 'canceled' : 'failed';
+        const staleNext = activeDeploy.status === 'canceling' ? 'canceled' : 'canceling';
         logger.info('status_transition', 'status_change', {
           deploymentId: activeDeploy.id,
           from: activeDeploy.status,
           to: staleNext,
           reason: 'precheck_reap_timeout',
         });
-        await updateDeploymentStatus(
-          txDb,
-          activeDeploy.id,
-          staleNext,
-          'timed out',
-          activeDeploy.status === 'canceling' ? { force: true } : undefined,
-        );
+        await updateDeploymentStatus(txDb, activeDeploy.id, staleNext, 'timed out', {
+          force: true,
+        });
+        if (staleNext === 'canceling') {
+          return { canceling: activeDeploy.id } as const;
+        }
       }
-      return await createDeployment(txDb, projectId, null, null, null, { cliVersion });
+      const currentLiveDeployment =
+        recoveredCutover ??
+        (committedActiveDeploymentId
+          ? await getDeployment(txDb, committedActiveDeploymentId)
+          : null);
+      return {
+        deployment: await createDeployment(txDb, projectId, null, null, null, { cliVersion }),
+        currentLiveDeployment,
+        ...(reconciledMarkerKeys.length > 0 && { reconciledMarkerKeys }),
+      } as const;
     });
   } catch (err) {
     if (err instanceof ConcurrentDeployError) {
@@ -2479,6 +2547,30 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
     }
     throw err;
   }
+  if ('recoveryFailed' in precheckResult) {
+    return context.json(
+      {
+        error: 'deployment recovery is incomplete; retry the deploy',
+        deployment: precheckResult.recoveryFailed,
+      },
+      503,
+    );
+  }
+  if ('canceling' in precheckResult) {
+    return context.json(
+      { error: 'deploy cancellation requested', deployment: precheckResult.canceling },
+      409,
+    );
+  }
+  for (const markerKey of precheckResult.reconciledMarkerKeys ?? []) {
+    await context.env.ROUTING.delete(markerKey).catch(() => {
+      // Once the PostgreSQL recovery transaction is acknowledged, stale
+      // marker bytes are harmless and can be removed by a later attempt.
+    });
+  }
+  const preDeployment = precheckResult.deployment;
+  const currentLiveDeployment = precheckResult.currentLiveDeployment;
+  const originalActiveDeploymentId = currentLiveDeployment?.id ?? null;
 
   const planLimits = getPlanLimits(user.plan);
 
@@ -2491,6 +2583,7 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
   let currentStep = 'parsing';
   let currentDeploymentId: string = preDeployment.id;
   let currentStatus: DeploymentStatus = 'pending';
+  let cutoverProtected = false;
   let phaseName = 'parsing';
   let phaseStartMs = Date.now();
   const markPhase = (next: string): void => {
@@ -2523,7 +2616,263 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
     phaseName = 'json_validate';
     phaseStartMs = Date.now();
     let routingSwitched = false;
+    let cutoverCommitted = false;
     const writtenRoutingKeys: Array<string> = [];
+    const routingValuesBeforeWrite = new Map<string, string | null>();
+    const routingValuesWritten = new Map<string, string | null>();
+    const snapshotRoutingValue = async (key: string): Promise<void> => {
+      if (!routingValuesBeforeWrite.has(key)) {
+        routingValuesBeforeWrite.set(key, await context.env.ROUTING.get(key));
+        writtenRoutingKeys.push(key);
+      }
+    };
+    const putTrackedRouting = async (key: string, value: string): Promise<void> => {
+      await snapshotRoutingValue(key);
+      // Record the intended mutation before awaiting KV. A write can commit at
+      // Cloudflare and still reject locally when its acknowledgement is lost;
+      // compensation must then inspect and undo that possibly-landed value.
+      routingValuesWritten.set(key, value);
+      await context.env.ROUTING.put(key, value);
+    };
+    const deleteTrackedRouting = async (key: string): Promise<void> => {
+      await snapshotRoutingValue(key);
+      routingValuesWritten.set(key, null);
+      await context.env.ROUTING.delete(key);
+    };
+    const withProjectCutoverFence = async <T>(
+      deploymentId: string,
+      mutate: (txDb: Db) => Promise<T>,
+    ): Promise<T> => {
+      return await context.get('db').transaction(async (tx) => {
+        await tx.execute(drizzleSql`SELECT id FROM projects WHERE id = ${projectId} FOR UPDATE`);
+        const txDb = tx as unknown as Db;
+        const lockedProject = await getProject(txDb, projectId);
+        if (!lockedProject || lockedProject.status === 'deleting') {
+          throw new Error(PROJECT_DELETING_ERROR_MESSAGE);
+        }
+        await assertDeploymentNotCanceled(txDb, deploymentId);
+        if (cutoverProtected) {
+          const intent = parseCutoverMarker(
+            await context.env.ROUTING.get(cutoverIntentKey(deploymentId)),
+          );
+          if (intent?.ownerId !== cutoverOwnerId || intent.projectId !== projectId) {
+            throw new Error(SUPERSEDED_BUILD_ERROR_MESSAGE);
+          }
+        }
+        return await mutate(txDb);
+      });
+    };
+    // Compensation must serialize with every project cutover, not only
+    // teardown. Once a newer deploy or rollback owns the project, restoring
+    // this attempt's snapshots would overwrite its routing, cron, and queue
+    // state while PostgreSQL points at the newer deployment. Under the shared
+    // project lock, require both the original active deployment provenance and
+    // the absence of a competing in-flight operation. Teardown's `deleting`
+    // state and a missing row likewise make absence authoritative.
+    const withProjectCompensationFence = async (restore: () => Promise<void>): Promise<void> => {
+      await context.get('db').transaction(async (tx) => {
+        await tx.execute(drizzleSql`SELECT id FROM projects WHERE id = ${projectId} FOR UPDATE`);
+        const txDb = tx as unknown as Db;
+        const lockedProject = await getProject(txDb, projectId);
+        if (!lockedProject || lockedProject.status === 'deleting') {
+          return;
+        }
+        if (lockedProject.active_deployment_id !== originalActiveDeploymentId) {
+          return;
+        }
+        const competingOperation = await getActiveDeployment(txDb, projectId);
+        if (competingOperation && competingOperation.id !== currentDeploymentId) {
+          return;
+        }
+        await restore();
+      });
+    };
+    const withProjectAssetGcFence = async <T>(
+      knownRetainedHashes: ReadonlySet<string>,
+      cleanup: (retainedHashes: Set<string>) => Promise<T>,
+    ): Promise<T | null> => {
+      return await context.get('db').transaction(async (tx) => {
+        await tx.execute(drizzleSql`SELECT id FROM projects WHERE id = ${projectId} FOR UPDATE`);
+        const txDb = tx as unknown as Db;
+        const lockedProject = await getProject(txDb, projectId);
+        if (!lockedProject || lockedProject.status === 'deleting') {
+          return null;
+        }
+
+        // Retention selection happens after go-live, so another deployment or
+        // rollback can become authoritative before external GC begins. Rebuild
+        // the protected hash set under the same lock used by final cutover and
+        // keep that lock through R2 deletion. A following static deploy performs
+        // its last R2 existence check under this lock before committing live.
+        const protectedHashes = new Set(knownRetainedHashes);
+        const retained = [...(await getRetainedDeployments(txDb, projectId))];
+        if (
+          lockedProject.active_deployment_id &&
+          !retained.some((deployment) => deployment.id === lockedProject.active_deployment_id)
+        ) {
+          const active = await getDeployment(txDb, lockedProject.active_deployment_id);
+          if (active) {
+            retained.push(active);
+          }
+        }
+        // A direct upload lands in R2 before its deployment can become live.
+        // Once the row has placement-bearing asset_hashes, protect it through
+        // every nonterminal state (including canceling/compensating). The
+        // recent-upload timestamp guard covers the short pre-persistence gap.
+        for (const inFlight of await getInFlightDeploymentsExcluding(txDb, projectId)) {
+          if (!retained.some((deployment) => deployment.id === inFlight.id)) {
+            retained.push(inFlight);
+          }
+        }
+        for (const protectedDeployment of retained) {
+          if (!protectedDeployment.asset_hashes) {
+            if (protectedDeployment.id === lockedProject.active_deployment_id) {
+              return null;
+            }
+            continue;
+          }
+          try {
+            const retainedManifest = JSON.parse(protectedDeployment.asset_hashes) as Record<
+              string,
+              { hash: string }
+            >;
+            for (const entry of Object.values(retainedManifest)) {
+              protectedHashes.add(entry.hash);
+            }
+          } catch {
+            // Corrupt retained metadata cannot prove an object is unreferenced.
+            return null;
+          }
+        }
+        return await cleanup(protectedHashes);
+      });
+    };
+    let remainingAssetGcHashBudget = ASSET_GC_MAX_HASHES_PER_DEPLOY;
+    const deleteAssetHashesWithProjectFence = async (
+      knownRetainedHashes: ReadonlySet<string>,
+      hashes: ReadonlyArray<string>,
+    ): Promise<number> => {
+      let deleted = 0;
+      const budgetedHashes = hashes.slice(0, remainingAssetGcHashBudget);
+      for (let index = 0; index < budgetedHashes.length; index += ASSET_GC_LOCK_BATCH) {
+        const batch = budgetedHashes.slice(index, index + ASSET_GC_LOCK_BATCH);
+        remainingAssetGcHashBudget -= batch.length;
+        const batchDeleted = await withProjectAssetGcFence(
+          knownRetainedHashes,
+          (currentRetainedHashes) =>
+            deleteUnreferencedAssets(
+              context.env.STATIC_ASSETS,
+              context.env.STATIC_ASSETS_R2,
+              batch,
+              currentRetainedHashes,
+              projectId,
+            ),
+        );
+        deleted += batchDeleted ?? 0;
+      }
+      return deleted;
+    };
+    const sweepAssetOrphansWithProjectFence = async (
+      knownRetainedHashes: ReadonlySet<string>,
+    ): Promise<number> => {
+      let deleted = 0;
+      await scanProjectAssetOrphanCandidates(
+        context.env.STATIC_ASSETS_R2,
+        projectId,
+        async (candidates) => {
+          deleted += await deleteAssetHashesWithProjectFence(knownRetainedHashes, candidates);
+        },
+        { maxCandidates: remainingAssetGcHashBudget },
+      );
+      return deleted;
+    };
+    const restoreTrackedRouting = async (): Promise<void> => {
+      await withProjectCompensationFence(async () => {
+        const errors: Array<unknown> = [];
+        for (const [key, previous] of [...routingValuesBeforeWrite].reverse()) {
+          try {
+            if (!routingValuesWritten.has(key)) {
+              continue;
+            }
+            const undo = resolveRoutingUndo(
+              await context.env.ROUTING.get(key),
+              routingValuesWritten.get(key)!,
+              previous,
+            );
+            if (!undo.restore) {
+              continue;
+            }
+            if (undo.value === null) {
+              await context.env.ROUTING.delete(key);
+            } else {
+              await context.env.ROUTING.put(key, undo.value);
+            }
+          } catch (error) {
+            errors.push(error);
+          }
+        }
+        if (errors.length > 0) {
+          throw new AggregateError(errors, 'one or more routing entries could not be restored');
+        }
+      });
+    };
+    let cronStateBeforeWrite: CronSyncState | null | undefined;
+    let cronSchedulerWriteAttempted = false;
+    const snapshotCronState = async (): Promise<void> => {
+      if (cronStateBeforeWrite === undefined) {
+        cronStateBeforeWrite = await snapshotCronScheduler(context.env, projectId);
+      }
+    };
+    const restoreTrackedCronState = async (): Promise<void> => {
+      if (cronSchedulerWriteAttempted && cronStateBeforeWrite !== undefined) {
+        await withProjectCompensationFence(() =>
+          restoreCronScheduler(context.env, projectId, cronStateBeforeWrite!),
+        );
+      }
+    };
+    const queueConsumerSnapshots = new Map<
+      string,
+      { queueId: string; scriptName: string; state: QueueConsumerInfo | null }
+    >();
+    const snapshotTrackedQueueConsumer = async (
+      queueId: string,
+      scriptName: string,
+    ): Promise<void> => {
+      const key = `${queueId}\0${scriptName}`;
+      if (!queueConsumerSnapshots.has(key)) {
+        queueConsumerSnapshots.set(key, {
+          queueId,
+          scriptName,
+          state: await snapshotQueueConsumer(
+            context.env.CF_ACCOUNT_ID,
+            context.env.CF_API_TOKEN,
+            queueId,
+            scriptName,
+          ),
+        });
+      }
+    };
+    const restoreTrackedQueueConsumers = async (): Promise<void> => {
+      await withProjectCompensationFence(async () => {
+        const errors: Array<unknown> = [];
+        for (const snapshot of [...queueConsumerSnapshots.values()].reverse()) {
+          try {
+            await restoreQueueConsumer(
+              context.env.CF_ACCOUNT_ID,
+              context.env.CF_API_TOKEN,
+              snapshot.queueId,
+              snapshot.scriptName,
+              snapshot.state,
+            );
+          } catch (error) {
+            errors.push(error);
+          }
+        }
+        if (errors.length > 0) {
+          throw new AggregateError(errors, 'one or more queue consumers could not be restored');
+        }
+      });
+    };
     let workerUploaded = false;
     let workerUploadUrl: string | undefined;
     let sandboxContainerAppId: string | undefined;
@@ -2589,33 +2938,46 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
       const declaredHashes = Array.from(
         new Set(Object.values(incomingAssetManifest).map((e) => e.hash)),
       );
-      const newHashes = declaredHashes.filter((h) => !carryForwardHashes.has(h));
-      const missingHashes: Array<string> = [];
-      const missingMutex: { busy: boolean } = { busy: false };
-      const r2HeadCache = new Map<string, { size: number } | null>();
-      await uploadPool(newHashes, R2_HEAD_VERIFY_CONCURRENCY, async (hash) => {
-        const key = `assets/${projectId}/${hash}`;
-        const head = await context.env.STATIC_ASSETS_R2.head(key);
-        // Single-writer atomicity: this `set` is synchronous so concurrent
-        // pool tasks don't actually race the map even though they share
-        // it. Cache it so the WfP path below can reuse the head metadata
-        // (for the size-based KV-vs-R2 split, though direct-to-R2 lands
-        // everything in R2 — see below).
-        r2HeadCache.set(hash, head ? { size: head.size } : null);
-        if (!head) {
-          // Single-writer atomicity is enough here: array `push` is
-          // synchronous and each iteration either pushes once or doesn't.
-          // The mutex guard is a hint to keep the cap-truncation logic
-          // race-free if it grows.
-          if (!missingMutex.busy) {
-            missingMutex.busy = true;
-            missingHashes.push(hash);
-            missingMutex.busy = false;
-          } else {
-            missingHashes.push(hash);
+      let previousBackendIsStatic = false;
+      if (currentLiveDeployment) {
+        const routingRaw = await context.env.ROUTING.get(project.slug);
+        if (routingRaw) {
+          try {
+            const routing = JSON.parse(routingRaw) as { staticDeploymentId?: unknown };
+            previousBackendIsStatic = typeof routing.staticDeploymentId === 'string';
+          } catch {
+            // A missing/malformed/non-static route must conservatively require
+            // every asset, exactly like the preflight endpoint.
           }
         }
-      });
+      }
+      // WfP preflight intentionally requires every declared asset because the
+      // prior bytes may exist only in Cloudflare's asset store. Those hashes
+      // are freshly direct-uploaded even when content-identical. Static→static
+      // can safely carry prior platform KV/R2 placement forward.
+      const newHashes =
+        hasWorkerFiles || !previousBackendIsStatic
+          ? declaredHashes
+          : declaredHashes.filter((hash) => !carryForwardHashes.has(hash));
+      const missingHashes: Array<string> = [];
+      const r2HeadCache = new Map<string, { size: number } | null>();
+      // R2 binding operations count toward a Worker's per-request subrequest
+      // budget. A valid manifest may contain 5,000 assets, so one HEAD per hash
+      // can fail a healthy deployment before validation. Inventory the scoped
+      // project prefix in paginated calls instead; this runs outside every
+      // PostgreSQL transaction and stops as soon as all required hashes appear.
+      const foundNewAssets = await findR2Assets(
+        context.env.STATIC_ASSETS_R2,
+        projectId,
+        new Set(newHashes),
+      );
+      for (const hash of newHashes) {
+        const object = foundNewAssets.get(hash);
+        r2HeadCache.set(hash, object ? { size: object.size } : null);
+        if (!object) {
+          missingHashes.push(hash);
+        }
+      }
       if (missingHashes.length > 0) {
         const cap = 10;
         const sample = missingHashes.slice(0, cap);
@@ -2799,8 +3161,10 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
           from: currentStatus,
           to: 'uploading',
         });
-        await updateDeploymentStatus(context.get('db'), deployment.id, 'uploading');
-        currentStatus = 'uploading';
+        if (!cutoverProtected) {
+          await updateDeploymentStatus(context.get('db'), deployment.id, 'uploading');
+          currentStatus = 'uploading';
+        }
         await assertDeploymentNotCanceled(context.get('db'), deployment.id);
         await assertProjectNotDeleting(context.get('db'), projectId);
 
@@ -2881,8 +3245,8 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
           // hashes without preflight still relies on carry-forward to
           // serve those bytes from their existing KV/R2 home.
           let prevServingManifest: Record<string, string> | null = null;
-          if (project.active_deployment_id) {
-            const prev = await context.env.ROUTING.get(`manifest:${project.active_deployment_id}`);
+          if (originalActiveDeploymentId) {
+            const prev = await context.env.ROUTING.get(`manifest:${originalActiveDeploymentId}`);
             if (prev) {
               prevServingManifest = JSON.parse(prev) as Record<string, string>;
             }
@@ -2894,6 +3258,26 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
               prevHashEntry.set(hash, v);
             }
           }
+          const priorHashStore = new Map<string, 'kv' | 'r2'>();
+          const priorStoredManifest = currentLiveDeployment?.asset_hashes
+            ? (JSON.parse(currentLiveDeployment.asset_hashes) as Record<
+                string,
+                { hash?: unknown; size?: unknown; store?: unknown }
+              >)
+            : null;
+          const priorDeployManifest = parseManifest(currentLiveDeployment?.manifest);
+          if (priorStoredManifest) {
+            for (const entry of Object.values(priorStoredManifest)) {
+              if (typeof entry.hash !== 'string') {
+                continue;
+              }
+              const store = inferPersistedAssetStore(entry, priorDeployManifest);
+              if (store) {
+                priorHashStore.set(entry.hash, store);
+              }
+            }
+          }
+          const convertingWorkerToStatic = !!currentLiveDeployment && !previousBackendIsStatic;
 
           const servingManifest: Record<string, string> = {};
           for (const [path, entry] of Object.entries(assetManifest)) {
@@ -2901,12 +3285,18 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
               // Carry-forward — preserve prior placement (KV vs R2).
               servingManifest[path] = prevHashEntry.get(entry.hash)!;
             } else if (carryForwardHashes.has(entry.hash)) {
-              // Carry-forward by hash (existed in prior `asset_hashes`)
-              // but the prior serving manifest is gone (e.g. dedupe
-              // GC'd the entry). Direct-to-R2 lands carry-forward bytes
-              // nowhere new this deploy, so we have no `!` guarantee —
-              // omit and rely on the dispatch fallback chain. Same gap
-              // case as the multipart path's else branch.
+              // A WfP -> static preflight requires every asset again, so the
+              // CLI just wrote these bytes to scoped R2. Otherwise recover a
+              // lagging/missing prior serving manifest from placement persisted
+              // with the active deployment (or the legacy multipart size split).
+              const store = convertingWorkerToStatic
+                ? 'r2'
+                : (priorHashStore.get(entry.hash) ??
+                  inferPersistedAssetStore(entry, priorDeployManifest));
+              if (!store) {
+                throw new StaticAssetDisappearedError([path]);
+              }
+              servingManifest[path] = store === 'r2' ? `!${entry.hash}` : entry.hash;
             } else {
               // New this deploy — verified in R2 above; direct-to-R2
               // always uses the `!` prefix.
@@ -2922,7 +3312,11 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
           await context
             .get('db')
             .update(deployments)
-            .set({ asset_hashes: JSON.stringify(assetManifest) })
+            .set({
+              asset_hashes: JSON.stringify(
+                attachServingStoreMetadata(assetManifest, servingManifest),
+              ),
+            })
             .where(eq(deployments.id, deployment.id));
 
           const type =
@@ -2939,31 +3333,79 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
             manifest,
             suspended: existingEntry?.suspended,
           });
+          currentStep = 'cutover_intent';
+          const cutoverMarker: CutoverMarker = {
+            projectId,
+            ownerId: cutoverOwnerId,
+            buildId: deployBuild ?? null,
+          };
+          await context.env.ROUTING.put(
+            cutoverIntentKey(deployment.id),
+            JSON.stringify(cutoverMarker),
+          );
+          if (!cutoverProtected) {
+            const claimed = await beginDeploymentCutover(context.get('db'), deployment.id);
+            if (!claimed) {
+              throw new Error('deployment canceled');
+            }
+            cutoverProtected = true;
+            currentStatus = 'cutover';
+          }
+          const dispatchWorkerName = context.env.DISPATCH_WORKER_NAME ?? 'void-dispatch';
+          const projectResources = await getProjectResources(context.get('db'), projectId);
+          await withProjectCutoverFence(deployment.id, async () => {
+            for (const previousQueue of previousManifest?.queues ?? []) {
+              const resource = projectResources.find(
+                (entry) => entry.type === 'queue' && entry.binding_name === previousQueue.name,
+              );
+              if (resource) {
+                await snapshotTrackedQueueConsumer(resource.cf_id, dispatchWorkerName);
+                await removeQueueConsumer(
+                  context.env.CF_ACCOUNT_ID,
+                  context.env.CF_API_TOKEN,
+                  resource.cf_id,
+                  dispatchWorkerName,
+                );
+              }
+              await deleteTrackedRouting(
+                `queue:${getProjectQueueName(projectId, previousQueue.name)}`,
+              );
+            }
+          });
+          await snapshotCronState();
           await assertDeploymentNotCanceled(context.get('db'), deployment.id);
           await assertProjectNotDeleting(context.get('db'), projectId);
           markPhase('routing_switch');
-          await context.env.ROUTING.put(project.slug, routingJson);
-          writtenRoutingKeys.push(project.slug);
-          await writeProjectAccountEntry(
-            context.env.ROUTING,
-            projectId,
-            project.user_id,
-            user.plan,
-          );
-          writtenRoutingKeys.push(projectAccountKey(projectId));
-          routingSwitched = true;
-          logger = logger.with({ routingSwitched: true });
-          logger.info('routing_switch', 'slug_routed', { slug: project.slug });
+          await withProjectCutoverFence(deployment.id, async (txDb) => {
+            const cutoverDomains = await getDomainsByProjectId(txDb, projectId);
+            await putTrackedRouting(project.slug, routingJson);
+            await putTrackedRouting(
+              projectAccountKey(projectId),
+              buildProjectAccountJson({ userId: project.user_id, plan: user.plan }),
+            );
+            routingSwitched = true;
+            logger = logger.with({ routingSwitched: true });
+            logger.info('routing_switch', 'slug_routed', { slug: project.slug });
 
-          for (const domain of projectDomains) {
-            if (domain.status === 'active') {
-              const domainKey = `domain:${domain.hostname}`;
-              await context.env.ROUTING.put(domainKey, routingJson);
-              writtenRoutingKeys.push(domainKey);
+            for (const domain of cutoverDomains) {
+              if (domain.status === 'active') {
+                const domainKey = `domain:${domain.hostname}`;
+                await putTrackedRouting(domainKey, routingJson);
+              }
             }
-          }
 
+            currentStep = 'cron_setup';
+            markPhase('cron_sync');
+            cronSchedulerWriteAttempted = true;
+            await clearCronScheduler(context.env, projectId);
+          });
+
+          currentStep = 'db_finalize';
           markPhase('db_finalize');
+          await context.env.ROUTING.put(
+            cutoverReadyKey(deployment.id),
+            JSON.stringify(cutoverMarker),
+          );
           logger.info('status_transition', 'status_change', {
             from: currentStatus,
             to: 'live',
@@ -2978,22 +3420,44 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
             if (!lockedProject || lockedProject.status === 'deleting') {
               throw new Error(PROJECT_DELETING_ERROR_MESSAGE);
             }
+            const [intent, ready] = await Promise.all([
+              context.env.ROUTING.get(cutoverIntentKey(deployment.id)).then(parseCutoverMarker),
+              context.env.ROUTING.get(cutoverReadyKey(deployment.id)).then(parseCutoverMarker),
+            ]);
+            if (
+              intent?.ownerId !== cutoverOwnerId ||
+              ready?.ownerId !== cutoverOwnerId ||
+              intent.projectId !== projectId ||
+              ready.projectId !== projectId
+            ) {
+              throw new Error(SUPERSEDED_BUILD_ERROR_MESSAGE);
+            }
+            await assertDeploymentNotCanceled(txDb, deployment.id);
             // Re-check the bound build under a row lock before going live. The
             // up-front guard can pass and then a newer GitHub Actions run
             // supersede (cancel) this build while we spent minutes building and
             // uploading; without this re-check a superseded runner would still
             // go live with stale code. See `assertBoundBuildStillActive`.
             await assertBoundBuildStillActive(txDb, deployBuild, projectId);
+
+            // Asset GC takes this same project lock and protects hashes from
+            // every nonterminal deployment. Once placement-bearing
+            // asset_hashes is persisted, no final object-store scan is needed.
             await updateDeploymentStatus(txDb, deployment.id, 'live', undefined, {
               force: true,
             });
             await updateProjectType(txDb, projectId, type);
+            await setActiveDeployment(txDb, projectId, deployment.id);
+            await markDeploymentRetained(txDb, deployment.id, true);
           });
+          cutoverCommitted = true;
           currentStatus = 'live';
-          await setActiveDeployment(context.get('db'), projectId, deployment.id);
-          await markDeploymentRetained(context.get('db'), deployment.id, true);
-
-          await clearCronScheduler(context.env, projectId);
+          await Promise.all([
+            context.env.ROUTING.delete(cutoverIntentKey(deployment.id)),
+            context.env.ROUTING.delete(cutoverReadyKey(deployment.id)),
+          ]).catch(() => {
+            // Stale markers are harmless once PostgreSQL is live.
+          });
 
           const legacyName = `user-${project.slug}`;
           await deleteDispatchScript(
@@ -3008,14 +3472,6 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
             projectId,
             deployment.id,
           );
-          for (const old of retained) {
-            await deleteDispatchScript(
-              context.env.CF_ACCOUNT_ID,
-              context.env.CF_API_TOKEN,
-              dispatchNamespace,
-              `user-${project.slug}-${old.id}`,
-            );
-          }
 
           markPhase('retention_cleanup');
           if (STATIC_RETENTION_LIMIT > 0) {
@@ -3049,42 +3505,86 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
               }
             }
 
-            for (const old of toEvict) {
-              if (old.asset_hashes) {
+            const { evictable, activeToKeep } = await context.get('db').transaction(async (tx) => {
+              await tx.execute(
+                drizzleSql`SELECT id FROM projects WHERE id = ${projectId} FOR UPDATE`,
+              );
+              const txDb = tx as unknown as Db;
+              const lockedProject = await getProject(txDb, projectId);
+              const evictable: typeof toEvict = [];
+              let activeToKeep: (typeof toEvict)[number] | undefined;
+              for (const old of toEvict) {
+                if (lockedProject?.active_deployment_id === old.id) {
+                  activeToKeep = old;
+                  continue;
+                }
+                await markDeploymentRetained(txDb, old.id, false);
+                evictable.push(old);
+              }
+              return { evictable, activeToKeep };
+            });
+
+            // A rollback can make a row selected for eviction active before
+            // this lock is acquired. Preserve its hashes before deleting any
+            // other deployment's assets or running the orphan sweep. Missing
+            // legacy metadata fails closed by disabling asset GC for this
+            // pass; retaining extra bytes is safer than deleting live bytes.
+            let assetCleanupSafe = true;
+            if (activeToKeep) {
+              if (!activeToKeep.asset_hashes) {
+                assetCleanupSafe = false;
+              } else {
+                try {
+                  const activeManifest = JSON.parse(activeToKeep.asset_hashes) as Record<
+                    string,
+                    { hash: string }
+                  >;
+                  for (const entry of Object.values(activeManifest)) {
+                    retainedHashes.add(entry.hash);
+                  }
+                } catch (e) {
+                  assetCleanupSafe = false;
+                  logger.warn('retention_cleanup', 'active_asset_hashes_parse_failed', {
+                    retainedDeploymentId: activeToKeep.id,
+                    err: e instanceof Error ? e.message : String(e),
+                  });
+                }
+              }
+            }
+
+            for (const old of evictable) {
+              await deleteDispatchScript(
+                context.env.CF_ACCOUNT_ID,
+                context.env.CF_API_TOKEN,
+                dispatchNamespace,
+                `user-${project.slug}-${old.id}`,
+              );
+              if (assetCleanupSafe && old.asset_hashes) {
                 const evictedManifest = JSON.parse(old.asset_hashes) as Record<
                   string,
                   { hash: string }
                 >;
                 const evictedHashes = Object.values(evictedManifest).map((e) => e.hash);
-                await deleteUnreferencedAssets(
-                  context.env.STATIC_ASSETS,
-                  context.env.STATIC_ASSETS_R2,
-                  evictedHashes,
-                  retainedHashes,
-                  projectId,
-                );
+                await deleteAssetHashesWithProjectFence(retainedHashes, evictedHashes);
               }
               await context.env.ROUTING.delete(`manifest:${old.id}`);
-              await markDeploymentRetained(context.get('db'), old.id, false);
             }
 
             // Direct-to-R2 orphan sweep. See WfP branch for rationale —
             // orphans uploaded via presigned PUTs that never finalized are
             // not named in any manifest, so the eviction loop misses them.
             // Best-effort: a failed sweep should not fail the deploy.
-            try {
-              const orphans = await sweepProjectAssetOrphans(
-                context.env.STATIC_ASSETS_R2,
-                projectId,
-                retainedHashes,
-              );
-              if (orphans > 0) {
-                logger.info('retention_cleanup', 'r2_orphans_swept', { count: orphans });
+            if (assetCleanupSafe) {
+              try {
+                const orphans = await sweepAssetOrphansWithProjectFence(retainedHashes);
+                if (orphans > 0) {
+                  logger.info('retention_cleanup', 'r2_orphans_swept', { count: orphans });
+                }
+              } catch (e) {
+                logger.warn('retention_cleanup', 'r2_orphan_sweep_failed', {
+                  err: e instanceof Error ? e.message : String(e),
+                });
               }
-            } catch (e) {
-              logger.warn('retention_cleanup', 'r2_orphan_sweep_failed', {
-                err: e instanceof Error ? e.message : String(e),
-              });
             }
           }
 
@@ -3199,26 +3699,97 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
         if (assetCount > 0) {
           currentStep = 'asset_upload';
           markPhase('asset_upload');
-          // Hydrate `assetsByHash` from R2. The cache-buster injected
-          // above is already in `assetsByHash`; only fetch the rest.
-          // Bounded concurrency matches the head-verify pool.
-          const wfpDeclaredHashSet = new Set(
-            Object.values(incomingAssetManifest).map((e) => e.hash),
+          const previousServingManifest = originalActiveDeploymentId
+            ? ((await context.env.ROUTING.get(
+                `manifest:${originalActiveDeploymentId}`,
+                'json',
+              )) as Record<string, string> | null)
+            : null;
+          const previousHashEntry = new Map<string, string>();
+          if (previousServingManifest) {
+            for (const value of Object.values(previousServingManifest)) {
+              previousHashEntry.set(value.startsWith('!') ? value.slice(1) : value, value);
+            }
+          }
+          const previousHashStore = new Map<string, 'kv' | 'r2'>();
+          const previousStoredManifest = currentLiveDeployment?.asset_hashes
+            ? (JSON.parse(currentLiveDeployment.asset_hashes) as Record<
+                string,
+                { hash?: unknown; size?: unknown; store?: unknown }
+              >)
+            : null;
+          const previousDeployManifest = parseManifest(currentLiveDeployment?.manifest);
+          if (previousStoredManifest) {
+            for (const entry of Object.values(previousStoredManifest)) {
+              if (typeof entry.hash !== 'string') {
+                continue;
+              }
+              const store = inferPersistedAssetStore(entry, previousDeployManifest);
+              if (store) {
+                previousHashStore.set(entry.hash, store);
+              }
+            }
+          }
+
+          const session = await createAssetUploadSession(
+            context.env.CF_ACCOUNT_ID,
+            context.env.CF_API_TOKEN,
+            dispatchNamespace,
+            workerName,
+            // Strip extras (e.g. v2 `blake3`/`md5`) at the CF API boundary —
+            // CF documents only `{ hash, size }` and may strictly validate.
+            normalizeForCfAssetSession(assetManifest),
           );
-          const hashesNeedingBytes = Array.from(wfpDeclaredHashSet).filter(
-            (h) => !assetsByHash.has(h),
+          logger.info('asset_upload', 'session_created', {
+            manifestEntries: Object.keys(assetManifest).length,
+            buckets: session.buckets.length,
+            blobsAvailable: assetsByHash.size,
+          });
+
+          // Hydrate only hashes Cloudflare's upload session actually requests.
+          // Carry-forward bytes may still use legacy unscoped KV/R2 keys, so
+          // mirror dispatch's scoped-first, legacy-second lookup exactly.
+          const hashesNeedingBytes = Array.from(new Set(session.buckets.flat())).filter(
+            (hash) => !assetsByHash.has(hash),
           );
+          const newHashSetForHydration = new Set(newHashes);
+          const hydratedStoreByHash = new Map<string, 'kv' | 'r2'>();
           await uploadPool(hashesNeedingBytes, R2_HEAD_VERIFY_CONCURRENCY, async (hash) => {
-            const obj = await context.env.STATIC_ASSETS_R2.get(`assets/${projectId}/${hash}`);
-            if (!obj) {
-              // Should be impossible — we already head-verified above.
-              // Surface as a hard error: a missing object after head
-              // succeeded means R2 lost the bytes between head and get.
+            const previousEntry = previousHashEntry.get(hash);
+            const preferredStore = newHashSetForHydration.has(hash)
+              ? 'r2'
+              : previousEntry
+                ? previousEntry.startsWith('!')
+                  ? 'r2'
+                  : 'kv'
+                : previousHashStore.get(hash);
+            let assetBytes: ArrayBuffer | null = null;
+            let resolvedStore: 'kv' | 'r2' | undefined;
+            if (preferredStore === 'r2' || !preferredStore) {
+              const object =
+                (await context.env.STATIC_ASSETS_R2.get(`assets/${projectId}/${hash}`)) ??
+                (await context.env.STATIC_ASSETS_R2.get(`assets/${hash}`));
+              assetBytes = object ? await object.arrayBuffer() : null;
+              if (assetBytes) {
+                resolvedStore = 'r2';
+              }
+            }
+            if (!assetBytes && (preferredStore === 'kv' || !previousEntry)) {
+              assetBytes =
+                (await context.env.STATIC_ASSETS.get(
+                  `assets/${projectId}/${hash}`,
+                  'arrayBuffer',
+                )) ?? (await context.env.STATIC_ASSETS.get(`assets/${hash}`, 'arrayBuffer'));
+              if (assetBytes) {
+                resolvedStore = 'kv';
+              }
+            }
+            if (!assetBytes) {
               throw new Error(
-                `R2 object ${`assets/${projectId}/${hash}`} disappeared between head and get`,
+                `serving asset ${hash} was not found in its persisted ${preferredStore} store`,
               );
             }
-            const assetBytes = await obj.arrayBuffer();
+            hydratedStoreByHash.set(hash, resolvedStore!);
             // Find a path in the asset manifest with this hash so we
             // can derive the content type for the CF asset upload.
             // Multiple paths can share a hash; any one is correct.
@@ -3247,21 +3818,6 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
             cached: assetCount - newAssets,
           });
 
-          const session = await createAssetUploadSession(
-            context.env.CF_ACCOUNT_ID,
-            context.env.CF_API_TOKEN,
-            dispatchNamespace,
-            workerName,
-            // Strip extras (e.g. v2 `blake3`/`md5`) at the CF API boundary —
-            // CF documents only `{ hash, size }` and may strictly validate.
-            normalizeForCfAssetSession(assetManifest),
-          );
-          logger.info('asset_upload', 'session_created', {
-            manifestEntries: Object.keys(assetManifest).length,
-            buckets: session.buckets.length,
-            blobsAvailable: assetsByHash.size,
-          });
-
           completionJwt = await uploadAssetBuckets(
             context.env.CF_ACCOUNT_ID,
             session.jwt,
@@ -3275,42 +3831,39 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
           });
           emit({ event: 'asset_upload_done' });
 
-          await context
-            .get('db')
-            .update(deployments)
-            .set({ asset_hashes: JSON.stringify(assetManifest) })
-            .where(eq(deployments.id, deployment.id));
-
           // Mirror serving manifest. Direct-to-R2 already lands assets
           // in our R2; we just need to write the per-deploy serving
           // manifest so dispatch's WfP fallback can read them when CF's
           // asset store returns the dedupe-poisoning stub.
-          const declaredHashes2 = new Set(Object.values(incomingAssetManifest).map((e) => e.hash));
-          let prevServingManifest: Record<string, string> | null = null;
-          if (preflightUsed && project.active_deployment_id) {
-            const prev = await context.env.ROUTING.get(`manifest:${project.active_deployment_id}`);
-            if (prev) {
-              prevServingManifest = JSON.parse(prev) as Record<string, string>;
-            }
-          }
-          const prevHashEntry = new Map<string, string>();
-          if (prevServingManifest) {
-            for (const v of Object.values(prevServingManifest)) {
-              const hash = v.startsWith('!') ? v.slice(1) : v;
-              prevHashEntry.set(hash, v);
-            }
-          }
+          const newHashSet = new Set(newHashes);
           const servingManifest: Record<string, string> = {};
           for (const [path, entry] of Object.entries(assetManifest)) {
-            if (declaredHashes2.has(entry.hash)) {
-              // Direct-to-R2 always uses R2-prefixed entries.
-              servingManifest[path] = `!${entry.hash}`;
-            } else if (prevHashEntry.has(entry.hash)) {
-              servingManifest[path] = prevHashEntry.get(entry.hash)!;
+            if (path.startsWith('/.void-deploy/')) {
+              continue;
             }
-            // else: preflight-skipped with no prior mirror — same gap
-            // case as multipart; serving manifest omits.
+            if (newHashSet.has(entry.hash)) {
+              // Newly required direct uploads always live in scoped R2.
+              servingManifest[path] = `!${entry.hash}`;
+            } else if (previousHashEntry.has(entry.hash)) {
+              servingManifest[path] = previousHashEntry.get(entry.hash)!;
+            } else {
+              const store =
+                previousHashStore.get(entry.hash) ?? hydratedStoreByHash.get(entry.hash);
+              if (!store) {
+                throw new StaticAssetDisappearedError([path]);
+              }
+              servingManifest[path] = store === 'r2' ? `!${entry.hash}` : entry.hash;
+            }
           }
+          const persistedAssetManifest = attachServingStoreMetadata(assetManifest, servingManifest);
+          // Persist exact placement before the serving manifest/ready marker.
+          // GC protects every nonterminal row with asset_hashes, and recovery
+          // can reconstruct a lagging KV manifest without probing 5,000 keys.
+          await context
+            .get('db')
+            .update(deployments)
+            .set({ asset_hashes: JSON.stringify(persistedAssetManifest) })
+            .where(eq(deployments.id, deployment.id));
           await context.env.ROUTING.put(
             `manifest:${deployment.id}`,
             JSON.stringify(servingManifest),
@@ -3515,8 +4068,10 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
             from: currentStatus,
             to: 'migrating',
           });
-          await updateDeploymentStatus(context.get('db'), deployment.id, 'migrating');
-          currentStatus = 'migrating';
+          if (!cutoverProtected) {
+            await updateDeploymentStatus(context.get('db'), deployment.id, 'migrating');
+            currentStatus = 'migrating';
+          }
           await assertDeploymentNotCanceled(context.get('db'), deployment.id);
           await assertProjectNotDeleting(context.get('db'), projectId);
           emit({ event: 'worker_readiness' });
@@ -3784,6 +4339,28 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
           await assertProjectNotDeleting(context.get('db'), projectId);
         }
 
+        // Queue setup is the first authoritative external mutation for a
+        // Worker deploy. Persist a protected intent before it so no reaper can
+        // terminalize a request whose queue/routing cutover may have landed.
+        currentStep = 'cutover_intent';
+        const cutoverMarker: CutoverMarker = {
+          projectId,
+          ownerId: cutoverOwnerId,
+          buildId: deployBuild ?? null,
+        };
+        await context.env.ROUTING.put(
+          cutoverIntentKey(deployment.id),
+          JSON.stringify(cutoverMarker),
+        );
+        if (!cutoverProtected) {
+          const claimed = await beginDeploymentCutover(context.get('db'), deployment.id);
+          if (!claimed) {
+            throw new Error('deployment canceled');
+          }
+          cutoverProtected = true;
+          currentStatus = 'cutover';
+        }
+
         // Queue setup
         currentStep = 'queue_setup';
         markPhase('queue_setup');
@@ -3794,61 +4371,100 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
         const dispatchWorkerName = context.env.DISPATCH_WORKER_NAME ?? 'void-dispatch';
         const queueProxyToken = workerBindings.find((b) => b.name === '__VOID_PROXY_TOKEN')?.text;
         const queueConflicts: Array<{ queue: string; ownerScript: string }> = [];
-        const consumerOutcomes = await Promise.all(
-          (manifest.queues ?? []).map(async (q) => {
+        const projectResources = await getProjectResources(context.get('db'), projectId);
+        await withProjectCutoverFence(deployment.id, async () => {
+          for (const q of manifest.queues ?? []) {
             const queueBinding = workerBindings.find(
-              (b) => b.type === 'queue' && b.name === q.bindingName,
+              (binding) => binding.type === 'queue' && binding.name === q.bindingName,
             );
-            if (!queueBinding?.queue_id) {
-              return null;
+            if (queueBinding?.queue_id) {
+              await snapshotTrackedQueueConsumer(queueBinding.queue_id, dispatchWorkerName);
             }
-            const consumerResult = await addQueueConsumer(
-              context.env.CF_ACCOUNT_ID,
-              context.env.CF_API_TOKEN,
-              queueBinding.queue_id,
-              dispatchWorkerName,
-              {
-                ...(q.maxBatchSize != null && { batch_size: q.maxBatchSize }),
-                ...(q.maxBatchTimeout != null && {
-                  max_wait_time_ms: q.maxBatchTimeout * 1000,
-                }),
-                ...(q.maxRetries != null && { max_retries: q.maxRetries }),
-                ...(q.retryDelay != null && { retry_delay: q.retryDelay }),
-              },
-            );
-            if (consumerResult.status === 'conflict') {
-              emit({
-                event: 'queue_consumer_conflict',
-                queue: q.name,
-                ownerScript: consumerResult.ownerScript,
-              });
-              queueConflicts.push({ queue: q.name, ownerScript: consumerResult.ownerScript });
-            }
-            return { q, queueBinding, status: consumerResult.status };
-          }),
-        );
-        if (queueConflicts.length > 0) {
-          const details = queueConflicts
-            .map((conflict) => `${conflict.queue} owned by ${conflict.ownerScript}`)
-            .join('; ');
-          throw new Error(`queue consumer conflict: ${details}`);
-        }
-        for (const outcome of consumerOutcomes) {
-          if (!outcome) {
-            continue;
           }
-          const queueKey = `queue:${outcome.queueBinding.queue_name}`;
-          await context.env.ROUTING.put(
-            queueKey,
-            JSON.stringify({
-              workerName,
-              projectId,
-              queueName: outcome.q.name,
-              proxyToken: queueProxyToken,
+          const settledConsumerOutcomes = await Promise.allSettled(
+            (manifest.queues ?? []).map(async (q) => {
+              const queueBinding = workerBindings.find(
+                (b) => b.type === 'queue' && b.name === q.bindingName,
+              );
+              if (!queueBinding?.queue_id) {
+                return null;
+              }
+              const consumerResult = await addQueueConsumer(
+                context.env.CF_ACCOUNT_ID,
+                context.env.CF_API_TOKEN,
+                queueBinding.queue_id,
+                dispatchWorkerName,
+                {
+                  ...(q.maxBatchSize != null && { batch_size: q.maxBatchSize }),
+                  ...(q.maxBatchTimeout != null && {
+                    max_wait_time_ms: q.maxBatchTimeout * 1000,
+                  }),
+                  ...(q.maxRetries != null && { max_retries: q.maxRetries }),
+                  ...(q.retryDelay != null && { retry_delay: q.retryDelay }),
+                },
+              );
+              if (consumerResult.status === 'conflict') {
+                emit({
+                  event: 'queue_consumer_conflict',
+                  queue: q.name,
+                  ownerScript: consumerResult.ownerScript,
+                });
+                queueConflicts.push({ queue: q.name, ownerScript: consumerResult.ownerScript });
+              }
+              return { q, queueBinding, status: consumerResult.status };
             }),
           );
-          writtenRoutingKeys.push(queueKey);
-        }
+          const consumerErrors = settledConsumerOutcomes
+            .filter((outcome) => outcome.status === 'rejected')
+            .map((outcome) => outcome.reason);
+          if (consumerErrors.length > 0) {
+            throw new AggregateError(consumerErrors, 'one or more queue consumers failed to sync');
+          }
+          const consumerOutcomes = settledConsumerOutcomes
+            .filter((outcome) => outcome.status === 'fulfilled')
+            .map((outcome) => outcome.value);
+          if (queueConflicts.length > 0) {
+            const details = queueConflicts
+              .map((conflict) => `${conflict.queue} owned by ${conflict.ownerScript}`)
+              .join('; ');
+            throw new Error(`queue consumer conflict: ${details}`);
+          }
+          for (const outcome of consumerOutcomes) {
+            if (!outcome) {
+              continue;
+            }
+            const queueKey = `queue:${outcome.queueBinding.queue_name}`;
+            await putTrackedRouting(
+              queueKey,
+              JSON.stringify({
+                workerName,
+                projectId,
+                queueName: outcome.q.name,
+                proxyToken: queueProxyToken,
+              }),
+            );
+          }
+          const desiredQueueNames = new Set((manifest.queues ?? []).map((queue) => queue.name));
+          for (const previousQueue of previousManifest?.queues ?? []) {
+            if (!desiredQueueNames.has(previousQueue.name)) {
+              const resource = projectResources.find(
+                (entry) => entry.type === 'queue' && entry.binding_name === previousQueue.name,
+              );
+              if (resource) {
+                await snapshotTrackedQueueConsumer(resource.cf_id, dispatchWorkerName);
+                await removeQueueConsumer(
+                  context.env.CF_ACCOUNT_ID,
+                  context.env.CF_API_TOKEN,
+                  resource.cf_id,
+                  dispatchWorkerName,
+                );
+              }
+              await deleteTrackedRouting(
+                `queue:${getProjectQueueName(projectId, previousQueue.name)}`,
+              );
+            }
+          }
+        });
         await assertDeploymentNotCanceled(context.get('db'), deployment.id);
         await assertProjectNotDeleting(context.get('db'), projectId);
 
@@ -3870,8 +4486,10 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
             from: currentStatus,
             to: 'prerendering',
           });
-          await updateDeploymentStatus(context.get('db'), deployment.id, 'prerendering');
-          currentStatus = 'prerendering';
+          if (!cutoverProtected) {
+            await updateDeploymentStatus(context.get('db'), deployment.id, 'prerendering');
+            currentStatus = 'prerendering';
+          }
           await assertDeploymentNotCanceled(context.get('db'), deployment.id);
           await assertProjectNotDeleting(context.get('db'), projectId);
           const siteDomain = context.env.SITE_DOMAIN ?? SITE_DOMAIN;
@@ -3905,7 +4523,7 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
                 // Host-scope the warmed key to the slug host implied by the
                 // fetch URL — dispatch reads `<pid>/isr/v3/<did>/<host>/<path>`
                 // keyed on the request hostname, so without this the warmed
-                // bytes are a permanent cold miss (see isr-shared `isrCacheKey`).
+                // bytes are a permanent cold miss (see @void/isr `isrCacheKey`).
                 const key = isrCacheKey(projectId, deployment.id, slugHost, pathname);
                 const headers = serializePrerenderHeaders(response);
                 const body = await response.arrayBuffer();
@@ -3948,26 +4566,51 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
           assetManifestId: assetCount > 0 ? deployment.id : undefined,
           assetConfig: assetCount > 0 ? assetConfig : undefined,
         });
+        await snapshotCronState();
         await assertDeploymentNotCanceled(context.get('db'), deployment.id);
         await assertProjectNotDeleting(context.get('db'), projectId);
         markPhase('routing_switch');
-        await context.env.ROUTING.put(project.slug, routingJson);
-        writtenRoutingKeys.push(project.slug);
-        await writeProjectAccountEntry(context.env.ROUTING, projectId, project.user_id, user.plan);
-        writtenRoutingKeys.push(projectAccountKey(projectId));
-        routingSwitched = true;
-        logger = logger.with({ routingSwitched: true });
-        logger.info('routing_switch', 'slug_routed', { slug: project.slug });
+        await withProjectCutoverFence(deployment.id, async (txDb) => {
+          const cutoverDomains = await getDomainsByProjectId(txDb, projectId);
+          await putTrackedRouting(project.slug, routingJson);
+          await putTrackedRouting(
+            projectAccountKey(projectId),
+            buildProjectAccountJson({ userId: project.user_id, plan: user.plan }),
+          );
+          routingSwitched = true;
+          logger = logger.with({ routingSwitched: true });
+          logger.info('routing_switch', 'slug_routed', { slug: project.slug });
 
-        for (const domain of projectDomains) {
-          if (domain.status === 'active') {
-            const domainKey = `domain:${domain.hostname}`;
-            await context.env.ROUTING.put(domainKey, routingJson);
-            writtenRoutingKeys.push(domainKey);
+          for (const domain of cutoverDomains) {
+            if (domain.status === 'active') {
+              const domainKey = `domain:${domain.hostname}`;
+              await putTrackedRouting(domainKey, routingJson);
+            }
           }
-        }
 
+          currentStep = 'cron_setup';
+          markPhase('cron_sync');
+          cronSchedulerWriteAttempted = true;
+          if (hasCrons) {
+            const cronProxyToken = workerBindings.find(
+              (binding) => binding.name === '__VOID_PROXY_TOKEN',
+            )?.text;
+            await syncCronScheduler(context.env, projectId, {
+              workerName,
+              schedules: manifest.schedules!,
+              proxyToken: cronProxyToken,
+            });
+          } else {
+            await clearCronScheduler(context.env, projectId);
+          }
+        });
+
+        currentStep = 'db_finalize';
         markPhase('db_finalize');
+        await context.env.ROUTING.put(
+          cutoverReadyKey(deployment.id),
+          JSON.stringify(cutoverMarker),
+        );
         logger.info('status_transition', 'status_change', {
           from: currentStatus,
           to: 'live',
@@ -3980,12 +4623,28 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
           if (!lockedProject || lockedProject.status === 'deleting') {
             throw new Error(PROJECT_DELETING_ERROR_MESSAGE);
           }
+          const [intent, ready] = await Promise.all([
+            context.env.ROUTING.get(cutoverIntentKey(deployment.id)).then(parseCutoverMarker),
+            context.env.ROUTING.get(cutoverReadyKey(deployment.id)).then(parseCutoverMarker),
+          ]);
+          if (
+            intent?.ownerId !== cutoverOwnerId ||
+            ready?.ownerId !== cutoverOwnerId ||
+            intent.projectId !== projectId ||
+            ready.projectId !== projectId
+          ) {
+            throw new Error(SUPERSEDED_BUILD_ERROR_MESSAGE);
+          }
+          await assertDeploymentNotCanceled(txDb, deployment.id);
           // Re-check the bound build under a row lock before going live. The
           // up-front guard can pass and then a newer GitHub Actions run
           // supersede (cancel) this build while we spent minutes building and
           // uploading; without this re-check a superseded runner would still
           // go live with stale code. See `assertBoundBuildStillActive`.
           await assertBoundBuildStillActive(txDb, deployBuild, projectId);
+          // Asset GC takes this same project lock and protects hashes from
+          // every nonterminal deployment. Serving placement was persisted
+          // before cutover began, so no storage scan belongs here.
           await updateDeploymentStatus(txDb, deployment.id, 'live', undefined, {
             force: true,
           });
@@ -3994,37 +4653,17 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
             projectId,
             manifest.type ?? (manifest.framework ? 'framework' : 'void'),
           );
+          await setActiveDeployment(txDb, projectId, deployment.id);
+          await markDeploymentRetained(txDb, deployment.id, true);
         });
+        cutoverCommitted = true;
         currentStatus = 'live';
-        await setActiveDeployment(context.get('db'), projectId, deployment.id);
-        await markDeploymentRetained(context.get('db'), deployment.id, true);
-
-        // Cron sync
-        currentStep = 'cron_setup';
-        markPhase('cron_sync');
-        const cronSyncPromise = (async () => {
-          try {
-            if (hasCrons) {
-              const cronProxyToken = workerBindings.find(
-                (b) => b.name === '__VOID_PROXY_TOKEN',
-              )?.text;
-              await syncCronScheduler(context.env, projectId, {
-                workerName,
-                schedules: manifest.schedules!,
-                proxyToken: cronProxyToken,
-              });
-            } else {
-              await clearCronScheduler(context.env, projectId);
-            }
-          } catch (err) {
-            logger.error('cron_sync', 'cron_sync_failed_post_routing', err);
-          }
-        })();
-        try {
-          context.executionCtx.waitUntil(cronSyncPromise);
-        } catch {
-          await cronSyncPromise;
-        }
+        await Promise.all([
+          context.env.ROUTING.delete(cutoverIntentKey(deployment.id)),
+          context.env.ROUTING.delete(cutoverReadyKey(deployment.id)),
+        ]).catch(() => {
+          // Stale markers are harmless once PostgreSQL is live.
+        });
 
         // Legacy + retention cleanup (mirror of multipart's WfP path)
         const legacyWorkerName = `user-${project.slug}`;
@@ -4078,23 +4717,49 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
             }
           }
 
-          for (const old of toEvict) {
-            const evictionSkipped = await context.get('db').transaction(async (tx) => {
-              await tx.execute(
-                drizzleSql`SELECT id FROM projects WHERE id = ${projectId} FOR UPDATE`,
-              );
-              const txDb = tx as unknown as Db;
-              const lockedProject = await getProject(txDb, projectId);
+          const { evictable, activeToKeep } = await context.get('db').transaction(async (tx) => {
+            await tx.execute(
+              drizzleSql`SELECT id FROM projects WHERE id = ${projectId} FOR UPDATE`,
+            );
+            const txDb = tx as unknown as Db;
+            const lockedProject = await getProject(txDb, projectId);
+            const evictable: typeof toEvict = [];
+            let activeToKeep: (typeof toEvict)[number] | undefined;
+            for (const old of toEvict) {
               if (lockedProject?.active_deployment_id === old.id) {
-                return true;
+                activeToKeep = old;
+                continue;
               }
               await markDeploymentRetained(txDb, old.id, false);
-              return false;
-            });
-            if (evictionSkipped) {
-              continue;
+              evictable.push(old);
             }
+            return { evictable, activeToKeep };
+          });
 
+          let assetCleanupSafe = true;
+          if (activeToKeep) {
+            if (!activeToKeep.asset_hashes) {
+              assetCleanupSafe = false;
+            } else {
+              try {
+                const activeManifest = JSON.parse(activeToKeep.asset_hashes) as Record<
+                  string,
+                  { hash: string }
+                >;
+                for (const entry of Object.values(activeManifest)) {
+                  retainedHashes.add(entry.hash);
+                }
+              } catch (e) {
+                assetCleanupSafe = false;
+                logger.warn('retention_cleanup', 'active_asset_hashes_parse_failed', {
+                  retainedDeploymentId: activeToKeep.id,
+                  err: e instanceof Error ? e.message : String(e),
+                });
+              }
+            }
+          }
+
+          for (const old of evictable) {
             try {
               const oldWorkerName = `user-${project.slug}-${old.id}`;
               await deleteDispatchScript(
@@ -4108,25 +4773,25 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
                   err: e instanceof Error ? e.message : String(e),
                 });
               });
-              if (old.asset_hashes) {
+              if (assetCleanupSafe && old.asset_hashes) {
                 try {
                   const evictedManifest = JSON.parse(old.asset_hashes) as Record<
                     string,
                     { hash: string }
                   >;
                   const evictedHashes = Object.values(evictedManifest).map((e) => e.hash);
-                  await deleteUnreferencedAssets(
-                    context.env.STATIC_ASSETS,
-                    context.env.STATIC_ASSETS_R2,
-                    evictedHashes,
-                    retainedHashes,
-                    projectId,
-                  ).catch((e) => {
-                    logger.warn('retention_cleanup', 'evicted_unreferenced_assets_delete_failed', {
-                      evictedDeploymentId: old.id,
-                      err: e instanceof Error ? e.message : String(e),
-                    });
-                  });
+                  await deleteAssetHashesWithProjectFence(retainedHashes, evictedHashes).catch(
+                    (e) => {
+                      logger.warn(
+                        'retention_cleanup',
+                        'evicted_unreferenced_assets_delete_failed',
+                        {
+                          evictedDeploymentId: old.id,
+                          err: e instanceof Error ? e.message : String(e),
+                        },
+                      );
+                    },
+                  );
                   await context.env.ROUTING.delete(`manifest:${old.id}`).catch((e) => {
                     logger.warn('retention_cleanup', 'evicted_routing_manifest_delete_failed', {
                       evictedDeploymentId: old.id,
@@ -4198,19 +4863,17 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
           // outlive the eviction loop. Walk the project's R2 keyspace and
           // drop anything not in `retainedHashes`. Best-effort: a failed
           // sweep should not fail the deploy.
-          try {
-            const orphans = await sweepProjectAssetOrphans(
-              context.env.STATIC_ASSETS_R2,
-              projectId,
-              retainedHashes,
-            );
-            if (orphans > 0) {
-              logger.info('retention_cleanup', 'r2_orphans_swept', { count: orphans });
+          if (assetCleanupSafe) {
+            try {
+              const orphans = await sweepAssetOrphansWithProjectFence(retainedHashes);
+              if (orphans > 0) {
+                logger.info('retention_cleanup', 'r2_orphans_swept', { count: orphans });
+              }
+            } catch (e) {
+              logger.warn('retention_cleanup', 'r2_orphan_sweep_failed', {
+                err: e instanceof Error ? e.message : String(e),
+              });
             }
-          } catch (e) {
-            logger.warn('retention_cleanup', 'r2_orphan_sweep_failed', {
-              err: e instanceof Error ? e.message : String(e),
-            });
           }
         }
 
@@ -4267,23 +4930,192 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
         const failedWorkerName = workerName!;
         const failedDispatchNamespace = dispatchNamespace!;
 
+        // A connection can fail after PostgreSQL has committed the go-live
+        // transaction but before the client receives COMMIT's acknowledgement.
+        // Before undoing any external state, reconcile that ambiguous outcome
+        // from the durable deployment row. A readable non-live row after three
+        // checks proves the callback did not commit. A live row proves it did,
+        // even when a newer deploy/rollback has since changed project.active.
+        // If PostgreSQL remains unreadable, preserve external state: leaking a
+        // version temporarily is recoverable, deleting a possibly-live Worker
+        // and restoring stale tenant routing is not.
+        const supersededBuild = raw === SUPERSEDED_BUILD_ERROR_MESSAGE;
+        const teardownRaceLost = routingSwitched && raw === PROJECT_DELETING_ERROR_MESSAGE;
+        const deploymentCanceled = raw === 'deployment canceled';
+        const staticAssetsMissing = err instanceof StaticAssetDisappearedError;
+        let ambiguousCutoverOutcome:
+          | 'committed'
+          | 'pending_reconcile'
+          | 'not_committed'
+          | 'unknown'
+          | undefined;
+        if (
+          routingSwitched &&
+          !cutoverCommitted &&
+          currentStep === 'db_finalize' &&
+          !supersededBuild &&
+          !teardownRaceLost &&
+          !deploymentCanceled &&
+          !staticAssetsMissing
+        ) {
+          let durableReadSucceeded = false;
+          for (let attempt = 0; attempt < 3; attempt++) {
+            try {
+              const latest = await getDeployment(context.get('db'), failedDeployment.id);
+              durableReadSucceeded = true;
+              if (latest?.status === 'live') {
+                ambiguousCutoverOutcome = 'committed';
+                break;
+              }
+              if (latest?.status === 'cutover') {
+                ambiguousCutoverOutcome = 'pending_reconcile';
+                break;
+              }
+            } catch (readError) {
+              logger.warn('catch', 'cutover_outcome_read_failed', {
+                deploymentId: failedDeployment.id,
+                attempt: attempt + 1,
+                err: readError instanceof Error ? readError.message : String(readError),
+              });
+            }
+            if (attempt < 2) {
+              await new Promise((resolve) => setTimeout(resolve, 25 * 2 ** attempt));
+            }
+          }
+          ambiguousCutoverOutcome ??= durableReadSucceeded ? 'not_committed' : 'unknown';
+          logger.warn('catch', 'cutover_outcome_reconciled', {
+            deploymentId: failedDeployment.id,
+            outcome: ambiguousCutoverOutcome,
+          });
+        }
+        let readyMarkerConfirmed: boolean | undefined;
+        if (ambiguousCutoverOutcome === 'pending_reconcile') {
+          try {
+            const ready = parseCutoverMarker(
+              await context.env.ROUTING.get(cutoverReadyKey(failedDeployment.id)),
+            );
+            readyMarkerConfirmed =
+              ready?.projectId === projectId && ready.ownerId === cutoverOwnerId;
+          } catch {
+            // An unreadable marker leaves the protected intent fenced. A
+            // later deploy can retry this proof under the project lock.
+          }
+        }
+        const preserveAmbiguousCutover =
+          ambiguousCutoverOutcome === 'committed' ||
+          (ambiguousCutoverOutcome === 'pending_reconcile' && readyMarkerConfirmed !== false) ||
+          ambiguousCutoverOutcome === 'unknown';
+
         // SUPERSEDED is thrown only inside the go-live tx (by
         // `assertBoundBuildStillActive`), so the message alone identifies it.
         // A teardown race is PROJECT_DELETING thrown AFTER routing was switched
         // (the in-tx delete re-check). Both abort the go-live: roll back the
         // routing keys this attempt wrote and tear down the worker/bundle/
         // container state, then mark the deployment failed (never live).
-        const supersededBuild = raw === SUPERSEDED_BUILD_ERROR_MESSAGE;
-        const teardownRaceLost = routingSwitched && raw === PROJECT_DELETING_ERROR_MESSAGE;
-        if (teardownRaceLost || supersededBuild) {
-          logger.error('catch', supersededBuild ? 'superseded_build' : 'teardown_race_lost', err, {
+        const cutoverFailed = cutoverProtected && !cutoverCommitted && !preserveAmbiguousCutover;
+        if (teardownRaceLost || supersededBuild || cutoverFailed) {
+          const failureEvent = supersededBuild
+            ? 'superseded_build'
+            : teardownRaceLost
+              ? 'teardown_race_lost'
+              : 'cutover_failed';
+          logger.error('catch', failureEvent, err, {
             workerName: failedWorkerName,
             writtenRoutingKeyCount: writtenRoutingKeys.length,
           });
-          for (const key of writtenRoutingKeys) {
-            await context.env.ROUTING.delete(key).catch((e) =>
-              logger.error('catch', 'routing_rollback_failed', e, { key }),
-            );
+
+          // Once a protected cutover intent exists, claim an explicit
+          // compensation state under the project lock before undoing or
+          // deleting anything. A concurrent recovery that already published
+          // this deployment makes the conditional claim fail, in which case
+          // this stale request must not touch its external state or artifacts.
+          const needsProtectedClaim = !teardownRaceLost && currentStatus === 'cutover';
+          if (needsProtectedClaim) {
+            const claimed = await context.get('db').transaction(async (tx) => {
+              await tx.execute(
+                drizzleSql`SELECT id FROM projects WHERE id = ${projectId} FOR UPDATE`,
+              );
+              const intent = parseCutoverMarker(
+                await context.env.ROUTING.get(cutoverIntentKey(failedDeployment.id)),
+              );
+              if (intent?.projectId !== projectId || intent.ownerId !== cutoverOwnerId) {
+                return false;
+              }
+              return await beginDeploymentCompensation(tx as unknown as Db, failedDeployment.id);
+            });
+            if (!claimed) {
+              logger.warn('catch', 'cutover_compensation_claim_lost', {
+                deploymentId: failedDeployment.id,
+              });
+              emit({ event: 'error', message: msg, step: currentStep });
+              return;
+            }
+            currentStatus = 'compensating';
+          }
+
+          const compensationErrors: Array<unknown> = [];
+          if (!cutoverCommitted) {
+            await restoreTrackedQueueConsumers().catch((e) => {
+              compensationErrors.push(e);
+              logger.error('catch', 'queue_consumer_rollback_failed', e);
+            });
+          }
+          await restoreTrackedRouting().catch((e) => {
+            compensationErrors.push(e);
+            logger.error('catch', 'routing_rollback_failed', e);
+          });
+          await restoreTrackedCronState().catch((e) => {
+            compensationErrors.push(e);
+            logger.error('catch', 'cron_rollback_failed', e);
+          });
+
+          // Snapshot compensation is best-effort per surface. Retry once when
+          // one of those exact undos failed, then normalize the whole project
+          // back to PostgreSQL's committed active deployment if exact restore
+          // is still incomplete.
+          if (needsProtectedClaim && compensationErrors.length > 0) {
+            compensationErrors.length = 0;
+            await restoreTrackedQueueConsumers().catch((error) => compensationErrors.push(error));
+            await restoreTrackedRouting().catch((error) => compensationErrors.push(error));
+            await restoreTrackedCronState().catch((error) => compensationErrors.push(error));
+          }
+          if (needsProtectedClaim && (compensationErrors.length > 0 || routingSwitched)) {
+            await context.get('db').transaction(async (tx) => {
+              await tx.execute(
+                drizzleSql`SELECT id FROM projects WHERE id = ${projectId} FOR UPDATE`,
+              );
+              const txDb = tx as unknown as Db;
+              const lockedProject = await getProject(txDb, projectId);
+              if (!lockedProject || lockedProject.status === 'deleting') {
+                return;
+              }
+              if (compensationErrors.length > 0) {
+                const committedActive = lockedProject.active_deployment_id
+                  ? await getDeployment(txDb, lockedProject.active_deployment_id)
+                  : null;
+                if (committedActive) {
+                  await replayDeploymentCutover(
+                    context.env,
+                    txDb,
+                    lockedProject,
+                    committedActive,
+                    user.plan,
+                    lockedProject.type,
+                  );
+                } else {
+                  await clearProjectExternalState(context.env, txDb, lockedProject);
+                }
+              } else {
+                // Exact undo succeeded, but a domain activation may have
+                // committed after the earlier snapshot and copied this failed
+                // deployment's slug route. Reconcile only domain keys to the
+                // restored route; touching cron/queues here would regress
+                // pre-routing failures that never changed those surfaces.
+                const currentDomains = await getDomainsByProjectId(txDb, projectId);
+                const restoredRouting = await context.env.ROUTING.get(lockedProject.slug);
+                await reconcileProjectDomainRoutes(context.env, currentDomains, restoredRouting);
+              }
+            });
           }
           if (workerUploaded && workerUploadUrl) {
             await fetch(workerUploadUrl, {
@@ -4332,17 +5164,75 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
               });
             }
           }
+
+          if (needsProtectedClaim) {
+            const compensatedKey = cutoverCompensatedKey(failedDeployment.id);
+            try {
+              await context.env.ROUTING.put(compensatedKey, projectId);
+            } catch (markerError) {
+              const confirmed = await context.env.ROUTING.get(compensatedKey).catch(() => null);
+              if (confirmed !== projectId) {
+                throw markerError;
+              }
+            }
+          }
+          const latestAfterFailure = await getDeployment(context.get('db'), failedDeployment.id);
+          const wasCanceled =
+            latestAfterFailure !== null &&
+            CANCELLATION_REQUESTED_DEPLOYMENT_STATUSES.includes(latestAfterFailure.status);
           logger.info('status_transition', 'status_change', {
             deploymentId: failedDeployment.id,
             from: currentStatus,
-            to: 'failed',
-            reason: supersededBuild ? 'superseded_build' : 'teardown_race_lost',
+            to: wasCanceled ? 'canceled' : 'failed',
+            reason: failureEvent,
           });
-          await updateDeploymentStatus(context.get('db'), failedDeployment.id, 'failed', msg).catch(
-            () => {},
+          await updateDeploymentStatus(
+            context.get('db'),
+            failedDeployment.id,
+            wasCanceled ? 'canceled' : 'failed',
+            msg,
+            wasCanceled ? { force: true } : undefined,
+          ).catch(() => {});
+          currentStatus = wasCanceled ? 'canceled' : 'failed';
+          const terminal = await getDeployment(context.get('db'), failedDeployment.id).catch(
+            () => null,
           );
-          currentStatus = 'failed';
+          if (terminal && TERMINAL_DEPLOYMENT_STATUSES.includes(terminal.status)) {
+            await Promise.all([
+              context.env.ROUTING.delete(cutoverIntentKey(failedDeployment.id)),
+              context.env.ROUTING.delete(cutoverReadyKey(failedDeployment.id)),
+              context.env.ROUTING.delete(cutoverCompensatedKey(failedDeployment.id)),
+            ]).catch(() => {
+              // Terminal PostgreSQL state makes stale markers harmless.
+            });
+          }
           emit({ event: 'error', message: msg, step: currentStep });
+        } else if (preserveAmbiguousCutover) {
+          logger.warn('catch', 'ambiguous_cutover_preserved', {
+            deploymentId: failedDeployment.id,
+            outcome: ambiguousCutoverOutcome,
+          });
+          if (ambiguousCutoverOutcome === 'committed') {
+            currentStatus = 'live';
+            await Promise.all([
+              context.env.ROUTING.delete(cutoverIntentKey(failedDeployment.id)),
+              context.env.ROUTING.delete(cutoverReadyKey(failedDeployment.id)),
+            ]).catch(() => {
+              // Stale markers are harmless once PostgreSQL is live.
+            });
+            const siteDomain = context.env.SITE_DOMAIN ?? SITE_DOMAIN;
+            const slugUrl = `https://${project.slug}.${siteDomain}`;
+            emit({
+              event: 'done',
+              deployment: failedDeployment.id,
+              url: slugUrl,
+              urls: [slugUrl],
+              assets: 0,
+              workers: 0,
+            });
+          } else {
+            emit({ event: 'error', message: msg, step: currentStep });
+          }
         } else if (routingSwitched) {
           logger.error('catch', 'post_routing_step_failed', err, {
             workerName: failedWorkerName,
@@ -4383,11 +5273,9 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
           const latest = await getDeployment(context.get('db'), failedDeployment.id);
           const wasCanceled =
             latest && CANCELLATION_REQUESTED_DEPLOYMENT_STATUSES.includes(latest.status);
-          for (const key of writtenRoutingKeys) {
-            await context.env.ROUTING.delete(key).catch((e) =>
-              logger.error('catch', 'routing_rollback_failed', e, { key }),
-            );
-          }
+          await restoreTrackedRouting().catch((e) =>
+            logger.error('catch', 'routing_rollback_failed', e),
+          );
           await deleteDispatchScript(
             context.env.CF_ACCOUNT_ID,
             context.env.CF_API_TOKEN,
@@ -4569,6 +5457,48 @@ app.post('/:id/deploy/preflight', async (context) => {
   const { assetManifest, hasWorker } = body;
   const total = Object.keys(assetManifest).length;
 
+  // `active_deployment_id` was introduced as a nullable column without a
+  // backfill. Resolve it once under the same project lock used by deploy and
+  // rollback before selecting the previous manifest. The serving route wins
+  // over deployment history so a legacy project that was rolled back to an
+  // older deployment deduplicates against the assets that are actually live.
+  let activeDeploymentId = project.active_deployment_id;
+  if (!activeDeploymentId) {
+    const resolution = await context.get('db').transaction(async (tx) => {
+      await tx.execute(drizzleSql`SELECT id FROM projects WHERE id = ${projectId} FOR UPDATE`);
+      const txDb = tx as unknown as Db;
+      const lockedProject = await getProject(txDb, projectId);
+      if (!lockedProject) {
+        return { kind: 'missing' as const };
+      }
+      if (lockedProject.user_id !== context.get('user').id) {
+        return { kind: 'forbidden' as const };
+      }
+      if (lockedProject.status === 'deleting') {
+        return { kind: 'deleting' as const };
+      }
+      if (lockedProject.active_deployment_id) {
+        return { kind: 'active' as const, deploymentId: lockedProject.active_deployment_id };
+      }
+
+      const legacyActive = await resolveLegacyActiveDeployment(context.env, txDb, lockedProject);
+      if (legacyActive) {
+        await setActiveDeployment(txDb, projectId, legacyActive.id);
+      }
+      return { kind: 'active' as const, deploymentId: legacyActive?.id ?? null };
+    });
+    if (resolution.kind === 'missing') {
+      return context.json({ error: 'project not found' }, 404);
+    }
+    if (resolution.kind === 'forbidden') {
+      return context.json({ error: 'forbidden' }, 403);
+    }
+    if (resolution.kind === 'deleting') {
+      return context.json({ error: 'project is being deleted' }, 410);
+    }
+    activeDeploymentId = resolution.deploymentId;
+  }
+
   const prevManifest = await getLastLiveAssetManifest(context.get('db'), projectId);
 
   if (!prevManifest) {
@@ -4583,7 +5513,7 @@ app.post('/:id/deploy/preflight', async (context) => {
   // `staticDeploymentId` in the entry means the active backend is static
   // (KV/R2); anything else — including a missing or malformed entry — is
   // treated as non-static so we conservatively return all assets.
-  if (project.active_deployment_id) {
+  if (activeDeploymentId) {
     const routingRaw = await context.env.ROUTING.get(project.slug);
     let prevIsStatic = false;
     if (routingRaw) {

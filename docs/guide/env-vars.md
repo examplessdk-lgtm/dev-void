@@ -150,6 +150,8 @@ void secret list
 void secret delete STRIPE_KEY
 ```
 
+These commands follow the platform saved in `.void/project.json`: they use the hosted secret store for Void projects and Wrangler's encrypted Worker secret APIs for direct Cloudflare projects. Secret values are never printed, and direct Cloudflare commands use the account and Worker name pinned in root `wrangler.jsonc`.
+
 Remote secrets count as "present" for deploy validation — `void deploy` checks both `.env*` and the remote secret list before uploading.
 
 For direct Cloudflare deployment, mark a built-in schema helper with `.secret()` to make `void deploy --platform cloudflare` upload its non-empty production value automatically. Void accepts the value from `.env`, `.env.production`, `.env.production.local`, or the deploy process environment; removes it from Worker `vars`; uploads it over stdin; and adds it to `secrets.required`. Existing remote-only marked secrets are preserved, optional absent secrets stay absent, and deploy never deletes remote secrets. Name/value heuristics still warn only—they do not automatically promote unmarked keys.

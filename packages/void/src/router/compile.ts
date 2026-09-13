@@ -707,6 +707,8 @@ export type CompileOptions = {
   liveRuntimePath?: string;
   /** Whether the app uses void/live. */
   hasLive?: boolean;
+  /** Removed WebSocket classes retained to preserve Durable Object storage. */
+  webSocketTombstones?: Array<string>;
 };
 
 export type SsrCompileOptions = {
@@ -794,9 +796,12 @@ export function compileRouteTable(
       lines.push(`import __voidAuthConfig from ${JSON.stringify(auth.authConfigPath)};`);
     }
   }
-  if (webSockets.length > 0 && options.webSocketRuntimePath) {
+  if (
+    (webSockets.length > 0 || options.webSocketTombstones?.length) &&
+    options.webSocketRuntimePath
+  ) {
     lines.push(
-      `import { createWebSocketDurableObject as __createWebSocketDurableObject, handleWebSocketUpgrade as __handleWebSocketUpgrade, forwardWebSocketRequest as __forwardWebSocketRequest } from ${JSON.stringify(options.webSocketRuntimePath)};`,
+      `import { createWebSocketDurableObject as __createWebSocketDurableObject, createWebSocketTombstoneDurableObject as __createWebSocketTombstoneDurableObject, handleWebSocketUpgrade as __handleWebSocketUpgrade, forwardWebSocketRequest as __forwardWebSocketRequest } from ${JSON.stringify(options.webSocketRuntimePath)};`,
     );
   }
   if (options.hasLive && options.liveRuntimePath) {
@@ -1199,6 +1204,14 @@ export function compileRouteTable(
     lines.push('');
   } else {
     lines.push('export async function __voidHandleWebSocket() { return null; }');
+    lines.push('');
+  }
+  for (const className of options.webSocketTombstones ?? []) {
+    lines.push(
+      `export const ${className} = __createWebSocketTombstoneDurableObject(${JSON.stringify(className)});`,
+    );
+  }
+  if (options.webSocketTombstones?.length) {
     lines.push('');
   }
 
@@ -2629,7 +2642,7 @@ export interface WorkerEntryOptions {
    * absent, the render path is emitted byte-identical to today (zero
    * behavioral change for managed/dev/no-ISR builds).
    */
-  isr?: { runtimePath: string };
+  isr?: { runtimePath: string; queryAllowlist?: Record<string, Array<string>> };
   /**
    * Resolved `assetConfig.not_found_handling` for this build. Threaded to
    * `compileAssetFallbackHelper` so `routing.notFound: '404-page'` is honored
@@ -2791,7 +2804,7 @@ function __filterInternalBindings(env) {
   const renderBlock = isr
     ? `      const __render = async (req) => serveWithAssets(req, env, await app.fetch(req, userEnv, ctx));
       if (env.ISR_CACHE) {
-        const __isr = await handleIsr(request, env, ctx, { revalidate: __VOID_ISR_REVALIDATE, deploymentId: __VOID_ISR_DEPLOYMENT_ID }, __render);
+        const __isr = await handleIsr(request, env, ctx, { revalidate: __VOID_ISR_REVALIDATE, deploymentId: __VOID_ISR_DEPLOYMENT_ID, queryAllowlist: ${JSON.stringify(isr?.queryAllowlist)} }, __render);
         if (__isr) return __isr;
       }
       return __render(request);`

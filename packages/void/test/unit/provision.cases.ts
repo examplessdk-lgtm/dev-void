@@ -2605,12 +2605,14 @@ describe('provisionCloudflareResources — account gate + env scrub', () => {
     set('CLOUDFLARE_ENV', 'staging');
     set('CF_ACCESS_CLIENT_ID', 'id');
     set('CF_ACCESS_CLIENT_SECRET', 'secret');
+    set('CF_ACCESS_TOKEN', 'short-lived-user-jwt');
     try {
       const env = provisionEnv({ accountId: 'acct-X' });
       // CLOUDFLARE_ENV would let wrangler select an env-specific account block.
       expect(env.CLOUDFLARE_ENV).toBeUndefined();
       expect(env.CF_ACCESS_CLIENT_ID).toBeUndefined();
       expect(env.CF_ACCESS_CLIENT_SECRET).toBeUndefined();
+      expect(env.CF_ACCESS_TOKEN).toBeUndefined();
       expect(env.CLOUDFLARE_ACCOUNT_ID).toBe('acct-X');
     } finally {
       for (const [k, v] of Object.entries(saved)) {

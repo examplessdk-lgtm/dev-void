@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { getProject } from '../db.ts';
 import type { ApiEnv } from '../env.ts';
-import { teardownProject } from '../provisioning/cleanup.ts';
+import { ProjectOperationInProgressError, teardownProject } from '../provisioning/cleanup.ts';
 
 const app = new Hono<ApiEnv>();
 
@@ -22,7 +22,15 @@ app.delete('/:id', async (context) => {
   // name — fatal on failure), best-effort CF cleanup (D1, KV, R2, queues,
   // hyperdrive, custom hostnames, routing entries — warnings), and the DB
   // cascade. Critical-cleanup failure throws and surfaces as a 5xx.
-  const { warnings } = await teardownProject(context, projectId, project);
+  let warnings: ReadonlyArray<string>;
+  try {
+    ({ warnings } = await teardownProject(context, projectId, project));
+  } catch (error) {
+    if (error instanceof ProjectOperationInProgressError) {
+      return context.json({ error: error.message }, 409);
+    }
+    throw error;
+  }
 
   return context.json({
     ok: true,

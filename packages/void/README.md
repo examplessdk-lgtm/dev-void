@@ -11,7 +11,8 @@ Vite plugin and CLI for building and deploying apps on Void.
 - URL redirects, rewrites, and fallbacks (`void.json` / `public/_redirects`, plus `c.rewrite()` from middleware)
 - binding inference for D1, KV, R2, AI, auth, queues, and typed Durable Objects
 - remote bindings for local development
-- deploy packaging for Void-hosted apps, static sites, and supported meta-frameworks
+- one target-aware deploy path for Void-hosted and direct Cloudflare apps
+- automatic Cloudflare provisioning, verified Worker Version activation, and operational commands
 
 ## Quick Start
 
@@ -40,9 +41,10 @@ export default defineConfig({
 - `voidPlugin()` — Vite integration, routing, pages mode, codegen, migrations, packaging
 - `void prepare` — generate `.void` artifacts for CI, editors, and fresh clones
 - `void auth login` — platform auth
-- `void deploy` — build and deploy
+- `void deploy` — build and deploy to the saved Cloudflare or Void target
 - `void db *` — local DB and migration commands
-- `void project *` — link, status, logs, requests, rollback, delete
+- `void project *` — target-aware status, logs, rollback, and managed-project operations
+- `void secret *` / `void domain *` — target-aware Worker secrets and custom domains
 
 Runtime helpers include:
 
@@ -66,13 +68,15 @@ Runtime helpers include:
 - supported meta-framework deploy targets:
   - TanStack Start
   - React Router
+  - vinext App Router and Pages Router
   - SvelteKit
   - Nuxt
+  - Analog
   - Astro
 - static and SPA deploys
 - non-Cloudflare server targets (`node`, `bun`, `deno`)
 
-There is Vinext-specific source in the repo, but it is intentionally on hold and not part of the current public support matrix.
+Direct Cloudflare deployments also support D1, KV, R2, Queues, Hyperdrive, auth, cron jobs, AI, ISR, typed SQLite Durable Objects, and WebSocket rooms. They upload an immutable Worker Version, probe it before activation (using a 0%-traffic version override when Durable Objects disable preview URLs), and retain version metadata for migration-aware rollback.
 
 ## Database Model
 

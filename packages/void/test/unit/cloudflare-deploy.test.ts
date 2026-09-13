@@ -15,7 +15,10 @@ import {
   DEPLOY_PASSTHROUGH_EXCLUDE_FIELDS,
   DEPLOY_WHOLE_OBJECT_PINNED_FIELDS,
   ensureCloudflareAuthSecret,
+  formatCloudflareActivationError,
   hashWranglerUploader,
+  parseRootWranglerConfig,
+  prepareCloudflareFrameworkArtifact,
   runCloudflareDeploy,
   runWranglerAuthToken,
   syncCloudflareSchemaSecrets,
@@ -42,8 +45,12 @@ import {
   type SelfHostSchemaFacts,
 } from '../../src/cli/env-validation.ts';
 import type { CliLogger } from '../../src/cli/log-file.ts';
+import { FRAMEWORK_PRESETS } from '../../src/cli/preset.ts';
 import { provisionCloudflareResources, type ProvisionResult } from '../../src/cli/provision.ts';
-import { FRIENDLY_BINDING_NAMES } from '../../src/cli/wrangler.ts';
+import {
+  FRIENDLY_BINDING_NAMES,
+  readWranglerManagedQueueCleanupCandidates,
+} from '../../src/cli/wrangler.ts';
 import { readConfig } from '../../src/config.ts';
 
 const tmpDir = join(import.meta.dirname, '.tmp-cf-deploy-test');
@@ -79,6 +86,21 @@ const silentCliLog: CliLogger = {
   close: async () => {},
 };
 
+/** Run a deploy while capturing its user-facing success output. */
+async function captureSuccessMessages(run: () => Promise<void>): Promise<Array<string>> {
+  const messages: Array<string> = [];
+  const restore = log.success;
+  log.success = (message: string) => {
+    messages.push(message);
+  };
+  try {
+    await run();
+  } finally {
+    log.success = restore;
+  }
+  return messages;
+}
+
 /** Synthetic real ids (shape-valid) for drift/provision fixtures. */
 const REAL_D1_ID = '52b3bbc7-c473-4b26-9486-1345f5de61c4';
 /** A second shape-valid D1 id, so a tampered config can point at a DIFFERENT database. */
@@ -100,6 +122,32 @@ const cleanExit: DeployWranglerRunResult = {
   signal: null,
   error: null,
 };
+
+describe('Cloudflare activation diagnostics', () => {
+  it('reports readiness restoration outcomes without claiming uncertain traffic is unchanged', () => {
+    expect(
+      formatCloudflareActivationError({
+        ok: false,
+        reason: 'readiness-access-denied',
+        rollback: 'succeeded',
+      }),
+    ).toContain('traffic was restored to the previous version');
+    expect(
+      formatCloudflareActivationError({
+        ok: false,
+        reason: 'readiness-failed',
+        rollback: 'failed',
+      }),
+    ).toContain('Automatic traffic restoration failed');
+    expect(
+      formatCloudflareActivationError({
+        ok: false,
+        reason: 'readiness-failed',
+        rollback: 'unsafe',
+      }),
+    ).toContain('did not invoke the changed Wrangler binary');
+  });
+});
 
 /** No-schema (nothing-to-gate) env-insensitive facts. */
 const NO_SCHEMA_FACTS: SelfHostSchemaFacts = { hasSchema: false, requiredKeys: [], secretKeys: [] };
@@ -128,10 +176,11 @@ const srcEnvPublic = srcFileUrl('runtime', 'env-public.ts');
 const srcEnvHelpers = srcFileUrl('runtime', 'env-helpers.ts');
 
 /**
- * Wrangler's FULL credential env-var set, canonical names + deprecated `CF_*` aliases.
+ * Cloudflare credentials held by the parent, including Wrangler's canonical names +
+ * deprecated `CF_*` aliases and Void's readiness JWT.
  * Mirrors `WRANGLER_AUTH_CREDENTIAL_ENV_VARS` in deploy.ts. Every child that runs untrusted
  * project code (env-schema probes, `vite build`, `drizzle-kit generate`) must see NONE of
- * these; the wrangler runner must still see ALL of them.
+ * these; the Wrangler runner keeps only the credentials Wrangler itself needs.
  */
 const WRANGLER_AUTH_VARS = [
   'CLOUDFLARE_API_TOKEN',
@@ -145,9 +194,10 @@ const WRANGLER_AUTH_VARS = [
   'WRANGLER_R2_SQL_AUTH_TOKEN',
   'CLOUDFLARE_ACCESS_CLIENT_ID',
   'CLOUDFLARE_ACCESS_CLIENT_SECRET',
+  'CF_ACCESS_TOKEN',
 ];
 
-/** Set every wrangler credential on the parent for the duration of `run`, then restore. */
+/** Set every Cloudflare credential on the parent for the duration of `run`, then restore. */
 async function withWranglerCredentials(run: () => Promise<void>): Promise<void> {
   const saved: Record<string, string | undefined> = {};
   for (const name of WRANGLER_AUTH_VARS) {
@@ -262,6 +312,43 @@ function harness(overrides: Partial<CloudflareDeployDeps> = {}): {
     runBuild: () => {
       trace.push('build');
     },
+    prepareFrameworkArtifact: async () => {
+      trace.push('prepare-framework');
+    },
+    // Stand in for the version upload + activation with one `deploy` spawn through the runner
+    // the deploy handed over (`options.runWrangler` — a test's own `runWrangler` override, else
+    // the recorder above), so a test that swaps the runner still observes whether the deploy
+    // happened. Dedicated suites in packages/deploy-cloudflare exercise the real activation.
+    activateVersion: async (options) => {
+      if (!options.verifyUploader()) {
+        return { ok: false, reason: 'uploader-changed' };
+      }
+      const result = await Promise.resolve(
+        options.runWrangler(
+          [
+            'deploy',
+            ...(options.configPath ? ['-c', options.configPath] : []),
+            ...(options.assetsDirectoryOverride
+              ? ['--assets', options.assetsDirectoryOverride]
+              : []),
+            '--env=',
+            '--experimental-provision=false',
+            '--experimental-auto-create=false',
+            '--autoconfig=false',
+          ],
+          { capture: false },
+        ),
+      );
+      if (result.status !== 0 || result.signal != null || result.error) {
+        return { ok: false, reason: 'upload-failed', status: result.status };
+      }
+      return {
+        ok: true,
+        versionId: '22222222-2222-4222-8222-222222222222',
+        previewUrl: 'https://preview.example.workers.dev',
+        previousVersionId: null,
+      };
+    },
     // Stub the wrangler-uploader hash so orchestration tests never hash the real ~18MB bundle
     // twice; a constant means the pre-build and post-build snapshots match (an unchanged uploader).
     // Dedicated tests inject a stateful stub that changes across the build to drive the fail path.
@@ -308,6 +395,7 @@ function harness(overrides: Partial<CloudflareDeployDeps> = {}): {
     // verification would have nothing to read — pass it by default; dedicated tests
     // exercise the real verifier and the fail-closed branch.
     verifyDeployConfig: () => ({ ok: true }),
+    resolveGeneratedConfigPath: (root) => join(root, 'dist/ssr/wrangler.json'),
     // Stub the migration gate so orchestration tests never spawn drizzle-kit; dedicated
     // tests inject a throwing stub (drift) or exercise the real pure gates (journal /
     // destructive) directly.
@@ -431,7 +519,7 @@ describe('ensureCloudflareAuthSecret', () => {
       },
     });
 
-    expect(result).toEqual({ created: true });
+    expect(result).toEqual({ created: true, workerWasMissing: true });
     expect(call).toBe(3);
   });
 
@@ -558,7 +646,11 @@ describe('syncCloudflareSchemaSecrets', () => {
       },
     });
 
-    expect(result).toEqual({ requiredSecretNames: ['API_TOKEN'], uploaded: 1 });
+    expect(result).toEqual({
+      requiredSecretNames: ['API_TOKEN'],
+      uploaded: 1,
+      workerWasMissing: true,
+    });
     expect(call).toBe(3);
   });
 
@@ -594,6 +686,19 @@ function d1Project(
     'routes/index.ts': `export const GET = (c) => c.env.DB.prepare('SELECT 1').first();`,
     'wrangler.jsonc': JSON.stringify(wrangler, null, 2),
     ...extraFiles,
+  });
+}
+
+/** A minimal worker-bearing app whose source inference enables `void/sandbox`. */
+function sandboxProject(): string {
+  return makeProject({
+    'package.json': JSON.stringify({ name: 'sandbox-app' }),
+    'void.json': JSON.stringify({}),
+    'routes/index.ts': [
+      `import { getSandbox } from 'void/sandbox';`,
+      `export const GET = () => Response.json({ sandbox: Boolean(getSandbox) });`,
+    ].join('\n'),
+    'wrangler.jsonc': JSON.stringify({ account_id: 'acc123', name: 'sandbox-app' }, null, 2),
   });
 }
 
@@ -1201,35 +1306,276 @@ describe('computeDesiredCloudflareResources — provisioned resources are never 
 // Orchestration flow
 // ---------------------------------------------------------------------------
 
-describe('runCloudflareDeploy — app-class guard (narrowed to full Void apps)', () => {
-  it('rejects a configured static/SPA app with exit(1) and never runs wrangler', async () => {
+describe('runCloudflareDeploy — static, SPA, and SSG apps', () => {
+  const generatedStaticConfig = (root: string) =>
+    join(root, '.void/deploy/cloudflare/wrangler-static.json');
+
+  it('rejects a static-looking non-Cloudflare runtime before any account operation', async () => {
     const root = makeProject({
-      'package.json': JSON.stringify({ name: 'spaapp' }),
-      'void.json': JSON.stringify({ inference: { appType: 'spa' } }),
+      'package.json': JSON.stringify({ name: 'node-static', dependencies: { vite: '6.0.0' } }),
+      'void.json': JSON.stringify({ target: 'node' }),
+      'wrangler.jsonc': JSON.stringify({ account_id: 'acc123' }),
+      'index.html': '<!doctype html><div id="app"></div>',
     });
     const { deps, trace, exitCalls } = harness();
+
     await expect(
       runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
     ).rejects.toBeInstanceOf(ExitError);
+
     expect(exitCalls).toEqual([1]);
     expect(trace).toEqual([]);
   });
 
-  it('rejects an UNCONFIGURED Vite SPA (no void.json appType) via the managed detectPreset classifier', async () => {
-    // resolveStaticDeployPreset returns null here (no --dir, no configured appType), so the
-    // old guard let this slip; detectPreset structurally classifies it as an SPA (vite dep,
-    // no backend files) and this fork now rejects it.
+  it('deploys a configured SPA through the thin edge Worker', async () => {
+    const root = makeProject({
+      'package.json': JSON.stringify({ name: 'spaapp' }),
+      'void.json': JSON.stringify({ inference: { appType: 'spa' } }),
+      'wrangler.jsonc': JSON.stringify({ account_id: 'acc123' }),
+      'dist/index.html': '<!doctype html><div id="app"></div>',
+    });
+    const { deps, wranglerArgs, exitCalls } = harness();
+    await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+
+    expect(exitCalls).toEqual([]);
+    expect(wranglerArgs.map((args) => args[0])).toEqual(['whoami', 'deploy']);
+    expect(parseRootWranglerConfig(join(root, 'wrangler.jsonc'))).toEqual({
+      account_id: 'acc123',
+    });
+    const config = parseRootWranglerConfig(generatedStaticConfig(root));
+    expect(config).toMatchObject({
+      name: 'spaapp',
+      account_id: 'acc123',
+      main: 'static-edge.mjs',
+      assets: {
+        directory: '../../../dist',
+        binding: 'ASSETS',
+        run_worker_first: true,
+        not_found_handling: 'single-page-application',
+      },
+    });
+    expect(readFileSync(join(root, '.void/deploy/cloudflare/static-edge.mjs'), 'utf-8')).toContain(
+      'void/edge',
+    );
+    expect(wranglerArgs.at(-1)).toContain(join(root, '.void/deploy/cloudflare/assets'));
+  });
+
+  it('preserves canonical Worker configuration when deploying static assets', async () => {
+    const canonical = `{
+  // Hand-authored Worker configuration must survive a temporary static deploy.
+  "account_id": "acc123",
+  "name": "switchable-app",
+  "main": "src/worker.ts",
+  "durable_objects": { "bindings": [{ "name": "STATE", "class_name": "State" }] },
+  "queues": {
+    "producers": [{ "binding": "BILLING", "queue": "billing" }],
+    "consumers": [{ "queue": "billing" }]
+  },
+  "workflows": [{ "name": "billing-flow", "class_name": "BillingFlow" }]
+}\n`;
+    const root = makeProject({
+      'package.json': JSON.stringify({ name: 'switchable-app' }),
+      'void.json': JSON.stringify({ inference: { appType: 'spa' } }),
+      'wrangler.jsonc': canonical,
+      'dist/index.html': '<h1>Static</h1>',
+    });
+    const { deps, exitCalls } = harness();
+
+    const successMessages = await captureSuccessMessages(() =>
+      runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
+    );
+
+    expect(exitCalls).toEqual([]);
+    expect(readFileSync(join(root, 'wrangler.jsonc'), 'utf-8')).toBe(canonical);
+    const generated = parseRootWranglerConfig(generatedStaticConfig(root));
+    expect(generated.durable_objects).toEqual({ bindings: [] });
+    expect(generated.queues).toEqual({ producers: [], consumers: [] });
+    expect(generated.workflows).toEqual([]);
+    expect(successMessages).toContain(
+      'Deployed "switchable-app" to your Cloudflare account.\nhttps://preview.example.workers.dev',
+    );
+  });
+
+  it('passes a complete Access service-token pair to the readiness probe', async () => {
+    const root = makeProject({
+      'package.json': JSON.stringify({ name: 'access-app' }),
+      'void.json': JSON.stringify({ inference: { appType: 'spa' } }),
+      'wrangler.jsonc': JSON.stringify({ account_id: 'acc123' }),
+      'dist/index.html': '<h1>Access</h1>',
+    });
+    const previousId = process.env.CF_ACCESS_CLIENT_ID;
+    const previousSecret = process.env.CF_ACCESS_CLIENT_SECRET;
+    process.env.CF_ACCESS_CLIENT_ID = 'service-id';
+    process.env.CF_ACCESS_CLIENT_SECRET = 'service-secret';
+    let readinessHeaders: Readonly<Record<string, string>> | undefined;
+    const { deps, exitCalls } = harness({
+      activateVersion: async (options) => {
+        readinessHeaders = options.readinessHeaders;
+        return {
+          ok: true,
+          versionId: '22222222-2222-4222-8222-222222222222',
+          previewUrl: 'https://preview.example.workers.dev',
+          previousVersionId: null,
+        };
+      },
+    });
+
+    try {
+      await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+      expect(exitCalls).toEqual([]);
+      expect(readinessHeaders).toEqual({
+        'CF-Access-Client-Id': 'service-id',
+        'CF-Access-Client-Secret': 'service-secret',
+      });
+    } finally {
+      if (previousId === undefined) {
+        delete process.env.CF_ACCESS_CLIENT_ID;
+      } else {
+        process.env.CF_ACCESS_CLIENT_ID = previousId;
+      }
+      if (previousSecret === undefined) {
+        delete process.env.CF_ACCESS_CLIENT_SECRET;
+      } else {
+        process.env.CF_ACCESS_CLIENT_SECRET = previousSecret;
+      }
+    }
+  });
+
+  it('passes a short-lived Access user JWT to the guarded readiness probe', async () => {
+    const root = makeProject({
+      'package.json': JSON.stringify({ name: 'access-user-app' }),
+      'void.json': JSON.stringify({ inference: { appType: 'spa' } }),
+      'wrangler.jsonc': JSON.stringify({ account_id: 'acc123' }),
+      'dist/index.html': '<h1>Access</h1>',
+    });
+    const previousToken = process.env.CF_ACCESS_TOKEN;
+    const previousId = process.env.CF_ACCESS_CLIENT_ID;
+    const previousSecret = process.env.CF_ACCESS_CLIENT_SECRET;
+    const previousSubdomain = process.env.CLOUDFLARE_WORKERS_SUBDOMAIN;
+    delete process.env.CF_ACCESS_CLIENT_ID;
+    delete process.env.CF_ACCESS_CLIENT_SECRET;
+    process.env.CF_ACCESS_TOKEN = 'short-lived-user-jwt';
+    process.env.CLOUDFLARE_WORKERS_SUBDOMAIN = 'developer-platform-experience';
+    let readinessHeaders: Readonly<Record<string, string>> | undefined;
+    let readinessHeadersWorkersDevSubdomain: string | undefined;
+    const { deps, exitCalls } = harness({
+      activateVersion: async (options) => {
+        readinessHeaders = options.readinessHeaders;
+        readinessHeadersWorkersDevSubdomain = options.readinessHeadersWorkersDevSubdomain;
+        return {
+          ok: true,
+          versionId: '22222222-2222-4222-8222-222222222222',
+          previewUrl: 'https://preview.example.workers.dev',
+          previousVersionId: null,
+        };
+      },
+    });
+
+    try {
+      await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+      expect(exitCalls).toEqual([]);
+      expect(readinessHeaders).toEqual({ 'cf-access-token': 'short-lived-user-jwt' });
+      expect(readinessHeadersWorkersDevSubdomain).toBe('developer-platform-experience');
+    } finally {
+      if (previousToken === undefined) {
+        delete process.env.CF_ACCESS_TOKEN;
+      } else {
+        process.env.CF_ACCESS_TOKEN = previousToken;
+      }
+      if (previousId === undefined) {
+        delete process.env.CF_ACCESS_CLIENT_ID;
+      } else {
+        process.env.CF_ACCESS_CLIENT_ID = previousId;
+      }
+      if (previousSecret === undefined) {
+        delete process.env.CF_ACCESS_CLIENT_SECRET;
+      } else {
+        process.env.CF_ACCESS_CLIENT_SECRET = previousSecret;
+      }
+      if (previousSubdomain === undefined) {
+        delete process.env.CLOUDFLARE_WORKERS_SUBDOMAIN;
+      } else {
+        process.env.CLOUDFLARE_WORKERS_SUBDOMAIN = previousSubdomain;
+      }
+    }
+  });
+
+  it('builds and deploys an unconfigured Vite SPA', async () => {
     const root = makeProject({
       'package.json': JSON.stringify({ name: 'viteapp', dependencies: { vite: '6.0.0' } }),
       'void.json': JSON.stringify({}),
+      'wrangler.jsonc': JSON.stringify({ account_id: 'acc123' }),
       'index.html': '<!doctype html><div id="app"></div>',
     });
-    const { deps, trace, exitCalls } = harness();
+    const { deps, trace, wranglerArgs, exitCalls } = harness({
+      runStaticBuild: () => {
+        trace.push('static-build');
+        mkdirSync(join(root, 'dist'), { recursive: true });
+        writeFileSync(join(root, 'dist/index.html'), '<!doctype html><div id="app"></div>');
+      },
+    });
+    await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+
+    expect(exitCalls).toEqual([]);
+    expect(trace).toEqual(['wrangler:whoami', 'static-build', 'wrangler:deploy']);
+    expect(wranglerArgs.at(-1)).toContain(generatedStaticConfig(root));
+  });
+
+  it('authenticates an env-pinned static deploy before its config file exists', async () => {
+    const saved = process.env.CLOUDFLARE_ACCOUNT_ID;
+    process.env.CLOUDFLARE_ACCOUNT_ID = 'env-account';
+    const root = makeProject({
+      'package.json': JSON.stringify({ name: 'static-env-app' }),
+      'void.json': JSON.stringify({}),
+      'public/index.html': '<h1>Static</h1>',
+    });
+    const { deps, wranglerArgs, exitCalls } = harness();
+    try {
+      await runCloudflareDeploy(root, { backend: 'cloudflare', dir: 'public' }, silentCliLog, deps);
+    } finally {
+      if (saved === undefined) {
+        delete process.env.CLOUDFLARE_ACCOUNT_ID;
+      } else {
+        process.env.CLOUDFLARE_ACCOUNT_ID = saved;
+      }
+    }
+
+    expect(exitCalls).toEqual([]);
+    expect(wranglerArgs.find((args) => args[0] === 'whoami')).toEqual([
+      'whoami',
+      '--json',
+      '--env=',
+    ]);
+    expect(existsSync(join(root, 'wrangler.jsonc'))).toBe(false);
+    expect(existsSync(generatedStaticConfig(root))).toBe(true);
+  });
+
+  it('rejects a static build that rewrites the root Wrangler config', async () => {
+    const root = makeProject({
+      'package.json': JSON.stringify({ name: 'viteapp', dependencies: { vite: '6.0.0' } }),
+      'void.json': JSON.stringify({}),
+      'wrangler.jsonc': JSON.stringify({ account_id: 'acc123' }),
+      'index.html': '<!doctype html><div id="app"></div>',
+    });
+    const { deps, trace, wranglerArgs, exitCalls } = harness({
+      runStaticBuild: () => {
+        trace.push('static-build');
+        mkdirSync(join(root, 'dist'), { recursive: true });
+        writeFileSync(join(root, 'dist/index.html'), '<h1>Built</h1>');
+        writeFileSync(
+          join(root, 'wrangler.jsonc'),
+          JSON.stringify({ account_id: 'acc123', services: [{ binding: 'INJECTED' }] }),
+        );
+      },
+    });
+
     await expect(
       runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
     ).rejects.toBeInstanceOf(ExitError);
+
     expect(exitCalls).toEqual([1]);
-    expect(trace).toEqual([]);
+    expect(trace).toEqual(['wrangler:whoami', 'static-build']);
+    expect(wranglerArgs.some((args) => args[0] === 'deploy')).toBe(false);
   });
 
   it('rejects a bare --spa deploy before any account op', async () => {
@@ -1246,18 +1592,32 @@ describe('runCloudflareDeploy — app-class guard (narrowed to full Void apps)',
     expect(trace).toEqual([]);
   });
 
-  it('rejects a --dir static deploy before any account op', async () => {
+  it('deploys an explicit pre-built directory without running a build', async () => {
     const root = makeProject({
       'package.json': JSON.stringify({ name: 'app' }),
       'void.json': JSON.stringify({}),
+      'wrangler.jsonc': JSON.stringify({ account_id: 'acc123' }),
+      'public/index.html': '<h1>Static</h1>',
+      'public/_headers': '/*\n  X-Test: yes\n',
+      'public/_redirects': '/* /index.html 200\n',
       'routes/index.ts': `export const GET = () => new Response('ok');`,
     });
-    const { deps, trace, exitCalls } = harness();
-    await expect(
-      runCloudflareDeploy(root, { backend: 'cloudflare', dir: 'dist' }, silentCliLog, deps),
-    ).rejects.toBeInstanceOf(ExitError);
-    expect(exitCalls).toEqual([1]);
-    expect(trace).toEqual([]);
+    const { deps, trace, wranglerArgs, exitCalls } = harness();
+    await runCloudflareDeploy(root, { backend: 'cloudflare', dir: 'public' }, silentCliLog, deps);
+
+    expect(exitCalls).toEqual([]);
+    expect(trace).toEqual(['wrangler:whoami', 'wrangler:deploy']);
+    expect(parseRootWranglerConfig(join(root, 'wrangler.jsonc'))).toEqual({
+      account_id: 'acc123',
+    });
+    expect(parseRootWranglerConfig(generatedStaticConfig(root))).toMatchObject({
+      assets: { directory: '../../../public', not_found_handling: '404-page' },
+    });
+    const stagedAssets = join(root, '.void/deploy/cloudflare/assets');
+    expect(readFileSync(join(stagedAssets, 'index.html'), 'utf-8')).toBe('<h1>Static</h1>');
+    expect(existsSync(join(stagedAssets, '_headers'))).toBe(false);
+    expect(existsSync(join(stagedAssets, '_redirects'))).toBe(false);
+    expect(wranglerArgs.at(-1)).toContain(stagedAssets);
   });
 
   it('rejects a bare project with no Void backend files (positive full-Void assertion)', async () => {
@@ -1293,29 +1653,81 @@ describe('runCloudflareDeploy — app-class guard (narrowed to full Void apps)',
     expect(trace.indexOf('postgres-migrate')).toBeLessThan(trace.indexOf('wrangler:deploy'));
   });
 
-  it('rejects a pages app with output:"static" (SSG) — the signal the build itself branches on', async () => {
-    // Real-shape: the static-pages playground config — `output: "static"` + a `pages/` dir.
-    // `detectPreset` returns null (no SSG dep / no root index.html) and `pages/` satisfies
-    // `hasBackendFiles`, so without the `output === 'static'` signal this reaches account/build.
+  it('deploys a fully prerenderable output:"static" Pages app through the thin edge Worker', async () => {
     const root = makeProject({
       'package.json': JSON.stringify({ name: 'ssgapp' }),
       'void.json': JSON.stringify({
         output: 'static',
         worker: { compatibility_date: '2026-02-12' },
       }),
+      'wrangler.jsonc': JSON.stringify({ account_id: 'acc123' }),
       'pages/index.vue': `<template><div>hi</div></template>`,
       'pages/index.server.ts': `export const loader = () => ({});`,
     });
-    const { deps, trace, exitCalls } = harness();
-    await expect(
-      runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
-    ).rejects.toBeInstanceOf(ExitError);
-    expect(exitCalls).toEqual([1]);
-    // NO account / build seam ran.
-    expect(trace).toEqual([]);
+    const { deps, trace, exitCalls } = harness({
+      runStaticBuild: () => {
+        trace.push('static-build');
+        mkdirSync(join(root, 'dist/client'), { recursive: true });
+        writeFileSync(join(root, 'dist/client/index.html'), '<h1>Prerendered</h1>');
+      },
+    });
+
+    await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+
+    expect(exitCalls).toEqual([]);
+    expect(trace).toEqual(['wrangler:whoami', 'static-build', 'wrangler:deploy']);
+    expect(parseRootWranglerConfig(join(root, 'wrangler.jsonc'))).toEqual({
+      account_id: 'acc123',
+    });
+    expect(parseRootWranglerConfig(generatedStaticConfig(root))).toMatchObject({
+      main: 'static-edge.mjs',
+      assets: { directory: '../../../dist/client', not_found_handling: '404-page' },
+    });
   });
 
-  it('A1: rejects a project whose D1 binding sets a custom migrations_pattern before any account op', async () => {
+  it('keeps an output:"static" app with a dynamic page on the full Worker path', async () => {
+    const root = makeProject({
+      'package.json': JSON.stringify({ name: 'hybrid-ssg' }),
+      'void.json': JSON.stringify({ output: 'static' }),
+      'wrangler.jsonc': JSON.stringify({ account_id: 'acc123' }),
+      'pages/[id].vue': `<template><div>dynamic</div></template>`,
+      'pages/[id].server.ts': `export const loader = ({ params }) => ({ id: params.id });`,
+    });
+    const { deps, trace, exitCalls } = harness();
+
+    await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+
+    expect(exitCalls).toEqual([]);
+    expect(trace).toEqual(['wrangler:whoami', 'build', 'gate', 'wrangler:deploy']);
+  });
+
+  // An `email/` handler compiles to the worker's `email()` export. The thin static edge
+  // Worker exports none, so routing an email-bearing `output: "static"` app there would
+  // drop every inbound handler with no deploy-time error — the same class of miss
+  // `hasNonPageBackend` closes on the managed path.
+  it('keeps an output:"static" app with an email/ handler on the full Worker path', async () => {
+    const root = makeProject({
+      'package.json': JSON.stringify({ name: 'email-ssg' }),
+      'void.json': JSON.stringify({ output: 'static' }),
+      // A prerendered page carries the max `revalidate`, so the worker path desires
+      // ISR_CACHE; pre-provision it so the stubbed provisioner has nothing to create.
+      'wrangler.jsonc': JSON.stringify({
+        account_id: 'acc123',
+        kv_namespaces: [{ binding: 'ISR_CACHE', id: REAL_KV_ID }],
+      }),
+      'pages/index.vue': `<template><div>hi</div></template>`,
+      'pages/index.server.ts': `export const loader = () => ({});`,
+      'email/support.ts': `export default async () => {};`,
+    });
+    const { deps, trace, exitCalls } = harness();
+
+    await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+
+    expect(exitCalls).toEqual([]);
+    expect(trace).toEqual(['wrangler:whoami', 'build', 'gate', 'wrangler:deploy']);
+  });
+
+  it('accepts a valid custom migrations_pattern', async () => {
     const root = d1Project({
       ...PROVISIONED_D1,
       d1_databases: [
@@ -1329,12 +1741,9 @@ describe('runCloudflareDeploy — app-class guard (narrowed to full Void apps)',
       ],
     });
     const { deps, trace, exitCalls } = harness();
-    await expect(
-      runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
-    ).rejects.toBeInstanceOf(ExitError);
-    expect(exitCalls).toEqual([1]);
-    // Rejected at the custom-pattern guard (after the desired set, before whoami/provision).
-    expect(trace).toEqual([]);
+    await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+    expect(exitCalls).toEqual([]);
+    expect(trace).toContain('wrangler:deploy');
   });
 
   it('A1: rejects a PRESENT-but-EMPTY migrations_pattern ("") before any account op', async () => {
@@ -1364,29 +1773,47 @@ describe('runCloudflareDeploy — app-class guard (narrowed to full Void apps)',
     expect(wranglerArgs).toEqual([]);
   });
 
-  it('rejects a WebSocket / Durable Object app (.ws.ts route) before any account op', async () => {
-    // A `.ws.ts` route makes the build emit a `new_classes` (KV-backed) DO migration, which a
-    // fresh Cloudflare account refuses to create — reject via the SAME `scanWebSocketRoutesSync`
-    // scan the build's DO emission uses.
-    const root = makeProject({
-      'package.json': JSON.stringify({ name: 'wsapp' }),
-      'void.json': JSON.stringify({}),
-      'routes/index.ts': `export const GET = () => new Response('ok');`,
-      'routes/chat/[room].ws.ts': `import { defineRoom } from 'void/ws';\nexport default defineRoom({});`,
+  it('rejects migrations_pattern without an explicit migrations_dir before any account op', async () => {
+    const root = d1Project({
+      ...PROVISIONED_D1,
+      d1_databases: [
+        {
+          binding: 'DB',
+          database_name: 'myapp-db',
+          database_id: REAL_D1_ID,
+          migrations_pattern: 'db/migrations/**/*.sql',
+        },
+      ],
     });
-    const { deps, trace, exitCalls } = harness();
+    const { deps, trace, wranglerArgs, exitCalls } = harness();
     await expect(
       runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
     ).rejects.toBeInstanceOf(ExitError);
     expect(exitCalls).toEqual([1]);
     expect(trace).toEqual([]);
+    expect(wranglerArgs).toEqual([]);
+  });
+
+  it('deploys a WebSocket app with a SQLite Durable Object migration', async () => {
+    const root = makeProject({
+      'package.json': JSON.stringify({ name: 'wsapp' }),
+      'void.json': JSON.stringify({}),
+      'wrangler.jsonc': JSON.stringify({ account_id: 'acc123' }),
+      'routes/index.ts': `export const GET = () => new Response('ok');`,
+      'routes/chat/[room].ws.ts': `import { defineRoom } from 'void/ws';\nexport default defineRoom({});`,
+    });
+    const { deps, trace, exitCalls } = harness();
+    await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+
+    expect(exitCalls).toEqual([]);
+    expect(trace).toEqual(['wrangler:whoami', 'build', 'gate', 'wrangler:deploy']);
+    expect(parseRootWranglerConfig(join(root, 'wrangler.jsonc'))).toMatchObject({
+      migrations: [{ tag: 'void-ws-v1', new_sqlite_classes: ['ChatRoomWs'] }],
+    });
   });
 
   it('does not reject a dev-only WebSocket route (.dev.ws.ts) — it never reaches production', async () => {
-    // The gate scans with `'prod'`, the same environment the build compiles with, so a
-    // dev-only room emits no `new_classes` migration and must not block the deploy. Compare
-    // with the test above: the same project with a suffix-free `.ws.ts` route is rejected
-    // pre-account with an empty trace.
+    // The production scan ignores a dev-only route, so no Durable Object is emitted.
     const root = makeProject({
       'package.json': JSON.stringify({ name: 'wsapp' }),
       'void.json': JSON.stringify({}),
@@ -1448,6 +1875,124 @@ describe('runCloudflareDeploy — preflight', () => {
       }
     }
   });
+
+  it('authenticates an env-pinned Worker deploy before its config file exists', async () => {
+    const saved = process.env.CLOUDFLARE_ACCOUNT_ID;
+    process.env.CLOUDFLARE_ACCOUNT_ID = 'env-account';
+    const root = makeProject({
+      'package.json': JSON.stringify({ name: 'worker-env-app' }),
+      'void.json': JSON.stringify({}),
+      'routes/index.ts': `export const GET = () => new Response('ok');`,
+    });
+    const { deps, wranglerArgs, exitCalls } = harness();
+    try {
+      await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+    } finally {
+      if (saved === undefined) {
+        delete process.env.CLOUDFLARE_ACCOUNT_ID;
+      } else {
+        process.env.CLOUDFLARE_ACCOUNT_ID = saved;
+      }
+    }
+
+    expect(exitCalls).toEqual([]);
+    expect(wranglerArgs.find((args) => args[0] === 'whoami')).toEqual([
+      'whoami',
+      '--json',
+      '--env=',
+    ]);
+    expect(parseRootWranglerConfig(join(root, 'wrangler.jsonc')).account_id).toBe('env-account');
+  });
+
+  it('verifies Cloudflare Containers before building a Sandbox app', async () => {
+    const root = sandboxProject();
+    const { deps, trace, wranglerArgs } = harness();
+
+    await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+
+    expect(wranglerArgs).toContainEqual([
+      'containers',
+      'list',
+      '--json',
+      '-c',
+      join(root, 'wrangler.jsonc'),
+      '--env=',
+    ]);
+    expect(trace.indexOf('wrangler:whoami')).toBeLessThan(trace.indexOf('wrangler:containers'));
+    expect(trace.indexOf('wrangler:containers')).toBeLessThan(trace.indexOf('build'));
+  });
+
+  it('fails before provisioning or building when Sandbox Containers are unavailable', async () => {
+    const root = sandboxProject();
+    const errors: Array<string> = [];
+    const errorSpy = vi.spyOn(log, 'error').mockImplementation((message) => {
+      errors.push(String(message));
+    });
+    const { deps, trace, exitCalls } = harness({
+      runWrangler: (args) => {
+        trace.push(`wrangler:${args[0]}`);
+        if (args[0] === 'whoami') {
+          return { ...cleanExit, stdout: '{"loggedIn":true}' };
+        }
+        if (args[0] === 'containers') {
+          return { ...cleanExit, status: 1, stderr: 'HTTP 403' };
+        }
+        return cleanExit;
+      },
+    });
+
+    try {
+      await expect(
+        runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
+      ).rejects.toBeInstanceOf(ExitError);
+    } finally {
+      errorSpy.mockRestore();
+    }
+
+    expect(exitCalls).toEqual([1]);
+    expect(trace).toEqual(['wrangler:whoami', 'wrangler:containers']);
+    expect(errors.join('\n')).toContain('Cloudflare Containers require the Workers Paid plan');
+    expect(errors.join('\n')).toContain('/:account/workers/plans');
+    expect(errors.join('\n')).toContain('Containers: Edit');
+    expect(errors.join('\n')).toContain('Cloudchamber: Edit');
+  });
+
+  it('does not probe Containers when the app does not use Sandbox', async () => {
+    const root = d1Project(PROVISIONED_D1);
+    const { deps, wranglerArgs } = harness();
+
+    await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+
+    expect(wranglerArgs.some((args) => args[0] === 'containers')).toBe(false);
+  });
+
+  it('translates a Sandbox upload entitlement error into Workers Paid guidance', async () => {
+    const root = sandboxProject();
+    const errors: Array<string> = [];
+    const errorSpy = vi.spyOn(log, 'error').mockImplementation((message) => {
+      errors.push(String(message));
+    });
+    const { deps, exitCalls } = harness({
+      activateVersion: async () => ({
+        ok: false,
+        reason: 'upload-failed',
+        status: 1,
+        containersUnavailable: true,
+      }),
+    });
+
+    try {
+      await expect(
+        runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
+      ).rejects.toBeInstanceOf(ExitError);
+    } finally {
+      errorSpy.mockRestore();
+    }
+
+    expect(exitCalls).toEqual([1]);
+    expect(errors.join('\n')).toContain('Cloudflare Containers require the Workers Paid plan');
+    expect(errors.join('\n')).toContain('The Sandbox container was not deployed');
+  });
 });
 
 describe('runCloudflareDeploy — resource provisioning', () => {
@@ -1476,12 +2021,17 @@ describe('runCloudflareDeploy — resource provisioning', () => {
       }) as CloudflareDeployDeps['provision'],
     });
 
-    await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+    const successMessages = await captureSuccessMessages(() =>
+      runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
+    );
 
     expect(capturedDesired?.d1).toMatchObject({ binding: 'DB', name: 'myapp-db' });
     expect(provisionTrace).toEqual(['provision']);
     expect(trace).toContain('build');
     expect(trace).toContain('wrangler:deploy');
+    expect(successMessages).toContain(
+      'Deployed "myapp" to your Cloudflare account.\nhttps://preview.example.workers.dev',
+    );
   });
 
   it('proceeds through whoami → build → gate → migrate-gate → remote-migrate → deploy when fully provisioned', async () => {
@@ -1529,10 +2079,12 @@ describe('runCloudflareDeploy — resource provisioning', () => {
       join(root, 'wrangler.jsonc'),
       '--env=',
     ]);
-    // deploy follows the .wrangler/deploy redirect, pins the top-level env, disables
-    // wrangler's own implicit provisioning + auto-create + framework autoconfig.
+    // Upload and trigger synchronization use the exact generated config that was
+    // verified above, rather than letting triggers fall back to the root config.
     expect(wranglerArgs.find((a) => a[0] === 'deploy')).toEqual([
       'deploy',
+      '-c',
+      join(root, 'dist/ssr/wrangler.json'),
       '--env=',
       '--experimental-provision=false',
       '--experimental-auto-create=false',
@@ -1720,7 +2272,7 @@ describe('runCloudflareDeploy — D1 migrations_dir gate', () => {
 });
 
 describe('runCloudflareDeploy — full Void app queues', () => {
-  it('rejects a framework app (with a queue) via the framework guard before any account op', async () => {
+  it('deploys a Class-A framework queue through the verified artifact', async () => {
     const root = makeProject({
       'package.json': JSON.stringify({
         name: 'fwapp',
@@ -1731,12 +2283,10 @@ describe('runCloudflareDeploy — full Void app queues', () => {
       'wrangler.jsonc': JSON.stringify({ account_id: 'acc123', name: 'fwapp' }, null, 2),
     });
     const { deps, trace, exitCalls } = harness();
-    await expect(
-      runCloudflareDeploy(root, { backend: 'cloudflare', provision: true }, silentCliLog, deps),
-    ).rejects.toBeInstanceOf(ExitError);
-    expect(exitCalls).toEqual([1]);
-    // Guard fires before preflight/provision — nothing ran.
-    expect(trace).toEqual([]);
+    await runCloudflareDeploy(root, { backend: 'cloudflare', provision: true }, silentCliLog, deps);
+    expect(exitCalls).toEqual([]);
+    expect(trace).toContain('provision');
+    expect(trace).toContain('wrangler:deploy');
   });
 
   it('lets a full Void app with a queue proceed (queues wire through the build)', async () => {
@@ -2313,6 +2863,8 @@ describe('runCloudflareDeploy — wrangler implicit provisioning disabled on dep
     await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
     expect(wranglerArgs.find((a) => a[0] === 'deploy')).toEqual([
       'deploy',
+      '-c',
+      join(root, 'dist/ssr/wrangler.json'),
       '--env=',
       '--experimental-provision=false',
       '--experimental-auto-create=false',
@@ -4826,8 +5378,8 @@ describe('runCloudflareDeploy — managed path does not import the provision mod
 // lighter Void composition that emits no worker artifact here — reject early.
 // ---------------------------------------------------------------------------
 
-describe('runCloudflareDeploy — framework guard (all framework SSR deferred in v1)', () => {
-  it('rejects a Class B/C framework SSR app before any account operation', async () => {
+describe('runCloudflareDeploy — framework artifact guard', () => {
+  it('deploys a Class B/C framework through its prepared Worker output', async () => {
     const root = makeProject({
       'package.json': JSON.stringify({
         name: 'skapp',
@@ -4838,15 +5390,14 @@ describe('runCloudflareDeploy — framework guard (all framework SSR deferred in
       'wrangler.jsonc': JSON.stringify({ account_id: 'acc123', name: 'skapp' }, null, 2),
     });
     const { deps, trace, exitCalls } = harness();
-    await expect(
-      runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
-    ).rejects.toBeInstanceOf(ExitError);
-    expect(exitCalls).toEqual([1]);
-    // Rejected before preflight — no whoami, no build, no deploy.
-    expect(trace).toEqual([]);
+    await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+    expect(exitCalls).toEqual([]);
+    expect(trace).toContain('build');
+    expect(trace).toContain('prepare-framework');
+    expect(trace).toContain('wrangler:deploy');
   });
 
-  it('rejects a Class-A framework SSR app before any account operation (narrowed in v1)', async () => {
+  it('deploys a Class-A framework through its Cloudflare Vite artifact', async () => {
     const root = makeProject({
       'package.json': JSON.stringify({
         name: 'tsapp',
@@ -4857,12 +5408,221 @@ describe('runCloudflareDeploy — framework guard (all framework SSR deferred in
       'wrangler.jsonc': JSON.stringify({ account_id: 'acc123', name: 'tsapp' }, null, 2),
     });
     const { deps, trace, exitCalls } = harness();
+    await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+    expect(exitCalls).toEqual([]);
+    expect(trace).toContain('build');
+    expect(trace).toContain('wrangler:deploy');
+  });
+
+  it('persists framework queue bindings before building', async () => {
+    const root = makeProject({
+      'package.json': JSON.stringify({
+        name: 'skapp',
+        dependencies: { '@sveltejs/kit': '2.0.0' },
+      }),
+      'void.json': JSON.stringify({}),
+      'queues/email.ts': [
+        'export const maxBatchSize = 25;',
+        'export const maxBatchTimeout = 10;',
+        'export const maxRetries = 4;',
+        'export const retryDelay = 30;',
+        'export default async function email() {}',
+      ].join('\n'),
+      'wrangler.jsonc': JSON.stringify({ account_id: 'acc123', name: 'skapp' }, null, 2),
+    });
+    const { deps } = harness();
+    await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+
+    expect(parseRootWranglerConfig(join(root, 'wrangler.jsonc'))).toMatchObject({
+      queues: {
+        producers: [{ binding: 'QUEUE_EMAIL', queue: 'email' }],
+        consumers: [
+          {
+            queue: 'email',
+            max_batch_size: 25,
+            max_batch_timeout: 10,
+            max_retries: 4,
+            retry_delay: 30,
+          },
+        ],
+      },
+    });
+  });
+
+  it('carries removed framework consumers through activation and acknowledges cleanup', async () => {
+    const root = makeProject({
+      'package.json': JSON.stringify({
+        name: 'skapp',
+        dependencies: { '@sveltejs/kit': '2.0.0' },
+      }),
+      'void.json': JSON.stringify({}),
+      'queues/email.ts': 'export default async function email() {}',
+      'wrangler.jsonc': JSON.stringify({ account_id: 'acc123', name: 'skapp' }, null, 2),
+    });
+    const cleanupSnapshots: Array<ReadonlyArray<string> | undefined> = [];
+    const { deps } = harness({
+      activateVersion: async (options) => {
+        cleanupSnapshots.push(options.queueConsumerCleanup);
+        if (cleanupSnapshots.length === 2) {
+          return {
+            ok: false,
+            reason: 'triggers-failed',
+            status: 1,
+            rollback: 'succeeded',
+          };
+        }
+        return {
+          ok: true,
+          versionId: '22222222-2222-4222-8222-222222222222',
+          previewUrl: 'https://preview.example.workers.dev',
+          previousVersionId: null,
+        };
+      },
+    });
+
+    await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+    rmSync(join(root, 'queues/email.ts'));
     await expect(
       runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
     ).rejects.toBeInstanceOf(ExitError);
-    expect(exitCalls).toEqual([1]);
-    // The whole framework path is deferred — rejected before any account op.
-    expect(trace).toEqual([]);
+    expect(readWranglerManagedQueueCleanupCandidates(join(root, 'wrangler.jsonc'))).toEqual([
+      'email',
+    ]);
+    await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+
+    expect(cleanupSnapshots).toEqual([['email'], ['email'], ['email']]);
+    expect(readWranglerManagedQueueCleanupCandidates(join(root, 'wrangler.jsonc'))).toEqual([]);
+  });
+
+  it('prepares a standalone framework Worker with cron and queue handlers', async () => {
+    const root = makeProject({
+      'package.json': JSON.stringify({
+        name: 'skapp',
+        dependencies: { '@sveltejs/kit': '2.0.0' },
+      }),
+      'void.json': JSON.stringify({}),
+      'wrangler.jsonc': `{
+  // keep this comment
+  "name": "skapp",
+  "account_id": "acc123",
+  "compatibility_flags": ["custom_flag"],
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Room"] }]
+}\n`,
+      '.svelte-kit/cloudflare/_worker.js':
+        'export default { fetch() { return new Response("ok") } };\n',
+      '.svelte-kit/cloudflare/_app/immutable/app.js': 'console.log("client");\n',
+      'crons/hourly.ts': [
+        'import { defineScheduled } from "void";',
+        'export const cron = "0 * * * *";',
+        'export default defineScheduled(async function hourly() {});',
+      ].join('\n'),
+      'queues/email.ts': [
+        'import { defineQueue } from "void";',
+        'export default defineQueue(async function email() {});',
+      ].join('\n'),
+    });
+
+    await prepareCloudflareFrameworkArtifact(
+      root,
+      join(root, 'wrangler.jsonc'),
+      'acc123',
+      'skapp',
+      readConfig(root),
+      { name: 'sveltekit', class: 'b' },
+      FRAMEWORK_PRESETS.sveltekit,
+    );
+
+    const wrapper = readFileSync(join(root, '.svelte-kit/cloudflare/_worker.js'), 'utf-8');
+    expect(wrapper).toContain('import original from "./__original.js";');
+    expect(wrapper).toContain('scheduled: handleScheduled');
+    expect(wrapper).toContain('queue: handleQueue');
+    expect(existsSync(join(root, '.svelte-kit/cloudflare/__void_handlers.mjs'))).toBe(true);
+    expect(readFileSync(join(root, '.svelte-kit/cloudflare/.assetsignore'), 'utf-8')).toContain(
+      '__void_handlers.mjs',
+    );
+    const config = parseRootWranglerConfig(join(root, 'wrangler.jsonc'));
+    expect(config).toMatchObject({
+      main: '.svelte-kit/cloudflare/_worker.js',
+      no_bundle: false,
+      compatibility_flags: ['custom_flag', 'nodejs_als'],
+      migrations: [{ tag: 'v1', new_sqlite_classes: ['Room'] }],
+      assets: {
+        directory: '.svelte-kit/cloudflare',
+        binding: 'ASSETS',
+        run_worker_first: true,
+      },
+      triggers: { crons: ['0 * * * *'] },
+    });
+    expect(readFileSync(join(root, 'wrangler.jsonc'), 'utf-8')).toContain('// keep this comment');
+  });
+
+  it('prepares Class A wrapper handlers without replacing its generated config pointer', async () => {
+    const root = makeProject({
+      'package.json': JSON.stringify({
+        name: 'tanstack-app',
+        dependencies: { '@tanstack/react-start': '1.0.0' },
+      }),
+      'void.json': JSON.stringify({}),
+      'wrangler.jsonc': JSON.stringify({ account_id: 'acc123', name: 'tanstack-app' }),
+      'dist/server/index.js': 'export default { fetch() { return new Response("ok") } };\n',
+      'dist/client/app.js': 'console.log("client");\n',
+      '.wrangler/deploy/config.json': '{"configPath":"../../../dist/server/wrangler.json"}\n',
+      'crons/hourly.ts': [
+        'import { defineScheduled } from "void";',
+        'export const cron = "0 * * * *";',
+        'export default defineScheduled(async function hourly() {});',
+      ].join('\n'),
+      'queues/email.ts': [
+        'import { defineQueue } from "void";',
+        'export default defineQueue(async function email() {});',
+      ].join('\n'),
+    });
+    const pointerBefore = readFileSync(join(root, '.wrangler/deploy/config.json'), 'utf-8');
+
+    await prepareCloudflareFrameworkArtifact(
+      root,
+      join(root, 'wrangler.jsonc'),
+      'acc123',
+      'tanstack-app',
+      readConfig(root),
+      { name: 'tanstack-start', class: 'a' },
+      FRAMEWORK_PRESETS['tanstack-start'],
+    );
+
+    expect(readFileSync(join(root, '.wrangler/deploy/config.json'), 'utf-8')).toBe(pointerBefore);
+    expect(readFileSync(join(root, 'dist/server/index.js'), 'utf-8')).toContain(
+      'scheduled: handleScheduled',
+    );
+    expect(readFileSync(join(root, 'dist/server/index.js'), 'utf-8')).toContain(
+      'queue: handleQueue',
+    );
+    const handlers = readFileSync(join(root, 'dist/server/__void_handlers.mjs'), 'utf-8');
+    expect(handlers).not.toContain('@napi-rs/keyring');
+    expect(handlers).not.toContain('@cloudflare/vite-plugin');
+    expect(parseRootWranglerConfig(join(root, 'wrangler.jsonc'))).not.toHaveProperty('main');
+  });
+
+  it('fails closed when a framework build omits its Worker or assets', async () => {
+    const root = makeProject({
+      'package.json': JSON.stringify({ name: 'nuxt-app', dependencies: { nuxt: '4.0.0' } }),
+      'void.json': JSON.stringify({}),
+      'wrangler.jsonc': JSON.stringify({ account_id: 'acc123', name: 'nuxt-app' }),
+    });
+    const prepare = () =>
+      prepareCloudflareFrameworkArtifact(
+        root,
+        join(root, 'wrangler.jsonc'),
+        'acc123',
+        'nuxt-app',
+        readConfig(root),
+        { name: 'nuxt', class: 'c' },
+        FRAMEWORK_PRESETS.nuxt,
+      );
+    await expect(prepare()).rejects.toThrow('did not emit its Worker entry');
+
+    mkdirSync(join(root, '.output/server'), { recursive: true });
+    writeFileSync(join(root, '.output/server/index.mjs'), 'export default {};\n');
+    await expect(prepare()).rejects.toThrow('did not emit its asset directory');
   });
 });
 
@@ -5054,6 +5814,43 @@ describe('runCloudflareDeploy — migrations dir / count / auth', () => {
     expect(trace).toContain('auth-secret');
     expect(trace.indexOf('auth-secret')).toBeLessThan(trace.indexOf('wrangler:d1'));
     expect(trace).toContain('wrangler:deploy');
+  });
+
+  it('allows the DO bootstrap when first-secret provisioning proved the Worker was absent', async () => {
+    const root = makeProject({
+      'package.json': JSON.stringify({ name: 'authapp' }),
+      'void.json': JSON.stringify({ auth: {} }),
+      'routes/index.ts': `export const GET = () => new Response('ok');`,
+      'db/migrations/0000_auth.sql': `CREATE TABLE "user" (id text primary key);`,
+      'wrangler.jsonc': JSON.stringify({
+        account_id: 'acc123',
+        name: 'authapp',
+        d1_databases: [
+          {
+            binding: 'DB',
+            database_name: 'authapp-db',
+            database_id: REAL_D1_ID,
+            migrations_dir: './db/migrations',
+          },
+        ],
+      }),
+    });
+    let allowed = false;
+    const { deps } = harness({
+      ensureAuthSecret: async () => ({ created: true, workerWasMissing: true }),
+      activateVersion: async (options) => {
+        allowed = options.allowFirstDeploymentBootstrap === true;
+        return {
+          ok: true,
+          versionId: '22222222-2222-4222-8222-222222222222',
+          previewUrl: 'https://preview.example.workers.dev',
+          previousVersionId: null,
+        };
+      },
+    });
+
+    await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+    expect(allowed).toBe(true);
   });
 });
 
@@ -6354,7 +7151,7 @@ describe('checkWranglerMigrationApplySet', () => {
     expect(result.ok).toBe(true);
   });
 
-  it('A1: fails closed (defense in depth) if a custom migrations_pattern slips through', async () => {
+  it('accepts a custom pattern whose exact result matches the validated set', async () => {
     const root = makeProject({
       'wrangler.jsonc': '{}',
       'db/migrations/0000_init.sql': 'CREATE TABLE a (id integer);',
@@ -6366,9 +7163,31 @@ describe('checkWranglerMigrationApplySet', () => {
       './db/migrations',
       [{ name: '0000_init.sql', sql: 'CREATE TABLE a (id integer);' }],
     );
+    expect(result.ok).toBe(true);
+  });
+
+  it('rejects a custom pattern when migrations_dir is implicit', async () => {
+    const root = makeProject({
+      'wrangler.jsonc': '{}',
+      'db/migrations/0000_init.sql': 'CREATE TABLE a (id integer);',
+    });
+    const result = await checkWranglerMigrationApplySet(
+      join(root, 'wrangler.jsonc'),
+      {
+        d1_databases: [
+          {
+            binding: 'DB',
+            migrations_pattern: 'db/migrations/**/*.sql',
+          },
+        ],
+      },
+      'DB',
+      './db/migrations',
+      [{ name: '0000_init.sql', sql: 'CREATE TABLE a (id integer);' }],
+    );
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.reason).toContain('custom migrations_pattern');
+      expect(result.reason).toContain('requires an explicit migrations_dir');
     }
   });
 
@@ -6386,7 +7205,47 @@ describe('checkWranglerMigrationApplySet', () => {
     );
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.reason).toContain('custom migrations_pattern');
+      expect(result.reason).toContain('must be a non-empty string');
+    }
+  });
+
+  it('rejects a custom pattern whose exact result omits a validated migration', async () => {
+    const root = makeProject({
+      'wrangler.jsonc': '{}',
+      'db/migrations/0000_init.sql': 'CREATE TABLE a (id integer);',
+      'db/migrations/0001_more.sql': 'CREATE TABLE b (id integer);',
+    });
+    const result = await checkWranglerMigrationApplySet(
+      join(root, 'wrangler.jsonc'),
+      configFor('./db/migrations', 'db/migrations/0000_*.sql'),
+      'DB',
+      './db/migrations',
+      [
+        { name: '0000_init.sql', sql: 'CREATE TABLE a (id integer);' },
+        { name: '0001_more.sql', sql: 'CREATE TABLE b (id integer);' },
+      ],
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toContain('0001_more.sql');
+    }
+  });
+
+  it('rejects a custom pattern outside migrations_dir before enumeration', async () => {
+    const root = makeProject({
+      'wrangler.jsonc': '{}',
+      'db/migrations/0000_init.sql': 'CREATE TABLE a (id integer);',
+    });
+    const result = await checkWranglerMigrationApplySet(
+      join(root, 'wrangler.jsonc'),
+      configFor('./db/migrations', 'other/*.sql'),
+      'DB',
+      './db/migrations',
+      [{ name: '0000_init.sql', sql: 'CREATE TABLE a (id integer);' }],
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toContain('must start with');
     }
   });
 });
@@ -6754,21 +7613,40 @@ describe('runCloudflareDeploy — schema probe runs under the build NODE_ENV', (
 describe('runCloudflareDeploy — wrangler credentials reach only the wrangler runner', () => {
   it('the BUILD child env carries none of the wrangler auth credentials', async () => {
     let buildEnvSeen: NodeJS.ProcessEnv = {};
-    await withWranglerCredentials(async () => {
-      const root = d1Project(PROVISIONED_D1);
-      const { deps } = harness({
-        runBuild: (env) => {
-          buildEnvSeen = { ...env };
-        },
+    const previousDatabaseUrl = process.env.DATABASE_URL;
+    const previousVoidToken = process.env.VOID_TOKEN;
+    try {
+      await withWranglerCredentials(async () => {
+        process.env.DATABASE_URL = 'postgres://production-secret';
+        process.env.VOID_TOKEN = 'managed-platform-token';
+        const root = d1Project(PROVISIONED_D1);
+        const { deps } = harness({
+          runBuild: (env) => {
+            buildEnvSeen = { ...env };
+          },
+        });
+        await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
       });
-      await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
-    });
-    for (const name of WRANGLER_AUTH_VARS) {
-      expect(buildEnvSeen[name]).toBeUndefined();
+      for (const name of WRANGLER_AUTH_VARS) {
+        expect(buildEnvSeen[name]).toBeUndefined();
+      }
+      expect(buildEnvSeen.DATABASE_URL).toBeUndefined();
+      expect(buildEnvSeen.VOID_TOKEN).toBeUndefined();
+    } finally {
+      if (previousDatabaseUrl === undefined) {
+        delete process.env.DATABASE_URL;
+      } else {
+        process.env.DATABASE_URL = previousDatabaseUrl;
+      }
+      if (previousVoidToken === undefined) {
+        delete process.env.VOID_TOKEN;
+      } else {
+        process.env.VOID_TOKEN = previousVoidToken;
+      }
     }
   });
 
-  it('the wrangler runner env DOES still carry them (whoami / migrate / deploy need them)', async () => {
+  it('the wrangler runner keeps Wrangler auth but not Void readiness credentials', async () => {
     await withWranglerCredentials(async () => {
       // Run a deploy first so the fork's memoized provision module is loaded — the sync
       // `deployChildEnv` reads it, exactly as `createDeployWranglerRunner` does.
@@ -6778,7 +7656,11 @@ describe('runCloudflareDeploy — wrangler credentials reach only the wrangler r
 
       const runnerEnv = deployChildEnv('acc123', 'https://api.cloudflare.com/client/v4');
       for (const name of WRANGLER_AUTH_VARS) {
-        expect(runnerEnv[name]).toBe(`secret-${name}`);
+        if (name === 'CF_ACCESS_TOKEN') {
+          expect(runnerEnv[name]).toBeUndefined();
+        } else {
+          expect(runnerEnv[name]).toBe(`secret-${name}`);
+        }
       }
     });
   });

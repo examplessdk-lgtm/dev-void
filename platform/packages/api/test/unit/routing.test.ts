@@ -7,6 +7,7 @@ import {
   computeDispatchLimits,
   projectAccountKey,
   refreshProjectKvForUser,
+  resolveRoutingUndo,
   setProjectsRoutingSuspension,
 } from '../../src/routing.ts';
 import { PLAN_LIMITS, type PlanLimits } from '../../src/tiers.ts';
@@ -31,6 +32,42 @@ function createKvStore(initial: Record<string, string> = {}): {
   } as unknown as KVNamespace;
   return { store, puts, kv };
 }
+
+function createRoutingDb(): Parameters<typeof setProjectsRoutingSuspension>[1] {
+  return {
+    transaction: async (fn: (tx: { execute: () => Promise<void> }) => Promise<unknown>) =>
+      fn({ execute: async () => {} }),
+  } as unknown as Parameters<typeof setProjectsRoutingSuspension>[1];
+}
+
+describe('resolveRoutingUndo', () => {
+  it('restores the prior route when the attempted value is still current', () => {
+    expect(resolveRoutingUndo('{"deploymentId":"b"}', '{"deploymentId":"b"}', 'old')).toEqual({
+      restore: true,
+      value: 'old',
+    });
+  });
+
+  it('carries a newer suspension marker onto the restored deployment', () => {
+    const result = resolveRoutingUndo(
+      JSON.stringify({ deploymentId: 'b', suspended: 'admin_suspended' }),
+      JSON.stringify({ deploymentId: 'b' }),
+      JSON.stringify({ deploymentId: 'a' }),
+    );
+    expect(result.restore).toBe(true);
+    expect(JSON.parse(result.value!)).toEqual({
+      deploymentId: 'a',
+      suspended: 'admin_suspended',
+    });
+  });
+
+  it('does not overwrite a deleted or newer deployment route', () => {
+    expect(resolveRoutingUndo(null, '{"deploymentId":"b"}', 'old').restore).toBe(false);
+    expect(resolveRoutingUndo('{"deploymentId":"c"}', '{"deploymentId":"b"}', 'old').restore).toBe(
+      false,
+    );
+  });
+});
 
 describe('computeDispatchLimits', () => {
   function planWith(overrides: Partial<PlanLimits>): PlanLimits {
@@ -382,6 +419,41 @@ describe('applyRoutingSuspension', () => {
 });
 
 describe('setProjectsRoutingSuspension', () => {
+  it('reads domains only after acquiring the project lock', async () => {
+    const events: Array<string> = [];
+    const { kv } = createKvStore({
+      'slug-a': JSON.stringify({ projectId: 'proj_a' }),
+      'domain:newly-active.com': JSON.stringify({ projectId: 'proj_a' }),
+    });
+    vi.spyOn(await import('../../src/db.ts'), 'getDomainsByProjectIds').mockImplementation(
+      async () => {
+        events.push('read-domains');
+        return new Map([
+          ['proj_a', [{ project_id: 'proj_a', hostname: 'newly-active.com', status: 'active' }]],
+        ]) as unknown as Awaited<
+          ReturnType<typeof import('../../src/db.ts').getDomainsByProjectIds>
+        >;
+      },
+    );
+    const db = {
+      transaction: async (fn: (tx: { execute: () => Promise<void> }) => Promise<unknown>) =>
+        fn({
+          execute: async () => {
+            events.push('lock-project');
+          },
+        }),
+    } as unknown as Parameters<typeof setProjectsRoutingSuspension>[1];
+
+    await setProjectsRoutingSuspension(kv, db, [{ id: 'proj_a', slug: 'slug-a' }], {
+      op: 'suspend',
+      reason: 'admin_suspended',
+      force: true,
+    });
+
+    expect(events).toEqual(['lock-project', 'read-domains']);
+    vi.restoreAllMocks();
+  });
+
   it('stamps the slug AND every domain route with a live KV entry — including a crash-window pending domain', async () => {
     // `tryActivateDomain` writes `domain:<host>` to KV BEFORE flipping the DB row
     // to `active`; a crash between leaves a `pending` row whose KV route is still
@@ -406,7 +478,7 @@ describe('setProjectsRoutingSuspension', () => {
         ],
       ]) as unknown as Awaited<ReturnType<typeof import('../../src/db.ts').getDomainsByProjectIds>>,
     );
-    const db = {} as Parameters<typeof setProjectsRoutingSuspension>[1];
+    const db = createRoutingDb();
     await setProjectsRoutingSuspension(kv, db, [{ id: 'proj_a', slug: 'slug-a' }], {
       op: 'suspend',
       reason: 'requests_exceeded',
@@ -429,7 +501,7 @@ describe('setProjectsRoutingSuspension', () => {
         ['proj_a', [{ project_id: 'proj_a', hostname: 'active.com', status: 'active' }]],
       ]) as unknown as Awaited<ReturnType<typeof import('../../src/db.ts').getDomainsByProjectIds>>,
     );
-    const db = {} as Parameters<typeof setProjectsRoutingSuspension>[1];
+    const db = createRoutingDb();
     await setProjectsRoutingSuspension(kv, db, [{ id: 'proj_a', slug: 'slug-a' }], {
       op: 'unsuspend',
       matchReason: null,
@@ -449,7 +521,7 @@ describe('setProjectsRoutingSuspension', () => {
         ['proj_a', [{ project_id: 'proj_a', hostname: 'active.com', status: 'active' }]],
       ]) as unknown as Awaited<ReturnType<typeof import('../../src/db.ts').getDomainsByProjectIds>>,
     );
-    const db = {} as Parameters<typeof setProjectsRoutingSuspension>[1];
+    const db = createRoutingDb();
     await setProjectsRoutingSuspension(kv, db, [{ id: 'proj_a', slug: 'slug-a' }], {
       op: 'unsuspend',
       matchReason: 'requests_exceeded',
@@ -462,7 +534,7 @@ describe('setProjectsRoutingSuspension', () => {
   it('no-ops without a domains query when given zero projects', async () => {
     const { kv, puts } = createKvStore({});
     const spy = vi.spyOn(await import('../../src/db.ts'), 'getDomainsByProjectIds');
-    const db = {} as Parameters<typeof setProjectsRoutingSuspension>[1];
+    const db = createRoutingDb();
     await setProjectsRoutingSuspension(kv, db, [], {
       op: 'suspend',
       reason: 'requests_exceeded',

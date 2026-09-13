@@ -1,4 +1,3 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 import {
   cloneWithoutVoidPages,
   deleteIsrCache,
@@ -8,6 +7,7 @@ import {
   htmlEdgeKey,
   isrCacheResponse,
   isrKey,
+  isrPrefix,
   isStale,
   jsonEdgeKey,
   listIsrHosts,
@@ -23,10 +23,11 @@ import {
   type IsrCacheEnv,
   type IsrCacheMetadata,
   type RenderFn,
-} from '../../src/runtime/isr-cache.ts';
+} from '@void/isr/runtime';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 
 // Collapsed self-host deployment id (baked as a compile-time literal on the real
-// worker). Every key in this suite is scoped by it — `void-isr/<id>/...`.
+// worker). Every key in this suite is scoped by the shared v3 protocol.
 const DPL = '11111111-1111-4111-8111-111111111111';
 const HOST = 'app.void.app';
 // A fixed, realistic epoch so `Date.now()` (faked) is deterministic.
@@ -234,22 +235,22 @@ describe('normalizeIsrPath / denormalizeIsrPath', () => {
 });
 
 describe('collapsed self-host cache keys', () => {
-  it('scopes the KV key by deployment id AND host (void-isr/<id>/<host>/...), no projectId/isr-v2', () => {
-    expect(isrKey(DPL, HOST, '/')).toBe(`void-isr/${DPL}/${HOST}/__index__`);
-    expect(isrKey(DPL, HOST, '/blog/x')).toBe(`void-isr/${DPL}/${HOST}/blog/x`);
-    expect(isrKey(DPL, HOST, '/about/')).toBe(`void-isr/${DPL}/${HOST}/about`);
+  it('uses the shared v3 protocol scoped by deployment id and host', () => {
+    expect(isrKey(DPL, HOST, '/')).toBe(`${isrPrefix(DPL)}${HOST}/__index__`);
+    expect(isrKey(DPL, HOST, '/blog/x')).toBe(`${isrPrefix(DPL)}${HOST}/blog/x`);
+    expect(isrKey(DPL, HOST, '/about/')).toBe(`${isrPrefix(DPL)}${HOST}/about`);
   });
 
   it('host-scopes the KV key: different hosts never share a cache key', () => {
     expect(isrKey(DPL, 'foo.example', '/x')).not.toBe(isrKey(DPL, 'bar.example', '/x'));
-    expect(isrKey(DPL, 'foo.example', '/x')).toBe(`void-isr/${DPL}/foo.example/x`);
+    expect(isrKey(DPL, 'foo.example', '/x')).toBe(`${isrPrefix(DPL)}foo.example/x`);
   });
 
   it('builds the host-registry key (void-isr-hosts/<id>/<host>), distinct from the cache prefix', () => {
     expect(hostRegistryKey(DPL, HOST)).toBe(`void-isr-hosts/${DPL}/${HOST}`);
     // The registry prefix must NOT collide with the cache prefix, or an `{ all }`
-    // list (prefix `void-isr/<id>/`) would enumerate registry keys as cache keys.
-    expect(hostRegistryKey(DPL, HOST).startsWith(`void-isr/${DPL}/`)).toBe(false);
+    // list (the shared v3 deployment prefix) would enumerate registry keys as cache keys.
+    expect(hostRegistryKey(DPL, HOST).startsWith(isrPrefix(DPL))).toBe(false);
   });
 
   it('builds HTML edge keys with the deployment id and a canonical pathname', () => {
@@ -260,9 +261,9 @@ describe('collapsed self-host cache keys', () => {
     expect(htmlEdgeKey(HOST, '/', DPL)).toBe(`https://${HOST}/?__void_isr=${DPL}`);
   });
 
-  it('builds JSON edge keys as the HTML key plus the &__void=json marker', () => {
+  it('builds JSON edge keys with the shared variant ordering', () => {
     expect(jsonEdgeKey(HOST, '/about', DPL)).toBe(
-      `https://${HOST}/about?__void_isr=${DPL}&__void=json`,
+      `https://${HOST}/about?__void=json&__void_isr=${DPL}`,
     );
   });
 });
@@ -554,6 +555,42 @@ describe('handleIsr', () => {
     return new Request(`https://${HOST}${path}`, { method: 'GET', headers });
   }
 
+  it('isolates only allowlisted query variants and ignores unrelated parameters', async () => {
+    const { store, kv } = createKvMock();
+    const env = makeEnv(kv);
+    const render = vi.fn(async (request: Request) => {
+      const q = new URL(request.url).searchParams.get('q');
+      return new Response(`<html>${q}</html>`, { headers: { 'content-type': 'text/html' } });
+    });
+    const options = {
+      ...OPTS,
+      revalidate: { '/search': 60 },
+      queryAllowlist: { '/search': ['q'] },
+    };
+
+    const first = createCtx();
+    await handleIsr(htmlRequest('/search?q=one&utm=a'), env, first.ctx, options, render);
+    await first.flush();
+    const second = createCtx();
+    const same = await handleIsr(
+      htmlRequest('/search?utm=b&q=one'),
+      env,
+      second.ctx,
+      options,
+      render,
+    );
+    await second.flush();
+    const third = createCtx();
+    await handleIsr(htmlRequest('/search?q=two'), env, third.ctx, options, render);
+    await third.flush();
+
+    expect(await same!.text()).toBe('<html>one</html>');
+    expect(render).toHaveBeenCalledTimes(2);
+    expect(store.has(isrKey(DPL, HOST, '/search', `https://${HOST}/search?q=one`))).toBe(true);
+    expect(store.has(isrKey(DPL, HOST, '/search', `https://${HOST}/search?q=two`))).toBe(true);
+    expect(store.has(isrKey(DPL, HOST, '/search'))).toBe(false);
+  });
+
   it('MISS → renders live, returns MISS, and writes KV + HTML edge in the background', async () => {
     const { store, kv } = createKvMock();
     const env = makeEnv(kv);
@@ -577,9 +614,9 @@ describe('handleIsr', () => {
     // HTML edge variant warmed; plain HTML (no page data) never warms the JSON variant.
     expect(edge.store.has(htmlEdgeKey(HOST, '/blog/post', DPL))).toBe(true);
     expect(edge.store.has(jsonEdgeKey(HOST, '/blog/post', DPL))).toBe(false);
-    // Exactly one PAGE-cache entry persisted (`void-isr/…`); the host-registry
+    // Exactly one page-cache entry persisted; the host-registry
     // bookkeeping key (`void-isr-hosts/…`) is separate and excluded here.
-    expect([...store.keys()].filter((k) => k.startsWith('void-isr/')).length).toBe(1);
+    expect([...store.keys()].filter((k) => k.startsWith(isrPrefix(DPL))).length).toBe(1);
   });
 
   it('MISS whose render sets Set-Cookie → client keeps EVERY cookie; KV + edge copies stay stripped', async () => {
@@ -618,7 +655,7 @@ describe('handleIsr', () => {
     expect(entry).not.toBeNull();
     expect(entry!.headers['set-cookie']).toBeUndefined();
     expect(await new Response(entry!.body).text()).toBe('<html>live</html>');
-    expect([...store.keys()].filter((k) => k.startsWith('void-isr/')).length).toBe(1);
+    expect([...store.keys()].filter((k) => k.startsWith(isrPrefix(DPL))).length).toBe(1);
     // (3) The edge (caches.default) copy is stripped too.
     const warmed = edge.store.get(htmlEdgeKey(HOST, '/blog/post', DPL));
     expect(warmed).toBeDefined();
@@ -994,8 +1031,8 @@ describe('handleIsr', () => {
     const entry = await readIsrCache(env, HOST, '/blog/post');
     expect(entry).not.toBeNull();
     expect(await new Response(entry!.body).text()).toBe('<html>live</html>');
-    // Exactly one PAGE-cache entry (`void-isr/…`); the registry key is separate.
-    expect([...store.keys()].filter((k) => k.startsWith('void-isr/')).length).toBe(1);
+    // Exactly one page-cache entry; the registry key is separate.
+    expect([...store.keys()].filter((k) => k.startsWith(isrPrefix(DPL))).length).toBe(1);
   });
 
   it('serves the L2 KV HIT with no per-colo edge cache (KV ladder independent of caches.default)', async () => {
@@ -1091,7 +1128,7 @@ describe('handleIsr', () => {
       expect(tasks).toHaveLength(0);
       expect(put).not.toHaveBeenCalled();
       expect(edge.put).not.toHaveBeenCalled();
-      expect([...store.keys()].filter((k) => k.startsWith('void-isr/')).length).toBe(0);
+      expect([...store.keys()].filter((k) => k.startsWith(isrPrefix(DPL))).length).toBe(0);
       expect(edge.store.size).toBe(0);
       expect(await readIsrCache(env, HOST, '/blog/post')).toBeNull();
     });
@@ -1122,7 +1159,7 @@ describe('handleIsr', () => {
       expect(entry!.status).toBe(200);
       expect(await new Response(entry!.body).text()).toBe('<html>ok-200</html>');
       expect(edge.store.has(htmlEdgeKey(HOST, '/blog/post', DPL))).toBe(true);
-      expect([...store.keys()].filter((k) => k.startsWith('void-isr/')).length).toBe(1);
+      expect([...store.keys()].filter((k) => k.startsWith(isrPrefix(DPL))).length).toBe(1);
     });
   });
 });

@@ -75,6 +75,7 @@ vi.mock('../../src/cli/auth', () => ({
 
 vi.mock('../../src/cli/project', () => ({
   readProjectConfig: () => mockReadProjectConfig(),
+  readDeploymentPlatform: () => 'void',
 }));
 
 vi.mock('../../src/cli/client', () => ({

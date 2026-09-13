@@ -1,3 +1,4 @@
+import { sql as drizzleSql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { SITE_DOMAIN } from '../constants.ts';
 import {
@@ -8,6 +9,7 @@ import {
   getDomainByHostname,
   getDomainByHostnameOrCfHostnameId,
   deleteDomain,
+  type Db,
 } from '../db.ts';
 import type { ApiEnv } from '../env.ts';
 import { tryActivateDomain } from '../provisioning/activate-domain.ts';
@@ -281,26 +283,28 @@ const app = new Hono<ApiEnv>()
 
     const warnings: Array<string> = [];
 
-    // Best-effort CF + KV cleanup (always proceed to DB delete)
-    await Promise.all([
-      deleteCustomHostname(
-        context.env.CF_ZONE_ID,
-        context.env.CF_API_TOKEN,
-        domain.cf_hostname_id,
-      ).catch((err) => {
-        warnings.push(
-          `Failed to delete custom hostname: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }),
-      context.env.ROUTING.delete(`domain:${domain.hostname}`).catch((err) => {
+    // CF cleanup is best-effort. KV + DB deletion serialize with deploy,
+    // rollback, activation, and failed-cutover compensation through the
+    // project row so none can resurrect this hostname from a stale snapshot.
+    await deleteCustomHostname(
+      context.env.CF_ZONE_ID,
+      context.env.CF_API_TOKEN,
+      domain.cf_hostname_id,
+    ).catch((err) => {
+      warnings.push(
+        `Failed to delete custom hostname: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    });
+    await context.get('db').transaction(async (tx) => {
+      await tx.execute(drizzleSql`SELECT id FROM projects WHERE id = ${projectId} FOR UPDATE`);
+      const txDb = tx as unknown as Db;
+      await context.env.ROUTING.delete(`domain:${domain.hostname}`).catch((err) => {
         warnings.push(
           `Failed to delete routing entry: ${err instanceof Error ? err.message : String(err)}`,
         );
-      }),
-    ]);
-
-    // DB record is source of truth — always delete last
-    await deleteDomain(context.get('db'), domain.id);
+      });
+      await deleteDomain(txDb, domain.id);
+    });
 
     return context.json({ ok: true, ...(warnings.length > 0 && { warnings }) });
   });

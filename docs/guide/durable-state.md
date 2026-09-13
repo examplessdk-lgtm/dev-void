@@ -131,4 +131,4 @@ Typed durable state currently requires a native Void app targeting Cloudflare. I
 
 Void-managed deployment does not yet carry custom Durable Object modules in its deploy manifest, so `void deploy --platform void` fails before building and points to the direct Cloudflare path. Meta-framework adapter mode and `node`, `bun`, or `deno` targets also fail with guidance when `durable-objects/` is present.
 
-This is separate from [typed WebSocket routes](./websockets.md), whose current `*.ws.ts` classes use a legacy key-value-backed migration and therefore remain unsupported by direct Cloudflare deploys.
+This is separate from [typed WebSocket routes](./websockets.md), which also use SQLite-backed Durable Objects and work on both direct Cloudflare and hosted Void deployments.

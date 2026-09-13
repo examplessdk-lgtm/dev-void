@@ -1,11 +1,36 @@
-import { isrCacheKey, isrCacheVariantPrefix, isrEdgeCacheUrl } from '@voidcloud/isr-shared';
-import type { IsrCacheMetadata } from '@voidcloud/isr-shared';
+import { isrCacheKey, isrCacheVariantPrefix, isrEdgeCacheUrl } from '@void/isr';
+import {
+  decodeIsrCacheEntry,
+  extractPageDataFromHtml,
+  isrCacheResponse,
+  isStale,
+  normalizePageDataForJsonCache,
+  packIsrValue,
+  resolvePathTtl,
+  resolveRevalidateTtl,
+  serializeHeaders,
+  shouldBypassIsr,
+  type IsrCacheEntry,
+  type IsrCacheMetadata,
+} from '@void/isr/core';
 import type { Env } from './env.ts';
 import { matchSegmentPattern } from './pattern.ts';
 
 // Re-export so callers that import from `./isr` (tests, index.ts) still work.
-export { isrCacheKey };
-export type { IsrCacheMetadata };
+export {
+  extractPageDataFromHtml,
+  isrCacheResponse,
+  isStale,
+  normalizePageDataForJsonCache,
+  packIsrValue,
+  resolvePathTtl,
+  resolveRevalidateTtl,
+  serializeHeaders,
+  shouldBypassIsr,
+  unpackIsrValue,
+} from '@void/isr/core';
+export { isrCacheKey } from '@void/isr';
+export type { IsrCacheEntry, IsrCacheMetadata } from '@void/isr/core';
 
 /**
  * Hard cap on rewrite-variant ISR entries per (project, deployment, pathname).
@@ -21,56 +46,6 @@ export type { IsrCacheMetadata };
  * working; only NEW variants are rejected past the cap.
  */
 export const MAX_ISR_VARIANTS_PER_PATH = 200;
-
-export type IsrCacheEntry = Readonly<{
-  body: ReadableStream;
-  status: number;
-  headers: Record<string, string>;
-  createdAt: number;
-  ttl: number;
-}>;
-
-const PAGE_DATA_SCRIPT_RE =
-  /<script\b[^>]*\bid=(["'])__VOID_PAGE_DATA__\1[^>]*>([\s\S]*?)<\/script>/i;
-
-/**
- * Pack response headers + body into a single ArrayBuffer.
- * Format: [4 bytes uint32 LE header length][UTF-8 header JSON][raw body]
- */
-export function packIsrValue(headers: Record<string, string>, body: ArrayBuffer): ArrayBuffer {
-  const headerJson = new TextEncoder().encode(JSON.stringify(headers));
-  const buffer = new ArrayBuffer(4 + headerJson.byteLength + body.byteLength);
-  const view = new DataView(buffer);
-  view.setUint32(0, headerJson.byteLength, true); // little-endian
-  new Uint8Array(buffer, 4, headerJson.byteLength).set(headerJson);
-  new Uint8Array(buffer, 4 + headerJson.byteLength).set(new Uint8Array(body));
-  return buffer;
-}
-
-/**
- * Unpack headers + body from a packed ArrayBuffer.
- * Returns null if the buffer is too small or malformed.
- */
-export function unpackIsrValue(
-  buffer: ArrayBuffer,
-): { headers: Record<string, string>; body: ArrayBuffer } | null {
-  if (buffer.byteLength < 4) {
-    return null;
-  }
-  const view = new DataView(buffer);
-  const headerLen = view.getUint32(0, true);
-  if (buffer.byteLength < 4 + headerLen) {
-    return null;
-  }
-  try {
-    const headerBytes = new Uint8Array(buffer, 4, headerLen);
-    const headers: Record<string, string> = JSON.parse(new TextDecoder().decode(headerBytes));
-    const body = buffer.slice(4 + headerLen);
-    return { headers, body };
-  } catch {
-    return null;
-  }
-}
 
 /**
  * Read an ISR cache entry from KV.
@@ -89,31 +64,7 @@ export async function readIsrCache(
     key,
     'arrayBuffer',
   );
-  if (!value || !metadata) {
-    return null;
-  }
-
-  const unpacked = unpackIsrValue(value);
-  if (!unpacked) {
-    return null;
-  }
-
-  if (!metadata.c || !metadata.t) {
-    return null;
-  }
-
-  return {
-    body: new ReadableStream({
-      start(controller) {
-        controller.enqueue(new Uint8Array(unpacked.body));
-        controller.close();
-      },
-    }),
-    status: metadata.s,
-    headers: unpacked.headers,
-    createdAt: metadata.c,
-    ttl: metadata.t,
-  };
+  return decodeIsrCacheEntry(value, metadata);
 }
 
 /**
@@ -201,118 +152,6 @@ async function isVariantWriteAllowed(
   }
   // At or over cap: only allow updates to existing keys.
   return listed.keys.some((cacheKey) => cacheKey.name === key);
-}
-
-/**
- * Check if a cached entry is stale.
- */
-export function isStale(entry: IsrCacheEntry): boolean {
-  return Date.now() - entry.createdAt > entry.ttl * 1000;
-}
-
-/**
- * Build a Response from an ISR cache entry.
- */
-export function isrCacheResponse(entry: IsrCacheEntry, stale: boolean): Response {
-  const headers = new Headers(entry.headers);
-  headers.set('x-isr-cache', stale ? 'STALE' : 'HIT');
-
-  // Edge-cacheable: s-maxage controls CDN TTL based on remaining ISR freshness.
-  // Browser always revalidates (max-age=0) so users see updates after edge expiry.
-  if (stale) {
-    // Stale: short edge TTL while background revalidation runs.
-    // Cap at entry.ttl so short-TTL configs don't serve stale longer than their ISR window.
-    const staleTtl = Math.min(10, entry.ttl);
-    headers.set('Cache-Control', `public, s-maxage=${staleTtl}, max-age=0, must-revalidate`);
-  } else {
-    const remainingSeconds = Math.max(
-      0,
-      Math.floor((entry.createdAt + entry.ttl * 1000 - Date.now()) / 1000),
-    );
-    headers.set(
-      'Cache-Control',
-      `public, s-maxage=${remainingSeconds}, max-age=0, must-revalidate`,
-    );
-  }
-
-  return new Response(entry.body, {
-    status: entry.status,
-    headers,
-  });
-}
-
-/**
- * Read the `x-revalidate` header from a worker response.
- * Returns the override TTL, or null to use the default.
- * A value of 0 means "do not cache this response".
- */
-export function resolveRevalidateTtl(response: Response, defaultTtl: number): number {
-  const header = response.headers.get('x-revalidate');
-  if (header === null) {
-    return defaultTtl;
-  }
-
-  const value = parseInt(header, 10);
-  if (isNaN(value) || value < 0) {
-    return defaultTtl;
-  }
-  return value;
-}
-
-function acceptsEventStream(request: Request): boolean {
-  return (
-    request.headers
-      .get('Accept')
-      ?.toLowerCase()
-      .split(',')
-      .some((part) => part.split(';', 1)[0]?.trim() === 'text/event-stream') ?? false
-  );
-}
-
-/**
- * ISR should be bypassed for requests with credentials and EventSource
- * requests. Pages protocol navigation (X-VoidPages) uses a separate JSON edge
- * cache.
- */
-export function shouldBypassIsr(request: Request): boolean {
-  return (
-    request.headers.has('Cookie') ||
-    request.headers.has('Authorization') ||
-    acceptsEventStream(request)
-  );
-}
-
-/**
- * Resolve the ISR TTL for a given pathname.
- * Accepts the `revalidate` config from the routing entry (number, object, or undefined).
- * For object form, first matching pattern wins.
- *
- * Uses `matchSegmentPattern` (not literal) because the folded flat `revalidate`
- * map also carries GENERATED page-pattern keys (`:slug`, `:path{.+}`) that must
- * param-match. Bounded known limitation (plan 0077): a user-authored key whose
- * segment STARTS with a literal colon (`/:batchGet`) is therefore matched as a
- * param (`^/[^/]+$`) and over-matches unrelated single-segment paths. Near-zero
- * reachability — a real colon-in-URL is MID-segment (`/v1/users:batchGet`) and
- * stays literal; a leading-`:` segment is not a real URL shape and is
- * undocumented (docs sanction literal paths + `*` globs only). Bounded by
- * `shouldBypassIsr`.
- */
-export function resolvePathTtl(
-  revalidate: number | Record<string, number> | undefined,
-  pathname: string,
-): number {
-  if (revalidate == null) {
-    return 0;
-  }
-  if (typeof revalidate === 'number') {
-    return revalidate;
-  }
-  for (const [pattern, ttl] of Object.entries(revalidate)) {
-    if (matchSegmentPattern(pattern, pathname)) {
-      return ttl;
-    }
-  }
-  return 0;
 }
 
 /**
@@ -455,43 +294,6 @@ export function isDottedPathIsrEligible(
     }
   }
   return false;
-}
-
-export function normalizePageDataForJsonCache(raw: string): string | null {
-  try {
-    const parsed = JSON.parse(raw) as { deferred?: unknown; deferredKeys?: unknown };
-    if (parsed.deferred !== undefined || parsed.deferredKeys !== undefined) {
-      return null;
-    }
-    return raw;
-  } catch {
-    return null;
-  }
-}
-
-export function extractPageDataFromHtml(html: string): string | null {
-  const match = html.match(PAGE_DATA_SCRIPT_RE);
-  if (!match) {
-    return null;
-  }
-  return normalizePageDataForJsonCache(match[2]);
-}
-
-/**
- * Extract response headers as a plain object, skipping ISR-managed headers.
- */
-const SKIP_HEADERS = new Set(['cache-control', 'x-isr-cache', 'x-void-page-data', 'set-cookie']);
-
-export function serializeHeaders(response: Response): Record<string, string> {
-  const result: Record<string, string> = {};
-
-  response.headers.forEach((value, key) => {
-    if (!SKIP_HEADERS.has(key.toLowerCase())) {
-      result[key] = value;
-    }
-  });
-
-  return result;
 }
 
 /**

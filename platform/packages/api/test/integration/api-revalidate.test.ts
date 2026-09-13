@@ -1,4 +1,4 @@
-import { hashOriginalUrl } from '@voidcloud/isr-shared';
+import { hashOriginalUrl } from '@void/isr';
 import {
   describe,
   it,
@@ -41,7 +41,7 @@ function isrKey(
 // puts set no `expirationTtl`), so revalidation must sweep the `v2` namespace
 // during the rollout. The version segment (`v2` vs `v3`) keeps the legacy sweep
 // disjoint from the host-scoped one — no runtime heuristic on the first
-// segment. See isr-shared `ISR_LEGACY_CACHE_KEY_VERSION`.
+// segment. See @void/isr `ISR_LEGACY_CACHE_KEY_VERSION`.
 function legacyIsrKey(projectId: string, deploymentId: string, normalizedPath: string): string {
   return `${projectId}/isr/v2/${deploymentId}/${normalizedPath}`;
 }

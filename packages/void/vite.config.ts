@@ -73,6 +73,7 @@ export default defineConfig({
     entry: [
       'src/index.ts',
       'src/database-provider.ts',
+      'src/edge.ts',
       'src/runtime/handler.ts',
       'src/runtime/response.ts',
       'src/runtime/validator.ts',
@@ -117,7 +118,6 @@ export default defineConfig({
       'src/runtime/queues.ts',
       'src/runtime/storage.ts',
       'src/runtime/isr.ts',
-      'src/runtime/isr-cache.ts',
       'src/runtime/log.ts',
       'src/runtime/ai.ts',
       'src/runtime/email.ts',

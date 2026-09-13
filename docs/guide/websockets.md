@@ -10,6 +10,8 @@ Void-managed WebSockets currently works only for Void apps. Meta-framework mode 
 
 Void supports typed WebSockets from file-based `.ws.ts` routes. Each WebSocket route compiles to a Cloudflare Durable Object, so the feature is currently Cloudflare-only. If you set `target` to `node`, `bun`, or `deno`, builds fail when `.ws.ts` routes are present.
 
+New route classes use SQLite-backed Durable Objects on both deployment platforms. Void preserves legacy key-value-backed migration history for existing hosted projects and never reclassifies an already-created class.
+
 Use WebSockets for chat, presence, collaborative rooms, notifications, AI/live-log streaming, and other realtime flows where one connection target maps cleanly to one route instance.
 
 ## Route files
@@ -191,3 +193,9 @@ This first release intentionally focuses on the Durable Object sweet spot:
 - JSON event messages only
 
 That covers most realtime app shapes Void is targeting without exposing Durable Objects directly.
+
+## Deployment
+
+`void deploy --platform cloudflare` persists the required binding and append-only SQLite class migration in `wrangler.jsonc`, then deploys the generated Worker directly to your account. Commit this migration history and never delete or reorder a step after deployment.
+
+`void deploy --platform void` uses the same shared migration planner in the hosted uploader. Existing hosted WebSocket classes created on legacy storage remain there; only genuinely new classes use SQLite.

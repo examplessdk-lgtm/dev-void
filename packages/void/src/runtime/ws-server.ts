@@ -496,6 +496,28 @@ export function createWebSocketDurableObject(
   return VoidWebSocketDurableObject;
 }
 
+/** Keep a removed WebSocket Durable Object class deployable without deleting its storage. */
+export function createWebSocketTombstoneDurableObject(
+  className: string,
+): WebSocketDurableObjectClass {
+  return class VoidWebSocketTombstoneDurableObject implements WebSocketDurableObjectInstance {
+    constructor(
+      public readonly state: DurableObjectState,
+      public readonly env: Record<string, unknown>,
+    ) {}
+
+    async fetch(): Promise<Response> {
+      return new Response(`WebSocket route ${className} has been removed.`, { status: 410 });
+    }
+
+    async webSocketMessage(webSocket: WebSocket): Promise<void> {
+      webSocket.close(1012, 'WebSocket route removed');
+    }
+
+    async webSocketClose(): Promise<void> {}
+  };
+}
+
 function getStub(
   env: Record<string, unknown>,
   route: WebSocketRouteMeta,

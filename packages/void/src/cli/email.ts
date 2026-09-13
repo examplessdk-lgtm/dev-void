@@ -1,4 +1,5 @@
 import { confirm, isCancel, log, note } from '@clack/prompts';
+import { parseRootWranglerConfig, readWranglerTopLevelString } from '@void/deploy-cloudflare';
 import { readConfig } from '../config.ts';
 import { readProjectPaths } from '../project-paths.ts';
 import { scanEmailHandlersSync } from '../router/email.ts';
@@ -10,8 +11,6 @@ import {
   discoverRootWranglerConfig,
   isWranglerNonInteractiveOrCI,
   loadProvisionModule,
-  parseRootWranglerConfig,
-  readWranglerTopLevelString,
   resolveDeployTransport,
   runWranglerAuthToken,
 } from './deploy.ts';

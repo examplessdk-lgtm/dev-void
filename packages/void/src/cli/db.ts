@@ -32,7 +32,7 @@ import { PlatformApiError, PlatformClient } from './client.ts';
 import type { DbArgs } from './db-args.ts';
 import { formatTimestamp } from './gen.ts';
 import { cliTitle, dim, pc } from './output.ts';
-import { readProjectConfig } from './project.ts';
+import { readDeploymentPlatform, readProjectConfig } from './project.ts';
 
 const drizzleKitBin = join(fileURLToPath(import.meta.resolve('drizzle-kit')), '..', 'bin.cjs');
 const DEFAULT_SEED_FILES = [
@@ -484,15 +484,45 @@ async function runStatus(root: string, dialect: DatabaseDialect): Promise<void> 
 
   // Try to get remote status
   let remoteApplied: Array<{ name: string; applied_at: string }> | null = null;
-  const token = getToken(root);
-  const config = readProjectConfig(root);
-  if (token && config) {
+  const deploymentPlatform = readDeploymentPlatform(root);
+  if (deploymentPlatform === 'cloudflare') {
     try {
-      const client = new PlatformClient(token, { root });
-      const result = await client.getMigrationStatus(config.projectId, dialect);
-      remoteApplied = result.applied;
+      if (dialect !== 'sqlite') {
+        const databaseUrl = process.env.DATABASE_URL;
+        if (!databaseUrl) {
+          throw new Error('DATABASE_URL is not available.');
+        }
+        const names =
+          dialect === 'postgresql'
+            ? await (await import('../migrations/runner-pg.ts')).getPgAppliedMigrations(databaseUrl)
+            : await (
+                await import('../migrations/runner-mysql.ts')
+              ).getMySqlAppliedMigrations(databaseUrl);
+        remoteApplied = names.map((name) => ({ name, applied_at: '' }));
+      } else {
+        const { readCloudflareD1Migrations, resolveCloudflareD1Context } =
+          await import('./cloudflare-operations.ts');
+        const configured = resolveBindingNames(readConfig(root).inference?.bindings);
+        const context = resolveCloudflareD1Context(root, configured?.d1 ?? 'DB');
+        remoteApplied = (await readCloudflareD1Migrations(context)).map((name) => ({
+          name,
+          applied_at: '',
+        }));
+      }
     } catch {
-      // graceful degradation — remote unavailable
+      // Graceful degradation — local migration status remains useful offline.
+    }
+  } else {
+    const token = getToken(root);
+    const config = readProjectConfig(root);
+    if (token && config) {
+      try {
+        const client = new PlatformClient(token, { root });
+        const result = await client.getMigrationStatus(config.projectId, dialect);
+        remoteApplied = result.applied;
+      } catch {
+        // graceful degradation — remote unavailable
+      }
     }
   }
 
@@ -747,6 +777,41 @@ async function fetchRemoteDatabaseUrl(client: PlatformClient, projectId: string)
   }
 }
 
+async function executeExternalRemoteSql(
+  dialect: Exclude<DatabaseDialect, 'sqlite'>,
+  dbUrl: string,
+  sql: string,
+): Promise<void> {
+  if (dialect === 'postgresql') {
+    const { Client } = await import('pg');
+    const pgClient: PgClient = new Client({ connectionString: dbUrl });
+    await pgClient.connect();
+    try {
+      const result = await pgClient.query(sql);
+      if (result.rows && result.rows.length > 0) {
+        printTable(result.rows);
+      } else {
+        log.success('Executed successfully.');
+      }
+    } finally {
+      await pgClient.end();
+    }
+    return;
+  }
+  const { createConnection } = await import('mysql2/promise');
+  const mySqlClient = await createConnection({ uri: dbUrl, multipleStatements: true });
+  try {
+    const [rows] = await mySqlClient.query(sql);
+    if (Array.isArray(rows) && rows.length > 0) {
+      printTable(rows as Array<Record<string, unknown>>);
+    } else {
+      log.success('Executed successfully.');
+    }
+  } finally {
+    await mySqlClient.end();
+  }
+}
+
 /**
  * Prompt the user to confirm a destructive remote query when running in a TTY.
  * Returns true if execution should proceed, false if it was cancelled.
@@ -776,8 +841,9 @@ async function runExecute(
   remote?: boolean,
 ): Promise<void> {
   if (remote) {
+    const directCloudflare = readDeploymentPlatform(root) === 'cloudflare';
     // Reject --file with --remote D1 before reading the file or prompting.
-    if (dialect === 'sqlite' && file) {
+    if (dialect === 'sqlite' && file && !directCloudflare) {
       log.error(
         '--file is not yet supported with --remote D1; pipe statements through stdin or run them one at a time.',
       );
@@ -785,6 +851,39 @@ async function runExecute(
     }
 
     const sql = file ? readFileSync(join(root, file), 'utf-8') : command!;
+
+    if (directCloudflare) {
+      const shouldProceed = await confirmDestructiveRemote(sql);
+      if (!shouldProceed) {
+        log.info('Cancelled.');
+        process.exit(0);
+      }
+      if (dialect === 'sqlite') {
+        const { executeCloudflareD1Sql, resolveCloudflareD1Context } =
+          await import('./cloudflare-operations.ts');
+        const configured = resolveBindingNames(readConfig(root).inference?.bindings);
+        const rows = await executeCloudflareD1Sql(
+          resolveCloudflareD1Context(root, configured?.d1 ?? 'DB'),
+          sql,
+        );
+        if (rows.length > 0) {
+          printTable(rows);
+        } else {
+          log.success('Executed successfully.');
+        }
+      } else {
+        const dbUrl = process.env.DATABASE_URL;
+        if (!dbUrl) {
+          log.error(
+            'DATABASE_URL is required in the shell for a direct Cloudflare remote database command.',
+          );
+          process.exit(1);
+        }
+        await executeExternalRemoteSql(dialect, dbUrl, sql);
+      }
+      outro('Done.');
+      return;
+    }
 
     const token = getToken(root);
     if (!token) {
@@ -809,34 +908,7 @@ async function runExecute(
       const client = new PlatformClient(token, { root });
       const dbUrl = await fetchRemoteDatabaseUrl(client, projectConfig.projectId);
 
-      if (dialect === 'postgresql') {
-        const { Client } = await import('pg');
-        const pgClient: PgClient = new Client({ connectionString: dbUrl });
-        await pgClient.connect();
-        try {
-          const result = await pgClient.query(sql);
-          if (result.rows && result.rows.length > 0) {
-            printTable(result.rows);
-          } else {
-            log.success('Executed successfully.');
-          }
-        } finally {
-          await pgClient.end();
-        }
-      } else {
-        const { createConnection } = await import('mysql2/promise');
-        const mySqlClient = await createConnection({ uri: dbUrl, multipleStatements: true });
-        try {
-          const [rows] = await mySqlClient.query(sql);
-          if (Array.isArray(rows) && rows.length > 0) {
-            printTable(rows as Array<Record<string, unknown>>);
-          } else {
-            log.success('Executed successfully.');
-          }
-        } finally {
-          await mySqlClient.end();
-        }
-      }
+      await executeExternalRemoteSql(dialect, dbUrl, sql);
       outro('Done.');
       return;
     }
@@ -995,11 +1067,118 @@ async function runMigrate(root: string, dialect: DatabaseDialect, remote?: boole
   }
 
   if (remote) {
+    const deploymentPlatform = readDeploymentPlatform(root);
     if (dialect !== 'sqlite') {
-      log.error(
-        `db: \`void db migrate --remote\` is only supported for D1 projects. ${dialect === 'mysql' ? 'MySQL' : 'PostgreSQL'} remote migrations run during \`void deploy\` through the project Hyperdrive binding.`,
+      if (deploymentPlatform !== 'cloudflare') {
+        log.error(
+          `db: \`void db migrate --remote\` is only supported for D1 projects. ${dialect === 'mysql' ? 'MySQL' : 'PostgreSQL'} remote migrations run during \`void deploy\` through the project Hyperdrive binding.`,
+        );
+        process.exit(1);
+      }
+
+      if (rawMigrations.length === 0) {
+        log.info(`No migration files found in ${paths.sourceRelative('db/migrations')}/`);
+        outro('Done.');
+        return;
+      }
+      const databaseUrl = process.env.DATABASE_URL;
+      if (!databaseUrl) {
+        log.error(
+          'DATABASE_URL is required in the shell for a direct Cloudflare remote database command.',
+        );
+        process.exit(1);
+      }
+
+      try {
+        let appliedNames: Array<string>;
+        let applyMigrations: () => Promise<Array<string>>;
+        if (dialect === 'postgresql') {
+          const { getPgAppliedMigrations, runPgMigrations } =
+            await import('../migrations/runner-pg.ts');
+          appliedNames = await getPgAppliedMigrations(databaseUrl);
+          applyMigrations = () => runPgMigrations(migrationsDir, databaseUrl);
+        } else {
+          const { getMySqlAppliedMigrations, runMySqlMigrations } =
+            await import('../migrations/runner-mysql.ts');
+          appliedNames = await getMySqlAppliedMigrations(databaseUrl);
+          applyMigrations = () => runMySqlMigrations(migrationsDir, databaseUrl);
+        }
+        const appliedSet = new Set(appliedNames);
+        const pending = rawMigrations.filter((migration) => !appliedSet.has(migration.name));
+        if (pending.length === 0) {
+          log.info('Remote database is up to date.');
+          outro('Done.');
+          return;
+        }
+        validateMigrations(pending);
+        const applied = await applyMigrations();
+        for (const migration of applied) {
+          log.step(migration);
+        }
+        log.success(`Applied ${applied.length} migration(s) to remote database.`);
+        outro('Done.');
+        return;
+      } catch (error) {
+        log.error(`db: Remote ${dialect} migrations failed — ${getErrorMessage(error)}`);
+        process.exit(1);
+      }
+    }
+
+    if (deploymentPlatform === 'cloudflare') {
+      if (rawMigrations.length === 0) {
+        log.info(`No migration files found in ${paths.sourceRelative('db/migrations')}/`);
+        outro('Done.');
+        return;
+      }
+      const {
+        applyCloudflareD1Migrations,
+        readCloudflareD1Migrations,
+        resolveCloudflareD1Context,
+      } = await import('./cloudflare-operations.ts');
+      const configured = resolveBindingNames(readConfig(root).inference?.bindings);
+      const binding = configured?.d1 ?? 'DB';
+      const context = resolveCloudflareD1Context(root, binding);
+      const remoteBefore = new Set(await readCloudflareD1Migrations(context));
+      const pending = rawMigrations.filter((migration) => !remoteBefore.has(migration.name));
+      if (pending.length === 0) {
+        log.info('Remote database is up to date.');
+        outro('Done.');
+        return;
+      }
+      try {
+        validateMigrations(pending);
+      } catch (error) {
+        log.error(getErrorMessage(error));
+        process.exit(1);
+      }
+      const { checkWranglerMigrationApplySet, parseRootWranglerConfig } =
+        await import('./deploy.ts');
+      const applySet = await checkWranglerMigrationApplySet(
+        context.operation.configPath,
+        parseRootWranglerConfig(context.operation.configPath),
+        binding,
+        context.migrationsDir,
+        rawMigrations,
       );
-      process.exit(1);
+      if (!applySet.ok) {
+        log.error(applySet.reason);
+        process.exit(1);
+      }
+      await applyCloudflareD1Migrations(context);
+      const remoteAfter = new Set(await readCloudflareD1Migrations(context));
+      const unapplied = rawMigrations.filter((migration) => !remoteAfter.has(migration.name));
+      if (unapplied.length > 0) {
+        log.error(
+          `db: Remote D1 still has unapplied migrations: ${unapplied.map((migration) => migration.name).join(', ')}.`,
+        );
+        process.exit(1);
+      }
+      for (const migration of pending) {
+        log.step(migration.name);
+      }
+      log.success(`Applied ${pending.length} migration(s) to remote database.`);
+      outro('Done.');
+      return;
     }
 
     const token = getToken(root);
@@ -1178,21 +1357,28 @@ async function runStudio(root: string, dialect: DatabaseDialect, remote?: boolea
       process.exit(1);
     }
 
-    // External database: fetch the connection URL, then open Studio against it.
-    const token = getToken(root);
-    if (!token) {
-      log.error('Not logged in. Run `void auth login` first.');
-      process.exit(1);
+    // External database: use the direct deploy credential or fetch the managed URL.
+    let dbUrl: string;
+    if (readDeploymentPlatform(root) === 'cloudflare') {
+      dbUrl = process.env.DATABASE_URL ?? '';
+      if (!dbUrl) {
+        log.error('DATABASE_URL is required in the shell for direct Cloudflare remote Studio.');
+        process.exit(1);
+      }
+    } else {
+      const token = getToken(root);
+      if (!token) {
+        log.error('Not logged in. Run `void auth login` first.');
+        process.exit(1);
+      }
+      const projectConfig = readProjectConfig(root);
+      if (!projectConfig) {
+        log.error('No project linked. Run `void deploy` first or link a project.');
+        process.exit(1);
+      }
+      const client = new PlatformClient(token, { root });
+      dbUrl = await fetchRemoteDatabaseUrl(client, projectConfig.projectId);
     }
-
-    const projectConfig = readProjectConfig(root);
-    if (!projectConfig) {
-      log.error('No project linked. Run `void deploy` first or link a project.');
-      process.exit(1);
-    }
-
-    const client = new PlatformClient(token, { root });
-    const dbUrl = await fetchRemoteDatabaseUrl(client, projectConfig.projectId);
 
     const { writeDrizzleConfig } = await import('../drizzle/config.ts');
     const configPath = writeDrizzleConfig(root, dbUrl, dialect);

@@ -27,6 +27,7 @@ jobs:
         with:
           cache: true
           node-version-file: .node-version
+      - run: vp run build
       - run: vp run --filter @voidcloud/platform deploy:staging
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}

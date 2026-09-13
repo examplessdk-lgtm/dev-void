@@ -38,6 +38,18 @@ describe('FRAMEWORK_PRESETS', () => {
     expect(preset.assetsDir).toBe('dist/client');
   });
 
+  it.each([
+    ['tanstack-start', 'dist/server'],
+    ['react-router', 'build/server'],
+    ['vinext-app', 'dist/server'],
+    ['vinext-pages', 'dist/ssr'],
+  ])('matches the generated %s Cloudflare Worker directory', (name, workerDir) => {
+    const preset = FRAMEWORK_PRESETS[name];
+    expect(preset.cloudflareArtifact).toBe('vite-plugin');
+    expect(preset.workerDir).toBe(workerDir);
+    expect(preset.workerMain).toBe('index.js');
+  });
+
   it('all presets have required fields', () => {
     for (const preset of Object.values(FRAMEWORK_PRESETS)) {
       expect(preset.buildCommand).toBeTruthy();

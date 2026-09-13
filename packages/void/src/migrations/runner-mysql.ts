@@ -7,15 +7,35 @@ export type MySqlClient = {
   ): Promise<T>;
 };
 
+export async function readMySqlAppliedMigrations(client: MySqlClient): Promise<Array<string>> {
+  try {
+    const rows = await client.query<Array<{ name: string }>>(
+      'SELECT `name` FROM `_void_migrations`',
+    );
+    return rows.map((row) => String(row.name));
+  } catch (error) {
+    const value =
+      typeof error === 'object' && error !== null ? (error as Record<string, unknown>) : undefined;
+    if (value?.code === 'ER_NO_SUCH_TABLE' || value?.errno === 1146) {
+      return [];
+    }
+    throw error;
+  }
+}
+
 export async function getMySqlAppliedMigrations(url: string): Promise<Array<string>> {
   const { createConnection } = await import('mysql2/promise');
   const connection = await createConnection(url);
   try {
-    await connection.query(
-      'CREATE TABLE IF NOT EXISTS `_void_migrations` (`name` VARCHAR(255) PRIMARY KEY, `applied_at` VARCHAR(64) NOT NULL)',
-    );
-    const [rows] = await connection.query('SELECT `name` FROM `_void_migrations`');
-    return (rows as Array<{ name: string }>).map((row) => String(row.name));
+    return await readMySqlAppliedMigrations({
+      async query<T extends Array<Record<string, unknown>> = Array<Record<string, unknown>>>(
+        sql: string,
+        params?: Array<unknown>,
+      ): Promise<T> {
+        const [rows] = await connection.query(sql, params);
+        return (Array.isArray(rows) ? rows : []) as T;
+      },
+    });
   } finally {
     await connection.end();
   }

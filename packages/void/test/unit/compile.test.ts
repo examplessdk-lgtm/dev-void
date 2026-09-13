@@ -537,6 +537,29 @@ describe('compileRouteTable', () => {
     expect(code).toContain('__forwardWebSocketRequest');
   });
 
+  it('exports tombstones for removed websocket Durable Object classes', () => {
+    const scan: ScanResult = {
+      routes: [],
+      websockets: [],
+      middleware: [],
+      jobs: [],
+      queues: [],
+      pages: { pages: [], layouts: [], namedLayouts: [] },
+    };
+    const code = compileRouteTable(scan, '/routes', '/middleware', '/crons', '/queues', null, {
+      ...testOptions,
+      webSocketTombstones: ['RemovedChatWs'],
+    });
+
+    expect(code).toContain('createWebSocketTombstoneDurableObject');
+    expect(code).toContain(
+      'export const RemovedChatWs = __createWebSocketTombstoneDurableObject("RemovedChatWs")',
+    );
+    expect(compileWorkerEntry({ webSocketClasses: ['RemovedChatWs'] })).toContain(
+      'export { RemovedChatWs };',
+    );
+  });
+
   it('generates the shared live durable object export when live is enabled', () => {
     const scan: ScanResult = {
       routes: [],
@@ -2946,7 +2969,7 @@ describe('compileWorkerEntry — ISR wiring', () => {
       webSocketClasses: [],
       runtimeEnvPath: 'void/_env',
       serveSpaFallback: false,
-      isr: { runtimePath: 'void/isr' },
+      isr: { runtimePath: 'void/isr', queryAllowlist: { '/search': ['q'] } },
     });
 
     // Baked import #1: handleIsr from the supplied runtime path.
@@ -2958,7 +2981,7 @@ describe('compileWorkerEntry — ISR wiring', () => {
     // Render path threaded through handleIsr, guarded on the ISR_CACHE binding.
     expect(code).toContain('if (env.ISR_CACHE)');
     expect(code).toContain(
-      'handleIsr(request, env, ctx, { revalidate: __VOID_ISR_REVALIDATE, deploymentId: __VOID_ISR_DEPLOYMENT_ID }, __render)',
+      'handleIsr(request, env, ctx, { revalidate: __VOID_ISR_REVALIDATE, deploymentId: __VOID_ISR_DEPLOYMENT_ID, queryAllowlist: {"/search":["q"]} }, __render)',
     );
     // Deployment id + host captured on the raw env so revalidate() can purge even
     // on requests that never enter the render ladder.

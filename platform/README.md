@@ -99,6 +99,7 @@ The platform workspace's `dev` script starts the dashboard only. It does not sta
 Void is one repository with an explicit dependency boundary:
 
 - Repository-level `packages/` — public SDK, CLI, runtime helpers, and framework adapters.
+- `../packages/deploy-core` — target-neutral deployment manifests and wire contracts shared by the SDK and platform.
 - `platform/packages/` — private hosted control plane, traffic router, proxy services, log pipeline, dashboard, and UI.
 - Platform packages may depend on public/shared packages. Public SDK packages must not depend on `platform/`.
 

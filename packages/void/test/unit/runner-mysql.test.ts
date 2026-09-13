@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vite-plus/test';
-import { applyMySqlMigrations, type MySqlClient } from '../../src/migrations/runner-mysql.ts';
+import {
+  applyMySqlMigrations,
+  readMySqlAppliedMigrations,
+  type MySqlClient,
+} from '../../src/migrations/runner-mysql.ts';
 
 describe('MySQL migration runner', () => {
   it('applies only pending migrations and records them with MySQL placeholders', async () => {
@@ -29,5 +33,29 @@ describe('MySQL migration runner', () => {
       sql: 'INSERT INTO `_void_migrations` (`name`, `applied_at`) VALUES (?, ?)',
       params: ['002_users.sql', expect.any(String)],
     });
+  });
+
+  it('treats only a missing tracking table as empty history', async () => {
+    const missingTableError = Object.assign(new Error('table not found'), {
+      code: 'ER_NO_SUCH_TABLE',
+      errno: 1146,
+    });
+    const missing: MySqlClient = {
+      query: async () => {
+        throw missingTableError;
+      },
+    };
+    await expect(readMySqlAppliedMigrations(missing)).resolves.toEqual([]);
+
+    const permissionError = Object.assign(new Error('permission denied'), {
+      code: 'ER_TABLEACCESS_DENIED_ERROR',
+      errno: 1142,
+    });
+    const denied: MySqlClient = {
+      query: async () => {
+        throw permissionError;
+      },
+    };
+    await expect(readMySqlAppliedMigrations(denied)).rejects.toBe(permissionError);
   });
 });

@@ -1,9 +1,16 @@
 import { sql as drizzleSql } from 'drizzle-orm';
 import { Hono, type Context } from 'hono';
+import { deployTokenTtlSecondsForBuildMinutes, signPrerenderToken } from '../auth/deploy-token.ts';
 import { hmacSignState } from '../auth/hmac.ts';
 import { buildManagerNamespace } from '../build-namespace.ts';
 import { isTerminalBuildStatus } from '../build-status.ts';
 import { DEFAULT_DISPATCH_NAMESPACE } from '../constants.ts';
+import {
+  clearCronScheduler,
+  restoreCronScheduler,
+  snapshotCronScheduler,
+  syncCronScheduler,
+} from '../cron-scheduler-client.ts';
 import type { Db } from '../db.ts';
 import {
   createProject,
@@ -20,8 +27,14 @@ import {
   getDomainsByProjectId,
   getDomainsByProjectIds,
   getDeployment,
+  getActiveDeployment,
+  createDeployment,
+  deleteRollbackLease,
+  updateRollbackLeaseState,
   cancelDeployment,
   setActiveDeployment,
+  updateDeploymentStatus,
+  updateProjectType,
   appendAppliedMigrations,
   appendProjectMigrations,
   activeDeploymentContainsMigration,
@@ -35,6 +48,7 @@ import {
   upsertProjectDatabaseUrl,
   getProjectDatabaseUrl,
   tryCreateEmailDestination,
+  ACTIVE_BUILD_STATUSES,
 } from '../db.ts';
 import { type ApiEnv, isDevBypass } from '../env.ts';
 import { validateSubmittedExecutionPlans } from '../migrations/execution-plan.ts';
@@ -44,7 +58,11 @@ import { encryptProjectSecret, decryptProjectSecret } from '../project-secrets.t
 import {
   CloudflareApiError,
   InvalidHyperdriveConnectionStringError,
+  addQueueConsumer,
   getDispatchWorkerProxyToken,
+  removeQueueConsumer,
+  restoreQueueConsumer,
+  snapshotQueueConsumer,
 } from '../provisioning/cloudflare-api.ts';
 import { syncProjectAllowlistKvBestEffort } from '../provisioning/email-allowlist.ts';
 import {
@@ -55,7 +73,12 @@ import {
   // rather than shadowing it — they match different CF error wordings.
   isAlreadyExistsError as isDestinationAlreadyExistsError,
 } from '../provisioning/email-routing.ts';
-import { buildRoutingJson, buildStaticRoutingJson, computeDispatchLimits } from '../routing.ts';
+import {
+  buildRoutingJson,
+  buildStaticRoutingJson,
+  computeDispatchLimits,
+  resolveRoutingUndo,
+} from '../routing.ts';
 import { tokenizeSql } from '../sql/tokenize.ts';
 import { getPlanLimits } from '../tiers.ts';
 import type { Build, DeployManifest } from '../types.ts';
@@ -157,7 +180,7 @@ const DESTRUCTIVE_PRAGMA = '-- void:allow-destructive';
  */
 class RollbackError extends Error {
   constructor(
-    public readonly status: 400 | 404,
+    public readonly status: 400 | 404 | 409,
     message: string,
     /**
      * For destructive-rollback rejections, we surface the server-computed
@@ -204,6 +227,8 @@ function deployAttentionScore(status: string | null | undefined): number {
     status === 'uploading' ||
     status === 'migrating' ||
     status === 'prerendering' ||
+    status === 'cutover' ||
+    status === 'compensating' ||
     status === 'canceling'
   ) {
     return 3;
@@ -661,6 +686,72 @@ const app = new Hono<ApiEnv>()
     return context.json(project);
   })
 
+  // Mint a narrowly scoped credential for deploy-time remote-binding access.
+  // The built application receives this token while it runs under Miniflare,
+  // so it must never inherit the caller's full API/deploy credential.
+  .post('/:id/prerender-token', async (context) => {
+    const project = await getProject(context.get('db'), context.req.param('id'));
+    if (!project) {
+      return context.json({ error: 'project not found' }, 404);
+    }
+    const user = context.get('user');
+    if (project.user_id !== user.id) {
+      return context.json({ error: 'forbidden' }, 403);
+    }
+    const deployBuild = context.get('deployBuild');
+    const signToken = (buildId?: string) =>
+      signPrerenderToken(
+        { projectId: project.id, userId: user.id, login: user.login, buildId },
+        context.env.JWT_SECRET,
+        {
+          // A manual CLI prerender can legitimately run longer than five
+          // minutes because path discovery and rendering are sequential. It
+          // has no build row whose plan timeout can size the token, so give it
+          // the same bounded 65-minute ceiling as an unlimited build. This
+          // remains a proxy-only, single-project credential and avoids
+          // restoring the caller's broad platform token inside Miniflare.
+          ttlSeconds: deployTokenTtlSecondsForBuildMinutes(
+            buildId ? getPlanLimits(user.plan).buildTimeoutMinutes : 0,
+          ),
+        },
+      );
+
+    let token: string;
+    if (deployBuild) {
+      // The auth middleware checked this build before entering the route, but a
+      // supersede can race that check and token signing. Lock project first
+      // (the platform-wide lock order), then the build row, and revalidate while
+      // minting. Once this transaction releases, the proxy checks the same row
+      // on every request, so a later terminal transition revokes the derived
+      // credential immediately rather than merely waiting for JWT expiry.
+      const minted = await context.get('db').transaction(async (tx) => {
+        await tx.execute(drizzleSql`SELECT id FROM projects WHERE id = ${project.id} FOR SHARE`);
+        await tx.execute(drizzleSql`SELECT id FROM builds WHERE id = ${deployBuild} FOR UPDATE`);
+        const txDb = tx as unknown as Db;
+        const lockedProject = await getProject(txDb, project.id);
+        const boundBuild = await getBuild(txDb, deployBuild);
+        if (
+          !lockedProject ||
+          lockedProject.status === 'deleting' ||
+          lockedProject.user_id !== user.id ||
+          !boundBuild ||
+          boundBuild.project_id !== project.id ||
+          !ACTIVE_BUILD_STATUSES.includes(boundBuild.status)
+        ) {
+          return null;
+        }
+        return signToken(deployBuild);
+      });
+      if (!minted) {
+        return context.json({ error: 'deploy token build is no longer active' }, 403);
+      }
+      token = minted;
+    } else {
+      token = await signToken();
+    }
+    return context.json({ token });
+  })
+
   // List deployments for a project
   .get('/:id/deployments', async (context) => {
     const project = await getProject(context.get('db'), context.req.param('id'));
@@ -763,6 +854,24 @@ const app = new Hono<ApiEnv>()
 
     const planLimits = getPlanLimits(context.get('user').plan);
 
+    // A committed rollback lease blocks deploys and other rollbacks while
+    // the cutover transaction commits or external compensation runs. Keeping
+    // this fence outside the cutover transaction is essential: if PostgreSQL
+    // rejects COMMIT after the callback returns, the lease still exists while
+    // we restore KV, cron, and queue state from the callback's undo log.
+    let rollbackLeaseId: string | undefined;
+    const rollbackOwnerId = crypto.randomUUID();
+    const externalUndo: Array<() => Promise<void>> = [];
+    const routingValuesWritten = new Map<string, string | null>();
+    let externalCompensated = false;
+    let rollbackCommitted = false;
+    let adoptedRollbackLease = false;
+    let releaseRollbackLease = true;
+    let rollbackResultCandidate: { migrationDiff: ReadonlyArray<string> } | undefined;
+    let rollbackErrorResponse: Response | undefined;
+    let rollbackErrorToThrow: unknown;
+    let leaseReleaseError: AggregateError | undefined;
+
     // The entire rollback cutover runs inside a single row-locked tx so
     // concurrent rollbacks / applies / renames serialize and no external
     // state is written before the pg flip. Ordering invariants:
@@ -781,289 +890,763 @@ const app = new Hono<ApiEnv>()
     // inside the lock because a concurrent /rename can rewrite every
     // deployment's applied_migrations via
     // renameAppliedMigrationsForProject.
-    let rollbackResult: { migrationDiff: ReadonlyArray<string> };
+    let rollbackResult: { migrationDiff: ReadonlyArray<string> } | undefined;
     try {
-      rollbackResult = await context.get('db').transaction(async (tx) => {
-        // Lock the project row via `SELECT … FOR UPDATE` — per-project,
-        // collision-free, released automatically at tx end. MUST be the
-        // first statement in the locked section so serialization is
-        // established before any subsequent read or write.
+      const rollbackLease = await context.get('db').transaction(async (tx) => {
         await tx.execute(drizzleSql`SELECT id FROM projects WHERE id = ${projectId} FOR UPDATE`);
         const txDb = tx as unknown as Db;
-
-        // Re-read target INSIDE the lock. applied_migrations can be
-        // rewritten by a concurrent /rename; manifest and retained are
-        // stable in practice but re-reading is cheap and removes every
-        // time-of-check / time-of-use hazard on this row.
-        const target = await getDeployment(txDb, deploymentId);
-        if (!target || target.project_id !== projectId) {
-          throw new RollbackError(404, 'deployment not found');
-        }
-        if (!target.retained) {
-          throw new RollbackError(400, 'deployment not retained (worker script evicted)');
-        }
-
-        // Re-read project so `active_deployment_id` and `type` reflect
-        // any concurrent rollback / deploy that committed before the
-        // lock was acquired. `type` and `user_id` are effectively
-        // immutable but re-reading keeps the computed routing JSON
-        // consistent with the exact row the flip will reference.
         const lockedProject = await getProject(txDb, projectId);
         if (!lockedProject) {
           throw new RollbackError(404, 'project not found');
         }
+        if (lockedProject.status === 'deleting') {
+          throw new RollbackError(409, 'project is being deleted');
+        }
+        const activeDeploy = await getActiveDeployment(txDb, projectId);
+        if (activeDeploy) {
+          if (activeDeploy.source === 'rollback-lease' && activeDeploy.manifest) {
+            try {
+              const lease = JSON.parse(activeDeploy.manifest) as {
+                targetDeploymentId?: unknown;
+                state?: unknown;
+                ownerId?: unknown;
+                migrationDiff?: unknown;
+              };
+              const updatedAt = activeDeploy.updated_at.includes('T')
+                ? activeDeploy.updated_at
+                : `${activeDeploy.updated_at.replace(' ', 'T')}Z`;
+              const staleRunningLease =
+                lease.state === 'running' &&
+                Date.now() - new Date(updatedAt).getTime() >= 30 * 60 * 1000;
+              if (
+                lease.targetDeploymentId === deploymentId &&
+                lease.state === 'applied' &&
+                typeof lease.ownerId === 'string' &&
+                lockedProject.active_deployment_id === deploymentId
+              ) {
+                if (
+                  !Array.isArray(lease.migrationDiff) ||
+                  !lease.migrationDiff.every((value) => typeof value === 'string')
+                ) {
+                  throw new RollbackError(409, `deploy in progress: ${activeDeploy.id}`);
+                }
+                const migrationDiff = lease.migrationDiff as Array<string>;
+                const released = await deleteRollbackLease(txDb, activeDeploy.id, lease.ownerId);
+                if (!released) {
+                  throw new RollbackError(409, `deploy in progress: ${activeDeploy.id}`);
+                }
+                return { id: activeDeploy.id, adopted: false, appliedResult: { migrationDiff } };
+              }
+              if (
+                lease.targetDeploymentId === deploymentId &&
+                typeof lease.ownerId === 'string' &&
+                (lease.state === 'retryable' || staleRunningLease)
+              ) {
+                const adopted = await updateRollbackLeaseState(
+                  txDb,
+                  activeDeploy.id,
+                  deploymentId,
+                  'running',
+                  rollbackOwnerId,
+                  lease.ownerId,
+                );
+                if (!adopted) {
+                  throw new RollbackError(409, `deploy in progress: ${activeDeploy.id}`);
+                }
+                return { id: activeDeploy.id, adopted: true, appliedResult: undefined };
+              }
+            } catch {
+              // Legacy/corrupt leases retain the normal in-progress behavior.
+            }
+          }
+          throw new RollbackError(409, `deploy in progress: ${activeDeploy.id}`);
+        }
+        const lease = await createDeployment(
+          txDb,
+          projectId,
+          JSON.stringify({
+            version: 1,
+            targetDeploymentId: deploymentId,
+            state: 'running',
+            ownerId: rollbackOwnerId,
+          }),
+          'rollback-lease',
+        );
+        return { id: lease.id, adopted: false, appliedResult: undefined };
+      });
+      if (rollbackLease.appliedResult) {
+        rollbackCommitted = true;
+        rollbackResult = rollbackLease.appliedResult;
+      } else {
+        rollbackLeaseId = rollbackLease.id;
+        adoptedRollbackLease = rollbackLease.adopted;
+      }
 
-        const targetMigrations: Array<string> = target.applied_migrations
-          ? JSON.parse(target.applied_migrations)
-          : [];
+      if (!rollbackCommitted) {
+        rollbackResult = await context.get('db').transaction(async (tx) => {
+          // Lock the project row via `SELECT … FOR UPDATE` — per-project,
+          // collision-free, released automatically at tx end. MUST be the
+          // first statement in the locked section so serialization is
+          // established before any subsequent read or write.
+          await tx.execute(drizzleSql`SELECT id FROM projects WHERE id = ${projectId} FOR UPDATE`);
+          const txDb = tx as unknown as Db;
 
-        const projectMigrationNames = await getProjectMigrationNames(txDb, projectId);
-        const currentActive = lockedProject.active_deployment_id
-          ? await getDeployment(txDb, lockedProject.active_deployment_id)
-          : null;
-        const currentMigrations: Array<string> =
-          projectMigrationNames.length > 0
-            ? [...projectMigrationNames]
-            : currentActive?.applied_migrations
-              ? JSON.parse(currentActive.applied_migrations)
-              : [];
-        const diff = currentMigrations.filter((m) => !targetMigrations.includes(m));
+          // Re-read target INSIDE the lock. applied_migrations can be
+          // rewritten by a concurrent /rename; manifest and retained are
+          // stable in practice but re-reading is cheap and removes every
+          // time-of-check / time-of-use hazard on this row.
+          const target = await getDeployment(txDb, deploymentId);
+          if (!target || target.project_id !== projectId) {
+            throw new RollbackError(404, 'deployment not found');
+          }
+          if (!target.retained) {
+            throw new RollbackError(400, 'deployment not retained (worker script evicted)');
+          }
 
-        // Reject destructive rollbacks server-side unless the caller
-        // explicitly opts in. `diff` holds migrations the CURRENT active
-        // has run that the TARGET does not know about — typically
-        // forward-only DDL (DROP TABLE, ALTER, etc.) applied after the
-        // target was built. Flipping traffic to the target in this state
-        // leaves the worker code expecting the OLD schema while D1 still
-        // carries the evolved schema, which silently corrupts queries.
-        //
-        // The override is snapshot-bound, NOT a blanket boolean: the
-        // caller must echo the exact set of migration names they were
-        // shown at confirmation time, and the server-computed diff must
-        // match that set exactly (same elements, same size). This closes
-        // a TOCTOU where a concurrent deploy flips `currentActive`
-        // between the caller's preflight `listDeployments` read and our
-        // locked `diff` re-read — set-equality means any drift forces a
-        // fresh confirmation against the new state.
-        //
-        // The check runs BEFORE the pg flip and any external write so a
-        // rejected rollback mutates nothing.
-        if (diff.length > 0) {
-          const confirmed = allowDestructive ?? [];
-          const confirmedSet = new Set(confirmed);
-          const snapshotMatches =
-            confirmed.length === diff.length && diff.every((m) => confirmedSet.has(m));
-          if (!snapshotMatches) {
-            // Migration names are arbitrary non-empty strings (see
-            // /rename), so interpolating them raw into prose with hand-
-            // rolled quoting can produce invalid JSON hints when a name
-            // contains quotes / backslashes / newlines. JSON.stringify
-            // the diff for the example, and expose it structurally via
-            // `destructiveMigrations` so programmatic callers echo the
-            // authoritative array rather than re-parsing the message.
+          // Re-read project so `active_deployment_id` and `type` reflect
+          // any concurrent rollback / deploy that committed before the
+          // lock was acquired. `type` and `user_id` are effectively
+          // immutable but re-reading keeps the computed routing JSON
+          // consistent with the exact row the flip will reference.
+          const lockedProject = await getProject(txDb, projectId);
+          if (!lockedProject) {
+            throw new RollbackError(404, 'project not found');
+          }
+          if (lockedProject.status === 'deleting') {
+            throw new RollbackError(409, 'project is being deleted');
+          }
+          const activeDeploy = await getActiveDeployment(txDb, projectId);
+          let ownsRollbackLease = false;
+          if (activeDeploy && activeDeploy.id === rollbackLeaseId && activeDeploy.manifest) {
+            try {
+              const lease = JSON.parse(activeDeploy.manifest) as { ownerId?: unknown };
+              ownsRollbackLease = lease.ownerId === rollbackOwnerId;
+            } catch {
+              // A corrupt or legacy lease is never treated as owned.
+            }
+          }
+          if (!ownsRollbackLease) {
             throw new RollbackError(
-              400,
-              `Rollback is destructive: current deployment has migration(s) the target does not include: ${JSON.stringify(diff)}. Retry with \`allowDestructive: ${JSON.stringify(diff)}\` to confirm this exact set.`,
-              diff,
+              409,
+              `deploy in progress: ${activeDeploy?.id ?? rollbackLeaseId}`,
             );
           }
-        }
 
-        // Build routing JSON from the freshly-read target manifest.
-        const manifest: DeployManifest | null = target.manifest
-          ? JSON.parse(target.manifest)
-          : null;
-        // Effective dispatch limits honor the TARGET manifest's per-project
-        // override, clamped to the CURRENT plan ceiling — a rollback under a
-        // downgraded plan clamps, never rejects. Computed here (pure CPU, no
-        // I/O added inside the lock) because the manifest is re-read inside
-        // the lock; `planLimits` itself is resolved before the tx.
-        const dispatchLimits = computeDispatchLimits(planLimits, manifest?.limits);
-        // Rollback external-write pass depends only on authoritative
-        // persistent sources (pg deployments table for queue activation
-        // history; target's manifest + unconditional DO reconciliation
-        // for crons), not on the potentially-stale currentActive manifest
-        // snapshot or the eagerly-written resources table. See queue
-        // sweep below for why the union uses `deployed_at IS NOT NULL`.
-        const workerName = getProjectDeploymentWorkerName(lockedProject.slug, target.id);
-        const existingRouting = await context.env.ROUTING.get(lockedProject.slug);
-        const existingEntry = existingRouting ? JSON.parse(existingRouting) : null;
-        const isStaticDeployment = lockedProject.type === 'static' || lockedProject.type === 'spa';
+          const targetMigrations: Array<string> = target.applied_migrations
+            ? JSON.parse(target.applied_migrations)
+            : [];
 
-        let routingJson: string;
-        if (isStaticDeployment) {
-          const assetConfig = manifest?.assetConfig ?? {
-            not_found_handling:
-              lockedProject.type === 'spa' ? 'single-page-application' : '404-page',
+          const projectMigrationNames = await getProjectMigrationNames(txDb, projectId);
+          const currentActive = lockedProject.active_deployment_id
+            ? await getDeployment(txDb, lockedProject.active_deployment_id)
+            : null;
+          const currentMigrations: Array<string> =
+            projectMigrationNames.length > 0
+              ? [...projectMigrationNames]
+              : currentActive?.applied_migrations
+                ? JSON.parse(currentActive.applied_migrations)
+                : [];
+          const diff = currentMigrations.filter((m) => !targetMigrations.includes(m));
+
+          // Reject destructive rollbacks server-side unless the caller
+          // explicitly opts in. `diff` holds migrations the CURRENT active
+          // has run that the TARGET does not know about — typically
+          // forward-only DDL (DROP TABLE, ALTER, etc.) applied after the
+          // target was built. Flipping traffic to the target in this state
+          // leaves the worker code expecting the OLD schema while D1 still
+          // carries the evolved schema, which silently corrupts queries.
+          //
+          // The override is snapshot-bound, NOT a blanket boolean: the
+          // caller must echo the exact set of migration names they were
+          // shown at confirmation time, and the server-computed diff must
+          // match that set exactly (same elements, same size). This closes
+          // a TOCTOU where a concurrent deploy flips `currentActive`
+          // between the caller's preflight `listDeployments` read and our
+          // locked `diff` re-read — set-equality means any drift forces a
+          // fresh confirmation against the new state.
+          //
+          // The check runs BEFORE the pg flip and any external write so a
+          // rejected rollback mutates nothing.
+          if (diff.length > 0) {
+            const confirmed = allowDestructive ?? [];
+            const confirmedSet = new Set(confirmed);
+            const snapshotMatches =
+              confirmed.length === diff.length && diff.every((m) => confirmedSet.has(m));
+            if (!snapshotMatches) {
+              // Migration names are arbitrary non-empty strings (see
+              // /rename), so interpolating them raw into prose with hand-
+              // rolled quoting can produce invalid JSON hints when a name
+              // contains quotes / backslashes / newlines. JSON.stringify
+              // the diff for the example, and expose it structurally via
+              // `destructiveMigrations` so programmatic callers echo the
+              // authoritative array rather than re-parsing the message.
+              throw new RollbackError(
+                400,
+                `Rollback is destructive: current deployment has migration(s) the target does not include: ${JSON.stringify(diff)}. Retry with \`allowDestructive: ${JSON.stringify(diff)}\` to confirm this exact set.`,
+                diff,
+              );
+            }
+          }
+
+          // Build routing JSON from the freshly-read target manifest.
+          const manifest: DeployManifest | null = target.manifest
+            ? JSON.parse(target.manifest)
+            : null;
+          // Effective dispatch limits honor the TARGET manifest's per-project
+          // override, clamped to the CURRENT plan ceiling — a rollback under a
+          // downgraded plan clamps, never rejects. Computed here (pure CPU, no
+          // I/O added inside the lock) because the manifest is re-read inside
+          // the lock; `planLimits` itself is resolved before the tx.
+          const dispatchLimits = computeDispatchLimits(planLimits, manifest?.limits);
+          // Rollback external-write pass depends only on authoritative
+          // persistent sources (pg deployments table for queue activation
+          // history; target's manifest + unconditional DO reconciliation
+          // for crons), not on the potentially-stale currentActive manifest
+          // snapshot or the eagerly-written resources table. See queue
+          // sweep below for why the union uses `deployed_at IS NOT NULL`.
+          const workerName = getProjectDeploymentWorkerName(lockedProject.slug, target.id);
+          const existingRouting = await context.env.ROUTING.get(lockedProject.slug);
+          const existingEntry = existingRouting ? JSON.parse(existingRouting) : null;
+          const targetType =
+            manifest?.type ??
+            (manifest?.framework
+              ? 'framework'
+              : target.bundle_stored || manifest?.workerMain
+                ? 'void'
+                : manifest?.static === 'spa'
+                  ? 'spa'
+                  : manifest?.static === 'ssg'
+                    ? 'static'
+                    : manifest?.assetConfig?.not_found_handling === 'single-page-application'
+                      ? 'spa'
+                      : manifest?.assetConfig?.not_found_handling === '404-page'
+                        ? 'static'
+                        : 'void');
+          const isStaticDeployment = targetType === 'static' || targetType === 'spa';
+          let targetHasAssets = false;
+          if (target.asset_hashes) {
+            try {
+              const assetHashes = JSON.parse(target.asset_hashes) as unknown;
+              targetHasAssets =
+                typeof assetHashes === 'object' &&
+                assetHashes !== null &&
+                Object.keys(assetHashes).length > 0;
+            } catch {
+              throw new RollbackError(400, 'target deployment has invalid asset metadata');
+            }
+          }
+
+          let routingJson: string;
+          if (isStaticDeployment) {
+            const assetConfig = manifest?.assetConfig ?? {
+              not_found_handling: targetType === 'spa' ? 'single-page-application' : '404-page',
+            };
+            routingJson = buildStaticRoutingJson({
+              projectId,
+              userId: lockedProject.user_id,
+              deploymentId: target.id,
+              assetConfig,
+              manifest,
+              suspended: existingEntry?.suspended,
+            });
+          } else {
+            routingJson = buildRoutingJson({
+              workerName,
+              projectId,
+              userId: lockedProject.user_id,
+              manifest,
+              deploymentId: target.id,
+              dispatchLimits,
+              suspended: existingEntry?.suspended,
+              hasCrons: !!manifest?.schedules?.length,
+              assetManifestId: targetHasAssets ? target.id : undefined,
+              assetConfig: targetHasAssets ? manifest?.assetConfig : undefined,
+            });
+          }
+
+          // PG flip FIRST. If this throws, no external state is mutated
+          // yet — the tx rolls back cleanly and the caller can retry.
+          await updateProjectType(txDb, projectId, targetType);
+          await setActiveDeployment(txDb, projectId, target.id);
+
+          const snapshottedRoutingKeys = new Set<string>();
+          const snapshotRoutingKey = async (key: string): Promise<void> => {
+            if (snapshottedRoutingKeys.has(key)) {
+              return;
+            }
+            const previous = await context.env.ROUTING.get(key);
+            snapshottedRoutingKeys.add(key);
+            externalUndo.push(async () => {
+              if (!routingValuesWritten.has(key)) {
+                return;
+              }
+              const undo = resolveRoutingUndo(
+                await context.env.ROUTING.get(key),
+                routingValuesWritten.get(key)!,
+                previous,
+              );
+              if (!undo.restore) {
+                return;
+              }
+              if (undo.value === null) {
+                await context.env.ROUTING.delete(key);
+              } else {
+                await context.env.ROUTING.put(key, undo.value);
+              }
+            });
           };
-          routingJson = buildStaticRoutingJson({
-            projectId,
-            userId: lockedProject.user_id,
-            deploymentId: target.id,
-            assetConfig,
-            manifest,
-            suspended: existingEntry?.suspended,
-          });
-        } else {
-          routingJson = buildRoutingJson({
-            workerName,
-            projectId,
-            userId: lockedProject.user_id,
-            manifest,
-            deploymentId: target.id,
-            dispatchLimits,
-            suspended: existingEntry?.suspended,
-            hasCrons: !!manifest?.schedules?.length,
-          });
-        }
+          const putRouting = async (key: string, value: string): Promise<void> => {
+            await snapshotRoutingKey(key);
+            // Record before awaiting KV so a committed write whose acknowledgement
+            // is lost is still included in the rollback undo pass.
+            routingValuesWritten.set(key, value);
+            await context.env.ROUTING.put(key, value);
+          };
+          const deleteRouting = async (key: string): Promise<void> => {
+            await snapshotRoutingKey(key);
+            routingValuesWritten.set(key, null);
+            await context.env.ROUTING.delete(key);
+          };
 
-        // PG flip FIRST. If this throws, no external state is mutated
-        // yet — the tx rolls back cleanly and the caller can retry.
-        await setActiveDeployment(txDb, projectId, target.id);
+          // External writes SECOND, inside the same lock. Every write is
+          // preceded by an exact snapshot and compensated in reverse order
+          // before the transaction releases the project lock.
+          try {
+            await putRouting(lockedProject.slug, routingJson);
 
-        // External writes SECOND, inside the same lock. A throw here
-        // rolls back the pg flip; some external writes may have
-        // already landed but subsequent external retries are
-        // idempotent (KV PUT is an overwrite; queue/domain routes are
-        // keyed by slug/hostname; cron DO sync is a replace).
-        await context.env.ROUTING.put(lockedProject.slug, routingJson);
+            // Resolve the target worker's baked __VOID_PROXY_TOKEN once if
+            // either cron or queues need it. Re-fetching on each path would
+            // double the CF API round-trips AND widen the failure window
+            // between cron DO sync and queue KV write: a transient CF 429
+            // on the second fetch would abort the transaction after cron
+            // state was already committed to the DO. The framework's
+            // /__void/scheduled and /__void/queue handlers both validate
+            // against the SAME __VOID_PROXY_TOKEN binding, so one lookup
+            // is authoritative for both.
+            const needsProxyToken = !!manifest?.schedules?.length || !!manifest?.queues?.length;
+            const targetProxyToken = needsProxyToken
+              ? await resolveRollbackProxyToken(context.env, workerName, projectId)
+              : null;
 
-        // Resolve the target worker's baked __VOID_PROXY_TOKEN once if
-        // either cron or queues need it. Re-fetching on each path would
-        // double the CF API round-trips AND widen the failure window
-        // between cron DO sync and queue KV write: a transient CF 429
-        // on the second fetch would abort the transaction after cron
-        // state was already committed to the DO. The framework's
-        // /__void/scheduled and /__void/queue handlers both validate
-        // against the SAME __VOID_PROXY_TOKEN binding, so one lookup
-        // is authoritative for both.
-        const needsProxyToken = !!manifest?.schedules?.length || !!manifest?.queues?.length;
-        const targetProxyToken = needsProxyToken
-          ? await resolveRollbackProxyToken(context.env, workerName, projectId)
-          : null;
-
-        // Sync cron scheduler to point at the rollback target.
-        //
-        // When target has no schedules, `/clear` is called unconditionally
-        // (it's idempotent — see cron-scheduler.ts `handleClear`). A
-        // prior failed cutover could leave the DO holding schedules that
-        // no pg manifest still mentions, and a guarded clear would let
-        // that stale DO state persist across every future rollback.
-        //
-        // Not migrated to clearCronScheduler/syncCronScheduler helpers: those
-        // helpers swallow errors (catch+log) because deploy/cleanup paths can
-        // self-heal on the next deploy. Rollback runs inside a DB transaction
-        // and must throw on cron failure so the txn aborts and the rollback
-        // is retried atomically; swallowing here would silently desync DO
-        // state from the rolled-back manifest.
-        if (manifest?.schedules?.length) {
-          const cronId = context.env.CRON_SCHEDULER.idFromName(projectId);
-          await context.env.CRON_SCHEDULER.get(cronId).fetch(
-            new Request('https://do/sync', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
+            // Sync cron scheduler to point at the rollback target.
+            //
+            // When target has no schedules, `/clear` is called unconditionally
+            // (it's idempotent — see cron-scheduler.ts `handleClear`). A
+            // prior failed cutover could leave the DO holding schedules that
+            // no pg manifest still mentions, and a guarded clear would let
+            // that stale DO state persist across every future rollback.
+            //
+            const previousCronState = await snapshotCronScheduler(context.env, projectId);
+            externalUndo.push(() =>
+              restoreCronScheduler(context.env, projectId, previousCronState),
+            );
+            if (manifest?.schedules?.length) {
+              await syncCronScheduler(context.env, projectId, {
                 workerName,
                 schedules: manifest.schedules,
                 proxyToken: targetProxyToken!,
-              }),
-            }),
-          );
-        } else {
-          const cronId = context.env.CRON_SCHEDULER.idFromName(projectId);
-          await context.env.CRON_SCHEDULER.get(cronId).fetch(
-            new Request('https://do/clear', { method: 'POST' }),
-          );
-        }
+              });
+            } else {
+              await clearCronScheduler(context.env, projectId);
+            }
 
-        // Update custom domain routing
-        const projectDomains = await getDomainsByProjectId(txDb, projectId);
-        for (const domain of projectDomains) {
-          if (domain.status === 'active') {
-            await context.env.ROUTING.put(`domain:${domain.hostname}`, routingJson);
-          }
-        }
+            // Update custom domain routing
+            const projectDomains = await getDomainsByProjectId(txDb, projectId);
+            for (const domain of projectDomains) {
+              if (domain.status === 'active') {
+                await putRouting(`domain:${domain.hostname}`, routingJson);
+              }
+            }
 
-        // Update queue routing. Rewrite every queue route that target
-        // binds AND delete any queue route left over from older
-        // deployments that target does not bind. Without the deletion
-        // pass, messages arriving on a queue A had bound but B does not
-        // would still hit `queue:<q>` in KV and dispatch would forward
-        // them to A's (now evicted) worker.
-        //
-        // Sweep source is the UNION of:
-        //   - Deployments that have ever been live (`deployed_at IS NOT NULL`).
-        //   - Terminal-failed/canceled deployments (`deployed_at = null`).
-        //
-        // The second set catches deploys that wrote `queue:<name>` KV
-        // routes at step 2b and then failed before the routing flip.
-        // In-flight deploys (status not in the terminal-failed set) are
-        // excluded, so rollback does not clobber KV routes an in-flight
-        // deploy is provisioning.
-        const [activatedDeployments, terminalFailedDeployments] = await Promise.all([
-          getActivatedDeployments(txDb, projectId),
-          getTerminalFailedDeployments(txDb, projectId),
-        ]);
-        const sweepQueueNames = new Set<string>();
-        const unionSource = [...activatedDeployments, ...terminalFailedDeployments];
-        for (const d of unionSource) {
-          if (!d.manifest) {
-            continue;
+            // Update queue routing. Rewrite every queue route that target
+            // binds AND delete any queue route left over from older
+            // deployments that target does not bind. Without the deletion
+            // pass, messages arriving on a queue A had bound but B does not
+            // would still hit `queue:<q>` in KV and dispatch would forward
+            // them to A's (now evicted) worker.
+            //
+            // Sweep source is the UNION of:
+            //   - Deployments that have ever been live (`deployed_at IS NOT NULL`).
+            //   - Terminal-failed/canceled deployments (`deployed_at = null`).
+            //
+            // The second set catches deploys that wrote `queue:<name>` KV
+            // routes at step 2b and then failed before the routing flip.
+            // In-flight deploys (status not in the terminal-failed set) are
+            // excluded, so rollback does not clobber KV routes an in-flight
+            // deploy is provisioning.
+            const [activatedDeployments, terminalFailedDeployments] = await Promise.all([
+              getActivatedDeployments(txDb, projectId),
+              getTerminalFailedDeployments(txDb, projectId),
+            ]);
+            const sweepQueueNames = new Set<string>();
+            const unionSource = [...activatedDeployments, ...terminalFailedDeployments];
+            for (const d of unionSource) {
+              if (!d.manifest) {
+                continue;
+              }
+              let depManifest: DeployManifest | null = null;
+              try {
+                depManifest = JSON.parse(d.manifest);
+              } catch {
+                // Skip deployments with unparseable manifests rather than
+                // blowing up the whole rollback.
+                continue;
+              }
+              for (const q of depManifest?.queues ?? []) {
+                sweepQueueNames.add(q.name);
+              }
+            }
+            // Include target's own queue names in the union so the delete
+            // pass's complement is always `union \ target`, i.e. we never
+            // accidentally delete a route we're about to rewrite below.
+            const targetQueueNames = new Set((manifest?.queues ?? []).map((q) => q.name));
+            for (const name of targetQueueNames) {
+              sweepQueueNames.add(name);
+            }
+            const queueResources = await getProjectResources(txDb, projectId);
+            const dispatchWorkerName = context.env.DISPATCH_WORKER_NAME ?? 'void-dispatch';
+            const queueResourceByName = new Map(
+              queueResources
+                .filter((resource) => resource.type === 'queue')
+                .map((resource) => [resource.binding_name, resource] as const),
+            );
+            for (const name of sweepQueueNames) {
+              const resource = queueResourceByName.get(name);
+              if (!resource) {
+                if (targetQueueNames.has(name)) {
+                  throw new RollbackError(400, `target queue resource is missing: ${name}`);
+                }
+                continue;
+              }
+              const previousConsumer = await snapshotQueueConsumer(
+                context.env.CF_ACCOUNT_ID,
+                context.env.CF_API_TOKEN,
+                resource.cf_id,
+                dispatchWorkerName,
+              );
+              externalUndo.push(() =>
+                restoreQueueConsumer(
+                  context.env.CF_ACCOUNT_ID,
+                  context.env.CF_API_TOKEN,
+                  resource.cf_id,
+                  dispatchWorkerName,
+                  previousConsumer,
+                ),
+              );
+              const targetQueue = manifest?.queues?.find((queue) => queue.name === name);
+              if (targetQueue) {
+                const consumer = await addQueueConsumer(
+                  context.env.CF_ACCOUNT_ID,
+                  context.env.CF_API_TOKEN,
+                  resource.cf_id,
+                  dispatchWorkerName,
+                  {
+                    ...(targetQueue.maxBatchSize != null && {
+                      batch_size: targetQueue.maxBatchSize,
+                    }),
+                    ...(targetQueue.maxBatchTimeout != null && {
+                      max_wait_time_ms: targetQueue.maxBatchTimeout * 1000,
+                    }),
+                    ...(targetQueue.maxRetries != null && {
+                      max_retries: targetQueue.maxRetries,
+                    }),
+                    ...(targetQueue.retryDelay != null && {
+                      retry_delay: targetQueue.retryDelay,
+                    }),
+                  },
+                );
+                if (consumer.status === 'conflict') {
+                  throw new Error(
+                    `queue consumer conflict: ${name} owned by ${consumer.ownerScript}`,
+                  );
+                }
+              } else {
+                await removeQueueConsumer(
+                  context.env.CF_ACCOUNT_ID,
+                  context.env.CF_API_TOKEN,
+                  resource.cf_id,
+                  dispatchWorkerName,
+                );
+              }
+            }
+            if (manifest?.queues?.length) {
+              for (const q of manifest.queues) {
+                await putRouting(
+                  `queue:${getProjectQueueName(projectId, q.name)}`,
+                  JSON.stringify({
+                    workerName,
+                    projectId,
+                    queueName: q.name,
+                    proxyToken: targetProxyToken!,
+                  }),
+                );
+              }
+            }
+            for (const name of sweepQueueNames) {
+              if (targetQueueNames.has(name)) {
+                continue;
+              }
+              await deleteRouting(`queue:${getProjectQueueName(projectId, name)}`);
+            }
+          } catch (externalError) {
+            const compensationErrors: Array<unknown> = [];
+            for (const undo of externalUndo.reverse()) {
+              try {
+                await undo();
+              } catch (compensationError) {
+                compensationErrors.push(compensationError);
+              }
+            }
+            if (compensationErrors.length > 0) {
+              throw new AggregateError(
+                [externalError, ...compensationErrors],
+                'rollback failed and external state compensation was incomplete',
+              );
+            }
+            externalCompensated = true;
+            throw externalError;
           }
-          let depManifest: DeployManifest | null = null;
+
+          // This owned lease transition commits atomically with the project flip
+          // and is the durable witness for ambiguous COMMIT acknowledgements.
+          // `active_deployment_id` alone is insufficient when the requested
+          // rollback target was already active before this transaction began.
+          const witnessed = await updateRollbackLeaseState(
+            txDb,
+            rollbackLeaseId!,
+            deploymentId,
+            'applied',
+            rollbackOwnerId,
+            rollbackOwnerId,
+            diff,
+          );
+          if (!witnessed) {
+            throw new Error('rollback lease ownership was lost before commit');
+          }
+          rollbackResultCandidate = { migrationDiff: diff };
+          return rollbackResultCandidate;
+        });
+        rollbackCommitted = true;
+      }
+    } catch (err) {
+      // COMMIT acknowledgement can be lost after PostgreSQL durably applied
+      // the project flip. The owned lease's `applied` transition commits in
+      // the same transaction and is the authoritative witness, including a
+      // rollback whose target was already active before the request. A still-
+      // `running` lease proves the transaction did not commit.
+      let ambiguousCommitOutcome: 'committed' | 'not_committed' | 'unknown' | undefined;
+      if (!rollbackCommitted && !externalCompensated && externalUndo.length > 0) {
+        let durableReadSucceeded = false;
+        for (let attempt = 0; attempt < 3; attempt++) {
           try {
-            depManifest = JSON.parse(d.manifest);
+            const latestLease = rollbackLeaseId
+              ? await getDeployment(context.get('db'), rollbackLeaseId)
+              : null;
+            durableReadSucceeded = true;
+            if (latestLease?.source === 'rollback-lease' && latestLease.manifest) {
+              const lease = JSON.parse(latestLease.manifest) as {
+                targetDeploymentId?: unknown;
+                state?: unknown;
+                ownerId?: unknown;
+              };
+              if (lease.targetDeploymentId === deploymentId && lease.ownerId === rollbackOwnerId) {
+                ambiguousCommitOutcome = lease.state === 'applied' ? 'committed' : 'not_committed';
+                break;
+              }
+            }
           } catch {
-            // Skip deployments with unparseable manifests rather than
-            // blowing up the whole rollback.
-            continue;
+            // Preserve on an unreadable outcome; the original error remains
+            // the one returned to the caller below.
           }
-          for (const q of depManifest?.queues ?? []) {
-            sweepQueueNames.add(q.name);
+          if (attempt < 2) {
+            await new Promise((resolve) => setTimeout(resolve, 25 * 2 ** attempt));
           }
         }
-        // Include target's own queue names in the union so the delete
-        // pass's complement is always `union \ target`, i.e. we never
-        // accidentally delete a route we're about to rewrite below.
-        const targetQueueNames = new Set((manifest?.queues ?? []).map((q) => q.name));
-        for (const name of targetQueueNames) {
-          sweepQueueNames.add(name);
-        }
-        if (manifest?.queues?.length) {
-          for (const q of manifest.queues) {
-            await context.env.ROUTING.put(
-              `queue:${getProjectQueueName(projectId, q.name)}`,
-              JSON.stringify({
-                workerName,
-                projectId,
-                queueName: q.name,
-                proxyToken: targetProxyToken!,
-              }),
+        ambiguousCommitOutcome ??= durableReadSucceeded ? 'not_committed' : 'unknown';
+      }
+
+      if (ambiguousCommitOutcome === 'committed' && rollbackResultCandidate) {
+        rollbackCommitted = true;
+        rollbackResult = rollbackResultCandidate;
+      }
+
+      if (!rollbackCommitted && !externalCompensated && externalUndo.length > 0) {
+        if (ambiguousCommitOutcome === 'not_committed') {
+          const compensationErrors: Array<unknown> = [];
+          try {
+            await context.get('db').transaction(async (tx) => {
+              await tx.execute(
+                drizzleSql`SELECT id FROM projects WHERE id = ${projectId} FOR UPDATE`,
+              );
+              const txDb = tx as unknown as Db;
+              const activeLease = await getActiveDeployment(txDb, projectId);
+              let stillOwnsLease = false;
+              if (activeLease && activeLease.id === rollbackLeaseId && activeLease.manifest) {
+                try {
+                  const lease = JSON.parse(activeLease.manifest) as { ownerId?: unknown };
+                  stillOwnsLease = lease.ownerId === rollbackOwnerId;
+                } catch {
+                  // Corrupt or replaced ownership always suppresses stale undo.
+                }
+              }
+              if (!stillOwnsLease) {
+                return;
+              }
+              for (const undo of [...externalUndo].reverse()) {
+                try {
+                  await undo();
+                } catch (compensationError) {
+                  compensationErrors.push(compensationError);
+                }
+              }
+
+              // A domain activation can commit after the failed rollback's
+              // transaction released this project lock but before this outer
+              // compensation acquired it. That hostname was not in the earlier
+              // snapshot, and activation may have copied the rollback target's
+              // temporary slug route into its domain key. Reconcile the complete
+              // current domain inventory to the now-restored slug route before
+              // releasing the rollback lease. Pending rows are deleted too: KV
+              // may have been written immediately before activation's final
+              // database status update was interrupted.
+              let restoredProjectRouting: string | null = null;
+              try {
+                restoredProjectRouting = await context.env.ROUTING.get(project.slug);
+              } catch (compensationError) {
+                compensationErrors.push(compensationError);
+              }
+              for (const domain of await getDomainsByProjectId(txDb, projectId)) {
+                try {
+                  if (domain.status === 'active' && restoredProjectRouting !== null) {
+                    await context.env.ROUTING.put(
+                      `domain:${domain.hostname}`,
+                      restoredProjectRouting,
+                    );
+                  } else {
+                    await context.env.ROUTING.delete(`domain:${domain.hostname}`);
+                  }
+                } catch (compensationError) {
+                  compensationErrors.push(compensationError);
+                }
+              }
+            });
+          } catch (compensationTransactionError) {
+            // This includes failure to acquire/commit the lock and DB reads
+            // inside it. No such outcome proves compensation completed, so the
+            // rollback lease must remain as a fail-closed fence.
+            compensationErrors.push(compensationTransactionError);
+          }
+          if (compensationErrors.length > 0) {
+            releaseRollbackLease = false;
+            if (rollbackLeaseId) {
+              await updateRollbackLeaseState(
+                context.get('db'),
+                rollbackLeaseId,
+                deploymentId,
+                'retryable',
+                rollbackOwnerId,
+                rollbackOwnerId,
+              ).catch(() => {
+                // The owned running lease is still a fail-closed fence when
+                // the retryable state write is unavailable.
+              });
+            }
+            throw new AggregateError(
+              [err, ...compensationErrors],
+              'rollback transaction failed and external state compensation was incomplete',
             );
           }
+        } else if (ambiguousCommitOutcome === 'unknown') {
+          releaseRollbackLease = false;
+          // Do not overwrite the witness while PostgreSQL is unreadable. An
+          // `applied` lease lets a retry finish success; a `running` lease
+          // remains a fail-closed fence until it can be reconciled.
         }
-        for (const name of sweepQueueNames) {
-          if (targetQueueNames.has(name)) {
-            continue;
-          }
-          await context.env.ROUTING.delete(`queue:${getProjectQueueName(projectId, name)}`);
+      }
+      if (rollbackCommitted) {
+        // Continue through finally so the rollback lease is released, then
+        // return the normal success response below.
+      } else {
+        // An adopted lease represents an earlier rollback whose PostgreSQL
+        // outcome was unreadable while external state may already point at
+        // the target. A failed retry snapshots that possibly-divergent state,
+        // so even successful compensation cannot prove it matches the active
+        // deployment in PostgreSQL. Keep the original fence until a retry
+        // durably confirms the target as active.
+        if (rollbackLeaseId && adoptedRollbackLease && ambiguousCommitOutcome !== 'unknown') {
+          releaseRollbackLease = false;
+          await updateRollbackLeaseState(
+            context.get('db'),
+            rollbackLeaseId,
+            deploymentId,
+            'retryable',
+            rollbackOwnerId,
+            rollbackOwnerId,
+          ).catch(() => {
+            // A failed state write leaves the lease in `running`, which is a
+            // stronger non-adoptable fence until its stale timeout elapses.
+          });
         }
-
-        return { migrationDiff: diff };
-      });
-    } catch (err) {
-      if (err instanceof RollbackError) {
+      }
+      if (!rollbackCommitted && err instanceof RollbackError) {
         if (err.destructiveMigrations) {
-          return context.json(
+          rollbackErrorResponse = context.json(
             { error: err.message, destructiveMigrations: err.destructiveMigrations },
             err.status,
           );
+        } else {
+          rollbackErrorResponse = context.json({ error: err.message }, err.status);
         }
-        return context.json({ error: err.message }, err.status);
+      } else if (!rollbackCommitted) {
+        rollbackErrorToThrow = err;
       }
-      throw err;
+    } finally {
+      if (rollbackLeaseId && releaseRollbackLease) {
+        let releaseError: unknown;
+        let releaseAttemptCompleted = false;
+        for (let attempt = 0; attempt < 3; attempt++) {
+          try {
+            await deleteRollbackLease(context.get('db'), rollbackLeaseId, rollbackOwnerId);
+            releaseAttemptCompleted = true;
+            break;
+          } catch (error) {
+            releaseError = error;
+            if (attempt < 2) {
+              await new Promise((resolve) => setTimeout(resolve, 25 * 2 ** attempt));
+            }
+          }
+        }
+        if (!releaseAttemptCompleted) {
+          await updateRollbackLeaseState(
+            context.get('db'),
+            rollbackLeaseId,
+            deploymentId,
+            'retryable',
+            rollbackOwnerId,
+            rollbackOwnerId,
+          ).catch(() => {
+            // Preserve the running fence if PostgreSQL remains unavailable.
+          });
+          leaseReleaseError = new AggregateError(
+            [releaseError],
+            'rollback finished but its project lease could not be released; retry the rollback',
+          );
+        }
+      }
     }
 
+    if (leaseReleaseError) {
+      throw leaseReleaseError;
+    }
+    if (rollbackErrorResponse) {
+      return rollbackErrorResponse;
+    }
+    if (rollbackErrorToThrow !== undefined) {
+      throw rollbackErrorToThrow;
+    }
+    if (!rollbackResult) {
+      throw new Error('rollback completed without a result');
+    }
     return context.json({
       ok: true,
       deploymentId,

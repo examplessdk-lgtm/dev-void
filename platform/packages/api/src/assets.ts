@@ -19,6 +19,8 @@ class AssetHashMissError extends Error {}
 export type AssetManifestEntry = Readonly<{
   hash: string;
   size: number;
+  /** Platform serving store. Absent on deployments created before placement was persisted. */
+  store?: 'kv' | 'r2';
 }>;
 
 export type AssetEntry = Readonly<{
@@ -625,21 +627,74 @@ export async function deleteUnreferencedAssets(
   evictedHashes: ReadonlyArray<string>,
   retainedHashes: Set<string>,
   projectId: string,
-): Promise<void> {
+): Promise<number> {
   const toDelete = evictedHashes.filter((hash) => !retainedHashes.has(hash));
   if (toDelete.length === 0) {
-    return;
+    return 0;
   }
 
-  for (const hash of toDelete) {
-    await kv.delete(`assets/${projectId}/${hash}`);
+  let kvIndex = 0;
+  let kvError: unknown;
+  const deleteKvWorker = async (): Promise<void> => {
+    while (kvError === undefined && kvIndex < toDelete.length) {
+      const hash = toDelete[kvIndex++];
+      try {
+        await kv.delete(`assets/${projectId}/${hash}`);
+      } catch (error) {
+        kvError ??= error;
+      }
+    }
+  };
+  await Promise.all(
+    Array.from(
+      { length: Math.min(STATIC_ASSET_UPLOAD_CONCURRENCY, toDelete.length) },
+      deleteKvWorker,
+    ),
+  );
+  if (kvError !== undefined) {
+    throw kvError;
+  }
+
+  // A direct upload can overwrite an old content-addressed R2 key between
+  // retention selection and deletion. Preserve recently uploaded objects so
+  // an in-flight deploy has time to claim them in PostgreSQL. Callers also
+  // serialize GC/final cutover with the project lock; this timestamp guard
+  // avoids needlessly aborting the common upload-before-finalize race.
+  const now = Date.now();
+  const protectionMs = PENDING_UPLOAD_PROTECTION_SECONDS * 1000;
+  const r2ToDelete: Array<string> = [];
+  let r2Index = 0;
+  let r2Error: unknown;
+  const inspectR2Worker = async (): Promise<void> => {
+    while (r2Error === undefined && r2Index < toDelete.length) {
+      const hash = toDelete[r2Index++];
+      const key = `assets/${projectId}/${hash}`;
+      try {
+        const object = await r2.head(key);
+        if (object?.uploaded && now - object.uploaded.getTime() < protectionMs) {
+          continue;
+        }
+        r2ToDelete.push(key);
+      } catch (error) {
+        r2Error ??= error;
+      }
+    }
+  };
+  await Promise.all(
+    Array.from(
+      { length: Math.min(STATIC_ASSET_UPLOAD_CONCURRENCY, toDelete.length) },
+      inspectR2Worker,
+    ),
+  );
+  if (r2Error !== undefined) {
+    throw r2Error;
   }
 
   // R2 supports batch delete up to 1000 keys at a time
-  for (let i = 0; i < toDelete.length; i += 1000) {
-    const batch = toDelete.slice(i, i + 1000).map((hash) => `assets/${projectId}/${hash}`);
-    await r2.delete(batch);
+  for (let i = 0; i < r2ToDelete.length; i += 1000) {
+    await r2.delete(r2ToDelete.slice(i, i + 1000));
   }
+  return r2ToDelete.length;
 }
 
 function workerBundlePrefix(projectId: string, deploymentId: string): string {
@@ -825,6 +880,69 @@ export async function deleteWorkerBundle(
  */
 export async function deleteProjectAssets(r2: R2Bucket, projectId: string): Promise<void> {
   await paginatedR2Delete(r2, `assets/${projectId}/`);
+}
+
+/**
+ * Scan old, unclaimed-looking R2 assets for one project and hand their hashes
+ * to `onBatch` in bounded batches. This function deliberately does not delete
+ * anything: a candidate is not proven orphaned until the caller re-reads the
+ * project's retained deployments under its project-row lock.
+ *
+ * R2 listing happens before each callback and therefore outside any database
+ * transaction the callback opens. This keeps a large project keyspace from
+ * holding a PostgreSQL connection and project lock for the entire paginated
+ * scan. Callbacks are awaited serially so callers can fence and delete one
+ * bounded batch at a time without accumulating the full keyspace in memory.
+ *
+ * Normal asset keys uploaded within the pending-upload protection window are
+ * skipped. The malformed prefix-only key (`assets/{projectId}/`) is still
+ * surfaced immediately, matching the legacy orphan sweep's self-healing
+ * behavior. A caller that deletes candidates should re-check object freshness
+ * at deletion time as well, because a direct upload can overwrite the same
+ * content-addressed key after it was listed.
+ *
+ * Returns the number of candidates handed to `onBatch`, not the number the
+ * callback ultimately deletes after its authoritative retained-hash check.
+ */
+export async function scanProjectAssetOrphanCandidates(
+  r2: R2Bucket,
+  projectId: string,
+  onBatch: (hashes: ReadonlyArray<string>) => Promise<void>,
+  { maxCandidates = Number.POSITIVE_INFINITY }: { maxCandidates?: number } = {},
+): Promise<number> {
+  const prefix = `assets/${projectId}/`;
+  const now = Date.now();
+  const protectionMs = PENDING_UPLOAD_PROTECTION_SECONDS * 1000;
+  let candidateCount = 0;
+  let cursor: string | undefined;
+
+  do {
+    const listed = await r2.list({ prefix, cursor, limit: R2_DELETE_BATCH });
+    const candidates: Array<string> = [];
+    for (const object of listed.objects) {
+      const hash = object.key.slice(prefix.length);
+      if (hash.length > 0 && now - object.uploaded.getTime() < protectionMs) {
+        continue;
+      }
+      candidates.push(hash);
+    }
+
+    for (let i = 0; i < candidates.length; i += R2_DELETE_BATCH) {
+      const remaining = maxCandidates - candidateCount;
+      if (remaining <= 0) {
+        return candidateCount;
+      }
+      const batch = candidates.slice(i, i + Math.min(R2_DELETE_BATCH, remaining));
+      await onBatch(batch);
+      candidateCount += batch.length;
+      if (candidateCount >= maxCandidates) {
+        return candidateCount;
+      }
+    }
+    cursor = listed.truncated ? listed.cursor : undefined;
+  } while (cursor !== undefined);
+
+  return candidateCount;
 }
 
 /**

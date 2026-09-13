@@ -613,11 +613,11 @@ export function assertNoTransportRedirectInProjectDotenv(
 }
 
 /**
- * Child-process env with the CF Access service-token PAIR scrubbed. Mirrors
- * `buildEnv` in `deploy.ts`: a shared, long-lived Access token is needed only by
- * this CLI's own API client and must never leak into the spawned wrangler
- * process (which may in turn run user hooks). The cloudflared `CF_ACCESS_TOKEN`
- * JWT (dev path) is left untouched.
+ * Child-process env with every CF Access credential scrubbed. Mirrors `buildEnv`
+ * in `deploy.ts`: Access credentials are needed only by this CLI's own guarded
+ * HTTP requests and must never leak into the spawned wrangler process (which may
+ * in turn run user hooks). This includes the short-lived cloudflared
+ * `CF_ACCESS_TOKEN` JWT used by local readiness probes.
  *
  * Pins ONE transport context: scrubs every {@link TRANSPORT_REDIRECT_ENV_VARS}
  * from the child env, then re-sets `CLOUDFLARE_API_BASE_URL` to the SINGLE resolved
@@ -673,6 +673,7 @@ export function provisionEnv(ctx?: {
   const scrub = (name: string): void => deleteEnvVarCaseAware(env, name, platform);
   scrub('CF_ACCESS_CLIENT_ID');
   scrub('CF_ACCESS_CLIENT_SECRET');
+  scrub('CF_ACCESS_TOKEN');
   // Scrub EVERY transport-redirecting selector (CLOUDFLARE_ENV, the API-base overrides,
   // WRANGLER_API_ENVIRONMENT, CLOUDFLARE_COMPLIANCE_REGION). CLOUDFLARE_ENV would select a
   // named env-block whose account_id/bindings differ; the others would re-derive a

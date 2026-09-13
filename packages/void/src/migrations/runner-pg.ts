@@ -10,6 +10,22 @@ export type PgClient = {
   ): Promise<{ rows: Array<T> }>;
 };
 
+export async function readPgAppliedMigrations(client: PgClient): Promise<Array<string>> {
+  try {
+    const result = await client.query('SELECT name FROM _void_migrations');
+    return result.rows.map((row) => String(row.name));
+  } catch (error) {
+    if (
+      typeof error === 'object' &&
+      error !== null &&
+      (error as Record<string, unknown>).code === '42P01'
+    ) {
+      return [];
+    }
+    throw error;
+  }
+}
+
 /**
  * Apply unapplied SQL migrations via a connected PostgreSQL client.
  * Each migration runs in its own transaction (BEGIN/COMMIT).
@@ -19,13 +35,7 @@ export async function getPgAppliedMigrations(url: string): Promise<Array<string>
   const client = new Client({ connectionString: url });
   await client.connect();
   try {
-    await client.query(
-      `CREATE TABLE IF NOT EXISTS _void_migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL)`,
-    );
-    const result = await client.query('SELECT name FROM _void_migrations');
-    return result.rows.map((row) => String(row.name));
-  } catch {
-    return [];
+    return await readPgAppliedMigrations(client);
   } finally {
     await client.end();
   }

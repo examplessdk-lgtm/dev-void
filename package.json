@@ -3,7 +3,7 @@
   "type": "module",
   "scripts": {
     "build": "vp run --filter './packages/**' --parallel build",
-    "build:core": "vp run --filter ./packages/void build",
+    "build:core": "vp run --filter ./packages/deploy-core --filter ./packages/deploy-cloudflare --filter ./packages/edge --filter ./packages/isr --filter ./packages/void build",
     "build:docs": "vp run --filter ./docs build",
     "build:platform": "vp run --filter './platform/packages/**' build",
     "check": "vp run -r --parallel typecheck",

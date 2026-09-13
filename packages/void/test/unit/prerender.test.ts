@@ -2,7 +2,11 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'pathslash';
 import { afterEach, describe, expect, it } from 'vite-plus/test';
-import { buildPrerenderBindings, collectPrerenderWorkerModules } from '../../src/prerender.ts';
+import {
+  buildPrerenderBindings,
+  collectPrerenderPathsNode,
+  collectPrerenderWorkerModules,
+} from '../../src/prerender.ts';
 import { INTERNAL_ENV_KEYS, stripInternalEnvKeys } from '../../src/shared/env.ts';
 
 const tempDirs: Array<string> = [];
@@ -102,6 +106,58 @@ describe('collectPrerenderWorkerModules', () => {
     expect(() => collectPrerenderWorkerModules(workerDir, 'index.js')).toThrow(
       "Worker entry 'index.js' not found",
     );
+  });
+});
+
+describe('collectPrerenderPathsNode', () => {
+  it('scrubs orchestrator credentials before importing the built app', async () => {
+    const root = createTempWorkerDir();
+    const ssrDir = join(root, 'dist', 'ssr');
+    mkdirSync(ssrDir, { recursive: true });
+    writeFileSync(join(root, 'package.json'), '{"type":"module"}\n');
+    writeFileSync(join(root, '.env.production'), 'PUBLIC_VALUE=visible\n');
+    writeFileSync(
+      join(ssrDir, 'app.js'),
+      `
+const sensitive = [
+  'VOID_TOKEN',
+  'DATABASE_URL',
+  'CLOUDFLARE_API_TOKEN',
+  'CLOUDFLARE_ACCESS_CLIENT_SECRET',
+  'ACTIONS_ID_TOKEN_REQUEST_TOKEN',
+];
+export default {
+  fetch() {
+    const paths = process.env.PUBLIC_VALUE === 'visible' ? ['/safe'] : ['/safe-missing'];
+    if (sensitive.some((name) => process.env[name])) paths.push('/credential-leaked');
+    return Response.json({ paths });
+  },
+};
+`,
+    );
+    const previous = new Map<string, string | undefined>();
+    for (const name of [
+      'VOID_TOKEN',
+      'DATABASE_URL',
+      'CLOUDFLARE_API_TOKEN',
+      'CLOUDFLARE_ACCESS_CLIENT_SECRET',
+      'ACTIONS_ID_TOKEN_REQUEST_TOKEN',
+    ]) {
+      previous.set(name, process.env[name]);
+      process.env[name] = `secret-${name}`;
+    }
+    try {
+      await expect(collectPrerenderPathsNode({ root, ssrDir })).resolves.toEqual(['/safe']);
+    } finally {
+      for (const [name, value] of previous) {
+        if (value === undefined) {
+          delete process.env[name];
+        } else {
+          process.env[name] = value;
+        }
+      }
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

@@ -458,7 +458,7 @@ Before any of your project code runs, the deploy **reads** — the session, the 
 ◆  Set up email on mail.acme.com?  ● Yes / ○ No
 ```
 
-Enter (Yes is the default) applies only the `+` rows that are not ready, then the deploy continues as usual: the build, `wrangler deploy` — which creates the routing rules from the `addresses` array wrangler now finds in your config and prints its own `Email Routing plan:` — and finally the address map:
+Enter (Yes is the default) applies only the `+` rows that are not ready, then the deploy continues as usual: the build, the version upload and activation, wrangler's trigger synchronization — which creates the routing rules from the `addresses` array wrangler now finds in your config and prints its own `Email Routing plan:` — and finally the address map:
 
 ```
   ✔ deployed  acme-support

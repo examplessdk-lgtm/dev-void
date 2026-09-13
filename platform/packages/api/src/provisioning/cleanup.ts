@@ -9,6 +9,7 @@ import {
   countProjectsUsingDestination,
   deleteProjectCascade,
   getAllProjectDeployments,
+  getActiveDeployment,
   getDomainsByProjectId,
   getEmailDestinationsByProjectId,
   getProject,
@@ -274,7 +275,11 @@ async function cleanupBestEffortResources(
   // (deleteAll + deleteAlarm). KV `hasCrons` is omitted when false and
   // missing on older entries; the PG manifest is the authoritative source,
   // and unconditional clear avoids a stale-KV gate.
-  cleanup.push(clearCronScheduler(context.env, projectId));
+  cleanup.push(
+    clearCronScheduler(context.env, projectId).catch(
+      warn(`Failed to clear cron scheduler for project ${projectId}`),
+    ),
+  );
 
   // KV routing entry
   cleanup.push(
@@ -359,6 +364,10 @@ async function lockAndMarkDeleting(
     if (!lockedProject) {
       throw new Error('project disappeared during deletion');
     }
+    const activeDeployment = await getActiveDeployment(txDb, projectId);
+    if (activeDeployment?.source === 'rollback-lease') {
+      throw new ProjectOperationInProgressError();
+    }
     if (lockedProject.status !== 'deleting') {
       await tx
         .update(projectsTable)
@@ -388,6 +397,13 @@ async function lockAndMarkDeleting(
     // on replay (already-terminal builds are not re-matched by the CAS).
     return await terminateBuildsForProject(txDb, projectId, { reason: 'project deleted' });
   });
+}
+
+export class ProjectOperationInProgressError extends Error {
+  constructor() {
+    super('project operation in progress');
+    this.name = 'ProjectOperationInProgressError';
+  }
 }
 
 /**

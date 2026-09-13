@@ -121,6 +121,29 @@ describe('DELETE /projects/:id', () => {
     expect(await res.json()).toEqual({ error: 'forbidden' });
   });
 
+  it('returns 409 while a rollback lease protects external compensation', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'rollback-leased-delete');
+    await env.db.insert(deployments).values({
+      id: 'dpl_rollback_lease',
+      project_id: project.id,
+      status: 'pending',
+      source: 'rollback-lease',
+    });
+
+    const res = await app.fetch(
+      new Request(`http://localhost/projects/${project.id}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${user.jwt}` },
+      }),
+      env,
+    );
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: 'project operation in progress' });
+    expect(await db.getProject(env.db, project.id)).not.toBeNull();
+  });
+
   it('deletes project with no resources', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id, 'empty-app');

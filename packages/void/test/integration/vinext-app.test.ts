@@ -10,9 +10,7 @@ const PLAYGROUND = 'playground/vinext-app';
 let DEV_PORT: number;
 let DEV_BASE: string;
 
-// Temporarily disabled — Vinext integration removed from public docs
-// oxlint-disable-next-line jest/no-disabled-tests
-describe.skip('playground/vinext-app build', () => {
+describe('playground/vinext-app build', () => {
   beforeAll(() => {
     const pg = join(ROOT, PLAYGROUND);
     rmSync(join(pg, 'dist'), { recursive: true, force: true });
@@ -44,8 +42,7 @@ describe.skip('playground/vinext-app build', () => {
   });
 });
 
-// oxlint-disable-next-line jest/no-disabled-tests
-describe.skip('playground/vinext-app dev', () => {
+describe('playground/vinext-app dev', () => {
   let child: ReturnType<typeof spawn>;
   let stderr = '';
 

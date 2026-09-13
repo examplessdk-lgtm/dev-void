@@ -2,7 +2,7 @@ import { intro, outro, log } from '@clack/prompts';
 import { getToken } from './auth.ts';
 import { PlatformClient, type LogEntry } from './client.ts';
 import { cliTitle, dim, pc } from './output.ts';
-import { readProjectConfig } from './project.ts';
+import { readDeploymentPlatform, readProjectConfig } from './project.ts';
 
 export async function runLogsCommand(
   root: string,
@@ -13,6 +13,29 @@ export async function runLogsCommand(
 ): Promise<void> {
   console.log();
   intro(cliTitle('project logs'));
+
+  const platform = readDeploymentPlatform(root);
+  if (platform === 'cloudflare') {
+    const { resolveCloudflareOperationContext, tailCloudflareWorker } =
+      await import('./cloudflare-operations.ts');
+    if (range !== '1h') {
+      log.warn('Cloudflare tail streams live logs; --range does not select historical entries.');
+    }
+    if (level && level !== 'all' && level !== 'error') {
+      log.warn(
+        'Cloudflare tail cannot filter individual console levels; showing all invocation logs.',
+      );
+    }
+    await tailCloudflareWorker(resolveCloudflareOperationContext(root), {
+      filter: filter || undefined,
+      versionId: deployment || undefined,
+      status: level === 'error' ? 'error' : undefined,
+    });
+    return;
+  }
+  if (platform === 'none') {
+    throw new Error('logs: Deployment is disabled. Run `void init` to choose a platform.');
+  }
 
   const token = getToken(root);
   if (!token) {

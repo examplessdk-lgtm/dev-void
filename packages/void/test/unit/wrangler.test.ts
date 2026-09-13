@@ -3,6 +3,7 @@ import { parse as parseJsoncRaw, type ParseError } from 'jsonc-parser';
 import { join } from 'pathslash';
 import { describe, it, expect, afterEach } from 'vite-plus/test';
 import {
+  acknowledgeWranglerManagedQueueRemovals,
   bindingEntriesForField,
   bindingNamesForField,
   ensureWranglerCompat,
@@ -12,9 +13,12 @@ import {
   readExistingLiveBindingConfig,
   readProvisionedBindingEntry,
   readWranglerCompat,
+  readWranglerManagedQueueCleanupCandidates,
+  readWranglerWebSocketTombstones,
   resolveLiveBindingConfig,
   syncWranglerBindings,
   syncWranglerDurableObjects,
+  syncWranglerWebSockets,
   writeProvisionedWranglerConfig,
 } from '../../src/cli/wrangler.ts';
 import type { VoidConfig } from '../../src/config.ts';
@@ -460,6 +464,147 @@ describe('syncWranglerBindings', () => {
     expect(result).toBe(false);
   });
 
+  it('adds WebSocket classes as SQLite Durable Objects', () => {
+    setup('wrangler.jsonc', '{ "name": "test" }');
+    const result = syncWranglerWebSockets(tmpDir, [
+      {
+        pattern: '/chat/:room',
+        methods: ['GET'],
+        params: ['room'],
+        catchAll: false,
+        env: null,
+        filePath: 'chat/[room].ws.ts',
+        className: 'WsChatRoomWs',
+        bindingName: 'WS_CHAT_ROOM_WS',
+        mode: 'room',
+        hasAuthGate: false,
+      },
+    ]);
+
+    expect(result).toBe(true);
+    const parsed = JSON.parse(readFileSync(join(tmpDir, 'wrangler.jsonc'), 'utf-8'));
+    expect(parsed.durable_objects.bindings).toEqual([
+      { name: 'WS_CHAT_ROOM_WS', class_name: 'WsChatRoomWs' },
+    ]);
+    expect(parsed.migrations).toEqual([
+      { tag: 'void-ws-v1', new_sqlite_classes: ['WsChatRoomWs'] },
+    ]);
+  });
+
+  it('preserves a legacy WebSocket class and appends new classes as SQLite', () => {
+    setup(
+      'wrangler.jsonc',
+      JSON.stringify({
+        durable_objects: {
+          bindings: [{ name: 'LEGACY', class_name: 'LegacyRoom' }],
+        },
+        migrations: [{ tag: 'void-ws-v1', new_classes: ['LegacyRoom'] }],
+      }),
+    );
+    const route = (className: string, bindingName: string) => ({
+      pattern: `/${bindingName}`,
+      methods: ['GET'],
+      params: [],
+      catchAll: false,
+      env: null,
+      filePath: `${bindingName}.ws.ts`,
+      className,
+      bindingName,
+      mode: 'room' as const,
+      hasAuthGate: false,
+    });
+
+    syncWranglerWebSockets(tmpDir, [route('LegacyRoom', 'LEGACY'), route('ChatRoom', 'CHAT')]);
+
+    const parsed = JSON.parse(readFileSync(join(tmpDir, 'wrangler.jsonc'), 'utf-8'));
+    expect(parsed.migrations).toEqual([
+      { tag: 'void-ws-v1', new_classes: ['LegacyRoom'] },
+      { tag: 'void-ws-v1-2', new_sqlite_classes: ['ChatRoom'] },
+    ]);
+  });
+
+  it('retains stale generated WebSocket bindings and reports tombstone exports', () => {
+    setup(
+      'wrangler.jsonc',
+      JSON.stringify({
+        durable_objects: {
+          bindings: [
+            { name: 'OLD_CHAT', class_name: 'OldChatWs' },
+            { name: 'CART', class_name: 'ShoppingCartDurableObject' },
+          ],
+        },
+        migrations: [
+          { tag: 'void-ws-v1', new_sqlite_classes: ['OldChatWs'] },
+          { tag: 'durable-shopping-cart-v1', new_sqlite_classes: ['ShoppingCartDurableObject'] },
+        ],
+      }),
+    );
+
+    expect(syncWranglerWebSockets(tmpDir, [])).toBe(false);
+
+    const parsed = JSON.parse(readFileSync(join(tmpDir, 'wrangler.jsonc'), 'utf-8'));
+    expect(parsed.durable_objects.bindings).toEqual([
+      { name: 'OLD_CHAT', class_name: 'OldChatWs' },
+      { name: 'CART', class_name: 'ShoppingCartDurableObject' },
+    ]);
+    expect(parsed.migrations).toEqual([
+      { tag: 'void-ws-v1', new_sqlite_classes: ['OldChatWs'] },
+      { tag: 'durable-shopping-cart-v1', new_sqlite_classes: ['ShoppingCartDurableObject'] },
+    ]);
+    expect(readWranglerWebSocketTombstones(tmpDir, [])).toEqual(['OldChatWs']);
+  });
+
+  it('replaces a renamed generated WebSocket binding', () => {
+    setup(
+      'wrangler.jsonc',
+      JSON.stringify({
+        durable_objects: { bindings: [{ name: 'OLD_CHAT', class_name: 'OldChatWs' }] },
+        migrations: [{ tag: 'void-ws-v1', new_sqlite_classes: ['OldChatWs'] }],
+      }),
+    );
+
+    syncWranglerWebSockets(tmpDir, [
+      {
+        pattern: '/chat',
+        methods: ['GET'],
+        params: [],
+        catchAll: false,
+        env: null,
+        filePath: 'chat.ws.ts',
+        className: 'ChatWs',
+        bindingName: 'CHAT',
+        mode: 'room',
+        hasAuthGate: false,
+      },
+    ]);
+
+    const parsed = JSON.parse(readFileSync(join(tmpDir, 'wrangler.jsonc'), 'utf-8'));
+    expect(parsed.durable_objects.bindings).toEqual([
+      { name: 'OLD_CHAT', class_name: 'OldChatWs' },
+      { name: 'CHAT', class_name: 'ChatWs' },
+    ]);
+    expect(parsed.migrations).toEqual([
+      { tag: 'void-ws-v1', new_sqlite_classes: ['OldChatWs'] },
+      { tag: 'void-ws-v1-2', new_sqlite_classes: ['ChatWs'] },
+    ]);
+    expect(
+      readWranglerWebSocketTombstones(tmpDir, [
+        {
+          pattern: '/chat',
+          methods: ['GET'],
+          params: [],
+          catchAll: false,
+          env: null,
+          filePath: 'chat.ws.ts',
+          className: 'ChatWs',
+          bindingName: 'CHAT',
+          mode: 'room',
+          hasAuthGate: false,
+        },
+      ]),
+    ).toEqual(['OldChatWs']);
+  });
+
   it('adds sandbox durable object, container, and migration metadata', () => {
     setup('wrangler.jsonc', '{ "name": "test" }');
     const result = syncWranglerBindings(tmpDir, { ...noBindings, needsSandbox: true });
@@ -470,7 +615,7 @@ describe('syncWranglerBindings', () => {
       name: 'void-sandbox',
       class_name: 'Sandbox',
     });
-    expect(parsed.containers[0].image).toContain('Dockerfile');
+    expect(parsed.containers[0].image).toMatch(/^docker\.io\/cloudflare\/sandbox:/);
     expect(parsed.migrations).toEqual([
       { tag: 'void-sandbox-v1', new_sqlite_classes: ['Sandbox'] },
     ]);
@@ -901,6 +1046,111 @@ describe('writeProvisionedWranglerConfig', () => {
     ).toThrow(/duplicate key "max_batch_size"/);
     // File left byte-for-byte untouched.
     expect(readRaw('wrangler.jsonc')).toBe(dup);
+  });
+
+  it('never infers queue ownership from a conventional QUEUE_* binding name', () => {
+    setup(
+      'wrangler.jsonc',
+      `{
+  "queues": {
+    "producers": [
+      { "binding": "QUEUE_OLD", "queue": "old" },
+      { "binding": "CUSTOM", "queue": "custom" }
+    ],
+    "consumers": [
+      { "queue": "old", "max_batch_size": 5 },
+      { "queue": "custom", "max_batch_size": 10 }
+    ]
+  }
+}`,
+    );
+
+    const result = writeProvisionedWranglerConfig(tmpDir, {
+      queues: { producers: [], consumers: [], reconcileVoidOwned: true },
+    });
+
+    expect(result.modified).toBe(false);
+    expect(parseRaw('wrangler.jsonc').queues).toEqual({
+      producers: [
+        { binding: 'QUEUE_OLD', queue: 'old' },
+        { binding: 'CUSTOM', queue: 'custom' },
+      ],
+      consumers: [
+        { queue: 'old', max_batch_size: 5 },
+        { queue: 'custom', max_batch_size: 10 },
+      ],
+    });
+  });
+
+  it('prunes only queue entries that Void explicitly recorded as managed', () => {
+    setup('wrangler.jsonc', '{}');
+    writeProvisionedWranglerConfig(tmpDir, {
+      queues: {
+        producers: [{ binding: 'QUEUE_OLD', queue: 'old' }],
+        consumers: [{ queue: 'old', max_batch_size: 5 }],
+        reconcileVoidOwned: true,
+      },
+    });
+    expect(readRaw('wrangler.jsonc')).toContain('// void:managed-queues:v1:');
+
+    writeProvisionedWranglerConfig(tmpDir, {
+      queues: { producers: [], consumers: [], reconcileVoidOwned: true },
+    });
+
+    expect(parseRaw('wrangler.jsonc').queues).toEqual({ producers: [], consumers: [] });
+    const configPath = join(tmpDir, 'wrangler.jsonc');
+    expect(readRaw('wrangler.jsonc')).toContain('// void:managed-queues:v1:');
+    expect(readWranglerManagedQueueCleanupCandidates(configPath)).toEqual(['old']);
+
+    acknowledgeWranglerManagedQueueRemovals(configPath, ['old']);
+    expect(readWranglerManagedQueueCleanupCandidates(configPath)).toEqual([]);
+    expect(readRaw('wrangler.jsonc')).not.toContain('// void:managed-queues:v1:');
+  });
+
+  it('reconciles a renamed framework queue without retaining the old binding', () => {
+    setup('wrangler.jsonc', '{}');
+    writeProvisionedWranglerConfig(tmpDir, {
+      queues: {
+        producers: [{ binding: 'QUEUE_OLD', queue: 'old' }],
+        consumers: [{ queue: 'old' }],
+        reconcileVoidOwned: true,
+      },
+    });
+
+    writeProvisionedWranglerConfig(tmpDir, {
+      queues: {
+        producers: [{ binding: 'QUEUE_NEW', queue: 'new' }],
+        consumers: [{ queue: 'new' }],
+        reconcileVoidOwned: true,
+      },
+    });
+
+    expect(parseRaw('wrangler.jsonc').queues).toEqual({
+      producers: [{ binding: 'QUEUE_NEW', queue: 'new' }],
+      consumers: [{ queue: 'new' }],
+    });
+    expect(readWranglerManagedQueueCleanupCandidates(join(tmpDir, 'wrangler.jsonc'))).toEqual([
+      'new',
+      'old',
+    ]);
+  });
+
+  it('cancels a pending consumer removal when the queue is reintroduced before deploy', () => {
+    setup('wrangler.jsonc', '{}');
+    const queues = {
+      producers: [{ binding: 'QUEUE_JOBS', queue: 'jobs' }],
+      consumers: [{ queue: 'jobs' }],
+      reconcileVoidOwned: true,
+    };
+    writeProvisionedWranglerConfig(tmpDir, { queues });
+    writeProvisionedWranglerConfig(tmpDir, {
+      queues: { producers: [], consumers: [], reconcileVoidOwned: true },
+    });
+    writeProvisionedWranglerConfig(tmpDir, { queues });
+
+    expect(readWranglerManagedQueueCleanupCandidates(join(tmpDir, 'wrangler.jsonc'))).toEqual([
+      'jobs',
+    ]);
   });
 
   it('fails closed on a top-level duplicated key (account_id twice) — throws without writing', () => {

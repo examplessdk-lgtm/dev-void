@@ -121,29 +121,14 @@ export function parseDeployArgs(args: Array<string>): DeployArgs {
     throw new Error('deploy: --require-email requires --platform cloudflare.');
   }
 
-  // The Cloudflare backend deploys the built worker to the user's OWN Cloudflare account
-  // via their local wrangler auth — it never resolves a Void project, and it never takes
-  // the managed static-site path. `--project`, `--dir` and `--spa` all read as instructions
-  // that path cannot carry out, and it used to accept and then ignore them: `--project foo`
-  // in particular looked like it selected a deploy destination while the worker went to the
-  // local wrangler account instead. Reject them here rather than deploy somewhere else.
+  // The Cloudflare backend deploys to the user's OWN account and therefore never
+  // resolves a Void project. Static flags are target-neutral: both backends honor
+  // `--dir` and `--spa` through their respective static deployment adapters.
   if (backend === 'cloudflare' || platform === 'cloudflare') {
     if (projectSlug !== undefined) {
       throw new Error(
         'deploy: --project is not supported with --platform cloudflare — this platform deploys ' +
           'to your own Cloudflare account and no Void project is involved.',
-      );
-    }
-    if (dir !== undefined) {
-      throw new Error(
-        'deploy: --dir is not supported with --platform cloudflare — this platform uploads the ' +
-          'worker your build emits, not a static directory.',
-      );
-    }
-    if (spa) {
-      throw new Error(
-        'deploy: --spa is not supported with --platform cloudflare — this platform uploads the ' +
-          'worker your build emits, not a static SPA.',
       );
     }
   }

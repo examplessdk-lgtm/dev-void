@@ -3,9 +3,17 @@ import { getToken } from './auth.ts';
 import { type DomainStatusResponse, PlatformClient } from './client.ts';
 import type { DomainArgs } from './domain-args.ts';
 import { pc } from './output.ts';
-import { readProjectConfig } from './project.ts';
+import { readDeploymentPlatform, readProjectConfig } from './project.ts';
 
 export async function runDomainCommand(root: string, args: DomainArgs): Promise<void> {
+  const platform = readDeploymentPlatform(root);
+  if (platform === 'cloudflare') {
+    return runCloudflareDomainCommand(root, args);
+  }
+  if (platform === 'none') {
+    throw new Error('domain: Deployment is disabled. Run `void init` to choose a platform.');
+  }
+
   const token = getToken(root);
   if (!token) {
     log.error('Not logged in. Run `void auth login` first.');
@@ -45,6 +53,66 @@ export async function runDomainCommand(root: string, args: DomainArgs): Promise<
     case 'status':
       return domainStatus(client, projectId!, args.hostname!, args.verbose === true);
   }
+}
+
+async function runCloudflareDomainCommand(root: string, args: DomainArgs): Promise<void> {
+  if (args.projectSlug) {
+    throw new Error(
+      'domain: --project selects a Void platform project and is not used for direct Cloudflare apps.',
+    );
+  }
+  const { changeCloudflareDomain, listCloudflareDomains } =
+    await import('./cloudflare-operations.ts');
+
+  if (args.subcommand === 'add') {
+    const result = await changeCloudflareDomain(root, args.hostname!, 'add');
+    log.success(
+      result.modified
+        ? `Domain ${args.hostname} added and activated on Cloudflare.`
+        : `Domain ${args.hostname} is already configured.`,
+    );
+    note(
+      'Cloudflare Custom Domains manages the DNS record and TLS certificate in the zone on your account.',
+      'Cloudflare Domain',
+    );
+    return;
+  }
+  if (args.subcommand === 'delete') {
+    const result = await changeCloudflareDomain(root, args.hostname!, 'delete');
+    if (result.modified) {
+      log.success(`Domain ${args.hostname} removed from Cloudflare.`);
+    } else {
+      log.info(`Domain ${args.hostname} is not configured.`);
+    }
+    return;
+  }
+
+  const domains = listCloudflareDomains(root);
+  if (args.subcommand === 'list') {
+    if (domains.length === 0) {
+      log.info('No custom domains configured.');
+      return;
+    }
+    note(
+      domains.map((domain) => `  ${domain.pattern}  ${pc.green('configured')}`).join('\n'),
+      'Custom Domains',
+    );
+    return;
+  }
+
+  const domain = domains.find((entry) => entry.pattern === args.hostname);
+  if (!domain) {
+    log.error(`domain: Domain '${args.hostname}' is not configured for this Worker.`);
+    process.exit(1);
+  }
+  const lines = [
+    `Hostname: ${domain.pattern}`,
+    'Status:   configured locally — present in wrangler.jsonc; remote certificate state is managed by Cloudflare.',
+  ];
+  if (args.verbose) {
+    lines.push('', 'Details:', '  Type:        Cloudflare Custom Domain', '  TLS:         managed');
+  }
+  note(lines.join('\n'), 'Domain Status');
 }
 
 async function domainAdd(

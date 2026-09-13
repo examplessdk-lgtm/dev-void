@@ -14,7 +14,14 @@ function base64urlEncode(data: Uint8Array): string {
 }
 
 async function signJwt(
-  payload: { sub: string; login: string; aud?: string; exp?: number },
+  payload: {
+    sub: string;
+    login: string;
+    aud?: string;
+    exp?: number;
+    project?: string;
+    build?: string;
+  },
   secret: string,
 ): Promise<string> {
   const encoder = new TextEncoder();
@@ -279,6 +286,90 @@ describe('proxy worker', () => {
 
       expect(res.status).toBe(200);
       expect(env.AI.run).toHaveBeenCalled();
+    });
+
+    it('accepts a prerender token only for its scoped project', async () => {
+      const token = await signJwt(
+        { sub: 'user_1', login: 'testuser', aud: 'prerender', project: 'proj_1' },
+        JWT_SECRET,
+      );
+      const api = createMockApi();
+      const apiFetch = vi.spyOn(api, 'fetch');
+      const env = createEnv(undefined, undefined, api);
+
+      const allowed = await worker.fetch(
+        post(
+          '/ai/run',
+          { model: 'test-model', inputs: {}, projectId: 'proj_1' },
+          { authorization: `Bearer ${token}` },
+        ),
+        env,
+      );
+      expect(allowed.status).toBe(200);
+      expect(apiFetch).not.toHaveBeenCalled();
+
+      const denied = await worker.fetch(
+        post(
+          '/ai/run',
+          { model: 'test-model', inputs: {}, projectId: 'proj_42' },
+          { authorization: `Bearer ${token}` },
+        ),
+        env,
+      );
+      expect(denied.status).toBe(403);
+      expect(await denied.json()).toEqual({ error: 'forbidden' });
+    });
+
+    it('revokes an already-minted build-bound prerender token when its build terminates', async () => {
+      const token = await signJwt(
+        {
+          sub: 'user_1',
+          login: 'testuser',
+          aud: 'prerender',
+          project: 'proj_1',
+          build: 'bld_1',
+        },
+        JWT_SECRET,
+      );
+      let active = true;
+      const api = createMockApi(async (input) => {
+        const url = typeof input === 'string' ? input : input.url;
+        expect(url).toContain('/internal/verify-prerender-build/proj_1');
+        return active
+          ? Response.json({ ok: true })
+          : Response.json({ error: 'build is no longer active' }, { status: 403 });
+      });
+      const env = createEnv(undefined, undefined, api);
+      const request = () =>
+        post(
+          '/ai/run',
+          { model: 'test-model', inputs: {}, projectId: 'proj_1' },
+          { authorization: `Bearer ${token}` },
+        );
+
+      expect((await worker.fetch(request(), env)).status).toBe(200);
+      active = false;
+      const revoked = await worker.fetch(request(), env);
+      expect(revoked.status).toBe(403);
+      expect(await revoked.json()).toEqual({
+        error: 'prerender token build is no longer active',
+      });
+    });
+
+    it('rejects deploy tokens at the binding proxy', async () => {
+      const token = await signJwt(
+        { sub: 'user_1', login: 'testuser', aud: 'deploy', project: 'proj_1' },
+        JWT_SECRET,
+      );
+      const res = await worker.fetch(
+        post(
+          '/ai/run',
+          { model: 'test-model', inputs: {}, projectId: 'proj_1' },
+          { authorization: `Bearer ${token}` },
+        ),
+        createEnv(),
+      );
+      expect(res.status).toBe(401);
     });
 
     it('rejects access when user does not own the project', async () => {

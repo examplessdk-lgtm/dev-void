@@ -2086,12 +2086,47 @@ function getWorkflowSetupSteps(
  * otherwise a `${{ vars.VOID_PROJECT }}` placeholder is emitted with a comment
  * telling the user to set the repository variable.
  */
-function getWorkflowYaml(
+export function getWorkflowYaml(
   root: string,
   pm: ProjectState['packageManager'],
   slug: string | null,
+  platform: 'cloudflare' | 'void' = 'void',
 ): string {
   const { setup, install, runner } = getWorkflowSetupSteps(root, pm);
+  if (platform === 'cloudflare') {
+    return `name: Deploy to Cloudflare
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: void-cloudflare-deploy-\${{ github.repository }}-\${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+${setup}
+${install}
+      - name: Deploy
+        env:
+          # Add this scoped token at Settings → Secrets and variables → Actions.
+          CLOUDFLARE_API_TOKEN: \${{ secrets.CLOUDFLARE_API_TOKEN }}
+          # Required only for PostgreSQL/MySQL provisioning and migrations.
+          DATABASE_URL: \${{ secrets.DATABASE_URL }}
+          # Required in fresh checkouts when a Worker Version has no preview URL.
+          CLOUDFLARE_WORKERS_SUBDOMAIN: \${{ vars.CLOUDFLARE_WORKERS_SUBDOMAIN }}
+          # Required only when Cloudflare Access protects Worker readiness.
+          CF_ACCESS_CLIENT_ID: \${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: \${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+        run: ${runner} deploy --platform cloudflare
+`;
+  }
   // When the slug is unknown, fall back to a repository variable and prefix the
   // `VOID_PROJECT` line with a comment (each comment line indented to 2 spaces
   // so it stays inside the `env:` mapping and the YAML remains valid).
@@ -2137,7 +2172,11 @@ ${install}
 `;
 }
 
-function setupGithubActions(root: string, state: ProjectState): void {
+function setupGithubActions(
+  root: string,
+  state: ProjectState,
+  platform: 'cloudflare' | 'void' = 'void',
+): void {
   const workflowDir = join(root, '.github', 'workflows');
   const workflowPath = join(workflowDir, 'void-deploy.yml');
 
@@ -2149,10 +2188,17 @@ function setupGithubActions(root: string, state: ProjectState): void {
   const slug = readProjectConfig(root)?.slug ?? null;
 
   mkdirSync(workflowDir, { recursive: true });
-  writeFileSync(workflowPath, getWorkflowYaml(root, state.packageManager, slug));
+  writeFileSync(workflowPath, getWorkflowYaml(root, state.packageManager, slug, platform));
   log.success('Created .github/workflows/void-deploy.yml');
 
-  if (slug) {
+  if (platform === 'cloudflare') {
+    note(
+      'Pushes to main will deploy through the same readiness-gated Cloudflare path.\n' +
+        'Add a scoped CLOUDFLARE_API_TOKEN repository secret; PostgreSQL/MySQL apps also need DATABASE_URL.\n' +
+        'Keep account_id in wrangler.jsonc.',
+      'GitHub Actions Cloudflare deploy',
+    );
+  } else if (slug) {
     note(
       `Pushes to main will build and deploy "${slug}" via GitHub OIDC — no token to store.\n` +
         'Connect the repo to your project in the Void dashboard to authorize it.',
@@ -3763,7 +3809,7 @@ export async function runInitCommand(root: string, initArgs?: InitArgs): Promise
     await setupCloudflareDeployment(root);
   }
 
-  // Step 9: GitHub Actions (the built-in workflow currently targets Void).
+  // Step 9: GitHub Actions for either configured deployment target.
   // Skip when `root` is a workspace subpackage: `setupGithubActions` would
   // write `.github/workflows/deploy.yml` under the subpackage root, but
   // GitHub only reads `.github/workflows/*` from the repository root, so
@@ -3778,13 +3824,13 @@ export async function runInitCommand(root: string, initArgs?: InitArgs): Promise
   // subpackage-membership signal directly so both targeted and
   // interactive modes agree.
   const githubStepSkipForSubpackage = isInsideWorkspaceSubpackage(root);
-  const shouldSetupGithub = targeted ? initArgs?.github === true : deploymentPlatform === 'void';
+  const shouldSetupGithub = targeted ? initArgs?.github === true : deploymentPlatform !== 'none';
   if (shouldSetupGithub && !githubStepSkipForSubpackage) {
     // `setupGithubActions` writes `void-deploy.yml` (skipping with a warning if
     // it already exists). It does not touch any pre-existing `deploy.yml`.
     if (targeted) {
       // --github flag: run directly without prompting
-      setupGithubActions(root, state);
+      setupGithubActions(root, state, deploymentPlatform === 'cloudflare' ? 'cloudflare' : 'void');
     } else {
       const setupGha = await confirm({
         message: 'Create .github/workflows/void-deploy.yml to deploy on pushes to main?',
@@ -3794,7 +3840,11 @@ export async function runInitCommand(root: string, initArgs?: InitArgs): Promise
         process.exit(0);
       }
       if (setupGha) {
-        setupGithubActions(root, state);
+        setupGithubActions(
+          root,
+          state,
+          deploymentPlatform === 'cloudflare' ? 'cloudflare' : 'void',
+        );
       }
     }
   } else if (githubStepSkipForSubpackage && shouldSetupGithub) {

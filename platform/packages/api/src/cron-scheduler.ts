@@ -166,6 +166,9 @@ export class CronScheduler extends DurableObject<ApiEnv['Bindings']> {
     if (request.method === 'GET' && path === '/status') {
       return this.handleStatus();
     }
+    if (request.method === 'GET' && path === '/snapshot') {
+      return Response.json({ state: await this.getState() });
+    }
 
     return new Response('not found', { status: 404 });
   }

@@ -3,13 +3,21 @@ import { intro, outro, log, note, cancel, isCancel, password, confirm } from '@c
 import { getToken } from './auth.ts';
 import { PlatformClient } from './client.ts';
 import { cliTitle } from './output.ts';
-import { readProjectConfig } from './project.ts';
+import { readDeploymentPlatform, readProjectConfig } from './project.ts';
 import { getRequestedProjectSlug, resolveProjectBySlug } from './resolve-project.ts';
 import type { SecretArgs } from './secret-args.ts';
 
 export async function runSecretCommand(root: string, args: SecretArgs): Promise<void> {
   console.log();
   intro(cliTitle('secret'));
+
+  const platform = readDeploymentPlatform(root);
+  if (platform === 'cloudflare') {
+    return runCloudflareSecretCommand(root, args);
+  }
+  if (platform === 'none') {
+    throw new Error('secret: Deployment is disabled. Run `void init` to choose a platform.');
+  }
 
   const token = getToken(root);
   if (!token) {
@@ -85,6 +93,63 @@ export async function runSecretCommand(root: string, args: SecretArgs): Promise<
   }
 
   await client.deleteSecret(projectId, args.name);
+  outro(`Secret ${args.name} deleted.`);
+}
+
+async function runCloudflareSecretCommand(root: string, args: SecretArgs): Promise<void> {
+  if (args.projectName) {
+    throw new Error(
+      'secret: --project selects a Void platform project and is not used for direct Cloudflare apps.',
+    );
+  }
+  const {
+    deleteCloudflareSecret,
+    listCloudflareSecrets,
+    putCloudflareSecret,
+    resolveCloudflareOperationContext,
+    syncCloudflareSecrets,
+  } = await import('./cloudflare-operations.ts');
+  const context = resolveCloudflareOperationContext(root);
+
+  if (args.action === 'list') {
+    const secrets = await listCloudflareSecrets(context);
+    if (secrets.length === 0) {
+      outro('No secrets set.');
+      return;
+    }
+    note(secrets.map((name) => `  ${name}`).join('\n'), 'Secrets');
+    outro(`${secrets.length} secret(s)`);
+    return;
+  }
+  if (args.action === 'put') {
+    const value = args.value ?? (await readSecretValue());
+    await putCloudflareSecret(context, args.name, value);
+    outro(`Secret ${args.name} set.`);
+    return;
+  }
+  if (args.action === 'sync') {
+    const secrets = parseDotenvFile(args.file);
+    if (secrets.length === 0) {
+      log.warn('No secrets found in file.');
+      outro('Nothing to sync.');
+      return;
+    }
+    log.info(`Found ${secrets.length} secret(s):`);
+    for (const secret of secrets) {
+      log.message(`  ${secret.name}`);
+    }
+    const proceed = await confirm({
+      message: `This will overwrite ${secrets.length} secret(s) in the Cloudflare Worker. Continue?`,
+    });
+    if (isCancel(proceed) || !proceed) {
+      cancel('Secret sync cancelled.');
+      process.exit(0);
+    }
+    await syncCloudflareSecrets(context, secrets);
+    outro(`Synced ${secrets.length} secret(s).`);
+    return;
+  }
+  await deleteCloudflareSecret(context, args.name);
   outro(`Secret ${args.name} deleted.`);
 }
 

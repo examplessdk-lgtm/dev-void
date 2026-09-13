@@ -34,11 +34,13 @@ describe('playground/tanstack-start build', () => {
       d1_databases?: Array<{ binding: string }>;
       kv_namespaces?: Array<{ binding: string }>;
       assets?: { directory?: string };
+      triggers?: { crons?: Array<string> };
     };
 
     expect(wranglerConfig.d1_databases?.some((b) => b.binding === 'DB')).toBe(true);
     expect(wranglerConfig.kv_namespaces?.some((b) => b.binding === 'KV')).toBe(true);
     expect(wranglerConfig.assets?.directory).toBe('../client');
+    expect(wranglerConfig.triggers?.crons).toEqual(['0 * * * *']);
   });
 });
 

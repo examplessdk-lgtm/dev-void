@@ -5,7 +5,7 @@
     { "path": "packages/api" },
     { "path": "packages/dashboard" },
     { "path": "packages/dispatch" },
-    { "path": "packages/isr-shared" },
+    { "path": "../packages/isr" },
     { "path": "packages/proxy" },
     { "path": "packages/tail" }
   ]

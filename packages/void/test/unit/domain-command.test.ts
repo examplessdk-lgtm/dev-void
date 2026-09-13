@@ -22,6 +22,7 @@ async function runExpectingExit(rt: string, a: DomainArgs): Promise<void> {
 
 const mockGetToken = vi.fn();
 const mockReadProjectConfig = vi.fn();
+const mockReadDeploymentPlatform = vi.fn();
 const mockListProjects = vi.fn();
 const mockAddDomain = vi.fn();
 const mockListDomains = vi.fn();
@@ -43,6 +44,7 @@ vi.mock('../../src/cli/auth', () => ({
 
 vi.mock('../../src/cli/project', () => ({
   readProjectConfig: (...args: Array<unknown>) => mockReadProjectConfig(...args),
+  readDeploymentPlatform: (...args: Array<unknown>) => mockReadDeploymentPlatform(...args),
 }));
 
 vi.mock('../../src/cli/client', () => ({
@@ -80,6 +82,7 @@ beforeEach(() => {
 
   mockGetToken.mockReset();
   mockReadProjectConfig.mockReset();
+  mockReadDeploymentPlatform.mockReset();
   mockListProjects.mockReset();
   mockAddDomain.mockReset();
   mockListDomains.mockReset();
@@ -88,6 +91,7 @@ beforeEach(() => {
 
   mockGetToken.mockReturnValue('test-token');
   mockReadProjectConfig.mockReturnValue({ projectId: 'proj_default', slug: 'default' });
+  mockReadDeploymentPlatform.mockReturnValue('void');
   mockListProjects.mockResolvedValue([]);
   mockListDomains.mockResolvedValue([]);
   delete process.env.VOID_PROJECT;

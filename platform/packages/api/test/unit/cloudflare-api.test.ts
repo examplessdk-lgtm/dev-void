@@ -4,6 +4,9 @@ import {
   createHyperdrive,
   getDispatchWorkerProxyToken,
   parseHyperdriveConnectionString,
+  removeQueueConsumer,
+  restoreQueueConsumer,
+  snapshotQueueConsumer,
   updateHyperdrive,
 } from '../../src/provisioning/cloudflare-api.ts';
 
@@ -78,6 +81,59 @@ describe('addQueueConsumer', () => {
       /insufficient permissions/i,
     );
     expect(fetchMock).toHaveBeenCalledOnce();
+  });
+});
+
+describe('queue consumer snapshots', () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('snapshots and restores exact settings', async () => {
+    const snapshot = {
+      consumer_id: 'c1',
+      script: SCRIPT,
+      type: 'worker',
+      settings: { batch_size: 7, max_retries: 3 },
+    };
+    fetchMock.mockResolvedValueOnce(cfSuccess([snapshot]));
+    await expect(snapshotQueueConsumer(ACCOUNT, TOKEN, QUEUE_ID, SCRIPT)).resolves.toEqual(
+      snapshot,
+    );
+
+    fetchMock.mockResolvedValueOnce(cfSuccess([{ ...snapshot, settings: { batch_size: 1 } }]));
+    fetchMock.mockResolvedValueOnce(cfSuccess({ consumer_id: 'c1' }));
+    await restoreQueueConsumer(ACCOUNT, TOKEN, QUEUE_ID, SCRIPT, snapshot);
+
+    const restoreRequest = fetchMock.mock.calls[2]![1] as RequestInit;
+    expect(restoreRequest.method).toBe('PUT');
+    expect(JSON.parse(String(restoreRequest.body))).toEqual({
+      script_name: SCRIPT,
+      type: 'worker',
+      settings: { batch_size: 7, max_retries: 3 },
+    });
+  });
+
+  it('removes only the matching script consumer', async () => {
+    fetchMock.mockResolvedValueOnce(
+      cfSuccess([
+        { consumer_id: 'other', script: 'other-worker', type: 'worker', settings: {} },
+        { consumer_id: 'ours', script: SCRIPT, type: 'worker', settings: {} },
+      ]),
+    );
+    fetchMock.mockResolvedValueOnce(cfSuccess(null));
+
+    await removeQueueConsumer(ACCOUNT, TOKEN, QUEUE_ID, SCRIPT);
+
+    expect(fetchMock.mock.calls[1]![0]).toContain('/consumers/ours');
+    expect((fetchMock.mock.calls[1]![1] as RequestInit).method).toBe('DELETE');
   });
 });
 

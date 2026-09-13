@@ -739,21 +739,24 @@ describe('POST /projects/:id/deploy (JSON mode — direct-to-R2)', () => {
     // pre-routing checks and the slug-route flip.
     const originalPut = env.ROUTING.put.bind(env.ROUTING);
     let cancelTriggered = false;
+    let inFlightDeploymentId: string | undefined;
+    let cancelPromise: Promise<unknown> | undefined;
     (env.ROUTING.put as unknown) = async (
       key: string,
       value: string,
       options?: { metadata?: unknown; expirationTtl?: number },
     ) => {
+      if (key.startsWith('manifest:')) {
+        inFlightDeploymentId = key.slice('manifest:'.length);
+      }
       if (!cancelTriggered && key === project.slug) {
         cancelTriggered = true;
-        // Mark the in-flight deployment as canceling so the next
-        // assertDeploymentNotCanceled throws BEFORE the routing flip.
-        const rows = await env.db
-          .select({ id: deployments.id })
-          .from(deployments)
-          .where(eq(deployments.project_id, project.id));
-        if (rows.length > 0) {
-          await cancelDeployment(env.db, rows[0].id, 'test cancel');
+        // Queue cancellation behind the cutover's project-row lock. Awaiting
+        // it from this transaction-backed KV mock would deadlock PGlite's
+        // single connection; the queued update runs when the thrown error
+        // releases the cutover transaction.
+        if (inFlightDeploymentId) {
+          cancelPromise = cancelDeployment(env.db, inFlightDeploymentId, 'test cancel');
         }
         // Throw to abort the slug write itself.
         throw new Error('canceled before slug write');
@@ -787,6 +790,7 @@ describe('POST /projects/:id/deploy (JSON mode — direct-to-R2)', () => {
       );
       expect(res.status).toBe(200);
       await readAllEvents(res);
+      await cancelPromise;
     } finally {
       (env.ROUTING.put as unknown) = originalPut;
     }
@@ -1081,6 +1085,15 @@ describe('POST /projects/:id/deploy (JSON mode — direct-to-R2)', () => {
       .update(projects)
       .set({ active_deployment_id: liveId })
       .where(eq(projects.id, project.id));
+    await env.ROUTING.put(
+      project.slug,
+      JSON.stringify({
+        staticDeploymentId: liveId,
+        projectId: project.id,
+        userId: user.id,
+        type: 'spa',
+      }),
+    );
     // Prior serving manifest with NO `!` prefix → KV placement.
     await env.ROUTING.put(`manifest:${liveId}`, JSON.stringify({ '/index.html': kvHash }));
 

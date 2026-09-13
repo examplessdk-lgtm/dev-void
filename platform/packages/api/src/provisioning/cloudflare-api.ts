@@ -188,14 +188,14 @@ export async function createQueue(
   });
 }
 
-type QueueConsumerSettings = Readonly<{
+export type QueueConsumerSettings = Readonly<{
   batch_size?: number;
   max_wait_time_ms?: number;
   max_retries?: number;
   retry_delay?: number;
 }>;
 
-type QueueConsumerInfo = Readonly<{
+export type QueueConsumerInfo = Readonly<{
   consumer_id: string;
   // CF Queues API asymmetry: POST/PUT bodies use `script_name`, but
   // GET /queues/{id}/consumers returns the subscribed worker under
@@ -208,6 +208,64 @@ type QueueConsumerInfo = Readonly<{
   type: string;
   settings: QueueConsumerSettings;
 }>;
+
+/** Read this script's exact consumer state without touching another owner. */
+export async function snapshotQueueConsumer(
+  accountId: string,
+  apiToken: string,
+  queueId: string,
+  scriptName: string,
+): Promise<QueueConsumerInfo | null> {
+  const consumers = await cfFetch<ReadonlyArray<QueueConsumerInfo>>(
+    `${CF_API_BASE}/${accountId}/queues/${queueId}/consumers`,
+    apiToken,
+  );
+  return consumers.find((consumer) => consumer.script === scriptName) ?? null;
+}
+
+/** Remove only this script's consumer, leaving a conflicting owner untouched. */
+export async function removeQueueConsumer(
+  accountId: string,
+  apiToken: string,
+  queueId: string,
+  scriptName: string,
+): Promise<void> {
+  const existing = await snapshotQueueConsumer(accountId, apiToken, queueId, scriptName);
+  if (!existing) {
+    return;
+  }
+  await cfFetch(
+    `${CF_API_BASE}/${accountId}/queues/${queueId}/consumers/${existing.consumer_id}`,
+    apiToken,
+    { method: 'DELETE' },
+  );
+}
+
+/** Restore a consumer snapshot exactly, or restore its prior absence. */
+export async function restoreQueueConsumer(
+  accountId: string,
+  apiToken: string,
+  queueId: string,
+  scriptName: string,
+  snapshot: QueueConsumerInfo | null,
+): Promise<void> {
+  if (!snapshot) {
+    await removeQueueConsumer(accountId, apiToken, queueId, scriptName);
+    return;
+  }
+  const consumersUrl = `${CF_API_BASE}/${accountId}/queues/${queueId}/consumers`;
+  const current = await snapshotQueueConsumer(accountId, apiToken, queueId, scriptName);
+  const body = JSON.stringify({
+    script_name: snapshot.script,
+    type: snapshot.type,
+    settings: snapshot.settings,
+  });
+  if (current) {
+    await cfFetch(`${consumersUrl}/${current.consumer_id}`, apiToken, { method: 'PUT', body });
+  } else {
+    await cfFetch(consumersUrl, apiToken, { method: 'POST', body });
+  }
+}
 
 /**
  * Result of a queue consumer upsert. `created` = a new consumer was

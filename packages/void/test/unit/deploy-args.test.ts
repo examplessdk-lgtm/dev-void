@@ -184,9 +184,8 @@ describe('parseDeployArgs', () => {
     expect(result.skipBuild).toBe(true);
   });
 
-  // The Cloudflare backend deploys to the user's own account via wrangler — it resolves no
-  // Void project and takes no static-site path, so these flags cannot be honored. Accepting
-  // and ignoring `--project` in particular looked like it chose a destination.
+  // The Cloudflare backend resolves no Void project. Static flags are shared by
+  // both targets and are interpreted by the selected target adapter.
   it('throws when --project is used with --backend cloudflare', () => {
     expect(() => parseDeployArgs(['--backend', 'cloudflare', '--project', 'foo'])).toThrow(
       /--project is not supported with --platform cloudflare/,
@@ -199,16 +198,12 @@ describe('parseDeployArgs', () => {
     );
   });
 
-  it('throws when --dir is used with --backend cloudflare', () => {
-    expect(() => parseDeployArgs(['--backend', 'cloudflare', '--dir', 'dist'])).toThrow(
-      /--dir is not supported with --platform cloudflare/,
-    );
-  });
-
-  it('throws when --spa is used with --backend cloudflare', () => {
-    expect(() => parseDeployArgs(['--backend', 'cloudflare', '--spa'])).toThrow(
-      /--spa is not supported with --platform cloudflare/,
-    );
+  it('parses --dir and --spa with --backend cloudflare', () => {
+    expect(parseDeployArgs(['--backend', 'cloudflare', '--dir', 'dist', '--spa'])).toMatchObject({
+      backend: 'cloudflare',
+      dir: 'dist',
+      spa: true,
+    });
   });
 
   it('still parses --project, --dir and --spa without --backend (managed path unaffected)', () => {

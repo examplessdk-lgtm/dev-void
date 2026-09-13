@@ -48,7 +48,7 @@ const HELP_TREE: HelpTree = {
       { command: '--spa', description: 'Use SPA mode for static deploys' },
       {
         command: '--skip-build',
-        description: 'Skip the build step and use existing output (not with --platform cloudflare)',
+        description: 'Skip the build step and use existing output (static deploys on Cloudflare)',
       },
       {
         command: '--platform <cloudflare|void>',

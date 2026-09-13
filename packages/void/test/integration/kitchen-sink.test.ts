@@ -55,7 +55,7 @@ describe('playground/kitchen-sink', () => {
       cwd: ROOT,
       stdio: 'pipe',
     });
-    preparePreviewWranglerConfig(pg);
+    const previewDatabaseId = preparePreviewWranglerConfig(pg);
 
     // Start preview server — pre-built assets, no lazy optimization.
     child = spawn(
@@ -90,11 +90,11 @@ describe('playground/kitchen-sink', () => {
     // D1 database so pages that query DB/Auth tables work.
     const { runMigrations, getMiniflareDatabasePath } =
       await import('../../src/migrations/runner.ts');
-    const dbPath = getMiniflareDatabasePath(join(pg, '.void'), 'local');
+    const dbPath = getMiniflareDatabasePath(join(pg, '.void'), previewDatabaseId);
     await runMigrations(join(pg, 'db', 'migrations'), dbPath);
 
     const { runLocalVoidAuthMigrations } = await import('../../src/auth/node.ts');
-    await runLocalVoidAuthMigrations(pg, 'sqlite', join(pg, '.void'), 'local', null);
+    await runLocalVoidAuthMigrations(pg, 'sqlite', join(pg, '.void'), previewDatabaseId, null);
   });
 
   afterAll(async () => {
@@ -546,16 +546,24 @@ describe('playground/kitchen-sink', () => {
 //   - ai (Workers AI) is remote-only, so its presence forces a remote-proxy
 //     session that needs a CF account/login. The build-time AI binding is
 //     covered directly by kitchen-sink-build.test.ts.
-function preparePreviewWranglerConfig(pg: string): void {
+function preparePreviewWranglerConfig(pg: string): string {
   const wranglerPath = join(pg, 'dist', 'ssr', 'wrangler.json');
   const wranglerConfig = JSON.parse(readFileSync(wranglerPath, 'utf-8')) as {
     dev?: Record<string, unknown>;
     ai?: unknown;
+    d1_databases?: Array<{ binding?: unknown; database_id?: unknown }>;
   };
+  const databaseId = wranglerConfig.d1_databases?.find(
+    (binding) => binding.binding === 'DB',
+  )?.database_id;
+  if (typeof databaseId !== 'string' || databaseId.length === 0) {
+    throw new Error('Kitchen-sink preview build did not emit the DB binding database_id.');
+  }
   wranglerConfig.dev = {
     ...(wranglerConfig.dev ?? {}),
     enable_containers: false,
   };
   delete wranglerConfig.ai;
   writeFileSync(wranglerPath, `${JSON.stringify(wranglerConfig, null, 2)}\n`);
+  return databaseId;
 }

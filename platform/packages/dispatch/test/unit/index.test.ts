@@ -1,4 +1,4 @@
-import { isrEdgeCacheUrl } from '@voidcloud/isr-shared';
+import { isrEdgeCacheUrl } from '@void/isr';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 import type { Env } from '../../src/env.ts';
 import app, { rebuildRequest } from '../../src/index.ts';

@@ -71,6 +71,31 @@ export async function verifyProjectOwner(
   }
 }
 
+/** Check that a build-bound prerender credential is still in flight. */
+export async function verifyPrerenderBuild(
+  api: Fetcher,
+  jwtSecret: string,
+  projectId: string,
+  buildId: string,
+): Promise<boolean> {
+  try {
+    const token = await hmacSign(projectId, jwtSecret);
+    const res = await api.fetch(`https://api/internal/verify-prerender-build/${projectId}`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-void-internal': token,
+      },
+      body: JSON.stringify({ buildId }),
+    });
+    return res.ok;
+  } catch {
+    // Project-data access fails closed if the revocation authority is
+    // unavailable. A build can retry without widening its credential.
+    return false;
+  }
+}
+
 // --- HMAC signing (mirrors packages/api/src/auth/hmac.ts) ---
 
 const encoder = new TextEncoder();

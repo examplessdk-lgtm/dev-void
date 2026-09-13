@@ -12,12 +12,28 @@ import {
 } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { isCI as ciInfoIsCI } from 'ci-info';
-import { parse as parseJsoncConfig, type ParseError } from 'jsonc-parser';
-import { basename, dirname, join, relative, resolve } from 'pathslash';
+import { Minimatch } from 'minimatch';
+import { basename, dirname, join, normalize, relative, resolve } from 'pathslash';
 
 const drizzleKitBin = join(fileURLToPath(import.meta.resolve('drizzle-kit')), '..', 'bin.cjs');
 const deployDriftCheckDir = join('.void', 'deploy-drift-check');
 import { intro, outro, log, note, confirm, isCancel, type SpinnerResult } from '@clack/prompts';
+import {
+  activateCloudflareVersion,
+  encodeCloudflareVersionMessage,
+  parseRootWranglerConfig,
+  readCloudflareTriggerConfig,
+  readBindingFieldPresence,
+  readConfigEntryString as readD1EntryString,
+  readStoredResourceName,
+  readWranglerTopLevelString,
+  renderCloudflareStaticEntry,
+  resolveD1MigrateTarget,
+  stageCloudflareStaticAssets,
+  writeCloudflareFrameworkDeployConfig,
+  writeCloudflareStaticDeployConfig,
+} from '@void/deploy-cloudflare';
+import { createDeployArtifact, createDeployUploadPayload } from '@void/deploy-core';
 import {
   hasApiRoutes as routeScanHasApiRoutes,
   hasDocumentRoutes as routeScanHasDocumentRoutes,
@@ -54,12 +70,13 @@ import {
   detectFramework,
   type DetectedFramework,
 } from '../plugin-inference.ts';
-import { collectPrerenderPaths, collectPrerenderPathsNode } from '../prerender.ts';
 import {
-  assertNoRootSourceConventionConflicts,
-  readProjectPaths,
-  resolveProjectPaths,
-} from '../project-paths.ts';
+  collectPrerenderPaths,
+  collectPrerenderPathsNode,
+  prerenderPages,
+  prerenderPagesNode,
+} from '../prerender.ts';
+import { readProjectPaths, resolveProjectPaths } from '../project-paths.ts';
 import { scanQueuesSync } from '../queues/scan.ts';
 import {
   hasEmailHandlers,
@@ -73,12 +90,14 @@ import {
   requiresSandboxPlatformImage,
   resolveSandboxConfig,
 } from '../sandbox/config.ts';
+import { cfAccessHeaders } from '../shared/cf-access.ts';
 import { mergeAndExpand, parseDotenvFile, scanWranglerDotenvKeys } from '../shared/dotenv.ts';
 import {
   CLOUDFLARE_DEPLOY_BUILD_ENV,
   resolveRemoteMode,
   stripInternalEnvKeys,
 } from '../shared/env.ts';
+import { buildEnv, WRANGLER_AUTH_CREDENTIAL_ENV_VARS } from '../shared/untrusted-env.ts';
 import { validateSsrEntry } from '../ssr/entry.ts';
 import { getApiUrl, getToken, getTokenSource } from './auth.ts';
 import {
@@ -87,6 +106,13 @@ import {
   type DeploymentResponse,
   type ManifestOnlyDeployPayload,
 } from './client.ts';
+import { classifyCloudflareDeployApp } from './cloudflare-deploy/classify.ts';
+import { createCloudflareEmptyDomainPublisher } from './cloudflare-operations.ts';
+import {
+  rememberCloudflareWorkersDevSubdomain,
+  resolveCloudflareWorkersDevSubdomain,
+} from './cloudflare-readiness.ts';
+export { parseRootWranglerConfig } from '@void/deploy-cloudflare';
 import { promptAndCreateProject } from './create-project.ts';
 import {
   formatConnectionLostMessage,
@@ -155,7 +181,6 @@ import {
 } from './package.ts';
 import {
   detectPreset,
-  hasBackendFiles,
   FRAMEWORK_PRESETS,
   formatProjectCommand,
   resolveProjectCommand,
@@ -216,17 +241,22 @@ import type {
   AssetConfig,
   DeployEvent,
   DeployManifest,
+  DeployTarget,
+  DeployTargetAdapter,
   DevRedirectRule,
   HeaderRule,
 } from './types.ts';
 import {
+  acknowledgeWranglerManagedQueueRemovals,
   readExistingLiveBindingConfig,
+  readWranglerManagedQueueCleanupCandidates,
+  readWranglerPublishedTrafficSnapshot,
   normalizeWranglerCompatibilityFlags,
   ensureWranglerCompat,
   resolveLiveBindingConfig,
   syncWranglerBindings,
-  syncWranglerDurableObjects,
   writeProvisionedWranglerConfig,
+  writeWranglerPublishedTrafficSnapshot,
   bindingEntriesForField,
   FRIENDLY_BINDING_NAMES,
   type LiveBindingConfig,
@@ -500,8 +530,7 @@ export async function runDeploy(root: string, options?: RunDeployOptions): Promi
 }
 
 /**
- * Build a child-process environment with the CF Access service-token PAIR
- * removed.
+ * Build a child-process environment with deployment credentials removed.
  *
  * The deploy flow spawns UNTRUSTED user build code (`vite build`, framework
  * preset builds, drizzle-kit loading the user schema) which inherits the
@@ -514,8 +543,10 @@ export async function runDeploy(root: string, options?: RunDeployOptions): Promi
  * We scrub it on the CHILD env rather than mutating `process.env`: deleting it
  * from the parent also breaks interactive expired-token re-auth, which reads
  * `cfAccessHeaders(process.env)` / the cloudflared pair-guard AFTER the build
- * step. Only the service-token pair is scrubbed; the cloudflared
- * `CF_ACCESS_TOKEN` JWT (dev path) is left untouched.
+ * step. Managed prerender runs later in this trusted parent process with a
+ * dedicated short-lived proxy credential. The deploy token, Cloudflare,
+ * Access, and production database credentials never reach arbitrary build
+ * scripts or plugins.
  *
  * `localBinRoot` is an explicit OPT-IN, not a default. Build commands are run
  * through a shell (`execSync`) and a user-configured `inference.build` (e.g.
@@ -530,35 +561,7 @@ export async function runDeploy(root: string, options?: RunDeployOptions): Promi
  * path and must not hand a dependency-shipped `node_modules/.bin/git` a child
  * process holding `VOID_TOKEN`.
  */
-export function buildEnv(
-  extra?: Record<string, string>,
-  options?: { localBinRoot?: string },
-): NodeJS.ProcessEnv {
-  const env = { ...process.env, ...extra };
-  delete env.CF_ACCESS_CLIENT_ID;
-  delete env.CF_ACCESS_CLIENT_SECRET;
-  return options?.localBinRoot === undefined
-    ? env
-    : prependLocalBinToPath(env, options.localBinRoot);
-}
-
-/**
- * Prepend `<root>/node_modules/.bin` to the child env's PATH, preserving
- * whatever was already there.
- *
- * PATH is looked up case-insensitively and written back under the SAME key the
- * env already used: Windows reports it as `Path`, and `{ ...process.env }`
- * drops the case-insensitive lookup that `process.env` itself provides, so
- * hardcoding `PATH` would leave the real variable untouched and add a dead one.
- */
-function prependLocalBinToPath(env: NodeJS.ProcessEnv, root: string): NodeJS.ProcessEnv {
-  const binDir = join(root, 'node_modules', '.bin');
-  const delimiter = process.platform === 'win32' ? ';' : ':';
-  const pathKey = Object.keys(env).find((key) => key.toLowerCase() === 'path') ?? 'PATH';
-  const existing = env[pathKey];
-  env[pathKey] = existing ? `${binDir}${delimiter}${existing}` : binDir;
-  return env;
-}
+export { buildEnv } from '../shared/untrusted-env.ts';
 
 /**
  * Marks a build child as driven by a MANAGED `void deploy`.
@@ -1355,7 +1358,8 @@ function deployPointerPath(root: string): string {
 }
 
 /**
- * Wrangler 4.131's FULL credential env-var set, verified against
+ * Cloudflare credential env vars that must not reach untrusted project code. This includes
+ * Wrangler 4.131's full authentication set, verified against
  * `wrangler-dist/cli.js`. It covers every env var wrangler reads to authenticate —
  * the API-client auth inputs (`apiToken`/`apiKey`/`apiEmail`/`userServiceKey`) plus
  * the `getEnvironmentVariableFactory` auth tokens — each canonical name AND its
@@ -1368,6 +1372,7 @@ function deployPointerPath(root: string): string {
  *   - R2 SQL auth token:    `WRANGLER_R2_SQL_AUTH_TOKEN` (a Bearer credential wrangler
  *     reads via `getEnvironmentVariableFactory`, falling back to `CLOUDFLARE_API_TOKEN`)
  *   - Access service token: `CLOUDFLARE_ACCESS_CLIENT_ID` / `CLOUDFLARE_ACCESS_CLIENT_SECRET`
+ *   - Readiness user JWT:   `CF_ACCESS_TOKEN` (Void-only; Wrangler never receives it)
  * Scrubbed from EVERY child that runs untrusted project code — the env-schema probes, the
  * `vite build`, and `drizzle-kit generate` (which loads the user's schema). None of them
  * authenticates against Cloudflare, so a leaking `env.ts` / build plugin / schema module can
@@ -1376,20 +1381,6 @@ function deployPointerPath(root: string): string {
  * (`provisionEnv` already scrubs Void's own `CF_ACCESS_CLIENT_ID/SECRET` pair + the
  * account-id selector; this adds the wrangler-account credentials it does not.)
  */
-const WRANGLER_AUTH_CREDENTIAL_ENV_VARS = [
-  'CLOUDFLARE_API_TOKEN',
-  'CF_API_TOKEN',
-  'CLOUDFLARE_API_KEY',
-  'CF_API_KEY',
-  'CLOUDFLARE_EMAIL',
-  'CF_EMAIL',
-  'CLOUDFLARE_API_USER_SERVICE_KEY',
-  'WRANGLER_CF_AUTHORIZATION_TOKEN',
-  'WRANGLER_R2_SQL_AUTH_TOKEN',
-  'CLOUDFLARE_ACCESS_CLIENT_ID',
-  'CLOUDFLARE_ACCESS_CLIENT_SECRET',
-];
-
 /**
  * Delete every {@link WRANGLER_AUTH_CREDENTIAL_ENV_VARS} entry from `env` IN PLACE and
  * return it, for a child that executes UNTRUSTED project code and needs no Cloudflare
@@ -1413,6 +1404,11 @@ function scrubWranglerAuthCredentials(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv
   for (const name of WRANGLER_AUTH_CREDENTIAL_ENV_VARS) {
     deleteVar(env, name);
   }
+  // These are not Wrangler credentials, but native Cloudflare builds do not
+  // need either one: DATABASE_URL is consumed only by the parent-side
+  // provision/migration steps, and VOID_TOKEN belongs to the managed target.
+  deleteVar(env, 'DATABASE_URL');
+  deleteVar(env, 'VOID_TOKEN');
   return env;
 }
 
@@ -1583,7 +1579,11 @@ export async function syncCloudflareSchemaSecrets(options: {
   excludeKeys?: Array<string>;
   runWrangler: DeployWranglerRun;
   beforeWranglerRun?: () => boolean;
-}): Promise<{ requiredSecretNames: Array<string>; uploaded: number }> {
+}): Promise<{
+  requiredSecretNames: Array<string>;
+  uploaded: number;
+  workerWasMissing?: true;
+}> {
   const excluded = new Set(options.excludeKeys ?? []);
   const secretKeys = [...new Set(options.secretKeys)].filter((key) => !excluded.has(key));
   if (secretKeys.length === 0) {
@@ -1613,6 +1613,7 @@ export async function syncCloudflareSchemaSecrets(options: {
       throw new CloudflareSchemaSecretError('', 'uploader-changed');
     }
   };
+  let workerWasMissing = false;
   const list = async (allowMissingWorker: boolean): Promise<Array<string>> => {
     beforeRun();
     try {
@@ -1628,6 +1629,7 @@ export async function syncCloudflareSchemaSecrets(options: {
       );
     } catch (error) {
       if (allowMissingWorker && error instanceof SelfHostFirstDeployError) {
+        workerWasMissing = true;
         return [];
       }
       if (error instanceof SelfHostFirstDeployError || error instanceof SelfHostSecretListError) {
@@ -1726,7 +1728,11 @@ export async function syncCloudflareSchemaSecrets(options: {
     }
   }
 
-  return { requiredSecretNames, uploaded: entries.length };
+  return {
+    requiredSecretNames,
+    uploaded: entries.length,
+    ...(workerWasMissing ? { workerWasMissing: true as const } : {}),
+  };
 }
 
 /**
@@ -2358,6 +2364,12 @@ export interface CloudflareDeployDeps {
   runWrangler?: DeployWranglerRun;
   /** Run the project's `vite build` (inherited stdio). Throws on a nonzero build. */
   runBuild?: (env: NodeJS.ProcessEnv) => void;
+  /** Run a static/SPA/SSG preset build command. */
+  runStaticBuild?: (command: string, env: NodeJS.ProcessEnv) => void;
+  /** Prepare a standalone framework Worker/config after its native build. */
+  prepareFrameworkArtifact?: typeof prepareCloudflareFrameworkArtifact;
+  /** Upload, readiness-probe, and activate the verified Worker Version. */
+  activateVersion?: typeof activateCloudflareVersion;
   /**
    * Wrangler-uploader content-hash seam (default: {@link hashWranglerUploader}). Snapshotted
    * BEFORE the build and re-checked AFTER, so a build that overwrote the wrangler bundle the
@@ -2374,6 +2386,8 @@ export interface CloudflareDeployDeps {
   syncSchemaSecrets?: typeof syncCloudflareSchemaSecrets;
   /** Generated-deploy-config verification seam (default: {@link verifyGeneratedDeployConfig}). */
   verifyDeployConfig?: typeof verifyGeneratedDeployConfig;
+  /** Resolve the generated config selected by the fresh deploy pointer. */
+  resolveGeneratedConfigPath?: (root: string) => string;
   /** Pre-remote-migrate gate seam (default: {@link assertRemoteMigrationsDeployable}). */
   assertMigrationsDeployable?: typeof assertRemoteMigrationsDeployable;
   /** Migration apply-set equality gate seam (default: {@link checkWranglerMigrationApplySet}). */
@@ -2481,151 +2495,36 @@ function isCleanWranglerExit(result: DeployWranglerRunResult): boolean {
   );
 }
 
-/**
- * Parse the root wrangler config (BOM-aware, trailing commas allowed), matching
- * the provisioner's `readRootConfig`. Returns `{}` when the file is absent or
- * unreadable — callers then treat every field as unset (safe: a genuinely broken
- * config fails later in wrangler with a clear error).
- */
-export function parseRootWranglerConfig(configPath: string): Record<string, unknown> {
-  if (!existsSync(configPath)) {
-    return {};
-  }
-  let raw: string;
-  try {
-    raw = readFileSync(configPath, 'utf-8');
-  } catch {
-    return {};
-  }
-  const content = raw.startsWith('﻿') ? raw.slice(1) : raw;
-  const errors: Array<ParseError> = [];
-  const parsed = parseJsoncConfig(content, errors, { allowTrailingComma: true });
-  if (errors.length > 0 || typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-    return {};
-  }
-  return parsed as Record<string, unknown>;
-}
-
-/** Read a non-empty top-level string field (`account_id` / `name`) from the config. */
-export function readWranglerTopLevelString(
-  config: Record<string, unknown>,
-  field: string,
-): string | undefined {
-  const value = config[field];
-  return typeof value === 'string' && value.length > 0 ? value : undefined;
-}
-
-/** Read the stored resource name (`database_name` / `bucket_name`) for a binding. */
-function readStoredResourceName(
-  config: Record<string, unknown>,
-  field: string,
-  binding: string,
-  nameField: string,
-): string | undefined {
-  const list = config[field];
-  if (!Array.isArray(list)) {
-    return undefined;
-  }
-  for (const entry of list) {
-    if (
-      entry &&
-      typeof entry === 'object' &&
-      (entry as { binding?: unknown }).binding === binding
-    ) {
-      const name = (entry as Record<string, unknown>)[nameField];
-      return typeof name === 'string' && name.length > 0 ? name : undefined;
-    }
-  }
-  return undefined;
-}
+const CLOUDFLARE_WORKERS_PAID_URL = 'https://dash.cloudflare.com/?to=/:account/workers/plans';
+const CLOUDFLARE_CONTAINERS_PRICING_URL = 'https://developers.cloudflare.com/containers/pricing/';
 
 /**
- * Whether a resource binding DECLARES a field at all — present with ANY defined
- * value, INCLUDING an empty string. Distinct from {@link readStoredResourceName}
- * (which collapses both "absent" and "empty string" to `undefined`): a
- * present-but-empty `migrations_pattern: ""` is still a CUSTOM pattern — wrangler
- * 4.131 takes its non-default branch for any value that is not `undefined`
- * (`rawPattern !== void 0`), so an empty pattern diverges from the default flat
- * `*.sql` enumeration this backend validates against. v1 therefore rejects a
- * custom pattern on PRESENCE, not on a non-empty length. Returns the raw value so
- * the caller can name it (never a secret — a wrangler config field).
+ * Actionable, output-independent guidance for the Sandbox entitlement probe.
+ *
+ * A nonzero `wrangler containers list` is intentionally not classified more narrowly: the
+ * Containers API uses the same failure surface when the account has no Workers Paid entitlement
+ * and when an API token lacks Containers / Cloudchamber permission. Claiming either one as fact
+ * would send some users down the wrong path, so the message gives both deterministic remedies.
  */
-function readBindingFieldPresence(
-  config: Record<string, unknown>,
-  field: string,
-  binding: string,
-  key: string,
-): { present: boolean; value: unknown } {
-  const list = config[field];
-  if (!Array.isArray(list)) {
-    return { present: false, value: undefined };
-  }
-  for (const entry of list) {
-    if (
-      entry &&
-      typeof entry === 'object' &&
-      (entry as { binding?: unknown }).binding === binding
-    ) {
-      return Object.hasOwn(entry as object, key)
-        ? { present: true, value: (entry as Record<string, unknown>)[key] }
-        : { present: false, value: undefined };
-    }
-  }
-  return { present: false, value: undefined };
-}
-
-/** Read a `d1_databases` entry's string field. */
-function readD1EntryString(entry: unknown, field: string): string | undefined {
-  if (!entry || typeof entry !== 'object') {
-    return undefined;
-  }
-  const value = (entry as Record<string, unknown>)[field];
-  return typeof value === 'string' && value.length > 0 ? value : undefined;
-}
-
-/**
- * Resolve the token to pass to `wrangler d1 migrations apply` so wrangler's OWN
- * resolution (`getDatabaseInfoFromConfig`, wrangler 4.131 src/d1/utils.ts) selects
- * EXACTLY the `d1_databases` entry the gate validated (matched by `binding`). wrangler
- * iterates the array and returns the FIRST entry where
- * `token === database_name || token === binding`, then uses that entry's `migrations_dir`.
- * We prefer the validated entry's own `database_name` as the token (falling back to the
- * binding), and FAIL CLOSED when an EARLIER entry also matches it — because wrangler would
- * then select the earlier entry (a different DB / an unrelated migrations folder) though
- * the gate validated ours.
- */
-function resolveD1MigrateTarget(
-  config: Record<string, unknown>,
-  binding: string,
-): { ok: true; token: string } | { ok: false; reason: string } {
-  const list = config.d1_databases;
-  if (!Array.isArray(list)) {
-    return { ok: false, reason: `the root config has no "d1_databases" array` };
-  }
-  const validatedIndex = list.findIndex((entry) => readD1EntryString(entry, 'binding') === binding);
-  if (validatedIndex === -1) {
-    return { ok: false, reason: `no d1_databases entry has binding ${JSON.stringify(binding)}` };
-  }
-  const validated = list[validatedIndex];
-  // wrangler matches by database_name OR binding; the validated entry always matches its
-  // own binding, so the binding is a safe fallback token when it has no database_name.
-  const token = readD1EntryString(validated, 'database_name') ?? binding;
-  for (let i = 0; i < validatedIndex; i++) {
-    const earlier = list[i];
-    if (
-      readD1EntryString(earlier, 'database_name') === token ||
-      readD1EntryString(earlier, 'binding') === token
-    ) {
-      return {
-        ok: false,
-        reason:
-          `an earlier d1_databases entry (binding ${JSON.stringify(readD1EntryString(earlier, 'binding'))}, ` +
-          `database_name ${JSON.stringify(readD1EntryString(earlier, 'database_name'))}) also matches the ` +
-          `token ${JSON.stringify(token)}, so wrangler would migrate it instead`,
-      };
-    }
-  }
-  return { ok: true, token };
+export function formatCloudflareSandboxUnavailable(options?: { preflight?: boolean }): string {
+  return [
+    options?.preflight
+      ? 'deploy: this app uses `void/sandbox`, but Void could not verify Cloudflare Containers with the current account and credentials.'
+      : "deploy: Cloudflare rejected access to Containers while deploying this app's Sandbox.",
+    'Cloudflare Containers require the Workers Paid plan and are not available on Workers Free.',
+    '',
+    `Enable Workers Paid: ${CLOUDFLARE_WORKERS_PAID_URL}`,
+    `Containers pricing: ${CLOUDFLARE_CONTAINERS_PRICING_URL}`,
+    '',
+    'If this account already has Workers Paid:',
+    '  • Run `wrangler login` again; or',
+    '  • Give CLOUDFLARE_API_TOKEN Account / Containers: Edit and Account / Cloudchamber: Edit.',
+    '',
+    'Confirm access with `wrangler containers list`, then rerun the deploy.',
+    options?.preflight
+      ? 'No resources were provisioned and the app was not built or deployed.'
+      : 'The Sandbox container was not deployed.',
+  ].join('\n');
 }
 
 /** The length cap {@link toValidWorkerName} applies (the CF plugin's own rule). */
@@ -3611,12 +3510,80 @@ export function compareWranglerMigrationPaths(a: string, b: string): number {
   return aSegments.length - bSegments.length;
 }
 
+export function resolveWranglerMigrationPattern(
+  config: Record<string, unknown>,
+  binding: string,
+  migrationsDirRaw: string,
+): { ok: true; pattern: string } | { ok: false; reason: string } {
+  const field = readBindingFieldPresence(config, 'd1_databases', binding, 'migrations_pattern');
+  const migrationsDir = normalize(migrationsDirRaw.replace(/\\/g, '/')).replace(/\/$/, '');
+  if (!field.present) {
+    return { ok: true, pattern: '*.sql' };
+  }
+  const directoryField = readBindingFieldPresence(
+    config,
+    'd1_databases',
+    binding,
+    'migrations_dir',
+  );
+  if (!directoryField.present) {
+    return {
+      ok: false,
+      reason:
+        `deploy: migrations_pattern for D1 binding ${binding} requires an explicit ` +
+        'migrations_dir in the same binding.',
+    };
+  }
+  if (typeof field.value !== 'string' || field.value.length === 0) {
+    return {
+      ok: false,
+      reason: `deploy: migrations_pattern for D1 binding ${binding} must be a non-empty string.`,
+    };
+  }
+  const normalized = normalize(field.value.replace(/\\/g, '/')).replace(/\/$/, '');
+  const prefix = migrationsDir === '.' ? '' : `${migrationsDir}/`;
+  if (prefix && !normalized.startsWith(prefix)) {
+    return {
+      ok: false,
+      reason:
+        `deploy: migrations_pattern ${JSON.stringify(field.value)} must start with ` +
+        `${JSON.stringify(`${migrationsDir}/`)} to match migrations_dir ${JSON.stringify(migrationsDirRaw)}.`,
+    };
+  }
+  const pattern = prefix ? normalized.slice(prefix.length) : normalized;
+  try {
+    new Minimatch(pattern, { dot: false });
+  } catch (error) {
+    return {
+      ok: false,
+      reason: `deploy: invalid migrations_pattern ${JSON.stringify(field.value)} — ${getErrorMessage(error)}`,
+    };
+  }
+  return { ok: true, pattern };
+}
+
+function listWranglerMigrationFiles(directory: string, pattern: string): Array<string> {
+  const matcher = new Minimatch(pattern, { dot: false });
+  const files: Array<string> = [];
+  const visit = (absolute: string, relativeDirectory: string): void => {
+    for (const entry of readdirSync(absolute, { withFileTypes: true })) {
+      const relativePath = relativeDirectory ? `${relativeDirectory}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) {
+        visit(join(absolute, entry.name), relativePath);
+      } else if (entry.isFile() && matcher.match(relativePath)) {
+        files.push(relativePath);
+      }
+    }
+  };
+  visit(directory, '');
+  return files.sort(compareWranglerMigrationPaths);
+}
+
 /**
  * Assert the migration files wrangler 4.131 will APPLY — in the ORDER it applies them — equal
  * the gated source set. wrangler resolves its OWN files from the D1 entry's `migrations_dir`
- * (relative to the config-file dir) with the DEFAULT pattern `<dir>/*.sql` (a custom
- * `migrations_pattern` is rejected pre-account, so only the default flat `*.sql` enumeration —
- * top-level, `{ dot:false }` — reaches here), tracks each by its `.sql` name, and applies them
+ * (relative to the config-file dir) with either the default `<dir>/*.sql` pattern or the
+ * configured `migrations_pattern`, tracks each by its relative `.sql` name, and applies them
  * sorted by its numeric-prefix comparator ({@link compareWranglerMigrationPaths}) — the exact
  * sequence `d1 migrations apply` runs against REMOTE D1. This backend VALIDATES the set
  * `collectMigrations` reads (flat dir, `seed.sql` excluded, sorted lexicographically). Two
@@ -3626,8 +3593,8 @@ export function compareWranglerMigrationPaths(a: string, b: string): number {
  * order wrangler applies must equal Void's gated order position-for-position, so the local
  * runner + deploy gates validate the exact order remote D1 receives (an unpadded prefix like
  * `2_` vs `10_` sorts differently lexicographically-vs-numerically and diverges — reject). A
- * defensive custom-pattern check fails closed if one slips past the pre-account guard. Exported
- * for unit testing.
+ * custom patterns are accepted only when their exact result matches that gated set. Exported for
+ * unit testing.
  */
 export async function checkWranglerMigrationApplySet(
   configPath: string,
@@ -3646,31 +3613,11 @@ export async function checkWranglerMigrationApplySet(
         `Align "migrations_dir" with your db/migrations, then rerun.`,
     };
   }
-  // Defense in depth: a custom migrations_pattern is rejected pre-account (v1 = default
-  // convention only). If one reaches here, fail closed rather than assume the flat `*.sql`.
-  // Reject on PRESENCE (any defined value, incl. `""`): a present-but-empty pattern is
-  // still non-default to wrangler, and it would otherwise be indistinguishable from absent.
-  const migrationsPattern = readBindingFieldPresence(
-    config,
-    'd1_databases',
-    binding,
-    'migrations_pattern',
-  );
-  if (migrationsPattern.present) {
-    return {
-      ok: false,
-      reason:
-        `deploy: a custom migrations_pattern (${JSON.stringify(migrationsPattern.value)}) is not ` +
-        `supported — v1 deploys only the default db/migrations/*.sql convention. Remove it, then rerun.`,
-    };
+  const resolvedPattern = resolveWranglerMigrationPattern(config, binding, migrationsDirRaw);
+  if (!resolvedPattern.ok) {
+    return resolvedPattern;
   }
-  // wrangler's DEFAULT enumeration: top-level `.sql` files, dotfiles excluded (Minimatch
-  // `*.sql` with `{ dot:false }` never crosses `/`, so `meta/` is not walked), APPLIED in
-  // wrangler's numeric-prefix order.
-  const wranglerNames = readdirSync(absDir, { withFileTypes: true })
-    .filter((entry) => entry.isFile() && entry.name.endsWith('.sql') && !entry.name.startsWith('.'))
-    .map((entry) => entry.name.replace(/\\/g, '/'))
-    .sort(compareWranglerMigrationPaths);
+  const wranglerNames = listWranglerMigrationFiles(absDir, resolvedPattern.pattern);
   const wranglerContent = new Map(
     wranglerNames.map((name) => [name, readFileSync(join(absDir, name), 'utf-8')]),
   );
@@ -4134,7 +4081,8 @@ export async function ensureCloudflareAuthSecret(options: {
   workerName: string;
   runWrangler: DeployWranglerRun;
   beforeWranglerRun?: () => boolean;
-}): Promise<{ created: boolean }> {
+}): Promise<{ created: boolean; workerWasMissing?: true }> {
+  let workerWasMissing = false;
   const beforeRun = (): void => {
     if (options.beforeWranglerRun && !options.beforeWranglerRun()) {
       throw new CloudflareAuthSecretError('', 'uploader-changed');
@@ -4155,6 +4103,7 @@ export async function ensureCloudflareAuthSecret(options: {
       );
     } catch (error) {
       if (allowMissingWorker && error instanceof SelfHostFirstDeployError) {
+        workerWasMissing = true;
         return [];
       }
       if (error instanceof SelfHostSecretListError) {
@@ -4207,7 +4156,7 @@ export async function ensureCloudflareAuthSecret(options: {
       'verification-failed',
     );
   }
-  return { created: true };
+  return { created: true, ...(workerWasMissing ? { workerWasMissing: true as const } : {}) };
 }
 
 /**
@@ -4242,9 +4191,33 @@ export async function runCloudflareDeploy(
 ): Promise<void> {
   const exit = deps.exit ?? ((code: number): never => process.exit(code));
   const voidConfig = readConfig(root);
+  const detectedFramework = detectFramework(root);
+  const frameworkPreset = detectedFramework ? FRAMEWORK_PRESETS[detectedFramework.name] : undefined;
   cliLog.info('cloudflare_deploy_start', {
     provision: options.provision === true ? true : undefined,
   });
+
+  // Static deploys branch before the full Worker classifier, so keep the
+  // runtime-target guard ahead of both paths. An explicit Cloudflare deploy
+  // must never reinterpret a node/bun/deno project as a Workers Assets app.
+  if (isNodeTarget(voidConfig.target)) {
+    log.error(
+      [
+        `deploy: --platform cloudflare is not supported for the "${voidConfig.target}" target.`,
+        'This backend deploys Cloudflare Workers only. Deploy a node/bun/deno build with its',
+        'own host/runtime, or use the default Cloudflare target for --platform cloudflare.',
+      ].join('\n'),
+    );
+    return exit(1);
+  }
+
+  const provisionModule = await loadProvisionModule();
+  const staticPreset =
+    resolveCloudflareStaticPreset(root, voidConfig, options) ??
+    (await resolveCloudflareVoidStaticPreset(root, voidConfig));
+  if (staticPreset) {
+    return runCloudflareStaticDeploy(root, options, voidConfig, staticPreset, cliLog, deps);
+  }
 
   // 0. Flag guard — `--skip-build` cannot be honored by this backend, so REJECT the
   // combination rather than silently ignore it. Every gate on this path reads the artifact
@@ -4271,131 +4244,11 @@ export async function runCloudflareDeploy(
   // reach its transport/drift/scrub primitives without a static import that would
   // make every managed `void deploy` eagerly load the provision lifecycle. Awaited
   // here BEFORE any sync helper that calls `requireProvisionModule()`.
-  const provisionModule = await loadProvisionModule();
-
-  // 1. App-class narrowing — v1 of `--backend cloudflare` supports ONE well-understood
-  // shape: a FULL VOID APP (worker-bearing, running `routingPlugin`) on the Cloudflare
-  // Workers target, with D1/KV/R2/Queues/Hyperdrive, auth, and ISR.
-  // Everything else FAILS CLOSED here, BEFORE any account / preflight / provision / build
-  // op, reusing the SAME classifiers the managed deploy path uses (`detectPreset` +
-  // `detectFramework`) so this fork can never disagree with the build about what the app is.
-
-  // 1a. Target guard — this backend deploys Cloudflare Workers ONLY. A node/bun/deno target
-  // builds a non-CF worker; reject before the desired set or any account operation.
-  if (isNodeTarget(voidConfig.target)) {
-    log.error(
-      [
-        `deploy: --platform cloudflare is not supported for the "${voidConfig.target}" target.`,
-        'This backend deploys Cloudflare Workers only. Deploy a node/bun/deno build with its',
-        'own host/runtime, or use the default Cloudflare target for --platform cloudflare.',
-      ].join('\n'),
-    );
-    return exit(1);
-  }
-
-  // 1b. Framework guard — v1 defers the ENTIRE framework SSR path (every class). Class A
-  // (tanstack-start / react-router / vinext) composes the Void CF stack but the framework
-  // owns its own entry + routing; Class B/C (sveltekit / nuxt / analog / astro) build
-  // through their own adapter with NO CF Vite plugin, so `vite build` emits no worker
-  // artifact here. Rejecting all of them leaves exactly one supported class — the full Void
-  // app that runs `routingPlugin` and emits ISR coherently — so this fork never has to
-  // reason about framework wiring. Checked before the static guard so a framework app with
-  // no Void backend dirs gets the framework message, not a misleading static one.
-  const framework = detectFramework(root);
-  if (framework) {
-    log.error(
-      [
-        `deploy: --platform cloudflare does not yet support framework SSR (${framework.name}).`,
-        'v1 deploys full Void apps only. Deploy this framework with `void deploy` (the managed',
-        'platform) or the framework’s own Cloudflare adapter. Framework SSR support for this',
-        'backend is a follow-up.',
-      ].join('\n'),
-    );
-    return exit(1);
-  }
-
-  // 1c. Static / SPA / SSG guard — reuse the MANAGED path's own classifier `detectPreset`
-  // (NOT `resolveStaticDeployPreset`, whose fallback fires only for an explicit `--dir` or a
-  // configured `inference.appType`, so an UNCONFIGURED static/SPA/SSG app slips past it).
-  // `detectPreset` structurally detects an SSG dep, a Vite-only SPA, and prebuilt html; the
-  // explicit `--dir` / `--spa` intents and a configured static appType are checked alongside
-  // it (a configured-but-not-yet-built static app has no structural marker for `detectPreset`).
-  // `voidConfig.output === 'static'` is the SSG signal the BUILD itself branches on
-  // (index.ts `void:env` skips worker minify + prerenders the SSR bundle for it, deploy.ts
-  // `deployConfig.output === 'static'` takes the static-asset path). A pages/ project with
-  // `output: "static"` satisfies `hasBackendFiles` and yields a `null` `detectPreset`, so
-  // without this signal it would slip past the guard and reach account/build as if it were a
-  // full worker app — include it in the reject.
-  const staticPreset = detectPreset(root, { dir: options.dir, spa: options.spa });
-  const configuredStatic =
-    voidConfig.inference?.appType === 'static' ||
-    voidConfig.inference?.appType === 'spa' ||
-    voidConfig.output === 'static';
-  if (staticPreset || configuredStatic || options.dir || options.spa) {
-    const appType = staticPreset?.appType ?? (options.spa ? 'spa' : 'static');
-    log.error(
-      [
-        `deploy: --platform cloudflare does not yet support ${appType} (static-asset) apps.`,
-        'The Cloudflare backend v1 deploys full Void apps (worker-bearing) on the Cloudflare',
-        'Workers target. Deploy this app with `void deploy` (the managed platform), or host',
-        'the built assets on Cloudflare Pages / any static host.',
-      ].join('\n'),
-    );
-    return exit(1);
-  }
-
-  // 1d. Positive full-Void assertion — the app must actually be worker-bearing. Mirrors the
-  // managed dispatch's `runFullDeploy` branch (a `null` preset with no framework) and rejects
-  // a bare project with no backend files (no routes/pages/middleware/crons/queues/SSR entry)
-  // that `detectPreset` also returns `null` for.
-  if (!hasBackendFiles(root)) {
-    log.error(
-      [
-        'deploy: --platform cloudflare found no Void backend to deploy.',
-        'A full Void app has at least one of: routes/, pages/, middleware, crons/, queues/,',
-        'email/, or an SSR entry. Add your server code, or use `void deploy` for a static site.',
-      ].join('\n'),
-    );
-    return exit(1);
-  }
-
-  // 1e. voidPlugin structural rejects — mirror the deterministic throws voidPlugin itself
-  // hits during `vite build`, reusing voidPlugin's OWN validators (no re-derivation), so an
-  // app that cannot build never reaches account mutation first: a sourceDir convention
-  // duplicated at the root (`assertNoRootSourceConventionConflicts`), a broken SSR entry
-  // (`validateSsrEntry`), and a malformed cron file (`scanJobsSync`). (sandbox / void/live /
-  // AI / remote / websocket are wired fine by the full-Void self-host build — no guard.)
-  const paths = resolveProjectPaths(root, voidConfig);
-  try {
-    assertNoRootSourceConventionConflicts(paths);
-    validateSsrEntry(root, paths);
-    scanJobsSync(root, paths.cronsDir);
-    syncWranglerDurableObjects(root, scanDurableObjectModules(root));
-  } catch (err) {
-    log.error(`deploy: ${getErrorMessage(err)}`);
-    return exit(1);
-  }
-
-  // 1f. WebSocket / Durable Object guard — FAIL CLOSED before any account op. For a `.ws.ts`
-  // route, the self-host `vite build` emits a `durable_objects` binding plus a DO migration
-  // block keyed `new_classes` (index.ts `mergeBindings`, via the SAME `scanWebSocketRoutesSync`
-  // scan; also cli/wrangler.ts for provisioning) — i.e. a KEY-VALUE-backed Durable Object
-  // namespace. As of Cloudflare's 2026-07-09 change, a fresh account (every Workers Free
-  // account, and any account with no pre-existing KV-backed namespace) REJECTS a `new_classes`
-  // migration at `wrangler deploy` ("create a namespace using a new_sqlite_classes migration
-  // instead"). So a websocket app deployed to a fresh own-account hard-fails after the build.
-  // Emitting `new_sqlite_classes` is a build-side follow-up; until then reject those apps.
-  // (sandbox / void/live DOs already emit `new_sqlite_classes` — they stay supported.)
-  if (scanWebSocketRoutesSync(root, paths, 'prod').length > 0) {
-    log.error(
-      [
-        'deploy: --platform cloudflare does not yet support WebSocket / Durable Object routes.',
-        'A `.ws.ts` route makes the build emit a key-value-backed Durable Object namespace',
-        '(a `new_classes` migration), which a fresh Cloudflare account (and every Workers Free',
-        'account) refuses to create. Deploy this app with `void deploy` (the managed platform).',
-        'SQLite-backed WebSocket support for this backend is a follow-up.',
-      ].join('\n'),
-    );
+  // 1. App-class narrowing — reject every artifact shape the current native
+  // verifier cannot prove safe before any account, provision, or build op.
+  const classification = classifyCloudflareDeployApp(root, voidConfig, options);
+  if (!classification.supported) {
+    log.error(classification.reason);
     return exit(1);
   }
 
@@ -4436,32 +4289,18 @@ export async function runCloudflareDeploy(
     return exit(1);
   }
 
-  // 2b. Custom migrations_pattern guard — FAIL CLOSED before any account op. v1 supports ONLY
-  // Void's default migration convention: `db/migrations/*.sql` with wrangler's default
-  // `migrations_pattern` (unset). An explicit `migrations_pattern` makes wrangler enumerate its
-  // remote-apply set through Minimatch over a custom glob, which can diverge from Void's
-  // `collectMigrations` (flat dir, `seed.sql` excluded) — so it would apply an unverifiable set
-  // to remote D1. Rejecting a custom pattern removes that divergence entirely; the default
-  // convention still gets ORDER-parity checked at 6b. (Only the DEPLOYED D1 entry matters.)
+  // 2b. Validate Wrangler's migration glob before any account operation. Custom patterns are
+  // supported, but they must follow Wrangler's migrations_dir prefix rule; the post-build gate
+  // later enumerates the exact Minimatch result and requires byte-for-byte set and order parity
+  // with Void's validated migrations before any remote D1 mutation.
   if (desired.d1) {
-    // Reject on PRESENCE (any defined value, incl. `""`) — a present-but-empty pattern is
-    // still non-default to wrangler, and readStoredResourceName can't tell absent from empty.
-    const migrationsPattern = readBindingFieldPresence(
+    const migrationsPattern = resolveWranglerMigrationPattern(
       parseRootWranglerConfig(configPath),
-      'd1_databases',
       desired.d1.binding,
-      'migrations_pattern',
+      desired.d1.migrationsDir ?? relative(dirname(configPath), migrationsDir),
     );
-    if (migrationsPattern.present) {
-      log.error(
-        [
-          `deploy: --platform cloudflare does not support a custom migrations_pattern (${JSON.stringify(migrationsPattern.value)}).`,
-          'v1 deploys only the default Void migration convention: db/migrations/*.sql with',
-          "wrangler's default pattern (leave `migrations_pattern` unset). A custom glob would",
-          'apply a set to remote D1 that Void cannot verify against its own db/migrations.',
-          `Remove "migrations_pattern" from the ${desired.d1.binding} D1 binding, then rerun.`,
-        ].join('\n'),
-      );
+    if (!migrationsPattern.ok) {
+      log.error(migrationsPattern.reason);
       return exit(1);
     }
   }
@@ -4500,6 +4339,13 @@ export async function runCloudflareDeploy(
         'void cannot intercept — so the account must be pinned before deploying.',
       ].join('\n'),
     );
+    return exit(1);
+  }
+  let workersDevSubdomain: string | undefined;
+  try {
+    workersDevSubdomain = resolveCloudflareWorkersDevSubdomain(root, accountId);
+  } catch (error) {
+    log.error(getErrorMessage(error));
     return exit(1);
   }
 
@@ -4689,7 +4535,9 @@ export async function runCloudflareDeploy(
     return exit(1);
   }
   const whoami = await Promise.resolve(
-    runWrangler(['whoami', '--json', '-c', configPath, '--env='], { capture: true }),
+    runWrangler(['whoami', '--json', ...existingWranglerConfigArgs(configPath), '--env='], {
+      capture: true,
+    }),
   );
   if (!isCleanWranglerExit(whoami)) {
     log.error(
@@ -4701,6 +4549,31 @@ export async function runCloudflareDeploy(
       ].join('\n'),
     );
     return exit(1);
+  }
+
+  // 3f. Sandbox is the one public Void feature whose native Cloudflare runtime has a hard
+  // Workers Paid dependency: `void/sandbox` emits a Cloudflare Container application. Verify the
+  // account entitlement + the active credential BEFORE provisioning any inferred resources or
+  // running the project build. `containers list --json` is a read-only account probe and succeeds
+  // even when the account has no existing containers. Its failure surface deliberately conflates
+  // a missing Workers Paid entitlement with insufficient API-token permissions, so the diagnostic
+  // explains both remedies instead of guessing from a 403. Apps that do not use Sandbox never run
+  // this probe and retain a Workers Free-compatible deploy path.
+  if (needsSandbox) {
+    if (!assertUploaderStillPinned()) {
+      return exit(1);
+    }
+    const containers = await Promise.resolve(
+      runWrangler(
+        ['containers', 'list', '--json', ...existingWranglerConfigArgs(configPath), '--env='],
+        { capture: true },
+      ),
+    );
+    if (!isCleanWranglerExit(containers)) {
+      log.error(formatCloudflareSandboxUnavailable({ preflight: true }));
+      return exit(1);
+    }
+    cliLog.info('cloudflare_sandbox_available');
   }
 
   // 4. Ensure every inferred resource exists. Missing id-bearing bindings trigger this
@@ -4866,7 +4739,37 @@ export async function runCloudflareDeploy(
   // below could never confirm the pin. Persisting it makes the documented env-only pin
   // deploy the verified account. (`workerName` was resolved from the same root `name` before the
   // email step, which never touches it.)
-  writeProvisionedWranglerConfig(root, { name: workerName, accountId }, { configPath });
+  const frameworkQueues = detectedFramework
+    ? scanQueuesSync(root, resolveProjectPaths(root, voidConfig).queuesDir)
+    : [];
+  writeProvisionedWranglerConfig(
+    root,
+    {
+      name: workerName,
+      accountId,
+      ...(detectedFramework
+        ? {
+            queues: {
+              producers: frameworkQueues.map((queue) => ({
+                queue: queue.name,
+                binding: queue.bindingName,
+              })),
+              consumers: frameworkQueues.map((queue) => ({
+                queue: queue.name,
+                ...(queue.maxBatchSize != null && { max_batch_size: queue.maxBatchSize }),
+                ...(queue.maxBatchTimeout != null && {
+                  max_batch_timeout: queue.maxBatchTimeout,
+                }),
+                ...(queue.maxRetries != null && { max_retries: queue.maxRetries }),
+                ...(queue.retryDelay != null && { retry_delay: queue.retryDelay }),
+              })),
+              reconcileVoidOwned: true,
+            },
+          }
+        : {}),
+    },
+    { configPath },
+  );
 
   // 6. Pin the id-bearing binding IDENTITIES across the build, mirroring the account_id pin.
   // Provision (step 4) wrote each real id into the root config via `wrangler <res> create
@@ -4968,7 +4871,10 @@ export async function runCloudflareDeploy(
   const runBuild =
     deps.runBuild ??
     ((env: NodeJS.ProcessEnv) => {
-      execSync(resolveProjectCommand(root, 'vite build'), { cwd: root, stdio: 'inherit', env });
+      const command = frameworkPreset
+        ? (voidConfig.inference?.build ?? resolveProjectCommand(root, frameworkPreset.buildCommand))
+        : resolveProjectCommand(root, 'vite build');
+      execSync(command, { cwd: root, stdio: 'inherit', env });
     });
   // The wrangler UPLOADER was pinned into `wranglerUploaderHashBefore` at the START of the deploy
   // (before the env-schema probe and the pre-build credentialed runs), and `assertUploaderStillPinned`
@@ -4982,6 +4888,24 @@ export async function runCloudflareDeploy(
   } catch (err) {
     log.error(`deploy: build failed — ${getErrorMessage(err)}`);
     return exit(getExitCode(err));
+  }
+  if (detectedFramework && frameworkPreset) {
+    try {
+      await (deps.prepareFrameworkArtifact ?? prepareCloudflareFrameworkArtifact)(
+        root,
+        configPath,
+        accountId,
+        workerName,
+        voidConfig,
+        detectedFramework,
+        frameworkPreset,
+      );
+    } catch (error) {
+      log.error(
+        `deploy: could not prepare ${detectedFramework.name} for Cloudflare — ${getErrorMessage(error)}`,
+      );
+      return exit(1);
+    }
   }
   // Early fail — re-check right after the build, before the ground-truth gates do any work. No
   // remote mutation has happened since the baseline was pinned, so a changed/unverifiable uploader
@@ -5299,6 +5223,12 @@ export async function runCloudflareDeploy(
     }
   }
 
+  // Remember whether a secret operation proved the Worker was absent before it wrote anything.
+  // Wrangler creates an active placeholder version while attaching the first secret. The version
+  // activator needs this proof to distinguish that placeholder from an existing application when
+  // Cloudflare requires a one-time ordinary deploy for initial Durable Object migrations.
+  let workerWasMissingBeforeSecretProvisioning = false;
+
   // 8e. Persistent Better Auth secret — after every local/build-derived gate,
   // but before the first remote migration or worker upload. Existing secrets
   // are adopted unchanged; a missing value is generated once, sent over stdin,
@@ -5340,6 +5270,7 @@ export async function runCloudflareDeploy(
         runWrangler,
         beforeWranglerRun: assertUploaderStillPinned,
       });
+      workerWasMissingBeforeSecretProvisioning ||= authSecret.workerWasMissing === true;
       cliLog.info('cloudflare_auth_secret_ready', { created: authSecret.created });
     } catch (error) {
       if (error instanceof CloudflareAuthSecretError && error.reason === 'uploader-changed') {
@@ -5497,6 +5428,7 @@ export async function runCloudflareDeploy(
         runWrangler,
         beforeWranglerRun: assertUploaderStillPinned,
       });
+      workerWasMissingBeforeSecretProvisioning ||= synced.workerWasMissing === true;
       requiredSchemaSecretNames = synced.requiredSecretNames;
       cliLog.info('cloudflare_schema_secrets_ready', { uploaded: synced.uploaded });
     } catch (error) {
@@ -5551,44 +5483,82 @@ export async function runCloudflareDeploy(
     return exit(1);
   }
 
-  // 11. Deploy — bare `wrangler deploy` follows .wrangler/deploy/config.json →
-  // dist/ssr/wrangler.json (which carries the real ids + pinned account). `--env=` pins
-  // the top-level env so an ambient CLOUDFLARE_ENV cannot reselect a named one.
+  // 11. Deploy the exact generated config verified above. Passing its absolute path
+  // explicitly keeps the version upload AND the later trigger synchronization on the
+  // same artifact. `versions upload` follows the deploy pointer on its own, but
+  // `triggers deploy` does not; omitting `configPath` here would therefore upload the
+  // generated cron/queue configuration and then synchronize triggers from the root
+  // config, silently dropping generated Cron Triggers and queue consumers.
   // `--experimental-provision=false` / `--experimental-auto-create=false` disable
   // wrangler 4.131's OWN resource provisioning (both default true, deployCommand +
   // globalFlags, wrangler-dist/cli.js), so ONLY `provisionCloudflareResources` may create
   // resources — a bare deploy can never auto-create a missing binding (e.g. an R2 bucket
   // absent remotely but passing the local drift predicate), even in CI.
   // `--autoconfig=false` disables wrangler 4.131's framework detection + auto-config
-  // (`autoconfig` defaults true, deployCommand cli.js:283108). Without it, and because we
-  // pass no `-c`, a detected framework marker (e.g. OpenNext) makes wrangler DELEGATE the
-  // deploy to another tool (`maybeDelegateToOpenNextDeployCommand`, cli.js:282991) — which
+  // (`autoconfig` defaults true, deployCommand cli.js:283108). Without it, a detected
+  // framework marker (e.g. OpenNext) can make wrangler DELEGATE the deploy to another tool
+  // (`maybeDelegateToOpenNextDeployCommand`, cli.js:282991) — which
   // would upload something OTHER than the artifact Void just built and verified. Forcing it
   // off guarantees wrangler uploads exactly the verified `dist/ssr/wrangler.json`.
   //
   // Final uploader re-verification immediately before the deploy — the last and most privileged
   // credentialed run of the hashed bundle. Against the same pre-build baseline; fail closed.
-  if (!assertUploaderStillPinned()) {
-    return exit(1);
-  }
-  const deployResult = await Promise.resolve(
-    runWrangler(
-      [
-        'deploy',
-        '--env=',
-        '--experimental-provision=false',
-        '--experimental-auto-create=false',
-        '--autoconfig=false',
-      ],
-      { capture: false },
+  const generatedConfigPath = (
+    deps.resolveGeneratedConfigPath ??
+    ((projectRoot) => readGeneratedDeployConfig(projectRoot).path)
+  )(root);
+  const queueConsumerCleanup = readWranglerManagedQueueCleanupCandidates(configPath);
+  const execution = await (deps.activateVersion ?? activateCloudflareVersion)({
+    runWrangler,
+    verifyUploader: assertUploaderStillPinned,
+    workerName,
+    configPath: generatedConfigPath,
+    message: encodeCloudflareVersionMessage(
+      migrations.map((migration) => migration.name),
+      readCloudflareTriggerConfig(generatedConfigPath),
     ),
-  );
-  if (!isCleanWranglerExit(deployResult)) {
-    log.error(`deploy: \`wrangler deploy\` failed (exit ${String(deployResult.status)}).`);
+    allowFirstDeploymentBootstrap: workerWasMissingBeforeSecretProvisioning,
+    readinessHeaders: cloudflareWorkerReadinessHeaders(),
+    workersDevSubdomain,
+    readinessHeadersWorkersDevSubdomain: process.env.CLOUDFLARE_WORKERS_SUBDOMAIN?.trim()
+      ? workersDevSubdomain
+      : undefined,
+    publishEmptyCustomDomains: createCloudflareEmptyDomainPublisher({
+      accountId,
+      apiBaseUrl,
+      configPath: generatedConfigPath,
+      workerName,
+      runWrangler,
+    }),
+    previousTrafficConfig: readWranglerPublishedTrafficSnapshot(configPath),
+    queueConsumerCleanup,
+  });
+  if (!execution.ok) {
+    log.error(
+      needsSandbox && execution.containersUnavailable
+        ? formatCloudflareSandboxUnavailable()
+        : formatCloudflareActivationError(execution),
+    );
     return exit(1);
   }
-  cliLog.info('cloudflare_deploy_end', { ok: true, worker: workerName });
-  log.success(`Deployed "${workerName}" to your Cloudflare account.`);
+  acknowledgeWranglerManagedQueueRemovals(configPath, queueConsumerCleanup);
+  rememberCloudflareWorkersDevSubdomain(root, accountId, execution.previewUrl);
+  const publishedTraffic = readCloudflareTriggerConfig(generatedConfigPath);
+  writeWranglerPublishedTrafficSnapshot(
+    configPath,
+    {
+      workers_dev: publishedTraffic.workers_dev,
+      preview_urls: publishedTraffic.preview_urls,
+      routes: [...publishedTraffic.routes],
+    },
+    { create: false },
+  );
+  cliLog.info('cloudflare_deploy_end', {
+    ok: true,
+    worker: workerName,
+    versionId: execution.versionId,
+  });
+  log.success(`Deployed "${workerName}" to your Cloudflare account.\n${execution.previewUrl}`);
   // The address map — the one thing nobody can find today (0078). Printed whenever the worker
   // shipped with email set up; a run that went without email already said so at 3b-ii.
   if (emailMap) {
@@ -5611,6 +5581,572 @@ export function discoverRootWranglerConfig(root: string): string {
   return join(root, 'wrangler.jsonc');
 }
 
+/** Avoid making Wrangler open a config path that Void has not created yet. */
+function existingWranglerConfigArgs(configPath: string): Array<string> {
+  return existsSync(configPath) ? ['-c', configPath] : [];
+}
+
+export function formatCloudflareActivationError(
+  result: Exclude<Awaited<ReturnType<typeof activateCloudflareVersion>>, { ok: true }>,
+): string {
+  const status = result.status === undefined ? '' : ` (exit ${String(result.status)})`;
+  const cloudflareCode =
+    result.cloudflareErrorCode === undefined
+      ? ''
+      : ` Cloudflare error code: ${String(result.cloudflareErrorCode)}.`;
+  switch (result.reason) {
+    case 'uploader-changed':
+      if (result.rollback === 'succeeded') {
+        return 'deploy: the verified Wrangler uploader changed after version activation. Traffic was restored to the previous version.';
+      }
+      if (result.rollback === 'unavailable') {
+        return 'deploy: the verified Wrangler uploader changed after the first version activated. No previous version is available; inspect `void project status` immediately.';
+      }
+      if (result.rollback === 'failed') {
+        return 'deploy: the verified Wrangler uploader changed after version activation, and automatic traffic restoration failed. Inspect `void project status` immediately.';
+      }
+      if (result.rollback === 'unsafe') {
+        return 'deploy: the verified Wrangler uploader changed after version activation. Void did not invoke the changed binary to restore traffic; reinstall Wrangler from a trusted lockfile and inspect `void project status` immediately.';
+      }
+      return 'deploy: the verified Wrangler uploader changed before version activation.';
+    case 'status-failed':
+      return `deploy: could not snapshot the current Cloudflare deployment${status}; no version was uploaded.`;
+    case 'deployment-changed':
+      return result.triggerRepair === 'succeeded'
+        ? `deploy: another Cloudflare operation superseded this deployment. Void restored triggers for the active version ${result.activeVersionId ?? '(unknown)'}; retry from fresh deployment status.`
+        : `deploy: another Cloudflare operation superseded this deployment, but its trigger state could not be verified. Inspect the active Worker version ${result.activeVersionId ?? '(unknown)'} immediately.`;
+    case 'traffic-split-unsupported':
+      return [
+        'deploy: the current Cloudflare deployment splits traffic across multiple Worker Versions.',
+        'Void will not flatten an existing gradual rollout to 100%. Finish or cancel that rollout',
+        'in Cloudflare, then retry; no version was uploaded.',
+      ].join('\n');
+    case 'upload-failed':
+      return `deploy: Cloudflare Worker Version upload failed${status}; production traffic is unchanged.${cloudflareCode}`;
+    case 'upload-output-invalid':
+      return 'deploy: Wrangler uploaded a version but did not report its version id; production traffic is unchanged.';
+    case 'preview-unavailable':
+      return [
+        'deploy: the uploaded Worker Version has no preview URL, so Void cannot verify readiness.',
+        'Set CLOUDFLARE_WORKERS_SUBDOMAIN to your account subdomain (for example "my-team")',
+        'and retry. Void caches it after a successful workers.dev deployment; production traffic is unchanged.',
+      ].join('\n');
+    case 'readiness-staging-failed':
+      return `deploy: Cloudflare could not stage the uploaded Worker Version at zero-percent traffic${status}; production traffic is unchanged.`;
+    case 'readiness-failed':
+      return [
+        'deploy: the uploaded Worker Version did not pass /__void/ready.',
+        formatCloudflareReadinessRestoration(result),
+      ].join('\n');
+    case 'readiness-access-denied':
+      return [
+        'deploy: Cloudflare Access blocked the uploaded Worker Version readiness probe.',
+        'For CI, set CF_ACCESS_CLIENT_ID and CF_ACCESS_CLIENT_SECRET to an admitted service token.',
+        'For a local deploy, set CF_ACCESS_TOKEN to a short-lived user JWT from cloudflared.',
+        `Then retry. ${formatCloudflareReadinessRestoration(result)}`,
+      ].join('\n');
+    case 'bootstrap-failed':
+      return `deploy: Cloudflare could not bootstrap the first Worker deployment${status}.${cloudflareCode}`;
+    case 'bootstrap-output-invalid':
+      return [
+        'deploy: Cloudflare bootstrapped the first Worker deployment, but Wrangler',
+        'did not report its version id and workers.dev URL. Inspect `void project status` before retrying.',
+      ].join('\n');
+    case 'bootstrap-readiness-failed':
+      return [
+        'deploy: the first Worker deployment did not pass /__void/ready.',
+        'Cloudflare requires this bootstrap to be non-versioned, so the new Worker is already active;',
+        'inspect its logs and `void project status` before retrying.',
+      ].join('\n');
+    case 'bootstrap-readiness-access-denied':
+      return [
+        'deploy: Cloudflare Access blocked the first Worker deployment readiness probe.',
+        'For CI, set CF_ACCESS_CLIENT_ID and CF_ACCESS_CLIENT_SECRET to an admitted service token;',
+        'for a local deploy, set CF_ACCESS_TOKEN to a short-lived user JWT from cloudflared.',
+        'Then retry. Cloudflare requires the first deployment to be non-versioned, so the new',
+        'Worker is already active behind Access.',
+      ].join('\n');
+    case 'activation-failed':
+      return `deploy: the ready Worker Version could not be activated${status}; production traffic is unchanged.`;
+    case 'triggers-failed': {
+      const rollback =
+        result.rollback === 'succeeded'
+          ? 'Traffic was restored to the previous version.'
+          : result.rollback === 'unavailable'
+            ? 'This was the first deployment, so no previous version was available to restore.'
+            : 'Automatic traffic restoration failed; inspect `void project status` immediately.';
+      return `deploy: the Worker activated, but Cloudflare trigger synchronization failed${status}. ${rollback}`;
+    }
+  }
+}
+
+function formatCloudflareReadinessRestoration(
+  result: Exclude<Awaited<ReturnType<typeof activateCloudflareVersion>>, { ok: true }>,
+): string {
+  switch (result.rollback) {
+    case 'succeeded':
+      return 'The failed version remains inactive, and traffic was restored to the previous version.';
+    case 'failed':
+      return 'Automatic traffic restoration failed; inspect `void project status` immediately.';
+    case 'unsafe':
+      return 'Void did not invoke the changed Wrangler binary to restore traffic; reinstall Wrangler from a trusted lockfile and inspect `void project status` immediately.';
+    case 'unavailable':
+      return 'No previous version was available to restore; inspect `void project status` immediately.';
+    default:
+      return 'The failed version remains inactive for inspection; production traffic is unchanged.';
+  }
+}
+
+/** Capture the Access credential used only by the guarded Worker readiness probe. */
+function cloudflareWorkerReadinessHeaders(): Record<string, string> {
+  return cfAccessHeaders({
+    CF_ACCESS_CLIENT_ID: process.env.CF_ACCESS_CLIENT_ID,
+    CF_ACCESS_CLIENT_SECRET: process.env.CF_ACCESS_CLIENT_SECRET,
+    CF_ACCESS_TOKEN: process.env.CF_ACCESS_TOKEN,
+  });
+}
+
+/** Build the trusted Wrangler pointer for a framework that emits Worker files directly. */
+export async function prepareCloudflareFrameworkArtifact(
+  root: string,
+  configPath: string,
+  accountId: string,
+  workerName: string,
+  voidConfig: VoidConfig,
+  framework: DetectedFramework,
+  preset: FrameworkPreset,
+): Promise<void> {
+  const workerMain = join(root, preset.workerDir, preset.workerMain);
+  const assetsDirectory = join(root, preset.assetsDir);
+  if (!existsSync(workerMain)) {
+    throw new Error(
+      `framework ${framework.name} did not emit its Worker entry at ${preset.workerDir}/${preset.workerMain}`,
+    );
+  }
+  if (!existsSync(assetsDirectory)) {
+    throw new Error(
+      `framework ${framework.name} did not emit its asset directory at ${preset.assetsDir}`,
+    );
+  }
+  const paths = resolveProjectPaths(root, voidConfig);
+  const crons = scanJobsSync(root, paths.cronsDir);
+  const queues = scanQueuesSync(root, paths.queuesDir);
+  await generateDeployWrapperIfNeeded(root, join(root, preset.workerDir), preset.workerMain, {
+    auth: null,
+    crons,
+    queues,
+    // Direct deployment applies migrations before upload; it does not need the
+    // hosted platform's internal migration endpoint in its framework wrapper.
+    hasMigrations: false,
+    migrationDialect: getDatabaseDialect(voidConfig),
+    readiness: true,
+  });
+  if (preset.cloudflareArtifact === 'vite-plugin') {
+    return;
+  }
+  const rootConfig = parseRootWranglerConfig(configPath);
+  writeCloudflareFrameworkDeployConfig({
+    configPath,
+    deployPointerPath: deployPointerPath(root),
+    name: workerName,
+    accountId,
+    main: relative(dirname(configPath), workerMain),
+    assetsDirectory: relative(dirname(configPath), assetsDirectory),
+    compatibilityDate:
+      voidConfig.worker?.compatibility_date ??
+      readWranglerTopLevelString(rootConfig, 'compatibility_date') ??
+      '2026-09-11',
+    compatibilityFlags: preset.cloudflareCompatibilityFlags,
+    crons: crons.flatMap((job) => job.crons),
+    ...(preset.workerDir === preset.assetsDir
+      ? {
+          assetsIgnore: [
+            preset.workerMain,
+            '_routes.json',
+            '__original.js',
+            '__original.mjs',
+            '__void_handlers.mjs',
+            '__void_migration_handler*.mjs',
+          ],
+        }
+      : {}),
+  });
+}
+
+function resolveCloudflareStaticPreset(
+  root: string,
+  voidConfig: VoidConfig,
+  options: Pick<RunDeployOptions, 'dir' | 'spa'>,
+): StaticPreset | null {
+  const configured = resolveStaticDeployPreset(root, voidConfig, options);
+  if (configured) {
+    return {
+      ...configured,
+      buildCommand: resolveStaticBuildCommand(
+        configured,
+        voidConfig.inference?.build,
+        Boolean(options.dir),
+      ),
+    };
+  }
+  if (detectFramework(root)) {
+    return null;
+  }
+  const detected = detectPreset(root, { spa: options.spa, strictBackend: true });
+  return detected
+    ? {
+        ...detected,
+        buildCommand: resolveStaticBuildCommand(detected, voidConfig.inference?.build, false),
+      }
+    : null;
+}
+
+/**
+ * Resolve a Void Pages `output: "static"` app to the thin static edge worker
+ * only when the same source-level conditions used by the managed deploy prove
+ * that no request can require the application worker at runtime. Hybrid SSG
+ * apps deliberately fall through to the normal Worker deploy path.
+ */
+export async function resolveCloudflareVoidStaticPreset(
+  root: string,
+  voidConfig: VoidConfig,
+): Promise<StaticPreset | null> {
+  if (voidConfig.output !== 'static') {
+    return null;
+  }
+
+  const paths = resolveProjectPaths(root, voidConfig);
+  if (!existsSync(paths.pagesDir) || validateSsrEntry(root, paths) !== null) {
+    return null;
+  }
+
+  const routeScan = await scanRoutes(root, {
+    output: voidConfig.output,
+    paths,
+    environment: 'prod',
+  });
+  const pageScan =
+    routeScan.pages.pages.length > 0
+      ? routeScan.pages
+      : await scanPages(root, { output: voidConfig.output, paths });
+  if (
+    pageScan.pages.length === 0 ||
+    !pageScan.pages.every(
+      (page) =>
+        page.shouldPrerender &&
+        ((page.params.length === 0 && !page.catchAll) || page.hasGetPrerenderPaths),
+    )
+  ) {
+    return null;
+  }
+
+  const bindings = inferProjectBindings(root, { paths });
+  const authEnabled =
+    bindings.needsAuth || findVoidAuthConfig(root, paths) !== null || voidConfig.auth !== undefined;
+  // The SAME predicate the managed path's fully-static optimization uses
+  // (`hasNonPageBackend`), so the two static branches can never disagree on
+  // whether an `email/` handler needs a worker: the thin static edge Worker
+  // exports no `email()`, so inbound mail to a project routed there bounces.
+  const hasRuntimeBackend =
+    hasNonPageBackend({
+      hasRoutes: routeScan.routes.length > 0,
+      hasMiddleware: routeScan.middleware.length > 0,
+      hasWebSockets: (routeScan.websockets?.length ?? 0) > 0,
+      hasEmail: routeScan.email !== undefined && hasEmailHandlers(routeScan.email),
+      authEnabled,
+      hasLive: bindings.needsLive === true,
+    }) ||
+    scanJobsSync(root, paths.cronsDir).length > 0 ||
+    scanQueuesSync(root, paths.queuesDir).length > 0;
+  if (hasRuntimeBackend) {
+    return null;
+  }
+
+  return {
+    buildCommand: resolveFullDeployBuildCommand(root, voidConfig.inference?.build).command,
+    outputDir: join(root, 'dist', 'client'),
+    appType: 'static',
+  };
+}
+
+async function runCloudflareStaticDeploy(
+  root: string,
+  options: RunDeployOptions,
+  voidConfig: VoidConfig,
+  preset: StaticPreset,
+  cliLog: CliLogger,
+  deps: CloudflareDeployDeps,
+): Promise<void> {
+  const exit = deps.exit ?? ((code: number): never => process.exit(code));
+  const configPath = discoverRootWranglerConfig(root);
+  const rootConfig = parseRootWranglerConfig(configPath);
+  let apiBaseUrl: string;
+  try {
+    apiBaseUrl = resolveDeployTransport(root, rootConfig);
+  } catch (error) {
+    log.error(`deploy: ${getErrorMessage(error)}`);
+    return exit(1);
+  }
+  const accountId =
+    readWranglerTopLevelString(rootConfig, 'account_id') ??
+    (process.env.CLOUDFLARE_ACCOUNT_ID?.trim() || undefined);
+  if (!accountId) {
+    log.error(
+      'deploy: no Cloudflare account is pinned. Set account_id in wrangler.jsonc or CLOUDFLARE_ACCOUNT_ID.',
+    );
+    return exit(1);
+  }
+  let workersDevSubdomain: string | undefined;
+  try {
+    workersDevSubdomain = resolveCloudflareWorkersDevSubdomain(root, accountId);
+  } catch (error) {
+    log.error(getErrorMessage(error));
+    return exit(1);
+  }
+
+  const runWrangler = deps.runWrangler ?? createDeployWranglerRunner(root, accountId, apiBaseUrl);
+  const hashUploader = deps.hashWranglerUploader ?? hashWranglerUploader;
+  const uploaderHash = hashUploader(root);
+  const rootConfigBeforeBuild = existsSync(configPath) ? readFileSync(configPath, 'utf-8') : null;
+  const uploaderIsPinned = (): boolean => {
+    const result = assertWranglerUploaderUnchanged(uploaderHash, hashUploader(root));
+    if (!result.ok) {
+      log.error(
+        [
+          'deploy: refusing to run the wrangler uploader with your Cloudflare credentials.',
+          result.reason,
+        ]
+          .filter(Boolean)
+          .join('\n'),
+      );
+    }
+    return result.ok;
+  };
+
+  if (!uploaderIsPinned()) {
+    return exit(1);
+  }
+  const whoami = await Promise.resolve(
+    runWrangler(['whoami', '--json', ...existingWranglerConfigArgs(configPath), '--env='], {
+      capture: true,
+    }),
+  );
+  if (!isCleanWranglerExit(whoami)) {
+    log.error('deploy: not authenticated with Cloudflare. Run `wrangler login` and retry.');
+    return exit(1);
+  }
+
+  if (preset.buildCommand && !options.skipBuild) {
+    log.step('Building...');
+    const buildChildEnv = scrubWranglerAuthCredentials(deployChildEnv(accountId, apiBaseUrl));
+    requireProvisionModule().deleteEnvVarCaseAware(buildChildEnv, 'NODE_ENV');
+    buildChildEnv.NODE_ENV = 'production';
+    const runStaticBuild =
+      deps.runStaticBuild ??
+      ((command: string, env: NodeJS.ProcessEnv) => {
+        execSync(command, { cwd: root, stdio: 'inherit', env });
+      });
+    try {
+      runStaticBuild(preset.buildCommand, buildChildEnv);
+    } catch (error) {
+      log.error(`deploy: build failed — ${getErrorMessage(error)}`);
+      return exit(getExitCode(error));
+    }
+  }
+  if (!existsSync(preset.outputDir)) {
+    log.error(`deploy: Output directory '${preset.outputDir}' not found. Run the build first.`);
+    return exit(1);
+  }
+  if (!uploaderIsPinned()) {
+    return exit(1);
+  }
+  const rootConfigAfterBuild = existsSync(configPath) ? readFileSync(configPath, 'utf-8') : null;
+  if (rootConfigAfterBuild !== rootConfigBeforeBuild) {
+    log.error(
+      [
+        'deploy: the root Wrangler config changed during the static build.',
+        'Refusing to upload a config rewritten by project build code. Restore the config and retry.',
+      ].join('\n'),
+    );
+    return exit(1);
+  }
+
+  const merged = mergeRoutingRules({ dir: preset.outputDir, routing: voidConfig.routing });
+  warnRedundantForceOn3xx(merged.redundantForceOn3xx);
+  lintDuplicateSources(merged.redirectRules, 'redirects/rewrites (pre-asset)');
+  lintDuplicateSources(merged.fallbackRules, 'fallbacks (post-asset)');
+  lintDestinationSplats(merged.redirectRules, 'redirects/rewrites (pre-asset)');
+  lintDestinationSplats(merged.fallbackRules, 'fallbacks (post-asset)');
+  const manifest = buildStaticManifest({
+    appType: preset.appType,
+    hashedAssetsPrefix: 'assets',
+    headerRules: merged.headerRules,
+    redirectRules: merged.redirectRules,
+    fallbackRules: merged.fallbackRules,
+    notFound: voidConfig.routing?.notFound,
+  });
+  const entryPath = join(root, '.void', 'deploy', 'cloudflare', 'static-edge.mjs');
+  mkdirSync(dirname(entryPath), { recursive: true });
+  writeFileSync(
+    entryPath,
+    renderCloudflareStaticEntry({
+      runtimeImport: 'void/edge',
+      headerRules: manifest.headerRules,
+      redirectRules: manifest.redirectRules,
+      fallbackRules: manifest.fallbackRules,
+    }),
+  );
+
+  const workerName = readWranglerTopLevelString(rootConfig, 'name') ?? deriveWorkerName(root);
+  // Static deployment needs a fetch-only entry and must detach Worker-only
+  // bindings/triggers, but those are deployment-artifact concerns. Preserve the
+  // user's canonical Wrangler source byte-for-byte so switching back to the
+  // Worker app does not lose hand-authored DOs, workflows, containers, queues,
+  // or comments.
+  const staticConfigPath = join(dirname(entryPath), 'wrangler-static.json');
+  writeFileSync(staticConfigPath, `${JSON.stringify(rootConfig, null, 2)}\n`, { mode: 0o600 });
+  writeCloudflareStaticDeployConfig({
+    configPath: staticConfigPath,
+    name: workerName,
+    accountId,
+    main: relative(dirname(staticConfigPath), entryPath),
+    assetsDirectory: relative(dirname(staticConfigPath), preset.outputDir),
+    compatibilityDate:
+      voidConfig.worker?.compatibility_date ??
+      readWranglerTopLevelString(rootConfig, 'compatibility_date') ??
+      '2026-09-11',
+    assetConfig: manifest.assetConfig ?? { not_found_handling: 'none' },
+  });
+
+  const stagedAssetsDirectory = join(root, '.void', 'deploy', 'cloudflare', 'assets');
+  stageCloudflareStaticAssets({
+    sourceDirectory: preset.outputDir,
+    destinationDirectory: stagedAssetsDirectory,
+  });
+
+  const queueConsumerCleanup = readWranglerManagedQueueCleanupCandidates(configPath);
+  const execution = await (deps.activateVersion ?? activateCloudflareVersion)({
+    runWrangler,
+    verifyUploader: uploaderIsPinned,
+    configPath: staticConfigPath,
+    workerName,
+    message: encodeCloudflareVersionMessage([], readCloudflareTriggerConfig(staticConfigPath)),
+    assetsDirectoryOverride: stagedAssetsDirectory,
+    readinessHeaders: cloudflareWorkerReadinessHeaders(),
+    workersDevSubdomain,
+    readinessHeadersWorkersDevSubdomain: process.env.CLOUDFLARE_WORKERS_SUBDOMAIN?.trim()
+      ? workersDevSubdomain
+      : undefined,
+    publishEmptyCustomDomains: createCloudflareEmptyDomainPublisher({
+      accountId,
+      apiBaseUrl,
+      configPath: staticConfigPath,
+      workerName,
+      runWrangler,
+    }),
+    previousTrafficConfig: readWranglerPublishedTrafficSnapshot(configPath),
+    queueConsumerCleanup,
+  });
+  if (!execution.ok) {
+    log.error(formatCloudflareActivationError(execution));
+    return exit(1);
+  }
+  acknowledgeWranglerManagedQueueRemovals(configPath, queueConsumerCleanup);
+  rememberCloudflareWorkersDevSubdomain(root, accountId, execution.previewUrl);
+  const publishedTraffic = readCloudflareTriggerConfig(staticConfigPath);
+  writeWranglerPublishedTrafficSnapshot(
+    configPath,
+    {
+      workers_dev: publishedTraffic.workers_dev,
+      preview_urls: publishedTraffic.preview_urls,
+      routes: [...publishedTraffic.routes],
+    },
+    { create: false },
+  );
+  cliLog.info('cloudflare_deploy_end', {
+    ok: true,
+    worker: workerName,
+    versionId: execution.versionId,
+  });
+  log.success(`Deployed "${workerName}" to your Cloudflare account.\n${execution.previewUrl}`);
+}
+
+type RunDeployTargetAdapter = DeployTargetAdapter<RunDeployOptions, CliLogger>;
+
+const cloudflareDeployTarget: RunDeployTargetAdapter = {
+  target: 'cloudflare',
+  capabilities: {
+    managedProjects: false,
+    skipBuild: true,
+    appTypes: {
+      void: 'supported',
+      spa: 'supported',
+      static: 'supported',
+      framework: 'supported',
+    },
+    features: {
+      auth: 'supported',
+      cron: 'supported',
+      queues: 'supported',
+      durableState: 'supported',
+      webSockets: 'supported',
+      live: 'supported',
+      sandbox: 'supported',
+      isr: 'supported',
+      remoteDevelopment: 'unsupported',
+      deploymentHistory: 'supported',
+      rollback: 'supported',
+      secrets: 'supported',
+      domains: 'supported',
+      logs: 'partial',
+    },
+  },
+  async deploy(root, options, cliLog): Promise<void> {
+    if (options.projectSlug !== undefined) {
+      throw new Error(
+        'deploy: --project is not supported with platform cloudflare — this platform deploys to your own Cloudflare account and no Void project is involved.',
+      );
+    }
+    return runCloudflareDeploy(root, options, cliLog);
+  },
+};
+
+const voidDeployTarget: RunDeployTargetAdapter = {
+  target: 'void',
+  capabilities: {
+    managedProjects: true,
+    skipBuild: true,
+    appTypes: {
+      void: 'supported',
+      spa: 'supported',
+      static: 'supported',
+      framework: 'supported',
+    },
+    features: {
+      auth: 'supported',
+      cron: 'supported',
+      queues: 'supported',
+      durableState: 'unsupported',
+      webSockets: 'supported',
+      live: 'supported',
+      sandbox: 'supported',
+      isr: 'supported',
+      remoteDevelopment: 'supported',
+      deploymentHistory: 'supported',
+      rollback: 'supported',
+      secrets: 'supported',
+      domains: 'supported',
+      logs: 'supported',
+    },
+  },
+  deploy: runManagedDeploy,
+};
+
+const deployTargets: Record<DeployTarget, RunDeployTargetAdapter> = {
+  cloudflare: cloudflareDeployTarget,
+  void: voidDeployTarget,
+};
+
 async function runDeployInner(
   root: string,
   options: RunDeployOptions | undefined,
@@ -5626,31 +6162,18 @@ async function runDeployInner(
     );
   }
 
-  if (platform === 'cloudflare') {
-    if (options?.projectSlug !== undefined) {
-      throw new Error(
-        'deploy: --project is not supported with platform cloudflare — this platform deploys to your own Cloudflare account and no Void project is involved.',
-      );
-    }
-    if (options?.dir !== undefined) {
-      throw new Error(
-        'deploy: --dir is not supported with platform cloudflare — this platform uploads the worker your build emits, not a static directory.',
-      );
-    }
-    if (options?.spa) {
-      throw new Error(
-        'deploy: --spa is not supported with platform cloudflare — this platform uploads the worker your build emits, not a static SPA.',
-      );
-    }
-  }
+  const targetLabel = platform === 'cloudflare' ? 'Cloudflare' : 'Void';
+  log.info(`Deployment target: ${targetLabel}`);
+  cliLog.info('deploy_target', { target: platform });
 
-  // Fork to the self-hosted Cloudflare platform BEFORE any managed-platform work
-  // (auth token, PlatformClient, project resolution, config read, branch
-  // selection). Everything below stays byte-for-byte the managed `void` path.
-  if (platform === 'cloudflare') {
-    return runCloudflareDeploy(root, options ?? {}, cliLog);
-  }
+  return deployTargets[platform].deploy(root, options ?? {}, cliLog);
+}
 
+async function runManagedDeploy(
+  root: string,
+  options: RunDeployOptions,
+  cliLog: CliLogger,
+): Promise<void> {
   let reauthenticated = false;
   while (true) {
     try {
@@ -5687,17 +6210,10 @@ async function runDeployInner(
         cliLog.info('github_oidc_exchange_start', { slug });
         token = await exchangeGithubOidcForDeployToken(getApiUrl(root), slug);
         maskGithubActionsSecret(token);
-        // Export the minted token so the downstream build/prerender can reach
-        // it. Both prerender paths re-read credentials via `getToken()`, which
-        // reads `process.env.VOID_TOKEN` first: the in-process path
-        // (`collectPrerenderPaths` below) and the spawned `vite build` child
-        // (`plugin-prerender`'s closeBundle, which inherits `process.env` via
-        // `buildEnv`). A local variable can't reach either, so without this the
-        // prerender injects no `__VOID_TOKEN`/`__VOID_PROJECT_ID` and renders
-        // against local/empty bindings (AI, remote D1/KV/R2 break). This
-        // restores parity with the removed scaffold step that wrote
-        // `VOID_TOKEN` to `$GITHUB_ENV`. Guarded by the enclosing `!token`
-        // branch, so an explicit `VOID_TOKEN` is never overwritten.
+        // Keep source accounting and expired-token handling consistent with an
+        // explicit CI token. `buildEnv()` always removes this value before any
+        // project-controlled child starts; managed prerender obtains a separate
+        // proxy-only token from the authenticated platform client.
         process.env.VOID_TOKEN = token;
         cliLog.info('github_oidc_exchange_success', { slug });
       }
@@ -6369,23 +6885,26 @@ async function streamDirectR2Deploy(
   // Build the JSON-mode payload. Worker bytes go in as base64 — the
   // manifest-only endpoint's design (0068) keeps worker bundles in the
   // body since they are bounded at 32 MiB total.
-  const payload: ManifestOnlyDeployPayload = {
+  let encodedWorkerFiles: Record<string, string> | undefined;
+  if (workerFiles && workerFiles.size > 0) {
+    encodedWorkerFiles = {};
+    for (const [relPath, buf] of workerFiles) {
+      encodedWorkerFiles[relPath] = buf.toString('base64');
+    }
+  }
+  const artifact = createDeployArtifact({
     manifest,
     assetManifest,
+    workerFiles: encodedWorkerFiles,
+  });
+  const payload: ManifestOnlyDeployPayload = createDeployUploadPayload(artifact, {
     source: getTokenSource(),
     commit: gitMetadata?.commit ?? null,
     repositoryUrl: gitMetadata?.repositoryUrl ?? null,
     commitUrl: gitMetadata?.commitUrl ?? null,
     gitRef: gitMetadata?.gitRef ?? null,
     preflight: preflightUsed ? 'true' : null,
-  };
-  if (workerFiles && workerFiles.size > 0) {
-    const encoded: Record<string, string> = {};
-    for (const [relPath, buf] of workerFiles) {
-      encoded[relPath] = buf.toString('base64');
-    }
-    payload.workerFiles = encoded;
-  }
+  });
 
   s.message('Finalizing deploy...');
   cliLog?.info('finalize_start', {
@@ -7038,6 +7557,7 @@ async function runFullDeploy(
     ? formatProjectCommand(root, fwPreset.buildCommand)
     : undefined;
   const distDir = resolveDistDir(root, fwPreset, frameworkBuildCmd);
+  const workerDirName = resolveWorkerDirName(distDir, fwPreset, frameworkBuildCmd);
 
   // Detect non-default assetsDir from Vite client manifest for _headers generation
   let assetsPrefix = 'assets';
@@ -7062,6 +7582,35 @@ async function runFullDeploy(
 
   // 6. Infer bindings (expanded scan dirs in framework mode, or custom from config)
   const deployConfig = voidConfig;
+
+  // Managed static prerender is deliberately outside the Vite subprocess. The
+  // build runs arbitrary project plugins with every platform credential
+  // scrubbed; only this trusted parent receives the proxy-only token and
+  // injects it into the built worker's Miniflare bindings.
+  if (deployConfig.output === 'static' && !isFrameworkMode) {
+    const result = isNodeTarget(deployConfig.target)
+      ? await prerenderPagesNode({
+          root,
+          ssrDir: join(distDir, 'ssr'),
+          clientDir: join(distDir, 'client'),
+        })
+      : await prerenderPages({
+          root,
+          workerDir: join(distDir, workerDirName),
+          clientDir: join(distDir, 'client'),
+          persistDir: join(root, '.void'),
+          remoteMode: resolveRemoteMode(deployConfig.remote),
+          projectId: config.projectId,
+          voidToken: await client.createPrerenderToken(config.projectId),
+        });
+
+    if (result.paths.length === 0) {
+      log.info('No pages to prerender');
+    } else if (result.failed.length > 0) {
+      voidWarn(`${result.failed.length} page(s) failed to prerender`);
+    }
+  }
+
   const paths = resolveProjectPaths(root, deployConfig);
   const dialect = getDatabaseDialect(deployConfig);
   const deployScanDirs =
@@ -7188,8 +7737,6 @@ async function runFullDeploy(
       }
     }
   }
-  const workerDirName = resolveWorkerDirName(distDir, fwPreset, frameworkBuildCmd);
-
   const rawJobs = scanJobsSync(root, paths.cronsDir);
   const rawQueues = scanQueuesSync(root, paths.queuesDir);
   const schedules = rawJobs.flatMap((job) =>
@@ -7316,6 +7863,7 @@ async function runFullDeploy(
             // would be built from local bindings even for remote projects.
             remoteMode: resolveRemoteMode(deployConfig.remote),
             projectId: config.projectId,
+            voidToken: await client.createPrerenderToken(config.projectId),
           });
 
   // 8. Read wrangler compat settings for Cloudflare targets

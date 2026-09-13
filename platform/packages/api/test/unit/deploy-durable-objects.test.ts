@@ -93,7 +93,7 @@ describe('enrichWebSocketManifest', () => {
     expect(result.manifest.websocket?.classes).toEqual(['ChatRoom', 'PresenceRoom']);
     expect(result.manifest.websocket?.migrations).toEqual([
       { tag: 'ws-v1', newClasses: ['ChatRoom'] },
-      { tag: 'ws-v2', newClasses: ['PresenceRoom'] },
+      { tag: 'ws-v2', newSqliteClasses: ['PresenceRoom'] },
     ]);
   });
 
@@ -221,7 +221,7 @@ describe('enrichWebSocketManifest', () => {
     expect(result.manifest.websocket?.classes).toEqual(['ChatRoom', 'PresenceRoom']);
     expect(result.manifest.websocket?.migrations).toEqual([
       { tag: 'ws-v1', newClasses: ['ChatRoom'] },
-      { tag: 'ws-v2', newClasses: ['PresenceRoom'] },
+      { tag: 'ws-v2', newSqliteClasses: ['PresenceRoom'] },
     ]);
   });
 
@@ -255,7 +255,7 @@ describe('enrichWebSocketManifest', () => {
     expect(result.nextVersion).toBe(1);
     // Only PresenceRoom is new — ChatRoom already exists (from previousClasses fallback)
     expect(result.manifest.websocket?.migrations).toEqual([
-      { tag: 'ws-v1', newClasses: ['PresenceRoom'] },
+      { tag: 'ws-v1', newSqliteClasses: ['PresenceRoom'] },
     ]);
   });
 
@@ -295,7 +295,23 @@ describe('enrichWebSocketManifest', () => {
     expect(result.manifest.websocket?.migrations).toEqual([
       { tag: 'ws-v1', newClasses: ['ChatRoom'] },
       { tag: 'ws-v2', deletedClasses: ['ChatRoom'] },
-      { tag: 'ws-v3', newClasses: ['ChatRoom'] },
+      { tag: 'ws-v3', newSqliteClasses: ['ChatRoom'] },
+    ]);
+  });
+
+  it('uses SQLite storage for a fresh hosted WebSocket deployment', () => {
+    const result = enrichWebSocketManifest(
+      {
+        version: 3,
+        bindings: {},
+        websocket: { routes: [], classes: ['ChatRoom'] },
+      },
+      null,
+      0,
+    );
+
+    expect(result.manifest.websocket?.migrations).toEqual([
+      { tag: 'ws-v1', newSqliteClasses: ['ChatRoom'] },
     ]);
   });
 });
@@ -330,6 +346,18 @@ describe('buildWebSocketUploadMigrations', () => {
   it('returns undefined when there are no websocket migrations', () => {
     expect(buildWebSocketUploadMigrations([])).toBeUndefined();
     expect(buildWebSocketUploadMigrations(undefined)).toBeUndefined();
+  });
+
+  it('serializes SQLite WebSocket migrations without changing legacy steps', () => {
+    expect(
+      buildWebSocketUploadMigrations([
+        { tag: 'ws-v1', newClasses: ['LegacyRoom'] },
+        { tag: 'ws-v2', newSqliteClasses: ['ChatRoom'] },
+      ]),
+    ).toEqual({
+      new_tag: 'ws-v2',
+      steps: [{ new_classes: ['LegacyRoom'] }, { new_sqlite_classes: ['ChatRoom'] }],
+    });
   });
 });
 

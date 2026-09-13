@@ -39,7 +39,6 @@
     "#self/runtime/live-server": "./dist/runtime/live-server.mjs",
     "#self/runtime/fetch": "./dist/runtime/fetch.mjs",
     "#self/runtime/fetch-stream": "./dist/runtime/fetch-stream.mjs",
-    "#self/runtime/isr-cache": "./dist/runtime/isr-cache.mjs",
     "#self/runtime/migration-handler": "./dist/runtime/migration-handler.mjs",
     "#self/runtime/migration-handler-pg": "./dist/runtime/migration-handler-pg.mjs",
     "#self/runtime/migration-handler-mysql": "./dist/runtime/migration-handler-mysql.mjs",
@@ -56,6 +55,11 @@
       "types": "./dist/database-provider.d.mts",
       "import": "./dist/database-provider.mjs",
       "require": "./dist/database-provider.mjs"
+    },
+    "./edge": {
+      "types": "./dist/edge.d.mts",
+      "import": "./dist/edge.mjs",
+      "require": "./dist/edge.mjs"
     },
     "./handler": {
       "types": "./dist/runtime/handler.d.mts",
@@ -356,6 +360,10 @@
     "@cloudflare/workers-types": "catalog:",
     "@hono/oauth-providers": "^0.9.0",
     "@napi-rs/keyring": "2.0.0",
+    "@void/deploy-cloudflare": "workspace:*",
+    "@void/deploy-core": "workspace:*",
+    "@void/edge": "workspace:*",
+    "@void/isr": "workspace:*",
     "better-auth": "^1.7.3",
     "better-sqlite3": "^13.0.3",
     "blake3-jit": "^1.1.0",
@@ -368,6 +376,7 @@
     "hono": "^4.13.7",
     "ignore": "^7.0.9",
     "jsonc-parser": "3.3.1",
+    "minimatch": "^10.2.6",
     "mysql2": "3.24.4",
     "pg": "8.23.0",
     "postal-mime": "^2.7.4",

@@ -1,8 +1,8 @@
+import { resolvePathTtl } from '@void/isr/runtime';
 import { describe, expect, it } from 'vite-plus/test';
 import type { VoidConfig } from '../../src/config.ts';
 import { collectPages, collectRevalidate, hasRevalidate } from '../../src/isr-config.ts';
 import type { PageDefinition, PageScanResult } from '../../src/pages/types.ts';
-import { resolvePathTtl } from '../../src/runtime/isr-cache.ts';
 
 describe('hasRevalidate', () => {
   it('treats null / undefined / 0 / negative / {} as no ISR', () => {

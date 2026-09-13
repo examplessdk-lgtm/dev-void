@@ -5,8 +5,7 @@ import { getPackageDir } from './agents.ts';
 import { getApiUrl } from './auth.ts';
 import { ensureCloudflaredToken } from './cf-access.ts';
 import type { CliLogger } from './log-file.ts';
-import type { AssetManifestEntry } from './package.ts';
-import type { DeployEvent, DeployManifest } from './types.ts';
+import type { DeployAssetUploadRequest, DeployEvent, DeployUploadPayload } from './types.ts';
 
 /**
  * Current CLI version. Sent as `X-Void-CLI-Version` on every platform
@@ -304,12 +303,7 @@ export type GithubConnection = {
  *     bakes it into the presigned PUT URL as a SIGNED `Content-Md5`
  *     header so R2 enforces integrity at write time.
  */
-export type UploadUrlAssetRequest = {
-  blake3: string;
-  md5: string;
-  size: number;
-  contentType: string;
-};
+export type UploadUrlAssetRequest = DeployAssetUploadRequest;
 
 /**
  * Manifest-only (direct-to-R2) deploy payload. Sent as JSON to
@@ -320,18 +314,7 @@ export type UploadUrlAssetRequest = {
  * to R2 via presigned PUT URLs before this call. The server verifies each
  * declared asset key exists in R2 (parallel HEAD) before flipping routing.
  */
-export type ManifestOnlyDeployPayload = {
-  manifest: DeployManifest;
-  assetManifest: Record<string, AssetManifestEntry>;
-  source: string | null;
-  commit: string | null;
-  repositoryUrl: string | null;
-  commitUrl: string | null;
-  gitRef: string | null;
-  preflight: 'true' | null;
-  /** Worker module bytes keyed by relative path, base64-encoded. */
-  workerFiles?: Record<string, string>;
-};
+export type ManifestOnlyDeployPayload = DeployUploadPayload;
 
 /**
  * HTTP client for the Void platform API.
@@ -865,6 +848,22 @@ export class PlatformClient {
     }
 
     return res.json();
+  }
+
+  async createPrerenderToken(projectId: string): Promise<string> {
+    const res = await fetch(`${this.baseUrl}/projects/${projectId}/prerender-token`, {
+      method: 'POST',
+      headers: {
+        ...this.authHeaders,
+      },
+    });
+
+    if (!res.ok) {
+      await throwPlatformApiError('Failed to create prerender token', res);
+    }
+
+    const body = (await res.json()) as { token: string };
+    return body.token;
   }
 
   async provisionDatabase(projectId: string, connectionString: string): Promise<{ ok: boolean }> {

@@ -1,18 +1,24 @@
-# @voidcloud/isr-shared
+# @void/isr
 
-Shared cache-key and edge-cache URL contract for ISR (Incremental Static Regeneration) between the API control plane (the purger) and the dispatch edge worker (the writer/reader).
+Shared Incremental Static Regeneration contracts for Void runtimes and deployment targets.
 
-**Consumers:** `packages/dispatch` (writes/reads the ISR slot) and `packages/api` (purges on revalidation) are the only intended consumers. This is an internal platform package — not a general-purpose ISR utility — and is not published or supported for use outside the monorepo. See "Who Imports This" below for the specific call sites.
+The package is public so the Void SDK, the hosted platform, and deployment adapters can consume the same cache-key and edge-cache URL protocol directly. Applications normally use `void/isr`; this lower-level package is intended for runtime and adapter authors.
 
 ## Purpose
 
 When a request is served via a dispatch-side rewrite (`routing.rewrites` or `routing.fallbacks`), the ISR slot splits per original-request URL via the `#rw=` variant suffix — so user code that branches on `c.isRewritten()` / `c.originalUrl()` doesn't share a cache entry with the direct-hit path to the same destination.
 
-ISR cache entries are written by `packages/dispatch` and purged by `packages/api`. The two workers must produce byte-identical keys and URLs — if the purger and the writer disagree on a single character, purges silently miss and stale HTML survives revalidation. This package centralizes every helper that constructs an ISR KV key or an edge-cache URL so the two sides cannot drift.
+ISR cache entries are written by `platform/packages/dispatch` and purged by `platform/packages/api`. The two workers must produce byte-identical keys and URLs — if the purger and the writer disagree on a single character, purges silently miss and stale HTML survives revalidation. This package centralizes every helper that constructs an ISR KV key or an edge-cache URL so the two sides cannot drift.
 
 Any new helper that touches the key or URL format belongs here, not in `api/` or `dispatch/`. Duplication is the failure mode this package exists to prevent.
 
 ## Public API
+
+The package has three entry points:
+
+- `@void/isr` owns the immutable, versioned KV-key and edge-cache URL protocol.
+- `@void/isr/core` owns target-neutral codecs, validation, TTL selection, request bypass rules, response construction, header sanitization, Void Pages data extraction, and query-variant normalization.
+- `@void/isr/runtime` implements the fail-open, single-tenant Cloudflare KV and Cache API ladder used by direct Void deployments, including bounded variants from `routing.revalidateQueryAllowlist`.
 
 | Symbol                        | Description                                                                                                              |
 | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
@@ -67,10 +73,11 @@ The hash is sync (BigInt FNV-1a; Workers' `crypto.subtle.digest` is async and we
 
 Because the original URL is not recoverable from a variant token, `splitIsrCacheKey` returns the token directly (as `variantToken`), and the purger calls `isrEdgeCacheUrlForToken` rather than re-hashing.
 
-## Who Imports This
+## Monorepo Consumers
 
-- `packages/api/src/isr-cache.ts` — purge path (`POST /projects/:id/revalidate` and the proxy-forwarded equivalent). Uses `splitIsrCacheKey` to decode variant KV entries and `isrEdgeCacheUrl` to reconstruct the matching edge-cache URL.
-- `packages/dispatch/src/isr.ts` — read/write path. Uses `isrCacheKey` and `isrEdgeCacheUrl` to resolve the slot for every ISR-backed page request.
+- `platform/packages/api/src/isr-cache.ts` — hosted purge path. Uses `splitIsrCacheKey` to decode variant KV entries and `isrEdgeCacheUrl` to reconstruct the matching edge-cache URL.
+- `platform/packages/dispatch/src/isr.ts` — hosted read/write path. Uses `isrCacheKey` and `isrEdgeCacheUrl` to resolve the slot for every ISR-backed page request.
+- `packages/void` — direct Cloudflare runtime and CLI integration.
 
 ## Rules for Adding Helpers
 

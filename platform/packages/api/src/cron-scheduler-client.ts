@@ -1,6 +1,6 @@
 import type { ApiEnv } from './env.ts';
 
-type CronSyncState = Readonly<{
+export type CronSyncState = Readonly<{
   workerName: string;
   schedules: ReadonlyArray<{ name: string; cron: string }>;
   proxyToken?: string;
@@ -20,7 +20,7 @@ async function callWithRetry(
   label: string,
   projectId: string,
   fn: () => Promise<Response>,
-): Promise<void> {
+): Promise<Response> {
   const delaysMs = [0, 100, 400];
   let lastErr: unknown;
   for (const delay of delaysMs) {
@@ -28,47 +28,40 @@ async function callWithRetry(
       await new Promise((resolve) => setTimeout(resolve, delay));
     }
     try {
-      await fn();
-      return;
+      const response = await fn();
+      if (!response.ok) {
+        throw new Error(`CronScheduler ${label} returned HTTP ${response.status}`);
+      }
+      return response;
     } catch (err) {
       lastErr = err;
     }
   }
-  console.error(
-    `[cron-scheduler-client] ${label} failed for ${projectId} after ${delaysMs.length} attempts:`,
-    lastErr instanceof Error ? lastErr.message : lastErr,
+  throw new Error(
+    `CronScheduler ${label} failed for ${projectId} after ${delaysMs.length} attempts`,
+    { cause: lastErr },
   );
 }
 
 /**
  * Resync the per-project CronScheduler DO with the current live deployment's
- * cron schedules. Errors are retried then caught and logged — cron sync drift
- * self-heals on the next deploy.
+ * cron schedules. Failures propagate after retry so deployment and rollback
+ * cutovers cannot report success with stale scheduler state.
  */
 export async function syncCronScheduler(
   env: Pick<ApiEnv['Bindings'], 'CRON_SCHEDULER'>,
   projectId: string,
   state: CronSyncState,
 ): Promise<void> {
-  try {
-    await callWithRetry('sync', projectId, () =>
-      env.CRON_SCHEDULER.get(env.CRON_SCHEDULER.idFromName(projectId)).fetch(
-        new Request('https://do/sync', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(state),
-        }),
-      ),
-    );
-  } catch (err) {
-    // `idFromName` can throw synchronously on a misconfigured binding or
-    // malformed projectId. Catch here so callers (e.g. `Promise.all` over a
-    // cleanup array) cannot be aborted by a stray sync throw.
-    console.error(
-      `[cron-scheduler-client] sync threw synchronously for ${projectId}:`,
-      err instanceof Error ? err.message : err,
-    );
-  }
+  await callWithRetry('sync', projectId, () =>
+    env.CRON_SCHEDULER.get(env.CRON_SCHEDULER.idFromName(projectId)).fetch(
+      new Request('https://do/sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(state),
+      }),
+    ),
+  );
 }
 
 /**
@@ -80,17 +73,36 @@ export async function clearCronScheduler(
   env: Pick<ApiEnv['Bindings'], 'CRON_SCHEDULER'>,
   projectId: string,
 ): Promise<void> {
-  try {
-    await callWithRetry('clear', projectId, () =>
-      env.CRON_SCHEDULER.get(env.CRON_SCHEDULER.idFromName(projectId)).fetch(
-        new Request('https://do/clear', { method: 'POST' }),
-      ),
-    );
-  } catch (err) {
-    // See note on `syncCronScheduler` above.
-    console.error(
-      `[cron-scheduler-client] clear threw synchronously for ${projectId}:`,
-      err instanceof Error ? err.message : err,
-    );
+  await callWithRetry('clear', projectId, () =>
+    env.CRON_SCHEDULER.get(env.CRON_SCHEDULER.idFromName(projectId)).fetch(
+      new Request('https://do/clear', { method: 'POST' }),
+    ),
+  );
+}
+
+/** Read the exact state required to compensate a failed cutover. */
+export async function snapshotCronScheduler(
+  env: Pick<ApiEnv['Bindings'], 'CRON_SCHEDULER'>,
+  projectId: string,
+): Promise<CronSyncState | null> {
+  const response = await callWithRetry('snapshot', projectId, () =>
+    env.CRON_SCHEDULER.get(env.CRON_SCHEDULER.idFromName(projectId)).fetch(
+      new Request('https://do/snapshot'),
+    ),
+  );
+  const body = await response.json<{ state: CronSyncState | null }>();
+  return body.state;
+}
+
+/** Restore a previously captured scheduler state after a failed cutover. */
+export async function restoreCronScheduler(
+  env: Pick<ApiEnv['Bindings'], 'CRON_SCHEDULER'>,
+  projectId: string,
+  state: CronSyncState | null,
+): Promise<void> {
+  if (state) {
+    await syncCronScheduler(env, projectId, state);
+  } else {
+    await clearCronScheduler(env, projectId);
   }
 }

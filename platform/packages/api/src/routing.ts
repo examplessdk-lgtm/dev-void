@@ -1,3 +1,4 @@
+import { sql as drizzleSql } from 'drizzle-orm';
 import { getDomainsByProjectIds, getProjectsByUserId, getUser, type Db } from './db.ts';
 import type { PlanLimits } from './tiers.ts';
 import type { AssetConfig, DeployManifest } from './types.ts';
@@ -88,6 +89,49 @@ export type RoutingSuspensionUpdate =
   | { op: 'unsuspend'; matchReason: string | null };
 
 /**
+ * Resolve a routing undo without overwriting a later authoritative mutation.
+ * Exact matches restore directly. A suspension-only rewrite still belongs to
+ * the attempted deployment, so restore its prior route while carrying the
+ * newest `suspended` marker. Any other change (including deletion) wins and
+ * suppresses the stale undo.
+ */
+export function resolveRoutingUndo(
+  current: string | null,
+  written: string | null,
+  previous: string | null,
+): { restore: boolean; value: string | null } {
+  if (current === written) {
+    return { restore: true, value: previous };
+  }
+  if (current === null || written === null) {
+    return { restore: false, value: null };
+  }
+  try {
+    const currentEntry = JSON.parse(current) as Record<string, unknown>;
+    const writtenEntry = JSON.parse(written) as Record<string, unknown>;
+    const hasCurrentSuspension = Object.hasOwn(currentEntry, 'suspended');
+    const currentSuspension = currentEntry.suspended;
+    delete currentEntry.suspended;
+    delete writtenEntry.suspended;
+    if (JSON.stringify(currentEntry) !== JSON.stringify(writtenEntry)) {
+      return { restore: false, value: null };
+    }
+    if (previous === null) {
+      return { restore: true, value: null };
+    }
+    const restoredEntry = JSON.parse(previous) as Record<string, unknown>;
+    if (hasCurrentSuspension) {
+      restoredEntry.suspended = currentSuspension;
+    } else {
+      delete restoredEntry.suspended;
+    }
+    return { restore: true, value: JSON.stringify(restoredEntry) };
+  } catch {
+    return { restore: false, value: null };
+  }
+}
+
+/**
  * Apply a {@link RoutingSuspensionUpdate} to each given routing KV entry. A
  * project's suspension lives on EVERY routing entry dispatch serves it from —
  * its slug route AND one `domain:<host>` route per active custom domain — so
@@ -147,7 +191,9 @@ export async function applyRoutingSuspension(
  * {@link applyRoutingSuspension} skips any key with no KV entry, so a pending
  * domain that was never published is just a cheap no-op read.
  *
- * Batches the domain lookup over all projects. No-ops (no DB query) for an
+ * Each project's KV mutation runs under its project-row lock so deploy,
+ * rollback, domain lifecycle, and failure compensation cannot overwrite a
+ * newer suspension decision with a stale routing snapshot. No-ops for an
  * empty project list.
  */
 export async function setProjectsRoutingSuspension(
@@ -159,13 +205,19 @@ export async function setProjectsRoutingSuspension(
   if (projects.length === 0) {
     return;
   }
-  const domainMap = await getDomainsByProjectIds(
-    db,
-    projects.map((p) => p.id),
-  );
   for (const project of projects) {
-    const domainKeys = (domainMap.get(project.id) ?? []).map((d) => `domain:${d.hostname}`);
-    await applyRoutingSuspension(routing, [project.slug, ...domainKeys], update);
+    await db.transaction(async (tx) => {
+      await tx.execute(drizzleSql`SELECT id FROM projects WHERE id = ${project.id} FOR UPDATE`);
+      // Resolve domains only after the project lock. Domain activation takes
+      // the same lock before publishing a route, so this read must happen
+      // behind it or a domain activated between the eager read and this lock
+      // could escape the suspension entirely.
+      const domainMap = await getDomainsByProjectIds(tx as unknown as Db, [project.id]);
+      const domainKeys = (domainMap.get(project.id) ?? []).map(
+        (domain) => `domain:${domain.hostname}`,
+      );
+      await applyRoutingSuspension(routing, [project.slug, ...domainKeys], update);
+    });
   }
 }
 

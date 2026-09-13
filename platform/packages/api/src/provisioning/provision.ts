@@ -1,3 +1,4 @@
+import { createDeployIntent } from '@void/deploy-core';
 import { eq } from 'drizzle-orm';
 import { hmacSignState } from '../auth/hmac.ts';
 import { getProjectResources, createResource, type Db } from '../db.ts';
@@ -64,56 +65,99 @@ export async function provisionBindings(
   },
 ): Promise<ReadonlyArray<WorkerBinding>> {
   const existing = await getProjectResources(db, projectId);
+  const plan = createDeployIntent(manifest).resourcePlan;
 
   // Run all CF API provisioning calls in parallel
   const tasks: Array<Promise<WorkerBinding>> = [];
 
-  for (const name of manifest.bindings.d1 ?? []) {
-    tasks.push(
-      ensureResource(db, accountId, apiToken, projectId, 'd1', name, existing).then(
-        (r): WorkerBinding => ({ type: 'd1', name, id: r.cf_id }),
-      ),
-    );
-  }
-
-  for (const name of manifest.bindings.kv ?? []) {
-    tasks.push(
-      ensureResource(db, accountId, apiToken, projectId, 'kv', name, existing).then(
-        (r): WorkerBinding => ({ type: 'kv_namespace', name, namespace_id: r.cf_id }),
-      ),
-    );
-  }
-
-  for (const name of manifest.bindings.r2 ?? []) {
-    tasks.push(
-      ensureResource(db, accountId, apiToken, projectId, 'r2', name, existing).then(
-        (r): WorkerBinding => ({ type: 'r2_bucket', name, bucket_name: r.cf_id }),
-      ),
-    );
-  }
-
-  for (const q of manifest.queues ?? []) {
-    const queueName = getProjectQueueName(projectId, q.name);
-    tasks.push(
-      ensureResource(db, accountId, apiToken, projectId, 'queue', q.name, existing).then(
-        (r): WorkerBinding => ({
-          type: 'queue',
-          name: q.bindingName,
-          queue_name: queueName,
-          queue_id: r.cf_id,
-        }),
-      ),
-    );
-  }
-
-  for (const name of manifest.bindings.hyperdrive ?? []) {
-    const found = existing.find((r) => r.type === 'hyperdrive' && r.binding_name === name);
-    if (!found) {
-      throw new Error(
-        `Hyperdrive not provisioned for binding "${name}". Run \`void db set-url\` first.`,
-      );
+  for (const resource of plan.resources) {
+    switch (resource.type) {
+      case 'd1':
+        tasks.push(
+          ensureResource(
+            db,
+            accountId,
+            apiToken,
+            projectId,
+            'd1',
+            resource.bindingName,
+            existing,
+          ).then((r): WorkerBinding => ({ type: 'd1', name: resource.bindingName, id: r.cf_id })),
+        );
+        break;
+      case 'kv':
+        tasks.push(
+          ensureResource(
+            db,
+            accountId,
+            apiToken,
+            projectId,
+            'kv',
+            resource.bindingName,
+            existing,
+          ).then((r): WorkerBinding => ({
+            type: 'kv_namespace',
+            name: resource.bindingName,
+            namespace_id: r.cf_id,
+          })),
+        );
+        break;
+      case 'r2':
+        tasks.push(
+          ensureResource(
+            db,
+            accountId,
+            apiToken,
+            projectId,
+            'r2',
+            resource.bindingName,
+            existing,
+          ).then((r): WorkerBinding => ({
+            type: 'r2_bucket',
+            name: resource.bindingName,
+            bucket_name: r.cf_id,
+          })),
+        );
+        break;
+      case 'queue': {
+        const queueName = getProjectQueueName(projectId, resource.resourceName);
+        tasks.push(
+          ensureResource(
+            db,
+            accountId,
+            apiToken,
+            projectId,
+            'queue',
+            resource.resourceName,
+            existing,
+          ).then((r): WorkerBinding => ({
+            type: 'queue',
+            name: resource.bindingName,
+            queue_name: queueName,
+            queue_id: r.cf_id,
+          })),
+        );
+        break;
+      }
+      case 'hyperdrive': {
+        const found = existing.find(
+          (r) => r.type === 'hyperdrive' && r.binding_name === resource.bindingName,
+        );
+        if (!found) {
+          throw new Error(
+            `Hyperdrive not provisioned for binding "${resource.bindingName}". Run \`void db set-url\` first.`,
+          );
+        }
+        tasks.push(
+          Promise.resolve({
+            type: 'hyperdrive' as const,
+            name: resource.bindingName,
+            id: found.cf_id,
+          }),
+        );
+        break;
+      }
     }
-    tasks.push(Promise.resolve({ type: 'hyperdrive' as const, name, id: found.cf_id }));
   }
 
   const bindings = await Promise.all(tasks);

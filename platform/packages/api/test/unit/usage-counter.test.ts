@@ -13,7 +13,11 @@ const dbCalls = {
   unsuspendIfReason: [] as Array<{ id: string; reason: string }>,
 };
 vi.mock('../../src/db.ts', () => ({
-  createDb: () => ({ __mock: 'db' }),
+  createDb: () => ({
+    __mock: 'db',
+    transaction: async (fn: (tx: { execute: () => Promise<void> }) => Promise<unknown>) =>
+      fn({ execute: async () => {} }),
+  }),
   suspendUser: vi.fn(async (_db: unknown, id: string, reason: string) => {
     dbCalls.suspend.push({ id, reason });
   }),

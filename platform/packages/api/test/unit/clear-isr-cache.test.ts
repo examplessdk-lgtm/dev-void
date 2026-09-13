@@ -1,4 +1,4 @@
-import { isrCachePrefix, isrLegacyCachePrefix } from '@voidcloud/isr-shared';
+import { isrCachePrefix, isrLegacyCachePrefix } from '@void/isr';
 import { describe, expect, it } from 'vite-plus/test';
 import { clearIsrCache } from '../../src/routes/deploy.ts';
 

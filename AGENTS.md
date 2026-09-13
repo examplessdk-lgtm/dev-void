@@ -16,6 +16,7 @@ The `void` package on npm has these previous versions: '0.0.1', '0.1.0', '0.1.2'
 
 - **Never** commit without asking for confirmation.
 - When adding new dependencies to the project, always run `npm view [package] version` to get the latest version.
+- **Keep native Cloudflare deploys Workers Free-compatible by default.** New public Void SDK/runtime features must work with `void deploy --platform cloudflare` on Workers Free unless the underlying Cloudflare product has no Free offering. Paid-only functionality must be explicitly opt-in, inferred and emitted only when the app uses it, and checked before provisioning or building. Its documentation and deploy error must name the required Cloudflare product/plan, link to enable it, and explain any API-token permissions. Platform-internal paid services must never become requirements of a single-app native Cloudflare deploy. Add regression coverage proving that an app which does not use the paid feature emits no paid binding and performs no entitlement probe.
 - Every implementation plan should include the following:
   - During plan generation: ask clarifying questions when necessary, especially around developer-experience defining design decisions.
   - Verification:
@@ -53,16 +54,20 @@ vp run --filter ./packages/vue typecheck # Typecheck a specific package
 
 pnpm workspaces managed through Vite+. Shared dependency versions use the **pnpm catalog** in `pnpm-workspace.yaml` (`typescript`, `vite-plus`, Vite+/Vitest aliases, `@cloudflare/workers-types`, wrangler). Make sure to run `vp install` after making package structure changes.
 
-| Package                                          | npm name       | Purpose                                                        |
-| ------------------------------------------------ | -------------- | -------------------------------------------------------------- |
-| [`packages/void`](./packages/void/AGENTS.md)     | `void`         | Core Vite plugin — routing, inference, migrations, CLI         |
-| [`packages/react`](./packages/react/README.md)   | `@void/react`  | React framework adapter for Pages mode (SSR, Link, useForm)    |
-| [`packages/vue`](./packages/vue/README.md)       | `@void/vue`    | Vue framework adapter for Pages mode (SSR, Link, useForm)      |
-| [`packages/svelte`](./packages/svelte/README.md) | `@void/svelte` | Svelte 5 framework adapter for Pages mode (SSR, Link, useForm) |
-| [`packages/solid`](./packages/solid/README.md)   | `@void/solid`  | SolidJS framework adapter for Pages mode (SSR, Link, useForm)  |
-| [`docs`](./docs)                                 | (private)      | Documentation site (VitePress)                                 |
-| [`platform`](./platform/README.md)               | (private)      | Hosted control plane, routing, proxy, logs, and dashboard      |
-| `playground/*`                                   | (private)      | local apps for testing                                         |
+| Package                                                      | npm name                  | Purpose                                                           |
+| ------------------------------------------------------------ | ------------------------- | ----------------------------------------------------------------- |
+| [`packages/deploy-core`](./packages/deploy-core)             | `@void/deploy-core`       | Shared deployment manifests, events, and target-neutral contracts |
+| [`packages/deploy-cloudflare`](./packages/deploy-cloudflare) | `@void/deploy-cloudflare` | Direct Cloudflare config and verified upload primitives           |
+| [`packages/edge`](./packages/edge)                           | `@void/edge`              | Shared routing, headers, and static edge runtime                  |
+| [`packages/isr`](./packages/isr)                             | `@void/isr`               | Shared ISR protocol, core logic, and direct runtime               |
+| [`packages/void`](./packages/void/AGENTS.md)                 | `void`                    | Core Vite plugin — routing, inference, migrations, CLI            |
+| [`packages/react`](./packages/react/README.md)               | `@void/react`             | React framework adapter for Pages mode (SSR, Link, useForm)       |
+| [`packages/vue`](./packages/vue/README.md)                   | `@void/vue`               | Vue framework adapter for Pages mode (SSR, Link, useForm)         |
+| [`packages/svelte`](./packages/svelte/README.md)             | `@void/svelte`            | Svelte 5 framework adapter for Pages mode (SSR, Link, useForm)    |
+| [`packages/solid`](./packages/solid/README.md)               | `@void/solid`             | SolidJS framework adapter for Pages mode (SSR, Link, useForm)     |
+| [`docs`](./docs)                                             | (private)                 | Documentation site (VitePress)                                    |
+| [`platform`](./platform/README.md)                           | (private)                 | Hosted control plane, routing, proxy, logs, and dashboard         |
+| `playground/*`                                               | (private)                 | local apps for testing                                            |
 
 Platform packages live under `platform/packages/*` and may depend on public/shared root packages. Public SDK packages under `packages/*` must not import from `platform/`.
 

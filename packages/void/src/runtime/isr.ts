@@ -1,5 +1,12 @@
+import { isrEdgeCacheUrlForToken, splitIsrCacheKey } from '@void/isr';
+import {
+  denormalizeIsrPath,
+  isrKey,
+  isrPrefix,
+  isrVariantPrefix,
+  listIsrHosts,
+} from '@void/isr/runtime';
 import { getRawRuntimeEnv } from './env-raw.ts';
-import { denormalizeIsrPath, htmlEdgeKey, isrKey, jsonEdgeKey, listIsrHosts } from './isr-cache.ts';
 
 export type RevalidateOptions = {
   paths?: Array<string>;
@@ -39,29 +46,46 @@ export async function revalidate(options: RevalidateOptions): Promise<void> {
       return;
     }
     const requestHost = rawEnv.__VOID_ISR_HOST as string | undefined;
-    // Cache keys are host-scoped (`void-isr/<id>/<host>/<path>`), so a purge must
+    // Cache keys are deployment- and host-scoped, so a purge must
     // target a concrete (host, path). Delete KV first and unconditionally — the
     // authoritative purge must never depend on the Cache API — then best-effort
     // purge the per-host edge variants, guarded so a degraded `caches.default`
     // (scheduled/queue handlers, or no Cache API) cannot fail the KV delete.
-    const purge = async (host: string, path: string): Promise<void> => {
-      await kv.delete(isrKey(id, host, path));
+    const purgeKey = async (
+      host: string,
+      path: string,
+      key: string,
+      variantToken: string | null,
+    ): Promise<void> => {
+      await kv.delete(key);
       try {
         // Cast because this package has both @types/node and @cloudflare/workers-types
         // in scope, and Node's ambient CacheStorage (which lacks `.default`)
         // otherwise shadows the Workers one — same pattern as isr-cache.ts.
         const cache = (caches as unknown as { default: Cache }).default;
-        await cache.delete(htmlEdgeKey(host, path, id));
-        await cache.delete(jsonEdgeKey(host, path, id));
+        await cache.delete(isrEdgeCacheUrlForToken(host, path, id, 'html', variantToken));
+        await cache.delete(isrEdgeCacheUrlForToken(host, path, id, 'json', variantToken));
       } catch {
         // Fail open — a degraded Cache API must not fail the authoritative KV purge.
       }
     };
+    const purgePath = async (host: string, path: string): Promise<void> => {
+      await purgeKey(host, path, isrKey(id, host, path), null);
+      let cursor: string | undefined;
+      do {
+        const list = await kv.list({ prefix: isrVariantPrefix(id, host, path), cursor });
+        for (const key of list.keys) {
+          const { variantToken } = splitIsrCacheKey(key.name);
+          await purgeKey(host, path, key.name, variantToken);
+        }
+        cursor = list.list_complete ? undefined : list.cursor;
+      } while (cursor);
+    };
     if (options.all) {
       // Enumerate the actual host-scoped cache keys (registry-independent, so it
       // is complete even for a host that was never registered). Split the host
-      // off the key tail BEFORE denormalizing: `void-isr/<id>/<host>/<path>`.
-      const prefix = `void-isr/${id}/`;
+      // off the key tail before denormalizing the remaining pathname.
+      const prefix = isrPrefix(id);
       let cursor: string | undefined;
       do {
         const list = await kv.list({ prefix, cursor });
@@ -72,8 +96,9 @@ export async function revalidate(options: RevalidateOptions): Promise<void> {
             continue;
           }
           const host = tail.slice(0, slash);
-          const path = denormalizeIsrPath(tail.slice(slash + 1));
-          await purge(host, path);
+          const { normalizedPath, variantToken } = splitIsrCacheKey(tail.slice(slash + 1));
+          const path = denormalizeIsrPath(normalizedPath);
+          await purgeKey(host, path, key.name, variantToken);
         }
         cursor = list.list_complete ? undefined : list.cursor;
       } while (cursor);
@@ -91,7 +116,7 @@ export async function revalidate(options: RevalidateOptions): Promise<void> {
       }
       for (const host of hosts) {
         for (const path of paths) {
-          await purge(host, path);
+          await purgePath(host, path);
         }
       }
     }

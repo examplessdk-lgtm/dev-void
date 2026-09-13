@@ -51,6 +51,10 @@ describe('needsWrapper', () => {
     expect(needsWrapper({ ...base, hasMigrations: true })).toBe(true);
   });
 
+  it('returns true when deployment readiness is required', () => {
+    expect(needsWrapper({ ...base, readiness: true })).toBe(true);
+  });
+
   it('returns false when hasMigrations is false', () => {
     expect(needsWrapper({ ...base, hasMigrations: false })).toBe(false);
   });

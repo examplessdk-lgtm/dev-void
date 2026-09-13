@@ -81,6 +81,8 @@ export type JwtPayload = Readonly<{
   aud: string;
   iat: number;
   exp: number;
+  project?: string;
+  build?: string;
 }>;
 
 export type ProxyEnv = Readonly<{

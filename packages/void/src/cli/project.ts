@@ -1,5 +1,6 @@
 import { readFileSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { join, dirname } from 'pathslash';
+import type { DeployTarget } from './types.ts';
 
 export type ProjectConfig = {
   projectId: string;
@@ -7,7 +8,7 @@ export type ProjectConfig = {
   voidInternalStaging?: boolean;
 };
 
-export type DeploymentPlatform = 'cloudflare' | 'void' | 'none';
+export type DeploymentPlatform = DeployTarget | 'none';
 
 const PROJECT_FILE = '.void/project.json';
 

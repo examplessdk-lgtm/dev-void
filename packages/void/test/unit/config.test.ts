@@ -256,6 +256,13 @@ describe('readConfig', () => {
     expect(config.platformImage).toBe('docker.io/cloudflare/sandbox:0.8.11');
   });
 
+  it('uses the matching published sandbox image by default', () => {
+    const config = resolveSandboxConfig({ sandbox: true }, tmpDir);
+
+    expect(config.image).toMatch(/^docker\.io\/cloudflare\/sandbox:/);
+    expect(config.platformImage).toBe(config.image);
+  });
+
   it('throws on invalid sandbox config', () => {
     setup(JSON.stringify({ sandbox: { instanceType: 'huge' } }));
     expect(() => readConfig(tmpDir)).toThrow('"sandbox.instanceType"');

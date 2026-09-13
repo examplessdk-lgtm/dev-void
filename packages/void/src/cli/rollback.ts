@@ -2,11 +2,19 @@ import { intro, outro, log, select, confirm, isCancel, cancel } from '@clack/pro
 import { getToken } from './auth.ts';
 import { PlatformClient } from './client.ts';
 import { cliTitle, createSpinner, dim, ensureUtc, pc } from './output.ts';
-import { readProjectConfig } from './project.ts';
+import { readDeploymentPlatform, readProjectConfig } from './project.ts';
 
 export async function runRollbackCommand(root: string, deployId?: string): Promise<void> {
   console.log();
   intro(cliTitle('project rollback'));
+
+  const platform = readDeploymentPlatform(root);
+  if (platform === 'cloudflare') {
+    return runCloudflareRollback(root, deployId);
+  }
+  if (platform === 'none') {
+    throw new Error('rollback: Deployment is disabled. Run `void init` to choose a platform.');
+  }
 
   const token = getToken(root);
   if (!token) {
@@ -117,6 +125,117 @@ export async function runRollbackCommand(root: string, deployId?: string): Promi
   }
 
   outro(dim('Traffic is now serving the rolled-back deployment.'));
+}
+
+async function runCloudflareRollback(root: string, deployId?: string): Promise<void> {
+  const {
+    activateCloudflareExistingVersion,
+    readCloudflareWorkerStatus,
+    resolveCloudflareOperationContext,
+  } = await import('./cloudflare-operations.ts');
+  const context = resolveCloudflareOperationContext(root);
+  const status = await readCloudflareWorkerStatus(context);
+  const deployedVersionIds = new Set(status.deployedVersionIds);
+  const candidates = [...status.versions]
+    .reverse()
+    .filter(
+      (version) => version.id !== status.activeVersionId && deployedVersionIds.has(version.id),
+    );
+  if (candidates.length === 0) {
+    log.warn('No previous Cloudflare Worker Versions are available for rollback.');
+    outro(dim('Deploy more versions to enable rollback.'));
+    return;
+  }
+
+  const requestedMatches = deployId
+    ? candidates.filter((version) => version.id === deployId || version.id.startsWith(deployId))
+    : [];
+  if (requestedMatches.length > 1) {
+    log.error(`Version prefix ${deployId} is ambiguous; pass the complete version id.`);
+    process.exit(1);
+  }
+  let target = requestedMatches[0];
+  if (deployId && !target) {
+    log.error(`Version ${deployId} is not available for rollback.`);
+    process.exit(1);
+  }
+  if (!target) {
+    const result = await select({
+      message: 'Select a version to roll back to:',
+      options: candidates.map((version) => ({
+        value: version.id,
+        label: `${version.id} ${dim(formatAge(version.createdAt))}`,
+        hint: version.metadata
+          ? `${version.metadata.migrations.length} migration(s)`
+          : 'migration state unknown',
+      })),
+    });
+    if (isCancel(result)) {
+      cancel('Rollback cancelled.');
+      process.exit(0);
+    }
+    target = candidates.find((version) => version.id === result)!;
+  }
+
+  const current = status.versions.find((version) => version.id === status.activeVersionId);
+  if (target.metadata?.schema !== 2) {
+    log.error(
+      'This version predates Void trigger snapshots and cannot be rolled back safely. Deploy that revision again to create complete rollback metadata.',
+    );
+    process.exit(1);
+  }
+  if (current?.metadata?.schema !== 2) {
+    log.error(
+      'The active version has no trigger snapshot, so a failed rollback could not be compensated safely. Redeploy the current revision first.',
+    );
+    process.exit(1);
+  }
+  if (!current?.metadata || !target.metadata) {
+    log.warn(
+      'Void migration metadata is unavailable for one of these versions. Database migrations are forward-only and will not be reverted.',
+    );
+    const proceed = await confirm({ message: 'Proceed with rollback?' });
+    if (isCancel(proceed) || !proceed) {
+      cancel('Rollback cancelled.');
+      process.exit(0);
+    }
+  } else {
+    const targetSet = new Set(target.metadata.migrations);
+    const migrationDiff = current.metadata.migrations.filter(
+      (migration) => !targetSet.has(migration),
+    );
+    if (migrationDiff.length > 0) {
+      log.warn(
+        `The current database has ${migrationDiff.length} migration(s) applied after this version:`,
+      );
+      for (const migration of migrationDiff) {
+        log.message(`  ${dim('•')} ${migration}`);
+      }
+      log.message(
+        dim(
+          'Rolling back will NOT revert these migrations. The older code will run against the current schema.',
+        ),
+      );
+      const proceed = await confirm({ message: 'Proceed with rollback?' });
+      if (isCancel(proceed) || !proceed) {
+        cancel('Rollback cancelled.');
+        process.exit(0);
+      }
+    }
+  }
+
+  const spinner = createSpinner();
+  spinner.start('Rolling back...');
+  try {
+    await activateCloudflareExistingVersion(context, target, current);
+    spinner.stop('Rollback complete.');
+  } catch (error) {
+    spinner.stop('Rollback failed.');
+    log.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  }
+  log.success(`Rolled back to ${pc.bold(target.id)}`);
+  outro(dim('Traffic is now serving the selected Cloudflare Worker Version.'));
 }
 
 function formatAge(deployedAt: string | null): string {

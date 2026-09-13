@@ -15,6 +15,7 @@ import {
   ensureVoidDependency,
   extractPnpmWorkspacePackages,
   generateStarterMigration,
+  getWorkflowYaml,
   getTodayCompatDate,
   isScaffoldableEmptyProject,
   isVoidResolvableFrom,
@@ -35,6 +36,31 @@ const mockSaveToken = vi.fn();
 const mockIsStagingMode = vi.fn();
 const mockListProjects = vi.fn();
 const mockCreateProject = vi.fn();
+
+describe('GitHub Actions deployment workflows', () => {
+  it('scaffolds the direct Cloudflare deployment path with a scoped API token', () => {
+    const yaml = getWorkflowYaml('/project', 'npm', null, 'cloudflare');
+    expect(yaml).toContain('name: Deploy to Cloudflare');
+    expect(yaml).toContain('CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}');
+    expect(yaml).toContain('DATABASE_URL: ${{ secrets.DATABASE_URL }}');
+    expect(yaml).toContain(
+      'CLOUDFLARE_WORKERS_SUBDOMAIN: ${{ vars.CLOUDFLARE_WORKERS_SUBDOMAIN }}',
+    );
+    expect(yaml).toContain('CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}');
+    expect(yaml).toContain('CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}');
+    expect(yaml).toContain('npx void deploy --platform cloudflare');
+    expect(yaml).toContain('contents: read');
+    expect(yaml).not.toContain('id-token: write');
+    expect(yaml).not.toContain('VOID_TOKEN');
+  });
+
+  it('retains the GitHub OIDC workflow for managed deployments', () => {
+    const yaml = getWorkflowYaml('/project', 'npm', 'my-app', 'void');
+    expect(yaml).toContain('name: Deploy to Void');
+    expect(yaml).toContain('id-token: write');
+    expect(yaml).toContain('npx void deploy --platform void --project "$VOID_PROJECT"');
+  });
+});
 
 function expectPnpmAllowBuilds(root: string): void {
   const yaml = readFileSync(join(root, 'pnpm-workspace.yaml'), 'utf-8');
@@ -2584,7 +2610,7 @@ export default config;
     }
   });
 
-  it('defaults deployment setup to Cloudflare and skips Void-specific setup', async () => {
+  it('defaults deployment setup to Cloudflare and offers its GitHub workflow', async () => {
     const root = mkdtempSync(join(tmpdir(), 'void-init-'));
     try {
       writeExistingAstroProject(root);
@@ -2594,9 +2620,18 @@ export default config;
           ? { status: 1, stdout: '', stderr: 'Not authenticated' }
           : { status: 0, stdout: '', stderr: '' },
       );
-      mockConfirm.mockImplementation((options: { message?: string }) =>
-        options.message === 'Log in to Cloudflare with Wrangler now?' ? false : undefined,
-      );
+      mockConfirm.mockImplementation((options: { message?: string }) => {
+        if (options.message === 'Log in to Cloudflare with Wrangler now?') {
+          return false;
+        }
+        if (
+          options.message ===
+          'Create .github/workflows/void-deploy.yml to deploy on pushes to main?'
+        ) {
+          return true;
+        }
+        return undefined;
+      });
 
       await runInitCommand(root);
 
@@ -2627,7 +2662,9 @@ export default config;
       );
       expect(mockGetToken).not.toHaveBeenCalled();
       expect(mockListProjects).not.toHaveBeenCalled();
-      expect(existsSync(join(root, '.github', 'workflows', 'void-deploy.yml'))).toBe(false);
+      expect(
+        readFileSync(join(root, '.github', 'workflows', 'void-deploy.yml'), 'utf-8'),
+      ).toContain('void deploy --platform cloudflare');
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

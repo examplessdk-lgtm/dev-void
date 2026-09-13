@@ -25,7 +25,7 @@ function extractName(filePath: string): string {
   return filePath.replace(/\.[^.]+$/, '');
 }
 
-function deriveBindingName(name: string): string {
+export function deriveQueueBindingName(name: string): string {
   return 'QUEUE_' + name.toUpperCase().replace(/[^A-Z0-9]/g, '_');
 }
 
@@ -51,7 +51,7 @@ function parseQueueFiles(
       return {
         filePath,
         name,
-        bindingName: deriveBindingName(name),
+        bindingName: deriveQueueBindingName(name),
         maxBatchSize: extractConsumerOption(source, 'maxBatchSize'),
         maxBatchTimeout: extractConsumerOption(source, 'maxBatchTimeout'),
         maxRetries: extractConsumerOption(source, 'maxRetries'),

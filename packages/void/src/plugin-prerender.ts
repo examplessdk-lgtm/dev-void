@@ -21,6 +21,12 @@ export function prerenderPlugin(root: string, config: VoidConfig): Plugin {
       if (config.output !== 'static') {
         return;
       }
+      // A managed deploy runs prerender in the trusted parent CLI after the
+      // build. This keeps every platform credential out of arbitrary Vite
+      // plugins while preserving the same built-worker execution path.
+      if (process.env.VOID_DEPLOY_BUILD === '1') {
+        return;
+      }
       if (this.environment?.name !== 'client') {
         return;
       }

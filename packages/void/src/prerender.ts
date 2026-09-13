@@ -17,6 +17,7 @@ import { readConfig } from './config.ts';
 import { voidLog, voidWarn } from './log.ts';
 import { filterLoadedEnv, stripInternalEnvKeys } from './shared/env.ts';
 import { DEFAULT_PROXY_URL, STAGING_PROXY_URL } from './shared/proxy.ts';
+import { buildEnv } from './shared/untrusted-env.ts';
 
 const PRERENDER_PATHS_ENDPOINT = '/__void/prerender-paths';
 const STATIC_PAGE_DATA_DIR = '_void/pages';
@@ -241,6 +242,7 @@ async function createCloudflarePrerenderRunner(options: {
   clientDir?: string;
   remoteMode?: boolean;
   projectId?: string;
+  voidToken?: string;
 }) {
   const { root, workerDir, persistDir, clientDir, remoteMode } = options;
 
@@ -277,7 +279,10 @@ async function createCloudflarePrerenderRunner(options: {
   // A token is only useful alongside a project ID. Avoid touching the system
   // keychain for ordinary unlinked builds, which also keeps parallel prerenders
   // from contending on the platform credential store.
-  const voidToken = voidProjectId ? getToken(root) : null;
+  // Managed deploy passes a dedicated, short-lived prerender token explicitly.
+  // Self-hosted `vite build` keeps the existing linked-project credential
+  // fallback because it has no parent deploy orchestrator to mint one.
+  const voidToken = voidProjectId ? (options.voidToken ?? getToken(root)) : null;
   const voidStaging = isStagingMode(root);
 
   const bindings = buildPrerenderBindings({
@@ -401,6 +406,7 @@ export async function collectPrerenderPaths(options: {
   clientDir?: string;
   remoteMode?: boolean;
   projectId?: string;
+  voidToken?: string;
 }): Promise<Array<string>> {
   const runner = await createCloudflarePrerenderRunner(options);
   try {
@@ -422,6 +428,7 @@ export async function prerenderPages(options: {
   persistDir: string;
   remoteMode?: boolean;
   projectId?: string;
+  voidToken?: string;
 }): Promise<PrerenderRunResult> {
   const runner = await createCloudflarePrerenderRunner(options);
   try {
@@ -555,7 +562,7 @@ if (mode === "collect") {
       execFile(
         process.execPath,
         [runnerPath, JSON.stringify(config)],
-        { env: { ...process.env, ...env }, cwd: root, maxBuffer: 10 * 1024 * 1024 },
+        { env: buildEnv(env), cwd: root, maxBuffer: 10 * 1024 * 1024 },
         (error, stdout, stderr) => {
           if (stderr) {
             process.stderr.write(stderr);

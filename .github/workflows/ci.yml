@@ -79,8 +79,9 @@ jobs:
       - run: vp check
         if: ${{ matrix.shard == 'unit' }}
 
-      # Unit suites import the core package through its public `void/*` exports and exercise
-      # generated CLI assets, so they need the core build even though they skip playground builds.
+      # Unit suites import the core package and its workspace dependencies through public exports and
+      # exercise generated CLI assets, so they need the transitive core stack even though they skip
+      # playground builds.
       - run: vp run build:core
         if: ${{ matrix.shard == 'unit' }}
 
@@ -132,7 +133,8 @@ jobs:
         run: |
           : "${VOID_E2E_CF_TOKEN:?empty — set it as a cloudflare-e2e environment secret}"
           : "${VOID_E2E_CF_ACCOUNT_ID:?empty — set it as a cloudflare-e2e environment secret}"
-      # build:core produces dist/cli/cli.mjs + the built `void` plugin the deploy uses to build the app.
+      # build:core produces the core package and its workspace dependencies, including
+      # dist/cli/cli.mjs and the built `void` plugin the deploy uses to build the app.
       - run: vp run build:core
       - run: vp test run packages/void/test/e2e/cloudflare-deploy-live.test.ts
 

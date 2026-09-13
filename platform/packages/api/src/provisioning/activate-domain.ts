@@ -1,4 +1,11 @@
-import { type Db, updateDomainStatus, updateDomainVerificationData } from '../db.ts';
+import { sql as drizzleSql } from 'drizzle-orm';
+import {
+  getDomain,
+  getProject,
+  type Db,
+  updateDomainStatus,
+  updateDomainVerificationData,
+} from '../db.ts';
 import type { ApiEnv } from '../env.ts';
 import type { DomainVerificationData } from '../schema.ts';
 import type { Domain, Project } from '../types.ts';
@@ -95,14 +102,32 @@ export async function tryActivateDomain(
   // Read slug routing whenever the CF gate is satisfied so we can surface
   // `awaitingDeployment` to the caller regardless of whether activation
   // actually happened (activation also requires `domain.status === 'pending'`).
-  const slugRouting = gateOk && wasPending ? await env.ROUTING.get(project.slug) : null;
-
+  let slugRouting: string | null = null;
   let activated = false;
-  if (gateOk && wasPending && slugRouting) {
-    await env.ROUTING.put(`domain:${domain.hostname}`, slugRouting);
-    await updateDomainStatus(db, domain.id, 'active');
-    activated = true;
-    domain.status = 'active';
+  if (gateOk && wasPending) {
+    await db.transaction(async (tx) => {
+      await tx.execute(drizzleSql`SELECT id FROM projects WHERE id = ${project.id} FOR UPDATE`);
+      const txDb = tx as unknown as Db;
+      const [lockedProject, lockedDomain] = await Promise.all([
+        getProject(txDb, project.id),
+        getDomain(txDb, domain.id),
+      ]);
+      if (
+        !lockedProject ||
+        lockedProject.status === 'deleting' ||
+        lockedDomain?.status !== 'pending'
+      ) {
+        return;
+      }
+      slugRouting = await env.ROUTING.get(lockedProject.slug);
+      if (!slugRouting) {
+        return;
+      }
+      await env.ROUTING.put(`domain:${lockedDomain.hostname}`, slugRouting);
+      await updateDomainStatus(txDb, lockedDomain.id, 'active');
+      activated = true;
+      domain.status = 'active';
+    });
   }
 
   const awaitingDeployment = gateOk && wasPending && !slugRouting;

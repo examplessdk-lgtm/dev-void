@@ -9,6 +9,7 @@ import {
   normalizeForCfAssetSession,
   persistWorkerBundle,
   replayWorkerBundle,
+  scanProjectAssetOrphanCandidates,
   uploadAssetBuckets,
   uploadStaticAssets,
   type AssetEntry,
@@ -360,6 +361,142 @@ describe('deleteUnreferencedAssets', () => {
     expect(kv.store.has('assets/proj_test/hash_a')).toBe(false);
     // Legacy key untouched
     expect(kv.store.has('assets/hash_a')).toBe(true);
+  });
+
+  it('preserves a recently uploaded R2 object that an in-flight deploy may claim', async () => {
+    const kv = createMockKV();
+    const r2 = createMockR2();
+    const key = 'assets/proj_test/hash_fresh';
+    r2.store.set(key, new ArrayBuffer(0));
+    vi.mocked(r2.head).mockResolvedValue({
+      key,
+      version: 'fresh-version',
+      size: 0,
+      etag: 'fresh-etag',
+      httpEtag: '"fresh-etag"',
+      uploaded: new Date(),
+      checksums: {},
+      writeHttpMetadata: vi.fn(),
+    } as unknown as R2Object);
+
+    await deleteUnreferencedAssets(kv, r2, ['hash_fresh'], new Set(), 'proj_test');
+
+    expect(r2.store.has(key)).toBe(true);
+    expect(r2.delete).not.toHaveBeenCalled();
+  });
+});
+
+function createAssetScanR2Mock(
+  objects: ReadonlyArray<{ key: string; uploaded: Date }>,
+  pageSize = 1000,
+) {
+  return {
+    list: vi.fn(async (options?: { prefix?: string; cursor?: string; limit?: number }) => {
+      const prefix = options?.prefix ?? '';
+      const matching = objects.filter((object) => object.key.startsWith(prefix));
+      const start = options?.cursor ? Number(options.cursor) : 0;
+      const limit = Math.min(options?.limit ?? pageSize, pageSize);
+      const page = matching.slice(start, start + limit);
+      const next = start + page.length;
+      const truncated = next < matching.length;
+      return {
+        objects: page,
+        delimitedPrefixes: [],
+        truncated,
+        ...(truncated ? { cursor: String(next) } : {}),
+      } as unknown as R2Objects;
+    }),
+    delete: vi.fn(),
+  } as unknown as R2Bucket & { delete: ReturnType<typeof vi.fn> };
+}
+
+describe('scanProjectAssetOrphanCandidates', () => {
+  it('emits old and malformed keys while preserving fresh uploads and project scope', async () => {
+    const now = Date.now();
+    const r2 = createAssetScanR2Mock([
+      { key: 'assets/proj_test/hash_old', uploaded: new Date(now - 3_600_001) },
+      { key: 'assets/proj_test/hash_fresh', uploaded: new Date(now - 3_599_000) },
+      // Preserve the old sweep's self-healing behavior: a prefix-only key is
+      // malformed and remains a candidate even when it was uploaded recently.
+      { key: 'assets/proj_test/', uploaded: new Date(now) },
+      { key: 'assets/proj_other/hash_old', uploaded: new Date(now - 3_600_001) },
+    ]);
+    const batches: Array<ReadonlyArray<string>> = [];
+
+    const count = await scanProjectAssetOrphanCandidates(r2, 'proj_test', async (batch) => {
+      batches.push(batch);
+    });
+
+    expect(count).toBe(2);
+    expect(batches).toEqual([['hash_old', '']]);
+    expect(r2.list).toHaveBeenCalledWith({
+      prefix: 'assets/proj_test/',
+      cursor: undefined,
+      limit: 1000,
+    });
+    expect(r2.delete).not.toHaveBeenCalled();
+  });
+
+  it('paginates and invokes the callback in batches of at most 1000 candidates', async () => {
+    const uploaded = new Date(Date.now() - 3_600_001);
+    const r2 = createAssetScanR2Mock(
+      Array.from({ length: 1505 }, (_, index) => ({
+        key: `assets/proj_test/hash_${index}`,
+        uploaded,
+      })),
+      1505,
+    );
+    const batches: Array<ReadonlyArray<string>> = [];
+
+    const count = await scanProjectAssetOrphanCandidates(r2, 'proj_test', async (batch) => {
+      batches.push(batch);
+    });
+
+    expect(count).toBe(1505);
+    expect(vi.mocked(r2.list).mock.calls.length).toBeGreaterThan(1);
+    expect(batches.map((batch) => batch.length)).toEqual([1000, 505]);
+    expect(batches.flat()).toHaveLength(1505);
+    expect(batches.every((batch) => batch.length > 0 && batch.length <= 1000)).toBe(true);
+    expect(r2.delete).not.toHaveBeenCalled();
+  });
+
+  it('does not invoke the callback when every matching object is fresh', async () => {
+    const r2 = createAssetScanR2Mock([
+      { key: 'assets/proj_test/hash_fresh', uploaded: new Date() },
+    ]);
+    const onBatch = vi.fn(async (_batch: ReadonlyArray<string>) => {});
+
+    const count = await scanProjectAssetOrphanCandidates(r2, 'proj_test', onBatch);
+
+    expect(count).toBe(0);
+    expect(onBatch).not.toHaveBeenCalled();
+    expect(r2.delete).not.toHaveBeenCalled();
+  });
+
+  it('stops at the requested per-invocation candidate budget', async () => {
+    const uploaded = new Date(Date.now() - 3_600_001);
+    const r2 = createAssetScanR2Mock(
+      Array.from({ length: 1500 }, (_, index) => ({
+        key: `assets/proj_test/hash_${index}`,
+        uploaded,
+      })),
+      500,
+    );
+    const batches: Array<ReadonlyArray<string>> = [];
+
+    const count = await scanProjectAssetOrphanCandidates(
+      r2,
+      'proj_test',
+      async (batch) => {
+        batches.push(batch);
+      },
+      { maxCandidates: 200 },
+    );
+
+    expect(count).toBe(200);
+    expect(batches.map((batch) => batch.length)).toEqual([200]);
+    expect(r2.list).toHaveBeenCalledTimes(1);
+    expect(r2.delete).not.toHaveBeenCalled();
   });
 });
 

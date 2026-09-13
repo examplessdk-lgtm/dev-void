@@ -21,6 +21,7 @@ vi.mock('../../src/cli/auth', () => ({
 
 vi.mock('../../src/cli/project', () => ({
   readProjectConfig: () => mockReadProjectConfig(),
+  readDeploymentPlatform: () => 'void',
   isVoidInternalStaging: () => false,
 }));
 

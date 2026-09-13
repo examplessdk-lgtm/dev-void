@@ -86,6 +86,7 @@ drizzle/
   - domains
   - usage
   - PostgreSQL and MySQL project database provisioning/update
+  - `POST /projects/:id/prerender-token` — mint a five-minute, project-scoped token accepted only by the remote-binding proxy
   - `/projects/:id/github` — connect/inspect/update/disconnect the GitHub repo (POST/GET/PATCH/DELETE; auth + ownership)
   - `/projects/:id/email/*` — monthly usage, and the verified-recipient list the project may send to (`GET|POST|DELETE`). Adding a recipient triggers a verification email; the address only becomes sendable once the recipient consents. See [Email](#email).
 - `GET /usage`

@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { appendSqliteClassMigration, type DurableObjectMigrationStep } from '@void/deploy-core';
 import {
   applyEdits,
   createScanner,
@@ -30,19 +31,91 @@ const UTF8_BOM = '﻿';
 const NODEJS_ALS_FLAG = 'nodejs_als';
 const NODEJS_COMPAT_FLAG = 'nodejs_compat';
 const VOID_CONFIG_FILE = 'void.json';
+const MANAGED_QUEUES_MARKER = /^\s*\/\/ void:managed-queues:v1:([A-Za-z0-9_-]+)\s*$/m;
+const PUBLISHED_TRAFFIC_MARKER = /^\s*\/\/ void:published-traffic:v1:([A-Za-z0-9_-]+)\s*$/m;
 export const DEFAULT_LIVE_BINDING = 'VOID_LIVE';
 export const DEFAULT_LIVE_CLASS = 'VoidLiveStreamDurableObject';
 export const LIVE_MIGRATION_TAG = 'live-v1';
+
+export type WranglerCustomDomain = {
+  pattern: string;
+  customDomain: true;
+};
+
+export type WranglerCustomDomainUpdate = {
+  configPath: string;
+  domains: Array<WranglerCustomDomain>;
+  modified: boolean;
+};
+
+export type WranglerPublishedTrafficSnapshot = {
+  workers_dev: boolean;
+  preview_urls: boolean;
+  routes: Array<unknown>;
+};
+
+/** Read the last traffic attachment state Void successfully published remotely. */
+export function readWranglerPublishedTrafficSnapshot(
+  configPath: string,
+): WranglerPublishedTrafficSnapshot | undefined {
+  if (!existsSync(configPath)) {
+    return undefined;
+  }
+  const encoded = PUBLISHED_TRAFFIC_MARKER.exec(readFileSync(configPath, 'utf-8'))?.[1];
+  if (!encoded) {
+    return undefined;
+  }
+  try {
+    const value = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8')) as unknown;
+    if (
+      !isRecord(value) ||
+      typeof value.workers_dev !== 'boolean' ||
+      typeof value.preview_urls !== 'boolean' ||
+      !Array.isArray(value.routes)
+    ) {
+      return undefined;
+    }
+    return {
+      workers_dev: value.workers_dev,
+      preview_urls: value.preview_urls,
+      routes: value.routes,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+/** Persist traffic attachment provenance without adding unsupported Wrangler fields. */
+export function writeWranglerPublishedTrafficSnapshot(
+  configPath: string,
+  snapshot: WranglerPublishedTrafficSnapshot,
+  options?: { create?: boolean },
+): void {
+  if (!existsSync(configPath)) {
+    return;
+  }
+  const raw = readFileSync(configPath, 'utf-8');
+  const encoded = Buffer.from(JSON.stringify(snapshot), 'utf8').toString('base64url');
+  const marker = `// void:published-traffic:v1:${encoded}`;
+  const existing = PUBLISHED_TRAFFIC_MARKER.exec(raw);
+  if (!existing && options?.create === false) {
+    return;
+  }
+  const next = existing
+    ? raw.slice(0, existing.index) + marker + raw.slice(existing.index + existing[0].length)
+    : `${marker}${raw.includes('\r\n') ? '\r\n' : '\n'}${raw}`;
+  if (next !== raw) {
+    writeFileSync(configPath, next);
+  }
+}
 
 export type LiveBindingConfig = {
   bindingName: string;
   className: string;
 };
 
-type DurableObjectMigration = {
+type DurableObjectMigration = DurableObjectMigrationStep & {
   tag?: string;
-  new_classes?: Array<string>;
-  new_sqlite_classes?: Array<string>;
 };
 
 /** Latest compatibility date the Void test suite is pinned against. */
@@ -474,28 +547,59 @@ export function syncWranglerBindings(
     }
   }
 
-  if (options?.websockets && options.websockets.length > 0) {
+  if (options?.websockets) {
     const existing =
       ((
         parsed.durable_objects as
           | { bindings?: Array<{ name: string; class_name: string }> }
           | undefined
       )?.bindings as Array<{ name: string; class_name: string }> | undefined) ?? [];
+    const migrations = Array.isArray(parsed.migrations)
+      ? (parsed.migrations as Array<DurableObjectMigration>)
+      : [];
+    // Registered Durable Object classes are data-bearing identities. Removing a
+    // route must not remove its binding or emit `deleted_classes`: either action
+    // can make the next upload invalid or destroy the object's SQLite storage.
+    // Historical WebSocket bindings remain attached and the compiler exports a
+    // tombstone class until an explicit destructive lifecycle command exists.
+    const retained = existing;
+    for (const route of options.websockets) {
+      const conflict = retained.find(
+        (binding) => binding.name === route.bindingName && binding.class_name !== route.className,
+      );
+      if (conflict) {
+        throw new Error(
+          `websocket: binding '${route.bindingName}' is already configured for class '${conflict.class_name}', but '${route.filePath}' requires '${route.className}'.`,
+        );
+      }
+    }
     const additions = options.websockets
-      .filter((route) => !existing.some((binding) => binding.name === route.bindingName))
+      .filter((route) => !retained.some((binding) => binding.name === route.bindingName))
       .map((route) => ({ name: route.bindingName, class_name: route.className }));
-    if (additions.length > 0) {
-      parsed.durable_objects = { bindings: [...existing, ...additions] };
+    const nextBindings = [...retained, ...additions];
+    if (
+      nextBindings.length !== existing.length ||
+      nextBindings.some(
+        (binding, index) =>
+          binding.name !== existing[index]?.name ||
+          binding.class_name !== existing[index]?.class_name,
+      )
+    ) {
+      parsed.durable_objects = {
+        ...((parsed.durable_objects as Record<string, unknown> | undefined) ?? {}),
+        bindings: nextBindings,
+      };
       modified = true;
     }
 
-    if (!Array.isArray(parsed.migrations)) {
-      parsed.migrations = [
-        {
-          tag: 'void-ws-v1',
-          new_classes: options.websockets.map((route) => route.className),
-        },
-      ];
+    const planned = appendSqliteClassMigration(
+      migrations,
+      options.websockets.map((route) => route.className),
+      'void-ws-v1',
+      retained.map((binding) => binding.class_name),
+    );
+    if (planned.added) {
+      parsed.migrations = planned.migrations;
       modified = true;
     }
   }
@@ -695,6 +799,65 @@ export function syncWranglerDurableObjects(
   return syncWranglerBindings(root, NO_INFERRED_BINDINGS, { durableObjects });
 }
 
+/** Persist WebSocket Durable Object bindings and SQLite migration history. */
+export function syncWranglerWebSockets(
+  root: string,
+  websockets: Array<WebSocketRouteDefinition>,
+): boolean {
+  if (
+    websockets.length === 0 &&
+    !['wrangler.jsonc', 'wrangler.json'].some((name) => existsSync(join(root, name)))
+  ) {
+    return false;
+  }
+  return syncWranglerBindings(root, NO_INFERRED_BINDINGS, { websockets });
+}
+
+/**
+ * Return registered WebSocket classes that no longer have a source route.
+ * These classes must remain exported while their data-bearing bindings remain
+ * in Wrangler configuration. Arbitrary user Durable Objects are excluded by
+ * requiring provenance from Void's WebSocket migration tag.
+ */
+export function readWranglerWebSocketTombstones(
+  root: string,
+  websockets: Array<WebSocketRouteDefinition>,
+): Array<string> {
+  const configPath = ['wrangler.jsonc', 'wrangler.json']
+    .map((name) => join(root, name))
+    .find((path) => existsSync(path));
+  if (!configPath) {
+    return [];
+  }
+  const parsed = parseJsonc(readFileSync(configPath, 'utf-8'));
+  const migrations = Array.isArray(parsed.migrations)
+    ? (parsed.migrations as Array<DurableObjectMigration>)
+    : [];
+  const historicalClasses = new Set(
+    migrations
+      .filter((migration) => /^void-ws-v1(?:-\d+)?$/.test(migration.tag ?? ''))
+      .flatMap((migration) => [
+        ...(migration.new_classes ?? []),
+        ...(migration.new_sqlite_classes ?? []),
+      ]),
+  );
+  const currentClasses = new Set(websockets.map((route) => route.className));
+  const bindings = (
+    parsed.durable_objects as { bindings?: Array<{ class_name?: unknown }> } | undefined
+  )?.bindings;
+  return [
+    ...new Set(
+      (Array.isArray(bindings) ? bindings : []).flatMap((binding) =>
+        typeof binding.class_name === 'string' &&
+        historicalClasses.has(binding.class_name) &&
+        !currentClasses.has(binding.class_name)
+          ? [binding.class_name]
+          : [],
+      ),
+    ),
+  ].sort();
+}
+
 /**
  * Ensure a wrangler config has an explicit compatibility date.
  * Used when `worker.compatibility_date` is configured in void.json but the
@@ -865,6 +1028,8 @@ export type ProvisionedWranglerPatch = {
   queues?: {
     producers?: Array<WranglerQueueProducer>;
     consumers?: Array<WranglerQueueConsumer>;
+    /** Remove only stale entries carrying explicit Void-managed provenance. */
+    reconcileVoidOwned?: boolean;
   };
   /**
    * Email (Mode B — the developer's own Cloudflare account; design doc 0078).
@@ -893,6 +1058,112 @@ export type ProvisionedWranglerPatch = {
    */
   vars?: Record<string, string>;
 };
+
+type ManagedQueueProvenance = {
+  producerBindings: Array<string>;
+  consumerQueues: Array<string>;
+  /** Void-owned consumers removed locally but not yet confirmed removed remotely. */
+  pendingConsumerRemovals: Array<string>;
+};
+
+function readManagedQueueProvenance(text: string): ManagedQueueProvenance {
+  const encoded = MANAGED_QUEUES_MARKER.exec(text)?.[1];
+  if (!encoded) {
+    return { producerBindings: [], consumerQueues: [], pendingConsumerRemovals: [] };
+  }
+  try {
+    const parsed = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8')) as unknown;
+    if (!isRecord(parsed)) {
+      return { producerBindings: [], consumerQueues: [], pendingConsumerRemovals: [] };
+    }
+    return {
+      producerBindings: Array.isArray(parsed.producerBindings)
+        ? parsed.producerBindings.filter((value): value is string => typeof value === 'string')
+        : [],
+      consumerQueues: Array.isArray(parsed.consumerQueues)
+        ? parsed.consumerQueues.filter((value): value is string => typeof value === 'string')
+        : [],
+      pendingConsumerRemovals: Array.isArray(parsed.pendingConsumerRemovals)
+        ? parsed.pendingConsumerRemovals.filter(
+            (value): value is string => typeof value === 'string',
+          )
+        : [],
+    };
+  } catch {
+    // A malformed marker proves no ownership. Fail safe by retaining every entry.
+    return { producerBindings: [], consumerQueues: [], pendingConsumerRemovals: [] };
+  }
+}
+
+function writeManagedQueueProvenance(text: string, provenance: ManagedQueueProvenance): string {
+  const normalized: ManagedQueueProvenance = {
+    producerBindings: [...new Set(provenance.producerBindings)].sort(),
+    consumerQueues: [...new Set(provenance.consumerQueues)].sort(),
+    pendingConsumerRemovals: [...new Set(provenance.pendingConsumerRemovals)].sort(),
+  };
+  const existing = MANAGED_QUEUES_MARKER.exec(text);
+  if (
+    normalized.producerBindings.length === 0 &&
+    normalized.consumerQueues.length === 0 &&
+    normalized.pendingConsumerRemovals.length === 0
+  ) {
+    if (!existing) {
+      return text;
+    }
+    const start = existing.index;
+    const end = start + existing[0].length;
+    const trailingNewline = text.slice(end).match(/^(\r?\n)/)?.[1] ?? '';
+    return text.slice(0, start) + text.slice(end + trailingNewline.length);
+  }
+  const encoded = Buffer.from(JSON.stringify(normalized), 'utf8').toString('base64url');
+  const marker = `// void:managed-queues:v1:${encoded}`;
+  if (existing) {
+    return text.slice(0, existing.index) + marker + text.slice(existing.index + existing[0].length);
+  }
+  return `${marker}${text.includes('\r\n') ? '\r\n' : '\n'}${text}`;
+}
+
+/**
+ * Return explicitly Void-owned consumer names that may need remote cleanup.
+ *
+ * Current managed consumers are included for schema-1 upgrades; the activation layer subtracts
+ * consumers still present in the desired config. Pending removals survive failed deploys so a
+ * later retry can finish cleanup without inferring ownership from queue naming conventions.
+ */
+export function readWranglerManagedQueueCleanupCandidates(configPath: string): Array<string> {
+  if (!existsSync(configPath)) {
+    return [];
+  }
+  const raw = readFileSync(configPath, 'utf-8');
+  const text = raw.startsWith(UTF8_BOM) ? raw.slice(UTF8_BOM.length) : raw;
+  const provenance = readManagedQueueProvenance(text);
+  return [...new Set([...provenance.consumerQueues, ...provenance.pendingConsumerRemovals])].sort();
+}
+
+/** Clear only cleanup tombstones confirmed by a successful trigger reconciliation. */
+export function acknowledgeWranglerManagedQueueRemovals(
+  configPath: string,
+  removedQueues: ReadonlyArray<string>,
+): void {
+  if (!existsSync(configPath) || removedQueues.length === 0) {
+    return;
+  }
+  const raw = readFileSync(configPath, 'utf-8');
+  const hasBom = raw.startsWith(UTF8_BOM);
+  const text = hasBom ? raw.slice(UTF8_BOM.length) : raw;
+  const provenance = readManagedQueueProvenance(text);
+  const removed = new Set(removedQueues);
+  const updated = writeManagedQueueProvenance(text, {
+    ...provenance,
+    pendingConsumerRemovals: provenance.pendingConsumerRemovals.filter(
+      (queue) => !removed.has(queue),
+    ),
+  });
+  const finalText = hasBom ? `${UTF8_BOM}${updated}` : updated;
+  if (finalText !== raw) {
+    writeFileSync(configPath, finalText);
+  }
+}
 
 export type WriteProvisionedWranglerResult = {
   /** Absolute path of the config file that was operated on. */
@@ -1271,6 +1542,11 @@ export function writeProvisionedWranglerConfig(
   //     so the queue name is the identity.
   // Framework self-host only (see the note on ProvisionedWranglerPatch); a native
   // app would duplicate the build's scanner queues.
+  const reconcileManagedQueues = patch.queues?.reconcileVoidOwned === true;
+  const managedQueueProvenance = readManagedQueueProvenance(text);
+  const managedProducerBindings = new Set(managedQueueProvenance.producerBindings);
+  const managedConsumerQueues = new Set(managedQueueProvenance.consumerQueues);
+  const pendingConsumerRemovals = new Set(managedQueueProvenance.pendingConsumerRemovals);
   const upsertQueueEntries = (
     section: 'producers' | 'consumers',
     entries: Array<Record<string, unknown>> | undefined,
@@ -1401,12 +1677,69 @@ export function writeProvisionedWranglerConfig(
           isArrayInsertion: true,
         });
         currentList.push(entry);
+        if (reconcileManagedQueues) {
+          if (section === 'producers' && typeof entry.binding === 'string') {
+            managedProducerBindings.add(entry.binding);
+          } else if (section === 'consumers' && typeof entry.queue === 'string') {
+            managedConsumerQueues.add(entry.queue);
+          }
+        }
       }
     }
   };
   if (patch.queues) {
+    if (patch.queues.reconcileVoidOwned) {
+      const queues = assertObjectContainer(parseJsonc(text).queues, 'queues');
+      assertValidQueueProducers(queues?.producers);
+      const producers = Array.isArray(queues?.producers)
+        ? (queues.producers as Array<Record<string, unknown>>)
+        : [];
+      const desiredBindings = new Set(
+        (patch.queues.producers ?? []).map((producer) => producer.binding),
+      );
+      const staleProducerIndexes: Array<number> = [];
+      for (let index = 0; index < producers.length; index++) {
+        const producer = producers[index];
+        if (
+          typeof producer.binding === 'string' &&
+          managedProducerBindings.has(producer.binding) &&
+          !desiredBindings.has(producer.binding)
+        ) {
+          staleProducerIndexes.push(index);
+          managedProducerBindings.delete(producer.binding);
+        }
+      }
+      for (const index of staleProducerIndexes.reverse()) {
+        set(['queues', 'producers', index], undefined);
+      }
+
+      const consumers = Array.isArray(queues?.consumers)
+        ? (queues.consumers as Array<Record<string, unknown>>)
+        : [];
+      const desiredConsumerQueues = new Set(
+        (patch.queues.consumers ?? []).map((consumer) => consumer.queue),
+      );
+      const staleConsumerIndexes = consumers.flatMap((consumer, index) => {
+        if (
+          typeof consumer.queue === 'string' &&
+          managedConsumerQueues.has(consumer.queue) &&
+          !desiredConsumerQueues.has(consumer.queue)
+        ) {
+          managedConsumerQueues.delete(consumer.queue);
+          pendingConsumerRemovals.add(consumer.queue);
+          return [index];
+        }
+        return [];
+      });
+      for (const index of staleConsumerIndexes.reverse()) {
+        set(['queues', 'consumers', index], undefined);
+      }
+    }
     upsertQueueEntries('producers', patch.queues.producers);
     upsertQueueEntries('consumers', patch.queues.consumers);
+    for (const consumer of patch.queues.consumers ?? []) {
+      pendingConsumerRemovals.delete(consumer.queue);
+    }
   }
 
   // vars — per-key upsert into the top-level `vars` object (created when absent).
@@ -1491,12 +1824,180 @@ export function writeProvisionedWranglerConfig(
     );
   }
 
+  if (reconcileManagedQueues) {
+    const finalQueues = assertObjectContainer(parseJsonc(text).queues, 'queues');
+    const finalProducerBindings = new Set(
+      (Array.isArray(finalQueues?.producers) ? finalQueues.producers : []).flatMap((entry) =>
+        isRecord(entry) && typeof entry.binding === 'string' ? [entry.binding] : [],
+      ),
+    );
+    const finalConsumerQueues = new Set(
+      (Array.isArray(finalQueues?.consumers) ? finalQueues.consumers : []).flatMap((entry) =>
+        isRecord(entry) && typeof entry.queue === 'string' ? [entry.queue] : [],
+      ),
+    );
+    text = writeManagedQueueProvenance(text, {
+      producerBindings: [...managedProducerBindings].filter((binding) =>
+        finalProducerBindings.has(binding),
+      ),
+      consumerQueues: [...managedConsumerQueues].filter((queue) => finalConsumerQueues.has(queue)),
+      pendingConsumerRemovals: [...pendingConsumerRemovals],
+    });
+  }
+
   const finalText = hasBom ? `${UTF8_BOM}${text}` : text;
   const modified = finalText !== rawContent;
   if (modified) {
     writeFileSync(configPath, finalText);
   }
   return { configPath, modified, d1MigrationsDirSkipped };
+}
+
+/** Read the custom-domain routes owned by the root Wrangler config. */
+export function readWranglerCustomDomains(root: string): WranglerCustomDomainUpdate {
+  const configPath = discoverWranglerConfigPath(root);
+  const raw = existsSync(configPath) ? readFileSync(configPath, 'utf-8') : '{}';
+  const text = raw.startsWith(UTF8_BOM) ? raw.slice(UTF8_BOM.length) : raw;
+  const parsed = parseJsonc(text);
+  assertNoDuplicateMembers(text, configPath);
+  return {
+    configPath,
+    domains: parseCustomDomains(parsed.routes, configPath),
+    modified: false,
+  };
+}
+
+/**
+ * Add or remove one Wrangler `custom_domain` route without rewriting unrelated
+ * configuration. The returned domain list is the post-edit source of truth used
+ * by `void domain list|status` on direct Cloudflare projects.
+ */
+export function updateWranglerCustomDomain(
+  root: string,
+  hostname: string,
+  action: 'add' | 'delete',
+): WranglerCustomDomainUpdate {
+  const configPath = discoverWranglerConfigPath(root);
+  if (!existsSync(configPath)) {
+    throw new Error(
+      `domain: No Wrangler config found at "${configPath}". Run \`void init\` first.`,
+    );
+  }
+  const raw = readFileSync(configPath, 'utf-8');
+  const hasBom = raw.startsWith(UTF8_BOM);
+  const original = hasBom ? raw.slice(UTF8_BOM.length) : raw;
+  const parsed = parseJsonc(original);
+  assertNoDuplicateMembers(original, configPath);
+  if (parsed.route !== undefined) {
+    throw new Error(
+      `domain: "${configPath}" uses the singular "route" field. Convert it to a "routes" array before managing custom domains so the existing route cannot be shadowed.`,
+    );
+  }
+  const routes = parsed.routes;
+  if (routes !== undefined && !Array.isArray(routes)) {
+    throw new Error(`domain: "routes" in "${configPath}" must be an array.`);
+  }
+  const routeArray = (routes ?? []) as Array<unknown>;
+  const matches: Array<number> = [];
+  for (let index = 0; index < routeArray.length; index++) {
+    const route = routeArray[index];
+    if (typeof route === 'string') {
+      if (route === hostname) {
+        throw new Error(
+          `domain: ${JSON.stringify(hostname)} already exists as a non-custom route in "${configPath}". Remove or convert that route first.`,
+        );
+      }
+      continue;
+    }
+    if (typeof route !== 'object' || route === null || Array.isArray(route)) {
+      throw new Error(`domain: "routes[${index}]" in "${configPath}" is malformed.`);
+    }
+    const entry = route as Record<string, unknown>;
+    if (entry.pattern !== hostname) {
+      continue;
+    }
+    if (entry.custom_domain !== true) {
+      throw new Error(
+        `domain: ${JSON.stringify(hostname)} already exists as a non-custom route in "${configPath}". Remove or convert that route first.`,
+      );
+    }
+    matches.push(index);
+  }
+  if (matches.length > 1) {
+    throw new Error(
+      `domain: ${JSON.stringify(hostname)} is declared more than once in "${configPath}". Remove the duplicate before continuing.`,
+    );
+  }
+
+  let text = original;
+  const formattingOptions = detectFormattingOptions(original);
+  if (action === 'add' && matches.length === 0) {
+    text = applyMemberEdit(
+      text,
+      ['routes', routeArray.length],
+      { pattern: hostname, custom_domain: true },
+      { formattingOptions, isArrayInsertion: true },
+    );
+    const dropped = findDroppedComment(extractCommentTokens(original), extractCommentTokens(text));
+    if (dropped !== undefined) {
+      throw new Error(
+        `domain: cannot update "${configPath}" because the edit would drop a comment (${dropped}).`,
+      );
+    }
+  } else if (action === 'delete' && matches.length === 1) {
+    text = applyEdits(text, modify(text, ['routes', matches[0]], undefined, { formattingOptions }));
+  }
+
+  const finalText = hasBom ? `${UTF8_BOM}${text}` : text;
+  const modified = finalText !== raw;
+  if (modified) {
+    writeFileSync(configPath, finalText);
+  }
+  return {
+    configPath,
+    domains: parseCustomDomains(parseJsonc(text).routes, configPath),
+    modified,
+  };
+}
+
+function discoverWranglerConfigPath(root: string): string {
+  for (const name of ['wrangler.jsonc', 'wrangler.json']) {
+    const path = join(root, name);
+    if (existsSync(path)) {
+      return path;
+    }
+  }
+  return join(root, 'wrangler.jsonc');
+}
+
+function parseCustomDomains(value: unknown, configPath: string): Array<WranglerCustomDomain> {
+  if (value === undefined) {
+    return [];
+  }
+  if (!Array.isArray(value)) {
+    throw new Error(`domain: "routes" in "${configPath}" must be an array.`);
+  }
+  const domains: Array<WranglerCustomDomain> = [];
+  for (let index = 0; index < value.length; index++) {
+    const route = value[index];
+    if (typeof route === 'string') {
+      continue;
+    }
+    if (typeof route !== 'object' || route === null || Array.isArray(route)) {
+      throw new Error(`domain: "routes[${index}]" in "${configPath}" is malformed.`);
+    }
+    const entry = route as Record<string, unknown>;
+    if (entry.custom_domain !== true) {
+      continue;
+    }
+    if (typeof entry.pattern !== 'string' || entry.pattern.length === 0) {
+      throw new Error(
+        `domain: custom domain route "routes[${index}]" in "${configPath}" needs a non-empty pattern.`,
+      );
+    }
+    domains.push({ pattern: entry.pattern, customDomain: true });
+  }
+  return domains;
 }
 
 /**

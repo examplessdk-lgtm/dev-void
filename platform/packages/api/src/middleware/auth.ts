@@ -20,6 +20,7 @@ import { isAdminSuspended } from '../suspension.ts';
  *   - `GET  /projects`                         listProjects (slug→id resolution)
  *   - `GET  /projects/:id/resources`           getResources (PostgreSQL gate)
  *   - `POST /projects/:id/database`            provisionDatabase (PostgreSQL gate)
+ *   - `POST /projects/:id/prerender-token`      mint binding-proxy credential
  *   - `GET  /projects/:id/deployments`         listDeployments (live-binding restore)
  *   - `GET  /projects/:id/secrets`             listSecrets (env.ts schema validation)
  *   - `POST /projects/:id/deploy/preflight`    asset preflight
@@ -34,6 +35,7 @@ const DEPLOY_TOKEN_ALLOWLIST: ReadonlyArray<DeployAllowEntry> = [
   { method: 'GET', segments: ['projects'] },
   { method: 'GET', segments: ['projects', null, 'resources'] },
   { method: 'POST', segments: ['projects', null, 'database'] },
+  { method: 'POST', segments: ['projects', null, 'prerender-token'] },
   { method: 'GET', segments: ['projects', null, 'deployments'] },
   { method: 'GET', segments: ['projects', null, 'secrets'] },
   { method: 'POST', segments: ['projects', null, 'deploy', 'preflight'] },

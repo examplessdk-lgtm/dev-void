@@ -1,0 +1,23 @@
+{
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "WsChatRoomWs",
+        "class_name": "WsChatRoomWs"
+      },
+      {
+        "name": "WsNotificationsWs",
+        "class_name": "WsNotificationsWs"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "void-ws-v1",
+      "new_sqlite_classes": [
+        "WsChatRoomWs",
+        "WsNotificationsWs"
+      ]
+    }
+  ]
+}

@@ -54,12 +54,15 @@ vi.mock('../../src/cli/output.ts', async () => {
 // real. (For a non-`output:static` Void app this is the only in-process CF
 // runtime the deploy path would otherwise start; all network I/O is mocked
 // below.)
+const { mockCollectPrerenderPaths } = vi.hoisted(() => ({
+  mockCollectPrerenderPaths: vi.fn(async () => [] as Array<string>),
+}));
 vi.mock('../../src/prerender.ts', async () => {
   const actual =
     await vi.importActual<typeof import('../../src/prerender.ts')>('../../src/prerender.ts');
   return {
     ...actual,
-    collectPrerenderPaths: vi.fn(async () => [] as Array<string>),
+    collectPrerenderPaths: mockCollectPrerenderPaths,
   };
 });
 
@@ -113,6 +116,10 @@ function installPlatformMocks(): Captured {
       };
       const total = Object.keys(body.assetManifest ?? {}).length;
       return json({ needed: [], total, skipped: total });
+    }
+
+    if (url.endsWith('/projects/proj_named_layouts_test/prerender-token') && method === 'POST') {
+      return json({ token: 'scoped-prerender-token' });
     }
 
     if (url.endsWith('/deploy') && method === 'POST') {
@@ -213,6 +220,7 @@ describe('runFullDeploy emits manifest.pages (Void pages app, end-to-end)', () =
     originalFetch = globalThis.fetch;
     globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
     fetchMock.mockReset();
+    mockCollectPrerenderPaths.mockClear();
 
     savedToken = process.env.VOID_TOKEN;
     savedProject = process.env.VOID_PROJECT;
@@ -242,6 +250,13 @@ describe('runFullDeploy emits manifest.pages (Void pages app, end-to-end)', () =
     const captured = installPlatformMocks();
 
     await runDeploy(fixture, { skipBuild: true });
+
+    expect(mockCollectPrerenderPaths).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectId: 'proj_named_layouts_test',
+        voidToken: 'scoped-prerender-token',
+      }),
+    );
 
     expect(captured.finalizeBody).not.toBeNull();
     const pages = captured.finalizeBody!.manifest?.pages as

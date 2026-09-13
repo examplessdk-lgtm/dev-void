@@ -12,6 +12,7 @@ import type { ResolvedSandboxConfig } from '../sandbox/config.ts';
 import { toSlash } from '../shared/utils.ts';
 import type {
   AssetConfig,
+  DeployAssetManifestEntry,
   DeployManifest,
   DevRedirectRule,
   HeaderRule,
@@ -21,6 +22,7 @@ import type {
   ScheduleMeta,
   WebSocketManifestMeta,
 } from './types.ts';
+export type { DeployAssetManifestEntry as AssetManifestEntry } from './types.ts';
 import {
   DEFAULT_LIVE_BINDING,
   DEFAULT_LIVE_CLASS,
@@ -344,14 +346,6 @@ function checkWorkerJsAsset(relativePath: string, assetsIgnoreFilePresent: boole
  * existing CLI/test code that reads `entry.hash` keeps working for one
  * release. Remove in a follow-up PR after consumers migrate to `blake3`.
  */
-export type AssetManifestEntry = {
-  blake3: string;
-  md5: string;
-  size: number;
-  /** @deprecated v1 alias of `blake3`; remove in next release. */
-  hash: string;
-};
-
 /**
  * Collect all files in a directory, compute hashes, and return both the
  * manifest (for preflight) and the raw file map (for selective packaging).
@@ -364,10 +358,10 @@ export async function collectAndHashAssets(
   onProgress?: ProgressCallback,
   opts: { ignorePatterns?: Array<string> } = {},
 ): Promise<{
-  assetManifest: Record<string, AssetManifestEntry>;
+  assetManifest: Record<string, DeployAssetManifestEntry>;
   assetFiles: Map<string, Buffer>;
 }> {
-  const assetManifest: Record<string, AssetManifestEntry> = {};
+  const assetManifest: Record<string, DeployAssetManifestEntry> = {};
   const assetFiles = new Map<string, Buffer>();
 
   try {

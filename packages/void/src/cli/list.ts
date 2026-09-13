@@ -2,12 +2,20 @@ import { intro, outro, log } from '@clack/prompts';
 import { getToken } from './auth.ts';
 import { PlatformClient, type DeploymentResponse } from './client.ts';
 import { cliTitle, dim, ensureUtc, pc, tablePrefix } from './output.ts';
-import { readProjectConfig } from './project.ts';
+import { readDeploymentPlatform, readProjectConfig } from './project.ts';
 import { resolveProjectBySlug } from './resolve-project.ts';
 
 export async function runListCommand(root: string, slug?: string): Promise<void> {
   console.log();
   intro(cliTitle('project status'));
+
+  const platform = readDeploymentPlatform(root);
+  if (platform === 'cloudflare') {
+    return showCloudflareDeployments(root, slug);
+  }
+  if (platform === 'none') {
+    throw new Error('project: Deployment is disabled. Run `void init` to choose a platform.');
+  }
 
   const token = getToken(root);
   if (!token) {
@@ -40,6 +48,41 @@ export async function runListCommand(root: string, slug?: string): Promise<void>
   }
 
   await showDeployments(client, projectId, projectSlug);
+}
+
+async function showCloudflareDeployments(root: string, slug?: string): Promise<void> {
+  if (slug) {
+    throw new Error(
+      'project: A project name selects a Void platform project and is not used for direct Cloudflare apps.',
+    );
+  }
+  const { readCloudflareWorkerStatus, resolveCloudflareOperationContext } =
+    await import('./cloudflare-operations.ts');
+  const status = await readCloudflareWorkerStatus(resolveCloudflareOperationContext(root));
+  if (status.versions.length === 0) {
+    outro(`No deployments for ${status.workerName}.`);
+    return;
+  }
+  const rows = [...status.versions].reverse().map((version) => ({
+    id: version.id,
+    status: version.id === status.activeVersionId ? 'live' : 'available',
+    migrations: version.metadata ? String(version.metadata.migrations.length) : '-',
+    deployed: version.createdAt ? formatRelativeTime(version.createdAt) : '-',
+  }));
+  const idWidth = Math.max('id'.length, ...rows.map((row) => row.id.length));
+  const statusWidth = Math.max('status'.length, ...rows.map((row) => row.status.length));
+  const prefix = tablePrefix();
+  console.log(prefix);
+  console.log(
+    `${prefix}${dim(`${'id'.padEnd(idWidth)}  ${'status'.padEnd(statusWidth)}  migrations  deployed`)}`,
+  );
+  for (const row of rows) {
+    const renderedStatus = row.status === 'live' ? pc.bold(pc.green(row.status)) : dim(row.status);
+    console.log(
+      `${prefix}${row.id.padEnd(idWidth)}  ${renderedStatus}${''.padEnd(statusWidth - row.status.length)}  ${row.migrations.padEnd(10)}  ${row.deployed}`,
+    );
+  }
+  outro(`${status.workerName} — ${rows.length} version(s)`);
 }
 
 async function showDeployments(

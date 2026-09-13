@@ -191,9 +191,9 @@ Output mode. Controls the default rendering strategy for pages.
 | Value                | Default prerender | Per-page override                | Prerender timing           |
 | -------------------- | ----------------- | -------------------------------- | -------------------------- |
 | `"server"` (default) | `false`           | `export const prerender = true`  | Deploy-time (platform ISR) |
-| `"static"`           | `true`            | `export const prerender = false` | Build-time (`vite build`)  |
+| `"static"`           | `true`            | `export const prerender = false` | Build or deploy post-build |
 
-When set to `"static"`, all pages are prerendered at build time as static HTML files written to `dist/client/`. Individual pages can opt out with `export const prerender = false`. Dynamic pages (with route params) without a `getPrerenderPaths()` export are implicitly not prerendered.
+When set to `"static"`, all pages are prerendered as static HTML files written to `dist/client/`. A standalone `vite build` renders them in the build; managed `void deploy` renders immediately afterward in the trusted deploy process so build plugins never receive platform credentials. Individual pages can opt out with `export const prerender = false`. Dynamic pages (with route params) without a `getPrerenderPaths()` export are implicitly not prerendered.
 
 When omitted or set to `"server"`, pages are server-rendered on request. Individual pages can opt into deploy-time prerendering with `export const prerender = true`, or opt out of server-rendered component HTML with `export const ssr = false`.
 
@@ -236,18 +236,18 @@ Enable and configure Cloudflare Sandboxes for Void apps. Importing from `void/sa
 }
 ```
 
-| Field               | Type     | Default                                  |
-| ------------------- | -------- | ---------------------------------------- |
-| `binding`           | `string` | `SANDBOX`                                |
-| `className`         | `string` | `Sandbox`                                |
-| `containerName`     | `string` | `void-sandbox`                           |
-| `image`             | `string` | Bundled `@cloudflare/sandbox` Dockerfile |
-| `imageBuildContext` | `string` | Directory of `image`                     |
-| `platformImage`     | `string` | Matching sandbox SDK registry image      |
-| `instanceType`      | `string` | `lite` on Void deploy                    |
-| `maxInstances`      | `number` | `20` on Void deploy                      |
+| Field               | Type     | Default                              |
+| ------------------- | -------- | ------------------------------------ |
+| `binding`           | `string` | `SANDBOX`                            |
+| `className`         | `string` | `Sandbox`                            |
+| `containerName`     | `string` | `void-sandbox`                       |
+| `image`             | `string` | Matching published sandbox SDK image |
+| `imageBuildContext` | `string` | Directory of `image`                 |
+| `platformImage`     | `string` | Matching sandbox SDK registry image  |
+| `instanceType`      | `string` | `lite` on Void deploy                |
+| `maxInstances`      | `number` | `20` on Void deploy                  |
 
-Sandbox support currently applies to Void apps on the Cloudflare target. `void deploy` supports registry images. If `sandbox.image` is a custom local Dockerfile path, set `sandbox.platformImage` to the pushed image that the platform should run.
+Sandbox support currently applies to Void apps on the Cloudflare target. Native deployment requires [Workers Paid](https://dash.cloudflare.com/?to=/:account/workers/plans) because Cloudflare Containers are unavailable on Workers Free. `void deploy --platform cloudflare` verifies Containers access before provisioning resources or building the app and explains how to fix a missing plan or API-token permission. Apps that do not import `void/sandbox` or configure `sandbox` emit no Container and perform no entitlement check. The default registry image is pinned to the installed `@cloudflare/sandbox` version, so local Wrangler and native Cloudflare deploys run the same container as Void Platform. If `sandbox.image` is a custom local Dockerfile path, set `sandbox.platformImage` to the pushed image that the platform should run.
 
 ### `target`
 

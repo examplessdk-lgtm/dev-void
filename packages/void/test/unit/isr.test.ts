@@ -1,6 +1,6 @@
+import { hostRegistryKey, htmlEdgeKey, isrKey, isrPrefix, jsonEdgeKey } from '@void/isr/runtime';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 import { envContext } from '../../src/runtime/env-raw.ts';
-import { hostRegistryKey, htmlEdgeKey, isrKey, jsonEdgeKey } from '../../src/runtime/isr-cache.ts';
 import { revalidate } from '../../src/runtime/isr.ts';
 
 const DPL = 'dpl_1';
@@ -174,6 +174,30 @@ describe('revalidate — self-host (own ISR_CACHE + edge)', () => {
     ]);
   });
 
+  it('{ paths } deletes every allowlisted query variant from KV and edge cache', async () => {
+    const { store, kv } = createKvMock();
+    const variantA = `https://${HOST}/search?q=a`;
+    const variantB = `https://${HOST}/search?q=b`;
+    store.set(isrKey(DPL, HOST, '/search', variantA), new ArrayBuffer(4));
+    store.set(isrKey(DPL, HOST, '/search', variantB), new ArrayBuffer(4));
+    edge.store.set(htmlEdgeKey(HOST, '/search', DPL, variantA), new Response('a'));
+    edge.store.set(jsonEdgeKey(HOST, '/search', DPL, variantA), new Response('a'));
+    edge.store.set(htmlEdgeKey(HOST, '/search', DPL, variantB), new Response('b'));
+    edge.store.set(jsonEdgeKey(HOST, '/search', DPL, variantB), new Response('b'));
+
+    await envContext.run(
+      { ISR_CACHE: kv, __VOID_ISR_DEPLOYMENT_ID: DPL, __VOID_ISR_HOST: HOST },
+      async () => revalidate({ paths: ['/search'] }),
+    );
+
+    expect(store.has(isrKey(DPL, HOST, '/search', variantA))).toBe(false);
+    expect(store.has(isrKey(DPL, HOST, '/search', variantB))).toBe(false);
+    expect(edge.store.has(htmlEdgeKey(HOST, '/search', DPL, variantA))).toBe(false);
+    expect(edge.store.has(jsonEdgeKey(HOST, '/search', DPL, variantA))).toBe(false);
+    expect(edge.store.has(htmlEdgeKey(HOST, '/search', DPL, variantB))).toBe(false);
+    expect(edge.store.has(jsonEdgeKey(HOST, '/search', DPL, variantB))).toBe(false);
+  });
+
   // Cron/queue handlers stamp the deployment id WITHOUT a request host (the F1
   // fix), so a host-less `revalidate({ paths })` must enumerate EVERY registered
   // host from the registry and purge each host's (host, path) entry.
@@ -247,7 +271,7 @@ describe('revalidate — self-host (own ISR_CACHE + edge)', () => {
     expect(kvDelete).toHaveBeenCalledWith(isrKey(DPL, HOST, '/'));
   });
 
-  it('{ all: true } lists the void-isr/<id>/ prefix, SPLITS the host off each key, and purges every (host, path) — cursor-paginated', async () => {
+  it('{ all: true } lists the shared deployment prefix, splits each host, and purges every entry across pages', async () => {
     // pageSize 2 forces the cursor loop to iterate across multiple pages.
     const { store, kv, list } = createKvMock(2);
     const HOST2 = 'other.example';
@@ -284,7 +308,7 @@ describe('revalidate — self-host (own ISR_CACHE + edge)', () => {
     // EVERY list call is scoped to THIS deployment's prefix. An unscoped
     // `kv.list()` (or a wrong/missing prefix) would enumerate — and therefore
     // purge — other deployments' keys; assert the prefix on every page.
-    const listPrefix = `void-isr/${DPL}/`;
+    const listPrefix = isrPrefix(DPL);
     for (const [opts] of list.mock.calls) {
       expect((opts as { prefix?: string }).prefix).toBe(listPrefix);
     }
