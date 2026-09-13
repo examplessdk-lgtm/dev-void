@@ -203,16 +203,17 @@ Under the hood, your code runs in workerd (a separate process from the Vite dev 
 
 The dev inbox is **not** available under a Class B or C framework — SvelteKit, Nuxt, Analog, Astro. Those adapters own their own dev server and worker build, so Void never installs the Cloudflare Vite plugin for them and has nowhere to register the inbox. Declaring an `assets` binding does not help: SvelteKit, Nuxt and Analog do not run your code in a workerd instance fronted by Vite at all, so there is no loopback to bind to. Sends from those apps return `BINDING_MISSING`. Use `createEmailTestHarness` from `void/email/testing` instead, which captures in-process and works everywhere. When the inbox is configured but unreachable, `sendEmail` returns `UPSTREAM_ERROR` — nothing is captured and nothing is sent.
 
-To bypass the inbox for a single send during dev (e.g. to verify real delivery against a verified address), pass `sendInDev: true`:
+`sendInDev: true` bypasses the dev inbox for a single send. `void dev` binds no send transport at all — the platform's `__VOID_PROXY` service binding is added only on a deployed worker, and the own-account `SEND_EMAIL` binding is stripped under `serve` so miniflare cannot write stray `.eml` files or send real mail. With the inbox skipped there is nothing left to fall through to, so the call returns `BINDING_MISSING`: it proves the inbox was bypassed, it does not deliver. To verify real delivery, deploy and send from the deployed worker.
 
 ```ts
-await sendEmail({
+const result = await sendEmail({
   from: 'acme+noreply@mail.void.cloud',
   to: 'verified@acme.dev',
-  subject: 'Real send during dev',
-  text: 'This will hit the binding.',
+  subject: 'Skips the dev inbox',
+  text: 'Not captured — and not delivered either.',
   sendInDev: true,
 });
+// Under `void dev`: result.error.code === 'BINDING_MISSING'
 ```
 
 ## Testing

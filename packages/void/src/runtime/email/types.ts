@@ -36,9 +36,14 @@ export interface SendEmailOptions {
   attachments?: Array<Attachment>;
   /**
    * Per-call escape hatch for local development. When true, bypasses the
-   * `void dev` in-memory inbox and sends through the proxy as if running
-   * in production. Useful for one-off "test the real send pipeline"
-   * checks without restarting the dev server.
+   * `void dev` in-memory inbox for this one send.
+   *
+   * It does not deliver. `void dev` binds no send transport at all: the
+   * platform's `__VOID_PROXY` service binding is added only on a deployed
+   * worker, and the own-account `SEND_EMAIL` binding is stripped under
+   * `serve`. With the inbox skipped there is nothing to fall through to,
+   * so the call returns `BINDING_MISSING`. To verify real delivery, deploy
+   * and send from the deployed worker.
    *
    * Has no effect outside `void dev` (production always sends; the dev
    * inbox is registered only when `void dev` is running).

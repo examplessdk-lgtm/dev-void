@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it } from 'vite-plus/test';
 import { sendEmail } from '../../src/runtime/email.ts';
-import { clearDevBuffer, listDevMessages } from '../../src/runtime/email/dev-inbox.ts';
+import {
+  clearDevBuffer,
+  DEV_INBOX_ENV_VAR,
+  listDevMessages,
+} from '../../src/runtime/email/dev-inbox.ts';
 import { createEmailTestHarness } from '../../src/runtime/email/testing.ts';
 import { withRuntimeEnv } from '../../src/runtime/env.ts';
 
@@ -682,6 +686,42 @@ describe('sendEmail (sendInDev escape hatch)', () => {
       }
     } finally {
       harness.dispose();
+    }
+  });
+
+  // The test above hand-injects `__VOID_PROXY`, which `void dev` never
+  // produces: the platform adds that service binding only on a deployed
+  // worker, and the own-account `SEND_EMAIL` binding is deleted from the
+  // resolved worker config whenever `viteCommand === 'serve'`. So under a
+  // real dev server `sendInDev: true` bypasses the inbox and lands on
+  // nothing. Pin that, message text included, so re-adding a send binding
+  // to dev has to come past this test.
+  it('returns BINDING_MISSING under a real `void dev` env (no transport to fall through to)', async () => {
+    const assets = {
+      calls: 0,
+      async fetch() {
+        this.calls += 1;
+        return new Response('unreachable', { status: 500 });
+      },
+    };
+    const result = await withRuntimeEnv({ [DEV_INBOX_ENV_VAR]: 'ASSETS', ASSETS: assets }, () =>
+      sendEmail({
+        from: 'a@x.dev',
+        to: 'b@y.dev',
+        subject: 's',
+        text: 't',
+        sendInDev: true,
+      }),
+    );
+    // The inbox was bypassed: nothing was posted to the dev server, and
+    // nothing was buffered.
+    expect(assets.calls).toBe(0);
+    expect(listDevMessages()).toHaveLength(0);
+    expect(result.ok).toBe(false);
+    if (!result.ok && 'error' in result) {
+      expect(result.error.code).toBe('BINDING_MISSING');
+      expect(result.error.message).toContain('`sendInDev: true`, which does not deliver');
+      expect(result.error.message).toContain('`void dev` binds no send transport at all');
     }
   });
 });
