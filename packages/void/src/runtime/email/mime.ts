@@ -11,6 +11,33 @@ import type { Address, Attachment, NormalizedAttachment, NormalizedEmail } from 
 /** Cloudflare Email Workers reject messages larger than ~10 MB after base64 expansion. */
 export const MAX_MESSAGE_BYTES: number = 10 * 1024 * 1024;
 
+/**
+ * Upper bound on the TOTAL attachment bytes `normalizeEmail` will materialize.
+ *
+ * Base64 expands by `ceil(n / 3) * 4`, so an attachment set larger than three
+ * quarters of `MAX_MESSAGE_BYTES` cannot fit in a message that passes the
+ * check at the end of `buildMime` no matter how small everything else is.
+ * `buildMime` remains the authority on the final size — this bound only stops
+ * `normalizeEmail` from materializing, and then expanding, bytes already known
+ * not to fit.
+ *
+ * It has to be charged here because that final check comes far too late to
+ * help. Measured peak live memory is about 10x the attachment bytes (8 MiB in
+ * gives 83 MiB live) once the normalized copy, the base64 binary string, the
+ * 76-column slices, the joins, `rawText` and its `TextEncoder.encode` are all
+ * resident at once. Against a 128 MB isolate ceiling, a set over roughly
+ * 12 MiB terminates the isolate rather than returning the `MIME_ERROR` the
+ * docs promise for an oversize payload.
+ *
+ * This is a developer-experience guardrail, NOT the security boundary.
+ * Attachments come from the app's own code, never from a remote sender, and
+ * the platform proxy already caps the base64 length before decoding and the
+ * raw length after. What this buys is a precise, catchable failure at the call
+ * that went wrong, instead of a dead isolate with nothing a caller could act
+ * on.
+ */
+const MAX_ATTACHMENT_BYTES_TOTAL: number = Math.floor((MAX_MESSAGE_BYTES * 3) / 4);
+
 const CRLF = '\r\n';
 const ASCII_PRINTABLE = /^[\x20-\x7e]*$/;
 const HEADER_NAME = /^[!-9;-~]+$/;
@@ -146,6 +173,43 @@ function parseAddresses(
   return list.map((entry) => parseAddress(entry, field));
 }
 
+/**
+ * Keeps the `exceeds Cloudflare limit of <N> bytes` tail that `buildMime`'s
+ * own size error already uses, so the documented shape — and any caller
+ * matching on it — holds for both paths.
+ */
+function attachmentsTooLargeError(bytes: number): MimeError {
+  return new MimeError(
+    'MIME_ERROR',
+    `email: attachment size ${bytes} bytes exceeds Cloudflare limit of ${MAX_ATTACHMENT_BYTES_TOTAL} bytes.`,
+  );
+}
+
+/**
+ * Size of `content` WITHOUT materializing it.
+ *
+ * A string reports its UTF-16 `length`, which is a sound LOWER bound on its
+ * UTF-8 byte length — every code unit encodes to at least one byte — so this
+ * can never reject a string that would have fit; the exact length is charged
+ * after the encode. Anything else reports 0 and is left to `toBytes` to reject
+ * by type.
+ */
+function declaredSize(content: Attachment['content']): number {
+  if (content instanceof Uint8Array) {
+    return content.byteLength;
+  }
+  if (content instanceof ArrayBuffer) {
+    return content.byteLength;
+  }
+  if (typeof Blob !== 'undefined' && content instanceof Blob) {
+    return content.size;
+  }
+  if (typeof content === 'string') {
+    return content.length;
+  }
+  return 0;
+}
+
 async function toBytes(content: Attachment['content']): Promise<Uint8Array> {
   if (content instanceof Uint8Array) {
     return content;
@@ -228,9 +292,28 @@ export async function normalizeEmail(opts: {
   const cc = opts.cc ? parseAddresses(opts.cc, 'cc') : [];
   const bcc = opts.bcc ? parseAddresses(opts.bcc, 'bcc') : [];
   const replyTo = opts.replyTo ? parseAddress(opts.replyTo, 'replyTo') : undefined;
-  const attachments = opts.attachments
-    ? await Promise.all(opts.attachments.map(normalizeAttachment))
-    : [];
+  // Sequential, not `Promise.all`: the running total has to be charged
+  // BEFORE each copy, or the entire set is already resident by the time
+  // anything looks at a size. Sequencing costs nothing measurable — every
+  // conversion in `toBytes` is synchronous except `Blob.arrayBuffer`, which
+  // is a memcpy of bytes the caller already holds, so there is no I/O here to
+  // overlap.
+  const attachments: Array<NormalizedAttachment> = [];
+  let attachmentBytes = 0;
+  for (const att of opts.attachments ?? []) {
+    const declared = declaredSize(att.content);
+    if (attachmentBytes + declared > MAX_ATTACHMENT_BYTES_TOTAL) {
+      throw attachmentsTooLargeError(attachmentBytes + declared);
+    }
+    const normalized = await normalizeAttachment(att);
+    // Charge the exact length too: a non-ASCII string undercounts itself
+    // above, and `declaredSize` reports 0 for a type `toBytes` will reject.
+    attachmentBytes += normalized.bytes.byteLength;
+    if (attachmentBytes > MAX_ATTACHMENT_BYTES_TOTAL) {
+      throw attachmentsTooLargeError(attachmentBytes);
+    }
+    attachments.push(normalized);
+  }
   // Threading headers are passed through as-is — they come from the
   // trusted reply path (buildReplyMessage), not user input. We still
   // reject CR/LF inside them, same as any other header value.

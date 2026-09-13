@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vite-plus/test';
-import { buildMime, MimeError, normalizeEmail } from '../../src/runtime/email/mime.ts';
+import {
+  buildMime,
+  MAX_MESSAGE_BYTES,
+  MimeError,
+  normalizeEmail,
+} from '../../src/runtime/email/mime.ts';
 
 function decode(bytes: Uint8Array): string {
   return new TextDecoder().decode(bytes);
@@ -313,6 +318,65 @@ describe('normalizeEmail', () => {
     await expect(
       normalizeEmail({ from: 'a b@x.dev', to: 'b@y.dev', subject: 's', text: 't' }),
     ).rejects.toThrow(/from/);
+  });
+
+  // `MAX_MESSAGE_BYTES` used to be enforced ONLY at the end of `buildMime` —
+  // after every attachment had been materialized in parallel by a
+  // `Promise.all`, base64'd, sliced at 76 columns, joined and re-encoded.
+  // Peak live memory measured about 10x the attachment bytes, so a set over
+  // roughly 12 MiB terminated the isolate instead of returning the
+  // `MIME_ERROR` the docs promise. Base64 expands by `ceil(n / 3) * 4`, so
+  // nothing above three quarters of the message cap can ever fit anyway.
+  const MAX_ATTACHMENT_BYTES_TOTAL = Math.floor((MAX_MESSAGE_BYTES * 3) / 4);
+
+  /**
+   * A one-byte Blob wearing a declared `size`, recording whether anything
+   * ever read it. Shadowing beats allocating: the whole point is that the
+   * second attachment's bytes are never touched.
+   */
+  function fakeBlob(name: string, size: number, reads: Array<string>): Blob {
+    const blob = new Blob([new Uint8Array(1)]);
+    Object.defineProperty(blob, 'size', { value: size });
+    Object.defineProperty(blob, 'arrayBuffer', {
+      value: async () => {
+        reads.push(name);
+        return new ArrayBuffer(size);
+      },
+    });
+    return blob;
+  }
+
+  it('rejects an oversize attachment set without materializing past the first', async () => {
+    const reads: Array<string> = [];
+    const half = Math.ceil(MAX_ATTACHMENT_BYTES_TOTAL / 2) + 1;
+    await expect(
+      normalizeEmail({
+        from: 'a@x.dev',
+        to: 'b@y.dev',
+        subject: 's',
+        text: 't',
+        attachments: [
+          { filename: 'first.bin', content: fakeBlob('first', half, reads) },
+          { filename: 'second.bin', content: fakeBlob('second', half, reads) },
+        ],
+      }),
+    ).rejects.toThrow(
+      new RegExp(`exceeds Cloudflare limit of ${MAX_ATTACHMENT_BYTES_TOTAL} bytes`),
+    );
+    // The fix, stated as an assertion: the second attachment is charged from
+    // its DECLARED size and rejected before a single byte of it is copied.
+    expect(reads).toEqual(['first']);
+  });
+
+  it('still builds a legal attachment under the bound', async () => {
+    const { text } = await build({
+      from: 'a@x.dev',
+      to: 'b@y.dev',
+      subject: 's',
+      text: 't',
+      attachments: [{ filename: 'ok.bin', content: new Uint8Array(1024) }],
+    });
+    expect(text).toContain('Content-Disposition: attachment; filename="ok.bin"');
   });
 });
 
