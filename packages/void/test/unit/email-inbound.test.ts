@@ -1267,6 +1267,26 @@ describe('parseEmail error contract', () => {
   // the one thing that does make postal-mime reject — a deeply nested
   // message — escaped as a bare Error carrying parser internals. The union
   // has to be honest: every code it names is reachable.
+  it('wraps a raw-stream read failure as PARSE_FAILED', async () => {
+    // An own-account delivery wraps Cloudflare's native one-shot `raw` with
+    // `createMessageProxy`, so the buffering read is what fails. The
+    // acquisition used to sit above the guarded block, and the stream error
+    // escaped raw.
+    const raw = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.error(new Error('stream broke mid-delivery'));
+      },
+    });
+    const { message } = createMessageProxy(
+      { from: 'a@b.dev', to: 'acme+x@mail.void.cloud', headers: {}, raw, rawSize: 32 },
+      { slug: 'acme' },
+    );
+
+    await expect(parseEmail(message)).rejects.toSatisfy(
+      (e: unknown) => e instanceof ParseEmailError && e.code === 'PARSE_FAILED',
+    );
+  });
+
   it('wraps a parser rejection as PARSE_FAILED', async () => {
     // postal-mime refuses past 256 levels of nesting. Build one bomb that
     // trips exactly that, and nothing else.
@@ -1361,6 +1381,22 @@ describe('buildReplyMessage', () => {
   function withSlug<T>(fn: () => T | Promise<T>): T | Promise<T> {
     return envContext.run({ __VOID_PROJECT_SLUG: 'myslug', __VOID_EMAIL_DOMAIN: MAIL_DOMAIN }, fn);
   }
+
+  it('throws rather than falling back to message.to when the slug cannot be a sender', async () => {
+    // A slug over 56 characters cannot build `<slug>+noreply@`, which must
+    // stay inside RFC 5321's 64-octet local part. Falling through to
+    // `message.to` builds the slug-stripped shape the platform reply pin
+    // drops, so the handler would see a success and the mail would vanish.
+    await envContext.run(
+      { __VOID_PROJECT_SLUG: 'a'.repeat(57), __VOID_EMAIL_DOMAIN: MAIL_DOMAIN },
+      async () => {
+        const message = makeMessage({ Subject: 'Help me' });
+        await expect(buildReplyMessage(message, { text: 'sure' })).rejects.toThrow(
+          /cannot build a default reply sender/,
+        );
+      },
+    );
+  });
 
   it('defaults from/to/subject from the original message', async () => {
     await withSlug(async () => {

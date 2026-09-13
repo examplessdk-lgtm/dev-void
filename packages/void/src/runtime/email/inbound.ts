@@ -48,17 +48,19 @@ const MAX_ACTION_ADDRESS_LENGTH = 320;
  */
 const MAX_REPLY_BYTES_TOTAL = 2 * MAX_MESSAGE_BYTES;
 
-function tryReadProjectSlug(): string | undefined {
+function readRawProjectSlug(): string | undefined {
   let raw: unknown;
   try {
     raw = getRawRuntimeEnv()?.__VOID_PROJECT_SLUG;
   } catch {
     return undefined;
   }
-  if (typeof raw !== 'string' || raw.length === 0) {
-    return undefined;
-  }
-  return VALID_SLUG.test(raw) ? raw : undefined;
+  return typeof raw === 'string' && raw.length > 0 ? raw : undefined;
+}
+
+function tryReadProjectSlug(): string | undefined {
+  const raw = readRawProjectSlug();
+  return raw !== undefined && VALID_SLUG.test(raw) ? raw : undefined;
 }
 
 // The platform mail domain for this environment, injected per deployment
@@ -135,8 +137,12 @@ export async function parseEmail(message: ForwardableEmailMessage): Promise<Pars
   }
   const { default: PostalMime } = await import('postal-mime');
   const cached = proxyRawCache.get(message);
-  const source = cached ? await cached.read() : message.raw;
   try {
+    // Acquire inside the guard. On an own-account deploy the generated
+    // handler wraps Cloudflare's native one-shot `raw`, so a mid-delivery
+    // stream failure rejects here — above the `try` it escaped as the bare
+    // stream error, past the `ParseEmailError` this function advertises.
+    const source = cached ? await cached.read() : message.raw;
     return await PostalMime.parse(source);
   } catch (cause) {
     // postal-mime is lenient — binary garbage, truncated parts and bad
@@ -743,6 +749,19 @@ export async function buildReplyMessage(
         );
       }
       fromAddr = `${slug}+noreply@${domain}`;
+    } else if (readRawProjectSlug() !== undefined) {
+      // A slug IS injected, so this is a platform deployment — it just
+      // cannot be a sender, because `<slug>+noreply@` must stay inside RFC
+      // 5321's 64-octet local part, which caps the slug at 56 characters.
+      // Falling through to `message.to` would build the slug-stripped
+      // `<tag>@<domain>` shape that the platform's reply pin drops, with no
+      // error reaching the handler.
+      throw new Error(
+        "replyEmail: 'from' is required — this project's slug cannot build a " +
+          'default reply sender (`<slug>+noreply@<domain>` must stay within the ' +
+          '64-octet local part, so the slug must be at most 56 characters). ' +
+          'Set `from` explicitly.',
+      );
     } else {
       fromAddr = message.to;
     }

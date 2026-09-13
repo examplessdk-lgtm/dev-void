@@ -464,8 +464,14 @@ const app = new Hono<ApiEnv>()
             dest.cf_destination_id,
           );
         } catch (err) {
-          // Non-fatal — proceed with DB delete; orphaned CF rows can be
-          // cleaned up later via a sweep.
+          // Non-fatal — proceed with the row delete. There is NO sweep for the
+          // orphan this leaves, so this log line is the only trace an operator
+          // gets. Two concurrent revokes of a shared tag can also both read
+          // `refs === 2`, both decline the upstream delete, and both drop their
+          // row. Counting after the row delete instead of before would fix
+          // that, but the same shape is in the admin revoke and in teardown,
+          // where the rows die later in the cascade and the window is far
+          // wider — so it belongs in one change across all three, not here.
           console.error('[email] CF deleteDestination failed:', err);
         }
       }
