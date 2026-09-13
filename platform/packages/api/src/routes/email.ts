@@ -16,6 +16,7 @@ import {
 import { sendPlatformVerificationEmail } from '../email/send-verification.ts';
 import type { ApiEnv } from '../env.ts';
 import {
+  projectAllowlistKvDiffers,
   syncProjectAllowlistKv,
   syncProjectAllowlistKvBestEffort,
 } from '../provisioning/email-allowlist.ts';
@@ -165,9 +166,25 @@ const app = new Hono<ApiEnv>()
         // Non-fatal — we still return the cached view.
       }
     }
-    // Push any newly-verified addresses into the proxy's allowlist KV so
-    // sends can use them without waiting for the next deploy.
-    if (anyFlipped) {
+    // Push any newly-verified address into the proxy's allowlist KV, and
+    // repair the mirror whenever it has drifted from the verified rows.
+    //
+    // The repair is not belt-and-braces. Every write to this mirror is
+    // best-effort, and nothing else re-derives the key: the confirm route
+    // early-returns on an already-verified row, the hourly `scheduled()`
+    // backfill in `index.ts` touches only `email-slug:`, and no deploy hook
+    // calls the sync. One swallowed KV failure after Postgres committed
+    // `verified` therefore leaves the owner looking at a `verified` listing
+    // while the proxy — which reads a missing key as deny-all — rejects every
+    // send as an unverified destination, with no user-visible cause. So THIS
+    // listing is the repair: the same read-compare-write self-heal shape as
+    // the `email-slug:` backfill. Cost is one KV read (skipped entirely when
+    // a flip already forces the write); the write happens only on a real
+    // difference, never on every listing.
+    if (
+      anyFlipped ||
+      (await projectAllowlistKvDiffers(context.get('db'), context.env.ROUTING, projectId))
+    ) {
       await syncProjectAllowlistKvBestEffort(context.get('db'), context.env.ROUTING, projectId);
     }
 
@@ -238,6 +255,11 @@ const app = new Hono<ApiEnv>()
     // duplicate verification emails and don't fail their request.
     // Other errors (auth, network, CF outage) are surfaced as 502.
     let cfRow: CfDestinationAddress;
+    // `cfRow.verified` cannot distinguish a row CF just created for THIS
+    // request from a row that was already on the account and nobody has
+    // clicked yet — both report `null`. Only the recovery path below knows
+    // which one we are holding, so it records that here.
+    let recoveredExistingCfRow = false;
     try {
       cfRow = await addDestination(context.env.CF_ACCOUNT_ID, context.env.CF_API_TOKEN, address);
     } catch (err) {
@@ -253,6 +275,7 @@ const app = new Hono<ApiEnv>()
           return context.json({ error: 'failed to register destination' }, 502);
         }
         cfRow = found;
+        recoveredExistingCfRow = true;
       } catch (innerErr) {
         console.error('[email] addDestination recovery failed:', innerErr);
         return context.json({ error: 'failed to register destination' }, 502);
@@ -292,13 +315,12 @@ const app = new Hono<ApiEnv>()
         ownerAudit,
       );
       if (!inserted.row) {
-        // Sibling DELETE ate the row mid-INSERT-then-SELECT, twice. The
-        // CF tag we just registered is potentially orphaned (only at
-        // CF's account level, since we didn't persist it). Log it for a
-        // future sweep and surface a clean retryable error.
-        console.error(
-          `[email] tryCreateEmailDestination concurrently modified twice for project=${projectId} address=${address}; orphan CF tag candidate: ${cfRow.tag}`,
-        );
+        // Either a sibling DELETE ate the row mid-INSERT-then-SELECT twice,
+        // or project teardown's cascade landed between the `status` guard
+        // above and the INSERT. Neither persisted the CF tag we just
+        // registered, so roll it back rather than leaking an account-level
+        // address, then surface a clean retryable error.
+        await rollbackCfDestination(context, projectId, address, cfRow.tag);
         return context.json({ error: 'destination concurrently modified, try again' }, 409);
       }
       const { row } = inserted;
@@ -308,8 +330,23 @@ const app = new Hono<ApiEnv>()
       return context.json(serializeDestination(row), 201);
     }
 
-    if (cfVerified && !ownerMatches) {
-      // Option B — platform-side verification required.
+    if (!ownerMatches && (cfVerified || recoveredExistingCfRow)) {
+      // Option B — platform-side verification required. It is required
+      // whenever the Cloudflare-side click is not ours to claim:
+      //   - the row was already VERIFIED by someone else, or
+      //   - the row was already on the account and still pending, meaning
+      //     CF mailed the recipient for the OTHER project and will not mail
+      //     again for this one (it refused our create).
+      // Either way, nothing CF does can express consent for THIS project, so
+      // our own link is the only one that can.
+      //
+      // Accepted cost: this creates a state where our row is `verified`
+      // while the CF account row is still pending — the recipient clicked
+      // OUR link, not CF's. The send then fails at the `send_email` binding,
+      // and `packages/proxy/src/email.ts` classifies that CF error as
+      // `UNVERIFIED_DESTINATION`, which the framework reports as "verify the
+      // address first". It fails safe, and it self-heals the moment the
+      // recipient clicks CF's link. No machinery for it.
       const inserted = await tryInsertWithRetry(
         context.get('db'),
         projectId,
@@ -320,9 +357,7 @@ const app = new Hono<ApiEnv>()
         'platform',
       );
       if (!inserted.row) {
-        console.error(
-          `[email] tryCreateEmailDestination concurrently modified twice for project=${projectId} address=${address}; orphan CF tag candidate: ${cfRow.tag}`,
-        );
+        await rollbackCfDestination(context, projectId, address, cfRow.tag);
         return context.json({ error: 'destination concurrently modified, try again' }, 409);
       }
       const { row } = inserted;
@@ -337,9 +372,9 @@ const app = new Hono<ApiEnv>()
       return context.json({ ...serializeDestination(row), platformVerificationPending: true }, 201);
     }
 
-    // CF returned a fresh row ('verified' is null) — normal flow: insert
-    // pending, CF emails the recipient, GET-refresh flips to verified
-    // when they click.
+    // CF created the row for THIS request (or the address is the owner's
+    // own) — normal flow: insert pending, CF is mailing the recipient right
+    // now, and the GET refresh flips the row to verified when they click.
     const inserted = await tryInsertWithRetry(
       context.get('db'),
       projectId,
@@ -350,9 +385,7 @@ const app = new Hono<ApiEnv>()
       'cf',
     );
     if (!inserted.row) {
-      console.error(
-        `[email] tryCreateEmailDestination concurrently modified twice for project=${projectId} address=${address}; orphan CF tag candidate: ${cfRow.tag}`,
-      );
+      await rollbackCfDestination(context, projectId, address, cfRow.tag);
       return context.json({ error: 'destination concurrently modified, try again' }, 409);
     }
     return context.json(serializeDestination(inserted.row), 201);
@@ -518,8 +551,10 @@ async function dispatchPlatformVerification(
  * we're processing a duplicate POST). One retry with a fresh insert+
  * select almost always wins — if it still misses, the caller surfaces
  * a clean 409 to the user with a "concurrently modified, try again"
- * message rather than a generic 500. The orphan CF tag is logged for
- * later cleanup.
+ * message rather than a generic 500. The caller rolls the CF tag back.
+ *
+ * A foreign-key violation reports the same "not inserted" outcome: see
+ * the catch below.
  */
 async function tryInsertWithRetry(
   db: Db,
@@ -532,21 +567,101 @@ async function tryInsertWithRetry(
   ownerAudit?: OwnerVerificationAudit,
 ): Promise<{ row: EmailDestination | null; inserted: boolean }> {
   for (let attempt = 0; attempt < 2; attempt++) {
-    const result = await tryCreateEmailDestination(
-      db,
-      projectId,
-      address,
-      cfDestinationId,
-      status,
-      verifiedAt,
-      verificationSource,
-      ownerAudit,
-    );
+    let result: { row: EmailDestination | null; inserted: boolean };
+    try {
+      result = await tryCreateEmailDestination(
+        db,
+        projectId,
+        address,
+        cfDestinationId,
+        status,
+        verifiedAt,
+        verificationSource,
+        ownerAudit,
+      );
+    } catch (err) {
+      if (!isForeignKeyViolation(err)) {
+        throw err;
+      }
+      // Project teardown committed its cascade between the route's
+      // `status === 'deleting'` guard (an unlocked read) and this INSERT, so
+      // `email_destinations.project_id` has no project row left to point at.
+      // Retrying cannot help — the project is gone for good. Report the same
+      // "not inserted" shape as the row-deleted race so the caller rolls the
+      // CF destination back (`rollbackCfDestination`) and answers 409,
+      // instead of letting a raw 23503 reach the app's `onError` as a 500
+      // that leaves the account-level address allocated with nothing left to
+      // reclaim it.
+      return { row: null, inserted: false };
+    }
     if (result.row) {
       return result;
     }
   }
   return { row: null, inserted: false };
+}
+
+/** Postgres `foreign_key_violation` SQLSTATE — surfaced by both `pg` and PGlite. */
+const PG_FOREIGN_KEY_VIOLATION = '23503';
+
+/**
+ * The project row vanished under an insert that references it.
+ *
+ * The SQLSTATE rides on the DRIVER error, and drizzle wraps that in a
+ * `DrizzleQueryError` whose own `code` is undefined — so the `cause` chain
+ * has to be walked, not just the frame that was thrown. Verified against
+ * PGlite in `api-delete.test.ts`; `pg` reports the same code the same way.
+ * Bounded so a self-referencing `cause` cannot spin.
+ */
+function isForeignKeyViolation(err: unknown): boolean {
+  let cursor: unknown = err;
+  for (let depth = 0; depth < 8; depth++) {
+    if (typeof cursor !== 'object' || cursor === null) {
+      return false;
+    }
+    if ((cursor as { code?: unknown }).code === PG_FOREIGN_KEY_VIOLATION) {
+      return true;
+    }
+    cursor = (cursor as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
+/**
+ * Undo the CF-side registration for a destination whose row never landed.
+ *
+ * `email_destinations` rows are the ONLY thing that maps an account-level CF
+ * destination back to a project — teardown's cleanup reads them, and there is
+ * no sweep for one nothing points at. Every path here already failed to
+ * persist a row, so without this the address stays allocated forever against
+ * the shared 200-destination account cap.
+ *
+ * The reference count must be ZERO, not `<= 1` the way the DELETE route reads
+ * it: that route still holds its own row, and we have none. A live sibling
+ * project can legitimately share the tag (the already-exists recovery above
+ * reuses one CF address across projects), so a non-zero count must never
+ * delete — it would silently revoke the sibling's recipient. Anything that
+ * goes wrong keeps the original log line so an operator can still find the
+ * tag by hand.
+ */
+async function rollbackCfDestination(
+  context: Context<ApiEnv>,
+  projectId: string,
+  address: string,
+  cfDestinationId: string,
+): Promise<void> {
+  try {
+    const refs = await countProjectsUsingDestination(context.get('db'), cfDestinationId);
+    if (refs === 0) {
+      await deleteDestination(context.env.CF_ACCOUNT_ID, context.env.CF_API_TOKEN, cfDestinationId);
+      return;
+    }
+  } catch (err) {
+    console.error('[email] CF destination rollback failed:', err);
+  }
+  console.error(
+    `[email] tryCreateEmailDestination concurrently modified for project=${projectId} address=${address}; orphan CF tag candidate: ${cfDestinationId}`,
+  );
 }
 
 /**
