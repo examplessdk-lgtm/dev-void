@@ -199,16 +199,41 @@ function logAddress(value: unknown): string {
  * `new Headers()` throwing already gets, and for the same reason: an
  * over-sized bag on one forward says the handler is hostile, and partially
  * enacting the rest of its list is the worse failure mode.
+ *
+ * SHAPE FIRST, before anything enumerates. The declared type is a record,
+ * but the value crossed RPC from the tenant, so it can be a string, a
+ * `String`, an Array or a typed array — each has one indexed own property
+ * PER ELEMENT, and `Object.entries` / `Object.keys` / `for…in` all
+ * materialize the whole key set before a count can be read (V8 builds the
+ * for-in enum cache up front; `break` does not help). Measured ~100 B per
+ * element: a 1.5 MiB string is an OOM in a 128 MB isolate, from a payload
+ * 20x below the RPC cap. The old `new Headers(<any of these>)` threw in
+ * O(1); this keeps that. workerd RPC only delivers `Object.prototype`
+ * objects (it refuses to serialize a null-prototype one), so a plain-object
+ * test is exact; null is accepted too for callers that never crossed RPC.
  */
-function forwardHeadersWithinBounds(headers: Record<string, string>): boolean {
-  const entries = Object.entries(headers);
-  if (entries.length > MAX_FORWARD_HEADERS) {
+function forwardHeadersWithinBounds(headers: unknown): headers is Record<string, string> {
+  if (typeof headers !== 'object' || headers === null) {
+    console.error('[email-router] action list dropped: forward headers is not a plain object');
+    return false;
+  }
+  const proto = Object.getPrototypeOf(headers);
+  if (proto !== Object.prototype && proto !== null) {
+    console.error('[email-router] action list dropped: forward headers is not a plain object');
+    return false;
+  }
+  // `Object.keys`, not `Object.entries`: one pointer per key on top of the
+  // deserialized object the isolate already holds, versus a fresh 2-tuple
+  // per entry. The count is read before any value is touched.
+  const names = Object.keys(headers);
+  if (names.length > MAX_FORWARD_HEADERS) {
     console.error(
-      `[email-router] action list dropped: forward has ${entries.length} headers (max ${MAX_FORWARD_HEADERS})`,
+      `[email-router] action list dropped: forward has ${names.length} headers (max ${MAX_FORWARD_HEADERS})`,
     );
     return false;
   }
-  for (const [name, value] of entries) {
+  for (const name of names) {
+    const value = (headers as Record<string, unknown>)[name];
     // The NAME is bounded too: `new Headers()` accepts an arbitrarily long
     // token, so an unbounded name is the same amplifier as an unbounded value.
     if (name.length > MAX_FORWARD_HEADER_LENGTH) {

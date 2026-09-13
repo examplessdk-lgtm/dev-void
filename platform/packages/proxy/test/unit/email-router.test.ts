@@ -871,6 +871,40 @@ describe('routeInbound — action enaction', () => {
     expect(errorSpy).toHaveBeenCalled();
   });
 
+  it('drops the WHOLE list when forward headers is not a plain object, before enumerating it', async () => {
+    // A tenant can return anything as `headers`. `Object.entries` walks one
+    // own property PER ELEMENT of a string, a `String`, an Array or a typed
+    // array (~100 B each — measured OOM at a 1.5 MiB string under a 128 MB
+    // heap), and `for…in` / `Object.keys` are no better: V8 builds the whole
+    // key set before the first iteration. The old `new Headers(x)` threw in
+    // O(1) on every one of these shapes, so the shape check has to be what
+    // stops them, and it has to fire BEFORE the count — the count is what
+    // enumerates. The log line pins which branch fired.
+    const shapes: Array<[string, unknown]> = [
+      ['string', 'a'.repeat(64)],
+      ['String wrapper', new String('a'.repeat(64))],
+      ['array of pairs', [['X-Void-Tag', 'v']]],
+      ['typed array', new Uint8Array(64)],
+    ];
+    for (const [label, headers] of shapes) {
+      errorSpy.mockClear();
+      const { env } = makeEnv({
+        kvSeed: withAllowlist(['admin@example.com', 'ops@example.com']),
+        emailReturn: [
+          { type: 'forward', to: 'admin@example.com', headers },
+          { type: 'forward', to: 'ops@example.com' },
+        ],
+      });
+      const { message, forwardCalls } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
+      const { ctx } = createCtx();
+      await routeInbound(message, env, ctx);
+      expect(forwardCalls, label).toHaveLength(0);
+      expect(errorSpy, label).toHaveBeenCalledWith(
+        expect.stringContaining('forward headers is not a plain object'),
+      );
+    }
+  });
+
   it('reject is terminal: forward and reply after a reject do NOT fire', async () => {
     const { env } = makeEnv({
       kvSeed: withAllowlist(),
