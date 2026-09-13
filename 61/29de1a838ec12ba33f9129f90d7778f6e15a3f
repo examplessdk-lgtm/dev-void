@@ -1,0 +1,39 @@
+platform/packages/api/src/auth/deploy-token.ts
+  s_25e3fa510208b1::t_fe682c93ed5510 89-94,96,104,107
+platform/packages/api/src/index.ts
+  s_25e3fa510208b1::t_011ebadedbdf29 57,135
+platform/packages/api/src/routes/internal-verify-prerender-build.ts
+  s_b7dae709a64091::t_45194e70925f6a 1-36
+platform/packages/proxy/src/index.ts
+  s_25e3fa510208b1::t_1a87a5462c5987 8,79-89
+platform/packages/proxy/src/resolve.ts
+  s_25e3fa510208b1::t_2a5833d2c2260f 74-98
+platform/packages/proxy/src/types.ts
+  s_25e3fa510208b1::t_13469705b2bec1 63
+platform/packages/proxy/test/unit/proxy.test.ts
+  s_25e3fa510208b1::t_a09be5e7035fdf 17-24,323-358
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "6129de1a838ec12ba33f9129f90d7778f6e15a3f",
+  "prompts": {},
+  "sessions": {
+    "s_25e3fa510208b1": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09903-8d8f-76f2-a3c1-275d2b8ab55f",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    },
+    "s_b7dae709a64091": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09949-13ee-7793-9126-f20773c048eb",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
