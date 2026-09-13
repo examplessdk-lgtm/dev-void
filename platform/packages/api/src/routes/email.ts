@@ -320,7 +320,14 @@ const app = new Hono<ApiEnv>()
         // above and the INSERT. Neither persisted the CF tag we just
         // registered, so roll it back rather than leaking an account-level
         // address, then surface a clean retryable error.
-        await rollbackCfDestination(context, projectId, address, cfRow.tag);
+        await rollbackCfDestination(
+          context.get('db'),
+          context.env.CF_ACCOUNT_ID,
+          context.env.CF_API_TOKEN,
+          projectId,
+          address,
+          cfRow.tag,
+        );
         return context.json({ error: 'destination concurrently modified, try again' }, 409);
       }
       const { row } = inserted;
@@ -357,7 +364,14 @@ const app = new Hono<ApiEnv>()
         'platform',
       );
       if (!inserted.row) {
-        await rollbackCfDestination(context, projectId, address, cfRow.tag);
+        await rollbackCfDestination(
+          context.get('db'),
+          context.env.CF_ACCOUNT_ID,
+          context.env.CF_API_TOKEN,
+          projectId,
+          address,
+          cfRow.tag,
+        );
         return context.json({ error: 'destination concurrently modified, try again' }, 409);
       }
       const { row } = inserted;
@@ -385,7 +399,14 @@ const app = new Hono<ApiEnv>()
       'cf',
     );
     if (!inserted.row) {
-      await rollbackCfDestination(context, projectId, address, cfRow.tag);
+      await rollbackCfDestination(
+        context.get('db'),
+        context.env.CF_ACCOUNT_ID,
+        context.env.CF_API_TOKEN,
+        projectId,
+        address,
+        cfRow.tag,
+      );
       return context.json({ error: 'destination concurrently modified, try again' }, 409);
     }
     return context.json(serializeDestination(inserted.row), 201);
@@ -643,24 +664,31 @@ function isForeignKeyViolation(err: unknown): boolean {
  * delete — it would silently revoke the sibling's recipient. Anything that
  * goes wrong keeps the original log line so an operator can still find the
  * tag by hand.
+ *
+ * Takes `db` / account / token explicitly rather than a Hono `Context`
+ * because `autoAddOwnerDestination` in `routes/projects.ts` shares it and has
+ * no context by design — it runs after the 201 response, so it outlives the
+ * request whose context it would otherwise borrow.
  */
-async function rollbackCfDestination(
-  context: Context<ApiEnv>,
+export async function rollbackCfDestination(
+  db: Db,
+  accountId: string,
+  apiToken: string,
   projectId: string,
   address: string,
   cfDestinationId: string,
 ): Promise<void> {
   try {
-    const refs = await countProjectsUsingDestination(context.get('db'), cfDestinationId);
+    const refs = await countProjectsUsingDestination(db, cfDestinationId);
     if (refs === 0) {
-      await deleteDestination(context.env.CF_ACCOUNT_ID, context.env.CF_API_TOKEN, cfDestinationId);
+      await deleteDestination(accountId, apiToken, cfDestinationId);
       return;
     }
   } catch (err) {
     console.error('[email] CF destination rollback failed:', err);
   }
   console.error(
-    `[email] tryCreateEmailDestination concurrently modified for project=${projectId} address=${address}; orphan CF tag candidate: ${cfDestinationId}`,
+    `[email] destination row not persisted for project=${projectId} address=${address}; orphan CF tag candidate: ${cfDestinationId}`,
   );
 }
 

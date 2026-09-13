@@ -2100,8 +2100,12 @@ describe('POST /projects — owner email destination auto-add', () => {
   // sender to allow-list a recipient for, so the auto-add stays inert.
   const emailEnv = () => ({ ...env, EMAIL_SENDER_DOMAIN: 'mail.staging.void.cloud' });
 
+  // `respond` may be async so a test can commit a competing write (project
+  // teardown's cascade) while the route is awaiting Cloudflare. The stub is
+  // already called from an async fetch shim, and the shared `mockCfApi`
+  // handlers for these same endpoints are typed the same way.
   function stubEmailRouting(
-    respond: (method: string, url: string) => Response,
+    respond: (method: string, url: string) => Response | Promise<Response>,
   ): Array<{ method: string; url: string }> {
     const calls: Array<{ method: string; url: string }> = [];
     const inner = globalThis.fetch;
@@ -2238,6 +2242,98 @@ describe('POST /projects — owner email destination auto-add', () => {
       .from(emailDestinations)
       .where(eq(emailDestinations.project_id, project.id));
     expect(rows).toHaveLength(0);
+  });
+
+  it('rolls the CF address back when teardown cascades the project mid-add', async () => {
+    // The auto-add runs off the response path, so project teardown can commit
+    // its cascade between `createProject` and the destination INSERT. The
+    // INSERT then violates the foreign key, and nothing retries it — without a
+    // rollback the account-level CF address stays allocated against the shared
+    // 200-address cap with no row left to reclaim it from.
+    const user = await createTestUser(env.db);
+    const ownerEmail = await withEmail(user.id, 'cascade-owner@example.com');
+    mockCfApi();
+    const calls = stubEmailRouting(async (method) => {
+      if (method === 'POST') {
+        // Teardown lands while CF is registering the address.
+        await env.db.delete(projects).where(eq(projects.slug, 'auto-add-cascaded'));
+      }
+      return Response.json({
+        success: true,
+        errors: [],
+        messages: [],
+        result: { tag: 'cf-tag-cascaded', email: ownerEmail, verified: null },
+      });
+    });
+
+    // Best-effort and post-response: the create still succeeds.
+    const res = await createProjectAs(user, 'auto-add-cascaded', emailEnv());
+    expect(res.status).toBe(201);
+    const project = (await res.json()) as { id: string };
+
+    const rows = await env.db
+      .select()
+      .from(emailDestinations)
+      .where(eq(emailDestinations.project_id, project.id));
+    expect(rows).toHaveLength(0);
+
+    const deletes = calls.filter((call) => call.method === 'DELETE');
+    expect(deletes).toHaveLength(1);
+    expect(deletes[0]!.url).toContain('/email/routing/addresses/cf-tag-cascaded');
+  });
+
+  it('leaves the CF address alone when a sibling project still references it', async () => {
+    // Same cascade, but the address came back through the already-exists
+    // recovery and a live sibling project's row still points at the tag. CF
+    // destinations are account-level, so deleting it would silently revoke the
+    // sibling's recipient: the reference count decides, not the failure.
+    const user = await createTestUser(env.db);
+    const ownerEmail = await withEmail(user.id, 'shared-owner@example.com');
+    const sibling = await createTestProject(env.db, user.id, 'auto-add-sibling');
+    await env.db.insert(emailDestinations).values({
+      id: 'edst_sibling_shared',
+      project_id: sibling.id,
+      address: ownerEmail,
+      cf_destination_id: 'cf-tag-shared',
+      status: 'verified',
+      verified_at: '2026-01-01T00:00:00Z',
+      verification_source: 'cf',
+    });
+    mockCfApi();
+    const calls = stubEmailRouting(async (method) => {
+      if (method === 'POST') {
+        return Response.json(
+          {
+            success: false,
+            errors: [{ code: 10037, message: 'destination address already exists' }],
+            messages: [],
+            result: null,
+          },
+          { status: 400 },
+        );
+      }
+      // Teardown lands while we are recovering the existing tag.
+      await env.db.delete(projects).where(eq(projects.slug, 'auto-add-shared'));
+      return Response.json({
+        success: true,
+        errors: [],
+        messages: [],
+        result: [{ tag: 'cf-tag-shared', email: ownerEmail, verified: '2026-01-01T00:00:00Z' }],
+      });
+    });
+
+    const res = await createProjectAs(user, 'auto-add-shared', emailEnv());
+    expect(res.status).toBe(201);
+
+    expect(calls.filter((call) => call.method === 'DELETE')).toEqual([]);
+    const [survivor] = await env.db
+      .select()
+      .from(emailDestinations)
+      .where(eq(emailDestinations.project_id, sibling.id));
+    expect(survivor).toMatchObject({
+      cf_destination_id: 'cf-tag-shared',
+      status: 'verified',
+    });
   });
 
   it('makes no CF call when the environment has no platform mail domain', async () => {

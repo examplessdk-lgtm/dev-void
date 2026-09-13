@@ -59,6 +59,7 @@ import { buildRoutingJson, buildStaticRoutingJson, computeDispatchLimits } from 
 import { tokenizeSql } from '../sql/tokenize.ts';
 import { getPlanLimits } from '../tiers.ts';
 import type { Build, DeployManifest } from '../types.ts';
+import { rollbackCfDestination } from './email.ts';
 import { getRequestsDataset, queryProjectRequestOverview } from './usage.ts';
 
 /**
@@ -2546,6 +2547,11 @@ async function autoAddOwnerDestination(
   address: string,
   ownerUserId: string,
 ): Promise<void> {
+  // Set the moment Cloudflare holds an account-level address for us — on the
+  // fresh-create path AND on the already-exists recovery path, which adopts an
+  // address the account already carries. Everything after that point can fail
+  // with the address still allocated and no row pointing at it.
+  let allocatedTag: string | null = null;
   try {
     let cfRow;
     try {
@@ -2561,6 +2567,7 @@ async function autoAddOwnerDestination(
       }
       cfRow = found;
     }
+    allocatedTag = cfRow.tag;
     const status = cfRow.verified ? 'verified' : 'pending';
     await tryCreateEmailDestination(
       db,
@@ -2579,6 +2586,19 @@ async function autoAddOwnerDestination(
     }
   } catch (err) {
     console.error('[projects] auto-add owner email destination failed:', err);
+    if (allocatedTag) {
+      // Roll back on ANY error, not just the foreign-key violation that
+      // project teardown's cascade raises. This path is best-effort and runs
+      // after the 201, so nothing retries it and nothing reports it: once CF
+      // has allocated the address, any failure past that point means no row
+      // persisted to reference it, and an unreferenced address is invisible
+      // to teardown's cleanup while still costing the shared 200-per-account
+      // cap. Rolling back unconditionally is simpler and safer than an
+      // FK-only check. The `refs === 0` guard inside `rollbackCfDestination`
+      // is what stops it revoking a recipient a sibling project still uses —
+      // including the already-exists path, where the address predates us.
+      await rollbackCfDestination(db, accountId, apiToken, projectId, address, allocatedTag);
+    }
   }
 }
 
