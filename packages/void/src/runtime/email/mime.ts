@@ -630,20 +630,43 @@ function base64Wrapped(bytes: Uint8Array): string {
 function quotedPrintable(text: string): string {
   // Encode as UTF-8 bytes then quote per RFC 2045.
   const bytes = new TextEncoder().encode(text);
-  let out = '';
+  // Emit into a byte buffer, not a string: `out += chunk` per byte builds a
+  // V8 cons-string tree whose nodes cost ~56 bytes per encoded byte and stay
+  // live until the message is flattened. Measured, 1 MiB of non-ASCII text
+  // held 57 MiB that way; a 1.9 MiB body killed a 128 MB isolate while its
+  // 5.9 MiB message was under the limit. Every input byte yields at most 3
+  // output bytes, a soft break (3) lands at most once per 73 content bytes,
+  // and a lone LF becomes CRLF, so this buffer never grows.
+  const out = new Uint8Array(Math.ceil(bytes.length * 3 * (76 / 73)) + 8);
+  let n = 0;
   let lineLen = 0;
-  const flush = (chunk: string) => {
-    if (lineLen + chunk.length > 75) {
-      out += '=' + CRLF;
+  const HEX = '0123456789ABCDEF';
+  const put = (c: number) => {
+    out[n++] = c;
+  };
+  const flush = (c0: number, c1?: number, c2?: number) => {
+    const width = c2 !== undefined ? 3 : c1 !== undefined ? 2 : 1;
+    if (lineLen + width > 75) {
+      put(0x3d);
+      put(0x0d);
+      put(0x0a);
       lineLen = 0;
     }
-    out += chunk;
-    lineLen += chunk.length;
+    put(c0);
+    if (c1 !== undefined) {
+      put(c1);
+    }
+    if (c2 !== undefined) {
+      put(c2);
+    }
+    lineLen += width;
   };
+  const quote = (b: number) => flush(0x3d, HEX.charCodeAt(b >> 4), HEX.charCodeAt(b & 0xf));
   for (let i = 0; i < bytes.length; i++) {
     const b = bytes[i];
     if (b === 0x0a) {
-      out += CRLF;
+      put(0x0d);
+      put(0x0a);
       lineLen = 0;
       continue;
     }
@@ -652,7 +675,8 @@ function quotedPrintable(text: string): string {
       if (bytes[i + 1] === 0x0a) {
         continue;
       }
-      out += CRLF;
+      put(0x0d);
+      put(0x0a);
       lineLen = 0;
       continue;
     }
@@ -660,19 +684,29 @@ function quotedPrintable(text: string): string {
       // Defer encoding decision: a space at end-of-line must be quoted.
       const isLast = i === bytes.length - 1 || bytes[i + 1] === 0x0a || bytes[i + 1] === 0x0d;
       if (isLast) {
-        flush(b === 0x20 ? '=20' : '=09');
+        quote(b);
       } else {
-        flush(String.fromCharCode(b));
+        flush(b);
       }
       continue;
     }
     if (b === 0x3d || b < 0x20 || b > 0x7e) {
-      flush('=' + b.toString(16).toUpperCase().padStart(2, '0'));
+      quote(b);
       continue;
     }
-    flush(String.fromCharCode(b));
+    flush(b);
   }
-  return out;
+  return bytesToAsciiString(out.subarray(0, n));
+}
+
+/** Pure-ASCII bytes to a string, in the same 32K chunks `base64` uses. */
+function bytesToAsciiString(bytes: Uint8Array): string {
+  let s = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    s += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return s;
 }
 
 function needsQuotedPrintable(text: string): boolean {
@@ -681,6 +715,46 @@ function needsQuotedPrintable(text: string): boolean {
     return true;
   }
   return text.split(/\r?\n/).some((line) => line.length > 990);
+}
+
+/**
+ * Lower bound on the octets `text` will occupy in the rendered message, in
+ * one pass over the string and with NO allocation. Every UTF-8 byte yields at
+ * least one octet on either body path — the 7bit path copies bytes and only
+ * ever widens a bare LF to CRLF; the quoted-printable path emits each
+ * non-ASCII byte as `=XX` (3 octets) and every other byte as itself, and its
+ * soft breaks only add. So `ascii + 3 * nonAscii` can never overshoot the
+ * real size, which keeps a false rejection impossible; `buildMime`'s final
+ * check remains the authority. `TextEncoder.encode` would give the same count
+ * but at the price of a full copy, which is exactly the allocation this
+ * bound exists to avoid.
+ */
+function minBodyOctets(text: string): number {
+  let octets = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if (c < 0x80) {
+      octets += 1;
+    } else if (c < 0x800) {
+      octets += 6; // 2 UTF-8 bytes, each `=XX`
+    } else if (c >= 0xd800 && c <= 0xdbff && i + 1 < text.length) {
+      const d = text.charCodeAt(i + 1);
+      if (d >= 0xdc00 && d <= 0xdfff) {
+        octets += 12; // 4 UTF-8 bytes for the pair
+        i++;
+        continue;
+      }
+      octets += 9; // lone surrogate encodes as U+FFFD, 3 bytes
+    } else {
+      octets += 9; // 3 UTF-8 bytes
+    }
+  }
+  return octets;
+}
+
+/** Octets a base64 body of `n` bytes occupies at 76 columns, excluding CRLF. */
+function base64Octets(n: number): number {
+  return Math.ceil(n / 3) * 4;
 }
 
 interface MimePart {
@@ -813,6 +887,25 @@ export function buildMime(email: NormalizedEmail): { raw: Uint8Array; messageId:
       continue;
     }
     topHeaders.push([name, encodeWord(value)]);
+  }
+
+  // Project the body size BEFORE encoding anything. The final check below
+  // sees the message only after every body has been quoted-printable
+  // encoded, rendered into its part, concatenated into `rawText` and
+  // encoded again — measured, that peak is about 11x the UTF-8 bytes of a
+  // non-ASCII body, so a body several times over the limit terminates a
+  // 128 MB isolate instead of returning the `MIME_ERROR` the guide promises.
+  // Each term is a lower bound on the rendered size, so this never rejects
+  // a message that would have fit; the final check stays the authority.
+  const projected =
+    (email.text ? minBodyOctets(email.text) : 0) +
+    (email.html ? minBodyOctets(email.html) : 0) +
+    email.attachments.reduce((sum, a) => sum + base64Octets(a.bytes.byteLength), 0);
+  if (projected > MAX_MESSAGE_BYTES) {
+    throw new MimeError(
+      'MIME_ERROR',
+      `email: message body is at least ${projected} bytes once encoded, which exceeds Cloudflare limit of ${MAX_MESSAGE_BYTES} bytes.`,
+    );
   }
 
   const textPart = email.text ? buildBodyPart('text/plain', email.text) : undefined;

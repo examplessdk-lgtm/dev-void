@@ -827,3 +827,90 @@ describe('buildMime', () => {
     expect(unfoldHeader(text, 'Subject')).toBe(subject);
   });
 });
+
+function bodyOf(text: string): string {
+  return text.split('\r\n\r\n').slice(1).join('\r\n\r\n');
+}
+
+describe('buildMime body size projection', () => {
+  // A 4 MiB non-ASCII body is 12.6 MiB once quoted-printable encoded, so it
+  // can never fit. Before the projection, `buildMime` found that out only
+  // after encoding it — measured at ~11x the UTF-8 bytes live — and a body a
+  // few times over the limit terminated a 128 MB isolate instead of
+  // returning `MIME_ERROR`. The projection is a single allocation-free pass
+  // over the string, so this test is fast and the rejected string is small.
+  it('rejects a body that cannot fit before encoding it', async () => {
+    const cjk = '漢'.repeat(Math.ceil((4 * 1024 * 1024) / 3));
+    const email = await normalizeEmail({ from: 'a@x.dev', to: 'b@y.dev', subject: 's', text: cjk });
+    let error: unknown;
+    try {
+      buildMime(email);
+    } catch (e) {
+      error = e;
+    }
+    expect(error).toBeInstanceOf(MimeError);
+    expect((error as MimeError).code).toBe('MIME_ERROR');
+    // The projection's message, not the post-render one: the body was never encoded.
+    expect((error as MimeError).message).toMatch(
+      new RegExp(
+        `at least \\d+ bytes once encoded, which exceeds Cloudflare limit of ${MAX_MESSAGE_BYTES} bytes`,
+      ),
+    );
+  });
+
+  it('counts text and html together', async () => {
+    // Each alone projects under the limit; together they cannot fit.
+    const half = '漢'.repeat(Math.ceil((1.8 * 1024 * 1024) / 3));
+    await expect(
+      build({ from: 'a@x.dev', to: 'b@y.dev', subject: 's', text: half }),
+    ).resolves.toBeTruthy();
+    await expect(
+      build({ from: 'a@x.dev', to: 'b@y.dev', subject: 's', text: half, html: half }),
+    ).rejects.toThrow(/at least \d+ bytes once encoded/);
+  });
+
+  it('never rejects a message that fits, and leaves the final check as the authority', async () => {
+    // 3.3 MiB of CJK projects to ~10.38 MiB (under the cap, since the
+    // projection ignores soft breaks and headers) but renders to ~10.8 MiB.
+    // The projection must let it through; the post-render check must reject it.
+    const nearly = '漢'.repeat(Math.ceil((3.3 * 1024 * 1024) / 3));
+    const email = await normalizeEmail({
+      from: 'a@x.dev',
+      to: 'b@y.dev',
+      subject: 's',
+      text: nearly,
+    });
+    expect(() => buildMime(email)).toThrow(/message size \d+ bytes exceeds Cloudflare limit/);
+    // And a 3 MiB body, whose message is ~9.4 MiB, builds.
+    const fits = '漢'.repeat(Math.ceil((3 * 1024 * 1024) / 3));
+    const { raw } = await build({ from: 'a@x.dev', to: 'b@y.dev', subject: 's', text: fits });
+    expect(raw.byteLength).toBeLessThanOrEqual(MAX_MESSAGE_BYTES);
+  });
+});
+
+describe('quotedPrintable encoder', () => {
+  // Fixtures captured from the string-concatenating encoder these replace,
+  // so the byte-buffer encoder is pinned to the exact previous output.
+  const cases: Array<[string, string, string]> = [
+    [
+      'soft-breaks at 76 columns',
+      'é'.repeat(30),
+      '=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=\r\n=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=\r\n=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9',
+    ],
+    ['quotes trailing whitespace', 'a \nb\t\nc é', 'a=20\r\nb=09\r\nc =C3=A9'],
+    ['quotes control bytes and =', 'a\u0001b=é', 'a=01b=3D=C3=A9'],
+    ['normalizes CR, LF and CRLF', 'l1\r\nl2\rl3\nl4é', 'l1\r\nl2\r\nl3\r\nl4=C3=A9'],
+    [
+      'does not split a quoted byte across a soft break',
+      'a'.repeat(100) + 'é',
+      'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=\r\naaaaaaaaaaaaaaaaaaaaaaaaa=C3=A9',
+    ],
+  ];
+  for (const [name, input, expected] of cases) {
+    it(name, async () => {
+      const { text } = await build({ from: 'a@x.dev', to: 'b@y.dev', subject: 's', text: input });
+      expect(text).toContain('Content-Transfer-Encoding: quoted-printable');
+      expect(bodyOf(text)).toBe(expected);
+    });
+  }
+});
