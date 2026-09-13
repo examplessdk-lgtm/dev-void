@@ -8,6 +8,7 @@
     "build:platform": "vp run --filter './platform/packages/**' build",
     "check": "vp run -r --parallel typecheck",
     "check:platform": "vp run --filter './platform/**' --parallel typecheck",
+    "check:sdk": "vp run --filter './packages/**' --parallel typecheck",
     "dev:docs": "vp run --filter ./docs dev",
     "dev:platform": "vp run --filter @voidcloud/platform dev",
     "fmt": "vp fmt --write .",

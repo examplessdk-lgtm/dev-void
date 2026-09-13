@@ -51,6 +51,9 @@ jobs:
       # Platform packages only. The framework and the playgrounds are typechecked by ci.yml, and
       # the playground typechecks need the playground builds, which this job does not run.
       - run: vp run check:platform
+      # SDK packages too: the deploy workflows run only this job, the dashboard and the
+      # workers bundle the SDK, and `vp pack` does not typecheck.
+      - run: vp run check:sdk
 
   test:
     runs-on: blacksmith-4vcpu-ubuntu-2404

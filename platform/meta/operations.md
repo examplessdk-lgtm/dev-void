@@ -510,7 +510,7 @@ Four platform workflows live in the repository-level `.github/workflows/` direct
 2. `vp fmt --check`, `vp lint`
 3. `vp run build` (SDK packages), then `vp run --filter './platform/packages/**' build`
 4. `vp run lint:platform` (type-aware lint; needs the dashboard build output)
-5. `vp run check:platform` (typecheck platform packages only)
+5. `vp run check:platform` and `vp run check:sdk` (typecheck the platform packages and the SDK packages; the playgrounds are typechecked by `ci.yml`)
 6. `vp test run --project platform-unit` and `--project platform-api-integration`
 7. Builds the API build container image (PRs only)
 
