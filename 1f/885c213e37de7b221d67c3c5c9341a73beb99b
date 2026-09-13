@@ -1,0 +1,21 @@
+README.md
+  s_034a11bf6e7eaf::t_4cfab6962c4bec 105-107
+TESTING.md
+  s_034a11bf6e7eaf::t_9b7906b2c383e0 1-137
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "1f885c213e37de7b221d67c3c5c9341a73beb99b",
+  "prompts": {},
+  "sessions": {
+    "s_034a11bf6e7eaf": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0980d-4a13-70b2-9bda-9dbbf50e98af",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
