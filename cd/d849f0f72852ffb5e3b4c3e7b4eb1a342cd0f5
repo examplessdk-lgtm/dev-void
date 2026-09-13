@@ -1,0 +1,21 @@
+packages/void/src/cli/deploy.ts
+  s_034a11bf6e7eaf::t_cc48d04a3e0b2e 5620-5623
+packages/void/test/unit/deploy-auth.test.ts
+  s_034a11bf6e7eaf::t_93cb4abb22a983 115-130
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "cdd849f0f72852ffb5e3b4c3e7b4eb1a342cd0f5",
+  "prompts": {},
+  "sessions": {
+    "s_034a11bf6e7eaf": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0980d-4a13-70b2-9bda-9dbbf50e98af",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
