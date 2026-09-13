@@ -1,0 +1,29 @@
+platform/packages/api/src/assets.ts
+  s_844d270c7c95d6::t_094b05127d558a 22-23,630,633,636-690,694-695,697,885-947
+platform/packages/api/test/unit/assets.test.ts
+  s_d704c94c6d1ef3::t_14833610bc14f6 12,365-500
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "adbc3cbdcfa52aa9663f1e5c7b776eb61c543389",
+  "prompts": {},
+  "sessions": {
+    "s_844d270c7c95d6": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09959-10e0-7050-bbc1-2658444bfc28",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    },
+    "s_d704c94c6d1ef3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09959-3312-7c10-b5fb-7af80c6c976f",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
