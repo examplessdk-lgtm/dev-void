@@ -123,6 +123,10 @@ Void-managed WebSocket route files (`*.ws.ts`) are still Cloudflare-only because
 
 You can still define [cron jobs](../guide/jobs.md) in `crons/` and they will compile into the bundle, but there is no built-in scheduler to invoke them. On Cloudflare, Workers Cron Triggers call the `scheduled` handler automatically. On Node.js, you'll need an external scheduler (e.g. `node-cron`, systemd timers, or your hosting platform's cron) to trigger the exported handler.
 
+### No inbound email
+
+Inbound [email handlers](../guide/email.md#inbound) in `email/` need Cloudflare Email Routing to invoke the worker's `email()` export, and the Node.js entry exposes HTTP only. An `email/` directory fails the build with guidance. Outbound `sendEmail` has no send transport on these targets either: it returns a `BINDING_MISSING` error.
+
 ### No prerendering
 
 [Prerendering](../guide/edge/prerendering.md) is a platform feature that relies on Cloudflare's edge cache and the Void deploy pipeline. It is not available for non-CF targets.

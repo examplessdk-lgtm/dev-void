@@ -750,7 +750,8 @@ export function voidPlugin(options?: {
   // Gated on the handler DIRECTORY, not on `bindings.needsEmail`. Outbound
   // `sendEmail` is a binding rather than a compiled export, so it keeps
   // working in every framework and must not be caught here.
-  if (detected && hasEmailHandlers(scanEmailHandlersSync(paths.sourceRoot))) {
+  const hasInboundEmail = hasEmailHandlers(scanEmailHandlersSync(paths.sourceRoot));
+  if (detected && hasInboundEmail) {
     throw new Error(
       'email: inbound email handlers are only supported in Void apps. Remove the email/ directory — `sendEmail` from void/email keeps working.',
     );
@@ -2056,6 +2057,14 @@ export function voidPlugin(options?: {
     if (durableObjects.length > 0) {
       throw new Error(
         `durable: durable-objects/ requires target: "cloudflare". It is not available with target: '${config.target}'.`,
+      );
+    }
+    // `compileNodeApp` imports only the Hono app from the route table; the
+    // `__emailHandler` the table exports for `email/` is never invoked, so
+    // without this the build succeeds and every inbound handler is dead code.
+    if (hasInboundEmail) {
+      throw new Error(
+        `email: inbound email handlers (email/) require target: "cloudflare". They are not available with target: '${config.target}'.`,
       );
     }
     if (config.routing?.revalidate) {

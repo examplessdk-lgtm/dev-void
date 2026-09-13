@@ -251,6 +251,8 @@ Inbound mail is a **Void-app-only** feature. Receive it by dropping handlers in 
 
 Under a third-party framework — TanStack Start, React Router, SvelteKit, Nuxt, Analog, Astro — Void wires only crons and queues into the framework's own worker entry, so there is nowhere to attach an `email()` export. An `email/` directory in those projects is a build error, not silently dead code. Outbound is unaffected: `sendEmail` is a binding, and it works in every framework.
 
+The same holds for `target: "node" | "bun" | "deno"`: those builds expose HTTP only and never invoke an `email()` export, so an `email/` directory fails the build with guidance.
+
 ```ts
 // email/_default.ts — fallback for any unmatched recipient
 import { defineEmail, parseEmail } from 'void/email';

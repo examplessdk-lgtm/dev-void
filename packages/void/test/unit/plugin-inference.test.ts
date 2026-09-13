@@ -705,6 +705,55 @@ describe('detectFramework', () => {
     }
   });
 
+  // `compileNodeApp` never imports `__emailHandler`, so on `node`/`bun`/`deno`
+  // an `email/` directory compiled cleanly into a bundle that could not
+  // receive mail. Same shape as the live / sandbox / durable-objects guards
+  // in the node-target branch.
+  for (const target of ['node', 'bun', 'deno'] as const) {
+    it(`rejects an email/ handler directory with target: "${target}"`, () => {
+      const root = createTempRoot();
+      mkdirSync(join(root, 'routes'), { recursive: true });
+      mkdirSync(join(root, 'email'), { recursive: true });
+      writeFileSync(join(root, 'void.json'), JSON.stringify({ target }));
+      writeFileSync(
+        join(root, 'routes', 'index.ts'),
+        'export const GET = () => new Response("ok");',
+      );
+      writeFileSync(
+        join(root, 'email', '_default.ts'),
+        `
+        import { defineEmail } from "void/email";
+        export default defineEmail(async () => {});
+        `,
+      );
+
+      const cwd = vi.spyOn(process, 'cwd').mockReturnValue(root);
+
+      try {
+        expect(() => voidPlugin()).toThrow(
+          `email: inbound email handlers (email/) require target: "cloudflare". They are not available with target: '${target}'.`,
+        );
+      } finally {
+        cwd.mockRestore();
+      }
+    });
+  }
+
+  it('still builds a non-Cloudflare target without an email/ directory', () => {
+    const root = createTempRoot();
+    mkdirSync(join(root, 'routes'), { recursive: true });
+    writeFileSync(join(root, 'void.json'), JSON.stringify({ target: 'node' }));
+    writeFileSync(join(root, 'routes', 'index.ts'), 'export const GET = () => new Response("ok");');
+
+    const cwd = vi.spyOn(process, 'cwd').mockReturnValue(root);
+
+    try {
+      expect(() => voidPlugin()).not.toThrow();
+    } finally {
+      cwd.mockRestore();
+    }
+  });
+
   // Outbound is a binding, not a compiled export, so it stays supported.
   it('allows sendEmail without an email/ directory in framework adapter mode', () => {
     const root = createTempRoot();
