@@ -1128,6 +1128,32 @@ describe('reply threading survives a hostile inbound header', () => {
     expect(Math.max(...text.split('\r\n').map((l) => l.length))).toBeLessThanOrEqual(998);
   });
 
+  it('survives a References chain with more tokens than Math.max takes arguments', async () => {
+    // ~123k spread arguments is where V8 throws RangeError (measured on
+    // workerd and node). 130k short ids is 780 KB, far inside
+    // MAX_MESSAGE_BYTES, so a remote sender can reach it.
+    const chain = Array.from({ length: 130_000 }, () => '<a@r>').join(' ');
+    const message = inbound({ references: chain, 'message-id': '<abc@remote.dev>', subject: 'hi' });
+
+    const reply = await buildReplyMessage(message, { text: 'thanks', from: 'acme+noreply@x.dev' });
+
+    const text = new TextDecoder().decode(reply.raw);
+    expect(text).toContain('In-Reply-To: <abc@remote.dev>');
+    expect(Math.max(...text.split('\r\n').map((l) => l.length))).toBeLessThanOrEqual(998);
+  });
+
+  it('survives a Subject with more tokens than Math.max takes arguments', async () => {
+    // The cheaper trigger: `prefixReplySubject` collapses whitespace runs, so
+    // 130k single-character tokens is only 260 KB of ASCII.
+    const subject = Array.from({ length: 130_000 }, () => 'a').join(' ');
+    const message = inbound({ subject });
+
+    const reply = await buildReplyMessage(message, { text: 'thanks', from: 'acme+noreply@x.dev' });
+
+    const text = new TextDecoder().decode(reply.raw);
+    expect(Math.max(...text.split('\r\n').map((l) => l.length))).toBeLessThanOrEqual(998);
+  });
+
   it('drops an unusable References chain rather than failing the reply', async () => {
     const message = inbound({ references: `<${HUGE}@remote.dev>`, subject: 'hi' });
 

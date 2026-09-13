@@ -446,8 +446,14 @@ function fitsHeaderLine(name: string, value: string | undefined): value is strin
     return false;
   }
   const encoder = new TextEncoder();
-  const widest = Math.max(...value.split(/\s+/).map((token) => encoder.encode(token).length));
-  return name.length + 2 + widest <= 998;
+  // A predicate, not a maximum. Spreading the token list into `Math.max`
+  // throws `RangeError` past ~123k arguments (measured on workerd), and a
+  // remote sender reaches that with a `References` chain of about 4.4 MB, or
+  // an all-ASCII `Subject` of about 240 KB — both well inside
+  // MAX_MESSAGE_BYTES. This guard exists to stop a hostile header making the
+  // app's reply throw, so it must not be the thing that throws.
+  const budget = 998 - (name.length + 2);
+  return !value.split(/\s+/).some((token) => encoder.encode(token).length > budget);
 }
 
 export interface ReplyEmailOptions {
