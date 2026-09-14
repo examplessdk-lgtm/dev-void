@@ -73,7 +73,7 @@ Paths in this file are relative to `platform/` unless they begin with `../`. For
 
 The `@voidcloud/platform` workspace package retains the dashboard-only `dev` and `build` scripts. Dashboard deploys run after the platform workers in the platform deploy pipeline.
 
-**Manual deploys only. Do not ask to push or deploy.**
+**Production deploys are manual only; staging deploys on every push to `main`.** See [`meta/operations.md`](./meta/operations.md#github-actions) for the workflow triggers. Do not ask to push or deploy.
 
 ## Local Development
 
