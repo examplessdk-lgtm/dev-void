@@ -23,7 +23,7 @@
  */
 
 import { EmailMessage } from 'cloudflare:email';
-import { readSenderDomain, recordInboundDelivery } from './email.ts';
+import { readMimeFromAddrSpec, readSenderDomain, recordInboundDelivery } from './email.ts';
 import type { Env } from './types.ts';
 
 // Built via new RegExp to dodge oxlint no-control-regex rule.
@@ -915,6 +915,26 @@ function validateActions(
       if (!isPermittedReplySender(action.from, replySender)) {
         console.error(
           `[email-router] reply dropped: sender not owned by project "${sanitize(replySender.slug, 64)}" (from=${logAddress(action.from)})`,
+        );
+        continue;
+      }
+      // The envelope is pinned; now pin what the recipient will SEE. The
+      // bytes are the tenant's, and `new EmailMessage(from, to, raw)` never
+      // compares them with `from`, so a `From:` header naming a sibling
+      // project would pass the sender pin above. Same check, same reason,
+      // as `/email/send` in `email.ts`; `replyEmail()` always renders the
+      // header from the address it records, so only a hand-built reply
+      // can fail here.
+      if (!(action.raw instanceof Uint8Array)) {
+        console.error(
+          `[email-router] reply dropped: raw is not a Uint8Array (from=${logAddress(action.from)})`,
+        );
+        continue;
+      }
+      const mimeFrom = readMimeFromAddrSpec(action.raw);
+      if (!mimeFrom.ok || mimeFrom.addrSpec.toLowerCase() !== action.from.toLowerCase()) {
+        console.error(
+          `[email-router] reply dropped: MIME From is not the envelope sender (from=${logAddress(action.from)}, ${mimeFrom.ok ? 'header names another address' : mimeFrom.reason})`,
         );
         continue;
       }

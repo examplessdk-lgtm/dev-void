@@ -153,6 +153,226 @@ function bytesToStream(bytes: Uint8Array): ReadableStream<Uint8Array> {
 }
 
 /**
+ * The addr-spec named by the message-level `From:` header, or why there is
+ * no single one to name.
+ *
+ * `/send` pins the ENVELOPE sender (`from`) to the calling project's slug,
+ * but the bytes a recipient's mail client shows as the sender are the MIME
+ * `From:` header inside `mimeBase64`, and a tenant worker holding its own
+ * project HMAC can post any bytes it likes there. Cloudflare's local
+ * `send_email` simulator (miniflare `send_email.worker.ts`) throws
+ * `From: header does not match mail from` for exactly this, and its author
+ * says the messages mirror production — but nothing in the public docs
+ * promises it, the same simulator takes the LAST of several `From:` headers
+ * and the FIRST mailbox of a list, and the proxy is the platform's tenancy
+ * boundary. So the proxy checks itself: exactly one `From:` header, holding
+ * exactly one mailbox, whose addr-spec is the authorized envelope sender.
+ *
+ * Scope is deliberately narrow. The display name (a quoted-string or RFC
+ * 2047 encoded-words before `<…>`) is NOT inspected — closing display-name
+ * spoofing would need a real RFC 5322 scanner tracking `buildMime` forever,
+ * and stays handed back. The structural specials outside quotes
+ * (`, ; : ( ) [ ] \` and a bare `@` before `<`) are refused only because
+ * each one would make "which mailbox is this" ambiguous — a list, a group,
+ * a comment or a phrase that reads as an address — and `buildMime` never
+ * emits any of them unquoted. `Sender:`, `Reply-To:` and `Resent-From:` are
+ * not pinned: no client presents them as the author, and a reply sent to a
+ * sibling project's inbound address is something anyone can do without the
+ * proxy.
+ *
+ * Every line of the header block is visited so a `From:` cannot hide
+ * behind an unrelated header, and continuation lines (leading WSP) are
+ * unfolded onto the header they extend. The scan stops at the first empty
+ * line — a `From:` inside a MIME part's own headers is that part's, not the
+ * message's — or at the end of `raw`, which `MAX_MIME_BYTES` already
+ * bounds. The work is one linear pass over bytes that are already in
+ * memory; only the `From:` value is ever decoded to a string, and the
+ * tokenizer below is a single pass with no backtracking, so a display
+ * name of any length (which `buildMime` allows) costs what it weighs.
+ *
+ * Header names are matched the way lenient parsers (postal-mime, which
+ * miniflare uses) match them — bytes before the first `:` with trailing
+ * WSP trimmed, case-insensitively — so `From :` counts as a second `From:`
+ * rather than slipping past as an unknown header. A bare CR inside a line
+ * fails the scan: `buildMime` rejects CR/LF in every value, and a parser
+ * that splits on LF alone would read the bytes after it as part of the
+ * same header.
+ */
+export type MimeFrom =
+  | { ok: true; addrSpec: string }
+  | { ok: false; reason: 'missing' | 'multiple' | 'malformed' };
+
+const LF = 0x0a;
+const CR = 0x0d;
+const SP = 0x20;
+const HTAB = 0x09;
+const COLON = 0x3a;
+const FROM_NAME = [0x66, 0x72, 0x6f, 0x6d]; // "from"
+
+function isFromHeaderName(line: Uint8Array, colon: number): boolean {
+  let end = colon;
+  while (end > 0 && (line[end - 1] === SP || line[end - 1] === HTAB)) {
+    end--;
+  }
+  if (end !== FROM_NAME.length) {
+    return false;
+  }
+  for (let i = 0; i < end; i++) {
+    // ASCII case fold: `A`..`Z` → `a`..`z`. Non-letters fold to themselves.
+    if ((line[i] | 0x20) !== FROM_NAME[i]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** Operator-readable detail for each way the pin can fail to find a sender. */
+const MIME_FROM_REFUSALS: Record<Extract<MimeFrom, { ok: false }>['reason'], string> = {
+  missing: 'the message has no From header',
+  multiple: 'the message has more than one From header',
+  malformed: 'the From header must hold a single mailbox',
+};
+
+export function readMimeFromAddrSpec(raw: Uint8Array): MimeFrom {
+  const fromHeaders: Array<Array<Uint8Array>> = [];
+  let current: Array<Uint8Array> | null = null;
+  const n = raw.byteLength;
+  let lineStart = 0;
+  while (lineStart < n) {
+    const lf = raw.indexOf(LF, lineStart);
+    const lineEnd = lf === -1 ? n : lf;
+    let contentEnd = lineEnd;
+    if (contentEnd > lineStart && raw[contentEnd - 1] === CR) {
+      contentEnd--;
+    }
+    if (contentEnd === lineStart) {
+      break; // empty line: end of the header block
+    }
+    const line = raw.subarray(lineStart, contentEnd);
+    if (line.indexOf(CR) !== -1) {
+      return { ok: false, reason: 'malformed' };
+    }
+    if (line[0] === SP || line[0] === HTAB) {
+      current?.push(line);
+    } else {
+      current = null;
+      const colon = line.indexOf(COLON);
+      if (colon !== -1 && isFromHeaderName(line, colon)) {
+        current = [line.subarray(colon + 1)];
+        fromHeaders.push(current);
+      }
+    }
+    lineStart = lf === -1 ? n : lf + 1;
+  }
+  if (fromHeaders.length === 0) {
+    return { ok: false, reason: 'missing' };
+  }
+  if (fromHeaders.length > 1) {
+    return { ok: false, reason: 'multiple' };
+  }
+  // Unfold: each continuation line keeps its leading WSP, so joining the
+  // pieces is RFC 5322 §2.2.3 unfolding with the CRLF removed.
+  const pieces = fromHeaders[0];
+  let total = 0;
+  for (const piece of pieces) {
+    total += piece.byteLength;
+  }
+  const joined = new Uint8Array(total);
+  let offset = 0;
+  for (const piece of pieces) {
+    joined.set(piece, offset);
+    offset += piece.byteLength;
+  }
+  const addrSpec = singleMailboxAddrSpec(new TextDecoder().decode(joined));
+  return addrSpec === null ? { ok: false, reason: 'malformed' } : { ok: true, addrSpec };
+}
+
+/**
+ * The addr-spec of a header value that holds exactly one mailbox — either a
+ * bare `addr-spec` or `[phrase] <addr-spec>` — or `null` when the value is
+ * anything else. One pass; quoted-strings (with `\` escapes) are skipped
+ * whole, and their contents are never interpreted.
+ */
+function singleMailboxAddrSpec(value: string): string | null {
+  let inQuotes = false;
+  let escaped = false;
+  let lt = -1;
+  let gt = -1;
+  let firstAt = -1;
+  for (let i = 0; i < value.length; i++) {
+    const ch = value[i];
+    if (inQuotes) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch === '\\') {
+        escaped = true;
+      } else if (ch === '"') {
+        inQuotes = false;
+      }
+      continue;
+    }
+    switch (ch) {
+      case '"':
+        // A quoted-string belongs to the phrase, which ends at `<`.
+        if (lt !== -1) {
+          return null;
+        }
+        inQuotes = true;
+        break;
+      case '<':
+        if (lt !== -1) {
+          return null;
+        }
+        lt = i;
+        break;
+      case '>':
+        if (lt === -1 || gt !== -1) {
+          return null;
+        }
+        gt = i;
+        break;
+      case '@':
+        if (firstAt === -1) {
+          firstAt = i;
+        }
+        break;
+      case ',':
+      case ';':
+      case ':':
+      case '(':
+      case ')':
+      case '[':
+      case ']':
+      case '\\':
+        return null;
+      default:
+        break;
+    }
+  }
+  if (inQuotes) {
+    return null;
+  }
+  let addrSpec: string;
+  if (lt === -1) {
+    addrSpec = value.trim();
+  } else {
+    // `<` present: it needs its `>`, nothing but WSP may follow, and the
+    // phrase before it must not read as an address of its own.
+    if (gt === -1 || value.slice(gt + 1).trim().length !== 0) {
+      return null;
+    }
+    if (firstAt !== -1 && firstAt < lt) {
+      return null;
+    }
+    addrSpec = value.slice(lt + 1, gt);
+  }
+  // One printable-ASCII token. Rules out an empty `<>`, WSP inside the
+  // brackets, and a code point that only LOOKS like the sender before the
+  // caller lower-cases it for the compare.
+  return /^[\x21-\x7e]+$/.test(addrSpec) ? addrSpec : null;
+}
+
+/**
  * Platform-wide suspension marker.
  *
  * `routing.suspended` is written into a project's routing blob by
@@ -462,6 +682,29 @@ app.post('/send', async (context) => {
         },
       },
       200,
+    );
+  }
+
+  // The envelope is pinned; now pin what the recipient will actually SEE.
+  // A mismatch here is a request the framework never produces — `buildMime`
+  // renders `From:` from the same `from.email` it posts as the envelope — so
+  // it is refused outright rather than reported per recipient. Runs before
+  // the suspension and allowlist reads for the same reason as the slug pin:
+  // no KV work for a request that can never be authorized.
+  const mimeFrom = readMimeFromAddrSpec(raw);
+  if (!mimeFrom.ok || mimeFrom.addrSpec.toLowerCase() !== fromLower) {
+    const detail = mimeFrom.ok
+      ? 'the From header address does not match the envelope sender'
+      : MIME_FROM_REFUSALS[mimeFrom.reason];
+    return context.json(
+      {
+        ok: false,
+        error: {
+          code: 'INVALID_FROM',
+          message: `mime From must be the envelope sender ${from}: ${detail}`,
+        },
+      },
+      403,
     );
   }
 

@@ -35,6 +35,15 @@ import type { Env } from '../../src/types.ts';
 // -----------------------------------------------------------------------
 
 const PROD_DOMAIN = 'mail.void.cloud';
+
+/**
+ * Reply bytes the way `replyEmail()` renders them: a `From:` header naming
+ * the envelope sender, then a body. The router pins the MIME `From:` to
+ * `action.from`, so a fixture without one is dropped before enaction.
+ */
+function replyRaw(from: string, body = 'reply body'): Uint8Array {
+  return new TextEncoder().encode(`From: ${from}\r\n\r\n${body}\r\n`);
+}
 const STAGING_DOMAIN = 'mail.staging.void.cloud';
 
 /** Frozen clock. Drives both quota buckets below. */
@@ -947,7 +956,7 @@ describe('routeInbound — action enaction', () => {
           type: 'reply',
           from: `myslug+support@${PROD_DOMAIN}`,
           to: 'sender@example.com',
-          raw: new TextEncoder().encode('reply body'),
+          raw: replyRaw(`myslug+support@${PROD_DOMAIN}`, 'reply body'),
         },
       ],
     });
@@ -982,7 +991,7 @@ describe('routeInbound — action enaction', () => {
           type: 'reply',
           from: `myslug+support@${PROD_DOMAIN}`,
           to: 'admin@example.com',
-          raw: new TextEncoder().encode('reply body'),
+          raw: replyRaw(`myslug+support@${PROD_DOMAIN}`, 'reply body'),
         },
       ],
     });
@@ -1009,7 +1018,7 @@ describe('routeInbound — action enaction', () => {
           type: 'reply',
           from: `myslug+support@${PROD_DOMAIN}`,
           to: 'ops@example.com',
-          raw: new TextEncoder().encode('r'),
+          raw: replyRaw(`myslug+support@${PROD_DOMAIN}`, 'r'),
         },
         { type: 'forward', to: 'ops@example.com' },
       ],
@@ -1154,7 +1163,7 @@ describe('routeInbound — action enaction', () => {
           type: 'reply',
           from: `myslug+support@${PROD_DOMAIN}`,
           to: 'admin@example.com',
-          raw: new TextEncoder().encode('r'),
+          raw: replyRaw(`myslug+support@${PROD_DOMAIN}`, 'r'),
         },
       ],
     });
@@ -1180,7 +1189,7 @@ describe('routeInbound — action enaction', () => {
           type: 'reply',
           from: `myslug+support@${PROD_DOMAIN}`,
           to: 'admin@example.com',
-          raw: new TextEncoder().encode('reply body'),
+          raw: replyRaw(`myslug+support@${PROD_DOMAIN}`, 'reply body'),
         },
       ],
     });
@@ -1677,7 +1686,7 @@ describe('routeInbound — per-project gating on forward/reply (HIGH H1)', () =>
           type: 'reply',
           from: `myslug+support@${PROD_DOMAIN}`,
           to: 'admin@example.com',
-          raw: new TextEncoder().encode('reply'),
+          raw: replyRaw(`myslug+support@${PROD_DOMAIN}`, 'reply'),
         },
       ],
     });
@@ -1784,7 +1793,7 @@ describe('routeInbound — reply sender pin (F1)', () => {
           type: 'reply',
           from: `noreply@${PROD_DOMAIN}`,
           to: 'admin@example.com',
-          raw: new TextEncoder().encode('r'),
+          raw: replyRaw(`noreply@${PROD_DOMAIN}`, 'r'),
         },
       ],
     });
@@ -1792,6 +1801,65 @@ describe('routeInbound — reply sender pin (F1)', () => {
     const { ctx } = createCtx();
     await routeInbound(message, env, ctx);
     expect(replyCalls).toHaveLength(0);
+  });
+
+  it('drops a reply whose MIME From names another address than the envelope sender', async () => {
+    // The sender pin above checks `action.from`; the recipient's client
+    // shows the `From:` header inside `raw`, which is the tenant's bytes.
+    // Same pin as `/email/send`, applied to the recorded reply.
+    const shapes: Array<[string, unknown]> = [
+      ['sibling project in From:', replyRaw(`otherproject+support@${PROD_DOMAIN}`)],
+      [
+        'display name around a sibling',
+        replyRaw(`"Support" <otherproject+support@${PROD_DOMAIN}>`),
+      ],
+      ['no From: header', new TextEncoder().encode('Subject: hi\r\n\r\nreply body\r\n')],
+      [
+        'two From: headers',
+        new TextEncoder().encode(
+          `From: myslug+support@${PROD_DOMAIN}\r\nFrom: otherproject+support@${PROD_DOMAIN}\r\n\r\nr\r\n`,
+        ),
+      ],
+      ['raw is not bytes', `From: myslug+support@${PROD_DOMAIN}\r\n\r\nr\r\n`],
+    ];
+    for (const [label, raw] of shapes) {
+      errorSpy.mockClear();
+      const { env } = makeEnv({
+        kvSeed: withAllowlist(['admin@example.com']),
+        emailReturn: [
+          { type: 'reply', from: `myslug+support@${PROD_DOMAIN}`, to: 'admin@example.com', raw },
+        ],
+      });
+      const { message, replyCalls } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
+      const { ctx } = createCtx();
+      await routeInbound(message, env, ctx);
+      expect(replyCalls, label).toHaveLength(0);
+      expect(errorSpy, label).toHaveBeenCalledWith(expect.stringContaining('reply dropped'));
+    }
+  });
+
+  it('accepts a MIME From that differs from the envelope sender only by case, or carries a display name', async () => {
+    for (const header of [
+      `MySlug+Support@${PROD_DOMAIN.toUpperCase()}`,
+      `"Acme Support" <myslug+support@${PROD_DOMAIN}>`,
+      `=?UTF-8?B?5pSv5o+0?= <myslug+support@${PROD_DOMAIN}>`,
+    ]) {
+      const { env } = makeEnv({
+        kvSeed: withAllowlist(['admin@example.com']),
+        emailReturn: [
+          {
+            type: 'reply',
+            from: `myslug+support@${PROD_DOMAIN}`,
+            to: 'admin@example.com',
+            raw: replyRaw(header),
+          },
+        ],
+      });
+      const { message, replyCalls } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
+      const { ctx } = createCtx();
+      await routeInbound(message, env, ctx);
+      expect(replyCalls, header).toHaveLength(1);
+    }
   });
 
   it("accepts replyEmail's default sender, <slug>+noreply@<domain>", async () => {
@@ -1802,7 +1870,7 @@ describe('routeInbound — reply sender pin (F1)', () => {
           type: 'reply',
           from: `myslug+noreply@${PROD_DOMAIN}`,
           to: 'admin@example.com',
-          raw: new TextEncoder().encode('r'),
+          raw: replyRaw(`myslug+noreply@${PROD_DOMAIN}`, 'r'),
         },
       ],
     });
@@ -1821,7 +1889,7 @@ describe('routeInbound — reply sender pin (F1)', () => {
           type: 'reply',
           from: `myslug@${PROD_DOMAIN}`,
           to: 'admin@example.com',
-          raw: new TextEncoder().encode('r'),
+          raw: replyRaw(`myslug@${PROD_DOMAIN}`, 'r'),
         },
       ],
     });
@@ -1872,7 +1940,7 @@ describe('routeInbound — reply sender pin (F1)', () => {
           type: 'reply',
           from: `MySlug+Support@${PROD_DOMAIN.toUpperCase()}`,
           to: 'admin@example.com',
-          raw: new TextEncoder().encode('r'),
+          raw: replyRaw(`MySlug+Support@${PROD_DOMAIN.toUpperCase()}`, 'r'),
         },
       ],
     });
@@ -1899,7 +1967,7 @@ describe('routeInbound — reply sender pin (F1)', () => {
           type: 'reply',
           from: `Kslug@${PROD_DOMAIN}`,
           to: 'admin@example.com',
-          raw: new TextEncoder().encode('r'),
+          raw: replyRaw(`Kslug@${PROD_DOMAIN}`, 'r'),
         },
       ],
     });
@@ -1920,13 +1988,13 @@ describe('routeInbound — reply sender pin (F1)', () => {
           type: 'reply',
           from: `myslug+support@${PROD_DOMAIN}`,
           to: 'admin@example.com',
-          raw: new TextEncoder().encode('r'),
+          raw: replyRaw(`myslug+support@${PROD_DOMAIN}`, 'r'),
         },
         {
           type: 'reply',
           from: `myslug+support@${STAGING_DOMAIN}`,
           to: 'admin@example.com',
-          raw: new TextEncoder().encode('r'),
+          raw: replyRaw(`myslug+support@${STAGING_DOMAIN}`, 'r'),
         },
       ],
     });
@@ -1948,13 +2016,13 @@ describe('routeInbound — reply sender pin (F1)', () => {
           type: 'reply',
           from: `noreply@${PROD_DOMAIN}`,
           to: 'admin@example.com',
-          raw: new TextEncoder().encode('r'),
+          raw: replyRaw(`noreply@${PROD_DOMAIN}`, 'r'),
         },
         {
           type: 'reply',
           from: `myslug+noreply@${PROD_DOMAIN}`,
           to: 'admin@example.com',
-          raw: new TextEncoder().encode('r'),
+          raw: replyRaw(`myslug+noreply@${PROD_DOMAIN}`, 'r'),
         },
       ],
     });
@@ -1973,7 +2041,7 @@ describe('routeInbound — reply sender pin (F1)', () => {
           type: 'reply',
           from: `otherproject+support@${PROD_DOMAIN}`,
           to: 'admin@example.com',
-          raw: new TextEncoder().encode('r'),
+          raw: replyRaw(`otherproject+support@${PROD_DOMAIN}`, 'r'),
         },
       ],
     });
@@ -1995,7 +2063,7 @@ describe('routeInbound — reply sender pin (F1)', () => {
           type: 'reply',
           from: `noreply@${PROD_DOMAIN}`,
           to: 'admin@example.com',
-          raw: new TextEncoder().encode('r'),
+          raw: replyRaw(`noreply@${PROD_DOMAIN}`, 'r'),
         },
         { type: 'forward', to: 'admin@example.com' },
       ],

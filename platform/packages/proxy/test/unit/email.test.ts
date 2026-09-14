@@ -17,6 +17,12 @@ vi.mock('cloudflare:email', () => ({
 }));
 
 const worker = (await import('../../src/index.ts')).default;
+const { readMimeFromAddrSpec } = await import('../../src/email.ts');
+// The framework's own MIME builder — the ONLY legitimate producer of the
+// `mimeBase64` a tenant posts — so the proxy's From pin is checked against
+// every `From:` shape it really renders, not against hand-typed lookalikes.
+const { buildMime, normalizeEmail } =
+  await import('../../../../../packages/void/src/runtime/email/mime.ts');
 
 const JWT_SECRET = 'test-secret-key';
 const PROD_DOMAIN = 'mail.void.cloud';
@@ -93,8 +99,15 @@ function createMockEnv(
   };
 }
 
-/** Minimal base64 of an RFC 5322-ish body — content is irrelevant here. */
-function mimeBase64(body = 'Subject: hi\r\n\r\nhello\r\n'): string {
+const DEFAULT_FROM = `acme+noreply@${PROD_DOMAIN}`;
+
+/** The smallest message `/email/send` accepts for `from`: a matching `From:` and a body. */
+function mimeFor(from: string, rest = 'Subject: hi\r\n\r\nhello\r\n'): string {
+  return `From: ${from}\r\n${rest}`;
+}
+
+/** Minimal base64 of an RFC 5322-ish body — content beyond `From:` is irrelevant here. */
+function mimeBase64(body = mimeFor(DEFAULT_FROM)): string {
   let binary = '';
   for (const b of new TextEncoder().encode(body)) {
     binary += String.fromCharCode(b);
@@ -116,14 +129,19 @@ async function postSend(
   );
 }
 
-/** A `/email/send` body that passes every gate for `proj_1` / slug `acme`. */
+/**
+ * A `/email/send` body that passes every gate for `proj_1` / slug `acme`.
+ * The MIME `From:` follows the envelope under test, exactly as the framework
+ * renders both from one `from.email`; pass `mimeBase64` to diverge them.
+ */
 async function sendBody(overrides: Record<string, unknown> = {}) {
+  const from = typeof overrides.from === 'string' ? overrides.from : DEFAULT_FROM;
   return {
     projectId: 'proj_1',
     aiToken: await signHmac('proj_1', JWT_SECRET),
-    from: `acme+noreply@${PROD_DOMAIN}`,
+    from,
     recipients: ['dev@example.com'],
-    mimeBase64: mimeBase64(),
+    mimeBase64: mimeBase64(mimeFor(from)),
     requestId: 'req_1',
     ...overrides,
   };
@@ -926,6 +944,225 @@ describe('POST /email/send — sender pinning (cross-project tenancy)', () => {
   });
 });
 
+describe('POST /email/send — MIME From pin (what the recipient sees)', () => {
+  /** A tenant that owns `acme` and wants to look like `victim`. */
+  function twoTenantsKv() {
+    return happyPathKv({ 'email-slug:proj_2': 'victim' });
+  }
+
+  async function sendMime(mime: string, overrides: Record<string, unknown> = {}) {
+    const kv = twoTenantsKv();
+    const sender = createSender();
+    const env = createMockEnv(kv, { SEND_EMAIL: sender.binding });
+    const res = await postSend(env, await sendBody({ mimeBase64: mimeBase64(mime), ...overrides }));
+    return { res, body: await readSend(res), sender, kv };
+  }
+
+  it("refuses a MIME From naming another project's sender under an authorized envelope", async () => {
+    // The envelope `acme+noreply@` passes the slug pin; the bytes the
+    // recipient's client renders as the sender say `victim+noreply@`.
+    const { res, body, sender, kv } = await sendMime(mimeFor(`victim+noreply@${PROD_DOMAIN}`));
+    expect(res.status).toBe(403);
+    expect(body.ok).toBe(false);
+    expect(body.error?.code).toBe('INVALID_FROM');
+    expect(sender.calls).toHaveLength(0);
+    // Refused before the suspension, allowlist and quota reads.
+    expect(kv.get.mock.calls.map((c) => c[0])).toEqual(['email-slug:proj_1']);
+    expect(kv.put).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['a display name in front of the victim', `"Acme Billing" <victim+noreply@${PROD_DOMAIN}>`],
+    [
+      'the victim in the phrase, the envelope in brackets',
+      `victim@${PROD_DOMAIN} <${DEFAULT_FROM}>`,
+    ],
+    ['a mailbox list, envelope first', `${DEFAULT_FROM}, victim@${PROD_DOMAIN}`],
+    ['a mailbox list, victim first', `victim@${PROD_DOMAIN}, ${DEFAULT_FROM}`],
+    ['a group', `Acme: victim@${PROD_DOMAIN};`],
+    ['two angle-addrs', `<victim@${PROD_DOMAIN}> <${DEFAULT_FROM}>`],
+    ['a comment carrying the victim', `${DEFAULT_FROM} (victim@${PROD_DOMAIN})`],
+    ['trailing text after the angle-addr', `<${DEFAULT_FROM}> victim@${PROD_DOMAIN}`],
+    ['an unterminated quoted-string', `"Acme <${DEFAULT_FROM}>`],
+    ['an empty angle-addr', '<>'],
+    ['an empty value', ''],
+    ['whitespace inside the brackets', `< ${DEFAULT_FROM} >`],
+  ])(
+    'refuses a From that is not a single mailbox naming the envelope (%s)',
+    async (_label, value) => {
+      const { body, sender } = await sendMime(mimeFor(value));
+      expect(body.ok, `${JSON.stringify(value)} should have been refused`).toBe(false);
+      expect(body.error?.code).toBe('INVALID_FROM');
+      expect(sender.calls).toHaveLength(0);
+    },
+  );
+
+  it('refuses a From that only case-folds INTO the envelope sender', async () => {
+    // U+212A KELVIN SIGN lower-cases to `k`. Without the printable-ASCII
+    // check the compare would pass and CF would receive a From the envelope
+    // check never saw.
+    const from = `acme+link@${PROD_DOMAIN}`;
+    const { body, sender } = await sendMime(mimeFor(`acme+lin\u212A@${PROD_DOMAIN}`), { from });
+    expect(body.ok).toBe(false);
+    expect(body.error?.code).toBe('INVALID_FROM');
+    expect(sender.calls).toHaveLength(0);
+  });
+
+  it('refuses a message with no From header at all', async () => {
+    const { body, sender } = await sendMime('Subject: hi\r\n\r\nhello\r\n');
+    expect(body.ok).toBe(false);
+    expect(body.error?.code).toBe('INVALID_FROM');
+    expect(body.error?.message).toContain('no From header');
+    expect(sender.calls).toHaveLength(0);
+  });
+
+  it.each([
+    ['plain duplicates', `From: ${DEFAULT_FROM}\r\nFrom: victim@${PROD_DOMAIN}\r\n`],
+    [
+      'the second one spelled `From :`',
+      `From: ${DEFAULT_FROM}\r\nFrom : victim@${PROD_DOMAIN}\r\n`,
+    ],
+    ['the second one upper-cased', `From: ${DEFAULT_FROM}\r\nFROM: victim@${PROD_DOMAIN}\r\n`],
+    [
+      'the second one after an unrelated header',
+      `From: ${DEFAULT_FROM}\r\nSubject: x\r\nFrom: victim@${PROD_DOMAIN}\r\n`,
+    ],
+    [
+      'the second one hidden behind a bare LF',
+      `From: ${DEFAULT_FROM}\nFrom: victim@${PROD_DOMAIN}\r\n`,
+    ],
+  ])('refuses two From headers (%s)', async (_label, headers) => {
+    const { body, sender } = await sendMime(`${headers}Subject: hi\r\n\r\nhello\r\n`);
+    expect(body.ok).toBe(false);
+    expect(body.error?.code).toBe('INVALID_FROM');
+    expect(body.error?.message).toContain('more than one From');
+    expect(sender.calls).toHaveLength(0);
+  });
+
+  it('refuses a bare CR that a LF-splitting parser would read as a second line', async () => {
+    const { body, sender } = await sendMime(
+      `From: ${DEFAULT_FROM}\rFrom: victim@${PROD_DOMAIN}\r\nSubject: hi\r\n\r\nhello\r\n`,
+    );
+    expect(body.ok).toBe(false);
+    expect(body.error?.code).toBe('INVALID_FROM');
+    expect(sender.calls).toHaveLength(0);
+  });
+
+  it('does not read a From inside a MIME part as the message From', async () => {
+    // The scan ends at the first empty line; a part's own `From:` is body.
+    const { body } = await sendMime(
+      `Content-Type: multipart/mixed; boundary=b\r\n\r\n--b\r\nFrom: victim@${PROD_DOMAIN}\r\n\r\nx\r\n--b--\r\n`,
+    );
+    expect(body.ok).toBe(false);
+    expect(body.error?.message).toContain('no From header');
+  });
+
+  it.each([
+    ['ASCII case differences', `ACME+NoReply@${PROD_DOMAIN.toUpperCase()}`],
+    ['a display name', `Acme Billing <${DEFAULT_FROM}>`],
+    ['a quoted display name with a comma', `"Smith, John" <${DEFAULT_FROM}>`],
+    [
+      'a quoted display name with escaped quotes and brackets',
+      `"Acme \\"<Billing>\\" \\\\ Co" <${DEFAULT_FROM}>`,
+    ],
+    ['an encoded-word display name', `=?UTF-8?B?SsO8cmdlbg==?= <${DEFAULT_FROM}>`],
+    [
+      'a quoted display name that holds the victim (handed back: display names are not inspected)',
+      `"victim@${PROD_DOMAIN}" <${DEFAULT_FROM}>`,
+    ],
+    ['a folded value', `Acme\r\n Billing\r\n <${DEFAULT_FROM}>`],
+    ['a tab-folded value', `Acme\r\n\tBilling <${DEFAULT_FROM}>`],
+    ['surrounding whitespace', `   ${DEFAULT_FROM}   `],
+    ['the header name upper-cased', undefined],
+  ])('accepts a single mailbox naming the envelope (%s)', async (_label, value) => {
+    const mime =
+      value === undefined
+        ? `FROM: ${DEFAULT_FROM}\r\nSubject: hi\r\n\r\nhello\r\n`
+        : mimeFor(value);
+    const { body, sender } = await sendMime(mime);
+    expect(body.ok, `${JSON.stringify(value)} should have been accepted`).toBe(true);
+    expect(sender.calls).toHaveLength(1);
+    // The pin inspects; it never rewrites. CF receives the tenant's bytes.
+    expect(sender.texts()[0]).toBe(mime);
+  });
+
+  it('accepts a message whose header block runs to the end of the bytes', async () => {
+    const { body } = await sendMime(`From: ${DEFAULT_FROM}\r\nSubject: hi`);
+    expect(body.ok).toBe(true);
+  });
+
+  it('accepts a +tag envelope whose From carries the same tag', async () => {
+    const from = `acme+billing@${PROD_DOMAIN}`;
+    const { body } = await sendMime(mimeFor(from), { from });
+    expect(body.ok).toBe(true);
+  });
+
+  it('refuses a +tag envelope whose From carries a different tag', async () => {
+    const { body, sender } = await sendMime(mimeFor(`acme+billing@${PROD_DOMAIN}`), {
+      from: `acme+support@${PROD_DOMAIN}`,
+    });
+    expect(body.ok).toBe(false);
+    expect(body.error?.code).toBe('INVALID_FROM');
+    expect(sender.calls).toHaveLength(0);
+  });
+
+  describe("every From shape the framework's buildMime renders is accepted", () => {
+    // 200 CJK characters: 600 UTF-8 bytes → 14 encoded-words → folded over
+    // many continuation lines, with `<addr>` alone on the last one.
+    const longName = '東京都千代田区'.repeat(29).slice(0, 200);
+    it.each([
+      ['a bare address', { email: DEFAULT_FROM }],
+      ['a plain display name', { email: DEFAULT_FROM, name: 'Acme Billing' }],
+      ['a quoted display name', { email: DEFAULT_FROM, name: 'Smith, John' }],
+      [
+        'a display name with quotes and backslashes',
+        { email: DEFAULT_FROM, name: 'Acme "Co" \\ Ltd <x>' },
+      ],
+      ['a short non-ASCII display name', { email: DEFAULT_FROM, name: 'Jürgen Müller' }],
+      ['a 200-character CJK display name (folded)', { email: DEFAULT_FROM, name: longName }],
+      ['an upper-case address', { email: `ACME+NoReply@${PROD_DOMAIN}` }],
+    ])('%s', async (_label, from) => {
+      const email = await normalizeEmail({
+        from,
+        to: 'dev@example.com',
+        subject: 'hi',
+        text: 'hello',
+      });
+      const { raw } = buildMime(email);
+      const parsed = readMimeFromAddrSpec(raw);
+      expect(parsed).toEqual({ ok: true, addrSpec: from.email });
+
+      // And through the route, as the framework would post it.
+      const kv = twoTenantsKv();
+      const sender = createSender();
+      const env = createMockEnv(kv, { SEND_EMAIL: sender.binding });
+      let binary = '';
+      for (const b of raw) {
+        binary += String.fromCharCode(b);
+      }
+      const res = await postSend(
+        env,
+        await sendBody({ from: from.email, mimeBase64: btoa(binary) }),
+      );
+      expect((await readSend(res)).ok).toBe(true);
+      expect(sender.calls).toHaveLength(1);
+    });
+
+    it('the CJK fixture really is folded across continuation lines', async () => {
+      const email = await normalizeEmail({
+        from: { email: DEFAULT_FROM, name: longName },
+        to: 'dev@example.com',
+        subject: 'hi',
+        text: 'hello',
+      });
+      const text = new TextDecoder().decode(buildMime(email).raw);
+      const fromHeader = text.slice(text.indexOf('From:'), text.indexOf('\r\nTo:'));
+      expect(fromHeader.split('\r\n ').length).toBeGreaterThan(5);
+      expect(fromHeader.endsWith(`<${DEFAULT_FROM}>`)).toBe(true);
+    });
+  });
+});
+
 describe('POST /email/send — allowlist fails closed', () => {
   it.each([
     ['the key is missing entirely', undefined],
@@ -1175,7 +1412,7 @@ describe('POST /email/send — per-recipient fan-out', () => {
     // A regression that hoisted `bytesToStream(raw)` out of the loop would
     // still record three sends — but recipients 2 and 3 would receive an
     // already-drained (empty) stream. Assert the delivered BYTES.
-    const mime = 'Subject: fan-out\r\n\r\nbody bytes\r\n';
+    const mime = mimeFor(DEFAULT_FROM, 'Subject: fan-out\r\n\r\nbody bytes\r\n');
     const recipients = ['a@example.com', 'b@example.com', 'c@example.com'];
     const kv = happyPathKv({ 'email-allowlist:proj_1': JSON.stringify(recipients) });
     const sender = createSender();

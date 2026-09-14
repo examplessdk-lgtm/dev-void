@@ -88,6 +88,9 @@ Outbound gate chain, in order — the first failure short-circuits, and nothing 
 body shape ▸ EMAIL_SENDER_DOMAIN set ▸ SEND_EMAIL bound ▸ recipients ▸ MIME size
   ▸ email-slug:<projectId>        (pins `from` local-part to the project's slug)
   ▸ strict `from` regex           (<slug>[+tag]@$EMAIL_SENDER_DOMAIN, no CR/LF or display names)
+  ▸ MIME `From:` addr-spec        (exactly one From header, one mailbox, equal to `from`; the
+                                   display name is not inspected — CF's own From-vs-envelope
+                                   check is undocumented, so the proxy does not rely on it)
   ▸ routing.suspended             (platform-wide; the marker dispatch answers with 429)
   ▸ email-suspended:<projectId>   (email-only kill-switch)
   ▸ email-allowlist:<projectId>   (per-project verified destinations)
