@@ -1,7 +1,17 @@
 name: Deploy Platform Production
 
 on:
+  push:
+    # `prod` is the production ref: it holds the commit that is live, and
+    # advancing it is the release. No path filter — a push here is deliberate.
+    branches: [prod]
   workflow_dispatch:
+
+concurrency:
+  # One running deploy plus at most one pending. Never interrupt a deploy
+  # between the api migration and the workers that depend on it.
+  group: platform-deploy-production
+  cancel-in-progress: false
 
 permissions: {}
 

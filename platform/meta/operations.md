@@ -27,10 +27,10 @@ Five Cloudflare Workers:
 
 Two fully isolated environments. Each has its own CF resources (KV, R2, dispatch namespace, analytics engine) and a separate Hyperdrive configuration pointing to its own PlanetScale PostgreSQL database.
 
-| Environment    | API URL                  | Dashboard                 | User Sites           | Trigger                                                                       |
-| -------------- | ------------------------ | ------------------------- | -------------------- | ----------------------------------------------------------------------------- |
-| **Production** | `api.void.cloud`         | `dash.void.cloud`         | `*.void.app`         | Manual: "Deploy Platform Production" workflow                                 |
-| **Staging**    | `api.staging.void.cloud` | `dash.staging.void.cloud` | `*.staging.void.app` | Automatic: "Deploy Platform Staging" on push to `main` (also manual dispatch) |
+| Environment    | API URL                  | Dashboard                 | User Sites           | Trigger                                                                          |
+| -------------- | ------------------------ | ------------------------- | -------------------- | -------------------------------------------------------------------------------- |
+| **Production** | `api.void.cloud`         | `dash.void.cloud`         | `*.void.app`         | Automatic: "Deploy Platform Production" on push to `prod` (also manual dispatch) |
+| **Staging**    | `api.staging.void.cloud` | `dash.staging.void.cloud` | `*.staging.void.app` | Automatic: "Deploy Platform Staging" on push to `main` (also manual dispatch)    |
 
 ## Cloudflare Resources
 
@@ -231,7 +231,7 @@ Two GitHub environments (`Prod` and `Staging`) share the same repo-level secrets
 | `CF_ACCESS_CLIENT_ID_STAGING`     | Staging     | CF Access service-token client id for reaching staging (see Staging Access Control) |
 | `CF_ACCESS_CLIENT_SECRET_STAGING` | Staging     | CF Access service-token client secret for reaching staging                          |
 
-`platform-deploy.yml` uses the `Prod` environment and runs only on manual dispatch; `platform-deploy-staging.yml` uses `Staging` and also runs on every push to `main` that matches the `platform-ci.yml` path filter. Both run only when the repository variable `VOID_PLATFORM_DEPLOY_ENABLED` is `true`.
+`platform-deploy.yml` uses the `Prod` environment and runs on every push to `prod` or on manual dispatch; `platform-deploy-staging.yml` uses `Staging` and runs on every push to `main` that matches the `platform-ci.yml` path filter, or on manual dispatch. Both run only when the repository variable `VOID_PLATFORM_DEPLOY_ENABLED` is `true`.
 
 **GitHub Actions `CF_API_TOKEN` permissions** — narrower-scope token used only for wrangler deploys. Separate from the API worker runtime token.
 
@@ -514,11 +514,13 @@ Four platform workflows live in the repository-level `.github/workflows/` direct
 6. `vp test run --project platform-unit` and `--project platform-api-integration`
 7. Builds the API build container image (PRs only)
 
-**`platform-deploy.yml`** — manual dispatch (production, environment: `Prod`):
+**`platform-deploy.yml`** — push to `prod`, or manual dispatch (production, environment: `Prod`):
 
 1. Runs `platform-ci.yml` first
 2. `vp run build` (SDK packages the dashboard bundles)
 3. `vp run --filter @voidcloud/platform deploy` (api with drizzle-kit migrations, proxy, tail, dispatch, dashboard)
+
+`prod` is the production ref: it points at the commit that is live, so advancing it is the release (`git push origin main:prod` deploys whatever `main` is at). There is no path filter — a push to `prod` is deliberate. A `concurrency` group (`platform-deploy-production`, `cancel-in-progress: false`) keeps one deploy running and at most one pending, so a deploy is never interrupted between the API migration and the workers.
 
 **`platform-deploy-staging.yml`** — push to `main` that matches the `platform-ci.yml` path filter, or manual dispatch (staging, environment: `Staging`):
 
