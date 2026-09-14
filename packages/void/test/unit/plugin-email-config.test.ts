@@ -32,7 +32,10 @@ vi.mock('@cloudflare/vite-plugin', () => ({
 
 const tempDirs: Array<string> = [];
 
-function createProjectRoot(voidConfig: Record<string, unknown> = {}): string {
+function createProjectRoot(
+  voidConfig: Record<string, unknown> = {},
+  { usesVoidEmail = true }: { usesVoidEmail?: boolean } = {},
+): string {
   const root = mkdtempSync(join(tmpdir(), 'void-email-config-'));
   tempDirs.push(root);
   writeFileSync(join(root, 'package.json'), JSON.stringify({ type: 'module' }));
@@ -40,12 +43,13 @@ function createProjectRoot(voidConfig: Record<string, unknown> = {}): string {
     join(root, 'void.json'),
     JSON.stringify({ worker: { compatibility_date: '2026-02-24' }, ...voidConfig }),
   );
-  // An app that actually sends mail, so `needsEmail` is inferred the way it
-  // would be for a real project rather than forced through config.
   mkdirSync(join(root, 'routes/api'), { recursive: true });
-  writeFileSync(
-    join(root, 'routes/api/notify.ts'),
-    `
+  if (usesVoidEmail) {
+    // An app that actually sends mail, so `needsEmail` is inferred the way it
+    // would be for a real project rather than forced through config.
+    writeFileSync(
+      join(root, 'routes/api/notify.ts'),
+      `
 import { sendEmail } from "void/email";
 
 export async function POST() {
@@ -53,7 +57,22 @@ export async function POST() {
   return Response.json({});
 }
 `,
-  );
+    );
+  } else {
+    // An app that never imports `void/email` and drives Cloudflare's email
+    // API through its own binding, so `needsEmail` is inferred false.
+    writeFileSync(
+      join(root, 'routes/api/notify.ts'),
+      `
+import { env } from "cloudflare:workers";
+
+export async function POST() {
+  await env.MAILER.send({});
+  return Response.json({});
+}
+`,
+    );
+  }
   return root;
 }
 
@@ -152,6 +171,53 @@ describe('mergeBindings email config (void dev)', () => {
     const result = await resolveCloudflareConfig(root, resolved, SERVE);
 
     expect('send_email' in resolved).toBe(false);
+    expect('send_email' in result).toBe(false);
+  });
+
+  it('preserves a user send_email binding when the app does not import void/email', async () => {
+    // Nothing in this app goes through `sendEmail`, so the strip has nothing
+    // to guard: the user's own binding must reach miniflare exactly as
+    // wrangler.jsonc declares it, or `env.MAILER.send()` is a dev-only crash.
+    const root = createProjectRoot({}, { usesVoidEmail: false });
+    const resolved = {
+      assets: { binding: 'ASSETS' },
+      send_email: [{ name: 'MAILER', destination_address: 'ops@example.com' }],
+    };
+
+    const result = await resolveCloudflareConfig(root, resolved, SERVE);
+
+    expect(resolved.send_email).toEqual([
+      { name: 'MAILER', destination_address: 'ops@example.com' },
+    ]);
+    // Not re-added by the patch either: defu concatenates arrays, so a patch
+    // entry would double the binding rather than replace it.
+    expect('send_email' in result).toBe(false);
+  });
+
+  it('leaves a SEND_EMAIL entry alone when the app does not import void/email', async () => {
+    // The same `needsEmail` that arms the dev inbox gates the strip. Without
+    // `void/email` in the app, `sendEmail` never runs, so a `SEND_EMAIL` entry
+    // is either a stale leftover nothing reads or the user's own choice of
+    // name — both belong to the root config, as `void deploy` also treats them.
+    const root = createProjectRoot({}, { usesVoidEmail: false });
+    const resolved = { send_email: [{ name: 'SEND_EMAIL' }] };
+
+    const result = await resolveCloudflareConfig(root, resolved, SERVE);
+
+    expect(resolved.send_email).toEqual([{ name: 'SEND_EMAIL' }]);
+    expect('send_email' in result).toBe(false);
+  });
+
+  it('strips only the SEND_EMAIL entry when the app also carries its own binding', async () => {
+    const root = createProjectRoot({ email: { from: 'Acme <noreply@mail.acme.com>' } });
+    const resolved = {
+      ...provisionedRootConfig(),
+      send_email: [{ name: 'MAILER' }, { name: 'SEND_EMAIL' }, { name: 'ALERTS' }],
+    };
+
+    const result = await resolveCloudflareConfig(root, resolved, SERVE);
+
+    expect(resolved.send_email).toEqual([{ name: 'MAILER' }, { name: 'ALERTS' }]);
     expect('send_email' in result).toBe(false);
   });
 });

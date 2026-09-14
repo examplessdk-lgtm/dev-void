@@ -13,6 +13,7 @@ import {
 } from './asset-routing.ts';
 import { findVoidAuthConfig } from './auth/config.ts';
 import { getToken, isStagingMode } from './cli/auth.ts';
+import { SEND_EMAIL_BINDING } from './cli/email-cloudflare.ts';
 import { readProjectConfig } from './cli/project.ts';
 import {
   ensureWranglerCompat,
@@ -1241,16 +1242,38 @@ export function voidPlugin(options?: {
       result.vars = vars;
     }
 
-    // Serve never carries a `send_email` binding, so the dev inbox stays the
-    // only sink. `void deploy --platform cloudflare` writes
+    // Serve never carries Void's own `send_email` binding, so the dev inbox
+    // stays the only sink. `void deploy --platform cloudflare` writes
     // `send_email: [{ name: "SEND_EMAIL" }]` into the root wrangler.jsonc, and
     // `sendEmail` falls through to `env.SEND_EMAIL` whenever the inbox is not
-    // armed — under miniflare that binding writes .eml files to disk, or with
-    // `remote: true` sends real mail. Mutate `resolved`, as the assets policy
-    // above does: the return value is defu-merged over it, so this is the only
-    // way to remove a key. Build passes the root entry through untouched.
-    if (viteCommand === 'serve') {
-      delete (resolved as Record<string, unknown>).send_email;
+    // armed (`sendInDev: true`, or no assets binding to reach the dev server
+    // through) — under miniflare that binding writes .eml files to disk, or
+    // with `remote: true` sends real mail. Only the entry under the reserved
+    // `SEND_EMAIL` name is removed: a user's own `send_email` binding under
+    // another name is theirs — nothing in Void reads it, and the root config
+    // takes precedence — so it reaches miniflare exactly as declared. Gated on
+    // `needsEmail`, the same signal that arms the inbox: without `void/email`
+    // in the app there is no `sendEmail` to guard, and a `SEND_EMAIL` entry is
+    // then either a stale leftover nothing reads or the user's own choice of
+    // name; `void deploy` warns about the former and deploys as-is, and dev
+    // must not be stricter about the root config than deploy is. Mutate
+    // `resolved`, as the assets policy above does: the return value is
+    // defu-merged over it (arrays concatenate, `undefined` is skipped), so
+    // this is the only way to remove an entry. An emptied array drops the key
+    // — the Cloudflare plugin treats `[]` and absent alike. Build passes the
+    // root entries through untouched.
+    if (viteCommand === 'serve' && bindings.needsEmail) {
+      const sendEmail = (resolved as { send_email?: unknown }).send_email;
+      if (Array.isArray(sendEmail)) {
+        const kept = sendEmail.filter(
+          (entry) => (entry as { name?: unknown } | null)?.name !== SEND_EMAIL_BINDING,
+        );
+        if (kept.length > 0) {
+          (resolved as Record<string, unknown>).send_email = kept;
+        } else {
+          delete (resolved as Record<string, unknown>).send_email;
+        }
+      }
     }
 
     // Default sender for `sendEmail()` from void.json `email.from`. Serve-only,
