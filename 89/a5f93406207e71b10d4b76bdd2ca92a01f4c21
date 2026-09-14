@@ -1,0 +1,29 @@
+TESTING.md
+  s_5658fef4073ebd::t_fb80c7fc258213 40-53
+packages/void/test/unit/windows-resource-diagnostics.test.ts
+  s_5658fef4073ebd::t_c81761209793d7 1-63
+test/windows-integration-setup.ts
+  s_5658fef4073ebd::t_aff34353f8a7a3 1-9
+test/windows-resource-diagnostics.ps1
+  s_5658fef4073ebd::t_c83fde02f45dab 1-44
+test/windows-resource-diagnostics.ts
+  s_5658fef4073ebd::t_e7967c04f44ec3 1-42
+vite.config.ts
+  s_5658fef4073ebd::t_5522410e1dffa1 381-386
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "89a5f93406207e71b10d4b76bdd2ca92a01f4c21",
+  "prompts": {},
+  "sessions": {
+    "s_5658fef4073ebd": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09ef3-cccd-76c0-8ca1-d1305c47aaa8",
+        "model": "unknown"
+      },
+      "human_author": "unknown"
+    }
+  }
+}
