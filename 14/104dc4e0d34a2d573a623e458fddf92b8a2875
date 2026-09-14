@@ -1,0 +1,29 @@
+docs/guide/self-hosted-platform.md
+  s_1dd93636335f05::t_072002704f56d4 148,150
+docs/reference/cli.md
+  s_1dd93636335f05::t_0ccb34d6735fd3 314
+packages/void/AGENT_PROMPT.md
+  s_1dd93636335f05::t_e71f932a653895 25
+packages/void/getting-started-prompt.txt
+  s_1dd93636335f05::t_88b7b94316ca0a 18
+packages/void/skills/void/SKILL.md
+  s_1dd93636335f05::t_6a34e80b70f2c6 20
+platform/README.md
+  s_1dd93636335f05::t_4d10f85fa991cf 5
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "14104dc4e0d34a2d573a623e458fddf92b8a2875",
+  "prompts": {},
+  "sessions": {
+    "s_1dd93636335f05": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09f05-af64-7241-aba5-280a73850b4a",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
