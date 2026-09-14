@@ -500,6 +500,25 @@ const app = new Hono<ApiEnv>()
 
     // Best-effort CF cleanup. Only delete from CF if no other project
     // references the same destination tag — destinations are account-wide.
+    //
+    // The count and the upstream delete are not one step, and nothing
+    // serializes them against a sibling project's POST. Two concurrent
+    // revokes of a shared tag can both read `refs === 2`, both decline the
+    // upstream delete, and both drop their row (an orphan). The mirror image:
+    // a POST for the same address on another project whose already-exists
+    // recovery listed this tag BEFORE the delete below lands, and whose row
+    // INSERT lands AFTER this count, commits a row pointing at a tag CF no
+    // longer has. The listing never re-checks a `verified` row against CF and
+    // a repeat POST returns the existing row without calling CF, so that row
+    // stays dangling until its owner runs `void email disallow` then `allow`:
+    // the DELETE's upstream call 404s (caught below), the row goes, and the
+    // re-add is a fresh create that mails a new link. Re-validating the tag
+    // from the POST side after its insert only narrows this to "insert and
+    // re-check both land between this count and this delete"; closing it
+    // needs both sides to compensate, and the same count-then-delete shape is
+    // in the admin revoke and in teardown, where the rows die later in the
+    // cascade and the window is far wider — so it belongs in one change
+    // across all three (design doc 0067), not here.
     if (dest.cf_destination_id) {
       const refs = await countProjectsUsingDestination(context.get('db'), dest.cf_destination_id);
       if (refs <= 1) {
@@ -512,12 +531,8 @@ const app = new Hono<ApiEnv>()
         } catch (err) {
           // Non-fatal — proceed with the row delete. There is NO sweep for the
           // orphan this leaves, so this log line is the only trace an operator
-          // gets. Two concurrent revokes of a shared tag can also both read
-          // `refs === 2`, both decline the upstream delete, and both drop their
-          // row. Counting after the row delete instead of before would fix
-          // that, but the same shape is in the admin revoke and in teardown,
-          // where the rows die later in the cascade and the window is far
-          // wider — so it belongs in one change across all three, not here.
+          // gets. A 404 here is also the recovery path for a dangling row (see
+          // above): the tag is already gone, and the row must go with it.
           console.error('[email] CF deleteDestination failed:', err);
         }
       }
