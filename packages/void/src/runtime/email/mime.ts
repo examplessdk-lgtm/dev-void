@@ -905,6 +905,102 @@ const RESERVED_HEADERS = new Set(
   ].map((h) => h.toLowerCase()),
 );
 
+/**
+ * Lower bound on the octets one header VALUE occupies once `encodeWord` (or
+ * `formatAddress`, for a display name) and `foldHeader` have rendered it, in
+ * one pass over the string and with NO allocation.
+ *
+ * `encodeWord` leaves a value alone when every character is printable ASCII
+ * and otherwise B-encodes ALL of it, so the two paths need different terms:
+ *
+ * - Plain: every character is at least one octet, EXCEPT whitespace.
+ *   `foldHeader` re-joins a long value from its non-WSP tokens, so a run of
+ *   spaces or tabs collapses to one, and a bound that charged them could
+ *   reject a message that fits. Only the non-WSP characters count.
+ * - Encoded: each RFC 2047 word carries at most `ENCODED_WORD_PAYLOAD_BYTES`
+ *   (45) UTF-8 bytes as base64 — `ceil(n / 3) * 4 >= 4n / 3` octets — inside
+ *   12 octets of `=?UTF-8?B?` and `?=`, so there are at least `floor(n / 45)`
+ *   words' worth of framing. Whitespace inside the value is base64 like any
+ *   other byte; only the single separators between words fold.
+ *
+ * Folding (`foldHeader`) can only ADD octets beyond that — a `CRLF SP` per
+ * line — and quoting a display name (`formatAddress`) adds the quotes and
+ * escapes, so neither path can render fewer octets than this returns.
+ * Measured, the encoded bound is 96% of the rendered size for CJK, where the
+ * real cost is 5 octets per character; a UTF-16 `length` would have counted
+ * 1 and let the isolate die on a header five times over the limit.
+ */
+function minHeaderValueOctets(value: string): number {
+  let utf8 = 0;
+  let visible = 0;
+  let encoded = false;
+  for (let i = 0; i < value.length; i++) {
+    const c = value.charCodeAt(i);
+    if (c < 0x80) {
+      utf8 += 1;
+      if (c === 0x20 || c === 0x09) {
+        continue;
+      }
+      if (c < 0x20 || c === 0x7f) {
+        encoded = true;
+      }
+      visible += 1;
+    } else {
+      encoded = true;
+      if (c < 0x800) {
+        utf8 += 2;
+      } else if (c >= 0xd800 && c <= 0xdbff && i + 1 < value.length) {
+        const d = value.charCodeAt(i + 1);
+        if (d >= 0xdc00 && d <= 0xdfff) {
+          utf8 += 4; // the pair is one code point
+          i++;
+          continue;
+        }
+        utf8 += 3; // lone surrogate encodes as U+FFFD
+      } else {
+        utf8 += 3;
+      }
+    }
+  }
+  if (!encoded) {
+    return visible;
+  }
+  return Math.floor((utf8 * 4) / 3) + 12 * Math.floor(utf8 / ENCODED_WORD_PAYLOAD_BYTES);
+}
+
+/** Lower bound on one rendered address: its display name, plus the address itself verbatim. */
+function minAddressOctets(addr: { email: string; name?: string }): number {
+  return addr.email.length + (addr.name ? minHeaderValueOctets(addr.name) : 0);
+}
+
+/**
+ * Lower bound on the octets of every top header `buildMime` renders from
+ * caller-supplied values: `Subject`, the custom headers, and the addresses in
+ * `From`, `To`, `Cc` and `Reply-To`. `Bcc` is never rendered and a reserved
+ * custom header is dropped, so neither is counted — charging either could
+ * reject a message that fits. The fixed `Name: ` and `CRLF` per header are
+ * omitted for the same reason a lower bound may omit any term.
+ */
+function minHeaderOctets(email: NormalizedEmail): number {
+  let octets = minHeaderValueOctets(email.subject);
+  for (const [name, value] of Object.entries(email.headers)) {
+    if (!RESERVED_HEADERS.has(name.toLowerCase())) {
+      octets += minHeaderValueOctets(value);
+    }
+  }
+  octets += minAddressOctets(email.from);
+  for (const addr of email.to) {
+    octets += minAddressOctets(addr);
+  }
+  for (const addr of email.cc) {
+    octets += minAddressOctets(addr);
+  }
+  if (email.replyTo) {
+    octets += minAddressOctets(email.replyTo);
+  }
+  return octets;
+}
+
 function generateMessageId(fromEmail: string): string {
   const domain = fromEmail.split('@')[1] ?? 'localhost';
   const bytes = new Uint8Array(12);
@@ -918,6 +1014,30 @@ function generateMessageId(fromEmail: string): string {
  * generated Message-ID header so callers can surface it in the result.
  */
 export function buildMime(email: NormalizedEmail): { raw: Uint8Array; messageId: string } {
+  // Project the message size BEFORE rendering anything — headers included.
+  // The final check below sees the message only after every header has been
+  // encoded and folded and every body quoted-printable encoded, all of it
+  // rendered into `rawText` and encoded again. Measured, that peak is about
+  // 11x the UTF-8 bytes of a non-ASCII body, and `encodeWord` alone holds
+  // over 3x the UTF-8 bytes of a non-ASCII header (its array of encoded
+  // words plus their join) before the fold, the join, `rawText` and `raw`
+  // each add another copy of the rendered header. A body several times over the
+  // limit, or a 20 MB subject or display name, terminated a 128 MB isolate
+  // instead of returning the `MIME_ERROR` the guide promises. Each term is
+  // a lower bound on the rendered size, so this never rejects a message
+  // that would have fit; the final check stays the authority.
+  const projected =
+    minHeaderOctets(email) +
+    (email.text ? minBodyOctets(email.text) : 0) +
+    (email.html ? minBodyOctets(email.html) : 0) +
+    email.attachments.reduce((sum, a) => sum + base64Octets(a.bytes.byteLength), 0);
+  if (projected > MAX_MESSAGE_BYTES) {
+    throw new MimeError(
+      'MIME_ERROR',
+      `email: message is at least ${projected} bytes once encoded, which exceeds Cloudflare limit of ${MAX_MESSAGE_BYTES} bytes.`,
+    );
+  }
+
   const messageId = generateMessageId(email.from.email);
   const date = new Date().toUTCString().replace('GMT', '+0000');
 
@@ -954,25 +1074,6 @@ export function buildMime(email: NormalizedEmail): { raw: Uint8Array; messageId:
       continue;
     }
     topHeaders.push([name, encodeWord(value)]);
-  }
-
-  // Project the body size BEFORE encoding anything. The final check below
-  // sees the message only after every body has been quoted-printable
-  // encoded, rendered into its part, concatenated into `rawText` and
-  // encoded again — measured, that peak is about 11x the UTF-8 bytes of a
-  // non-ASCII body, so a body several times over the limit terminates a
-  // 128 MB isolate instead of returning the `MIME_ERROR` the guide promises.
-  // Each term is a lower bound on the rendered size, so this never rejects
-  // a message that would have fit; the final check stays the authority.
-  const projected =
-    (email.text ? minBodyOctets(email.text) : 0) +
-    (email.html ? minBodyOctets(email.html) : 0) +
-    email.attachments.reduce((sum, a) => sum + base64Octets(a.bytes.byteLength), 0);
-  if (projected > MAX_MESSAGE_BYTES) {
-    throw new MimeError(
-      'MIME_ERROR',
-      `email: message body is at least ${projected} bytes once encoded, which exceeds Cloudflare limit of ${MAX_MESSAGE_BYTES} bytes.`,
-    );
   }
 
   const textPart = email.text ? buildBodyPart('text/plain', email.text) : undefined;

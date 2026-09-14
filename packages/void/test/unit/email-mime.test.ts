@@ -1021,6 +1021,106 @@ describe('buildMime body size projection', () => {
   });
 });
 
+describe('buildMime header size projection', () => {
+  const PROJECTION = new RegExp(
+    `message is at least \\d+ bytes once encoded, which exceeds Cloudflare limit of ${MAX_MESSAGE_BYTES} bytes`,
+  );
+
+  async function expectProjected(opts: Parameters<typeof normalizeEmail>[0]) {
+    const email = await normalizeEmail(opts);
+    let error: unknown;
+    try {
+      buildMime(email);
+    } catch (e) {
+      error = e;
+    }
+    expect(error).toBeInstanceOf(MimeError);
+    expect((error as MimeError).code).toBe('MIME_ERROR');
+    // The projection's message, not the post-render one: nothing was encoded.
+    expect((error as MimeError).message).toMatch(PROJECTION);
+  }
+
+  // A non-ASCII header value is B-encoded into 45-byte words of 72 octets
+  // each and folded one per line: 5 octets for every CJK character, so 3M
+  // characters (9 MB of UTF-8) is a 15 MB header. Before the header bound,
+  // `buildMime` encoded, folded, joined and re-encoded all of that before
+  // it measured anything, and a 7M-character subject terminated a 128 MB
+  // isolate instead of returning `MIME_ERROR`.
+  it('rejects a subject that cannot fit before encoding it', async () => {
+    await expectProjected({
+      from: 'a@x.dev',
+      to: 'b@y.dev',
+      subject: '漢'.repeat(3_000_000),
+      text: 'hi',
+    });
+  });
+
+  it('counts every display name across the recipient list', async () => {
+    await expectProjected({
+      from: 'a@x.dev',
+      to: Array.from({ length: MAX_RECIPIENTS }, (_, i) => ({
+        email: `u${i}@y.dev`,
+        name: '漢'.repeat(30_000),
+      })),
+      subject: 's',
+      text: 'hi',
+    });
+  });
+
+  it('counts a custom header, and not a reserved one that is never rendered', async () => {
+    const big = 'x'.repeat(11 * 1024 * 1024);
+    await expectProjected({
+      from: 'a@x.dev',
+      to: 'b@y.dev',
+      subject: 's',
+      text: 'hi',
+      headers: { 'X-Note': big },
+    });
+    // `Subject` in the custom map is dropped by `buildMime`, so charging it
+    // would reject a message that fits.
+    const { text } = await build({
+      from: 'a@x.dev',
+      to: 'b@y.dev',
+      subject: 's',
+      text: 'hi',
+      headers: { Subject: big },
+    });
+    expect(text).toContain('Subject: s\r\n');
+  });
+
+  it('never charges the whitespace that folding collapses', async () => {
+    // `foldHeader` re-joins a long value from its non-WSP tokens, so 11 MiB
+    // of spaces renders as one. A bound that counted `length` would reject
+    // this message; it fits.
+    const { text } = await build({
+      from: 'a@x.dev',
+      to: 'b@y.dev',
+      subject: `a${' '.repeat(11 * 1024 * 1024)}b`,
+      text: 'hi',
+    });
+    expect(text).toContain('Subject: a b\r\n');
+  });
+
+  it('never rejects a header-heavy message that fits, and leaves the final check as the authority', async () => {
+    // 2.15M CJK characters project to ~10.32 MiB (4.8 octets each: the bound
+    // omits the fold's CRLF per word) but render to ~10.75 MB at 5 octets
+    // each. The projection must let it through; the post-render check must
+    // reject it.
+    const nearly = '漢'.repeat(2_150_000);
+    const email = await normalizeEmail({
+      from: 'a@x.dev',
+      to: 'b@y.dev',
+      subject: nearly,
+      text: 'hi',
+    });
+    expect(() => buildMime(email)).toThrow(/message size \d+ bytes exceeds Cloudflare limit/);
+    // And 2M characters, whose message is ~10.0 MB, builds.
+    const fits = '漢'.repeat(2_000_000);
+    const { raw } = await build({ from: 'a@x.dev', to: 'b@y.dev', subject: fits, text: 'hi' });
+    expect(raw.byteLength).toBeLessThanOrEqual(MAX_MESSAGE_BYTES);
+  });
+});
+
 describe('quotedPrintable encoder', () => {
   // Fixtures captured from the string-concatenating encoder these replace,
   // so the byte-buffer encoder is pinned to the exact previous output.
