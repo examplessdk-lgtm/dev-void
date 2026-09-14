@@ -531,6 +531,16 @@ function triggerWranglerConfig(
   };
   // Only a snapshot that carried `addresses` may reach Wrangler's Email Routing plan: an
   // absent key skips the plan, which is what a version deployed without email must do.
+  // That holds in both directions of a rollback — the snapshot being LEFT lends nothing
+  // here — so rolling back from an email-enabled version to one recorded without the key
+  // (a pre-`addresses` snapshot, or a deploy that had no handlers) leaves the rules where
+  // they are, routed to a Worker that no longer exports `email()`. Do not encode that
+  // transition as `[]`: wrangler plans the deletion of every rule this Worker owns on `[]`,
+  // a destructive plan it confirms (default No) in a TTY and refuses in CI, and a
+  // non-zero `triggers deploy` here is `triggers-failed`, which the rollback compensates
+  // by restoring the version it just left. Whether a rollback should touch Email Routing
+  // at all is a product call (design doc 0078, decision 13); this code replays the
+  // snapshot verbatim.
   if (triggerConfig.addresses !== undefined) {
     config.addresses = [...triggerConfig.addresses];
   }

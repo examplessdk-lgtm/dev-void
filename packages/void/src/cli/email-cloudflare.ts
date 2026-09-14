@@ -1023,6 +1023,14 @@ export async function preflightEmail(inputs: EmailCloudflareInputs): Promise<Ema
     const existing = Array.isArray(inputs.existingAddresses)
       ? inputs.existingAddresses.map((a) => (typeof a === 'string' ? a.toLowerCase() : String(a)))
       : ['(not an array)'];
+    // The candidate set is THIS scan's derivation. Void records no provenance for the
+    // entries it wrote on an earlier deploy (the array carries no marker), so an entry
+    // left behind by a deleted handler and a hand-written one are the same thing here:
+    // both are `unknown`, and the whole step is skipped with the array untouched
+    // (decision 13). With no handlers left at all the candidate set is empty and every
+    // committed entry is `unknown` — the rule stays routed to this worker. Whether such
+    // a leftover should instead be Void-managed (pruned, or `[]` when nothing is left) is
+    // decision 13's other branch; see the deploy step's note above `patch.addresses`.
     const candidates = new Set(pre.derived.addresses);
     const unknown = existing.filter((a) => !candidates.has(a));
     if (unknown.length > 0) {

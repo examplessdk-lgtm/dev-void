@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { log } from '@clack/prompts';
+import { parseCloudflareVersionMessage } from '@void/deploy-cloudflare';
 import { dirname, join } from 'pathslash';
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 import {
@@ -9345,6 +9346,79 @@ describe('runCloudflareDeploy — Mode B email step (3b-ii)', () => {
     expect(printed).toContain('no longer declares email handlers');
     expect(printed).toContain('support@mail.acme.com — still routed to worker "myapp"');
     expect(printed).toContain('send_email SEND_EMAIL binding');
+  });
+
+  it('last inbound handler removed, outbound `void/email` kept: the committed entry is a decision-13 blocker, the array stays, and the trigger snapshot still carries it (the ready-path `null` write is never reached)', async () => {
+    // Deploy 1 wrote COMMITTED_EMAIL from `email/support+[ticket].ts`. The handler is gone, but
+    // `routes/index.ts` still imports `void/email`, so `needsEmail` holds and the email step runs
+    // with an EMPTY derived set. Preflight step 8 reads the committed support@ entry as one Void
+    // did not derive (it is not in the empty candidate set): ownership `foreign`, an all-scope
+    // blocker, the step skips with the array untouched. `patch.addresses = null` (the ready path)
+    // is never reached, and the version annotation replays the entry — wrangler keeps the rule
+    // routed to a worker with no `email()` export.
+    const root = makeProject({
+      'package.json': JSON.stringify({ name: 'myapp' }),
+      'void.json': JSON.stringify({ email: { from: 'noreply@mail.acme.com' } }),
+      'routes/index.ts': [
+        `import { sendEmail } from 'void/email';`,
+        `export const GET = async (c) => {`,
+        `  await sendEmail({ to: 'a@b.c', subject: 's', text: 't' });`,
+        `  return c.env.DB.prepare('SELECT 1').first();`,
+        `};`,
+      ].join('\n'),
+      'wrangler.jsonc': JSON.stringify(COMMITTED_EMAIL, null, 2),
+      ...INIT_MIGRATION,
+    });
+    const snapshots: Array<unknown> = [];
+    const { deps, spawns, confirms, exitCalls } = emailHarness({
+      ...readyRows,
+      runner: { ...readyRows.runner, 'email routing rules list acme.com': myRule },
+      deps: {
+        // The real build passes the root's `addresses` through verbatim (whole-object pinned);
+        // mirror that so the annotation `activateVersion` receives is the one a deploy carries.
+        runBuild: () => {
+          const rootConfig = readRootConfig(root);
+          mkdirSync(join(root, 'dist/ssr'), { recursive: true });
+          writeFileSync(
+            join(root, 'dist/ssr/wrangler.json'),
+            JSON.stringify({
+              name: 'myapp',
+              account_id: 'acc123',
+              ...(rootConfig.addresses === undefined ? {} : { addresses: rootConfig.addresses }),
+            }),
+          );
+        },
+      },
+    });
+    const inner = deps.activateVersion!;
+    deps.activateVersion = async (options) => {
+      snapshots.push(parseCloudflareVersionMessage(options.message));
+      return inner(options);
+    };
+    const output = captureOutput();
+    try {
+      await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+    } finally {
+      output.restore();
+    }
+    expect(exitCalls).toEqual([]);
+    expect(confirms).toEqual([]);
+    // The email step RAN (preflight probes), then blocked — no write, array untouched.
+    expect(spawns.some((s) => s.args[0] === 'email' && s.args[1] === 'routing')).toBe(true);
+    expect(readRootConfig(root).addresses).toEqual(['support@mail.acme.com']);
+    const printed = output.lines.join('\n');
+    expect(printed).toContain(
+      'addresses holds entries Void did not derive (support@mail.acme.com)',
+    );
+    expect(printed).not.toContain('addresses removed');
+    // The snapshot replays the stale entry: `addresses` reaches wrangler's plan as-is.
+    expect(spawns.some((s) => s.args[0] === 'deploy')).toBe(true);
+    expect(snapshots).toEqual([
+      expect.objectContaining({
+        schema: 2,
+        triggerConfig: expect.objectContaining({ addresses: ['support@mail.acme.com'] }),
+      }),
+    ]);
   });
 
   it('an app with no email use never touches the email step (no whoami before 3e, no auth token)', async () => {

@@ -3901,6 +3901,20 @@ async function runCloudflareEmailStep(
   // not idle: an `addresses` entry no longer in the pruned set reaches wrangler's plan as a
   // `conflict` (a takeover prompt in a TTY, a UserError after the upload in CI — decision
   // 12), and a stale `__VOID_EMAIL_FROM` ships the OLD sender while the map prints the new.
+  //
+  // The `null` (key removed) branch below is reachable in exactly one shape: every derived
+  // address is routed elsewhere (a forward, another worker — a worker rename makes all of
+  // them so), so this worker OWNS none of those rules and `[]` would plan nothing either;
+  // the key goes because a plan on a stale entry is a `conflict`. A handler deleted while
+  // its entry stays never gets here: the preflight (step 8) has no provenance for entries
+  // Void wrote on an earlier deploy, so it reads that leftover as an entry Void did not
+  // derive — the decision-13 blocker, array untouched, rule still routed to this worker
+  // (guide: "Deleting a handler leaves its address in `addresses`"). Making the leftover
+  // Void-managed instead (a marker like `void:managed-queues`, then `[]` or a prune) is
+  // decision 13's other branch, and under `triggers deploy` a `[]` plan that deletes owned
+  // rules is destructive: wrangler asks (default No) in a TTY and throws in CI, which the
+  // activation reports as `triggers-failed` and compensates by restoring the previous
+  // version. A product call, not a deploy default.
   if (pre.ready) {
     const patch: ProvisionedWranglerPatch = {};
     const rows: Array<string> = [];
