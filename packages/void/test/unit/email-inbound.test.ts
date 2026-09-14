@@ -1285,8 +1285,9 @@ describe('reply threading survives a hostile inbound header', () => {
   });
 
   it('threads a chain at the raw cap’s scale, and every line still fits', async () => {
-    // 9 MiB of two-character ids is 3.1M tokens. The reply must carry it: a
-    // per-token allocation here was 34 bytes each, which is the isolate.
+    // 9 MiB of two-character ids is 3.1M tokens. The reply carries its newest
+    // 8 KiB, and the answer must not cost per token: a per-token allocation
+    // here was 34 bytes each, which is the isolate.
     const chain = 'ab '.repeat((9 * 1024 * 1024) / 3).trimEnd();
     const text = await replyText(chain);
     expect(text).toContain(`In-Reply-To: ${MESSAGE_ID}`);
@@ -1311,6 +1312,162 @@ describe('reply threading survives a hostile inbound header', () => {
     // file. The materializing form took 570 ms locally and would not fit a
     // 128 MB isolate at all — the memory is the real guard, the time a proxy.
     expect(elapsed).toBeLessThan(1000);
+  });
+
+  // The line guard bounds one id, not the chain: 10 MiB of short ids passes
+  // it — every id folds — and the folded reply is then over
+  // `MAX_MESSAGE_BYTES`, so `buildMime` threw instead of sending the reply the
+  // guide promises, and the handler's earlier forwards went with it. A chain
+  // is bounded at 8192 characters, checked on `length` alone, and past that
+  // the reply keeps the NEWEST ids whole, the parent's id still last.
+  const REFERENCES_BUDGET = 8192;
+
+  /** The `References` value of a rendered reply, unfolded; `undefined` when absent. */
+  function referencesOf(text: string): string | undefined {
+    const headers = text.split('\r\n\r\n')[0].replace(/\r\n(?=[ \t])/g, '');
+    return headers
+      .split('\r\n')
+      .find((line) => line.startsWith('References: '))
+      ?.slice('References: '.length);
+  }
+
+  it('threads the newest ids of a chain over the budget, inside a 128 MB heap', () => {
+    // The reviewer's shape: a `References` just under the inbound cap, of
+    // short ids. Measured before the bound: 156 ms, 55 MB of heap, then
+    // `MimeError: message size 10777129 bytes exceeds Cloudflare limit`.
+    const inboundModule = pathToFileURL(
+      join(import.meta.dirname, '../../src/runtime/email/inbound.ts'),
+    ).href;
+    const child = `
+      const { buildReplyMessage, createMessageProxy } = await import(process.argv[1]);
+      const references = '<a@b> '.repeat(Math.floor((${MAX_MESSAGE_BYTES} - 200) / 6)).trimEnd();
+      const raw = new TextEncoder().encode('body');
+      const { message } = createMessageProxy(
+        {
+          from: 'sender@remote.dev',
+          to: 'acme+support@mail.void.cloud',
+          headers: { references, 'message-id': ${JSON.stringify(MESSAGE_ID)}, subject: 'hi' },
+          raw,
+          rawSize: raw.length,
+        },
+        { slug: 'acme' },
+      );
+      const heap0 = process.memoryUsage().heapUsed;
+      const t0 = performance.now();
+      const reply = await buildReplyMessage(message, { text: 'thanks', from: 'acme+noreply@x.dev' });
+      const ms = performance.now() - t0;
+      const heapDeltaMB = (process.memoryUsage().heapUsed - heap0) / (1024 * 1024);
+      console.log(JSON.stringify({ text: new TextDecoder().decode(reply.raw), ms, heapDeltaMB }));
+    `;
+    const stdout = execFileSync(
+      process.execPath,
+      ['--max-old-space-size=128', '--input-type=module', '-e', child, inboundModule],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000 },
+    );
+    const result = JSON.parse(stdout.trim().split('\n').at(-1) ?? '{}') as {
+      text: string;
+      ms: number;
+      heapDeltaMB: number;
+    };
+    expect(result.text).toContain(`In-Reply-To: ${MESSAGE_ID}`);
+    const references = referencesOf(result.text);
+    expect(references).toBeDefined();
+    expect(references!.length).toBeLessThanOrEqual(REFERENCES_BUDGET);
+    expect(references!.startsWith('<a@b> ')).toBe(true);
+    expect(references!.endsWith(` <a@b> ${MESSAGE_ID}`)).toBe(true);
+    expect(widestLineOctets(result.text)).toBeLessThanOrEqual(998);
+    // 4 ms and 0 MB measured; the bound leaves room for CI's slower runner.
+    expect(result.ms).toBeLessThan(5000);
+    expect(result.heapDeltaMB).toBeLessThan(16);
+  }, 30_000);
+
+  it('keeps the whole chain at the budget, and drops the oldest id one character over', async () => {
+    // 900 eight-character ids and one 75-character first id: 8175 characters,
+    // which with the parent's ` <abc@remote.dev>` is the budget exactly.
+    const rest = Array.from({ length: 900 }, (_, i) => `<${String(i + 1).padStart(4, '0')}@r>`);
+    const oldest = `<${'x'.repeat(71)}@r>`;
+    const atBudget = [oldest, ...rest].join(' ');
+    expect(atBudget.length + 1 + MESSAGE_ID.length).toBe(REFERENCES_BUDGET);
+
+    const kept = referencesOf(await replyText(atBudget));
+    expect(kept).toBe(`${atBudget} ${MESSAGE_ID}`);
+
+    const trimmed = referencesOf(await replyText(`<x${oldest.slice(1)} ${rest.join(' ')}`));
+    expect(trimmed).toBe(`${rest.join(' ')} ${MESSAGE_ID}`);
+    expect(trimmed!.length).toBeLessThanOrEqual(REFERENCES_BUDGET);
+  });
+
+  it('never splits an id at the cut', async () => {
+    // Long ids, so the character cut lands inside one: that id goes, whole,
+    // and the tail starts on the next boundary.
+    const ids = Array.from(
+      { length: 200 },
+      (_, i) => `<${String(i).padStart(3, '0')}${'y'.repeat(96)}@r>`,
+    );
+    const references = referencesOf(await replyText(ids.join(' ')));
+    expect(references).toBeDefined();
+    expect(references!.length).toBeLessThanOrEqual(REFERENCES_BUDGET);
+    const kept = references!.split(' ');
+    expect(kept.at(-1)).toBe(MESSAGE_ID);
+    for (const id of kept.slice(0, -1)) {
+      expect(ids).toContain(id);
+    }
+    expect(kept.slice(0, -1)).toEqual(ids.slice(ids.length - (kept.length - 1)));
+  });
+
+  it('keeps the newest ids without a usable Message-ID', async () => {
+    const ids = Array.from({ length: 1000 }, (_, i) => `<${String(i).padStart(4, '0')}@r>`);
+    const text = await replyText(ids.join(' '), '');
+    expect(text).not.toContain('In-Reply-To:');
+    const references = referencesOf(text);
+    expect(references).toBeDefined();
+    expect(references!.length).toBeLessThanOrEqual(REFERENCES_BUDGET);
+    expect(references).not.toContain('<0000@r>');
+    expect(references!.endsWith(' <0999@r>')).toBe(true);
+  });
+
+  it('threads the newest ids when the id no line can carry is an old one', async () => {
+    const ids = Array.from({ length: 1000 }, (_, i) => `<${String(i).padStart(4, '0')}@r>`);
+    // Oldest: outside the tail, so the tail threads. Every id used to go.
+    const oldestHuge = referencesOf(await replyText(`<${HUGE}@r> ${ids.join(' ')}`));
+    expect(oldestHuge).not.toContain(HUGE);
+    expect(oldestHuge!.endsWith(` <0999@r> ${MESSAGE_ID}`)).toBe(true);
+    // Newest: inside the tail, so only the parent's id is threaded.
+    const newestHuge = referencesOf(await replyText(`${ids.join(' ')} <${HUGE}@r>`));
+    expect(newestHuge).toBe(MESSAGE_ID);
+  });
+
+  it('keeps the actions queued before a reply to a chain over the budget', async () => {
+    // What the throw cost: `handleEmail` returns the queue only once the
+    // handler resolves, so a forward recorded before the reply was lost with
+    // it — bounced as a "project handler error" on the platform, never
+    // enacted on a native message.
+    const references = '<a@b> '.repeat(Math.floor((MAX_MESSAGE_BYTES - 200) / 6)).trimEnd();
+    const raw = new TextEncoder().encode('Subject: hi\r\n\r\nbody\r\n');
+    const { message, getActions } = createMessageProxy(
+      {
+        from: 'sender@remote.dev',
+        to: 'acme+support@mail.void.cloud',
+        headers: { references, 'message-id': MESSAGE_ID, subject: 'hi' },
+        raw,
+        rawSize: raw.length,
+      },
+      { slug: 'acme' },
+    );
+    const handler = defineEmail(async (m) => {
+      await m.forward('archive@acme.dev');
+      await replyEmail(m, { text: 'thanks', from: 'acme+noreply@x.dev' });
+    });
+
+    await handler(message, {}, {} as ExecutionContext);
+
+    const actions = getActions();
+    expect(actions.map((a) => a.type)).toEqual(['forward', 'reply']);
+    const reply = actions[1];
+    if (reply.type !== 'reply') {
+      throw new Error('expected reply action');
+    }
+    expect(new TextDecoder().decode(reply.raw)).toContain(`In-Reply-To: ${MESSAGE_ID}`);
   });
 
   it('still threads a normal Message-ID', async () => {

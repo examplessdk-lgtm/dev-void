@@ -484,6 +484,39 @@ describe('sendEmail (from defaulting)', () => {
       harness.dispose();
     }
   });
+
+  it('rejects an explicit 65-octet local part before capture, like the slug default', async () => {
+    // The slug default above refuses to BUILD a 65-octet local part, but the
+    // same address passed explicitly used to be captured as a success —
+    // under `void dev` and here — and could only bounce at an MTA.
+    const harness = createEmailTestHarness();
+    try {
+      const from = await sendEmail({
+        from: `${'a'.repeat(57)}+noreply@${MAIL_DOMAIN}`,
+        to: 'b@y.dev',
+        subject: 's',
+        text: 't',
+      });
+      expect(from.ok).toBe(false);
+      if (!from.ok && 'error' in from) {
+        expect(from.error.code).toBe('INVALID_FROM');
+        expect(from.error.message).toMatch(/local part is 65 octets, over the 64-octet limit/);
+      }
+      const to = await sendEmail({
+        from: 'a@x.dev',
+        to: `${'a'.repeat(65)}@y.dev`,
+        subject: 's',
+        text: 't',
+      });
+      expect(to.ok).toBe(false);
+      if (!to.ok && 'error' in to) {
+        expect(to.error.code).toBe('INVALID_TO');
+      }
+      expect(harness.messages).toHaveLength(0);
+    } finally {
+      harness.dispose();
+    }
+  });
 });
 
 describe('sendEmail (proxy round trip)', () => {

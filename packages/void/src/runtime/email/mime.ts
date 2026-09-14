@@ -75,6 +75,24 @@ export const MAX_RECIPIENTS: number = 100;
  */
 export const MAX_ADDRESS_LENGTH: number = 320;
 
+/**
+ * Cap on the local part (before the `@`) of one parsed address, in UTF-8
+ * OCTETS. RFC 5321 §4.5.3.1.1 sets 64 as the longest every receiver MUST
+ * accept; a client MAY send a longer one but MUST expect the server to
+ * reject it, so it is not deliverable in general. The platform proxy does
+ * not check it — its `MAX_RECIPIENT_LENGTH` is the 320 total above — so a
+ * 65-octet local part used to pass this preflight, be captured as a success
+ * under `void dev` and by the test harness, and be turned away only by an
+ * MTA. Counted in octets because the address rules below admit a non-ASCII
+ * local part (SMTPUTF8, RFC 6531, which keeps RFC 5321's limits as octet
+ * counts): 22 CJK characters are 66 octets. The same figure caps the
+ * default `<slug>+noreply@` sender — `VALID_SLUG` in `runtime/email.ts`
+ * and `MAX_SLUG_LENGTH` (`64 - 8`) in `cli/project-slug.ts` and the API —
+ * which already refused it while an explicit `from` of the same address
+ * was accepted.
+ */
+export const MAX_LOCAL_PART_OCTETS: number = 64;
+
 const CRLF = '\r\n';
 const ASCII_PRINTABLE = /^[\x20-\x7e]*$/;
 const HEADER_NAME = /^[!-9;-~]+$/;
@@ -162,6 +180,15 @@ function validateAddressParts(field: string, email: string, name?: string): void
     throw new MimeError(
       fieldErrorCode(field),
       `${field}: '${email}' is not a valid email address.`,
+    );
+  }
+  // After the total-length bound above, so the encode is over at most
+  // `MAX_ADDRESS_LENGTH` characters; see `MAX_LOCAL_PART_OCTETS`.
+  const localOctets = new TextEncoder().encode(email.slice(0, at)).length;
+  if (localOctets > MAX_LOCAL_PART_OCTETS) {
+    throw new MimeError(
+      fieldErrorCode(field),
+      `${field}: local part is ${localOctets} octets, over the ${MAX_LOCAL_PART_OCTETS}-octet limit in RFC 5321 §4.5.3.1.1.`,
     );
   }
   if (name !== undefined) {

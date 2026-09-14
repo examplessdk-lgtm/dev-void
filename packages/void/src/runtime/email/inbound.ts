@@ -670,7 +670,12 @@ export interface ReplyEmailOptions {
   subject?: string;
   text?: string;
   html?: string;
-  /** Custom headers; threading headers (`In-Reply-To`, `References`) are added automatically. */
+  /**
+   * Custom headers; threading headers (`In-Reply-To`, `References`) are
+   * added automatically, best-effort: an inbound id too long for a header
+   * line is dropped, and a `References` chain over 8 KiB keeps only its
+   * newest ids.
+   */
   headers?: Record<string, string>;
   attachments?: Array<Attachment>;
 }
@@ -745,6 +750,65 @@ function prefixReplySubject(original: string): string {
     return 'Re:';
   }
   return prefixed;
+}
+
+/**
+ * Longest `References` value a reply carries, in UTF-16 code units — the
+ * measure `MAX_REPLY_SUBJECT_CHARS` uses. It is checked on `length` alone,
+ * so a chain the size of the inbound message costs one property read before
+ * anything is scanned or sliced.
+ *
+ * RFC 5322 puts no limit on the field, but everything downstream does. RFC
+ * 5537 §3.4.4 has a followup agent trim it to 998 characters, and Postfix's
+ * `header_size_limit` discards header bytes past 100 KiB. A message-id is
+ * tens of characters, so 8 KiB carries a chain over a hundred replies deep
+ * with every id intact — an order of magnitude past any conversation — and
+ * a value this size, folded and encoded, is at most ~25 KB of a 10 MiB
+ * reply, so the chain alone can never push the reply over the limit.
+ * Unbounded, it could: the inbound header can be the whole 10 MiB message,
+ * and 10 MiB of short ids passes the line guard — every id folds — yet
+ * `foldHeader`'s continuations put the rendered reply over
+ * `MAX_MESSAGE_BYTES`, and `buildMime` threw (measured: 10,777,129 bytes
+ * from a 10,485,557-character chain) for a reply the guide promises is sent.
+ *
+ * Past the bound the NEWEST ids are kept, whole, and the parent's id still
+ * ends the chain. That is what a mail client threads on: it links the reply
+ * under any id it recognises, and the parent is also `In-Reply-To`. The
+ * root id RFC 5537 keeps is a Netnews convention (a newsreader identifies a
+ * thread by it); in mail it would spend the budget on an id older than
+ * every client in the conversation.
+ */
+const MAX_REPLY_REFERENCES_CHARS = 8192;
+
+/**
+ * The `References` value a reply carries, or `''` when nothing can be
+ * threaded. In order: the whole inbound chain continued by the parent's
+ * `messageId` when it fits `MAX_REPLY_REFERENCES_CHARS`; otherwise the
+ * newest ids of the chain that fit, none of them split; and the parent's id
+ * alone (which may be empty) when even those hold an id no line can carry.
+ */
+function replyReferences(originalReferences: string, messageId: string): string {
+  const parent = messageId ? ` ${messageId}` : '';
+  let chain = originalReferences;
+  const budget = MAX_REPLY_REFERENCES_CHARS - parent.length;
+  if (chain.length > budget) {
+    // Keep the tail, from the first SP or HTAB at or after the cut so no id
+    // is split — the breaks `foldHeader` folds at, as in `fitsHeaderLine`.
+    // The scan and the slice are bounded by the budget, not by the header.
+    let cut = chain.length - budget;
+    while (cut < chain.length) {
+      const c = chain.charCodeAt(cut);
+      if (c === 0x20 || c === 0x09) {
+        break;
+      }
+      cut++;
+    }
+    chain = chain.slice(cut);
+  }
+  chain = `${chain}${parent}`.trim();
+  // A chain folds at its spaces, so one this long is fine; it is a single
+  // oversized id inside it that is not.
+  return fitsHeaderLine('References', chain) ? chain : messageId;
 }
 
 /**
@@ -847,8 +911,11 @@ function quotedPrintableDecode(qp: string): Uint8Array {
 /**
  * Pure helper: build the reply MIME from an inbound message + reply opts,
  * with `Subject: Re: …` (no double-prefix), `In-Reply-To`, and `References`
- * threaded from the original. Exposed separately so the dispatch step
- * (`message.reply`) can be tested without `cloudflare:email`.
+ * threaded from the original. Threading is best-effort (the inbound values
+ * are remote-sender controlled): an id no header line can carry is dropped,
+ * and a `References` chain over `MAX_REPLY_REFERENCES_CHARS` is trimmed to
+ * its newest ids. Exposed separately so the dispatch step (`message.reply`)
+ * can be tested without `cloudflare:email`.
  */
 export async function buildReplyMessage(
   message: ForwardableEmailMessage,
@@ -925,12 +992,10 @@ export async function buildReplyMessage(
   const messageId = fitsHeaderLine('In-Reply-To', originalMessageId) ? originalMessageId : '';
   if (messageId) {
     threading.inReplyTo = messageId;
-    const chain = originalReferences ? `${originalReferences} ${messageId}`.trim() : messageId;
-    // A `References` chain folds at its spaces, so a long one is usually
-    // fine; it is a single oversized id in the chain that is not.
-    threading.references = fitsHeaderLine('References', chain) ? chain : messageId;
-  } else if (originalReferences && fitsHeaderLine('References', originalReferences)) {
-    threading.references = originalReferences;
+  }
+  const references = replyReferences(originalReferences, messageId);
+  if (references) {
+    threading.references = references;
   }
 
   const normalized = await normalizeEmail({
@@ -957,6 +1022,11 @@ export async function buildReplyMessage(
  * (correct `In-Reply-To` / `References` / `Subject: Re: …`) and records a
  * reply intent on the message proxy. The platform router enacts the reply
  * via the real `ForwardableEmailMessage.reply()` once the handler returns.
+ *
+ * The threading headers are best-effort, since the inbound values they are
+ * built from are remote-sender controlled: an id no header line can carry
+ * is dropped, and a `References` chain over 8 KiB keeps only its newest
+ * ids. The reply is sent either way.
  */
 export async function replyEmail(
   message: ForwardableEmailMessage,

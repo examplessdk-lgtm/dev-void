@@ -82,7 +82,7 @@ For SaaS sending to arbitrary end-users (every signup gets a welcome email), the
 | `headers`     | `Record<string, string>`     | Custom headers; reserved headers (From, Date, etc.) are ignored. |
 | `attachments` | `Attachment[]`               | See [Attachments](#attachments).                                 |
 
-At most 100 recipients across `to`, `cc` and `bcc` per call, and each address is at most 320 characters (RFC 5321). Both are checked before anything is parsed or built and return `INVALID_TO`. Custom header names must be RFC 5322 field names (printable ASCII, no colon); a name too long to fit a 998-octet line — a field name cannot be folded — is rejected with `MIME_ERROR` before anything is built.
+At most 100 recipients across `to`, `cc` and `bcc` per call, and each address is at most 320 characters with a local part (before the `@`) of at most 64 UTF-8 octets (RFC 5321). All three are checked before anything is built and return `INVALID_TO`. Custom header names must be RFC 5322 field names (printable ASCII, no colon); a name too long to fit a 998-octet line — a field name cannot be folded — is rejected with `MIME_ERROR` before anything is built.
 
 `Address` accepts either a string (`"hello@acme.dev"` or `"Name <hello@acme.dev>"`) or an object (`{ email, name? }`). Display names with non-ASCII characters are RFC 2047 encoded automatically.
 
@@ -335,7 +335,7 @@ export default defineEmail(async (message, env, ctx, info) => {
 
 `replyEmail` builds the reply MIME with `Subject: Re: <original>` (no double-prefix), `In-Reply-To: <Message-ID>`, and a continued `References` chain, then dispatches through the message's `reply()`. Defaults: `to = message.from`, `subject = "Re: <original>"`.
 
-Everything taken from the inbound message is best-effort, because the remote sender controls it. A `Message-ID` or `References` value too long for a header line is dropped rather than threaded. Control characters in the subject become a space, and a subject over 4096 characters, or an ASCII one too long to fold, falls back to a bare `Re:`. The reply is always sent; pass `subject` to control it exactly.
+Everything taken from the inbound message is best-effort, because the remote sender controls it. A `Message-ID` or `References` value too long for a header line is dropped rather than threaded, and a `References` chain over 8 KiB keeps only its newest ids — the parent's `Message-ID` always ends it. Control characters in the subject become a space, and a subject over 4096 characters, or an ASCII one too long to fold, falls back to a bare `Re:`. The reply is always sent; pass `subject` to control it exactly.
 
 On the platform the `from` default is **not** `message.to`. A reply is sent from
 your project's own slug on the platform mail zone — `<slug>+noreply@<domain>` —

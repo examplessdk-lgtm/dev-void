@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vite-plus/test';
 import {
   buildMime,
   MAX_ADDRESS_LENGTH,
+  MAX_LOCAL_PART_OCTETS,
   MAX_MESSAGE_BYTES,
   MAX_RECIPIENTS,
   MimeError,
@@ -680,6 +681,59 @@ describe('normalizeEmail', () => {
       text: 't',
     });
     expect(named.to[0].email).toBe(longest);
+  });
+
+  it('refuses a local part over MAX_LOCAL_PART_OCTETS, counted in UTF-8 octets', async () => {
+    // RFC 5321 §4.5.3.1.1: 64 octets is the longest local part every
+    // receiver MUST accept. The total-length bound alone let this through
+    // — `'a'.repeat(65)}@x.dev` is 71 characters — so `void dev` and the
+    // test harness captured it as a success. The platform proxy applies
+    // only the 320 total, so the preflight is the one check.
+    const longest = `${'a'.repeat(MAX_LOCAL_PART_OCTETS)}@x.dev`;
+    const over = `${'a'.repeat(MAX_LOCAL_PART_OCTETS + 1)}@x.dev`;
+    expect(over.length).toBeLessThan(MAX_ADDRESS_LENGTH);
+    const email = await normalizeEmail({ from: longest, to: longest, subject: 's', text: 't' });
+    expect(email.to[0].email).toBe(longest);
+    for (const [field, code] of [
+      ['to', 'INVALID_TO'],
+      ['from', 'INVALID_FROM'],
+      ['cc', 'MIME_ERROR'],
+    ] as const) {
+      let error: unknown;
+      try {
+        await normalizeEmail({
+          from: 'a@x.dev',
+          to: 'b@y.dev',
+          [field]: over,
+          subject: 's',
+          text: 't',
+        });
+      } catch (e) {
+        error = e;
+      }
+      expect(error).toBeInstanceOf(MimeError);
+      expect((error as MimeError).code).toBe(code);
+      expect((error as MimeError).message).toBe(
+        `${field}: local part is ${MAX_LOCAL_PART_OCTETS + 1} octets, over the ${MAX_LOCAL_PART_OCTETS}-octet limit in RFC 5321 §4.5.3.1.1.`,
+      );
+    }
+    // Octets, not characters: the address rules admit a non-ASCII local
+    // part (SMTPUTF8), and RFC 6531 keeps RFC 5321's limits as octet counts.
+    // 21 three-octet characters are 63 octets and fit; 22 are 66 and do not.
+    const cjkFits = `${'漢'.repeat(21)}@x.dev`;
+    const cjkOver = `${'漢'.repeat(22)}@x.dev`;
+    expect(new TextEncoder().encode('漢'.repeat(22)).length).toBe(66);
+    const utf8 = await normalizeEmail({ from: 'a@x.dev', to: cjkFits, subject: 's', text: 't' });
+    expect(utf8.to[0].email).toBe(cjkFits);
+    await expect(
+      normalizeEmail({ from: 'a@x.dev', to: cjkOver, subject: 's', text: 't' }),
+    ).rejects.toThrow(/^to: local part is 66 octets, over the 64-octet limit/);
+    // The display-name form is bounded on the same parsed address, and the
+    // total-length bound still answers first for an address over both.
+    expect(() => parseAddress(`Name <${over}>`, 'to')).toThrow(/local part is 65 octets/);
+    expect(() => parseAddress(`${'a'.repeat(65)}@${'b'.repeat(251)}.dev`, 'to')).toThrow(
+      /over the 320-character limit/,
+    );
   });
 
   it('parses the display-name form in linear time', () => {
