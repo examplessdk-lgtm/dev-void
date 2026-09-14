@@ -1,0 +1,41 @@
+TESTING.md
+  s_5658fef4073ebd::t_6c644ee2f6af2b 21-39
+packages/react/test/integration/react-pages-client.test.ts
+  s_5658fef4073ebd::t_fab55b74aa66a9 7,918,940,961,978,1015,1402
+packages/solid/test/integration/solid-pages-playground.test.ts
+  s_5658fef4073ebd::t_ce1527abfda25e 7,489,511,532,551,588,882
+packages/svelte/test/integration/svelte-pages-client.test.ts
+  s_5658fef4073ebd::t_afeb529e20b2ce 7,455
+packages/void/test/integration/browser-helpers.test.ts
+  s_5658fef4073ebd::t_34ad2947f04670 1-38
+packages/void/test/integration/nuxt.test.ts
+  s_5658fef4073ebd::t_0460a56449e686 6,42,76-90,92,123,126,128-129,150-151
+packages/void/test/integration/sveltekit.test.ts
+  s_5658fef4073ebd::t_c480f67f2f3a48 6,37,70-74,76-84,91-92,118,121,123-124,145-146
+packages/void/test/unit/deploy-drift.test.ts
+  s_5658fef4073ebd::t_844417cca9ee91 41-44
+packages/vue/test/integration/vue-pages-client.test.ts
+  s_5658fef4073ebd::t_b7bb94fea3273f 7,489,511,532,549,586,951
+playground/nuxt/pages/index.vue
+  s_5658fef4073ebd::t_13ec11e1ac95e6 1-7,9
+playground/sveltekit/src/routes/+page.svelte
+  s_5658fef4073ebd::t_a300b463cdd6ac 1-10
+test/browser-helpers.ts
+  s_5658fef4073ebd::t_2cadc6e304beff 1-52
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "88f12a7885dff0471bc969c3485b0383b28dde59",
+  "prompts": {},
+  "sessions": {
+    "s_5658fef4073ebd": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09ef3-cccd-76c0-8ca1-d1305c47aaa8",
+        "model": "unknown"
+      },
+      "human_author": "unknown"
+    }
+  }
+}
