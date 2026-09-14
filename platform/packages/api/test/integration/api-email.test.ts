@@ -395,6 +395,52 @@ describe('POST /projects/:id/email/destinations', () => {
     expect(res.status).toBe(400);
   });
 
+  it('rejects an over-long address before the rate limiter, CF, or the database see it', async () => {
+    // The loose regex accepts any length, so without a cap this reached CF
+    // and inserted a 100 KB `address` row. RFC 5321 bounds a deliverable
+    // address at 256 octets; the cap is the proxy's 320.
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    const fetchMock = mockCfApi();
+    const putSpy = vi.spyOn(env.ROUTING, 'put');
+
+    const res = await addDestination(project.id, user.jwt, `${'a'.repeat(100 * 1024)}@example.com`);
+
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: 'invalid address' });
+    expect(cfCalls(fetchMock, 'POST', '/email/routing/addresses')).toHaveLength(0);
+    expect(await rowsFor(project.id)).toHaveLength(0);
+    // A 400 must not charge the per-project add budget either way, but the
+    // point of the cap is that the rejection happens ahead of the limiter.
+    expect(
+      putSpy.mock.calls.filter(([key]) => String(key).startsWith('email-add-rate:')),
+    ).toHaveLength(0);
+
+    // Exact boundary: 320 characters is still deliverable and goes through.
+    const atCap = await addDestination(project.id, user.jwt, `${'a'.repeat(308)}@example.com`);
+    expect(atCap.status).toBe(201);
+    const overCap = await addDestination(project.id, user.jwt, `${'a'.repeat(309)}@example.com`);
+    expect(overCap.status).toBe(400);
+    expect(cfCalls(fetchMock, 'POST', '/email/routing/addresses')).toHaveLength(1);
+  });
+
+  it('bounds a crafted address before the regex can backtrack on it', async () => {
+    // `isValidEmail` is quadratic on `a@` + `b.`x N + ` x`: every `.` is a
+    // candidate for the literal `\.`, and the inner space defeats `$` on each
+    // retry. At 160 KB that is seconds of CPU per request, all of it ahead
+    // of the rate limiter. The regex alone rejects this input too, so the
+    // status cannot tell the two orders apart — the elapsed time can.
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    mockCfApi();
+
+    const startedAt = Date.now();
+    const res = await addDestination(project.id, user.jwt, `a@${'b.'.repeat(80_000)} x`);
+
+    expect(res.status).toBe(400);
+    expect(Date.now() - startedAt).toBeLessThan(2000);
+  });
+
   it('creates a pending row and calls CF on the first add', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id);

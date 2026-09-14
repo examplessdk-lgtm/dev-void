@@ -46,6 +46,19 @@ const ADD_RATE_PER_MINUTE = 5;
 const ADD_RATE_PER_DAY = 50;
 
 /**
+ * Cap the raw `address` string BEFORE `.trim().toLowerCase()` and BEFORE
+ * `isValidEmail`. Both run ahead of the rate limiter, and a 400 never
+ * charges it, so whatever they cost is free to the caller. `toLowerCase`
+ * allocates a full-size copy up front (V8 sizes the result before it knows
+ * nothing changed), and the loose regex backtracks quadratically on a
+ * crafted string — `a@` + `b.` x 80k + ` x` (160 KB) is ~7s of CPU in the
+ * shared isolate. RFC 5321 caps a forward-path at 256 octets, UTF-16 length
+ * is never more than the octet count, so 320 cannot reject a deliverable
+ * address. Same value as the proxy's `MAX_RECIPIENT_LENGTH`.
+ */
+const MAX_ADDRESS_LENGTH = 320;
+
+/**
  * Email observability + destinations management.
  *
  * Counters live in `ROUTING` KV under monthly buckets — exposed via the
@@ -217,7 +230,13 @@ const app = new Hono<ApiEnv>()
     } catch {
       return context.json({ error: 'invalid address' }, 400);
     }
-    const address = typeof body.address === 'string' ? body.address.trim().toLowerCase() : '';
+    // Length is checked on the RAW string: `MAX_ADDRESS_LENGTH` exists to
+    // bound the normalization and the regex, so neither may run first.
+    const raw = body.address;
+    if (typeof raw !== 'string' || raw.length > MAX_ADDRESS_LENGTH) {
+      return context.json({ error: 'invalid address' }, 400);
+    }
+    const address = raw.trim().toLowerCase();
     if (!isValidEmail(address)) {
       return context.json({ error: 'invalid address' }, 400);
     }
