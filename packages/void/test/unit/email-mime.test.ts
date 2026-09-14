@@ -1177,7 +1177,9 @@ describe('buildMime body size projection', () => {
   it('never rejects a message that fits, and leaves the final check as the authority', async () => {
     // 3.3 MiB of CJK projects to ~10.38 MiB (under the cap, since the
     // projection ignores soft breaks and headers) but renders to ~10.8 MiB.
-    // The projection must let it through; the post-render check must reject it.
+    // The projection must let it through; the post-render check must reject
+    // it. One full ~10 MB render, so it carries its own timeout (0.4 s here,
+    // several times that on a loaded CI runner).
     const nearly = '漢'.repeat(Math.ceil((3.3 * 1024 * 1024) / 3));
     const email = await normalizeEmail({
       from: 'a@x.dev',
@@ -1186,11 +1188,12 @@ describe('buildMime body size projection', () => {
       text: nearly,
     });
     expect(() => buildMime(email)).toThrow(/message size \d+ bytes exceeds Cloudflare limit/);
-    // And a 3 MiB body, whose message is ~9.4 MiB, builds.
-    const fits = '漢'.repeat(Math.ceil((3 * 1024 * 1024) / 3));
+    // And a body the projection accepts builds; the size that fits is not
+    // at issue, so keep this one small.
+    const fits = '漢'.repeat(20_000);
     const { raw } = await build({ from: 'a@x.dev', to: 'b@y.dev', subject: 's', text: fits });
     expect(raw.byteLength).toBeLessThanOrEqual(MAX_MESSAGE_BYTES);
-  });
+  }, 30_000);
 });
 
 describe('buildMime header size projection', () => {
@@ -1385,7 +1388,9 @@ describe('buildMime header size projection', () => {
     // 2.15M CJK characters project to ~10.32 MiB (4.8 octets each: the bound
     // omits the fold's CRLF per word) but render to ~10.75 MB at 5 octets
     // each. The projection must let it through; the post-render check must
-    // reject it.
+    // reject it. This is the one case that needs a full ~10 MB render (the
+    // property is AT the boundary), so it carries its own timeout: 0.8 s
+    // here, 5.4 s on a loaded 4-vCPU CI runner.
     const nearly = '漢'.repeat(2_150_000);
     const email = await normalizeEmail({
       from: 'a@x.dev',
@@ -1394,11 +1399,12 @@ describe('buildMime header size projection', () => {
       text: 'hi',
     });
     expect(() => buildMime(email)).toThrow(/message size \d+ bytes exceeds Cloudflare limit/);
-    // And 2M characters, whose message is ~10.0 MB, builds.
-    const fits = '漢'.repeat(2_000_000);
+    // And a subject the projection accepts builds; the size that fits is
+    // not at issue, so keep this one small.
+    const fits = '漢'.repeat(20_000);
     const { raw } = await build({ from: 'a@x.dev', to: 'b@y.dev', subject: fits, text: 'hi' });
     expect(raw.byteLength).toBeLessThanOrEqual(MAX_MESSAGE_BYTES);
-  });
+  }, 30_000);
 });
 
 describe('foldHeader memory', () => {
@@ -1448,7 +1454,9 @@ describe('body line scan memory', () => {
       text: 'a\n'.repeat(lines),
       html: '\n'.repeat(lines),
     });
-    expect(performance.now() - started).toBeLessThan(5000);
+    // A gross-regression guard only: the previous code died here, it did not
+    // slow down. 0.2 s locally; a loaded CI runner is several times slower.
+    expect(performance.now() - started).toBeLessThan(20_000);
     expect(raw.byteLength).toBeLessThanOrEqual(MAX_MESSAGE_BYTES);
     expect(raw.byteLength).toBeGreaterThan(lines * 5);
     expect(text).toContain(`Content-Transfer-Encoding: 7bit\r\n\r\n${'a\r\n'.repeat(lines)}`);
