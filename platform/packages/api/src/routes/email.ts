@@ -255,7 +255,10 @@ const app = new Hono<ApiEnv>()
       // best-effort and expires in 24h — so a repeat POST is the resend, and
       // the only one a project owner has. The rate check above already
       // bounds it. A CF-pending row is not resendable: CF mails its own link
-      // on create only, and the row flips via the GET refresh when clicked.
+      // on create only, and the row flips via the GET refresh when clicked —
+      // so that repeat is answered with `verificationSent: false`, the same
+      // marker the recovered-owner insert below carries, because both mean
+      // "nothing went out; the row waits on a Cloudflare link mailed earlier".
       if (existing.status === 'pending' && existing.verification_source === 'platform') {
         await dispatchPlatformVerification(context, project, existing, address);
         return context.json(
@@ -263,7 +266,12 @@ const app = new Hono<ApiEnv>()
           200,
         );
       }
-      return context.json(serializeDestination(existing), 200);
+      return context.json(
+        existing.status === 'pending'
+          ? { ...serializeDestination(existing), verificationSent: false }
+          : serializeDestination(existing),
+        200,
+      );
     }
 
     // Create CF destination; CF responds with the tag and triggers the
@@ -405,9 +413,20 @@ const app = new Hono<ApiEnv>()
       return context.json({ ...serializeDestination(row), platformVerificationPending: true }, 201);
     }
 
-    // CF created the row for THIS request (or the address is the owner's
-    // own) — normal flow: insert pending, CF is mailing the recipient right
-    // now, and the GET refresh flips the row to verified when they click.
+    // The row waits on CLOUDFLARE's link. Two ways to get here:
+    //   - CF created the address for THIS request: it is mailing the
+    //     recipient right now, and the GET refresh flips the row to verified
+    //     when they click.
+    //   - The address is the owner's own and CF already held it, still
+    //     pending (their first project's auto-add, or a hand add). CF refused
+    //     our create and mails its link on create only, so NOTHING went out
+    //     for this add — the link from the first add is the only one the
+    //     owner has, and this route cannot mint another (CF has no resend
+    //     API; `deleteDestination` + a fresh create is the only way, and the
+    //     DELETE route takes it only when no other project references the
+    //     tag). Report that as `verificationSent: false` rather than let a
+    //     bare 201 read as "a link went out": `void email allow` prints
+    //     "Verification email sent" from the status code alone.
     const inserted = await tryInsertWithRetry(
       context.get('db'),
       projectId,
@@ -428,7 +447,12 @@ const app = new Hono<ApiEnv>()
       );
       return context.json({ error: 'destination concurrently modified, try again' }, 409);
     }
-    return context.json(serializeDestination(inserted.row), 201);
+    return context.json(
+      recoveredExistingCfRow
+        ? { ...serializeDestination(inserted.row), verificationSent: false }
+        : serializeDestination(inserted.row),
+      201,
+    );
   })
 
   .delete('/:id/email/destinations/:destId', async (context) => {

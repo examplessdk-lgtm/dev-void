@@ -471,9 +471,15 @@ describe('POST /projects/:id/email/destinations', () => {
 
     const first = await addDestination(project.id, user.jwt, 'a@b.com', emailEnv());
     expect(first.status).toBe(201);
+    // CF created the address for this request and is mailing the link: the
+    // "nothing sent" marker must NOT appear on a real create.
+    expect((await first.json()) as { verificationSent?: boolean }).not.toHaveProperty(
+      'verificationSent',
+    );
 
     const second = await addDestination(project.id, user.jwt, 'a@b.com', emailEnv());
     expect(second.status).toBe(200);
+    expect(((await second.json()) as { verificationSent?: boolean }).verificationSent).toBe(false);
 
     // CF is touched once — the duplicate is fully short-circuited, so the
     // recipient gets one verification email rather than one per click.
@@ -1477,6 +1483,110 @@ describe('per-project verification (Option C + Option B)', () => {
     expect(rows[0]!.status).toBe('pending');
     expect(rows[0]!.verification_source).toBe('platform');
     expect(await readAllowlist(project.id)).toEqual([]);
+  });
+
+  it("owner's own address already on the account and still PENDING: adopted, and reported as no send", async () => {
+    // CF holds the owner's address from an earlier add (their first project's
+    // auto-add, or a hand add) and the owner never clicked. CF refuses this
+    // create, and it mails its link on create only — so this add sends
+    // nothing, and the row waits on the link from the FIRST add. The 201 is
+    // real (the project's row is new) but must not read as "a link went
+    // out": `void email allow` prints "Verification email sent" from a bare
+    // 201.
+    const user = await createTestUser(env.db);
+    await setUserEmail(user.id, 'owner@example.com');
+    const project = await createTestProject(env.db, user.id);
+    const fetchMock = mockCfWithProxy({
+      addEmailDestination: () => cfError('address already exists'),
+      listEmailDestinations: () => cfSuccess([cfRow('cf-tag-owner', 'owner@example.com', null)]),
+    });
+
+    const res = await addDestination(project.id, user.jwt, 'owner@example.com', emailEnv());
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as {
+      status: string;
+      verification_source: string;
+      verificationSent?: boolean;
+      platformVerificationPending?: boolean;
+    };
+    expect(body.status).toBe('pending');
+    // Not Option B: the owner's own address needs no per-project consent,
+    // and CF's click is the one that unlocks the send binding.
+    expect(body.verification_source).toBe('cf');
+    expect(body.platformVerificationPending).toBeUndefined();
+    expect(body.verificationSent).toBe(false);
+
+    // Nothing went out: CF refused, and the platform has no link of its own
+    // to mail for a CF-pending owner row.
+    expect(proxySends(fetchMock)).toHaveLength(0);
+    const rows = await rowsFor(project.id);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.cf_destination_id).toBe('cf-tag-owner');
+    expect(rows[0]?.verification_source).toBe('cf');
+  });
+
+  it('disallow + allow re-registers at CF only once no other project lists the address', async () => {
+    // The CLI's "fresh link" recipe. A sibling project (the owner's first,
+    // via auto-add) still references the tag, so DELETE keeps the CF address
+    // and the re-add lands on the adopt path again — honestly marked. Once
+    // the sibling's row is gone the DELETE reaches CF and the next add is a
+    // real create, which is the only way Cloudflare mails a new link.
+    const user = await createTestUser(env.db);
+    await setUserEmail(user.id, 'owner@example.com');
+    const first = await createTestProject(env.db, user.id, 'email-first');
+    const second = await createTestProject(env.db, user.id, 'email-second');
+    await env.db.insert(emailDestinations).values({
+      id: 'edst_first_owner',
+      project_id: first.id,
+      address: 'owner@example.com',
+      status: 'pending',
+      cf_destination_id: 'cf-tag-owner',
+      verification_source: 'cf',
+    });
+    let onAccount = true;
+    const fetchMock = mockCfWithProxy({
+      addEmailDestination: () =>
+        onAccount
+          ? cfError('address already exists')
+          : cfSuccess(cfRow('cf-tag-owner-2', 'owner@example.com', null)),
+      listEmailDestinations: () =>
+        cfSuccess(onAccount ? [cfRow('cf-tag-owner', 'owner@example.com', null)] : []),
+      deleteEmailDestination: () => {
+        onAccount = false;
+        return cfSuccess({ tag: 'cf-tag-owner' });
+      },
+    });
+
+    const added = await addDestination(second.id, user.jwt, 'owner@example.com', emailEnv());
+    expect(added.status).toBe(201);
+    const addedBody = (await added.json()) as { id: string; verificationSent?: boolean };
+    expect(addedBody.verificationSent).toBe(false);
+
+    // Sibling still lists the address: the CF address survives the DELETE...
+    expect((await removeDestination(second.id, addedBody.id, user.jwt, emailEnv())).status).toBe(
+      200,
+    );
+    expect(cfCalls(fetchMock, 'DELETE', '/email/routing/addresses')).toHaveLength(0);
+    // ...so the re-add adopts it again, and says so again.
+    const readded = await addDestination(second.id, user.jwt, 'owner@example.com', emailEnv());
+    expect(readded.status).toBe(201);
+    const readdedBody = (await readded.json()) as { id: string; verificationSent?: boolean };
+    expect(readdedBody.verificationSent).toBe(false);
+
+    // Drop the sibling's row too, then the recipe works: DELETE reaches CF,
+    // the next add is a fresh create, and the marker is gone.
+    await env.db.delete(emailDestinations).where(eq(emailDestinations.id, 'edst_first_owner'));
+    expect((await removeDestination(second.id, readdedBody.id, user.jwt, emailEnv())).status).toBe(
+      200,
+    );
+    expect(cfCalls(fetchMock, 'DELETE', '/email/routing/addresses')).toHaveLength(1);
+    const fresh = await addDestination(second.id, user.jwt, 'owner@example.com', emailEnv());
+    expect(fresh.status).toBe(201);
+    expect((await fresh.json()) as { verificationSent?: boolean }).not.toHaveProperty(
+      'verificationSent',
+    );
+    expect((await rowsFor(second.id))[0]?.cf_destination_id).toBe('cf-tag-owner-2');
+    expect(proxySends(fetchMock)).toHaveLength(0);
   });
 
   it('Option B: parallel POSTs for the same address send exactly one platform email', async () => {

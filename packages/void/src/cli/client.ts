@@ -240,6 +240,14 @@ export type EmailDestinationResponse = {
    * a repeat POST is how that link gets re-sent.
    */
   platformVerificationPending?: boolean;
+  /**
+   * `false` when the call mailed nothing and the row waits on a Cloudflare
+   * link sent EARLIER: a repeat add of a CF-pending address, or a first add
+   * (201) of an address Cloudflare already held pending — the owner's own,
+   * from another project or a hand add. CF refused the create and mails its
+   * link on create only, so a bare 201 must not read as "a link went out".
+   */
+  verificationSent?: boolean;
 };
 
 export type DomainResponse = {
@@ -1309,9 +1317,10 @@ export class PlatformClient {
       await throwPlatformApiError('Failed to add email destination', res);
     }
 
-    // 201 registered the address just now (a verification link went out);
-    // 200 found it already on the project's list. The body is the same
-    // shape either way, so the status is the only signal for the caller.
+    // 201 registered the address just now; 200 found it already on the
+    // project's list. The body is the same shape either way, so the status
+    // is the "created" signal — whether a link went out is the body's
+    // `verificationSent` / `platformVerificationPending`, not the status.
     const body = (await res.json()) as EmailDestinationResponse;
     return { ...body, created: res.status === 201 };
   }
