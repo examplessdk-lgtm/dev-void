@@ -333,6 +333,18 @@ async function normalizeAttachment(att: Attachment): Promise<NormalizedAttachmen
   if (att.contentId !== undefined) {
     rejectCRLF('attachment contentId', att.contentId);
   }
+  // The type admits only the two literals, but that binds nothing at
+  // runtime: a JS caller, or a JSON-parsed options object, can hand over any
+  // string, and `buildAttachmentPart` interpolates the value straight into
+  // `Content-Disposition`. An allow-list, not `rejectCRLF`: there is no
+  // third disposition this builder could render meaningfully.
+  if (
+    att.disposition !== undefined &&
+    att.disposition !== 'attachment' &&
+    att.disposition !== 'inline'
+  ) {
+    throw new MimeError('MIME_ERROR', "attachment disposition must be 'attachment' or 'inline'.");
+  }
   const bytes = await toBytes(att.content);
   return {
     filename: att.filename,

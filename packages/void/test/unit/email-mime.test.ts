@@ -344,6 +344,47 @@ describe('normalizeEmail', () => {
     ).rejects.toThrow(/filename/);
   });
 
+  it("rejects an attachment disposition other than 'attachment' or 'inline'", async () => {
+    // `Attachment.disposition` is a two-literal union at compile time only.
+    // A JS caller, or a JSON-parsed options object, can pass any string,
+    // and `buildAttachmentPart` interpolates it verbatim into
+    // `Content-Disposition`. Unlike its neighbours it never went through
+    // `rejectCRLF`, so a CRLF in it rendered as a second header line inside
+    // the attachment part (`X-Injected: 1; filename="f.txt"`), and a blank
+    // line in it ended the part's header block early.
+    const base = { from: 'a@x.dev', to: 'b@y.dev', subject: 's', text: 't' };
+    const message = "attachment disposition must be 'attachment' or 'inline'.";
+    for (const disposition of [
+      'attachment\r\nX-Injected: 1',
+      'attachment\r\n\r\nbody',
+      'form-data',
+    ]) {
+      const attempt = normalizeEmail({
+        ...base,
+        attachments: [{ filename: 'f.txt', content: 'x', disposition: disposition as never }],
+      });
+      await expect(attempt).rejects.toThrow(message);
+      await expect(attempt).rejects.toMatchObject({ code: 'MIME_ERROR' });
+    }
+    // Both literals still render as given, whatever the body shape.
+    for (const disposition of ['attachment', 'inline'] as const) {
+      const { text } = await build({
+        ...base,
+        attachments: [{ filename: 'f.txt', content: 'x', disposition }],
+      });
+      expect(text).toContain(`Content-Disposition: ${disposition}; filename="f.txt"`);
+    }
+    // And an omitted disposition still defaults on `contentId`.
+    const defaulted = await normalizeEmail({
+      ...base,
+      attachments: [
+        { filename: 'f.txt', content: 'x' },
+        { filename: 'logo.png', content: 'x', contentId: 'logo' },
+      ],
+    });
+    expect(defaulted.attachments.map((a) => a.disposition)).toEqual(['attachment', 'inline']);
+  });
+
   it('rejects whitespace inside an address', async () => {
     await expect(
       normalizeEmail({ from: 'a b@x.dev', to: 'b@y.dev', subject: 's', text: 't' }),
