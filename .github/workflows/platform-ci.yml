@@ -12,6 +12,11 @@ on:
       - 'vite.config.ts'
       - '.github/workflows/platform-*.yml'
   workflow_call:
+    inputs:
+      require-schema-compat:
+        description: Run the production schema-compatibility guard. The production deploy sets this for every trigger.
+        type: boolean
+        default: false
 
 permissions: {}
 
@@ -82,11 +87,11 @@ jobs:
   # the push must not ship.
   #
   # It has teeth on PRs, where the code under test is a different commit from the one that is
-  # live. On a push to `prod` the caller is the deploy itself, so the job covers the migrations
-  # rather than a code difference. Staging deploys skip it: they cannot break production, and they
-  # run on nearly every push to `main`.
+  # live. The production deploy sets `require-schema-compat` for every trigger — including a
+  # manual dispatch, which can be started from any ref and would otherwise skip the job. Staging
+  # deploys skip it: they cannot break production, and they run on nearly every push to `main`.
   schema-compat:
-    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/prod'
+    if: github.event_name == 'pull_request' || inputs.require-schema-compat
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 20
     permissions:
@@ -96,6 +101,9 @@ jobs:
       POSTGRES_PASSWORD: void_ci_pass
       POSTGRES_DB: void_schema_compat
       COMPAT_DATABASE_URL: postgresql://void_ci:void_ci_pass@localhost:5432/void_schema_compat
+      # Pinned: the suite compares timestamps written by Postgres with local time, so a
+      # runner whose locale is not UTC shifts them by the offset.
+      TZ: UTC
     services:
       postgres:
         image: postgres:18
@@ -124,19 +132,40 @@ jobs:
         env:
           DATABASE_URL: ${{ env.COMPAT_DATABASE_URL }}
 
-      # Phase 2 — the production ref's code must still run on that schema.
+      # Phase 2 — the release that is live must still run on that schema. On a push that is the
+      # commit `prod` pointed at before the push, never the commit being deployed: the api worker
+      # is replaced after its migrations run, so the previous release is what serves traffic for
+      # the length of the deploy. PRs compare against the deployed branch.
+      - name: Resolve the compatibility baseline
+        id: baseline
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PREVIOUS_SHA: ${{ github.event.before }}
+        run: |
+          if [ "$EVENT_NAME" = 'push' ]; then
+            printf '%s' "$PREVIOUS_SHA" | grep -Eq '^[0-9a-f]{40}$' || {
+              echo '::error::The push event carries no previous commit to compare against.'
+              exit 1
+            }
+            echo "ref=$PREVIOUS_SHA" >> "$GITHUB_OUTPUT"
+          else
+            echo 'ref=prod' >> "$GITHUB_OUTPUT"
+          fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: prod
+          ref: ${{ steps.baseline.outputs.ref }}
           persist-credentials: false
-      - name: Does the production ref carry the platform?
+      - name: Does the baseline carry the platform?
         id: production
         run: |
           if [ -d platform/packages/api ]; then
             echo 'usable=true' >> "$GITHUB_OUTPUT"
           else
+            # Production still runs a pre-monorepo revision, so there is no platform code to test
+            # against: the schema is checked, the code is not. That gap closes with the first
+            # release from this repository, after which this branch stops being taken.
             echo 'usable=false' >> "$GITHUB_OUTPUT"
-            echo '::warning::The production ref predates the platform, so this check has no baseline yet. It starts comparing once the prod branch is advanced past the platform merge.'
+            echo '::warning::The compatibility baseline predates the platform, so the production code was not exercised against the migrated schema. This stops once prod carries the platform.'
           fi
       - if: steps.production.outputs.usable == 'true'
         uses: voidzero-dev/setup-vp@1b32467adbe183473499fd9d5d372c3ed9641754 # v1.18.0

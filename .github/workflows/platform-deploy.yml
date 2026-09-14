@@ -19,6 +19,10 @@ jobs:
   ci:
     if: ${{ vars.VOID_PLATFORM_DEPLOY_ENABLED == 'true' }}
     uses: ./.github/workflows/platform-ci.yml
+    with:
+      # Every production trigger runs the schema-compatibility guard, whichever ref the
+      # dispatch came from.
+      require-schema-compat: true
     permissions:
       contents: read
 
