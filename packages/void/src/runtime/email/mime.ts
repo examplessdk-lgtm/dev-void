@@ -66,12 +66,14 @@ const MAX_ATTACHMENT_BYTES_TOTAL: number = Math.floor((MAX_MESSAGE_BYTES * 3) / 
 export const MAX_RECIPIENTS: number = 100;
 
 /**
- * Cap on one parsed address. RFC 5321 §4.5.3.1 allows a 64-octet local part
- * and a 255-octet domain, so nothing over 320 characters can be delivered;
- * the platform proxy applies the same `MAX_RECIPIENT_LENGTH` to the same
- * parsed address. A display name is not bounded — it is folded or encoded
- * into legal header lines at any length, and the tokenizers below keep that
- * cost linear.
+ * Pre-parse cap on one parsed address, in characters. RFC 5321 §4.5.3.1
+ * allows a 64-octet local part and a 255-octet domain, so nothing over 320
+ * characters can be delivered; the platform proxy applies the same
+ * `MAX_RECIPIENT_LENGTH` to the same parsed address. This is the bound on
+ * the WORK — it is checked before the address is scanned or encoded — not
+ * the deliverability bound, which is `MAX_ADDRESS_OCTETS` below. A display
+ * name is not bounded — it is folded or encoded into legal header lines at
+ * any length, and the tokenizers below keep that cost linear.
  */
 export const MAX_ADDRESS_LENGTH: number = 320;
 
@@ -92,6 +94,26 @@ export const MAX_ADDRESS_LENGTH: number = 320;
  * was accepted.
  */
 export const MAX_LOCAL_PART_OCTETS: number = 64;
+
+/**
+ * Cap on the whole parsed address, in UTF-8 OCTETS. RFC 5321 §4.5.3.1.3 sets
+ * 256 octets as the longest forward-path every receiver MUST accept,
+ * "including the punctuation and element separators" — the path is
+ * `<local@domain>`, so the address inside it is at most 254 (RFC 5321 errata
+ * 1690, the widely cited 254-character maximum). The 320-character bound
+ * above is the sum of the two component maxima, not a path any MTA must
+ * take: `a@` followed by a 255-octet domain is 257 characters, passed the
+ * total-length and local-part checks, and was captured as a success under
+ * `void dev` and by the test harness. The platform proxy does not check it
+ * either — its `MAX_RECIPIENT_LENGTH` is the same 320.
+ *
+ * This one check also closes the domain rule (§4.5.3.1.2, 255 octets): with
+ * the address at most 254 octets and the local part at least 1, the domain
+ * is at most 252, so it needs no check of its own. Counted in octets for the
+ * reason `MAX_LOCAL_PART_OCTETS` is — the address rules admit non-ASCII
+ * (SMTPUTF8, RFC 6531), which keeps RFC 5321's limits as octet counts.
+ */
+export const MAX_ADDRESS_OCTETS: number = 254;
 
 const CRLF = '\r\n';
 const ASCII_PRINTABLE = /^[\x20-\x7e]*$/;
@@ -195,6 +217,15 @@ export function validateAddressParts(field: string, email: string, name?: string
     throw new MimeError(
       fieldErrorCode(field),
       `${field}: local part is ${localOctets} octets, over the ${MAX_LOCAL_PART_OCTETS}-octet limit in RFC 5321 §4.5.3.1.1.`,
+    );
+  }
+  // Same bound on the encode; see `MAX_ADDRESS_OCTETS` for why the whole
+  // address is checked and the domain is not.
+  const addressOctets = new TextEncoder().encode(email).length;
+  if (addressOctets > MAX_ADDRESS_OCTETS) {
+    throw new MimeError(
+      fieldErrorCode(field),
+      `${field}: address is ${addressOctets} octets, over the ${MAX_ADDRESS_OCTETS}-octet limit in RFC 5321 §4.5.3.1.3.`,
     );
   }
   if (name !== undefined) {

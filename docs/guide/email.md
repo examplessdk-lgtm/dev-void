@@ -82,7 +82,7 @@ For SaaS sending to arbitrary end-users (every signup gets a welcome email), the
 | `headers`     | `Record<string, string>`     | Custom headers; reserved headers (From, Date, etc.) are ignored. |
 | `attachments` | `Attachment[]`               | See [Attachments](#attachments).                                 |
 
-At most 100 recipients across `to`, `cc` and `bcc` per call, and each address is at most 320 characters with a local part (before the `@`) of at most 64 UTF-8 octets (RFC 5321). All three are checked before anything is built and return `INVALID_TO`. Custom header names must be RFC 5322 field names (printable ASCII, no colon); a name too long to fit a 998-octet line — a field name cannot be folded — is rejected with `MIME_ERROR` before anything is built.
+At most 100 recipients across `to`, `cc` and `bcc` per call, and each address is at most 254 UTF-8 octets with a local part (before the `@`) of at most 64 UTF-8 octets (RFC 5321: a 256-octet forward-path `<local@domain>` and a 64-octet local part are the longest every receiver must accept). All three are checked before anything is built and return `INVALID_TO`. Custom header names must be RFC 5322 field names (printable ASCII, no colon); a name too long to fit a 998-octet line — a field name cannot be folded — is rejected with `MIME_ERROR` before anything is built.
 
 `Address` accepts either a string (`"hello@acme.dev"` or `"Name <hello@acme.dev>"`) or an object (`{ email, name? }`). Display names with non-ASCII characters are RFC 2047 encoded automatically.
 
@@ -536,6 +536,8 @@ Inside the worker, a message reaches your handlers exactly as addressed — `sup
 ### Sending
 
 `sendEmail()` uses the worker's own `SEND_EMAIL` binding; there is no proxy hop and no platform quota — Cloudflare's own limits apply, reported as `QUOTA_EXCEEDED`. The `void email usage`, `logs`, `destinations`, `allow` and `disallow` commands are platform commands and do not apply here.
+
+Setup is per mail domain, not per direction: any use of email — an `email/` handler or a `void/email` import — sets the domain up for routing and sending together, so an app that only receives is still onboarded for Email Sending and still gets the binding; Cloudflare meters outbound per message, so a domain that never sends costs nothing, and `replyEmail` goes through Email Routing's own `message.reply()`, which needs no onboarding either way.
 
 Who you can send to depends on your Workers plan. Onboarding the mail domain for Email Sending is what allows **arbitrary recipients**, and it needs **Workers Paid** — billing is dashboard-only, so Void cannot do that for you. On Workers Free the onboarding row fails and the deploy prints:
 

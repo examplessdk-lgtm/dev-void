@@ -1014,6 +1014,30 @@ describe('harness enforces the proxy action bounds, like production', () => {
     expect(harness.forwards).toEqual([]);
   });
 
+  it('refuses a forward address over the 254-octet path limit, by the sendEmail rule', async () => {
+    // Under the 320 total above, so `forward()`'s own pre-check passes and
+    // the refusal comes from `validateAddressParts` — the rule an outbound
+    // `to` gets, inherited rather than mirrored.
+    let thrown: unknown;
+    const label = 'b'.repeat(63);
+    const over = `a@${[label, label, label, label].join('.')}`;
+    expect(over).toHaveLength(257);
+    const harness = harnessFor(async (message) => {
+      try {
+        await message.forward(over);
+      } catch (e) {
+        thrown = e;
+      }
+    });
+    await harness.deliver(DELIVERY);
+    expect(thrown).toBeInstanceOf(MimeError);
+    expect((thrown as MimeError).code).toBe('INVALID_TO');
+    expect((thrown as MimeError).message).toBe(
+      'to: address is 257 octets, over the 254-octet limit in RFC 5321 §4.5.3.1.3.',
+    );
+    expect(harness.forwards).toEqual([]);
+  });
+
   it('refuses a forward header record with a CRLF in a value at the call, recording nothing for it', async () => {
     let thrown: unknown;
     const harness = harnessFor(async (message) => {

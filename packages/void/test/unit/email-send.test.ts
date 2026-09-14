@@ -517,6 +517,32 @@ describe('sendEmail (from defaulting)', () => {
       harness.dispose();
     }
   });
+
+  it('rejects a 257-octet address before capture, whatever its local part', async () => {
+    // `a@` + a 255-octet domain is under the 320 total and the 64-octet
+    // local part, and used to be captured as a success — under `void dev`
+    // and here — when RFC 5321 §4.5.3.1.3 caps the path at 256 octets.
+    const label = 'b'.repeat(63);
+    const over = `a@${[label, label, label, label].join('.')}`;
+    expect(over).toHaveLength(257);
+    const harness = createEmailTestHarness();
+    try {
+      const from = await sendEmail({ from: over, to: 'b@y.dev', subject: 's', text: 't' });
+      expect(from.ok).toBe(false);
+      if (!from.ok && 'error' in from) {
+        expect(from.error.code).toBe('INVALID_FROM');
+        expect(from.error.message).toMatch(/address is 257 octets, over the 254-octet limit/);
+      }
+      const to = await sendEmail({ from: 'a@x.dev', to: over, subject: 's', text: 't' });
+      expect(to.ok).toBe(false);
+      if (!to.ok && 'error' in to) {
+        expect(to.error.code).toBe('INVALID_TO');
+      }
+      expect(harness.messages).toHaveLength(0);
+    } finally {
+      harness.dispose();
+    }
+  });
 });
 
 describe('sendEmail (proxy round trip)', () => {
