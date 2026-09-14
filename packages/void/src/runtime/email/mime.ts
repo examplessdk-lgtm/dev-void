@@ -166,6 +166,24 @@ function validateAddressParts(field: string, email: string, name?: string): void
   }
   if (name !== undefined) {
     rejectCRLF(`${field} display name`, name);
+    // An ASCII name with specials is rendered as one quoted-string, which
+    // `foldHeader` never splits: ` "name"` is a line of at least 3 octets
+    // plus the name. Same reason as the filename guard above — the escaping
+    // in `formatAddress` costs heap per escaped character, and the line
+    // check that would refuse it runs only after everything is rendered.
+    // A non-ASCII name becomes encoded-words and folds; a plain name folds
+    // at its spaces; neither is bounded here.
+    if (
+      ASCII_PRINTABLE.test(name) &&
+      RFC5322_SPECIALS.test(name) &&
+      name.length + QUOTED_NAME_LINE_OVERHEAD > MAX_LINE_OCTETS
+    ) {
+      throw new MimeError(
+        fieldErrorCode(field),
+        `${field}: display name is ${name.length} characters and must be quoted, which cannot be folded, ` +
+          `so its line would exceed the ${MAX_LINE_OCTETS}-octet limit in RFC 5322 §2.1.1. Shorten it.`,
+      );
+    }
     // `@` in a display name almost always means a typo like
     // `a@x.dev<b@evil.dev>` got mis-parsed as `name=a@x.dev,
     // email=b@evil.dev`. Reject so the caller sees a clear validation
@@ -295,6 +313,20 @@ async function normalizeAttachment(att: Attachment): Promise<NormalizedAttachmen
     throw new MimeError('MIME_ERROR', 'attachment: missing filename.');
   }
   rejectCRLF('attachment filename', att.filename);
+  // A quoted parameter never folds — `foldHeader` keeps a quoted-string
+  // whole — so ` filename="…"` is one line of at least 12 octets plus the
+  // filename. Refuse here what the post-render line check would refuse
+  // anyway: `quoteParam` costs heap per escaped character, and a filename
+  // of ~1.7M quotes killed a 128 MB isolate before that check could run.
+  // `length` never exceeds the UTF-8 octet count, so this cannot reject a
+  // filename whose line would have fit.
+  if (att.filename.length + QUOTED_FILENAME_LINE_OVERHEAD > MAX_LINE_OCTETS) {
+    throw new MimeError(
+      'MIME_ERROR',
+      `attachment filename is ${att.filename.length} characters; a quoted \`filename=\` parameter cannot be folded, ` +
+        `so its line would exceed the ${MAX_LINE_OCTETS}-octet limit in RFC 5322 §2.1.1. Shorten the filename.`,
+    );
+  }
   if (att.contentType !== undefined) {
     rejectCRLF('attachment contentType', att.contentType);
   }
@@ -622,6 +654,10 @@ function foldHeader(name: string, value: string): string {
 
 /** RFC 5322 §2.1.1: each line MUST be at most 998 octets, excluding CRLF. */
 const MAX_LINE_OCTETS = 998;
+/** ` filename="` + `"`: the shortest line a quoted filename parameter can fold onto. */
+const QUOTED_FILENAME_LINE_OVERHEAD = 12;
+/** ` "` + `"`: the shortest line a quoted display name can fold onto. */
+const QUOTED_NAME_LINE_OVERHEAD = 3;
 
 /**
  * First line of `text` that exceeds the octet limit, if any.
@@ -966,9 +1002,39 @@ function minAddressOctets(addr: { email: string; name?: string }): number {
 }
 
 /**
- * Lower bound on the octets of every top header `buildMime` renders from
- * caller-supplied values: `Subject`, the custom headers, and the addresses in
- * `From`, `To`, `Cc` and `Reply-To`. `Bcc` is never rendered and a reserved
+ * Lower bound on the octets of a value rendered VERBATIM — never through
+ * `encodeWord` — into a header `foldHeader` may still fold: `In-Reply-To`,
+ * `References`, and an attachment part's `Content-Type` media type and
+ * `Content-ID`. Every non-WSP UTF-16 code unit is at least one octet of
+ * UTF-8; a WSP run may collapse to a single space when the line folds, so
+ * none is charged. The `<>` around a Content-ID and the fold's `CRLF SP`
+ * only add.
+ *
+ * `minHeaderValueOctets` cannot stand in here: a non-ASCII value sends it
+ * down the encoded-word formula (4.8 octets per CJK character) while these
+ * values render as raw UTF-8 (3), so it would overshoot and could reject a
+ * message that fits.
+ */
+function minVerbatimOctets(value: string): number {
+  let octets = 0;
+  for (let i = 0; i < value.length; i++) {
+    const c = value.charCodeAt(i);
+    if (c !== 0x20 && c !== 0x09) {
+      octets += 1;
+    }
+  }
+  return octets;
+}
+
+/**
+ * Lower bound on the octets of every header `buildMime` renders from
+ * caller-supplied values: `Subject`, the custom headers, the addresses in
+ * `From`, `To`, `Cc` and `Reply-To`, the `In-Reply-To` / `References` pair
+ * `replyEmail` threads through (remote-sender controlled, up to the whole
+ * inbound message), and each attachment part's `Content-Type` and
+ * `Content-ID`. The filename is not a term: `normalizeAttachment` already
+ * refuses one that could not fold onto a legal line, so it is under a
+ * kilobyte by the time it gets here. `Bcc` is never rendered and a reserved
  * custom header is dropped, so neither is counted — charging either could
  * reject a message that fits. The fixed `Name: ` and `CRLF` per header are
  * omitted for the same reason a lower bound may omit any term.
@@ -989,6 +1055,18 @@ function minHeaderOctets(email: NormalizedEmail): number {
   }
   if (email.replyTo) {
     octets += minAddressOctets(email.replyTo);
+  }
+  if (email.threading?.inReplyTo) {
+    octets += minVerbatimOctets(email.threading.inReplyTo);
+  }
+  if (email.threading?.references) {
+    octets += minVerbatimOctets(email.threading.references);
+  }
+  for (const att of email.attachments) {
+    octets += minVerbatimOctets(att.contentType);
+    if (att.contentId) {
+      octets += minVerbatimOctets(att.contentId);
+    }
   }
   return octets;
 }

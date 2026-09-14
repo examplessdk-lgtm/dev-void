@@ -437,6 +437,82 @@ describe('normalizeEmail', () => {
     expect(email.to.length + email.cc.length + email.bcc.length).toBe(MAX_RECIPIENTS);
   });
 
+  it('refuses a quoted filename that could never fold onto a legal line, before rendering it', async () => {
+    // ` filename="…"` is the shortest line a quoted parameter can land on:
+    // 12 octets plus the name. The post-render line check refuses the same
+    // input, but only after `quoteParam` has escaped it — measured, a
+    // filename of ~1.7M quote characters killed a 128 MB isolate there.
+    const longest = 'a'.repeat(998 - 12);
+    const { text } = await build({
+      from: 'a@x.dev',
+      to: 'b@y.dev',
+      subject: 's',
+      text: 't',
+      attachments: [{ filename: longest, content: 'x' }],
+    });
+    expect(text).toContain(`filename="${longest}"`);
+    await expect(
+      build({
+        from: 'a@x.dev',
+        to: 'b@y.dev',
+        subject: 's',
+        text: 't',
+        attachments: [{ filename: `${longest}b`, content: 'x' }],
+      }),
+    ).rejects.toThrow(
+      /attachment filename is 987 characters; a quoted `filename=` parameter cannot be folded/,
+    );
+    // The guard is cheap on the input that used to be fatal.
+    const started = performance.now();
+    await expect(
+      build({
+        from: 'a@x.dev',
+        to: 'b@y.dev',
+        subject: 's',
+        text: 't',
+        attachments: [{ filename: '"'.repeat(2_000_000), content: 'x' }],
+      }),
+    ).rejects.toThrow(/cannot be folded/);
+    expect(performance.now() - started).toBeLessThan(1000);
+  });
+
+  it('refuses a quoted display name that could never fold onto a legal line', async () => {
+    // Only a name that must be QUOTED (ASCII with specials) is one
+    // unbreakable token; a plain name folds at its spaces and a non-ASCII
+    // name becomes encoded-words, so neither is bounded here.
+    const plain = 'word '.repeat(300).trim();
+    await expect(
+      build({ from: 'a@x.dev', to: { email: 'b@y.dev', name: plain }, subject: 's', text: 't' }),
+    ).resolves.toBeTruthy();
+    const quotedFits = `x,${'a'.repeat(998 - 3 - 2)}`;
+    await expect(
+      build({
+        from: 'a@x.dev',
+        to: { email: 'b@y.dev', name: quotedFits },
+        subject: 's',
+        text: 't',
+      }),
+    ).resolves.toBeTruthy();
+    await expect(
+      build({
+        from: 'a@x.dev',
+        to: { email: 'b@y.dev', name: `${quotedFits}b` },
+        subject: 's',
+        text: 't',
+      }),
+    ).rejects.toThrow(
+      /to: display name is 996 characters and must be quoted, which cannot be folded/,
+    );
+    await expect(
+      build({
+        from: 'a@x.dev',
+        to: { email: 'b@y.dev', name: '"'.repeat(2_000_000) },
+        subject: 's',
+        text: 't',
+      }),
+    ).rejects.toThrow(/cannot be folded/);
+  });
+
   it('refuses an address over MAX_ADDRESS_LENGTH, with the code for its field', async () => {
     // RFC 5321 §4.5.3.1: 64-octet local part + `@` + 255-octet domain.
     const longest = `${'a'.repeat(64)}@${'b'.repeat(251)}.dev`;
@@ -1099,6 +1175,80 @@ describe('buildMime header size projection', () => {
       text: 'hi',
     });
     expect(text).toContain('Subject: a b\r\n');
+  });
+
+  // `replyEmail` threads `In-Reply-To` and `References` straight off the
+  // INBOUND message, so a remote sender controls them up to the whole raw
+  // message. They are rendered verbatim — never `encodeWord`ed — but folded
+  // and joined like any other header, so an oversized chain was rendered in
+  // full before the post-render check saw it.
+  it('counts the threading headers', async () => {
+    // 900k twelve-character ids: 10.8 MB of non-WSP before a single space.
+    await expectProjected({
+      from: 'a@x.dev',
+      to: 'b@y.dev',
+      subject: 's',
+      text: 'hi',
+      threading: { references: '<abcdefgh@x> '.repeat(900_000).trimEnd() },
+    });
+    await expectProjected({
+      from: 'a@x.dev',
+      to: 'b@y.dev',
+      subject: 's',
+      text: 'hi',
+      threading: { inReplyTo: `<${'x'.repeat(11 * 1024 * 1024)}@x>` },
+    });
+  });
+
+  // An attachment part's own headers are built outside `foldHeader`'s
+  // encoded path: `Content-Type: <contentType>; name="<filename>"`,
+  // `Content-Disposition: <disposition>; filename="<filename>"` and
+  // `Content-ID: <contentId>`. Each of the three values is charged.
+  it('counts attachment metadata that has no bound of its own', async () => {
+    const over = 'x'.repeat(11 * 1024 * 1024);
+    await expectProjected({
+      from: 'a@x.dev',
+      to: 'b@y.dev',
+      subject: 's',
+      text: 'hi',
+      attachments: [{ filename: 'f.txt', content: 'x', contentType: over }],
+    });
+    await expectProjected({
+      from: 'a@x.dev',
+      to: 'b@y.dev',
+      subject: 's',
+      text: 'hi',
+      attachments: [{ filename: 'f.txt', content: 'x', contentId: over }],
+    });
+    // The filename is not a projection term: `normalizeAttachment` refuses
+    // one that could never fold onto a legal line, long before this.
+  });
+
+  it('never rejects a References chain that fits, and never charges the whitespace it folds away', async () => {
+    // A 5 MB chain of short ids is a legal message: it folds at its spaces
+    // into 76-column lines and renders under the cap.
+    const id = '<abcdefgh@x>';
+    const chain = Array.from({ length: Math.floor((5 * 1024 * 1024) / (id.length + 1)) }, () => id);
+    const { raw, text } = await build({
+      from: 'a@x.dev',
+      to: 'b@y.dev',
+      subject: 's',
+      text: 'hi',
+      threading: { references: chain.join(' ') },
+    });
+    expect(raw.byteLength).toBeLessThanOrEqual(MAX_MESSAGE_BYTES);
+    expect(unfoldHeader(text, 'References')).toBe(chain.join(' '));
+    // A long chain is re-joined from its ids by single spaces, so 11 MiB of
+    // spaces between two ids renders as one; a bound that charged them
+    // would reject a message that fits.
+    const spaced = await build({
+      from: 'a@x.dev',
+      to: 'b@y.dev',
+      subject: 's',
+      text: 'hi',
+      threading: { references: `<a@x>${' '.repeat(11 * 1024 * 1024)}<b@x>` },
+    });
+    expect(spaced.text).toContain('References: <a@x> <b@x>\r\n');
   });
 
   it('never rejects a header-heavy message that fits, and leaves the final check as the authority', async () => {
