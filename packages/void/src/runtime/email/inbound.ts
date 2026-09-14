@@ -569,15 +569,52 @@ function fitsHeaderLine(name: string, value: string | undefined): value is strin
   if (!value) {
     return false;
   }
-  const encoder = new TextEncoder();
-  // A predicate, not a maximum. Spreading the token list into `Math.max`
-  // throws `RangeError` past ~123k arguments (measured on workerd), and a
-  // remote sender reaches that with a `References` chain of about 4.4 MB, or
-  // an all-ASCII `Subject` of about 240 KB — both well inside
-  // MAX_MESSAGE_BYTES. This guard exists to stop a hostile header making the
-  // app's reply throw, so it must not be the thing that throws.
+  // A predicate, not a maximum, in one pass that allocates nothing. Spreading
+  // the token list into `Math.max` throws `RangeError` past ~123k arguments
+  // (measured on workerd), and `split(/\s+/)` materializes every token before
+  // `.some()` looks at the first — over 30 bytes of heap each, so 10 MiB of
+  // two-character ids (3.5M tokens, inside MAX_MESSAGE_BYTES) measured 134 MB
+  // and terminates a 128 MB isolate before the predicate can answer. This
+  // guard exists to stop a hostile header making the app's reply throw, so it
+  // must be neither the thing that throws nor the thing that runs out of
+  // memory.
+  //
+  // A run ends only at SP or HTAB. That is the whitespace `foldHeader` folds
+  // at (§3.2.2 FWS), and a threading value is emitted verbatim, so treating
+  // the rest of `\s` (NBSP, FF, VT …) as a break passed a value the folder
+  // then could not break, and `buildMime` rejected the over-long line — the
+  // throw this predicate exists to prevent. Counting through them is the
+  // strict direction: it can only refuse a value, never pass one that fails.
   const budget = 998 - (name.length + 2);
-  return !value.split(/\s+/).some((token) => encoder.encode(token).length > budget);
+  let run = 0;
+  for (let i = 0; i < value.length; i++) {
+    const c = value.charCodeAt(i);
+    if (c === 0x20 || c === 0x09) {
+      run = 0;
+      continue;
+    }
+    // UTF-8 octets, as `TextEncoder` would count them: a surrogate pair is one
+    // 4-octet code point, and a lone surrogate encodes as U+FFFD (3 octets).
+    if (c < 0x80) {
+      run += 1;
+    } else if (c < 0x800) {
+      run += 2;
+    } else if (
+      c >= 0xd800 &&
+      c <= 0xdbff &&
+      i + 1 < value.length &&
+      (value.charCodeAt(i + 1) & 0xfc00) === 0xdc00
+    ) {
+      run += 4;
+      i++;
+    } else {
+      run += 3;
+    }
+    if (run > budget) {
+      return false;
+    }
+  }
+  return true;
 }
 
 export interface ReplyEmailOptions {
@@ -665,26 +702,35 @@ function decodeRfc2047(value: string): string {
     return value;
   }
   try {
-    return value.replace(
-      /=\?([\w-]+)\?([BbQq])\?([^?]*)\?=(?:\s+(?==\?))?/g,
-      (_match, charset: string, enc: string, payload: string) => {
-        const bytes =
-          enc.toUpperCase() === 'B' ? base64Decode(payload) : quotedPrintableDecode(payload);
-        // Honor the charset declared in the encoded-word. Q-encoded
-        // ISO-8859-1 / Windows-1252 subjects are still common in mail
-        // from older systems; decoding them as UTF-8 mojibakes any
-        // byte ≥ 0x80. TextDecoder rejects unknown labels by throwing,
-        // so fall back to UTF-8 only when the requested charset isn't
-        // supported (better than leaving the raw encoded-word in place).
-        let decoder: TextDecoder;
-        try {
-          decoder = new TextDecoder(charset || 'utf-8', { fatal: false });
-        } catch {
-          decoder = new TextDecoder('utf-8', { fatal: false });
-        }
-        return decoder.decode(bytes);
-      },
-    );
+    // One encoded-word at a time. `replace` with a callback collects every
+    // match — result array, captures and all — before the callback runs
+    // once, so a 10 MiB subject of tiny encoded-words (750k of them, inside
+    // MAX_MESSAGE_BYTES) needed 138 MB on the reply path and terminated a
+    // 128 MB isolate. `matchAll` is lazy: the same path needs 35 MB, and what
+    // is kept is the decoded output.
+    const parts: Array<string> = [];
+    let last = 0;
+    for (const m of value.matchAll(/=\?([\w-]+)\?([BbQq])\?([^?]*)\?=(?:\s+(?==\?))?/g)) {
+      const [match, charset, enc, payload] = m;
+      const bytes =
+        enc.toUpperCase() === 'B' ? base64Decode(payload) : quotedPrintableDecode(payload);
+      // Honor the charset declared in the encoded-word. Q-encoded
+      // ISO-8859-1 / Windows-1252 subjects are still common in mail
+      // from older systems; decoding them as UTF-8 mojibakes any
+      // byte ≥ 0x80. TextDecoder rejects unknown labels by throwing,
+      // so fall back to UTF-8 only when the requested charset isn't
+      // supported (better than leaving the raw encoded-word in place).
+      let decoder: TextDecoder;
+      try {
+        decoder = new TextDecoder(charset || 'utf-8', { fatal: false });
+      } catch {
+        decoder = new TextDecoder('utf-8', { fatal: false });
+      }
+      parts.push(value.slice(last, m.index), decoder.decode(bytes));
+      last = m.index + match.length;
+    }
+    parts.push(value.slice(last));
+    return parts.join('');
   } catch {
     return value;
   }

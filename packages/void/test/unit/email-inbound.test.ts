@@ -1169,6 +1169,118 @@ describe('reply threading survives a hostile inbound header', () => {
     ).toBeLessThanOrEqual(998);
   });
 
+  // The line guard measures octets, the way the wire does, and the only
+  // break it may count on is SP or HTAB — the whitespace `foldHeader` folds
+  // at. The chain is carried when every id fits and dropped for the bare
+  // message-id otherwise, and the answer must arrive in one pass with no
+  // per-id allocation: a remote sender can put 10 MiB of ids in one header.
+  const MESSAGE_ID = '<abc@remote.dev>';
+
+  async function replyText(references: string, messageId = MESSAGE_ID): Promise<string> {
+    const message = inbound({ references, 'message-id': messageId, subject: 'hi' });
+    const reply = await buildReplyMessage(message, { text: 'thanks', from: 'acme+noreply@x.dev' });
+    return new TextDecoder().decode(reply.raw);
+  }
+
+  function widestLineOctets(text: string): number {
+    const encoder = new TextEncoder();
+    return text.split('\r\n').reduce((max, line) => Math.max(max, encoder.encode(line).length), 0);
+  }
+
+  it('keeps an id that exactly fills the line, and drops one octet more', async () => {
+    // `References: ` is 12 octets, so 986 is the widest id one line carries.
+    // With no Message-ID to append, the header is that one id, unfolded —
+    // the only shape where the guard's budget is the wire line exactly. In a
+    // chain every id is charged the same 12 octets although a folded
+    // continuation costs 1, so the guard is conservative there, never loose.
+    const atBudget = `<${'x'.repeat(984)}>`;
+    const overBudget = `<${'x'.repeat(985)}>`;
+
+    const kept = await replyText(atBudget, '');
+    expect(kept).toContain(`References: ${atBudget}\r\n`);
+    expect(widestLineOctets(kept)).toBe(998);
+
+    const dropped = await replyText(overBudget, '');
+    expect(dropped).not.toContain('References:');
+    expect(widestLineOctets(dropped)).toBeLessThanOrEqual(998);
+  });
+
+  it('measures an id in UTF-8 octets, not UTF-16 units', async () => {
+    // 495 units but 988 octets: a code-unit count would pass it.
+    const id = `<${'é'.repeat(493)}>`;
+    const text = await replyText(id);
+    expect(text).not.toContain(id);
+    expect(text).toContain(`References: ${MESSAGE_ID}`);
+    expect(widestLineOctets(text)).toBeLessThanOrEqual(998);
+  });
+
+  it('counts a surrogate pair as one four-octet code point', async () => {
+    // A `Headers` value is a ByteString, so nothing above U+00FF arrives this
+    // way in production; the count still has to agree with `TextEncoder`,
+    // which is what `buildMime` measures the rendered line with.
+    const id = `<${'😀'.repeat(247)}>`; // 496 units, 990 octets
+    const headers = new Map([
+      ['subject', 'hi'],
+      ['message-id', MESSAGE_ID],
+      ['references', id],
+    ]);
+    const message = {
+      from: 'sender@remote.dev',
+      to: 'support@app.dev',
+      headers: { get: (name: string) => headers.get(name.toLowerCase()) ?? null },
+    } as unknown as ForwardableEmailMessage;
+    const reply = await buildReplyMessage(message, { text: 'thanks', from: 'acme+noreply@x.dev' });
+    const text = new TextDecoder().decode(reply.raw);
+    expect(text).not.toContain(id);
+    expect(text).toContain(`References: ${MESSAGE_ID}`);
+  });
+
+  it('keeps a multibyte id that fits once encoded', async () => {
+    const id = `<${'é'.repeat(492)}>`; // 494 units, 986 octets
+    const text = await replyText(id, '');
+    expect(text).toContain(`References: ${id}\r\n`);
+    expect(widestLineOctets(text)).toBe(998);
+  });
+
+  it('does not count whitespace the folder cannot fold at as a break', async () => {
+    // `\s` matches NBSP and FF, but RFC 5322 §3.2.2 folds only at SP/HTAB and
+    // so does `foldHeader`. Splitting at either used to pass two fitting ids
+    // that then landed on one 1222-octet line, and `buildMime` threw.
+    const id = `<${'x'.repeat(600)}@remote.dev>`;
+    for (const separator of [' ', '\f']) {
+      const text = await replyText(`${id}${separator}${id}`);
+      expect(text).not.toContain(id);
+      expect(text).toContain(`References: ${MESSAGE_ID}`);
+      expect(widestLineOctets(text)).toBeLessThanOrEqual(998);
+    }
+  });
+
+  it('threads a chain at the raw cap’s scale, and every line still fits', async () => {
+    // 9 MiB of two-character ids is 3.1M tokens. The reply must carry it: a
+    // per-token allocation here was 34 bytes each, which is the isolate.
+    const chain = 'ab '.repeat((9 * 1024 * 1024) / 3).trimEnd();
+    const text = await replyText(chain);
+    expect(text).toContain(`In-Reply-To: ${MESSAGE_ID}`);
+    expect(text).toContain('References: ab ab ab');
+    expect(text).toContain(` ab ${MESSAGE_ID}`);
+    expect(widestLineOctets(text)).toBeLessThanOrEqual(998);
+  });
+
+  it('answers for a 10 MiB chain in one pass', async () => {
+    // The largest header a remote sender can deliver: MAX_MESSAGE_BYTES of
+    // two-character ids (3.5M tokens), with one over-long id at the very end
+    // so the whole chain is scanned before it is refused. `split(/\s+/)`
+    // materialized 3.5M tokens first — measured at 570 ms and 147 MB, which
+    // terminates a 128 MB isolate; the one-pass scan is 20 ms and 0 bytes.
+    const chain = 'ab '.repeat(Math.floor(MAX_MESSAGE_BYTES / 3)) + `<${HUGE}@remote.dev>`;
+    const started = performance.now();
+    const text = await replyText(chain);
+    const elapsed = performance.now() - started;
+    expect(text).not.toContain(HUGE);
+    expect(text).toContain(`References: ${MESSAGE_ID}`);
+    expect(elapsed).toBeLessThan(300);
+  });
+
   it('still threads a normal Message-ID', async () => {
     const message = inbound({ 'message-id': '<abc123@remote.dev>', subject: 'hi' });
 
@@ -1259,6 +1371,19 @@ describe('reply subject survives a hostile inbound header', () => {
       from: FROM,
     });
     expect(reply.subject).toBe('Re: good subject');
+  });
+
+  it('decodes a subject of 750k encoded-words one word at a time', async () => {
+    // MAX_MESSAGE_BYTES of `=?UTF-8?Q?a?=` is the largest subject a remote
+    // sender can deliver. `replace` with a callback collected all 750k
+    // matches before decoding the first — measured at 138 MB on the whole
+    // reply path, which is the isolate; the lazy scan needs 35 MB. The
+    // runner's heap is not capped, so this pins the behaviour: adjacent
+    // encoded-words join, the decoded subject is one 750k-character ASCII
+    // token no line can carry, and the reply falls back to a bare `Re:`.
+    const subject = '=?UTF-8?Q?a?= '.repeat(Math.floor(MAX_MESSAGE_BYTES / 14));
+    const reply = await buildReplyMessage(inbound(subject), { text: 'thanks', from: FROM });
+    expect(reply.subject).toBe('Re:');
   });
 });
 
