@@ -1,0 +1,19 @@
+packages/void/src/cli/platform-management.ts
+  s_ca65f2d4bfdbc3::t_57bc7ef1eca9b4 825-830,923-937
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "5de5795ad78736b394f21b5e0c5d59f4f9b995a6",
+  "prompts": {},
+  "sessions": {
+    "s_ca65f2d4bfdbc3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09f1b-55c6-7d41-95ce-43b638f8d13b",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
