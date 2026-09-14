@@ -1,0 +1,19 @@
+platform/packages/api/src/build-manager.ts
+  s_2c6b90668806a9::t_08b2e6e1cd067d 271
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "029c65f943ced49a3d554c50c48c3e8ab226662d",
+  "prompts": {},
+  "sessions": {
+    "s_2c6b90668806a9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09f4a-b15c-7430-9518-0c89838cfba2",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
