@@ -591,6 +591,110 @@ describe('Cloudflare version activation', () => {
     ]);
   });
 
+  it('replays the previous snapshot addresses when managed-queue cleanup rebuilds it', async () => {
+    // `queueConsumerCleanup` is non-empty on EVERY deploy of a project with Void-managed
+    // consumers (`readWranglerManagedQueueCleanupCandidates` includes the current consumers
+    // for schema-1 upgrades), so the rebuilt previous config is what `stabilize…` replays when
+    // a concurrent rollback returns traffic to the previous version. Wrangler's Email Routing
+    // plan takes no "previous" list — it reconciles to exactly the replayed `addresses`, and
+    // skips the plan when the key is absent — so the copy must keep that version's own value:
+    // absent, `[]`, and a list are three different plans.
+    const replayed = async (
+      previousAddresses: ReadonlyArray<string> | undefined,
+    ): Promise<Record<string, unknown>> => {
+      const activation = deferred<CloudflareCommandResult>();
+      const activationStarted = deferred<void>();
+      let activeVersionId = CURRENT;
+      let appliedTriggerConfig: Record<string, unknown> | undefined;
+      const previousTriggerConfig = {
+        workers_dev: true,
+        preview_urls: true,
+        routes: [],
+        crons: [],
+        queueConsumers: [],
+        workflows: [],
+        ...(previousAddresses === undefined ? {} : { addresses: previousAddresses }),
+      };
+      const runWrangler = async (args: Array<string>) => {
+        if (args[0] === 'deployments') {
+          return ok(
+            JSON.stringify({ versions: [{ version_id: activeVersionId, percentage: 100 }] }),
+          );
+        }
+        if (args[0] === 'versions' && args[1] === 'upload') {
+          return ok(
+            `Worker Version ID: ${NEXT}\nVersion Preview URL: https://ready.example.workers.dev`,
+          );
+        }
+        if (args[0] === 'versions' && args[1] === 'deploy') {
+          activeVersionId = NEXT;
+          activationStarted.resolve(undefined);
+          return activation.promise;
+        }
+        if (args[0] === 'versions' && args[1] === 'list') {
+          return ok(
+            JSON.stringify([
+              {
+                id: CURRENT,
+                annotations: {
+                  'workers/message': encodeCloudflareVersionMessage([], previousTriggerConfig),
+                },
+              },
+            ]),
+          );
+        }
+        if (args[0] === 'triggers') {
+          const configIndex = args.indexOf('-c');
+          appliedTriggerConfig = JSON.parse(readFileSync(args[configIndex + 1]!, 'utf8')) as Record<
+            string,
+            unknown
+          >;
+          return ok();
+        }
+        if (args[0] === 'queues') {
+          return ok();
+        }
+        throw new Error(`Unexpected command: ${args.join(' ')}`);
+      };
+
+      const pending = activateCloudflareVersion({
+        runWrangler,
+        verifyUploader: () => true,
+        workerName: 'my-worker',
+        message: encodeCloudflareVersionMessage([], {
+          workers_dev: true,
+          preview_urls: true,
+          routes: [],
+          crons: [],
+          queueConsumers: [],
+          workflows: [],
+          addresses: ['billing@mail.acme.com'],
+        }),
+        queueConsumerCleanup: ['jobs'],
+        fetch: async () => Response.json({ ready: true }),
+      });
+      await activationStarted.promise;
+      // A concurrent rollback to the previous version wins before triggers are published.
+      activeVersionId = CURRENT;
+      activation.resolve(ok());
+
+      await expect(pending).resolves.toMatchObject({
+        ok: false,
+        reason: 'deployment-changed',
+        activeVersionId: CURRENT,
+        triggerRepair: 'succeeded',
+      });
+      return appliedTriggerConfig!;
+    };
+
+    expect(await replayed(['support@mail.acme.com'])).toMatchObject({
+      addresses: ['support@mail.acme.com'],
+      queues: { consumers: [{ queue: 'jobs' }] },
+    });
+    expect(await replayed([])).toMatchObject({ addresses: [] });
+    expect(await replayed(undefined)).not.toHaveProperty('addresses');
+  });
+
   it('does not compensate over a concurrent owner after trigger failure', async () => {
     const failedTriggers = deferred<CloudflareCommandResult>();
     const triggerStarted = deferred<void>();

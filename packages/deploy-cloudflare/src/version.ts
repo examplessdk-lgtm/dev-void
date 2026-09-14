@@ -336,6 +336,14 @@ function mergeTriggerCleanupBaselines(
       return true;
     });
   };
+  // The baseline is only ever the `previousTriggerConfig` of `deployCloudflareVersionTriggers`,
+  // which mines it for state the active version no longer wants (queue consumers, workflow
+  // schedules, custom domains); it is never replayed as a version's own config. Email Routing
+  // needs no such subtraction — Wrangler plans deletions from rule ownership, not from a previous
+  // list — so `addresses` here is inert today. Carry it the same way as the other lists (the union
+  // of every published plan) so the baseline stays a faithful record, and keep the key absent when
+  // no version carried a plan: an absent key and `[]` are different plans.
+  const withAddresses = present.filter((config) => config.addresses !== undefined);
   return {
     workers_dev: present.some((config) => config.workers_dev),
     preview_urls: present.some((config) => config.preview_urls),
@@ -343,6 +351,9 @@ function mergeTriggerCleanupBaselines(
     crons: unique(present.flatMap((config) => config.crons)),
     queueConsumers: unique(present.flatMap((config) => config.queueConsumers)),
     workflows: unique(present.flatMap((config) => config.workflows)),
+    ...(withAddresses.length === 0
+      ? {}
+      : { addresses: [...new Set(withAddresses.flatMap((config) => config.addresses ?? []))] }),
   };
 }
 
@@ -377,18 +388,27 @@ function triggerConfigWithQueueConsumerCleanup(
   if (queues.length === 0) {
     return previous;
   }
+  // This copy becomes the previous version's known trigger config, which
+  // `stabilizeCloudflareVersionTriggers` replays verbatim when a concurrent rollback returns
+  // traffic to that version. Spread `previous` so every snapshot field survives — including an
+  // optional one such as `addresses`, where an absent key and `[]` are different Email Routing
+  // plans — rather than re-listing fields and silently dropping a newer one.
+  const base: CloudflareTriggerConfig = previous ?? {
+    workers_dev: false,
+    preview_urls: false,
+    routes: [],
+    crons: [],
+    queueConsumers: [],
+    workflows: [],
+  };
   return {
-    workers_dev: previous?.workers_dev ?? false,
-    preview_urls: previous?.preview_urls ?? false,
-    routes: previous?.routes ?? [],
-    crons: previous?.crons ?? [],
+    ...base,
     queueConsumers: [
-      ...(previous?.queueConsumers ?? []),
+      ...base.queueConsumers,
       ...queues
-        .filter((queue) => !queueConsumerNames(previous?.queueConsumers ?? []).includes(queue))
+        .filter((queue) => !queueConsumerNames(base.queueConsumers).includes(queue))
         .map((queue) => ({ queue })),
     ],
-    workflows: previous?.workflows ?? [],
   };
 }
 
