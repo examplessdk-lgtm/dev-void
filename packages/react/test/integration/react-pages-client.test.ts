@@ -4,6 +4,7 @@ import spawn from 'cross-spawn';
 import { join } from 'pathslash';
 import { chromium, type Browser, type Page } from 'playwright';
 import { describe, expect, it, beforeAll, afterAll } from 'vite-plus/test';
+import { waitForIslandsHydrated } from '../../../../test/browser-helpers.ts';
 import { getPort, waitForServer, killChild } from '../../../../test/integration-helpers.ts';
 
 declare global {
@@ -914,7 +915,7 @@ function registerIslandTests(getBase: () => string) {
     const page = await newPage();
     try {
       await page.goto(BASE + '/blog');
-      await page.waitForSelector('[data-island][data-hydrated="true"]');
+      await waitForIslandsHydrated(page, 2);
 
       const islands = await page.$$eval('[data-island]', (els) =>
         els.map((el) => ({
@@ -936,7 +937,7 @@ function registerIslandTests(getBase: () => string) {
     const page = await newPage();
     try {
       await page.goto(BASE + '/blog');
-      await page.waitForSelector('[data-island][data-hydrated="true"]');
+      await waitForIslandsHydrated(page);
 
       const countBefore = await page.textContent('[data-testid="count"]');
       expect(countBefore).toBe('Count: 0');
@@ -957,7 +958,7 @@ function registerIslandTests(getBase: () => string) {
     const page = await newPage();
     try {
       await page.goto(BASE + '/blog');
-      await page.waitForSelector('[data-island][data-hydrated="true"]');
+      await waitForIslandsHydrated(page);
 
       await page.click('button:has-text("Add Post")');
       await page.waitForFunction(() => document.body.textContent?.includes('Title is required'));
@@ -974,7 +975,7 @@ function registerIslandTests(getBase: () => string) {
     const page = await newPage();
     try {
       await page.goto(BASE + '/blog');
-      await page.waitForSelector('[data-island][data-hydrated="true"]');
+      await waitForIslandsHydrated(page);
 
       await page.fill('input:near(:text("Title:"))', 'New Post');
       await page.fill('textarea:near(:text("Body:"))', 'Some content');
@@ -1011,7 +1012,7 @@ function registerIslandTests(getBase: () => string) {
       expect(marker).toBeUndefined();
 
       // Islands should be hydrated
-      await page.waitForSelector('[data-island][data-hydrated="true"]');
+      await waitForIslandsHydrated(page);
     } finally {
       await page.context().close();
     }
@@ -1398,7 +1399,7 @@ describe('react-pages client (dev)', () => {
 
     try {
       await page.goto(`${DEV_BASE}/blog`);
-      await page.waitForSelector('[data-island][data-hydrated="true"]');
+      await waitForIslandsHydrated(page);
 
       // Interact to establish client state — count becomes 1
       await page.click("button:has-text('Increment')");

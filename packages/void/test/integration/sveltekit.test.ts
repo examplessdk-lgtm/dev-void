@@ -3,6 +3,7 @@ import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import spawn from 'cross-spawn';
 import { join } from 'pathslash';
 import { afterAll, beforeAll, describe, expect, it } from 'vite-plus/test';
+import { collectBrowserDiagnostics } from '../../../../test/browser-helpers.ts';
 import { getPort, waitForServer, killChild } from '../../../../test/integration-helpers.ts';
 
 const ROOT = join(import.meta.dirname, '..', '..', '..', '..');
@@ -33,7 +34,7 @@ describe('playground/sveltekit build', () => {
 
 describe('playground/sveltekit dev', () => {
   let child: ReturnType<typeof spawn>;
-  let stderr = '';
+  let serverOutput = '';
 
   beforeAll(async () => {
     const pg = join(ROOT, PLAYGROUND);
@@ -66,19 +67,29 @@ describe('playground/sveltekit dev', () => {
       },
     );
 
-    child.stderr!.on('data', (chunk: Buffer) => {
-      stderr += String(chunk);
-    });
+    const recordOutput = (chunk: Buffer) => {
+      serverOutput = (serverOutput + String(chunk)).slice(-20_000);
+    };
+    child.stdout!.on('data', recordOutput);
+    child.stderr!.on('data', recordOutput);
 
-    await waitForServer(DEV_BASE, 20_000);
+    try {
+      await waitForServer(DEV_BASE, 30_000, {
+        expectStatus: 200,
+        expectBody: 'SvelteKit + Void',
+        isAlive: () => child.exitCode === null && child.signalCode === null,
+      });
+    } catch (error) {
+      throw new Error(`SvelteKit failed to start:\n${serverOutput}`, { cause: error });
+    }
   });
 
   afterAll(async () => {
     if (child) {
       await killChild(child);
     }
-    if (stderr.includes('error when starting dev server')) {
-      throw new Error(stderr);
+    if (serverOutput.includes('error when starting dev server')) {
+      throw new Error(serverOutput);
     }
   });
 
@@ -104,10 +115,13 @@ describe('playground/sveltekit dev', () => {
   it('navigates to smoke route via SPA from home page', async () => {
     const { chromium } = await import('playwright');
     const browser = await chromium.launch();
+    let diagnostics = () => '';
     try {
       const page = await browser.newPage();
+      diagnostics = collectBrowserDiagnostics(page);
       await page.goto(DEV_BASE);
-      await page.waitForLoadState('networkidle');
+      // Wait for client mounting before clicking the server-rendered link.
+      await page.waitForSelector('h1[data-hydrated="true"]');
 
       // Mark the document to detect full page reloads
       await page.evaluate(() => {
@@ -128,6 +142,8 @@ describe('playground/sveltekit dev', () => {
       const kvValue = await page.textContent('[data-testid="kv-value"]');
       expect(d1User).toBe('Alice');
       expect(kvValue).toBe('ok');
+    } catch (error) {
+      throw new Error(`${diagnostics()}\nDev server:\n${serverOutput}`, { cause: error });
     } finally {
       await browser.close();
     }

@@ -4,6 +4,7 @@ import spawn from 'cross-spawn';
 import { join } from 'pathslash';
 import { chromium, type Browser, type Page } from 'playwright';
 import { describe, expect, it, beforeAll, afterAll } from 'vite-plus/test';
+import { waitForIslandsHydrated } from '../../../../test/browser-helpers.ts';
 import { getPort, waitForServer, killChild } from '../../../../test/integration-helpers.ts';
 
 declare global {
@@ -25,16 +26,6 @@ let PREVIEW_PORT: number;
 let PREVIEW_BASE: string;
 
 let browser: Browser;
-
-async function waitForIslandsHydrated(page: Page) {
-  await page.waitForFunction(() => {
-    const islands = Array.from(document.querySelectorAll('[data-island]'));
-    return (
-      islands.length > 0 &&
-      islands.every((island) => island.getAttribute('data-hydrated') === 'true')
-    );
-  });
-}
 
 beforeAll(async () => {
   browser = await chromium.launch();
@@ -461,7 +452,7 @@ function registerIslandTests(getBase: () => string) {
     const page = await newPage();
     try {
       await page.goto(BASE + '/blog');
-      await waitForIslandsHydrated(page);
+      await waitForIslandsHydrated(page, 2);
 
       const islands = await page.$$eval('[data-island]', (els) =>
         els.map((el) => ({
