@@ -103,7 +103,18 @@ supersedes: 0047-email.md
 >   registration, so a non-owner row stays pending (disallow + allow
 >   re-registers it and, the address now being CF-verified, takes the
 >   Option B platform link), while the owner's own address adopts the live
->   tag with the inherited-consent audit (Option C).
+>   tag with the inherited-consent audit (Option C). _(2026-09-15)_ A
+>   VERIFIED `cf` row keeps its consent and is never re-read against
+>   Cloudflare: the human at that address clicked the link mailed for
+>   this project's own registration, so an out-of-band deletion of the
+>   destination (an operator in the Cloudflare dashboard, or the
+>   delete-vs-register window the DELETE route names) is not a platform
+>   revocation — the revocation surfaces are `void email disallow`, the
+>   admin revoke, and the owner-email change — and until the address is
+>   re-verified on the account Cloudflare's `send_email` refuses the send
+>   (the proxy reports `UNVERIFIED_DESTINATION`); `disallow` + `allow`
+>   re-registers the row at any time (the DELETE 404s harmlessly on the
+>   dead tag).
 > - Per-project rate-limit on `POST /destinations`: 5/minute and
 >   50/day in `email-add-rate:<projectId>:*` KV counters, with the
 >   same NaN-poison defense as the proxy's send counter. Blocks Mallory
@@ -732,7 +743,7 @@ CF's `send_email` only delivers to addresses verified as destinations on the sen
 - **CF API client** — `platform/packages/api/src/provisioning/email-routing.ts` wraps `POST/GET/DELETE /accounts/:id/email/routing/addresses`.
 - **API routes** — `GET|POST|DELETE /projects/:id/email/destinations[/:id]`. POST triggers CF to email the recipient with a verification link; GET refreshes status from CF for any rows still `pending`.
 - **Auto-verify project owner** — `platform/packages/api/src/routes/projects.ts` calls `addDestination(user.email)` when a project is created (via `ctx.waitUntil`, non-blocking). The owner gets the verification email in their GitHub-OAuth-linked inbox; one click and their project can send to itself out of the box.
-- **Per-project allowlist enforcement in the proxy** — _(re-land)_ the user worker carries no `send_email` binding. The api mirrors each project's verified rows into `email-allowlist:<projectId>` in `ROUTING` KV (`provisioning/email-allowlist.ts`), and the proxy checks every send and every inbound reply against that mirror. Both revoke paths tighten the mirror before deleting the row. Destinations are account-wide on CF's side; the mirror is what makes consent per project.
+- **Per-project allowlist enforcement in the proxy** — _(re-land)_ the user worker carries no `send_email` binding. The api mirrors each project's verified rows into `email-allowlist:<projectId>` in `ROUTING` KV (`provisioning/email-allowlist.ts`), and the proxy checks every send and every inbound reply against that mirror. Both revoke paths tighten the mirror before deleting the row. Destinations are account-wide on CF's side; the mirror is what makes consent per project. _(2026-09-15)_ Project teardown fails closed (503, row kept, retry) on the `email-slug:` / `email-allowlist:` deletes, slug first, before any best-effort cleanup: `__VOID_PROXY_TOKEN` never expires and the proxy reads a missing routing blob as "not suspended", so after the cascade those two keys are all that stops a retained token from sending.
 - **Cross-project safety on delete** — destinations are CF account-wide; before calling `deleteDestination` we check `countProjectsUsingDestination` and only remove from CF if no other project references the same `cf_destination_id`.
 
 The platform/team never opens the CF dashboard. The recipient (the person receiving the verification email) is the only human in the loop, and they only click a link in their own inbox. For every address except the owner's own, that mail is **ours** — HMAC-signed link, sent from `noreply@<mail domain>`, resendable — because Cloudflare's verification is per account rather than per project, and Cloudflare has no API to resend its mail.

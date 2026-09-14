@@ -661,6 +661,109 @@ describe('DELETE /projects/:id — CF email destination cleanup', () => {
 });
 
 // ---------------------------------------------------------------------------
+// The proxy authorizes `/email/send` with `__VOID_PROXY_TOKEN`, an HMAC of the
+// project id that never expires and that the tenant's own worker code can
+// read. After teardown the ONLY things that stop that token from sending are
+// the `email-slug:<projectId>` and `email-allowlist:<projectId>` KV mirrors
+// (a missing slug mirror is a 502, a missing allowlist denies every
+// recipient) — the proxy reads a missing routing blob as "not suspended".
+// Once the cascade has run there is no row left to retry the deletes from
+// and nothing sweeps them, so a mirror that outlives the project keeps a
+// dead tenant sendable forever. Teardown therefore fails closed on those two
+// deletes, exactly as the destination revoke paths do on their mirror write.
+// ---------------------------------------------------------------------------
+
+describe('DELETE /projects/:id — email send authorization outlives nothing', () => {
+  it('keeps the project when the email mirrors cannot be deleted, and a retry finishes', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'mail-kv-down');
+    mockCfApi();
+    await env.ROUTING.put(`email-slug:${project.id}`, project.slug);
+    await env.ROUTING.put(`email-allowlist:${project.id}`, JSON.stringify(['owner@example.com']));
+    await env.ROUTING.put(
+      project.slug,
+      JSON.stringify({ workerName: 'user-mail-kv-down', projectId: project.id }),
+    );
+
+    // KV refuses ONLY the two email mirror deletes. Every other delete —
+    // the routing entry included — goes through, which is the exact
+    // permutation that used to leave the stale mirrors authorizing sends
+    // for a project whose routing entry (and row) were already gone.
+    const originalDelete = env.ROUTING.delete.bind(env.ROUTING);
+    const failing = vi.spyOn(env.ROUTING, 'delete').mockImplementation((async (k: string) => {
+      if (k === `email-slug:${project.id}` || k === `email-allowlist:${project.id}`) {
+        throw new Error('forced KV failure for test');
+      }
+      return originalDelete(k as never);
+    }) as typeof env.ROUTING.delete);
+
+    const res = await app.fetch(
+      new Request(`http://localhost/projects/${project.id}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${user.jwt}` },
+      }),
+      env,
+    );
+    expect(res.status).toBe(503);
+    expect(((await res.json()) as { error: string }).error).toMatch(/try again/);
+
+    // The row is the retry handle: it stays, marked deleting, with the
+    // mirrors it will delete on the next attempt still in place.
+    const [kept] = await env.db.select().from(projects).where(eq(projects.id, project.id));
+    expect(kept?.status).toBe('deleting');
+    expect(await env.ROUTING.get(`email-slug:${project.id}`)).toBe(project.slug);
+    expect(await env.ROUTING.get(`email-allowlist:${project.id}`)).not.toBeNull();
+
+    failing.mockRestore();
+    const retry = await app.fetch(
+      new Request(`http://localhost/projects/${project.id}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${user.jwt}` },
+      }),
+      env,
+    );
+    expect(retry.status).toBe(200);
+    const [gone] = await env.db.select().from(projects).where(eq(projects.id, project.id));
+    expect(gone).toBeUndefined();
+    expect(await env.ROUTING.get(`email-slug:${project.id}`)).toBeNull();
+    expect(await env.ROUTING.get(`email-allowlist:${project.id}`)).toBeNull();
+    expect(await env.ROUTING.get(project.slug)).toBeNull();
+  });
+
+  it('revokes the slug mirror before the allowlist mirror', async () => {
+    // The slug mirror is the stronger gate — without it the proxy answers
+    // 502 whatever the allowlist says — so it goes first: if the second
+    // delete is the one that fails, the send path is already closed while
+    // the row waits for the retry.
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'mail-slug-first');
+    mockCfApi();
+    await env.ROUTING.put(`email-slug:${project.id}`, project.slug);
+    await env.ROUTING.put(`email-allowlist:${project.id}`, JSON.stringify(['owner@example.com']));
+
+    const originalDelete = env.ROUTING.delete.bind(env.ROUTING);
+    vi.spyOn(env.ROUTING, 'delete').mockImplementation((async (k: string) => {
+      if (k === `email-allowlist:${project.id}`) {
+        throw new Error('forced KV failure for test');
+      }
+      return originalDelete(k as never);
+    }) as typeof env.ROUTING.delete);
+
+    const res = await app.fetch(
+      new Request(`http://localhost/projects/${project.id}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${user.jwt}` },
+      }),
+      env,
+    );
+    expect(res.status).toBe(503);
+    expect(await env.ROUTING.get(`email-slug:${project.id}`)).toBeNull();
+    const [kept] = await env.db.select().from(projects).where(eq(projects.id, project.id));
+    expect(kept?.status).toBe('deleting');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // The other side of the same ordering problem: a destination POST that LOSES
 // the race to teardown.
 //

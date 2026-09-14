@@ -463,7 +463,9 @@ async function cleanupRaceWindowResourceOrphans(
  *      can't keep acting on its now-revoked token during the cleanup window.
  *   2. Run critical CF cleanup (container apps + per-deploy container
  *      orphan recovery). Throws on non-404 failure; the caller should surface
- *      a 5xx and the DB row remains, allowing retry.
+ *      a 5xx and the DB row remains, allowing retry. Then revoke the proxy's
+ *      email send authorization for the project (the `email-slug:` and
+ *      `email-allowlist:` KV mirrors) — same contract: throws, row remains.
  *   3. Run best-effort CF cleanup (D1, KV, R2, queues, hyperdrive, custom
  *      hostnames, routing entries, deployment workers). Failures become
  *      warnings.
@@ -495,6 +497,10 @@ export async function teardownProject(
   await cancelContainerBuildDos(context.env, cancelledOnLock, 'project deleted');
 
   await cleanupCriticalResources(context, projectId, project);
+  // Fail-closed, and BEFORE anything below is destroyed: these two KV keys
+  // are what still authorizes the project's non-expiring proxy token to send
+  // mail, and the project row is the only handle a retry has for them.
+  await revokeProjectEmailSendAuthorization(context.env.ROUTING, projectId);
   const { warnings: bestEffortWarnings, cleanedCfIds } = await cleanupBestEffortResources(
     context,
     projectId,
@@ -529,7 +535,8 @@ export async function teardownProject(
 
 /**
  * Best-effort teardown of the Cloudflare Email Routing destinations this
- * project is the last holder of, plus the project's KV mirrors.
+ * project is the last holder of. (The project's email KV mirrors are NOT
+ * best-effort — see `revokeProjectEmailSendAuthorization`.)
  *
  * CF destinations are ACCOUNT-level: one address added for project A is a
  * valid `send_email` recipient for every worker in the account. The
@@ -550,7 +557,6 @@ async function cleanupProjectEmailDestinations(
   projectId: string,
 ): Promise<void> {
   const db = context.get('db');
-  const kv = context.env.ROUTING;
   let destinations: Awaited<ReturnType<typeof getEmailDestinationsByProjectId>> = [];
   try {
     destinations = await getEmailDestinationsByProjectId(db, projectId);
@@ -578,15 +584,51 @@ async function cleanupProjectEmailDestinations(
       );
     }
   }
-  // Drop the proxy's read caches for this project. `email-allowlist:` is the
-  // verified-recipient mirror; `email-slug:` is the projectId→slug mapping the
-  // proxy uses to pin outbound `from` addresses. Project ids are never reused,
-  // so this is storage hygiene rather than a security boundary.
-  for (const key of [`email-allowlist:${projectId}`, `email-slug:${projectId}`]) {
+}
+
+/**
+ * Thrown when teardown cannot revoke the project's email send authorization.
+ * The project row is left in place (status `deleting`) so the caller can
+ * answer with a retryable 5xx; the next teardown attempt repeats the deletes.
+ */
+export class EmailSendRevocationError extends Error {
+  constructor(key: string, cause: unknown) {
+    super(`failed to delete ${key}`, { cause });
+    this.name = 'EmailSendRevocationError';
+  }
+}
+
+/**
+ * Delete the two KV mirrors that authorize `/email/send` for this project,
+ * and FAIL the teardown if either delete does.
+ *
+ * `__VOID_PROXY_TOKEN` is an HMAC of the project id that never expires, and
+ * the tenant's own worker code can read it, so after teardown the proxy's
+ * KV reads are the only thing standing between a retained token and the
+ * shared `send_email` binding: `email-slug:<projectId>` absent is a 502 and
+ * `email-allowlist:<projectId>` absent denies every recipient, while a
+ * missing ROUTING blob (`cleanupBestEffortResources` deletes it, also
+ * best-effort) is deliberately read as "not suspended". Once
+ * `deleteProjectCascade` has run there is no row to retry from and nothing
+ * sweeps these keys, so a delete that was swallowed here would leave the
+ * dead project sendable for as long as the slug and allowlist stayed behind.
+ * Failing closed keeps the row — the retry handle — exactly as the
+ * destination revoke paths keep theirs when the mirror write fails.
+ *
+ * The slug mirror goes first: it is the stronger gate (a 502 whatever the
+ * allowlist says), so if the second delete is the one that fails the send
+ * path is already closed while the row waits for the retry.
+ */
+async function revokeProjectEmailSendAuthorization(
+  kv: KVNamespace,
+  projectId: string,
+): Promise<void> {
+  for (const key of [`email-slug:${projectId}`, `email-allowlist:${projectId}`]) {
     try {
       await kv.delete(key);
     } catch (err) {
       console.error(`[cleanup] KV delete failed for ${key}:`, err);
+      throw new EmailSendRevocationError(key, err);
     }
   }
 }
