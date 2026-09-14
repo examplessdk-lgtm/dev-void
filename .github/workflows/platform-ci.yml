@@ -86,7 +86,8 @@ jobs:
   # integration tests against that schema: if the code that is live cannot run on the new schema,
   # the push must not ship. The fresh database stands in for production's only while the
   # migrations under test are the released ones plus new entries, so the job also rejects any
-  # edit, removal, or reordering of a released migration.
+  # edit, removal, or reordering of a released migration. The release it tests is the head of the
+  # last successful production deploy, read from `platform-deploy.yml`'s run history.
   #
   # It has teeth on PRs, where the code under test is a different commit from the one that is
   # live. The production deploy sets `require-schema-compat` for every trigger — including a
@@ -98,6 +99,8 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
+      # The schema guard reads the production deploy's run history to find the live release.
+      actions: read
     env:
       POSTGRES_USER: void_ci
       POSTGRES_PASSWORD: void_ci_pass
@@ -134,24 +137,33 @@ jobs:
         env:
           DATABASE_URL: ${{ env.COMPAT_DATABASE_URL }}
 
-      # Phase 2 — the release that is live must still run on that schema. On a push that is the
-      # commit `prod` pointed at before the push, never the commit being deployed: the api worker
-      # is replaced after its migrations run, so the previous release is what serves traffic for
-      # the length of the deploy. PRs compare against the deployed branch.
+      # Phase 2 — the release that is live must still run on that schema. That release is the head
+      # of the last successful production deploy: not `github.event.before`, which is only the
+      # previous push and may have failed to deploy or been replaced while pending in the deploy
+      # concurrency group. Until a production deploy has been recorded, fall back to the previous
+      # `prod` commit on a push and to the `prod` branch on a PR, and say so.
       - name: Resolve the compatibility baseline
         id: baseline
         env:
+          GH_TOKEN: ${{ github.token }}
           EVENT_NAME: ${{ github.event_name }}
           PREVIOUS_SHA: ${{ github.event.before }}
+          NO_PREVIOUS_SHA: '0000000000000000000000000000000000000000'
         run: |
-          if [ "$EVENT_NAME" = 'push' ]; then
-            printf '%s' "$PREVIOUS_SHA" | grep -Eq '^[0-9a-f]{40}$' || {
-              echo '::error::The push event carries no previous commit to compare against.'
-              exit 1
-            }
+          live=$(curl -sSf \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/workflows/platform-deploy.yml/runs?status=success&per_page=1" \
+            | node -e 'let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => process.stdout.write(JSON.parse(s).workflow_runs?.[0]?.head_sha ?? ""))')
+          if [ -n "$live" ]; then
+            echo "ref=$live" >> "$GITHUB_OUTPUT"
+            echo "Baseline: $live (last successful production deploy)"
+          elif [ "$EVENT_NAME" = 'push' ] && printf '%s' "$PREVIOUS_SHA" | grep -Eq '^[0-9a-f]{40}$' && [ "$PREVIOUS_SHA" != "$NO_PREVIOUS_SHA" ]; then
             echo "ref=$PREVIOUS_SHA" >> "$GITHUB_OUTPUT"
+            echo "::warning::No successful production deploy is recorded yet; comparing against the previous prod commit $PREVIOUS_SHA instead of the live release."
           else
             echo 'ref=prod' >> "$GITHUB_OUTPUT"
+            echo '::warning::No successful production deploy is recorded yet; comparing against the prod branch instead of the live release.'
           fi
       # The baseline checkout replaces the workspace, and the baseline may predate the checker.
       - name: Keep the candidate's migration set for the append-only check

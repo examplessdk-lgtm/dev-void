@@ -25,6 +25,8 @@ jobs:
       require-schema-compat: true
     permissions:
       contents: read
+      # The schema guard reads this workflow's run history to find the live release.
+      actions: read
 
   deploy:
     if: ${{ vars.VOID_PLATFORM_DEPLOY_ENABLED == 'true' }}
