@@ -90,7 +90,12 @@ body shape ▸ `from` length ▸ EMAIL_SENDER_DOMAIN set ▸ SEND_EMAIL bound �
   ▸ strict `from` regex           (<slug>[+tag]@$EMAIL_SENDER_DOMAIN, no CR/LF or display names)
   ▸ MIME `From:` addr-spec        (exactly one From header, one mailbox, equal to `from`; the
                                    display name is not inspected — CF's own From-vs-envelope
-                                   check is undocumented, so the proxy does not rely on it)
+                                   check is undocumented, so the proxy does not rely on it.
+                                   The header scan keeps byte offsets, never a view per line,
+                                   so a fold of millions of continuations costs its bytes and
+                                   nothing per line; the value itself has no length bound
+                                   beyond MIME size, matching the framework's unbounded
+                                   display name)
   ▸ routing.suspended             (platform-wide; the marker dispatch answers with 429)
   ▸ email-suspended:<projectId>   (email-only kill-switch)
   ▸ email-allowlist:<projectId>   (per-project verified destinations)
@@ -102,7 +107,11 @@ body shape ▸ `from` length ▸ EMAIL_SENDER_DOMAIN set ▸ SEND_EMAIL bound �
 `<sentinel>.<unixSeconds>.<sha256(from|to|mimeBase64)>` under `JWT_SECRET` (sentinel auth plus
 content binding, 5-minute skew window). Only the proxy and api hold `JWT_SECRET`. The reference
 signer is `packages/api/src/email/send-verification.ts`; changing the format needs a coordinated
-proxy + api deploy.
+proxy + api deploy. The three hashed fields are size-bounded BEFORE the hash — `mimeBase64` to
+the base64 form of the MIME cap, `from` and `to` to the same 320 characters `/email/send` applies
+— because the hash runs ahead of the token check, so an unauthenticated caller would otherwise
+choose how much is copied and hashed. Every pre-auth refusal is the same opaque
+`403 invalid platform token`.
 
 The worker also exports `email()` as the catch-all CF Email Routing handler for the mail zone
 (`packages/proxy/src/email-router.ts`). Inbound parses `<slug>+<tag>` from the recipient, reads the
@@ -113,6 +122,16 @@ returned `EmailAction[]` on the real message. Inbound honors `routing.suspended`
 `DISPATCH.get` exactly as the HTTP router does. Forward/reply actions returned by a handler run
 through the same per-project allowlist and burst/monthly quotas as `/email/send` — CF Email Routing
 destinations are account-wide, so per-project gating is the platform's security boundary.
+
+The returned action list is re-validated at the proxy no matter what produced it — a
+Workers-for-Platforms tenant can ship any `WorkerEntrypoint`, so the framework's own guardrails are
+not the boundary. Before any outbound gate: at most 100 actions; every address at most 320 chars; a
+forward's header bag a plain object of at most 32 string headers of at most 1024 chars each (an
+invalid bag drops the whole list); a reply's `raw` a `Uint8Array` of at most 10 MiB, with at most
+20 MiB of replies across one delivery (an overrunning reply is dropped and not charged, so a later
+one that fits still goes); and a reply's MIME `From:` pinned to its envelope sender. Reject reasons
+are truncated to 1,000 chars **before** control chars are stripped, so a control-heavy reason never
+costs a full-length pass.
 
 Inbound requests are **not** metered today; only the `email-recv:<id>:<month>` delivery counter is
 written.

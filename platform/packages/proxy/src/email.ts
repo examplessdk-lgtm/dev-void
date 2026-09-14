@@ -10,7 +10,7 @@ const app = new Hono<ProxyEnv>();
  * framework enforces the same cap client-side; this is the proxy-side belt to
  * the framework's suspenders.
  */
-const MAX_MIME_BYTES = 10 * 1024 * 1024;
+export const MAX_MIME_BYTES = 10 * 1024 * 1024;
 
 /**
  * Cap the recipient list. Every entry costs a trimmed+lowercased copy, a
@@ -41,7 +41,7 @@ const MAX_RECIPIENTS = 100;
  * normalization for exactly that reason. RFC 5321 caps a forward-path at
  * 256 octets, so 320 is generous for any address that could be delivered.
  */
-const MAX_RECIPIENT_LENGTH = 320;
+export const MAX_RECIPIENT_LENGTH = 320;
 
 /**
  * Cap the envelope sender for the same reason. It is one string, so there
@@ -54,8 +54,13 @@ const MAX_RECIPIENT_LENGTH = 320;
  * with the other raw-input size gates, before any configuration or KV
  * read. Same figure as `MAX_RECIPIENT_LENGTH`, for the same RFC 5321
  * reason.
+ *
+ * Both are exported for the platform-token gate in `index.ts`, which
+ * applies them to `/email/internal/send`'s `from` and `to` BEFORE hashing
+ * the pair into the content binding — the same reason and the same
+ * figures, on the one path that runs ahead of any credential check.
  */
-const MAX_SENDER_LENGTH = 320;
+export const MAX_SENDER_LENGTH = 320;
 
 /**
  * The platform mail domain for this environment — `mail.void.cloud` in
@@ -204,6 +209,17 @@ function bytesToStream(bytes: Uint8Array): ReadableStream<Uint8Array> {
  * tokenizer below is a single pass with no backtracking, so a display
  * name of any length (which `buildMime` allows) costs what it weighs.
  *
+ * "What it weighs" has to mean BYTES, not lines. The scan keeps nothing
+ * per line — only the byte offsets of the one `From:` it found — because
+ * `MAX_MIME_BYTES` bounds bytes and a folded header can hold one line per
+ * three of them (` \r\n`): 3.5 million continuations fit in 10 MiB, and an
+ * earlier shape that retained one `subarray` view per continuation held
+ * ~125 bytes of heap each — 437 MB, measured, in an isolate of 128 MB that
+ * every tenant's AI/D1/KV/R2 traffic shares. The same message with no
+ * `From:` cost 1 MB, so the amplifier was the `From:` itself. The value is
+ * unfolded with ONE copy of the header's byte range, and no copy at all
+ * when it did not fold.
+ *
  * Header names are matched the way lenient parsers (postal-mime, which
  * miniflare uses) match them — bytes before the first `:` with trailing
  * WSP trimmed, case-insensitively — so `From :` counts as a second `From:`
@@ -223,21 +239,29 @@ const HTAB = 0x09;
 const COLON = 0x3a;
 const FROM_NAME = [0x66, 0x72, 0x6f, 0x6d]; // "from"
 
-function isFromHeaderName(line: Uint8Array, colon: number): boolean {
-  let end = colon;
-  while (end > 0 && (line[end - 1] === SP || line[end - 1] === HTAB)) {
-    end--;
+/**
+ * Where the value of the header line `raw[start, end)` begins if the line
+ * is named `From` — the byte after its first `:` — or -1 if it is not.
+ * The name is the bytes before that colon with trailing WSP trimmed,
+ * compared case-insensitively; since it has to be exactly `from`, the
+ * colon is looked for only across the WSP run that may follow those four
+ * bytes, so the check reads at most the name and never searches the line.
+ */
+function fromValueStart(raw: Uint8Array, start: number, end: number): number {
+  if (end - start <= FROM_NAME.length) {
+    return -1;
   }
-  if (end !== FROM_NAME.length) {
-    return false;
-  }
-  for (let i = 0; i < end; i++) {
+  for (let i = 0; i < FROM_NAME.length; i++) {
     // ASCII case fold: `A`..`Z` → `a`..`z`. Non-letters fold to themselves.
-    if ((line[i] | 0x20) !== FROM_NAME[i]) {
-      return false;
+    if ((raw[start + i] | 0x20) !== FROM_NAME[i]) {
+      return -1;
     }
   }
-  return true;
+  let colon = start + FROM_NAME.length;
+  while (colon < end && (raw[colon] === SP || raw[colon] === HTAB)) {
+    colon++;
+  }
+  return colon < end && raw[colon] === COLON ? colon + 1 : -1;
 }
 
 /** Operator-readable detail for each way the pin can fail to find a sender. */
@@ -248,9 +272,20 @@ const MIME_FROM_REFUSALS: Record<Extract<MimeFrom, { ok: false }>['reason'], str
 };
 
 export function readMimeFromAddrSpec(raw: Uint8Array): MimeFrom {
-  const fromHeaders: Array<Array<Uint8Array>> = [];
-  let current: Array<Uint8Array> | null = null;
   const n = raw.byteLength;
+  // The `From:` header as offsets into `raw`: its value starts after the
+  // colon and ends where the content of its last line ends. `folded` says
+  // whether a continuation line extended it, `inFrom` whether the line
+  // being visited may.
+  let fromCount = 0;
+  let valueStart = -1;
+  let valueEnd = -1;
+  let folded = false;
+  let inFrom = false;
+  // The next CR at or after `lineStart`. Searched for lazily, each search
+  // starting past the previous hit, so finding the bare CR that fails the
+  // scan stays linear across a block of CR-less lines.
+  let nextCr = raw.indexOf(CR);
   let lineStart = 0;
   while (lineStart < n) {
     const lf = raw.indexOf(LF, lineStart);
@@ -262,42 +297,53 @@ export function readMimeFromAddrSpec(raw: Uint8Array): MimeFrom {
     if (contentEnd === lineStart) {
       break; // empty line: end of the header block
     }
-    const line = raw.subarray(lineStart, contentEnd);
-    if (line.indexOf(CR) !== -1) {
+    if (nextCr !== -1 && nextCr < lineStart) {
+      nextCr = raw.indexOf(CR, lineStart);
+    }
+    if (nextCr !== -1 && nextCr < contentEnd) {
       return { ok: false, reason: 'malformed' };
     }
-    if (line[0] === SP || line[0] === HTAB) {
-      current?.push(line);
+    if (raw[lineStart] === SP || raw[lineStart] === HTAB) {
+      if (inFrom) {
+        valueEnd = contentEnd;
+        folded = true;
+      }
     } else {
-      current = null;
-      const colon = line.indexOf(COLON);
-      if (colon !== -1 && isFromHeaderName(line, colon)) {
-        current = [line.subarray(colon + 1)];
-        fromHeaders.push(current);
+      const start = fromValueStart(raw, lineStart, contentEnd);
+      inFrom = start !== -1;
+      if (inFrom) {
+        fromCount++;
+        valueStart = start;
+        valueEnd = contentEnd;
+        folded = false;
       }
     }
     lineStart = lf === -1 ? n : lf + 1;
   }
-  if (fromHeaders.length === 0) {
+  if (fromCount === 0) {
     return { ok: false, reason: 'missing' };
   }
-  if (fromHeaders.length > 1) {
+  if (fromCount > 1) {
     return { ok: false, reason: 'multiple' };
   }
-  // Unfold: each continuation line keeps its leading WSP, so joining the
-  // pieces is RFC 5322 §2.2.3 unfolding with the CRLF removed.
-  const pieces = fromHeaders[0];
-  let total = 0;
-  for (const piece of pieces) {
-    total += piece.byteLength;
+  // Unfold (RFC 5322 §2.2.3): the value is the header's byte range with
+  // its line breaks removed, each continuation keeping its leading WSP.
+  // Every CR still inside the range ends a line — the scan refused any
+  // other — so dropping CR and LF is the whole job, done in place on one
+  // copy of the range. A header that did not fold needs no copy.
+  let value = raw.subarray(valueStart, valueEnd);
+  if (folded) {
+    value = raw.slice(valueStart, valueEnd);
+    let kept = 0;
+    for (let i = 0; i < value.length; i++) {
+      const byte = value[i];
+      if (byte !== CR && byte !== LF) {
+        value[kept++] = byte;
+      }
+    }
+    value = value.subarray(0, kept);
   }
-  const joined = new Uint8Array(total);
-  let offset = 0;
-  for (const piece of pieces) {
-    joined.set(piece, offset);
-    offset += piece.byteLength;
-  }
-  const addrSpec = singleMailboxAddrSpec(new TextDecoder().decode(joined));
+  const addrSpec = singleMailboxAddrSpec(new TextDecoder().decode(value));
   return addrSpec === null ? { ok: false, reason: 'malformed' } : { ok: true, addrSpec };
 }
 

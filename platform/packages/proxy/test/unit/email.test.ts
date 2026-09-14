@@ -1208,6 +1208,131 @@ describe('POST /email/send — MIME From pin (what the recipient sees)', () => {
       expect(fromHeader.endsWith(`<${DEFAULT_FROM}>`)).toBe(true);
     });
   });
+
+  describe('the scan keeps nothing per line', () => {
+    const MAX_MIME_BYTES = 10 * 1024 * 1024;
+
+    /** `From: <value>` folded over as many `<fold>` continuations as fit in 10 MiB. */
+    function foldedToTheCap(value: string, fold: string): { raw: Uint8Array; lines: number } {
+      const head = new TextEncoder().encode(`From: ${value}\r\n`);
+      const cont = new TextEncoder().encode(fold);
+      const lines = Math.floor((MAX_MIME_BYTES - head.byteLength) / cont.byteLength);
+      const raw = new Uint8Array(head.byteLength + lines * cont.byteLength);
+      raw.set(head, 0);
+      for (let i = 0, at = head.byteLength; i < lines; i++, at += cont.byteLength) {
+        raw.set(cont, at);
+      }
+      return { raw, lines };
+    }
+
+    it.each([
+      ['CRLF', ' \r\n', 3_495_249],
+      ['bare LF', ' \n', 5_242_874],
+    ])(
+      'unfolds a From spread over millions of %s continuations in bounded heap',
+      (_label, fold, expectedLines) => {
+        // Every continuation is one space: a value that is the address
+        // followed by millions of spaces, which trim away, so the scan
+        // still has to visit every line. `MAX_MIME_BYTES` bounds bytes, not
+        // lines, and one retained view per line was ~125 bytes of heap
+        // each — 437 MB for the CRLF case and 694 MB for bare LF, measured,
+        // against a 128 MB isolate that every tenant shares; the same bytes
+        // with no `From:` cost 1 MB. The offsets-only scan measured 0.2 MB
+        // of heap and 85 ms (CRLF) / 111 ms (LF) on the same input; the
+        // ceilings below leave room for the test runner, not for a
+        // per-line allocation.
+        const { raw, lines } = foldedToTheCap('a@b', fold);
+        expect(lines).toBe(expectedLines);
+        expect(raw.byteLength).toBeLessThanOrEqual(MAX_MIME_BYTES);
+        const heapBefore = process.memoryUsage().heapUsed;
+        const started = performance.now();
+        const parsed = readMimeFromAddrSpec(raw);
+        const elapsed = performance.now() - started;
+        const heapGrowth = process.memoryUsage().heapUsed - heapBefore;
+        expect(parsed).toEqual({ ok: true, addrSpec: 'a@b' });
+        expect(elapsed).toBeLessThan(2000);
+        expect(heapGrowth).toBeLessThan(64 * 1024 * 1024);
+      },
+    );
+
+    it('refuses the same shape through /email/send before any KV read past the slug', async () => {
+      // The pathological fold names a sender that is not the envelope, so
+      // the pin refuses it — after unfolding, not by a size gate: the
+      // scan's bound is the message itself, which `MAX_MIME_BYTES` already
+      // holds in memory. The base64 is built with Buffer: 10 MiB of
+      // per-byte string concatenation is the test's own cost, not the
+      // proxy's.
+      const { raw } = foldedToTheCap(`victim+noreply@${PROD_DOMAIN}`, ' \r\n');
+      const kv = twoTenantsKv();
+      const sender = createSender();
+      const env = createMockEnv(kv, { SEND_EMAIL: sender.binding });
+      const started = performance.now();
+      const res = await postSend(
+        env,
+        await sendBody({ mimeBase64: Buffer.from(raw).toString('base64') }),
+      );
+      expect(performance.now() - started).toBeLessThan(5000);
+      const body = await readSend(res);
+      expect(res.status).toBe(403);
+      expect(body.error?.code).toBe('INVALID_FROM');
+      expect(body.error?.message).toContain('does not match the envelope sender');
+      expect(sender.calls).toHaveLength(0);
+      expect(kv.get.mock.calls.map((c) => c[0])).toEqual(['email-slug:proj_1']);
+    });
+
+    it.each([
+      [
+        'a continuation after the NEXT header belongs to that header',
+        `From: ${DEFAULT_FROM}\r\nSubject: a\r\n b\r\n\r\nx`,
+      ],
+      [
+        'a continuation before the From belongs to the header before it',
+        `Subject: a\r\n b\r\nFrom: ${DEFAULT_FROM}\r\n\r\nx`,
+      ],
+      ['a whitespace-only continuation line', `From: ${DEFAULT_FROM}\r\n \r\nSubject: a\r\n\r\nx`],
+      ['the From on the last line, unterminated', `Subject: a\r\nFrom: ${DEFAULT_FROM}`],
+      ['a fold on the last line, unterminated', `From: Acme\r\n <${DEFAULT_FROM}>`],
+    ])('tracks the From by offsets: %s', (_label, mime) => {
+      expect(readMimeFromAddrSpec(new TextEncoder().encode(mime))).toEqual({
+        ok: true,
+        addrSpec: DEFAULT_FROM,
+      });
+    });
+
+    it('still refuses a bare CR on a line after the one From', () => {
+      // The lazy CR search restarts past each terminator; a bare CR inside
+      // a LATER header must still fail the scan (an LF-splitting parser
+      // would read what follows it as part of that header).
+      const mime = `From: ${DEFAULT_FROM}\r\nSubject: a\rFrom: victim@${PROD_DOMAIN}\r\n\r\nx`;
+      expect(readMimeFromAddrSpec(new TextEncoder().encode(mime))).toEqual({
+        ok: false,
+        reason: 'malformed',
+      });
+    });
+
+    it('accepts a From value of any length the framework renders (no value bound)', async () => {
+      // `buildMime` bounds the ADDRESS at 320 (`MAX_ADDRESS_LENGTH`) and
+      // deliberately leaves the display name unbounded — it is encoded and
+      // folded at any length (mime.ts). A 100k-character CJK name renders as
+      // a ~486 KB `From:` over ~6.7k continuation lines, and the proxy must
+      // keep accepting what the framework's own preflight accepts: the fix
+      // for the per-line cost was to stop retaining lines, not to cap the
+      // value, and a cap would be a contract change owned by the framework.
+      const name = '東京都千代田区'.repeat(15000).slice(0, 100_000);
+      const email = await normalizeEmail({
+        from: { email: DEFAULT_FROM, name },
+        to: 'dev@example.com',
+        subject: 'hi',
+        text: 'hello',
+      });
+      const { raw } = buildMime(email);
+      const text = new TextDecoder().decode(raw);
+      const fromHeader = text.slice(text.indexOf('From:'), text.indexOf('\r\nTo:'));
+      expect(fromHeader.length).toBeGreaterThan(400_000);
+      expect(fromHeader.split('\r\n ').length).toBeGreaterThan(6000);
+      expect(readMimeFromAddrSpec(raw)).toEqual({ ok: true, addrSpec: DEFAULT_FROM });
+    });
+  });
 });
 
 describe('POST /email/send — allowlist fails closed', () => {
@@ -1988,6 +2113,67 @@ describe('POST /email/internal/send — replay window + content binding', () => 
     });
     expect(tooBig.status).toBe(403);
     expect(sender.calls).toHaveLength(0);
+  });
+
+  it.each([
+    ['from', { from: 'a'.repeat(321), to: TO }],
+    ['to', { from: FROM, to: 'a'.repeat(321) }],
+  ])('refuses an over-long `%s` at the auth boundary, before hashing it', async (_field, addrs) => {
+    // The MIME field was bounded before the content hash; `from` and `to`
+    // are hashed with it and were not. The template that joins the three
+    // flattens them into one full-size string and `TextEncoder` copies it
+    // again, both before the token is verified — so an unauthenticated
+    // caller with a small MIME still chose two full-size copies plus the
+    // sha256 over them. Same 320 as `/email/send`'s sender and recipient
+    // bounds, and the same opaque refusal as the other pre-auth gates: the
+    // body is `{ error: 'invalid platform token' }`, not the handler's
+    // `ok: false` shape, which is how this asserts the handler never ran.
+    const sender = createSender();
+    const env = createMockEnv(createMockKv(), { SEND_EMAIL: sender.binding });
+    const mime = mimeBase64();
+    const platformTimestamp = Math.floor(Date.now() / 1000);
+    const res = await post(env, {
+      // Correctly signed for this exact body, so only the bound refuses it.
+      platformToken: await signPlatform({
+        unixSeconds: platformTimestamp,
+        ...addrs,
+        mimeBase64: mime,
+      }),
+      platformTimestamp,
+      ...addrs,
+      mimeBase64: mime,
+    });
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: 'invalid platform token' });
+    expect(sender.calls).toHaveLength(0);
+  });
+
+  it('a 320-character `to` under a valid signature still reaches the handler', async () => {
+    // The bound sits exactly where `/email/send` puts its recipient bound.
+    // The handler applies no length rule of its own to `to`: it hands the
+    // address to `EmailMessage`, so the send goes through with it verbatim.
+    const sender = createSender();
+    const env = createMockEnv(createMockKv(), { SEND_EMAIL: sender.binding });
+    const mime = mimeBase64();
+    const to = `${'a'.repeat(320 - '@example.com'.length)}@example.com`;
+    expect(to).toHaveLength(320);
+    const platformTimestamp = Math.floor(Date.now() / 1000);
+    const res = await post(env, {
+      platformToken: await signPlatform({
+        unixSeconds: platformTimestamp,
+        from: FROM,
+        to,
+        mimeBase64: mime,
+      }),
+      platformTimestamp,
+      from: FROM,
+      to,
+      mimeBase64: mime,
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true });
+    expect(sender.calls).toHaveLength(1);
+    expect(sender.calls[0].to).toBe(to);
   });
 
   it('fails closed with 502 when the SEND_EMAIL binding is missing', async () => {

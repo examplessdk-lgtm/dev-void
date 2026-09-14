@@ -4,7 +4,7 @@ import { ai } from './ai.ts';
 import { asNumber, asString, isProxyBody } from './body.ts';
 import { d1 } from './d1.ts';
 import { routeInbound } from './email-router.ts';
-import { email } from './email.ts';
+import { email, MAX_RECIPIENT_LENGTH, MAX_SENDER_LENGTH } from './email.ts';
 import { kv } from './kv.ts';
 import { r2 } from './r2.ts';
 import { verifyPrerenderBuild, verifyProjectOwner } from './resolve.ts';
@@ -141,6 +141,22 @@ app.post('/*', async (context, next) => {
     // MAX_MIME_BYTES the handlers enforce; the handler still re-checks the
     // decoded size, this only refuses to hash what can never be valid.
     if (bindingMime.length > MAX_PLATFORM_MIME_BASE64_LENGTH) {
+      return context.json({ error: 'invalid platform token' }, 403);
+    }
+    // The two addresses are hashed alongside the MIME and were the only
+    // part of the input left unbounded. The template below flattens
+    // `from|to|mime` into one full-size string and `TextEncoder` copies it
+    // again (measured: +1x on the heap and +1x external for the pair), so
+    // without this an unauthenticated caller with a small MIME still chose
+    // two more full-size copies plus the sha256 over them. The bounds are
+    // the ones `/email/send` applies to its sender and recipients, and they
+    // refuse nothing the only signer sends: `/email/internal/send` accepts
+    // exactly `noreply@<EMAIL_SENDER_DOMAIN>` as `from`, and `to` is one
+    // address the api worker already bounded at the same 320 when it was
+    // registered (`api/src/routes/email.ts`) — RFC 5321 caps a path at 256
+    // octets anyway. Same opaque refusal: from outside, a body that cannot
+    // be signed and a body that was not are one case.
+    if (bindingFrom.length > MAX_SENDER_LENGTH || bindingTo.length > MAX_RECIPIENT_LENGTH) {
       return context.json({ error: 'invalid platform token' }, 403);
     }
     const contentHash = await sha256Hex(`${bindingFrom}|${bindingTo}|${bindingMime}`);

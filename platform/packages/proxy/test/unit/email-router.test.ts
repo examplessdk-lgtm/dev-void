@@ -2077,3 +2077,145 @@ describe('routeInbound — reply sender pin (F1)', () => {
     expect(forwardCalls).toHaveLength(1);
   });
 });
+
+// -----------------------------------------------------------------------
+// Reject reasons are truncated BEFORE control chars are stripped.
+//
+// `sanitize()` used to run its global replacement over the whole string and
+// only then slice. A control-heavy reason makes V8 materialize one part per
+// match (~68 B each, measured), so a 4 MB `\0a\0a…` reason — 8x below the
+// 32 MiB RPC ceiling — is ~140 MB of transient heap in the 128 MB proxy
+// isolate, ahead of every outbound gate. Slicing first bounds the work to
+// `maxLen` code units.
+// -----------------------------------------------------------------------
+
+describe('routeInbound — reject reason is truncated before sanitizing', () => {
+  it('bounds a multi-megabyte control-heavy reason without a full-string pass', async () => {
+    // 32 MiB of alternating NUL / letter: one regex match per NUL, which is
+    // the shape that maximizes the parts array. The RPC transport could not
+    // deliver a larger reason.
+    const reason = '\x00a'.repeat(16 * 1024 * 1024);
+    const { env } = makeEnv({
+      kvSeed: { myslug: DEFAULT_ROUTING },
+      emailReturn: [{ type: 'reject', reason }],
+    });
+    const { message, rejectCalls } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    const t0 = performance.now();
+    await routeInbound(message, env, ctx);
+    const elapsed = performance.now() - t0;
+    expect(rejectCalls).toHaveLength(1);
+    expect(rejectCalls[0]!.length).toBeLessThanOrEqual(1000);
+    // oxlint-disable-next-line no-control-regex
+    expect(rejectCalls[0]).not.toMatch(new RegExp('[\\u0000-\\u001f\\u007f]'));
+    // Generous: the slice-first path is ~0 ms; the old order measured 800+ ms
+    // on this input on a laptop, and an OOM under a 128 MB heap.
+    expect(elapsed).toBeLessThan(500);
+  });
+
+  it('collapses controls inside the 1000-char window and does not refill from beyond it', async () => {
+    // 300 x "line\r\n" is 1800 chars. Slice-first keeps the first 1000 code
+    // units — 166 full lines (996) plus "line" — then each CRLF becomes one
+    // space, so the reason is 834 clean chars, not 1000. The reason is DSN
+    // text for a remote MTA, so a shorter window is the acceptable trade.
+    const { env } = makeEnv({
+      kvSeed: { myslug: DEFAULT_ROUTING },
+      emailReturn: [{ type: 'reject', reason: 'line\r\n'.repeat(300) }],
+    });
+    const { message, rejectCalls } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(rejectCalls).toHaveLength(1);
+    expect(rejectCalls[0]).toBe('line '.repeat(166) + 'line');
+  });
+});
+
+// -----------------------------------------------------------------------
+// Proxy-side reply size limits.
+//
+// The framework bounds a `reply()` at `MAX_MESSAGE_BYTES` (10 MiB) and one
+// dispatch's replies at `MAX_REPLY_BYTES_TOTAL` (20 MiB), but those checks
+// run inside the tenant's own worker. A hand-written Workers-for-Platforms
+// entrypoint can return any `Uint8Array` the 32 MiB RPC transport carries,
+// and the router used to scan it for `From:` and stream it into
+// `message.reply()` with no bound of its own. Same belt-and-suspenders split
+// as `MAX_ACTIONS`.
+// -----------------------------------------------------------------------
+
+describe('routeInbound — reply size limits', () => {
+  const MIB = 1024 * 1024;
+  const SENDER = `myslug+support@${PROD_DOMAIN}`;
+
+  /** `size` bytes of reply MIME with a valid `From:` naming the sender. */
+  function sizedReply(size: number, from = SENDER): Uint8Array {
+    const head = new TextEncoder().encode(`From: ${from}\r\n\r\n`);
+    const raw = new Uint8Array(size);
+    raw.set(head);
+    raw.fill(0x41, head.length);
+    return raw;
+  }
+
+  function replyAction(raw: Uint8Array) {
+    return { type: 'reply', from: SENDER, to: 'admin@example.com', raw };
+  }
+
+  it('drops a reply over 10 MiB before the MIME From scan', async () => {
+    // No `From:` header at all: if the size check ran AFTER the scan, the
+    // drop would be logged as a missing From header instead.
+    const raw = new Uint8Array(10 * MIB + 1).fill(0x41);
+    const { env, kv } = makeEnv({
+      kvSeed: withAllowlist(['admin@example.com']),
+      emailReturn: [replyAction(raw)],
+    });
+    const { message, replyCalls } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(replyCalls).toHaveLength(0);
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining(`reply dropped: raw is ${10 * MIB + 1} bytes (max ${10 * MIB})`),
+    );
+    expect(errorSpy).not.toHaveBeenCalledWith(expect.stringContaining('no From header'));
+    expect(kv.store.get(SENT_KEY)).toBeUndefined();
+  });
+
+  it('accepts a reply of exactly 10 MiB', async () => {
+    const { env } = makeEnv({
+      kvSeed: withAllowlist(['admin@example.com']),
+      emailReturn: [replyAction(sizedReply(10 * MIB))],
+    });
+    const { message, replyCalls } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(replyCalls).toHaveLength(1);
+    expect(replyCalls[0]?.from).toBe(SENDER);
+  });
+
+  it('three 8 MiB replies: the third overruns the 20 MiB budget and is dropped, the rest fire', async () => {
+    // The overrunning reply is dropped and NOT charged, exactly as the
+    // framework's `reply()` throws before advancing `replyBytesUsed`: a
+    // later reply that fits the remaining budget (16 + 4 = 20 MiB) still
+    // goes.
+    const { env, kv } = makeEnv({
+      kvSeed: withAllowlist(['admin@example.com']),
+      emailReturn: [
+        replyAction(sizedReply(8 * MIB)),
+        replyAction(sizedReply(8 * MIB)),
+        replyAction(sizedReply(8 * MIB)),
+        replyAction(sizedReply(4 * MIB)),
+      ],
+    });
+    const { message, replyCalls } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(replyCalls).toHaveLength(3);
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        `reply dropped: cumulative reply bytes ${24 * MIB} exceed this delivery's budget of ${20 * MIB}`,
+      ),
+    );
+    // Three enacted replies, three quota units.
+    expect(kv.store.get(SENT_KEY)).toBe('3');
+    expect(kv.store.get(BURST_KEY)).toBe('3');
+  });
+});

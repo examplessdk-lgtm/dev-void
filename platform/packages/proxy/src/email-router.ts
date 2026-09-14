@@ -23,16 +23,40 @@
  */
 
 import { EmailMessage } from 'cloudflare:email';
-import { readMimeFromAddrSpec, readSenderDomain, recordInboundDelivery } from './email.ts';
+import {
+  MAX_MIME_BYTES,
+  readMimeFromAddrSpec,
+  readSenderDomain,
+  recordInboundDelivery,
+} from './email.ts';
 import type { Env } from './types.ts';
 
 // Built via new RegExp to dodge oxlint no-control-regex rule.
 // oxlint-disable-next-line no-control-regex
 const CONTROL_CHARS_RE = new RegExp('[\\u0000-\\u001f\\u007f]+', 'g');
 
-/** Strip CR/LF/NUL/control chars before logging or sending to remote MTAs. */
+/**
+ * Strip CR/LF/NUL/control chars before logging or sending to remote MTAs.
+ *
+ * Slice FIRST, then replace. Several inputs here arrive over RPC from the
+ * tenant worker (a reject reason, a non-object action, an unknown action
+ * type) and are bounded by nothing but the 32 MiB transport cap. A global
+ * regex replace materializes one part per match, so a control-heavy string
+ * costs far more than one copy: measured, a 30 MB `\0a\0a…` reason is
+ * ~1 GB of transient heap and 800+ ms, and a 4 MB one already exhausts a
+ * 128 MB heap — the shared proxy isolate's ceiling — before any outbound
+ * gate has run. Slicing first bounds the replace to `maxLen` code units.
+ *
+ * The result is therefore at most `maxLen` chars and may be SHORTER: a run of
+ * controls inside the window collapses to one space and the window is not
+ * refilled from beyond `maxLen`. Every caller renders a log line or a DSN
+ * reason, where a shorter window loses nothing that matters. Slicing at a
+ * UTF-16 index can split a surrogate pair either way — the old order sliced
+ * at the same kind of boundary after replacing — so this does not change
+ * that class of edge.
+ */
 function sanitize(value: string, maxLen: number): string {
-  return value.replace(CONTROL_CHARS_RE, ' ').slice(0, maxLen);
+  return value.slice(0, maxLen).replace(CONTROL_CHARS_RE, ' ');
 }
 
 interface RoutingEntry {
@@ -148,6 +172,36 @@ const MAX_ACTION_ADDRESS_LENGTH = 320;
 const MAX_FORWARD_HEADERS = 32;
 const MAX_FORWARD_HEADER_LENGTH = 1024;
 
+/**
+ * Cap one reply's MIME bytes: `MAX_MIME_BYTES`, the `/email/send` bound in
+ * `email.ts`, which is itself the twin of the framework's
+ * `MAX_MESSAGE_BYTES` in `runtime/email/mime.ts` — the CF ceiling the
+ * design doc records as ~10 MB base64-inflated.
+ *
+ * The framework checks this inside `reply()`, but that runs in the tenant's
+ * own worker: a hand-written Workers-for-Platforms entrypoint returns any
+ * `Uint8Array` the 32 MiB RPC transport carries, and until this check the
+ * router's only bound on `reply.raw` was `instanceof Uint8Array` — it then
+ * scanned the whole value for `From:` and streamed it into
+ * `message.reply()`, where CF's own limit fails it late and opaquely (the
+ * failure is logged here and the reply silently never goes out). Checked
+ * BEFORE `readMimeFromAddrSpec`, whose scan is linear in `raw`.
+ */
+const MAX_REPLY_BYTES = MAX_MIME_BYTES;
+
+/**
+ * Cumulative reply-byte budget for ONE delivery. Twin of the framework's
+ * `MAX_REPLY_BYTES_TOTAL` in `runtime/email/inbound.ts`, same figure and
+ * same rule: a reply that would overrun the budget is refused and NOT
+ * charged, so a later, smaller reply that fits the remainder still goes.
+ * Only the offending reply is dropped — like every other per-reply refusal
+ * here (bad address, sender pin, MIME From) and unlike an invalid forward
+ * header bag, which drops the whole list because partially enacting an
+ * injection attempt is the worse failure. An oversized reply is a resource
+ * bound, and the in-budget replies cost no more than a compliant list.
+ */
+const MAX_REPLY_BYTES_TOTAL = 2 * MAX_REPLY_BYTES;
+
 // workerd's RPC layer throws TypeError with messages like
 // "The RPC receiver does not implement the method 'X'". Match a couple of
 // shapes to survive minor wording shifts in workerd. Lessons.md notes this
@@ -184,13 +238,12 @@ function isValidEmailAddress(s: unknown): s is string {
 }
 
 /**
- * Render a rejected address for a log line. Truncates BEFORE `sanitize`,
- * which replaces across the whole string and only then slices — logging a
- * hostile megabyte address at full length would pay exactly the cost the
- * length check just refused.
+ * Render a rejected address for a log line. `sanitize` truncates before it
+ * replaces, so logging a hostile megabyte address costs `MAX_ACTION_ADDRESS_LENGTH`
+ * code units, not the length the check just refused.
  */
 function logAddress(value: unknown): string {
-  return sanitize(String(value).slice(0, MAX_ACTION_ADDRESS_LENGTH), MAX_ACTION_ADDRESS_LENGTH);
+  return sanitize(String(value), MAX_ACTION_ADDRESS_LENGTH);
 }
 
 /**
@@ -857,6 +910,8 @@ function validateActions(
     return null;
   }
   const out: Array<SanitizedAction> = [];
+  // Bytes of the replies accepted so far, against `MAX_REPLY_BYTES_TOTAL`.
+  let replyBytesUsed = 0;
   for (const action of actions) {
     if (!action || typeof action !== 'object') {
       console.error(`[email-router] dropping non-object action: ${sanitize(String(action), 320)}`);
@@ -864,7 +919,8 @@ function validateActions(
     }
     if (action.type === 'reject') {
       // CRLF / control chars in the reason would inject into the SMTP DSN
-      // we hand back to the remote MTA — strip first, then truncate.
+      // we hand back to the remote MTA. `sanitize` truncates, then strips,
+      // so a multi-megabyte control-heavy reason never gets a full pass.
       const raw = typeof action.reason === 'string' ? action.reason : '';
       const reason =
         raw.length > 0 ? sanitize(raw, MAX_REJECT_REASON_LENGTH) : 'rejected by handler';
@@ -931,6 +987,22 @@ function validateActions(
         );
         continue;
       }
+      // Size before the scan below, which is linear in `raw`. Both bounds
+      // mirror the framework's `reply()`; see the constants for why the
+      // proxy re-checks them and why an overrun drops only this reply.
+      const replyBytes = action.raw.byteLength;
+      if (replyBytes > MAX_REPLY_BYTES) {
+        console.error(
+          `[email-router] reply dropped: raw is ${replyBytes} bytes (max ${MAX_REPLY_BYTES}) (from=${logAddress(action.from)})`,
+        );
+        continue;
+      }
+      if (replyBytesUsed + replyBytes > MAX_REPLY_BYTES_TOTAL) {
+        console.error(
+          `[email-router] reply dropped: cumulative reply bytes ${replyBytesUsed + replyBytes} exceed this delivery's budget of ${MAX_REPLY_BYTES_TOTAL} (from=${logAddress(action.from)})`,
+        );
+        continue;
+      }
       const mimeFrom = readMimeFromAddrSpec(action.raw);
       if (!mimeFrom.ok || mimeFrom.addrSpec.toLowerCase() !== action.from.toLowerCase()) {
         console.error(
@@ -938,6 +1010,7 @@ function validateActions(
         );
         continue;
       }
+      replyBytesUsed += replyBytes;
       out.push({ type: 'reply', from: action.from, to: action.to, raw: action.raw });
     } else {
       // Unknown action type — log so handler authors notice rather than
