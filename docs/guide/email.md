@@ -335,7 +335,7 @@ export default defineEmail(async (message, env, ctx, info) => {
 
 `replyEmail` builds the reply MIME with `Subject: Re: <original>` (no double-prefix), `In-Reply-To: <Message-ID>`, and a continued `References` chain, then dispatches through the message's `reply()`. Defaults: `to = message.from`, `subject = "Re: <original>"`.
 
-Everything taken from the inbound message is best-effort, because the remote sender controls it. A `Message-ID` or `References` value too long for a header line is dropped rather than threaded. Control characters in the subject become a space, and an ASCII subject too long to fold falls back to a bare `Re:`. The reply is always sent; pass `subject` to control it exactly.
+Everything taken from the inbound message is best-effort, because the remote sender controls it. A `Message-ID` or `References` value too long for a header line is dropped rather than threaded. Control characters in the subject become a space, and a subject over 4096 characters, or an ASCII one too long to fold, falls back to a bare `Re:`. The reply is always sent; pass `subject` to control it exactly.
 
 On the platform the `from` default is **not** `message.to`. A reply is sent from
 your project's own slug on the platform mail zone — `<slug>+noreply@<domain>` —

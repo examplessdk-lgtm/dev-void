@@ -642,8 +642,9 @@ export interface ReplyEmailOptions {
   /**
    * Defaults to `Re: <original-subject>` (no double-prefix). The original is
    * remote-sender controlled, so the default is best-effort: control
-   * characters become a space, and an ASCII subject too long to fold falls
-   * back to a bare `Re:`. Pass `subject` to control it exactly.
+   * characters become a space, and a subject over 4096 characters, or an
+   * ASCII one too long to fold, falls back to a bare `Re:`. Pass `subject`
+   * to control it exactly.
    */
   subject?: string;
   text?: string;
@@ -652,6 +653,25 @@ export interface ReplyEmailOptions {
   headers?: Record<string, string>;
   attachments?: Array<Attachment>;
 }
+
+/**
+ * Longest decoded inbound `Subject` the default reply subject is built from;
+ * anything longer falls back to a bare `Re:`.
+ *
+ * RFC 5322 §2.1.1 caps a header LINE at 998 octets, and only folding lets a
+ * header run past it — so a subject is something that fits on a line or
+ * two. Real ones are tens to hundreds of characters; the longest automated
+ * ones (a ticket title under a stack of list tags) reach a few hundred, and
+ * Exchange rejects past 255. Four thousand keeps every one of those with an
+ * order of magnitude to spare and refuses the shape that is only a subject
+ * in name. What the bound buys is proportional cost: the control-character
+ * replacements below cost 66 bytes of heap per match, so at this size they
+ * cost at most 135 KB, and the reply's own `Subject` line is at most ~20 KB
+ * — 4096 code units x 3 UTF-8 octets, base64'd in 45-octet encoded-words
+ * with their framing — against a `MAX_MESSAGE_BYTES` of 10 MiB, so the
+ * subject alone can never push the reply over the limit.
+ */
+const MAX_REPLY_SUBJECT_CHARS = 4096;
 
 function prefixReplySubject(original: string): string {
   // Decode RFC 2047 encoded-words first so we (a) detect existing
@@ -662,21 +682,41 @@ function prefixReplySubject(original: string): string {
   //
   // The inbound subject is remote-sender controlled, and two things
   // downstream throw on it: `normalizeEmail` rejects CR, LF and NUL, and
-  // `buildMime` rejects a header line over 998 octets. A throw here is
-  // not the app's fault, and in production it rejects the whole delivery
-  // — the reply AND any forward the handler queued. So, as with the
-  // threading headers below, the subject is best-effort: C0 controls
-  // (a decoded `=00`, `=0A`, or a B-encoded NUL) become a single space,
-  // and a subject no line can carry falls back to a bare `Re:`.
-  const decoded = decodeRfc2047(original)
+  // `buildMime` rejects a header line over 998 octets or a message over
+  // `MAX_MESSAGE_BYTES`. A throw here is not the app's fault, and in
+  // production it rejects the whole delivery — the reply AND any forward
+  // the handler queued. So, as with the threading headers below, the
+  // subject is best-effort: C0 controls (a decoded `=00`, `=0A`, or a
+  // B-encoded NUL) become a single space, and three shapes fall back to a
+  // bare `Re:` — an empty subject, one over `MAX_REPLY_SUBJECT_CHARS`, and
+  // an ASCII one no line can carry.
+  //
+  // The bound is checked BEFORE the replacements, on the decoded string.
+  // A global `replace` materializes one part per match before it builds the
+  // result — about 66 bytes each — and the inbound header can be the whole
+  // 10 MiB message: 5 MiB of alternating tab and letter measured 165 MB on
+  // the first replacement alone and terminated a 128 MB isolate, which is
+  // the tenant's. It is the DECODED length that is bounded, not the raw
+  // header's: an encoded-word is always at least as long as what it decodes
+  // to (base64 is 4/3 of its bytes plus `=?UTF-8?B?…?=` per 45 of them, and
+  // a Q-encoded 3-octet character is nine characters), so a raw bound would
+  // refuse a CJK subject of under a thousand characters whose decoded form
+  // fits. The decode is one linear pass that holds only its output, already
+  // made to survive the 10 MiB case (see `quotedPrintableDecode` below) —
+  // accuracy for a pass that is paid either way.
+  const decoded = decodeRfc2047(original);
+  if (decoded.length > MAX_REPLY_SUBJECT_CHARS) {
+    return 'Re:';
+  }
+  const cleaned = decoded
     // eslint-disable-next-line no-control-regex -- C0 controls and DEL are the point
     .replace(/[\x00-\x1f\x7f]+/g, ' ')
     .replace(/ {2,}/g, ' ')
     .trim();
-  if (!decoded) {
+  if (!cleaned) {
     return 'Re:';
   }
-  const prefixed = /^re:/i.test(decoded) ? decoded : `Re: ${decoded}`;
+  const prefixed = /^re:/i.test(cleaned) ? cleaned : `Re: ${cleaned}`;
   // Only a pure-ASCII subject can fail to fold: anything else goes through
   // `encodeWord`, which splits it into 75-character encoded-words joined
   // by spaces, and those fold. An ASCII token wider than a line cannot.

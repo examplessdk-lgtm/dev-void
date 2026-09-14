@@ -1496,6 +1496,143 @@ describe('reply subject survives a hostile inbound header', () => {
     const reply = await buildReplyMessage(inbound(subject), { text: 'thanks', from: FROM });
     expect(reply.subject).toBe(expected);
   });
+
+  /**
+   * Build the reply in a child Node under the tenant isolate's 128 MB heap
+   * cap and report what it cost there. `subjectSource` is a JS expression
+   * evaluated in the child, so the fixture is built inside the cap too.
+   */
+  function replyInIsolate(subjectSource: string): {
+    subject: string;
+    ms: number;
+    heapDeltaMB: number;
+  } {
+    const inboundModule = pathToFileURL(
+      join(import.meta.dirname, '../../src/runtime/email/inbound.ts'),
+    ).href;
+    const child = `
+      const { buildReplyMessage, createMessageProxy } = await import(process.argv[1]);
+      const subject = ${subjectSource};
+      const raw = new TextEncoder().encode('body');
+      const { message } = createMessageProxy(
+        {
+          from: 'sender@remote.dev',
+          to: 'acme+support@mail.void.cloud',
+          headers: { subject },
+          raw,
+          rawSize: raw.length,
+        },
+        { slug: 'acme' },
+      );
+      const heap0 = process.memoryUsage().heapUsed;
+      const t0 = performance.now();
+      const reply = await buildReplyMessage(message, { text: 'thanks', from: ${JSON.stringify(FROM)} });
+      const ms = performance.now() - t0;
+      const heapDeltaMB = (process.memoryUsage().heapUsed - heap0) / (1024 * 1024);
+      console.log(JSON.stringify({ subject: reply.subject, ms, heapDeltaMB }));
+    `;
+    const stdout = execFileSync(
+      process.execPath,
+      ['--max-old-space-size=128', '--input-type=module', '-e', child, inboundModule],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000 },
+    );
+    return JSON.parse(stdout.trim().split('\n').at(-1) ?? '{}') as {
+      subject: string;
+      ms: number;
+      heapDeltaMB: number;
+    };
+  }
+
+  // The third shape of the same header, aimed past the decoder at the
+  // control-character replacements: a global `replace` materializes one
+  // part per match before it builds the result, about 66 bytes each, so
+  // 5 MiB of alternating tab and letter (2.6M matches, inside
+  // MAX_MESSAGE_BYTES, no encoded-word for the decoder to touch) measured
+  // 165 MB on the first replacement alone, 191 MB and 206 ms on the reply
+  // path, and terminated a 128 MB isolate. The decoded subject is now
+  // bounded BEFORE the replacements run — 2.3 ms and 0.5 MB on the same
+  // path — so the pin runs in a child with the isolate's cap, where the
+  // old shape did not finish at all.
+  it('replies to a 5 MiB subject of alternating tabs and letters inside a 128 MB heap', () => {
+    const result = replyInIsolate(`'\\ta'.repeat(${(5 * 1024 * 1024) / 2})`);
+    expect(result.subject).toBe('Re:');
+    expect(result.ms).toBeLessThan(200);
+    expect(result.heapDeltaMB).toBeLessThan(64);
+  }, 30_000);
+
+  // The bound sits on the decoded subject and is checked before the
+  // replacements: a subject exactly at it is still repaired, one character
+  // over falls back. `\x01` rather than a tab, because `Headers` strips
+  // leading and trailing HTTP whitespace and the count must be exact.
+  it('repairs a subject exactly at the bound and falls back one character over', async () => {
+    const atBound = 'a\x01'.repeat(2048); // 4096 code units
+    const kept = await buildReplyMessage(inbound(atBound), { text: 'thanks', from: FROM });
+    expect(kept.subject).toBe(`Re: ${'a '.repeat(2048).trim()}`);
+    expect(maxLine(kept)).toBeLessThanOrEqual(998);
+
+    const over = await buildReplyMessage(inbound(`${atBound}a`), { text: 'thanks', from: FROM });
+    expect(over.subject).toBe('Re:');
+  });
+
+  // It is the DECODED length that is bounded. B-encoded, 4096 three-octet
+  // characters arrive as a 19,945-character header, so a bound on the raw
+  // header would have refused a CJK subject a quarter that long. The
+  // rendered `Subject` line of that subject is the widest any kept subject
+  // renders to — about 20 KB, against a 10 MiB message limit.
+  it('bounds the decoded subject, not the encoded header it arrived in', async () => {
+    // Fifteen three-octet characters fill a 45-octet encoded-word exactly,
+    // so no character is split across words (RFC 2047 §5).
+    const encode = (text: string) => {
+      const words: Array<string> = [];
+      for (let i = 0; i < text.length; i += 15) {
+        const bytes = new TextEncoder().encode(text.slice(i, i + 15));
+        words.push(`=?UTF-8?B?${btoa(String.fromCharCode(...bytes))}?=`);
+      }
+      return words.join(' ');
+    };
+    const atBound = '日'.repeat(4096);
+    const header = encode(atBound);
+    expect(header.length).toBeGreaterThan(4 * atBound.length);
+
+    const kept = await buildReplyMessage(inbound(header), { text: 'thanks', from: FROM });
+    expect(kept.subject).toBe(`Re: ${atBound}`);
+    expect(maxLine(kept)).toBeLessThanOrEqual(998);
+    expect(kept.raw.byteLength).toBeLessThan(32 * 1024);
+
+    const over = await buildReplyMessage(inbound(encode(`${atBound}日`)), {
+      text: 'thanks',
+      from: FROM,
+    });
+    expect(over.subject).toBe('Re:');
+  });
+
+  // The residual the previous round left open. A 10 MiB subject WITH spaces
+  // folds — every token is one character — so `fitsHeaderLine` passed it,
+  // `buildMime`'s projection (a lower bound) passed it, and the folded
+  // `Subject` alone rendered to 10,761,941 octets: the final size check
+  // threw `MimeError` out of `replyEmail()`, the throw this path exists to
+  // prevent. Bounded, the subject falls back and the reply is recorded.
+  it('replies to a 10 MiB subject that folds instead of throwing MimeError from the size check', async () => {
+    const raw = new TextEncoder().encode('body');
+    const { message, getActions } = createMessageProxy(
+      {
+        from: 'sender@remote.dev',
+        to: 'acme+support@mail.void.cloud',
+        headers: { subject: 'a '.repeat(MAX_MESSAGE_BYTES / 2) },
+        raw,
+        rawSize: raw.length,
+      },
+      { slug: 'acme' },
+    );
+
+    await replyEmail(message, { text: 'thanks', from: FROM });
+
+    const [action] = getActions();
+    if (action?.type !== 'reply') {
+      throw new Error('expected reply action');
+    }
+    expect(new TextDecoder().decode(action.raw)).toContain('Subject: Re:\r\n');
+  });
 });
 
 describe('parseEmail error contract', () => {
