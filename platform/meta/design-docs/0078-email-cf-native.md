@@ -1072,19 +1072,19 @@ Rules that hold the whole thing together:
 
 #### Refusals and degraded branches
 
-| Branch                                                     | What the developer sees                                                                                                                                          |
-| ---------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| no `email.from`                                            | `add "email": { "from": "you@mail.acme.com" } to void.json` — deploying without email                                                                            |
-| apex has foreign MX, `email.from` on the apex              | `acme.com already receives mail (aspmx.l.google.com). Void never enables routing over live mail. Use something@mail.acme.com.` stop                              |
-| session predates 4.81 (no email scopes)                    | `wrangler login` (one browser Allow) — stop                                                                                                                      |
-| routing status `unlocked` / `misconfigured*`               | print the status, stop — never re-lock records a developer unlocked                                                                                              |
-| `_dmarc.<name>` / `cf-bounce.<name>` TXT exists            | refuse sending onboarding; onboarding writes its own `_dmarc` `p=reject` and the API 409s (`dmarc.multiple`, `dkim.conflict`…)                                   |
-| sending enable fails (Free)                                | `Workers Paid needed for arbitrary recipients. Inbound works; sendEmail() to verified destinations only.` continue without it                                    |
-| subdomain POST refused                                     | one-time dashboard step printed (`Email → Settings → Subdomains → add mail.acme.com`); `addresses` withheld this run                                             |
-| rule on my address owned elsewhere                         | address pruned from `addresses`, reported; wrangler's plan stays non-destructive                                                                                 |
-| existing `send_email` entry not named `SEND_EMAIL`         | refuse with the rename — a second binding would be silent                                                                                                        |
-| zone in another account / not on Cloudflare / partial zone | distinguished via `GET /zones?name=` without `account.id`; `partial`/`secondary` refused                                                                         |
-| CI / non-TTY, not ready                                    | checklist + `run void email setup once, commit wrangler.jsonc, redeploy`; `--require-email` fails instead. `--provision` is NOT an escape: it fails closed in CI |
+| Branch                                                     | What the developer sees                                                                                                                                                                                                                                                                                                         |
+| ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| no `email.from`                                            | `add "email": { "from": "you@mail.acme.com" } to void.json` — deploying without email                                                                                                                                                                                                                                           |
+| apex has foreign MX, `email.from` on the apex              | `acme.com already receives mail (aspmx.l.google.com). Void never enables routing over live mail. Use something@mail.acme.com.` stop                                                                                                                                                                                             |
+| session predates 4.81 (no email scopes)                    | `wrangler login` (one browser Allow) — stop                                                                                                                                                                                                                                                                                     |
+| routing status `unlocked` / `misconfigured*`               | print the status, stop — never re-lock records a developer unlocked                                                                                                                                                                                                                                                             |
+| `_dmarc.<name>` / `cf-bounce.<name>` TXT exists            | refuse sending onboarding; onboarding writes its own `_dmarc` `p=reject` and the API 409s (`dmarc.multiple`, `dkim.conflict`…)                                                                                                                                                                                                  |
+| sending enable fails (Free)                                | `Workers Paid needed for arbitrary recipients. Inbound works; sendEmail() to verified destinations only.` continue without it. 2026-09-14: the `send_email` binding written alongside remembers the refusal — settled on later deploys, for `--require-email` and `void email status`; only `void email setup` offers the retry |
+| subdomain POST refused                                     | one-time dashboard step printed (`Email → Settings → Subdomains → add mail.acme.com`); `addresses` withheld this run                                                                                                                                                                                                            |
+| rule on my address owned elsewhere                         | address pruned from `addresses`, reported; wrangler's plan stays non-destructive                                                                                                                                                                                                                                                |
+| existing `send_email` entry not named `SEND_EMAIL`         | refuse with the rename — a second binding would be silent                                                                                                                                                                                                                                                                       |
+| zone in another account / not on Cloudflare / partial zone | distinguished via `GET /zones?name=` without `account.id`; `partial`/`secondary` refused                                                                                                                                                                                                                                        |
+| CI / non-TTY, not ready                                    | checklist + `run void email setup once, commit wrangler.jsonc, redeploy`; `--require-email` fails instead. `--provision` is NOT an escape: it fails closed in CI                                                                                                                                                                |
 
 #### Human steps that remain, and why
 
@@ -1148,7 +1148,12 @@ wrangler carries them, delete `fetchWithSessionBearer`.
    with a bare `send_email` binding do. `401 / 2036` on
    `GET /accounts/{a}/email/sending/zones` was seen on one account with no
    onboarded domain and an unread plan; the documented not-entitled code
-   is `403 / 10105`. Used as a hint line only.
+   is `403 / 10105`. Used as a hint line only. 2026-09-14: `sending settings`
+   answers not-found on Free and on Paid-never-onboarded alike, so no read
+   can tell them apart; the committed `send_email` binding — written only by
+   a run that already attempted `enable` — is the memory of a refusal
+   (binding present + sending pending = settled), the deploy never retries,
+   and `void email setup` offers the retry on its own prompt.
 7. The API-token permission set for the plan endpoint (`x-api-token-group:
 null`) — the CI story runs on `CLOUDFLARE_API_TOKEN`.
 8. Two-label subdomains; what the plan reports after a dashboard edit of a

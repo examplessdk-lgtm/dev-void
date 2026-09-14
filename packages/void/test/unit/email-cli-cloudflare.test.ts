@@ -259,6 +259,52 @@ afterEach(() => {
   }
 });
 
+/**
+ * Workers Free AFTER a `setup` that was refused Email Sending: the binding, `addresses`
+ * and the sender var are committed, routing + subaddressing are on, the rule exists, and
+ * `sending settings` still answers not-found — the same answer a Paid account that never
+ * onboarded gives. The committed binding is the memory of the refusal (`preflightEmail`),
+ * so every row reads ready; the onboarding is the one retry `setup` offers on its own
+ * prompt, and the state `status` must call set up.
+ */
+function freeAfterSetup(extra: { runnerTable?: Record<string, EmailWranglerRunResult> } = {}) {
+  const root = makeProject({
+    wrangler: `{
+  "account_id": "${ACCOUNT}",
+  "name": "acme-support",
+  "send_email": [{ "name": "SEND_EMAIL" }],
+  "addresses": ["support@mail.acme.com"],
+  "vars": { "__VOID_EMAIL_FROM": "noreply@mail.acme.com" },
+}
+`,
+  });
+  roots.push(root);
+  const fakes = transcriptDeps({
+    runnerTable: {
+      'email routing rules list acme.com': {
+        status: 0,
+        stdout:
+          'Rule: 1a2b3c\n  Name:     support\n  Enabled:  true\n  Matchers: to:support@mail.acme.com\n  Actions:  worker:acme-support\n  Priority: 0\n\nCatch-all rule: disabled, action: drop\n',
+        stderr: BETA_WARNING,
+      },
+      ...extra.runnerTable,
+    },
+    fetchTable: {
+      [`GET /zones/${ZONE_ID}/email/routing`]: () =>
+        jsonResponse(200, { success: true, result: { enabled: true, support_subaddress: true } }),
+    },
+    mx: { 'acme.com': ['aspmx.l.google.com'], 'mail.acme.com': ['route1.mx.cloudflare.net'] },
+  });
+  return { root, configPath: join(root, 'wrangler.jsonc'), ...fakes };
+}
+const RETRY_PROMPT =
+  'Onboard mail.acme.com for Email Sending? Inbound already works; onboarding needs Workers Paid.';
+const sendingRefused: EmailWranglerRunResult = {
+  status: 1,
+  stdout: '',
+  stderr: `${BETA_WARNING}✘ [ERROR] A request to the Cloudflare API (/zones/${ZONE_ID}/email/sending/subdomains) failed.\n\n  something went wrong [code: 10105]\n`,
+};
+
 describe('void email setup --platform cloudflare', () => {
   it('first run: checklist, one confirm, exact argv + REST calls, wrangler.jsonc written', async () => {
     const root = makeProject();
@@ -533,6 +579,119 @@ describe('void email setup --platform cloudflare', () => {
     expect(logged.lines.join('\n')).toContain('Email set up on mail.acme.com.');
   });
 
+  it('Workers Free after `setup`: the onboarding is offered as its own prompt; refused again → hint, config unchanged, exit 0', async () => {
+    const { root, configPath, deps, calls, fetchCalls, printed } = freeAfterSetup({
+      runnerTable: { 'email sending enable mail.acme.com': sendingRefused },
+    });
+    const before = readFileSync(configPath, 'utf-8');
+    const confirms: Array<string> = [];
+    const logged = captureLog();
+    let code: number;
+    try {
+      code = await run(root, 'setup', {
+        ...deps,
+        isInteractive: true,
+        confirm: async (message) => {
+          confirms.push(message);
+          return true;
+        },
+      });
+    } finally {
+      logged.restore();
+    }
+
+    expect(code).toBe(0);
+    expect(confirms).toEqual([RETRY_PROMPT]);
+    // The checklist before the prompt: the row says what works, the retry is the one change.
+    expect(printed[0]).toContain(
+      '    sending   mail.acme.com  not onboarded — verified destinations only; after upgrading to Workers Paid run void email setup --platform cloudflare',
+    );
+    expect(printed[0]).toContain('    + onboard mail.acme.com for Email Sending');
+    expect(printed[0]).not.toContain('+ enable Email Routing');
+    expect(printed[0]).not.toContain('+ wrangler.jsonc');
+    // ONE account write — the onboarding — and no bearer write.
+    expect(calls.filter((c) => c.args.includes('enable')).map((c) => c.args.slice(0, 4))).toEqual([
+      ['email', 'sending', 'enable', 'mail.acme.com'],
+    ]);
+    expect(fetchCalls.every((c) => c.method === 'GET')).toBe(true);
+    const output = printed.join('\n');
+    expect(output).toContain(
+      '! sending   mail.acme.com not onboarded [code: 10105] — account is not entitled to Email Sending',
+    );
+    expect(output).toContain(SENDING_FREE_PLAN_HINT);
+    expect(printed.at(-1)).toContain(
+      'outbound  sendEmail() from noreply@mail.acme.com   (verified destinations only)',
+    );
+    expect(readFileSync(configPath, 'utf-8')).toBe(before);
+    expect(logged.lines.join('\n')).toContain('Email set up on mail.acme.com.');
+  });
+
+  it('Workers Free after `setup`, upgraded to Workers Paid: the retry onboards the domain', async () => {
+    const { root, configPath, deps, calls, printed } = freeAfterSetup({
+      runnerTable: { 'email sending enable mail.acme.com': sendingEnabled('mail.acme.com') },
+    });
+    const before = readFileSync(configPath, 'utf-8');
+    const logged = captureLog();
+    let code: number;
+    try {
+      code = await run(root, 'setup', { ...deps, isInteractive: true, confirm: async () => true });
+    } finally {
+      logged.restore();
+    }
+
+    expect(code).toBe(0);
+    expect(calls.filter((c) => c.args.includes('enable'))).toHaveLength(1);
+    expect(printed.join('\n')).toContain('✔ sending   mail.acme.com onboarded');
+    expect(printed.at(-1)).toBe(
+      [
+        '    inbound   support@mail.acme.com  →  email/support+[ticket].ts',
+        '    outbound  sendEmail() from noreply@mail.acme.com',
+      ].join('\n'),
+    );
+    expect(readFileSync(configPath, 'utf-8')).toBe(before);
+    expect(logged.lines.join('\n')).toContain('Email set up on mail.acme.com.');
+  });
+
+  it('Workers Free after `setup`, retry declined: nothing changed, no `enable` call, no write', async () => {
+    const { root, configPath, deps, calls, fetchCalls } = freeAfterSetup();
+    const before = readFileSync(configPath, 'utf-8');
+    const confirms: Array<string> = [];
+    const logged = captureLog();
+    let code: number;
+    try {
+      code = await run(root, 'setup', {
+        ...deps,
+        isInteractive: true,
+        confirm: async (message) => {
+          confirms.push(message);
+          return false;
+        },
+      });
+    } finally {
+      logged.restore();
+    }
+
+    expect(code).toBe(0);
+    expect(confirms).toEqual([RETRY_PROMPT]);
+    expect(logged.lines).toContain('Nothing changed.');
+    expect(calls.some((c) => c.args.includes('enable'))).toBe(false);
+    expect(fetchCalls.every((c) => c.method === 'GET')).toBe(true);
+    expect(readFileSync(configPath, 'utf-8')).toBe(before);
+  });
+
+  it('Workers Free after `setup`, non-interactive: the retry is never run unasked — exit 1, no `enable` call', async () => {
+    const { root, configPath, deps, calls } = freeAfterSetup();
+    const before = readFileSync(configPath, 'utf-8');
+    const confirm = vi.fn(async () => true);
+
+    const code = await run(root, 'setup', { ...deps, isInteractive: false, confirm });
+
+    expect(code).toBe(1);
+    expect(confirm).not.toHaveBeenCalled();
+    expect(calls.some((c) => c.args.includes('enable'))).toBe(false);
+    expect(readFileSync(configPath, 'utf-8')).toBe(before);
+  });
+
   it('second run, everything ready: no prompt, zero writes, config unchanged, exit 0', async () => {
     const root = makeProject({
       wrangler: `{
@@ -637,6 +796,37 @@ describe('void email status --platform cloudflare', () => {
         '    outbound  sendEmail() from noreply@mail.acme.com   (verified destinations only)',
       ].join('\n'),
     );
+  });
+
+  it('Workers Free after `setup` (binding committed, sending still not onboarded): exit 0, the row says what works and how to retry', async () => {
+    const { root, configPath, deps, calls, fetchCalls, printed } = freeAfterSetup();
+    const before = readFileSync(configPath, 'utf-8');
+    const confirm = vi.fn(async () => true);
+    const logged = captureLog();
+    let code: number;
+    try {
+      code = await run(root, 'status', { ...deps, isInteractive: true, confirm });
+    } finally {
+      logged.restore();
+    }
+
+    expect(code).toBe(0);
+    expect(confirm).not.toHaveBeenCalled();
+    expect(calls.some((c) => c.args.includes('enable'))).toBe(false);
+    expect(fetchCalls.every((c) => c.method === 'GET')).toBe(true);
+    expect(readFileSync(configPath, 'utf-8')).toBe(before);
+    expect(printed[0]).toContain(
+      '    sending   mail.acme.com  not onboarded — verified destinations only; after upgrading to Workers Paid run void email setup --platform cloudflare',
+    );
+    expect(printed[0]).toContain('    binding   SEND_EMAIL             (present)');
+    expect(printed[1]).toBe(
+      [
+        '    inbound   support@mail.acme.com  →  email/support+[ticket].ts',
+        '    outbound  sendEmail() from noreply@mail.acme.com   (verified destinations only)',
+      ].join('\n'),
+    );
+    expect(logged.lines.join('\n')).toContain('Email is set up on mail.acme.com.');
+    expect(logged.lines.join('\n')).not.toContain('not set up');
   });
 
   it("ready but the rule not created yet (right after `setup`): exit 0 — rules are the next deploy's", async () => {

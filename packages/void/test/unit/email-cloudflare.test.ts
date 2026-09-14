@@ -1122,6 +1122,66 @@ describe('preflightEmail', () => {
     expect(pre.ready).toBe(true);
   });
 
+  it('remembers a refused sending onboarding by the committed binding: pending + binding present reads ready, retry on offer', async () => {
+    // Workers Free after `void email setup`: routing + subaddressing on, the binding,
+    // `addresses` and the sender var committed, and `sending settings` still answering
+    // not-found — the same answer a Paid account that never onboarded gives. The binding
+    // is written only by a run that already attempted `sending enable`, so it is the
+    // memory of the refusal: settled, never asked again by the deploy, and the retry is
+    // what `void email setup` offers.
+    const notOnboarded = {
+      'email sending settings mail.acme.com': sendingNotFound('mail.acme.com'),
+    };
+    const remembered = await preflightEmail(readyAccount({ runnerTable: notOnboarded }).inputs);
+    expect(remembered.sending.state).toBe('pending');
+    expect(remembered.binding.state).toBe('present');
+    expect(remembered.blockers).toEqual([]);
+    expect(remembered.ready).toBe(true);
+    expect(remembered.sendingRetryable).toBe(true);
+    const text = renderEmailChecklist(remembered);
+    expect(text).toContain(
+      '    sending   mail.acme.com  not onboarded — verified destinations only; after upgrading to Workers Paid run void email setup --platform cloudflare',
+    );
+    // The onboarding stays listed as the one account change — the retry prompt's row.
+    expect(text).toContain('    + onboard mail.acme.com for Email Sending');
+    expect(text).not.toContain('Nothing to change');
+
+    // No binding: nothing has attempted the onboarding yet, so the row is plain work.
+    const untried = await preflightEmail(
+      readyAccount({ runnerTable: notOnboarded, existingSendEmail: undefined }).inputs,
+    );
+    expect(untried.binding.state).toBe('absent');
+    expect(untried.ready).toBe(false);
+    expect(untried.sendingRetryable).toBe(true);
+    expect(renderEmailChecklist(untried)).toContain('    sending   mail.acme.com  not onboarded\n');
+
+    // A sending-scoped blocker settles the row on its own and leaves nothing to retry:
+    // the ✘ row carries the reason, the sending row keeps the bare word.
+    const conflict = await preflightEmail(
+      readyAccount({
+        runnerTable: notOnboarded,
+        dns: fakeDns({
+          mx: {
+            'acme.com': ['aspmx.l.google.com'],
+            'mail.acme.com': ['route1.mx.cloudflare.net', 'route2.mx.cloudflare.net'],
+          },
+          txt: { '_dmarc.mail.acme.com': ['v=DMARC1; p=none'] },
+        }),
+      }).inputs,
+    );
+    expect(conflict.blockers.map((b) => b.scope)).toEqual(['sending']);
+    expect(conflict.ready).toBe(true);
+    expect(conflict.sendingRetryable).toBe(false);
+    expect(renderEmailChecklist(conflict)).toContain(
+      '    sending   mail.acme.com  not onboarded\n',
+    );
+
+    // Onboarded: nothing to retry.
+    const onboarded = await preflightEmail(readyAccount().inputs);
+    expect(onboarded.sending.state).toBe('ready');
+    expect(onboarded.sendingRetryable).toBe(false);
+  });
+
   it('an MX lookup that fails outright is unknown, and blocks (fail closed)', async () => {
     const { inputs } = transcriptInputs({
       dns: fakeDns({
@@ -1505,6 +1565,36 @@ describe('applyEmailSetup', () => {
       vars: { __VOID_EMAIL_FROM: 'noreply@mail.acme.com' },
       addresses: ['support@mail.acme.com'],
     });
+
+    // Round trip: the patch that refused run writes, fed back into the next preflight against
+    // the account it left behind (routing + subaddressing on, sending still not-found), reads
+    // ready — the binding is the memory of the refusal — with the retry on offer for `setup`.
+    const next = await preflightEmail(
+      transcriptInputs({
+        runnerTable: {
+          'email routing rules list acme.com': {
+            status: 0,
+            stdout: RULES_WITH_ENTRIES.replace('to:support@acme.com', 'to:support@mail.acme.com'),
+            stderr: BETA_WARNING,
+          },
+        },
+        fetchTable: { [`GET /zones/${ZONE_ID}/email/routing`]: routingGet(true) },
+        dns: fakeDns({
+          mx: {
+            'acme.com': ['aspmx.l.google.com'],
+            'mail.acme.com': ['route1.mx.cloudflare.net'],
+          },
+        }),
+        existingSendEmail: [out.patch.sendEmail!],
+        existingAddresses: out.patch.addresses,
+        existingVars: out.patch.vars,
+      }).inputs,
+    );
+    expect(next.sending.state).toBe('pending');
+    expect(next.ready).toBe(true);
+    expect(next.sendingRetryable).toBe(true);
+    expect(next.addressesStale).toBe(false);
+    expect(next.sender.state).toBe('ready');
   });
 
   it('a sending-scoped blocker (DMARC present) skips sending enable, routing still applies', async () => {

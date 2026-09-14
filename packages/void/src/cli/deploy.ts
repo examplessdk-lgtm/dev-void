@@ -3897,6 +3897,9 @@ async function runCloudflareEmailStep(
   };
 
   // Every account row ready: no prompt, no account call, zero keystrokes (the second deploy).
+  // A sending row the committed binding remembers as refused (Workers Free) lands here too
+  // — the deploy never retries the onboarding; the map ends `(verified destinations only)`
+  // and `void email setup` is where the retry is offered (`preflightEmail`'s memory rule).
   // The two CONFIG rows are reconciled here by a plain file write, because a stale one is
   // not idle: an `addresses` entry no longer in the pruned set reaches wrangler's plan as a
   // `conflict` (a takeover prompt in a TTY, a UserError after the upload in CI — decision
@@ -4040,17 +4043,19 @@ async function runCloudflareEmailStep(
   // `addresses` when the bearer failed or routing is off — so a run whose subdomain
   // routing POST failed ships the binding with no inbound rule behind it, which is
   // exactly the end state the `leaveAccount` branch above already returns as
-  // `satisfied: false`. Gating `--require-email` on the binding would contradict both
-  // that branch and the error text ("not fully set up … refusing to deploy"), so this
-  // mirrors `preflightEmail`'s own `ready` predicate instead: the inbound rows (routing +
-  // subaddressing, with `addresses` actually written — `out.inboundReady`, the same field
-  // `void email setup` exits on) + a settled sending + the binding. A sending-scoped
-  // blocker is settled there (Void cannot act on it) and is settled here; a plain
-  // `sending enable` refusal (Workers Free) is NOT, on either side. `map` stays on
-  // `bindingPresent`: the worker DOES ship with email, and a deploy may ship with email
-  // while `satisfied` is false.
-  const sendingSettled = out.sendingReady || pre.blockers.some((b) => b.scope === 'sending');
-  const satisfied = bindingPresent && out.inboundReady && sendingSettled;
+  // `satisfied: false`. Gating `--require-email` on the binding alone would contradict
+  // both that branch and the error text ("not fully set up … refusing to deploy"), so
+  // this mirrors `preflightEmail`'s own `ready` predicate instead: the inbound rows
+  // (routing + subaddressing, with `addresses` actually written — `out.inboundReady`, the
+  // same field `void email setup` exits on) + the binding. The sending row needs no term
+  // of its own: apply has just made its one `sending enable` call (or found the row ready
+  // or blocked), and the binding it writes on that same run is what the NEXT preflight
+  // reads as the memory of a refusal — binding present + sending pending is settled there
+  // (Workers Free, `10105`; the memory rule in `preflightEmail`), so it is settled here,
+  // or the two would disagree on the very next deploy. `map` stays on `bindingPresent`:
+  // the worker DOES ship with email, and a deploy may ship with email while `satisfied`
+  // is false.
+  const satisfied = bindingPresent && out.inboundReady;
   return {
     satisfied,
     configWritten,

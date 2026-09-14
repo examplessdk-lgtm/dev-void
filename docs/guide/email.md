@@ -533,6 +533,8 @@ Workers Paid needed for arbitrary recipients. Inbound works; sendEmail() to veri
 
 Everything else — routing, rules, the binding — still goes through, and the address map ends with `outbound  sendEmail() from support@mail.acme.com   (verified destinations only)`. Verified destinations are the addresses under **Email Routing → Destination addresses** in your Cloudflare dashboard; a handler that `forward()`s to a new address needs the same verification click.
 
+The refusal is remembered by the `send_email` binding that same run writes into `wrangler.jsonc`: Void writes the binding only after it has attempted the onboarding, so a committed binding next to a domain that is still not onboarded means "tried, refused". Later deploys ask nothing about it, `--require-email` passes, `void email status` reads the domain as set up (its sending row says `not onboarded — verified destinations only` and names the retry), and the address map keeps ending with `(verified destinations only)`. The deploy never retries the onboarding on its own. After upgrading to Workers Paid, run `void email setup --platform cloudflare` once: it asks `Onboard mail.acme.com for Email Sending?` and, on Yes, onboards the domain — from then on the map ends without the marker.
+
 If `_dmarc.mail.acme.com` or `cf-bounce.mail.acme.com` already has a TXT record, sending onboarding is refused — it writes its own `_dmarc` (`p=reject`) and DKIM records and Cloudflare would answer with a conflict. Inbound is unaffected; remove the records or keep sending off.
 
 ### CI
@@ -546,7 +548,7 @@ Run `void email setup --platform cloudflare` once locally, commit wrangler.jsonc
 
 then deploys **without** email. Pass `--require-email` to fail instead. Automatic resource provisioning is not an escape hatch: it creates D1/KV/R2/Queue/Hyperdrive resources, never a mail setup. To read the rows without deploying or being asked anything, run `void email status --platform cloudflare`.
 
-So the CI story is: run `void email setup --platform cloudflare` once on your machine (it runs the same preflight, checklist and prompt as the first deploy, then writes `wrangler.jsonc`, without deploying), commit `wrangler.jsonc`, and let CI run `void deploy --platform cloudflare --require-email`. With the binding and `addresses` committed, every row reads ready and nothing is asked.
+So the CI story is: run `void email setup --platform cloudflare` once on your machine (it runs the same preflight, checklist and prompt as the first deploy, then writes `wrangler.jsonc`, without deploying), commit `wrangler.jsonc`, and let CI run `void deploy --platform cloudflare --require-email`. With the binding and `addresses` committed, every row reads ready and nothing is asked — on Workers Free too, where the committed binding is what remembers the refused sending onboarding (see [Sending](#sending)).
 
 ### If the subdomain step is refused
 

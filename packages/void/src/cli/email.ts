@@ -218,7 +218,10 @@ export interface EmailCloudflareCommandDeps {
  * apply → write the root wrangler.jsonc. It exists for CI: a non-interactive deploy that
  * finds email not ready prints the checklist and says to run this once, commit
  * wrangler.jsonc, and redeploy. Rules and the catch-all stay wrangler's job — the next
- * `void deploy --platform cloudflare` applies the plan from the written `addresses`.
+ * `void deploy --platform cloudflare` applies the plan from the written `addresses`. It
+ * is also the ONLY place a sending onboarding the committed binding remembers as refused
+ * (Workers Free) is retried — on its own prompt, after a Workers Paid upgrade; the deploy
+ * reads that row as settled and never retries it.
  *
  * `status` is the preflight alone, printed, exit 1 when not ready.
  */
@@ -325,11 +328,15 @@ export async function runEmailCloudflareCommand(
   }
 
   // 4. The one Enter. An `all` blocker means nothing can be applied; a ready preflight
-  //    needs no prompt (apply makes zero calls and the config write is idempotent).
+  //    needs no prompt (apply makes zero calls and the config write is idempotent) — with
+  //    one exception: a sending row the committed binding remembers as refused (Workers
+  //    Free; `sendingRetryable`, see `preflightEmail`). Apply WOULD make that one `sending
+  //    enable` call again, so it is offered as its own prompt — the retry after a Workers
+  //    Paid upgrade, which the deploy never attempts — and is never run unasked.
   if (pre.blockers.some((b) => b.scope === 'all')) {
     return fail('email: nothing was changed — fix the ✘ rows above and rerun.');
   }
-  if (!pre.ready) {
+  if (!pre.ready || pre.sendingRetryable) {
     const interactive = deps.isInteractive ?? !isWranglerNonInteractiveOrCI();
     if (!interactive) {
       return fail(
@@ -342,7 +349,10 @@ export async function runEmailCloudflareCommand(
         const answer = await confirm({ message, initialValue: true });
         return !isCancel(answer) && answer === true;
       });
-    if (!(await ask(`Set up email on ${pre.domain}?`))) {
+    const question = pre.ready
+      ? `Onboard ${pre.domain} for Email Sending? Inbound already works; onboarding needs Workers Paid.`
+      : `Set up email on ${pre.domain}?`;
+    if (!(await ask(question))) {
       log.info('Nothing changed.');
       return;
     }
@@ -375,7 +385,9 @@ export async function runEmailCloudflareCommand(
   // matches nothing — "set up" would be false, and CI's `--require-email` (which gates on
   // the same `inboundReady`) would refuse the deploy this command exists to prepare. A
   // sending row that stays pending (Workers Free) is NOT a failure here: inbound is
-  // complete, `addresses` is committed, and the plan hint above is the warning.
+  // complete, `addresses` is committed, the plan hint above is the warning, and the
+  // binding written alongside is what the next preflight reads as the memory of that
+  // refusal — so `void email status` and `--require-email` read this state as set up too.
   if (!out.inboundReady) {
     const missing = !out.routingReady
       ? `Email Routing on ${pre.domain} is not ready`

@@ -35,7 +35,10 @@
  *   - `ready` means no ACCOUNT work is left. Routing rules are `wrangler deploy`'s own
  *     (`rulesPending`), and the two CONFIG rows — `addresses` against the pruned set,
  *     `vars.__VOID_EMAIL_FROM` against `email.from` — are reconciled by a plain file write
- *     on every deploy, never behind the prompt (`addressesStale`, `sender`).
+ *     on every deploy, never behind the prompt (`addressesStale`, `sender`). A sending
+ *     onboarding the committed `send_email` binding remembers as refused (Workers Free)
+ *     is settled, not work: the binding is written only by a run that already attempted
+ *     it. `void email setup` offers the retry (`sendingRetryable`); the deploy never does.
  *   - The session gate reads `whoami --json`: a `wrangler login` session must carry both
  *     email scopes; an API token (`CLOUDFLARE_API_TOKEN`, the CI credential) cannot list
  *     its permissions, so it is gated by the reads, which fail closed; a Global API Key is
@@ -578,9 +581,22 @@ export interface EmailPreflight {
   rulesPending: Array<string>;
   blockers: Array<EmailPreflightBlocker>;
   /**
-   * True when nothing is left for APPLY to do on the account: no prompt, zero calls.
-   * Routing rules are wrangler's (`rulesPending` is informational), and the two config
-   * rows (`sender`, `addressesStale`) are reconciled by a plain file write.
+   * True when Email Sending onboarding is still on the table: the row is `pending` and no
+   * sending-scoped blocker stands in the way — exactly when apply would make its one
+   * `wrangler email sending enable` call (the checklist's `onboard … for Email Sending`
+   * row). With the binding committed such a row is SETTLED (`ready` stays true; see the
+   * memory rule in `preflightEmail`), so this is what `void email setup` offers as its own
+   * prompt — the retry after a Workers Paid upgrade — instead of running it unasked. ONE
+   * field, computed here, so the offer and apply's call cannot drift.
+   */
+  sendingRetryable: boolean;
+  /**
+   * True when nothing is left for APPLY to do on the account — no prompt, zero calls —
+   * with one remembered exception: a sending row the committed binding records as refused
+   * (`sendingRetryable`), which apply WOULD retry, so the deploy never runs apply on a
+   * ready preflight and `void email setup` asks first. Routing rules are wrangler's
+   * (`rulesPending` is informational), and the two config rows (`sender`,
+   * `addressesStale`) are reconciled by a plain file write.
    */
   ready: boolean;
 }
@@ -686,6 +702,7 @@ export async function preflightEmail(inputs: EmailCloudflareInputs): Promise<Ema
     addresses: [],
     rulesPending: [],
     blockers: [],
+    sendingRetryable: false,
     ready: false,
   };
   const block = (scope: 'all' | 'sending', message: string): void => {
@@ -1061,10 +1078,31 @@ export async function preflightEmail(inputs: EmailCloudflareInputs): Promise<Ema
   // on, so it does not keep every later deploy prompting. Routing rules are created by
   // `wrangler deploy` from the written `addresses`, so a rule not there yet is not apply's
   // work either (`rulesPending`); the same goes for the config rows, which a plain file
-  // write reconciles without a prompt. A sending onboarding that keeps failing (Workers
-  // Free) DOES keep the row pending — there is no state to remember it by.
+  // write reconciles without a prompt.
+  //
+  // A sending row still pending WITH the binding committed is settled too — the committed
+  // binding is the memory of a refused onboarding. `sending settings` answers not-found
+  // for "Workers Free" and for "Paid, never onboarded" alike, so no read tells the two
+  // apart; only the mutating `sending enable` does. And `applyEmailSetup` writes
+  // `send_email` ONLY on a run that has already made that call: the binding goes in once
+  // routing or sending came up, and `enable` runs on every apply whose sending row is not
+  // ready and not blocked. So binding present + sending pending reads "attempted and
+  // refused" (Workers Free, `10105`). Without this rule the refusal came back on every
+  // deploy — a prompt in a TTY, "cannot ask" in CI, `--require-email` refused forever,
+  // `void email status` exit 1 — against a setup that is complete for inbound (replies
+  // go through the native `message.reply()`, never the binding) and sends to verified
+  // destinations. The cost: a later Workers Paid upgrade is not picked up by the deploy;
+  // `void email setup` offers the retry (`sendingRetryable`). A binding committed by hand
+  // reads the same way — the developer chose it. Note that with the binding present every
+  // sending state is settled today (`unknown` always carries a sending-scoped blocker), so
+  // the row gates `ready` only through the binding; the three terms stay apart because
+  // each is settled for a different reason.
+  const sendingBlocked = pre.blockers.some((b) => b.scope === 'sending');
+  pre.sendingRetryable = pre.sending.state === 'pending' && !sendingBlocked;
   const sendingSettled =
-    pre.sending.state === 'ready' || pre.blockers.some((b) => b.scope === 'sending');
+    pre.sending.state === 'ready' ||
+    sendingBlocked ||
+    (pre.sending.state === 'pending' && pre.binding.state === 'present');
   pre.ready =
     !pre.blockers.some((b) => b.scope === 'all') &&
     pre.routing.state === 'ready' &&
@@ -1148,10 +1186,18 @@ export function renderEmailChecklist(pre: EmailPreflight): string {
         ? 'subaddressing off'
         : 'subaddressing unknown';
   row('routing', `${pre.domain}  ${routingWord} · ${subWord}`);
-  row(
-    'sending',
-    `${pre.domain}  ${pre.sending.state === 'ready' ? 'onboarded' : pre.sending.state === 'unknown' ? 'unknown — run void email setup --platform cloudflare' : 'not onboarded'}`,
-  );
+  // A pending row the committed binding remembers as refused (see `preflightEmail`) reads
+  // settled, so it says what still works and where the retry lives; a sending-scoped
+  // blocker keeps the bare word — its ✘ row at the end carries the reason.
+  const sendingWord =
+    pre.sending.state === 'ready'
+      ? 'onboarded'
+      : pre.sending.state === 'unknown'
+        ? 'unknown — run void email setup --platform cloudflare'
+        : pre.sendingRetryable && pre.binding.state === 'present'
+          ? 'not onboarded — verified destinations only; after upgrading to Workers Paid run void email setup --platform cloudflare'
+          : 'not onboarded';
+  row('sending', `${pre.domain}  ${sendingWord}`);
   if (pre.derived.addresses.length === 0) {
     row('rules', '(none — no email/ handlers)');
   }
@@ -1341,8 +1387,10 @@ export interface EmailApplyResult {
    * written. Routing alone is not "set up" — a refused subaddressing PATCH withholds
    * `addresses` (no bearer call may fail, decision 11), so the next deploy creates no
    * rule at all, and until the flag is on `support+T-42@` matches no rule for `support@`.
-   * `void email setup` exits 0 on this; `--require-email` gates on it plus the binding and
-   * a settled sending row. ONE field, computed here, so the two callers cannot drift.
+   * `void email setup` exits 0 on this; `--require-email` gates on it plus the binding —
+   * the sending row needs no term there, because the binding this same run writes is what
+   * the next preflight reads as the memory of a refused onboarding (see `preflightEmail`).
+   * ONE field, computed here, so the two callers cannot drift.
    */
   inboundReady: boolean;
 }

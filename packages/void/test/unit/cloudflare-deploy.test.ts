@@ -33,7 +33,7 @@ import {
   type DeployWranglerRunResult,
   type EmittedWorkerVarsResult,
 } from '../../src/cli/deploy.ts';
-import type { EmailDns } from '../../src/cli/email-cloudflare.ts';
+import { SENDING_FREE_PLAN_HINT, type EmailDns } from '../../src/cli/email-cloudflare.ts';
 import {
   resolveEnvSchemaFactsViaSubprocess,
   validateEmittedVarsViaSubprocess,
@@ -9053,47 +9053,120 @@ describe('runCloudflareDeploy — Mode B email step (3b-ii)', () => {
     expect(readRootConfig(root).addresses).toEqual(['support@mail.acme.com']);
   });
 
-  it('--require-email fails on Workers Free: routing is up, but `sending enable` answers 10105', async () => {
-    // Every other row is ready; only Email Sending is refused (no entitlement). The
-    // preflight does NOT treat that as settled — no sending-scoped blocker exists for it,
-    // so the row stays pending on every deploy (`sendingSettled` in preflightEmail). The
-    // apply still writes the binding, and this pins that --require-email refuses anyway.
+  /** wrangler's `sending enable` on Workers Free: the documented not-entitled code. */
+  const sendingRefused: DeployWranglerRunResult = {
+    ...cleanExit,
+    status: 1,
+    stderr: `${BETA_WARNING}✘ [ERROR] A request to the Cloudflare API (/zones/${ZONE_ID}/email/sending/subdomains) failed.\n\n  something went wrong [code: 10105]\n`,
+  };
+
+  it('--require-email passes on Workers Free: routing is up, `sending enable` answers 10105, the binding written alongside remembers it', async () => {
+    // Every other row is ready; only Email Sending is refused (no entitlement). Inbound is
+    // complete — replies go through the native `message.reply()`, never the binding — and
+    // the apply writes the binding, which is what the NEXT preflight reads as the memory of
+    // this refusal (binding present + sending pending is settled; the memory rule in
+    // `preflightEmail`). So `satisfied` carries no sending term of its own: the deploy
+    // proceeds, the hint is printed once, and the map says what sending can do.
     const root = emailProject();
     const { deps, spawns, exitCalls, trace } = emailHarness({
       ...readyRows,
-      runner: {
-        'email sending enable mail.acme.com': {
-          ...cleanExit,
-          status: 1,
-          stderr: `${BETA_WARNING}✘ [ERROR] A request to the Cloudflare API (/zones/${ZONE_ID}/email/sending/subdomains) failed.\n\n  something went wrong [code: 10105]\n`,
-        },
-      },
+      runner: { 'email sending enable mail.acme.com': sendingRefused },
       confirm: async () => true,
     });
     const output = captureOutput();
     try {
-      await expect(
-        runCloudflareDeploy(
+      await runCloudflareDeploy(
+        root,
+        { backend: 'cloudflare', requireEmail: true },
+        silentCliLog,
+        deps,
+      );
+    } finally {
+      output.restore();
+    }
+    expect(exitCalls).toEqual([]);
+    const printed = output.lines.join('\n');
+    expect(printed).toContain('[code: 10105]');
+    expect(printed).toContain(SENDING_FREE_PLAN_HINT);
+    expect(printed).not.toContain('--require-email');
+    expect(printed).toContain(
+      'outbound  sendEmail() from noreply@mail.acme.com   (verified destinations only)',
+    );
+    expect(trace).toContain('build');
+    expect(spawns.some((s) => s.args[0] === 'deploy')).toBe(true);
+    // Inbound DID come up, and the config records it — with the binding that remembers.
+    const written = readRootConfig(root);
+    expect(written.send_email).toEqual([{ name: 'SEND_EMAIL' }]);
+    expect(written.addresses).toEqual(['support@mail.acme.com']);
+    expect(written.vars).toEqual({ __VOID_EMAIL_FROM: 'noreply@mail.acme.com' });
+  });
+
+  /**
+   * The Workers Free account AFTER the deploy above (or `void email setup`, which exits 0
+   * there): the binding, `addresses` and the sender var are committed, routing +
+   * subaddressing are on, the rule exists, and `sending settings` still answers not-found —
+   * the same answer a Paid account that never onboarded gives. The committed binding is the
+   * memory of the refusal, so the preflight reads ready on every later deploy: no prompt in
+   * a TTY, nothing to ask in CI, `--require-email` passes, and the onboarding is never
+   * retried by the deploy — `void email setup` is where that retry is offered.
+   */
+  const COMMITTED_ON_FREE = {
+    ...readyRows,
+    runner: {
+      'email routing rules list acme.com': myRule,
+      'email sending settings mail.acme.com': sendingNotFound,
+    },
+  };
+
+  for (const [shell, isCI] of [
+    ['CI', true],
+    ['a TTY', false],
+  ] as const) {
+    it(`Workers Free, committed config, ${shell} + --require-email: the refusal is remembered — no prompt, no \`sending enable\`, the deploy proceeds`, async () => {
+      const root = emailProject(COMMITTED_EMAIL);
+      const before = readRootConfig(root);
+      const { deps, spawns, fetchCalls, confirms, exitCalls, trace } = emailHarness({
+        ...COMMITTED_ON_FREE,
+        isCI,
+        // Record the prompt instead of throwing on it, so the assertion names the failure.
+        confirm: undefined,
+      });
+      const output = captureOutput();
+      try {
+        await runCloudflareDeploy(
           root,
           { backend: 'cloudflare', requireEmail: true },
           silentCliLog,
           deps,
-        ),
-      ).rejects.toBeInstanceOf(ExitError);
-    } finally {
-      output.restore();
-    }
-    expect(exitCalls).toEqual([1]);
-    const printed = output.lines.join('\n');
-    expect(printed).toContain('[code: 10105]');
-    expect(printed).toContain('--require-email');
-    expect(trace).not.toContain('build');
-    expect(spawns.some((s) => s.args[0] === 'deploy')).toBe(false);
-    // Inbound DID come up, and the config records it — the refusal is about sending only.
-    const written = readRootConfig(root);
-    expect(written.send_email).toEqual([{ name: 'SEND_EMAIL' }]);
-    expect(written.addresses).toEqual(['support@mail.acme.com']);
-  });
+        );
+      } finally {
+        output.restore();
+      }
+      expect(exitCalls).toEqual([]);
+      expect(confirms).toEqual([]);
+      // The probe of sending still runs (read-only); the onboarding is NOT retried.
+      expect(spawns.some((s) => s.args[0] === 'email' && s.args[1] === 'sending')).toBe(true);
+      expect(spawns.some((s) => s.args[0] === 'email' && s.args[2] === 'enable')).toBe(false);
+      expect(fetchCalls.filter((c) => c.method !== 'GET')).toEqual([]);
+      const printed = output.lines.join('\n');
+      expect(printed).not.toContain('This changes YOUR Cloudflare account');
+      expect(printed).not.toContain('cannot ask');
+      expect(printed).not.toContain('deploying without email');
+      expect(printed).not.toContain('--require-email');
+      expect(printed).not.toContain('[code: 10105]');
+      expect(printed).toContain('inbound   support@mail.acme.com  →  email/support+[ticket].ts');
+      expect(printed).toContain(
+        'outbound  sendEmail() from noreply@mail.acme.com   (verified destinations only)',
+      );
+      expect(trace).toContain('build');
+      expect(spawns.some((s) => s.args[0] === 'deploy')).toBe(true);
+      // The committed config is left exactly as the refused run wrote it.
+      const after = readRootConfig(root);
+      expect(after.send_email).toEqual(before.send_email);
+      expect(after.addresses).toEqual(before.addresses);
+      expect(after.vars).toEqual(before.vars);
+    });
+  }
 
   it('--require-email passes on a fully ready second deploy: nothing to apply, zero keystrokes', async () => {
     // The headline flow. No apply runs, so readiness comes from the PREFLIGHT result.
