@@ -1119,17 +1119,43 @@ function minVerbatimOctets(value: string): number {
 }
 
 /**
+ * Octets every attachment part costs before any of its values: what
+ * `wrapMultipart`, `renderPart` and `buildAttachmentPart` emit for a part
+ * whose filename, media type, disposition and content are all empty. Each
+ * term is emitted verbatim on every path — `foldHeader` returns a short
+ * line as-is and re-joins a long one from its tokens with at least one
+ * space between them, so the space after `Name:` and the one after `;` are
+ * floors, not counts — and a fold's `CRLF SP` only adds. The boundary's
+ * random suffix is left out: `makeBoundary` strips `+`, `/` and `=`, so it
+ * has no provable minimum, and `mixed` is the shortest prefix an attachment
+ * part can sit under.
+ */
+const ATTACHMENT_PART_MIN_OCTETS: number =
+  CRLF.length + // the join between this part and the one before it
+  ('--=_void_mixed_'.length + CRLF.length) +
+  ('Content-Type: '.length + '; name=""'.length + CRLF.length) +
+  ('Content-Transfer-Encoding: base64'.length + CRLF.length) +
+  ('Content-Disposition: '.length + '; filename=""'.length + CRLF.length) +
+  CRLF.length; // the blank line before the body
+
+/**
  * Lower bound on the octets of every header `buildMime` renders from
  * caller-supplied values: `Subject`, the custom headers, the addresses in
  * `From`, `To`, `Cc` and `Reply-To`, the `In-Reply-To` / `References` pair
  * `replyEmail` threads through (remote-sender controlled, up to the whole
- * inbound message), and each attachment part's `Content-Type` and
- * `Content-ID`. The filename is not a term: `normalizeAttachment` already
- * refuses one that could not fold onto a legal line, so it is under a
- * kilobyte by the time it gets here. `Bcc` is never rendered and a reserved
- * custom header is dropped, so neither is counted — charging either could
- * reject a message that fits. The fixed `Name: ` and `CRLF` per header are
- * omitted for the same reason a lower bound may omit any term.
+ * inbound message), and each attachment part's `Content-Type`, `Content-ID`
+ * and — twice, once per header it is rendered into — filename. `Bcc` is
+ * never rendered and a reserved custom header is dropped, so neither is
+ * counted — charging either could reject a message that fits. The fixed
+ * `Name: ` and `CRLF` per header are omitted for the same reason a lower
+ * bound may omit any term, EXCEPT for an attachment part: `normalizeAttachment`
+ * bounds ONE filename at under a kilobyte, not the sum, and a message is
+ * free to carry any number of parts, so the filename and the framing every
+ * part is wrapped in are the whole size of a message of empty attachments.
+ * Measured, 50k zero-byte attachments with legal 986-character filenames
+ * rendered to 106 MB — held three to four times over between the parts,
+ * their join, `rawText` and `raw` — and terminated a 128 MB isolate before
+ * the final size check could return `MIME_ERROR`.
  */
 function minHeaderOctets(email: NormalizedEmail): number {
   let octets = minHeaderValueOctets(email.subject);
@@ -1155,6 +1181,11 @@ function minHeaderOctets(email: NormalizedEmail): number {
     octets += minVerbatimOctets(email.threading.references);
   }
   for (const att of email.attachments) {
+    // The filename sits inside a quoted-string in both `name="…"` and
+    // `filename="…"`, and `foldHeader` never splits a quoted-string, so
+    // every code unit of it — whitespace included — is at least one octet
+    // on each line; `quoteParam`'s escapes only add.
+    octets += ATTACHMENT_PART_MIN_OCTETS + 2 * att.filename.length;
     octets += minVerbatimOctets(att.contentType);
     if (att.contentId) {
       octets += minVerbatimOctets(att.contentId);

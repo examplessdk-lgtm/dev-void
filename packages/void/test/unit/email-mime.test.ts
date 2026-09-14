@@ -1275,8 +1275,42 @@ describe('buildMime header size projection', () => {
       text: 'hi',
       attachments: [{ filename: 'f.txt', content: 'x', contentId: over }],
     });
-    // The filename is not a projection term: `normalizeAttachment` refuses
-    // one that could never fold onto a legal line, long before this.
+  });
+
+  // `normalizeAttachment` bounds ONE filename at 986 characters, not the
+  // sum, and nothing bounds the part count: 50k zero-byte attachments with
+  // legal filenames are a 106 MB message — each filename rendered twice,
+  // inside 117 octets of boundary and framing — that was held three to
+  // four times over between the parts, their join, `rawText` and `raw`,
+  // and terminated a 128 MB isolate before the final size check. Every
+  // part is charged its filename twice plus that framing.
+  it('counts every attachment part: its filename twice, and the framing around it', async () => {
+    const filename = 'a'.repeat(986);
+    const empty = new Uint8Array(0);
+    const parts = (n: number) =>
+      Array.from({ length: n }, () => ({ filename, contentType: 'x', content: empty }));
+    await expectProjected({
+      from: 'a@x.dev',
+      to: 'b@y.dev',
+      subject: 's',
+      text: 't',
+      attachments: parts(50_000),
+    });
+    // The bound is exact for a part with no content: 5,017 parts project to
+    // 214 octets under the cap and render to 10.67 MB, so the post-render
+    // check — not the projection — must be the one to refuse them.
+    await expect(
+      build({ from: 'a@x.dev', to: 'b@y.dev', subject: 's', text: 't', attachments: parts(5_017) }),
+    ).rejects.toThrow(/message size \d+ bytes exceeds Cloudflare limit/);
+    // And 4,900 parts, a 10.42 MB message, build.
+    const { raw } = await build({
+      from: 'a@x.dev',
+      to: 'b@y.dev',
+      subject: 's',
+      text: 't',
+      attachments: parts(4_900),
+    });
+    expect(raw.byteLength).toBeLessThanOrEqual(MAX_MESSAGE_BYTES);
   });
 
   it('never rejects a References chain that fits, and never charges the whitespace it folds away', async () => {
