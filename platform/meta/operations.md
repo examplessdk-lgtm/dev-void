@@ -27,10 +27,10 @@ Five Cloudflare Workers:
 
 Two fully isolated environments. Each has its own CF resources (KV, R2, dispatch namespace, analytics engine) and a separate Hyperdrive configuration pointing to its own PlanetScale PostgreSQL database.
 
-| Environment    | API URL                  | Dashboard                 | User Sites           | Trigger                                       |
-| -------------- | ------------------------ | ------------------------- | -------------------- | --------------------------------------------- |
-| **Production** | `api.void.cloud`         | `dash.void.cloud`         | `*.void.app`         | Manual: "Deploy Platform Production" workflow |
-| **Staging**    | `api.staging.void.cloud` | `dash.staging.void.cloud` | `*.staging.void.app` | Manual: "Deploy Platform Staging" workflow    |
+| Environment    | API URL                  | Dashboard                 | User Sites           | Trigger                                                                       |
+| -------------- | ------------------------ | ------------------------- | -------------------- | ----------------------------------------------------------------------------- |
+| **Production** | `api.void.cloud`         | `dash.void.cloud`         | `*.void.app`         | Manual: "Deploy Platform Production" workflow                                 |
+| **Staging**    | `api.staging.void.cloud` | `dash.staging.void.cloud` | `*.staging.void.app` | Automatic: "Deploy Platform Staging" on push to `main` (also manual dispatch) |
 
 ## Cloudflare Resources
 
@@ -231,7 +231,7 @@ Two GitHub environments (`Prod` and `Staging`) share the same repo-level secrets
 | `CF_ACCESS_CLIENT_ID_STAGING`     | Staging     | CF Access service-token client id for reaching staging (see Staging Access Control) |
 | `CF_ACCESS_CLIENT_SECRET_STAGING` | Staging     | CF Access service-token client secret for reaching staging                          |
 
-`platform-deploy.yml` uses the `Prod` environment; `platform-deploy-staging.yml` uses `Staging`. Both run only on manual dispatch and only when the repository variable `VOID_PLATFORM_DEPLOY_ENABLED` is `true`.
+`platform-deploy.yml` uses the `Prod` environment and runs only on manual dispatch; `platform-deploy-staging.yml` uses `Staging` and also runs on every push to `main` that matches the `platform-ci.yml` path filter. Both run only when the repository variable `VOID_PLATFORM_DEPLOY_ENABLED` is `true`.
 
 **GitHub Actions `CF_API_TOKEN` permissions** — narrower-scope token used only for wrangler deploys. Separate from the API worker runtime token.
 
@@ -520,13 +520,15 @@ Four platform workflows live in the repository-level `.github/workflows/` direct
 2. `vp run build` (SDK packages the dashboard bundles)
 3. `vp run --filter @voidcloud/platform deploy` (api with drizzle-kit migrations, proxy, tail, dispatch, dashboard)
 
-**`platform-deploy-staging.yml`** — manual dispatch (staging, environment: `Staging`):
+**`platform-deploy-staging.yml`** — push to `main` that matches the `platform-ci.yml` path filter, or manual dispatch (staging, environment: `Staging`):
 
 1. Runs `platform-ci.yml` first
 2. `vp run build`
 3. `vp run --filter @voidcloud/platform deploy:staging` (same order, all to staging)
 
-**`platform-smoke-test.yml`** — manual dispatch (environment: `Staging`): builds the SDK, deploys `playground/kitchen-sink` to staging with `void deploy`, resets its state, and runs `platform/scripts/kitchen-sink-smoke-test.ts` against `https://kitchen-sink.staging.void.app`.
+A `concurrency` group (`platform-deploy-staging`, `cancel-in-progress: false`) keeps one deploy running and at most one pending, so a burst of pushes never interrupts a deploy between the API migration and the workers.
+
+**`platform-smoke-test.yml`** — manual dispatch and a daily cron (`0 0 * * *`, 8am SGT), environment: `Staging`: builds the SDK, deploys `playground/kitchen-sink` to staging with `void deploy`, resets its state, and runs `platform/scripts/kitchen-sink-smoke-test.ts` against `https://kitchen-sink.staging.void.app`.
 
 ### Health Checks
 

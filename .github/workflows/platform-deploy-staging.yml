@@ -2,6 +2,24 @@ name: Deploy Platform Staging
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    # Same filter as platform-ci.yml: workers bundle the SDK, so SDK-only
+    # changes must redeploy staging too.
+    paths:
+      - 'platform/**'
+      - 'packages/**'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - 'vite.config.ts'
+      - '.github/workflows/platform-*.yml'
+
+concurrency:
+  # One running deploy plus at most one pending. Never interrupt a deploy
+  # between the api migration and the workers that depend on it.
+  group: platform-deploy-staging
+  cancel-in-progress: false
 
 permissions: {}
 

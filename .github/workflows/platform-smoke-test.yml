@@ -1,6 +1,8 @@
 name: Platform Smoke Test
 
 on:
+  schedule:
+    - cron: '0 0 * * *' # daily at 8am SGT (midnight UTC)
   workflow_dispatch:
 
 permissions: {}
