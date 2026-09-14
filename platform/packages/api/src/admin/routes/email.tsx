@@ -6,7 +6,10 @@ import {
   getProject,
 } from '../../db.ts';
 import type { ApiEnv } from '../../env.ts';
-import { syncProjectAllowlistKv } from '../../provisioning/email-allowlist.ts';
+import {
+  syncProjectAllowlistKv,
+  syncProjectAllowlistKvBestEffort,
+} from '../../provisioning/email-allowlist.ts';
 import { deleteDestination } from '../../provisioning/email-routing.ts';
 import { formatDateTime } from '../views/format.ts';
 import { Layout } from '../views/layout.tsx';
@@ -344,6 +347,10 @@ app.post('/:projectId/destinations/:destId/delete', async (context) => {
     }
   }
   await deleteEmailDestination(context.get('db'), destination.id);
+  // Re-derive after the delete: the tighten above works from a snapshot that
+  // a concurrent confirm click can make stale. Same shape and same reasoning
+  // as the owner-facing revoke in `routes/email.ts`.
+  await syncProjectAllowlistKvBestEffort(context.get('db'), context.env.ROUTING, projectId);
   return context.redirect(`/admin/email/${projectId}`);
 });
 

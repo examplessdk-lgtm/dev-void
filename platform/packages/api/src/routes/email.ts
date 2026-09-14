@@ -459,7 +459,10 @@ const app = new Hono<ApiEnv>()
     // mail. (Same inversion as unretain-before-cleanup: never destroy the
     // record the retry needs.) The sync must EXCLUDE this row explicitly:
     // it is still `verified` in Postgres at this point, so a plain re-sync
-    // would write the address straight back.
+    // would write the address straight back. `status` is the snapshot's: a
+    // `pending` row is not in the mirror and has nothing to tighten, and the
+    // re-derive after the delete below covers a row that was promoted in
+    // between.
     if (dest.status === 'verified') {
       try {
         await syncProjectAllowlistKv(context.get('db'), context.env.ROUTING, projectId, {
@@ -497,6 +500,25 @@ const app = new Hono<ApiEnv>()
     }
 
     await deleteEmailDestination(context.get('db'), dest.id);
+
+    // Re-derive the mirror now that the row is gone. The tighten above works
+    // from a snapshot, and the snapshot can go stale before this delete: a
+    // confirm click (or the listing's CF refresh) can flip a `pending` row to
+    // `verified` and write it into the mirror after the snapshot was taken,
+    // and a click on a SIBLING row re-derives the whole project from rows
+    // that still include this one. Either way the delete then drops the row
+    // and the mirror keeps granting an address nothing backs. Deriving after
+    // the delete cannot include the row. Best-effort on purpose: the row is
+    // already gone, so a 503 here would not be retryable, and the residual
+    // is bounded — Postgres and KV are written separately and KV has no
+    // compare-and-swap, so a concurrent writer that derived its mirror while
+    // the row still existed can still land its write after this one, and
+    // the grant then lasts until this project's next listing re-derives the
+    // mirror (`projectAllowlistKvDiffers`) or any other mirror write for the
+    // project. That is a revoke delayed, not consent bypassed: the recipient
+    // clicked to allow this project. Serializing the two routes is the
+    // project-level lock class from design doc 0067, deliberately not here.
+    await syncProjectAllowlistKvBestEffort(context.get('db'), context.env.ROUTING, projectId);
     return context.json({ ok: true });
   });
 

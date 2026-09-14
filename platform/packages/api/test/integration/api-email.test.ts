@@ -39,6 +39,7 @@ import {
 } from 'vite-plus/test';
 import { signConfirmToken } from '../../src/auth/confirm-token.ts';
 import { revokeOwnerVerifiedDestinationsForUserChange } from '../../src/db.ts';
+import * as dbModule from '../../src/db.ts';
 import {
   hashSendContent,
   PLATFORM_INTERNAL_EMAIL_SENTINEL,
@@ -929,9 +930,13 @@ describe('email-allowlist KV sync', () => {
     const res = await removeDestination(project.id, 'edst_v2', user.jwt);
     expect(res.status).toBe(200);
 
-    expect(observed).toHaveLength(1);
-    expect(observed[0]?.written).toEqual(['keep@example.com']);
-    expect(observed[0]?.rowIds).toEqual(['edst_v1', 'edst_v2']);
+    // Two writes. The tighten lands while BOTH rows are still present and
+    // already excludes the revoked one; the re-derive after the delete sees
+    // the row gone and agrees.
+    expect(observed).toEqual([
+      { written: ['keep@example.com'], rowIds: ['edst_v1', 'edst_v2'] },
+      { written: ['keep@example.com'], rowIds: ['edst_v1'] },
+    ]);
     expect(await readAllowlist(project.id)).toEqual(['keep@example.com']);
     expect(await rowsFor(project.id)).toHaveLength(1);
   });
@@ -1113,6 +1118,229 @@ describe('email-allowlist KV sync', () => {
     expect((await listDestinations(project.id, user.jwt)).status).toBe(200);
 
     expect(await readAllowlist(project.id)).toEqual(['clicker@example.com']);
+  });
+
+  // -------------------------------------------------------------------------
+  // Revoke racing a confirmation click.
+  //
+  // The revoke snapshots the row ONCE. A platform-pending row is not in the
+  // mirror, so a revoke that snapshots `pending` has nothing to tighten before
+  // the delete. The confirm click can land in between: it flips the row and
+  // derives the mirror FROM the verified rows, which now include this one.
+  // The delete then drops the row, and the mirror still grants an address no
+  // row backs. Nothing in the revoke used to look at the mirror again after
+  // the delete, so the grant outlived the row until the next listing.
+  // -------------------------------------------------------------------------
+
+  async function seedRevokeVsConfirm(): Promise<{
+    projectId: string;
+    jwt: string;
+    token: string;
+  }> {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'project-a');
+    const sibling = await createTestProject(env.db, user.id, 'project-b');
+    // The account-level Cloudflare address is SHARED with a sibling project,
+    // which is the case where the stale grant delivers: the revoke sees two
+    // referencing projects, skips the upstream delete, and Cloudflare keeps
+    // the address verified. (A sole-reference revoke removes the Cloudflare
+    // address, and the send binding refuses the recipient regardless of the
+    // mirror.)
+    await env.db.insert(emailDestinations).values([
+      {
+        id: 'edst_pend',
+        project_id: project.id,
+        address: 'shared@example.com',
+        status: 'pending',
+        cf_destination_id: 'cf-tag-shared',
+        verified_at: null,
+        verification_source: 'platform',
+      },
+      {
+        id: 'edst_sibling',
+        project_id: sibling.id,
+        address: 'shared@example.com',
+        status: 'verified',
+        cf_destination_id: 'cf-tag-shared',
+        verified_at: '2026-04-29T00:00:00Z',
+        verification_source: 'cf',
+      },
+    ]);
+    const now = Math.floor(Date.now() / 1000);
+    const token = await signConfirmToken(
+      {
+        v: 1,
+        pid: project.id,
+        did: 'edst_pend',
+        addr: 'shared@example.com',
+        iat: now,
+        exp: now + 24 * 60 * 60,
+      },
+      env.JWT_SECRET,
+    );
+    return { projectId: project.id, jwt: user.jwt, token };
+  }
+
+  async function confirmClick(token: string): Promise<Response> {
+    return app.fetch(
+      new Request(`http://localhost/email/destinations/confirm?token=${encodeURIComponent(token)}`),
+      env,
+    );
+  }
+
+  it('does not let a confirm click that lands mid-revoke outlive the deleted row', async () => {
+    const { projectId, jwt, token } = await seedRevokeVsConfirm();
+    expect(await env.ROUTING.get(`email-allowlist:${projectId}`)).toBeNull();
+
+    // Park the revoke AFTER its row snapshot (`pending`) and BEFORE its row
+    // delete — the reference count is the first thing it awaits past the
+    // snapshot, and it sits next to the upstream Cloudflare call, the widest
+    // window in the route. Run the click to completion in there.
+    const original = dbModule.countProjectsUsingDestination;
+    let clicked = false;
+    vi.spyOn(dbModule, 'countProjectsUsingDestination').mockImplementation(async (db, tag) => {
+      if (!clicked) {
+        clicked = true;
+        const res = await confirmClick(token);
+        expect(res.status).toBe(200);
+        // The click flipped the row and derived the mirror from it.
+        expect(await readAllowlist(projectId)).toEqual(['shared@example.com']);
+      }
+      return original(db, tag);
+    });
+
+    const fetchMock = mockCfApi();
+    const res = await removeDestination(projectId, 'edst_pend', jwt);
+    expect(res.status).toBe(200);
+    expect(clicked).toBe(true);
+
+    // The row is gone, the shared Cloudflare address was (correctly) kept for
+    // the sibling — and the mirror must not keep granting the address.
+    expect(await rowsFor(projectId)).toHaveLength(0);
+    expect(cfCalls(fetchMock, 'DELETE', '/email/routing/addresses/')).toHaveLength(0);
+    expect(await readAllowlist(projectId)).toEqual([]);
+  });
+
+  it('does not let a sibling row confirmed mid-revoke write the revoked address back', async () => {
+    // Same window, other row. The snapshot says `verified`, so the tighten
+    // ran and excluded this row — but a click on ANOTHER row of the project
+    // re-derives the whole mirror from rows that still include this one,
+    // because the delete has not happened yet.
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    await env.db.insert(emailDestinations).values([
+      {
+        id: 'edst_gone',
+        project_id: project.id,
+        address: 'gone@example.com',
+        status: 'verified',
+        cf_destination_id: 'cf-tag-gone',
+        verified_at: '2026-04-29T00:00:00Z',
+      },
+      {
+        id: 'edst_other',
+        project_id: project.id,
+        address: 'other@example.com',
+        status: 'pending',
+        cf_destination_id: 'cf-tag-other',
+        verified_at: null,
+        verification_source: 'platform',
+      },
+    ]);
+    await env.ROUTING.put(`email-allowlist:${project.id}`, JSON.stringify(['gone@example.com']));
+    const now = Math.floor(Date.now() / 1000);
+    const token = await signConfirmToken(
+      {
+        v: 1,
+        pid: project.id,
+        did: 'edst_other',
+        addr: 'other@example.com',
+        iat: now,
+        exp: now + 24 * 60 * 60,
+      },
+      env.JWT_SECRET,
+    );
+
+    const original = dbModule.countProjectsUsingDestination;
+    let clicked = false;
+    vi.spyOn(dbModule, 'countProjectsUsingDestination').mockImplementation(async (db, tag) => {
+      if (!clicked) {
+        clicked = true;
+        // The tighten already ran: the mirror no longer grants the revoked row.
+        expect(await readAllowlist(project.id)).toEqual([]);
+        expect((await confirmClick(token)).status).toBe(200);
+        // ...and the sibling's click just wrote it back.
+        expect((await readAllowlist(project.id)).sort()).toEqual([
+          'gone@example.com',
+          'other@example.com',
+        ]);
+      }
+      return original(db, tag);
+    });
+
+    mockCfApi();
+    expect((await removeDestination(project.id, 'edst_gone', user.jwt)).status).toBe(200);
+    expect(clicked).toBe(true);
+    expect((await rowsFor(project.id)).map((r) => r.id)).toEqual(['edst_other']);
+    expect(await readAllowlist(project.id)).toEqual(['other@example.com']);
+  });
+
+  it('heals a click whose mirror write lands after the revoke, on the next listing', async () => {
+    // The residual. Postgres and KV are written separately and KV has no
+    // compare-and-swap, so a click that derived its mirror while the row was
+    // still verified can land its write AFTER the revoke's own. Pinned here
+    // so the bound is explicit: the grant is stale until this project's next
+    // listing, which re-derives the mirror from the rows and drops it.
+    const { projectId, jwt, token } = await seedRevokeVsConfirm();
+    const key = `email-allowlist:${projectId}`;
+
+    // Hold the click's mirror write (the only write that grants the address)
+    // until the revoke has finished everything it does.
+    const originalPut = env.ROUTING.put.bind(env.ROUTING);
+    let releasePut!: () => void;
+    const putReleased = new Promise<void>((resolve) => {
+      releasePut = resolve;
+    });
+    let putStarted!: () => void;
+    const putHeld = new Promise<void>((resolve) => {
+      putStarted = resolve;
+    });
+    vi.spyOn(env.ROUTING, 'put').mockImplementation((async (
+      k: string,
+      value: string | ArrayBuffer | ArrayBufferView | ReadableStream,
+      options?: KVNamespacePutOptions,
+    ) => {
+      if (k === key && String(value).includes('shared@example.com')) {
+        putStarted();
+        await putReleased;
+      }
+      return originalPut(k, value as never, options as never);
+    }) as typeof env.ROUTING.put);
+
+    const original = dbModule.countProjectsUsingDestination;
+    let click: Promise<Response> | null = null;
+    vi.spyOn(dbModule, 'countProjectsUsingDestination').mockImplementation(async (db, tag) => {
+      if (!click) {
+        click = confirmClick(token);
+        await putHeld;
+      }
+      return original(db, tag);
+    });
+
+    mockCfApi();
+    const res = await removeDestination(projectId, 'edst_pend', jwt);
+    expect(res.status).toBe(200);
+    expect(await rowsFor(projectId)).toHaveLength(0);
+
+    releasePut();
+    expect((await click!).status).toBe(200);
+    // Lost update: the click's write was last, and no row backs it.
+    expect(await readAllowlist(projectId)).toEqual(['shared@example.com']);
+
+    vi.restoreAllMocks();
+    mockCfApi();
+    expect((await listDestinations(projectId, jwt)).status).toBe(200);
+    expect(await readAllowlist(projectId)).toEqual([]);
   });
 });
 

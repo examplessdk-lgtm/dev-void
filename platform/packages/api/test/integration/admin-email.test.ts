@@ -447,10 +447,15 @@ describe('POST /admin/email/:projectId/destinations/:destId/delete', () => {
     const res = await post(`/admin/email/${projectId}/destinations/${doomed.id}/delete`, adminJwt);
 
     expect(res.status).toBe(302);
-    expect(observed).toHaveLength(1);
+    // Two writes: the tighten with both rows still present, then the
+    // re-derive after the delete (a confirm click can promote a row between
+    // the snapshot and the delete; deriving afterwards cannot include it).
+    expect(observed).toHaveLength(2);
     expect(observed[0]?.written).toEqual(['keep@example.com']);
-    // Both rows still there at the moment of the write.
+    // Both rows still there at the moment of the first write.
     expect(observed[0]?.rowIds).toContain(doomed.id);
+    expect(observed[1]?.written).toEqual(['keep@example.com']);
+    expect(observed[1]?.rowIds).not.toContain(doomed.id);
     expect(await env.ROUTING.get(`email-allowlist:${projectId}`)).toBe(
       JSON.stringify(['keep@example.com']),
     );
