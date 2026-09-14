@@ -218,6 +218,33 @@ describe('normalizeEmail', () => {
     ).toBeLessThanOrEqual(998);
   });
 
+  it('measures a line in UTF-8 octets, not UTF-16 units, and reports its number', async () => {
+    // A CJK filename is rendered verbatim into ` filename="…"`: 3 octets per
+    // character inside 12 of framing, so 328 characters land exactly on the
+    // 998-octet limit and 329 are one octet over. The pre-render guard sees
+    // only `length` (341) and lets both through; the post-render scan must
+    // count octets. The line number pins the CRLF-delimited index into the
+    // multipart body, where the part's own headers live.
+    const fits = '漢'.repeat(328);
+    const { text } = await build({
+      from: 'a@x.dev',
+      to: 'b@y.dev',
+      subject: 's',
+      text: 't',
+      attachments: [{ filename: fits, content: 'x' }],
+    });
+    expect(text).toContain(`\r\n filename="${fits}"\r\n`);
+    await expect(
+      build({
+        from: 'a@x.dev',
+        to: 'b@y.dev',
+        subject: 's',
+        text: 't',
+        attachments: [{ filename: `${fits}漢`, content: 'x' }],
+      }),
+    ).rejects.toThrow(/header line 19 is 999 octets, over the 998-octet limit/);
+  });
+
   // A quoted-string parameter carries `\\` and `"` only as quoted-pairs
   // (RFC 5322 §3.2.4 — qtext excludes both). Deleting quotes and leaving
   // backslashes raw makes a trailing backslash escape the CLOSING quote,
@@ -641,6 +668,34 @@ describe('buildMime', () => {
     expect(text).toContain('Content-Transfer-Encoding: quoted-printable');
     // 'é' = 0xC3 0xA9 in UTF-8 → =C3=A9
     expect(text).toContain('caf=C3=A9');
+  });
+
+  // The encoding decision, pinned: only LF and CRLF end a line, a bare CR
+  // (or any other control character) forces quoted-printable, and a line of
+  // 990 printable characters is the longest that ships as 7bit. Captured
+  // from the regex-and-split implementation the one-pass scanner replaced.
+  it.each<[string, string, string, string]>([
+    ['a bare CR', 'a\rb', 'quoted-printable', 'a\r\nb'],
+    ['a tab', 'a\tb', 'quoted-printable', 'a\tb'],
+    ['DEL', 'a\x7fb', 'quoted-printable', 'a=7Fb'],
+    ['a 990-character line', 'a'.repeat(990), '7bit', 'a'.repeat(990)],
+    [
+      'a 991-character line',
+      'a'.repeat(991),
+      'quoted-printable',
+      `${'a'.repeat(75)}=\r\n`.repeat(13) + 'a'.repeat(16),
+    ],
+    [
+      'two 990-character lines split by a bare LF',
+      `${'a'.repeat(990)}\n${'b'.repeat(990)}`,
+      '7bit',
+      `${'a'.repeat(990)}\r\n${'b'.repeat(990)}`,
+    ],
+    ['a mix of LF and CRLF', 'l1\nl2\r\nl3\n', '7bit', 'l1\r\nl2\r\nl3\r\n'],
+  ])('encodes %s as %s', async (_what, input, encoding, expected) => {
+    const { text } = await build({ from: 'a@x.dev', to: 'b@y.dev', subject: 's', text: input });
+    expect(text).toContain(`Content-Transfer-Encoding: ${encoding}`);
+    expect(bodyOf(text)).toBe(expected);
   });
 
   it('attaches files as base64 in multipart/mixed', async () => {
@@ -1292,6 +1347,39 @@ describe('foldHeader memory', () => {
     expect(lines[0]).toBe(`Subject:${' a'.repeat(34)}`);
     expect(lines.every((l) => l.length <= 76)).toBe(true);
     expect(unfoldHeader(text, 'Subject')).toBe('a '.repeat(words).trimEnd());
+  });
+});
+
+describe('body line scan memory', () => {
+  // A legal 6 MB body of 3M two-character lines — pasted logs, say — renders
+  // to 9 MB. The encoding decision used to strip every line break with a
+  // global `replace` and `split` the body into an array of lines, the 7bit
+  // path re-joined it with another global `replace` (V8 keeps two or three
+  // parts-array slots per match), and the post-render line check `split`
+  // the whole message again: 240 MB of heap, all of it per LINE and
+  // invisible to any size projection, on a message that fit a 128 MB
+  // isolate four times over. Every pass is now one `charCodeAt` scan and
+  // the 7bit body is written into a buffer of its own size (measured, 32
+  // MB). The memory bound is measured, not asserted, because the test
+  // runner's heap is not the isolate's; this pins the rendered shape and
+  // that the scans stay linear.
+  it('builds a legal message of millions of short lines in text and html', async () => {
+    const lines = 1_500_000;
+    const started = performance.now();
+    const { raw, text } = await build({
+      from: 'a@x.dev',
+      to: 'b@y.dev',
+      subject: 's',
+      text: 'a\n'.repeat(lines),
+      html: '\n'.repeat(lines),
+    });
+    expect(performance.now() - started).toBeLessThan(5000);
+    expect(raw.byteLength).toBeLessThanOrEqual(MAX_MESSAGE_BYTES);
+    expect(raw.byteLength).toBeGreaterThan(lines * 5);
+    expect(text).toContain(`Content-Transfer-Encoding: 7bit\r\n\r\n${'a\r\n'.repeat(lines)}`);
+    expect(text).toContain(`Content-Transfer-Encoding: 7bit\r\n\r\n${'\r\n'.repeat(lines)}`);
+    // Every LF in the message is the LF of a CRLF.
+    expect(text).not.toMatch(/(^|[^\r])\n/);
   });
 });
 

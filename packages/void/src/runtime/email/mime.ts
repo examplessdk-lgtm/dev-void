@@ -667,17 +667,42 @@ const QUOTED_NAME_LINE_OVERHEAD = 3;
  * and are just as unfoldable. Body content cannot trip this — text is
  * quoted-printable re-encoded above 990 octets and base64 is emitted at a
  * fixed width — so a hit is always a header.
+ *
+ * One pass over the string, counting UTF-8 octets per CRLF-delimited line,
+ * with NO allocation. The earlier `text.split(CRLF)` held one array slot and
+ * one substring per line for the whole scan, and a legal body of millions of
+ * short lines — pasted logs, say — is millions of lines. Only a CRLF pair
+ * ends a line, exactly as the split did; a bare CR or LF is content.
  */
 function findOverlongLine(text: string): { index: number; octets: number } | undefined {
-  const lines = text.split(CRLF);
-  const encoder = new TextEncoder();
-  for (let i = 0; i < lines.length; i++) {
-    const octets = encoder.encode(lines[i]).length;
-    if (octets > MAX_LINE_OCTETS) {
-      return { index: i, octets };
+  let index = 0;
+  let octets = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if (c === 0x0d && text.charCodeAt(i + 1) === 0x0a) {
+      if (octets > MAX_LINE_OCTETS) {
+        return { index, octets };
+      }
+      index++;
+      octets = 0;
+      i++;
+    } else if (c < 0x80) {
+      octets += 1;
+    } else if (c < 0x800) {
+      octets += 2;
+    } else if (c >= 0xd800 && c <= 0xdbff && i + 1 < text.length) {
+      const d = text.charCodeAt(i + 1);
+      if (d >= 0xdc00 && d <= 0xdfff) {
+        octets += 4; // the pair is one code point
+        i++;
+      } else {
+        octets += 3; // lone surrogate encodes as U+FFFD
+      }
+    } else {
+      octets += 3;
     }
   }
-  return undefined;
+  return octets > MAX_LINE_OCTETS ? { index, octets } : undefined;
 }
 
 /**
@@ -804,12 +829,79 @@ function bytesToAsciiString(bytes: Uint8Array): string {
   return s;
 }
 
+/**
+ * Whether a body must be quoted-printable encoded: anything outside
+ * printable ASCII, or any line longer than 990 characters (RFC 5322 §2.1.1
+ * makes 998 octets the hard limit). Only LF and CRLF end a line; a bare CR
+ * is a control character like any other and forces the encoding.
+ *
+ * One pass over the string with NO allocation. The earlier shape — strip
+ * every line break with a global `replace`, test the copy, then `split` the
+ * text into an array of lines — was linear in the message but held a copy
+ * of the body plus one array slot and one substring per line, and a legal
+ * 6 MB body of millions of two-character lines needed 64 MB for the strip
+ * and another 24-40 MB for the split. Those are per-LINE costs, invisible
+ * to any size projection: the message fit.
+ */
 function needsQuotedPrintable(text: string): boolean {
-  // Encode any non-ASCII or any line longer than 998 bytes (RFC 5322 limit).
-  if (!ASCII_PRINTABLE.test(text.replace(/\r?\n/g, ''))) {
-    return true;
+  let lineLen = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if (c === 0x0a) {
+      lineLen = 0;
+      continue;
+    }
+    if (c === 0x0d) {
+      if (text.charCodeAt(i + 1) === 0x0a) {
+        continue;
+      }
+      return true;
+    }
+    if (c < 0x20 || c > 0x7e) {
+      return true;
+    }
+    lineLen++;
+    if (lineLen > 990) {
+      return true;
+    }
   }
-  return text.split(/\r?\n/).some((line) => line.length > 990);
+  return false;
+}
+
+/**
+ * The 7bit body: `text` with every bare LF widened to CRLF, and every CRLF
+ * kept. Only called once `needsQuotedPrintable` has returned false, so every
+ * character is printable ASCII, LF, or the CR of a CRLF — one byte each —
+ * and a byte buffer is exact.
+ *
+ * NOT `text.replace(/\r?\n/g, CRLF)`: V8 builds a global-regex replacement
+ * from a parts array that holds two or three slots per match, grown by
+ * doubling, so that one line cost 144 MB of heap on a legal 6 MB body of
+ * 3M lines and terminated a 128 MB isolate — the largest single allocation
+ * in the whole build, for a body that renders to 9 MB. The buffer here is
+ * the output size, known up front from one counting pass. A body that is
+ * already CRLF-only (or has no line breaks) is returned as-is.
+ */
+function to7bitBody(text: string): string {
+  let bare = 0;
+  for (let i = 0; i < text.length; i++) {
+    if (text.charCodeAt(i) === 0x0a && (i === 0 || text.charCodeAt(i - 1) !== 0x0d)) {
+      bare++;
+    }
+  }
+  if (bare === 0) {
+    return text;
+  }
+  const out = new Uint8Array(text.length + bare);
+  let n = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if (c === 0x0a && (i === 0 || text.charCodeAt(i - 1) !== 0x0d)) {
+      out[n++] = 0x0d;
+    }
+    out[n++] = c;
+  }
+  return bytesToAsciiString(out);
 }
 
 /**
@@ -869,7 +961,7 @@ function buildBodyPart(contentType: string, body: string): MimePart {
       ['Content-Type', `${contentType}; charset=UTF-8`],
       ['Content-Transfer-Encoding', useQp ? 'quoted-printable' : '7bit'],
     ],
-    body: useQp ? quotedPrintable(body) : body.replace(/\r?\n/g, CRLF),
+    body: useQp ? quotedPrintable(body) : to7bitBody(body),
   };
 }
 
