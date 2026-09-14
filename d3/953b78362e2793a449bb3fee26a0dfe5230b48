@@ -1,0 +1,21 @@
+packages/void/src/cli/platform-cloudflare.ts
+  s_6432b33e221c70::t_6f0769d1f0e8e6 546-563
+packages/void/test/unit/platform-cloudflare.test.ts
+  s_6432b33e221c70::t_3a5b9c08ed80d7 263-328
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "d3953b78362e2793a449bb3fee26a0dfe5230b48",
+  "prompts": {},
+  "sessions": {
+    "s_6432b33e221c70": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09ec2-2d39-7d93-9069-72bd0171f59f",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

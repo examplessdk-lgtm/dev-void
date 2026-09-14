@@ -1,0 +1,19 @@
+packages/void/src/cli/platform-plan.ts
+  s_0aacc4d36b8f1d::t_45de4a2c275793 411-422,424-425,427,432,600,604-609,613-614,620-631,638,687,693-731,777-778,781,810,813-821
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "820d76f3c41c1aca0c88adf2a9f390fd4f01fe80",
+  "prompts": {},
+  "sessions": {
+    "s_0aacc4d36b8f1d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09f4a-908b-77e3-9640-09f2246d1be1",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

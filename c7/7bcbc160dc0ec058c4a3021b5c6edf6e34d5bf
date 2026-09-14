@@ -1,0 +1,33 @@
+docs/guide/deployment.md
+  s_990292d8ce7c56::t_bab7096db2772b 141
+docs/reference/cli.md
+  s_990292d8ce7c56::t_cd0e24ee583544 92,110
+packages/void/src/cli/init.ts
+  s_c35072d131d864::t_32b901655c1371 15,1870-1874,1877,1885-1895,1897,1907-1910,2140,2206-2207,2226,2239-2242,3858,3864,3882-3901,3907-3912,3926
+packages/void/test/unit/init.test.ts
+  s_c35072d131d864::t_3fafb8fec4e646 63-69,72-74,299-316,327-346,358-394
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "c77bcbc160dc0ec058c4a3021b5c6edf6e34d5bf",
+  "prompts": {},
+  "sessions": {
+    "s_990292d8ce7c56": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09f67-dbd3-7433-a13f-fbff0fade282",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    },
+    "s_c35072d131d864": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09f6b-eca9-75b0-8f6e-6855ed4d0777",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

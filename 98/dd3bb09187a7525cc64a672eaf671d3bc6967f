@@ -1,0 +1,23 @@
+packages/void/src/cli/platform-lifecycle.ts
+  s_22951510778d43::t_d756859f5a9df1 56-61,113-117
+packages/void/src/cli/platform-management.ts
+  s_22951510778d43::t_0cdb1e937f4851 31,52-82
+packages/void/test/unit/platform-management.test.ts
+  s_22951510778d43::t_4f8462b3fedd5a 15-19,213-232
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "98dd3bb09187a7525cc64a672eaf671d3bc6967f",
+  "prompts": {},
+  "sessions": {
+    "s_22951510778d43": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09ede-0a6b-7e51-9029-0670aac615f4",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

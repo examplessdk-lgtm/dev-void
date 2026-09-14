@@ -1,0 +1,21 @@
+packages/platform/src/installation.ts
+  s_da445b56921f5b::t_5f4609e542b9a2 95-104,108-109
+packages/void/test/unit/platform-management.test.ts
+  s_da445b56921f5b::t_7572cec9c23729 338-349
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "40a929a8c8c6d32d131673285bd8cfca61d29b37",
+  "prompts": {},
+  "sessions": {
+    "s_da445b56921f5b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09efa-680f-7542-8617-f8711bc167ca",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

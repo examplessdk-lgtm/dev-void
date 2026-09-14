@@ -1,0 +1,35 @@
+packages/void/src/cli/platform-installer.ts
+  s_fc416a8804a77f::t_9d0ff0b440a4e9 24,278-282,310-312,573-589
+packages/void/src/cli/platform-management.ts
+  s_7d552ecf67bee4::t_c75e1731265b8e 27,830,924,928-929,934-950
+packages/void/src/cli/platform-plan.ts
+  s_7d552ecf67bee4::t_5befa69c96d7d9 746-757
+packages/void/test/unit/platform-installer.test.ts
+  s_7d552ecf67bee4::t_ad4bed556d9f1e 351
+packages/void/test/unit/platform-management.test.ts
+  s_7d552ecf67bee4::t_a0cb947181eda1 22-25,317-382
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "b267e15619af3691f4be86a5410f57b3f57ea1c5",
+  "prompts": {},
+  "sessions": {
+    "s_7d552ecf67bee4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09f1e-6e6e-7053-95ab-59e17e9e6ff6",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    },
+    "s_fc416a8804a77f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09f1e-6103-7b81-99c0-e9b0b0e17696",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

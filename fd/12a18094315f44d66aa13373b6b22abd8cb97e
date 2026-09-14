@@ -1,0 +1,21 @@
+packages/void/src/cli/platform-lifecycle.ts
+  s_2a58c614378016::t_5063719aa24c2d 46-52,54
+packages/void/test/unit/platform-lifecycle.test.ts
+  s_2a58c614378016::t_988fdbe036087b 72-80
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "fd12a18094315f44d66aa13373b6b22abd8cb97e",
+  "prompts": {},
+  "sessions": {
+    "s_2a58c614378016": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09f9b-9bec-75f3-9f70-c6ed7f9112aa",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

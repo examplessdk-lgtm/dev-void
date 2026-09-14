@@ -1,0 +1,21 @@
+packages/platform/src/installation.ts
+  s_6432b33e221c70::t_3a582a3e10101a 84-88
+packages/void/test/unit/platform-installation-state.test.ts
+  s_6432b33e221c70::t_6793a64b84872e 1-42
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "8583ad1579ba16261d93943a0f5307beb5a56f71",
+  "prompts": {},
+  "sessions": {
+    "s_6432b33e221c70": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09ec2-2d39-7d93-9069-72bd0171f59f",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

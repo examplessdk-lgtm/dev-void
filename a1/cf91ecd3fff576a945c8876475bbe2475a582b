@@ -1,0 +1,21 @@
+packages/void/src/cli/platform-recovery.ts
+  s_528adb4caf2cfe::t_37b360de234028 88,105,108,114-117,158-168
+packages/void/test/unit/platform-recovery.test.ts
+  s_528adb4caf2cfe::t_b902f9f9ea4132 279-303
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "a1cf91ecd3fff576a945c8876475bbe2475a582b",
+  "prompts": {},
+  "sessions": {
+    "s_528adb4caf2cfe": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09ef4-f8b2-7c43-976b-001af415aac6",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

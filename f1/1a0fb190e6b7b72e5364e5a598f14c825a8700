@@ -1,0 +1,21 @@
+platform/packages/api/src/index.ts
+  s_26854aa177d135::t_2be58901988698 2,98-127
+platform/packages/api/test/integration/api-health.test.ts
+  s_26854aa177d135::t_27da86cb93d821 1,22-51
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "f11a0fb190e6b7b72e5364e5a598f14c825a8700",
+  "prompts": {},
+  "sessions": {
+    "s_26854aa177d135": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09fa1-4d32-7762-a0d0-a398d08e9c6a",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

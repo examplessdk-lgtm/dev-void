@@ -1,0 +1,21 @@
+packages/void/src/cli/auth.ts
+  s_6e9896c70b9a63::t_c236e0a7b54c86 172
+packages/void/test/unit/auth-legacy.test.ts
+  s_6e9896c70b9a63::t_a90eeb80ad6456 1-80
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "26963b8a9d3ccf4cb03d339f45abd07a9038c178",
+  "prompts": {},
+  "sessions": {
+    "s_6e9896c70b9a63": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09f34-4933-7252-80d3-2e7208ce35c7",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

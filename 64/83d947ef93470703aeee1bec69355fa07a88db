@@ -1,0 +1,23 @@
+packages/void/src/cli/platform-lifecycle.ts
+  s_23f92c8d9d5264::t_b2c7ec65d34947 57
+packages/void/src/cli/platform-registry.ts
+  s_23f92c8d9d5264::t_c64e34159b74b8 481
+packages/void/test/unit/platform-registry.test.ts
+  s_23f92c8d9d5264::t_ae16786d2f1b0a 144-146,153-157
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "6483d947ef93470703aeee1bec69355fa07a88db",
+  "prompts": {},
+  "sessions": {
+    "s_23f92c8d9d5264": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09ee7-b61d-7602-8bcc-56cdd1cb5a98",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

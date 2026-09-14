@@ -1,0 +1,19 @@
+packages/void/src/cli/platform-installer.ts
+  s_c98bda2abc43fb::t_5157f273ac2344 11,150,167-170
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "479f72387e39ad4c544411417690f72a55b75113",
+  "prompts": {},
+  "sessions": {
+    "s_c98bda2abc43fb": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09ecd-66db-75a2-aa2b-15752d45cf9a",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

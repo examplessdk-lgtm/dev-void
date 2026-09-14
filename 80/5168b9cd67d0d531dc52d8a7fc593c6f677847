@@ -1,0 +1,21 @@
+packages/void/test/unit/auth-login.test.ts
+  s_7c8862c30e12a7::t_71c0c79cdf561f 181-182
+packages/void/test/unit/db-execute-remote.test.ts
+  s_7c8862c30e12a7::t_19477f9630f164 517,519
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "805168b9cd67d0d531dc52d8a7fc593c6f677847",
+  "prompts": {},
+  "sessions": {
+    "s_7c8862c30e12a7": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09f44-2fe6-70a1-88ff-270af16a5ef8",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
