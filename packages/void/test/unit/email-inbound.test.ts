@@ -2267,6 +2267,44 @@ describe('end-to-end: envelope → handler → action queue', () => {
     );
   });
 
+  it('records a plain header record verbatim, keeping the name casing', async () => {
+    const handler = defineEmail(async (message) => {
+      // The record form is a runtime affordance (JS handlers, or a cast):
+      // `ForwardableEmailMessage.forward` is typed against `Headers`.
+      const record = { 'X-Forwarded-By': 'void-test' } as unknown as Headers;
+      await message.forward('archive@example.com', record);
+    });
+    const actions = await dispatchToHandler(makeEnvelope(), handler);
+    expect(actions).toEqual([
+      { type: 'forward', to: 'archive@example.com', headers: { 'X-Forwarded-By': 'void-test' } },
+    ]);
+  });
+
+  it.each([
+    ['a CRLF in a value', { 'X-Trace': 'abc\r\nBcc: leak@evil.test' }],
+    ['a NUL in a value', { 'X-Trace': 'abc\0' }],
+    ['a non-token name', { 'X Trace': 'abc' }],
+  ])(
+    'refuses a forward header record with %s at the call, recording nothing for it',
+    async (_label, headers) => {
+      // The record is replayed through `new Headers()` (natively and in the
+      // platform router). What that constructor rejects must fail here, in
+      // the handler, not after earlier actions have already fired.
+      const { message, getActions } = createMessageProxy(makeEnvelope());
+      await message.forward('first@example.com');
+      let thrown: unknown;
+      try {
+        await message.forward('archive@example.com', headers as unknown as Headers);
+      } catch (e) {
+        thrown = e;
+      }
+      expect(thrown).toBeInstanceOf(MimeError);
+      expect((thrown as MimeError).code).toBe('MIME_ERROR');
+      expect((thrown as MimeError).message).toMatch(/^forward: invalid header/);
+      expect(getActions()).toEqual([{ type: 'forward', to: 'first@example.com' }]);
+    },
+  );
+
   it('setReject still works with a full queue (it shrinks the queue, so it is exempt)', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {

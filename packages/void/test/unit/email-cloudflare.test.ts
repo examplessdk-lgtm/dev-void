@@ -946,6 +946,66 @@ describe('preflightEmail', () => {
     );
   });
 
+  it('treats a disabled custom rule as absent, like the disabled catch-all', async () => {
+    // A rule to this worker that Cloudflare has switched off routes no mail: the row is
+    // `absent`, so the deploy's `addresses` entry stays and wrangler's plan turns it back on.
+    const disabled = RULES_WITH_ENTRIES.replace(
+      'to:support@acme.com',
+      'to:support@mail.acme.com',
+    ).replace(
+      'Enabled:  true\n  Matchers: to:support@mail.acme.com',
+      'Enabled:  false\n  Matchers: to:support@mail.acme.com',
+    );
+    expect(disabled).toContain('Enabled:  false');
+    const pre = await preflightEmail(readyAccount({ rules: disabled }).inputs);
+    expect(pre.rules.mine).toEqual([]);
+    expect(pre.rules.absent).toEqual(['support@mail.acme.com']);
+    expect(pre.rules.state).toBe('pending');
+    expect(pre.rulesPending).toEqual(['support@mail.acme.com']);
+    expect(pre.addresses).toEqual(['support@mail.acme.com']);
+    const text = renderEmailChecklist(pre);
+    expect(text).toContain('support@mail.acme.com → acme-support   (absent)');
+    expect(text).toContain('+ routing rule (applied by wrangler deploy)');
+
+    // A disabled rule is skipped, not matched: an enabled sibling on the same address still
+    // decides the row — here a forward that owns the address, so it is pruned (decision 12).
+    const sibling = disabled.replace(
+      '\n\nCatch-all rule:',
+      `
+Rule: 7g8h9i
+  Name:     (none)
+  Enabled:  true
+  Matchers: to:support@mail.acme.com
+  Actions:  forward:support@gmail.com
+  Priority: 2
+
+
+Catch-all rule:`,
+    );
+    expect(sibling).toContain('Rule: 7g8h9i');
+    const preSibling = await preflightEmail(readyAccount({ rules: sibling }).inputs);
+    expect(preSibling.rules.absent).toEqual([]);
+    expect(preSibling.rules.foreign).toEqual([
+      { address: 'support@mail.acme.com', owner: 'forward:support@gmail.com' },
+    ]);
+
+    // A disabled FOREIGN rule is still somebody else's matcher: the row stays `foreign`
+    // and the address is pruned, exactly as when the rule is enabled — Void does not
+    // take over another owner's rule because it is switched off.
+    const disabledForeign = disabled.replace(
+      'Actions:  worker:acme-support',
+      'Actions:  forward:support@gmail.com',
+    );
+    expect(disabledForeign).toContain('Actions:  forward:support@gmail.com');
+    const preForeign = await preflightEmail(readyAccount({ rules: disabledForeign }).inputs);
+    expect(preForeign.rules.absent).toEqual([]);
+    expect(preForeign.rules.mine).toEqual([]);
+    expect(preForeign.rules.foreign).toEqual([
+      { address: 'support@mail.acme.com', owner: 'forward:support@gmail.com' },
+    ]);
+    expect(preForeign.addresses).toEqual([]);
+  });
+
   it('treats a catch-all owned by another worker as foreign, by this worker as mine', async () => {
     const base = {
       from: 'noreply@acme.com',

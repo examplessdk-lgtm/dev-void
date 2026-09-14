@@ -986,11 +986,23 @@ export async function preflightEmail(inputs: EmailCloudflareInputs): Promise<Ema
         }
         continue;
       }
-      const rule = rules.rules.find((r) => r.to.includes(address));
+      // An enabled rule decides the row. A disabled one routes nothing: OUR disabled rule
+      // reads `absent`, like the disabled catch-all above — the address stays in
+      // `addresses`, and wrangler's plan (which writes every rule `enabled: true`) turns
+      // it back on at the next deploy. A disabled FOREIGN rule stays `foreign`: the
+      // matcher is still somebody else's, and taking it over is the same conflict the
+      // enabled case prunes the address to avoid.
+      const rule =
+        rules.rules.find((r) => r.enabled && r.to.includes(address)) ??
+        rules.rules.find((r) => r.to.includes(address));
       if (!rule) {
         pre.rules.absent.push(address);
       } else if (rule.actions.includes(workerToken)) {
-        pre.rules.mine.push(address);
+        if (rule.enabled) {
+          pre.rules.mine.push(address);
+        } else {
+          pre.rules.absent.push(address);
+        }
       } else {
         pre.rules.foreign.push({ address, owner: rule.actions.join(', ') });
       }

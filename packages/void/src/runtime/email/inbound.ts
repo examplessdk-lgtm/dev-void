@@ -274,6 +274,13 @@ function addressTooLong(field: 'from' | 'to', length: number): MimeError {
   );
 }
 
+function invalidForwardHeaders(cause: unknown): MimeError {
+  // The runtime's own message names the offending name or value. A handler
+  // may have built that value from the inbound message, so it is bounded.
+  const detail = cause instanceof Error ? cause.message.slice(0, 320) : 'not a valid header set';
+  return new MimeError('MIME_ERROR', `forward: invalid header — ${detail}`);
+}
+
 async function readStreamToBytes(
   stream: ReadableStream<Uint8Array>,
   limit = Infinity,
@@ -470,6 +477,20 @@ export function createMessageProxy(
       if (fwdHeaders instanceof Headers) {
         headersObj = Object.fromEntries(fwdHeaders.entries());
       } else if (fwdHeaders) {
+        // A `Headers` instance has already validated its names and values;
+        // a record has not. Every consumer replays the record through
+        // `new Headers()` — `enactEmailActions` on a native message, the
+        // platform router before its own replay — so run that constructor
+        // here and fail in the handler's own call. Left to replay, a CRLF
+        // or NUL in a LATER forward surfaced only after earlier forwards and
+        // replies had fired, leaving Cloudflare a failed invocation for a
+        // message that was partly delivered. The record itself is what is
+        // stored: preserving name casing is why this form exists.
+        try {
+          void new Headers(fwdHeaders);
+        } catch (e) {
+          throw invalidForwardHeaders(e);
+        }
         headersObj = { ...fwdHeaders };
       }
       actions.push({ type: 'forward', to, ...(headersObj ? { headers: headersObj } : {}) });
@@ -974,6 +995,14 @@ export function isForwardableEmailMessage(value: unknown): value is ForwardableE
  * anything. `reply` needs a genuine `EmailMessage` — Cloudflare rejects a
  * duck-typed object — so `cloudflare:email` is loaded here, and only when
  * a reply was recorded.
+ *
+ * The `new Headers()` below is the one step this loop constructs from
+ * handler input, and it cannot fail on a recorded action: the proxy's
+ * `forward()` already ran the record through that constructor, so a bad
+ * record failed inside the handler, before any replay. (`EmailMessage`
+ * construction neither validates nor reads its stream — measured under
+ * workerd.) What Cloudflare itself refuses at `forward()` / `reply()` still
+ * throws out of the loop, as any native call would.
  */
 export async function enactEmailActions(
   message: ForwardableEmailMessage,

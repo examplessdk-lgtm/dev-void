@@ -21,6 +21,7 @@ import {
   parseEmail,
   replyEmail,
 } from '../../src/runtime/email/inbound.ts';
+import { MimeError } from '../../src/runtime/email/mime.ts';
 import { createEmailTestHarness } from '../../src/runtime/email/testing.ts';
 import { envContext } from '../../src/runtime/env-raw.ts';
 import { withRuntimeEnv } from '../../src/runtime/env.ts';
@@ -379,6 +380,39 @@ describe('generated handleEmail on a native ForwardableEmailMessage', () => {
     expect(calls.forwards[0].to).toBe('ops@acme.com');
     expect(calls.forwards[0].headers).toBeInstanceOf(Headers);
     expect(calls.forwards[0].headers?.get('X-Void-Trace')).toBe('abc');
+  });
+
+  it('fires nothing on the native message when a later forward carries an invalid header record', async () => {
+    // The plain-record form is stored verbatim, so a value `new Headers()`
+    // rejects used to surface only during native replay — after the first
+    // forward had already fired. Cloudflare then sees a failed invocation
+    // for a message that was partly delivered. The bad header must fail in
+    // the handler's own call, before anything is enacted.
+    const handleEmail = buildHandleEmail(async (message) => {
+      await message.forward('ops@acme.com');
+      // The record form is a runtime affordance (JS handlers, or a cast):
+      // `ForwardableEmailMessage.forward` is typed against `Headers`.
+      const record = { 'X-Void-Trace': 'abc\r\nBcc: leak@evil.test' } as unknown as Headers;
+      await message.forward('archive@acme.com', record);
+    });
+    const { message, calls } = nativeMessage({
+      from: 'sender@example.com',
+      to: 'support@mail.acme.com',
+      mime: INBOUND_MIME,
+    });
+
+    const outcome = await handleEmail(message, {}, {}).then(
+      () => 'resolved',
+      (e: unknown) => e,
+    );
+
+    // The partial delivery is the bug: nothing may have reached the native
+    // message. Asserted before the error shape so a regression names it.
+    expect(calls.forwards).toEqual([]);
+    expect(calls.replies).toEqual([]);
+    expect(calls.rejects).toEqual([]);
+    expect(outcome).toBeInstanceOf(MimeError);
+    expect((outcome as MimeError).message).toMatch(/^forward: invalid header/);
   });
 
   it('enacts replyEmail as a real EmailMessage sent from the delivered address', async () => {
