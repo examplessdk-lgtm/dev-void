@@ -69,6 +69,22 @@ const MAX_PLATFORM_MIME_BASE64_LENGTH = Math.ceil((10 * 1024 * 1024 * 4) / 3) + 
 // observed a token a meaningful replay window.
 const PLATFORM_TOKEN_MAX_SKEW_SECONDS = 5 * 60;
 
+/**
+ * Exact length of a well-formed `platformToken`. The only signer
+ * (`signSentinelAtBound` in `packages/api/src/email/send-verification.ts`)
+ * emits an HMAC-SHA256 tag — 32 bytes — as unpadded base64url, and
+ * ceil(32 * 4 / 3) = 43 characters is the only length that encodes to. Any
+ * other length can never verify, so it is refused before `verifyHmac` runs:
+ * `base64urlDecode` copies the token twice through global `replace` (V8
+ * materializes one part per match) and then `Uint8Array.from` iterates
+ * `atob`'s output one character at a time — measured, a 30 MB token is
+ * ~1.5 GB of transient heap and ~2 s, and a 4 MB one kills a 128 MB heap,
+ * the shared proxy isolate's ceiling. This gate runs ahead of any
+ * credential check, so without the bound an unauthenticated caller chose
+ * that cost.
+ */
+const PLATFORM_TOKEN_LENGTH = 43;
+
 // Auth middleware — parses body, authenticates, sets projectId
 app.post('/*', async (context, next) => {
   let body: ProxyBody;
@@ -115,6 +131,13 @@ app.post('/*', async (context, next) => {
     const platformTimestamp = asNumber(body.platformTimestamp);
     if (!platformToken || platformTimestamp === null) {
       return context.json({ error: 'platform token required' }, 403);
+    }
+    // A token of the wrong length is present but can never be valid, so it
+    // takes the same opaque refusal as the skew and size gates below —
+    // `required` is reserved for an absent token. Checked before anything
+    // else touches the token; see `PLATFORM_TOKEN_LENGTH`.
+    if (platformToken.length !== PLATFORM_TOKEN_LENGTH) {
+      return context.json({ error: 'invalid platform token' }, 403);
     }
     const nowSec = Math.floor(Date.now() / 1000);
     if (Math.abs(nowSec - platformTimestamp) > PLATFORM_TOKEN_MAX_SKEW_SECONDS) {

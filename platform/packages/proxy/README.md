@@ -103,6 +103,11 @@ body shape ▸ `from` length ▸ EMAIL_SENDER_DOMAIN set ▸ SEND_EMAIL bound �
   ▸ SEND_EMAIL.send() per recipient
 ```
 
+`requestId` is a caller-supplied log correlation id and is never validated: it is truncated to 128
+characters and stripped of control characters once at intake (a missing or non-string id logs as
+`unknown`), so the per-delivery `[email-log]` line can neither be forged with a newline nor carry a
+tenant-sized value.
+
 `POST /email/internal/send` authenticates with an HMAC of
 `<sentinel>.<unixSeconds>.<sha256(from|to|mimeBase64)>` under `JWT_SECRET` (sentinel auth plus
 content binding, 5-minute skew window). Only the proxy and api hold `JWT_SECRET`. The reference
@@ -110,8 +115,11 @@ signer is `packages/api/src/email/send-verification.ts`; changing the format nee
 proxy + api deploy. The three hashed fields are size-bounded BEFORE the hash — `mimeBase64` to
 the base64 form of the MIME cap, `from` and `to` to the same 320 characters `/email/send` applies
 — because the hash runs ahead of the token check, so an unauthenticated caller would otherwise
-choose how much is copied and hashed. Every pre-auth refusal is the same opaque
-`403 invalid platform token`.
+choose how much is copied and hashed. The token itself is refused unless it is exactly 43
+characters — the only length an HMAC-SHA256 tag has as unpadded base64url — BEFORE it is decoded,
+because the decode copies it several times over (a 4 MB token exhausts the 128 MB isolate). Every
+pre-auth refusal is the same opaque `403 invalid platform token`; `platform token required` is
+reserved for an absent token or timestamp.
 
 The worker also exports `email()` as the catch-all CF Email Routing handler for the mail zone
 (`packages/proxy/src/email-router.ts`). Inbound parses `<slug>+<tag>` from the recipient, reads the
@@ -131,7 +139,11 @@ invalid bag drops the whole list); a reply's `raw` a `Uint8Array` of at most 10 
 20 MiB of replies across one delivery (an overrunning reply is dropped and not charged, so a later
 one that fits still goes); and a reply's MIME `From:` pinned to its envelope sender. Reject reasons
 are truncated to 1,000 chars **before** control chars are stripped, so a control-heavy reason never
-costs a full-length pass.
+costs a full-length pass. A value that is logged because it failed validation — a non-object
+action, an unknown action `type`, an address that is not a string — is never coerced with
+`String()`: a string is truncated then stripped, and anything else (a typed array or Array, which
+`String()` would join element by element; a BigInt, whose decimal conversion is superlinear) is
+logged by kind only.
 
 Inbound requests are **not** metered today; only the `email-recv:<id>:<month>` delivery counter is
 written.

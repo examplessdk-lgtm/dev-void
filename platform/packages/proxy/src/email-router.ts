@@ -59,6 +59,48 @@ function sanitize(value: string, maxLen: number): string {
   return value.slice(0, maxLen).replace(CONTROL_CHARS_RE, ' ');
 }
 
+/**
+ * Render a tenant-supplied value of UNKNOWN type for a log line, without
+ * ever coercing its contents.
+ *
+ * `sanitize(String(value), n)` is bounded only when `value` is already a
+ * string. Everything else the RPC transport can carry is an amplifier or a
+ * CPU sink that runs to completion before the slice: `String()` of a typed
+ * array or an Array joins every element with commas (measured: a 30 MB
+ * `Uint8Array` is a 107M-char string, +385 MB of heap, ~580 ms, and an OOM
+ * under the 128 MB isolate ceiling; a nested array flattens recursively
+ * to the same), and `String()` of a BigInt is a decimal conversion that is
+ * superlinear in its size (measured: 4 MiB is 1.9 s, 32 MiB is 20 s of CPU
+ * — the whole RPC cap, spent ahead of every outbound gate). Both reach here
+ * from any hand-built entrypoint, as an action, an action's `type`, or an
+ * address that failed validation.
+ *
+ * So: a string is sliced then stripped; a number, boolean, `undefined` or
+ * `null` renders as itself (all a few chars); and anything else — bigint,
+ * function, symbol, any object — renders as its KIND only. The object tag
+ * comes from `Object.prototype.toString`, which reads nothing a tenant can
+ * set: it consults only `Symbol.toStringTag`, and symbol-keyed properties do
+ * not cross RPC (structured clone drops them). `constructor.name` would
+ * not be safe — `constructor` is an ordinary string key the tenant can send
+ * with any value. The tag is sliced anyway so a local caller cannot make it
+ * long either.
+ */
+function describeUntrusted(value: unknown, maxLen: number): string {
+  switch (typeof value) {
+    case 'string':
+      return sanitize(value, maxLen);
+    case 'number':
+    case 'boolean':
+    case 'undefined':
+      return String(value);
+    case 'object':
+      return value === null ? 'null' : sanitize(Object.prototype.toString.call(value), 64);
+    default:
+      // bigint, function, symbol
+      return `[${typeof value}]`;
+  }
+}
+
 interface RoutingEntry {
   workerName?: string;
   projectId?: string;
@@ -238,12 +280,14 @@ function isValidEmailAddress(s: unknown): s is string {
 }
 
 /**
- * Render a rejected address for a log line. `sanitize` truncates before it
- * replaces, so logging a hostile megabyte address costs `MAX_ACTION_ADDRESS_LENGTH`
- * code units, not the length the check just refused.
+ * Render a rejected address for a log line. The value is whatever failed
+ * `isValidEmailAddress`, so it need not be a string at all — a typed array
+ * or an Array as `to` used to be joined whole by `String()` before the
+ * slice. `describeUntrusted` renders a string within
+ * `MAX_ACTION_ADDRESS_LENGTH` code units and anything else by kind.
  */
 function logAddress(value: unknown): string {
-  return sanitize(String(value), MAX_ACTION_ADDRESS_LENGTH);
+  return describeUntrusted(value, MAX_ACTION_ADDRESS_LENGTH);
 }
 
 /**
@@ -669,7 +713,13 @@ export async function routeInbound(
       actions = [];
     }
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
+    // The thrown value is the tenant's: a handler can throw an Error with any
+    // message, or any value that crosses RPC. Only a bounded prefix is
+    // inspected — workerd's own "does not implement" text is well under 320
+    // characters — because `receiver does not.*method` backtracks
+    // quadratically on a long message (measured: 1 MB = 21 s of CPU), and a
+    // non-Error throw is described by kind, never coerced whole.
+    const msg = e instanceof Error ? e.message.slice(0, 320) : describeUntrusted(e, 320);
     if (RPC_METHOD_MISSING.test(msg)) {
       console.error(
         `[email-router] ${sanitize(workerName, 320)} has no .email() (needs redeploy):`,
@@ -682,7 +732,7 @@ export async function routeInbound(
       );
       return;
     }
-    console.error(`[email-router] dispatch to ${sanitize(workerName, 320)} failed:`, e);
+    console.error(`[email-router] dispatch to ${sanitize(workerName, 320)} failed:`, msg);
     message.setReject(`${label}: project handler error`);
     ctx.waitUntil(
       logRecv(env, routing.projectId, message, [{ type: 'reject', reason: 'dispatch-error' }]),
@@ -914,7 +964,9 @@ function validateActions(
   let replyBytesUsed = 0;
   for (const action of actions) {
     if (!action || typeof action !== 'object') {
-      console.error(`[email-router] dropping non-object action: ${sanitize(String(action), 320)}`);
+      // Never `String(action)` here: a string is bounded by `sanitize`, but a
+      // BigInt's decimal conversion is not — see `describeUntrusted`.
+      console.error(`[email-router] dropping non-object action: ${describeUntrusted(action, 320)}`);
       continue;
     }
     if (action.type === 'reject') {
@@ -1014,9 +1066,11 @@ function validateActions(
       out.push({ type: 'reply', from: action.from, to: action.to, raw: action.raw });
     } else {
       // Unknown action type — log so handler authors notice rather than
-      // silently doing nothing.
+      // silently doing nothing. The `type` is whatever the tenant put there;
+      // `describeUntrusted` renders a string within 320 chars and a typed
+      // array, Array, or BigInt by kind, never by contents.
       console.warn(
-        `[email-router] dropping unknown action type: ${sanitize(String((action as { type?: unknown }).type), 320)}`,
+        `[email-router] dropping unknown action type: ${describeUntrusted((action as { type?: unknown }).type, 320)}`,
       );
     }
   }

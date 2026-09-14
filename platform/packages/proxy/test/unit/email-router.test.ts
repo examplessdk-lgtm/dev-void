@@ -209,7 +209,7 @@ interface MakeEnvOptions {
   /** When provided, the dispatch stub's `email()` returns this value. */
   emailReturn?: unknown;
   /** When provided, the dispatch stub's `email()` throws this. */
-  emailThrow?: Error;
+  emailThrow?: unknown;
   /** When provided, env.DISPATCH.get itself throws. */
   dispatchGetThrow?: Error;
   /**
@@ -746,6 +746,40 @@ describe('routeInbound — dispatch result handling', () => {
     await routeInbound(message, env, ctx);
     expect(rejectCalls).toHaveLength(1);
     expect(rejectCalls[0]).toContain('no email handler');
+  });
+
+  it('inspects only a bounded prefix of a thrown message: a 1 MB one classifies in milliseconds', async () => {
+    // `receiver does not.*method` backtracks quadratically when the message
+    // repeats the prefix without the suffix — 1 MB was 21 s of CPU on the
+    // whole string. The prefix keeps workerd's own text recognizable.
+    const filler = 'receiver does not '.repeat(60_000);
+    const { env } = makeEnv({
+      kvSeed: { myslug: DEFAULT_ROUTING },
+      emailThrow: new Error(filler),
+    });
+    const { message, rejectCalls } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    const t0 = performance.now();
+    await routeInbound(message, env, ctx);
+    expect(performance.now() - t0).toBeLessThan(500);
+    expect(rejectCalls).toHaveLength(1);
+    expect(rejectCalls[0]).toContain('project handler error');
+  });
+
+  it('never coerces a non-Error throw whole: a 30 MB Uint8Array is described by kind', async () => {
+    const { env } = makeEnv({
+      kvSeed: { myslug: DEFAULT_ROUTING },
+      emailThrow: new Uint8Array(30 * 1024 * 1024),
+    });
+    const { message, rejectCalls } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    const before = process.memoryUsage().heapUsed;
+    const t0 = performance.now();
+    await routeInbound(message, env, ctx);
+    expect(performance.now() - t0).toBeLessThan(500);
+    expect(process.memoryUsage().heapUsed - before).toBeLessThan(64 * 1024 * 1024);
+    expect(rejectCalls).toHaveLength(1);
+    expect(rejectCalls[0]).toContain('project handler error');
   });
 
   it('classifies other dispatch errors as project handler error', async () => {
@@ -2127,6 +2161,146 @@ describe('routeInbound — reject reason is truncated before sanitizing', () => 
     await routeInbound(message, env, ctx);
     expect(rejectCalls).toHaveLength(1);
     expect(rejectCalls[0]).toBe('line '.repeat(166) + 'line');
+  });
+});
+
+// -----------------------------------------------------------------------
+// Untrusted values are never coerced with `String()` for a log line.
+//
+// `sanitize(String(x), 320)` is bounded only when `x` is a string. A typed
+// array or an Array as an action's `type` (or as an address that failed
+// validation) is joined element by element before the slice — measured, a
+// 30 MB `Uint8Array` is a 107M-char string, +385 MB and ~580 ms, an OOM
+// under the 128 MB isolate — and a BigInt as the action itself is a decimal
+// conversion superlinear in its size (4 MiB: 1.9 s; 32 MiB: 20 s of CPU).
+// All of it runs ahead of every outbound gate, from any hand-built
+// entrypoint. `describeUntrusted` renders such values by kind only.
+// -----------------------------------------------------------------------
+
+describe('routeInbound — non-string action fields are described, not coerced', () => {
+  /** Heap growth across `fn`, in MB, with a GC before when one is exposed. */
+  async function heapDeltaMB(fn: () => Promise<void>): Promise<number> {
+    (globalThis as { gc?: () => void }).gc?.();
+    const before = process.memoryUsage().heapUsed;
+    await fn();
+    return (process.memoryUsage().heapUsed - before) / (1024 * 1024);
+  }
+
+  function warnLines(): Array<string> {
+    return warnSpy.mock.calls.map((call) => String(call[0]));
+  }
+  function errorLines(): Array<string> {
+    return errorSpy.mock.calls.map((call) => String(call[0]));
+  }
+
+  it('a 30 MB Uint8Array as an unknown action `type` is logged by kind, in bounded time and heap', async () => {
+    const type = new Uint8Array(30 * 1024 * 1024).fill(0x41);
+    const { env } = makeEnv({
+      kvSeed: withAllowlist(['admin@example.com']),
+      emailReturn: [{ type }, { type: 'forward', to: 'admin@example.com' }],
+    });
+    const { message, forwardCalls } = createFakeMessage({ to: `myslug@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    const t0 = performance.now();
+    const grew = await heapDeltaMB(() => routeInbound(message, env, ctx));
+    const elapsed = performance.now() - t0;
+    const line = warnLines().find((l) => l.includes('dropping unknown action type'));
+    expect(line).toBe('[email-router] dropping unknown action type: [object Uint8Array]');
+    // The list continues: the unknown entry is skipped, the forward fires.
+    expect(forwardCalls).toHaveLength(1);
+    // `String(type)` alone measured ~580 ms and +385 MB on this input.
+    expect(elapsed).toBeLessThan(100);
+    expect(grew).toBeLessThan(64);
+  });
+
+  it.each([
+    ['a nested Array', [[1, 2], [3]], '[object Array]'],
+    ['a plain object', { nested: true }, '[object Object]'],
+    ['a BigInt', 1n << 4096n, '[bigint]'],
+    ['null', null, 'null'],
+    ['a number', 42, '42'],
+    ['a boolean', false, 'false'],
+    ['undefined', undefined, 'undefined'],
+  ])('an unknown action `type` that is %s is rendered by kind', async (_label, type, rendered) => {
+    const { env } = makeEnv({
+      kvSeed: { myslug: DEFAULT_ROUTING },
+      emailReturn: [{ type }],
+    });
+    const { message } = createFakeMessage({ to: `myslug@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(warnLines()).toContain(`[email-router] dropping unknown action type: ${rendered}`);
+  });
+
+  it('a string `type` is still rendered, sliced then stripped', async () => {
+    const { env } = makeEnv({
+      kvSeed: { myslug: DEFAULT_ROUTING },
+      emailReturn: [{ type: `quarantine\r\n${'x'.repeat(1000)}` }],
+    });
+    const { message } = createFakeMessage({ to: `myslug@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    const line = warnLines().find((l) => l.includes('dropping unknown action type'));
+    expect(line).toBe(`[email-router] dropping unknown action type: quarantine ${'x'.repeat(308)}`);
+  });
+
+  it('a 30 MB control-heavy string as the action itself is bounded', async () => {
+    // Already closed by the slice-first `sanitize` — `String()` of a string
+    // is the string — pinned here beside the cases it does not cover.
+    const action = '\x00a'.repeat(15 * 1024 * 1024);
+    const { env } = makeEnv({
+      kvSeed: { myslug: DEFAULT_ROUTING },
+      emailReturn: [action],
+    });
+    const { message } = createFakeMessage({ to: `myslug@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    const t0 = performance.now();
+    await routeInbound(message, env, ctx);
+    expect(performance.now() - t0).toBeLessThan(100);
+    const line = errorLines().find((l) => l.includes('dropping non-object action'));
+    expect(line).toBeDefined();
+    expect(line!.length).toBeLessThanOrEqual(
+      '[email-router] dropping non-object action: '.length + 320,
+    );
+    // oxlint-disable-next-line no-control-regex
+    expect(line).not.toMatch(new RegExp('[\\u0000-\\u001f\\u007f]'));
+  });
+
+  it('a BigInt as the action itself is logged by kind, never converted to decimal', async () => {
+    // 4 MiB of magnitude: `String()` of it measured 1.9 s of CPU. The
+    // transport could carry eight times this.
+    const action = 1n << BigInt(4 * 1024 * 1024 * 8);
+    const { env } = makeEnv({
+      kvSeed: withAllowlist(['admin@example.com']),
+      emailReturn: [action, { type: 'forward', to: 'admin@example.com' }],
+    });
+    const { message, forwardCalls } = createFakeMessage({ to: `myslug@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    const t0 = performance.now();
+    await routeInbound(message, env, ctx);
+    expect(performance.now() - t0).toBeLessThan(100);
+    expect(errorLines()).toContain('[email-router] dropping non-object action: [bigint]');
+    expect(forwardCalls).toHaveLength(1);
+  });
+
+  it('a 30 MB Uint8Array as a forward `to` is logged by kind', async () => {
+    // `logAddress` renders whatever failed `isValidEmailAddress`, which is
+    // not necessarily a string.
+    const to = new Uint8Array(30 * 1024 * 1024).fill(0x41);
+    const { env } = makeEnv({
+      kvSeed: withAllowlist(['admin@example.com']),
+      emailReturn: [{ type: 'forward', to }],
+    });
+    const { message, forwardCalls } = createFakeMessage({ to: `myslug@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    const t0 = performance.now();
+    const grew = await heapDeltaMB(() => routeInbound(message, env, ctx));
+    expect(performance.now() - t0).toBeLessThan(100);
+    expect(grew).toBeLessThan(64);
+    expect(errorLines()).toContain(
+      '[email-router] forward dropped: invalid "to" address [object Uint8Array]',
+    );
+    expect(forwardCalls).toHaveLength(0);
   });
 });
 

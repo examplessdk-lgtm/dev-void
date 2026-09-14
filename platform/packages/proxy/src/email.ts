@@ -148,12 +148,38 @@ const SLUG_RE = /^[a-z0-9._-]+$/;
  * Built via new RegExp so oxlint's no-control-regex rule (which fires
  * on even Unicode-escaped control refs in regex literals) does not
  * reject the pattern. Behavior is identical to a literal regex.
+ *
+ * Slice FIRST, then replace — the same order as `sanitize` in
+ * `email-router.ts`, for the same reason: a global replace materializes one
+ * part per match, so a control-heavy input costs far more than one copy
+ * (measured: a 5 MB `\na\na…` value is +170 MB of transient heap through the
+ * old replace-then-slice order, past the 128 MB isolate ceiling; slice-first
+ * is 0 ms). Most callers already pass bounded values; `requestId` at intake
+ * and the inbound `Subject:` header did not. The result is at most `maxLen`
+ * chars and may be shorter — a control run inside the window collapses to
+ * one space and nothing is refilled from beyond it — which loses nothing on
+ * a log line.
  */
 // oxlint-disable-next-line no-control-regex
 const CONTROL_CHARS_RE = new RegExp('[\\u0000-\\u001f\\u007f]+', 'g');
 function sanitizeForLog(value: string, maxLen = 200): string {
-  return value.replace(CONTROL_CHARS_RE, ' ').slice(0, maxLen);
+  return value.slice(0, maxLen).replace(CONTROL_CHARS_RE, ' ');
 }
+
+/**
+ * Cap the caller-supplied log correlation id. The framework sends 16 hex
+ * chars (`newRequestId` in `void/email`), but a hand-built tenant worker can
+ * send any string the request body carries, and the only consumer is the
+ * `[email-log]` line — one per delivery, so up to `MAX_RECIPIENTS` copies of
+ * it per request — in the shared proxy log stream. It is diagnostic, so it
+ * is bounded and sanitized ONCE at intake rather than refused with a 400:
+ * a missing or non-string id already logs as `unknown` instead of failing
+ * the send, and a truncated id is no less useful to correlate on. The
+ * control-char strip is what stops a `\n` in the id from forging a second
+ * `[email-log]` line under another project's id. 128 leaves room for a
+ * UUID or a prefixed id without inviting anything longer.
+ */
+const MAX_REQUEST_ID_LENGTH = 128;
 
 /**
  * Wrap a Uint8Array as a single-chunk ReadableStream. CF's EmailMessage
@@ -521,7 +547,11 @@ app.post('/send', async (context) => {
 
   const from = asString(body.from);
   const mimeBase64 = asString(body.mimeBase64);
-  const requestId = asString(body.requestId) ?? 'unknown';
+  // Bounded and sanitized here, once, so `logSend` never interpolates the
+  // raw value; see `MAX_REQUEST_ID_LENGTH`.
+  const requestIdRaw = asString(body.requestId);
+  const requestId =
+    requestIdRaw === null ? 'unknown' : sanitizeForLog(requestIdRaw, MAX_REQUEST_ID_LENGTH);
   const recipientsRaw = Array.isArray(body.recipients) ? body.recipients : null;
 
   if (!from || !mimeBase64 || !recipientsRaw) {

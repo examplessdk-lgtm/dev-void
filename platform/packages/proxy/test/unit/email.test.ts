@@ -2148,6 +2148,78 @@ describe('POST /email/internal/send — replay window + content binding', () => 
     expect(sender.calls).toHaveLength(0);
   });
 
+  it.each([
+    ['one character short (42)', (t: string) => t.slice(0, 42)],
+    ['one character long (44)', (t: string) => `${t}A`],
+    ['30 MB', () => 'ab-_'.repeat((30 * 1024 * 1024) / 4)],
+  ])('refuses a token that is %s before decoding it', async (_label, mutate) => {
+    // The only signer emits an HMAC-SHA256 tag as unpadded base64url — 32
+    // bytes, exactly 43 characters — so any other length can never verify.
+    // `verifyHmac` decodes the token before comparing (two global replaces,
+    // `atob`, then `Uint8Array.from` over every character), which is ~50 B
+    // of heap per token character and runs ahead of every credential check:
+    // measured, a 30 MB token is ~1.5 GB and ~2 s, and a 4 MB one exhausts
+    // a 128 MB heap. The gate refuses on length, so `crypto.subtle.verify`
+    // — the only consumer of the decoded bytes — is never reached, and the
+    // refusal is the same opaque one every other pre-auth gate gives.
+    const sender = createSender();
+    const env = createMockEnv(createMockKv(), { SEND_EMAIL: sender.binding });
+    const mime = mimeBase64();
+    const platformTimestamp = Math.floor(Date.now() / 1000);
+    const platformToken = mutate(
+      await signPlatform({ unixSeconds: platformTimestamp, from: FROM, to: TO, mimeBase64: mime }),
+    );
+    const verify = vi.spyOn(crypto.subtle, 'verify');
+    try {
+      const t0 = performance.now();
+      const res = await post(env, {
+        platformToken,
+        platformTimestamp,
+        from: FROM,
+        to: TO,
+        mimeBase64: mime,
+      });
+      const elapsed = performance.now() - t0;
+      expect(res.status).toBe(403);
+      expect(await res.json()).toEqual({ error: 'invalid platform token' });
+      expect(verify).not.toHaveBeenCalled();
+      expect(sender.calls).toHaveLength(0);
+      // Generous: parsing the 30 MB JSON body is the whole cost now; the
+      // decode it no longer reaches measured ~2 s on this input.
+      expect(elapsed).toBeLessThan(1000);
+    } finally {
+      verify.mockRestore();
+    }
+  });
+
+  it('a 43-character token that is not the signature is still refused by the HMAC, not the length gate', async () => {
+    // Pins the gate to LENGTH only: a well-formed but wrong token must reach
+    // `crypto.subtle.verify` and fail there, so the length check cannot be
+    // mistaken for the credential check.
+    const sender = createSender();
+    const env = createMockEnv(createMockKv(), { SEND_EMAIL: sender.binding });
+    const mime = mimeBase64();
+    const platformTimestamp = Math.floor(Date.now() / 1000);
+    const platformToken = await signHmac('not-the-sentinel', JWT_SECRET);
+    expect(platformToken).toHaveLength(43);
+    const verify = vi.spyOn(crypto.subtle, 'verify');
+    try {
+      const res = await post(env, {
+        platformToken,
+        platformTimestamp,
+        from: FROM,
+        to: TO,
+        mimeBase64: mime,
+      });
+      expect(res.status).toBe(403);
+      expect(await res.json()).toEqual({ error: 'invalid platform token' });
+      expect(verify).toHaveBeenCalledTimes(1);
+      expect(sender.calls).toHaveLength(0);
+    } finally {
+      verify.mockRestore();
+    }
+  });
+
   it('a 320-character `to` under a valid signature still reaches the handler', async () => {
     // The bound sits exactly where `/email/send` puts its recipient bound.
     // The handler applies no length rule of its own to `to`: it hands the
@@ -2276,6 +2348,85 @@ describe('POST /email/send — the envelope handed to CF', () => {
     for (const call of sender.calls) {
       // oxlint-disable-next-line no-control-regex
       expect(new RegExp('[\\u0000-\\u001f\\u007f]').test(call.from)).toBe(false);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// `requestId` is a caller-supplied log correlation id. The framework sends 16
+// hex chars, but a hand-built tenant worker holding a valid project HMAC can
+// send any string, and `logSend` used to interpolate it verbatim into one
+// `[email-log]` line per delivery — so a `\n` in it forged a second line under
+// any project id, and a multi-megabyte one was repeated up to 100 times into
+// the shared proxy log stream. It is bounded and sanitized once at intake.
+// ---------------------------------------------------------------------------
+
+describe('POST /email/send — requestId is bounded and sanitized at intake', () => {
+  // oxlint-disable-next-line no-control-regex
+  const CONTROL = new RegExp('[\\u0000-\\u001f\\u007f]');
+
+  it('a 5 MB control-heavy requestId still sends, and logs a short clean id', async () => {
+    // Alternating LF / letter: one regex match per LF, the shape that made
+    // the old replace-then-slice order materialize one part per match
+    // (measured: +170 MB on this input, past the 128 MB isolate ceiling).
+    const requestId = `\na`.repeat((5 * 1024 * 1024) / 2);
+    const forged = `req_1\n[email-log] proj_victim x@example.com sent forged @0`;
+    const sender = createSender();
+    const env = createMockEnv(happyPathKv(), { SEND_EMAIL: sender.binding });
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      const t0 = performance.now();
+      const res = await postSend(env, await sendBody({ requestId }));
+      const elapsed = performance.now() - t0;
+      expect(res.status).toBe(200);
+      expect((await readSend(res)).ok).toBe(true);
+      expect(sender.calls).toHaveLength(1);
+      const lines = logSpy.mock.calls
+        .map((call) => String(call[0]))
+        .filter((line) => line.startsWith('[email-log] '));
+      expect(lines).toHaveLength(1);
+      // The id is sliced to 128 code units and each LF becomes one space,
+      // so the whole line is the fixed fields plus at most 128 chars of id.
+      const fixed = `[email-log] proj_1  dev@example.com sent cf-msg-1 @${Date.now()}`.length;
+      expect(lines[0]!.length).toBeLessThanOrEqual(fixed + 128);
+      expect(lines[0]).not.toMatch(CONTROL);
+      expect(lines[0]!.split(' ')[1]).toBe('proj_1');
+      // Generous: the slice-first path is ~0 ms; the JSON body is ~5 MB.
+      expect(elapsed).toBeLessThan(500);
+
+      // And a newline can no longer forge a second `[email-log]` line.
+      logSpy.mockClear();
+      const res2 = await postSend(env, await sendBody({ requestId: forged }));
+      expect(res2.status).toBe(200);
+      const lines2 = logSpy.mock.calls
+        .map((call) => String(call[0]))
+        .filter((line) => line.startsWith('[email-log] '));
+      expect(lines2).toHaveLength(1);
+      expect(lines2[0]).not.toMatch(CONTROL);
+      expect(lines2[0]).not.toContain('\n[email-log]');
+      expect(lines2[0]!.split(' ')[1]).toBe('proj_1');
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
+  it.each([
+    ['missing', undefined],
+    ['not a string', 42],
+  ])('a requestId that is %s logs as `unknown`', async (_label, requestId) => {
+    const sender = createSender();
+    const env = createMockEnv(happyPathKv(), { SEND_EMAIL: sender.binding });
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      const res = await postSend(env, await sendBody({ requestId }));
+      expect(res.status).toBe(200);
+      const lines = logSpy.mock.calls
+        .map((call) => String(call[0]))
+        .filter((line) => line.startsWith('[email-log] '));
+      expect(lines).toHaveLength(1);
+      expect(lines[0]!.split(' ')[2]).toBe('unknown');
+    } finally {
+      logSpy.mockRestore();
     }
   });
 });
