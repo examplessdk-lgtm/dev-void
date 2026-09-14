@@ -133,6 +133,48 @@ describe('compareMigrationSets', () => {
       'journal is shorter than the released journal (1 entries, released 2)',
     ]);
   });
+
+  // The api deploy migrates before it deploys the worker, so a push to `prod` whose deploy failed
+  // afterwards has still applied its migrations. The workflow therefore takes the previous `prod`
+  // commit, not the last successful release, as the released set; these pin what that buys.
+  describe('a migration applied by a deploy that then failed', () => {
+    const lastSuccessfulRelease = migrationSet([entry(0, 100)], {
+      '0000_tag.sql': 'hash-0000',
+      'meta/0000_snapshot.json': 'hash-snap-0000',
+    });
+    const releasedThoughFailed = migrationSet([...lastSuccessfulRelease.journal, entry(1, 300)], {
+      ...Object.fromEntries(lastSuccessfulRelease.files),
+      '0001_tag.sql': 'hash-0001',
+      'meta/0001_snapshot.json': 'hash-snap-0001',
+    });
+
+    it('rejects a retry that edits it', () => {
+      const retry = migrationSet(releasedThoughFailed.journal, {
+        ...Object.fromEntries(releasedThoughFailed.files),
+        '0001_tag.sql': 'hash-0001-edited',
+      });
+      expect(compareMigrationSets(lastSuccessfulRelease, retry)).toEqual([]);
+      expect(compareMigrationSets(releasedThoughFailed, retry)).toEqual([
+        'released migration 0001_tag.sql was modified',
+        REAPPLY_NOTE,
+      ]);
+    });
+
+    it('rejects a retry that replaces it with an earlier entry', () => {
+      const retry = migrationSet([...lastSuccessfulRelease.journal, entry(1, 200)], {
+        ...Object.fromEntries(lastSuccessfulRelease.files),
+        '0001_tag.sql': 'hash-0001-redone',
+        'meta/0001_snapshot.json': 'hash-snap-0001-redone',
+      });
+      expect(compareMigrationSets(lastSuccessfulRelease, retry)).toEqual([]);
+      expect(compareMigrationSets(releasedThoughFailed, retry)).toEqual([
+        'released migration 0001_tag.sql was modified',
+        'released migration meta/0001_snapshot.json was modified',
+        REAPPLY_NOTE,
+        'journal entry 1 differs from the released journal: released 0001_tag (idx 1, when 300), candidate 0001_tag (idx 1, when 200)',
+      ]);
+    });
+  });
 });
 
 describe('readMigrationSet', () => {

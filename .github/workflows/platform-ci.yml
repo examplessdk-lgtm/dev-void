@@ -84,10 +84,15 @@ jobs:
   # push to `prod` applies a new schema while the previous release is still serving traffic. This
   # migrates a real Postgres with the migrations under test, then runs the production ref's
   # integration tests against that schema: if the code that is live cannot run on the new schema,
-  # the push must not ship. The fresh database stands in for production's only while the
-  # migrations under test are the released ones plus new entries, so the job also rejects any
-  # edit, removal, or reordering of a released migration. The release it tests is the head of the
-  # last successful production deploy, read from `platform-deploy.yml`'s run history.
+  # the push must not ship. The release it tests is the head of the last successful production
+  # deploy, read from `platform-deploy.yml`'s run history.
+  #
+  # The fresh database stands in for production's only while the migrations under test are the
+  # released ones plus new entries, so the job also rejects any edit, removal, or reordering of a
+  # released migration. "Released" is every commit ever pushed to `prod`, not only the ones whose
+  # deploy succeeded: the api deploy migrates first, so a deploy that failed afterwards has still
+  # applied its migrations. That set is the previous `prod` commit, which is at or ahead of the
+  # live release's because `prod` only moves forward.
   #
   # It has teeth on PRs, where the code under test is a different commit from the one that is
   # live. The production deploy sets `require-schema-compat` for every trigger — including a
@@ -142,6 +147,11 @@ jobs:
       # previous push and may have failed to deploy or been replaced while pending in the deploy
       # concurrency group. Until a production deploy has been recorded, fall back to the previous
       # `prod` commit on a push and to the `prod` branch on a PR, and say so.
+      #
+      # The released migration set is a second, stricter baseline: the previous `prod` commit on a
+      # push, and the `prod` branch otherwise. Every push to `prod` starts a deploy that migrates
+      # before it deploys, so a commit's migrations count as applied whether or not its deploy
+      # succeeded; a retry may only append to them.
       - name: Resolve the compatibility baseline
         id: baseline
         env:
@@ -165,6 +175,13 @@ jobs:
             echo 'ref=prod' >> "$GITHUB_OUTPUT"
             echo '::warning::No successful production deploy is recorded yet; comparing against the prod branch instead of the live release.'
           fi
+          if [ "$EVENT_NAME" = 'push' ] && printf '%s' "$PREVIOUS_SHA" | grep -Eq '^[0-9a-f]{40}$' && [ "$PREVIOUS_SHA" != "$NO_PREVIOUS_SHA" ]; then
+            echo "released=$PREVIOUS_SHA" >> "$GITHUB_OUTPUT"
+            echo "Released migrations: $PREVIOUS_SHA (previous prod commit)"
+          else
+            echo 'released=prod' >> "$GITHUB_OUTPUT"
+            echo 'Released migrations: prod'
+          fi
       # The baseline checkout replaces the workspace, and the baseline may predate the checker.
       - name: Keep the candidate's migration set for the append-only check
         run: |
@@ -173,6 +190,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ steps.baseline.outputs.ref }}
+          persist-credentials: false
+      # After the checkout above, which cleans the workspace. `released/` sits outside every
+      # workspace and test glob, so the builds and tests below do not see it.
+      - name: Check out the released migration set
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.baseline.outputs.released }}
+          path: released
+          sparse-checkout: platform/packages/api/drizzle
           persist-credentials: false
       - name: Does the baseline carry the platform?
         id: production
@@ -190,8 +216,12 @@ jobs:
       # an entry it has applied, so a candidate that edits, removes, or reorders released
       # migrations would migrate this fresh database differently from production. Reject it.
       - name: The candidate must only append to the released migrations
-        if: steps.production.outputs.usable == 'true'
-        run: node "$RUNNER_TEMP/check-migration-set.ts" --baseline platform/packages/api/drizzle --candidate "$RUNNER_TEMP/candidate-drizzle"
+        run: |
+          if [ ! -d released/platform/packages/api/drizzle ]; then
+            echo '::notice::The released commit carries no migrations, so there is no released set for the candidate to extend.'
+            exit 0
+          fi
+          node "$RUNNER_TEMP/check-migration-set.ts" --baseline released/platform/packages/api/drizzle --candidate "$RUNNER_TEMP/candidate-drizzle"
       - if: steps.production.outputs.usable == 'true'
         uses: voidzero-dev/setup-vp@1b32467adbe183473499fd9d5d372c3ed9641754 # v1.18.0
         with:
