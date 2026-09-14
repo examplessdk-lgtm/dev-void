@@ -680,6 +680,227 @@ describe('GET /projects/:id/email/destinations', () => {
 });
 
 // ---------------------------------------------------------------------------
+// GET refresh: the row's Cloudflare destination was deleted and recreated
+// ---------------------------------------------------------------------------
+
+describe('GET refresh against a recreated Cloudflare destination', () => {
+  /**
+   * The state the reviewer's sequence ends in, built through the routes:
+   *
+   *   1. project A registers `alice` first on the account — a fresh CF
+   *      create, so A waits on CLOUDFLARE's link (`pending` / `cf`, tag T1).
+   *   2. T1 is deleted at Cloudflare (an operator in the dashboard, or the
+   *      delete-vs-register window the DELETE route names). A's row keeps T1.
+   *   3. project B registers `alice` — the address is off the account again,
+   *      so CF creates T2 and mails alice a link that names no project.
+   *   4. alice clicks it. CF now lists `alice` verified under T2.
+   *
+   * Returns both projects' rows plus the fetch mock, with CF's list already
+   * reporting T2 verified.
+   */
+  async function recreatedDestination(options: {
+    ownerA: { id: string; jwt: string };
+    ownerB: { id: string; jwt: string };
+    address: string;
+  }) {
+    const projectA = await createTestProject(env.db, options.ownerA.id, 'email-a');
+    const projectB = await createTestProject(env.db, options.ownerB.id, 'email-b');
+    const tagT1 = `cf-tag-${options.address}`;
+    const tagT2 = 'cf-tag-recreated';
+    // Cloudflare's view, driven by the steps above. Each create hands out
+    // the next tag: step 1 gets T1, step 3 gets T2.
+    let onAccount: ReturnType<typeof cfRow> | null = null;
+    const unissued = [tagT1, tagT2];
+    const fetchMock = mockCfWithProxy({
+      addEmailDestination: (_url, init) => {
+        if (onAccount) {
+          return cfError('address already exists');
+        }
+        const body = typeof init?.body === 'string' ? JSON.parse(init.body) : {};
+        onAccount = cfRow(unissued.shift()!, body.email, null);
+        return cfSuccess(onAccount);
+      },
+      listEmailDestinations: () => cfSuccess(onAccount ? [onAccount] : []),
+      deleteEmailDestination: (url) => {
+        const tag = url.split('/').pop()?.split('?')[0] ?? '';
+        if (onAccount?.tag !== tag) {
+          return cfError('destination not found', 404);
+        }
+        onAccount = null;
+        return cfSuccess({ tag });
+      },
+    });
+
+    // 1. A registers first: fresh create, T1.
+    const addedA = await addDestination(
+      projectA.id,
+      options.ownerA.jwt,
+      options.address,
+      emailEnv(),
+    );
+    expect(addedA.status).toBe(201);
+    const rowA = (await addedA.json()) as {
+      id: string;
+      status: string;
+      verification_source: string;
+    };
+    expect(rowA.status).toBe('pending');
+    expect(rowA.verification_source).toBe('cf');
+    expect((await rowsFor(projectA.id))[0]?.cf_destination_id).toBe(tagT1);
+
+    // 2. T1 disappears at Cloudflare; A's row still points at it.
+    onAccount = null;
+
+    // 3. B registers: the address is off the account, so CF creates T2 and
+    //    mails alice. B waits on that link.
+    const addedB = await addDestination(
+      projectB.id,
+      options.ownerB.jwt,
+      options.address,
+      emailEnv(),
+    );
+    expect(addedB.status).toBe(201);
+    const rowB = (await addedB.json()) as {
+      id: string;
+      status: string;
+      verification_source: string;
+    };
+    expect(rowB.status).toBe('pending');
+    expect(rowB.verification_source).toBe('cf');
+    expect((await rowsFor(projectB.id))[0]?.cf_destination_id).toBe(tagT2);
+    expect(proxySends(fetchMock)).toHaveLength(0);
+
+    // 4. alice clicks CF's link.
+    onAccount = cfRow(tagT2, options.address, '2026-09-15T00:00:00Z');
+
+    return { projectA, projectB, rowA, rowB, tagT1, tagT2, fetchMock };
+  }
+
+  it("does not promote another project's pending CF row off the recreated tag's click", async () => {
+    // Under the normal order B would have hit Option B — alice was already
+    // verified at CF, so B gets the platform's per-project link — and A's
+    // own CF link is the only thing that verifies A. The recreated tag
+    // inverts that: the click was for the destination B registered, and
+    // matching by address alone hands that consent to A too.
+    const owner = await createTestUser(env.db, 'owner');
+    await setUserEmail(owner.id, 'owner@example.com');
+    const { projectA, projectB, rowA, tagT1, tagT2 } = await recreatedDestination({
+      ownerA: owner,
+      ownerB: owner,
+      address: 'alice@example.com',
+    });
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    // B registered T2: the click is B's.
+    const listedB = await listDestinations(projectB.id, owner.jwt, emailEnv());
+    expect(listedB.status).toBe(200);
+    const bodyB = (await listedB.json()) as Array<{ status: string }>;
+    expect(bodyB[0]?.status).toBe('verified');
+    expect(await readAllowlist(projectB.id)).toEqual(['alice@example.com']);
+
+    // A registered T1, which nobody clicked: it stays pending, off the
+    // allowlist, and says why once.
+    const listedA = await listDestinations(projectA.id, owner.jwt, emailEnv());
+    expect(listedA.status).toBe(200);
+    const bodyA = (await listedA.json()) as Array<{ status: string; verification_source: string }>;
+    expect(bodyA).toHaveLength(1);
+    expect(bodyA[0]?.status).toBe('pending');
+    expect(bodyA[0]?.verification_source).toBe('cf');
+    expect(await readAllowlist(projectA.id)).toEqual([]);
+    const persisted = (await rowsFor(projectA.id))[0];
+    expect(persisted?.status).toBe('pending');
+    expect(persisted?.cf_destination_id).toBe(tagT1);
+    expect(persisted?.verified_by_user_id).toBeNull();
+    const mismatchLines = warnSpy.mock.calls.filter((call) =>
+      String(call[0]).includes('[email] destination tag mismatch'),
+    );
+    expect(mismatchLines).toHaveLength(1);
+    expect(String(mismatchLines[0]![0])).toContain(rowA.id);
+    expect(String(mismatchLines[0]![0])).toContain(tagT1);
+    expect(String(mismatchLines[0]![0])).toContain(tagT2);
+  });
+
+  it("adopts the recreated tag for the project owner's OWN address, with the inherited-consent audit", async () => {
+    // Option C: the owner is the human who clicked, whichever registration
+    // CF's mail answered. Same rule the auto-add applies when it inherits a
+    // CF-verified owner address, audit columns included.
+    const owner = await createTestUser(env.db, 'owner');
+    await setUserEmail(owner.id, 'owner@example.com');
+    const other = await createTestUser(env.db, 'other');
+    await setUserEmail(other.id, 'other@example.com');
+    const { projectA, tagT2 } = await recreatedDestination({
+      ownerA: owner,
+      ownerB: other,
+      address: 'owner@example.com',
+    });
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const listedA = await listDestinations(projectA.id, owner.jwt, emailEnv());
+    expect(listedA.status).toBe(200);
+    const bodyA = (await listedA.json()) as Array<{ status: string; verification_source: string }>;
+    expect(bodyA[0]?.status).toBe('verified');
+    expect(bodyA[0]?.verification_source).toBe('cf');
+    expect(await readAllowlist(projectA.id)).toEqual(['owner@example.com']);
+    const persisted = (await rowsFor(projectA.id))[0];
+    expect(persisted?.status).toBe('verified');
+    expect(persisted?.cf_destination_id).toBe(tagT2);
+    // CF's click time, not now() — Postgres renders the string its own way.
+    expect(persisted?.verified_at).toMatch(/^2026-09-15/);
+    expect(persisted?.verified_by_user_id).toBe(owner.id);
+    expect(persisted?.verified_by_email_snapshot).toBe('owner@example.com');
+    expect(
+      warnSpy.mock.calls.filter((call) =>
+        String(call[0]).includes('[email] destination tag mismatch'),
+      ),
+    ).toHaveLength(0);
+  });
+
+  it('disallow + allow on the stale row takes the platform link, because the address is now CF-verified', async () => {
+    // The recipe the log line points at. DELETE finds T1 gone at CF (404,
+    // caught) and drops the row; the re-add recovers T2, which is verified
+    // by someone else's registration, so it is Option B — the per-project
+    // link the normal order would have given A in the first place.
+    const owner = await createTestUser(env.db, 'owner');
+    await setUserEmail(owner.id, 'owner@example.com');
+    const { projectA, rowA, tagT1, tagT2, fetchMock } = await recreatedDestination({
+      ownerA: owner,
+      ownerB: owner,
+      address: 'alice@example.com',
+    });
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const removed = await removeDestination(projectA.id, rowA.id, owner.jwt, emailEnv());
+    expect(removed.status).toBe(200);
+    const deletes = cfCalls(fetchMock, 'DELETE', '/email/routing/addresses');
+    expect(deletes).toHaveLength(1);
+    expect(String(deletes[0]![0])).toContain(tagT1);
+    expect(await rowsFor(projectA.id)).toHaveLength(0);
+
+    const readded = await addDestination(projectA.id, owner.jwt, 'alice@example.com', emailEnv());
+    expect(readded.status).toBe(201);
+    const body = (await readded.json()) as {
+      status: string;
+      verification_source: string;
+      platformVerificationPending?: boolean;
+    };
+    expect(body.status).toBe('pending');
+    expect(body.verification_source).toBe('platform');
+    expect(body.platformVerificationPending).toBe(true);
+    const sends = proxySends(fetchMock);
+    expect(sends).toHaveLength(1);
+    expect(sends[0]!.body.to).toBe('alice@example.com');
+    expect((await rowsFor(projectA.id))[0]?.cf_destination_id).toBe(tagT2);
+
+    // And the refresh keeps its hands off a platform-pending row.
+    const listed = await listDestinations(projectA.id, owner.jwt, emailEnv());
+    expect(listed.status).toBe(200);
+    expect(((await listed.json()) as Array<{ status: string }>)[0]?.status).toBe('pending');
+    expect(await readAllowlist(projectA.id)).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // DELETE /projects/:id/email/destinations/:destId
 // ---------------------------------------------------------------------------
 

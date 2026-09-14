@@ -96,7 +96,14 @@ supersedes: 0047-email.md
 >   confirmation page on success.
 > - GET `/destinations` refresh now skips
 >   `verification_source='platform'` rows so a CF-side `verified=true`
->   doesn't override the platform gate.
+>   doesn't override the platform gate. _(2026-09-15)_ It also promotes a
+>   CF-pending row only when Cloudflare's verified destination carries the
+>   tag that row registered: when the destination was deleted and another
+>   project's add recreated it, CF's click answered that other
+>   registration, so a non-owner row stays pending (disallow + allow
+>   re-registers it and, the address now being CF-verified, takes the
+>   Option B platform link), while the owner's own address adopts the live
+>   tag with the inherited-consent audit (Option C).
 > - Per-project rate-limit on `POST /destinations`: 5/minute and
 >   50/day in `email-add-rate:<projectId>:*` KV counters, with the
 >   same NaN-poison defense as the proxy's send counter. Blocks Mallory

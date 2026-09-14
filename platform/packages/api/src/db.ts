@@ -1915,6 +1915,42 @@ export async function countProjectsUsingDestination(
   return Number(result[0]?.n ?? 0);
 }
 
+/**
+ * Promote a pending row to `verified` by INHERITING the project owner's
+ * Cloudflare-side consent from a destination this row did not register.
+ *
+ * The listing refresh in `routes/email.ts` reaches for this when the row's
+ * own CF destination is gone and the account now carries the same address
+ * under a new tag that somebody else's registration verified. For the
+ * owner's own address that is Option C (design doc 0078): the human who
+ * clicked is the human who owns the project. The row adopts the live tag
+ * and records whose consent it inherited, exactly as the create paths do
+ * (`autoAddOwnerDestination`, the owner branch of the POST), so a later
+ * owner-email change can revoke it through
+ * `revokeOwnerVerifiedDestinationsForUserChange`.
+ *
+ * `verification_source` stays `'cf'`: the consent is still Cloudflare's
+ * click, only attributed. Non-owner rows never take this path.
+ */
+export async function promoteEmailDestinationWithOwnerAudit(
+  db: Db,
+  id: string,
+  cfDestinationId: string,
+  verifiedAt: string | null,
+  ownerAudit: OwnerVerificationAudit,
+): Promise<void> {
+  await db
+    .update(emailDestinations)
+    .set({
+      status: 'verified',
+      cf_destination_id: cfDestinationId,
+      verified_at: verifiedAt ?? new Date().toISOString(),
+      verified_by_user_id: ownerAudit.userId,
+      verified_by_email_snapshot: ownerAudit.emailSnapshot,
+    })
+    .where(eq(emailDestinations.id, id));
+}
+
 // --- Deletion ---
 
 export async function deleteProjectResources(db: Db, projectId: string): Promise<void> {

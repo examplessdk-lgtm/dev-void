@@ -8,6 +8,7 @@ import {
   getEmailDestinationsByProjectId,
   getProject,
   getUser,
+  promoteEmailDestinationWithOwnerAudit,
   tryCreateEmailDestination,
   updateEmailDestinationStatus,
   type Db,
@@ -158,9 +159,15 @@ const app = new Hono<ApiEnv>()
         for (const cf of cfRows) {
           byEmail.set(cf.email.toLowerCase(), cf);
         }
+        // The owner's address is read only when a row needs it (below).
+        let ownerEmail: string | null | undefined;
         for (const row of pending) {
           const cf = byEmail.get(row.address);
-          if (cf?.verified) {
+          if (!cf?.verified) {
+            continue;
+          }
+          if (cf.tag === row.cf_destination_id) {
+            // The click answered the destination THIS row registered.
             await updateEmailDestinationStatus(
               context.get('db'),
               row.id,
@@ -168,11 +175,47 @@ const app = new Hono<ApiEnv>()
               cf.tag,
               cf.verified,
             );
-            row.status = 'verified';
-            row.cf_destination_id = cf.tag;
-            row.verified_at = cf.verified;
-            anyFlipped = true;
+          } else {
+            // The account carries the address under a tag this row never
+            // registered: its own destination was deleted at Cloudflare
+            // (an operator, or the delete-vs-register window the DELETE
+            // route names) and another project's add recreated it, so CF's
+            // mail — which names no project — was answered for THAT
+            // registration. Had the destination survived, this project
+            // would have been the second registrant and taken the
+            // per-project platform link (Option B); promoting by address
+            // here would hand it the other registration's consent instead.
+            // So a NON-owner row stays pending — `void email disallow` then
+            // `allow` re-registers it, and because the address is now
+            // CF-verified that add takes the platform link. This GET must
+            // not mail that link itself. The OWNER's own address is Option
+            // C: the human who clicked is the human who owns the project,
+            // so the row adopts the live tag and records the inherited
+            // consent the way the create paths do.
+            if (ownerEmail === undefined) {
+              const owner = await getUser(context.get('db'), project.user_id);
+              ownerEmail = owner?.email?.toLowerCase() ?? null;
+            }
+            if (ownerEmail !== row.address) {
+              console.warn(
+                `[email] destination tag mismatch: row=${row.id} project=${projectId} registered=${row.cf_destination_id} cloudflare=${cf.tag}; the verified destination belongs to another registration, so the row stays pending (disallow + allow re-registers it)`,
+              );
+              continue;
+            }
+            await promoteEmailDestinationWithOwnerAudit(
+              context.get('db'),
+              row.id,
+              cf.tag,
+              cf.verified,
+              { userId: project.user_id, emailSnapshot: ownerEmail },
+            );
+            row.verified_by_user_id = project.user_id;
+            row.verified_by_email_snapshot = ownerEmail;
           }
+          row.status = 'verified';
+          row.cf_destination_id = cf.tag;
+          row.verified_at = cf.verified;
+          anyFlipped = true;
         }
       } catch (err) {
         console.error('[email] destinations refresh failed:', err);
