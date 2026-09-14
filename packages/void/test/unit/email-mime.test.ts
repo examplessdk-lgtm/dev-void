@@ -1121,6 +1121,30 @@ describe('buildMime header size projection', () => {
   });
 });
 
+describe('foldHeader memory', () => {
+  // A legal 3 MB subject of one-letter words is 1.5M fold points. The
+  // earlier fold kept a slice, a `{ text, comma }` object and a cons-string
+  // node per token — about 65 bytes of heap per input character — and
+  // terminated a 128 MB isolate on a message that fit. The fold now keeps
+  // only its finished lines (~1 byte per character). This pins the
+  // rendered shape; the memory bound is measured, not asserted, because
+  // the test runner's heap is not the isolate's.
+  it('folds a legal subject of millions of one-letter words', async () => {
+    const words = 1_500_000;
+    const { raw, text } = await build({
+      from: 'a@x.dev',
+      to: 'b@y.dev',
+      subject: 'a '.repeat(words).trimEnd(),
+      text: 'hi',
+    });
+    expect(raw.byteLength).toBeLessThanOrEqual(MAX_MESSAGE_BYTES);
+    const lines = headerLines(text, 'Subject');
+    expect(lines[0]).toBe(`Subject:${' a'.repeat(34)}`);
+    expect(lines.every((l) => l.length <= 76)).toBe(true);
+    expect(unfoldHeader(text, 'Subject')).toBe('a '.repeat(words).trimEnd());
+  });
+});
+
 describe('quotedPrintable encoder', () => {
   // Fixtures captured from the string-concatenating encoder these replace,
   // so the byte-buffer encoder is pinned to the exact previous output.

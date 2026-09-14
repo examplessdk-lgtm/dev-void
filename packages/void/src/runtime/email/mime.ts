@@ -496,135 +496,128 @@ function formatAddressList(addrs: Array<{ email: string; name?: string }>): stri
 }
 
 /**
- * Soft-fold long header lines at address-list boundaries (`, `) outside
- * any double-quoted string. A naive `split(/, /)` would split inside
- * `"Smith, John"`, corrupting quoted display names.
+ * Soft-fold a long header line. Fold points, strongest first: address-list
+ * separators (a `, ` outside any double-quoted string), then any remaining
+ * unquoted whitespace inside a part. A naive `split(/, /)` would split
+ * inside `"Smith, John"`, corrupting quoted display names, and folding only
+ * between whole parts is not enough — one recipient carrying a long encoded
+ * display name, or a `References:` run of message IDs, is a single part
+ * that can blow past RFC 5322 §2.1.1's 998-octet hard limit on its own.
  *
- * Both tokenizers here slice the input at the boundaries they find rather
- * than growing each piece with `current += ch`. V8 keeps that growth as a
- * cons-string tree of about 32 bytes per character, live until the piece is
- * next flattened — measured, a 4 MB header value held 128 MB across the two
- * passes, so one 800k-character non-ASCII display name (a legal 4 MiB
- * message) terminated a 128 MB isolate before `buildMime` could size it.
+ * RFC 2047 §2 limits any header line carrying an encoded-word to 76
+ * characters; RFC 5322 §2.1.1 makes 78 a SHOULD and 998 a MUST. Folding at
+ * 76 satisfies all three. A comma always stays on the line it terminates.
+ * A token longer than the budget still gets its own line, which is the
+ * best a WSP-only fold rule allows (§3.2.2 permits folding only at WSP).
+ *
+ * One pass, and the only thing kept per input character is the folded
+ * output itself: each finished line is one flat string in `lines`. The
+ * earlier shape — tokenize the whole value into an array of slices, wrap
+ * each in a `{ text, comma }` object, then grow the result with `out +=`
+ * per token — held about 130 bytes of heap per token for the length of the
+ * fold (a slice, an object and a cons-string node each), so a legal 3 MB
+ * subject of one-letter words terminated a 128 MB isolate. That was a
+ * per-TOKEN cost, invisible to any size projection: the message fit.
  */
-function splitAddressList(value: string): Array<string> {
-  const parts: Array<string> = [];
-  let start = 0;
+function foldHeader(name: string, value: string): string {
+  const line = `${name}: ${value}`;
+  if (line.length <= 78) {
+    return line;
+  }
+  const MAX_LINE = 76;
+  const lines: Array<string> = [];
+  // Pieces of the line being built, joined by the single space each fold
+  // point becomes. The first line starts on `Name:`; a continuation starts
+  // on the empty string so the join yields its leading space.
+  let current: Array<string> = [`${name}:`];
+  let lineLen = name.length + 1;
+  let chunks = 0;
+  const emit = (text: string, comma: boolean) => {
+    chunks++;
+    const piece = comma ? `${text},` : text;
+    if (piece.length > 0 && lineLen + 1 + piece.length > MAX_LINE) {
+      lines.push(current.join(' '));
+      current = ['', piece];
+      lineLen = 1 + piece.length;
+    } else {
+      current.push(piece);
+      lineLen += 1 + piece.length;
+    }
+  };
+  // A token is emitted only once the scanner knows whether it is the last
+  // of its part, because that one carries the part's comma. An empty part
+  // (`a, , b`) still owes its separator, so it emits an empty chunk rather
+  // than losing a comma.
+  let tokenStart = -1;
+  let heldStart = -1;
+  let heldEnd = -1;
+  const endToken = (i: number) => {
+    if (tokenStart < 0) {
+      return;
+    }
+    if (heldStart >= 0) {
+      emit(value.slice(heldStart, heldEnd), false);
+    }
+    heldStart = tokenStart;
+    heldEnd = i;
+    tokenStart = -1;
+  };
+  const endPart = (isLast: boolean) => {
+    if (heldStart >= 0) {
+      emit(value.slice(heldStart, heldEnd), !isLast);
+      heldStart = -1;
+    } else {
+      emit('', !isLast);
+    }
+  };
   let inQuotes = false;
   let escape = false;
   for (let i = 0; i < value.length; i++) {
     const ch = value[i];
     if (escape) {
       escape = false;
+      if (tokenStart < 0) {
+        tokenStart = i;
+      }
       continue;
     }
     if (ch === '\\' && inQuotes) {
       escape = true;
+      if (tokenStart < 0) {
+        tokenStart = i;
+      }
       continue;
     }
     if (ch === '"') {
       inQuotes = !inQuotes;
+      if (tokenStart < 0) {
+        tokenStart = i;
+      }
       continue;
     }
     if (!inQuotes && ch === ',' && value[i + 1] === ' ') {
-      parts.push(value.slice(start, i));
+      endToken(i);
+      endPart(false);
       i++; // skip the space
-      start = i + 1;
-    }
-  }
-  parts.push(value.slice(start));
-  return parts;
-}
-
-/**
- * Split one address-list part at whitespace runs outside any
- * double-quoted string. RFC 5322 §3.2.2 permits folding only at WSP,
- * and keeping quoted strings whole means a fold never lands inside a
- * display name like `"Smith, John"`.
- */
-function splitFoldPoints(part: string): Array<string> {
-  const tokens: Array<string> = [];
-  let start = 0;
-  let inQuotes = false;
-  let escape = false;
-  for (let i = 0; i < part.length; i++) {
-    const ch = part[i];
-    if (escape) {
-      escape = false;
-      continue;
-    }
-    if (ch === '\\' && inQuotes) {
-      escape = true;
-      continue;
-    }
-    if (ch === '"') {
-      inQuotes = !inQuotes;
       continue;
     }
     if (!inQuotes && (ch === ' ' || ch === '\t')) {
-      if (i > start) {
-        tokens.push(part.slice(start, i));
-      }
-      start = i + 1;
-    }
-  }
-  if (part.length > start) {
-    tokens.push(part.slice(start));
-  }
-  return tokens;
-}
-
-function foldHeader(name: string, value: string): string {
-  const line = `${name}: ${value}`;
-  if (line.length <= 78) {
-    return line;
-  }
-  // Fold points, strongest first: address-list separators (a `, `
-  // outside any quoted string), then any remaining unquoted whitespace
-  // inside a part. Folding only between whole parts is not enough — one
-  // recipient carrying a long encoded display name, or a `References:`
-  // run of message IDs, is a single part that can blow past RFC 5322
-  // §2.1.1's 998-octet hard limit on its own.
-  const chunks: Array<{ text: string; comma: boolean }> = [];
-  const parts = splitAddressList(value);
-  for (let i = 0; i < parts.length; i++) {
-    const isLast = i === parts.length - 1;
-    const tokens = splitFoldPoints(parts[i]);
-    if (tokens.length === 0) {
-      // An empty part (`a, , b`) still owes its separator; without a
-      // placeholder chunk the rendered value would lose a comma.
-      chunks.push({ text: '', comma: !isLast });
+      endToken(i);
       continue;
     }
-    for (let j = 0; j < tokens.length; j++) {
-      chunks.push({ text: tokens[j], comma: !isLast && j === tokens.length - 1 });
+    if (tokenStart < 0) {
+      tokenStart = i;
     }
   }
-  // One unbreakable token — a single long Message-ID, say. RFC 5322
-  // §3.2.2 only allows folding at WSP, so there is nowhere to fold and
-  // `Name:\r\n <token>` would shorten nothing.
-  if (chunks.length <= 1) {
+  endToken(value.length);
+  endPart(true);
+  // One unbreakable token — a single long Message-ID, say. There is
+  // nowhere to fold, and `Name:\r\n <token>` would shorten nothing.
+  if (chunks <= 1) {
     return line;
   }
-  // RFC 2047 §2 limits any header line carrying an encoded-word to 76
-  // characters; RFC 5322 §2.1.1 makes 78 a SHOULD and 998 a MUST.
-  // Folding at 76 satisfies all three. A comma always stays on the line
-  // it terminates. A chunk longer than the budget still gets its own
-  // line, which is the best a WSP-only fold rule allows.
-  const MAX_LINE = 76;
-  let out = `${name}:`;
-  let lineLen = out.length;
-  for (const chunk of chunks) {
-    const piece = chunk.comma ? `${chunk.text},` : chunk.text;
-    if (piece.length > 0 && lineLen + 1 + piece.length > MAX_LINE) {
-      out += `${CRLF} ${piece}`;
-      lineLen = 1 + piece.length;
-    } else {
-      out += ` ${piece}`;
-      lineLen += 1 + piece.length;
-    }
-  }
-  return out;
+  lines.push(current.join(' '));
+  return lines.join(CRLF);
 }
 
 /** RFC 5322 §2.1.1: each line MUST be at most 998 octets, excluding CRLF. */
@@ -667,9 +660,8 @@ function findOverlongLine(text: string): { index: number; octets: number } | und
  *
  * Backslash first, then quote — the other order would double-escape.
  *
- * Note this file's own `splitAddressList` and `splitFoldPoints` already
- * track quoted-pairs when folding, so the emitter was contradicting the
- * folder.
+ * Note this file's own `foldHeader` already tracks quoted-pairs when
+ * folding, so the emitter was contradicting the folder.
  */
 function quoteParam(value: string): string {
   return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
