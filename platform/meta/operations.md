@@ -520,7 +520,7 @@ Four platform workflows live in the repository-level `.github/workflows/` direct
 2. `vp run build` (SDK packages the dashboard bundles)
 3. `vp run --filter @voidcloud/platform deploy` (api with drizzle-kit migrations, proxy, tail, dispatch, dashboard)
 
-`prod` is the production ref: it points at the commit that is live, so advancing it is the release (`git push origin main:prod` deploys whatever `main` is at). There is no path filter — a push to `prod` is deliberate. A `concurrency` group (`platform-deploy-production`, `cancel-in-progress: false`) keeps one deploy running and at most one pending, so a deploy is never interrupted between the API migration and the workers.
+`prod` is the production ref: it points at the commit that is live, so advancing it is the release (`git push origin main:prod` deploys whatever `main` is at). There is no path filter — a push to `prod` is deliberate. The branch carries a `prod` ruleset that blocks deletion and force-pushes and allows updates only from its bypass actors (organization admins, repository admins, and the `Void` team), so a push to `prod` is a maintainer action. A `concurrency` group (`platform-deploy-production`, `cancel-in-progress: false`) keeps one deploy running and at most one pending, so a deploy is never interrupted between the API migration and the workers.
 
 **`platform-deploy-staging.yml`** — push to `main` that matches the `platform-ci.yml` path filter, or manual dispatch (staging, environment: `Staging`):
 
