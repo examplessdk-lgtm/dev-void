@@ -12,6 +12,11 @@ on:
       - 'vite.config.ts'
       - '.github/workflows/platform-*.yml'
   workflow_call:
+    inputs:
+      require-schema-compat:
+        description: Run the production schema-compatibility guard. The production deploy sets this for every trigger.
+        type: boolean
+        default: false
 
 permissions: {}
 
@@ -75,11 +80,89 @@ jobs:
       - run: vp run --filter './platform/packages/**' build
       - run: vp test run --project ${{ matrix.project }}
 
-  # The former repository compared migrations against its `prod` branch. The merged repository's
-  # production ref has intentionally not been chosen yet, so this job remains visible but inert
-  # until the deployment-cutover change supplies the authoritative ref.
+  # The production guard. `platform-deploy.yml` migrates before it deploys the api worker, so a
+  # push to `prod` applies a new schema while the previous release is still serving traffic. This
+  # migrates a real Postgres with the migrations under test, then runs the `prod` branch's
+  # integration tests against that schema: if the code that is live cannot run on the new schema,
+  # the push must not ship. Accepted limits: the baseline is the `prod` branch head rather than the
+  # deployed revision, and released migrations are assumed append-only (drizzle never re-applies an
+  # applied entry and skips entries not newer than the last applied).
+  #
+  # It has teeth on PRs, where the code under test is a different commit from the one that is
+  # live. The production deploy sets `require-schema-compat` for every trigger — including a
+  # manual dispatch, which can be started from any ref and would otherwise skip the job. Staging
+  # deploys skip it: they cannot break production, and they run on nearly every push to `main`.
   schema-compat:
-    if: ${{ false }}
+    if: github.event_name == 'pull_request' || inputs.require-schema-compat
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      POSTGRES_USER: void_ci
+      POSTGRES_PASSWORD: void_ci_pass
+      POSTGRES_DB: void_schema_compat
+      COMPAT_DATABASE_URL: postgresql://void_ci:void_ci_pass@localhost:5432/void_schema_compat
+      # Pinned: the suite compares timestamps written by Postgres with local time, so a
+      # runner whose locale is not UTC shifts them by the offset.
+      TZ: UTC
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: ${{ env.POSTGRES_USER }}
+          POSTGRES_PASSWORD: ${{ env.POSTGRES_PASSWORD }}
+          POSTGRES_DB: ${{ env.POSTGRES_DB }}
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U $POSTGRES_USER"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=5
     steps:
-      - run: echo 'Enable after choosing the merged repository production ref.'
+      # Phase 1 — apply the migrations under test to a real Postgres.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: voidzero-dev/setup-vp@1b32467adbe183473499fd9d5d372c3ed9641754 # v1.18.0
+        with:
+          cache: true
+          node-version-file: .node-version
+      - run: vp run build
+      - run: vp run --filter @voidcloud/api migrate
+        env:
+          DATABASE_URL: ${{ env.COMPAT_DATABASE_URL }}
+
+      # Phase 2 — the release that is live must still run on that schema. `prod` is that release.
+      # PRs are checked against it; a push to `prod` checks itself, as in the old repository; a
+      # manual dispatch from another ref is checked against `prod`.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: prod
+          persist-credentials: false
+      - name: Does the baseline carry the platform?
+        id: production
+        run: |
+          if [ -d platform/packages/api ]; then
+            echo 'usable=true' >> "$GITHUB_OUTPUT"
+          else
+            # Production still runs a pre-monorepo revision, so there is no platform code to test
+            # against: the schema is checked, the code is not. That gap closes with the first
+            # release from this repository, after which this branch stops being taken.
+            echo 'usable=false' >> "$GITHUB_OUTPUT"
+            echo '::warning::The compatibility baseline predates the platform, so the production code was not exercised against the migrated schema. This stops once prod carries the platform.'
+          fi
+      - if: steps.production.outputs.usable == 'true'
+        uses: voidzero-dev/setup-vp@1b32467adbe183473499fd9d5d372c3ed9641754 # v1.18.0
+        with:
+          cache: true
+          node-version-file: .node-version
+      - name: Run the production ref's integration tests on the migrated schema
+        if: steps.production.outputs.usable == 'true'
+        run: |
+          vp run build
+          vp run --filter './platform/packages/**' build
+          vp test run --project platform-api-integration
+        env:
+          VOID_TEST_DATABASE_URL: ${{ env.COMPAT_DATABASE_URL }}

@@ -4476,18 +4476,19 @@ describe('POST /projects/:id/migrations/rename', () => {
     expect(rollbackBody.migrationDiff).toEqual(['m3.sql']);
   });
 
-  it('rollback-vs-rollback serializes on the row lock and keeps pg and ROUTING in sync', async () => {
-    // Concurrent rollbacks must fully serialize. The row lock covers the
-    // whole cutover (pg flip + ROUTING.put + cron + queue + ISR), so when
-    // both finish the final state is internally consistent: whatever pg
-    // says is active, ROUTING points at the matching worker, and the
-    // diffs returned by both rollbacks are computed against the correct
-    // pre-flip snapshots.
+  it('two rollbacks in sequence keep pg and ROUTING in sync, the second after the first has finished', async () => {
+    // Two rollbacks run one after the other must leave a consistent state.
+    // The row lock covers the whole cutover (pg flip + ROUTING.put + cron +
+    // queue + ISR), so when both finish the final state is internally
+    // consistent: whatever pg says is active, ROUTING points at the
+    // matching worker, and the diffs returned by both rollbacks are
+    // computed against the correct pre-flip snapshots.
     //
-    // This test pins that invariant by holding rollback A mid-cutover
+    // This test pins that invariant by holding rollback A mid-rollback
     // (inside its locked tx, AFTER the pg flip but during its
     // `ROUTING.put(slug, …)` external write) and kicking rollback B while
-    // A is paused. B must block on the row lock until A commits.
+    // A is paused. B starts only after A has fully finished, post-commit
+    // lease cleanup included.
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id, 'r13f1-rb-rb');
     await insertD1Resource(env.db, project.id);
@@ -4552,9 +4553,8 @@ describe('POST /projects/:id/migrations/rename', () => {
     //
     // Both rollbacks in this scenario carry non-empty diffs (A→B drops m3;
     // B→C drops m2) so the destructive guard would reject them without an
-    // opt-in. The invariant here (lock serialization between concurrent
-    // rollbacks) is orthogonal, so echo each rollback's exact diff via
-    // `allowDestructive`.
+    // opt-in. The invariant here (a second rollback after the first) is
+    // orthogonal, so echo each rollback's exact diff via `allowDestructive`.
     const rollbackAPromise = app.fetch(
       authedReq(`/projects/${project.id}/rollback`, user.jwt, {
         method: 'POST',
@@ -4564,10 +4564,48 @@ describe('POST /projects/:id/migrations/rename', () => {
     );
     await aReachedPut;
 
-    // Kick rollback B to C. It enters the tx callback and blocks on the
-    // per-project row lock — A still holds it. (On PGlite this is also
-    // enforced by the underlying single-connection serialization, a safe
-    // upper bound for this test.)
+    // B is held at the waypoint between its pre-lock reads and its row-lock
+    // acquisition, so it can only run once A's rollback — including the
+    // post-commit lease cleanup — has finished. The wrapper is installed after
+    // A's transaction started, so the first transaction it sees is B's.
+    //
+    // Without the hold the driver decides the order: PGlite queues statements,
+    // so B's in-lock read runs after A's cleanup, while a pooled Postgres grants
+    // the queued row lock at A's commit, so B resumes before that cleanup, reads
+    // A's rollback lease and answers 409 `deploy in progress`. That fence is
+    // real, but it is driver order rather than the sequence under test.
+    //
+    // This test therefore does not exercise row-lock contention between
+    // rollbacks: on Postgres a rollback that wins the lock at the other's
+    // commit still sees its rollback lease and answers 409, which is intended.
+    // The row lock itself is covered by the `/apply` contention tests in this
+    // file.
+    const realDb = env.db;
+    const realTransaction = realDb.transaction.bind(realDb);
+    let releaseB: () => void = () => {};
+    const bHold = new Promise<void>((r) => {
+      releaseB = r;
+    });
+    let bHoldFired = false;
+    const wrappedDb: Db = new Proxy(realDb, {
+      get(target, prop, receiver) {
+        if (prop === 'transaction') {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          return (async (fn: any) => {
+            if (!bHoldFired) {
+              bHoldFired = true;
+              await bHold;
+            }
+            return realTransaction(fn);
+          }) as unknown as typeof realDb.transaction;
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    }) as Db;
+    setTestDb(wrappedDb);
+
+    // Kick rollback B to C. It does its pre-lock reads, then waits at the
+    // waypoint until A's rollback has fully completed.
     const rollbackBPromise = app.fetch(
       authedReq(`/projects/${project.id}/rollback`, user.jwt, {
         method: 'POST',
@@ -4576,18 +4614,14 @@ describe('POST /projects/:id/migrations/rename', () => {
       env,
     );
 
-    // Give B's request time to reach its tx/lock acquisition and
-    // actually be blocked. We cannot poll pg to confirm this — a
-    // `SELECT` through env.db would itself block on the single
-    // PGlite connection that A's tx still holds — so we use a small
-    // sleep. Release A afterward.
-    await new Promise((r) => setTimeout(r, 30));
-
-    // Release A. It commits the tx (pg active=B, ROUTING=B, etc),
-    // then B acquires the lock and flips pg active=C, ROUTING=C.
+    // Release A. It commits the tx (pg active=B, ROUTING=B, etc) and clears its
+    // rollback lease, then B acquires the lock and flips pg active=C, ROUTING=C.
     releaseA();
-    const [resA, resB] = await Promise.all([rollbackAPromise, rollbackBPromise]);
+    const resA = await rollbackAPromise;
     expect(resA.status).toBe(200);
+    releaseB();
+    const resB = await rollbackBPromise;
+    setTestDb(realDb);
     expect(resB.status).toBe(200);
 
     const bodyA = (await resA.json()) as {
@@ -4609,8 +4643,8 @@ describe('POST /projects/:id/migrations/rename', () => {
 
     // Final consistency: pg says active=C AND ROUTING.workerName matches C.
     // The pg flip happens FIRST inside the lock and external writes follow,
-    // so the serialized order guarantees pg and ROUTING converge on the
-    // same terminal state.
+    // so running B after A guarantees pg and ROUTING converge on the same
+    // terminal state.
     const finalPg = await env.db.select().from(projects).where(eq(projects.id, project.id));
     expect(finalPg[0]!.active_deployment_id).toBe(depC.id);
 

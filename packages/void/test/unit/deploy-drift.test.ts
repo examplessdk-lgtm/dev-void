@@ -38,7 +38,10 @@ const WRANGLER_AUTH_VARS = [
   'CLOUDFLARE_ACCESS_CLIENT_SECRET',
 ];
 
-describe('hasDeploySchemaDrift', () => {
+// These cases run real Drizzle processes (up to three per test). Windows CI can take
+// over five seconds even when every operation succeeds; keep that budget local to this suite.
+const driftTestTimeout = process.platform === 'win32' ? 30_000 : 10_000;
+describe('hasDeploySchemaDrift', { timeout: driftTestTimeout }, () => {
   afterEach(() => {
     while (tempDirs.length > 0) {
       rmSync(tempDirs.pop()!, { recursive: true, force: true });

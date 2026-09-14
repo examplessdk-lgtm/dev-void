@@ -383,6 +383,12 @@ export default defineConfig({
           // schedule the longest files first and fill idle slots across package boundaries.
           name: 'parallel-integration',
           sequence: { groupOrder: 2 },
+          // maxWorkers limits files, not describe.concurrent tests. On Windows CI, two files
+          // at Vitest's default concurrency open up to ten isolated browser contexts at once.
+          // Reduce socket pressure while keeping file-level parallelism and other OSes unchanged.
+          ...(process.platform === 'win32'
+            ? { maxConcurrency: 2, setupFiles: ['test/windows-integration-setup.ts'] }
+            : {}),
           testTimeout,
           hookTimeout,
           // Kept alongside the e2e glob below so a newly added e2e file gets its credentials

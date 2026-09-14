@@ -18,6 +18,39 @@ vpr test:all
 `vpr test:all` formats, lints, builds, typechecks, and tests the merged monorepo. Investigate slow
 or hanging tests when they occur instead of routinely increasing timeouts.
 
+## Browser readiness and Windows CI
+
+Use `waitForIslandsHydrated` from `test/browser-helpers.ts` before asserting island state or
+interacting with islands. Pass the expected minimum count when checking a multi-island fixture.
+Each island imports and hydrates independently, so a selector matching one hydrated island does
+not establish that its siblings are ready. The helper rejects empty or partially hydrated pages;
+`packages/void/test/integration/browser-helpers.test.ts` covers these cases.
+
+For SPA navigation, wait for a client readiness signal before setting the document marker and
+clicking. The Nuxt and SvelteKit playgrounds expose `h1[data-hydrated="true"]` after client startup.
+`networkidle` and server-rendered HTML do not establish router readiness. Keep the document-marker
+assertion so a full reload still fails the test. These suites attach recent browser console,
+navigation, failed-request, HMR, and dev-server output to failures.
+
+Give real subprocess tests a measured, suite-local timeout. The Drizzle drift suite can launch
+three processes per case and uses 30 seconds on Windows and 10 seconds elsewhere. Ordinary unit
+tests retain their default timeout. `waitForServer` already scales its timeout on Windows;
+callers should pass an unscaled value and leave enough hook time for that wait and setup.
+
+Windows integration tests also use `maxConcurrency: 2`. `maxWorkers` caps files, not concurrent
+tests inside each file: two CI workers with Vitest's default concurrency of five can open ten
+isolated browser contexts at once. The Windows cap reduces that to four without serializing
+files or changing Linux/macOS concurrency. Do not retry browser navigation to hide
+`ERR_NO_BUFFER_SPACE`; it reports a Windows socket resource failure, not a readiness timeout.
+
+The Windows setup hook prints one resource snapshot per integration file at the first failed
+test, before suite teardown. It records memory, the largest processes, dynamic TCP port ranges,
+and connection counts by state/PID. Collection is read-only, limited to ten seconds and 64 KiB,
+and retains partial output if it fails. Concurrent failures share the snapshot. It does not log
+environment variables, process command lines, or remote addresses, and does not replace the
+original test failure. Use this evidence to distinguish port, queue, and memory pressure rather
+than assuming every socket error is port exhaustion.
+
 ## Native Cloudflare live E2E tests
 
 Live tests are opt-in. They provision or update real resources and can write data, enqueue messages,

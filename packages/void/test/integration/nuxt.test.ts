@@ -3,6 +3,7 @@ import { existsSync, readFileSync, rmSync } from 'node:fs';
 import spawn from 'cross-spawn';
 import { join } from 'pathslash';
 import { afterAll, beforeAll, describe, expect, it } from 'vite-plus/test';
+import { collectBrowserDiagnostics } from '../../../../test/browser-helpers.ts';
 import { getPort, waitForServer, killChild } from '../../../../test/integration-helpers.ts';
 
 const ROOT = join(import.meta.dirname, '..', '..', '..', '..');
@@ -38,7 +39,7 @@ describe(
   'playground/nuxt dev',
   () => {
     let child: ReturnType<typeof spawn>;
-    let stderr = '';
+    let serverOutput = '';
 
     beforeAll(
       async () => {
@@ -72,14 +73,23 @@ describe(
           },
         );
 
-        child.stderr!.on('data', (chunk: Buffer) => {
-          stderr += String(chunk);
-        });
+        const recordOutput = (chunk: Buffer) => {
+          serverOutput = (serverOutput + String(chunk)).slice(-20_000);
+        };
+        child.stdout!.on('data', recordOutput);
+        child.stderr!.on('data', recordOutput);
 
-        const serverTimeout = process.platform === 'win32' ? 60_000 : 30_000;
-        await waitForServer(DEV_BASE, serverTimeout);
+        try {
+          await waitForServer(DEV_BASE, 30_000, {
+            expectStatus: 200,
+            expectBody: 'Nuxt + Void',
+            isAlive: () => child.exitCode === null && child.signalCode === null,
+          });
+        } catch (error) {
+          throw new Error(`Nuxt failed to start:\n${serverOutput}`, { cause: error });
+        }
       },
-      process.platform === 'win32' ? 75_000 : 45_000,
+      process.platform === 'win32' ? 120_000 : 45_000,
     );
 
     afterAll(async () => {
@@ -110,10 +120,13 @@ describe(
     it('navigates to smoke route via SPA from home page', async () => {
       const { chromium } = await import('playwright');
       const browser = await chromium.launch();
+      let diagnostics = () => '';
       try {
         const page = await browser.newPage();
+        diagnostics = collectBrowserDiagnostics(page);
         await page.goto(DEV_BASE);
-        await page.waitForLoadState('networkidle');
+        // SSR and network inactivity do not mean Nuxt has installed its router yet.
+        await page.waitForSelector('h1[data-hydrated="true"]');
 
         // Mark the document to detect full page reloads
         await page.evaluate(() => {
@@ -134,6 +147,8 @@ describe(
         const kvValue = await page.textContent('[data-testid="kv-value"]');
         expect(d1User).toBe('Alice');
         expect(kvValue).toBe('ok');
+      } catch (error) {
+        throw new Error(`${diagnostics()}\nDev server:\n${serverOutput}`, { cause: error });
       } finally {
         await browser.close();
       }
