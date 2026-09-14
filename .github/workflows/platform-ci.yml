@@ -84,7 +84,9 @@ jobs:
   # push to `prod` applies a new schema while the previous release is still serving traffic. This
   # migrates a real Postgres with the migrations under test, then runs the production ref's
   # integration tests against that schema: if the code that is live cannot run on the new schema,
-  # the push must not ship.
+  # the push must not ship. The fresh database stands in for production's only while the
+  # migrations under test are the released ones plus new entries, so the job also rejects any
+  # edit, removal, or reordering of a released migration.
   #
   # It has teeth on PRs, where the code under test is a different commit from the one that is
   # live. The production deploy sets `require-schema-compat` for every trigger — including a
@@ -151,6 +153,11 @@ jobs:
           else
             echo 'ref=prod' >> "$GITHUB_OUTPUT"
           fi
+      # The baseline checkout replaces the workspace, and the baseline may predate the checker.
+      - name: Keep the candidate's migration set for the append-only check
+        run: |
+          cp -R platform/packages/api/drizzle "$RUNNER_TEMP/candidate-drizzle"
+          cp platform/packages/api/scripts/check-migration-set.ts "$RUNNER_TEMP/check-migration-set.ts"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ steps.baseline.outputs.ref }}
@@ -167,6 +174,12 @@ jobs:
             echo 'usable=false' >> "$GITHUB_OUTPUT"
             echo '::warning::The compatibility baseline predates the platform, so the production code was not exercised against the migrated schema. This stops once prod carries the platform.'
           fi
+      # Production applies only journal entries newer than its last applied one and never re-runs
+      # an entry it has applied, so a candidate that edits, removes, or reorders released
+      # migrations would migrate this fresh database differently from production. Reject it.
+      - name: The candidate must only append to the released migrations
+        if: steps.production.outputs.usable == 'true'
+        run: node "$RUNNER_TEMP/check-migration-set.ts" --baseline platform/packages/api/drizzle --candidate "$RUNNER_TEMP/candidate-drizzle"
       - if: steps.production.outputs.usable == 'true'
         uses: voidzero-dev/setup-vp@1b32467adbe183473499fd9d5d372c3ed9641754 # v1.18.0
         with:

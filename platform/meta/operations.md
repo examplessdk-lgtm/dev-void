@@ -513,6 +513,7 @@ Four platform workflows live in the repository-level `.github/workflows/` direct
 5. `vp run check:platform` and `vp run check:sdk` (typecheck the platform packages and the SDK packages; the playgrounds are typechecked by `ci.yml`)
 6. `vp test run --project platform-unit` and `--project platform-api-integration`
 7. Builds the API build container image (PRs only)
+8. The production schema-compatibility guard (`schema-compat`; PRs and every production deploy): applies the migrations under test to a fresh Postgres 18, then runs the live release's `platform-api-integration` suite against that schema. Released migrations are append-only: an edit, a removal, a reordering, or a new entry whose journal timestamp is not after the last released one fails the guard, because production never re-applies a migration it has applied and skips an entry that is not newer than its last.
 
 **`platform-deploy.yml`** — push to `prod`, or manual dispatch (production, environment: `Prod`):
 
