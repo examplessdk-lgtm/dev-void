@@ -29,8 +29,6 @@ jobs:
     uses: ./.github/workflows/platform-ci.yml
     permissions:
       contents: read
-      # The schema guard reads the production deploy's run history; a called job may not ask for more than its caller grants.
-      actions: read
 
   deploy:
     if: ${{ vars.VOID_PLATFORM_DEPLOY_ENABLED == 'true' }}

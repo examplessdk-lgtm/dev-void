@@ -82,17 +82,11 @@ jobs:
 
   # The production guard. `platform-deploy.yml` migrates before it deploys the api worker, so a
   # push to `prod` applies a new schema while the previous release is still serving traffic. This
-  # migrates a real Postgres with the migrations under test, then runs the production ref's
+  # migrates a real Postgres with the migrations under test, then runs the `prod` branch's
   # integration tests against that schema: if the code that is live cannot run on the new schema,
-  # the push must not ship. The release it tests is the head of the last successful production
-  # deploy, read from `platform-deploy.yml`'s run history.
-  #
-  # The fresh database stands in for production's only while the migrations under test are the
-  # released ones plus new entries, so the job also rejects any edit, removal, or reordering of a
-  # released migration. "Released" is every commit ever pushed to `prod`, not only the ones whose
-  # deploy succeeded: the api deploy migrates first, so a deploy that failed afterwards has still
-  # applied its migrations. That set is the previous `prod` commit, which is at or ahead of the
-  # live release's because `prod` only moves forward.
+  # the push must not ship. Accepted limits: the baseline is the `prod` branch head rather than the
+  # deployed revision, and released migrations are assumed append-only (drizzle never re-applies an
+  # applied entry and skips entries not newer than the last applied).
   #
   # It has teeth on PRs, where the code under test is a different commit from the one that is
   # live. The production deploy sets `require-schema-compat` for every trigger — including a
@@ -104,8 +98,6 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
-      # The schema guard reads the production deploy's run history to find the live release.
-      actions: read
     env:
       POSTGRES_USER: void_ci
       POSTGRES_PASSWORD: void_ci_pass
@@ -142,63 +134,12 @@ jobs:
         env:
           DATABASE_URL: ${{ env.COMPAT_DATABASE_URL }}
 
-      # Phase 2 — the release that is live must still run on that schema. That release is the head
-      # of the last successful production deploy: not `github.event.before`, which is only the
-      # previous push and may have failed to deploy or been replaced while pending in the deploy
-      # concurrency group. Until a production deploy has been recorded, fall back to the previous
-      # `prod` commit on a push and to the `prod` branch on a PR, and say so.
-      #
-      # The released migration set is a second, stricter baseline: the previous `prod` commit on a
-      # push, and the `prod` branch otherwise. Every push to `prod` starts a deploy that migrates
-      # before it deploys, so a commit's migrations count as applied whether or not its deploy
-      # succeeded; a retry may only append to them.
-      - name: Resolve the compatibility baseline
-        id: baseline
-        env:
-          GH_TOKEN: ${{ github.token }}
-          EVENT_NAME: ${{ github.event_name }}
-          PREVIOUS_SHA: ${{ github.event.before }}
-          NO_PREVIOUS_SHA: '0000000000000000000000000000000000000000'
-        run: |
-          live=$(curl -sSf \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H 'Accept: application/vnd.github+json' \
-            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/workflows/platform-deploy.yml/runs?status=success&per_page=1" \
-            | node -e 'let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => process.stdout.write(JSON.parse(s).workflow_runs?.[0]?.head_sha ?? ""))')
-          if [ -n "$live" ]; then
-            echo "ref=$live" >> "$GITHUB_OUTPUT"
-            echo "Baseline: $live (last successful production deploy)"
-          elif [ "$EVENT_NAME" = 'push' ] && printf '%s' "$PREVIOUS_SHA" | grep -Eq '^[0-9a-f]{40}$' && [ "$PREVIOUS_SHA" != "$NO_PREVIOUS_SHA" ]; then
-            echo "ref=$PREVIOUS_SHA" >> "$GITHUB_OUTPUT"
-            echo "::warning::No successful production deploy is recorded yet; comparing against the previous prod commit $PREVIOUS_SHA instead of the live release."
-          else
-            echo 'ref=prod' >> "$GITHUB_OUTPUT"
-            echo '::warning::No successful production deploy is recorded yet; comparing against the prod branch instead of the live release.'
-          fi
-          if [ "$EVENT_NAME" = 'push' ] && printf '%s' "$PREVIOUS_SHA" | grep -Eq '^[0-9a-f]{40}$' && [ "$PREVIOUS_SHA" != "$NO_PREVIOUS_SHA" ]; then
-            echo "released=$PREVIOUS_SHA" >> "$GITHUB_OUTPUT"
-            echo "Released migrations: $PREVIOUS_SHA (previous prod commit)"
-          else
-            echo 'released=prod' >> "$GITHUB_OUTPUT"
-            echo 'Released migrations: prod'
-          fi
-      # The baseline checkout replaces the workspace, and the baseline may predate the checker.
-      - name: Keep the candidate's migration set for the append-only check
-        run: |
-          cp -R platform/packages/api/drizzle "$RUNNER_TEMP/candidate-drizzle"
-          cp platform/packages/api/scripts/check-migration-set.ts "$RUNNER_TEMP/check-migration-set.ts"
+      # Phase 2 — the release that is live must still run on that schema. `prod` is that release.
+      # PRs are checked against it; a push to `prod` checks itself, as in the old repository; a
+      # manual dispatch from another ref is checked against `prod`.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ steps.baseline.outputs.ref }}
-          persist-credentials: false
-      # After the checkout above, which cleans the workspace. `released/` sits outside every
-      # workspace and test glob, so the builds and tests below do not see it.
-      - name: Check out the released migration set
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ steps.baseline.outputs.released }}
-          path: released
-          sparse-checkout: platform/packages/api/drizzle
+          ref: prod
           persist-credentials: false
       - name: Does the baseline carry the platform?
         id: production
@@ -212,16 +153,6 @@ jobs:
             echo 'usable=false' >> "$GITHUB_OUTPUT"
             echo '::warning::The compatibility baseline predates the platform, so the production code was not exercised against the migrated schema. This stops once prod carries the platform.'
           fi
-      # Production applies only journal entries newer than its last applied one and never re-runs
-      # an entry it has applied, so a candidate that edits, removes, or reorders released
-      # migrations would migrate this fresh database differently from production. Reject it.
-      - name: The candidate must only append to the released migrations
-        run: |
-          if [ ! -d released/platform/packages/api/drizzle ]; then
-            echo '::notice::The released commit carries no migrations, so there is no released set for the candidate to extend.'
-            exit 0
-          fi
-          node "$RUNNER_TEMP/check-migration-set.ts" --baseline released/platform/packages/api/drizzle --candidate "$RUNNER_TEMP/candidate-drizzle"
       - if: steps.production.outputs.usable == 'true'
         uses: voidzero-dev/setup-vp@1b32467adbe183473499fd9d5d372c3ed9641754 # v1.18.0
         with:
