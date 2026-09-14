@@ -767,6 +767,61 @@ describe('normalizeEmail', () => {
     expect(() => parseAddress('a <b@c.d> e', 'to')).toThrow(MimeError);
     expect(() => parseAddress('<a b@c.d>', 'to')).toThrow(MimeError);
   });
+
+  it('undoes quoted-pairs in a quoted display name, and only there', () => {
+    // RFC 5322 §3.2.4: inside a quoted-string `"` and `\` appear only as
+    // `\"` and `\\`, and `\x` is `x` for any other `x`. The parsed name is
+    // what `formatAddress` quotes and escapes again, so it has to be the
+    // raw text — what the object form carries — or the escapes render
+    // twice and the recipient sees the backslashes.
+    expect(parseAddress('"Smith \\"Bob\\"" <a@x.dev>', 'to')).toEqual({
+      email: 'a@x.dev',
+      name: 'Smith "Bob"',
+    });
+    expect(parseAddress('"a\\\\b" <a@x.dev>', 'to')).toEqual({ email: 'a@x.dev', name: 'a\\b' });
+    expect(parseAddress('"ab\\\\" <a@x.dev>', 'to')).toEqual({ email: 'a@x.dev', name: 'ab\\' });
+    expect(parseAddress('"a\\xb" <a@x.dev>', 'to')).toEqual({ email: 'a@x.dev', name: 'axb' });
+    // UTF-16 code units, surrogate pairs included.
+    expect(parseAddress('"\\"😀 \\\\ ï" <a@x.dev>', 'to')).toEqual({
+      email: 'a@x.dev',
+      name: '"😀 \\ ï',
+    });
+    // A quoted name with no backslash is untouched, and a backslash in an
+    // UNQUOTED name is a character like any other — as in the object form.
+    expect(parseAddress('"Smith, John" <a@x.dev>', 'to')).toEqual({
+      email: 'a@x.dev',
+      name: 'Smith, John',
+    });
+    expect(parseAddress('a\\b <c@d.e>', 'to')).toEqual({ email: 'c@d.e', name: 'a\\b' });
+    // `\@` is still an `@` in a display name, which is still refused.
+    expect(() => parseAddress('"a\\@x" <b@y.dev>', 'to')).toThrow(/must not contain '@'/);
+    // The quoted-string line guard sees the DECODED name, the one
+    // `formatAddress` renders: 500 pairs are 1,000 raw characters (over
+    // the guard) but a 500-character name (under it), and the count the
+    // error reports is the decoded one.
+    expect(parseAddress(`"${'\\"'.repeat(500)}" <a@x.dev>`, 'to').name).toBe('"'.repeat(500));
+    expect(() => parseAddress(`"${'\\"'.repeat(996)}" <a@x.dev>`, 'to')).toThrow(
+      /display name is 996 characters and must be quoted/,
+    );
+  });
+
+  it('undoes quoted-pairs in linear time and without a per-pair allocation', () => {
+    // A `replace(/\\(.)/g, '$1')` holds about 60 bytes of heap per match
+    // before it builds its result — measured 307 MB for 10 MiB of `\"`
+    // pairs, past a 128 MB isolate — and nothing bounds the name before
+    // the decode runs: an ASCII name is bounded only on its DECODED form,
+    // and a non-ASCII one never is. The buffer routine peaked at 49 MB on
+    // the same input. Heap is not something a test can pin; time is, and
+    // both shapes are exercised so the output of each path is built.
+    const started = performance.now();
+    expect(() => parseAddress(`"${'\\"'.repeat(1_000_000)}" <a@x.dev>`, 'to')).toThrow(
+      /cannot be folded/,
+    );
+    const nonAscii = parseAddress(`"${'\\"é'.repeat(500_000)}" <a@x.dev>`, 'to');
+    expect(nonAscii.name).toHaveLength(1_000_000);
+    expect(nonAscii.name!.startsWith('"é"é')).toBe(true);
+    expect(performance.now() - started).toBeLessThan(1000);
+  });
 });
 
 describe('buildMime', () => {
@@ -977,6 +1032,45 @@ describe('buildMime', () => {
     // (`"` → `\"`). Order matters; reverse order would double-escape the
     // backslash from the quote-escape into `\\\\\"`.
     expect(text).toContain('From: "Smith, \\"Bob\\" \\\\Bobby" <a@x.dev>');
+  });
+
+  it('renders a quoted display name with its quoted-pairs escaped exactly once', async () => {
+    // `"Smith \"Bob\"" <a@x.dev>` used to keep the raw `\"` pairs in the
+    // parsed name, and `formatAddress` escaped them again: the header read
+    // `"Smith \\\"Bob\\\""` and the recipient saw `Smith \"Bob\"`. The
+    // object form of the same name was right, so the two forms disagreed.
+    const cases: Array<[string, string, string]> = [
+      ['"Smith \\"Bob\\"" <a@x.dev>', 'Smith "Bob"', '"Smith \\"Bob\\""'],
+      ['"a\\\\b" <a@x.dev>', 'a\\b', '"a\\\\b"'],
+      ['"ab\\\\" <a@x.dev>', 'ab\\', '"ab\\\\"'],
+      ['"Smith, John" <a@x.dev>', 'Smith, John', '"Smith, John"'],
+      ['"a\\xb" <a@x.dev>', 'axb', 'axb'],
+    ];
+    for (const [from, name, rendered] of cases) {
+      const viaString = await build({ from, to: 'b@y.dev', subject: 's', text: 't' });
+      const viaObject = await build({
+        from: { email: 'a@x.dev', name },
+        to: 'b@y.dev',
+        subject: 's',
+        text: 't',
+      });
+      expect(unfoldHeader(viaString.text, 'From')).toBe(`${rendered} <a@x.dev>`);
+      expect(unfoldHeader(viaObject.text, 'From')).toBe(`${rendered} <a@x.dev>`);
+      // Read the quoted-string back the way a receiver does.
+      const m = unfoldHeader(viaString.text, 'From').match(/^"((?:[^"\\]|\\.)*)" </);
+      if (m) {
+        expect(m[1].replace(/\\(.)/g, '$1')).toBe(name);
+      }
+    }
+    // A non-ASCII name becomes encoded-words rather than a quoted-string;
+    // the decoded text is what gets encoded.
+    const { text } = await build({
+      from: '"\\"😀\\\\ ï" <a@x.dev>',
+      to: 'b@y.dev',
+      subject: 's',
+      text: 't',
+    });
+    expect(decodeEncodedWords(unfoldHeader(text, 'From'))).toBe('"😀\\ ï <a@x.dev>');
   });
 
   it('rejects bare addr-spec values containing a comma (header-injection guard)', async () => {

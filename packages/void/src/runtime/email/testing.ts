@@ -31,7 +31,12 @@
 
 import { compileEmailPattern, type CompiledEmailPattern } from '../../router/email.ts';
 import { registerEmailSink, type CapturedMessage } from './dev-inbox.ts';
-import type { EmailHandler, EmailHandlerInfo } from './inbound.ts';
+import {
+  createMessageProxy,
+  type EmailAction,
+  type EmailHandler,
+  type EmailHandlerInfo,
+} from './inbound.ts';
 import { buildMime, normalizeEmail } from './mime.ts';
 
 export interface EmailTestHarness {
@@ -236,32 +241,6 @@ function parseHeaderBlock(raw: Uint8Array): Headers {
   return headers;
 }
 
-function stripSlugForHarness(address: string, slug: string | undefined): string {
-  if (!slug) {
-    return address;
-  }
-  const atIdx = address.indexOf('@');
-  if (atIdx <= 0) {
-    return address;
-  }
-  const localPart = address.slice(0, atIdx);
-  const domain = address.slice(atIdx);
-  const prefix = `${slug.toLowerCase()}+`;
-  if (localPart.toLowerCase().startsWith(prefix)) {
-    return localPart.slice(prefix.length) + domain;
-  }
-  return address;
-}
-
-function makeReadableStream(bytes: Uint8Array): ReadableStream<Uint8Array> {
-  return new ReadableStream({
-    start(controller) {
-      controller.enqueue(bytes);
-      controller.close();
-    },
-  });
-}
-
 export function createInboundTestHarness(opts: InboundTestHarnessOptions): InboundTestHarness {
   const { compiled, defaultHandler } = compileRoutes(opts.routes);
   const env = opts.env ?? {};
@@ -282,8 +261,6 @@ export function createInboundTestHarness(opts: InboundTestHarnessOptions): Inbou
     // dropped the headers of a caller-supplied `raw:`, which are the exact
     // wire bytes the caller asked to deliver.
     //
-    // Parsed from the local `raw`, never from `message.raw`: that is a
-    // one-shot stream here, so reading it would steal the handler's read.
     // A hand-rolled header split rather than postal-mime, so a deliberately
     // malformed `raw:` fixture still reaches the handler instead of
     // throwing PARSE_FAILED inside the harness.
@@ -309,12 +286,6 @@ export function createInboundTestHarness(opts: InboundTestHarnessOptions): Inbou
       headers.set('To', input.to);
     }
 
-    // Mirror production's setReject-is-terminal contract from
-    // createMessageProxy: once setReject fires, subsequent forward/reply
-    // calls are warned and dropped. Without this flag the harness would
-    // record forwards/replies that the real CF runtime silently discards
-    // — passing the user's tests for buggy handler code that fails in
-    // production.
     // Mirror production: the dispatcher strips the platform-injected
     // `<slug>+` prefix from message.to before user code sees it. When the
     // harness was created with an explicit `slug`, use that; otherwise
@@ -322,7 +293,7 @@ export function createInboundTestHarness(opts: InboundTestHarnessOptions): Inbou
     // `+`). Inference keeps existing tests with `slug+tag@domain` recipients
     // working without configuration. Falls back to the verbatim address
     // if no `+` is present.
-    const inferredSlug = (() => {
+    const slug = (() => {
       if (opts.slug === null) {
         return undefined;
       }
@@ -333,92 +304,29 @@ export function createInboundTestHarness(opts: InboundTestHarnessOptions): Inbou
       const plus = local.indexOf('+');
       return plus === -1 ? undefined : local.slice(0, plus);
     })();
-    const userVisibleTo = stripSlugForHarness(input.to, inferredSlug);
 
-    // Per-delivery records used to walk back forward/reply on setReject —
-    // CF treats setReject as terminal, dropping anything queued before it
-    // in the same dispatch. The harness mirrors that: prior forward/reply
-    // entries from THIS delivery are popped off the public arrays so the
-    // audit trail matches what the real router would actually enact.
-    const localForwards: Array<InboundForwardCapture> = [];
-    const localReplies: Array<InboundReplyCapture> = [];
-
-    let rejected = false;
-    const message: ForwardableEmailMessage = {
-      from: input.from,
-      to: userVisibleTo,
-      headers,
-      raw: makeReadableStream(raw),
-      rawSize: raw.byteLength,
-      setReject(reason: string) {
-        if (rejected) {
-          return; // already rejected; ignore (matches production)
-        }
-        rejected = true;
-        // Drop any forward/reply this handler queued earlier — they never
-        // would have run in production. Pop from the public arrays in
-        // reverse so indices remain valid as we splice.
-        const dropped = localForwards.length + localReplies.length;
-        for (let i = localForwards.length - 1; i >= 0; i--) {
-          const idx = forwards.lastIndexOf(localForwards[i]);
-          if (idx >= 0) {
-            forwards.splice(idx, 1);
-          }
-        }
-        for (let i = localReplies.length - 1; i >= 0; i--) {
-          const idx = replies.lastIndexOf(localReplies[i]);
-          if (idx >= 0) {
-            replies.splice(idx, 1);
-          }
-        }
-        localForwards.length = 0;
-        localReplies.length = 0;
-        if (dropped > 0) {
-          console.warn(
-            `[void/email] setReject() after ${dropped} forward/reply call(s) — those actions were dropped. ` +
-              'CF rejects are terminal: anything queued before setReject() never runs. ' +
-              'Move the reject earlier in the handler.',
-          );
-        }
-        rejects.push(reason);
+    // The message the handler sees is production's own proxy, built the way
+    // the generated `email()` entry builds it: from an envelope and the slug.
+    // Everything the proxy enforces — setReject is terminal, the 100-action
+    // queue, the 320-character address cap, the header-record check, the
+    // per-reply and per-delivery byte bounds — therefore throws here at the
+    // same call, with the same error, as it does after deploy. A hand-rolled
+    // message that recorded every call passed handlers that fail on the
+    // 101st forward in production. The proxy also makes `raw` replayable,
+    // as the platform lane does.
+    //
+    // `Object.fromEntries` is what the platform router's `buildEnvelope`
+    // does with the native message's headers.
+    const { message, getActions } = createMessageProxy(
+      {
+        from: input.from,
+        to: input.to,
+        headers: Object.fromEntries(headers),
+        raw,
+        rawSize: raw.byteLength,
       },
-      async forward(forwardTo: string, forwardHeaders?: Headers) {
-        if (rejected) {
-          console.warn(
-            '[void/email] forward() called after setReject() — ignored. ' +
-              'CF rejects are terminal: nothing else runs once setReject fires.',
-          );
-          return;
-        }
-        const entry = { to: forwardTo, headers: forwardHeaders };
-        forwards.push(entry);
-        localForwards.push(entry);
-      },
-      async reply(reply: { from: string; to: string; raw?: unknown }) {
-        if (rejected) {
-          console.warn(
-            '[void/email] reply() called after setReject() — ignored. ' +
-              'CF rejects are terminal: nothing else runs once setReject fires.',
-          );
-          return;
-        }
-        // The reply EmailMessage carries .from/.to publicly; its raw body
-        // isn't part of the public type but we read it best-effort so tests
-        // can assert on the threading headers / subject.
-        let rawBytes = new Uint8Array(0);
-        const r = (reply as { raw?: unknown }).raw;
-        if (r instanceof Uint8Array) {
-          // Copy into a fresh Uint8Array<ArrayBuffer> to match the field type
-          // — instanceof keeps the original ArrayBufferLike variance.
-          rawBytes = new Uint8Array(r);
-        } else if (typeof r === 'string') {
-          rawBytes = new TextEncoder().encode(r);
-        }
-        const entry = { from: reply.from, to: reply.to, raw: rawBytes };
-        replies.push(entry);
-        localReplies.push(entry);
-      },
-    } as unknown as ForwardableEmailMessage;
+      { slug },
+    );
 
     const ctx = {
       waitUntil() {
@@ -448,46 +356,74 @@ export function createInboundTestHarness(opts: InboundTestHarnessOptions): Inbou
     // has no tag to match — production lands at `_default` if defined, otherwise
     // no-op. We mirror that here.
 
-    for (const route of compiled) {
-      const re = new RegExp(route.pattern.regexSource, 'i');
-      const m = re.exec(local);
-      if (!m) {
-        continue;
+    async function dispatch(): Promise<InboundDeliveryResult> {
+      for (const route of compiled) {
+        const re = new RegExp(route.pattern.regexSource, 'i');
+        const m = re.exec(local);
+        if (!m) {
+          continue;
+        }
+        const params: Record<string, string> = {};
+        for (let i = 0; i < route.pattern.paramNames.length; i++) {
+          params[route.pattern.paramNames[i]] = m[i + 1];
+        }
+        const info: EmailHandlerInfo = { params };
+        await route.handler(message, env, ctx, info);
+        return { handler: route.key, params };
       }
-      const params: Record<string, string> = {};
-      for (let i = 0; i < route.pattern.paramNames.length; i++) {
-        params[route.pattern.paramNames[i]] = m[i + 1];
+      if (defaultHandler) {
+        const info: EmailHandlerInfo = { params: {} };
+        await defaultHandler(message, env, ctx, info);
+        return { handler: '_default', params: {} };
       }
-      const info: EmailHandlerInfo = { params };
-      await route.handler(message, env, ctx, info);
-      const result: InboundDeliveryResult = { handler: route.key, params };
-      deliveries.push(result);
-      return result;
+      // Nothing matched and there is no `_default`. The generated dispatcher
+      // rejects here so the remote MTA gets a non-delivery report
+      // (`router/compile.ts`), and the harness has to mirror that or a test
+      // for catch-all or anti-spam behavior observes an ACCEPTED message
+      // where deployment bounces it. Routed through `setReject` rather than
+      // pushed directly, so the terminal-reject semantics stay identical.
+      //
+      // The reason is byte-for-byte the dispatcher's, built from the WIRE
+      // recipient with its original case — that string reaches the sender's
+      // DSN, and rebuilding it from the stripped or lowercased address would
+      // recreate the divergence class this mirroring exists to prevent.
+      message.setReject(
+        `no handler matched recipient "${input.to}" — add email/_default.ts to handle unmatched mail`,
+      );
+      return { handler: undefined, params: {} };
     }
-    if (defaultHandler) {
-      const info: EmailHandlerInfo = { params: {} };
-      await defaultHandler(message, env, ctx, info);
-      const result: InboundDeliveryResult = { handler: '_default', params: {} };
-      deliveries.push(result);
-      return result;
-    }
-    // Nothing matched and there is no `_default`. The generated dispatcher
-    // rejects here so the remote MTA gets a non-delivery report
-    // (`router/compile.ts`), and the harness has to mirror that or a test
-    // for catch-all or anti-spam behavior observes an ACCEPTED message
-    // where deployment bounces it. Routed through `setReject` rather than
-    // pushed directly, so the terminal-reject semantics stay identical.
-    //
-    // The reason is byte-for-byte the dispatcher's, built from the WIRE
-    // recipient with its original case — that string reaches the sender's
-    // DSN, and rebuilding it from the stripped or lowercased address would
-    // recreate the divergence class this mirroring exists to prevent.
-    message.setReject(
-      `no handler matched recipient "${input.to}" — add email/_default.ts to handle unmatched mail`,
-    );
-    const result: InboundDeliveryResult = { handler: undefined, params: {} };
+
+    const result = await dispatch();
+    // Recorded once the handler has returned, as production enacts them: a
+    // handler that throws leaves nothing — the platform router rejects the
+    // message as a handler error, and on your own account the invocation
+    // fails before `enactEmailActions` runs.
+    record(getActions());
     deliveries.push(result);
     return result;
+  }
+
+  // The proxy already made `setReject` terminal — earlier forward/reply
+  // entries purged, later ones dropped — so the queue is exactly what the
+  // router would enact. A forward's headers cross the queue as the record
+  // the proxy validated; the capture hands them back as `Headers`.
+  function record(actions: ReadonlyArray<EmailAction>): void {
+    for (const action of actions) {
+      switch (action.type) {
+        case 'reject':
+          rejects.push(action.reason);
+          break;
+        case 'forward':
+          forwards.push({
+            to: action.to,
+            ...(action.headers ? { headers: new Headers(action.headers) } : {}),
+          });
+          break;
+        case 'reply':
+          replies.push({ from: action.from, to: action.to, raw: action.raw });
+          break;
+      }
+    }
   }
 
   return {

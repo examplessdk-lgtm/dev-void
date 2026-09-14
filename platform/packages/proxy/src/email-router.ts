@@ -166,6 +166,38 @@ interface EmailEntrypointStub {
  */
 const MAX_INBOUND_BYTES = 10 * 1024 * 1024;
 
+/**
+ * Cap the number of DISTINCT header names on an inbound message.
+ *
+ * `MAX_INBOUND_BYTES` bounds the header bag's BYTES (headers are part of
+ * `raw`) but not its COUNT, and count is what `buildEnvelope` pays for:
+ * `Object.fromEntries` defines one own property per distinct name on a
+ * dictionary-mode object, ~75–110 B of V8 heap each (measured; the range
+ * is the table's doubling cycle), against a wire minimum of 7 bytes per
+ * line (`abcd:\r\n`). The byte cap therefore admits ~1.5M distinct names,
+ * and materializing those is a hard OOM under the 128 MB isolate ceiling
+ * (measured: 1.5M keys is 158 MB retained and ~580 ms in Node, ~1.2 s of
+ * CPU in workerd; 1.3M still fits, at 82 MB) — in the SHARED proxy isolate,
+ * ahead of dispatch, from any remote sender who fills a message with short
+ * headers. The same bag is then walked again by the RPC serializer and
+ * copied into a `Headers` by the tenant's `createMessageProxy`, so the cap
+ * here bounds both of those too.
+ *
+ * Real mail carries well under 100 distinct names. workerd's `Headers`
+ * folds repeated names (`Received`, `DKIM-Signature`, `ARC-*`) into ONE
+ * entry each, so hop count does not raise the number. 1024 is 10x that,
+ * and the amplified cost at 1024 (~140 KB) is noise next to the raw buffer.
+ *
+ * Checked by walking `message.headers` and stopping at the cap, BEFORE the
+ * body is buffered and before `Object.fromEntries` builds anything. In
+ * workerd, `entries()` snapshots the whole bag once into a `kj::Array`
+ * (`Headers::getDisplayedHeaders`, C++ memory the V8 heap limit does not
+ * see; there is no `size`) — work `fromEntries` was paying anyway. The
+ * early stop is what keeps the V8-side cost of an over-cap message to
+ * `MAX_INBOUND_HEADERS + 1` pairs.
+ */
+const MAX_INBOUND_HEADERS = 1024;
+
 /** Cap user-supplied reject reasons — surfaced to remote MTAs and our logs. */
 const MAX_REJECT_REASON_LENGTH = 1000;
 
@@ -255,6 +287,13 @@ class InboundTooLargeError extends Error {
   constructor(public readonly size: number) {
     super(`inbound message exceeds ${MAX_INBOUND_BYTES} bytes (got ${size})`);
     this.name = 'InboundTooLargeError';
+  }
+}
+
+class InboundTooManyHeadersError extends Error {
+  constructor() {
+    super(`inbound message carries more than ${MAX_INBOUND_HEADERS} headers`);
+    this.name = 'InboundTooManyHeadersError';
   }
 }
 
@@ -659,6 +698,10 @@ export async function routeInbound(
       message.setReject(`${label}: message too large (max ${MAX_INBOUND_BYTES} bytes)`);
       return;
     }
+    if (e instanceof InboundTooManyHeadersError) {
+      message.setReject(`${label}: too many headers (max ${MAX_INBOUND_HEADERS})`);
+      return;
+    }
     console.error(`[email-router] failed to read message body for ${sanitize(slug, 64)}:`, e);
     message.setReject(`${label}: could not read inbound message body`);
     return;
@@ -861,6 +904,16 @@ async function logRecv(
 }
 
 async function buildEnvelope(message: ForwardableEmailMessage): Promise<EmailEnvelope> {
+  // Header COUNT first, before the body is buffered and before any property
+  // is defined: the bag is walked once, stops at the cap, and the collected
+  // pairs feed `fromEntries` below. See `MAX_INBOUND_HEADERS`.
+  const entries: Array<[string, string]> = [];
+  for (const entry of message.headers) {
+    if (entries.length >= MAX_INBOUND_HEADERS) {
+      throw new InboundTooManyHeadersError();
+    }
+    entries.push(entry);
+  }
   const raw = await readStreamToBytes(message.raw);
   // `Object.fromEntries`, NOT `Object.create(null)`: workerd's RPC
   // serializer refuses any object whose prototype is not `Object.prototype`
@@ -869,7 +922,7 @@ async function buildEnvelope(message: ForwardableEmailMessage): Promise<EmailEnv
   // key as an OWN data property (`CreateDataProperty`), so a remote header
   // named `__proto__` becomes a plain key on both sides of the RPC and never
   // touches the prototype chain — verified over a real workerd RPC hop.
-  const headers: Record<string, string> = Object.fromEntries(message.headers);
+  const headers: Record<string, string> = Object.fromEntries(entries);
   return {
     from: String(message.from ?? ''),
     to: String(message.to ?? ''),

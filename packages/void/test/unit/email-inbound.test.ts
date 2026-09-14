@@ -946,6 +946,148 @@ describe('createInboundTestHarness', () => {
   });
 });
 
+describe('harness enforces the proxy action bounds, like production', () => {
+  // The handler under test runs against production's own `createMessageProxy`
+  // in both lanes (the generated `email()` entry builds it from the envelope),
+  // and that proxy is where the queue cap, the address cap, the header-record
+  // check and the reply bounds throw. A harness that recorded every call
+  // instead passed a handler that fails on the 101st forward after deploy —
+  // fourth divergence of this shape on this feature. These pin that the
+  // harness throws the SAME error (class, code, message) at the same call.
+  function harnessFor(handler: Parameters<typeof defineEmail>[0]) {
+    return createInboundTestHarness({ routes: { _default: defineEmail(handler) } });
+  }
+  const DELIVERY = { from: 'u@x.dev', to: 'myslug+anything@app.dev' };
+
+  it('throws the proxy error on the 101st queued action, and keeps the 100', async () => {
+    let thrown: unknown;
+    const harness = harnessFor(async (message) => {
+      for (let i = 0; i < 100; i++) {
+        await message.forward(`box${i}@example.com`);
+      }
+      try {
+        await message.forward('overflow@example.com');
+      } catch (e) {
+        thrown = e;
+      }
+    });
+    await harness.deliver(DELIVERY);
+    expect(thrown).toBeInstanceOf(MimeError);
+    expect((thrown as MimeError).code).toBe('MIME_ERROR');
+    expect((thrown as MimeError).message).toBe(
+      'email: handler queued more than 100 actions for one message.',
+    );
+    expect(harness.forwards).toHaveLength(100);
+    expect(harness.forwards[99]).toEqual({ to: 'box99@example.com' });
+  });
+
+  it('fails the delivery with that error when the handler does not catch it', async () => {
+    // Production enacts nothing from a handler that throws: the platform
+    // router rejects the message as a handler error, and on your own account
+    // the invocation fails before `enactEmailActions` runs.
+    const harness = harnessFor(async (message) => {
+      for (let i = 0; i <= 100; i++) {
+        await message.forward(`box${i}@example.com`);
+      }
+    });
+    await expect(harness.deliver(DELIVERY)).rejects.toThrow(/handler queued more than 100 actions/);
+    expect(harness.forwards).toEqual([]);
+    expect(harness.deliveries).toEqual([]);
+  });
+
+  it('refuses a forward address over the address-length limit', async () => {
+    let thrown: unknown;
+    const over = `${'a'.repeat(320)}@example.com`;
+    const harness = harnessFor(async (message) => {
+      try {
+        await message.forward(over);
+      } catch (e) {
+        thrown = e;
+      }
+    });
+    await harness.deliver(DELIVERY);
+    expect(thrown).toBeInstanceOf(MimeError);
+    expect((thrown as MimeError).code).toBe('INVALID_TO');
+    expect((thrown as MimeError).message).toBe(
+      `to address is ${over.length} characters, over the 320-character limit.`,
+    );
+    expect(harness.forwards).toEqual([]);
+  });
+
+  it('refuses a forward header record with a CRLF in a value at the call, recording nothing for it', async () => {
+    let thrown: unknown;
+    const harness = harnessFor(async (message) => {
+      await message.forward('first@example.com');
+      try {
+        await message.forward('archive@example.com', {
+          'X-Trace': 'abc\r\nBcc: leak@evil.test',
+        } as unknown as Headers);
+      } catch (e) {
+        thrown = e;
+      }
+      // A record that `new Headers()` accepts is recorded, and the capture
+      // exposes it as the `Headers` its type declares.
+      await message.forward('archive@example.com', {
+        'X-Forwarded-By': 'void-test',
+      } as unknown as Headers);
+    });
+    await harness.deliver(DELIVERY);
+    expect(thrown).toBeInstanceOf(MimeError);
+    expect((thrown as MimeError).code).toBe('MIME_ERROR');
+    expect((thrown as MimeError).message).toMatch(/^forward: invalid header/);
+    expect(harness.forwards.map((f) => f.to)).toEqual(['first@example.com', 'archive@example.com']);
+    expect(harness.forwards[0].headers).toBeUndefined();
+    expect(harness.forwards[1].headers).toBeInstanceOf(Headers);
+    expect(harness.forwards[1].headers?.get('X-Forwarded-By')).toBe('void-test');
+  });
+
+  it('reply() refuses a native EmailMessage with the proxy error', async () => {
+    let thrown: unknown;
+    const native = Object.freeze({ from: 'support@app.dev', to: 'u@x.dev' });
+    const harness = harnessFor(async (message) => {
+      try {
+        await message.reply(native as unknown as Parameters<ForwardableEmailMessage['reply']>[0]);
+      } catch (e) {
+        thrown = e;
+      }
+    });
+    await harness.deliver(DELIVERY);
+    expect(thrown).toBeInstanceOf(MimeError);
+    expect((thrown as MimeError).code).toBe('MIME_ERROR');
+    expect((thrown as MimeError).message).toMatch(/native EmailMessage cannot be replayed/);
+    expect(harness.replies).toEqual([]);
+  });
+
+  it('reply() refuses a Uint8Array raw over MAX_MESSAGE_BYTES', async () => {
+    let thrown: unknown;
+    const harness = harnessFor(async (message) => {
+      try {
+        await message.reply({
+          from: 'support@app.dev',
+          to: 'u@x.dev',
+          raw: new Uint8Array(MAX_MESSAGE_BYTES + 1),
+        } as unknown as Parameters<ForwardableEmailMessage['reply']>[0]);
+      } catch (e) {
+        thrown = e;
+      }
+    });
+    await harness.deliver(DELIVERY);
+    expect(thrown).toBeInstanceOf(MimeError);
+    expect((thrown as MimeError).message).toMatch(/exceeds Cloudflare limit/);
+    expect(harness.replies).toEqual([]);
+  });
+
+  it('records nothing from a handler that throws, like production', async () => {
+    const harness = harnessFor(async (message) => {
+      await message.forward('ops@x.dev');
+      throw new Error('boom');
+    });
+    await expect(harness.deliver(DELIVERY)).rejects.toThrow(/boom/);
+    expect(harness.forwards).toEqual([]);
+    expect(harness.deliveries).toEqual([]);
+  });
+});
+
 describe('harness rejects an unmatched delivery, like production', () => {
   // The generated dispatcher calls setReject when nothing matches and there
   // is no _default, so the sender gets an NDR. The harness used to return

@@ -131,16 +131,35 @@ function createFakeMessage(opts: {
   forwardError?: Error;
   /** When set, throws this error from every `reply()` call. */
   replyError?: Error;
+  /**
+   * When set, `message.headers` iterates these pairs instead of being a
+   * real `Headers`. Shaped after workerd, where `entries()` snapshots the
+   * bag into a `kj::Array` in C++ memory (`Headers::getDisplayedHeaders`)
+   * that the V8 heap limit never sees. Node's undici `Headers` instead
+   * caches a sorted copy of the WHOLE bag on the V8 heap on first
+   * iteration (measured ~70 B per entry retained, 103 MB at 1.5M), so a
+   * heap assertion through a real `Headers` here would measure undici,
+   * not the router. Only what the router touches is modelled: iteration
+   * and `get()`.
+   */
+  headerEntries?: Iterable<[string, string]>;
 }): FakeMessage {
   const rawBytes = opts.rawBytes ?? new TextEncoder().encode('Subject: hi\r\n\r\nbody\r\n');
   const rejectCalls: Array<string> = [];
   const forwardCalls: Array<RecordedForward> = [];
   const replyCalls: Array<RecordedReply> = [];
   const order: Array<string> = [];
-  const headers = new Headers();
+  const realHeaders = new Headers();
   if (opts.subject) {
-    headers.set('Subject', opts.subject);
+    realHeaders.set('Subject', opts.subject);
   }
+  const headerEntries = opts.headerEntries;
+  const headers: Headers = headerEntries
+    ? ({
+        [Symbol.iterator]: () => headerEntries[Symbol.iterator](),
+        get: () => null,
+      } as unknown as Headers)
+    : realHeaders;
   const message: Partial<ForwardableEmailMessage> & Record<string, unknown> = {
     from: opts.from ?? 'sender@example.com',
     to: opts.to,
@@ -689,6 +708,81 @@ describe('routeInbound — message size guards', () => {
     await routeInbound(message, env, ctx);
     expect(rejectCalls).toHaveLength(0);
     expect(emailFn).toHaveBeenCalledTimes(1);
+  });
+});
+
+// -----------------------------------------------------------------------
+// Header count cap. The byte cap bounds the bag's bytes, not its count,
+// and `Object.fromEntries` pays ~75–110 B of V8 heap per distinct name
+// against 7 wire bytes per line — so a 10 MiB message of short distinct
+// headers (~1.5M of them) is an OOM in the 128 MB proxy isolate before
+// dispatch. The router counts first and refuses over the cap.
+// -----------------------------------------------------------------------
+
+describe('routeInbound — inbound header count cap', () => {
+  const MAX_INBOUND_HEADERS = 1024;
+
+  function* distinctHeaders(n: number): Generator<[string, string]> {
+    for (let i = 0; i < n; i++) {
+      yield [`h${i.toString(36)}`, 'v'];
+    }
+  }
+
+  it('rejects a message carrying more distinct headers than the cap, before dispatch', async () => {
+    const { env, emailFn } = makeEnv({ kvSeed: { myslug: DEFAULT_ROUTING }, emailReturn: [] });
+    const { message, rejectCalls } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
+    for (const [name, value] of distinctHeaders(MAX_INBOUND_HEADERS + 1)) {
+      message.headers.append(name, value);
+    }
+    const { ctx, waited } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(rejectCalls).toHaveLength(1);
+    expect(rejectCalls[0]).toBe(`${PROD_DOMAIN}: too many headers (max ${MAX_INBOUND_HEADERS})`);
+    expect(emailFn).not.toHaveBeenCalled();
+    // Same shape as the byte-cap refusal: no dispatch, no recv log.
+    expect(waited).toHaveLength(0);
+  });
+
+  it('dispatches a message with exactly the cap, every header in the envelope', async () => {
+    const { env, emailFn } = makeEnv({ kvSeed: { myslug: DEFAULT_ROUTING }, emailReturn: [] });
+    const { message, rejectCalls } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
+    for (const [name, value] of distinctHeaders(MAX_INBOUND_HEADERS)) {
+      message.headers.append(name, value);
+    }
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(rejectCalls).toHaveLength(0);
+    expect(emailFn).toHaveBeenCalledTimes(1);
+    const envelope = emailFn.mock.calls[0]?.[0] as { headers: Record<string, string> };
+    expect(Object.keys(envelope.headers)).toHaveLength(MAX_INBOUND_HEADERS);
+    expect(envelope.headers['h0']).toBe('v');
+    expect(envelope.headers[`h${(MAX_INBOUND_HEADERS - 1).toString(36)}`]).toBe('v');
+  });
+
+  it('a 1.5M-header bag — what the byte cap admits — is refused in bounded time and heap', async () => {
+    // 1.5M distinct names at 7 wire bytes each (`abcd:\r\n`) fits the
+    // 10 MiB byte cap. Materializing them measured 158 MB retained and
+    // ~580 ms in Node, ~1.2 s of CPU in workerd, and a hard OOM under a
+    // 128 MB heap. The bag is a workerd-shaped iterable (see
+    // `headerEntries`), so the heap read below is the router's own cost:
+    // the first `MAX_INBOUND_HEADERS + 1` pairs, then the refusal.
+    const { env, emailFn } = makeEnv({ kvSeed: { myslug: DEFAULT_ROUTING }, emailReturn: [] });
+    const { message, rejectCalls } = createFakeMessage({
+      to: `myslug+tag@${PROD_DOMAIN}`,
+      headerEntries: distinctHeaders(1_500_000),
+    });
+    const { ctx } = createCtx();
+    (globalThis as { gc?: () => void }).gc?.();
+    const before = process.memoryUsage().heapUsed;
+    const t0 = performance.now();
+    await routeInbound(message, env, ctx);
+    const elapsed = performance.now() - t0;
+    const grew = (process.memoryUsage().heapUsed - before) / (1024 * 1024);
+    expect(rejectCalls).toHaveLength(1);
+    expect(rejectCalls[0]).toContain('too many headers');
+    expect(emailFn).not.toHaveBeenCalled();
+    expect(elapsed).toBeLessThan(100);
+    expect(grew).toBeLessThan(32);
   });
 });
 

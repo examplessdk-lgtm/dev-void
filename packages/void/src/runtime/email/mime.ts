@@ -225,6 +225,60 @@ function validateAddressParts(field: string, email: string, name?: string): void
 }
 
 /**
+ * Undo the quoted-pairs in the content of a quoted display name: `\x` →
+ * `x` for any `x` (RFC 5322 §3.2.4 — `qtext` excludes `"` and `\`, so a
+ * quoted-string carries either only as a quoted-pair). The parsed name is
+ * the RAW text `formatAddress` will quote and escape again, so leaving the
+ * pairs in place rendered `"Smith \"Bob\"" <a@x.dev>` as
+ * `"Smith \\\"Bob\\\""` and the recipient saw `Smith \"Bob\"`, while the
+ * object form of the same name rendered correctly. Only the quoted branch
+ * of `parseAddress` calls this; a backslash in an unquoted name is a
+ * character like any other, as it is in the object form.
+ *
+ * NOT `text.replace(/\\(.)/g, '$1')`: a global-regex replacement holds one
+ * part per match before it builds the result, about 60 bytes each, and
+ * nothing bounds this name before it runs — the quoted-string line guard
+ * in `validateAddressParts` needs the DECODED name, and a non-ASCII name is
+ * never bounded at all. Measured, 10 MiB of `\"` pairs peaked at 307 MB of
+ * heap that way and terminated a 128 MB isolate; this shape peaks at 49 MB.
+ * Same discipline as `to7bitBody`: one counting pass, a buffer of exactly
+ * the output size, one fill, and the 32K-chunk conversion `base64` uses.
+ * The common case — no backslash at all — is one scan and no allocation.
+ * The regex that admits the text guarantees every backslash is followed by
+ * a character, so the fill never reads past the end.
+ */
+function unquotePairs(text: string): string {
+  const first = text.indexOf('\\');
+  if (first === -1) {
+    return text;
+  }
+  let pairs = 0;
+  for (let i = first; i < text.length; i++) {
+    if (text.charCodeAt(i) === 0x5c) {
+      pairs++;
+      i++;
+    }
+  }
+  // UTF-16 code units, not bytes: a quoted name may be non-ASCII, and a
+  // surrogate pair is two units that round-trip exactly.
+  const out = new Uint16Array(text.length - pairs);
+  let n = 0;
+  for (let i = 0; i < text.length; i++) {
+    let c = text.charCodeAt(i);
+    if (c === 0x5c) {
+      c = text.charCodeAt(++i);
+    }
+    out[n++] = c;
+  }
+  let s = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < n; i += chunk) {
+    s += String.fromCharCode(...out.subarray(i, i + chunk));
+  }
+  return s;
+}
+
+/**
  * Parse one address — a bare `email@domain` or `Display Name <email@domain>`
  * — into its parts, throwing a `MimeError` for `field` on anything else.
  * Exported so `void.json` `email.from` is validated by the same rules the
@@ -246,11 +300,16 @@ export function parseAddress(value: Address, field: string): { email: string; na
     // accept the same strings with the same captures (checked exhaustively
     // to length 7 over `a`, space, tab, `<`, `>`, `"`, `@`, `\`, `,`);
     // this one is linear because `[^"<\s]` cannot take a space from `\s*`.
+    const quoted = value.match(/^\s*"((?:[^"\\]|\\.)*)"\s*<\s*([^>\s]+)\s*>\s*$/);
     const angle =
-      value.match(/^\s*"((?:[^"\\]|\\.)*)"\s*<\s*([^>\s]+)\s*>\s*$/) ??
-      value.match(/^\s*(?:([^"<\s](?:[^"<]*[^"<\s])?)\s*)?<\s*([^>\s]+)\s*>\s*$/);
+      quoted ?? value.match(/^\s*(?:([^"<\s](?:[^"<]*[^"<\s])?)\s*)?<\s*([^>\s]+)\s*>\s*$/);
     if (angle) {
-      const name = angle[1]?.trim();
+      // The quoted form's `\"` and `\\` are quoted-pairs, undone here so
+      // the parsed name is the raw text — the same thing the object form
+      // carries — and `formatAddress` escapes it exactly once. Decoded
+      // BEFORE `validateAddressParts`, whose quoted-string line guard has
+      // to see the name `formatAddress` will render.
+      const name = (quoted ? unquotePairs(angle[1] ?? '') : angle[1])?.trim();
       const email = angle[2];
       validateAddressParts(field, email, name);
       return name ? { email, name } : { email };
