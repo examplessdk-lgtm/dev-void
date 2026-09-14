@@ -1,0 +1,19 @@
+packages/platform/scripts/build-runtime.mjs
+  s_93e78f63fe8686::t_6697467d5aabfb 20-25,40
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "294eb967b1033d200360f94659f74d37a830d032",
+  "prompts": {},
+  "sessions": {
+    "s_93e78f63fe8686": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09f66-66ea-7503-bddc-e7c15280e7a5",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
