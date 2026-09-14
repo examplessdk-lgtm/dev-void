@@ -308,7 +308,7 @@ export function createInboundTestHarness(opts: InboundTestHarnessOptions): Inbou
     // The message the handler sees is production's own proxy, built the way
     // the generated `email()` entry builds it: from an envelope and the slug.
     // Everything the proxy enforces — setReject is terminal, the 100-action
-    // queue, the 320-character address cap, the header-record check, the
+    // queue, the address checks (length and shape), the header-record check, the
     // per-reply and per-delivery byte bounds — therefore throws here at the
     // same call, with the same error, as it does after deploy. A hand-rolled
     // message that recorded every call passed handlers that fail on the

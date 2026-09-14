@@ -2672,6 +2672,47 @@ describe('end-to-end: envelope → handler → action queue', () => {
     },
   );
 
+  it('refuses a hand-built reply with a malformed address at the call, recording nothing for it', async () => {
+    // The `{ from, to, raw }` reply form bypasses `normalizeEmail`, so it
+    // gets the same record-time rule as `forward(to)`: a bad address fails
+    // in the handler's own call, before any native replay could fire the
+    // actions queued ahead of it.
+    const cases: Array<[Record<'from' | 'to', string>, 'INVALID_FROM' | 'INVALID_TO', string]> = [
+      [
+        { from: 'not-an-address', to: 'ops@example.com' },
+        'INVALID_FROM',
+        "from: 'not-an-address' is not a valid email address.",
+      ],
+      [
+        { from: 'me@example.com', to: 'Ops <ops@example.com>' },
+        'INVALID_TO',
+        "to: 'Ops <ops@example.com>' is not a valid email address.",
+      ],
+      [
+        { from: `${'a'.repeat(65)}@example.com`, to: 'ops@example.com' },
+        'INVALID_FROM',
+        'from: local part is 65 octets, over the 64-octet limit in RFC 5321 §4.5.3.1.1.',
+      ],
+    ];
+    for (const [addrs, code, expected] of cases) {
+      const { message, getActions } = createMessageProxy(makeEnvelope());
+      await message.forward('first@example.com');
+      let thrown: unknown;
+      try {
+        await message.reply({
+          ...addrs,
+          raw: new TextEncoder().encode('Subject: x\r\n\r\nhi'),
+        } as unknown as Parameters<ForwardableEmailMessage['reply']>[0]);
+      } catch (e) {
+        thrown = e;
+      }
+      expect(thrown).toBeInstanceOf(MimeError);
+      expect((thrown as MimeError).code).toBe(code);
+      expect((thrown as MimeError).message).toBe(expected);
+      expect(getActions()).toEqual([{ type: 'forward', to: 'first@example.com' }]);
+    }
+  });
+
   it('records every forward address sendEmail would accept', async () => {
     // Not the platform router's `isValidEmailAddress`, which also wants a
     // dot in the domain: `user@localhost` is legal RFC 5321 and is what the

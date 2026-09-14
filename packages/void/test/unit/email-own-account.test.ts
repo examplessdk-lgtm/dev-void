@@ -461,6 +461,41 @@ describe('generated handleEmail on a native ForwardableEmailMessage', () => {
     );
   });
 
+  it('fires nothing on the native message when a later hand-built reply carries a malformed address', async () => {
+    // The `{ from, to, raw }` reply form bypasses `normalizeEmail`; it used to
+    // check only the length, so the malformed `to` reached Cloudflare's
+    // native `reply()` after the forward had fired. Same record-time rule
+    // as `forward(to)` now: the handler's own call fails, nothing replays.
+    const handleEmail = buildHandleEmail(async (message) => {
+      await message.forward('ops@acme.com');
+      await message.reply({
+        from: 'support@mail.acme.com',
+        to: 'not-an-address',
+        raw: new TextEncoder().encode('Subject: re\r\n\r\nhi\r\n'),
+      } as unknown as Parameters<ForwardableEmailMessage['reply']>[0]);
+    });
+    const { message, calls } = nativeMessage({
+      from: 'sender@example.com',
+      to: 'support@mail.acme.com',
+      mime: INBOUND_MIME,
+      verifiedDestinations: ['ops@acme.com'],
+    });
+
+    const outcome = await handleEmail(message, {}, {}).then(
+      () => 'resolved',
+      (e: unknown) => e,
+    );
+
+    expect(calls.forwards).toEqual([]);
+    expect(calls.replies).toEqual([]);
+    expect(calls.rejects).toEqual([]);
+    expect(outcome).toBeInstanceOf(MimeError);
+    expect((outcome as MimeError).code).toBe('INVALID_TO');
+    expect((outcome as MimeError).message).toBe(
+      "to: 'not-an-address' is not a valid email address.",
+    );
+  });
+
   it('enacts replyEmail as a real EmailMessage sent from the delivered address', async () => {
     const handleEmail = buildHandleEmail(async (message) => {
       // Both reads of the one-shot native stream must work: the proxy

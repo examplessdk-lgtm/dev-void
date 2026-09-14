@@ -285,13 +285,13 @@ export default defineEmail(async (message, env, ctx) => {
 
 The handler receives Cloudflare's native `ForwardableEmailMessage` plus an optional fourth `info` arg with `params` populated for dynamic / tagged route segments:
 
-| Method                             | Purpose                                                                                                                           |
-| ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| `message.setReject(reason)`        | Reject the message — the sender sees the SMTP error.                                                                              |
-| `message.forward(to, hdrs?)`       | Forward to a verified destination address. `to` is a bare address; one `sendEmail` would refuse throws `INVALID_TO` at the call.  |
-| `replyEmail(message, opts)`        | Reply with a threaded `In-Reply-To` / `References`.                                                                               |
-| `message.reply({ from, to, raw })` | Bring your own MIME bytes (`Uint8Array` or stream). A native `EmailMessage` cannot be replayed — its body has no public accessor. |
-| Returning without action           | Accept the message silently.                                                                                                      |
+| Method                             | Purpose                                                                                                                                                                                                   |
+| ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `message.setReject(reason)`        | Reject the message — the sender sees the SMTP error.                                                                                                                                                      |
+| `message.forward(to, hdrs?)`       | Forward to a verified destination address. `to` is a bare address; one `sendEmail` would refuse throws `INVALID_TO` at the call.                                                                          |
+| `replyEmail(message, opts)`        | Reply with a threaded `In-Reply-To` / `References`.                                                                                                                                                       |
+| `message.reply({ from, to, raw })` | Bring your own MIME bytes (`Uint8Array` or stream). `from` and `to` are bare addresses, checked at the call like `forward`. A native `EmailMessage` cannot be replayed — its body has no public accessor. |
+| Returning without action           | Accept the message silently.                                                                                                                                                                              |
 
 `parseEmail(message)` wraps [`postal-mime`](https://www.npmjs.com/package/postal-mime) and returns a structured object with `from`, `to`, `subject`, `text`, `html`, `attachments`, and full `headers`. Call it at most once per message — the underlying stream can only be read once.
 

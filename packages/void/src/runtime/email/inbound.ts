@@ -528,6 +528,13 @@ export function createMessageProxy(
       if (reply.to.length > MAX_ACTION_ADDRESS_LENGTH) {
         throw addressTooLong('to', reply.to.length);
       }
+      // Same rule as `forward(to)` above, for the hand-built reply form:
+      // `replyEmail()` already goes through `normalizeEmail`, but a caller
+      // who passes `{ from, to, raw }` bypasses it, and a malformed address
+      // here used to be refused only by Cloudflare's native `reply()` — after
+      // every earlier action had fired. Both are bare addresses.
+      validateAddressParts('from', reply.from);
+      validateAddressParts('to', reply.to);
       // `replyEmail()` is bounded by `buildMime`; a hand-built reply is not, so
       // bound it here before the bytes travel to the proxy (or to native reply).
       const remaining = MAX_REPLY_BYTES_TOTAL - replyBytesUsed;
