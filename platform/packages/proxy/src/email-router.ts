@@ -242,7 +242,20 @@ function forwardHeadersWithinBounds(headers: unknown): headers is Record<string,
       );
       return false;
     }
-    if (typeof value === 'string' && value.length > MAX_FORWARD_HEADER_LENGTH) {
+    // A non-string value evades the length check below, and `new Headers()`
+    // does not throw on it: workerd RPC delivers Arrays, typed arrays, and
+    // numbers verbatim, and `new Headers({ x: <Array> })` coerces the value
+    // with `String()` — an Array joins to one comma-separated string ~30x
+    // its wire size (measured: a Date-filled Array OOMs the 128 MB isolate
+    // from a ~4 MiB RPC payload). The declared type is `Record<string,
+    // string>`; anything else is refused before it reaches `new Headers()`.
+    if (typeof value !== 'string') {
+      console.error(
+        `[email-router] action list dropped: forward header "${sanitize(name, 64)}" value is not a string`,
+      );
+      return false;
+    }
+    if (value.length > MAX_FORWARD_HEADER_LENGTH) {
       console.error(
         `[email-router] action list dropped: forward header "${sanitize(name, 64)}" value exceeds ${MAX_FORWARD_HEADER_LENGTH} characters`,
       );

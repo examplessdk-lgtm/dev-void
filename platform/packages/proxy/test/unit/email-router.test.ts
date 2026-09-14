@@ -905,6 +905,38 @@ describe('routeInbound — action enaction', () => {
     }
   });
 
+  it('drops the WHOLE list when a forward header VALUE is not a string', async () => {
+    // The bag is a plain object (passes the shape check), but a VALUE crossed
+    // RPC as an Array / typed array / number. `typeof value === 'string'`
+    // skipped the length bound, and `new Headers({ x: <Array> })` does NOT
+    // throw — it coerces with `String()`, joining an Array into one giant
+    // comma-separated value ~30x its wire size (a Date-filled Array OOMs a
+    // 128 MB isolate from a ~4 MiB RPC payload). So an RPC-sized nested value
+    // evaded the 1024-char bound entirely. Every value must be a string.
+    const shapes: Array<[string, unknown]> = [
+      ['array of strings', new Array(8).fill('a')],
+      ['nested array', [new Array(4).fill('a')]],
+      ['typed array', new Uint8Array(8).fill(255)],
+      ['number', 12345],
+    ];
+    for (const [label, value] of shapes) {
+      errorSpy.mockClear();
+      const { env } = makeEnv({
+        kvSeed: withAllowlist(['admin@example.com']),
+        emailReturn: [
+          { type: 'forward', to: 'admin@example.com', headers: { 'X-Void-Tag': value } },
+        ],
+      });
+      const { message, forwardCalls } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
+      const { ctx } = createCtx();
+      await routeInbound(message, env, ctx);
+      expect(forwardCalls, label).toHaveLength(0);
+      expect(errorSpy, label).toHaveBeenCalledWith(
+        expect.stringContaining('value is not a string'),
+      );
+    }
+  });
+
   it('reject is terminal: forward and reply after a reject do NOT fire', async () => {
     const { env } = makeEnv({
       kvSeed: withAllowlist(),
