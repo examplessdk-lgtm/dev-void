@@ -75,11 +75,79 @@ jobs:
       - run: vp run --filter './platform/packages/**' build
       - run: vp test run --project ${{ matrix.project }}
 
-  # The former repository compared migrations against its `prod` branch. The merged repository's
-  # production ref has intentionally not been chosen yet, so this job remains visible but inert
-  # until the deployment-cutover change supplies the authoritative ref.
+  # The production guard. `platform-deploy.yml` migrates before it deploys the api worker, so a
+  # push to `prod` applies a new schema while the previous release is still serving traffic. This
+  # migrates a real Postgres with the migrations under test, then runs the production ref's
+  # integration tests against that schema: if the code that is live cannot run on the new schema,
+  # the push must not ship.
+  #
+  # It has teeth on PRs, where the code under test is a different commit from the one that is
+  # live. On a push to `prod` the caller is the deploy itself, so the job covers the migrations
+  # rather than a code difference. Staging deploys skip it: they cannot break production, and they
+  # run on nearly every push to `main`.
   schema-compat:
-    if: ${{ false }}
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/prod'
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      POSTGRES_USER: void_ci
+      POSTGRES_PASSWORD: void_ci_pass
+      POSTGRES_DB: void_schema_compat
+      COMPAT_DATABASE_URL: postgresql://void_ci:void_ci_pass@localhost:5432/void_schema_compat
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: ${{ env.POSTGRES_USER }}
+          POSTGRES_PASSWORD: ${{ env.POSTGRES_PASSWORD }}
+          POSTGRES_DB: ${{ env.POSTGRES_DB }}
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U $POSTGRES_USER"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=5
     steps:
-      - run: echo 'Enable after choosing the merged repository production ref.'
+      # Phase 1 — apply the migrations under test to a real Postgres.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: voidzero-dev/setup-vp@1b32467adbe183473499fd9d5d372c3ed9641754 # v1.18.0
+        with:
+          cache: true
+          node-version-file: .node-version
+      - run: vp run build
+      - run: vp run --filter @voidcloud/api migrate
+        env:
+          DATABASE_URL: ${{ env.COMPAT_DATABASE_URL }}
+
+      # Phase 2 — the production ref's code must still run on that schema.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: prod
+          persist-credentials: false
+      - name: Does the production ref carry the platform?
+        id: production
+        run: |
+          if [ -d platform/packages/api ]; then
+            echo 'usable=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'usable=false' >> "$GITHUB_OUTPUT"
+            echo '::warning::The production ref predates the platform, so this check has no baseline yet. It starts comparing once the prod branch is advanced past the platform merge.'
+          fi
+      - if: steps.production.outputs.usable == 'true'
+        uses: voidzero-dev/setup-vp@1b32467adbe183473499fd9d5d372c3ed9641754 # v1.18.0
+        with:
+          cache: true
+          node-version-file: .node-version
+      - name: Run the production ref's integration tests on the migrated schema
+        if: steps.production.outputs.usable == 'true'
+        run: |
+          vp run build
+          vp run --filter './platform/packages/**' build
+          vp test run --project platform-api-integration
+        env:
+          VOID_TEST_DATABASE_URL: ${{ env.COMPAT_DATABASE_URL }}
