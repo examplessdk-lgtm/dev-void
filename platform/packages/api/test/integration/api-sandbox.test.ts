@@ -503,25 +503,26 @@ describe('per-deploy sandbox integration', () => {
     const originalPut = env.ROUTING.put.bind(env.ROUTING);
     const originalDelete = env.ROUTING.delete.bind(env.ROUTING);
     let teardownTriggered = false;
-    let teardownPromise: Promise<unknown> | undefined;
     const putSpy = vi.spyOn(env.ROUTING, 'put').mockImplementation((async (
       key: string,
       value: string | ArrayBuffer | ArrayBufferView | ReadableStream,
       options?: KVNamespacePutOptions,
     ) => {
       const result = await originalPut(key, value as never, options as never);
-      if (key === project.slug && !teardownTriggered) {
+      // The `cutover-ready:` key is written after the routing-switch transaction
+      // commits and before the deploy's finalize transaction opens, so the
+      // teardown writes can be awaited here: no transaction is open, nothing
+      // deadlocks, and the flip is guaranteed to land before the finalize read.
+      // Queuing them instead (the earlier shape) only ordered them in PGlite's
+      // favour — on a pooled Postgres the flip opened a new session and lost the
+      // race against the deploy's warm connection, which committed live.
+      if (key.startsWith('cutover-ready:') && !teardownTriggered) {
         teardownTriggered = true;
-        // Queue teardown behind the cutover's project-row lock. Do not await
-        // it here: PGlite uses one connection, so awaiting a second query from
-        // inside the transaction-backed ROUTING mock would deadlock the test.
-        // The queued query runs as soon as the cutover transaction releases
-        // the lock, before deploy's following database-finalize transaction.
-        teardownPromise = env.db
+        await env.db
           .update(projects)
           .set({ status: 'deleting' })
-          .where(eq(projects.id, project.id))
-          .then(() => originalDelete(project.slug));
+          .where(eq(projects.id, project.id));
+        await originalDelete(project.slug);
       }
       return result;
     }) as typeof env.ROUTING.put);
@@ -538,7 +539,6 @@ describe('per-deploy sandbox integration', () => {
         typeof e === 'object' && e !== null && (e as { event?: unknown }).event === 'error',
     );
     expect(errorEvent).toBeDefined();
-    await teardownPromise;
 
     // Teardown's deletion remains authoritative. Before the compensation
     // fence, restoreTrackedRouting() put `previousRouting` back here and a

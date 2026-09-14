@@ -4564,10 +4564,42 @@ describe('POST /projects/:id/migrations/rename', () => {
     );
     await aReachedPut;
 
-    // Kick rollback B to C. It enters the tx callback and blocks on the
-    // per-project row lock — A still holds it. (On PGlite this is also
-    // enforced by the underlying single-connection serialization, a safe
-    // upper bound for this test.)
+    // B is held at the waypoint between its pre-lock reads and its row-lock
+    // acquisition, so it can only run once A's rollback — including the
+    // post-commit lease cleanup — has finished. The wrapper is installed after
+    // A's transaction started, so the first transaction it sees is B's.
+    //
+    // Without the hold the driver decides the order: PGlite queues statements,
+    // so B's in-lock read runs after A's cleanup, while a pooled Postgres grants
+    // the queued row lock at A's commit, so B resumes before that cleanup, reads
+    // A's rollback lease and answers 409 `deploy in progress`. That fence is
+    // real, but it is driver order rather than the serialization under test.
+    const realDb = env.db;
+    const realTransaction = realDb.transaction.bind(realDb);
+    let releaseB: () => void = () => {};
+    const bHold = new Promise<void>((r) => {
+      releaseB = r;
+    });
+    let bHoldFired = false;
+    const wrappedDb: Db = new Proxy(realDb, {
+      get(target, prop, receiver) {
+        if (prop === 'transaction') {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          return (async (fn: any) => {
+            if (!bHoldFired) {
+              bHoldFired = true;
+              await bHold;
+            }
+            return realTransaction(fn);
+          }) as unknown as typeof realDb.transaction;
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    }) as Db;
+    setTestDb(wrappedDb);
+
+    // Kick rollback B to C. It does its pre-lock reads, then waits at the
+    // waypoint until A's rollback has fully completed.
     const rollbackBPromise = app.fetch(
       authedReq(`/projects/${project.id}/rollback`, user.jwt, {
         method: 'POST',
@@ -4576,18 +4608,14 @@ describe('POST /projects/:id/migrations/rename', () => {
       env,
     );
 
-    // Give B's request time to reach its tx/lock acquisition and
-    // actually be blocked. We cannot poll pg to confirm this — a
-    // `SELECT` through env.db would itself block on the single
-    // PGlite connection that A's tx still holds — so we use a small
-    // sleep. Release A afterward.
-    await new Promise((r) => setTimeout(r, 30));
-
-    // Release A. It commits the tx (pg active=B, ROUTING=B, etc),
-    // then B acquires the lock and flips pg active=C, ROUTING=C.
+    // Release A. It commits the tx (pg active=B, ROUTING=B, etc) and clears its
+    // rollback lease, then B acquires the lock and flips pg active=C, ROUTING=C.
     releaseA();
-    const [resA, resB] = await Promise.all([rollbackAPromise, rollbackBPromise]);
+    const resA = await rollbackAPromise;
     expect(resA.status).toBe(200);
+    releaseB();
+    const resB = await rollbackBPromise;
+    setTestDb(realDb);
     expect(resB.status).toBe(200);
 
     const bodyA = (await resA.json()) as {
