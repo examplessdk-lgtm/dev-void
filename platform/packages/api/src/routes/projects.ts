@@ -3177,7 +3177,7 @@ async function autoAddOwnerDestination(
     }
     allocatedTag = cfRow.tag;
     const status = cfRow.verified ? 'verified' : 'pending';
-    await tryCreateEmailDestination(
+    const { row } = await tryCreateEmailDestination(
       db,
       projectId,
       address,
@@ -3187,6 +3187,18 @@ async function autoAddOwnerDestination(
       'cf',
       status === 'verified' ? { userId: ownerUserId, emailSnapshot: address } : undefined,
     );
+    if (!row) {
+      // The helper's hard-error outcome: a manual add for the same address
+      // won the ON CONFLICT race, and its row was deleted before the
+      // read-back. That deleter released the tag only if it counted itself
+      // as the last reference — teardown's cascade window, or an upstream
+      // delete that failed, leaves the tag live with no row pointing at it,
+      // which is exactly what the rollback below exists for. No retry, unlike
+      // the POST route: the owner just removed this address on purpose, and
+      // re-inserting it here would resurrect a row they revoked. Best-effort
+      // means they can re-add it.
+      throw new Error('owner destination row vanished between insert and read-back');
+    }
     // Already verified on a prior project — push it into the allowlist mirror
     // now so the proxy accepts the first send without a manual refresh.
     if (status === 'verified') {

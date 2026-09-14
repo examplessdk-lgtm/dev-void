@@ -2911,6 +2911,222 @@ describe('POST /projects — owner email destination auto-add', () => {
     });
   });
 
+  // A manual `POST /projects/:id/email/destinations` for the owner's own
+  // address can race the post-response auto-add. Its row wins the
+  // `ON CONFLICT DO NOTHING` insert, so the helper reads the winner back
+  // instead — and `{ row: null }` is what it reports when that winner was
+  // deleted between the two statements.
+  //
+  // Interleaves at the driver: `env.db.$client` is the object drizzle issues
+  // every statement through (PGlite here, `pg.Pool` under
+  // VOID_TEST_DATABASE_URL), so a hook on its `query` can run the competing
+  // delete after the helper's INSERT and before its SELECT with the real
+  // helper untouched. The SQL shape is drizzle's: PGlite takes the text
+  // directly, node-postgres wraps it in `{ text }`.
+  function deleteRowBeforeReadBack(rowId: string): void {
+    const client = env.db.$client as unknown as {
+      query: (...args: Array<unknown>) => Promise<unknown>;
+    };
+    const original = client.query.bind(client);
+    let sawInsert = false;
+    vi.spyOn(client, 'query').mockImplementation(async (...args: Array<unknown>) => {
+      const head = args[0];
+      const sql = typeof head === 'string' ? head : ((head as { text?: string })?.text ?? '');
+      if (/^insert into "email_destinations"/i.test(sql)) {
+        sawInsert = true;
+      } else if (sawInsert && /^select .* from "email_destinations"/i.test(sql)) {
+        sawInsert = false;
+        await env.db.delete(emailDestinations).where(eq(emailDestinations.id, rowId));
+      }
+      return original(...args);
+    });
+  }
+
+  it('rolls the CF address back when the winning manual row vanishes before read-back', async () => {
+    // The manual add adopted the tag the auto-add had just allocated (CF said
+    // "already exists", recovery listed it), so its row references the same
+    // tag. Then that row is deleted without the tag being released — the
+    // teardown cascade window, or a DELETE whose upstream call failed. The
+    // helper reports `{ row: null }`; ignoring it exits "successfully" with a
+    // live tag nothing references.
+    const user = await createTestUser(env.db);
+    const ownerEmail = await withEmail(user.id, 'raced-owner@example.com');
+    mockCfApi();
+    const helper = vi.spyOn(db, 'tryCreateEmailDestination');
+    const calls = stubEmailRouting(async (method) => {
+      if (method === 'POST') {
+        // The manual add lands while CF is registering the address.
+        const [project] = await env.db
+          .select()
+          .from(projects)
+          .where(eq(projects.slug, 'auto-add-raced'));
+        await env.db.insert(emailDestinations).values({
+          id: 'edst_manual_raced',
+          project_id: project!.id,
+          address: ownerEmail,
+          cf_destination_id: 'cf-tag-raced',
+          status: 'pending',
+          verification_source: 'cf',
+        });
+      }
+      return Response.json({
+        success: true,
+        errors: [],
+        messages: [],
+        result: { tag: 'cf-tag-raced', email: ownerEmail, verified: null },
+      });
+    });
+    deleteRowBeforeReadBack('edst_manual_raced');
+
+    const res = await createProjectAs(user, 'auto-add-raced', emailEnv());
+    expect(res.status).toBe(201);
+    const project = (await res.json()) as { id: string };
+
+    // The interleaving was the documented one, not a foreign-key failure.
+    expect(helper).toHaveBeenCalledTimes(1);
+    await expect(helper.mock.results[0]!.value).resolves.toEqual({ row: null, inserted: false });
+
+    const rows = await env.db
+      .select()
+      .from(emailDestinations)
+      .where(eq(emailDestinations.project_id, project.id));
+    expect(rows).toHaveLength(0);
+
+    const deletes = calls.filter((call) => call.method === 'DELETE');
+    expect(deletes).toHaveLength(1);
+    expect(deletes[0]!.url).toContain('/email/routing/addresses/cf-tag-raced');
+  });
+
+  it('leaves a vanished-row tag alone when a sibling project still references it', async () => {
+    // The vanished-row failure must go through the same `refs === 0` guard as
+    // every other rollback: the tag is account-level, and a sibling project's
+    // live row is a reason to keep it regardless of what happened to ours.
+    const user = await createTestUser(env.db);
+    const ownerEmail = await withEmail(user.id, 'raced-shared-owner@example.com');
+    const sibling = await createTestProject(env.db, user.id, 'auto-add-raced-sibling');
+    await env.db.insert(emailDestinations).values({
+      id: 'edst_raced_sibling',
+      project_id: sibling.id,
+      address: ownerEmail,
+      cf_destination_id: 'cf-tag-raced-shared',
+      status: 'verified',
+      verified_at: '2026-01-01T00:00:00Z',
+      verification_source: 'cf',
+    });
+    mockCfApi();
+    const helper = vi.spyOn(db, 'tryCreateEmailDestination');
+    const calls = stubEmailRouting(async (method) => {
+      if (method === 'POST') {
+        return Response.json(
+          {
+            success: false,
+            errors: [{ code: 10037, message: 'destination address already exists' }],
+            messages: [],
+            result: null,
+          },
+          { status: 400 },
+        );
+      }
+      // The manual add lands while we are recovering the existing tag.
+      const [project] = await env.db
+        .select()
+        .from(projects)
+        .where(eq(projects.slug, 'auto-add-raced-shared'));
+      await env.db.insert(emailDestinations).values({
+        id: 'edst_manual_raced_shared',
+        project_id: project!.id,
+        address: ownerEmail,
+        cf_destination_id: 'cf-tag-raced-shared',
+        status: 'verified',
+        verified_at: '2026-01-01T00:00:00Z',
+        verification_source: 'cf',
+      });
+      return Response.json({
+        success: true,
+        errors: [],
+        messages: [],
+        result: [
+          { tag: 'cf-tag-raced-shared', email: ownerEmail, verified: '2026-01-01T00:00:00Z' },
+        ],
+      });
+    });
+    deleteRowBeforeReadBack('edst_manual_raced_shared');
+
+    const res = await createProjectAs(user, 'auto-add-raced-shared', emailEnv());
+    expect(res.status).toBe(201);
+    const project = (await res.json()) as { id: string };
+
+    expect(helper).toHaveBeenCalledTimes(1);
+    await expect(helper.mock.results[0]!.value).resolves.toEqual({ row: null, inserted: false });
+    expect(
+      await env.db
+        .select()
+        .from(emailDestinations)
+        .where(eq(emailDestinations.project_id, project.id)),
+    ).toHaveLength(0);
+    // No row landed, so nothing to mirror for the new project either.
+    expect(await env.ROUTING.get(`email-allowlist:${project.id}`)).toBeNull();
+
+    expect(calls.filter((call) => call.method === 'DELETE')).toEqual([]);
+    const [survivor] = await env.db
+      .select()
+      .from(emailDestinations)
+      .where(eq(emailDestinations.project_id, sibling.id));
+    expect(survivor).toMatchObject({
+      cf_destination_id: 'cf-tag-raced-shared',
+      status: 'verified',
+    });
+  });
+
+  it('keeps the manual row and the tag when a manual add for the address won', async () => {
+    // Same race, but the winning row is still there when the helper reads it
+    // back: that is a success, not a failure. The manual row must survive
+    // untouched and the tag it references must not be revoked.
+    const user = await createTestUser(env.db);
+    const ownerEmail = await withEmail(user.id, 'won-owner@example.com');
+    mockCfApi();
+    const helper = vi.spyOn(db, 'tryCreateEmailDestination');
+    const calls = stubEmailRouting(async (method) => {
+      if (method === 'POST') {
+        const [project] = await env.db
+          .select()
+          .from(projects)
+          .where(eq(projects.slug, 'auto-add-won'));
+        await env.db.insert(emailDestinations).values({
+          id: 'edst_manual_won',
+          project_id: project!.id,
+          address: ownerEmail,
+          cf_destination_id: 'cf-tag-won',
+          status: 'pending',
+          verification_source: 'cf',
+        });
+      }
+      return Response.json({
+        success: true,
+        errors: [],
+        messages: [],
+        result: { tag: 'cf-tag-won', email: ownerEmail, verified: null },
+      });
+    });
+
+    const res = await createProjectAs(user, 'auto-add-won', emailEnv());
+    expect(res.status).toBe(201);
+    const project = (await res.json()) as { id: string };
+
+    expect(helper).toHaveBeenCalledTimes(1);
+    await expect(helper.mock.results[0]!.value).resolves.toMatchObject({
+      row: { id: 'edst_manual_won' },
+      inserted: false,
+    });
+    const rows = await env.db
+      .select()
+      .from(emailDestinations)
+      .where(eq(emailDestinations.project_id, project.id));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ id: 'edst_manual_won', cf_destination_id: 'cf-tag-won' });
+    expect(calls.filter((call) => call.method === 'DELETE')).toEqual([]);
+  });
+
   it('makes no CF call when the environment has no platform mail domain', async () => {
     const user = await createTestUser(env.db);
     await withEmail(user.id, 'owner@example.com');
