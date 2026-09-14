@@ -78,7 +78,7 @@ import { hasEmailHandlers, scanEmailHandlersSync } from './router/email.ts';
 import { isRouteEnabledForEnvironment, type RouteEnvironment } from './router/parse-filename.ts';
 import { scanMiddlewareSync, scanRoutePatternsSync } from './router/scan.ts';
 import { scanWebSocketRoutesSync } from './router/websocket.ts';
-import { DEV_INBOX_ENV_VAR } from './runtime/email/dev-inbox.ts';
+import { DEV_INBOX_ENV_VAR, DEV_INBOX_TOKEN_ENV_VAR } from './runtime/email/dev-inbox.ts';
 import { SANDBOX_MIGRATION_TAG, isSandboxEnabled, resolveSandboxConfig } from './sandbox/config.ts';
 import { mergeAndExpand, parseDotenvFile } from './shared/dotenv.ts';
 import {
@@ -1232,13 +1232,15 @@ export function voidPlugin(options?: {
     //
     // Dev only: name the assets binding so `sendEmail` can loop back into the
     // Vite dev server and reach the `/__void/inbox` buffer, which lives in the
-    // Node process rather than in this worker's isolate.
+    // Node process rather than in this worker's isolate — and hand it the
+    // dev-trigger token the inbox middleware requires on every route.
     const emailDevInboxBinding =
       (workerConfig.assets as { binding?: string } | undefined)?.binding ??
       (resolved.assets as { binding?: string } | undefined)?.binding;
     if (shouldInjectEmailDevInboxVar(routeEnvironment, bindings.needsEmail, emailDevInboxBinding)) {
       const vars = (result.vars as Record<string, string>) ?? {};
       vars[DEV_INBOX_ENV_VAR] = emailDevInboxBinding as string;
+      vars[DEV_INBOX_TOKEN_ENV_VAR] = devTriggerToken;
       result.vars = vars;
     }
 
@@ -2018,7 +2020,7 @@ export function voidPlugin(options?: {
       createWranglerCompatPersistPlugin(root, config),
       restartPlugin(),
       bindingWatchPlugin,
-      ...(bindings.needsEmail ? [emailDevInboxPlugin()] : []),
+      ...(bindings.needsEmail ? [emailDevInboxPlugin({ devTriggerToken })] : []),
       envPlugin,
       envSchemaPlugin(root, {
         onDefaults: applySchemaDefaultsToWorkerVars,
@@ -2199,7 +2201,7 @@ export function voidPlugin(options?: {
     createWranglerCompatPersistPlugin(root, config),
     restartPlugin(),
     bindingWatchPlugin,
-    ...(bindings.needsEmail ? [emailDevInboxPlugin()] : []),
+    ...(bindings.needsEmail ? [emailDevInboxPlugin({ devTriggerToken })] : []),
     envPlugin,
     envSchemaPlugin(root, {
       onDefaults: applySchemaDefaultsToWorkerVars,

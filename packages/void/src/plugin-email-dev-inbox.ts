@@ -11,8 +11,16 @@
 //   * the in-process sink — only fires for a `sendEmail` that happens to run
 //     inside this Node process (e.g. a prerender pass). Kept so that path is
 //     still captured; it is not the dev-server transport.
+//
+// Every route requires the project's dev-trigger token — the same one
+// `/__void/scheduled` and `/__void/queue` check. Vite's own host validation
+// only rejects DNS-rebinding hostnames: any IP-literal `Host` passes, so with
+// `--host` (or a shared port) every peer on the network could otherwise read
+// raw MIME (Bcc, attachments), clear the buffer, or plant captures.
 
+import { timingSafeEqual } from 'node:crypto';
 import type { Plugin } from 'vite';
+import { voidLog } from './log.ts';
 import {
   clearDevBuffer,
   DEV_INBOX_ACK_HEADER,
@@ -20,6 +28,8 @@ import {
   DEV_INBOX_CAPTURE_PATH,
   DEV_INBOX_MAX_CAPTURE_BYTES,
   DEV_INBOX_PREFIX,
+  DEV_INBOX_TOKEN_HEADER,
+  DEV_INBOX_TOKEN_QUERY,
   findDevMessage,
   listDevMessages,
   parseCapturedMessage,
@@ -41,9 +51,23 @@ const SECURITY_HEADERS = {
     "default-src 'none'; style-src 'unsafe-inline'; frame-src data:; img-src data:; connect-src 'none'",
 } as const;
 
-export function emailDevInboxPlugin(): Plugin {
+export interface EmailDevInboxPluginOptions {
+  /**
+   * The per-project dev-trigger token (`.void/dev-trigger-token`), shared with
+   * the cron/queue dev routes and injected into the worker as
+   * `__VOID_EMAIL_DEV_INBOX_TOKEN` so its capture POST can present it.
+   */
+  devTriggerToken: string;
+}
+
+export function emailDevInboxPlugin(options: EmailDevInboxPluginOptions): Plugin {
+  const { devTriggerToken } = options;
   let devMode = false;
   let unregister: (() => void) | undefined;
+
+  /** `href` for an inbox path that keeps the browser session authorized. */
+  const inboxHref = (path: string): string =>
+    `${INBOX_PREFIX}${path}?${DEV_INBOX_TOKEN_QUERY}=${encodeURIComponent(devTriggerToken)}`;
 
   return {
     name: 'void:email-dev-inbox',
@@ -68,6 +92,20 @@ export function emailDevInboxPlugin(): Plugin {
         return;
       }
 
+      // The browser cannot add a header, so the inbox URL is printed with the
+      // token in its query, the same way the cron/queue hint prints its curl.
+      const printInboxUrl = () => {
+        const address = server.httpServer?.address();
+        const port = typeof address === 'object' && address ? address.port : null;
+        if (port == null) {
+          return;
+        }
+        voidLog(`Email inbox: http://localhost:${port}${inboxHref('')}`);
+      };
+      if (server.httpServer) {
+        server.httpServer.once('listening', () => setTimeout(printInboxUrl, 100));
+      }
+
       server.middlewares.use(INBOX_PREFIX, (req, res) => {
         if (server.config.command !== 'serve') {
           res.writeHead(404, SECURITY_HEADERS);
@@ -76,6 +114,15 @@ export function emailDevInboxPlugin(): Plugin {
         }
         const url = new URL(req.url ?? '/', 'http://localhost');
         const path = url.pathname;
+
+        if (!isAuthorized(req.headers[DEV_INBOX_TOKEN_HEADER], url, devTriggerToken)) {
+          // No ack header here: the worker must not read a refusal as a capture.
+          res.writeHead(401, { ...SECURITY_HEADERS, 'Content-Type': 'text/plain; charset=utf-8' });
+          res.end(
+            `Unauthorized: the void dev inbox requires the dev-trigger token — send it as the ${DEV_INBOX_TOKEN_HEADER} header or the ?${DEV_INBOX_TOKEN_QUERY}= query (printed as the inbox URL when void dev starts; stored in .void/dev-trigger-token).`,
+          );
+          return;
+        }
 
         if (req.method === 'POST' && path === DEV_INBOX_CAPTURE_PATH) {
           void handleCapture(req, res);
@@ -95,7 +142,7 @@ export function emailDevInboxPlugin(): Plugin {
 
         if (path === '/' || path === '') {
           res.writeHead(200, { ...SECURITY_HEADERS, 'Content-Type': 'text/html; charset=utf-8' });
-          res.end(renderListHtml(listDevMessages()));
+          res.end(renderListHtml(listDevMessages(), inboxHref));
           return;
         }
         const match = path.match(/^\/([^/]+)(\/raw)?$/);
@@ -125,10 +172,29 @@ export function emailDevInboxPlugin(): Plugin {
           return;
         }
         res.writeHead(200, { ...SECURITY_HEADERS, 'Content-Type': 'text/html; charset=utf-8' });
-        res.end(renderDetailHtml(message));
+        res.end(renderDetailHtml(message, inboxHref));
       });
     },
   };
+}
+
+/**
+ * Constant-time check of the presented token — header first (worker, curl),
+ * then the query (browser). Both are compared against the one project token.
+ */
+function isAuthorized(
+  headerValue: string | Array<string> | undefined,
+  url: URL,
+  expected: string,
+): boolean {
+  const presented =
+    typeof headerValue === 'string' ? headerValue : url.searchParams.get(DEV_INBOX_TOKEN_QUERY);
+  if (typeof presented !== 'string') {
+    return false;
+  }
+  const a = Buffer.from(presented);
+  const b = Buffer.from(expected);
+  return a.byteLength === b.byteLength && timingSafeEqual(a, b);
 }
 
 // Structural shapes rather than `node:http` classes: the same handler is
@@ -234,16 +300,16 @@ const STYLE = `
   .header-table th { width: 160px; }
 `;
 
-function renderListHtml(messages: Array<CapturedMessage>): string {
+function renderListHtml(messages: Array<CapturedMessage>, href: (path: string) => string): string {
   const rows = messages
     .map(
       (m) => `
         <tr>
-          <td><a href="${INBOX_PREFIX}/${m.id}">${escapeHtml(m.subject || '(no subject)')}</a></td>
+          <td><a href="${escapeHtml(href(`/${m.id}`))}">${escapeHtml(m.subject || '(no subject)')}</a></td>
           <td>${escapeHtml(formatAddress(m.from))}</td>
           <td>${escapeHtml(m.to.map(formatAddress).join(', '))}</td>
           <td class="meta">${escapeHtml(formatTime(m.capturedAt))}</td>
-          <td class="meta"><a href="${INBOX_PREFIX}/${m.id}/raw">.eml</a></td>
+          <td class="meta"><a href="${escapeHtml(href(`/${m.id}/raw`))}">.eml</a></td>
         </tr>`,
     )
     .join('');
@@ -263,7 +329,7 @@ function renderListHtml(messages: Array<CapturedMessage>): string {
 </body></html>`;
 }
 
-function renderDetailHtml(m: CapturedMessage): string {
+function renderDetailHtml(m: CapturedMessage, href: (path: string) => string): string {
   const headerRows = Object.entries(m.headers)
     .map(([k, v]) => `<tr><th>${escapeHtml(k)}</th><td>${escapeHtml(v)}</td></tr>`)
     .join('');
@@ -281,8 +347,8 @@ function renderDetailHtml(m: CapturedMessage): string {
 <html><head><meta charset="utf-8"><title>${escapeHtml(m.subject || '(no subject)')} — Void inbox</title><style>${STYLE}</style></head>
 <body>
   <div class="actions">
-    <a class="button" href="${INBOX_PREFIX}">← Back</a>
-    <a class="button" href="${INBOX_PREFIX}/${m.id}/raw">Download .eml</a>
+    <a class="button" href="${escapeHtml(href(''))}">← Back</a>
+    <a class="button" href="${escapeHtml(href(`/${m.id}/raw`))}">Download .eml</a>
   </div>
   <h1>${escapeHtml(m.subject || '(no subject)')}</h1>
   <table class="header-table">

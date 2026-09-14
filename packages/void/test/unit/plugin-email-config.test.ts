@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'pathslash';
 import type { Plugin } from 'vite';
@@ -219,6 +219,43 @@ describe('mergeBindings email config (void dev)', () => {
 
     expect(resolved.send_email).toEqual([{ name: 'MAILER' }, { name: 'ALERTS' }]);
     expect('send_email' in result).toBe(false);
+  });
+});
+
+describe('mergeBindings dev inbox vars (void dev)', () => {
+  it('injects the inbox binding var and the dev-trigger token together under serve', async () => {
+    const root = createProjectRoot();
+
+    const result = await resolveCloudflareConfig(root, { assets: { binding: 'ASSETS' } }, SERVE);
+
+    const vars = result.vars as Record<string, string>;
+    expect(vars.__VOID_EMAIL_DEV_INBOX).toBe('ASSETS');
+    // The same per-project token the cron/queue dev routes check: the inbox
+    // middleware requires it on every route, including the worker's capture
+    // POST, so the worker must hold the value the plugin was handed.
+    const persisted = readFileSync(join(root, '.void', 'dev-trigger-token'), 'utf8').trim();
+    expect(persisted.length).toBeGreaterThan(0);
+    expect(vars.__VOID_EMAIL_DEV_INBOX_TOKEN).toBe(persisted);
+  });
+
+  it('injects neither var when the app does not import void/email', async () => {
+    const root = createProjectRoot({}, { usesVoidEmail: false });
+
+    const result = await resolveCloudflareConfig(root, { assets: { binding: 'ASSETS' } }, SERVE);
+
+    const vars = result.vars as Record<string, string> | undefined;
+    expect(vars?.__VOID_EMAIL_DEV_INBOX).toBeUndefined();
+    expect(vars?.__VOID_EMAIL_DEV_INBOX_TOKEN).toBeUndefined();
+  });
+
+  it('injects neither var on build — a production wrangler.json carries no dev token', async () => {
+    const root = createProjectRoot();
+
+    const result = await resolveCloudflareConfig(root, { assets: { binding: 'ASSETS' } }, BUILD);
+
+    const vars = result.vars as Record<string, string> | undefined;
+    expect(vars?.__VOID_EMAIL_DEV_INBOX).toBeUndefined();
+    expect(vars?.__VOID_EMAIL_DEV_INBOX_TOKEN).toBeUndefined();
   });
 });
 

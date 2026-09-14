@@ -70,6 +70,28 @@ export const DEV_INBOX_CAPTURE_URL: string = `${DEV_INBOX_PREFIX}${DEV_INBOX_CAP
 export const DEV_INBOX_ENV_VAR: string = '__VOID_EMAIL_DEV_INBOX';
 
 /**
+ * Serve-only var carrying the project's dev-trigger token — the same
+ * per-project secret `/__void/scheduled` and `/__void/queue` require — so the
+ * worker can authenticate its capture POST. Injected together with
+ * {@link DEV_INBOX_ENV_VAR} under the same gate. The compiled router embeds
+ * the token as a module-local const the `void/email` runtime cannot import,
+ * so a var is the only transport into `sendEmail`.
+ */
+export const DEV_INBOX_TOKEN_ENV_VAR: string = '__VOID_EMAIL_DEV_INBOX_TOKEN';
+
+/**
+ * How a caller proves it holds the dev-trigger token. Every `/__void/inbox`
+ * route — browse, raw download, clear, and the worker's capture POST —
+ * requires one of these, mirroring the `x-void-dev-trigger` check on the
+ * cron/queue dev routes. The query form exists for the browser: a link
+ * printed in the terminal cannot carry a header, and the inbox pages render
+ * their own links with it. Responses send `Referrer-Policy: no-referrer`, so
+ * the token never leaves the inbox through a Referer.
+ */
+export const DEV_INBOX_TOKEN_HEADER: string = 'x-void-dev-trigger';
+export const DEV_INBOX_TOKEN_QUERY: string = 'token';
+
+/**
  * Acknowledgement marker on the capture response. The transport rides the
  * assets binding, so a 200 alone proves nothing — if that binding ever stops
  * being a dev-server loopback, a plain static/SPA response would also be 200.

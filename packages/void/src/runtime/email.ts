@@ -25,6 +25,8 @@ import {
   DEV_INBOX_ACK_VALUE,
   DEV_INBOX_CAPTURE_URL,
   DEV_INBOX_ENV_VAR,
+  DEV_INBOX_TOKEN_ENV_VAR,
+  DEV_INBOX_TOKEN_HEADER,
   dispatchToSinks,
   hasActiveSink,
   serializeCapturedMessage,
@@ -519,6 +521,17 @@ interface DevInboxFetcher {
   fetch(req: Request | string, init?: RequestInit): Promise<Response>;
 }
 
+interface DevInbox {
+  fetcher: DevInboxFetcher;
+  /**
+   * The dev-trigger token the inbox middleware requires. Injected under the
+   * same gate as the binding var; when it is somehow absent the POST still
+   * goes out and the dev server's 401 is reported verbatim — the inbox is
+   * never skipped in favour of a real send transport.
+   */
+  token: string | undefined;
+}
+
 /**
  * Resolve the loopback into the `void dev` inbox, or `undefined` outside dev.
  *
@@ -529,7 +542,7 @@ interface DevInboxFetcher {
  * middleware in the dev-server process — the only place the buffer exists.
  * In a production build neither the var nor that wiring is present.
  */
-function resolveDevInbox(env: Record<string, unknown> | undefined): DevInboxFetcher | undefined {
+function resolveDevInbox(env: Record<string, unknown> | undefined): DevInbox | undefined {
   const bindingName = env?.[DEV_INBOX_ENV_VAR];
   if (typeof bindingName !== 'string' || bindingName.length === 0) {
     return undefined;
@@ -538,25 +551,74 @@ function resolveDevInbox(env: Record<string, unknown> | undefined): DevInboxFetc
   if (typeof binding !== 'object' || binding === null) {
     return undefined;
   }
-  return typeof (binding as { fetch?: unknown }).fetch === 'function'
-    ? (binding as DevInboxFetcher)
-    : undefined;
+  if (typeof (binding as { fetch?: unknown }).fetch !== 'function') {
+    return undefined;
+  }
+  const token = env?.[DEV_INBOX_TOKEN_ENV_VAR];
+  return {
+    fetcher: binding as DevInboxFetcher,
+    token: typeof token === 'string' && token.length > 0 ? token : undefined,
+  };
 }
 
 // A local loopback answers immediately; this only exists so a wedged dev
 // server degrades into an error instead of hanging the user's request.
 const DEV_INBOX_TIMEOUT_MS = 5000;
 
+/** Bound on the error text a failed capture echoes from the dev server. */
+const DEV_INBOX_ERROR_EXCERPT_CHARS = 200;
+const DEV_INBOX_ERROR_EXCERPT_TIMEOUT_MS = 1000;
+
+/**
+ * First line of a refusal, so a 401 names the header it wanted. Reads ONE
+ * chunk under its own deadline: the main 5s race has already settled by the
+ * time the status is known, and a body that never arrives must not turn a
+ * clean error into a hung `sendEmail`.
+ */
+async function readErrorExcerpt(res: Response): Promise<string> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const reader = res.body?.getReader();
+    if (!reader) {
+      return '';
+    }
+    const first = await Promise.race([
+      reader.read().then(({ value }) => value),
+      new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => resolve(undefined), DEV_INBOX_ERROR_EXCERPT_TIMEOUT_MS);
+      }),
+    ]);
+    void reader.cancel().catch(() => {});
+    if (!first) {
+      return '';
+    }
+    return new TextDecoder()
+      .decode(first)
+      .trim()
+      .split('\n')[0]
+      .slice(0, DEV_INBOX_ERROR_EXCERPT_CHARS);
+  } catch {
+    return '';
+  } finally {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
+  }
+}
+
 async function postToDevInbox(
-  fetcher: DevInboxFetcher,
+  inbox: DevInbox,
   captured: CapturedMessage,
 ): Promise<{ ok: true } | { ok: false; reason: string }> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     const attempt = Promise.resolve(
-      fetcher.fetch(`http://localhost${DEV_INBOX_CAPTURE_URL}`, {
+      inbox.fetcher.fetch(`http://localhost${DEV_INBOX_CAPTURE_URL}`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: {
+          'content-type': 'application/json',
+          ...(inbox.token !== undefined && { [DEV_INBOX_TOKEN_HEADER]: inbox.token }),
+        },
         body: serializeCapturedMessage(captured),
       }),
     ).then(
@@ -578,7 +640,13 @@ async function postToDevInbox(
     }
     const { res } = settled;
     if (!res.ok) {
-      return { ok: false, reason: `dev server responded ${res.status}` };
+      // A 401 names the header it wanted; surface that instead of a bare
+      // status so a missing token is diagnosable from the worker's console.
+      const excerpt = await readErrorExcerpt(res);
+      return {
+        ok: false,
+        reason: `dev server responded ${res.status}${excerpt ? `: ${excerpt}` : ''}`,
+      };
     }
     // A 200 alone is not proof: if the assets binding ever stops being a
     // dev-server loopback, a static/SPA response is also a 200.

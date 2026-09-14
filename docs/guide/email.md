@@ -38,7 +38,7 @@ hits first, because a recipient you have not verified yet fails per-recipient.
 
 Zero config on the Void platform (`void deploy`). Every Void project ships with:
 
-- **Sender** — `<your-slug>+noreply@mail.void.cloud`. Used as the default `from` if you omit it. The platform owns the zone with Email Routing + DKIM + SPF + DMARC set up; you do nothing.
+- **Sender** — `<your-slug>+noreply@mail.void.cloud`. Used as the default `from` if you omit it. The platform owns the zone with Email Routing + DKIM + SPF + DMARC set up; you do nothing. Project slugs are capped at 56 characters so this local part fits RFC 5321's 64 octets; a project created before the cap with a longer slug must pass `from` explicitly.
 - **No worker binding to add** — outbound mail is sent by the Void proxy, which holds the
   platform `send_email` binding. Your worker never gets one, so there is nothing to configure.
 
@@ -191,13 +191,25 @@ way. Narrow with `'error' in result` rather than assuming.
 
 ## Local development
 
-During `void dev`, sends are captured to an in-memory inbox instead of going to Cloudflare. Browse them at:
+During `void dev`, sends are captured to an in-memory inbox instead of going to Cloudflare. The dev server prints the inbox URL when it starts:
 
 ```
-http://localhost:5173/__void/inbox
+[void] Email inbox: http://localhost:5173/__void/inbox?token=<printed-token>
 ```
 
 The inbox shows a list view with subject, sender, recipient, and timestamp. Click a message to see headers, attachments, and an HTML preview rendered in a sandboxed iframe. Each message can be downloaded as a `.eml` file.
+
+Every inbox route requires the local dev trigger token — the same token `/__void/scheduled` and `/__void/queue` use, stored in `.void/dev-trigger-token`. The browser carries it as `?token=` (the printed URL and every link inside the inbox include it); curl sends it as the `x-void-dev-trigger` header. A request without it gets a `401`. Vite's host check only blocks DNS-rebinding hostnames, so without the token anyone who can reach the port — every peer on the network under `--host` — could read raw MIME (including Bcc recipients and attachments), clear the buffer, or plant messages.
+
+```bash
+# download a message as .eml
+curl http://localhost:5173/__void/inbox/<id>/raw \
+  -H "x-void-dev-trigger: <printed-token>" -o message.eml
+
+# clear the inbox
+curl -X DELETE http://localhost:5173/__void/inbox \
+  -H "x-void-dev-trigger: <printed-token>"
+```
 
 The buffer holds the most recent 100 messages and survives HMR but not a full server restart. No disk persistence.
 

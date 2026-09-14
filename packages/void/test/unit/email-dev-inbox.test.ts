@@ -15,8 +15,9 @@
  * `ASSETS` fetcher — which is exactly what `@cloudflare/vite-plugin` binds
  * `env.ASSETS` to in dev (`{ node: (req, res) => viteDevServer.middlewares(req, res) }`).
  */
+import { EventEmitter } from 'node:events';
 import { Readable } from 'node:stream';
-import { afterEach, beforeEach, describe, expect, it } from 'vite-plus/test';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 import { shouldInjectEmailDevInboxVar } from '../../src/index.ts';
 import { emailDevInboxPlugin } from '../../src/plugin-email-dev-inbox.ts';
 import { sendEmail } from '../../src/runtime/email.ts';
@@ -26,6 +27,9 @@ import {
   DEV_INBOX_ACK_VALUE,
   DEV_INBOX_CAPTURE_URL,
   DEV_INBOX_ENV_VAR,
+  DEV_INBOX_TOKEN_ENV_VAR,
+  DEV_INBOX_TOKEN_HEADER,
+  DEV_INBOX_TOKEN_QUERY,
   hasActiveSink,
   listDevMessages,
   parseCapturedMessage,
@@ -34,6 +38,25 @@ import {
   type CapturedMessage,
 } from '../../src/runtime/email/dev-inbox.ts';
 import { withRuntimeEnv } from '../../src/runtime/env.ts';
+
+/** The per-project dev-trigger token `voidPlugin()` hands the plugin. */
+const TOKEN = 'dev-token-test';
+
+/** The worker env `mergeBindings` produces under `void dev`: binding var + token var. */
+function devEnv(assets: unknown, bindingName = 'ASSETS'): Record<string, unknown> {
+  return {
+    [DEV_INBOX_ENV_VAR]: bindingName,
+    [DEV_INBOX_TOKEN_ENV_VAR]: TOKEN,
+    [bindingName]: assets,
+  };
+}
+
+/** A request that presents the token the way curl and the worker do. */
+function authed(url: string, init: RequestInit = {}): Request {
+  const headers = new Headers(init.headers);
+  headers.set(DEV_INBOX_TOKEN_HEADER, TOKEN);
+  return new Request(url, { ...init, headers });
+}
 
 // ---------------------------------------------------------------------------
 // A minimal connect-style middleware stack, so the plugin's real
@@ -50,6 +73,7 @@ function createFakeViteServer(): FakeServer {
   const stack: Array<{ route: string; handle: NodeHandler }> = [];
   const server = {
     config: { command: 'serve' as const },
+    httpServer: undefined,
     middlewares: {
       use(route: string | NodeHandler, handle?: NodeHandler) {
         if (typeof route === 'function') {
@@ -61,7 +85,7 @@ function createFakeViteServer(): FakeServer {
     },
   };
 
-  const plugin = emailDevInboxPlugin();
+  const plugin = emailDevInboxPlugin({ devTriggerToken: TOKEN });
   const configureServer = plugin.configureServer as (this: unknown, s: unknown) => void;
   configureServer.call(plugin, server);
 
@@ -108,7 +132,10 @@ function createFakeViteServer(): FakeServer {
             if (chunk) {
               chunks.push(Buffer.from(chunk));
             }
-            resolve(new Response(Buffer.concat(chunks), { status, headers }));
+            // A WHATWG Response rejects a body on 204/304, which the plugin's
+            // DELETE answers with; node:http has no such rule.
+            const body = status === 204 || status === 304 ? null : Buffer.concat(chunks);
+            resolve(new Response(body, { status, headers }));
           },
         };
         entry.handle(req, res, () => {
@@ -142,6 +169,10 @@ function fakeAssetsBinding(server: FakeServer): {
 
 function subjectsInListHtml(html: string): Array<string> {
   return [...html.matchAll(/<a href="\/__void\/inbox\/[^"]+">([^<]*)<\/a>/g)].map((m) => m[1]);
+}
+
+function hrefsInHtml(html: string): Array<string> {
+  return [...html.matchAll(/href="([^"]+)"/g)].map((m) => m[1]);
 }
 
 beforeEach(() => {
@@ -194,7 +225,7 @@ describe('sendEmail -> dev inbox (cross-process transport)', () => {
     const server = createFakeViteServer();
     const assets = fakeAssetsBinding(server);
 
-    const result = await withRuntimeEnv({ [DEV_INBOX_ENV_VAR]: 'ASSETS', ASSETS: assets }, () =>
+    const result = await withRuntimeEnv(devEnv(assets), () =>
       sendEmail({
         from: 'Acme <hello@acme.dev>',
         to: 'user@example.com',
@@ -224,7 +255,7 @@ describe('sendEmail -> dev inbox (cross-process transport)', () => {
     expect(messages[0].html).toBe('<p>Hi there</p>');
     expect(messages[0].raw.byteLength).toBeGreaterThan(0);
 
-    const listed = await server.dispatch(new Request('http://localhost/__void/inbox'));
+    const listed = await server.dispatch(authed('http://localhost/__void/inbox'));
     expect(subjectsInListHtml(await listed.text())).toContain('Cross-process hello');
   });
 
@@ -234,7 +265,7 @@ describe('sendEmail -> dev inbox (cross-process transport)', () => {
   it('reports one id per unique address while the buffered message keeps the fields', async () => {
     const server = createFakeViteServer();
     const assets = fakeAssetsBinding(server);
-    const result = await withRuntimeEnv({ [DEV_INBOX_ENV_VAR]: 'ASSETS', ASSETS: assets }, () =>
+    const result = await withRuntimeEnv(devEnv(assets), () =>
       sendEmail({
         from: 'a@x.dev',
         to: ['A@x.dev'],
@@ -257,11 +288,11 @@ describe('sendEmail -> dev inbox (cross-process transport)', () => {
   it('serves the captured .eml back from the raw route', async () => {
     const server = createFakeViteServer();
     const assets = fakeAssetsBinding(server);
-    await withRuntimeEnv({ [DEV_INBOX_ENV_VAR]: 'ASSETS', ASSETS: assets }, () =>
+    await withRuntimeEnv(devEnv(assets), () =>
       sendEmail({ from: 'a@x.dev', to: 'b@y.dev', subject: 'raw-check', text: 'body text' }),
     );
     const id = listDevMessages()[0].id;
-    const raw = await server.dispatch(new Request(`http://localhost/__void/inbox/${id}/raw`));
+    const raw = await server.dispatch(authed(`http://localhost/__void/inbox/${id}/raw`));
     expect(raw.status).toBe(200);
     expect(raw.headers.get('content-type')).toBe('message/rfc822');
     expect(await raw.text()).toContain('Subject: raw-check');
@@ -270,7 +301,7 @@ describe('sendEmail -> dev inbox (cross-process transport)', () => {
   it('acknowledges the capture with a marker header so a plain asset 200 is not mistaken for success', async () => {
     const server = createFakeViteServer();
     const res = await server.dispatch(
-      new Request(`http://localhost${DEV_INBOX_CAPTURE_URL}`, {
+      authed(`http://localhost${DEV_INBOX_CAPTURE_URL}`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: serializeCapturedMessage({
@@ -299,7 +330,7 @@ describe('sendEmail -> dev inbox (cross-process transport)', () => {
         throw new Error('socket hang up');
       },
     };
-    const result = await withRuntimeEnv({ [DEV_INBOX_ENV_VAR]: 'ASSETS', ASSETS: broken }, () =>
+    const result = await withRuntimeEnv(devEnv(broken), () =>
       sendEmail({ from: 'a@x.dev', to: 'b@y.dev', subject: 's', text: 't' }),
     );
     expect(result.ok).toBe(false);
@@ -318,7 +349,7 @@ describe('sendEmail -> dev inbox (cross-process transport)', () => {
         });
       },
     };
-    const result = await withRuntimeEnv({ [DEV_INBOX_ENV_VAR]: 'ASSETS', ASSETS: assetOnly }, () =>
+    const result = await withRuntimeEnv(devEnv(assetOnly), () =>
       sendEmail({ from: 'a@x.dev', to: 'b@y.dev', subject: 's', text: 't' }),
     );
     expect(result.ok).toBe(false);
@@ -345,7 +376,7 @@ describe('sendEmail -> dev inbox (cross-process transport)', () => {
   it('honors sendInDev: true by skipping the dev inbox entirely', async () => {
     const server = createFakeViteServer();
     const assets = fakeAssetsBinding(server);
-    const result = await withRuntimeEnv({ [DEV_INBOX_ENV_VAR]: 'ASSETS', ASSETS: assets }, () =>
+    const result = await withRuntimeEnv(devEnv(assets), () =>
       sendEmail({
         from: 'a@x.dev',
         to: 'b@y.dev',
@@ -364,11 +395,206 @@ describe('sendEmail -> dev inbox (cross-process transport)', () => {
   it('uses the binding name the var names, not a hardcoded ASSETS', async () => {
     const server = createFakeViteServer();
     const assets = fakeAssetsBinding(server);
-    await withRuntimeEnv({ [DEV_INBOX_ENV_VAR]: 'STATIC_FILES', STATIC_FILES: assets }, () =>
+    await withRuntimeEnv(devEnv(assets, 'STATIC_FILES'), () =>
       sendEmail({ from: 'a@x.dev', to: 'b@y.dev', subject: 'named-binding', text: 't' }),
     );
     expect(assets.calls).toHaveLength(1);
     expect(listDevMessages()[0].subject).toBe('named-binding');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Every inbox route requires the dev-trigger token. Vite's host validation
+// admits any IP-literal `Host`, so under `--host` (or a shared port) the
+// unauthenticated inbox handed every network peer the raw MIME — Bcc and
+// attachments included — plus DELETE and a capture endpoint to plant messages.
+// ---------------------------------------------------------------------------
+
+function seeded(): CapturedMessage {
+  return {
+    id: 'dev_seeded',
+    capturedAt: Date.now(),
+    raw: new TextEncoder().encode('Subject: seeded\r\nBcc: hidden@bcc.dev\r\n\r\nbody'),
+    messageId: '<seeded@x>',
+    from: { email: 'a@x.dev' },
+    to: [{ email: 'b@y.dev' }],
+    cc: [],
+    bcc: [{ email: 'hidden@bcc.dev' }],
+    subject: 'seeded',
+    text: 'body',
+    headers: {},
+    attachments: [],
+  };
+}
+
+describe('dev inbox auth (dev-trigger token on every route)', () => {
+  const captureInit = (): RequestInit => ({
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: serializeCapturedMessage({ ...seeded(), id: 'dev_planted' }),
+  });
+
+  it.each([
+    ['GET list', 'http://localhost/__void/inbox', {}],
+    ['GET detail', 'http://localhost/__void/inbox/dev_seeded', {}],
+    ['GET raw', 'http://localhost/__void/inbox/dev_seeded/raw', {}],
+    ['DELETE clear', 'http://localhost/__void/inbox', { method: 'DELETE' }],
+    ['POST capture', `http://localhost${DEV_INBOX_CAPTURE_URL}`, captureInit()],
+  ] as Array<[string, string, RequestInit]>)(
+    '%s: 401 without the token, 401 with a wrong one, and nothing happens',
+    async (_label, url, init) => {
+      const server = createFakeViteServer();
+      pushToDevBuffer(seeded());
+
+      const missing = await server.dispatch(new Request(url, init));
+      expect(missing.status).toBe(401);
+      expect(missing.headers.get(DEV_INBOX_ACK_HEADER)).toBeNull();
+      const body = await missing.text();
+      expect(body.split('\n')).toHaveLength(1);
+      expect(body).toContain(DEV_INBOX_TOKEN_HEADER);
+      expect(body).toContain(`?${DEV_INBOX_TOKEN_QUERY}=`);
+      expect(body).not.toContain(TOKEN);
+
+      const wrongHeader = await server.dispatch(
+        new Request(url, {
+          ...init,
+          headers: { ...init.headers, [DEV_INBOX_TOKEN_HEADER]: 'nope' },
+        }),
+      );
+      expect(wrongHeader.status).toBe(401);
+      const wrongQuery = await server.dispatch(
+        new Request(`${url}?${DEV_INBOX_TOKEN_QUERY}=nope`, init),
+      );
+      expect(wrongQuery.status).toBe(401);
+      // A header that is wrong is not rescued by a query that is right — the
+      // header is what the worker and curl send, so it is what gets checked.
+      const wrongHeaderRightQuery = await server.dispatch(
+        new Request(`${url}?${DEV_INBOX_TOKEN_QUERY}=${TOKEN}`, {
+          ...init,
+          headers: { ...init.headers, [DEV_INBOX_TOKEN_HEADER]: 'nope' },
+        }),
+      );
+      expect(wrongHeaderRightQuery.status).toBe(401);
+
+      // The refusal had no side effect: the seeded message is still the only one.
+      expect(listDevMessages().map((m) => m.id)).toEqual(['dev_seeded']);
+    },
+  );
+
+  it('serves every route with the token in the header (worker, curl)', async () => {
+    const server = createFakeViteServer();
+    pushToDevBuffer(seeded());
+
+    const list = await server.dispatch(authed('http://localhost/__void/inbox'));
+    expect(list.status).toBe(200);
+    expect(subjectsInListHtml(await list.text())).toContain('seeded');
+
+    const detail = await server.dispatch(authed('http://localhost/__void/inbox/dev_seeded'));
+    expect(detail.status).toBe(200);
+    expect(await detail.text()).toContain('hidden@bcc.dev');
+
+    const raw = await server.dispatch(authed('http://localhost/__void/inbox/dev_seeded/raw'));
+    expect(raw.status).toBe(200);
+    expect(await raw.text()).toContain('Bcc: hidden@bcc.dev');
+
+    const planted = await server.dispatch(
+      authed(`http://localhost${DEV_INBOX_CAPTURE_URL}`, captureInit()),
+    );
+    expect(planted.status).toBe(200);
+    expect(planted.headers.get(DEV_INBOX_ACK_HEADER)).toBe(DEV_INBOX_ACK_VALUE);
+    expect(listDevMessages().map((m) => m.id)).toEqual(['dev_planted', 'dev_seeded']);
+
+    const cleared = await server.dispatch(
+      authed('http://localhost/__void/inbox', { method: 'DELETE' }),
+    );
+    expect(cleared.status).toBe(204);
+    expect(listDevMessages()).toHaveLength(0);
+  });
+
+  it('accepts the token as ?token= so the printed URL works in a browser, and keeps the session in its links', async () => {
+    const server = createFakeViteServer();
+    pushToDevBuffer(seeded());
+    const q = `?${DEV_INBOX_TOKEN_QUERY}=${TOKEN}`;
+
+    const list = await server.dispatch(new Request(`http://localhost/__void/inbox${q}`));
+    expect(list.status).toBe(200);
+    const listHrefs = hrefsInHtml(await list.text());
+    expect(listHrefs).toEqual([`/__void/inbox/dev_seeded${q}`, `/__void/inbox/dev_seeded/raw${q}`]);
+
+    const detail = await server.dispatch(
+      new Request(`http://localhost/__void/inbox/dev_seeded${q}`),
+    );
+    expect(detail.status).toBe(200);
+    expect(hrefsInHtml(await detail.text())).toEqual([
+      `/__void/inbox${q}`,
+      `/__void/inbox/dev_seeded/raw${q}`,
+    ]);
+
+    const raw = await server.dispatch(
+      new Request(`http://localhost/__void/inbox/dev_seeded/raw${q}`),
+    );
+    expect(raw.status).toBe(200);
+    expect(raw.headers.get('content-type')).toBe('message/rfc822');
+  });
+
+  it('sendEmail reports the 401 by name when the worker env lacks the token, and nothing is captured', async () => {
+    const server = createFakeViteServer();
+    const assets = fakeAssetsBinding(server);
+    const result = await withRuntimeEnv({ [DEV_INBOX_ENV_VAR]: 'ASSETS', ASSETS: assets }, () =>
+      sendEmail({ from: 'a@x.dev', to: 'b@y.dev', subject: 'no-token', text: 't' }),
+    );
+    expect(assets.calls).toHaveLength(1);
+    expect(listDevMessages()).toHaveLength(0);
+    expect(result.ok).toBe(false);
+    if (!result.ok && 'error' in result) {
+      expect(result.error.code).toBe('UPSTREAM_ERROR');
+      expect(result.error.message).toContain('dev server responded 401');
+      expect(result.error.message).toContain(DEV_INBOX_TOKEN_HEADER);
+    }
+  });
+
+  it('never hangs on a refusal whose body stalls — the excerpt read has its own deadline', async () => {
+    vi.useFakeTimers();
+    try {
+      const stalled = {
+        async fetch() {
+          // Status arrives, the body never does.
+          return new Response(new ReadableStream({ start() {} }), { status: 401 });
+        },
+      };
+      const pending = withRuntimeEnv(devEnv(stalled), () =>
+        sendEmail({ from: 'a@x.dev', to: 'b@y.dev', subject: 'stall', text: 't' }),
+      );
+      await vi.advanceTimersByTimeAsync(1000);
+      const result = await pending;
+      expect(result.ok).toBe(false);
+      if (!result.ok && 'error' in result) {
+        expect(result.error.code).toBe('UPSTREAM_ERROR');
+        expect(result.error.message).toContain('dev server responded 401');
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('prints the inbox URL with the token once the dev server is listening', async () => {
+    const httpServer = new EventEmitter() as EventEmitter & { address: () => { port: number } };
+    httpServer.address = () => ({ port: 5173 });
+    const server = { config: { command: 'serve' as const }, httpServer, middlewares: { use() {} } };
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      const plugin = emailDevInboxPlugin({ devTriggerToken: TOKEN });
+      (plugin.configureServer as (this: unknown, s: unknown) => void).call(plugin, server);
+      expect(log).not.toHaveBeenCalled();
+      httpServer.emit('listening');
+      await new Promise((r) => setTimeout(r, 150));
+      const output = log.mock.calls.map((c) => String(c[0] ?? '')).join('\n');
+      expect(output).toContain(
+        `Email inbox: http://localhost:5173/__void/inbox?${DEV_INBOX_TOKEN_QUERY}=${TOKEN}`,
+      );
+    } finally {
+      log.mockRestore();
+    }
   });
 });
 
