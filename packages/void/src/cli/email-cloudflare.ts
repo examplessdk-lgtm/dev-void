@@ -1328,6 +1328,15 @@ export interface EmailApplyResult {
   sendingReady: boolean;
   /** True when `addresses` was NOT written this run and the key is deleted instead. */
   addressesWithheld: boolean;
+  /**
+   * The inbound rows, together: routing ready AND subaddressing on AND `addresses`
+   * written. Routing alone is not "set up" — a refused subaddressing PATCH withholds
+   * `addresses` (no bearer call may fail, decision 11), so the next deploy creates no
+   * rule at all, and until the flag is on `support+T-42@` matches no rule for `support@`.
+   * `void email setup` exits 0 on this; `--require-email` gates on it plus the binding and
+   * a settled sending row. ONE field, computed here, so the two callers cannot drift.
+   */
+  inboundReady: boolean;
 }
 
 /**
@@ -1356,6 +1365,7 @@ export async function applyEmailSetup(
     subaddressingReady: pre.subaddressing.state === 'on',
     sendingReady: pre.sending.state === 'ready',
     addressesWithheld: false,
+    inboundReady: false,
   };
   const blocked = pre.blockers.filter((b) => b.scope === 'all');
   if (blocked.length > 0 || !pre.apex || !pre.mode) {
@@ -1534,6 +1544,8 @@ export async function applyEmailSetup(
   if (result.patch.sendEmail || result.patch.addresses !== undefined) {
     lines.push('  ✔ config    wrangler.jsonc updated');
   }
+  result.inboundReady =
+    result.routingReady && result.subaddressingReady && !result.addressesWithheld;
   return result;
 }
 

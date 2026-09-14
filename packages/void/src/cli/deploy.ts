@@ -4028,19 +4028,15 @@ async function runCloudflareEmailStep(
   // exactly the end state the `leaveAccount` branch above already returns as
   // `satisfied: false`. Gating `--require-email` on the binding would contradict both
   // that branch and the error text ("not fully set up … refusing to deploy"), so this
-  // mirrors `preflightEmail`'s own `ready` predicate instead: routing + subaddressing +
-  // a settled sending + the binding, with `addresses` actually written. A sending-scoped
+  // mirrors `preflightEmail`'s own `ready` predicate instead: the inbound rows (routing +
+  // subaddressing, with `addresses` actually written — `out.inboundReady`, the same field
+  // `void email setup` exits on) + a settled sending + the binding. A sending-scoped
   // blocker is settled there (Void cannot act on it) and is settled here; a plain
   // `sending enable` refusal (Workers Free) is NOT, on either side. `map` stays on
   // `bindingPresent`: the worker DOES ship with email, and a deploy may ship with email
   // while `satisfied` is false.
   const sendingSettled = out.sendingReady || pre.blockers.some((b) => b.scope === 'sending');
-  const satisfied =
-    bindingPresent &&
-    out.routingReady &&
-    out.subaddressingReady &&
-    !out.addressesWithheld &&
-    sendingSettled;
+  const satisfied = bindingPresent && out.inboundReady && sendingSettled;
   return {
     satisfied,
     configWritten,

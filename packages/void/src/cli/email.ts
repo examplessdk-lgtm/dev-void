@@ -370,9 +370,20 @@ export async function runEmailCloudflareCommand(
       pendingLabel: '(no rule yet)',
     }),
   );
-  if (!out.routingReady) {
+  // The inbound rows, not routing alone: a refused subaddressing PATCH after a successful
+  // enable withholds `addresses`, so the next deploy creates no rule and `+tag` mail
+  // matches nothing — "set up" would be false, and CI's `--require-email` (which gates on
+  // the same `inboundReady`) would refuse the deploy this command exists to prepare. A
+  // sending row that stays pending (Workers Free) is NOT a failure here: inbound is
+  // complete, `addresses` is committed, and the plan hint above is the warning.
+  if (!out.inboundReady) {
+    const missing = !out.routingReady
+      ? `Email Routing on ${pre.domain} is not ready`
+      : !out.subaddressingReady
+        ? `subaddressing on ${pre.apex} is still off (support+anything@ would not reach support@)`
+        : '`addresses` was withheld';
     log.warn(
-      `Email routing on ${pre.domain} is not ready yet — finish the step above, then rerun \`void email setup --platform cloudflare\`.`,
+      `Email is not set up on ${pre.domain} yet — ${missing}; no routing rule is created until it is. Finish the step above, then rerun \`void email setup --platform cloudflare\`.`,
     );
     return exit(1);
   }

@@ -1229,6 +1229,7 @@ describe('applyEmailSetup', () => {
     expect(out.subaddressingReady).toBe(true);
     expect(out.sendingReady).toBe(true);
     expect(out.addressesWithheld).toBe(false);
+    expect(out.inboundReady).toBe(true);
     expect(out.patch).toEqual({
       sendEmail: { name: 'SEND_EMAIL' },
       vars: { __VOID_EMAIL_FROM: 'noreply@mail.acme.com' },
@@ -1305,6 +1306,49 @@ describe('applyEmailSetup', () => {
     expect(out.lines[0]).toBe('  ✔ routing   acme.com enabled');
   });
 
+  it('routing enabled but the subaddressing PATCH refused → routingReady, NOT inboundReady; addresses withheld', async () => {
+    // The one partial state where `routingReady` is true and inbound is still not set up:
+    // the PATCH is a bearer call, so its refusal withholds `addresses` (decision 11) — no
+    // rule is created by the next deploy — and `+tag` mail matches no rule until the flag
+    // is on. Both callers must read `inboundReady`, not `routingReady`.
+    const fetchCalls: Array<FetchCall> = [];
+    const { inputs } = transcriptInputs({
+      fetchCalls,
+      runnerTable: { 'email sending enable mail.acme.com': sendingEnabled('mail.acme.com') },
+      fetchTable: {
+        [ROUTING_DNS_POST]: () =>
+          jsonResponse(200, { success: true, result: { name: 'mail.acme.com' } }),
+        [ROUTING_PATCH]: () =>
+          jsonResponse(403, {
+            success: false,
+            errors: [{ code: 10000, message: 'Authentication error' }],
+          }),
+      },
+    });
+    const pre = await preflightEmail(inputs);
+    fetchCalls.length = 0;
+    const out = await applyEmailSetup(pre, inputs);
+    expect(fetchCalls.map((c) => c.method)).toEqual(['POST', 'PATCH']);
+    expect(out.routingReady).toBe(true);
+    expect(out.subaddressingReady).toBe(false);
+    expect(out.sendingReady).toBe(true);
+    expect(out.addressesWithheld).toBe(true);
+    expect(out.inboundReady).toBe(false);
+    expect(out.patch).toEqual({
+      sendEmail: { name: 'SEND_EMAIL' },
+      vars: { __VOID_EMAIL_FROM: 'noreply@mail.acme.com' },
+      addresses: null,
+    });
+    expect(out.lines).toEqual([
+      '  ✔ routing   mail.acme.com enabled',
+      '  ✘ routing   subaddressing on acme.com: Cloudflare answered 403 [code: 10000] — Authentication error',
+      '    turn it on in the Cloudflare dashboard → acme.com → Email → Settings → Subaddressing',
+      '  ✔ sending   mail.acme.com onboarded',
+      '  ! config    addresses withheld this run (session-bearer step failed); no routing rule is created for support@mail.acme.com',
+      '  ✔ config    wrangler.jsonc updated',
+    ]);
+  });
+
   it('bearer failure → dashboard fallback line, addresses withheld (deleted), deploy continues', async () => {
     const calls: Array<Call> = [];
     const { inputs } = transcriptInputs({
@@ -1317,6 +1361,7 @@ describe('applyEmailSetup', () => {
     const out = await applyEmailSetup(pre, inputs);
     expect(out.routingReady).toBe(false);
     expect(out.addressesWithheld).toBe(true);
+    expect(out.inboundReady).toBe(false);
     expect(out.patch.addresses).toBeNull();
     // Sending still onboarded → the binding is still written.
     expect(out.sendingReady).toBe(true);
@@ -1344,6 +1389,7 @@ describe('applyEmailSetup', () => {
     const out = await applyEmailSetup(pre, inputs);
     expect(fetchCalls.map((c) => c.method)).toEqual(['POST']);
     expect(out.addressesWithheld).toBe(true);
+    expect(out.inboundReady).toBe(false);
     expect(out.patch.addresses).toBeNull();
     expect(out.lines[0]).toBe(
       '  ✘ routing   mail.acme.com: Cloudflare answered 400 [code: 2062] — Email Routing is not enabled on this zone',
@@ -1401,6 +1447,7 @@ describe('applyEmailSetup', () => {
     expect(out.routingReady).toBe(false);
     expect(out.subaddressingReady).toBe(false);
     expect(out.addressesWithheld).toBe(true);
+    expect(out.inboundReady).toBe(false);
     expect(out.patch.addresses).toBeNull();
     expect(out.lines).toEqual([
       '  ✘ routing   mail.acme.com: Email Routing is not enabled on acme.com — a subdomain can only be added to a zone that already routes; Void never enables routing on the apex from the subdomain path',

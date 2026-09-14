@@ -1,8 +1,10 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { log } from '@clack/prompts';
 import { join } from 'pathslash';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 import {
+  SENDING_FREE_PLAN_HINT,
   WRANGLER_EMAIL_PROSE_VERSION,
   type EmailDns,
   type EmailWranglerRunResult,
@@ -124,6 +126,24 @@ function fakeDns(mx: Record<string, Array<string>>): EmailDns {
     },
     resolveTxt: async () => {
       throw noData();
+    },
+  };
+}
+
+/** Capture clack's `log.*` lines — the command's final verdict is one of those, not a `print` block. */
+function captureLog(): { lines: Array<string>; restore: () => void } {
+  const lines: Array<string> = [];
+  const spies = (['message', 'info', 'warn', 'error', 'success', 'step'] as const).map((level) =>
+    vi.spyOn(log, level).mockImplementation(((...args: Array<unknown>) => {
+      lines.push(args.map(String).join(' '));
+    }) as never),
+  );
+  return {
+    lines,
+    restore: () => {
+      for (const spy of spies) {
+        spy.mockRestore();
+      }
     },
   };
 }
@@ -403,6 +423,114 @@ describe('void email setup --platform cloudflare', () => {
     expect(config.send_email).toEqual([{ name: 'SEND_EMAIL' }]);
     expect(config.vars).toEqual({ __VOID_EMAIL_FROM: 'noreply@mail.acme.com' });
     expect(config.addresses).toBeUndefined();
+  });
+
+  it('routing came up but the subaddressing PATCH was refused: exit 1, subaddressing named, addresses withheld', async () => {
+    // The apex path: `wrangler email routing enable acme.com` succeeds, then the bearer
+    // PATCH `{ support_subaddress: true }` is refused. `addresses` is withheld (no bearer
+    // call may fail, decision 11), so the next deploy creates NO rule, and until the flag
+    // is on `support+T-42@` matches no rule for `support@` either. Routing alone is not
+    // "set up": the exit and the verdict line must say what is missing and to rerun.
+    const root = makeProject({ from: 'noreply@acme.com' });
+    roots.push(root);
+    const configPath = join(root, 'wrangler.jsonc');
+    const { deps, calls, fetchCalls, printed } = transcriptDeps({
+      runnerTable: {
+        'email routing settings acme.com': routingSettings('acme.com', 'unconfigured', false),
+        'email sending settings acme.com': sendingNotFound('acme.com'),
+        'email routing enable acme.com': {
+          status: 0,
+          stdout: 'Email Routing enabled for acme.com (status: ready)\n',
+          stderr: BETA_WARNING,
+        },
+        'email sending enable acme.com': sendingEnabled('acme.com'),
+      },
+      fetchTable: {
+        [`PATCH /zones/${ZONE_ID}/email/routing`]: () =>
+          jsonResponse(403, {
+            success: false,
+            errors: [{ code: 10000, message: 'Authentication error' }],
+          }),
+      },
+      mx: {},
+    });
+    const logged = captureLog();
+    let code: number;
+    try {
+      code = await run(root, 'setup', { ...deps, isInteractive: true, confirm: async () => true });
+    } finally {
+      logged.restore();
+    }
+
+    expect(code).toBe(1);
+    expect(calls.map((c) => c.args.slice(0, 4))).toContainEqual([
+      'email',
+      'routing',
+      'enable',
+      'acme.com',
+    ]);
+    expect(fetchCalls.map((c) => c.method)).toEqual(['GET', 'GET', 'PATCH']);
+    const output = printed.join('\n');
+    expect(output).toContain('✔ routing   acme.com enabled');
+    expect(output).toContain(
+      '✘ routing   subaddressing on acme.com: Cloudflare answered 403 [code: 10000] — Authentication error',
+    );
+    expect(output).toContain('addresses withheld this run (session-bearer step failed)');
+    // Routing DID come up, so the binding + sender var are written; `addresses` is not.
+    const config = readJsonc(configPath);
+    expect(config.send_email).toEqual([{ name: 'SEND_EMAIL' }]);
+    expect(config.vars).toEqual({ __VOID_EMAIL_FROM: 'noreply@acme.com' });
+    expect(config.addresses).toBeUndefined();
+    // The verdict: not "set up" — what is missing, and the rerun.
+    const verdict = logged.lines.join('\n');
+    expect(verdict).not.toContain('Email set up on');
+    expect(verdict).toContain('subaddressing');
+    expect(verdict).toContain('rerun `void email setup --platform cloudflare`');
+  });
+
+  it('Workers Free: routing + subaddressing on, sending refused → exit 0 with the plan hint, addresses written', async () => {
+    // Sending onboarding needs Workers Paid, which Void cannot buy; inbound is complete and
+    // `addresses` is committed, which is all `setup` exists to do (CI commits the file).
+    // The plan hint and the `(verified destinations only)` marker are the warning.
+    const root = makeProject();
+    roots.push(root);
+    const configPath = join(root, 'wrangler.jsonc');
+    const { deps, printed } = transcriptDeps({
+      runnerTable: {
+        'email sending enable mail.acme.com': {
+          status: 1,
+          stdout: '',
+          stderr: `${BETA_WARNING}✘ [ERROR] A request to the Cloudflare API (/zones/${ZONE_ID}/email/sending/subdomains) failed.\n\n  something went wrong [code: 10105]\n`,
+        },
+      },
+      fetchTable: {
+        [`POST /zones/${ZONE_ID}/email/routing/dns`]: () =>
+          jsonResponse(200, { success: true, result: { name: 'mail.acme.com' } }),
+        [`PATCH /zones/${ZONE_ID}/email/routing`]: () =>
+          jsonResponse(200, { success: true, result: { support_subaddress: true } }),
+      },
+    });
+    const logged = captureLog();
+    let code: number;
+    try {
+      code = await run(root, 'setup', { ...deps, isInteractive: true, confirm: async () => true });
+    } finally {
+      logged.restore();
+    }
+
+    expect(code).toBe(0);
+    const output = printed.join('\n');
+    expect(output).toContain('✔ routing   mail.acme.com enabled');
+    expect(output).toContain('✔ routing   subaddressing on for acme.com');
+    expect(output).toContain(
+      '! sending   mail.acme.com not onboarded [code: 10105] — account is not entitled to Email Sending',
+    );
+    expect(output).toContain(SENDING_FREE_PLAN_HINT);
+    expect(printed.at(-1)).toContain(
+      'outbound  sendEmail() from noreply@mail.acme.com   (verified destinations only)',
+    );
+    expect(readJsonc(configPath).addresses).toEqual(['support@mail.acme.com']);
+    expect(logged.lines.join('\n')).toContain('Email set up on mail.acme.com.');
   });
 
   it('second run, everything ready: no prompt, zero writes, config unchanged, exit 0', async () => {
