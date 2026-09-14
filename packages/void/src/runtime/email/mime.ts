@@ -38,6 +38,43 @@ export const MAX_MESSAGE_BYTES: number = 10 * 1024 * 1024;
  */
 const MAX_ATTACHMENT_BYTES_TOTAL: number = Math.floor((MAX_MESSAGE_BYTES * 3) / 4);
 
+/**
+ * Cap on the recipient count across `to`, `cc` and `bcc`, checked against
+ * the RAW input before a single address is parsed.
+ *
+ * The platform proxy refuses more than 100 recipients (`MAX_RECIPIENTS` in
+ * `proxy/src/email.ts`, counted on the deduplicated list this module
+ * produces), so on the platform a larger list is always rejected — but only
+ * after the tenant has parsed every address and rendered the whole `To:`
+ * header. Measured, that rendering costs about 250 bytes of heap per
+ * recipient plus the header's own ~31 bytes per character, so 230k short,
+ * valid addresses (a 4.8 MiB message, legal under `MAX_MESSAGE_BYTES`)
+ * terminated a 128 MB isolate instead of reaching the proxy's `INVALID_TO`.
+ * Under `void dev` the same list was captured as a success and failed only
+ * once deployed. Mirroring the cap here makes it a precise, catchable error
+ * at the call that went wrong, in every mode.
+ *
+ * This is the framework's own limit on an own-account deploy, where the
+ * `SEND_EMAIL` binding sends one envelope per recipient and imposes no
+ * per-call count. Cloudflare's object-form `send()` API caps `to + cc + bcc`
+ * at 50, so 100 is the looser of the two.
+ *
+ * Counted on the raw entries rather than after deduplication: parsing is what
+ * this bound exists to skip, so a list of 150 entries with 100 unique
+ * addresses is refused here where the proxy would have accepted it.
+ */
+export const MAX_RECIPIENTS: number = 100;
+
+/**
+ * Cap on one parsed address. RFC 5321 §4.5.3.1 allows a 64-octet local part
+ * and a 255-octet domain, so nothing over 320 characters can be delivered;
+ * the platform proxy applies the same `MAX_RECIPIENT_LENGTH` to the same
+ * parsed address. A display name is not bounded — it is folded or encoded
+ * into legal header lines at any length, and the tokenizers below keep that
+ * cost linear.
+ */
+export const MAX_ADDRESS_LENGTH: number = 320;
+
 const CRLF = '\r\n';
 const ASCII_PRINTABLE = /^[\x20-\x7e]*$/;
 const HEADER_NAME = /^[!-9;-~]+$/;
@@ -100,6 +137,12 @@ function fieldErrorCode(field: string): MimeErrorCode {
 
 function validateAddressParts(field: string, email: string, name?: string): void {
   rejectCRLF(`${field} address`, email);
+  if (email.length > MAX_ADDRESS_LENGTH) {
+    throw new MimeError(
+      fieldErrorCode(field),
+      `${field}: address is ${email.length} characters, over the ${MAX_ADDRESS_LENGTH}-character limit.`,
+    );
+  }
   // Address must be a single token with EXACTLY ONE '@', a non-empty local
   // part and a non-empty domain, and no whitespace, quoting, or
   // list-separators. Without the separator rule, a `to: "a@x,b@y"` would
@@ -148,9 +191,19 @@ export function parseAddress(value: Address, field: string): { email: string; na
     // Match `Display Name <email@domain>` with paired quotes around the
     // name (both or neither). The earlier regex had two independent
     // optional quotes, so a single stray `"` slipped through.
+    //
+    // The unquoted name must start and end on a non-whitespace character.
+    // The earlier `^\s*([^"<]+?)?\s*<` let three consecutive quantifiers
+    // compete for the same run of whitespace, which the backtracker
+    // resolves by trying every split — cubic in the run length. Measured:
+    // 4,000 leading spaces before a valid address (accepted, then trimmed)
+    // cost 10 s; a 16 KB run would exceed the 30 s CPU limit. Both forms
+    // accept the same strings with the same captures (checked exhaustively
+    // to length 7 over `a`, space, tab, `<`, `>`, `"`, `@`, `\`, `,`);
+    // this one is linear because `[^"<\s]` cannot take a space from `\s*`.
     const angle =
       value.match(/^\s*"((?:[^"\\]|\\.)*)"\s*<\s*([^>\s]+)\s*>\s*$/) ??
-      value.match(/^\s*([^"<]+?)?\s*<\s*([^>\s]+)\s*>\s*$/);
+      value.match(/^\s*(?:([^"<\s](?:[^"<]*[^"<\s])?)\s*)?<\s*([^>\s]+)\s*>\s*$/);
     if (angle) {
       const name = angle[1]?.trim();
       const email = angle[2];
@@ -171,6 +224,14 @@ function parseAddresses(
 ): Array<{ email: string; name?: string }> {
   const list = Array.isArray(value) ? value : [value];
   return list.map((entry) => parseAddress(entry, field));
+}
+
+/** Entries in one recipient field, counted the way `parseAddresses` will see them. */
+function countRecipients(value: Address | Array<Address> | undefined): number {
+  if (!value) {
+    return 0;
+  }
+  return Array.isArray(value) ? value.length : 1;
 }
 
 /**
@@ -283,6 +344,15 @@ export async function normalizeEmail(opts: {
       }
       rejectCRLF(`header '${name}'`, value);
     }
+  }
+  // Before any address is parsed: the count is what bounds the work below.
+  const recipientCount =
+    countRecipients(opts.to) + countRecipients(opts.cc) + countRecipients(opts.bcc);
+  if (recipientCount > MAX_RECIPIENTS) {
+    throw new MimeError(
+      'INVALID_TO',
+      `email: too many recipients (max ${MAX_RECIPIENTS}, got ${recipientCount}) across 'to', 'cc' and 'bcc'.`,
+    );
   }
   const from = parseAddress(opts.from, 'from');
   const to = parseAddresses(opts.to, 'to');
@@ -429,38 +499,40 @@ function formatAddressList(addrs: Array<{ email: string; name?: string }>): stri
  * Soft-fold long header lines at address-list boundaries (`, `) outside
  * any double-quoted string. A naive `split(/, /)` would split inside
  * `"Smith, John"`, corrupting quoted display names.
+ *
+ * Both tokenizers here slice the input at the boundaries they find rather
+ * than growing each piece with `current += ch`. V8 keeps that growth as a
+ * cons-string tree of about 32 bytes per character, live until the piece is
+ * next flattened — measured, a 4 MB header value held 128 MB across the two
+ * passes, so one 800k-character non-ASCII display name (a legal 4 MiB
+ * message) terminated a 128 MB isolate before `buildMime` could size it.
  */
 function splitAddressList(value: string): Array<string> {
   const parts: Array<string> = [];
-  let current = '';
+  let start = 0;
   let inQuotes = false;
   let escape = false;
   for (let i = 0; i < value.length; i++) {
     const ch = value[i];
     if (escape) {
-      current += ch;
       escape = false;
       continue;
     }
     if (ch === '\\' && inQuotes) {
-      current += ch;
       escape = true;
       continue;
     }
     if (ch === '"') {
       inQuotes = !inQuotes;
-      current += ch;
       continue;
     }
     if (!inQuotes && ch === ',' && value[i + 1] === ' ') {
-      parts.push(current);
-      current = '';
+      parts.push(value.slice(start, i));
       i++; // skip the space
-      continue;
+      start = i + 1;
     }
-    current += ch;
   }
-  parts.push(current);
+  parts.push(value.slice(start));
   return parts;
 }
 
@@ -472,37 +544,32 @@ function splitAddressList(value: string): Array<string> {
  */
 function splitFoldPoints(part: string): Array<string> {
   const tokens: Array<string> = [];
-  let current = '';
+  let start = 0;
   let inQuotes = false;
   let escape = false;
   for (let i = 0; i < part.length; i++) {
     const ch = part[i];
     if (escape) {
-      current += ch;
       escape = false;
       continue;
     }
     if (ch === '\\' && inQuotes) {
-      current += ch;
       escape = true;
       continue;
     }
     if (ch === '"') {
       inQuotes = !inQuotes;
-      current += ch;
       continue;
     }
     if (!inQuotes && (ch === ' ' || ch === '\t')) {
-      if (current.length > 0) {
-        tokens.push(current);
-        current = '';
+      if (i > start) {
+        tokens.push(part.slice(start, i));
       }
-      continue;
+      start = i + 1;
     }
-    current += ch;
   }
-  if (current.length > 0) {
-    tokens.push(current);
+  if (part.length > start) {
+    tokens.push(part.slice(start));
   }
   return tokens;
 }

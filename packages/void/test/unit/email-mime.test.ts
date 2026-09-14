@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vite-plus/test';
 import {
   buildMime,
+  MAX_ADDRESS_LENGTH,
   MAX_MESSAGE_BYTES,
+  MAX_RECIPIENTS,
   MimeError,
   normalizeEmail,
+  parseAddress,
 } from '../../src/runtime/email/mime.ts';
 
 function decode(bytes: Uint8Array): string {
@@ -377,6 +380,136 @@ describe('normalizeEmail', () => {
       attachments: [{ filename: 'ok.bin', content: new Uint8Array(1024) }],
     });
     expect(text).toContain('Content-Disposition: attachment; filename="ok.bin"');
+  });
+
+  /**
+   * An object address whose `email` records every read. `parseAddress` has
+   * to read it to do anything at all, so an untouched entry proves the list
+   * was refused before it was parsed.
+   */
+  function watchedAddress(reads: Array<number>, i: number): { email: string } {
+    return {
+      get email() {
+        reads.push(i);
+        return `u${i}@example.com`;
+      },
+    };
+  }
+
+  it('refuses more than MAX_RECIPIENTS across to, cc and bcc before parsing any of them', async () => {
+    // The platform proxy refuses the same count on the deduplicated list,
+    // but only after the tenant has parsed every entry and rendered the
+    // `To:` header — measured, 230k short valid addresses (a legal 4.8 MiB
+    // message) terminated a 128 MB isolate on the way there.
+    const reads: Array<number> = [];
+    const to = Array.from({ length: MAX_RECIPIENTS - 1 }, (_, i) => watchedAddress(reads, i));
+    let error: unknown;
+    try {
+      await normalizeEmail({
+        from: 'a@x.dev',
+        to,
+        cc: watchedAddress(reads, MAX_RECIPIENTS - 1),
+        bcc: [watchedAddress(reads, MAX_RECIPIENTS)],
+        subject: 's',
+        text: 't',
+      });
+    } catch (e) {
+      error = e;
+    }
+    expect(error).toBeInstanceOf(MimeError);
+    expect((error as MimeError).code).toBe('INVALID_TO');
+    expect((error as MimeError).message).toMatch(
+      new RegExp(`too many recipients \\(max ${MAX_RECIPIENTS}, got ${MAX_RECIPIENTS + 1}\\)`),
+    );
+    expect(reads).toEqual([]);
+  });
+
+  it('accepts exactly MAX_RECIPIENTS across the three fields', async () => {
+    const to = Array.from({ length: MAX_RECIPIENTS - 2 }, (_, i) => `u${i}@example.com`);
+    const email = await normalizeEmail({
+      from: 'a@x.dev',
+      to,
+      cc: 'cc@example.com',
+      bcc: ['bcc@example.com'],
+      subject: 's',
+      text: 't',
+    });
+    expect(email.to.length + email.cc.length + email.bcc.length).toBe(MAX_RECIPIENTS);
+  });
+
+  it('refuses an address over MAX_ADDRESS_LENGTH, with the code for its field', async () => {
+    // RFC 5321 §4.5.3.1: 64-octet local part + `@` + 255-octet domain.
+    const longest = `${'a'.repeat(64)}@${'b'.repeat(251)}.dev`;
+    expect(longest).toHaveLength(MAX_ADDRESS_LENGTH);
+    const over = `${'a'.repeat(65)}@${'b'.repeat(251)}.dev`;
+    const email = await normalizeEmail({ from: longest, to: longest, subject: 's', text: 't' });
+    expect(email.to[0].email).toBe(longest);
+    for (const [field, code] of [
+      ['to', 'INVALID_TO'],
+      ['from', 'INVALID_FROM'],
+      ['cc', 'MIME_ERROR'],
+    ] as const) {
+      let error: unknown;
+      try {
+        await normalizeEmail({
+          from: 'a@x.dev',
+          to: 'b@y.dev',
+          [field]: over,
+          subject: 's',
+          text: 't',
+        });
+      } catch (e) {
+        error = e;
+      }
+      expect(error).toBeInstanceOf(MimeError);
+      expect((error as MimeError).code).toBe(code);
+      expect((error as MimeError).message).toMatch(
+        new RegExp(
+          `^${field}: address is ${over.length} characters, over the ${MAX_ADDRESS_LENGTH}-character limit`,
+        ),
+      );
+    }
+    // The bound is on the parsed address, as at the proxy — a long display
+    // name around a legal address is not an oversize address.
+    const named = await normalizeEmail({
+      from: 'a@x.dev',
+      to: `"${'n'.repeat(2 * MAX_ADDRESS_LENGTH)}" <${longest}>`,
+      subject: 's',
+      text: 't',
+    });
+    expect(named.to[0].email).toBe(longest);
+  });
+
+  it('parses the display-name form in linear time', () => {
+    // `^\s*([^"<]+?)?\s*<` let three quantifiers share one run of
+    // whitespace; the backtracker tried every split, cubic in the run.
+    // Measured on that form: 2,000 spaces took 2 s, 4,000 took 10 s (16 s
+    // when the `>` is missing). A regex cannot be interrupted, so keep the
+    // run where a regression costs seconds, not the test's whole timeout.
+    const run = ' '.repeat(4000);
+    const started = performance.now();
+    expect(parseAddress(`${run}a@b.c`, 'to')).toEqual({ email: 'a@b.c' });
+    expect(() => parseAddress(`${run}<a@b.c`, 'to')).toThrow(MimeError);
+    expect(parseAddress(`\t${run}Name${run}<a@b.c>${run}`, 'to')).toEqual({
+      email: 'a@b.c',
+      name: 'Name',
+    });
+    expect(performance.now() - started).toBeLessThan(1000);
+  });
+
+  it('keeps the display-name form’s language after the regex change', () => {
+    // Shapes the old and new patterns were checked to agree on
+    // (exhaustively to length 7 over a 9-symbol alphabet); pinned here.
+    expect(parseAddress('a>b <c@d.e>', 'to')).toEqual({ email: 'c@d.e', name: 'a>b' });
+    expect(parseAddress('x<a@b.c>', 'to')).toEqual({ email: 'a@b.c', name: 'x' });
+    expect(parseAddress('\tJohn\tSmith\t<j@s.e>', 'to')).toEqual({
+      email: 'j@s.e',
+      name: 'John\tSmith',
+    });
+    expect(parseAddress('   <a@b.c>   ', 'to')).toEqual({ email: 'a@b.c' });
+    expect(() => parseAddress('a"b <c@d.e>', 'to')).toThrow(MimeError);
+    expect(() => parseAddress('a <b@c.d> e', 'to')).toThrow(MimeError);
+    expect(() => parseAddress('<a b@c.d>', 'to')).toThrow(MimeError);
   });
 });
 

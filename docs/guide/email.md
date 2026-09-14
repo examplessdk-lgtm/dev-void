@@ -82,6 +82,8 @@ For SaaS sending to arbitrary end-users (every signup gets a welcome email), the
 | `headers`     | `Record<string, string>`     | Custom headers; reserved headers (From, Date, etc.) are ignored. |
 | `attachments` | `Attachment[]`               | See [Attachments](#attachments).                                 |
 
+At most 100 recipients across `to`, `cc` and `bcc` per call, and each address is at most 320 characters (RFC 5321). Both are checked before anything is parsed or built and return `INVALID_TO`.
+
 `Address` accepts either a string (`"hello@acme.dev"` or `"Name <hello@acme.dev>"`) or an object (`{ email, name? }`). Display names with non-ASCII characters are RFC 2047 encoded automatically.
 
 On the platform the sender is pinned to your project. `from` must be your project's own platform address — `<project-slug>@mail.void.cloud` or `<project-slug>+<tag>@mail.void.cloud`, optionally with a display name (`Acme <acme+noreply@mail.void.cloud>`). Anything else is rejected with `INVALID_FROM`. Omit `from` and Void fills in `<project-slug>+noreply@mail.void.cloud` for you. Sending from your own domain on the platform is not supported yet.
@@ -174,7 +176,7 @@ Error codes:
 | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `BINDING_MISSING`        | No email transport: neither the worker's own `SEND_EMAIL` binding (an own-account deploy without `email.from`) nor the platform proxy is available, or a Class B/C dev server. |
 | `INVALID_FROM`           | `from` was missing, malformed, not the project sender (platform), or a sender Cloudflare would not accept (own account).                                                       |
-| `INVALID_TO`             | `to` was empty or contained an invalid address.                                                                                                                                |
+| `INVALID_TO`             | `to` was empty, contained an invalid or over-long address, or the call had more than 100 recipients.                                                                           |
 | `UNVERIFIED_DESTINATION` | Cloudflare rejected the recipient as unverified.                                                                                                                               |
 | `MIME_ERROR`             | Failed to build the MIME message (oversize attachments, malformed input).                                                                                                      |
 | `QUOTA_EXCEEDED`         | Platform quota for outbound email reached (retry next billing period), or Cloudflare's own rate or daily limit on your own account.                                            |

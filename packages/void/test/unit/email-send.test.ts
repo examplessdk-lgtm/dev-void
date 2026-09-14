@@ -166,6 +166,30 @@ describe('sendEmail (error mapping)', () => {
       expect(result.error.code).toBe('BINDING_MISSING');
     }
   });
+
+  it('returns INVALID_TO for an oversize recipient list before any transport is tried', async () => {
+    // Pre-flight: it must come back as a top-level `error`, from the
+    // harness (`void dev`) exactly as it would from a deployed worker — the
+    // proxy's own 100-recipient refusal used to be the first place a list
+    // like this was ever rejected, and only after the tenant had built it.
+    const harness = createEmailTestHarness();
+    try {
+      const result = await sendEmail({
+        from: 'a@x.dev',
+        to: Array.from({ length: 101 }, (_, i) => `u${i}@example.com`),
+        subject: 's',
+        text: 't',
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok && 'error' in result) {
+        expect(result.error.code).toBe('INVALID_TO');
+        expect(result.error.message).toMatch(/too many recipients \(max 100, got 101\)/);
+      }
+      expect(harness.messages).toHaveLength(0);
+    } finally {
+      harness.dispose();
+    }
+  });
 });
 
 describe('sendEmail (from defaulting)', () => {
