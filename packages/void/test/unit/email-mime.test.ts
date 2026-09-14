@@ -1,3 +1,6 @@
+import { execFileSync } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
+import { join } from 'pathslash';
 import { describe, expect, it } from 'vite-plus/test';
 import {
   buildMime,
@@ -579,6 +582,61 @@ describe('normalizeEmail', () => {
         text: 't',
       }),
     ).rejects.toThrow(/cannot be folded/);
+  });
+
+  it('refuses a header name that could never sit on a legal line, before rendering it', async () => {
+    // A field name never folds. `Name:` alone is the shortest line it can
+    // sit on — what `foldHeader` emits when the value's first token does
+    // not fit beside a long name — so 997 characters is the longest name
+    // with ANY legal rendering, and only with a value that folds: `Name:`
+    // is 998 octets, then ` a b`. The same name over an empty value is one
+    // 999-octet line, which is the post-render line check's to refuse, not
+    // this guard's: a bound one character tighter would reject a message
+    // that fits.
+    const longest = `X${'a'.repeat(998 - 1 - 1)}`;
+    expect(longest).toHaveLength(997);
+    const { text } = await build({
+      from: 'a@x.dev',
+      to: 'b@y.dev',
+      subject: 's',
+      text: 't',
+      headers: { [longest]: 'a b' },
+    });
+    expect(headerLines(text, longest)).toEqual([`${longest}:`, ' a b']);
+    await expect(
+      build({
+        from: 'a@x.dev',
+        to: 'b@y.dev',
+        subject: 's',
+        text: 't',
+        headers: { [longest]: '' },
+      }),
+    ).rejects.toThrow(/header line \d+ is 999 octets, over the 998-octet limit/);
+    // One character more has no legal rendering whatever the value.
+    await expect(
+      normalizeEmail({
+        from: 'a@x.dev',
+        to: 'b@y.dev',
+        subject: 's',
+        text: 't',
+        headers: { [`${longest}b`]: 'a b' },
+      }),
+    ).rejects.toThrow(/headers: a header name is 998 characters; a field name cannot be folded/);
+    // The guard is cheap on the input that used to be rendered four times
+    // over before the line check saw it: a 5 MiB name took 23 ms and
+    // 5.6 MB of heap to refuse post-render (measured); a 50 MiB one killed
+    // a 128 MB isolate. Refused here in 2 ms with no allocation.
+    const started = performance.now();
+    await expect(
+      normalizeEmail({
+        from: 'a@x.dev',
+        to: 'b@y.dev',
+        subject: 's',
+        text: 't',
+        headers: { ['X'.repeat(5 * 1024 * 1024)]: '' },
+      }),
+    ).rejects.toThrow(/a field name cannot be folded/);
+    expect(performance.now() - started).toBeLessThan(1000);
   });
 
   it('refuses an address over MAX_ADDRESS_LENGTH, with the code for its field', async () => {
@@ -1262,6 +1320,99 @@ describe('buildMime header size projection', () => {
     });
     expect(text).toContain('Subject: s\r\n');
   });
+
+  // A custom header's NAME is rendered verbatim too, and `normalizeEmail`
+  // bounds one name at under a kilobyte — not the sum, nor the count. With
+  // empty values the names and the `: ` CRLF around each are the whole
+  // message, and none of it was charged: 60k empty headers with
+  // 500-character names — a 30 MB message — projected to zero, rendered in
+  // full and peaked at 121 MB of a 128 MB isolate (measured, 240 ms); 100k
+  // of them went to 169 MB. Every name and its framing is charged now, so
+  // the same set is refused before a line is built (98 ms, 67 MB peak).
+  it('counts every custom header name and the framing around it', async () => {
+    const names = (count: number, len: number) =>
+      Object.fromEntries(Array.from({ length: count }, (_, i) => [`X${i}`.padEnd(len, 'a'), '']));
+    const started = performance.now();
+    // 22k names of 500 characters: 11 MB of names, nothing else.
+    await expectProjected({
+      from: 'a@x.dev',
+      to: 'b@y.dev',
+      subject: 's',
+      text: 't',
+      headers: names(22_000, 500),
+    });
+    // 31 ms measured; the bound leaves room for a loaded CI runner.
+    expect(performance.now() - started).toBeLessThan(2000);
+    // The bound is exact for a header with an empty value: 10,485 names of
+    // 996 characters project 745 octets under the cap and render 548 under
+    // it, so they build. One more 600-character name projects 141 under
+    // and renders 57 over, so the post-render check — not the projection —
+    // must be the one to refuse it. One more 996-character name is over
+    // by projection alone.
+    const fits = names(10_485, 996);
+    const { raw } = await build({
+      from: 'a@x.dev',
+      to: 'b@y.dev',
+      subject: 's',
+      text: 't',
+      headers: fits,
+    });
+    expect(raw.byteLength).toBeLessThanOrEqual(MAX_MESSAGE_BYTES);
+    await expect(
+      build({
+        from: 'a@x.dev',
+        to: 'b@y.dev',
+        subject: 's',
+        text: 't',
+        headers: { ...fits, ['Y'.padEnd(600, 'a')]: '' },
+      }),
+    ).rejects.toThrow(/message size \d+ bytes exceeds Cloudflare limit/);
+    await expectProjected({
+      from: 'a@x.dev',
+      to: 'b@y.dev',
+      subject: 's',
+      text: 't',
+      headers: names(10_486, 996),
+    });
+  }, 30_000);
+
+  // The runner's own heap is not capped, so the pin runs the projection in
+  // a child with the isolate's cap. 60k empty headers with 996-character
+  // names are 60 MB of names the caller already holds; rendering them held
+  // the folded lines, their join and `rawText` beside the names — three
+  // copies, 180 MB live — and died with `FATAL ERROR: Reached heap limit`
+  // before the size check (measured). The projection refuses them at an
+  // 88 MB peak, in 173 ms.
+  it('refuses 60 MB of header names inside a 128 MB heap', () => {
+    const mimeModule = pathToFileURL(
+      join(import.meta.dirname, '../../src/runtime/email/mime.ts'),
+    ).href;
+    const child = `
+      const { normalizeEmail, buildMime } = await import(process.argv[1]);
+      const headers = {};
+      for (let i = 0; i < 60_000; i++) headers['X' + i + 'a'.repeat(996 - 1 - String(i).length)] = '';
+      const t0 = performance.now();
+      const email = await normalizeEmail({ from: 'a@x.dev', to: 'b@y.dev', subject: 's', text: 't', headers });
+      let error;
+      try { buildMime(email); } catch (e) { error = e; }
+      console.log(JSON.stringify({ code: error?.code, message: error?.message, ms: performance.now() - t0 }));
+    `;
+    const stdout = execFileSync(
+      process.execPath,
+      ['--max-old-space-size=128', '--input-type=module', '-e', child, mimeModule],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000 },
+    );
+    const result = JSON.parse(stdout.trim().split('\n').at(-1) ?? '{}') as {
+      code?: string;
+      message?: string;
+      ms: number;
+    };
+    expect(result.code).toBe('MIME_ERROR');
+    expect(result.message).toMatch(PROJECTION);
+    // 173 ms measured locally; the bound leaves room for CI's slower runner
+    // (about 6x), where the old shape did not finish at all.
+    expect(result.ms).toBeLessThan(5000);
+  }, 30_000);
 
   it('never charges the whitespace that folding collapses', async () => {
     // `foldHeader` re-joins a long value from its non-WSP tokens, so 11 MiB

@@ -386,6 +386,24 @@ export async function normalizeEmail(opts: {
           `headers: '${name}' is not a valid RFC 5322 header name.`,
         );
       }
+      // A field name never folds. The shortest line that can carry it is
+      // `Name:` on its own — what `foldHeader` emits when the value's
+      // first token does not fit beside a long name — so a name over
+      // `MAX_LINE_OCTETS - 1` characters has no legal rendering whatever
+      // its value, and the post-render line check would refuse it. Refuse
+      // it here instead, as `normalizeAttachment` does a filename: that
+      // check runs only after the name has been lowercased, joined into
+      // its line, the header block, `rawText` and `raw` — four copies of a
+      // name that can be the whole message. `HEADER_NAME` admits only
+      // ASCII, so `length` is the octet count exactly and this cannot
+      // reject a name whose line would have fit.
+      if (name.length + HEADER_NAME_LINE_OVERHEAD > MAX_LINE_OCTETS) {
+        throw new MimeError(
+          'MIME_ERROR',
+          `headers: a header name is ${name.length} characters; a field name cannot be folded, ` +
+            `so its line would exceed the ${MAX_LINE_OCTETS}-octet limit in RFC 5322 §2.1.1. Shorten the name.`,
+        );
+      }
       rejectCRLF(`header '${name}'`, value);
     }
   }
@@ -670,6 +688,8 @@ const MAX_LINE_OCTETS = 998;
 const QUOTED_FILENAME_LINE_OVERHEAD = 12;
 /** ` "` + `"`: the shortest line a quoted display name can fold onto. */
 const QUOTED_NAME_LINE_OVERHEAD = 3;
+/** `:` alone: the shortest line a header name can sit on, its value folded onto the next. */
+const HEADER_NAME_LINE_OVERHEAD = 1;
 
 /**
  * First line of `text` that exceeds the octet limit, if any.
@@ -1151,6 +1171,17 @@ const ATTACHMENT_PART_MIN_OCTETS: number =
   CRLF.length; // the blank line before the body
 
 /**
+ * Octets every custom header costs around its value: the `: ` after the
+ * name and the CRLF that ends its line. Exact, not a floor, once the name
+ * is counted: `buildMime` renders each non-reserved custom header through
+ * `foldHeader`, which emits the name verbatim, then `: ` — or, when the
+ * value's first token does not fit beside the name, `:` CRLF SP, which is
+ * more — and `join(CRLF)` ends every header line, a custom header never
+ * being the last of the block (the body part's own headers follow it).
+ */
+const CUSTOM_HEADER_FRAMING_OCTETS: number = ': '.length + CRLF.length;
+
+/**
  * Lower bound on the octets of every header `buildMime` renders from
  * caller-supplied values: `Subject`, the custom headers, the addresses in
  * `From`, `To`, `Cc` and `Reply-To`, the `In-Reply-To` / `References` pair
@@ -1159,21 +1190,48 @@ const ATTACHMENT_PART_MIN_OCTETS: number =
  * and — twice, once per header it is rendered into — filename. `Bcc` is
  * never rendered and a reserved custom header is dropped, so neither is
  * counted — charging either could reject a message that fits. The fixed
- * `Name: ` and `CRLF` per header are omitted for the same reason a lower
- * bound may omit any term, EXCEPT for an attachment part: `normalizeAttachment`
- * bounds ONE filename at under a kilobyte, not the sum, and a message is
- * free to carry any number of parts, so the filename and the framing every
- * part is wrapped in are the whole size of a message of empty attachments.
- * Measured, 50k zero-byte attachments with legal 986-character filenames
- * rendered to 106 MB — held three to four times over between the parts,
- * their join, `rawText` and `raw` — and terminated a 128 MB isolate before
- * the final size check could return `MIME_ERROR`.
+ * `Name: ` and `CRLF` of the headers `buildMime` itself names — `Subject`,
+ * the address lists, the threading pair — are omitted for the same reason
+ * a lower bound may omit any term. They are NOT omitted where the caller
+ * controls the name or the count, because there they can be the whole
+ * message:
+ *
+ * - A custom header's name is rendered verbatim, and `normalizeEmail`
+ *   bounds ONE name at under a kilobyte, not the sum, nor the count. With
+ *   empty values the names and the `: ` CRLF around each are the entire
+ *   size, and the framing is exact once the name is counted (see
+ *   `CUSTOM_HEADER_FRAMING_OCTETS`), so charging both cannot reject a
+ *   message that fits. Measured before the name was charged, 60k empty
+ *   headers with 500-character names — a 30 MB message — projected to
+ *   zero, rendered in full and peaked at 121 MB of a 128 MB isolate; 100k
+ *   of them (50 MB) went to 169 MB.
+ * - An attachment part: `normalizeAttachment` bounds ONE filename at under
+ *   a kilobyte, not the sum, and a message is free to carry any number of
+ *   parts, so the filename and the framing every part is wrapped in are
+ *   the whole size of a message of empty attachments. Measured, 50k
+ *   zero-byte attachments with legal 986-character filenames rendered to
+ *   106 MB — held three to four times over between the parts, their join,
+ *   `rawText` and `raw` — and terminated a 128 MB isolate before the final
+ *   size check could return `MIME_ERROR`.
+ *
+ * The header COUNT is deliberately not bounded here. Each header now costs
+ * at least five octets (a one-character name, `: `, CRLF), so the count
+ * the projection can admit is finite, and past a few hundred thousand keys
+ * the caller's own object — measured at about 74 bytes per key, before
+ * `sendEmail` is called — is the dominant cost, which no check inside this
+ * module can pre-empt. Rendering does add live heap per header (about
+ * 150 bytes: two `Object.entries`, the `topHeaders` pair, the folded line),
+ * so a legal message of 500k four-character headers still does not fit a
+ * 128 MB isolate while one of 400k does; a bound on that would be the
+ * framework's own number — the platform proxy bounds bytes, not headers —
+ * and is left as a product decision rather than invented here.
  */
 function minHeaderOctets(email: NormalizedEmail): number {
   let octets = minHeaderValueOctets(email.subject);
   for (const [name, value] of Object.entries(email.headers)) {
     if (!RESERVED_HEADERS.has(name.toLowerCase())) {
-      octets += minHeaderValueOctets(value);
+      // `HEADER_NAME` admits only ASCII, so `length` is the name's octets.
+      octets += name.length + CUSTOM_HEADER_FRAMING_OCTETS + minHeaderValueOctets(value);
     }
   }
   octets += minAddressOctets(email.from);

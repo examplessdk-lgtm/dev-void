@@ -82,7 +82,7 @@ For SaaS sending to arbitrary end-users (every signup gets a welcome email), the
 | `headers`     | `Record<string, string>`     | Custom headers; reserved headers (From, Date, etc.) are ignored. |
 | `attachments` | `Attachment[]`               | See [Attachments](#attachments).                                 |
 
-At most 100 recipients across `to`, `cc` and `bcc` per call, and each address is at most 320 characters (RFC 5321). Both are checked before anything is parsed or built and return `INVALID_TO`.
+At most 100 recipients across `to`, `cc` and `bcc` per call, and each address is at most 320 characters (RFC 5321). Both are checked before anything is parsed or built and return `INVALID_TO`. Custom header names must be RFC 5322 field names (printable ASCII, no colon); a name too long to fit a 998-octet line — a field name cannot be folded — is rejected with `MIME_ERROR` before anything is built.
 
 `Address` accepts either a string (`"hello@acme.dev"` or `"Name <hello@acme.dev>"`) or an object (`{ email, name? }`). Display names with non-ASCII characters are RFC 2047 encoded automatically.
 
