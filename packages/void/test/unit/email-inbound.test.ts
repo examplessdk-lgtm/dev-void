@@ -131,6 +131,33 @@ describe('scanEmailHandlers', () => {
     const scan = await scanEmailHandlers(root);
     expect(scan.addresses.map((a) => a.address)).toEqual(['ok']);
   });
+
+  it('rejects a second _default.<ext> file instead of letting glob order pick one', async () => {
+    const root = setupRoot({
+      'email/_default.ts': 'export default () => {}',
+      'email/_default.js': 'export default () => {}',
+    });
+    // Glob order is readdir order, so either file may be reported as the
+    // "second" one — the error must name both regardless.
+    await expect(scanEmailHandlers(root)).rejects.toThrow(/is a second default handler next to/);
+    await expect(scanEmailHandlers(root)).rejects.toThrow(/"_default\.ts"/);
+    await expect(scanEmailHandlers(root)).rejects.toThrow(/"_default\.js"/);
+    await expect(scanEmailHandlers(root)).rejects.toThrow(
+      /keep exactly one email\/_default\.\* file/,
+    );
+    expect(() => scanEmailHandlersSync(root)).toThrow(/is a second default handler/);
+  });
+
+  it('matches _default exactly: _Default.ts and _default.test.ts are private helpers, not a collision', async () => {
+    const root = setupRoot({
+      'email/_default.mjs': 'export default () => {}',
+      'email/_Default.ts': 'export default () => {}',
+      'email/_default.test.ts': 'export default () => {}',
+    });
+    const scan = await scanEmailHandlers(root);
+    expect(scan.defaultHandler).toBe('_default.mjs');
+    expect(scan.addresses).toEqual([]);
+  });
 });
 
 describe('compileEmailPattern', () => {

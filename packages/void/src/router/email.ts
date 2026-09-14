@@ -169,7 +169,19 @@ function parseEmailFiles(files: Array<string>): {
       continue;
     }
     const basename = filePath.replace(/\.[^.]+$/, '');
+    // `_default` is a reserved filename and is matched exactly: `_Default.ts`
+    // or `_default.test.ts` fall through to the `_`-prefix skip below like
+    // any other private helper. Two `_default.<ext>` files (e.g. `.ts` next
+    // to `.js` mid-migration) would otherwise resolve to whichever the glob
+    // returned last — readdir order, not stable across filesystems — with
+    // the other silently unbundled. Reject, mirroring the regex-collision
+    // check on per-address handlers below.
     if (basename === '_default') {
+      if (defaultHandler !== undefined) {
+        throw new Error(
+          `email handler "${filePath}" is a second default handler next to "${defaultHandler}" — keep exactly one email/_default.* file.`,
+        );
+      }
       defaultHandler = filePath;
       continue;
     }
