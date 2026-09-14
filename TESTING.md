@@ -37,6 +37,20 @@ three processes per case and uses 30 seconds on Windows and 10 seconds elsewhere
 tests retain their default timeout. `waitForServer` already scales its timeout on Windows;
 callers should pass an unscaled value and leave enough hook time for that wait and setup.
 
+Windows integration tests also use `maxConcurrency: 2`. `maxWorkers` caps files, not concurrent
+tests inside each file: two CI workers with Vitest's default concurrency of five can open ten
+isolated browser contexts at once. The Windows cap reduces that to four without serializing
+files or changing Linux/macOS concurrency. Do not retry browser navigation to hide
+`ERR_NO_BUFFER_SPACE`; it reports a Windows socket resource failure, not a readiness timeout.
+
+The Windows setup hook prints one resource snapshot per integration file at the first failed
+test, before suite teardown. It records memory, the largest processes, dynamic TCP port ranges,
+and connection counts by state/PID. Collection is read-only, limited to ten seconds and 64 KiB,
+and retains partial output if it fails. Concurrent failures share the snapshot. It does not log
+environment variables, process command lines, or remote addresses, and does not replace the
+original test failure. Use this evidence to distinguish port, queue, and memory pressure rather
+than assuming every socket error is port exhaustion.
+
 ## Native Cloudflare live E2E tests
 
 Live tests are opt-in. They provision or update real resources and can write data, enqueue messages,
