@@ -150,7 +150,7 @@ type SendEmailResult =
   | { ok: false; deliveries: SendEmailRecipientResult[] }; // mid-batch failure
 ```
 
-`ids` carries one entry per envelope send. Because the CF `EmailMessage` envelope is single-recipient, multi-recipient calls (`to`/`cc`/`bcc`) fan out into one CF send per address, each with its own messageId.
+`ids` carries one entry per envelope send. Because the CF `EmailMessage` envelope is single-recipient, multi-recipient calls (`to`/`cc`/`bcc`) fan out into one CF send per unique address, each with its own messageId. Addresses are matched case-insensitively across the three fields and `recipient` is the lowercased address; a capture under `void dev` or the test harness reports the same list.
 
 There are three discriminated cases:
 

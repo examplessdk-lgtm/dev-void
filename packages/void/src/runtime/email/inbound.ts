@@ -747,11 +747,22 @@ function base64Decode(b64: string): Uint8Array {
 
 function quotedPrintableDecode(qp: string): Uint8Array {
   // RFC 2047 Q-encoding: `_` = space, `=XX` = hex byte, otherwise literal.
-  const bytes: Array<number> = [];
+  //
+  // Decode straight into a typed array. The payload regex in `decodeRfc2047`
+  // accepts whitespace, so an unfolded 10 MiB `Subject` is ONE encoded-word
+  // and this loop sees every character of it. Pushing each byte onto an
+  // `Array<number>` first held one boxed element per character — measured
+  // at 200 MB of heap for 10 MiB of plain Q text (330 MB on the whole reply
+  // path) — and terminated a 128 MB isolate before `buildMime`'s size
+  // projection could refuse the subject. Every input character yields at
+  // most one output byte, so `qp.length` is the exact upper bound and the
+  // decode holds nothing but the output.
+  const out = new Uint8Array(qp.length);
+  let kept = 0;
   for (let i = 0; i < qp.length; i++) {
     const ch = qp.charCodeAt(i);
     if (ch === 0x5f /* _ */) {
-      bytes.push(0x20);
+      out[kept++] = 0x20;
     } else if (ch === 0x3d /* = */ && i + 2 < qp.length) {
       // Both characters must be hex. `parseInt('0G', 16)` is 0, not NaN,
       // so a finiteness check accepted any pair that merely STARTED with
@@ -760,16 +771,16 @@ function quotedPrintableDecode(qp: string): Uint8Array {
       // RFC 2045 §6.7 asks of a robust decoder and what postal-mime does.
       const hex = qp.slice(i + 1, i + 3);
       if (/^[0-9A-Fa-f]{2}$/.test(hex)) {
-        bytes.push(parseInt(hex, 16));
+        out[kept++] = parseInt(hex, 16);
         i += 2;
       } else {
-        bytes.push(ch);
+        out[kept++] = ch;
       }
     } else {
-      bytes.push(ch);
+      out[kept++] = ch;
     }
   }
-  return new Uint8Array(bytes);
+  return out.subarray(0, kept);
 }
 
 /**

@@ -1,4 +1,6 @@
+import { execFileSync } from 'node:child_process';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
 import { join } from 'pathslash';
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 import { compileRouteTable } from '../../src/router/compile.ts';
@@ -1414,6 +1416,85 @@ describe('reply subject survives a hostile inbound header', () => {
     const subject = '=?UTF-8?Q?a?= '.repeat(Math.floor(MAX_MESSAGE_BYTES / 14));
     const reply = await buildReplyMessage(inbound(subject), { text: 'thanks', from: FROM });
     expect(reply.subject).toBe('Re:');
+  });
+
+  // The other shape of the same header: ONE encoded-word carrying the whole
+  // 10 MiB. The payload pattern accepts whitespace, so a folded `Subject`
+  // arrives (unfolded by `Headers`) as a single Q-word and the decoder sees
+  // every character of it. Pushing each byte onto an `Array<number>` first
+  // measured 199 MB of heap for the decode alone and 330 MB peak on the reply
+  // path — `FATAL ERROR: Reached heap limit` under `--max-old-space-size=128`,
+  // which is the tenant isolate — before `buildMime`'s projection could
+  // refuse the subject. Decoding into a preallocated `Uint8Array` peaks at
+  // 10.5 MB on the same path (42 ms). The runner's own heap is not capped,
+  // so the pin runs the reply in a child with the isolate's cap.
+  it('replies to a 10 MiB single Q-encoded word inside a 128 MB heap', () => {
+    const inboundModule = pathToFileURL(
+      join(import.meta.dirname, '../../src/runtime/email/inbound.ts'),
+    ).href;
+    const child = `
+      const { buildReplyMessage, createMessageProxy } = await import(process.argv[1]);
+      const subject = '=?UTF-8?Q?' + 'a'.repeat(${MAX_MESSAGE_BYTES} - 20) + '?=';
+      const raw = new TextEncoder().encode('body');
+      const { message } = createMessageProxy(
+        {
+          from: 'sender@remote.dev',
+          to: 'acme+support@mail.void.cloud',
+          headers: { subject },
+          raw,
+          rawSize: raw.length,
+        },
+        { slug: 'acme' },
+      );
+      const t0 = performance.now();
+      const reply = await buildReplyMessage(message, { text: 'thanks', from: ${JSON.stringify(FROM)} });
+      console.log(JSON.stringify({ subject: reply.subject, ms: performance.now() - t0 }));
+    `;
+    const stdout = execFileSync(
+      process.execPath,
+      ['--max-old-space-size=128', '--input-type=module', '-e', child, inboundModule],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000 },
+    );
+    const result = JSON.parse(stdout.trim().split('\n').at(-1) ?? '{}') as {
+      subject: string;
+      ms: number;
+    };
+    // The decoded word is one 10 MiB ASCII token no line can carry, so the
+    // subject falls back — the same answer the 750k-word shape gets.
+    expect(result.subject).toBe('Re:');
+    // 42 ms measured locally; the bound leaves room for CI's slower runner
+    // (about 6x), where the old `Array<number>` shape did not finish at all.
+    expect(result.ms).toBeLessThan(5000);
+  }, 30_000);
+
+  // A folded `Subject` reaches the decoder unfolded: `Headers` — Cloudflare's
+  // `ForwardableEmailMessage.headers` and the proxy's `new Headers(envelope
+  // .headers)` alike — rejects CR and LF, so what the payload can carry from a
+  // fold is the SP / HTAB that followed the CRLF. That whitespace is a literal
+  // byte to the Q decoder, and `prefixReplySubject` folds the run into the
+  // single space `_` would have produced.
+  it('decodes a Q-word carrying unfolded FWS to the same subject as the unfolded word', async () => {
+    const unfolded = await buildReplyMessage(inbound('=?UTF-8?Q?good=20sub_ject?='), {
+      text: 'thanks',
+      from: FROM,
+    });
+    const folded = await buildReplyMessage(inbound('=?UTF-8?Q?good=20sub\t ject?='), {
+      text: 'thanks',
+      from: FROM,
+    });
+    expect(unfolded.subject).toBe('Re: good sub ject');
+    expect(folded.subject).toBe(unfolded.subject);
+  });
+
+  it.each([
+    ['a lone = at the end', '=?UTF-8?Q?a=?=', 'Re: a='],
+    ['a one-digit escape at the end', '=?UTF-8?Q?a=4?=', 'Re: a=4'],
+    ['a well-formed escape at the end', '=?UTF-8?Q?a=41?=', 'Re: aA'],
+    ['a malformed second digit', '=?UTF-8?Q?a=4G?=', 'Re: a=4G'],
+    ['an escape that is the whole payload', '=?UTF-8?Q?=41?=', 'Re: A'],
+  ])('keeps the Q escape rules at the payload edge for %s', async (_label, subject, expected) => {
+    const reply = await buildReplyMessage(inbound(subject), { text: 'thanks', from: FROM });
+    expect(reply.subject).toBe(expected);
   });
 });
 

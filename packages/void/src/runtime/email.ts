@@ -595,15 +595,26 @@ async function postToDevInbox(
   }
 }
 
-/** Shared result shape for both capture paths (in-process sink and dev inbox). */
+/**
+ * Shared result shape for both capture paths (in-process sink and dev inbox).
+ *
+ * `ids` is built from the same deduplicated, lowercased list the two
+ * production transports send to, so code written against a captured result
+ * sees exactly what a deploy returns: one entry per unique address, keyed the
+ * way `sendViaBinding` and the proxy report it. Mapping every `to`/`cc`/`bcc`
+ * occurrence instead handed a test or `void dev` handler one success per
+ * occurrence in its original case — deliveries that never happen once
+ * deployed. The captured message itself keeps the original fields; the
+ * inbox displays what was asked for, the result reports what would be sent.
+ */
 function capturedResult(normalized: NormalizedEmail, captureId: string): SendEmailResult {
-  const recipients = [...normalized.to, ...normalized.cc, ...normalized.bcc];
+  const recipients = uniqueRecipients(normalized);
   if (recipients.length === 0) {
     return err('INVALID_TO', "email: 'to' must include at least one recipient.");
   }
   return {
     ok: true,
-    ids: recipients.map((r) => ({ recipient: r.email, messageId: captureId })),
+    ids: recipients.map((recipient) => ({ recipient, messageId: captureId })),
   };
 }
 

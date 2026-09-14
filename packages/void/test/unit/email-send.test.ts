@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vite-plus/test';
+import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 import { sendEmail } from '../../src/runtime/email.ts';
 import {
   clearDevBuffer,
@@ -11,6 +11,22 @@ import { withRuntimeEnv } from '../../src/runtime/env.ts';
 afterEach(() => {
   clearDevBuffer();
 });
+
+// Stand-in for workerd's `EmailMessage`, so the own-account `SEND_EMAIL`
+// transport can run in the plain-node runner and its result be compared
+// with a captured one.
+const fake = vi.hoisted(() => {
+  class FakeEmailMessage {
+    constructor(
+      readonly from: string,
+      readonly to: string,
+      readonly raw: ReadableStream<Uint8Array> | string,
+    ) {}
+  }
+  return { FakeEmailMessage };
+});
+
+vi.mock('cloudflare:email', () => ({ EmailMessage: fake.FakeEmailMessage }));
 
 /**
  * Build a fake `__VOID_PROXY` service binding that responds to
@@ -97,6 +113,62 @@ describe('sendEmail (test harness)', () => {
       expect(harness.messages.some((m) => m.subject === 'harness-only')).toBe(true);
     } finally {
       harness.dispose();
+    }
+  });
+
+  // A captured result must be the result a deploy returns. Both production
+  // transports send to `uniqueRecipients()` — one envelope per address,
+  // matched case-insensitively and reported lowercased — while the capture
+  // path mapped every `to`/`cc`/`bcc` occurrence in its original case, so a
+  // test written against it expected four deliveries where production makes
+  // two. The captured MESSAGE still carries the fields as given: the inbox
+  // shows what was asked for, `ids` reports what would be sent.
+  it('reports one id per unique address, the way the production transports do', async () => {
+    const opts = {
+      from: 'a@x.dev',
+      to: ['A@x.dev'],
+      cc: ['a@x.dev'],
+      bcc: ['Bob <B@x.dev>', 'b@x.dev'],
+      subject: 's',
+      text: 't',
+    };
+    const harness = createEmailTestHarness();
+    let captured: Awaited<ReturnType<typeof sendEmail>>;
+    try {
+      captured = await sendEmail(opts);
+      expect(harness.messages).toHaveLength(1);
+      const m = harness.messages[0];
+      expect(m.to).toEqual([{ email: 'A@x.dev' }]);
+      expect(m.cc).toEqual([{ email: 'a@x.dev' }]);
+      expect(m.bcc).toEqual([{ email: 'B@x.dev', name: 'Bob' }, { email: 'b@x.dev' }]);
+    } finally {
+      harness.dispose();
+    }
+    expect(captured.ok).toBe(true);
+    if (!captured.ok) {
+      return;
+    }
+    expect(captured.ids).toEqual([
+      { recipient: 'a@x.dev', messageId: captured.ids[0].messageId },
+      { recipient: 'b@x.dev', messageId: captured.ids[0].messageId },
+    ]);
+    expect(captured.ids[0].messageId).toMatch(/^dev_/);
+
+    // The same call through the own-account binding: the recipients the
+    // capture reported are exactly the envelopes production sends.
+    const sent: Array<string> = [];
+    const binding = {
+      async send(msg: unknown) {
+        const m = msg as InstanceType<typeof fake.FakeEmailMessage>;
+        sent.push(m.to);
+        return { messageId: `cf-${m.to}` };
+      },
+    };
+    const deployed = await withRuntimeEnv({ SEND_EMAIL: binding }, () => sendEmail(opts));
+    expect(deployed.ok).toBe(true);
+    if (deployed.ok) {
+      expect(deployed.ids.map((d) => d.recipient)).toEqual(captured.ids.map((d) => d.recipient));
+      expect(sent).toEqual(captured.ids.map((d) => d.recipient));
     }
   });
 

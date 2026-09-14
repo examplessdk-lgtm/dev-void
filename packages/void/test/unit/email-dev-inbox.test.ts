@@ -228,6 +228,32 @@ describe('sendEmail -> dev inbox (cross-process transport)', () => {
     expect(subjectsInListHtml(await listed.text())).toContain('Cross-process hello');
   });
 
+  // The cross-process capture answers with the same `ids` the in-process
+  // sink does — one per unique address, lowercased, as production sends —
+  // while the buffered message the inbox renders keeps every field as given.
+  it('reports one id per unique address while the buffered message keeps the fields', async () => {
+    const server = createFakeViteServer();
+    const assets = fakeAssetsBinding(server);
+    const result = await withRuntimeEnv({ [DEV_INBOX_ENV_VAR]: 'ASSETS', ASSETS: assets }, () =>
+      sendEmail({
+        from: 'a@x.dev',
+        to: ['A@x.dev'],
+        cc: ['a@x.dev'],
+        bcc: ['Bob <B@x.dev>', 'b@x.dev'],
+        subject: 'dedup-check',
+        text: 't',
+      }),
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.ids.map((d) => d.recipient)).toEqual(['a@x.dev', 'b@x.dev']);
+    }
+    const [message] = listDevMessages();
+    expect(message.to).toEqual([{ email: 'A@x.dev' }]);
+    expect(message.cc).toEqual([{ email: 'a@x.dev' }]);
+    expect(message.bcc).toEqual([{ email: 'B@x.dev', name: 'Bob' }, { email: 'b@x.dev' }]);
+  });
+
   it('serves the captured .eml back from the raw route', async () => {
     const server = createFakeViteServer();
     const assets = fakeAssetsBinding(server);
