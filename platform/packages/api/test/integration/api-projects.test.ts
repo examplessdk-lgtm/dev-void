@@ -1067,6 +1067,53 @@ describe('POST /projects', () => {
     });
   });
 
+  // The slug is the prefix of the project's email local-part
+  // (`<slug>+noreply@<domain>`), which RFC 5321 caps at 64 octets. The runtime
+  // refuses to build a default sender from a slug over 56, so a longer slug
+  // must never be allocated.
+  it('accepts a 56-character slug', async () => {
+    const user = await createTestUser(env.db);
+    const slug = `len-${'a'.repeat(52)}`;
+    expect(slug).toHaveLength(56);
+
+    const res = await app.fetch(
+      new Request('http://localhost/projects', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${user.jwt}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ slug }),
+      }),
+      env,
+    );
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { slug: string };
+    expect(body.slug).toBe(slug);
+  });
+
+  it('rejects a 57-character slug', async () => {
+    const user = await createTestUser(env.db);
+    const slug = `len-${'a'.repeat(53)}`;
+    expect(slug).toHaveLength(57);
+
+    const res = await app.fetch(
+      new Request('http://localhost/projects', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${user.jwt}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ slug }),
+      }),
+      env,
+    );
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: 'slug must be at most 56 characters' });
+    // Refused before allocation: nothing was inserted.
+    expect(await env.db.select().from(projects).where(eq(projects.slug, slug))).toEqual([]);
+  });
+
   it('rejects short slug for free tier users', async () => {
     const user = await createTestUser(env.db);
 
@@ -2670,7 +2717,14 @@ describe('POST /projects — owner email destination auto-add', () => {
 
     const res = await createProjectAs(user, 'auto-add-app', emailEnv());
     expect(res.status).toBe(201);
-    const project = (await res.json()) as { id: string };
+    const project = (await res.json()) as {
+      id: string;
+      owner_email_destination?: { address: string; verified?: unknown };
+    };
+    // The response names the address being registered so the CLI can explain
+    // the verification email that may follow. It carries no outcome: the add
+    // runs after the response, so `verified` cannot be known here.
+    expect(project.owner_email_destination).toEqual({ address: ownerEmail.toLowerCase() });
 
     const [row] = await env.db
       .select()
@@ -2715,7 +2769,14 @@ describe('POST /projects — owner email destination auto-add', () => {
 
     const res = await createProjectAs(user, 'auto-add-second', emailEnv());
     expect(res.status).toBe(201);
-    const project = (await res.json()) as { id: string };
+    const project = (await res.json()) as {
+      id: string;
+      owner_email_destination?: { address: string };
+    };
+    // Same notice as the fresh-address case: the response is built before
+    // the add runs, so it cannot (and must not claim to) know CF adopted a
+    // verified address.
+    expect(project.owner_email_destination).toEqual({ address: ownerEmail });
 
     const [row] = await env.db
       .select()
@@ -2860,6 +2921,8 @@ describe('POST /projects — owner email destination auto-add', () => {
     const res = await createProjectAs(user, 'auto-add-no-domain', env);
     expect(res.status).toBe(201);
     expect(calls).toEqual([]);
+    // No add scheduled, so the response must not announce one.
+    expect(await res.json()).not.toHaveProperty('owner_email_destination');
   });
 
   it('skips synthetic GitHub noreply addresses, which are not deliverable', async () => {
@@ -2871,6 +2934,7 @@ describe('POST /projects — owner email destination auto-add', () => {
     const res = await createProjectAs(user, 'auto-add-synthetic', emailEnv());
     expect(res.status).toBe(201);
     expect(calls).toEqual([]);
+    expect(await res.json()).not.toHaveProperty('owner_email_destination');
   });
 
   // The project-slug mirror the email proxy reads to pin a project's outbound

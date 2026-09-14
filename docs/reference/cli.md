@@ -330,6 +330,8 @@ For the Void platform, project resolution precedence is:
 
 If no project is linked and no override is provided, CLI prompts to link or create one. In CI (non-TTY), `void deploy` errors out instead — set `VOID_PROJECT` or pass `--project <slug>`.
 
+A new project's slug is lowercase alphanumeric with interior dashes, at most 56 characters — it is also the project's email sender, `<slug>+noreply@<mail domain>`, and that local part must fit RFC 5321's 64 octets. Slugs of 5 characters or fewer need a paid plan. Creating a project also registers the owner's own email address as a recipient (see `void email allow`); the CLI says so, and `void email destinations` shows whether it is verified yet.
+
 That fallback is mainly for projects that skipped Void project setup during `void init`.
 
 ### `void deploy --platform cloudflare`

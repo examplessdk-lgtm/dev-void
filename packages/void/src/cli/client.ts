@@ -115,14 +115,15 @@ export type CreateProjectResponse = {
   id: string;
   slug: string;
   /**
-   * Present when the platform auto-added the project owner's own address as
-   * an outbound email destination. `verified: false` means Cloudflare has
-   * mailed them a verification link that must be clicked before any send to
-   * that address is accepted.
+   * Present exactly when the platform scheduled the project owner's own
+   * address to be registered as an outbound email destination. The
+   * registration runs after the response is sent, so this says nothing about
+   * its outcome — Cloudflare may mail a verification link, or adopt an
+   * address the owner already verified. `void email destinations` shows the
+   * resulting state.
    */
   owner_email_destination?: {
     address: string;
-    verified: boolean;
   };
 };
 

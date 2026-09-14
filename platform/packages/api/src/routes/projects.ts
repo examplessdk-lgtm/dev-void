@@ -140,6 +140,17 @@ export const RESERVED_SLUGS = new Set([
   'www',
 ]);
 
+/**
+ * Longest slug a project may claim. The slug is an EMAIL local-part prefix:
+ * the runtime's default sender is `<slug>+noreply@<EMAIL_SENDER_DOMAIN>` and
+ * inbound mail arrives at `<slug>+<tag>@`. RFC 5321 § 4.5.3.1.1 caps a
+ * local-part at 64 octets and `+noreply` takes 8 of them, so a slug over 56
+ * has no working default sender (the runtime's `VALID_SLUG` refuses it and
+ * `sendEmail` returns `INVALID_FROM`). 56 also sits inside the 63-octet DNS
+ * label `<slug>.void.app` needs, which nothing else enforced either.
+ */
+export const MAX_SLUG_LENGTH = 56;
+
 const DESTRUCTIVE_PATTERNS = [
   /\bDROP\s+TABLE\b/i,
   /\bDROP\s+VIEW\b/i,
@@ -603,6 +614,12 @@ const app = new Hono<ApiEnv>()
       return context.json({ error: 'slug must be lowercase alphanumeric with dashes' }, 400);
     }
 
+    // See MAX_SLUG_LENGTH: the slug has to fit in front of `+noreply@` in a
+    // 64-octet SMTP local-part. The CLI treats this 400 as re-promptable.
+    if (body.slug.length > MAX_SLUG_LENGTH) {
+      return context.json({ error: `slug must be at most ${MAX_SLUG_LENGTH} characters` }, 400);
+    }
+
     if (RESERVED_SLUGS.has(body.slug)) {
       return context.json({ error: 'this name is reserved' }, 400);
     }
@@ -644,6 +661,7 @@ const app = new Hono<ApiEnv>()
       // verification email to the owner.
       const ownerEmail = context.get('user').email;
       if (context.env.EMAIL_SENDER_DOMAIN && ownerEmail && !isSyntheticProviderEmail(ownerEmail)) {
+        const address = ownerEmail.toLowerCase();
         // Off the response path: CF Email Routing has no timeout in
         // `cfFetch`, and project creation must not wait on it. Nothing
         // downstream depends on the row existing yet — a pending row emits
@@ -656,10 +674,17 @@ const app = new Hono<ApiEnv>()
             context.get('db'),
             context.env.ROUTING,
             project.id,
-            ownerEmail.toLowerCase(),
+            address,
             userId,
           ),
         );
+        // Tell the caller WHICH address is being registered, and nothing
+        // more: whether CF mails a verification link (fresh address) or
+        // adopts one the owner already verified is decided by the add above,
+        // which has not run yet. The CLI prints this so the verification
+        // email that may follow is explained; `void email destinations`
+        // shows the outcome.
+        return context.json({ ...project, owner_email_destination: { address } }, 201);
       }
       return context.json(project, 201);
     } catch (err) {
