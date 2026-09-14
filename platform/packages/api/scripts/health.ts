@@ -7,6 +7,7 @@
  * Usage:
  *   node scripts/health.ts            # production
  *   node scripts/health.ts --staging  # staging
+ *   VOID_TOKEN=... node scripts/health.ts   # CI / explicit token
  */
 
 import { readFileSync, readdirSync } from 'node:fs';
@@ -16,6 +17,20 @@ import { join, resolve } from 'node:path';
 // ── Config ──────────────────────────────────────────────────────────
 
 const isStaging = process.argv.includes('--staging');
+
+const KEYRING_SERVICE = 'dev.void.cli';
+
+// The keyring is a native addon. Load it lazily and treat a missing binary
+// (CI, Docker, SSH) like an empty keychain, so VOID_TOKEN and the file
+// fallback keep working without it.
+async function keyringGet(account: string): Promise<string | null> {
+  try {
+    const { Entry } = await import('@napi-rs/keyring');
+    return new Entry(KEYRING_SERVICE, account).getPassword();
+  } catch {
+    return null;
+  }
+}
 
 type Config = Readonly<{
   token?: string;
@@ -31,13 +46,17 @@ function readConfig(): Config {
   }
 }
 
-const config = readConfig();
-const token = isStaging ? config.stagingToken : config.token;
+// Token resolution order: VOID_TOKEN env > system keychain > ~/.void/config.json.
+// Mirrors getToken() in packages/void/src/cli/auth.ts (read-only: no migration here).
+const account = isStaging ? 'stagingToken' : 'token';
+const token = process.env.VOID_TOKEN || (await keyringGet(account)) || readConfig()[account];
 const baseUrl = isStaging ? 'https://api.staging.void.cloud' : 'https://api.void.cloud';
 
 if (!token) {
-  console.error(`No ${isStaging ? 'stagingToken' : 'token'} found in ~/.void/config.json`);
-  console.error('Run `void login` first.');
+  console.error(`No ${account} found in the system keychain or ~/.void/config.json.`);
+  console.error(
+    'Run `void auth login` first (in a staging project for --staging), or set VOID_TOKEN.',
+  );
   process.exit(1);
 }
 
