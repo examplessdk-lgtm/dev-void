@@ -10,10 +10,10 @@ describe('dashboard auth middleware', () => {
     expect(isPublicDashboardPath('/assets/layout.css')).toBe(true);
   });
 
-  it('keeps dashboard routes behind auth', () => {
+  it('keeps every non-auth route behind authentication', () => {
     expect(isPublicDashboardPath('/')).toBe(false);
-    expect(isPublicDashboardPath('/projects/proj_123')).toBe(false);
-    expect(isPublicDashboardPath('/settings')).toBe(false);
+    expect(isPublicDashboardPath('/private')).toBe(false);
+    expect(isPublicDashboardPath('/account')).toBe(false);
     expect(isPublicDashboardPath('/assetz/layout.css')).toBe(false);
   });
 });

@@ -1,30 +1,25 @@
 # @voidcloud/dashboard
 
-User-facing dashboard for Void. Built as a React Pages mode app, dogfooding the
-platform.
+Authentication frontend for the Void platform. Built as a React Pages mode app,
+dogfooding the platform.
 
 ## Architecture
 
 - **React Pages mode** - `voidPlugin()` + `voidReact()`, SSR with client hydration.
-- **API-only data access** - loaders and actions call the platform API. The dashboard
-  does not connect to platform Postgres directly.
 - **Auth** - OAuth (GitHub/Google) via the platform's `/auth/login` flow. The JWT is
   stored in an httpOnly cookie (`void_token`). Middleware validates the token with
   `GET /me`.
-- **Preview gate** - authenticated non-admin users see a gated page while the
-  dashboard is rebuilt. Admin users can access the dashboard routes.
 - **Styling** - Tailwind CSS v4 with the Void design system from `@voidcloud/ui`
   (VoidZero theme styles, fonts, assets, and React UI primitives).
 
 ## Pages
 
-| Route           | Purpose                                         |
-| --------------- | ----------------------------------------------- |
-| `/login`        | OAuth buttons (GitHub, Google)                  |
-| `/`             | Admin-gated project list                        |
-| `/projects/:id` | Deployments, usage, domains, secrets, resources |
-| `/settings`     | Profile                                         |
-| `/logout`       | Clears cookie, redirects to login               |
+| Route            | Purpose                                  |
+| ---------------- | ---------------------------------------- |
+| `/login`         | OAuth buttons (GitHub, Google)           |
+| `/auth/callback` | Exchanges the login response for a token |
+| `/`              | Minimal authenticated confirmation page  |
+| `/logout`        | Clears cookie, redirects to login        |
 
 ## Local Development
 
@@ -71,23 +66,18 @@ on the dashboard side, so it never activates in production.
 
 ```text
 lib/
-  api.ts                    # Typed platform API client + fetch helpers
+  api.ts                    # Typed authentication API fetch helpers
 middleware/
-  01.auth.ts                # void_token validation through /me + admin preview gate
+  01.auth.ts                # void_token validation through /me
 pages/
-  layout.tsx                # Top bar with nav + user info
+  layout.tsx                # Authenticated shell with logout
   login.tsx                 # OAuth login buttons
   login.server.ts           # Builds provider login URLs
   logout.tsx
   logout.server.ts          # Cookie clear + redirect
-  index.tsx                 # Project list or preview gate
-  index.server.ts           # API reads for projects
-  settings.tsx              # Profile
-  settings.server.ts        # Session user from middleware
+  index.tsx                 # Authenticated confirmation page
+  index.server.ts           # Session user from middleware
   auth/
     callback.tsx
     callback.server.ts      # OAuth callback token/code exchange
-  projects/
-    [id].tsx                # Project detail
-    [id].server.ts          # API reads/actions for project dashboard data
 ```

@@ -79,7 +79,7 @@ function LoginPageShell({ children }: { children: ReactNode }) {
 export default function LoginPage({ githubUrl, googleUrl, devLoginUrl }: Props) {
   return (
     <LoginPageShell>
-      <h1 className="max-w-[25rem] text-pretty">Sign in to your dashboard.</h1>
+      <h1 className="max-w-[25rem] text-pretty">Sign in to Void.</h1>
       <Stack alignCenter className="mt-8 sm:!flex-row" gap={20} vertical>
         <a className="button button--primary text-white! hover:text-white!" href={githubUrl}>
           <span className="text-white">Continue with GitHub</span>

@@ -39,13 +39,13 @@ function FlexibleFooterSpacer() {
 }
 
 export default function Layout({ children }: { children: ReactNode }) {
-  const { user, canAccessDashboard } = useShared<DashboardShared>();
+  const { user } = useShared<DashboardShared>();
   const navigation = useNavigation();
   const isLoading = navigation.state !== 'idle';
 
   useEffect(() => preventDragging(), []);
 
-  if (!user || !canAccessDashboard) {
+  if (!user) {
     return (
       <>
         {isLoading && <div className="nav-progress loading" />}
@@ -69,10 +69,7 @@ export default function Layout({ children }: { children: ReactNode }) {
         <div className="marketing-layout flex min-h-screen flex-col bg-white text-primary dark:bg-primary dark:text-white">
           <AppHeader
             accountMenuLabel={user.login}
-            accountMenuItems={[
-              { icon: 'lucide:settings', link: '/settings', text: 'Settings' },
-              { icon: 'lucide:log-out', link: '/logout', text: 'Logout' },
-            ]}
+            accountMenuItems={[{ icon: 'lucide:log-out', link: '/logout', text: 'Logout' }]}
           />
           <div className="flex flex-1 flex-col">
             {children}

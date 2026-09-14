@@ -143,15 +143,22 @@ void describe(`kitchen-sink smoke (${BASE})`, { concurrency: true }, () => {
 
       const assetUrl = `${BASE}/${assetMatch![1]}`;
 
+      // `cache: 'no-store'` makes this a NETWORK get, so the assertion reads the
+      // response the platform just produced. Reading the stored entry instead
+      // (plain HEAD after the page load, which is how this test used to run)
+      // reports whatever the browser cached earlier: the dispatch edge cache only
+      // stamps `immutable` on gets to hashed paths, so a conditional HEAD is both
+      // answered from the store and outside the caching contract under test.
       // Use in-browser fetch (not curl) — CF edge cache rules differ for browser vs non-browser
-      const cacheControl = await page.evaluate(async (url) => {
-        const res = await fetch(url, { method: 'HEAD' });
-        return res.headers.get('cache-control') || '';
+      const asset = await page.evaluate(async (url) => {
+        const res = await fetch(url, { cache: 'no-store' });
+        return { status: res.status, cacheControl: res.headers.get('cache-control') || '' };
       }, assetUrl);
 
+      assert.equal(asset.status, 200, `asset GET succeeds (got ${asset.status})`);
       assert.ok(
-        cacheControl.includes('immutable'),
-        `Cache-Control includes immutable (got: ${cacheControl})`,
+        asset.cacheControl.includes('immutable'),
+        `Cache-Control includes immutable (got: ${asset.cacheControl})`,
       );
     } finally {
       await ctx.close();

@@ -49,7 +49,20 @@ EVALEOF
 1. Visit `/`.
 2. Assert the page contains "Kitchen Sink" and "Auth" in its text.
 3. Inspect the page's HTML source for hashed asset URLs (e.g. `.js` or `.css` files with hash in the filename).
-4. Use an **in-browser sync XHR** (`XMLHttpRequest` via `agent-browser eval`) to HEAD-request one of those asset URLs and assert its `Cache-Control` header contains `immutable`. Do NOT use `curl` — Cloudflare edge cache rules rewrite headers differently for browser vs non-browser requests.
+4. Use an **in-browser sync XHR** (`XMLHttpRequest` via `agent-browser eval`) to GET one of those asset URLs with a cache-busting query parameter, and assert its `Cache-Control` header contains `immutable`. Do NOT use `curl` — Cloudflare edge cache rules rewrite headers differently for browser vs non-browser requests. Do NOT use `HEAD`: the dispatch edge cache stamps `immutable` on `GET`s to hashed paths only, and a conditional `HEAD` is answered from the entry the browser already stored, so it reports `no-store` and looks like a failure.
+
+   ```bash
+   agent-browser eval --stdin <<'EVALEOF'
+   const el = document.querySelector('script[src*="/assets/"]') || document.querySelector('link[href*="/assets/"]');
+   const url = el.src || el.href;
+   const xhr = new XMLHttpRequest();
+   xhr.open('GET', url + (url.includes('?') ? '&' : '?') + 'smoke=' + Date.now(), false);
+   xhr.send();
+   xhr.status + ' ' + xhr.getResponseHeader('cache-control')
+   EVALEOF
+   ```
+
+   Expect `200 public, max-age=31536000, immutable`.
 
 ### 2. SPA navigation (no full reload)
 

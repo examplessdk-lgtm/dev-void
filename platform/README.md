@@ -2,7 +2,7 @@
 
 The hosted Void platform lives in `platform/` inside the main Void monorepo. Public SDK packages live in the repository-level `packages/` directory. Both surfaces share one pnpm workspace, lockfile, Vite+ configuration, and commit history.
 
-Paths in this file are relative to `platform/` unless they begin with `../`. For example, `packages/api` is the hosted control plane and `../packages/void` is the public SDK package.
+Paths in this file are relative to `platform/` unless they begin with `../`. For example, `packages/api` is the hosted control plane and `../packages/void` is the public SDK package. The bare `vp run deploy*` commands in this file are `platform/package.json` scripts and run from `platform/`; from the repository root, the equivalent is `vp run --filter @voidcloud/platform <script>`.
 
 ## Context Overview
 
@@ -73,7 +73,7 @@ Paths in this file are relative to `platform/` unless they begin with `../`. For
 
 The `@voidcloud/platform` workspace package retains the dashboard-only `dev` and `build` scripts. Dashboard deploys run after the platform workers in the platform deploy pipeline.
 
-**Manual deploys only. Do not ask to push or deploy.**
+**Production deploys are manual only; staging deploys on every push to `main`.** See [`meta/operations.md`](./meta/operations.md#github-actions) for the workflow triggers. Do not ask to push or deploy.
 
 ## Local Development
 
@@ -144,7 +144,7 @@ Void is one repository with an explicit dependency boundary:
 | User-facing dashboard                                                         | `packages/dashboard/pages/*`, `packages/dashboard/middleware/01.auth.ts`, `packages/dashboard/lib/api.ts`                                                                                                                              |
 | Shared internal styling                                                       | `packages/ui/src/base.css`, `packages/ui/src/theme.css`                                                                                                                                                                                |
 
-The dashboard depends on `void` and `@void/react` through normal `workspace:*` dependencies. The monorepo task graph builds those packages before the dashboard when required.
+The dashboard depends on `void` and `@void/react` through normal `workspace:*` dependencies. Those packages export only their `dist/` output, so run `vp run build` before `vp run --filter @voidcloud/platform deploy` on a fresh checkout. The platform workflows do this; the task graph does not.
 
 ## SDK overview
 
@@ -204,7 +204,7 @@ The user-facing dashboard.
 - Built as a Void Vue pages app.
 - Uses direct Postgres reads through Hyperdrive for read-heavy loaders.
 - Uses the API for mutations, usage metrics, secrets, and domain operations.
-- Is deployed separately from the main platform pipeline.
+- Deploys as the last stage of the full platform deploy, after the workers. `deploy:dashboard` and `deploy:staging:dashboard` deploy it alone.
 - Is currently de-emphasized relative to the rest of the platform work.
 
 ### `packages/dispatch`

@@ -101,14 +101,6 @@ export function getPublicApiUrl(context: Context): string {
   return getApiUrl(context);
 }
 
-export function getApiOrigin(context: Context): string {
-  return new URL(getApiUrl(context)).origin;
-}
-
-export function getApiClientFetch(context: Context): typeof fetch {
-  return getApiFetch(context);
-}
-
 export async function fetchApi(
   context: Context,
   path: string,
@@ -121,21 +113,6 @@ export async function fetchApi(
 
   return getTimedApiFetch(context)(`${getApiUrl(context)}${path}`, {
     ...options,
-    headers,
-  });
-}
-
-/** Use service binding when available (production), fall back to HTTP (local dev). */
-export function createClient(context: Context) {
-  const token = getToken(context);
-  const baseUrl = getApiUrl(context);
-  const headers = getCfAccessHeaders(context);
-  headers.Accept = 'application/json';
-  if (token) {
-    headers.Authorization = `Bearer ${token}`;
-  }
-  return hc<ApiRoutes>(baseUrl, {
-    fetch: getTimedApiFetch(context),
     headers,
   });
 }
@@ -198,25 +175,4 @@ export async function getCurrentUser(context: Context): Promise<API<'me'> | null
     return null;
   }
   return readApiJson<API<'me'>>(res);
-}
-
-export class ApiError extends Error {
-  constructor(
-    public readonly status: number,
-    message: string,
-  ) {
-    super(message);
-  }
-}
-
-export async function api(
-  context: Context,
-  path: string,
-  options?: RequestInit,
-): Promise<Response> {
-  const res = await fetchApi(context, path, options);
-  if (!res.ok) {
-    throw new ApiError(res.status, await getApiErrorMessage(res));
-  }
-  return res;
 }
