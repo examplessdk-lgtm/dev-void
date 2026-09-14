@@ -1,4 +1,12 @@
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'pathslash';
 import type { Plugin } from 'vite';
@@ -256,6 +264,69 @@ describe('mergeBindings dev inbox vars (void dev)', () => {
     const vars = result.vars as Record<string, string> | undefined;
     expect(vars?.__VOID_EMAIL_DEV_INBOX).toBeUndefined();
     expect(vars?.__VOID_EMAIL_DEV_INBOX_TOKEN).toBeUndefined();
+  });
+});
+
+// The token file is the one credential every inbox route accepts, so its mode
+// is part of the inbox's authorization: under the usual 022 umask a default
+// `openSync(.., 'wx')` leaves it 0644, readable by every other account on a
+// shared host — and loopback needs no `--host`, so that account can read raw
+// MIME, clear the buffer, or plant captures against the owner's dev server.
+// Windows has no group/other bits (`mode` and `chmod` only toggle write
+// there), so the mode assertions are POSIX-only.
+describe('dev-trigger token file mode (inbox credential)', () => {
+  const tokenPath = (root: string) => join(root, '.void', 'dev-trigger-token');
+  const modeOf = (path: string) => statSync(path).mode & 0o777;
+
+  it.skipIf(process.platform === 'win32')(
+    'creates a fresh token file owner-only (0600)',
+    async () => {
+      const root = createProjectRoot();
+
+      const result = await resolveCloudflareConfig(root, { assets: { binding: 'ASSETS' } }, SERVE);
+
+      expect(modeOf(tokenPath(root))).toBe(0o600);
+      const vars = result.vars as Record<string, string>;
+      expect(vars.__VOID_EMAIL_DEV_INBOX_TOKEN).toBe(readFileSync(tokenPath(root), 'utf8').trim());
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'tightens a pre-existing 0644 token file to 0600 and keeps its value',
+    async () => {
+      // A token persisted by an earlier void release, before the mode was set.
+      const root = createProjectRoot();
+      mkdirSync(join(root, '.void'), { recursive: true });
+      writeFileSync(tokenPath(root), 'stable-token\n');
+      chmodSync(tokenPath(root), 0o644);
+      expect(modeOf(tokenPath(root))).toBe(0o644);
+
+      const result = await resolveCloudflareConfig(root, { assets: { binding: 'ASSETS' } }, SERVE);
+
+      expect(modeOf(tokenPath(root))).toBe(0o600);
+      // Tightening never rotates: saved curl scripts and the worker keep working.
+      expect(readFileSync(tokenPath(root), 'utf8')).toBe('stable-token\n');
+      const vars = result.vars as Record<string, string>;
+      expect(vars.__VOID_EMAIL_DEV_INBOX_TOKEN).toBe('stable-token');
+    },
+  );
+
+  it('leaves an already owner-only token file alone', async () => {
+    const root = createProjectRoot();
+    mkdirSync(join(root, '.void'), { recursive: true });
+    writeFileSync(tokenPath(root), 'stable-token\n', { mode: 0o600 });
+    const before = statSync(tokenPath(root));
+
+    const result = await resolveCloudflareConfig(root, { assets: { binding: 'ASSETS' } }, SERVE);
+
+    // Same inode, same mode, same ctime: no chmod was issued on a file that
+    // was already tight, so a read-only or foreign-owned token still loads.
+    const after = statSync(tokenPath(root));
+    expect(after.mode).toBe(before.mode);
+    expect(after.ctimeMs).toBe(before.ctimeMs);
+    expect(after.ino).toBe(before.ino);
+    const vars = result.vars as Record<string, string>;
+    expect(vars.__VOID_EMAIL_DEV_INBOX_TOKEN).toBe('stable-token');
   });
 });
 

@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'pathslash';
 import { normalizePath, type Plugin } from 'vite';
 import { scanJobsSync, type JobDefinition } from './crons/scan.ts';
@@ -9,6 +9,8 @@ import { scanQueuesSync, type QueueDefinition } from './queues/scan.ts';
 type FrameworkTriggersOptions = {
   devTriggerToken: string;
 };
+
+const DISPATCH_FILE_MODE = 0o600;
 
 /** Absolute path of the generated dispatch file. Stable across the dev process. */
 export function frameworkTriggersDispatchPath(root: string): string {
@@ -27,10 +29,23 @@ export function writeFrameworkTriggersDispatch(root: string, devTriggerToken: st
   const queues = scanQueuesSync(root, paths.queuesDir);
   const target = frameworkTriggersDispatchPath(root);
   mkdirSync(dirname(target), { recursive: true });
+  // Owner-only, like `.void/dev-trigger-token`: this module embeds the same
+  // token, and it is the inbox's whole credential (see `getOrCreateDevTriggerToken`).
+  // `mode` applies only when the file is created, so a file left by an
+  // earlier release is tightened after the rewrite — best-effort, and not on
+  // Windows, where `chmod` has no group/other bits to clear.
   writeFileSync(
     target,
     generateModule(paths.cronsDir, paths.queuesDir, jobs, queues, devTriggerToken),
+    { mode: DISPATCH_FILE_MODE },
   );
+  if (process.platform !== 'win32') {
+    try {
+      chmodSync(target, DISPATCH_FILE_MODE);
+    } catch {
+      // ignore
+    }
+  }
 }
 
 /**

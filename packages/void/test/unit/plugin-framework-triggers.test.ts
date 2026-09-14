@@ -1,4 +1,12 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'pathslash';
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
@@ -83,6 +91,35 @@ describe('frameworkTriggersPlugin', () => {
     expect(generated).toContain('"0 * * * *"');
     expect(generated).toContain('export async function handleDevTrigger');
   });
+
+  // The generated module embeds the dev trigger token, which is the whole
+  // credential of the `/__void/inbox` routes — so it gets the same
+  // owner-only mode as `.void/dev-trigger-token`. Windows has no
+  // group/other bits, so there is nothing to assert there.
+  it.skipIf(process.platform === 'win32')('writes the dispatch module owner-only (0600)', () => {
+    const root = createTempRoot();
+    const plugin = frameworkTriggersPlugin(root, { devTriggerToken: 'dev-token-test' });
+    callConfigResolved(plugin);
+
+    expect(statSync(frameworkTriggersDispatchPath(root)).mode & 0o777).toBe(0o600);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'tightens a dispatch module left at 0644 by an earlier release',
+    () => {
+      const root = createTempRoot();
+      const target = frameworkTriggersDispatchPath(root);
+      mkdirSync(join(root, '.void'), { recursive: true });
+      writeFileSync(target, '// stale\n', { mode: 0o644 });
+      expect(statSync(target).mode & 0o777).toBe(0o644);
+
+      const plugin = frameworkTriggersPlugin(root, { devTriggerToken: 'dev-token-test' });
+      callConfigResolved(plugin);
+
+      expect(statSync(target).mode & 0o777).toBe(0o600);
+      expect(readFileSync(target, 'utf-8')).toContain(`__DEV_TRIGGER_TOKEN = "dev-token-test"`);
+    },
+  );
 
   it('emits handleDevTrigger that returns null for non-trigger requests', () => {
     const root = createTempRoot();

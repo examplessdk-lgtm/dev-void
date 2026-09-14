@@ -1,4 +1,13 @@
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, writeSync } from 'node:fs';
+import {
+  chmodSync,
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  statSync,
+  writeSync,
+} from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { cloudflare, type PluginConfig, type WorkerConfig } from '@cloudflare/vite-plugin';
 import { appendSqliteClassMigration } from '@void/deploy-core';
@@ -106,6 +115,13 @@ import { validateSsrEntry } from './ssr/entry.ts';
  * The token is local to the project and only honored by a worker bound to
  * localhost; treat it like the rest of `.void/` — disposable scratch state,
  * safe to remove manually if desired.
+ *
+ * The file is owner-only (0600). It is the one credential the dev-inbox
+ * routes accept, and loopback is reachable by every account on the host,
+ * so a default-umask 0644 file would hand any other local user the raw MIME,
+ * the DELETE, and the capture endpoint. A file persisted by an earlier
+ * release is tightened in place, never rotated. Windows has no group/other
+ * bits — `mode` and `chmod` only toggle write there — so it is left alone.
  */
 /**
  * Best-effort detection of `vite build` (and `vite preview`) so we can skip
@@ -121,6 +137,8 @@ function isViteBuildOrPreview(): boolean {
   return subcommand === 'build' || subcommand === 'preview';
 }
 
+const DEV_TRIGGER_TOKEN_FILE_MODE = 0o600;
+
 function getOrCreateDevTriggerToken(root: string): string {
   const tokenPath = join(root, '.void', 'dev-trigger-token');
   const readExisting = (): string | undefined => {
@@ -131,9 +149,24 @@ function getOrCreateDevTriggerToken(root: string): string {
       return undefined;
     }
   };
+  // Best-effort: a token we can read but not chmod (foreign owner, read-only
+  // mount) must still start the dev server.
+  const tightenExisting = (): void => {
+    if (process.platform === 'win32') {
+      return;
+    }
+    try {
+      if ((statSync(tokenPath).mode & 0o077) !== 0) {
+        chmodSync(tokenPath, DEV_TRIGGER_TOKEN_FILE_MODE);
+      }
+    } catch {
+      // ignore
+    }
+  };
 
   const existing = readExisting();
   if (existing) {
+    tightenExisting();
     return existing;
   }
 
@@ -144,7 +177,7 @@ function getOrCreateDevTriggerToken(root: string): string {
   mkdirSync(join(root, '.void'), { recursive: true });
   const fresh = crypto.randomUUID();
   try {
-    const fd = openSync(tokenPath, 'wx');
+    const fd = openSync(tokenPath, 'wx', DEV_TRIGGER_TOKEN_FILE_MODE);
     try {
       writeSync(fd, fresh);
     } finally {
