@@ -3177,7 +3177,13 @@ async function autoAddOwnerDestination(
     }
     allocatedTag = cfRow.tag;
     const status = cfRow.verified ? 'verified' : 'pending';
-    const { row } = await tryCreateEmailDestination(
+    // `address` was the owner's email when the request came in, before the
+    // Cloudflare calls above. Inheriting CF's `verified` flag is only sound
+    // while that is STILL true, and the helper checks it under a lock that
+    // serializes with the login-side email change — a plain re-read here
+    // would not see that change until it commits. A `pending` row inherits
+    // nothing, so it needs no such check.
+    const { row, ownerEmailChanged } = await tryCreateEmailDestination(
       db,
       projectId,
       address,
@@ -3187,6 +3193,15 @@ async function autoAddOwnerDestination(
       'cf',
       status === 'verified' ? { userId: ownerUserId, emailSnapshot: address } : undefined,
     );
+    if (ownerEmailChanged) {
+      // The owner's address moved while CF was answering. The consent this
+      // row would inherit belongs to a mailbox they no longer hold, and no
+      // later login would revisit it (they compare the stored address with
+      // the provider's, and those now agree). Best-effort means they can
+      // add a recipient by hand; the rollback below releases the tag if
+      // nothing else references it.
+      throw new Error('owner email changed while the address was being registered');
+    }
     if (!row) {
       // The helper's hard-error outcome: a manual add for the same address
       // won the ON CONFLICT race, and its row was deleted before the

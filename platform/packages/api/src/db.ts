@@ -1625,6 +1625,34 @@ export interface OwnerVerificationAudit {
  *   { row: null }            — extremely unlikely race where the row was
  *                              deleted between insert-failure and select.
  *                              Caller must treat as a hard error.
+ *   { row: null, ownerEmailChanged: true }
+ *                            — `ownerAudit` was given but the owner no
+ *                              longer holds `emailSnapshot`; nothing was
+ *                              written. See below.
+ *
+ * With `ownerAudit`, the insert runs in one transaction behind
+ * `SELECT … FOR SHARE` on the owner's `users` row and happens only while
+ * `users.email` still equals the snapshot. The consent an Option C row
+ * inherits is "this address IS the owner's", and the login callback
+ * (`updateUserRevokingInheritedDestinations` in `routes/auth.ts`) retires
+ * exactly these rows when that stops being true — but it can only retire
+ * rows that exist when it runs. Both callers decide to inherit from an
+ * unlocked read of the owner's email (the auto-add before its unbounded
+ * Cloudflare call, the POST's owner branch after it), so a login that
+ * rotates the address between that read and this insert commits first,
+ * finds nothing, and the insert would then land a `verified` grant for
+ * the old mailbox attributed to the old identity; every later login
+ * compares equal and never looks again. The lock is
+ * what makes this a real gate under READ COMMITTED: a plain re-read does
+ * not see the login's uncommitted `UPDATE users`, whereas `FOR SHARE`
+ * conflicts with the `FOR NO KEY UPDATE` that write takes (`email` is not
+ * in a unique index), so this either waits for the login and re-reads the
+ * rotated address, or holds the login until this row is committed and
+ * visible to its revoke. The `projects` row is locked FIRST, in the
+ * strength the INSERT's foreign key would take anyway, to keep the
+ * `projects → users` lock order the build transactions use
+ * (`createGithubActionsBuildWithinLimit`); taking `users` first deadlocks
+ * against them.
  */
 export async function tryCreateEmailDestination(
   db: Db,
@@ -1642,33 +1670,63 @@ export async function tryCreateEmailDestination(
    * so revocation only touches inherited-consent rows.
    */
   ownerAudit?: OwnerVerificationAudit,
-): Promise<{ row: EmailDestination | null; inserted: boolean }> {
-  const id = generateId('edst');
-  const resolvedVerifiedAt =
-    status === 'verified' ? (verifiedAt ?? new Date().toISOString()) : null;
-  const inserted = await db
-    .insert(emailDestinations)
-    .values({
-      id,
-      project_id: projectId,
-      address: address.toLowerCase(),
-      cf_destination_id: cfDestinationId,
-      status,
-      verified_at: resolvedVerifiedAt,
-      verification_source: verificationSource,
-      verified_by_user_id: ownerAudit?.userId ?? null,
-      verified_by_email_snapshot: ownerAudit?.emailSnapshot ?? null,
-    })
-    .onConflictDoNothing({ target: [emailDestinations.project_id, emailDestinations.address] })
-    .returning();
-  if (inserted.length > 0) {
-    return { row: inserted[0]!, inserted: true };
+): Promise<{ row: EmailDestination | null; inserted: boolean; ownerEmailChanged?: true }> {
+  const values = {
+    id: generateId('edst'),
+    project_id: projectId,
+    address: address.toLowerCase(),
+    cf_destination_id: cfDestinationId,
+    status,
+    verified_at: status === 'verified' ? (verifiedAt ?? new Date().toISOString()) : null,
+    verification_source: verificationSource,
+    verified_by_user_id: ownerAudit?.userId ?? null,
+    verified_by_email_snapshot: ownerAudit?.emailSnapshot ?? null,
+  };
+  const insertRow = async (via: Db): Promise<EmailDestination | undefined> => {
+    const [row] = await via
+      .insert(emailDestinations)
+      .values(values)
+      .onConflictDoNothing({ target: [emailDestinations.project_id, emailDestinations.address] })
+      .returning();
+    return row;
+  };
+  let inserted: EmailDestination | undefined;
+  if (!ownerAudit) {
+    inserted = await insertRow(db);
+  } else {
+    const outcome = await db.transaction(async (tx) => {
+      await tx
+        .select({ id: projects.id })
+        .from(projects)
+        .where(eq(projects.id, projectId))
+        .for('key share')
+        .limit(1);
+      const [owner] = await tx
+        .select({ email: users.email })
+        .from(users)
+        .where(eq(users.id, ownerAudit.userId))
+        .for('share')
+        .limit(1);
+      if ((owner?.email?.toLowerCase() ?? null) !== ownerAudit.emailSnapshot.toLowerCase()) {
+        return 'owner-email-changed';
+      }
+      return insertRow(tx as unknown as Db);
+    });
+    if (outcome === 'owner-email-changed') {
+      return { row: null, inserted: false, ownerEmailChanged: true };
+    }
+    inserted = outcome;
+  }
+  if (inserted) {
+    return { row: inserted, inserted: true };
   }
   // ON CONFLICT DO NOTHING didn't return a row, which means a sibling
-  // request inserted concurrently. Read it back. If the sibling DELETED
-  // their own row between insert-failure and select (extremely unlikely
-  // — only the project owner can DELETE), we return `{ row: null }`.
-  // The caller treats that as "concurrently modified, retry once".
+  // request inserted concurrently. Read it back — outside the transaction
+  // above, which has nothing left to write once the insert found a
+  // conflict. If the sibling DELETED their own row between insert-failure
+  // and select (extremely unlikely — only the project owner can DELETE),
+  // we return `{ row: null }`. The caller treats that as "concurrently
+  // modified, retry once".
   const existing = await getEmailDestinationByAddress(db, projectId, address);
   return { row: existing, inserted: false };
 }
@@ -1931,24 +1989,54 @@ export async function countProjectsUsingDestination(
  *
  * `verification_source` stays `'cf'`: the consent is still Cloudflare's
  * click, only attributed. Non-owner rows never take this path.
+ *
+ * Same gate as the owner-audited insert in `tryCreateEmailDestination`, for
+ * the same reason: the listing decided "this is the owner's address" from an
+ * unlocked read, and a login that rotates the address can commit between
+ * that read and this write — its revoke skips a `pending` row, and no later
+ * login looks again. So the promotion runs in one transaction behind
+ * `SELECT … FOR SHARE` on the owner's `users` row (after `projects`, in the
+ * lock order the build transactions use) and writes nothing when
+ * `users.email` no longer equals the snapshot, or the row is no longer
+ * `pending`. Returns whether the row was promoted.
  */
 export async function promoteEmailDestinationWithOwnerAudit(
   db: Db,
+  projectId: string,
   id: string,
   cfDestinationId: string,
   verifiedAt: string | null,
   ownerAudit: OwnerVerificationAudit,
-): Promise<void> {
-  await db
-    .update(emailDestinations)
-    .set({
-      status: 'verified',
-      cf_destination_id: cfDestinationId,
-      verified_at: verifiedAt ?? new Date().toISOString(),
-      verified_by_user_id: ownerAudit.userId,
-      verified_by_email_snapshot: ownerAudit.emailSnapshot,
-    })
-    .where(eq(emailDestinations.id, id));
+): Promise<boolean> {
+  return db.transaction(async (tx) => {
+    await tx
+      .select({ id: projects.id })
+      .from(projects)
+      .where(eq(projects.id, projectId))
+      .for('key share')
+      .limit(1);
+    const [owner] = await tx
+      .select({ email: users.email })
+      .from(users)
+      .where(eq(users.id, ownerAudit.userId))
+      .for('share')
+      .limit(1);
+    if ((owner?.email?.toLowerCase() ?? null) !== ownerAudit.emailSnapshot.toLowerCase()) {
+      return false;
+    }
+    const promoted = await tx
+      .update(emailDestinations)
+      .set({
+        status: 'verified',
+        cf_destination_id: cfDestinationId,
+        verified_at: verifiedAt ?? new Date().toISOString(),
+        verified_by_user_id: ownerAudit.userId,
+        verified_by_email_snapshot: ownerAudit.emailSnapshot,
+      })
+      .where(and(eq(emailDestinations.id, id), eq(emailDestinations.status, 'pending')))
+      .returning({ id: emailDestinations.id });
+    return promoted.length > 0;
+  });
 }
 
 // --- Deletion ---

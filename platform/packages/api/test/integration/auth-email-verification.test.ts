@@ -830,4 +830,327 @@ describe('email verification gating on account linking', () => {
       expect(healed.mirror).toEqual(['teammate@example.com']);
     });
   });
+
+  describe('owner email change racing an owner-inherited grant', () => {
+    // `autoAddOwnerDestination` (`routes/projects.ts`) captures the owner's
+    // address BEFORE its unbounded Cloudflare call and only inserts after it.
+    // The demotion above runs `UPDATE users` + the revoke in one transaction,
+    // but it can only demote rows that EXIST when it runs. A login that
+    // changes the address while the auto-add is parked at Cloudflare commits
+    // first and finds nothing; the auto-add then inserts the OLD address as
+    // `verified`, attributed to the OLD identity, and mirrors it into the
+    // allowlist. Every later login compares equal and never looks again.
+    //
+    // Interleaves at the Cloudflare stub: the projects route awaits the stub,
+    // and the stub drives the real `/auth/callback` before answering. Both
+    // routes run against the same PGlite session, so the login's transaction
+    // has fully committed before the auto-add gets its answer — exactly the
+    // ordering the reviewer described.
+    const emailEnv = () => ({ ...env, EMAIL_SENDER_DOMAIN: 'mail.staging.void.cloud' });
+
+    function stubEmailRoutingOver(
+      base: typeof fetch,
+      respond: (method: string) => Response | Promise<Response>,
+    ): Array<{ method: string; url: string }> {
+      const calls: Array<{ method: string; url: string }> = [];
+      vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        if (url.includes('/email/routing/addresses')) {
+          const method = init?.method ?? 'GET';
+          calls.push({ method, url });
+          return respond(method);
+        }
+        return base(input, init);
+      });
+      return calls;
+    }
+
+    async function loginAs(providerId: string, login: string): Promise<Response> {
+      const state = await buildSignedState('github');
+      await seedOAuthNonce(env.db, 'test-nonce');
+      return app.fetch(
+        new Request(`http://localhost/auth/callback?code=test-code&state=${state}`, {
+          headers: { Cookie: 'oauth_nonce=test-nonce' },
+        }),
+        env,
+        executionCtx,
+      );
+    }
+
+    it('does not inherit verification for an address the owner gave up while the add was in flight', async () => {
+      const existing = await createTestUser(env.db, 'racing-user', 'github', '939393');
+      await env.db
+        .update(users)
+        .set({ email: 'old-owner@example.com' })
+        .where(eq(users.id, existing.id));
+
+      // The provider now reports the NEW address; every login below rotates
+      // (or confirms) it.
+      const github = mockGitHubApi({
+        id: 939393,
+        login: 'racing-user',
+        email: 'new-owner@example.com',
+        emailVerified: true,
+      });
+      let loginDuringAdd: Response | undefined;
+      const calls = stubEmailRoutingOver(github, async (method) => {
+        if (method === 'POST') {
+          // Second-or-later project: Cloudflare already holds the address.
+          return Response.json(
+            {
+              success: false,
+              errors: [{ code: 10037, message: 'destination address already exists' }],
+              messages: [],
+              result: null,
+            },
+            { status: 400 },
+          );
+        }
+        // The owner's email changes while the add is recovering the tag.
+        loginDuringAdd = await loginAs('939393', 'racing-user');
+        return Response.json({
+          success: true,
+          errors: [],
+          messages: [],
+          // ...and Cloudflare reports the OLD address verified: the owner
+          // clicked its link on a prior project.
+          result: [
+            {
+              tag: 'cf-tag-racing',
+              email: 'old-owner@example.com',
+              verified: '2026-01-01T00:00:00Z',
+            },
+          ],
+        });
+      });
+
+      // No execution context: `scheduleAfterResponse` awaits the add inline,
+      // so the 201 below means the add has finished.
+      const created = await app.fetch(
+        new Request('http://localhost/projects', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${existing.jwt}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ slug: 'owner-email-racing' }),
+        }),
+        emailEnv(),
+      );
+      expect(created.status).toBe(201);
+      const project = (await created.json()) as { id: string };
+      expect(loginDuringAdd?.status).toBe(302);
+      const [user] = await env.db.select().from(users).where(eq(users.id, existing.id));
+      expect(user!.email).toBe('new-owner@example.com');
+
+      // The grant the login could not see must not exist: the row would say
+      // the OLD identity consented to mail reaching a mailbox the owner no
+      // longer holds, and no later login would ever revisit it.
+      const rows = await env.db
+        .select()
+        .from(emailDestinations)
+        .where(eq(emailDestinations.project_id, project.id));
+      expect(rows.filter((r) => r.status === 'verified')).toEqual([]);
+      expect(await env.ROUTING.get(`email-allowlist:${project.id}`)).toBeNull();
+      // Nothing references the tag any more, so the add released it — the
+      // same rollback every other post-allocation failure takes.
+      expect(calls.filter((c) => c.method === 'DELETE').map((c) => c.url)).toEqual([
+        expect.stringContaining('/email/routing/addresses/cf-tag-racing'),
+      ]);
+
+      // A later login sees no change and revokes nothing — which is exactly
+      // why the row must never have been written.
+      const later = await loginAs('939393', 'racing-user');
+      expect(later.status).toBe(302);
+      const after = await env.db
+        .select()
+        .from(emailDestinations)
+        .where(eq(emailDestinations.project_id, project.id));
+      expect(after.filter((r) => r.status === 'verified')).toEqual([]);
+    });
+
+    it('answers 409 instead of inheriting when the owner address rotates under the manual add', async () => {
+      // The Option C branch of `POST /projects/:id/email/destinations` reads
+      // the owner AFTER its Cloudflare calls, so its window is only the gap
+      // between that read and the insert — but the read is unlocked, and the
+      // same login can commit inside it. The helper's locked re-check is
+      // what closes it; the route then takes the same rollback + 409 it
+      // takes when the row it just inserted vanished, and a retry re-reads
+      // the owner and lands on the Option B platform link.
+      const existing = await createTestUser(env.db, 'racing-manual', 'github', '949494');
+      await env.db
+        .update(users)
+        .set({ email: 'old-owner@example.com' })
+        .where(eq(users.id, existing.id));
+      const project = await createTestProject(env.db, existing.id, 'owner-email-racing-manual');
+
+      const github = mockGitHubApi({
+        id: 949494,
+        login: 'racing-manual',
+        email: 'new-owner@example.com',
+        emailVerified: true,
+      });
+      const calls = stubEmailRoutingOver(github, (method) => {
+        if (method === 'POST') {
+          return Response.json(
+            {
+              success: false,
+              errors: [{ code: 10037, message: 'destination address already exists' }],
+              messages: [],
+              result: null,
+            },
+            { status: 400 },
+          );
+        }
+        return Response.json({
+          success: true,
+          errors: [],
+          messages: [],
+          result: [
+            {
+              tag: 'cf-tag-racing-manual',
+              email: 'old-owner@example.com',
+              verified: '2026-01-01T00:00:00Z',
+            },
+          ],
+        });
+      });
+      // The route's owner read returns the OLD address; the login lands
+      // right after it and before the insert. The auth middleware resolves
+      // the caller through the same helper first, so fire on the SECOND
+      // read only — the one the route makes after Cloudflare answered.
+      const realGetUser = dbModule.getUser;
+      let loginDuringAdd: Response | undefined;
+      let reads = 0;
+      vi.spyOn(dbModule, 'getUser').mockImplementation(async (...args) => {
+        const owner = await realGetUser(...args);
+        reads += 1;
+        if (reads === 2) {
+          loginDuringAdd = await loginAs('949494', 'racing-manual');
+        }
+        return owner;
+      });
+
+      const res = await app.fetch(
+        new Request(`http://localhost/projects/${project.id}/email/destinations`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${existing.jwt}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ address: 'old-owner@example.com' }),
+        }),
+        emailEnv(),
+        executionCtx,
+      );
+      expect(loginDuringAdd?.status).toBe(302);
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual({ error: 'destination concurrently modified, try again' });
+
+      const rows = await env.db
+        .select()
+        .from(emailDestinations)
+        .where(eq(emailDestinations.project_id, project.id));
+      expect(rows).toEqual([]);
+      expect(await env.ROUTING.get(`email-allowlist:${project.id}`)).toBeNull();
+      expect(calls.filter((c) => c.method === 'DELETE').map((c) => c.url)).toEqual([
+        expect.stringContaining('/email/routing/addresses/cf-tag-racing-manual'),
+      ]);
+
+      // The retry sees the rotated owner: the old address is now somebody
+      // else's, so it gets the per-project platform link, not inherited
+      // consent.
+      const retry = await app.fetch(
+        new Request(`http://localhost/projects/${project.id}/email/destinations`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${existing.jwt}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ address: 'old-owner@example.com' }),
+        }),
+        emailEnv(),
+        executionCtx,
+      );
+      expect(retry.status).toBe(201);
+      expect(await retry.json()).toMatchObject({
+        status: 'pending',
+        verification_source: 'platform',
+        platformVerificationPending: true,
+      });
+    });
+
+    it('leaves a pending row pending when the owner address rotates under the listing refresh', async () => {
+      // Third Option C site: the GET refresh adopts a recreated tag for the
+      // owner's own address off an unlocked owner read. The login's revoke
+      // skips a `pending` row, so a promotion that lands after the rotation
+      // would be the same never-revisited grant. Fire the login on the
+      // route's owner read (the second `getUser`; the first is the auth
+      // middleware) and expect the locked helper to write nothing.
+      const existing = await createTestUser(env.db, 'racing-listing', 'github', '959595');
+      await env.db
+        .update(users)
+        .set({ email: 'old-owner@example.com' })
+        .where(eq(users.id, existing.id));
+      const project = await createTestProject(env.db, existing.id, 'owner-email-racing-listing');
+      await env.db.insert(emailDestinations).values({
+        id: 'edst_racing_listing',
+        project_id: project.id,
+        address: 'old-owner@example.com',
+        status: 'pending',
+        cf_destination_id: 'cf-tag-racing-listing-dead',
+        verification_source: 'cf',
+      });
+
+      const github = mockGitHubApi({
+        id: 959595,
+        login: 'racing-listing',
+        email: 'new-owner@example.com',
+        emailVerified: true,
+      });
+      stubEmailRoutingOver(github, () =>
+        Response.json({
+          success: true,
+          errors: [],
+          messages: [],
+          // The address is verified on the account under a tag this row
+          // never registered — the owner-adopt branch of the refresh.
+          result: [
+            {
+              tag: 'cf-tag-racing-listing-live',
+              email: 'old-owner@example.com',
+              verified: '2026-01-01T00:00:00Z',
+            },
+          ],
+        }),
+      );
+      const realGetUser = dbModule.getUser;
+      let loginDuringRefresh: Response | undefined;
+      let reads = 0;
+      vi.spyOn(dbModule, 'getUser').mockImplementation(async (...args) => {
+        const owner = await realGetUser(...args);
+        reads += 1;
+        if (reads === 2) {
+          loginDuringRefresh = await loginAs('959595', 'racing-listing');
+        }
+        return owner;
+      });
+
+      const res = await app.fetch(
+        new Request(`http://localhost/projects/${project.id}/email/destinations`, {
+          headers: { Authorization: `Bearer ${existing.jwt}` },
+        }),
+        emailEnv(),
+        executionCtx,
+      );
+      expect(loginDuringRefresh?.status).toBe(302);
+      expect(res.status).toBe(200);
+      const listed = (await res.json()) as Array<{ id: string; status: string }>;
+      expect(listed.find((r) => r.id === 'edst_racing_listing')?.status).toBe('pending');
+
+      const [row] = await env.db
+        .select()
+        .from(emailDestinations)
+        .where(eq(emailDestinations.id, 'edst_racing_listing'));
+      expect(row).toMatchObject({
+        status: 'pending',
+        cf_destination_id: 'cf-tag-racing-listing-dead',
+        verified_by_user_id: null,
+        verified_by_email_snapshot: null,
+      });
+      expect(await env.ROUTING.get(`email-allowlist:${project.id}`)).toBeNull();
+    });
+  });
 });

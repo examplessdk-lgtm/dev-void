@@ -122,6 +122,17 @@ supersedes: 0047-email.md
 > - `autoAddOwnerDestination` is unchanged in behavior — by definition
 >   the address IS the owner's email, so it threads
 >   `verification_source='cf'` explicitly (Option C every time).
+>   _(2026-09-15)_ All three Option C writes (the auto-add, the POST's
+>   owner branch, and the listing refresh's owner adopt) decide to
+>   inherit from an unlocked read of the owner's email and only write
+>   after Cloudflare answers, while the login-side revoke can only demote
+>   rows that exist — and are `verified` — when it runs. So the
+>   owner-audited insert (`tryCreateEmailDestination`) and promotion
+>   (`promoteEmailDestinationWithOwnerAudit`) each run inside one
+>   transaction behind `SELECT … FOR SHARE` on the owner's `users` row
+>   and write nothing when `users.email` no longer matches the snapshot
+>   (the auto-add then releases the tag; the POST answers its existing
+>   409, and a retry takes Option B; the listing leaves the row pending).
 >
 > Tests cover each path: Option C trust, Option B platform-pending +
 > confirmation email dispatch, refresh-skip, confirm-endpoint happy

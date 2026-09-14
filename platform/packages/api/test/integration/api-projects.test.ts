@@ -2923,23 +2923,83 @@ describe('POST /projects — owner email destination auto-add', () => {
   // delete after the helper's INSERT and before its SELECT with the real
   // helper untouched. The SQL shape is drizzle's: PGlite takes the text
   // directly, node-postgres wraps it in `{ text }`.
+  //
+  // An owner-audited INSERT runs inside a transaction (`tryCreateEmailDestination`
+  // locks the owner's row first), and a transaction's statements never pass
+  // through the top-level `query`: PGlite hands drizzle its own transaction
+  // object, node-postgres a checked-out pool client. Watch those too — but
+  // only to see the INSERT. The delete still fires at the read-back, which
+  // the helper issues at top level after the transaction has committed; on
+  // PGlite it could not run any earlier, since the transaction holds the
+  // single session until then.
   function deleteRowBeforeReadBack(rowId: string): void {
     const client = env.db.$client as unknown as {
       query: (...args: Array<unknown>) => Promise<unknown>;
+      transaction?: (cb: (tx: unknown) => Promise<unknown>) => Promise<unknown>;
+      connect?: (
+        ...args: Array<unknown>
+      ) => Promise<{ query: (...args: Array<unknown>) => Promise<unknown> }>;
     };
-    const original = client.query.bind(client);
+    const textOf = (head: unknown): string =>
+      typeof head === 'string' ? head : ((head as { text?: string })?.text ?? '');
     let sawInsert = false;
-    vi.spyOn(client, 'query').mockImplementation(async (...args: Array<unknown>) => {
-      const head = args[0];
-      const sql = typeof head === 'string' ? head : ((head as { text?: string })?.text ?? '');
+    const observe = (sql: string): void => {
       if (/^insert into "email_destinations"/i.test(sql)) {
         sawInsert = true;
-      } else if (sawInsert && /^select .* from "email_destinations"/i.test(sql)) {
+      }
+    };
+    const original = client.query.bind(client);
+    vi.spyOn(client, 'query').mockImplementation(async (...args: Array<unknown>) => {
+      const sql = textOf(args[0]);
+      observe(sql);
+      if (sawInsert && /^select .* from "email_destinations"/i.test(sql)) {
         sawInsert = false;
         await env.db.delete(emailDestinations).where(eq(emailDestinations.id, rowId));
       }
       return original(...args);
     });
+    if (typeof client.transaction === 'function') {
+      // PGlite: the callback's transaction object is created per call.
+      const originalTransaction = client.transaction.bind(client);
+      vi.spyOn(client, 'transaction').mockImplementation((cb) =>
+        originalTransaction((tx) =>
+          cb(
+            new Proxy(tx as object, {
+              get(target, key, receiver) {
+                const value = Reflect.get(target, key, receiver);
+                if (key !== 'query' || typeof value !== 'function') {
+                  return value;
+                }
+                return (...args: Array<unknown>) => {
+                  observe(textOf(args[0]));
+                  return value.apply(target, args);
+                };
+              },
+            }),
+          ),
+        ),
+      );
+    }
+    if (typeof client.connect === 'function') {
+      // node-postgres: drizzle checks a client out of the pool per transaction
+      // with the promise form. The pool's own `query` also goes through
+      // `connect`, callback-style, for every top-level statement — leave
+      // those calls untouched (the `query` spy above already sees them).
+      const originalConnect = client.connect.bind(client);
+      vi.spyOn(client, 'connect').mockImplementation((...args: Array<unknown>) => {
+        if (args.length > 0) {
+          return originalConnect(...args);
+        }
+        return originalConnect().then((pooled) => {
+          const pooledQuery = pooled.query.bind(pooled);
+          pooled.query = (...queryArgs: Array<unknown>) => {
+            observe(textOf(queryArgs[0]));
+            return pooledQuery(...queryArgs);
+          };
+          return pooled;
+        });
+      });
+    }
   }
 
   it('rolls the CF address back when the winning manual row vanishes before read-back', async () => {

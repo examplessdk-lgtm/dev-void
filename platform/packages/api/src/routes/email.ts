@@ -202,13 +202,23 @@ const app = new Hono<ApiEnv>()
               );
               continue;
             }
-            await promoteEmailDestinationWithOwnerAudit(
+            // The helper re-checks the owner's address under a lock: the
+            // read above is unlocked, and a login that rotates the address
+            // can commit between it and this write.
+            const promoted = await promoteEmailDestinationWithOwnerAudit(
               context.get('db'),
+              projectId,
               row.id,
               cf.tag,
               cf.verified,
               { userId: project.user_id, emailSnapshot: ownerEmail },
             );
+            if (!promoted) {
+              console.warn(
+                `[email] destination tag mismatch: row=${row.id} project=${projectId} registered=${row.cf_destination_id} cloudflare=${cf.tag}; the owner's address changed while the listing was refreshing, so the row stays pending`,
+              );
+              continue;
+            }
             row.verified_by_user_id = project.user_id;
             row.verified_by_email_snapshot = ownerEmail;
           }
@@ -704,7 +714,13 @@ async function dispatchPlatformVerification(
  * message rather than a generic 500. The caller rolls the CF tag back.
  *
  * A foreign-key violation reports the same "not inserted" outcome: see
- * the catch below.
+ * the catch below. So does `ownerEmailChanged`, without the retry: the
+ * helper found the owner's address rotated away from the one whose
+ * Cloudflare consent the Option C branch meant to inherit (the read the
+ * branch made is unlocked, and a login can commit between it and the
+ * insert). A second attempt would read the same answer. The 409 is right
+ * on the merits — the retry re-reads the owner and, the address now being
+ * somebody else's, takes the Option B platform link instead.
  */
 async function tryInsertWithRetry(
   db: Db,
@@ -717,7 +733,7 @@ async function tryInsertWithRetry(
   ownerAudit?: OwnerVerificationAudit,
 ): Promise<{ row: EmailDestination | null; inserted: boolean }> {
   for (let attempt = 0; attempt < 2; attempt++) {
-    let result: { row: EmailDestination | null; inserted: boolean };
+    let result: { row: EmailDestination | null; inserted: boolean; ownerEmailChanged?: true };
     try {
       result = await tryCreateEmailDestination(
         db,
@@ -744,7 +760,7 @@ async function tryInsertWithRetry(
       // reclaim it.
       return { row: null, inserted: false };
     }
-    if (result.row) {
+    if (result.row || result.ownerEmailChanged) {
       return result;
     }
   }
