@@ -162,6 +162,65 @@ describe('parseEmailArgs', () => {
     );
   });
 
+  // `--project` and `--limit` take the same missing-value path as `--platform`. A bare
+  // flag used to fall through as a positional, which the read-only subcommands never
+  // reject: `void email usage --project` silently ran against the linked project and
+  // `void email logs --limit` silently ignored the limit.
+  it('errors on --project without a value', () => {
+    expect(() => parseEmailArgs(['usage', '--project'])).toThrow(
+      'email: --project requires a value (a project name).',
+    );
+    // A value that starts with `-` is the next flag, not a project name — previously
+    // `--limit` became the slug and `5` the positional.
+    expect(() => parseEmailArgs(['usage', '--project', '--limit', '5'])).toThrow(
+      'email: --project requires a value (a project name).',
+    );
+    expect(() => parseEmailArgs(['destinations', '--project'])).toThrow(
+      /--project requires a value/,
+    );
+  });
+
+  it('errors on --limit without a value', () => {
+    expect(() => parseEmailArgs(['logs', '--limit'])).toThrow(
+      'email: --limit requires a value (a positive integer).',
+    );
+    expect(() => parseEmailArgs(['logs', '--limit', '--project', 'my-app'])).toThrow(
+      'email: --limit requires a value (a positive integer).',
+    );
+    // The value check still applies once a value is present.
+    expect(() => parseEmailArgs(['logs', '--limit=abc'])).toThrow(
+      /--limit must be a positive integer \(got 'abc'\)/,
+    );
+  });
+
+  it('parses --project=<name> and --limit=<n> (the = form --platform already takes)', () => {
+    expect(parseEmailArgs(['usage', '--project=foo'])).toEqual({
+      subcommand: 'usage',
+      projectSlug: 'foo',
+      limit: undefined,
+      address: undefined,
+      platform: undefined,
+    });
+    expect(parseEmailArgs(['logs', '--limit=5'])).toEqual({
+      subcommand: 'logs',
+      projectSlug: undefined,
+      limit: 5,
+      address: undefined,
+      platform: undefined,
+    });
+  });
+
+  it('still carries an unrelated stray positional on a read-only subcommand', () => {
+    // Positional validation is unchanged: only allow/disallow require one, and only a
+    // second one is rejected. A stray word is still parsed as `address` and left to the
+    // command, exactly as before.
+    expect(parseEmailArgs(['usage', 'stray'])).toMatchObject({
+      subcommand: 'usage',
+      address: 'stray',
+      projectSlug: undefined,
+    });
+  });
+
   it('errors on --backend without a value or with another value', () => {
     expect(() => parseEmailArgs(['setup', '--backend'])).toThrow(
       /--backend requires a value \('cloudflare'\)/,

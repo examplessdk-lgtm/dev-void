@@ -87,15 +87,28 @@ export function parseEmailArgs(args: Array<string>): EmailArgs {
 
   const rest = args.slice(1);
   for (let i = 0; i < rest.length; i++) {
-    if (rest[i] === '--project' && rest[i + 1]) {
-      projectSlug = rest[++i];
-    } else if (rest[i] === '--limit' && rest[i + 1]) {
-      const raw = rest[++i];
+    // `--project` and `--limit` take the same missing-value path as `--platform`: a bare
+    // flag used to fall through as a positional, which the read-only subcommands never
+    // reject — so `void email usage --project` ran against the linked project and
+    // `void email logs --limit` ignored the limit instead of reporting it missing.
+    if (rest[i] === '--project' || rest[i]?.startsWith('--project=')) {
+      const { value, next } = readFlagValue(rest, i, '--project');
+      if (value === undefined) {
+        throw new Error('email: --project requires a value (a project name).');
+      }
+      projectSlug = value;
+      i = next;
+    } else if (rest[i] === '--limit' || rest[i]?.startsWith('--limit=')) {
+      const { value: raw, next } = readFlagValue(rest, i, '--limit');
+      if (raw === undefined) {
+        throw new Error('email: --limit requires a value (a positive integer).');
+      }
       const n = parseInt(raw, 10);
       if (!Number.isFinite(n) || n <= 0) {
         throw new Error(`email: --limit must be a positive integer (got '${raw}').`);
       }
       limit = n;
+      i = next;
     } else if (rest[i] === '--platform' || rest[i]?.startsWith('--platform=')) {
       const { value, next } = readFlagValue(rest, i, '--platform');
       if (value === undefined) {
