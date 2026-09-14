@@ -199,13 +199,14 @@ app.get('/dev-login', async (context) => {
 });
 
 /**
- * Drop owner-inherited email destinations when the owner's provider email
- * changes underneath us.
+ * Write the provider's current login/email back to `users`, and when the
+ * email actually changed, retire the owner-inherited destinations that the
+ * OLD address was granted.
  *
- * `updateUser` above runs on EVERY login for the user's primary provider and
- * writes back whatever the provider currently reports, so `users.email` is a
- * mutable field, not a signup-time constant. Two places mint destination rows
- * that are verified purely on "this address IS the project owner's" — the
+ * This runs on EVERY login for the user's primary provider and writes back
+ * whatever the provider currently reports, so `users.email` is a mutable
+ * field, not a signup-time constant. Two places mint destination rows that
+ * are verified purely on "this address IS the project owner's" — the
  * Option C owner branch in `routes/email.ts` and `autoAddOwnerDestination` in
  * `routes/projects.ts`. Once the owner's address changes, that claim is stale:
  * the old mailbox may have been handed to someone else, while the row stays
@@ -214,12 +215,26 @@ app.get('/dev-login', async (context) => {
  * those rows and re-derive each affected project's mirror from the remaining
  * verified rows.
  *
- * Entirely best-effort: a Postgres or KV blip here must never block sign-in.
+ * The email write and the demotion commit TOGETHER. The change is detected
+ * by comparing the stored address with the provider's, so a demotion that
+ * fails AFTER `users.email` is already committed can never be retried: every
+ * later login compares equal and the stale grant survives indefinitely. In
+ * one transaction a Postgres failure rolls the email back too, and the next
+ * login sees the difference again and retries. That failure surfaces as a
+ * failed sign-in, exactly as a failure of the plain `updateUser` write
+ * always has.
+ *
+ * Only the KV mirror stays best-effort, and only after the commit: Postgres
+ * is the source of truth, the proxy reads a MISSING key as deny-all, and the
+ * destinations listing (`projectAllowlistKvDiffers`) re-derives a mirror that
+ * differs from the verified rows. A lost KV write is therefore self-healing,
+ * where a lost demotion is not.
  */
-async function revokeOwnerInheritedDestinations(
+async function updateUserRevokingInheritedDestinations(
   db: Db,
   kv: KVNamespace,
   userId: string,
+  login: string,
   previousEmail: string | null,
   nextEmail: string | null,
 ): Promise<void> {
@@ -227,19 +242,16 @@ async function revokeOwnerInheritedDestinations(
   // previous) grants nothing to revoke, and a provider that stops reporting
   // one is a data gap, not a reassignment.
   if (!previousEmail || !nextEmail || previousEmail.toLowerCase() === nextEmail.toLowerCase()) {
+    await updateUser(db, userId, login, nextEmail);
     return;
   }
-  try {
-    const projectIds = await revokeOwnerVerifiedDestinationsForUserChange(
-      db,
-      userId,
-      previousEmail,
-    );
-    for (const projectId of projectIds) {
-      await syncProjectAllowlistKvBestEffort(db, kv, projectId);
-    }
-  } catch (err) {
-    console.error(`[email-allowlist] owner email-change revoke failed for user=${userId}:`, err);
+  const projectIds = await db.transaction(async (tx) => {
+    const txDb = tx as unknown as Db;
+    await updateUser(txDb, userId, login, nextEmail);
+    return revokeOwnerVerifiedDestinationsForUserChange(txDb, userId, previousEmail);
+  });
+  for (const projectId of projectIds) {
+    await syncProjectAllowlistKvBestEffort(db, kv, projectId);
   }
 }
 
@@ -350,13 +362,12 @@ app.get('/callback', async (context) => {
       // Only overwrite stored email when the new one is verified;
       // a transient /user/emails failure must not wipe the existing email.
       if (emailVerified) {
-        const previousEmail = user.email;
-        await updateUser(db, user.id, login, email);
-        await revokeOwnerInheritedDestinations(
+        await updateUserRevokingInheritedDestinations(
           db,
           context.env.ROUTING,
           user.id,
-          previousEmail,
+          login,
+          user.email,
           email,
         );
       } else {

@@ -10,6 +10,7 @@ import {
   vi,
 } from 'vite-plus/test';
 import { hmacSignState } from '../../src/auth/hmac.ts';
+import * as dbModule from '../../src/db.ts';
 import {
   createOAuthAccount,
   getUserByOAuthAccount,
@@ -677,5 +678,156 @@ describe('email verification gating on account linking', () => {
       .where(eq(emailDestinations.id, 'edst_owner_stable'));
     expect(row?.status).toBe('verified');
     expect(row?.verification_source).toBe('cf');
+  });
+
+  describe('owner email change survives a transient failure', () => {
+    // Shared fixture: one owner-inherited row (Option C / autoAddOwnerDestination
+    // shape) plus one per-recipient row, mirror already in sync.
+    async function seedRotatingOwner(providerId: string, login: string) {
+      const existing = await createTestUser(env.db, login, 'github', providerId);
+      await env.db
+        .update(users)
+        .set({ email: 'old-owner@example.com' })
+        .where(eq(users.id, existing.id));
+      const project = await createTestProject(env.db, existing.id, `owner-rotate-${providerId}`);
+      await env.db.insert(emailDestinations).values([
+        {
+          id: `edst_inherited_${providerId}`,
+          project_id: project.id,
+          address: 'old-owner@example.com',
+          status: 'verified',
+          cf_destination_id: `cf-tag-old-${providerId}`,
+          verified_at: '2026-04-25T00:00:00Z',
+          verification_source: 'cf',
+          verified_by_user_id: existing.id,
+          verified_by_email_snapshot: 'old-owner@example.com',
+        },
+        {
+          id: `edst_teammate_${providerId}`,
+          project_id: project.id,
+          address: 'teammate@example.com',
+          status: 'verified',
+          cf_destination_id: `cf-tag-teammate-${providerId}`,
+          verified_at: '2026-04-25T00:00:00Z',
+          verification_source: 'platform',
+        },
+      ]);
+      await env.ROUTING.put(
+        `email-allowlist:${project.id}`,
+        JSON.stringify(['old-owner@example.com', 'teammate@example.com']),
+      );
+      return { existing, project };
+    }
+
+    async function loginWithNewEmail(providerId: string, login: string): Promise<Response> {
+      const state = await buildSignedState('github');
+      await seedOAuthNonce(env.db, 'test-nonce');
+      vi.stubGlobal(
+        'fetch',
+        mockGitHubApi({
+          id: Number(providerId),
+          login,
+          email: 'new-owner@example.com',
+          emailVerified: true,
+        }),
+      );
+      return app.fetch(
+        new Request(`http://localhost/auth/callback?code=test-code&state=${state}`, {
+          headers: { Cookie: 'oauth_nonce=test-nonce' },
+        }),
+        env,
+        executionCtx,
+      );
+    }
+
+    async function readState(userId: string, projectId: string, inheritedId: string) {
+      const [user] = await env.db.select().from(users).where(eq(users.id, userId));
+      const [row] = await env.db
+        .select()
+        .from(emailDestinations)
+        .where(eq(emailDestinations.id, inheritedId));
+      const raw = await env.ROUTING.get(`email-allowlist:${projectId}`);
+      return {
+        email: user!.email,
+        status: row!.status,
+        source: row!.verification_source,
+        mirror: raw === null ? null : (JSON.parse(raw) as Array<string>),
+      };
+    }
+
+    it('retries the demotion on the next login when the Postgres demotion failed once', async () => {
+      // A transient Postgres failure in the demotion must not be permanent.
+      // `users.email` and the owner-inherited demotion are committed
+      // together: if the demotion cannot run, the email change rolls back
+      // too, so the next login still sees `previousEmail !== email` and
+      // retries. Before this, `users.email` was committed first and the
+      // demotion error swallowed — every later login saw
+      // `previousEmail === email` and the stale grant survived forever.
+      const { existing, project } = await seedRotatingOwner('919191', 'blip-user');
+      const inheritedId = 'edst_inherited_919191';
+
+      const revokeSpy = vi
+        .spyOn(dbModule, 'revokeOwnerVerifiedDestinationsForUserChange')
+        .mockRejectedValueOnce(new Error('pg blip'));
+
+      const first = await loginWithNewEmail('919191', 'blip-user');
+      expect(revokeSpy).toHaveBeenCalledTimes(1);
+      // The sign-in fails the way a failed `updateUser` write always has...
+      expect(first.status).toBe(500);
+
+      // ...and NOTHING of the change is committed: the email still reads the
+      // old address, so the stale grant is not sitting next to a rotated
+      // `users.email` that would hide it from every later comparison.
+      const afterFirst = await readState(existing.id, project.id, inheritedId);
+      expect(afterFirst.email).toBe('old-owner@example.com');
+      expect(afterFirst.status).toBe('verified');
+      expect(afterFirst.source).toBe('cf');
+      expect(afterFirst.mirror).toEqual(['old-owner@example.com', 'teammate@example.com']);
+
+      // Second login, same new email — the retry.
+      const second = await loginWithNewEmail('919191', 'blip-user');
+      expect(second.status).toBe(302);
+      expect(revokeSpy).toHaveBeenCalledTimes(2);
+
+      const afterSecond = await readState(existing.id, project.id, inheritedId);
+      expect(afterSecond.email).toBe('new-owner@example.com');
+      expect(afterSecond.status).toBe('pending');
+      expect(afterSecond.source).toBe('platform');
+      expect(afterSecond.mirror).toEqual(['teammate@example.com']);
+    });
+
+    it('commits the demotion when only the KV mirror write fails, and the listing repairs the mirror', async () => {
+      // The KV half is best-effort by design: Postgres is the source of
+      // truth and the destinations listing re-derives the mirror whenever it
+      // differs from the verified rows. A KV blip must therefore neither
+      // block sign-in nor roll back the demotion.
+      const { existing, project } = await seedRotatingOwner('929292', 'kv-blip-user');
+      const inheritedId = 'edst_inherited_929292';
+
+      const putSpy = vi.spyOn(env.ROUTING, 'put').mockRejectedValueOnce(new Error('kv blip'));
+
+      const res = await loginWithNewEmail('929292', 'kv-blip-user');
+      expect(res.status).toBe(302);
+      expect(putSpy).toHaveBeenCalledTimes(1);
+
+      const afterLogin = await readState(existing.id, project.id, inheritedId);
+      expect(afterLogin.email).toBe('new-owner@example.com');
+      expect(afterLogin.status).toBe('pending');
+      expect(afterLogin.source).toBe('platform');
+      // The lost write left the mirror stale...
+      expect(afterLogin.mirror).toEqual(['old-owner@example.com', 'teammate@example.com']);
+
+      // ...and the listing's read-compare-write repair heals it.
+      const list = await app.fetch(
+        new Request(`http://localhost/projects/${project.id}/email/destinations`, {
+          headers: { Authorization: `Bearer ${existing.jwt}` },
+        }),
+        env,
+        executionCtx,
+      );
+      expect(list.status).toBe(200);
+      const healed = await readState(existing.id, project.id, inheritedId);
+      expect(healed.mirror).toEqual(['teammate@example.com']);
+    });
   });
 });
