@@ -255,8 +255,19 @@ describe('sendEmail (SEND_EMAIL binding)', () => {
  * A `ForwardableEmailMessage` as workerd hands it to `email()`: a one-shot
  * raw stream, a `Headers` instance, and the three native methods, each
  * recording its call.
+ *
+ * `verifiedDestinations` models the one refusal Cloudflare documents for
+ * `forward(rcptTo)` — "Forward this email message to a verified destination
+ * address of the account" — so a fake with the list set throws, as the real
+ * method does, for anything that is not on it. Left unset, every address is
+ * accepted, which is what the fake did before the option existed.
  */
-function nativeMessage(opts: { from: string; to: string; mime: string }): {
+function nativeMessage(opts: {
+  from: string;
+  to: string;
+  mime: string;
+  verifiedDestinations?: ReadonlyArray<string>;
+}): {
   message: ForwardableEmailMessage;
   calls: {
     rejects: Array<string>;
@@ -290,6 +301,9 @@ function nativeMessage(opts: { from: string; to: string; mime: string }): {
       calls.rejects.push(reason);
     },
     async forward(to: string, fwdHeaders?: Headers) {
+      if (opts.verifiedDestinations && !opts.verifiedDestinations.includes(to)) {
+        throw bindingError('E_RECIPIENT_NOT_ALLOWED', `destination address ${to} not verified`);
+      }
       calls.forwards.push({ to, headers: fwdHeaders });
       return { messageId: 'fwd' };
     },
@@ -413,6 +427,38 @@ describe('generated handleEmail on a native ForwardableEmailMessage', () => {
     expect(calls.rejects).toEqual([]);
     expect(outcome).toBeInstanceOf(MimeError);
     expect((outcome as MimeError).message).toMatch(/^forward: invalid header/);
+  });
+
+  it('fires nothing on the native message when a later forward carries a malformed address', async () => {
+    // The address half of the case above. `forward()` used to check only the
+    // length, so `not-an-address` was recorded and surfaced during native
+    // replay — Cloudflare refuses a destination that is not a verified
+    // address — after the first forward had already fired. The fake models
+    // that refusal; the proxy must fail in the handler's own call instead.
+    const handleEmail = buildHandleEmail(async (message) => {
+      await message.forward('ops@acme.com');
+      await message.forward('not-an-address');
+    });
+    const { message, calls } = nativeMessage({
+      from: 'sender@example.com',
+      to: 'support@mail.acme.com',
+      mime: INBOUND_MIME,
+      verifiedDestinations: ['ops@acme.com'],
+    });
+
+    const outcome = await handleEmail(message, {}, {}).then(
+      () => 'resolved',
+      (e: unknown) => e,
+    );
+
+    expect(calls.forwards).toEqual([]);
+    expect(calls.replies).toEqual([]);
+    expect(calls.rejects).toEqual([]);
+    expect(outcome).toBeInstanceOf(MimeError);
+    expect((outcome as MimeError).code).toBe('INVALID_TO');
+    expect((outcome as MimeError).message).toBe(
+      "to: 'not-an-address' is not a valid email address.",
+    );
   });
 
   it('enacts replyEmail as a real EmailMessage sent from the delivered address', async () => {

@@ -10,7 +10,13 @@
 
 import type { Email as PostalMimeEmail } from 'postal-mime';
 import { getRawRuntimeEnv } from '../env-raw.ts';
-import { buildMime, MAX_MESSAGE_BYTES, MimeError, normalizeEmail } from './mime.ts';
+import {
+  buildMime,
+  MAX_MESSAGE_BYTES,
+  MimeError,
+  normalizeEmail,
+  validateAddressParts,
+} from './mime.ts';
 import type { Address, Attachment } from './types.ts';
 
 // Mirror the slug-validity rule from runtime/email.ts so a malformed
@@ -468,6 +474,17 @@ export function createMessageProxy(
       if (to.length > MAX_ACTION_ADDRESS_LENGTH) {
         throw addressTooLong('to', to.length);
       }
+      // Shape, after the length bound above so the scan is over at most 320
+      // characters. `forward(rcptTo)` takes a bare address — Cloudflare's
+      // "verified destination address" — so no display name is parsed; the
+      // rule is the one `sendEmail` applies to its `to`, so a handler's
+      // forward refuses exactly what an outbound send refuses. Left to
+      // replay, a malformed address in a LATER forward was refused by
+      // Cloudflare only after earlier forwards and replies had fired (the
+      // platform router validates the whole list first and drops just that
+      // forward). The router also wants a dot in the domain; `user@localhost`
+      // passes here, as it does for `sendEmail`, and is dropped there alone.
+      validateAddressParts('to', to);
       // Accept both `Headers` (matches CF's runtime signature) and a plain
       // `Record<string, string>`. `Headers.entries()` lowercases keys per
       // spec; users who care about preserving header casing in the wire

@@ -1041,6 +1041,28 @@ describe('harness enforces the proxy action bounds, like production', () => {
     expect(harness.forwards[1].headers?.get('X-Forwarded-By')).toBe('void-test');
   });
 
+  it('refuses a malformed forward address at the call, recording nothing for it', async () => {
+    // A harness that captured `Ops <ops@example.com>` as a forward passed a
+    // handler whose deploy fails at native replay (Cloudflare) or loses the
+    // forward at the router (platform). Same error as `sendEmail`'s `to`.
+    let thrown: unknown;
+    const harness = harnessFor(async (message) => {
+      await message.forward('first@example.com');
+      try {
+        await message.forward('Ops <ops@example.com>');
+      } catch (e) {
+        thrown = e;
+      }
+    });
+    await harness.deliver(DELIVERY);
+    expect(thrown).toBeInstanceOf(MimeError);
+    expect((thrown as MimeError).code).toBe('INVALID_TO');
+    expect((thrown as MimeError).message).toBe(
+      "to: 'Ops <ops@example.com>' is not a valid email address.",
+    );
+    expect(harness.forwards).toEqual([{ to: 'first@example.com' }]);
+  });
+
   it('reply() refuses a native EmailMessage with the proxy error', async () => {
     let thrown: unknown;
     const native = Object.freeze({ from: 'support@app.dev', to: 'u@x.dev' });
@@ -2603,6 +2625,72 @@ describe('end-to-end: envelope → handler → action queue', () => {
       expect(getActions()).toEqual([{ type: 'forward', to: 'first@example.com' }]);
     },
   );
+
+  it.each([
+    ['no @', 'not-an-address', "to: 'not-an-address' is not a valid email address."],
+    // `forward(rcptTo)` takes a bare address — Cloudflare's "verified
+    // destination address" — so the display-name form `sendEmail` parses
+    // is not an address here.
+    [
+      'a display name',
+      'Ops <ops@example.com>',
+      "to: 'Ops <ops@example.com>' is not a valid email address.",
+    ],
+    ['two @', 'a@b@example.com', "to: 'a@b@example.com' is not a valid email address."],
+    ['an empty domain', 'user@', "to: 'user@' is not a valid email address."],
+    ['an empty local part', '@example.com', "to: '@example.com' is not a valid email address."],
+    [
+      'a list separator',
+      'a@example.com,b@example.com',
+      "to: 'a@example.com,b@example.com' is not a valid email address.",
+    ],
+    ['whitespace', 'a b@example.com', "to: 'a b@example.com' is not a valid email address."],
+    [
+      'a 65-octet local part',
+      `${'a'.repeat(65)}@example.com`,
+      'to: local part is 65 octets, over the 64-octet limit in RFC 5321 §4.5.3.1.1.',
+    ],
+  ])(
+    'refuses a forward address with %s at the call, recording nothing for it',
+    async (_label, to, expected) => {
+      // Same class as the header record above, for the address: Cloudflare
+      // refuses it at native replay, the platform router before enaction.
+      // Checked here with the rule `sendEmail` applies to its `to`, so a
+      // handler's forward refuses exactly what an outbound send refuses.
+      const { message, getActions } = createMessageProxy(makeEnvelope());
+      await message.forward('first@example.com');
+      let thrown: unknown;
+      try {
+        await message.forward(to);
+      } catch (e) {
+        thrown = e;
+      }
+      expect(thrown).toBeInstanceOf(MimeError);
+      expect((thrown as MimeError).code).toBe('INVALID_TO');
+      expect((thrown as MimeError).message).toBe(expected);
+      expect(getActions()).toEqual([{ type: 'forward', to: 'first@example.com' }]);
+    },
+  );
+
+  it('records every forward address sendEmail would accept', async () => {
+    // Not the platform router's `isValidEmailAddress`, which also wants a
+    // dot in the domain: `user@localhost` is legal RFC 5321 and is what the
+    // outbound path accepts. A dot-less domain still reaches the router,
+    // which drops that one forward on its own. A local part of exactly 64
+    // octets, a `+` tag and a non-ASCII local part (SMTPUTF8) are all fine.
+    const accepted = [
+      'user@localhost',
+      'x@y',
+      'ops+T-42@example.com',
+      `${'a'.repeat(64)}@example.com`,
+      'jöhn@example.com',
+    ];
+    const { message, getActions } = createMessageProxy(makeEnvelope());
+    for (const to of accepted) {
+      await message.forward(to);
+    }
+    expect(getActions()).toEqual(accepted.map((to) => ({ type: 'forward', to })));
+  });
 
   it('setReject still works with a full queue (it shrinks the queue, so it is exempt)', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});

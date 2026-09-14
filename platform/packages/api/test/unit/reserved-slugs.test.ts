@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vite-plus/test';
+import { EMAIL_RESERVED_SLUGS, isReservedEmailSlug } from '../../src/reserved-slugs.ts';
 import { RESERVED_SLUGS } from '../../src/routes/projects.ts';
 
 describe('reserved slugs (real implementation)', () => {
@@ -37,5 +38,46 @@ describe('reserved slugs (real implementation)', () => {
 
   it('has a reasonable minimum size', () => {
     expect(RESERVED_SLUGS.size).toBeGreaterThanOrEqual(30);
+  });
+});
+
+// The five email-identity slugs were reserved only when email shipped, so a
+// project registered before that can still hold one and the create-time
+// check above never sees it. The email path (api backfill, proxy send,
+// inbound router) therefore enforces `EMAIL_RESERVED_SLUGS` on its own; this
+// pins that set to the create-time list so the two cannot drift apart.
+describe('email-reserved slugs (shared with the proxy)', () => {
+  it('is exactly the email-identity subset', () => {
+    expect([...EMAIL_RESERVED_SLUGS].sort()).toEqual([
+      'abuse',
+      'bounce',
+      'noreply',
+      'postmaster',
+      'security',
+    ]);
+  });
+
+  it('is a subset of the create-time reserved list', () => {
+    for (const slug of EMAIL_RESERVED_SLUGS) {
+      expect(RESERVED_SLUGS.has(slug), `${slug} must also be refused at create`).toBe(true);
+    }
+  });
+
+  it('isReservedEmailSlug refuses each email identity', () => {
+    for (const slug of EMAIL_RESERVED_SLUGS) {
+      expect(isReservedEmailSlug(slug)).toBe(true);
+    }
+  });
+
+  it('isReservedEmailSlug leaves hostname-only reservations and ordinary slugs alone', () => {
+    // Reserved since the first commit, so no project can hold one; and a
+    // hostname collision is not a mailbox.
+    for (const slug of ['www', 'api', 'mail', 'smtp', 'imap', 'pop']) {
+      expect(RESERVED_SLUGS.has(slug)).toBe(true);
+      expect(isReservedEmailSlug(slug)).toBe(false);
+    }
+    for (const slug of ['my-app', 'noreply-tools', 'abuse-report', 'postmaster2']) {
+      expect(isReservedEmailSlug(slug)).toBe(false);
+    }
   });
 });

@@ -555,6 +555,46 @@ describe('inbound email router', () => {
     expect(call?.[1]).toBeUndefined();
   });
 
+  // The routing blob is keyed by slug, so a project that registered
+  // `noreply` before it was reserved would receive every bounce and reply to
+  // the platform's own verification mail (`noreply@<domain>`), and a
+  // `postmaster` project the domain's abuse reports.
+  it.each([
+    ['bare noreply', 'noreply', `noreply@${PROD_DOMAIN}`],
+    ['tagged noreply', 'noreply', `noreply+bounce@${PROD_DOMAIN}`],
+    ['postmaster', 'postmaster', `postmaster@${PROD_DOMAIN}`],
+    ['mixed case', 'abuse', `Abuse@${PROD_DOMAIN}`],
+  ])(
+    'rejects mail to a reserved email identity (%s) without reading routing or dispatching',
+    async (_label, slug, to) => {
+      const kv = createMockKv({
+        [slug]: JSON.stringify({ workerName: 'legacy-worker', projectId: 'proj_legacy' }),
+      });
+      const env = createMockEnv(kv);
+      const message = createInboundMessage(to);
+      await routeInboundMessage(env, message);
+
+      expect((env.DISPATCH as { get: ReturnType<typeof vi.fn> }).get).not.toHaveBeenCalled();
+      expect(message.setReject).toHaveBeenCalledTimes(1);
+      expect(String(message.setReject.mock.calls[0][0])).toContain('reserved');
+      expect(kv.get).not.toHaveBeenCalled();
+    },
+  );
+
+  it('still routes an ordinary slug that merely CONTAINS a reserved word', async () => {
+    const kv = createMockKv({
+      'noreply-tools': JSON.stringify({ workerName: 'user-worker', projectId: 'proj_1' }),
+      'email-allowlist:proj_1': JSON.stringify(['dev@example.com']),
+    });
+    const env = createMockEnv(kv);
+    const message = createInboundMessage(`noreply-tools+x@${PROD_DOMAIN}`);
+    await routeInboundMessage(env, message);
+    expect((env.DISPATCH as { get: ReturnType<typeof vi.fn> }).get).toHaveBeenCalledWith(
+      'user-worker',
+    );
+    expect(message.setReject).not.toHaveBeenCalled();
+  });
+
   it('names the configured zone in reject reasons', async () => {
     const env = createMockEnv(createMockKv(), { EMAIL_SENDER_DOMAIN: STAGING_DOMAIN });
     const message = createInboundMessage(`nosuchproject@${STAGING_DOMAIN}`);
@@ -988,6 +1028,67 @@ describe('POST /email/send — sender pinning (cross-project tenancy)', () => {
     const call = kv.get.mock.calls.find((c) => c[0] === 'email-slug:proj_1');
     expect(call, 'the slug mirror was never read').toBeDefined();
     expect(call?.[1]).toBeUndefined();
+  });
+});
+
+describe('POST /email/send — reserved email identities (legacy slug holders)', () => {
+  // `noreply`, `postmaster`, `abuse`, `bounce` and `security` joined
+  // `RESERVED_SLUGS` only when email shipped. A project that registered one
+  // of them BEFORE that still holds the slug and, until the api's hourly
+  // backfill withholds it, its `email-slug:` mirror — which is all the pin
+  // above checks. `noreply@<domain>` is the platform's own verification
+  // sender, so such a project could send mail indistinguishable from ours.
+  /** KV exactly as the mirror stands for a pre-reservation `noreply` project. */
+  function legacyKv(slug: string) {
+    return createMockKv({
+      'email-slug:proj_1': slug,
+      'email-allowlist:proj_1': JSON.stringify(['dev@example.com']),
+    });
+  }
+
+  it.each([
+    ["the platform's own sender, bare", 'noreply', `noreply@${PROD_DOMAIN}`],
+    ["the platform's own sender, tagged", 'noreply', `noreply+verify@${PROD_DOMAIN}`],
+    ['postmaster', 'postmaster', `postmaster@${PROD_DOMAIN}`],
+    ['abuse', 'abuse', `abuse+x@${PROD_DOMAIN}`],
+    ['bounce', 'bounce', `bounce@${PROD_DOMAIN}`],
+    ['security', 'security', `security@${PROD_DOMAIN}`],
+  ])('refuses %s even though the mirror pins that very slug', async (_label, slug, from) => {
+    const kv = legacyKv(slug);
+    const sender = createSender();
+    const env = createMockEnv(kv, { SEND_EMAIL: sender.binding });
+    const res = await postSend(env, await sendBody({ from }));
+    expect(res.status).toBe(403);
+    const body = await readSend(res);
+    expect(body.ok).toBe(false);
+    expect(body.error?.code).toBe('INVALID_FROM');
+    expect(body.error?.message).toContain('reserved');
+    expect(sender.calls).toHaveLength(0);
+    // Refused on the mirror alone: no allowlist or quota read, nothing written.
+    expect(kv.get.mock.calls.map((c) => c[0])).toEqual(['email-slug:proj_1']);
+    expect(kv.put).not.toHaveBeenCalled();
+  });
+
+  it('is the slug that is refused, not the `from`: a wrong `from` on a reserved slug is refused too', async () => {
+    const kv = legacyKv('noreply');
+    const sender = createSender();
+    const env = createMockEnv(kv, { SEND_EMAIL: sender.binding });
+    const res = await postSend(env, await sendBody({ from: `acme@${PROD_DOMAIN}` }));
+    expect(res.status).toBe(403);
+    expect((await readSend(res)).error?.code).toBe('INVALID_FROM');
+    expect(sender.calls).toHaveLength(0);
+  });
+
+  it('leaves an ordinary slug that merely CONTAINS a reserved word untouched', async () => {
+    const kv = createMockKv({
+      'email-slug:proj_1': 'noreply-tools',
+      'email-allowlist:proj_1': JSON.stringify(['dev@example.com']),
+    });
+    const sender = createSender();
+    const env = createMockEnv(kv, { SEND_EMAIL: sender.binding });
+    const res = await postSend(env, await sendBody({ from: `noreply-tools+x@${PROD_DOMAIN}` }));
+    expect((await readSend(res)).ok).toBe(true);
+    expect(sender.calls).toHaveLength(1);
   });
 });
 

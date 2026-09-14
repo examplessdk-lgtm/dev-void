@@ -288,7 +288,7 @@ The handler receives Cloudflare's native `ForwardableEmailMessage` plus an optio
 | Method                             | Purpose                                                                                                                           |
 | ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
 | `message.setReject(reason)`        | Reject the message — the sender sees the SMTP error.                                                                              |
-| `message.forward(to, hdrs?)`       | Forward to a verified destination address.                                                                                        |
+| `message.forward(to, hdrs?)`       | Forward to a verified destination address. `to` is a bare address; one `sendEmail` would refuse throws `INVALID_TO` at the call.  |
 | `replyEmail(message, opts)`        | Reply with a threaded `In-Reply-To` / `References`.                                                                               |
 | `message.reply({ from, to, raw })` | Bring your own MIME bytes (`Uint8Array` or stream). A native `EmailMessage` cannot be replayed — its body has no public accessor. |
 | Returning without action           | Accept the message silently.                                                                                                      |

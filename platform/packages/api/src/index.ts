@@ -45,6 +45,7 @@ import {
   deleteCustomHostname,
   getCustomHostname,
 } from './provisioning/cloudflare-api.ts';
+import { isReservedEmailSlug } from './reserved-slugs.ts';
 import { oidcRoutes } from './routes/auth-oidc.ts';
 import auth from './routes/auth.ts';
 import deleteRoute from './routes/delete.ts';
@@ -580,10 +581,28 @@ async function processUserRollover(
   // pass, so sharing its try/catch would hold the mirror hostage to one
   // bad entry (and vice versa) — neither may block the other, and
   // neither may block rollover/unsuspension.
+  //
+  // A project whose slug is an email identity (`EMAIL_RESERVED_SLUGS`:
+  // `noreply`, `postmaster`, …) gets NO mirror. Those slugs were reserved
+  // only when email shipped, so a project registered earlier can still
+  // hold one, and the create-time check never sees it; the mirror is what
+  // authorizes `/email/send`, so withholding it keeps the proxy's answer
+  // at 502 for that project. A mirror written before the slug was
+  // reserved is deleted here — this pass is the migration — and the
+  // proxy refuses the slug on its own as well, for the hour until it is.
   try {
     for (const project of userProjects) {
       const emailSlugKey = `email-slug:${project.id}`;
       const existingSlug = await env.ROUTING.get(emailSlugKey);
+      if (isReservedEmailSlug(project.slug)) {
+        if (existingSlug !== null) {
+          await env.ROUTING.delete(emailSlugKey);
+          console.warn(
+            `[backfill] removed email-slug mirror for project ${project.id}: "${project.slug}" is a reserved email identity`,
+          );
+        }
+        continue;
+      }
       if (existingSlug !== project.slug) {
         await env.ROUTING.put(emailSlugKey, project.slug);
       }

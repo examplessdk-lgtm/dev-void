@@ -73,6 +73,7 @@ import {
   // rather than shadowing it — they match different CF error wordings.
   isAlreadyExistsError as isDestinationAlreadyExistsError,
 } from '../provisioning/email-routing.ts';
+import { EMAIL_RESERVED_SLUGS } from '../reserved-slugs.ts';
 import {
   buildRoutingJson,
   buildStaticRoutingJson,
@@ -89,17 +90,16 @@ import { getRequestsDataset, queryProjectRequestOverview } from './usage.ts';
  * Slugs no project may claim. Two overlapping reasons:
  *
  *  - hostname collisions on `*.void.app` (`www`, `api`, `dash`, `cname`, …);
- *  - EMAIL sender identity. A project's outbound `from` is
- *    `<slug>[+tag]@<EMAIL_SENDER_DOMAIN>`, so owning a slug owns that
- *    mailbox. `noreply` is the platform's own verification sender (the
- *    proxy's internal allow-list is exactly `noreply@<domain>`), and
- *    `postmaster`/`abuse`/`bounce`/`security` are the addresses recipients
- *    and mail providers treat as authoritative for the whole domain.
- *    Without them here, a user registering `noreply` could send mail that
- *    is indistinguishable from ours.
+ *  - EMAIL sender identity: `EMAIL_RESERVED_SLUGS` (`../reserved-slugs.ts`).
+ *    A project's outbound `from` is `<slug>[+tag]@<EMAIL_SENDER_DOMAIN>`,
+ *    so owning a slug owns that mailbox, and a user registering `noreply`
+ *    could send mail indistinguishable from the platform's own. That set
+ *    is folded in here rather than listed twice: this check only reaches
+ *    NEW projects, so the email path enforces the same set on its own
+ *    against a project that registered the slug before it was reserved.
  */
 export const RESERVED_SLUGS = new Set([
-  'abuse',
+  ...EMAIL_RESERVED_SLUGS,
   'admin',
   'api',
   'app',
@@ -107,7 +107,6 @@ export const RESERVED_SLUGS = new Set([
   'auth',
   'billing',
   'blog',
-  'bounce',
   'cdn',
   'cname',
   'dash',
@@ -119,17 +118,14 @@ export const RESERVED_SLUGS = new Set([
   'imap',
   'login',
   'mail',
-  'noreply',
   'ns1',
   'ns2',
   'ns3',
   'ns4',
   'oauth',
   'pop',
-  'postmaster',
   'proxy',
   'register',
-  'security',
   'signup',
   'smtp',
   'sso',

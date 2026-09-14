@@ -1,5 +1,5 @@
 import { eq, sql } from 'drizzle-orm';
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vite-plus/test';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vite-plus/test';
 import { scheduled } from '../../src/index.ts';
 import { builds, domains, projects } from '../../src/schema.ts';
 import {
@@ -131,6 +131,66 @@ describe('scheduled()', () => {
 
     expect(await env.ROUTING.get(`email-slug:${bad.id}`)).toBe(bad.slug);
     expect(await env.ROUTING.get(`email-slug:${good.id}`)).toBe(good.slug);
+  });
+
+  /** The email-slug backfill's own warnings — other hourly steps warn too. */
+  function backfillWarnings(spy: {
+    mock: { calls: ReadonlyArray<ReadonlyArray<unknown>> };
+  }): Array<string> {
+    return spy.mock.calls
+      .map((call) => String(call[0]))
+      .filter((line) => line.startsWith('[backfill] removed email-slug mirror'));
+  }
+
+  // `noreply`, `postmaster`, `abuse`, `bounce` and `security` were reserved
+  // only when email shipped. A project that registered one before that
+  // still holds it (`createTestProject` inserts the row directly, exactly
+  // like the pre-reservation create path did), and the mirror is what
+  // authorizes `/email/send` for it — so the backfill must never write one,
+  // and must remove one written before the slug was reserved.
+  it('writes no email-slug mirror for a legacy project holding a reserved email slug', async () => {
+    const { id } = await createTestUser(env.db, 'reservedslug', 'github', undefined, 'free');
+    const legacy = await createTestProject(env.db, id, 'noreply');
+    const sibling = await createTestProject(env.db, id);
+    await env.ROUTING.put(legacy.slug, JSON.stringify({ worker: 'test', projectId: legacy.id }));
+    await env.ROUTING.put(sibling.slug, JSON.stringify({ worker: 'test', projectId: sibling.id }));
+    const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await scheduled(mockController, makeBindings(env), mockCtx);
+    } finally {
+      consoleWarn.mockRestore();
+    }
+
+    expect(await env.ROUTING.get(`email-slug:${legacy.id}`)).toBeNull();
+    // Withholding is silent: there was nothing to remove.
+    expect(backfillWarnings(consoleWarn)).toEqual([]);
+    // The sibling in the same user's loop is unaffected.
+    expect(await env.ROUTING.get(`email-slug:${sibling.id}`)).toBe(sibling.slug);
+  });
+
+  it('removes an email-slug mirror written before the slug was reserved', async () => {
+    const { id } = await createTestUser(env.db, 'reservedmirror', 'github', undefined, 'free');
+    const legacy = await createTestProject(env.db, id, 'postmaster');
+    // Written by createProject back when `postmaster` was claimable.
+    await env.ROUTING.put(`email-slug:${legacy.id}`, legacy.slug);
+    await env.ROUTING.put(legacy.slug, JSON.stringify({ worker: 'test', projectId: legacy.id }));
+    const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await scheduled(mockController, makeBindings(env), mockCtx);
+      // Logged once, on the pass that removes it …
+      const warnings = backfillWarnings(consoleWarn);
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain(legacy.id);
+      expect(await env.ROUTING.get(`email-slug:${legacy.id}`)).toBeNull();
+
+      // … and not again on the next pass, which has nothing to remove.
+      consoleWarn.mockClear();
+      await scheduled(mockController, makeBindings(env), mockCtx);
+      expect(backfillWarnings(consoleWarn)).toEqual([]);
+      expect(await env.ROUTING.get(`email-slug:${legacy.id}`)).toBeNull();
+    } finally {
+      consoleWarn.mockRestore();
+    }
   });
 
   it('does not overwrite existing userId in routing entries', async () => {

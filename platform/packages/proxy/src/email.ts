@@ -1,3 +1,4 @@
+import { isReservedEmailSlug } from '@voidcloud/api/reserved-slugs';
 import { EmailMessage } from 'cloudflare:email';
 import { Hono } from 'hono';
 import { asString } from './body.ts';
@@ -746,6 +747,28 @@ app.post('/send', async (context) => {
         },
       },
       502,
+    );
+  }
+  // A slug that is an email identity of the domain itself (`noreply`, the
+  // platform's own verification sender; `postmaster`, `abuse`, …) may not
+  // send at all. `RESERVED_SLUGS` stops NEW projects from claiming one, but
+  // a project registered before those were reserved still holds its slug,
+  // and the mirror alone would let it send as `noreply@<domain>` —
+  // indistinguishable from the platform. The api's backfill withholds and
+  // removes the mirror for such a project; this refusal covers the mirror
+  // that already exists until that pass runs, and any write that bypasses
+  // the backfill. Refused as a bad `from` rather than a 502: nothing
+  // upstream is missing, the identity is simply not the project's to use.
+  if (isReservedEmailSlug(expectedSlug)) {
+    return context.json(
+      {
+        ok: false,
+        error: {
+          code: 'INVALID_FROM',
+          message: `project slug "${expectedSlug}" is a reserved email identity on ${senderDomain} — refusing to send`,
+        },
+      },
+      403,
     );
   }
   // Lowercase once for the strict regex + slug compare; the regex anchors

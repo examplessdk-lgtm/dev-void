@@ -22,6 +22,7 @@
  * via ctx.waitUntil after the handler returns.
  */
 
+import { isReservedEmailSlug } from '@voidcloud/api/reserved-slugs';
 import { EmailMessage } from 'cloudflare:email';
 import {
   MAX_MIME_BYTES,
@@ -588,6 +589,20 @@ export async function routeInbound(
 
   if (!slug) {
     message.setReject(`${label}: missing project slug in recipient`);
+    return;
+  }
+
+  // `noreply@`, `postmaster@`, `abuse@`, … are the domain's own addresses,
+  // not a tenant's: the bounces and replies to the platform's verification
+  // mail come back to `noreply@<domain>`. `RESERVED_SLUGS` keeps a NEW
+  // project from claiming one, but the routing blob below is keyed by slug
+  // and a project registered before those were reserved still has one — it
+  // would receive that mail. Refused before the KV read so no routing
+  // entry, whatever its origin, can hand a reserved mailbox to a worker.
+  // The reject matches what an unclaimed slug gets today: there is no
+  // platform mailbox behind these addresses either.
+  if (isReservedEmailSlug(slug)) {
+    message.setReject(`${label}: "${sanitize(slug, 64)}" is a reserved platform address`);
     return;
   }
 

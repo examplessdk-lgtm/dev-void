@@ -153,7 +153,13 @@ function fieldErrorCode(field: string): MimeErrorCode {
   return 'MIME_ERROR';
 }
 
-function validateAddressParts(field: string, email: string, name?: string): void {
+/**
+ * Validate one parsed address (and its display name, when there is one),
+ * throwing a `MimeError` for `field` on anything undeliverable. Exported so
+ * the inbound proxy's `forward(to)` refuses a bare address by the same rule
+ * `sendEmail` applies to its `to`.
+ */
+export function validateAddressParts(field: string, email: string, name?: string): void {
   rejectCRLF(`${field} address`, email);
   if (email.length > MAX_ADDRESS_LENGTH) {
     throw new MimeError(

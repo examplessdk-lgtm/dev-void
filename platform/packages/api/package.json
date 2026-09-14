@@ -14,6 +14,7 @@
     "./usage": "./src/routes/usage.ts",
     "./api": "./src/api.ts",
     "./env": "./src/env.ts",
+    "./reserved-slugs": "./src/reserved-slugs.ts",
     "./suspension": "./src/suspension.ts",
     "./routing": "./src/routing.ts"
   },
