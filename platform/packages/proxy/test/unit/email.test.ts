@@ -819,6 +819,53 @@ describe('POST /email/send — request validation', () => {
     expect(kv.put).not.toHaveBeenCalled();
     expect(sender.calls).toHaveLength(0);
   });
+
+  // The sender is one string, but `from.toLowerCase()` copies it whole and
+  // a valid-shaped sender (`<slug>+<unbounded tag>@<domain>`) is then echoed
+  // verbatim into the MIME `From:` refusal and serialized into the
+  // response — all above the quota gates. The bound has to come first.
+  it('rejects an over-long sender before the slug read, the copy, or the echo', async () => {
+    const MAX_SENDER_LENGTH = 320;
+    const kv = happyPathKv();
+    const sender = createSender();
+    const env = createMockEnv(kv, { SEND_EMAIL: sender.binding });
+    // Shaped to pass the strict regex AND the slug pin, so the only thing
+    // that can refuse it is the length bound.
+    const tag = 'a'.repeat(MAX_SENDER_LENGTH);
+    const from = `acme+${tag}@${PROD_DOMAIN}`;
+    const res = await postSend(
+      env,
+      // A MIME with no `From:` at all: without the bound this request would
+      // reach the addr-spec refusal that interpolates the whole sender.
+      await sendBody({ from, mimeBase64: mimeBase64('Subject: hi\r\n\r\nhello\r\n') }),
+    );
+
+    expect(res.status).toBe(413);
+    const body = await readSend(res);
+    expect(body.error?.code).toBe('INVALID_FROM');
+    expect(body.error?.message).not.toContain(tag);
+    expect(body.deliveries).toBeUndefined();
+    expect(kv.get).not.toHaveBeenCalled();
+    expect(kv.put).not.toHaveBeenCalled();
+    expect(sender.calls).toHaveLength(0);
+  });
+
+  it('still sends from a sender sitting exactly at the cap', async () => {
+    const MAX_SENDER_LENGTH = 320;
+    const prefix = 'acme+';
+    const suffix = `@${PROD_DOMAIN}`;
+    const from = `${prefix}${'a'.repeat(MAX_SENDER_LENGTH - prefix.length - suffix.length)}${suffix}`;
+    expect(from).toHaveLength(MAX_SENDER_LENGTH);
+    const kv = happyPathKv();
+    const sender = createSender();
+    const env = createMockEnv(kv, { SEND_EMAIL: sender.binding });
+    const res = await postSend(env, await sendBody({ from }));
+
+    expect(res.status).toBe(200);
+    expect((await readSend(res)).ok).toBe(true);
+    expect(sender.calls).toHaveLength(1);
+    expect(sender.calls[0].from).toBe(from);
+  });
 });
 
 describe('POST /email/send — sender pinning (cross-project tenancy)', () => {

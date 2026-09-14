@@ -85,7 +85,7 @@ The proxy forwards the request to `API.fetch("https://api/internal/revalidate/:p
 Outbound gate chain, in order — the first failure short-circuits, and nothing before the counters burns quota:
 
 ```text
-body shape ▸ EMAIL_SENDER_DOMAIN set ▸ SEND_EMAIL bound ▸ recipients ▸ MIME size
+body shape ▸ `from` length ▸ EMAIL_SENDER_DOMAIN set ▸ SEND_EMAIL bound ▸ recipients ▸ MIME size
   ▸ email-slug:<projectId>        (pins `from` local-part to the project's slug)
   ▸ strict `from` regex           (<slug>[+tag]@$EMAIL_SENDER_DOMAIN, no CR/LF or display names)
   ▸ MIME `From:` addr-spec        (exactly one From header, one mailbox, equal to `from`; the

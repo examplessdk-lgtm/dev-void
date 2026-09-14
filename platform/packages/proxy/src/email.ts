@@ -44,6 +44,20 @@ const MAX_RECIPIENTS = 100;
 const MAX_RECIPIENT_LENGTH = 320;
 
 /**
+ * Cap the envelope sender for the same reason. It is one string, so there
+ * is no list amplifier, but `from.toLowerCase()` below copies it whole
+ * (measured: V8 returns a fresh full-size string even when nothing
+ * changed), and a sender the strict regex accepts — an unbounded `+tag`
+ * is one — is then echoed verbatim into the MIME `From:` refusal and
+ * serialized into the response, three more copies of it. All of that runs
+ * above the allowlist and quota gates, so it is never metered. Checked
+ * with the other raw-input size gates, before any configuration or KV
+ * read. Same figure as `MAX_RECIPIENT_LENGTH`, for the same RFC 5321
+ * reason.
+ */
+const MAX_SENDER_LENGTH = 320;
+
+/**
  * The platform mail domain for this environment — `mail.void.cloud` in
  * production, `mail.staging.void.cloud` in staging. Configured as the
  * `EMAIL_SENDER_DOMAIN` var on both the proxy and api workers, and mirrored
@@ -488,6 +502,23 @@ app.post('/send', async (context) => {
     );
   }
 
+  // Bound the sender before anything copies it — the lowercase, the strict
+  // regex and the refusal that echoes it all sit below. Same 413 as the
+  // recipient bound; INVALID_FROM is the framework's code for an unusable
+  // sender. The address is deliberately not echoed back.
+  if (from.length > MAX_SENDER_LENGTH) {
+    return context.json(
+      {
+        ok: false,
+        error: {
+          code: 'INVALID_FROM',
+          message: `sender exceeds ${MAX_SENDER_LENGTH} characters`,
+        },
+      },
+      413,
+    );
+  }
+
   // Fail closed on missing sender configuration — never fall back to a
   // baked-in domain (see readSenderDomain). Resolved before any KV work so a
   // misconfigured environment can't burn quota counters on a send that can't
@@ -690,7 +721,9 @@ app.post('/send', async (context) => {
   // renders `From:` from the same `from.email` it posts as the envelope — so
   // it is refused outright rather than reported per recipient. Runs before
   // the suspension and allowlist reads for the same reason as the slug pin:
-  // no KV work for a request that can never be authorized.
+  // no KV work for a request that can never be authorized. The refusal may
+  // echo `from`: it is at most `MAX_SENDER_LENGTH` printable-ASCII bytes by
+  // now.
   const mimeFrom = readMimeFromAddrSpec(raw);
   if (!mimeFrom.ok || mimeFrom.addrSpec.toLowerCase() !== fromLower) {
     const detail = mimeFrom.ok
