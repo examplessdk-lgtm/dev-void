@@ -4476,18 +4476,19 @@ describe('POST /projects/:id/migrations/rename', () => {
     expect(rollbackBody.migrationDiff).toEqual(['m3.sql']);
   });
 
-  it('rollback-vs-rollback serializes on the row lock and keeps pg and ROUTING in sync', async () => {
-    // Concurrent rollbacks must fully serialize. The row lock covers the
-    // whole cutover (pg flip + ROUTING.put + cron + queue + ISR), so when
-    // both finish the final state is internally consistent: whatever pg
-    // says is active, ROUTING points at the matching worker, and the
-    // diffs returned by both rollbacks are computed against the correct
-    // pre-flip snapshots.
+  it('two rollbacks in sequence keep pg and ROUTING in sync, the second after the first has finished', async () => {
+    // Two rollbacks run one after the other must leave a consistent state.
+    // The row lock covers the whole cutover (pg flip + ROUTING.put + cron +
+    // queue + ISR), so when both finish the final state is internally
+    // consistent: whatever pg says is active, ROUTING points at the
+    // matching worker, and the diffs returned by both rollbacks are
+    // computed against the correct pre-flip snapshots.
     //
-    // This test pins that invariant by holding rollback A mid-cutover
+    // This test pins that invariant by holding rollback A mid-rollback
     // (inside its locked tx, AFTER the pg flip but during its
     // `ROUTING.put(slug, …)` external write) and kicking rollback B while
-    // A is paused. B must block on the row lock until A commits.
+    // A is paused. B starts only after A has fully finished, post-commit
+    // lease cleanup included.
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id, 'r13f1-rb-rb');
     await insertD1Resource(env.db, project.id);
@@ -4552,9 +4553,8 @@ describe('POST /projects/:id/migrations/rename', () => {
     //
     // Both rollbacks in this scenario carry non-empty diffs (A→B drops m3;
     // B→C drops m2) so the destructive guard would reject them without an
-    // opt-in. The invariant here (lock serialization between concurrent
-    // rollbacks) is orthogonal, so echo each rollback's exact diff via
-    // `allowDestructive`.
+    // opt-in. The invariant here (a second rollback after the first) is
+    // orthogonal, so echo each rollback's exact diff via `allowDestructive`.
     const rollbackAPromise = app.fetch(
       authedReq(`/projects/${project.id}/rollback`, user.jwt, {
         method: 'POST',
@@ -4573,7 +4573,13 @@ describe('POST /projects/:id/migrations/rename', () => {
     // so B's in-lock read runs after A's cleanup, while a pooled Postgres grants
     // the queued row lock at A's commit, so B resumes before that cleanup, reads
     // A's rollback lease and answers 409 `deploy in progress`. That fence is
-    // real, but it is driver order rather than the serialization under test.
+    // real, but it is driver order rather than the sequence under test.
+    //
+    // This test therefore does not exercise row-lock contention between
+    // rollbacks: on Postgres a rollback that wins the lock at the other's
+    // commit still sees its rollback lease and answers 409, which is intended.
+    // The row lock itself is covered by the `/apply` contention tests in this
+    // file.
     const realDb = env.db;
     const realTransaction = realDb.transaction.bind(realDb);
     let releaseB: () => void = () => {};
@@ -4637,8 +4643,8 @@ describe('POST /projects/:id/migrations/rename', () => {
 
     // Final consistency: pg says active=C AND ROUTING.workerName matches C.
     // The pg flip happens FIRST inside the lock and external writes follow,
-    // so the serialized order guarantees pg and ROUTING converge on the
-    // same terminal state.
+    // so running B after A guarantees pg and ROUTING converge on the same
+    // terminal state.
     const finalPg = await env.db.select().from(projects).where(eq(projects.id, project.id));
     expect(finalPg[0]!.active_deployment_id).toBe(depC.id);
 
