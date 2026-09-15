@@ -366,10 +366,15 @@ async function createCloudflarePrerenderRunner(options: {
 
   // One persistence root for every local resource: miniflare 5 replaced the
   // per-product `d1Persist`/`kvPersist`/`r2Persist` with `resourcePersistencePath`,
-  // which it splits into `<root>/d1`, `<root>/kv`, `<root>/r2`. Set only when a
-  // resource is bound, as the per-product options were.
+  // which it splits into `<root>/d1`, `<root>/kv`, `<root>/r2`. The root is
+  // `<persistDir>/v3`, the same one `@cloudflare/vite-plugin` derives from
+  // `persistState: { path: '.void' }` for the dev server and the one
+  // `getMiniflareDatabasePath` (migration runner, drizzle plugin, auth bootstrap)
+  // addresses: `.void/v3/d1/miniflare-D1DatabaseObject/<hash>.sqlite`. Passing
+  // `persistDir` itself would open a second, empty database under `.void/d1`.
+  // Set only when a resource is bound, as the per-product options were.
   if (mfOptions.d1Databases || mfOptions.kvNamespaces || mfOptions.r2Buckets) {
-    mfOptions.resourcePersistencePath = persistDir;
+    mfOptions.resourcePersistencePath = join(persistDir, 'v3');
   }
 
   const mf = new Miniflare(convertV4MiniflareOptions(mfOptions));

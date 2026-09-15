@@ -1,9 +1,11 @@
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, relative } from 'pathslash';
+import { dirname, join, relative } from 'pathslash';
 import { afterEach, describe, expect, it } from 'vite-plus/test';
+import { getMiniflareDatabasePath, openSqliteDatabase } from '../../src/migrations/runner.ts';
 import {
   buildPrerenderBindings,
+  collectPrerenderPaths,
   collectPrerenderPathsNode,
   collectPrerenderWorkerModules,
 } from '../../src/prerender.ts';
@@ -159,6 +161,67 @@ export default {
       rmSync(root, { recursive: true, force: true });
     }
   });
+});
+
+describe('collectPrerenderPaths (Cloudflare target)', () => {
+  afterEach(() => {
+    while (tempDirs.length > 0) {
+      rmSync(tempDirs.pop()!, { recursive: true, force: true });
+    }
+  });
+
+  // The dev server (`@cloudflare/vite-plugin`, `persistState: { path: '.void' }`
+  // -> `<root>/.void/v3`), the local migration runner, the drizzle plugin and the
+  // auth bootstrap all address the local D1 file through
+  // `getMiniflareDatabasePath(join(root, '.void'), id)`. Prerender boots the built
+  // worker in its own Miniflare and MUST open that same file, otherwise a page that
+  // reads a migrated table renders against an empty database. This test seeds a
+  // table exactly where the runner writes it and asks the real bundled Miniflare
+  // (resolved through wrangler like prerender.ts does) to read it back.
+  it('opens the D1 database the local migration runner wrote', async () => {
+    const root = createTempWorkerDir();
+    const persistDir = join(root, '.void');
+    const workerDir = join(root, 'dist', 'ssr');
+    mkdirSync(workerDir, { recursive: true });
+
+    const dbPath = getMiniflareDatabasePath(persistDir, 'local');
+    mkdirSync(dirname(dbPath), { recursive: true });
+    const db = await openSqliteDatabase(dbPath);
+    try {
+      db.exec('CREATE TABLE pages (path TEXT NOT NULL)');
+      db.prepare('INSERT INTO pages (path) VALUES (?)').run('/from-migrated-db');
+    } finally {
+      db.close();
+    }
+
+    writeFileSync(
+      join(workerDir, 'wrangler.json'),
+      JSON.stringify({
+        main: 'index.js',
+        compatibility_date: '2026-02-12',
+        d1_databases: [{ binding: 'DB', database_name: 'default', database_id: 'local' }],
+      }),
+    );
+    writeFileSync(
+      join(workerDir, 'index.js'),
+      `
+export default {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+    if (url.pathname !== '/__void/prerender-paths') {
+      return new Response('Not Found', { status: 404 });
+    }
+    const { results } = await env.DB.prepare('SELECT path FROM pages ORDER BY path').all();
+    return Response.json({ paths: results.map((row) => row.path) });
+  },
+};
+`,
+    );
+
+    await expect(collectPrerenderPaths({ root, workerDir, persistDir })).resolves.toEqual([
+      '/from-migrated-db',
+    ]);
+  }, 60_000);
 });
 
 describe('buildPrerenderBindings', () => {
