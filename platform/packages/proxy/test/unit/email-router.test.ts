@@ -413,6 +413,45 @@ describe('routeInbound — slug parsing + KV lookup', () => {
     expect(dispatchGet).not.toHaveBeenCalled();
   });
 
+  // `workerName` is declared `string` but arrives from KV, exactly like
+  // `suspended` above. A truthy non-string passed the `!workerName` check and
+  // reached `DISPATCH.get`; every failure handler after that point renders
+  // the name through `sanitize`, whose `.slice`/`.replace` throw on a
+  // non-string — so a worker that could not be reached surfaced as an
+  // unhandled handler error instead of a reject. No producer writes a
+  // non-string name (`buildRoutingJson` types it), so it is corrupt data.
+  it.each([
+    ['a number', 42],
+    ['an object', {}],
+    ['a boolean', true],
+    ['an array', ['user-worker']],
+  ])('rejects a routing blob whose workerName is %s as corrupt', async (_kind, workerName) => {
+    const { env, dispatchGet } = makeEnv({
+      kvSeed: { myslug: JSON.stringify({ workerName, projectId: 'p_test' }) },
+      // The realistic failure: a stub for a name no worker has throws at
+      // call time, and the catch block is what used to crash.
+      emailThrow: new Error('Worker not found'),
+    });
+    const { message, rejectCalls } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await expect(routeInbound(message, env, ctx)).resolves.toBeUndefined();
+    expect(rejectCalls).toHaveLength(1);
+    expect(rejectCalls[0]).toContain('routing data corrupt');
+    expect(dispatchGet).not.toHaveBeenCalled();
+  });
+
+  it('an empty-string workerName still reads as a static deploy', async () => {
+    const { env, dispatchGet } = makeEnv({
+      kvSeed: { myslug: JSON.stringify({ workerName: '', projectId: 'p_test' }) },
+    });
+    const { message, rejectCalls } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(rejectCalls).toHaveLength(1);
+    expect(rejectCalls[0]).toContain('no worker (static deploy)');
+    expect(dispatchGet).not.toHaveBeenCalled();
+  });
+
   it('routes a tag-less recipient (whole local-part is the slug)', async () => {
     const { env, emailFn } = makeEnv({ kvSeed: { myslug: DEFAULT_ROUTING }, emailReturn: [] });
     const { message, rejectCalls } = createFakeMessage({ to: `myslug@${PROD_DOMAIN}` });

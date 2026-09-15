@@ -686,6 +686,16 @@ export async function routeInbound(
     message.setReject(`${label}: project "${sanitize(slug, 64)}" has no worker (static deploy)`);
     return;
   }
+  // Declared `string`, but it arrives from KV like `suspended` does. Every
+  // failure handler below renders the name through `sanitize`, which throws
+  // on a non-string — a worker that cannot be reached would then surface as
+  // an unhandled handler error instead of a reject. `buildRoutingJson` only
+  // ever writes a string, so anything else is corrupt data, refused the same
+  // way as a non-object blob.
+  if (typeof workerName !== 'string') {
+    message.setReject(`${label}: routing data corrupt`);
+    return;
+  }
 
   // Email-only suspend kill-switch — the narrower control, set by the admin
   // UI to stop mail without taking the whole project offline. Gates inbound
