@@ -425,7 +425,66 @@ function isValidProxyResponse(b: unknown): b is ProxyResponse {
   return false;
 }
 
-async function readResponseAsResult(res: Response, fallbackId: string): Promise<SendEmailResult> {
+/**
+ * Validate the `ids` list of an `ok: true` proxy response against the
+ * recipients this send asked for.
+ *
+ * The proxy answers `ok: true` only once every requested recipient passed
+ * its allowlist and `SEND_EMAIL.send()` confirmed each one, and it builds
+ * `ids` from that same per-recipient list — so a well-formed success names
+ * every requested address exactly once, as `{ recipient, messageId }` with
+ * `messageId` always a string (`''` when Cloudflare returned none; that is
+ * the proxy's explicit convention, and the framework's own Message-ID stands
+ * in for it). Anything else is a schema-skewed or corrupt proxy. It is
+ * refused as a whole rather than trimmed to the entries that parse: an
+ * `ok: true` with a delivery missing would tell the caller a send was
+ * confirmed when it never was, and the caller could not retry that recipient
+ * because a success carries no per-recipient failure to retry from.
+ *
+ * Order is not part of the contract: the list is compared as a set against
+ * the unique, lowercased recipients the request carried, and returned in the
+ * order the proxy gave it. Entries are named by index only — the body is
+ * attached as `cause`, and a recipient string from a corrupt response is
+ * not a value to interpolate into an error message.
+ */
+function readDeliveryList(
+  raw: Array<unknown>,
+  recipients: ReadonlyArray<string>,
+  fallbackId: string,
+): { ok: true; ids: Array<SendEmailDelivery> } | { ok: false; reason: string } {
+  if (raw.length !== recipients.length) {
+    return { ok: false, reason: `expected ${recipients.length} deliveries, got ${raw.length}` };
+  }
+  const requested = new Set(recipients);
+  const seen = new Set<string>();
+  const ids: Array<SendEmailDelivery> = [];
+  for (const [i, d] of raw.entries()) {
+    const entry = d as { recipient?: unknown; messageId?: unknown } | null;
+    if (
+      typeof entry !== 'object' ||
+      entry === null ||
+      typeof entry.recipient !== 'string' ||
+      typeof entry.messageId !== 'string'
+    ) {
+      return { ok: false, reason: `entry ${i} is not { recipient: string, messageId: string }` };
+    }
+    if (!requested.has(entry.recipient)) {
+      return { ok: false, reason: `entry ${i} names a recipient that was not requested` };
+    }
+    if (seen.has(entry.recipient)) {
+      return { ok: false, reason: `entry ${i} repeats a recipient` };
+    }
+    seen.add(entry.recipient);
+    ids.push({ recipient: entry.recipient, messageId: entry.messageId || fallbackId });
+  }
+  return { ok: true, ids };
+}
+
+async function readResponseAsResult(
+  res: Response,
+  recipients: ReadonlyArray<string>,
+  fallbackId: string,
+): Promise<SendEmailResult> {
   try {
     let body: unknown;
     try {
@@ -441,22 +500,17 @@ async function readResponseAsResult(res: Response, fallbackId: string): Promise<
       );
     }
     if (body.ok === true) {
-      // `ids` is `unknown[]` from the typeguard's perspective — validate
-      // each entry shape before surfacing it.
-      const ids: Array<SendEmailDelivery> = [];
-      for (const d of body.ids as Array<unknown>) {
-        if (typeof d !== 'object' || d === null) {
-          continue;
-        }
-        const entry = d as { recipient?: unknown; messageId?: unknown };
-        const recipient = typeof entry.recipient === 'string' ? entry.recipient : '';
-        if (!recipient) {
-          continue;
-        }
-        const mid = typeof entry.messageId === 'string' ? entry.messageId : '';
-        ids.push({ recipient, messageId: mid || fallbackId });
+      // `ids` is `unknown[]` from the typeguard's perspective; the list is
+      // validated as a whole against the recipients this send asked for.
+      const list = readDeliveryList(body.ids as Array<unknown>, recipients, fallbackId);
+      if (!list.ok) {
+        return err(
+          'UPSTREAM_ERROR',
+          `email: proxy returned a malformed delivery list (${list.reason})`,
+          body,
+        );
       }
-      return { ok: true, ids };
+      return { ok: true, ids: list.ids };
     }
     // Treat the body as a flat record from here — the discriminated
     // union narrowing fights the `unknown`-derived branches and adds
@@ -813,7 +867,7 @@ export async function sendEmail(opts: SendEmailOptions): Promise<SendEmailResult
       e,
     );
   }
-  return readResponseAsResult(res, messageId);
+  return readResponseAsResult(res, recipients, messageId);
 }
 
 /**

@@ -820,6 +820,119 @@ describe('sendEmail (proxy round trip)', () => {
   });
 });
 
+// The proxy answers `ok: true` only after every requested recipient was
+// accepted by the allowlist AND confirmed by `SEND_EMAIL.send()`, and its
+// `ids` is `deliveries.map(({ recipient, messageId }))` — one entry per
+// requested address, `messageId` always a string (`''` when CF returned
+// none). So on `ok: true` the list is the request's recipient set, and a
+// list that does not account for every recipient is a schema-skewed or
+// corrupt proxy: dropping the bad entry and still returning `ok: true`
+// would tell the caller a delivery was confirmed when none was.
+describe('sendEmail (proxy delivery list)', () => {
+  const send = (proxy: ReturnType<typeof fakeProxy>['proxy'], to: string | Array<string>) =>
+    withRuntimeEnv({ __VOID_PROXY: proxy, ...PROXY_ENV_KEYS }, () =>
+      sendEmail({ from: 'a@x.dev', to, subject: 's', text: 't', sendInDev: true }),
+    );
+
+  it.each([
+    [
+      'a null entry',
+      'b@y.dev',
+      { ok: true, ids: [null] },
+      'entry 0 is not { recipient: string, messageId: string }',
+    ],
+    [
+      'a missing messageId',
+      'b@y.dev',
+      { ok: true, ids: [{ recipient: 'b@y.dev' }] },
+      'entry 0 is not { recipient: string, messageId: string }',
+    ],
+    [
+      'a non-string recipient',
+      'b@y.dev',
+      { ok: true, ids: [{ recipient: 42, messageId: 'cf-1' }] },
+      'entry 0 is not { recipient: string, messageId: string }',
+    ],
+    [
+      'an empty list for a two-recipient send',
+      ['b@y.dev', 'c@y.dev'],
+      { ok: true, ids: [] },
+      'expected 2 deliveries, got 0',
+    ],
+    [
+      'one entry short of the request',
+      ['b@y.dev', 'c@y.dev'],
+      { ok: true, ids: [{ recipient: 'b@y.dev', messageId: 'cf-1' }] },
+      'expected 2 deliveries, got 1',
+    ],
+    [
+      'a duplicated recipient',
+      ['b@y.dev', 'c@y.dev'],
+      {
+        ok: true,
+        ids: [
+          { recipient: 'b@y.dev', messageId: 'cf-1' },
+          { recipient: 'b@y.dev', messageId: 'cf-2' },
+        ],
+      },
+      'entry 1 repeats a recipient',
+    ],
+    [
+      'a recipient that was not requested',
+      'b@y.dev',
+      { ok: true, ids: [{ recipient: 'z@y.dev', messageId: 'cf-1' }] },
+      'entry 0 names a recipient that was not requested',
+    ],
+    [
+      'a recipient in the wrong case',
+      'b@y.dev',
+      { ok: true, ids: [{ recipient: 'B@y.dev', messageId: 'cf-1' }] },
+      'entry 0 names a recipient that was not requested',
+    ],
+  ])(
+    'returns UPSTREAM_ERROR for an ok:true response carrying %s',
+    async (_, to, payload, reason) => {
+      const { proxy } = fakeProxy(() => ({ status: 200, body: payload }));
+      const result = await send(proxy, to);
+      expect(result).toEqual({
+        ok: false,
+        error: {
+          code: 'UPSTREAM_ERROR',
+          message: `email: proxy returned a malformed delivery list (${reason})`,
+          cause: payload,
+        },
+      });
+    },
+  );
+
+  it('passes a complete list through verbatim, in the order the proxy sent it', async () => {
+    const { calls, proxy } = fakeProxy(() => ({
+      status: 200,
+      body: {
+        ok: true,
+        ids: [
+          { recipient: 'c@y.dev', messageId: 'cf-c' },
+          { recipient: 'b@y.dev', messageId: '' },
+        ],
+      },
+    }));
+    const result = await send(proxy, ['b@y.dev', 'c@y.dev']);
+    expect((calls[0].body as { recipients: Array<string> }).recipients).toEqual([
+      'b@y.dev',
+      'c@y.dev',
+    ]);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      // Order-insensitive: the proxy's order is kept, not re-sorted. The
+      // empty messageId is the proxy's "CF returned none" convention and
+      // still falls back to the locally generated Message-ID.
+      expect(result.ids.map((d) => d.recipient)).toEqual(['c@y.dev', 'b@y.dev']);
+      expect(result.ids[0].messageId).toBe('cf-c');
+      expect(result.ids[1].messageId).toMatch(/^<.+@x\.dev>$/);
+    }
+  });
+});
+
 describe('sendEmail (sendInDev escape hatch)', () => {
   it('bypasses the harness and calls the proxy', async () => {
     const harness = createEmailTestHarness();
