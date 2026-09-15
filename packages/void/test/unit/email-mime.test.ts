@@ -6,6 +6,7 @@ import {
   buildMime,
   MAX_ADDRESS_LENGTH,
   MAX_ADDRESS_OCTETS,
+  MAX_ATTACHMENTS,
   MAX_LOCAL_PART_OCTETS,
   MAX_MESSAGE_BYTES,
   MAX_RECIPIENTS,
@@ -13,6 +14,7 @@ import {
   normalizeEmail,
   parseAddress,
 } from '../../src/runtime/email/mime.ts';
+import type { Attachment } from '../../src/runtime/email/types.ts';
 
 function decode(bytes: Uint8Array): string {
   return new TextDecoder().decode(bytes);
@@ -453,6 +455,120 @@ describe('normalizeEmail', () => {
       attachments: [{ filename: 'ok.bin', content: new Uint8Array(1024) }],
     });
     expect(text).toContain('Content-Disposition: attachment; filename="ok.bin"');
+  });
+
+  describe('attachment count', () => {
+    // `MAX_ATTACHMENT_BYTES_TOTAL` never advances on a zero-byte attachment,
+    // and the size projection in `buildMime` runs only after every entry
+    // has been normalized — about 275 bytes of live heap each. Measured, 2M
+    // empty attachments terminated a 128 MB isolate in 0.3 s instead of
+    // returning `MIME_ERROR`. The count is now refused before the loop, at
+    // the largest count the projection could admit: 119 octets per part —
+    // `ATTACHMENT_PART_MIN_OCTETS` plus a one-character filename rendered
+    // twice — under `MAX_MESSAGE_BYTES`.
+    const PART_MIN_OCTETS = 117 + 2;
+
+    /** An attachment that records any read of the fields the loop touches first. */
+    function watchedAttachment(reads: Array<number>, i: number): Attachment {
+      return {
+        get filename() {
+          reads.push(i);
+          return 'a';
+        },
+        get content() {
+          reads.push(i);
+          return '';
+        },
+      };
+    }
+
+    it('is derived from the per-part floor and the message cap', () => {
+      expect(MAX_ATTACHMENTS).toBe(Math.floor(MAX_MESSAGE_BYTES / PART_MIN_OCTETS));
+      expect(MAX_ATTACHMENTS).toBe(88_115);
+    });
+
+    it('refuses one over MAX_ATTACHMENTS before normalizing any of them', async () => {
+      const reads: Array<number> = [];
+      const attachments = Array.from({ length: MAX_ATTACHMENTS + 1 }, (_, i) =>
+        watchedAttachment(reads, i),
+      );
+      let error: unknown;
+      try {
+        await normalizeEmail({
+          from: 'a@x.dev',
+          to: 'b@y.dev',
+          subject: 's',
+          text: 't',
+          attachments,
+        });
+      } catch (e) {
+        error = e;
+      }
+      expect(error).toBeInstanceOf(MimeError);
+      expect((error as MimeError).code).toBe('MIME_ERROR');
+      expect((error as MimeError).message).toBe(
+        `email: too many attachments (max ${MAX_ATTACHMENTS}, got ${MAX_ATTACHMENTS + 1}).`,
+      );
+      expect(reads).toEqual([]);
+    });
+
+    it('accepts exactly MAX_ATTACHMENTS', async () => {
+      const one = { filename: 'a', content: '' };
+      const email = await normalizeEmail({
+        from: 'a@x.dev',
+        to: 'b@y.dev',
+        subject: 's',
+        text: 't',
+        attachments: Array.from({ length: MAX_ATTACHMENTS }, () => one),
+      });
+      expect(email.attachments.length).toBe(MAX_ATTACHMENTS);
+    });
+
+    it('never rejects a count the size projection would have admitted', () => {
+      // The smallest part there is: a one-character filename, an empty
+      // media type and no content. One over the cap is refused by the
+      // projection on framing alone, so the count bound only ever refuses
+      // what `buildMime` was going to; exactly at the cap the projection
+      // admits it and the post-render check is the one to refuse the
+      // 12.9 MB it renders to.
+      const part = {
+        filename: 'a',
+        contentType: '',
+        bytes: new Uint8Array(0),
+        contentId: undefined,
+        disposition: 'inline' as const,
+      };
+      const email = (n: number) => ({
+        from: { email: 'a@x.dev' },
+        to: [{ email: 'b@y.dev' }],
+        cc: [],
+        bcc: [],
+        subject: 's',
+        text: 't',
+        headers: {},
+        attachments: Array.from({ length: n }, () => part),
+      });
+      expect(() => buildMime(email(MAX_ATTACHMENTS + 1))).toThrow(
+        /message is at least \d+ bytes once encoded, which exceeds Cloudflare limit/,
+      );
+      expect(() => buildMime(email(MAX_ATTACHMENTS))).toThrow(
+        /message size \d+ bytes exceeds Cloudflare limit/,
+      );
+    });
+
+    it('refuses a non-array attachments value instead of walking it unbounded', async () => {
+      // A `Set` iterates but has no `length`, so a count read off the
+      // options would bound nothing; the type admits only an array.
+      await expect(
+        normalizeEmail({
+          from: 'a@x.dev',
+          to: 'b@y.dev',
+          subject: 's',
+          text: 't',
+          attachments: new Set([{ filename: 'a', content: '' }]) as unknown as Array<Attachment>,
+        }),
+      ).rejects.toThrow(/attachments must be an array/);
+    });
   });
 
   /**

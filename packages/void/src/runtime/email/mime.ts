@@ -567,6 +567,22 @@ export async function normalizeEmail(opts: {
   const cc = opts.cc ? parseAddresses(opts.cc, 'cc') : [];
   const bcc = opts.bcc ? parseAddresses(opts.bcc, 'bcc') : [];
   const replyTo = opts.replyTo ? parseAddress(opts.replyTo, 'replyTo') : undefined;
+  // Before any entry is normalized: the count is what bounds the loop below
+  // for a zero-byte attachment, which the byte total never sees. The type
+  // admits only an array, but that binds nothing at runtime, and the count
+  // is only a bound on the loop if the loop walks the array it was read
+  // from — so anything else is refused, as `toBytes` refuses a content of
+  // a type outside the contract.
+  const attachmentList = opts.attachments ?? [];
+  if (!Array.isArray(attachmentList)) {
+    throw new MimeError('MIME_ERROR', 'email: attachments must be an array.');
+  }
+  if (attachmentList.length > MAX_ATTACHMENTS) {
+    throw new MimeError(
+      'MIME_ERROR',
+      `email: too many attachments (max ${MAX_ATTACHMENTS}, got ${attachmentList.length}).`,
+    );
+  }
   // Sequential, not `Promise.all`: the running total has to be charged
   // BEFORE each copy, or the entire set is already resident by the time
   // anything looks at a size. Sequencing costs nothing measurable — every
@@ -575,7 +591,7 @@ export async function normalizeEmail(opts: {
   // overlap.
   const attachments: Array<NormalizedAttachment> = [];
   let attachmentBytes = 0;
-  for (const att of opts.attachments ?? []) {
+  for (const att of attachmentList) {
     const declared = declaredSize(att.content);
     if (attachmentBytes + declared > MAX_ATTACHMENT_BYTES_TOTAL) {
       throw attachmentsTooLargeError(attachmentBytes + declared);
@@ -1312,6 +1328,33 @@ const ATTACHMENT_PART_MIN_OCTETS: number =
   ('Content-Transfer-Encoding: base64'.length + CRLF.length) +
   ('Content-Disposition: '.length + '; filename=""'.length + CRLF.length) +
   CRLF.length; // the blank line before the body
+
+/**
+ * Cap on the attachment COUNT, checked against the raw list in
+ * `normalizeEmail` before a single entry is normalized.
+ *
+ * Every part costs at least `ATTACHMENT_PART_MIN_OCTETS` of framing plus
+ * its filename twice, and `normalizeAttachment` refuses an empty filename,
+ * so the size projection in `buildMime` charges a part at least 119 octets
+ * and refuses one more part than this whatever else the message holds.
+ * That projection runs only after `normalizeEmail` has normalized EVERY
+ * entry, and `MAX_ATTACHMENT_BYTES_TOTAL` cannot bound that loop for a
+ * zero-byte attachment — its running total never advances — while the
+ * normalized copy (the object, a fresh `Uint8Array`, the `TextEncoder`
+ * that made it) costs about 275 bytes of live heap per entry. Measured, 2M
+ * empty attachments terminated a 128 MB isolate in 0.3 s instead of
+ * returning `MIME_ERROR`; this many normalize in 24 MB and are then refused
+ * by the post-render size check under the same ceiling.
+ *
+ * Derived, not chosen: it is exactly the largest count the projection can
+ * admit, so this cannot reject a message that would have been accepted, and
+ * `buildMime` remains the authority on the final size. Same class as
+ * `MAX_ATTACHMENT_BYTES_TOTAL` — a developer-experience guardrail on the
+ * app's own input, not the security boundary.
+ */
+export const MAX_ATTACHMENTS: number = Math.floor(
+  MAX_MESSAGE_BYTES / (ATTACHMENT_PART_MIN_OCTETS + 2),
+);
 
 /**
  * Octets every custom header costs around its value: the `: ` after the
