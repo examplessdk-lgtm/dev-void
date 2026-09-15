@@ -1,4 +1,5 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'pathslash';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 
@@ -37,7 +38,7 @@ vi.mock('@napi-rs/keyring', () => ({
 const directories: Array<string> = [];
 
 beforeEach(() => {
-  state.home = mkdtempSync('/tmp/void-auth-legacy-home-');
+  state.home = mkdtempSync(join(tmpdir(), 'void-auth-legacy-home-'));
   directories.push(state.home);
   state.passwords.clear();
   process.env.VOID_PLATFORM_REGISTRY_DIR = join(state.home, 'registry');
@@ -56,7 +57,7 @@ afterEach(() => {
 
 describe('legacy Void Cloud authentication', () => {
   it('preserves token-only Void Cloud CI on clean runners', async () => {
-    const root = mkdtempSync('/tmp/void-auth-legacy-ci-');
+    const root = mkdtempSync(join(tmpdir(), 'void-auth-legacy-ci-'));
     directories.push(root);
     process.env.VOID_TOKEN = 'ci-token';
     const { getApiUrl, getProxyUrl, getSiteDomain, getToken } =
@@ -69,7 +70,7 @@ describe('legacy Void Cloud authentication', () => {
   });
 
   it('preserves a token-only platform selection while migrating to the keychain', async () => {
-    const root = mkdtempSync('/tmp/void-auth-legacy-project-');
+    const root = mkdtempSync(join(tmpdir(), 'void-auth-legacy-project-'));
     directories.push(root);
     const configDirectory = join(state.home, '.void');
     mkdirSync(configDirectory, { recursive: true });
@@ -95,7 +96,7 @@ describe('legacy Void Cloud authentication', () => {
   });
 
   it('lets an explicit platform connection supersede a legacy hosted selection', async () => {
-    const root = mkdtempSync('/tmp/void-auth-platform-selection-');
+    const root = mkdtempSync(join(tmpdir(), 'void-auth-platform-selection-'));
     directories.push(root);
     const configDirectory = join(state.home, '.void');
     mkdirSync(configDirectory, { recursive: true });

@@ -175,7 +175,9 @@ describe('platform registry', () => {
     });
     promoteInstallationSecrets(manifest, directory);
     const recoveryPath = join(directory, 'account_123', 'example-a1b2c3d4.recovery.enc');
-    expect(statSync(recoveryPath).mode & 0o777).toBe(0o600);
+    if (process.platform !== 'win32') {
+      expect(statSync(recoveryPath).mode & 0o777).toBe(0o600);
+    }
     expect(readFileSync(recoveryPath, 'utf8')).not.toContain('postgres://secret');
     expect(readInstallationRecoverySecrets(manifest, directory)).toEqual({
       databaseUrl: 'postgres://secret',
