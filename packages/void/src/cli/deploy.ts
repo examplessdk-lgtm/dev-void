@@ -4549,7 +4549,7 @@ export async function runCloudflareDeploy(
               `  • ${a} — still routed to worker "${workerName}", which no longer exports email(); inbound mail there will fail.`,
           ),
           ...(staleBinding ? [`  • send_email ${SEND_EMAIL_BINDING} binding`] : []),
-          'Deploying as-is. To detach: remove `addresses`, `send_email` and `vars.__VOID_EMAIL_FROM` from wrangler.jsonc and delete the rules with `wrangler email routing rules delete`, or set `addresses: []` and let `wrangler deploy` ask before deleting every Void-owned rule.',
+          'Deploying as-is. To detach: remove `addresses`, `send_email` and `vars.__VOID_EMAIL_FROM` from wrangler.jsonc and delete the rules in the Cloudflare dashboard (Email → Email Routing → Routing rules), or set `addresses: []` and let `void deploy --platform cloudflare` ask before deleting every Void-owned rule.',
         ].join('\n'),
       );
     }

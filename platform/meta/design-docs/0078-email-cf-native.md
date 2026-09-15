@@ -1857,7 +1857,14 @@ injection and typing of the two bindings, the environment-level admin page
 and setup script, the three Mode C code sites, and the proxy's bounce text
 for a framework-type project (the routing blob already carries `type`;
 `email-router.ts` never reads it, so the bounce says "needs redeploy" to a
-user for whom redeploying cannot help).
+user for whom redeploying cannot help). _(added 2026-09-15)_ Tenant
+visibility of a dropped outbound action: a `forward` or `reply` refused by
+the per-project gate (recipient not a verified destination, burst or
+monthly limit) is logged only in the proxy's own console output, the
+inbound record still reads `handled`, and `GET /projects/:id/email/logs`
+still answers `pending` — so a project cannot see that its reply never
+left. The guide documents the gate; surfacing the drop needs the
+Analytics Engine-backed log query that `void email logs` is waiting on.
 
 ## Open decisions
 

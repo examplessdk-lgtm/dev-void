@@ -182,7 +182,15 @@ async function emailDisallow(
   log.success(`Removed ${dest.address}. Outbound to this address will be rejected on next deploy.`);
 }
 
-async function emailLogs(client: PlatformClient, projectId: string, limit?: number): Promise<void> {
+/**
+ * `void email logs` — exported for the unit test; the command entry
+ * (`runEmailCommand`) resolves the client and project first.
+ */
+export async function emailLogs(
+  client: Pick<PlatformClient, 'getEmailLogs'>,
+  projectId: string,
+  limit?: number,
+): Promise<void> {
   // The API currently ignores `limit`; server-side wiring is pending the
   // Analytics Engine integration. Forwarding it now keeps the CLI
   // forward-compatible — once persistent storage lands, no client change is
@@ -190,7 +198,14 @@ async function emailLogs(client: PlatformClient, projectId: string, limit?: numb
   const result = await client.getEmailLogs(projectId, limit);
   if (result.pending) {
     log.info(result.note ?? 'Persistent log storage is not yet wired up.');
-    log.info('Real-time activity is visible in `wrangler tail` output for the proxy worker.');
+    // The proxy's own send/receive records are the platform worker's console
+    // output, which a project's credentials cannot read — so nothing points
+    // at them. The one thing a user CAN read today is their own worker's
+    // console output: the email handler is invoked over RPC on the same
+    // tailed script as every HTTP request, so it lands in `void project logs`.
+    log.info(
+      'Email activity logs are not available yet. Console output from your email handler appears in `void project logs`.',
+    );
     return;
   }
   if (result.logs.length === 0) {
@@ -419,7 +434,7 @@ export async function runEmailCloudflareCommand(
   }
   if ((out.patch.addresses ?? []).length > 0) {
     log.info(
-      'Routing rules are created by the next `void deploy --platform cloudflare` (wrangler applies the Email Routing plan on deploy).',
+      'Routing rules are created by the next `void deploy --platform cloudflare`, which applies the Email Routing plan from `addresses`.',
     );
   }
   log.success(`Email set up on ${pre.domain}.`);

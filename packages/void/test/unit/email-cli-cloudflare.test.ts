@@ -423,6 +423,28 @@ describe('void email setup --platform cloudflare', () => {
     expect(fetchCalls.every((c) => c.method === 'GET')).toBe(true);
   });
 
+  it('a session without the email scopes: the ✘ row says `void cloudflare logout`, then `login` — exit 1, no prompt', async () => {
+    const root = makeProject();
+    roots.push(root);
+    const who = JSON.parse(fixture('whoami').stdout) as { tokenPermissions: Array<string> };
+    who.tokenPermissions = who.tokenPermissions.filter((s) => !s.startsWith('email_'));
+    const { deps, calls, fetchCalls, printed } = transcriptDeps({
+      runnerTable: { 'whoami --json': { status: 0, stdout: JSON.stringify(who), stderr: '' } },
+    });
+    const confirm = vi.fn(async () => true);
+
+    const code = await run(root, 'setup', { ...deps, isInteractive: true, confirm });
+
+    expect(code).toBe(1);
+    expect(confirm).not.toHaveBeenCalled();
+    expect(printed[0]).toContain(
+      '    ✘ the Cloudflare session lacks email_routing:write + email_sending:write — run `void cloudflare logout`, then `void cloudflare login` (one browser Allow)',
+    );
+    expect(printed[0]).not.toMatch(/wrangler login/i);
+    expect(calls.map((c) => c.args.slice(0, 2).join(' '))).toEqual(['whoami --json']);
+    expect(fetchCalls).toEqual([]);
+  });
+
   it('an `all` blocker (foreign MX on the apex path) exits 1 without a prompt', async () => {
     const root = makeProject({ from: 'noreply@acme.com' });
     roots.push(root);
@@ -910,6 +932,34 @@ describe('void email status --platform cloudflare', () => {
 
     expect(code).toBe(0);
     expect(calls.some((c) => c.args[0] === 'email')).toBe(true);
+  });
+
+  it('not signed in: the checklist reaches the terminal as-is and says `void cloudflare login`, exit 1', async () => {
+    const root = makeProject();
+    roots.push(root);
+    const { deps, calls } = transcriptDeps({
+      runnerTable: {
+        'whoami --json': { status: 0, stdout: JSON.stringify({ loggedIn: false }), stderr: '' },
+      },
+    });
+    // The default block printer is clack's `log.message`, straight from the renderer — this
+    // path has no `formatCloudflareUserMessage` in front of it, so the text pinned here is
+    // exactly what the developer reads.
+    const { print: _print, ...withoutPrint } = deps;
+    const logged = captureLog();
+    let code: number;
+    try {
+      code = await run(root, 'status', { ...withoutPrint, isInteractive: false });
+    } finally {
+      logged.restore();
+    }
+
+    expect(code).toBe(1);
+    const output = logged.lines.join('\n');
+    expect(output).toContain('    ✘ not logged in to Cloudflare — run `void cloudflare login`');
+    expect(output).not.toMatch(/wrangler login/i);
+    expect(output).toContain('Email is not set up on mail.acme.com yet');
+    expect(calls.map((c) => c.args.slice(0, 2).join(' '))).toEqual(['whoami --json']);
   });
 
   it('ready: exit 0 and the routed address map', async () => {

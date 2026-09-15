@@ -452,6 +452,75 @@ describe('routeInbound — slug parsing + KV lookup', () => {
     expect(dispatchGet).not.toHaveBeenCalled();
   });
 
+  // `projectId` is the other KV-sourced field the router keys a control on.
+  // The email-only kill-switch is `email-suspended:<projectId>`, built with a
+  // template literal: `42` becomes `email-suspended:42`, `{}` becomes
+  // `email-suspended:[object Object]`, `''` becomes `email-suspended:` — keys
+  // no writer has ever set — so the lookup missed and a project suspended
+  // under its real id kept receiving mail. A number also reaches `sanitize`
+  // from the gate-load and counter-put failure handlers, where `.slice`
+  // throws inside a catch. Every worker routing has carried a string id since
+  // the first writer, so absent / null / empty / mistyped is corrupt data:
+  // the suspension state cannot be read, and the message must not run.
+  it.each([
+    ['a number', 42],
+    ['an object', {}],
+    ['a boolean', true],
+    ['an array', ['p_test']],
+    ['an empty string', ''],
+    ['null', null],
+    ['absent', undefined],
+  ])('rejects a routing blob whose projectId is %s as corrupt', async (_kind, projectId) => {
+    const { env, kv, emailFn, dispatchGet } = makeEnv({
+      kvSeed: {
+        // `JSON.stringify` drops an `undefined` value, so that row seeds a
+        // blob with no `projectId` key at all.
+        myslug: JSON.stringify({ workerName: 'user-worker', projectId }),
+        // The real project IS suspended under its real id. Before the guard
+        // the coerced key missed this row and the message was dispatched.
+        'email-suspended:p_test': '2026-04-29T00:00:00Z',
+      },
+      emailReturn: [{ type: 'forward', to: 'admin@example.com' }],
+    });
+    const { message, rejectCalls, forwardCalls } = createFakeMessage({
+      to: `myslug+tag@${PROD_DOMAIN}`,
+    });
+    const { ctx, waited } = createCtx();
+    await expect(routeInbound(message, env, ctx)).resolves.toBeUndefined();
+    expect(rejectCalls).toEqual([`${PROD_DOMAIN}: routing data corrupt`]);
+    // No suspension lookup was even attempted on a key built from the bad
+    // value — the guard sits in front of it.
+    const suspensionLookups = kv.get.mock.calls
+      .map((call) => call[0])
+      .filter((key) => key.startsWith('email-suspended:'));
+    expect(suspensionLookups).toEqual([]);
+    expect(dispatchGet).not.toHaveBeenCalled();
+    expect(emailFn).not.toHaveBeenCalled();
+    expect(forwardCalls).toHaveLength(0);
+    // Refused before dispatch, so nothing is scheduled for log-recv either.
+    expect(waited).toHaveLength(0);
+  });
+
+  it('a string projectId reaches the email-only suspension lookup', async () => {
+    const { env, kv, emailFn, dispatchGet } = makeEnv({
+      kvSeed: {
+        myslug: DEFAULT_ROUTING,
+        'email-suspended:p_test': '2026-04-29T00:00:00Z',
+      },
+      emailReturn: [{ type: 'forward', to: 'admin@example.com' }],
+    });
+    const { message, rejectCalls, forwardCalls } = createFakeMessage({
+      to: `myslug+tag@${PROD_DOMAIN}`,
+    });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(kv.get).toHaveBeenCalledWith('email-suspended:p_test');
+    expect(rejectCalls).toEqual([`${PROD_DOMAIN}: project "myslug" inbound is suspended`]);
+    expect(dispatchGet).not.toHaveBeenCalled();
+    expect(emailFn).not.toHaveBeenCalled();
+    expect(forwardCalls).toHaveLength(0);
+  });
+
   it('routes a tag-less recipient (whole local-part is the slug)', async () => {
     const { env, emailFn } = makeEnv({ kvSeed: { myslug: DEFAULT_ROUTING }, emailReturn: [] });
     const { message, rejectCalls } = createFakeMessage({ to: `myslug@${PROD_DOMAIN}` });
@@ -1710,19 +1779,27 @@ describe('routeInbound — per-project gating on forward/reply (HIGH H1)', () =>
     expect(forwardCalls).toHaveLength(1);
   });
 
-  it('fails CLOSED when the routing entry has no projectId', async () => {
+  it('fails CLOSED when the routing entry has no projectId — refused before dispatch', async () => {
     // No projectId → no per-project guard is available, so forward/reply
     // must be refused rather than falling back to CF's account-wide flag.
-    const { env, emailFn } = makeEnv({
+    // This used to pin "dispatch, then drop the forward". A worker routing
+    // with no id is corrupt data (every writer has put one in the blob since
+    // the first), and the email-only suspension key cannot be built from it
+    // either — so the router now refuses it in front of dispatch, which is
+    // strictly more closed: no tenant code runs, no forward can fire.
+    const { env, emailFn, dispatchGet } = makeEnv({
       kvSeed: { myslug: JSON.stringify({ workerName: 'user-worker' }) },
       emailReturn: [{ type: 'forward', to: 'admin@example.com' }],
     });
-    const { message, forwardCalls } = createFakeMessage({ to: `myslug@${PROD_DOMAIN}` });
+    const { message, forwardCalls, rejectCalls } = createFakeMessage({
+      to: `myslug@${PROD_DOMAIN}`,
+    });
     const { ctx } = createCtx();
     await routeInbound(message, env, ctx);
-    expect(emailFn).toHaveBeenCalledTimes(1);
+    expect(rejectCalls).toEqual([`${PROD_DOMAIN}: routing data corrupt`]);
+    expect(dispatchGet).not.toHaveBeenCalled();
+    expect(emailFn).not.toHaveBeenCalled();
     expect(forwardCalls).toHaveLength(0);
-    expect(errorSpy).toHaveBeenCalled();
   });
 
   it('fails CLOSED when the gate cannot be loaded (KV read error)', async () => {

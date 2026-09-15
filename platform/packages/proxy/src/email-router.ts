@@ -697,6 +697,22 @@ export async function routeInbound(
     return;
   }
 
+  // `projectId` arrives from KV the same way. The email-only kill-switch
+  // below is keyed `email-suspended:<projectId>`, and a template literal
+  // coerces whatever is there — a number, an object, an empty string — into
+  // a key that names no real project, so the lookup misses and a suspended
+  // tenant keeps receiving mail. Every failure handler after dispatch also
+  // renders the id through `sanitize`, which throws on a non-string. Every
+  // writer of a worker routing has put a string id in the blob since the
+  // first one (`buildRoutingJson` types it, and there is no static-deploy
+  // reading for a missing id the way there is for a missing `workerName`),
+  // so absent, empty or mistyped is corrupt data and is refused the same
+  // way — the suspension state cannot be read, so the message must not run.
+  if (typeof routing.projectId !== 'string' || routing.projectId === '') {
+    message.setReject(`${label}: routing data corrupt`);
+    return;
+  }
+
   // Email-only suspend kill-switch — the narrower control, set by the admin
   // UI to stop mail without taking the whole project offline. Gates inbound
   // as well as outbound so a suspended project doesn't keep accepting +
@@ -704,11 +720,9 @@ export async function routeInbound(
   // No cacheTtl: this is an abuse-response control; we eat the extra KV
   // get per inbound message so a suspend takes effect immediately
   // (subject only to KV's ~near-instant per-colo consistency).
-  if (routing.projectId) {
-    if (await env.ROUTING.get(`email-suspended:${routing.projectId}`)) {
-      message.setReject(`${label}: project "${sanitize(slug, 64)}" inbound is suspended`);
-      return;
-    }
+  if (await env.ROUTING.get(`email-suspended:${routing.projectId}`)) {
+    message.setReject(`${label}: project "${sanitize(slug, 64)}" inbound is suspended`);
+    return;
   }
 
   let stub: EmailEntrypointStub;

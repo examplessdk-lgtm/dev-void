@@ -20,6 +20,7 @@ import {
   wranglerApiErrorCode,
   type EmailCloudflareInputs,
   type EmailDns,
+  type EmailPreflight,
   type EmailWranglerRunResult,
 } from '../../src/cli/email-cloudflare.ts';
 import type { EmailHandlersScan } from '../../src/router/email.ts';
@@ -721,7 +722,7 @@ describe('preflightEmail', () => {
     expect(pre.ready).toBe(true);
     const text = renderEmailChecklist(pre);
     expect(text).not.toContain('+ wrangler.jsonc');
-    expect(text).toContain('+ routing rule (applied by wrangler deploy)');
+    expect(text).toContain('+ routing rule (created on deploy)');
   });
 
   it('flags a committed `addresses` array that is not the pruned set as stale, without losing ready', async () => {
@@ -853,7 +854,7 @@ describe('preflightEmail', () => {
     expect(pre.rules.absent).toEqual(['support@acme.com', '*@acme.com']);
   });
 
-  it('blocks on a session without the email scopes (`wrangler login`)', async () => {
+  it('blocks on a session without the email scopes (`void cloudflare logout`, then `login`)', async () => {
     const who = JSON.parse(fixture('whoami').stdout) as { tokenPermissions: Array<string> };
     who.tokenPermissions = who.tokenPermissions.filter((s) => !s.startsWith('email_'));
     const calls: Array<Call> = [];
@@ -864,9 +865,73 @@ describe('preflightEmail', () => {
     const pre = await preflightEmail(inputs);
     expect(pre.session.state).toBe('missing-scopes');
     expect(pre.session.missingScopes).toEqual(['email_routing:write', 'email_sending:write']);
-    expect(pre.blockers[0]?.message).toContain('wrangler login');
+    // `void cloudflare login` re-uses a session `whoami` reads cleanly (it never re-consents
+    // one), so a readable-but-insufficient session must be signed out first.
+    expect(pre.blockers[0]?.message).toBe(
+      'the Cloudflare session lacks email_routing:write + email_sending:write — run `void cloudflare logout`, then `void cloudflare login` (one browser Allow)',
+    );
     // No other read runs on a session that cannot do the work.
     expect(calls.map((c) => c.args.join(' '))).toEqual(['whoami --json']);
+  });
+
+  it('every session blocker routes Cloudflare login through Void, never through wrangler', async () => {
+    // AGENTS.md: user-facing output never asks for a wrangler command. These rows print raw
+    // from `void email setup` / `status`, and through `formatCloudflareUserMessage` on the
+    // deploy path, where a `wrangler …` command would render as "the underlying Cloudflare
+    // operation" — no guidance at all.
+    const who = JSON.parse(fixture('whoami').stdout) as { tokenPermissions: Array<string> };
+    who.tokenPermissions = who.tokenPermissions.filter((s) => !s.startsWith('email_'));
+    const sessions: Array<{
+      state: EmailPreflight['session']['state'];
+      whoami: EmailWranglerRunResult;
+    }> = [
+      { state: 'unknown', whoami: { status: 1, stdout: '', stderr: '✘ [ERROR] boom\n' } },
+      { state: 'unknown', whoami: { status: 0, stdout: 'not json', stderr: '' } },
+      {
+        state: 'not-logged-in',
+        whoami: { status: 0, stdout: JSON.stringify({ loggedIn: false }), stderr: '' },
+      },
+      {
+        state: 'api-key',
+        whoami: {
+          status: 0,
+          stdout: JSON.stringify({ loggedIn: true, authType: 'Global API Key' }),
+          stderr: '',
+        },
+      },
+      { state: 'missing-scopes', whoami: { status: 0, stdout: JSON.stringify(who), stderr: '' } },
+    ];
+    for (const session of sessions) {
+      const { inputs } = transcriptInputs({ runnerTable: { 'whoami --json': session.whoami } });
+      const pre = await preflightEmail(inputs);
+      expect(pre.session.state).toBe(session.state);
+      expect(pre.blockers.map((b) => b.scope)).toEqual(['all']);
+      const message = pre.blockers[0]!.message;
+      expect(message).toContain('`void cloudflare login`');
+      expect(message).not.toMatch(/wrangler/i);
+      // The checklist carries the row verbatim on both printing paths.
+      expect(renderEmailChecklist(pre)).toContain(`    ✘ ${message}`);
+    }
+    // A Global API Key wins over both an OAuth session and CLOUDFLARE_API_TOKEN in wrangler's
+    // env precedence, so neither alternative works until the key is unset.
+    const apiKey = await preflightEmail(
+      transcriptInputs({ runnerTable: { 'whoami --json': sessions[3]!.whoami } }).inputs,
+    );
+    expect(apiKey.blockers[0]?.message).toBe(
+      'the Cloudflare session is a Global API Key (CLOUDFLARE_API_KEY), which has no bearer to borrow for the subaddressing calls — unset CLOUDFLARE_API_KEY, then run `void cloudflare login` or set CLOUDFLARE_API_TOKEN to a token with Email Routing Edit + Email Sending Edit',
+    );
+    const notLoggedIn = await preflightEmail(
+      transcriptInputs({ runnerTable: { 'whoami --json': sessions[2]!.whoami } }).inputs,
+    );
+    expect(notLoggedIn.blockers[0]?.message).toBe(
+      'not logged in to Cloudflare — run `void cloudflare login`',
+    );
+    const unreadable = await preflightEmail(
+      transcriptInputs({ runnerTable: { 'whoami --json': sessions[0]!.whoami } }).inputs,
+    );
+    expect(unreadable.blockers[0]?.message).toBe(
+      'could not read the Cloudflare session — run `void cloudflare login`',
+    );
   });
 
   it('blocks when not logged in', async () => {
@@ -965,7 +1030,7 @@ describe('preflightEmail', () => {
     expect(pre.addresses).toEqual(['support@mail.acme.com']);
     const text = renderEmailChecklist(pre);
     expect(text).toContain('support@mail.acme.com → acme-support   (absent)');
-    expect(text).toContain('+ routing rule (applied by wrangler deploy)');
+    expect(text).toContain('+ routing rule (created on deploy)');
 
     // A disabled rule is skipped, not matched: an enabled sibling on the same address still
     // decides the row — here a forward that owns the address, so it is pruned (decision 12).
@@ -1297,7 +1362,7 @@ describe('renderEmailChecklist', () => {
         '    + turn on subaddressing for acme.com          support+anything@ reaches support@',
         '    + onboard mail.acme.com for Email Sending     MX/SPF/DKIM on cf-bounce.mail.acme.com, _dmarc.mail.acme.com (p=reject)',
         '    + wrangler.jsonc                              send_email: [{ name: "SEND_EMAIL" }], addresses: ["support@mail.acme.com"], vars.__VOID_EMAIL_FROM: "noreply@mail.acme.com"',
-        '    + routing rule (applied by wrangler deploy)   support@mail.acme.com → acme-support',
+        '    + routing rule (created on deploy)            support@mail.acme.com → acme-support',
         '    ! email/_default.ts                           a catch-all exists only on an apex; other @mail.acme.com mail bounces',
       ].join('\n'),
     );
@@ -1486,6 +1551,9 @@ describe('applyEmailSetup', () => {
     // Sending still onboarded → the binding is still written.
     expect(out.sendingReady).toBe(true);
     expect(out.patch.sendEmail).toEqual({ name: 'SEND_EMAIL' });
+    expect(out.lines).toContain(
+      '  ✘ routing   mail.acme.com: could not borrow the Cloudflare session (session-bearer step failed)',
+    );
     expect(out.lines).toContain(`    ${subdomainDashboardFallback('acme.com', 'mail.acme.com')}`);
     expect(out.lines.some((l) => l.includes('addresses withheld this run'))).toBe(true);
     expect(calls.map((c) => c.args)).toEqual([['email', 'sending', 'enable', 'mail.acme.com']]);

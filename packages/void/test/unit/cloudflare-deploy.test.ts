@@ -8922,6 +8922,11 @@ describe('runCloudflareDeploy — Mode B email step (3b-ii)', () => {
     expect(confirms).toEqual([]);
     const printed = output.lines.join('\n');
     expect(printed).toContain('email_routing:write + email_sending:write');
+    // The checklist goes through `formatCloudflareUserMessage` on this path, which turns a
+    // `wrangler …` command into "the underlying Cloudflare operation" — so the guidance must
+    // already be a Void command at the source to survive as guidance.
+    expect(printed).toContain('run `void cloudflare logout`, then `void cloudflare login`');
+    expect(printed).not.toContain('underlying Cloudflare operation');
     expect(printed).toContain('deploying without email');
     // Nothing past whoami was asked of wrangler for email, and nothing was written.
     expect(spawns.some((s) => s.args[0] === 'email')).toBe(false);
@@ -9456,6 +9461,12 @@ describe('runCloudflareDeploy — Mode B email step (3b-ii)', () => {
     expect(printed).toContain('no longer declares email handlers');
     expect(printed).toContain('support@mail.acme.com — still routed to worker "myapp"');
     expect(printed).toContain('send_email SEND_EMAIL binding');
+    // The detach guidance names a dashboard path and a Void command, not a wrangler command
+    // (which the deploy log wrapper would render as "the underlying Cloudflare operation").
+    expect(printed).toContain(
+      'delete the rules in the Cloudflare dashboard (Email → Email Routing → Routing rules), or set `addresses: []` and let `void deploy --platform cloudflare` ask',
+    );
+    expect(printed).not.toContain('underlying Cloudflare operation');
   });
 
   it('last inbound handler removed, outbound `void/email` kept: the committed entry is a decision-13 blocker, the array stays, and the trigger snapshot still carries it (the ready-path `null` write is never reached)', async () => {

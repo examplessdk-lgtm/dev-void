@@ -335,7 +335,7 @@ export default defineEmail(async (message, env, ctx, info) => {
 
 `replyEmail` builds the reply MIME with `Subject: Re: <original>` (no double-prefix), `In-Reply-To: <Message-ID>`, and a continued `References` chain, then dispatches through the message's `reply()`. Defaults: `to = message.from`, `subject = "Re: <original>"`.
 
-Everything taken from the inbound message is best-effort, because the remote sender controls it. A `Message-ID` or `References` value too long for a header line is dropped rather than threaded, and a `References` chain over 8 KiB keeps only its newest ids — the parent's `Message-ID` always ends it. Control characters in the subject become a space, and a subject over 4096 characters, or an ASCII one too long to fold, falls back to a bare `Re:`. The reply is always sent; pass `subject` to control it exactly.
+Everything taken from the inbound message is best-effort, because the remote sender controls it. A `Message-ID` or `References` value too long for a header line is dropped rather than threaded, and a `References` chain over 8 KiB keeps only its newest ids — the parent's `Message-ID` always ends it. Control characters in the subject become a space, and a subject over 4096 characters, or an ASCII one too long to fold, falls back to a bare `Re:`. None of these fallbacks suppresses the reply; pass `subject` to control it exactly.
 
 On the platform the `from` default is **not** `message.to`. A reply is sent from
 your project's own slug on the platform mail zone — `<slug>+noreply@<domain>` —
@@ -355,6 +355,21 @@ log stream, not your project's.
 This is what stops one project replying as another project's address. Note that
 `message.to` is the _stripped_ address (`<tag>@<domain>`), so `from: message.to`
 is exactly the shape the pin rejects.
+:::
+
+::: warning The platform gates the reply recipient
+A reply's `to` goes through the same gate as `sendEmail()` and `forward()`: it
+must be one of your project's verified destinations —
+`void email allow <address>`, then the recipient's verification click. A reply
+to any other address is **dropped silently**: the inbound message is still
+accepted, `replyEmail` still resolves, nothing reaches your worker, and the
+only trace is in the platform's log stream, not your project's.
+
+So the ticket example above answers only senders you have allowlisted. An
+auto-responder to arbitrary senders needs
+[your own Cloudflare account](#your-own-cloudflare-account)
+(`--platform cloudflare`), where `reply()` is Cloudflare's own reply-to-sender
+and Void adds no allowlist.
 :::
 
 Note the asymmetry with `sendEmail`: `sendEmail` returns an error result and
@@ -430,7 +445,7 @@ The harness uses the same precedence rules as the production dispatcher. Reserve
 
 ## Your own Cloudflare account
 
-`void deploy --platform cloudflare` sets email up on a zone **you** own, through your `wrangler login` session. You never handle a Cloudflare object — no zone id, no routing rule, no token scope. You type one address, read one checklist, and press Enter once.
+`void deploy --platform cloudflare` sets email up on a zone **you** own, through your Cloudflare sign-in (`void cloudflare login`). You never handle a Cloudflare object — no zone id, no routing rule, no token scope. You type one address, read one checklist, and press Enter once.
 
 ### Two things to type, once
 
@@ -446,7 +461,7 @@ The harness uses the same precedence rules as the production dispatcher. Reserve
 
    The host (`mail.acme.com`) must be a zone in the Cloudflare account your deploy is pinned to, or sit under one. Without `email.from`, a deploy that uses email prints `add "email": { "from": "you@mail.acme.com" } to void.json` and deploys without it. Void does not pick a zone for you — wrangler cannot list them — and it never writes `void.json`.
 
-2. **`wrangler login`** on wrangler 4.81 or newer, or **`CLOUDFLARE_API_TOKEN`** set to a token with **Email Routing Edit** and **Email Sending Edit** (zone and account) alongside the deploy permissions. A login session from an older wrangler lacks the two email scopes; the deploy tells you to log in again (one browser Allow) and skips the email step. A token's permissions cannot be listed up front, so a token that lacks one shows up as a row Void could not read (`unknown`), with the permission named. A Global API Key pair (`CLOUDFLARE_API_KEY`) is refused: it has no single bearer for the two calls wrangler has no command for.
+2. **`void cloudflare login`**, or **`CLOUDFLARE_API_TOKEN`** set to a token with **Email Routing Edit** and **Email Sending Edit** (zone and account) alongside the deploy permissions. A browser session created by older Cloudflare tooling lacks the two email scopes; the deploy tells you to run `void cloudflare logout`, then `void cloudflare login` (one browser Allow) and skips the email step. A token's permissions cannot be listed up front, so a token that lacks one shows up as a row Void could not read (`unknown`), with the permission named. A Global API Key pair (`CLOUDFLARE_API_KEY`) is refused: it has no single bearer for the two calls wrangler has no command for.
 
 ### The first deploy
 
@@ -468,7 +483,7 @@ Before any of your project code runs, the deploy **reads** — the session, the 
     + turn on subaddressing for acme.com          support+anything@ reaches support@
     + onboard mail.acme.com for Email Sending     MX/SPF/DKIM on cf-bounce.mail.acme.com, _dmarc.mail.acme.com (p=reject)
     + wrangler.jsonc                              send_email: [{ name: "SEND_EMAIL" }], addresses: ["support@mail.acme.com"], vars.__VOID_EMAIL_FROM: "noreply@mail.acme.com"
-    + routing rule (applied by wrangler deploy)   support@mail.acme.com → acme-support
+    + routing rule (created on deploy)            support@mail.acme.com → acme-support
     ! email/_default.ts                           a catch-all exists only on an apex; other @mail.acme.com mail bounces
 
 ◆  Set up email on mail.acme.com?  ● Yes / ○ No
@@ -580,7 +595,7 @@ and **withholds `addresses` for that run** — no routing rule is created, so no
 ### What stays manual
 
 1. One Enter on the first deploy — it changes your account and locks DNS records.
-2. `wrangler login` once, on wrangler 4.81 or newer — or a `CLOUDFLARE_API_TOKEN` with Email Routing Edit + Email Sending Edit (what a CI runner needs).
+2. `void cloudflare login` once — or a `CLOUDFLARE_API_TOKEN` with Email Routing Edit + Email Sending Edit (what a CI runner needs).
 3. `email.from` typed once.
 4. Workers Paid, if you need `sendEmail()` to arbitrary recipients.
 5. A verification click when a handler `forward()`s to a new destination.

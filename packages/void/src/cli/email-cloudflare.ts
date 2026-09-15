@@ -713,23 +713,30 @@ export async function preflightEmail(inputs: EmailCloudflareInputs): Promise<Ema
     block('all', conflict);
   }
 
-  // 1. Session: logged in, and — for a `wrangler login` session — both email scopes
-  //    (0078: a session that predates wrangler 4.81 has neither → `wrangler login`, one
-  //    browser Allow). An API token's permissions are not enumerable (`tokenPermissions`
-  //    never describes it), so the gate is the reads below: a refused read fails closed as
-  //    an `unknown` row. A Global API Key has no single bearer `auth token` can hand over,
-  //    so the subaddressing rows could never read; it is refused up front, by name.
+  // 1. Session: logged in, and — for a browser (OAuth) session — both email scopes
+  //    (0078: a session that predates wrangler 4.81 has neither; the pinned wrangler's
+  //    default `login` scope set carries both, one browser Allow). An API token's
+  //    permissions are not enumerable (`tokenPermissions` never describes it), so the gate
+  //    is the reads below: a refused read fails closed as an `unknown` row. A Global API
+  //    Key has no single bearer `auth token` can hand over, so the subaddressing rows could
+  //    never read; it is refused up front, by name.
+  //
+  //    Every blocker names `void cloudflare login` (AGENTS.md: Cloudflare operations are
+  //    described through Void, never as a wrangler command). That command is a no-op on a
+  //    session `whoami --json` already reads cleanly — it re-uses the existing session
+  //    rather than re-consenting — so a session that IS readable but insufficient (the
+  //    scope and Global API Key branches) says what to clear first: `void cloudflare
+  //    logout`, or the CLOUDFLARE_API_KEY pair, which wrangler prefers over both an OAuth
+  //    session and CLOUDFLARE_API_TOKEN.
   const whoami = await run(['whoami', '--json']);
   const who = isHardFailure(whoami) || whoami.status !== 0 ? null : parseWhoamiJson(whoami.stdout);
   if (!who) {
+    // `whoami --json` failed or printed no session.
     pre.session.state = 'unknown';
-    block(
-      'all',
-      'could not read the wrangler session (`wrangler whoami --json` failed) — run `wrangler login`',
-    );
+    block('all', 'could not read the Cloudflare session — run `void cloudflare login`');
   } else if (!who.loggedIn) {
     pre.session.state = 'not-logged-in';
-    block('all', 'not logged in to Cloudflare — run `wrangler login`');
+    block('all', 'not logged in to Cloudflare — run `void cloudflare login`');
   } else {
     pre.session.authType = who.authType;
     pre.session.email = who.email;
@@ -738,7 +745,7 @@ export async function preflightEmail(inputs: EmailCloudflareInputs): Promise<Ema
       pre.session.state = 'api-key';
       block(
         'all',
-        'the wrangler session is a Global API Key (CLOUDFLARE_API_KEY), which has no bearer to borrow for the subaddressing calls — run `wrangler login`, or set CLOUDFLARE_API_TOKEN to a token with Email Routing Edit + Email Sending Edit',
+        'the Cloudflare session is a Global API Key (CLOUDFLARE_API_KEY), which has no bearer to borrow for the subaddressing calls — unset CLOUDFLARE_API_KEY, then run `void cloudflare login` or set CLOUDFLARE_API_TOKEN to a token with Email Routing Edit + Email Sending Edit',
       );
     } else if (who.authType === undefined || who.authType === 'OAuth Token') {
       // A missing `authType` is an older payload shape: keep the scope gate (fail closed).
@@ -748,7 +755,7 @@ export async function preflightEmail(inputs: EmailCloudflareInputs): Promise<Ema
         pre.session.state = 'missing-scopes';
         block(
           'all',
-          `the wrangler session lacks ${pre.session.missingScopes.join(' + ')} — run \`wrangler login\` again (one browser Allow)`,
+          `the Cloudflare session lacks ${pre.session.missingScopes.join(' + ')} — run \`void cloudflare logout\`, then \`void cloudflare login\` (one browser Allow)`,
         );
       } else {
         pre.session.state = 'ok';
@@ -1282,7 +1289,7 @@ export function renderEmailChecklist(pre: EmailPreflight): string {
     change('wrangler.jsonc', parts.join(', '));
   }
   for (const address of pre.rules.absent) {
-    change('routing rule (applied by wrangler deploy)', `${address} → ${pre.workerName}`);
+    change('routing rule (created on deploy)', `${address} → ${pre.workerName}`);
   }
   for (const foreign of pre.rules.foreign) {
     warn(foreign.address, `already routed to ${foreign.owner}; left alone, not in addresses`);
@@ -1492,7 +1499,8 @@ export async function applyEmailSetup(
   };
   const describeFailure = (response: SessionBearerResponse | null): string => {
     if (!response) {
-      return 'could not borrow the wrangler session (`wrangler auth token` failed)';
+      // `auth token --json` failed, so no bearer could be borrowed.
+      return 'could not borrow the Cloudflare session (session-bearer step failed)';
     }
     const first = response.errors[0];
     const code = first?.code ? ` [code: ${first.code}]` : '';
