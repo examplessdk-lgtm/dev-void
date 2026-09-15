@@ -23,12 +23,12 @@ export async function runListCommand(root: string, slug?: string): Promise<void>
     process.exit(1);
   }
 
-  const client = new PlatformClient(token, { root });
-
   let projectId: string;
   let projectSlug: string;
+  let client: PlatformClient;
 
   if (slug) {
+    client = new PlatformClient(token, { root });
     const projects = await client.listProjects();
     const config = resolveProjectBySlug(projects, slug);
     if (!config) {
@@ -45,6 +45,7 @@ export async function runListCommand(root: string, slug?: string): Promise<void>
     }
     projectId = linked.projectId;
     projectSlug = linked.slug;
+    client = new PlatformClient(token, { root });
   }
 
   await showDeployments(client, projectId, projectSlug);

@@ -260,8 +260,8 @@ export function resolveWranglerArgv(
     return [process.execPath, jsBin];
   }
   throw new Error(
-    `provision: could not resolve the "wrangler" package. wrangler ships as a dependency of "void"; ` +
-      `reinstall dependencies (e.g. \`pnpm install\`) so it is present, then retry.`,
+    `provision: Void's bundled Cloudflare tooling is unavailable. Reinstall the project's ` +
+      `dependencies from its trusted lockfile, then retry.`,
   );
 }
 

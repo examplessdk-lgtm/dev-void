@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vite-plus/test';
 import worker from '../../src/index.ts';
+import { PLATFORM_DISABLED_KEY } from '../../src/platform-lifecycle.ts';
 
 const JWT_SECRET = 'test-secret-key';
 
@@ -129,6 +130,9 @@ function createEnv(
   aiOverrides?: Partial<MockAi>,
   kvData?: Record<string, string>,
   apiOverride?: { fetch: ReturnType<typeof vi.fn> | ((req: Request) => Promise<Response>) },
+  platformInstallationId?: string,
+  healthProbeToken?: string,
+  trafficState?: string,
 ) {
   return {
     AI: {
@@ -148,6 +152,9 @@ function createEnv(
         throw new Error('worker not found');
       }),
     },
+    ...(platformInstallationId ? { PLATFORM_INSTALLATION_ID: platformInstallationId } : {}),
+    ...(healthProbeToken ? { PLATFORM_HEALTH_PROBE_TOKEN: healthProbeToken } : {}),
+    ...(trafficState ? { PLATFORM_TRAFFIC_STATE: trafficState } : {}),
   };
 }
 
@@ -174,6 +181,63 @@ describe('proxy worker', () => {
     for (const pid of ['proj_1', 'proj_42', 'proj_99', 'p']) {
       aiTokens[pid] = await signAiToken(pid, JWT_SECRET);
     }
+  });
+
+  it('rejects every request while the platform is disabled', async () => {
+    const res = await worker.fetch(
+      new Request('https://proxy.void.cloud/health'),
+      createEnv(undefined, { [PLATFORM_DISABLED_KEY]: 'disabled' }, undefined, 'installation-id'),
+    );
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: 'Platform disabled' });
+  });
+
+  it('fails closed in staging even when routing KV is missing the disabled value', async () => {
+    const res = await worker.fetch(
+      new Request('https://proxy.void.cloud/health'),
+      createEnv(undefined, undefined, undefined, 'installation-id', undefined, 'staging'),
+    );
+    expect(res.status).toBe(503);
+  });
+
+  it('admits installer health checks while public traffic is disabled', async () => {
+    const res = await worker.fetch(
+      new Request('https://proxy.void.cloud/health', {
+        headers: { 'X-Void-Platform-Probe': 'probe-token' },
+      }),
+      createEnv(
+        undefined,
+        { [PLATFORM_DISABLED_KEY]: 'disabled' },
+        undefined,
+        'installation-id',
+        'probe-token',
+      ),
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true });
+  });
+
+  it('rejects the legacy public installer header while disabled', async () => {
+    const res = await worker.fetch(
+      new Request('https://proxy.void.cloud/health', {
+        headers: { 'X-Health-Check': 'void-admin' },
+      }),
+      createEnv(
+        undefined,
+        { [PLATFORM_DISABLED_KEY]: 'disabled' },
+        undefined,
+        'installation-id',
+        'probe-token',
+      ),
+    );
+    expect(res.status).toBe(503);
+  });
+
+  it('does not read the lifecycle gate for hosted Void Cloud', async () => {
+    const env = createEnv();
+    const res = await worker.fetch(new Request('https://proxy.void.cloud/health'), env);
+    expect(res.status).toBe(200);
+    expect(env.ROUTING.get).not.toHaveBeenCalled();
   });
 
   describe('CORS', () => {
@@ -579,6 +643,27 @@ describe('proxy worker', () => {
       );
     });
 
+    it('uses the installation-specific AI Gateway', async () => {
+      const env = { ...createEnv(), AI_GATEWAY_ID: 'void-team' };
+      await worker.fetch(
+        post('/ai/run', {
+          model: 'm',
+          inputs: {},
+          projectId: 'proj_42',
+          aiToken: aiTokens['proj_42'],
+        }),
+        env,
+      );
+
+      expect(env.AI.run).toHaveBeenCalledWith(
+        'm',
+        {},
+        {
+          gateway: { id: 'void-team', metadata: { projectId: 'proj_42' } },
+        },
+      );
+    });
+
     it('preserves user gateway options while forcing Void gateway id and project metadata', async () => {
       const env = createEnv();
       await worker.fetch(
@@ -837,6 +922,26 @@ describe('proxy worker', () => {
         model: 'gpt-4o',
         messages: [{ role: 'user', content: 'Hello' }],
       });
+    });
+
+    it('uses the installation-specific gateway for provider requests', async () => {
+      mockProviderFetch('{}', { headers: { 'content-type': 'application/json' } });
+      const { gateway } = mockProviderGateway();
+      const env = { ...createEnv({ gateway }), AI_GATEWAY_ID: 'void-team' };
+
+      const response = await worker.fetch(
+        post('/ai/provider', {
+          provider: 'openai',
+          path: '/chat/completions',
+          providerKey: 'key',
+          projectId: 'proj_1',
+          aiToken: aiTokens['proj_1'],
+        }),
+        env,
+      );
+
+      expect(response.status).toBe(200);
+      expect(gateway).toHaveBeenCalledWith('void-team');
     });
 
     it('uses Google AI Studio API-key header for provider-native requests', async () => {

@@ -6,6 +6,7 @@ import { d1 } from './d1.ts';
 import { routeInbound } from './email-router.ts';
 import { email, MAX_RECIPIENT_LENGTH, MAX_SENDER_LENGTH } from './email.ts';
 import { kv } from './kv.ts';
+import { PLATFORM_DISABLED_KEY, PLATFORM_DISABLED_VALUE } from './platform-lifecycle.ts';
 import { r2 } from './r2.ts';
 import { verifyPrerenderBuild, verifyProjectOwner } from './resolve.ts';
 import { revalidate } from './revalidate.ts';
@@ -13,6 +14,24 @@ import { sandbox } from './sandbox.ts';
 import type { Env, JwtPayload, ProxyBody, ProxyEnv } from './types.ts';
 
 const app = new Hono<ProxyEnv>();
+
+app.use('/*', async (context, next) => {
+  const healthProbeToken = context.env.PLATFORM_HEALTH_PROBE_TOKEN;
+  const installerProbe =
+    healthProbeToken !== undefined &&
+    healthProbeToken !== '' &&
+    context.req.path === '/health' &&
+    context.req.header('X-Void-Platform-Probe') === healthProbeToken;
+  if (
+    !installerProbe &&
+    (context.env.PLATFORM_TRAFFIC_STATE === 'staging' ||
+      (context.env.PLATFORM_INSTALLATION_ID &&
+        (await context.env.ROUTING.get(PLATFORM_DISABLED_KEY)) === PLATFORM_DISABLED_VALUE))
+  ) {
+    return context.json({ error: 'Platform disabled' }, 503);
+  }
+  await next();
+});
 
 // CORS
 app.use(
@@ -260,6 +279,20 @@ app.post('/ai/*', async (context, next) => {
   await next();
 });
 
+app.post('/sandbox/*', async (context, next) => {
+  if (!proxyCapabilityEnabled(context.env.PLATFORM_CAPABILITIES, 'sandbox')) {
+    return context.json(
+      {
+        error: 'platform capability unavailable',
+        capability: 'sandbox',
+        message: 'This Void platform does not enable sandbox.',
+      },
+      501,
+    );
+  }
+  await next();
+});
+
 // Route groups
 app.route('/ai', ai);
 app.route('/d1', d1);
@@ -279,6 +312,23 @@ export default {
     await routeInbound(message, env, ctx);
   },
 };
+
+function proxyCapabilityEnabled(value: string | undefined, capability: string): boolean {
+  if (!value) {
+    return true;
+  }
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return (
+      !!parsed &&
+      typeof parsed === 'object' &&
+      !Array.isArray(parsed) &&
+      (parsed as Record<string, unknown>)[capability] === true
+    );
+  } catch {
+    return false;
+  }
+}
 
 // --- HMAC verification ---
 

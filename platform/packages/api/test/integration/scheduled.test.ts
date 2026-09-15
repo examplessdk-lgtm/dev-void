@@ -73,6 +73,26 @@ describe('scheduled()', () => {
     await expect(scheduled(mockController, makeBindings(env), mockCtx)).resolves.toBeUndefined();
   });
 
+  it('does not touch optional module bindings in a core self-hosted installation', async () => {
+    const bindings = makeBindings(env) as Record<string, unknown>;
+    bindings.PLATFORM_CAPABILITIES = JSON.stringify({
+      ai: true,
+      customDomains: false,
+      email: false,
+      githubActions: false,
+      githubOAuth: true,
+      googleOAuth: false,
+      managedBuilds: false,
+      sandbox: false,
+    });
+    delete bindings.BUILD_SCHEDULER;
+    delete bindings.BUILD_MANAGER;
+    delete bindings.BUILD_MANAGER_LARGE;
+    await expect(
+      scheduled(mockController, bindings as unknown as Parameters<typeof scheduled>[1], mockCtx),
+    ).resolves.toBeUndefined();
+  });
+
   it('skips unlimited plan users', async () => {
     const { id } = await createTestUser(env.db, 'sponsor', 'github', undefined, 'sponsored');
     const proj = await createTestProject(env.db, id);

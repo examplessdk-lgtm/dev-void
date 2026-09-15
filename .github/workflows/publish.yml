@@ -21,7 +21,6 @@ jobs:
     environment: Release
     permissions:
       contents: read
-      id-token: write
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
@@ -34,4 +33,13 @@ jobs:
       - run: vp run build
 
       - run: npm install -g npm@11
-      - run: vp pm publish -r --access public --tag latest --no-git-checks
+      - name: Verify npm release credentials
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          test -n "$NODE_AUTH_TOKEN" || { echo "Release environment is missing NPM_TOKEN." >&2; exit 1; }
+          npm whoami --registry https://registry.npmjs.org
+      - name: Publish public packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: vp pm publish -r --access public --tag latest --no-git-checks

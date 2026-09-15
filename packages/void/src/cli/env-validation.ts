@@ -1040,7 +1040,7 @@ function selfHostEnvError(report: EnvValidationReport): SelfHostEnvValidationErr
   if (missing.length > 0) {
     lines.push(
       '',
-      'Set each missing production secret with `wrangler secret put <NAME>`, ' +
+      'Set each missing production secret with `void secret put <NAME>`, ' +
         'or add a value to .env / .env.production.',
     );
   }
@@ -1220,7 +1220,7 @@ function secretListFailureMessage(
     case 'nonzero-exit':
       return (
         `${base} (reason: nonzero-exit, status ${detail.exitCode ?? 'unknown'}). ` +
-        'Re-run `wrangler secret list -c <config>` to see wrangler’s own diagnostics.'
+        'Run `void secret list` to retry through Void and see the Cloudflare diagnostics.'
       );
     case 'malformed-output':
       return (

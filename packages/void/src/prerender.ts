@@ -11,7 +11,7 @@ import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import { dirname, join, relative } from 'pathslash';
 import { loadEnv } from 'vite';
-import { getToken, isStagingMode } from './cli/auth.ts';
+import { getProxyUrl, getToken, isStagingMode } from './cli/auth.ts';
 import { ensureWranglerCompat } from './cli/wrangler.ts';
 import { readConfig } from './config.ts';
 import { voidLog, voidWarn } from './log.ts';
@@ -204,6 +204,7 @@ export type PrerenderBindingsInput = {
   env: Record<string, string>;
   voidToken: string | null | undefined;
   voidProjectId: string | undefined;
+  voidProxyUrl?: string;
   voidStaging: boolean;
   remoteMode: boolean | undefined;
 };
@@ -227,7 +228,8 @@ export function buildPrerenderBindings(input: PrerenderBindingsInput): Record<st
     if (input.voidStaging) {
       voidBindings.__VOID_STAGING = '1';
     }
-    voidBindings.__VOID_PROXY_URL = input.voidStaging ? STAGING_PROXY_URL : DEFAULT_PROXY_URL;
+    voidBindings.__VOID_PROXY_URL =
+      input.voidProxyUrl ?? (input.voidStaging ? STAGING_PROXY_URL : DEFAULT_PROXY_URL);
     if (input.remoteMode) {
       voidBindings.__VOID_REMOTE = '1';
     }
@@ -284,12 +286,14 @@ async function createCloudflarePrerenderRunner(options: {
   // fallback because it has no parent deploy orchestrator to mint one.
   const voidToken = voidProjectId ? (options.voidToken ?? getToken(root)) : null;
   const voidStaging = isStagingMode(root);
+  const voidProxyUrl = voidToken && voidProjectId ? getProxyUrl(root) : undefined;
 
   const bindings = buildPrerenderBindings({
     wranglerVars: wranglerConfig.vars,
     env,
     voidToken,
     voidProjectId,
+    voidProxyUrl,
     voidStaging,
     remoteMode,
   });

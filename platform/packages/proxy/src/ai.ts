@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import { asRecord, asString } from './body.ts';
 import type { AiGateway, ProxyEnv } from './types.ts';
 
-const GATEWAY_ID = 'void';
+const DEFAULT_GATEWAY_ID = 'void';
 const PROVIDER_AUTH_DEFAULTS: Record<string, { header: string; prefix: string }> = {
   'google-ai-studio': { header: 'x-goog-api-key', prefix: '' },
 };
@@ -161,7 +161,11 @@ function providerAuthDefaults(provider: string): { header: string; prefix: strin
   return PROVIDER_AUTH_DEFAULTS[provider] ?? { header: 'authorization', prefix: 'Bearer ' };
 }
 
-function gatewayOptions(value: unknown, projectId: string): Record<string, unknown> {
+function gatewayOptions(
+  value: unknown,
+  projectId: string,
+  gatewayId: string,
+): Record<string, unknown> {
   const options = asRecord(value);
   const gateway = asRecord(options.gateway);
   const metadata = asRecord(gateway.metadata);
@@ -170,7 +174,7 @@ function gatewayOptions(value: unknown, projectId: string): Record<string, unkno
     ...options,
     gateway: {
       ...gateway,
-      id: GATEWAY_ID,
+      id: gatewayId,
       metadata: {
         ...metadata,
         projectId,
@@ -342,7 +346,11 @@ ai.post('/run', async (context) => {
     return context.json({ error: 'model required' }, 400);
   }
 
-  const options = gatewayOptions(body.options, projectId);
+  const options = gatewayOptions(
+    body.options,
+    projectId,
+    context.env.AI_GATEWAY_ID ?? DEFAULT_GATEWAY_ID,
+  );
 
   try {
     const result = await context.env.AI.run(model, body.inputs, options);
@@ -378,7 +386,7 @@ ai.post('/provider', async (context) => {
   }
 
   try {
-    const gateway = context.env.AI.gateway(GATEWAY_ID);
+    const gateway = context.env.AI.gateway(context.env.AI_GATEWAY_ID ?? DEFAULT_GATEWAY_ID);
     const baseUrl = await gateway.getUrl(provider);
     const requestBody = providerRequestBody(providerBody(body.body));
     const headers = applyProviderHeaders({

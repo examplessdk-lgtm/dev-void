@@ -178,7 +178,8 @@ describe('runLogin', () => {
     await rejection;
   });
 
-  it('sends Cloudflare Access headers when exchanging the login code', async () => {
+  it('sends Cloudflare Access headers when exchanging a staging login code', async () => {
+    process.env.VOID_API_URL = 'https://api.staging.void.cloud';
     process.env.CF_ACCESS_TOKEN = 'cf-access-token';
 
     let resolveLoginUrl!: (url: string) => void;

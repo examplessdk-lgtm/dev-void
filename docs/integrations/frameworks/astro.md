@@ -9,7 +9,7 @@ outline: deep
 ::: warning Astro 6 required
 
 - [Astro 6+](https://astro.build/blog/astro-6/) is required to use `import { x } from "void/x"` helpers in Astro apps.
-- You also need to enable `"nodejs_als"` under `compatibility_flags` in your wrangler config.
+- You also need to enable `"nodejs_als"` under `compatibility_flags` in your Cloudflare config.
   :::
 
 ## Setup
@@ -40,7 +40,7 @@ export default defineConfig({
 });
 ```
 
-By default, Astro Cloudflare runtime and `voidPlugin()` migrations share Wrangler's local state at `.wrangler/state/v3`, so no extra persistence configuration is required.
+By default, Astro's Cloudflare runtime and `voidPlugin()` migrations share local state at `.wrangler/state/v3`, so no extra persistence configuration is required.
 
 ### 4. Create `wrangler.jsonc`
 

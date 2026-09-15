@@ -79,6 +79,7 @@ function createMockCounter(opts?: {
 function createEnv(opts?: {
   kvData?: Record<string, string>;
   counter?: ReturnType<typeof createMockCounter>;
+  capabilities?: Record<string, boolean>;
 }) {
   const counter = opts?.counter ?? createMockCounter();
   return {
@@ -98,6 +99,7 @@ function createEnv(opts?: {
         throw new Error('worker not found');
       }),
     },
+    ...(opts?.capabilities ? { PLATFORM_CAPABILITIES: JSON.stringify(opts.capabilities) } : {}),
     SANDBOX_CONCURRENCY_COUNTER: counter.namespace,
   };
 }
@@ -125,6 +127,23 @@ describe('proxy sandbox routes', () => {
       proj_pro: await signAiToken('proj_pro', JWT_SECRET),
       proj_unknown: await signAiToken('proj_unknown', JWT_SECRET),
     };
+  });
+
+  it('returns a clear response when the platform has no sandbox module', async () => {
+    const env = createEnv({
+      capabilities: { sandbox: false },
+      kvData: { 'project:proj_solo': projectKv('user_solo', 'solo') },
+    });
+    const res = await worker.fetch(
+      post('/sandbox/acquire', {
+        sandboxId: 'sb-1',
+        projectId: 'proj_solo',
+        aiToken: aiTokens.proj_solo,
+      }),
+      env,
+    );
+    expect(res.status).toBe(501);
+    expect(await res.json()).toMatchObject({ capability: 'sandbox' });
   });
 
   describe('POST /sandbox/acquire', () => {

@@ -17,7 +17,7 @@ export class ProxyClient {
   ) {
     this.authHeaders = {
       Authorization: `Bearer ${token}`,
-      ...cfAccessHeaders(env),
+      ...cfAccessHeaders(env, proxyUrl),
     };
   }
 

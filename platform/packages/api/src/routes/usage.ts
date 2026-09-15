@@ -37,7 +37,13 @@ const projectUsage = new Hono<ApiEnv>()
         projectId,
         since,
       ),
-      queryProjectAiUsage(context.env.CF_ACCOUNT_ID, context.env.CF_API_TOKEN, projectId, since),
+      queryProjectAiUsage(
+        context.env.CF_ACCOUNT_ID,
+        context.env.CF_API_TOKEN,
+        context.env.AI_GATEWAY_ID ?? 'void',
+        projectId,
+        since,
+      ),
     ]);
 
     return context.json({
@@ -86,7 +92,13 @@ const accountUsage = new Hono<ApiEnv>()
         since,
       ),
       ...projects.map((p) =>
-        queryProjectAiUsage(context.env.CF_ACCOUNT_ID, context.env.CF_API_TOKEN, p.id, since),
+        queryProjectAiUsage(
+          context.env.CF_ACCOUNT_ID,
+          context.env.CF_API_TOKEN,
+          context.env.AI_GATEWAY_ID ?? 'void',
+          p.id,
+          since,
+        ),
       ),
     ]);
     const projectUsages = projects.map((p, i) => ({
@@ -448,6 +460,7 @@ const COST_PER_NEURON = 0.000011;
 async function queryProjectAiUsage(
   accountId: string,
   apiToken: string,
+  gatewayId: string,
   projectId: string,
   since: Date,
 ): Promise<{ neurons: number }> {
@@ -456,7 +469,7 @@ async function queryProjectAiUsage(
     accounts(filter: { accountTag: "${accountId}" }) {
       aiGatewayRequests(
         filter: {
-          gatewayId: "void"
+          gatewayId: "${gatewayId}"
           metadata_projectId: "${projectId}"
           datetime_geq: "${since.toISOString()}"
         }

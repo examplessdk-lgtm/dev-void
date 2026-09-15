@@ -26,8 +26,7 @@ import { detectFramework } from '../plugin-inference.ts';
 import { readProjectPaths } from '../project-paths.ts';
 import type { SeedFn } from '../runtime/seed.ts';
 import { cfAccessHeaders } from '../shared/cf-access.ts';
-import { DEFAULT_PROXY_URL, STAGING_PROXY_URL } from '../shared/proxy.ts';
-import { getToken, isStagingMode } from './auth.ts';
+import { getProxyUrl, getToken } from './auth.ts';
 import { PlatformApiError, PlatformClient } from './client.ts';
 import type { DbArgs } from './db-args.ts';
 import { formatTimestamp } from './gen.ts';
@@ -932,13 +931,13 @@ async function runExecute(
       // Fall back to the locally-configured binding name (or 'DB' by default) if resource discovery fails.
     }
 
-    const proxyUrl = isStagingMode(root) ? STAGING_PROXY_URL : DEFAULT_PROXY_URL;
+    const proxyUrl = getProxyUrl(root);
     const res = await fetch(`${proxyUrl}/d1/query`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${token}`,
         'Content-Type': 'application/json',
-        ...cfAccessHeaders(process.env),
+        ...cfAccessHeaders(process.env, proxyUrl),
       },
       body: JSON.stringify({
         projectId: projectConfig.projectId,

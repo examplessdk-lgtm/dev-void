@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test'
 const mockGetToken = vi.fn<() => string | null>(() => null);
 const mockReadProjectConfig = vi.fn<() => { projectId: string; slug: string } | null>(() => null);
 const mockIsStagingMode = vi.fn<() => boolean>(() => false);
+const mockGetProxyUrl = vi.fn<() => string>(() => 'https://proxy.void.cloud');
 
 const mockGetResources = vi.fn<() => Promise<Array<{ type: string; binding_name: string }>>>(() =>
   Promise.resolve([]),
@@ -15,6 +16,7 @@ const mockGetResources = vi.fn<() => Promise<Array<{ type: string; binding_name:
 const mockGetDatabaseUrl = vi.fn<() => Promise<{ url: string }>>();
 
 vi.mock('../../src/cli/auth', () => ({
+  getProxyUrl: () => mockGetProxyUrl(),
   getToken: () => mockGetToken(),
   isStagingMode: () => mockIsStagingMode(),
 }));
@@ -131,6 +133,9 @@ describe('void db execute --remote (D1)', () => {
     mockGetToken.mockReturnValue('test-token');
     mockReadProjectConfig.mockReturnValue({ projectId: 'proj-abc', slug: 'test-proj' });
     mockIsStagingMode.mockReturnValue(false);
+    mockGetProxyUrl.mockImplementation(() =>
+      mockIsStagingMode() ? 'https://proxy.staging.void.cloud' : 'https://proxy.void.cloud',
+    );
     mockGetResources.mockResolvedValue([]);
     // By default, confirm returns true (proceed)
     mockConfirm.mockResolvedValue(true);
@@ -186,6 +191,18 @@ describe('void db execute --remote (D1)', () => {
 
     const [url] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toBe('https://proxy.staging.void.cloud/d1/query');
+  });
+
+  it('sends custom platform credentials only to its pinned proxy', async () => {
+    const root = createProjectRoot();
+    mockGetProxyUrl.mockReturnValue('https://void-company-proxy.example.workers.dev');
+    fetchMock.mockResolvedValueOnce(jsonResponse({ results: [], success: true }));
+
+    await runDbCommand(root, { action: 'execute', command: 'SELECT 1', remote: true });
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      'https://void-company-proxy.example.workers.dev/d1/query',
+    );
   });
 
   it('uses the D1 binding name from getResources when available', async () => {
@@ -497,8 +514,9 @@ describe('void db execute --remote (D1)', () => {
     expect(mockConfirm).toHaveBeenCalledTimes(1);
   });
 
-  it('includes CF Access service-token headers when env vars are set', async () => {
+  it('includes CF Access service-token headers for the staging proxy', async () => {
     const root = createProjectRoot();
+    mockIsStagingMode.mockReturnValue(true);
     const originalId = process.env.CF_ACCESS_CLIENT_ID;
     const originalSecret = process.env.CF_ACCESS_CLIENT_SECRET;
     process.env.CF_ACCESS_CLIENT_ID = 'test-client-id.access';

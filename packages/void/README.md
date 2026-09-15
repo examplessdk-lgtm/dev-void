@@ -24,7 +24,7 @@ npm install -D void
 
 If you run `void init` in an empty directory, the scaffold flow adds the matching Pages adapter and Vite+ by default.
 
-Then run `npx void init`. In an empty directory, the full interactive flow can scaffold a starter and configure local project files. It then asks where to deploy: Cloudflare (the default) creates or augments `wrangler.jsonc`, offers Wrangler login, and saves the selected account; Void can log you in and link or create a managed project. The next step is just `npx void deploy`. Auth-enabled deploys preserve an existing `BETTER_AUTH_SECRET` or create a persistent encrypted secret when missing on either platform. Direct Cloudflare deploys also promote env schema keys explicitly marked `.secret()` to encrypted Worker secrets, removing them from plaintext vars; values may come from production dotenv files or the deploy process environment. In an existing app, init configures Void in place by adding missing Vite scripts and creating or patching `vite.config.*` with `voidPlugin()`.
+Then run `npx void init`. In an empty directory, the full interactive flow can scaffold a starter and configure local project files. It then asks where to deploy: Cloudflare (the default) creates or augments `wrangler.jsonc`, handles secure browser sign-in through Void's bundled tooling, and saves the selected account; Void asks for the API URL of an explicitly connected company platform (`void platform connect <url>` or `void platform install`). Back up `~/.void/platforms/` after installing a company platform because its owner-only recovery material contains runtime keys that Cloudflare cannot return. The next app step is just `npx void deploy`. Auth-enabled deploys preserve an existing `BETTER_AUTH_SECRET` or create a persistent encrypted secret when missing on either platform. Direct Cloudflare deploys also promote env schema keys explicitly marked `.secret()` to encrypted Worker secrets, removing them from plaintext vars; values may come from production dotenv files or the deploy process environment. In an existing app, init configures Void in place by adding missing Vite scripts and creating or patching `vite.config.*` with `voidPlugin()`.
 
 ```ts
 // vite.config.ts
@@ -41,6 +41,7 @@ export default defineConfig({
 - `voidPlugin()` — Vite integration, routing, pages mode, codegen, migrations, packaging
 - `void prepare` — generate `.void` artifacts for CI, editors, and fresh clones
 - `void auth login` — platform auth
+- `void platform *` — connect to or install, recover, repair, upgrade, disable, and safely uninstall a company platform
 - `void deploy` — build and deploy to the saved Cloudflare or Void target
 - `void db *` — local DB and migration commands
 - `void project *` — target-aware status, logs, rollback, and managed-project operations
@@ -77,6 +78,8 @@ Runtime helpers include:
 - non-Cloudflare server targets (`node`, `bun`, `deno`)
 
 Direct Cloudflare deployments also support D1, KV, R2, Queues, Hyperdrive, auth, cron jobs, AI, ISR, typed SQLite Durable Objects, and WebSocket rooms. They upload an immutable Worker Version, probe it before activation (using a 0%-traffic version override when Durable Objects disable preview URLs), and retain version metadata for migration-aware rollback.
+
+Self-hosted platform upgrades verify every packaged PostgreSQL migration and require the live Drizzle history to be an exact prefix. Pending SQL is allowed only for an explicitly attested old-version/schema compatibility edge, runs in one transaction, and leaves the old Worker version authoritative until the target runtime passes discovery and health checks.
 
 ## Database Model
 

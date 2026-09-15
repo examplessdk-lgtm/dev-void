@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'pathslash';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 import type { PlatformClient } from '../../src/cli/client.ts';
+import { savePlatformConnection } from '../../src/cli/platform-registry.ts';
 
 const mockSelect = vi.fn();
 const mockText = vi.fn();
@@ -33,6 +34,7 @@ vi.mock('@clack/prompts', () => ({
 
 function createClient() {
   return {
+    apiUrl: 'https://api.void.cloud',
     createProject: vi.fn(),
     listProjects: vi.fn(),
   } as unknown as PlatformClient & {
@@ -46,6 +48,16 @@ describe('promptDeployProjectConfig', () => {
 
   beforeEach(() => {
     root = mkdtempSync(join(tmpdir(), 'void-deploy-project-'));
+    process.env.VOID_PLATFORM_REGISTRY_DIR = join(root, 'registry');
+    savePlatformConnection({
+      accountId: null,
+      apiUrl: 'https://api.void.cloud',
+      applicationDomain: 'void.app',
+      displayName: 'Void Cloud',
+      installationId: null,
+      kind: 'connected',
+      proxyUrl: 'https://proxy.void.cloud',
+    });
     writeFileSync(join(root, 'package.json'), JSON.stringify({ name: 'test-app' }));
     mockSelect.mockReset();
     mockText.mockReset();
@@ -56,6 +68,7 @@ describe('promptDeployProjectConfig', () => {
   });
 
   afterEach(() => {
+    delete process.env.VOID_PLATFORM_REGISTRY_DIR;
     rmSync(root, { recursive: true, force: true });
   });
 
@@ -77,7 +90,10 @@ describe('promptDeployProjectConfig', () => {
     expect(client.createProject).toHaveBeenCalledWith('new-app');
     expect(config).toEqual({ projectId: 'proj_new', slug: 'new-app' });
     expect(JSON.parse(readFileSync(join(root, '.void', 'project.json'), 'utf-8'))).toEqual({
+      applicationDomain: 'void.app',
       platform: 'void',
+      platformUrl: 'https://api.void.cloud',
+      proxyUrl: 'https://proxy.void.cloud',
       ...config,
     });
   });

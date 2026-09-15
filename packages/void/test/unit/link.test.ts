@@ -3,12 +3,14 @@ import { tmpdir } from 'node:os';
 import { stripVTControlCharacters } from 'node:util';
 import { join } from 'pathslash';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
+import { savePlatformConnection } from '../../src/cli/platform-registry.ts';
 
 const mockCancel = vi.fn();
 const mockConfirm = vi.fn();
 const mockGetToken = vi.fn();
 const mockListProjects = vi.fn();
 const mockOutro = vi.fn();
+const mockReadLegacyHostedPlatformSelection = vi.fn();
 const mockSelect = vi.fn();
 
 const existingProject = {
@@ -37,10 +39,17 @@ vi.mock('../../src/cli/auth', () => ({
 
 vi.mock('../../src/cli/client', () => ({
   PlatformClient: class {
+    readonly apiUrl = 'https://api.void.cloud';
+
     listProjects(...args: Array<unknown>) {
       return mockListProjects(...args);
     }
   },
+}));
+
+vi.mock('../../src/cli/hosted-platform', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../src/cli/hosted-platform.ts')>()),
+  readLegacyHostedPlatformSelection: () => mockReadLegacyHostedPlatformSelection(),
 }));
 
 // Disable colors so assertions can match plain strings without ANSI escape codes.
@@ -67,15 +76,28 @@ describe('runLink', () => {
 
   beforeEach(() => {
     root = mkdtempSync(join(tmpdir(), 'void-link-'));
+    process.env.VOID_PLATFORM_REGISTRY_DIR = join(root, 'registry');
+    savePlatformConnection({
+      accountId: null,
+      apiUrl: 'https://api.void.cloud',
+      applicationDomain: 'void.app',
+      displayName: 'Void Cloud',
+      installationId: null,
+      kind: 'connected',
+      proxyUrl: 'https://proxy.void.cloud',
+    });
     mockCancel.mockReset();
     mockConfirm.mockReset();
     mockGetToken.mockReset();
     mockListProjects.mockReset();
     mockOutro.mockReset();
+    mockReadLegacyHostedPlatformSelection.mockReset();
+    mockReadLegacyHostedPlatformSelection.mockReturnValue(null);
     mockSelect.mockReset();
   });
 
   afterEach(() => {
+    delete process.env.VOID_PLATFORM_REGISTRY_DIR;
     vi.restoreAllMocks();
     rmSync(root, { recursive: true, force: true });
   });
@@ -94,13 +116,41 @@ describe('runLink', () => {
         'Linking to an existing project. Running `void deploy` will overwrite the current deployment of existing-app.void.app. Continue?',
     });
     expect(JSON.parse(readFileSync(join(root, '.void', 'project.json'), 'utf-8'))).toEqual({
+      applicationDomain: 'void.app',
       platform: 'void',
+      platformUrl: 'https://api.void.cloud',
+      proxyUrl: 'https://proxy.void.cloud',
       projectId: 'proj_1',
       slug: 'existing-app',
     });
     expect(stripVTControlCharacters(String(mockOutro.mock.calls[0]?.[0]))).toBe(
       'Linked to existing-app.void.app',
     );
+  });
+
+  it('links through a legacy Void Cloud selection without reconnecting', async () => {
+    const { runLink } = await import('../../src/cli/link.ts');
+    rmSync(join(root, 'registry'), { force: true, recursive: true });
+    mockReadLegacyHostedPlatformSelection.mockReturnValue({
+      apiUrl: 'https://api.void.cloud',
+      applicationDomain: 'void.app',
+      displayName: 'Void Cloud',
+      proxyUrl: 'https://proxy.void.cloud',
+      source: 'legacy-credential',
+    });
+    mockGetToken.mockReturnValue('legacy-token');
+    mockListProjects.mockResolvedValueOnce([existingProject]);
+
+    await runLink(root, 'existing-app');
+
+    expect(JSON.parse(readFileSync(join(root, '.void', 'project.json'), 'utf-8'))).toEqual({
+      applicationDomain: 'void.app',
+      platform: 'void',
+      platformUrl: 'https://api.void.cloud',
+      proxyUrl: 'https://proxy.void.cloud',
+      projectId: 'proj_1',
+      slug: 'existing-app',
+    });
   });
 
   it('does not write project config when the existing-project guard is declined', async () => {

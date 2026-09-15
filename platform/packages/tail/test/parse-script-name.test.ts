@@ -42,4 +42,12 @@ describe('parseScriptName', () => {
       deployId: '',
     });
   });
+
+  it('accepts the configured self-hosted dispatch Worker name', () => {
+    expect(parseScriptName('void-company-dispatch', 'void-company-dispatch')).toEqual({
+      projectKey: '__platform-dispatch',
+      deployId: '',
+    });
+    expect(parseScriptName('void-other-dispatch', 'void-company-dispatch')).toBeNull();
+  });
 });

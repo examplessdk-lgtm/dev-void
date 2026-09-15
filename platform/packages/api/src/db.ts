@@ -90,13 +90,60 @@ export async function createUser(
   providerId: string,
   login: string,
   email: string | null,
+  role: 'user' | 'admin' = 'user',
+  plan: PlanId = 'free',
 ): Promise<User> {
   const id = generateId('user');
   const [row] = await db
     .insert(users)
-    .values({ id, provider, provider_id: providerId, login, email })
+    .values({ id, provider, provider_id: providerId, login, email, role, plan })
     .returning();
   return row;
+}
+
+/**
+ * Creates a user and grants the first account on a self-hosted installation
+ * the admin role. Call this inside the same transaction that links the OAuth
+ * identity. The table lock makes concurrent first logins observe one winner.
+ * Hosted Void Cloud passes no installation id and retains the existing user
+ * default without taking the lock.
+ */
+export async function createUserForPlatform(
+  db: Db,
+  provider: string,
+  providerId: string,
+  login: string,
+  email: string | null,
+  installationId?: string,
+  options?: {
+    additionalSignupAllowed: boolean;
+    bootstrapGitHubId: string;
+  },
+): Promise<User> {
+  if (!installationId) {
+    return createUser(db, provider, providerId, login, email);
+  }
+  await db.execute(sql`LOCK TABLE ${users} IN SHARE ROW EXCLUSIVE MODE`);
+  const [existing] = await db.select({ id: users.id }).from(users).limit(1);
+  if (!existing) {
+    if (
+      provider !== 'github' ||
+      !options?.bootstrapGitHubId ||
+      providerId !== options.bootstrapGitHubId
+    ) {
+      throw new SelfHostedSignupRestrictedError();
+    }
+  } else if (!options?.additionalSignupAllowed) {
+    throw new SelfHostedSignupRestrictedError();
+  }
+  return createUser(db, provider, providerId, login, email, existing ? 'user' : 'admin', 'custom');
+}
+
+export class SelfHostedSignupRestrictedError extends Error {
+  constructor() {
+    super('Self-hosted platform signup is restricted.');
+    this.name = 'SelfHostedSignupRestrictedError';
+  }
 }
 
 export async function getUserByProvider(

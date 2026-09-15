@@ -122,7 +122,7 @@ async function exchangeOidcTokenAtApi(
   try {
     res = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...cfAccessHeaders(process.env) },
+      headers: { 'Content-Type': 'application/json', ...cfAccessHeaders(process.env, apiUrl) },
       body: JSON.stringify({ oidcToken, project }),
     });
   } catch (err) {

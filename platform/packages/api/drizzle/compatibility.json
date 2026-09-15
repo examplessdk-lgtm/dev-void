@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "lineage": "void-platform-postgresql-v1",
+  "rollbackSafeFrom": [
+    {
+      "platformVersion": "0.10.14",
+      "schemaDigest": "9631e7ad6596fc8cd12715d5263d32e94aafd398e5b1689321038232f64dcd74"
+    }
+  ]
+}

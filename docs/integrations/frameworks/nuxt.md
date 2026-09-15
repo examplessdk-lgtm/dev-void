@@ -18,10 +18,10 @@ cd my-app
 ### 2. Install dependencies
 
 ```bash
-npm install -D void wrangler
+npm install -D void
 ```
 
-The `wrangler` dependency is needed by Nuxt to create Cloudflare platform proxy during dev.
+Void includes the Cloudflare tooling used by Nuxt's platform proxy during development.
 
 ### 3. Configure `nuxt.config.ts`
 
@@ -42,7 +42,7 @@ export default defineNuxtConfig({
 });
 ```
 
-By default, Nuxt Cloudflare dev runtime and `voidPlugin()` migrations share Wrangler's local state at `.wrangler/state/v3`, so no extra persistence configuration is required.
+By default, Nuxt's Cloudflare development runtime and `voidPlugin()` migrations share local state at `.wrangler/state/v3`, so no extra persistence configuration is required.
 
 ### 4. Create `wrangler.jsonc`
 

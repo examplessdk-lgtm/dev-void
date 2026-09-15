@@ -29,6 +29,10 @@ const roots: Array<string> = [];
 function createProject(envSchemaBody?: string): string {
   const root = mkdtempSync(join(tmpdir(), 'void-env-cli-'));
   roots.push(root);
+  // Native TypeScript loading follows the same package module rules as .js.
+  // Void projects are ESM, so keep the subprocess fixture representative even
+  // when the host's temporary directory has no package boundary of its own.
+  writeFileSync(join(root, 'package.json'), '{"type":"module"}\n');
   if (envSchemaBody !== undefined) {
     const envPublicUrl = pathToFileURL(ENV_PUBLIC_DIST).href;
     writeFileSync(

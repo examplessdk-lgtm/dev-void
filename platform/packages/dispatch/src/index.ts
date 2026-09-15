@@ -26,6 +26,7 @@ import {
   type FailureKind,
   type RequestType,
 } from './metering.ts';
+import { PLATFORM_DISABLED_KEY, PLATFORM_DISABLED_VALUE } from './platform-lifecycle.ts';
 import { classifyDynamicRequestType, hasExtension } from './request-type.ts';
 import { applyRoutingRules, mergeQueryIntoLocation, type RedirectRule } from './routing-rules.ts';
 import { resolveStaticPath, resolveAssetContentType, safeDecodePathname } from './static.ts';
@@ -86,6 +87,7 @@ type QueueRoutingEntry = Readonly<{
 
 const CLIENT_REVALIDATE_CACHE_CONTROL = 'public, max-age=0, must-revalidate';
 const STATIC_ASSET_HEDGE_DELAY_MS = 1000;
+const PLATFORM_QUEUE_RETRY_DELAY_SECONDS = 300;
 const PLATFORM_STATIC_ASSET_TIMEOUT: FailureKind = 'platform-static-asset-timeout';
 const PLATFORM_STATIC_ASSET_ERROR: FailureKind = 'platform-static-asset-error';
 const PLATFORM_STATIC_ASSET_MISSING: FailureKind = 'platform-static-asset-missing';
@@ -583,8 +585,34 @@ export function rebuildRequest(
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    const startTime = Date.now();
     const url = new URL(request.url);
+    if (
+      !env.PLATFORM_INSTALLATION_ID &&
+      url.pathname === '/health' &&
+      request.headers.get('X-Health-Check') === 'void-admin'
+    ) {
+      return Response.json({ ok: true });
+    }
+    // The installer proves the complete cutover while the public routing gate
+    // remains closed. This endpoint exposes no application data and is already
+    // reserved for the installer's exact health-check header.
+    if (
+      env.PLATFORM_HEALTH_PROBE_TOKEN &&
+      url.pathname === '/health' &&
+      request.headers.get('X-Void-Platform-Probe') === env.PLATFORM_HEALTH_PROBE_TOKEN
+    ) {
+      return Response.json({ ok: true });
+    }
+    if (
+      env.PLATFORM_TRAFFIC_STATE === 'staging' ||
+      (env.PLATFORM_INSTALLATION_ID &&
+        (await env.ROUTING.get(PLATFORM_DISABLED_KEY)) === PLATFORM_DISABLED_VALUE)
+    ) {
+      return createErrorResponse(request, 503, 'Platform disabled', {
+        'Cache-Control': 'no-store',
+      });
+    }
+    const startTime = Date.now();
     // Budget for the bounded hot paths (static-asset reads, primary dispatch).
     // Unset → the 10s default. An explicit `0`/negative/non-finite override is
     // passed through verbatim, disabling the timers via `withTimeout`'s escape
@@ -604,11 +632,6 @@ export default {
       url.pathname === '/__queue'
     ) {
       return createErrorResponse(request, 404, 'Not Found');
-    }
-
-    // Health check short-circuit — bypass KV lookup entirely
-    if (url.pathname === '/health' && request.headers.get('X-Health-Check') === 'void-admin') {
-      return Response.json({ ok: true });
     }
 
     const slug = extractSlug(url.hostname, env.BASE_HOSTNAME);
@@ -1733,6 +1756,34 @@ export default {
   },
 
   async queue(batch: MessageBatch, env: Env): Promise<void> {
+    if (env.PLATFORM_TRAFFIC_STATE === 'staging') {
+      console.warn(
+        `[queue-relay] platform traffic is staging; retrying queue="${batch.queue}" in ${PLATFORM_QUEUE_RETRY_DELAY_SECONDS}s`,
+      );
+      batch.retryAll({ delaySeconds: PLATFORM_QUEUE_RETRY_DELAY_SECONDS });
+      return;
+    }
+    if (env.PLATFORM_INSTALLATION_ID) {
+      let disabled: string | null;
+      try {
+        disabled = await env.ROUTING.get(PLATFORM_DISABLED_KEY);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(
+          `[queue-relay] platform traffic gate read failed; retrying queue="${batch.queue}" in ${PLATFORM_QUEUE_RETRY_DELAY_SECONDS}s error=${JSON.stringify(message)}`,
+        );
+        batch.retryAll({ delaySeconds: PLATFORM_QUEUE_RETRY_DELAY_SECONDS });
+        return;
+      }
+      if (disabled === PLATFORM_DISABLED_VALUE) {
+        console.warn(
+          `[queue-relay] platform traffic is disabled; retrying queue="${batch.queue}" in ${PLATFORM_QUEUE_RETRY_DELAY_SECONDS}s`,
+        );
+        batch.retryAll({ delaySeconds: PLATFORM_QUEUE_RETRY_DELAY_SECONDS });
+        return;
+      }
+    }
+
     // Look up which user worker handles this queue
     const routingRaw = await env.ROUTING.get(`queue:${batch.queue}`, { cacheTtl: 60 });
     if (!routingRaw) {

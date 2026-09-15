@@ -23,6 +23,24 @@ import { PlatformPage } from '../views/platform.tsx';
 
 const app = new Hono<ApiEnv>();
 
+// This console intentionally models the hosted production/staging topology and
+// its literal script names. Self-hosted installations are upgraded through the
+// ownership-aware CLI; letting this route run there could target an unrelated
+// `void-*` Worker in the same account.
+app.use('*', async (context, next) => {
+  if (context.env.PLATFORM_INSTALLATION_ID) {
+    return context.json(
+      {
+        error: 'platform capability unavailable',
+        capability: 'hosted-platform-operations',
+        message: 'Manage this self-hosted Void platform with `void platform upgrade`.',
+      },
+      501,
+    );
+  }
+  await next();
+});
+
 const PAGE_SIZE = 15;
 
 function toErrorMessage(err: unknown): string {

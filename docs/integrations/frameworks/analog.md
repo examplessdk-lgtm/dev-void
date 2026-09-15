@@ -18,10 +18,10 @@ cd my-app
 ### 2. Install dependencies
 
 ```bash
-npm install -D void wrangler nitro-cloudflare-dev
+npm install -D void nitro-cloudflare-dev
 ```
 
-The `wrangler` dependency is needed for local Cloudflare bindings. `nitro-cloudflare-dev` creates a Cloudflare platform proxy during dev so that `void/db`, `void/kv`, and other runtime helpers can access bindings.
+Void provides the local Cloudflare binding runtime. `nitro-cloudflare-dev` creates the platform proxy during development so that `void/db`, `void/kv`, and other runtime helpers can access bindings.
 
 ### 3. Configure `vite.config.ts`
 

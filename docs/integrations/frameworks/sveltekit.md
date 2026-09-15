@@ -61,7 +61,7 @@ SvelteKit's adapter reads bindings from `wrangler.jsonc` for local dev. `voidPlu
 }
 ```
 
-By default, SvelteKit's Cloudflare adapter, `voidPlugin()` migrations, and `void db` commands share Wrangler's local state at `.wrangler/state/v3`, so no extra `platformProxy.persist` configuration is required.
+By default, SvelteKit's Cloudflare adapter, `voidPlugin()` migrations, and `void db` commands share local state at `.wrangler/state/v3`, so no extra `platformProxy.persist` configuration is required.
 
 ### 6. Configure `tsconfig.json`
 

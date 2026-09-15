@@ -178,3 +178,29 @@ describe('GET /auth/dev-login', () => {
     expect(url.searchParams.get('token')).toBeTruthy();
   });
 });
+
+describe('GET /auth/login redirect isolation', () => {
+  it('rejects the hosted dashboard for self-hosted APIs without a configured dashboard', async () => {
+    const redirect = encodeURIComponent('https://dash.void.cloud/auth/callback');
+    const res = await app.fetch(new Request(`http://localhost/auth/login?redirect=${redirect}`), {
+      ...env,
+      PLATFORM_INSTALLATION_ID: 'example-a1b2c3d4',
+    });
+
+    expect(res.status).toBe(400);
+    await expect(res.json()).resolves.toEqual({
+      error: 'redirect must be a localhost or dashboard URL',
+    });
+  });
+
+  it('preserves the hosted dashboard default for Void Cloud', async () => {
+    const redirect = encodeURIComponent('https://dash.void.cloud/auth/callback');
+    const res = await app.fetch(
+      new Request(`http://localhost/auth/login?redirect=${redirect}&provider=github`),
+      env,
+    );
+
+    expect(res.status).toBe(302);
+    expect(res.headers.get('location')).toContain('https://github.com/login/oauth/authorize');
+  });
+});

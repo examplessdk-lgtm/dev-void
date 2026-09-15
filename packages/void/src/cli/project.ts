@@ -1,8 +1,18 @@
 import { readFileSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
+import { normalizeApplicationDomain } from '@void/platform';
 import { join, dirname } from 'pathslash';
+import {
+  hostedPlatformForApiUrl,
+  VOID_CLOUD_PLATFORM,
+  VOID_CLOUD_STAGING_PLATFORM,
+} from './hosted-platform.ts';
+import { listPlatformConnections, normalizePlatformApiUrl } from './platform-registry.ts';
 import type { DeployTarget } from './types.ts';
 
 export type ProjectConfig = {
+  applicationDomain?: string;
+  platformUrl?: string;
+  proxyUrl?: string;
   projectId: string;
   slug: string;
   voidInternalStaging?: boolean;
@@ -13,8 +23,11 @@ export type DeploymentPlatform = DeployTarget | 'none';
 const PROJECT_FILE = '.void/project.json';
 
 type ProjectConfigFile = {
+  applicationDomain?: unknown;
   platform?: unknown;
+  platformUrl?: unknown;
   projectId?: unknown;
+  proxyUrl?: unknown;
   slug?: unknown;
   voidInternalStaging?: unknown;
 };
@@ -47,6 +60,15 @@ export function readProjectConfig(root: string): ProjectConfig | null {
     projectId: config.projectId,
     slug: config.slug,
   };
+  if (typeof config.platformUrl === 'string') {
+    result.platformUrl = normalizePlatformApiUrl(config.platformUrl);
+  }
+  if (typeof config.applicationDomain === 'string') {
+    result.applicationDomain = normalizeApplicationDomain(config.applicationDomain);
+  }
+  if (typeof config.proxyUrl === 'string') {
+    result.proxyUrl = normalizePlatformApiUrl(config.proxyUrl);
+  }
   if (config.voidInternalStaging === true) {
     result.voidInternalStaging = true;
   }
@@ -88,6 +110,15 @@ export function writeDeploymentPlatform(root: string, platform: DeploymentPlatfo
   if (typeof existing?.projectId === 'string') {
     next.projectId = existing.projectId;
   }
+  if (typeof existing?.platformUrl === 'string') {
+    next.platformUrl = existing.platformUrl;
+  }
+  if (typeof existing?.applicationDomain === 'string') {
+    next.applicationDomain = existing.applicationDomain;
+  }
+  if (typeof existing?.proxyUrl === 'string') {
+    next.proxyUrl = existing.proxyUrl;
+  }
   if (typeof existing?.slug === 'string') {
     next.slug = existing.slug;
   }
@@ -106,6 +137,74 @@ export function isVoidInternalStaging(root: string): boolean {
   return readProjectConfigFile(root)?.voidInternalStaging === true;
 }
 
+export function readProjectPlatformUrl(root: string): string | null {
+  const value = readProjectConfigFile(root)?.platformUrl;
+  return typeof value === 'string' && value !== '' ? normalizePlatformApiUrl(value) : null;
+}
+
+export function readProjectApplicationDomain(root: string): string | null {
+  const value = readProjectConfigFile(root)?.applicationDomain;
+  return typeof value === 'string' && value !== '' ? normalizeApplicationDomain(value) : null;
+}
+
+export function readProjectProxyUrl(root: string): string | null {
+  const value = readProjectConfigFile(root)?.proxyUrl;
+  return typeof value === 'string' && value !== '' ? normalizePlatformApiUrl(value) : null;
+}
+
+/** Resolve the immutable platform identity that every newly linked project records. */
+export function attachSelectedPlatform(
+  root: string,
+  config: Pick<ProjectConfig, 'projectId' | 'slug'>,
+  platformApiUrl: string,
+): ProjectConfig {
+  const apiUrl = normalizePlatformApiUrl(platformApiUrl);
+  const hosted = hostedPlatformForApiUrl(apiUrl);
+  if (hosted) {
+    return {
+      ...config,
+      applicationDomain: hosted.applicationDomain,
+      platformUrl: hosted.apiUrl,
+      proxyUrl: hosted.proxyUrl,
+      ...(isVoidInternalStaging(root) && hosted.apiUrl === VOID_CLOUD_STAGING_PLATFORM.apiUrl
+        ? { voidInternalStaging: true }
+        : {}),
+    };
+  }
+  const connection = listPlatformConnections().find((entry) => entry.apiUrl === apiUrl);
+  if (connection?.applicationDomain && connection.proxyUrl) {
+    return {
+      ...config,
+      applicationDomain: connection.applicationDomain,
+      platformUrl: connection.apiUrl,
+      proxyUrl: connection.proxyUrl,
+    };
+  }
+  throw new Error(
+    `platform: No verified metadata is registered for ${apiUrl}. Run \`void platform connect ${apiUrl}\` before linking a project.`,
+  );
+}
+
+export function isLegacyVoidCloudProject(root: string): boolean {
+  const config = readProjectConfigFile(root);
+  return (
+    typeof config?.projectId === 'string' &&
+    typeof config.slug === 'string' &&
+    typeof config.platformUrl !== 'string'
+  );
+}
+
+export function legacyVoidCloudProjectMetadata(): Pick<
+  ProjectConfig,
+  'applicationDomain' | 'platformUrl' | 'proxyUrl'
+> {
+  return {
+    applicationDomain: VOID_CLOUD_PLATFORM.applicationDomain,
+    platformUrl: VOID_CLOUD_PLATFORM.apiUrl,
+    proxyUrl: VOID_CLOUD_PLATFORM.proxyUrl,
+  };
+}
+
 /**
  * Write the project config to the project root.
  */
@@ -117,6 +216,21 @@ export function writeProjectConfig(root: string, config: ProjectConfig): void {
     projectId: config.projectId,
     slug: config.slug,
   };
+  if (config.platformUrl) {
+    next.platformUrl = normalizePlatformApiUrl(config.platformUrl);
+  } else if (typeof existing?.platformUrl === 'string') {
+    next.platformUrl = existing.platformUrl;
+  }
+  if (config.applicationDomain) {
+    next.applicationDomain = normalizeApplicationDomain(config.applicationDomain);
+  } else if (typeof existing?.applicationDomain === 'string') {
+    next.applicationDomain = existing.applicationDomain;
+  }
+  if (config.proxyUrl) {
+    next.proxyUrl = normalizePlatformApiUrl(config.proxyUrl);
+  } else if (typeof existing?.proxyUrl === 'string') {
+    next.proxyUrl = existing.proxyUrl;
+  }
   if (config.voidInternalStaging === true || existing?.voidInternalStaging === true) {
     next.voidInternalStaging = true;
   }

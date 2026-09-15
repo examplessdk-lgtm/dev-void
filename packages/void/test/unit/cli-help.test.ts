@@ -1,8 +1,18 @@
-import { describe, expect, it, vi } from 'vite-plus/test';
+import { note } from '@clack/prompts';
+import { beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 import { parseEmailArgs } from '../../src/cli/email-args.ts';
 import { getHelpPath, hasHelpPage, printHelpPage } from '../../src/cli/help.ts';
 
+vi.mock('@clack/prompts', () => ({
+  note: vi.fn(),
+  outro: vi.fn(),
+}));
+
 describe('CLI help resolver', () => {
+  beforeEach(() => {
+    vi.mocked(note).mockClear();
+  });
+
   it('resolves top-level help requests', () => {
     expect(getHelpPath(['help'])).toEqual([]);
     expect(getHelpPath(['--help'])).toEqual([]);
@@ -70,23 +80,32 @@ describe('CLI help resolver', () => {
     expect(hasHelpPage(['github', 'disconnect'])).toBe(true);
     expect(hasHelpPage(['github', 'missing'])).toBe(false);
   });
+
+  it('tracks Cloudflare authentication help pages', () => {
+    expect(hasHelpPage(['cloudflare'])).toBe(true);
+    expect(hasHelpPage(['cloudflare', 'login'])).toBe(true);
+    expect(hasHelpPage(['cloudflare', 'status'])).toBe(true);
+    expect(hasHelpPage(['cloudflare', 'logout'])).toBe(true);
+  });
+
+  it.each(['upgrade', 'repair', 'disable', 'enable'] as const)(
+    'prints the correct platform %s usage',
+    (command) => {
+      printHelpPage(['platform', command]);
+
+      expect(vi.mocked(note).mock.calls[0]?.[0]).toContain(
+        `void platform ${command} [id] [--plan]`,
+      );
+    },
+  );
 });
 
 describe('rendered help advertises the flags the parser honours', () => {
-  /** The page as printed, ANSI stripped, so an assertion reads like the terminal. */
+  /** The page as handed to clack's `note` (mocked above), ANSI stripped, so an assertion reads like the terminal. */
   function render(path: Array<string>): string {
-    const lines: Array<string> = [];
-    // The page renders through clack's `note`, which writes to stdout, not
-    // through console.log.
-    const spy = vi.spyOn(process.stdout, 'write').mockImplementation(((chunk: unknown) => {
-      lines.push(String(chunk));
-      return true;
-    }) as typeof process.stdout.write);
-    try {
-      printHelpPage(path);
-    } finally {
-      spy.mockRestore();
-    }
+    vi.mocked(note).mockClear();
+    printHelpPage(path);
+    const lines = vi.mocked(note).mock.calls.map((call) => String(call[0]));
     // eslint-disable-next-line no-control-regex
     return lines.join('\n').replace(/\u001b\[[0-9;]*m/g, '');
   }

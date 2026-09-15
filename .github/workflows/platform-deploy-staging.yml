@@ -35,6 +35,22 @@ jobs:
     needs: ci
     runs-on: blacksmith-4vcpu-ubuntu-2404
     environment: Staging
+    env:
+      CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID_STAGING }}
+      CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET_STAGING }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+      VOID_PLATFORM_ADMIN_GITHUB_ID: ${{ secrets.STAGING_ADMIN_GITHUB_ID }}
+      VOID_PLATFORM_ADMIN_GITHUB_LOGIN: ${{ secrets.STAGING_ADMIN_GITHUB_LOGIN }}
+      VOID_PLATFORM_DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
+      VOID_PLATFORM_GITHUB_CLIENT_ID: ${{ secrets.STAGING_GITHUB_CLIENT_ID }}
+      VOID_PLATFORM_GITHUB_CLIENT_SECRET: ${{ secrets.STAGING_GITHUB_CLIENT_SECRET }}
+      VOID_PLATFORM_JWT_SECRET: ${{ secrets.STAGING_JWT_SECRET }}
+      VOID_PLATFORM_PROJECT_SECRET_KEY: ${{ secrets.STAGING_PROJECT_SECRET_KEY }}
+      VOID_PLATFORM_R2_ACCESS_KEY_ID: ${{ secrets.STAGING_R2_ACCESS_KEY_ID }}
+      VOID_PLATFORM_R2_SECRET_ACCESS_KEY: ${{ secrets.STAGING_R2_SECRET_ACCESS_KEY }}
+      VOID_PLATFORM_RUNTIME_CLOUDFLARE_API_TOKEN: ${{ secrets.STAGING_RUNTIME_CLOUDFLARE_API_TOKEN }}
+      VOID_PLATFORM_STAGING_INSTALLATION: ${{ vars.VOID_PLATFORM_STAGING_INSTALLATION }}
     permissions:
       contents: read
     steps:
@@ -45,9 +61,56 @@ jobs:
         with:
           cache: true
           node-version-file: .node-version
-      - run: vp run build
-      - run: vp run --filter @voidcloud/platform deploy:staging
+      - name: Verify staging lifecycle configuration
+        run: |
+          required=(
+            CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_API_TOKEN
+            VOID_PLATFORM_DATABASE_URL
+            VOID_PLATFORM_STAGING_INSTALLATION
+          )
+          missing=()
+          for name in "${required[@]}"; do
+            if [[ -z "${!name}" ]]; then
+              missing+=("$name")
+            fi
+          done
+          if (( ${#missing[@]} > 0 )); then
+            echo "::error::The Staging environment is missing: ${missing[*]}"
+            exit 1
+          fi
+      - name: Prepare ephemeral recovery encryption
+        run: |
+          recovery_key="$(openssl rand -base64 32)"
+          echo "::add-mask::$recovery_key"
+          echo "VOID_PLATFORM_RECOVERY_KEY=$recovery_key" >> "$GITHUB_ENV"
+          echo "VOID_PLATFORM_REGISTRY_DIR=$RUNNER_TEMP/void-platform-registry" >> "$GITHUB_ENV"
+      - name: Build the staging runtime
+        run: vp run build
         env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
-          STAGING_DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
+          VOID_PLATFORM_SOURCE_REVISION: ${{ github.sha }}
+      - name: Recover the staging installation
+        run: >-
+          node packages/void/dist/cli/cli.mjs platform discover
+          --account "$CLOUDFLARE_ACCOUNT_ID"
+          --installation "$VOID_PLATFORM_STAGING_INSTALLATION"
+      - name: Preview the staging upgrade
+        run: >-
+          node packages/void/dist/cli/cli.mjs platform upgrade
+          "$VOID_PLATFORM_STAGING_INSTALLATION"
+          --runtime packages/platform/dist/runtime --plan
+      - name: Deploy the staging runtime
+        run: >-
+          node packages/void/dist/cli/cli.mjs platform upgrade
+          "$VOID_PLATFORM_STAGING_INSTALLATION"
+          --runtime packages/platform/dist/runtime --yes
+
+  smoke-test:
+    if: ${{ vars.VOID_PLATFORM_DEPLOY_ENABLED == 'true' }}
+    needs: deploy
+    uses: ./.github/workflows/platform-smoke-test.yml
+    permissions:
+      contents: read
+    secrets:
+      CF_ACCESS_CLIENT_ID_STAGING: ${{ secrets.CF_ACCESS_CLIENT_ID_STAGING }}
+      CF_ACCESS_CLIENT_SECRET_STAGING: ${{ secrets.CF_ACCESS_CLIENT_SECRET_STAGING }}
+      VOID_TOKEN_STAGING: ${{ secrets.VOID_TOKEN_STAGING }}

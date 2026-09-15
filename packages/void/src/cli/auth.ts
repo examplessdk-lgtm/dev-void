@@ -1,16 +1,31 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { Entry } from '@napi-rs/keyring';
 import { join } from 'pathslash';
 import { cfAccessHeaders } from '../shared/cf-access.ts';
+import { DEFAULT_PROXY_URL, STAGING_PROXY_URL } from '../shared/proxy.ts';
 import { ensureCloudflaredToken } from './cf-access.ts';
-import { pc } from './output.ts';
-import { isVoidInternalStaging } from './project.ts';
+import {
+  readLegacyHostedPlatformSelection,
+  VOID_CLOUD_PLATFORM,
+  VOID_CLOUD_STAGING_PLATFORM,
+} from './hosted-platform.ts';
+import { deleteKeyringPassword, readKeyringPassword, writeKeyringPassword } from './keyring.ts';
+import {
+  getActivePlatformConnection,
+  listPlatformConnections,
+  normalizePlatformApiUrl,
+  platformCredentialAccount,
+} from './platform-registry.ts';
+import {
+  isLegacyVoidCloudProject,
+  isVoidInternalStaging,
+  readProjectApplicationDomain,
+  readProjectPlatformUrl,
+} from './project.ts';
 
 const CONFIG_DIR = join(homedir(), '.void');
 const CONFIG_PATH = join(CONFIG_DIR, 'config.json');
-
 const KEYRING_SERVICE = 'dev.void.cli';
 
 // ---------------------------------------------------------------------------
@@ -19,29 +34,15 @@ const KEYRING_SERVICE = 'dev.void.cli';
 // ---------------------------------------------------------------------------
 
 function keyringGet(account: string): string | null {
-  try {
-    return new Entry(KEYRING_SERVICE, account).getPassword();
-  } catch {
-    return null;
-  }
+  return readKeyringPassword(KEYRING_SERVICE, account);
 }
 
 function keyringSet(account: string, password: string): boolean {
-  try {
-    new Entry(KEYRING_SERVICE, account).setPassword(password);
-    return true;
-  } catch {
-    return false;
-  }
+  return writeKeyringPassword(KEYRING_SERVICE, account, password);
 }
 
 function keyringDelete(account: string): boolean {
-  try {
-    new Entry(KEYRING_SERVICE, account).deletePassword();
-    return true;
-  } catch {
-    return false;
-  }
+  return deleteKeyringPassword(KEYRING_SERVICE, account);
 }
 
 // ---------------------------------------------------------------------------
@@ -52,6 +53,7 @@ function keyringDelete(account: string): boolean {
 type Config = {
   token?: string;
   stagingToken?: string;
+  tokens?: Record<string, string>;
   api?: string;
 };
 
@@ -73,7 +75,22 @@ export function isStagingMode(root: string = process.cwd()): boolean {
 }
 
 export function getSiteDomain(root: string = process.cwd()): string {
-  return isStagingMode(root) ? 'staging.void.app' : 'void.app';
+  const legacySelection = readLegacyHostedPlatformSelection();
+  const domain =
+    readProjectApplicationDomain(root) ??
+    (isStagingMode(root) ? VOID_CLOUD_STAGING_PLATFORM.applicationDomain : undefined) ??
+    (isLegacyVoidCloudProject(root) ||
+    (process.env.VOID_TOKEN && process.env.VOID_API_URL === undefined)
+      ? VOID_CLOUD_PLATFORM.applicationDomain
+      : undefined) ??
+    getActivePlatformConnection()?.applicationDomain ??
+    legacySelection?.applicationDomain;
+  if (!domain) {
+    throw new Error(
+      'platform: No Void platform selected. Run `void platform connect <url>` or `void platform install` first.',
+    );
+  }
+  return domain;
 }
 
 /**
@@ -86,7 +103,13 @@ export function getToken(root: string = process.cwd()): string | null {
     return envToken;
   }
 
-  const account = isStagingMode(root) ? 'stagingToken' : 'token';
+  let apiUrl: string;
+  try {
+    apiUrl = getApiUrl(root);
+  } catch {
+    return null;
+  }
+  const account = platformCredentialAccount(apiUrl);
 
   // Try keyring first
   const keyringToken = keyringGet(account);
@@ -94,15 +117,15 @@ export function getToken(root: string = process.cwd()): string | null {
     return keyringToken;
   }
 
-  // File fallback — auto-migrate to keyring if available
   const config = readConfig();
-  const fileToken = config[account];
+  const normalizedApiUrl = normalizePlatformApiUrl(apiUrl);
+  const fileToken = config.tokens?.[normalizedApiUrl];
   if (fileToken) {
     if (keyringSet(account, fileToken)) {
-      // Successfully migrated — best-effort cleanup of the config-file copy.
-      // Failures here (read-only FS, permission denied, full disk) must not
-      // crash callers. Token stays in the file; next invocation will retry.
-      delete config[account];
+      delete config.tokens![normalizedApiUrl];
+      if (Object.keys(config.tokens!).length === 0) {
+        delete config.tokens;
+      }
       try {
         writeConfig(config);
       } catch {
@@ -112,6 +135,36 @@ export function getToken(root: string = process.cwd()): string | null {
     return fileToken;
   }
 
+  const legacyAccount = legacyCredentialAccount(root, normalizedApiUrl, config);
+  if (legacyAccount) {
+    const legacyKeyringToken = keyringGet(legacyAccount);
+    if (legacyKeyringToken) {
+      keyringSet(account, legacyKeyringToken);
+      return legacyKeyringToken;
+    }
+  }
+
+  // File fallback — auto-migrate to the origin-scoped keyring entry if applicable.
+  if (!legacyAccount) {
+    return null;
+  }
+  const legacyFileToken = config[legacyAccount];
+  if (legacyFileToken) {
+    if (keyringSet(account, legacyFileToken)) {
+      // Successfully migrated — best-effort cleanup of the config-file copy.
+      // Failures here (read-only FS, permission denied, full disk) must not
+      // crash callers. Token stays in the file; next invocation will retry.
+      config.api ??= normalizedApiUrl;
+      delete config[legacyAccount];
+      try {
+        writeConfig(config);
+      } catch {
+        // Ignore — migration is best-effort.
+      }
+    }
+    return legacyFileToken;
+  }
+
   return null;
 }
 
@@ -119,35 +172,53 @@ export function getTokenSource(): 'ci' | 'manual' {
   return process.env.VOID_TOKEN ? 'ci' : 'manual';
 }
 
-export function saveToken(token: string, root: string = process.cwd()): void {
-  const account = isStagingMode(root) ? 'stagingToken' : 'token';
-  if (keyringSet(account, token)) {
+export function saveToken(
+  token: string,
+  root: string = process.cwd(),
+  dependencies: { keyringSet?: (account: string, password: string) => boolean } = {},
+): void {
+  const apiUrl = normalizePlatformApiUrl(getApiUrl(root));
+  const account = platformCredentialAccount(apiUrl);
+  if ((dependencies.keyringSet ?? keyringSet)(account, token)) {
     return;
   }
-
-  // Keyring unavailable — fall back to file
-  console.warn(pc.yellow('System keychain unavailable, storing token in ~/.void/config.json'));
-  const config = readConfig();
-  config[account] = token;
-  writeConfig(config);
+  throw new Error(
+    'auth: The system keychain is unavailable. Refusing to store your platform token in plaintext. Configure a system keychain, or set VOID_TOKEN from a secret manager in headless environments.',
+  );
 }
 
 export function removeToken(root: string = process.cwd()): boolean {
-  const account = isStagingMode(root) ? 'stagingToken' : 'token';
+  const apiUrl = normalizePlatformApiUrl(getApiUrl(root));
+  const account = platformCredentialAccount(apiUrl);
   let removed = false;
 
   // Remove from keyring
   if (keyringDelete(account)) {
     removed = true;
   }
-
   // Also clean up config file if token exists there
   try {
     const config = readConfig();
-    if (config[account]) {
-      delete config[account];
-      writeConfig(config);
+    let configChanged = false;
+    const legacyAccount = legacyCredentialAccount(root, apiUrl, config);
+    if (legacyAccount && keyringDelete(legacyAccount)) {
       removed = true;
+    }
+    if (legacyAccount && config[legacyAccount]) {
+      delete config[legacyAccount];
+      configChanged = true;
+      removed = true;
+    }
+    if (config.tokens?.[apiUrl]) {
+      delete config.tokens[apiUrl];
+      if (Object.keys(config.tokens).length === 0) {
+        delete config.tokens;
+      }
+      configChanged = true;
+      removed = true;
+    }
+    if (configChanged) {
+      writeConfig(config);
     }
   } catch {
     // ignore
@@ -156,8 +227,25 @@ export function removeToken(root: string = process.cwd()): boolean {
   return removed;
 }
 
-const DEFAULT_API_URL = 'https://api.void.cloud';
-const STAGING_API_URL = 'https://api.staging.void.cloud';
+const DEFAULT_API_URL = VOID_CLOUD_PLATFORM.apiUrl;
+const STAGING_API_URL = VOID_CLOUD_STAGING_PLATFORM.apiUrl;
+
+function legacyCredentialAccount(
+  root: string,
+  normalizedApiUrl: string,
+  config: Config,
+): 'token' | 'stagingToken' | null {
+  const account = isStagingMode(root) ? 'stagingToken' : 'token';
+  let configuredUrl: string;
+  try {
+    configuredUrl = normalizePlatformApiUrl(
+      config.api ?? (isStagingMode(root) ? STAGING_API_URL : DEFAULT_API_URL),
+    );
+  } catch {
+    return null;
+  }
+  return configuredUrl === normalizedApiUrl ? account : null;
+}
 
 function base64Url(buffer: Buffer): string {
   return buffer.toString('base64').replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
@@ -181,7 +269,7 @@ async function exchangeLoginCode(
   ensureCloudflaredToken(apiUrl);
   const res = await fetch(new URL('auth/cli/token', base), {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...cfAccessHeaders(process.env) },
+    headers: { 'Content-Type': 'application/json', ...cfAccessHeaders(process.env, apiUrl) },
     body: JSON.stringify({
       code,
       state,
@@ -218,11 +306,88 @@ async function exchangeLoginCode(
  * Priority: VOID_API_URL env var > ~/.void/config.json > default
  */
 export function getApiUrl(root: string = process.cwd()): string {
-  return (
-    process.env.VOID_API_URL ??
-    readConfig().api ??
-    (isStagingMode(root) ? STAGING_API_URL : DEFAULT_API_URL)
-  );
+  if (process.env.VOID_API_URL) {
+    return normalizePlatformApiUrl(process.env.VOID_API_URL);
+  }
+  if (isStagingMode(root)) {
+    return STAGING_API_URL;
+  }
+
+  const projectApiUrl = readProjectPlatformUrl(root);
+  if (projectApiUrl) {
+    if (projectApiUrl === DEFAULT_API_URL || projectApiUrl === STAGING_API_URL) {
+      return projectApiUrl;
+    }
+    if (listPlatformConnections().some((connection) => connection.apiUrl === projectApiUrl)) {
+      return projectApiUrl;
+    }
+    throw new Error(
+      `platform: Project metadata selected unverified platform ${projectApiUrl}. Connect to it explicitly with \`void platform connect ${projectApiUrl}\` before forwarding credentials.`,
+    );
+  }
+
+  const config = readConfig();
+  const legacySelection = readLegacyHostedPlatformSelection();
+  let apiUrl =
+    (isLegacyVoidCloudProject(root) ? DEFAULT_API_URL : undefined) ??
+    getActivePlatformConnection()?.apiUrl ??
+    config.api ??
+    legacySelection?.apiUrl;
+  // VOID_TOKEN predates explicit platform selection and has always meant Void
+  // Cloud when VOID_API_URL is absent. Preserve that contract for clean CI
+  // runners while still requiring new interactive users to select a platform.
+  apiUrl ??= process.env.VOID_TOKEN ? DEFAULT_API_URL : undefined;
+  if (!apiUrl) {
+    apiUrl = keyringGet('token')
+      ? DEFAULT_API_URL
+      : keyringGet('stagingToken')
+        ? STAGING_API_URL
+        : undefined;
+    if (apiUrl) {
+      // Historical keychain entries had no corresponding API selection. Record
+      // the non-sensitive hosted origin so project linking can complete the
+      // migration without importing auth/keyring code into project state.
+      try {
+        writeConfig({ ...config, api: apiUrl });
+      } catch {
+        // Selection still works for this invocation; migration is best-effort.
+      }
+    }
+  }
+  if (!apiUrl) {
+    throw new Error(
+      'platform: No Void platform selected. Run `void platform connect <url>` or `void platform install` first.',
+    );
+  }
+  return normalizePlatformApiUrl(apiUrl);
+}
+
+export function getProxyUrl(root: string = process.cwd()): string {
+  // The project file is repository-controlled and therefore cannot be trusted
+  // to choose the origin that receives a user's platform credential. Resolve
+  // the proxy from the selected API's trusted local registry entry instead.
+  // VOID_PROXY_URL remains an explicit operator override for CI and recovery.
+  if (process.env.VOID_PROXY_URL) {
+    return normalizePlatformApiUrl(process.env.VOID_PROXY_URL);
+  }
+
+  const apiUrl = normalizePlatformApiUrl(getApiUrl(root));
+  if (apiUrl === STAGING_API_URL) {
+    return STAGING_PROXY_URL;
+  }
+  if (apiUrl === DEFAULT_API_URL) {
+    return DEFAULT_PROXY_URL;
+  }
+
+  const proxyUrl = listPlatformConnections().find(
+    (connection) => connection.apiUrl === apiUrl,
+  )?.proxyUrl;
+  if (proxyUrl === null || proxyUrl === undefined) {
+    throw new Error(
+      `platform: No verified proxy is registered for ${apiUrl}. Reconnect with \`void platform connect ${apiUrl}\` or set VOID_PROXY_URL explicitly.`,
+    );
+  }
+  return proxyUrl;
 }
 
 function page(title: string, message: string): string {

@@ -15,10 +15,11 @@ export async function runPurgeCacheCommand(root: string, projectSlug?: string): 
     process.exit(1);
   }
 
-  const client = new PlatformClient(token, { root });
   const requestedSlug = getRequestedProjectSlug({ projectSlug });
   let projectId: string;
+  let client: PlatformClient;
   if (requestedSlug) {
+    client = new PlatformClient(token, { root });
     const projects = await client.listProjects();
     const config = resolveProjectBySlug(projects, requestedSlug);
     if (!config) {
@@ -33,6 +34,7 @@ export async function runPurgeCacheCommand(root: string, projectSlug?: string): 
       process.exit(1);
     }
     projectId = linked.projectId;
+    client = new PlatformClient(token, { root });
   }
 
   const s = createSpinner();

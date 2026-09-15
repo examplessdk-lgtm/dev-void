@@ -40,15 +40,12 @@ function req(path: string, cookie?: string, init?: RequestInit): Response | Prom
   const headers: Record<string, string> = {
     ...(init?.headers as Record<string, string>),
   };
+  const method = init?.method?.toUpperCase() ?? 'GET';
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(method) && headers.Origin === undefined) {
+    headers.Origin = 'http://localhost';
+  }
   if (cookie) {
     headers.Cookie = `admin_token=${cookie}`;
-  }
-  // Admin writes are guarded against cross-origin form posts, so a write must
-  // carry the Origin a real browser would send. The guard itself is covered in
-  // admin-email.test.ts, which builds its cross-origin requests by hand.
-  const method = (init?.method ?? 'GET').toUpperCase();
-  if (method !== 'GET' && method !== 'HEAD' && headers.Origin === undefined) {
-    headers.Origin = 'http://localhost';
   }
   return app.fetch(
     new Request(`http://localhost${path}`, { ...init, headers, redirect: 'manual' }),
@@ -89,6 +86,31 @@ describe('auth middleware', () => {
     const admin = await createTestUser(env.db, 'admin', 'github', undefined, 'free', 'admin');
     const res = await req('/admin/', admin.adminJwt);
     expect(res.status).toBe(200);
+  });
+
+  test('rejects same-site sibling origins for admin mutations', async () => {
+    const admin = await createTestUser(env.db, 'admin-csrf', 'github', undefined, 'free', 'admin');
+    const res = await req('/admin/signup-control/toggle', admin.adminJwt, {
+      method: 'POST',
+      headers: { Origin: 'https://attacker.apps.example.com' },
+    });
+    expect(res.status).toBe(403);
+  });
+
+  test('rejects admin mutations without browser origin evidence', async () => {
+    const admin = await createTestUser(
+      env.db,
+      'admin-csrf-missing',
+      'github',
+      undefined,
+      'free',
+      'admin',
+    );
+    const res = await req('/admin/signup-control/toggle', admin.adminJwt, {
+      method: 'POST',
+      headers: { Origin: '' },
+    });
+    expect(res.status).toBe(403);
   });
 });
 
@@ -493,9 +515,8 @@ describe('POST /admin/users/:id/plan', () => {
         method: 'POST',
         headers: {
           Cookie: `admin_token=${admin.adminJwt}`,
-          'Content-Type': 'application/x-www-form-urlencoded',
-          // A real admin form post is same-origin; the write guard requires it.
           Origin: 'http://localhost',
+          'Content-Type': 'application/x-www-form-urlencoded',
         },
         body: new URLSearchParams({ plan: 'pro' }).toString(),
         redirect: 'manual',
@@ -653,9 +674,8 @@ describe('POST /admin/users/:id/suspend + unsuspend', () => {
         method: 'POST',
         headers: {
           Cookie: `admin_token=${adminJwt}`,
-          'Content-Type': 'application/x-www-form-urlencoded',
-          // A real admin form post is same-origin; the write guard requires it.
           Origin: 'http://localhost',
+          'Content-Type': 'application/x-www-form-urlencoded',
         },
         body: '',
         redirect: 'manual',
@@ -677,9 +697,8 @@ describe('POST /admin/users/:id/suspend + unsuspend', () => {
         method: 'POST',
         headers: {
           Cookie: `admin_token=${adminJwt}`,
-          'Content-Type': 'application/x-www-form-urlencoded',
-          // A real admin form post is same-origin; the write guard requires it.
           Origin: 'http://localhost',
+          'Content-Type': 'application/x-www-form-urlencoded',
         },
         body: new URLSearchParams({ reason }).toString(),
         redirect: 'manual',
@@ -1141,7 +1160,77 @@ describe('GET /admin/login', () => {
     expect(res.status).toBe(200);
     const html = await res.text();
     expect(html).toContain('Void Admin');
+    expect(html).toContain('GitHub');
     expect(html).toContain('Google');
+  });
+
+  test('shows only the authentication providers enabled by the platform', async () => {
+    env.PLATFORM_CAPABILITIES = JSON.stringify({
+      ai: true,
+      customDomains: false,
+      email: false,
+      githubActions: true,
+      githubOAuth: true,
+      googleOAuth: false,
+      managedBuilds: false,
+      sandbox: false,
+    });
+    try {
+      const res = await app.fetch(new Request('http://localhost/admin/login'), env);
+      const html = await res.text();
+      expect(html).toContain('Sign in with GitHub');
+      expect(html).not.toContain('Sign in with Google');
+    } finally {
+      env.PLATFORM_CAPABILITIES = undefined;
+    }
+  });
+
+  test('signs an administrator in with GitHub OAuth', async () => {
+    await createTestUser(env.db, 'octocat', 'github', '4242', 'custom', 'admin');
+    const start = await app.fetch(
+      new Request('http://localhost/admin/login/github', { redirect: 'manual' }),
+      env,
+    );
+    expect(start.status).toBe(302);
+    const authorization = new URL(start.headers.get('Location')!);
+    expect(authorization.origin + authorization.pathname).toBe(
+      'https://github.com/login/oauth/authorize',
+    );
+    expect(authorization.searchParams.get('redirect_uri')).toBe('http://localhost/auth/callback');
+    const state = authorization.searchParams.get('state')!;
+    const browserCookie = start.headers.get('Set-Cookie')!.split(';', 1)[0]!;
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string | URL | Request): Promise<Response> => {
+        const url =
+          typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+        if (url === 'https://github.com/login/oauth/access_token') {
+          return Response.json({ access_token: 'github-token' });
+        }
+        if (url === 'https://api.github.com/user') {
+          return Response.json({ id: 4242, login: 'octocat', email: null });
+        }
+        if (url === 'https://api.github.com/user/emails') {
+          return Response.json([]);
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      }),
+    );
+    try {
+      const callback = await app.fetch(
+        new Request(
+          `http://localhost/auth/callback?code=test-code&state=${encodeURIComponent(state)}`,
+          { headers: { Cookie: browserCookie }, redirect: 'manual' },
+        ),
+        env,
+      );
+      expect(callback.status).toBe(302);
+      expect(callback.headers.get('Location')).toBe('/admin/');
+      expect(callback.headers.get('Set-Cookie')).toContain('admin_token=');
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
 

@@ -7,6 +7,8 @@ import { getPackageDir } from './agents.ts';
 import { parseDeployArgs } from './args.ts';
 import { authSubcommands, parseAuthArgs } from './auth-args.ts';
 import { buildSubcommands, parseBuildArgs } from './build-args.ts';
+import { cloudflareSubcommands, parseCloudflareArgs } from './cloudflare-args.ts';
+import { formatCloudflareUserMessage } from './cloudflare-user-output.ts';
 import { dbSubcommands, parseDbArgs } from './db-args.ts';
 import { domainSubcommands, parseDomainArgs } from './domain-args.ts';
 import { emailSubcommands, parseEmailArgs } from './email-args.ts';
@@ -14,6 +16,7 @@ import { envSubcommands, parseEnvArgs } from './env-args.ts';
 import { genSubcommands, parseGenArgs } from './gen-args.ts';
 import { githubSubcommands, parseGithubArgs } from './github-args.ts';
 import { getHelpPath, printGlobalHelp, printHelpPage, printVoidHeader } from './help.ts';
+import { parsePlatformArgs, platformSubcommands } from './platform-args.ts';
 import { parsePrepareArgs } from './prepare-args.ts';
 import { projectSubcommands, parseProjectArgs } from './project-args.ts';
 import { secretSubcommands, parseSecretArgs } from './secret-args.ts';
@@ -65,7 +68,7 @@ async function runSubcommandGroup<T>(
       await run(root, parsed);
     }
   } catch (err) {
-    log.error(err instanceof Error ? err.message : String(err));
+    log.error(formatCloudflareUserMessage(err instanceof Error ? err.message : String(err)));
     process.exit(1);
   }
 }
@@ -81,7 +84,7 @@ if (helpPath) {
     try {
       printHelpPage(helpPath);
     } catch (err) {
-      log.error(err instanceof Error ? err.message : String(err));
+      log.error(formatCloudflareUserMessage(err instanceof Error ? err.message : String(err)));
       process.exit(1);
     }
   }
@@ -91,7 +94,7 @@ if (helpPath) {
   try {
     deployArgs = parseDeployArgs(args.slice(1));
   } catch (err) {
-    log.error(err instanceof Error ? err.message : String(err));
+    log.error(formatCloudflareUserMessage(err instanceof Error ? err.message : String(err)));
     process.exit(1);
   }
 
@@ -107,13 +110,23 @@ if (helpPath) {
       provision: deployArgs.provision,
       requireEmail: deployArgs.requireEmail,
     }).catch((err) => {
-      log.error(err.message ?? err);
+      log.error(formatCloudflareUserMessage(err.message ?? String(err)));
       process.exit(1);
     });
   });
 } else if (command === 'auth') {
   runSubcommandGroup('auth', authSubcommands, parseAuthArgs, (root, parsed) =>
     import('./auth-cmd.ts').then(({ runAuthCommand }) => runAuthCommand(root, parsed)),
+  );
+} else if (command === 'platform') {
+  runSubcommandGroup('platform', platformSubcommands, parsePlatformArgs, (root, parsed) =>
+    import('./platform-cmd.ts').then(({ runPlatformCommand }) => runPlatformCommand(root, parsed)),
+  );
+} else if (command === 'cloudflare') {
+  runSubcommandGroup('cloudflare', cloudflareSubcommands, parseCloudflareArgs, (root, parsed) =>
+    import('./cloudflare-cmd.ts').then(({ runCloudflareCommand }) =>
+      runCloudflareCommand(root, parsed),
+    ),
   );
 } else if (command === 'project') {
   runSubcommandGroup('project', projectSubcommands, parseProjectArgs, (root, parsed) =>
@@ -157,13 +170,13 @@ if (helpPath) {
   try {
     prepareArgs = parsePrepareArgs(args.slice(1));
   } catch (err) {
-    log.error(err instanceof Error ? err.message : String(err));
+    log.error(formatCloudflareUserMessage(err instanceof Error ? err.message : String(err)));
     process.exit(1);
   }
 
   import('./prepare.ts').then(({ runPrepareCommand }) => {
     runPrepareCommand(root, prepareArgs).catch((err) => {
-      log.error(err.message ?? err);
+      log.error(formatCloudflareUserMessage(err.message ?? String(err)));
       process.exit(1);
     });
   });
@@ -174,11 +187,11 @@ if (helpPath) {
     try {
       initArgs = parseInitArgs(args.slice(1));
     } catch (err) {
-      log.error(err instanceof Error ? err.message : String(err));
+      log.error(formatCloudflareUserMessage(err instanceof Error ? err.message : String(err)));
       process.exit(1);
     }
     runInitCommand(root, initArgs).catch((err) => {
-      log.error(err.message ?? err);
+      log.error(formatCloudflareUserMessage(err.message ?? String(err)));
       process.exit(1);
     });
   });
@@ -197,6 +210,16 @@ if (helpPath) {
       name: 'auth',
       hint: 'login | logout | whoami | token',
       description: 'Login, logout, and token management',
+    },
+    {
+      name: 'platform',
+      hint: 'connect | list | use | status | install | upgrade | repair | disable | uninstall',
+      description: 'Connect, install, and manage Void platforms',
+    },
+    {
+      name: 'cloudflare',
+      hint: 'login | status | logout',
+      description: 'Manage Cloudflare authentication',
     },
     {
       name: 'project',
@@ -273,6 +296,20 @@ if (helpPath) {
         return runSubcommandGroup('auth', authSubcommands, parseAuthArgs, (r, p) =>
           import('./auth-cmd.ts').then(({ runAuthCommand }) => runAuthCommand(r, p)),
         );
+      case 'platform':
+        return runSubcommandGroup('platform', platformSubcommands, parsePlatformArgs, (r, p) =>
+          import('./platform-cmd.ts').then(({ runPlatformCommand }) => runPlatformCommand(r, p)),
+        );
+      case 'cloudflare':
+        return runSubcommandGroup(
+          'cloudflare',
+          cloudflareSubcommands,
+          parseCloudflareArgs,
+          (r, p) =>
+            import('./cloudflare-cmd.ts').then(({ runCloudflareCommand }) =>
+              runCloudflareCommand(r, p),
+            ),
+        );
       case 'project':
         return runSubcommandGroup('project', projectSubcommands, parseProjectArgs, (r, p) =>
           import('./project-cmd.ts').then(({ runProjectCommand }) => runProjectCommand(r, p)),
@@ -319,7 +356,7 @@ if (helpPath) {
         return;
     }
   })().catch((err) => {
-    log.error(err instanceof Error ? err.message : String(err));
+    log.error(formatCloudflareUserMessage(err instanceof Error ? err.message : String(err)));
     process.exit(1);
   });
 } else {

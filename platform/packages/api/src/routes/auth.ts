@@ -1,5 +1,6 @@
 import { Hono } from 'hono';
 import { setCookie, getCookie, deleteCookie } from 'hono/cookie';
+import { handleAdminOAuthCallback, isAdminOAuthState } from '../admin/routes/login.ts';
 import {
   ensureGitHubPreviewRepoAccess,
   getGitHubPreviewRepoConfig,
@@ -18,11 +19,12 @@ import {
   createCodeChallenge,
   isValidCodeVerifier,
 } from '../auth/pkce.ts';
+import { getPlatformCapabilities } from '../capabilities.ts';
 import { DEFAULT_DASHBOARD_URL } from '../constants.ts';
 import {
   getUserByOAuthAccount,
   getUserByEmail,
-  createUser,
+  createUserForPlatform,
   updateUser,
   createOAuthAccount,
   acceptInvitationByEmail,
@@ -35,6 +37,7 @@ import {
   linkGitHubIdentity,
   revokeOwnerVerifiedDestinationsForUserChange,
   GitHubIdentityAlreadyLinkedError,
+  SelfHostedSignupRestrictedError,
   type Db,
 } from '../db.ts';
 import { sendWelcomeEmail } from '../email.ts';
@@ -54,7 +57,11 @@ const CLI_AUTH_CODE_TTL_SECONDS = 5 * 60;
 
 const app = new Hono<ApiEnv>();
 
-export function isAllowedRedirect(url: string, dashboardUrl?: string): boolean {
+export function isAllowedRedirect(
+  url: string,
+  dashboardUrl?: string,
+  platformInstallationId?: string,
+): boolean {
   let parsed: URL;
   try {
     parsed = new URL(url);
@@ -71,7 +78,10 @@ export function isAllowedRedirect(url: string, dashboardUrl?: string): boolean {
   }
 
   // Dashboard: compare exact origin (protocol + hostname + port)
-  const origin = dashboardUrl ?? 'https://dash.void.cloud';
+  const origin = dashboardUrl ?? (platformInstallationId ? null : DEFAULT_DASHBOARD_URL);
+  if (!origin) {
+    return false;
+  }
   try {
     return parsed.origin === new URL(origin).origin;
   } catch {
@@ -90,13 +100,22 @@ app.get('/login', async (context) => {
     return context.json({ error: 'redirect parameter is required' }, 400);
   }
 
-  if (!isAllowedRedirect(redirect, context.env.DASHBOARD_URL)) {
+  if (
+    !isAllowedRedirect(redirect, context.env.DASHBOARD_URL, context.env.PLATFORM_INSTALLATION_ID)
+  ) {
     return context.json({ error: 'redirect must be a localhost or dashboard URL' }, 400);
   }
 
   const provider = context.req.query('provider') ?? 'github';
   if (provider !== 'github' && provider !== 'google') {
     return context.json({ error: 'provider must be github or google' }, 400);
+  }
+  const capabilities = getPlatformCapabilities(context.env);
+  if (
+    (provider === 'github' && !capabilities.githubOAuth) ||
+    (provider === 'google' && !capabilities.googleOAuth)
+  ) {
+    return context.json({ error: 'authentication provider unavailable', provider }, 501);
   }
 
   const codeChallenge = context.req.query('code_challenge');
@@ -353,6 +372,10 @@ app.get('/callback', async (context) => {
     return context.json({ error: 'missing code or state' }, 400);
   }
 
+  if (isAdminOAuthState(state)) {
+    return handleAdminOAuthCallback(context);
+  }
+
   // Verify state HMAC
   const dotIndex = state.lastIndexOf('.');
   if (dotIndex === -1) {
@@ -399,11 +422,23 @@ app.get('/callback', async (context) => {
   deleteCookie(context, 'oauth_nonce', { path: '/auth/callback' });
 
   // Re-validate redirect after decoding
-  if (!isAllowedRedirect(redirect, context.env.DASHBOARD_URL)) {
+  if (
+    !isAllowedRedirect(redirect, context.env.DASHBOARD_URL, context.env.PLATFORM_INSTALLATION_ID)
+  ) {
     return context.json({ error: 'invalid redirect' }, 400);
   }
 
   const resolvedProvider = provider ?? 'github';
+  const capabilities = getPlatformCapabilities(context.env);
+  if (
+    (resolvedProvider === 'github' && !capabilities.githubOAuth) ||
+    (resolvedProvider === 'google' && !capabilities.googleOAuth)
+  ) {
+    return context.json(
+      { error: 'authentication provider unavailable', provider: resolvedProvider },
+      501,
+    );
+  }
   let providerId: string;
   let login: string;
   let email: string | null;
@@ -495,7 +530,9 @@ app.get('/callback', async (context) => {
   if (!user) {
     // Check signup allowlist (new users only)
     const enabled = await context.env.ROUTING.get('signup:enabled');
-    if (enabled === 'true') {
+    const selfHosted = Boolean(context.env.PLATFORM_INSTALLATION_ID);
+    let additionalSignupAllowed = !selfHosted || enabled === 'false';
+    if (enabled === 'true' || (selfHosted && enabled !== 'false')) {
       let allowedByRepoAccess = false;
       if (resolvedProvider === 'github' && previewRepo) {
         try {
@@ -506,25 +543,37 @@ app.get('/callback', async (context) => {
       }
 
       const entries = allowedByRepoAccess ? [] : await getAllowlist(context.env.ROUTING);
-      if (
-        !allowedByRepoAccess &&
-        !isSignupAllowed(resolvedProvider, login, emailVerified ? email : null, entries)
-      ) {
+      additionalSignupAllowed =
+        allowedByRepoAccess ||
+        isSignupAllowed(resolvedProvider, login, emailVerified ? email : null, entries);
+      if (!selfHosted && !additionalSignupAllowed) {
         return context.redirect('/signup-restricted');
       }
     }
-    user = await db.transaction(async (tx) => {
-      const txDb = tx as unknown as typeof db;
-      const newUser = await createUser(
-        txDb,
-        resolvedProvider,
-        providerId,
-        login,
-        emailVerified ? email : null,
-      );
-      await createOAuthAccount(txDb, newUser.id, resolvedProvider, providerId);
-      return newUser;
-    });
+    try {
+      user = await db.transaction(async (tx) => {
+        const txDb = tx as unknown as typeof db;
+        const newUser = await createUserForPlatform(
+          txDb,
+          resolvedProvider,
+          providerId,
+          login,
+          emailVerified ? email : null,
+          context.env.PLATFORM_INSTALLATION_ID,
+          {
+            additionalSignupAllowed,
+            bootstrapGitHubId: context.env.PLATFORM_BOOTSTRAP_GITHUB_ID ?? '',
+          },
+        );
+        await createOAuthAccount(txDb, newUser.id, resolvedProvider, providerId);
+        return newUser;
+      });
+    } catch (error) {
+      if (error instanceof SelfHostedSignupRestrictedError) {
+        return context.redirect('/signup-restricted');
+      }
+      throw error;
+    }
     createdUser = true;
   }
 

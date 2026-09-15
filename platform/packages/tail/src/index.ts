@@ -1,5 +1,6 @@
 type Env = Readonly<{
   ANALYTICS: AnalyticsEngineDataset;
+  PLATFORM_DISPATCH_WORKER_NAME?: string;
 }>;
 
 function isFetchEvent(event: TraceItem['event']): event is TraceItemFetchEventInfo {
@@ -17,6 +18,7 @@ function isFetchEvent(event: TraceItem['event']): event is TraceItemFetchEventIn
  */
 export function parseScriptName(
   scriptName: string,
+  platformDispatchWorkerName?: string,
 ): { projectKey: string; deployId: string } | null {
   const dplIndex = scriptName.lastIndexOf('-dpl_');
   if (dplIndex > 4) {
@@ -27,6 +29,9 @@ export function parseScriptName(
   }
   if (scriptName.startsWith('user-')) {
     return { projectKey: scriptName, deployId: '' };
+  }
+  if (platformDispatchWorkerName && scriptName === platformDispatchWorkerName) {
+    return { projectKey: '__platform-dispatch', deployId: '' };
   }
   if (scriptName === 'void-dispatch' || scriptName === 'void-dispatch-staging') {
     return { projectKey: `__platform-${scriptName.slice('void-'.length)}`, deployId: '' };
@@ -42,7 +47,7 @@ export default {
         continue;
       }
 
-      const parsed = parseScriptName(scriptName);
+      const parsed = parseScriptName(scriptName, env.PLATFORM_DISPATCH_WORKER_NAME);
       if (!parsed) {
         continue;
       }

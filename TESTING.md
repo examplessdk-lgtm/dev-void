@@ -94,11 +94,11 @@ explicit, manually reviewed operation against exact resource IDs.
 
 ### Select the Cloudflare account
 
-Authenticate and inspect the accounts available to Wrangler:
+Authenticate and inspect the accounts available to Void:
 
 ```sh
-wrangler login
-wrangler whoami
+void cloudflare login
+void cloudflare status
 ```
 
 Use the intended test account rather than an account name embedded in a script. Pin it by either:

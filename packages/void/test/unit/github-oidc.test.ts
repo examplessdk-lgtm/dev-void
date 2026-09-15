@@ -104,6 +104,7 @@ describe('exchangeGithubOidcForDeployToken', () => {
   });
 
   it('forwards CF Access service-token headers on the API POST but not the GitHub GET', async () => {
+    const gatedApiUrl = 'https://api.staging.void.cloud';
     const prevId = process.env.CF_ACCESS_CLIENT_ID;
     const prevSecret = process.env.CF_ACCESS_CLIENT_SECRET;
     process.env.CF_ACCESS_CLIENT_ID = 'cf-id';
@@ -113,7 +114,7 @@ describe('exchangeGithubOidcForDeployToken', () => {
         .mockResolvedValueOnce(jsonResponse({ value: 'oidc-jwt' }))
         .mockResolvedValueOnce(jsonResponse({ token: 'deploy-token' }));
 
-      await exchangeGithubOidcForDeployToken(apiUrl, 'my-app', oidcEnv());
+      await exchangeGithubOidcForDeployToken(gatedApiUrl, 'my-app', oidcEnv());
 
       // GitHub OIDC GET hits token.actions.githubusercontent.com — never CF Access.
       const [, getInit] = fetchMock.mock.calls[0] as [URL, RequestInit];
@@ -133,6 +134,7 @@ describe('exchangeGithubOidcForDeployToken', () => {
   });
 
   it('forwards a CF_ACCESS_TOKEN user JWT on the API POST but not the GitHub GET', async () => {
+    const gatedApiUrl = 'https://api.staging.void.cloud';
     const prevToken = process.env.CF_ACCESS_TOKEN;
     process.env.CF_ACCESS_TOKEN = 'cf-jwt';
     try {
@@ -140,7 +142,7 @@ describe('exchangeGithubOidcForDeployToken', () => {
         .mockResolvedValueOnce(jsonResponse({ value: 'oidc-jwt' }))
         .mockResolvedValueOnce(jsonResponse({ token: 'deploy-token' }));
 
-      await exchangeGithubOidcForDeployToken(apiUrl, 'my-app', oidcEnv());
+      await exchangeGithubOidcForDeployToken(gatedApiUrl, 'my-app', oidcEnv());
 
       const [, getInit] = fetchMock.mock.calls[0] as [URL, RequestInit];
       expect((getInit.headers as Record<string, string>)['cf-access-token']).toBeUndefined();
@@ -149,6 +151,28 @@ describe('exchangeGithubOidcForDeployToken', () => {
       expect((postInit.headers as Record<string, string>)['cf-access-token']).toBe('cf-jwt');
     } finally {
       restoreEnv('CF_ACCESS_TOKEN', prevToken);
+    }
+  });
+
+  it('never forwards shared Access credentials to a self-hosted API', async () => {
+    const prevId = process.env.CF_ACCESS_CLIENT_ID;
+    const prevSecret = process.env.CF_ACCESS_CLIENT_SECRET;
+    process.env.CF_ACCESS_CLIENT_ID = 'cf-id';
+    process.env.CF_ACCESS_CLIENT_SECRET = 'cf-secret';
+    try {
+      fetchMock
+        .mockResolvedValueOnce(jsonResponse({ value: 'oidc-jwt' }))
+        .mockResolvedValueOnce(jsonResponse({ token: 'deploy-token' }));
+
+      await exchangeGithubOidcForDeployToken(apiUrl, 'my-app', oidcEnv());
+
+      const [, postInit] = fetchMock.mock.calls[1] as [string, RequestInit];
+      const postHeaders = postInit.headers as Record<string, string>;
+      expect(postHeaders['CF-Access-Client-Id']).toBeUndefined();
+      expect(postHeaders['CF-Access-Client-Secret']).toBeUndefined();
+    } finally {
+      restoreEnv('CF_ACCESS_CLIENT_ID', prevId);
+      restoreEnv('CF_ACCESS_CLIENT_SECRET', prevSecret);
     }
   });
 

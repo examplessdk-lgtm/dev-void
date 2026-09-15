@@ -235,6 +235,21 @@ describe('buildPrerenderBindings', () => {
     expect(result.__VOID_PROXY_URL).toBe('https://proxy.staging.void.cloud');
   });
 
+  it('pins custom platform credentials to its discovered proxy', () => {
+    const result = buildPrerenderBindings({
+      wranglerVars: {},
+      env: {},
+      voidToken: 'custom-token',
+      voidProjectId: 'custom-project',
+      voidProxyUrl: 'https://void-company-proxy.example.workers.dev',
+      voidStaging: false,
+      remoteMode: true,
+    });
+
+    expect(result.__VOID_PROXY_URL).toBe('https://void-company-proxy.example.workers.dev');
+    expect(JSON.stringify(result)).not.toContain('proxy.void.cloud');
+  });
+
   it('sets __VOID_REMOTE when remote mode is enabled', () => {
     const result = buildPrerenderBindings({
       wranglerVars: {},

@@ -26,6 +26,7 @@ import {
   type AssetManifestEntry,
 } from '../assets.ts';
 import { hmacSignState } from '../auth/hmac.ts';
+import { getPlatformCapabilities } from '../capabilities.ts';
 import { deleteDispatchScript, retryWithBackoff } from '../cf-api.ts';
 import { R2_CONCURRENCY, uploadPool } from '../concurrency.ts';
 import { SITE_DOMAIN } from '../constants.ts';
@@ -2006,6 +2007,15 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
     return context.json({ event: 'error', message: shapeError }, 400);
   }
   const incomingManifest = body.manifest as DeployManifest;
+  if (incomingManifest.sandbox && !getPlatformCapabilities(context.env).sandbox) {
+    return context.json(
+      {
+        event: 'error',
+        message: 'This Void platform does not enable sandbox deployments.',
+      },
+      501,
+    );
+  }
   if (
     incomingManifest.version == null ||
     !SUPPORTED_MANIFEST_VERSIONS.includes(incomingManifest.version)

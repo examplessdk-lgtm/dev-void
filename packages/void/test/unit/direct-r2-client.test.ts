@@ -285,8 +285,9 @@ describe('PlatformClient CF Access header capture (survives a later env scrub)',
       process.env.CF_ACCESS_CLIENT_ID = 'svc-id.access';
       process.env.CF_ACCESS_CLIENT_SECRET = 'svc-secret';
 
-      // Construct the client — cfAccessHeaders(process.env) is read here.
-      const client = makeClient();
+      // Construct a known Access-gated staging client, which captures the
+      // credentials before the untrusted build environment is scrubbed.
+      const client = new PlatformClient(token, { apiUrl: 'https://api.staging.void.cloud' });
 
       // Simulate deploy.ts's scrub (before any user build spawns).
       delete process.env.CF_ACCESS_CLIENT_ID;
@@ -301,6 +302,37 @@ describe('PlatformClient CF Access header capture (survives a later env scrub)',
       const headers = init.headers as Record<string, string>;
       expect(headers['CF-Access-Client-Id']).toBe('svc-id.access');
       expect(headers['CF-Access-Client-Secret']).toBe('svc-secret');
+    } finally {
+      if (savedId === undefined) {
+        delete process.env.CF_ACCESS_CLIENT_ID;
+      } else {
+        process.env.CF_ACCESS_CLIENT_ID = savedId;
+      }
+      if (savedSecret === undefined) {
+        delete process.env.CF_ACCESS_CLIENT_SECRET;
+      } else {
+        process.env.CF_ACCESS_CLIENT_SECRET = savedSecret;
+      }
+    }
+  });
+
+  it('does not send staging Access credentials to a self-hosted platform', async () => {
+    const savedId = process.env.CF_ACCESS_CLIENT_ID;
+    const savedSecret = process.env.CF_ACCESS_CLIENT_SECRET;
+    try {
+      process.env.CF_ACCESS_CLIENT_ID = 'svc-id.access';
+      process.env.CF_ACCESS_CLIENT_SECRET = 'svc-secret';
+      const client = makeClient();
+      fetchMock.mockResolvedValueOnce(jsonResponse({ urls: {} }));
+
+      await client.requestUploadUrls(projectId, [
+        { blake3: 'a'.repeat(32), md5: 'b'.repeat(32), size: 1, contentType: 'text/plain' },
+      ]);
+
+      const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      const headers = init.headers as Record<string, string>;
+      expect(headers['CF-Access-Client-Id']).toBeUndefined();
+      expect(headers['CF-Access-Client-Secret']).toBeUndefined();
     } finally {
       if (savedId === undefined) {
         delete process.env.CF_ACCESS_CLIENT_ID;

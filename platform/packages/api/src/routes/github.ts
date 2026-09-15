@@ -7,6 +7,7 @@ import {
   createCodeChallenge,
   isValidCodeVerifier,
 } from '../auth/pkce.ts';
+import { capabilityMiddleware } from '../capabilities.ts';
 import { DEFAULT_DASHBOARD_URL, MEMBERSHIP_TTL_SECONDS } from '../constants.ts';
 import type { Db } from '../db.ts';
 import {
@@ -331,6 +332,7 @@ function deriveAccountFromRepositories(
 // callback is public and authenticated via the signed HMAC state instead.
 // ---------------------------------------------------------------------------
 export const githubRoutes = new Hono<ApiEnv>()
+  .use('*', capabilityMiddleware('managedBuilds'))
 
   // Begin a GitHub App install — return the install URL the dashboard opens.
   // State binds the caller's user id, their GitHub account id, and a nonce so
@@ -1398,6 +1400,7 @@ function isValidWorkflowPath(path: string): boolean {
 // route does the project-ownership check (mirrors routes/domains.ts).
 // ---------------------------------------------------------------------------
 export const githubProjectRoutes = new Hono<ApiEnv>()
+  .use('*', capabilityMiddleware('managedBuilds'))
 
   // Connect a project to a repo within one of the caller's installations.
   .post('/:id/github', async (context) => {

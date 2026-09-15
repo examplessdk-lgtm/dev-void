@@ -2,6 +2,8 @@
 
 The hosted Void platform lives in `platform/` inside the main Void monorepo. Public SDK packages live in the repository-level `packages/` directory. Both surfaces share one pnpm workspace, lockfile, Vite+ configuration, and commit history.
 
+The same core API, dispatch, proxy, and tail sources are also packaged into the public `@void/platform` runtime. `void platform install` deploys those bundles as an ownership-tracked company control plane without the hosted dashboard, GitHub App, or Container build subsystem. Interactive lifecycle administration uses Wrangler browser OAuth with keyring storage, separate from the installed control plane's scoped runtime token. Disable/enable state is explicit and durable, while lifecycle mutations require the remote installation checkpoint plus fresh per-Worker and R2 ownership proofs and hold a PostgreSQL advisory lock across hosts. The claimed PostgreSQL row stores the secret-free authoritative lifecycle manifest under that lock, fencing stale hosts while Workers KV remains the lost-local-state discovery mirror. Local recovery checkpoints are AES-256-GCM encrypted with an OS-keychain key; existing Worker secrets are preserved during ordinary upgrades and missing-Worker repair fails closed when its original secrets are unavailable. The checked-in `../platform/deployments/void-cloud.json` describes hosted Void Cloud using only public resource names and capability metadata; parity tests keep its historical defaults intact without storing account ids, zone ids, credentials, or other private deployment state.
+
 Paths in this file are relative to `platform/` unless they begin with `../`. For example, `packages/api` is the hosted control plane and `../packages/void` is the public SDK package. The bare `vp run deploy*` commands in this file are `platform/package.json` scripts and run from `platform/`; from the repository root, the equivalent is `vp run --filter @voidcloud/platform <script>`.
 
 ## Context Overview
@@ -68,12 +70,12 @@ Paths in this file are relative to `platform/` unless they begin with `../`. For
 | `vp run test:all`                           | Run formatting, linting, all builds, typechecks, and all SDK/platform tests |
 | `vp run deploy`                             | Deploy `api` → `proxy` → `tail` → `dispatch` → `dashboard`                  |
 | `vp run deploy:dashboard`                   | Deploy the dashboard only                                                   |
-| `vp run deploy:staging`                     | Deploy staging `api` → `proxy` → `tail` → `dispatch` → `dashboard`          |
+| `vp run deploy:staging`                     | Legacy/manual per-service staging deploy (CI uses `void platform upgrade`)  |
 | `vp run deploy:staging:dashboard`           | Deploy the staging dashboard only                                           |
 
 The `@voidcloud/platform` workspace package retains the dashboard-only `dev` and `build` scripts. Dashboard deploys run after the platform workers in the platform deploy pipeline.
 
-**Production deploys on push to `prod`; staging deploys on every push to `main`.** See [`meta/operations.md`](./meta/operations.md#github-actions) for the workflow triggers. Do not push `prod` or ask to deploy.
+**Production deploys on push to `prod`; staging deploys every passing `main` runtime through the public `void platform upgrade --runtime` lifecycle.** See [`meta/operations.md`](./meta/operations.md#github-actions) for the workflow triggers and protected-environment requirements. Do not push `prod` or ask to deploy.
 
 ## Local Development
 
@@ -100,6 +102,7 @@ Void is one repository with an explicit dependency boundary:
 
 - Repository-level `packages/` — public SDK, CLI, runtime helpers, and framework adapters.
 - `../packages/deploy-core` — target-neutral deployment manifests and wire contracts shared by the SDK and platform.
+- `../packages/platform` — public deployment/installation manifests plus integrity-checked core Worker artifacts used by the platform installer.
 - `platform/packages/` — private hosted control plane, traffic router, proxy services, log pipeline, dashboard, and UI.
 - Platform packages may depend on public/shared packages. Public SDK packages must not depend on `platform/`.
 

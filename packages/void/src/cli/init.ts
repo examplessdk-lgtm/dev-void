@@ -12,6 +12,7 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { intro, outro, log, confirm, isCancel, cancel, note, select, text } from '@clack/prompts';
+import type { PlatformDiscoveryDocument } from '@void/platform';
 import { parse, type ParseError } from 'jsonc-parser';
 import MagicString from 'magic-string';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'pathslash';
@@ -21,9 +22,16 @@ import { writeDrizzleConfig } from '../drizzle/config.ts';
 import { detectFramework, type DetectedFramework } from '../plugin-inference.ts';
 import { readProjectPaths } from '../project-paths.ts';
 import { detectAgents, getAgentById, getPackageDir, type AgentConfig } from './agents.ts';
+import {
+  cloudflareAuthEnvironment,
+  ensureCloudflareAuthentication,
+  type CloudflareAccount,
+} from './cloudflare-auth.ts';
 import { maybeSetupDeployProject } from './deploy-setup.ts';
 import { maybeScaffoldEnvTs } from './env-scaffold.ts';
 import { cliTitle } from './output.ts';
+import { discoverPlatform } from './platform-cmd.ts';
+import { savePlatformConnection } from './platform-registry.ts';
 import { formatProjectCommand, resolveWranglerArgv } from './preset.ts';
 import {
   readDeploymentPlatform,
@@ -1600,7 +1608,7 @@ function setupWranglerConfig(root: string, framework: DetectedFramework): void {
   if (result.modified) {
     log.success(
       hadConfig
-        ? 'Updated wrangler config with compatibility_date and nodejs_als'
+        ? 'Updated Cloudflare config with compatibility_date and nodejs_als'
         : 'Created wrangler.jsonc with compatibility_date and nodejs_als',
     );
   } else {
@@ -1844,7 +1852,7 @@ async function promptDeploymentPlatform(root: string): Promise<DeploymentPlatfor
       {
         value: 'void',
         label: current === 'void' ? 'Void [current]' : 'Void',
-        hint: 'Deploy to the managed Void Platform.',
+        hint: "Deploy to your company's Void Platform.",
       },
       {
         value: 'none',
@@ -1864,36 +1872,47 @@ async function promptDeploymentPlatform(root: string): Promise<DeploymentPlatfor
   return platform;
 }
 
-type CloudflareAccount = {
-  id: string;
-  name: string;
-};
-
-function parseCloudflareAccounts(stdout: string): Array<CloudflareAccount> | null {
-  let value: unknown;
+export async function ensureVoidPlatformConnection(
+  root: string,
+): Promise<PlatformDiscoveryDocument> {
+  let selectedApiUrl: string | null = null;
+  let promptedForPlatform = false;
   try {
-    value = JSON.parse(stdout.trim());
-  } catch {
-    return null;
-  }
-  const record = asRecord(value);
-  if (record?.loggedIn !== true || !Array.isArray(record.accounts)) {
-    return null;
-  }
-
-  const accounts: Array<CloudflareAccount> = [];
-  for (const account of record.accounts) {
-    const item = asRecord(account);
-    if (!item || typeof item.id !== 'string' || item.id.length === 0) {
-      continue;
+    const { getApiUrl, getSiteDomain } = await import('./auth.ts');
+    selectedApiUrl = getApiUrl(root);
+    getSiteDomain(root);
+  } catch (error) {
+    if (!(error instanceof Error) || !error.message.includes('No Void platform selected')) {
+      throw error;
     }
-    accounts.push({
-      id: item.id,
-      name:
-        typeof item.name === 'string' && item.name.length > 0 ? item.name : 'Cloudflare account',
-    });
+    // A genuinely new user must identify the company platform before login.
   }
-  return accounts;
+  if (!selectedApiUrl) {
+    promptedForPlatform = true;
+    const value = await text({
+      message: 'Void platform API URL:',
+      placeholder: 'https://platform.example.com',
+    });
+    if (isCancel(value) || typeof value === 'symbol') {
+      cancel('Setup cancelled.');
+      process.exit(0);
+    }
+    selectedApiUrl = String(value);
+  }
+  const discovery = await discoverPlatform(selectedApiUrl);
+  savePlatformConnection({
+    accountId: null,
+    apiUrl: discovery.apiUrl,
+    applicationDomain: discovery.applicationDomain,
+    displayName: discovery.displayName,
+    installationId: discovery.installationId,
+    kind: discovery.installationId ? 'installed' : 'connected',
+    proxyUrl: discovery.proxyUrl,
+  });
+  if (promptedForPlatform) {
+    log.success(`Connected to ${discovery.displayName} at ${discovery.apiUrl}.`);
+  }
+  return discovery;
 }
 
 function runInitWrangler(
@@ -1905,6 +1924,7 @@ function runInitWrangler(
   const result = spawnSync(command, [...prefix, ...args], {
     cwd: root,
     encoding: 'utf-8',
+    env: cloudflareAuthEnvironment(),
     stdio: capture ? ['ignore', 'pipe', 'pipe'] : 'inherit',
   });
   return {
@@ -1925,45 +1945,25 @@ async function setupCloudflareDeployment(root: string): Promise<void> {
     log.info(`${basename(initialWrite.configPath)} is ready for Cloudflare deployment`);
   }
 
-  const readAccounts = (): Array<CloudflareAccount> | null => {
-    const result = runInitWrangler(root, ['whoami', '--json', '-c', initialWrite.configPath], true);
-    return result.status === 0 ? parseCloudflareAccounts(result.stdout) : null;
-  };
-
-  let accounts = readAccounts();
-  if (!accounts) {
-    const shouldLogin = await confirm({
-      message: 'Log in to Cloudflare with Wrangler now?',
-      initialValue: true,
-    });
-    if (isCancel(shouldLogin)) {
-      cancel('Setup cancelled.');
-      process.exit(0);
-    }
-    if (!shouldLogin) {
-      note(
-        `Run \`wrangler login\`, then rerun \`void init\` to select an account.\n${basename(initialWrite.configPath)} is already created.`,
-        'Cloudflare deployment',
-      );
-      return;
-    }
-
-    const login = runInitWrangler(root, ['login'], false);
-    if (login.status !== 0) {
-      log.warn('Wrangler login did not complete. Run `wrangler login`, then rerun `void init`.');
-      return;
-    }
-    accounts = readAccounts();
-    if (!accounts) {
-      log.warn(
-        'Wrangler login completed, but the Cloudflare account could not be read. Rerun `void init`.',
-      );
-      return;
-    }
+  let accounts: ReadonlyArray<CloudflareAccount>;
+  try {
+    ({ accounts } = await ensureCloudflareAuthentication({
+      interactive: true,
+      requireAccounts: true,
+      runWrangler: (args, capture) => runInitWrangler(root, [...args], capture),
+      whoamiArgs: ['-c', initialWrite.configPath],
+    }));
+  } catch (error) {
+    log.warn(error instanceof Error ? error.message : String(error));
+    note(
+      `${basename(initialWrite.configPath)} is ready. Run \`void init\` again when you want to finish Cloudflare setup.`,
+      'Cloudflare deployment',
+    );
+    return;
   }
 
   if (accounts.length === 0) {
-    log.warn('Wrangler is authenticated but returned no Cloudflare accounts.');
+    log.warn('Cloudflare authentication returned no accounts.');
     return;
   }
 
@@ -2091,6 +2091,7 @@ export function getWorkflowYaml(
   pm: ProjectState['packageManager'],
   slug: string | null,
   platform: 'cloudflare' | 'void' = 'void',
+  platformApiUrl: string = WORKFLOW_DEFAULT_API_URL,
 ): string {
   const { setup, install, runner } = getWorkflowSetupSteps(root, pm);
   if (platform === 'cloudflare') {
@@ -2156,8 +2157,8 @@ permissions:
   contents: read
 
 env:
-  # Override with a VOID_API_URL repository variable to target staging.
-  VOID_API_URL: \${{ vars.VOID_API_URL || '${WORKFLOW_DEFAULT_API_URL}' }}
+  # Override only when intentionally targeting another platform deployment.
+  VOID_API_URL: \${{ vars.VOID_API_URL || '${platformApiUrl}' }}
   ${projectLine}
 
 jobs:
@@ -2176,6 +2177,7 @@ function setupGithubActions(
   root: string,
   state: ProjectState,
   platform: 'cloudflare' | 'void' = 'void',
+  platformApiUrl: string = WORKFLOW_DEFAULT_API_URL,
 ): void {
   const workflowDir = join(root, '.github', 'workflows');
   const workflowPath = join(workflowDir, 'void-deploy.yml');
@@ -2188,7 +2190,10 @@ function setupGithubActions(
   const slug = readProjectConfig(root)?.slug ?? null;
 
   mkdirSync(workflowDir, { recursive: true });
-  writeFileSync(workflowPath, getWorkflowYaml(root, state.packageManager, slug, platform));
+  writeFileSync(
+    workflowPath,
+    getWorkflowYaml(root, state.packageManager, slug, platform, platformApiUrl),
+  );
   log.success('Created .github/workflows/void-deploy.yml');
 
   if (platform === 'cloudflare') {
@@ -3804,9 +3809,13 @@ export async function runInitCommand(root: string, initArgs?: InitArgs): Promise
   const deploymentPlatform = !targeted
     ? await promptDeploymentPlatform(root)
     : readDeploymentPlatform(root);
+  let voidPlatformDiscovery: PlatformDiscoveryDocument | null = null;
 
   if (!targeted && deploymentPlatform === 'cloudflare') {
     await setupCloudflareDeployment(root);
+  }
+  if (!targeted && deploymentPlatform === 'void') {
+    voidPlatformDiscovery = await ensureVoidPlatformConnection(root);
   }
 
   // Step 9: GitHub Actions for either configured deployment target.
@@ -3824,13 +3833,37 @@ export async function runInitCommand(root: string, initArgs?: InitArgs): Promise
   // subpackage-membership signal directly so both targeted and
   // interactive modes agree.
   const githubStepSkipForSubpackage = isInsideWorkspaceSubpackage(root);
-  const shouldSetupGithub = targeted ? initArgs?.github === true : deploymentPlatform !== 'none';
+  let shouldSetupGithub = targeted ? initArgs?.github === true : deploymentPlatform !== 'none';
+  if (
+    shouldSetupGithub &&
+    !githubStepSkipForSubpackage &&
+    deploymentPlatform !== 'cloudflare' &&
+    deploymentPlatform !== 'none'
+  ) {
+    if (!voidPlatformDiscovery) {
+      const { getApiUrl } = await import('./auth.ts');
+      voidPlatformDiscovery = await discoverPlatform(getApiUrl(root));
+    }
+    if (!voidPlatformDiscovery.capabilities.githubActions) {
+      const message = `${voidPlatformDiscovery.displayName} does not support GitHub Actions deployments.`;
+      if (targeted) {
+        throw new Error(`init: ${message}`);
+      }
+      log.info(`${message} Skipping workflow setup.`);
+      shouldSetupGithub = false;
+    }
+  }
   if (shouldSetupGithub && !githubStepSkipForSubpackage) {
     // `setupGithubActions` writes `void-deploy.yml` (skipping with a warning if
     // it already exists). It does not touch any pre-existing `deploy.yml`.
     if (targeted) {
       // --github flag: run directly without prompting
-      setupGithubActions(root, state, deploymentPlatform === 'cloudflare' ? 'cloudflare' : 'void');
+      setupGithubActions(
+        root,
+        state,
+        deploymentPlatform === 'cloudflare' ? 'cloudflare' : 'void',
+        voidPlatformDiscovery?.apiUrl,
+      );
     } else {
       const setupGha = await confirm({
         message: 'Create .github/workflows/void-deploy.yml to deploy on pushes to main?',
@@ -3844,6 +3877,7 @@ export async function runInitCommand(root: string, initArgs?: InitArgs): Promise
           root,
           state,
           deploymentPlatform === 'cloudflare' ? 'cloudflare' : 'void',
+          voidPlatformDiscovery?.apiUrl,
         );
       }
     }

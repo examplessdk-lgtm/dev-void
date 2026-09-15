@@ -192,6 +192,33 @@ describe('Cloudflare version activation', () => {
     }
   });
 
+  it('can reconcile non-route triggers without publishing a stale route snapshot', async () => {
+    let applied: Record<string, unknown> | undefined;
+    await deployCloudflareVersionTriggers({
+      manageRoutes: false,
+      runWrangler: async (args) => {
+        const configIndex = args.indexOf('-c');
+        applied = JSON.parse(readFileSync(args[configIndex + 1]!, 'utf-8')) as Record<
+          string,
+          unknown
+        >;
+        return ok();
+      },
+      workerName: 'app',
+      triggerConfig: {
+        workers_dev: false,
+        preview_urls: false,
+        routes: [{ pattern: 'apps.example.com/*', zone_name: 'example.com' }],
+        crons: ['0 * * * *'],
+        queueConsumers: [],
+        workflows: [],
+      },
+    });
+
+    expect(applied).not.toHaveProperty('routes');
+    expect(applied).toMatchObject({ triggers: { crons: ['0 * * * *'] } });
+  });
+
   it('removes queue consumers omitted from the desired trigger snapshot', async () => {
     const calls: Array<Array<string>> = [];
     const result = await deployCloudflareVersionTriggers({
@@ -434,7 +461,7 @@ describe('Cloudflare version activation', () => {
     expect(result).toEqual({
       ok: true,
       versionId: NEXT,
-      previewUrl: 'https://ready.example.workers.dev',
+      previewUrl: 'https://my-worker.example.workers.dev',
       previousVersionId: CURRENT,
       workersDevSubdomain: 'example',
     });
@@ -1209,7 +1236,10 @@ describe('Cloudflare version activation', () => {
         allowFirstDeploymentBootstrap: true,
         fetch: async () => Response.json({ ready: true }),
       }),
-    ).resolves.toMatchObject({ ok: true, previewUrl: 'https://first.example.workers.dev' });
+    ).resolves.toMatchObject({
+      ok: true,
+      previewUrl: 'https://first-with-secret.example.workers.dev',
+    });
     expect(runWrangler.mock.calls.map(([args]) => args[0])).toEqual([
       'deployments',
       'versions',
@@ -1409,7 +1439,9 @@ describe('Cloudflare version activation', () => {
         stderr: 'Durable Object migrations require deploy. [code: 10211]',
         status: 1,
       },
-      bootstrap: ok(`Current Version ID: ${NEXT}\nhttps://first.example.workers.dev`),
+      bootstrap: ok(
+        `Current Version ID: ${NEXT}\nVersion Preview URL: https://2e209d56-first.example.workers.dev`,
+      ),
     });
     const fetcher = vi.fn(async () => Response.json({ ready: true }));
 

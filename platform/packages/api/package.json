@@ -46,6 +46,7 @@
   "devDependencies": {
     "@cloudflare/workers-types": "catalog:platform",
     "@electric-sql/pglite": "0.5.8",
+    "@napi-rs/keyring": "2.0.0",
     "@types/pg": "8.23.1",
     "drizzle-kit": "^0.31.10",
     "miniflare": "^4.20260421.0",

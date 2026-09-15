@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import { isVoidAccessGatedUrl } from '../shared/cf-access.ts';
 
 const probedHosts = new Set<string>();
 
@@ -23,7 +24,7 @@ export function ensureCloudflaredToken(apiUrl: string): void {
   if (process.env.CF_ACCESS_TOKEN) {
     return;
   }
-  if (!isGatedHost(apiUrl)) {
+  if (!isVoidAccessGatedUrl(apiUrl)) {
     return;
   }
   const host = new URL(apiUrl).hostname;
@@ -64,14 +65,5 @@ function runCloudflared(
     return out.length > 0 ? out : null;
   } catch {
     return null;
-  }
-}
-
-function isGatedHost(apiUrl: string): boolean {
-  try {
-    const host = new URL(apiUrl).hostname;
-    return host.endsWith('.staging.void.cloud') || host.endsWith('.staging.void.app');
-  } catch {
-    return false;
   }
 }

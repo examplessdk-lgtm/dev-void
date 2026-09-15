@@ -1,6 +1,14 @@
 name: Platform Smoke Test
 
 on:
+  workflow_call:
+    secrets:
+      CF_ACCESS_CLIENT_ID_STAGING:
+        required: true
+      CF_ACCESS_CLIENT_SECRET_STAGING:
+        required: true
+      VOID_TOKEN_STAGING:
+        required: true
   schedule:
     - cron: '0 0 * * *' # daily at 8am SGT (midnight UTC)
   workflow_dispatch:

@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test'
 import type { Env } from '../../src/env.ts';
 import app, { rebuildRequest } from '../../src/index.ts';
 import { isrCacheKey, unpackIsrValue } from '../../src/isr.ts';
+import { PLATFORM_DISABLED_KEY } from '../../src/platform-lifecycle.ts';
 
 // Mock caches.default (CF edge cache) with a Map-backed store.
 // Uses full URL as key — callers (isrEdgeCacheKey, hashed asset code) already normalize.
@@ -3752,25 +3753,138 @@ describe('queue relay', () => {
     routingRaw?: string | null;
     workerResponse?: Response;
     workerFetchImpl?: () => Promise<Response>;
+    installationId?: string;
+    trafficState?: string;
+    lifecycleValue?: string | null;
+    lifecycleError?: Error;
   }) {
     const workerFetch = vi.fn(
       async (_req: Request) =>
         options.workerFetchImpl?.() ?? options.workerResponse ?? new Response('ok'),
     );
+    const routingGet = vi.fn(async (key: string) => {
+      if (key === PLATFORM_DISABLED_KEY) {
+        if (options.lifecycleError) {
+          throw options.lifecycleError;
+        }
+        return options.lifecycleValue ?? null;
+      }
+      return options.routingRaw ?? null;
+    });
+    const dispatchGet = vi.fn(() => ({ fetch: workerFetch }));
     return {
       env: {
-        ROUTING: {
-          get: async () => options.routingRaw ?? null,
-        },
-        DISPATCH: {
-          get: () => ({ fetch: workerFetch }),
-        },
+        ROUTING: { get: routingGet },
+        DISPATCH: { get: dispatchGet },
         ISR_CACHE: { getWithMetadata: async () => ({ value: null, metadata: null }) },
         ANALYTICS: { writeDataPoint: () => {} },
+        ...(options.installationId ? { PLATFORM_INSTALLATION_ID: options.installationId } : {}),
+        ...(options.trafficState ? { PLATFORM_TRAFFIC_STATE: options.trafficState } : {}),
       } as unknown as Env,
+      dispatchGet,
+      routingGet,
       workerFetch,
     };
   }
+
+  it('retries without routing to an app while a self-hosted platform is disabled', async () => {
+    const routing = JSON.stringify({ workerName: 'user-app', queueName: 'emails' });
+    const batch = createMockBatch('test-queue', [{ id: 'm1', body: 'hello' }]);
+    const { env, dispatchGet, routingGet } = createQueueEnv({
+      routingRaw: routing,
+      installationId: 'installation-id',
+      lifecycleValue: 'disabled',
+    });
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      await app.queue(batch, env);
+
+      expect(routingGet).toHaveBeenCalledOnce();
+      expect(routingGet).toHaveBeenCalledWith(PLATFORM_DISABLED_KEY);
+      expect(dispatchGet).not.toHaveBeenCalled();
+      expect(batch.retryAll).toHaveBeenCalledWith({ delaySeconds: 300 });
+      expect(batch.ackAll).not.toHaveBeenCalled();
+    } finally {
+      warning.mockRestore();
+    }
+  });
+
+  it('retries staging batches without reading unavailable routing KV', async () => {
+    const batch = createMockBatch('test-queue', [{ id: 'm1', body: 'hello' }]);
+    const { env, dispatchGet, routingGet } = createQueueEnv({
+      installationId: 'installation-id',
+      trafficState: 'staging',
+    });
+    routingGet.mockRejectedValue(new Error('routing unavailable'));
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      await app.queue(batch, env);
+
+      expect(routingGet).not.toHaveBeenCalled();
+      expect(dispatchGet).not.toHaveBeenCalled();
+      expect(batch.retryAll).toHaveBeenCalledWith({ delaySeconds: 300 });
+    } finally {
+      warning.mockRestore();
+    }
+  });
+
+  it('relays batches after the self-hosted traffic gate is enabled', async () => {
+    const routing = JSON.stringify({ workerName: 'user-app', queueName: 'emails' });
+    const batch = createMockBatch('test-queue', [{ id: 'm1', body: 'hello' }]);
+    const { env, routingGet, workerFetch } = createQueueEnv({
+      routingRaw: routing,
+      installationId: 'installation-id',
+      lifecycleValue: null,
+      workerResponse: Response.json({ ok: true }),
+    });
+
+    await app.queue(batch, env);
+
+    expect(routingGet).toHaveBeenNthCalledWith(1, PLATFORM_DISABLED_KEY);
+    expect(routingGet).toHaveBeenNthCalledWith(2, 'queue:test-queue', { cacheTtl: 60 });
+    expect(workerFetch).toHaveBeenCalledOnce();
+    expect(batch.ackAll).toHaveBeenCalledOnce();
+  });
+
+  it('keeps hosted queue relay free of self-hosted lifecycle reads', async () => {
+    const routing = JSON.stringify({ workerName: 'user-app', queueName: 'emails' });
+    const batch = createMockBatch('test-queue', [{ id: 'm1', body: 'hello' }]);
+    const { env, routingGet, workerFetch } = createQueueEnv({
+      routingRaw: routing,
+      workerResponse: Response.json({ ok: true }),
+    });
+
+    await app.queue(batch, env);
+
+    expect(routingGet).toHaveBeenCalledOnce();
+    expect(routingGet).toHaveBeenCalledWith('queue:test-queue', { cacheTtl: 60 });
+    expect(workerFetch).toHaveBeenCalledOnce();
+  });
+
+  it('fails closed when the self-hosted traffic gate cannot be read', async () => {
+    const routing = JSON.stringify({ workerName: 'user-app', queueName: 'emails' });
+    const batch = createMockBatch('test-queue', [{ id: 'm1', body: 'hello' }]);
+    const { env, dispatchGet, routingGet } = createQueueEnv({
+      routingRaw: routing,
+      installationId: 'installation-id',
+      lifecycleError: new Error('routing unavailable'),
+    });
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    try {
+      await app.queue(batch, env);
+
+      expect(routingGet).toHaveBeenCalledOnce();
+      expect(routingGet).toHaveBeenCalledWith(PLATFORM_DISABLED_KEY);
+      expect(dispatchGet).not.toHaveBeenCalled();
+      expect(batch.retryAll).toHaveBeenCalledWith({ delaySeconds: 300 });
+      expect(error).toHaveBeenCalledWith(expect.stringContaining('traffic gate read failed'));
+    } finally {
+      error.mockRestore();
+    }
+  });
 
   it('retries all when routing entry is missing', async () => {
     const batch = createMockBatch('test-queue', [{ id: 'm1', body: 'hello' }]);

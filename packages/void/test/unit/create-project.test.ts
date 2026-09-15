@@ -23,6 +23,9 @@ vi.mock('@clack/prompts', () => ({
 
 function createClient() {
   return {
+    // `promptAndCreateProject` records the platform identity behind the client's
+    // API URL; the hosted Void Cloud URL resolves without any local connection.
+    apiUrl: 'https://api.void.cloud',
     createProject: vi.fn(),
   } as unknown as PlatformClient & {
     createProject: ReturnType<typeof vi.fn>;
@@ -85,6 +88,10 @@ describe('promptAndCreateProject', () => {
     expect(JSON.parse(readFileSync(join(root, '.void', 'project.json'), 'utf-8'))).toEqual({
       platform: 'void',
       ...config,
+      // The platform identity behind the client's API URL, recorded on every new link.
+      applicationDomain: 'void.app',
+      platformUrl: 'https://api.void.cloud',
+      proxyUrl: 'https://proxy.void.cloud',
     });
   });
 

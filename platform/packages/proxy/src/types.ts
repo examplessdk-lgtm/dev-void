@@ -54,6 +54,7 @@ export interface SandboxConcurrencyCounterRpc extends Rpc.DurableObjectBranded {
 
 export type Env = Readonly<{
   AI: AiBinding;
+  AI_GATEWAY_ID?: string;
   JWT_SECRET: string;
   ROUTING: KVNamespace;
 
@@ -61,6 +62,10 @@ export type Env = Readonly<{
   CF_API_TOKEN: string;
   API: Fetcher;
   DISPATCH: DispatchNamespace;
+  PLATFORM_CAPABILITIES?: string;
+  PLATFORM_HEALTH_PROBE_TOKEN?: string;
+  PLATFORM_INSTALLATION_ID?: string;
+  PLATFORM_TRAFFIC_STATE?: string;
   SANDBOX_CONCURRENCY_COUNTER: DurableObjectNamespace<SandboxConcurrencyCounterRpc>;
   SEND_EMAIL: SendEmailBinding;
 

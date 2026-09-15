@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vite-plus/test';
 import type { Env } from '../../src/env.ts';
 import app from '../../src/index.ts';
+import { PLATFORM_DISABLED_KEY } from '../../src/platform-lifecycle.ts';
 
 vi.stubGlobal('caches', {
   default: {
@@ -14,11 +15,22 @@ function createCtx(): ExecutionContext {
   return { waitUntil: vi.fn(), passThroughOnException: vi.fn() } as unknown as ExecutionContext;
 }
 
-function createEnv(): Env {
+function createEnv(
+  disabled = false,
+  selfHosted = false,
+  healthProbeToken?: string,
+  trafficState?: string,
+): Env {
   const workerFetch = vi.fn(async () => new Response('worker'));
   return {
     ROUTING: {
-      get: async () => JSON.stringify({ workerName: 'user-app', projectId: 'proj_1' }),
+      get: vi.fn(async (key: string) =>
+        key === PLATFORM_DISABLED_KEY
+          ? disabled
+            ? 'disabled'
+            : null
+          : JSON.stringify({ workerName: 'user-app', projectId: 'proj_1' }),
+      ),
     },
     DISPATCH: {
       get: vi.fn(() => ({ fetch: workerFetch })),
@@ -31,10 +43,78 @@ function createEnv(): Env {
     ANALYTICS: {
       writeDataPoint: vi.fn(),
     },
+    ...(selfHosted ? { PLATFORM_INSTALLATION_ID: 'installation-id' } : {}),
+    ...(healthProbeToken ? { PLATFORM_HEALTH_PROBE_TOKEN: healthProbeToken } : {}),
+    ...(trafficState ? { PLATFORM_TRAFFIC_STATE: trafficState } : {}),
   } as unknown as Env;
 }
 
 describe('internal route blocking', () => {
+  it('rejects every request while the platform is disabled', async () => {
+    const response = await app.fetch(
+      new Request('https://my-app.void.app/normal-path'),
+      createEnv(true, true),
+      createCtx(),
+    );
+    expect(response.status).toBe(503);
+    expect(response.headers.get('Cache-Control')).toBe('no-store');
+  });
+
+  it('fails closed in staging even when routing KV is missing the disabled value', async () => {
+    const response = await app.fetch(
+      new Request('https://my-app.void.app/normal-path'),
+      createEnv(false, true, undefined, 'staging'),
+      createCtx(),
+    );
+    expect(response.status).toBe(503);
+  });
+
+  it('admits installer health checks while public traffic is disabled', async () => {
+    const response = await app.fetch(
+      new Request('https://my-app.void.app/health', {
+        headers: { 'X-Void-Platform-Probe': 'probe-token' },
+      }),
+      createEnv(true, true, 'probe-token'),
+      createCtx(),
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true });
+  });
+
+  it('rejects the legacy public installer header while disabled', async () => {
+    const response = await app.fetch(
+      new Request('https://my-app.void.app/health', {
+        headers: { 'X-Health-Check': 'void-admin' },
+      }),
+      createEnv(true, true, 'probe-token'),
+      createCtx(),
+    );
+    expect(response.status).toBe(503);
+  });
+
+  it('preserves the legacy Void Cloud admin health probe', async () => {
+    const response = await app.fetch(
+      new Request('https://test.void.app/health', {
+        headers: { 'X-Health-Check': 'void-admin' },
+      }),
+      createEnv(),
+      createCtx(),
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true });
+  });
+
+  it('does not add a lifecycle routing read for hosted Void Cloud', async () => {
+    const env = createEnv();
+    const response = await app.fetch(
+      new Request('https://my-app.void.app/normal-path'),
+      env,
+      createCtx(),
+    );
+    expect(response.status).toBe(200);
+    expect(env.ROUTING.get).toHaveBeenCalledTimes(1);
+  });
+
   it('blocks POST /__void/migrate with 404', async () => {
     const response = await app.fetch(
       new Request('https://my-app.void.app/__void/migrate', { method: 'POST' }),

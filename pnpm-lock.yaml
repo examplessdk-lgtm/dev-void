@@ -415,6 +415,25 @@ importers:
         specifier: ^3.5.42
         version: 3.5.42(typescript@7.0.2)
 
+  packages/platform:
+    dependencies:
+      pathslash:
+        specifier: 'catalog:'
+        version: 0.1.0
+    devDependencies:
+      '@types/node':
+        specifier: 'catalog:'
+        version: 26.5.1
+      typescript:
+        specifier: 'catalog:'
+        version: 7.0.2
+      vite-plus:
+        specifier: 'catalog:'
+        version: 0.3.1(@types/node@26.5.1)(esbuild@0.27.7)(jiti@2.7.0)(sass@1.101.0)(svelte@5.57.0)(terser@5.51.2)(tsx@4.23.0)(typescript@7.0.2)(yaml@2.9.0)
+      wrangler:
+        specifier: 'catalog:'
+        version: 4.107.0(@cloudflare/workers-types@4.20260702.1)
+
   packages/react:
     dependencies:
       '@vitejs/plugin-react':
@@ -531,6 +550,9 @@ importers:
       '@void/md':
         specifier: workspace:*
         version: link:../md
+      '@void/platform':
+        specifier: workspace:*
+        version: link:../platform
       better-auth:
         specifier: ^1.7.3
         version: 1.7.3(@cloudflare/workers-types@4.20260702.1)(@sveltejs/kit@2.69.1(@sveltejs/vite-plugin-svelte@7.3.0(@voidzero-dev/vite-plus-core@0.3.1(@types/node@26.5.1)(esbuild@0.27.7)(jiti@2.7.0)(sass@1.99.0)(terser@5.51.2)(tsx@4.23.0)(typescript@7.0.2)(yaml@2.9.0))(svelte@5.56.4))(@voidzero-dev/vite-plus-core@0.3.1(@types/node@26.5.1)(esbuild@0.27.7)(jiti@2.7.0)(sass@1.99.0)(terser@5.51.2)(tsx@4.23.0)(typescript@7.0.2)(yaml@2.9.0))(svelte@5.56.4)(typescript@7.0.2))(@tanstack/react-start@1.168.27(a8f416b3041612515f17b85272c5757b))(better-sqlite3@13.0.3)(drizzle-kit@0.31.10)(drizzle-orm@0.45.2(@cloudflare/workers-types@4.20260702.1)(@electric-sql/pglite@0.5.8)(@types/better-sqlite3@9.6.0)(@types/pg@8.23.1)(better-sqlite3@13.0.3)(kysely@0.29.2)(mysql2@3.24.4(@types/node@26.5.1))(pg@8.23.0))(mysql2@3.24.4(@types/node@26.5.1))(pg@8.23.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(solid-js@1.9.14)(svelte@5.56.4)(vitest@4.1.11)(vue@3.5.39(typescript@7.0.2))
@@ -677,6 +699,9 @@ importers:
 
   platform:
     devDependencies:
+      '@void/platform':
+        specifier: workspace:*
+        version: link:../packages/platform
       playwright:
         specifier: ^1.63.0
         version: 1.63.0
@@ -738,6 +763,9 @@ importers:
       '@electric-sql/pglite':
         specifier: 0.5.8
         version: 0.5.8
+      '@napi-rs/keyring':
+        specifier: 2.0.0
+        version: 2.0.0
       '@types/pg':
         specifier: 8.23.1
         version: 8.23.1

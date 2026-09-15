@@ -4255,7 +4255,7 @@ async function provisionCloudflareResourcesLocked(
           `provision: Hyperdrive config ${JSON.stringify(name)} is not in "${configPath}" yet, and ` +
             `creating it needs a Cloudflare API token. wrangler exposes no machine-readable ` +
             `Hyperdrive list, so Void checks the account over the Cloudflare REST API, which a ` +
-            `"wrangler login" (OAuth) session cannot authenticate. Without that check a create ` +
+            `Cloudflare browser OAuth cannot authenticate. Without that check a create ` +
             `would silently duplicate an existing same-named config, so nothing was provisioned. ` +
             `Either (a) export CLOUDFLARE_API_TOKEN with Hyperdrive edit permission and rerun, or ` +
             `(b) create the Hyperdrive config yourself (dashboard / "wrangler hyperdrive create") ` +

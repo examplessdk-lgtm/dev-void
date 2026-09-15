@@ -1,5 +1,6 @@
 import { sql as drizzleSql } from 'drizzle-orm';
 import { Hono } from 'hono';
+import { capabilityMiddleware } from '../capabilities.ts';
 import { SITE_DOMAIN } from '../constants.ts';
 import {
   getProject,
@@ -48,6 +49,7 @@ function isAdoptablePostCreateOrphan(cfHostname: CustomHostnameInfo): boolean {
 }
 
 const app = new Hono<ApiEnv>()
+  .use('*', capabilityMiddleware('customDomains'))
 
   // Add a custom domain to a project
   .post('/:id/domains', async (context) => {

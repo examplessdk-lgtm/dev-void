@@ -17,7 +17,7 @@ When `output` is `"static"`:
 - All pages default to `prerender = true` and are written as HTML files to `dist/client/`. A standalone `vite build` renders them during the build; managed `void deploy` renders immediately afterward in its trusted parent process.
 - Use `export const prerender = false` in a page's `.server.ts` to opt out. That page will be server-rendered on request.
 - Dynamic pages without `getPrerenderPaths()` are implicitly not prerendered (the paths aren't known at build time).
-- The build output is self-contained and works for `wrangler deploy`, self-hosting, or `void deploy`.
+- The build output is self-contained and works for direct Cloudflare deployment, self-hosting, or `void deploy`.
 
 ## How it works
 

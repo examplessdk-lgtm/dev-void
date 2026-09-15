@@ -6,7 +6,7 @@ outline: deep
 
 Use typed Durable Objects when state must be strongly consistent and coordinated by a stable name, such as a shopping cart, collaborative room, rate limiter, or workflow.
 
-Void turns each module in `durable-objects/` into a SQLite-backed Cloudflare Durable Object. The filename determines the binding, worker class, and initial Cloudflare migration, so no Wrangler configuration is needed.
+Void turns each module in `durable-objects/` into a SQLite-backed Cloudflare Durable Object. The filename determines the binding, Worker class, and initial Cloudflare migration, so no manual Cloudflare configuration is needed.
 
 Void writes the inferred binding and migration entry to `wrangler.jsonc`. Commit that file: Cloudflare Durable Object migrations are append-only, and the persisted order ensures a newly added module is migrated after every class already deployed.
 
@@ -127,7 +127,7 @@ Do not delete or reorder generated Durable Object migrations in `wrangler.jsonc`
 
 ## Deployment support
 
-Typed durable state currently requires a native Void app targeting Cloudflare. It works in local development, manual Wrangler deploys, and `void deploy --platform cloudflare`. The direct deploy path supports it because the generated class is SQLite-backed.
+Typed durable state currently requires a native Void app targeting Cloudflare. It works in local development and with `void deploy --platform cloudflare`; the direct deploy path supports it because the generated class is SQLite-backed.
 
 Void-managed deployment does not yet carry custom Durable Object modules in its deploy manifest, so `void deploy --platform void` fails before building and points to the direct Cloudflare path. Meta-framework adapter mode and `node`, `bun`, or `deno` targets also fail with guidance when `durable-objects/` is present.
 

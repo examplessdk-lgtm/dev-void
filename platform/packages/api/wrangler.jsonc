@@ -156,7 +156,9 @@
   },
   "routes": [{ "pattern": "api.void.cloud", "custom_domain": true }],
   "vars": {
+    "CRON_FIRES_QUEUE_NAME": "void-cron-fires",
     "PLATFORM_ENV": "production",
+    "PROXY_URL": "https://proxy.void.cloud",
     "REQUESTS_DATASET": "void_requests",
     "TAIL_SERVICE_NAME": "void-tail",
     // Must match packages/proxy/wrangler.jsonc — the proxy validates senders against its own copy.
@@ -289,7 +291,9 @@
       ],
       "routes": [{ "pattern": "api.void.cloud", "custom_domain": true }],
       "vars": {
+        "CRON_FIRES_QUEUE_NAME": "void-cron-fires",
         "PLATFORM_ENV": "production",
+        "PROXY_URL": "https://proxy.void.cloud",
         "REQUESTS_DATASET": "void_requests",
         "TAIL_SERVICE_NAME": "void-tail",
         "EMAIL_SENDER_DOMAIN": "mail.void.cloud",
@@ -408,6 +412,7 @@
       "send_email": [{ "name": "EMAIL" }],
       "routes": [{ "pattern": "api.staging.void.cloud", "custom_domain": true }],
       "vars": {
+        "CRON_FIRES_QUEUE_NAME": "void-cron-fires-staging",
         "DISPATCH_NAMESPACE": "void-users-staging",
         "DISPATCH_WORKER_NAME": "void-dispatch-staging",
         "VOID_PROXY_SERVICE": "void-proxy-staging",
@@ -418,6 +423,7 @@
         "REQUESTS_DATASET": "void_requests_staging",
         "EMAIL_SENDER_DOMAIN": "mail.staging.void.cloud",
         "PLATFORM_ENV": "staging",
+        "PROXY_URL": "https://proxy.staging.void.cloud",
         "TAIL_SERVICE_NAME": "void-tail-staging",
         "R2_STATIC_ASSETS_BUCKET": "void-static-assets-overflow-staging",
         "USAGE_EVENTS_QUEUE_NAME": "void-usage-events-staging",

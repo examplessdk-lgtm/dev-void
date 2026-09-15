@@ -8,7 +8,7 @@ outline: deep
 
 Use this page as the exact reference for `void.json`. If you are still learning how the pieces fit together, start in the guide first and come back here when you need field-by-field details.
 
-Project-level configuration lives in a `void.json` file at the project root. Most fields are optional. Cloudflare-targeted apps must pin a Workers `compatibility_date` in `worker.compatibility_date` or in a supported wrangler fallback file (`wrangler.jsonc` or `wrangler.json`). If no date is configured, Void writes the latest known-good date to `void.json` so future runs stay explicit and stable.
+Project-level configuration lives in a `void.json` file at the project root. Most fields are optional. Cloudflare-targeted apps must pin a Workers `compatibility_date` in `worker.compatibility_date` or in a supported Cloudflare fallback file (`wrangler.jsonc` or `wrangler.json`). If no date is configured, Void writes the latest known-good date to `void.json` so future runs stay explicit and stable.
 
 ```json
 {
@@ -247,7 +247,7 @@ Enable and configure Cloudflare Sandboxes for Void apps. Importing from `void/sa
 | `instanceType`      | `string` | `lite` on Void deploy                |
 | `maxInstances`      | `number` | `20` on Void deploy                  |
 
-Sandbox support currently applies to Void apps on the Cloudflare target. Native deployment requires [Workers Paid](https://dash.cloudflare.com/?to=/:account/workers/plans) because Cloudflare Containers are unavailable on Workers Free. `void deploy --platform cloudflare` verifies Containers access before provisioning resources or building the app and explains how to fix a missing plan or API-token permission. Apps that do not import `void/sandbox` or configure `sandbox` emit no Container and perform no entitlement check. The default registry image is pinned to the installed `@cloudflare/sandbox` version, so local Wrangler and native Cloudflare deploys run the same container as Void Platform. If `sandbox.image` is a custom local Dockerfile path, set `sandbox.platformImage` to the pushed image that the platform should run.
+Sandbox support currently applies to Void apps on the Cloudflare target. Native deployment requires [Workers Paid](https://dash.cloudflare.com/?to=/:account/workers/plans) because Cloudflare Containers are unavailable on Workers Free. `void deploy --platform cloudflare` verifies Containers access before provisioning resources or building the app and explains how to fix a missing plan or API-token permission. Apps that do not import `void/sandbox` or configure `sandbox` emit no Container and perform no entitlement check. The default registry image is pinned to the installed `@cloudflare/sandbox` version, so local and native Cloudflare deploys run the same container as Void Platform. If `sandbox.image` is a custom local Dockerfile path, set `sandbox.platformImage` to the pushed image that the platform should run.
 
 ### `target`
 
@@ -270,7 +270,7 @@ Void-managed WebSocket route files (`*.ws.ts`) are Cloudflare-only because they 
 
 ### `worker`
 
-Curated Cloudflare Workers configuration. Cloudflare-targeted apps require an explicit `compatibility_date` here unless it is provided by a supported wrangler fallback file. If no date is configured, Void writes the latest known-good date here. Binding arrays such as `d1_databases`, `kv_namespaces`, and `r2_buckets` are not allowed here because Void manages bindings through inference and `inference.bindings`. If you need custom bindings with real IDs, use a `wrangler.json` and `wrangler deploy`.
+Curated Cloudflare Workers configuration. Cloudflare-targeted apps require an explicit `compatibility_date` here unless it is provided by a supported Cloudflare fallback file. If no date is configured, Void writes the latest known-good date here. Binding arrays such as `d1_databases`, `kv_namespaces`, and `r2_buckets` are not allowed here because Void manages bindings through inference and `inference.bindings`. If you need custom bindings with real IDs, add them to `wrangler.jsonc`; Void preserves them during deployment.
 
 | Field                 | Type       | Description                            |
 | --------------------- | ---------- | -------------------------------------- |
@@ -293,7 +293,7 @@ Curated Cloudflare Workers configuration. Cloudflare-targeted apps require an ex
 
 `worker.vars` values must be strings. They are merged into Worker bindings before `.env` files are loaded, so project `.env` values override `worker.vars` for local dev/build. Do not put secrets here; use `env.ts` plus `void secret put` for production secrets.
 
-`worker.limits.cpu_ms` caps Workers CPU time per request, in milliseconds. It must be an integer between 1 and 300000 (Cloudflare's hard maximum, 5 minutes). A deploy that requests more than your account plan's ceiling fails with an error naming both the requested value and the plan maximum. Only a rollback clamps: rolling back to a deployment whose configured limit now exceeds your plan applies the plan ceiling instead of failing. If your plan changes so that a previously valid value now exceeds the ceiling, deploys keep failing until you lower `cpu_ms` in `void.json`. On the self-hosted path (`void deploy --platform cloudflare`, or a bare `wrangler deploy` of the build output), the value is written into the generated `dist/ssr/wrangler.json` as `limits.cpu_ms` and enforced by Cloudflare directly. The Void plan ceiling does not apply there, but your Cloudflare account's own CPU-time allowance still does: the Workers Free plan caps CPU at 10 ms per request, and the Workers Paid plan allows up to 300000 ms. A value above what your Cloudflare account permits is constrained or rejected by Cloudflare, not by Void.
+`worker.limits.cpu_ms` caps Workers CPU time per request, in milliseconds. It must be an integer between 1 and 300000 (Cloudflare's hard maximum, 5 minutes). A deploy that requests more than your account plan's ceiling fails with an error naming both the requested value and the plan maximum. Only a rollback clamps: rolling back to a deployment whose configured limit now exceeds your plan applies the plan ceiling instead of failing. If your plan changes so that a previously valid value now exceeds the ceiling, deploys keep failing until you lower `cpu_ms` in `void.json`. On the direct Cloudflare path, the value is written into the generated `dist/ssr/wrangler.json` as `limits.cpu_ms` and enforced by Cloudflare directly. The Void plan ceiling does not apply there, but your Cloudflare account's own CPU-time allowance still does: the Workers Free plan caps CPU at 10 ms per request, and the Workers Paid plan allows up to 300000 ms. A value above what your Cloudflare account permits is constrained or rejected by Cloudflare, not by Void.
 
 ```json
 {
@@ -432,7 +432,7 @@ Set `"404-page"` when your assets come from a static site generator (VitePress, 
 
 This does **not** apply to SvelteKit, Nuxt, Analog, or Astro deploys: those pin `not_found_handling` to `"none"` because the framework's own worker owns unmatched HTML, and `void deploy` warns if you set `routing.notFound` anyway.
 
-TanStack Start, React Router, and vinext honor it on a managed `void deploy`, which resolves the asset config itself. Void writes no `assets` policy into their generated worker wrangler config (`dist/server` for TanStack Start and vinext App, `build/server` for React Router, `dist/ssr` for vinext Pages), so on a self-hosted `wrangler deploy` it applies only if that config declares a complete `assets` policy of its own — `binding`, `directory`, `not_found_handling`, and `run_worker_first`. Void leaves those fields untouched, so your own policy is honored; with none, Cloudflare's default applies. `vite build` warns when it is set. See [Static Assets](../guide/edge/static-assets.md#unmatched-requests) for the per-framework paths.
+TanStack Start, React Router, and vinext honor it on a managed `void deploy`, which resolves the asset config itself. Void writes no `assets` policy into their generated Worker config (`dist/server` for TanStack Start and vinext App, `build/server` for React Router, `dist/ssr` for vinext Pages). A custom config must declare a complete `assets` policy — `binding`, `directory`, `not_found_handling`, and `run_worker_first`. Void leaves those fields untouched, so your own policy is honored; with none, Cloudflare's default applies. `vite build` warns when it is set. See [Static Assets](../guide/edge/static-assets.md#unmatched-requests) for the per-framework paths.
 
 ### `inference`
 
@@ -456,7 +456,7 @@ Each binding accepts `true` (use default name), `false` (disable), or a string (
 | `ai`      | `AI`            | `Ai`          | Boolean only             |
 | `email`   | —               | —             | Boolean only             |
 
-Custom names are used in the deploy manifest, Wrangler config generation/sync, remote binding proxying, internal migrations, and generated runtime helpers such as `void/db`, `void/kv`, and `void/storage`.
+Custom names are used in deploy-manifest and Cloudflare-config generation, remote binding proxying, internal migrations, and generated runtime helpers such as `void/db`, `void/kv`, and `void/storage`.
 
 `email` is a feature switch rather than a Cloudflare binding, so it has no binding name or type. On the platform, outbound mail is sent through the Void proxy, which owns the `send_email` binding — none is written into your worker; on your own Cloudflare account, `void deploy --platform cloudflare` writes a `send_email` binding named `SEND_EMAIL` into `wrangler.jsonc` itself once email is set up (see [`email.from`](#email)). Set it to `true` to turn the [email integration](../guide/email.md) on — which registers the `void dev` inbox — even when no scanned file imports `void/email`, or `false` to turn it off.
 

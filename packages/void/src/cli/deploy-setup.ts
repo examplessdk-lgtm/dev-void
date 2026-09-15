@@ -3,7 +3,12 @@ import { getToken, isStagingMode } from './auth.ts';
 import { PlatformClient } from './client.ts';
 import { promptAndCreateProject } from './create-project.ts';
 import { promptForLoginToken } from './login.ts';
-import { readProjectConfig, writeProjectConfig, type ProjectConfig } from './project.ts';
+import {
+  attachSelectedPlatform,
+  readProjectConfig,
+  writeProjectConfig,
+  type ProjectConfig,
+} from './project.ts';
 import { promptProjectSelection } from './prompt.ts';
 
 async function ensureToken(root: string): Promise<string> {
@@ -51,7 +56,7 @@ export async function maybeSetupDeployProject(root: string): Promise<ProjectConf
   });
   if (result.action === 'select') {
     const config = { projectId: result.project.id, slug: result.project.slug };
-    writeProjectConfig(root, config);
+    writeProjectConfig(root, attachSelectedPlatform(root, config, client.apiUrl));
     log.success(`Linked project: ${config.slug}`);
     return config;
   }

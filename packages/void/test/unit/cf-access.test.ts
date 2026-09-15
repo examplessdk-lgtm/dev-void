@@ -3,16 +3,19 @@ import { cfAccessHeaders } from '../../src/shared/cf-access.ts';
 
 describe('cfAccessHeaders', () => {
   it('returns empty when nothing is set', () => {
-    expect(cfAccessHeaders({})).toEqual({});
+    expect(cfAccessHeaders({}, 'https://api.staging.void.cloud')).toEqual({});
   });
 
   it('prefers service-token pair over CF_ACCESS_TOKEN', () => {
     expect(
-      cfAccessHeaders({
-        CF_ACCESS_CLIENT_ID: 'id',
-        CF_ACCESS_CLIENT_SECRET: 'secret',
-        CF_ACCESS_TOKEN: 'jwt',
-      }),
+      cfAccessHeaders(
+        {
+          CF_ACCESS_CLIENT_ID: 'id',
+          CF_ACCESS_CLIENT_SECRET: 'secret',
+          CF_ACCESS_TOKEN: 'jwt',
+        },
+        'https://api.staging.void.cloud',
+      ),
     ).toEqual({
       'CF-Access-Client-Id': 'id',
       'CF-Access-Client-Secret': 'secret',
@@ -21,30 +24,52 @@ describe('cfAccessHeaders', () => {
 
   it('falls back to CF_ACCESS_TOKEN when service token is incomplete', () => {
     expect(
-      cfAccessHeaders({
-        CF_ACCESS_CLIENT_ID: 'id',
-        CF_ACCESS_TOKEN: 'jwt',
-      }),
+      cfAccessHeaders(
+        {
+          CF_ACCESS_CLIENT_ID: 'id',
+          CF_ACCESS_TOKEN: 'jwt',
+        },
+        'https://proxy.staging.void.cloud',
+      ),
     ).toEqual({ 'cf-access-token': 'jwt' });
   });
 
   it('ignores empty strings', () => {
     expect(
-      cfAccessHeaders({
-        CF_ACCESS_CLIENT_ID: '',
-        CF_ACCESS_CLIENT_SECRET: '',
-        CF_ACCESS_TOKEN: '',
-      }),
+      cfAccessHeaders(
+        {
+          CF_ACCESS_CLIENT_ID: '',
+          CF_ACCESS_CLIENT_SECRET: '',
+          CF_ACCESS_TOKEN: '',
+        },
+        'https://api.staging.void.cloud',
+      ),
     ).toEqual({});
   });
 
   it('ignores non-string values', () => {
     expect(
-      cfAccessHeaders({
-        CF_ACCESS_CLIENT_ID: 123,
-        CF_ACCESS_CLIENT_SECRET: { a: 1 },
-        CF_ACCESS_TOKEN: null,
-      }),
+      cfAccessHeaders(
+        {
+          CF_ACCESS_CLIENT_ID: 123,
+          CF_ACCESS_CLIENT_SECRET: { a: 1 },
+          CF_ACCESS_TOKEN: null,
+        },
+        'https://api.staging.void.cloud',
+      ),
+    ).toEqual({});
+  });
+
+  it('never sends shared Access credentials to a connected third-party origin', () => {
+    expect(
+      cfAccessHeaders(
+        {
+          CF_ACCESS_CLIENT_ID: 'staging-id',
+          CF_ACCESS_CLIENT_SECRET: 'staging-secret',
+          CF_ACCESS_TOKEN: 'staging-jwt',
+        },
+        'https://platform.example.test',
+      ),
     ).toEqual({});
   });
 });

@@ -1,0 +1,211 @@
+import { createPlatformResourceOwnershipMarker } from './installation.ts';
+import { createApplicationRoutes, type PlatformDeploymentManifest } from './manifest.ts';
+
+export type PlatformProvisionedResourceIds = Readonly<{
+  hyperdrive: string;
+  isrCacheKv: string;
+  legacyAssetsKv: string;
+  routingKv: string;
+  zone: string;
+}>;
+
+export type PlatformWorkerConfigSet = Readonly<
+  Record<'api' | 'dispatch' | 'proxy' | 'tail', Record<string, unknown>>
+>;
+
+export function createPlatformWorkerConfigs(input: {
+  accountId: string;
+  apiUrl: string;
+  deployment: PlatformDeploymentManifest;
+  healthProbeToken: string;
+  installationId: string;
+  ownershipNonce: string;
+  platformVersion: string;
+  publicEndpoints?: boolean;
+  proxyUrl: string;
+  resources: PlatformProvisionedResourceIds;
+  runtimeEntrypoints: Readonly<Record<'api' | 'dispatch' | 'proxy' | 'tail', string>>;
+  trafficState?: 'enabled' | 'staging';
+}): PlatformWorkerConfigSet {
+  const {
+    accountId,
+    apiUrl,
+    deployment,
+    healthProbeToken,
+    installationId,
+    ownershipNonce,
+    platformVersion,
+    proxyUrl,
+    resources,
+    runtimeEntrypoints,
+  } = input;
+  const publicEndpoints = input.publicEndpoints ?? true;
+  const trafficState = input.trafficState ?? 'enabled';
+  const names = deployment.resources;
+  const ownershipVars = (resourceKey: string, resourceName: string) => ({
+    PLATFORM_OWNERSHIP_MARKER: JSON.stringify(
+      createPlatformResourceOwnershipMarker({
+        accountId,
+        installationId,
+        ownershipNonce,
+        resourceId: resourceName,
+        resourceKey,
+        resourceKind: 'worker',
+        resourceName,
+      }),
+    ),
+  });
+  const common = {
+    account_id: accountId,
+    compatibility_date: '2026-02-24',
+    observability: { enabled: true },
+    preview_urls: publicEndpoints,
+    workers_dev: publicEndpoints,
+  };
+  const kv = [
+    { binding: 'ROUTING', id: resources.routingKv },
+    { binding: 'ISR_CACHE', id: resources.isrCacheKv },
+    { binding: 'STATIC_ASSETS', id: resources.legacyAssetsKv },
+  ];
+  const dispatchNamespace = [{ binding: 'DISPATCH', namespace: names.dispatchNamespace }];
+  const r2 = [{ binding: 'STATIC_ASSETS_R2', bucket_name: names.assetsBucket }];
+
+  const api: Record<string, unknown> = {
+    ...common,
+    name: names.apiWorker,
+    main: runtimeEntrypoints.api,
+    no_bundle: true,
+    compatibility_flags: ['nodejs_compat'],
+    placement: { mode: 'smart' },
+    hyperdrive: [{ binding: 'HYPERDRIVE', id: resources.hyperdrive }],
+    kv_namespaces: kv,
+    r2_buckets: r2,
+    dispatch_namespaces: dispatchNamespace,
+    durable_objects: {
+      bindings: [
+        { name: 'USAGE_COUNTER', class_name: 'UsageCounter' },
+        { name: 'CRON_SCHEDULER', class_name: 'CronScheduler' },
+        { name: 'ERROR_ALERT_MONITOR', class_name: 'ErrorAlertMonitor' },
+        { name: 'SANDBOX_CONCURRENCY_COUNTER', class_name: 'SandboxConcurrencyCounter' },
+      ],
+    },
+    migrations: [
+      { tag: 'v1', new_classes: ['UsageCounter'] },
+      { tag: 'v2', new_classes: ['CronScheduler'] },
+      { tag: 'v3', new_classes: ['ErrorAlertMonitor'] },
+      { tag: 'v4', new_classes: ['SandboxConcurrencyCounter'] },
+    ],
+    queues: {
+      producers: [{ binding: 'CRON_FIRES_QUEUE', queue: names.cronQueue }],
+      consumers: [
+        { queue: names.usageQueue, max_batch_size: 100, max_batch_timeout: 5 },
+        { queue: names.cronQueue, max_batch_size: 50, max_batch_timeout: 1, max_retries: 3 },
+      ],
+    },
+    triggers: { crons: ['0 * * * *'] },
+    vars: {
+      AUTH_REDIRECT_URI: `${apiUrl}/auth/callback`,
+      AI_GATEWAY_ID: names.aiGateway,
+      CRON_FIRES_QUEUE_NAME: names.cronQueue,
+      DISPATCH_NAMESPACE: names.dispatchNamespace,
+      DISPATCH_WORKER_NAME: names.dispatchWorker,
+      LOGS_DATASET: names.logsDataset,
+      PLATFORM_CAPABILITIES: JSON.stringify(deployment.capabilities),
+      PLATFORM_DISPLAY_NAME: deployment.displayName,
+      PLATFORM_ENV: 'production',
+      PLATFORM_HEALTH_PROBE_TOKEN: healthProbeToken,
+      PLATFORM_INSTALLATION_ID: installationId,
+      PLATFORM_TRAFFIC_STATE: trafficState,
+      ...ownershipVars('api-worker', names.apiWorker),
+      PLATFORM_VERSION: platformVersion,
+      PROXY_URL: proxyUrl,
+      R2_STATIC_ASSETS_BUCKET: names.assetsBucket,
+      REQUESTS_DATASET: names.requestsDataset,
+      SITE_DOMAIN: deployment.application.baseDomain,
+      TAIL_SERVICE_NAME: names.tailWorker,
+      USAGE_EVENTS_QUEUE_NAME: names.usageQueue,
+      VOID_PROXY_SERVICE: names.proxyWorker,
+    },
+  };
+  if (publicEndpoints && deployment.controlPlane.apiHostname) {
+    api.routes = [{ pattern: deployment.controlPlane.apiHostname, custom_domain: true }];
+  }
+
+  const proxy: Record<string, unknown> = {
+    ...common,
+    name: names.proxyWorker,
+    main: runtimeEntrypoints.proxy,
+    no_bundle: true,
+    compatibility_flags: ['nodejs_compat'],
+    ai: { binding: 'AI' },
+    kv_namespaces: [{ binding: 'ROUTING', id: resources.routingKv }],
+    services: [{ binding: 'API', service: names.apiWorker }],
+    dispatch_namespaces: dispatchNamespace,
+    durable_objects: {
+      bindings: [
+        {
+          name: 'SANDBOX_CONCURRENCY_COUNTER',
+          class_name: 'SandboxConcurrencyCounter',
+          script_name: names.apiWorker,
+        },
+      ],
+    },
+    vars: {
+      AI_GATEWAY_ID: names.aiGateway,
+      PLATFORM_CAPABILITIES: JSON.stringify(deployment.capabilities),
+      PLATFORM_HEALTH_PROBE_TOKEN: healthProbeToken,
+      PLATFORM_INSTALLATION_ID: installationId,
+      PLATFORM_TRAFFIC_STATE: trafficState,
+      ...ownershipVars('proxy-worker', names.proxyWorker),
+    },
+  };
+  if (publicEndpoints && deployment.controlPlane.proxyHostname) {
+    proxy.routes = [{ pattern: deployment.controlPlane.proxyHostname, custom_domain: true }];
+  }
+
+  return {
+    api,
+    proxy,
+    tail: {
+      ...common,
+      name: names.tailWorker,
+      main: runtimeEntrypoints.tail,
+      no_bundle: true,
+      analytics_engine_datasets: [{ binding: 'ANALYTICS', dataset: names.logsDataset }],
+      vars: {
+        PLATFORM_DISPATCH_WORKER_NAME: names.dispatchWorker,
+        ...ownershipVars('tail-worker', names.tailWorker),
+      },
+    },
+    dispatch: {
+      ...common,
+      name: names.dispatchWorker,
+      main: runtimeEntrypoints.dispatch,
+      no_bundle: true,
+      ...(publicEndpoints
+        ? {
+            routes: createApplicationRoutes(deployment.application).map((route) => ({
+              pattern: route.pattern,
+              zone_name: route.zoneName,
+            })),
+          }
+        : {}),
+      dispatch_namespaces: dispatchNamespace,
+      kv_namespaces: kv,
+      r2_buckets: r2,
+      analytics_engine_datasets: [
+        { binding: 'ANALYTICS', dataset: names.requestsDataset },
+        { binding: 'LOGS', dataset: names.logsDataset },
+      ],
+      queues: { producers: [{ binding: 'USAGE_QUEUE', queue: names.usageQueue }] },
+      tail_consumers: [{ service: names.tailWorker }],
+      vars: {
+        BASE_HOSTNAME: deployment.application.baseDomain,
+        PLATFORM_HEALTH_PROBE_TOKEN: healthProbeToken,
+        PLATFORM_INSTALLATION_ID: installationId,
+        PLATFORM_TRAFFIC_STATE: trafficState,
+        ...ownershipVars('dispatch-worker', names.dispatchWorker),
+      },
+    },
+  };
+}

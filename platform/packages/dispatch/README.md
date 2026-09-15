@@ -34,9 +34,12 @@ Two rule lists exist so dispatch never has to reason about per-rule phase flags 
 The dispatch worker also exports `queue()`:
 
 1. Cloudflare delivers a `MessageBatch`
-2. `queue:{queueId}` is resolved from `ROUTING` KV
-3. The batch is serialized and forwarded to the active user worker at `/__void/queue`
-4. Success acks the whole batch; failure retries the batch
+2. Self-hosted dispatch checks the installation traffic gate before any app lookup; staging, disabled, and unreadable gate states retry the batch after five minutes
+3. `queue:{queueId}` is resolved from `ROUTING` KV
+4. The batch is serialized and forwarded to the active user worker at `/__void/queue`
+5. Success acks the whole batch; failure retries the batch
+
+Lifecycle retries preserve the batch only within the Queue consumer's configured retry count and Cloudflare's retention and dead-letter policy. A long disable can exhaust those limits; disabling the platform does not provide indefinite message storage.
 
 ## Source Layout
 

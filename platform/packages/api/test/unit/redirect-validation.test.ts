@@ -24,6 +24,19 @@ describe('isAllowedRedirect', () => {
     ).toBe(true);
   });
 
+  it('does not inherit the hosted dashboard in a self-hosted installation', () => {
+    expect(
+      isAllowedRedirect('https://dash.void.cloud/auth/callback', undefined, 'example-a1b2c3d4'),
+    ).toBe(false);
+    expect(
+      isAllowedRedirect(
+        'https://company-dashboard.example.com/auth/callback',
+        'https://company-dashboard.example.com',
+        'example-a1b2c3d4',
+      ),
+    ).toBe(true);
+  });
+
   // Subdomain attack vectors
   it('rejects subdomain prefix attack', () => {
     expect(isAllowedRedirect('https://dash.void.cloud.attacker.com/steal')).toBe(false);

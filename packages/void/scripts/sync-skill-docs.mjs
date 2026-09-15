@@ -15,7 +15,7 @@ if (!existsSync(sourceDir)) {
 rmSync(targetDir, { recursive: true, force: true });
 mkdirSync(targetDir, { recursive: true });
 
-for (const file of globSync('**/*.md', { cwd: sourceDir })) {
+for (const file of globSync('**/*.md', { cwd: sourceDir, ignore: ['node_modules/**'] })) {
   const dest = resolve(targetDir, file);
   mkdirSync(dirname(dest), { recursive: true });
   cpSync(resolve(sourceDir, file), dest);

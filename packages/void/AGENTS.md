@@ -2,6 +2,8 @@
 
 Core Vite plugin — routing, inference, migrations, CLI.
 
+User-facing CLI output and documentation describe Cloudflare operations through Void. Never ask users to install, authenticate, or invoke Wrangler directly. Keep `wrangler.jsonc` / `wrangler.json` and `WRANGLER_*` names only where users must recognize an actual file or environment variable; implementation details may remain in source comments, tests, and debug logs.
+
 ## Architecture
 
 The main export `voidPlugin()` returns an array of Vite plugins. For the default Cloudflare target, this includes the `cloudflare()` plugin. For non-CF targets (`node`, `bun`, `deno`), it replaces `cloudflare()` with `nodeTargetPlugin()`:
@@ -199,7 +201,7 @@ Void ships with first-class support for coding agents (Claude Code, Cursor, Code
 - **`docs/`** — all 23 docs markdown files are included in the npm package at `node_modules/void/docs/`.
 - **`void init --agents`** — runs all agent setup steps from a single detection/selection pass: injects Void instructions with versioned markers and symlinks skills from the `void` package.
 - **`void init` in an empty directory** — scaffolds a Pages-mode starter, then lets you pick D1, PostgreSQL, MySQL, or Static Pages before running the same setup flow.
-- **Cloudflare onboarding in `void init`** — Cloudflare is the default deployment choice. Init stores it in `.void/project.json`, creates or comment-preservingly augments `wrangler.jsonc`, checks `wrangler whoami --json`, offers `wrangler login`, and writes the sole or selected account as `account_id`. Void and Skip never run the Wrangler onboarding. A deploy-time `--platform` override is one-off and never changes either saved preference.
+- **Cloudflare onboarding in `void init`** — Cloudflare is the default deployment choice. Init stores it in `.void/project.json`, creates or comment-preservingly augments `wrangler.jsonc`, checks the Cloudflare session through bundled tooling, opens secure browser OAuth when needed, and writes the sole or selected account as `account_id`. Void and Skip never run the Wrangler onboarding. A deploy-time `--platform` override is one-off and never changes either saved preference.
 
 Agent instructions use versioned markers (`<!--injected-by-void-v0.0.1-->` / `<!--/injected-by-void-->`) for safe update-in-place across version upgrades.
 

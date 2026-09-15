@@ -155,7 +155,7 @@ describe('Class A routing.notFound self-host warning', () => {
 
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain('tanstack-start');
-    expect(warnings[0]).toContain('vite build && wrangler deploy');
+    expect(warnings[0]).toContain('direct Cloudflare deployment');
     expect(warnings[0]).toContain('void deploy');
   });
 

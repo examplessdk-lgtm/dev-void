@@ -21,7 +21,7 @@ import {
   type AssetRoutingPolicy,
 } from './asset-routing.ts';
 import { findVoidAuthConfig } from './auth/config.ts';
-import { getToken, isStagingMode } from './cli/auth.ts';
+import { getApiUrl, getProxyUrl, getToken, isStagingMode } from './cli/auth.ts';
 import { SEND_EMAIL_BINDING } from './cli/email-cloudflare.ts';
 import { readProjectConfig } from './cli/project.ts';
 import {
@@ -96,7 +96,6 @@ import {
   resolveRemoteMode,
   stripInternalEnvKeys,
 } from './shared/env.ts';
-import { DEFAULT_PROXY_URL, STAGING_PROXY_URL } from './shared/proxy.ts';
 import { validateSsrEntry } from './ssr/entry.ts';
 
 /**
@@ -587,9 +586,15 @@ function createWranglerCompatPersistPlugin(
 }
 
 type CredentialStatus =
-  | { status: 'ok'; token: string; projectId: string; staging?: boolean }
+  | {
+      status: 'ok';
+      token: string;
+      projectId: string;
+      proxyUrl: string;
+      staging?: boolean;
+    }
   | { status: 'no-token' }
-  | { status: 'no-project'; token: string; staging?: boolean };
+  | { status: 'no-project'; apiUrl: string; token: string; staging?: boolean };
 
 /**
  * Read Void auth credentials for local dev AI proxy access.
@@ -602,17 +607,21 @@ function readVoidDevCredentials(root: string): CredentialStatus {
     return { status: 'no-token' };
   }
   const staging = isStagingMode(root) || undefined;
+  const apiUrl = getApiUrl(root);
 
   const project = readProjectConfig(root);
   if (!project) {
-    return { status: 'no-project', token, staging };
+    return { status: 'no-project', apiUrl, token, staging };
   }
 
-  return { status: 'ok', token, projectId: project.projectId, staging };
+  return {
+    status: 'ok',
+    token,
+    projectId: project.projectId,
+    proxyUrl: getProxyUrl(root),
+    staging,
+  };
 }
-
-const DEFAULT_API_URL = 'https://api.void.cloud';
-const STAGING_API_URL = 'https://api.staging.void.cloud';
 
 /**
  * Interactive AI setup prompt shown during dev server startup when the user
@@ -622,15 +631,14 @@ const STAGING_API_URL = 'https://api.staging.void.cloud';
 async function runAiSetupPrompt(
   root: string,
   token: string,
-  staging: boolean | undefined,
+  apiUrl: string,
   server: import('vite').ViteDevServer,
 ): Promise<void> {
   const { select, text, isCancel, log } = await import('@clack/prompts');
   const { PlatformClient } = await import('./cli/client.ts');
-  const { writeProjectConfig } = await import('./cli/project.ts');
+  const { attachSelectedPlatform, writeProjectConfig } = await import('./cli/project.ts');
   const { inferDefaultSlug } = await import('./cli/resolve-project.ts');
 
-  const apiUrl = staging ? STAGING_API_URL : DEFAULT_API_URL;
   const client = new PlatformClient(token, apiUrl);
 
   let projects: Array<import('./cli/client.ts').ProjectResponse>;
@@ -704,7 +712,7 @@ async function runAiSetupPrompt(
     slug = project.slug;
   }
 
-  writeProjectConfig(root, { projectId, slug });
+  writeProjectConfig(root, attachSelectedPlatform(root, { projectId, slug }, client.apiUrl));
   log.success(`Linked to ${pc.blue(slug)}`);
 
   // Restart the dev server so mergeBindings picks up fresh credentials
@@ -956,7 +964,7 @@ export function voidPlugin(options?: {
     const syncFrameworkCompat = (compat: ReturnType<typeof readWranglerCompat>) => {
       const syncedDate = ensureWranglerCompatibilityDate(root, compat.compatibilityDate);
       if (syncedDate) {
-        voidLog('Synced compatibility_date to wrangler config');
+        voidLog('Synced compatibility_date to Cloudflare config');
       }
     };
 
@@ -972,7 +980,7 @@ export function voidPlugin(options?: {
         }
         const synced = ensureWranglerNodejsAlsFlag(root);
         if (synced) {
-          voidLog('Synced nodejs_als to wrangler config');
+          voidLog('Synced nodejs_als to Cloudflare config');
         }
       },
       buildStart() {
@@ -1598,6 +1606,7 @@ export function voidPlugin(options?: {
         const vars = (result.vars as Record<string, string>) ?? {};
         vars.__VOID_TOKEN = credentials.token;
         vars.__VOID_PROJECT_ID = credentials.projectId;
+        vars.__VOID_PROXY_URL = credentials.proxyUrl;
         if (credentials.staging) {
           vars.__VOID_STAGING = '1';
         }
@@ -1616,7 +1625,7 @@ export function voidPlugin(options?: {
       const credentials = readVoidDevCredentials(root);
       if (credentials.status === 'ok') {
         const vars = (result.vars as Record<string, string>) ?? {};
-        vars.__VOID_PROXY_URL = credentials.staging ? STAGING_PROXY_URL : DEFAULT_PROXY_URL;
+        vars.__VOID_PROXY_URL = credentials.proxyUrl;
         vars.__VOID_TOKEN = credentials.token;
         vars.__VOID_PROJECT_ID = credentials.projectId;
         vars.__VOID_REMOTE = '1';
@@ -1850,7 +1859,7 @@ export function voidPlugin(options?: {
             // Fire-and-forget interactive setup
             afterReady(() => {
               console.log();
-              runAiSetupPrompt(root, credentials.token, credentials.staging, server);
+              runAiSetupPrompt(root, credentials.token, credentials.apiUrl, server);
             });
           } else {
             afterReady(() => {
@@ -1984,8 +1993,8 @@ export function voidPlugin(options?: {
           notFoundIgnoredWarned = true;
           voidWarn(
             `Void generates no asset routing policy for a ${framework} build, so "routing.notFound" in ` +
-              'void.json is not written to the built worker config. On a self-hosted `vite build && ' +
-              'wrangler deploy` it takes effect only if your own wrangler config declares a complete ' +
+              'void.json is not written to the built worker config. During a self-hosted build and ' +
+              'direct Cloudflare deployment, it takes effect only if your own Cloudflare config declares a complete ' +
               '`assets` policy (`binding`, `directory`, `not_found_handling`, `run_worker_first`); ' +
               "otherwise Cloudflare's default applies. Managed `void deploy` supplies the policy for you.",
           );

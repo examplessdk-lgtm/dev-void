@@ -25,6 +25,7 @@
     "test": "vp test run"
   },
   "devDependencies": {
+    "@void/platform": "workspace:*",
     "playwright": "^1.63.0",
     "typescript": "catalog:",
     "vite-plus": "catalog:",

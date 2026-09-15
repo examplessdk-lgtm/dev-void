@@ -32,6 +32,7 @@ export type ApiEnv = Env & {
     CF_API_TOKEN: string;
     CF_ACCOUNT_ID: string;
     CF_ZONE_ID: string;
+    AI_GATEWAY_ID?: string;
     JWT_SECRET: string;
     GITHUB_CLIENT_ID: string;
     GITHUB_CLIENT_SECRET: string;
@@ -129,9 +130,18 @@ export type ApiEnv = Env & {
      * why the DO can't make the call directly.
      */
     CRON_FIRES_QUEUE: Queue<import('./cron-fires-queue.ts').CronFireMessage>;
+    CRON_FIRES_QUEUE_NAME?: string;
     LOGS_DATASET?: string;
     REQUESTS_DATASET?: string;
     PLATFORM_ENV?: string;
+    PLATFORM_DISPLAY_NAME?: string;
+    PLATFORM_BOOTSTRAP_GITHUB_ID?: string;
+    PLATFORM_HEALTH_PROBE_TOKEN?: string;
+    PLATFORM_INSTALLATION_ID?: string;
+    PLATFORM_TRAFFIC_STATE?: string;
+    PLATFORM_VERSION?: string;
+    PLATFORM_CAPABILITIES?: string;
+    PROXY_URL?: string;
     PROJECT_SECRET_KEYS_JSON: string;
     PROJECT_SECRET_ACTIVE_KEY_VERSION: string;
     /**

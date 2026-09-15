@@ -73,7 +73,7 @@ const DO_POST_TIMEOUT_MS = 10000;
 // build-manager test asserts against the workspace SDK package — this file is
 // plain JS copied into the container image, so it can't import that constant
 // and the test mirrors the literal instead.
-export const DEFAULT_VOID_CLI_VERSION = '0.10.13';
+export const DEFAULT_VOID_CLI_VERSION = '0.10.14';
 
 // --- source-download bounds --------------------------------------------------
 //

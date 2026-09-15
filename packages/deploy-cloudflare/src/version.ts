@@ -148,6 +148,7 @@ export async function deployCloudflareVersionTriggers(options: {
   previousTriggerConfig?: CloudflareTriggerConfig;
   /** Wrangler skips an empty Custom Domain set, so the caller may publish it directly. */
   publishEmptyCustomDomains?: () => Promise<CloudflareCommandResult>;
+  manageRoutes?: boolean;
 }): Promise<CloudflareCommandResult> {
   const source = options.configPath ? parseRootWranglerConfig(options.configPath) : {};
   // `triggers deploy` still validates unrelated upload configuration. Build a trigger-only
@@ -161,6 +162,7 @@ export async function deployCloudflareVersionTriggers(options: {
       options.triggerConfig,
       options.previousTriggerConfig,
     ),
+    options.manageRoutes,
   );
   const directory = mkdtempSync(join(tmpdir(), 'void-version-triggers-'));
   const configPath = join(directory, 'wrangler.json');
@@ -186,6 +188,7 @@ export async function deployCloudflareVersionTriggers(options: {
       }
     }
     if (
+      options.manageRoutes !== false &&
       hasCustomDomains(options.previousTriggerConfig?.routes) &&
       !hasCustomDomains(options.triggerConfig.routes)
     ) {
@@ -248,6 +251,7 @@ export async function stabilizeCloudflareVersionTriggers(options: {
   previousTriggerConfig?: CloudflareTriggerConfig;
   knownTriggerConfigs?: Readonly<Record<string, CloudflareTriggerConfig>>;
   publishEmptyCustomDomains?: () => Promise<CloudflareCommandResult>;
+  manageRoutes?: boolean;
   attempts?: number;
 }): Promise<CloudflareTriggerStabilization> {
   const commonArgs = [...(options.configPath ? ['-c', options.configPath] : []), '--env='];
@@ -289,6 +293,7 @@ export async function stabilizeCloudflareVersionTriggers(options: {
       triggerConfig: activeTriggerConfig,
       previousTriggerConfig: cleanupBaseline,
       publishEmptyCustomDomains: options.publishEmptyCustomDomains,
+      manageRoutes: options.manageRoutes,
     });
     if (!isCleanCommandExit(triggers)) {
       return {
@@ -535,6 +540,7 @@ function parseTriggerConfig(value: unknown): CloudflareTriggerConfig | null {
 function triggerWranglerConfig(
   base: Record<string, unknown>,
   triggerConfig: CloudflareTriggerConfig,
+  manageRoutes = true,
 ): Record<string, unknown> {
   const triggers = isRecord(base.triggers) ? { ...base.triggers } : {};
   const queues = isRecord(base.queues) ? { ...base.queues } : {};
@@ -542,13 +548,15 @@ function triggerWranglerConfig(
   queues.consumers = [...triggerConfig.queueConsumers];
   const config: Record<string, unknown> = {
     ...base,
-    routes: [...triggerConfig.routes],
     triggers,
     queues,
     workflows: [...triggerConfig.workflows],
     workers_dev: triggerConfig.workers_dev,
     preview_urls: triggerConfig.preview_urls,
   };
+  if (manageRoutes) {
+    config.routes = [...triggerConfig.routes];
+  }
   // Only a snapshot that carried `addresses` may reach Wrangler's Email Routing plan: an
   // absent key skips the plan, which is what a version deployed without email must do.
   // That holds in both directions of a rollback — the snapshot being LEFT lends nothing
@@ -1014,7 +1022,7 @@ export async function activateCloudflareVersion(options: {
   return {
     ok: true,
     versionId,
-    previewUrl: readinessUrl,
+    previewUrl: publishedCloudflareUrl(options.workerName, desiredTriggerConfig, readinessUrl),
     previousVersionId: previous.versionId,
     ...workersDevSubdomainResult(readinessUrl),
   };
@@ -1141,12 +1149,12 @@ async function bootstrapFirstDeployment(
         ? readCloudflareTriggerConfig(options.configPath)
         : triggerConfigFromWrangler({});
   const reportedUrl = output.match(PREVIEW_URL_RE)?.[1] ?? output.match(WORKERS_DEV_URL_RE)?.[1];
-  const previewUrl =
+  const reportedOrConfiguredUrl =
     reportedUrl ??
     (desiredTriggerConfig.workers_dev
       ? workersDevReadinessUrl(options.workerName, options.workersDevSubdomain)
       : customRouteReadinessUrl(desiredTriggerConfig.routes));
-  if (!versionId || !previewUrl) {
+  if (!versionId || !reportedOrConfiguredUrl) {
     return {
       ok: false,
       reason: 'bootstrap-output-invalid',
@@ -1154,6 +1162,11 @@ async function bootstrapFirstDeployment(
       ...(versionId ? { versionId } : {}),
     };
   }
+  const previewUrl = publishedCloudflareUrl(
+    options.workerName,
+    desiredTriggerConfig,
+    reportedOrConfiguredUrl,
+  );
   const ready = await probeReadiness(
     `${previewUrl.replace(/\/$/, '')}/__void/ready`,
     options.workerName,
@@ -1395,6 +1408,20 @@ function workersDevReadinessUrl(workerName: string, value: string | undefined): 
     return undefined;
   }
   return `https://${workerName}.${subdomain}.workers.dev`;
+}
+
+/** Resolve the stable URL that owns production traffic after triggers are published. */
+function publishedCloudflareUrl(
+  workerName: string,
+  triggerConfig: CloudflareTriggerConfig,
+  fallbackUrl: string,
+): string {
+  if (triggerConfig.workers_dev) {
+    return (
+      workersDevReadinessUrl(workerName, extractWorkersDevSubdomain(fallbackUrl)) ?? fallbackUrl
+    );
+  }
+  return customRouteReadinessUrl(triggerConfig.routes) ?? fallbackUrl;
 }
 
 /** Normalize an account workers.dev subdomain supplied by config or the environment. */

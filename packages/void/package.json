@@ -1,6 +1,6 @@
 {
   "name": "void",
-  "version": "0.10.13",
+  "version": "0.10.14",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/voidzero-dev/void.git",
@@ -364,6 +364,7 @@
     "@void/deploy-core": "workspace:*",
     "@void/edge": "workspace:*",
     "@void/isr": "workspace:*",
+    "@void/platform": "workspace:*",
     "better-auth": "^1.7.3",
     "better-sqlite3": "^13.0.3",
     "blake3-jit": "^1.1.0",

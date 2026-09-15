@@ -82,14 +82,16 @@ export function resolveCloudflareOperationContext(
 ): CloudflareOperationContext {
   const configPath = discoverRootWranglerConfig(root);
   if (!existsSync(configPath)) {
-    throw new Error(`No Wrangler config found at "${configPath}". Run \`void init\` first.`);
+    throw new Error(`No Cloudflare config found at "${configPath}". Run \`void init\` first.`);
   }
   assertNoOperationConfigOverride(root);
   assertNoTransportRedirectInProjectDotenv(root);
   const config = parseRootWranglerConfig(configPath);
   const workerName = readWranglerTopLevelString(config, 'name');
   if (!workerName) {
-    throw new Error(`Wrangler config "${configPath}" has no worker name. Run \`void init\` first.`);
+    throw new Error(
+      `Cloudflare config "${configPath}" has no worker name. Run \`void init\` first.`,
+    );
   }
   const accountId =
     readWranglerTopLevelString(config, 'account_id') ??
@@ -775,6 +777,9 @@ function createCloudflareOperationRunner(
   return (args, options) => {
     const env = provisionEnv({ accountId, apiBaseUrl });
     deleteEnvVarCaseAware(env, 'WRANGLER_CI_OVERRIDE_NAME');
+    if (!options.capture) {
+      env.WRANGLER_LOG = 'none';
+    }
     const result = spawnSync(command, [...prefix, ...args], {
       cwd: root,
       env,

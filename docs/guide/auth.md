@@ -220,9 +220,9 @@ When auth is active, Void configures Better Auth with these conventions:
 
 Auth sessions live in the same database system as the rest of the app. `AUTH_KV` is no longer used.
 
-Both Void Cloud and `void deploy --platform cloudflare` automatically ensure a persistent `BETTER_AUTH_SECRET` for auth-enabled apps. An existing secret is preserved; when it is missing, deploy generates it once and stores it through the target's encrypted secret storage. On Cloudflare, the value is sent to `wrangler secret put` over stdin and inherited by later Worker versions.
+Both Void Cloud and `void deploy --platform cloudflare` automatically ensure a persistent `BETTER_AUTH_SECRET` for auth-enabled apps. An existing secret is preserved; when it is missing, deploy generates it once and stores it through Cloudflare's encrypted secret API, then inherits it into later Worker versions.
 
-Localhost dev uses a built-in fallback secret automatically. If you deploy without the Void CLI, including bare `vite build && wrangler deploy`, set and inherit `BETTER_AUTH_SECRET` yourself.
+Localhost development uses a built-in fallback secret automatically. Production deployment through Void manages the secret lifecycle for you.
 
 ## Customization
 

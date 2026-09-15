@@ -460,11 +460,11 @@ Callers:
 
 ### Deploy Scripts
 
-`platform/package.json` orchestrates deployment. Run these from `platform/`, or from the repository root as `vp run --filter @voidcloud/platform <script>`. A fresh checkout needs the SDK build first (`vp run build` from the repository root; from `platform/` that name is the dashboard build) because the dashboard bundles the SDK from `dist/`.
+`platform/package.json` retains the hosted production and manual per-service deployment scripts. Run these from `platform/`, or from the repository root as `vp run --filter @voidcloud/platform <script>`. A fresh checkout needs the SDK build first (`vp run build` from the repository root; from `platform/` that name is the dashboard build) because the dashboard bundles the SDK from `dist/`.
 
 ```
 vp run deploy           # Production: same with --env production
-vp run deploy:staging   # Staging: same with --env staging
+vp run deploy:staging   # Legacy/manual staging path; CI does not use this
 ```
 
 Broken down:
@@ -478,16 +478,15 @@ deploy
 ├── deploy:dispatch     → vp run --filter @voidcloud/dispatch deploy --env production
 └── deploy:dashboard    → vp run --filter @voidcloud/dashboard deploy --env production
 
-deploy:staging
-├── deploy:staging:api       → vp run --filter @voidcloud/api migrate:staging  (DATABASE_URL=$STAGING_DATABASE_URL drizzle-kit migrate)
-│                            → vp run --filter @voidcloud/api deploy --env staging
-├── deploy:staging:proxy     → vp run --filter @voidcloud/proxy deploy --env staging
-├── deploy:staging:tail      → vp run --filter @voidcloud/tail deploy --env staging
-├── deploy:staging:dispatch  → vp run --filter @voidcloud/dispatch deploy --env staging
-└── deploy:staging:dashboard → vp run --filter @voidcloud/dashboard deploy --env staging
+main staging CI
+├── vp run build with VOID_PLATFORM_SOURCE_REVISION=$GITHUB_SHA
+├── void platform discover --account $CLOUDFLARE_ACCOUNT_ID
+├── void platform upgrade [id] --runtime packages/platform/dist/runtime --plan
+├── void platform upgrade [id] --runtime packages/platform/dist/runtime --yes
+└── reusable platform smoke test (deploy and exercise kitchen-sink)
 ```
 
-Deploy order matters: api runs PostgreSQL migrations via drizzle-kit before deploying (ensures schema is ready for new code), then proxy deploys after the api worker has published any Durable Object classes that proxy binds to, then tail and dispatch deploy, and dashboard deploys only after the platform worker deploys succeed. Package-level deploy scripts reject missing env flags; production must be invoked with `--env production` and staging with `--env staging`.
+Deploy order matters. The hosted production script runs PostgreSQL migrations before the API Worker, then proxy, tail, dispatch, and dashboard. The staging lifecycle instead validates its source runtime, applies forward-only migrations under the installation's PostgreSQL advisory lock, stages immutable Worker versions, probes API/discovery/proxy/dispatch, commits traffic, and records the source revision and runtime digest. A failed cutover restores the previous Worker versions; a newer workflow run never cancels an active deployment.
 
 ### API rollout notes for DB-backed project secrets
 
@@ -527,12 +526,18 @@ Four platform workflows live in the repository-level `.github/workflows/` direct
 **`platform-deploy-staging.yml`** — push to `main` that matches the `platform-ci.yml` path filter, or manual dispatch (staging, environment: `Staging`):
 
 1. Runs `platform-ci.yml` first
-2. `vp run build`
-3. `vp run --filter @voidcloud/platform deploy:staging` (same order, all to staging)
+2. Builds `@void/platform` with `VOID_PLATFORM_SOURCE_REVISION` set to the exact `main` commit
+3. Discovers the ownership-tracked staging installation into a fresh runner-local registry
+4. Previews and applies `void platform upgrade --runtime packages/platform/dist/runtime`
+5. Calls the reusable kitchen-sink smoke test after the lifecycle health checks pass
 
 A `concurrency` group (`platform-deploy-staging`, `cancel-in-progress: false`) keeps one deploy running and at most one pending, so a burst of pushes never interrupts a deploy between the API migration and the workers.
 
-**`platform-smoke-test.yml`** — manual dispatch and a daily cron (`0 0 * * *`, 8am SGT), environment: `Staging`: builds the SDK, deploys `playground/kitchen-sink` to staging with `void deploy`, resets its state, and runs `platform/scripts/kitchen-sink-smoke-test.ts` against `https://kitchen-sink.staging.void.app`.
+The protected `Staging` environment must supply `CF_API_TOKEN`, `CF_ACCOUNT_ID`, and `STAGING_DATABASE_URL`. Ordinary upgrades preserve existing Worker secrets. Keep `STAGING_GITHUB_CLIENT_ID`, `STAGING_GITHUB_CLIENT_SECRET`, `STAGING_ADMIN_GITHUB_LOGIN` (and preferably `STAGING_ADMIN_GITHUB_ID`), `STAGING_R2_ACCESS_KEY_ID`, `STAGING_R2_SECRET_ACCESS_KEY`, `STAGING_JWT_SECRET`, `STAGING_PROJECT_SECRET_KEY`, and the platform runtime token available for a repair that must recreate a missing Worker. Access-gated staging also supplies `CF_ACCESS_CLIENT_ID_STAGING` and `CF_ACCESS_CLIENT_SECRET_STAGING`. The repository/environment variable `VOID_PLATFORM_STAGING_INSTALLATION` is required and pins every CI run to the intended installer-owned installation. Each job generates a masked ephemeral `VOID_PLATFORM_RECOVERY_KEY`; no plaintext platform recovery file or persistent Actions key is created.
+
+Bootstrap staging once with `void platform install --runtime packages/platform/dist/runtime` from a trusted workstation, using browser OAuth for the human lifecycle operation and a separate `VOID_PLATFORM_RUNTIME_CLOUDFLARE_API_TOKEN` for the installed control plane. `STAGING_DATABASE_URL` must point to a new, dedicated, empty database: the installer deliberately refuses to claim the populated database behind the legacy Wrangler deployment. This is a deliberate one-time cutover because the public installer must create and checkpoint its own ownership-suffixed resources; CI never creates a replacement installation when discovery fails. After the first successful install, set `VOID_PLATFORM_STAGING_INSTALLATION` to its generated installation id, sign in to the new platform, and replace `VOID_TOKEN_STAGING` with a token for its kitchen-sink smoke-test project. The workflow then reconstructs non-secret state from Cloudflare on every run and never persists `~/.void` in Actions.
+
+**`platform-smoke-test.yml`** — reusable from the staging deploy, manually dispatchable, and scheduled daily (`0 0 * * *`, 8am SGT), environment: `Staging`: builds the SDK, deploys `playground/kitchen-sink` to staging with `void deploy`, resets its state, and runs `platform/scripts/kitchen-sink-smoke-test.ts` against `https://kitchen-sink.staging.void.app`.
 
 ### Health Checks
 

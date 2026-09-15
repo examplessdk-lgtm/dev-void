@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test'
 import {
   detectProjectState,
   ensureVoidDependency,
+  ensureVoidPlatformConnection,
   extractPnpmWorkspacePackages,
   generateStarterMigration,
   getWorkflowYaml,
@@ -21,6 +22,7 @@ import {
   isVoidResolvableFrom,
   runInitCommand,
 } from '../../src/cli/init.ts';
+import { savePlatformConnection } from '../../src/cli/platform-registry.ts';
 import { buildDrizzleKitSpawnEnv } from '../../src/cli/yarn-pnp.ts';
 
 const mockSpawnSync = vi.fn();
@@ -31,11 +33,14 @@ const mockNote = vi.fn();
 const mockOutro = vi.fn();
 const mockLogWarn = vi.fn();
 const mockGetToken = vi.fn();
+const mockGetApiUrl = vi.fn();
 const mockRunLogin = vi.fn();
 const mockSaveToken = vi.fn();
 const mockIsStagingMode = vi.fn();
 const mockListProjects = vi.fn();
 const mockCreateProject = vi.fn();
+const mockDiscoverPlatform = vi.fn();
+let platformRegistryDirectory: string;
 
 describe('GitHub Actions deployment workflows', () => {
   it('scaffolds the direct Cloudflare deployment path with a scoped API token', () => {
@@ -55,9 +60,18 @@ describe('GitHub Actions deployment workflows', () => {
   });
 
   it('retains the GitHub OIDC workflow for managed deployments', () => {
-    const yaml = getWorkflowYaml('/project', 'npm', 'my-app', 'void');
+    const yaml = getWorkflowYaml(
+      '/project',
+      'npm',
+      'my-app',
+      'void',
+      'https://api.company.example',
+    );
     expect(yaml).toContain('name: Deploy to Void');
     expect(yaml).toContain('id-token: write');
+    expect(yaml).toContain(
+      "VOID_API_URL: ${{ vars.VOID_API_URL || 'https://api.company.example' }}",
+    );
     expect(yaml).toContain('npx void deploy --platform void --project "$VOID_PROJECT"');
   });
 });
@@ -93,11 +107,16 @@ vi.mock('@clack/prompts', () => ({
 }));
 
 vi.mock('../../src/cli/auth', () => ({
+  getApiUrl: (...args: Array<unknown>) => mockGetApiUrl(...args),
   getToken: (...args: Array<unknown>) => mockGetToken(...args),
   runLogin: (...args: Array<unknown>) => mockRunLogin(...args),
   saveToken: (...args: Array<unknown>) => mockSaveToken(...args),
   isStagingMode: (...args: Array<unknown>) => mockIsStagingMode(...args),
   getSiteDomain: () => 'void.app',
+}));
+
+vi.mock('../../src/cli/platform-cmd', () => ({
+  discoverPlatform: (...args: Array<unknown>) => mockDiscoverPlatform(...args),
 }));
 
 vi.mock('../../src/cli/client', () => ({
@@ -107,6 +126,15 @@ vi.mock('../../src/cli/client', () => ({
     readonly body = undefined;
   },
   PlatformClient: class {
+    readonly apiUrl: string;
+
+    constructor(_token: string, options?: string | { apiUrl?: string }) {
+      this.apiUrl =
+        (typeof options === 'string' ? options : options?.apiUrl) ??
+        mockGetApiUrl() ??
+        'https://api.example.com';
+    }
+
     listProjects(...args: Array<unknown>) {
       return mockListProjects(...args);
     }
@@ -222,6 +250,8 @@ function wranglerWhoamiResult(accounts: Array<{ id: string; name: string }>): {
 }
 
 afterEach(() => {
+  delete process.env.VOID_PLATFORM_REGISTRY_DIR;
+  rmSync(platformRegistryDirectory, { recursive: true, force: true });
   mockSpawnSync.mockReset();
   mockSelect.mockReset();
   mockConfirm.mockReset();
@@ -230,14 +260,27 @@ afterEach(() => {
   mockOutro.mockReset();
   mockLogWarn.mockReset();
   mockGetToken.mockReset();
+  mockGetApiUrl.mockReset();
   mockRunLogin.mockReset();
   mockSaveToken.mockReset();
   mockIsStagingMode.mockReset();
   mockListProjects.mockReset();
   mockCreateProject.mockReset();
+  mockDiscoverPlatform.mockReset();
 });
 
 beforeEach(() => {
+  platformRegistryDirectory = mkdtempSync(join(tmpdir(), 'void-init-platform-registry-'));
+  process.env.VOID_PLATFORM_REGISTRY_DIR = platformRegistryDirectory;
+  savePlatformConnection({
+    accountId: null,
+    apiUrl: 'https://api.void.cloud',
+    applicationDomain: 'void.app',
+    displayName: 'Void Cloud',
+    installationId: null,
+    kind: 'connected',
+    proxyUrl: 'https://proxy.void.cloud',
+  });
   mockSelect.mockImplementation((options: { message?: string }) =>
     options.message === 'Where should this project deploy?' ? 'void' : undefined,
   );
@@ -256,10 +299,108 @@ beforeEach(() => {
     return { status: 0, stdout: '', stderr: '' };
   });
   mockGetToken.mockReturnValue(null);
+  mockGetApiUrl.mockReturnValue('https://api.void.cloud');
   mockRunLogin.mockResolvedValue('token_123');
   mockIsStagingMode.mockReturnValue(false);
   mockListProjects.mockResolvedValue([]);
   mockCreateProject.mockResolvedValue({ id: 'proj_123', slug: 'my-app' });
+  mockDiscoverPlatform.mockResolvedValue({
+    apiUrl: 'https://api.void.cloud',
+    applicationDomain: 'void.app',
+    authenticationProviders: ['github', 'google'],
+    capabilities: {
+      ai: true,
+      customDomains: true,
+      email: true,
+      githubActions: true,
+      githubOAuth: true,
+      googleOAuth: true,
+      managedBuilds: true,
+      sandbox: true,
+    },
+    displayName: 'Void Cloud',
+    installationId: null,
+    platformVersion: '0.10.14',
+    proxyUrl: 'https://proxy.void.cloud',
+    schemaVersion: 1,
+  });
+});
+
+describe('Void platform deployment setup', () => {
+  it('connects a genuinely new user before attempting platform login', async () => {
+    rmSync(platformRegistryDirectory, { force: true, recursive: true });
+    mockGetApiUrl.mockImplementation(() => {
+      throw new Error('No Void platform selected');
+    });
+    mockText.mockResolvedValue('https://platform.example.test');
+    mockDiscoverPlatform.mockResolvedValueOnce({
+      apiUrl: 'https://platform.example.test',
+      applicationDomain: 'apps.example.test',
+      authenticationProviders: ['github'],
+      capabilities: {
+        ai: true,
+        customDomains: true,
+        email: false,
+        githubActions: false,
+        githubOAuth: true,
+        googleOAuth: false,
+        managedBuilds: false,
+        sandbox: false,
+      },
+      displayName: 'Company Void',
+      installationId: 'company-a1b2c3d4',
+      platformVersion: '0.10.14',
+      proxyUrl: 'https://proxy.example.test',
+      schemaVersion: 1,
+    });
+
+    await ensureVoidPlatformConnection('/project');
+
+    expect(mockDiscoverPlatform).toHaveBeenCalledWith('https://platform.example.test');
+    const { getActivePlatformConnection } = await import('../../src/cli/platform-registry.ts');
+    expect(getActivePlatformConnection()).toMatchObject({
+      apiUrl: 'https://platform.example.test',
+      applicationDomain: 'apps.example.test',
+      proxyUrl: 'https://proxy.example.test',
+    });
+  });
+
+  it('refuses to scaffold unsupported platform GitHub Actions', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-init-no-github-actions-'));
+    try {
+      writeFileSync(
+        join(root, 'package.json'),
+        JSON.stringify({ name: 'existing-app', private: true }, null, 2) + '\n',
+      );
+      mockDiscoverPlatform.mockResolvedValueOnce({
+        apiUrl: 'https://platform.example.test',
+        applicationDomain: 'apps.example.test',
+        authenticationProviders: ['github'],
+        capabilities: {
+          ai: true,
+          customDomains: true,
+          email: false,
+          githubActions: false,
+          githubOAuth: true,
+          googleOAuth: false,
+          managedBuilds: false,
+          sandbox: false,
+        },
+        displayName: 'Company Void',
+        installationId: 'company-a1b2c3d4',
+        platformVersion: '0.10.14',
+        proxyUrl: 'https://proxy.example.test',
+        schemaVersion: 1,
+      });
+
+      await expect(
+        runInitCommand(root, { agents: false, github: true, tsconfig: false }),
+      ).rejects.toThrow('Company Void does not support GitHub Actions deployments');
+      expect(existsSync(join(root, '.github', 'workflows', 'void-deploy.yml'))).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('extractPnpmWorkspacePackages', () => {
@@ -1704,7 +1845,10 @@ describe('isScaffoldableEmptyProject', () => {
 
       // The link was written...
       expect(JSON.parse(readFileSync(join(root, '.void', 'project.json'), 'utf-8'))).toEqual({
+        applicationDomain: 'void.app',
         platform: 'void',
+        platformUrl: 'https://api.void.cloud',
+        proxyUrl: 'https://proxy.void.cloud',
         projectId: 'proj_789',
         slug: 'linked-app',
       });
@@ -2523,7 +2667,10 @@ export default config;
       expect(mockListProjects).toHaveBeenCalledOnce();
       expect(mockCreateProject).toHaveBeenCalledWith('my-live-app');
       expect(JSON.parse(readFileSync(join(root, '.void', 'project.json'), 'utf-8'))).toEqual({
+        applicationDomain: 'void.app',
         platform: 'void',
+        platformUrl: 'https://api.void.cloud',
+        proxyUrl: 'https://proxy.void.cloud',
         projectId: 'proj_live',
         slug: 'my-live-app',
       });
@@ -2601,7 +2748,10 @@ export default config;
       expect(mockSaveToken).not.toHaveBeenCalled();
       expect(mockCreateProject).not.toHaveBeenCalled();
       expect(JSON.parse(readFileSync(join(root, '.void', 'project.json'), 'utf-8'))).toEqual({
+        applicationDomain: 'void.app',
         platform: 'void',
+        platformUrl: 'https://api.void.cloud',
+        proxyUrl: 'https://proxy.void.cloud',
         projectId: 'proj_456',
         slug: 'existing-app',
       });
@@ -2610,7 +2760,7 @@ export default config;
     }
   });
 
-  it('defaults deployment setup to Cloudflare and offers its GitHub workflow', async () => {
+  it('defaults deployment setup to Cloudflare, opens login, and offers its GitHub workflow', async () => {
     const root = mkdtempSync(join(tmpdir(), 'void-init-'));
     try {
       writeExistingAstroProject(root);
@@ -2621,9 +2771,6 @@ export default config;
           : { status: 0, stdout: '', stderr: '' },
       );
       mockConfirm.mockImplementation((options: { message?: string }) => {
-        if (options.message === 'Log in to Cloudflare with Wrangler now?') {
-          return false;
-        }
         if (
           options.message ===
           'Create .github/workflows/void-deploy.yml to deploy on pushes to main?'
@@ -2651,13 +2798,13 @@ export default config;
         expect.arrayContaining(['whoami', '--json', '-c', join(root, 'wrangler.jsonc')]),
         expect.objectContaining({ cwd: root, stdio: ['ignore', 'pipe', 'pipe'] }),
       );
-      expect(mockSpawnSync).not.toHaveBeenCalledWith(
+      expect(mockSpawnSync).toHaveBeenCalledWith(
         process.execPath,
         expect.arrayContaining(['login']),
-        expect.anything(),
+        expect.objectContaining({ cwd: root, stdio: ['ignore', 'pipe', 'pipe'] }),
       );
       expect(mockNote).toHaveBeenCalledWith(
-        expect.stringContaining('Run `wrangler login`'),
+        expect.stringContaining('Run `void init` again'),
         'Cloudflare deployment',
       );
       expect(mockGetToken).not.toHaveBeenCalled();
@@ -2693,8 +2840,10 @@ export default config;
       expect(wrangler).toContain('"EXAMPLE": "yes"');
       expect(wrangler).toContain('"compatibility_date":');
       expect(wrangler).toContain('"account_id": "account-1"');
-      expect(mockConfirm).not.toHaveBeenCalledWith(
-        expect.objectContaining({ message: 'Log in to Cloudflare with Wrangler now?' }),
+      expect(mockSpawnSync).not.toHaveBeenCalledWith(
+        process.execPath,
+        expect.arrayContaining(['login']),
+        expect.anything(),
       );
       expect(mockSelect).not.toHaveBeenCalledWith(
         expect.objectContaining({ message: 'Choose a Cloudflare account:' }),
@@ -2704,14 +2853,11 @@ export default config;
     }
   });
 
-  it('logs in with Wrangler, rereads accounts, and stores the selected account', async () => {
+  it('opens Cloudflare browser login, rereads accounts, and stores the selected account', async () => {
     const root = mkdtempSync(join(tmpdir(), 'void-init-'));
     try {
       writeExistingAstroProject(root);
       selectCloudflareDuringInit('account-2');
-      mockConfirm.mockImplementation((options: { message?: string }) =>
-        options.message === 'Log in to Cloudflare with Wrangler now?' ? true : undefined,
-      );
       let whoamiCalls = 0;
       mockSpawnSync.mockImplementation((_command, args) => {
         if (Array.isArray(args) && args.includes('whoami')) {
@@ -2732,7 +2878,7 @@ export default config;
       expect(mockSpawnSync).toHaveBeenCalledWith(
         process.execPath,
         expect.arrayContaining(['login']),
-        expect.objectContaining({ cwd: root, stdio: 'inherit' }),
+        expect.objectContaining({ cwd: root, stdio: ['ignore', 'pipe', 'pipe'] }),
       );
       const accountPrompt = mockSelect.mock.calls.find(
         ([options]) => options.message === 'Choose a Cloudflare account:',
@@ -2788,14 +2934,11 @@ export default config;
     }
   });
 
-  it('continues without an account when Wrangler login fails', async () => {
+  it('continues without an account when Cloudflare sign-in fails', async () => {
     const root = mkdtempSync(join(tmpdir(), 'void-init-'));
     try {
       writeExistingAstroProject(root);
       selectCloudflareDuringInit();
-      mockConfirm.mockImplementation((options: { message?: string }) =>
-        options.message === 'Log in to Cloudflare with Wrangler now?' ? true : undefined,
-      );
       mockSpawnSync.mockImplementation((_command, args) =>
         Array.isArray(args) && args.includes('login')
           ? { status: 1, stdout: '', stderr: 'Login failed' }
@@ -2816,7 +2959,7 @@ export default config;
         ),
       ).toHaveLength(1);
       expect(mockLogWarn).toHaveBeenCalledWith(
-        'Wrangler login did not complete. Run `wrangler login`, then rerun `void init`.',
+        'Cloudflare browser sign-in did not complete. Run `void cloudflare login` to try again.',
       );
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -2852,9 +2995,6 @@ export default config;
           ([, args]) => Array.isArray(args) && (args.includes('whoami') || args.includes('login')),
         ),
       ).toBe(false);
-      expect(mockConfirm).not.toHaveBeenCalledWith(
-        expect.objectContaining({ message: 'Log in to Cloudflare with Wrangler now?' }),
-      );
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

@@ -537,7 +537,7 @@ describe('dischargeSelfHostEnvContext — ground-truth secret gate', () => {
     const envError = error as SelfHostEnvValidationError;
     expect(envError.report.missing).toEqual(['STRIPE_KEY']);
     expect(envError.message).toContain('STRIPE_KEY');
-    expect(envError.message).toContain('wrangler secret put');
+    expect(envError.message).toContain('void secret put');
   });
 
   it('a required key ABSENT locally but PRESENT as a remote secret is discharged (passes, pinned argv)', async () => {

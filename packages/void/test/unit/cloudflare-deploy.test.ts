@@ -1994,6 +1994,43 @@ describe('runCloudflareDeploy — preflight', () => {
     expect(errors.join('\n')).toContain('Cloudflare Containers require the Workers Paid plan');
     expect(errors.join('\n')).toContain('The Sandbox container was not deployed');
   });
+
+  it('discovers and persists the only account on a first deploy', async () => {
+    const savedAccount = process.env.CLOUDFLARE_ACCOUNT_ID;
+    delete process.env.CLOUDFLARE_ACCOUNT_ID;
+    try {
+      const root = d1Project({ ...PROVISIONED_D1, account_id: undefined });
+      const { deps, exitCalls, wranglerArgs } = harness({
+        runWrangler: (args) => {
+          wranglerArgs.push([...args]);
+          if (args[0] === 'whoami') {
+            return {
+              ...cleanExit,
+              stdout: JSON.stringify({
+                loggedIn: true,
+                accounts: [{ id: 'discovered-account', name: 'My account' }],
+              }),
+            };
+          }
+          return cleanExit;
+        },
+      });
+
+      await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+
+      expect(exitCalls).toEqual([]);
+      expect(parseRootWranglerConfig(join(root, 'wrangler.jsonc'))).toMatchObject({
+        account_id: 'discovered-account',
+      });
+      expect(wranglerArgs.filter((args) => args[0] === 'whoami')).toHaveLength(2);
+    } finally {
+      if (savedAccount === undefined) {
+        delete process.env.CLOUDFLARE_ACCOUNT_ID;
+      } else {
+        process.env.CLOUDFLARE_ACCOUNT_ID = savedAccount;
+      }
+    }
+  });
 });
 
 describe('runCloudflareDeploy — resource provisioning', () => {
