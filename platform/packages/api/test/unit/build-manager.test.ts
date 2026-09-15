@@ -1585,6 +1585,38 @@ describe('BuildManager.onStop', () => {
     expect(ctx._kv.get('buildConfig')).toMatchObject({ status: 'complete' });
   });
 
+  it('still terminalizes and releases the scheduler when log completion persistence fails', async () => {
+    const ctx = makeStubCtx();
+    const env = makeEnv();
+    const m = makeManager(ctx, env);
+    await m.startBuild(makeConfig());
+    (
+      env as unknown as { BUILD_SCHEDULER: { get: ReturnType<typeof vi.fn> } }
+    ).BUILD_SCHEDULER.get.mockClear();
+    dbState.writes = [];
+
+    const originalPut = ctx.storage.put.getMockImplementation()!;
+    ctx.storage.put.mockImplementation(async (key: string, value: unknown) => {
+      if (
+        key === 'logDrainState' &&
+        typeof value === 'object' &&
+        value !== null &&
+        (value as { state?: string }).state === 'complete'
+      ) {
+        throw new Error('sqlite metadata unavailable');
+      }
+      await originalPut(key, value);
+    });
+
+    await expect(m.onStop({ exitCode: 0, reason: 'exit' })).resolves.toBeUndefined();
+
+    expect(lastWrite('complete')).toBeDefined();
+    expect(
+      (env as unknown as { BUILD_SCHEDULER: { get: ReturnType<typeof vi.fn> } }).BUILD_SCHEDULER
+        .get,
+    ).toHaveBeenCalled();
+  });
+
   // failure branch: same decoupling for a non-zero exit — a Postgres throw
   // on the 'failed' terminal write must not strand the freed slot.
   it('still pokes the scheduler when the non-zero terminal DB write throws', async () => {
@@ -1931,6 +1963,13 @@ describe('BuildManager.onError', () => {
     ).BUILD_SCHEDULER.get.mockClear();
 
     vi.mocked(markBuildTerminalIfActive).mockRejectedValueOnce(new Error('postgres write failed'));
+    (m as unknown as { _portFetch: (url: string) => Promise<Response> })._portFetch = vi.fn(
+      async () =>
+        new RealResponse(JSON.stringify({ lines: [], lastSeq: 0 }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+    );
 
     // The terminal write rejects (and surfaces), but the slot must already be
     // freed: pokeScheduler ran in the finally despite the rejection.
@@ -2537,12 +2576,74 @@ describe('BuildManager.fetch GET /logs?since=N (admin poll read)', () => {
     const body = (await res.json()) as {
       lines: Array<{ seq: number; line: string; stream: string; ts: number }>;
       lastSeq: number;
+      logsComplete: boolean | null;
     };
     expect(body.lines).toEqual([
       { seq: 1, line: 'installing deps', stream: 'stdout', ts: 10 },
       { seq: 2, line: 'build done', stream: 'stdout', ts: 20 },
     ]);
     expect(body.lastSeq).toBe(2);
+    expect(body.logsComplete).toBe(false);
+  });
+
+  it('keeps terminal reads incomplete until delayed diagnostics are drained and the producer stops', async () => {
+    const ctx = makeStubCtx();
+    const env = makeEnv();
+    const m = makeManager(ctx, env);
+    await m.startBuild(makeConfig());
+
+    let releaseTerminalWrite!: () => void;
+    const terminalWriteGate = new Promise<void>((resolve) => {
+      releaseTerminalWrite = resolve;
+    });
+    let terminalWriteEntered!: () => void;
+    const terminalWriteStarted = new Promise<void>((resolve) => {
+      terminalWriteEntered = resolve;
+    });
+    vi.mocked(markBuildTerminalIfActive).mockImplementationOnce(async () => {
+      terminalWriteEntered();
+      await terminalWriteGate;
+      dbState.status.set('b1', 'failed');
+      return true;
+    });
+    (m as unknown as { _portFetch: (url: string) => Promise<Response> })._portFetch = vi.fn(
+      async () =>
+        new RealResponse(
+          JSON.stringify({
+            lines: [{ seq: 1, line: 'delayed diagnostic', stream: 'stderr', ts: 1 }],
+            lastSeq: 1,
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+    );
+
+    const failing = m.onError(new Error('container runtime error'));
+    await terminalWriteStarted;
+
+    const pending = (await (await m.fetch(new Request('https://manager/logs?since=0'))).json()) as {
+      lines: Array<LogRow>;
+      terminal: boolean;
+      logsComplete: boolean | null;
+    };
+    expect(pending).toMatchObject({ lines: [], terminal: true, logsComplete: false });
+
+    releaseTerminalWrite();
+    await failing;
+    const drained = (await (await m.fetch(new Request('https://manager/logs?since=0'))).json()) as {
+      lines: Array<LogRow>;
+      logsComplete: boolean | null;
+    };
+    expect(drained.lines.map((line) => line.line)).toEqual(['delayed diagnostic']);
+    expect(drained.logsComplete).toBe(false);
+
+    // onError deliberately leaves the container to the base lifecycle. Its later
+    // onStop is the producer barrier that makes the drained snapshot final.
+    (m as unknown as { _containerRunning: boolean })._containerRunning = false;
+    await m.onStop({ exitCode: 1, reason: 'exit' });
+    const complete = (await (
+      await m.fetch(new Request('https://manager/logs?since=1'))
+    ).json()) as { lines: Array<LogRow>; lastSeq: number; logsComplete: boolean | null };
+    expect(complete).toMatchObject({ lines: [], lastSeq: 1, logsComplete: true });
   });
 
   it('since=K returns ONLY rows with seq > K (asc), with lastSeq = max seq', async () => {
@@ -2673,9 +2774,32 @@ describe('BuildManager.fetch GET /logs?since=N (admin poll read)', () => {
     // No startBuild → no stored config.
 
     const res = await m.fetch(new Request('https://manager/logs?since=0', { method: 'GET' }));
-    const body = (await res.json()) as { status: string | null; terminal: boolean };
+    const body = (await res.json()) as {
+      status: string | null;
+      terminal: boolean;
+      logsComplete: boolean | null;
+    };
     expect(body.status).toBeNull();
     expect(body.terminal).toBe(false);
+    expect(body.logsComplete).toBeNull();
+  });
+
+  it('read-only infers completion for a legacy terminal config with a stopped container', async () => {
+    const ctx = makeStubCtx({
+      initialLogs: [{ seq: 1, line: 'legacy tail', stream: 'stdout', ts: 1 }],
+    });
+    ctx._kv.set('buildConfig', { ...makeConfig(), status: 'complete' });
+    const m = makeManager(ctx, makeEnv());
+    ctx.storage.put.mockClear();
+
+    const body = (await (await m.fetch(new Request('https://manager/logs?since=0'))).json()) as {
+      lines: Array<LogRow>;
+      logsComplete: boolean | null;
+    };
+
+    expect(body.logsComplete).toBe(true);
+    expect(body.lines.map((line) => line.line)).toEqual(['legacy tail']);
+    expect(ctx.storage.put).not.toHaveBeenCalled();
   });
 
   it('does NOT collide with the WS upgrade: a GET WITHOUT the Upgrade header reads logs', async () => {
@@ -4046,6 +4170,10 @@ describe('BuildManager.pollLogs (DO log pull-loop)', () => {
     // parked and Postgres continues to authorize the deploy token. The peer must
     // signal immediately, not drain during that publication window.
     expect(fetchFn).not.toHaveBeenCalled();
+    const beforeOwner = (await (
+      await m.fetch(new Request('https://manager/logs?since=0'))
+    ).json()) as { logsComplete: boolean | null };
+    expect(beforeOwner.logsComplete).toBe(false);
     releaseRevocation();
     await timeout;
 
@@ -4056,6 +4184,13 @@ describe('BuildManager.pollLogs (DO log pull-loop)', () => {
       .map((r) => r.line)
       .filter((line) => line.startsWith('[build-manager] container terminated:'));
     expect(markers).toEqual(['[build-manager] container terminated: build timed out']);
+    const afterOwner = (await (
+      await m.fetch(new Request('https://manager/logs?since=0'))
+    ).json()) as { lines: Array<LogRow>; logsComplete: boolean | null };
+    expect(afterOwner.logsComplete).toBe(true);
+    expect(afterOwner.lines.at(-1)?.line).toBe(
+      '[build-manager] container terminated: build timed out',
+    );
   });
 
   it('explains the kill on a startup-failure teardown, and skips its drain on failed revocation', async () => {

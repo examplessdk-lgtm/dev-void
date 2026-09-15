@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
-import { runLogin } from '../../src/cli/auth.ts';
+import { runLogin, runPlatformLogin } from '../../src/cli/auth.ts';
 
 const mockExecFile = vi.fn();
 const exchangeRequests: Array<{
@@ -53,6 +53,20 @@ afterEach(() => {
 });
 
 describe('runLogin', () => {
+  it('keeps explicit platform login and code exchange on the selected origin', async () => {
+    let ready!: (url: string) => void;
+    const urlReady = new Promise<string>((resolve) => {
+      ready = resolve;
+    });
+    const login = runPlatformLogin('https://company.example.com', 'github', ready);
+    const url = new URL(await urlReady);
+    expect(url.origin).toBe('https://company.example.com');
+    const callback = new URL(url.searchParams.get('redirect')!);
+    callback.searchParams.set('code', 'platform-code');
+    expect((await fetch(callback)).status).toBe(200);
+    await expect(login).resolves.toBe('real-token');
+    expect(exchangeRequests[0]?.url).toBe('https://company.example.com/auth/cli/token');
+  });
   it('binds the localhost callback to the login request with state', async () => {
     let resolveLoginUrl!: (url: string) => void;
     const loginUrlPromise = new Promise<string>((resolve) => {

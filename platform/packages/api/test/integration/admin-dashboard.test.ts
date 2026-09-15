@@ -1343,33 +1343,51 @@ describe('POST /admin/users/:id/delete', () => {
 });
 
 describe('GET /admin/deployments/:id/logs', () => {
-  test('returns logs from Analytics Engine for a live deployment', async () => {
+  test('selects and orders by ingestion time so newly ingested errors from old requests remain visible', async () => {
     const admin = await createTestUser(env.db, 'admin-logs1', 'github', undefined, 'free', 'admin');
     const project = await createTestProject(env.db, admin.id, 'logs-proj');
     const deployment = await createTestDeployment(env.db, project.id, 'live');
+    const now = 1_709_333_000_000;
+    const oldRequestStart = now - 60 * 60 * 1000;
+    const newlyIngested = now - 30 * 1000;
+    vi.spyOn(Date, 'now').mockReturnValue(now);
 
     mockCfApi({
-      analyticsQuery: () =>
-        Response.json({
+      analyticsQuery: (_url, init) => {
+        const query = String(init?.body);
+        expect(query).toContain(
+          `timestamp >= toDateTime('${new Date(now - 60_000).toISOString().replace('T', ' ').slice(0, 19)}')`,
+        );
+        expect(query).not.toMatch(/AND double1 >= \d+/);
+        expect(query).toContain('ORDER BY timestamp DESC, double1 DESC');
+        return Response.json({
           data: [
             {
-              outcome: 'ok',
-              logData: '[{"timestamp":1709312585000,"level":"error","message":"test error"}]',
-              exceptionData: '[]',
+              outcome: 'exception',
+              logData: '[{"level":"error","message":"late failure"}]',
+              exceptionData: '[{"name":"Error","message":"late failure"}]',
               url: 'https://logs-proj.void.app/',
               method: 'GET',
-              statusCode: '200',
-              ts: 1709312585000,
+              statusCode: '500',
+              ts: oldRequestStart,
+              timestamp: new Date(newlyIngested).toISOString(),
             },
           ],
-        }),
+        });
+      },
     });
 
-    const res = await req(`/admin/deployments/${deployment.id}/logs`, admin.adminJwt);
+    const res = await req(`/admin/deployments/${deployment.id}/logs?since=1m`, admin.adminJwt);
     expect(res.status).toBe(200);
-    const json = (await res.json()) as { data: Array<{ outcome: string; logs: Array<unknown> }> };
+    const json = (await res.json()) as {
+      data: Array<{ outcome: string; logs: Array<unknown>; timestamp: number; ingestedAt: number }>;
+    };
     expect(json.data).toHaveLength(1);
-    expect(json.data[0].outcome).toBe('ok');
+    expect(json.data[0]).toMatchObject({
+      outcome: 'exception',
+      timestamp: oldRequestStart,
+      ingestedAt: newlyIngested,
+    });
     expect(json.data[0].logs).toHaveLength(1);
     vi.restoreAllMocks();
   });

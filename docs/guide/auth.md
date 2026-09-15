@@ -8,7 +8,7 @@ outline: deep
 Void-managed auth currently works only for Void apps. Meta-framework mode is not supported yet.
 :::
 
-Void uses [Better Auth](https://www.better-auth.com/) as the auth engine for Void apps. Void owns the conventions and wiring; Better Auth owns the auth behavior.
+Void configures [Better Auth](https://www.better-auth.com/) for your app, including its database connection, API routes, and client. Start with email and password, or add a social login provider.
 
 ## Quick Start
 
@@ -49,7 +49,7 @@ await auth.signIn.email({
 
 ### 3. Protect a server route
 
-Use `requireAuth` in an API route handler or a page loader to gate access. It returns the authenticated user or throws a `401`:
+Call `requireAuth` in a route handler or page loader that needs a signed-in user. It returns that user, or throws `401` if the request isn't authenticated:
 
 ```ts
 // routes/api/profile.ts
@@ -136,7 +136,7 @@ await auth.signIn.email({
 await auth.signOut();
 ```
 
-The exact client API comes from Better Auth. Void just preconfigures the client with `basePath: "/api/auth"`.
+The client uses Better Auth's API, configured at `/api/auth`.
 
 See the official [Better Auth client docs](https://www.better-auth.com/docs/concepts/client) for the full client API.
 
@@ -220,7 +220,7 @@ When auth is active, Void configures Better Auth with these conventions:
 
 Auth sessions live in the same database system as the rest of the app. `AUTH_KV` is no longer used.
 
-Both Void Cloud and `void deploy --platform cloudflare` automatically ensure a persistent `BETTER_AUTH_SECRET` for auth-enabled apps. An existing secret is preserved; when it is missing, deploy generates it once and stores it through Cloudflare's encrypted secret API, then inherits it into later Worker versions.
+On both deployment targets, Void keeps an existing `BETTER_AUTH_SECRET` or generates one when it's missing. The value is stored as an encrypted Worker secret and reused by later versions.
 
 Localhost development uses a built-in fallback secret automatically. Production deployment through Void manages the secret lifecycle for you.
 
@@ -243,21 +243,15 @@ For the full set of available options, see the official [Better Auth options ref
 
 ## Database and Migrations
 
-Void manages Better Auth migrations as part of the normal Void migration flow:
+Auth tables live alongside your app's tables. During local development, Void creates them automatically.
 
-- local dev bootstraps auth tables automatically
-- deploy runs auth migrations together with app migrations
-- users do not run a separate Better Auth CLI path
+A Void platform deploy creates the Better Auth tables at runtime after dispatch. A direct Cloudflare deploy requires those tables in your checked-in migrations. Generate them with:
 
-This applies to `void deploy` (the managed platform), which creates the Better Auth
-tables at runtime after dispatch. Deploying to your own Cloudflare account with
-[`--platform cloudflare`](/integrations/cloudflare) does **not** run that step: there,
-your checked-in `db/migrations/*.sql` must already produce the Better Auth schema, and
-deploy fails closed if they do not. Run `void db generate`: Void resolves the production
-Better Auth configuration (including renamed models/fields and plugin tables), adds it to
-Drizzle's schema input, and generates reviewable migration SQL alongside your application
-tables. Commit that migration before deploying. No duplicate auth definitions in
-`db/schema.ts` or separate Better Auth CLI are needed.
+```sh
+void db generate
+```
+
+Void adds the production Better Auth schema, including configured model names and plugin tables, to Drizzle's migration input. Review and commit the SQL before deploying. You don't need to duplicate the auth tables in `db/schema.ts` or run a separate Better Auth CLI.
 
 ## Unsupported Modes
 

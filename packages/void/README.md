@@ -2,6 +2,13 @@
 
 Vite plugin and CLI for building and deploying apps on Void.
 
+You can also administer a team platform with the same CLI. Sign in with
+`void platform auth login`, then manage users, signup access, projects, and logs.
+Commands show a preview before applying changes and support `--json` for scripts.
+See [Platform Administration](../../docs/guide/platform-administration.md) for a
+walkthrough and the [CLI reference](../../docs/reference/cli.md#operator-commands)
+for every command.
+
 ## What It Covers
 
 - file-based API routes from `routes/`
@@ -24,7 +31,7 @@ npm install -D void
 
 If you run `void init` in an empty directory, the scaffold flow adds the matching Pages adapter and Vite+ by default.
 
-Then run `npx void init`. In an empty directory, the full interactive flow can scaffold a starter and configure local project files. It then asks where to deploy: Cloudflare (the default) creates or augments `wrangler.jsonc`, handles secure browser sign-in through Void's bundled tooling, and saves the selected account; Void asks for the API URL of an explicitly connected company platform (`void platform connect <url>` or `void platform install`). Back up `~/.void/platforms/` after installing a company platform because its owner-only recovery material contains runtime keys that Cloudflare cannot return. The next app step is just `npx void deploy`. Auth-enabled deploys preserve an existing `BETTER_AUTH_SECRET` or create a persistent encrypted secret when missing on either platform. Direct Cloudflare deploys also promote env schema keys explicitly marked `.secret()` to encrypted Worker secrets, removing them from plaintext vars; values may come from production dotenv files or the deploy process environment. In an existing app, init configures Void in place by adding missing Vite scripts and creating or patching `vite.config.*` with `voidPlugin()`.
+Then run `npx void init`. In an empty directory, the full interactive flow can scaffold a starter and configure local project files. It then asks where to deploy: Cloudflare (the default) creates or augments `wrangler.jsonc`, handles secure browser sign-in through Void's bundled tooling, and saves the selected account; Void asks for the API URL of an explicitly connected company platform (`void connect <url>` or `void platform install`). Back up `~/.void/platforms/` after installing a company platform because its owner-only recovery material contains runtime keys that Cloudflare cannot return. The next app step is just `npx void deploy`. Auth-enabled deploys preserve an existing `BETTER_AUTH_SECRET` or create a persistent encrypted secret when missing on either platform. Direct Cloudflare deploys also promote env schema keys explicitly marked `.secret()` to encrypted Worker secrets, removing them from plaintext vars; values may come from production dotenv files or the deploy process environment. In an existing app, init configures Void in place by adding missing Vite scripts and creating or patching `vite.config.*` with `voidPlugin()`.
 
 ```ts
 // vite.config.ts
@@ -41,7 +48,8 @@ export default defineConfig({
 - `voidPlugin()` — Vite integration, routing, pages mode, codegen, migrations, packaging
 - `void prepare` — generate `.void` artifacts for CI, editors, and fresh clones
 - `void auth login` — platform auth
-- `void platform *` — connect to or install, recover, repair, upgrade, disable, and safely uninstall a company platform
+- `void connect [url]` — choose Cloudflare or a Void platform, sign in, and save the deployment destination
+- `void platform *` — list, select, inspect, install, recover, repair, upgrade, disable, and safely uninstall a company platform
 - `void deploy` — build and deploy to the saved Cloudflare or Void target
 - `void db *` — local DB and migration commands
 - `void project *` — target-aware status, logs, rollback, and managed-project operations

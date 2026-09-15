@@ -1,6 +1,6 @@
 {
   "name": "void-api",
-  "main": "src/index.ts",
+  "main": "src/worker/index.ts",
   "compatibility_date": "2026-02-12",
   "compatibility_flags": ["nodejs_compat"],
   "observability": {

@@ -2,9 +2,11 @@
 
 ## Operating Rules
 
+- Branch choice: keep work on the current branch, including `main`, unless the user asks for a separate branch or worktree. Individually reviewable commits do not require a feature branch.
 - Worktrees: create real git worktrees with `git worktree add` under `.worktrees/`. Do not apply worktree changes back to the main tree without explicit user confirmation.
 - Design/doc work: stay in design mode until the user asks for implementation. If a feature is not live yet, prefer a clean cutover over legacy migration work.
 - Docs/progress: code is the source of truth, but public docs may intentionally omit paused features. Describe root scripts exactly as implemented; root `dev` and `build` are dashboard-only. Track "implemented", "shipped", and "done" separately unless the user says they are equivalent.
+- Public documentation: follow the writing approach in [Fate's guides](https://fate.technology/guide/requests): introduce one idea, show a small practical example, then explain the resulting behavior. Build up workflows in short sections; keep implementation details in maintainer docs and keep command references easy to scan.
 - Commands: avoid HEREDOC commit messages with apostrophes; run `pnpm test <path-or-pattern>` without `--`; from the repository root, use `vp run build:all` for a full SDK + platform build.
 - `vp run` argv: unlike `pnpm`, `vp run <script> -- <args>` forwards the literal `--` to the script. For wrangler the `--` separator hides `--env`, so the deploy silently targets the top-level (prod) env. Always write `vp run --filter <pkg> deploy --env production|staging` (no `--` separator), and require production deploys to pass `--env production` explicitly.
 

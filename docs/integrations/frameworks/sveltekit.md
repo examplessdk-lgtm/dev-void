@@ -4,7 +4,7 @@ outline: deep
 
 # SvelteKit
 
-[SvelteKit](https://svelte.dev/docs/kit) uses Vite internally with its own Cloudflare adapter (`@sveltejs/adapter-cloudflare`). Add `voidPlugin()` to the Vite config for binding inference, typed DB, and migrations during development.
+Use Void with [SvelteKit](https://svelte.dev/docs/kit) for resource detection, typed database queries, and migrations. SvelteKit keeps its own build and Cloudflare integration; Void plugs into its Vite configuration.
 
 ## Setup
 
@@ -168,7 +168,7 @@ export default defineQueue<{ to: string; subject: string }>(async (batch) => {
 
 ### Environment Variables
 
-Void gives you a typed env layer: declare keys in `env.ts`, read them via `import { env } from "void/env"`, and get schema validation at build + deploy time plus a client-leak guard that fails the build if a server-only key reaches the browser. `void/env` is a drop-in replacement for SvelteKit's `$env/static/*` and `$env/dynamic/*` for env-var access. See the [env vars guide](../../guide/env-vars.md) for the full feature set.
+Declare environment variables in `env.ts`, then read them with `import { env } from "void/env"`. Void supplies types, checks values during build and deploy, and stops the build if client code references a server-only key. See [Environment Variables](../../guide/env-vars.md).
 
 ## Accessing Bindings Directly
 

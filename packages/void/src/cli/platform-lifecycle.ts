@@ -337,7 +337,6 @@ export function assertNoninteractivePlatformMutationAcknowledged(
   interactive: boolean,
 ): void {
   if (
-    args.subcommand === 'connect' ||
     args.subcommand === 'list' ||
     args.subcommand === 'use' ||
     args.subcommand === 'status' ||

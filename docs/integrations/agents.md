@@ -4,7 +4,7 @@ outline: deep
 
 # Using Void with Coding Agents
 
-Void integrates with coding agents via **skills** that provide agent instructions and reference docs. They are set up as part of the default `void init` flow. To run only the agent setup step:
+`void init` gives your coding agent Void instructions and reference docs. To add or refresh just that setup, run:
 
 ```sh
 npx void init --agents
@@ -14,7 +14,7 @@ This detects your coding agent, links skills into its configuration directory, a
 
 ## Skills
 
-Skills give your coding agent structured knowledge about Void, including how to use the CLI, build apps, work with routes, databases, auth, and more. They are symlinked from the `void` package into the agent's skills directory, so they stay version-matched with your installed Void version.
+Skills point your agent to the commands and docs it needs for the task. They link to the installed `void` package, so the guidance matches the version your app uses.
 
 Void ships two skills:
 

@@ -87,7 +87,7 @@ export function getSiteDomain(root: string = process.cwd()): string {
     legacySelection?.applicationDomain;
   if (!domain) {
     throw new Error(
-      'platform: No Void platform selected. Run `void platform connect <url>` or `void platform install` first.',
+      'platform: No Void platform selected. Run `void connect <url>` or `void platform install` first.',
     );
   }
   return domain;
@@ -177,7 +177,19 @@ export function saveToken(
   root: string = process.cwd(),
   dependencies: { keyringSet?: (account: string, password: string) => boolean } = {},
 ): void {
-  const apiUrl = normalizePlatformApiUrl(getApiUrl(root));
+  savePlatformToken(token, getApiUrl(root), dependencies);
+}
+
+export function readPlatformToken(apiUrl: string): string | null {
+  return keyringGet(platformCredentialAccount(normalizePlatformApiUrl(apiUrl)));
+}
+
+export function savePlatformToken(
+  token: string,
+  origin: string,
+  dependencies: { keyringSet?: (account: string, password: string) => boolean } = {},
+): void {
+  const apiUrl = normalizePlatformApiUrl(origin);
   const account = platformCredentialAccount(apiUrl);
   if ((dependencies.keyringSet ?? keyringSet)(account, token)) {
     return;
@@ -322,7 +334,7 @@ export function getApiUrl(root: string = process.cwd()): string {
       return projectApiUrl;
     }
     throw new Error(
-      `platform: Project metadata selected unverified platform ${projectApiUrl}. Connect to it explicitly with \`void platform connect ${projectApiUrl}\` before forwarding credentials.`,
+      `platform: Project metadata selected unverified platform ${projectApiUrl}. Connect to it explicitly with \`void connect ${projectApiUrl}\` before forwarding credentials.`,
     );
   }
 
@@ -356,7 +368,7 @@ export function getApiUrl(root: string = process.cwd()): string {
   }
   if (!apiUrl) {
     throw new Error(
-      'platform: No Void platform selected. Run `void platform connect <url>` or `void platform install` first.',
+      'platform: No Void platform selected. Run `void connect <url>` or `void platform install` first.',
     );
   }
   return normalizePlatformApiUrl(apiUrl);
@@ -384,7 +396,7 @@ export function getProxyUrl(root: string = process.cwd()): string {
   )?.proxyUrl;
   if (proxyUrl === null || proxyUrl === undefined) {
     throw new Error(
-      `platform: No verified proxy is registered for ${apiUrl}. Reconnect with \`void platform connect ${apiUrl}\` or set VOID_PROXY_URL explicitly.`,
+      `platform: No verified proxy is registered for ${apiUrl}. Reconnect with \`void connect ${apiUrl}\` or set VOID_PROXY_URL explicitly.`,
     );
   }
   return proxyUrl;
@@ -605,9 +617,17 @@ export async function runLogin(
   provider = 'github',
   onUrl?: (url: string) => void,
 ): Promise<string> {
+  return runPlatformLogin(getApiUrl(root), provider, onUrl);
+}
+
+export async function runPlatformLogin(
+  origin: string,
+  provider = 'github',
+  onUrl?: (url: string) => void,
+): Promise<string> {
   const { execFile } = await import('node:child_process');
 
-  const apiUrl = getApiUrl(root);
+  const apiUrl = normalizePlatformApiUrl(origin);
   const state = randomBytes(32).toString('hex');
   const codeVerifier = createCodeVerifier();
   const codeChallenge = createCodeChallenge(codeVerifier);

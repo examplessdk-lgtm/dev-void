@@ -4,7 +4,7 @@ outline: deep
 
 # Node.js, Bun, and Deno
 
-Void apps default to Cloudflare Workers, but you can target Node.js, Bun, or Deno instead by setting `target` in `void.json`. This is useful when you want to deploy to a traditional server, run in a container, or use a runtime that isn't Cloudflare.
+Set `target` in `void.json` to build for Node.js, Bun, or Deno. You can run the resulting server on your own machine, in a container, or with a hosting provider.
 
 ```json
 { "target": "node" }
@@ -133,11 +133,11 @@ Inbound [email handlers](../guide/email.md#inbound) in `email/` need Cloudflare 
 
 ### No `void deploy`
 
-The `void deploy` CLI deploys to the Void platform on Cloudflare. For non-CF targets, build with `vite build` and deploy the `dist/` directory using your hosting provider's workflow, whether that is Docker, systemd, PM2, Fly.io, Railway, or any other Node.js host.
+`void deploy` handles Cloudflare and Void platform deployments. For Node.js, Bun, or Deno, run `vite build` and deploy `dist/` using your hosting provider's workflow.
 
 ### Ignored config fields
 
-These `void.json` fields are silently ignored (with a warning) when using a non-CF target:
+Void warns and ignores these Cloudflare-specific `void.json` fields on other targets:
 
 - `inference.bindings`: Cloudflare binding configuration
 - `remote`: remote binding proxy

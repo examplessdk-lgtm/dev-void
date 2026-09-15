@@ -182,6 +182,7 @@ export type ApiEnv = Env & {
   Variables: {
     user: User;
     db: Db;
+    operatorSession: { id: string; expiresAt: string };
     /**
      * Project id a scoped deploy token is pinned to. Set by `authMiddleware`
      * for `aud:'deploy'` tokens; absent for full `aud:'api'` tokens. The deploy

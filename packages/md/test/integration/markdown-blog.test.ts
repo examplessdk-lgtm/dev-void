@@ -106,10 +106,14 @@ function defineClientScriptTests(getBase: () => string) {
       const island = await page.$('[data-island]');
       expect(island).not.toBeNull();
 
-      // Island component should be interactive — click ThemeToggle in main content
-      const button = await page.waitForSelector('main button.theme-toggle', {
-        timeout: 5000,
-      });
+      // The client script and island hydrate independently. Wait for the
+      // island's handlers before clicking the button rendered by SSR.
+      const button = await page.waitForSelector(
+        'main [data-island][data-hydrated="true"] button.theme-toggle',
+        {
+          timeout: 5000,
+        },
+      );
       const initialText = await button.textContent();
       expect(initialText?.trim()).toBe('Auto');
 

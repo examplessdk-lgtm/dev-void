@@ -9,6 +9,7 @@ import { authSubcommands, parseAuthArgs } from './auth-args.ts';
 import { buildSubcommands, parseBuildArgs } from './build-args.ts';
 import { cloudflareSubcommands, parseCloudflareArgs } from './cloudflare-args.ts';
 import { formatCloudflareUserMessage } from './cloudflare-user-output.ts';
+import { parseConnectArgs } from './connect-args.ts';
 import { dbSubcommands, parseDbArgs } from './db-args.ts';
 import { domainSubcommands, parseDomainArgs } from './domain-args.ts';
 import { emailSubcommands, parseEmailArgs } from './email-args.ts';
@@ -16,6 +17,7 @@ import { envSubcommands, parseEnvArgs } from './env-args.ts';
 import { genSubcommands, parseGenArgs } from './gen-args.ts';
 import { githubSubcommands, parseGithubArgs } from './github-args.ts';
 import { getHelpPath, printGlobalHelp, printHelpPage, printVoidHeader } from './help.ts';
+import { OperatorClientError } from './operator-client.ts';
 import { parsePlatformArgs, platformSubcommands } from './platform-args.ts';
 import { parsePrepareArgs } from './prepare-args.ts';
 import { projectSubcommands, parseProjectArgs } from './project-args.ts';
@@ -54,8 +56,11 @@ async function runSubcommandGroup<T>(
 ) {
   const root = process.cwd();
   const sub = args[1];
+  const hasNamedSubcommand = args
+    .slice(1)
+    .some((arg) => subcommands.some(({ name }) => name === arg));
   try {
-    if ((!sub || sub.startsWith('-')) && process.stdin.isTTY) {
+    if ((!sub || (sub.startsWith('-') && !hasNamedSubcommand)) && process.stdin.isTTY) {
       const { promptSubcommand } = await import('./subcommand-prompt.ts');
       const result = await promptSubcommand(command, subcommands);
       if (!result) {
@@ -68,7 +73,29 @@ async function runSubcommandGroup<T>(
       await run(root, parsed);
     }
   } catch (err) {
-    log.error(formatCloudflareUserMessage(err instanceof Error ? err.message : String(err)));
+    if (command === 'platform' && args.includes('--json')) {
+      console.error(
+        JSON.stringify(
+          err instanceof OperatorClientError
+            ? err.toJSON()
+            : {
+                error: 'invalid_command',
+                message: err instanceof Error ? err.message : String(err),
+              },
+        ),
+      );
+      process.exit(1);
+    }
+    const message = formatCloudflareUserMessage(err instanceof Error ? err.message : String(err));
+    if (command === 'platform') {
+      console.error(
+        err instanceof OperatorClientError && err.details !== undefined
+          ? `${message}\nPartial result:\n${JSON.stringify(err.details, null, 2)}`
+          : message,
+      );
+    } else {
+      log.error(message);
+    }
     process.exit(1);
   }
 }
@@ -113,6 +140,15 @@ if (helpPath) {
       log.error(formatCloudflareUserMessage(err.message ?? String(err)));
       process.exit(1);
     });
+  });
+} else if (command === 'connect') {
+  (async () => {
+    const parsed = parseConnectArgs(args.slice(1));
+    const { runConnectCommand } = await import('./connect.ts');
+    await runConnectCommand(process.cwd(), parsed);
+  })().catch((err) => {
+    log.error(formatCloudflareUserMessage(err instanceof Error ? err.message : String(err)));
+    process.exit(1);
   });
 } else if (command === 'auth') {
   runSubcommandGroup('auth', authSubcommands, parseAuthArgs, (root, parsed) =>
@@ -205,6 +241,7 @@ if (helpPath) {
   // Interactive top-level prompt
   const topLevelCommands: Array<SubcommandDef> = [
     { name: 'init', description: 'Set up void in a new or existing project' },
+    { name: 'connect', description: 'Connect to Cloudflare or a Void platform' },
     { name: 'deploy', description: 'Build and deploy to the configured platform' },
     {
       name: 'auth',
@@ -213,8 +250,8 @@ if (helpPath) {
     },
     {
       name: 'platform',
-      hint: 'connect | list | use | status | install | upgrade | repair | disable | uninstall',
-      description: 'Connect, install, and manage Void platforms',
+      hint: 'auth | user | project | deployment | signup | system | install',
+      description: 'Install platforms and administer users, projects, access, and operations',
     },
     {
       name: 'cloudflare',
@@ -282,6 +319,11 @@ if (helpPath) {
     const root = process.cwd();
 
     switch (cmd) {
+      case 'connect': {
+        const { runConnectCommand } = await import('./connect.ts');
+        await runConnectCommand(root, parseConnectArgs([]));
+        return;
+      }
       case 'init': {
         const { runInitCommand, parseInitArgs } = await import('./init.ts');
         await runInitCommand(root, parseInitArgs([]));

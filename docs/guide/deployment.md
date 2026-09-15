@@ -4,7 +4,9 @@ outline: deep
 
 # Deployment
 
-Void apps run on Cloudflare's infrastructure but you don't need to use your own Cloudflare account. Our long term goal is to provide a simpler app-centric deployment experience similar to that of Vercel and Netlify. But right now, Void only supports deploying via the CLI or GitHub actions.
+Use `void deploy` to deploy your app to your own Cloudflare account or a Void platform run by your team. The CLI builds your app, creates the resources it needs, and applies your database migrations.
+
+Choose Cloudflare if you're deploying an app yourself. Choose Void if your team has a shared platform you can connect to. You can also [install a Void platform](./self-hosted-platform.md) in your company's Cloudflare account.
 
 ## CLI
 
@@ -15,9 +17,15 @@ void init   # choose Cloudflare (default), Void, or Skip deployment setup
 void deploy # builds and deploys to the saved platform
 ```
 
-`void init` stores the selection as `platform` in `.void/project.json`. Choosing Cloudflare creates or updates `wrangler.jsonc`, handles secure browser sign-in through Void's bundled tooling, and saves the selected Cloudflare `account_id`. Choosing Void continues into optional Void login and project linking. Choosing Skip stores `"platform": "none"`, and `void deploy` waits for an explicit `--platform cloudflare` or `--platform void` override.
+During setup, Void asks where you want to deploy:
 
-New Void-managed projects require an explicit platform connection; there is no implicit public default. Connect to an existing platform with `void platform connect <url>`, or [install a company platform in your own Cloudflare account](./self-hosted-platform.md). Existing projects created before platform URLs were recorded continue to resolve to Void Cloud for compatibility.
+- **Cloudflare:** sign in through your browser and choose an account. Void saves the account in `wrangler.jsonc`.
+- **Void:** connect to a platform, sign in, and link or create a project.
+- **Skip:** set up deployment later with `void connect`.
+
+Your choice is saved in `.void/project.json`, so the next deploy is just `void deploy`.
+
+To connect to your team's platform and sign in, run `void connect <url>` using the URL from your administrator. Use `void connect --platform cloudflare` to set up your own Cloudflare account. Connecting preserves existing project links. New Void projects need a platform connection. Older projects already linked to Void Cloud continue to use it.
 
 ### Migrations
 
@@ -25,11 +33,11 @@ If your app uses Drizzle, `void deploy` runs migrations as part of the deploy fl
 
 1. Build the app
 2. Read SQL migrations from `db/migrations/`
-3. Fail if the schema has drifted ahead of the committed migrations
+3. Check that the migrations match your current schema
 4. Apply pending migrations to the target database
 5. Make the new deploy live
 
-Deploy always uses checked-in migration files. If drift is detected, run `void db generate`, review the generated migration, commit it yourself, then rerun deploy. For the full database workflow and backend-specific details, see the [Database guide](./database.md).
+If you've changed your schema without a matching migration, deploy stops. Run `void db generate`, review and commit the SQL, then deploy again. For the full database workflow and backend-specific details, see the [Database guide](./database.md).
 
 ### Flags
 
@@ -46,13 +54,13 @@ void deploy [--platform <cloudflare|void>] [--project <name>] [--dir <path>] [--
 
 ### Project resolution
 
-After resolving the platform from the CLI override and then `.void/project.json`, the Void platform resolves its project in this order:
+For a Void platform deploy, the CLI chooses the project in this order:
 
 1. `--project <name>` flag
 2. `VOID_PROJECT` environment variable
 3. Linked project in `.void/project.json`
 
-If none match, the CLI prompts interactively.
+If none is set, Void asks you to choose a project. Direct Cloudflare deploys use the Worker and account saved in your Cloudflare config.
 
 ### CI preparation
 
@@ -69,11 +77,17 @@ If your CI pipeline runs typechecking or other static analysis before deploy, ru
 
 You can deploy from a GitHub repo on every push to `main`. Running `void init --github` generates `.github/workflows/void-deploy.yml` for the platform saved in `.void/project.json`.
 
-For Cloudflare targets, the workflow runs `void deploy --platform cloudflare` and authenticates with `CLOUDFLARE_API_TOKEN`; scope that repository secret to the pinned account and only the products the application deploy needs. PostgreSQL/MySQL apps also need a `DATABASE_URL` repository secret, while SQLite and database-free apps can leave it unset. Set the `CLOUDFLARE_WORKERS_SUBDOMAIN` repository variable when versions lack preview URLs, and add `CF_ACCESS_CLIENT_ID` / `CF_ACCESS_CLIENT_SECRET` repository secrets only when Access protects Worker readiness. Local interactive deploys may use a short-lived `CF_ACCESS_TOKEN` from `cloudflared` instead; CI should use the service-token pair. For Void targets, the generated workflow uses GitHub OIDC and needs no long-lived `VOID_TOKEN`.
+For Cloudflare, add `CLOUDFLARE_API_TOKEN` to your repository secrets. The token needs access to the account and products your app uses. PostgreSQL and MySQL apps also need a `DATABASE_URL` secret.
 
-### Void GitHub App (recommended)
+If your Worker has no version preview URL, set the `CLOUDFLARE_WORKERS_SUBDOMAIN` repository variable. If Cloudflare Access protects the Worker, also add `CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET` secrets so Void can check that a deployment is ready. See [Cloudflare deployment](../integrations/cloudflare.md#deploy-to-your-own-cloudflare-account) for the setup details.
 
-No `.github/workflows/void-deploy.yml` or repository `VOID_TOKEN` is required.
+Void platforms with GitHub Actions support use short-lived GitHub OIDC credentials. You don't need to store a `VOID_TOKEN` for that workflow.
+
+### Void GitHub App
+
+If your platform supports managed GitHub builds, the Void GitHub App can build and deploy your app when you push. This feature requires a platform with a configured GitHub App and build Containers; it isn't included in a core self-hosted installation.
+
+You don't need a deployment workflow file or a repository `VOID_TOKEN` for this path.
 
 1. Initialize your Void project
 
@@ -89,7 +103,7 @@ void project link
 void github install
 ```
 
-You should receive GitHub url asking you to install and authorize `Void Deploy`.
+Void opens GitHub so you can install and authorize the `Void Deploy` app.
 
 In the browser, select the GitHub account/organization and grant access to the repository.
 
@@ -114,7 +128,7 @@ void github connect --executor container
 void github status
 ```
 
-You should receive an output like:
+The output shows the repository, branch, and build executor:
 
 ```bash
 Repository      <owner/repository>
@@ -138,7 +152,9 @@ void build logs --follow
 
 ### GitHub Actions
 
-When the selected Void platform advertises GitHub Actions support, the generated workflow authenticates with [GitHub OIDC](https://docs.github.com/en/actions/deployment/security-hardening-your-deployments/about-security-hardening-with-openid-connect) — there is **no long-lived `VOID_TOKEN` secret to store or rotate**. `void deploy` detects GitHub Actions and does the exchange itself: it requests a short-lived OIDC token from GitHub (audience `void`), exchanges it at `POST $VOID_API_URL/auth/github-oidc` for a short-lived project-scoped deploy token, and deploys. The generated `VOID_API_URL` defaults to the platform selected during init, not necessarily Void Cloud. `permissions: id-token: write` is still required: it is what lets the job (and thus the CLI) mint the OIDC token. Core self-hosted installations currently advertise GitHub Actions as unavailable, so `void init` does not offer this workflow for them.
+On platforms that support it, the generated workflow uses [GitHub OIDC](https://docs.github.com/en/actions/deployment/security-hardening-your-deployments/about-security-hardening-with-openid-connect) to obtain a short-lived deploy token for your project. `void deploy` handles the exchange automatically. Keep `permissions: id-token: write` in the workflow so GitHub can issue that credential.
+
+The generated workflow uses the platform selected during `void init`. Core self-hosted installations don't yet support this integration, so Void doesn't offer the workflow for them. For a platform that does, the npm version looks like this; set the repository's `VOID_API_URL` variable to your platform's API URL:
 
 ```yaml
 name: Deploy to Void
@@ -157,7 +173,7 @@ permissions:
   contents: read
 
 env:
-  VOID_API_URL: ${{ vars.VOID_API_URL || 'https://api.void.cloud' }}
+  VOID_API_URL: ${{ vars.VOID_API_URL }}
   VOID_PROJECT: my-app
 
 jobs:
@@ -174,18 +190,26 @@ jobs:
         run: npx void deploy --platform void --project "$VOID_PROJECT"
 ```
 
-Connect the repository to your project once with `void github connect <project> --repo <owner/repo> --executor github_actions` to authorize it. This GitHub Actions path requires the `github_actions` build executor — the default `container` executor will not work with this workflow. The exact steps vary by package manager (the scaffold detects pnpm, yarn, bun, or npm). The `VOID_PROJECT` value is baked in from your linked project when known; otherwise the workflow reads a `VOID_PROJECT` repository variable. To target staging, set a `VOID_API_URL` repository variable to `https://api.staging.void.cloud`.
+Authorize the repository once with `void github connect <project> --repo <owner/repo> --executor github_actions`. Choose the `github_actions` executor for this workflow; `container` runs builds on the platform instead.
 
-::: info External databases on direct Cloudflare deploys
-PostgreSQL and MySQL projects use the shell-provided production `DATABASE_URL` to provision Hyperdrive and apply checked-in migrations before upload. The URL is not written to generated config. PostgreSQL migrations are transactional; MySQL DDL may partially apply on failure.
-:::
+The generated workflow uses your package manager and linked project. If no project is linked, it reads the `VOID_PROJECT` repository variable.
 
 ## Other Targets
 
-To deploy directly to your own Cloudflare account, select Cloudflare during `void init` or run `void deploy --platform cloudflare`. Void supports full Worker apps; static sites, SPAs, and known SSGs; `--dir`; fully prerenderable `output: "static"` Pages apps; and Cloudflare builds from TanStack Start, React Router, vinext, SvelteKit, Nuxt, Analog, and Astro. Static assets are served behind a thin Worker so Void routing and header behavior remains consistent; hybrid and SSR apps retain their generated application Worker. Void automatically creates or adopts the D1/KV/R2/Queues/Hyperdrive resources a Worker app needs, configures typed state and WebSocket routes as SQLite Durable Objects, and applies custom D1 migration layouts only after proving Cloudflare's exact file set and order match the validated migrations. Keys explicitly marked `.secret()` in `env.ts` are removed from plaintext Worker vars and uploaded through Cloudflare's encrypted secret mechanism; production values may come from `.env`, `.env.production`, `.env.production.local`, or the deploy process environment. PostgreSQL and MySQL apps use a production `DATABASE_URL` from the shell to provision Hyperdrive and apply checked-in migrations; the URL is never written to generated config. For auth-enabled apps Void preserves an existing remote `BETTER_AUTH_SECRET`, or creates and stores one once when missing.
+### Your own Cloudflare account
 
-Direct deploy uploads an immutable Worker Version, probes it before traffic, activates it at 100%, then synchronizes routes, custom domains, schedules, and queue consumers. Versions without preview URLs, including Durable Object versions, are staged at 0% and probed through the workers.dev URL with a version override. Set `CLOUDFLARE_WORKERS_SUBDOMAIN` in a fresh CI checkout; local deploys cache it after Cloudflare reports a workers.dev URL. A failed readiness probe or trigger sync restores the previous deployment. For a brand-new Worker whose first upload contains Durable Object migrations, Cloudflare requires one ordinary deployment to establish migration history; Void uses that bootstrap only after proving no production version exists, probes the active Worker, and returns to readiness-gated version upload for every later deploy. Target-aware `void secret`, `void domain`, `void project status|logs|rollback`, and remote `void db` commands use the same pinned Worker and account. Rollback restores the selected version's saved trigger snapshot but never reverses database migrations; legacy versions without complete trigger metadata are rejected. Cloudflare logs are a live tail rather than hosted history.
+Select Cloudflare during setup, or run:
 
-Void owns the local Cloudflare authentication flow and stores browser credentials in the operating-system keychain. Interactive deploys sign in and select an account when needed; CI uses `CLOUDFLARE_API_TOKEN` and, for multi-account tokens, `CLOUDFLARE_ACCOUNT_ID`. Provisioning a **Hyperdrive** config for the first time specifically needs `CLOUDFLARE_API_TOKEN`, because the available Cloudflare tooling exposes no machine-readable Hyperdrive list for Void to check against; an already-provisioned Hyperdrive app deploys through browser OAuth. Named Cloudflare environments, worker-bearing `--skip-build`, and `node`/`bun`/`deno` targets fail closed with guidance. For auth apps, run `void db generate`; it automatically includes the production Better Auth schema, and deploy validates and applies the checked-in migration. Avoid concurrent first deploys from different machines or CI runners because the provisioning lock is local to one config path. See the [Cloudflare integration guide](../integrations/cloudflare.md#deploy-to-your-own-cloudflare-account) for the full walk-through and scope.
+```sh
+void deploy --platform cloudflare
+```
 
-To deploy to Node.js, Bun, or Deno instead of Cloudflare, set [`target`](../reference/config.md) in `void.json`. This builds a standalone server you can run anywhere, including Docker, Railway, and Fly.io. These targets do not have access to Void platform features such as D1, KV, R2, built-in auth, Workers AI, or cron scheduling. See the [Node.js, Bun, and Deno guide](../integrations/nodejs-bun-deno.md).
+Void supports full Worker apps, static sites, SPAs, and Cloudflare builds from supported frameworks. It provisions resources, applies migrations, and manages secrets for you. Commands such as `void secret put`, `void project logs`, and `void project rollback` then use the same account and Worker.
+
+See the [Cloudflare guide](../integrations/cloudflare.md#deploy-to-your-own-cloudflare-account) for supported features, CI setup, and deployment limits.
+
+### Node.js, Bun, and Deno
+
+Set [`target`](../reference/config.md#target) in `void.json` to build a standalone server for Node.js, Bun, or Deno. You can run the result on your own server or in a container.
+
+These targets don't provide Cloudflare bindings such as D1, KV, R2, and Workers AI. See the [Node.js, Bun, and Deno guide](../integrations/nodejs-bun-deno.md) for the features available on each target.

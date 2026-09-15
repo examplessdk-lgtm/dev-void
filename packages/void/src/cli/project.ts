@@ -129,6 +129,40 @@ export function writeDeploymentPlatform(root: string, platform: DeploymentPlatfo
   writeFileSync(filePath, JSON.stringify(next, null, 2) + '\n');
 }
 
+/** Select a verified platform without changing an existing project link. */
+export function writePlatformSelection(
+  root: string,
+  connection: { apiUrl: string; applicationDomain: string; proxyUrl: string },
+): boolean {
+  const existing = readProjectConfigFile(root);
+  const linked = readProjectConfig(root);
+  const pinnedUrl = isVoidInternalStaging(root)
+    ? VOID_CLOUD_STAGING_PLATFORM.apiUrl
+    : linked
+      ? (linked.platformUrl ?? VOID_CLOUD_PLATFORM.apiUrl)
+      : null;
+  if (pinnedUrl && pinnedUrl !== connection.apiUrl) {
+    return false;
+  }
+  const filePath = join(root, PROJECT_FILE);
+  mkdirSync(dirname(filePath), { recursive: true });
+  writeFileSync(
+    filePath,
+    JSON.stringify(
+      {
+        ...existing,
+        platform: 'void',
+        platformUrl: normalizePlatformApiUrl(connection.apiUrl),
+        applicationDomain: normalizeApplicationDomain(connection.applicationDomain),
+        proxyUrl: normalizePlatformApiUrl(connection.proxyUrl),
+      },
+      null,
+      2,
+    ) + '\n',
+  );
+  return true;
+}
+
 /**
  * Internal-only platform developers' staging switch.
  * This intentionally lives with the project link state, not public void.json.
@@ -181,7 +215,7 @@ export function attachSelectedPlatform(
     };
   }
   throw new Error(
-    `platform: No verified metadata is registered for ${apiUrl}. Run \`void platform connect ${apiUrl}\` before linking a project.`,
+    `platform: No verified metadata is registered for ${apiUrl}. Run \`void connect ${apiUrl}\` before linking a project.`,
   );
 }
 

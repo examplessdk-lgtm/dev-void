@@ -1,28 +1,23 @@
 import { Hono } from 'hono';
-import {
-  createPlatformEvent,
-  updatePlatformEventStatus,
-  skipPendingBatchEvents,
-  getPlatformEventsByBatchId,
-  getRecentPlatformEvents,
-} from '../../db.ts';
+import { getRecentPlatformEvents } from '../../db.ts';
 import type { ApiEnv } from '../../env.ts';
-import { generateId } from '../../id.ts';
+import { OperatorError } from '../../operator/common.ts';
 import {
-  listWorkerVersions,
-  listWorkerDeployments,
-  createWorkerDeployment,
-  type WorkerVersion,
-  type WorkerDeployment,
-} from '../../provisioning/workers-versions.ts';
+  workerEnvironment,
+  workerList,
+  workerDetail,
+  prepareWorkerRollback,
+  prepareAllWorkerRollbacks,
+  executeWorkerRollbacks,
+  workerBatch,
+} from '../../operator/worker-operations.ts';
 import type { PlatformEvent } from '../../types.ts';
-import { PLATFORM_WORKERS, getScriptName, getWorkerByName, parseEnv } from '../platform-workers.ts';
+import { PLATFORM_WORKERS } from '../platform-workers.ts';
 import { PlatformRollbackResultPage } from '../views/platform-rollback-result.tsx';
 import { PlatformWorkerDetailPage } from '../views/platform-worker-detail.tsx';
 import { PlatformPage } from '../views/platform.tsx';
 
 const app = new Hono<ApiEnv>();
-
 // This console intentionally models the hosted production/staging topology and
 // its literal script names. Self-hosted installations are upgraded through the
 // ownership-aware CLI; letting this route run there could target an unrelated
@@ -41,12 +36,14 @@ app.use('*', async (context, next) => {
   await next();
 });
 
+app.onError((error, context) => {
+  if (error instanceof OperatorError) {
+    return context.text(error.message, error.status);
+  }
+  console.error(error);
+  return context.text('Platform operation failed.', 500);
+});
 const PAGE_SIZE = 15;
-
-function toErrorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
-}
-
 export type ActivityEntry =
   | { kind: 'single'; event: PlatformEvent }
   | { kind: 'batch'; batchId: string; events: ReadonlyArray<PlatformEvent> };
@@ -83,289 +80,113 @@ function collapseEvents(events: ReadonlyArray<PlatformEvent>): ReadonlyArray<Act
   return entries;
 }
 
-async function fetchWorkerDetail(
-  accountId: string,
-  apiToken: string,
-  scriptName: string,
-): Promise<{
-  versions: ReadonlyArray<WorkerVersion>;
-  deployment?: WorkerDeployment;
-  error?: string;
-}> {
-  const [versionsResult, deploymentsResult] = await Promise.allSettled([
-    listWorkerVersions(accountId, apiToken, scriptName),
-    listWorkerDeployments(accountId, apiToken, scriptName),
-  ]);
-
-  const versions = versionsResult.status === 'fulfilled' ? versionsResult.value.items : [];
-  const deployment =
-    deploymentsResult.status === 'fulfilled' ? deploymentsResult.value.deployments[0] : undefined;
-
-  const errors: Array<string> = [];
-  if (versionsResult.status === 'rejected') {
-    errors.push(toErrorMessage(versionsResult.reason));
-  }
-  if (deploymentsResult.status === 'rejected') {
-    errors.push(toErrorMessage(deploymentsResult.reason));
-  }
-
-  return { versions, deployment, error: errors.length > 0 ? errors.join('; ') : undefined };
-}
-
-// GET / — overview of all platform workers
 app.get('/', async (context) => {
-  const env = parseEnv(context.env.PLATFORM_ENV);
-  const accountId = context.env.CF_ACCOUNT_ID;
-  const apiToken = context.env.CF_API_TOKEN;
-  const db = context.get('db');
-  const tz = (context.req.raw.cf?.timezone as string | undefined) ?? undefined;
-
-  const page = Math.max(1, parseInt(context.req.query('page') ?? '1') || 1);
-
-  const [cfResults, rawEvents] = await Promise.all([
-    Promise.allSettled(
-      PLATFORM_WORKERS.map(async (worker) => {
-        const scriptName = getScriptName(worker, env);
-        const { deployments } = await listWorkerDeployments(accountId, apiToken, scriptName);
-        const current = deployments[0];
-        const currentVersionId = current?.versions.find((v) => v.percentage === 100)?.version_id;
-        // Find the first deployment whose active version differs from current
-        // (skips over rollback-induced deployments that point back to the same version)
-        const previous = deployments.find((d) => {
-          const vid = d.versions.find((v) => v.percentage === 100)?.version_id;
-          return vid && vid !== currentVersionId;
-        });
-        const previousVersionId = previous?.versions.find((v) => v.percentage === 100)?.version_id;
-        return { worker, scriptName, deployment: current, previousVersionId };
-      }),
-    ),
-    getRecentPlatformEvents(db, env, 500),
+  const environment = workerEnvironment(context.env);
+  const [result, rawEvents] = await Promise.all([
+    workerList(context.env, environment),
+    getRecentPlatformEvents(context.get('db'), environment, 500),
   ]);
-
-  const workers = cfResults.map((r, i) => {
-    if (r.status === 'fulfilled') {
-      return r.value;
-    }
-    const worker = PLATFORM_WORKERS[i];
-    const errorMsg = toErrorMessage(r.reason);
-    console.error(`Failed to fetch deployments for ${getScriptName(worker, env)}: ${errorMsg}`);
-    return { worker, scriptName: getScriptName(worker, env), error: errorMsg };
-  });
-
   const allEntries = collapseEvents(rawEvents);
-  const totalPages = Math.max(1, Math.ceil(allEntries.length / PAGE_SIZE));
-  const entries = allEntries.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
-
+  const page = Math.max(1, parseInt(context.req.query('page') ?? '1', 10) || 1);
   return context.html(
     <PlatformPage
-      workers={workers}
-      env={env}
+      workers={result.workers}
+      env={environment}
       username={context.get('user').login}
-      tz={tz}
-      entries={entries}
+      tz={context.req.raw.cf?.timezone as string | undefined}
+      entries={allEntries.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)}
       page={page}
-      totalPages={totalPages}
+      totalPages={Math.max(1, Math.ceil(allEntries.length / PAGE_SIZE))}
     />,
   );
 });
 
-// POST /rollback-all — orchestrated rollback of all platform workers
 app.post('/rollback-all', async (context) => {
-  const env = parseEnv(context.env.PLATFORM_ENV);
-  const accountId = context.env.CF_ACCOUNT_ID;
-  const apiToken = context.env.CF_API_TOKEN;
-  const db = context.get('db');
-  const tz = (context.req.raw.cf?.timezone as string | undefined) ?? undefined;
-
+  const environment = workerEnvironment(context.env);
   const body = await context.req.parseBody();
-  const batchId = generateId('batch');
-
-  // Rollback order: reverse deploy order (dispatch → dashboard → api → tail → proxy)
-  const rollbackOrder = [...PLATFORM_WORKERS].sort((a, b) => b.deployOrder - a.deployOrder);
-
-  // Validate all version IDs present
-  const workerTargets = rollbackOrder.map((worker) => {
-    const versionId = body[`version_${worker.name}`] as string | undefined;
-    const scriptName = getScriptName(worker, env);
-    return { worker, scriptName, versionId };
-  });
-
-  const missing = workerTargets.filter((t) => !t.versionId);
-  if (missing.length > 0) {
-    return context.html(
-      `<h1>Missing version IDs for: ${missing.map((m) => m.worker.name).join(', ')}</h1>`,
-      400,
-    );
-  }
-
-  // Insert all events as pending
-  const eventRows = await Promise.all(
-    workerTargets.map((t) =>
-      createPlatformEvent(db, {
-        id: generateId('pevt'),
-        batch_id: batchId,
-        action: 'rollback_all',
-        worker_name: t.worker.name,
-        environment: env,
-        version_id: t.versionId!,
-        script_name: t.scriptName,
-        status: 'pending',
-        error_message: null,
-        admin_user_id: context.get('user').id,
-        admin_login: context.get('user').login,
-      }),
-    ),
+  const versions = Object.fromEntries(
+    PLATFORM_WORKERS.map((worker) => [worker.name, body[`version_${worker.name}`]]),
   );
-
-  // Execute rollbacks sequentially, stop on failure
-  for (let i = 0; i < workerTargets.length; i++) {
-    const target = workerTargets[i];
-    const event = eventRows[i];
-
-    try {
-      await createWorkerDeployment(accountId, apiToken, target.scriptName, target.versionId!);
-      await updatePlatformEventStatus(db, event.id, 'success');
-    } catch (err) {
-      const errorMessage = toErrorMessage(err);
-      console.error(`Batch rollback failed for ${target.scriptName} to ${target.versionId}:`, err);
-      await updatePlatformEventStatus(db, event.id, 'failed', errorMessage);
-      // Mark all remaining pending events as skipped in one query
-      await skipPendingBatchEvents(db, batchId);
-      break;
-    }
-  }
-
-  const finalEvents = await getPlatformEventsByBatchId(db, batchId);
-
+  const targets = await prepareAllWorkerRollbacks(context.env, environment, versions);
+  const result = await executeWorkerRollbacks(
+    context.get('db'),
+    context.env,
+    context.get('user'),
+    environment,
+    targets,
+    true,
+  );
   return context.html(
     <PlatformRollbackResultPage
-      events={finalEvents}
-      batchId={batchId}
-      env={env}
+      events={result.events}
+      batchId={result.batchId!}
+      env={environment}
       username={context.get('user').login}
-      tz={tz}
+      tz={context.req.raw.cf?.timezone as string | undefined}
     />,
   );
 });
 
-// GET /events/:batchId — view past batch rollback results
 app.get('/events/:batchId', async (context) => {
-  const batchId = context.req.param('batchId');
-  const db = context.get('db');
-  const tz = (context.req.raw.cf?.timezone as string | undefined) ?? undefined;
-
-  const events = await getPlatformEventsByBatchId(db, batchId);
-  if (events.length === 0) {
-    return context.html('<h1>Batch not found</h1>', 404);
-  }
-
-  const env = events[0].environment;
-
+  const result = await workerBatch(context.get('db'), context.env, context.req.param('batchId'));
   return context.html(
     <PlatformRollbackResultPage
-      events={events}
-      batchId={batchId}
-      env={env}
+      events={result.events}
+      batchId={result.batchId}
+      env={result.environment}
       username={context.get('user').login}
-      tz={tz}
+      tz={context.req.raw.cf?.timezone as string | undefined}
     />,
   );
 });
 
-// GET /:name — version history for a single worker
 app.get('/:name', async (context) => {
-  const env = parseEnv(context.env.PLATFORM_ENV);
-  const worker = getWorkerByName(context.req.param('name'));
-  if (!worker) {
-    return context.html('<h1>Worker not found</h1>', 404);
-  }
-
-  const scriptName = getScriptName(worker, env);
-  const tz = (context.req.raw.cf?.timezone as string | undefined) ?? undefined;
-  const { versions, deployment, error } = await fetchWorkerDetail(
-    context.env.CF_ACCOUNT_ID,
-    context.env.CF_API_TOKEN,
-    scriptName,
-  );
-
+  const environment = workerEnvironment(context.env);
+  const result = await workerDetail(context.env, environment, context.req.param('name'));
   return context.html(
     <PlatformWorkerDetailPage
-      worker={worker}
-      env={env}
-      scriptName={scriptName}
-      versions={versions}
-      deployment={deployment}
-      error={error}
+      {...result}
+      env={environment}
       username={context.get('user').login}
-      tz={tz}
+      tz={context.req.raw.cf?.timezone as string | undefined}
     />,
   );
 });
 
-// POST /:name/rollback — deploy a previous version at 100%
 app.post('/:name/rollback', async (context) => {
-  const env = parseEnv(context.env.PLATFORM_ENV);
-  const worker = getWorkerByName(context.req.param('name'));
-  if (!worker) {
-    return context.html('<h1>Worker not found</h1>', 404);
-  }
-
+  const environment = workerEnvironment(context.env);
   const body = await context.req.parseBody();
-  const versionId = body.version_id as string;
-  if (!versionId) {
-    return context.html('<h1>Missing version_id</h1>', 400);
+  if (typeof body.version_id !== 'string') {
+    throw new OperatorError(400, 'Missing version_id.');
   }
-
-  const accountId = context.env.CF_ACCOUNT_ID;
-  const apiToken = context.env.CF_API_TOKEN;
-  const scriptName = getScriptName(worker, env);
-  const db = context.get('db');
-
-  let status: 'success' | 'failed' = 'success';
-  let errorMessage: string | null = null;
-
-  try {
-    await createWorkerDeployment(accountId, apiToken, scriptName, versionId);
-  } catch (err) {
-    status = 'failed';
-    errorMessage = toErrorMessage(err);
-    console.error(`Rollback failed for ${scriptName} to version ${versionId}:`, err);
-  }
-
-  await createPlatformEvent(db, {
-    id: generateId('pevt'),
-    batch_id: null,
-    action: 'rollback',
-    worker_name: worker.name,
-    environment: env,
-    version_id: versionId,
-    script_name: scriptName,
-    status,
-    error_message: errorMessage,
-    admin_user_id: context.get('user').id,
-    admin_login: context.get('user').login,
-  });
-
-  if (status === 'failed') {
-    const tz = (context.req.raw.cf?.timezone as string | undefined) ?? undefined;
-    const { versions, deployment } = await fetchWorkerDetail(accountId, apiToken, scriptName);
-
+  const target = await prepareWorkerRollback(
+    context.env,
+    environment,
+    context.req.param('name'),
+    body.version_id,
+  );
+  const result = await executeWorkerRollbacks(
+    context.get('db'),
+    context.env,
+    context.get('user'),
+    environment,
+    [target],
+  );
+  if (!result.ok) {
+    const detail = await workerDetail(context.env, environment, target.worker.name);
+    const outcome = result.events[0];
     return context.html(
       <PlatformWorkerDetailPage
-        worker={worker}
-        env={env}
-        scriptName={scriptName}
-        versions={versions}
-        deployment={deployment}
-        error={`Rollback failed: ${errorMessage}`}
+        {...detail}
+        env={environment}
+        error={`Rollback outcome: ${outcome.status}. ${outcome.error_message ?? outcome.auditError ?? ''}`}
         username={context.get('user').login}
-        tz={tz}
+        tz={context.req.raw.cf?.timezone as string | undefined}
       />,
-      500,
+      502,
     );
   }
-
-  return context.redirect(`/admin/platform/${worker.name}`);
+  return context.redirect(`/admin/platform/${target.worker.name}`);
 });
 
 export default app;

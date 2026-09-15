@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   getPlatformRuntimeDirectory,
   parsePlatformRuntimeManifest,
@@ -90,6 +92,35 @@ describe('platform runtime manifest', () => {
     );
   });
 
+  it('starts the packaged API Worker in the bundled local runtime', async () => {
+    const runtimeDirectory = getPlatformRuntimeDirectory();
+    const runtime = readPlatformRuntimeManifest();
+    const apiPackagePath = fileURLToPath(
+      new URL('../../../../platform/packages/api/package.json', import.meta.url),
+    );
+    const apiRequire = createRequire(apiPackagePath);
+    const miniflarePath = createRequire(apiRequire.resolve('wrangler')).resolve('miniflare');
+    const { Miniflare, convertV4MiniflareOptions } = (await import(
+      pathToFileURL(miniflarePath).href
+    )) as MiniflareModule;
+    const miniflare = new Miniflare(
+      convertV4MiniflareOptions({
+        bindings: { PLATFORM_TRAFFIC_STATE: 'staging' },
+        compatibilityDate: '2026-02-24',
+        compatibilityFlags: ['nodejs_compat'],
+        modules: true,
+        scriptPath: join(runtimeDirectory, runtime.artifacts.api.path),
+      }),
+    );
+
+    try {
+      await miniflare.ready;
+      expect((await miniflare.dispatchFetch('http://localhost/health')).status).toBe(503);
+    } finally {
+      await miniflare.dispose();
+    }
+  });
+
   it('rejects a custom runtime whose artifacts changed after its manifest was built', () => {
     const temporary = mkdtempSync(join(tmpdir(), 'void-custom-runtime-test-'));
     const runtimeDirectory = join(temporary, 'runtime');
@@ -109,3 +140,12 @@ describe('platform runtime manifest', () => {
 function digest(value: Buffer): string {
   return createHash('sha256').update(value).digest('hex');
 }
+
+type MiniflareModule = Readonly<{
+  Miniflare: new (options: Record<string, unknown>) => {
+    readonly ready: Promise<URL>;
+    dispatchFetch(url: string): Promise<Response>;
+    dispose(): Promise<void>;
+  };
+  convertV4MiniflareOptions(options: Record<string, unknown>): Record<string, unknown>;
+}>;

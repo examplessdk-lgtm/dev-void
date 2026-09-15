@@ -50,7 +50,7 @@ export async function discoverPlatform(
   return discovery;
 }
 
-async function promptUrl(): Promise<string> {
+export async function promptPlatformUrl(): Promise<string> {
   if (!process.stdin.isTTY) {
     throw new Error('platform: A platform URL is required in non-interactive mode.');
   }
@@ -80,7 +80,7 @@ async function resolveConnection(selector: string): Promise<PlatformConnection> 
   }
   const connections = listPlatformConnections();
   if (connections.length === 0) {
-    throw new Error('platform: No platforms configured. Run `void platform connect <url>`.');
+    throw new Error('platform: No platforms configured. Run `void connect <url>`.');
   }
   if (connections.length === 1) {
     return selectPlatformConnection(connections[0]!.id);
@@ -111,27 +111,28 @@ function showConnection(connection: PlatformConnection, activeId: string | null)
   }
 }
 
+export function saveDiscoveredPlatform(discovery: PlatformDiscoveryDocument): PlatformConnection {
+  return savePlatformConnection({
+    accountId: null,
+    apiUrl: discovery.apiUrl,
+    applicationDomain: discovery.applicationDomain,
+    displayName: discovery.displayName,
+    installationId: discovery.installationId,
+    kind: discovery.installationId ? 'installed' : 'connected',
+    proxyUrl: discovery.proxyUrl,
+  });
+}
+
 export async function runPlatformCommand(_root: string, args: PlatformArgs): Promise<void> {
-  if (args.subcommand === 'connect') {
-    const discovery = await discoverPlatform(args.url || (await promptUrl()));
-    const connection = savePlatformConnection({
-      accountId: null,
-      apiUrl: discovery.apiUrl,
-      applicationDomain: discovery.applicationDomain,
-      displayName: discovery.displayName,
-      installationId: discovery.installationId,
-      kind: discovery.installationId ? 'installed' : 'connected',
-      proxyUrl: discovery.proxyUrl,
-    });
-    log.success(`Connected to ${pc.bold(connection.displayName)} at ${connection.apiUrl}.`);
-    log.info('Run `void auth login` to authenticate with this platform.');
+  if (args.subcommand === 'operator') {
+    const { runOperatorCommand } = await import('./operator-cmd.ts');
+    await runOperatorCommand(args);
     return;
   }
-
   if (args.subcommand === 'list') {
     const connections = listPlatformConnections();
     if (connections.length === 0) {
-      log.info('No platforms configured. Run `void platform connect <url>`.');
+      log.info('No platforms configured. Run `void connect <url>`.');
       return;
     }
     const activeId = getActivePlatformConnection()?.id ?? null;

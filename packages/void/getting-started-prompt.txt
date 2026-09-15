@@ -1,5 +1,15 @@
 Void is a fullstack Vite framework and deployment platform for Cloudflare.
+Deployment connection: `void connect` chooses Cloudflare or a Void platform and signs in when needed. Use `void connect --platform cloudflare` to select a Cloudflare account, or `void connect <url>` to join a company platform. Existing project links are preserved when connecting elsewhere. `--no-login` registers a verified Void platform without authentication; authenticated headless connection requires a valid origin-scoped keychain session or `VOID_TOKEN` with matching `VOID_API_URL`. Platform installation and administration use `void platform`.
 Non-interactive self-hosted platform lifecycle mutations require `--yes`; `--plan` is read-only and needs no acknowledgement. Published routes and custom domains are observed for recovery but retained for explicit dashboard cleanup because Cloudflare cannot condition deletion on an immutable attachment generation.
+If you are administering an installed platform, use `void platform auth login`
+for a separate, revocable administrator session. The `user`, `project`,
+`deployment`, `build`, `signup`, `invitation`, and `system` groups under
+`void platform` provide terminal administration. Read their `--help`; use
+`--plan` before changes, `--yes` for approved noninteractive mutations, and
+`--json` for scripts. Operator commands select the active connection or explicit
+`--connection`/`VOID_API_URL`, never an application's project file. Automation
+uses `VOID_OPERATOR_TOKEN` from a secret manager with an explicit origin.
+
 In an empty directory, set up a new app like this:
 
 npm install -D void
@@ -12,7 +22,7 @@ In an empty directory, `void init` will add the matching Pages adapter and start
 
 During `void init`, choose Vite+ unless you specifically want plain Vite scripts, then choose a Pages framework (React, Vue, Svelte, or Solid). Choose D1 for a zero-config default, PostgreSQL for existing Postgres, or MySQL for existing MySQL-compatible infrastructure.
 
-At the end of the interactive flow, `void init` asks for Cloudflare (default), Void, or Skip deployment setup and saves the choice in `.void/project.json`. Choosing Cloudflare creates or augments `wrangler.jsonc`, handles secure browser sign-in through Void's bundled tooling, and saves the selected `account_id`. Void-managed deployment requires an explicit platform: connect with `void platform connect <url>`, or preview and install a company control plane with `void platform install --plan` and `void platform install`. Your first app deploy is then just:
+At the end of the interactive flow, `void init` asks for Cloudflare (default), Void, or Skip deployment setup and saves the choice in `.void/project.json`. Choosing Cloudflare creates or augments `wrangler.jsonc`, handles secure browser sign-in through Void's bundled tooling, and saves the selected `account_id`. Void-managed deployment requires an explicit platform: connect with `void connect <url>`, or preview and install a company control plane with `void platform install --plan` and `void platform install`. Your first app deploy is then just:
 
 void deploy
 

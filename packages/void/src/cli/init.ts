@@ -22,17 +22,12 @@ import { writeDrizzleConfig } from '../drizzle/config.ts';
 import { detectFramework, type DetectedFramework } from '../plugin-inference.ts';
 import { readProjectPaths } from '../project-paths.ts';
 import { detectAgents, getAgentById, getPackageDir, type AgentConfig } from './agents.ts';
-import {
-  cloudflareAuthEnvironment,
-  ensureCloudflareAuthentication,
-  type CloudflareAccount,
-} from './cloudflare-auth.ts';
+import { connectCloudflare } from './cloudflare-connect.ts';
 import { maybeSetupDeployProject } from './deploy-setup.ts';
 import { maybeScaffoldEnvTs } from './env-scaffold.ts';
 import { cliTitle } from './output.ts';
-import { discoverPlatform } from './platform-cmd.ts';
-import { savePlatformConnection } from './platform-registry.ts';
-import { formatProjectCommand, resolveWranglerArgv } from './preset.ts';
+import { discoverPlatform, saveDiscoveredPlatform } from './platform-cmd.ts';
+import { formatProjectCommand } from './preset.ts';
 import {
   readDeploymentPlatform,
   readProjectConfig,
@@ -1900,105 +1895,22 @@ export async function ensureVoidPlatformConnection(
     selectedApiUrl = String(value);
   }
   const discovery = await discoverPlatform(selectedApiUrl);
-  savePlatformConnection({
-    accountId: null,
-    apiUrl: discovery.apiUrl,
-    applicationDomain: discovery.applicationDomain,
-    displayName: discovery.displayName,
-    installationId: discovery.installationId,
-    kind: discovery.installationId ? 'installed' : 'connected',
-    proxyUrl: discovery.proxyUrl,
-  });
+  saveDiscoveredPlatform(discovery);
   if (promptedForPlatform) {
     log.success(`Connected to ${discovery.displayName} at ${discovery.apiUrl}.`);
   }
   return discovery;
 }
 
-function runInitWrangler(
-  root: string,
-  args: Array<string>,
-  capture: boolean,
-): { status: number | null; stdout: string; stderr: string } {
-  const [command, ...prefix] = resolveWranglerArgv(root);
-  const result = spawnSync(command, [...prefix, ...args], {
-    cwd: root,
-    encoding: 'utf-8',
-    env: cloudflareAuthEnvironment(),
-    stdio: capture ? ['ignore', 'pipe', 'pipe'] : 'inherit',
-  });
-  return {
-    status: result.status,
-    stdout: typeof result.stdout === 'string' ? result.stdout : '',
-    stderr: typeof result.stderr === 'string' ? result.stderr : '',
-  };
-}
-
 async function setupCloudflareDeployment(root: string): Promise<void> {
-  const compatibilityDate = readProjectWranglerCompatDate(root) ?? getTodayCompatDate();
-  const initialWrite = writeProvisionedWranglerConfig(root, { compatibilityDate });
-  if (initialWrite.modified) {
-    log.success(
-      `Created or updated ${basename(initialWrite.configPath)} for Cloudflare deployment`,
-    );
-  } else {
-    log.info(`${basename(initialWrite.configPath)} is ready for Cloudflare deployment`);
-  }
-
-  let accounts: ReadonlyArray<CloudflareAccount>;
   try {
-    ({ accounts } = await ensureCloudflareAuthentication({
-      interactive: true,
-      requireAccounts: true,
-      runWrangler: (args, capture) => runInitWrangler(root, [...args], capture),
-      whoamiArgs: ['-c', initialWrite.configPath],
-    }));
+    await connectCloudflare(root, true);
   } catch (error) {
     log.warn(error instanceof Error ? error.message : String(error));
     note(
-      `${basename(initialWrite.configPath)} is ready. Run \`void init\` again when you want to finish Cloudflare setup.`,
+      'Run `void connect --platform cloudflare` when you want to finish Cloudflare setup.',
       'Cloudflare deployment',
     );
-    return;
-  }
-
-  if (accounts.length === 0) {
-    log.warn('Cloudflare authentication returned no accounts.');
-    return;
-  }
-
-  const existingConfig = parseJsoncFile(initialWrite.configPath);
-  const existingAccountId =
-    typeof existingConfig?.account_id === 'string' ? existingConfig.account_id : undefined;
-  const existingAccount = accounts.find((account) => account.id === existingAccountId);
-  let account = existingAccount ?? accounts[0];
-
-  if (!existingAccount && accounts.length > 1) {
-    const accountId = await select({
-      message: 'Choose a Cloudflare account:',
-      initialValue: accounts[0].id,
-      options: accounts.map((candidate) => ({
-        value: candidate.id,
-        label: candidate.name,
-        hint: candidate.id,
-      })),
-    });
-    if (isCancel(accountId) || typeof accountId === 'symbol') {
-      cancel('Setup cancelled.');
-      process.exit(0);
-    }
-    account = accounts.find((candidate) => candidate.id === accountId) ?? accounts[0];
-  }
-
-  const accountWrite = writeProvisionedWranglerConfig(
-    root,
-    { accountId: account.id },
-    { configPath: initialWrite.configPath },
-  );
-  if (accountWrite.modified) {
-    log.success(`Configured Cloudflare account: ${account.name}`);
-  } else {
-    log.info(`Cloudflare account already configured: ${account.name}`);
   }
 }
 

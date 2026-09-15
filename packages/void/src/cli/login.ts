@@ -4,20 +4,32 @@ import {
   getTokenSource,
   removeToken,
   runLogin,
+  runPlatformLogin,
+  savePlatformToken,
   saveToken,
   isStagingMode,
 } from './auth.ts';
 import { isExpiredTokenError, PlatformClient } from './client.ts';
 import { cliTitle, createSpinner, pc } from './output.ts';
 
-export async function promptForLoginToken(root: string = process.cwd()): Promise<string> {
-  const provider = await select({
-    message: 'Choose a login provider:',
-    options: [
-      { value: 'github', label: 'GitHub' },
-      { value: 'google', label: 'Google' },
-    ],
-  });
+export async function promptForLoginToken(
+  root: string = process.cwd(),
+  platform?: { apiUrl: string; authenticationProviders: ReadonlyArray<'github' | 'google'> },
+): Promise<string> {
+  const providers = platform?.authenticationProviders ?? ['github', 'google'];
+  if (providers.length === 0) {
+    throw new Error('auth: This platform has no login providers.');
+  }
+  const provider =
+    providers.length === 1
+      ? providers[0]!
+      : await select({
+          message: 'Choose a login provider:',
+          options: providers.map((value) => ({
+            value,
+            label: value === 'github' ? 'GitHub' : 'Google',
+          })),
+        });
 
   if (isCancel(provider) || typeof provider === 'symbol') {
     cancel('Login cancelled.');
@@ -29,12 +41,19 @@ export async function promptForLoginToken(root: string = process.cwd()): Promise
   s.start(`Opening browser for ${providerName} login...`);
 
   try {
-    const token = await runLogin(root, provider, (url) => {
+    const onUrl = (url: string) => {
       s.message(
         `Waiting for ${providerName} login. If your browser didn't open, visit:\n${pc.cyan(url)}`,
       );
-    });
-    saveToken(token, root);
+    };
+    const token = platform
+      ? await runPlatformLogin(platform.apiUrl, provider, onUrl)
+      : await runLogin(root, provider, onUrl);
+    if (platform) {
+      savePlatformToken(token, platform.apiUrl);
+    } else {
+      saveToken(token, root);
+    }
     s.stop('Logged in!');
     return token;
   } catch (err) {

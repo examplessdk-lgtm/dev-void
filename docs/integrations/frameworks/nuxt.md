@@ -4,7 +4,7 @@ outline: deep
 
 # Nuxt
 
-[Nuxt](https://nuxt.com/) has its own CLI and build system based on Nitro. Add `voidPlugin()` to Nuxt's Vite config for binding inference, typed DB, and migrations during development.
+Use Void with [Nuxt](https://nuxt.com/) for resource detection, typed database queries, and migrations. Nuxt keeps its own build and Cloudflare integration; Void plugs into its Vite configuration.
 
 ## Setup
 
@@ -146,7 +146,7 @@ export default defineQueue<{ to: string; subject: string }>(async (batch) => {
 
 ### Environment Variables
 
-Void gives you a typed env layer: declare keys in `env.ts`, read them via `import { env } from "void/env"`, and get schema validation at build + deploy time plus a client-leak guard that fails the build if a server-only key reaches the browser. See the [env vars guide](../../guide/env-vars.md) for the full feature set.
+Declare environment variables in `env.ts`, then read them with `import { env } from "void/env"`. Void supplies types, checks values during build and deploy, and stops the build if client code references a server-only key. See [Environment Variables](../../guide/env-vars.md).
 
 `void/env` replaces `useRuntimeConfig()` and `event.context.cloudflare.env` for env-var access. Keep `event.context.cloudflare.env` around when you need raw binding access (D1, KV, R2, etc.), and `useRuntimeConfig()` when you need non-env runtime config.
 

@@ -16,7 +16,7 @@ const { parsePlatformRuntimeManifest, platformDatabaseSchemaDigest } = await imp
 );
 
 const workers = [
-  ['api', join(repositoryRoot, 'platform', 'packages', 'api', 'src', 'index.ts')],
+  ['api', join(repositoryRoot, 'platform', 'packages', 'api', 'src', 'worker', 'index.ts')],
   ['proxy', join(repositoryRoot, 'platform', 'packages', 'proxy', 'src', 'index.ts')],
   ['tail', join(repositoryRoot, 'platform', 'packages', 'tail', 'src', 'index.ts')],
   ['dispatch', join(repositoryRoot, 'platform', 'packages', 'dispatch', 'src', 'index.ts')],

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vite-plus/test';
-import { runLoginCommand } from '../../src/cli/login.ts';
+import { promptForLoginToken, runLoginCommand } from '../../src/cli/login.ts';
 
 const mockWarn = vi.fn();
 const mockError = vi.fn();
@@ -16,6 +16,8 @@ const mockGetToken = vi.fn();
 const mockGetTokenSource = vi.fn();
 const mockRemoveToken = vi.fn();
 const mockRunLogin = vi.fn();
+const mockRunPlatformLogin = vi.fn();
+const mockSavePlatformToken = vi.fn();
 const mockSaveToken = vi.fn();
 const mockWhoami = vi.fn();
 const mockIsExpiredTokenError = vi.fn();
@@ -46,6 +48,8 @@ vi.mock('../../src/cli/auth', () => ({
   getTokenSource: (...args: Array<unknown>) => mockGetTokenSource(...args),
   removeToken: (...args: Array<unknown>) => mockRemoveToken(...args),
   runLogin: (...args: Array<unknown>) => mockRunLogin(...args),
+  runPlatformLogin: (...args: Array<unknown>) => mockRunPlatformLogin(...args),
+  savePlatformToken: (...args: Array<unknown>) => mockSavePlatformToken(...args),
   saveToken: (...args: Array<unknown>) => mockSaveToken(...args),
   isStagingMode: () => false,
 }));
@@ -75,6 +79,8 @@ beforeEach(() => {
   mockGetTokenSource.mockReset();
   mockRemoveToken.mockReset();
   mockRunLogin.mockReset();
+  mockRunPlatformLogin.mockReset().mockResolvedValue('platform-token');
+  mockSavePlatformToken.mockReset();
   mockSaveToken.mockReset();
   mockWhoami.mockReset();
   mockIsExpiredTokenError.mockReset();
@@ -88,6 +94,25 @@ beforeEach(() => {
 
 describe('runLoginCommand', () => {
   const root = '/project';
+
+  it('logs into the explicit platform with its sole provider and scopes token storage', async () => {
+    await promptForLoginToken(root, {
+      apiUrl: 'https://company.example.com',
+      authenticationProviders: ['github'],
+    });
+    expect(mockSelect).not.toHaveBeenCalled();
+    expect(mockRunLogin).not.toHaveBeenCalled();
+    expect(mockRunPlatformLogin).toHaveBeenCalledWith(
+      'https://company.example.com',
+      'github',
+      expect.any(Function),
+    );
+    expect(mockSavePlatformToken).toHaveBeenCalledWith(
+      'platform-token',
+      'https://company.example.com',
+    );
+    expect(mockSaveToken).not.toHaveBeenCalled();
+  });
 
   it('keeps the logout-first flow when the stored token is still valid', async () => {
     mockGetToken.mockReturnValue('existing-token');

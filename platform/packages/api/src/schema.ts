@@ -304,6 +304,38 @@ export const emailDestinations = pgTable(
 );
 
 // ---------------------------------------------------------------------------
+// Operator sessions and mutation audit, separate from browser/deployment auth.
+// Audit identities survive account deletion deliberately.
+// ---------------------------------------------------------------------------
+export const operatorSessions = pgTable(
+  'operator_sessions',
+  {
+    id: text('id').primaryKey(),
+    user_id: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    expires_at: timestamp('expires_at', { mode: 'string' }).notNull(),
+    created_at: timestamp('created_at', { mode: 'string' }).notNull().defaultNow(),
+  },
+  (table) => [index('idx_operator_sessions_expiry').on(table.expires_at)],
+);
+
+export const operatorEvents = pgTable(
+  'operator_events',
+  {
+    id: text('id').primaryKey(),
+    user_id: text('user_id').notNull(),
+    login: text('login').notNull(),
+    action: text('action').notNull(),
+    target: text('target').notNull(),
+    status: text('status').notNull().$type<'pending' | 'success' | 'failed'>(),
+    http_status: integer('http_status'),
+    created_at: timestamp('created_at', { mode: 'string' }).notNull().defaultNow(),
+  },
+  (table) => [index('idx_operator_events_created').on(table.created_at, table.id)],
+);
+
+// ---------------------------------------------------------------------------
 // platform_events (audit log for admin platform rollbacks)
 // ---------------------------------------------------------------------------
 export const platformEvents = pgTable(

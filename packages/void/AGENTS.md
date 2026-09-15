@@ -76,6 +76,8 @@ src/
   cli/
     cli.ts                  # CLI entry: `void deploy|link|login`
     deploy.ts               # Managed/native target dispatch and deployment orchestration
+    connect.ts              # Developer onboarding: select Cloudflare or Void and authenticate
+    cloudflare-connect.ts   # Shared account setup for connect and init
     cloudflare-deploy/
       classify.ts           # Fail-closed native app-shape classifier
       config.ts             # Shared Wrangler JSON/JSONC config readers
@@ -91,6 +93,8 @@ src/
 ```
 
 ### Key Design Decisions
+
+- **Deployment connection**: `void connect [url] [--platform cloudflare|void]` is the developer entry point. A URL chooses Void; without arguments the CLI offers both targets. Interactive connection reuses or obtains credentials for the selected origin/account. `--no-login` saves only verified Void connection metadata; headless authenticated connection requires an origin-scoped keychain session or `VOID_TOKEN` with matching `VOID_API_URL`. Existing project links are preserved when connecting elsewhere. Platform installation and administration remain under `void platform`; it has no `connect` subcommand.
 
 - **Import redirection**: The routing plugin's `resolveId` hook redirects bare `"void"` imports to `void/handler` (the lightweight subpath). Without this, route files pull the entire plugin (vite, @cloudflare/vite-plugin, lightningcss) into the Worker bundle. Uses `import.meta.resolve()` to compute absolute paths at plugin init.
 - **Pre-resolved paths in codegen**: Generated virtual module code uses absolute paths for `hono` and `void/response` (resolved via `import.meta.resolve()`). Virtual modules have no filesystem location, so bare specifiers can't resolve from them.

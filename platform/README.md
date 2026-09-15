@@ -70,12 +70,34 @@ Paths in this file are relative to `platform/` unless they begin with `../`. For
 | `vp run test:all`                           | Run formatting, linting, all builds, typechecks, and all SDK/platform tests |
 | `vp run deploy`                             | Deploy `api` → `proxy` → `tail` → `dispatch` → `dashboard`                  |
 | `vp run deploy:dashboard`                   | Deploy the dashboard only                                                   |
-| `vp run deploy:staging`                     | Legacy/manual per-service staging deploy (CI uses `void platform upgrade`)  |
+| `vp run deploy:staging`                     | Deploy the first-party Void Cloud staging environment                       |
 | `vp run deploy:staging:dashboard`           | Deploy the staging dashboard only                                           |
 
 The `@voidcloud/platform` workspace package retains the dashboard-only `dev` and `build` scripts. Dashboard deploys run after the platform workers in the platform deploy pipeline.
 
 **Production deploys on push to `prod`; staging deploys every passing `main` runtime through the public `void platform upgrade --runtime` lifecycle.** See [`meta/operations.md`](./meta/operations.md#github-actions) for the workflow triggers and protected-environment requirements. Do not push `prod` or ask to deploy.
+
+## Operator CLI
+
+Sign in as an administrator to inspect users, projects, deployments, and platform
+health:
+
+```sh
+void platform auth login
+void platform user list
+void platform system health
+```
+
+Commands use the selected platform connection. Add `--plan` to preview a change,
+`--yes` to apply it in a script, and `--json` to read structured results. The
+[Platform Administration guide](../docs/guide/platform-administration.md) covers
+the workflows; the [CLI reference](../docs/reference/cli.md#operator-commands)
+lists all commands and options.
+
+The CLI and browser admin UI share the same server operations. The operator API
+is served at `/operator/v1` and records changes in `operator_events`. Apply
+`0033_operator_sessions_and_events` before deploying the API; the migration adds
+tables and indexes that remain compatible with existing Workers.
 
 ## Local Development
 

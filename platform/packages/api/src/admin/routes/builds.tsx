@@ -1,7 +1,8 @@
 import { Hono } from 'hono';
-import { buildManagerNamespace } from '../../build-namespace.ts';
 import { getBuild } from '../../db.ts';
 import type { ApiEnv } from '../../env.ts';
+import { buildLogs } from '../../operator/build-operations.ts';
+import { OperatorError } from '../../operator/common.ts';
 import { BuildLogs, isTerminalBuildStatus } from '../views/build-logs.tsx';
 import { formatDateTime } from '../views/format.ts';
 import { Layout } from '../views/layout.tsx';
@@ -19,25 +20,18 @@ const app = new Hono<ApiEnv>();
 //   - non-container (github_actions) builds: there is no DO log store; return an
 //     empty page plus the external `logs_url` so the UI can link out. No DO call.
 app.get('/:id/logs', async (context) => {
-  const build = await getBuild(context.get('db'), context.req.param('id'));
-  if (!build) {
-    return context.json({ error: 'build not found' }, 404);
-  }
-
-  // A missing/non-numeric `since` polls from the start. Matches the DO's own
-  // `handleReadLogs` guard so the cursor never moves backward.
   const raw = Number(context.req.query('since'));
-  const since = Number.isFinite(raw) ? raw : 0;
-
-  if (build.executor !== 'container') {
-    return context.json({ lines: [], lastSeq: 0, external: build.logs_url ?? null });
+  const since = Number.isSafeInteger(raw) && raw >= 0 ? raw : 0;
+  try {
+    return context.json(
+      await buildLogs(context.get('db'), context.env, context.req.param('id'), since),
+    );
+  } catch (error) {
+    if (error instanceof OperatorError) {
+      return context.json({ error: error.message }, error.status);
+    }
+    throw error;
   }
-
-  const ns = buildManagerNamespace(context.env, build.instance_type);
-  const stub = ns.get(ns.idFromName(build.id));
-  const res = await stub.fetch(`http://manager/logs?since=${since}`);
-  const body = (await res.json()) as { lines: ReadonlyArray<unknown>; lastSeq: number };
-  return context.json(body);
 });
 
 // GET /admin/builds/:id

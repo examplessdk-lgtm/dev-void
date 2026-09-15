@@ -3,7 +3,7 @@ import {
   PLATFORM_DISABLED_KEY,
   PLATFORM_DISABLED_VALUE,
 } from '@void/platform';
-import { sql } from 'drizzle-orm';
+import { lt, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { adminAuthMiddleware } from './admin/middleware/auth.ts';
 import { adminCsrfMiddleware } from './admin/middleware/csrf.ts';
@@ -46,6 +46,7 @@ import type { ApiEnv } from './env.ts';
 import { ErrorAlertMonitor } from './error-alert-monitor.ts';
 import { cancelContainerBuildDos } from './github/cancel-builds.ts';
 import { authMiddleware } from './middleware/auth.ts';
+import { operatorApi } from './operator/index.ts';
 import { processPlatformQueue } from './platform-queue.ts';
 import { tryActivateDomain } from './provisioning/activate-domain.ts';
 import {
@@ -75,6 +76,7 @@ import { projectUsage, accountUsage } from './routes/usage.ts';
 import { webhookRoutes } from './routes/webhooks.ts';
 import { setProjectsRoutingSuspension } from './routing.ts';
 import { SandboxConcurrencyCounter } from './sandbox-concurrency-counter.ts';
+import { operatorSessions } from './schema.ts';
 import { isAdminSuspended, REASON_REQUESTS_EXCEEDED } from './suspension.ts';
 import { getCurrentBillingPeriodStart, getPlanLimits } from './tiers.ts';
 import type { Domain, Project } from './types.ts';
@@ -240,6 +242,9 @@ const app = new Hono<ApiEnv>()
   .route('/projects', projectUsage)
   .use('/usage', authMiddleware)
   .route('/usage', accountUsage);
+
+// Versioned bearer-authenticated operator API. It has no browser cookie bypass.
+app.route('/operator/v1', operatorApi);
 
 // Admin dashboard (HTML, cookie-based auth)
 app.route('/admin', adminLogin);
@@ -415,6 +420,10 @@ async function scheduled(
   await purgeExpiredAuthCodes(db).catch((err) =>
     console.error('[scheduled] failed to purge expired auth codes:', err),
   );
+  await db
+    .delete(operatorSessions)
+    .where(lt(operatorSessions.expires_at, new Date().toISOString()))
+    .catch((err) => console.error('[scheduled] failed to purge expired operator sessions:', err));
 
   // Catch up on missed GitHub webhooks (design-doc 0074): list GitHub's own
   // `status=failure` delivery log and redeliver any failed event we haven't

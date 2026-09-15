@@ -3,6 +3,7 @@ import { note, outro } from '@clack/prompts';
 import { join } from 'pathslash';
 import { getPackageDir } from './agents.ts';
 import { asciiArts } from './ascii.ts';
+import { operatorCommands, operatorGroups } from './operator-args.ts';
 import { categoryTitle, helpLine, pc, sectionTitle } from './output.ts';
 
 type HelpCommand = {
@@ -21,7 +22,108 @@ type HelpPage = {
 type HelpNode = HelpPage & { children?: HelpTree };
 type HelpTree = Record<string, HelpNode>;
 
+function operatorHelpTree(): HelpTree {
+  return Object.fromEntries(
+    operatorGroups.map((group) => {
+      const commands = operatorCommands.filter((entry) => entry.group === group);
+      return [
+        group,
+        {
+          summary: `Administer platform ${group}. Operator credentials are separate from deployment credentials.`,
+          usage: [`void platform ${group} <command> [options]`],
+          commands: commands.map((entry) => ({
+            command: entry.action,
+            description: entry.description,
+          })),
+          children: Object.fromEntries(
+            commands.map((entry) => [
+              entry.action,
+              {
+                summary: `${entry.description}.`,
+                usage: [
+                  `void platform ${group} ${entry.action}${entry.positional?.map((name) => (entry.optionalPositional ? ` [${name}]` : ` <${name}>`)).join('') ?? ''} [options]`,
+                ],
+                options: [
+                  {
+                    command: '--connection <id-or-url>',
+                    description:
+                      'Choose a registered connection; otherwise use VOID_API_URL or the active connection',
+                  },
+                  {
+                    command: '--json',
+                    description:
+                      'Write structured JSON to stdout (JSON Lines while following logs)',
+                  },
+                  ...(entry.method
+                    ? [
+                        {
+                          command: '--plan',
+                          description: 'Validate and preview without changing anything',
+                        },
+                        {
+                          command: '--yes',
+                          description:
+                            'Apply after preview without prompting; required in unattended scripts',
+                        },
+                        {
+                          command: '--timeout <seconds>',
+                          description:
+                            'Mutation deadline (default 300 seconds; maximum 3600 seconds)',
+                        },
+                      ]
+                    : []),
+                  ...(['list', 'events', 'logs'].includes(entry.action)
+                    ? [
+                        {
+                          command: '--limit <number>',
+                          description:
+                            entry.action === 'logs'
+                              ? 'Maximum 500 log records'
+                              : 'Maximum 100 records per page',
+                        },
+                        ...(entry.action !== 'logs'
+                          ? [{ command: '--page <number>', description: 'One-based page number' }]
+                          : []),
+                      ]
+                    : []),
+                  ...Object.entries(entry.values ?? {}).map(([flag, description]) => ({
+                    command: `--${flag} <value>`,
+                    description,
+                  })),
+                  ...(entry.booleans ?? []).map((flag) => ({
+                    command: `--${flag}`,
+                    description:
+                      flag === 'follow'
+                        ? 'Poll new logs until interrupted or the build ends'
+                        : 'Read a full API session from stdin for explicit operator session exchange',
+                  })),
+                ],
+              },
+            ]),
+          ),
+        },
+      ];
+    }),
+  );
+}
+
 const HELP_TREE: HelpTree = {
+  connect: {
+    summary: 'Connect this project to Cloudflare or an existing Void platform.',
+    usage: ['void connect [url] [--platform <cloudflare|void>] [--no-login]'],
+    options: [
+      { command: '--platform <cloudflare|void>', description: 'Choose the deployment destination' },
+      { command: '--no-login', description: 'Save a Void connection without authenticating' },
+    ],
+    examples: [
+      { command: 'void connect', description: 'Choose a destination and sign in' },
+      { command: 'void connect https://platform.example.com', description: 'Join a Void platform' },
+      {
+        command: 'void connect --platform cloudflare',
+        description: 'Sign in and select a Cloudflare account',
+      },
+    ],
+  },
   init: {
     summary: 'Set up Void in a new or existing project.',
     usage: ['void init [options]'],
@@ -108,10 +210,14 @@ const HELP_TREE: HelpTree = {
     },
   },
   platform: {
-    summary: 'Connect, install, and manage Void platforms.',
+    summary:
+      'Install Void platforms and administer users, projects, access, and operations. Use `void connect` to join one.',
     usage: ['void platform <command>'],
     commands: [
-      { command: 'connect [url]', description: 'Connect to an existing Void platform' },
+      ...operatorGroups.map((group) => ({
+        command: `${group} <command>`,
+        description: `Administer platform ${group}`,
+      })),
       { command: 'list', description: 'List installed and connected platforms' },
       { command: 'use [id]', description: 'Select the default Void platform' },
       { command: 'status [id]', description: 'Inspect a platform and its health' },
@@ -124,10 +230,7 @@ const HELP_TREE: HelpTree = {
       { command: 'uninstall [id]', description: 'Safely remove an installed Void platform' },
     ],
     children: {
-      connect: basicSubcommand(
-        'Connect to a platform after verifying its discovery document.',
-        'void platform connect [url]',
-      ),
+      ...operatorHelpTree(),
       list: basicSubcommand('List installed and connected platforms.', 'void platform list'),
       use: basicSubcommand('Select the default Void platform.', 'void platform use [id]'),
       status: basicSubcommand('Inspect a platform and its health.', 'void platform status [id]'),
@@ -831,6 +934,9 @@ export function printGlobalHelp(): void {
     [
       globalCommandLine(['init'], 'void init'),
       ...globalOptionLines(['init']),
+      '',
+      globalCommandLine(['connect'], 'void connect [url]'),
+      ...globalOptionLines(['connect']),
       '',
       globalCommandLine(['deploy'], 'void deploy'),
       ...globalOptionLines(['deploy']),

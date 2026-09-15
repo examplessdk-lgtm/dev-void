@@ -4,7 +4,7 @@ outline: deep
 
 # Durable State
 
-Use typed Durable Objects when state must be strongly consistent and coordinated by a stable name, such as a shopping cart, collaborative room, rate limiter, or workflow.
+Use a Durable Object when requests need to share state under one name, such as a shopping cart, room, or rate limiter. Void gives you typed methods and stores the object's state between calls.
 
 Void turns each module in `durable-objects/` into a SQLite-backed Cloudflare Durable Object. The filename determines the binding, Worker class, and initial Cloudflare migration, so no manual Cloudflare configuration is needed.
 
@@ -64,7 +64,11 @@ The same name always resolves to the same Durable Object. Use `getById(id)` when
 
 ## Execution and persistence
 
-Void loads state before the first operation, serializes RPC method calls, and writes the state record after each successful method, `fetch`, or `alarm` handler. If a handler or the state write fails, Void restores `context.state` to its value before the operation so later operations cannot persist the failed mutation. Direct writes through `context.storage` are outside this rollback guarantee. A method receives:
+Void loads state before the first operation and runs RPC methods one at a time. After a method, `fetch`, or `alarm` handler succeeds, it saves the updated state.
+
+If the handler or save fails, Void restores `context.state` to its previous value. Direct writes to `context.storage` aren't included in that rollback.
+
+Each method receives:
 
 - `context.state`, which can be mutated or replaced
 - `context.env`, the Durable Object environment
@@ -127,8 +131,8 @@ Do not delete or reorder generated Durable Object migrations in `wrangler.jsonc`
 
 ## Deployment support
 
-Typed durable state currently requires a native Void app targeting Cloudflare. It works in local development and with `void deploy --platform cloudflare`; the direct deploy path supports it because the generated class is SQLite-backed.
+Typed state works in local development and direct Cloudflare deploys of native Void apps. Deploy with `void deploy --platform cloudflare`.
 
-Void-managed deployment does not yet carry custom Durable Object modules in its deploy manifest, so `void deploy --platform void` fails before building and points to the direct Cloudflare path. Meta-framework adapter mode and `node`, `bun`, or `deno` targets also fail with guidance when `durable-objects/` is present.
+Deploying custom Durable Object modules to a Void platform isn't supported yet. `void deploy --platform void` stops before building and points you to the Cloudflare path. Meta-frameworks and Node.js, Bun, and Deno targets also reject `durable-objects/` with guidance.
 
 This is separate from [typed WebSocket routes](./websockets.md), which also use SQLite-backed Durable Objects and work on both direct Cloudflare and hosted Void deployments.

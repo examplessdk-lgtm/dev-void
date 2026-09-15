@@ -21,6 +21,8 @@ import {
   invitations,
   oauthNonces,
   authCodes,
+  operatorSessions,
+  operatorEvents,
   builds,
   githubConnections,
   githubInstallations,
@@ -486,6 +488,25 @@ export async function clearTables(db: Db): Promise<void> {
   await db.delete(users);
   await db.delete(oauthNonces);
   await db.delete(authCodes);
+  await db.delete(operatorSessions);
+  await db.delete(operatorEvents);
+}
+
+/** Establish a real revocable operator session for integration requests. */
+export async function createOperatorToken(
+  db: Db,
+  user: { id: string; login: string },
+  origin = 'http://localhost',
+): Promise<string> {
+  const id = crypto.randomUUID();
+  await db
+    .insert(operatorSessions)
+    .values({ id, user_id: user.id, expires_at: new Date(Date.now() + 3_600_000).toISOString() });
+  return signJwt(
+    { sub: user.id, login: user.login, aud: 'operator', jti: id, operatorOrigin: origin },
+    JWT_SECRET,
+    { ttlSeconds: 3600 },
+  );
 }
 
 export async function seedOAuthNonce(db: Db, nonce: string): Promise<void> {

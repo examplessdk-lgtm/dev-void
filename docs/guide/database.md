@@ -33,7 +33,7 @@ const dbFileItems = [
 
 # Database
 
-Void provides a first-class [Drizzle ORM](https://orm.drizzle.team) integration. Define your schema in TypeScript, import the pre-wired Drizzle instance from `void/db`, and start querying. You do not need an extra install.
+Define your tables in TypeScript, then query them with `db` from `void/db`. Void includes [Drizzle ORM](https://orm.drizzle.team) and configures the connection, so you can use the same schema and query workflow with D1, PostgreSQL, or MySQL.
 
 <FileTree :items="dbFileItems" default-expanded />
 
@@ -99,7 +99,7 @@ export const users = mysqlTable('users', {
 
 :::
 
-Everything ships with `void`, so there is nothing extra to install. You also do not have to write this by hand. Use `void gen model` or let your coding agent generate it.
+The schema helpers are included in `void`. You can write tables yourself or generate a starting point with `void gen model`.
 
 You can also split your schema across multiple files under `db/schema/` and re-export from a barrel file:
 
@@ -257,7 +257,7 @@ If more than one default seed file exists, pass `--file <path>` explicitly.
 
 ### Programmatic seeding
 
-`db/seed.ts` is the first-class path for generated or randomized data. Seed modules can export either a default function or a named `seed` function.
+Use `db/seed.ts` when you want to generate seed data in code. Export a default function or a named `seed` function.
 
 ```ts
 // db/seed.ts
@@ -288,7 +288,7 @@ INSERT INTO messages (text) VALUES ('Hello from SQL');
 
 ## Schema-Derived Validators
 
-Instead of writing validator schemas by hand, you can derive them directly from your Drizzle tables using Void's bundled adapter entrypoints: [`void/drizzle-zod`](../reference/api.md#subpath-exports), [`void/drizzle-valibot`](../reference/api.md#subpath-exports), and [`void/drizzle-arktype`](../reference/api.md#subpath-exports). These resolve through the same package boundary as `void/schema-*`, so the generated validators stay type-compatible with your tables automatically.
+You can derive request validators from your Drizzle tables with [`void/drizzle-zod`](../reference/api.md#user-facing-imports), [`void/drizzle-valibot`](../reference/api.md#user-facing-imports), or [`void/drizzle-arktype`](../reference/api.md#user-facing-imports). These adapters use Void's bundled Drizzle version, keeping the validators compatible with your table types.
 
 ::: code-group
 

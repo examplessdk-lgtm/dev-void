@@ -1,18 +1,9 @@
 import { Hono } from 'hono';
 import { SITE_DOMAIN } from '../../constants.ts';
-import {
-  getAllProjectsWithOwner,
-  countProjects,
-  searchProjects,
-  getProject,
-  getProjectBuilds,
-  getProjectDeployments,
-  getProjectResources,
-  getUser,
-  getDomainsByProjectId,
-} from '../../db.ts';
+import { getAllProjectsWithOwner, countProjects, searchProjects } from '../../db.ts';
 import type { ApiEnv } from '../../env.ts';
-import { teardownProject } from '../../provisioning/cleanup.ts';
+import { deleteOperatorProject, getOperatorProject } from '../../operator/tenant-service.ts';
+import { renderOperationError } from '../operation-error.tsx';
 import { BuildTable } from '../views/build-table.tsx';
 import { DeploymentTable } from '../views/deployment-table.tsx';
 import { Layout } from '../views/layout.tsx';
@@ -20,6 +11,7 @@ import { ProjectsListPage } from '../views/projects-list.tsx';
 
 const PAGE_SIZE = 20;
 const app = new Hono<ApiEnv>();
+app.onError(renderOperationError);
 
 // GET /projects
 app.get('/', async (context) => {
@@ -56,17 +48,10 @@ app.get('/', async (context) => {
 
 // GET /projects/:id
 app.get('/:id', async (context) => {
-  const project = await getProject(context.get('db'), context.req.param('id'));
-  if (!project) {
-    return context.html('<h1>Project not found</h1>', 404);
-  }
-  const [deployments, resources, owner, domains, builds] = await Promise.all([
-    getProjectDeployments(context.get('db'), project.id, 10),
-    getProjectResources(context.get('db'), project.id),
-    getUser(context.get('db'), project.user_id),
-    getDomainsByProjectId(context.get('db'), project.id),
-    getProjectBuilds(context.get('db'), project.id),
-  ]);
+  const { project, deployments, resources, owner, domains, builds } = await getOperatorProject(
+    context.get('db'),
+    context.req.param('id'),
+  );
 
   const cfAccountId = context.env.CF_ACCOUNT_ID;
   const siteDomain = context.env.SITE_DOMAIN ?? SITE_DOMAIN;
@@ -206,11 +191,7 @@ app.get('/:id', async (context) => {
 
 // POST /projects/:id/delete
 app.post('/:id/delete', async (context) => {
-  const project = await getProject(context.get('db'), context.req.param('id'));
-  if (!project) {
-    return context.html('<h1>Project not found</h1>', 404);
-  }
-  await teardownProject(context, project.id, project);
+  await deleteOperatorProject(context, context.req.param('id'));
   return context.redirect('/admin/projects');
 });
 

@@ -115,7 +115,8 @@ vi.mock('../../src/cli/auth', () => ({
   getSiteDomain: () => 'void.app',
 }));
 
-vi.mock('../../src/cli/platform-cmd', () => ({
+vi.mock('../../src/cli/platform-cmd', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../src/cli/platform-cmd.ts')>()),
   discoverPlatform: (...args: Array<unknown>) => mockDiscoverPlatform(...args),
 }));
 
@@ -2804,7 +2805,7 @@ export default config;
         expect.objectContaining({ cwd: root, stdio: ['ignore', 'pipe', 'pipe'] }),
       );
       expect(mockNote).toHaveBeenCalledWith(
-        expect.stringContaining('Run `void init` again'),
+        expect.stringContaining('Run `void connect --platform cloudflare`'),
         'Cloudflare deployment',
       );
       expect(mockGetToken).not.toHaveBeenCalled();

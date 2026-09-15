@@ -4,10 +4,7 @@ import { assertNoninteractivePlatformMutationAcknowledged } from '../../src/cli/
 
 describe('platform args', () => {
   it('parses connection and lifecycle selectors', () => {
-    expect(parsePlatformArgs(['connect', 'https://api.example.com'])).toEqual({
-      subcommand: 'connect',
-      url: 'https://api.example.com',
-    });
+    expect(() => parsePlatformArgs(['connect', 'https://api.example.com'])).toThrow();
     expect(parsePlatformArgs(['repair', 'example-a1b2c3d4', '--plan'])).toEqual({
       subcommand: 'repair',
       selector: 'example-a1b2c3d4',

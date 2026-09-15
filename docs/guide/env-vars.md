@@ -4,7 +4,7 @@ outline: deep
 
 # Environment Variables
 
-Void provides typed, validated environment variables via a single `env.ts` file at the root of your project. The schema serves three purposes:
+Declare your environment variables in `env.ts`. Void uses that schema to give you types, validate values, and check for missing keys before deployment:
 
 1. **Runtime validation** — declared keys are validated on first access; missing/invalid values produce a clear error
 2. **TypeScript** — `env.X` and `c.env.X` become typed automatically (no manual interface to maintain)
@@ -15,7 +15,7 @@ Void provides typed, validated environment variables via a single `env.ts` file 
 Place an `env.ts` at your project root and call `defineEnv` once:
 
 ::: tip Scaffolded on `void init`
-If you already have `.env` or `.env.example` files when you run `void init`, Void generates an `env.ts` seeded from those keys. Inference is conservative — values that unambiguously parse as a boolean (`true`/`false`), an `http(s)://` URL, or a small integer get typed accordingly; everything else stays `string()`. The generated file carries a banner comment asking you to review and tighten types before running dev.
+If your project has `.env` or `.env.example`, `void init` creates an `env.ts` from those keys. It recognizes booleans, URLs, and small integers; other values start as strings. Review the generated types and add any validation your app needs.
 :::
 
 ```ts
@@ -60,13 +60,13 @@ export default defineEnv({
 
 ### Client vs server
 
-Keys matching Vite's `envPrefix` (default `VITE_`) are exposed to client code; Vite enforces this at the bundler level. All other keys are server-only — referencing one from a client module fails the build with a file:line:col error from `void:env-client-guard`, and the runtime proxy still throws as a backstop.
+Keys matching Vite's `envPrefix` (normally `VITE_`) are available in client code. Other keys are server-only. If a client module references a server-only key, the build stops and points to the source location. The runtime also rejects that access.
 
 If your project sets a custom `envPrefix` (e.g. `'PUBLIC_'` or an array like `['PUBLIC_', 'NEXT_PUBLIC_']`) in `vite.config.ts`, the build guard honours it automatically. Schema keys that match any configured prefix pass the client check.
 
 ### Build-time constant folding
 
-In production client builds, static reads of a client-exposed key are folded into string literals so the bundler can dead-code-eliminate conditional branches — exactly what Vite already does for `import.meta.env.MODE`.
+During a production build, Void replaces static reads of public environment variables with their values. This lets the bundler remove branches that can't run, as it does with Vite's `import.meta.env`.
 
 ```ts
 // source
@@ -86,15 +86,15 @@ Rules:
 - **Static access only.** `env.FOO` and `env["FOO"]` get folded. Dynamic access (`env[key]`), destructuring, and reassignment fall back to the runtime proxy.
 - **Values come from** the same source Vite already uses for `import.meta.env`: `.env*` files (respecting `envDir`) plus schema `.default(x)` values for missing keys. Unknown keys are left untouched and the proxy serves them at runtime.
 - **Build-only.** Dev keeps going through the proxy so editing `.env.local` takes effect without a full rebuild.
-- **Zero-config.** No flags, no opt-in — just works.
+  This optimization runs automatically.
 
 ### Vite `define` interop
 
-Vite's `define` option performs build-time literal replacement (e.g. `define: { 'process.env.VERSION': '"1.0"' }`). It does **not** flow through schema validation or the typed `env` proxy — using both `define` and `defineEnv` for the same name causes silent skew (compiled client code sees the define value, runtime proxy and validation see the schema source). Void emits a warning at config time when this overlap is detected.
+Vite's `define` replaces expressions at build time without going through `env.ts` validation. If you use both for the same name, compiled client code can see a different value from server code. Void warns when it finds this overlap.
 
 ### `envDir`
 
-Void honours Vite's `envDir` option for `.env` file loading (both the worker `vars` injection and dev-time validation). Defaults to the project root. The deploy CLI still reads from the project root regardless — keep production `.env` files there.
+The Vite plugin respects `envDir` when loading dotenv files for development. The deploy CLI reads production dotenv files from the project root, so keep them there even if local development uses another directory.
 
 ### Imports inside `env.ts`
 
@@ -107,9 +107,7 @@ In practice `env.ts` should only import schema helpers from `void/env` and — a
 
 ## `.env` files
 
-Void uses Vite's standard `.env` convention to populate the schema:
-
-Whether a file's values ship depends on which deploy path you use:
+Void follows Vite's dotenv file naming. Deployment treats portable configuration and local secrets differently:
 
 | File                    | Loaded in dev | Shipped by `void deploy` | Shipped by `--platform cloudflare` |
 | ----------------------- | ------------- | ------------------------ | ---------------------------------- |
@@ -120,7 +118,9 @@ Whether a file's values ship depends on which deploy path you use:
 
 `.local` files are gitignored by convention — use them for secrets you don't want in source control.
 
-The direct Cloudflare backend excludes local files from generated Worker `vars`, but it reads explicitly `.secret()`-marked keys from `.env.production.local` and the deploy process environment, uploads them through Cloudflare's encrypted secret mechanism, and removes them from the generated plaintext config. Shell values take precedence. Unmarked local and shell keys are never shipped. Values in `.env` and `.env.production` normally remain plaintext, except that explicitly marked schema keys are promoted to encrypted secrets there too. See [Cloudflare deploy](/integrations/cloudflare).
+For direct Cloudflare deploys, mark sensitive keys with `.secret()`. Void reads their production values, uploads them as encrypted secrets, and removes them from plaintext Worker vars. Shell values take precedence.
+
+Unmarked values in `.env` and `.env.production` remain plaintext. Unmarked local and shell values aren't deployed. See [Cloudflare deployment](/integrations/cloudflare#databases-and-secrets).
 
 ### Dotenv variable expansion
 
@@ -136,11 +136,11 @@ LITERAL=\$NOT_EXPANDED        # → "$NOT_EXPANDED" (backslash-escape)
 
 Nested references resolve transitively (`A=${B}`, `B=${C}`, `C=value` → `A=value`). Cycles are detected and leave the raw literal (Void emits a warning rather than looping). Missing references expand to the empty string.
 
-Expansion runs identically across every path that reads your `.env*` files: the runtime typed `env` proxy, `void env check`, `void deploy`, and the `void init` scaffold inference. Importantly, references **only** resolve against values declared in the `.env*` files themselves — shell `process.env` values are not substituted in. This stops a developer-machine variable from silently materialising in committed examples or deploy manifests. (Vite's own `loadEnv` does consult `process.env` during expansion for the dev-server path; Void filters the shell pollution back out via `filterLoadedEnv` so the observable surface stays the same.)
+Void resolves references against values in your dotenv files, not arbitrary shell variables. The typed `env` API, CLI validation, deploy, and setup use the same expansion rules. This keeps machine-specific shell values from appearing unexpectedly in generated configuration.
 
 ## Production secrets
 
-For values that should never live in a `.env` file (Stripe keys, OAuth secrets, etc.), upload them as encrypted secret bindings on your deployed worker:
+To store production credentials such as Stripe keys or OAuth secrets, upload them with the CLI:
 
 ```bash
 void secret put STRIPE_KEY            # prompts for value
@@ -154,7 +154,9 @@ These commands follow the platform saved in `.void/project.json`: they use the h
 
 Remote secrets count as "present" for deploy validation — `void deploy` checks both `.env*` and the remote secret list before uploading.
 
-For direct Cloudflare deployment, mark a built-in schema helper with `.secret()` to make `void deploy --platform cloudflare` upload its non-empty production value automatically. Void accepts the value from `.env`, `.env.production`, `.env.production.local`, or the deploy process environment; removes it from Worker `vars`; uploads it over stdin; and adds it to `secrets.required`. Existing remote-only marked secrets are preserved, optional absent secrets stay absent, and deploy never deletes remote secrets. Name/value heuristics still warn only—they do not automatically promote unmarked keys.
+On direct Cloudflare deploys, a built-in schema helper's `.secret()` modifier also enables automatic upload. Values can come from `.env`, `.env.production`, `.env.production.local`, or the deploy process environment. Void removes them from Worker vars and records them as required secrets.
+
+Existing remote-only secrets are preserved, optional missing values stay absent, and deployment doesn't delete remote secrets. Warnings based on a key's name or value don't make it a secret; mark it explicitly.
 
 For auth-enabled apps, both Void Cloud and `void deploy --platform cloudflare` manage `BETTER_AUTH_SECRET` automatically: they preserve an existing encrypted secret and generate one only when missing.
 
@@ -221,7 +223,7 @@ The managed block is grouped into `required`, `with defaults`, and `optional` se
 
 Env validation errors, dev-server warnings, and CLI reports automatically replace secret-looking values with `<redacted>` before they surface. This keeps tokens out of Discord screenshots, GitHub issues, and CI logs when you paste an `EnvValidationError` stack.
 
-Redaction is belt-and-braces:
+Void decides which values to redact in this order:
 
 1. **Explicit override.** The built-in helpers support `.secret()` and `.public()` modifiers, and they win over every heuristic:
 
@@ -241,11 +243,11 @@ Redaction is belt-and-braces:
 
 The **key name itself is never masked** — you need it to locate the offending entry.
 
-For local debugging, set `VOID_ENV_UNMASK=1` in your shell to see raw values in error output. On activation Void prints a one-shot notice to stderr so the loosened output is visibly attributed; unset it before sharing logs.
+For local debugging, set `VOID_ENV_UNMASK=1` to show raw values in error output. Void prints a notice when this is enabled. Unset it before sharing logs.
 
 ## Using `env.ts` with a meta-framework
 
-The full env story works on every framework `voidPlugin()` supports — typegen, leak guard, folding, runtime reads on both server and client, plus all CLI-level features.
+All supported frameworks get environment types, validation, checks for server secrets reaching client code, and CLI commands. Public variables are also inlined in production client builds.
 
 | Framework         | `env.ts` typegen | Client leak guard | Constant folding |   `env` on server   |     `env` on client     | `void env check` + deploy gate |
 | ----------------- | :--------------: | :---------------: | :--------------: | :-----------------: | :---------------------: | :----------------------------: |
@@ -267,7 +269,7 @@ What you always get, regardless of framework:
 - `void:env-client-guard` fails the build with a file:line:col error when a server-only key is referenced from a client module.
 - Build-time constant folding for `envPrefix`-matched reads in the client bundle.
 
-On Nuxt / Analog / Astro, `import { env }` works server-side through the same runtime proxy used on Class A targets — the proxy reads from the worker's `env` binding at request time. You're free to keep using the framework's native mechanism (`useRuntimeConfig()`, `event.context.cloudflare.env`, `import { env } from "cloudflare:workers"`, `Astro.locals.runtime.env`, `astro:env`) wherever it fits better — but you no longer _have_ to.
+In Nuxt, Analog, and Astro, `import { env } from "void/env"` reads Worker bindings at request time. You can also keep using your framework's native environment API where it suits your app.
 
 ## Migration from untyped `c.env`
 
@@ -275,9 +277,7 @@ If you don't have an `env.ts`, `c.env.X` continues to work as `unknown` — no b
 
 ## How it compares
 
-`void/env` is a Void-only module — it isn't a standalone env library you'd pull into a Nuxt, SvelteKit, or bare-Vite project. This section exists so you can see what the integrated Void env story includes relative to what you'd otherwise assemble yourself on those stacks, not as a pick-one-of-many benchmark.
-
-Most frameworks ship _parts_ of an env story — loading, typing, validation, deploy checks — but stitching them together is left to the user. Here's how Void's single `env.ts` stacks up against the tools people reach for on other stacks today.
+`void/env` is part of Void rather than a standalone environment library. It connects your schema to local development, the build, and deployment. The table below compares that integration with other approaches.
 
 | Feature                                         | Void `env.ts` | `@t3-oss/env` | Astro `astro:env` | SvelteKit `$env` | Vite `import.meta.env` | Nuxt `runtimeConfig` | `dotenv` + `zod` (DIY) |
 | ----------------------------------------------- | :-----------: | :-----------: | :---------------: | :--------------: | :--------------------: | :------------------: | :--------------------: |
@@ -298,14 +298,13 @@ Most frameworks ship _parts_ of an env story — loading, typing, validation, de
 | Schema scaffolded from existing `.env` files    |      yes      |      no       |        no         |        no        |           no           |          no          |           no           |
 | `${VAR}` expansion, no `process.env` leakage    |      yes      |      no       |        no         |        no        |    partial (leaks)     |          no          |      needs plugin      |
 
-### Where Void differs
+### What the integration provides
 
-- **One file, one call.** `defineEnv({...})` is the whole API surface. `@t3-oss/env` is the closest analogue but splits into `server`/`client`/`runtimeEnv` blocks and expects you to hand it `process.env`. Void auto-discovers `env.ts`, loads `.env*` via Vite's own resolver (honouring `envDir`), and wires the result into the plugin, the worker bundle, the CLI, and generated types without extra config.
-- **Helpers _and_ Standard Schema, mixable.** Most solutions force a choice: either Zod-only (t3-env, many DIY setups), or a bespoke helper DSL with no escape hatch (Astro, SvelteKit). Void ships `string()`, `number()`, `boolean()`, `url()`, `email()`, `oneOf()`, `json<T>()` so a small project pulls in zero validator dependencies, and any [Standard Schema](https://standardschema.dev) library (valibot, zod, arktype) drops into the same object for richer rules.
-- **Build-time leak prevention with source locations.** The `void:env-client-guard` plugin walks client module graphs and fails the build with a file:line:col pointer when a non-prefixed key is imported from the browser bundle. Vite on its own only enforces this through the _prefix convention_ — a renamed variable silently leaks. Void enforces both the prefix rule and the schema's server/client split.
-- **Build-time constant folding for client reads.** Production client builds inline static `env.VITE_FOO` reads as literals so `if (env.MODE === 'production') { … }` branches tree-shake the same way `import.meta.env.MODE` already does. Server / SSR / worker code keeps the runtime proxy untouched, and only prefix-matching keys are ever folded — no schema-required validation is bypassed because the same values still flow through `defineEnv` on boot.
-- **Defaults propagate everywhere.** `PORT: number().default(3000)` fills the typed proxy, the worker `vars` block in dev, the deploy manifest, and the prerender bindings — so `process.env.PORT`, `c.env.PORT`, and `env.PORT` all return `3000` when unset. t3-env and Nuxt only surface defaults in the typed object; the raw `process.env` still reads `undefined`.
-- **Deploy is the enforcement point.** `void deploy` unions `.env*` with the remote secret list and hard-fails on any missing required key _before_ upload. No competing solution in the table treats deploy as a validation gate — the closest substitute is a handwritten CI script calling `zod.parse(process.env)`, which doesn't know about the target platform's remote secrets.
-- **`.env.example` is generated, not maintained by hand.** `void env example` writes a marker-delimited block grouped into `required`, `with defaults`, `optional`, with enum hints for `oneOf` keys. Everything outside the markers (team CI tokens, comments) survives refresh. No other tool in the comparison ships this.
-- **Async validators.** A validator can return a `Promise` — useful for probing a URL, fetching a JWKS, or resolving a secret reference at startup. t3-env and schema-based systems assume synchronous parsing.
-- **Onboarding from an existing `.env`.** `void init` detects pre-existing dotenv files and writes a seeded `env.ts` with conservative type inference (boolean/URL/number/string) and a banner comment prompting you to tighten the guesses. Every other solution in the table requires you to hand-write the schema from scratch even when your team already has a `.env.example` committed.
+- **A shared schema.** `env.ts` supplies the types and validation used by the plugin, Worker, CLI, and generated declarations.
+- **Built-in helpers and custom validators.** Start with `string()`, `number()`, or the other helpers. Use a Standard Schema validator when a field needs more detailed rules.
+- **Checks before deployment.** Void checks required keys against dotenv values and remote secret names before uploading.
+- **Client and server separation.** Client references to server-only keys stop the build with a source location. Public values can be inlined without embedding server secrets.
+- **Consistent defaults.** Defaults fill missing values in the typed API, Worker vars, deploy manifest, and prerender bindings.
+- **Generated examples.** `void env example` updates a marked section of `.env.example` while preserving your team's comments and other keys.
+- **Async validation.** Validators can return promises, for example to resolve a secret reference at startup.
+- **Setup from existing files.** `void init` can create an initial schema from your dotenv files for you to review.

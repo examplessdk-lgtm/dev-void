@@ -1,0 +1,56 @@
+import { Hono } from 'hono';
+import { bodyLimit } from 'hono/body-limit';
+import type { ApiEnv } from '../env.ts';
+import { operatorAudit, operatorAuditRoutes } from './audit.ts';
+import { authenticatedSessionRoutes, operatorAuth, operatorSessionRoutes } from './auth.ts';
+import { OperatorError } from './common.ts';
+import { operationsRoutes } from './operations-routes.ts';
+import { tenantRoutes } from './tenant-routes.ts';
+
+export const operatorApi = new Hono<ApiEnv>();
+operatorApi.onError((error, context) => {
+  if (error instanceof OperatorError) {
+    return context.json(
+      {
+        error: error.code,
+        message: error.message,
+        ...(error.details ? { details: error.details } : {}),
+      },
+      error.status,
+    );
+  }
+  console.error('[operator] request failed', error);
+  return context.json(
+    {
+      error: 'internal_error',
+      message: 'The operator request failed. Inspect platform events before retrying a mutation.',
+    },
+    500,
+  );
+});
+operatorApi.use('*', async (context, next) => {
+  context.header('Cache-Control', 'no-store');
+  context.header('X-Void-Operator-Api-Version', '1');
+  await next();
+});
+operatorApi.use(
+  '*',
+  bodyLimit({
+    maxSize: 32 * 1024,
+    onError: (context) =>
+      context.json(
+        { error: 'body_too_large', message: 'Operator request bodies must not exceed 32 KiB.' },
+        413,
+      ),
+  }),
+);
+operatorApi.route('/', operatorSessionRoutes);
+operatorApi.use('*', operatorAuth);
+operatorApi.route('/', authenticatedSessionRoutes);
+operatorApi.use('*', operatorAudit);
+operatorApi.route('/', operatorAuditRoutes);
+operatorApi.route('/', tenantRoutes);
+operatorApi.route('/', operationsRoutes);
+operatorApi.notFound((context) =>
+  context.json({ error: 'not_found', message: 'Unknown operator API endpoint.' }, 404),
+);

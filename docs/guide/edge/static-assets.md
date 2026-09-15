@@ -4,7 +4,7 @@ outline: deep
 
 # Static Assets Caching
 
-Void serves static assets through Cloudflare's global edge network with sensible cache defaults. This page covers how static assets are cached at the edge.
+Void caches static assets on Cloudflare's edge network. Hashed build files can be reused across deploys, while other files use cache keys tied to the deployment.
 
 ## Hashed assets
 
@@ -108,17 +108,19 @@ For Void apps with only `/api` routes, Void keeps the platform SPA fallback and 
 | Asset-first (only `/api` routes, or none)         | `single-page-application`        | `index.html` with status **200** |
 | Framework deploy (SvelteKit, Nuxt, Analog, Astro) | `none` — pinned, not overridable | The framework worker's own 404   |
 
-The middle row is a worker with `middleware/`, a route outside `/api`, a document websocket, or Live, but no `pages/` and no SSR entry. `run_worker_first: ['/**']` sends everything to the worker, which bypasses the platform's SPA switch, so the generated worker does that fallback itself for HTML navigations — after your middleware has run, so auth gates and OAuth callbacks still see the request first.
+Apps with middleware, a route outside `/api`, document WebSockets, or Live send requests through the Worker first. If they have no Pages or SSR entry, the Worker can then serve `index.html` for HTML navigation. Middleware and auth run before that fallback.
 
-The SPA fallback is right for a single-page app, where deep links must boot the client router. It is wrong for a site whose HTML was generated per page: unknown URLs return 200 instead of 404, and the generator's `404.html` is never served. Nothing in a built asset tree distinguishes the two, so Void does not guess — override it with [`routing.notFound`](../../reference/config.md#routing-notfound):
+A SPA needs `index.html` for deep links so its client router can load. A generated static site usually needs a real `404.html` instead. Void can't distinguish the two from built files alone. Set [`routing.notFound`](../../reference/config.md#routing-notfound) for the behavior you want:
 
 ```json
 { "routing": { "notFound": "404-page" } }
 ```
 
-Accepted values are `"single-page-application"`, `"404-page"`, and `"none"`. `run_worker_first` keeps its inferred value, so API routes, auth, and `/__void/*` still reach the worker first. Setting anything other than `"single-page-application"` also turns off the worker-side `index.html` fallback described above — otherwise it would answer the request before `not_found_handling` was ever consulted. With `"404-page"` the worker serves whatever the asset binding returns for the unmatched path, which is Cloudflare's nearest `404.html` — but only for HTML navigations (requests whose `Accept` includes `text/html`), so an API route that deliberately returns a 404 keeps its own body, status and headers. If the build has no `404.html`, the worker's own 404 is kept.
+Choose `"single-page-application"`, `"404-page"`, or `"none"`. This leaves `run_worker_first` unchanged, so the same requests still reach your middleware and API handlers.
 
-The last row is the exception: `routing.notFound` is **ignored** for SvelteKit, Nuxt, Analog, and Astro deploys, and `void deploy` warns when you set it. Those deploys emit no `run_worker_first`, so the asset layer already answers first and real prerendered files win — `not_found_handling` would only change what the framework's own `env.ASSETS.fetch()` delegation returns, where `"single-page-application"` turns genuine 404s into the prerendered home page at 200 and `"404-page"` takes the 404 away from the framework's own error route.
+Choosing anything other than `"single-page-application"` disables the Worker's `index.html` fallback. With `"404-page"`, unmatched HTML navigation uses the asset layer's nearest `404.html`. Intentional API `404` responses keep their body, status, and headers. If no `404.html` exists, the Worker's original `404` is kept.
+
+SvelteKit, Nuxt, Analog, and Astro manage their own not-found behavior. Void ignores `routing.notFound` for those deploys and prints a warning. Their prerendered files are served first, and the framework handles unmatched routes without a platform SPA fallback replacing its error page.
 
 TanStack Start, React Router, and vinext follow the rows above on a managed `void deploy` — that path resolves the asset config itself and applies it to the uploaded Worker. Void writes no `assets` policy into their generated Worker config:
 
@@ -129,7 +131,7 @@ TanStack Start, React Router, and vinext follow the rows above on a managed `voi
 | vinext (App)   | `dist/server/wrangler.json`  |
 | vinext (Pages) | `dist/ssr/wrangler.json`     |
 
-For direct Cloudflare deployment, the setting takes effect only if that config declares a complete `assets` policy of its own — `binding`, `directory`, `not_found_handling`, and `run_worker_first`. Void leaves those fields alone, so a policy you write yourself is honored by the generated wrapper; with no policy at all, Cloudflare's default applies. `vite build` warns when `routing.notFound` is set so the choice is not silent.
+For direct Cloudflare deployment, these frameworks need a complete `assets` policy in their own config: `binding`, `directory`, `not_found_handling`, and `run_worker_first`. Void preserves that policy. Without one, Cloudflare's default applies. The build warns when `routing.notFound` is set so you know to check the framework's asset configuration.
 
 ### Generated config
 

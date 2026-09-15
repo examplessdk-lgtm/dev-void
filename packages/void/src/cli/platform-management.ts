@@ -29,6 +29,7 @@ import {
   loadPlatformRuntime,
   REMOTE_INSTALLATION_MANIFEST_KEY,
   resolveBootstrapGitHubId,
+  type PlatformDatabaseLifecycleLock,
 } from './platform-installer.ts';
 import { resolvePlatformInstallDatabaseUrl } from './platform-lifecycle.ts';
 import { assertNoninteractivePlatformMutationAcknowledged } from './platform-lifecycle.ts';
@@ -177,7 +178,7 @@ export async function runInstalledPlatformCommand(args: PlatformArgs): Promise<v
 
   const execute = async (
     currentManifest: PlatformInstallationManifest,
-    databaseCheckpoint?: (manifest: PlatformInstallationManifest) => Promise<void>,
+    databaseLock?: PlatformDatabaseLifecycleLock,
     databaseCheckpointExists = false,
   ): Promise<void> => {
     const manifest = currentManifest;
@@ -186,14 +187,14 @@ export async function runInstalledPlatformCommand(args: PlatformArgs): Promise<v
 
     if (args.subcommand === 'disable') {
       await disablePlatform(client, manifest, args.plan, {
-        checkpoint: databaseCheckpoint,
+        checkpoint: databaseLock?.checkpoint,
         databaseUrl,
       });
       return;
     }
     if (args.subcommand === 'uninstall') {
       await uninstallPlatform(client, manifest, args, {
-        checkpoint: databaseCheckpoint,
+        checkpoint: databaseLock?.checkpoint,
         databaseUrl,
       });
       return;
@@ -302,7 +303,10 @@ export async function runInstalledPlatformCommand(args: PlatformArgs): Promise<v
       // runInstalledPlatformCommand holds the database session lock across the
       // entire replan and mutation sequence.
       acquireDatabaseLifecycleLock: async () =>
-        Object.assign(async () => {}, { checkpoint: databaseCheckpoint }),
+        Object.assign(async () => {}, {
+          checkpoint: databaseLock?.checkpoint,
+          prepareDatabase: databaseLock?.prepareDatabase,
+        }),
       client,
       runtime: runtime!,
       replanWorkers: async (recoveryManifest) =>
@@ -359,7 +363,7 @@ export async function runInstalledPlatformCommand(args: PlatformArgs): Promise<v
       if (!authoritative) {
         await releaseDatabase.checkpoint?.(currentManifest);
       }
-      await execute(currentManifest, releaseDatabase.checkpoint, databaseCheckpointExists);
+      await execute(currentManifest, releaseDatabase, databaseCheckpointExists);
     } finally {
       await releaseDatabase();
     }

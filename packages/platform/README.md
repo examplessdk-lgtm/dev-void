@@ -2,6 +2,12 @@
 
 Public, target-neutral contracts and packaged runtime artifacts for installing a Void company platform in a Cloudflare account.
 
+The packaged API also serves the `void platform` commands for managing users,
+projects, access, and logs. The installer applies the database migration needed
+for administrator sessions and audit records. See
+[Platform Administration](../../docs/guide/platform-administration.md) to operate
+an installed platform from your terminal.
+
 The package contains:
 
 - versioned deployment and installation manifests

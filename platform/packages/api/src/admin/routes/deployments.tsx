@@ -5,9 +5,13 @@ import {
   searchDeployments,
   getDeployment,
   getProject,
-  cancelDeployment,
 } from '../../db.ts';
-import { type ApiEnv, isDevBypass } from '../../env.ts';
+import { type ApiEnv } from '../../env.ts';
+import { OperatorError } from '../../operator/common.ts';
+import {
+  deploymentLogs,
+  requestDeploymentCancellation,
+} from '../../operator/deployment-operations.ts';
 import type { DeployManifest } from '../../types.ts';
 import { DeploymentLogs } from '../views/deployment-logs.tsx';
 import { displayStatus } from '../views/deployment-table.tsx';
@@ -244,206 +248,34 @@ app.post('/:id/cancel', async (context) => {
     return context.html('<h1>Deployment not found</h1>', 404);
   }
 
-  await cancelDeployment(context.get('db'), deployment.id, 'canceled by admin');
+  try {
+    await requestDeploymentCancellation(context.get('db'), deployment.id);
+  } catch (error) {
+    if (error instanceof OperatorError) {
+      return context.text(error.message, error.status);
+    }
+    throw error;
+  }
   return context.redirect(`/admin/deployments/${deployment.id}`);
 });
 
-// GET /deployments/:id/logs — query historical logs via Analytics Engine
+// GET /deployments/:id/logs — shared historical log reader.
 app.get('/:id/logs', async (context) => {
-  const deployment = await getDeployment(context.get('db'), context.req.param('id'));
-  if (!deployment) {
-    return context.json({ error: 'deployment not found' }, 404);
-  }
-  const project = await getProject(context.get('db'), deployment.project_id);
-  if (!project) {
-    return context.json({ error: 'project not found' }, 404);
-  }
-
-  if (isDevBypass(context.env)) {
-    return context.json({ data: mockLogData() });
-  }
-
-  const workerName = `user-${project.slug}`;
-  const since = context.req.query('since') ?? '1h';
-  const sinceMs = parseSince(since);
-  const limit = Math.min(parseInt(context.req.query('limit') ?? '100', 10) || 100, 500);
-
-  const sinceStr = new Date(sinceMs).toISOString().replace('T', ' ').slice(0, 19);
-  const dataset = context.env.LOGS_DATASET ?? 'void_logs';
-  const query = `
-    SELECT
-      blob1 as outcome,
-      blob2 as logData,
-      blob3 as exceptionData,
-      blob4 as url,
-      blob5 as method,
-      blob6 as statusCode,
-      blob7 as deployId,
-      double1 as ts,
-      timestamp
-    FROM ${dataset}
-    WHERE index1 = '${workerName}'
-      AND timestamp >= toDateTime('${sinceStr}')
-      AND blob7 = '${deployment.id}'
-    ORDER BY timestamp DESC
-    LIMIT ${limit}
-  `;
-
-  const response = await fetch(
-    `https://api.cloudflare.com/client/v4/accounts/${context.env.CF_ACCOUNT_ID}/analytics_engine/sql`,
-    {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${context.env.CF_API_TOKEN}`,
-        'Content-Type': 'text/plain',
-      },
-      body: query,
-    },
-  );
-
-  if (!response.ok) {
-    const body = await response.text();
-    return context.json(
-      { error: 'log query failed', status: response.status, detail: body, query },
-      502,
-    );
-  }
-
-  const result = (await response.json()) as { data: ReadonlyArray<LogRow> };
-  const data = (result.data ?? []).map((row) => ({
-    timestamp: row.ts,
-    outcome: row.outcome,
-    logs: tryParse(row.logData),
-    exceptions: tryParse(row.exceptionData),
-    url: row.url,
-    method: row.method,
-    status: row.statusCode,
-  }));
-
-  return context.json({ data });
-});
-
-type LogRow = Readonly<{
-  outcome: string;
-  logData: string;
-  exceptionData: string;
-  url: string;
-  method: string;
-  statusCode: string;
-  ts: number;
-}>;
-
-function tryParse(json: string): ReadonlyArray<unknown> {
   try {
-    return JSON.parse(json);
-  } catch {
-    return [];
+    return context.json(
+      await deploymentLogs(context.get('db'), context.env, context.req.param('id'), {
+        since: context.req.query('since'),
+        limit: Number(context.req.query('limit') ?? 100),
+        cursor: context.req.query('cursor'),
+        order: 'newest-first',
+      }),
+    );
+  } catch (error) {
+    if (error instanceof OperatorError) {
+      return context.json({ error: error.message }, error.status);
+    }
+    throw error;
   }
-}
-
-function mockLogData() {
-  const now = Date.now();
-  return [
-    {
-      timestamp: now - 1000,
-      outcome: 'ok',
-      logs: [
-        { level: 'info', message: 'Incoming request: GET /api/users' },
-        { level: 'debug', message: 'Cache HIT for key: users:list:page=1' },
-      ],
-      exceptions: [],
-      url: '/api/users',
-      method: 'GET',
-      status: '200',
-    },
-    {
-      timestamp: now - 5000,
-      outcome: 'ok',
-      logs: [{ level: 'log', message: 'POST /api/auth/login — user authenticated successfully' }],
-      exceptions: [],
-      url: '/api/auth/login',
-      method: 'POST',
-      status: '200',
-    },
-    {
-      timestamp: now - 12000,
-      outcome: 'exception',
-      logs: [
-        {
-          level: 'error',
-          message:
-            'TypeError: Cannot read properties of undefined (reading "id")\n    at getUser (src/handlers/users.ts:42:18)\n    at handleRequest (src/index.ts:15:3)',
-        },
-      ],
-      exceptions: [
-        { name: 'TypeError', message: 'Cannot read properties of undefined (reading "id")' },
-      ],
-      url: '/api/users/999',
-      method: 'GET',
-      status: '500',
-    },
-    {
-      timestamp: now - 30000,
-      outcome: 'ok',
-      logs: [
-        {
-          level: 'warn',
-          message: 'Rate limit approaching: 85/100 requests in current window for IP 192.168.1.42',
-        },
-      ],
-      exceptions: [],
-      url: '/api/data/export',
-      method: 'GET',
-      status: '200',
-    },
-    {
-      timestamp: now - 45000,
-      outcome: 'ok',
-      logs: [],
-      exceptions: [],
-      url: '/health',
-      method: 'GET',
-      status: '204',
-    },
-    {
-      timestamp: now - 60000,
-      outcome: 'ok',
-      logs: [
-        {
-          level: 'info',
-          message:
-            'D1 query executed in 12ms: SELECT * FROM posts WHERE published = 1 ORDER BY created_at DESC LIMIT 20',
-        },
-        { level: 'info', message: 'Returning 20 posts' },
-      ],
-      exceptions: [],
-      url: '/api/posts',
-      method: 'GET',
-      status: '200',
-    },
-    {
-      timestamp: now - 90000,
-      outcome: 'canceled',
-      logs: [{ level: 'warn', message: 'Request canceled by client before completion' }],
-      exceptions: [],
-      url: '/api/reports/generate',
-      method: 'POST',
-      status: '499',
-    },
-  ];
-}
-
-function parseSince(since: string): number {
-  const now = Date.now();
-  const units: Record<string, number> = {
-    '1m': 60 * 1000,
-    '5m': 5 * 60 * 1000,
-    '1h': 60 * 60 * 1000,
-    '6h': 6 * 60 * 60 * 1000,
-    '24h': 24 * 60 * 60 * 1000,
-    '7d': 7 * 24 * 60 * 60 * 1000,
-  };
-  return now - (units[since] ?? units['1h']);
-}
+});
 
 export default app;

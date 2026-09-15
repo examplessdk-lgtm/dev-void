@@ -187,8 +187,15 @@
     {
       "idx": 33,
       "version": "7",
-      "when": 1788100096485,
-      "tag": "0033_outgoing_changeling",
+      "when": 1789463551982,
+      "tag": "0033_operator_sessions_and_events",
+      "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1789475317696,
+      "tag": "0034_email_destinations",
       "breakpoints": true
     }
   ]

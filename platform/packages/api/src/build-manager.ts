@@ -39,6 +39,8 @@ const STORAGE_KEY_CONFIG = 'buildConfig';
 const STORAGE_KEY_AGENT_TOKEN = 'agentToken';
 /** DO storage key for the GitHub Check Run id created at `startBuild()`. */
 const STORAGE_KEY_CHECK_RUN = 'checkRunId';
+/** DO storage key proving whether the container can still produce log lines. */
+const STORAGE_KEY_LOG_DRAIN = 'logDrainState';
 
 /** Build statuses past which no further transition should occur. */
 const TERMINAL_STATUSES: ReadonlyArray<StoredBuildStatus> = ['complete', 'failed', 'cancelled'];
@@ -1205,6 +1207,8 @@ type StoredBuildStatus =
 /** Stored build config plus the live status we track inside the DO. */
 type ManagerState = BuildConfig & { status: StoredBuildStatus };
 
+type LogDrainState = { state: 'open' } | { state: 'complete'; finalSeq: number };
+
 /**
  * The narrow slice of `ctx.container` the log pull needs (the base class copies it
  * into a private field, so we read it back through a cast): `running` for the
@@ -1291,7 +1295,7 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
    * of its own calls fail just before a non-owner successfully signals, and
    * either emit falsely or miss the only truthful marker.
    */
-  private teardownInFlight: Promise<void> | null = null;
+  private teardownInFlight: Promise<boolean> | null = null;
 
   /**
    * First-caller-wins claim on the termination marker, so overlapping teardowns
@@ -1353,6 +1357,33 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
     }
   }
 
+  private async markLogDrainComplete(): Promise<void> {
+    try {
+      this.ensureLogTable();
+      const maxRow = this.ctx.storage.sql
+        .exec<{ max: number | null }>('SELECT MAX(seq) AS max FROM logs')
+        .toArray()[0];
+      await this.ctx.storage.put<LogDrainState>(STORAGE_KEY_LOG_DRAIN, {
+        state: 'complete',
+        finalSeq: maxRow?.max ?? 0,
+      });
+    } catch (err) {
+      // Completion metadata is a reader hint. It must never bypass the existing
+      // Postgres terminalization or scheduler release guarantees.
+      console.warn('build-manager: log drain completion persist failed', err);
+    }
+  }
+
+  private async completeNaturalLogDrain(): Promise<void> {
+    await this.pullInFlight?.catch(() => false);
+    // A forced teardown's marker owner publishes completion after its marker
+    // attempt. onStop may interleave while that owner is still awaiting
+    // Postgres, so an already-stopped container alone is not enough here.
+    if (!this.terminationMarkerClaimed && !this.teardownInFlight) {
+      await this.markLogDrainComplete();
+    }
+  }
+
   /**
    * Entry point invoked over RPC by the BuildScheduler. Persists the config,
    * mints the scoped deploy + installation tokens, starts the container with
@@ -1367,6 +1398,9 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
    * (the only place it is persisted) via a `starting`-guarded CAS.
    */
   async startBuild(config: BuildConfig): Promise<void> {
+    // Written before the config becomes visible so every new build is explicitly
+    // incomplete until a producer barrier publishes its final SQLite sequence.
+    await this.ctx.storage.put<LogDrainState>(STORAGE_KEY_LOG_DRAIN, { state: 'open' });
     await this.ctx.storage.put<ManagerState>(STORAGE_KEY_CONFIG, {
       ...config,
       status: 'starting',
@@ -1417,6 +1451,7 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
             completedAt: new Date().toISOString(),
           });
           await this.setStatus('failed');
+          await this.markLogDrainComplete();
           await this.broadcast({ type: 'status', status: 'failed' });
           // Finalize a run created on a PRIOR attempt (a capacity requeue re-runs
           // startBuild on the same build id; the persisted `builds.check_run_id`
@@ -1447,6 +1482,7 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
           completedAt: new Date().toISOString(),
         });
         await this.setStatus('cancelled');
+        await this.markLogDrainComplete();
         await this.broadcast({ type: 'status', status: 'cancelled' });
         // Finalize a run created on a PRIOR attempt (see the aged-out branch above).
         // CAS-aware (see the aged-out branch): on a lost CAS finalize to the recorded
@@ -1486,6 +1522,7 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
           completedAt: new Date().toISOString(),
         });
         await this.setStatus('cancelled');
+        await this.markLogDrainComplete();
         await this.broadcast({ type: 'status', status: 'cancelled' });
         // Finalize a run created on a PRIOR attempt (see the aged-out branch above).
         // CAS-aware (see the aged-out branch): on a lost CAS finalize to the recorded
@@ -1515,10 +1552,13 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
       if (!row || row.status !== 'starting') {
         if (row && TERMINAL_STATUSES.includes(row.status)) {
           await this.setStatus(row.status);
+          await this.markLogDrainComplete();
           // Finalize a run created on a PRIOR attempt that this requeue is now
           // abandoning (out-of-band cancel during the queue wait). No-ops on a first
           // attempt (no run yet); on a requeue the id is in DO storage / builds row.
           await this.finalizeCheckRunToStatus(config, row.status);
+        } else if (!row) {
+          await this.markLogDrainComplete();
         }
         await this.pokeScheduler();
         return;
@@ -1593,9 +1633,12 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
         if (!recheck || recheck.status !== 'starting') {
           if (recheck && TERMINAL_STATUSES.includes(recheck.status)) {
             await this.setStatus(recheck.status);
+            await this.markLogDrainComplete();
             // Pass the in-hand `checkRunId`: the run was just created this invocation,
             // so this finalizes it even if both the DO put and the PG persist failed.
             await this.finalizeCheckRunToStatus(config, recheck.status, checkRunId);
+          } else if (!recheck) {
+            await this.markLogDrainComplete();
           }
           await this.pokeScheduler();
           return;
@@ -1841,6 +1884,8 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
             ownsMarker,
             terminalError === undefined,
           );
+        } else {
+          await this.markLogDrainComplete();
         }
         // Skipped when the terminal write threw (`terminal` null): we don't know the
         // recorded outcome, so finalizing the check run would be a guess. NOT an
@@ -2123,7 +2168,9 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
     const current = config.status;
     if (TERMINAL_STATUSES.includes(current)) {
       // Already finalized (e.g. timeout alarm fired and stopped the container).
-      // Don't overwrite the recorded outcome; just poke the scheduler.
+      // A natural stop after onError is a producer barrier. A forced teardown's
+      // marker owner must publish completion instead, after its marker attempt.
+      await this.completeNaturalLogDrain();
       await this.pokeScheduler();
       return;
     }
@@ -2140,6 +2187,7 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
     // live). The container already exited, so there is no stop() to make.
     if (params.exitCode === 0) {
       await this.setStatus('complete');
+      await this.completeNaturalLogDrain();
       try {
         // The deployment link is BEST-EFFORT and must run inside this try. The
         // lookup is a Hyperdrive/Postgres read that can throw on a transient
@@ -2189,6 +2237,7 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
       }
     } else {
       await this.setStatus('failed');
+      await this.completeNaturalLogDrain();
       try {
         const won = await markBuildTerminalIfActive(db, config.buildId, 'failed', {
           error: `build exited with code ${params.exitCode} (${params.reason})`,
@@ -2236,11 +2285,17 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
     // ACTIVE and pins the concurrency slot until the 75m idle reaper even though
     // the container has already errored.
     await this.setStatus('failed');
+    let won: boolean | null = null;
+    let terminalError: unknown;
     try {
-      const won = await markBuildTerminalIfActive(this.db(), config.buildId, 'failed', {
-        error: message,
-        completedAt: new Date().toISOString(),
-      });
+      try {
+        won = await markBuildTerminalIfActive(this.db(), config.buildId, 'failed', {
+          error: message,
+          completedAt: new Date().toISOString(),
+        });
+      } catch (err) {
+        terminalError = err;
+      }
       // Drain BEFORE finalizing, because `finalizeCheckRun` embeds the last
       // CHECK_RUN_LOG_TAIL_LINES rows and this is the ONE terminalizer that does not
       // force-stop — so nothing else has pulled. `pollLogs`' terminal branch does
@@ -2250,20 +2305,25 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
       // Deliberately no stop() here — an errored container is left to the base class,
       // and adding a kill would change onError's contract.
       await this.drainLogsAfterError();
-      await this.broadcast({ type: 'status', status: 'failed' });
-      // CAS-aware: finalize 'failure' only when THIS site won; otherwise finalize to
-      // the out-of-band recorded outcome so GitHub matches the DB.
-      if (won) {
-        await this.finalizeCheckRun(config, 'failure', {
-          detailsUrl: this.projectUrl(config),
-          title: 'Void build failed',
-          summary: message,
-        });
-      } else {
-        await this.finalizeCheckRunToRecordedOutcome(config);
+      if (won !== null) {
+        await this.broadcast({ type: 'status', status: 'failed' });
+        // CAS-aware: finalize 'failure' only when THIS site won; otherwise finalize to
+        // the out-of-band recorded outcome so GitHub matches the DB.
+        if (won) {
+          await this.finalizeCheckRun(config, 'failure', {
+            detailsUrl: this.projectUrl(config),
+            title: 'Void build failed',
+            summary: message,
+          });
+        } else {
+          await this.finalizeCheckRunToRecordedOutcome(config);
+        }
       }
     } finally {
       await this.pokeScheduler();
+    }
+    if (terminalError) {
+      throw terminalError;
     }
   }
 
@@ -2415,9 +2475,10 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
         // stop()/destroy() no-ops against an already-dead container are not
         // evidence that this manager terminated it.
         if (this.rawContainer()?.running !== true) {
-          return;
+          return true;
         }
         let signalSucceeded = false;
+        let destroySucceeded = false;
         try {
           await this.stop();
           signalSucceeded = true;
@@ -2427,12 +2488,14 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
         try {
           await this.destroy();
           signalSucceeded = true;
+          destroySucceeded = true;
         } catch {
           // Best-effort SIGKILL — container already gone / mid-teardown.
         }
         if (signalSucceeded) {
           this.containerTornDown = true;
         }
+        return destroySucceeded || this.rawContainer()?.running !== true;
       })();
       this.teardownInFlight = teardown;
       void teardown.finally(() => {
@@ -2441,9 +2504,7 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
         }
       });
     }
-    if (teardown) {
-      await teardown;
-    }
+    const producerStopped = teardown ? await teardown : false;
 
     // AFTER the drain AND a successful signal so it reads as the truthful last
     // line of the build's output. Ingested through the same sink as pulled lines,
@@ -2471,7 +2532,7 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
     // meant NOBODY ingested one — the peer had no claim and the owner had no
     // container — and the build's log just stopped. Ingesting is DO-local
     // (SQLite + broadcast), so it needs no container at all.
-    if (markerAuthoritative && this.containerTornDown) {
+    if (markerAuthoritative && producerStopped && this.containerTornDown) {
       try {
         await this.ingestLines([
           {
@@ -2483,10 +2544,15 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
       } catch (err) {
         console.warn('forceStopContainer: terminated marker ingest failed', err);
       }
-    } else if (markerAuthoritative && !this.containerTornDown) {
-      // Both signals failed. Release the synchronous claim so a later retry can
-      // become authoritative if container control recovers; retaining it here
-      // would suppress every future truthful marker in this DO instance.
+    }
+    if (markerAuthoritative && producerStopped) {
+      // This write follows the shared teardown and the authoritative marker
+      // attempt. Non-owners can kill the container, but they cannot tell readers
+      // the stream is complete while the owner is still waiting to append it.
+      await this.markLogDrainComplete();
+    } else if (markerAuthoritative) {
+      // Container control did not prove the producer stopped. Release the claim
+      // so a later recovery attempt can own both the marker and completion.
       this.terminationMarkerClaimed = false;
     }
   }
@@ -2855,7 +2921,7 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
   /**
    * READ-ONLY poll read of the stored `logs` table for the admin worker.
    * `GET /logs?since=N` → `{ lines: Array<{seq,line,stream,ts}>, lastSeq, status,
-   * terminal }` where `lines` are the rows with `seq > N` (ascending) and
+   * terminal, logsComplete }` where `lines` are the rows with `seq > N` (ascending) and
    * `lastSeq` is the table's MAX(seq) — or the requested `since` when the table
    * is empty, so a poller's cursor never moves backward across an empty response
    * (same monotonic intent as `pollLogs`). A missing/non-numeric `since` is
@@ -2866,10 +2932,24 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
    * live status): every completion path sets the DO status terminal FIRST, then
    * does the Postgres CAS write — so if that PG write throws, the PG row can lag
    * ACTIVE until the stale reaper while the DO/container is already terminal.
-   * Exposing the DO's terminal here lets `void build logs --follow` stop promptly
-   * instead of polling for ~2h. `null`/`false` when no config exists yet.
+   * `logsComplete` is published only after the producer has stopped and every
+   * final append has been attempted, so follow mode does not mistake a terminal
+   * status for a completed log drain.
    */
   private async handleReadLogs(url: URL): Promise<Response> {
+    // Read completion before taking the final synchronous SQLite snapshot. Once
+    // complete is visible, its final sequence was stored after every append, so
+    // this response cannot pair `logsComplete: true` with a stale row snapshot.
+    const drainState = (await this.ctx.storage.get<LogDrainState>(STORAGE_KEY_LOG_DRAIN)) ?? null;
+    const cfg = await this.getConfig();
+    const legacyComplete =
+      drainState === null &&
+      cfg !== null &&
+      isTerminalBuildStatus(cfg.status) &&
+      this.rawContainer()?.running !== true &&
+      !this.pullInFlight &&
+      !this.teardownInFlight &&
+      !this.terminationMarkerClaimed;
     this.ensureLogTable();
     const raw = Number(url.searchParams.get('since'));
     const since = Number.isFinite(raw) ? raw : 0;
@@ -2883,12 +2963,19 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
       .exec<{ max: number | null }>('SELECT MAX(seq) AS max FROM logs')
       .toArray()[0];
     const lastSeq = maxRow?.max ?? since;
-    const cfg = await this.getConfig();
     return Response.json({
       lines,
       lastSeq,
       status: cfg?.status ?? null,
       terminal: cfg ? isTerminalBuildStatus(cfg.status) : false,
+      logsComplete:
+        drainState?.state === 'complete'
+          ? true
+          : drainState?.state === 'open'
+            ? false
+            : legacyComplete
+              ? true
+              : null,
     });
   }
 

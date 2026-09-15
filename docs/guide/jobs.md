@@ -4,7 +4,7 @@ outline: deep
 
 # Cron Jobs
 
-Void supports cron-triggered jobs from a top-level `crons/` directory.
+Put scheduled jobs in `crons/`. Each file declares a cron expression and a handler, and Void configures the schedule when you deploy.
 
 ## Job files
 
@@ -45,7 +45,7 @@ export default defineScheduled(async (controller, env) => {
 
 ## `defineScheduled`
 
-`defineScheduled(fn)` is a typed identity helper for scheduled jobs.
+Wrap a handler with `defineScheduled()` to get types for the scheduled event, environment, and execution context.
 
 Handler signature:
 
@@ -63,7 +63,7 @@ Notes:
 
 ## Local development
 
-Cron triggers do not fire on their schedule during local dev — this is a Cloudflare Workers / miniflare limitation, not specific to Void. Exercise a job locally by POSTing to the dev endpoint Void exposes:
+Schedules don't fire automatically in local development. Test a job by sending a request to Void's development endpoint:
 
 ```
 POST /__void/scheduled
@@ -84,7 +84,7 @@ curl -X POST http://localhost:5173/__void/scheduled \
 
 If you set `__VOID_PROXY_TOKEN` in `.dev.vars`, that explicit token takes precedence and the printed curl command uses `x-void-internal: <your-token>` instead.
 
-This works the same in default Void mode and every supported framework — SvelteKit, Nuxt, Analog, Astro, TanStack Start, React Router, and vinext. In framework mode the cron handler runs inside the framework adapter's request pipeline (or the dev miniflare for Class A frameworks), so it sees whatever bindings the adapter exposes (D1, KV, R2, queues, AI, etc.).
+The endpoint works in native Void apps and supported frameworks. Framework jobs run in the adapter's development runtime and use the bindings it provides.
 
 ## Deployment behavior
 

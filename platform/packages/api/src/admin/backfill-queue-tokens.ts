@@ -9,6 +9,8 @@ export type BackfillQueueTokensOptions = Readonly<{
   apiToken: string;
   dispatchNamespace: string;
   jwtSecret: string;
+  /** Validate every candidate without writing to KV. */
+  dryRun?: boolean;
   /**
    * Override for tests. When set, replaces the live CF API call that
    * reads `__VOID_PROXY_TOKEN` from the target worker's bindings.
@@ -18,6 +20,7 @@ export type BackfillQueueTokensOptions = Readonly<{
 
 export type BackfillQueueTokensResult = Readonly<{
   scanned: number;
+  wouldUpdate?: number;
   updated: number;
   skipped: number;
   /**
@@ -75,6 +78,7 @@ export async function backfillQueueTokens(
 
   let scanned = 0;
   let updated = 0;
+  let wouldUpdate = 0;
   let skipped = 0;
   let raced = 0;
   let errored = 0;
@@ -139,11 +143,15 @@ export async function backfillQueueTokens(
         continue;
       }
 
+      if (opts.dryRun) {
+        wouldUpdate++;
+        continue;
+      }
       await routing.put(name, JSON.stringify({ ...entry, proxyToken }));
       updated++;
     }
     cursor = page.list_complete ? undefined : page.cursor;
   } while (cursor);
 
-  return { scanned, updated, skipped, raced, errored };
+  return { scanned, updated, skipped, raced, errored, ...(opts.dryRun ? { wouldUpdate } : {}) };
 }

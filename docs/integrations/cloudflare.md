@@ -34,7 +34,7 @@ export const GET = defineHandler(async (c) => {
 });
 ```
 
-`c.env` is fully typed via `CloudContext` -- no manual type declarations needed.
+`CloudContext` provides the types for `c.env`, so you don't need to declare them yourself.
 
 ### Via `cloudflare:workers` import
 
@@ -164,7 +164,7 @@ Because Void doesn't control the CF plugin in this mode, it can't merge bindings
 - Also ensures the `nodejs_als` compatibility flag is present.
 - The framework adapter then reads this `wrangler.jsonc` normally.
 
-This means your `wrangler.jsonc` is the single source of truth for bindings in this mode. Void keeps it up to date as you add new resource imports to your code, but you're responsible for replacing placeholder IDs with real ones before deploying.
+The framework adapter reads bindings from `wrangler.jsonc`. Void adds them as you import resources, and `void deploy --platform cloudflare` replaces local placeholder IDs when it provisions production resources.
 
 ### Merge precedence
 
@@ -204,7 +204,7 @@ This means `pnpm dev` works out of the box (Miniflare creates local instances of
 After `vite build`, the Cloudflare Vite plugin writes a merged `wrangler.json` to the `dist/` directory. This file contains:
 
 - All fields from your `wrangler.jsonc` (bindings with real IDs, routes, services, vars, environments)
-- Any inferred bindings Void added (with placeholder IDs -- replace these before deploying)
+- Any inferred bindings Void added (local placeholders during development; provisioned IDs during deploy)
 - Fields set by Void (`main`, `assets`, `triggers`)
 
 When you run `void deploy --platform cloudflare`, Void validates this generated `wrangler.json` and deploys it safely.
@@ -215,66 +215,130 @@ When deploying to a Void platform, the `wrangler.json` in the build output is **
 
 ## Deploy to your own Cloudflare account
 
-During `void init`, Cloudflare is the default deployment platform. The generated Worker is standard Cloudflare output, and Void deploys it directly to your own account.
+Choose Cloudflare during `void init`, then deploy:
 
-When you choose Cloudflare, init creates or augments the root `wrangler.jsonc` with a compatibility date, checks your Cloudflare session through Void's bundled tooling, and opens secure browser sign-in if needed. A single available account is selected automatically; when your login can access multiple accounts, init asks which one to use. The resulting `account_id` is written to the config without removing comments or unrelated fields. If you skip sign-in, rerun `void init` or use `void cloudflare login` later.
+```sh
+void deploy
+```
 
-[`void deploy --platform cloudflare`](#one-command-void-deploy-platform-cloudflare) provisions bindings, applies remote migrations, checks secrets, builds, then uploads, verifies, and activates a Worker Version for you. `void init` saves this choice so the override is normally unnecessary. The [Local development](#local-development), [AI](#ai-self-host), and [ISR](#isr-self-host) notes below also apply.
+Void opens your browser to sign in when needed. If you have access to several accounts, it asks which one to use and saves the account in your root `wrangler.jsonc`. Credentials are stored in your operating system's keychain. Press Ctrl+C to cancel login, or manage your session with `void cloudflare login`, `status`, and `logout`.
+
+To configure deployment separately from project setup, run `void connect --platform cloudflare`. It uses the same browser login and account selection as `void init`, and saves Cloudflare as the target for subsequent `void deploy` commands.
 
 ### One command: `void deploy --platform cloudflare`
 
-`void deploy --platform cloudflare` deploys the built worker to **your own** Cloudflare account. Void owns the Cloudflare authentication flow and uses your root `wrangler.jsonc`; there is no Void platform login or linked project. When `.void/project.json` already contains `"platform": "cloudflare"`, plain `void deploy` takes the same path.
+You can also choose Cloudflare for a single deploy:
 
-```bash
-# Create or adopt missing resources, then deploy
+```sh
 void deploy --platform cloudflare
 ```
 
-**Prerequisites**
+This deploys directly to your account. You don't need a Void platform connection or project. Once Cloudflare is saved in `.void/project.json`, `void deploy` uses it automatically.
 
-- **Select an account.** Interactive `void init` or the first deploy signs you in, selects the sole account automatically or shows a Void account picker, and writes `account_id` to your root `wrangler.jsonc`. In CI, set `CLOUDFLARE_ACCOUNT_ID` when the token can access multiple accounts.
-- **Authenticate with Cloudflare.** Interactive setup and deploy open secure browser OAuth immediately when needed and store credentials in the operating-system keychain; press Ctrl+C to cancel. You can explicitly manage the session with `void cloudflare login|status|logout`. CI uses `CLOUDFLARE_API_TOKEN`. Deploy needs `Workers Scripts:Edit` plus read on the resources you bind, and per-product `*:Edit` whenever automatic provisioning must create a missing D1 database, KV namespace, R2 bucket, Queue, or Hyperdrive config. Email setup needs a session from wrangler 4.81 or newer, which carries the Email Routing and Email Sending scopes, or a `CLOUDFLARE_API_TOKEN` that also has Email Routing Edit and Email Sending Edit (a Global API Key pair is refused).
-- **Admit readiness probes through Cloudflare Access, when applicable.** If an Access policy protects the Worker's `workers.dev` hostname, export a complete `CF_ACCESS_CLIENT_ID` / `CF_ACCESS_CLIENT_SECRET` service-token pair that the policy allows. An interactive local deploy can instead export `CF_ACCESS_TOKEN="$(cloudflared access token --app=https://<worker>.<account>.workers.dev)"` to use the current user's short-lived session. Void sends either credential only to a matching HTTPS readiness URL, never to project build code or Cloudflare deployment tooling, and never stores it. When account-wide default-deny blocks a generated preview alias but the stable Worker hostname admits the credential, Void stages the new version at 0% and probes it through that stable hostname with a version override. An unresolved Access denial leaves a normal upload inactive or restores the prior 100% deployment; Cloudflare's required first-deploy bootstrap is already active behind Access when its probe is denied.
-- **Identify the account's workers.dev subdomain in fresh CI, when version previews are unavailable.** Export `CLOUDFLARE_WORKERS_SUBDOMAIN` as the account subdomain (for example `my-team`, or `my-team.workers.dev`). Interactive/local deploys cache this value in ignored `.void/cloudflare.json` after a successful deploy reports a workers.dev URL, so it normally needs to be supplied only to a fresh checkout whose Worker uses Durable Objects or otherwise has no version preview URL.
-- **`CLOUDFLARE_API_TOKEN` is required to provision a Hyperdrive config for the first time.** Browser OAuth covers every other resource, but the available Cloudflare tooling exposes no machine-readable Hyperdrive list, so Void checks whether the config already exists over the Cloudflare REST API, which OAuth cannot authenticate. Without a token automatic provisioning stops **before** touching your account rather than risk minting a duplicate config. Either export `CLOUDFLARE_API_TOKEN` with Hyperdrive edit permission, or create the Hyperdrive config in the dashboard and add its id to the `hyperdrive` binding in `wrangler.jsonc`; deploying an **already-provisioned** Hyperdrive app needs no token.
-- **Workers Paid and Docker, if your app uses the sandbox.** Cloudflare Containers are unavailable on Workers Free, and the sandbox image is built locally. Before provisioning or building, Void verifies the selected account and credentials automatically. If the check fails, [enable Workers Paid](https://dash.cloudflare.com/?to=/:account/workers/plans), then run `void cloudflare login` again; when using `CLOUDFLARE_API_TOKEN`, grant it Account / Containers: Edit and Account / Cloudchamber: Edit. See [Containers pricing](https://developers.cloudflare.com/containers/pricing/).
+### What happens during deploy
 
-**What it does** (in order): settles the app class, pins the account and confirms Cloudflare authentication; when the app uses email (`sendEmail()` or `email/` handlers), reads your zone's email state and, before any project code runs, asks once to set it up (see the [email guide](../guide/email.md#your-own-cloudflare-account)); creates or adopts inferred resources, builds and validates the emitted artifact, preserves or creates the auth secret, applies checked-in PostgreSQL or MySQL migrations using `DATABASE_URL` (or remote D1 migrations), promotes explicit env schema `.secret()` values through Cloudflare's encrypted bulk-secret API, uploads an immutable Worker Version, probes that version directly for readiness, activates it at 100%, and synchronizes routes, custom domains, cron triggers, queue consumers, and Email Routing rules. PostgreSQL migrations are transactional; MySQL DDL is not.
+Void reads your app's configuration and source, then:
 
-Note that **the build runs before the secret, auth-schema, and migration gates** -- those gates read the real emitted worker, so there has to be one to read. A missing production secret or a bad migration is therefore reported _after_ resources may have been provisioned and the build has run, which is worth knowing if your build hooks are slow or have side effects. Remote D1 migrations and the worker upload still run only once every ground-truth gate has passed, so a failed gate does not alter the database schema or live worker.
+1. Checks the app type, selected account, and Cloudflare credentials.
+2. If the app uses email (`sendEmail()` or `email/` handlers), reads your zone's email state and, before any project code runs, asks once to set it up. See [Your own Cloudflare account](../guide/email.md#your-own-cloudflare-account) in the email guide.
+3. Creates missing resources or reuses resources already in your account.
+4. Builds the app and checks the generated Worker config, secrets, and migration history.
+5. Preserves or creates the auth secret, applies pending migrations, and uploads keys marked `.secret()` as encrypted Worker secrets.
+6. Uploads a Worker Version and checks that it is ready.
+7. Sends traffic to the new version and applies routes, custom domains, cron schedules, queue consumers, and Email Routing rules.
 
-**Trust boundary: the build runs your project's code.** This backend runs your project's build -- your config, every Vite plugin, and every build dependency -- with filesystem access before the credentialed deploy. Deploy narrows what that build can quietly change: it runs the build with your Cloudflare credentials scrubbed, verifies the emitted `wrangler.json` against a pre-build snapshot of your account, name, and binding identities, and checks that the bundled deployment tool was not modified during the build. Those checks catch a build that tampers with the deploy target or uploader. They do not sandbox the build itself, so a fully compromised build dependency remains a trust boundary. Vet your dependencies as you would for any deploy; stronger build isolation is future work.
+The secret and migration checks need the built Worker, so they happen after provisioning and building. If a check fails, resources may already exist, but Void has not applied remote D1 migrations or uploaded the application Worker.
 
-Provisioning is automatic and **idempotent**. Void reads existing ids first, adopts matching resources when possible, creates anything missing, and writes the resolved ids into your root `wrangler.jsonc`. Queues carry no id in the config, so Void checks each one against your account and creates it when absent. Auth-enabled apps similarly reuse an existing `BETTER_AUTH_SECRET`; they generate a 32-byte random value only when the remote secret is absent, never once per deploy. The former `--provision` flag is still accepted for backwards compatibility but is no longer needed.
+Resource IDs are saved in `wrangler.jsonc` for the next deploy. Void preserves comments, though it may adjust indentation when writing the file. Commit the updated config so other machines and CI can reuse the same resources. The old `--provision` flag is still accepted, but provisioning is now automatic.
 
-Activation is deliberately separate from upload. Void records the exact migration filenames and trigger snapshot in the Worker Version annotation, probes the uploaded version before it receives traffic, and only then promotes it to 100%. When Cloudflare exposes a version preview, Void probes that URL. Durable Object versions do not expose previews, so Void stages the new version at 0%, requests the production workers.dev URL with Cloudflare's version-override header, restores the prior deployment after a failed probe, and promotes only a ready version. If trigger synchronization fails, Void restores the previously active version. `void project status` lists available versions and `void project rollback [version]` activates one without rebuilding, then restores its versioned schedules, queues, workflows, routes, and domains. Versions that predate trigger snapshots cannot be rolled back safely and are rejected.
+Run the first deploy from one machine at a time. The provisioning lock protects a local config file; it cannot coordinate two fresh CI runners, which could create duplicate resources.
 
-Cloudflare has three first-deploy exceptions: the Versions API cannot create a Worker, it cannot establish a new Worker's initial Durable Object migration history, and an account can leave preview URLs disabled until its first ordinary deployment. When Cloudflare requires an ordinary deploy for one of those reasons, Void first proves that the Worker did not exist before first-deploy secret provisioning, performs one guarded bootstrap deployment, then verifies the active Worker through `/__void/ready`. Cloudflare may create a placeholder version while attaching that first secret; Void carries its earlier absence proof across that step. This bootstrap is never used for a previously deployed application, because an ordinary deployment would bypass the readiness traffic guard. All later deployments return to immutable version upload, zero-traffic readiness probing, and explicit activation.
+### Deploying from CI
 
-If the Worker already has a gradual deployment that splits traffic across versions, deploy stops before upload instead of flattening that rollout to 100%. Finish or cancel the gradual rollout in Cloudflare first.
+Set `CLOUDFLARE_API_TOKEN` in your CI secrets. The token needs Workers Scripts: Edit and read access to bound resources, plus edit permission for each product Void needs to provision. Set `CLOUDFLARE_ACCOUNT_ID` if the token can access more than one account.
+
+Email setup needs a browser session from `void cloudflare login`, which carries the Email Routing and Email Sending scopes, or a `CLOUDFLARE_API_TOKEN` that also has Email Routing Edit and Email Sending Edit. A Global API Key pair is refused. In CI the email step never prompts: run `void email setup --platform cloudflare` once locally, commit `wrangler.jsonc`, then deploy with `--require-email`.
+
+When a Worker has no version preview URL, such as a Worker with Durable Objects, also set `CLOUDFLARE_WORKERS_SUBDOMAIN`. Use the account subdomain, for example `my-team` or `my-team.workers.dev`. Local deploys cache this value in ignored `.void/cloudflare.json` after Cloudflare reports a deployment URL; a fresh CI checkout has no such cache.
+
+#### Cloudflare Access
+
+If Cloudflare Access protects the Worker's `workers.dev` hostname, Void needs credentials to check deployment readiness. In CI, provide an allowed `CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET` pair. For a local deploy, you can use a short-lived user session:
+
+```sh
+export CF_ACCESS_TOKEN="$(cloudflared access token --app=https://<worker>.<account>.workers.dev)"
+```
+
+Void sends these credentials only to a matching HTTPS readiness URL. It doesn't save them or pass them to your build or deployment tools.
+
+If Access blocks a version preview but allows the stable Worker hostname, Void checks the new version through that hostname using a version override. If Access still denies the request, Void leaves the upload inactive or restores the previous deployment. A required first-deploy bootstrap is an exception: that Worker is already active behind Access when the check runs.
+
+### Databases and secrets
+
+PostgreSQL and MySQL apps need a production `DATABASE_URL` in the deploy process environment. Void uses it for Hyperdrive provisioning and migrations, and never writes it to generated config. PostgreSQL migrations are transactional; MySQL schema changes may partially apply before an error.
+
+Creating a Hyperdrive config for the first time also requires `CLOUDFLARE_API_TOKEN` with Hyperdrive edit permission. Void needs the REST API to find existing configurations, and the current provisioning path can't use browser OAuth for that lookup. Alternatively, create the config in the Cloudflare dashboard and add its ID to the `hyperdrive` binding in `wrangler.jsonc`. An app with an existing Hyperdrive binding can deploy through browser login.
+
+For auth-enabled apps, run `void db generate` and commit the migrations. Void includes the production Better Auth schema, including renamed tables and plugin tables, and checks it against your migration history during deploy. D1 also gets an in-memory schema check before remote migration. A mismatch stops deployment and asks you to regenerate the SQL.
+
+Custom D1 layouts are supported through `migrations_dir`, `migrations_table`, and `migrations_pattern`. The files Cloudflare will apply must match the files Void validated, including their content and numeric order. Missing, extra, or reordered migrations stop deployment.
+
+Mark sensitive values with [`.secret()`](../guide/env-vars.md). Void removes them from plaintext Worker vars and uploads them as encrypted secrets. Values can come from `.env`, `.env.production`, `.env.production.local`, or the deploy environment; the environment takes precedence. Existing remote secrets are preserved, optional missing secrets are skipped, and deploy doesn't delete remote secrets.
+
+Unmarked values from `.env` and `.env.production` are deployed as plaintext vars. Unmarked local and shell values aren't deployed. Warnings about likely secrets don't encrypt them for you; use `.secret()`.
+
+For apps using auth, Void creates a random 32-byte `BETTER_AUTH_SECRET` only when the remote secret is missing. It reuses that value on later deploys. Both auth secrets and schema-marked secrets can be set up on a new Worker's draft before its first upload.
+
+### Readiness and rollback
+
+Void usually checks an uploaded version before sending it traffic. When Cloudflare provides a version preview URL, Void probes that URL. Otherwise, it stages the version at 0% traffic and checks it through `workers.dev` using Cloudflare's version-override header.
+
+If readiness or trigger synchronization fails, Void restores the previous deployment. If you already have a gradual rollout splitting traffic across versions, finish or cancel it in Cloudflare before deploying through Void.
+
+A new Worker may need one ordinary deployment before version uploads work. This can happen when creating the Worker, establishing its first Durable Object migration history, or enabling preview URLs. Void checks that the Worker did not exist before first-deploy secret setup, deploys it once, then checks the active Worker through `/__void/ready`. It keeps that earlier check even if attaching a secret creates a placeholder version. This bootstrap is never used for an existing application.
+
+To inspect versions or roll back:
+
+```sh
+void project status
+void project rollback [version]
+```
+
+Each version records its migration filenames and its schedules, queues, workflows, routes, and domains. Rollback restores that configuration along with the code, but does not reverse database migrations. Void asks for confirmation when the schema may be newer than the code or migration metadata is missing. Versions without a complete trigger snapshot cannot be rolled back through Void.
 
 #### Scope and limitations
 
-- **Supported apps:** worker-bearing Void apps, static sites, SPAs, known SSGs, explicit `--dir` deploys, fully prerenderable Void Pages apps with `output: "static"`, and Cloudflare output from TanStack Start, React Router, vinext App Router, vinext Pages Router, SvelteKit, Nuxt, Analog, and Astro. Static deployments always use a thin Worker in front of Workers Assets so redirects, rewrites, fallbacks, and headers match the Void edge. Hybrid and SSR framework builds keep their generated application Worker. Worker-bearing apps support D1 (SQLite), KV, R2, Queues, typed SQLite-backed state from `durable-objects/`, PostgreSQL or MySQL through Hyperdrive, auth, WebSockets, AI, cron jobs, and ISR. Unsupported shapes fail closed **before** account operations, with guidance:
-  - **Hybrid `output: "static"` remains worker-backed.** If a page opts out of prerendering, a dynamic page has no `getPrerenderPaths()`, or the app has another runtime feature, Void deploys the generated application Worker instead of dropping that functionality.
-  - **WebSocket routes (`*.ws.ts`) use SQLite Durable Objects.** Void persists their bindings and append-only `new_sqlite_classes` history in `wrangler.jsonc`; commit that history and never delete or reorder deployed migration steps. Existing hosted projects whose earlier WebSocket classes used legacy `new_classes` keep those classes unchanged, while newly introduced classes use SQLite.
-  - **Direct ISR uses the shared cache protocol.** Cache entries are deployment- and hostname-scoped, `routing.revalidateQueryAllowlist` creates bounded query variants, and `revalidate()` purges the direct entry plus every matching query variant from KV and the Cache API.
-  - **Custom D1 migration layouts are supported.** When `migrations_dir`, `migrations_table`, or `migrations_pattern` is configured, Void resolves Cloudflare's exact file set and numeric order, then requires it to match the migration set it validated before any remote apply. Stray, missing, reordered, or byte-different SQL fails closed.
-  - **Non-Cloudflare targets (`node` / `bun` / `deno`) are not supported here** -- this backend deploys Cloudflare Workers only.
-  - **Email (`void/email`) is set up on the first deploy, on a zone you own.** Put `email.from` in `void.json`; the deploy reads your account, prints a checklist of what it would change, and asks once -- see [Your own Cloudflare account](../guide/email.md#your-own-cloudflare-account) in the email guide. What remains outside Void's reach: `email/_default.ts` and dynamic local parts (`email/[user].ts`) need a catch-all, which exists only on a zone apex, so on a mail subdomain they get no rule; a mail domain that already has non-Cloudflare MX records is refused, never routed over; `sendEmail()` to arbitrary recipients needs Workers Paid (Email Sending onboarding), otherwise verified destinations only; enabling routing on a subdomain goes through your session bearer and, if Cloudflare refuses it, falls back to a one-time dashboard step; in CI the email step never prompts -- run `void email setup --platform cloudflare` once, commit `wrangler.jsonc`, and deploy with `--require-email`; Void owns the top-level `addresses` array in `wrangler.jsonc`, so hand-written entries there skip the email step; and the `void email usage` / `logs` / `allow` / `destinations` commands are platform-only.
-  - **`--skip-build` is limited to static deploys.** Static, SPA, and SSG output can be reused when its directory already exists. Worker-bearing apps require a fresh build because their checks validate the emitted worker `vars` and generated auth schema.
-- **Sandbox requires Workers Paid.** Other Void SDK features on the native path remain Workers Free-compatible within Cloudflare's Free quotas. Importing `void/sandbox` or enabling `sandbox` in `void.json` is the opt-in that adds a Container application and triggers the entitlement preflight; apps that do not use it perform no Containers check.
-- **PostgreSQL and MySQL migrations require `DATABASE_URL` in the deploy environment.** Cloudflare does not return the database password from an existing Hyperdrive config. The URL is used only to provision Hyperdrive and apply checked-in migrations before upload; it is never written to `wrangler.jsonc` or the generated Worker config.
-- **Auth requires checked-in migrations that produce the Better Auth schema.** Run `void db generate`; when Void-managed auth is enabled, it resolves the production Better Auth configuration and includes its tables in Drizzle's schema input automatically, including configured renames and plugin tables. Review and commit the resulting SQL. Cloudflare deploy validates the generated schema against the checked-in migration history, then applies it with the application migrations. D1 receives an additional in-memory structural simulation before its remote apply; PostgreSQL relies on the dialect-aware Drizzle drift gate and transactional migration runner. If the generated schema and checked-in migration history differ, deploy fails closed and asks you to regenerate rather than mutating source during deployment.
-- **Migrations must apply in the same order Void validated.** Deploy checks that the files Cloudflare will apply to remote D1, including a configured `migrations_pattern` and numeric-prefix ordering, exactly match Void's validated set -- no stray files, same content, same order. Deploy fails closed on a mismatch.
-- **Avoid concurrent first deploys from different machines or CI runners.** The provisioning lock is per local config path and does not coordinate across hosts. Resource adoption makes later deploys idempotent, but two first deploys racing the same account could create duplicate resources whose names are not account-unique. Commit the updated `wrangler.jsonc` when practical so CI starts with the resolved ids.
-- **Your `wrangler.jsonc` is rewritten on provision.** Void preserves your comments but may normalize the whole file's indentation when it writes new ids -- expect that in the diff.
-- **Schema-marked secrets are encrypted automatically.** A key declared with a built-in helper's `.secret()` is removed from generated `vars`, bulk-uploaded over stdin, and added to `secrets.required`. Values can come from `.env`, `.env.production`, `.env.production.local`, or the deploy process environment (shell wins). Remote-only marked secrets are inherited, absent optional ones are skipped, and no remote secrets are pruned. Unmarked `.env` / `.env.production` values still ship as plaintext; unmarked local and shell values do not ship. Heuristic secret detection remains warning-only.
-- **First deploy of a new worker.** Void can create schema-marked secrets on the draft Worker and automatically bootstraps `BETTER_AUTH_SECRET` for auth-enabled apps.
-- **Named Cloudflare environments are intentionally not selected.** Direct commands always target the top-level root config and reject `CLOUDFLARE_ENV`, `CLOUDFLARE_VITE_WRANGLER_CONFIG_PATH`, and project-local name overrides. Use a separate checked-in root config per deployment target for now.
-- **Operational commands follow the saved target.** `void secret list|put|sync|delete`, `void domain add|delete|list|status`, `void project status|list|logs|rollback`, `void db status`, `void db execute --remote`, and `void db migrate --remote` operate directly on the pinned Cloudflare Worker or D1 database when `.void/project.json` selects Cloudflare. Cloudflare logs are a live tail, not hosted historical log storage. Custom domains are stored as `custom_domain` routes and applied immediately through route-only trigger synchronization, so a domain edit cannot rewrite cron, queue, or workflow triggers. Deleting the final custom domain requires `CLOUDFLARE_API_TOKEN` with Workers Scripts: Edit permission because the standard trigger operation skips empty domain sets; Void uses Cloudflare's domain-record API for that one reconciliation and otherwise fails before changing state.
-- **Database migrations remain forward-only during rollback.** Rolling back activates older code and restores the trigger snapshot Void stored with that Worker Version, but never reverses D1, PostgreSQL, or MySQL migrations. Void compares version annotations and asks for confirmation when older code will run against a newer schema, or when migration metadata is unavailable. A legacy version without a complete trigger snapshot is rejected instead of leaving non-versioned Cloudflare triggers attached to incompatible code.
-- **Void does not tear down direct resources.** `void project delete` refuses for Cloudflare targets because inferred resources may be shared. Remove resources explicitly with Cloudflare tooling only after verifying ownership.
+Void supports Worker apps, static sites, SPAs, known SSGs, `--dir` deploys, and fully prerenderable Pages apps with `output: "static"`. It also deploys Cloudflare output from TanStack Start, React Router, vinext App Router and Pages Router, SvelteKit, Nuxt, Analog, and Astro.
+
+Static sites use a small Worker in front of Workers Assets to handle redirects, rewrites, fallbacks, and headers. Hybrid and SSR apps keep their application Worker. A page that opts out of prerendering, a dynamic page without `getPrerenderPaths()`, or another runtime feature keeps the app on a Worker even with `output: "static"`.
+
+Worker apps support D1, KV, R2, Queues, typed state, PostgreSQL and MySQL through Hyperdrive, auth, WebSockets, AI, cron jobs, and ISR. The main limits are:
+
+- **Sandbox needs Workers Paid and Docker.** Importing `void/sandbox` or enabling `sandbox` in `void.json` adds a Container application. Void checks access before provisioning or building. [Enable Workers Paid](https://dash.cloudflare.com/?to=/:account/workers/plans) and sign in again if needed. API tokens need Account / Containers: Edit and Account / Cloudchamber: Edit. See [Containers pricing](https://developers.cloudflare.com/containers/pricing/). Apps without Sandbox skip this check and remain compatible with Workers Free within its quotas.
+- **Worker apps need a fresh build.** `--skip-build` works for existing static, SPA, and SSG output. Worker validation needs the current build's vars and auth schema.
+- **Named Cloudflare environments aren't supported.** Direct commands use the top-level root config and reject `CLOUDFLARE_ENV`, `CLOUDFLARE_VITE_WRANGLER_CONFIG_PATH`, and project-local name overrides. Use a separate root config per deployment target.
+- **Node.js, Bun, and Deno use a different deployment path.** See their [integration guide](./nodejs-bun-deno.md).
+- **Email is set up on the first deploy, on a zone you own.** Put `email.from` in `void.json`; the deploy reads your account, prints a checklist of what it would change, and asks once. See [Your own Cloudflare account](../guide/email.md#your-own-cloudflare-account). Outside Void's reach: `email/_default.ts` and dynamic local parts (`email/[user].ts`) need a catch-all, which exists only on a zone apex, so on a mail subdomain they get no rule; a mail domain that already has non-Cloudflare MX records is refused, never routed over; `sendEmail()` to arbitrary recipients needs Workers Paid (Email Sending onboarding), otherwise verified destinations only; Void owns the top-level `addresses` array in `wrangler.jsonc`, so hand-written entries there skip the email step; and `void email usage`, `logs`, `allow`, and `destinations` are platform-only.
+
+WebSocket routes and typed state use SQLite-backed Durable Objects. Commit the bindings and `new_sqlite_classes` migration history in `wrangler.jsonc`; don't delete or reorder deployed migration steps. Older hosted classes using `new_classes` keep their existing storage.
+
+ISR uses the shared cache protocol. Entries are scoped to a deployment and hostname, and `routing.revalidateQueryAllowlist` adds bounded query variants. `revalidate()` purges matching entries and variants from KV and the local edge cache. See [ISR](#isr-self-host) below for cache behavior across regions.
+
+### Managing the deployed app
+
+With Cloudflare selected, `void secret`, `void domain`, `void project status|list|logs|rollback`, and remote `void db` commands use the saved Worker and account. Database commands operate on the selected D1 database. Logs are a live tail; Void doesn't provide hosted log history for direct deploys.
+
+Custom domain changes update routes immediately without rewriting schedules, queues, or workflows. Removing the final custom domain requires `CLOUDFLARE_API_TOKEN` with Workers Scripts: Edit because that operation uses Cloudflare's domain-record API.
+
+`void project delete` doesn't remove direct Cloudflare resources, which may be shared. Review their use and remove them explicitly in Cloudflare.
+
+::: details How Void checks the build
+
+Your build runs your config, Vite plugins, and dependencies with filesystem access. Void removes Cloudflare credentials from the build environment, checks the generated account, Worker name, and binding IDs against the pre-build configuration, and verifies that the bundled deployment tool hasn't changed.
+
+These checks detect changes to the deployment target or uploader, but they don't sandbox arbitrary build code. Build dependencies still need the same trust as other code you run on your machine.
+
+:::
 
 ### Local development
 
@@ -323,7 +387,7 @@ export const POST = defineHandler(async (c) => {
 });
 ```
 
-`ai.gateway` is required for `ai.provider().fetch()` -- without it, that call returns a `501`. No AI traffic or provider secret passes through Void's shared proxy: requests go directly to _your own_ Cloudflare AI Gateway, authenticated with provider secrets from _your_ Worker's environment. (The request and that secret are of course still sent onward to the AI Gateway and the upstream provider you call.)
+Set `ai.gateway` before calling `ai.provider().fetch()`; otherwise it returns `501`. Requests use the provider secrets in your Worker's environment and go through your AI Gateway to the provider. They don't pass through the Void platform's shared proxy.
 
 Notes:
 
@@ -365,8 +429,8 @@ await revalidate({ all: true });
 
 Self-hosted, `revalidate()` purges this worker's own KV entries (global, authoritative) plus the current colo's edge cache.
 
-Limits (the single-worker cache ladder can't do everything the platform's dispatch layer does):
+There are a few differences from platform-managed ISR:
 
-- **No fleet-wide / cross-colo edge purge.** `revalidate()` clears KV globally and the _local_ colo's edge cache; other colos keep serving their edge copy until it expires (bounded by the response's `s-maxage`), then re-render on the next edge miss.
-- **The pages-protocol JSON variant is not served from a cold colo's KV.** A colo that hasn't rendered the HTML yet re-renders the JSON live; the JSON edge cache is warmed only as a side effect of the HTML render path.
-- **The warm cache is dropped on every redeploy.** Each `vite build` bakes a fresh deployment id into the cache keys, so cached HTML never outlives the hashed assets it references -- the first request after a deploy is a cold render.
+- **Edge caches expire independently.** `revalidate()` clears KV and the current data center's edge cache. Other data centers may serve their cached response until its `s-maxage` expires, then render again.
+- **Pages JSON is cached after an HTML render.** A data center that hasn't rendered the HTML yet generates the JSON response live rather than reading it from KV.
+- **Each deploy starts with a fresh cache.** Cache keys include a new deployment ID, so cached HTML can't reference assets from an older build. The first request renders the page again.

@@ -4,25 +4,35 @@ outline: deep
 
 # Self-host a Void platform
 
-A self-hosted Void platform gives a company one shared control plane in its own Cloudflare account. Developers connect the normal `void` CLI to it, log in with GitHub, create projects, and run `void deploy --platform void`. This is different from `void deploy --platform cloudflare`, which deploys one app directly and does not install a control plane.
+A Void platform lets your team deploy apps into a shared Cloudflare account. As an administrator, you install and maintain the platform. Developers connect the Void CLI to its URL, sign in with GitHub, and deploy their apps.
 
-Developer and administrator platform sessions created by `void auth login` are stored in the operating-system keychain, scoped to the platform origin. Void refuses to create a new plaintext token file when the keychain is unavailable; headless environments provide `VOID_TOKEN` from a secret manager.
+If you're deploying an app for yourself, [deploy directly to Cloudflare](../integrations/cloudflare.md#deploy-to-your-own-cloudflare-account). You don't need to install a platform first.
 
-The core installation intentionally excludes the user dashboard, Deploy on GitHub, GitHub App webhooks, build Containers, email, Google OAuth, custom project domains, and sandbox orchestration. Those are optional platform modules, not prerequisites for deploying an app. GitHub OAuth login, CLI deploys, D1, KV, R2, Queues, cron jobs, Workers AI, WebSockets, SSE, ISR, routing, logs, and rollback use the same platform components as Void Cloud.
+The CLI stores platform login credentials in your operating system's keychain, separately for each platform URL. For CI, supply `VOID_TOKEN` from a secret manager. Void doesn't create new plaintext token files if the keychain is unavailable.
+
+The core platform supports GitHub login, CLI deploys, D1, KV, R2, Queues, cron jobs, Workers AI, WebSockets, SSE, ISR, routing, logs, and rollback. It uses the same components as Void Cloud.
+
+The user dashboard, GitHub builds and webhooks, build Containers, email, Google login, custom project domains, and sandbox orchestration aren't part of the core installation.
 
 ## Prerequisites
 
 You need:
 
 - A Cloudflare account with Workers for Platforms and the products represented in the footprint below.
-- A Cloudflare user who can create the resources represented in the footprint below. Interactive lifecycle commands open Cloudflare browser OAuth and store the session in the operating-system keychain. CI uses `CLOUDFLARE_API_TOKEN` instead.
-- A separate, scoped Cloudflare runtime API token for the installed control plane. It manages application Workers, D1, KV, R2, Queues, Analytics, and certificates after installation; it is never used as the human operator credential. Give it account-level Workers Scripts: Edit, Workers Tail: Read, D1: Edit, Workers KV Storage: Edit, Workers R2 Storage: Edit, Queues: Edit, and Account Analytics: Read, plus zone-level SSL and Certificates: Edit on the application zone. The installer prints a direct account-token dashboard link and accepts the value through a masked prompt.
-- A dedicated, empty external PostgreSQL database reachable through Cloudflare Hyperdrive. Void never creates or deletes this database. The installer transactionally claims it for one platform installation and refuses to share it with another installation.
+- Access to create the platform's resources in that account. Void opens your browser to sign in and stores the session in your system keychain. CI uses `CLOUDFLARE_API_TOKEN`.
+- A Cloudflare API token for the running platform. This is separate from your administrator login: the platform uses it to manage resources when developers deploy apps. See the permissions below.
+- An empty PostgreSQL database reachable through Cloudflare Hyperdrive, dedicated to this installation. Void records the installation in that database and won't let another platform share it. You manage the database itself.
 - An application base domain such as `apps.example.com`. Its containing Cloudflare zone may already exist or the installer can create it.
 - A GitHub OAuth App for login. The installer prints the exact callback URL before asking for its client credentials.
 - An R2 API token with Object Read & Write access. This is separate from the Cloudflare management API token and is used to sign direct asset uploads.
 
 Workers for Platforms is a platform-level Cloudflare product. This requirement does not change native single-app deploys: ordinary `void deploy --platform cloudflare` apps remain Workers Free-compatible unless the app explicitly uses a paid-only product such as Containers.
+
+### Runtime token permissions
+
+The running platform needs these account permissions: Workers Scripts: Edit, Workers Tail: Read, D1: Edit, Workers KV Storage: Edit, Workers R2 Storage: Edit, Queues: Edit, and Account Analytics: Read. It also needs SSL and Certificates: Edit on the application zone.
+
+The installer links to the account-token page and asks for the token in a masked prompt. Keep a copy in your secret manager for recovery.
 
 ## Preview the installation
 
@@ -32,7 +42,9 @@ Run the interactive installer with `--plan` first:
 void platform install --plan
 ```
 
-The plan performs reads only. It selects an account, normalizes the installation name, shows every resource it would create, reuse, update, or adopt, and prints the future API and resource-proxy URLs. By default both use their respective Workers' `workers.dev` hostnames.
+The plan shows the account, resource names, domains, and changes Void would make. It doesn't change Cloudflare resources. The API and resource proxy use `workers.dev` hostnames by default.
+
+A preview uses an example suffix for resource names. Installation generates a fresh suffix and shows the final names before asking you to proceed.
 
 For a repeatable non-interactive plan:
 
@@ -42,24 +54,23 @@ void platform install --plan \
   --display-name "Company Void" \
   --account 0123456789abcdef0123456789abcdef \
   --application-domain apps.example.com \
-  --zone example.com \
-  --yes
+  --zone example.com
 ```
 
-`--yes` is required for every mutating lifecycle command in CI or another non-interactive shell. Interactive commands still ask before install or uninstall unless `--yes` is provided; `--plan` is always read-only.
+Commands that change the platform require `--yes` in a non-interactive shell. A preview with `--plan` doesn't need it.
 
 Use `--control-plane-domain platform.example.net` when you want a custom API hostname. The hostname must be in a zone the selected account and token can manage. Omitting it keeps the control plane on `workers.dev` and avoids requiring another domain.
 
-Use `--dedicated-zone` only when the application domain is the entire zone and every unmatched hostname in that zone belongs to Void. Without it, Void installs only the explicit `*.application-domain` routes. It never assumes a domain is shaped like `apps.company.com`.
+Use `--dedicated-zone` if the entire application zone belongs to Void. This adds catch-all routes for unmatched hostnames. For example, you could use a spare domain such as `example.app` as the whole zone, or `apps.example.com` within an existing company zone without the catch-all.
 
 ## Configure GitHub OAuth
 
-Create a GitHub OAuth App using the API URL from the plan:
+Create a GitHub OAuth App using the final API URL the installer prints. A `--plan` preview may use a placeholder resource suffix, so wait for the actual installation URL before saving the callback:
 
 - Homepage URL: the API origin, for example `https://void-company-api.example.workers.dev`
 - Authorization callback URL: `<API origin>/auth/callback`
 
-Keep its client ID and client secret for the installer. The installer also asks for the GitHub username of the initial administrator. Only that account can bootstrap the installation, and signup remains restricted after the first login until an administrator explicitly changes the signup controls. First-owner creation is serialized in PostgreSQL so concurrent logins cannot create multiple owners.
+The installer asks for the app's client ID, client secret, and the GitHub username of the first administrator. That GitHub account becomes the first owner. Signup stays restricted until an administrator changes the access settings.
 
 ## Install
 
@@ -69,7 +80,9 @@ The interactive command asks for every missing value:
 void platform install
 ```
 
-For non-interactive installation, provide the plan flags above and these environment variables. `CLOUDFLARE_API_TOKEN` is the CI/operator credential; `VOID_PLATFORM_RUNTIME_CLOUDFLARE_API_TOKEN` is the distinct token installed into the platform Workers:
+For CI or another non-interactive shell, supply the configuration through environment variables. The example below uses placeholders; load the real values from your secret manager.
+
+`CLOUDFLARE_API_TOKEN` authorizes the installation. `VOID_PLATFORM_RUNTIME_CLOUDFLARE_API_TOKEN` is the separate token the running platform will use.
 
 ```sh
 export CLOUDFLARE_API_TOKEN=your-scoped-management-token
@@ -86,12 +99,15 @@ void platform install \
   --display-name "Company Void" \
   --account 0123456789abcdef0123456789abcdef \
   --application-domain apps.example.com \
-  --zone example.com
+  --zone example.com \
+  --yes
 ```
 
 The database must be dedicated to this installation. Its ownership claim and platform tables remain after uninstall because external PostgreSQL is never purged automatically. To reuse it for a different installation, explicitly remove the old platform schema and data yourself or provide a fresh database.
 
-Before changing Cloudflare, the installer shows the complete plan and defaults the confirmation to No. A read-only `--plan` shows the exact footprint with a representative stable suffix; the mutating install allocates a fresh cryptographically random suffix and shows those final names before confirmation. Every create operation is preceded by a durable local intent checkpoint, and ownership is continuously mirrored into the installer-owned routing namespace. The installer also stamps installation-specific ownership markers into every platform Worker and the assets R2 bucket. A local intent alone is never accepted as remote ownership proof, so a concurrent or ambiguous same-name installation fails closed instead of claiming resources it might later delete.
+Before making changes, Void shows the full plan and asks for confirmation, with No selected by default. It saves progress locally and in Cloudflare so an interrupted install can resume.
+
+Void records which resources belong to the installation. If it cannot prove that a resource is yours to manage, it stops and asks you to resolve the conflict.
 
 If the requested zone does not exist, Void creates it and stops in a `waiting-for-dns` state. Update the domain at its registrar to use the printed Cloudflare nameservers, wait for the zone to become active, then resume:
 
@@ -99,13 +115,26 @@ If the requested zone does not exist, Void creates it and stops in a `waiting-fo
 void platform install --resume --name <installation-id>
 ```
 
-After installation, sign in through `void auth login`. The initial administrator can also open `<API origin>/admin/login` and use the same GitHub account to manage signup access and inspect the platform.
-
 For application traffic, Void creates one proxied wildcard DNS record at `*.application-domain` and the matching Worker routes. A compatible existing proxied record is adopted and is never deleted by Void.
+
+## Managing Access
+
+After installation, sign in with the GitHub account you chose as the first administrator:
+
+```sh
+void platform auth login
+void platform signup allow github teammate
+```
+
+Void shows the proposed access change and asks you to confirm it. Once approved, `teammate` can connect to the platform's API URL and sign in with GitHub.
+
+To see who can join, run `void platform signup show`. You can also allow an email address or a domain such as `*@example.com`. `void platform signup open` permits public signup; `void platform signup restrict` requires an allowlist match again.
+
+Your administrator session lasts for one hour. Use it to inspect users, projects, logs, and platform health. The [Platform Administration guide](./platform-administration.md) walks through those workflows, previews, and automation. You can also open `<API origin>/admin/login` to use the browser admin UI.
 
 ## Cloudflare footprint
 
-Every resource uses a recognizable `void-<installation-name>-<random-suffix>-*` prefix where Cloudflare permits names. The per-installation suffix prevents a concurrent process from predicting and claiming a Worker name before its first upload.
+Resources use a `void-<installation-name>-<random-suffix>-*` prefix where Cloudflare allows names. This keeps installations recognizable and avoids predictable Worker names colliding during setup.
 
 | Resource                                  |  Count | Purpose                                                            |
 | ----------------------------------------- | -----: | ------------------------------------------------------------------ |
@@ -119,20 +148,21 @@ Every resource uses a recognizable `void-<installation-name>-<random-suffix>-*` 
 | Proxied wildcard DNS records              |      1 | Application hostname resolution                                    |
 | Zones                                     | 0 or 1 | Created only when the requested application zone is absent         |
 
-The API Worker declares four Durable Object classes for usage, cron scheduling, error monitoring, and concurrency coordination. Analytics Engine datasets for request and log telemetry are established by Worker bindings rather than separate installer API calls. Core installation creates no Container application, GitHub App, dashboard Worker, or build Worker.
+The API Worker uses four Durable Object classes for usage, cron scheduling, error monitoring, and concurrency. Worker bindings create the request and log datasets in Analytics Engine. The core installation doesn't create Container applications, a GitHub App, a dashboard Worker, or build Workers.
 
 ## Connect and deploy an app
 
-A successful installation is selected automatically. On another workstation, connect by API URL; its public discovery document pins both the API and resource-proxy origins so project credentials never cross platform boundaries:
+The CLI selects your platform after installation. A developer, or an administrator on another workstation, can connect using its API URL:
 
 ```sh
-void platform connect https://void-company-api.example.workers.dev
-void auth login
+void connect https://void-company-api.example.workers.dev
 void project link
 void deploy --platform void
 ```
 
-There is no implicit public Void platform for new projects. One configured platform is selected automatically; multiple platforms produce an interactive picker. Non-interactive use with multiple platforms must select one first with `void platform use <id-or-url>`. Existing project files created before platform URLs were recorded continue to resolve to Void Cloud for compatibility.
+`void connect` validates the platform and signs you in when needed. With no URL, it offers Cloudflare or a Void platform; `void connect --platform void` offers saved platforms and an option to enter another URL. New projects need a platform connection. Connecting elsewhere preserves an existing project link and explains which destination the project still uses.
+
+In CI, use `void connect <url> --no-login` to register the platform, and supply `VOID_TOKEN` and `VOID_API_URL` for deployment. To verify authentication during connection, omit `--no-login` and set both variables to credentials for that same platform. Older project files already linked to Void Cloud continue to work.
 
 Use these commands to inspect connections and installations:
 
@@ -144,31 +174,81 @@ void platform status [id]
 
 ## Resume, repair, recover, and upgrade
 
-Local state lives under `~/.void/platforms/`. Manifests contain no credentials. Recovery material is encrypted with AES-256-GCM in owner-only `.recovery.enc` files; the randomly generated encryption key lives in the operating-system keychain. Existing plaintext `.recovery` files are encrypted and deleted on first read. A lifecycle operation refuses to write secrets when the keychain is unavailable instead of falling back to plaintext.
+You can omit an installation ID when only one is configured. With several installations, choose one interactively or pass its ID in CI.
 
-Headless environments may set `VOID_PLATFORM_RECOVERY_KEY` to a canonical base64-encoded 32-byte key supplied by their secret manager. Ephemeral CI jobs may generate a new key for each run because their original platform secrets remain in protected CI secrets and deployed Worker secrets are preserved during upgrades.
+### Resume an installation
 
-- Resume an interrupted install with `void platform install --resume --name <id>`.
-- Before the initial PostgreSQL claim succeeds, an explicit database URL may correct a mistyped or unreachable URL. After the claim succeeds—or Hyperdrive has been provisioned—the recorded URL is pinned; resume refuses a different `DATABASE_URL` instead of splitting lifecycle state from the database used by deployed Workers.
-- Inspect drift without changes with `void platform repair [id] --plan`.
-- Recreate only missing installer-owned resources with `void platform repair [id]`. Missing adopted or external resources fail closed.
-- Deploy the packaged current platform runtime and pending database migrations with `void platform upgrade [id]`. Upgrade and repair preserve whether traffic is currently enabled or disabled.
-- To test or operate a source build, run `vp run --filter @void/platform build`, then pass `--runtime packages/platform/dist/runtime` to install, upgrade, repair, or enable. Custom runtimes use the same integrity verification, migration safety, staged cutover, health checks, and rollback path as packaged releases. The successful installation checkpoint records the runtime manifest digest, whether it was custom or packaged, and `VOID_PLATFORM_SOURCE_REVISION` when that value was present during the runtime build.
-- Platform database upgrades are forward-only and fail closed. The published runtime manifest hashes the migration journal and every SQL file; the installer requires PostgreSQL's Drizzle history to be an exact ordered prefix before it changes the database. Edited, forked, out-of-order, or package-newer histories are rejected.
-- When existing platform Workers need pending migrations, the target release must explicitly attest that its final schema remains compatible with the exact old Worker version and current schema digest. If that edge is absent, upgrade stops before the database or Workers change and asks you to use a supported intermediate release. Maintainers must ship expand-compatible schema changes during this rollback-capable transition; destructive contract changes belong in a later release after old Workers can no longer be restored.
-- All pending platform migrations run in one PostgreSQL transaction under the lifecycle lock. Worker deployment starts only after the target schema digest is verified and checkpointed. The installation keeps reporting the old platform version until every Worker is deployed and target-version health succeeds. If cutover fails, Void restores the old Workers against the explicitly compatible expanded schema; retry recognizes the completed schema and does not rerun migrations.
-- Fresh, resumed, and previously disabled installations write the routing safety gate before the first Worker upload. Bounded API, discovery, proxy, and dispatch health probes can run through that gate, but normal user traffic remains blocked until the complete target runtime passes verification. An ambiguous upload response or interrupted process therefore leaves the incomplete installation closed and safely resumable.
-- R2 creation checkpoints the bucket's Cloudflare creation fingerprint before writing its ownership marker. If that marker write fails, resume repairs only the still-missing marker on the exact checkpointed bucket generation; a replacement bucket or foreign marker is never overwritten.
-- Upgrade, repair, enable, and interrupted-cutover recovery inventory every existing platform Worker before publishing triggers. Routes and custom domains outside the installation manifest are carried into both the new version and its rollback snapshot, so lifecycle operations do not erase manually attached traffic.
-- The manifest fingerprints the Hyperdrive PostgreSQL origin without storing its password. Before migrations or Worker upload, Void fetches the exact Hyperdrive configuration and requires its scheme, host, port, database, and (when Cloudflare returns it) user to match the pinned recovery database. If an administrator retargeted Hyperdrive, the command stops before mutation.
-- Recover a lost local manifest from the installation marker in Cloudflare with `void platform discover [--account <id>]`. In an account containing several platforms, add `--installation <id-or-name>` to recover and verify only the intended installation.
-- On a newly discovered workstation, provide `VOID_PLATFORM_DATABASE_URL` for database locking and migrations. Normal upgrades preserve the existing encrypted Worker secrets, so GitHub, R2, JWT, project-encryption, and runtime-token values do not need to be re-entered. If repair must recreate a missing API or proxy Worker, restore the original values through the documented `VOID_PLATFORM_*` variables; Void fails before creating an unusable Worker when they are absent. Install, repair, upgrade, enable, disable, and uninstall hold a PostgreSQL session advisory lock so two hosts cannot mutate one installation concurrently. The claimed database row also stores the secret-free authoritative lifecycle manifest, which prevents a host with stale local or Workers KV state from undoing a newer operation.
+If setup stops or fails, continue from the saved progress:
 
-Discovery verifies the account, every recorded Cloudflare resource, and the routing namespace ownership marker before writing local state. It also verifies the live endpoint identity for a completed enabled installation; interrupted and disabled installations remain recoverable when no endpoint is available. Cloudflare does not expose secret values. Keep the database URL and original runtime secrets in an organizational secret manager for disaster recovery; routine source and package upgrades preserve those deployed secrets without downloading them.
+```sh
+void platform install --resume --name <id>
+```
+
+You can correct the database URL if the initial connection failed. Once Void has claimed the database or provisioned Hyperdrive, that database is fixed for the installation. A later command with a different URL stops before making changes.
+
+### Repair missing resources
+
+Preview what needs repair, then apply it:
+
+```sh
+void platform repair [id] --plan
+void platform repair [id]
+```
+
+Repair recreates missing resources that the installer owns. If an adopted or external resource is missing, restore it yourself before continuing. A disabled platform stays disabled through repair and upgrade.
+
+### Upgrade the platform
+
+Use the installed CLI's packaged runtime to upgrade:
+
+```sh
+void platform upgrade [id] --plan
+void platform upgrade [id]
+```
+
+An upgrade validates the runtime, applies supported pending migrations, deploys the Workers, and checks their health. Existing Worker secrets are preserved.
+
+Database migrations only move forward. Void checks that the live migration history matches the release's files and order. If migrations are pending, the release must explicitly support running the previous Worker version against the updated schema. Otherwise, upgrade stops and asks you to use an intermediate release.
+
+Pending migrations run in one PostgreSQL transaction. If the Worker rollout fails, Void restores the previous Workers against that compatible schema. A retry recognizes migrations that already succeeded.
+
+### Manage an installation from another machine
+
+Use `discover` to restore the administrator's local installation records:
+
+```sh
+void platform discover --account <account-id> --installation <id-or-name>
+```
+
+Discovery checks the recorded resources and their ownership before saving local state. For an enabled installation, it also checks the live platform's identity. Interrupted or disabled installations can still be recovered when their endpoints are unavailable.
+
+After discovery, provide `VOID_PLATFORM_DATABASE_URL` for migrations and to coordinate administrator commands. You don't need to re-enter the other secrets for a normal upgrade. If repair must recreate a missing API or proxy Worker, supply its original runtime token, GitHub, R2, JWT, and project-encryption secrets through the `VOID_PLATFORM_*` variables. Cloudflare can't return those values, so keep them in your organization's secret manager.
+
+### Where local state lives
+
+Installation records live in `~/.void/platforms/` and contain no credentials. Recovery secrets are encrypted with AES-256-GCM in `.recovery.enc` files. The encryption key lives in your operating system's keychain; on systems with POSIX permissions, recovery files are readable only by their owner. Older plaintext `.recovery` files are encrypted and removed on first read.
+
+If the keychain isn't available, Void stops before writing secrets. Headless environments can supply `VOID_PLATFORM_RECOVERY_KEY`: a canonical base64-encoded 32-byte key from a secret manager. A temporary CI runner can use a new key for each run if its original credentials remain available in protected CI secrets.
+
+::: details How recovery protects existing resources
+
+Platform commands hold a PostgreSQL advisory lock so two administrators can't change the same installation at once. The database also stores the authoritative installation record; stale local or KV records cannot overwrite newer changes.
+
+Before migrations or uploads, Void checks that Hyperdrive still points at the recorded database, including its scheme, host, port, database name, and user when Cloudflare provides it. The recorded fingerprint excludes the password. A changed origin stops the operation.
+
+New, resumed, and previously disabled installations block user traffic before Worker uploads begin. Only the installer's health probes can pass until the complete runtime is verified. An interrupted or ambiguous upload leaves setup resumable with traffic blocked.
+
+Void preserves manually attached routes and custom domains in both the new configuration and rollback state. R2 recovery checks the bucket's recorded creation identity before completing an interrupted ownership marker write. It won't overwrite a replacement bucket or another installation's marker.
+
+:::
 
 ## Continuously deploy a source build
 
-A CI runner does not need a persisted `~/.void/platforms` directory. It can rebuild local state from the installer-owned Cloudflare checkpoint, supply the original secrets from its protected environment, preview the change, and upgrade from a workspace runtime:
+Build `@void/platform` from your checkout and pass its runtime directory to `install`, `upgrade`, `repair`, or `enable` with `--runtime`. Custom runtimes get the same integrity, migration, health, and rollback checks as packaged releases.
+
+Void records the runtime's manifest digest, whether it was packaged or custom, and the source revision when you set `VOID_PLATFORM_SOURCE_REVISION` during the build.
+
+A fresh CI runner can discover the installation each time. Set `CLOUDFLARE_API_TOKEN` and `VOID_PLATFORM_DATABASE_URL` through its protected environment, then:
 
 ```sh
 export VOID_PLATFORM_SOURCE_REVISION="$GITHUB_SHA"
@@ -176,50 +256,63 @@ vp run build
 
 export VOID_PLATFORM_REGISTRY_DIR="$RUNNER_TEMP/void-platform-registry"
 export VOID_PLATFORM_RECOVERY_KEY="$(openssl rand -base64 32)"
-void platform discover --account "$CLOUDFLARE_ACCOUNT_ID"
+void platform discover --account "$CLOUDFLARE_ACCOUNT_ID" \
+  --installation "$VOID_PLATFORM_INSTALLATION"
 void platform upgrade "$VOID_PLATFORM_INSTALLATION" \
   --runtime packages/platform/dist/runtime --plan
 void platform upgrade "$VOID_PLATFORM_INSTALLATION" \
   --runtime packages/platform/dist/runtime --yes
 ```
 
-The installation selector may be omitted when the account contains only one discoverable installation. Serialize deployments for one installation: database migrations and Worker cutover must never be cancelled midway by a newer CI run. Keep the CI management token and database URL in a protected environment. Existing Worker secrets are inherited by new versions; provide the other original secrets only when a repair must recreate a missing Worker or when performing an explicit credential rotation.
+Omit the installation selector only if the account has one discoverable installation. Run one deployment per installation at a time, and let it finish before starting the next. Cancelling during migrations or Worker rollout can leave an installation waiting for recovery.
+
+Keep the management token and database URL in a protected CI environment. Upgrades inherit deployed Worker secrets. Other original secrets are needed when recreating a missing Worker or explicitly rotating credentials.
 
 ## Disable and safely uninstall
 
-New installs observe published routes and custom domains and record them as retained attachments. Cloudflare does not expose a generation precondition for deleting either kind of attachment, so disable, rollback, and uninstall leave them in place for explicit dashboard cleanup. The installation-owned routing flag still blocks platform requests.
-
-Gate platform traffic through an installation-owned routing flag without deleting resources or data. Repair and upgrade keep the installation private until traffic is restored explicitly:
+To pause a platform without removing its data:
 
 ```sh
 void platform disable [id] --plan
 void platform disable [id]
+```
+
+Disabled platforms reject requests through a flag in their routing storage. Their domains and routes remain attached. Repair and upgrade preserve the disabled state; restore traffic with:
+
+```sh
 void platform enable [id] --plan
 void platform enable [id]
 ```
 
-Add `--yes` to a mutating lifecycle command when running it non-interactively.
+Add `--yes` to commands that make changes in a non-interactive shell.
 
-Disable also blocks queue batches from reaching application Workers. Dispatch retries those batches after five minutes, but delivery remains subject to each Queue consumer's configured retry count and Cloudflare's retention and dead-letter policy. Plan a dead-letter queue or another recovery path when an installation may stay disabled long enough to exhaust those limits.
+While disabled, the platform retries queue batches after five minutes instead of delivering them to apps. Queue retention and retry limits still apply. For a long pause, plan a dead-letter queue or another way to recover messages.
 
-Preview uninstall first:
+### Uninstall
+
+Preview removal before applying it:
 
 ```sh
 void platform uninstall [id] --plan
+void platform uninstall [id]
 ```
 
-The default uninstall policy is ownership-aware:
+Uninstall blocks platform traffic, removes transient Queues, and records the resources left for you to review. By default, Workers, KV, R2, Hyperdrive, the dispatch namespace, and AI Gateway remain in your account. Adopted resources, external PostgreSQL, zones, DNS records, routes, and custom domains are always retained.
 
-- Adopted or external resources are never deleted.
-- Transient Queues are removed. DNS records, routes, and custom domains are retained for explicit dashboard cleanup because Cloudflare cannot condition deletion on the exact configuration the installer verified.
-- Installer-owned Workers, KV, R2, Hyperdrive, dispatch, and AI Gateway resources are retained and recorded in the final manifest by default.
-- External PostgreSQL is never deleted.
-- Zones are always retained. A zone can contain unrelated DNS, settings, and Cloudflare products that the installer cannot exhaustively prove ownership of, so inspect and delete an installer-created zone manually after uninstall if appropriate. The legacy `--delete-zone` flag fails before mutation with this guidance.
-
-To delete installer-owned data:
+To also remove eligible data resources owned by the installer:
 
 ```sh
 void platform uninstall [id] --purge-data
 ```
 
-`--purge-data` is destructive, but still never deletes external PostgreSQL, Workers, R2, the AI Gateway, Worker routes, Worker custom domains, adopted resources, or a zone. Those Cloudflare APIs expose no server-enforced generation condition, so a replacement could race a client-side ownership check. Void therefore blocks platform traffic through routing storage and leaves those resources to an operator who can inspect the account immediately before cleanup. Before any Cloudflare mutation, Void compares the remote installation checkpoint with fresh resource inventory and verifies the ownership markers on every Worker. A missing or changed ownership proof stops the operation before it can affect a replacement resource. The routing namespace is deleted last, so rerunning after a failure skips completed work. A default data-retaining uninstall keeps a final `uninstalled` audit checkpoint and disabled flag in the retained routing namespace.
+Even with `--purge-data`, Void retains Workers, R2, AI Gateway, DNS records, routes, custom domains, adopted resources, external PostgreSQL, and zones. Review those in the Cloudflare dashboard if you want to remove them. The older `--delete-zone` flag is no longer supported.
+
+::: details Why some resources require manual cleanup
+
+Cloudflare can't make deletion of these resources conditional on the exact resource generation Void inspected. A resource could be replaced or repurposed between that inspection and deletion. Void leaves it in place and blocks platform traffic instead.
+
+Before removal, Void verifies remote ownership and compares the installation record with a fresh resource inventory. Changed or missing ownership proof stops the operation. A retry skips work already completed, and the routing namespace is removed last when eligible.
+
+A default uninstall keeps the final `uninstalled` record and disabled flag in the retained routing namespace. PostgreSQL's installation claim and tables also remain; uninstall never deletes the external database.
+
+:::

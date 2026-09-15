@@ -32,7 +32,7 @@ Use this page as a command reference. If you are setting up a project for the fi
 | `void auth login`                 | Authenticate with Void                                                        |
 | `void cloudflare login`           | Authenticate with Cloudflare through Void                                     |
 | `void platform install`           | Install a company Void platform in Cloudflare                                 |
-| `void platform connect <url>`     | Connect the CLI to a Void platform                                            |
+| `void connect <url>`              | Connect the CLI to a Void platform                                            |
 | `void project link`               | Link directory to a project                                                   |
 | `void project logs`               | Show runtime logs from deployed project                                       |
 | `void project requests`           | Show request-level traffic (status, method, timing)                           |
@@ -51,12 +51,12 @@ Use this page as a command reference. If you are setting up a project for the fi
 
 ## Binary Invocation
 
-Outside npm scripts, invoke `void` with `npx`, `pnpm`, `yarn`, or `bunx`. For readability, the docs show unprefixed `void` commands. In practice, you still need a binary runner unless the executable is already on your `PATH`.
+The docs use `void` for brevity. Outside package scripts, run it with your package manager: `npx void`, `pnpm void`, `yarn void`, or `bunx void`.
 
 Alternatively, you can add `./node_modules/.bin` to your `PATH` so that you can invoke `void` directly when you are in the root directory of your app.
 
 :::warning ⚠️ Prefer local install
-We do not recommend installing `void` globally, because the CLI needs to be in sync with same version of the runtime framework. Always install `void` locally as a dev dependency of your project.
+Install `void` in your project so the CLI and runtime use the same version.
 :::
 
 ## Help
@@ -71,7 +71,7 @@ void <group> <command> --help
 void <group> help <command>
 ```
 
-Use `void --help` or `void help` for the top-level command list. Every command and grouped subcommand has a focused help page, so `void deploy --help`, `void help db execute`, and `void db help execute` all print command-specific usage before any command validation or network/auth work runs.
+Use `void --help` for the command list. For a specific command, try `void deploy --help` or `void db execute --help`. Help runs without signing in, validating the project, or making network requests.
 
 ## Setup
 
@@ -83,11 +83,17 @@ void init [--tsconfig] [--github] [--agents]
 
 Setup wizard for Void projects (new or existing).
 
-If run in a scaffoldable empty directory, `void init` scaffolds a Pages starter. It asks which scaffold toolchain to use, with Vite+ as the default top option and plain Vite as the alternative. If a single Pages adapter is already installed, it reuses that framework; otherwise it asks which framework to scaffold (React, Vue, Svelte, or Solid). It then asks which starter you want: D1, PostgreSQL, MySQL, or Static Pages. The database-backed starters write a framework-specific `vite.config.ts`, a `pages/` home page plus `.server.ts` loader, `db/schema.ts`, `db/seed.ts`, a generated initial migration under `db/migrations/`, and `routes/api/hello.ts`. The Static Pages starter writes just the framework-specific `vite.config.ts` and a `pages/` home page so you can add server features later. Vite+ starters add `vite-plus` and use `vp dev`, `vp build`, and `vp preview` scripts.
+In an empty project, `void init` asks you to choose:
 
-If run in a non-empty folder that does not look like an app yet, such as a parent `Projects/` folder with subdirectories but no `package.json`, `void init` asks whether to create a new subfolder or continue in the current folder. Creating a subfolder is the default selection.
+- **Toolchain:** Vite+ (the default) or plain Vite.
+- **Framework:** React, Vue, Svelte, or Solid. If one Pages adapter is already installed, Void uses it.
+- **Starter:** D1, PostgreSQL, MySQL, or Static Pages.
 
-If run in an existing project, `void init` configures the project in place: it ensures `void` and `vite` are declared, adds missing `dev` (`vite`) and `build` (`vite build`) scripts without overwriting existing scripts, and creates or patches `vite.config.*` with `voidPlugin()` when the config shape is safe to edit. If the Vite config is too dynamic to patch confidently, it prints the manual snippet instead of rewriting it.
+Database starters include the framework config, a page and server loader, schema, seed, initial migration, and `routes/api/hello.ts`. Static Pages includes the framework config and home page. Vite+ starters use `vp dev`, `vp build`, and `vp preview`.
+
+If the directory contains other files but isn't an app yet, Void offers to create a subfolder. You can choose to continue in the current directory instead.
+
+In an existing app, Void adds missing dependencies and scripts, then updates `vite.config.*` with `voidPlugin()`. Existing scripts are preserved. If the config is too dynamic to edit, Void prints the snippet for you to add.
 
 After that, the full interactive flow walks through:
 
@@ -115,7 +121,9 @@ Use flags to run individual steps without prompts:
 
 Flags can be combined. When any flag is provided, only the specified steps run and interactive prompts are skipped.
 
-For a saved Cloudflare target, the `--github` workflow requires a `CLOUDFLARE_API_TOKEN` repository secret scoped to the pinned account and the Worker/resource permissions the app needs. PostgreSQL/MySQL apps must also configure `DATABASE_URL` as a repository secret; SQLite and database-free apps may leave it unset. For a saved Void target that advertises GitHub Actions support, the workflow uses GitHub OIDC and embeds that platform's API URL: connect the repository once with `void github connect <project> --repo <owner/repo> --executor github_actions` (see the GitHub section below), and pushes to `main` deploy automatically. There is no `VOID_TOKEN` secret to create or rotate. The core self-hosted platform currently advertises this capability as unavailable, so interactive init skips the workflow and `void init --github` explains why instead of creating one that cannot deploy.
+For Cloudflare, the generated workflow needs a `CLOUDFLARE_API_TOKEN` repository secret with access to your app's account and resources. PostgreSQL and MySQL apps also need `DATABASE_URL`.
+
+For a Void platform with GitHub Actions support, the workflow uses that platform's API URL and short-lived GitHub OIDC credentials. Authorize the repository with `void github connect <project> --repo <owner/repo> --executor github_actions`. Core self-hosted platforms don't yet support this integration, so Void explains that limitation instead of generating a workflow.
 
 For projects that already have `"extends"`, `void init --tsconfig` preserves the existing config and adds `./.void/tsconfig.json`. If the existing config defines `files` or `compilerOptions.paths`, Void also merges its generated declaration files and aliases into the root config because TypeScript replaces those fields across `extends` instead of deeply merging them.
 
@@ -129,13 +137,32 @@ Generates the project-local `.void/` artifacts used by TypeScript and runtime co
 
 This is the intended command for CI, fresh clones, editor bootstrap, and any workflow that needs `routes.d.ts`, `db.d.ts`, `queues.d.ts`, `env.d.ts`, and `.void/tsconfig.json` in place before typechecking.
 
+## Connect
+
+```sh
+void connect
+void connect https://platform.example.com
+void connect --platform cloudflare
+void connect --platform void
+```
+
+Connect a project to its deployment destination. With no arguments, choose Cloudflare or a Void platform interactively. A URL selects a Void platform directly. `--platform void` offers saved platforms and an option to enter another URL.
+
+For Cloudflare, Void signs in through the browser when needed, selects an accessible account, and saves `account_id` in the root `wrangler.jsonc` or `wrangler.json`. It shares this setup with `void init`. An existing account selection is preserved; conflicting or inaccessible account settings must be resolved before continuing.
+
+For a Void platform, Void validates its discovery document, reuses a valid session or opens browser login using the platform's supported providers, and saves the verified API and proxy origins. Credentials are stored in the operating-system keychain for that API origin. A sole login provider is selected automatically.
+
+The deployment preference is saved in `.void/project.json`. Connecting to another Void platform preserves an existing project link; the CLI explains when that link or an environment override still selects a different destination. Use `void project link` to explicitly choose a project. Cloudflare selection also retains existing Void project metadata so you can switch back later.
+
+In a non-interactive shell, supply a URL or explicit target. Cloudflare requires usable credentials and an unambiguous account (`CLOUDFLARE_ACCOUNT_ID` when needed). For a Void platform, provide `VOID_TOKEN` with a matching `VOID_API_URL`, or reuse a valid origin-scoped keychain session. Use `void connect <url> --no-login` to save the verified connection without authenticating; this option is only available for Void platforms.
+
 ## Auth
 
 ### `void auth login`
 
 OAuth login. You choose GitHub or Google at the prompt, and the token is saved in the operating-system keychain, scoped to the platform origin. Login fails closed when no keychain is available instead of writing the token to a plaintext file; headless environments use `VOID_TOKEN` from their secret manager.
 
-This is optional if you already completed auth during the interactive `void init` flow.
+This is optional if you already completed auth during `void connect` or the interactive `void init` flow.
 
 ### `void auth logout`
 
@@ -157,7 +184,7 @@ Void ships and invokes compatible Cloudflare tooling itself. Users do not need t
 - `void cloudflare status` — show the accessible Cloudflare accounts without exposing credentials.
 - `void cloudflare logout` — remove the local browser session.
 
-Interactive `void init` and `void deploy --platform cloudflare` invoke the same login flow automatically when necessary. Non-interactive CI must set `CLOUDFLARE_API_TOKEN`.
+Interactive `void connect --platform cloudflare`, `void init`, and `void deploy --platform cloudflare` invoke the same login flow automatically when necessary. Non-interactive CI must set `CLOUDFLARE_API_TOKEN`.
 When a browser session is required, Void opens Cloudflare login immediately and prints `Press Ctrl+C to cancel`; there is no redundant terminal confirmation.
 
 ## Project commands
@@ -201,7 +228,9 @@ void project logs --level error --range 12h
 void project logs --level error --filter websocket
 ```
 
-Tip: `void project logs` only sees what Cloudflare Tail captures — top-level `console.*` calls and uncaught throws. Application errors caught and persisted to your own DB are invisible to tail. Surface them via `console.error(...)` or `void/log`'s `logger.error(...)` so they show up under `--level error`. For 5xx that never reach your worker at all (edge-router errors, static/SPA projects), use `void project requests --status 5xx`.
+Logs include top-level `console.*` calls and uncaught errors captured by Cloudflare Tail. If you catch an error and save it only to your database, it won't appear here. Also log it with `console.error()` or `logger.error()` from `void/log`.
+
+For errors that never reach your Worker, such as edge routing errors or static site requests, use `void project requests --status 5xx`.
 
 On a direct Cloudflare target, `--filter` becomes Cloudflare's live search, `--deployment` selects a Worker Version, and `--level error` selects error invocations. Other individual console levels cannot be filtered, and `--range` does not select history. `void project requests` is hosted-only.
 
@@ -241,7 +270,9 @@ Roll back to a previous deployment or Worker Version.
 - If `[deployId]` is omitted, shows an interactive select menu of retained deployments
 - If the target deployment has fewer applied migrations than the current one, a warning is shown listing the migration diff before confirmation
 
-On the hosted platform, only **retained** deployments can be selected. On Cloudflare, the argument is a complete or unambiguous prefix of a Worker Version id. Void activates that immutable version at 100% and restores the schedules, queue consumers, workflows, routes, and custom domains captured in its trigger snapshot. Versions created before trigger snapshots are rejected because Cloudflare stores those triggers outside the immutable Worker Version and Void cannot reconstruct them safely. Database migrations remain forward-only: when the target version recorded fewer migrations, or either version lacks Void migration metadata, the CLI warns and asks for confirmation because the older code will run against the current schema.
+On a Void platform, you can select a retained deployment. On Cloudflare, use a complete Worker Version ID or an unambiguous prefix. Void activates that version at 100% and restores its saved schedules, queues, workflows, routes, and custom domains. Older versions without that snapshot cannot be restored through Void.
+
+Rollback doesn't reverse database migrations. If older code may run against a newer schema, or migration metadata is missing, Void explains the risk and asks for confirmation.
 
 ### `void project cancel [deployId]`
 
@@ -278,18 +309,193 @@ This command is currently hosted-only. Direct Cloudflare cache purge fails close
 
 ## Platform management
 
-Void-managed projects deploy to an explicitly selected platform. Connections are stored per API origin, and credentials are scoped to that origin.
+Void-managed projects deploy to an explicitly selected platform. Join one with [`void connect`](#connect). Connections are stored per API origin, and credentials are scoped to that origin.
 
 ### Connection commands
 
 ```sh
-void platform connect [url]
 void platform list
 void platform use [id]
 void platform status [id]
 ```
 
-`connect` fetches and validates `/.well-known/void-platform` before saving anything. If the URL is omitted it prompts interactively. `use` and `status` auto-select the only configured platform; with multiple platforms they show a picker interactively and require an id or URL in non-interactive use.
+`use` and `status` auto-select the only configured platform; with multiple platforms they show a picker interactively and require an id or URL in non-interactive use. A project with a recorded platform URL keeps using that platform when the global default changes.
+
+### Operator commands
+
+Use `void platform` to administer the users and apps on your selected platform. Start with the [Platform Administration guide](../guide/platform-administration.md) for signing in, giving people access, and investigating deployments.
+
+Every command below accepts `--connection <registered-id-or-url>` to select a platform and `--json` for structured output. Without `--connection`, Void uses `VOID_API_URL` if set, then the active platform connection. Application project files do not change this selection.
+
+#### Making Changes
+
+Commands that change users, projects, signup access, invitations, or Workers show a preview before asking for confirmation:
+
+```sh
+void platform user plan <user-id> pro --plan
+void platform user plan <user-id> pro --yes
+```
+
+`--plan` validates the change and prints its effect without applying it. `--yes` applies the change without prompting, which is required in scripts. Use one or the other; they cannot be combined. These flags also apply to deployment cancellation and maintenance commands, but not to authentication commands.
+
+Each preview and apply request allows five minutes. Set `--timeout <seconds>` to an integer from 1 to 3600 to change that limit. Read requests and individual log polls allow 30 seconds.
+
+Void does not automatically retry changes. If a request loses its connection or times out, inspect the affected objects and `void platform system events` before repeating it. Partial results describe the work that completed and exit with a nonzero status.
+
+#### Authentication {#operator-authentication}
+
+Sign in, inspect your session, or sign out:
+
+```sh
+void platform auth login [--provider github|google] [--token-stdin]
+void platform auth status
+void platform auth logout
+void platform auth token [--token-stdin]
+```
+
+Browser login defaults to GitHub; Google is available when enabled on the platform. Login saves a one-hour administrator session in your system keychain. Logout revokes that session and removes its local credential.
+
+`auth token` prints your current operator token. With `--token-stdin`, it exchanges a full administrator API login session from standard input for a new operator token. `auth login --token-stdin` saves the exchanged token to the keychain instead of printing it.
+
+For automation, supply `VOID_OPERATOR_TOKEN` with an explicit `VOID_API_URL` or `--connection`. Operator tokens are stored separately from application deployment credentials. The API checks your current administrator access on every request. See [Using Scripts](../guide/platform-administration.md#using-scripts) for an example.
+
+#### Users {#operator-users}
+
+Find a user by login, email, or ID, then inspect their projects and usage:
+
+```sh
+void platform user list [--search <text>] [--page <n>] [--limit <n>]
+void platform user show <id>
+```
+
+Use the same ID to change a plan, suspend or restore the account, or delete it:
+
+```sh
+void platform user plan <id> <free|solo|pro|sponsored|custom>
+void platform user suspend <id> [--reason <text>]
+void platform user restore <id>
+void platform user delete <id>
+```
+
+Suspending a user blocks their applications. Deleting a user also deletes their project resources. A plan change updates resource limits while preserving any administrator suspension.
+
+#### Projects {#operator-projects}
+
+List projects across the platform, filter them by owner, or inspect one project's resources:
+
+```sh
+void platform project list [--user <user-id>] [--search <text>] [--page <n>] [--limit <n>]
+void platform project show <id>
+void platform project delete <id>
+```
+
+Search matches a project's slug, ID, or owner's login. `show` includes resources, domains, the latest 10 deployments, and the latest 20 builds. `delete` removes the project and its resources.
+
+#### Deployments {#operator-deployments}
+
+Find a deployment, inspect its manifest, or request cancellation:
+
+```sh
+void platform deployment list [--project <id-or-slug>] [--status <status>] [--search <text>] [--page <n>] [--limit <n>]
+void platform deployment show <id>
+void platform deployment cancel <id>
+```
+
+Cancellation applies while a deployment is pending, uploading, migrating, or prerendering, and can be requested again while it is canceling. A deployment that has begun switching traffic, is compensating for a failure, or has finished cannot be canceled through this command.
+
+Read its runtime logs with:
+
+```sh
+void platform deployment logs <id> [--since <time>] [--cursor <cursor>] [--limit <n>] [--follow]
+```
+
+The default is the last hour, oldest first, with up to 100 records. `--since` accepts a duration such as `10m`, `2h`, or `1d`, an ISO date, or epoch milliseconds. Set `--limit` from 1 to 500 and pass the response's `nextCursor` as `--cursor` to read another page.
+
+`--follow` reads the remaining pages and checks for new logs every two seconds until you press Ctrl+C. It checks a five-minute overlap for delayed records and suppresses replayed rows. Records that arrive later may need a subsequent historical query. Following stops with an error if a window exceeds 10,000 records; use a narrower historical query in that case.
+
+#### Builds {#operator-builds}
+
+Inspect a build or read its output:
+
+```sh
+void platform build show <id>
+void platform build logs <id> [--since <sequence>] [--limit <n>] [--follow]
+```
+
+Build logs start at sequence `0` and return up to 500 lines. Use the returned `lastSeq` as `--since` to continue; `--limit` accepts 1 to 500. Container log retrieval requires managed builds to be enabled. GitHub Actions builds return an external log URL.
+
+Following waits for the final logs after the build becomes terminal. If completion cannot be confirmed within two minutes, the command exits with an error. Older builds without a completion signal may wait for 30 seconds without new lines before following stops.
+
+#### Signup Access {#operator-signup}
+
+Inspect signup restrictions, open signup to everyone, or require an allowlist match:
+
+```sh
+void platform signup show
+void platform signup open
+void platform signup restrict
+```
+
+Add and remove entries by their type and pattern:
+
+```sh
+void platform signup allow <github|email> <pattern> [--note <text>]
+void platform signup remove <github|email> <pattern>
+```
+
+GitHub entries match a login. Email entries match an address or a domain pattern such as `*@example.com`, across sign-in providers. Quote wildcard patterns in your shell. With restrictions enabled and an empty allowlist, nobody new can sign up.
+
+#### Invitations {#operator-invitations}
+
+Invite people by email and track whether they have joined:
+
+```sh
+void platform invitation list [--page <n>] [--limit <n>]
+void platform invitation send <email[,email...]>
+void platform invitation revoke <id>
+```
+
+Send accepts up to 100 comma-separated addresses. Invitations grant signup access even if email delivery is unavailable or fails; delivery is reported separately. Revoking a pending invitation removes its exact email grant. A broader domain entry can still allow that person to sign up.
+
+#### System {#operator-system}
+
+Inspect activity, check service health, or review administrative changes:
+
+```sh
+void platform system overview
+void platform system health
+void platform system cli-versions
+void platform system events [--page <n>] [--limit <n>]
+void platform system backfill-queue-tokens
+```
+
+`overview` shows platform totals and recent activity. `health` checks the configured services and database, and exits with a nonzero status if a check fails. `cli-versions` reports the CLI versions used by deployments.
+
+`events` shows the administrator, target, and outcome of changes. A pending event means the outcome has not been recorded. Previews and session login/logout do not create these events. `backfill-queue-tokens` repairs older queue entries that are missing authentication tokens and supports `--plan` before applying the repair.
+
+#### Hosted Workers {#operator-workers}
+
+Void Cloud operators can inspect the platform's five Workers and their versions:
+
+```sh
+void platform worker list
+void platform worker show <proxy|tail|api|dashboard|dispatch>
+void platform worker rollback <name> <version-id>
+void platform worker rollback-all
+void platform worker events [batch-id]
+```
+
+Each command accepts `--environment production|staging`. By default, it uses the platform's environment; `events <batch-id>` uses the batch's environment. Worker event lists accept `--page` and `--limit` when no batch ID is given. `worker list` always returns the fixed Worker inventory.
+
+Choose a version from `worker show` for a single rollback. `rollback-all` selects the previous version of each Worker, shows those versions in its preview, and rolls them back in dependency order. A failure stops the remaining changes and reports which Workers succeeded, failed, or were skipped. Use `worker events <batch-id>` to inspect the result.
+
+These commands are for Void Cloud's Workers. Self-hosted installations use the [platform lifecycle commands](../guide/self-hosted-platform.md#resume-repair-recover-and-upgrade).
+
+#### Pagination and JSON
+
+User, project, deployment, invitation, and event lists default to page `1` with 20 items. `--limit` accepts 1 to 100 for these lists. Their JSON responses include the page, limit, and total count.
+
+With `--json`, results go to standard output and command errors go to standard error as JSON. Errors and partial failures exit with a nonzero status. An unhealthy `system health` result stays on standard output and also exits nonzero. Log following writes one JSON object per response, including each page and empty responses.
 
 ### `void platform install`
 
@@ -311,9 +517,13 @@ void platform install [options] [--yes]
 | `--runtime <path>`                | Deploy a locally built, integrity-checked runtime directory                      |
 | `--yes`                           | Acknowledge Cloudflare changes in non-interactive use                            |
 
-Interactive platform lifecycle commands use Cloudflare browser OAuth. Void enables OS-keychain storage before starting a new login and obtains an ephemeral access token through its bundled tooling; it never reads plaintext credential files. CI continues to use `CLOUDFLARE_API_TOKEN` (or `CF_API_TOKEN`). Installation prompts separately for a scoped runtime token because the installed control plane—not the human operator—needs long-lived permission to provision application resources. Non-interactive installs provide it as `VOID_PLATFORM_RUNTIME_CLOUDFLARE_API_TOKEN` alongside the database, GitHub OAuth, and R2 variables.
+Platform administration uses Cloudflare browser login and the system keychain. CI can use `CLOUDFLARE_API_TOKEN` or `CF_API_TOKEN`.
 
-The installer transactionally claims a dedicated empty PostgreSQL database for exactly one platform installation. An explicit URL can replace a failed, unverified initial connection; after a successful claim or Hyperdrive provisioning, resume pins the recorded database URL and rejects a different environment value. Secret recovery checkpoints are AES-256-GCM encrypted, authenticated to the installation identity, and use a random key held in the OS keychain. A missing keychain fails closed. Headless environments can provide a canonical base64-encoded 32-byte `VOID_PLATFORM_RECOVERY_KEY`; CI may generate an ephemeral one when all required source credentials are held by its protected secret store.
+The installed platform needs a separate runtime token to provision resources for apps. The installer asks for it in a masked prompt. For non-interactive installs, set `VOID_PLATFORM_RUNTIME_CLOUDFLARE_API_TOKEN` and the database, GitHub OAuth, and R2 variables listed in the [setup guide](../guide/self-hosted-platform.md#install).
+
+Use an empty PostgreSQL database dedicated to the installation. You can correct a failed initial connection, but after the database is claimed or Hyperdrive is provisioned, commands reject a different URL.
+
+Recovery secrets are encrypted with AES-256-GCM using a key in your system keychain. The encrypted data is tied to the installation identity. Without a keychain, supply a canonical base64-encoded 32-byte `VOID_PLATFORM_RECOVERY_KEY`; otherwise Void stops before saving secrets. CI can generate a temporary key when its original credentials remain in protected secrets.
 
 If a newly created zone is waiting for registrar delegation, resume after it becomes active:
 
@@ -325,7 +535,7 @@ See [Self-host a Void platform](../guide/self-hosted-platform.md) for prerequisi
 
 ### Lifecycle commands
 
-Traffic cleanup is fail-closed. New installs checkpoint every published route and custom-domain Cloudflare id, but Cloudflare cannot condition attachment deletion on that immutable identity. Disable, rollback, and uninstall therefore retain those attachments for explicit dashboard cleanup while the routing flag blocks requests.
+Use these commands to recover, update, pause, or remove an installation:
 
 ```sh
 void platform discover [--account <id>] [--installation <id-or-name>]
@@ -338,15 +548,36 @@ void platform uninstall [id] [--plan] [--purge-data] [--keep-zone] [--yes]
 
 `discover --installation` limits recovery and endpoint verification to one installation in a shared Cloudflare account.
 
-An omitted id auto-selects one local installation and prompts when several exist. Non-interactive use with multiple installations requires an id. Every non-interactive mutating lifecycle command also requires `--yes`; `--plan` is read-only and needs no acknowledgement. `discover` authenticates with browser OAuth or an explicit CI token, verifies remote ownership, and recovers only non-secret metadata. Normal upgrades preserve Worker secrets that are already deployed. After discovery on a new workstation, provide `VOID_PLATFORM_DATABASE_URL`; provide the original runtime token, GitHub OAuth, R2, JWT, and project-encryption values only if a repair must recreate a missing API or proxy Worker.
+Omit `id` when only one installation is configured, or choose from the interactive picker. Non-interactive commands need an ID when several installations exist. Commands that make changes also require `--yes`; `--plan` only previews changes.
 
-`repair` recreates missing installer-owned resources only. `disable` writes an installation-owned routing flag that rejects platform traffic without deleting data. Fresh, resumed, and previously disabled installations establish that gate before the first Worker mutation, admit only the installer's bounded health probes, and remove it after every target Worker passes verification. Routes and custom domains remain attached: Cloudflare exposes no immutable-generation precondition for their deletion, so Void records them as retained and leaves explicit dashboard cleanup to the operator. `enable` removes the routing gate and restores `workers.dev` access. Repair, enable, upgrade, and cutover recovery preserve live Worker routes and custom domains in their trigger snapshots. Before migrations or Worker upload, lifecycle commands also require the recorded Hyperdrive origin to match the pinned recovery database and stop if it was retargeted. Mutating lifecycle commands hold a session advisory lock in the installation's PostgreSQL database, preventing two workstations from changing the same platform concurrently. The same claimed row stores a secret-free authoritative lifecycle manifest so stale hosts cannot reverse newer operations.
+After discovery on another machine, set `VOID_PLATFORM_DATABASE_URL`. Normal upgrades preserve deployed Worker secrets. Restore the original runtime, GitHub, R2, JWT, and project-encryption values only if repair needs to recreate a missing API or proxy Worker.
 
-`--runtime` accepts a directory containing `manifest.json`, the four bundled Worker artifacts, and the declared Drizzle migrations. Relative paths resolve from the current directory. The CLI validates every recorded size and SHA-256 digest before planning or mutating Cloudflare. Without this option it uses the runtime bundled in the installed `@void/platform` package. Successful lifecycle checkpoints record whether the runtime was packaged or custom, its manifest digest, and its optional source revision.
+| Command     | Behavior                                                                                      |
+| ----------- | --------------------------------------------------------------------------------------------- |
+| `discover`  | Verifies remote ownership and restores local installation records without downloading secrets |
+| `repair`    | Recreates missing resources owned by the installer                                            |
+| `upgrade`   | Deploys the selected runtime and supported pending migrations                                 |
+| `disable`   | Blocks platform traffic through routing storage without removing data                         |
+| `enable`    | Restores traffic after checking the platform                                                  |
+| `uninstall` | Blocks traffic and removes eligible resources, retaining data by default                      |
 
-Platform upgrade SQL is forward-only. The packaged runtime hashes its journal and every migration, and the installer requires the live Drizzle records to be an exact ordered prefix. Pending migrations for an installation with existing Workers run only when the release contains an exact rollback-compatibility edge for the old platform version and current schema digest; otherwise the command stops before database or Worker mutation and requires a supported intermediate version. Pending SQL executes in one transaction. The old platform version remains authoritative until target-version discovery and health checks pass, so a failed cutover can restore old Workers against an explicitly expand-compatible schema and retry without reapplying migrations.
+Repair and upgrade preserve disabled state. New, resumed, and previously disabled installations block user traffic until all target Workers pass verification; the installer's health probes can still run. Routes and custom domains remain attached.
 
-Uninstall deletes only safely identifiable installer-owned resources. It re-reads the remote installation checkpoint, inventories Cloudflare, and checks per-Worker ownership markers before any mutation. Data resources are retained unless `--purge-data` is present. External PostgreSQL, Workers, AI Gateway, R2, DNS records, Worker routes, and Worker custom domains are always retained for manual cleanup: those APIs expose no server-enforced generation condition, so automatic deletion could race a replacement or repurposed record. Uninstall blocks platform traffic through routing storage and leaves every traffic attachment untouched. External PostgreSQL is never deleted or queried for project data, but its installation claim provides the cross-host lifecycle lock. Adopted resources are never deleted automatically. Zones are always retained because they can contain unrelated DNS, settings, and Cloudflare products that the installer cannot exhaustively prove ownership of. Inspect and delete retained traffic attachments, Workers, DNS records, R2, AI Gateway, and an installer-created zone manually after uninstall if appropriate. The legacy `--delete-zone` flag fails before mutation with that guidance.
+Commands preserve manually attached routes and domains in deployment and rollback snapshots. They also verify that Hyperdrive still points at the recorded database before migrations or uploads. A PostgreSQL advisory lock prevents concurrent administration, and the database's installation record prevents stale local state from undoing newer changes.
+
+`--runtime` selects a directory containing `manifest.json`, the four Worker bundles, and their Drizzle migrations. Relative paths resolve from the current directory. Void checks file sizes and SHA-256 digests before planning or changing Cloudflare.
+
+Without `--runtime`, the CLI uses the runtime bundled in `@void/platform`. The installation record stores the runtime source, manifest digest, and optional source revision.
+
+Platform migrations only move forward. Their recorded hashes and order must match the release's migration history. Pending SQL runs in one transaction, and only when the release declares rollback compatibility with the exact previous platform version and schema digest. Without that declaration, Void stops and asks you to upgrade through an intermediate release.
+
+The previous platform version remains authoritative until the target runtime passes discovery and health checks. A failed rollout restores the old Workers against the compatible updated schema; retrying doesn't reapply completed migrations.
+
+Uninstall verifies remote ownership before removing anything. Data resources are retained unless you pass `--purge-data`. Workers, R2, AI Gateway, DNS records, routes, custom domains, adopted resources, external PostgreSQL, and zones are always retained for manual review.
+
+Cloudflare can't condition deletion of these resources on the exact generation Void inspected, so automatic deletion could affect a replacement. Traffic stays blocked through routing storage. PostgreSQL is never deleted or queried for project data during uninstall; its installation record is used to coordinate the command. The older `--delete-zone` flag is rejected.
+
+See [Disable and safely uninstall](../guide/self-hosted-platform.md#disable-and-safely-uninstall) for the full removal policy.
 
 ## Deploy
 
@@ -421,44 +652,44 @@ That fallback is mainly for projects that skipped Void project setup during `voi
 
 ### `void deploy --platform cloudflare`
 
-Deploy the built worker straight to **your own** Cloudflare account instead of the Void platform. Void handles Cloudflare authentication through its bundled tooling and uses your root `wrangler.jsonc`; no Void platform login or linked project is involved.
+Build and deploy to your Cloudflare account using the root `wrangler.jsonc`:
 
-```
-void deploy --platform cloudflare                   # provision what is missing, then deploy
+```sh
+void deploy --platform cloudflare
 void deploy --platform cloudflare --require-email   # fail instead of deploying without email
 ```
 
-Prerequisites:
+Void signs you in through your browser when needed and saves the selected account. In CI, set `CLOUDFLARE_API_TOKEN` and, if the token can access several accounts, `CLOUDFLARE_ACCOUNT_ID`.
 
-- On an interactive first deploy, Void signs you in, selects your sole account automatically or shows an account picker, and saves `account_id`. In CI, set `CLOUDFLARE_ACCOUNT_ID` when the token can access multiple accounts.
-- Interactive deploys use secure browser OAuth automatically. CI must set `CLOUDFLARE_API_TOKEN`. Deploy needs `Workers Scripts:Edit` plus read on the resources you bind, and per-product `*:Edit` whenever it must create a missing D1 database, KV namespace, R2 bucket, Queue, or Hyperdrive config. Email setup needs a browser session from `void cloudflare login`, which carries the Email Routing and Email Sending scopes (a session created by older Cloudflare tooling lacks them: `void cloudflare logout`, then sign in again), or a `CLOUDFLARE_API_TOKEN` that also has Email Routing Edit and Email Sending Edit (a Global API Key pair is refused).
-- If Cloudflare Access protects the Worker's `workers.dev` hostname, export a complete `CF_ACCESS_CLIENT_ID` / `CF_ACCESS_CLIENT_SECRET` service-token pair admitted by that Access policy. For an interactive local deploy, `CF_ACCESS_TOKEN="$(cloudflared access token --app=https://<worker>.<account>.workers.dev)"` also accepts the current user's short-lived Access session. Void uses these credentials only for a matching HTTPS readiness probe, does not expose them to project build code or Cloudflare deployment tooling, and does not store them.
-- In a fresh CI checkout, set `CLOUDFLARE_WORKERS_SUBDOMAIN` to the account subdomain (for example `my-team`) when the Worker has no version preview URL, as with Durable Objects. Local deploys learn and cache it in ignored `.void/cloudflare.json` from Cloudflare's first reported workers.dev URL.
-- `CLOUDFLARE_API_TOKEN` is **required** to provision a Hyperdrive config for the first time. Browser OAuth covers every other resource, but the available Cloudflare tooling exposes no machine-readable Hyperdrive list, so Void checks for an existing config over the REST API, which OAuth cannot authenticate. Without a token, automatic provisioning stops before touching your account. Alternatively create the Hyperdrive config in the dashboard and put its id in `wrangler.jsonc`; deploying an already-provisioned Hyperdrive app needs no token.
-- `--skip-build` is supported for static, SPA, and SSG deployment when the output directory already exists. It is **not supported for worker-bearing apps**, because that path validates the artifact the build emits (worker `vars` in `dist/ssr/wrangler.json` and the generated auth schema).
-- `--project` is **not supported** with `--platform cloudflare`, because no Void project is resolved. `--dir` and `--spa` are supported and deploy through a thin Worker in front of Cloudflare Workers Assets.
-- Apps that use the sandbox require local Docker and [Workers Paid](https://dash.cloudflare.com/?to=/:account/workers/plans). Before provisioning or building, Void verifies Containers access automatically; an API token must include Account / Containers: Edit and Account / Cloudchamber: Edit. Apps without sandbox usage do not run this check.
+| Option or setting              | Cloudflare behavior                                                                    |
+| ------------------------------ | -------------------------------------------------------------------------------------- |
+| `--dir`, `--spa`               | Deploy static output through a small Worker and Workers Assets                         |
+| `--skip-build`                 | Reuse existing static, SPA, or SSG output; unavailable for Worker apps                 |
+| `--project`                    | Unavailable; the Worker and account come from the Cloudflare config                    |
+| Named environments             | Unavailable; use the top-level root config                                             |
+| `CLOUDFLARE_WORKERS_SUBDOMAIN` | Needed in fresh CI when versions have no preview URL; cached locally after a deploy    |
+| `--require-email`              | Fail instead of deploying without email when the email step cannot run, as in CI       |
+| `DATABASE_URL`                 | Required in the deploy environment for PostgreSQL or MySQL provisioning and migrations |
 
-For static, SPA, and SSG apps, Void builds when needed, merges `_headers`, `_redirects`, and `void.json` routing rules, writes a deterministic thin edge Worker, and deploys the asset directory with Workers Assets. A fully prerenderable `output: "static"` Pages app uses this path; a hybrid app with a dynamic page or another runtime feature keeps its generated application Worker. TanStack Start, React Router, vinext App Router and Pages Router, SvelteKit, Nuxt, Analog, and Astro Cloudflare outputs are supported, including their SSR Workers.
+The token needs Workers Scripts: Edit, read access to bound resources, and edit permissions for products Void provisions. First-time Hyperdrive provisioning specifically needs `CLOUDFLARE_API_TOKEN` with Hyperdrive edit permission, or an existing config ID in `wrangler.jsonc`.
 
-For worker-bearing apps, it settles the app class, pins the account and checks auth, runs the email step when the app uses email (below), automatically provisions missing resources, **builds**, validates the emitted artifact and migrations, preserves or creates the auth secret, applies remote D1 migrations or checked-in PostgreSQL/MySQL migrations through the production `DATABASE_URL`, and promotes explicit env schema `.secret()` values to encrypted Cloudflare Worker secrets. It then uploads an immutable Worker Version, records the exact migration filenames in its annotation, probes that version directly, activates it at 100%, and synchronizes routes, custom domains, cron triggers, queue consumers, and Email Routing rules (from `addresses`). Versions without preview URLs are staged at 0% and probed through the production workers.dev URL with a version override. The same zero-percent path is used when an account-wide Access default-deny policy blocks the generated preview alias but admits the stable Worker hostname, so failed readiness never sends the new version traffic. A failed trigger sync restores the previous version. PostgreSQL migrations are transactional; MySQL DDL is not. External database URLs are never written to the Worker config.
+Email setup needs a browser session from `void cloudflare login`, which carries the Email Routing and Email Sending scopes (a session created by older Cloudflare tooling lacks them: `void cloudflare logout`, then sign in again), or a `CLOUDFLARE_API_TOKEN` that also has Email Routing Edit and Email Sending Edit. A Global API Key pair is refused.
 
-The initial deployment of a brand-new Worker has three Cloudflare exceptions: the Versions API cannot create the Worker, rejects initial Durable Object migration history with error `10211`, and some accounts do not enable preview URLs until an ordinary deployment. Only after proving that the Worker did not exist before first-deploy secret provisioning, Void handles these cases with one ordinary deploy and probes the active Worker for readiness. This remains safe when Cloudflare creates a placeholder version while attaching the first secret; Void never takes the fallback for a previously deployed application. Later deployments use preview URLs when available and the 0%-traffic version-override flow otherwise.
+Sandbox apps need Docker, [Workers Paid](https://dash.cloudflare.com/?to=/:account/workers/plans), and Containers access. API tokens need Account / Containers: Edit and Account / Cloudchamber: Edit. Void checks access before provisioning or building; apps without Sandbox skip that check.
 
-The build deliberately comes **before** the secret, auth-schema, and migration gates, because those gates inspect the real emitted worker rather than a prediction of it. A missing secret or a bad migration surfaces after the build has run — relevant when a build is expensive or has side effects. Remote D1 migrations run only once every gate has passed, so a failed gate mutates nothing remote.
+Void provisions inferred resources, builds and validates the app, applies migrations, uploads encrypted secrets, and checks the uploaded Worker Version before sending it traffic. After activation it synchronizes routes, custom domains, cron triggers, queue consumers, and the Email Routing rules derived from `addresses`. Static, hybrid, and SSR output from supported frameworks is also supported. A brand-new Worker may need one ordinary deployment before the Versions API can be used.
 
-Every deploy automatically ensures that the D1 database, KV namespaces, R2 bucket, Queues, Hyperdrive config, and ISR cache namespace inferred from your source exist, then writes the real ids into your root `wrangler.jsonc`. Provisioning is **idempotent** — re-running creates nothing that already exists (it reads existing ids first). The former `--provision` flag is still accepted for backwards compatibility but is no longer needed. Notes:
+If Cloudflare Access protects readiness URLs, supply an allowed `CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET` pair, or a short-lived local `CF_ACCESS_TOKEN`. These credentials are used only for matching HTTPS readiness requests. Versions without accessible previews can be checked at 0% traffic through the stable hostname.
 
-- **Avoid concurrent first deploys from different machines or CI runners.** The provisioning lock is per local config path and does not coordinate across hosts. Resource adoption makes later deploys idempotent, but two first deploys racing the same account could create duplicate resources whose names are not account-unique. Commit the updated `wrangler.jsonc` when practical so CI starts with the resolved ids.
-- **Your `wrangler.jsonc` is rewritten.** When Void writes new ids, it preserves your comments but may normalize the whole file's indentation — expect that in the diff.
-- **Explicit schema secrets are encrypted automatically.** `.secret()` values may come from `.env`, `.env.production`, `.env.production.local`, or the deploy process environment. Void removes them from generated `vars`, uploads them over stdin, and inherits them through `secrets.required`. Remote-only marked secrets are preserved; absent optional values are skipped; nothing is pruned. Unmarked portable env values remain plaintext, while unmarked local and shell values are excluded.
-- **First deploy of a not-yet-deployed worker:** Void can bootstrap schema-marked values on the draft Worker and automatically manages `BETTER_AUTH_SECRET` for auth-enabled apps.
-- **Custom D1 migration layouts are verified:** configured `migrations_dir`, `migrations_table`, and `migrations_pattern` are supported only when Cloudflare's exact file set, bytes, and numeric order match the migration set Void validated.
-- **Top-level config only:** direct deploy and operational commands reject named Cloudflare environments and alternate config-path overrides. Keep the intended account and Worker name pinned in the root config.
+Secrets and migrations are validated after the build, so a failed check may leave provisioned resources. It doesn't apply remote D1 migrations or upload the application Worker. PostgreSQL migrations are transactional; MySQL schema changes may partially apply on error.
+
+Provisioning reuses known resource IDs and writes newly resolved IDs into `wrangler.jsonc`, preserving comments but possibly changing indentation. Commit that file for other machines and CI. Run the first deploy from one machine at a time because provisioning locks are local. The old `--provision` flag is accepted but no longer needed.
+
+Keys marked `.secret()` become encrypted Worker secrets; existing remote secrets are preserved. Void also preserves or creates `BETTER_AUTH_SECRET` for auth apps. Custom D1 migration layouts are accepted only when Cloudflare's file set, content, and order match the validated migrations.
 
 **Email.** When the app uses email (`sendEmail()` or `email/` handlers) and `void.json` has `email.from`, the deploy reads the state of that address's zone before the build — session scopes, zone, MX records, Email Routing, subaddressing, routing rules, Email Sending, and what `wrangler.jsonc` holds — prints a checklist of what it would change in your account, and asks once (default Yes). On Yes it enables what is missing, writes `send_email: [{ "name": "SEND_EMAIL" }]`, the `__VOID_EMAIL_FROM` var and the `addresses` array into `wrangler.jsonc`, and lets wrangler create the routing rules when the activated version's triggers are synchronized; the deploy ends with the address map. A deploy with nothing left to set up asks nothing. Without `email.from` the deploy prints `add "email": { "from": "you@mail.acme.com" } to void.json` and continues without email. Non-interactive runs (CI, or stdin/stdout not a terminal) never prompt: they print the checklist plus `Run void email setup --platform cloudflare once locally, commit wrangler.jsonc, then redeploy` and deploy without email (or with the setup `wrangler.jsonc` already carries, when the binding is committed; a committed `addresses` array whose routing is off is removed first, since wrangler's plan on it would fail after the upload) — unless `--require-email` is passed, which fails instead. A deploy whose account rows all read ready reconciles the two config rows — `addresses` against the current derivation and `vars.__VOID_EMAIL_FROM` against `email.from` — with a plain file write and no prompt. See [Your own Cloudflare account](../guide/email.md#your-own-cloudflare-account) for the whole flow, including the subdomain-vs-apex rule and what stays manual.
 
-See the [Cloudflare integration guide](../integrations/cloudflare.md#deploy-to-your-own-cloudflare-account) for the full walk-through.
+See the [Cloudflare guide](../integrations/cloudflare.md#deploy-to-your-own-cloudflare-account) for the complete deployment sequence, first-deploy exceptions, secret precedence, and recovery behavior.
 
 ## Database
 

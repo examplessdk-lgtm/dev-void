@@ -51,6 +51,9 @@ describe('CLI help resolver', () => {
   });
 
   it('tracks known and unknown help pages', () => {
+    expect(hasHelpPage(['connect'])).toBe(true);
+    expect(hasHelpPage(['platform', 'connect'])).toBe(false);
+    expect(getHelpPath(['connect', 'https://platform.example.com', '--help'])).toEqual(['connect']);
     expect(hasHelpPage(['deploy'])).toBe(true);
     expect(hasHelpPage(['db', 'execute'])).toBe(true);
     expect(hasHelpPage(['missing'])).toBe(false);
