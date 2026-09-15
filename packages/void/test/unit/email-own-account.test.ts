@@ -564,6 +564,70 @@ describe('generated handleEmail on a native ForwardableEmailMessage', () => {
     expect(calls.rejects).toEqual(['changed my mind']);
   });
 
+  it('hands the native setReject() the reason the platform router would send', async () => {
+    // A reason built from the parsed message carries what the remote sender
+    // put there — a CRLF and a NUL smuggled through an RFC 2047 encoded-word
+    // here. The platform router slices the reason to 1000 characters and
+    // strips controls before it reaches the SMTP reply; this replay used to
+    // pass the recorded string to the native `setReject()` verbatim, so the
+    // same handler injected a line into the SMTP reply on your own account
+    // and was clean on the platform. The proxy now records the normalized
+    // reason, so the two deployments send the same string.
+    const handleEmail = buildHandleEmail(async (message) => {
+      const parsed = await parseEmail(message);
+      message.setReject(`unwanted: ${parsed.subject}${'!'.repeat(2000)}`);
+    });
+    const { message, calls } = nativeMessage({
+      from: 'sender@example.com',
+      to: 'support@mail.acme.com',
+      mime:
+        'From: sender@example.com\r\n' +
+        'To: support@mail.acme.com\r\n' +
+        'Subject: =?UTF-8?Q?spam=0D=0ABcc:_x=00?=\r\n' +
+        '\r\n' +
+        'body\r\n',
+    });
+
+    const actions = await handleEmail(message, {}, {});
+
+    // 23 characters of prefix plus 977 "!" fill the 1000-character window;
+    // the CRLF pair then collapses to one space and the NUL to another.
+    const expected = `unwanted: spam Bcc: x ${'!'.repeat(977)}`;
+    expect(calls.rejects).toEqual([expected]);
+    expect(actions).toEqual([{ type: 'reject', reason: expected }]);
+  });
+
+  it('fires nothing on the native message when a later forward carries too many headers', async () => {
+    // Cloudflare's native `forward()` accepts any bag, so on your own account
+    // a 33-header forward used to go out — while the platform router drops
+    // the WHOLE action list for the same handler. The router's bounds now
+    // fail the handler's own call, before anything is enacted, in both.
+    const handleEmail = buildHandleEmail(async (message) => {
+      await message.forward('ops@acme.com');
+      const bag = new Headers();
+      for (let i = 0; i < 33; i++) {
+        bag.set(`X-Void-${i}`, 'v');
+      }
+      await message.forward('archive@acme.com', bag);
+    });
+    const { message, calls } = nativeMessage({
+      from: 'sender@example.com',
+      to: 'support@mail.acme.com',
+      mime: INBOUND_MIME,
+    });
+
+    const outcome = await handleEmail(message, {}, {}).then(
+      () => 'resolved',
+      (e: unknown) => e,
+    );
+
+    expect(calls.forwards).toEqual([]);
+    expect(calls.replies).toEqual([]);
+    expect(calls.rejects).toEqual([]);
+    expect(outcome).toBeInstanceOf(MimeError);
+    expect((outcome as MimeError).message).toBe('forward: 33 headers, over the 32-header limit.');
+  });
+
   it('still returns the actions as data for a platform envelope, enacting nothing', async () => {
     const handleEmail = buildHandleEmail(async (message) => {
       message.setReject('spam');

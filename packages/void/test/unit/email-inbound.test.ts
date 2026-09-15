@@ -1087,6 +1087,61 @@ describe('harness enforces the proxy action bounds, like production', () => {
     expect(harness.forwards).toEqual([{ to: 'first@example.com' }]);
   });
 
+  it("refuses a forward header bag over the router's bounds at the call, recording nothing for it", async () => {
+    // `new Headers()` accepts 33 headers, so the record-validity check
+    // passes them, and the managed router drops the WHOLE action list on
+    // the count (`forwardHeadersWithinBounds`). A harness that reported
+    // this forward passed a handler whose managed deployment silently
+    // performed no actions.
+    let thrown: unknown;
+    const harness = harnessFor(async (message) => {
+      await message.forward('first@example.com');
+      const bag = new Headers();
+      for (let i = 0; i < 33; i++) {
+        bag.set(`X-Void-${i}`, 'v');
+      }
+      try {
+        await message.forward('archive@example.com', bag);
+      } catch (e) {
+        thrown = e;
+      }
+    });
+    await harness.deliver(DELIVERY);
+    expect(thrown).toBeInstanceOf(MimeError);
+    expect((thrown as MimeError).code).toBe('MIME_ERROR');
+    expect((thrown as MimeError).message).toBe('forward: 33 headers, over the 32-header limit.');
+    expect(harness.forwards).toEqual([{ to: 'first@example.com' }]);
+  });
+
+  it('reports the reject reason the router sends: sliced to 1000 and stripped of controls', async () => {
+    // A reason built from the parsed message carries what the remote sender
+    // put there — here a CRLF and a NUL smuggled through an RFC 2047
+    // encoded-word, which `parseEmail` decodes. The managed router
+    // normalizes the reason (`validateActions`) before it reaches the SMTP
+    // reply; the harness must report that string, not the verbatim one a
+    // native replay used to hand `setReject()`.
+    const harness = harnessFor(async (message) => {
+      const parsed = await parseEmail(message);
+      message.setReject(`unwanted: ${parsed.subject}${'!'.repeat(2000)}`);
+    });
+    await harness.deliver({
+      ...DELIVERY,
+      raw:
+        'From: u@x.dev\r\n' +
+        'To: myslug+anything@app.dev\r\n' +
+        'Subject: =?UTF-8?Q?spam=0D=0ABcc:_x=00?=\r\n' +
+        '\r\n' +
+        'body\r\n',
+    });
+    expect(harness.rejects).toHaveLength(1);
+    // "unwanted: spam\r\nBcc: x\0" is 23 characters, so the 1000-character
+    // window holds it plus 977 "!". The CRLF pair then collapses to ONE
+    // space and the NUL to another, and the window is not refilled from
+    // beyond the cut — 999 characters, the router's own trade.
+    expect(harness.rejects[0]).toBe(`unwanted: spam Bcc: x ${'!'.repeat(977)}`);
+    expect(harness.rejects[0]).toHaveLength(999);
+  });
+
   it('reply() refuses a native EmailMessage with the proxy error', async () => {
     let thrown: unknown;
     const native = Object.freeze({ from: 'support@app.dev', to: 'u@x.dev' });
@@ -2649,6 +2704,116 @@ describe('end-to-end: envelope → handler → action queue', () => {
       expect(getActions()).toEqual([{ type: 'forward', to: 'first@example.com' }]);
     },
   );
+
+  function headerBag(count: number): Record<string, string> {
+    const bag: Record<string, string> = {};
+    for (let i = 0; i < count; i++) {
+      bag[`X-Void-${i}`] = 'v';
+    }
+    return bag;
+  }
+
+  it.each([
+    ['33 headers in a record', headerBag(33), 'forward: 33 headers, over the 32-header limit.'],
+    [
+      '33 headers in a Headers',
+      new Headers(headerBag(33)),
+      'forward: 33 headers, over the 32-header limit.',
+    ],
+    [
+      'a 1025-character name',
+      { ['X'.repeat(1025)]: 'v' },
+      'forward: header name is 1025 characters, over the 1024-character limit.',
+    ],
+    [
+      'a 1025-character value in a record',
+      { 'X-Void-Tag': 'v'.repeat(1025) },
+      'forward: header "X-Void-Tag" value is 1025 characters, over the 1024-character limit.',
+    ],
+    [
+      'a 1025-character value in a Headers',
+      new Headers({ 'X-Void-Tag': 'v'.repeat(1025) }),
+      'forward: header "x-void-tag" value is 1025 characters, over the 1024-character limit.',
+    ],
+    [
+      'a non-string value',
+      { 'X-Void-Tag': 123 },
+      'forward: header "X-Void-Tag" value is not a string.',
+    ],
+  ])(
+    'refuses a forward header bag with %s at the call, recording nothing for it',
+    async (_label, headers, expected) => {
+      // `new Headers()` accepts every one of these, so the validity check
+      // above passes them. The platform router then applies its own count
+      // and per-field bounds (`forwardHeadersWithinBounds`) and drops the
+      // WHOLE action list — a handler that recorded this forward deployed as
+      // one whose managed delivery silently performed no actions. The same
+      // bounds, on the record about to be stored, fail the handler's call.
+      const { message, getActions } = createMessageProxy(makeEnvelope());
+      await message.forward('first@example.com');
+      let thrown: unknown;
+      try {
+        await message.forward('archive@example.com', headers as unknown as Headers);
+      } catch (e) {
+        thrown = e;
+      }
+      expect(thrown).toBeInstanceOf(MimeError);
+      expect((thrown as MimeError).code).toBe('MIME_ERROR');
+      expect((thrown as MimeError).message).toBe(expected);
+      expect(getActions()).toEqual([{ type: 'forward', to: 'first@example.com' }]);
+    },
+  );
+
+  it("records a forward header bag exactly at the router's bounds", async () => {
+    // 32 headers, every name and value 1024 characters: the largest bag the
+    // managed router enacts. The bound is `>` on both sides, not `>=`.
+    const bag: Record<string, string> = {};
+    for (let i = 0; i < 32; i++) {
+      bag[`X-${'a'.repeat(1020)}${String(i).padStart(2, '0')}`] = 'v'.repeat(1024);
+    }
+    const { message, getActions } = createMessageProxy(makeEnvelope());
+    await message.forward('archive@example.com', bag as unknown as Headers);
+    const actions = getActions();
+    expect(actions).toHaveLength(1);
+    const recorded = (actions[0] as { headers?: Record<string, string> }).headers ?? {};
+    expect(Object.keys(recorded)).toHaveLength(32);
+    for (const [name, value] of Object.entries(recorded)) {
+      expect(name).toHaveLength(1024);
+      expect(value).toHaveLength(1024);
+    }
+  });
+
+  it('normalizes the reject reason as the router does: slice to 1000, then strip controls', () => {
+    // The router's own fixture (`email-router.test.ts`): 300 x "line\r\n" is
+    // 1800 characters; the first 1000 code units are 166 full lines plus
+    // "line", and each CRLF then becomes one space — 834 characters, not
+    // 1000. Recorded this way, the native replay hands `setReject()` the
+    // string the platform router would, and a harness reports it.
+    const { message, getActions } = createMessageProxy(makeEnvelope());
+    message.setReject('line\r\n'.repeat(300));
+    expect(getActions()).toEqual([{ type: 'reject', reason: 'line '.repeat(166) + 'line' }]);
+  });
+
+  it('bounds a multi-megabyte control-laden reject reason before it is recorded', () => {
+    // A reason built from the inbound message can be as large as the message
+    // and carry a remote sender's CRLF; both used to be recorded verbatim and,
+    // on your own account, replayed verbatim into the SMTP reply.
+    const { message, getActions } = createMessageProxy(makeEnvelope());
+    message.setReject(`${'x'.repeat(5 * 1024 * 1024)}\r\n\x00`);
+    const [action] = getActions();
+    expect(action).toEqual({ type: 'reject', reason: 'x'.repeat(1000) });
+  });
+
+  it("records the router's substitute for an empty reason, and a space for a controls-only one", () => {
+    // The router checks for empty BEFORE it strips (`validateActions`), so a
+    // reason that is only controls becomes one space, not the substitute.
+    const empty = createMessageProxy(makeEnvelope());
+    empty.message.setReject('');
+    expect(empty.getActions()).toEqual([{ type: 'reject', reason: 'rejected by handler' }]);
+    const controls = createMessageProxy(makeEnvelope());
+    controls.message.setReject('\r\n');
+    expect(controls.getActions()).toEqual([{ type: 'reject', reason: ' ' }]);
+  });
 
   it.each([
     ['no @', 'not-an-address', "to: 'not-an-address' is not a valid email address."],

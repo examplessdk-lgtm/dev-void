@@ -40,6 +40,26 @@ const MAX_ACTIONS = 100;
 const MAX_ACTION_ADDRESS_LENGTH = 320;
 
 /**
+ * Bounds on one forward's header bag: how many, and how long a name or a
+ * value may be. Restated from the router's `MAX_FORWARD_HEADERS` /
+ * `MAX_FORWARD_HEADER_LENGTH` (`email-router.ts` — the platform depends on
+ * the framework, never the reverse, so the numbers cannot be imported; a
+ * proxy-side test pins them equal). The router drops the WHOLE action list
+ * on a violation, so a bag that passed here and failed there was a handler
+ * whose test reported the forward and whose managed deployment silently
+ * performed no actions. Exported for that parity test only.
+ */
+export const MAX_FORWARD_HEADERS: number = 32;
+export const MAX_FORWARD_HEADER_LENGTH: number = 1024;
+
+/**
+ * Cap on a reject reason, restated from the router's
+ * `MAX_REJECT_REASON_LENGTH` in `email-router.ts` for the same reason as
+ * above, and pinned by the same test. See `normalizeRejectReason`.
+ */
+export const MAX_REJECT_REASON_LENGTH: number = 1000;
+
+/**
  * Cumulative reply-byte budget for ONE dispatch.
  *
  * `MAX_MESSAGE_BYTES` bounds a single `reply()` call, not the queue: N replies
@@ -287,6 +307,86 @@ function invalidForwardHeaders(cause: unknown): MimeError {
   return new MimeError('MIME_ERROR', `forward: invalid header — ${detail}`);
 }
 
+/**
+ * The router's `forwardHeadersWithinBounds`, as a throw. It runs on the
+ * record about to be recorded — the very object the router receives, so the
+ * count is the router's count: a `Headers` folded its duplicate names before
+ * it got here, and a record keeps `X-A` and `x-a` as two, both there and
+ * here. Runs after the `new Headers()` validity check, so every name is a
+ * token and every value is header-safe; what is left is size. The router
+ * drops the WHOLE list on any of these — a handler that passed here and
+ * failed there deployed as one whose managed delivery performed no actions.
+ */
+function assertForwardHeadersWithinBounds(headers: Record<string, string>): void {
+  const names = Object.keys(headers);
+  if (names.length > MAX_FORWARD_HEADERS) {
+    throw new MimeError(
+      'MIME_ERROR',
+      `forward: ${names.length} headers, over the ${MAX_FORWARD_HEADERS}-header limit.`,
+    );
+  }
+  for (const name of names) {
+    if (name.length > MAX_FORWARD_HEADER_LENGTH) {
+      throw new MimeError(
+        'MIME_ERROR',
+        `forward: header name is ${name.length} characters, over the ${MAX_FORWARD_HEADER_LENGTH}-character limit.`,
+      );
+    }
+    // The declared value type is `string`, and the router refuses anything
+    // else: `new Headers()` coerces an Array with `String()`, so a non-string
+    // value has no `length` the bound below could measure.
+    const value: unknown = headers[name];
+    if (typeof value !== 'string') {
+      throw new MimeError(
+        'MIME_ERROR',
+        `forward: header "${name.slice(0, 64)}" value is not a string.`,
+      );
+    }
+    if (value.length > MAX_FORWARD_HEADER_LENGTH) {
+      throw new MimeError(
+        'MIME_ERROR',
+        `forward: header "${name.slice(0, 64)}" value is ${value.length} characters, over the ${MAX_FORWARD_HEADER_LENGTH}-character limit.`,
+      );
+    }
+  }
+}
+
+/**
+ * The router's rule for a reject reason (`validateActions` in
+ * `email-router.ts`: `sanitize(raw, MAX_REJECT_REASON_LENGTH)`, and
+ * `'rejected by handler'` for an empty one), applied when the reason is
+ * RECORDED so the native replay carries the string the managed one does.
+ *
+ * The reason goes into the SMTP reply to the connecting client, and a
+ * handler may build it from the inbound message: a remote sender's CRLF is
+ * then a line injected into that reply, and a multi-megabyte reason is a
+ * transient-heap amplifier. The router already refuses both, but on your
+ * own account `enactEmailActions` handed the recorded string to the native
+ * `setReject()` untouched, so the same handler injected there and was
+ * clean here. NORMALIZED rather than refused, unlike the forward bounds
+ * above: a reject is the handler's terminal decision, and throwing out of
+ * it would drop that decision and bounce the message as a dispatch error
+ * (see the `MAX_ACTIONS` note in `setReject`). Slice FIRST, then replace: a
+ * global replace materializes ~66 bytes per match, so the slice is what
+ * bounds the work (see `prefixReplySubject`). The result can be SHORTER
+ * than the cap: a run of controls inside the window collapses to one space
+ * and the window is not refilled from beyond it — the router's own trade,
+ * and it is DSN text.
+ */
+function normalizeRejectReason(reason: string): string {
+  // A JS handler can pass anything; the router treats a non-string as empty.
+  const raw = typeof reason === 'string' ? reason : '';
+  if (raw.length === 0) {
+    return 'rejected by handler';
+  }
+  return (
+    raw
+      .slice(0, MAX_REJECT_REASON_LENGTH)
+      // eslint-disable-next-line no-control-regex -- C0 controls and DEL are the point
+      .replace(/[\x00-\x1f\x7f]+/g, ' ')
+  );
+}
+
 async function readStreamToBytes(
   stream: ReadableStream<Uint8Array>,
   limit = Infinity,
@@ -460,7 +560,7 @@ export function createMessageProxy(
             'Move the reject earlier in the handler.',
         );
       }
-      actions.push({ type: 'reject', reason });
+      actions.push({ type: 'reject', reason: normalizeRejectReason(reason) });
     },
     async forward(to: string, fwdHeaders?: Headers | Record<string, string>) {
       if (rejected) {
@@ -509,6 +609,12 @@ export function createMessageProxy(
           throw invalidForwardHeaders(e);
         }
         headersObj = { ...fwdHeaders };
+      }
+      // Size, after validity, on the record that is stored — for both forms.
+      // The router applies these bounds to that record and drops the whole
+      // list; here they fail the handler's own call, recording nothing.
+      if (headersObj) {
+        assertForwardHeadersWithinBounds(headersObj);
       }
       actions.push({ type: 'forward', to, ...(headersObj ? { headers: headersObj } : {}) });
     },
@@ -1095,8 +1201,11 @@ export function isForwardableEmailMessage(value: unknown): value is ForwardableE
  * `forward()` already ran the record through that constructor, so a bad
  * record failed inside the handler, before any replay. (`EmailMessage`
  * construction neither validates nor reads its stream — measured under
- * workerd.) What Cloudflare itself refuses at `forward()` / `reply()` still
- * throws out of the loop, as any native call would.
+ * workerd.) A reject's reason reaches the native `setReject()` as the proxy
+ * recorded it — already sliced and stripped the way the platform router
+ * would (`normalizeRejectReason`), so the SMTP reply is the same in both
+ * deployments. What Cloudflare itself refuses at `forward()` / `reply()`
+ * still throws out of the loop, as any native call would.
  */
 export async function enactEmailActions(
   message: ForwardableEmailMessage,

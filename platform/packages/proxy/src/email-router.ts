@@ -199,8 +199,14 @@ const MAX_INBOUND_BYTES = 10 * 1024 * 1024;
  */
 const MAX_INBOUND_HEADERS = 1024;
 
-/** Cap user-supplied reject reasons — surfaced to remote MTAs and our logs. */
-const MAX_REJECT_REASON_LENGTH = 1000;
+/**
+ * Cap user-supplied reject reasons — surfaced to remote MTAs and our logs.
+ * The framework's `createMessageProxy` restates this figure and applies the
+ * same slice-and-strip when the reason is recorded, so a native
+ * (own-account) replay carries the string this router would; exported so
+ * the router test pins the two equal.
+ */
+export const MAX_REJECT_REASON_LENGTH = 1000;
 
 /**
  * Cap the number of actions one dispatch may return.
@@ -242,10 +248,13 @@ const MAX_ACTION_ADDRESS_LENGTH = 320;
  * Bound a forward's header bag. `new Headers(...)` lowercases and copies
  * every name and validates every value, so an unbounded bag is the same
  * unmetered work as an unbounded address list — and it survives RPC as a
- * plain object, so nothing upstream has looked at its size.
+ * plain object, so nothing upstream has looked at its size. The framework's
+ * `createMessageProxy` restates both figures and refuses the bag at the
+ * handler's own call, so a test does not report a forward this router would
+ * drop; exported so the router test pins the pairs equal.
  */
-const MAX_FORWARD_HEADERS = 32;
-const MAX_FORWARD_HEADER_LENGTH = 1024;
+export const MAX_FORWARD_HEADERS = 32;
+export const MAX_FORWARD_HEADER_LENGTH = 1024;
 
 /**
  * Cap one reply's MIME bytes: `MAX_MIME_BYTES`, the `/email/send` bound in

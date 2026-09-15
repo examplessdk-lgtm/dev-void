@@ -27,7 +27,21 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
-import { routeInbound } from '../../src/email-router.ts';
+// The framework's own proxy — the record-time twin of this router's bounds.
+// The platform depends on the framework, never the reverse, so the router
+// cannot import its numbers; this test is where the two are pinned equal.
+import {
+  createMessageProxy,
+  MAX_FORWARD_HEADER_LENGTH as FRAMEWORK_MAX_FORWARD_HEADER_LENGTH,
+  MAX_FORWARD_HEADERS as FRAMEWORK_MAX_FORWARD_HEADERS,
+  MAX_REJECT_REASON_LENGTH as FRAMEWORK_MAX_REJECT_REASON_LENGTH,
+} from '../../../../../packages/void/src/runtime/email/inbound.ts';
+import {
+  MAX_FORWARD_HEADER_LENGTH,
+  MAX_FORWARD_HEADERS,
+  MAX_REJECT_REASON_LENGTH,
+  routeInbound,
+} from '../../src/email-router.ts';
 import type { Env } from '../../src/types.ts';
 
 // -----------------------------------------------------------------------
@@ -2485,5 +2499,130 @@ describe('routeInbound — reply size limits', () => {
     // Three enacted replies, three quota units.
     expect(kv.store.get(SENT_KEY)).toBe('3');
     expect(kv.store.get(BURST_KEY)).toBe('3');
+  });
+});
+
+// -----------------------------------------------------------------------
+// Framework ↔ router parity for the record-time bounds.
+//
+// The framework's `createMessageProxy` restates `MAX_FORWARD_HEADERS`,
+// `MAX_FORWARD_HEADER_LENGTH` and `MAX_REJECT_REASON_LENGTH` and applies
+// them where the action is RECORDED — in the handler's own call — so the
+// test harness (which builds its message with that proxy) and a native
+// own-account replay answer what this router answers. A number that
+// drifted on one side would reopen the gap: a forward the harness reports
+// and this router drops, or a reject reason that is clean here and injects
+// into the SMTP reply natively. The numbers are pinned equal, and the
+// agreement is pinned at the bound in both directions: the largest bag the
+// proxy records is enacted here, one past it is refused there and dropped
+// here, and a reason the proxy has normalized passes through this router
+// unchanged.
+// -----------------------------------------------------------------------
+
+describe('framework ↔ router bound parity', () => {
+  const ENVELOPE = {
+    from: 'sender@example.com',
+    to: 'tag@example.com',
+    headers: {},
+    raw: new TextEncoder().encode('Subject: hi\r\n\r\nbody\r\n'),
+    rawSize: 21,
+  };
+
+  it('restates the same numbers', () => {
+    // Guarded on type: an export missing on either side reads `undefined`,
+    // and `undefined === undefined` is not parity.
+    for (const [framework, router] of [
+      [FRAMEWORK_MAX_FORWARD_HEADERS, MAX_FORWARD_HEADERS],
+      [FRAMEWORK_MAX_FORWARD_HEADER_LENGTH, MAX_FORWARD_HEADER_LENGTH],
+      [FRAMEWORK_MAX_REJECT_REASON_LENGTH, MAX_REJECT_REASON_LENGTH],
+    ]) {
+      expect(router).toBeTypeOf('number');
+      expect(framework).toBe(router);
+    }
+  });
+
+  it('enacts the largest forward header bag the framework records', async () => {
+    const bag: Record<string, string> = {};
+    for (let i = 0; i < MAX_FORWARD_HEADERS; i++) {
+      const suffix = String(i).padStart(2, '0');
+      bag[`X-${'a'.repeat(MAX_FORWARD_HEADER_LENGTH - 2 - suffix.length)}${suffix}`] = 'v'.repeat(
+        MAX_FORWARD_HEADER_LENGTH,
+      );
+    }
+    const proxy = createMessageProxy(ENVELOPE);
+    await proxy.message.forward('admin@example.com', bag as unknown as Headers);
+    const { env } = makeEnv({
+      kvSeed: withAllowlist(['admin@example.com']),
+      emailReturn: proxy.getActions(),
+    });
+    const { message, forwardCalls } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(forwardCalls).toHaveLength(1);
+    expect([...forwardCalls[0]!.headers!.keys()]).toHaveLength(MAX_FORWARD_HEADERS);
+    expect(errorSpy).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [
+      'one header too many',
+      (() => {
+        const bag: Record<string, string> = {};
+        for (let i = 0; i <= MAX_FORWARD_HEADERS; i++) {
+          bag[`X-Void-${i}`] = 'v';
+        }
+        return bag;
+      })(),
+    ],
+    ['a name one character too long', { [`X${'a'.repeat(MAX_FORWARD_HEADER_LENGTH)}`]: 'v' }],
+    ['a value one character too long', { 'X-Void-Tag': 'v'.repeat(MAX_FORWARD_HEADER_LENGTH + 1) }],
+  ])(
+    'refuses a bag with %s at the framework call, and drops the same raw list here',
+    async (_label, bag) => {
+      // Both sides, same input: the framework fails the handler's call (so
+      // the list never exists), and a hand-built entrypoint that returns the
+      // list anyway loses the WHOLE list here.
+      const proxy = createMessageProxy(ENVELOPE);
+      await expect(
+        proxy.message.forward('admin@example.com', bag as unknown as Headers),
+      ).rejects.toThrow(/^forward: /);
+      expect(proxy.getActions()).toEqual([]);
+      const { env } = makeEnv({
+        kvSeed: withAllowlist(['admin@example.com', 'ops@example.com']),
+        emailReturn: [
+          { type: 'forward', to: 'admin@example.com', headers: bag },
+          { type: 'forward', to: 'ops@example.com' },
+        ],
+      });
+      const { message, forwardCalls } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
+      const { ctx } = createCtx();
+      await routeInbound(message, env, ctx);
+      expect(forwardCalls).toHaveLength(0);
+      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('action list dropped'));
+    },
+  );
+
+  it.each([
+    ['a control-heavy reason past the cap', 'line\r\n'.repeat(300)],
+    ['a multi-megabyte reason ending in CRLF and NUL', `${'x'.repeat(5 * 1024 * 1024)}\r\n\x00`],
+    ['an empty reason', ''],
+    ['a controls-only reason', '\r\n'],
+  ])('sends the reject reason the framework recorded for %s unchanged', async (_label, reason) => {
+    // What the proxy records is already this router's `sanitize` output, so
+    // the router's own pass is the identity on it — the native replay and
+    // the managed one hand the remote MTA the same string.
+    const proxy = createMessageProxy(ENVELOPE);
+    proxy.message.setReject(reason);
+    const [recorded] = proxy.getActions();
+    expect(recorded!.type).toBe('reject');
+    const { env } = makeEnv({
+      kvSeed: { myslug: DEFAULT_ROUTING },
+      emailReturn: [recorded],
+    });
+    const { message, rejectCalls } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(rejectCalls).toEqual([(recorded as { reason: string }).reason]);
+    expect(rejectCalls[0]!.length).toBeLessThanOrEqual(MAX_REJECT_REASON_LENGTH);
   });
 });
