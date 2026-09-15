@@ -728,43 +728,6 @@ describe('sendEmail (proxy round trip)', () => {
     }
   });
 
-  it('drops malformed delivery entries inside an otherwise-valid mid-batch response', async () => {
-    const { proxy } = fakeProxy(() => ({
-      status: 200,
-      body: {
-        ok: false,
-        deliveries: [
-          { recipient: 'a@y.dev', ok: true, messageId: 'cf-a' },
-          null, // garbage entry: must not crash the map
-          { recipient: 'b@y.dev', ok: false, error: null }, // missing error.message
-          'string-not-object',
-          { ok: true, messageId: 'cf-x' }, // missing recipient
-        ],
-      },
-    }));
-    const result = await withRuntimeEnv({ __VOID_PROXY: proxy, ...PROXY_ENV_KEYS }, () =>
-      sendEmail({
-        from: 'a@x.dev',
-        to: ['a@y.dev', 'b@y.dev'],
-        subject: 's',
-        text: 't',
-        sendInDev: true,
-      }),
-    );
-    expect(result.ok).toBe(false);
-    if (!result.ok && 'deliveries' in result) {
-      // Two valid entries (a@y.dev ok, b@y.dev failed) survive; garbage is dropped.
-      expect(result.deliveries).toHaveLength(2);
-      const a = result.deliveries.find((d) => d.recipient === 'a@y.dev');
-      expect(a?.ok).toBe(true);
-      const b = result.deliveries.find((d) => d.recipient === 'b@y.dev');
-      expect(b?.ok).toBe(false);
-      if (b && !b.ok) {
-        expect(b.error.code).toBe('UPSTREAM_ERROR');
-      }
-    }
-  });
-
   it('returns UPSTREAM_ERROR when proxy responds with non-JSON', async () => {
     const proxy = {
       async fetch() {
@@ -930,6 +893,256 @@ describe('sendEmail (proxy delivery list)', () => {
       expect(result.ids[0].messageId).toBe('cf-c');
       expect(result.ids[1].messageId).toMatch(/^<.+@x\.dev>$/);
     }
+  });
+});
+
+// The mid-batch `deliveries` list is built from the same per-recipient list
+// as `ids`: one entry per requested address, each either
+// `{ recipient, ok: true, messageId }` or `{ recipient, ok: false, error }`
+// (the proxy always attaches `error` to a failed entry — both its producer
+// paths do). The documented retry pattern acts on exactly the `ok: false`
+// entries, so a list that skips, repeats or invents a recipient, or an
+// entry that does not state its outcome, cannot be acted on: skipping the
+// bad entry would leave a recipient with no outcome and no retry, and
+// treating an entry with no `ok` as failed would retry a recipient that may
+// have been delivered. Such a response is a schema-skewed or corrupt proxy
+// and is refused as a whole, under the same rules as the success path.
+describe('sendEmail (proxy mid-batch delivery list)', () => {
+  const send = (proxy: ReturnType<typeof fakeProxy>['proxy'], to: string | Array<string>) =>
+    withRuntimeEnv({ __VOID_PROXY: proxy, ...PROXY_ENV_KEYS }, () =>
+      sendEmail({ from: 'a@x.dev', to, subject: 's', text: 't', sendInDev: true }),
+    );
+  const failed = (recipient: string) => ({
+    recipient,
+    ok: false,
+    error: { code: 'UNVERIFIED_DESTINATION', message: `${recipient} not verified` },
+  });
+  const SHAPE =
+    '{ recipient: string, ok: true, messageId: string } | { recipient: string, ok: false, error: { message: string } }';
+
+  it.each([
+    [
+      'a null entry standing in for one recipient',
+      ['a@y.dev', 'b@y.dev'],
+      { ok: false, deliveries: [null, failed('b@y.dev')] },
+      `entry 0 is not ${SHAPE}`,
+    ],
+    [
+      'a string entry',
+      ['a@y.dev', 'b@y.dev'],
+      { ok: false, deliveries: [failed('a@y.dev'), 'string-not-object'] },
+      `entry 1 is not ${SHAPE}`,
+    ],
+    [
+      'an empty list for a two-recipient send',
+      ['a@y.dev', 'b@y.dev'],
+      { ok: false, deliveries: [] },
+      'expected 2 deliveries, got 0',
+    ],
+    [
+      'one entry short of the request',
+      ['a@y.dev', 'b@y.dev'],
+      { ok: false, deliveries: [failed('b@y.dev')] },
+      'expected 2 deliveries, got 1',
+    ],
+    [
+      'more entries than the request',
+      ['a@y.dev', 'b@y.dev'],
+      {
+        ok: false,
+        deliveries: [
+          { recipient: 'a@y.dev', ok: true, messageId: 'cf-a' },
+          null,
+          { recipient: 'b@y.dev', ok: false, error: null },
+          'string-not-object',
+          { ok: true, messageId: 'cf-x' },
+        ],
+      },
+      'expected 2 deliveries, got 5',
+    ],
+    [
+      'a duplicated recipient',
+      ['a@y.dev', 'b@y.dev'],
+      {
+        ok: false,
+        deliveries: [failed('b@y.dev'), { recipient: 'b@y.dev', ok: true, messageId: 'cf-b' }],
+      },
+      'entry 1 repeats a recipient',
+    ],
+    [
+      'a recipient that was not requested',
+      ['a@y.dev', 'b@y.dev'],
+      {
+        ok: false,
+        deliveries: [failed('z@y.dev'), { recipient: 'b@y.dev', ok: true, messageId: 'cf-b' }],
+      },
+      'entry 0 names a recipient that was not requested',
+    ],
+    [
+      'a recipient in the wrong case',
+      ['a@y.dev', 'b@y.dev'],
+      {
+        ok: false,
+        deliveries: [failed('A@y.dev'), { recipient: 'b@y.dev', ok: true, messageId: 'cf-b' }],
+      },
+      'entry 0 names a recipient that was not requested',
+    ],
+    [
+      'an entry with no recipient',
+      ['a@y.dev', 'b@y.dev'],
+      { ok: false, deliveries: [{ ok: true, messageId: 'cf-a' }, failed('b@y.dev')] },
+      `entry 0 is not ${SHAPE}`,
+    ],
+    [
+      'an entry with no ok',
+      ['a@y.dev', 'b@y.dev'],
+      { ok: false, deliveries: [{ recipient: 'a@y.dev', messageId: 'cf-a' }, failed('b@y.dev')] },
+      `entry 0 is not ${SHAPE}`,
+    ],
+    [
+      'an entry whose ok is the string "true"',
+      ['a@y.dev', 'b@y.dev'],
+      {
+        ok: false,
+        deliveries: [{ recipient: 'a@y.dev', ok: 'true', messageId: 'cf-a' }, failed('b@y.dev')],
+      },
+      `entry 0 is not ${SHAPE}`,
+    ],
+    [
+      'an ok:true entry with no messageId',
+      ['a@y.dev', 'b@y.dev'],
+      { ok: false, deliveries: [{ recipient: 'a@y.dev', ok: true }, failed('b@y.dev')] },
+      `entry 0 is not ${SHAPE}`,
+    ],
+    [
+      'an ok:true entry with a non-string messageId',
+      ['a@y.dev', 'b@y.dev'],
+      {
+        ok: false,
+        deliveries: [{ recipient: 'a@y.dev', ok: true, messageId: 42 }, failed('b@y.dev')],
+      },
+      `entry 0 is not ${SHAPE}`,
+    ],
+    [
+      'an ok:false entry with no error',
+      ['a@y.dev', 'b@y.dev'],
+      {
+        ok: false,
+        deliveries: [
+          { recipient: 'a@y.dev', ok: true, messageId: 'cf-a' },
+          { recipient: 'b@y.dev', ok: false },
+        ],
+      },
+      `entry 1 is not ${SHAPE}`,
+    ],
+    [
+      'an ok:false entry with a null error',
+      ['a@y.dev', 'b@y.dev'],
+      {
+        ok: false,
+        deliveries: [
+          { recipient: 'a@y.dev', ok: true, messageId: 'cf-a' },
+          { recipient: 'b@y.dev', ok: false, error: null },
+        ],
+      },
+      `entry 1 is not ${SHAPE}`,
+    ],
+    [
+      'an ok:false entry whose error has no string message',
+      ['a@y.dev', 'b@y.dev'],
+      {
+        ok: false,
+        deliveries: [
+          { recipient: 'a@y.dev', ok: true, messageId: 'cf-a' },
+          { recipient: 'b@y.dev', ok: false, error: { code: 'UPSTREAM_ERROR', message: 7 } },
+        ],
+      },
+      `entry 1 is not ${SHAPE}`,
+    ],
+  ])(
+    'returns a top-level UPSTREAM_ERROR for a mid-batch response carrying %s',
+    async (_, to, payload, reason) => {
+      const { proxy } = fakeProxy(() => ({ status: 200, body: payload }));
+      const result = await send(proxy, to);
+      expect(result).toEqual({
+        ok: false,
+        error: {
+          code: 'UPSTREAM_ERROR',
+          message: `email: proxy returned a malformed delivery list (${reason})`,
+          cause: payload,
+        },
+      });
+    },
+  );
+
+  it('passes a complete list through in the order the proxy sent it', async () => {
+    // The proxy lists allowlist rejections before the sends it attempted,
+    // so the order differs from the request's; it is kept, not re-sorted.
+    // An unknown error code is coerced; the empty messageId is the proxy's
+    // "CF returned none" convention and falls back to the locally generated
+    // Message-ID, as on the success path.
+    const { calls, proxy } = fakeProxy(() => ({
+      status: 200,
+      body: {
+        ok: false,
+        deliveries: [
+          { recipient: 'c@y.dev', ok: false, error: { code: 'WEIRD_NEW_CODE', message: 'nope' } },
+          failed('b@y.dev'),
+          { recipient: 'a@y.dev', ok: true, messageId: '' },
+        ],
+      },
+    }));
+    const result = await send(proxy, ['a@y.dev', 'b@y.dev', 'c@y.dev']);
+    expect((calls[0].body as { recipients: Array<string> }).recipients).toEqual([
+      'a@y.dev',
+      'b@y.dev',
+      'c@y.dev',
+    ]);
+    expect(result.ok).toBe(false);
+    if (!result.ok && 'deliveries' in result) {
+      expect(result.deliveries.map((d) => d.recipient)).toEqual(['c@y.dev', 'b@y.dev', 'a@y.dev']);
+      expect(result.deliveries[0]).toEqual({
+        recipient: 'c@y.dev',
+        ok: false,
+        error: { code: 'UPSTREAM_ERROR', message: 'nope' },
+      });
+      expect(result.deliveries[1]).toEqual({
+        recipient: 'b@y.dev',
+        ok: false,
+        error: { code: 'UNVERIFIED_DESTINATION', message: 'b@y.dev not verified' },
+      });
+      const a = result.deliveries[2];
+      expect(a.ok).toBe(true);
+      if (a.ok) {
+        expect(a.messageId).toMatch(/^<.+@x\.dev>$/);
+      }
+    } else {
+      throw new Error('expected a mid-batch result');
+    }
+  });
+
+  it('does not refuse a mid-batch list in which every entry succeeded', async () => {
+    // Contradicts `anyFailed`, but every recipient has a trustworthy
+    // outcome and the retry filter selects nothing. Refusing it would make
+    // the caller retry the whole call and deliver duplicates.
+    const { proxy } = fakeProxy(() => ({
+      status: 200,
+      body: {
+        ok: false,
+        deliveries: [
+          { recipient: 'a@y.dev', ok: true, messageId: 'cf-a' },
+          { recipient: 'b@y.dev', ok: true, messageId: 'cf-b' },
+        ],
+      },
+    }));
+    const result = await send(proxy, ['a@y.dev', 'b@y.dev']);
+    expect(result).toEqual({
+      ok: false,
+      deliveries: [
+        { recipient: 'a@y.dev', ok: true, messageId: 'cf-a' },
+        { recipient: 'b@y.dev', ok: true, messageId: 'cf-b' },
+      ],
+    });
   });
 });
 

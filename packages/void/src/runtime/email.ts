@@ -425,59 +425,127 @@ function isValidProxyResponse(b: unknown): b is ProxyResponse {
   return false;
 }
 
+type RecipientListRead<T> = { ok: true; entries: Array<T> } | { ok: false; reason: string };
+
 /**
- * Validate the `ids` list of an `ok: true` proxy response against the
- * recipients this send asked for.
+ * Validate a per-recipient list from the proxy against the recipients this
+ * send asked for. Both list-bearing responses go through here — `ids` on
+ * `ok: true` and `deliveries` on a mid-batch `ok: false` — so the two cannot
+ * drift: the proxy builds both from the same per-recipient list, one entry
+ * per requested address, and a caller following the documented retry
+ * pattern (retry only `ok: false` entries) can act on an outcome only if
+ * every recipient has one.
  *
- * The proxy answers `ok: true` only once every requested recipient passed
- * its allowlist and `SEND_EMAIL.send()` confirmed each one, and it builds
- * `ids` from that same per-recipient list — so a well-formed success names
- * every requested address exactly once, as `{ recipient, messageId }` with
- * `messageId` always a string (`''` when Cloudflare returned none; that is
- * the proxy's explicit convention, and the framework's own Message-ID stands
- * in for it). Anything else is a schema-skewed or corrupt proxy. It is
- * refused as a whole rather than trimmed to the entries that parse: an
- * `ok: true` with a delivery missing would tell the caller a send was
- * confirmed when it never was, and the caller could not retry that recipient
- * because a success carries no per-recipient failure to retry from.
+ * The rules shared by both shapes: the count equals the recipients sent;
+ * every entry is an object naming a requested recipient exactly once. The
+ * list is compared as a set against the unique, lowercased recipients the
+ * request carried and returned in the order the proxy gave it — order is
+ * not part of the contract (the proxy lists allowlist rejections before the
+ * sends it attempted). `readEntry` decides the rest of the entry's shape and
+ * returns `undefined` when it does not hold; `shape` names that shape in the
+ * reason.
  *
- * Order is not part of the contract: the list is compared as a set against
- * the unique, lowercased recipients the request carried, and returned in the
- * order the proxy gave it. Entries are named by index only — the body is
- * attached as `cause`, and a recipient string from a corrupt response is
- * not a value to interpolate into an error message.
+ * Anything else is a schema-skewed or corrupt proxy and is refused as a
+ * whole rather than trimmed to the entries that parse: a dropped entry is a
+ * recipient whose outcome the caller can neither trust nor retry. Entries
+ * are named by index only — the body is attached as `cause`, and a recipient
+ * string from a corrupt response is not a value to interpolate into an
+ * error message.
  */
-function readDeliveryList(
+function readRecipientList<T>(
   raw: Array<unknown>,
   recipients: ReadonlyArray<string>,
-  fallbackId: string,
-): { ok: true; ids: Array<SendEmailDelivery> } | { ok: false; reason: string } {
+  shape: string,
+  readEntry: (entry: Record<string, unknown>, recipient: string) => T | undefined,
+): RecipientListRead<T> {
   if (raw.length !== recipients.length) {
     return { ok: false, reason: `expected ${recipients.length} deliveries, got ${raw.length}` };
   }
   const requested = new Set(recipients);
   const seen = new Set<string>();
-  const ids: Array<SendEmailDelivery> = [];
+  const entries: Array<T> = [];
   for (const [i, d] of raw.entries()) {
-    const entry = d as { recipient?: unknown; messageId?: unknown } | null;
-    if (
-      typeof entry !== 'object' ||
-      entry === null ||
-      typeof entry.recipient !== 'string' ||
-      typeof entry.messageId !== 'string'
-    ) {
-      return { ok: false, reason: `entry ${i} is not { recipient: string, messageId: string }` };
+    const entry = typeof d === 'object' && d !== null ? (d as Record<string, unknown>) : null;
+    const recipient = entry?.recipient;
+    if (entry === null || typeof recipient !== 'string') {
+      return { ok: false, reason: `entry ${i} is not ${shape}` };
     }
-    if (!requested.has(entry.recipient)) {
+    const value = readEntry(entry, recipient);
+    if (value === undefined) {
+      return { ok: false, reason: `entry ${i} is not ${shape}` };
+    }
+    if (!requested.has(recipient)) {
       return { ok: false, reason: `entry ${i} names a recipient that was not requested` };
     }
-    if (seen.has(entry.recipient)) {
+    if (seen.has(recipient)) {
       return { ok: false, reason: `entry ${i} repeats a recipient` };
     }
-    seen.add(entry.recipient);
-    ids.push({ recipient: entry.recipient, messageId: entry.messageId || fallbackId });
+    seen.add(recipient);
+    entries.push(value);
   }
-  return { ok: true, ids };
+  return { ok: true, entries };
+}
+
+/**
+ * The `ids` list of an `ok: true` response. The proxy answers `ok: true`
+ * only once every requested recipient passed its allowlist and
+ * `SEND_EMAIL.send()` confirmed each one, so every entry is
+ * `{ recipient, messageId }` with `messageId` always a string (`''` when
+ * Cloudflare returned none; that is the proxy's explicit convention, and the
+ * framework's own Message-ID stands in for it). An `ok: true` with a
+ * delivery missing would tell the caller a send was confirmed when it never
+ * was, and a success carries no per-recipient failure to retry from.
+ */
+function readDeliveryList(
+  raw: Array<unknown>,
+  recipients: ReadonlyArray<string>,
+  fallbackId: string,
+): RecipientListRead<SendEmailDelivery> {
+  return readRecipientList(
+    raw,
+    recipients,
+    '{ recipient: string, messageId: string }',
+    (entry, recipient) =>
+      typeof entry.messageId === 'string'
+        ? { recipient, messageId: entry.messageId || fallbackId }
+        : undefined,
+  );
+}
+
+/**
+ * The `deliveries` list of a mid-batch `ok: false` response. Each entry is
+ * either a confirmed send (`ok: true`, `messageId` a string with the same
+ * `''` convention as above) or a failure (`ok: false`, `error` with a string
+ * `message`; the code is coerced, unknown values become `UPSTREAM_ERROR`).
+ * Both are the proxy's own outcome for that recipient; `ok` is what the
+ * caller retries on, so an entry that does not state it is not an outcome
+ * at all — treating it as failed would retry a recipient that may have been
+ * delivered, and treating it as delivered would silently lose one.
+ */
+function readFailureDeliveries(
+  raw: Array<unknown>,
+  recipients: ReadonlyArray<string>,
+  fallbackId: string,
+): RecipientListRead<SendEmailRecipientResult> {
+  return readRecipientList(
+    raw,
+    recipients,
+    '{ recipient: string, ok: true, messageId: string } | { recipient: string, ok: false, error: { message: string } }',
+    (entry, recipient) => {
+      if (entry.ok === true) {
+        return typeof entry.messageId === 'string'
+          ? { recipient, ok: true, messageId: entry.messageId || fallbackId }
+          : undefined;
+      }
+      if (entry.ok === false) {
+        const error = entry.error as { code?: unknown; message?: unknown } | null | undefined;
+        return typeof error === 'object' && error !== null && typeof error.message === 'string'
+          ? { recipient, ok: false, error: makeError(coerceErrorCode(error.code), error.message) }
+          : undefined;
+      }
+      return undefined;
+    },
+  );
 }
 
 async function readResponseAsResult(
@@ -499,18 +567,14 @@ async function readResponseAsResult(
         body,
       );
     }
+    // Both list-bearing shapes are validated as a whole against the
+    // recipients this send asked for (`ids` / `deliveries` are `unknown[]`
+    // from the typeguard's perspective).
+    const malformedList = (reason: string): SendEmailResult =>
+      err('UPSTREAM_ERROR', `email: proxy returned a malformed delivery list (${reason})`, body);
     if (body.ok === true) {
-      // `ids` is `unknown[]` from the typeguard's perspective; the list is
-      // validated as a whole against the recipients this send asked for.
       const list = readDeliveryList(body.ids as Array<unknown>, recipients, fallbackId);
-      if (!list.ok) {
-        return err(
-          'UPSTREAM_ERROR',
-          `email: proxy returned a malformed delivery list (${list.reason})`,
-          body,
-        );
-      }
-      return { ok: true, ids: list.ids };
+      return list.ok ? { ok: true, ids: list.entries } : malformedList(list.reason);
     }
     // Treat the body as a flat record from here — the discriminated
     // union narrowing fights the `unknown`-derived branches and adds
@@ -523,42 +587,14 @@ async function readResponseAsResult(
         typeof e.message === 'string' ? e.message : 'email: upstream send failed',
       );
     }
-    // Mid-batch — surface per-recipient outcomes verbatim, normalizing
-    // unknown error codes to UPSTREAM_ERROR. Each delivery entry is
-    // independently validated so a single malformed entry can't crash
-    // the whole map.
-    const deliveries: Array<SendEmailRecipientResult> = [];
-    for (const d of failure.deliveries as Array<unknown>) {
-      if (typeof d !== 'object' || d === null) {
-        continue;
-      }
-      const entry = d as {
-        recipient?: unknown;
-        ok?: unknown;
-        messageId?: unknown;
-        error?: { code?: unknown; message?: unknown };
-      };
-      const recipient = typeof entry.recipient === 'string' ? entry.recipient : '';
-      if (!recipient) {
-        continue;
-      }
-      if (entry.ok === true) {
-        const mid = typeof entry.messageId === 'string' ? entry.messageId : '';
-        deliveries.push({ recipient, ok: true, messageId: mid || fallbackId });
-      } else {
-        deliveries.push({
-          recipient,
-          ok: false,
-          error: makeError(
-            coerceErrorCode(entry.error?.code),
-            typeof entry.error?.message === 'string'
-              ? entry.error.message
-              : 'email: upstream send failed',
-          ),
-        });
-      }
-    }
-    return { ok: false, deliveries };
+    // Mid-batch — per-recipient outcomes, one per requested recipient, so
+    // the caller can retry exactly the failed ones.
+    const list = readFailureDeliveries(
+      failure.deliveries as Array<unknown>,
+      recipients,
+      fallbackId,
+    );
+    return list.ok ? { ok: false, deliveries: list.entries } : malformedList(list.reason);
   } catch (e) {
     // Defense-in-depth: any unexpected error parsing the proxy response
     // becomes a clean UPSTREAM_ERROR rather than escaping `sendEmail` as

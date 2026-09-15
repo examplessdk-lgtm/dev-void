@@ -156,7 +156,7 @@ There are three discriminated cases:
 
 - **All success** (`ok: true`) — every recipient delivered.
 - **Pre-flight failure** (`ok: false`, has `error`) — validation / MIME / missing binding rejected the call before any sends were attempted. Retrying the whole call is safe.
-- **Mid-batch failure** (`ok: false`, has `deliveries`) — sends were attempted and some failed. Each recipient has its own per-recipient outcome (`ok: true` with `messageId`, or `ok: false` with `error`). Retry only recipients with `ok: false` — re-sending to ones with `ok: true` will deliver duplicates.
+- **Mid-batch failure** (`ok: false`, has `deliveries`) — sends were attempted and some failed. Each recipient has its own per-recipient outcome (`ok: true` with `messageId`, or `ok: false` with `error`). Retry only recipients with `ok: false` — re-sending to ones with `ok: true` will deliver duplicates. The list always names every recipient of the call; an incomplete or malformed list from the platform proxy is reported as a top-level `UPSTREAM_ERROR` (`result.error`), never as a partial `deliveries`.
 
 ```ts
 const result = await sendEmail({ to: ['a@x.dev', 'b@x.dev', 'c@x.dev'], ... });
