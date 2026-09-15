@@ -1900,11 +1900,12 @@ owner's.
     proxy cannot bound a tenant's `email()` return value before workerd
     materializes it (128 MiB of nulls or ~500 MiB of `{}` fit the 32 MiB
     serialized cap; see [RPC result materialization](#rpc-result-materialization--accepted-limit-measured-2026-09-15)).
-    Accept as a limit (recommended for this PR — the documented eviction
-    cost to unrelated traffic is an isolate replacement), **or** fund one of
-    the architectural bounds: an HTTP contract via `stub.fetch()` with a
-    byte-capped body read, a dedicated email-dispatch worker, or a lower
-    `cpuMs` for email dispatch than for HTTP.
+    **Decided 2026-09-15: accepted as a limit for this PR.** The eviction
+    cost to unrelated traffic is one isolate replacement, and a tenant pays
+    its own CPU budget to reach it. The architectural bounds stay on the
+    table as a follow-up, none of them a bug-fix: an HTTP contract via
+    `stub.fetch()` with a byte-capped body read, a dedicated email-dispatch
+    worker, or a lower `cpuMs` for email dispatch than for HTTP.
 
 ## Open questions
 
