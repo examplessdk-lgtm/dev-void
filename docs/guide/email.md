@@ -82,7 +82,7 @@ For SaaS sending to arbitrary end-users (every signup gets a welcome email), the
 | `headers`     | `Record<string, string>`     | Custom headers; reserved headers (From, Date, etc.) are ignored. |
 | `attachments` | `Attachment[]`               | See [Attachments](#attachments).                                 |
 
-At most 100 recipients across `to`, `cc` and `bcc` per call, and each address is at most 254 UTF-8 octets with a local part (before the `@`) of at most 64 UTF-8 octets (RFC 5321: a 256-octet forward-path `<local@domain>` and a 64-octet local part are the longest every receiver must accept). All three are checked before anything is built and return `INVALID_TO`. Custom header names must be RFC 5322 field names (printable ASCII, no colon); a name too long to fit a 998-octet line — a field name cannot be folded — is rejected with `MIME_ERROR` before anything is built.
+At most 100 recipients across `to`, `cc` and `bcc` per call, and each address is at most 254 UTF-8 octets with a local part (before the `@`) of at most 64 UTF-8 octets (RFC 5321: a 256-octet forward-path `<local@domain>` and a 64-octet local part are the longest every receiver must accept), with no whitespace or control character (C0 or DEL) anywhere in it. All of these are checked before anything is built and return `INVALID_TO`. Custom header names must be RFC 5322 field names (printable ASCII, no colon); a name too long to fit a 998-octet line — a field name cannot be folded — is rejected with `MIME_ERROR` before anything is built.
 
 `Address` accepts either a string (`"hello@acme.dev"` or `"Name <hello@acme.dev>"`) or an object (`{ email, name? }`). Display names with non-ASCII characters are RFC 2047 encoded automatically.
 

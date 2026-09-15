@@ -819,6 +819,100 @@ describe('normalizeEmail', () => {
     );
   });
 
+  describe('control characters in an address', () => {
+    // `rejectCRLF` refuses CR, LF and NUL and the shape rule's `\s` refuses
+    // TAB, VT and FF, so every other C0 control and DEL passed both:
+    // `a\x01b@example.com` was accepted and `formatAddress` wrote the byte
+    // raw into the `To:` line, captured as a success under `void dev` and
+    // by the test harness. The platform router's `isValidEmailAddress`
+    // refuses `\u0000-\u001f` and `\u007f`, so a `forward(to)` carrying one
+    // was dropped there after earlier actions had fired.
+    const controls = [
+      ['SOH', '\x01', '0001'],
+      ['ESC', '\x1b', '001B'],
+      ['US', '\x1f', '001F'],
+      ['DEL', '\x7f', '007F'],
+      // Also whitespace to `\s`; the control rule answers first so the
+      // message names the byte instead of echoing it.
+      ['TAB', '\t', '0009'],
+    ] as const;
+
+    it('refuses a bare address carrying one, with the code for its field', async () => {
+      for (const [, ch, codePoint] of controls) {
+        const bad = `a${ch}b@example.com`;
+        for (const [field, code] of [
+          ['to', 'INVALID_TO'],
+          ['from', 'INVALID_FROM'],
+          ['cc', 'MIME_ERROR'],
+          ['bcc', 'MIME_ERROR'],
+          ['replyTo', 'MIME_ERROR'],
+        ] as const) {
+          let error: unknown;
+          try {
+            await normalizeEmail({
+              from: 'a@x.dev',
+              to: 'b@y.dev',
+              [field]: bad,
+              subject: 's',
+              text: 't',
+            });
+          } catch (e) {
+            error = e;
+          }
+          expect(error).toBeInstanceOf(MimeError);
+          expect((error as MimeError).code).toBe(code);
+          expect((error as MimeError).message).toBe(
+            `${field}: address contains a control character (U+${codePoint}).`,
+          );
+        }
+      }
+    });
+
+    it('refuses it in the object and display-name forms on the same parsed address', async () => {
+      for (const [, ch, codePoint] of controls) {
+        const bad = `a${ch}b@example.com`;
+        await expect(
+          normalizeEmail({
+            from: 'a@x.dev',
+            to: { name: 'Bob', email: bad },
+            subject: 's',
+            text: 't',
+          }),
+        ).rejects.toThrow(`to: address contains a control character (U+${codePoint}).`);
+        expect(() => parseAddress(`Bob <${bad}>`, 'to')).toThrow(
+          `to: address contains a control character (U+${codePoint}).`,
+        );
+      }
+      // The length bound still answers first: the scan is over at most 320
+      // characters, so an over-long address is refused before it is read.
+      expect(() => parseAddress(`a\x01${'b'.repeat(320)}@x.dev`, 'to')).toThrow(
+        /over the 320-character limit/,
+      );
+    });
+
+    it('never renders one raw from a display name, which is encoded instead', async () => {
+      // A name is not an address: a control in it is a character like any
+      // other and `formatAddress` RFC 2047-encodes the non-printable name,
+      // so the byte reaches the wire only inside base64. Pinned so the
+      // address rule is never mistaken for the reason the header is clean.
+      // Every C0 control and DEL except the CR and LF that delimit lines.
+      // eslint-disable-next-line no-control-regex -- C0 controls and DEL are the point
+      const rawControl = /[\x00-\x09\x0b\x0c\x0e-\x1f\x7f]/;
+      for (const [, ch] of controls) {
+        const { text } = await build({
+          from: 'a@x.dev',
+          to: { name: `Bo${ch}b`, email: 'b@y.dev' },
+          subject: 's',
+          text: 't',
+        });
+        const toLine = unfoldHeader(text, 'To');
+        expect(toLine).toMatch(/^=\?UTF-8\?B\?[A-Za-z0-9+/=]+\?= <b@y\.dev>$/);
+        expect(decodeEncodedWords(toLine)).toBe(`Bo${ch}b <b@y.dev>`);
+        expect(text.slice(0, text.indexOf('\r\n\r\n'))).not.toMatch(rawControl);
+      }
+    });
+  });
+
   it('parses the display-name form in linear time', () => {
     // `^\s*([^"<]+?)?\s*<` let three quantifiers share one run of
     // whitespace; the backtracker tried every split, cubic in the run.

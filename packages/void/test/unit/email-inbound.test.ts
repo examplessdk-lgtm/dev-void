@@ -1038,6 +1038,28 @@ describe('harness enforces the proxy action bounds, like production', () => {
     expect(harness.forwards).toEqual([]);
   });
 
+  it('refuses a forward address carrying a control character, by the sendEmail rule', async () => {
+    // The platform router's `isValidEmailAddress` refuses `\u0000-\u001f`
+    // and `\u007f`, and used to be the first thing that did: `forward()`
+    // recorded the address, the harness captured it as a success, and the
+    // router dropped just that forward after earlier actions had fired.
+    let thrown: unknown;
+    const harness = harnessFor(async (message) => {
+      try {
+        await message.forward('a\x01b@example.com');
+      } catch (e) {
+        thrown = e;
+      }
+    });
+    await harness.deliver(DELIVERY);
+    expect(thrown).toBeInstanceOf(MimeError);
+    expect((thrown as MimeError).code).toBe('INVALID_TO');
+    expect((thrown as MimeError).message).toBe(
+      'to: address contains a control character (U+0001).',
+    );
+    expect(harness.forwards).toEqual([]);
+  });
+
   it('refuses a forward header record with a CRLF in a value at the call, recording nothing for it', async () => {
     let thrown: unknown;
     const harness = harnessFor(async (message) => {

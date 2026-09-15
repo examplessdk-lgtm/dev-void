@@ -189,6 +189,26 @@ export function validateAddressParts(field: string, email: string, name?: string
       `${field}: address is ${email.length} characters, over the ${MAX_ADDRESS_LENGTH}-character limit.`,
     );
   }
+  // No C0 control or DEL anywhere in the address. `rejectCRLF` above
+  // refuses only CR, LF and NUL, and the whitespace rule below only the
+  // controls `\s` matches (TAB, VT, FF), so `a\x01b@example.com` or
+  // `a\x7fb@example.com` passed both and `formatAddress` wrote the byte
+  // straight into the `To:` line — captured as a success under `void dev`
+  // and by the test harness, refused only by the platform router or an MTA.
+  // The same class the router's `isValidEmailAddress` refuses, so a
+  // handler's `forward(to)` fails at the call rather than being dropped
+  // after earlier actions fired. After the length bound, so the scan is
+  // over at most `MAX_ADDRESS_LENGTH` characters; before the shape rule, so
+  // the message names the byte instead of echoing it.
+  // eslint-disable-next-line no-control-regex -- C0 controls and DEL are the point
+  const control = /[\x00-\x1f\x7f]/.exec(email);
+  if (control) {
+    const codePoint = control[0].charCodeAt(0).toString(16).toUpperCase().padStart(4, '0');
+    throw new MimeError(
+      fieldErrorCode(field),
+      `${field}: address contains a control character (U+${codePoint}).`,
+    );
+  }
   // Address must be a single token with EXACTLY ONE '@', a non-empty local
   // part and a non-empty domain, and no whitespace, quoting, or
   // list-separators. Without the separator rule, a `to: "a@x,b@y"` would
