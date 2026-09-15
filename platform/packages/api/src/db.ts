@@ -1810,9 +1810,11 @@ export async function createEmailDestination(
  * Called from the OAuth callback in `routes/auth.ts`, which re-reads the
  * provider's current email on every login and writes it straight back
  * via `updateUser` — so the stored address really does change under us.
- * The caller runs this in the SAME transaction as that `updateUser`: the
- * change is detected by comparing the stored address with the provider's,
- * so a demotion committed separately and then lost would never be retried.
+ * The caller runs this in the SAME transaction as that `updateUser`, and
+ * tightens each returned project's mirror inside it too, before the commit:
+ * the change is detected by comparing the stored address with the
+ * provider's, so a demotion — or a mirror write — committed separately and
+ * then lost would never be retried.
  */
 export async function revokeOwnerVerifiedDestinationsForUserChange(
   db: Db,

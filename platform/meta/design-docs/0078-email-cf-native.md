@@ -133,6 +133,22 @@ supersedes: 0047-email.md
 >   and write nothing when `users.email` no longer matches the snapshot
 >   (the auto-add then releases the tag; the POST answers its existing
 >   409, and a retry takes Option B; the listing leaves the row pending).
+>   _(2026-09-15)_ The login-side revoke
+>   (`updateUserRevokingInheritedDestinations` in `routes/auth.ts`) commits
+>   the email write, the demotion and each affected project's
+>   `email-allowlist:` tighten in ONE transaction, tighten last and inside
+>   it. Its only retry is the next login, which retries only while the
+>   stored address still differs from the provider's, so a mirror write
+>   swallowed after the commit was never retried and the proxy kept
+>   authorizing the old address until the owner happened to list
+>   destinations. A lost tighten now rolls the whole change back and the
+>   sign-in proceeds on the stored address; a rolled-back login can leave a
+>   key ahead of Postgres only in the tightening direction (deny), which
+>   the listing re-widens to match the rows. A best-effort re-derive after
+>   the commit undoes a listing or confirm click that re-widened the key
+>   between the tighten and the commit; the residual (a concurrent
+>   writer's put landing after both) is the DELETE route's, the 0067
+>   project-lock class.
 >
 > Tests cover each path: Option C trust, Option B platform-pending +
 > confirmation email dispatch, refresh-skip, confirm-endpoint happy
@@ -785,7 +801,7 @@ CF's `send_email` only delivers to addresses verified as destinations on the sen
 - **CF API client** — `platform/packages/api/src/provisioning/email-routing.ts` wraps `POST/GET/DELETE /accounts/:id/email/routing/addresses`.
 - **API routes** — `GET|POST|DELETE /projects/:id/email/destinations[/:id]`. POST triggers CF to email the recipient with a verification link; GET refreshes status from CF for any rows still `pending`.
 - **Auto-verify project owner** — `platform/packages/api/src/routes/projects.ts` calls `addDestination(user.email)` when a project is created (via `ctx.waitUntil`, non-blocking). The owner gets the verification email in their GitHub-OAuth-linked inbox; one click and their project can send to itself out of the box.
-- **Per-project allowlist enforcement in the proxy** — _(re-land)_ the user worker carries no `send_email` binding. The api mirrors each project's verified rows into `email-allowlist:<projectId>` in `ROUTING` KV (`provisioning/email-allowlist.ts`), and the proxy checks every send and every inbound reply against that mirror. Both revoke paths tighten the mirror before deleting the row. Destinations are account-wide on CF's side; the mirror is what makes consent per project. _(2026-09-15)_ Project teardown fails closed (503, row kept, retry) on the `email-slug:` / `email-allowlist:` deletes, slug first, before any best-effort cleanup: `__VOID_PROXY_TOKEN` never expires and the proxy reads a missing routing blob as "not suspended", so after the cascade those two keys are all that stops a retained token from sending.
+- **Per-project allowlist enforcement in the proxy** — _(re-land)_ the user worker carries no `send_email` binding. The api mirrors each project's verified rows into `email-allowlist:<projectId>` in `ROUTING` KV (`provisioning/email-allowlist.ts`), and the proxy checks every send and every inbound reply against that mirror. Both revoke paths tighten the mirror before deleting the row, and the owner-email change tightens it inside the transaction that demotes the inherited rows, before the commit. Destinations are account-wide on CF's side; the mirror is what makes consent per project. _(2026-09-15)_ Project teardown fails closed (503, row kept, retry) on the `email-slug:` / `email-allowlist:` deletes, slug first, before any best-effort cleanup: `__VOID_PROXY_TOKEN` never expires and the proxy reads a missing routing blob as "not suspended", so after the cascade those two keys are all that stops a retained token from sending.
 - **Cross-project safety on delete** — destinations are CF account-wide; before calling `deleteDestination` we check `countProjectsUsingDestination` and only remove from CF if no other project references the same `cf_destination_id`.
 
 The platform/team never opens the CF dashboard. The recipient (the person receiving the verification email) is the only human in the loop, and they only click a link in their own inbox. For every address except the owner's own, that mail is **ours** — HMAC-signed link, sent from `noreply@<mail domain>`, resendable — because Cloudflare's verification is per account rather than per project, and Cloudflare has no API to resend its mail.
