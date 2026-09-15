@@ -182,6 +182,11 @@ function resolveSendEmailBinding(
  * `UPSTREAM_ERROR` with the original error as `cause` — the framework has
  * no way to act on a delivery failure or a service outage beyond
  * reporting it.
+ *
+ * The platform proxy's `classifyUpstream` mirrors this table for its own
+ * binding, except the two sender codes: there `from` is pinned to the
+ * project sender, so a sender failure is the platform's to fix and stays
+ * `UPSTREAM_ERROR`. Keep the recipient and limit rows in lockstep.
  */
 function classifyBindingError(e: unknown): SendEmailError {
   const message = e instanceof Error ? e.message : String(e);

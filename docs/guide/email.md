@@ -180,7 +180,7 @@ Error codes:
 | `INVALID_TO`             | `to` was empty, contained an invalid or over-long address, or the call had more than 100 recipients.                                                                           |
 | `UNVERIFIED_DESTINATION` | Cloudflare rejected the recipient as unverified.                                                                                                                               |
 | `MIME_ERROR`             | Failed to build the MIME message (oversize attachments, malformed input).                                                                                                      |
-| `QUOTA_EXCEEDED`         | Platform quota for outbound email reached (retry next billing period), or Cloudflare's own rate or daily limit on your own account.                                            |
+| `QUOTA_EXCEEDED`         | Platform quota for outbound email reached (retry next billing period), or Cloudflare's own rate or daily limit on the sending account — the platform's, or your own.           |
 | `UPSTREAM_ERROR`         | Other binding failure; the original error is attached as `error.cause`.                                                                                                        |
 
 Which branch carries the code depends on when the send failed.

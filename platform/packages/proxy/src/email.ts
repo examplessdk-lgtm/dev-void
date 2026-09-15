@@ -1022,13 +1022,12 @@ app.post('/send', async (context) => {
         messageId: typeof result?.messageId === 'string' ? result.messageId : '',
       });
     } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
       deliveries.push({
         recipient: r,
         ok: false,
         error: {
-          code: classifyUpstream(message),
-          message,
+          code: classifyUpstream(e, projectId),
+          message: e instanceof Error ? e.message : String(e),
         },
       });
     }
@@ -1090,7 +1089,23 @@ interface RecipientResult {
 }
 
 /**
- * Map a CF send_email error message to a framework-facing error code.
+ * Map an error thrown by the platform's `send_email` binding to a
+ * framework-facing error code. Mirrors `classifyBindingError` in
+ * `void/email` (the framework's own-binding lane): Email Service throws
+ * `Error`s carrying a `code` (the `E_*` table in Cloudflare's Workers API
+ * reference), and that code is read FIRST — the message regex below is the
+ * fallback for the older, message-only Email Routing sender. Anything else
+ * is UPSTREAM_ERROR, which the framework retries.
+ *
+ * The two sender codes are where the lanes deliberately differ. `from` is
+ * pinned to `<slug>[+tag]@<senderDomain>` above, so an
+ * `E_SENDER_NOT_VERIFIED` / `E_SENDER_DOMAIN_NOT_AVAILABLE` here means the
+ * PLATFORM's mail zone is not onboarded or verified: the tenant's `from`
+ * passed the pin and nothing about it is theirs to fix. INVALID_FROM is
+ * documented as "not the project sender" and as pre-flight, so it would be
+ * false on both counts; the send stays UPSTREAM_ERROR (retryable once the
+ * platform is repaired) with Cloudflare's message kept, and the code is
+ * logged because `logSend` records only ours.
  *
  * UNVERIFIED_DESTINATION is special — the framework treats it as
  * "don't retry; the user has to verify the address first." A false
@@ -1103,14 +1118,31 @@ interface RecipientResult {
  * `^[^\n]{0,200}` cap so a long preamble can't drag a tail-of-line
  * "destination address foo not verified" into a false positive on a
  * transient upstream error message that happens to mention the same
- * domain or address. Any other error falls through to UPSTREAM_ERROR
- * which the framework retries.
+ * domain or address.
  */
 const UNVERIFIED_DESTINATION_RE =
   /^[^\n]{0,200}destination address[^\n]{0,200}not (?:yet )?verified/i;
 
-function classifyUpstream(msg: string): string {
-  if (UNVERIFIED_DESTINATION_RE.test(msg)) {
+function classifyUpstream(e: unknown, projectId: string): string {
+  const message = e instanceof Error ? e.message : String(e);
+  const code =
+    typeof (e as { code?: unknown })?.code === 'string' ? (e as { code: string }).code : '';
+  switch (code) {
+    case 'E_RECIPIENT_NOT_ALLOWED':
+      return 'UNVERIFIED_DESTINATION';
+    case 'E_RATE_LIMIT_EXCEEDED':
+    case 'E_DAILY_LIMIT_EXCEEDED':
+      return 'QUOTA_EXCEEDED';
+    case 'E_SENDER_NOT_VERIFIED':
+    case 'E_SENDER_DOMAIN_NOT_AVAILABLE':
+      console.error(
+        `[email-send] project ${projectId} send binding refused the platform sender (${code}): ${sanitizeForLog(message)}`,
+      );
+      return 'UPSTREAM_ERROR';
+    default:
+      break;
+  }
+  if (UNVERIFIED_DESTINATION_RE.test(message)) {
     return 'UNVERIFIED_DESTINATION';
   }
   return 'UPSTREAM_ERROR';

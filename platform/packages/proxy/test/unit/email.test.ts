@@ -1883,6 +1883,63 @@ describe('POST /email/send — upstream error classification', () => {
     const body = await sendWithError(message);
     expect(body.deliveries?.[0].error?.code).toBe('UPSTREAM_ERROR');
   });
+
+  // Email Service throws a plain `Error` with a string `code` (Cloudflare's
+  // `E_*` table). These messages deliberately do NOT match the
+  // destination-verification regex, so a pass can only come from the code.
+  function bindingError(code: string, message: string): Error {
+    return Object.assign(new Error(message), { code });
+  }
+
+  async function sendWithThrow(thrown: unknown): Promise<SendResponseBody> {
+    const send = vi.fn(async () => {
+      throw thrown;
+    });
+    const env = createMockEnv(happyPathKv(), { SEND_EMAIL: { send } });
+    return readSend(await postSend(env, await sendBody()));
+  }
+
+  it.each([
+    ['E_RECIPIENT_NOT_ALLOWED', 'UNVERIFIED_DESTINATION'],
+    ['E_RATE_LIMIT_EXCEEDED', 'QUOTA_EXCEEDED'],
+    ['E_DAILY_LIMIT_EXCEEDED', 'QUOTA_EXCEEDED'],
+  ])('classifies a binding throw carrying %s as %s', async (code, expected) => {
+    const body = await sendWithThrow(bindingError(code, 'Email Service refused the send'));
+    expect(body.deliveries?.[0].error?.code).toBe(expected);
+    expect(body.deliveries?.[0].error?.message).toBe('Email Service refused the send');
+  });
+
+  it.each(['E_SENDER_NOT_VERIFIED', 'E_SENDER_DOMAIN_NOT_AVAILABLE'])(
+    'keeps %s as UPSTREAM_ERROR (the pinned platform sender is not the tenant to fix) and logs it',
+    async (code) => {
+      const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        const body = await sendWithThrow(bindingError(code, 'Sender domain not verified'));
+        expect(body.deliveries?.[0].error?.code).toBe('UPSTREAM_ERROR');
+        expect(body.deliveries?.[0].error?.message).toBe('Sender domain not verified');
+        expect(consoleError).toHaveBeenCalledTimes(1);
+        const line = String(consoleError.mock.calls[0]?.[0]);
+        expect(line).toContain(code);
+        expect(line).toContain('proj_1');
+      } finally {
+        consoleError.mockRestore();
+      }
+    },
+  );
+
+  it('falls back to the message regex when the code is not one it knows', async () => {
+    const body = await sendWithThrow(
+      bindingError('E_SOMETHING_NEW', 'destination address dev@example.com is not verified'),
+    );
+    expect(body.deliveries?.[0].error?.code).toBe('UNVERIFIED_DESTINATION');
+  });
+
+  it('classifies a non-Error throw as UPSTREAM_ERROR', async () => {
+    const body = await sendWithThrow('boom');
+    expect(body.deliveries?.[0].ok).toBe(false);
+    expect(body.deliveries?.[0].error?.code).toBe('UPSTREAM_ERROR');
+    expect(body.deliveries?.[0].error?.message).toBe('boom');
+  });
 });
 
 // ---------------------------------------------------------------------------
