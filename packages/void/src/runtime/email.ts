@@ -403,6 +403,24 @@ function coerceErrorCode(code: unknown): SendEmailErrorCode {
     : 'UPSTREAM_ERROR';
 }
 
+/**
+ * The text of a refusal the proxy's middleware sent instead of a send
+ * response: `{ error: string, message?: string }`. `message` is the
+ * sentence written for a person (the capability gate's "This Void platform
+ * does not enable email."); `error` is the short code every such refusal
+ * carries. `null` when the body is not that shape.
+ */
+function readProxyRefusal(body: unknown): string | null {
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+    return null;
+  }
+  const { error, message } = body as { error?: unknown; message?: unknown };
+  if (typeof error !== 'string' || error === '') {
+    return null;
+  }
+  return typeof message === 'string' && message !== '' ? message : error;
+}
+
 // Discriminator + shape check that runs before we destructure. The proxy
 // response shape is well-defined, but treating the parsed body as
 // `unknown` here lets us short-circuit to a clean UPSTREAM_ERROR for any
@@ -561,6 +579,18 @@ async function readResponseAsResult(
       return err('UPSTREAM_ERROR', `email: proxy returned ${res.status} with non-JSON body`);
     }
     if (!isValidProxyResponse(body)) {
+      // The proxy's own middleware — auth, platform lifecycle, capability
+      // gates — answers ahead of the email handler with a flat
+      // `{ error: string, message?: string }` and a non-2xx status. That
+      // is a well-formed refusal, not a malformed send response, so carry
+      // its text through the way the handler's `{ ok: false, error }` is
+      // carried above; a platform without the email module otherwise reads
+      // as "malformed response (status 501)" with the reason buried in
+      // `cause`.
+      const refusal = readProxyRefusal(body);
+      if (!res.ok && refusal !== null) {
+        return err('UPSTREAM_ERROR', `email: proxy returned ${res.status}: ${refusal}`, body);
+      }
       return err(
         'UPSTREAM_ERROR',
         `email: proxy returned malformed response (status ${res.status})`,

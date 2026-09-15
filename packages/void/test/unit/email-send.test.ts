@@ -728,6 +728,64 @@ describe('sendEmail (proxy round trip)', () => {
     }
   });
 
+  // The proxy's middleware (capability gate, auth, platform lifecycle)
+  // refuses ahead of the email handler with a flat `{ error, message? }`
+  // and a non-2xx status — a well-formed refusal whose text must reach the
+  // caller, not a "malformed response".
+  it.each([
+    [
+      'a 501 from the platform capability gate',
+      501,
+      {
+        error: 'platform capability unavailable',
+        capability: 'email',
+        message: 'This Void platform does not enable email.',
+      },
+      'This Void platform does not enable email.',
+    ],
+    [
+      'a 403 from the auth middleware (no message, falls back to error)',
+      403,
+      { error: 'invalid project token' },
+      'invalid project token',
+    ],
+  ])('surfaces the proxy refusal text for %s', async (_, status, payload, expected) => {
+    const { proxy } = fakeProxy(() => ({ status, body: payload }));
+    const result = await withRuntimeEnv({ __VOID_PROXY: proxy, ...PROXY_ENV_KEYS }, () =>
+      sendEmail({
+        from: 'a@x.dev',
+        to: 'b@y.dev',
+        subject: 's',
+        text: 't',
+        sendInDev: true,
+      }),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok && 'error' in result) {
+      expect(result.error.code).toBe('UPSTREAM_ERROR');
+      expect(result.error.message).toBe(`email: proxy returned ${status}: ${expected}`);
+      expect(result.error.cause).toEqual(payload);
+    }
+  });
+
+  it('still reports a flat error body on a 2xx as malformed', async () => {
+    const { proxy } = fakeProxy(() => ({ status: 200, body: { error: 'nope' } }));
+    const result = await withRuntimeEnv({ __VOID_PROXY: proxy, ...PROXY_ENV_KEYS }, () =>
+      sendEmail({
+        from: 'a@x.dev',
+        to: 'b@y.dev',
+        subject: 's',
+        text: 't',
+        sendInDev: true,
+      }),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok && 'error' in result) {
+      expect(result.error.code).toBe('UPSTREAM_ERROR');
+      expect(result.error.message).toBe('email: proxy returned malformed response (status 200)');
+    }
+  });
+
   it('returns UPSTREAM_ERROR when proxy responds with non-JSON', async () => {
     const proxy = {
       async fetch() {

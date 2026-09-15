@@ -293,6 +293,27 @@ app.post('/sandbox/*', async (context, next) => {
   await next();
 });
 
+// Same gate for the email group. A deployed worker on a platform without
+// the email module still holds `__VOID_PROXY` and a valid project token, so
+// an explicit-`from` `sendEmail()` reaches `/email/send` and would otherwise
+// answer with the sender-domain / send-binding configuration failures — or
+// send, if the operator left the bindings in place. `/email/internal/send`
+// is covered too: its only caller is the api's verification mail, which
+// sits behind the api's own `email` capability gate.
+app.post('/email/*', async (context, next) => {
+  if (!proxyCapabilityEnabled(context.env.PLATFORM_CAPABILITIES, 'email')) {
+    return context.json(
+      {
+        error: 'platform capability unavailable',
+        capability: 'email',
+        message: 'This Void platform does not enable email.',
+      },
+      501,
+    );
+  }
+  await next();
+});
+
 // Route groups
 app.route('/ai', ai);
 app.route('/d1', d1);

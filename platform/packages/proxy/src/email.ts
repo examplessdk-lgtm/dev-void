@@ -510,10 +510,25 @@ async function readRoutingSuspension(kv: KVNamespace, slug: string): Promise<Rou
   if (typeof parsed !== 'object' || parsed === null) {
     return { kind: 'corrupt' };
   }
+  // The marker is read by TRUTHINESS, the same test the two sibling readers
+  // apply — `packages/dispatch` (`if (routing.suspended)` → 429) and the
+  // inbound router in `email-router.ts` (truthy → reject). A falsy present
+  // value (`null`, `false`, `''`, `0`) is "not suspended" to both of them, so
+  // it is `clear` here too: no writer emits one today (an unsuspend DELETES
+  // the key), but a future clear that stamps `suspended: null` must not
+  // brick every send. A TRUTHY value that is not a string has no writer
+  // either — every producer stamps a non-empty reason string — yet both
+  // siblings refuse on it, so it is `corrupt` rather than `clear`: the send
+  // path must not be the one gate that reads a marker the edge and inbound
+  // paths are blocking on as an open door.
   const suspended = (parsed as { suspended?: unknown }).suspended;
-  return typeof suspended === 'string' && suspended.length > 0
-    ? { kind: 'suspended', reason: suspended }
-    : { kind: 'clear' };
+  if (!suspended) {
+    return { kind: 'clear' };
+  }
+  if (typeof suspended !== 'string') {
+    return { kind: 'corrupt' };
+  }
+  return { kind: 'suspended', reason: suspended };
 }
 
 /**

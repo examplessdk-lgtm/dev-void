@@ -332,6 +332,48 @@ describe('POST /email/send — sender domain', () => {
   });
 });
 
+describe('POST /email/send — platform capability', () => {
+  let kv: MockKv;
+
+  beforeEach(() => {
+    kv = happyPathKv();
+  });
+
+  it('returns the standard 501 when the platform has no email module', async () => {
+    // The bindings are configured on purpose: the gate must refuse on the
+    // capability alone, not on the missing configuration an installed
+    // platform happens to have.
+    const env = createMockEnv(kv, { PLATFORM_CAPABILITIES: JSON.stringify({ email: false }) });
+    const res = await postSend(env, await sendBody());
+    expect(res.status).toBe(501);
+    expect(await res.json()).toEqual({
+      error: 'platform capability unavailable',
+      capability: 'email',
+      message: 'This Void platform does not enable email.',
+    });
+    expect((env.SEND_EMAIL as { send: ReturnType<typeof vi.fn> }).send).not.toHaveBeenCalled();
+    expect(kv.get).not.toHaveBeenCalled();
+    expect(kv.put).not.toHaveBeenCalled();
+  });
+
+  it('still authenticates first, like the sandbox gate', async () => {
+    const env = createMockEnv(kv, { PLATFORM_CAPABILITIES: JSON.stringify({ email: false }) });
+    const res = await postSend(env, await sendBody({ aiToken: 'nope' }));
+    expect(res.status).toBe(403);
+  });
+
+  it.each([
+    ['email: true', JSON.stringify({ email: true })],
+    ['unset (hosted platform)', undefined],
+  ])('sends when the capability is %s', async (_, capabilities) => {
+    const env = createMockEnv(kv, { PLATFORM_CAPABILITIES: capabilities });
+    const res = await postSend(env, await sendBody());
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { ok: boolean }).ok).toBe(true);
+    expect((env.SEND_EMAIL as { send: ReturnType<typeof vi.fn> }).send).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('POST /email/send — suspension', () => {
   it('refuses when the routing blob carries the platform-wide suspended marker', async () => {
     const kv = happyPathKv({ acme: JSON.stringify({ projectId: 'proj_1', suspended: 'abuse' }) });
@@ -383,6 +425,60 @@ describe('POST /email/send — suspension', () => {
       consoleError.mockRestore();
     }
   });
+
+  // A truthy marker that is not a string has no writer — every producer
+  // stamps a non-empty reason string or deletes the key — but the two
+  // sibling readers refuse on it by truthiness: dispatch answers
+  // `if (routing.suspended)` with a 429 and the inbound router rejects. The
+  // send path must not be the one gate that reads the same value as "clear",
+  // so it fails closed exactly like an unparseable blob.
+  it.each([
+    ['true', true],
+    ['a number', 42],
+    ['an object', {}],
+    ['an array', ['x']],
+  ])('fails closed with 502 when the suspended marker is %s', async (_kind, suspended) => {
+    const kv = happyPathKv({ acme: JSON.stringify({ projectId: 'proj_1', suspended }) });
+    const sender = createSender();
+    const env = createMockEnv(kv, { SEND_EMAIL: sender.binding });
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const res = await postSend(env, await sendBody());
+      expect(res.status).toBe(502);
+      const body = await readSend(res);
+      expect(body.error?.code).toBe('UPSTREAM_ERROR');
+      expect(body.error?.message).toContain('malformed');
+      expect(consoleError).toHaveBeenCalled();
+      expect(sender.calls).toHaveLength(0);
+      expect(kv.put).not.toHaveBeenCalled();
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  // A falsy present marker is "not suspended" to both sibling readers, and
+  // no writer produces one today (an unsuspend DELETES the key). The send
+  // path stays aligned so a future clear that stamps `suspended: null`
+  // cannot brick every send. `undefined` is the absent key: `JSON.stringify`
+  // drops it, so that row pins the no-marker blob through the same table.
+  it.each([
+    ['absent', undefined],
+    ['null', null],
+    ['false', false],
+    ['an empty string', ''],
+    ['zero', 0],
+  ])(
+    'still sends when the suspended marker is %s (falsy to every reader)',
+    async (_kind, suspended) => {
+      const kv = happyPathKv({ acme: JSON.stringify({ projectId: 'proj_1', suspended }) });
+      const sender = createSender();
+      const env = createMockEnv(kv, { SEND_EMAIL: sender.binding });
+      const res = await postSend(env, await sendBody());
+      expect(res.status).toBe(200);
+      expect((await readSend(res)).ok).toBe(true);
+      expect(sender.calls).toHaveLength(1);
+    },
+  );
 
   it('refuses when the email-only kill-switch is set', async () => {
     const kv = happyPathKv({ 'email-suspended:proj_1': '1' });
@@ -489,6 +585,16 @@ describe('POST /email/internal/send', () => {
     const env = createMockEnv(createMockKv(), { EMAIL_SENDER_DOMAIN: '' });
     const res = await postInternal(env, await internalBody(PROD_DOMAIN));
     expect(res.status).toBe(502);
+  });
+
+  it('is behind the same email capability gate as /email/send', async () => {
+    const env = createMockEnv(createMockKv(), {
+      PLATFORM_CAPABILITIES: JSON.stringify({ email: false }),
+    });
+    const res = await postInternal(env, await internalBody(PROD_DOMAIN));
+    expect(res.status).toBe(501);
+    expect(await res.json()).toMatchObject({ capability: 'email' });
+    expect((env.SEND_EMAIL as { send: ReturnType<typeof vi.fn> }).send).not.toHaveBeenCalled();
   });
 });
 
