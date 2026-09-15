@@ -303,6 +303,7 @@ email/
   support.ts                — handles support@<your-domain>
   billing.ts                — handles billing@<your-domain>
   support+[ticket].ts       — handles support+ticket-123@... → info.params.ticket = "ticket-123"
+  support+vip.ts            — handles exactly support+vip@..., ahead of support+[ticket].ts
   [user].ts                 — dynamic local-part   → info.params.user
   [user]+[tag].ts           — dynamic + subaddress → info.params.user, info.params.tag
   _default.ts               — fallback when no per-address pattern matches
@@ -310,11 +311,15 @@ email/
 
 Files are matched against the local-part of the `To` address (the portion before `@`), case-insensitive. **Match precedence (most specific wins):**
 
-1. `support+[ticket].ts` (static + tag)
-2. `support.ts` (static)
-3. `[user]+[tag].ts` (dynamic + tag)
-4. `[user].ts` (dynamic)
-5. `_default.ts` (fallback)
+1. `support+vip.ts` (static + literal tag)
+2. `support+[ticket].ts` (static + captured tag)
+3. `support.ts` (static)
+4. `[user]+vip.ts` (dynamic + literal tag)
+5. `[user]+[tag].ts` (dynamic + captured tag)
+6. `[user].ts` (dynamic)
+7. `_default.ts` (fallback)
+
+The first pattern that matches wins. Within a shape, a literal tag beats a captured tag — `support+vip@` reaches `support+vip.ts`, and every other `support+…@` reaches `support+[ticket].ts`. Handlers of the same shape are tried alphabetically.
 
 If nothing matches and there's no `_default.ts`, control returns to Cloudflare and the sender receives a non-delivery report. Nested folders under `email/` are ignored — the recipient is a flat string, not a path.
 

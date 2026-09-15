@@ -180,6 +180,56 @@ describe('parseEmailArgs', () => {
     );
   });
 
+  // An empty slug is not nullish: `runEmailCommand` used to keep `''` over `VOID_PROJECT`
+  // and then fall through to the linked project, so `--project=` (or `--project "$VAR"`
+  // with the variable unset) silently mutated the linked project's allowlist.
+  it('errors on --project with an empty or whitespace-only value, same message as a bare flag', () => {
+    const message = 'email: --project requires a value (a project name).';
+    expect(() => parseEmailArgs(['disallow', 'a@x.dev', '--project='])).toThrow(message);
+    expect(() => parseEmailArgs(['disallow', 'a@x.dev', '--project', ''])).toThrow(message);
+    expect(() => parseEmailArgs(['disallow', 'a@x.dev', '--project', '   '])).toThrow(message);
+    expect(() => parseEmailArgs(['allow', 'a@x.dev', '--project=  '])).toThrow(message);
+  });
+
+  // Same rule as `void deploy` and this file's `--platform`: the last value never wins,
+  // so a wrapper's override and a caller's cannot silently disagree about the target.
+  it('errors when --project is repeated, even if the final value is valid', () => {
+    const message = 'email: --project can only be specified once.';
+    expect(() =>
+      parseEmailArgs(['disallow', 'a@x.dev', '--project', 'a', '--project', 'b']),
+    ).toThrow(message);
+    expect(() => parseEmailArgs(['allow', 'a@x.dev', '--project=a', '--project=a'])).toThrow(
+      message,
+    );
+    expect(() => parseEmailArgs(['destinations', '--project', 'a', '--project=b'])).toThrow(
+      message,
+    );
+  });
+
+  // The parser is shared, so the read-only subcommands reject the same shapes — they are
+  // exactly the ones that never validate a positional and used to run against the wrong
+  // project without a word.
+  it('rejects an empty or repeated --project on the read-only subcommands too', () => {
+    for (const sub of ['usage', 'logs']) {
+      expect(() => parseEmailArgs([sub, '--project='])).toThrow(
+        'email: --project requires a value (a project name).',
+      );
+      expect(() => parseEmailArgs([sub, '--project', 'a', '--project', 'b'])).toThrow(
+        'email: --project can only be specified once.',
+      );
+    }
+    // A single, non-empty value is still accepted as before.
+    expect(parseEmailArgs(['usage', '--project', 'x'])).toMatchObject({
+      subcommand: 'usage',
+      projectSlug: 'x',
+    });
+    expect(parseEmailArgs(['logs', '--limit', '3', '--project=x'])).toMatchObject({
+      subcommand: 'logs',
+      projectSlug: 'x',
+      limit: 3,
+    });
+  });
+
   it('errors on --limit without a value', () => {
     expect(() => parseEmailArgs(['logs', '--limit'])).toThrow(
       'email: --limit requires a value (a positive integer).',

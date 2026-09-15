@@ -16,6 +16,9 @@
  *
  * Match precedence (most specific wins):
  *   static + tag → static → dynamic + tag → dynamic → _default
+ * Within a kind a literal tag beats a captured tag (`support+vip` before
+ * `support+[tag]`, `[user]+vip` before `[user]+[tag]`); the same shape sorts
+ * alphabetically. See `compareEmailRoutes`.
  *
  * Local-part matching is case-insensitive: the compiled patterns carry the `i`
  * flag and run against the recipient in its original case, so a captured tag
@@ -138,17 +141,10 @@ export function compileEmailPattern(basename: string): CompiledEmailPattern | nu
   };
 }
 
-const SPECIFICITY: Record<EmailPatternKind, number> = {
-  static: 0,
-  'static-tag': 1,
-  dynamic: 2,
-  'dynamic-tag': 3,
-};
-
 /**
- * Final dispatch order: most specific first. Within a specificity bucket,
- * static-tag beats static (more constraints), dynamic-tag beats dynamic.
- * The order below matches the precedence list in the file header.
+ * Kind order: most specific first. static-tag beats static (more
+ * constraints), dynamic-tag beats dynamic. Matches the precedence list in
+ * the file header.
  */
 const DISPATCH_ORDER: Record<EmailPatternKind, number> = {
   'static-tag': 0,
@@ -156,6 +152,40 @@ const DISPATCH_ORDER: Record<EmailPatternKind, number> = {
   'dynamic-tag': 2,
   dynamic: 3,
 };
+
+/** The two fields the dispatch order is computed from. */
+export interface EmailRouteOrderKey {
+  /** Handler name as written, e.g. "support+[ticket]" (a basename or a harness route key). */
+  address: string;
+  pattern: CompiledEmailPattern;
+}
+
+/**
+ * The ONE dispatch comparator. The generated `__emailHandler` and the
+ * `createInboundTestHarness` route table both return on the first pattern
+ * that matches, so whatever sorts first owns every address it matches.
+ *
+ *   1. kind, per `DISPATCH_ORDER`
+ *   2. fewer captures first — `support+vip` and `support+[tag]` are both
+ *      `static-tag` and both match `support+vip@`; the literal tag must be
+ *      tried first or the exact handler is dead code. Same for
+ *      `[user]+vip` over `[user]+[tag]`.
+ *   3. alphabetical, so the table is deterministic across filesystems.
+ *
+ * Two patterns with the same regex source share a kind and a capture count,
+ * so the collision check below can still name the alphabetically-first one.
+ */
+export function compareEmailRoutes(a: EmailRouteOrderKey, b: EmailRouteOrderKey): number {
+  const kind = DISPATCH_ORDER[a.pattern.kind] - DISPATCH_ORDER[b.pattern.kind];
+  if (kind !== 0) {
+    return kind;
+  }
+  const captures = a.pattern.paramNames.length - b.pattern.paramNames.length;
+  if (captures !== 0) {
+    return captures;
+  }
+  return a.address.localeCompare(b.address);
+}
 
 function parseEmailFiles(files: Array<string>): {
   addresses: Array<EmailHandlerDefinition>;
@@ -199,15 +229,7 @@ function parseEmailFiles(files: Array<string>): {
     });
   }
 
-  addresses.sort((a, b) => {
-    const da = DISPATCH_ORDER[a.pattern.kind];
-    const db = DISPATCH_ORDER[b.pattern.kind];
-    if (da !== db) {
-      return da - db;
-    }
-    // Same kind — keep deterministic alphabetical order.
-    return a.address.localeCompare(b.address);
-  });
+  addresses.sort(compareEmailRoutes);
 
   // Two handlers can compile to the same regex source — the obvious case
   // is `[user].ts` and `[other].ts` both producing `^([^+@]+)$`. After
@@ -254,6 +276,3 @@ export function scanEmailHandlersSync(root: string, emailDir = 'email'): EmailHa
 export function hasEmailHandlers(scan: EmailHandlersScan): boolean {
   return scan.addresses.length > 0 || Boolean(scan.defaultHandler);
 }
-
-// SPECIFICITY is exported for tests/tooling that want to inspect ordering.
-export { SPECIFICITY };

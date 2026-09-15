@@ -1561,8 +1561,10 @@ window.__vite_plugin_react_preamble_installed__ = true;
   }
 
   // Inbound email — generate __emailHandler that dispatches by recipient
-  // local-part. Patterns are tried in specificity order (static-tag > static
-  // > dynamic-tag > dynamic); on match, captured groups become `info.params`
+  // local-part. Patterns are tried in the order the scanner sorted them
+  // (`compareEmailRoutes` in router/email.ts: static-tag > static >
+  // dynamic-tag > dynamic, a literal tag before a captured one, then
+  // alphabetical) and the first match wins; captured groups become `info.params`
   // and the handler is invoked with (message, env, ctx, info). Falls through
   // to email/_default.ts when no per-address pattern matches.
   //

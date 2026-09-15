@@ -130,6 +130,56 @@ describe('scanEmailHandlers', () => {
     expect(scan.addresses[2].pattern.paramNames).toEqual(['user', 'tag']);
   });
 
+  it('sorts a literal tag ahead of a captured tag of the same kind', async () => {
+    // Both compile to `static-tag`, both match `support+vip@`, and the
+    // dispatcher returns on the first hit. Alphabetically `[` sorts before
+    // `v`, which used to put the capture first and leave the exact handler
+    // dead for every delivery.
+    const root = setupRoot({
+      'email/support+[tag].ts': 'export default () => {}',
+      'email/support+vip.ts': 'export default () => {}',
+    });
+    const scan = await scanEmailHandlers(root);
+    expect(scan.addresses.map((a) => a.address)).toEqual(['support+vip', 'support+[tag]']);
+    expect(scan.addresses.map((a) => a.pattern.kind)).toEqual(['static-tag', 'static-tag']);
+  });
+
+  it('sorts [user]+vip ahead of [user]+[tag]', async () => {
+    const root = setupRoot({
+      'email/[user]+[tag].ts': 'export default () => {}',
+      'email/[user]+vip.ts': 'export default () => {}',
+    });
+    const scan = await scanEmailHandlers(root);
+    expect(scan.addresses.map((a) => a.address)).toEqual(['[user]+vip', '[user]+[tag]']);
+    expect(scan.addresses.map((a) => a.pattern.kind)).toEqual(['dynamic-tag', 'dynamic-tag']);
+  });
+
+  it('pins the full six-shape dispatch order', async () => {
+    const root = setupRoot({
+      'email/[user].ts': 'export default () => {}',
+      'email/[user]+[tag].ts': 'export default () => {}',
+      'email/[user]+vip.ts': 'export default () => {}',
+      'email/support.ts': 'export default () => {}',
+      'email/support+[tag].ts': 'export default () => {}',
+      'email/support+vip.ts': 'export default () => {}',
+    });
+    const scan = await scanEmailHandlers(root);
+    expect(scan.addresses.map((a) => a.address)).toEqual([
+      'support+vip',
+      'support+[tag]',
+      'support',
+      '[user]+vip',
+      '[user]+[tag]',
+      '[user]',
+    ]);
+    // The generated dispatcher returns on the first regex that matches, so
+    // the exact handler must be the first one that matches `support+vip`.
+    const first = scan.addresses.find((a) =>
+      new RegExp(a.pattern.regexSource, 'i').test('support+vip'),
+    );
+    expect(first?.address).toBe('support+vip');
+  });
+
   it('skips files with invalid pattern shapes', async () => {
     const root = setupRoot({
       'email/support+ticket+extra.ts': 'export default () => {}', // two `+`
@@ -746,6 +796,56 @@ describe('generated __emailHandler dispatch (behavioural)', () => {
     expect(rejections).toHaveLength(1);
     expect(rejections[0]).toContain('no handler matched recipient');
   });
+
+  it('runs the exact-tag handler for support+vip@ when a capturing sibling exists (real scan)', async () => {
+    // Scanner → codegen → dispatch, end to end. The hand-built scans above
+    // fix their own order; this one takes the order `scanEmailHandlers`
+    // produces, which is the only thing the generated loop relies on.
+    const root = setupRoot({
+      'email/[user].ts': 'export default () => {}',
+      'email/[user]+[tag].ts': 'export default () => {}',
+      'email/[user]+vip.ts': 'export default () => {}',
+      'email/support.ts': 'export default () => {}',
+      'email/support+[tag].ts': 'export default () => {}',
+      'email/support+vip.ts': 'export default () => {}',
+    });
+    const scan = await scanEmailHandlers(root);
+    const hits: Array<string> = [];
+    const dispatch = buildEmailDispatcher(compile(scan), {
+      '/e/[user].ts': { default: () => hits.push('[user]') },
+      '/e/[user]+[tag].ts': { default: () => hits.push('[user]+[tag]') },
+      '/e/[user]+vip.ts': { default: () => hits.push('[user]+vip') },
+      '/e/support.ts': { default: () => hits.push('support') },
+      '/e/support+[tag].ts': { default: () => hits.push('support+[tag]') },
+      '/e/support+vip.ts': { default: () => hits.push('support+vip') },
+    });
+
+    const { message } = createMessageProxy(
+      {
+        from: 'sender@example.com',
+        to: 'acme+support+vip@mail.void.cloud',
+        headers: {},
+        raw: new Uint8Array(),
+        rawSize: 0,
+      },
+      { slug: 'acme' },
+    );
+    await dispatch(message, {}, {}, { slug: 'acme' });
+    expect(hits).toEqual(['support+vip']);
+
+    const { message: other } = createMessageProxy(
+      {
+        from: 'sender@example.com',
+        to: 'acme+support+T-42@mail.void.cloud',
+        headers: {},
+        raw: new Uint8Array(),
+        rawSize: 0,
+      },
+      { slug: 'acme' },
+    );
+    await dispatch(other, {}, {}, { slug: 'acme' });
+    expect(hits).toEqual(['support+vip', 'support+[tag]']);
+  });
 });
 
 describe('compileWorkerEntry (email)', () => {
@@ -836,6 +936,44 @@ describe('createInboundTestHarness', () => {
 
     await harness.deliver({ from: 'u@x.dev', to: 'myslug+random@app.dev' });
     expect(dynamic).toHaveBeenCalled();
+  });
+
+  it('prefers an exact tag over a captured tag of the same shape', async () => {
+    const exact = vi.fn(async () => {});
+    const captured = vi.fn(async () => {});
+    // Keys are declared capture-first on purpose: object order must not
+    // decide, and neither may the alphabetical `[` < `v` tie-break.
+    const harness = createInboundTestHarness({
+      routes: { 'support+[tag]': captured, 'support+vip': exact },
+    });
+
+    const vip = await harness.deliver({ from: 'u@x.dev', to: 'myslug+support+vip@app.dev' });
+    expect(vip.handler).toBe('support+vip');
+    expect(vip.params).toEqual({});
+    expect(exact).toHaveBeenCalledTimes(1);
+    expect(captured).not.toHaveBeenCalled();
+
+    const other = await harness.deliver({ from: 'u@x.dev', to: 'myslug+support+T-42@app.dev' });
+    expect(other.handler).toBe('support+[tag]');
+    expect(other.params).toEqual({ tag: 'T-42' });
+    expect(exact).toHaveBeenCalledTimes(1);
+  });
+
+  it('prefers [user]+vip over [user]+[tag]', async () => {
+    const exact = vi.fn(async () => {});
+    const captured = vi.fn(async () => {});
+    const harness = createInboundTestHarness({
+      routes: { '[user]+[tag]': captured, '[user]+vip': exact },
+    });
+
+    const vip = await harness.deliver({ from: 'u@x.dev', to: 'myslug+alice+vip@app.dev' });
+    expect(vip.handler).toBe('[user]+vip');
+    expect(vip.params).toEqual({ user: 'alice' });
+    expect(captured).not.toHaveBeenCalled();
+
+    const other = await harness.deliver({ from: 'u@x.dev', to: 'myslug+alice+welcome@app.dev' });
+    expect(other.handler).toBe('[user]+[tag]');
+    expect(other.params).toEqual({ user: 'alice', tag: 'welcome' });
   });
 
   it('falls through to _default when no per-address pattern matches', async () => {

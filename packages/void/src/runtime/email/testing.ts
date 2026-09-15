@@ -29,7 +29,11 @@
  *   expect(result.params).toEqual({ ticket: "abc-1" });
  */
 
-import { compileEmailPattern, type CompiledEmailPattern } from '../../router/email.ts';
+import {
+  compareEmailRoutes,
+  compileEmailPattern,
+  type CompiledEmailPattern,
+} from '../../router/email.ts';
 import { registerEmailSink, type CapturedMessage } from './dev-inbox.ts';
 import {
   createMessageProxy,
@@ -143,17 +147,11 @@ export interface InboundTestHarnessOptions {
 }
 
 interface CompiledRoute {
-  key: string;
+  /** The route key as written; named `address` so the route sorts through `compareEmailRoutes`. */
+  address: string;
   pattern: CompiledEmailPattern;
   handler: EmailHandler;
 }
-
-const DISPATCH_PRIORITY = {
-  'static-tag': 0,
-  static: 1,
-  'dynamic-tag': 2,
-  dynamic: 3,
-} as const;
 
 function compileRoutes(routes: Record<string, EmailHandler>): {
   compiled: Array<CompiledRoute>;
@@ -172,16 +170,11 @@ function compileRoutes(routes: Record<string, EmailHandler>): {
         `createInboundTestHarness: route key ${JSON.stringify(key)} is not a valid email pattern. Use shapes like "support", "support+[ticket]", "[user]", "[user]+[tag]", or the reserved key "_default".`,
       );
     }
-    compiled.push({ key, pattern, handler });
+    compiled.push({ address: key, pattern, handler });
   }
-  compiled.sort((a, b) => {
-    const pa = DISPATCH_PRIORITY[a.pattern.kind];
-    const pb = DISPATCH_PRIORITY[b.pattern.kind];
-    if (pa !== pb) {
-      return pa - pb;
-    }
-    return a.key.localeCompare(b.key);
-  });
+  // The scanner's own comparator (`router/email.ts`), so the harness cannot
+  // drift from the order the generated dispatcher tries patterns in.
+  compiled.sort(compareEmailRoutes);
   return { compiled, defaultHandler };
 }
 
@@ -447,7 +440,7 @@ export function createInboundTestHarness(opts: InboundTestHarnessOptions): Inbou
         }
         const info: EmailHandlerInfo = { params };
         await route.handler(message, env, ctx, info);
-        return { handler: route.key, params };
+        return { handler: route.address, params };
       }
       if (defaultHandler) {
         const info: EmailHandlerInfo = { params: {} };

@@ -77,10 +77,13 @@ export function parseEmailArgs(args: Array<string>): EmailArgs {
     );
   }
 
-  let projectSlug: string | undefined;
   let limit: number | undefined;
   // Raw values, one per occurrence, so a repeated flag is reported as repeated even when
   // its final value would have been accepted — the same precedence `void deploy` keeps.
+  // `--project` is collected the same way: the last value used to win silently, so a
+  // wrapper's override and a caller's could disagree and `void email disallow` would
+  // mutate whichever project came last.
+  const projectValues: Array<string> = [];
   const platformValues: Array<string> = [];
   const backendValues: Array<string> = [];
   const positional: Array<string> = [];
@@ -93,10 +96,13 @@ export function parseEmailArgs(args: Array<string>): EmailArgs {
     // `void email logs --limit` ignored the limit instead of reporting it missing.
     if (rest[i] === '--project' || rest[i]?.startsWith('--project=')) {
       const { value, next } = readFlagValue(rest, i, '--project');
-      if (value === undefined) {
+      // `--project=` and `--project ''` (an empty shell variable) read as a bare flag:
+      // an empty slug is not nullish, so `runEmailCommand` would otherwise skip
+      // `VOID_PROJECT` and act on the linked project as if no override was given.
+      if (value === undefined || value.trim() === '') {
         throw new Error('email: --project requires a value (a project name).');
       }
-      projectSlug = value;
+      projectValues.push(value);
       i = next;
     } else if (rest[i] === '--limit' || rest[i]?.startsWith('--limit=')) {
       const { value: raw, next } = readFlagValue(rest, i, '--limit');
@@ -127,6 +133,12 @@ export function parseEmailArgs(args: Array<string>): EmailArgs {
       positional.push(rest[i]);
     }
   }
+
+  // Same rule as `void deploy`: `--project` at most once.
+  if (projectValues.length > 1) {
+    throw new Error('email: --project can only be specified once.');
+  }
+  const projectSlug = projectValues[0];
 
   // `--platform <cloudflare|void>` is canonical; `--backend cloudflare` is the legacy
   // alias `void deploy` also keeps. Same rules as deploy: each at most once, never both.
