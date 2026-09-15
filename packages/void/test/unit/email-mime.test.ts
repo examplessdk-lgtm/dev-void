@@ -2018,6 +2018,130 @@ describe('buildMime', () => {
     expect(decodeEncodedWords(unfoldHeader(text, 'From'))).toBe('"😀\\ ï <a@x.dev>');
   });
 
+  describe('a period in a display name', () => {
+    // `.` is one of RFC 5322 §3.2.3's `specials`, so it is not `atext` and a
+    // name containing one is not a `phrase` of atoms: `Dr. Smith <a@x.dev>`
+    // parses only as `obs-phrase` (§4.1), which §4 says MUST NOT be
+    // generated. `RFC5322_SPECIALS` used to omit it, so every dotted name
+    // went out unquoted; a strict receiver (Python's `email` parser flags
+    // "period in 'phrase'", and `.` alone as an invalid phrase) sees
+    // obsolete syntax on an otherwise valid message.
+    const dotted: Array<[string, string]> = [
+      ['Dr. Smith', '"Dr. Smith"'],
+      ['J. R. R. Tolkien', '"J. R. R. Tolkien"'],
+      ['Smith.', '"Smith."'],
+      ['.', '"."'],
+      ['Acme Inc.', '"Acme Inc."'],
+    ];
+
+    it('renders the name as one quoted-string, in From and in an address list', async () => {
+      for (const [name, rendered] of dotted) {
+        const { text } = await build({
+          from: { email: 'a@x.dev', name },
+          to: [{ email: 'b@y.dev', name }, 'c@z.dev'],
+          subject: 's',
+          text: 'hi',
+        });
+        expect(unfoldHeader(text, 'From')).toBe(`${rendered} <a@x.dev>`);
+        expect(unfoldHeader(text, 'To')).toBe(`${rendered} <b@y.dev>, c@z.dev`);
+      }
+    });
+
+    it('renders the string form the same way, whether or not the caller quoted it', async () => {
+      for (const [name, rendered] of dotted) {
+        const bare = await build({
+          from: `${name} <a@x.dev>`,
+          to: 'b@y.dev',
+          subject: 's',
+          text: 't',
+        });
+        const quoted = await build({
+          from: `${rendered} <a@x.dev>`,
+          to: 'b@y.dev',
+          subject: 's',
+          text: 't',
+        });
+        expect(unfoldHeader(bare.text, 'From')).toBe(`${rendered} <a@x.dev>`);
+        expect(unfoldHeader(quoted.text, 'From')).toBe(`${rendered} <a@x.dev>`);
+      }
+    });
+
+    it('round-trips through postal-mime as the original name', async () => {
+      const { default: PostalMime } = await import('postal-mime');
+      for (const [name] of dotted) {
+        const { raw } = await build({
+          from: { email: 'a@x.dev', name },
+          to: { email: 'b@y.dev', name },
+          subject: 's',
+          text: 'hi',
+        });
+        const parsed = await PostalMime.parse(raw);
+        expect(parsed.from).toEqual({ address: 'a@x.dev', name });
+        expect(parsed.to).toEqual([{ address: 'b@y.dev', name }]);
+      }
+    });
+
+    it('still escapes a quote or backslash beside the period', async () => {
+      // The period only selects the quoted-string path; inside it `"` and
+      // `\` are quoted-pairs as before, and the period itself is `qtext`.
+      const { default: PostalMime } = await import('postal-mime');
+      const name = 'Dr. "Doc" Smith \\ Jr.';
+      const { raw, text } = await build({
+        from: { email: 'a@x.dev', name },
+        to: 'b@y.dev',
+        subject: 's',
+        text: 'hi',
+      });
+      expect(unfoldHeader(text, 'From')).toBe('"Dr. \\"Doc\\" Smith \\\\ Jr." <a@x.dev>');
+      expect((await PostalMime.parse(raw)).from).toEqual({ address: 'a@x.dev', name });
+    });
+
+    it('leaves a non-ASCII dotted name to the encoded-word path', async () => {
+      // `ASCII_PRINTABLE` is tested first: an encoded-word carries the
+      // period as base64, so quoting it as well would put the quotes inside
+      // the encoded text, not around it.
+      const { text } = await build({
+        from: { email: 'a@x.dev', name: 'Dr. Müller' },
+        to: 'b@y.dev',
+        subject: 's',
+        text: 'hi',
+      });
+      const from = unfoldHeader(text, 'From');
+      expect(from).toMatch(/^=\?UTF-8\?B\?[A-Za-z0-9+/=]+\?= <a@x\.dev>$/);
+      expect(decodeEncodedWords(from)).toBe('Dr. Müller <a@x.dev>');
+    });
+
+    it('is now bounded by the quoted-string line guard, at the same edge as any other special', async () => {
+      // A quoted-string is one token `foldHeader` never splits, so a
+      // dotted name is now subject to the ` "name"` line bound in
+      // `validateAddressParts`: 995 characters fit a 998-octet line exactly
+      // (the period is `qtext`, so nothing is escaped and the bound is
+      // exact), 996 do not. Before the fix the same 996-character name
+      // rendered unquoted and folded at its spaces.
+      const fits = `Dr. ${'a'.repeat(998 - 3 - 4)}`;
+      expect(fits.length).toBe(995);
+      const { text } = await build({
+        from: 'a@x.dev',
+        to: { email: 'b@y.dev', name: fits },
+        subject: 's',
+        text: 't',
+      });
+      const lines = headerLines(text, 'To');
+      expect(lines).toEqual(['To:', ` "${fits}"`, ' <b@y.dev>']);
+      expect(Math.max(...lines.map((l) => l.length))).toBe(998);
+      await expect(
+        build({
+          from: 'a@x.dev',
+          to: { email: 'b@y.dev', name: `${fits}b` },
+          subject: 's',
+          text: 't',
+        }),
+      ).rejects.toThrow(
+        /to: display name is 996 characters and must be quoted, which cannot be folded/,
+      );
+    });
+  });
+
   it('rejects bare addr-spec values containing a comma (header-injection guard)', async () => {
     // Without this guard, `to: "victim@a.com,attacker@b.com"` slips
     // through the unquoted addr-spec path and renders as two recipients.

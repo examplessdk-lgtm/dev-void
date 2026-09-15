@@ -913,13 +913,26 @@ function encodeWord(text: string): string {
   return words.join(' ');
 }
 
-// RFC 5322 specials — names containing any of these MUST be quoted as a
-// phrase. The earlier code path put this check inside the ATOM_SAFE
-// branch, but ATOM_SAFE already excluded these specials, so the check was
-// unreachable for `,` `(` `)` `<` `>` etc. — the fall-through hit
-// encodeWord which short-circuits on ASCII and emitted unquoted, letting
-// a comma in a display name split the address list.
-const RFC5322_SPECIALS = /[",()<>:;@[\]\\]/;
+/**
+ * RFC 5322 §3.2.3, verbatim:
+ *
+ *     specials = "(" / ")" / "<" / ">" / "[" / "]" / ":" / ";" / "@" /
+ *                "\" / "," / "." / DQUOTE
+ *
+ * A display name is a §3.2.5 `phrase = 1*word`, `word = atom /
+ * quoted-string`, and `atext` is everything printable EXCEPT these, so an
+ * ASCII name containing any of them must be rendered as one quoted-string.
+ * The class below lists the thirteen in the RFC's order so it can be checked
+ * against the production by eye. This check has been wrong twice: it once
+ * sat inside a branch that had already excluded every special, so it was
+ * unreachable and a comma in a name split the address list; then the list
+ * itself lacked `.`, so `Dr. Smith <a@x.dev>` went out unquoted. That is
+ * `obs-phrase` (§4.1, `word *(word / "." / CFWS)`), which §4 says MUST NOT
+ * be generated, and a strict receiver flags it as obsolete syntax (Python's
+ * `email` parser: "period in 'phrase'"). Every conforming generator —
+ * Python's `email.headerregistry.Address`, for one — emits `"Dr. Smith"`.
+ */
+const RFC5322_SPECIALS = /[()<>[\]:;@\\,."]/;
 
 function formatAddress(addr: { email: string; name?: string }): string {
   if (!addr.name) {

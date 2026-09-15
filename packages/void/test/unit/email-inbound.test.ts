@@ -2600,6 +2600,42 @@ describe('buildReplyMessage', () => {
     expect(built.to).toBe('someone@else.dev');
     expect(built.subject).toBe('Custom subject');
   });
+
+  it('renders a dotted sender name, handed back as `to`, as one quoted-string', async () => {
+    // The default `to` is the bare envelope sender, so no display name is
+    // formatted unless the handler passes one — typically the parsed
+    // `From`. postal-mime gives the name as its raw text (`Dr. Smith`, the
+    // quotes undone), and `buildMime` quotes it again on the way out: `.`
+    // is an RFC 5322 special, so the name is not a phrase of atoms.
+    const raw = new TextEncoder().encode(
+      'From: "Dr. Smith" <user@example.com>\r\n' +
+        'To: support@app.dev\r\n' +
+        'Subject: Hi\r\n\r\nhello\r\n',
+    );
+    const message = {
+      from: 'user@example.com',
+      to: 'support@app.dev',
+      headers: new Headers({ Subject: 'Hi' }),
+      raw: new ReadableStream({
+        start(controller) {
+          controller.enqueue(raw);
+          controller.close();
+        },
+      }),
+      rawSize: raw.length,
+    } as unknown as ForwardableEmailMessage;
+    const parsed = await parseEmail(message);
+    expect(parsed.from).toEqual({ address: 'user@example.com', name: 'Dr. Smith' });
+    const sender = parsed.from as { address: string; name: string };
+    const built = await buildReplyMessage(message, {
+      from: 'override@app.dev',
+      to: { email: sender.address, name: sender.name },
+      text: 'ack',
+    });
+    expect(built.to).toBe('user@example.com');
+    const text = new TextDecoder().decode(built.raw);
+    expect(text).toContain('To: "Dr. Smith" <user@example.com>\r\n');
+  });
 });
 
 // ---------------------------------------------------------------------------
