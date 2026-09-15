@@ -128,7 +128,7 @@ await sendEmail({
 });
 ```
 
-`contentType` is inferred from the filename extension when omitted; when given, it must be a valid media type (`type/subtype`, optionally followed by `; attribute=value` parameters — no `name`, which is set from `filename`), or `sendEmail` returns `MIME_ERROR`. Total message size (after base64 expansion) is capped at 10 MB to match Cloudflare's limit; oversize payloads return `MIME_ERROR` instead of failing upstream.
+`contentType` is inferred from the filename extension when omitted; when given, it must be a valid media type (`type/subtype`, optionally followed by `; attribute=value` parameters — no `name`, which is set from `filename`), or `sendEmail` returns `MIME_ERROR`. `contentId` is the identifier the HTML references as `cid:<id>`: letters, digits, the RFC 5322 `atext` symbols and dots, optionally with an `@domain` part and optionally in one pair of angle brackets (`logo`, `logo@acme.dev` and `<logo@acme.dev>` all render as `Content-ID: <…>`); anything else — whitespace, quotes, parentheses, a stray `<` or `>`, or an empty string — returns `MIME_ERROR`. Total message size (after base64 expansion) is capped at 10 MB to match Cloudflare's limit; oversize payloads return `MIME_ERROR` instead of failing upstream.
 
 ## Result and errors
 

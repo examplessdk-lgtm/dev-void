@@ -1338,6 +1338,165 @@ describe('normalizeEmail', () => {
     });
   });
 
+  describe('Content-ID syntax of an attachment', () => {
+    // `rejectControls` answered only for CTLs, and `buildAttachmentPart`
+    // writes the Content-ID verbatim, adding `<` `>` unless the value
+    // already starts with `<`: `logo other` rendered `<logo other>`,
+    // `<logo` rendered `<logo` and `logo>` rendered `<logo>>` — captured as
+    // a success under `void dev` and by the harness, and left for the
+    // receiver to refuse or to fail the html's `cid:` reference against.
+    // The grammar is RFC 5322 §3.6.4 `msg-id`, read as a generator, with
+    // the `@` side and the brackets optional (RFC 2392 §2 resolves `cid:x`
+    // against `<x>`, and the builder has always bracketed a bare id); the
+    // message names the rule and never echoes the value.
+    const base = { from: 'a@x.dev', to: 'b@y.dev', subject: 's', html: '<img src="cid:logo">' };
+    const SYNTAX =
+      'attachment contentId is not a valid Content-ID (RFC 5322 §3.6.4 msg-id: an identifier of atext, "." and "@", optionally in one pair of angle brackets).';
+
+    async function refused(contentId: string): Promise<MimeError> {
+      let error: unknown;
+      try {
+        await normalizeEmail({
+          ...base,
+          attachments: [{ filename: 'logo.png', content: 'x', contentId }],
+        });
+      } catch (e) {
+        error = e;
+      }
+      expect(error).toBeInstanceOf(MimeError);
+      expect((error as MimeError).code).toBe('MIME_ERROR');
+      return error as MimeError;
+    }
+
+    /** The attachment part's rendered `Content-ID` line. */
+    async function contentIdLine(contentId: string): Promise<string | undefined> {
+      const { text } = await build({
+        ...base,
+        attachments: [{ filename: 'logo.png', content: 'x', contentId }],
+      });
+      return text.split('\r\n').find((line) => line.startsWith('Content-ID:'));
+    }
+
+    it('refuses one that does not parse, naming the rule rather than echoing it', async () => {
+      const invalid = [
+        'logo other', // WSP: rendered `<logo other>`
+        '<logo', // unterminated: rendered `<logo`
+        'logo>', // rendered `<logo>>`
+        '<logo>>', //
+        '<<logo>', //
+        '<logo>x', // text after the closing bracket
+        '<>', // brackets around nothing
+        '<', //
+        '>', //
+        ' logo', // leading WSP
+        'logo ', // trailing WSP
+        'lo\tgo', // HTAB is WSP too (`rejectControls` lets it through)
+        'lo"go', // `"` is not atext
+        'lo(go)', // nor `(` `)`: an RFC 822 comment is refused, not stripped
+        'lo,go', //
+        'lo;go', //
+        'lo:go', //
+        'lo\\go', //
+        'a@[127.0.0.1]', // `no-fold-literal` is left out
+        'a..b', // `dot-atom-text` is 1*atext *("." 1*atext): no doubled dot
+        '.a', // no leading dot
+        'a.', // no trailing dot
+        'a.@b', // nor on either side of the `@`
+        'a@.b', //
+        'a@b@c', // one `@` at most
+        '@b', // an `@` owes both sides
+        'a@', //
+        'lögo', // atext is US-ASCII
+        '', // used to be validated, then silently not rendered
+      ];
+      for (const contentId of invalid) {
+        const error = await refused(contentId);
+        expect(error.message, JSON.stringify(contentId)).toBe(SYNTAX);
+        if (contentId.length > 0) {
+          expect(error.message).not.toContain(contentId);
+        }
+      }
+    });
+
+    it('accepts every valid form and renders it as it did, byte for byte', async () => {
+      // Bare or bracketed, the wire form is `<id>`; a bracketed id renders
+      // as given, a bare one is wrapped — exactly what the unchecked path did.
+      const valid: Array<[contentId: string, rendered: string]> = [
+        ['logo', '<logo>'], // the documented example: no `@` (RFC 2392 §2)
+        ['<logo>', '<logo>'],
+        ['logo@example.com', '<logo@example.com>'], // a proper RFC 5322 msg-id
+        ['<logo@example.com>', '<logo@example.com>'],
+        ['a.b', '<a.b>'],
+        ['a.b.c@d.e', '<a.b.c@d.e>'],
+        ["!#$%&'*+-/=?^_`{|}~", "<!#$%&'*+-/=?^_`{|}~>"], // every atext symbol
+        ['20240101.1234@mail.void.cloud', '<20240101.1234@mail.void.cloud>'],
+        ['Logo-1_2', '<Logo-1_2>'], // case is kept as given
+      ];
+      for (const [contentId, rendered] of valid) {
+        expect(await contentIdLine(contentId), contentId).toBe(`Content-ID: ${rendered}`);
+      }
+    });
+
+    it('keeps the documented inline-image example working verbatim', async () => {
+      const { text } = await build({
+        from: 'Acme <acme+noreply@mail.void.cloud>',
+        to: 'user@example.com',
+        subject: 'Hello',
+        html: '<img src="cid:logo" alt="Acme">',
+        attachments: [
+          {
+            filename: 'logo.png',
+            content: new Uint8Array([1, 2, 3]),
+            contentType: 'image/png',
+            contentId: 'logo',
+            disposition: 'inline',
+          },
+        ],
+      });
+      expect(text).toContain('Content-ID: <logo>\r\n');
+      expect(text).toContain('<img src="cid:logo" alt="Acme">');
+    });
+
+    it('still infers disposition from a bracketed id', async () => {
+      // `att.contentId ? 'inline' : 'attachment'`: any id the grammar
+      // admits is non-empty, so the default is `inline` for both forms.
+      const email = await normalizeEmail({
+        ...base,
+        attachments: [
+          { filename: 'a.png', content: 'x', contentId: 'a' },
+          { filename: 'b.png', content: 'x', contentId: '<b>' },
+        ],
+      });
+      expect(email.attachments.map((a) => a.disposition)).toEqual(['inline', 'inline']);
+    });
+
+    it('keeps the length bound in front of the scan', async () => {
+      // "Bound before you scan": the `CONTENT_ID_LINE_OVERHEAD` guard
+      // answers for an over-long value before the grammar reads it — the
+      // space in here is never reached. `Content-ID: <id>` is one token,
+      // so it never folds: a bare id of 984 characters renders exactly at
+      // the 998-octet limit and 985 cannot; an id that brings its own
+      // brackets is allowed those two characters more.
+      const error = await refused(`x ${'x'.repeat(1998)}`);
+      expect(error.message).toBe(
+        'attachment contentId is 2000 characters; at most 984 fit on the Content-ID line ' +
+          'under the 998-octet limit in RFC 5322 §2.1.1. Shorten it.',
+      );
+      expect((await refused('x'.repeat(985))).message).toMatch(
+        /^attachment contentId is 985 characters; at most 984 fit/,
+      );
+      const bare = await contentIdLine('x'.repeat(984));
+      expect(bare).toBe(`Content-ID: <${'x'.repeat(984)}>`);
+      expect(bare!.length).toBe(998);
+      expect((await refused(`<${'x'.repeat(985)}>`)).message).toMatch(
+        /^attachment contentId is 987 characters; at most 986 fit/,
+      );
+      const bracketed = await contentIdLine(`<${'x'.repeat(984)}>`);
+      expect(bracketed).toBe(`Content-ID: <${'x'.repeat(984)}>`);
+      expect(bracketed!.length).toBe(998);
+    });
+  });
+
   describe('a colon in an address', () => {
     // `:` is an RFC 5322 §3.2.3 special, not `atext`, so a bare
     // `a:b@example.com` is no addr-spec without quoting — which is refused
@@ -2387,19 +2546,35 @@ describe('buildMime header size projection', () => {
   // An attachment part's own headers are built outside `foldHeader`'s
   // encoded path: `Content-Type: <contentType>; name="<filename>"`,
   // `Content-Disposition: <disposition>; filename="<filename>"` and
-  // `Content-ID: <contentId>`. Each of the three values is charged; the
-  // filename and the media type are also bounded per attachment in
-  // `normalizeAttachment` (see 'media type syntax of an attachment'), so
-  // only the Content-ID reaches the projection unbounded.
-  it('counts attachment metadata that has no bound of its own', async () => {
+  // `Content-ID: <contentId>`. Each of the three values is charged, and
+  // each is now also bounded per attachment in `normalizeAttachment` (see
+  // 'media type syntax of an attachment' and 'Content-ID syntax of an
+  // attachment'), so none reaches the projection over-long through
+  // `normalizeEmail`. The charge stays — `buildMime` is the authority on
+  // the final size, whatever handed it the email — so it is pinned on a
+  // hand-built `NormalizedEmail`, as the attachment-count test is.
+  it('counts an attachment Content-ID, even though normalizeAttachment now bounds it', () => {
     const over = 'x'.repeat(11 * 1024 * 1024);
-    await expectProjected({
-      from: 'a@x.dev',
-      to: 'b@y.dev',
-      subject: 's',
-      text: 'hi',
-      attachments: [{ filename: 'f.txt', content: 'x', contentId: over }],
-    });
+    expect(() =>
+      buildMime({
+        from: { email: 'a@x.dev' },
+        to: [{ email: 'b@y.dev' }],
+        cc: [],
+        bcc: [],
+        subject: 's',
+        text: 'hi',
+        headers: {},
+        attachments: [
+          {
+            filename: 'f.txt',
+            contentType: 'text/plain',
+            bytes: new Uint8Array(1),
+            contentId: over,
+            disposition: 'inline',
+          },
+        ],
+      }),
+    ).toThrow(PROJECTION);
   });
 
   // `normalizeAttachment` bounds ONE filename at 986 characters, not the

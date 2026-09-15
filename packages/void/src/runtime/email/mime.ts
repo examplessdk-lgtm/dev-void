@@ -247,6 +247,100 @@ function validateMediaType(field: string, value: string): void {
   }
 }
 
+/** RFC 5322 §3.2.3 `atext` besides ALPHA and DIGIT. */
+const ATEXT_SYMBOLS = "!#$%&'*+-/=?^_`{|}~";
+
+/** RFC 5322 §3.2.3 `atext` character. */
+function isAtext(c: number): boolean {
+  return (
+    (c >= 0x30 && c <= 0x39) ||
+    (c >= 0x41 && c <= 0x5a) ||
+    (c >= 0x61 && c <= 0x7a) ||
+    ATEXT_SYMBOLS.includes(String.fromCharCode(c))
+  );
+}
+
+/**
+ * Refuse an attachment Content-ID that would not render as one RFC 5322
+ * §3.6.4 `msg-id`.
+ *
+ * `rejectControls` answers only for CTLs, and `buildAttachmentPart` writes
+ * the value verbatim — adding `<` and `>` unless the value already starts
+ * with `<` — so `logo other` rendered `Content-ID: <logo other>`, `<logo`
+ * rendered `Content-ID: <logo` and `logo>` rendered `Content-ID: <logo>>`:
+ * captured as a success under `void dev` and by the harness, and left for
+ * the receiver to refuse or to fail the `cid:` reference against.
+ *
+ * The grammar is the RFC's, read as a generator, with two deliberate
+ * differences. An `msg-id` is `"<" id-left "@" id-right ">"`, each side a
+ * `dot-atom-text` (§3.2.3: `1*atext *("." 1*atext)`, so no leading,
+ * trailing or doubled dot — the strict form; `obs-id-left`/`obs-id-right`
+ * are §4 obsolete syntax, which MUST NOT be generated); `no-fold-literal`
+ * (`[…]` for `id-right`) is left out. First difference: the `@` and its
+ * right side are OPTIONAL. RFC 2392 §2 resolves a `cid:` URL by wrapping
+ * its body in `<` `>` and matching that against `Content-ID`, so an id
+ * without `@` — the documented `contentId: 'logo'` + `cid:logo` — is what
+ * every client already resolves, and the domain that would make it a
+ * proper `msg-id` adds nothing a reference could use. Second: the angle
+ * brackets are optional too, because the builder has always added them
+ * around a bare id; given, they must be one pair around the whole value.
+ *
+ * Refused, then: whitespace of any kind, a second `@`, `<` or `>` anywhere
+ * but as that one pair, `"`, `(`, `)`, `,`, `;`, `:`, `\`, `[`, `]`,
+ * anything non-ASCII, and the empty string (which used to be validated
+ * and then silently NOT rendered). Everything accepted renders exactly as
+ * it did.
+ *
+ * One pass, no allocation, which is why this runs AFTER the value's length
+ * bound. The message names the rule and never echoes the value.
+ */
+function validateContentId(field: string, value: string): void {
+  const syntax = () =>
+    new MimeError(
+      'MIME_ERROR',
+      `${field} is not a valid Content-ID (RFC 5322 §3.6.4 msg-id: an identifier of atext, "." and "@", optionally in one pair of angle brackets).`,
+    );
+  let i = 0;
+  let end = value.length;
+  if (value[0] === '<') {
+    if (end < 2 || value[end - 1] !== '>') {
+      throw syntax();
+    }
+    i = 1;
+    end--;
+  }
+  /** Advance over a `dot-atom-text`; false when there is none, or a dot is misplaced. */
+  const dotAtomText = (): boolean => {
+    let run = 0; // atext since the last dot
+    for (; i < end; i++) {
+      const c = value.charCodeAt(i);
+      if (isAtext(c)) {
+        run++;
+      } else if (c === 0x2e /* . */ && run > 0) {
+        run = 0;
+      } else {
+        break;
+      }
+    }
+    return run > 0;
+  };
+  if (!dotAtomText()) {
+    throw syntax();
+  }
+  if (i < end) {
+    if (value[i] !== '@') {
+      throw syntax();
+    }
+    i++;
+    if (!dotAtomText()) {
+      throw syntax();
+    }
+  }
+  if (i !== end) {
+    throw syntax();
+  }
+}
+
 const COMMON_TYPES: Record<string, string> = {
   txt: 'text/plain',
   html: 'text/html',
@@ -589,7 +683,25 @@ async function normalizeAttachment(att: Attachment): Promise<NormalizedAttachmen
   }
   if (att.contentId !== undefined) {
     rejectCRLF('attachment contentId', att.contentId);
+    // Same order again: the bound, then the scans. An id the grammar admits
+    // has no whitespace, so `Content-ID: <id>` is one token after the field
+    // name and `foldHeader` returns the line whole: exactly the field name
+    // plus the id plus the `<` `>` `buildAttachmentPart` adds around a bare
+    // one — an id that already starts with `<` renders as given, so it is
+    // allowed those 2 characters more. `length` never exceeds the UTF-8
+    // octet count, so this cannot reject an id whose line would have fit;
+    // an over-long id with whitespace in it is refused here rather than
+    // by the grammar, and refused either way.
+    const brackets = att.contentId.startsWith('<') ? 0 : 2;
+    if (att.contentId.length + brackets + CONTENT_ID_LINE_OVERHEAD > MAX_LINE_OCTETS) {
+      throw new MimeError(
+        'MIME_ERROR',
+        `attachment contentId is ${att.contentId.length} characters; at most ${MAX_LINE_OCTETS - CONTENT_ID_LINE_OVERHEAD - brackets} fit ` +
+          `on the Content-ID line under the ${MAX_LINE_OCTETS}-octet limit in RFC 5322 §2.1.1. Shorten it.`,
+      );
+    }
     rejectControls('attachment contentId', att.contentId);
+    validateContentId('attachment contentId', att.contentId);
   }
   // The type admits only the two literals, but that binds nothing at
   // runtime: a JS caller, or a JSON-parsed options object, can hand over any
@@ -970,6 +1082,14 @@ const QUOTED_FILENAME_LINE_OVERHEAD = 12;
  * first — is the scan this bound exists to run ahead of.
  */
 const CONTENT_TYPE_LINE_OVERHEAD = 2;
+/**
+ * `Content-ID: `: the only line an attachment's Content-ID can sit on. The
+ * value is one token — `<id>` — so `foldHeader` cannot fold it onto a
+ * continuation line the way it can a media type, and the field name is
+ * part of what the id must fit beside. Exact, not conservative: the `<`
+ * and `>` the builder adds around a bare id are charged at the call.
+ */
+const CONTENT_ID_LINE_OVERHEAD = 'Content-ID: '.length;
 /** ` "` + `"`: the shortest line a quoted display name can fold onto. */
 const QUOTED_NAME_LINE_OVERHEAD = 3;
 /** `:` alone: the shortest line a header name can sit on, its value folded onto the next. */
