@@ -22,6 +22,7 @@
  * buffer. See `runtime/email.ts` and `plugin-email-dev-inbox.ts`.
  */
 
+import { MAX_MESSAGE_BYTES } from './mime.ts';
 import type { NormalizedEmail, NormalizedAttachment } from './types.ts';
 
 export interface CapturedMessage {
@@ -100,8 +101,43 @@ export const DEV_INBOX_TOKEN_QUERY: string = 'token';
 export const DEV_INBOX_ACK_HEADER: string = 'x-void-email-inbox';
 export const DEV_INBOX_ACK_VALUE: string = 'captured';
 
-/** Upper bound on a capture body. Dev-only, but an unbounded read is still a footgun. */
-export const DEV_INBOX_MAX_CAPTURE_BYTES: number = 32 * 1024 * 1024;
+/**
+ * Upper bound on a capture body. Dev-only, but an unbounded read is still a
+ * footgun.
+ *
+ * Derived from `MAX_MESSAGE_BYTES`, not chosen: a message `buildMime` accepts
+ * must never be refused here, or `void dev` fails a send that production
+ * delivers. `serializeCapturedMessage` carries the raw MIME as base64 (4/3 of
+ * its octets) AND every caller string a second time as JSON, where the
+ * expansion over the MIME rendering of the same string is at most 3.75x. That
+ * worst case is a control character in a value `encodeWord` renders — the
+ * subject, a display name, a custom header value: JSON writes it as `\u0001`
+ * (6 bytes) while the encoded-word spends at least 1.6 octets per UTF-8 byte
+ * (4/3 of base64 plus 12 octets of `=?UTF-8?B?…?=` per 45-byte word). A body
+ * expands at most 2x: the same control is `=01` (3) in quoted-printable, a
+ * CRLF (2) is `\r\n` (4), and a `"`, `\` or HTAB (1) is 2. An attachment's
+ * filename, media type and Content-ID refuse controls (`rejectControls`), so
+ * their worst is `"` or `\` at 2x (verbatim in the media type and Content-ID;
+ * escaped, and twice, in the quoted filename), as is a custom header NAME,
+ * which is printable ASCII. The MIME holds at most
+ * `MAX_MESSAGE_BYTES` of those strings, so the JSON is under
+ * `(4/3 + 3.75) * MAX_MESSAGE_BYTES` (5.09x) plus what has no MIME footprint of
+ * its own — the JSON framing, ids, timestamps, and the `bcc` addresses
+ * (`MAX_RECIPIENTS * MAX_ADDRESS_LENGTH`, 32 KB). 6x is the smallest integer
+ * multiple that covers it. At 32 MiB this refused a legal 10.3 MB message of
+ * control-character text (33.6 MB serialized) with a 413 that `sendEmail`
+ * reported as `UPSTREAM_ERROR`. Measured: that message serializes to 3.26x
+ * `MAX_MESSAGE_BYTES`, a legal 10 MiB one of CRLF text to 3.33x, and one of a
+ * control-character subject (or display name, or custom header value) to
+ * 4.93x — the body-only figure would not have covered it.
+ *
+ * Three caller strings have NO MIME footprint, so no multiple of
+ * `MAX_MESSAGE_BYTES` bounds them: a `bcc` display name (never rendered), a
+ * custom header whose name is reserved (dropped), and a whitespace run inside
+ * a long foldable header value (collapsed by folding). They are captured as
+ * given, and a message that pads one of them past this cap is still refused.
+ */
+export const DEV_INBOX_MAX_CAPTURE_BYTES: number = 6 * MAX_MESSAGE_BYTES;
 
 function bytesToBase64(bytes: Uint8Array): string {
   // 8KB chunks keep us well under the typical V8 fromCharCode arg limit.

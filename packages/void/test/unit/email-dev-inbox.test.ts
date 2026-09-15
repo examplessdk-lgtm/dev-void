@@ -22,11 +22,13 @@ import { shouldInjectEmailDevInboxVar } from '../../src/index.ts';
 import { emailDevInboxPlugin } from '../../src/plugin-email-dev-inbox.ts';
 import { sendEmail } from '../../src/runtime/email.ts';
 import {
+  captureMessage,
   clearDevBuffer,
   DEV_INBOX_ACK_HEADER,
   DEV_INBOX_ACK_VALUE,
   DEV_INBOX_CAPTURE_URL,
   DEV_INBOX_ENV_VAR,
+  DEV_INBOX_MAX_CAPTURE_BYTES,
   DEV_INBOX_TOKEN_ENV_VAR,
   DEV_INBOX_TOKEN_HEADER,
   DEV_INBOX_TOKEN_QUERY,
@@ -37,6 +39,13 @@ import {
   serializeCapturedMessage,
   type CapturedMessage,
 } from '../../src/runtime/email/dev-inbox.ts';
+import {
+  buildMime,
+  MAX_ADDRESS_LENGTH,
+  MAX_MESSAGE_BYTES,
+  MAX_RECIPIENTS,
+  normalizeEmail,
+} from '../../src/runtime/email/mime.ts';
 import { withRuntimeEnv } from '../../src/runtime/env.ts';
 
 /** The per-project dev-trigger token `voidPlugin()` hands the plugin. */
@@ -213,6 +222,112 @@ describe('dev inbox capture wire format', () => {
     expect(parseCapturedMessage(null)).toBeUndefined();
     expect(parseCapturedMessage({ id: 1 })).toBeUndefined();
     expect(parseCapturedMessage({ id: 'x', raw: 'not-base64!!!', to: 'nope' })).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The capture cap is sized for the SERIALIZED capture, not for the MIME. The
+// wire format carries the raw MIME as base64 and every caller string again as
+// JSON, and JSON escapes a control character to six bytes where the MIME
+// spends three (`=01`, quoted-printable body) or 1.6 (base64 encoded-word
+// header). So a message `buildMime` accepts — legal in production — can
+// serialize to several times MAX_MESSAGE_BYTES, and a cap that ignores that
+// makes `void dev` refuse what a deploy would send.
+// ---------------------------------------------------------------------------
+
+/** Serialized capture size of a message, alongside the MIME it was built from. */
+async function serializedSizeOf(
+  opts: Parameters<typeof normalizeEmail>[0],
+): Promise<{ mimeBytes: number; jsonBytes: number }> {
+  const normalized = await normalizeEmail(opts);
+  const { raw, messageId } = buildMime(normalized);
+  const json = serializeCapturedMessage(captureMessage(normalized, raw, messageId));
+  return { mimeBytes: raw.byteLength, jsonBytes: Buffer.byteLength(json, 'utf8') };
+}
+
+describe('dev inbox capture cap (sized for the serialized capture)', () => {
+  // 3.31M x \x01. Quoted-printable renders each as `=01` plus a soft break
+  // every 25, so the MIME is 10.3 MB — under MAX_MESSAGE_BYTES, so production
+  // sends it — while the capture renders each as `\u0001` (19.9 MB) next to
+  // the base64 of that MIME (13.8 MB): 33.6 MB, over the 32 MiB the cap used
+  // to be. The dev server answered 413 and `sendEmail` reported the legal
+  // message as UPSTREAM_ERROR. The smallest such body is 3,303,000 characters;
+  // the margin keeps the test off the edge of the old cap.
+  it('captures a legal message whose serialized capture exceeds 32 MiB', async () => {
+    const text = '\x01'.repeat(3_310_000);
+    const server = createFakeViteServer();
+    const assets = fakeAssetsBinding(server);
+    const result = await withRuntimeEnv(devEnv(assets), () =>
+      sendEmail({ from: 'a@x.dev', to: 'b@y.dev', subject: 'control-heavy', text }),
+    );
+    expect(result).toMatchObject({ ok: true });
+    const [message] = listDevMessages();
+    expect(message.subject).toBe('control-heavy');
+    expect(message.raw.byteLength).toBeLessThanOrEqual(MAX_MESSAGE_BYTES);
+    expect(message.text).toBe(text);
+    // What crossed the wire: the same JSON the worker POSTed (ASCII, so its
+    // length is its byte size), and it is over the former cap.
+    expect(serializeCapturedMessage(message).length).toBeGreaterThan(32 * 1024 * 1024);
+  });
+
+  // The bound behind the constant: base64 raw (4/3) plus every caller string
+  // at its worst JSON expansion over its own MIME octets (3.75x, a control in
+  // an encoded-word header), plus the fields with no MIME footprint (`bcc`
+  // addresses, framing). Pinned against the real builder and serializer at a
+  // small scale — the ratio is per octet, so it holds at any size — so a new
+  // capture field, or a MIME path that stops rendering a string, changes
+  // this test before it changes the inbox.
+  it('is derived from MAX_MESSAGE_BYTES: base64 raw (4/3) plus caller strings at 3.75x', async () => {
+    const worstExpansion = 6 / 1.6;
+    expect(DEV_INBOX_MAX_CAPTURE_BYTES).toBe(6 * MAX_MESSAGE_BYTES);
+    const framing = 1024;
+    const bound =
+      (4 / 3 + worstExpansion) * MAX_MESSAGE_BYTES + MAX_RECIPIENTS * MAX_ADDRESS_LENGTH + framing;
+    expect(DEV_INBOX_MAX_CAPTURE_BYTES).toBeGreaterThan(bound);
+    // ...and the smallest integer multiple that does.
+    expect(5 * MAX_MESSAGE_BYTES).toBeLessThan(bound);
+
+    const base = { from: 'a@x.dev', to: 'b@y.dev', subject: 's' };
+    const control = '\x01'.repeat(30_000);
+    const encodedHeaderShapes: Array<[string, Parameters<typeof normalizeEmail>[0]]> = [
+      // encoded-word header: base64 plus framing (1.6) in the MIME, 6 in JSON — 3.75x
+      ['control subject', { ...base, subject: control, text: 't' }],
+      ['control display name', { ...base, to: [{ email: 'b@y.dev', name: control }], text: 't' }],
+      ['control custom header value', { ...base, headers: { 'X-Note': control }, text: 't' }],
+    ];
+    const shapes: Array<[string, Parameters<typeof normalizeEmail>[0]]> = [
+      // body: `=01` (3) in the MIME, `\u0001` (6) in JSON — 2x
+      ['control text', { ...base, text: control }],
+      // body, 7bit path: CRLF (2) in the MIME, `\r\n` (4) in JSON — exactly 2x
+      ['crlf text', { ...base, text: '\r\n'.repeat(30_000) }],
+      // body, quoted-printable path: a mid-line HTAB is 1 octet, `\t` in JSON is 2 — 2x
+      ['tab text', { ...base, text: '\t'.repeat(30_000) }],
+      // custom header names: printable ASCII, `"` is 1 in the MIME and 2 in JSON — 2x
+      [
+        'quote header names',
+        {
+          ...base,
+          text: 't',
+          headers: Object.fromEntries(
+            Array.from({ length: 50 }, (_, i) => [`${'"'.repeat(900)}${i}`, 'v']),
+          ),
+        },
+      ],
+      ...encodedHeaderShapes,
+    ];
+    for (const [label, opts] of shapes) {
+      const { mimeBytes, jsonBytes } = await serializedSizeOf(opts);
+      expect(mimeBytes, label).toBeLessThanOrEqual(MAX_MESSAGE_BYTES);
+      expect(jsonBytes, label).toBeLessThanOrEqual((4 / 3 + worstExpansion) * mimeBytes + framing);
+    }
+
+    // The 3.75x term is load-bearing, not slack: every encoded-header shape
+    // serializes past the body-only figure (4/3 + 2), which is why that
+    // figure could not have been the ratio.
+    for (const [label, opts] of encodedHeaderShapes) {
+      const { mimeBytes, jsonBytes } = await serializedSizeOf(opts);
+      expect(jsonBytes, label).toBeGreaterThan((4 / 3 + 2) * mimeBytes);
+    }
   });
 });
 
