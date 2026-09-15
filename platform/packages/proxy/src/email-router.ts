@@ -24,6 +24,7 @@
 
 import { isReservedEmailSlug } from '@voidcloud/api/reserved-slugs';
 import { EmailMessage } from 'cloudflare:email';
+import { validate as isValidEmailSyntax } from 'email-validator';
 import {
   MAX_MIME_BYTES,
   readMimeFromAddrSpec,
@@ -236,8 +237,8 @@ const MAX_ACTIONS = 100;
 /**
  * Cap a single address inside an action (`forward.to`, `reply.from`,
  * `reply.to`). `MAX_ACTIONS` alone still leaves a 100 x <address length>
- * amplifier: every address is scanned by `VALID_ADDRESS_RE` and, on the drop
- * path, copied twice more by `sanitize()`. Checked BEFORE the regex for
+ * amplifier: every address is scanned by `isValidEmailAddress` and, on the
+ * drop path, copied twice more by `sanitize()`. Checked BEFORE the scan for
  * exactly that reason. RFC 5321 caps a forward-path at 256 octets, so 320 is
  * generous for anything deliverable — and it is the outbound
  * `MAX_RECIPIENT_LENGTH` value, for the reason given above.
@@ -307,30 +308,39 @@ class InboundTooManyHeadersError extends Error {
   }
 }
 
-// Same dodge as CONTROL_CHARS_RE — RegExp constructor avoids the
-// no-control-regex rule.
-const VALID_ADDRESS_RE = new RegExp(
-  '^[^@\\s<>"()[\\]\\\\,;:\\u0000-\\u001f\\u007f]+' +
-    '@[^@\\s<>"()[\\]\\\\,;:\\u0000-\\u001f\\u007f]+' +
-    '\\.[^@\\s<>"()[\\]\\\\,;:\\u0000-\\u001f\\u007f]+$',
-);
-
+/**
+ * The address rule for `forward.to`, `reply.from` and `reply.to`:
+ * `email-validator`, the SAME package the framework's `validateAddressParts`
+ * applies when a handler's `forward(to)` or hand-built `reply()` records the
+ * action (`packages/void/src/runtime/email/mime.ts`). One rule on both sides
+ * means nothing the framework records is dropped here for its shape — a drop
+ * here happens after the actions before it have fired, and a handler's test
+ * harness has already reported the action as a success. The hand-written
+ * regex this replaces had drifted from the framework's by one character at
+ * a time (the dot in the domain, `:`, the control range), and both still
+ * admitted `a..b@example.com`, which no dot-atom allows.
+ *
+ * The package refuses everything the regex did — whitespace, quotes,
+ * parens, brackets, every C0 control and DEL, a second `@` — and also a
+ * quoted or non-ASCII local part, a dot-less domain, a malformed dot-atom
+ * (leading, trailing or doubled dots), a TLD that does not start with a
+ * letter or is one character, more than 254 characters, a local part over
+ * 64, or a label over 63. CF does strict validation on forward/reply too;
+ * failing fast here keeps address fragments away from `EmailMessage` and
+ * the SMTP layers downstream.
+ *
+ * Length FIRST: the package scans the whole string, so testing it on an
+ * unbounded address is the work `MAX_ACTION_ADDRESS_LENGTH` exists to stop.
+ * Guarding here covers `forward.to`, `reply.from` and `reply.to` at every
+ * call site.
+ *
+ * Exported for the router test only: the framework's `validateAddressParts`
+ * is the record-time twin of this rule, and the test pins that the two
+ * `package.json`s stay on the same rule — every address one side accepts,
+ * the other accepts, with zero divergences.
+ */
 export function isValidEmailAddress(s: unknown): s is string {
-  // Reject quotes, parens, brackets, control chars in addition to the
-  // obvious whitespace/angle-bracket cases. CF does strict validation on
-  // forward/reply but we want to fail fast and not let address fragments
-  // reach `EmailMessage` / SMTP layers downstream.
-  //
-  // Length FIRST: the regex below scans the whole string, so testing it on an
-  // unbounded address is the work `MAX_ACTION_ADDRESS_LENGTH` exists to stop.
-  // Guarding here covers `forward.to`, `reply.from` and `reply.to` at every
-  // call site.
-  //
-  // Exported for the router test only: the framework's `validateAddressParts`
-  // is the record-time twin of this rule, and the test pins that nothing the
-  // framework records is dropped here (the framework may be stricter, never
-  // looser — one known exception, the dot this regex wants in the domain).
-  return typeof s === 'string' && s.length <= MAX_ACTION_ADDRESS_LENGTH && VALID_ADDRESS_RE.test(s);
+  return typeof s === 'string' && s.length <= MAX_ACTION_ADDRESS_LENGTH && isValidEmailSyntax(s);
 }
 
 /**

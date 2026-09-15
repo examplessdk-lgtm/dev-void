@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@voidcloud/api": "workspace:*",
+    "email-validator": "^2.0.4",
     "hono": "catalog:platform"
   },
   "devDependencies": {

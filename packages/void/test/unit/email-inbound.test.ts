@@ -22,6 +22,11 @@ import {
   type EmailEnvelope,
 } from '../../src/runtime/email/inbound.ts';
 import { MAX_MESSAGE_BYTES, MimeError } from '../../src/runtime/email/mime.ts';
+
+/** The one shape message the address rule (`email-validator`) throws; it never echoes the address. */
+const INVALID_ADDRESS =
+  'address is not a valid email address (ASCII local part and dotted domain, RFC 5322 dot-atom; ' +
+  "at most 64 characters before the '@' and 254 in total).";
 import { createInboundTestHarness } from '../../src/runtime/email/testing.ts';
 import { envContext } from '../../src/runtime/env-raw.ts';
 
@@ -1014,10 +1019,11 @@ describe('harness enforces the proxy action bounds, like production', () => {
     expect(harness.forwards).toEqual([]);
   });
 
-  it('refuses a forward address over the 254-octet path limit, by the sendEmail rule', async () => {
+  it('refuses a forward address over the 254-character path limit, by the sendEmail rule', async () => {
     // Under the 320 total above, so `forward()`'s own pre-check passes and
     // the refusal comes from `validateAddressParts` — the rule an outbound
-    // `to` gets, inherited rather than mirrored.
+    // `to` gets, inherited rather than mirrored (`email-validator` checks
+    // 254 before its regex).
     let thrown: unknown;
     const label = 'b'.repeat(63);
     const over = `a@${[label, label, label, label].join('.')}`;
@@ -1032,9 +1038,7 @@ describe('harness enforces the proxy action bounds, like production', () => {
     await harness.deliver(DELIVERY);
     expect(thrown).toBeInstanceOf(MimeError);
     expect((thrown as MimeError).code).toBe('INVALID_TO');
-    expect((thrown as MimeError).message).toBe(
-      'to: address is 257 octets, over the 254-octet limit in RFC 5321 §4.5.3.1.3.',
-    );
+    expect((thrown as MimeError).message).toBe(`to: ${INVALID_ADDRESS}`);
     expect(harness.forwards).toEqual([]);
   });
 
@@ -1043,6 +1047,8 @@ describe('harness enforces the proxy action bounds, like production', () => {
     // and `\u007f`, and used to be the first thing that did: `forward()`
     // recorded the address, the harness captured it as a success, and the
     // router dropped just that forward after earlier actions had fired.
+    // Both sides now apply `email-validator`; the message names the rule
+    // and never echoes the byte.
     let thrown: unknown;
     const harness = harnessFor(async (message) => {
       try {
@@ -1054,9 +1060,8 @@ describe('harness enforces the proxy action bounds, like production', () => {
     await harness.deliver(DELIVERY);
     expect(thrown).toBeInstanceOf(MimeError);
     expect((thrown as MimeError).code).toBe('INVALID_TO');
-    expect((thrown as MimeError).message).toBe(
-      'to: address contains a control character (U+0001).',
-    );
+    expect((thrown as MimeError).message).toBe(`to: ${INVALID_ADDRESS}`);
+    expect((thrown as MimeError).message).not.toContain('\x01');
     expect(harness.forwards).toEqual([]);
   });
 
@@ -1079,9 +1084,7 @@ describe('harness enforces the proxy action bounds, like production', () => {
     await harness.deliver(DELIVERY);
     expect(thrown).toBeInstanceOf(MimeError);
     expect((thrown as MimeError).code).toBe('INVALID_TO');
-    expect((thrown as MimeError).message).toBe(
-      "to: 'a:b@example.com' is not a valid email address.",
-    );
+    expect((thrown as MimeError).message).toBe(`to: ${INVALID_ADDRESS}`);
     expect(harness.forwards).toEqual([{ to: 'first@example.com' }]);
   });
 
@@ -1128,9 +1131,7 @@ describe('harness enforces the proxy action bounds, like production', () => {
     await harness.deliver(DELIVERY);
     expect(thrown).toBeInstanceOf(MimeError);
     expect((thrown as MimeError).code).toBe('INVALID_TO');
-    expect((thrown as MimeError).message).toBe(
-      "to: 'Ops <ops@example.com>' is not a valid email address.",
-    );
+    expect((thrown as MimeError).message).toBe(`to: ${INVALID_ADDRESS}`);
     expect(harness.forwards).toEqual([{ to: 'first@example.com' }]);
   });
 
@@ -2863,36 +2864,38 @@ describe('end-to-end: envelope → handler → action queue', () => {
   });
 
   it.each([
-    ['no @', 'not-an-address', "to: 'not-an-address' is not a valid email address."],
+    ['no @', 'not-an-address'],
     // `forward(rcptTo)` takes a bare address — Cloudflare's "verified
     // destination address" — so the display-name form `sendEmail` parses
     // is not an address here.
-    [
-      'a display name',
-      'Ops <ops@example.com>',
-      "to: 'Ops <ops@example.com>' is not a valid email address.",
-    ],
-    ['two @', 'a@b@example.com', "to: 'a@b@example.com' is not a valid email address."],
-    ['an empty domain', 'user@', "to: 'user@' is not a valid email address."],
-    ['an empty local part', '@example.com', "to: '@example.com' is not a valid email address."],
-    [
-      'a list separator',
-      'a@example.com,b@example.com',
-      "to: 'a@example.com,b@example.com' is not a valid email address.",
-    ],
-    ['whitespace', 'a b@example.com', "to: 'a b@example.com' is not a valid email address."],
-    [
-      'a 65-octet local part',
-      `${'a'.repeat(65)}@example.com`,
-      'to: local part is 65 octets, over the 64-octet limit in RFC 5321 §4.5.3.1.1.',
-    ],
+    ['a display name', 'Ops <ops@example.com>'],
+    ['two @', 'a@b@example.com'],
+    ['an empty domain', 'user@'],
+    ['an empty local part', '@example.com'],
+    ['a list separator', 'a@example.com,b@example.com'],
+    ['whitespace', 'a b@example.com'],
+    ['a 65-character local part', `${'a'.repeat(65)}@example.com`],
+    // Inverted: these used to be recorded here and dropped by the platform
+    // router alone, which always wanted a dot in the domain. One package
+    // (`email-validator`) on both sides now, so the call refuses them.
+    ['a dot-less domain', 'user@localhost'],
+    ['a one-letter domain', 'x@y'],
+    // Both sides used to accept these; no dot-atom does, and an MTA refuses
+    // them after the handler's test reported a success.
+    ['doubled dots in the local part', 'a..b@example.com'],
+    ['a leading dot', '.a@example.com'],
+    ['a trailing dot before the @', 'a.@example.com'],
+    ['doubled dots in the domain', 'a@example..com'],
+    ['a non-ASCII local part', 'jöhn@example.com'],
+    ['a quoted local part', '"a b"@example.com'],
   ])(
     'refuses a forward address with %s at the call, recording nothing for it',
-    async (_label, to, expected) => {
+    async (_label, to) => {
       // Same class as the header record above, for the address: Cloudflare
       // refuses it at native replay, the platform router before enaction.
-      // Checked here with the rule `sendEmail` applies to its `to`, so a
-      // handler's forward refuses exactly what an outbound send refuses.
+      // Checked here with the rule `sendEmail` applies to its `to` — and
+      // the rule the router drops on — so a handler's forward refuses
+      // exactly what an outbound send refuses and nothing the router loses.
       const { message, getActions } = createMessageProxy(makeEnvelope());
       await message.forward('first@example.com');
       let thrown: unknown;
@@ -2903,7 +2906,7 @@ describe('end-to-end: envelope → handler → action queue', () => {
       }
       expect(thrown).toBeInstanceOf(MimeError);
       expect((thrown as MimeError).code).toBe('INVALID_TO');
-      expect((thrown as MimeError).message).toBe(expected);
+      expect((thrown as MimeError).message).toBe(`to: ${INVALID_ADDRESS}`);
       expect(getActions()).toEqual([{ type: 'forward', to: 'first@example.com' }]);
     },
   );
@@ -2917,18 +2920,19 @@ describe('end-to-end: envelope → handler → action queue', () => {
       [
         { from: 'not-an-address', to: 'ops@example.com' },
         'INVALID_FROM',
-        "from: 'not-an-address' is not a valid email address.",
+        `from: ${INVALID_ADDRESS}`,
       ],
       [
         { from: 'me@example.com', to: 'Ops <ops@example.com>' },
         'INVALID_TO',
-        "to: 'Ops <ops@example.com>' is not a valid email address.",
+        `to: ${INVALID_ADDRESS}`,
       ],
       [
         { from: `${'a'.repeat(65)}@example.com`, to: 'ops@example.com' },
         'INVALID_FROM',
-        'from: local part is 65 octets, over the 64-octet limit in RFC 5321 §4.5.3.1.1.',
+        `from: ${INVALID_ADDRESS}`,
       ],
+      [{ from: 'me@example.com', to: 'a..b@example.com' }, 'INVALID_TO', `to: ${INVALID_ADDRESS}`],
     ];
     for (const [addrs, code, expected] of cases) {
       const { message, getActions } = createMessageProxy(makeEnvelope());
@@ -2950,17 +2954,17 @@ describe('end-to-end: envelope → handler → action queue', () => {
   });
 
   it('records every forward address sendEmail would accept', async () => {
-    // Not the platform router's `isValidEmailAddress`, which also wants a
-    // dot in the domain: `user@localhost` is legal RFC 5321 and is what the
-    // outbound path accepts. A dot-less domain still reaches the router,
-    // which drops that one forward on its own. A local part of exactly 64
-    // octets, a `+` tag and a non-ASCII local part (SMTPUTF8) are all fine.
+    // The same rule as the platform router's `isValidEmailAddress`
+    // (`email-validator` on both sides), so everything recorded here is
+    // enacted there. A local part of exactly 64 characters, a `+` tag, dots
+    // between atoms, a punycode IDN domain and a numeric second character
+    // in the TLD are all fine.
     const accepted = [
-      'user@localhost',
-      'x@y',
       'ops+T-42@example.com',
       `${'a'.repeat(64)}@example.com`,
-      'jöhn@example.com',
+      'first.last@sub.example.com',
+      'a@xn--bcher-kva.example',
+      'a@b.c1',
     ];
     const { message, getActions } = createMessageProxy(makeEnvelope());
     for (const to of accepted) {

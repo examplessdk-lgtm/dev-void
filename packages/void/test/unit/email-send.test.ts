@@ -485,7 +485,7 @@ describe('sendEmail (from defaulting)', () => {
     }
   });
 
-  it('rejects an explicit 65-octet local part before capture, like the slug default', async () => {
+  it('rejects an explicit 65-character local part before capture, like the slug default', async () => {
     // The slug default above refuses to BUILD a 65-octet local part, but the
     // same address passed explicitly used to be captured as a success —
     // under `void dev` and here — and could only bounce at an MTA.
@@ -500,7 +500,9 @@ describe('sendEmail (from defaulting)', () => {
       expect(from.ok).toBe(false);
       if (!from.ok && 'error' in from) {
         expect(from.error.code).toBe('INVALID_FROM');
-        expect(from.error.message).toMatch(/local part is 65 octets, over the 64-octet limit/);
+        expect(from.error.message).toMatch(
+          /^from: address is not a valid email address \(ASCII local part/,
+        );
       }
       const to = await sendEmail({
         from: 'a@x.dev',
@@ -518,7 +520,7 @@ describe('sendEmail (from defaulting)', () => {
     }
   });
 
-  it('rejects a 257-octet address before capture, whatever its local part', async () => {
+  it('rejects a 257-character address before capture, whatever its local part', async () => {
     // `a@` + a 255-octet domain is under the 320 total and the 64-octet
     // local part, and used to be captured as a success — under `void dev`
     // and here — when RFC 5321 §4.5.3.1.3 caps the path at 256 octets.
@@ -531,7 +533,9 @@ describe('sendEmail (from defaulting)', () => {
       expect(from.ok).toBe(false);
       if (!from.ok && 'error' in from) {
         expect(from.error.code).toBe('INVALID_FROM');
-        expect(from.error.message).toMatch(/address is 257 octets, over the 254-octet limit/);
+        expect(from.error.message).toMatch(
+          /^from: address is not a valid email address \(ASCII local part/,
+        );
       }
       const to = await sendEmail({ from: 'a@x.dev', to: over, subject: 's', text: 't' });
       expect(to.ok).toBe(false);

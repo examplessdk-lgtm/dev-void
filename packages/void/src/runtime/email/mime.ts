@@ -6,6 +6,7 @@
  * Inline images use multipart/related when both attachments and html are present.
  */
 
+import { validate as isValidEmailSyntax } from 'email-validator';
 import type { Address, Attachment, NormalizedAttachment, NormalizedEmail } from './types.ts';
 
 /** Cloudflare Email Workers reject messages larger than ~10 MB after base64 expansion. */
@@ -70,50 +71,13 @@ export const MAX_RECIPIENTS: number = 100;
  * allows a 64-octet local part and a 255-octet domain, so nothing over 320
  * characters can be delivered; the platform proxy applies the same
  * `MAX_RECIPIENT_LENGTH` to the same parsed address. This is the bound on
- * the WORK — it is checked before the address is scanned or encoded — not
- * the deliverability bound, which is `MAX_ADDRESS_OCTETS` below. A display
- * name is not bounded — it is folded or encoded into legal header lines at
- * any length, and the tokenizers below keep that cost linear.
+ * the WORK — it is checked before the address is scanned — not the
+ * deliverability bound, which `email-validator` applies at 254 (see
+ * `validateAddressParts`). A display name is not bounded — it is folded or
+ * encoded into legal header lines at any length, and the tokenizers below
+ * keep that cost linear.
  */
 export const MAX_ADDRESS_LENGTH: number = 320;
-
-/**
- * Cap on the local part (before the `@`) of one parsed address, in UTF-8
- * OCTETS. RFC 5321 §4.5.3.1.1 sets 64 as the longest every receiver MUST
- * accept; a client MAY send a longer one but MUST expect the server to
- * reject it, so it is not deliverable in general. The platform proxy does
- * not check it — its `MAX_RECIPIENT_LENGTH` is the 320 total above — so a
- * 65-octet local part used to pass this preflight, be captured as a success
- * under `void dev` and by the test harness, and be turned away only by an
- * MTA. Counted in octets because the address rules below admit a non-ASCII
- * local part (SMTPUTF8, RFC 6531, which keeps RFC 5321's limits as octet
- * counts): 22 CJK characters are 66 octets. The same figure caps the
- * default `<slug>+noreply@` sender — `VALID_SLUG` in `runtime/email.ts`
- * and `MAX_SLUG_LENGTH` (`64 - 8`) in `cli/project-slug.ts` and the API —
- * which already refused it while an explicit `from` of the same address
- * was accepted.
- */
-export const MAX_LOCAL_PART_OCTETS: number = 64;
-
-/**
- * Cap on the whole parsed address, in UTF-8 OCTETS. RFC 5321 §4.5.3.1.3 sets
- * 256 octets as the longest forward-path every receiver MUST accept,
- * "including the punctuation and element separators" — the path is
- * `<local@domain>`, so the address inside it is at most 254 (RFC 5321 errata
- * 1690, the widely cited 254-character maximum). The 320-character bound
- * above is the sum of the two component maxima, not a path any MTA must
- * take: `a@` followed by a 255-octet domain is 257 characters, passed the
- * total-length and local-part checks, and was captured as a success under
- * `void dev` and by the test harness. The platform proxy does not check it
- * either — its `MAX_RECIPIENT_LENGTH` is the same 320.
- *
- * This one check also closes the domain rule (§4.5.3.1.2, 255 octets): with
- * the address at most 254 octets and the local part at least 1, the domain
- * is at most 252, so it needs no check of its own. Counted in octets for the
- * reason `MAX_LOCAL_PART_OCTETS` is — the address rules admit non-ASCII
- * (SMTPUTF8, RFC 6531), which keeps RFC 5321's limits as octet counts.
- */
-export const MAX_ADDRESS_OCTETS: number = 254;
 
 const CRLF = '\r\n';
 const ASCII_PRINTABLE = /^[\x20-\x7e]*$/;
@@ -178,81 +142,53 @@ function fieldErrorCode(field: string): MimeErrorCode {
 /**
  * Validate one parsed address (and its display name, when there is one),
  * throwing a `MimeError` for `field` on anything undeliverable. Exported so
- * the inbound proxy's `forward(to)` refuses a bare address by the same rule
- * `sendEmail` applies to its `to`.
+ * the inbound proxy's `forward(to)` and hand-built `reply()` refuse a bare
+ * address by the same rule `sendEmail` applies to its `to`.
+ *
+ * The address rule is `email-validator`, and nothing else. It is also the
+ * platform router's rule (`isValidEmailAddress` in the proxy's
+ * `email-router.ts`), so there is exactly ONE address syntax in the tree:
+ * an action the framework records is never dropped by the router for its
+ * shape, and a test harness never captures as a success what the managed
+ * deployment would lose. The hand-written predecessor grew one character
+ * per review round — the exactly-one-`@` rule, then every C0 control and
+ * DEL, then `:`, then a parity test against the router's own regex, which
+ * had drifted on the dot in the domain — and still admitted `a..b@x.com`,
+ * `.a@x.com` and `a@x..com`, which no dot-atom allows and every MTA
+ * refuses. One maintained rule on both sides ends that series.
+ *
+ * What it enforces: at most 254 characters in total; an ASCII dot-atom
+ * local part of at most 64 characters (RFC 5322 §3.2.3 `atext`, dots only
+ * between atoms — no quoted local part, no whitespace, no control, no
+ * special); a dotted domain of ASCII labels of at most 63 characters each,
+ * with a TLD that starts with a letter and has at least two characters; so
+ * `user@localhost`, `x@y` and a raw IDN or SMTPUTF8 address are refused
+ * (an IDN domain is accepted as punycode, `xn--…`). ASCII-only makes
+ * octets and characters the same thing, so the RFC 5321 §4.5.3.1 octet
+ * limits are the package's length checks; the 64 is also what caps the
+ * default `<slug>+noreply@` sender (`VALID_SLUG` in `runtime/email.ts`,
+ * `MAX_SLUG_LENGTH` = `64 - 8` in `cli/project-slug.ts` and the API). One
+ * known quirk, pinned in the tests rather than worked around: the FIRST
+ * character of the local part may not be a backtick, while any later one
+ * may.
+ *
+ * `MAX_ADDRESS_LENGTH` still runs first, on the raw string, so the scan is
+ * bounded before anything reads the address; the package's own 254 check
+ * runs before its regex for the same reason. The message never echoes the
+ * address: it may hold a control character, and naming the rule is enough.
  */
 export function validateAddressParts(field: string, email: string, name?: string): void {
-  rejectCRLF(`${field} address`, email);
   if (email.length > MAX_ADDRESS_LENGTH) {
     throw new MimeError(
       fieldErrorCode(field),
       `${field}: address is ${email.length} characters, over the ${MAX_ADDRESS_LENGTH}-character limit.`,
     );
   }
-  // No C0 control or DEL anywhere in the address. `rejectCRLF` above
-  // refuses only CR, LF and NUL, and the whitespace rule below only the
-  // controls `\s` matches (TAB, VT, FF), so `a\x01b@example.com` or
-  // `a\x7fb@example.com` passed both and `formatAddress` wrote the byte
-  // straight into the `To:` line — captured as a success under `void dev`
-  // and by the test harness, refused only by the platform router or an MTA.
-  // The same class the router's `isValidEmailAddress` refuses, so a
-  // handler's `forward(to)` fails at the call rather than being dropped
-  // after earlier actions fired. After the length bound, so the scan is
-  // over at most `MAX_ADDRESS_LENGTH` characters; before the shape rule, so
-  // the message names the byte instead of echoing it.
-  // eslint-disable-next-line no-control-regex -- C0 controls and DEL are the point
-  const control = /[\x00-\x1f\x7f]/.exec(email);
-  if (control) {
-    const codePoint = control[0].charCodeAt(0).toString(16).toUpperCase().padStart(4, '0');
+  if (!isValidEmailSyntax(email)) {
     throw new MimeError(
       fieldErrorCode(field),
-      `${field}: address contains a control character (U+${codePoint}).`,
-    );
-  }
-  // Address must be a single token with EXACTLY ONE '@', a non-empty local
-  // part and a non-empty domain, and no whitespace, quoting, or
-  // list-separators. Without the separator rule, a `to: "a@x,b@y"` would
-  // slip through the bare-string path and split into two recipients in the
-  // rendered headers; without the exactly-one/non-empty rule, `user@`,
-  // `@example.com` and `a@b@c` passed the preflight and were reported as a
-  // successful capture in the dev inbox, only to fail once they reached the
-  // platform — and as a different error code than the one advertised here.
-  //
-  // Deliberately NOT the platform's `isValidEmail`, which also requires a
-  // dot in the domain: `user@localhost` and `x@y` are legal RFC 5321 and
-  // are accepted today. Quoted local parts (`"a@b"@example.com`) stay
-  // rejected by the `"` in the specials class below, as they already were.
-  //
-  // The class is `RFC5322_SPECIALS` less the `@` the rule above owns: every
-  // one of them is outside `atext` (RFC 5322 §3.2.3), so a bare address
-  // carrying one is no addr-spec without quoting, and quoting is refused.
-  // `:` was the one missing — `a:b@example.com` passed here, was recorded
-  // by a handler's `forward()`, and was dropped by the platform router's
-  // `isValidEmailAddress` after earlier actions had fired.
-  const at = email.indexOf('@');
-  const singleAt = at > 0 && at === email.lastIndexOf('@') && at < email.length - 1;
-  if (!singleAt || /\s/.test(email) || /[,;:<>"()[\]\\]/.test(email)) {
-    throw new MimeError(
-      fieldErrorCode(field),
-      `${field}: '${email}' is not a valid email address.`,
-    );
-  }
-  // After the total-length bound above, so the encode is over at most
-  // `MAX_ADDRESS_LENGTH` characters; see `MAX_LOCAL_PART_OCTETS`.
-  const localOctets = new TextEncoder().encode(email.slice(0, at)).length;
-  if (localOctets > MAX_LOCAL_PART_OCTETS) {
-    throw new MimeError(
-      fieldErrorCode(field),
-      `${field}: local part is ${localOctets} octets, over the ${MAX_LOCAL_PART_OCTETS}-octet limit in RFC 5321 §4.5.3.1.1.`,
-    );
-  }
-  // Same bound on the encode; see `MAX_ADDRESS_OCTETS` for why the whole
-  // address is checked and the domain is not.
-  const addressOctets = new TextEncoder().encode(email).length;
-  if (addressOctets > MAX_ADDRESS_OCTETS) {
-    throw new MimeError(
-      fieldErrorCode(field),
-      `${field}: address is ${addressOctets} octets, over the ${MAX_ADDRESS_OCTETS}-octet limit in RFC 5321 §4.5.3.1.3.`,
+      `${field}: address is not a valid email address (ASCII local part and dotted domain, ` +
+        `RFC 5322 dot-atom; at most 64 characters before the '@' and 254 in total).`,
     );
   }
   if (name !== undefined) {

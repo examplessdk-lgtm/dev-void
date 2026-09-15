@@ -457,7 +457,8 @@ describe('generated handleEmail on a native ForwardableEmailMessage', () => {
     expect(outcome).toBeInstanceOf(MimeError);
     expect((outcome as MimeError).code).toBe('INVALID_TO');
     expect((outcome as MimeError).message).toBe(
-      "to: 'not-an-address' is not a valid email address.",
+      'to: address is not a valid email address (ASCII local part and dotted domain, ' +
+        "RFC 5322 dot-atom; at most 64 characters before the '@' and 254 in total).",
     );
   });
 
@@ -492,7 +493,8 @@ describe('generated handleEmail on a native ForwardableEmailMessage', () => {
     expect(outcome).toBeInstanceOf(MimeError);
     expect((outcome as MimeError).code).toBe('INVALID_TO');
     expect((outcome as MimeError).message).toBe(
-      "to: 'not-an-address' is not a valid email address.",
+      'to: address is not a valid email address (ASCII local part and dotted domain, ' +
+        "RFC 5322 dot-atom; at most 64 characters before the '@' and 254 in total).",
     );
   });
 

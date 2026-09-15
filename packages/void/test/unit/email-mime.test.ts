@@ -5,9 +5,7 @@ import { describe, expect, it } from 'vite-plus/test';
 import {
   buildMime,
   MAX_ADDRESS_LENGTH,
-  MAX_ADDRESS_OCTETS,
   MAX_ATTACHMENTS,
-  MAX_LOCAL_PART_OCTETS,
   MAX_MESSAGE_BYTES,
   MAX_RECIPIENTS,
   MimeError,
@@ -18,6 +16,18 @@ import type { Attachment } from '../../src/runtime/email/types.ts';
 
 function decode(bytes: Uint8Array): string {
   return new TextDecoder().decode(bytes);
+}
+
+/**
+ * The one shape message `validateAddressParts` throws: the rule is
+ * `email-validator`, and the message names the rule rather than echoing the
+ * address (which may hold a control character).
+ */
+function invalidAddress(field: string): string {
+  return (
+    `${field}: address is not a valid email address (ASCII local part and dotted domain, ` +
+    `RFC 5322 dot-atom; at most 64 characters before the '@' and 254 in total).`
+  );
 }
 
 async function build(opts: Parameters<typeof normalizeEmail>[0]) {
@@ -160,13 +170,22 @@ describe('normalizeEmail', () => {
     },
   );
 
-  // Deliberately NOT the platform's own `isValidEmail`, which requires a dot
-  // in the domain. These two are legal RFC 5321 and accepted today; adopting
-  // that stricter rule here would newly reject them.
-  it.each(['user@localhost', 'x@y'])('still accepts %s (no dot in the domain)', async (ok) => {
-    const email = await normalizeEmail({ from: ok, to: ok, subject: 's', text: 't' });
-    expect(email.from.email).toBe(ok);
-  });
+  // Inverted: these used to be accepted as legal RFC 5321 mailboxes while
+  // the platform router refused them for the missing dot, so a handler's
+  // `forward('user@localhost')` was recorded here and dropped there. The
+  // rule is now `email-validator` on both sides, which wants a dotted
+  // domain with a letter-first TLD of at least two characters.
+  it.each(['user@localhost', 'x@y', 'a@example'])(
+    'now refuses %s (no dot in the domain), as the router always did',
+    async (bad) => {
+      await expect(
+        normalizeEmail({ from: bad, to: 'b@y.dev', subject: 's', text: 't' }),
+      ).rejects.toThrow(invalidAddress('from'));
+      await expect(
+        normalizeEmail({ from: 'a@x.dev', to: bad, subject: 's', text: 't' }),
+      ).rejects.toThrow(invalidAddress('to'));
+    },
+  );
 
   // RFC 5322 §2.1.1 makes 998 a MUST and §3.2.2 allows folding ONLY at
   // whitespace, so a long token with no spaces cannot be folded at all —
@@ -760,16 +779,18 @@ describe('normalizeEmail', () => {
   it('refuses an address over MAX_ADDRESS_LENGTH, with the code for its field', async () => {
     // RFC 5321 §4.5.3.1: 64-octet local part + `@` + 255-octet domain is the
     // sum of the component maxima — the pre-parse bound, not a deliverable
-    // path (see `MAX_ADDRESS_OCTETS`). At exactly 320 the octet rule answers;
-    // one over, this one answers first, before anything is scanned.
+    // path (the package's 254 total is that). At exactly 320 the package
+    // answers; one over, this one answers first, before anything is scanned.
     const longest = `${'a'.repeat(64)}@${'b'.repeat(251)}.dev`;
     expect(longest).toHaveLength(MAX_ADDRESS_LENGTH);
     const over = `${'a'.repeat(65)}@${'b'.repeat(251)}.dev`;
     await expect(
       normalizeEmail({ from: 'a@x.dev', to: longest, subject: 's', text: 't' }),
-    ).rejects.toThrow(/^to: address is 320 octets, over the 254-octet limit/);
-    const deliverable = `${'a'.repeat(64)}@${'b'.repeat(185)}.dev`;
-    expect(deliverable).toHaveLength(MAX_ADDRESS_OCTETS);
+    ).rejects.toThrow(invalidAddress('to'));
+    // 254 characters of 63-character-or-shorter labels: the longest address
+    // the package accepts.
+    const deliverable = `${'a'.repeat(64)}@${'b'.repeat(63)}.${'c'.repeat(63)}.${'d'.repeat(57)}.dev`;
+    expect(deliverable).toHaveLength(254);
     const email = await normalizeEmail({
       from: deliverable,
       to: deliverable,
@@ -813,14 +834,14 @@ describe('normalizeEmail', () => {
     expect(named.to[0].email).toBe(deliverable);
   });
 
-  it('refuses an address over MAX_ADDRESS_OCTETS, counted in UTF-8 octets', async () => {
+  it('refuses an address over 254 characters (RFC 5321 §4.5.3.1.3), by the package rule', async () => {
     // RFC 5321 §4.5.3.1.3: a 256-octet forward-path `<local@domain>` is the
     // longest every receiver MUST accept, so the address is at most 254.
     // The 320 total is the sum of the local-part and domain maxima, not a
-    // path — `a@` + a 255-octet domain is 257 characters, under both the
-    // total-length and local-part checks, and `void dev` and the test
-    // harness captured it as a success. The platform proxy applies only the
-    // 320 total, so the preflight is the one check.
+    // path — `a@` + a 255-octet domain is 257 characters, under the
+    // total-length bound, and `void dev` and the test harness once captured
+    // it as a success. `email-validator` checks 254 before its regex, and
+    // the platform router applies the same package, so both sides refuse it.
     const label = 'b'.repeat(63);
     const domain255 = [label, label, label, label].join('.');
     expect(domain255).toHaveLength(255);
@@ -828,7 +849,7 @@ describe('normalizeEmail', () => {
     expect(over).toHaveLength(257);
     expect(over.length).toBeLessThan(MAX_ADDRESS_LENGTH);
     const longest = `a@${domain255.slice(0, 252)}`;
-    expect(longest).toHaveLength(MAX_ADDRESS_OCTETS);
+    expect(longest).toHaveLength(254);
     const email = await normalizeEmail({ from: longest, to: longest, subject: 's', text: 't' });
     expect(email.to[0].email).toBe(longest);
     for (const [field, code] of [
@@ -850,46 +871,43 @@ describe('normalizeEmail', () => {
       }
       expect(error).toBeInstanceOf(MimeError);
       expect((error as MimeError).code).toBe(code);
-      expect((error as MimeError).message).toBe(
-        `${field}: address is 257 octets, over the ${MAX_ADDRESS_OCTETS}-octet limit in RFC 5321 §4.5.3.1.3.`,
-      );
+      expect((error as MimeError).message).toBe(invalidAddress(field));
     }
-    // Octets, not characters: the address rules admit a non-ASCII domain
-    // (SMTPUTF8), and RFC 6531 keeps RFC 5321's limits as octet counts. Each
-    // `ü` is 2 octets, so three 31-character labels and one 63-character
-    // label are 252 octets of domain in 159 characters — an address of 254
-    // octets in 161 characters fits; one more character is 255 and does not.
-    const idnDomain = `${'ü'.repeat(31)}.${'ü'.repeat(31)}.${'ü'.repeat(31)}.${'b'.repeat(63)}`;
-    const idnFits = `a@${idnDomain}`;
-    const idnOver = `a@${idnDomain}b`;
-    expect(idnFits).toHaveLength(161);
-    expect(new TextEncoder().encode(idnFits).length).toBe(MAX_ADDRESS_OCTETS);
-    expect(idnOver.length).toBeLessThan(MAX_ADDRESS_OCTETS);
-    const utf8 = await normalizeEmail({ from: 'a@x.dev', to: idnFits, subject: 's', text: 't' });
-    expect(utf8.to[0].email).toBe(idnFits);
+    // Inverted: a raw IDN domain used to be accepted and counted in UTF-8
+    // octets (SMTPUTF8). The package is ASCII-only, so octets and characters
+    // are the same thing and a raw `ü` label is refused however short; the
+    // same domain is accepted as punycode, which is what DNS carries.
+    const idnRaw = `a@${'ü'.repeat(31)}.${'b'.repeat(63)}`;
     await expect(
-      normalizeEmail({ from: 'a@x.dev', to: idnOver, subject: 's', text: 't' }),
-    ).rejects.toThrow(/^to: address is 255 octets, over the 254-octet limit/);
-    // The display-name form is bounded on the same parsed address; the
-    // local-part rule answers first for an address over both; and the
-    // total-length bound still answers first for one over all three.
-    expect(() => parseAddress(`Name <${over}>`, 'to')).toThrow(/address is 257 octets/);
+      normalizeEmail({ from: 'a@x.dev', to: idnRaw, subject: 's', text: 't' }),
+    ).rejects.toThrow(invalidAddress('to'));
+    const punycode = 'a@xn--bcher-kva.example';
+    const idn = await normalizeEmail({ from: 'a@x.dev', to: punycode, subject: 's', text: 't' });
+    expect(idn.to[0].email).toBe(punycode);
+    // A label over 63 characters is refused on its own, inside the 254 total.
+    const longLabel = `a@${'b'.repeat(64)}.dev`;
+    await expect(
+      normalizeEmail({ from: 'a@x.dev', to: longLabel, subject: 's', text: 't' }),
+    ).rejects.toThrow(invalidAddress('to'));
+    // The display-name form is bounded on the same parsed address, and the
+    // total-length bound still answers first for one over both.
+    expect(() => parseAddress(`Name <${over}>`, 'to')).toThrow(invalidAddress('to'));
     expect(() => parseAddress(`${'a'.repeat(65)}@${domain255.slice(0, 200)}`, 'to')).toThrow(
-      /local part is 65 octets/,
+      invalidAddress('to'),
     );
     expect(() => parseAddress(`${'a'.repeat(65)}@${domain255}`, 'to')).toThrow(
       /over the 320-character limit/,
     );
   });
 
-  it('refuses a local part over MAX_LOCAL_PART_OCTETS, counted in UTF-8 octets', async () => {
+  it('refuses a local part over 64 characters (RFC 5321 §4.5.3.1.1), by the package rule', async () => {
     // RFC 5321 §4.5.3.1.1: 64 octets is the longest local part every
     // receiver MUST accept. The total-length bound alone let this through
     // — `'a'.repeat(65)}@x.dev` is 71 characters — so `void dev` and the
-    // test harness captured it as a success. The platform proxy applies
-    // only the 320 total, so the preflight is the one check.
-    const longest = `${'a'.repeat(MAX_LOCAL_PART_OCTETS)}@x.dev`;
-    const over = `${'a'.repeat(MAX_LOCAL_PART_OCTETS + 1)}@x.dev`;
+    // test harness once captured it as a success. `email-validator`
+    // enforces the 64, and the platform router applies the same package.
+    const longest = `${'a'.repeat(64)}@x.dev`;
+    const over = `${'a'.repeat(65)}@x.dev`;
     expect(over.length).toBeLessThan(MAX_ADDRESS_LENGTH);
     const email = await normalizeEmail({ from: longest, to: longest, subject: 's', text: 't' });
     expect(email.to[0].email).toBe(longest);
@@ -912,49 +930,42 @@ describe('normalizeEmail', () => {
       }
       expect(error).toBeInstanceOf(MimeError);
       expect((error as MimeError).code).toBe(code);
-      expect((error as MimeError).message).toBe(
-        `${field}: local part is ${MAX_LOCAL_PART_OCTETS + 1} octets, over the ${MAX_LOCAL_PART_OCTETS}-octet limit in RFC 5321 §4.5.3.1.1.`,
-      );
+      expect((error as MimeError).message).toBe(invalidAddress(field));
     }
-    // Octets, not characters: the address rules admit a non-ASCII local
-    // part (SMTPUTF8), and RFC 6531 keeps RFC 5321's limits as octet counts.
-    // 21 three-octet characters are 63 octets and fit; 22 are 66 and do not.
-    const cjkFits = `${'漢'.repeat(21)}@x.dev`;
-    const cjkOver = `${'漢'.repeat(22)}@x.dev`;
-    expect(new TextEncoder().encode('漢'.repeat(22)).length).toBe(66);
-    const utf8 = await normalizeEmail({ from: 'a@x.dev', to: cjkFits, subject: 's', text: 't' });
-    expect(utf8.to[0].email).toBe(cjkFits);
-    await expect(
-      normalizeEmail({ from: 'a@x.dev', to: cjkOver, subject: 's', text: 't' }),
-    ).rejects.toThrow(/^to: local part is 66 octets, over the 64-octet limit/);
+    // Inverted: a non-ASCII local part (SMTPUTF8) used to be accepted and
+    // counted in UTF-8 octets. The package is ASCII-only, so `ünicode@` and
+    // a CJK local part are refused however short, on both sides.
+    for (const bad of ['ünicode@example.com', 'jöhn@example.com', `${'漢'.repeat(21)}@x.dev`]) {
+      await expect(
+        normalizeEmail({ from: 'a@x.dev', to: bad, subject: 's', text: 't' }),
+      ).rejects.toThrow(invalidAddress('to'));
+    }
     // The display-name form is bounded on the same parsed address, and the
     // total-length bound still answers first for an address over both.
-    expect(() => parseAddress(`Name <${over}>`, 'to')).toThrow(/local part is 65 octets/);
+    expect(() => parseAddress(`Name <${over}>`, 'to')).toThrow(invalidAddress('to'));
     expect(() => parseAddress(`${'a'.repeat(65)}@${'b'.repeat(251)}.dev`, 'to')).toThrow(
       /over the 320-character limit/,
     );
   });
 
   describe('control characters in an address', () => {
-    // `rejectCRLF` refuses CR, LF and NUL and the shape rule's `\s` refuses
-    // TAB, VT and FF, so every other C0 control and DEL passed both:
-    // `a\x01b@example.com` was accepted and `formatAddress` wrote the byte
-    // raw into the `To:` line, captured as a success under `void dev` and
-    // by the test harness. The platform router's `isValidEmailAddress`
-    // refuses `\u0000-\u001f` and `\u007f`, so a `forward(to)` carrying one
-    // was dropped there after earlier actions had fired.
+    // Every C0 control and DEL once passed the hand-written rule (which
+    // refused only CR, LF, NUL and what `\s` matches): `a\x01b@example.com`
+    // was accepted and `formatAddress` wrote the byte raw into the `To:`
+    // line, captured as a success under `void dev` and by the test harness,
+    // and dropped by the platform router after earlier actions had fired.
+    // `email-validator` admits only `atext`, so every control is refused,
+    // and the message never echoes the address.
     const controls = [
-      ['SOH', '\x01', '0001'],
-      ['ESC', '\x1b', '001B'],
-      ['US', '\x1f', '001F'],
-      ['DEL', '\x7f', '007F'],
-      // Also whitespace to `\s`; the control rule answers first so the
-      // message names the byte instead of echoing it.
-      ['TAB', '\t', '0009'],
+      ['SOH', '\x01'],
+      ['ESC', '\x1b'],
+      ['US', '\x1f'],
+      ['DEL', '\x7f'],
+      ['TAB', '\t'],
     ] as const;
 
     it('refuses a bare address carrying one, with the code for its field', async () => {
-      for (const [, ch, codePoint] of controls) {
+      for (const [, ch] of controls) {
         const bad = `a${ch}b@example.com`;
         for (const [field, code] of [
           ['to', 'INVALID_TO'],
@@ -977,15 +988,14 @@ describe('normalizeEmail', () => {
           }
           expect(error).toBeInstanceOf(MimeError);
           expect((error as MimeError).code).toBe(code);
-          expect((error as MimeError).message).toBe(
-            `${field}: address contains a control character (U+${codePoint}).`,
-          );
+          expect((error as MimeError).message).toBe(invalidAddress(field));
+          expect((error as MimeError).message).not.toContain(ch);
         }
       }
     });
 
     it('refuses it in the object and display-name forms on the same parsed address', async () => {
-      for (const [, ch, codePoint] of controls) {
+      for (const [, ch] of controls) {
         const bad = `a${ch}b@example.com`;
         await expect(
           normalizeEmail({
@@ -994,9 +1004,30 @@ describe('normalizeEmail', () => {
             subject: 's',
             text: 't',
           }),
-        ).rejects.toThrow(`to: address contains a control character (U+${codePoint}).`);
-        expect(() => parseAddress(`Bob <${bad}>`, 'to')).toThrow(
-          `to: address contains a control character (U+${codePoint}).`,
+        ).rejects.toThrow(invalidAddress('to'));
+        expect(() => parseAddress(`Bob <${bad}>`, 'to')).toThrow(invalidAddress('to'));
+      }
+      // CR, LF and NUL in the object form reach the address rule directly
+      // (the string form is refused before it is parsed, by `rejectCRLF`):
+      // the package refuses them with the field's own code, so dropping the
+      // separate CRLF scan from the bare address lost nothing.
+      for (const ch of ['\r', '\n', '\0']) {
+        let error: unknown;
+        try {
+          await normalizeEmail({
+            from: 'a@x.dev',
+            to: { email: `a${ch}b@example.com` },
+            subject: 's',
+            text: 't',
+          });
+        } catch (e) {
+          error = e;
+        }
+        expect(error).toBeInstanceOf(MimeError);
+        expect((error as MimeError).code).toBe('INVALID_TO');
+        expect((error as MimeError).message).toBe(invalidAddress('to'));
+        expect(() => parseAddress(`Bob <a${ch}b@example.com>`, 'to')).toThrow(
+          /must not contain CR, LF, or NUL/,
         );
       }
       // The length bound still answers first: the scan is over at most 320
@@ -1031,12 +1062,12 @@ describe('normalizeEmail', () => {
 
   describe('a colon in an address', () => {
     // `:` is an RFC 5322 §3.2.3 special, not `atext`, so a bare
-    // `a:b@example.com` is no addr-spec without quoting — which the `"`
-    // rule refuses. It was the one special missing from the address class
-    // (`RFC5322_SPECIALS` in the same file has it): the address passed here,
-    // a handler's `forward()` recorded it, and the platform router's
-    // `isValidEmailAddress` dropped that one forward after earlier actions
-    // had fired. Refused now with the shape message, like `,` and `;`.
+    // `a:b@example.com` is no addr-spec without quoting — which is refused
+    // too. It was the one special missing from the hand-written address
+    // class: the address passed here, a handler's `forward()` recorded it,
+    // and the platform router's `isValidEmailAddress` dropped that one
+    // forward after earlier actions had fired. `email-validator` admits only
+    // `atext`, so it is refused like `,` and `;`.
     const colons = ['a:b@example.com', 'a@b:c.example.com', ':a@example.com', 'a@example.com:'];
 
     it('refuses a bare address carrying one, with the code for its field', async () => {
@@ -1062,9 +1093,7 @@ describe('normalizeEmail', () => {
           }
           expect(error).toBeInstanceOf(MimeError);
           expect((error as MimeError).code).toBe(code);
-          expect((error as MimeError).message).toBe(
-            `${field}: '${bad}' is not a valid email address.`,
-          );
+          expect((error as MimeError).message).toBe(invalidAddress(field));
         }
       }
     });
@@ -1078,10 +1107,8 @@ describe('normalizeEmail', () => {
             subject: 's',
             text: 't',
           }),
-        ).rejects.toThrow(`to: '${bad}' is not a valid email address.`);
-        expect(() => parseAddress(`Bob <${bad}>`, 'to')).toThrow(
-          `to: '${bad}' is not a valid email address.`,
-        );
+        ).rejects.toThrow(invalidAddress('to'));
+        expect(() => parseAddress(`Bob <${bad}>`, 'to')).toThrow(invalidAddress('to'));
       }
     });
 
@@ -1098,18 +1125,137 @@ describe('normalizeEmail', () => {
     });
   });
 
+  describe('dot-atom shape of an address', () => {
+    // An RFC 5322 §3.2.3 dot-atom cannot start or end with a dot or carry
+    // two in a row, on either side of the `@`. The hand-written rule and
+    // the platform router's regex BOTH accepted every one of these — no
+    // divergence, just a shared hole that Cloudflare or the next MTA would
+    // refuse after the handler's test had reported a success. One package
+    // on both sides closes it.
+    const dots = [
+      'a..b@example.com',
+      '.a@example.com',
+      'a.@example.com',
+      'a@example..com',
+      'a@.example.com',
+      'a@example.com.',
+    ];
+
+    it('refuses leading, trailing and doubled dots, with the code for its field', async () => {
+      for (const bad of dots) {
+        for (const [field, code] of [
+          ['to', 'INVALID_TO'],
+          ['from', 'INVALID_FROM'],
+          ['cc', 'MIME_ERROR'],
+          ['bcc', 'MIME_ERROR'],
+          ['replyTo', 'MIME_ERROR'],
+        ] as const) {
+          let error: unknown;
+          try {
+            await normalizeEmail({
+              from: 'a@x.dev',
+              to: 'b@y.dev',
+              [field]: bad,
+              subject: 's',
+              text: 't',
+            });
+          } catch (e) {
+            error = e;
+          }
+          expect(error, bad).toBeInstanceOf(MimeError);
+          expect((error as MimeError).code).toBe(code);
+          expect((error as MimeError).message).toBe(invalidAddress(field));
+        }
+        expect(() => parseAddress(`Bob <${bad}>`, 'to')).toThrow(invalidAddress('to'));
+      }
+    });
+
+    it('still accepts dots between atoms, on both sides', async () => {
+      for (const ok of [
+        'first.last@example.com',
+        'a.b.c@sub.example.co.uk',
+        'a@sub.sub.example.com',
+      ]) {
+        const email = await normalizeEmail({ from: ok, to: ok, subject: 's', text: 't' });
+        expect(email.to[0].email).toBe(ok);
+      }
+    });
+  });
+
+  describe('domain and local-part characters of an address', () => {
+    // The package's domain rule: ASCII labels, and a TLD that starts with a
+    // letter and is at least two characters. A quoted local part and a
+    // display name in the bare string stay refused, as they always were.
+    it('applies the TLD rule', async () => {
+      for (const bad of ['a@b.c', 'a@b.1c', 'a@b.c-', 'a@b.-c']) {
+        await expect(
+          normalizeEmail({ from: 'a@x.dev', to: bad, subject: 's', text: 't' }),
+        ).rejects.toThrow(invalidAddress('to'));
+      }
+      for (const ok of [
+        'a@b.c1',
+        'a@b.co',
+        'a@b.c-d',
+        'a@xn--bcher-kva.example',
+        'a@b-c.example',
+      ]) {
+        const email = await normalizeEmail({ from: 'a@x.dev', to: ok, subject: 's', text: 't' });
+        expect(email.to[0].email).toBe(ok);
+      }
+    });
+
+    it('refuses a raw IDN domain and a quoted local part', async () => {
+      for (const bad of [
+        'a@exämple.com',
+        '"a b"@example.com',
+        '"a@b"@example.com',
+        '"weird"@x.dev',
+      ]) {
+        await expect(
+          normalizeEmail({ from: 'a@x.dev', to: bad, subject: 's', text: 't' }),
+        ).rejects.toThrow(invalidAddress('to'));
+      }
+    });
+
+    it('pins the package quirk: a backtick may not be the FIRST local-part character', async () => {
+      // The first character class of `email-validator`'s regex lacks the
+      // backtick that every later class has. Pinned, not worked around: the
+      // point of one package on both sides is that the rule is whatever the
+      // package says, and a wrapper that patched this would be the start of
+      // the next hand-written rule.
+      await expect(
+        normalizeEmail({ from: 'a@x.dev', to: '`a@x.com', subject: 's', text: 't' }),
+      ).rejects.toThrow(invalidAddress('to'));
+      const email = await normalizeEmail({
+        from: 'a@x.dev',
+        to: 'a`b@x.com',
+        subject: 's',
+        text: 't',
+      });
+      expect(email.to[0].email).toBe('a`b@x.com');
+    });
+
+    it('accepts every RFC 5322 atext punctuation after the first character', async () => {
+      const atext = "!#$%&'*+-/=?^_`{|}~";
+      const ok = `a${atext}@example.com`;
+      const email = await normalizeEmail({ from: 'a@x.dev', to: ok, subject: 's', text: 't' });
+      expect(email.to[0].email).toBe(ok);
+    });
+  });
+
   it('parses the display-name form in linear time', () => {
     // `^\s*([^"<]+?)?\s*<` let three quantifiers share one run of
     // whitespace; the backtracker tried every split, cubic in the run.
     // Measured on that form: 2,000 spaces took 2 s, 4,000 took 10 s (16 s
     // when the `>` is missing). A regex cannot be interrupted, so keep the
     // run where a regression costs seconds, not the test's whole timeout.
+    // (Two-letter TLDs: the address rule wants at least two.)
     const run = ' '.repeat(4000);
     const started = performance.now();
-    expect(parseAddress(`${run}a@b.c`, 'to')).toEqual({ email: 'a@b.c' });
-    expect(() => parseAddress(`${run}<a@b.c`, 'to')).toThrow(MimeError);
-    expect(parseAddress(`\t${run}Name${run}<a@b.c>${run}`, 'to')).toEqual({
-      email: 'a@b.c',
+    expect(parseAddress(`${run}a@b.cd`, 'to')).toEqual({ email: 'a@b.cd' });
+    expect(() => parseAddress(`${run}<a@b.cd`, 'to')).toThrow(MimeError);
+    expect(parseAddress(`\t${run}Name${run}<a@b.cd>${run}`, 'to')).toEqual({
+      email: 'a@b.cd',
       name: 'Name',
     });
     expect(performance.now() - started).toBeLessThan(1000);
@@ -1118,14 +1264,14 @@ describe('normalizeEmail', () => {
   it('keeps the display-name form’s language after the regex change', () => {
     // Shapes the old and new patterns were checked to agree on
     // (exhaustively to length 7 over a 9-symbol alphabet); pinned here.
-    expect(parseAddress('a>b <c@d.e>', 'to')).toEqual({ email: 'c@d.e', name: 'a>b' });
-    expect(parseAddress('x<a@b.c>', 'to')).toEqual({ email: 'a@b.c', name: 'x' });
-    expect(parseAddress('\tJohn\tSmith\t<j@s.e>', 'to')).toEqual({
-      email: 'j@s.e',
+    expect(parseAddress('a>b <c@d.ef>', 'to')).toEqual({ email: 'c@d.ef', name: 'a>b' });
+    expect(parseAddress('x<a@b.cd>', 'to')).toEqual({ email: 'a@b.cd', name: 'x' });
+    expect(parseAddress('\tJohn\tSmith\t<j@s.ef>', 'to')).toEqual({
+      email: 'j@s.ef',
       name: 'John\tSmith',
     });
-    expect(parseAddress('   <a@b.c>   ', 'to')).toEqual({ email: 'a@b.c' });
-    expect(() => parseAddress('a"b <c@d.e>', 'to')).toThrow(MimeError);
+    expect(parseAddress('   <a@b.cd>   ', 'to')).toEqual({ email: 'a@b.cd' });
+    expect(() => parseAddress('a"b <c@d.ef>', 'to')).toThrow(MimeError);
     expect(() => parseAddress('a <b@c.d> e', 'to')).toThrow(MimeError);
     expect(() => parseAddress('<a b@c.d>', 'to')).toThrow(MimeError);
   });
@@ -1154,7 +1300,7 @@ describe('normalizeEmail', () => {
       email: 'a@x.dev',
       name: 'Smith, John',
     });
-    expect(parseAddress('a\\b <c@d.e>', 'to')).toEqual({ email: 'c@d.e', name: 'a\\b' });
+    expect(parseAddress('a\\b <c@d.ef>', 'to')).toEqual({ email: 'c@d.ef', name: 'a\\b' });
     // `\@` is still an `@` in a display name, which is still refused.
     expect(() => parseAddress('"a\\@x" <b@y.dev>', 'to')).toThrow(/must not contain '@'/);
     // The quoted-string line guard sees the DECODED name, the one

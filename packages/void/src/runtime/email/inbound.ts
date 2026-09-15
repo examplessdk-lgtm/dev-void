@@ -577,13 +577,13 @@ export function createMessageProxy(
       // Shape, after the length bound above so the scan is over at most 320
       // characters. `forward(rcptTo)` takes a bare address — Cloudflare's
       // "verified destination address" — so no display name is parsed; the
-      // rule is the one `sendEmail` applies to its `to`, so a handler's
-      // forward refuses exactly what an outbound send refuses. Left to
-      // replay, a malformed address in a LATER forward was refused by
-      // Cloudflare only after earlier forwards and replies had fired (the
-      // platform router validates the whole list first and drops just that
-      // forward). The router also wants a dot in the domain; `user@localhost`
-      // passes here, as it does for `sendEmail`, and is dropped there alone.
+      // rule is the one `sendEmail` applies to its `to` AND the one the
+      // platform router drops on (`email-validator`, on both sides), so a
+      // handler's forward refuses exactly what an outbound send refuses and
+      // records nothing the router would lose. Left to replay, a malformed
+      // address in a LATER forward was refused by Cloudflare only after
+      // earlier forwards and replies had fired (the platform router
+      // validates the whole list first and drops just that forward).
       validateAddressParts('to', to);
       // Accept both `Headers` (matches CF's runtime signature) and a plain
       // `Record<string, string>`. `Headers.entries()` lowercases keys per

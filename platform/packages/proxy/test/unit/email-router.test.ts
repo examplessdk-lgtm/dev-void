@@ -2634,10 +2634,11 @@ describe('framework ↔ router bound parity', () => {
     // is what this router drops on. Anything the framework records and the
     // router drops is an action a handler's test reported as a success and
     // the managed deployment silently lost — after the actions before it
-    // had fired. So: framework-accepts ⇒ router-accepts, for every entry
-    // below. The framework may be STRICTER (its 254-octet path and 64-octet
-    // local-part bounds are; the router's is the 320 work bound), never
-    // looser.
+    // had fired. Both sides now call the same package (`email-validator`),
+    // so the rule is: framework-accepts ⇔ router-accepts, for every entry
+    // below, with ZERO divergences either way. This test is the pin that
+    // the two `package.json`s stay on the same rule; the old "one known
+    // divergence" (the dot in the domain) is gone because both refuse it.
     const frameworkAccepts = (address: string): boolean => {
       try {
         validateAddressParts('to', address);
@@ -2658,21 +2659,47 @@ describe('framework ↔ router bound parity', () => {
       `a${ch}b@example.com`,
       `a@b${ch}c.example.com`,
     ]);
-    // `a@` plus 252 octets of labels: the longest path RFC 5321 makes every
-    // receiver accept, and the framework's `MAX_ADDRESS_OCTETS`.
+    // `a@` plus 252 characters of labels: the longest path RFC 5321 makes
+    // every receiver accept, and the package's 254 total.
     const domain252 = `${'b'.repeat(63)}.${'c'.repeat(63)}.${'d'.repeat(63)}.${'e'.repeat(60)}`;
     const deliverable = [
       'ops@example.com',
       'ops+T-42@example.com',
       'first.last@sub.example.com',
-      'jöhn@example.com',
       `${'a'.repeat(64)}@example.com`,
       `a@${domain252}`,
+      'a@xn--bcher-kva.example',
+      'a@b.c1',
+      "a!#$%&'*+-/=?^_`{|}~@example.com",
     ];
-    // The router's 320 work bound, with the dot its regex wants; the
-    // framework refuses both on its 254-octet rule.
+    // The router's 320 work bound, with a dot in the domain; both sides
+    // refuse both on the package's 254 total (the labels are also over 63).
     const at320 = `${'a'.repeat(64)}@${'b'.repeat(251)}.dev`;
     const at321 = `${'a'.repeat(64)}@${'b'.repeat(252)}.dev`;
+    // Dot-atom shapes BOTH sides used to accept — no divergence, one shared
+    // hole an MTA refused after the handler's test reported a success.
+    const malformedDotAtom = [
+      'a..b@example.com',
+      '.a@example.com',
+      'a.@example.com',
+      'a@example..com',
+      'a@.example.com',
+      'a@example.com.',
+    ];
+    // The framework used to accept these and the router refused them (the
+    // dot), or both accepted them (non-ASCII, the TLD shapes); both refuse
+    // them now.
+    const newlyRefused = [
+      'user@localhost',
+      'x@y',
+      'a@example',
+      'jöhn@example.com',
+      'ünicode@example.com',
+      'a@exämple.com',
+      'a@b.c',
+      'a@b.1c',
+      '`a@x.com',
+    ];
     const corpus: Array<string> = [
       ...deliverable,
       // One `@`, and something on both sides of it.
@@ -2698,46 +2725,62 @@ describe('framework ↔ router bound parity', () => {
       'ops@example.com ',
       ...controls,
       ...specials,
+      ...malformedDotAtom,
+      ...newlyRefused,
       at320,
       at321,
       `${'a'.repeat(65)}@example.com`,
       `a@${'b'.repeat(253)}`,
+      `a@${'b'.repeat(64)}.dev`,
+      // The package quirk, from the other side: a backtick AFTER the first
+      // character is fine.
+      'a`b@x.com',
     ];
 
-    // The one class the framework accepts and this router refuses, on
-    // purpose: the router wants a dot in the domain; the framework's
-    // `sendEmail` does not (`user@localhost` and `x@y` are syntactically
-    // legal RFC 5321 §4.1.2 mailboxes, and its comment says so). A handler's
-    // `forward('user@localhost')` is therefore recorded and dropped here.
-    // Pinned as a known divergence, not folded into the corpus, so that
-    // whichever side moves first is what this test reports.
-    const dotlessDomain = ['user@localhost', 'x@y', 'a@example'];
-
-    it('drops nothing the framework records, except a dot-less domain', () => {
+    it('accepts and refuses exactly what the framework does — zero divergences', () => {
       expect(at320).toHaveLength(320);
       expect(at321).toHaveLength(321);
-      expect(new TextEncoder().encode(deliverable[5]!).length).toBe(254);
-      const divergent = corpus.filter((a) => frameworkAccepts(a) && !isValidEmailAddress(a));
+      expect(deliverable[4]).toHaveLength(254);
+      const divergent = corpus.filter((a) => frameworkAccepts(a) !== isValidEmailAddress(a));
       expect(
         divergent,
-        `framework records but the router drops: ${JSON.stringify(divergent[0])}`,
+        `framework and router disagree on: ${JSON.stringify(divergent[0])}`,
       ).toEqual([]);
-      // Not vacuous: both sides accept the deliverable shapes, the router
-      // alone accepts the 320-character address, and both refuse every
-      // special and control.
+      // Not vacuous: both sides accept every deliverable shape, and both
+      // refuse the 320-character address, every special, every control,
+      // every malformed dot-atom and every newly refused shape.
       expect(deliverable.every((a) => frameworkAccepts(a) && isValidEmailAddress(a))).toBe(true);
-      expect(isValidEmailAddress(at320)).toBe(true);
+      expect(frameworkAccepts('a`b@x.com') && isValidEmailAddress('a`b@x.com')).toBe(true);
+      expect(isValidEmailAddress(at320)).toBe(false);
       expect(frameworkAccepts(at320)).toBe(false);
       expect(
-        [...controls, ...specials].some((a) => frameworkAccepts(a) || isValidEmailAddress(a)),
+        [...controls, ...specials, ...malformedDotAtom, ...newlyRefused].some(
+          (a) => frameworkAccepts(a) || isValidEmailAddress(a),
+        ),
       ).toBe(false);
     });
 
-    it('pins the dot-less domain as the one known divergence', () => {
-      for (const address of dotlessDomain) {
-        expect(frameworkAccepts(address), `framework accepts ${address}`).toBe(true);
+    it('drops a malformed dot-atom the framework also refuses', () => {
+      // The thread this closes: `a..b@example.com` was accepted by BOTH the
+      // hand-written framework rule and this router's regex.
+      for (const address of malformedDotAtom) {
+        expect(isValidEmailAddress(address), `router refuses ${address}`).toBe(false);
+        expect(frameworkAccepts(address), `framework refuses ${address}`).toBe(false);
+      }
+    });
+
+    it('refuses the dot-less domain on both sides now, not as a divergence', () => {
+      for (const address of ['user@localhost', 'x@y', 'a@example']) {
+        expect(frameworkAccepts(address), `framework refuses ${address}`).toBe(false);
         expect(isValidEmailAddress(address), `router refuses ${address}`).toBe(false);
       }
+    });
+
+    it('is length-first: a non-string or an over-long value never reaches the package', () => {
+      expect(isValidEmailAddress(undefined)).toBe(false);
+      expect(isValidEmailAddress(42)).toBe(false);
+      expect(isValidEmailAddress(['ops@example.com'])).toBe(false);
+      expect(isValidEmailAddress(`ops@${'b'.repeat(400)}.dev`)).toBe(false);
     });
   });
 });
