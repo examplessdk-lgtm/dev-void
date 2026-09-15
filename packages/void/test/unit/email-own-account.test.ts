@@ -396,6 +396,44 @@ describe('generated handleEmail on a native ForwardableEmailMessage', () => {
     expect(calls.forwards[0].headers?.get('X-Void-Trace')).toBe('abc');
   });
 
+  it('enacts a forward recorded after parseEmail drained the native raw stream', async () => {
+    // The documented handler shape — `parseEmail(message)`, then
+    // `message.forward(...)` — reads the one-shot native `raw` to completion
+    // before the forward is replayed, exactly as Cloudflare's own "Email
+    // Storage" example does on a real message. The replay must not depend
+    // on `raw`: `forward(rcptTo, headers?)` carries no bytes, the runtime
+    // forwards the message it holds (miniflare's local `forward` never reads
+    // `raw` either), so a disturbed stream at replay time is the ordinary
+    // case, not a fault.
+    const handleEmail = buildHandleEmail(async (message) => {
+      const parsed = await parseEmail(message);
+      await message.forward('ops@acme.com', new Headers({ 'X-Subject': parsed.subject ?? '' }));
+    });
+    const { message, calls } = nativeMessage({
+      from: 'sender@example.com',
+      to: 'support@mail.acme.com',
+      mime: INBOUND_MIME,
+    });
+    const nativeForward = message.forward.bind(message);
+    let rawLockedAtForward: boolean | undefined;
+    vi.spyOn(message, 'forward').mockImplementation(async (to, fwdHeaders) => {
+      rawLockedAtForward = message.raw.locked;
+      return nativeForward(to, fwdHeaders);
+    });
+
+    const actions = await handleEmail(message, {}, {});
+
+    // The parse consumed the native stream and it is still held by that
+    // reader when the native forward fires — and the forward fires anyway.
+    expect(rawLockedAtForward).toBe(true);
+    expect(calls.forwards).toHaveLength(1);
+    expect(calls.forwards[0].to).toBe('ops@acme.com');
+    expect(calls.forwards[0].headers?.get('X-Subject')).toBe('Help');
+    expect(actions).toEqual([
+      { type: 'forward', to: 'ops@acme.com', headers: { 'x-subject': 'Help' } },
+    ]);
+  });
+
   it('fires nothing on the native message when a later forward carries an invalid header record', async () => {
     // The plain-record form is stored verbatim, so a value `new Headers()`
     // rejects used to surface only during native replay — after the first

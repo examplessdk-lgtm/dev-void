@@ -1077,7 +1077,7 @@ The project owner's email is added automatically when the project is created, so
 void email disallow <address> [--project <name>]
 ```
 
-Remove one recipient from the project's destination list. Outbound mail to that address is rejected from the next deploy onward.
+Remove one recipient from the project's destination list. Sends to that address are refused within about a minute: the platform updates the project's allowlist as part of the command, and the proxy re-reads it every 60 seconds. No deploy is involved.
 
 ### `void email status`
 

@@ -167,8 +167,18 @@ function freshLinkHint(address: string): string {
   return `For a fresh link, remove the address from every project that lists it (\`void email disallow ${address}\`), then \`void email allow ${address}\` — Cloudflare mails a new link only when it registers the address anew.`;
 }
 
-async function emailDisallow(
-  client: PlatformClient,
+/**
+ * `void email disallow <address>` — exported for the unit test; the command
+ * entry (`runEmailCommand`) resolves the client and project first.
+ *
+ * No deploy is involved: the api tightens the proxy's `email-allowlist`
+ * KV mirror inside the DELETE (and answers 503 if that write fails), and
+ * the proxy re-reads the mirror with a 60s `cacheTtl` on both the send
+ * path and inbound forward/reply — so the address is refused once that
+ * per-colo cache turns over.
+ */
+export async function emailDisallow(
+  client: Pick<PlatformClient, 'listEmailDestinations' | 'removeEmailDestination'>,
   projectId: string,
   address: string,
 ): Promise<void> {
@@ -179,7 +189,7 @@ async function emailDisallow(
     process.exit(1);
   }
   await client.removeEmailDestination(projectId, dest.id);
-  log.success(`Removed ${dest.address}. Outbound to this address will be rejected on next deploy.`);
+  log.success(`Removed ${dest.address}. Sends to it are refused within about a minute.`);
 }
 
 /**
