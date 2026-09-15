@@ -1060,6 +1060,114 @@ describe('normalizeEmail', () => {
     });
   });
 
+  describe('control characters in an attachment filename', () => {
+    // `rejectCRLF` refused only CR, LF and NUL, and a filename is rendered
+    // through `quoteParam` — never `encodeWord` — so `invoice\x01.pdf` was
+    // written raw into both `name="…"` and `filename="…"` (measured on the
+    // wire: `… 69 6e 76 6f 69 63 65 01 2e 70 64 66 22`), captured as a
+    // success under `void dev` and by the harness, and left for the
+    // receiving MTA. RFC 5322 §3.2.4 `qtext` is printable US-ASCII less `"`
+    // and `\`; a control in a quoted-string is `obs-qtext`, which §4 says
+    // MUST NOT be generated. The message names the code point and never
+    // echoes the value.
+    const base = { from: 'a@x.dev', to: 'b@y.dev', subject: 's', text: 't' };
+    const controls = [
+      ['SOH', '\x01', 'U+0001'],
+      ['ESC', '\x1b', 'U+001B'],
+      ['US', '\x1f', 'U+001F'],
+      ['DEL', '\x7f', 'U+007F'],
+    ] as const;
+
+    it('refuses one, naming its code point rather than echoing it', async () => {
+      for (const [, ch, point] of controls) {
+        let error: unknown;
+        try {
+          await normalizeEmail({
+            ...base,
+            attachments: [{ filename: `invoice${ch}.pdf`, content: 'x' }],
+          });
+        } catch (e) {
+          error = e;
+        }
+        expect(error).toBeInstanceOf(MimeError);
+        expect((error as MimeError).code).toBe('MIME_ERROR');
+        expect((error as MimeError).message).toBe(
+          `attachment filename contains a control character (${point}).`,
+        );
+        expect((error as MimeError).message).not.toContain(ch);
+      }
+      // CR, LF and NUL still answer first, with the message they always had.
+      for (const ch of ['\r', '\n', '\0']) {
+        await expect(
+          normalizeEmail({ ...base, attachments: [{ filename: `a${ch}b.pdf`, content: 'x' }] }),
+        ).rejects.toThrow('attachment filename: must not contain CR, LF, or NUL.');
+      }
+    });
+
+    it('accepts HTAB, which is folding white space inside a quoted-string (RFC 5322 §3.2.4), unchanged', async () => {
+      // `quoted-string = DQUOTE *([FWS] qcontent) [FWS] DQUOTE` and `FWS` is
+      // made of `WSP` (SP / HTAB), so a tab between characters is legal
+      // exactly as a space is; `obs-NO-WS-CTL`, the RFC's own list of the
+      // controls that used to be `qtext`, leaves %d9 out. Rendered as it
+      // was: raw, inside the quotes, in both parameters.
+      const { text } = await build({
+        ...base,
+        attachments: [{ filename: 'a\tb.pdf', content: 'x' }],
+      });
+      expect(text).toContain('; name="a\tb.pdf"\r\n');
+      expect(text).toContain('; filename="a\tb.pdf"\r\n');
+    });
+
+    it('still renders a non-ASCII filename as raw UTF-8 in the quoted parameter', async () => {
+      // The existing path, pinned: no RFC 2231 `filename*=` and no
+      // encoded-word — the UTF-8 octets go inside the quotes as they did.
+      const { raw, text } = await build({
+        ...base,
+        attachments: [{ filename: 'résumé.pdf', content: 'x' }],
+      });
+      expect(text).toContain('; name="résumé.pdf"\r\n');
+      expect(text).toContain('; filename="résumé.pdf"\r\n');
+      expect(text).not.toContain('filename*=');
+      const hex = [...raw].map((b) => b.toString(16).padStart(2, '0')).join(' ');
+      expect(hex).toContain('66 69 6c 65 6e 61 6d 65 3d 22 72 c3 a9 73 75 6d c3 a9 2e 70 64 66 22');
+    });
+
+    it('keeps the length bound in front of the scan', async () => {
+      // "Bound before you scan": an over-long filename is refused by the
+      // `QUOTED_FILENAME_LINE_OVERHEAD` guard before its characters are read.
+      const filename = `a\x01${'b'.repeat(2000)}.pdf`;
+      await expect(
+        normalizeEmail({ ...base, attachments: [{ filename, content: 'x' }] }),
+      ).rejects.toThrow(
+        new RegExp(
+          `attachment filename is ${filename.length} characters; a quoted \`filename=\` parameter cannot be folded`,
+        ),
+      );
+    });
+
+    it('refuses one in the media type by the same rule', async () => {
+      // `Content-Type: <contentType>; name="…"` is rendered verbatim, and an
+      // RFC 2045 §5.1 `token` excludes CTLs.
+      await expect(
+        normalizeEmail({
+          ...base,
+          attachments: [{ filename: 'a.pdf', content: 'x', contentType: 'application/pdf\x01' }],
+        }),
+      ).rejects.toThrow('attachment contentType contains a control character (U+0001).');
+    });
+
+    it('refuses one in the Content-ID by the same rule', async () => {
+      // `Content-ID: <cid>` is rendered verbatim, and an RFC 5322 §3.6.4
+      // `msg-id` is `dot-atom-text` — no control at all.
+      await expect(
+        normalizeEmail({
+          ...base,
+          attachments: [{ filename: 'a.png', content: 'x', contentId: 'lo\x7fgo' }],
+        }),
+      ).rejects.toThrow('attachment contentId contains a control character (U+007F).');
+    });
+  });
+
   describe('a colon in an address', () => {
     // `:` is an RFC 5322 §3.2.3 special, not `atext`, so a bare
     // `a:b@example.com` is no addr-spec without quoting — which is refused

@@ -92,6 +92,43 @@ function rejectCRLF(field: string, value: string): void {
   }
 }
 
+/**
+ * Refuse any other C0 control or DEL in a value that is rendered VERBATIM
+ * into a header — an attachment's filename, media type and Content-ID.
+ * `rejectCRLF` is enough for a value `encodeWord` renders (the subject, a
+ * custom header value, a display name): anything outside printable ASCII
+ * sends the whole value into base64, so a control never reaches the wire.
+ * These three go through `quoteParam` or straight into the line, so
+ * `invoice\x01.pdf` was written raw into `name="…"` and `filename="…"`,
+ * captured as a success under `void dev` and by the test harness, and left
+ * for the receiving MTA to refuse.
+ *
+ * RFC 5322 §3.2.4 `qtext` is printable US-ASCII less `"` and `\`; a
+ * control inside a quoted-string is `obs-qtext`, which §4 says MUST NOT be
+ * generated. HTAB is deliberately NOT refused: `quoted-string` is
+ * `DQUOTE *([FWS] qcontent) [FWS] DQUOTE` and `FWS` is built from `WSP`
+ * (SP / HTAB), so a tab between characters is folding white space exactly
+ * as a space is — and `obs-NO-WS-CTL`, the RFC's own list of the controls
+ * that used to be `qtext`, leaves %d9 out. The same set is illegal in an
+ * RFC 2045 §5.1 `token` (no CTLs) and an RFC 5322 §3.6.4 `msg-id`
+ * (`dot-atom-text`), so one rule serves the media type and the Content-ID.
+ *
+ * The message names the code point and never echoes the value, as
+ * `validateAddressParts` does. Runs AFTER the filename's length bound, so
+ * the scan is over a value already known to fit a line.
+ */
+function rejectControls(field: string, value: string): void {
+  for (let i = 0; i < value.length; i++) {
+    const c = value.charCodeAt(i);
+    if ((c < 0x20 && c !== 0x09) || c === 0x7f) {
+      throw new MimeError(
+        'MIME_ERROR',
+        `${field} contains a control character (U+${c.toString(16).toUpperCase().padStart(4, '0')}).`,
+      );
+    }
+  }
+}
+
 const COMMON_TYPES: Record<string, string> = {
   txt: 'text/plain',
   html: 'text/html',
@@ -413,11 +450,16 @@ async function normalizeAttachment(att: Attachment): Promise<NormalizedAttachmen
         `so its line would exceed the ${MAX_LINE_OCTETS}-octet limit in RFC 5322 §2.1.1. Shorten the filename.`,
     );
   }
+  // After the bound: `rejectCRLF` above answers for the line delimiters on
+  // the raw string, and this scan is over a filename already known to fit.
+  rejectControls('attachment filename', att.filename);
   if (att.contentType !== undefined) {
     rejectCRLF('attachment contentType', att.contentType);
+    rejectControls('attachment contentType', att.contentType);
   }
   if (att.contentId !== undefined) {
     rejectCRLF('attachment contentId', att.contentId);
+    rejectControls('attachment contentId', att.contentId);
   }
   // The type admits only the two literals, but that binds nothing at
   // runtime: a JS caller, or a JSON-parsed options object, can hand over any

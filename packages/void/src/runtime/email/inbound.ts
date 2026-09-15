@@ -768,6 +768,65 @@ function fitsHeaderLine(name: string, value: string | undefined): value is strin
   return true;
 }
 
+/**
+ * Whether `value` carries a C0 control other than HTAB, or DEL. The
+ * sibling of `fitsHeaderLine` for the other way a remote-controlled id can
+ * be unrepresentable: a threading value is emitted verbatim, so a control
+ * inside it reached the reply's `In-Reply-To` / `References` line raw —
+ * `\x01` and DEL pass a WHATWG `Headers`, which refuses only CR, LF and
+ * NUL — and an RFC 5322 §3.6.4 `msg-id` is `dot-atom-text`, which admits no
+ * control at all. HTAB is not one here: it is the whitespace that separates
+ * ids (§3.2.2 FWS), the same break `fitsHeaderLine` and `replyReferences`
+ * cut at. One pass, no allocation, so it costs nothing a hostile header can
+ * multiply; never a throw, for the same reason as the line guard.
+ */
+function hasControl(value: string): boolean {
+  for (let i = 0; i < value.length; i++) {
+    const c = value.charCodeAt(i);
+    if ((c < 0x20 && c !== 0x09) || c === 0x7f) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * `chain` without any id that `hasControl` refuses, the rest in their order
+ * and joined by single spaces; the chain itself when there is nothing to
+ * drop, without allocating. Only ONE id is lost — the others still thread —
+ * whereas an id no line can carry drops the whole chain for the parent's id
+ * (`replyReferences`), because that guard is about the rendered line and
+ * this one is about one token. Called only on a chain already cut to
+ * `MAX_REPLY_REFERENCES_CHARS`, so the per-id slices in the rare bad case
+ * are bounded by that budget, not by the header a remote sender delivered.
+ */
+function dropControlIds(chain: string): string {
+  if (!hasControl(chain)) {
+    return chain;
+  }
+  const kept: Array<string> = [];
+  let start = -1;
+  let tainted = false;
+  for (let i = 0; i <= chain.length; i++) {
+    const c = i < chain.length ? chain.charCodeAt(i) : 0x20;
+    if (c === 0x20 || c === 0x09) {
+      if (start >= 0 && !tainted) {
+        kept.push(chain.slice(start, i));
+      }
+      start = -1;
+      tainted = false;
+    } else {
+      if (start < 0) {
+        start = i;
+      }
+      if (c < 0x20 || c === 0x7f) {
+        tainted = true;
+      }
+    }
+  }
+  return kept.join(' ');
+}
+
 export interface ReplyEmailOptions {
   /**
    * On the managed platform (a `__VOID_PROJECT_SLUG` is injected) defaults
@@ -935,6 +994,9 @@ function replyReferences(originalReferences: string, messageId: string): string 
     }
     chain = chain.slice(cut);
   }
+  // After the cut, so the only chain this ever walks is one the budget
+  // already bounds. `parent` was checked by the caller and is never dropped.
+  chain = dropControlIds(chain);
   chain = `${chain}${parent}`.trim();
   // A chain folds at its spaces, so one this long is fine; it is a single
   // oversized id inside it that is not.
@@ -1117,9 +1179,14 @@ export async function buildReplyMessage(
   // limit, and a message-id has no whitespace to fold at — so threading a
   // hostile one verbatim would let anyone make this app's reply throw, with
   // the app at fault for nothing. Threading is best-effort: drop a value
-  // that cannot be represented and still send the reply.
+  // that cannot be represented and still send the reply. A control
+  // character is the other way an id is unrepresentable (`hasControl`), and
+  // it is dropped the same way rather than refused by `normalizeEmail`.
   const threading: { inReplyTo?: string; references?: string } = {};
-  const messageId = fitsHeaderLine('In-Reply-To', originalMessageId) ? originalMessageId : '';
+  const messageId =
+    fitsHeaderLine('In-Reply-To', originalMessageId) && !hasControl(originalMessageId)
+      ? originalMessageId
+      : '';
   if (messageId) {
     threading.inReplyTo = messageId;
   }

@@ -1770,6 +1770,53 @@ describe('reply threading survives a hostile inbound header', () => {
     expect(text).toContain('In-Reply-To: <abc123@remote.dev>');
     expect(text).toContain('References: <abc123@remote.dev>');
   });
+
+  describe('a control character in a threading id', () => {
+    // A threading value is emitted verbatim, and `\x01` or DEL pass a WHATWG
+    // `Headers` (which refuses only CR, LF and NUL), so a remote sender's
+    // `Message-ID: <abc\x01def@remote.dev>` reached the reply's `In-Reply-To`
+    // and `References` lines raw. An RFC 5322 §3.6.4 `msg-id` admits no
+    // control, so such an id is unrepresentable — dropped, as an over-long
+    // one is, never a throw: the reply is still sent. Unlike the line
+    // guard, which is about the rendered line, this is about one token, so
+    // a bad id in the middle of a chain loses only itself.
+    // eslint-disable-next-line no-control-regex -- C0 controls and DEL are the point
+    const rawControl = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/;
+
+    function headersOf(text: string): string {
+      return text.slice(0, text.indexOf('\r\n\r\n'));
+    }
+
+    it('drops a parent Message-ID carrying one: no In-Reply-To, absent from References, reply still sent', async () => {
+      const parent = '<abc\x01def@remote.dev>';
+      const text = await replyText('<r1@remote.dev>', parent);
+      expect(text).toContain('Subject: Re: hi');
+      expect(text).not.toContain('In-Reply-To:');
+      expect(referencesOf(text)).toBe('<r1@remote.dev>');
+      expect(headersOf(text)).not.toMatch(rawControl);
+      // With no chain to thread either, the reply carries no threading at all.
+      const bare = await replyText('', parent);
+      expect(bare).toContain('Subject: Re: hi');
+      expect(bare).not.toContain('In-Reply-To:');
+      expect(bare).not.toContain('References:');
+    });
+
+    it('drops only the id carrying DEL from a References chain; the rest and the parent stay in order', async () => {
+      for (const separator of [' ', '\t']) {
+        const chain = ['<r1@remote.dev>', '<r\x7f2@remote.dev>', '<r3@remote.dev>'].join(separator);
+        const text = await replyText(chain);
+        expect(text).toContain(`In-Reply-To: ${MESSAGE_ID}\r\n`);
+        expect(referencesOf(text)).toBe(`<r1@remote.dev> <r3@remote.dev> ${MESSAGE_ID}`);
+        expect(headersOf(text)).not.toMatch(rawControl);
+      }
+    });
+
+    it('still threads a clean chain and parent exactly as before', async () => {
+      const text = await replyText('<r1@remote.dev> <r2@remote.dev>');
+      expect(text).toContain(`In-Reply-To: ${MESSAGE_ID}\r\n`);
+      expect(referencesOf(text)).toBe(`<r1@remote.dev> <r2@remote.dev> ${MESSAGE_ID}`);
+    });
+  });
 });
 
 describe('reply subject survives a hostile inbound header', () => {
