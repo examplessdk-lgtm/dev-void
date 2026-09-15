@@ -1,0 +1,59 @@
+.github/workflows/platform-deploy-staging.yml
+  s_99519f2f391ce2::t_6e3710bd1e7899 52,69,82-86
+docs/guide/self-hosted-platform.md
+  s_99519f2f391ce2::t_df79c37f4d7718 9-10,18-19,72,76,147-149,165,167,178,186
+docs/reference/cli.md
+  s_99519f2f391ce2::t_356b6e76b93728 128,295-297,322-324
+packages/platform/README.md
+  s_99519f2f391ce2::t_da94e5998aa7fc 16-17
+packages/void/AGENT_PROMPT.md
+  s_99519f2f391ce2::t_dc2aecd4753173 27
+packages/void/getting-started-prompt.txt
+  s_99519f2f391ce2::t_f70796dfaa647a 19
+packages/void/skills/void/SKILL.md
+  s_99519f2f391ce2::t_5ebf8da2afdf92 24
+packages/void/src/cli/auth.ts
+  s_99519f2f391ce2::t_c7dbf920f31b60 13,37,41,45,175-179,182,185-187
+packages/void/src/cli/keyring.ts
+  s_99519f2f391ce2::t_04804713a893be 1-27
+packages/void/src/cli/platform-auth.ts
+  s_99519f2f391ce2::t_72a7b2f440c78b 1-132
+packages/void/src/cli/platform-installer.ts
+  s_99519f2f391ce2::t_7d9eceb7484d0b 249-254,256,259,261-264,270-287,289-300,303-314,322,387,1742,1747,1755-1760,1763,1804,1808-1824,1826-1857
+packages/void/src/cli/platform-lifecycle.ts
+  s_99519f2f391ce2::t_b459b88e4327d4 10,77-78,111-112,212,225-228,240,310-325
+packages/void/src/cli/platform-management.ts
+  s_99519f2f391ce2::t_640ebf94173681 18,171-172,286,290
+packages/void/src/cli/platform-registry.ts
+  s_99519f2f391ce2::t_6135f2fa8b7518 1,18-19,47-57,442-449,456,464,473-481,487-508,511-514,516-521,523-535,537-547,550,553,558,560-563,565-652
+packages/void/test/unit/auth-token-storage.test.ts
+  s_99519f2f391ce2::t_22f0db20ec0938 1-18
+packages/void/test/unit/platform-auth.test.ts
+  s_99519f2f391ce2::t_45b4df4c069b9e 1-97
+packages/void/test/unit/platform-installer.test.ts
+  s_99519f2f391ce2::t_1850fc57a76f14 26,33-34,73-76,78,1239,1251-1254,1270,1278,1284-1350
+packages/void/test/unit/platform-management.test.ts
+  s_99519f2f391ce2::t_fbc71b01aa462f 18,41-44,46
+packages/void/test/unit/platform-registry.test.ts
+  s_99519f2f391ce2::t_8d63bd1b62a9d8 1,9,29-32,40,177,179,191-245
+platform/README.md
+  s_99519f2f391ce2::t_8598cfc3921a73 5
+platform/meta/operations.md
+  s_99519f2f391ce2::t_762936f783dae9 535,537
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "530a89bf2cbd2cd36c8bbb01f957a974dde6e856",
+  "prompts": {},
+  "sessions": {
+    "s_99519f2f391ce2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0a291-e48e-7d43-a70f-9f0339096aa7",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
