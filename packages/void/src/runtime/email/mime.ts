@@ -129,6 +129,124 @@ function rejectControls(field: string, value: string): void {
   }
 }
 
+/** RFC 2045 §5.1 `tspecials`: what a `token` may not contain besides SPACE and CTLs. */
+const TSPECIALS = '()<>@,;:\\"/[]?=';
+
+/** RFC 2045 §5.1 `token` character: printable US-ASCII less SPACE and `tspecials`. */
+function isTokenChar(c: number): boolean {
+  return c > 0x20 && c < 0x7f && !TSPECIALS.includes(String.fromCharCode(c));
+}
+
+/**
+ * Refuse an attachment media type that does not parse as RFC 2045 §5.1
+ * `type "/" subtype *(";" parameter)`.
+ *
+ * `rejectControls` answers only for CTLs, and `buildAttachmentPart` writes
+ * the value verbatim ahead of its own `; name="…"`, so `text/plain; x="`
+ * rendered `Content-Type: text/plain; x="; name="a.txt"` — captured as a
+ * success under `void dev` and by the harness, while Python's `email`
+ * reports `end of header inside quoted string` on that line and reads the
+ * builder's `name` parameter as the VALUE of `x`. `text` (no subtype),
+ * `text/plain; charset` (no value) and `text/plain;;` went the same way.
+ *
+ * The grammar is the RFC's, read as a generator: a `token` is printable
+ * US-ASCII less SPACE and `tspecials`; a `value` is a `token` or a
+ * quoted-string, whose content is anything but a bare `"` or `\` (the same
+ * rule `quoteParam` renders `name="…"` by, so a caller's quoted value may
+ * carry what the builder's own already does). Optional WSP is admitted on
+ * either side of `;` — the RFC 822 implicit LWSP every parser accepts and
+ * the form HTTP's `Content-Type` writes — and nowhere else: `text/ plain`,
+ * a trailing `;`, and an RFC 822 comment are refused rather than repaired.
+ * Two parameters are also refused on their meaning: a `name`, because the
+ * builder appends `name="<filename>"` and RFC 6838 §4.3 makes it "an error
+ * for a specific parameter to be specified more than once"; and by that
+ * same sentence any attribute given twice, compared case-insensitively as
+ * §5.1 says attributes match. Type and subtype are kept as given — matching
+ * is case-insensitive, so `TEXT/PLAIN` is legal and renders unchanged.
+ *
+ * One pass, no backtracking, and the only allocation is one lower-cased
+ * attribute per parameter for the duplicate check, which is why this runs
+ * AFTER the value's length bound. The message names the rule and never
+ * echoes the value.
+ */
+function validateMediaType(field: string, value: string): void {
+  const syntax = () =>
+    new MimeError(
+      'MIME_ERROR',
+      `${field} is not a valid media type (RFC 2045 §5.1: type/subtype, then ; attribute=value parameters).`,
+    );
+  const n = value.length;
+  let i = 0;
+  /** Advance over a `token`; the number of characters consumed. */
+  const token = (): number => {
+    const start = i;
+    while (i < n && isTokenChar(value.charCodeAt(i))) {
+      i++;
+    }
+    return i - start;
+  };
+  const wsp = (): void => {
+    while (i < n && (value[i] === ' ' || value[i] === '\t')) {
+      i++;
+    }
+  };
+  if (token() === 0 || value[i] !== '/') {
+    throw syntax();
+  }
+  i++;
+  if (token() === 0) {
+    throw syntax();
+  }
+  const seen = new Set<string>();
+  while (i < n) {
+    wsp();
+    if (value[i] !== ';') {
+      throw syntax();
+    }
+    i++;
+    wsp();
+    const start = i;
+    if (token() === 0 || value[i] !== '=') {
+      throw syntax();
+    }
+    const attribute = value.slice(start, i).toLowerCase();
+    i++;
+    if (value[i] === '"') {
+      i++;
+      for (;;) {
+        if (i >= n) {
+          throw syntax();
+        }
+        const ch = value[i++];
+        if (ch === '"') {
+          break;
+        }
+        if (ch === '\\') {
+          if (i >= n) {
+            throw syntax();
+          }
+          i++;
+        }
+      }
+    } else if (token() === 0) {
+      throw syntax();
+    }
+    if (attribute === 'name') {
+      throw new MimeError(
+        'MIME_ERROR',
+        `${field} must not carry a name= parameter; the builder adds name="<filename>" itself.`,
+      );
+    }
+    if (seen.has(attribute)) {
+      throw new MimeError(
+        'MIME_ERROR',
+        `${field} gives the same parameter twice; attribute names are case-insensitive and each may appear once (RFC 6838 §4.3).`,
+      );
+    }
+    seen.add(attribute);
+  }
+}
+
 const COMMON_TYPES: Record<string, string> = {
   txt: 'text/plain',
   html: 'text/html',
@@ -455,7 +573,19 @@ async function normalizeAttachment(att: Attachment): Promise<NormalizedAttachmen
   rejectControls('attachment filename', att.filename);
   if (att.contentType !== undefined) {
     rejectCRLF('attachment contentType', att.contentType);
+    // Same order as the filename: the bound, then the scans. `Content-Type:
+    // <contentType>; name="…"` puts the media type on the line ahead of the
+    // builder's own parameter, and `validateMediaType` keeps one string per
+    // parameter, so both run over a value already known to fit.
+    if (att.contentType.length + CONTENT_TYPE_LINE_OVERHEAD > MAX_LINE_OCTETS) {
+      throw new MimeError(
+        'MIME_ERROR',
+        `attachment contentType is ${att.contentType.length} characters; at most ${MAX_LINE_OCTETS - CONTENT_TYPE_LINE_OVERHEAD} fit ` +
+          `on the Content-Type line under the ${MAX_LINE_OCTETS}-octet limit in RFC 5322 §2.1.1. Shorten it.`,
+      );
+    }
     rejectControls('attachment contentType', att.contentType);
+    validateMediaType('attachment contentType', att.contentType);
   }
   if (att.contentId !== undefined) {
     rejectCRLF('attachment contentId', att.contentId);
@@ -830,6 +960,16 @@ function foldHeader(name: string, value: string): string {
 const MAX_LINE_OCTETS = 998;
 /** ` filename="` + `"`: the shortest line a quoted filename parameter can fold onto. */
 const QUOTED_FILENAME_LINE_OVERHEAD = 12;
+/**
+ * ` ` + `;`: the shortest line an attachment's media type can fold onto,
+ * the whole value taken as one token. `foldHeader` would split a value
+ * of several parameters at their spaces, so this bound is exact for the
+ * one-token media type every attachment carries in practice and
+ * conservative for a run of parameters that together pass the line
+ * limit; that is accepted, because the alternative — find the fold points
+ * first — is the scan this bound exists to run ahead of.
+ */
+const CONTENT_TYPE_LINE_OVERHEAD = 2;
 /** ` "` + `"`: the shortest line a quoted display name can fold onto. */
 const QUOTED_NAME_LINE_OVERHEAD = 3;
 /** `:` alone: the shortest line a header name can sit on, its value folded onto the next. */

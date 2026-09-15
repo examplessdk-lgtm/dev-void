@@ -1168,6 +1168,176 @@ describe('normalizeEmail', () => {
     });
   });
 
+  describe('media type syntax of an attachment', () => {
+    // `rejectControls` answered only for CTLs, and `buildAttachmentPart`
+    // writes the media type verbatim ahead of its own `; name="…"`, so
+    // `text/plain; x="` rendered `Content-Type: text/plain; x="; name="a.txt"`
+    // — captured as a success under `void dev` and by the harness, while
+    // Python's `email` reports `end of header inside quoted string` on that
+    // line and reads the builder's `name` as the VALUE of `x`. The grammar
+    // is RFC 2045 §5.1 `type "/" subtype *(";" parameter)`, read as a
+    // generator; the message names the rule and never echoes the value.
+    const base = { from: 'a@x.dev', to: 'b@y.dev', subject: 's', text: 't' };
+    const SYNTAX =
+      'attachment contentType is not a valid media type (RFC 2045 §5.1: type/subtype, then ; attribute=value parameters).';
+
+    async function refused(contentType: string): Promise<MimeError> {
+      let error: unknown;
+      try {
+        await normalizeEmail({
+          ...base,
+          attachments: [{ filename: 'a.txt', content: 'x', contentType }],
+        });
+      } catch (e) {
+        error = e;
+      }
+      expect(error).toBeInstanceOf(MimeError);
+      expect((error as MimeError).code).toBe('MIME_ERROR');
+      return error as MimeError;
+    }
+
+    it('refuses one that does not parse, naming the rule rather than echoing it', async () => {
+      const invalid = [
+        'text/plain; x="', // unterminated quoted-string
+        'text/plain; x="a\\"', // the `\` escapes the closing quote
+        'text/plain; charset', // attribute without `=` value
+        'text/plain; charset=', // empty token value (`""` is the empty value)
+        'text/plain; x=a/b', // `/` is a tspecial; must be quoted
+        'text', // subtype is MANDATORY (§5.1)
+        'text/', //
+        '/plain', //
+        'text/plain/x', //
+        'text/ plain', // WSP inside the type
+        'text plain', //
+        ' text/plain', // leading WSP
+        'text/plain ', // trailing WSP
+        'text/plain;', // `;` owes a parameter
+        'text/plain;;', //
+        'text/plain; ; a=b', //
+        'text/plain; a=b,c', // `,` is a tspecial
+        'text/plain (plain text)', // an RFC 822 comment: refused, not stripped
+        'tëxt/plain', // token is US-ASCII
+        'text/plain; ä=b', //
+        'text/plain; a=ö', //
+        '', //
+      ];
+      for (const contentType of invalid) {
+        const error = await refused(contentType);
+        expect(error.message, contentType).toBe(SYNTAX);
+        if (contentType.length > 0) {
+          expect(error.message).not.toContain(contentType);
+        }
+      }
+    });
+
+    it('accepts every valid form and renders it as it did, byte for byte', async () => {
+      const valid = [
+        'TEXT/PLAIN', // case is kept as given; matching is case-insensitive
+        'application/vnd.ms-excel',
+        'application/x-foo.bar-baz_1', // `.`, `-`, `_` are token characters
+        'image/svg+xml',
+        'text/plain; charset=utf-8',
+        'text/plain; charset="utf-8"',
+        'text/plain;charset=utf-8', // no WSP after `;`
+        'text/plain ; charset=utf-8', // WSP before `;` (RFC 822 implicit LWSP)
+        'text/plain;\tcharset=utf-8', // HTAB is WSP
+        'text/plain; charset=""', // the empty quoted-string is a value
+        'text/plain; title="a \\"b\\" \\\\ c; d=e"', // quoted-pairs, and `;` inside quotes
+        'text/plain; title="résumé"', // what `name="résumé.pdf"` already carries
+        'multipart/x-thing; a=1; B=2', // distinct attributes
+      ];
+      for (const contentType of valid) {
+        const { text } = await build({
+          ...base,
+          attachments: [{ filename: 'a.txt', content: 'x', contentType }],
+        });
+        // Verbatim, then the builder's own parameter — exactly the line the
+        // unchecked path rendered.
+        expect(text, contentType).toContain(`Content-Type: ${contentType}; name="a.txt"\r\n`);
+      }
+    });
+
+    /**
+     * The attachment part's `Content-Type` header, every physical line of
+     * it: the lines between `Content-Type:` and the part's
+     * `Content-Transfer-Encoding: base64`, which only an attachment carries.
+     */
+    async function attachmentContentTypeLines(contentType: string): Promise<Array<string>> {
+      const { text } = await build({
+        ...base,
+        attachments: [{ filename: 'a.txt', content: 'x', contentType }],
+      });
+      const lines = text.split('\r\n');
+      const end = lines.indexOf('Content-Transfer-Encoding: base64');
+      let start = end - 1;
+      while (start > 0 && !lines[start].startsWith('Content-Type:')) {
+        start--;
+      }
+      return lines.slice(start, end);
+    }
+
+    it('pins the rendered line for three of them', async () => {
+      expect(await attachmentContentTypeLines('TEXT/PLAIN')).toEqual([
+        'Content-Type: TEXT/PLAIN; name="a.txt"',
+      ]);
+      expect(await attachmentContentTypeLines('text/plain; charset="utf-8"')).toEqual([
+        'Content-Type: text/plain; charset="utf-8"; name="a.txt"',
+      ]);
+      expect(await attachmentContentTypeLines('application/x-foo.bar-baz_1')).toEqual([
+        'Content-Type: application/x-foo.bar-baz_1; name="a.txt"',
+      ]);
+    });
+
+    it('keeps the length bound in front of the scan', async () => {
+      // "Bound before you scan": the `CONTENT_TYPE_LINE_OVERHEAD` guard
+      // answers for an over-long value before the grammar reads it — the
+      // stray `"` in here is never reached. ` <type>;` is the shortest line
+      // the media type can fold onto, so 996 characters render exactly at
+      // the 998-octet limit and 997 cannot.
+      const error = await refused(`a/b"${'c'.repeat(2000)}`);
+      expect(error.message).toBe(
+        'attachment contentType is 2004 characters; at most 996 fit on the Content-Type line ' +
+          'under the 998-octet limit in RFC 5322 §2.1.1. Shorten it.',
+      );
+      expect((await refused(`a/${'b'.repeat(995)}`)).message).toMatch(
+        /^attachment contentType is 997 characters; at most 996 fit/,
+      );
+      const lines = await attachmentContentTypeLines(`a/${'b'.repeat(994)}`);
+      expect(lines).toEqual(['Content-Type:', ` a/${'b'.repeat(994)};`, ' name="a.txt"']);
+      expect(lines[1].length).toBe(998);
+    });
+
+    it("refuses a caller's name= parameter, which the builder sets from the filename", async () => {
+      // `buildAttachmentPart` appends `name="<filename>"`, so a second one
+      // would be the same parameter twice — RFC 6838 §4.3: "It is an error
+      // for a specific parameter to be specified more than once."
+      for (const contentType of ['text/plain; name=other', 'text/plain; NAME="other"']) {
+        expect((await refused(contentType)).message).toBe(
+          'attachment contentType must not carry a name= parameter; the builder adds name="<filename>" itself.',
+        );
+      }
+    });
+
+    it('refuses a parameter given twice, whatever its case (RFC 6838 §4.3)', async () => {
+      // §5.1: "Matching of attributes is ALWAYS case-insensitive", and
+      // §4.3 of RFC 6838 makes a repeat an error; a parser that keeps the
+      // first and one that keeps the last would disagree on the message.
+      for (const contentType of [
+        'text/plain; a=b; a=c',
+        'text/plain; charset=utf-8; CHARSET=ascii',
+      ]) {
+        expect((await refused(contentType)).message).toBe(
+          'attachment contentType gives the same parameter twice; attribute names are case-insensitive and each may appear once (RFC 6838 §4.3).',
+        );
+      }
+    });
+
+    it('reports a syntax error ahead of a semantic one on the same parameter', async () => {
+      // `name` without a value is a syntax error first.
+      expect((await refused('text/plain; name')).message).toBe(SYNTAX);
+    });
+  });
+
   describe('a colon in an address', () => {
     // `:` is an RFC 5322 §3.2.3 special, not `atext`, so a bare
     // `a:b@example.com` is no addr-spec without quoting — which is refused
@@ -2217,16 +2387,12 @@ describe('buildMime header size projection', () => {
   // An attachment part's own headers are built outside `foldHeader`'s
   // encoded path: `Content-Type: <contentType>; name="<filename>"`,
   // `Content-Disposition: <disposition>; filename="<filename>"` and
-  // `Content-ID: <contentId>`. Each of the three values is charged.
+  // `Content-ID: <contentId>`. Each of the three values is charged; the
+  // filename and the media type are also bounded per attachment in
+  // `normalizeAttachment` (see 'media type syntax of an attachment'), so
+  // only the Content-ID reaches the projection unbounded.
   it('counts attachment metadata that has no bound of its own', async () => {
     const over = 'x'.repeat(11 * 1024 * 1024);
-    await expectProjected({
-      from: 'a@x.dev',
-      to: 'b@y.dev',
-      subject: 's',
-      text: 'hi',
-      attachments: [{ filename: 'f.txt', content: 'x', contentType: over }],
-    });
     await expectProjected({
       from: 'a@x.dev',
       to: 'b@y.dev',
@@ -2247,7 +2413,7 @@ describe('buildMime header size projection', () => {
     const filename = 'a'.repeat(986);
     const empty = new Uint8Array(0);
     const parts = (n: number) =>
-      Array.from({ length: n }, () => ({ filename, contentType: 'x', content: empty }));
+      Array.from({ length: n }, () => ({ filename, contentType: 'a/b', content: empty }));
     await expectProjected({
       from: 'a@x.dev',
       to: 'b@y.dev',
@@ -2255,11 +2421,11 @@ describe('buildMime header size projection', () => {
       text: 't',
       attachments: parts(50_000),
     });
-    // The bound is exact for a part with no content: 5,017 parts project to
-    // 214 octets under the cap and render to 10.67 MB, so the post-render
+    // The bound is exact for a part with no content: 5,012 parts project to
+    // 640 octets under the cap and render to 10.66 MB, so the post-render
     // check — not the projection — must be the one to refuse them.
     await expect(
-      build({ from: 'a@x.dev', to: 'b@y.dev', subject: 's', text: 't', attachments: parts(5_017) }),
+      build({ from: 'a@x.dev', to: 'b@y.dev', subject: 's', text: 't', attachments: parts(5_012) }),
     ).rejects.toThrow(/message size \d+ bytes exceeds Cloudflare limit/);
     // And 4,900 parts, a 10.42 MB message, build.
     const { raw } = await build({
