@@ -222,9 +222,16 @@ export function validateAddressParts(field: string, email: string, name?: string
   // dot in the domain: `user@localhost` and `x@y` are legal RFC 5321 and
   // are accepted today. Quoted local parts (`"a@b"@example.com`) stay
   // rejected by the `"` in the specials class below, as they already were.
+  //
+  // The class is `RFC5322_SPECIALS` less the `@` the rule above owns: every
+  // one of them is outside `atext` (RFC 5322 §3.2.3), so a bare address
+  // carrying one is no addr-spec without quoting, and quoting is refused.
+  // `:` was the one missing — `a:b@example.com` passed here, was recorded
+  // by a handler's `forward()`, and was dropped by the platform router's
+  // `isValidEmailAddress` after earlier actions had fired.
   const at = email.indexOf('@');
   const singleAt = at > 0 && at === email.lastIndexOf('@') && at < email.length - 1;
-  if (!singleAt || /\s/.test(email) || /[,;<>"()[\]\\]/.test(email)) {
+  if (!singleAt || /\s/.test(email) || /[,;:<>"()[\]\\]/.test(email)) {
     throw new MimeError(
       fieldErrorCode(field),
       `${field}: '${email}' is not a valid email address.`,

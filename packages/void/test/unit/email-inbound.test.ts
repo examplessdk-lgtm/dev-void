@@ -1060,6 +1060,31 @@ describe('harness enforces the proxy action bounds, like production', () => {
     expect(harness.forwards).toEqual([]);
   });
 
+  it('refuses a forward address carrying a colon, by the sendEmail rule', async () => {
+    // Same class as the control character above: `:` is an RFC 5322
+    // §3.2.3 special the platform router's `isValidEmailAddress` refuses,
+    // and it was the one missing from the framework's address class —
+    // `forward('a:b@example.com')` was recorded, the harness captured it as
+    // a success, and the router dropped just that forward after the one
+    // before it had fired.
+    let thrown: unknown;
+    const harness = harnessFor(async (message) => {
+      await message.forward('first@example.com');
+      try {
+        await message.forward('a:b@example.com');
+      } catch (e) {
+        thrown = e;
+      }
+    });
+    await harness.deliver(DELIVERY);
+    expect(thrown).toBeInstanceOf(MimeError);
+    expect((thrown as MimeError).code).toBe('INVALID_TO');
+    expect((thrown as MimeError).message).toBe(
+      "to: 'a:b@example.com' is not a valid email address.",
+    );
+    expect(harness.forwards).toEqual([{ to: 'first@example.com' }]);
+  });
+
   it('refuses a forward header record with a CRLF in a value at the call, recording nothing for it', async () => {
     let thrown: unknown;
     const harness = harnessFor(async (message) => {

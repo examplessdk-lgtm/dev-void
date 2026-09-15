@@ -1029,6 +1029,75 @@ describe('normalizeEmail', () => {
     });
   });
 
+  describe('a colon in an address', () => {
+    // `:` is an RFC 5322 §3.2.3 special, not `atext`, so a bare
+    // `a:b@example.com` is no addr-spec without quoting — which the `"`
+    // rule refuses. It was the one special missing from the address class
+    // (`RFC5322_SPECIALS` in the same file has it): the address passed here,
+    // a handler's `forward()` recorded it, and the platform router's
+    // `isValidEmailAddress` dropped that one forward after earlier actions
+    // had fired. Refused now with the shape message, like `,` and `;`.
+    const colons = ['a:b@example.com', 'a@b:c.example.com', ':a@example.com', 'a@example.com:'];
+
+    it('refuses a bare address carrying one, with the code for its field', async () => {
+      for (const bad of colons) {
+        for (const [field, code] of [
+          ['to', 'INVALID_TO'],
+          ['from', 'INVALID_FROM'],
+          ['cc', 'MIME_ERROR'],
+          ['bcc', 'MIME_ERROR'],
+          ['replyTo', 'MIME_ERROR'],
+        ] as const) {
+          let error: unknown;
+          try {
+            await normalizeEmail({
+              from: 'a@x.dev',
+              to: 'b@y.dev',
+              [field]: bad,
+              subject: 's',
+              text: 't',
+            });
+          } catch (e) {
+            error = e;
+          }
+          expect(error).toBeInstanceOf(MimeError);
+          expect((error as MimeError).code).toBe(code);
+          expect((error as MimeError).message).toBe(
+            `${field}: '${bad}' is not a valid email address.`,
+          );
+        }
+      }
+    });
+
+    it('refuses it in the object and display-name forms on the same parsed address', async () => {
+      for (const bad of colons) {
+        await expect(
+          normalizeEmail({
+            from: 'a@x.dev',
+            to: { name: 'Bob', email: bad },
+            subject: 's',
+            text: 't',
+          }),
+        ).rejects.toThrow(`to: '${bad}' is not a valid email address.`);
+        expect(() => parseAddress(`Bob <${bad}>`, 'to')).toThrow(
+          `to: '${bad}' is not a valid email address.`,
+        );
+      }
+    });
+
+    it('still accepts one in a display name, where it is quoted', async () => {
+      // A name is a phrase, and a phrase with a special is rendered as one
+      // quoted-string — the address rule is not the name rule.
+      const { text } = await build({
+        from: 'a@x.dev',
+        to: { name: 'Ops: Tier 2', email: 'b@y.dev' },
+        subject: 's',
+        text: 't',
+      });
+      expect(unfoldHeader(text, 'To')).toBe('"Ops: Tier 2" <b@y.dev>');
+    });
+  });
+
   it('parses the display-name form in linear time', () => {
     // `^\s*([^"<]+?)?\s*<` let three quantifiers share one run of
     // whitespace; the backtracker tried every split, cubic in the run.

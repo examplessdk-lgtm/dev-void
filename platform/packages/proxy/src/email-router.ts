@@ -315,7 +315,7 @@ const VALID_ADDRESS_RE = new RegExp(
     '\\.[^@\\s<>"()[\\]\\\\,;:\\u0000-\\u001f\\u007f]+$',
 );
 
-function isValidEmailAddress(s: unknown): s is string {
+export function isValidEmailAddress(s: unknown): s is string {
   // Reject quotes, parens, brackets, control chars in addition to the
   // obvious whitespace/angle-bracket cases. CF does strict validation on
   // forward/reply but we want to fail fast and not let address fragments
@@ -325,6 +325,11 @@ function isValidEmailAddress(s: unknown): s is string {
   // unbounded address is the work `MAX_ACTION_ADDRESS_LENGTH` exists to stop.
   // Guarding here covers `forward.to`, `reply.from` and `reply.to` at every
   // call site.
+  //
+  // Exported for the router test only: the framework's `validateAddressParts`
+  // is the record-time twin of this rule, and the test pins that nothing the
+  // framework records is dropped here (the framework may be stricter, never
+  // looser — one known exception, the dot this regex wants in the domain).
   return typeof s === 'string' && s.length <= MAX_ACTION_ADDRESS_LENGTH && VALID_ADDRESS_RE.test(s);
 }
 

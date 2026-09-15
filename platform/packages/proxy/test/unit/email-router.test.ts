@@ -36,7 +36,9 @@ import {
   MAX_FORWARD_HEADERS as FRAMEWORK_MAX_FORWARD_HEADERS,
   MAX_REJECT_REASON_LENGTH as FRAMEWORK_MAX_REJECT_REASON_LENGTH,
 } from '../../../../../packages/void/src/runtime/email/inbound.ts';
+import { validateAddressParts } from '../../../../../packages/void/src/runtime/email/mime.ts';
 import {
+  isValidEmailAddress,
   MAX_FORWARD_HEADER_LENGTH,
   MAX_FORWARD_HEADERS,
   MAX_REJECT_REASON_LENGTH,
@@ -2624,5 +2626,118 @@ describe('framework ↔ router bound parity', () => {
     await routeInbound(message, env, ctx);
     expect(rejectCalls).toEqual([(recorded as { reason: string }).reason]);
     expect(rejectCalls[0]!.length).toBeLessThanOrEqual(MAX_REJECT_REASON_LENGTH);
+  });
+
+  describe('address rule', () => {
+    // The framework's `validateAddressParts` is what `forward(to)` and a
+    // hand-built `reply({ from, to })` record through; `isValidEmailAddress`
+    // is what this router drops on. Anything the framework records and the
+    // router drops is an action a handler's test reported as a success and
+    // the managed deployment silently lost — after the actions before it
+    // had fired. So: framework-accepts ⇒ router-accepts, for every entry
+    // below. The framework may be STRICTER (its 254-octet path and 64-octet
+    // local-part bounds are; the router's is the 320 work bound), never
+    // looser.
+    const frameworkAccepts = (address: string): boolean => {
+      try {
+        validateAddressParts('to', address);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+
+    // Every C0 control and DEL, each inside the local part.
+    const controls = Array.from({ length: 0x21 }, (_, i) => (i === 0x20 ? 0x7f : i)).map(
+      (code) => `a${String.fromCharCode(code)}b@example.com`,
+    );
+    // Every RFC 5322 §3.2.3 special (`.` and `@` aside — `.` is dot-atom
+    // punctuation and `@` has its own exactly-one rule), in the local part
+    // and in the domain.
+    const specials = [...'()<>[]:;\\,"'].flatMap((ch) => [
+      `a${ch}b@example.com`,
+      `a@b${ch}c.example.com`,
+    ]);
+    // `a@` plus 252 octets of labels: the longest path RFC 5321 makes every
+    // receiver accept, and the framework's `MAX_ADDRESS_OCTETS`.
+    const domain252 = `${'b'.repeat(63)}.${'c'.repeat(63)}.${'d'.repeat(63)}.${'e'.repeat(60)}`;
+    const deliverable = [
+      'ops@example.com',
+      'ops+T-42@example.com',
+      'first.last@sub.example.com',
+      'jöhn@example.com',
+      `${'a'.repeat(64)}@example.com`,
+      `a@${domain252}`,
+    ];
+    // The router's 320 work bound, with the dot its regex wants; the
+    // framework refuses both on its 254-octet rule.
+    const at320 = `${'a'.repeat(64)}@${'b'.repeat(251)}.dev`;
+    const at321 = `${'a'.repeat(64)}@${'b'.repeat(252)}.dev`;
+    const corpus: Array<string> = [
+      ...deliverable,
+      // One `@`, and something on both sides of it.
+      'not-an-address',
+      'a@b@example.com',
+      '@example.com',
+      'user@',
+      '@',
+      '',
+      // Quoting, display names, list separators.
+      '"a b"@example.com',
+      '"a@b"@example.com',
+      'Ops <ops@example.com>',
+      'a@example.com,b@example.com',
+      'a@example.com;b@example.com',
+      // Whitespace: the ASCII kinds and the non-ASCII one `\s` also matches.
+      'a b@example.com',
+      'a\tb@example.com',
+      'a\vb@example.com',
+      'a\fb@example.com',
+      'a\u00a0b@example.com',
+      ' ops@example.com',
+      'ops@example.com ',
+      ...controls,
+      ...specials,
+      at320,
+      at321,
+      `${'a'.repeat(65)}@example.com`,
+      `a@${'b'.repeat(253)}`,
+    ];
+
+    // The one class the framework accepts and this router refuses, on
+    // purpose: the router wants a dot in the domain; the framework's
+    // `sendEmail` does not (`user@localhost` and `x@y` are syntactically
+    // legal RFC 5321 §4.1.2 mailboxes, and its comment says so). A handler's
+    // `forward('user@localhost')` is therefore recorded and dropped here.
+    // Pinned as a known divergence, not folded into the corpus, so that
+    // whichever side moves first is what this test reports.
+    const dotlessDomain = ['user@localhost', 'x@y', 'a@example'];
+
+    it('drops nothing the framework records, except a dot-less domain', () => {
+      expect(at320).toHaveLength(320);
+      expect(at321).toHaveLength(321);
+      expect(new TextEncoder().encode(deliverable[5]!).length).toBe(254);
+      const divergent = corpus.filter((a) => frameworkAccepts(a) && !isValidEmailAddress(a));
+      expect(
+        divergent,
+        `framework records but the router drops: ${JSON.stringify(divergent[0])}`,
+      ).toEqual([]);
+      // Not vacuous: both sides accept the deliverable shapes, the router
+      // alone accepts the 320-character address, and both refuse every
+      // special and control.
+      expect(deliverable.every((a) => frameworkAccepts(a) && isValidEmailAddress(a))).toBe(true);
+      expect(isValidEmailAddress(at320)).toBe(true);
+      expect(frameworkAccepts(at320)).toBe(false);
+      expect(
+        [...controls, ...specials].some((a) => frameworkAccepts(a) || isValidEmailAddress(a)),
+      ).toBe(false);
+    });
+
+    it('pins the dot-less domain as the one known divergence', () => {
+      for (const address of dotlessDomain) {
+        expect(frameworkAccepts(address), `framework accepts ${address}`).toBe(true);
+        expect(isValidEmailAddress(address), `router refuses ${address}`).toBe(false);
+      }
+    });
   });
 });
