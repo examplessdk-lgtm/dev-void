@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { signConfirmToken, type ConfirmTokenPayload } from '../auth/confirm-token.ts';
+import { capabilityMiddleware } from '../capabilities.ts';
 import {
   countProjectsUsingDestination,
   deleteEmailDestination,
@@ -68,6 +69,12 @@ const MAX_ADDRESS_LENGTH = 320;
  * account-level address API and keep our per-project view in sync.
  */
 const app = new Hono<ApiEnv>()
+  // Path-scoped, NOT `use('*')` as `domains.ts` does: this router is one of
+  // several mounted at `/projects`, and Hono re-registers a sub-app's
+  // `use('*')` as `ALL /projects/*` on the parent, where it runs for every
+  // sibling mounted after it (`githubProjectRoutes`, `projectUsage`). Pinned
+  // by the sibling-router test in `api-email.test.ts`.
+  .use('/:id/email/*', capabilityMiddleware('email'))
   .get('/:id/email/usage', async (context) => {
     const projectId = context.req.param('id');
     const project = await getProject(context.get('db'), projectId);

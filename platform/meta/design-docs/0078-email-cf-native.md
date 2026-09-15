@@ -1865,6 +1865,14 @@ inbound record still reads `handled`, and `GET /projects/:id/email/logs`
 still answers `pending` — so a project cannot see that its reply never
 left. The guide documents the gate; surfacing the drop needs the
 Analytics Engine-backed log query that `void email logs` is waiting on.
+Verification pickup: a Cloudflare-verified destination row moves from
+`pending` to `verified` (and into the allowlist KV) only when the
+project's destinations are listed (`GET /projects/:id/email/destinations`)
+or the address is re-added; nothing else re-reads Cloudflare, so a send
+after the click still returns `UNVERIFIED_DESTINATION` until a listing
+runs. Cloudflare has no verification webhook; a deploy-time or
+scheduled refresh is the candidate. The guide says to run
+`void email destinations` after the click.
 
 ## Open decisions
 

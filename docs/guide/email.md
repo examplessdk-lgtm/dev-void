@@ -41,8 +41,9 @@ Zero config on the Void platform (`void deploy`). Every Void project ships with:
 - **Sender** — `<your-slug>+noreply@mail.void.cloud`. Used as the default `from` if you omit it. The platform owns the zone with Email Routing + DKIM + SPF + DMARC set up; you do nothing. Project slugs are capped at 56 characters so this local part fits RFC 5321's 64 octets; a project created before the cap with a longer slug must pass `from` explicitly.
 - **No worker binding to add** — outbound mail is sent by the Void proxy, which holds the
   platform `send_email` binding. Your worker never gets one, so there is nothing to configure.
+- **Your own address as a recipient** — the email on your Void account is registered as a recipient when the project is created. It is verified at once when Cloudflare already holds it verified for the platform (you clicked its link for an earlier project of yours); otherwise Cloudflare mails it a verification link, and until you click that link and run `void email destinations` — the listing is what records the click — a send to yourself comes back `ok: false` with a per-recipient `UNVERIFIED_DESTINATION` in `result.deliveries`.
 
-That's it. `sendEmail({ to: '...', subject: '...', text: '...' })` works on first deploy.
+That's it for configuration. Delivery is gated separately: outbound mail only reaches verified recipients, so `sendEmail({ to: '...', subject: '...', text: '...' })` works on first deploy for your own address once it is verified, and for anyone else after `void email allow` — see [Adding recipients](#adding-recipients).
 
 Deploying to your own Cloudflare account instead (`void deploy --platform cloudflare`) takes one line of `void.json` and one Enter on the first deploy — see [Your own Cloudflare account](#your-own-cloudflare-account).
 
@@ -54,13 +55,13 @@ Cloudflare's `send_email` binding only delivers to addresses you've registered a
 void email allow user@acme.com
 ```
 
-Cloudflare emails the recipient with a verification link. Once they click it, you can send to that address from your project. If the link did not arrive or has expired, run `void email allow <address>` again while the address is still pending — the CLI re-sends the link, or tells you how to get a fresh one. List the project's recipients:
+Cloudflare emails the recipient with a verification link. Once they click it and `void email destinations` has picked the click up, you can send to that address from your project. If the link did not arrive or has expired, run `void email allow <address>` again while the address is still pending — the CLI re-sends the link, or tells you how to get a fresh one. List the project's recipients:
 
 ```sh
 void email destinations
 ```
 
-The project owner's email (the GitHub address you signed up with) is added automatically when the project is created — so sending from your project to yourself works out of the box.
+The project owner's email (the GitHub address you signed up with) is added automatically when the project is created, so it skips `void email allow` — not the verification. See [Setup](#setup) for when it is verified at once and when there is a link to click.
 
 ::: warning When this is the right fit
 The shared sender is great for: ops alerts to the team, notifications to the project owner, reply-by-email flows on top of inbound, internal/app-internal mail.

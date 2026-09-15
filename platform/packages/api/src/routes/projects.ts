@@ -4,6 +4,7 @@ import { deployTokenTtlSecondsForBuildMinutes, signPrerenderToken } from '../aut
 import { hmacSignState } from '../auth/hmac.ts';
 import { buildManagerNamespace } from '../build-namespace.ts';
 import { isTerminalBuildStatus } from '../build-status.ts';
+import { getPlatformCapabilities } from '../capabilities.ts';
 import { DEFAULT_DISPATCH_NAMESPACE } from '../constants.ts';
 import {
   clearCronScheduler,
@@ -650,13 +651,19 @@ const app = new Hono<ApiEnv>()
       // themselves works from the first deploy. CF sends them a verification
       // link; the row stays `pending` until they click it.
       //
-      // Gated on EMAIL_SENDER_DOMAIN: the row's only purpose is to allow-list
-      // a recipient for sends from `<slug>[+tag]@<domain>`, so in an
-      // environment with no platform mail domain there is nothing it could
-      // ever authorize — and registering it would still cost CF a
-      // verification email to the owner.
+      // Gated on the `email` platform capability AND EMAIL_SENDER_DOMAIN:
+      // the row's only purpose is to allow-list a recipient for sends from
+      // `<slug>[+tag]@<domain>`, so on a platform that does not enable email
+      // (its `/email/*` routes answer 501) or in an environment with no
+      // platform mail domain there is nothing it could ever authorize — and
+      // registering it would still cost CF a verification email to the owner.
       const ownerEmail = context.get('user').email;
-      if (context.env.EMAIL_SENDER_DOMAIN && ownerEmail && !isSyntheticProviderEmail(ownerEmail)) {
+      if (
+        getPlatformCapabilities(context.env).email &&
+        context.env.EMAIL_SENDER_DOMAIN &&
+        ownerEmail &&
+        !isSyntheticProviderEmail(ownerEmail)
+      ) {
         const address = ownerEmail.toLowerCase();
         // Off the response path: CF Email Routing has no timeout in
         // `cfFetch`, and project creation must not wait on it. Nothing

@@ -2626,3 +2626,178 @@ describe('platform-internal send token (as produced by the route)', () => {
     expect(send!.body.platformToken).toBe(expectedToken);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Platform capability gate
+// ---------------------------------------------------------------------------
+
+describe('email platform capability', () => {
+  /**
+   * Hosted Void Cloud's capability set with ONE switch flipped. Only `email`
+   * is under test here: `domains.ts` registers its gate as `use('*')`, which
+   * Hono re-homes to `ALL /projects/*` and runs for every sibling mounted
+   * after it, so turning `customDomains` off as well would make these routes
+   * answer 501 `customDomains` before the email gate is reached.
+   */
+  function capabilityEnv(email: boolean, bindings: TestEnv = env): TestEnv {
+    return {
+      ...bindings,
+      PLATFORM_CAPABILITIES: JSON.stringify({
+        ai: true,
+        customDomains: true,
+        email,
+        githubActions: true,
+        githubOAuth: true,
+        googleOAuth: true,
+        managedBuilds: true,
+        sandbox: true,
+      }),
+    };
+  }
+
+  const UNAVAILABLE = {
+    error: 'platform capability unavailable',
+    capability: 'email',
+    message: 'This Void platform does not enable email.',
+  };
+
+  async function get(path: string, jwt: string, bindings: TestEnv): Promise<Response> {
+    return app.fetch(
+      new Request(`http://localhost${path}`, { headers: { Authorization: `Bearer ${jwt}` } }),
+      bindings,
+    );
+  }
+
+  it('answers 501 on usage and logs without reading the counters', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    const month = new Date().toISOString().slice(0, 7);
+    await env.ROUTING.put(`email-sent:${project.id}:${month}`, '7');
+    const kvGet = vi.spyOn(env.ROUTING, 'get');
+
+    const usage = await get(`/projects/${project.id}/email/usage`, user.jwt, capabilityEnv(false));
+    expect(usage.status).toBe(501);
+    expect(await usage.json()).toEqual(UNAVAILABLE);
+
+    const logs = await get(`/projects/${project.id}/email/logs`, user.jwt, capabilityEnv(false));
+    expect(logs.status).toBe(501);
+    expect(await logs.json()).toMatchObject({ capability: 'email' });
+
+    expect(kvGet).not.toHaveBeenCalled();
+  });
+
+  it('answers 501 on every destinations route before Cloudflare or the database is touched', async () => {
+    const user = await createTestUser(env.db);
+    await setUserEmail(user.id, 'owner@example.com');
+    const project = await createTestProject(env.db, user.id);
+    await seedVerifiedPair(project.id);
+    const fetchMock = mockCfWithProxy();
+    const kvPut = vi.spyOn(env.ROUTING, 'put');
+    const bindings = capabilityEnv(false, emailEnv());
+
+    const list = await listDestinations(project.id, user.jwt, bindings);
+    expect(list.status).toBe(501);
+    expect(await list.json()).toMatchObject({ capability: 'email' });
+
+    const add = await addDestination(project.id, user.jwt, 'new@example.com', bindings);
+    expect(add.status).toBe(501);
+    expect(await add.json()).toEqual(UNAVAILABLE);
+
+    const remove = await removeDestination(project.id, 'edst_v1', user.jwt, bindings);
+    expect(remove.status).toBe(501);
+    expect(await remove.json()).toMatchObject({ capability: 'email' });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    // Not even the add rate-limit counter is charged.
+    expect(kvPut).not.toHaveBeenCalled();
+    expect((await rowsFor(project.id)).map((row) => row.id).sort()).toEqual(['edst_v1', 'edst_v2']);
+    expect(await readAllowlist(project.id)).toEqual(['keep@example.com', 'gone@example.com']);
+  });
+
+  it('answers 501 on the public confirm link and leaves the row pending', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    await env.db.insert(emailDestinations).values({
+      id: 'edst_gate',
+      project_id: project.id,
+      address: 'shared@example.com',
+      status: 'pending',
+      cf_destination_id: 'cf-tag-shared',
+      verified_at: null,
+      verification_source: 'platform',
+    });
+    const now = Math.floor(Date.now() / 1000);
+    const token = await signConfirmToken(
+      {
+        v: 1,
+        pid: project.id,
+        did: 'edst_gate',
+        addr: 'shared@example.com',
+        iat: now,
+        exp: now + 3600,
+      },
+      env.JWT_SECRET,
+    );
+
+    const res = await app.fetch(
+      new Request(`http://localhost/email/destinations/confirm?token=${encodeURIComponent(token)}`),
+      capabilityEnv(false),
+    );
+    expect(res.status).toBe(501);
+    expect(await res.json()).toMatchObject({ capability: 'email' });
+
+    const [row] = await rowsFor(project.id);
+    expect(row).toMatchObject({ id: 'edst_gate', status: 'pending', verified_at: null });
+    expect(await readAllowlist(project.id)).toEqual([]);
+  });
+
+  it('does not gate sibling routers mounted at /projects', async () => {
+    // The gate is registered as `/:id/email/*`, not `use('*')`. A wildcard
+    // would also have answered 501 for every router mounted after this one.
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+
+    const github = await get(`/projects/${project.id}/github`, user.jwt, capabilityEnv(false));
+    expect(github.status).toBe(404);
+    expect(await github.json()).toEqual({ error: 'connection not found' });
+
+    const detail = await get(`/projects/${project.id}`, user.jwt, capabilityEnv(false));
+    expect(detail.status).toBe(200);
+  });
+
+  it('serves the routes when the capability is explicitly enabled', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+
+    const usage = await get(`/projects/${project.id}/email/usage`, user.jwt, capabilityEnv(true));
+    expect(usage.status).toBe(200);
+    expect(await usage.json()).toMatchObject({ sent: 0, received: 0, limit: 200 });
+
+    const list = await listDestinations(project.id, user.jwt, capabilityEnv(true));
+    expect(list.status).toBe(200);
+    expect(await list.json()).toEqual([]);
+  });
+
+  it('registers no owner destination on project creation, even with a mail domain configured', async () => {
+    const user = await createTestUser(env.db);
+    await setUserEmail(user.id, 'owner@example.com');
+    const fetchMock = mockCfApi();
+
+    const res = await app.fetch(
+      new Request('http://localhost/projects', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${user.jwt}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ slug: 'email-capability-off' }),
+      }),
+      capabilityEnv(false, emailEnv()),
+    );
+    expect(res.status).toBe(201);
+    const project = (await res.json()) as { id: string; owner_email_destination?: unknown };
+    // The CLI prints this field to explain a verification email that may
+    // follow; a platform that cannot send one must not announce it.
+    expect(project.owner_email_destination).toBeUndefined();
+
+    expect(cfCalls(fetchMock, 'POST', '/email/routing/addresses')).toHaveLength(0);
+    expect(await rowsFor(project.id)).toHaveLength(0);
+  });
+});

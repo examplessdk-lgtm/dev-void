@@ -221,7 +221,10 @@ const app = new Hono<ApiEnv>()
   .route('/github', githubRoutes)
   // Public: the HMAC-signed token in `?token=` IS the auth. Mounted
   // BEFORE the `/projects/*` auth middleware so recipients (third
-  // parties, not Void users) can click without logging in.
+  // parties, not Void users) can click without logging in. Gated like
+  // `/webhooks/*`: a platform without email issued no confirmation link,
+  // so the standard 501 replaces verifying a token nobody can hold.
+  .use('/email/*', capabilityMiddleware('email'))
   .route('/email', emailConfirm)
   .use('/me', authMiddleware)
   .route('/me', me)
