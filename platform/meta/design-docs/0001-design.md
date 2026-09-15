@@ -1,14 +1,19 @@
 # Void — Design Document
 
 **Date:** 2026-03-08
-**Status:** Implemented (living document)
+**Status:** Historical architecture record.
+
+> This record describes the March 2026 design. For the current installation
+> model and supported core, see [platform architecture](../architecture.md) and
+> [the self-hosted platform guide](../../../docs/guide/self-hosted-platform.md).
 
 Void has two halves:
 
-- the public framework in `framework/`, which gives developers a Vite-native fullstack DX
-- the private platform in `packages/`, which provisions resources, deploys apps, routes traffic, meters usage, and operates the hosted product
+- the framework and CLI in `packages/`, which give developers a Vite-native fullstack DX
+- the platform in `platform/packages/`, which provisions resources, deploys apps, routes traffic, and meters usage in an operator-owned Cloudflare account
 
-This document should describe the current architecture first. Future-facing ideas belong here only when they are clearly marked as roadmap.
+Both are maintained in this repository. The feature and roadmap sections below
+record the design at the time; they do not define the supported self-hosted core.
 
 ---
 
@@ -29,11 +34,11 @@ Developer machine
   └─ void CLI (auth, deploy, db, project, secret, domain)
           │
           ▼
-Void Platform API (`packages/api`)
+Void Platform API (`platform/packages/api`)
   ├─ users / projects / deployments / domains / secrets / usage
   ├─ deploy pipeline + rollback
   ├─ resource provisioning (D1, KV, R2, Queues)
-  ├─ internal admin UI
+  ├─ administrator UI
   └─ platform metadata in PostgreSQL via Hyperdrive
           │
           ├─ Routing KV + static-asset KV/R2
@@ -41,15 +46,15 @@ Void Platform API (`packages/api`)
           ├─ Analytics Engine
           └─ Cloudflare account resources
                  │
-                 ├─ Dispatch (`packages/dispatch`)
-                 ├─ Proxy (`packages/proxy`)
-                 ├─ Tail (`packages/tail`)
-                 └─ Dashboard (`packages/dashboard`)
+                 ├─ Dispatch (`platform/packages/dispatch`)
+                 ├─ Proxy (`platform/packages/proxy`)
+                 ├─ Tail (`platform/packages/tail`)
+                 └─ Dashboard (`platform/packages/dashboard`)
 ```
 
 ### Major Moving Pieces
 
-#### Framework package (`framework/packages/void`)
+#### Framework package (`packages/void`)
 
 The framework package is responsible for local DX and build-time understanding of the app.
 
@@ -64,7 +69,7 @@ It handles:
 - build packaging and deploy upload
 - runtime helpers like `void/db`, `void/kv`, `void/storage`, `void/ai`, `void/isr`, and `void/client`
 
-#### Platform API (`packages/api`)
+#### Platform API (`platform/packages/api`)
 
 This is the control plane.
 
@@ -76,11 +81,11 @@ It owns:
 - binding/resource provisioning
 - rollback and retention logic
 - queue and cron registration
-- internal admin routes and views
+- administrator routes and views
 
 Platform metadata lives in PostgreSQL, accessed through a Hyperdrive binding.
 
-#### Dispatch (`packages/dispatch`)
+#### Dispatch (`platform/packages/dispatch`)
 
 Dispatch is the data-plane entrypoint for deployed apps.
 
@@ -93,7 +98,7 @@ It:
 - meters every request into Analytics Engine
 - relays Cloudflare Queue batches to user workers
 
-#### Proxy (`packages/proxy`)
+#### Proxy (`platform/packages/proxy`)
 
 Proxy is the shared service layer between user apps and platform-owned capabilities.
 
@@ -105,7 +110,7 @@ It handles:
 
 The point of the proxy is that platform-owned resources never need to be exposed directly to user code.
 
-#### Tail (`packages/tail`)
+#### Tail (`platform/packages/tail`)
 
 Tail is the runtime log pipeline.
 
@@ -115,7 +120,7 @@ It:
 - stores logs in Analytics Engine
 - broadcasts live log events through a Durable Object
 
-#### Dashboard (`packages/dashboard`)
+#### Dashboard (`platform/packages/dashboard`)
 
 The dashboard is the user-facing product surface.
 
@@ -124,7 +129,7 @@ It is a Void app itself, built with Vue pages mode, and it currently mixes:
 - direct reads from the platform Postgres database for loader-heavy views
 - API calls for mutations, usage metrics, secrets, and domain operations
 
-It is deployed separately from the main platform pipeline and is currently lower priority than the core platform work.
+The user dashboard is a separate deployment. It is not included in the core self-hosted installation.
 
 ### Core Data Stores
 
@@ -143,7 +148,7 @@ There are two deploy shapes: worker deploys and static-only deploys.
 #### Worker deploys (`type: "void"` or `"framework"`)
 
 1. The CLI builds the app, detects app type/framework, scans bindings, collects migrations, and packages worker modules plus assets.
-2. The CLI uploads the deploy manifest and blobs to `packages/api`.
+2. The CLI uploads the deploy manifest and blobs to `platform/packages/api`.
 3. The API creates a deployment row and provisions missing resources.
 4. The API uploads a versioned worker named `user-{slug}-{deploymentId}`.
 5. The API invokes `POST /__void/migrate` on that new worker.
@@ -187,7 +192,7 @@ This lets a local dev session talk to real deployed resources while still using 
 
 `target: "node" | "bun" | "deno"` produces a standalone server build.
 
-This is an escape hatch for self-hosting, not the primary product path. Platform-specific features like managed Cloudflare bindings do not apply there.
+These targets run an individual application without a Void platform. Platform-specific features like managed Cloudflare bindings do not apply there.
 
 ---
 
@@ -234,7 +239,7 @@ Current public support is:
 
 In this mode the framework owns routing and rendering, while Void provides deploy packaging, binding inference, Drizzle wiring, auth/queue/cron wrappers where needed, and platform deployment.
 
-There is Vinext-specific source in the framework repo, but it is intentionally on hold and not part of the current public support matrix.
+There is Vinext-specific source in the framework packages, but it is intentionally on hold and not part of the current public support matrix.
 
 #### Static and SPA projects
 
@@ -416,7 +421,7 @@ This section is about features offered to apps after they are deployed on Void.
 #### Product surfaces
 
 - user-facing dashboard
-- internal admin dashboard
+- administrator dashboard
 - deployment logs and runtime logs
 - project usage views
 - plan enforcement and suspension

@@ -159,8 +159,8 @@ function ensureLocalDevVars(): void {
 function showNextSteps(): void {
   p.note(
     [
-      'Run:',
-      '  1. pnpm -C packages/api exec wrangler dev --local --host localhost --port 8787',
+      'From the repository root:',
+      '  1. vp run --filter @voidcloud/api dev --local --enable-containers=false --host localhost --port 8787',
       '  2. Open http://localhost:8787/admin/',
     ].join('\n'),
     'Next steps',

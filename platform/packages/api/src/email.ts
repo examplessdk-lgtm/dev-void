@@ -1,4 +1,20 @@
-const SENDER = 'Void <noreply@void.cloud>';
+import type { ApiEnv } from './env.ts';
+import {
+  getPlatformApiUrl,
+  getPlatformDisplayName,
+  platformConnectCommand,
+} from './platform-identity.ts';
+
+type PlatformEmailEnv = Pick<
+  ApiEnv['Bindings'],
+  | 'EMAIL'
+  | 'EMAIL_FROM'
+  | 'PLATFORM_DISPLAY_NAME'
+  | 'PLATFORM_INSTALLATION_ID'
+  | 'AUTH_REDIRECT_URI'
+  | 'PLATFORM_ENV'
+  | 'DASHBOARD_URL'
+>;
 
 const BUTTON_STYLE =
   'display:inline-block;background:#000;color:#fff;padding:10px 24px;text-decoration:none;border-radius:4px;font-weight:500';
@@ -8,7 +24,7 @@ function emailHtml(body: string, footer: string): string {
 <html><head><meta charset="utf-8"></head>
 <body style="font-family:system-ui,sans-serif;max-width:480px;margin:40px auto;color:#1a1a1a">
 ${body}
-<p style="color:#666;font-size:0.85rem;margin-top:24px">${footer}</p>
+<p style="color:#666;font-size:0.85rem;margin-top:24px">${escapeHtml(footer)}</p>
 </body></html>`;
 }
 
@@ -16,81 +32,114 @@ function button(href: string, label: string): string {
   return `<a href="${escapeHtml(href)}" style="${BUTTON_STYLE}">${escapeHtml(label)}</a>`;
 }
 
-async function sendEmail(
-  binding: SendEmail,
-  params: { to: string; subject: string; html: string; text: string },
-): Promise<void> {
-  await binding.send({ from: SENDER, ...params });
+function emailConfig(env: PlatformEmailEnv) {
+  const apiUrl = getPlatformApiUrl(env);
+  const hosted =
+    !env.PLATFORM_INSTALLATION_ID &&
+    ['https://api.void.cloud', 'https://api.staging.void.cloud'].includes(apiUrl);
+  const from = env.EMAIL_FROM?.trim() || (hosted ? 'Void <noreply@void.cloud>' : '');
+  if (!from || /[\r\n]/.test(from)) {
+    throw new Error(
+      'Set EMAIL_FROM to a Cloudflare-verified sender before enabling platform email.',
+    );
+  }
+  const dashboardUrl =
+    env.DASHBOARD_URL ||
+    (hosted
+      ? env.PLATFORM_ENV === 'staging'
+        ? 'https://dash.staging.void.cloud'
+        : 'https://dash.void.cloud'
+      : undefined);
+  if (dashboardUrl) {
+    const dashboard = new URL(dashboardUrl);
+    if (
+      !['http:', 'https:'].includes(dashboard.protocol) ||
+      dashboard.username ||
+      dashboard.password
+    ) {
+      throw new Error('DASHBOARD_URL must be an HTTP(S) URL without credentials.');
+    }
+  }
+  return { apiUrl, from, dashboardUrl, name: getPlatformDisplayName(env) };
 }
 
-export async function sendInvitationEmail(emailBinding: SendEmail, to: string): Promise<void> {
-  await sendEmail(emailBinding, {
+async function sendEmail(
+  env: PlatformEmailEnv,
+  params: { to: string; subject: string; html: string; text: string },
+): Promise<void> {
+  const { from } = emailConfig(env);
+  if (!env.EMAIL) {
+    throw new Error('Platform email is not configured.');
+  }
+  await env.EMAIL.send({ from, ...params });
+}
+
+export async function sendInvitationEmail(env: PlatformEmailEnv, to: string): Promise<void> {
+  const { apiUrl, name } = emailConfig(env);
+  const command = platformConnectCommand(apiUrl);
+  const inviteUrl = `${apiUrl}/invite`;
+  await sendEmail(env, {
     to,
-    subject: "You're invited to Void's Private Beta",
+    subject: `You're invited to ${name}`,
     html: emailHtml(
-      `<h2 style="margin-bottom:8px">Hello there!</h2>
-<p>You're invited to <strong>Void's Private Beta</strong> phase.</p>
-<p><strong>Warning:</strong> Void is still a work in progress and things may change.</p>
-<p>We'd love to get your feedback on how we can improve. There are two ways to share your thoughts:</p>
-<ul>
-<li>Join the <a href="${DISCORD_URL}" style="color:#1a1a1a">Void Discord server</a>, then write in the private feedback channel.</li>
-<li>Create an issue in <a href="${GITHUB_REPO_URL}" style="color:#1a1a1a">void-sdk/void</a> after you receive the invite.</li>
-</ul>
-<p>Thank you!</p>
-<p>Please authenticate with a GitHub or Google account that uses the same email address as this invite.</p>
-<p>${button(QUICKSTART_URL, 'Get Started')}</p>`,
+      `<h2 style="margin-bottom:8px">You're invited to ${escapeHtml(name)}</h2>
+<p>An administrator has invited you to deploy applications on ${escapeHtml(name)}.</p>
+<p>Connect the Void CLI to this platform. When prompted, sign in with an account whose verified email address matches this invitation:</p>
+<pre><code>${escapeHtml(command)}</code></pre>
+<p>${button(inviteUrl, 'Get Started')}</p>`,
       "If you didn't expect this invitation, you can ignore this email.",
     ),
-    text: `Hello there!\n\nYou're invited to Void's Private Beta phase.\n\nWarning: Void is still a work in progress and things may change.\n\nWe'd love to get your feedback on how we can improve. There are two ways to share your thoughts:\n\nJoin the Void Discord server: ${DISCORD_URL}. Then write in the private feedback channel.\n\nCreate an issue in ${GITHUB_REPO_URL} after you receive the invite.\n\nThank you!\n\nPlease authenticate with a GitHub or Google account that uses the same email address as this invite.\n\nGet started: ${QUICKSTART_URL}\n\nIf you didn't expect this invitation, you can ignore this email.`,
+    text: `You're invited to ${name}.\n\nAn administrator has invited you to deploy applications on ${name}.\n\nConnect the Void CLI to this platform. When prompted, sign in with an account whose verified email address matches this invitation:\n\n${command}\n\nGet started: ${inviteUrl}\n\nIf you didn't expect this invitation, you can ignore this email.`,
   });
 }
 
-const QUICKSTART_URL = 'https://void.cloud/guide/quickstart';
-const GUIDE_URL = 'https://void.cloud/guide/';
-const DISCORD_URL = 'https://discord.gg/QRF4nSvcQv';
-const GITHUB_REPO_URL = 'https://github.com/void-sdk/void';
-
 export async function sendWelcomeEmail(
-  emailBinding: SendEmail,
+  env: PlatformEmailEnv,
   to: string,
   login: string,
 ): Promise<void> {
-  await sendEmail(emailBinding, {
+  const { apiUrl, name } = emailConfig(env);
+  const command = platformConnectCommand(apiUrl);
+  await sendEmail(env, {
     to,
-    subject: 'Welcome to Void',
+    subject: `Welcome to ${name}`,
     html: emailHtml(
-      `<h2 style="margin-bottom:8px">Welcome to Void, ${escapeHtml(login)}</h2>
-<p>Your account is ready. Void is the deployment platform for the Vite ecosystem — deploy full-stack apps with file-based routing, database bindings, AI integration, and edge-first infrastructure.</p>
-<p>Join our Discord to get an early-access feedback role and chat with the team:</p>
-<p>${button(DISCORD_URL, 'Join Discord')}</p>
-<p style="margin-top:16px">To get started with Void, see the <a href="${GUIDE_URL}" style="color:#1a1a1a">guide</a>.</p>`,
-      'You received this email because you signed up for Void.',
+      `<h2 style="margin-bottom:8px">Welcome to ${escapeHtml(name)}, ${escapeHtml(login)}</h2>
+<p>Your account is ready. Connect the Void CLI to this platform:</p>
+<pre><code>${escapeHtml(command)}</code></pre>
+<p>The CLI opens your browser to sign in when needed. See the platform setup guide for the next steps.</p>
+<p>${button(`${apiUrl}/invite`, 'Platform Setup')}</p>`,
+      `You received this email because you signed up for ${name}.`,
     ),
-    text: `Welcome to Void, ${login}\n\nYour account is ready. Void is the deployment platform for the Vite ecosystem — deploy full-stack apps with file-based routing, database bindings, AI integration, and edge-first infrastructure.\n\nJoin our Discord to get an early-access feedback role and chat with the team: ${DISCORD_URL}\n\nTo get started with Void, see the guide: ${GUIDE_URL}\n\nYou received this email because you signed up for Void.`,
+    text: `Welcome to ${name}, ${login}\n\nYour account is ready. Connect the Void CLI to this platform:\n\n${command}\n\nThe CLI opens your browser to sign in when needed. See the platform setup guide for the next steps.\n\nPlatform setup: ${apiUrl}/invite\n\nYou received this email because you signed up for ${name}.`,
   });
 }
 
 export async function sendDeployFailedEmail(
-  emailBinding: SendEmail,
+  env: PlatformEmailEnv,
   to: string,
   projectSlug: string,
   errorMessage: string,
-  dashboardUrl: string,
 ): Promise<void> {
+  const { apiUrl, dashboardUrl, name } = emailConfig(env);
   const truncated = errorMessage.length > 200 ? errorMessage.slice(0, 200) + '...' : errorMessage;
-  const projectUrl = `${dashboardUrl}/projects/${encodeURIComponent(projectSlug)}`;
-
-  await sendEmail(emailBinding, {
+  const projectUrl = dashboardUrl
+    ? new URL(`/projects/${encodeURIComponent(projectSlug)}`, dashboardUrl).href
+    : null;
+  const command = platformConnectCommand(apiUrl);
+  await sendEmail(env, {
     to,
     subject: `Deploy failed: ${projectSlug}`,
     html: emailHtml(
       `<h2 style="margin-bottom:8px">Deploy failed: ${escapeHtml(projectSlug)}</h2>
-<p>A deploy to <strong>${escapeHtml(projectSlug)}</strong> failed with the following error:</p>
+<p>A deploy to <strong>${escapeHtml(projectSlug)}</strong> on ${escapeHtml(name)} failed with the following error:</p>
 <pre style="background:#f5f5f5;padding:12px;border-radius:4px;overflow-x:auto;font-size:0.85rem">${escapeHtml(truncated)}</pre>
-<p>${button(projectUrl, 'View Project')}</p>`,
-      'You received this email because you own this project on Void.',
+<p>Connect to this platform to inspect the deployment:</p><pre><code>${escapeHtml(command)}
+void project status</code></pre>
+${projectUrl ? `<p>${button(projectUrl, 'View Project')}</p>` : ''}`,
+      `You received this email because you own this project on ${name}.`,
     ),
-    text: `Deploy failed: ${projectSlug}\n\nA deploy to ${projectSlug} failed with the following error:\n\n${truncated}\n\nView project: ${projectUrl}\n\nYou received this email because you own this project on Void.`,
+    text: `Deploy failed: ${projectSlug}\n\nA deploy to ${projectSlug} on ${name} failed with the following error:\n\n${truncated}\n\nConnect to this platform to inspect the deployment:\n${command}\nvoid project status\n${projectUrl ? `\nView project: ${projectUrl}\n` : ''}\nYou received this email because you own this project on ${name}.`,
   });
 }
 
@@ -116,43 +165,43 @@ function suggestRange(start: number, sentAt: number): string {
 }
 
 export async function sendErrorAlertEmail(
-  emailBinding: SendEmail,
+  env: PlatformEmailEnv,
   to: string,
   projectSlug: string,
   errorCount: number,
-  dashboardUrl: string,
   window: { start: number; end: number } | null,
   sentAt: number = Date.now(),
 ): Promise<void> {
-  const projectUrl = `${dashboardUrl}/projects/${encodeURIComponent(projectSlug)}`;
+  const { apiUrl, dashboardUrl, name } = emailConfig(env);
+  const projectUrl = dashboardUrl
+    ? new URL(`/projects/${encodeURIComponent(projectSlug)}`, dashboardUrl).href
+    : null;
+  const command = platformConnectCommand(apiUrl);
   const count = formatCount(errorCount);
   const when = window
     ? `between ${utcStamp(window.start)} and ${utcStamp(window.end)}`
     : 'recently';
   const range = window ? suggestRange(window.start, sentAt) : '24h';
-  // `requests` leads: this alert counts every 5xx the edge returned, including
-  // ones the edge router generated itself and requests to static/SPA projects.
-  // Those never invoke a worker, so they produce no log rows at all — pointing
-  // only at `logs` would send users to a view that cannot show them.
+  // Requests include edge and static errors that never invoke a Worker or produce Worker logs.
   const requestsHint = `void project requests --status 5xx --range ${range}`;
   const logsHint = `void project logs --level error --range ${range}`;
   const hintNote =
     'The first lists every 5xx, including errors generated at the edge that never reach your worker; the second adds worker logs and exceptions.';
-
-  await sendEmail(emailBinding, {
+  await sendEmail(env, {
     to,
     subject: `5xx errors detected: ${projectSlug}`,
     html: emailHtml(
       `<h2 style="margin-bottom:8px">5xx errors detected: ${escapeHtml(projectSlug)}</h2>
-<p>Your project <strong>${escapeHtml(projectSlug)}</strong> returned <strong>${count}</strong> server error responses ${escapeHtml(when)}.</p>
-<p style="margin-bottom:4px;color:#444">Inspect them from the CLI:</p>
-<pre style="background:#f4f4f5;padding:12px 16px;border-radius:4px;font-family:ui-monospace,SFMono-Regular,monospace;font-size:0.85rem;overflow-x:auto;margin:0 0 8px"><code>${escapeHtml(requestsHint)}
+<p>Your project <strong>${escapeHtml(projectSlug)}</strong> on ${escapeHtml(name)} returned <strong>${count}</strong> server error responses ${escapeHtml(when)}.</p>
+<p style="margin-bottom:4px;color:#444">Connect to this platform and inspect them from the CLI:</p>
+<pre style="background:#f4f4f5;padding:12px 16px;border-radius:4px;font-family:ui-monospace,SFMono-Regular,monospace;font-size:0.85rem;overflow-x:auto;margin:0 0 8px"><code>${escapeHtml(command)}
+${escapeHtml(requestsHint)}
 ${escapeHtml(logsHint)}</code></pre>
 <p style="color:#666;font-size:0.85rem;margin:0 0 16px">${escapeHtml(hintNote)}</p>
-<p>${button(projectUrl, 'View Project')}</p>`,
-      'You will not receive another alert for this project for 24 hours. You received this email because you own this project on Void.',
+${projectUrl ? `<p>${button(projectUrl, 'View Project')}</p>` : ''}`,
+      `You will not receive another alert for this project for 24 hours. You received this email because you own this project on ${name}.`,
     ),
-    text: `5xx errors detected: ${projectSlug}\n\nYour project ${projectSlug} returned ${count} server error responses ${when}.\n\nInspect them from the CLI:\n  ${requestsHint}\n  ${logsHint}\n\n${hintNote}\n\nView project: ${projectUrl}\n\nYou will not receive another alert for this project for 24 hours. You received this email because you own this project on Void.`,
+    text: `5xx errors detected: ${projectSlug}\n\nYour project ${projectSlug} on ${name} returned ${count} server error responses ${when}.\n\nConnect to this platform and inspect them from the CLI:\n  ${command}\n  ${requestsHint}\n  ${logsHint}\n\n${hintNote}\n${projectUrl ? `\nView project: ${projectUrl}\n` : ''}\nYou will not receive another alert for this project for 24 hours. You received this email because you own this project on ${name}.`,
   });
 }
 

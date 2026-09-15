@@ -65,6 +65,65 @@ function project(config?: string): string {
 }
 
 describe('Cloudflare operational parsing', () => {
+  it('rolls back to an original version while preserving current triggers and settings', async () => {
+    const root = project();
+    let active = 'new';
+    const runner = vi.fn<CloudflareOperationRunner>((args) => {
+      if (args[0] === 'deployments') {
+        return ok(JSON.stringify({ versions: [{ version_id: active, percentage: 100 }] }));
+      }
+      if (args[0] === 'versions' && args[1] === 'deploy') {
+        const config = JSON.parse(readFileSync(args[args.indexOf('-c') + 1]!, 'utf8'));
+        expect(config).toEqual({ account_id: 'account-1', name: 'my-worker' });
+        active = 'original';
+        return ok();
+      }
+      throw new Error(`Unexpected mutation ${args.join(' ')}`);
+    });
+    await activateCloudflareExistingVersion(
+      { ...context(runner), configPath: join(root, 'wrangler.jsonc') },
+      { id: 'original', message: null, metadata: null, createdAt: null },
+      { id: 'new', message: null, metadata: null, createdAt: null },
+    );
+    expect(active).toBe('original');
+    expect(runner.mock.calls).toHaveLength(3);
+  });
+  it('uses traffic-only rollback when the active version is outside the recent version list', async () => {
+    const root = project();
+    let active = 'new-outside-list';
+    const runner = vi.fn<CloudflareOperationRunner>((args) => {
+      if (args[0] === 'deployments') {
+        return ok(JSON.stringify({ versions: [{ version_id: active, percentage: 100 }] }));
+      }
+      if (args[0] === 'versions' && args[1] === 'deploy') {
+        const config = JSON.parse(readFileSync(args[args.indexOf('-c') + 1]!, 'utf8'));
+        expect(config).toEqual({ account_id: 'account-1', name: 'my-worker' });
+        active = 'target';
+        return ok();
+      }
+      throw new Error(`Unexpected mutation ${args.join(' ')}`);
+    });
+    const triggerConfig = {
+      workers_dev: true,
+      preview_urls: true,
+      routes: [],
+      crons: ['0 * * * *'],
+      queueConsumers: [],
+      workflows: [],
+    };
+    await activateCloudflareExistingVersion(
+      { ...context(runner), configPath: join(root, 'wrangler.jsonc') },
+      {
+        id: 'target',
+        message: null,
+        metadata: { schema: 2, migrations: [], triggerConfig },
+        createdAt: null,
+      },
+      undefined,
+    );
+    expect(active).toBe('target');
+    expect(runner.mock.calls.some(([args]) => args[0] === 'triggers')).toBe(false);
+  });
   it('reads active traffic and Void migration metadata', () => {
     expect(
       parseActiveVersionId(

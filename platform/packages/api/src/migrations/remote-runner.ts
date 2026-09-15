@@ -287,7 +287,7 @@ export async function runRemoteMigrations(
     // prior post-SQL failure (network blip, 429, timeout) that committed
     // the SQL but lost the tracking INSERT. Reconciling via INSERT OR
     // IGNORE is correct in that case and restores the deploy-retry path
-    // that void-sdk/void#6 is about.
+    // after user SQL was committed without its tracking row.
     //
     // Restriction: the unconditional fall-through is gated on
     // `isSingleStatement(migration.sql)`. For a multi-statement migration

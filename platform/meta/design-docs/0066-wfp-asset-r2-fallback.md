@@ -6,9 +6,13 @@ created: 2026-04-23
 
 # WfP Asset Safety-Net Fallback via R2
 
+> Historical design record. Status, checklists and examples describe the work
+> when recorded. See the [design archive](./README.md) for current guides and
+> the supported self-hosted platform.
+
 ## Context
 
-Doc [0065](./0065-cloudflare-asset-dedupe-poisoning.md) documents a Cloudflare Workers for Platforms bug (`cloudflare/workers-sdk#12586`, internal WC-4511) where the `assets-upload-session` API can report a content hash as already cached when the bytes are missing from CF's blob store. At runtime, requests for poisoned paths receive a 36-byte `Assets have not yet been deployed to this script.` stub instead of the real asset.
+Doc [0065](./0065-cloudflare-asset-dedupe-poisoning.md) documents a Cloudflare Workers for Platforms bug (`cloudflare/workers-sdk#12586`) where the `assets-upload-session` API can report a content hash as already cached when the bytes are missing from CF's blob store. At runtime, requests for poisoned paths receive a 36-byte `Assets have not yet been deployed to this script.` stub instead of the real asset.
 
 0065 accepted the bug and left platform-side mitigation as a future option. This doc commits to the safety-net variant of that future option — keeping CF as the primary asset-serving path, mirroring assets to platform-owned R2/KV, and falling back to the mirror at request time when dispatch detects the stub.
 
@@ -23,7 +27,7 @@ For every WfP deploy with assets:
 3. A serving manifest (`Record<path, hash-or-!hash>`) is written to `ROUTING.put('manifest:{deploymentId}', ...)`. Same shape and same KV key the static-only path uses.
 4. The routing entry written under the project slug gains `assetManifestId` and `assetConfig` fields so dispatch knows the mirror exists.
 
-At request time in `packages/dispatch`:
+At request time in `platform/packages/dispatch`:
 
 1. Dispatch calls the user worker as today. CF's native asset binding may intercept asset paths before the worker runs (default `run_worker_first: false`) or serve them from the worker's `env.ASSETS.fetch()` fallback.
 2. Dispatch inspects every worker response that can come from CF's asset binding, including worker-backed `fallbackRules` re-dispatches and ISR background revalidation renders. If and only if the routing entry has `assetManifestId` AND the response matches the stub fingerprint (status 200, `Content-Type` starts with `text/plain`, `Content-Length` 1–199), dispatch reads the body and checks for the known stub marker substring.
@@ -34,11 +38,11 @@ Every fallback hit logs a structured event (`event: 'wfp-asset-fallback'`) carry
 
 ## What does not change
 
-- CF `assets-upload-session` / `uploadAssetBuckets` / `completionJwt` path (`packages/api/src/routes/deploy.ts` asset-upload block).
+- CF `assets-upload-session` / `uploadAssetBuckets` / `completionJwt` path (`platform/packages/api/src/routes/deploy.ts` asset-upload block).
 - The `/.void-deploy/<deploymentId>.txt` cache-buster.
 - The `ASSETS` binding attached to the user worker's metadata.
 - The `assets: buildAssetMetadata(...)` metadata entry.
-- Framework code (`framework/packages/void/...`, adapters). `serveWithAssets` in the Void router is already `!env.ASSETS`-guarded and continues to call CF's binding as today.
+- Framework code (`packages/void/...`, adapters). `serveWithAssets` in the Void router is already `!env.ASSETS`-guarded and continues to call CF's binding as today.
 - Worker script upload pipeline.
 - CF-native `assetConfig` semantics (`not_found_handling`, `html_handling`, `run_worker_first`). CF continues to own these on the happy path; the fallback path uses the same `resolveStaticPath` logic the static-only path uses.
 
@@ -75,7 +79,7 @@ If the observed shape diverges from this expectation, update the detection heuri
 
 The marker string is a contract we do not control. CF can change the text at any time and we'd stop detecting. Mitigations:
 
-- **Log every fallback hit** with structured fields so the rate over time is queryable (`packages/tail` pipeline).
+- **Log every fallback hit** with structured fields so the rate over time is queryable (`platform/packages/tail` pipeline).
 - **Monitor for sudden drops to zero** of the fallback rate. If the rate falls to zero globally without a corresponding CF release note, the detection may have broken.
 - **Canary** (future work): a synthetic deploy that can be set up to trigger the stub on demand, exercised daily, and alerts if detection misses.
 
@@ -89,13 +93,13 @@ One caveat: the first WfP deploy after this code lands on a given project may no
 
 ## Retention and GC
 
-The existing `deleteUnreferencedAssets` in `packages/api/src/assets.ts` is keyed on `assets/{projectId}/{hash}` and uses the `retained`-flag set from `deployments.asset_hashes` — works unchanged for WfP. The WfP retention-cleanup block in `packages/api/src/routes/deploy.ts` is extended to call `deleteUnreferencedAssets` and `ROUTING.delete('manifest:{id}')` for deployments being evicted from the retention window. Per-project GC for mirrored bytes is now a side effect of WfP deploys, matching the behavior of static-only deploys.
+The existing `deleteUnreferencedAssets` in `platform/packages/api/src/assets.ts` is keyed on `assets/{projectId}/{hash}` and uses the `retained`-flag set from `deployments.asset_hashes` — works unchanged for WfP. The WfP retention-cleanup block in `platform/packages/api/src/routes/deploy.ts` is extended to call `deleteUnreferencedAssets` and `ROUTING.delete('manifest:{id}')` for deployments being evicted from the retention window. Per-project GC for mirrored bytes is now a side effect of WfP deploys, matching the behavior of static-only deploys.
 
 ## Pre-routing failure cleanup
 
 A deploy that fails before routing switches is never marked `retained`, so the retention GC above will never see its asset hashes. Without explicit cleanup, the mirror blobs and the `manifest:{id}` KV entry written during the WfP branch would accumulate on repeated failed deploys.
 
-The mirror integrates with the existing abort-cleanup path (`cleanupStreamedAssetsOnAbort` in `packages/api/src/routes/deploy.ts`):
+The mirror integrates with the existing abort-cleanup path (`cleanupStreamedAssetsOnAbort` in `platform/packages/api/src/routes/deploy.ts`):
 
 - Hashes are registered in `streamedHashStores` **before** calling `uploadStaticAssets`, not after. `uploadStaticAssets` runs concurrent workers and rejects on the first worker failure, leaving already-settled writes on disk; post-call registration would miss those on partial failure. Placement (`kv` vs `r2`) is a pure function of `entry.bytes.byteLength` vs `KV_THRESHOLD`, so we compute it up-front instead of waiting for the return value. The shared abort cleanup then sweeps mirrored blobs alongside streamed-static uploads, gated by retained-hash protection (hashes still referenced by any retained or in-flight deployment are kept).
 - The `manifest:{deploymentId}` KV entry is tracked via a request-scoped identifier and deleted unconditionally by the abort closure, independent of the blob sweep. This covers the edge case where every asset was preflight-skipped (no new blobs uploaded, but the manifest KV was still written with carry-forward entries).
@@ -128,18 +132,18 @@ If telemetry shows **zero** fallback hits over the evaluation window, staying on
 
 The change is strictly additive at deploy time and has a narrow gated check at request time. To disable:
 
-1. **Deploy side:** comment out the `uploadStaticAssets` call + serving-manifest write in the WfP branch of `packages/api/src/routes/deploy.ts`, and remove the `assetManifestId` / `assetConfig` arguments from `buildRoutingJson`.
+1. **Deploy side:** comment out the `uploadStaticAssets` call + serving-manifest write in the WfP branch of `platform/packages/api/src/routes/deploy.ts`, and remove the `assetManifestId` / `assetConfig` arguments from `buildRoutingJson`.
 2. **Dispatch side:** the fallback path is gated on `routing.assetManifestId`. Removing that field from routing entries (or rolling back the `buildRoutingJson` change) disables the fallback without any dispatch change required.
 
 A one-line feature flag could be added if needed (`process.env.WFP_ASSET_MIRROR_ENABLED`) but wasn't included in the initial rollout to keep the code surface small.
 
 ## Files changed (implementation)
 
-- `packages/api/src/routing.ts` — `buildRoutingJson` accepts `assetManifestId`, `assetConfig`.
-- `packages/api/src/routes/deploy.ts` — R2/KV mirror after CF upload, `assetManifestId` emitted on WfP routing JSON, retention block extended to evict mirrored assets.
-- `packages/dispatch/src/index.ts` — `RoutingEntry.assetManifestId`, stub detection, fallback helper, telemetry.
-- `packages/dispatch/test/unit/wfp-asset-fallback.test.ts` — new test file.
-- `packages/api/test/unit/routing.test.ts` — new test file.
+- `platform/packages/api/src/routing.ts` — `buildRoutingJson` accepts `assetManifestId`, `assetConfig`.
+- `platform/packages/api/src/routes/deploy.ts` — R2/KV mirror after CF upload, `assetManifestId` emitted on WfP routing JSON, retention block extended to evict mirrored assets.
+- `platform/packages/dispatch/src/index.ts` — `RoutingEntry.assetManifestId`, stub detection, fallback helper, telemetry.
+- `platform/packages/dispatch/test/unit/wfp-asset-fallback.test.ts` — new test file.
+- `platform/packages/api/test/unit/routing.test.ts` — new test file.
 
 ## References
 
@@ -147,4 +151,3 @@ A one-line feature flag could be added if needed (`process.env.WFP_ASSET_MIRROR_
 - [0028-per-worker-assets](./0028-per-worker-assets.md) — how CF WfP's native asset binding works.
 - [0042-dispatch-asset-caching](./0042-dispatch-asset-caching.md) — edge-cache layer that fronts static assets (now also fronts this fallback path).
 - Upstream: [`cloudflare/workers-sdk#12586`](https://github.com/cloudflare/workers-sdk/issues/12586).
-- Internal: WC-4511.

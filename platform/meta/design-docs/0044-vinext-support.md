@@ -1,5 +1,9 @@
 # vinext Framework Support
 
+> Historical design record. Status, checklists and examples describe the work
+> when recorded. See the [design archive](./README.md) for current guides and
+> the supported self-hosted platform.
+
 **Date:** 2026-03-02
 **Status:** Approved
 
@@ -100,7 +104,7 @@ vinext uses the same `runFullDeploy()` path as TanStack Start and React Router (
 
 ## Files to Modify
 
-### Framework repo (`framework/`)
+### Framework packages (`packages/`)
 
 1. **`packages/void/src/plugin-inference.ts`**
    - Add `vinext` to `FRAMEWORK_PACKAGES`

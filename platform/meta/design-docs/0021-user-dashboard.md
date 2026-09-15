@@ -1,5 +1,9 @@
 # User Dashboard
 
+> Historical design record. Status, checklists and examples describe the work
+> when recorded. See the [design archive](./README.md) for current guides and
+> the supported self-hosted platform.
+
 **Date:** 2026-03-08
 **Status:** Implemented (living document)
 
@@ -11,10 +15,10 @@ A user-facing dashboard for Void, built as a Vue Pages mode app that dogfoods th
 
 ## Architecture
 
-### Package: `packages/dashboard`
+### Package: `platform/packages/dashboard`
 
 - Vue Pages mode app using `voidPlugin()` + `voidVue()`
-- Deploys separately at `dash.void.cloud` / `dash.staging.void.cloud`
+- Deploys separately at `dash.platform.example.net` / `dash.staging.platform.example.net`
 - Tailwind CSS v4 with shared tokens from `@voidcloud/ui`
 
 ### Data Access
@@ -26,9 +30,9 @@ A user-facing dashboard for Void, built as a Vue Pages mode app that dogfoods th
 
 OAuth (GitHub/Google) → platform issues JWT → stored in `void_token` httpOnly cookie → middleware validates token and sets request-scoped user state.
 
-### Shared Design System: `packages/ui`
+### Shared Design System: `platform/packages/ui`
 
-`packages/ui` currently exports shared CSS tokens (`base.css`, `theme.css`) consumed by the dashboard. It is not yet a component library.
+`platform/packages/ui` currently exports shared CSS tokens (`base.css`, `theme.css`) consumed by the dashboard. It is not yet a component library.
 
 ## Pages
 
@@ -44,7 +48,7 @@ OAuth (GitHub/Google) → platform issues JWT → stored in `void_token` httpOnl
 ## Source Layout
 
 ```text
-packages/dashboard/
+platform/packages/dashboard/
   middleware/
     01.auth.ts               # Hyperdrive DB init, cookie auth, shared user state
   lib/

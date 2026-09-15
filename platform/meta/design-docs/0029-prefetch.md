@@ -6,6 +6,10 @@ created: 2026-02-26
 
 # Link Prefetch
 
+> Historical design record. Status, checklists and examples describe the work
+> when recorded. See the [design archive](./README.md) for current guides and
+> the supported self-hosted platform.
+
 ## Problem
 
 The `<Link>` component navigates via `router.visit()`, which fetches the page JSON and resolves the component JS sequentially on click. Every navigation pays full network latency for both the data fetch and the JS chunk download. For pages the user is likely to visit next, we can eliminate this latency by prefetching ahead of time.

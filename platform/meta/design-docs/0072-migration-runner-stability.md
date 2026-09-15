@@ -6,6 +6,10 @@ created: 2026-05-18
 
 # Stable Migration Execution Across Void SDK and Platform
 
+> Historical design record. Status, checklists and examples describe the work
+> when recorded. See the [design archive](./README.md) for current guides and
+> the supported self-hosted platform.
+
 ## Summary
 
 Void has two production migration paths for customer databases:
@@ -50,7 +54,7 @@ Cloudflare references checked for this draft:
 
 Code path:
 
-- `framework/packages/void/src/migrations/runner.ts`
+- `packages/void/src/migrations/runner.ts`
 
 Behavior:
 
@@ -69,7 +73,7 @@ Assessment:
 
 Code path:
 
-- `framework/packages/void/src/migrations/runner-pg.ts`
+- `packages/void/src/migrations/runner-pg.ts`
 
 Behavior:
 
@@ -86,7 +90,7 @@ Assessment:
 
 Code path:
 
-- `framework/packages/void/src/runtime/migration-handler.ts`
+- `packages/void/src/runtime/migration-handler.ts`
 
 Invocation:
 
@@ -111,7 +115,7 @@ Risk:
 
 Code path:
 
-- `packages/api/src/routes/deploy.ts`
+- `platform/packages/api/src/routes/deploy.ts`
 
 Behavior:
 
@@ -133,10 +137,10 @@ Assessment:
 
 Code paths:
 
-- `framework/packages/void/src/runtime/migration-handler.ts`
-- `framework/packages/void/src/runtime/auth-migrations.ts`
-- `framework/packages/void/src/runtime/better-auth.ts`
-- `framework/packages/void/src/runtime/better-auth-pg.ts`
+- `packages/void/src/runtime/migration-handler.ts`
+- `packages/void/src/runtime/auth-migrations.ts`
+- `packages/void/src/runtime/better-auth.ts`
+- `packages/void/src/runtime/better-auth-pg.ts`
 
 Behavior:
 
@@ -152,8 +156,8 @@ Risk:
 
 Code paths:
 
-- `packages/api/src/routes/projects.ts`
-- `packages/api/src/migrations/remote-runner.ts`
+- `platform/packages/api/src/routes/projects.ts`
+- `platform/packages/api/src/migrations/remote-runner.ts`
 
 Invocation:
 
@@ -631,8 +635,8 @@ Required behavior:
 
 The platform already has a tokenizer-backed destructive guard:
 
-- `packages/api/src/sql/tokenize.ts`
-- `packages/api/src/routes/projects.ts`
+- `platform/packages/api/src/sql/tokenize.ts`
+- `platform/packages/api/src/routes/projects.ts`
 
 The SDK currently uses raw regex matching.
 

@@ -240,6 +240,7 @@ export default extendConfig(
               { text: 'Deployment', link: '/guide/deployment' },
               { text: 'Self-hosted Platform', link: '/guide/self-hosted-platform' },
               { text: 'Platform Administration', link: '/guide/platform-administration' },
+              { text: 'Platform Development', link: '/guide/platform-development' },
             ],
           },
         ],

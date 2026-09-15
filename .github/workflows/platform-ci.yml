@@ -23,7 +23,7 @@ permissions: {}
 jobs:
   build-api-container:
     if: github.event_name == 'pull_request'
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'voidzero-dev/void' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     timeout-minutes: 10
     permissions:
       contents: read
@@ -35,7 +35,7 @@ jobs:
         run: docker build --pull --tag void-api-build-container:ci platform/packages/api/container
 
   lint-build-check:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'voidzero-dev/void' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     permissions:
       contents: read
     steps:
@@ -61,7 +61,7 @@ jobs:
       - run: vp run check:sdk
 
   test:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'voidzero-dev/void' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     permissions:
       contents: read
     strategy:
@@ -82,23 +82,27 @@ jobs:
 
   # The production guard. `platform-deploy.yml` migrates before it deploys the api worker, so a
   # push to `prod` applies a new schema while the previous release is still serving traffic. This
-  # migrates a real Postgres with the migrations under test, then runs the `prod` branch's
+  # migrates a real Postgres with the migrations under test, then runs the selected released ref's
   # integration tests against that schema: if the code that is live cannot run on the new schema,
-  # the push must not ship. Accepted limits: the baseline is the `prod` branch head rather than the
-  # deployed revision, and released migrations are assumed append-only (drizzle never re-applies an
-  # applied entry and skips entries not newer than the last applied).
+  # the push must not ship. Void Cloud defaults to `prod`; forks opt in by setting the repository
+  # variable VOID_PLATFORM_PRODUCTION_REF to their released branch, tag, or commit. The selected
+  # ref must represent the deployed version, and released migrations are assumed append-only
+  # (drizzle never re-applies an entry and skips entries not newer than the last applied).
   #
   # It has teeth on PRs, where the code under test is a different commit from the one that is
-  # live. The production deploy sets `require-schema-compat` for every trigger — including a
-  # manual dispatch, which can be started from any ref and would otherwise skip the job. Staging
-  # deploys skip it: they cannot break production, and they run on nearly every push to `main`.
+  # live. The production deploy explicitly requests `require-schema-compat`, including on
+  # manual dispatch. Fork reusable-workflow callers can request it with their own baseline.
+  # Staging deploys run source checks without the production compatibility comparison.
   schema-compat:
-    if: github.event_name == 'pull_request' || inputs.require-schema-compat
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    if: >-
+      ${{ inputs.require-schema-compat || (github.event_name == 'pull_request'
+      && (github.repository == 'voidzero-dev/void' || vars.VOID_PLATFORM_PRODUCTION_REF != '')) }}
+    runs-on: ${{ github.repository == 'voidzero-dev/void' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     timeout-minutes: 20
     permissions:
       contents: read
     env:
+      PRODUCTION_REF: ${{ vars.VOID_PLATFORM_PRODUCTION_REF || 'prod' }}
       POSTGRES_USER: void_ci
       POSTGRES_PASSWORD: void_ci_pass
       POSTGRES_DB: void_schema_compat
@@ -121,6 +125,11 @@ jobs:
           --health-timeout=5s
           --health-retries=5
     steps:
+      - name: Require a production baseline for fork deployment checks
+        if: ${{ github.repository != 'voidzero-dev/void' && vars.VOID_PLATFORM_PRODUCTION_REF == '' }}
+        run: |
+          echo '::error::Set the repository variable VOID_PLATFORM_PRODUCTION_REF to the released platform ref before requesting schema compatibility checks.'
+          exit 1
       # Phase 1 — apply the migrations under test to a real Postgres.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -134,32 +143,23 @@ jobs:
         env:
           DATABASE_URL: ${{ env.COMPAT_DATABASE_URL }}
 
-      # Phase 2 — the release that is live must still run on that schema. `prod` is that release.
-      # PRs are checked against it; a push to `prod` checks itself, as in the old repository; a
-      # manual dispatch from another ref is checked against `prod`.
+      # Phase 2 — the selected released ref must still run on the migrated schema.
+      # Forks opt in with VOID_PLATFORM_PRODUCTION_REF; Void Cloud defaults to prod.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: prod
+          ref: ${{ env.PRODUCTION_REF }}
           persist-credentials: false
-      - name: Does the baseline carry the platform?
-        id: production
+      - name: Require platform code in the baseline
         run: |
-          if [ -d platform/packages/api ]; then
-            echo 'usable=true' >> "$GITHUB_OUTPUT"
-          else
-            # Production still runs a pre-monorepo revision, so there is no platform code to test
-            # against: the schema is checked, the code is not. That gap closes with the first
-            # release from this repository, after which this branch stops being taken.
-            echo 'usable=false' >> "$GITHUB_OUTPUT"
-            echo '::warning::The compatibility baseline predates the platform, so the production code was not exercised against the migrated schema. This stops once prod carries the platform.'
+          if [ ! -d platform/packages/api ]; then
+            echo '::error::The selected production baseline does not contain the platform. Choose a released platform ref with VOID_PLATFORM_PRODUCTION_REF.'
+            exit 1
           fi
-      - if: steps.production.outputs.usable == 'true'
-        uses: voidzero-dev/setup-vp@1b32467adbe183473499fd9d5d372c3ed9641754 # v1.18.0
+      - uses: voidzero-dev/setup-vp@1b32467adbe183473499fd9d5d372c3ed9641754 # v1.18.0
         with:
           cache: true
           node-version-file: .node-version
       - name: Run the production ref's integration tests on the migrated schema
-        if: steps.production.outputs.usable == 'true'
         run: |
           vp run build
           vp run --filter './platform/packages/**' build

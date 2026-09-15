@@ -1,7 +1,7 @@
 # @voidcloud/dashboard
 
-Authentication frontend for the Void platform. Built as a React Pages mode app,
-dogfooding the platform.
+Optional authentication frontend for a Void platform, built as a React Pages
+mode app. The administrator UI is served by the API Worker.
 
 ## Architecture
 
@@ -23,44 +23,42 @@ dogfooding the platform.
 
 ## Local Development
 
-Run the dashboard against the production API and your real user:
+Start with an API you run locally. From the repository root, with PostgreSQL
+running and its client tools on your path:
 
 ```sh
-API_URL=https://api.void.cloud SITE_DOMAIN=void.app pnpm -C packages/dashboard dev
+vp run build:core
+vp run --filter @voidcloud/api setup --admin-email dev@example.com
+vp run --filter @voidcloud/api dev --local --enable-containers=false --host localhost --port 8787
 ```
 
-Open the local Vite URL and sign in. The production API allows localhost OAuth
-redirects and returns the dashboard token to `/auth/callback`.
-
-To run against staging, first get a Cloudflare Access token and pass it through
-to the local dashboard worker:
+In another terminal:
 
 ```sh
-export CF_ACCESS_TOKEN="$(cloudflared access token -app=https://api.staging.void.cloud)"
-API_URL=https://api.staging.void.cloud SITE_DOMAIN=staging.void.app pnpm -C packages/dashboard dev
+vp run --filter @voidcloud/dashboard dev
 ```
 
-You can also put `API_URL`, `SITE_DOMAIN`, and `CF_ACCESS_TOKEN` in
-`packages/dashboard/.dev.vars`. `pnpm dev` refreshes an expired staging
-`CF_ACCESS_TOKEN` through `cloudflared` before Vite starts.
+Setup creates ignored `.dev.vars` files. Set the dashboard's
+`platform/packages/dashboard/.dev.vars` to use the local API:
 
-To run against a local API instead:
-
-```sh
-pnpm -C packages/api setup   # one-time: provisions Postgres + seeds admin
-pnpm -C packages/api dev     # terminal 1: API on http://localhost:8787
-pnpm -C packages/dashboard dev  # terminal 2 (reads .dev.vars below)
+```dotenv
+API_URL=http://localhost:8787
+SITE_DOMAIN=apps.example.com
 ```
 
-Put `API_URL=http://localhost:8787` and `SITE_DOMAIN=void.app` in
-`packages/dashboard/.dev.vars` so the dashboard targets the local API.
+Open the Vite URL and choose **Dev login (local API)**. That path requires the
+API's explicit development bypass and the dashboard's login nonce. Operator
+CLI authentication remains separate from the browser development bypass.
 
-The login page renders an extra **Dev login (local API)** button whenever
-`API_URL` points at `localhost` / `127.0.0.1`. Clicking it hits the API's
-`/auth/dev-login` endpoint, which mints a JWT for the seeded admin and
-redirects back through `/auth/callback`. The endpoint is guarded by
-`DEV_AUTH_BYPASS === 'true'` on the API side and the login-nonce CSRF cookie
-on the dashboard side, so it never activates in production.
+To use an API that you operate, set `API_URL` to its public origin and
+`SITE_DOMAIN` to its application domain. If Cloudflare Access protects it,
+set `CF_ACCESS_APP_URL` to that same HTTPS origin. The local token helper uses
+`cloudflared` to refresh its Access session before Vite starts; automation can
+supply `CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET` instead.
+
+See [Platform Development](../../../docs/guide/platform-development.md) for the
+full setup and source-runtime workflow. The core platform installer does not
+install the dashboard; running this app locally does not add it to an installation.
 
 ## Source Layout
 

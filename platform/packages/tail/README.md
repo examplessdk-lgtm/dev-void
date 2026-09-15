@@ -34,17 +34,19 @@ src/index.ts              # tail() handler + parseScriptName()
 test/parse-script-name.test.ts
 ```
 
-## Configuration
+## Configuration and Deployment
 
-- Wired into `packages/dispatch/wrangler.jsonc` via `tail_consumers`
-- Writes to the `void_logs` / `void_logs_staging` Analytics Engine datasets
-- No public HTTP surface
+For a self-hosted installation, `void platform install` configures the tail
+consumer and its Analytics Engine binding, and `void platform upgrade` deploys
+changes from the packaged runtime. Dataset and Worker names belong to that
+installation.
 
-## Deploy
+The checked-in Wrangler environments describe the existing Void Cloud deployment.
+Its dispatch configuration references this Worker through `tail_consumers`, so
+maintainers deploy tail before dispatch. See the
+[Void Cloud operations note](../../meta/operations.md) for that deployment and
+[Platform Development](../../../docs/guide/platform-development.md) to build your
+own runtime.
 
-```bash
-vp run --filter @voidcloud/tail deploy --env production
-vp run --filter @voidcloud/tail deploy --env staging
-```
-
-Deploy this before `dispatch`, since dispatch references it as a tail consumer.
+This Worker has no public HTTP surface. It stores events in Analytics Engine;
+the API provides log queries to the CLI and administrator UI.

@@ -7,6 +7,10 @@ depends: 0054-versioned-deployments
 
 # PostgreSQL via Hyperdrive
 
+> Historical design record. Status, checklists and examples describe the work
+> when recorded. See the [design archive](./README.md) for current guides and
+> the supported self-hosted platform.
+
 Extend Void's built-in Drizzle integration to support PostgreSQL via Cloudflare Hyperdrive, alongside the existing D1/SQLite default.
 
 ## Motivation

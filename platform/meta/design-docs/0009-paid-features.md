@@ -1,5 +1,9 @@
 # Paid Feature Analysis
 
+> Historical design record. Status, checklists and examples describe the work
+> when recorded. See the [design archive](./README.md) for current guides and
+> the supported self-hosted platform.
+
 **Date:** 2026-02-19
 **Status:** Draft
 
@@ -37,7 +41,7 @@ Deploy per branch/PR with isolated URL and its own D1 database clone.
 
 - **Why it converts:** The #1 feature teams pay Vercel for. Gateway to multi-user/team plans.
 - **CF advantage:** Workers for Platforms makes spinning up isolated workers cheap. D1 databases are free to create.
-- **Implementation:** Extend deploy flow with branch-based naming (`{branch}-{slug}.void.app`), D1 snapshot for preview isolation, auto-cleanup on merge/close.
+- **Implementation:** Extend deploy flow with branch-based naming (`{branch}-{slug}.apps.example.com`), D1 snapshot for preview isolation, auto-cleanup on merge/close.
 - **Effort:** Medium. Deploy pipeline exists; need branch routing + DB cloning + lifecycle management.
 - **Tier:** Pro (or Team).
 

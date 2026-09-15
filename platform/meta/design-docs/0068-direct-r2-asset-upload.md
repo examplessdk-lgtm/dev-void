@@ -6,12 +6,15 @@ created: 2026-05-07
 
 # Direct-to-R2 Asset Upload
 
+> Historical design record. Status, checklists and examples describe the work
+> when recorded. See the [design archive](./README.md) for current guides and
+> the supported self-hosted platform.
+
 ## Context
 
 `pnpm void deploy` for static / SPA projects with large `dist/` payloads
 fails with `Connection lost during deploy: 'terminated'` and leaves the
-deployment row stuck in `pending` (issue
-[void-sdk/void#23](https://github.com/void-sdk/void/issues/23)).
+deployment row stuck in `pending`.
 
 Root cause is pinned: the API Worker streams the entire multipart body
 through its handler, hashing each `asset:*` part inline and piping it to
@@ -160,7 +163,7 @@ The multipart code path is preserved verbatim. Detection is via
 
 ### Task 1 — Platform: R2 presigning utility
 
-**File:** `packages/api/src/r2-presign.ts` (new, ~150 LOC)
+**File:** `platform/packages/api/src/r2-presign.ts` (new, ~150 LOC)
 
 Implement AWS Signature V4 PUT presigning for R2. Use
 [`aws4fetch`](https://github.com/mhart/aws4fetch) (already a CF
@@ -196,7 +199,7 @@ isn't part of the signature).
 Read R2 endpoint from existing platform conventions (R2 S3 endpoint:
 `https://${accountId}.r2.cloudflarestorage.com/${bucket}`).
 
-**Tests** in `packages/api/test/unit/r2-presign.test.ts`:
+**Tests** in `platform/packages/api/test/unit/r2-presign.test.ts`:
 
 - Returns a URL pointing at the right bucket/key
 - Rejects malformed `md5` input (not 32 hex chars)
@@ -205,13 +208,13 @@ Read R2 endpoint from existing platform conventions (R2 S3 endpoint:
   canonical-form convention)
 
 **Secrets needed:** `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`. Add to
-`packages/api/wrangler.jsonc` env section as documented secrets (no
-default values committed). Update `meta/operations.md` to mention
+`platform/packages/api/wrangler.jsonc` env section as documented secrets (no
+default values committed). Update `platform/meta/operations.md` to mention
 they're required.
 
 ### Task 2 — Platform: New endpoints + JSON-mode deploy
 
-**File:** `packages/api/src/routes/deploy.ts`
+**File:** `platform/packages/api/src/routes/deploy.ts`
 
 (a) Add `POST /:id/deploy/upload-urls` — body validates with the
 existing project-ownership middleware. For each asset, call
@@ -254,7 +257,7 @@ provides: dedupe-skip when the manifest matches the live deploy,
 per-deploy cache-buster keying, retention-aware asset cleanup, the
 two-phase cancellation hooks.
 
-**Tests** in `packages/api/test/integration/deploy-direct-r2.test.ts`:
+**Tests** in `platform/packages/api/test/integration/deploy-direct-r2.test.ts`:
 
 - A static deploy with all assets pre-uploaded to R2 succeeds and
   reaches `live`.
@@ -268,8 +271,8 @@ two-phase cancellation hooks.
 
 ### Task 3 — Framework: MD5 hashing + assetManifest v2
 
-**Files:** `framework/packages/void/src/cli/package.ts`,
-`framework/packages/void/src/cli/types.ts`
+**Files:** `packages/void/src/cli/package.ts`,
+`packages/void/src/cli/types.ts`
 
 Update `collectAndHashAssets` to compute both BLAKE3 (existing recipe:
 `blake3(base64(content) + extension).hex().slice(0, 32)`) and MD5
@@ -284,7 +287,7 @@ keep working — flag this for removal in a follow-up.
 Add `assetManifestVersion: 2` to the deploy manifest builder.
 
 **Tests** in
-`framework/packages/void/test/unit/asset-hashing.test.ts`:
+`packages/void/test/unit/asset-hashing.test.ts`:
 
 - Both hashes match expected values for known fixtures
 - BLAKE3 still matches Wrangler's `hashFile` output exactly
@@ -293,8 +296,8 @@ Add `assetManifestVersion: 2` to the deploy manifest builder.
 
 ### Task 4 — Framework: Direct-to-R2 upload flow
 
-**Files:** `framework/packages/void/src/cli/client.ts`,
-`framework/packages/void/src/cli/deploy.ts`
+**Files:** `packages/void/src/cli/client.ts`,
+`packages/void/src/cli/deploy.ts`
 
 Add to `PlatformClient`:
 
@@ -339,7 +342,7 @@ events: `presign_request_start`, `presign_request_end`,
 `finalize_start` / `finalize_end`.
 
 **Tests** in
-`framework/packages/void/test/integration/direct-r2-deploy.test.ts`:
+`packages/void/test/integration/direct-r2-deploy.test.ts`:
 
 - Mock the platform's preflight + upload-urls + finalize endpoints
 - Mock R2 PUT (verify the Content-MD5 header is present and signed)
@@ -418,7 +421,7 @@ follow-up commits to this design (CLI: `feat/cli-direct-r2-upload`;
 platform: `feat/api-direct-r2-upload`). Direct-to-R2 is now the only
 supported deploy flow, and the `--legacy-upload` CLI flag, the
 `packageBuild`/`packageStaticBuild`/`packageFrameworkBuild` FormData
-builders, the multipart streaming handler in `packages/api/src/routes/deploy.ts`,
-and the `packages/api/src/multipart.ts` parser have all been deleted.
+builders, the multipart streaming handler in `platform/packages/api/src/routes/deploy.ts`,
+and the `platform/packages/api/src/multipart.ts` parser have all been deleted.
 Old CLI versions on npm fail against the new platform with a clear
 error until users upgrade.

@@ -1,21 +1,19 @@
 /**
- * Security spike: HTTP-DCV + ownership-gate wildcard-hijack reproduction.
+ * Custom-domain ownership verification diagnostic for a disposable platform.
  *
- * Drives the Cloudflare custom_hostnames API to empirically prove that the
- * planned switch from cert-DCV `txt` back to `http` (while KEEPING the
- * `_cf-custom-hostname` ownership TXT + an ownership-driven activation gate)
- * does NOT reopen the pre-PR #154 wildcard hijack.
+ * Exercises HTTP certificate validation while checking that the platform
+ * requires the per-host `_cf-custom-hostname` ownership TXT. Configure a
+ * disposable Cloudflare for SaaS zone and a separate domain you control.
  *
  * THE EXPLOIT BEING TESTED
- *   Pre-#154, Void created custom hostnames with `ssl.method: 'http'` and NO
- *   ownership gate. A victim whose zone published a wildcard
- *   `*.victim → cname.void.app` let ANY Void account bind `x.victim` because
- *   CF auto-validated the cert through the wildcard CNAME and the platform
- *   routed on cert-DCV alone. The fix keeps HTTP cert-DCV but refuses to route
+ *   Without an ownership gate, a wildcard CNAME pointing to the platform
+ *   can let another account claim a hostname under that domain: Cloudflare
+ *   can validate the certificate through the wildcard even though the
+ *   requester does not control the domain. The platform refuses to route
  *   until the per-host `_cf-custom-hostname` TXT (which a wildcard cannot
  *   forge) is satisfied — i.e. until `ownership_verification` disappears.
  *
- * THE PLATFORM GATE THIS SCRIPT EVALUATES (matches the planned domains.ts gate)
+ * THE PLATFORM GATE THIS SCRIPT EVALUATES (matches the domains.ts activation gate)
  *   gateOk = status === 'active'
  *         && ssl.status === 'active'
  *         && !ownership_verification
@@ -26,10 +24,10 @@
  *       the gate is NEVER true, `ownership_verification` persists, and `status`
  *       never reaches `active`. FAIL (abort the whole change) otherwise.
  *   B — residual probe: report whether `ssl.status` reaches `active` while
- *       `status` stays pending (unserved cert / CT-log noise). Expected and
- *       accepted per the plan; bounded by the Phase-3 janitor. Never fails.
+ *       `status` stays pending (unserved cert / CT-log noise). This is
+ *       diagnostic only: a valid certificate does not establish ownership.
  *   C — positive control: a DOCUMENTED manual variant. The operator publishes a
- *       specific `x2.<VICTIM_BASE> CNAME cname.void.app` PLUS its
+ *       specific `x2.<VICTIM_BASE> CNAME <platform-cname-target>` PLUS its
  *       `_cf-custom-hostname` TXT, then runs with `--with-positive-control`.
  *       Confirms `status`→active, `ssl.status`→active,
  *       `ownership_verification` disappears, gate flips true. Proves we don't
@@ -37,19 +35,19 @@
  *
  * PREREQUISITES
  *   - A SEPARATE Cloudflare account hosting a throwaway VICTIM zone with a
- *     wildcard `*.<VICTIM_BASE>  CNAME  cname.void.app` record. This is the
+ *     wildcard `*.<VICTIM_BASE>  CNAME  <platform-cname-target>` record. This is the
  *     attacker's lever; without it Experiment A is meaningless. Test both
  *     orange- and grey-cloud variants of that wildcard for full coverage.
- *   - CF_ZONE_ID / CF_API_TOKEN below belong to the VOID for-SaaS zone (the
+ *   - CF_ZONE_ID / CF_API_TOKEN below belong to the platform for-SaaS zone (the
  *     attacker's account) — the zone that issues `POST /custom_hostnames`.
  *     They are NOT the victim account's credentials.
  *   - For Experiment C only: before running, in the VICTIM zone publish
- *       x2.<VICTIM_BASE>            CNAME  cname.void.app
+ *       x2.<VICTIM_BASE>            CNAME  <platform-cname-target>
  *       _cf-custom-hostname.x2...   TXT    <value printed by this script on a
  *                                          prior dry create, or read from CF>
  *
  * ENV VARS (config from env/CLI only — NEVER hardcode secrets)
- *   CF_ZONE_ID    (required)  Void for-SaaS zone id that owns custom_hostnames.
+ *   CF_ZONE_ID    (required)  Platform for-SaaS zone id that owns custom_hostnames.
  *   CF_API_TOKEN  (required)  Token with custom_hostnames edit on that zone.
  *   VICTIM_BASE   (required)  Victim base hostname, e.g. `victim-spike.example`.
  *                             Experiment A registers `x.<VICTIM_BASE>`,
@@ -67,19 +65,19 @@
  *   --hostname-a=<host>       Override Experiment A hostname (default x.<base>).
  *   --hostname-c=<host>       Override Experiment C hostname (default x2.<base>).
  *
- * HOW TO RUN (oxnode — do NOT use tsx/node-strip)
+ * HOW TO RUN (from the repository root; requires the workspace Node version)
  *   CF_ZONE_ID=... CF_API_TOKEN=... VICTIM_BASE=victim-spike.example \
- *     oxnode packages/api/scripts/dcv-http-spike.ts
+ *     node platform/packages/api/scripts/dcv-http-spike.ts
  *
  *   Real (>=24h) run with positive control:
  *   CF_ZONE_ID=... CF_API_TOKEN=... VICTIM_BASE=victim-spike.example \
- *     oxnode packages/api/scripts/dcv-http-spike.ts \
+ *     node platform/packages/api/scripts/dcv-http-spike.ts \
  *       --window=90000 --with-positive-control
  *
  * !!! WARNING !!!
  *   This hits the LIVE Cloudflare API and creates real custom hostnames + cert
- *   orders. Target STAGING / DISPOSABLE domains ONLY. Every hostname this
- *   script creates is DELETEd on exit (including on error / SIGINT), but a
+ *   orders. Target disposable accounts and domains you control only. Every
+ *   hostname this script creates is DELETEd on exit (including on error / SIGINT), but a
  *   crash before cleanup can orphan a hostname + leave a CT-log entry — manually
  *   `DELETE /zones/{zone}/custom_hostnames/{id}` if that happens.
  */
@@ -152,7 +150,7 @@ async function createHttpDcvHostname(hostname: string): Promise<CustomHostnameIn
   });
 }
 
-// ── Gate (matches the planned domains.ts activation gate) ────────────
+// ── Gate (matches the domains.ts activation gate) ────────────
 
 function evaluateGate(cfHostname: CustomHostnameInfo): boolean {
   return (
@@ -344,7 +342,7 @@ function experimentB(a: PollResult): ExperimentResult {
     details: {
       ssl_active_while_status_pending: sslActiveWhileStatusPending,
       ssl_ever_active: a.sslEverActive,
-      note: 'Accepted per plan; bounded by the Phase-3 cleanup janitor.',
+      note: 'Diagnostic only: certificate validity does not establish hostname ownership.',
     },
   };
 }

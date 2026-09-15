@@ -7,6 +7,10 @@ depends: 0050-drizzle-first-class, 0052-postgres-hyperdrive, 0057-better-auth-in
 
 # Drizzle-Native Better Auth Integration
 
+> Historical design record. Status, checklists and examples describe the work
+> when recorded. See the [design archive](./README.md) for current guides and
+> the supported self-hosted platform.
+
 ## Summary
 
 Shift Void's Better Auth runtime from Better Auth's raw database / Kysely migration path to a Drizzle-native integration that reuses Void's database runtime and generated auth schema.
@@ -99,7 +103,7 @@ So Void adopts the same underlying model without invoking the CLI:
 
 New module:
 
-- `framework/packages/void/src/auth/drizzle.ts`
+- `packages/void/src/auth/drizzle.ts`
 
 This module resolves the effective Better Auth config and generates:
 
@@ -229,7 +233,7 @@ That is not acceptable for framework-managed auth tables.
 
 To avoid the snapshot-history problem, Void now owns a minimal auth migration runner:
 
-- `framework/packages/void/src/runtime/auth-migrations.ts`
+- `packages/void/src/runtime/auth-migrations.ts`
 
 It uses the generated `migrationSchema` and does live "ensure" diffs:
 
@@ -310,28 +314,28 @@ That broader `void/db` pooling story remains separate work.
 
 ### Codegen / DB surface
 
-- `framework/packages/void/src/auth/drizzle.ts`
-- `framework/packages/void/src/plugin-routing.ts`
-- `framework/packages/void/src/plugin-drizzle.ts`
-- `framework/packages/void/src/codegen/project-tsconfig.ts`
-- `framework/packages/void/src/index.ts`
-- `framework/packages/void/src/cli/gen.ts`
-- `framework/packages/void/src/cli/init.ts`
-- `framework/packages/void/src/router/compile.ts`
+- `packages/void/src/auth/drizzle.ts`
+- `packages/void/src/plugin-routing.ts`
+- `packages/void/src/plugin-drizzle.ts`
+- `packages/void/src/codegen/project-tsconfig.ts`
+- `packages/void/src/index.ts`
+- `packages/void/src/cli/gen.ts`
+- `packages/void/src/cli/init.ts`
+- `packages/void/src/router/compile.ts`
 
 ### Runtime
 
-- `framework/packages/void/src/runtime/better-auth-shared.ts`
-- `framework/packages/void/src/runtime/auth-migrations.ts`
-- `framework/packages/void/src/auth/node.ts`
-- `framework/packages/void/src/runtime/better-auth-pg.ts`
+- `packages/void/src/runtime/better-auth-shared.ts`
+- `packages/void/src/runtime/auth-migrations.ts`
+- `packages/void/src/auth/node.ts`
+- `packages/void/src/runtime/better-auth-pg.ts`
 
 ### Tests
 
-- `framework/packages/void/test/unit/auth-drizzle.test.ts`
-- `framework/packages/void/test/unit/auth-migrations.test.ts`
-- `framework/packages/void/test/unit/compile-auth.test.ts`
-- `framework/packages/void/test/unit/plugin-drizzle.test.ts`
+- `packages/void/test/unit/auth-drizzle.test.ts`
+- `packages/void/test/unit/auth-migrations.test.ts`
+- `packages/void/test/unit/compile-auth.test.ts`
+- `packages/void/test/unit/plugin-drizzle.test.ts`
 
 ## Verification
 

@@ -1,5 +1,9 @@
 # Headers & Redirects in void.json
 
+> Historical design record. Status, checklists and examples describe the work
+> when recorded. See the [design archive](./README.md) for current guides and
+> the supported self-hosted platform.
+
 **Date:** 2026-02-27
 **Status:** Draft
 
@@ -92,8 +96,8 @@ If the user provides their own `_headers` or `_redirects` in `public/`, skip gen
 
 ## Files to Change
 
-| File                                         | Change                                                                                  |
-| -------------------------------------------- | --------------------------------------------------------------------------------------- |
-| `framework/packages/void/src/config.ts`      | Add `redirects` to `VoidConfig`, add `convertRedirectsConfig()`, validation             |
-| `framework/packages/void/src/cli/deploy.ts`  | Replace hardcoded `_headers` generation with config-driven generation for both files    |
-| `framework/packages/void/src/cli/headers.ts` | Rename to something more general or add redirect conversion alongside header conversion |
+| File                               | Change                                                                                  |
+| ---------------------------------- | --------------------------------------------------------------------------------------- |
+| `packages/void/src/config.ts`      | Add `redirects` to `VoidConfig`, add `convertRedirectsConfig()`, validation             |
+| `packages/void/src/cli/deploy.ts`  | Replace hardcoded `_headers` generation with config-driven generation for both files    |
+| `packages/void/src/cli/headers.ts` | Rename to something more general or add redirect conversion alongside header conversion |

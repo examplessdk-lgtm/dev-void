@@ -6,6 +6,10 @@ created: 2026-04-14
 
 # URL Rewrites
 
+> Historical design record. Status, checklists and examples describe the work
+> when recorded. See the [design archive](./README.md) for current guides and
+> the supported self-hosted platform.
+
 ## Context
 
 Void supports URL redirects (3xx) at the edge but not URL rewrites (status 200). A rewrite serves content from a different internal path without changing the browser URL. This is a fundamental routing primitive that unlocks several real-world patterns:
@@ -26,7 +30,7 @@ Void supports URL redirects (3xx) at the edge but not URL rewrites (status 200).
 
 ## Framework wire contract
 
-The platform depends on the framework emitting a specific manifest wire shape for routing rules: `redirectRules` / `fallbackRules` with `{ source, destination, status }` entries, no `force` field. `force` lives on the internal `DevRedirectRule` in the framework and is stripped by the CLI before serialising; the public `RedirectRule` does not carry it. When bumping the submodule, verify the framework's `packages/void/src/cli/types.ts` `RedirectRule` / `DevRedirectRule` contract has not changed without a corresponding platform update. `packages/dispatch/test/unit/framework-contract.test.ts` pins the wire shape on the platform side so silent drift shows up as a typecheck failure.
+The platform depends on the framework emitting a specific manifest wire shape for routing rules: `redirectRules` / `fallbackRules` with `{ source, destination, status }` entries, no `force` field. `force` lives on the internal `DevRedirectRule` in the framework and is stripped by the CLI before serialising; the public `RedirectRule` does not carry it. When changing shared routing contracts, verify the framework's `packages/void/src/cli/types.ts` `RedirectRule` / `DevRedirectRule` contract has not changed without a corresponding platform update. `platform/packages/dispatch/test/unit/framework-contract.test.ts` pins the wire shape on the platform side so silent drift shows up as a typecheck failure.
 
 ## Design
 
@@ -79,7 +83,7 @@ Patterns support named captures as well as legacy splat:
 
 Destination substitution works via `:name` / `:name*` tokens. The anonymous `*` is internally captured as `splat`, so existing `:splat` destinations keep working. Named captures let patterns re-slot more than one segment (e.g., `/blog/:author/:slug` → `/articles/:author/:slug`), which a single anonymous capture cannot express. Named parameters also lay the groundwork for typed route codegen later.
 
-The compiled matcher lives once, in `packages/dispatch/src/headers.ts#compilePattern`, and is mirrored inline by the framework's node-target emitter. When a pattern contains `*` in the middle (e.g., `/blog/*/x`), the captured splat is what actually matched the `*`, not "everything after the prefix" — the regex match is authoritative.
+The compiled matcher lives once, in `platform/packages/dispatch/src/headers.ts#compilePattern`, and is mirrored inline by the framework's node-target emitter. When a pattern contains `*` in the middle (e.g., `/blog/*/x`), the captured splat is what actually matched the `*`, not "everything after the prefix" — the regex match is authoritative.
 
 ### Phases: `rewrites` vs `fallbacks`
 
@@ -132,7 +136,7 @@ Dispatch strips any client-supplied `X-Void-Original-URL` on ingress before appl
 
 ### Query preservation on redirects
 
-Redirects preserve the request's query string. `applyRoutingRules` returns `{ type: 'redirect', destination, status }` and the caller (dispatch `index.ts` and the compiled Hono middleware) builds the `Location` header with the request's query merged into the destination via `packages/dispatch/src/routing-rules.ts#mergeQueryIntoLocation`.
+Redirects preserve the request's query string. `applyRoutingRules` returns `{ type: 'redirect', destination, status }` and the caller (dispatch `index.ts` and the compiled Hono middleware) builds the `Location` header with the request's query merged into the destination via `platform/packages/dispatch/src/routing-rules.ts#mergeQueryIntoLocation`.
 
 Merge semantics: if the destination contains `?`, its parameters take precedence on per-key conflict; otherwise the request's query is appended verbatim. No opt-out flag — users who genuinely need to drop query can write the destination with an explicit `?` reset.
 
@@ -140,7 +144,7 @@ Rewrites already preserve query since only `url.pathname` is mutated.
 
 ### Constraints
 
-- **Status code allowlists.** `redirectRules` accepts `[200, 301, 302, 303, 307, 308]` — 200 is a pre-asset "force" rewrite, the 3xx values are redirects. `fallbackRules` accepts `[200]` only — fallbacks are rewrites by definition. 303 was added alongside the shared framework/platform status allowlist so OAuth-style `POST → 303 → GET` flows can be expressed at the edge. Both lists are enforced at config validation in the framework and again on manifest ingest in `packages/api/src/routes/deploy.ts`.
+- **Status code allowlists.** `redirectRules` accepts `[200, 301, 302, 303, 307, 308]` — 200 is a pre-asset "force" rewrite, the 3xx values are redirects. `fallbackRules` accepts `[200]` only — fallbacks are rewrites by definition. 303 was added alongside the shared framework/platform status allowlist so OAuth-style `POST → 303 → GET` flows can be expressed at the edge. Both lists are enforced at config validation in the framework and again on manifest ingest in `platform/packages/api/src/routes/deploy.ts`.
 - Only internal paths (starting with `/`) are supported as rewrite destinations. External URLs are rejected at config validation time and at the API on manifest ingest (`redirectRules` with `status: 200` and all `fallbackRules` entries must have a path-absolute `destination`).
 - Rewrite and fallback destinations must not contain a query string — rejected at config validation time.
 - Single-pass evaluation within each phase: a rewritten path is not re-evaluated against the same phase's rules. A request can still traverse both phases in one trip — pre-asset `redirectRules` (possible rewrite) → static asset resolution → post-asset `fallbackRules` (possible rewrite) — but each phase evaluates its own list exactly once; neither re-runs.
@@ -185,11 +189,11 @@ Framework docs (`docs/guide/edge/revalidation.md`) call out the shared-slot sema
 - `framework: src/cli/deploy.ts` -- merge rewrite + fallback rules at deploy paths
 - `framework: src/router/compile.ts` -- combined redirect+rewrite Hono middleware for node targets; `c.rewrite` / `c.originalUrl` / `c.isRewritten` wiring
 - `framework: src/runtime/handler.ts` -- Hono module augmentation for `c.rewrite` / `c.originalUrl` / `c.isRewritten`, `__rewrite` in `CloudContextVariables`. Scoping to `CloudEnv` was considered (to surface sub-app / vanilla-Hono misuse as a type error) and not shipped; misuse currently produces a runtime `TypeError` at call time.
-- `platform: packages/dispatch/src/headers.ts` -- shared pattern compiler (`compilePattern`, `substituteParams`) used by both header rules and routing rules; named `:param` and `:name*` captures
-- `platform: packages/dispatch/src/routing-rules.ts` -- `applyRoutingRules()` returns a discriminated union (not a `Response`); `mergeQueryIntoLocation` helper for query preservation on redirects
-- `platform: packages/dispatch/src/index.ts` -- handle rewrite result (modify pathname, continue pipeline), set `X-Void-Original-URL` header, apply fallbacks after static miss
-- `platform: packages/api/src/routing.ts` -- propagate `fallbackRules` from the manifest into the KV routing entry (alongside `redirectRules`)
-- `platform: packages/api/src/types.ts` -- `DeployManifest.fallbackRules` field. Entries in both `redirectRules` and `fallbackRules` are `{ source, destination, status }` — no per-rule phase flag; phase is encoded by which array the rule lives in.
+- `platform: platform/packages/dispatch/src/headers.ts` -- shared pattern compiler (`compilePattern`, `substituteParams`) used by both header rules and routing rules; named `:param` and `:name*` captures
+- `platform: platform/packages/dispatch/src/routing-rules.ts` -- `applyRoutingRules()` returns a discriminated union (not a `Response`); `mergeQueryIntoLocation` helper for query preservation on redirects
+- `platform: platform/packages/dispatch/src/index.ts` -- handle rewrite result (modify pathname, continue pipeline), set `X-Void-Original-URL` header, apply fallbacks after static miss
+- `platform: platform/packages/api/src/routing.ts` -- propagate `fallbackRules` from the manifest into the KV routing entry (alongside `redirectRules`)
+- `platform: platform/packages/api/src/types.ts` -- `DeployManifest.fallbackRules` field. Entries in both `redirectRules` and `fallbackRules` are `{ source, destination, status }` — no per-rule phase flag; phase is encoded by which array the rule lives in.
 
 ## Considered and rejected
 

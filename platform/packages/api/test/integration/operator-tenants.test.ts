@@ -290,8 +290,15 @@ describe('operator signup access and invitations', () => {
   test('previews invitations without email or writes, sends a normalized batch, and revokes access', async () => {
     const send = vi.fn(async () => {});
     const EMAIL = { send } as unknown as SendEmail;
+    const emailEnv = {
+      EMAIL,
+      EMAIL_FROM: 'Example Platform <platform@example.com>',
+      AUTH_REDIRECT_URI: 'https://api.example.com/auth/callback',
+      PLATFORM_DISPLAY_NAME: 'Example Platform',
+      PLATFORM_INSTALLATION_ID: 'example-installation',
+    };
     const body = { emails: ['One@Example.com', 'two@example.com', 'one@example.com'] };
-    const preview = await req('/invitations/send', { ...body, dryRun: true }, { EMAIL });
+    const preview = await req('/invitations/send', { ...body, dryRun: true }, emailEnv);
     expect(preview.status).toBe(200);
     expect(await preview.json()).toMatchObject({
       dryRun: true,
@@ -300,7 +307,7 @@ describe('operator signup access and invitations', () => {
     expect(send).not.toHaveBeenCalled();
     expect(await env.db.select().from(invitations)).toEqual([]);
     expect(await getAllowlist(env.ROUTING)).toEqual([]);
-    const response = await req('/invitations/send', body, { EMAIL });
+    const response = await req('/invitations/send', body, emailEnv);
     expect(response.status).toBe(200);
     const result = (await response.json()) as {
       invitations: Array<{ id: string }>;
@@ -309,6 +316,13 @@ describe('operator signup access and invitations', () => {
     expect(result.invitations).toHaveLength(2);
     expect(result.warnings).toEqual([]);
     expect(send).toHaveBeenCalledTimes(2);
+    expect(send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        from: 'Example Platform <platform@example.com>',
+        subject: "You're invited to Example Platform",
+        text: expect.stringContaining("void connect 'https://api.example.com'"),
+      }),
+    );
     const listed = (await (await req('/invitations?limit=1')).json()) as {
       invitations: Array<unknown>;
     };

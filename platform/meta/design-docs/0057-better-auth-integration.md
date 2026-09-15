@@ -6,6 +6,10 @@ created: 2026-03-09
 
 # Better Auth Integration
 
+> Historical design record. Status, checklists and examples describe the work
+> when recorded. See the [design archive](./README.md) for current guides and
+> the supported self-hosted platform.
+
 ## Summary
 
 Replace Void's bespoke built-in auth implementation with a Better Auth-powered auth system for Void apps.

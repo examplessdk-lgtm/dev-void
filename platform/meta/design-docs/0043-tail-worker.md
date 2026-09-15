@@ -7,6 +7,10 @@ supersedes: 0040-worker-observability
 
 # Tail Worker — User Worker Observability
 
+> Historical design record. Status, checklists and examples describe the work
+> when recorded. See the [design archive](./README.md) for current guides and
+> the supported self-hosted platform.
+
 ## Context
 
 Design doc 0040 proposed using the CF Workers Logs (telemetry) API and Tail API for user worker observability. Both are unsupported for Workers for Platforms dispatch namespace workers — the telemetry API returns empty data, and the Tail REST endpoint doesn't exist (502). CF docs confirm:
@@ -41,7 +45,7 @@ API Worker (void-api)
 
 ## Design
 
-### New package: `packages/tail`
+### New package: `platform/packages/tail`
 
 A new CF Worker (`void-tail`) with:
 
@@ -67,7 +71,7 @@ AE provides 90-day automatic retention and SQL querying via the REST API. The 16
 
 ### Dispatch worker changes
 
-Add `tail_consumers` to `packages/dispatch/wrangler.jsonc`:
+Add `tail_consumers` to `platform/packages/dispatch/wrangler.jsonc`:
 
 ```jsonc
 "tail_consumers": [{ "service": "void-tail" }]
@@ -84,18 +88,18 @@ This automatically routes tail events from `void-dispatch` and all user workers 
 
 ### Wrangler configs
 
-**`packages/tail/wrangler.jsonc`:**
+**`platform/packages/tail/wrangler.jsonc`:**
 
 - Analytics engine dataset: `void_logs` (staging: `void_logs_staging`)
 - Durable object: `LogStream` class
 - No routes — accessed only via service binding and `tail_consumers`
 
-**`packages/dispatch/wrangler.jsonc`:**
+**`platform/packages/dispatch/wrangler.jsonc`:**
 
 - Add `tail_consumers: [{ "service": "void-tail" }]`
 - Staging: `tail_consumers: [{ "service": "void-tail-staging" }]`
 
-**`packages/api/wrangler.jsonc`:**
+**`platform/packages/api/wrangler.jsonc`:**
 
 - Add `TAIL` service binding to `void-tail`
 

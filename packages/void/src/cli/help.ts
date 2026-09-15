@@ -142,7 +142,8 @@ const HELP_TREE: HelpTree = {
     ],
   },
   deploy: {
-    summary: 'Build and deploy the current project to its configured platform.',
+    summary:
+      'Build and deploy. Offers to link an existing Cloudflare Worker when no destination is configured.',
     usage: ['void deploy [options]'],
     options: [
       { command: '--project <name>', description: 'Deploy target project name' },

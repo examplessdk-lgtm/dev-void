@@ -1,21 +1,23 @@
 ---
-title: Compare-Failure Logging + GitHub Check Runs for Deploy-on-GitHub Builds (SDD Plan)
+title: Compare-Failure Logging + GitHub Check Runs for Deploy-on-GitHub Builds
 status: implemented
 created: 2026-06-23
 ---
 
 # Plan 0075 — Compare-Failure Logging (A) + GitHub Check Runs (B)
 
-This is a subagent-driven-development (SDD) implementation plan. Each "Task N"
-section is independently implementable by one subagent. The plan is derived
-verbatim from the approved design (Design Doc 0028 synthesis). Do not invent new
-scope.
+> Historical design record. Status, checklists and examples describe the work
+> when recorded. See the [design archive](./README.md) for current guides and
+> the supported self-hosted platform.
+
+This record describes the implementation plan for comparison failure logs and
+GitHub check runs. The task sections preserve the original dependency order.
 
 ---
 
 ## Context
 
-Two features, both in `packages/api`:
+Two features, both in `platform/packages/api`:
 
 - **Feature A — Compare-failure logging.** `getBranchHeadComparisonStatus`
   (`src/github/installation-token.ts:147-186`) collapses five distinct failure
@@ -60,7 +62,7 @@ Verified ground truth (all confirmed against current `main`):
 | `onStop` already calls `getDeploymentByProjectAndCommit` best-effort (`:523`)                                                                                | `src/build-manager.ts:522-528`                 |
 | `cancelContainerBuildDos` is the SINGLE chokepoint → `stub.cancelBuild(reason)`                                                                              | `src/github/cancel-builds.ts:25-43`            |
 | `markBuildTerminalIfActive` at `src/db.ts:2298`; `getBuild` at `:2201`; `getDeploymentByProjectAndCommit` at `:3485`                                         | `src/db.ts`                                    |
-| App has `Checks: Write` already                                                                                                                              | `meta/operations.md:313`                       |
+| App has `Checks: Write` already                                                                                                                              | `platform/meta/operations.md:313`              |
 | Webhook integration tests mock `installation-token.ts` at the module boundary via `vi.mock` → a logging change is invisible to them                          | `test/integration/api-webhooks.test.ts:96-107` |
 | GitHub fetch mocking pattern: `vi.stubGlobal('fetch', vi.fn(...))`, unmocked URL throws `Unmocked fetch:`                                                    | `test/integration/api-github.test.ts:178-189`  |
 | Existing DO test harness                                                                                                                                     | `test/unit/build-manager.test.ts`              |
@@ -69,8 +71,7 @@ Verified ground truth (all confirmed against current `main`):
 
 ## Global Constraints
 
-These are binding requirements for every task. Copy them verbatim into each
-subagent's brief. (Quoted here verbatim as exact requirements.)
+The implementation was designed around these compatibility constraints.
 
 - **behavior-preserving compare (still returns null):** Feature A is
   behavior-preserving — `getBranchHeadComparisonStatus` still returns `null` on
@@ -98,20 +99,15 @@ subagent's brief. (Quoted here verbatim as exact requirements.)
   `main`; no re-stamp needed). Follow the repo migration convention.
 - **App checks:write is the only new GitHub permission used:** `Checks: Write` is
   the only GitHub App permission required, and it is already granted
-  (`meta/operations.md:313`). No App manifest/permission change is made.
+  (`platform/meta/operations.md:313`). No App manifest/permission change is made.
 - **both executors addressed:** Both executors are addressed — Container gets full
   check-run support in this plan; GitHub Actions is explicitly DEFERRED with the
   rationale documented in code + README (the native workflow check already
   covers it), and the shared helper is written executor-agnostic for a future
   Actions PR.
-- **commit footer:** Any commit (made by the controller/owner, not the
-  subagents) ends with the footer
-  `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`.
 - **run gates:** After each task and at the end, run
   `vp run --filter ./packages/api typecheck`, `vp fmt --check`, `vp lint`, and
   the relevant `vp test run` suites.
-- **do NOT commit or deploy (controller/owner does):** Subagents must NOT commit
-  or deploy. The controller/owner performs all commits and deploys.
 
 ---
 
@@ -265,7 +261,7 @@ stamped migration.
    comment.
 
 2. Generate the migration with drizzle-kit (the repo's existing generate
-   command/script for `packages/api`) AFTER editing the schema. This produces:
+   command/script for `platform/packages/api`) AFTER editing the schema. This produces:
    - `drizzle/0028_check_runs.sql` containing exactly:
      ```sql
      ALTER TABLE "builds" ADD COLUMN "check_run_id" text;
@@ -475,7 +471,7 @@ Postgres + DO storage, and finalize it at every terminal site. All best-effort.
        name: 'Void Build',
        headSha: config.commitSha,
        externalId: config.buildId,
-       detailsUrl: `https://${config.projectSlug}.void.app`,
+       detailsUrl: `https://${config.projectSlug}.apps.example.com`,
        title: 'Void build in progress',
        summary: `Building \`${config.branch}\` @ ${config.commitSha.slice(0, 7)}`,
      });
@@ -536,7 +532,7 @@ Postgres + DO storage, and finalize it at every terminal site. All best-effort.
 
    ```ts
    await this.finalizeCheckRun(config, 'success', {
-     detailsUrl: `https://${config.projectSlug}.void.app`,
+     detailsUrl: `https://${config.projectSlug}.apps.example.com`,
      title: 'Void build succeeded',
      summary: deploymentId ? 'Deployment is live.' : 'Build complete.',
    });
@@ -548,7 +544,7 @@ Postgres + DO storage, and finalize it at every terminal site. All best-effort.
 5. **Finalize failure** — same shape (`conclusion: 'failure'`) inside the
    existing `try` of:
    - `onStop` exit-!=0 (`:552`): `summary` mentions the exit code; `detailsUrl`
-     = `config.logsUrl ?? https://${config.projectSlug}.void.app`.
+     = `config.logsUrl ?? https://${config.projectSlug}.apps.example.com`.
    - `onError` (`:581`): `summary` = the error message; same fallback URL.
    - `enforceTimeout` (`:649`): `summary: 'build timed out'`; same fallback URL.
    - **`startBuild`'s own catch — the NON-capacity branch ONLY** (`build-manager.ts`
@@ -565,7 +561,7 @@ Postgres + DO storage, and finalize it at every terminal site. All best-effort.
      **Do NOT finalize in the capacity-error branch** (`if (isContainerCapacityError(error)) { throw error }` at ~`:417-421`, which returns before the terminal write): that build is REQUEUED and re-runs `startBuild`, reusing the same check-run (idempotent create) — it correctly stays `in_progress` across the requeue. Putting the finalize next to `markBuildTerminalIfActive('failed')` naturally excludes the capacity path, which never reaches it.
 
    Use `builds.logs_url` if available on the config; container `logs_url` is often
-   null today, so fall back to the dashboard URL `https://${config.projectSlug}.void.app`.
+   null today, so fall back to the dashboard URL `https://${config.projectSlug}.apps.example.com`.
 
 6. **Finalize cancelled** — `cancelBuild`, inside the existing
    `if (shouldTerminalize)` block after `markBuildTerminalIfActive(...'cancelled'...)`
@@ -589,8 +585,7 @@ Postgres + DO storage, and finalize it at every terminal site. All best-effort.
 **Constraints:** check-run writes are BEST-EFFORT (never fail a build/deploy on a
 GitHub API error, always logged); both executors addressed (container here;
 Actions deferred — do NOT wire the Actions paths in `auth-oidc.ts` /
-`webhooks.ts`); commit footer applies to the controller's commit; do NOT
-commit/deploy. Depends on Tasks 2, 3, 4.
+`webhooks.ts`). Depends on Tasks 2, 3, 4.
 
 **Tests to add** — NEW `test/integration/api-check-runs.test.ts` driving
 `BuildManager` directly (reuse the harness from `test/unit/build-manager.test.ts`).
@@ -605,7 +600,7 @@ Use `vi.stubGlobal('fetch', vi.fn(...))` matchers:
 | startBuild all-rechecks-pass                                              | one `POST /check-runs` with `head_sha == commitSha`, `external_id == buildId`, `name == 'Void Build'`, `status == 'in_progress'`; `builds.check_run_id == '99001'` |
 | startBuild freshness null/non-identical (`:181`/`:202`)                   | NO POST; `check_run_id` stays NULL                                                                                                                                 |
 | startBuild uncovered (`:235`)                                             | NO POST; NULL                                                                                                                                                      |
-| onStop exit 0                                                             | one `PATCH …/99001` with `conclusion:'success'`, `details_url == 'https://{slug}.void.app'`                                                                        |
+| onStop exit 0                                                             | one `PATCH …/99001` with `conclusion:'success'`, `details_url == 'https://{slug}.apps.example.com'`                                                                |
 | onStop exit 1                                                             | `PATCH` `conclusion:'failure'`, summary mentions exit code                                                                                                         |
 | onError                                                                   | `PATCH` `conclusion:'failure'`                                                                                                                                     |
 | enforceTimeout                                                            | `PATCH` `conclusion:'failure'`, summary `'build timed out'`                                                                                                        |
@@ -637,15 +632,15 @@ vp test run test/integration/db-builds.test.ts
 
 **Files / exact changes:**
 
-- `packages/api/README.md` (Deploy-on-GitHub section, around the build-executor
+- `platform/packages/api/README.md` (Deploy-on-GitHub section, around the build-executor
   description, ~`:155-165`): note that container builds publish a "Void Build"
   GitHub Check Run; that GitHub Actions check-runs are deferred (the native
   workflow check already covers them) and the helper is executor-agnostic for a
-  future PR; that `details_url` is `https://{projectSlug}.void.app` (success /
+  future PR; that `details_url` is `https://{projectSlug}.apps.example.com` (success /
   fallback) or `logs_url` (failure when set); that `Checks: Write` is already
   granted and no permission change was needed; that `check_run_id` has no index
   (no query filters by it — deferred).
-- `meta/operations.md` (near the GitHub App permissions list, `:306-318`): a
+- `platform/meta/operations.md` (near the GitHub App permissions list, `:306-318`): a
   one-line note that `Checks: Write` (`:313`) is now exercised by container
   check-runs.
 
@@ -664,12 +659,12 @@ test run.
 | 2   | backward-compat / generate+stamp                              | Single additive nullable `text` column; old code inert, new code tolerates NULL; generate after 0027 → `when` auto-newer, no re-stamp.                                                                                                                                                                      |
 | 3   | idempotency (retry/supersede/cancel — no stuck `in_progress`) | retry reuses `external_id`; cancel funnels through `cancelBuild` → PATCH cancelled; a cancel landing DURING the create POST is caught by the post-create recheck in `startBuild` (re-reads the row, finalizes to its recorded outcome, skips the container) — NOT by `onStop`, whose terminal guard no-ops. |
 | 4   | executor coverage                                             | Container full; Actions explicitly deferred with documented rationale; helper executor-agnostic for the future PR.                                                                                                                                                                                          |
-| 5   | details_url + how URL is known                                | `https://{projectSlug}.void.app` from in-hand `BuildConfig` (no lookup/column) at EVERY finalize site incl. failure; `cancelBuild` omits it. No `logs_url` use.                                                                                                                                             |
+| 5   | details_url + how URL is known                                | `https://{projectSlug}.apps.example.com` from in-hand `BuildConfig` (no lookup/column) at EVERY finalize site incl. failure; `cancelBuild` omits it. No `logs_url` use.                                                                                                                                     |
 | 6   | failure isolation                                             | helper never throws; create wrapped (start proceeds on null); finalize swallowed inside the try whose `finally` always pokes scheduler.                                                                                                                                                                     |
 | 7   | permission                                                    | `Checks: Write` already granted (`operations.md:313`); no manifest change.                                                                                                                                                                                                                                  |
 | 8   | test strategy                                                 | Feature A: real-module unit test + `console.warn` spy + fetch stub. Feature B: `vi.stubGlobal('fetch')` lifecycle assertions on the DO + helper unit test.                                                                                                                                                  |
 
-### Residual risks (controller, read before execution)
+### Residual risks recorded during implementation
 
 - **create-vs-cancel interleave window (CLOSED in the fix wave):** a `cancelBuild`
   that interleaves during the create POST runs its own finalize before the id is
@@ -704,7 +699,7 @@ test run.
   wants an Actions check, the helper is ready; wire at `auth-oidc.ts:261` (create)
   - `webhooks.ts:789` (finalize) with `name:'Void Deploy'` and `external_id =
 projectId:runId:runAttempt`.
-- **`details_url` is always the project dashboard URL** (`https://{slug}.void.app`)
+- **`details_url` is always the project dashboard URL** (`https://{slug}.apps.example.com`)
   at create/success/failure; `cancelBuild` omits it. There is no `logs_url` wiring
   here — acceptable per the README follow-up about container→DO log streaming not
   yet wired.

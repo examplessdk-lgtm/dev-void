@@ -6,6 +6,10 @@ created: 2026-09-15
 
 # Platform Operator CLI
 
+> Historical design record. Status, checklists and examples describe the work
+> when recorded. See the [design archive](./README.md) for current guides and
+> the supported self-hosted platform.
+
 Extend `void platform` with all supported administrative operations currently
 available through the admin dashboard. Use shared server operations for browser
 and terminal clients. Keep installation lifecycle management ownership-aware.
@@ -44,7 +48,7 @@ objects, and require confirmation unless `--yes` was explicitly supplied.
 `--plan` fail before mutation. `--json` writes structured results to stdout;
 diagnostics go to stderr. IDs/path segments and query values are encoded.
 
-## Implementation and commits
+## Implementation record
 
 - [x] Authentication, JSON errors/validation, mutation audit, API registration.
 - [x] Shared user/project/access operations and tenant API with regression tests.
@@ -54,9 +58,6 @@ diagnostics go to stderr. IDs/path segments and query values are encoded.
 - [x] Package builds, typechecking, final full test suite and CLI smoke verification.
 - [x] Four GPT-6 Astra high reviews, GPT-5.6 Sol high fixes committed individually,
       and repeated review until no P1 findings remain.
-
-Commit subjects start with a capital letter and end with a period. The user has
-explicitly authorized these commits. No deployment or push is part of this task.
 
 ## Verification
 

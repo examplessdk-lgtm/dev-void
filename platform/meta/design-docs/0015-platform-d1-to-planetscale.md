@@ -1,5 +1,9 @@
 # Platform: Migrate from D1 to PlanetScale Postgres
 
+> Historical design record. Status, checklists and examples describe the work
+> when recorded. See the [design archive](./README.md) for current guides and
+> the supported self-hosted platform.
+
 **Date:** 2026-02-20
 **Status:** Proposed
 
@@ -25,7 +29,7 @@ Migrate the platform worker's database from Cloudflare D1 (SQLite) to PlanetScal
 
 ## Step 1: Schema Conversion
 
-**File:** `packages/api/src/schema.ts`
+**File:** `platform/packages/api/src/schema.ts`
 
 Convert from SQLite to Postgres dialect. This is the most mechanical step.
 
@@ -179,7 +183,7 @@ These manually set `new Date().toISOString()` for returned objects. With `timest
 
 ## Step 5: Drizzle Kit Config
 
-**File:** `packages/api/drizzle.config.ts`
+**File:** `platform/packages/api/drizzle.config.ts`
 
 ```diff
  export default defineConfig({
@@ -198,10 +202,10 @@ Since we're changing database engines entirely, the existing SQLite migrations a
 
 ```bash
 # Archive old migrations
-mv packages/api/drizzle packages/api/drizzle-d1-archive
+mv platform/packages/api/drizzle platform/packages/api/drizzle-d1-archive
 
 # Generate new Postgres migration from schema
-cd packages/api
+cd platform/packages/api
 npx drizzle-kit generate
 ```
 
@@ -211,7 +215,7 @@ This produces a single baseline migration that creates all 5 tables with Postgre
 
 ## Step 7: Wrangler Config
 
-**File:** `packages/api/wrangler.jsonc`
+**File:** `platform/packages/api/wrangler.jsonc`
 
 ### Production
 
@@ -220,7 +224,7 @@ This produces a single baseline migration that creates all 5 tables with Postgre
 -    {
 -      "binding": "DB",
 -      "database_name": "void-api",
--      "database_id": "f85c1d7d-7b41-4f85-88e5-ad37966825e7",
+-      "database_id": "<PREVIOUS_D1_DATABASE_ID>",
 -      "migrations_dir": "drizzle"
 -    }
 -  ],
@@ -325,7 +329,7 @@ The existing `clearTables` helper uses `db.delete(table)`. This works identicall
 
 ```bash
 # Against the staging branch
-cd packages/api
+cd platform/packages/api
 DATABASE_URL="postgres://..." npx drizzle-kit migrate
 
 # Against the production branch
@@ -408,7 +412,7 @@ After stable on Postgres:
 2. Delete `drizzle-d1-archive/` (the old SQLite migrations)
 3. Remove `D1Database` from env types
 4. Remove `@cloudflare/workers-types` D1 type references if no longer needed
-5. Update `packages/api/README.md` to reflect Postgres
+5. Update `platform/packages/api/README.md` to reflect Postgres
 6. Update `CLAUDE.md` / `README.md` monorepo docs
 
 ---

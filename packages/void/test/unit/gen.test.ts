@@ -1310,7 +1310,7 @@ describe('gen migration', () => {
   });
 
   it('surfaces partial-drizzle state before bundled-mode guard when migrations.js is present but _journal.json is missing', async () => {
-    // Regression for void-sdk/void#6 round 22: when `migrations.js` survives
+    // Regression: when `migrations.js` survives
     // a bad merge but `_journal.json` is missing, the bundled-mode guard
     // used to fire first and tell the user to "delete migrations.js".
     // Following that advice strips the last drizzle artifact and leaves the

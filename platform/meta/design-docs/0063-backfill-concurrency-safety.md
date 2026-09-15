@@ -6,9 +6,13 @@ created: 2026-04-19
 
 # Backfill Concurrency Safety For Routing KV Migrations
 
+> Historical design record. Status, checklists and examples describe the work
+> when recorded. See the [design archive](./README.md) for current guides and
+> the supported self-hosted platform.
+
 ## Context
 
-`POST /admin/backfill-queue-tokens` (`packages/api/src/admin/backfill-queue-tokens.ts`) exists to stamp `proxyToken` on legacy `queue:*` KV entries written before dispatch started forwarding `x-void-internal`. The current implementation performs a global, paginated sweep:
+`POST /admin/backfill-queue-tokens` (`platform/packages/api/src/admin/backfill-queue-tokens.ts`) exists to stamp `proxyToken` on legacy `queue:*` KV entries written before dispatch started forwarding `x-void-internal`. The current implementation performs a global, paginated sweep:
 
 ```
 list(prefix: 'queue:', cursor) → get(name) → parse → resolve token → re-read(name) → if unchanged: put
@@ -71,7 +75,7 @@ Start with **Approach D** today, plan **Approach C** for the long term.
 
 ## Related
 
-- `packages/api/src/admin/backfill-queue-tokens.ts`
-- `packages/api/src/admin/routes/system.tsx` — `POST /admin/backfill-queue-tokens`
+- `platform/packages/api/src/admin/backfill-queue-tokens.ts`
+- `platform/packages/api/src/admin/routes/system.tsx` — `POST /admin/backfill-queue-tokens`
 - Codex adversarial review pass 3 (2026-04-19), finding 4 of 4.
 - [0062-transactional-queue-setup.md](./0062-transactional-queue-setup.md) — shares the KV-as-source-of-truth constraint.

@@ -7,6 +7,10 @@ depends: []
 
 # Versioned Deployments
 
+> Historical design record. Status, checklists and examples describe the work
+> when recorded. See the [design archive](./README.md) for current guides and
+> the supported self-hosted platform.
+
 ## Summary
 
 Void now deploys worker-based projects as versioned scripts in the Workers for Platforms dispatch namespace. Each deployment gets its own worker (`user-{slug}-{deployId}`), migrations run inside that new worker via `/__void/migrate`, and routing flips only after the deployment is validated.
@@ -71,5 +75,5 @@ Versioned worker names allow logs to be filtered by deployment. The tail pipelin
 
 ### Notes
 
-- This document is now historical/implementation-aligned rather than aspirational. The source of truth is the current deploy flow in `packages/api/src/routes/deploy.ts`.
+- This document is now historical/implementation-aligned rather than aspirational. The source of truth is the current deploy flow in `platform/packages/api/src/routes/deploy.ts`.
 - Static-only deployments are covered separately in [0055-kv-r2-static-deployments.md](./0055-kv-r2-static-deployments.md).

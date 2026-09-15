@@ -355,7 +355,7 @@ describe('runRemoteMigrations', () => {
   });
 
   it('recovers from "already exists" when the tracking row was lost on a prior run', async () => {
-    // Simulates void-sdk/void#6: a previous deploy committed the user SQL
+    // Simulates a migration journal mismatch: a previous deploy committed the user SQL
     // to D1 but the subsequent tracking INSERT failed (network blip, 429,
     // timeout). A retry re-runs the migration, which now fails with
     // "already exists". Because the applied set (populated from

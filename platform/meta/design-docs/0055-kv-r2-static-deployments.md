@@ -7,6 +7,10 @@ depends: [0028-per-worker-assets, 0054-versioned-deployments]
 
 # KV/R2-Based Static Deployments
 
+> Historical design record. Status, checklists and examples describe the work
+> when recorded. See the [design archive](./README.md) for current guides and
+> the supported self-hosted platform.
+
 ## Summary
 
 Static-only deployments (type `"static"` / `"spa"`) now bypass Workers for Platforms entirely. Assets are stored with content-addressed keys in KV (primary) with R2 fallback for files `>= 2 MB`, and dispatch serves them directly. This removes the per-script cost for retained static deployments and allows a fixed retention limit of 100 static deployments across all tiers.
@@ -57,5 +61,5 @@ Rollback works by updating routing to point to an older `staticDeploymentId`. Be
 
 ### Notes
 
-- This document is now implementation-aligned rather than aspirational. The source of truth is the static deploy branch in `packages/api/src/routes/deploy.ts` plus dispatch static serving in `packages/dispatch/src/static.ts`.
+- This document is now implementation-aligned rather than aspirational. The source of truth is the static deploy branch in `platform/packages/api/src/routes/deploy.ts` plus dispatch static serving in `platform/packages/dispatch/src/static.ts`.
 - Worker-based versioned deployments are covered separately in [0054-versioned-deployments.md](./0054-versioned-deployments.md).

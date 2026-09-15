@@ -6,7 +6,12 @@ created: 2026-06-23
 
 # RFC: Decouple GitHub-for-Deploys from the Login Provider
 
-> **Status: implemented** — shipped via voidzero-dev/void#230 (CLI) + void-platform#194 (API). The only remaining owner action is registering `/github/link-callback` in the GitHub App's Callback URL list.
+> Historical design record. Status, checklists and examples describe the work
+> when recorded. See the [design archive](./README.md) for current guides and
+> the supported self-hosted platform.
+
+> **Status: implemented.** Installations that enable the GitHub App integration
+> must register their API origin plus `/github/link-callback` in the app's Callback URL list.
 
 ## Summary
 
@@ -63,7 +68,7 @@ This is **rejected** (see Alternatives). The continuity check (`github.ts:270`) 
 - Changing the login model or the 1:1 login↔account relationship.
 - Allowing one GitHub org to map to multiple Void accounts (mirrors Vercel's unsolved case). Deferred from the linking work; **now designed as a planned follow-up — see [§Follow-up: Org-Shared GitHub App Installations](#follow-up-org-shared-github-app-installations-planned) below.**
 - Reworking the public `/callback` ownership proof.
-- Closing the pre-existing org-install `read:org` confused-deputy edge ([[project_github_org_install_ownership]]) — tracked separately **— addressed by the follow-up below.**
+- Closing the pre-existing org-install `read:org` confused-deputy edge (GitHub organization installation ownership) — tracked separately **— addressed by the follow-up below.**
 
 ## Design
 

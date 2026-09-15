@@ -1,5 +1,4 @@
 import { DurableObject } from 'cloudflare:workers';
-import { DEFAULT_DASHBOARD_URL } from './constants.ts';
 import { createDb, getUser, getProject } from './db.ts';
 import { sendErrorAlertEmail } from './email.ts';
 import type { ApiEnv } from './env.ts';
@@ -152,19 +151,11 @@ export class ErrorAlertMonitor extends DurableObject<ApiEnv['Bindings']> {
       // Resolve canonical slug from DB — dispatch may have sent a hostname for custom-domain traffic
       const project = await getProject(db, state.projectId);
       const slug = project?.slug ?? state.slug;
-      const dashboardUrl = this.env.DASHBOARD_URL ?? DEFAULT_DASHBOARD_URL;
       const errorWindow =
         state.firstErrorAt !== null && state.lastErrorAt !== null
           ? { start: state.firstErrorAt, end: state.lastErrorAt }
           : null;
-      await sendErrorAlertEmail(
-        this.env.EMAIL,
-        user.email,
-        slug,
-        state.count,
-        dashboardUrl,
-        errorWindow,
-      );
+      await sendErrorAlertEmail(this.env, user.email, slug, state.count, errorWindow);
       // Success — cooldown and reset
       state.lastAlertAt = Date.now();
       this.resetWindow(state);

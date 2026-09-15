@@ -1,5 +1,9 @@
 # Event-Driven Usage Enforcement
 
+> Historical design record. Status, checklists and examples describe the work
+> when recorded. See the [design archive](./README.md) for current guides and
+> the supported self-hosted platform.
+
 **Date:** 2026-02-24
 **Status:** Draft
 
@@ -11,7 +15,7 @@ Replace the current `scheduled` handler (which fans out `O(users x projects)` An
 
 ## Problem
 
-The `scheduled` handler in `packages/api/src/index.ts` runs every 5 minutes and:
+The `scheduled` handler in `platform/packages/api/src/index.ts` runs every 5 minutes and:
 
 1. Pages through **all** users in batches of 50
 2. For each user's projects, fires one Analytics Engine HTTP call per project (up to 10 concurrent)

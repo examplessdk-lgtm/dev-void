@@ -1,5 +1,9 @@
 # Per-Worker Static Assets
 
+> Historical design record. Status, checklists and examples describe the work
+> when recorded. See the [design archive](./README.md) for current guides and
+> the supported self-hosted platform.
+
 **Date:** 2026-02-26
 **Status:** Approved
 
@@ -124,7 +128,7 @@ This replicates the exact caching behavior dispatch currently applies in `buildR
 
 ### What gets removed
 
-- `packages/dispatch/src/headers.ts` — the `applyHeaderRules()` logic
+- `platform/packages/dispatch/src/headers.ts` — the `applyHeaderRules()` logic
 - `HeaderRule` type and `headers` field from the KV routing entry
 - Header parsing in the framework CLI as it relates to dispatch
 - The `assetsDir` heuristic for detecting hashed paths — the `_headers` file handles it explicitly

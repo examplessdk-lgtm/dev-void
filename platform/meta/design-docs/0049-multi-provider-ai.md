@@ -1,5 +1,9 @@
 # Multi-Provider AI (BYOK)
 
+> Historical design record. Status, checklists and examples describe the work
+> when recorded. See the [design archive](./README.md) for current guides and
+> the supported self-hosted platform.
+
 **Date:** 2026-03-03
 **Status:** Implemented
 
@@ -68,7 +72,7 @@ The existing Workers AI path is completely unchanged. The `@cf/` prefix triggers
 Same as production but over HTTPS instead of service binding:
 
 ```
-Local Worker → HTTPS POST proxy.void.cloud/ai/chat
+Local Worker → HTTPS POST proxy.platform.example.net/ai/chat
   headers: { Authorization: "Bearer <JWT>" }
   body: { action: "chat", model, inputs, projectId, providerKey }
 ```
@@ -198,7 +202,7 @@ type ChatCompletionChunk = {
 ### New Endpoint: `/ai/chat`
 
 ```ts
-// packages/proxy/src/ai.ts
+// platform/packages/proxy/src/ai.ts
 
 ai.post('/chat', async (c) => {
   const body = c.get('body');
@@ -292,7 +296,7 @@ AI Gateway tracks costs across all providers (Workers AI, OpenAI, Anthropic, etc
 
 ## Framework Changes
 
-### `framework/packages/void/src/runtime/ai.ts`
+### `packages/void/src/runtime/ai.ts`
 
 1. **Provider detection**: Parse model string prefix to determine path.
 2. **API key resolution**: Read `env.{PROVIDER}_API_KEY` based on prefix mapping.
@@ -309,15 +313,15 @@ No changes. The `manifest.bindings.ai: boolean` flag already triggers proxy bind
 
 ## What Changes Where
 
-| Component                             | Change                                                                  |
-| ------------------------------------- | ----------------------------------------------------------------------- |
-| `framework/.../runtime/ai.ts`         | Provider detection, API key resolution, `"chat"` action, type overloads |
-| `framework/.../runtime/ai.ts` (types) | `ChatCompletionInputs`, `ChatCompletionResponse`, `ThirdPartyModel`     |
-| `packages/proxy/src/ai.ts`            | New `/ai/chat` endpoint → AI Gateway `/compat`                          |
-| `packages/proxy/src/types.ts`         | Add `CF_AIG_TOKEN` to `ProxyEnv`                                        |
-| `packages/proxy/wrangler.jsonc`       | Add `CF_AIG_TOKEN` secret                                               |
-| `packages/proxy/test/`                | Tests for `/ai/chat` endpoint                                           |
-| Docs                                  | Supported providers, API key conventions, examples                      |
+| Component                                 | Change                                                                  |
+| ----------------------------------------- | ----------------------------------------------------------------------- |
+| `packages/void/src/runtime/ai.ts`         | Provider detection, API key resolution, `"chat"` action, type overloads |
+| `packages/void/src/runtime/ai.ts` (types) | `ChatCompletionInputs`, `ChatCompletionResponse`, `ThirdPartyModel`     |
+| `platform/packages/proxy/src/ai.ts`       | New `/ai/chat` endpoint → AI Gateway `/compat`                          |
+| `platform/packages/proxy/src/types.ts`    | Add `CF_AIG_TOKEN` to `ProxyEnv`                                        |
+| `platform/packages/proxy/wrangler.jsonc`  | Add `CF_AIG_TOKEN` secret                                               |
+| `platform/packages/proxy/test/`           | Tests for `/ai/chat` endpoint                                           |
+| Docs                                      | Supported providers, API key conventions, examples                      |
 
 ## Non-Goals (v1)
 

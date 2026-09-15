@@ -1,6 +1,6 @@
 # @voidcloud/api
 
-Control-plane API and internal admin UI for Void.
+Control-plane API and administrator UI for a Void platform.
 
 It owns platform auth, projects, deployments, domains, secrets, provisioning, rollback, usage/account enforcement, and Deploy-on-GitHub (GitHub App connect, push-triggered builds, GitHub Actions OIDC). The worker uses Hono plus Drizzle over PostgreSQL via Hyperdrive.
 
@@ -102,7 +102,7 @@ drizzle/
 
 The webhook and OIDC endpoints return `503` when the GitHub App secrets are unset, so the worker runs without them. On staging, both paths must be on the Cloudflare Access **bypass** list (GitHub cannot present Access credentials).
 
-### Internal API
+### Service-to-service API
 
 - `POST /internal/revalidate/:projectId`
 - `POST /internal/resolve-resource/:projectId`
@@ -150,8 +150,7 @@ parity, dry runs, and capability guards in `test/integration/operator-*.test.ts`
 3. looks up an existing OAuth account
 4. if needed, links the provider to an existing user with the same email
 5. otherwise creates a new user
-6. for GitHub logins, optionally grants preview access to a configured GitHub repository
-7. signs a JWT and redirects back:
+6. signs a JWT and redirects back:
    - dashboard redirects receive a short-lived `?code=...` for `POST /auth/exchange`
    - new CLI redirects with `code_challenge_method=S256` receive a short-lived `?code=...` for `POST /auth/cli/token`
    - legacy localhost CLI redirects still receive `?token=...`
@@ -192,7 +191,7 @@ Connect a repo through a GitHub App; a `git push` then builds and deploys automa
   - **CF Container** — `BuildScheduler` (global, alarm-driven queue with per-tier concurrency from `tiers.ts`) atomically claims a build and starts a container on one of two classes by the owner's plan: `BuildManager` (free, `standard-3` = 2 vCPU / 8 GiB / 16 GB) or `BuildManagerLarge` (paid, `standard-4` = 4 vCPU / 12 GiB / 20 GB, Cloudflare's max per-container size). The class is routed by the persisted `builds.instance_type` (`standard-3` / `standard-4`, derived from the plan by `getBuildInstanceType`) via `buildManagerNamespace` in `build-namespace.ts`; cancel and reaper paths use the same picker, so they address the same class the build started on. `BuildManagerLarge` extends `BuildManager`, which extends `@cloudflare/containers` `Container`, enforces a timeout alarm, and persists status to Postgres via Hyperdrive.
   - **GitHub Actions** — `void init --github` scaffolds a workflow that calls `POST /auth/github-oidc`; the verified job runs `void deploy` and reports back via the `workflow_run` webhook.
 - **Build mechanism**: both executors run the real `void deploy` CLI with a short-lived, project-scoped deploy token (`aud: "deploy"`, minted by `auth/deploy-token.ts`). There is no artifact-upload endpoint; `routes/deploy.ts` is unchanged. The container agent (`container/build-agent.mjs`) downloads the source tarball, installs deps, and runs `npx void deploy --project <slug>` with `VOID_TOKEN` + `VOID_API_URL`.
-- **Check Run**: container builds publish a "Void Build" GitHub Check Run (head SHA = the build's `commit_sha`/webhook `after`), created `in_progress` at build start and finalized `success`/`failure`/`cancelled` at every terminal site. Best-effort — a Check Run API error never fails or perturbs a build/deploy. `details_url` is the project's dashboard URL `https://{projectSlug}.void.app` for the in-progress/success/failure states (omitted on cancel). The helper (`github/check-run.ts`) is executor-agnostic; Actions check-runs are deferred (the native workflow check already covers them) and the helper is ready for a future PR. `Checks: Write` is already granted, so no permission change was needed. `builds.check_run_id` has no index (nothing queries by it — deferred).
+- **Check Run**: container builds publish a "Void Build" GitHub Check Run (head SHA = the build's `commit_sha`/webhook `after`), created `in_progress` at build start and finalized `success`/`failure`/`cancelled` at every terminal site. Best-effort — a Check Run API error never fails or perturbs a build/deploy. `details_url` is the application URL derived from the configured `SITE_DOMAIN` for the in-progress/success/failure states (omitted on cancel). The helper (`github/check-run.ts`) is executor-agnostic; Actions check-runs are deferred (the native workflow check already covers them) and the helper is ready for a future PR. Configure Checks write permission and the relevant webhook subscriptions when enabling this integration. `builds.check_run_id` has no index (nothing queries by it — deferred).
 - **Build logs**: `BuildManager` pulls container stdout/stderr into the DO with a `pollLogs()` loop — a non-starting `getTcpPort().fetch()` against the agent's paged `GET /logs?since=N` (deliberately NOT `containerFetch`, which would auto-resurrect an exited container) on a ~1s cadence, advancing its cursor only after SQLite ingestion and feeding the SQLite `logs` table + WebSocket fan-out. On natural exit, the agent keeps its control server alive with an 8s idle deadline that resets only when the acknowledged cursor advances and a 120s non-resettable absolute cap. After a moving final page, the same pull callback sends one empty follow-up request so `since=<last ingested seq>` acknowledges durable ingestion without waiting another tick. Forced teardown instead single-flights the whole join, fresh bounded pull, liveness recheck, and signal sequence so concurrent callers cannot ingest after the termination marker. The DO also serves a read-only `GET /logs?since=N` -> `{ lines, lastSeq }`. The admin build views (below) consume this; `github_actions` builds have no DO log store and link out to their GitHub Actions run.
 
 ## Email
@@ -258,34 +257,29 @@ Notable sections:
 - deployment log viewing
 - per-project Builds section (ongoing build highlighted) plus a build detail page with a client-side polling live-log tail for container builds (mirrors the deployment live-tail; not a WebSocket), or a GitHub Actions link for `github_actions` builds. The tail polls `GET /admin/builds/:id/logs?since=N`, which fronts the `BuildManager`/`BuildManagerLarge` DO's read-only `GET /logs?since=N` (DO chosen by `instance_type` via `buildManagerNamespace`).
 - per-project email page (linked from the project detail view): usage, caps, outbound kill switch, destinations
-- signup allowlist/private-beta controls
+- signup restrictions and allowlists
 - platform worker version history and orchestrated rollback
 
 Admin writes are same-origin guarded: `admin/middleware/auth.ts` rejects any non-`GET` request whose `Origin`/`Referer` host does not match the request host, before the cookie is even read.
 
 ## Local Setup and Secrets
 
-Useful scripts:
+From the repository root, with PostgreSQL and its client tools available:
 
-```bash
-pnpm -C packages/api dev
-pnpm -C packages/api setup
-pnpm -C packages/api db:generate
-pnpm -C packages/api migrate
+```sh
+vp run build:core
+vp run --filter @voidcloud/api setup --admin-email dev@example.com
+vp run --filter @voidcloud/api dev --local --enable-containers=false --host localhost --port 8787
 ```
 
-`pnpm -C packages/api setup` also ensures `packages/api/.dev.vars` and
-`packages/dashboard/.dev.vars` include the local development overrides:
-`DEV_AUTH_BYPASS=true`, `PLATFORM_ENV=staging`, `JWT_SECRET=dev`, and the local
-Hyperdrive connection string. It also prompts for the local admin email and
-upserts the seeded `user_admin` record to match it. For non-interactive use,
-pass `pnpm -C packages/api setup -- --admin-email you@example.com`.
+Open `http://localhost:8787/admin/`. Setup creates the local database, applies
+migrations, and seeds the administrator. It writes development-only configuration
+to ignored `.dev.vars` files in the API and dashboard packages. See
+[Platform Development](../../../docs/guide/platform-development.md) for local
+frontend setup and installing a runtime built from a fork.
 
-To run the API locally, use:
-
-```bash
-pnpm -C packages/api exec wrangler dev --local --host localhost --port 8787
-```
+Use the platform installer for deployed configuration. The values below depend
+on the capabilities and bindings enabled in that installation.
 
 Secrets used at runtime:
 
@@ -307,8 +301,9 @@ Secrets used at runtime:
 Optional vars:
 
 - `AUTH_REDIRECT_URI`
-- `DASHBOARD_URL`
-- `GITHUB_PREVIEW_REPO_PAT`
+- `DASHBOARD_URL` — optional frontend origin for project links
+- `PLATFORM_DISPLAY_NAME` — name shown on onboarding pages and emails
+- `EMAIL_FROM` — verified sender for the optional `EMAIL` binding
 - `VOID_PROXY_SERVICE`
 - `SITE_DOMAIN`
 - `EMAIL_SENDER_DOMAIN` — platform mail domain for this environment (`mail.void.cloud` in production). Set on the proxy worker too, and handed to deployed user workers as `__VOID_EMAIL_DOMAIN`. See [Email](#email).
@@ -319,7 +314,14 @@ Optional vars:
 
 The four `GITHUB_APP_*` secrets are optional: when unset, `/webhooks/github` and `/auth/github-oidc` return `503` and the rest of the worker runs normally. They are the App for Deploy-on-GitHub, separate from the sign-in OAuth app above.
 
-Set `GITHUB_PREVIEW_REPO_PAT` to automatically invite GitHub-authenticated users to `void-sdk/void` with read-only access. The PAT should be a fine-grained token with `Administration` repository permission `write` for that repository.
+When enabling email on a self-hosted or custom-origin platform, configure
+`EMAIL_FROM` with a Cloudflare-verified sender and `AUTH_REDIRECT_URI` with the
+platform's public OAuth callback URL. Emails use that origin and
+`PLATFORM_DISPLAY_NAME`; an installed platform does not default to Void Cloud
+senders or dashboard links. Email remains optional and is not part of the core
+installer.
+
+Administrators manage access with `void platform signup` and `void platform invitation`. Signup eligibility comes from the installation's own allowlist and bootstrap administrator configuration.
 
 ## Tests
 

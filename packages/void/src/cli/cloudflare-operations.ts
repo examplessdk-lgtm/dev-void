@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os';
 import {
   encodeCloudflareVersionMessage,
+  deployCloudflareVersionTraffic,
   parseCloudflareVersionMessage,
   parseRootWranglerConfig,
   readCloudflareTriggerConfig,
@@ -391,15 +392,37 @@ export async function activateCloudflareExistingVersion(
   target: CloudflareWorkerVersion,
   current?: CloudflareWorkerVersion,
 ): Promise<void> {
-  if (target.metadata?.schema !== 2) {
-    throw new Error(
-      `Cloudflare version ${target.id} predates Void trigger snapshots and cannot be rolled back safely. Deploy that revision again to create rollback metadata.`,
-    );
-  }
-  if (current && current.metadata?.schema !== 2) {
-    throw new Error(
-      `The active Cloudflare version ${current.id} has no trigger snapshot, so Void cannot safely compensate a failed rollback. Deploy the current revision again first.`,
-    );
+  // Without a complete snapshot, use Cloudflare's code-only rollback semantics.
+  // Keeping triggers unchanged also makes the inverse recovery possible.
+  if (
+    target.metadata?.schema !== 2 ||
+    target.metadata.triggerConfig.preserve ||
+    !current ||
+    current.metadata?.schema !== 2 ||
+    current.metadata.triggerConfig.preserve
+  ) {
+    const owner = await readActiveCloudflareVersionId(context);
+    if (current && owner !== current.id) {
+      throw new Error(
+        'Cloudflare production changed before rollback. Refresh deployment status and retry.',
+      );
+    }
+    const result = await deployCloudflareVersionTraffic({
+      ...context,
+      percentages: [`${target.id}@100`],
+      message: 'Void rollback preserving existing routes and triggers.',
+    });
+    if (result.status !== 0 || result.signal || result.error) {
+      throw new Error(
+        'Cloudflare could not complete rollback. Refresh deployment status before retrying.',
+      );
+    }
+    if ((await readActiveCloudflareVersionId(context)) !== target.id) {
+      throw new Error(
+        'Cloudflare rollback was superseded or could not be verified. Refresh deployment status.',
+      );
+    }
+    return;
   }
   const targetTriggerConfig = target.metadata.triggerConfig;
   const publishedTraffic = readWranglerPublishedTrafficSnapshot(context.configPath);

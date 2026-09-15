@@ -6,6 +6,10 @@ created: 2026-03-05
 
 # WebSocket Support
 
+> Historical design record. Status, checklists and examples describe the work
+> when recorded. See the [design archive](./README.md) for current guides and
+> the supported self-hosted platform.
+
 ## Summary
 
 Add first-class WebSocket support to Void, built on top of Cloudflare Durable Objects via `partyserver`, with a typed, framework-level API surface:

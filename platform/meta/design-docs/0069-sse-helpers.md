@@ -6,6 +6,10 @@ created: 2026-05-08
 
 # SSE Helpers
 
+> Historical design record. Status, checklists and examples describe the work
+> when recorded. See the [design archive](./README.md) for current guides and
+> the supported self-hosted platform.
+
 ## Summary
 
 Add `void/sse`: a small helper package for producing and consuming
@@ -428,7 +432,7 @@ should not force the Cloudflare target.
 
 ## Documentation
 
-Add `framework/docs/guide/sse.md` covering:
+Add `docs/guide/sse.md` covering:
 
 - basic server stream
 - basic client consumption

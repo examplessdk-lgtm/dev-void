@@ -765,7 +765,7 @@ describe('assertJournalCoherence', () => {
   });
 
   it('throws when _journal.json contains duplicate tag entries', () => {
-    // Regression for void-sdk/void#6 round 37: a bad merge can leave two
+    // Regression: a bad merge can leave two
     // entries in `_journal.json` sharing the same `tag`. The old
     // `new Set(journal.entries.map(...))` silently collapsed those into
     // a single tag, the drift diff passed, and every downstream caller

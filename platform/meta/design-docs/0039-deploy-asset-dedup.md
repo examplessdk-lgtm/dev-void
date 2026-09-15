@@ -1,5 +1,9 @@
 # Deploy Asset Deduplication (Client → API)
 
+> Historical design record. Status, checklists and examples describe the work
+> when recorded. See the [design archive](./README.md) for current guides and
+> the supported self-hosted platform.
+
 **Date:** 2026-02-28
 **Status:** Implemented
 
@@ -257,7 +261,7 @@ The deploy output changes to show dedup stats:
 │  3 worker module(s), 42 static asset(s) (40 unchanged, 2 uploaded)
 │  SSR enabled
 │
-└  https://myapp.void.app
+└  https://myapp.apps.example.com
 ```
 
 On first deploy (no previous manifest), all assets are uploaded as before — no visual change.

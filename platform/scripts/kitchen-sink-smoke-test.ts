@@ -5,20 +5,40 @@
  * Uses node:test + node:assert — no vitest needed.
  *
  * Usage:
- *   node scripts/kitchen-sink-smoke-test.ts                              # defaults to staging
- *   SMOKE_URL=https://kitchen-sink.void.app node scripts/kitchen-sink-smoke-test.ts  # production
+ *   SMOKE_URL=https://kitchen-sink.apps.example.com node platform/scripts/kitchen-sink-smoke-test.ts
+ *
+ * The target must be a disposable kitchen-sink deployment: this suite resets
+ * its database, KV, and storage before exercising mutations.
  */
 
 import assert from 'node:assert/strict';
 import { describe, it, before, after } from 'node:test';
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
 
-const BASE = (process.env.SMOKE_URL || 'https://kitchen-sink.staging.void.app').replace(/\/$/, '');
+if (!process.env.SMOKE_URL) {
+  throw new Error(
+    'Set SMOKE_URL to a disposable kitchen-sink deployment. This suite resets its data.',
+  );
+}
+const target = new URL(process.env.SMOKE_URL);
+if (
+  !['http:', 'https:'].includes(target.protocol) ||
+  target.username ||
+  target.password ||
+  target.search ||
+  target.hash ||
+  target.pathname !== '/'
+) {
+  throw new Error(
+    'SMOKE_URL must be an HTTP(S) origin without credentials, a path, query, or fragment.',
+  );
+}
+const BASE = target.origin;
 const TIMEOUT = 15_000;
 const uid = Date.now().toString(36);
 
-// CF Access service-token headers required when the target host (staging) is
-// gated by Cloudflare Access. Empty when either var is unset (prod runs).
+// Supply a Cloudflare Access service-token pair if the selected test app is
+// protected by Access. These credentials belong to the explicit SMOKE_URL target.
 const CF_ACCESS: Record<string, string> =
   process.env.CF_ACCESS_CLIENT_ID && process.env.CF_ACCESS_CLIENT_SECRET
     ? {

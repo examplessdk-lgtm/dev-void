@@ -1,5 +1,9 @@
 # Platform DB: Migrate from Raw D1 SQL to Drizzle ORM
 
+> Historical design record. Status, checklists and examples describe the work
+> when recorded. See the [design archive](./README.md) for current guides and
+> the supported self-hosted platform.
+
 **Status:** Implemented
 
 ## Problem

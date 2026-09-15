@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const DEV_VARS = join(process.cwd(), '.dev.vars');
@@ -69,24 +69,79 @@ function runCloudflared(args, options = {}) {
   return out ? out : null;
 }
 
-function setDevVar(contents, key, value) {
-  const escaped = value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-  const line = `${key}="${escaped}"`;
-  const pattern = new RegExp(`^${key}=.*$`, 'm');
-  if (pattern.test(contents)) {
-    return contents.replace(pattern, line);
-  }
-  return `${contents.replace(/\s*$/, '')}\n${line}\n`;
+function removeDevVar(contents, key) {
+  return contents.replace(new RegExp(`^[\\t ]*${key}[\\t ]*=.*(?:\\r?\\n|$)`, 'gm'), '');
 }
 
-const devVars = existsSync(DEV_VARS) ? parseDotenv(readFileSync(DEV_VARS, 'utf8')) : {};
-const apiUrl = process.env.API_URL ?? devVars.API_URL;
+function setDevVar(contents, key, value) {
+  const escaped = value.replace(/\\/g, '\\\\').replace(/"/g, '\\\"');
+  const line = `${key}="${escaped}"`;
+  return `${removeDevVar(contents, key).replace(/\s*$/, '')}\n${line}\n`;
+}
 
-if (!apiUrl || !isStagingApi(apiUrl)) {
+function writeDevVars(contents) {
+  writeFileSync(DEV_VARS, contents, { mode: 0o600 });
+  chmodSync(DEV_VARS, 0o600);
+}
+
+const devVarsContents = existsSync(DEV_VARS) ? readFileSync(DEV_VARS, 'utf8') : '';
+const devVars = parseDotenv(devVarsContents);
+const apiUrl = process.env.API_URL ?? devVars.API_URL;
+// A persisted token belongs only to the API origin for which cloudflared
+// returned it. Discard stale/unattributed file credentials before even the
+// unprotected-host early exit: the dashboard reads this file after we finish.
+let selectedOrigin;
+try {
+  selectedOrigin = new URL(apiUrl).origin;
+} catch {
+  selectedOrigin = null;
+}
+if (devVars.CF_ACCESS_TOKEN && devVars.CF_ACCESS_TOKEN_ORIGIN !== selectedOrigin) {
+  writeDevVars(
+    removeDevVar(removeDevVar(devVarsContents, 'CF_ACCESS_TOKEN'), 'CF_ACCESS_TOKEN_ORIGIN'),
+  );
+  delete devVars.CF_ACCESS_TOKEN;
+  delete devVars.CF_ACCESS_TOKEN_ORIGIN;
+}
+
+// Explicit opt-in for self-hosted APIs protected by Cloudflare Access. Keep
+// the established Void Cloud staging behavior for existing local checkouts.
+const accessAppUrl = process.env.CF_ACCESS_APP_URL ?? devVars.CF_ACCESS_APP_URL;
+
+if (!apiUrl || (!accessAppUrl && !isStagingApi(apiUrl))) {
   process.exit(0);
 }
 
-if (process.env.CF_ACCESS_CLIENT_ID && process.env.CF_ACCESS_CLIENT_SECRET) {
+let app;
+try {
+  const api = new URL(apiUrl);
+  const accessApp = new URL(accessAppUrl || apiUrl);
+  if (
+    api.protocol !== 'https:' ||
+    accessApp.protocol !== 'https:' ||
+    api.username ||
+    api.password ||
+    api.pathname !== '/' ||
+    api.search ||
+    api.hash ||
+    accessApp.username ||
+    accessApp.password ||
+    api.origin !== accessApp.origin ||
+    accessApp.pathname !== '/' ||
+    accessApp.search ||
+    accessApp.hash
+  ) {
+    throw new Error('Access application must be the HTTPS origin of API_URL.');
+  }
+  app = api.origin;
+} catch {
+  console.error('[dashboard] CF_ACCESS_APP_URL must be the HTTPS origin of API_URL.');
+  process.exit(1);
+}
+
+const accessClientId = process.env.CF_ACCESS_CLIENT_ID ?? devVars.CF_ACCESS_CLIENT_ID;
+const accessClientSecret = process.env.CF_ACCESS_CLIENT_SECRET ?? devVars.CF_ACCESS_CLIENT_SECRET;
+if (accessClientId && accessClientSecret) {
   process.exit(0);
 }
 
@@ -94,11 +149,14 @@ if (process.env.CF_ACCESS_TOKEN && isUsableToken(process.env.CF_ACCESS_TOKEN)) {
   process.exit(0);
 }
 
-if (devVars.CF_ACCESS_TOKEN && isUsableToken(devVars.CF_ACCESS_TOKEN)) {
+if (
+  devVars.CF_ACCESS_TOKEN &&
+  devVars.CF_ACCESS_TOKEN_ORIGIN === app &&
+  isUsableToken(devVars.CF_ACCESS_TOKEN)
+) {
   process.exit(0);
 }
 
-const app = new URL(apiUrl).origin;
 let token = runCloudflared(['access', 'token', `-app=${app}`]);
 
 if (!token && process.stdin.isTTY && process.stdout.isTTY) {
@@ -115,5 +173,7 @@ if (!token || !isUsableToken(token)) {
 }
 
 const current = existsSync(DEV_VARS) ? readFileSync(DEV_VARS, 'utf8') : '';
-writeFileSync(DEV_VARS, setDevVar(current, 'CF_ACCESS_TOKEN', token));
+writeDevVars(
+  setDevVar(setDevVar(current, 'CF_ACCESS_TOKEN', token), 'CF_ACCESS_TOKEN_ORIGIN', app),
+);
 console.log(`[dashboard] Refreshed Cloudflare Access token for ${app}.`);

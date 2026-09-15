@@ -30,7 +30,6 @@ import { getPlatformCapabilities } from '../capabilities.ts';
 import { deleteDispatchScript, retryWithBackoff } from '../cf-api.ts';
 import { R2_CONCURRENCY, uploadPool } from '../concurrency.ts';
 import { SITE_DOMAIN } from '../constants.ts';
-import { DEFAULT_DASHBOARD_URL } from '../constants.ts';
 import {
   clearCronScheduler,
   restoreCronScheduler,
@@ -5356,15 +5355,8 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
           }
           emit({ event: 'error', message: msg, step: currentStep });
           if (!wasCanceled && context.env.EMAIL && user.email) {
-            const dashboardUrl = context.env.DASHBOARD_URL ?? DEFAULT_DASHBOARD_URL;
             context.executionCtx.waitUntil(
-              sendDeployFailedEmail(
-                context.env.EMAIL,
-                user.email,
-                project.slug,
-                msg,
-                dashboardUrl,
-              ).catch((err) =>
+              sendDeployFailedEmail(context.env, user.email, project.slug, msg).catch((err) =>
                 logger.error('catch', 'failed_email_send_failed', err, {
                   projectSlug: project.slug,
                 }),

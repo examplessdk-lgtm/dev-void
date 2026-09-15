@@ -242,6 +242,9 @@ Void preserves manually attached routes and custom domains in both the new confi
 
 :::
 
+For local API and dashboard development, fork CI, and the source layout, see
+[Platform Development](./platform-development.md).
+
 ## Continuously deploy a source build
 
 Build `@void/platform` from your checkout and pass its runtime directory to `install`, `upgrade`, `repair`, or `enable` with `--runtime`. Custom runtimes get the same integrity, migration, health, and rollback checks as packaged releases.

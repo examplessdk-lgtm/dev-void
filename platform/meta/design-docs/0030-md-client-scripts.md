@@ -1,5 +1,9 @@
 # Markdown Client Scripts
 
+> Historical design record. Status, checklists and examples describe the work
+> when recorded. See the [design archive](./README.md) for current guides and
+> the supported self-hosted platform.
+
 **Date:** 2026-02-26
 **Status:** Design
 
@@ -84,13 +88,13 @@ Virtual modules served on-demand by Vite. Same `data-md-script` + dynamic import
 
 ### Step 1: Extend `extractScript()` (md plugin)
 
-**File:** `framework/packages/md/src/extract-script.ts`
+**File:** `packages/md/src/extract-script.ts`
 
 Return `clientCode` alongside existing fields: strip island import lines from the script content. The caller gets `{ script, body, islandImports, clientCode }`.
 
 ### Step 2: Store client scripts in md plugin state
 
-**File:** `framework/packages/md/src/index.ts`
+**File:** `packages/md/src/index.ts`
 
 - Add a `clientScripts: Map<string, string>` at the plugin level
 - In `scanMdPages()` (called during `buildStart`), populate the map when `clientCode` is non-empty
@@ -100,7 +104,7 @@ Return `clientCode` alongside existing fields: strip island import lines from th
 
 ### Step 3: Extend islands client entry
 
-**File:** `framework/packages/vue/src/plugin-islands.ts`
+**File:** `packages/vue/src/plugin-islands.ts`
 
 - In `generateIslandClientEntry()`, find the md plugin via the Vite plugin array, read its `api.getClientScripts()`
 - Append URL-matched dynamic imports to the generated entry code
@@ -114,10 +118,10 @@ A `.md` page might have client code but no island imports. Today such a page has
 
 ## Files Changed
 
-| File                                           | Change                                                                       |
-| ---------------------------------------------- | ---------------------------------------------------------------------------- |
-| `framework/packages/md/src/extract-script.ts`  | Return `clientCode` (script minus island imports)                            |
-| `framework/packages/md/src/index.ts`           | Store client scripts, virtual module resolveId/load, expose API              |
-| `framework/packages/vue/src/plugin-islands.ts` | Extend client entry + renderer for md scripts                                |
-| `framework/packages/void/src/pages/types.ts`   | Add `hasClientScript?: boolean` to `PageDefinition` (if needed for renderer) |
-| `framework/packages/void/src/pages/scan.ts`    | Detect client scripts during page scan (if needed)                           |
+| File                                 | Change                                                                       |
+| ------------------------------------ | ---------------------------------------------------------------------------- |
+| `packages/md/src/extract-script.ts`  | Return `clientCode` (script minus island imports)                            |
+| `packages/md/src/index.ts`           | Store client scripts, virtual module resolveId/load, expose API              |
+| `packages/vue/src/plugin-islands.ts` | Extend client entry + renderer for md scripts                                |
+| `packages/void/src/pages/types.ts`   | Add `hasClientScript?: boolean` to `PageDefinition` (if needed for renderer) |
+| `packages/void/src/pages/scan.ts`    | Detect client scripts during page scan (if needed)                           |

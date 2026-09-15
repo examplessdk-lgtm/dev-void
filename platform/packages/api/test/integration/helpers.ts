@@ -64,7 +64,6 @@ export type TestEnv = {
   R2_STATIC_ASSETS_BUCKET: string;
   GITHUB_CLIENT_ID: string;
   GITHUB_CLIENT_SECRET: string;
-  GITHUB_PREVIEW_REPO_PAT?: string;
   GOOGLE_CLIENT_ID: string;
   GOOGLE_CLIENT_SECRET: string;
   DASHBOARD_URL?: string;

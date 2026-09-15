@@ -6,6 +6,10 @@ created: 2026-03-02
 
 # Platform Cron Scheduler
 
+> Historical design record. Status, checklists and examples describe the work
+> when recorded. See the [design archive](./README.md) for current guides and
+> the supported self-hosted platform.
+
 ## Context
 
 Cloudflare's Workers for Platforms (dispatch namespace) does not support cron triggers on user workers. The CF API for dispatch namespace scripts has no `schedules` endpoint, and the `triggers` field in upload metadata is silently ignored. User-defined cron jobs (e.g. `crons/heartbeat.ts` with `export const cron = "* * * * *"`) never fire when deployed.
@@ -63,7 +67,7 @@ type CronSchedulerState = {
 - If the DO alarm is late (CF jitter), evaluate against the alarm's scheduled time, not wall clock
 - If a user worker invocation fails, log and continue — cron jobs are fire-and-forget (matches CF native cron behavior)
 
-### 2. Deploy Flow Changes (`packages/api/src/routes/deploy.ts`)
+### 2. Deploy Flow Changes (`platform/packages/api/src/routes/deploy.ts`)
 
 After worker upload:
 
@@ -82,7 +86,7 @@ Added to the compiled worker entry alongside the existing `/__queue` route.
 - Calls `handleScheduled(controller, env, ctx)` (the existing generated dispatcher)
 - Returns 200 on success, 500 on error
 
-This goes in `framework/packages/void/src/router/compile.ts` (where `/__queue` is generated) and in the wrapper entry (`framework/packages/void/src/cli/wrapper.ts`).
+This goes in `packages/void/src/router/compile.ts` (where `/__queue` is generated) and in the wrapper entry (`packages/void/src/cli/wrapper.ts`).
 
 ### 4. Cron Expression Evaluation
 
@@ -91,7 +95,7 @@ Use `cron-parser` (v5.5.0) in the DO to:
 - Check if a cron expression matches a given minute: parse → get prev → compare
 - Compute next fire time: parse → call `next()` → get timestamp
 
-### 5. Wrangler Config Changes (`packages/api/wrangler.jsonc`)
+### 5. Wrangler Config Changes (`platform/packages/api/wrangler.jsonc`)
 
 ```jsonc
 // New DO binding (both production and staging)

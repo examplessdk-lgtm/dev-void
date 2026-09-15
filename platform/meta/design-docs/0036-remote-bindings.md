@@ -1,5 +1,9 @@
 # Remote Bindings for Local Development
 
+> Historical design record. Status, checklists and examples describe the work
+> when recorded. See the [design archive](./README.md) for current guides and
+> the supported self-hosted platform.
+
 **Date:** 2026-02-28
 **Status:** Design
 
@@ -7,7 +11,7 @@
 
 ## Summary
 
-Allow Void users to connect to their real remote D1, KV, and R2 resources during local development, enabling read-write access to production data from `vite dev`. A unified proxy worker (`proxy.void.cloud`) mediates all remote binding access, authenticated via JWT. The Void plugin injects proxy-backed binding implementations when remote mode is active.
+Allow Void users to connect to their real remote D1, KV, and R2 resources during local development, enabling read-write access to production data from `vite dev`. A unified proxy worker (`proxy.platform.example.net`) mediates all remote binding access, authenticated via JWT. The Void plugin injects proxy-backed binding implementations when remote mode is active.
 
 ## Motivation
 
@@ -37,7 +41,7 @@ The env var overrides the config — `VOID_REMOTE=0` disables remote mode even i
 
 **Prerequisites** (checked on startup, clear error if unmet):
 
-- User must be logged in (valid token at `~/.void/config.json`)
+- User must be logged in to the selected platform
 - Project must be linked (`.void/project.json` exists)
 - Project must have been deployed at least once (remote resources must exist)
 
@@ -65,7 +69,7 @@ The env var overrides the config — `VOID_REMOTE=0` disables remote mode even i
                            │ JWT-authenticated HTTPS
                            ▼
 ┌──────────────────────────────────────────────────────┐
-│                 proxy.void.cloud                      │
+│                 proxy.platform.example.net                      │
 │  (Cloudflare Worker — consolidates ai-proxy)         │
 │                                                       │
 │  ├── POST /ai/run         → Workers AI (existing)    │
@@ -88,15 +92,15 @@ The env var overrides the config — `VOID_REMOTE=0` disables remote mode even i
 
 ### Key Design Decisions
 
-- **Unified proxy** — consolidates `ai-proxy` into a general `proxy` worker at `proxy.void.cloud`. AI inference, D1, KV, and R2 all share one auth surface.
+- **Unified proxy** — consolidates `ai-proxy` into a general `proxy` worker at `proxy.platform.example.net`. AI inference, D1, KV, and R2 all share one auth surface.
 - **CF REST API backend** — the proxy forwards operations to Cloudflare's REST APIs. This avoids giving users any direct access to Void's CF account.
 - **Entry-point wrapping** — proxy-backed bindings are injected by wrapping the worker's fetch handler, not by modifying Miniflare configuration. This ensures both `c.env.DB` and `void/db` hit the proxy.
 
 ### Why Not Miniflare Native Remote Bindings?
 
-Cloudflare shipped native remote bindings (GA September 2025) where Miniflare proxies binding calls to real CF resources via an internal protocol. However, this requires authenticating to the CF account that owns the resources. Since all Void user resources live under Void's CF account, we can't use this mechanism without either:
+Cloudflare shipped native remote bindings (GA September 2025) where Miniflare proxies binding calls to real CF resources via an internal protocol. However, this requires authenticating to the CF account that owns the resources. Since deployed application resources live in the platform operator's Cloudflare account, we can't use this mechanism without either:
 
-- Giving users scoped API tokens to our account (security risk)
+- Giving application developers API tokens to the operator's account (security risk)
 - Reverse-engineering Miniflare's internal proxy protocol (undocumented, uses Cap'n Proto)
 
 The Void proxy approach gives us full control over auth, scoping, and audit while keeping the user experience simple.
@@ -105,10 +109,10 @@ The Void proxy approach gives us full control over auth, scoping, and audit whil
 
 ### Rename and Consolidation
 
-`packages/ai-proxy` is renamed to `packages/proxy`. All existing AI inference functionality is preserved. New D1/KV/R2 proxy endpoints are added alongside.
+`packages/ai-proxy` is renamed to `platform/packages/proxy`. All existing AI inference functionality is preserved. New D1/KV/R2 proxy endpoints are added alongside.
 
 ```
-packages/proxy/
+platform/packages/proxy/
 ├── src/
 │   ├── index.ts             (Hono router, auth middleware)
 │   ├── ai.ts                (existing AI inference logic)
@@ -196,7 +200,7 @@ When remote mode is active, the plugin injects env vars instead of (or in additi
 
 ```ts
 // In mergeBindings(), when remote mode is active
-vars.__VOID_PROXY_URL = 'https://proxy.void.cloud';
+vars.__VOID_PROXY_URL = 'https://proxy.platform.example.net';
 vars.__VOID_TOKEN = credentials.token;
 vars.__VOID_PROJECT_ID = credentials.projectId;
 vars.__VOID_REMOTE = 'true';
@@ -229,7 +233,7 @@ This covers both access patterns:
 
 ### Proxy-Backed Binding Implementations
 
-Located in `framework/packages/void/src/runtime/remote/`:
+Located in `packages/void/src/runtime/remote/`:
 
 ```
 runtime/remote/
@@ -254,7 +258,7 @@ Key implementation detail: `D1PreparedStatement.prepare()` and `.bind()` are syn
   ➜  Local:   http://localhost:5173/
   ➜  Network: http://192.168.1.5:5173/
 
-  ⚡ Remote bindings active (my-project.void.app)
+  ⚡ Remote bindings active (my-project.apps.example.com)
      DB      → remote D1
      KV      → remote KV
      STORAGE → remote R2
@@ -262,13 +266,13 @@ Key implementation detail: `D1PreparedStatement.prepare()` and `.bind()` are syn
 
 ### Error Handling
 
-| Scenario            | Behavior                                                                               |
-| ------------------- | -------------------------------------------------------------------------------------- |
-| Not logged in       | `✗ Remote bindings require authentication. Run void login first.`                      |
-| No linked project   | `✗ Remote bindings require a linked project. Run void deploy first.`                   |
-| No prior deployment | `✗ Remote bindings require at least one deployment. Run void deploy first.`            |
-| Expired token       | `✗ Remote binding auth expired. Restart dev server to re-authenticate.`                |
-| Proxy unreachable   | Runtime error in route handler: `Remote D1 query failed: proxy.void.cloud unreachable` |
+| Scenario            | Behavior                                                                                         |
+| ------------------- | ------------------------------------------------------------------------------------------------ |
+| Not logged in       | `✗ Remote bindings require authentication. Run void login first.`                                |
+| No linked project   | `✗ Remote bindings require a linked project. Run void deploy first.`                             |
+| No prior deployment | `✗ Remote bindings require at least one deployment. Run void deploy first.`                      |
+| Expired token       | `✗ Remote binding auth expired. Restart dev server to re-authenticate.`                          |
+| Proxy unreachable   | Runtime error in route handler: `Remote D1 query failed: proxy.platform.example.net unreachable` |
 
 Proxy errors surface as runtime errors in the user's route handler — same behavior as if a real CF binding failed in production.
 
@@ -285,7 +289,7 @@ V1 routes all R2 operations (including large file uploads/downloads) through the
 The proxy generates short-lived, scoped S3-compatible pre-signed URLs. The local R2 implementation fetches the URL from the proxy, then reads/writes R2 directly:
 
 ```
-Local:  POST proxy.void.cloud/r2/presign { key, operation: "get" | "put" }
+Local:  POST proxy.platform.example.net/r2/presign { key, operation: "get" | "put" }
 Proxy:  → { url: "https://{account}.r2.cloudflarestorage.com/{key}?X-Amz-..." }
 Local:  GET/PUT {presigned-url}  (direct to R2, no proxy hop)
 ```
@@ -315,4 +319,4 @@ Add `remote` to `void.json`:
 }
 ```
 
-Update `framework/packages/void/schema.json` and `src/config.ts` accordingly. The `remote` field is `boolean`, defaults to `false`.
+Update `packages/void/schema.json` and `src/config.ts` accordingly. The `remote` field is `boolean`, defaults to `false`.

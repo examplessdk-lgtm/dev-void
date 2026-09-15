@@ -9,6 +9,10 @@ depends:
 
 # Project Secret Storage Transition
 
+> Historical design record. Status, checklists and examples describe the work
+> when recorded. See the [design archive](./README.md) for current guides and
+> the supported self-hosted platform.
+
 ## Summary
 
 Move project secrets from Cloudflare per-worker secret storage to an encrypted platform-side secret store, backed by the platform PostgreSQL database.
@@ -36,8 +40,8 @@ Today:
 
 This behavior lives in:
 
-- `packages/api/src/routes/secrets.ts`
-- `packages/api/src/routes/deploy.ts`
+- `platform/packages/api/src/routes/secrets.ts`
+- `platform/packages/api/src/routes/deploy.ts`
 
 ### Why it breaks
 

@@ -1,46 +1,17 @@
-Follow these instructions to test the kitchen sink app.
+# Kitchen Sink Smoke Tests
 
-- Production URL: https://kitchen-sink.void.app/
-- Staging URL: https://kitchen-sink.staging.void.app/
+Use `playground/kitchen-sink` to verify a platform with a disposable app. The automated suite resets the app's database, KV, and storage, then exercises navigation, mutations, authentication, queues, and caching.
 
-## High-level instructions
+Deploy the app to the platform you want to test, then pass its URL explicitly from the repository root:
 
-- Always first confirm with the user whether we are testing staging or production.
-- Use the `/agent-browser` skill for browser automation. If the user doesn't have this skill installed, prompt them to install with `npx skills add vercel-labs/agent-browser`.
-- **DO NOT use Playwright MCP tools** directly. They have a separate page context from `agent-browser`.
-- The source code of the app is in `playground/kitchen-sink`.
-- If a test case fails, remember the failure and move on to the next case.
-- Print a summary of all results (pass/fail) at the end.
-
-## Techniques
-
-These patterns came up repeatedly during testing. Use them to avoid common pitfalls.
-
-**Deleting a specific row from a table:** The snapshot shows multiple "Delete" buttons without row context. Use JS eval to find the right row:
-
-```bash
-agent-browser eval --stdin <<'EVALEOF'
-const row = Array.from(document.querySelectorAll("tr")).find(r => r.textContent.includes("TARGET"));
-if (row) { row.querySelector("button").click(); "deleted" } else { "not found" }
-EVALEOF
+```sh
+vp exec playwright install chromium
+SMOKE_URL=https://kitchen-sink.apps.example.com node platform/scripts/kitchen-sink-smoke-test.ts
 ```
 
-**File uploads:** The native file chooser dialog doesn't work well in headless mode. Use the DataTransfer API via JS eval instead:
+Use an app whose data can be deleted. The script has no default destination. If Cloudflare Access protects the app, supply that application's `CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET` from your secret manager.
 
-```bash
-agent-browser eval --stdin <<'EVALEOF'
-const input = document.querySelector('input[type="file"]');
-const dt = new DataTransfer();
-dt.items.add(new File(["file content"], "filename.txt", { type: "text/plain" }));
-input.files = dt.files;
-input.dispatchEvent(new Event("change", { bubbles: true }));
-"file set"
-EVALEOF
-```
-
-**Waiting after mutations:** After clicking form submit buttons, the app reloads data via the server. Always wait 2-3 seconds (or poll) before asserting.
-
-**JS eval limitations:** `agent-browser eval` does not support top-level `await`. Use synchronous code only. For complex expressions with nested quotes, always use `--stdin` with heredoc to avoid shell escaping issues.
+The checklist below can also be run manually or with browser automation. Use unique values for created records, wait for each mutation to appear, and remove test records afterward. KV listings are eventually consistent; poll them instead of relying on a fixed delay. Record each result and report failures after completing the remaining cases.
 
 ## Test Cases
 
@@ -49,17 +20,17 @@ EVALEOF
 1. Visit `/`.
 2. Assert the page contains "Kitchen Sink" and "Auth" in its text.
 3. Inspect the page's HTML source for hashed asset URLs (e.g. `.js` or `.css` files with hash in the filename).
-4. Use an **in-browser sync XHR** (`XMLHttpRequest` via `agent-browser eval`) to GET one of those asset URLs with a cache-busting query parameter, and assert its `Cache-Control` header contains `immutable`. Do NOT use `curl` — Cloudflare edge cache rules rewrite headers differently for browser vs non-browser requests. Do NOT use `HEAD`: the dispatch edge cache stamps `immutable` on `GET`s to hashed paths only, and a conditional `HEAD` is answered from the entry the browser already stored, so it reports `no-store` and looks like a failure.
+4. Use the browser to GET one of those asset URLs with a cache-busting query parameter, and assert its `Cache-Control` header contains `immutable`. Inspect a `GET` response rather than `HEAD`: the dispatch edge cache stamps `immutable` on `GET`s to hashed paths only, and a conditional `HEAD` is answered from the entry the browser already stored, so it reports `no-store` and looks like a failure.
 
-   ```bash
-   agent-browser eval --stdin <<'EVALEOF'
-   const el = document.querySelector('script[src*="/assets/"]') || document.querySelector('link[href*="/assets/"]');
+   ```js
+   const el =
+     document.querySelector('script[src*="/assets/"]') ||
+     document.querySelector('link[href*="/assets/"]');
    const url = el.src || el.href;
    const xhr = new XMLHttpRequest();
    xhr.open('GET', url + (url.includes('?') ? '&' : '?') + 'smoke=' + Date.now(), false);
    xhr.send();
-   xhr.status + ' ' + xhr.getResponseHeader('cache-control')
-   EVALEOF
+   xhr.status + ' ' + xhr.getResponseHeader('cache-control');
    ```
 
    Expect `200 public, max-age=31536000, immutable`.

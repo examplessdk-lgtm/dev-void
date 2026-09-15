@@ -8,6 +8,10 @@ If you run a team platform, `void platform` also lets you give people access,
 manage their projects, and investigate deployments from the terminal. Start with
 [Platform Administration](./docs/guide/platform-administration.md).
 
+The platform implementation is included in this repository. To change it or
+deploy a runtime from your own fork, follow
+[Platform Development](./docs/guide/platform-development.md).
+
 ```ts
 // vite.config.ts
 import { defineConfig } from 'vite';
@@ -39,6 +43,8 @@ pnpm void deploy     # deploy to the saved Cloudflare or Void target
 ```
 
 ## Adding Void to an Existing Project
+
+Already deploy the same Void app directly to Cloudflare? Run `void deploy`. If your project has a `wrangler.jsonc` or `wrangler.json` and no deployment destination, Void offers to link and deploy using the existing Worker and resources. Accept once, then use `void deploy` for future deployments. See [Deploy an existing Worker](./docs/integrations/cloudflare.md#deploy-an-existing-worker).
 
 1. Install Void:
 

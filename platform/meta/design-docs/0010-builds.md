@@ -1,5 +1,9 @@
 # Builds — CI/Build Service
 
+> Historical design record. Status, checklists and examples describe the work
+> when recorded. See the [design archive](./README.md) for current guides and
+> the supported self-hosted platform.
+
 **Date:** 2026-02-19
 **Updated:** 2026-07-02
 **Status:** Implemented (backend + admin build UI; user-facing dashboard views deferred)
@@ -201,7 +205,7 @@ PROJECT_ID        - vite cloud project id
 SOURCE_URL        - GitHub tarball URL (with auth token embedded or separate)
 SOURCE_TOKEN      - GitHub installation access token (1hr TTL)
 BUILD_TOKEN       - short-lived token for POST /builds/:id/artifacts
-PLATFORM_URL      - e.g. https://api.void.cloud
+PLATFORM_URL      - e.g. https://api.platform.example.net
 DO_URL            - BuildManager DO URL for log streaming
 ```
 
@@ -299,9 +303,9 @@ Receives the build FormData from the container. Authenticated with the build-spe
 
 ## Database Schema
 
-The platform uses PostgreSQL (PlanetScale) via Cloudflare Hyperdrive, with Drizzle ORM for type-safe queries. Schema is defined in `packages/api/src/schema.ts`. Types are inferred via `InferSelectModel`, not hand-maintained.
+The platform uses PostgreSQL (PlanetScale) via Cloudflare Hyperdrive, with Drizzle ORM for type-safe queries. Schema is defined in `platform/packages/api/src/schema.ts`. Types are inferred via `InferSelectModel`, not hand-maintained.
 
-**New tables to add to `packages/api/src/schema.ts`:**
+**New tables to add to `platform/packages/api/src/schema.ts`:**
 
 ```typescript
 // ---------------------------------------------------------------------------
@@ -360,7 +364,7 @@ export const githubConnections = pgTable(
 );
 ```
 
-**Types (in `packages/api/src/types.ts`):**
+**Types (in `platform/packages/api/src/types.ts`):**
 
 ```typescript
 import type { builds, githubConnections } from './schema';
@@ -402,16 +406,16 @@ API Worker: POST /webhooks/github
 
 ## Dashboard Integration
 
-### User-Facing Dashboard (`packages/dashboard`)
+### User-Facing Dashboard (`platform/packages/dashboard`)
 
-The user dashboard is a Vue Pages mode app (`packages/dashboard`) with direct Hyperdrive reads. Build-related pages:
+The user dashboard is a Vue Pages mode app (`platform/packages/dashboard`) with direct Hyperdrive reads. Build-related pages:
 
 - **Build list** — read-only loader queries `builds` table via Hyperdrive
 - **Build detail** — status, logs (WebSocket to API), commit info
 - **GitHub connection management** — connect/disconnect repo (mutations go through API HTTP)
 - **Real-time log viewer** — WebSocket to `GET /builds/:id/logs` on the API
 
-### Admin Dashboard (`packages/api/src/admin/`)
+### Admin Dashboard (`platform/packages/api/src/admin/`)
 
 The admin dashboard (Hono JSX, server-rendered) gets a builds section for operational visibility:
 
@@ -452,7 +456,7 @@ These can be cleanly added without modifying the Phase 1 architecture:
 
 ### Preview Deploys
 
-- Builds triggered by pull requests deploy to `pr-{n}--{slug}.void.app`
+- Builds triggered by pull requests deploy to `pr-{n}--{slug}.apps.example.com`
 - Requires dispatch worker changes for PR URL routing
 - Comment on PR with preview URL
 
@@ -494,7 +498,7 @@ Consequences:
 
 - There is **no** `POST /builds/:id/artifacts` endpoint. (Design "Artifact Flow"
   and the corresponding row in "Platform API Endpoints" are dropped.)
-- There is **no** deploy-pipeline extraction. `packages/api/src/routes/deploy.ts`
+- There is **no** deploy-pipeline extraction. `platform/packages/api/src/routes/deploy.ts`
   is **unchanged**; the deploy endpoint stays JSON-manifest-only with
   direct-to-R2 asset upload.
 - The container reuses the exact same deploy path as a local `void deploy`, so
@@ -507,7 +511,7 @@ container was both unnecessary and wrong.
 
 **Scoped deploy token (replaces the HMAC build-token):**
 
-- `signDeployToken()` (`packages/api/src/auth/deploy-token.ts`) mints a 15-min
+- `signDeployToken()` (`platform/packages/api/src/auth/deploy-token.ts`) mints a 15-min
   `aud: 'deploy'`, project-scoped JWT. (15 min is the default; the container
   build path sizes the TTL to the owner plan's `buildTimeoutMinutes`, hard-capped
   at 60 min + a 300s margin via `deployTokenTtlSecondsForBuildMinutes`. The token
@@ -543,7 +547,7 @@ dashboard build views remain deferred.
 
 ### 4. Durable Objects: flat files, migration tags v5 + v6
 
-- DO classes live **flat** in `packages/api/src/` (`build-scheduler.ts`,
+- DO classes live **flat** in `platform/packages/api/src/` (`build-scheduler.ts`,
   `build-manager.ts`), not in a `durable-objects/` directory.
 - The wrangler DO migration tag is **v5** (`new_sqlite_classes`:
   `[BuildScheduler, BuildManager]`), applied to top-level + `env.production` +
@@ -565,14 +569,14 @@ In addition to `builds` and `github_connections`:
   (`'container' | 'github_actions'`, default `'container'`).
 - A new `github_installations` table maps GitHub installation IDs to users and
   tracks accessible repos. The OAuth callback backfills installation → user.
-- Migrations: `packages/api/drizzle/0027_github_deploy.sql` (creates `builds`,
+- Migrations: `platform/packages/api/drizzle/0027_github_deploy.sql` (creates `builds`,
   `github_connections`, `github_installations`; idempotent `IF NOT EXISTS`) and
   `0028_check_runs.sql` (`ALTER TABLE builds ADD COLUMN check_run_id`).
   Re-stamped past 0026 during the #179 routing split.
 
 ### New / changed surfaces (not in the original design)
 
-- `packages/api/src/github/`: `app-jwt.ts` (RS256 App JWT), `installation-token.ts`
+- `platform/packages/api/src/github/`: `app-jwt.ts` (RS256 App JWT), `installation-token.ts`
   (cached 1h installation token + tarball URL), `webhook-verify.ts`
   (HMAC-SHA256), `oidc-verify.ts` (GitHub Actions JWKS verify). Dependency: `jose`.
 - Routes mounted in `index.ts`: `routes/github.ts` (install-url, installations,
@@ -580,7 +584,7 @@ In addition to `builds` and `github_connections`:
   (`push` → queue container build + poke scheduler; `installation` /
   `installation_repositories`; `workflow_run`), `routes/auth-oidc.ts`
   (`POST /auth/github-oidc`).
-- Container: `packages/api/container/` — `Dockerfile` (node:24-slim + corepack +
+- Container: `platform/packages/api/container/` — `Dockerfile` (node:24-slim + corepack +
   bun) and `build-agent.mjs`.
 - Tiers: `PlanLimits.concurrentBuilds` + `.buildTimeoutMinutes` (0 = unlimited);
   `getBuildInstanceType(plan)` -> two sizes only: free -> standard-3
@@ -611,15 +615,15 @@ bypass list (GitHub cannot present Access creds).
 
 ---
 
-## Configurable Deploy-Workflow Path (SDD Plan — 2026-07-02)
+## Configurable Deploy-Workflow Path (2026-07-02)
 
-> Subagent-driven-development plan. Each `Task N` is independently implementable
-> by one subagent. Extends the OIDC executor described in [§2](#2-two-build-executors-container-is-default-github-actions-via-oidc-added);
-> no new design doc — this is the home of the `void-deploy.yml` pin.
+This follow-up extends the OIDC executor described in
+[§2](#2-two-build-executors-container-is-default-github-actions-via-oidc-added)
+with a configurable `void-deploy.yml` path.
 
 ### Motivation
 
-The OIDC exchange (`packages/api/src/routes/auth-oidc.ts`) hardcodes the
+The OIDC exchange (`platform/packages/api/src/routes/auth-oidc.ts`) hardcodes the
 authorized workflow as `SCAFFOLD_WORKFLOW_PATH = '.github/workflows/void-deploy.yml'`
 (`:26`, enforced `:131`). Baking a filename into the backend is inflexible;
 owners should own their workflow layout. Make the authorized path a
@@ -695,9 +699,9 @@ users hand-manage a custom file); dashboard UI (marketing site only); multiple
 
 ### Tasks
 
-**Task 1 — Schema + migration (platform, `packages/api`).**
+**Task 1 — Schema + migration (platform, `platform/packages/api`).**
 Add the `workflow_path` column to `githubConnections` in `schema.ts`. Generate
-`drizzle/0029_github_workflow_path.sql` via `pnpm -C packages/api db:generate`
+`drizzle/0029_github_workflow_path.sql` via `pnpm -C platform/packages/api db:generate`
 (emits `.sql` + `_journal.json` + `0029_snapshot.json` together — do not
 hand-edit meta). SQL is
 `ALTER TABLE "github_connections" ADD COLUMN "workflow_path" text DEFAULT '.github/workflows/void-deploy.yml' NOT NULL;`.
@@ -720,7 +724,7 @@ Remove the global gate at `:131`; re-add after connection selection, comparing
 `SCAFFOLD_WORKFLOW_PATH` as the default constant. _Verify:_ control-flow reasoning;
 covered by Task 5. _Depends:_ Task 1.
 
-**Task 5 — Tests (platform, `packages/api/test/integration`).**
+**Task 5 — Tests (platform, `platform/packages/api/test/integration`).**
 `api-oidc.test.ts`: (a) default back-compat — existing scaffolded / `other.yml`
 / spoofed-prefix cases still pass; (b) `workflow_path='.github/workflows/ci.yml'`
 → `ci.yml` mints 200, `void-deploy.yml` → 401; (c) two projects, same repo,
@@ -728,20 +732,15 @@ different paths → each mints only its own, cross → 401. Connection-CRUD test
 POST/PATCH invalid path → 400, `.yaml` ok, value persisted + read back.
 _Verify:_ `vp test run` on these files green. _Depends:_ Tasks 2–4.
 
-**Task 6 — CLI flags (framework, `packages/void`) — SEPARATE REPO.**
-Pre-req: `git submodule update --init framework` (uninitialized in this
-worktree). `client.ts` connect + update helpers add optional `workflowPath` →
+**Task 6 — CLI flags (`packages/void`).** `client.ts` connect + update helpers add optional `workflowPath` →
 body `workflow_path`; `github-cmd.ts` connect + update parse `--workflow <path>`
 (client-side validate for a friendly error; API stays authoritative). Contract:
 body field is `workflow_path` (fixed by Task 3). _Verify:_ framework typecheck +
 `github-cmd` tests. _Depends:_ Task 3 (field-name contract) — buildable in
 parallel once fixed.
 
-### Commit / rollout
+### Schema compatibility
 
-Two repos → per CLAUDE.md commit **framework (Task 6) first, then platform, then
-bump the submodule pointer**; in this worktree the framework submodule has a
-separate object store, so cherry-pick back to main + amend the pointer per the
-worktree recipe. **All commits require explicit user confirmation.** Deploy:
-additive column, migrate then deploy API; old code tolerates the new column — no
-two-phase concern.
+The added column is backward-compatible with the previous API. Apply the
+migration before deploying the API that reads it. Framework and platform changes
+now share the same workspace and contract tests.

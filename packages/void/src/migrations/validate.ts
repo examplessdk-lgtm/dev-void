@@ -166,7 +166,7 @@ export function listDrizzleArtifacts(migrationsDir: string): Array<string> {
  * An orphan file created by hand (or by a botched scaffold/merge) gets
  * applied to D1 without Drizzle ever acknowledging it, and a failed
  * deploy can leave the database in a state that is impossible to recover
- * from without manual SQL edits (see void-sdk/void#6).
+ * from without manual SQL edits.
  *
  * A missing journal is NOT a drift error. The drift check is a diff
  * between disk and `meta/_journal.json`; with no journal, there is nothing

@@ -1,4 +1,10 @@
 export {
+  readExistingCloudflareWorker,
+  assertExistingCloudflareConfig,
+  assertCloudflareBindingsPreserved,
+  type ExistingCloudflareWorker,
+} from './existing.ts';
+export {
   parseRootWranglerConfig,
   readBindingFieldPresence,
   readConfigEntryString,
@@ -25,6 +31,7 @@ export {
 export {
   activateCloudflareVersion,
   deployCloudflareVersionTriggers,
+  deployCloudflareVersionTraffic,
   encodeCloudflareVersionMessage,
   extractWorkersDevSubdomain,
   normalizeWorkersDevSubdomain,

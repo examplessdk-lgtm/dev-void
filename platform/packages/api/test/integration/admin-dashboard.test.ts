@@ -1711,11 +1711,11 @@ describe('POST /admin/invitations/send', () => {
 });
 
 describe('GET /signup-restricted', () => {
-  test('renders private beta page without auth', async () => {
+  test('explains administrator-controlled signup without auth', async () => {
     const res = await app.fetch(new Request('http://localhost/signup-restricted'), env);
     expect(res.status).toBe(200);
     const html = await res.text();
-    expect(html).toContain('Private Beta');
-    expect(html).toContain('Sorry, we are still in private beta');
+    expect(html).toContain('Signup Restricted');
+    expect(html).toContain('require administrator approval');
   });
 });

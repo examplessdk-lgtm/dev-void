@@ -1,5 +1,9 @@
 # Multi-Framework Support
 
+> Historical design record. Status, checklists and examples describe the work
+> when recorded. See the [design archive](./README.md) for current guides and
+> the supported self-hosted platform.
+
 **Date:** 2026-02-25
 **Status:** Implemented (Nuxt + SvelteKit runtime env fix, binding inference across framework classes)
 
@@ -203,7 +207,7 @@ type DeployManifest = {
 
 ## API Changes
 
-In `packages/api/src/routes/deploy.ts`, the worker upload metadata uses the new manifest fields with fallbacks:
+In `platform/packages/api/src/routes/deploy.ts`, the worker upload metadata uses the new manifest fields with fallbacks:
 
 ```typescript
 const metadata = {
@@ -356,25 +360,25 @@ SvelteKit additionally uses hooks injection to wrap `handle` with `withRuntimeEn
 
 ## What Changes Where
 
-| File                                | Change                                                                       |
-| ----------------------------------- | ---------------------------------------------------------------------------- |
-| `framework/.../runtime/env.ts`      | New runtime env resolver with Nuxt/SvelteKit/workerd fallbacks               |
-| `framework/.../runtime/db.ts`       | Use resolver (`requireRuntimeBinding("DB")`)                                 |
-| `framework/.../runtime/kv.ts`       | Use resolver (`requireRuntimeBinding("KV")`)                                 |
-| `framework/.../runtime/storage.ts`  | Use resolver (`requireRuntimeBinding("STORAGE")`)                            |
-| `framework/.../runtime/queues.ts`   | Use resolver (`requireRuntimeBinding("QUEUE_*")`)                            |
-| `framework/.../runtime/isr.ts`      | Use resolver (`getRuntimeBinding(...)`)                                      |
-| `framework/.../runtime/ai.ts`       | Resolve all AI env/bindings via runtime resolver                             |
-| `framework/.../plugin-inference.ts` | Extend `detectFramework()` with class info; add Class B/C framework entries  |
-| `framework/.../index.ts`            | Class B/C plugin composition + SvelteKit hooks injection + wrangler sync     |
-| `framework/.../cli/deploy.ts`       | Class B/C deploy paths — preset lookup, wrangler parsing, wrapper bundling   |
-| `framework/.../cli/package.ts`      | Support `workerMain`, `compatibilityDate`, `compatibilityFlags` in manifest  |
-| `framework/.../cli/preset.ts`       | Add `FRAMEWORK_PRESETS` for SvelteKit, Nuxt, Astro                           |
-| `framework/.../cli/wrangler.ts`     | New — parse wrangler.json/jsonc for compat settings                          |
-| `framework/.../cli/wrapper.ts`      | New — generate + Vite-bundle the wrapper entry with auth/cron/queue handlers |
-| `framework/.../config.ts`           | Extend `bindings` to accept `string`; add `build` and `cache.prerender`      |
-| `packages/api/src/types.ts`         | Add optional `workerMain`, `compatibilityDate`, `compatibilityFlags`         |
-| `packages/api/src/routes/deploy.ts` | Use new manifest fields in worker upload metadata                            |
+| File                                         | Change                                                                       |
+| -------------------------------------------- | ---------------------------------------------------------------------------- |
+| `packages/void/src/runtime/env.ts`           | New runtime env resolver with Nuxt/SvelteKit/workerd fallbacks               |
+| `packages/void/src/runtime/db.ts`            | Use resolver (`requireRuntimeBinding("DB")`)                                 |
+| `packages/void/src/runtime/kv.ts`            | Use resolver (`requireRuntimeBinding("KV")`)                                 |
+| `packages/void/src/runtime/storage.ts`       | Use resolver (`requireRuntimeBinding("STORAGE")`)                            |
+| `packages/void/src/runtime/queues.ts`        | Use resolver (`requireRuntimeBinding("QUEUE_*")`)                            |
+| `packages/void/src/runtime/isr.ts`           | Use resolver (`getRuntimeBinding(...)`)                                      |
+| `packages/void/src/runtime/ai.ts`            | Resolve all AI env/bindings via runtime resolver                             |
+| `packages/void/src/plugin-inference.ts`      | Extend `detectFramework()` with class info; add Class B/C framework entries  |
+| `packages/void/src/index.ts`                 | Class B/C plugin composition + SvelteKit hooks injection + wrangler sync     |
+| `packages/void/src/cli/deploy.ts`            | Class B/C deploy paths — preset lookup, wrangler parsing, wrapper bundling   |
+| `packages/void/src/cli/package.ts`           | Support `workerMain`, `compatibilityDate`, `compatibilityFlags` in manifest  |
+| `packages/void/src/cli/preset.ts`            | Add `FRAMEWORK_PRESETS` for SvelteKit, Nuxt, Astro                           |
+| `packages/void/src/cli/wrangler.ts`          | New — parse wrangler.json/jsonc for compat settings                          |
+| `packages/void/src/cli/wrapper.ts`           | New — generate + Vite-bundle the wrapper entry with auth/cron/queue handlers |
+| `packages/void/src/config.ts`                | Extend `bindings` to accept `string`; add `build` and `cache.prerender`      |
+| `platform/packages/api/src/types.ts`         | Add optional `workerMain`, `compatibilityDate`, `compatibilityFlags`         |
+| `platform/packages/api/src/routes/deploy.ts` | Use new manifest fields in worker upload metadata                            |
 
 ---
 

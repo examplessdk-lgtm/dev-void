@@ -16,14 +16,37 @@ on:
 permissions: {}
 
 jobs:
+  check-ref:
+    if: ${{ vars.VOID_PLATFORM_DEPLOY_ENABLED == 'true' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    steps:
+      # Reusable runs use the caller's ref. Reject case variants before secrets.
+      - name: Verify the exact smoke-test branch
+        run: test "$GITHUB_REF" = 'refs/heads/main'
+
   smoke-test:
-    if: ${{ vars.VOID_PLATFORM_DEPLOY_ENABLED == 'true' }}
+    if: ${{ vars.VOID_PLATFORM_DEPLOY_ENABLED == 'true' && github.ref == 'refs/heads/main' }}
+    needs: check-ref
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    # Configure all three credentials in Staging. Reusable callers must declare
+    # these secret names explicitly for GitHub to resolve the environment values.
     environment: Staging
     timeout-minutes: 15
     permissions:
       contents: read
     steps:
+      - name: Verify staging smoke-test credentials
+        env:
+          CF_ACCESS_CLIENT_ID_STAGING: ${{ secrets.CF_ACCESS_CLIENT_ID_STAGING }}
+          CF_ACCESS_CLIENT_SECRET_STAGING: ${{ secrets.CF_ACCESS_CLIENT_SECRET_STAGING }}
+          VOID_TOKEN_STAGING: ${{ secrets.VOID_TOKEN_STAGING }}
+        run: |
+          for name in CF_ACCESS_CLIENT_ID_STAGING CF_ACCESS_CLIENT_SECRET_STAGING VOID_TOKEN_STAGING; do
+            if [[ -z "${!name}" ]]; then
+              echo "::error::Missing $name. Configure it in the Staging environment."
+              exit 1
+            fi
+          done
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false

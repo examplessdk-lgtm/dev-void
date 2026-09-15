@@ -1,214 +1,92 @@
-# Architecture
+# Platform architecture
 
+The Void platform runs in an operator's Cloudflare account. Developers connect
+the CLI to that installation, sign in, and deploy applications into its Workers
+for Platforms namespace. Each installation owns its resources and its
+PostgreSQL database.
+
+For installation steps and the supported feature set, read
+[Self-host a Void platform](../../docs/guide/self-hosted-platform.md). For
+administration commands, read
+[Platform Administration](../../docs/guide/platform-administration.md).
+
+## Source and packaged runtime
+
+The framework, CLI, and platform share one workspace:
+
+| Directory                                            | Responsibility                                                  |
+| ---------------------------------------------------- | --------------------------------------------------------------- |
+| `packages/void`                                      | Vite plugin, application runtime, and `void` CLI                |
+| `packages/platform`                                  | Installation contracts and packaged core Worker bundles         |
+| `packages/deploy-core`, `packages/deploy-cloudflare` | Deployment contracts and Cloudflare upload primitives           |
+| `packages/edge`, `packages/isr`                      | Shared routing and ISR behavior                                 |
+| `platform/packages/api`                              | Control plane, provisioning, administrator API and UI           |
+| `platform/packages/dispatch`                         | Application ingress, asset serving, queue delivery and metering |
+| `platform/packages/proxy`                            | Workers AI, remote bindings and ISR revalidation                |
+| `platform/packages/tail`                             | Runtime log ingestion into Analytics Engine                     |
+| `platform/packages/dashboard`                        | User dashboard source                                           |
+
+The installer consumes integrity-checked runtime artifacts from
+[`@void/platform`](../../packages/platform/README.md). It generates resource
+names, bindings and hostnames for the selected installation. A fork can build
+that same runtime from its own source and supply it to `void platform upgrade`.
+
+The user dashboard and integrations such as managed GitHub builds remain in
+the repository, but are not included in the core installation. Their presence
+in the source tree does not imply that an installation supports them. The
+platform's discovery document advertises its capabilities.
+
+## Request and deployment flow
+
+```text
+Developer                       Installed platform
+---------                       ------------------
+void connect <url>       ------> Discovery document
+void auth login         ------> API + GitHub OAuth
+void deploy             ------> API
+                                 | validate manifest and provision resources
+                                 | upload worker and assets; run migrations
+                                 | publish active routing record
+                                 v
+Browser ---------------------> Dispatch
+                                 |----> Worker in dispatch namespace
+                                 |----> Static assets in KV/R2
+                                 `----> Request metering
+
+Application worker ----------> Proxy (AI, remote bindings, revalidation)
+Application tail events -----> Tail -> Analytics Engine -> API log queries
+void platform user list ------> Administrator API
 ```
-                              VOID — SYSTEM ARCHITECTURE
- ═══════════════════════════════════════════════════════════════════════════════
 
-                          ┌───────────────────────────────────────┐
-                          │         DEVELOPER'S MACHINE           │
-                          │                                       │
-                          │  src/  routes/  middleware/  jobs/    │
-                          │  vite.config.ts (voidPlugin())        │
-                          │  void.json                            │
-                          │                                       │
-                          │  ┌─────────────────────────────────┐  │
-                          │  │  void (npm package)             │  │
-                          │  │                                 │  │
-                          │  │  Vite Plugins:                  │  │
-                          │  │   ├─ routing (file-based)       │  │
-                          │  │   ├─ db-types (DDL → .d.ts)     │  │
-                          │  │   ├─ migration                  │  │
-                          │  │   ├─ inference (binding scan)   │  │
-                          │  │   ├─ prerender / SSR / ISR      │  │
-                          │  │   └─ @cloudflare/vite-plugin    │  │
-                          │  │                                 │  │
-                          │  │  Runtime Exports:               │  │
-                          │  │   ├─ void         (core)        │  │
-                          │  │   ├─ void/db      (typed D1)    │  │
-                          │  │   ├─ void/kv      (typed KV)    │  │
-                          │  │   ├─ void/storage (typed R2)    │  │
-                          │  │   ├─ void/client  (typed fetch) │  │
-                          │  │   ├─ void/auth    (app auth)    │  │
-                          │  │   └─ void/ai      (Workers AI)  │  │
-                          │  │                                 │  │
-                          │  │  CLI (void):                    │  │
-                          │  │   ├─ void init                  │  │
-                          │  │   ├─ void deploy                │  │
-                          │  │   ├─ void login                 │  │
-                          │  │   ├─ void link / list / delete  │  │
-                          │  │   ├─ void secret set/delete     │  │
-                          │  │   ├─ void domain add/remove     │  │
-                          │  │   └─ void db push/studio        │  │
-                          │  │                                 │  │
-                          │  │  Framework Integrations:        │  │
-                          │  │   ├─ @void/vue                │  │
-                          │  │   ├─ @void/react              │  │
-                          │  │   ├─ @void/solid              │  │
-                          │  │   └─ @void/svelte             │  │
-                          │  └─────────────────────────────────┘  │
-                          └────────┬─────────────────┬────────────┘
-                                   │                 │
-                         vite dev  │                 │  void deploy
-                                   │                 │
-                ┌──────────────────▼───┐             │
-                │   LOCAL DEV SERVER   │             │
-                │                      │             │
-                │  Vite Dev Server     │             │
-                │    ├─ HMR + assets   │             │
-                │    └─ proxy /api/*   │             │
-                │                      │             │
-                │  workerd (local)     │             │
-                │    ├─ API routes     │             │
-                │    ├─ D1 (SQLite)    │             │
-                │    ├─ KV (fs)        │             │
-                │    └─ R2 (fs)        │             │
-                │                      │             │
-                │  Remote Bindings ────────┐         │
-                │  (optional, via proxy)   │         │
-                └──────────────────────┘   │         │
-                                           │         │
- ══════════════════════════════════════════════════════════════════════════════
-                              CLOUDFLARE EDGE
- ══════════════════════════════════════════════════════════════════════════════
+The API stages deployments before changing the active routing record. Worker
+deployments apply migrations before traffic moves. Static deployments publish
+an asset manifest without creating an application Worker. Retained deployments
+allow rollback within the installation's configured limits.
 
-                                           │         │
-         ┌─────────────────────────────────▼───┐     │
-         │  void-proxy  (proxy.void.cloud)     │     │
-         │                                     │     │
-         │  Two modes:                         │     │
-         │                                     │     │
-         │  1. AI Proxy (production)           │     │
-         │     user worker ──service binding──►│     │
-         │     metered billing for Workers AI  │     │
-         │                   │                 │     │
-         │              ┌────▼─────┐           │     │
-         │              │Workers AI│           │     │
-         │              │(via AI   │           │     │
-         │              │ Gateway) │           │     │
-         │              └──────────┘           │     │
-         │                                     │     │
-         │  2. Remote Bindings (local dev)     │     │
-         │     CLI ──HTTPS + JWT──►            │     │
-         │     D1/KV/R2 via CF REST APIs       │     │
-         └─────────────────────────────────────┘     │
-                                                     │
-                ┌────────────────────────────────────▼───┐
-                │  void-api  (api.void.cloud)            │
-                │                                        │
-                │  Control Plane:                        │
-                │   ├─ OAuth (GitHub / Google)           │
-                │   ├─ Project CRUD                      │
-                │   ├─ Deploy Pipeline:                  │
-                │   │   ├─ Validate manifest             │
-                │   │   ├─ Provision D1/KV/R2            │
-                │   │   ├─ Run migrations (CF REST)      │
-                │   │   ├─ Upload assets → R2            │
-                │   │   ├─ Upload worker → dispatch NS   │
-                │   │   └─ Update KV routing entry       │
-                │   ├─ Usage Metering (Analytics Engine) │
-                │   ├─ Tier Enforcement (DO)             │
-                │   ├─ Secrets Management                │
-                │   ├─ Custom Domains (CF for SaaS)      │
-                │   └─ Admin Dashboard (/admin)          │
-                │                                        │
-                │  Bindings:                             │
-                │   DB ─── D1    ASSETS ─── R2           │
-                │   ROUTING ─── KV    DISPATCH ─── WfP   │
-                │   USAGE_COUNTER ─── DO                 │
-                │   Queue ─── void-usage-events          │
-                └────────────────────────────────────────┘
-                         │
-                         │ provisions + deploys
-                         ▼
- ┌─────────────────────────────────────────────────────────────────────┐
- │                    USER PROJECT RESOURCES                           │
- │                                                                     │
- │   ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐      │
- │   │    D1    │    │    KV    │    │    R2    │    │  Queue   │      │
- │   │(database)│    │(key-val) │    │(objects) │    │(optional)│      │
- │   └─────┬────┘    └─────┬────┘    └─────┬────┘    └─────┬────┘      │
- │         └───────────┬───┴──────────┬────┘               │           │
- │                     │              │                    │           │
- │              ┌──────▼──────────────▼────────────────────▼────┐      │
- │              │         User Worker                           │      │
- │              │  (Workers for Platforms — dispatch namespace) │      │
- │              │                                               │      │
- │              │  routes/api/* → Hono handlers                 │      │
- │              │  middleware/* → request pipeline              │      │
- │              │  jobs/*       → cron triggers                 │      │
- │              │  SSR          → main.ssr.ts                   │      │
- │              │                       │                       │      │
- │              │                  service binding              │      │
- │              │                       │                       │      │
- │              │                  void-proxy (AI)              │      │
- │              └───────────────────────────────────────────────┘      │
- │                              ▲                                      │
- └──────────────────────────────┼──────────────────────────────────────┘
-                                │
-         ┌──────────────────────┼────────────────────────────────┐
-         │  void-dispatch  (*.void.app / custom domains)         │
-         │                      │                                │
-         │  Request Flow:       │                                │
-         │   browser ──►  extract slug from hostname             │
-         │                      │                                │
-         │              ┌───────▼───────┐                        │
-         │              │  KV ROUTING   │                        │
-         │              │  slug → config│                        │
-         │              └───────┬───────┘                        │
-         │                      │                                │
-         │          ┌───────────┼───────────┐                    │
-         │          │           │           │                    │
-         │     /api/*      static/*    SPA/SSR                   │
-         │          │           │           │                    │
-         │          ▼           ▼           ▼                    │
-         │     Workers      R2 assets   index.html               │
-         │     for          (edge       fallback                 │
-         │     Platforms    cached)                              │
-         │                                                       │
-         │  Bindings:                                            │
-         │   DISPATCH ─── WfP    ASSETS ─── R2                   │
-         │   ROUTING ─── KV      ANALYTICS ─── AE                │
-         │   USAGE_QUEUE ─── Queue                               │
-         │                                                       │
-         │  Also: custom domains via CF for SaaS                 │
-         │  (CNAME → cname.void.app)                             │
-         └───────────────────────────────────────────────────────┘
+Worker assets use Cloudflare's asset binding, with a platform-owned KV/R2 mirror
+for the known missing-asset response described in
+[the asset fallback design](./design-docs/0066-wfp-asset-r2-fallback.md).
 
-         ┌───────────────────────────────────────────────────────┐
-         │  void-dashboard  (dash.void.cloud)                    │
-         │                                                       │
-         │  Vue SSR app (@void/vue)                            │
-         │   ├─ Login (OAuth via API)                            │
-         │   ├─ Projects (list, create, detail)                  │
-         │   ├─ Deployments, Domains, Secrets                    │
-         │   ├─ Usage Metrics                                    │
-         │   └─ Settings                                         │
-         │                                                       │
-         │  BFF: server loaders → API via HTTP                   │
-         │  Auth: JWT in httpOnly cookie (void_token)            │
-         └───────────────────────────────────────────────────────┘
+## Data and trust boundaries
 
- ══════════════════════════════════════════════════════════════════════════════
-                              DATA FLOW SUMMARY
- ══════════════════════════════════════════════════════════════════════════════
+PostgreSQL, reached through Hyperdrive, stores users, projects, deployments,
+resource ownership, administrator sessions and audit records. Routing KV points
+application hostnames to active deployments. KV/R2 store static assets;
+Analytics Engine stores usage and runtime logs. Durable Objects coordinate
+stateful work such as cron scheduling and usage counters. The optional managed
+build subsystem keeps build logs in Durable Object SQLite storage, separately
+from application runtime logs.
 
-  Developer                    Platform                        End User
-  ─────────                    ────────                        ────────
-  void deploy ──────────────► api.void.cloud
-                                │ provision
-                                │ upload
-                                ▼
-                              R2 + WfP + KV
-                                                ◄──────────── browser
-                                              dispatch         {slug}.void.app
-                                                │
-                                          ┌─────┴─────┐
-                                          ▼           ▼
-                                       Worker      R2 assets
-                                       (API)       (static)
-                                          │
-                                     service bind
-                                          ▼
-                                       Proxy
-                                       (AI metering)
-```
+Application D1, KV, R2 and Queue resources are provisioned separately from the
+platform's own stores. Public SDK packages under `packages/` must not import
+platform implementation code. Shared contracts belong in the public packages.
+
+Lifecycle commands authenticate the operator to Cloudflare. Day-to-day
+administration uses installation-scoped administrator credentials. The running
+platform has its own runtime token for resource provisioning. These credentials
+serve different purposes and must not be substituted for one another.
+
+See [operations](./operations.md) for maintenance and
+[the design archive](./design-docs/README.md) for the reasoning behind individual
+features. Archived proposals describe the source at the time they were written;
+they are not an installation checklist.

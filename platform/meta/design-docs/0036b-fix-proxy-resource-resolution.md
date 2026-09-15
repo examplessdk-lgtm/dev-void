@@ -1,6 +1,8 @@
 # Fix Proxy Resource Resolution
 
-> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
+> Historical design record. Status, checklists and examples describe the work
+> when recorded. See the [design archive](./README.md) for current guides and
+> the supported self-hosted platform.
 
 **Goal:** Fix remote bindings by resolving resources via the API service binding instead of a non-existent D1 table.
 
@@ -14,7 +16,7 @@
 
 **Files:**
 
-- Modify: `packages/api/src/db.ts` (after line 275)
+- Modify: `platform/packages/api/src/db.ts` (after line 275)
 
 **Step 1: Add the query function**
 
@@ -49,12 +51,12 @@ Ensure `and` is imported from `drizzle-orm` (check existing imports at top of fi
 
 **Files:**
 
-- Create: `packages/api/src/routes/internal-resolve-resource.ts`
-- Modify: `packages/api/src/index.ts` (~line 48, add route mount)
+- Create: `platform/packages/api/src/routes/internal-resolve-resource.ts`
+- Modify: `platform/packages/api/src/index.ts` (~line 48, add route mount)
 
 **Step 1: Create the route file**
 
-Follow the exact pattern of `packages/api/src/routes/internal-revalidate.ts`:
+Follow the exact pattern of `platform/packages/api/src/routes/internal-revalidate.ts`:
 
 ```typescript
 import { Hono } from 'hono';
@@ -101,7 +103,7 @@ export default app;
 
 **Step 2: Mount in API index.ts**
 
-In `packages/api/src/index.ts`, add import and mount next to the existing internal route:
+In `platform/packages/api/src/index.ts`, add import and mount next to the existing internal route:
 
 ```typescript
 import internalResolveResource from "./routes/internal-resolve-resource";
@@ -117,8 +119,8 @@ Place it right after the existing `.route("/internal/revalidate", internalRevali
 
 **Files:**
 
-- Modify: `packages/proxy/src/resolve.ts` (full rewrite)
-- Modify: `packages/proxy/src/types.ts` (remove `DB: D1Database`)
+- Modify: `platform/packages/proxy/src/resolve.ts` (full rewrite)
+- Modify: `platform/packages/proxy/src/types.ts` (remove `DB: D1Database`)
 
 **Step 1: Rewrite resolve.ts**
 
@@ -154,7 +156,7 @@ export async function resolveResource(
   return data.cf_id;
 }
 
-// --- HMAC signing (mirrors packages/api/src/auth/hmac.ts) ---
+// --- HMAC signing (mirrors platform/packages/api/src/auth/hmac.ts) ---
 
 const encoder = new TextEncoder();
 let cachedSignKey: CryptoKey | undefined;
@@ -183,7 +185,7 @@ async function hmacSign(data: string, secret: string): Promise<string> {
 
 **Step 2: Update types.ts**
 
-Remove `DB: D1Database` from the `Env` type in `packages/proxy/src/types.ts`.
+Remove `DB: D1Database` from the `Env` type in `platform/packages/proxy/src/types.ts`.
 
 ---
 
@@ -191,9 +193,9 @@ Remove `DB: D1Database` from the `Env` type in `packages/proxy/src/types.ts`.
 
 **Files:**
 
-- Modify: `packages/proxy/src/d1.ts` (lines 19, 72)
-- Modify: `packages/proxy/src/kv.ts` (all resolveResource calls)
-- Modify: `packages/proxy/src/r2.ts` (all resolveResource calls)
+- Modify: `platform/packages/proxy/src/d1.ts` (lines 19, 72)
+- Modify: `platform/packages/proxy/src/kv.ts` (all resolveResource calls)
+- Modify: `platform/packages/proxy/src/r2.ts` (all resolveResource calls)
 
 All callers currently do:
 
@@ -215,8 +217,8 @@ Same pattern for all kv.ts and r2.ts callers — replace `c.env.DB` with `c.env.
 
 **Files:**
 
-- Modify: `packages/proxy/wrangler.jsonc` (remove d1_databases blocks)
-- Modify: `packages/proxy/src/index.ts` (remove `db: !!c.env.DB` from health check)
+- Modify: `platform/packages/proxy/wrangler.jsonc` (remove d1_databases blocks)
+- Modify: `platform/packages/proxy/src/index.ts` (remove `db: !!c.env.DB` from health check)
 
 Remove the `d1_databases` array from both the production and staging env sections. Remove or update the health check reference to `c.env.DB`.
 
@@ -226,7 +228,7 @@ Remove the `d1_databases` array from both the production and staging env section
 
 **Files:**
 
-- Modify: `packages/proxy/test/unit/d1.test.ts`
+- Modify: `platform/packages/proxy/test/unit/d1.test.ts`
 - Modify: any other test files that mock `c.env.DB`
 
 Update the test mocks: replace D1 mocks with a mock `API` fetcher that returns `{ cf_id: "..." }` for resolve-resource calls.
@@ -244,7 +246,7 @@ Update the test mocks: replace D1 mocks with a mock `API` fetcher that returns `
 **Step 4:** Deploy proxy and API to staging, then test with:
 
 ```
-cd framework/playground/kitchen-sink
+cd playground/kitchen-sink
 VOID_REMOTE=1 pnpm dev
 ```
 

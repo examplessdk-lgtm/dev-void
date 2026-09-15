@@ -6,9 +6,13 @@ created: 2026-03-10
 
 # Scroll Position Restoration
 
+> Historical design record. Status, checklists and examples describe the work
+> when recorded. See the [design archive](./README.md) for current guides and
+> the supported self-hosted platform.
+
 ## Problem
 
-The Void pages router (`framework/packages/void/src/pages/client.ts`) does not save or restore scroll position during client-side navigation. Back/forward navigation scrolls to top, which is incorrect UX.
+The Void pages router (`packages/void/src/pages/client.ts`) does not save or restore scroll position during client-side navigation. Back/forward navigation scrolls to top, which is incorrect UX.
 
 Current behavior:
 

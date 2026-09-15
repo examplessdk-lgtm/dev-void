@@ -6,6 +6,10 @@ created: 2026-03-01
 
 # Worker Observability — Error Logs
 
+> Historical design record. Status, checklists and examples describe the work
+> when recorded. See the [design archive](./README.md) for current guides and
+> the supported self-hosted platform.
+
 ## Goal
 
 Enable admin dashboard users to click on a deployment and see runtime error logs from that user worker (from requests, not deployment-time errors).
@@ -20,7 +24,7 @@ Use Cloudflare's built-in **Workers Logs** (GA April 2025) for historical log st
 
 Add `observability` to the worker metadata when uploading to the dispatch namespace.
 
-**File:** `packages/api/src/routes/deploy.ts`
+**File:** `platform/packages/api/src/routes/deploy.ts`
 
 Both the static-only and full deploy paths gain:
 
@@ -105,17 +109,17 @@ Add a "Logs" section to the deployment detail page (`/admin/deployments/:id`).
 
 ### 4. New Files
 
-| File                                               | Purpose                                     |
-| -------------------------------------------------- | ------------------------------------------- |
-| `packages/api/src/admin/views/deployment-logs.tsx` | Logs section JSX component                  |
-| `packages/api/src/provisioning/cloudflare-api.ts`  | New CF API helpers for observability + tail |
+| File                                                        | Purpose                                     |
+| ----------------------------------------------------------- | ------------------------------------------- |
+| `platform/packages/api/src/admin/views/deployment-logs.tsx` | Logs section JSX component                  |
+| `platform/packages/api/src/provisioning/cloudflare-api.ts`  | New CF API helpers for observability + tail |
 
 ### 5. Modified Files
 
-| File                                            | Change                                                     |
-| ----------------------------------------------- | ---------------------------------------------------------- |
-| `packages/api/src/routes/deploy.ts`             | Add `observability` to worker upload metadata (both paths) |
-| `packages/api/src/admin/routes/deployments.tsx` | New routes for logs + tail endpoints, render logs section  |
+| File                                                     | Change                                                     |
+| -------------------------------------------------------- | ---------------------------------------------------------- |
+| `platform/packages/api/src/routes/deploy.ts`             | Add `observability` to worker upload metadata (both paths) |
+| `platform/packages/api/src/admin/routes/deployments.tsx` | New routes for logs + tail endpoints, render logs section  |
 
 ## Risks
 

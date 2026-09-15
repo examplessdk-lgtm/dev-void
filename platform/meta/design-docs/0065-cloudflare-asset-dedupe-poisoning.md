@@ -1,14 +1,18 @@
 ---
-title: Cloudflare WfP Asset-Dedupe Poisoning — Known Issue, Accepted
-status: accepted
+title: Cloudflare WfP Asset-Dedupe Poisoning — Incident Record
+status: superseded-by-0066
 created: 2026-04-22
 ---
 
-# Cloudflare WfP Asset-Dedupe Poisoning — Known Issue, Accepted
+# Cloudflare WfP Asset-Dedupe Poisoning — Incident Record
+
+> Historical design record. Status, checklists and examples describe the work
+> when recorded. See the [design archive](./README.md) for current guides and
+> the supported self-hosted platform.
 
 ## Context
 
-Cloudflare Workers for Platforms (WfP) includes an asset-upload API used by the `packages/api` deploy route. The handshake is three steps:
+Cloudflare Workers for Platforms (WfP) includes an asset-upload API used by the `platform/packages/api` deploy route. The handshake is three steps:
 
 1. `POST /workers/dispatch/.../assets-upload-session` — client sends a manifest `{path → hash}`; CF responds with a completion JWT and `buckets` (the subset of hashes it wants uploaded). Hashes in the manifest but absent from the buckets are ones CF claims are already stored.
 2. `POST /assets-upload` per bucket — client uploads the requested bytes.
@@ -47,11 +51,10 @@ The hash depends only on content and extension. Every React 18.3 app produces by
 ## Tracking
 
 - Upstream: [`cloudflare/workers-sdk#12586`](https://github.com/cloudflare/workers-sdk/issues/12586)
-- Internal CF ticket: **WC-4511**
-- Observed prod incidents in our account:
-  - `source-map-viewer` (`proj_pdszrn3030tp`) — `dpl_49ehj42935ji`, `dpl_cda6upl0laud`, `dpl_sxt86xioqvr8` on 2026-04-21; `dpl_v9tz4upy6pwm` on 2026-04-22 (`logo.svg` hash `874a24587da1faf3ab2af28348bc8ca6`).
+- Observed during repeated asset deployments in April 2026, including an SVG
+  asset whose hash was incorrectly reported as already uploaded.
 
-## Decision: accept the bug
+## Original decision (superseded by 0066)
 
 We are **not** implementing platform-side workarounds for this bug. Specifically, the following approaches were tried and reverted:
 
@@ -63,9 +66,9 @@ Reasons for reverting:
 2. **Refusal-on-uncorroborated is high false-positive.** CF's dedupe claim may be truthful for a hash we have no record of (another account, a project we don't know about). Refusing correct deploys because we can't prove CF is telling the truth punishes the user for CF's opaque state.
 3. **Complexity cost.** The cascade required multiple correctness follow-ups (P1, P2, rollout safety, legacy manifest classification). Each fix surface was non-trivial. The maintenance burden is disproportionate to the benefit.
 
-## Current behavior
+## Behavior before the fallback
 
-On the `main` branch, the WfP deploy path trusts CF's session response verbatim:
+At the time of this incident, the WfP deploy path trusted CF's session response:
 
 1. Inject the deploy-scoped cache-buster file `/.void-deploy/<deployId>.txt` (this addresses a separate CF bug where the session endpoint can return a cached plain-text "Assets have already been uploaded" response instead of a proper session; injecting a unique file forces CF to actually process the request). This is an **added** file, not a modification of user content.
 2. Call `createAssetUploadSession` with the manifest.
@@ -90,21 +93,19 @@ Workaround in the user's hands: redeploy. If CF's dedupe entry has cleared betwe
 
 ## Future options (not committed)
 
-If this becomes a frequent user-visible pain point, the architectural fix is to serve assets from platform-owned storage (R2 + `packages/dispatch` worker) instead of CF's asset cache. The SPA/static deploy path already uses this model. Extending it to WfP deploys would eliminate the dedupe dependency entirely.
+If this becomes a frequent user-visible pain point, the architectural fix is to serve assets from platform-owned storage (R2 + `platform/packages/dispatch` worker) instead of CF's asset cache. The SPA/static deploy path already uses this model. Extending it to WfP deploys would eliminate the dedupe dependency entirely.
 
-Out of scope for now. This document exists so the next engineer who triages a "broken assets on first deploy" report can find the cause quickly and knows we've already decided not to work around it.
+Out of scope for now. This recorded the original decision; the serving fallback in 0066 superseded it.
 
 ## Update (2026-04-23)
 
-Safety-net fallback implemented in [0066](./0066-wfp-asset-r2-fallback.md). CF remains the primary serving path and the workarounds documented above (`/.void-deploy/` cache-buster + early `asset_hashes` persistence) remain in place. When CF returns the 36-byte stub, `packages/dispatch` detects it and serves the real asset from a platform-owned R2/KV mirror written at deploy time. The CF bug itself is not fixed — we mask the user-visible symptom.
+Safety-net fallback implemented in [0066](./0066-wfp-asset-r2-fallback.md). CF remains the primary serving path and the workarounds documented above (`/.void-deploy/` cache-buster + early `asset_hashes` persistence) remain in place. When CF returns the 36-byte stub, `platform/packages/dispatch` detects it and serves the real asset from a platform-owned R2/KV mirror written at deploy time. The CF bug itself is not fixed — we mask the user-visible symptom.
 
 ## References
 
 - Upstream: [`cloudflare/workers-sdk#12586`](https://github.com/cloudflare/workers-sdk/issues/12586)
-- Internal: WC-4511
 - Historical commits (for archaeology):
   - `29e567e` — original defense (per-project corroboration + novel-hash cache-buster + salt). Removed.
   - `32933ef` (PR #102) — early `asset_hashes` persistence (survives downstream failures). Kept.
-  - `82e3eb0` (PR #103) — platform-wide corroboration + salt cascade. Removed in this branch.
+  - `82e3eb0` (PR #103) — platform-wide corroboration + salt cascade. Removed.
   - Abandoned feature branch `feat/deployment-assets-normalization` (`f2705b0`) — normalized hash storage, SVG salting, transactional dual-write, rollout-compat fallback. Never merged.
-  - This branch `revert/asset-session-cascade` — removes the cascade.

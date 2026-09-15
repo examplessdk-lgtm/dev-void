@@ -6,6 +6,10 @@ created: 2026-03-02
 
 # Deploy Status Streaming
 
+> Historical design record. Status, checklists and examples describe the work
+> when recorded. See the [design archive](./README.md) for current guides and
+> the supported self-hosted platform.
+
 ## Context
 
 The deploy endpoint (`POST /projects/:id/deploy`) processes multiple phases — asset upload, binding provisioning, migrations, worker upload, prerendering, routing — but returns a single JSON response at the end. The CLI shows a blind spinner during the entire deploy. This design adds streaming progress events so the CLI can display granular status updates.
@@ -47,7 +51,7 @@ Pre-checks (ownership, rate limit, manifest validation) happen **before** the st
 {"event":"prerender_done"}
 
 # Terminal event (exactly one of done/error)
-{"event":"done","deployment":"dep_abc","url":"https://app.void.app","urls":["https://app.void.app"],"assets":42,"workers":2,"migrations":3}
+{"event":"done","deployment":"dep_abc","url":"https://app.apps.example.com","urls":["https://app.apps.example.com"],"assets":42,"workers":2,"migrations":3}
 {"event":"error","message":"migration failed: syntax error","step":"migration"}
 ```
 
@@ -63,7 +67,7 @@ Shorter sequence: `start → asset_upload → asset_upload_done → worker_uploa
 
 ## Type Definition
 
-Discriminated union, defined in both `packages/api/src/types.ts` and `framework/packages/void/src/cli/types.ts`:
+Discriminated union, defined in both `platform/packages/api/src/types.ts` and `packages/void/src/cli/types.ts`:
 
 ```ts
 type DeployEvent =

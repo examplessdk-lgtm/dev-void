@@ -1,5 +1,9 @@
 # Deploy to Raw Cloudflare
 
+> Historical design record. Status, checklists and examples describe the work
+> when recorded. See the [design archive](./README.md) for current guides and
+> the supported self-hosted platform.
+
 **Date:** 2026-02-16
 **Status:** Implemented
 
@@ -57,6 +61,6 @@ Migrations use wrangler's built-in D1 migration system: `wrangler d1 migrations 
 | Provisioning  | Auto-create resources via CF API         | User creates manually                        |
 | Migrations    | Platform runs via CF REST API            | `wrangler d1 migrations apply`               |
 | Auth          | OAuth + JWT via platform API             | N/A (user's own CF account)                  |
-| Routing       | `{slug}.void.app` via KV                 | User's own domain / `workers.dev`            |
+| Routing       | `{slug}.apps.example.com` via KV         | User's own domain / `workers.dev`            |
 
 **What doesn't change:** routing plugin, code generation, type generation, runtime (`defineHandler`, `defineMiddleware`, `convertReturnValue`), typed fetch client, DB query helper — all work identically.

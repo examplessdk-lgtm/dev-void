@@ -47,6 +47,11 @@ import { ErrorAlertMonitor } from './error-alert-monitor.ts';
 import { cancelContainerBuildDos } from './github/cancel-builds.ts';
 import { authMiddleware } from './middleware/auth.ts';
 import { operatorApi } from './operator/index.ts';
+import {
+  getPlatformApiUrl,
+  getPlatformDisplayName,
+  platformConnectCommand,
+} from './platform-identity.ts';
 import { processPlatformQueue } from './platform-queue.ts';
 import { tryActivateDomain } from './provisioning/activate-domain.ts';
 import {
@@ -183,30 +188,36 @@ const app = new Hono<ApiEnv>()
       supportedClassifierVersions: [1],
     }),
   )
-  .get('/signup-restricted', (context) =>
-    context.html(`<!DOCTYPE html>
-<html><head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Private Beta - Void</title>
-<style>body{font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#fafafa}.card{text-align:center;max-width:400px;padding:40px}h1{font-size:1.25rem;margin-bottom:12px}p{color:#666}</style>
-</head><body>
-<div class="card"><h1>Private Beta</h1><p>Sorry, we are still in private beta and your login is not currently in the allowed list. Check back later!</p></div>
-</body></html>`),
-  )
-  .get('/invite', (context) => {
-    const guideUrl = escapeHtml('https://void.cloud/guide/');
+  .get('/signup-restricted', (context) => {
+    const name = escapeHtml(getPlatformDisplayName(context.env, context.req.url));
     return context.html(`<!DOCTYPE html>
 <html><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>You're Invited - Void</title>
-<style>body{font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#fafafa}.card{text-align:center;max-width:440px;padding:40px}h1{font-size:1.5rem;margin-bottom:12px}p{color:#666;line-height:1.6;margin-bottom:20px}.btn{display:inline-block;background:#000;color:#fff;padding:12px 32px;text-decoration:none;border-radius:4px;font-weight:500;font-size:1rem}</style>
+<title>Signup Restricted - ${name}</title>
+<style>body{font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#fafafa}.card{text-align:center;max-width:400px;padding:40px}h1{font-size:1.25rem;margin-bottom:12px}p{color:#666;line-height:1.6}</style>
+</head><body>
+<div class="card"><h1>Signup Restricted</h1><p>New accounts on ${name} require administrator approval.</p><p>Ask your platform administrator for an invitation, then sign in with an account whose verified email address matches that invitation.</p></div>
+</body></html>`);
+  })
+  .get('/invite', (context) => {
+    const name = escapeHtml(getPlatformDisplayName(context.env, context.req.url));
+    const command = escapeHtml(
+      platformConnectCommand(getPlatformApiUrl(context.env, context.req.url)),
+    );
+    return context.html(`<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Get Started - ${name}</title>
+<style>body{font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#fafafa}.card{max-width:520px;padding:40px}h1{font-size:1.5rem;margin-bottom:12px}p{color:#666;line-height:1.6;margin-bottom:20px}pre{background:#eee;padding:16px;overflow:auto}a{color:inherit}</style>
 </head><body>
 <div class="card">
-<h1>You're Invited to Void</h1>
-<p>Void is the deployment platform for the Vite ecosystem. Build and deploy full-stack apps with file-based routing, database bindings, AI integration, and edge-first infrastructure.</p>
-<a href="${guideUrl}" class="btn">Get Started</a>
+<h1>Get Started with ${name}</h1>
+<p>Connect the Void CLI to this platform. When prompted, sign in with an account whose verified email address matches your invitation:</p>
+<pre><code>${command}</code></pre>
+<p>The CLI opens your browser to sign in when needed. If your application is already linked to another project, run <code>void project link</code> from its directory to choose a project on this platform before deploying.</p>
+<p>Need to create an application? Read the <a href="https://void.cloud/guide/quickstart">Void quickstart</a>, then return here to connect to this platform before deploying.</p>
 </div>
 </body></html>`);
   })

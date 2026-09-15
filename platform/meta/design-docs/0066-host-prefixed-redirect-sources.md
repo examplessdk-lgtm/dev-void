@@ -6,15 +6,19 @@ created: 2026-04-22
 
 # Host-Prefixed Sources for Redirects and Rewrites
 
+> Historical design record. Status, checklists and examples describe the work
+> when recorded. See the [design archive](./README.md) for current guides and
+> the supported self-hosted platform.
+
 ## Context
 
 Today, `_redirects` and `void.json` `routing.{redirects,rewrites,fallbacks}`
 sources are path-only. Dispatch compiles the source into a regex and matches it
-against `request.url`'s `pathname` (`packages/dispatch/src/redirects.ts:44`), so
+against `request.url`'s `pathname` (`platform/packages/dispatch/src/redirects.ts:44`), so
 a rule like:
 
 ```
-https://lichter-io.void.app/*   https://www.lichter.io/:splat   301
+https://my-site.apps.example.com/*   https://www.example.org/:splat   301
 ```
 
 silently never matches — the host prefix is part of the pattern, but the
@@ -78,7 +82,7 @@ export type RedirectRule = {
 };
 ```
 
-Dispatch matching (`packages/dispatch/src/redirects.ts:21`) adds a host check:
+Dispatch matching (`platform/packages/dispatch/src/redirects.ts:21`) adds a host check:
 if `rule.host` is set and doesn't equal the request `Host` header, skip the
 rule. Otherwise fall through to the existing pathname match.
 
@@ -91,16 +95,16 @@ rule. Otherwise fall through to the existing pathname match.
 
 ## Testing
 
-- Extend `framework/packages/void/test/unit/generate-headers-redirects.test.ts`
+- Extend `packages/void/test/unit/generate-headers-redirects.test.ts`
   with host-prefixed source parsing cases.
-- Extend `packages/dispatch/test/unit/redirects.test.ts` with
+- Extend `platform/packages/dispatch/test/unit/redirects.test.ts` with
   host-scoped-rule match/miss cases.
-- Extend `packages/api/test/unit/*` deploy-validation tests to cover the
+- Extend `platform/packages/api/test/unit/*` deploy-validation tests to cover the
   "host not bound to project" rejection.
 
 ## Docs
 
-- Update `framework/docs/guide/edge/redirects.md` with a "Domain-level
+- Update `docs/guide/edge/redirects.md` with a "Domain-level
   redirects" section.
 - Mention the relationship to external-origin rewrites (doc 0067): the source
   host identifies _where the request came from_, the destination URL

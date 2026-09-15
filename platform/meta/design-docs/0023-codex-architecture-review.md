@@ -1,5 +1,9 @@
 # Codex Architecture Review
 
+> Historical design record. Status, checklists and examples describe the work
+> when recorded. See the [design archive](./README.md) for current guides and
+> the supported self-hosted platform.
+
 **Date:** 2026-02-24
 **Scope:** Current platform architecture (`api`, `dispatch`, `ai-proxy`, `dashboard`) with focus on one question:
 **If we scale to millions of users, what limitations will we hit, and how do we prepare without lock-in?**
@@ -40,7 +44,7 @@ If those are fixed early, current architecture can scale significantly without m
 
 **Evidence:**
 
-- `packages/dispatch/src/index.ts`: early `cache.match` return happens before metering closure is used.
+- `platform/packages/dispatch/src/index.ts`: early `cache.match` return happens before metering closure is used.
 
 **Prepare now:**
 
@@ -53,9 +57,9 @@ If those are fixed early, current architecture can scale significantly without m
 
 **Evidence:**
 
-- `packages/api/src/routes/projects.ts` uses `getProjectBySlug` then insert.
-- `packages/api/src/schema.ts` unique index is `projects_user_id_slug_unique`.
-- Worker script name derives from slug in `packages/api/src/routes/deploy.ts`.
+- `platform/packages/api/src/routes/projects.ts` uses `getProjectBySlug` then insert.
+- `platform/packages/api/src/schema.ts` unique index is `projects_user_id_slug_unique`.
+- Worker script name derives from slug in `platform/packages/api/src/routes/deploy.ts`.
 
 **Prepare now:**
 
@@ -69,8 +73,8 @@ If those are fixed early, current architecture can scale significantly without m
 
 **Evidence:**
 
-- `packages/api/src/provisioning/provision.ts` hardcodes `void-ai-proxy`.
-- `packages/api/src/routes/deploy.ts` defaults `dispatchWorkerName` to `void-dispatch`.
+- `platform/packages/api/src/provisioning/provision.ts` hardcodes `void-ai-proxy`.
+- `platform/packages/api/src/routes/deploy.ts` defaults `dispatchWorkerName` to `void-dispatch`.
 - Ops doc claims strict env isolation.
 
 **Prepare now:**
@@ -85,7 +89,7 @@ If those are fixed early, current architecture can scale significantly without m
 
 **Evidence:**
 
-- `packages/api/src/index.ts`: batched scheduled loop + per-project usage and AI queries.
+- `platform/packages/api/src/index.ts`: batched scheduled loop + per-project usage and AI queries.
 - AI limit enforcement currently only for free plan branch.
 
 **Prepare now:**
@@ -100,7 +104,7 @@ If those are fixed early, current architecture can scale significantly without m
 
 **Evidence:**
 
-- `packages/api/src/routes/usage.ts` returns zero on non-OK responses.
+- `platform/packages/api/src/routes/usage.ts` returns zero on non-OK responses.
 - Query references hardcoded dataset/table names.
 - Ops docs and wrangler files contain mixed dataset naming history.
 
@@ -116,7 +120,7 @@ If those are fixed early, current architecture can scale significantly without m
 
 **Evidence:**
 
-- `packages/api/src/routes/auth.ts` `isAllowedRedirect` uses string prefix checks.
+- `platform/packages/api/src/routes/auth.ts` `isAllowedRedirect` uses string prefix checks.
 
 **Prepare now:**
 
@@ -129,8 +133,8 @@ If those are fixed early, current architecture can scale significantly without m
 
 **Evidence:**
 
-- `packages/api/src/migrations/remote-runner.ts` executes SQL then inserts migration record separately.
-- `packages/api/src/provisioning/provision.ts` checks then creates resources without global lock.
+- `platform/packages/api/src/migrations/remote-runner.ts` executes SQL then inserts migration record separately.
+- `platform/packages/api/src/provisioning/provision.ts` checks then creates resources without global lock.
 
 **Prepare now:**
 
@@ -144,8 +148,8 @@ If those are fixed early, current architecture can scale significantly without m
 
 **Evidence:**
 
-- `packages/api/src/routes/delete.ts` resource cleanup handles d1/kv/r2 paths, not queue teardown path.
-- `packages/dispatch/src/index.ts` queue handler `ackAll()` on missing routing.
+- `platform/packages/api/src/routes/delete.ts` resource cleanup handles d1/kv/r2 paths, not queue teardown path.
+- `platform/packages/dispatch/src/index.ts` queue handler `ackAll()` on missing routing.
 
 **Prepare now:**
 
@@ -158,8 +162,8 @@ If those are fixed early, current architecture can scale significantly without m
 
 **Evidence:**
 
-- `GET /projects/:id` in `packages/api/src/routes/projects.ts` returns project without owner check.
-- Signup allowlist logic applies only to Google new users in `packages/api/src/routes/auth.ts`.
+- `GET /projects/:id` in `platform/packages/api/src/routes/projects.ts` returns project without owner check.
+- Signup allowlist logic applies only to Google new users in `platform/packages/api/src/routes/auth.ts`.
 
 **Prepare now:**
 
@@ -173,8 +177,8 @@ If those are fixed early, current architecture can scale significantly without m
 
 **Evidence:**
 
-- `meta/operations.md` access model and single-admin emphasis.
-- `meta/progress.md` still marks monitoring/health system work as remaining.
+- The original operations runbook concentrated access in one administrator.
+- The original progress tracker left monitoring and health checks as future work.
 
 **Prepare now:**
 
@@ -195,7 +199,7 @@ Once control-plane actions are idempotent and reconcilable, growth mostly change
 
 ### 3) Move platform DB to Postgres via Hyperdrive, keep Drizzle domain model stable
 
-The proposed migration path in `meta/design-docs/0015-platform-d1-to-planetscale.md` is strategically correct: isolate the control plane schema from storage engine details.
+The proposed migration path in `platform/meta/design-docs/0015-platform-d1-to-planetscale.md` is strategically correct: isolate the control plane schema from storage engine details.
 
 ### 4) Separate environment config from code defaults
 

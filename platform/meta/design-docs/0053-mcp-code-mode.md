@@ -5,6 +5,10 @@ status: approved
 
 # MCP Code Mode for Platform API
 
+> Historical design record. Status, checklists and examples describe the work
+> when recorded. See the [design archive](./README.md) for current guides and
+> the supported self-hosted platform.
+
 Add a `query` tool to the Void MCP server that lets AI agents write JavaScript to interact with the platform API, inspired by [Cloudflare's Code Mode MCP](https://blog.cloudflare.com/code-mode-mcp/).
 
 ## Motivation
@@ -14,8 +18,8 @@ The current MCP server (`void mcp`) only exposes documentation tools. Agents tha
 ## Design Decisions
 
 - **Full API access.** The SDK exposes all `PlatformClient` methods (reads and mutations) plus a `link()` helper. Deploy-related methods (`deploy`, `preflight`) are available but not documented in the tool description since they require FormData. The SDK auto-binds all prototype methods without exposing private fields (`token`, `baseUrl`).
-- **Local execution.** Code runs in the `void mcp` process via `new AsyncFunction()`. No remote sandbox — the SDK methods are pre-authenticated HTTP calls to `api.void.cloud`, which already has auth and rate limiting.
-- **Implicit auth.** The MCP server reads `~/.void/token` (or `VOID_TOKEN` env) at startup, same as the CLI. The token never enters the LLM context.
+- **Local execution.** Code runs in the `void mcp` process via `new AsyncFunction()`. No remote sandbox — the SDK methods are pre-authenticated HTTP calls to `api.platform.example.net`, which already has auth and rate limiting.
+- **Implicit auth.** The MCP server uses CLI authentication (or `VOID_TOKEN`) for the selected platform. The token never enters the LLM context.
 - **Coexists with docs tools.** The 3 existing tools (`list_pages`, `get_page`, `search_docs`) remain unchanged. `query` is a 4th tool.
 
 ## Tool Definition
@@ -122,7 +126,7 @@ async () => {
 
 ## File Changes
 
-All in the framework submodule:
+All in the framework package:
 
 1. **`packages/void/src/cli/mcp.ts`** — Add `query` tool definition, SDK factory, code execution handler. Import `PlatformClient` and auth utilities.
 2. **`packages/void/test/unit/mcp.test.ts`** — Tests for the query tool with mocked API calls.

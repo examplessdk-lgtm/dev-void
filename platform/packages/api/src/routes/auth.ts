@@ -1,11 +1,6 @@
 import { Hono } from 'hono';
 import { setCookie, getCookie, deleteCookie } from 'hono/cookie';
 import { handleAdminOAuthCallback, isAdminOAuthState } from '../admin/routes/login.ts';
-import {
-  ensureGitHubPreviewRepoAccess,
-  getGitHubPreviewRepoConfig,
-  hasGitHubPreviewRepoAccess,
-} from '../auth/github-preview.ts';
 import { getGitHubAuthorizeUrl, exchangeCodeForToken, getGitHubUser } from '../auth/github.ts';
 import {
   getGoogleAuthorizeUrl,
@@ -469,12 +464,9 @@ app.get('/callback', async (context) => {
     email = ghUser.email;
     emailVerified = ghUser.emailVerified;
   }
-  const previewRepo =
-    resolvedProvider === 'github' ? getGitHubPreviewRepoConfig(context.env) : null;
-
   // Set when the email-match branch rejects a SECOND github identity for an account that already has one
   // (RFC 0074). The user is signed into the existing account, but `providerId` is NOT their github identity, so
-  // the github-identity-derived side effects below (installation backfill, preview-repo access) must be skipped.
+  // the installation backfill below must be skipped.
   let githubIdentityRejected = false;
 
   // Upsert user — check oauth_accounts first, then email, then create
@@ -533,19 +525,13 @@ app.get('/callback', async (context) => {
     const selfHosted = Boolean(context.env.PLATFORM_INSTALLATION_ID);
     let additionalSignupAllowed = !selfHosted || enabled === 'false';
     if (enabled === 'true' || (selfHosted && enabled !== 'false')) {
-      let allowedByRepoAccess = false;
-      if (resolvedProvider === 'github' && previewRepo) {
-        try {
-          allowedByRepoAccess = await hasGitHubPreviewRepoAccess(previewRepo, login);
-        } catch (err) {
-          console.error(`[github-preview] Failed to check repo access for ${login}:`, err);
-        }
-      }
-
-      const entries = allowedByRepoAccess ? [] : await getAllowlist(context.env.ROUTING);
-      additionalSignupAllowed =
-        allowedByRepoAccess ||
-        isSignupAllowed(resolvedProvider, login, emailVerified ? email : null, entries);
+      const entries = await getAllowlist(context.env.ROUTING);
+      additionalSignupAllowed = isSignupAllowed(
+        resolvedProvider,
+        login,
+        emailVerified ? email : null,
+        entries,
+      );
       if (!selfHosted && !additionalSignupAllowed) {
         return context.redirect('/signup-restricted');
       }
@@ -586,7 +572,7 @@ app.get('/callback', async (context) => {
     if (createdUser) {
       if (context.env.EMAIL) {
         context.executionCtx.waitUntil(
-          sendWelcomeEmail(context.env.EMAIL, email, login).catch((err) =>
+          sendWelcomeEmail(context.env, email, login).catch((err) =>
             console.error(`[welcome-email] Failed for ${email}:`, err),
           ),
         );
@@ -595,14 +581,6 @@ app.get('/callback', async (context) => {
   }
 
   if (resolvedProvider === 'github' && !githubIdentityRejected) {
-    if (previewRepo) {
-      context.executionCtx.waitUntil(
-        ensureGitHubPreviewRepoAccess(previewRepo, login).catch((err) =>
-          console.error(`[github-preview] Failed to grant void-sdk/void access to ${login}:`, err),
-        ),
-      );
-    }
-
     // Backfill GitHub App installations created before this user signed in.
     // `providerId` is the user's numeric GitHub account id, matched against
     // `github_installations.account_id`. Best-effort — a failure here must

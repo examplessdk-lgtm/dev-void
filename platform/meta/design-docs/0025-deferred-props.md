@@ -6,6 +6,10 @@ created: 2026-02-24
 
 # Deferred Props
 
+> Historical design record. Status, checklists and examples describe the work
+> when recorded. See the [design archive](./README.md) for current guides and
+> the supported self-hosted platform.
+
 ## Problem
 
 Some page data is slow to fetch (usage metrics, analytics, activity feeds) but the page shell and fast data should render immediately. Today, the loader blocks on all data before the page can render.

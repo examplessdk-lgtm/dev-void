@@ -44,13 +44,19 @@ export async function connectCloudflare(
     typeof config.compatibility_date === 'string'
       ? config.compatibility_date
       : new Date().toISOString().slice(0, 10);
-  const initialWrite = writeProvisionedWranglerConfig(root, { compatibilityDate });
-  log.info(`${basename(initialWrite.configPath)} is ready for Cloudflare deployment`);
+  const existingConfigPath = ['wrangler.jsonc', 'wrangler.json']
+    .map((name) => join(root, name))
+    .find(existsSync);
+  if (existsSync(join(root, 'wrangler.toml'))) {
+    throw new Error(
+      'connect: Found wrangler.toml. Convert it to wrangler.jsonc with the same settings before connecting to Cloudflare.',
+    );
+  }
   const { accounts } = await ensureCloudflareAuthentication({
     interactive,
     requireAccounts: true,
     runWrangler: createBundledCloudflareAuthRunner(root),
-    whoamiArgs: ['-c', initialWrite.configPath],
+    whoamiArgs: existingConfigPath ? ['-c', existingConfigPath] : [],
   });
   let account = accounts.find((entry) => entry.id === pinnedAccount);
   if (pinnedAccount && !account) {
@@ -80,11 +86,12 @@ export async function connectCloudflare(
   if (!account) {
     throw new Error('connect: No Cloudflare account was selected.');
   }
-  writeProvisionedWranglerConfig(
+  const written = writeProvisionedWranglerConfig(
     root,
-    { accountId: account.id },
-    { configPath: initialWrite.configPath },
+    { accountId: account.id, compatibilityDate },
+    existingConfigPath ? { configPath: existingConfigPath } : undefined,
   );
+  log.info(`${basename(written.configPath)} is ready for Cloudflare deployment`);
   log.success(`Configured Cloudflare account: ${account.name}`);
   return account;
 }

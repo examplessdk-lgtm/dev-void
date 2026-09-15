@@ -242,7 +242,7 @@ if (helpPath) {
   const topLevelCommands: Array<SubcommandDef> = [
     { name: 'init', description: 'Set up void in a new or existing project' },
     { name: 'connect', description: 'Connect to Cloudflare or a Void platform' },
-    { name: 'deploy', description: 'Build and deploy to the configured platform' },
+    { name: 'deploy', description: 'Build and deploy, or link an existing Cloudflare Worker' },
     {
       name: 'auth',
       hint: 'login | logout | whoami | token',

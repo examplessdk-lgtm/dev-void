@@ -1,5 +1,9 @@
 # Void — Feature Roadmap
 
+> Historical design record. Status, checklists and examples describe the work
+> when recorded. See the [design archive](./README.md) for current guides and
+> the supported self-hosted platform.
+
 **Date:** 2026-02-15
 **Status:** Post-v1.0 planning (partially implemented)
 
@@ -51,7 +55,7 @@ All four share one infrastructure pattern: injected script → beacon → Analyt
 
 #### GitHub Integration (Push to Deploy)
 
-GitHub App webhook on push → build → provision → deploy. Preview deployments per PR at `{pr-num}--{project}.void.app`. Build infrastructure TBD (Cloudflare Containers or equivalent).
+GitHub App webhook on push → build → provision → deploy. Preview deployments per PR at `{pr-num}--{project}.apps.example.com`. Build infrastructure TBD (Cloudflare Containers or equivalent).
 
 #### Preview Environments with Database Forks
 
@@ -63,7 +67,7 @@ Clone production D1 for preview deploys. Cleanup on PR close. Unique differentia
 
 Plugin architecture for typed binding adapters: Resend (email), Stripe (payments), etc. Start with 3-4 first-party, open spec for third-party.
 
-#### `@voidcloud/plugin-better-auth`
+#### Advanced Better Auth integration
 
 Advanced auth (2FA, passkeys, orgs, multiple linked accounts, password reset). Populates `c.get("user")` — route handler code unchanged.
 

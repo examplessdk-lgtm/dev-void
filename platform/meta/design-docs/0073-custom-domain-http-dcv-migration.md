@@ -6,6 +6,10 @@ created: 2026-06-03
 
 # RFC: Custom Domain HTTP-DCV Migration
 
+> Historical design record. Status, checklists and examples describe the work
+> when recorded. See the [design archive](./README.md) for current guides and
+> the supported self-hosted platform.
+
 ## Summary
 
 Custom-domain certificate validation moves from TXT-DCV back to **HTTP-DCV**, while keeping the `_cf-custom-hostname` ownership TXT that closes the wildcard-hijack vector. The activation gate is re-anchored on **hostname ownership** rather than on the cert-DCV method. The result collapses the user-published record set from "1 CNAME + 1 ownership TXT + 1–2 rotating `_acme-challenge` TXT" down to **1 CNAME + 1 (non-rotating) ownership TXT**, and — critically — makes certificate **renewal automatic forever**, eliminating the renewal-time silent-outage class of bugs.
@@ -16,16 +20,16 @@ This RFC supersedes [0072](./0072-custom-domain-verification-ux-improvements.md)
 
 The custom-domain flow has now evolved across four changes:
 
-- **Pre-PR #154.** Created custom hostnames with `ssl.method: "http"` against a shared CNAME target, with **no ownership verification and no activation gate keyed on ownership**. Users added one `CNAME` and CF handled the rest. **Vulnerable** — a victim with a wildcard CNAME (`*.victim.com → cname.void.app`) could be silently bound by any attacker, who could register `x.victim.com` as a custom hostname and have CF auto-validate the cert through the victim's wildcard. Confirmed end-to-end on production.
+- **Pre-PR #154.** Created custom hostnames with `ssl.method: "http"` against a shared CNAME target, with **no ownership verification and no activation gate keyed on ownership**. Users added one `CNAME` and CF handled the rest. **Vulnerable** — a victim with a wildcard CNAME (`*.victim.com → cname.apps.example.com`) could be silently bound by any attacker, who could register `x.victim.com` as a custom hostname and have CF auto-validate the cert through the victim's wildcard. Confirmed end-to-end on production.
 - **PR #154** (commit `65edfb71`, 2026-05-15). Switched to `ssl.method: "txt"` and added an activation gate requiring `cfHostname.ssl.method === "txt"`. Closed the hijack vector — but introduced the user-visible `_acme-challenge` TXT record(s) for SSL DCV, on top of the `_cf-custom-hostname` ownership TXT.
-- **PR #156** (commit `39b7f621`, 2026-05-17). Dropped `custom_metadata` from the create call — that field requires an Enterprise add-on our account is not provisioned for. (We must not reintroduce it here.)
+- **PR #156** (commit `39b7f621`, 2026-05-17). Dropped `custom_metadata` from the create call — that field requires an Enterprise add-on that an installation may not have enabled. (We must not reintroduce it here.)
 - **RFC 0072** (2026-05-18). Kept TXT-DCV, fixed the two-stage record reveal by short-polling CF for `ssl.validation_records` before `domain add` returned, and rolled up `domain status` into a single state. Explicitly rejected HTTP-DCV as a wildcard-hijack risk.
 
 ### Why revisit 0072's decision
 
 Two live problems forced the reconsideration:
 
-1. **Renewal-time silent outages.** The `_acme-challenge` token set **rotates on every certificate renewal** (~90 days). When a renewal generates a new token and no one re-publishes the new `_acme-challenge` value, the cert fails to renew and the domain silently drops back to `pending` / 404. **This was just hit live on `viteplus.dev`** — a domain that had been working went dark at renewal with no deploy, no config change, and no actionable signal to the owner. TXT-DCV makes every active custom domain a recurring manual liability.
+1. **Renewal-time silent outages.** The `_acme-challenge` token set **rotates on every certificate renewal** (~90 days). When a renewal generates a new token and no one re-publishes the new `_acme-challenge` value, the cert fails to renew and the domain silently drops back to `pending` / 404. **An observed production incident exposed this failure** — a domain that had been working went dark at renewal with no deploy, no config change, and no actionable signal to the owner. TXT-DCV makes every active custom domain a recurring manual liability.
 
 2. **The confusing "why 2 tokens?" multi-CA case.** Under TXT-DCV, CF can surface **two** `_acme-challenge` records at once (one per backing CA when CF hedges issuance across certificate authorities). Users reasonably ask "why are there two SSL tokens, and which one matters?" — the records are opaque and the count is non-deterministic from the user's point of view. (This is distinct from the ownership-vs-SSL "why both?" question 0072 already addressed; this is specifically the _multiple SSL tokens_ confusion.)
 
@@ -65,7 +69,7 @@ This is why the new gate is **method-agnostic by construction**: it gates on own
 
 ### Cert DCV method
 
-In `packages/api/src/provisioning/cloudflare-api.ts`, the `createCustomHostname` body changes the SSL method only:
+In `platform/packages/api/src/provisioning/cloudflare-api.ts`, the `createCustomHostname` body changes the SSL method only:
 
 ```jsonc
 // before (PR #154)
@@ -78,7 +82,7 @@ ssl: { method: "http", type: "dv" }
 
 ### Activation gate
 
-In `packages/api/src/routes/domains.ts`, the activation gate is re-anchored on ownership:
+In `platform/packages/api/src/routes/domains.ts`, the activation gate is re-anchored on ownership:
 
 ```ts
 gateOk =
@@ -97,14 +101,14 @@ The `ssl.method` clause is **dropped entirely** — and deliberately **not** rep
 
 ## Phase 0 — Security Spike (HARD GATE)
 
-Reproduce the pre-#154 exploit conditions on **staging** (the shared `void.app` CF-for-SaaS zone, `cname.void.app` target), operating at the CF API/DNS layer (not the Access-gated dashboard). Raw CF JSON snapshots and a pass/fail verdict attach to the implementation PR. **This is the ship gate: nothing in Phases 1–4 deploys until Experiment A passes.**
+Reproduce the pre-#154 exploit conditions on **staging** (the shared `apps.example.com` CF-for-SaaS zone, `cname.apps.example.com` target), operating at the CF API/DNS layer (not the Access-gated dashboard). Raw CF JSON snapshots and a pass/fail verdict attach to the implementation PR. **This is the ship gate: nothing in Phases 1–4 deploys until Experiment A passes.**
 
-- **Setup.** A throwaway victim domain on a _separate_ CF account with a wildcard `*.victim-spike… CNAME cname.void.app` (test both orange- and grey-cloud).
+- **Setup.** A throwaway victim domain on a _separate_ CF account with a wildcard `*.victim-spike… CNAME cname.apps.example.com` (test both orange- and grey-cloud).
 - **Experiment A — hijack attempt.** From Void's zone, `POST /custom_hostnames { hostname: "x.victim-spike…", ssl: { method: "http", type: "dv" } }` **without** publishing `_cf-custom-hostname`. Poll `GET /custom_hostnames/{id}` across the full DCV backoff window (≥24h).
   - **PASS:** `status` never reaches `active`; `ownership_verification` stays present; the new gate evaluates false at every poll; the edge never serves attacker content.
   - **FAIL → abort the entire change:** `status` reaches `active` without the ownership TXT, or the gate would route.
 - **Experiment B — residual probe.** On that same pending hostname, check whether `ssl.status` reaches `active` (CF would issue an _unserved_ cert, producing a CT-log entry). Expected and **accepted** (see "Accepted Residual"); mitigated by the janitor.
-- **Experiment C — positive control.** Publish a _specific_ `x2.victim-spike CNAME cname.void.app` **plus** its `_cf-custom-hostname` TXT; confirm `status → active`, `ssl.status → active`, `ownership_verification` disappears, and the gate flips true. Proves legitimate users are not stranded.
+- **Experiment C — positive control.** Publish a _specific_ `x2.victim-spike CNAME cname.apps.example.com` **plus** its `_cf-custom-hostname` TXT; confirm `status → active`, `ssl.status → active`, `ownership_verification` disappears, and the gate flips true. Proves legitimate users are not stranded.
 
 ### The H1 vs H2 decision
 
@@ -119,19 +123,19 @@ The spike exists precisely to distinguish H1 from H2 with live evidence.
 
 Under HTTP-DCV, an attacker (or any pending registration) can cause CF to issue an **unserved certificate** for a hostname that never activates — producing **Certificate Transparency log noise** for that hostname. We **accept** this residual (Experiment B confirms it), because it does not enable routing or content serving; it is only CT noise.
 
-To bound it, the hourly cron in `packages/api/src/index.ts` `scheduled()` (the block that already backfills `domain:*`) gains a **7-day pending-domain cleanup janitor**: for any domain with DB `status: 'pending'` and `created_at` older than 7 days, call `deleteCustomHostname` (which revokes the CF cert order) and remove the DB row. This is the safety net because an attacker's wildcard-routed pending hostname keeps resolving to our fallback, so CF's own "Moved → Deleted after 7 days" cleanup may not fire on its own. It reuses the existing `deleteCustomHostname` (`cloudflare-api.ts`) and the `getDomainsByProjectIds` / delete helpers (`db.ts`). Recent pending domains (within 7 days) are left untouched so legitimate slow setups are not reaped.
+To bound it, the hourly cron in `platform/packages/api/src/index.ts` `scheduled()` (the block that already backfills `domain:*`) gains a **7-day pending-domain cleanup janitor**: for any domain with DB `status: 'pending'` and `created_at` older than 7 days, call `deleteCustomHostname` (which revokes the CF cert order) and remove the DB row. This is the safety net because an attacker's wildcard-routed pending hostname keeps resolving to our fallback, so CF's own "Moved → Deleted after 7 days" cleanup may not fire on its own. It reuses the existing `deleteCustomHostname` (`cloudflare-api.ts`) and the `getDomainsByProjectIds` / delete helpers (`db.ts`). Recent pending domains (within 7 days) are left untouched so legitimate slow setups are not reaped.
 
 ## Surfaces Touched
 
-- `packages/api/src/provisioning/cloudflare-api.ts` — create-body method (`http`); remove the short-poll helper. (Do **not** reintroduce `custom_metadata`.)
-- `packages/api/src/routes/domains.ts` — ownership-anchored activation gate (no `ssl.method` clause); remove the create-time short-poll; verify the delete path triggers CF cert teardown via `deleteCustomHostname`.
-- `packages/api/src/index.ts` — 7-day pending-domain cleanup janitor in `scheduled()`.
-- `framework/packages/void/src/cli/domain.ts` — `domain add` drops the SSL-validation section (now two sections: CNAME + ownership); `domain status` rollup simplifies the cert/SSL-record blocks since SSL DCV never surfaces user records. Land in the framework submodule first, then bump the platform pointer (per the PR #154 pattern).
-- Tests: `packages/api/test/integration/api-domains.test.ts` (invert the legacy-HTTP-DCV test; add the ownership-still-present-must-NOT-activate regression; assert legacy `txt` active still activates; add a janitor test) and `framework/packages/void/test/unit/domain-command.test.ts` (two-section reveal; drop multi-SSL-record and SSL-pending assertions).
+- `platform/packages/api/src/provisioning/cloudflare-api.ts` — create-body method (`http`); remove the short-poll helper. (Do **not** reintroduce `custom_metadata`.)
+- `platform/packages/api/src/routes/domains.ts` — ownership-anchored activation gate (no `ssl.method` clause); remove the create-time short-poll; verify the delete path triggers CF cert teardown via `deleteCustomHostname`.
+- `platform/packages/api/src/index.ts` — 7-day pending-domain cleanup janitor in `scheduled()`.
+- `packages/void/src/cli/domain.ts` — `domain add` drops the SSL-validation section (now two sections: CNAME + ownership); `domain status` rollup simplifies the cert/SSL-record blocks since SSL DCV never surfaces user records. Verify CLI and platform behavior together in the unified workspace.
+- Tests: `platform/packages/api/test/integration/api-domains.test.ts` (invert the legacy-HTTP-DCV test; add the ownership-still-present-must-NOT-activate regression; assert legacy `txt` active still activates; add a janitor test) and `packages/void/test/unit/domain-command.test.ts` (two-section reveal; drop multi-SSL-record and SSL-pending assertions).
 
 ## Rollout
 
-Staging-first per `meta/operations.md` (deploy order api → … → dispatch; only **api** changes here, dispatch is method-agnostic). After the staging deploy, run a real end-to-end `void domain add` on staging and re-run Experiment A against the deployed staging API as a live regression. Promote to prod only after staging passes.
+Staging-first per `platform/meta/operations.md` (deploy order api → … → dispatch; only **api** changes here, dispatch is method-agnostic). After the staging deploy, run a real end-to-end `void domain add` on staging and re-run Experiment A against the deployed staging API as a live regression. Promote to prod only after staging passes.
 
 Rollback is clean and code-only (no schema change): revert the gate and create-body. Already-active HTTP-DCV domains keep their certs and keep routing.
 
@@ -144,7 +148,7 @@ Rollback is clean and code-only (no schema change): revert the gate and create-b
 - [Error codes — "Custom hostname does not CNAME to this zone"](https://developers.cloudflare.com/cloudflare-for-platforms/cloudflare-for-saas/domain-support/hostname-validation/error-codes/)
 - [Cloudflare blog — SSL-for-SaaS v1 vulnerability disclosure](https://blog.cloudflare.com/vulnerability-disclosure-on-ssl-for-saas-v1-managed-cname/)
 - Supersedes [0072 — Custom Domain Verification UX Improvements](./0072-custom-domain-verification-ux-improvements.md).
-- Internal: PR #154 (TXT-DCV + activation gate; includes the "confirmed end-to-end" exploit reproduction), PR #156 (drop `custom_metadata`). Live trigger: `viteplus.dev` renewal-time outage (2026-06).
+- Historical trigger: a certificate renewal outage in June 2026 exposed the manual TXT renewal dependency.
 
 ## Addendum (2026-06-03): Cron-Driven Auto-Activation
 
@@ -156,7 +160,7 @@ The cron-driven reconciliation pass removes both pain points. After DNS is confi
 
 ### Implementation
 
-The `scheduled()` handler in `packages/api/src/index.ts` now runs a pending-domain reconciliation pass on every cron tick, reusing **the same `tryActivateDomain()` gate** already used by the `GET /:id/domains/:domainId` status endpoint. There is no second copy of the gate logic — `tryActivateDomain()` is the single source of truth for the security check (`cf.status === 'active' && cf.ssl.status === 'active' && !ownership_verification && !ownership_verification_http`, plus the project must have live slug routing in KV). Per-domain failures (e.g. a transient CF API error) are isolated so one bad domain never aborts the batch.
+The `scheduled()` handler in `platform/packages/api/src/index.ts` now runs a pending-domain reconciliation pass on every cron tick, reusing **the same `tryActivateDomain()` gate** already used by the `GET /:id/domains/:domainId` status endpoint. There is no second copy of the gate logic — `tryActivateDomain()` is the single source of truth for the security check (`cf.status === 'active' && cf.ssl.status === 'active' && !ownership_verification && !ownership_verification_http`, plus the project must have live slug routing in KV). Per-domain failures (e.g. a transient CF API error) are isolated so one bad domain never aborts the batch.
 
 ### Tiered Cadence
 
@@ -195,13 +199,13 @@ A follow-up adversarial review surfaced three issues; the resolution after furth
 
 A second round of PR inline review (Cursor Bugbot + Codex) surfaced findings on the cron work and the create flow; three were fixed, two declined with rationale.
 
-- **HTTP-DCV re-trigger via PATCH (the load-bearing fix).** Void's flow is _add-domain-first_: `void domain add` creates the CF custom hostname with `ssl.method:'http'` **before** the user points the CNAME at `cname.void.app`. Per Cloudflare's Create Custom Hostname API ("if `http` is used and the domain is not already pointing to the Managed CNAME host, the PATCH method must be used once it is"), GET-only polling can leave an add-first domain pending until CF's decaying validation backoff terminates and CF **deletes** the hostname at 7 days. `tryActivateDomain()` now issues a best-effort no-change PATCH (re-sending the `ssl` block, via the new `patchCustomHostname()`), which both re-triggers HTTP DCV and resets CF's backoff. It is gated three ways:
+- **HTTP-DCV re-trigger via PATCH (the load-bearing fix).** Void's flow is _add-domain-first_: `void domain add` creates the CF custom hostname with `ssl.method:'http'` **before** the user points the CNAME at `cname.apps.example.com`. Per Cloudflare's Create Custom Hostname API ("if `http` is used and the domain is not already pointing to the Managed CNAME host, the PATCH method must be used once it is"), GET-only polling can leave an add-first domain pending until CF's decaying validation backoff terminates and CF **deletes** the hostname at 7 days. `tryActivateDomain()` now issues a best-effort no-change PATCH (re-sending the `ssl` block, via the new `patchCustomHostname()`), which both re-triggers HTTP DCV and resets CF's backoff. It is gated three ways:
   - `options.retriggerDcv` — **only the hourly reconcile tier opts in.** The every-2-min fast tier and the user `void domain status` route never PATCH. This bounds CF custom-hostname API load: a burst of young pending domains on the fast tier would otherwise fire ~`MAX_PENDING_RECONCILE_PER_RUN` PATCH every 2 min and risk 429ing other tenants' hostname operations, while CF's own sub-minute early retries already cover the first ~20 min. The PATCH's real value (long-tail re-trigger + backoff reset) is fully served at the hourly cadence (~3 PATCH/min worst case).
   - `wasPending && !gateOk` — never PATCH an already-validated or active domain.
   - `cf.ssl.method === 'http'` — **never mutate a legacy `txt`-DCV pending hostname.** A no-change PATCH always sends `ssl.method:'http'`; without this guard, a legacy pending domain (user still publishing rotating `_acme-challenge` records) would be silently switched to HTTP-DCV, discarding its in-progress validation and breaking the no-migration guarantee for legacy `txt` pending domains.
 - **Janitor activates verified-but-pending domains.** The 7-day cleanup janitor previously skipped (bare `continue`) any stale row CF reports `active`. It now opportunistically runs `tryActivateDomain()` on that row — loading the project + owner and preserving the admin-suspended-owner skip parity — so a verified domain that aged past the reconcile cap into the janitor comes online rather than sitting unrouted. It still **never deletes a verified host**.
 - **Stale-cleanup delete retry.** After the race-safe claim-first `deleteDomainIfPending`, a non-404 `deleteCustomHostname` failure now retries once before logging an explicit `ORPHANED` warning, shrinking the (documented, accepted) orphan-on-transient-CF-error window. The claim-first ordering is unchanged — the reviewers' suggested "delete the CF hostname first" reorder was **declined** because it reopens a strictly worse race: revoking the cert of a domain that a concurrent poll just activated (a live-traffic TLS outage), versus the current benign orphan (CT-log noise + a re-add conflict CF eventually GCs).
-- **Status route returns `cname_target`.** `GET /:id/domains/:domainId` now also returns `cname_target` (the `cname.void.app` constant, mirroring the add route) so `void domain status` can surface the traffic CNAME while the cert is still validating.
+- **Status route returns `cname_target`.** `GET /:id/domains/:domainId` now also returns `cname_target` (the `cname.apps.example.com` constant, mirroring the add route) so `void domain status` can surface the traffic CNAME while the cert is still validating.
 - **Declined: surface `ownership_verification_http`.** Per CF docs, a non-wildcard `ssl.method:'http'` hostname always returns the `_cf-custom-hostname` TXT `ownership_verification` alongside `ownership_verification_http`, so the user always has an actionable TXT challenge and the "only HTTP ownership challenge → no actionable record → stuck until janitor" scenario is not reachable in this configuration. The gate's dual-field check (treating either field's presence as "ownership not settled") is correct defense-in-depth. No change.
 
 **Forward-progress limitation (carried forward, not newly introduced).** Both the hourly reconcile and the PATCH select the oldest `MAX_PENDING_RECONCILE_PER_RUN` (200) pending rows with no advancing cursor. Under a _sustained_ >200 pending backlog — most plausibly CF-active-but-never-deployed rows the janitor correctly will not delete — the same oldest slice is reselected each hour, so a newer ungated add-first domain in the 30 min–7 day window can be starved of the PATCH (the "pending forever" failure mode, reachable only at that scale). This is the same capped-oldest-first limitation already noted above, now also applying to the PATCH; the deferred **creation-time custom-domain quota** and a **cursor-advancing / lock-free reconciler** remain the planned mitigations. Accepted for now.

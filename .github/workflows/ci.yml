@@ -18,7 +18,7 @@ permissions: {}
 jobs:
   test:
     name: test (${{ matrix.os }}, ${{ matrix.shard }})
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.os == 'ubuntu-latest' && github.repository == 'voidzero-dev/void' && 'blacksmith-4vcpu-ubuntu-2404' || matrix.os }}
     permissions:
       contents: read
     # No Cloudflare creds in this job. The credentialed live deploy e2e runs in the separate
@@ -29,7 +29,7 @@ jobs:
       matrix:
         # Windows runs on main pushes and on PRs labeled "test: windows",
         # unless a reusable workflow caller explicitly disables it.
-        os: '${{ (((github.event_name == ''push'' && startsWith(github.ref, ''refs/heads/'')) || contains(github.event.pull_request.labels.*.name, ''test: windows'')) && !(github.event_name == ''workflow_call'' && inputs.skip_windows)) && fromJSON(''["blacksmith-4vcpu-ubuntu-2404","windows-latest"]'') || fromJSON(''["blacksmith-4vcpu-ubuntu-2404"]'') }}'
+        os: '${{ (((github.event_name == ''push'' && startsWith(github.ref, ''refs/heads/'')) || contains(github.event.pull_request.labels.*.name, ''test: windows'')) && !(github.event_name == ''workflow_call'' && inputs.skip_windows)) && fromJSON(''["ubuntu-latest","windows-latest"]'') || fromJSON(''["ubuntu-latest"]'') }}'
         # Unit tests and two integration shards run on separate runners. Each integration
         # shard builds its own checkout first, so generated playground state is never shared.
         shard: [unit, '1/2', '2/2']
@@ -70,11 +70,12 @@ jobs:
           node-version-file: .node-version
           cache: true
 
-      # Both runner images already provide Chromium's shared-library dependencies. Avoid
-      # `--with-deps` here: it runs apt on Linux and makes test startup depend on the external
-      # Ubuntu mirrors even though no OS packages are needed by these runners.
+      # The upstream Linux image and Windows already provide browser libraries.
+      # Forks use GitHub's Ubuntu image and install Chromium's system dependencies.
       - run: vp exec playwright install chromium
-        if: ${{ matrix.shard != 'unit' }}
+        if: ${{ matrix.shard != 'unit' && (runner.os != 'Linux' || github.repository == 'voidzero-dev/void') }}
+      - run: vp exec playwright install --with-deps chromium
+        if: ${{ matrix.shard != 'unit' && runner.os == 'Linux' && github.repository != 'voidzero-dev/void' }}
 
       - run: vp check
         if: ${{ matrix.shard == 'unit' }}

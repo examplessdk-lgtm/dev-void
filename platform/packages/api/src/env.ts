@@ -36,7 +36,6 @@ export type ApiEnv = Env & {
     JWT_SECRET: string;
     GITHUB_CLIENT_ID: string;
     GITHUB_CLIENT_SECRET: string;
-    GITHUB_PREVIEW_REPO_PAT?: string;
     /**
      * GitHub App credentials for the "Deploy on GitHub" build system. Distinct
      * from the OAuth-login `GITHUB_CLIENT_ID/SECRET` above. All optional so old
@@ -162,6 +161,8 @@ export type ApiEnv = Env & {
      */
     R2_STATIC_ASSETS_BUCKET: string;
     EMAIL?: SendEmail;
+    /** Cloudflare-verified sender address. Required when a self-hosted platform enables email. */
+    EMAIL_FROM?: string;
     /**
      * Platform mail domain for this environment (`mail.void.cloud` in
      * production, `mail.staging.void.cloud` in staging). The proxy worker

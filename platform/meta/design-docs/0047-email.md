@@ -14,6 +14,10 @@ superseded_by: 0078-email-cf-native.md
 
 # Email — Send & Receive via Resend
 
+> Historical design record. Status, checklists and examples describe the work
+> when recorded. See the [design archive](./README.md) for current guides and
+> the supported self-hosted platform.
+
 ## Status: Deferred
 
 After designing the full feature (proxy-based send + inbound webhook routing + CLI domain setup + metering), we concluded that the platform engineering cost doesn't justify the marginal convenience over what users can do themselves with Resend's SDK.
@@ -61,7 +65,7 @@ export default onEmail(async (message) => {
 
 Outbound: user code → `void/email` → `__PROXY` service binding → proxy worker → Resend API (metered via Analytics Engine).
 
-Inbound: Resend webhook → `api.void.cloud/webhooks/resend` → fetch full body → `POST {slug}.void.app/_void/email` via dispatch → `onEmail` handler.
+Inbound: Resend webhook → `api.platform.example.net/webhooks/resend` → fetch full body → `POST {slug}.apps.example.com/_void/email` via dispatch → `onEmail` handler.
 
 Domain setup via CLI (`void domain setup-email`, `void domain verify-email`). Schema extends `domains` table with `resend_domain_id` and `email_status` columns.
 

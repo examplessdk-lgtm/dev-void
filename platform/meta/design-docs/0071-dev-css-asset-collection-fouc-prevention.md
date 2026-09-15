@@ -6,6 +6,10 @@ created: 2026-05-15
 
 # RFC: Dev CSS Asset Collection for SSR FOUC Prevention
 
+> Historical design record. Status, checklists and examples describe the work
+> when recorded. See the [design archive](./README.md) for current guides and
+> the supported self-hosted platform.
+
 ## Summary
 
 Void Pages mode can flash unstyled server-rendered HTML in development because the initial HTML does not include render-blocking CSS for the active page and layout graph. In production, Pages mode already uses the Vite manifest to emit route-scoped stylesheet links. The dev path should use Vite's module graph and CSS pipeline to discover and inline the CSS needed by the SSR render before sending HTML.

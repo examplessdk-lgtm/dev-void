@@ -6,26 +6,27 @@ created: 2026-07-02
 
 # Plan 0076 — Build Logs
 
+> Historical design record. Status, checklists and examples describe the work
+> when recorded. See the [design archive](./README.md) for current guides and
+> the supported self-hosted platform.
+
 This doc covers the two build-log surfaces for Deploy-on-GitHub **container** builds, both fronting the same BuildManager DO SQLite `logs` store:
 
-- **Part A — `void build logs` CLI** (shipped via void-platform#211 + void#244)
-- **Part B — build-log tail in the "Void Build" check run** (shipped via void-platform#224)
+- **Part A — `void build logs` CLI** (implemented)
+- **Part B — build-log tail in the "Void Build" check run** (implemented)
 
 ## Part A — `void build logs`
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+**Goal:** Give project owners a CLI command (`void build logs`) to view, live-tail, and download the build logs of their Deploy-on-GitHub **container** builds — logs that today are only reachable through the administrator `/admin/*` UI.
 
-**Goal:** Give project owners a CLI command (`void build logs`) to view, live-tail, and download the build logs of their Deploy-on-GitHub **container** builds — logs that today are only reachable through the internal `/admin/*` UI.
+**Architecture:** Two new **owner-guarded** API routes on the `platform/packages/api` `projects` router front the existing BuildManager Durable Object `GET /logs?since=N` store (exactly as the admin route does, but with user auth + a project-ownership check). A new top-level `void build` command group in the framework CLI (`packages/void`) adds the `logs` subcommand: it resolves the project, resolves the latest build (or an explicit id), prints captured lines, and — with `-f` — polls the logs endpoint until the build reaches a terminal status. `github_actions` builds have no DO log store and instead print their GitHub Actions link.
 
-**Architecture:** Two new **owner-guarded** API routes on the `packages/api` `projects` router front the existing BuildManager Durable Object `GET /logs?since=N` store (exactly as the admin route does, but with user auth + a project-ownership check). A new top-level `void build` command group in the framework CLI (`framework/packages/void`) adds the `logs` subcommand: it resolves the project, resolves the latest build (or an explicit id), prints captured lines, and — with `-f` — polls the logs endpoint until the build reaches a terminal status. `github_actions` builds have no DO log store and instead print their GitHub Actions link.
-
-**Tech Stack:** Hono (`packages/api`), Drizzle/PGlite tests, Cloudflare Durable Objects; framework CLI is plain TypeScript run on Node with `@clack/prompts`; Vite+ (`vp`) toolchain; oxfmt/oxlint.
+**Tech Stack:** Hono (`platform/packages/api`), Drizzle/PGlite tests, Cloudflare Durable Objects; framework CLI is plain TypeScript run on Node with `@clack/prompts`; Vite+ (`vp`) toolchain; oxfmt/oxlint.
 
 ## Global Constraints
 
-These bind **every** task. Exact values, copied verbatim from the approved design.
+These were the original API and CLI constraints. Later source changes may revise implementation details.
 
-- **Repo split.** API routes + their tests live in the **platform repo** (`packages/api`, committed at repo root). CLI + docs live in the **framework submodule** (`framework/packages/void`, committed inside `framework/`). **Do NOT bump the framework submodule pointer** (see memory `feedback_framework_pointer.md` — local pointer state is intentional). **Do NOT push, open a PR, or merge to `main`** without explicit user confirmation.
 - **Logs response envelope (BOTH branches identical shape):** `{ lines: Array<{ seq: number; line: string; stream: 'stdout' | 'stderr'; ts: number }>, lastSeq: number, status: string, terminal: boolean, external: string | null }`.
 - **List response envelope:** `{ builds: BuildSummary[] }` where `BuildSummary` = `{ id, status, executor, commit_sha, branch, exit_code, error, logs_url, created_at, started_at, completed_at }` (explicit map — never spread the raw DB row; do not leak `user_id`, `check_run_id`, `github_run_id`, `github_run_attempt`, `deployment_id`, `instance_type`).
 - **Build status values:** `'queued' | 'starting' | 'building' | 'deploying' | 'complete' | 'failed' | 'cancelled'`. **Terminal = `complete`, `failed`, `cancelled`.**
@@ -33,51 +34,51 @@ These bind **every** task. Exact values, copied verbatim from the approved desig
 - **DO fronting (mirror `admin/routes/builds.tsx`):** `buildManagerNamespace(context.env, build.instance_type)` → `ns.get(ns.idFromName(build.id))` → `stub.fetch(\`http://manager/logs?since=${since}\`)`. `since`: `const raw = Number(query('since')); const since = Number.isFinite(raw) ? raw : 0;`. Only container builds touch the DO.
 - **Poll cadence:** `1000` ms. The DO retains only the **last 10 000** lines (older lines of a huge build are gone; `since=0` returns what is retained) — note this in the CLI help/docs, do not try to work around it.
 - **CLI flags:** `[buildId]` optional positional; `-f`/`--follow` (boolean); `-o`/`--output <file>` (value); `-p`/`--project <slug>` (value). Unknown `-`-prefixed arg → throw; a second positional → throw. Project resolution order: `--project`/positional slug → `VOID_PROJECT` → linked `.void/project.json`.
-- **Formatting:** oxfmt uses **single-quote** strings. Run `vp fmt` + `vp lint` before a task is done (memory `feedback_run_fmt_lint_before_push.md`).
-- **Commands run from the right root.** Platform (`packages/api`) tests: from `packages/api`, `vp test run test/integration/<file>`. Framework tests: from the `framework/` submodule root, `vp test run packages/void/test/unit/<file>`. Typecheck: `vp run check` in the respective repo.
+- **Formatting:** oxfmt uses **single-quote** strings. Run `vp fmt` + `vp lint` before a task is done.
+- **Verification:** run the relevant `vp test run` selections and `vp run check` from the repository root.
 
 ---
 
 ## File Structure
 
-**Platform repo (`packages/api`):**
+**Platform package (`platform/packages/api`):**
 
-- Create: `packages/api/src/build-status.ts` — pure `isTerminalBuildStatus` + `TERMINAL_STATUSES` (relocated out of the `.tsx` admin view so a non-view route can import them without dragging JSX in).
-- Modify: `packages/api/src/admin/views/build-logs.tsx` — re-export `isTerminalBuildStatus` from the new module (keeps `admin/routes/builds.tsx`'s import path working, zero change there).
-- Modify: `packages/api/src/routes/projects.ts` — add the two owner-guarded routes + a `toBuildSummary` mapper.
-- Create: `packages/api/test/unit/build-status.test.ts`.
-- Create: `packages/api/test/integration/api-builds.test.ts`.
+- Create: `platform/packages/api/src/build-status.ts` — pure `isTerminalBuildStatus` + `TERMINAL_STATUSES` (relocated out of the `.tsx` admin view so a non-view route can import them without dragging JSX in).
+- Modify: `platform/packages/api/src/admin/views/build-logs.tsx` — re-export `isTerminalBuildStatus` from the new module (keeps `admin/routes/builds.tsx`'s import path working, zero change there).
+- Modify: `platform/packages/api/src/routes/projects.ts` — add the two owner-guarded routes + a `toBuildSummary` mapper.
+- Create: `platform/packages/api/test/unit/build-status.test.ts`.
+- Create: `platform/packages/api/test/integration/api-builds.test.ts`.
 
-**Framework submodule (`framework/packages/void`):**
+**Framework package (`packages/void`):**
 
-- Modify: `framework/packages/void/src/cli/client.ts` — `BuildSummary`, `BuildLogRow`, `BuildLogsResponse` types + `listBuilds` / `getBuildLogs` methods.
-- Create: `framework/packages/void/src/cli/build-args.ts` — `buildSubcommands`, `BuildArgs`, `parseBuildArgs`.
-- Create: `framework/packages/void/src/cli/build-cmd.ts` — `runBuildCommand`, `runBuildLogsCommand`, pure `followBuildLogs`.
-- Modify: `framework/packages/void/src/cli/cli.ts` — import, top-level `else if (command === 'build')`, `topLevelCommands` entry, interactive-switch `case 'build'`.
-- Modify: `framework/packages/void/src/cli/help.ts` — `HELP_TREE.build` node + `globalCommandGroup('build')` line.
-- Create: `framework/packages/void/test/unit/build-args.test.ts`, `build-client.test.ts`, `build-logs-follow.test.ts`.
-- Modify: `framework/docs/reference/cli.md` — cheat-sheet row + `## Build` section.
+- Modify: `packages/void/src/cli/client.ts` — `BuildSummary`, `BuildLogRow`, `BuildLogsResponse` types + `listBuilds` / `getBuildLogs` methods.
+- Create: `packages/void/src/cli/build-args.ts` — `buildSubcommands`, `BuildArgs`, `parseBuildArgs`.
+- Create: `packages/void/src/cli/build-cmd.ts` — `runBuildCommand`, `runBuildLogsCommand`, pure `followBuildLogs`.
+- Modify: `packages/void/src/cli/cli.ts` — import, top-level `else if (command === 'build')`, `topLevelCommands` entry, interactive-switch `case 'build'`.
+- Modify: `packages/void/src/cli/help.ts` — `HELP_TREE.build` node + `globalCommandGroup('build')` line.
+- Create: `packages/void/test/unit/build-args.test.ts`, `build-client.test.ts`, `build-logs-follow.test.ts`.
+- Modify: `docs/reference/cli.md` — cheat-sheet row + `## Build` section.
 - Modify: platform `README.md` — amend the "container build logs are admin-only" pitfall note.
 
 ---
 
-## Task 1: Relocate `isTerminalBuildStatus` to a shared module (`packages/api`)
+## Task 1: Relocate `isTerminalBuildStatus` to a shared module (`platform/packages/api`)
 
 **Files:**
 
-- Create: `packages/api/src/build-status.ts`
-- Modify: `packages/api/src/admin/views/build-logs.tsx:1-7`
-- Test: `packages/api/test/unit/build-status.test.ts`
+- Create: `platform/packages/api/src/build-status.ts`
+- Modify: `platform/packages/api/src/admin/views/build-logs.tsx:1-7`
+- Test: `platform/packages/api/test/unit/build-status.test.ts`
 
 **Interfaces:**
 
-- Produces: `isTerminalBuildStatus(status: Build['status']): boolean` and `TERMINAL_STATUSES: ReadonlyArray<Build['status']>` from `packages/api/src/build-status.ts`. Consumed by Task 2 (the new route) and by the existing `admin/views/build-logs.tsx` (re-export) + `admin/routes/builds.tsx` (unchanged import path).
+- Produces: `isTerminalBuildStatus(status: Build['status']): boolean` and `TERMINAL_STATUSES: ReadonlyArray<Build['status']>` from `platform/packages/api/src/build-status.ts`. Consumed by Task 2 (the new route) and by the existing `admin/views/build-logs.tsx` (re-export) + `admin/routes/builds.tsx` (unchanged import path).
 
 Context: `isTerminalBuildStatus` currently lives inside the `.tsx` view `admin/views/build-logs.tsx` (lines 1-7). Importing a `.tsx` view into a plain user route would drag JSX into its import graph. This task extracts the pure helper; the view re-exports it so nothing downstream changes.
 
 - [ ] **Step 1: Write the failing test**
 
-Create `packages/api/test/unit/build-status.test.ts`:
+Create `platform/packages/api/test/unit/build-status.test.ts`:
 
 ```ts
 import { describe, expect, it } from 'vite-plus/test';
@@ -105,12 +106,12 @@ describe('isTerminalBuildStatus', () => {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run (from `packages/api`): `vp test run test/unit/build-status.test.ts`
+Run (from `platform/packages/api`): `vp test run test/unit/build-status.test.ts`
 Expected: FAIL — cannot resolve `../../src/build-status.ts`.
 
 - [ ] **Step 3: Create the shared module**
 
-Create `packages/api/src/build-status.ts`:
+Create `platform/packages/api/src/build-status.ts`:
 
 ```ts
 import type { Build } from './types.ts';
@@ -129,7 +130,7 @@ export function isTerminalBuildStatus(status: Build['status']): boolean {
 
 - [ ] **Step 4: Re-export from the admin view (keep its consumers unchanged)**
 
-In `packages/api/src/admin/views/build-logs.tsx`, replace the local definition (the `TERMINAL_STATUSES` const + `isTerminalBuildStatus` function, currently lines ~3-7) with a re-export. The file's first lines become:
+In `platform/packages/api/src/admin/views/build-logs.tsx`, replace the local definition (the `TERMINAL_STATUSES` const + `isTerminalBuildStatus` function, currently lines ~3-7) with a re-export. The file's first lines become:
 
 ```tsx
 import type { Build } from '../../types.ts';
@@ -140,40 +141,33 @@ Leave the rest of `build-logs.tsx` (the `BuildLogs` JSX component and any use of
 
 - [ ] **Step 5: Run tests to verify they pass**
 
-Run (from `packages/api`): `vp test run test/unit/build-status.test.ts`
+Run (from `platform/packages/api`): `vp test run test/unit/build-status.test.ts`
 Expected: PASS (3 tests).
 
 - [ ] **Step 6: Typecheck + fmt + lint**
 
-Run (from `packages/api`): `vp run check` then `vp fmt` then `vp lint`
+Run (from `platform/packages/api`): `vp run check` then `vp fmt` then `vp lint`
 Expected: no type errors; no new lint errors.
-
-- [ ] **Step 7: Commit**
-
-```bash
-git add packages/api/src/build-status.ts packages/api/src/admin/views/build-logs.tsx packages/api/test/unit/build-status.test.ts
-git commit -m "refactor(api): extract isTerminalBuildStatus into shared build-status module"
-```
 
 ---
 
-## Task 2: Owner-guarded build routes (`packages/api`)
+## Task 2: Owner-guarded build routes (`platform/packages/api`)
 
 **Files:**
 
-- Modify: `packages/api/src/routes/projects.ts` (add imports; add `toBuildSummary` helper; add two routes adjacent to the existing `.get('/:id/logs', ...)` route)
-- Test: `packages/api/test/integration/api-builds.test.ts`
+- Modify: `platform/packages/api/src/routes/projects.ts` (add imports; add `toBuildSummary` helper; add two routes adjacent to the existing `.get('/:id/logs', ...)` route)
+- Test: `platform/packages/api/test/integration/api-builds.test.ts`
 
 **Interfaces:**
 
 - Consumes: `getProject`, `getBuild`, `getProjectBuilds` (`../db.ts`); `buildManagerNamespace` (`../build-namespace.ts`); `isTerminalBuildStatus` (`../build-status.ts`, Task 1); `Build` type (`../types.ts`).
 - Produces (HTTP): `GET /projects/:id/builds?limit=N` → `{ builds: BuildSummary[] }` (newest-first, limit default 20, capped 100). `GET /projects/:id/builds/:buildId/logs?since=N` → the logs envelope (see Global Constraints). Both auto-guarded by the existing `.use('/projects/*', authMiddleware)` in `index.ts` — **no `index.ts` change**.
 
-Context: `packages/api/src/routes/projects.ts` is one long chained `new Hono<ApiEnv>()...` instance (default-exported). Add the two routes by chaining `.get(...)` immediately after the existing `.get('/:id/logs', ...)` route. `context.get('db')` and `context.get('user')` are already populated by global + `/projects/*` middleware.
+Context: `platform/packages/api/src/routes/projects.ts` is one long chained `new Hono<ApiEnv>()...` instance (default-exported). Add the two routes by chaining `.get(...)` immediately after the existing `.get('/:id/logs', ...)` route. `context.get('db')` and `context.get('user')` are already populated by global + `/projects/*` middleware.
 
 - [ ] **Step 1: Write the failing integration test**
 
-Create `packages/api/test/integration/api-builds.test.ts`. This mirrors `test/integration/api-projects.test.ts` (auth via `user.jwt`) and `test/integration/admin-builds.test.ts` (the `spyNamespace` DO stub). Import `createBuild`/`updateBuildStatus` from `../../src/db.ts` and `builds` from `../../src/schema.ts` for teardown.
+Create `platform/packages/api/test/integration/api-builds.test.ts`. This mirrors `test/integration/api-projects.test.ts` (auth via `user.jwt`) and `test/integration/admin-builds.test.ts` (the `spyNamespace` DO stub). Import `createBuild`/`updateBuildStatus` from `../../src/db.ts` and `builds` from `../../src/schema.ts` for teardown.
 
 ```ts
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vite-plus/test';
@@ -361,12 +355,12 @@ describe('user-facing build routes', () => {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run (from `packages/api`): `vp test run test/integration/api-builds.test.ts`
+Run (from `platform/packages/api`): `vp test run test/integration/api-builds.test.ts`
 Expected: FAIL — routes return 404 (not registered) so the list/logs assertions fail.
 
 - [ ] **Step 3: Add imports + the `toBuildSummary` mapper to `projects.ts`**
 
-At the top of `packages/api/src/routes/projects.ts`, ensure these are imported (add only the ones missing — `getProject` is already imported by the file):
+At the top of `platform/packages/api/src/routes/projects.ts`, ensure these are imported (add only the ones missing — `getProject` is already imported by the file):
 
 ```ts
 import { getBuild, getProject, getProjectBuilds } from '../db.ts';
@@ -463,31 +457,22 @@ Chain these immediately after the existing `.get('/:id/logs', async (context) =>
 
 - [ ] **Step 5: Run tests to verify they pass**
 
-Run (from `packages/api`): `vp test run test/integration/api-builds.test.ts`
+Run (from `platform/packages/api`): `vp test run test/integration/api-builds.test.ts`
 Expected: PASS (7 tests).
 
 - [ ] **Step 6: Typecheck + fmt + lint**
 
-Run (from `packages/api`): `vp run check` then `vp fmt` then `vp lint`
+Run (from `platform/packages/api`): `vp run check` then `vp fmt` then `vp lint`
 Expected: clean.
-
-- [ ] **Step 7: Commit**
-
-```bash
-git add packages/api/src/routes/projects.ts packages/api/test/integration/api-builds.test.ts
-git commit -m "feat(api): owner-guarded build list + build logs routes"
-```
 
 ---
 
-## Task 3: `PlatformClient` build types + methods (`framework/packages/void`)
-
-> All Task 3-7 commands run from the **framework submodule root** (`framework/`), and commits are made **inside `framework/`**.
+## Task 3: `PlatformClient` build types + methods (`packages/void`)
 
 **Files:**
 
-- Modify: `framework/packages/void/src/cli/client.ts`
-- Test: `framework/packages/void/test/unit/build-client.test.ts`
+- Modify: `packages/void/src/cli/client.ts`
+- Test: `packages/void/test/unit/build-client.test.ts`
 
 **Interfaces:**
 
@@ -495,7 +480,7 @@ git commit -m "feat(api): owner-guarded build list + build logs routes"
 
 - [ ] **Step 1: Write the failing test**
 
-Create `framework/packages/void/test/unit/build-client.test.ts` (mirrors `test/unit/github-client.test.ts`):
+Create `packages/void/test/unit/build-client.test.ts` (mirrors `test/unit/github-client.test.ts`):
 
 ```ts
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
@@ -583,12 +568,12 @@ describe('PlatformClient.getBuildLogs', () => {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run (from `framework/`): `vp test run packages/void/test/unit/build-client.test.ts`
+Run (from the repository root): `vp test run packages/void/test/unit/build-client.test.ts`
 Expected: FAIL — `listBuilds`/`getBuildLogs` are not functions.
 
 - [ ] **Step 3: Add the types**
 
-In `framework/packages/void/src/cli/client.ts`, add near the other exported response types (e.g. after `LogEntry`):
+In `packages/void/src/cli/client.ts`, add near the other exported response types (e.g. after `LogEntry`):
 
 ```ts
 export type BuildSummary = {
@@ -660,31 +645,22 @@ Add to the `PlatformClient` class (e.g. after `getLogs`):
 
 - [ ] **Step 5: Run tests to verify they pass**
 
-Run (from `framework/`): `vp test run packages/void/test/unit/build-client.test.ts`
+Run (from the repository root): `vp test run packages/void/test/unit/build-client.test.ts`
 Expected: PASS (4 tests).
 
 - [ ] **Step 6: Typecheck + fmt + lint**
 
-Run (from `framework/`): `vp run check` then `vp fmt` then `vp lint`
+Run (from the repository root): `vp run check` then `vp fmt` then `vp lint`
 Expected: clean.
-
-- [ ] **Step 7: Commit (inside `framework/`)**
-
-```bash
-cd framework
-git add packages/void/src/cli/client.ts packages/void/test/unit/build-client.test.ts
-git commit -m "feat(cli): add PlatformClient listBuilds + getBuildLogs"
-cd ..
-```
 
 ---
 
-## Task 4: `build-args.ts` argument parser (`framework/packages/void`)
+## Task 4: `build-args.ts` argument parser (`packages/void`)
 
 **Files:**
 
-- Create: `framework/packages/void/src/cli/build-args.ts`
-- Test: `framework/packages/void/test/unit/build-args.test.ts`
+- Create: `packages/void/src/cli/build-args.ts`
+- Test: `packages/void/test/unit/build-args.test.ts`
 
 **Interfaces:**
 
@@ -693,7 +669,7 @@ cd ..
 
 - [ ] **Step 1: Write the failing test**
 
-Create `framework/packages/void/test/unit/build-args.test.ts` (mirrors `test/unit/github-args.test.ts`):
+Create `packages/void/test/unit/build-args.test.ts` (mirrors `test/unit/github-args.test.ts`):
 
 ```ts
 import { describe, expect, it } from 'vite-plus/test';
@@ -762,12 +738,12 @@ describe('parseBuildArgs', () => {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run (from `framework/`): `vp test run packages/void/test/unit/build-args.test.ts`
+Run (from the repository root): `vp test run packages/void/test/unit/build-args.test.ts`
 Expected: FAIL — cannot resolve `build-args.ts`.
 
 - [ ] **Step 3: Implement the parser**
 
-Create `framework/packages/void/src/cli/build-args.ts`:
+Create `packages/void/src/cli/build-args.ts`:
 
 ```ts
 import type { SubcommandDef } from './subcommand-prompt.ts';
@@ -840,31 +816,22 @@ export function parseBuildArgs(args: Array<string>): BuildArgs {
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run (from `framework/`): `vp test run packages/void/test/unit/build-args.test.ts`
+Run (from the repository root): `vp test run packages/void/test/unit/build-args.test.ts`
 Expected: PASS (10 tests).
 
 - [ ] **Step 5: Typecheck + fmt + lint**
 
-Run (from `framework/`): `vp run check` then `vp fmt` then `vp lint`
+Run (from the repository root): `vp run check` then `vp fmt` then `vp lint`
 Expected: clean.
-
-- [ ] **Step 6: Commit (inside `framework/`)**
-
-```bash
-cd framework
-git add packages/void/src/cli/build-args.ts packages/void/test/unit/build-args.test.ts
-git commit -m "feat(cli): add void build args parser"
-cd ..
-```
 
 ---
 
-## Task 5: `build-cmd.ts` command + follow loop (`framework/packages/void`)
+## Task 5: `build-cmd.ts` command + follow loop (`packages/void`)
 
 **Files:**
 
-- Create: `framework/packages/void/src/cli/build-cmd.ts`
-- Test: `framework/packages/void/test/unit/build-logs-follow.test.ts`
+- Create: `packages/void/src/cli/build-cmd.ts`
+- Test: `packages/void/test/unit/build-logs-follow.test.ts`
 
 **Interfaces:**
 
@@ -873,7 +840,7 @@ cd ..
 
 - [ ] **Step 1: Write the failing test for the pure follow loop**
 
-Create `framework/packages/void/test/unit/build-logs-follow.test.ts`:
+Create `packages/void/test/unit/build-logs-follow.test.ts`:
 
 ```ts
 import { describe, expect, it } from 'vite-plus/test';
@@ -925,12 +892,12 @@ describe('followBuildLogs', () => {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run (from `framework/`): `vp test run packages/void/test/unit/build-logs-follow.test.ts`
+Run (from the repository root): `vp test run packages/void/test/unit/build-logs-follow.test.ts`
 Expected: FAIL — `followBuildLogs` not exported.
 
 - [ ] **Step 3: Implement `build-cmd.ts`**
 
-Create `framework/packages/void/src/cli/build-cmd.ts`:
+Create `packages/void/src/cli/build-cmd.ts`:
 
 ```ts
 import { appendFileSync } from 'node:fs';
@@ -1085,31 +1052,22 @@ async function runBuildLogsCommand(
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run (from `framework/`): `vp test run packages/void/test/unit/build-logs-follow.test.ts`
+Run (from the repository root): `vp test run packages/void/test/unit/build-logs-follow.test.ts`
 Expected: PASS (1 test).
 
 - [ ] **Step 5: Typecheck + fmt + lint**
 
-Run (from `framework/`): `vp run check` then `vp fmt` then `vp lint`
+Run (from the repository root): `vp run check` then `vp fmt` then `vp lint`
 Expected: clean.
-
-- [ ] **Step 6: Commit (inside `framework/`)**
-
-```bash
-cd framework
-git add packages/void/src/cli/build-cmd.ts packages/void/test/unit/build-logs-follow.test.ts
-git commit -m "feat(cli): add void build logs command with follow loop"
-cd ..
-```
 
 ---
 
-## Task 6: Wire `build` into the CLI entry + help (`framework/packages/void`)
+## Task 6: Wire `build` into the CLI entry + help (`packages/void`)
 
 **Files:**
 
-- Modify: `framework/packages/void/src/cli/cli.ts`
-- Modify: `framework/packages/void/src/cli/help.ts`
+- Modify: `packages/void/src/cli/cli.ts`
+- Modify: `packages/void/src/cli/help.ts`
 
 **Interfaces:**
 
@@ -1159,7 +1117,7 @@ And in the interactive dispatch `switch` (next to `case 'github':`), add:
 
 - [ ] **Step 4: Add the `build` help node to `HELP_TREE`**
 
-In `framework/packages/void/src/cli/help.ts`, add a `build:` key to `HELP_TREE` (mirror the `github`/`logs` node shapes):
+In `packages/void/src/cli/help.ts`, add a `build:` key to `HELP_TREE` (mirror the `github`/`logs` node shapes):
 
 ```ts
   build: {
@@ -1191,7 +1149,7 @@ In `printGlobalHelp` (`help.ts`), add `...globalCommandGroup('build'),` (and a `
 
 - [ ] **Step 6: Typecheck, then verify the command is wired end-to-end**
 
-Run (from `framework/`):
+Run (from the repository root):
 
 ```
 vp run check
@@ -1211,31 +1169,22 @@ node packages/void/dist/cli/cli.js build logs --nope 2>&1 || true
 
 Expected: the first prints the `void build logs` help page (summary, `--follow`/`--output`/`--project` options, examples); the second exits non-zero with `build: Unexpected argument '--nope'.` (confirms dispatch → parser wiring). If `dist/cli/cli.js` is not the built path, use the path emitted by `vp run build:core` / the package `bin` entry.
 
-- [ ] **Step 7: Commit (inside `framework/`)**
-
-```bash
-cd framework
-git add packages/void/src/cli/cli.ts packages/void/src/cli/help.ts
-git commit -m "feat(cli): wire void build command group into entry + help"
-cd ..
-```
-
 ---
 
 ## Task 7: Documentation
 
 **Files:**
 
-- Modify: `framework/docs/reference/cli.md`
-- Modify: `README.md` (platform repo root — the "container build logs" pitfall note)
+- Modify: `docs/reference/cli.md`
+- Modify: `platform/README.md` (the "container build logs" pitfall note)
 
 **Interfaces:** none (docs only).
 
-Context: `README.md` is the source of truth (symlinked as `CLAUDE.md`/`AGENTS.md`). Its pitfall note currently says container build logs are surfaced only in the internal admin panel; this feature adds a user-facing path.
+The platform README and CLI reference should describe the user-facing build log path alongside the administrator UI.
 
 - [ ] **Step 1: Add the cheat-sheet row + `## Build` section to `cli.md`**
 
-In `framework/docs/reference/cli.md`, add a row to the top cheat-sheet table:
+In `docs/reference/cli.md`, add a row to the top cheat-sheet table:
 
 ```
 | `void build logs`                 | Stream, tail, or download build logs                                |
@@ -1281,22 +1230,9 @@ void build logs bld_123 -o build.log  # download a specific build's logs
 
 - [ ] **Step 2: Amend the platform README pitfall note**
 
-In `README.md` (platform repo root), find the pitfall bullet describing the container→DO live-log transport / admin Builds panel. Append a sentence noting the new user-facing path, e.g.:
+In `platform/README.md`, find the pitfall bullet describing the container→DO live-log transport / admin Builds panel. Append a sentence noting the new user-facing path, e.g.:
 
 > Users can now also view container build logs for their own projects via the CLI (`void build logs`), which fronts the same DO log store through owner-guarded routes `GET /projects/:id/builds` and `GET /projects/:id/builds/:buildId/logs`.
-
-- [ ] **Step 3: Commit**
-
-The `cli.md` change is inside `framework/`; the `README.md` change is in the platform repo. Commit them separately:
-
-```bash
-cd framework
-git add docs/reference/cli.md
-git commit -m "docs: document void build logs command"
-cd ..
-git add README.md
-git commit -m "docs: note user-facing container build logs via void build logs"
-```
 
 ---
 
@@ -1305,28 +1241,20 @@ git commit -m "docs: note user-facing container build logs via void build logs"
 - **Spec coverage:** view/follow/download modes → Task 5 (`runBuildLogsCommand` + `-o` writer + `followBuildLogs`); `void build logs` command group → Tasks 4/6; latest-build resolution → Task 5; owner-guarded API → Task 2; github_actions link-out → Tasks 2 (`external`) + 5; docs → Task 7. All covered.
 - **Type consistency:** `BuildLogsResponse`/`BuildLogRow`/`BuildSummary` names identical across client (Task 3), command (Task 5), and the API envelope (Task 2). `followBuildLogs` signature identical in Task 5 impl + test.
 - **Placeholder scan:** none — every code/test/command step carries literal content.
-- **Cross-repo:** framework commits wrapped in `cd framework` / `cd ..`; submodule pointer deliberately untouched; no push/merge.
-
-## Open items for the executor to confirm with the human (not blockers)
-
-1. **Submodule pointer:** left unbumped per memory `feedback_framework_pointer.md`. If the user wants the platform repo to reference the new framework CLI commit, that's a separate, explicit step.
-2. **Default line rendering:** plain passthrough (stdout), no per-stream coloring. (Design left this open; plain was chosen for simplicity/testability.)
-
----
 
 ## Part B — Build-Log Tail in the "Void Build" Check Run
 
-> Implemented via void-platform#224.
+> Implemented as the second build log surface.
 
 **Goal:** When a Deploy-on-GitHub **container** build's check run completes, embed the tail of the build log (last 100 captured lines) in the check run's `output.text` so users see the log directly on the GitHub check page — for every terminal outcome (success, failure, timeout, cancel). Approved in brainstorming: show **always**, **last ~100 lines**, assembled at the single chokepoint `BuildManager.finalizeCheckRun`.
 
-**Architecture:** Two small changes, both in `packages/api`. (1) `completeCheckRun` (`src/github/check-run.ts`) gains an optional `text` option forwarded as GitHub's `output.text`. (2) `BuildManager` (`src/build-manager.ts`) gains a pure exported formatter `formatLogTailMarkdown` plus a private reader `readLogTailMarkdown()` over the DO's SQLite `logs` table; `finalizeCheckRun` calls the reader (best-effort) and passes `text` to `completeCheckRun`. All six container terminal paths route through `finalizeCheckRun`, so they all inherit the tail. The GitHub Actions executor path (`routes/webhooks.ts`, `routes/auth-oidc.ts`) is **unchanged** — no logs exist on our side; its check keeps linking to the Actions run.
+**Architecture:** Two small changes, both in `platform/packages/api`. (1) `completeCheckRun` (`src/github/check-run.ts`) gains an optional `text` option forwarded as GitHub's `output.text`. (2) `BuildManager` (`src/build-manager.ts`) gains a pure exported formatter `formatLogTailMarkdown` plus a private reader `readLogTailMarkdown()` over the DO's SQLite `logs` table; `finalizeCheckRun` calls the reader (best-effort) and passes `text` to `completeCheckRun`. All six container terminal paths route through `finalizeCheckRun`, so they all inherit the tail. The GitHub Actions executor path (`routes/webhooks.ts`, `routes/auth-oidc.ts`) is **unchanged** — no logs exist on our side; its check keeps linking to the Actions run.
 
 **Tech Stack:** Cloudflare Durable Objects (SQLite storage), Hono, Vitest via Vite+ (`vp`), oxfmt/oxlint.
 
 ## Global Constraints
 
-These bind **every** task. Exact values, copied verbatim from the approved design.
+These were the original API and CLI constraints. Later source changes may revise implementation details.
 
 - `output.text` hard cap on GitHub is **65535 UTF-8 bytes** — GitHub validates **bytesize** (its 422 reads "maximum bytesize of 65535"), not UTF-16 length, so CJK/emoji content must be measured in bytes. Our formatter caps the joined log content at **`CHECK_RUN_LOG_TAIL_MAX_BYTES = 60000`** UTF-8 bytes (headroom for header + fence + marker), and the tail is **`CHECK_RUN_LOG_TAIL_LINES = 100`** lines. Both are named module-level constants in `build-manager.ts`.
 - Fence is **dynamic**: `max(6, longest consecutive-backtick run in the rendered content + 1)` backticks, with info string `text` on the opener — so log content can NEVER close the fence (a fixed six-backtick fence was escapable by a log line of ≥6 backticks; found in the whole-branch review). The **whole returned string** must additionally stay ≤ `CHECK_RUN_OUTPUT_TEXT_MAX_BYTES = 65535` UTF-8 bytes (GitHub's hard bytesize cap — an oversized string makes GitHub reject the PATCH): enforce with a converging loop that drops the oldest line (or further tail-truncates a lone line, never splitting a surrogate pair at the cut) and recomputes the fence until it fits.
@@ -1351,12 +1279,12 @@ These bind **every** task. Exact values, copied verbatim from the approved desig
 - Tail assembly is **best-effort and must never block or fail check-run completion**: the read in `finalizeCheckRun` is wrapped in try/catch; on throw, `console.warn` and finalize without `text`. Never throw out of `finalizeCheckRun` (existing invariant — callers rely on `finally { pokeScheduler() }`).
 - `createCheckRun` (the in-progress create) is untouched. The `github_actions` completion path (`routes/webhooks.ts`) is untouched and continues to send **no** `text`.
 - Do not modify the `logs` table schema, `ingestLines`, `pollLogs`, or `handleReadLogs`. Known accepted limitation (pre-existing, do not attempt to fix): the DO pull-loop may miss the final ~1s of container output.
-- Repo hygiene: single-quote strings (oxfmt), run `vp fmt` + `vp lint` before finishing a task; typecheck via `vp run check`. Tests run from the **repo root** with root-relative globs, e.g. `vp test run packages/api/test/unit/check-run.test.ts`.
-- No framework/submodule changes. `packages/api` only (plus README doc touch-up in T2).
+- Repo hygiene: single-quote strings (oxfmt), run `vp fmt` + `vp lint` before finishing a task; typecheck via `vp run check`. Tests run from the **repo root** with root-relative globs, e.g. `vp test run platform/packages/api/test/unit/check-run.test.ts`.
+- No framework changes. `platform/packages/api` only (plus README doc touch-up in T2).
 
 ## Task 1 — `completeCheckRun`: optional `output.text`
 
-**Files:** `packages/api/src/github/check-run.ts`, `packages/api/test/unit/check-run.test.ts`
+**Files:** `platform/packages/api/src/github/check-run.ts`, `platform/packages/api/test/unit/check-run.test.ts`
 
 - [ ] Add `text?: string` to the `opts` parameter type of `completeCheckRun` (after `summary`).
 - [ ] Include it in the PATCH body only when present:
@@ -1366,11 +1294,11 @@ These bind **every** task. Exact values, copied verbatim from the approved desig
 - [ ] Tests (follow the existing fetch-mock idioms in `check-run.test.ts`):
   - `completeCheckRun` with `text` provided → PATCH body's `output.text` equals the given string, `title`/`summary` unchanged.
   - `completeCheckRun` without `text` → PATCH body's `output` has **no** `text` key (assert `'text' in output === false`, not just undefined).
-- [ ] Run: `vp test run packages/api/test/unit/check-run.test.ts` (all pass), `vp run check`, `vp fmt`, `vp lint`.
+- [ ] Run: `vp test run platform/packages/api/test/unit/check-run.test.ts` (all pass), `vp run check`, `vp fmt`, `vp lint`.
 
 ## Task 2 — `BuildManager`: log-tail assembly in `finalizeCheckRun` (+ docs)
 
-**Files:** `packages/api/src/build-manager.ts`, `packages/api/test/unit/build-manager.test.ts`, `README.md` (root)
+**Files:** `platform/packages/api/src/build-manager.ts`, `platform/packages/api/test/unit/build-manager.test.ts`, `platform/README.md`
 
 - [ ] Add module-level exported constants `CHECK_RUN_LOG_TAIL_LINES = 100` and `CHECK_RUN_LOG_TAIL_MAX_CHARS = 60000` near `MAX_STORED_LOG_LINES`, with a short comment stating GitHub's 65535 cap and the headroom rationale.
 - [ ] Add a **pure exported** function `formatLogTailMarkdown(lines: string[], totalCaptured: number): string | null` implementing the exact format and char-cap algorithm from Global Constraints (`lines` already chronological). Export it for unit tests (mirror how `MAX_STORED_LOG_LINES` is exported).
@@ -1383,11 +1311,11 @@ These bind **every** task. Exact values, copied verbatim from the approved desig
   - Char cap: lines whose join exceeds 60000 chars → oldest dropped until it fits, marker present, result length of the whole returned string < 65535.
   - Single line longer than 60000 chars → its **last** 60000 chars kept.
   - Integration through the DO (reuse whatever harness the file already has for `finalizeCheckRun`/`onStop`/check-run assertions): with rows ingested into `logs`, the completion PATCH body contains `output.text` containing the ingested tail; with an empty `logs` table, the PATCH body's `output` has no `text` key; when the log read throws (e.g. stub `readLogTailMarkdown`/sql to throw), the PATCH still happens without `text`.
-- [ ] Docs: in root `README.md` (source of truth; `CLAUDE.md`/`AGENTS.md` are symlinks — edit `README.md` only), append one sentence to the "Container→DO live-log transport" pitfall bullet: container-build check runs now embed the last 100 captured log lines in the check-run `output.text` at completion (all terminal outcomes; `github_actions` checks unchanged — they link to the Actions run).
-- [ ] Run: `vp test run packages/api/test/unit/build-manager.test.ts` and `vp test run packages/api/test/unit/check-run.test.ts` (all pass), `vp run check`, `vp fmt`, `vp lint`.
+- [ ] Docs: in `platform/README.md`, append one sentence to the "Container→DO live-log transport" pitfall bullet: container-build check runs now embed the last 100 captured log lines in the check-run `output.text` at completion (all terminal outcomes; `github_actions` checks unchanged — they link to the Actions run).
+- [ ] Run: `vp test run platform/packages/api/test/unit/build-manager.test.ts` and `vp test run platform/packages/api/test/unit/check-run.test.ts` (all pass), `vp run check`, `vp fmt`, `vp lint`.
 
 ## Final Verification
 
-- [ ] Full api suite: `vp test run packages/api` (all pass).
+- [ ] Full api suite: `vp test run platform/packages/api` (all pass).
 - [ ] `vp run check` exit 0, `vp fmt --check` clean, `vp lint` clean.
-- [ ] Whole-branch `/codex:adversarial-review` (foreground) — converge to approve.
+- [ ] Review the complete implementation and resolve correctness findings.

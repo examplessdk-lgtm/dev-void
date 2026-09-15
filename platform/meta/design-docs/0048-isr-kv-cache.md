@@ -6,6 +6,10 @@ created: 2026-03-03
 
 # ISR Cache — R2 to KV Migration
 
+> Historical design record. Status, checklists and examples describe the work
+> when recorded. See the [design archive](./README.md) for current guides and
+> the supported self-hosted platform.
+
 ## Motivation
 
 ISR cached pages are rendered HTML — well under KV's 25 MiB value limit. KV provides faster reads than R2 (built-in regional caching), a simpler API, and native edge distribution. Switching the ISR persistent store from R2 to KV simplifies the architecture and improves L2 cache latency.

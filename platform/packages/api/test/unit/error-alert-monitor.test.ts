@@ -16,7 +16,6 @@ vi.mock('../../src/email.ts', () => ({
       _to: string,
       slug: string,
       count: number,
-      _dash: string,
       window: { start: number; end: number } | null,
     ) => {
       emailCalls.push({ slug, count, window });

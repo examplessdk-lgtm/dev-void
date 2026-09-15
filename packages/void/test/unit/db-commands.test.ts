@@ -1165,7 +1165,7 @@ describe('void db rename-migrations', () => {
   });
 
   it('runs the snapshot preflight BEFORE mutating the remote (linked project)', async () => {
-    // Regression for void-sdk/void#6: `runRenameMigrations` used to call
+    // Regression: `runRenameMigrations` used to call
     // `client.renameMigrations` FIRST and then run the snapshot preflight
     // gate, meaning a missing snapshot left the remote mutated while
     // nothing locally changed. The best-effort `reverseRemote()` rollback

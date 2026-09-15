@@ -235,6 +235,24 @@ void deploy --platform cloudflare
 
 This deploys directly to your account. You don't need a Void platform connection or project. Once Cloudflare is saved in `.void/project.json`, `void deploy` uses it automatically.
 
+### Deploy an existing Worker
+
+This handoff is for the existing source of an app already built with Void and previously deployed directly to Cloudflare. Keep its `wrangler.jsonc` or `wrangler.json`, then run:
+
+```sh
+void deploy
+```
+
+If the project has no deployment destination, Void asks whether to link and deploy to Cloudflare using the existing Worker and resources. Accept to sign in, verify the configured Worker, and deploy in the same command. Your account and Worker name stay the same. The next deployment is just `void deploy`.
+
+The first handoff preserves resource bindings, production variables, encrypted secrets, event handlers, and existing routes and schedules. It builds the app, checks the uploaded version's bindings and handler set, and verifies readiness before activating it. Void saves `keep_vars: true` in your config so later deployments retain dashboard-only variables too. The active version must also be the latest uploaded version; activate or remove an unpublished candidate in Cloudflare before retrying so secret inheritance has an unambiguous source.
+
+Keep this first deployment focused on the existing site. New resources, auth setup, runtime features, database migrations, and secret overrides stop the handoff before activation. A later code-only deploy continues to preserve dashboard-managed routes and visibility. Before adding a cron, queue consumer, workflow, or visibility change when those values exist only in the dashboard, add the current `routes`, `workers_dev`, and `preview_urls` values to the root Wrangler config. If the build fails, fix it and rerun `void deploy`; Void remembers the destination and checks the existing Worker again.
+
+Declining the prompt leaves the project unchanged. Explicit platform choices and existing project links take precedence. In CI, select the destination with `--platform cloudflare` and provide Cloudflare credentials.
+
+Direct deployment uses the top-level JSON/JSONC configuration; convert a `wrangler.toml` with the same settings before linking. Named environments need a separate top-level config. If previews are disabled, include the existing production hostname in your config so Void can check the candidate through it.
+
 ### What happens during deploy
 
 Void reads your app's configuration and source, then:
@@ -304,7 +322,9 @@ void project status
 void project rollback [version]
 ```
 
-Each version records its migration filenames and its schedules, queues, workflows, routes, and domains. Rollback restores that configuration along with the code, but does not reverse database migrations. Void asks for confirmation when the schema may be newer than the code or migration metadata is missing. Versions without a complete trigger snapshot cannot be rolled back through Void.
+Versions with a complete trigger snapshot can restore their schedules, queues, workflows, routes, and domains along with the code. For an older version deployed outside Void, or a handoff that preserved existing triggers, rollback keeps the current routes and schedules. You can return to the original Worker Version without redeploying its source.
+
+Rollback does not reverse database migrations. Void asks for confirmation when the schema may be newer than the code or migration metadata is missing.
 
 #### Scope and limitations
 

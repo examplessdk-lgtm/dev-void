@@ -6,9 +6,13 @@ created: 2026-04-19
 
 # Transactional Queue Setup In Deploy Pipeline
 
+> Historical design record. Status, checklists and examples describe the work
+> when recorded. See the [design archive](./README.md) for current guides and
+> the supported self-hosted platform.
+
 ## Context
 
-`packages/api/src/routes/deploy.ts` `queue_setup` mutates Cloudflare state before the deploy is committed. The current implementation is already two-pass:
+`platform/packages/api/src/routes/deploy.ts` `queue_setup` mutates Cloudflare state before the deploy is committed. The current implementation is already two-pass:
 
 1. Pass 1 runs `addQueueConsumer(...)` for every queue in the manifest, collects conflicts, and throws before pass 2 if any are found.
 2. Pass 2 writes `queue:*` KV entries pointing at the new `workerName`.
@@ -81,6 +85,6 @@ C is the right long-term direction but is a standalone project (schema migration
 
 ## Related
 
-- `packages/api/src/routes/deploy.ts` — `queue_setup` block around line 2315.
-- `packages/api/src/routes/projects.ts` — rollback cleanup semantics to mirror.
+- `platform/packages/api/src/routes/deploy.ts` — `queue_setup` block around line 2315.
+- `platform/packages/api/src/routes/projects.ts` — rollback cleanup semantics to mirror.
 - Codex adversarial review pass 3 (2026-04-19), finding 1 of 3.

@@ -16,18 +16,27 @@ concurrency:
 permissions: {}
 
 jobs:
+  check-ref:
+    if: ${{ vars.VOID_PLATFORM_DEPLOY_ENABLED == 'true' && github.ref == 'refs/heads/prod' }}
+    runs-on: ubuntu-latest
+    steps:
+      # Actions string comparisons ignore case. Check before entering Prod.
+      - name: Verify the exact production branch
+        run: test "$GITHUB_REF" = 'refs/heads/prod'
+
   ci:
-    if: ${{ vars.VOID_PLATFORM_DEPLOY_ENABLED == 'true' }}
+    if: ${{ vars.VOID_PLATFORM_DEPLOY_ENABLED == 'true' && github.ref == 'refs/heads/prod' }}
+    needs: check-ref
     uses: ./.github/workflows/platform-ci.yml
     with:
-      # Every production trigger runs the schema-compatibility guard, whichever ref the
-      # dispatch came from.
+      # Automatic and manual production runs use the prod ref and must pass
+      # the schema-compatibility guard.
       require-schema-compat: true
     permissions:
       contents: read
 
   deploy:
-    if: ${{ vars.VOID_PLATFORM_DEPLOY_ENABLED == 'true' }}
+    if: ${{ vars.VOID_PLATFORM_DEPLOY_ENABLED == 'true' && github.ref == 'refs/heads/prod' }}
     needs: ci
     runs-on: blacksmith-4vcpu-ubuntu-2404
     environment: Prod

@@ -6,6 +6,10 @@ created: 2026-03-05
 
 # First-Class Drizzle Integration
 
+> Historical design record. Status, checklists and examples describe the work
+> when recorded. See the [design archive](./README.md) for current guides and
+> the supported self-hosted platform.
+
 ## Summary
 
 Replace the current `void/db` lightweight query client with a Drizzle-powered database layer. Drizzle becomes the sole database abstraction for Void — schema-as-code, auto-wired D1 binding, push-based prototyping, migration-based deploys.

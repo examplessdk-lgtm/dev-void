@@ -235,7 +235,7 @@ export async function sendOperatorInvitations(
       continue;
     }
     try {
-      await sendInvitationEmail(context.env.EMAIL, email);
+      await sendInvitationEmail(context.env, email);
       emailDelivery.push({ email, status: 'sent' });
     } catch (error) {
       console.error('[admin] invitation email failed', { email, error });

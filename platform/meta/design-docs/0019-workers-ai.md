@@ -1,9 +1,13 @@
 # Workers AI
 
+> Historical design record. Status, checklists and examples describe the work
+> when recorded. See the [design archive](./README.md) for current guides and
+> the supported self-hosted platform.
+
 **Date:** 2026-02-22
 **Status:** Implemented
 
-> **Note:** The standalone `ai-proxy` worker described in this doc has been consolidated into the unified `proxy` worker (`packages/proxy`, deployed at `proxy.void.cloud`). AI functionality is preserved; the proxy now also handles D1/KV/R2 remote bindings. See [0036-remote-bindings.md](./0036-remote-bindings.md).
+> **Note:** The standalone `ai-proxy` worker described in this doc has been consolidated into the unified `proxy` worker (`platform/packages/proxy`, deployed at `proxy.platform.example.net`). AI functionality is preserved; the proxy now also handles D1/KV/R2 remote bindings. See [0036-remote-bindings.md](./0036-remote-bindings.md).
 
 ---
 
@@ -169,7 +173,7 @@ function Chat() {
 
 ### The metering problem
 
-Cloudflare charges our platform account for all AI inference across Workers for Platforms. If we put the `AI` binding directly on user workers, a user could modify their deployed bundle to:
+Cloudflare charges the operator's platform account for all AI inference across Workers for Platforms. If we put the `AI` binding directly on user workers, a user could modify their deployed bundle to:
 
 - Strip metering code
 - Call `env.AI.run()` directly without going through our wrapper
@@ -268,13 +272,13 @@ pnpm dev
 void plugin detects `import { ai }`
   │
   ▼
-Reads Void credentials (~/.void or void auth login)
+Reads credentials from the authenticated Void CLI session
   │
   ▼
 Injects __VOID_TOKEN and __VOID_PROJECT_ID as env vars
   │
   ▼
-ai.run() → HTTPS POST to ai-proxy.void.app
+ai.run() → HTTPS POST to ai-proxy.apps.example.com
   │         (with Bearer token auth)
   ▼
 Proxy → AI Gateway → CF Inference
@@ -509,20 +513,20 @@ Enforcement happens in the proxy worker — it can check usage against limits be
 
 ### Modified files
 
-| File                                         | Change                                                                     |
-| -------------------------------------------- | -------------------------------------------------------------------------- |
-| `packages/void/src/inference/walk.ts`        | Add `needsAI` to `InferredBindings`, detection in all 3 tiers              |
-| `packages/void/src/index.ts`                 | Handle `needsAI` in `mergeBindings()` (inject credentials, not AI binding) |
-| `packages/void/src/plugin-inference.ts`      | Add `bindings.ai` override support                                         |
-| `packages/void/src/runtime/handler.ts`       | Add `AI: Ai` to `CloudEnv.Bindings`                                        |
-| `packages/void/src/runtime/client.ts`        | Re-export `fetchStream`                                                    |
-| `packages/void/env.d.ts`                     | Add `AI: Ai` to `Cloudflare.Env`                                           |
-| `packages/void/package.json`                 | Add `./ai` export                                                          |
-| `packages/void/src/cli/types.ts`             | Add `ai?: boolean` to `DeployManifest.bindings`                            |
-| `packages/void/src/cli/package.ts`           | Serialize `needsAI` into manifest                                          |
-| `packages/api/src/types.ts`                  | Add `ai?: boolean` to `DeployManifest.bindings`                            |
-| `packages/api/src/routes/deploy.ts`          | Add service binding + project ID when `ai` is true                         |
-| `packages/api/src/provisioning/provision.ts` | Handle `ai` binding type (service binding, not CF resource)                |
+| File                                                  | Change                                                                     |
+| ----------------------------------------------------- | -------------------------------------------------------------------------- |
+| `packages/void/src/inference/walk.ts`                 | Add `needsAI` to `InferredBindings`, detection in all 3 tiers              |
+| `packages/void/src/index.ts`                          | Handle `needsAI` in `mergeBindings()` (inject credentials, not AI binding) |
+| `packages/void/src/plugin-inference.ts`               | Add `bindings.ai` override support                                         |
+| `packages/void/src/runtime/handler.ts`                | Add `AI: Ai` to `CloudEnv.Bindings`                                        |
+| `packages/void/src/runtime/client.ts`                 | Re-export `fetchStream`                                                    |
+| `packages/void/env.d.ts`                              | Add `AI: Ai` to `Cloudflare.Env`                                           |
+| `packages/void/package.json`                          | Add `./ai` export                                                          |
+| `packages/void/src/cli/types.ts`                      | Add `ai?: boolean` to `DeployManifest.bindings`                            |
+| `packages/void/src/cli/package.ts`                    | Serialize `needsAI` into manifest                                          |
+| `platform/packages/api/src/types.ts`                  | Add `ai?: boolean` to `DeployManifest.bindings`                            |
+| `platform/packages/api/src/routes/deploy.ts`          | Add service binding + project ID when `ai` is true                         |
+| `platform/packages/api/src/provisioning/provision.ts` | Handle `ai` binding type (service binding, not CF resource)                |
 
 ## Open Questions
 

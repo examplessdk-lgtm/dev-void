@@ -25,6 +25,8 @@ During setup, Void asks where you want to deploy:
 
 Your choice is saved in `.void/project.json`, so the next deploy is just `void deploy`.
 
+Already have a Cloudflare Worker and a root `wrangler.jsonc` or `wrangler.json`? Run `void deploy`. If no destination is selected, Void offers to link and deploy using the existing Worker and resources. Accept once to keep deploying to that site. See [Deploy an existing Worker](../integrations/cloudflare.md#deploy-an-existing-worker) for the first-deployment checks.
+
 To connect to your team's platform and sign in, run `void connect <url>` using the URL from your administrator. Use `void connect --platform cloudflare` to set up your own Cloudflare account. Connecting preserves existing project links. New Void projects need a platform connection. Older projects already linked to Void Cloud continue to use it.
 
 ### Migrations

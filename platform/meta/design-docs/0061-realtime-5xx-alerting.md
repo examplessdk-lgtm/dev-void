@@ -6,6 +6,10 @@ created: 2026-03-17
 
 # Real-Time 5xx Error Alerting
 
+> Historical design record. Status, checklists and examples describe the work
+> when recorded. See the [design archive](./README.md) for current guides and
+> the supported self-hosted platform.
+
 ## Context
 
 Users have no way to know their project is returning server errors until they check the dashboard. We need an automated alert system that emails the project owner when 5xx errors are detected, with low latency and without creating alert fatigue.
@@ -155,7 +159,7 @@ Worst-case load during persistent outage: one Postgres query + one email attempt
 
 ### 6. Email
 
-Sent via Cloudflare `SendEmail` binding (`noreply@void.cloud`).
+Sent via Cloudflare `SendEmail` binding (`noreply@platform.example.net`).
 
 - **Subject:** `5xx errors detected: {slug}`
 - **Body:** "Your project **{slug}** has returned **{count}** server error responses recently."
