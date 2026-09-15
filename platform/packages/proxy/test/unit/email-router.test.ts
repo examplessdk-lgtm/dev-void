@@ -34,13 +34,18 @@ import {
   createMessageProxy,
   MAX_FORWARD_HEADER_LENGTH as FRAMEWORK_MAX_FORWARD_HEADER_LENGTH,
   MAX_FORWARD_HEADERS as FRAMEWORK_MAX_FORWARD_HEADERS,
+  MAX_INBOUND_BYTES as FRAMEWORK_MAX_INBOUND_BYTES,
+  MAX_INBOUND_HEADERS as FRAMEWORK_MAX_INBOUND_HEADERS,
   MAX_REJECT_REASON_LENGTH as FRAMEWORK_MAX_REJECT_REASON_LENGTH,
 } from '../../../../../packages/void/src/runtime/email/inbound.ts';
 import { validateAddressParts } from '../../../../../packages/void/src/runtime/email/mime.ts';
+import { createInboundTestHarness } from '../../../../../packages/void/src/runtime/email/testing.ts';
 import {
   isValidEmailAddress,
   MAX_FORWARD_HEADER_LENGTH,
   MAX_FORWARD_HEADERS,
+  MAX_INBOUND_BYTES,
+  MAX_INBOUND_HEADERS,
   MAX_REJECT_REASON_LENGTH,
   routeInbound,
 } from '../../src/email-router.ts';
@@ -2519,6 +2524,14 @@ describe('routeInbound — reply size limits', () => {
 // proxy records is enacted here, one past it is refused there and dropped
 // here, and a reason the proxy has normalized passes through this router
 // unchanged.
+//
+// The harness also restates this router's ADMISSION — `MAX_INBOUND_BYTES`
+// and `MAX_INBOUND_HEADERS` — and refuses a synthetic message before the
+// handler runs, as `routeInbound` refuses the real one before dispatch. A
+// number that drifted there would let a test invoke a handler on a message
+// this router bounces. Pinned equal, and pinned in behaviour: the same
+// bytes, one past each cap, draw the same reject string from both sides
+// with the handler never called.
 // -----------------------------------------------------------------------
 
 describe('framework ↔ router bound parity', () => {
@@ -2537,6 +2550,8 @@ describe('framework ↔ router bound parity', () => {
       [FRAMEWORK_MAX_FORWARD_HEADERS, MAX_FORWARD_HEADERS],
       [FRAMEWORK_MAX_FORWARD_HEADER_LENGTH, MAX_FORWARD_HEADER_LENGTH],
       [FRAMEWORK_MAX_REJECT_REASON_LENGTH, MAX_REJECT_REASON_LENGTH],
+      [FRAMEWORK_MAX_INBOUND_BYTES, MAX_INBOUND_BYTES],
+      [FRAMEWORK_MAX_INBOUND_HEADERS, MAX_INBOUND_HEADERS],
     ]) {
       expect(router).toBeTypeOf('number');
       expect(framework).toBe(router);
@@ -2626,6 +2641,83 @@ describe('framework ↔ router bound parity', () => {
     await routeInbound(message, env, ctx);
     expect(rejectCalls).toEqual([(recorded as { reason: string }).reason]);
     expect(rejectCalls[0]!.length).toBeLessThanOrEqual(MAX_REJECT_REASON_LENGTH);
+  });
+
+  describe('admission', () => {
+    // One message, one past each cap, delivered to the same wire address on
+    // both sides. The router's fake carries the raw's own header lines as
+    // its `Headers`, which is the bag Cloudflare builds from the wire; its
+    // `rawSize` is the byte length, as Cloudflare sets it.
+    const WIRE_TO = `myslug+tag@${PROD_DOMAIN}`;
+
+    function headerLinesOf(raw: Uint8Array): Array<[string, string]> {
+      const text = new TextDecoder().decode(raw);
+      const block = text.slice(0, text.indexOf('\r\n\r\n'));
+      return block.split('\r\n').map((line) => {
+        const colon = line.indexOf(':');
+        return [line.slice(0, colon), line.slice(colon + 1).trim()];
+      });
+    }
+
+    function oversized(): Uint8Array {
+      const head = new TextEncoder().encode(`From: u@x.dev\r\nTo: ${WIRE_TO}\r\n\r\n`);
+      const raw = new Uint8Array(MAX_INBOUND_BYTES + 1);
+      raw.set(head, 0);
+      raw.fill(0x61, head.byteLength);
+      return raw;
+    }
+
+    function overHeaders(): Uint8Array {
+      const lines = ['From: u@x.dev', `To: ${WIRE_TO}`];
+      for (let i = lines.length; i <= MAX_INBOUND_HEADERS; i++) {
+        lines.push(`h${i.toString(36)}: v`);
+      }
+      return new TextEncoder().encode(`${lines.join('\r\n')}\r\n\r\nbody\r\n`);
+    }
+
+    it.each([
+      [
+        'one byte over the size cap',
+        oversized,
+        `${PROD_DOMAIN}: message too large (max ${MAX_INBOUND_BYTES} bytes)`,
+      ],
+      [
+        'one distinct header over the cap',
+        overHeaders,
+        `${PROD_DOMAIN}: too many headers (max ${MAX_INBOUND_HEADERS})`,
+      ],
+    ])(
+      'refuses a message %s with the same reason on both sides, handler never called',
+      async (_label, build, reason) => {
+        const raw = build();
+
+        const handler = vi.fn(async (message: ForwardableEmailMessage) => {
+          await message.forward('admin@example.com');
+        });
+        const harness = createInboundTestHarness({ routes: { _default: handler } });
+        await harness.deliver({ from: 'u@x.dev', to: WIRE_TO, raw });
+        expect(handler).not.toHaveBeenCalled();
+        expect(harness.rejects).toEqual([reason]);
+
+        const { env, emailFn } = makeEnv({
+          kvSeed: withAllowlist(['admin@example.com']),
+          emailReturn: [{ type: 'forward', to: 'admin@example.com' }],
+        });
+        const { message, rejectCalls, forwardCalls } = createFakeMessage({
+          to: WIRE_TO,
+          rawBytes: raw,
+          rawSize: raw.byteLength,
+        });
+        for (const [name, value] of headerLinesOf(raw)) {
+          message.headers.append(name, value);
+        }
+        const { ctx } = createCtx();
+        await routeInbound(message, env, ctx);
+        expect(emailFn).not.toHaveBeenCalled();
+        expect(forwardCalls).toEqual([]);
+        expect(rejectCalls).toEqual([reason]);
+      },
+    );
   });
 
   describe('address rule', () => {

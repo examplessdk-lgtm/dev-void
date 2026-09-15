@@ -165,8 +165,14 @@ interface EmailEntrypointStub {
  * here AND copied again across RPC into the user worker, so two of these have
  * to fit in the proxy isolate's heap. 10 MB is generous for normal mail and
  * keeps headroom for everything else the isolate is doing.
+ *
+ * The framework's test harness (`createInboundTestHarness`) restates this
+ * and `MAX_INBOUND_HEADERS` and refuses a synthetic message the way this
+ * router does, before the handler runs, so a test cannot pass a handler
+ * against a message the router never dispatches; exported so the router
+ * test pins the pairs equal.
  */
-const MAX_INBOUND_BYTES = 10 * 1024 * 1024;
+export const MAX_INBOUND_BYTES = 10 * 1024 * 1024;
 
 /**
  * Cap the number of DISTINCT header names on an inbound message.
@@ -198,7 +204,7 @@ const MAX_INBOUND_BYTES = 10 * 1024 * 1024;
  * early stop is what keeps the V8-side cost of an over-cap message to
  * `MAX_INBOUND_HEADERS + 1` pairs.
  */
-const MAX_INBOUND_HEADERS = 1024;
+export const MAX_INBOUND_HEADERS = 1024;
 
 /**
  * Cap user-supplied reject reasons — surfaced to remote MTAs and our logs.

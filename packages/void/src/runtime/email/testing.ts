@@ -36,6 +36,8 @@ import {
   type EmailAction,
   type EmailHandler,
   type EmailHandlerInfo,
+  MAX_INBOUND_BYTES,
+  MAX_INBOUND_HEADERS,
 } from './inbound.ts';
 import { buildMime, normalizeEmail } from './mime.ts';
 
@@ -203,30 +205,67 @@ async function buildSyntheticRaw(opts: InboundDeliverOptions): Promise<Uint8Arra
 }
 
 /**
+ * Thrown by `parseHeaderBlock` at the first distinct name past its cap —
+ * the router's `InboundTooManyHeadersError` (`email-router.ts`).
+ */
+class InboundTooManyHeadersError extends Error {}
+
+/**
  * Headers of a raw MIME message, up to the first blank line.
  *
  * Unfolds continuation lines (RFC 5322 §2.2.3: a line starting with WSP
  * continues the one before it). Anything it cannot parse is skipped rather
  * than thrown, because a test may deliver deliberately malformed bytes.
+ *
+ * `maxDistinct` is the router's header-count admission (`buildEnvelope` in
+ * `email-router.ts`): it walks the bag Cloudflare built from the wire and
+ * refuses at the cap, BEFORE any entry past it is materialized. That bag is
+ * a `Headers`, so the unit is the DISTINCT, case-insensitive name — a
+ * repeated `Received:` is one entry, and a continuation line is part of the
+ * one before it, never its own. The check sits in the same walk, checked
+ * before the `set`, so an over-cap message costs this harness the same
+ * `maxDistinct + 1` names it costs the router. A name a `Headers` refuses
+ * is not in the bag on either side, so it does not count.
  */
-function parseHeaderBlock(raw: Uint8Array): Headers {
+function parseHeaderBlock(raw: Uint8Array, maxDistinct: number): Headers {
   const headers = new Headers();
   const text = new TextDecoder().decode(raw);
   const end = text.indexOf('\r\n\r\n');
   const block = end === -1 ? text : text.slice(0, end);
+  let distinct = 0;
   let current = '';
   const commit = () => {
     const colon = current.indexOf(':');
     if (colon > 0) {
+      const name = current.slice(0, colon).trim();
+      let known: boolean;
       try {
-        headers.set(current.slice(0, colon).trim(), current.slice(colon + 1).trim());
+        known = headers.has(name);
       } catch {
-        // Not a name/value a Headers object accepts — skip it.
+        // Not a name a Headers object accepts — skip it.
+        current = '';
+        return;
+      }
+      if (!known && distinct >= maxDistinct) {
+        throw new InboundTooManyHeadersError();
+      }
+      try {
+        headers.set(name, current.slice(colon + 1).trim());
+        if (!known) {
+          distinct++;
+        }
+      } catch {
+        // Not a value a Headers object accepts — skip it.
       }
     }
     current = '';
   };
-  for (const line of block.split('\r\n')) {
+  // One line at a time rather than `split`, so the lines past the cap are
+  // never materialized either.
+  for (let pos = 0; pos <= block.length;) {
+    const nl = block.indexOf('\r\n', pos);
+    const line = nl === -1 ? block.slice(pos) : block.slice(pos, nl);
+    pos = nl === -1 ? block.length + 1 : nl + 2;
     if (line === '') {
       break;
     }
@@ -252,6 +291,27 @@ export function createInboundTestHarness(opts: InboundTestHarnessOptions): Inbou
 
   async function deliver(input: InboundDeliverOptions): Promise<InboundDeliveryResult> {
     const raw = await buildSyntheticRaw(input);
+
+    // The managed router's ADMISSION, before anything else looks at the
+    // bytes (`routeInbound` in `email-router.ts`): a message over
+    // `MAX_INBOUND_BYTES` is rejected from `rawSize` before its body is
+    // read, then `buildEnvelope` refuses one with more than
+    // `MAX_INBOUND_HEADERS` distinct names — each with a reject the handler
+    // never sees, because it is never invoked. The harness used to invoke it
+    // regardless, so a handler that forwards a 12 MiB message without
+    // calling `parseEmail()` recorded that forward here and had the message
+    // bounced at the router after deploy. Same order, same reasons, same
+    // outcome: one reject, no handler call. Platform lane only — a worker on
+    // your own Cloudflare account (`slug: null`) has no router in front of
+    // it, so Cloudflare hands the handler everything it accepts.
+    //
+    // The router prefixes every reason with the zone it serves
+    // (`EMAIL_SENDER_DOMAIN`). It is the catch-all rule on that zone, so the
+    // wire recipient's domain IS that zone and the harness recovers the label
+    // from the address it was given; `void email` is the router's own
+    // fallback when the var is unset. The size check reads `byteLength`: it
+    // runs BEFORE `parseHeaderBlock` decodes anything.
+    //
     // Production's `buildEnvelope` copies every wire header verbatim, so
     // `message.headers` and `message.raw` agree by construction. Start from
     // the bytes for the same reason: the harness's own synthetic MIME
@@ -264,9 +324,27 @@ export function createInboundTestHarness(opts: InboundTestHarnessOptions): Inbou
     // A hand-rolled header split rather than postal-mime, so a deliberately
     // malformed `raw:` fixture still reaches the handler instead of
     // throwing PARSE_FAILED inside the harness.
-    const headers = parseHeaderBlock(raw);
+    let headers: Headers;
+    if (opts.slug === null) {
+      headers = parseHeaderBlock(raw, Infinity);
+    } else {
+      const at = input.to.indexOf('@');
+      const label = at === -1 ? 'void email' : input.to.slice(at + 1).toLowerCase() || 'void email';
+      if (raw.byteLength > MAX_INBOUND_BYTES) {
+        return refuse(`${label}: message too large (max ${MAX_INBOUND_BYTES} bytes)`);
+      }
+      try {
+        headers = parseHeaderBlock(raw, MAX_INBOUND_HEADERS);
+      } catch (e) {
+        if (e instanceof InboundTooManyHeadersError) {
+          return refuse(`${label}: too many headers (max ${MAX_INBOUND_HEADERS})`);
+        }
+        throw e;
+      }
+    }
     // The caller's own headers win, so an explicit override stays an escape
-    // hatch.
+    // hatch. Applied AFTER admission: they are not on the wire, so the
+    // router never counted them.
     for (const [k, v] of new Headers(input.headers ?? {})) {
       headers.set(k, v);
     }
@@ -399,6 +477,15 @@ export function createInboundTestHarness(opts: InboundTestHarnessOptions): Inbou
     // message as a handler error, and on your own account the invocation
     // fails before `enactEmailActions` runs.
     record(getActions());
+    deliveries.push(result);
+    return result;
+  }
+
+  // An admission refusal, recorded the way a handler's own `setReject` is:
+  // the queue is that one reject, and the delivery is unhandled.
+  function refuse(reason: string): InboundDeliveryResult {
+    record([{ type: 'reject', reason }]);
+    const result: InboundDeliveryResult = { handler: undefined, params: {} };
     deliveries.push(result);
     return result;
   }

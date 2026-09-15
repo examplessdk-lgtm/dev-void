@@ -60,6 +60,23 @@ export const MAX_FORWARD_HEADER_LENGTH: number = 1024;
 export const MAX_REJECT_REASON_LENGTH: number = 1000;
 
 /**
+ * The router's ADMISSION bounds — what it refuses BEFORE the handler runs
+ * (`MAX_INBOUND_BYTES` / `MAX_INBOUND_HEADERS` in `email-router.ts`,
+ * restated for the same reason as above and pinned by the same test).
+ * `routeInbound` rejects a message over either one and never dispatches it,
+ * so a handler's behaviour on such a message is unreachable after a managed
+ * deploy; the test harness applies both before it invokes the handler.
+ *
+ * `MAX_INBOUND_BYTES` is NOT `MAX_MESSAGE_BYTES`, though the numbers agree
+ * today. That one is Cloudflare's cap on an OUTBOUND message (and the
+ * `parseEmail` guard); this one is the router's own heap headroom on an
+ * inbound one, set well under Cloudflare's ~25 MB inbound ceiling, and the
+ * two can move independently.
+ */
+export const MAX_INBOUND_BYTES: number = 10 * 1024 * 1024;
+export const MAX_INBOUND_HEADERS: number = 1024;
+
+/**
  * Cumulative reply-byte budget for ONE dispatch.
  *
  * `MAX_MESSAGE_BYTES` bounds a single `reply()` call, not the queue: N replies

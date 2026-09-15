@@ -426,7 +426,7 @@ describe('email handlers', () => {
 });
 ```
 
-The harness uses the same precedence rules as the production dispatcher. Reserved key `_default` mirrors `email/_default.ts`.
+The harness uses the same precedence rules as the production dispatcher. Reserved key `_default` mirrors `email/_default.ts`. It also applies the platform's inbound admission limits before your handler runs: a message over 10 MiB, or carrying more than 1024 distinct headers, is recorded in `rejects` and the handler is not called — exactly what the platform does before dispatch. With `slug: null` there is no platform router in front of the worker, so neither limit applies.
 
 ## Your own Cloudflare account
 

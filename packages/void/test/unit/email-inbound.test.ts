@@ -16,6 +16,8 @@ import {
   buildReplyMessage,
   createMessageProxy,
   defineEmail,
+  MAX_INBOUND_BYTES,
+  MAX_INBOUND_HEADERS,
   parseEmail,
   ParseEmailError,
   replyEmail,
@@ -1412,6 +1414,229 @@ describe('harness headers match the bytes, like production', () => {
     });
 
     expect(seen).toBe('<explicit@remote.dev>');
+  });
+});
+
+describe('admission checks mirrored from the managed router', () => {
+  // `routeInbound` refuses a message over `MAX_INBOUND_BYTES` (from
+  // `rawSize`, before the body is read) or with more than
+  // `MAX_INBOUND_HEADERS` distinct names (in `buildEnvelope`) and never
+  // dispatches it. The harness invoked the handler regardless, so a handler
+  // that forwards an oversized message without calling `parseEmail()` was
+  // green here and bounced after deploy. Now: same order, same reasons, no
+  // handler call. Platform lane only — an own-account worker has no router.
+  const TO = 'myslug+support@app.dev';
+  const HEAD = `From: u@x.dev\r\nTo: ${TO}\r\nSubject: big\r\n\r\n`;
+
+  /** A well-formed text message padded to exactly `total` bytes. */
+  function rawOfSize(total: number): Uint8Array {
+    const head = new TextEncoder().encode(HEAD);
+    const out = new Uint8Array(total);
+    out.set(head, 0);
+    out.fill(0x61, head.byteLength);
+    return out;
+  }
+
+  function rawWithHeaderLines(lines: Array<string>): string {
+    return `${lines.join('\r\n')}\r\n\r\nbody\r\n`;
+  }
+
+  /** `n` distinct names on the wire, `From:` and `To:` among them. */
+  function distinctHeaderLines(n: number): Array<string> {
+    return [
+      'From: u@x.dev',
+      `To: ${TO}`,
+      ...Array.from({ length: n - 2 }, (_, i) => `h${i.toString(36)}: v`),
+    ];
+  }
+
+  function forwarding() {
+    return vi.fn(async (message: ForwardableEmailMessage) => {
+      await message.forward('x@example.com');
+    });
+  }
+
+  it('rejects a message one byte over the size cap without invoking the handler', async () => {
+    const handler = forwarding();
+    const harness = createInboundTestHarness({ routes: { _default: handler } });
+
+    const result = await harness.deliver({
+      from: 'u@x.dev',
+      to: TO,
+      raw: rawOfSize(MAX_INBOUND_BYTES + 1),
+    });
+
+    expect(handler).not.toHaveBeenCalled();
+    // Byte-for-byte the router's reason: `<zone>: ...`, the zone being the
+    // recipient's domain.
+    expect(harness.rejects).toEqual(['app.dev: message too large (max 10485760 bytes)']);
+    expect(harness.forwards).toEqual([]);
+    // Recorded like a handler's own `setReject`: unhandled, one delivery.
+    expect(result).toEqual({ handler: undefined, params: {} });
+    expect(harness.deliveries).toEqual([result]);
+  });
+
+  it('admits a message exactly at the size cap', async () => {
+    const handler = forwarding();
+    const harness = createInboundTestHarness({ routes: { _default: handler } });
+
+    const result = await harness.deliver({
+      from: 'u@x.dev',
+      to: TO,
+      raw: rawOfSize(MAX_INBOUND_BYTES),
+    });
+
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(result.handler).toBe('_default');
+    expect(harness.rejects).toEqual([]);
+    expect(harness.forwards).toEqual([{ to: 'x@example.com' }]);
+  });
+
+  it('a handler that calls parseEmail() on a message at the cap still works', async () => {
+    // The router's admission and `parseEmail`'s own guard are both `>`, so
+    // the largest message the router dispatches is also one `parseEmail`
+    // reads.
+    let subject: string | undefined;
+    const harness = createInboundTestHarness({
+      routes: {
+        _default: async (message) => {
+          subject = (await parseEmail(message)).subject;
+          await message.forward('x@example.com');
+        },
+      },
+    });
+
+    await harness.deliver({ from: 'u@x.dev', to: TO, raw: rawOfSize(MAX_INBOUND_BYTES) });
+
+    expect(subject).toBe('big');
+    expect(harness.rejects).toEqual([]);
+    expect(harness.forwards).toEqual([{ to: 'x@example.com' }]);
+  });
+
+  it('rejects a message with one distinct header over the cap without invoking the handler', async () => {
+    const handler = forwarding();
+    const harness = createInboundTestHarness({ routes: { _default: handler } });
+
+    const result = await harness.deliver({
+      from: 'u@x.dev',
+      to: TO,
+      raw: rawWithHeaderLines(distinctHeaderLines(MAX_INBOUND_HEADERS + 1)),
+    });
+
+    expect(handler).not.toHaveBeenCalled();
+    expect(harness.rejects).toEqual(['app.dev: too many headers (max 1024)']);
+    expect(harness.forwards).toEqual([]);
+    expect(result).toEqual({ handler: undefined, params: {} });
+  });
+
+  it('admits a message with exactly the header cap, every header visible', async () => {
+    let seen: Headers | undefined;
+    const harness = createInboundTestHarness({
+      routes: {
+        _default: async (message) => {
+          seen = message.headers;
+        },
+      },
+    });
+
+    await harness.deliver({
+      from: 'u@x.dev',
+      to: TO,
+      raw: rawWithHeaderLines(distinctHeaderLines(MAX_INBOUND_HEADERS)),
+    });
+
+    expect(harness.rejects).toEqual([]);
+    expect([...seen!.keys()]).toHaveLength(MAX_INBOUND_HEADERS);
+    expect(seen!.get(`h${(MAX_INBOUND_HEADERS - 3).toString(36)}`)).toBe('v');
+  });
+
+  it.each([
+    [
+      'repeated names, which a Headers bag folds into one entry',
+      Array.from({ length: MAX_INBOUND_HEADERS + 1 }, () => 'Received: from a hop'),
+    ],
+    [
+      'continuation lines, which belong to the header before them',
+      ['Subject: a', ...Array.from({ length: MAX_INBOUND_HEADERS + 1 }, () => ' folded')],
+    ],
+    [
+      'the same name in different case',
+      Array.from({ length: MAX_INBOUND_HEADERS + 1 }, (_, i) =>
+        i % 2 ? 'x-void: b' : 'X-Void: a',
+      ),
+    ],
+  ])('counts distinct names, like the router: %s do not add up', async (_label, lines) => {
+    // The router walks the `Headers` Cloudflare built from the wire, and a
+    // `Headers` holds one entry per distinct (case-insensitive) name.
+    const handler = forwarding();
+    const harness = createInboundTestHarness({ routes: { _default: handler } });
+
+    await harness.deliver({ from: 'u@x.dev', to: TO, raw: rawWithHeaderLines(lines) });
+
+    expect(harness.rejects).toEqual([]);
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
+  it("checks size before headers, in the router's order", async () => {
+    // Over both caps at once: the router refuses on `rawSize` before it
+    // walks a single header, so that is the reason the sender sees.
+    const lines = distinctHeaderLines(MAX_INBOUND_HEADERS + 1);
+    const headBytes = new TextEncoder().encode(rawWithHeaderLines(lines));
+    const raw = new Uint8Array(MAX_INBOUND_BYTES + 1);
+    raw.set(headBytes, 0);
+    raw.fill(0x61, headBytes.byteLength);
+    const handler = forwarding();
+    const harness = createInboundTestHarness({ routes: { _default: handler } });
+
+    await harness.deliver({ from: 'u@x.dev', to: TO, raw });
+
+    expect(harness.rejects).toEqual(['app.dev: message too large (max 10485760 bytes)']);
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it("labels the reason with the recipient's domain, lowercased, like the router's zone", async () => {
+    const harness = createInboundTestHarness({ routes: { _default: forwarding() } });
+
+    await harness.deliver({
+      from: 'u@x.dev',
+      to: 'MySlug+Support@Mail.Void.Cloud',
+      raw: rawOfSize(MAX_INBOUND_BYTES + 1),
+    });
+    await harness.deliver({
+      from: 'u@x.dev',
+      to: 'no-at-sign',
+      raw: rawOfSize(MAX_INBOUND_BYTES + 1),
+    });
+
+    expect(harness.rejects).toEqual([
+      'mail.void.cloud: message too large (max 10485760 bytes)',
+      // The router's own fallback label, for a recipient that names no zone.
+      'void email: message too large (max 10485760 bytes)',
+    ]);
+  });
+
+  it('applies neither check on the own-account lane (`slug: null`)', async () => {
+    // There is no router in front of a worker on your own Cloudflare
+    // account: Cloudflare hands the handler every message it accepts, so a
+    // 10 MiB + 1 forward IS reachable there and the harness must not bounce
+    // it. (`parseEmail` keeps its own `MAX_MESSAGE_BYTES` guard.)
+    const handler = forwarding();
+    const harness = createInboundTestHarness({ slug: null, routes: { _default: handler } });
+
+    await harness.deliver({
+      from: 'u@x.dev',
+      to: 'support@mail.acme.com',
+      raw: rawOfSize(MAX_INBOUND_BYTES + 1),
+    });
+    await harness.deliver({
+      from: 'u@x.dev',
+      to: 'support@mail.acme.com',
+      raw: rawWithHeaderLines(distinctHeaderLines(MAX_INBOUND_HEADERS + 1)),
+    });
+
+    expect(handler).toHaveBeenCalledTimes(2);
+    expect(harness.rejects).toEqual([]);
+    expect(harness.forwards).toHaveLength(2);
   });
 });
 
