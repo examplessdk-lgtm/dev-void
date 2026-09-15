@@ -756,6 +756,15 @@ export async function routeInbound(
 
   let actions: Array<EmailAction>;
   try {
+    // This await materializes the tenant's WHOLE return value in this isolate
+    // before any bound below can look at it. workerd deserializes an RPC
+    // result eagerly, in one call, with no size hook; the only transport
+    // bound is the callee-side 32 MiB cap on SERIALIZED bytes, and a dense
+    // array turns 32 MiB of nulls into 128 MiB of caller heap, or of `{}`
+    // into ~500 MiB (measured, workerd 1.20260701.1, pointer-compressed V8).
+    // No proxy-side code can bound that; a contract change binds only
+    // cooperative tenants. Accepted limit — design doc 0078, "RPC result
+    // materialization", records the numbers and the architectural options.
     const result = await stub.email!(envelope);
     if (result === undefined || result === null) {
       actions = [];

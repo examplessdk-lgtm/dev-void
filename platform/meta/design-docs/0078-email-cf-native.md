@@ -556,6 +556,37 @@ The router pre-buffers `message.raw` to a `Uint8Array` before serializing the en
 1. **Stream consumer rule:** `parseEmail` reads the stream once and exhausts it. Buffering on the router side makes the body replayable across the RPC boundary if the receiving framework dispatcher needs it more than once.
 2. **RPC stream lifetime:** a `ReadableStream<Uint8Array>` IS in `BaseType` and survives RPC, but it's still a one-shot transferable. Buffering avoids subtle timing failures.
 
+#### RPC result materialization — accepted limit _(measured 2026-09-15)_
+
+`await stub.email(envelope)` in `email-router.ts` materializes the tenant's **entire** return value in the shared `void-proxy` isolate before `MAX_ACTIONS` or any per-field cap in `validateActions` can look at it. A Workers-for-Platforms tenant ships any `WorkerEntrypoint`, so the framework's action queue is a DX guardrail, not the boundary — and nothing on the proxy side can bound the result before it lands. This is a property of Workers RPC, recorded here with the numbers so it is not re-litigated.
+
+**The transport cap is 32 MiB of _serialized_ bytes, checked by the callee.** Docs: "The maximum serialized RPC limit is 32 MiB" ([RPC → Limitations](https://developers.cloudflare.com/workers/runtime-apis/rpc/#limitations)). Source: `MAX_JS_RPC_MESSAGE_SIZE = 1u << 25` in `src/workerd/api/worker-rpc.h`, asserted in `serializeJsValue` — for a return value that runs in the **callee**, and the caller sees `Error: Serialized RPC arguments or return values are limited to 32MiB, but the size of this value was: N bytes.` No WfP-specific figure exists (the [WfP limits page](https://developers.cloudflare.com/cloudflare-for-platforms/workers-for-platforms/reference/limits/) has none); a dispatch-namespace stub goes through the same `worker-rpc.c++` path as a service binding.
+
+**Why the cap does not bound the caller.** `deserializeJsValue` calls `jsg::Deserializer::readValue` once, materializing the whole graph with JS execution forbidden for the duration; it runs inside the `awaitIo` callback the moment the response arrives (`worker-rpc.c++`, where the `JsRpcPromise` is built), whether or not JS ever awaits the promise. The `CallResults` message always carries the by-value result, so promise pipelining cannot decline it, and `cloudflare:workers` exposes no API that inspects a result's size before materialization. Serialized bytes and materialized bytes are therefore different budgets, and the ratio is the tenant's to choose.
+
+_(measured)_ workerd 1.20260701.1 via miniflare, caller → callee over a service binding, caller heap read through the workerd inspector (`Runtime.getHeapUsage`), value returned from `email()` and retained:
+
+| Returned value                             | Serialized | Result                       | Caller heap delta             | Wall    |
+| ------------------------------------------ | ---------- | ---------------------------- | ----------------------------- | ------- |
+| `[null × 1e6]`                             | 0.95 MiB   | ok                           | 3.8 MiB (4.00 B/elem)         | 21 ms   |
+| `[null × 1.6e7]`                           | 15.26 MiB  | ok                           | 61.0 MiB                      | 279 ms  |
+| `[null × 33,554,400]`                      | 32.00 MiB  | ok                           | **128.0 MiB**                 | 587 ms  |
+| `[null × 33,554,500]`                      | 32.00 MiB+ | callee throws (33,554,513 B) | 0                             | 458 ms  |
+| `[{ …, junk: 'x'.repeat(8 MiB) }]`         | 8.00 MiB   | ok                           | 8.0 MiB (1.0x — no amplifier) | 4 ms    |
+| `[{ …, junk: 'x'.repeat(32 MiB) }]`        | 32.00 MiB+ | callee throws                | 0                             | 5 ms    |
+| `[sharedObj × 1.6e7]` (V8 back-references) | 30.52 MiB  | ok                           | 61.0 MiB (4.00 B/elem)        | 395 ms  |
+| `[{} × 1e6]`                               | 2.86 MiB   | ok                           | 47.0 MiB (~47 B/elem)         | 157 ms  |
+| `[{} × 4e6]`                               | 11.44 MiB  | ok                           | 170.9 MiB                     | 702 ms  |
+| `[{} × 11,184,800]`                        | 32.00 MiB  | ok                           | **502.6 MiB**                 | 2234 ms |
+
+workerd's V8 uses pointer compression (4 B per tagged slot; Node measures 8 B and 682 MiB for the last row), so a dense array of nulls is a 4x amplifier and an array of empty objects ~16x. Against the 128 MB isolate ceiling ([Limits → Memory](https://developers.cloudflare.com/workers/platform/limits/#memory)), a single in-cap return value is enough. Open-source workerd enforces no memory limit — the 502.6 MiB call succeeded locally — so the production eviction itself cannot be measured outside production.
+
+**What scales it down, and what does not.** Producing the value costs the tenant its own CPU (build + serialize run inside the callee's invocation, under `routing.limits.cpuMs`): ~1 MiB of caller heap per callee-CPU-ms for nulls, ~0.4 MiB/ms for `{}` (V8 ValueSerializer, measured in Node on an M-series laptop). So a plan cap scales the per-call figure — free 10 ms ≈ 10 MiB, pro 50 ms ≈ 50 MiB — but the solo/pro `cpuMs` override ceiling is 30 000 ms and `custom` is uncapped, so the worst rows are reachable there, and concurrent deliveries to one project materialize their results concurrently in one isolate, multiplying the plan-capped figure.
+
+**Blast radius, as documented.** "When an isolate exceeds 128 MB, the Workers runtime lets in-flight requests complete and creates a new isolate for subsequent requests. During extremely high load, the runtime may cancel some incoming requests to maintain stability." The offending invocation fails (`exceededMemory`) and that message is not enacted; what Email Routing then tells the sending MTA is not measured here. Unrelated proxy traffic pays an isolate replacement on that machine and, under extreme load, possible cancellations — the "disrupt unrelated proxy traffic" in the review is real and bounded to that.
+
+**Options weighed.** (i) Rely on the transport cap — it does not bound, per the table. (ii) Return a string, `Uint8Array` or `RpcTarget` and check length before parsing — cooperative only: a hostile entrypoint returns the array anyway and the deserializer accepts it. (iii) Return a `ReadableStream` — same objection; there is no lazy deserialization. (iv) Real bounds, all architectural: (a) call the tenant over `stub.fetch()` with a reserved path, so the result is a `Response` whose body the router reads under a byte cap no matter what the tenant does — a framework contract change that inherits the `/__void/*` shadowing hazard; (b) move the dispatch into a dedicated email-dispatch worker, so an eviction empties an isolate serving only inbound mail; (c) dispatch email with a lower `cpuMs` than HTTP — a soft, hardware- and plan-dependent bound that gives up the deliberate limits parity with the HTTP router. None fits a bug-fix round; handed back under [Open decisions](#open-decisions).
+
 #### Outbound flow
 
 ```
@@ -1849,6 +1880,15 @@ owner's.
    session-bearer bridge, two projects on one zone, ownership of a
    hand-written `addresses` array. Listed with recommendations under
    [Decisions handed back](#decisions-handed-back).
+10. **Inbound RPC result materialization** _(added 2026-09-15)_ — the
+    proxy cannot bound a tenant's `email()` return value before workerd
+    materializes it (128 MiB of nulls or ~500 MiB of `{}` fit the 32 MiB
+    serialized cap; see [RPC result materialization](#rpc-result-materialization--accepted-limit-measured-2026-09-15)).
+    Accept as a limit (recommended for this PR — the documented eviction
+    cost to unrelated traffic is an isolate replacement), **or** fund one of
+    the architectural bounds: an HTTP contract via `stub.fetch()` with a
+    byte-capped body read, a dedicated email-dispatch worker, or a lower
+    `cpuMs` for email dispatch than for HTTP.
 
 ## Open questions
 
