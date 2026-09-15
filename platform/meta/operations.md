@@ -41,7 +41,21 @@ These deployment and smoke-test workflows target Void Cloud, from `prod` for pro
 
 Both deploy workflows serialize deployments without cancelling an active rollout. Advancing `prod` requests a production deployment. A failed or interrupted deployment needs inspection before another rollout, particularly when database migrations already ran.
 
-The environment provides `CF_API_TOKEN`, `CF_ACCOUNT_ID`, and `DATABASE_URL` for production or `STAGING_DATABASE_URL` for staging. The staging smoke test also uses `CF_ACCESS_CLIENT_ID_STAGING` and `CF_ACCESS_CLIENT_SECRET_STAGING` when protected by Cloudflare Access. Consult the workflow files for their current inputs.
+Every platform secret is scoped to a GitHub environment (`Prod` or `Staging`); there are no repo-level platform secrets. The values live in the 1Password vault `VOID`:
+
+| Secret                            | Environment | Purpose                                                                                                        | 1Password item                                   |
+| --------------------------------- | ----------- | -------------------------------------------------------------------------------------------------------------- | ------------------------------------------------ |
+| `CF_API_TOKEN`                    | Both        | Cloudflare deploy API token (see [Secrets](#secrets))                                                          | `Cloudflare` → `Github Deploy Token`             |
+| `CF_ACCOUNT_ID`                   | Both        | Cloudflare account ID (passed as `CLOUDFLARE_ACCOUNT_ID`)                                                      | `Cloudflare` → `CF_ACCOUNT_ID`                   |
+| `DATABASE_URL`                    | Prod        | PlanetScale direct connection string for drizzle-kit migrations                                                | `Plantscale prod-admin`                          |
+| `STAGING_DATABASE_URL`            | Staging     | PlanetScale direct connection string for drizzle-kit migrations                                                | `Plantscale staging`                             |
+| `CF_ACCESS_CLIENT_ID_STAGING`     | Staging     | CF Access service-token client id for reaching staging (see [Staging Access Control](#staging-access-control)) | `Void Cloudflare Zero Trust GitHub OAuth App`    |
+| `CF_ACCESS_CLIENT_SECRET_STAGING` | Staging     | CF Access service-token client secret for reaching staging                                                     | `Void Cloudflare Zero Trust GitHub OAuth App`    |
+| `VOID_TOKEN_STAGING`              | Staging     | Staging API token the smoke test deploys `kitchen-sink` with (see below)                                       | `VOID_TOKEN_STAGING (GitHub Actions smoke test)` |
+
+`VOID_TOKEN_STAGING` is an `aud: api` JWT for the staging account that owns the `kitchen-sink` project, signed by hand with the staging JWT secret (`Platform JWT secret` → `staging`) via `signJwt()` in `platform/packages/api/src/auth/jwt.ts` with a 2-year TTL, because tokens from `void auth login` expire after 30 days. The 1Password item records the expiry. To rotate it: sign a new token the same way, update the item, then `gh secret set VOID_TOKEN_STAGING --env Staging`. The token is signed with the staging `JWT_SECRET`, so rotating that secret invalidates it regardless of the recorded expiry — re-sign and re-set it as part of that coordinated rotation (see [Secrets](#secrets)).
+
+Consult the workflow files for their current inputs.
 
 ## Secrets
 
