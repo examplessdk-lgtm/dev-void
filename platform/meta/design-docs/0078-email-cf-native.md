@@ -1922,6 +1922,24 @@ owner's.
     `stub.fetch()` with a byte-capped body read, a dedicated email-dispatch
     worker, or a lower `cpuMs` for email dispatch than for HTTP.
 
+11. **Mode B setup by direction** _(added 2026-09-15; raised by review three
+    times)_ — setup is keyed on `needsEmail` (an `email/` handler or a
+    `void/email` import), so an inbound-only app is also onboarded for
+    Email Sending (one `sending enable` call; on Workers Free one refused
+    POST and the hint) and receives the inert `SEND_EMAIL` binding.
+    `replyEmail` needs neither. Onboarding carries no per-domain charge —
+    Cloudflare meters accepted outbound messages — but on Workers Paid it
+    locks `_dmarc` (`p=reject`) and DKIM records on the mail subdomain that
+    an inbound-only app never uses. **Open.** Splitting by direction is
+    cheap in the walker (it already records the `void/email` specifier)
+    but touches the preflight `ready` predicate (also the "binding present
+    - sending pending" refusal memory), the checklist, apply, the address
+      map, deploy's `satisfied`, and `void email setup/status`; and it changes
+      the default failure mode: an app whose `sendEmail` lives in a
+      dependency, a dynamic import, or reads `env.SEND_EMAIL` directly would
+      ship without the binding and fail at runtime with `BINDING_MISSING`.
+      The guide documents the per-domain rule (Sending section). Owner's call.
+
 ## Open questions
 
 _(added 2026-09-11)_ Only a live probe settles these.
