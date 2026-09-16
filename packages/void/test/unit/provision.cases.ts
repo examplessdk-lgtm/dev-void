@@ -40,6 +40,17 @@ import { getProvisionTestShard, type ProvisionTestShard } from './provision-test
 
 const activeTestShard = getProvisionTestShard();
 
+/**
+ * Remove a scratch directory that a spawned wrangler stand-in used as its cwd.
+ * On Windows `TerminateProcess` returns before the dead process releases its
+ * handles, so an immediate `rmSync` in `afterEach` fails with `EPERM` even
+ * though the test already confirmed the process dead. Node retries
+ * `EPERM`/`EBUSY`/`ENOTEMPTY` with linear backoff when `maxRetries` is set.
+ */
+function removeProcessScratchDir(dir: string): void {
+  rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+}
+
 function shardForDescribe(name: string): ProvisionTestShard {
   if (name.startsWith('normalizeRunWranglerResult')) {
     return 'runner-signals';
@@ -2483,11 +2494,11 @@ describe('normalizeRunWranglerResult — signal / spawn-error handling', () => {
 describe('createDefaultRunWrangler — hard timeout kills the REAL process', () => {
   const TIMEOUT_TMP = join(import.meta.dirname, '.tmp-timeout-kill');
   beforeEach(() => {
-    rmSync(TIMEOUT_TMP, { recursive: true, force: true });
+    removeProcessScratchDir(TIMEOUT_TMP);
     mkdirSync(TIMEOUT_TMP, { recursive: true });
   });
   afterEach(() => {
-    rmSync(TIMEOUT_TMP, { recursive: true, force: true });
+    removeProcessScratchDir(TIMEOUT_TMP);
   });
 
   /** Poll `process.kill(pid, 0)` until the pid is dead (ESRCH) or the deadline passes. */
@@ -5602,11 +5613,11 @@ const WINDOWS_NO_SIGNALS = 'signal delivery to another process is POSIX-only (se
 describe('createDefaultRunWrangler — parent-signal forwarding awaits confirmed teardown', () => {
   const SIGNAL_TEARDOWN_TMP = join(import.meta.dirname, '.tmp-signal-teardown');
   beforeEach(() => {
-    rmSync(SIGNAL_TEARDOWN_TMP, { recursive: true, force: true });
+    removeProcessScratchDir(SIGNAL_TEARDOWN_TMP);
     mkdirSync(SIGNAL_TEARDOWN_TMP, { recursive: true });
   });
   afterEach(() => {
-    rmSync(SIGNAL_TEARDOWN_TMP, { recursive: true, force: true });
+    removeProcessScratchDir(SIGNAL_TEARDOWN_TMP);
   });
 
   it('SIGTERM to the parent: the child group is confirmed dead BEFORE the parent re-raises and exits', async (ctx) => {
@@ -5695,11 +5706,11 @@ describe('createDefaultRunWrangler — parent-signal forwarding awaits confirmed
 describe('createDefaultRunWrangler — normal close confirms the whole GROUP', () => {
   const GROUP_CLOSE_TMP = join(import.meta.dirname, '.tmp-group-close');
   beforeEach(() => {
-    rmSync(GROUP_CLOSE_TMP, { recursive: true, force: true });
+    removeProcessScratchDir(GROUP_CLOSE_TMP);
     mkdirSync(GROUP_CLOSE_TMP, { recursive: true });
   });
   afterEach(() => {
-    rmSync(GROUP_CLOSE_TMP, { recursive: true, force: true });
+    removeProcessScratchDir(GROUP_CLOSE_TMP);
   });
 
   it('an exit-0 leader that leaves a SAME-GROUP grandchild alive: the runner resolves only after the group is dead', async () => {
