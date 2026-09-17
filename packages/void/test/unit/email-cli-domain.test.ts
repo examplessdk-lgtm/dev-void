@@ -721,6 +721,70 @@ describe('emailDomainAdd', () => {
     expect(printed(errorSpy)).toContain('was revoked');
   });
 
+  it('reconciles a 403 answer — a suspended account never reached the route, nothing persisted', async () => {
+    mockAttemptId();
+    const addEmailDomain = vi.fn(async () => {
+      throw new PlatformApiError(
+        'Failed to add email domain',
+        403,
+        '{"error":"account suspended"}',
+      );
+    });
+    // A 403 may come from the middleware pre-route (no parse, no revoke), so
+    // it reconciles like any other ambiguous answer — here the polls prove
+    // nothing persisted and the held grant is revoked.
+    const getEmailDomain = vi.fn(async () => {
+      throw new PlatformApiError(
+        'Failed to fetch email domain status',
+        404,
+        '{"error":"email domain not found"}',
+      );
+    });
+    const fetchSpy = vi.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(null, { status: 200 }),
+    );
+    vi.stubGlobal('fetch', fetchSpy);
+
+    await expect(
+      emailDomainAdd({ addEmailDomain, getEmailDomain }, 'prj_1', 'acme.com', undefined, addDeps()),
+    ).rejects.toThrow('exit 1');
+
+    expect(getEmailDomain).toHaveBeenCalledTimes(15);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(String(fetchSpy.mock.calls[0]![0])).toBe('https://dash.cloudflare.com/oauth2/revoke');
+    expect(printed(errorSpy)).toContain('was not registered');
+  });
+
+  it('reconciles a 403 answer — every poll 403s too, so the state stays unknown and nothing is revoked', async () => {
+    mockAttemptId();
+    const addEmailDomain = vi.fn(async () => {
+      throw new PlatformApiError(
+        'Failed to add email domain',
+        403,
+        '{"error":"account suspended"}',
+      );
+    });
+    const getEmailDomain = vi.fn(async () => {
+      throw new PlatformApiError(
+        'Failed to fetch email domain status',
+        403,
+        '{"error":"account suspended"}',
+      );
+    });
+    const fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+
+    await expect(
+      emailDomainAdd({ addEmailDomain, getEmailDomain }, 'prj_1', 'acme.com', undefined, addDeps()),
+    ).rejects.toThrow('exit 1');
+
+    // No poll produced a read — the grant may be live, and a blind revoke
+    // could brick a committed row: report, don't revoke.
+    expect(getEmailDomain).toHaveBeenCalledTimes(15);
+    expect(printed(errorSpy)).toContain('state is unknown');
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
   it('reports a failed revocation instead of claiming it — the grant may still be live', async () => {
     mockAttemptId();
     const addEmailDomain = vi.fn(async () => {

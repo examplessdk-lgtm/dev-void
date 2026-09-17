@@ -116,6 +116,9 @@ function depsFor(
       return client;
     },
     lookupMx: async () => [],
+    // The name-walk's DB reservation — required whenever the row carries
+    // no relay name. Tests that exercise 'taken' pass their own.
+    claimRelayName: async () => 'claimed',
     ...extra,
   };
 }
@@ -428,6 +431,69 @@ describe('setupEmailDomain', () => {
       'zone_1',
       `${RELAY_WORKER_BASE_NAME}-3`,
     ]);
+  });
+
+  it('walks past a CF-free name the claim reports taken, and never uploads to it', async () => {
+    // CF shows only the base name physically present; another ROW holds
+    // '-2' in the db — the claim is what skips it, not the CF probe.
+    const { client, calls } = makeFakeClient({
+      zones: { 'acme.com': ZONE },
+      scriptNamesTaken: [RELAY_WORKER_BASE_NAME],
+    });
+    const claimed: Array<string> = [];
+
+    const result = await setupEmailDomain(
+      setupInput(),
+      depsFor(client, {
+        claimRelayName: async (_accountId, candidate) => {
+          claimed.push(candidate);
+          return candidate === `${RELAY_WORKER_BASE_NAME}-2` ? 'taken' : 'claimed';
+        },
+      }),
+    );
+
+    expect(result.status).toBe('active');
+    expect(result.relay_worker_name).toBe(`${RELAY_WORKER_BASE_NAME}-3`);
+    // The base name was CF-taken, so its claim was never spent.
+    expect(claimed).toEqual([`${RELAY_WORKER_BASE_NAME}-2`, `${RELAY_WORKER_BASE_NAME}-3`]);
+    // The contested name was never written.
+    for (const method of ['putRelayScript', 'putRelaySecret'] as const) {
+      expect(calls.filter((c) => c.method === method).map((c) => c.args[1])).toEqual([
+        `${RELAY_WORKER_BASE_NAME}-3`,
+      ]);
+    }
+  });
+
+  it('fails at deploy_relay when every CF-free name is claim-taken', async () => {
+    const { client } = makeFakeClient({ zones: { 'acme.com': ZONE } });
+
+    const result = await setupEmailDomain(
+      setupInput(),
+      depsFor(client, { claimRelayName: async () => 'taken' }),
+    );
+
+    expect(result.status).toBe('failed');
+    expect(result.setup_state).toEqual({ failed_step: 'deploy_relay' });
+    // Nothing was uploaded, so there is no name to record.
+    expect(result.relay_worker_name).toBeNull();
+  });
+
+  it('fails at deploy_relay when the walk runs without the claimRelayName dep', async () => {
+    // The dep is REQUIRED on the walk: a CF-only probe would silently
+    // re-open the last-write-wins relay race, so the walk refuses loudly.
+    const { client, calls } = makeFakeClient({ zones: { 'acme.com': ZONE } });
+
+    const result = await setupEmailDomain(setupInput(), {
+      ...depsFor(client),
+      claimRelayName: undefined,
+    });
+
+    expect(result.status).toBe('failed');
+    expect(result.setup_state).toEqual({ failed_step: 'deploy_relay' });
+    expect(result.error).toContain('claimRelayName');
+    // The refusal precedes even the CF probe — nothing was walked or written.
+    expect(methods(calls)).not.toContain('relayScriptExists');
+    expect(methods(calls)).not.toContain('putRelayScript');
   });
 
   it('verifies an oauth_grant with one refresh round-trip and returns the rotated refresh token', async () => {

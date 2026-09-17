@@ -164,6 +164,16 @@ const HEADER_NAME_RE = /^[!#$%&'*+\-.^_`|~0-9a-z]+$/;
  * Returns null when the block holds more DISTINCT names than
  * `MAX_INBOUND_HEADERS` — the same refusal the platform lane makes.
  */
+/**
+ * Cap TOTAL header pieces (distinct names + repeat occurrences + folds).
+ * `MAX_INBOUND_HEADERS` alone bounds only new map keys: one valid name
+ * repeated hundreds of thousands of times inside the MIME cap would still
+ * allocate and join an unbounded number of pieces here, in the shared
+ * proxy isolate. The count is charged per piece — the allocation unit —
+ * so repeats and folds hit the same wall as distinct names.
+ */
+const MAX_INBOUND_HEADER_LINES = 4096;
+
 function parseRelayedHeaders(raw: Uint8Array): Record<string, string> | null {
   const block = new TextDecoder().decode(raw.subarray(0, headerBlockEnd(raw)));
   // Pieces per name, each pushed with its join separator — `", "` for a
@@ -171,6 +181,8 @@ function parseRelayedHeaders(raw: Uint8Array): Record<string, string> | null {
   // concatenating the accumulated value per line is quadratic CPU on a
   // block of repeated same-name headers.
   const folded = new Map<string, Array<string>>();
+  // Total pieces across all names — the allocation unit the cap charges.
+  let totalPieces = 0;
   // The name the current continuation line extends, or null when the
   // previous line was skipped.
   let current: string | null = null;
@@ -190,6 +202,10 @@ function parseRelayedHeaders(raw: Uint8Array): Record<string, string> | null {
     }
     if (line.startsWith(' ') || line.startsWith('\t')) {
       if (current !== null && headerValueSafe(line)) {
+        totalPieces += 1;
+        if (totalPieces > MAX_INBOUND_HEADER_LINES) {
+          return null;
+        }
         const pieces = folded.get(current) ?? [];
         pieces.push(` ${line.trim()}`);
         folded.set(current, pieces);
@@ -208,6 +224,10 @@ function parseRelayedHeaders(raw: Uint8Array): Record<string, string> | null {
       continue;
     }
     const pieces = folded.get(name);
+    totalPieces += 1;
+    if (totalPieces > MAX_INBOUND_HEADER_LINES) {
+      return null;
+    }
     if (pieces !== undefined) {
       pieces.push(`, ${value}`);
     } else {

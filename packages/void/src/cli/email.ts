@@ -785,23 +785,27 @@ export async function emailDomainAdd(
   } catch (err) {
     if (
       err instanceof PlatformApiError &&
-      (err.status === 400 || err.status === 403 || err.status === 404 || err.status === 409)
+      (err.status === 400 || err.status === 404 || err.status === 409)
     ) {
-      // The add route's deliberate rejections: it revokes a posted grant
-      // server-side before answering any of these, and the error names the
-      // reason.
+      // Only the add route's deliberate rejections rethrow: it revokes a
+      // posted grant server-side before answering any of these, and the
+      // error names the reason. 403 is NOT in this set — the platform's
+      // middleware answers 403 pre-route (a suspended account, a
+      // deploy-token scope refusal) without ever parsing the body, so a
+      // 403 proves nothing about the grant and reconciles like any other
+      // ambiguous answer.
       throw err;
     }
     // A transport failure (DNS, a connection reset, a lost answer) OR an
-    // ambiguous answer (5xx, or a 401/413/429 from middleware or the edge)
-    // leaves the add's outcome unknown: the request may never have reached
-    // the route, it may have failed before the grant was stored or
-    // revoked, or it COMMITTED and only the outcome was lost. The CLI
-    // holds the only copy of a freshly minted grant, so reconcile before
-    // anything irreversible — a committed row is the grant's revocation
-    // handle, and only a definitive "not on the row" makes a CLI-side
-    // revoke safe (revoking a stored-and-unrotated grant would brick the
-    // row it belongs to).
+    // ambiguous answer (403, 5xx, or a 401/413/426/429 from middleware or
+    // the edge) leaves the add's outcome unknown: the request may never
+    // have reached the route, it may have failed before the grant was
+    // stored or revoked, or it COMMITTED and only the outcome was lost.
+    // The CLI holds the only copy of a freshly minted grant, so reconcile
+    // before anything irreversible — a committed row is the grant's
+    // revocation handle, and only a definitive "not on the row" makes a
+    // CLI-side revoke safe (revoking a stored-and-unrotated grant would
+    // brick the row it belongs to).
     const sleep =
       deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
     // The last informative read picks the deadline branch: a row carrying a

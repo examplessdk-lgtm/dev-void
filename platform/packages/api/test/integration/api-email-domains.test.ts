@@ -663,9 +663,11 @@ async function dropApplySentinelTrigger(): Promise<void> {
 }
 
 // Same mechanism as the apply sentinel, but firing on the deploy
-// CHECKPOINT write instead: relay_worker_name null→non-null happens only
-// there (the final apply writes it already-set), so a NON-unique error
-// here fails exactly the checkpoint.
+// CHECKPOINT write instead. The engine's pre-upload claim writes
+// relay_worker_name first, so the checkpoint's distinguishing transition
+// is zone_id null→non-null (the claim never touches zone_id; the final
+// apply writes it already-set) — a NON-unique error here fails exactly
+// the checkpoint.
 async function installCheckpointSentinelTrigger(): Promise<void> {
   await env.db.execute(
     sql.raw(
@@ -679,7 +681,7 @@ async function installCheckpointSentinelTrigger(): Promise<void> {
   await env.db.execute(
     sql.raw(
       `CREATE TRIGGER email_checkpoint_sentinel AFTER UPDATE ON email_domains
-       FOR EACH ROW WHEN (OLD.relay_worker_name IS NULL AND NEW.relay_worker_name IS NOT NULL)
+       FOR EACH ROW WHEN (OLD.zone_id IS NULL AND NEW.zone_id IS NOT NULL)
        EXECUTE FUNCTION email_checkpoint_sentinel_raise()`,
     ),
   );
@@ -1145,67 +1147,158 @@ describe('POST /projects/:id/email/domains', () => {
     expect((await mirrorFor('acme.com'))!.projectId).toBe(project.id);
   });
 
-  it('409s when another row already holds the relay name — the contested worker is never deleted', async () => {
+  it('claims the relay name before the upload — a db-held name is skipped and never written', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id);
     // Row one (seeded directly, same reason as the zone race above) already
-    // holds 'void-email-relay-2' in the account.
+    // holds 'void-email-relay-2' in the account — committed, so a
+    // concurrent walk's claim of '-2' 23505s on the relay index.
     await seedEmailDomain(project.id, 'acme.com', {
       status: 'active',
       relayWorkerName: `${RELAY_WORKER_BASE_NAME}-2`,
     });
 
-    // Domain two resolves to a DIFFERENT zone in the SAME account. The base
-    // name is taken, so the name-walk deploys 'void-email-relay-2' — the
-    // name row one holds — and the deploy CHECKPOINT 23505s on the relay
-    // index. The stub's zone_2 catch-all already names that relay, so the
-    // compensation's conditional reset fires.
+    // Domain two resolves to a DIFFERENT zone in the SAME account. CF shows
+    // only the BASE name physically present, so the CF probe alone would
+    // walk to '-2' — pre-fix the loser OVERWROTE row one's worker there
+    // before its checkpoint 23505d. The pre-upload claim is what skips
+    // '-2' now, and the walk lands on '-3'.
     const stub = stubCustomerCf({
       zones: { 'other.com': { id: 'zone_2', name: 'other.com', accountId: ZONE.accountId } },
       existingScripts: [RELAY_WORKER_BASE_NAME],
-      catchAllRule: { enabled: true, workerName: `${RELAY_WORKER_BASE_NAME}-2` },
     });
+    // The winner's deployed secret on '-2', through the stub's own sha256
+    // tracking (the same RELAY_SECRET the seeded mirror carries).
+    const contested = `${RELAY_WORKER_BASE_NAME}-2`;
+    await fetch(
+      `https://api.cloudflare.com/client/v4/accounts/${ZONE.accountId}/workers/scripts/${contested}/secrets`,
+      {
+        method: 'PUT',
+        body: JSON.stringify({
+          name: RELAY_SECRET_BINDING,
+          type: 'secret_text',
+          text: RELAY_SECRET,
+        }),
+      },
+    );
+    const winnerHashBefore = stub.secretHashes.get(contested);
+    expect(winnerHashBefore).toBe(await hashEmailRelaySecret(RELAY_SECRET));
+    const winnerMirrorBefore = await mirrorFor('acme.com');
+    const callsBeforeAdd = stub.calls.length;
+
     const res = await addDomain(project.id, user.jwt, { domain: 'other.com', apiToken: API_TOKEN });
-    expect(res.status).toBe(409);
-    expect(((await res.json()) as { error: string }).error).toBe(
-      'another email domain is deploying the same relay worker — retry',
-    );
+    expect(res.status).toBe(201);
+    const json = (await res.json()) as Record<string, unknown>;
+    expect(json.status).toBe('active');
+    expect(json.relay_worker_name).toBe(`${RELAY_WORKER_BASE_NAME}-3`);
 
-    // The contested name is NEVER deleted — no scriptDelete at all. The
-    // compensation detaches only the loser's zone rule: ONE ownership read
-    // (the checkpoint aborted the engine before its own), and the read
-    // named the loser's relay, so the conditional reset (drop, disabled)
-    // fired.
-    expect(callsByTag(stub.calls, 'scriptDelete')).toEqual([]);
-    expect(callsByTag(stub.calls, 'catchAllGet')).toHaveLength(1);
-    const catchAllWrites = callsByTag(stub.calls, 'catchAll');
-    expect(catchAllWrites).toHaveLength(1);
-    expect(catchAllWrites[0]!.url).toBe(
-      'https://api.cloudflare.com/client/v4/zones/zone_2/email/routing/rules/catch_all',
-    );
-    expect(catchAllWrites[0]!.body).toEqual({
-      matchers: [{ type: 'all' }],
-      actions: [{ type: 'drop' }],
-      enabled: false,
-    });
-    expect(stub.catchAllStates.get('zone_2')).toEqual({ enabled: false, workerName: null });
+    // The walk CF-probed base, '-2' and '-3' in order…
+    const during = stub.calls.slice(callsBeforeAdd);
+    expect(callsByTag(during, 'scriptGet').map((call) => call.url)).toEqual([
+      `https://api.cloudflare.com/client/v4/accounts/${ZONE.accountId}/workers/scripts/${RELAY_WORKER_BASE_NAME}`,
+      `https://api.cloudflare.com/client/v4/accounts/${ZONE.accountId}/workers/scripts/${contested}`,
+      `https://api.cloudflare.com/client/v4/accounts/${ZONE.accountId}/workers/scripts/${RELAY_WORKER_BASE_NAME}-3`,
+    ]);
+    // …but the contested name was NEVER written — no script PUT, no
+    // secret PUT, no delete. Stronger than the old 'never deleted': the
+    // claim skips the name before any upload.
+    const writes = [...callsByTag(during, 'scriptPut'), ...callsByTag(during, 'secretPut')];
+    expect(writes.length).toBeGreaterThan(0);
+    expect(writes.some((call) => call.url.includes(`/${contested}`))).toBe(false);
+    expect(callsByTag(during, 'scriptDelete')).toEqual([]);
 
-    // Row one is untouched; row two stayed pre-apply and got no mirror.
+    // The winner's worker secret and mirror are byte-identical; its row
+    // is untouched.
+    expect(stub.secretHashes.get(contested)).toBe(winnerHashBefore);
+    expect(await mirrorFor('acme.com')).toEqual(winnerMirrorBefore);
     expect((await rowFor(project.id, 'acme.com'))!).toMatchObject({
       status: 'active',
       zone_id: ZONE.id,
       account_id: ZONE.accountId,
-      relay_worker_name: `${RELAY_WORKER_BASE_NAME}-2`,
+      relay_worker_name: contested,
     });
-    expect((await rowFor(project.id, 'other.com'))!).toMatchObject({
-      status: 'pending',
-      zone_id: null,
-      account_id: null,
-      mode: null,
-      relay_worker_name: null,
+
+    // The loser went active on '-3': its catch-all names its own relay,
+    // and worker, row and mirror carry ONE secret.
+    expect(stub.catchAllStates.get('zone_2')).toEqual({
+      enabled: true,
+      workerName: `${RELAY_WORKER_BASE_NAME}-3`,
     });
-    expect(await mirrorFor('other.com')).toBeNull();
-    expect((await mirrorFor('acme.com'))!.projectId).toBe(project.id);
+    const loserRow = (await rowFor(project.id, 'other.com'))!;
+    expect(loserRow).toMatchObject({
+      status: 'active',
+      zone_id: 'zone_2',
+      account_id: ZONE.accountId,
+      relay_worker_name: `${RELAY_WORKER_BASE_NAME}-3`,
+    });
+    const loserHash = await hashEmailRelaySecret(
+      await decryptEmailDomainRelaySecret(env, project.id, 'other.com', loserRow),
+    );
+    expect(stub.secretHashes.get(`${RELAY_WORKER_BASE_NAME}-3`)).toBe(loserHash);
+    expect((await mirrorFor('other.com'))!.relaySecretSha256).toBe(loserHash);
+  });
+
+  it('claims distinct relay names for two concurrent setups in the same account', async () => {
+    const user = await createTestUser(env.db);
+    const projectA = await createTestProject(env.db, user.id);
+    const projectB = await createTestProject(env.db, user.id);
+
+    // Two zones in ONE customer account, nothing deployed yet: both
+    // name-walks start at the base name. The hold gives the overlap
+    // window — the FIRST setup to reach its secret PUT parks until the
+    // other settles or the cap fires (the same synchronization as
+    // 'serializes concurrent setup retries'). PGlite's single connection
+    // serializes the second request's transaction behind the first's
+    // commit, so the interleave this actually exercises is the
+    // COMMITTED-winner one: the loser's claim of the base name 23505s
+    // past the winner's commit and its walk advances to '-2'. Pre-fix
+    // the loser picked the same name from the CF probe, overwrote the
+    // winner's worker with its own binding + secret, and 409d at its
+    // checkpoint.
+    let holdFirstSecretPut = true;
+    const stub = stubCustomerCf({
+      zones: {
+        'a.com': { id: 'zone_a', name: 'a.com', accountId: ZONE.accountId },
+        'b.com': { id: 'zone_b', name: 'b.com', accountId: ZONE.accountId },
+      },
+      on: {
+        secretPut: async () => {
+          if (!holdFirstSecretPut) {
+            return;
+          }
+          holdFirstSecretPut = false;
+          await Promise.race([bothSettled, sleep(500)]);
+        },
+      },
+    });
+    const first = addDomain(projectA.id, user.jwt, { domain: 'a.com', apiToken: API_TOKEN });
+    const second = addDomain(projectB.id, user.jwt, { domain: 'b.com', apiToken: API_TOKEN });
+    const bothSettled = Promise.allSettled([first, second]);
+    const [firstRes, secondRes] = await Promise.all([first, second]);
+    expect(firstRes.status).toBe(201);
+    expect(secondRes.status).toBe(201);
+
+    const rowA = (await rowFor(projectA.id, 'a.com'))!;
+    const rowB = (await rowFor(projectB.id, 'b.com'))!;
+    expect(rowA.status).toBe('active');
+    expect(rowB.status).toBe('active');
+    // DISTINCT names — first-to-claim, never last-write-wins.
+    const names = [rowA.relay_worker_name, rowB.relay_worker_name];
+    expect(new Set(names).size).toBe(2);
+    expect(names.sort()).toEqual([RELAY_WORKER_BASE_NAME, `${RELAY_WORKER_BASE_NAME}-2`].sort());
+
+    // THE invariant, per domain: the secret on the worker, the row's
+    // stored triple, and the proxy mirror's hash are ONE secret.
+    for (const [project, domain, row] of [
+      [projectA, 'a.com', rowA],
+      [projectB, 'b.com', rowB],
+    ] as const) {
+      const rowHash = await hashEmailRelaySecret(
+        await decryptEmailDomainRelaySecret(env, project.id, domain, row),
+      );
+      expect(stub.secretHashes.get(row.relay_worker_name!)).toBe(rowHash);
+      expect((await mirrorFor(domain))!.relaySecretSha256).toBe(rowHash);
+    }
   });
 
   it('409s and revokes the posted grant when the project is marked deleting before setup', async () => {

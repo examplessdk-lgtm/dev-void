@@ -1452,8 +1452,16 @@ async function applyEmailDomainSetupResult(
  * name) to a setup that already passed the engine's CF-side reads —
  * first-to-persist wins.
  *
+ * The relay-NAME branch is a safety net, not a live path: fresh setups
+ * CLAIM the name on their own row (the claimRelayName dep) BEFORE any
+ * upload, so a checkpoint-time relay-name 23505 is no longer reachable
+ * from the setup flow — the claim itself is the only relay-name 23505
+ * left, and the walk absorbs it as 'taken'. The branch stays for rows
+ * written before the claim existed and as defense in depth.
+ *
  * Works from what the engine RETURNED or checkpointed (the loser's row
- * still holds nulls). A relay-NAME conflict never deletes the worker —
+ * still holds nulls — a claimed name is undone before this runs). A
+ * relay-NAME conflict never deletes the worker —
  * the name is contested, the winner is using it — so the compensation
  * runs with account_id nulled: only the loser's zone rule is detached. On
  * a ZONE conflict the winner is looked up and an owned catch-all is
@@ -1925,6 +1933,12 @@ async function runEmailDomainEngineSerialized(
     mode: 'apex' | 'subdomain' | null;
     relay_worker_name: string;
   } | null = null;
+  // Set when the engine's name-walk claimed a relay name on the row, so
+  // an engine throw can restore the row's locked pre-engine values — the
+  // claim commits with this transaction even when the checkpoint's
+  // savepoint rolls back, and a leaked entry would park the name while
+  // pointing the row at a worker the compensation may have deleted.
+  let relayNameClaimed = false;
   type EngineOutcome =
     | Readonly<{
         kind: 'ok_sync';
@@ -2023,6 +2037,30 @@ async function runEmailDomainEngineSerialized(
           },
           {
             refreshGrant: () => refreshOauthGrantSerialized(tx, context.env, current.id),
+            claimRelayName: async (accountId, candidate) => {
+              // Reserve (account_id, candidate) on THIS row BEFORE any CF
+              // upload — first-to-claim turns the relay race into a walk
+              // skip: a concurrent setup's claim of the same name blocks
+              // on this uncommitted UPDATE, then 23505s past the winner's
+              // commit ('taken' → the walk advances) or proceeds past its
+              // rollback. The savepoint keeps a contested claim from
+              // poisoning the transaction (same machinery as the
+              // checkpoint).
+              const claim = await tryEmailDomainSavepoint(tx, 'void_email_relay_claim', () =>
+                tx
+                  .update(emailDomains)
+                  .set({ account_id: accountId, relay_worker_name: candidate })
+                  .where(eq(emailDomains.id, current!.id)),
+              );
+              if (claim.ok) {
+                relayNameClaimed = true;
+                return 'claimed' as const;
+              }
+              if (isUniqueViolation(claim.err)) {
+                return 'taken' as const;
+              }
+              throw claim.err;
+            },
             persistProgress: async (progress) => {
               // Capture BEFORE the write: a 23505 throw still needs the
               // checkpoint for compensation below. The savepoint keeps the
@@ -2045,6 +2083,20 @@ async function runEmailDomainEngineSerialized(
         engineError = err;
       }
       if (result === null) {
+        // The engine threw AFTER a successful claim (the checkpoint's
+        // 23505 or a non-race failure): restore the row's locked
+        // pre-engine values so the claim doesn't outlive the setup it
+        // belonged to. Before the claim existed, the checkpoint's
+        // savepoint rollback left the row exactly this way.
+        if (relayNameClaimed) {
+          await tx
+            .update(emailDomains)
+            .set({
+              account_id: current.account_id,
+              relay_worker_name: current.relay_worker_name,
+            })
+            .where(eq(emailDomains.id, current.id));
+        }
         return { kind: 'engine_failed', err: engineError, race } as const;
       }
       const applied = await tryEmailDomainSavepoint(tx, 'void_email_apply', () =>
@@ -2120,9 +2172,11 @@ async function runEmailDomainEngineSerialized(
     const { err, result } = outcome;
     if (isUniqueViolation(err)) {
       // The concurrent-setup backstop (the schema's partial unique
-      // indexes): two setups racing one zone (or one account's relay name)
-      // both pass the engine's CF-side reads, so the loser is caught here
-      // — a 409, never a falsely-active second row. The row stays in its
+      // indexes): two setups racing one zone both pass the engine's
+      // CF-side reads, so the loser is caught here — a 409, never a
+      // falsely-active second row. (A relay-NAME 23505 is no longer
+      // reachable from a fresh setup — the pre-upload claim absorbs it —
+      // but the mapping stays as a safety net.) The row stays in its
       // pre-apply state; the loser's CF-side work is compensated
       // best-effort inside.
       const conflict = await compensateEmailDomainRace(

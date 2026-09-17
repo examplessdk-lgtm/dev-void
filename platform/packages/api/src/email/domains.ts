@@ -202,11 +202,13 @@ export class EmailDomainRowGoneError extends Error {
 /**
  * Mid-setup progress write, fired ONCE after the relay deploy + secret PUT
  * and BEFORE the catch-all write. Its real job is racing: the partial
- * unique indexes on emailDomains (one live row per zone, one relay name
- * per account) make a concurrent loser throw 23505 HERE, before it ever
- * writes its catch-all rule — closing the last-write-wins window
- * structurally. Status, setup_state, relay_version, and the credential
- * columns stay untouched; the final apply owns those.
+ * unique index on emailDomains (one live row per zone) makes a concurrent
+ * loser throw 23505 HERE, before it ever writes its catch-all rule —
+ * closing the last-write-wins window structurally. (The relay-name
+ * index's loser now throws EARLIER, at the engine's pre-upload
+ * claimRelayName; on a fresh setup this write's relay_worker_name and
+ * account_id are same-value no-ops.) Status, setup_state, relay_version,
+ * and the credential columns stay untouched; the final apply owns those.
  */
 export async function applyEmailDomainDeployCheckpoint(
   db: DbOrTx,

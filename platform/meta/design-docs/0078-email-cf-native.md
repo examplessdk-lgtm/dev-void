@@ -306,11 +306,11 @@ customer later runs `wrangler deploy` with an `addresses` array on the same
 zone, wrangler reports our rule as an externally-managed conflict and asks
 before taking over. Documented in `status` output, not fought. The name is
 stable once chosen: renaming a worker detaches every routing rule pointing
-at it, so `sync` redeploys in place and never renames. The chosen name is
-recorded on the row BEFORE the script upload and secret PUT, so a failed
-write still leaves the row knowing its relay — a retry redeploys in place
-and a remove can find the worker; name exhaustion fails the deploy with no
-name recorded (nothing was uploaded). The code is ours but the worker is the
+at it, so `sync` redeploys in place and never renames. A walked name is
+claimed on the row BEFORE the script upload and secret PUT (see the
+concurrency backstops), so a failed write still leaves the row knowing its
+relay — a retry redeploys in place and a remove can find the worker; name
+exhaustion fails the deploy with no name recorded (nothing was uploaded). The code is ours but the worker is the
 customer's: they can read it, edit it or delete it, and `status` reports
 drift on the next probe rather than fighting it. When the relay code
 changes, `status` shows the deployed version and `void email domain sync`
@@ -436,8 +436,17 @@ path.
 - **Two partial unique indexes backstop the engine's check-then-write.** One
   live row per zone (`status IN ('active','pending')`, so a `failed` row can
   still record the zone it failed in) and one relay name per account
-  (`relay_worker_name IS NOT NULL` — a deployed relay really exists). A
-  racing loser violates the index with a 23505 and gets a 409; the
+  (`relay_worker_name IS NOT NULL` — a deployed relay really exists). Setup
+  CLAIMS its walked relay name on its own row against the relay index
+  BEFORE any upload, so two setups racing one account serialize
+  first-to-claim: a concurrent claim blocks on the winner's uncommitted
+  UPDATE, then 23505s past its commit (the walk advances to the next
+  suffix) or proceeds past its rollback. First-to-claim, never
+  last-write-wins — the loser's walk never writes a worker the winner may
+  already be using, and an engine throw after a successful claim restores
+  the row's locked pre-engine values so the claim does not outlive its
+  setup. A racing loser that still violates an index (the zone race, or a
+  row written before the claim existed) gets a 409; the
   constraint name classifies the race, read by walking the error's cause
   chain (both drivers — PGlite and `pg` — expose it as `constraint` on the
   frame that carries the code). The loser's CF-side work is compensated
@@ -449,11 +458,13 @@ path.
   fires a `persistProgress` dep once — after the relay deploy + secret PUT,
   before the catch-all write — and the route persists it
   (`applyEmailDomainDeployCheckpoint`, an UPDATE…RETURNING). With the
-  indexes, a racing loser 23505s at the checkpoint and never writes its zone
-  rule, so the last-write-wins window (loser's rule overwritten onto the
-  zone, winner's row live but unrouted) cannot occur for fresh adds.
-  Checkpoints are skipped on in-place redeploys — a row that already carries
-  `relay_worker_name` already knows.
+  zone index, a racing loser 23505s at the checkpoint and never writes its
+  zone rule, so the last-write-wins window (loser's rule overwritten onto
+  the zone, winner's row live but unrouted) cannot occur for fresh adds.
+  (The relay-name race is closed earlier, at the pre-upload claim — on a
+  fresh setup the checkpoint's name and account writes are same-value
+  no-ops.) Checkpoints are skipped on in-place redeploys — a row that
+  already carries `relay_worker_name` already knows.
 - **Any checkpoint failure compensates from the captured payload.** A
   non-unique checkpoint error, or the row cascade-deleted by teardown
   mid-setup, leaves the relay deployed but unrecorded; the route runs
@@ -673,8 +684,11 @@ on the row at insert and at credential replace, and always serialized on
 the status GET (null on rows an older CLI wrote — an api predating
 attempt identity omits the key, and key presence is how a new CLI detects
 one). When the POST's response never arrives — or the answer is ambiguous:
-a 5xx, or a 401/413/429 from middleware or the edge; only the route's
-deliberate 400/403/404/409 rejections prove a server-side revoke — the CLI
+a 5xx, or a 401/403/413/426/429 from middleware or the edge; only the
+route's deliberate 400/404/409 rejections prove a server-side revoke (a
+403 is ambiguous: middleware answers it before the route ever parses the
+body — a suspended account, a mis-scoped deploy token — so it may carry
+no revoke at all, and the CLI cannot tell the two 403s apart) — the CLI
 polls the status, 15 tries, 1s apart, because a lost answer does not stop
 the api worker mid-commit. The row carrying THIS attempt's id means the
 add committed
@@ -888,7 +902,11 @@ API token cannot reach), and the narrow template-token variants.
   modelled on the `/email/internal/` branch: size bounds before any crypto,
   secret → mirror → project, then the second half of `routeInbound`
   (envelope → `stub.email` → `enactActions`) keyed by the domain's project
-  instead of a slug parsed from the recipient.
+  instead of a slug parsed from the recipient. The relayed header summary
+  is bounded on two axes, like the platform lane's pre-buffering: a
+  distinct-name cap, and a total-pieces cap charged per header piece
+  (distinct names + repeat occurrences + folds) — one name repeated inside
+  the MIME cap otherwise allocates unboundedly in the shared isolate.
 - **Schema:** `email_domains` follows the `emailDestinations` template
   (`status` as a `$type` union, CHECK constraints declared in the schema so
   drizzle-kit doesn't diff them away); migration `0039_email_domains`.

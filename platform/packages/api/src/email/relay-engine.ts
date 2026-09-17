@@ -11,7 +11,8 @@
  * walking the labels up to the registrable zone; also yields account_id) →
  * MX check over public DNS (decides apex vs subdomain) → enable routing
  * (POST routing/dns; empty body for apex, { name } for a subdomain) →
- * onboard sending → deploy relay + secret → catch-all → active.
+ * onboard sending → claim the relay name → deploy relay + secret →
+ * catch-all → active.
  *
  * Setup is re-runnable — re-adding a `failed` row re-executes it against
  * the row's recorded progress: a recorded mode skips the MX check (the
@@ -31,6 +32,16 @@
  * write, and its throw PROPAGATES so the route can abort setup when the
  * mid-setup row persist fails. Dep-free calls keep today's totality —
  * every failure still lands in the returned row fields.
+ *
+ * A claimRelayName dep reserves the walked relay name on the caller's own
+ * row BEFORE any CF upload (the route implements it as an UPDATE inside
+ * its serialized transaction): two setups racing one customer account
+ * serialize on the (account_id, relay_worker_name) unique index, so the
+ * loser's walk advances past the contested name instead of overwriting
+ * the winner's worker — first-to-claim, never last-write-wins. The dep
+ * is REQUIRED when the row carries no relay_worker_name: the walk throws
+ * without it rather than falling back to a CF-only probe, which would
+ * silently re-open that race.
  *
  * Failure rules:
  *   - Every orchestration failure leaves status 'failed' with
@@ -112,6 +123,22 @@ export type RelayEngineDeps = Readonly<{
   lookupMx?: (domain: string) => Promise<ReadonlyArray<string>>;
   /** Relay secret generator (sync rotation); defaults to generateEmailRelaySecret. */
   generateRelaySecret?: () => string;
+  /**
+   * Relay-name reservation for setup's name-walk: claims
+   * (accountId, candidate) on the caller's OWN row, inside the caller's
+   * serialized transaction (the route implements it with the same
+   * savepoint machinery as the deploy checkpoint). 'taken' means another
+   * row holds the name — the walk advances to the next suffix. Blocking
+   * semantics come from the (account_id, relay_worker_name) partial
+   * unique index: a concurrent claim waits on the winner's uncommitted
+   * UPDATE, then either proceeds (winner rolled back) or reports taken
+   * (winner committed) — one-directional, so no deadlock. REQUIRED
+   * whenever the row carries no relay_worker_name: the walk throws
+   * without it rather than probing CF alone, which would silently
+   * re-open the last-write-wins relay race. Never called on an in-place
+   * redeploy (the row already holds a name).
+   */
+  claimRelayName?: (accountId: string, candidate: string) => Promise<'claimed' | 'taken'>;
   /**
    * Mid-setup progress checkpoint (setup only), fired ONCE right after
    * the relay deploy + secret PUT succeed and BEFORE the catch-all write,
@@ -538,15 +565,19 @@ export async function setupEmailDomain(
 
   // Step 6: pick a free relay name — or reuse the recorded one, since a
   // re-run redeploys IN PLACE (the name-walk would take a fresh '-2' and
-  // orphan the first relay; renaming detaches routing rules). The name
-  // lands in progress the moment it is chosen, BEFORE the fallible writes:
-  // a failed upload or secret PUT then still records it on the row, so a
-  // retry redeploys in place and a remove can find the worker — an
-  // unrecorded upload would leak it and walk the next retry to '-2'.
+  // orphan the first relay; renaming detaches routing rules). A walked
+  // name is CLAIMED on the row via the claimRelayName dep BEFORE the
+  // upload, so two setups racing one account can't both deploy the same
+  // name (see claimFreeRelayName). The name lands in progress the moment
+  // it is chosen, BEFORE the fallible writes: a failed upload or secret
+  // PUT then still records it on the row, so a retry redeploys in place
+  // and a remove can find the worker — an unrecorded upload would leak
+  // it and walk the next retry to '-2'.
   let relayWorkerName: string;
   try {
     relayWorkerName =
-      input.row.relay_worker_name ?? (await chooseFreeRelayName(client, zone.account.id));
+      input.row.relay_worker_name ??
+      (await claimFreeRelayName(client, zone.account.id, deps.claimRelayName));
   } catch (err) {
     return fail('deploy_relay', err);
   }
@@ -625,14 +656,35 @@ export async function setupEmailDomain(
 /**
  * Setup step 6's name-walk: the base name, then '-2', '-3'… on collision
  * within the account (a second registered domain of the same customer).
- * The caller records the chosen name before any fallible write; the name
- * is stable once chosen — renaming a worker detaches every routing rule
- * pointing at it, so sync redeploys in place and never re-walks.
+ * Each candidate is CF-probed first — a physically occupied name (an
+ * orphan, or a worker the customer created out-of-band) is skipped
+ * without spending a claim — then CLAIMED via the claimRelayName dep
+ * BEFORE any upload: two setups racing one account serialize on the
+ * (account_id, relay_worker_name) unique index, so a concurrent claim
+ * either blocks past the winner's commit and 23505s ('taken' — the walk
+ * advances) or proceeds past its rollback. First-to-claim wins; the
+ * loser's walk never writes the contested worker. The dep is REQUIRED —
+ * a CF-only walk would re-open exactly that race. The caller records the
+ * chosen name before any fallible write; the name is stable once chosen
+ * — renaming a worker detaches every routing rule pointing at it, so
+ * sync redeploys in place and never re-walks.
  */
-async function chooseFreeRelayName(client: CfCustomerClient, accountId: string): Promise<string> {
+async function claimFreeRelayName(
+  client: CfCustomerClient,
+  accountId: string,
+  claimRelayName: RelayEngineDeps['claimRelayName'],
+): Promise<string> {
+  if (!claimRelayName) {
+    throw new Error(
+      'the claimRelayName dep is required when setup walks relay names (the row carries none)',
+    );
+  }
   for (let suffix = 1; suffix <= MAX_RELAY_NAME_SUFFIX; suffix++) {
     const candidate = suffix === 1 ? RELAY_WORKER_BASE_NAME : `${RELAY_WORKER_BASE_NAME}-${suffix}`;
-    if (!(await client.relayScriptExists(accountId, candidate))) {
+    if (await client.relayScriptExists(accountId, candidate)) {
+      continue;
+    }
+    if ((await claimRelayName(accountId, candidate)) === 'claimed') {
       return candidate;
     }
   }

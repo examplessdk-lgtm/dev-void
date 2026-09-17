@@ -376,6 +376,32 @@ describe('POST /email/relay — auth branch', () => {
     expect(emailFn).not.toHaveBeenCalled();
   });
 
+  it('rejects a header block that repeats one name past the total-pieces cap', async () => {
+    // The distinct-name cap counts map keys only; one name repeated
+    // thousands of times must hit the total-pieces cap instead.
+    const kv = await relayKv();
+    const { env, emailFn } = createMockEnv(kv, { emailReturn: [] });
+    const repeated = Array.from({ length: 5000 }, () => 'X-Repeat: v').join('\r\n');
+    const res = await postRelay(env as never, {
+      mime: `From: sender@example.com\r\nTo: support+T-42@acme.com\r\n${repeated}\r\n\r\nhi\r\n`,
+    });
+    expect(res.status).toBe(413);
+    expect(await res.json()).toEqual({ error: 'too many headers' });
+    expect(emailFn).not.toHaveBeenCalled();
+  });
+
+  it('rejects a header block that folds one header past the total-pieces cap', async () => {
+    const kv = await relayKv();
+    const { env, emailFn } = createMockEnv(kv, { emailReturn: [] });
+    const folds = Array.from({ length: 5000 }, () => '\tcontinued').join('\r\n');
+    const res = await postRelay(env as never, {
+      mime: `From: sender@example.com\r\nTo: support+T-42@acme.com\r\nX-Folded: start\r\n${folds}\r\n\r\nhi\r\n`,
+    });
+    expect(res.status).toBe(413);
+    expect(await res.json()).toEqual({ error: 'too many headers' });
+    expect(emailFn).not.toHaveBeenCalled();
+  });
+
   it('is covered by the email capability gate', async () => {
     const kv = await relayKv();
     const { env, emailFn } = createMockEnv(kv, {
@@ -479,9 +505,10 @@ describe('POST /email/relay — dispatch', () => {
   it('parses a large repeated-header block (one name, many occurrences)', async () => {
     const kv = await relayKv();
     const { env, emailFn } = createMockEnv(kv, { emailReturn: [] });
-    // One DISTINCT name (under MAX_INBOUND_HEADERS) repeated 50k times:
-    // the accumulation must not concatenate the whole value per line.
-    const occurrences = 50_000;
+    // One DISTINCT name (under MAX_INBOUND_HEADERS) repeated thousands of
+    // times but under the total-pieces cap: the accumulation must not
+    // concatenate the whole value per line.
+    const occurrences = 2_000;
     const mime = 'From: sender@example.com\r\n' + 'X-Loop: v\r\n'.repeat(occurrences) + '\r\n';
     const res = await postRelay(env as never, { mime });
     expect(res.status).toBe(200);
