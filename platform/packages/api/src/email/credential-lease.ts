@@ -12,7 +12,10 @@
  * SERIALIZED PER ROW: a `SELECT … FOR UPDATE` on the domain row (the same
  * row-level pattern the deploy/build claims use in db.ts) held across the
  * token-endpoint call, with the rotated refresh token re-encrypted and
- * persisted in the SAME transaction. There is no access-token cache on the
+ * persisted in the SAME transaction. Revocations take the same lock so they
+ * always target the live chain head (`revokeOauthGrantSerialized`), and the
+ * relay-secret rotation serializes on it too (`withEmailDomainRowLock`).
+ * There is no access-token cache on the
  * api side — every lease refreshes. `invalid_grant` marks the row
  * `token_revoked` inside the transaction, before the error travels.
  *
@@ -21,10 +24,10 @@
  */
 
 import { eq, sql } from 'drizzle-orm';
-import type { Db } from '../db.ts';
+import type { Db, DbOrTx, Tx } from '../db.ts';
 import type { ApiEnv } from '../env.ts';
 import { emailDomains } from '../schema.ts';
-import { OAuthGrantError, refreshOauthGrant } from './cf-customer.ts';
+import { OAuthGrantError, refreshOauthGrant, revokeOauthGrant } from './cf-customer.ts';
 import type { OauthGrantTokens } from './cf-customer.ts';
 import { decryptEmailDomainToken, encryptEmailDomainToken } from './domains.ts';
 import type { EmailDomain } from './domains.ts';
@@ -62,7 +65,7 @@ function errorMessage(err: unknown): string {
  * committed in between (killing the chain — see contract 4).
  */
 export async function refreshOauthGrantSerialized(
-  db: Db,
+  db: DbOrTx,
   env: SecretBindings,
   rowId: string,
 ): Promise<OauthGrantTokens> {
@@ -137,6 +140,75 @@ export async function refreshOauthGrantSerialized(
     throw outcome.revoked;
   }
   return outcome.tokens;
+}
+
+/**
+ * Revoke the row's CURRENT chain head under the same per-row lock the
+ * refresh uses. A revocation must target the live head: a token captured
+ * earlier may already be consumed by an interleaved lease refresh, and CF
+ * answers 200 whether the presented token was live or dead — so only a
+ * capture under the lock makes the 200 mean the chain is dead. The lock is
+ * held across the revocation call, exactly like the refresh. A gone row
+ * (teardown's cascade won) has nothing left to revoke. Throws on a network
+ * or non-2xx failure — the caller decides what that means (failed_steps,
+ * a 502, …). No status flip here: the caller owns the row's fate.
+ */
+export async function revokeOauthGrantSerialized(
+  db: DbOrTx,
+  env: SecretBindings,
+  rowId: string,
+): Promise<void> {
+  await db.transaction(async (tx) => {
+    const rows = await tx
+      .select({
+        id: emailDomains.id,
+        project_id: emailDomains.project_id,
+        domain: emailDomains.domain,
+        token_ciphertext: emailDomains.token_ciphertext,
+        token_iv: emailDomains.token_iv,
+        token_key_version: emailDomains.token_key_version,
+      })
+      .from(emailDomains)
+      .where(eq(emailDomains.id, rowId))
+      .for('update')
+      .limit(1);
+    const row = rows[0];
+    if (!row) {
+      return;
+    }
+    const head = await decryptEmailDomainToken(env, row.project_id, row.domain, {
+      token_ciphertext: row.token_ciphertext,
+      token_iv: row.token_iv,
+      token_key_version: row.token_key_version,
+    });
+    await revokeOauthGrant(head);
+  });
+}
+
+/**
+ * The per-row lock behind the refresh chain, generalized: `fn` runs inside
+ * a transaction holding `SELECT … FOR UPDATE` on the domain row. The relay
+ * secret rotation (sync) is serialized this way — two overlapping syncs
+ * would otherwise interleave the worker secret PUT and the row/mirror
+ * persist, leaving the worker holding a secret the row no longer knows.
+ * The lock is held across the CF calls, exactly like the refresh holds it
+ * across the token round-trip; the KV mirror write stays AFTER the commit
+ * (KV is not transactional).
+ */
+export async function withEmailDomainRowLock<T>(
+  db: Db,
+  rowId: string,
+  fn: (tx: Tx) => Promise<T>,
+): Promise<T> {
+  return db.transaction(async (tx) => {
+    await tx
+      .select({ id: emailDomains.id })
+      .from(emailDomains)
+      .where(eq(emailDomains.id, rowId))
+      .for('update')
+      .limit(1);
+    return fn(tx);
+  });
 }
 
 /**

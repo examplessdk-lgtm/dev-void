@@ -6,8 +6,10 @@ import {
   getEmailDestinationsByProjectId,
   getProject,
 } from '../../db.ts';
-import { revokeOauthGrant } from '../../email/cf-customer.ts';
-import { refreshOauthGrantSerialized } from '../../email/credential-lease.ts';
+import {
+  refreshOauthGrantSerialized,
+  revokeOauthGrantSerialized,
+} from '../../email/credential-lease.ts';
 import {
   clearEmailDomainMirror,
   decryptEmailDomainRelaySecret,
@@ -532,7 +534,11 @@ app.post('/:projectId/domains/:domain/revoke', async (context) => {
         // place the rotated token exists, so omitting revokeGrant here
         // would orphan a live grant with no platform handle.
         refreshGrant: () => refreshOauthGrantSerialized(context.get('db'), context.env, row.id),
-        ...(row.credential_kind === 'oauth_grant' ? { revokeGrant: revokeOauthGrant } : {}),
+        ...(row.credential_kind === 'oauth_grant'
+          ? {
+              revokeGrant: () => revokeOauthGrantSerialized(context.get('db'), context.env, row.id),
+            }
+          : {}),
       },
     );
     if (failed_steps.length > 0) {
@@ -583,22 +589,21 @@ app.post('/:projectId/domains/:domain/revoke-grant', async (context) => {
       400,
     );
   }
-  let refreshToken: string;
   let relaySecretSha256: string;
   try {
-    refreshToken = await decryptEmailDomainToken(context.env, projectId, row.domain, row);
     relaySecretSha256 = await hashEmailRelaySecret(
       await decryptEmailDomainRelaySecret(context.env, projectId, row.domain, row),
     );
   } catch (error) {
-    // No status change: without the credentials there is nothing to revoke.
-    console.error('[admin-email] grant revoke failed to decrypt the stored credential', {
+    // No status change: without the relay secret the mirror cannot be
+    // tightened safely, so there is nothing to base the revoke on either.
+    console.error('[admin-email] grant revoke failed to decrypt the stored relay secret', {
       projectId,
       domain: row.domain,
       error,
     });
     return context.html(
-      '<h1>Failed to decrypt the stored credential</h1><p>The grant cannot be revoked from here; the row keeps its current status.</p>',
+      '<h1>Failed to decrypt the stored relay secret</h1><p>The grant cannot be revoked from here; the row keeps its current status.</p>',
       500,
     );
   }
@@ -619,7 +624,11 @@ app.post('/:projectId/domains/:domain/revoke-grant', async (context) => {
     return context.html('<h1>Failed to tighten the domain mirror. Try again.</h1>', 503);
   }
   try {
-    await revokeOauthGrant(refreshToken);
+    // Revoke the row's LIVE chain head under the credential chain's row
+    // lock: a token decrypted here beforehand could already be consumed by
+    // an interleaved lease refresh, and CF answers 200 for a consumed
+    // token whether or not the grant survived.
+    await revokeOauthGrantSerialized(context.get('db'), context.env, row.id);
   } catch (error) {
     // Network/non-2xx — the grant's state is unknown, so the row keeps its
     // status and the operator retries. The mirror already flipped; the next

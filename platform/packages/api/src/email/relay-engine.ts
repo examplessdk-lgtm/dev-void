@@ -80,11 +80,15 @@ export type RelayEngineDeps = Readonly<{
   /** One refresh round-trip; defaults to the real OAuth token endpoint. */
   refreshGrant?: (refreshToken: string) => Promise<OauthGrantTokens>;
   /**
-   * RFC 7009 grant revocation (remove path only). Deliberately has NO
-   * default: a caller that leaves its row alive must not revoke, so the
-   * engine revokes only when the caller explicitly supplies this.
+   * RFC 7009 grant revocation (remove path only). Takes no token: the
+   * closure revokes the row's LIVE chain head (the serialized helper) — a
+   * token captured earlier may already be consumed by an interleaved
+   * refresh, and CF answers 200 for a consumed token either way.
+   * Deliberately has NO default: a caller that leaves its row alive must
+   * not revoke, so the engine revokes only when the caller explicitly
+   * supplies this.
    */
-  revokeGrant?: (refreshToken: string) => Promise<void>;
+  revokeGrant?: () => Promise<void>;
   /** Public-DNS MX lookup; defaults to DNS-over-HTTPS against cloudflare-dns.com. */
   lookupMx?: (domain: string) => Promise<ReadonlyArray<string>>;
   /** Relay secret generator (sync rotation); defaults to generateEmailRelaySecret. */
@@ -717,17 +721,19 @@ export async function syncEmailDomain(
  * 'catch_all' and keeps the consistent pair, exactly like a reset
  * failure.
  *
- * `revokeGrant` dep (oauth_grant rows only): once the refresh succeeded,
- * the grant is revoked at CF as the LAST step with the ROTATED refresh
- * token — the live chain head, since the refresh consumed the stored
- * original. A transient refresh failure revokes the ORIGINAL stored
- * credential instead (it may still be live and the row holding it is
- * about to disappear); an invalid_grant failure skips the revoke (CF
- * already killed the grant). A revoke rejection appends 'revoke_grant'
- * to failed_steps and never throws. api_token rows never revoke. The
- * conflict-compensation caller deliberately passes NO revokeGrant dep:
- * it leaves its own row alive, and revoking would brick the credential
- * that row still owns.
+ * `revokeGrant` dep (oauth_grant rows only): the grant is revoked as the
+ * LAST step, after the CF cleanup attempts. The dep takes no token — it
+ * revokes the row's LIVE chain head (callers pass the serialized helper):
+ * a token captured earlier, the rotated one included, may already be
+ * consumed by a lease refresh interleaved with the cleanup calls, and CF
+ * answers 200 for a consumed token whether or not the grant survived. A
+ * transient refresh failure revokes too (the stored token may still be
+ * live and the row holding it is about to disappear); an invalid_grant
+ * failure skips the revoke (CF already killed the grant). A revoke
+ * rejection appends 'revoke_grant' to failed_steps and never throws.
+ * api_token rows never revoke. The conflict-compensation caller
+ * deliberately passes NO revokeGrant dep: it leaves its own row alive,
+ * and revoking would brick the credential that row still owns.
  */
 export async function removeEmailDomain(
   input: EmailDomainRemoveInput,
@@ -735,13 +741,12 @@ export async function removeEmailDomain(
 ): Promise<EmailDomainRemoveResult> {
   const failedSteps: Array<string> = [];
   let credential = input.credential;
-  let rotatedRefreshToken: string | undefined;
+  let grantRefreshed = false;
   if (input.row.credential_kind === 'oauth_grant') {
     try {
       const tokens = await (deps.refreshGrant ?? refreshOauthGrant)(input.credential);
       credential = tokens.accessToken;
-      // The live chain head — this refresh consumed the stored original.
-      rotatedRefreshToken = tokens.refreshToken;
+      grantRefreshed = true;
     } catch (err) {
       failedSteps.push('delete_relay', 'catch_all');
       // invalid_grant means CF already killed the grant — nothing left to
@@ -750,7 +755,7 @@ export async function removeEmailDomain(
       // deleted.
       if (deps.revokeGrant && !(err instanceof OAuthGrantError && err.code === 'invalid_grant')) {
         try {
-          await deps.revokeGrant(input.credential);
+          await deps.revokeGrant();
         } catch {
           failedSteps.push('revoke_grant');
         }
@@ -820,12 +825,15 @@ export async function removeEmailDomain(
       }
     }
   }
-  // Grant revocation is the LAST step, after the CF cleanup attempts, and
-  // revokes the ROTATED token (the live chain head). A rejection is
-  // reported, never thrown: the row removal proceeds regardless.
-  if (rotatedRefreshToken !== undefined && deps.revokeGrant) {
+  // Grant revocation is the LAST step, after the CF cleanup attempts. The
+  // dep revokes the row's live chain head — NOT the token this run
+  // rotated: a lease refresh interleaved with the cleanup calls above
+  // would already have consumed it, and revoking a consumed token answers
+  // 200 while the newer grant lives on. A rejection is reported, never
+  // thrown: the row removal proceeds regardless.
+  if (grantRefreshed && deps.revokeGrant) {
     try {
-      await deps.revokeGrant(rotatedRefreshToken);
+      await deps.revokeGrant();
     } catch {
       failedSteps.push('revoke_grant');
     }

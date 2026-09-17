@@ -10,6 +10,7 @@ import {
   vi,
 } from 'vite-plus/test';
 import { createEmailDestination, getEmailDestinationsByProjectId } from '../../src/db.ts';
+import { refreshOauthGrantSerialized } from '../../src/email/credential-lease.ts';
 import {
   encryptEmailDomainRelaySecret,
   encryptEmailDomainToken,
@@ -976,6 +977,46 @@ describe('POST /admin/email/:projectId/domains/:domain/revoke-grant', () => {
       status: string;
     };
     expect(mirror.status).toBe('token_revoked');
+  });
+
+  test('revokes the chain head live at revoke time when a lease rotation lands mid-request', async () => {
+    const { adminJwt, projectId } = await seedAdminAndProject();
+    const row = await seedEmailDomain(projectId, 'acme-grant-race.com', {
+      credentialKind: 'oauth_grant',
+    });
+    const cfCalls = recordCustomerCfCalls();
+    // A lease rotation landing after the mirror flip, before the revoke:
+    // the originally stored token is consumed by it, so a revoke captured
+    // beforehand would submit a dead token — CF answers 200 either way,
+    // and the rotated head would live on with no handle.
+    const originalPut = env.ROUTING.put.bind(env.ROUTING);
+    let rotated = false;
+    vi.spyOn(env.ROUTING, 'put').mockImplementation((async (
+      key: string,
+      value: string,
+      options?: unknown,
+    ) => {
+      const result = await originalPut(key, value, options as never);
+      if (key === 'email-domain:acme-grant-race.com' && !rotated) {
+        rotated = true;
+        await refreshOauthGrantSerialized(env.db, env, row.id);
+      }
+      return result;
+    }) as typeof env.ROUTING.put);
+
+    const res = await post(
+      `/admin/email/${projectId}/domains/acme-grant-race.com/revoke-grant`,
+      adminJwt,
+    );
+
+    expect(res.status).toBe(302);
+    const revocations = cfCalls.filter((call) => call.tag === 'oauthRevoke');
+    expect(revocations).toHaveLength(1);
+    // The revoke went through the row lock, so it submitted the ROTATED
+    // head — not the stored-and-consumed original.
+    expect(String(revocations[0]!.body)).toContain('cf-rotated-refresh-dummy-1');
+    expect(String(revocations[0]!.body)).not.toContain(GRANT_REFRESH_TOKEN);
+    expect((await domainRow(projectId, 'acme-grant-race.com'))?.status).toBe('token_revoked');
   });
 
   test('fails the grant revoke without touching CF when the mirror write fails', async () => {

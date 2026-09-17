@@ -432,6 +432,63 @@ describe('emailDomainAdd', () => {
     expect(printed(infoSpy)).toContain('Cancelled — nothing was stored anywhere.');
   });
 
+  it('stops the clipboard watch once Enter wins — no orphaned poll loop', async () => {
+    const addEmailDomain = vi.fn(async () => domainRow({ credential_kind: 'api_token' }));
+    // A constant non-token value: the poll loop keeps watching without verifying.
+    const readClipboard = vi.fn(() => 'clipboard-before');
+    const verifyToken = vi.fn(async (): Promise<CfTokenVerification> => 'active');
+    let resolveEnter!: () => void;
+    const enterPressed = new Promise<void>((resolve) => {
+      resolveEnter = resolve;
+    });
+
+    const run = emailDomainAdd(
+      { addEmailDomain },
+      'prj_1',
+      'acme.com',
+      undefined,
+      addDeps({
+        runGrant: vi.fn(async () => {
+          throw new Error('cf-oauth: cancelled.');
+        }),
+        // The first waitForEnter arms the grant race and never fires (the
+        // grant's failure ends that race); the second arms the watch race and
+        // is fired below, once the poll loop is observably running.
+        waitForEnter: vi
+          .fn()
+          .mockImplementationOnce(neverEnter)
+          .mockImplementationOnce(() => enterPressed),
+        readClipboard,
+        clearClipboard: vi.fn(),
+        verifyToken,
+        pasteToken: vi.fn(async () => LEGACY_TOKEN),
+        openUrl: vi.fn(),
+        // Far past the observation window below, so a still-running loop
+        // would keep polling through it.
+        watchTimeoutMs: 10_000,
+      }),
+    );
+
+    // The watch is running: the snapshot read plus at least one interval poll.
+    await vi.waitFor(() => {
+      expect(readClipboard.mock.calls.length).toBeGreaterThanOrEqual(2);
+    });
+    resolveEnter();
+    await run;
+
+    // Enter switched to the paste path, which POSTed the pasted token.
+    expect(addEmailDomain).toHaveBeenCalledWith('prj_1', {
+      domain: 'acme.com',
+      apiToken: LEGACY_TOKEN,
+    });
+    // The settled race stopped the poll loop: no further clipboard reads (so
+    // no timer chain and no stray verify from the watch) past this point.
+    const readsAtSettle = readClipboard.mock.calls.length;
+    await new Promise((resolve) => setTimeout(resolve, 30)); // ~30 watch intervals
+    expect(readClipboard.mock.calls.length).toBe(readsAtSettle);
+    expect(verifyToken).toHaveBeenCalledTimes(1); // the pasted token's check
+  });
+
   it('refuses a pasted token shaped like another vendor’s, without a network call', async () => {
     const verifyToken = vi.fn();
     const addEmailDomain = vi.fn();

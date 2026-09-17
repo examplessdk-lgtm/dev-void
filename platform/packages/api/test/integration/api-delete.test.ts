@@ -1299,6 +1299,44 @@ describe('DELETE /projects/:id — customer-side email domain cleanup', () => {
     expect(dbProject).toBeUndefined();
     expect(await env.ROUTING.get('email-domain:acme-relay-never.example')).toBeNull();
   });
+
+  it('still revokes the grant for an oauth_grant domain whose relay never deployed', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'mail-relay-never-oauth');
+    mockCfApi();
+    const customerCalls = captureCustomerEmailCleanup({
+      catchAllRule: { enabled: true, workerName: RELAY_WORKER_BASE_NAME },
+    });
+    // A relay-less OAUTH row has no relay or rule to clean, but it owns a
+    // live customer-side grant — skipping it wholesale would orphan that
+    // grant with no platform handle once the cascade takes the row.
+    await seedCustomerEmailDomain(project.id, 'acme-relay-never-oauth.example', {
+      status: 'failed',
+      relayWorkerName: null,
+      credentialKind: 'oauth_grant',
+    });
+
+    const res = await app.fetch(
+      new Request(`http://localhost/projects/${project.id}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${user.jwt}` },
+      }),
+      env,
+    );
+    expect(res.status).toBe(200);
+
+    // Refresh (chain head persisted), no zone/account calls without a
+    // relay, then the revoke LAST against the rotated head.
+    expect(customerCalls.map((call) => call.tag)).toEqual(['oauthToken', 'oauthRevoke']);
+    expect(customerCalls[1]!.form).toMatchObject({
+      token_type_hint: 'refresh_token',
+      token: 'cf-rotated-refresh-dummy-1',
+    });
+
+    const [dbProject] = await env.db.select().from(projects).where(eq(projects.id, project.id));
+    expect(dbProject).toBeUndefined();
+    expect(await env.ROUTING.get('email-domain:acme-relay-never-oauth.example')).toBeNull();
+  });
 });
 
 // ---------------------------------------------------------------------------

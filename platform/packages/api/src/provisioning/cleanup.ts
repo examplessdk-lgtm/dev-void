@@ -16,8 +16,10 @@ import {
   getProjectResources,
   terminateBuildsForProject,
 } from '../db.ts';
-import { revokeOauthGrant } from '../email/cf-customer.ts';
-import { refreshOauthGrantSerialized } from '../email/credential-lease.ts';
+import {
+  refreshOauthGrantSerialized,
+  revokeOauthGrantSerialized,
+} from '../email/credential-lease.ts';
 import { clearEmailDomainMirror, decryptEmailDomainToken } from '../email/domains.ts';
 import type { EmailDomain } from '../email/domains.ts';
 import { removeEmailDomain } from '../email/relay-engine.ts';
@@ -685,10 +687,12 @@ async function revokeProjectEmailSendAuthorization(
  * The grant refresh goes through the row's serialized chain: refresh
  * tokens are single-use, and a teardown that crashes before the cascade
  * must leave the row's credential live for the retry. A row that never
- * deployed a relay has no customer-side state and is skipped — its
- * refresh would burn a single-use rotation for nothing. Never throws: a
- * project delete must not 5xx on the customer's CF account being
- * unreachable or the grant being revoked.
+ * deployed a relay has no CF-side relay or rule to clean, so api_token
+ * rows are skipped — but an oauth_grant row still owns a live
+ * customer-side grant, and that grant must be revoked even when the
+ * relay never deployed. Never throws: a project delete must not 5xx on
+ * the customer's CF account being unreachable or the grant being
+ * revoked.
  */
 async function cleanupProjectEmailDomains(
   context: Context<ApiEnv>,
@@ -728,7 +732,10 @@ async function cleanupProjectEmailDomains(
     console.error(`[cleanup] email domain lookup failed for project=${projectId}:`, err);
   }
   for (const row of rows) {
-    if (!row.relay_worker_name) {
+    // A relay-less api_token row has no customer-side state at all. A
+    // relay-less OAUTH row still owns a live grant: run the teardown so
+    // removeEmailDomain's last step revokes it.
+    if (!row.relay_worker_name && row.credential_kind !== 'oauth_grant') {
       continue;
     }
     try {
@@ -749,7 +756,9 @@ async function cleanupProjectEmailDomains(
           // oauth_grant rows. Refresh rotations must persist through the
           // row's serialized chain while it still exists.
           refreshGrant: () => refreshOauthGrantSerialized(db, context.env, row.id),
-          ...(row.credential_kind === 'oauth_grant' ? { revokeGrant: revokeOauthGrant } : {}),
+          ...(row.credential_kind === 'oauth_grant'
+            ? { revokeGrant: () => revokeOauthGrantSerialized(db, context.env, row.id) }
+            : {}),
         },
       );
       if (failed_steps.length > 0) {

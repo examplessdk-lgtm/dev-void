@@ -1136,8 +1136,13 @@ export async function routeRelayed(
  *   sender outside the sending account's verified zones, which a
  *   customer-domain reply — and a forward from the original external
  *   sender — both are under the PLATFORM's account, so they failed there
- *   after `/email/relay` had already answered 2xx. A forward's header
- *   overrides cannot be merged into the raw MIME here and are dropped.
+ *   after `/email/relay` had already answered 2xx. The same verified-zone
+ *   rule bars that external sender under the CUSTOMER account too, so a
+ *   forward's send_raw `from` is the envelope recipient (the registered-
+ *   domain address that received the mail); the MIME goes byte-identical
+ *   and the real `From:` header is what the destination sees and replies
+ *   to. A forward's header overrides cannot be merged into the raw MIME
+ *   here and are dropped.
  *   Every action has already passed `enactActions`' per-project gates.
  */
 function createRelayedMessage(
@@ -1228,7 +1233,12 @@ function createRelayedMessage(
       reason = r;
     },
     async forward(to: string, _headers?: Headers) {
-      await sendRaw(envelope.from, to, envelope.raw);
+      // send_raw rejects a MAIL FROM outside the account's verified
+      // zones, which the original external sender is — submit the
+      // envelope recipient (the registered-domain address that received
+      // the mail). The MIME bytes are untouched, so the real From:
+      // header is what the destination sees and replies to.
+      await sendRaw(envelope.to, to, envelope.raw);
     },
     // The reply channel `enactSanitized` prefers when present. A native
     // reply needs both the CF email event this lane never had and a genuine

@@ -166,7 +166,11 @@ const HEADER_NAME_RE = /^[!#$%&'*+\-.^_`|~0-9a-z]+$/;
  */
 function parseRelayedHeaders(raw: Uint8Array): Record<string, string> | null {
   const block = new TextDecoder().decode(raw.subarray(0, headerBlockEnd(raw)));
-  const folded = new Map<string, string>();
+  // Pieces per name, each pushed with its join separator — `", "` for a
+  // repeat occurrence, `" "` for a fold — and joined ONCE at the end;
+  // concatenating the accumulated value per line is quadratic CPU on a
+  // block of repeated same-name headers.
+  const folded = new Map<string, Array<string>>();
   // The name the current continuation line extends, or null when the
   // previous line was skipped.
   let current: string | null = null;
@@ -186,7 +190,9 @@ function parseRelayedHeaders(raw: Uint8Array): Record<string, string> | null {
     }
     if (line.startsWith(' ') || line.startsWith('\t')) {
       if (current !== null && headerValueSafe(line)) {
-        folded.set(current, `${folded.get(current) ?? ''} ${line.trim()}`);
+        const pieces = folded.get(current) ?? [];
+        pieces.push(` ${line.trim()}`);
+        folded.set(current, pieces);
       }
       continue;
     }
@@ -201,18 +207,20 @@ function parseRelayedHeaders(raw: Uint8Array): Record<string, string> | null {
       current = null;
       continue;
     }
-    const existing = folded.get(name);
-    if (existing !== undefined) {
-      folded.set(name, `${existing}, ${value}`);
+    const pieces = folded.get(name);
+    if (pieces !== undefined) {
+      pieces.push(`, ${value}`);
     } else {
       if (folded.size >= MAX_INBOUND_HEADERS) {
         return null;
       }
-      folded.set(name, value);
+      folded.set(name, [value]);
     }
     current = name;
   }
-  return Object.fromEntries(folded);
+  return Object.fromEntries(
+    Array.from(folded, ([name, pieces]): [string, string] => [name, pieces.join('')]),
+  );
 }
 
 /** Byte offset where the header block ends (the first empty line). */

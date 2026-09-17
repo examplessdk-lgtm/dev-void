@@ -75,6 +75,9 @@ export function createDb(connectionString: string) {
   return drizzle(connectionString, { schema });
 }
 export type Db = ReturnType<typeof createDb>;
+/** The transaction handle inside `db.transaction` — same query surface, savepoint-nested. */
+export type Tx = Parameters<Parameters<Db['transaction']>[0]>[0];
+export type DbOrTx = Db | Tx;
 
 export const TERMINAL_DEPLOYMENT_STATUSES: Array<DeploymentStatus> = ['live', 'failed', 'canceled'];
 export const CANCELLATION_REQUESTED_DEPLOYMENT_STATUSES: Array<DeploymentStatus> = [

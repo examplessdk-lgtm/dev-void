@@ -669,10 +669,20 @@ export async function emailDomainAdd(
       const interval = deps.watchIntervalMs ?? 1000;
       const snapshotTrimmed = snapshot.trim();
       const enterDuringWatch = createEnterRace(deps.waitForEnter);
+      // Either race outcome must stop the poll branch: an orphaned loop would
+      // keep reading the clipboard on ref'd timers to the deadline (and could
+      // verify a later token-shaped value) after the flow has moved on.
+      let watchSettled = false;
+      let watchTimer: ReturnType<typeof setTimeout> | undefined;
       outcome = await Promise.race([
         (async (): Promise<WatchOutcome> => {
-          while (Date.now() < deadline) {
-            await new Promise((resolve) => setTimeout(resolve, interval));
+          while (!watchSettled && Date.now() < deadline) {
+            await new Promise<void>((resolve) => {
+              watchTimer = setTimeout(resolve, interval);
+            });
+            if (watchSettled) {
+              break;
+            }
             const value = readClip()?.trim();
             if (!value || value === snapshotTrimmed) {
               continue;
@@ -699,7 +709,11 @@ export async function emailDomainAdd(
         })(),
         enterDuringWatch.promise.then((): WatchOutcome => ({ type: 'enter' })),
       ]);
+      watchSettled = true;
       enterDuringWatch.stop();
+      // Unref the timer the losing poll branch is parked on — it wakes once,
+      // sees the flag and exits; it must not keep the process alive meanwhile.
+      watchTimer?.unref();
     }
 
     if (outcome.type === 'token') {

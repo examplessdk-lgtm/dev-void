@@ -32,6 +32,7 @@ import {
   vi,
 } from 'vite-plus/test';
 import { hmacSignState } from '../../src/auth/hmac.ts';
+import { refreshOauthGrantSerialized } from '../../src/email/credential-lease.ts';
 import {
   decryptEmailDomainRelaySecret,
   decryptEmailDomainToken,
@@ -2083,6 +2084,81 @@ describe('DELETE /projects/:id/email/domains/:domain', () => {
     const revocations = callsByTag(stub.calls, 'oauthRevoke');
     expect(revocations).toHaveLength(1);
     expect(revocations[0]!.form!.token).toBe('cf-rotated-refresh-dummy-1');
+    expect(await rowFor(project.id, 'acme.com')).toBeUndefined();
+    expect(await mirrorFor('acme.com')).toBeNull();
+  });
+
+  it('revokes the chain head live at revoke time when a lease refresh interleaves the cleanup', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    const row = await seedEmailDomain(project.id, 'acme.com', {
+      status: 'active',
+      credentialKind: 'oauth_grant',
+      credential: REFRESH_TOKEN,
+    });
+
+    const stub = stubCustomerCf({
+      catchAllRule: { enabled: true, workerName: RELAY_WORKER_BASE_NAME },
+      on: {
+        // A lease rotation landing mid-cleanup: the removal's own rotation
+        // (round 1) is already consumed by the time the revoke runs.
+        catchAllGet: async () => {
+          await refreshOauthGrantSerialized(env.db, env, row.id);
+        },
+      },
+    });
+    const res = await removeDomain(project.id, 'acme.com', user.jwt);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, removed: true });
+    // The interleaved lease's token call records between the ownership
+    // read and the reset.
+    expect(tags(stub.calls)).toEqual([
+      'oauthToken',
+      'catchAllGet',
+      'oauthToken',
+      'catchAll',
+      'scriptDelete',
+      'oauthRevoke',
+    ]);
+    const revocations = callsByTag(stub.calls, 'oauthRevoke');
+    expect(revocations).toHaveLength(1);
+    // The revoke submits the LIVE head (round 2), not the removal's own
+    // rotation — CF answers 200 for a consumed token whether or not the
+    // grant survived, so only the live head makes the 200 mean the chain
+    // is dead.
+    expect(revocations[0]!.form!.token).toBe('cf-rotated-refresh-dummy-2');
+    expect(await rowFor(project.id, 'acme.com')).toBeUndefined();
+    expect(await mirrorFor('acme.com')).toBeNull();
+  });
+
+  it('removes an active oauth row whose removal refresh hits invalid_grant — token_revoked lands mid-removal', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    await seedEmailDomain(project.id, 'acme.com', {
+      status: 'active',
+      credentialKind: 'oauth_grant',
+      credential: REFRESH_TOKEN,
+    });
+
+    const stub = stubCustomerCf({
+      catchAllRule: { enabled: true, workerName: RELAY_WORKER_BASE_NAME },
+      oauth: 'invalid_grant',
+    });
+    const res = await removeDomain(project.id, 'acme.com', user.jwt);
+    expect(res.status).toBe(200);
+    // invalid_grant persisted token_revoked inside the removal, so the
+    // destructive failure takes the SAME unconditional-delete path as a
+    // row revoked before the request — keeping it would strand a stale
+    // active mirror with status-GET repair suppressed (failed_step
+    // 'remove').
+    expect(await res.json()).toEqual({
+      ok: true,
+      removed: true,
+      failed_steps: ['delete_relay', 'catch_all'],
+    });
+    // The refresh failed before any customer-zone call, and invalid_grant
+    // skips the revoke — CF already killed the grant.
+    expect(tags(stub.calls)).toEqual(['oauthToken']);
     expect(await rowFor(project.id, 'acme.com')).toBeUndefined();
     expect(await mirrorFor('acme.com')).toBeNull();
   });

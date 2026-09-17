@@ -446,6 +446,49 @@ describe('POST /email/relay — dispatch', () => {
     expect(envelope.headers.received).toBe('first, second');
   });
 
+  it('joins repeated occurrences of one header name with ", "', async () => {
+    const kv = await relayKv();
+    const { env, emailFn } = createMockEnv(kv, { emailReturn: [] });
+    const mime =
+      'From: sender@example.com\r\n' +
+      'X-Loop: one\r\n' +
+      'X-Loop: two\r\n' +
+      'X-Loop: three\r\n' +
+      'Subject: hi\r\n\r\nbody\r\n';
+    const res = await postRelay(env as never, { mime });
+    expect(res.status).toBe(200);
+    const envelope = emailFn.mock.calls[0]?.[0] as { headers: Record<string, string> };
+    expect(envelope.headers['x-loop']).toBe('one, two, three');
+  });
+
+  it('unfolds multi-line continuations onto the header they extend', async () => {
+    const kv = await relayKv();
+    const { env, emailFn } = createMockEnv(kv, { emailReturn: [] });
+    const mime =
+      'From: sender@example.com\r\n' +
+      'X-Folded: one\r\n' +
+      '\ttwo\r\n' +
+      '   three\r\n' +
+      'Subject: hi\r\n\r\nbody\r\n';
+    const res = await postRelay(env as never, { mime });
+    expect(res.status).toBe(200);
+    const envelope = emailFn.mock.calls[0]?.[0] as { headers: Record<string, string> };
+    expect(envelope.headers['x-folded']).toBe('one two three');
+  });
+
+  it('parses a large repeated-header block (one name, many occurrences)', async () => {
+    const kv = await relayKv();
+    const { env, emailFn } = createMockEnv(kv, { emailReturn: [] });
+    // One DISTINCT name (under MAX_INBOUND_HEADERS) repeated 50k times:
+    // the accumulation must not concatenate the whole value per line.
+    const occurrences = 50_000;
+    const mime = 'From: sender@example.com\r\n' + 'X-Loop: v\r\n'.repeat(occurrences) + '\r\n';
+    const res = await postRelay(env as never, { mime });
+    expect(res.status).toBe(200);
+    const envelope = emailFn.mock.calls[0]?.[0] as { headers: Record<string, string> };
+    expect(envelope.headers['x-loop']).toBe(new Array(occurrences).fill('v').join(', '));
+  });
+
   it('a handler reject action answers non-2xx so the relay setRejects', async () => {
     const kv = await relayKv();
     const { env } = createMockEnv(kv, {
@@ -487,7 +530,9 @@ describe('POST /email/relay — dispatch', () => {
     expect(env.SEND_EMAIL.send).not.toHaveBeenCalled();
 
     // One REST send_raw to the CUSTOMER account, leased credential as
-    // Bearer, original sender + original MIME bytes preserved.
+    // Bearer. The submitted sender is the envelope RECIPIENT — the
+    // customer account verified only its own domain, so the original
+    // external sender would be rejected as MAIL FROM.
     expect(calls).toHaveLength(1);
     expect(calls[0]?.url).toBe(
       'https://api.cloudflare.com/client/v4/accounts/acct_customer/email/sending/send_raw',
@@ -495,8 +540,10 @@ describe('POST /email/relay — dispatch', () => {
     const sendHeaders = new Headers(calls[0]?.init.headers);
     expect(sendHeaders.get('authorization')).toBe(`Bearer ${LEASED}`);
     expect(JSON.parse(calls[0]?.init.body as string)).toEqual({
-      from: 'sender@example.com',
+      // Owned address on the registered domain, not the external sender.
+      from: 'support+T-42@acme.com',
       recipients: ['admin@example.com'],
+      // Byte-identical MIME: the real From: header is preserved.
       mime_message: MIME,
     });
   });

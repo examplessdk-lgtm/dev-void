@@ -1134,12 +1134,12 @@ describe('removeEmailDomain', () => {
     expect(methods(calls)).not.toContain('relayScriptExists');
   });
 
-  it('revokes the rotated grant after the CF cleanup when the refresh succeeded', async () => {
+  it('revokes the grant after the CF cleanup when the refresh succeeded', async () => {
     const { client, calls } = makeFakeClient({
       catchAll: { enabled: true, workerName: RELAY_WORKER_BASE_NAME },
     });
     const refreshed: Array<string> = [];
-    const revoked: Array<string> = [];
+    let revoked = 0;
 
     const result = await removeEmailDomain(
       { ...removeInput, row: { ...removeInput.row, credential_kind: 'oauth_grant' } },
@@ -1150,8 +1150,10 @@ describe('removeEmailDomain', () => {
           expect(calls).toEqual([]);
           return { accessToken: 'cf-access-dummy', refreshToken: 'cf-rotated-dummy' };
         },
-        revokeGrant: async (refreshToken: string) => {
-          revoked.push(refreshToken);
+        // Zero-arg: the dep revokes the row's LIVE chain head; which token
+        // that is belongs to the serialized helper, not the engine.
+        revokeGrant: async () => {
+          revoked += 1;
           // Revocation is the LAST step — the CF cleanup already ran.
           expect(methods(calls)).toEqual(['getCatchAll', 'resetCatchAll', 'deleteRelayScript']);
         },
@@ -1160,8 +1162,7 @@ describe('removeEmailDomain', () => {
 
     expect(result.failed_steps).toEqual([]);
     expect(refreshed).toEqual([CREDENTIAL]);
-    // The ROTATED token is revoked — the consumed original is already dead.
-    expect(revoked).toEqual(['cf-rotated-dummy']);
+    expect(revoked).toBe(1);
   });
 
   it("appends 'revoke_grant' to failed_steps when the revocation rejects, without throwing", async () => {
@@ -1204,9 +1205,9 @@ describe('removeEmailDomain', () => {
     expect(calls).toEqual([]);
   });
 
-  it('revokes the ORIGINAL stored credential when the refresh fails transiently', async () => {
+  it('revokes when the refresh fails transiently — the stored token may still be live', async () => {
     const { client, calls } = makeFakeClient();
-    const revoked: Array<string> = [];
+    let revoked = 0;
 
     const result = await removeEmailDomain(
       { ...removeInput, row: { ...removeInput.row, credential_kind: 'oauth_grant' } },
@@ -1214,15 +1215,15 @@ describe('removeEmailDomain', () => {
         refreshGrant: async () => {
           throw new OAuthGrantError('temporarily_unavailable', 503);
         },
-        revokeGrant: async (refreshToken: string) => {
-          revoked.push(refreshToken);
+        revokeGrant: async () => {
+          revoked += 1;
         },
       }),
     );
 
     // The early-return shape is unchanged.
     expect(result.failed_steps).toEqual(['delete_relay', 'catch_all']);
-    expect(revoked).toEqual([CREDENTIAL]);
+    expect(revoked).toBe(1);
     expect(calls).toEqual([]);
   });
 
