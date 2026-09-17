@@ -1164,7 +1164,7 @@ const app = new Hono<ApiEnv>()
     // write-only). The row and credential are re-read inside the row
     // lock, so a replace that lands while this request waits is synced
     // as the NEW credential, never verified as the superseded one.
-    return syncEmailDomainAndApply(context, row.id, proxyOriginForEmail(context.env));
+    return syncEmailDomainAndApply(context, projectId, row.id, proxyOriginForEmail(context.env));
   })
 
   .delete('/:id/email/domains/:domain', async (context) => {
@@ -1189,67 +1189,115 @@ const app = new Hono<ApiEnv>()
 
     const force = context.req.query('force') === '1';
 
-    // Remove: best-effort CF cleanup (catch-all reset, relay DELETE, grant
-    // revoke LAST), then the row and the mirror key. removeEmailDomain
-    // never throws; a decrypt failure skips CF cleanup entirely. A failed
-    // DESTRUCTIVE step (catch-all or relay delete) KEEPS the row so the
-    // operator can retry — unless forced, or the grant is already dead:
-    // token_revoked rows are always deleted (CF may be unreachable and
-    // keeping buys no retry leverage — re-add is the renewal path), and a
-    // 'revoke_grant'-only failure still deletes (a stranded grant breaks
-    // no mail).
-    let failedSteps: ReadonlyArray<string>;
-    try {
-      const credential = await decryptEmailDomainToken(context.env, projectId, row.domain, row);
-      const result = await removeEmailDomain(
-        {
-          row: {
-            credential_kind: row.credential_kind,
-            account_id: row.account_id,
-            relay_worker_name: row.relay_worker_name,
-            zone_id: row.zone_id,
+    // Remove under the row's serialized lock, with the row and credential
+    // re-read inside it: a replace that commits between this request's
+    // entry read and the cleanup must not have its fresh credential
+    // orphaned by the row delete — the replace never invalidates an old
+    // api_token, so cleanup built on a stale snapshot would SUCCEED, the
+    // row would be deleted, and a newly committed oauth grant's only
+    // handle would go with it (live at CF with its broad scopes,
+    // revocable by nobody). The lock serializes with the replace's commit
+    // and with lease refreshes; the serialized helpers take THIS tx —
+    // passing the pool handle here would deadlock.
+    //
+    // removeEmailDomain never throws; a decrypt failure skips CF cleanup
+    // entirely. A failed DESTRUCTIVE step (catch-all or relay delete)
+    // KEEPS the row so the operator can retry — unless forced, or the
+    // grant is already dead: token_revoked rows are always deleted (CF
+    // may be unreachable and keeping buys no retry leverage — re-add is
+    // the renewal path), and a 'revoke_grant'-only failure still deletes
+    // (a stranded grant breaks no mail).
+    type Removal =
+      | Readonly<{ kind: 'removed'; failedSteps: ReadonlyArray<string> }>
+      | Readonly<{ kind: 'kept'; failedSteps: ReadonlyArray<string> }>
+      | Readonly<{ kind: 'vanished' }>;
+    const removal: Removal = await withEmailDomainRowLock(db, row.id, async (tx) => {
+      const locked = await tx
+        .select()
+        .from(emailDomains)
+        .where(eq(emailDomains.id, row.id))
+        .limit(1);
+      const current = locked[0];
+      if (!current) {
+        // Teardown's cascade can take the row mid-request — the
+        // idempotent delete branch below proceeds.
+        return { kind: 'vanished' };
+      }
+      let failedSteps: ReadonlyArray<string>;
+      try {
+        const credential = await decryptEmailDomainToken(
+          context.env,
+          projectId,
+          current.domain,
+          current,
+        );
+        const result = await removeEmailDomain(
+          {
+            row: {
+              credential_kind: current.credential_kind,
+              account_id: current.account_id,
+              relay_worker_name: current.relay_worker_name,
+              zone_id: current.zone_id,
+            },
+            credential,
           },
-          credential,
-        },
-        {
-          // Refresh rotations must persist through the row's serialized
-          // chain while the row lives — in the keep-row world a failed
-          // removal KEEPS the row, and a bricked rotation would kill the
-          // retry. The revoke likewise goes through the chain: it revokes
-          // the row's LIVE head under the row lock, so a lease refresh
-          // interleaved with the cleanup cannot leave a rotated grant
-          // orphaned behind a 200-for-a-consumed-token.
-          refreshGrant: () => refreshOauthGrantSerialized(db, context.env, row.id),
-          ...(row.credential_kind === 'oauth_grant'
-            ? { revokeGrant: () => revokeOauthGrantSerialized(db, context.env, row.id) }
-            : {}),
-        },
-      );
-      failedSteps = result.failed_steps;
-    } catch (err) {
-      console.error('[email] domain remove credential decrypt failed:', err);
-      failedSteps = ['delete_relay', 'catch_all'];
-    }
+          {
+            // Refresh rotations must persist through the row's serialized
+            // chain while the row lives — in the keep-row world a failed
+            // removal KEEPS the row, and a bricked rotation would kill
+            // the retry. The revoke likewise goes through the chain: it
+            // revokes the row's LIVE head, so a lease refresh that
+            // committed before this removal cannot leave a rotated grant
+            // orphaned behind a 200-for-a-consumed-token.
+            refreshGrant: () => refreshOauthGrantSerialized(tx, context.env, current.id),
+            ...(current.credential_kind === 'oauth_grant'
+              ? { revokeGrant: () => revokeOauthGrantSerialized(tx, context.env, current.id) }
+              : {}),
+          },
+        );
+        failedSteps = result.failed_steps;
+      } catch (err) {
+        console.error('[email] domain remove credential decrypt failed:', err);
+        failedSteps = ['delete_relay', 'catch_all'];
+      }
 
-    const destructive = failedSteps.some((s) => s === 'catch_all' || s === 'delete_relay');
-    // Decide on the CURRENT status, not the pre-removal snapshot: an
-    // invalid_grant inside the removal's refresh already persisted
-    // token_revoked, and a now-revoked row takes the unconditional-delete
-    // path exactly like one revoked before the request — keeping it would
-    // leave its stale active mirror accepting inbound with repair
-    // suppressed. A vanished row (teardown cascade) proceeds to the
-    // idempotent delete branch.
-    const currentStatus = (await getEmailDomainRowById(db, row.id))?.status;
-    if (destructive && !force && currentStatus !== undefined && currentStatus !== 'token_revoked') {
-      await markEmailDomainRemovalFailed(db, row.id, failedSteps);
-      return context.json({ ok: false, removed: false, failed_steps: failedSteps }, 200);
-    }
+      const destructive = failedSteps.some((s) => s === 'catch_all' || s === 'delete_relay');
+      // Decide on the CURRENT status, not the pre-removal snapshot: an
+      // invalid_grant inside the removal's refresh persisted
+      // token_revoked through THIS tx, and a now-revoked row takes the
+      // unconditional-delete path exactly like one revoked before the
+      // request — keeping it would leave its stale active mirror
+      // accepting inbound with repair suppressed. The row cannot vanish
+      // here — this tx holds its lock.
+      const currentStatus = (
+        await tx
+          .select({ status: emailDomains.status })
+          .from(emailDomains)
+          .where(eq(emailDomains.id, current.id))
+          .limit(1)
+      )[0]?.status;
+      if (destructive && !force && currentStatus !== 'token_revoked') {
+        await markEmailDomainRemovalFailed(tx, current.id, failedSteps);
+        return { kind: 'kept', failedSteps };
+      }
 
-    // Mirror key BEFORE the row — never destroy the record a retry would
-    // re-derive the mirror from (the destinations DELETE inversion). A KV
-    // failure 500s here with the row intact, so the retry can finish it.
-    await clearEmailDomainMirror(context.env.ROUTING, row.domain);
-    await db.delete(emailDomains).where(eq(emailDomains.id, row.id));
+      // Mirror key BEFORE the row — never destroy the record a retry
+      // would re-derive the mirror from (the destinations DELETE
+      // inversion). A KV failure rolls the transaction back with the row
+      // intact, so the retry can finish it.
+      await clearEmailDomainMirror(context.env.ROUTING, current.domain);
+      await tx.delete(emailDomains).where(eq(emailDomains.id, current.id));
+      return { kind: 'removed', failedSteps };
+    });
+
+    if (removal.kind === 'kept') {
+      return context.json({ ok: false, removed: false, failed_steps: removal.failedSteps }, 200);
+    }
+    if (removal.kind === 'vanished') {
+      // Teardown already cleared the mirror; the re-clear is idempotent.
+      await clearEmailDomainMirror(context.env.ROUTING, row.domain);
+    }
+    const failedSteps = removal.kind === 'removed' ? removal.failedSteps : [];
     return context.json({
       ok: true,
       removed: true,
@@ -1612,16 +1660,17 @@ async function compensateCheckpointDeploy(
 
 /**
  * The sync sequence — relay redeploy, secret rotation, row apply, mirror
- * publication — under the credential chain's row lock, shared by the sync
- * route and the replace path's healthy-row branch. The lock must span the
- * worker secret PUT, the row persist, and the mirror PUT: two overlapping
- * syncs would otherwise interleave them (A-put, B-put, B-apply, A-apply)
- * and leave the worker or the mirror holding a secret the other side no
+ * publication — under one transaction holding the project lock and then
+ * the credential chain's row lock, shared by the sync route and the
+ * replace path's healthy-row branch. The row lock must span the worker
+ * secret PUT, the row persist, and the mirror PUT: two overlapping syncs
+ * would otherwise interleave them (A-put, B-put, B-apply, A-apply) and
+ * leave the worker or the mirror holding a secret the other side no
  * longer names — inbound authentication fails until the next sync. The
- * lock is the lease chain's own (`withEmailDomainRowLock`), held across
- * the CF calls exactly like the refresh holds it across the token
- * round-trip; concurrent sends on an oauth_grant domain wait out the
- * sync, which is rare and manual.
+ * row FOR UPDATE is the lease chain's own, held across the CF calls
+ * exactly like the refresh holds it across the token round-trip;
+ * concurrent sends on an oauth_grant domain wait out the sync, which is
+ * rare and manual.
  *
  * The row — credential included — is RE-READ inside the lock: a replace
  * that committed while this request waited for the lock is synced as its
@@ -1635,20 +1684,53 @@ async function compensateCheckpointDeploy(
  */
 async function syncEmailDomainAndApply(
   context: Context<ApiEnv>,
+  projectId: string,
   rowId: string,
   proxyOrigin: string,
 ): Promise<Response> {
   const db = context.get('db');
-  let outcome: {
-    result: Awaited<ReturnType<typeof syncEmailDomain>>;
-    applied: EmailDomain;
-  };
+  let outcome:
+    | Readonly<{
+        kind: 'ok';
+        result: Awaited<ReturnType<typeof syncEmailDomain>>;
+        applied: EmailDomain;
+      }>
+    | Readonly<{ kind: 'project_gone' }>
+    | Readonly<{ kind: 'project_deleting' }>;
   try {
-    outcome = await withEmailDomainRowLock(db, rowId, async (tx) => {
+    outcome = await db.transaction(async (tx) => {
+      // The project lock comes FIRST — teardown's own order
+      // (lockAndMarkDeleting, deleteProjectCascade and the status route's
+      // mirror-repair fence all go project → row) — so a sync serializes
+      // with teardown instead of racing it. Without this recheck a sync
+      // that passed the route's entry guard could redeploy the relay and
+      // republish the mirror AFTER teardown cleared them, and the cascade
+      // would then delete the row, leaving a recreated mirror, worker and
+      // catch-all with no database handle. Holding the project lock
+      // across the CF calls blocks a teardown for the duration — the same
+      // tradeoff the mirror-repair fence makes, and safe: when the sync
+      // commits first, teardown's later clear/remove/cascade sees
+      // everything it created.
+      const projectRows = await tx
+        .select({ status: projects.status })
+        .from(projects)
+        .where(eq(projects.id, projectId))
+        .for('update')
+        .limit(1);
+      const project = projectRows[0];
+      if (!project) {
+        return { kind: 'project_gone' } as const;
+      }
+      if (project.status === 'deleting') {
+        return { kind: 'project_deleting' } as const;
+      }
+      // The row lock is the lease chain's own FOR UPDATE — refreshes,
+      // revokes, replaces and removals serialize on it exactly as before.
       const locked = await tx
         .select()
         .from(emailDomains)
         .where(eq(emailDomains.id, rowId))
+        .for('update')
         .limit(1);
       const current = locked[0];
       if (!current) {
@@ -1657,7 +1739,6 @@ async function syncEmailDomainAndApply(
         throw new Error('email_domains row vanished mid-sync');
       }
       const domain = current.domain;
-      const projectId = current.project_id;
       const credential = await decryptEmailDomainToken(context.env, projectId, domain, current);
       const result = await syncEmailDomain(
         {
@@ -1741,7 +1822,7 @@ async function syncEmailDomainAndApply(
       // this lock, so hashes land in the same order the secrets were
       // written to the worker.
       await writeEmailDomainMirror(context.env.ROUTING, applied, relaySecretSha256);
-      return { result, applied };
+      return { kind: 'ok', result, applied } as const;
     });
   } catch (err) {
     if (isUniqueViolation(err)) {
@@ -1761,6 +1842,12 @@ async function syncEmailDomainAndApply(
     throw err;
   }
 
+  if (outcome.kind === 'project_gone') {
+    return context.json({ error: 'project not found' }, 404);
+  }
+  if (outcome.kind === 'project_deleting') {
+    return context.json({ error: 'Project is being deleted' }, 409);
+  }
   return context.json(
     {
       ...serializeEmailDomain(outcome.applied, outcome.result.error),
@@ -1864,7 +1951,7 @@ async function replaceEmailDomainCredential(
     // The row in the DB already carries the NEW credential — the sync
     // re-reads it under the row lock, so the engine always sees the
     // committed kind.
-    return syncEmailDomainAndApply(context, existing.id, proxyOrigin);
+    return syncEmailDomainAndApply(context, projectId, existing.id, proxyOrigin);
   }
 
   // Setup never finished — re-run the full engine with a fresh relay

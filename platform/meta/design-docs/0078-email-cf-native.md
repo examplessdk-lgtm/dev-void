@@ -473,13 +473,17 @@ path.
   never compensates. The sync route's live-status flip can also 23505 (a
   `failed` row rejoining the live set while a winner holds its zone) —
   mapped to the same 409 zone message, deliberately without compensation.
-- **Sync serializes the whole rotation under the credential row lock.**
-  Relay redeploy, secret PUT, row apply and mirror publication run inside
-  `withEmailDomainRowLock`, and the row — credential included — is re-read
-  under the lock: a credential replace that lands while a sync waits is
-  synced as the new credential, never verified as the superseded one, and
-  two overlapping syncs publish the worker secret and its mirror hash in
-  the same order. A mirror PUT failure rolls the row apply back with it.
+- **Sync serializes the whole rotation under the project and credential
+  row locks, in teardown's order.** Relay redeploy, secret PUT, row apply
+  and mirror publication run in one transaction that takes the project row
+  FOR UPDATE first — refusing when teardown has marked it `deleting`, so a
+  sync that raced the route's entry guard can never redeploy or republish
+  state teardown already cleared — and then the domain row FOR UPDATE, the
+  lease chain's own. The row — credential included — is re-read under the
+  lock: a credential replace that lands while a sync waits is synced as
+  the new credential, never verified as the superseded one, and two
+  overlapping syncs publish the worker secret and its mirror hash in the
+  same order. A mirror PUT failure rolls the row apply back with it.
 
 ### Removal and teardown
 
@@ -502,6 +506,15 @@ false, failed_steps }`. The owner retries once the CF-side problem is
   not be "repaired" against a removal the operator is about to finish. The
   CLI mirrors the contract: `--force`, exit 1 with retry guidance on
   `removed: false`, and manual-cleanup hints on a forced removal.
+- **Removal runs under the same row lock.** The owner DELETE re-reads the
+  row — credential included — inside the lease chain's FOR UPDATE and
+  builds its cleanup from what the row holds at lock time: a replace that
+  commits while a removal waits is removed as the NEW credential (its
+  grant revoked), never orphaned by a row delete built on the stale
+  snapshot — the replace never invalidates an old API token, so the stale
+  cleanup would have succeeded and the new grant's only handle would have
+  been deleted with the row. Mirror clear and row delete stay inside the
+  same transaction; a KV failure rolls the row delete back with it.
 - **Project teardown cleans the customer side.** After the KV mirrors are
   revoked (fail-closed) and before the DB cascade, teardown runs
   `removeEmailDomain` for each registered domain with a deployed relay,

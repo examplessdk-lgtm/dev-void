@@ -32,6 +32,7 @@ import {
   vi,
 } from 'vite-plus/test';
 import { hmacSignState } from '../../src/auth/hmac.ts';
+import type { Db } from '../../src/db.ts';
 import {
   leaseEmailDomainCredential,
   refreshOauthGrantSerialized,
@@ -67,6 +68,7 @@ import {
   JWT_SECRET,
   type TestEnv,
 } from './helpers.ts';
+import { setTestDb } from './setup.ts';
 
 let env: TestEnv;
 
@@ -76,6 +78,47 @@ const API_TOKEN_REPLACEMENT = 'cf-api-token-replacement-dummy';
 const REFRESH_TOKEN = 'cf-refresh-token-dummy';
 const RELAY_SECRET = 'relay-secret-dummy';
 const ZONE = { id: 'zone_1', name: 'acme.com', accountId: 'acct_1' };
+
+/**
+ * Pause the app's FIRST `db.transaction` until released — the seam for
+ * landing a committed write (a replace, a teardown status flip) between a
+ * route's unlocked entry checks and its serialized section. PGlite's
+ * single connection forbids touching the db from inside an open
+ * transaction, so the write must happen BEFORE the tx starts: the proxy
+ * pauses prior to delegating, the test writes through the unwrapped
+ * `realDb`, then releases. Same pattern as cli-version-gate.test.ts.
+ */
+function pauseFirstTransaction(realDb: Db): {
+  wrappedDb: Db;
+  reached: Promise<void>;
+  release: () => void;
+} {
+  const realTransaction = realDb.transaction.bind(realDb);
+  let releaseFn: (() => void) | undefined;
+  let reachedFn: (() => void) | undefined;
+  const reached = new Promise<void>((r) => {
+    reachedFn = r;
+  });
+  let fired = false;
+  const wrappedDb = new Proxy(realDb, {
+    get(target, prop, receiver) {
+      if (prop === 'transaction') {
+        return (async (fn: never) => {
+          if (!fired) {
+            fired = true;
+            reachedFn?.();
+            await new Promise<void>((r) => {
+              releaseFn = r;
+            });
+          }
+          return realTransaction(fn);
+        }) as unknown as typeof realDb.transaction;
+      }
+      return Reflect.get(target, prop, receiver);
+    },
+  }) as Db;
+  return { wrappedDb, reached, release: () => releaseFn?.() };
+}
 
 beforeAll(async () => {
   env = await setupEnv();
@@ -2104,6 +2147,43 @@ describe('POST /projects/:id/email/domains/:domain/sync', () => {
     expect((await mirrorFor('acme.com'))!.relaySecretSha256).toBe(beforeMirror.relaySecretSha256);
   });
 
+  it('refuses the sync when teardown marks the project deleting before the lock', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    await addActiveDomain(project.id, user.jwt);
+    const before = (await rowFor(project.id, 'acme.com'))!;
+    const beforeMirror = (await mirrorFor('acme.com'))!;
+
+    // Teardown's status flip lands between the route's entry guard and
+    // the serialized section: the in-transaction project recheck must
+    // refuse the sync — otherwise the relay would be redeployed and the
+    // mirror republished AFTER teardown cleared them, and the cascade
+    // would delete the row, leaving a recreated mirror, worker and
+    // catch-all with no database handle.
+    const realDb = env.db;
+    const gate = pauseFirstTransaction(realDb);
+    setTestDb(gate.wrappedDb);
+    try {
+      const stub = stubCustomerCf({ zones: { 'acme.com': ZONE } });
+      const reqPromise = syncDomain(project.id, 'acme.com', user.jwt);
+      await gate.reached;
+      await realDb.update(projects).set({ status: 'deleting' }).where(eq(projects.id, project.id));
+      gate.release();
+
+      const res = await reqPromise;
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual({ error: 'Project is being deleted' });
+      // Refused before the engine ran — no CF call, no mirror write.
+      expect(stub.calls).toEqual([]);
+      const after = (await rowFor(project.id, 'acme.com'))!;
+      expect(after.relay_ciphertext).toBe(before.relay_ciphertext);
+      expect(after.status).toBe(before.status);
+      expect((await mirrorFor('acme.com'))!.relaySecretSha256).toBe(beforeMirror.relaySecretSha256);
+    } finally {
+      setTestDb(realDb);
+    }
+  });
+
   it('reports a foreign catch-all without overwriting it', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id);
@@ -2386,7 +2466,7 @@ describe('DELETE /projects/:id/email/domains/:domain', () => {
     expect(await mirrorFor('acme.com')).toBeNull();
   });
 
-  it('revokes the chain head live at revoke time when a lease refresh interleaves the cleanup', async () => {
+  it('serializes a lease refresh behind the removal — the revoke submits the live head', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id);
     const row = await seedEmailDomain(project.id, 'acme.com', {
@@ -2395,38 +2475,106 @@ describe('DELETE /projects/:id/email/domains/:domain', () => {
       credential: REFRESH_TOKEN,
     });
 
+    // The removal holds the row lock across the cleanup, so a lease
+    // refresh fired mid-cleanup cannot interleave: its transaction queues
+    // behind the removal's and finds the row gone afterwards. Fired
+    // without awaiting inside the hook — awaiting would deadlock PGlite's
+    // single connection against the removal's open transaction.
+    let leaseAttempt: Promise<'refreshed' | unknown> | undefined;
     const stub = stubCustomerCf({
       catchAllRule: { enabled: true, workerName: RELAY_WORKER_BASE_NAME },
       on: {
-        // A lease rotation landing mid-cleanup: the removal's own rotation
-        // (round 1) is already consumed by the time the revoke runs.
-        catchAllGet: async () => {
-          await refreshOauthGrantSerialized(env.db, env, row.id);
+        catchAllGet: () => {
+          leaseAttempt = refreshOauthGrantSerialized(env.db, env, row.id).then(
+            () => 'refreshed' as const,
+            (err: unknown) => err,
+          );
         },
       },
     });
     const res = await removeDomain(project.id, 'acme.com', user.jwt);
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true, removed: true });
-    // The interleaved lease's token call records between the ownership
-    // read and the reset.
+    // One rotation (the removal's own); the lease's token call could not
+    // have interleaved — its transaction had not started yet.
     expect(tags(stub.calls)).toEqual([
       'oauthToken',
       'catchAllGet',
-      'oauthToken',
       'catchAll',
       'scriptDelete',
       'oauthRevoke',
     ]);
     const revocations = callsByTag(stub.calls, 'oauthRevoke');
     expect(revocations).toHaveLength(1);
-    // The revoke submits the LIVE head (round 2), not the removal's own
-    // rotation — CF answers 200 for a consumed token whether or not the
-    // grant survived, so only the live head makes the 200 mean the chain
-    // is dead.
-    expect(revocations[0]!.form!.token).toBe('cf-rotated-refresh-dummy-2');
+    // The removal's own rotation IS the live head at revoke time — the
+    // lock makes the round-2 interleaving impossible, so revoking it
+    // kills the chain.
+    expect(revocations[0]!.form!.token).toBe('cf-rotated-refresh-dummy-1');
+    // The queued refresh ran after the commit and found the row gone.
+    const leaseOutcome = await leaseAttempt;
+    expect(leaseOutcome).toBeInstanceOf(Error);
+    expect(String(leaseOutcome)).toContain('vanished mid-refresh');
     expect(await rowFor(project.id, 'acme.com')).toBeUndefined();
     expect(await mirrorFor('acme.com')).toBeNull();
+  });
+
+  it('revokes the replacement credential when a replace commits before the removal lock', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    await addActiveDomain(project.id, user.jwt);
+    const row = (await rowFor(project.id, 'acme.com'))!;
+
+    // A replace committing an oauth_grant between the DELETE's entry read
+    // and its row lock: the removal must clean up with the credential the
+    // row holds at LOCK time — and revoke that grant — never delete the
+    // row over a stale api_token snapshot and orphan the grant (the
+    // replace never invalidates an old api_token, so the stale cleanup
+    // would have SUCCEEDED).
+    const realDb = env.db;
+    const gate = pauseFirstTransaction(realDb);
+    setTestDb(gate.wrappedDb);
+    try {
+      const stub = stubCustomerCf({
+        catchAllRule: { enabled: true, workerName: RELAY_WORKER_BASE_NAME },
+      });
+      const reqPromise = Promise.resolve(removeDomain(project.id, 'acme.com', user.jwt));
+      const winner = await Promise.race([
+        gate.reached.then(() => 'tx' as const),
+        reqPromise.then(() => 'request' as const),
+      ]);
+      if (winner === 'tx') {
+        // The replace's commit lands while the removal waits for the lock.
+        const enc = await encryptEmailDomainToken(env, project.id, 'acme.com', REFRESH_TOKEN);
+        await realDb
+          .update(emailDomains)
+          .set({
+            credential_kind: 'oauth_grant',
+            token_ciphertext: enc.ciphertext,
+            token_iv: enc.iv,
+            token_key_version: enc.keyVersion,
+            token_id: null,
+            token_expires_on: null,
+          })
+          .where(eq(emailDomains.id, row.id));
+        gate.release();
+      }
+      const res = await reqPromise;
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ ok: true, removed: true });
+      // The cleanup ran with the replacement grant — refreshed through
+      // the row, revoked LAST — not orphaned by the row delete.
+      expect(tags(stub.calls)).toEqual([
+        'oauthToken',
+        'catchAllGet',
+        'catchAll',
+        'scriptDelete',
+        'oauthRevoke',
+      ]);
+      expect(await rowFor(project.id, 'acme.com')).toBeUndefined();
+      expect(await mirrorFor('acme.com')).toBeNull();
+    } finally {
+      setTestDb(realDb);
+    }
   });
 
   it('removes an active oauth row whose removal refresh hits invalid_grant — token_revoked lands mid-removal', async () => {

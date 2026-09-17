@@ -25,7 +25,7 @@
  */
 
 import { eq, sql, type InferSelectModel } from 'drizzle-orm';
-import type { Db } from '../db.ts';
+import type { Db, DbOrTx } from '../db.ts';
 import type { ApiEnv } from '../env.ts';
 import { decryptProjectSecret, encryptProjectSecret } from '../project-secrets.ts';
 import { emailDomains } from '../schema.ts';
@@ -243,7 +243,7 @@ export async function applyEmailDomainDeployCheckpoint(
  * `failed_step === 'remove'`.
  */
 export async function markEmailDomainRemovalFailed(
-  db: Db,
+  db: DbOrTx,
   rowId: string,
   failedSteps: ReadonlyArray<string>,
 ): Promise<void> {
