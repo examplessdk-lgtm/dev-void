@@ -317,6 +317,18 @@ app.post('/github-oidc', async (context) => {
     return context.json({ error: 'project is being deleted' }, 409);
   }
   const build = result.build;
+  // The build helper re-reads and locks the project, so `build.user_id` is the
+  // billing owner that was current at admission even if ownership changed after
+  // the earlier connection lookup. Use that authoritative owner for token
+  // identity and timeout sizing.
+  const billingOwner = await getUser(db, build.user_id);
+  if (!billingOwner) {
+    await markBuildTerminalIfActive(db, build.id, 'cancelled', {
+      error: 'project owner no longer exists',
+      completedAt: new Date().toISOString(),
+    });
+    return context.json({ error: 'connection owner not found' }, 401);
+  }
 
   // Post-create freshness re-check, closing the compare→insert TOCTOU: a newer
   // push landing between the pre-check above and the build INSERT is invisible
@@ -425,14 +437,14 @@ app.post('/github-oidc', async (context) => {
   const token = await signDeployToken(
     {
       projectId: connection.project_id,
-      userId: connection.user_id,
-      login: user.login,
+      userId: build.user_id,
+      login: billingOwner.login,
       buildId: build.id,
     },
     context.env.JWT_SECRET,
     {
       ttlSeconds: deployTokenTtlSecondsForBuildMinutes(
-        getPlanLimits(user.plan).buildTimeoutMinutes,
+        getPlanLimits(billingOwner.plan).buildTimeoutMinutes,
       ),
     },
   );

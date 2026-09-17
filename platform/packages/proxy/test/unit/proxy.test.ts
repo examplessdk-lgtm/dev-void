@@ -86,8 +86,8 @@ function createMockKv(data: Record<string, string> = {}) {
 }
 
 /**
- * User-to-project ownership map used by the mock API for verify-owner checks.
- * Default: user_1 owns proj_1, proj_42, proj_99, and p.
+ * User-to-project deploy-access map used by the mock API. The endpoint retains
+ * its legacy verify-owner URL while the API now resolves roles dynamically.
  */
 const DEFAULT_OWNERSHIP: Record<string, Array<string>> = {
   user_1: ['proj_1', 'proj_42', 'proj_99', 'p'],
@@ -104,7 +104,7 @@ function createMockApi(
     const url = typeof input === 'string' ? input : input.url;
     const body = init?.body ?? (input instanceof Request ? await input.text() : undefined);
 
-    // Handle verify-owner requests
+    // Handle live project deploy-access requests.
     if (url.includes('/internal/verify-owner/')) {
       const projectId = url.split('/').pop()!;
       const parsed = typeof body === 'string' ? JSON.parse(body) : {};
@@ -541,7 +541,8 @@ describe('proxy worker', () => {
         env,
       );
       expect(allowed.status).toBe(200);
-      expect(apiFetch).not.toHaveBeenCalled();
+      expect(apiFetch).toHaveBeenCalledTimes(1);
+      expect(String(apiFetch.mock.calls[0]?.[0])).toContain('/internal/verify-owner/proj_1');
 
       const denied = await worker.fetch(
         post(
@@ -569,6 +570,9 @@ describe('proxy worker', () => {
       let active = true;
       const api = createMockApi(async (input) => {
         const url = typeof input === 'string' ? input : input.url;
+        if (url.includes('/internal/verify-owner/')) {
+          return Response.json({ ok: true });
+        }
         expect(url).toContain('/internal/verify-prerender-build/proj_1');
         return active
           ? Response.json({ ok: true })
@@ -608,7 +612,7 @@ describe('proxy worker', () => {
     });
 
     it('rejects access when user does not own the project', async () => {
-      // user_1 does not own "proj_other"
+      // user_1 has no deploy role on "proj_other"
       const env = createEnv();
       const res = await worker.fetch(
         post(
@@ -640,7 +644,26 @@ describe('proxy worker', () => {
       expect(await res.json()).toEqual({ error: 'forbidden' });
     });
 
-    it('returns 403 when verify-owner API call fails', async () => {
+    it('allows a non-owner whose live role has deploy access', async () => {
+      const collaboratorToken = await signJwt(
+        { sub: 'user_2', login: 'collaborator', aud: 'api' },
+        JWT_SECRET,
+      );
+      const access = { user_2: ['proj_shared'] };
+      const env = createEnv(undefined, undefined, createMockApi(undefined, access));
+      const res = await worker.fetch(
+        post(
+          '/ai/run',
+          { model: 'test-model', inputs: {}, projectId: 'proj_shared' },
+          { authorization: `Bearer ${collaboratorToken}` },
+        ),
+        env,
+      );
+
+      expect(res.status).toBe(200);
+    });
+
+    it('returns 403 when the live deploy-access API call fails', async () => {
       // API returns 500 for all requests
       const failingApi = createMockApi(async () => new Response('error', { status: 500 }));
       const env = createEnv(undefined, undefined, failingApi);

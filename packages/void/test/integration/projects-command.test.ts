@@ -90,12 +90,14 @@ describe('runProjectsCommand', () => {
           id: 'proj_1',
           user_id: 'user_1',
           slug: 'star-tracker',
+          role: 'owner',
           created_at: '2026-02-15T00:00:00.000Z',
         },
         {
           id: 'proj_2',
           user_id: 'user_1',
           slug: 'todo-app',
+          role: 'collaborator',
           created_at: '2026-02-15T00:00:00.000Z',
         },
       ]),
@@ -116,8 +118,10 @@ describe('runProjectsCommand', () => {
       redirect: 'manual',
     });
     expect(out).toContain('star-tracker');
+    expect(out).toContain('owner');
     expect(out).toContain('https://star-tracker.staging.void.app');
     expect(out).toContain('todo-app');
+    expect(out).toContain('collaborator');
     expect(out).toContain('https://todo-app.staging.void.app');
   });
 

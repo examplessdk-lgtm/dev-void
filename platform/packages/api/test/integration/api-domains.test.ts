@@ -17,7 +17,7 @@ import {
 import type { ApiEnv } from '../../src/env.ts';
 import app, { scheduled, cleanupStalePendingDomains, FAST_CRON } from '../../src/index.ts';
 import { tryActivateDomain } from '../../src/provisioning/activate-domain.ts';
-import { domains, users } from '../../src/schema.ts';
+import { domains, projectMembers, users } from '../../src/schema.ts';
 import type { Domain, Project } from '../../src/types.ts';
 import {
   setupEnv,
@@ -155,6 +155,60 @@ describe('POST /projects/:id/domains', () => {
     };
     expect(cfBody.ssl.method).toBe('http');
     expect(cfBody).not.toHaveProperty('custom_metadata');
+  });
+
+  it('rolls back the CF hostname when an admin is downgraded before locked persistence', async () => {
+    const owner = await createTestUser(env.db, 'domain-race-owner');
+    const admin = await createTestUser(env.db, 'domain-race-admin');
+    const project = await createTestProject(env.db, owner.id, 'domain-access-race');
+    await env.db.insert(projectMembers).values({
+      project_id: project.id,
+      user_id: admin.id,
+      role: 'admin',
+      added_by_user_id: owner.id,
+    });
+    const fetchMock = mockCfApi({
+      createCustomHostname: async () => {
+        // The unlocked route check already granted settings. The downgrade
+        // wins before the final project lock, so the CF first phase must be
+        // compensated and no domain row may become durable.
+        await env.db
+          .update(projectMembers)
+          .set({ role: 'reader' })
+          .where(eq(projectMembers.user_id, admin.id));
+        return cfSuccess({
+          id: 'ch-access-race',
+          hostname: 'access-race.example.com',
+          status: 'pending',
+          ssl: { status: 'pending_validation', method: 'http', type: 'dv' },
+        });
+      },
+    });
+
+    const res = await app.fetch(
+      new Request(`http://localhost/projects/${project.id}/domains`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${admin.jwt}`,
+        },
+        body: JSON.stringify({ hostname: 'access-race.example.com' }),
+      }),
+      env,
+    );
+
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: 'forbidden' });
+    expect(
+      await env.db.select().from(domains).where(eq(domains.hostname, 'access-race.example.com')),
+    ).toEqual([]);
+    expect(
+      fetchMock.mock.calls.filter(
+        ([url, init]) =>
+          String(url).includes('/custom_hostnames/ch-access-race') &&
+          (init as RequestInit | undefined)?.method === 'DELETE',
+      ),
+    ).toHaveLength(1);
   });
 
   it('returns 404 for non-existent project', async () => {
@@ -479,9 +533,8 @@ describe('POST /projects/:id/domains', () => {
       env,
     );
 
-    expect(res.status).toBe(500);
-    const body = (await res.json()) as { error: string };
-    expect(body.error).toBe('Internal Server Error');
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: 'hostname already in use' });
 
     const deletes = fetchMock.mock.calls.filter((call: Array<unknown>) => {
       const url = typeof call[0] === 'string' ? call[0] : String(call[0]);

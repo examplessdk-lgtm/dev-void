@@ -41,6 +41,7 @@ import {
   githubConnections,
   githubInstallations,
   githubInstallationMembers,
+  projectMembers,
   projects,
   resources,
 } from '../../src/schema.ts';
@@ -603,6 +604,51 @@ describe('builds', () => {
     expect(reusedComplete.reused).toBe(true);
     expect(reusedComplete.build!.id).toBe(superseded.build!.id);
     expect(reusedComplete.cancelled).toEqual([]);
+  });
+
+  it('uses the locked current owner and plan when ownership changed after webhook resolution', async () => {
+    const staleOwner = await createTestUser(
+      env.db,
+      'container-stale-owner',
+      'github',
+      undefined,
+      'pro',
+    );
+    const currentOwner = await createTestUser(env.db, 'container-current-owner');
+    const project = await createTestProject(env.db, staleOwner.id);
+    await createGitHubConnection(env.db, {
+      projectId: project.id,
+      installationId: 'container-owner-race',
+      repoFullName: 'acme/owner-race',
+      repositoryId: DEFAULT_REPO_ID,
+      branch: 'main',
+      buildExecutor: 'container',
+    });
+    await seedActiveInstall(env.db, 'container-owner-race');
+    await env.db
+      .update(projects)
+      .set({ user_id: currentOwner.id })
+      .where(eq(projects.id, project.id));
+    await env.db.insert(projectMembers).values({
+      project_id: project.id,
+      user_id: staleOwner.id,
+      role: 'admin',
+      added_by_user_id: currentOwner.id,
+    });
+
+    const result = await supersedeAndCreateContainerBuild(env.db, {
+      projectId: project.id,
+      connectionId: (await getGitHubConnection(env.db, project.id))!.id,
+      userId: staleOwner.id,
+      branch: 'main',
+      commitSha: 'owner-race',
+      installationId: 'container-owner-race',
+      repositoryId: DEFAULT_REPO_ID,
+      instanceType: 'standard-4',
+    });
+
+    expect(result.build?.user_id).toBe(currentOwner.id);
+    expect(result.build?.instance_type).toBe('standard-3');
   });
 
   // Same-SHA recreate race — a branch-delete cancellation samples a DB-clock fence
@@ -1922,6 +1968,68 @@ describe('builds', () => {
 // ---------------------------------------------------------------------------
 
 describe('createGithubActionsBuildWithinLimit', () => {
+  it('recomputes concurrency and attribution from the locked current owner after transfer', async () => {
+    const staleOwner = await createTestUser(
+      env.db,
+      'actions-stale-owner',
+      'github',
+      undefined,
+      'pro',
+    );
+    const currentOwner = await createTestUser(env.db, 'actions-current-owner');
+    const project = await createTestProject(env.db, staleOwner.id);
+    const otherProject = await createTestProject(env.db, currentOwner.id);
+    await createGitHubConnection(env.db, {
+      projectId: project.id,
+      installationId: 'actions-owner-race',
+      repoFullName: 'acme/actions-owner-race',
+      repositoryId: DEFAULT_REPO_ID,
+      buildExecutor: 'github_actions',
+    });
+    await seedActiveInstall(env.db, 'actions-owner-race');
+    await env.db
+      .update(projects)
+      .set({ user_id: currentOwner.id })
+      .where(eq(projects.id, project.id));
+    await env.db.insert(projectMembers).values({
+      project_id: project.id,
+      user_id: staleOwner.id,
+      role: 'admin',
+      added_by_user_id: currentOwner.id,
+    });
+    const occupying = await createBuild(env.db, {
+      projectId: otherProject.id,
+      userId: currentOwner.id,
+      executor: 'container',
+      status: 'building',
+    });
+    const args = {
+      projectId: project.id,
+      connectionId: (await getGitHubConnection(env.db, project.id))!.id,
+      userId: staleOwner.id,
+      limit: 3,
+      branch: 'main',
+      githubRunId: 'owner-race-1',
+      installationId: 'actions-owner-race',
+      repositoryId: DEFAULT_REPO_ID,
+      expectedWorkflowPath: '.github/workflows/void-deploy.yml',
+    } as const;
+
+    expect((await createGithubActionsBuildWithinLimit(env.db, args)).outcome).toBe(
+      'limit-exceeded',
+    );
+    await updateBuildStatus(env.db, occupying.id, 'complete');
+    const created = await createGithubActionsBuildWithinLimit(env.db, {
+      ...args,
+      githubRunId: 'owner-race-2',
+    });
+    expect(created.outcome).toBe('created');
+    if (created.outcome === 'created') {
+      expect(created.build.user_id).toBe(currentOwner.id);
+      expect(created.build.triggered_by_user_id).toBeNull();
+    }
+  });
+
   // The workflow_path gate in auth-oidc runs against the connection SNAPSHOT; the
   // locked re-read here is the authority. A concurrent PATCH that re-pins
   // workflow_path between the gate and this lock must fail the exchange closed so

@@ -4,6 +4,7 @@ import { operatorEvents } from '../../src/schema.ts';
 import {
   clearTables,
   createOperatorToken,
+  createTestProject,
   createTestUser,
   setupEnv,
   teardownEnv,
@@ -356,4 +357,28 @@ test('records sanitized action targets and change arguments', async () => {
       .filter((event) => event.action === 'signup/remove')
       .map((event) => JSON.parse(event.target).pattern),
   ).toEqual(['alice@example.com', 'bob@example.com']);
+});
+
+test('records only the project and registered user IDs for ownership transfer', async () => {
+  const owner = await createTestUser(env.db, 'audit-transfer-owner');
+  const target = await createTestUser(env.db, 'audit-transfer-target');
+  const project = await createTestProject(env.db, owner.id, 'audit-transfer-project');
+
+  const response = await request(`/projects/${project.id}/owner`, {
+    userId: target.id,
+    credential: 'must-not-be-audited',
+  });
+
+  expect(response.status).toBe(200);
+  expect(await env.db.select().from(operatorEvents)).toEqual([
+    expect.objectContaining({
+      action: `projects/${project.id}/owner`,
+      target: JSON.stringify({ projectId: project.id, userId: target.id }),
+      status: 'success',
+      http_status: 200,
+    }),
+  ]);
+  expect(JSON.stringify(await env.db.select().from(operatorEvents))).not.toContain(
+    'must-not-be-audited',
+  );
 });

@@ -1,7 +1,22 @@
-import { and, count, desc, eq, getTableColumns, ilike, or } from 'drizzle-orm';
+import {
+  and,
+  asc,
+  count,
+  desc,
+  eq,
+  getTableColumns,
+  ilike,
+  inArray,
+  isNotNull,
+  isNull,
+  notInArray,
+  or,
+  sql,
+} from 'drizzle-orm';
 import type { Context } from 'hono';
 import {
   type Db,
+  ACTIVE_BUILD_STATUSES,
   countUserDeploymentsToday,
   deleteUser,
   getDomainsByProjectId,
@@ -11,6 +26,7 @@ import {
   getProjectResources,
   getProjectsByUserId,
   getUser,
+  TERMINAL_DEPLOYMENT_STATUSES,
   LastAdminError,
   prepareUserRemoval,
   suspendUser,
@@ -19,20 +35,34 @@ import {
   updateUserPlan,
 } from '../db.ts';
 import type { ApiEnv } from '../env.ts';
+import { generateId } from '../id.ts';
 import { teardownProject } from '../provisioning/cleanup.ts';
 import { getRequestsDataset, queryBatchProjectUsage, ZERO_USAGE } from '../routes/usage.ts';
 import {
+  buildProjectAccountJson,
+  computeDispatchLimits,
+  projectAccountKey,
   refreshProjectKvForUser,
   sandboxBlockKey,
   setProjectsRoutingSuspension,
 } from '../routing.ts';
-import { deployments, projects, users } from '../schema.ts';
+import {
+  builds,
+  deployments,
+  githubConnections,
+  projectInvitations,
+  projectMembers,
+  projectOwnershipPeriods,
+  projects,
+  users,
+} from '../schema.ts';
 import {
   isAdminSuspended,
   REASON_REQUESTS_EXCEEDED,
   REASON_SANDBOX_RUNTIME_EXCEEDED,
 } from '../suspension.ts';
 import { getCurrentBillingPeriodStart, PLAN_LIMITS, type PlanId } from '../tiers.ts';
+import type { DeployManifest, Project, User } from '../types.ts';
 import { OperatorError, preview } from './common.ts';
 
 type Page = { page: number; limit: number; offset: number };
@@ -187,6 +217,458 @@ export async function getOperatorProject(db: Db, id: string) {
     getProjectBuilds(db, id),
   ]);
   return { project, deployments, resources, owner, domains, builds };
+}
+
+type OwnershipTransferBlocker = Readonly<{
+  kind: 'deletion' | 'deployment' | 'rollback' | 'build';
+  id: string;
+  status: string;
+}>;
+
+function accountSummary(user: User) {
+  return {
+    id: user.id,
+    login: user.login,
+    email: user.email,
+    plan: user.plan,
+    suspended: user.suspended_reason !== null,
+    suspendedReason: user.suspended_reason,
+  };
+}
+
+async function getOwnershipTransferBlockers(
+  db: Db,
+  projectId: string,
+): Promise<Array<OwnershipTransferBlocker>> {
+  const [activeDeployments, activeBuilds] = await Promise.all([
+    db
+      .select({ id: deployments.id, status: deployments.status, source: deployments.source })
+      .from(deployments)
+      .where(
+        and(
+          eq(deployments.project_id, projectId),
+          notInArray(deployments.status, TERMINAL_DEPLOYMENT_STATUSES),
+        ),
+      )
+      .orderBy(asc(deployments.created_at), asc(deployments.id)),
+    db
+      .select({ id: builds.id, status: builds.status })
+      .from(builds)
+      .where(
+        and(
+          eq(builds.project_id, projectId),
+          inArray(builds.status, ['queued', ...ACTIVE_BUILD_STATUSES]),
+        ),
+      )
+      .orderBy(asc(builds.created_at), asc(builds.id)),
+  ]);
+  return [
+    ...activeDeployments.map((deployment) => ({
+      kind:
+        deployment.source === 'rollback-lease' ? ('rollback' as const) : ('deployment' as const),
+      id: deployment.id,
+      status: deployment.status,
+    })),
+    ...activeBuilds.map((build) => ({
+      kind: 'build' as const,
+      id: build.id,
+      status: build.status,
+    })),
+  ];
+}
+
+async function inspectOwnershipTransfer(db: Db, projectId: string, targetUserId: string) {
+  const project = await requireProject(db, projectId);
+  const [currentOwner, newOwner, activeWork, targetMembership, github, domains] = await Promise.all(
+    [
+      requireUser(db, project.user_id),
+      requireUser(db, targetUserId),
+      getOwnershipTransferBlockers(db, projectId),
+      db
+        .select({ role: projectMembers.role })
+        .from(projectMembers)
+        .where(
+          and(eq(projectMembers.project_id, projectId), eq(projectMembers.user_id, targetUserId)),
+        )
+        .limit(1)
+        .then((rows) => rows[0] ?? null),
+      db
+        .select({
+          installationId: githubConnections.installation_id,
+          repository: githubConnections.repo_full_name,
+          authorizedByUserId: githubConnections.authorized_by_user_id,
+          executor: githubConnections.build_executor,
+        })
+        .from(githubConnections)
+        .where(eq(githubConnections.project_id, projectId))
+        .limit(1)
+        .then((rows) => rows[0] ?? null),
+      getDomainsByProjectId(db, projectId),
+    ],
+  );
+  const blockers: Array<OwnershipTransferBlocker> = [
+    ...(project.status === 'deleting'
+      ? [{ kind: 'deletion' as const, id: project.id, status: project.status }]
+      : []),
+    ...activeWork,
+  ];
+  return { project, currentOwner, newOwner, blockers, targetMembership, github, domains };
+}
+
+type OwnershipTransferCommit = Readonly<{
+  project: Project;
+  previousOwner: User;
+  newOwner: User;
+  previousOwnershipStartedAt: string;
+  transferredAt: string;
+  changed: boolean;
+}>;
+
+async function commitOwnershipTransfer(
+  db: Db,
+  projectId: string,
+  targetUserId: string,
+  operatorUserId: string,
+): Promise<OwnershipTransferCommit> {
+  return db.transaction(async (tx) => {
+    const txDb = tx as unknown as Db;
+    const [lockedProject] = await txDb
+      .select()
+      .from(projects)
+      .where(eq(projects.id, projectId))
+      .for('update')
+      .limit(1);
+    if (!lockedProject) {
+      throw new OperatorError(404, 'Project not found');
+    }
+
+    const lockedUsers = await txDb
+      .select()
+      .from(users)
+      .where(inArray(users.id, [...new Set([lockedProject.user_id, targetUserId])].sort()))
+      .orderBy(asc(users.id))
+      .for('update');
+    const byId = new Map(lockedUsers.map((user) => [user.id, user]));
+    const currentOwner = byId.get(lockedProject.user_id);
+    const newOwner = byId.get(targetUserId);
+    if (!currentOwner) {
+      throw new OperatorError(409, 'The current project owner no longer exists.', 'owner_missing');
+    }
+    if (!newOwner) {
+      throw new OperatorError(404, 'User not found');
+    }
+    if (lockedProject.status === 'deleting') {
+      throw new OperatorError(
+        409,
+        'Project ownership cannot change while deletion is active.',
+        'ownership_transfer_blocked',
+        { blockers: [{ kind: 'deletion', id: projectId, status: lockedProject.status }] },
+      );
+    }
+    const [openPeriod] = await txDb
+      .select()
+      .from(projectOwnershipPeriods)
+      .where(
+        and(
+          eq(projectOwnershipPeriods.project_id, projectId),
+          isNull(projectOwnershipPeriods.ends_at),
+        ),
+      )
+      .for('update')
+      .limit(1);
+
+    // Ownership is implicit. Keep these convergence writes before the
+    // idempotent branch so retry also repairs data written by an older API
+    // revision that committed the owner change without cleaning target access.
+    await txDb
+      .delete(projectMembers)
+      .where(
+        and(eq(projectMembers.project_id, projectId), eq(projectMembers.user_id, newOwner.id)),
+      );
+    await txDb
+      .update(projectInvitations)
+      .set({
+        status: 'revoked',
+        revoked_at: sql`now()`,
+        revoked_by_user_id: operatorUserId,
+      })
+      .where(
+        and(
+          eq(projectInvitations.project_id, projectId),
+          eq(projectInvitations.target_user_id, newOwner.id),
+          eq(projectInvitations.status, 'pending'),
+        ),
+      );
+
+    if (lockedProject.user_id === targetUserId) {
+      const [previousPeriod] = await txDb
+        .select()
+        .from(projectOwnershipPeriods)
+        .where(
+          and(
+            eq(projectOwnershipPeriods.project_id, projectId),
+            isNotNull(projectOwnershipPeriods.ends_at),
+          ),
+        )
+        .orderBy(desc(projectOwnershipPeriods.ends_at))
+        .limit(1);
+      const previousOwner = previousPeriod
+        ? ((
+            await txDb
+              .select()
+              .from(users)
+              .where(eq(users.id, previousPeriod.owner_user_id))
+              .limit(1)
+          )[0] ?? newOwner)
+        : newOwner;
+      return {
+        project: lockedProject,
+        previousOwner,
+        newOwner,
+        previousOwnershipStartedAt: previousPeriod?.starts_at ?? lockedProject.created_at,
+        transferredAt: openPeriod?.starts_at ?? lockedProject.created_at,
+        changed: false,
+      };
+    }
+
+    const blockers = await getOwnershipTransferBlockers(txDb, projectId);
+    if (blockers.length > 0) {
+      throw new OperatorError(
+        409,
+        'Project ownership cannot change while project work is active.',
+        'ownership_transfer_blocked',
+        { blockers },
+      );
+    }
+
+    if (openPeriod && openPeriod.owner_user_id !== lockedProject.user_id) {
+      throw new OperatorError(
+        409,
+        'Project ownership history does not match the current owner.',
+        'ownership_state_conflict',
+      );
+    }
+    if (openPeriod) {
+      await txDb
+        .update(projectOwnershipPeriods)
+        .set({ ends_at: sql`now()` })
+        .where(eq(projectOwnershipPeriods.id, openPeriod.id));
+    } else {
+      await txDb.insert(projectOwnershipPeriods).values({
+        id: generateId('pown'),
+        project_id: projectId,
+        owner_user_id: currentOwner.id,
+        starts_at: lockedProject.created_at,
+        ends_at: sql`now()`,
+      });
+    }
+    const [newPeriod] = await txDb
+      .insert(projectOwnershipPeriods)
+      .values({
+        id: generateId('pown'),
+        project_id: projectId,
+        owner_user_id: newOwner.id,
+        starts_at: sql`now()`,
+        changed_by_user_id: operatorUserId,
+      })
+      .returning();
+    const [updatedProject] = await txDb
+      .update(projects)
+      .set({ user_id: newOwner.id })
+      .where(eq(projects.id, projectId))
+      .returning();
+    await txDb
+      .insert(projectMembers)
+      .values({
+        project_id: projectId,
+        user_id: currentOwner.id,
+        role: 'admin',
+        added_by_user_id: operatorUserId,
+      })
+      .onConflictDoUpdate({
+        target: [projectMembers.project_id, projectMembers.user_id],
+        set: { role: 'admin', updated_at: sql`now()` },
+      });
+    return {
+      project: updatedProject!,
+      previousOwner: currentOwner,
+      newOwner,
+      previousOwnershipStartedAt: openPeriod?.starts_at ?? lockedProject.created_at,
+      transferredAt: newPeriod!.starts_at,
+      changed: true,
+    };
+  });
+}
+
+async function updateOwnershipCounters(
+  context: Context<ApiEnv>,
+  transfer: OwnershipTransferCommit,
+): Promise<void> {
+  const request = async (userId: string, path: string, body: Record<string, unknown>) => {
+    const stub = context.env.USAGE_COUNTER.get(context.env.USAGE_COUNTER.idFromName(userId));
+    const response = await stub.fetch(
+      new Request(`https://do${path}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      }),
+    );
+    if (!response.ok) {
+      throw new Error(`UsageCounter ${path} returned HTTP ${response.status}`);
+    }
+  };
+  if (transfer.previousOwner.id !== transfer.newOwner.id) {
+    await request(transfer.previousOwner.id, '/detach-project', {
+      projectId: transfer.project.id,
+      userId: transfer.previousOwner.id,
+      ownershipStartedAt: transfer.previousOwnershipStartedAt,
+      ownershipEndedAt: transfer.transferredAt,
+    });
+  }
+  await request(transfer.newOwner.id, '/attach-project', {
+    projectId: transfer.project.id,
+    userId: transfer.newOwner.id,
+    slug: transfer.project.slug,
+    ownershipStartedAt: transfer.transferredAt,
+    plan: transfer.newOwner.plan,
+  });
+}
+
+async function republishTransferredProject(
+  context: Context<ApiEnv>,
+  transfer: OwnershipTransferCommit,
+): Promise<void> {
+  const db = context.get('db');
+  await db.transaction(async (tx) => {
+    const txDb = tx as unknown as Db;
+    const [project] = await txDb
+      .select()
+      .from(projects)
+      .where(eq(projects.id, transfer.project.id))
+      .for('update')
+      .limit(1);
+    if (!project || project.user_id !== transfer.newOwner.id || project.status === 'deleting') {
+      throw new Error('Project ownership changed again before routing convergence.');
+    }
+    const [activeDeployment, domains] = await Promise.all([
+      project.active_deployment_id
+        ? txDb
+            .select({ manifest: deployments.manifest })
+            .from(deployments)
+            .where(eq(deployments.id, project.active_deployment_id))
+            .limit(1)
+            .then((rows) => rows[0] ?? null)
+        : null,
+      getDomainsByProjectId(txDb, project.id),
+    ]);
+    let manifest: DeployManifest | null = null;
+    if (activeDeployment?.manifest) {
+      manifest = JSON.parse(activeDeployment.manifest) as DeployManifest;
+    }
+    const dispatchLimits = computeDispatchLimits(
+      PLAN_LIMITS[transfer.newOwner.plan],
+      manifest?.limits,
+    );
+    for (const key of [project.slug, ...domains.map((domain) => `domain:${domain.hostname}`)]) {
+      const raw = await context.env.ROUTING.get(key);
+      if (!raw) {
+        continue;
+      }
+      const entry = JSON.parse(raw) as Record<string, unknown>;
+      entry.userId = transfer.newOwner.id;
+      if ('workerName' in entry) {
+        if (dispatchLimits) {
+          entry.limits = dispatchLimits;
+        } else {
+          delete entry.limits;
+        }
+      }
+      if (transfer.newOwner.suspended_reason) {
+        entry.suspended = transfer.newOwner.suspended_reason;
+      } else {
+        delete entry.suspended;
+      }
+      await context.env.ROUTING.put(key, JSON.stringify(entry));
+    }
+    await context.env.ROUTING.put(
+      projectAccountKey(project.id),
+      buildProjectAccountJson({ userId: transfer.newOwner.id, plan: transfer.newOwner.plan }),
+    );
+  });
+}
+
+export async function transferOperatorProjectOwner(
+  context: Context<ApiEnv>,
+  projectId: string,
+  targetUserId: string,
+  dryRun = false,
+) {
+  const db = context.get('db');
+  if (dryRun) {
+    const inspection = await inspectOwnershipTransfer(db, projectId, targetUserId);
+    return preview(
+      'project.owner',
+      { id: inspection.project.id, slug: inspection.project.slug, userId: targetUserId },
+      {
+        previousOwner: accountSummary(inspection.currentOwner),
+        newOwner: accountSummary(inspection.newOwner),
+        formerOwnerRole: 'admin',
+        targetPreviousRole: inspection.targetMembership?.role ?? null,
+        blockers: inspection.blockers,
+        github: inspection.github,
+        routingUpdates: [
+          inspection.project.slug,
+          ...inspection.domains.map((domain) => `domain:${domain.hostname}`),
+          projectAccountKey(inspection.project.id),
+        ],
+        counterUpdates: {
+          detachUserId: inspection.currentOwner.id,
+          attachUserId: inspection.newOwner.id,
+        },
+        usageTransfer: 'non-retroactive',
+      },
+    );
+  }
+
+  const transfer = await commitOwnershipTransfer(
+    db,
+    projectId,
+    targetUserId,
+    context.get('user').id,
+  );
+  const convergence = { countersComplete: false, routingComplete: false };
+  try {
+    await updateOwnershipCounters(context, transfer);
+    convergence.countersComplete = true;
+    await republishTransferredProject(context, transfer);
+    convergence.routingComplete = true;
+  } catch (error) {
+    console.error('[admin] project owner convergence failed', { projectId, targetUserId, error });
+    throw new OperatorError(
+      500,
+      'Project ownership changed, but external accounting or routing convergence is incomplete. Inspect the project and retry this ownership transfer.',
+      'partial_failure',
+      {
+        partial: true,
+        target: { id: transfer.project.id, slug: transfer.project.slug, userId: targetUserId },
+        ownershipTransferred: true,
+        transferredAt: transfer.transferredAt,
+        previousOwner: accountSummary(transfer.previousOwner),
+        newOwner: accountSummary(transfer.newOwner),
+        convergence,
+      },
+    );
+  }
+  return {
+    action: 'project.owner',
+    target: { id: transfer.project.id, slug: transfer.project.slug, userId: targetUserId },
+    previousOwner: accountSummary(transfer.previousOwner),
+    newOwner: accountSummary(transfer.newOwner),
+    transferredAt: transfer.transferredAt,
+    formerOwnerRole: transfer.previousOwner.id === transfer.newOwner.id ? null : 'admin',
+    changed: transfer.changed,
+    convergence,
+  };
 }
 
 export async function changeOperatorUserPlan(

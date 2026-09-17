@@ -228,7 +228,30 @@ Link current directory to an existing hosted Void project by slug, or select int
 
 ### `void project list`
 
-List all hosted projects (slug, mode, URL). For a saved Cloudflare target, this displays the current Worker's versions instead because there is no Void project registry.
+List all accessible hosted projects (slug, role, mode, URL). Shared projects are included and the role column distinguishes them from projects you own. For a saved Cloudflare target, this displays the current Worker's versions instead because there is no Void project registry.
+
+### `void project team`
+
+Manage access to a project hosted on a Void platform:
+
+```sh
+void project team list [--project <slug>]
+void project team invite <email> --role <reader|collaborator|admin> [--project <slug>]
+void project team invitations [--project <slug>]
+void project team role <user-id> <reader|collaborator|admin> [--project <slug>]
+void project team remove <user-id> [--project <slug>]
+void project team revoke <invitation-id> [--project <slug>]
+void project team leave [--project <slug>]
+void project team pending
+void project team accept <invitation-id>
+void project team decline <invitation-id>
+```
+
+Project-scoped commands use `--project`, then `VOID_PROJECT`, then the linked project. Invitations can target only an email address already registered to a user on that platform; they do not create accounts or grant signup access. Only the invited account can accept or decline its invitation.
+
+Readers can view the project but cannot deploy. Collaborators can deploy and manage deploy prerequisites. Project administrators can additionally configure the project and manage its team. The owner alone can delete the project. See [Project Collaboration](../guide/project-collaboration.md) for the full role boundaries.
+
+Team commands are not available for projects deployed directly to Cloudflare.
 
 ### `void project token <create|list|renew|revoke>`
 
@@ -526,9 +549,12 @@ List projects across the platform, filter them by owner, or inspect one project'
 void platform project list [--user <user-id>] [--search <text>] [--page <n>] [--limit <n>]
 void platform project show <id>
 void platform project delete <id>
+void platform project owner <project-id> <user-id>
 ```
 
 Search matches a project's slug, ID, or owner's login. `show` includes resources, domains, the latest 10 deployments, and the latest 20 builds. `delete` removes the project and its resources.
+
+`owner` transfers a project to another registered user. Preview it with `--plan`; apply it interactively or with `--yes`. The preview reports active-work blockers and the account limits that will apply. The former owner becomes a project administrator, and usage already incurred remains with the former owner.
 
 #### Deployments {#operator-deployments}
 

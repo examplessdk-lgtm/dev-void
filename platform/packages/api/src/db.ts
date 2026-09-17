@@ -7,6 +7,8 @@ import {
   eq,
   ne,
   lt,
+  lte,
+  gt,
   gte,
   inArray,
   notInArray,
@@ -27,6 +29,10 @@ import {
   users,
   oauthAccounts,
   projects,
+  projectMembers,
+  projectInvitations,
+  projectOwnershipPeriods,
+  projectAccessEvents,
   deployments,
   projectSecrets,
   resources,
@@ -55,7 +61,7 @@ import {
   REASON_REQUESTS_EXCEEDED,
   REASON_SANDBOX_RUNTIME_EXCEEDED,
 } from './suspension.ts';
-import type { PlanId } from './tiers.ts';
+import { getBuildInstanceType, getPlanLimits, type PlanId } from './tiers.ts';
 import type {
   Build,
   Deployment,
@@ -68,7 +74,14 @@ import type {
   Invitation,
   OAuthAccount,
   PlatformEvent,
+  ProjectAccessEvent,
+  ProjectAccessEventAction,
   ProjectDatabaseCredentials,
+  ProjectInvitation,
+  ProjectMember,
+  ProjectMemberRole,
+  ProjectOwnershipPeriod,
+  ProjectRole,
   ProjectSecret,
   Project,
   Resource,
@@ -399,7 +412,10 @@ export async function countUserDeploymentsToday(db: Db, userId: string): Promise
     .innerJoin(projects, eq(deployments.project_id, projects.id))
     .where(
       and(
-        eq(projects.user_id, userId),
+        // billing_user_id is authoritative after the team migration. Keep the
+        // owner fallback during the additive rollout for a placeholder created
+        // by an older API revision before the backfill converges.
+        sql`COALESCE(${deployments.billing_user_id}, ${projects.user_id}) = ${userId}`,
         sql`${deployments.created_at} >= CURRENT_DATE`,
         isNotNull(deployments.manifest),
       ),
@@ -411,7 +427,16 @@ export async function countUserDeploymentsToday(db: Db, userId: string): Promise
 
 export async function createProject(db: Db, userId: string, slug: string): Promise<Project> {
   const id = generateId('proj');
-  const [row] = await db.insert(projects).values({ id, user_id: userId, slug }).returning();
+  const row = await db.transaction(async (tx) => {
+    const [created] = await tx.insert(projects).values({ id, user_id: userId, slug }).returning();
+    await tx.insert(projectOwnershipPeriods).values({
+      id: generateId('pown'),
+      project_id: created.id,
+      owner_user_id: userId,
+      starts_at: created.created_at,
+    });
+    return created;
+  });
   return row;
 }
 
@@ -426,11 +451,697 @@ export async function getProjectBySlug(db: Db, slug: string): Promise<Project | 
 }
 
 export async function getProjectsByUserId(db: Db, userId: string): Promise<ReadonlyArray<Project>> {
+  return getOwnedProjectsByUserId(db, userId);
+}
+
+/** Projects for which userId is the billing owner. */
+export async function getOwnedProjectsByUserId(
+  db: Db,
+  userId: string,
+): Promise<ReadonlyArray<Project>> {
   return db
     .select()
     .from(projects)
     .where(eq(projects.user_id, userId))
     .orderBy(desc(projects.created_at));
+}
+
+export type AccessibleProject = Readonly<{
+  project: Project;
+  role: ProjectRole;
+  owner: User;
+}>;
+
+const accessibleProjectOwner = alias(users, 'accessible_project_owner');
+
+/** Owned and shared projects visible to an actor, with explicit billing owner. */
+export async function getAccessibleProjectsByUserId(
+  db: Db,
+  userId: string,
+): Promise<ReadonlyArray<AccessibleProject>> {
+  const rows = await db
+    .select({ project: projects, memberRole: projectMembers.role, owner: accessibleProjectOwner })
+    .from(projects)
+    .innerJoin(accessibleProjectOwner, eq(projects.user_id, accessibleProjectOwner.id))
+    .leftJoin(
+      projectMembers,
+      and(eq(projectMembers.project_id, projects.id), eq(projectMembers.user_id, userId)),
+    )
+    .where(or(eq(projects.user_id, userId), eq(projectMembers.user_id, userId)))
+    .orderBy(desc(projects.created_at));
+
+  return rows.map((row) => ({
+    project: row.project,
+    role: row.project.user_id === userId ? 'owner' : row.memberRole!,
+    owner: row.owner,
+  }));
+}
+
+// --- Project team membership and invitations ---
+
+export type ProjectMemberWithUser = Readonly<{ member: ProjectMember; user: User }>;
+
+export async function getProjectMember(
+  db: Db,
+  projectId: string,
+  userId: string,
+): Promise<ProjectMember | null> {
+  const [row] = await db
+    .select()
+    .from(projectMembers)
+    .where(and(eq(projectMembers.project_id, projectId), eq(projectMembers.user_id, userId)))
+    .limit(1);
+  return row ?? null;
+}
+
+export async function getProjectMembers(
+  db: Db,
+  projectId: string,
+): Promise<ReadonlyArray<ProjectMemberWithUser>> {
+  return db
+    .select({ member: projectMembers, user: users })
+    .from(projectMembers)
+    .innerJoin(users, eq(projectMembers.user_id, users.id))
+    .where(eq(projectMembers.project_id, projectId))
+    .orderBy(asc(projectMembers.created_at), asc(projectMembers.user_id));
+}
+
+export type ProjectTeamMutationErrorReason =
+  | 'project-not-found'
+  | 'target-user-not-found'
+  | 'owner-conflict'
+  | 'member-conflict'
+  | 'member-not-found'
+  | 'invitation-not-found'
+  | 'invitation-not-pending'
+  | 'invitation-not-target'
+  | 'invitation-expired'
+  | 'pending-invitation-limit'
+  | 'forbidden';
+
+export class ProjectTeamMutationError extends Error {
+  readonly status: 403 | 404 | 409;
+
+  constructor(readonly reason: ProjectTeamMutationErrorReason) {
+    super(reason);
+    this.name = 'ProjectTeamMutationError';
+    this.status =
+      reason === 'invitation-not-target' || reason === 'forbidden'
+        ? 403
+        : reason.endsWith('not-found')
+          ? 404
+          : 409;
+  }
+}
+
+async function lockProject(db: Db, projectId: string): Promise<Project> {
+  const [project] = await db
+    .select()
+    .from(projects)
+    .where(eq(projects.id, projectId))
+    .for('update')
+    .limit(1);
+  if (!project) {
+    throw new ProjectTeamMutationError('project-not-found');
+  }
+  return project;
+}
+
+/** Re-check team-management access while the project lock is held. */
+async function requireLockedMembersCapability(
+  db: Db,
+  project: Project,
+  actorUserId: string,
+): Promise<void> {
+  if (project.user_id === actorUserId) {
+    return;
+  }
+  const actorMember = await getProjectMember(db, project.id, actorUserId);
+  if (actorMember?.role !== 'admin') {
+    throw new ProjectTeamMutationError('forbidden');
+  }
+}
+
+export async function createProjectAccessEvent(
+  db: Db,
+  args: {
+    projectId: string;
+    actorUserId: string;
+    action: ProjectAccessEventAction;
+    subjectUserId?: string | null;
+    invitationEmailSnapshot?: string | null;
+    previousRole?: ProjectMemberRole | null;
+    newRole?: ProjectMemberRole | null;
+  },
+): Promise<ProjectAccessEvent> {
+  const [event] = await db
+    .insert(projectAccessEvents)
+    .values({
+      id: generateId('pae'),
+      project_id: args.projectId,
+      actor_user_id: args.actorUserId,
+      subject_user_id: args.subjectUserId ?? null,
+      invitation_email_snapshot: args.invitationEmailSnapshot ?? null,
+      previous_role: args.previousRole ?? null,
+      new_role: args.newRole ?? null,
+      action: args.action,
+    })
+    .returning();
+  return event;
+}
+
+export async function getProjectAccessEvents(
+  db: Db,
+  projectId: string,
+  limit = 100,
+): Promise<ReadonlyArray<ProjectAccessEvent>> {
+  return db
+    .select()
+    .from(projectAccessEvents)
+    .where(eq(projectAccessEvents.project_id, projectId))
+    .orderBy(desc(projectAccessEvents.created_at))
+    .limit(limit);
+}
+
+export async function setProjectMemberRole(
+  db: Db,
+  args: {
+    projectId: string;
+    subjectUserId: string;
+    role: ProjectMemberRole;
+    actorUserId: string;
+  },
+): Promise<ProjectMember> {
+  return db.transaction(async (tx) => {
+    const txDb = tx as unknown as Db;
+    const project = await lockProject(txDb, args.projectId);
+    await requireLockedMembersCapability(txDb, project, args.actorUserId);
+    if (project.user_id === args.subjectUserId) {
+      throw new ProjectTeamMutationError('owner-conflict');
+    }
+    const current = await getProjectMember(txDb, args.projectId, args.subjectUserId);
+    if (!current) {
+      throw new ProjectTeamMutationError('member-not-found');
+    }
+    if (current.role === args.role) {
+      return current;
+    }
+    const [member] = await txDb
+      .update(projectMembers)
+      .set({ role: args.role, updated_at: sql`now()` })
+      .where(
+        and(
+          eq(projectMembers.project_id, args.projectId),
+          eq(projectMembers.user_id, args.subjectUserId),
+        ),
+      )
+      .returning();
+    await createProjectAccessEvent(txDb, {
+      projectId: args.projectId,
+      actorUserId: args.actorUserId,
+      subjectUserId: args.subjectUserId,
+      action: 'role_changed',
+      previousRole: current.role,
+      newRole: args.role,
+    });
+    if (args.role !== 'admin') {
+      await invalidateGitHubConnectionAuthorizedBy(
+        txDb,
+        args.projectId,
+        args.subjectUserId,
+        'github connection authorizer lost admin access',
+      );
+    }
+    return member;
+  });
+}
+
+export async function removeProjectMember(
+  db: Db,
+  args: { projectId: string; subjectUserId: string; actorUserId: string },
+): Promise<ProjectMember> {
+  return db.transaction(async (tx) => {
+    const txDb = tx as unknown as Db;
+    const project = await lockProject(txDb, args.projectId);
+    if (project.user_id === args.subjectUserId) {
+      throw new ProjectTeamMutationError('owner-conflict');
+    }
+    const current = await getProjectMember(txDb, args.projectId, args.subjectUserId);
+    if (!current) {
+      throw new ProjectTeamMutationError('member-not-found');
+    }
+    if (args.actorUserId !== args.subjectUserId) {
+      await requireLockedMembersCapability(txDb, project, args.actorUserId);
+    }
+    const [member] = await txDb
+      .delete(projectMembers)
+      .where(
+        and(
+          eq(projectMembers.project_id, args.projectId),
+          eq(projectMembers.user_id, args.subjectUserId),
+        ),
+      )
+      .returning();
+    if (!member) {
+      throw new ProjectTeamMutationError('member-not-found');
+    }
+    await createProjectAccessEvent(txDb, {
+      projectId: args.projectId,
+      actorUserId: args.actorUserId,
+      subjectUserId: args.subjectUserId,
+      action: args.actorUserId === args.subjectUserId ? 'left' : 'member_removed',
+      previousRole: member.role,
+    });
+    await invalidateGitHubConnectionAuthorizedBy(
+      txDb,
+      args.projectId,
+      args.subjectUserId,
+      'github connection authorizer removed from project',
+    );
+    return member;
+  });
+}
+
+export async function getProjectInvitation(
+  db: Db,
+  invitationId: string,
+): Promise<ProjectInvitation | null> {
+  const [row] = await db
+    .select()
+    .from(projectInvitations)
+    .where(eq(projectInvitations.id, invitationId))
+    .limit(1);
+  return row ?? null;
+}
+
+export async function getProjectInvitations(
+  db: Db,
+  projectId: string,
+): Promise<ReadonlyArray<ProjectInvitation>> {
+  return db
+    .select()
+    .from(projectInvitations)
+    .where(eq(projectInvitations.project_id, projectId))
+    .orderBy(desc(projectInvitations.created_at));
+}
+
+export async function getPendingProjectInvitationsByUserId(
+  db: Db,
+  userId: string,
+): Promise<ReadonlyArray<ProjectInvitation>> {
+  return db
+    .select()
+    .from(projectInvitations)
+    .where(
+      and(
+        eq(projectInvitations.target_user_id, userId),
+        eq(projectInvitations.status, 'pending'),
+        gt(projectInvitations.expires_at, sql`now()`),
+      ),
+    )
+    .orderBy(desc(projectInvitations.created_at));
+}
+
+export async function createOrRefreshProjectInvitation(
+  db: Db,
+  args: {
+    projectId: string;
+    email: string;
+    role: ProjectMemberRole;
+    actorUserId: string;
+    expiresAt?: string;
+  },
+): Promise<Readonly<{ invitation: ProjectInvitation; target: User; refreshed: boolean }>> {
+  const normalizedEmail = args.email.trim().toLowerCase();
+  const targets = await db
+    .select()
+    .from(users)
+    .where(sql`lower(${users.email}) = ${normalizedEmail}`)
+    .limit(2);
+  if (targets.length !== 1) {
+    throw new ProjectTeamMutationError('target-user-not-found');
+  }
+  const target = targets[0]!;
+  const expiresAt = args.expiresAt ?? new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+
+  return db.transaction(async (tx) => {
+    const txDb = tx as unknown as Db;
+    const project = await lockProject(txDb, args.projectId);
+    await requireLockedMembersCapability(txDb, project, args.actorUserId);
+    const [lockedTarget] = await txDb
+      .select()
+      .from(users)
+      .where(and(eq(users.id, target.id), sql`lower(${users.email}) = ${normalizedEmail}`))
+      // The invitation is bound to the account resolved from this registered
+      // email. Prevent a concurrent profile update from changing the address
+      // between resolution and the invitation commit.
+      .for('update')
+      .limit(1);
+    if (!lockedTarget) {
+      throw new ProjectTeamMutationError('target-user-not-found');
+    }
+    if (project.user_id === target.id) {
+      throw new ProjectTeamMutationError('owner-conflict');
+    }
+    if (await getProjectMember(txDb, args.projectId, target.id)) {
+      throw new ProjectTeamMutationError('member-conflict');
+    }
+    const [pending] = await txDb
+      .select()
+      .from(projectInvitations)
+      .where(
+        and(
+          eq(projectInvitations.project_id, args.projectId),
+          eq(projectInvitations.target_user_id, target.id),
+          eq(projectInvitations.status, 'pending'),
+        ),
+      )
+      .for('update')
+      .limit(1);
+
+    if (!pending) {
+      const [pendingCount] = await txDb
+        .select({ count: count() })
+        .from(projectInvitations)
+        .where(
+          and(
+            eq(projectInvitations.project_id, args.projectId),
+            eq(projectInvitations.status, 'pending'),
+            gt(projectInvitations.expires_at, sql`now()`),
+          ),
+        );
+      if ((pendingCount?.count ?? 0) >= 100) {
+        throw new ProjectTeamMutationError('pending-invitation-limit');
+      }
+    }
+
+    let invitation: ProjectInvitation;
+    if (pending) {
+      [invitation] = await txDb
+        .update(projectInvitations)
+        .set({
+          role: args.role,
+          target_email_snapshot: normalizedEmail,
+          invited_by_user_id: args.actorUserId,
+          expires_at: expiresAt,
+        })
+        .where(eq(projectInvitations.id, pending.id))
+        .returning();
+    } else {
+      [invitation] = await txDb
+        .insert(projectInvitations)
+        .values({
+          id: generateId('pinv'),
+          project_id: args.projectId,
+          target_user_id: target.id,
+          target_email_snapshot: normalizedEmail,
+          role: args.role,
+          invited_by_user_id: args.actorUserId,
+          expires_at: expiresAt,
+        })
+        .returning();
+    }
+    await createProjectAccessEvent(txDb, {
+      projectId: args.projectId,
+      actorUserId: args.actorUserId,
+      subjectUserId: target.id,
+      invitationEmailSnapshot: normalizedEmail,
+      action: 'invited',
+      previousRole: pending?.role,
+      newRole: args.role,
+    });
+    return { invitation, target: lockedTarget, refreshed: !!pending };
+  });
+}
+
+export async function resendProjectInvitation(
+  db: Db,
+  args: { projectId: string; invitationId: string; actorUserId: string; expiresAt?: string },
+): Promise<Readonly<{ invitation: ProjectInvitation; target: User }>> {
+  const expiresAt = args.expiresAt ?? new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+  return db.transaction(async (tx) => {
+    const txDb = tx as unknown as Db;
+    const project = await lockProject(txDb, args.projectId);
+    await requireLockedMembersCapability(txDb, project, args.actorUserId);
+    const [invitation] = await txDb
+      .select()
+      .from(projectInvitations)
+      .where(
+        and(
+          eq(projectInvitations.id, args.invitationId),
+          eq(projectInvitations.project_id, args.projectId),
+        ),
+      )
+      .for('update')
+      .limit(1);
+    if (!invitation) {
+      throw new ProjectTeamMutationError('invitation-not-found');
+    }
+    if (invitation.status !== 'pending') {
+      throw new ProjectTeamMutationError('invitation-not-pending');
+    }
+    const [target] = await txDb
+      .select()
+      .from(users)
+      .where(eq(users.id, invitation.target_user_id))
+      .limit(1);
+    if (!target?.email) {
+      throw new ProjectTeamMutationError('target-user-not-found');
+    }
+    const normalizedEmail = target.email.trim().toLowerCase();
+    const [updated] = await txDb
+      .update(projectInvitations)
+      .set({ target_email_snapshot: normalizedEmail, expires_at: expiresAt })
+      .where(eq(projectInvitations.id, invitation.id))
+      .returning();
+    await createProjectAccessEvent(txDb, {
+      projectId: args.projectId,
+      actorUserId: args.actorUserId,
+      subjectUserId: target.id,
+      invitationEmailSnapshot: normalizedEmail,
+      action: 'invitation_resent',
+      newRole: invitation.role,
+    });
+    return { invitation: updated, target };
+  });
+}
+
+export async function revokeProjectInvitation(
+  db: Db,
+  args: { projectId: string; invitationId: string; actorUserId: string },
+): Promise<ProjectInvitation> {
+  return db.transaction(async (tx) => {
+    const txDb = tx as unknown as Db;
+    const project = await lockProject(txDb, args.projectId);
+    await requireLockedMembersCapability(txDb, project, args.actorUserId);
+    const [invitation] = await txDb
+      .select()
+      .from(projectInvitations)
+      .where(
+        and(
+          eq(projectInvitations.id, args.invitationId),
+          eq(projectInvitations.project_id, args.projectId),
+        ),
+      )
+      .for('update')
+      .limit(1);
+    if (!invitation) {
+      throw new ProjectTeamMutationError('invitation-not-found');
+    }
+    if (invitation.status !== 'pending') {
+      throw new ProjectTeamMutationError('invitation-not-pending');
+    }
+    const [updated] = await txDb
+      .update(projectInvitations)
+      .set({
+        status: 'revoked',
+        revoked_at: sql`now()`,
+        revoked_by_user_id: args.actorUserId,
+      })
+      .where(eq(projectInvitations.id, invitation.id))
+      .returning();
+    await createProjectAccessEvent(txDb, {
+      projectId: args.projectId,
+      actorUserId: args.actorUserId,
+      subjectUserId: invitation.target_user_id,
+      invitationEmailSnapshot: invitation.target_email_snapshot,
+      action: 'invitation_revoked',
+      previousRole: invitation.role,
+    });
+    return updated;
+  });
+}
+
+export async function respondToProjectInvitation(
+  db: Db,
+  args: { invitationId: string; actorUserId: string; response: 'accept' | 'decline' },
+): Promise<Readonly<{ invitation: ProjectInvitation; member: ProjectMember | null }>> {
+  const locator = await getProjectInvitation(db, args.invitationId);
+  if (!locator) {
+    throw new ProjectTeamMutationError('invitation-not-found');
+  }
+
+  const result = await db.transaction(async (tx) => {
+    const txDb = tx as unknown as Db;
+    const project = await lockProject(txDb, locator.project_id);
+    const [locked] = await txDb
+      .select({
+        invitation: projectInvitations,
+        expired: sql<boolean>`${projectInvitations.expires_at} <= now()`,
+      })
+      .from(projectInvitations)
+      .where(eq(projectInvitations.id, args.invitationId))
+      .for('update')
+      .limit(1);
+    if (!locked) {
+      throw new ProjectTeamMutationError('invitation-not-found');
+    }
+    const invitation = locked.invitation;
+    if (invitation.target_user_id !== args.actorUserId) {
+      throw new ProjectTeamMutationError('invitation-not-target');
+    }
+    const resultingStatus = args.response === 'accept' ? 'accepted' : 'declined';
+    if (invitation.status === resultingStatus) {
+      if (args.response === 'accept' && project.user_id === args.actorUserId) {
+        throw new ProjectTeamMutationError('owner-conflict');
+      }
+      const member =
+        args.response === 'accept'
+          ? await getProjectMember(txDb, project.id, args.actorUserId)
+          : null;
+      // Acceptance is idempotent only while the access it created still
+      // exists. Once an administrator removes that member, replaying the old
+      // invitation must not produce a 500 or recreate access; a fresh invite
+      // is required.
+      if (args.response === 'accept' && !member) {
+        throw new ProjectTeamMutationError('invitation-not-pending');
+      }
+      return {
+        invitation,
+        member,
+      };
+    }
+    if (invitation.status !== 'pending') {
+      throw new ProjectTeamMutationError('invitation-not-pending');
+    }
+    if (locked.expired) {
+      await txDb
+        .update(projectInvitations)
+        .set({ status: 'expired' })
+        .where(eq(projectInvitations.id, invitation.id));
+      return { error: 'invitation-expired' as const };
+    }
+    if (project.user_id === args.actorUserId) {
+      throw new ProjectTeamMutationError('owner-conflict');
+    }
+    if (await getProjectMember(txDb, project.id, args.actorUserId)) {
+      throw new ProjectTeamMutationError('member-conflict');
+    }
+
+    let member: ProjectMember | null = null;
+    if (args.response === 'accept') {
+      [member] = await txDb
+        .insert(projectMembers)
+        .values({
+          project_id: project.id,
+          user_id: args.actorUserId,
+          role: invitation.role,
+          added_by_user_id: invitation.invited_by_user_id,
+        })
+        .returning();
+    }
+    const [updated] = await txDb
+      .update(projectInvitations)
+      .set({
+        status: resultingStatus,
+        accepted_by_user_id: args.response === 'accept' ? args.actorUserId : null,
+        accepted_at: args.response === 'accept' ? sql`now()` : null,
+      })
+      .where(eq(projectInvitations.id, invitation.id))
+      .returning();
+    await createProjectAccessEvent(txDb, {
+      projectId: project.id,
+      actorUserId: args.actorUserId,
+      subjectUserId: args.actorUserId,
+      invitationEmailSnapshot: invitation.target_email_snapshot,
+      action: args.response === 'accept' ? 'accepted' : 'declined',
+      newRole: args.response === 'accept' ? invitation.role : null,
+    });
+    return { invitation: updated, member };
+  });
+
+  if ('error' in result) {
+    throw new ProjectTeamMutationError(result.error!);
+  }
+  return result;
+}
+
+// --- Project ownership history ---
+
+export async function getProjectOwnershipPeriods(
+  db: Db,
+  projectId: string,
+): Promise<ReadonlyArray<ProjectOwnershipPeriod>> {
+  return db
+    .select()
+    .from(projectOwnershipPeriods)
+    .where(eq(projectOwnershipPeriods.project_id, projectId))
+    .orderBy(asc(projectOwnershipPeriods.starts_at));
+}
+
+export async function getProjectOwnershipPeriodsByProjectIds(
+  db: Db,
+  projectIds: ReadonlyArray<string>,
+): Promise<ReadonlyArray<ProjectOwnershipPeriod>> {
+  if (projectIds.length === 0) {
+    return [];
+  }
+  return db
+    .select()
+    .from(projectOwnershipPeriods)
+    .where(inArray(projectOwnershipPeriods.project_id, projectIds))
+    .orderBy(asc(projectOwnershipPeriods.project_id), asc(projectOwnershipPeriods.starts_at));
+}
+
+export async function getOpenProjectOwnershipPeriod(
+  db: Db,
+  projectId: string,
+): Promise<ProjectOwnershipPeriod | null> {
+  const [row] = await db
+    .select()
+    .from(projectOwnershipPeriods)
+    .where(
+      and(
+        eq(projectOwnershipPeriods.project_id, projectId),
+        isNull(projectOwnershipPeriods.ends_at),
+      ),
+    )
+    .limit(1);
+  return row ?? null;
+}
+
+/** Ownership intervals use [starts_at, ends_at), so a boundary bills new owner. */
+export async function getProjectOwnerAt(
+  db: Db,
+  projectId: string,
+  occurredAt: string,
+): Promise<string | null> {
+  const [row] = await db
+    .select({ ownerUserId: projectOwnershipPeriods.owner_user_id })
+    .from(projectOwnershipPeriods)
+    .where(
+      and(
+        eq(projectOwnershipPeriods.project_id, projectId),
+        lte(projectOwnershipPeriods.starts_at, occurredAt),
+        or(
+          isNull(projectOwnershipPeriods.ends_at),
+          gt(projectOwnershipPeriods.ends_at, occurredAt),
+        ),
+      ),
+    )
+    .orderBy(desc(projectOwnershipPeriods.starts_at))
+    .limit(1);
+  return row?.ownerUserId ?? null;
 }
 
 export async function getLatestDeploymentsByProjectIds(
@@ -533,9 +1244,13 @@ export async function createDeployment(
     gitRef?: string | null;
     repositoryUrl?: string | null;
     assetHashes?: string;
+    billingUserId?: string | null;
+    initiatedByUserId?: string | null;
   },
 ): Promise<Deployment> {
   const id = generateId('dpl');
+  const billingUserId =
+    metadata?.billingUserId ?? (await getProject(db, projectId))?.user_id ?? null;
   const [row] = await db
     .insert(deployments)
     .values({
@@ -549,6 +1264,8 @@ export async function createDeployment(
       git_ref: metadata?.gitRef ?? null,
       cli_version: metadata?.cliVersion ?? null,
       asset_hashes: metadata?.assetHashes ?? null,
+      billing_user_id: billingUserId,
+      initiated_by_user_id: metadata?.initiatedByUserId ?? null,
     })
     .returning();
   return row;
@@ -1651,13 +2368,16 @@ export async function tryCreateEmailDestination(
     const outcome = await db.transaction(async (tx) => {
       await lockEmailPolicy(tx);
       const [project] = await tx
-        .select({ status: projects.status })
+        .select({ status: projects.status, ownerUserId: projects.user_id })
         .from(projects)
         .where(eq(projects.id, projectId))
         .for('update')
         .limit(1);
       if (!project || project.status === 'deleting') {
         return 'project-unavailable' as const;
+      }
+      if (project.ownerUserId !== ownerAudit.userId) {
+        return 'owner-email-changed' as const;
       }
       const [owner] = await tx
         .select({ email: users.email })
@@ -2022,12 +2742,15 @@ export async function promoteEmailDestinationWithOwnerAudit(
 ): Promise<boolean> {
   return db.transaction(async (tx) => {
     await lockEmailPolicy(tx);
-    await tx
-      .select({ id: projects.id })
+    const [project] = await tx
+      .select({ ownerUserId: projects.user_id })
       .from(projects)
       .where(eq(projects.id, projectId))
       .for('update')
       .limit(1);
+    if (project?.ownerUserId !== ownerAudit.userId) {
+      return false;
+    }
     const [retired] = await tx
       .select({ id: emailDestinationCleanups.cf_destination_id })
       .from(emailDestinationCleanups)
@@ -2478,7 +3201,12 @@ export async function getUsersWithProjectsBatch(db: Db, limit: number, offset: n
 
   const userIds = userRows.map((u) => u.id);
   const projectRows = await db
-    .select({ id: projects.id, slug: projects.slug, user_id: projects.user_id })
+    .select({
+      id: projects.id,
+      slug: projects.slug,
+      user_id: projects.user_id,
+      created_at: projects.created_at,
+    })
     .from(projects)
     .where(inArray(projects.user_id, userIds));
 
@@ -2907,6 +3635,7 @@ export async function createBuild(
     logsUrl?: string | null;
     instanceType?: string | null;
     status?: Build['status'];
+    triggeredByUserId?: string | null;
   },
 ): Promise<Build> {
   const id = generateId('bld');
@@ -2916,6 +3645,7 @@ export async function createBuild(
       id,
       project_id: args.projectId,
       user_id: args.userId,
+      triggered_by_user_id: args.triggeredByUserId ?? null,
       executor: args.executor ?? 'container',
       status: args.status ?? 'queued',
       commit_sha: args.commitSha ?? null,
@@ -3305,25 +4035,63 @@ export async function hasQueuedContainerBuilds(db: Db): Promise<boolean> {
  * and the plain read avoids any lock-order concern on `github_installations`.
  *
  * FAILS CLOSED unless the exact connection still belongs to the project, has
- * durable authority, and its active installation still covers the repo. Personal
- * authority is the installation owner matching the project owner. Organization
- * authority is `authorized_by_user_id` matching the project owner, written only
- * after per-repo OAuth proof. Legacy organization rows are null and stop here.
+ * durable authority, and its active installation still covers the repo. New
+ * connections record the project owner/admin who completed the repository proof;
+ * that authorizer must still be the owner or an admin. Legacy personal-install
+ * rows without provenance retain their former owner-match behavior; legacy
+ * organization rows are null and stop here.
  * An `all` install covers every repo; a `selected` install requires the immutable
  * repo id in its cache. This is the shared predicate used by webhook and OIDC
  * resolvers as well as enqueue and final startup checks.
  */
 function githubConnectionAuthorityClause() {
   return or(
+    eq(githubConnections.authorized_by_user_id, projects.user_id),
+    sql`exists (
+      select 1
+      from ${projectMembers}
+      where ${projectMembers.project_id} = ${projects.id}
+        and ${projectMembers.user_id} = ${githubConnections.authorized_by_user_id}
+        and ${projectMembers.role} = 'admin'
+    )`,
     and(
+      isNull(githubConnections.authorized_by_user_id),
       eq(githubInstallations.account_type, 'User'),
       eq(githubInstallations.user_id, projects.user_id),
     ),
-    and(
-      eq(githubInstallations.account_type, 'Organization'),
-      eq(githubConnections.authorized_by_user_id, projects.user_id),
-    ),
   );
+}
+
+/**
+ * Invalidate provenance that no longer names a project owner/admin. Membership
+ * mutations call this while holding the project row lock, so they serialize with
+ * connection CRUD/build creation (which use the same project-first order).
+ * Reauthorization by another admin changes `authorized_by_user_id`, making this
+ * a no-op. Active build rows are terminalized before the connection is removed,
+ * which immediately revokes their build-bound deploy tokens.
+ */
+async function invalidateGitHubConnectionAuthorizedBy(
+  db: Db,
+  projectId: string,
+  userId: string,
+  reason: string,
+): Promise<void> {
+  const [connection] = await db
+    .select({ id: githubConnections.id })
+    .from(githubConnections)
+    .where(
+      and(
+        eq(githubConnections.project_id, projectId),
+        eq(githubConnections.authorized_by_user_id, userId),
+      ),
+    )
+    .for('update')
+    .limit(1);
+  if (!connection) {
+    return;
+  }
+  await terminateBuildsForProject(db, projectId, { reason });
+  await db.delete(githubConnections).where(eq(githubConnections.id, connection.id));
 }
 
 async function installationCoversRepoInTx(
@@ -3466,13 +4234,23 @@ export async function supersedeAndCreateContainerBuild(
     // Lock order is unchanged (projects-first), so the round-4 40P01 class stays
     // closed.
     const [proj] = await tx
-      .select({ status: projects.status })
+      .select({ status: projects.status, user_id: projects.user_id })
       .from(projects)
       .where(eq(projects.id, args.projectId))
       .for('update')
       .limit(1);
     if (!proj || proj.status === 'deleting') {
       return { build: null, reused: false, cancelled: [], skipped: 'project-deleting' };
+    }
+    const ownerChanged = proj.user_id !== args.userId;
+    let instanceType = args.instanceType ?? null;
+    if (ownerChanged) {
+      const [owner] = await tx
+        .select({ plan: users.plan })
+        .from(users)
+        .where(eq(users.id, proj.user_id))
+        .limit(1);
+      instanceType = owner ? getBuildInstanceType(owner.plan) : null;
     }
 
     // Serialize against PATCH /projects/:id/github: lock + re-read the single
@@ -3629,12 +4407,12 @@ export async function supersedeAndCreateContainerBuild(
       .values({
         id,
         project_id: args.projectId,
-        user_id: args.userId,
+        user_id: proj.user_id,
         executor: 'container',
         status: 'queued',
         commit_sha: args.commitSha,
         branch: args.branch,
-        instance_type: args.instanceType ?? null,
+        instance_type: instanceType,
       })
       .returning();
     return { build: row, reused: false, cancelled };
@@ -3907,7 +4685,7 @@ export async function createGithubActionsBuildWithinLimit(
     // token for a deleting project would create an orphan build the cascade then
     // has to cancel.
     const [proj] = await tx
-      .select({ status: projects.status })
+      .select({ status: projects.status, user_id: projects.user_id })
       .from(projects)
       .where(eq(projects.id, args.projectId))
       .for('update')
@@ -3919,7 +4697,17 @@ export async function createGithubActionsBuildWithinLimit(
     // Serialize per-user slot acquisition. Concurrent exchanges for the same
     // owner block here until the holder commits, so the count below always
     // observes prior inserts.
-    await tx.execute(sql`SELECT id FROM ${users} WHERE id = ${args.userId} FOR UPDATE`);
+    await tx.execute(sql`SELECT id FROM ${users} WHERE id = ${proj.user_id} FOR UPDATE`);
+
+    let limit = args.limit;
+    if (proj.user_id !== args.userId) {
+      const [owner] = await tx
+        .select({ plan: users.plan })
+        .from(users)
+        .where(eq(users.id, proj.user_id))
+        .limit(1);
+      limit = owner ? getPlanLimits(owner.plan).concurrentBuilds : 0;
+    }
 
     // Serialize against DELETE /projects/:id/github: lock + re-read the connection
     // inside this tx. If a concurrent disconnect committed first, the row is gone
@@ -4057,12 +4845,14 @@ export async function createGithubActionsBuildWithinLimit(
         );
     }
 
-    if (args.limit > 0) {
+    if (limit > 0) {
       const [result] = await tx
         .select({ count: count() })
         .from(builds)
-        .where(and(eq(builds.user_id, args.userId), inArray(builds.status, ACTIVE_BUILD_STATUSES)));
-      if ((result?.count ?? 0) >= args.limit) {
+        .where(
+          and(eq(builds.user_id, proj.user_id), inArray(builds.status, ACTIVE_BUILD_STATUSES)),
+        );
+      if ((result?.count ?? 0) >= limit) {
         return { outcome: 'limit-exceeded' };
       }
     }
@@ -4073,7 +4863,7 @@ export async function createGithubActionsBuildWithinLimit(
       .values({
         id,
         project_id: args.projectId,
-        user_id: args.userId,
+        user_id: proj.user_id,
         executor: 'github_actions',
         status: 'building',
         commit_sha: args.commitSha ?? null,

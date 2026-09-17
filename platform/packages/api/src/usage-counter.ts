@@ -1,5 +1,12 @@
 import { DurableObject } from 'cloudflare:workers';
-import { createDb, suspendUser, unsuspendUserIfReason, type Db } from './db.ts';
+import {
+  createDb,
+  getProjectOwnershipPeriodsByProjectIds,
+  getProjectsByIds,
+  suspendUser,
+  unsuspendUserIfReason,
+  type Db,
+} from './db.ts';
 import type { ApiEnv } from './env.ts';
 import { queryProjectAiUsage } from './routes/usage.ts';
 import { sandboxBlockKey, setProjectsRoutingSuspension } from './routing.ts';
@@ -10,6 +17,8 @@ import { SANDBOX_USAGE_RETENTION_MS } from './usage-auth.ts';
 // --- Exported types ---
 
 export type CounterState = {
+  /** Account represented by this counter, learned from trusted API requests. */
+  ownerUserId: string | null;
   totalRequests: number;
   totalNeurons: number;
   totalSandboxSeconds: number;
@@ -20,6 +29,22 @@ export type CounterState = {
   aiSuspended: boolean;
   sandboxRuntimeSuspended: boolean;
   projectSlugs: Record<string, string>; // projectId → slug
+  /** Start of the current ownership period for each actively owned project. */
+  projectOwnershipStarts: Record<string, string>;
+  /** Latest per-project AI readings for actively owned projects. */
+  projectNeurons: Record<string, number>;
+  /** AI usage retained from projects transferred away during this billing period. */
+  historicalNeurons: number;
+  /** Closed ownership windows that remain re-queryable while Analytics ingestion settles. */
+  historicalAiWindows: Record<
+    string,
+    {
+      projectId: string;
+      ownershipStartedAt: string;
+      ownershipEndedAt: string;
+      neurons: number;
+    }
+  >;
 };
 
 const SANDBOX_WATERMARK_PREFIX = 'sandbox-usage:watermark:';
@@ -53,6 +78,10 @@ export type UsageEvent = Readonly<{
   /** Cumulative server-owned lease generation; from stays fixed across heartbeats. */
   sandboxMeteredFrom?: number;
   sandboxMeteredThrough?: number;
+  /** Set by the API consumer after resolving the event's ownership period. */
+  currentOwner?: boolean;
+  /** Current ownership-period boundary, when `currentOwner` is true. */
+  ownershipStartedAt?: string;
 }>;
 
 // --- Pure functions (exported for unit testing) ---
@@ -82,6 +111,7 @@ export function evaluateSandboxRuntimeLimit(state: CounterState, incomingSeconds
 
 function defaultState(): CounterState {
   return {
+    ownerUserId: null,
     totalRequests: 0,
     totalNeurons: 0,
     totalSandboxSeconds: 0,
@@ -92,6 +122,10 @@ function defaultState(): CounterState {
     aiSuspended: false,
     sandboxRuntimeSuspended: false,
     projectSlugs: {},
+    projectOwnershipStarts: {},
+    projectNeurons: {},
+    historicalNeurons: 0,
+    historicalAiWindows: {},
   };
 }
 
@@ -140,6 +174,9 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
     return {
       ...this.state,
       projectSlugs: { ...this.state.projectSlugs },
+      projectOwnershipStarts: { ...this.state.projectOwnershipStarts },
+      projectNeurons: { ...this.state.projectNeurons },
+      historicalAiWindows: structuredClone(this.state.historicalAiWindows),
     };
   }
 
@@ -202,6 +239,12 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
     if (request.method === 'POST' && path === '/init') {
       return this.handleInit(request);
     }
+    if (request.method === 'POST' && path === '/attach-project') {
+      return this.handleAttachProject(request);
+    }
+    if (request.method === 'POST' && path === '/detach-project') {
+      return this.handleDetachProject(request);
+    }
     if (request.method === 'POST' && path === '/reevaluate-sandbox') {
       return this.handleReevaluateSandbox(request);
     }
@@ -223,6 +266,9 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
       billingPeriodStart?: string;
     };
     const state = await this.getState();
+    if (body.userId) {
+      state.ownerUserId = body.userId;
+    }
     // A new counter can first see an interval after that interval has ended.
     // Its construction time is not the account's billing-period boundary.
     if (!state.billingPeriodInitialized && body.billingPeriodStart) {
@@ -274,9 +320,16 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
     }
     state.totalSandboxSeconds += incomingSandboxSeconds;
 
-    // Update projectSlugs map
+    // Only the current owner may keep a project in the active enforcement set.
+    // A delayed event from a closed ownership period still contributes to the
+    // former owner's already-billed totals, but must not reattach the project.
     for (const event of body.events) {
-      state.projectSlugs[event.projectId] = event.slug;
+      if (event.currentOwner !== false) {
+        state.projectSlugs[event.projectId] = event.slug;
+        if (event.ownershipStartedAt) {
+          state.projectOwnershipStarts[event.projectId] = event.ownershipStartedAt;
+        }
+      }
     }
 
     // Update plan if provided
@@ -295,7 +348,7 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
     const exceedsLimit = evaluateRequestLimit(state, 0); // already added above
     if (exceedsLimit && !state.requestsSuspended) {
       await settleWrites([
-        this.suspendProjects(getDb(), state.projectSlugs, REASON_REQUESTS_EXCEEDED),
+        this.suspendProjects(getDb(), state.projectSlugs, body.userId, REASON_REQUESTS_EXCEEDED),
         suspendUser(getDb(), body.userId, REASON_REQUESTS_EXCEEDED),
       ]);
       state.requestsSuspended = true;
@@ -333,6 +386,9 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
       userId: string;
     };
     const state = await this.getState();
+    if (body.userId) {
+      state.ownerUserId = body.userId;
+    }
 
     // Only act if billingPeriodStart differs
     if (state.billingPeriodStart === body.billingPeriodStart) {
@@ -358,7 +414,12 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
       // The alarm's delete branch requires aiSuspended to still be true AND returns
       // early for unlimited-AI plans, so without this the proxy keeps 429ing AI
       // routes after rollover.
-      for (const projectId of Object.keys(state.projectSlugs)) {
+      const ownedProjectIds = await this.ownedProjectIds(
+        createDb(this.env.HYPERDRIVE.connectionString),
+        Object.keys(state.projectSlugs),
+        body.userId ?? state.ownerUserId,
+      );
+      for (const projectId of ownedProjectIds) {
         await this.env.ROUTING.delete(`ai-block:${projectId}`);
       }
     }
@@ -374,6 +435,9 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
     state.totalRequests = 0;
     state.totalNeurons = 0;
     state.totalSandboxSeconds = 0;
+    state.historicalNeurons = 0;
+    state.historicalAiWindows = {};
+    state.projectNeurons = {};
     state.plan = body.plan;
     state.billingPeriodStart = body.billingPeriodStart;
     state.billingPeriodInitialized = true;
@@ -406,27 +470,155 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
       plan: string;
       billingPeriodStart: string;
       projectSlugs: Record<string, string>;
+      projectOwnershipStarts?: Record<string, string>;
+      userId?: string;
     };
     const state = await this.getState();
+    if (body.userId) {
+      state.ownerUserId = body.userId;
+    }
 
-    // Merge projectSlugs
-    Object.assign(state.projectSlugs, body.projectSlugs);
+    // PostgreSQL owns the current project set. Replace instead of merge so an
+    // ownership transfer cannot leave the old owner's DO able to restamp the
+    // transferred project's routing or AI block.
+    const previousProjectIds = new Set(Object.keys(state.projectSlugs));
+    const removedProjectIds = [...previousProjectIds].filter(
+      (projectId) => !(projectId in body.projectSlugs),
+    );
+    const db = createDb(this.env.HYPERDRIVE.connectionString);
+    await this.retainTransferredProjectWindows(db, state, removedProjectIds);
+    state.projectSlugs = { ...body.projectSlugs };
+    state.projectOwnershipStarts = { ...(body.projectOwnershipStarts ?? {}) };
     state.plan = body.plan;
     state.billingPeriodStart = body.billingPeriodStart;
     state.billingPeriodInitialized = true;
 
     // Re-suspend any newly added project slugs if user is currently suspended
     if (state.requestsSuspended) {
-      const db = createDb(this.env.HYPERDRIVE.connectionString);
-      await this.suspendProjects(db, state.projectSlugs, REASON_REQUESTS_EXCEEDED);
+      await this.suspendProjects(
+        db,
+        state.projectSlugs,
+        state.ownerUserId,
+        REASON_REQUESTS_EXCEEDED,
+      );
     }
-    if (state.aiSuspended) {
-      for (const projectId of Object.keys(state.projectSlugs)) {
+    const ownedProjectIds = await this.ownedProjectIds(
+      db,
+      Object.keys(state.projectSlugs),
+      state.ownerUserId,
+    );
+    for (const projectId of ownedProjectIds) {
+      if (state.aiSuspended) {
         await this.env.ROUTING.put(`ai-block:${projectId}`, '1');
+      } else {
+        await this.env.ROUTING.delete(`ai-block:${projectId}`);
       }
     }
 
     await this.saveState(state);
+    if (Object.keys(state.historicalAiWindows).length > 0 && !(await this.ctx.storage.getAlarm())) {
+      await this.ctx.storage.setAlarm(Date.now() + 15 * 60 * 1000);
+    }
+    return Response.json({ ok: true });
+  }
+
+  private async handleAttachProject(request: Request): Promise<Response> {
+    const body = (await request.json()) as {
+      projectId: string;
+      slug: string;
+      ownershipStartedAt: string;
+      plan?: string;
+      userId?: string;
+    };
+    if (
+      !body.projectId ||
+      !body.slug ||
+      !body.ownershipStartedAt ||
+      !Number.isFinite(Date.parse(body.ownershipStartedAt))
+    ) {
+      return Response.json({ error: 'invalid project attachment' }, { status: 400 });
+    }
+    const state = await this.getState();
+    if (body.userId) {
+      state.ownerUserId = body.userId;
+    }
+    const db = createDb(this.env.HYPERDRIVE.connectionString);
+    const ownedProjectIds = await this.ownedProjectIds(db, [body.projectId], state.ownerUserId);
+    if (!ownedProjectIds.has(body.projectId)) {
+      return Response.json({ error: 'project owner changed' }, { status: 409 });
+    }
+    state.projectSlugs[body.projectId] = body.slug;
+    state.projectOwnershipStarts[body.projectId] = body.ownershipStartedAt;
+    if (body.plan) {
+      state.plan = body.plan;
+    }
+    if (state.requestsSuspended) {
+      await this.suspendProjects(
+        db,
+        { [body.projectId]: body.slug },
+        state.ownerUserId,
+        REASON_REQUESTS_EXCEEDED,
+      );
+    }
+    if (state.aiSuspended) {
+      await this.env.ROUTING.put(`ai-block:${body.projectId}`, '1');
+    } else {
+      // The key is project-scoped and may have been left by the former
+      // owner's counter. The new owner's latch is authoritative after attach.
+      await this.env.ROUTING.delete(`ai-block:${body.projectId}`);
+    }
+    await this.saveState(state);
+    return Response.json({ ok: true });
+  }
+
+  private async handleDetachProject(request: Request): Promise<Response> {
+    const body = (await request.json()) as {
+      projectId: string;
+      userId?: string;
+      ownershipStartedAt?: string;
+      ownershipEndedAt?: string;
+    };
+    if (!body.projectId) {
+      return Response.json({ error: 'projectId is required' }, { status: 400 });
+    }
+    if (
+      (body.ownershipStartedAt && !Number.isFinite(Date.parse(body.ownershipStartedAt))) ||
+      (body.ownershipEndedAt && !Number.isFinite(Date.parse(body.ownershipEndedAt)))
+    ) {
+      return Response.json({ error: 'invalid ownership window' }, { status: 400 });
+    }
+    const state = await this.getState();
+    if (body.userId) {
+      state.ownerUserId = body.userId;
+    }
+    if (body.ownershipEndedAt) {
+      const windowKey = this.retainHistoricalAiWindow(
+        state,
+        body.projectId,
+        body.ownershipStartedAt ?? state.projectOwnershipStarts[body.projectId],
+        body.ownershipEndedAt,
+      );
+      if (windowKey) {
+        await this.refreshHistoricalAiWindows(state, [windowKey]);
+      }
+    } else {
+      this.retainHistoricalAiSample(state, body.projectId);
+    }
+    if (state.aiSuspended) {
+      const ownedProjectIds = await this.ownedProjectIds(
+        createDb(this.env.HYPERDRIVE.connectionString),
+        [body.projectId],
+        state.ownerUserId,
+      );
+      if (ownedProjectIds.has(body.projectId)) {
+        await this.env.ROUTING.delete(`ai-block:${body.projectId}`);
+      }
+    }
+    this.recomputeTotalNeurons(state);
+    await this.saveState(state);
+    if (Object.keys(state.historicalAiWindows).length > 0 && !(await this.ctx.storage.getAlarm())) {
+      await this.ctx.storage.setAlarm(Date.now() + 15 * 60 * 1000);
+    }
     return Response.json({ ok: true });
   }
 
@@ -448,7 +640,12 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
     state.sandboxRuntimeSuspended = false;
     if (state.aiSuspended) {
       // Keep the durable latch set until every idempotent delete succeeds.
-      for (const projectId of Object.keys(state.projectSlugs)) {
+      const ownedProjectIds = await this.ownedProjectIds(
+        createDb(this.env.HYPERDRIVE.connectionString),
+        Object.keys(state.projectSlugs),
+        state.ownerUserId,
+      );
+      for (const projectId of ownedProjectIds) {
         await this.env.ROUTING.delete(`ai-block:${projectId}`);
       }
       state.aiSuspended = false;
@@ -490,20 +687,51 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
     const state = await this.getState();
     const limits = getPlanLimits(state.plan);
 
-    const projectIds = Object.keys(state.projectSlugs);
+    // Older persisted states do not identify their account. Wait for the next
+    // trusted record/rollover/init instead of risking a cross-owner KV write.
+    if (!state.ownerUserId) {
+      await this.saveState(state);
+      await this.ctx.storage.setAlarm(Date.now() + 15 * 60 * 1000);
+      return;
+    }
+
+    const db = createDb(this.env.HYPERDRIVE.connectionString);
+    const ownedProjectIds = await this.ownedProjectIds(
+      db,
+      Object.keys(state.projectSlugs),
+      state.ownerUserId,
+    );
+    const transferredProjectIds = Object.keys(state.projectSlugs).filter(
+      (projectId) => !ownedProjectIds.has(projectId),
+    );
+    await this.retainTransferredProjectWindows(db, state, transferredProjectIds);
+    const projectIds = [...ownedProjectIds];
     // Unlimited/no-project accounts still need bounded receipt cleanup. Keep
     // waking only while the scan may have retained or not-yet-visited records.
-    if (limits.aiNeuronsPerMonth === 0 || projectIds.length === 0) {
+    if (
+      limits.aiNeuronsPerMonth === 0 ||
+      (projectIds.length === 0 && Object.keys(state.historicalAiWindows).length === 0)
+    ) {
       if (await this.saveState(state)) {
         await this.ctx.storage.setAlarm(Date.now() + 15 * 60 * 1000);
       }
       return;
     }
 
-    // Query AI Gateway for each project's neuron usage
-    const since = new Date(state.billingPeriodStart);
-    let totalNeurons = 0;
+    // Re-query closed ownership windows because Analytics ingestion can lag the
+    // transfer transaction. Exact half-open cutoffs prevent either owner from
+    // being charged for the other side of the transfer boundary.
+    await this.refreshHistoricalAiWindows(state);
+
+    // Query AI Gateway for each currently owned project's neuron usage.
+    const billingSince = new Date(state.billingPeriodStart);
     for (const projectId of projectIds) {
+      const ownershipStartedAt = state.projectOwnershipStarts[projectId];
+      const ownershipSince = ownershipStartedAt ? new Date(ownershipStartedAt) : billingSince;
+      const since =
+        Number.isFinite(ownershipSince.getTime()) && ownershipSince > billingSince
+          ? ownershipSince
+          : billingSince;
       const result = await queryProjectAiUsage(
         this.env.CF_ACCOUNT_ID,
         this.env.CF_API_TOKEN,
@@ -511,10 +739,10 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
         projectId,
         since,
       );
-      totalNeurons += result.neurons;
+      state.projectNeurons[projectId] = result.neurons;
     }
 
-    state.totalNeurons = totalNeurons;
+    this.recomputeTotalNeurons(state);
 
     // Evaluate AI limit
     const exceedsAi = evaluateAiLimit(state);
@@ -540,11 +768,139 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
 
   // --- Private helpers ---
 
+  private retainHistoricalAiSample(state: CounterState, projectId: string): void {
+    const billed = state.projectNeurons[projectId];
+    if (typeof billed === 'number' && Number.isFinite(billed)) {
+      state.historicalNeurons += billed;
+    }
+    delete state.projectNeurons[projectId];
+    delete state.projectOwnershipStarts[projectId];
+    delete state.projectSlugs[projectId];
+  }
+
+  private retainHistoricalAiWindow(
+    state: CounterState,
+    projectId: string,
+    ownershipStartedAt: string | undefined,
+    ownershipEndedAt: string,
+  ): string | null {
+    const billingStartedAt = new Date(state.billingPeriodStart);
+    const startedAt = new Date(ownershipStartedAt ?? state.billingPeriodStart);
+    const endedAt = new Date(ownershipEndedAt);
+    if (
+      !Number.isFinite(billingStartedAt.getTime()) ||
+      !Number.isFinite(startedAt.getTime()) ||
+      !Number.isFinite(endedAt.getTime()) ||
+      endedAt <= startedAt
+    ) {
+      this.retainHistoricalAiSample(state, projectId);
+      return null;
+    }
+    const normalizedStart = startedAt.toISOString();
+    const normalizedEnd = endedAt.toISOString();
+    const key = JSON.stringify([projectId, normalizedStart, normalizedEnd]);
+    const existing = state.historicalAiWindows[key];
+    const sampled = state.projectNeurons[projectId];
+    state.historicalAiWindows[key] = {
+      projectId,
+      ownershipStartedAt: normalizedStart,
+      ownershipEndedAt: normalizedEnd,
+      neurons:
+        existing?.neurons ??
+        (typeof sampled === 'number' && Number.isFinite(sampled) ? sampled : 0),
+    };
+    delete state.projectNeurons[projectId];
+    delete state.projectOwnershipStarts[projectId];
+    delete state.projectSlugs[projectId];
+    return key;
+  }
+
+  private async retainTransferredProjectWindows(
+    db: Db,
+    state: CounterState,
+    projectIds: ReadonlyArray<string>,
+  ): Promise<void> {
+    if (projectIds.length === 0) {
+      return;
+    }
+    const periods = await getProjectOwnershipPeriodsByProjectIds(db, projectIds);
+    for (const projectId of projectIds) {
+      const expectedStart = state.projectOwnershipStarts[projectId];
+      const candidates = periods
+        .filter(
+          (period) =>
+            period.project_id === projectId &&
+            period.owner_user_id === state.ownerUserId &&
+            period.ends_at !== null,
+        )
+        .sort((left, right) => Date.parse(right.ends_at!) - Date.parse(left.ends_at!));
+      const period =
+        candidates.find(
+          (candidate) =>
+            expectedStart && Date.parse(candidate.starts_at) === Date.parse(expectedStart),
+        ) ?? candidates[0];
+      if (period?.ends_at) {
+        this.retainHistoricalAiWindow(state, projectId, period.starts_at, period.ends_at);
+      } else {
+        // Project deletion removes ownership history with the project. Retain
+        // the last sampled amount when no closed transfer window survives.
+        this.retainHistoricalAiSample(state, projectId);
+      }
+    }
+  }
+
+  private async refreshHistoricalAiWindows(
+    state: CounterState,
+    onlyKeys?: ReadonlyArray<string>,
+  ): Promise<void> {
+    const billingSince = new Date(state.billingPeriodStart);
+    const keys = onlyKeys ?? Object.keys(state.historicalAiWindows);
+    for (const key of keys) {
+      const window = state.historicalAiWindows[key];
+      if (!window) {
+        continue;
+      }
+      const ownershipSince = new Date(window.ownershipStartedAt);
+      const until = new Date(window.ownershipEndedAt);
+      const since = ownershipSince > billingSince ? ownershipSince : billingSince;
+      if (until <= since) {
+        window.neurons = 0;
+        continue;
+      }
+      const result = await queryProjectAiUsage(
+        this.env.CF_ACCOUNT_ID,
+        this.env.CF_API_TOKEN,
+        this.env.AI_GATEWAY_ID ?? 'void',
+        window.projectId,
+        since,
+        until,
+        true,
+      );
+      window.neurons = result.neurons;
+    }
+  }
+
+  private recomputeTotalNeurons(state: CounterState): void {
+    const current = Object.values(state.projectNeurons).reduce(
+      (total, neurons) => total + neurons,
+      0,
+    );
+    const historicalWindows = Object.values(state.historicalAiWindows).reduce(
+      (total, window) => total + window.neurons,
+      0,
+    );
+    state.totalNeurons = state.historicalNeurons + historicalWindows + current;
+  }
+
   private async suspendProjects(
     db: Db,
     projectSlugs: Record<string, string>,
+    expectedOwnerUserId: string | null,
     reason: string,
   ): Promise<void> {
+    if (!expectedOwnerUserId) {
+      return;
+    }
     // Stamp `suspended` on each project's slug route AND its active custom-domain
     // routes — dispatch enforces suspension from all of them, so a slug-only
     // stamp left over-limit projects serving on their custom domains.
@@ -554,11 +910,35 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
     // route carries `admin_suspended` and this leaves it intact (the admin
     // reason already blocks dispatch; downgrading it to `requests_exceeded`
     // would let the next admin unsuspend silently un-block an admin action).
-    const projects = Object.entries(projectSlugs).map(([id, slug]) => ({ id, slug }));
+    const ownedProjectIds = await this.ownedProjectIds(
+      db,
+      Object.keys(projectSlugs),
+      expectedOwnerUserId,
+    );
+    const projects = Object.entries(projectSlugs).flatMap(([id, slug]) =>
+      ownedProjectIds.has(id) ? [{ id, slug, user_id: expectedOwnerUserId }] : [],
+    );
     await setProjectsRoutingSuspension(this.env.ROUTING, db, projects, {
       op: 'suspend',
       reason,
       force: false,
     });
+  }
+
+  /** Prevent a stale former-owner counter from mutating transferred projects. */
+  private async ownedProjectIds(
+    db: Db,
+    projectIds: ReadonlyArray<string>,
+    expectedOwnerUserId: string | null,
+  ): Promise<Set<string>> {
+    if (!expectedOwnerUserId || projectIds.length === 0) {
+      return new Set();
+    }
+    const projects = await getProjectsByIds(db, projectIds);
+    return new Set(
+      projects
+        .filter((project) => project.user_id === expectedOwnerUserId)
+        .map((project) => project.id),
+    );
   }
 }

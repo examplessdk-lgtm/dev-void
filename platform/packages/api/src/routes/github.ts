@@ -27,7 +27,6 @@ import {
   hasActiveInstallationMembership,
   linkGitHubIdentity,
   linkGitHubInstallationToUser,
-  getProject,
   terminateBuildsForProject,
   updateGitHubConnection,
   upsertGitHubInstallation,
@@ -46,9 +45,10 @@ import {
 } from '../github/user-installations.ts';
 import { localhostRedirectResponse } from '../html-redirect.ts';
 import { authMiddleware } from '../middleware/auth.ts';
-import { githubConnections, githubInstallations, oauthAccounts } from '../schema.ts';
+import { githubConnections, githubInstallations, oauthAccounts, projects } from '../schema.ts';
 import type { Build, GitHubConnection, GitHubInstallation } from '../types.ts';
 import { isLocalhostRedirect } from './auth.ts';
+import { requireProjectRouteCapability } from './project-access.ts';
 
 const GITHUB_API_BASE = 'https://api.github.com';
 const GITHUB_API_VERSION = '2026-03-10';
@@ -1377,7 +1377,7 @@ function isValidWorkflowPath(path: string): boolean {
 // ---------------------------------------------------------------------------
 // /projects — per-project connection CRUD. Mounted UNDER the global
 // `app.use('/projects/*', authMiddleware)`, so auth is already applied; each
-// route does the project-ownership check (mirrors routes/domains.ts).
+// route checks the required live project capability.
 // ---------------------------------------------------------------------------
 export const githubProjectRoutes = new Hono<ApiEnv>()
   .use('*', capabilityMiddleware('managedBuilds'))
@@ -1385,12 +1385,9 @@ export const githubProjectRoutes = new Hono<ApiEnv>()
   // Connect a project to a repo within one of the caller's installations.
   .post('/:id/github', async (context) => {
     const projectId = context.req.param('id');
-    const project = await getProject(context.get('db'), projectId);
-    if (!project) {
-      return context.json({ error: 'project not found' }, 404);
-    }
-    if (project.user_id !== context.get('user').id) {
-      return context.json({ error: 'forbidden' }, 403);
+    const access = await requireProjectRouteCapability(context, projectId, 'settings');
+    if (access instanceof Response) {
+      return access;
     }
 
     const body = await context.req.json<{
@@ -1628,6 +1625,26 @@ export const githubProjectRoutes = new Hono<ApiEnv>()
       if (!lockedInstall) {
         return { ok: false as const, status: 404 as const, error: 'installation not found' };
       }
+      // Serialize project-role changes with connection creation. The install row
+      // remains first (the established GitHub lifecycle lock order), followed by
+      // the project and then connection rows. A demoted/removed admin therefore
+      // cannot pass the preflight settings check and create a connection after
+      // losing access.
+      await tx
+        .select({ id: projects.id })
+        .from(projects)
+        .where(eq(projects.id, projectId))
+        .for('update')
+        .limit(1);
+      const lockedAccess = await requireProjectRouteCapability(
+        context,
+        projectId,
+        'settings',
+        txDb,
+      );
+      if (lockedAccess instanceof Response) {
+        return lockedAccess;
+      }
       // Re-derive ownership from the LOCKED row, not the stale pre-tx snapshot. If
       // member_removed cleared the owner pointer while we waited on the lock, the
       // pre-tx owner path is stale: we already resolved repositoryId via the
@@ -1724,13 +1741,16 @@ export const githubProjectRoutes = new Hono<ApiEnv>()
         installationId,
         repoFullName,
         repositoryId: String(repositoryId),
-        authorizedByUserId: lockedInstall.account_type === 'Organization' ? caller : null,
+        authorizedByUserId: caller,
         branch,
         buildExecutor,
         workflowPath,
       });
       return { ok: true as const, connection };
     });
+    if (result instanceof Response) {
+      return result;
+    }
     if (!result.ok) {
       return context.json({ error: result.error }, result.status);
     }
@@ -1740,12 +1760,9 @@ export const githubProjectRoutes = new Hono<ApiEnv>()
   // Read the project's connection.
   .get('/:id/github', async (context) => {
     const projectId = context.req.param('id');
-    const project = await getProject(context.get('db'), projectId);
-    if (!project) {
-      return context.json({ error: 'project not found' }, 404);
-    }
-    if (project.user_id !== context.get('user').id) {
-      return context.json({ error: 'forbidden' }, 403);
+    const access = await requireProjectRouteCapability(context, projectId, 'read');
+    if (access instanceof Response) {
+      return access;
     }
 
     const connection = await getGitHubConnection(context.get('db'), projectId);
@@ -1767,12 +1784,9 @@ export const githubProjectRoutes = new Hono<ApiEnv>()
   // Update branch / build executor.
   .patch('/:id/github', async (context) => {
     const projectId = context.req.param('id');
-    const project = await getProject(context.get('db'), projectId);
-    if (!project) {
-      return context.json({ error: 'project not found' }, 404);
-    }
-    if (project.user_id !== context.get('user').id) {
-      return context.json({ error: 'forbidden' }, 403);
+    const access = await requireProjectRouteCapability(context, projectId, 'settings');
+    if (access instanceof Response) {
+      return access;
     }
 
     const connection = await getGitHubConnection(context.get('db'), projectId);
@@ -1812,8 +1826,23 @@ export const githubProjectRoutes = new Hono<ApiEnv>()
     // in-flight OIDC exchange (which re-reads + locks the row) is serialized.
     // Only a REAL change invalidates builds — a no-op PATCH (value unchanged, or
     // field omitted) terminalizes nothing.
-    const { cancelled, updated, gone } = await context.get('db').transaction(async (tx) => {
+    const result = await context.get('db').transaction(async (tx) => {
       const txDb = tx as unknown as Db;
+      await tx
+        .select({ id: projects.id })
+        .from(projects)
+        .where(eq(projects.id, projectId))
+        .for('update')
+        .limit(1);
+      const lockedAccess = await requireProjectRouteCapability(
+        context,
+        projectId,
+        'settings',
+        txDb,
+      );
+      if (lockedAccess instanceof Response) {
+        return lockedAccess;
+      }
       await tx
         .select({ id: githubConnections.id })
         .from(githubConnections)
@@ -1878,6 +1907,11 @@ export const githubProjectRoutes = new Hono<ApiEnv>()
       return { cancelled: terminated, updated: next, gone: false };
     });
 
+    if (result instanceof Response) {
+      return result;
+    }
+    const { cancelled, updated, gone } = result;
+
     if (gone || !updated) {
       return context.json({ error: 'connection not found' }, 404);
     }
@@ -1892,12 +1926,9 @@ export const githubProjectRoutes = new Hono<ApiEnv>()
   // Disconnect the project.
   .delete('/:id/github', async (context) => {
     const projectId = context.req.param('id');
-    const project = await getProject(context.get('db'), projectId);
-    if (!project) {
-      return context.json({ error: 'project not found' }, 404);
-    }
-    if (project.user_id !== context.get('user').id) {
-      return context.json({ error: 'forbidden' }, 403);
+    const access = await requireProjectRouteCapability(context, projectId, 'settings');
+    if (access instanceof Response) {
+      return access;
     }
 
     // Terminalize ALL in-flight builds (queued + active, both executors) for
@@ -1909,8 +1940,23 @@ export const githubProjectRoutes = new Hono<ApiEnv>()
     // Actions builds also stop pinning a concurrency slot (their workflow_run
     // completion webhook resolves the CURRENT connection — once it's gone the
     // completion is ignored and the build would otherwise stay active forever).
-    const cancelled = await context.get('db').transaction(async (tx) => {
+    const result = await context.get('db').transaction(async (tx) => {
       const txDb = tx as unknown as Db;
+      await tx
+        .select({ id: projects.id })
+        .from(projects)
+        .where(eq(projects.id, projectId))
+        .for('update')
+        .limit(1);
+      const lockedAccess = await requireProjectRouteCapability(
+        context,
+        projectId,
+        'settings',
+        txDb,
+      );
+      if (lockedAccess instanceof Response) {
+        return lockedAccess;
+      }
       // Lock the connection row(s) so an in-flight OIDC exchange (which re-reads +
       // FOR UPDATE-locks the same row before inserting its build) is serialized:
       // whichever commits first wins, and a build created just before this commit
@@ -1926,6 +1972,11 @@ export const githubProjectRoutes = new Hono<ApiEnv>()
       await deleteGitHubConnection(txDb, projectId);
       return terminated;
     });
+
+    if (result instanceof Response) {
+      return result;
+    }
+    const cancelled = result;
 
     // AFTER the tx commits (never while holding the connection lock), best-effort
     // stop the container DOs for any cancelled container builds.

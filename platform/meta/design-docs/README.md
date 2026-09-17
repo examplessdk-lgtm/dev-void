@@ -33,7 +33,7 @@ as an instruction to modify a live installation.
 | Builds and GitHub     | [Build design](./0010-builds.md), [implementation decisions](./0011-builds-implementation-plan.md), [identity linking](./0074-github-deploy-identity-linking.md), [build logs](./0076-build-logs.md) |
 | Serving and routing   | [Asset fallback](./0066-wfp-asset-r2-fallback.md), [direct R2 uploads](./0068-direct-r2-asset-upload.md), [route-aware ISR](./0077-route-aware-isr-ttl.md)                                           |
 | Custom domains        | [Record presentation](./0072-custom-domain-verification-ux-improvements.md), [HTTP certificate validation](./0073-custom-domain-http-dcv-migration.md)                                               |
-| Administration        | [Operator CLI](./0078-platform-operator-cli.md)                                                                                                                                                      |
+| Administration        | [Operator CLI](./0078-platform-operator-cli.md), [project teams and ownership transfer](./0080-project-teams.md)                                                                                     |
 | Email                 | [Routing, recovery and delivery design](./0078-email-cf-native.md)                                                                                                                                   |
 | Legacy Sandboxes      | [Container ownership and teardown](./0067-cross-script-do-host-architecture.md)                                                                                                                      |
 

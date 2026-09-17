@@ -46,10 +46,10 @@ export async function resolveResource(
 }
 
 /**
- * Verifies that a user owns a project via the API service binding.
- * Called on the JWT auth path to prevent cross-tenant access.
+ * Verifies that an actor still has deploy-equivalent project access through
+ * the API service binding. The endpoint keeps its legacy name during rollout.
  */
-export async function verifyProjectOwner(
+export async function verifyProjectDeployAccess(
   api: Fetcher,
   jwtSecret: string,
   projectId: string,

@@ -191,6 +191,25 @@ describe('operator CLI (real subprocess and HTTP)', () => {
     expect(applied.stderr).toBe('');
     expect(requests.map(({ body }) => body)).toEqual([{ dryRun: true }, {}]);
   });
+  it('previews and applies project ownership transfer with the target user ID', async () => {
+    reply = (_path, body) =>
+      body.dryRun
+        ? { body: { dryRun: true, action: 'project.owner', target: 'project-1' } }
+        : { body: { ok: true, owner: { id: 'user-2' } } };
+    const result = await run(['project', 'owner', 'project-1', 'user-2', '--yes', '--json']);
+    expect(result.code).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({ owner: { id: 'user-2' } });
+    expect(requests).toEqual([
+      expect.objectContaining({
+        path: '/operator/v1/projects/project-1/owner',
+        body: { userId: 'user-2', dryRun: true },
+      }),
+      expect.objectContaining({
+        path: '/operator/v1/projects/project-1/owner',
+        body: { userId: 'user-2' },
+      }),
+    ]);
+  });
   it('prints structured argument failures without network calls', async () => {
     const result = await run(['user', 'list', '--limit', '10000', '--json']);
     expect(result.code).toBe(1);

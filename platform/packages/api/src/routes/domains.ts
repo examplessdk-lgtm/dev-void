@@ -3,7 +3,6 @@ import { Hono } from 'hono';
 import { capabilityMiddleware } from '../capabilities.ts';
 import { SITE_DOMAIN } from '../constants.ts';
 import {
-  getProject,
   createDomain,
   getDomainsByProjectId,
   getDomain,
@@ -22,6 +21,7 @@ import {
   type CustomHostnameInfo,
 } from '../provisioning/cloudflare-api.ts';
 import type { DomainVerificationData } from '../schema.ts';
+import { requireProjectRouteCapability } from './project-access.ts';
 
 const CNAME_TARGET = `cname.${SITE_DOMAIN}`;
 const ORPHAN_ADOPTION_MIN_AGE_MS = 60_000;
@@ -54,13 +54,9 @@ const app = new Hono<ApiEnv>()
   // Add a custom domain to a project
   .post('/:id/domains', async (context) => {
     const projectId = context.req.param('id');
-    const project = await getProject(context.get('db'), projectId);
-    if (!project) {
-      return context.json({ error: 'project not found' }, 404);
-    }
-
-    if (project.user_id !== context.get('user').id) {
-      return context.json({ error: 'forbidden' }, 403);
+    const access = await requireProjectRouteCapability(context, projectId, 'settings');
+    if (access instanceof Response) {
+      return access;
     }
 
     const { hostname } = await context.req.json<{ hostname: string }>();
@@ -112,15 +108,20 @@ const app = new Hono<ApiEnv>()
     // earlier post-create DB failure. Only adopt still-pending CF objects with
     // an outstanding ownership challenge; a previously verified/active hostname
     // must not become claimable by another project without fresh ownership.
+    // Cloudflare creation is a reversible first phase. The durable second
+    // phase below takes the project lock and rechecks access before inserting
+    // the row. If a membership change or teardown wins that lock, hand the CF
+    // object back before returning the rejection; if this request wins, the
+    // domain commits before the membership write can proceed.
     let cfHostname: CustomHostnameInfo;
-    let createdCustomHostname = false;
+    let createdCfHostname: CustomHostnameInfo | undefined;
     try {
       cfHostname = await createCustomHostname(
         context.env.CF_ZONE_ID,
         context.env.CF_API_TOKEN,
         hostname,
       );
-      createdCustomHostname = true;
+      createdCfHostname = cfHostname;
     } catch (err) {
       if (err instanceof CloudflareApiError && err.status === 409) {
         const existingAfterConflict = await getDomainByHostname(context.get('db'), hostname);
@@ -154,71 +155,97 @@ const app = new Hono<ApiEnv>()
       }
     }
 
-    // Under HTTP-DCV the certificate is validated at CF's edge once the
-    // hostname proxies through it, so CF never emits `ssl.validation_records`
-    // (no `_acme-challenge` TXT). `ownership_verification` — the
-    // `_cf-custom-hostname` TXT that proves the user controls the hostname —
-    // IS returned synchronously in the create response, so persist it
-    // straight away and return. (`ssl_validation_records` will be
-    // empty/absent — expected.)
-    const verificationData: DomainVerificationData = {
-      ownership_verification: cfHostname.ownership_verification,
-      ssl_validation_records: cfHostname.ssl.validation_records,
+    const rollbackCreatedHostname = async (): Promise<void> => {
+      if (!createdCfHostname) {
+        return;
+      }
+      const persistedDomain = await getDomainByHostnameOrCfHostnameId(
+        context.get('db'),
+        hostname,
+        createdCfHostname.id,
+      );
+      if (!persistedDomain) {
+        await deleteCustomHostname(
+          context.env.CF_ZONE_ID,
+          context.env.CF_API_TOKEN,
+          createdCfHostname.id,
+        ).catch((deleteErr) => {
+          console.error(
+            `Failed to delete orphaned custom hostname ${createdCfHostname?.id} after DB transaction failure:`,
+            deleteErr,
+          );
+        });
+      }
     };
 
-    // Insert domain record. If we just created the CF hostname and then fail
-    // to persist it, revoke that CF object so future adds do not hit a
-    // duplicate custom-hostname orphan that no Void project can delete.
-    let domain;
     try {
-      domain = await createDomain(
-        context.get('db'),
-        projectId,
-        hostname,
-        cfHostname.id,
-        verificationData,
-      );
-    } catch (err) {
-      if (createdCustomHostname) {
-        const persistedDomain = await getDomainByHostnameOrCfHostnameId(
-          context.get('db'),
+      const lockedResult = await context.get('db').transaction(async (tx) => {
+        await tx.execute(drizzleSql`SELECT id FROM projects WHERE id = ${projectId} FOR UPDATE`);
+        const txDb = tx as unknown as Db;
+        const lockedAccess = await requireProjectRouteCapability(
+          context,
+          projectId,
+          'settings',
+          txDb,
+        );
+        if (lockedAccess instanceof Response) {
+          return lockedAccess;
+        }
+        if (lockedAccess.project.status === 'deleting') {
+          return context.json({ error: 'Project is being deleted' }, 409);
+        }
+
+        // Recheck after waiting for the project lock. A prior request for this
+        // project may have committed while this request was queued.
+        const lockedExisting = await getDomainByHostname(txDb, hostname);
+        if (lockedExisting) {
+          return context.json({ error: 'hostname already in use' }, 409);
+        }
+
+        // Under HTTP-DCV the certificate is validated at CF's edge once the
+        // hostname proxies through it, so CF never emits
+        // `ssl.validation_records`. Persist the ownership challenge returned
+        // synchronously with the create response.
+        const verificationData: DomainVerificationData = {
+          ownership_verification: cfHostname.ownership_verification,
+          ssl_validation_records: cfHostname.ssl.validation_records,
+        };
+        const domain = await createDomain(
+          txDb,
+          projectId,
           hostname,
           cfHostname.id,
+          verificationData,
         );
-        if (!persistedDomain) {
-          await deleteCustomHostname(
-            context.env.CF_ZONE_ID,
-            context.env.CF_API_TOKEN,
-            cfHostname.id,
-          ).catch((deleteErr) => {
-            console.error(
-              `Failed to delete orphaned custom hostname ${cfHostname.id} after DB insert failure:`,
-              deleteErr,
-            );
-          });
-        }
+
+        return context.json({
+          ...domain,
+          cname_target: CNAME_TARGET,
+          ownership_verification: cfHostname.ownership_verification,
+          ssl_validation_records: cfHostname.ssl.validation_records ?? [],
+        });
+      });
+      if (!lockedResult.ok) {
+        await rollbackCreatedHostname();
       }
+      return lockedResult;
+    } catch (err) {
+      // A CF create can succeed even when the DB transaction later fails to
+      // insert or commit. Hand back only the object this request created; an
+      // adopted pre-existing hostname belongs to the recovery path and must
+      // not be deleted. The read-back also protects a concurrent winning
+      // request that durably persisted this exact object.
+      await rollbackCreatedHostname();
       throw err;
     }
-
-    return context.json({
-      ...domain,
-      cname_target: CNAME_TARGET,
-      ownership_verification: cfHostname.ownership_verification,
-      ssl_validation_records: cfHostname.ssl.validation_records ?? [],
-    });
   })
 
   // List domains for a project
   .get('/:id/domains', async (context) => {
     const projectId = context.req.param('id');
-    const project = await getProject(context.get('db'), projectId);
-    if (!project) {
-      return context.json({ error: 'project not found' }, 404);
-    }
-
-    if (project.user_id !== context.get('user').id) {
-      return context.json({ error: 'forbidden' }, 403);
+    const access = await requireProjectRouteCapability(context, projectId, 'read');
+    if (access instanceof Response) {
+      return access;
     }
 
     const domains = await getDomainsByProjectId(context.get('db'), projectId);
@@ -230,14 +257,11 @@ const app = new Hono<ApiEnv>()
     const projectId = context.req.param('id');
     const domainId = context.req.param('domainId');
 
-    const project = await getProject(context.get('db'), projectId);
-    if (!project) {
-      return context.json({ error: 'project not found' }, 404);
+    const access = await requireProjectRouteCapability(context, projectId, 'read');
+    if (access instanceof Response) {
+      return access;
     }
-
-    if (project.user_id !== context.get('user').id) {
-      return context.json({ error: 'forbidden' }, 403);
-    }
+    const project = access.project;
 
     const domain = await getDomain(context.get('db'), domainId);
     if (!domain || domain.project_id !== projectId) {
@@ -269,13 +293,9 @@ const app = new Hono<ApiEnv>()
     const projectId = context.req.param('id');
     const domainId = context.req.param('domainId');
 
-    const project = await getProject(context.get('db'), projectId);
-    if (!project) {
-      return context.json({ error: 'project not found' }, 404);
-    }
-
-    if (project.user_id !== context.get('user').id) {
-      return context.json({ error: 'forbidden' }, 403);
+    const access = await requireProjectRouteCapability(context, projectId, 'settings');
+    if (access instanceof Response) {
+      return access;
     }
 
     const domain = await getDomain(context.get('db'), domainId);
@@ -288,25 +308,38 @@ const app = new Hono<ApiEnv>()
     // CF cleanup is best-effort. KV + DB deletion serialize with deploy,
     // rollback, activation, and failed-cutover compensation through the
     // project row so none can resurrect this hostname from a stale snapshot.
-    await deleteCustomHostname(
-      context.env.CF_ZONE_ID,
-      context.env.CF_API_TOKEN,
-      domain.cf_hostname_id,
-    ).catch((err) => {
-      warnings.push(
-        `Failed to delete custom hostname: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    });
-    await context.get('db').transaction(async (tx) => {
+    const lockedResponse = await context.get('db').transaction(async (tx) => {
       await tx.execute(drizzleSql`SELECT id FROM projects WHERE id = ${projectId} FOR UPDATE`);
       const txDb = tx as unknown as Db;
+      const lockedAccess = await requireProjectRouteCapability(
+        context,
+        projectId,
+        'settings',
+        txDb,
+      );
+      if (lockedAccess instanceof Response) {
+        return lockedAccess;
+      }
+      await deleteCustomHostname(
+        context.env.CF_ZONE_ID,
+        context.env.CF_API_TOKEN,
+        domain.cf_hostname_id,
+      ).catch((err) => {
+        warnings.push(
+          `Failed to delete custom hostname: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
       await context.env.ROUTING.delete(`domain:${domain.hostname}`).catch((err) => {
         warnings.push(
           `Failed to delete routing entry: ${err instanceof Error ? err.message : String(err)}`,
         );
       });
       await deleteDomain(txDb, domain.id);
+      return null;
     });
+    if (lockedResponse) {
+      return lockedResponse;
+    }
 
     return context.json({ ok: true, ...(warnings.length > 0 && { warnings }) });
   });

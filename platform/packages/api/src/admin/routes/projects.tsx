@@ -3,7 +3,12 @@ import { SITE_DOMAIN } from '../../constants.ts';
 import { getAllProjectsWithOwner, countProjects, searchProjects } from '../../db.ts';
 import type { ApiEnv } from '../../env.ts';
 import { executeAuditedMutation, operatorAuditIntent } from '../../operator/audit.ts';
-import { deleteOperatorProject, getOperatorProject } from '../../operator/tenant-service.ts';
+import { OperatorError } from '../../operator/common.ts';
+import {
+  deleteOperatorProject,
+  getOperatorProject,
+  transferOperatorProjectOwner,
+} from '../../operator/tenant-service.ts';
 import { projectUrl, projectWithUrl } from '../../project-url.ts';
 import { renderOperationError } from '../operation-error.tsx';
 import { BuildTable } from '../views/build-table.tsx';
@@ -14,6 +19,45 @@ import { ProjectsListPage } from '../views/projects-list.tsx';
 const PAGE_SIZE = 20;
 const app = new Hono<ApiEnv>();
 app.onError(renderOperationError);
+
+type OwnerSummary = Readonly<{
+  id: string;
+  login: string;
+  email: string | null;
+  plan: string;
+  suspended: boolean;
+  suspendedReason: string | null;
+}>;
+
+type OwnerTransferPreview = Readonly<{
+  target: { id: string; slug: string; userId: string };
+  previousOwner: OwnerSummary;
+  newOwner: OwnerSummary;
+  formerOwnerRole: 'admin';
+  targetPreviousRole: string | null;
+  blockers: ReadonlyArray<{ kind: string; id: string; status: string }>;
+  github: {
+    installationId: string;
+    repository: string;
+    authorizedByUserId: string | null;
+    executor: string;
+  } | null;
+  routingUpdates: ReadonlyArray<string>;
+  counterUpdates: { detachUserId: string; attachUserId: string };
+  usageTransfer: string;
+}>;
+
+function transferTarget(body: Record<string, string | File>) {
+  const value = body.userId;
+  if (typeof value !== 'string' || !value.trim() || value.length > 512) {
+    throw new OperatorError(400, 'New owner user ID is required.');
+  }
+  return value.trim();
+}
+
+function suspensionLabel(owner: OwnerSummary) {
+  return owner.suspended ? `Suspended (${owner.suspendedReason ?? 'unknown reason'})` : 'Active';
+}
 
 // GET /projects
 app.get('/', async (context) => {
@@ -175,6 +219,19 @@ app.get('/:id', async (context) => {
       <h2>Builds ({builds.length})</h2>
       <BuildTable builds={builds} tz={tz} />
 
+      <h2>Transfer Ownership</h2>
+      <p>
+        Transfer this project to an existing Void Platform user. You will review the ownership,
+        plan, suspension, active-work, routing, and usage-counter changes before applying them.
+      </p>
+      <form method="post" action={`/admin/projects/${project.id}/owner/preview`}>
+        <label>
+          New owner user ID
+          <input type="text" name="userId" required maxlength={512} placeholder="user_..." />
+        </label>{' '}
+        <button type="submit">Preview Transfer</button>
+      </form>
+
       <h2>Danger Zone</h2>
       <form
         method="post"
@@ -187,6 +244,118 @@ app.get('/:id', async (context) => {
         </button>
       </form>
     </Layout>,
+  );
+});
+
+// POST /projects/:id/owner/preview
+app.post('/:id/owner/preview', async (context) => {
+  const projectId = context.req.param('id');
+  const body = await context.req.parseBody();
+  const userId = transferTarget(body);
+  const result = (await transferOperatorProjectOwner(
+    context,
+    projectId,
+    userId,
+    true,
+  )) as unknown as OwnerTransferPreview;
+
+  return context.html(
+    <Layout title={`Transfer ${result.target.slug}`} username={context.get('user').login}>
+      <h1>Transfer Ownership: {result.target.slug}</h1>
+      <table>
+        <thead>
+          <tr>
+            <th>Account</th>
+            <th>User</th>
+            <th>Plan</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th>Current owner</th>
+            <td>
+              {result.previousOwner.login} (<code>{result.previousOwner.id}</code>)
+            </td>
+            <td>{result.previousOwner.plan}</td>
+            <td>{suspensionLabel(result.previousOwner)}</td>
+          </tr>
+          <tr>
+            <th>New owner</th>
+            <td>
+              {result.newOwner.login} (<code>{result.newOwner.id}</code>)
+            </td>
+            <td>{result.newOwner.plan}</td>
+            <td>{suspensionLabel(result.newOwner)}</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <p>
+        The former owner will become a <strong>{result.formerOwnerRole}</strong>. The target's
+        current project role is <strong>{result.targetPreviousRole ?? 'none'}</strong>. Usage
+        transfer is {result.usageTransfer}.
+      </p>
+
+      <h2>Active-work blockers</h2>
+      {result.blockers.length > 0 ? (
+        <ul>
+          {result.blockers.map((blocker) => (
+            <li key={`${blocker.kind}:${blocker.id}`}>
+              {blocker.kind}: {blocker.id} ({blocker.status})
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p>None.</p>
+      )}
+
+      <h2>Convergence</h2>
+      <p>
+        Usage counters: detach from <code>{result.counterUpdates.detachUserId}</code>, attach to{' '}
+        <code>{result.counterUpdates.attachUserId}</code>.
+      </p>
+      <p>Routing and account entries: {result.routingUpdates.join(', ')}</p>
+
+      <h2>GitHub authorization provenance</h2>
+      {result.github ? (
+        <p>
+          {result.github.repository} installation {result.github.installationId}, authorized by{' '}
+          {result.github.authorizedByUserId ?? 'unknown'} ({result.github.executor}).
+        </p>
+      ) : (
+        <p>No GitHub connection.</p>
+      )}
+
+      {result.blockers.length === 0 ? (
+        <form method="post" action={`/admin/projects/${projectId}/owner`}>
+          <input type="hidden" name="userId" value={userId} />
+          <button type="submit" class="danger">
+            Apply Ownership Transfer
+          </button>
+        </form>
+      ) : (
+        <p>Resolve or cancel all active work before applying this transfer.</p>
+      )}
+      <p>
+        <a href={`/admin/projects/${projectId}`}>Back to project</a>
+      </p>
+    </Layout>,
+  );
+});
+
+// POST /projects/:id/owner
+app.post('/:id/owner', async (context) => {
+  const projectId = context.req.param('id');
+  const body = await context.req.parseBody();
+  const userId = transferTarget(body);
+  return executeAuditedMutation(
+    context,
+    operatorAuditIntent(`projects/${projectId}/owner`, { userId }),
+    async () => {
+      await transferOperatorProjectOwner(context, projectId, userId);
+      return { response: context.redirect(`/admin/projects/${projectId}`), succeeded: true };
+    },
   );
 });
 

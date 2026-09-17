@@ -17,6 +17,7 @@ import {
   failStaleDeployments,
   getDeployment,
   getProject,
+  removeProjectMember,
   updateDeploymentStatus,
   type Db,
 } from '../../src/db.ts';
@@ -29,6 +30,7 @@ import {
   domains,
   projects,
   projectMigrations,
+  projectMembers,
   projectSecrets,
   users,
 } from '../../src/schema.ts';
@@ -364,6 +366,127 @@ describe('POST /projects/:id/deploy', () => {
     const res = await app.fetch(await buildDeployRequest(env, project.id, bob.jwt), env);
     expect(res.status).toBe(403);
     expect(await res.json()).toEqual({ error: 'forbidden' });
+  });
+
+  it('denies readers and bills collaborator deploys to the project owner', async () => {
+    const owner = await createTestUser(env.db, 'team-owner');
+    const reader = await createTestUser(env.db, 'team-reader');
+    const collaborator = await createTestUser(
+      env.db,
+      'team-collaborator',
+      'github',
+      undefined,
+      'custom',
+    );
+    const project = await createTestProject(env.db, owner.id, 'team-deploy');
+    await env.db.insert(projectMembers).values([
+      {
+        project_id: project.id,
+        user_id: reader.id,
+        role: 'reader',
+        added_by_user_id: owner.id,
+      },
+      {
+        project_id: project.id,
+        user_id: collaborator.id,
+        role: 'collaborator',
+        added_by_user_id: owner.id,
+      },
+    ]);
+    mockCfApi();
+
+    const readerResponse = await app.fetch(
+      await buildDeployRequest(env, project.id, reader.jwt),
+      env,
+    );
+    expect(readerResponse.status).toBe(403);
+
+    const collaboratorResponse = await app.fetch(
+      await buildDeployRequest(env, project.id, collaborator.jwt),
+      env,
+    );
+    expect(collaboratorResponse.status).toBe(200);
+    const done = requireEvent<DoneEvent>(await readAllEvents(collaboratorResponse), 'done');
+    const deployment = await getDeployment(env.db, done.deployment);
+    expect(deployment).toMatchObject({
+      billing_user_id: owner.id,
+      initiated_by_user_id: collaborator.id,
+      status: 'live',
+    });
+    const routing = (await env.ROUTING.get(project.slug, 'json')) as { userId: string };
+    expect(routing.userId).toBe(owner.id);
+  });
+
+  it("uses the owner's plan rather than a collaborator's plan", async () => {
+    const owner = await createTestUser(env.db, 'limited-owner');
+    const collaborator = await createTestUser(
+      env.db,
+      'unlimited-collaborator',
+      'github',
+      undefined,
+      'custom',
+    );
+    const project = await createTestProject(env.db, owner.id, 'owner-plan-deploy');
+    await env.db.insert(projectMembers).values({
+      project_id: project.id,
+      user_id: collaborator.id,
+      role: 'collaborator',
+      added_by_user_id: owner.id,
+    });
+    mockCfApi();
+
+    const response = await app.fetch(
+      await buildDeployRequest(env, project.id, collaborator.jwt, {
+        manifest: { version: 3, bindings: {}, limits: { cpuMs: 60_000 } },
+      }),
+      env,
+    );
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      message: 'limits.cpuMs 60000 exceeds your plan maximum of 10',
+    });
+  });
+
+  it('revokes a collaborator before final publication even with an already-started deploy', async () => {
+    const owner = await createTestUser(env.db, 'final-owner');
+    const collaborator = await createTestUser(env.db, 'final-collaborator');
+    const project = await createTestProject(env.db, owner.id, 'final-revocation');
+    await env.db.insert(projectMembers).values({
+      project_id: project.id,
+      user_id: collaborator.id,
+      role: 'collaborator',
+      added_by_user_id: owner.id,
+    });
+    mockCfApi();
+
+    const originalPut = env.ROUTING.put.bind(env.ROUTING);
+    let revoked = false;
+    vi.spyOn(env.ROUTING, 'put').mockImplementation(async (key, value, options) => {
+      await originalPut(key, value, options);
+      if (!revoked && key.startsWith('cutover-ready:')) {
+        revoked = true;
+        await removeProjectMember(env.db, {
+          projectId: project.id,
+          subjectUserId: collaborator.id,
+          actorUserId: owner.id,
+        });
+      }
+    });
+
+    const response = await app.fetch(
+      await buildDeployRequest(env, project.id, collaborator.jwt),
+      env,
+    );
+    expect(response.status).toBe(200);
+    const events = await readAllEvents(response);
+    expect(events.some((event) => isDeployEvent(event) && event.event === 'done')).toBe(false);
+    expect(requireEvent<ErrorEvent>(events, 'error').message).toBe('forbidden');
+    expect(revoked).toBe(true);
+    const [deployment] = await env.db
+      .select({ status: deployments.status })
+      .from(deployments)
+      .where(eq(deployments.project_id, project.id));
+    expect(deployment?.status).not.toBe('live');
   });
 
   it('succeeds with minimal deploy (no bindings, no assets)', async () => {

@@ -25,6 +25,7 @@ import {
   getProjectDeploymentWorkerName,
   getProjectQueueName,
 } from '../naming.ts';
+import { requireProjectCapability } from '../project-access.ts';
 import { deployments as deploymentsTable, projects as projectsTable } from '../schema.ts';
 import type { Build, DeployManifest, Project, Resource } from '../types.ts';
 import {
@@ -351,6 +352,7 @@ async function cleanupBestEffortResources(
 async function lockAndMarkDeleting(
   db: Db,
   projectId: string,
+  actorUserId?: string,
 ): Promise<
   ReadonlyArray<{
     id: string;
@@ -365,6 +367,15 @@ async function lockAndMarkDeleting(
     const lockedProject = await getProject(txDb, projectId);
     if (!lockedProject) {
       throw new Error('project disappeared during deletion');
+    }
+    // API-initiated teardown starts with an unlocked route check so it can
+    // return the established 404/403 response quickly. Ownership can transfer
+    // before this transaction acquires the project lock, however. Re-resolve
+    // the actor under the same lock as the irreversible `deleting` status flip
+    // so a former owner cannot finish a stale delete request. Operator cleanup
+    // omits actorUserId and remains authorized by its separate admin guard.
+    if (actorUserId) {
+      await requireProjectCapability(txDb, projectId, actorUserId, 'delete');
     }
     const activeDeployment = await getActiveDeployment(txDb, projectId);
     if (activeDeployment?.source === 'rollback-lease') {
@@ -485,12 +496,17 @@ export async function teardownProject(
   context: Context<ApiEnv>,
   projectId: string,
   project: Pick<Project, 'slug' | 'status'>,
+  options: Readonly<{ actorUserId?: string }> = {},
 ): Promise<{ warnings: ReadonlyArray<string> }> {
   // Always run lock + mark — idempotent for `status='deleting'` (the helper
   // skips the flip and just (re-)marks any non-terminal deployments + builds).
   // This covers retried teardown after partial failure where the previous
   // attempt crashed before the cancellations committed.
-  const cancelledOnLock = await lockAndMarkDeleting(context.get('db'), projectId);
+  const cancelledOnLock = await lockAndMarkDeleting(
+    context.get('db'),
+    projectId,
+    options.actorUserId,
+  );
   // Stop the container DOs for the builds revoked above BEFORE any CF cleanup
   // begins (post-commit, never under the row lock — it's a DO round-trip), so
   // their tokens are dead and their containers stopped before we touch CF.

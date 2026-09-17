@@ -247,6 +247,7 @@ export default extendConfig(
             items: [
               { text: 'Remote Development', link: '/guide/remote-dev' },
               { text: 'Deploying Your App', link: '/guide/deployment' },
+              { text: 'Project Collaboration', link: '/guide/project-collaboration' },
             ],
           },
           {

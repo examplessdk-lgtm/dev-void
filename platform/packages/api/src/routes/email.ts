@@ -7,7 +7,6 @@ import {
   deleteEmailDestination,
   getEmailDestinationByAddress,
   getEmailDestinationsByProjectId,
-  getProject,
   getUser,
   promoteEmailDestinationWithOwnerAudit,
   queueUnreferencedEmailDestinationCleanup,
@@ -45,6 +44,7 @@ import {
   type CfDestinationAddress,
 } from '../provisioning/email-routing.ts';
 import type { EmailDestination } from '../types.ts';
+import { requireProjectRouteCapability } from './project-access.ts';
 
 /**
  * Per-project rate-limit on POST /destinations to prevent abuse where a
@@ -90,12 +90,9 @@ const app = new Hono<ApiEnv>()
   .use('/:id/email/*', capabilityMiddleware('email'))
   .get('/:id/email/usage', async (context) => {
     const projectId = context.req.param('id');
-    const project = await getProject(context.get('db'), projectId);
-    if (!project) {
-      return context.json({ error: 'project not found' }, 404);
-    }
-    if (project.user_id !== context.get('user').id) {
-      return context.json({ error: 'forbidden' }, 403);
+    const access = await requireProjectRouteCapability(context, projectId, 'read');
+    if (access instanceof Response) {
+      return access;
     }
 
     return context.json(await getProjectEmailUsage(context.get('db'), projectId));
@@ -103,12 +100,9 @@ const app = new Hono<ApiEnv>()
 
   .get('/:id/email/logs', async (context) => {
     const projectId = context.req.param('id');
-    const project = await getProject(context.get('db'), projectId);
-    if (!project) {
-      return context.json({ error: 'project not found' }, 404);
-    }
-    if (project.user_id !== context.get('user').id) {
-      return context.json({ error: 'forbidden' }, 403);
+    const access = await requireProjectRouteCapability(context, projectId, 'read');
+    if (access instanceof Response) {
+      return access;
     }
 
     const limit = Number(context.req.query('limit') ?? 50);
@@ -127,13 +121,11 @@ const app = new Hono<ApiEnv>()
   // -------------------------------------------------------------------------
   .get('/:id/email/destinations', async (context) => {
     const projectId = context.req.param('id');
-    const project = await getProject(context.get('db'), projectId);
-    if (!project) {
-      return context.json({ error: 'project not found' }, 404);
+    const access = await requireProjectRouteCapability(context, projectId, 'read');
+    if (access instanceof Response) {
+      return access;
     }
-    if (project.user_id !== context.get('user').id) {
-      return context.json({ error: 'forbidden' }, 403);
-    }
+    const project = access.project;
 
     const rows = await getEmailDestinationsByProjectId(context.get('db'), projectId);
     // Refresh status from CF for any rows still pending. CF's
@@ -235,13 +227,11 @@ const app = new Hono<ApiEnv>()
 
   .post('/:id/email/destinations', async (context) => {
     const projectId = context.req.param('id');
-    const project = await getProject(context.get('db'), projectId);
-    if (!project) {
-      return context.json({ error: 'project not found' }, 404);
+    const access = await requireProjectRouteCapability(context, projectId, 'settings');
+    if (access instanceof Response) {
+      return access;
     }
-    if (project.user_id !== context.get('user').id) {
-      return context.json({ error: 'forbidden' }, 403);
-    }
+    const project = access.project;
     // Same guard the other provisioning routes use (see `routes/projects.ts`).
     // Teardown snapshots the CF destination tags it must clean up ONCE; a
     // destination registered after that snapshot but before the cascade drops
@@ -476,13 +466,11 @@ const app = new Hono<ApiEnv>()
   .delete('/:id/email/destinations/:destId', async (context) => {
     const projectId = context.req.param('id');
     const destId = context.req.param('destId');
-    const project = await getProject(context.get('db'), projectId);
-    if (!project) {
-      return context.json({ error: 'project not found' }, 404);
+    const access = await requireProjectRouteCapability(context, projectId, 'settings');
+    if (access instanceof Response) {
+      return access;
     }
-    if (project.user_id !== context.get('user').id) {
-      return context.json({ error: 'forbidden' }, 403);
-    }
+    const project = access.project;
     if (project.status === 'deleting') {
       return context.json({ error: 'Project is being deleted' }, 409);
     }

@@ -87,8 +87,13 @@ function auditTarget(
       return JSON.stringify({ userId: id });
     }
   }
-  if (segments[0] === 'projects' && id && segments[2] === 'delete') {
-    return JSON.stringify({ projectId: id });
+  if (segments[0] === 'projects' && id) {
+    if (segments[2] === 'owner') {
+      return JSON.stringify({ projectId: id, userId: boundedString(body.userId, 512) });
+    }
+    if (segments[2] === 'delete') {
+      return JSON.stringify({ projectId: id });
+    }
   }
   if (segments[0] === 'email' && segments[1] === 'operations' && segments[3] === 'resolve') {
     return JSON.stringify({

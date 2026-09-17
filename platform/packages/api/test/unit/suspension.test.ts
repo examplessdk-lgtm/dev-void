@@ -48,6 +48,7 @@ describe('isAdminSuspended', () => {
 describe('evaluateRequestLimit (real implementation)', () => {
   function makeState(overrides: Partial<CounterState> = {}): CounterState {
     return {
+      ownerUserId: 'u1',
       totalRequests: 0,
       totalNeurons: 0,
       totalSandboxSeconds: 0,
@@ -57,6 +58,10 @@ describe('evaluateRequestLimit (real implementation)', () => {
       aiSuspended: false,
       sandboxRuntimeSuspended: false,
       projectSlugs: {},
+      projectOwnershipStarts: {},
+      projectNeurons: {},
+      historicalNeurons: 0,
+      historicalAiWindows: {},
       ...overrides,
     };
   }
@@ -83,6 +88,7 @@ describe('evaluateRequestLimit (real implementation)', () => {
 describe('evaluateAiLimit (real implementation)', () => {
   function makeState(overrides: Partial<CounterState> = {}): CounterState {
     return {
+      ownerUserId: 'u1',
       totalRequests: 0,
       totalNeurons: 0,
       totalSandboxSeconds: 0,
@@ -92,6 +98,10 @@ describe('evaluateAiLimit (real implementation)', () => {
       aiSuspended: false,
       sandboxRuntimeSuspended: false,
       projectSlugs: {},
+      projectOwnershipStarts: {},
+      projectNeurons: {},
+      historicalNeurons: 0,
+      historicalAiWindows: {},
       ...overrides,
     };
   }

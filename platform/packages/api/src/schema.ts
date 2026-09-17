@@ -21,7 +21,12 @@ import {
 import type { PlatformWorkerName, PlatformEnv } from './admin/platform-workers.ts';
 import type { PlatformOidcIdentity, CompanyIdentity } from './auth/identity-types.ts';
 import type { PlanId } from './tiers.ts';
-import type { InvitationStatus } from './types.ts';
+import type {
+  InvitationStatus,
+  ProjectAccessEventAction,
+  ProjectInvitationStatus,
+  ProjectMemberRole,
+} from './types.ts';
 
 // ---------------------------------------------------------------------------
 // users
@@ -339,6 +344,134 @@ export const projectDeployCredentials = pgTable(
 );
 
 // ---------------------------------------------------------------------------
+// Project access. Ownership remains authoritative on projects.user_id; owners
+// are deliberately not duplicated in project_members.
+// ---------------------------------------------------------------------------
+export const projectMembers = pgTable(
+  'project_members',
+  {
+    project_id: text('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    user_id: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    role: text('role').notNull().$type<ProjectMemberRole>(),
+    // Durable audit identity. This may name an account deleted later.
+    added_by_user_id: text('added_by_user_id'),
+    created_at: timestamp('created_at', { mode: 'string' }).notNull().defaultNow(),
+    updated_at: timestamp('updated_at', { mode: 'string' }).notNull().defaultNow(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.project_id, table.user_id] }),
+    index('idx_project_members_user_project').on(table.user_id, table.project_id),
+    check('project_members_role_check', sql`${table.role} IN ('reader', 'collaborator', 'admin')`),
+  ],
+);
+
+export const projectInvitations = pgTable(
+  'project_invitations',
+  {
+    id: text('id').primaryKey(),
+    project_id: text('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    target_user_id: text('target_user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    target_email_snapshot: text('target_email_snapshot').notNull(),
+    role: text('role').notNull().$type<ProjectMemberRole>(),
+    status: text('status').notNull().default('pending').$type<ProjectInvitationStatus>(),
+    // Actor ids are durable audit data and intentionally have no user FK.
+    invited_by_user_id: text('invited_by_user_id').notNull(),
+    accepted_by_user_id: text('accepted_by_user_id'),
+    created_at: timestamp('created_at', { mode: 'string' }).notNull().defaultNow(),
+    expires_at: timestamp('expires_at', { mode: 'string' }).notNull(),
+    accepted_at: timestamp('accepted_at', { mode: 'string' }),
+    revoked_at: timestamp('revoked_at', { mode: 'string' }),
+    revoked_by_user_id: text('revoked_by_user_id'),
+  },
+  (table) => [
+    index('idx_project_invitations_project_status').on(table.project_id, table.status),
+    index('idx_project_invitations_target_status').on(table.target_user_id, table.status),
+    uniqueIndex('idx_project_invitations_pending_target')
+      .on(table.project_id, table.target_user_id)
+      .where(sql`${table.status} = 'pending'`),
+    check(
+      'project_invitations_role_check',
+      sql`${table.role} IN ('reader', 'collaborator', 'admin')`,
+    ),
+    check(
+      'project_invitations_status_check',
+      sql`${table.status} IN ('pending', 'accepted', 'declined', 'revoked', 'expired')`,
+    ),
+  ],
+);
+
+export const projectOwnershipPeriods = pgTable(
+  'project_ownership_periods',
+  {
+    id: text('id').primaryKey(),
+    project_id: text('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    // Billing and operator actor identities must survive account deletion.
+    owner_user_id: text('owner_user_id').notNull(),
+    starts_at: timestamp('starts_at', { mode: 'string' }).notNull(),
+    ends_at: timestamp('ends_at', { mode: 'string' }),
+    changed_by_user_id: text('changed_by_user_id'),
+  },
+  (table) => [
+    index('idx_project_ownership_periods_owner_time').on(
+      table.owner_user_id,
+      table.starts_at,
+      table.ends_at,
+    ),
+    index('idx_project_ownership_periods_project_time').on(table.project_id, table.starts_at),
+    uniqueIndex('idx_project_ownership_periods_open')
+      .on(table.project_id)
+      .where(sql`${table.ends_at} IS NULL`),
+    check(
+      'project_ownership_periods_time_check',
+      sql`${table.ends_at} IS NULL OR ${table.ends_at} >= ${table.starts_at}`,
+    ),
+  ],
+);
+
+export const projectAccessEvents = pgTable(
+  'project_access_events',
+  {
+    id: text('id').primaryKey(),
+    project_id: text('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    actor_user_id: text('actor_user_id').notNull(),
+    subject_user_id: text('subject_user_id'),
+    invitation_email_snapshot: text('invitation_email_snapshot'),
+    previous_role: text('previous_role').$type<ProjectMemberRole>(),
+    new_role: text('new_role').$type<ProjectMemberRole>(),
+    action: text('action').notNull().$type<ProjectAccessEventAction>(),
+    created_at: timestamp('created_at', { mode: 'string' }).notNull().defaultNow(),
+  },
+  (table) => [
+    index('idx_project_access_events_project_created').on(table.project_id, table.created_at),
+    index('idx_project_access_events_subject_created').on(table.subject_user_id, table.created_at),
+    check(
+      'project_access_events_previous_role_check',
+      sql`${table.previous_role} IS NULL OR ${table.previous_role} IN ('reader', 'collaborator', 'admin')`,
+    ),
+    check(
+      'project_access_events_new_role_check',
+      sql`${table.new_role} IS NULL OR ${table.new_role} IN ('reader', 'collaborator', 'admin')`,
+    ),
+    check(
+      'project_access_events_action_check',
+      sql`${table.action} IN ('invited', 'invitation_resent', 'accepted', 'declined', 'invitation_revoked', 'role_changed', 'member_removed', 'left')`,
+    ),
+  ],
+);
+
+// ---------------------------------------------------------------------------
 // deployments
 // ---------------------------------------------------------------------------
 export const deployments = pgTable(
@@ -382,6 +515,11 @@ export const deployments = pgTable(
     retained: boolean('retained').notNull().default(false),
     applied_migrations: text('applied_migrations'),
     bundle_stored: boolean('bundle_stored').notNull().default(false),
+    // billing_user_id is the project owner at admission time. The actor is
+    // recorded separately and deliberately does not have a user FK so audit
+    // attribution survives account deletion.
+    billing_user_id: text('billing_user_id'),
+    initiated_by_user_id: text('initiated_by_user_id'),
   },
   (table) => [
     index('idx_deployments_project_id').on(table.project_id, table.created_at),
@@ -1133,6 +1271,7 @@ export const builds = pgTable(
     user_id: text('user_id')
       .notNull()
       .references(() => users.id),
+    triggered_by_user_id: text('triggered_by_user_id'),
     executor: text('executor')
       .notNull()
       .default('container')

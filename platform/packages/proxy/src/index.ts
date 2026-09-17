@@ -11,7 +11,7 @@ import { guardHumanStream } from './human-stream.ts';
 import { kv } from './kv.ts';
 import { PLATFORM_DISABLED_KEY, PLATFORM_DISABLED_VALUE } from './platform-lifecycle.ts';
 import { r2 } from './r2.ts';
-import { verifyPrerenderAuthority, verifyProjectOwner } from './resolve.ts';
+import { verifyPrerenderAuthority, verifyProjectDeployAccess } from './resolve.ts';
 import { revalidate } from './revalidate.ts';
 import type { Env, JwtPayload, ProxyBody, ProxyEnv } from './types.ts';
 
@@ -196,7 +196,7 @@ app.post('/*', async (context, next) => {
     } else {
       // Full API tokens retain the local-development ownership lookup.
       const checkOwner = () =>
-        verifyProjectOwner(
+        verifyProjectDeployAccess(
           context.env.API,
           context.env.JWT_SECRET,
           projectId,

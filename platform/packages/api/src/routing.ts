@@ -1,5 +1,5 @@
 import { sql as drizzleSql } from 'drizzle-orm';
-import { getDomainsByProjectIds, getProjectsByUserId, getUser, type Db } from './db.ts';
+import { getDomainsByProjectIds, getProject, getProjectsByUserId, getUser, type Db } from './db.ts';
 import type { PlanLimits } from './tiers.ts';
 import type { AssetConfig, DeployManifest } from './types.ts';
 
@@ -51,7 +51,19 @@ export async function refreshProjectKvForUser(
     return;
   }
   const payload = buildProjectAccountJson({ userId, plan: user.plan });
-  await Promise.all(projects.map((project) => routing.put(projectAccountKey(project.id), payload)));
+  for (const project of projects) {
+    await db.transaction(async (tx) => {
+      await tx.execute(drizzleSql`SELECT id FROM projects WHERE id = ${project.id} FOR UPDATE`);
+      const current = await getProject(tx as unknown as Db, project.id);
+      // The owned-project list was read before this lock. An ownership transfer
+      // can commit in between; in that ordering its project-account entry is now
+      // authoritative and a stale plan refresh must not overwrite it.
+      if (current?.user_id !== userId) {
+        return;
+      }
+      await routing.put(projectAccountKey(project.id), payload);
+    });
+  }
 }
 
 /**
@@ -185,7 +197,7 @@ export async function applyRoutingSuspension(
 export async function setProjectsRoutingSuspension(
   routing: KVNamespace,
   db: Db,
-  projects: ReadonlyArray<{ id: string; slug: string }>,
+  projects: ReadonlyArray<{ id: string; slug: string; user_id?: string }>,
   update: RoutingSuspensionUpdate,
 ): Promise<void> {
   if (projects.length === 0) {
@@ -194,6 +206,15 @@ export async function setProjectsRoutingSuspension(
   for (const project of projects) {
     await db.transaction(async (tx) => {
       await tx.execute(drizzleSql`SELECT id FROM projects WHERE id = ${project.id} FOR UPDATE`);
+      if (project.user_id !== undefined) {
+        const current = await getProject(tx as unknown as Db, project.id);
+        // User-level suspension/restore callers pass Project snapshots from an
+        // owned-project query. If ownership changed before this lock, transfer
+        // convergence owns the route and this stale fan-out must stand down.
+        if (current?.user_id !== project.user_id) {
+          return;
+        }
+      }
       // Resolve domains only after the project lock. Domain activation takes
       // the same lock before publishing a route, so this read must happen
       // behind it or a domain activated between the eager read and this lock

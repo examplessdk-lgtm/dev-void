@@ -42,6 +42,7 @@ import {
   failStaleActiveGithubActionsBuilds,
   hasQueuedContainerBuilds,
   getProject,
+  getOpenProjectOwnershipPeriod,
   getProjectsByIds,
   getUsersByIds,
   type Db,
@@ -96,6 +97,11 @@ import internalVerifyPrerenderBuild from './routes/internal-verify-prerender-bui
 import me from './routes/me.ts';
 import platformBootstrapRoutes from './routes/platform-bootstrap.ts';
 import projectTokens from './routes/project-tokens.ts';
+import {
+  myProjectInvitationRoutes,
+  projectInvitationResponseRoutes,
+  projectTeamRoutes,
+} from './routes/project-team.ts';
 import projects from './routes/projects.ts';
 import revalidate from './routes/revalidate.ts';
 import secrets from './routes/secrets.ts';
@@ -439,10 +445,15 @@ const app = new Hono<ApiEnv>()
   .use('/email/*', capabilityMiddleware('email'))
   .route('/email', emailConfirm)
   .use('/me', authMiddleware)
+  .use('/me/*', authMiddleware)
   .route('/me', me)
+  .route('/me', myProjectInvitationRoutes)
+  .use('/project-invitations/*', authMiddleware)
+  .route('/project-invitations', projectInvitationResponseRoutes)
   .use('/projects/*', authMiddleware)
   .route('/projects', projects)
   .route('/projects', projectTokens)
+  .route('/projects', projectTeamRoutes)
   .route('/projects', deploy)
   .route('/projects', deleteRoute)
   .route('/projects', revalidate)
@@ -928,7 +939,7 @@ async function processUserRollover(
   env: ApiEnv['Bindings'],
   db: Db,
   user: { id: string; plan: string; billing_cycle_start: string; suspended_reason: string | null },
-  userProjects: ReadonlyArray<{ id: string; slug: string }>,
+  userProjects: ReadonlyArray<{ id: string; slug: string; created_at: string }>,
 ): Promise<void> {
   // Backfill userId into old KV routing entries (all plans, before early return).
   // Wrapped in try/catch so a malformed KV entry doesn't block rollover/unsuspension.
@@ -986,8 +997,13 @@ async function processUserRollover(
 
   const billingPeriodStart = getCurrentBillingPeriodStart(user.billing_cycle_start).toISOString();
   const projectSlugs: Record<string, string> = {};
-  for (const p of userProjects) {
+  const projectOwnershipStarts: Record<string, string> = {};
+  const ownershipPeriods = await Promise.all(
+    userProjects.map((project) => getOpenProjectOwnershipPeriod(db, project.id)),
+  );
+  for (const [index, p] of userProjects.entries()) {
     projectSlugs[p.id] = p.slug;
+    projectOwnershipStarts[p.id] = ownershipPeriods[index]?.starts_at ?? p.created_at;
   }
 
   const doId = env.USAGE_COUNTER.idFromName(user.id);
@@ -1044,7 +1060,13 @@ async function processUserRollover(
     new Request('https://do/init', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ plan: user.plan, billingPeriodStart, projectSlugs }),
+      body: JSON.stringify({
+        plan: user.plan,
+        billingPeriodStart,
+        projectSlugs,
+        projectOwnershipStarts,
+        userId: user.id,
+      }),
     }),
   );
 }

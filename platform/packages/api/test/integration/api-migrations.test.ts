@@ -6229,14 +6229,15 @@ describe('POST /projects/:id/migrations/rename', () => {
     expect(source).not.toMatch(/hashtext\s*\(/);
     // No `pg_advisory_xact_lock` call remains.
     expect(source).not.toMatch(/pg_advisory_xact_lock/);
-    // Sanity: the row lock variant is present at the three call
-    // sites (/apply, /rename, /rollback).
+    // Sanity: the row lock variant is present for migrations, rollback, and
+    // the database provisioning mutations that share this route module.
     const rowLockMatches = source.match(
       /SELECT id FROM projects WHERE id = \$\{projectId\} FOR UPDATE/g,
     );
     expect(rowLockMatches).not.toBeNull();
-    // Apply, rename, rollback lease/cutover, and rollback's post-transaction
-    // compensation all use the collision-free project row lock.
-    expect(rowLockMatches!.length).toBe(5);
+    // Apply, rename, rollback lease/cutover, rollback's post-transaction
+    // compensation, database create, and database URL update all use the
+    // collision-free project row lock.
+    expect(rowLockMatches!.length).toBe(7);
   });
 });

@@ -12,6 +12,7 @@ import {
 import { createBuild } from '../../src/db.ts';
 import * as db from '../../src/db.ts';
 import app from '../../src/index.ts';
+import * as projectAccess from '../../src/project-access.ts';
 import {
   resources,
   projects,
@@ -20,6 +21,7 @@ import {
   emailDestinationCleanups,
   emailDestinations,
   users,
+  projectMembers,
 } from '../../src/schema.ts';
 import {
   setupEnv,
@@ -94,6 +96,53 @@ async function addResource(
 }
 
 describe('DELETE /projects/:id', () => {
+  it('rechecks delete capability under the lock after ownership transfers', async () => {
+    const formerOwner = await createTestUser(env.db, 'former-delete-owner');
+    const newOwner = await createTestUser(env.db, 'new-delete-owner');
+    const project = await createTestProject(env.db, formerOwner.id, 'transferred-delete');
+    const cf = mockCfApi();
+
+    // Drive the transfer after the route's fast authorization snapshot but
+    // before teardown takes the project lock. The stale snapshot still says
+    // owner; the locked recheck must observe the former owner's new admin role.
+    const requireCapability = projectAccess.requireProjectCapability;
+    let transferred = false;
+    vi.spyOn(projectAccess, 'requireProjectCapability').mockImplementation(async (...args) => {
+      const result = await requireCapability(...args);
+      if (!transferred && args[3] === 'delete') {
+        transferred = true;
+        await env.db
+          .update(projects)
+          .set({ user_id: newOwner.id })
+          .where(eq(projects.id, project.id));
+        await env.db.insert(projectMembers).values({
+          project_id: project.id,
+          user_id: formerOwner.id,
+          role: 'admin',
+          added_by_user_id: newOwner.id,
+        });
+      }
+      return result;
+    });
+
+    const res = await app.fetch(
+      new Request(`http://localhost/projects/${project.id}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${formerOwner.jwt}` },
+      }),
+      env,
+    );
+
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: 'forbidden' });
+    expect(transferred).toBe(true);
+    expect(cf).not.toHaveBeenCalled();
+    expect(await db.getProject(env.db, project.id)).toMatchObject({
+      user_id: newOwner.id,
+      status: 'active',
+    });
+  });
+
   it('returns 401 without auth', async () => {
     const res = await app.fetch(
       new Request('http://localhost/projects/proj_fake', {

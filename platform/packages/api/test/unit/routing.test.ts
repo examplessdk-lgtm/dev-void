@@ -288,7 +288,7 @@ describe('refreshProjectKvForUser', () => {
 
   it('rewrites a project entry per project the user owns', async () => {
     const { puts, kv } = createKv();
-    const db = {} as Parameters<typeof refreshProjectKvForUser>[0];
+    const db = createRoutingDb();
     vi.spyOn(await import('../../src/db.ts'), 'getUser').mockResolvedValue({
       id: 'user_1',
       plan: 'pro',
@@ -297,6 +297,11 @@ describe('refreshProjectKvForUser', () => {
       { id: 'proj_a' },
       { id: 'proj_b' },
     ] as unknown as Awaited<ReturnType<typeof import('../../src/db.ts').getProjectsByUserId>>);
+    vi.spyOn(await import('../../src/db.ts'), 'getProject').mockImplementation(async (_db, id) => {
+      return { id, user_id: 'user_1' } as Awaited<
+        ReturnType<typeof import('../../src/db.ts').getProject>
+      >;
+    });
 
     await refreshProjectKvForUser(db, kv, 'user_1');
 
@@ -327,6 +332,27 @@ describe('refreshProjectKvForUser', () => {
     } as Awaited<ReturnType<typeof import('../../src/db.ts').getUser>>);
     vi.spyOn(await import('../../src/db.ts'), 'getProjectsByUserId').mockResolvedValue([]);
     await refreshProjectKvForUser(db, kv, 'user_1');
+    expect(puts).toEqual([]);
+    vi.restoreAllMocks();
+  });
+
+  it('does not overwrite a project transferred after the owned-project query', async () => {
+    const { puts, kv } = createKv();
+    const db = createRoutingDb();
+    vi.spyOn(await import('../../src/db.ts'), 'getUser').mockResolvedValue({
+      id: 'former_owner',
+      plan: 'pro',
+    } as Awaited<ReturnType<typeof import('../../src/db.ts').getUser>>);
+    vi.spyOn(await import('../../src/db.ts'), 'getProjectsByUserId').mockResolvedValue([
+      { id: 'proj_a', user_id: 'former_owner' },
+    ] as unknown as Awaited<ReturnType<typeof import('../../src/db.ts').getProjectsByUserId>>);
+    vi.spyOn(await import('../../src/db.ts'), 'getProject').mockResolvedValue({
+      id: 'proj_a',
+      user_id: 'new_owner',
+    } as Awaited<ReturnType<typeof import('../../src/db.ts').getProject>>);
+
+    await refreshProjectKvForUser(db, kv, 'former_owner');
+
     expect(puts).toEqual([]);
     vi.restoreAllMocks();
   });
@@ -528,6 +554,38 @@ describe('setProjectsRoutingSuspension', () => {
     });
     expect(JSON.parse(store.get('slug-a')!).suspended).toBe('admin_suspended');
     expect(JSON.parse(store.get('domain:active.com')!).suspended).toBe('admin_suspended');
+    vi.restoreAllMocks();
+  });
+
+  it('does not apply a former owner snapshot after ownership transfers', async () => {
+    const { store, kv, puts } = createKvStore({
+      'slug-a': JSON.stringify({
+        projectId: 'proj_a',
+        userId: 'new_owner',
+        suspended: 'new_owner_reason',
+      }),
+    });
+    const domainsSpy = vi.spyOn(await import('../../src/db.ts'), 'getDomainsByProjectIds');
+    vi.spyOn(await import('../../src/db.ts'), 'getProject').mockResolvedValue({
+      id: 'proj_a',
+      user_id: 'new_owner',
+    } as Awaited<ReturnType<typeof import('../../src/db.ts').getProject>>);
+    const db = createRoutingDb();
+
+    await setProjectsRoutingSuspension(
+      kv,
+      db,
+      [{ id: 'proj_a', slug: 'slug-a', user_id: 'former_owner' }],
+      { op: 'unsuspend', matchReason: null },
+    );
+
+    expect(JSON.parse(store.get('slug-a')!)).toEqual({
+      projectId: 'proj_a',
+      userId: 'new_owner',
+      suspended: 'new_owner_reason',
+    });
+    expect(puts).toEqual([]);
+    expect(domainsSpy).not.toHaveBeenCalled();
     vi.restoreAllMocks();
   });
 

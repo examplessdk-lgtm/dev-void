@@ -27,13 +27,23 @@ vi.mock('../../src/db.ts', () => ({
   // The DO module also re-exports nothing else from db.ts at module scope,
   // so a minimal mock is sufficient.
   getUser: vi.fn(),
+  getProject: vi.fn(async (_db: unknown, id: string) => ({ id, user_id: 'u1', slug: id })),
+  getProjectsByIds: vi.fn(async (_db: unknown, ids: ReadonlyArray<string>) =>
+    ids.map((id) => ({ id, user_id: 'u1', slug: id })),
+  ),
+  getProjectOwnershipPeriodsByProjectIds: vi.fn(async () => []),
   // routing.ts (imported transitively via setProjectsRoutingSuspension) reads a
   // project's active domains here. Default to none so request-suspension tests
   // that don't seed domains keep their slug-only behaviour.
   getDomainsByProjectIds: vi.fn(async () => new Map()),
 }));
 
-import { suspendUser } from '../../src/db.ts';
+import {
+  getProject,
+  getProjectOwnershipPeriodsByProjectIds,
+  getProjectsByIds,
+  suspendUser,
+} from '../../src/db.ts';
 import { queryProjectAiUsage } from '../../src/routes/usage.ts';
 import { SANDBOX_USAGE_RETENTION_MS } from '../../src/usage-auth.ts';
 import {
@@ -51,6 +61,7 @@ vi.mock('../../src/routes/usage.ts', () => ({
 
 function makeState(overrides: Partial<CounterState> = {}): CounterState {
   return {
+    ownerUserId: 'u1',
     totalRequests: 0,
     totalNeurons: 0,
     totalSandboxSeconds: 0,
@@ -60,6 +71,10 @@ function makeState(overrides: Partial<CounterState> = {}): CounterState {
     aiSuspended: false,
     sandboxRuntimeSuspended: false,
     projectSlugs: {},
+    projectOwnershipStarts: {},
+    projectNeurons: {},
+    historicalNeurons: 0,
+    historicalAiWindows: {},
     ...overrides,
   };
 }
@@ -633,7 +648,7 @@ describe('UsageCounter.handleRecord — sandbox', () => {
   it('retains lease watermarks across rollover so delayed prior-period envelopes add nothing', async () => {
     const boundary = Math.floor(Date.now() / 1000) * 1000;
     const boundaryIso = new Date(boundary).toISOString();
-    const { counter, storage } = makeCounter({
+    const { counter, storage, kv } = makeCounter({
       plan: 'pro',
       billingPeriodStart: '2026-01-01T00:00:00Z',
     });
@@ -1004,6 +1019,33 @@ describe('UsageCounter.handleRecord — request suspension fans out to custom do
     // overwrite it, or the next admin unsuspend would silently un-block.
     expect(JSON.parse(kv.store.get('s1')!).suspended).toBe('admin_suspended');
   });
+
+  it('does not suspend a project transferred after the counter ownership precheck', async () => {
+    vi.mocked(getProjectsByIds).mockResolvedValueOnce([
+      { id: 'p1', user_id: 'u1', slug: 's1' } as never,
+    ]);
+    vi.mocked(getProject).mockResolvedValueOnce({
+      id: 'p1',
+      user_id: 'new-owner',
+      slug: 's1',
+    } as never);
+    const { counter, kv } = makeCounter({ plan: 'free', totalRequests: 3_000_000 });
+    kv.store.set('s1', JSON.stringify({ workerName: 'w', projectId: 'p1', userId: 'new-owner' }));
+
+    await counter.fetch(
+      recordRequest(
+        [{ projectId: 'p1', userId: 'u1', slug: 's1', requests: 1, responseBytes: 0 }],
+        'u1',
+        'free',
+      ),
+    );
+
+    expect(JSON.parse(kv.store.get('s1')!)).toEqual({
+      workerName: 'w',
+      projectId: 'p1',
+      userId: 'new-owner',
+    });
+  });
 });
 
 describe('UsageCounter.handleRollover — request latch in response', () => {
@@ -1030,6 +1072,243 @@ describe('UsageCounter.handleRollover — request latch in response', () => {
     const body = await res.json<{ rolled: boolean; requestsSuspended: boolean }>();
     expect(body.rolled).toBe(false);
     expect(body.requestsSuspended).toBe(false);
+  });
+});
+
+describe('UsageCounter ownership changes', () => {
+  beforeEach(() => {
+    vi.mocked(queryProjectAiUsage).mockReset().mockResolvedValue({ neurons: 0 });
+    vi.mocked(getProjectOwnershipPeriodsByProjectIds).mockReset().mockResolvedValue([]);
+  });
+
+  it('bills a delayed former-owner event without reattaching the project', async () => {
+    const { counter, storage } = makeCounter({ plan: 'solo' });
+    await counter.fetch(
+      recordRequest(
+        [
+          {
+            projectId: 'transferred',
+            userId: 'former-owner',
+            slug: 'app',
+            requests: 1,
+            responseBytes: 10,
+            currentOwner: false,
+          },
+        ],
+        'former-owner',
+      ),
+    );
+
+    expect(storage.data.get('state')).toMatchObject({
+      totalRequests: 1,
+      projectSlugs: {},
+    });
+  });
+
+  it('detaches and attaches a project without erasing already billed AI usage', async () => {
+    const { counter, storage, kv } = makeCounter({
+      plan: 'solo',
+      projectSlugs: { transferred: 'app' },
+      projectNeurons: { transferred: 42 },
+    });
+    const detached = await counter.fetch(
+      new Request('https://do/detach-project', {
+        method: 'POST',
+        body: JSON.stringify({ projectId: 'transferred' }),
+      }),
+    );
+    expect(detached.ok).toBe(true);
+    expect(storage.data.get('state')).toMatchObject({
+      projectSlugs: {},
+      projectNeurons: {},
+      historicalNeurons: 42,
+    });
+
+    const startedAt = '2026-06-01T00:00:00.000Z';
+    const attached = await counter.fetch(
+      new Request('https://do/attach-project', {
+        method: 'POST',
+        body: JSON.stringify({
+          projectId: 'next',
+          slug: 'next-app',
+          ownershipStartedAt: startedAt,
+          plan: 'pro',
+        }),
+      }),
+    );
+    expect(attached.ok).toBe(true);
+    expect(storage.data.get('state')).toMatchObject({
+      plan: 'pro',
+      projectSlugs: { next: 'next-app' },
+      projectOwnershipStarts: { next: startedAt },
+      historicalNeurons: 42,
+    });
+    expect(kv.calls).toContainEqual(['delete', 'ai-block:next']);
+  });
+
+  it('reconciles the complete pre-transfer AI window and resamples it idempotently', async () => {
+    const ownershipStartedAt = '2026-02-01T00:00:00.000Z';
+    const ownershipEndedAt = '2026-03-01T00:00:00.000Z';
+    vi.mocked(queryProjectAiUsage)
+      .mockResolvedValueOnce({ neurons: 57 })
+      .mockResolvedValueOnce({ neurons: 61 });
+    const { counter, storage } = makeCounter({
+      ownerUserId: 'former-owner',
+      plan: 'solo',
+      billingPeriodStart: '2026-01-01T00:00:00.000Z',
+      totalNeurons: 42,
+      projectSlugs: { transferred: 'app' },
+      projectOwnershipStarts: { transferred: ownershipStartedAt },
+      projectNeurons: { transferred: 42 },
+    });
+    const detachRequest = () =>
+      new Request('https://do/detach-project', {
+        method: 'POST',
+        body: JSON.stringify({
+          projectId: 'transferred',
+          userId: 'former-owner',
+          ownershipStartedAt,
+          ownershipEndedAt,
+        }),
+      });
+
+    expect((await counter.fetch(detachRequest())).ok).toBe(true);
+    expect(queryProjectAiUsage).toHaveBeenLastCalledWith(
+      undefined,
+      undefined,
+      'void',
+      'transferred',
+      new Date(ownershipStartedAt),
+      new Date(ownershipEndedAt),
+      true,
+    );
+    expect(storage.data.get('state')).toMatchObject({
+      totalNeurons: 57,
+      projectSlugs: {},
+      projectNeurons: {},
+      historicalNeurons: 0,
+      historicalAiWindows: {
+        [JSON.stringify(['transferred', ownershipStartedAt, ownershipEndedAt])]: {
+          projectId: 'transferred',
+          ownershipStartedAt,
+          ownershipEndedAt,
+          neurons: 57,
+        },
+      },
+    });
+
+    expect((await counter.fetch(detachRequest())).ok).toBe(true);
+    expect(storage.data.get('state')).toMatchObject({
+      totalNeurons: 61,
+      historicalNeurons: 0,
+      historicalAiWindows: {
+        [JSON.stringify(['transferred', ownershipStartedAt, ownershipEndedAt])]: {
+          neurons: 61,
+        },
+      },
+    });
+  });
+
+  it('keeps current ownership state retryable when cutoff reconciliation fails', async () => {
+    vi.mocked(queryProjectAiUsage).mockRejectedValueOnce(new Error('analytics unavailable'));
+    const { counter, storage } = makeCounter({
+      ownerUserId: 'former-owner',
+      plan: 'solo',
+      totalNeurons: 42,
+      projectSlugs: { transferred: 'app' },
+      projectOwnershipStarts: { transferred: '2026-02-01T00:00:00.000Z' },
+      projectNeurons: { transferred: 42 },
+    });
+
+    await expect(
+      counter.fetch(
+        new Request('https://do/detach-project', {
+          method: 'POST',
+          body: JSON.stringify({
+            projectId: 'transferred',
+            userId: 'former-owner',
+            ownershipStartedAt: '2026-02-01T00:00:00.000Z',
+            ownershipEndedAt: '2026-03-01T00:00:00.000Z',
+          }),
+        }),
+      ),
+    ).rejects.toThrow('analytics unavailable');
+    expect(storage.data.get('state')).toMatchObject({
+      totalNeurons: 42,
+      projectSlugs: { transferred: 'app' },
+      projectNeurons: { transferred: 42 },
+      historicalAiWindows: {},
+    });
+  });
+
+  it('queries AI only from the current ownership boundary', async () => {
+    const ownershipStartedAt = '2026-02-01T00:00:00.000Z';
+    const { counter } = makeCounter({
+      plan: 'solo',
+      billingPeriodStart: '2026-01-01T00:00:00.000Z',
+      projectSlugs: { p1: 'app' },
+      projectOwnershipStarts: { p1: ownershipStartedAt },
+    });
+
+    await counter.alarm();
+
+    expect(queryProjectAiUsage).toHaveBeenCalledWith(
+      undefined,
+      undefined,
+      'void',
+      'p1',
+      new Date(ownershipStartedAt),
+    );
+  });
+
+  it('reconciles a stale transferred project through its ownership cutoff before dropping it', async () => {
+    const ownershipStartedAt = '2026-01-01T00:00:00.000Z';
+    const ownershipEndedAt = '2026-02-01T00:00:00.000Z';
+    vi.mocked(getProjectsByIds).mockResolvedValueOnce([
+      { id: 'transferred', user_id: 'new-owner', slug: 'app' } as never,
+    ]);
+    vi.mocked(getProjectOwnershipPeriodsByProjectIds).mockResolvedValueOnce([
+      {
+        project_id: 'transferred',
+        owner_user_id: 'former-owner',
+        starts_at: ownershipStartedAt,
+        ends_at: ownershipEndedAt,
+      } as never,
+    ]);
+    vi.mocked(queryProjectAiUsage).mockResolvedValueOnce({ neurons: 57 });
+    const { counter, storage, kv } = makeCounter({
+      ownerUserId: 'former-owner',
+      plan: 'solo',
+      aiSuspended: true,
+      projectSlugs: { transferred: 'app' },
+      projectOwnershipStarts: { transferred: ownershipStartedAt },
+      projectNeurons: { transferred: 42 },
+    });
+    kv.store.set('ai-block:transferred', '1');
+
+    await counter.alarm();
+
+    expect(queryProjectAiUsage).toHaveBeenCalledWith(
+      undefined,
+      undefined,
+      'void',
+      'transferred',
+      new Date(ownershipStartedAt),
+      new Date(ownershipEndedAt),
+      true,
+    );
+    expect(kv.store.has('ai-block:transferred')).toBe(true);
+    expect(storage.data.get('state')).toMatchObject({
+      totalNeurons: 57,
+      projectSlugs: {},
+      projectNeurons: {},
+      historicalNeurons: 0,
+      historicalAiWindows: {
+        [JSON.stringify(['transferred', ownershipStartedAt, ownershipEndedAt])]: {
+          neurons: 57,
+        },
+      },
+    });
   });
 });
 

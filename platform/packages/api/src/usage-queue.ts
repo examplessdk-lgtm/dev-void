@@ -1,4 +1,9 @@
-import { createDb, getProjectsByIds, getUser } from './db.ts';
+import {
+  createDb,
+  getProjectOwnershipPeriodsByProjectIds,
+  getProjectsByIds,
+  getUser,
+} from './db.ts';
 import type { ApiEnv } from './env.ts';
 import { getCurrentBillingPeriodStart, getPlanLimits } from './tiers.ts';
 import {
@@ -138,14 +143,55 @@ export async function processUsageEventBatch(
     return;
   }
   const projectsById = new Map(projects.map((project) => [project.id, project]));
+  let ownershipPeriodsByProject: Map<
+    string,
+    Array<Awaited<ReturnType<typeof getProjectOwnershipPeriodsByProjectIds>>[number]>
+  >;
+  try {
+    const periods = await getProjectOwnershipPeriodsByProjectIds(
+      db,
+      projects.map((project) => project.id),
+    );
+    ownershipPeriodsByProject = new Map(projects.map((project) => [project.id, []]));
+    for (const period of periods) {
+      ownershipPeriodsByProject.get(period.project_id)?.push(period);
+    }
+  } catch (error) {
+    console.error('[usage-queue] project ownership lookup failed:', error);
+    batch.retryAll();
+    return;
+  }
   const records = authenticatedRecords.flatMap(({ event, at }) => {
     const project = projectsById.get(event.projectId);
     if (!project) {
       return [];
     }
+    const occurredAt = event.sandboxMeteredThrough !== undefined ? event.sandboxMeteredThrough : at;
+    const ownershipPeriod = ownershipPeriodsByProject
+      .get(event.projectId)
+      ?.find(
+        (period) =>
+          Date.parse(period.starts_at) <= occurredAt &&
+          (period.ends_at === null || occurredAt < Date.parse(period.ends_at)),
+      );
+    const ownerUserId = ownershipPeriod?.owner_user_id ?? project.user_id;
     // PostgreSQL owns account identity and the canonical slug. Producer
-    // hints are never forwarded into enforcement or alert routing.
-    return [{ event: { ...event, userId: project.user_id, slug: project.slug }, at }];
+    // hints are never forwarded into enforcement or alert routing. Ownership
+    // is resolved at the event timestamp so a delayed queue message crossing
+    // a transfer remains billed to the correct account.
+    return [
+      {
+        event: {
+          ...event,
+          userId: ownerUserId,
+          slug: project.slug,
+          currentOwner: ownershipPeriod ? ownershipPeriod.ends_at === null : true,
+          ownershipStartedAt:
+            ownershipPeriod?.starts_at ?? project.created_at ?? new Date(occurredAt).toISOString(),
+        },
+        at,
+      },
+    ];
   });
   const events = records.map((record) => record.event);
 

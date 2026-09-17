@@ -41,6 +41,83 @@ describe('parseProjectArgs', () => {
     });
   });
 
+  describe('team', () => {
+    it('opens the team command group without requiring an action', () => {
+      expect(parseProjectArgs(['team'])).toEqual({ subcommand: 'team', action: '' });
+    });
+
+    it('parses project-scoped team commands', () => {
+      expect(parseProjectArgs(['team', 'list', '--project', 'my-app'])).toEqual({
+        subcommand: 'team',
+        action: 'list',
+        projectSlug: 'my-app',
+      });
+      expect(
+        parseProjectArgs(['team', 'invite', 'member@example.com', '--role', 'collaborator']),
+      ).toEqual({
+        subcommand: 'team',
+        action: 'invite',
+        email: 'member@example.com',
+        role: 'collaborator',
+        projectSlug: '',
+      });
+      expect(parseProjectArgs(['team', 'role', 'user_1', 'admin'])).toEqual({
+        subcommand: 'team',
+        action: 'role',
+        userId: 'user_1',
+        role: 'admin',
+        projectSlug: '',
+      });
+      expect(parseProjectArgs(['team', 'remove', 'user_1'])).toEqual({
+        subcommand: 'team',
+        action: 'remove',
+        userId: 'user_1',
+        projectSlug: '',
+      });
+      expect(parseProjectArgs(['team', 'revoke', 'invite_1'])).toEqual({
+        subcommand: 'team',
+        action: 'revoke',
+        invitationId: 'invite_1',
+        projectSlug: '',
+      });
+    });
+
+    it('parses invitation inbox commands without a project', () => {
+      expect(parseProjectArgs(['team', 'pending'])).toEqual({
+        subcommand: 'team',
+        action: 'pending',
+      });
+      expect(parseProjectArgs(['team', 'accept', 'invite_1'])).toEqual({
+        subcommand: 'team',
+        action: 'accept',
+        invitationId: 'invite_1',
+      });
+      expect(parseProjectArgs(['team', 'decline', 'invite_1'])).toEqual({
+        subcommand: 'team',
+        action: 'decline',
+        invitationId: 'invite_1',
+      });
+    });
+
+    it('requires a registered email input and valid roles', () => {
+      expect(() => parseProjectArgs(['team', 'invite', 'member', '--role', 'reader'])).toThrow(
+        'Invitee must be a registered email address',
+      );
+      expect(() =>
+        parseProjectArgs(['team', 'invite', 'member@example.com', '--role', 'owner']),
+      ).toThrow("Invalid role 'owner'");
+      expect(() => parseProjectArgs(['team', 'role', 'user_1', 'owner'])).toThrow(
+        "Invalid role 'owner'",
+      );
+    });
+
+    it('rejects project selection for invitation inbox commands', () => {
+      expect(() => parseProjectArgs(['team', 'pending', '--project', 'my-app'])).toThrow(
+        '--project is not used with team pending',
+      );
+    });
+  });
+
   describe('cancel', () => {
     it('parses cancel without a deployment id', () => {
       expect(parseProjectArgs(['cancel'])).toEqual({

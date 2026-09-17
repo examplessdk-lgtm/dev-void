@@ -18,12 +18,14 @@ import {
 } from '../../src/db.ts';
 import * as db from '../../src/db.ts';
 import app from '../../src/index.ts';
+import * as projectAccess from '../../src/project-access.ts';
 import { users } from '../../src/schema.ts';
 import {
   deployments,
   domains,
   emailDestinations,
   projects,
+  projectMembers,
   resources,
   projectDatabaseCredentials,
   projectDeployCredentials,
@@ -584,6 +586,79 @@ describe('POST /projects/:id/prerender-token', () => {
 });
 
 describe('PUT /projects/:id/database-url', () => {
+  it.each([
+    { method: 'POST', suffix: 'database' },
+    { method: 'PUT', suffix: 'database-url' },
+  ] as const)(
+    'rechecks configure capability under the lock for $method /$suffix',
+    async ({ method, suffix }) => {
+      const owner = await createTestUser(env.db, `db-race-owner-${method.toLowerCase()}`);
+      const collaborator = await createTestUser(
+        env.db,
+        `db-race-collaborator-${method.toLowerCase()}`,
+      );
+      const project = await createTestProject(
+        env.db,
+        owner.id,
+        `db-access-race-${method.toLowerCase()}`,
+      );
+      await env.db.insert(projectMembers).values({
+        project_id: project.id,
+        user_id: collaborator.id,
+        role: 'collaborator',
+        added_by_user_id: owner.id,
+      });
+      const cf = mockCfApi();
+
+      // Return the route's first access snapshot, then commit the downgrade.
+      // The handler must re-resolve the collaborator under the project lock
+      // before either creating or updating a live Hyperdrive.
+      const requireCapability = projectAccess.requireProjectCapability;
+      let downgraded = false;
+      vi.spyOn(projectAccess, 'requireProjectCapability').mockImplementation(async (...args) => {
+        const result = await requireCapability(...args);
+        if (!downgraded && args[3] === 'configure') {
+          downgraded = true;
+          await env.db
+            .update(projectMembers)
+            .set({ role: 'reader' })
+            .where(eq(projectMembers.user_id, collaborator.id));
+        }
+        return result;
+      });
+
+      const requestUrl = `http://localhost/projects/${project.id}/${suffix}`;
+      const requestOptions = {
+        headers: {
+          Authorization: `Bearer ${collaborator.jwt}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          connectionString: 'postgresql://void_user:pass@db.example.com/appdb',
+        }),
+      };
+      const request =
+        method === 'POST'
+          ? new Request(requestUrl, { method: 'POST', ...requestOptions })
+          : new Request(requestUrl, { method: 'PUT', ...requestOptions });
+      const res = await app.fetch(request, env);
+
+      expect(res.status).toBe(403);
+      expect(await res.json()).toEqual({ error: 'forbidden' });
+      expect(downgraded).toBe(true);
+      expect(cf).not.toHaveBeenCalled();
+      expect(
+        await env.db.select().from(resources).where(eq(resources.project_id, project.id)),
+      ).toEqual([]);
+      expect(
+        await env.db
+          .select()
+          .from(projectDatabaseCredentials)
+          .where(eq(projectDatabaseCredentials.project_id, project.id)),
+      ).toEqual([]);
+    },
+  );
+
   it('provisions Hyperdrive with a Cloudflare-safe name', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id, 'pg-app-post');

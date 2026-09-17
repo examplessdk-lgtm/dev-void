@@ -112,6 +112,14 @@ export const operatorCommands: Array<OperatorCommand> = [
     method: 'POST',
   },
   {
+    group: 'project',
+    action: 'owner',
+    description: 'Transfer project ownership to another registered user',
+    path: '/projects/:id/owner',
+    positional: ['id', 'userId'],
+    method: 'POST',
+  },
+  {
     group: 'deployment',
     action: 'list',
     description: 'List tenant deployments',

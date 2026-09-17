@@ -24,7 +24,10 @@ import {
   getGitHubInstallationMembers,
   getInstallationRevocationAt,
   getProjectBuilds,
+  hasGitHubConnectionAuthority,
   recordInstallationRevocations,
+  removeProjectMember,
+  setProjectMemberRole,
   upsertGitHubInstallation,
   upsertGitHubInstallationMember,
 } from '../../src/db.ts';
@@ -40,6 +43,7 @@ import {
   githubInstallationMembers,
   githubInstallationRevocations,
   oauthAccounts,
+  projectMembers,
 } from '../../src/schema.ts';
 import {
   JWT_SECRET,
@@ -458,6 +462,106 @@ function mockEmptyInstallAccount(opts: {
 }
 
 describe('POST /projects/:id/github', () => {
+  it('lets project admins manage connections while readers and collaborators can only read them', async () => {
+    const owner = await createTestUser(env.db, 'team-github-owner');
+    const admin = await createTestUser(env.db, 'team-github-admin');
+    const collaborator = await createTestUser(env.db, 'team-github-collaborator');
+    const reader = await createTestUser(env.db, 'team-github-reader');
+    const project = await createTestProject(env.db, owner.id, 'team-github');
+    await env.db.insert(projectMembers).values([
+      {
+        project_id: project.id,
+        user_id: admin.id,
+        role: 'admin',
+        added_by_user_id: owner.id,
+      },
+      {
+        project_id: project.id,
+        user_id: collaborator.id,
+        role: 'collaborator',
+        added_by_user_id: owner.id,
+      },
+      {
+        project_id: project.id,
+        user_id: reader.id,
+        role: 'reader',
+        added_by_user_id: owner.id,
+      },
+    ]);
+    await upsertGitHubInstallation(env.db, {
+      installationId: 'team-111',
+      userId: admin.id,
+      accountLogin: admin.login,
+      accountId: 'team-admin-account',
+      accountType: 'User',
+      repositories: [{ full_name: `${admin.login}/app`, id: 9001 }],
+    });
+
+    const connect = await app.fetch(
+      new Request(`http://localhost/projects/${project.id}/github`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${admin.jwt}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          installationId: 'team-111',
+          repoFullName: `${admin.login}/app`,
+        }),
+      }),
+      env,
+    );
+    expect(connect.status).toBe(200);
+    expect((await getGitHubConnection(env.db, project.id))?.authorized_by_user_id).toBe(admin.id);
+
+    for (const user of [reader, collaborator]) {
+      const read = await app.fetch(
+        new Request(`http://localhost/projects/${project.id}/github`, authed(user.jwt)),
+        env,
+      );
+      expect(read.status).toBe(200);
+    }
+
+    const collaboratorPatch = await app.fetch(
+      new Request(`http://localhost/projects/${project.id}/github`, {
+        method: 'PATCH',
+        headers: {
+          Authorization: `Bearer ${collaborator.jwt}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ branch: 'blocked' }),
+      }),
+      env,
+    );
+    expect(collaboratorPatch.status).toBe(403);
+
+    const adminPatch = await app.fetch(
+      new Request(`http://localhost/projects/${project.id}/github`, {
+        method: 'PATCH',
+        headers: { Authorization: `Bearer ${admin.jwt}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ branch: 'release' }),
+      }),
+      env,
+    );
+    expect(adminPatch.status).toBe(200);
+
+    const readerDelete = await app.fetch(
+      new Request(`http://localhost/projects/${project.id}/github`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${reader.jwt}` },
+      }),
+      env,
+    );
+    expect(readerDelete.status).toBe(403);
+
+    const adminDelete = await app.fetch(
+      new Request(`http://localhost/projects/${project.id}/github`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${admin.jwt}` },
+      }),
+      env,
+    );
+    expect(adminDelete.status).toBe(200);
+    expect(await getGitHubConnection(env.db, project.id)).toBeNull();
+  });
+
   it('connects a project to a repo within the caller installation', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id, 'gh-app');
@@ -970,6 +1074,101 @@ describe('POST /projects/:id/github', () => {
       env,
     );
     expect(second.status).toBe(409);
+  });
+});
+
+describe('GitHub connection project-admin provenance', () => {
+  it('invalidates the connection and active builds when its authorizer loses admin access', async () => {
+    const owner = await createTestUser(env.db, 'provenance-owner');
+    const admin = await createTestUser(env.db, 'provenance-admin');
+    const project = await createTestProject(env.db, owner.id, 'provenance-project');
+    await env.db.insert(projectMembers).values({
+      project_id: project.id,
+      user_id: admin.id,
+      role: 'admin',
+      added_by_user_id: owner.id,
+    });
+    await upsertGitHubInstallation(env.db, {
+      installationId: 'provenance-install',
+      userId: admin.id,
+      accountLogin: admin.login,
+      accountId: 'provenance-account',
+      accountType: 'User',
+      repositories: [{ full_name: `${admin.login}/app`, id: 9101 }],
+    });
+    const connection = await createGitHubConnection(env.db, {
+      projectId: project.id,
+      installationId: 'provenance-install',
+      repoFullName: `${admin.login}/app`,
+      repositoryId: '9101',
+      authorizedByUserId: admin.id,
+    });
+    const build = await createBuild(env.db, {
+      projectId: project.id,
+      userId: owner.id,
+      executor: 'container',
+      status: 'building',
+    });
+    expect(await hasGitHubConnectionAuthority(env.db, connection.id, project.id)).toBe(true);
+
+    await setProjectMemberRole(env.db, {
+      projectId: project.id,
+      subjectUserId: admin.id,
+      role: 'collaborator',
+      actorUserId: owner.id,
+    });
+
+    expect(await getGitHubConnection(env.db, project.id)).toBeNull();
+    expect((await getBuild(env.db, build.id))?.status).toBe('cancelled');
+  });
+
+  it('keeps a connection reauthorized by another current admin', async () => {
+    const owner = await createTestUser(env.db, 'reauthorize-owner');
+    const firstAdmin = await createTestUser(env.db, 'reauthorize-first');
+    const secondAdmin = await createTestUser(env.db, 'reauthorize-second');
+    const project = await createTestProject(env.db, owner.id, 'reauthorize-project');
+    await env.db.insert(projectMembers).values([
+      {
+        project_id: project.id,
+        user_id: firstAdmin.id,
+        role: 'admin',
+        added_by_user_id: owner.id,
+      },
+      {
+        project_id: project.id,
+        user_id: secondAdmin.id,
+        role: 'admin',
+        added_by_user_id: owner.id,
+      },
+    ]);
+    await upsertGitHubInstallation(env.db, {
+      installationId: 'reauthorize-install',
+      userId: secondAdmin.id,
+      accountLogin: secondAdmin.login,
+      accountId: 'reauthorize-account',
+      accountType: 'User',
+      repositories: [{ full_name: `${secondAdmin.login}/app`, id: 9201 }],
+    });
+    const connection = await createGitHubConnection(env.db, {
+      projectId: project.id,
+      installationId: 'reauthorize-install',
+      repoFullName: `${secondAdmin.login}/app`,
+      repositoryId: '9201',
+      authorizedByUserId: firstAdmin.id,
+    });
+    await env.db
+      .update(githubConnections)
+      .set({ authorized_by_user_id: secondAdmin.id })
+      .where(eq(githubConnections.id, connection.id));
+
+    await removeProjectMember(env.db, {
+      projectId: project.id,
+      subjectUserId: firstAdmin.id,
+      actorUserId: owner.id,
+    });
+
+    expect((await getGitHubConnection(env.db, project.id))?.id).toBe(connection.id);
+    expect(await hasGitHubConnectionAuthority(env.db, connection.id, project.id)).toBe(true);
   });
 });
 

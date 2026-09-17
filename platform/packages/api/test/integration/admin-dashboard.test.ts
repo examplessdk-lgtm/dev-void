@@ -8,6 +8,7 @@ import {
   invitations,
   platformLoginConnections,
   platformLoginRevisions,
+  operatorEvents,
   projects,
   users,
 } from '../../src/schema.ts';
@@ -964,6 +965,8 @@ describe('GET /admin/projects/:id', () => {
     expect(html).toContain('detail-proj');
     expect(html).toContain('Resources');
     expect(html).toContain('Recent Deployments');
+    expect(html).toContain('Transfer Ownership');
+    expect(html).toContain(`/admin/projects/${project.id}/owner/preview`);
   });
 
   test('shows deployment error in project detail table', async () => {
@@ -1341,6 +1344,93 @@ describe('GET /admin/logout', () => {
     expect(res.headers.get('Location')).toBe('/admin/login');
     const setCookie = res.headers.get('Set-Cookie');
     expect(setCookie).toContain('admin_token=');
+  });
+});
+
+describe('POST /admin/projects/:id/owner', () => {
+  test('previews owners, plans, suspension, and active-work blockers without auditing', async () => {
+    const admin = await createTestUser(
+      env.db,
+      'admin-transfer-preview',
+      'github',
+      undefined,
+      'free',
+      'admin',
+    );
+    const owner = await createTestUser(env.db, 'browser-transfer-owner');
+    const target = await createTestUser(
+      env.db,
+      'browser-transfer-target',
+      'github',
+      undefined,
+      'pro',
+    );
+    await env.db
+      .update(users)
+      .set({ suspended_reason: 'operator_review' })
+      .where(eq(users.id, target.id));
+    const project = await createTestProject(env.db, owner.id, 'browser-transfer-project');
+    const deployment = await createTestDeployment(env.db, project.id, 'pending');
+
+    const response = await req(`/admin/projects/${project.id}/owner/preview`, admin.adminJwt, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: new URLSearchParams({ userId: target.id }),
+    });
+
+    expect(response.status).toBe(200);
+    const html = await response.text();
+    expect(html).toContain(`Transfer Ownership: ${project.slug}`);
+    expect(html).toContain(owner.login);
+    expect(html).toContain(target.login);
+    expect(html).toContain('pro');
+    expect(html).toContain('Suspended (operator_review)');
+    expect(html).toContain(`deployment: ${deployment.id} (pending)`);
+    expect(html).toContain('Resolve or cancel all active work');
+    expect(html).not.toContain(`action="/admin/projects/${project.id}/owner"`);
+    expect(await env.db.select().from(operatorEvents)).toEqual([]);
+    expect(
+      (await env.db.select().from(projects).where(eq(projects.id, project.id)))[0],
+    ).toMatchObject({ user_id: owner.id });
+  });
+
+  test('applies the confirmed transfer, audits it, and redirects to project detail', async () => {
+    const admin = await createTestUser(
+      env.db,
+      'admin-transfer-apply',
+      'github',
+      undefined,
+      'free',
+      'admin',
+    );
+    const owner = await createTestUser(env.db, 'browser-apply-owner');
+    const target = await createTestUser(env.db, 'browser-apply-target');
+    const project = await createTestProject(env.db, owner.id, 'browser-apply-project');
+
+    const response = await req(`/admin/projects/${project.id}/owner`, admin.adminJwt, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: new URLSearchParams({ userId: target.id }),
+    });
+
+    expect(response.status).toBe(302);
+    expect(response.headers.get('Location')).toBe(`/admin/projects/${project.id}`);
+    expect(response.headers.get('X-Void-Audit-Id')).toBeTruthy();
+    expect(
+      (await env.db.select().from(projects).where(eq(projects.id, project.id)))[0],
+    ).toMatchObject({ user_id: target.id });
+    expect(await env.db.select().from(operatorEvents)).toEqual([
+      expect.objectContaining({
+        action: `projects/${project.id}/owner`,
+        target: JSON.stringify({ projectId: project.id, userId: target.id }),
+        status: 'success',
+        http_status: 302,
+      }),
+    ]);
   });
 });
 

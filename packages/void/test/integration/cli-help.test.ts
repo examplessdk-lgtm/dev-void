@@ -89,6 +89,19 @@ describe('void help (subprocess)', () => {
     expect(output).toContain('void db execute --file <path>');
   });
 
+  it('prints project team and ownership-transfer help', () => {
+    const root = createProject();
+    const team = runVoid(root, ['project', 'team', 'invite', '--help']);
+    expect(team.status).toBe(0);
+    expect(team.output).toContain('registered email');
+    expect(team.output).toContain('--role <role>');
+
+    const owner = runVoid(root, ['platform', 'project', 'owner', '--help']);
+    expect(owner.status).toBe(0);
+    expect(owner.output).toContain('void platform project owner <id> <userId>');
+    expect(owner.output).toContain('--plan');
+  });
+
   it('fails unknown help topics', () => {
     const root = createProject();
     const { output, status } = runVoid(root, ['help', 'missing']);

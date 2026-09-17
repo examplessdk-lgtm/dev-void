@@ -20,6 +20,7 @@ import {
   listOperatorUsers,
   restoreOperatorUser,
   suspendOperatorUser,
+  transferOperatorProjectOwner,
 } from './tenant-service.ts';
 
 export const tenantRoutes = new Hono<ApiEnv>();
@@ -92,6 +93,17 @@ tenantRoutes.get('/projects', async (context) =>
 tenantRoutes.get('/projects/:id', async (context) =>
   context.json(await getOperatorProject(context.get('db'), context.req.param('id'))),
 );
+tenantRoutes.post('/projects/:id/owner', async (context) => {
+  const body = await readBody(context);
+  return context.json(
+    await transferOperatorProjectOwner(
+      context,
+      context.req.param('id'),
+      stringField(body, 'userId'),
+      dryRun(body),
+    ),
+  );
+});
 tenantRoutes.post('/projects/:id/delete', async (context) => {
   const body = await readBody(context);
   return context.json(await deleteOperatorProject(context, context.req.param('id'), dryRun(body)));
