@@ -120,6 +120,15 @@ function tryReadEmailDomain(): string | undefined {
   return typeof raw === 'string' && raw.length > 0 ? raw : undefined;
 }
 
+// The relay-lane marker `createMessageProxy` sets from `envelope.viaDomain`
+// — the registered custom domain the message arrived on. Undefined for a
+// platform-lane or own-account message, and for a hand-built message in a
+// test that never went through the proxy.
+function readRelayDomain(message: ForwardableEmailMessage): string | undefined {
+  const raw: unknown = (message as { __voidRelayDomain?: unknown }).__voidRelayDomain;
+  return typeof raw === 'string' && raw.length > 0 ? raw : undefined;
+}
+
 export interface EmailHandlerInfo {
   /**
    * Captured params from dynamic / tagged route segments. For example, a
@@ -230,6 +239,15 @@ export interface EmailEnvelope {
    */
   raw: ReadableStream<Uint8Array> | Uint8Array;
   rawSize: number;
+  /**
+   * The registered custom domain this message arrived on, set only by the
+   * platform's relay lane (`POST /email/relay` — design doc 0078, "Custom
+   * domains on Cloudflare"). Undefined on the platform mail zone. A relayed
+   * recipient carries no `<slug>+` prefix, so the generated dispatcher runs
+   * in no-prefix mode for it (Mode B item 4) and `replyEmail` defaults
+   * `from` to the address that received it, on this domain.
+   */
+  viaDomain?: string;
 }
 
 /**
@@ -473,11 +491,20 @@ export function createMessageProxy(
   const actions: Array<EmailAction> = [];
   const headers = new Headers(envelope.headers);
 
+  // A relayed recipient carries no `<slug>+` prefix (the relay lane is
+  // authenticated by the domain's relay secret, and `viaDomain` names that
+  // domain), so the slug is inert here even if a caller passed one — the
+  // generated `handleEmail` already suppresses it, and this keeps a
+  // coincidental `<slug>+` local-part prefix from being stripped off a
+  // customer-domain address.
+  const slug =
+    envelope.viaDomain === undefined || envelope.viaDomain === '' ? opts.slug : undefined;
+
   // Strip the platform-injected `<slug>+` prefix from message.to so handler
   // authors see the same address shape they wrote in `email/<addr>.ts`. The
   // dispatcher strips the same prefix for routing; mirroring it here keeps
   // the user-visible envelope consistent with the routing surface.
-  const userVisibleTo = stripSlugFromAddress(envelope.to, opts.slug);
+  const userVisibleTo = stripSlugFromAddress(envelope.to, slug);
 
   // Cache raw bytes lazily so repeated reads (e.g. parseEmail() followed by
   // anything touching message.raw) work. Real CF messages are one-shot, but
@@ -712,6 +739,22 @@ export function createMessageProxy(
   if (envelope.to !== userVisibleTo) {
     Object.defineProperty(message, '__voidPlatformTo', {
       value: envelope.to,
+      enumerable: false,
+      writable: false,
+      configurable: false,
+    });
+  }
+
+  // Mark the relay lane: the platform proved the domain's relay secret, so
+  // `viaDomain` names the one registered domain this message arrived on.
+  // `buildReplyMessage` reads the marker to default `from` to the address
+  // that received the message (on the customer domain) instead of the
+  // shared-sender `<slug>+noreply@<platform domain>` default — the platform
+  // pins a relayed reply to the receiving project's registered domains.
+  // Non-enumerable for the same reason as `__voidPlatformTo` above.
+  if (typeof envelope.viaDomain === 'string' && envelope.viaDomain.length > 0) {
+    Object.defineProperty(message, '__voidRelayDomain', {
+      value: envelope.viaDomain,
       enumerable: false,
       writable: false,
       configurable: false,
@@ -1148,9 +1191,19 @@ export async function buildReplyMessage(
   // With no slug there is no shared sender to pin to: the message was
   // delivered to a real address on the developer's own zone, and replying
   // from that address is what a reply means.
+  //
+  // A relayed message (a custom domain on the customer's own Cloudflare
+  // zone — the `__voidRelayDomain` marker from `createMessageProxy`) is the
+  // same shape as the own-account case even though a slug IS injected:
+  // `message.to` is a real address on the customer's domain, the platform
+  // pins relayed replies to the receiving project's registered domains, and
+  // the send leaves through the customer account's REST send. The shared
+  // `<slug>+noreply@<platform domain>` default would fail that pin.
   let fromAddr: Address;
   if (opts.from !== undefined) {
     fromAddr = opts.from;
+  } else if (readRelayDomain(message) !== undefined) {
+    fromAddr = message.to;
   } else {
     const slug = tryReadProjectSlug();
     if (slug) {

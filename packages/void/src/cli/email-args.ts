@@ -12,6 +12,14 @@ export const emailSubcommands: Array<SubcommandDef> = [
   { name: 'destinations', description: 'List verified recipient addresses for outbound mail' },
   { name: 'allow', arg: '<address>', description: 'Add a recipient and trigger CF verification' },
   { name: 'disallow', arg: '<address>', description: 'Remove a verified recipient' },
+  // The first (and only) nested group: the verb is collected as the arg so
+  // `domain list` completes in the interactive prompt; `domain add` then
+  // errors naming the missing <domain>, the same as a typed invocation.
+  {
+    name: 'domain',
+    arg: '<add|status|list|sync|remove>',
+    description: 'Send and receive at your own domain on a Cloudflare zone',
+  },
   {
     name: 'status',
     description: 'Show the email setup state and address map',
@@ -30,12 +38,32 @@ const EMAIL_SUBCOMMANDS = [
   'destinations',
   'allow',
   'disallow',
+  'domain',
   'status',
   'setup',
 ] as const;
 
+export const EMAIL_DOMAIN_VERBS = ['add', 'status', 'list', 'sync', 'remove'] as const;
+export type EmailDomainVerb = (typeof EMAIL_DOMAIN_VERBS)[number];
+
 export interface EmailArgs {
   subcommand: (typeof EMAIL_SUBCOMMANDS)[number];
+  /** The nested `void email domain <verb>` verb — set only when subcommand is 'domain'. */
+  domainVerb?: EmailDomainVerb;
+  /** The domain positional of a domain verb (absent for `domain list`). */
+  domain?: string;
+  /**
+   * `--subdomain <label|host>` on `domain add`: which subdomain to register
+   * instead of the `mail.<domain>` the MX decision proposes (design doc 0078,
+   * "[change with --subdomain]").
+   */
+  subdomain?: string;
+  /**
+   * `--force` on `domain remove`: drop the platform row even when a
+   * Cloudflare-side cleanup step fails (the api answers `forced: true` and
+   * names the failed steps for manual cleanup).
+   */
+  force?: boolean;
   projectSlug?: string;
   limit?: number;
   address?: string;
@@ -73,7 +101,7 @@ export function parseEmailArgs(args: Array<string>): EmailArgs {
   const subcommand = args[0] as EmailArgs['subcommand'];
   if (!subcommand || !(EMAIL_SUBCOMMANDS as ReadonlyArray<string>).includes(subcommand)) {
     throw new Error(
-      'email: Usage: void email <usage|logs|destinations|allow|disallow|status|setup> [args] [--project <name>] [--limit <n>] [--platform cloudflare].',
+      'email: Usage: void email <usage|logs|destinations|allow|disallow|domain|status|setup> [args] [--project <name>] [--limit <n>] [--platform cloudflare].',
     );
   }
 
@@ -86,6 +114,8 @@ export function parseEmailArgs(args: Array<string>): EmailArgs {
   const projectValues: Array<string> = [];
   const platformValues: Array<string> = [];
   const backendValues: Array<string> = [];
+  const subdomainValues: Array<string> = [];
+  let forceCount = 0;
   const positional: Array<string> = [];
 
   const rest = args.slice(1);
@@ -129,10 +159,31 @@ export function parseEmailArgs(args: Array<string>): EmailArgs {
       }
       backendValues.push(value);
       i = next;
+    } else if (rest[i] === '--subdomain' || rest[i]?.startsWith('--subdomain=')) {
+      const { value, next } = readFlagValue(rest, i, '--subdomain');
+      // Same missing-value rule as --project: a bare flag or an empty shell
+      // variable reads as no value, not as the next flag's name.
+      if (value === undefined || value.trim() === '') {
+        throw new Error('email: --subdomain requires a value (a subdomain label or host).');
+      }
+      subdomainValues.push(value);
+      i = next;
+    } else if (rest[i] === '--force' || rest[i]?.startsWith('--force=')) {
+      // A boolean: `--force=yes` is a positional's worth of confusion, not a value.
+      if (rest[i] !== '--force') {
+        throw new Error('email: --force takes no value.');
+      }
+      forceCount++;
     } else {
       positional.push(rest[i]);
     }
   }
+
+  // Same repeated-flag rule as --project/--subdomain.
+  if (forceCount > 1) {
+    throw new Error('email: --force can only be specified once.');
+  }
+  const force = forceCount > 0 ? true : undefined;
 
   // Same rule as `void deploy`: `--project` at most once.
   if (projectValues.length > 1) {
@@ -166,6 +217,30 @@ export function parseEmailArgs(args: Array<string>): EmailArgs {
       throw new Error("email: --backend must be 'cloudflare'.");
     }
     platform = 'cloudflare';
+  }
+
+  if (subdomainValues.length > 1) {
+    throw new Error('email: --subdomain can only be specified once.');
+  }
+  const subdomain = subdomainValues[0];
+
+  // The nested `domain` group parses its own positionals (verb + domain) and
+  // returns early — the one-positional rule below predates it and would
+  // read the verb as the address. Mode B needs none of this group (0078,
+  // "Mode B" under custom domains), so it is Void-platform-only.
+  if (subcommand === 'domain') {
+    if (platform === 'cloudflare') {
+      throw new Error(
+        'email: --platform cloudflare applies to `void email status` and `void email setup` only (`domain` is a Void platform command).',
+      );
+    }
+    return parseEmailDomainArgs(positional, { projectSlug, limit, platform, subdomain, force });
+  }
+  if (subdomain !== undefined) {
+    throw new Error('email: --subdomain applies to `void email domain add` only.');
+  }
+  if (force !== undefined) {
+    throw new Error('email: --force applies to `void email domain remove` only.');
   }
 
   // `void email allow|disallow` takes exactly one address. Silently
@@ -208,4 +283,61 @@ export function parseEmailArgs(args: Array<string>): EmailArgs {
   }
 
   return { subcommand, projectSlug, limit, address, platform };
+}
+
+/**
+ * The nested `void email domain <verb> [<domain>]` group. positional[0] is the
+ * verb, positional[1] the domain — `list` takes no domain, every other verb
+ * requires exactly one. Shape validation of the domain itself is the command's
+ * job (and ultimately the api's — its regex is authoritative); the parser only
+ * counts positionals, exactly as it does for `allow <address>`.
+ */
+function parseEmailDomainArgs(
+  positional: ReadonlyArray<string>,
+  flags: {
+    projectSlug?: string;
+    limit?: number;
+    platform?: EmailArgs['platform'];
+    subdomain?: string;
+    force?: boolean;
+  },
+): EmailArgs {
+  const verb = positional[0];
+  if (!verb || !(EMAIL_DOMAIN_VERBS as ReadonlyArray<string>).includes(verb)) {
+    throw new Error(
+      'email: Usage: void email domain <add|status|list|sync|remove> [<domain>] [--project <name>].',
+    );
+  }
+  if (flags.subdomain !== undefined && verb !== 'add') {
+    throw new Error('email: --subdomain applies to `void email domain add` only.');
+  }
+  if (flags.force !== undefined && verb !== 'remove') {
+    throw new Error('email: --force applies to `void email domain remove` only.');
+  }
+  const domain = positional[1];
+  if (verb === 'list') {
+    if (domain !== undefined) {
+      throw new Error('email: `void email domain list` takes no domain argument.');
+    }
+  } else if (domain === undefined) {
+    throw new Error(`email: Usage: void email domain ${verb} <domain> [--project <name>].`);
+  }
+  if (positional.length > 2) {
+    throw new Error(
+      `email: \`void email domain ${verb}\` takes exactly one domain argument (got ${positional.length - 1}: ${positional
+        .slice(1)
+        .map((p) => JSON.stringify(p))
+        .join(', ')}).`,
+    );
+  }
+  return {
+    subcommand: 'domain',
+    domainVerb: verb as EmailDomainVerb,
+    domain,
+    subdomain: flags.subdomain,
+    force: flags.force,
+    projectSlug: flags.projectSlug,
+    limit: flags.limit,
+    platform: flags.platform,
+  };
 }

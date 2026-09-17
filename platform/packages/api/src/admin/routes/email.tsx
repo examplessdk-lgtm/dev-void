@@ -1,3 +1,4 @@
+import { asc, eq, sql } from 'drizzle-orm';
 import { Hono, type Context } from 'hono';
 import {
   countProjectsUsingDestination,
@@ -5,13 +6,17 @@ import {
   getEmailDestinationsByProjectId,
   getProject,
 } from '../../db.ts';
+import { revokeOauthGrant } from '../../email/cf-customer.ts';
+import { clearEmailDomainMirror, decryptEmailDomainToken } from '../../email/domains.ts';
+import { removeEmailDomain } from '../../email/relay-engine.ts';
 import type { ApiEnv } from '../../env.ts';
 import {
   syncProjectAllowlistKv,
   syncProjectAllowlistKvBestEffort,
 } from '../../provisioning/email-allowlist.ts';
 import { deleteDestination } from '../../provisioning/email-routing.ts';
-import { formatDateTime } from '../views/format.ts';
+import { emailDomains } from '../../schema.ts';
+import { STATUS_COLORS, formatDateTime } from '../views/format.ts';
 import { Layout } from '../views/layout.tsx';
 
 const app = new Hono<ApiEnv>();
@@ -24,6 +29,10 @@ const app = new Hono<ApiEnv>();
  * and reads the caps from. The keys and the defaults below MUST stay in
  * lockstep with that worker — they are the same contract written from both
  * ends, and nothing at build time catches a drift.
+ *
+ * The destination and custom-domain rows are Postgres. The proxy's only
+ * view of a custom domain is the `email-domain:` ROUTING mirror, so the
+ * revoke below clears that key before the row.
  */
 const suspendKey = (projectId: string) => `email-suspended:${projectId}`;
 const monthlyLimitKey = (projectId: string) => `email-limit:${projectId}`;
@@ -48,7 +57,7 @@ app.get('/:projectId', async (context) => {
   }
 
   const month = monthBucket();
-  const [sent, received, suspended, monthlyOverride, burstOverride, destinations] =
+  const [sent, received, suspended, monthlyOverride, burstOverride, destinations, domains] =
     await Promise.all([
       context.env.ROUTING.get(sentKey(projectId, month)),
       context.env.ROUTING.get(recvKey(projectId, month)),
@@ -56,6 +65,12 @@ app.get('/:projectId', async (context) => {
       context.env.ROUTING.get(monthlyLimitKey(projectId)),
       context.env.ROUTING.get(burstLimitKey(projectId)),
       getEmailDestinationsByProjectId(context.get('db'), projectId),
+      context
+        .get('db')
+        .select()
+        .from(emailDomains)
+        .where(eq(emailDomains.project_id, projectId))
+        .orderBy(asc(emailDomains.created_at)),
     ]);
 
   // Distinguish an override from the default so an operator can see at a
@@ -238,6 +253,94 @@ app.get('/:projectId', async (context) => {
         There is deliberately no operator-side "add" here: an admin cannot consent on a recipient's
         behalf.
       </p>
+
+      <h2>Custom domains ({domains.length})</h2>
+      <p style={META}>
+        Sender/recipient domains on the customer's own Cloudflare zone, registered by the project
+        owner through <code>POST /projects/:id/email/domains</code>. Revoke clears the{' '}
+        <code>email-domain:</code> ROUTING mirror FIRST — the proxy trusts only that key, and a
+        failed clear keeps the row so the retry can finish — then deletes the relay worker and
+        catch-all rule in the customer's account best-effort (a stranded relay is inert without the
+        mirror entry) and drops the row. For <code>oauth_grant</code> rows, revoke grant is the
+        lighter escape hatch: it kills just the customer's OAuth grant at Cloudflare and flips the
+        row to <code>token_revoked</code>, leaving the row and mirror in place. The customer's
+        credential and the relay secret are never shown here.
+      </p>
+      {domains.length === 0 ? (
+        <p>
+          <em>No custom domains.</em>
+        </p>
+      ) : (
+        <table>
+          <thead>
+            <tr>
+              <th>Domain</th>
+              <th>Status</th>
+              <th>Mode</th>
+              <th>Relay worker</th>
+              <th>v</th>
+              <th>Token ID</th>
+              <th>Token expires</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {domains.map((domain) => (
+              <tr key={domain.id}>
+                <td>{domain.domain}</td>
+                <td>
+                  <span style={`color: ${domainStatusColor(domain.status)}`}>{domain.status}</span>
+                </td>
+                <td>{domain.mode ?? '-'}</td>
+                <td>{domain.relay_worker_name ?? '-'}</td>
+                <td>{domain.relay_version ?? '-'}</td>
+                <td>{domain.token_id ?? '-'}</td>
+                <td>
+                  {domain.token_expires_on ? formatDateTime(domain.token_expires_on, tz) : '-'}
+                </td>
+                <td>
+                  {/* Keep apostrophes out of the `onsubmit` text (see the Danger
+                      Zone note above); the typed slug is the real confirmation
+                      and is checked on the server. */}
+                  <form
+                    method="post"
+                    action={`/admin/email/${projectId}/domains/${domain.domain}/revoke`}
+                    onsubmit="return confirm('Revoke &quot;' + this.dataset.domain + '&quot;? The mirror key and row are deleted; the relay worker and catch-all in the customer account are deleted best-effort.')"
+                    data-domain={domain.domain}
+                  >
+                    <input
+                      type="text"
+                      name="confirm"
+                      placeholder={project.slug}
+                      autocomplete="off"
+                      required
+                    />{' '}
+                    <button type="submit" class="danger-sm">
+                      revoke
+                    </button>
+                  </form>
+                  {/* OAuth rows only: kill just the customer's grant (the row
+                      and mirror stay). API tokens are the customer's own — the
+                      route refuses those and points at dash.cloudflare.com. */}
+                  {domain.credential_kind === 'oauth_grant' ? (
+                    <form
+                      method="post"
+                      action={`/admin/email/${projectId}/domains/${domain.domain}/revoke-grant`}
+                      onsubmit="return confirm('Revoke the OAuth grant for &quot;' + this.dataset.domain + '&quot;? The domain stops sending and receiving until the customer reconnects it. The row and mirror stay in place.')"
+                      data-domain={domain.domain}
+                      style="margin-top: 6px"
+                    >
+                      <button type="submit" class="danger-sm">
+                        revoke grant
+                      </button>
+                    </form>
+                  ) : null}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
     </Layout>,
   );
 });
@@ -354,6 +457,139 @@ app.post('/:projectId/destinations/:destId/delete', async (context) => {
   return context.redirect(`/admin/email/${projectId}`);
 });
 
+// POST /email/:projectId/domains/:domain/revoke — operator revoke of a custom
+// email domain: clear the proxy's mirror key, best-effort CF cleanup in the
+// customer's account via the relay engine, then the row. The owner-facing
+// twin is DELETE /projects/:id/email/domains/:domain in `routes/email.ts`.
+app.post('/:projectId/domains/:domain/revoke', async (context) => {
+  const projectId = context.req.param('projectId');
+  const project = await getProject(context.get('db'), projectId);
+  if (!project) {
+    return context.html('<h1>Project not found</h1>', 404);
+  }
+  const domain = context.req.param('domain');
+  const rows = await context
+    .get('db')
+    .select()
+    .from(emailDomains)
+    .where(eq(emailDomains.project_id, projectId));
+  const row = rows.find((r) => r.domain === domain);
+  if (!row) {
+    return context.html('<h1>Email domain not found</h1>', 404);
+  }
+  const body = await context.req.parseBody();
+  if (body.confirm !== project.slug) {
+    return context.html(
+      `<h1>Not confirmed</h1><p>Type the project slug (<code>${project.slug}</code>) to revoke ${row.domain}.</p>`,
+      400,
+    );
+  }
+
+  // Tighten BEFORE anything destructive — the same inversion as the
+  // destination revoke above. The proxy trusts only the mirror key, and the
+  // row is what a retry re-runs from, so a failed clear keeps the row and
+  // nothing else has happened yet.
+  try {
+    await clearEmailDomainMirror(context.env.ROUTING, row.domain);
+  } catch (error) {
+    console.error('[admin-email] email-domain mirror clear failed; keeping the row', {
+      projectId,
+      domain: row.domain,
+      error,
+    });
+    return context.html('<h1>Failed to clear the domain mirror. Try again.</h1>', 503);
+  }
+
+  // Best-effort CF cleanup (relay script DELETE + catch-all reset);
+  // removeEmailDomain never throws. A stranded relay or rule in the
+  // customer's account is inert without the mirror entry, so neither a CF
+  // failure nor a decrypt failure (a rotated-away key version) may block the
+  // revoke — this log line is the trace an operator gets, same as the CF
+  // deleteDestination failure above.
+  try {
+    const credential = await decryptEmailDomainToken(context.env, projectId, row.domain, row);
+    const { failed_steps } = await removeEmailDomain({
+      row: {
+        credential_kind: row.credential_kind,
+        account_id: row.account_id,
+        relay_worker_name: row.relay_worker_name,
+        zone_id: row.zone_id,
+      },
+      credential,
+    });
+    if (failed_steps.length > 0) {
+      console.error('[admin-email] email-domain CF cleanup incomplete', {
+        projectId,
+        domain: row.domain,
+        failedSteps: failed_steps,
+      });
+    }
+  } catch (error) {
+    console.error('[admin-email] email-domain credential decrypt failed; skipping CF cleanup', {
+      projectId,
+      domain: row.domain,
+      error,
+    });
+  }
+
+  await context.get('db').delete(emailDomains).where(eq(emailDomains.id, row.id));
+  return context.redirect(`/admin/email/${projectId}`);
+});
+
+// POST /email/:projectId/domains/:domain/revoke-grant — operator revocation
+// of one domain's OAuth grant: the support escape hatch when a customer asks
+// us to kill their grant without tearing the domain down. RFC 7009 against
+// dash.cloudflare.com, then the row flips to 'token_revoked'. The proxy's
+// `email-domain:` mirror keeps the old status until the next status-GET
+// repair or sync — accepted for an operator tool.
+app.post('/:projectId/domains/:domain/revoke-grant', async (context) => {
+  const projectId = context.req.param('projectId');
+  const project = await getProject(context.get('db'), projectId);
+  if (!project) {
+    return context.html('<h1>Project not found</h1>', 404);
+  }
+  const domain = context.req.param('domain');
+  const rows = await context
+    .get('db')
+    .select()
+    .from(emailDomains)
+    .where(eq(emailDomains.project_id, projectId));
+  const row = rows.find((r) => r.domain === domain);
+  if (!row) {
+    return context.html('<h1>Email domain not found</h1>', 404);
+  }
+  if (row.credential_kind !== 'oauth_grant') {
+    return context.html(
+      '<h1>Not an OAuth grant</h1><p>API tokens are revoked by the customer at dash.cloudflare.com; there is no platform-side grant to revoke.</p>',
+      400,
+    );
+  }
+  let refreshToken: string;
+  try {
+    refreshToken = await decryptEmailDomainToken(context.env, projectId, row.domain, row);
+  } catch (error) {
+    // No status change: without the credential there is nothing to revoke.
+    console.error('[admin-email] grant revoke failed to decrypt the stored credential', {
+      projectId,
+      domain: row.domain,
+      error,
+    });
+    return context.html(
+      '<h1>Failed to decrypt the stored credential</h1><p>The grant cannot be revoked from here; the row keeps its current status.</p>',
+      500,
+    );
+  }
+  // Never throws; RFC 7009 answers 200 whether the token was live or already
+  // dead, so the status flip is safe either way.
+  await revokeOauthGrant(refreshToken);
+  await context
+    .get('db')
+    .update(emailDomains)
+    .set({ status: 'token_revoked', updated_at: sql`now()` })
+    .where(eq(emailDomains.id, row.id));
+  return context.redirect(`/admin/email/${projectId}`);
+});
+
 /**
  * Shared body of the two limit forms. A blank submission deletes the override
  * key, which is how an operator hands a project back to the platform default
@@ -382,6 +618,17 @@ async function setLimit(
   }
   await context.env.ROUTING.put(key(projectId), String(limit));
   return context.redirect(`/admin/email/${projectId}`);
+}
+
+/** Domain rows reuse the shared status palette: active reads as success, anything dead as failed. */
+function domainStatusColor(status: string): string {
+  if (status === 'active') {
+    return STATUS_COLORS.success;
+  }
+  if (status === 'pending') {
+    return STATUS_COLORS.pending;
+  }
+  return STATUS_COLORS.failed;
 }
 
 /** UTC `YYYY-MM`, matching `monthBucket` in `packages/proxy/src/email.ts`. */

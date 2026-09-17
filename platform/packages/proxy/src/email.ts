@@ -1,7 +1,9 @@
 import { isReservedEmailSlug } from '@voidcloud/api/reserved-slugs';
 import { EmailMessage } from 'cloudflare:email';
 import { Hono } from 'hono';
+import type { Context } from 'hono';
 import { asString } from './body.ts';
+import { dropEmailDomainLease, leaseBearer, leaseEmailDomainCredential } from './email-lease.ts';
 import type { Env, ProxyEnv } from './types.ts';
 
 const app = new Hono<ProxyEnv>();
@@ -724,6 +726,28 @@ app.post('/send', async (context) => {
     );
   }
 
+  // Custom sender domains (design doc 0078, "Custom domains on
+  // Cloudflare"): a `from` whose domain is NOT the platform sender domain
+  // belongs to a registered `email_domains` row, not to the shared zone.
+  // The slug pin and strict regex below only make sense ON `senderDomain`,
+  // so the paths fork here — after the size and structure gates that apply
+  // to both. A `from` with no usable domain part falls through to the
+  // shared-path guards, which refuse it.
+  const fromAt = from.indexOf('@');
+  const fromDomain = fromAt === -1 ? '' : from.slice(fromAt + 1).toLowerCase();
+  if (fromDomain !== '' && fromDomain !== senderDomain) {
+    return sendViaCustomDomain(
+      context,
+      projectId,
+      from,
+      fromDomain,
+      senderDomain,
+      recipients,
+      raw,
+      requestId,
+    );
+  }
+
   // Resolve the project's slug via the `email-slug:<projectId>` mirror
   // the API writes on project create. We use this to enforce that the
   // `from` address belongs to the calling project — without this check,
@@ -1052,6 +1076,389 @@ app.post('/send', async (context) => {
 });
 
 // -----------------------------------------------------------------------------
+// Custom sender domains — a `/send` fork for `from` domains registered to
+// the project (design doc 0078, "Custom domains on Cloudflare").
+// -----------------------------------------------------------------------------
+
+/**
+ * The Email Sending REST `send_raw` result. snake_case — the REST schema
+ * names the id `message_id`, unlike the `send_email` binding's camelCase
+ * `messageId` (and the api's `SendRawResult` in `email/cf-customer.ts`,
+ * which declares the same field). `delivered` and `queued` are both
+ * success for our purposes; `permanent_bounces` and
+ * `suppressed_recipients` are per-recipient permanent failures.
+ */
+export interface SendRawResult {
+  message_id?: unknown;
+  permanent_bounces?: unknown;
+  suppressed_recipients?: unknown;
+}
+
+/** A send_raw address list as a lowercase set; non-string entries are dropped. */
+export function readSendRawAddressList(value: unknown): Set<string> {
+  const out = new Set<string>();
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      if (typeof entry === 'string') {
+        out.add(entry.toLowerCase());
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Custom-domain outbound send. Reached from `/send` when the from-address
+ * domain is not the platform sender domain.
+ *
+ * Authorization is the domain mirror, not the slug pin: the api mirrors
+ * every `email_domains` row to `email-domain:<domain>` in ROUTING KV, and
+ * the send proceeds only when that mirror maps the domain to the CALLING
+ * project and the row is `active`. The message then leaves through the
+ * CUSTOMER's Cloudflare account — `POST
+ * /accounts/{accountId}/email/sending/send_raw` bearing a credential leased
+ * from the api (`email-lease.ts`) — so DKIM alignment and the daily quota
+ * are the customer's own.
+ *
+ * The platform's abuse and quota controls apply unchanged and run BEFORE
+ * the external call: platform-wide routing suspension, the email-only
+ * kill-switch, and the burst + monthly counters. The one shared-path gate
+ * deliberately absent is the verified-destination allowlist (decision 6):
+ * the customer's own Email Sending onboarding lifts Cloudflare's
+ * verified-destination gate, and the reputation at stake is theirs.
+ */
+async function sendViaCustomDomain(
+  context: Context<ProxyEnv>,
+  projectId: string,
+  from: string,
+  fromDomain: string,
+  senderDomain: string,
+  recipients: Array<string>,
+  raw: Uint8Array,
+  requestId: string,
+): Promise<Response> {
+  // The envelope is forwarded verbatim to the customer's account, so the
+  // printable-ASCII guard runs here for the same reason as on the shared
+  // path (case folding must not change the bytes downstream sees).
+  if (!/^[\x21-\x7e]+$/.test(from)) {
+    return context.json(
+      {
+        ok: false,
+        error: { code: 'INVALID_FROM', message: 'from address must be printable ASCII' },
+      },
+      403,
+    );
+  }
+  const fromLower = from.toLowerCase();
+
+  // The mirror IS the authorization: it names the one project this domain
+  // belongs to. A missing row, another project's row, and a row that never
+  // reached (or left) `active` all refuse identically. The message names
+  // the configured sender domain too: a `from` on another environment's
+  // platform zone lands here, and naming the zone is what makes that
+  // misconfiguration debuggable.
+  const mirror = await readEmailDomainMirror(context.env.ROUTING, fromDomain, { cacheTtl: 60 });
+  if (!mirror || mirror.projectId !== projectId || mirror.status !== 'active') {
+    return context.json(
+      {
+        ok: false,
+        error: {
+          code: 'INVALID_FROM',
+          message: `from address must be on the configured sender domain (${senderDomain}) or a domain registered to this project`,
+        },
+      },
+      403,
+    );
+  }
+  if (!mirror.accountId) {
+    return context.json(
+      {
+        ok: false,
+        error: { code: 'UPSTREAM_ERROR', message: 'email domain registration is incomplete' },
+      },
+      502,
+    );
+  }
+
+  // Pin what the recipient will SEE, exactly as the shared path does: the
+  // MIME `From:` must be the envelope sender. The mirror already bounds the
+  // domain to this project; this keeps the header from naming a different
+  // mailbox on it. Runs before the suspension and quota reads for the same
+  // reason as the shared path's pin: no KV work for a request that can
+  // never be authorized.
+  const mimeFrom = readMimeFromAddrSpec(raw);
+  if (!mimeFrom.ok || mimeFrom.addrSpec.toLowerCase() !== fromLower) {
+    const detail = mimeFrom.ok
+      ? 'the From header address does not match the envelope sender'
+      : MIME_FROM_REFUSALS[mimeFrom.reason];
+    return context.json(
+      {
+        ok: false,
+        error: {
+          code: 'INVALID_FROM',
+          message: `mime From must be the envelope sender ${from}: ${detail}`,
+        },
+      },
+      403,
+    );
+  }
+
+  // The suspension and quota gates below key on the project exactly as the
+  // shared path does; the slug mirror is the join to the routing blob the
+  // suspension marker lives on. Fail closed the same way when it is missing
+  // or malformed.
+  const slug = await context.env.ROUTING.get(`email-slug:${projectId}`);
+  if (!slug) {
+    return context.json(
+      {
+        ok: false,
+        error: {
+          code: 'UPSTREAM_ERROR',
+          message: 'project slug unknown — refusing to send',
+        },
+      },
+      502,
+    );
+  }
+  if (!SLUG_RE.test(slug)) {
+    console.error(
+      `[email-send] project ${projectId} slug malformed in KV: ${sanitizeForLog(slug, 64)}`,
+    );
+    return context.json(
+      {
+        ok: false,
+        error: {
+          code: 'UPSTREAM_ERROR',
+          message: 'project slug malformed in routing',
+        },
+      },
+      502,
+    );
+  }
+
+  // Platform-wide suspension — same marker, same codes as the shared path.
+  const platformSuspension = await readRoutingSuspension(context.env.ROUTING, slug);
+  if (platformSuspension.kind === 'corrupt') {
+    console.error(
+      `[email-send] project ${projectId} routing blob malformed in KV for slug ${sanitizeForLog(slug, 64)}`,
+    );
+    return context.json(
+      {
+        ok: false,
+        error: {
+          code: 'UPSTREAM_ERROR',
+          message: 'project routing entry malformed',
+        },
+      },
+      502,
+    );
+  }
+  if (platformSuspension.kind === 'suspended') {
+    return context.json(
+      {
+        ok: false,
+        error: {
+          code: 'QUOTA_EXCEEDED',
+          message: `project is suspended (${sanitizeForLog(platformSuspension.reason, 64)})`,
+        },
+      },
+      200,
+    );
+  }
+
+  // Email-only kill-switch. No cacheTtl, for the same reason as the shared
+  // path: an abuse-response control where convergence latency is the point.
+  if (await context.env.ROUTING.get(`email-suspended:${projectId}`)) {
+    return context.json(
+      { ok: false, error: { code: 'QUOTA_EXCEEDED', message: 'project email is suspended' } },
+      200,
+    );
+  }
+
+  // Burst + monthly quota checks against the whole recipient list — with no
+  // allowlist filtering on this path, every recipient counts. Same
+  // counters, same limits, same codes as the shared path.
+  const now = new Date();
+  const burstKey = `email-burst:${projectId}:${minuteBucket(now)}`;
+  const burstCurrent = readCounter(await context.env.ROUTING.get(burstKey));
+  const burstLimit = await getBurstLimit(context.env.ROUTING, projectId);
+  if (burstCurrent + recipients.length > burstLimit) {
+    return context.json(
+      {
+        ok: false,
+        error: {
+          code: 'QUOTA_EXCEEDED',
+          message: `outbound burst limit ${burstLimit}/min exceeded`,
+        },
+      },
+      429,
+    );
+  }
+  const counterKey = `email-sent:${projectId}:${monthBucket(now)}`;
+  const monthCurrent = readCounter(await context.env.ROUTING.get(counterKey));
+  const monthLimit = await getMonthlyLimit(context.env.ROUTING, projectId);
+  if (monthCurrent + recipients.length > monthLimit) {
+    return context.json(
+      {
+        ok: false,
+        error: {
+          code: 'QUOTA_EXCEEDED',
+          message: `monthly outbound limit ${monthLimit} exceeded`,
+        },
+      },
+      429,
+    );
+  }
+
+  // send_raw carries the MIME as a JSON string. Decode FATALLY: the
+  // framework's builder emits 7-bit-clean MIME, and a body that is not
+  // valid UTF-8 would be silently altered by a lenient decode — refuse it
+  // instead. Local validation, so it runs before any quota is burned.
+  let mimeMessage: string;
+  try {
+    mimeMessage = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(raw);
+  } catch {
+    return context.json(
+      { ok: false, error: { code: 'MIME_ERROR', message: 'mime must be valid UTF-8' } },
+      400,
+    );
+  }
+
+  // Lease the domain's credential from the api. A lease failure is a
+  // platform-side condition (the api owns the row's status transitions on
+  // real credential failures), so it costs the project no quota — the
+  // counters increment below, ahead of the one external call, the same
+  // optimistic increment the shared path uses.
+  const lease = await leaseEmailDomainCredential(context.env, fromDomain);
+  if (!lease) {
+    return context.json(
+      {
+        ok: false,
+        error: { code: 'UPSTREAM_ERROR', message: 'could not lease the domain credential' },
+      },
+      502,
+    );
+  }
+
+  await Promise.all([
+    context.env.ROUTING.put(counterKey, String(monthCurrent + recipients.length), {
+      expirationTtl: monthTtlSeconds(now),
+    }).catch((e) => {
+      console.error(`[email-send] monthly counter put failed for ${projectId}:`, e);
+    }),
+    context.env.ROUTING.put(burstKey, String(burstCurrent + recipients.length), {
+      expirationTtl: 5 * 60,
+    }).catch((e) => {
+      console.error(`[email-send] burst counter put failed for ${projectId}:`, e);
+    }),
+  ]);
+
+  // One REST call carries every recipient — unlike the platform binding's
+  // one EmailMessage per recipient. The response's message id is shared by
+  // the whole list.
+  let failure: { code: string; message: string } | null = null;
+  let messageId = '';
+  // Per-recipient permanent outcomes from the send_raw result: a recipient
+  // on either list was NOT sent to, and reporting it as delivered would
+  // tell the framework (and the log) a lie it cannot retry its way out of.
+  let bounced = new Set<string>();
+  let suppressed = new Set<string>();
+  let cfRes: Response | null = null;
+  try {
+    cfRes = await fetch(
+      `https://api.cloudflare.com/client/v4/accounts/${mirror.accountId}/email/sending/send_raw`,
+      {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${leaseBearer(lease)}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ from, recipients, mime_message: mimeMessage }),
+      },
+    );
+  } catch {
+    failure = { code: 'UPSTREAM_ERROR', message: 'email sending request failed' };
+  }
+  if (cfRes) {
+    if (!cfRes.ok) {
+      // A refused credential (401/403) evicts the cached lease so the next
+      // send re-leases; the api marks the row on its own probe path. CF's
+      // error body is never echoed or logged — it is not ours to surface.
+      if (cfRes.status === 401 || cfRes.status === 403) {
+        dropEmailDomainLease(fromDomain);
+      }
+      failure = {
+        code: cfRes.status === 429 ? 'QUOTA_EXCEEDED' : 'UPSTREAM_ERROR',
+        message: `email sending API returned ${cfRes.status}`,
+      };
+    } else {
+      let data: unknown = null;
+      try {
+        data = await cfRes.json();
+      } catch {
+        data = null;
+      }
+      const success =
+        typeof data === 'object' &&
+        data !== null &&
+        (data as { success?: unknown }).success === true;
+      if (!success) {
+        failure = { code: 'UPSTREAM_ERROR', message: 'email sending API refused the message' };
+      } else {
+        const result = (data as { result?: SendRawResult | null }).result;
+        const id = result?.message_id;
+        messageId = typeof id === 'string' ? id : '';
+        bounced = readSendRawAddressList(result?.permanent_bounces);
+        suppressed = readSendRawAddressList(result?.suppressed_recipients);
+      }
+    }
+  }
+
+  const deliveries: Array<RecipientResult> = [];
+  for (const r of recipients) {
+    if (failure) {
+      deliveries.push({ recipient: r, ok: false, error: failure });
+    } else if (bounced.has(r)) {
+      deliveries.push({
+        recipient: r,
+        ok: false,
+        error: {
+          code: 'UNVERIFIED_DESTINATION',
+          message: `recipient '${r}' permanently bounced`,
+        },
+      });
+    } else if (suppressed.has(r)) {
+      deliveries.push({
+        recipient: r,
+        ok: false,
+        error: {
+          code: 'UNVERIFIED_DESTINATION',
+          message: `recipient '${r}' is on the suppression list`,
+        },
+      });
+    } else {
+      deliveries.push({ recipient: r, ok: true, messageId });
+    }
+  }
+
+  logSend(projectId, requestId, deliveries);
+
+  // Same mid-batch contract as the shared path: any per-recipient failure
+  // (bounce, suppression, or a whole-call failure) answers ok:false with
+  // the per-recipient list so the caller retries exactly the failed ones.
+  if (deliveries.some((d) => !d.ok)) {
+    return context.json({ ok: false, deliveries }, 200);
+  }
+  return context.json({
+    ok: true,
+    ids: deliveries.map((d) => ({
+      recipient: d.recipient,
+      messageId: (d as { messageId: string }).messageId,
+    })),
+  });
+}
+
+// -----------------------------------------------------------------------------
 // Inbound delivery log — kept here because it's invoked from email-router.ts
 // inside the same worker (bypasses HTTP/auth).
 // -----------------------------------------------------------------------------
@@ -1185,6 +1592,74 @@ async function readAllowlist(kv: KVNamespace, projectId: string): Promise<Set<st
   } catch {
     return new Set();
   }
+}
+
+/**
+ * The api's `email_domains` row projected into ROUTING KV at
+ * `email-domain:<domain>` (design doc 0078, "Custom domains on
+ * Cloudflare"). Written on every row create/update, deleted on row delete;
+ * the proxy has no database access, so this mirror is its ONLY view of a
+ * registered custom domain. `relaySecretSha256` is the sha256 (hex) of the
+ * domain's relay secret — the secret itself never reaches KV.
+ *
+ * Read by the `/email/relay` auth branch (index.ts), by the custom-domain
+ * `/send` fork, and by the reply-sender pin (email-router.ts). The shape is
+ * a wire contract with the api (`api/src/email/domains.ts`).
+ */
+export interface EmailDomainMirror {
+  projectId: string;
+  status: string;
+  relaySecretSha256: string;
+  relayWorkerName: string | null;
+  accountId: string | null;
+  zoneId: string | null;
+  mode: string | null;
+}
+
+/**
+ * Read the mirror for `domain` (already lowercased by the caller). Returns
+ * null on absence AND on a malformed entry — the proxy trusts only the
+ * fields it validates, and a poisoned KV value fails closed like a missing
+ * one. `cacheTtl` follows the allowlist pattern (~60s per-colo
+ * convergence); the relay auth branch reads WITHOUT it so a revoked or
+ * rotated secret stops working at KV speed.
+ */
+export async function readEmailDomainMirror(
+  kv: KVNamespace,
+  domain: string,
+  options?: { cacheTtl?: number },
+): Promise<EmailDomainMirror | null> {
+  const raw = await kv.get(`email-domain:${domain}`, options);
+  if (!raw) {
+    return null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    return null;
+  }
+  const entry = parsed as Record<string, unknown>;
+  if (
+    typeof entry.projectId !== 'string' ||
+    entry.projectId === '' ||
+    typeof entry.status !== 'string' ||
+    typeof entry.relaySecretSha256 !== 'string'
+  ) {
+    return null;
+  }
+  return {
+    projectId: entry.projectId,
+    status: entry.status,
+    relaySecretSha256: entry.relaySecretSha256,
+    relayWorkerName: typeof entry.relayWorkerName === 'string' ? entry.relayWorkerName : null,
+    accountId: typeof entry.accountId === 'string' ? entry.accountId : null,
+    zoneId: typeof entry.zoneId === 'string' ? entry.zoneId : null,
+    mode: typeof entry.mode === 'string' ? entry.mode : null,
+  };
 }
 
 /**

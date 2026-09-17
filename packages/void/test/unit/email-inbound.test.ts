@@ -650,6 +650,47 @@ describe('generated __emailHandler dispatch (behavioural)', () => {
     expect(seen).toEqual([{ ticket: 'T-42' }]);
   });
 
+  it('runs a relayed (viaDomain) recipient in no-prefix mode even when a slug is passed', async () => {
+    // The relay lane of "Custom domains on Cloudflare" (design doc 0078):
+    // the platform router proves the domain's relay secret and sets
+    // `viaDomain`; the recipient carries no `<slug>+` prefix. A platform
+    // deployment still injects `__VOID_PROJECT_SLUG`, and the generated
+    // handleEmail suppresses it for this lane — and createMessageProxy
+    // itself ignores a slug passed alongside viaDomain, so a slug equal to
+    // the local-part prefix cannot strip `support+` off the address either.
+    const seen: Array<unknown> = [];
+    const dispatch = buildEmailDispatcher(compile({ ...SUPPORT, defaultHandler: '_default.ts' }), {
+      '/e/support.ts': { default: () => seen.push('static') },
+      '/e/support+[ticket].ts': {
+        default: (_m: unknown, _e: unknown, _c: unknown, info: { params: unknown }) =>
+          seen.push(info.params),
+      },
+      '/e/_default.ts': { default: () => seen.push('default') },
+    });
+
+    const { message } = createMessageProxy(
+      {
+        from: 'sender@example.com',
+        to: 'support+T-42@acme.com',
+        headers: {},
+        raw: new Uint8Array(),
+        rawSize: 0,
+        viaDomain: 'acme.com',
+      },
+      { slug: 'support' },
+    );
+
+    // Unstripped: the address IS the one the handler author wrote, and no
+    // wire-form `__voidPlatformTo` was preserved because nothing was stripped.
+    expect(message.to).toBe('support+T-42@acme.com');
+    expect((message as { __voidPlatformTo?: string }).__voidPlatformTo).toBeUndefined();
+    expect((message as { __voidRelayDomain?: string }).__voidRelayDomain).toBe('acme.com');
+
+    await dispatch(message, {}, {}, { slug: undefined });
+
+    expect(seen).toEqual([{ ticket: 'T-42' }]);
+  });
+
   it('routes an unprefixed recipient nothing matches to _default', async () => {
     const hits: Array<string> = [];
     const dispatch = buildEmailDispatcher(compile({ ...SUPPORT, defaultHandler: '_default.ts' }), {

@@ -1574,8 +1574,9 @@ window.__vite_plugin_react_preamble_installed__ = true;
   // (the slug is invisible to them — see design-doc 0078). When a slug is
   // configured (`__VOID_PROJECT_SLUG`) the dispatcher strips everything up to
   // and including the first `+` from the local-part before running it through
-  // the pattern table. Without one — a worker on the developer's own zone — the
-  // full local part is matched, so `support+T-42@zone` reaches
+  // the pattern table. Without one — a worker on the developer's own zone, or
+  // a relayed custom-domain envelope (`viaDomain`, suppressed by `handleEmail`)
+  // — the full local part is matched, so `support+T-42@zone` reaches
   // `email/support+[ticket].ts` there too.
   const email = scan.email;
   const emailDir = options.emailDir;
@@ -2892,12 +2893,22 @@ ${envValidateCall}${isrDeploymentStamp}  const userEnv = __filterInternalBinding
   // `message.to` is the bare `<tag>@<domain>` rather than the wire form, and to
   // the generated `__emailHandler`, which routes on the wire address
   // (`__voidPlatformTo`) and strips the `<slug>+` prefix iff a slug is set.
+  //
+  // Except on the relay lane: an envelope carrying `viaDomain` arrived via
+  // POST /email/relay from a customer zone (design doc 0078, "Custom domains
+  // on Cloudflare") and its recipient carries no `<slug>+` prefix — the
+  // dispatcher runs in no-prefix mode (Mode B item 4), so `support+T-42@acme.com`
+  // reaches `email/support+[ticket].ts` with the tag intact. Provisioning
+  // injects `__VOID_PROJECT_SLUG` unconditionally, so the slug must be
+  // suppressed HERE: left applied, the strip would take everything up to the
+  // first `+` and dispatch the bare tag to `_default` or a wrong `[user]`.
   const emailHandler = hasEmail
     ? remotePath
       ? `async function handleEmail(envelope, env, ctx) {
 ${envValidateCall}  if (env.__VOID_REMOTE === "1") env = ${createRemoteEnvCall};
   const userEnv = __filterInternalBindings(env);
-  const __slug = typeof env.__VOID_PROJECT_SLUG === "string" && env.__VOID_PROJECT_SLUG.length > 0 ? env.__VOID_PROJECT_SLUG : undefined;
+  const __relayed = typeof envelope.viaDomain === "string" && envelope.viaDomain.length > 0;
+  const __slug = __relayed ? undefined : (typeof env.__VOID_PROJECT_SLUG === "string" && env.__VOID_PROJECT_SLUG.length > 0 ? env.__VOID_PROJECT_SLUG : undefined);
   const { message, getActions } = __createMessageProxy(envelope, { slug: __slug });
   await __withRawEnv(env, () => withRuntimeEnv(env, () => __emailHandler(message, userEnv, ctx, { slug: __slug })));
   const __actions = getActions();
@@ -2906,7 +2917,8 @@ ${envValidateCall}  if (env.__VOID_REMOTE === "1") env = ${createRemoteEnvCall};
 }`
       : `async function handleEmail(envelope, env, ctx) {
 ${envValidateCall}  const userEnv = __filterInternalBindings(env);
-  const __slug = typeof env.__VOID_PROJECT_SLUG === "string" && env.__VOID_PROJECT_SLUG.length > 0 ? env.__VOID_PROJECT_SLUG : undefined;
+  const __relayed = typeof envelope.viaDomain === "string" && envelope.viaDomain.length > 0;
+  const __slug = __relayed ? undefined : (typeof env.__VOID_PROJECT_SLUG === "string" && env.__VOID_PROJECT_SLUG.length > 0 ? env.__VOID_PROJECT_SLUG : undefined);
   const { message, getActions } = __createMessageProxy(envelope, { slug: __slug });
   await __withRawEnv(env, () => withRuntimeEnv(env, () => __emailHandler(message, userEnv, ctx, { slug: __slug })));
   const __actions = getActions();

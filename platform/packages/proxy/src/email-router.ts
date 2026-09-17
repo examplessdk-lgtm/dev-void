@@ -25,12 +25,16 @@
 import { isReservedEmailSlug } from '@voidcloud/api/reserved-slugs';
 import { EmailMessage } from 'cloudflare:email';
 import { validate as isValidEmailSyntax } from 'email-validator';
+import { dropEmailDomainLease, leaseBearer, leaseEmailDomainCredential } from './email-lease.ts';
 import {
   MAX_MIME_BYTES,
+  readEmailDomainMirror,
   readMimeFromAddrSpec,
   readSenderDomain,
+  readSendRawAddressList,
   recordInboundDelivery,
 } from './email.ts';
+import type { SendRawResult } from './email.ts';
 import type { Env } from './types.ts';
 
 // Built via new RegExp to dodge oxlint no-control-regex rule.
@@ -142,7 +146,18 @@ interface EmailEnvelope {
   headers: Record<string, string>;
   raw: Uint8Array;
   rawSize: number;
+  /**
+   * The registered custom domain this message arrived on, set only on the
+   * relay lane (`/email/relay` — design doc 0078, "Custom domains on
+   * Cloudflare"). Undefined on the platform mail zone. The framework's
+   * dispatcher runs in no-prefix mode for a relayed envelope (Mode B item
+   * 4): the recipient carries no `<slug>+` prefix to strip.
+   */
+  viaDomain?: string;
 }
+
+/** Exported for the relay lane (`email-relay.ts`), which builds its own. */
+export type { EmailEnvelope };
 
 /** Mirrors `void/email`'s EmailAction. */
 type EmailAction =
@@ -453,15 +468,32 @@ function forwardHeadersWithinBounds(headers: unknown): headers is Record<string,
  * that must keep routing.
  */
 interface ReplySenderPin {
-  /** Routed project slug, already lowercased by `routeInbound`. */
+  /** Routed project slug, already lowercased by the caller. */
   slug: string;
   /** Domain of the received recipient, already lowercased. */
   domain: string;
+  /**
+   * The RECEIVING project. The pin's second accepted shape (design doc
+   * 0078, "What changes in the existing rules") — any address on a domain
+   * registered to the project — is checked against the `email-domain:` KV
+   * mirror, which must map the from-domain to this project.
+   */
+  projectId: string | undefined;
+  /** ROUTING KV for the mirror lookup. */
+  kv: KVNamespace;
+  /**
+   * Per-message memo of fromDomain → registered-to-the-receiving-project,
+   * so a burst of replies from one custom domain costs one KV read.
+   */
+  registeredDomains: Map<string, boolean>;
 }
 
 /**
  * True when `from` is a sender this project is allowed to speak as:
- * `<slug>@<domain>` or `<slug>+<tag>@<domain>`, case-insensitively.
+ * `<slug>@<domain>` or `<slug>+<tag>@<domain>` on the received domain,
+ * case-insensitively — or any address on a custom domain whose
+ * `email-domain:<domain>` mirror is `active` and maps to the receiving
+ * project (the registered-domain shape).
  *
  * A BARE `<tag>@<domain>` is refused. The framework strips the `<slug>+`
  * prefix from `message.to` before a handler sees it, so a handler that
@@ -474,7 +506,7 @@ interface ReplySenderPin {
  * both keep working, and the un-stripped recipient stays available to
  * handlers on `message.__voidPlatformTo`.
  */
-function isPermittedReplySender(from: string, pin: ReplySenderPin): boolean {
+async function isPermittedReplySender(from: string, pin: ReplySenderPin): Promise<boolean> {
   // The address is forwarded VERBATIM to `EmailMessage`, so the comparison
   // has to run on bytes that cannot change under case folding. U+212A
   // KELVIN SIGN lowercases to 'k' and U+0130 to 'i', so a non-ASCII
@@ -488,14 +520,44 @@ function isPermittedReplySender(from: string, pin: ReplySenderPin): boolean {
   if (at <= 0) {
     return false;
   }
-  if (lower.slice(at + 1) !== pin.domain) {
+  const fromDomain = lower.slice(at + 1);
+  if (fromDomain === pin.domain) {
+    // Split on the first '+' exactly as the recipient is split in
+    // `routeInbound`, so the sender's slug is read the same way the routed
+    // slug was.
+    const localPrefix = lower.slice(0, at).split('+')[0] ?? '';
+    if (localPrefix.length > 0 && localPrefix === pin.slug) {
+      return true;
+    }
+    // Fall through: the received domain may itself be registered to the
+    // receiving project — on the relay lane it always is — in which case
+    // any address on it is a permitted sender.
+  }
+  return isRegisteredDomainSender(fromDomain, pin);
+}
+
+/**
+ * The registered-domain shape: true when the `email-domain:<fromDomain>`
+ * mirror is `active` and names the receiving project. Fails closed on a KV
+ * error — `validateActions` has no try/catch, and a throw here would
+ * escape `routeInbound` and retry the delivery instead of dropping the
+ * reply.
+ */
+async function isRegisteredDomainSender(fromDomain: string, pin: ReplySenderPin): Promise<boolean> {
+  if (!pin.projectId) {
     return false;
   }
-  // Split on the first '+' exactly as the recipient is split in
-  // `routeInbound`, so the sender's slug is read the same way the routed
-  // slug was.
-  const localPrefix = lower.slice(0, at).split('+')[0] ?? '';
-  return localPrefix.length > 0 && localPrefix === pin.slug;
+  const cached = pin.registeredDomains.get(fromDomain);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const mirror = await readEmailDomainMirror(pin.kv, fromDomain, { cacheTtl: 60 }).catch(
+    () => null,
+  );
+  const registered =
+    mirror !== null && mirror.projectId === pin.projectId && mirror.status === 'active';
+  pin.registeredDomains.set(fromDomain, registered);
+  return registered;
 }
 
 function readCounter(raw: string | null): number {
@@ -861,12 +923,334 @@ export async function routeInbound(
     return;
   }
 
-  await enactActions(env, message, actions, gate, { slug, domain: receivedDomain });
+  await enactActions(env, message, actions, gate, {
+    slug,
+    domain: receivedDomain,
+    projectId: routing.projectId,
+    kv: env.ROUTING,
+    registeredDomains: new Map(),
+  });
 
   // Async log to the metering pipeline. Best-effort. Logged after every
   // dispatch — including reject-only outcomes — so operators have a
   // complete audit trail.
   ctx.waitUntil(logRecv(env, routing.projectId, message, actions));
+}
+
+/**
+ * The outcome the `/email/relay` HTTP handler maps onto its response. The
+ * relay worker answers any non-2xx with `message.setReject`, so every
+ * refusal below — unrouteable project, suspension, dispatch failure,
+ * handler reject — collapses to this one bit; the specific reason stays in
+ * proxy logs and never crosses back to the MTA.
+ */
+export interface RelayRouteOutcome {
+  reject: boolean;
+}
+
+/**
+ * The relay lane of inbound routing (design doc 0078, "Custom domains on
+ * Cloudflare"). The message arrived via POST /email/relay from the relay
+ * worker in the CUSTOMER's account — the index.ts auth branch has already
+ * proved the relay secret against the domain's mirror and resolved the
+ * project — so this is the second half of `routeInbound`: the same
+ * suspension gates, dispatch limits, envelope dispatch, action enaction and
+ * delivery log, but keyed by the mirror's project instead of a slug parsed
+ * from the recipient, and enacted on a synthetic message instead of a real
+ * `ForwardableEmailMessage`.
+ *
+ * The framework dispatcher runs in no-prefix mode for the relayed envelope
+ * (the recipient carries no `<slug>+` prefix; see `viaDomain` on the
+ * envelope).
+ */
+export async function routeRelayed(
+  env: Env,
+  ctx: ExecutionContext,
+  input: { projectId: string; domain: string; envelope: EmailEnvelope },
+): Promise<RelayRouteOutcome> {
+  const { projectId, domain, envelope } = input;
+
+  // The platform lane resolves routing by the slug parsed from the
+  // recipient; a relayed recipient carries no slug, so resolve the
+  // project's slug via the `email-slug:<projectId>` mirror the api writes
+  // on project create, then read the same routing blob by slug.
+  const slug = await env.ROUTING.get(`email-slug:${projectId}`);
+  if (!slug) {
+    console.error(`[email-relay] no slug mirror for project ${sanitize(projectId, 64)}`);
+    return { reject: true };
+  }
+  const routingJson = await env.ROUTING.get(slug);
+  if (!routingJson) {
+    console.error(
+      `[email-relay] no routing entry for slug ${sanitize(slug, 64)} (project ${sanitize(projectId, 64)})`,
+    );
+    return { reject: true };
+  }
+  let parsedRouting: unknown;
+  try {
+    parsedRouting = JSON.parse(routingJson);
+  } catch {
+    console.error(`[email-relay] routing data corrupt for slug ${sanitize(slug, 64)}`);
+    return { reject: true };
+  }
+  // Same corrupt-data rule as the platform lane: every writer of this blob
+  // emits a `JSON.stringify`d object, so a non-object parse has no
+  // legitimate writer.
+  if (typeof parsedRouting !== 'object' || parsedRouting === null) {
+    console.error(`[email-relay] routing data corrupt for slug ${sanitize(slug, 64)}`);
+    return { reject: true };
+  }
+  const routing = parsedRouting as RoutingEntry;
+
+  // The mirror's projectId is the authenticated identity (the relay secret
+  // proved it); the routing blob's is data. A disagreement is corrupt data
+  // — fail closed rather than dispatch one project's mail into another's
+  // worker.
+  if (routing.projectId !== projectId) {
+    console.error(
+      `[email-relay] routing blob names another project for slug ${sanitize(slug, 64)}`,
+    );
+    return { reject: true };
+  }
+
+  // Platform-wide suspension, then the email-only kill-switch — the same
+  // gates as the platform lane, so a suspended project loses relayed
+  // inbound at the same moment it loses everything else.
+  if (routing.suspended) {
+    console.error(`[email-relay] project ${sanitize(projectId, 64)} is suspended`);
+    return { reject: true };
+  }
+  const workerName = routing.workerName;
+  if (!workerName || typeof workerName !== 'string') {
+    // Static-only deploys have no worker to dispatch to; a truthy
+    // non-string is KV-corrupt data. Same refusal either way.
+    console.error(`[email-relay] project ${sanitize(projectId, 64)} has no worker (static deploy)`);
+    return { reject: true };
+  }
+  // No cacheTtl, as on the platform lane: an abuse-response control where
+  // convergence latency is the whole point.
+  if (await env.ROUTING.get(`email-suspended:${projectId}`)) {
+    console.error(`[email-relay] project ${sanitize(projectId, 64)} inbound is suspended`);
+    return { reject: true };
+  }
+
+  let stub: EmailEntrypointStub;
+  try {
+    // Same per-project dispatch limits pass-through as the platform lane.
+    stub = (routing.limits
+      ? env.DISPATCH.get(workerName, {}, { limits: routing.limits })
+      : env.DISPATCH.get(workerName)) as unknown as EmailEntrypointStub;
+  } catch (e) {
+    console.error(`[email-relay] DISPATCH.get(${sanitize(workerName, 320)}) failed:`, e);
+    return { reject: true };
+  }
+
+  // Built before dispatch so the dispatch-failure paths can log the
+  // delivery against it, exactly as `routeInbound` logs against the real
+  // message. The domain + authenticated project id key its REST send path
+  // (the customer account's send_raw with the domain's leased credential).
+  const relayed = createRelayedMessage(env, envelope, { domain, projectId });
+
+  // Same rule as the platform lane: the forward/reply actions the handler
+  // records run through the per-project allowlist + quota gate.
+  let gate: OutboundGate;
+  try {
+    gate = await loadOutboundGate(env, projectId);
+  } catch (e) {
+    console.error(`[email-relay] failed to load outbound gate for ${sanitize(projectId, 64)}:`, e);
+    gate = {
+      projectId,
+      allowlist: new Set(),
+      burstKey: '',
+      burstLimit: 0,
+      burstCurrent: 0,
+      monthKey: '',
+      monthLimit: 0,
+      monthCurrent: 0,
+      quotaExhausted: true,
+    };
+  }
+
+  let actions: Array<EmailAction>;
+  try {
+    // The RPC materialization note on the platform lane's dispatch applies
+    // unchanged here.
+    const result = await stub.email!(envelope);
+    if (result === undefined || result === null) {
+      actions = [];
+    } else if (Array.isArray(result)) {
+      actions = result;
+    } else {
+      console.warn(
+        `[email-relay] ${sanitize(workerName, 320)} email handler returned non-array; treating as no-op`,
+      );
+      actions = [];
+    }
+  } catch (e) {
+    // Same bounded classification as the platform lane.
+    const msg = e instanceof Error ? e.message.slice(0, 320) : describeUntrusted(e, 320);
+    if (RPC_METHOD_MISSING.test(msg)) {
+      console.error(
+        `[email-relay] ${sanitize(workerName, 320)} has no .email() (needs redeploy):`,
+        sanitize(msg, 320),
+      );
+      ctx.waitUntil(
+        logRecv(env, projectId, relayed.message, [{ type: 'reject', reason: 'no-handler' }]),
+      );
+      return { reject: true };
+    }
+    console.error(`[email-relay] dispatch to ${sanitize(workerName, 320)} failed:`, msg);
+    ctx.waitUntil(
+      logRecv(env, projectId, relayed.message, [{ type: 'reject', reason: 'dispatch-error' }]),
+    );
+    return { reject: true };
+  }
+
+  await enactActions(env, relayed.message, actions, gate, {
+    slug: slug.toLowerCase(),
+    domain,
+    projectId,
+    kv: env.ROUTING,
+    registeredDomains: new Map(),
+  });
+
+  // Same audit trail as the platform lane — including reject-only outcomes.
+  ctx.waitUntil(logRecv(env, projectId, relayed.message, actions));
+  return { reject: relayed.rejectedReason() !== null };
+}
+
+/**
+ * A `ForwardableEmailMessage` stand-in for a relayed message. The relay
+ * lane holds no CF email event — the message arrived over HTTP — so the
+ * methods enact differently than on the platform lane:
+ *
+ * - `setReject` is recorded; the `/email/relay` handler answers non-2xx
+ *   and the relay worker rejects at the SMTP layer with a generic reason.
+ * - `forward` sends the original MIME bytes, and `__voidRelayReply` (called
+ *   by `enactSanitized` in place of a native `message.reply`) sends the
+ *   recorded reply bytes — both through the CUSTOMER's Cloudflare account
+ *   as REST `send_raw` bearing the domain's leased credential (design doc
+ *   0078, "Inbound identity": the reply leaves from the customer-domain
+ *   address that received the message, over the REST path). The platform's
+ *   own `send_email` binding cannot carry either: Email Service rejects a
+ *   sender outside the sending account's verified zones, which a
+ *   customer-domain reply — and a forward from the original external
+ *   sender — both are under the PLATFORM's account, so they failed there
+ *   after `/email/relay` had already answered 2xx. A forward's header
+ *   overrides cannot be merged into the raw MIME here and are dropped.
+ *   Every action has already passed `enactActions`' per-project gates.
+ */
+function createRelayedMessage(
+  env: Env,
+  envelope: EmailEnvelope,
+  relay: { domain: string; projectId: string },
+): { message: ForwardableEmailMessage; rejectedReason: () => string | null } {
+  let reason: string | null = null;
+
+  // One REST send for both action kinds. Throws on any failure — the enact
+  // loop's per-action try/catch logs it and the message stays accepted,
+  // exactly as a failed native forward/reply does on the platform lane.
+  async function sendRaw(from: string, to: string, raw: Uint8Array): Promise<void> {
+    // Re-read the mirror at send time (uncached, like the relay auth
+    // branch): the account id comes from it, and a row revoked or
+    // re-registered to another project between the auth and this send must
+    // not push mail into the account the mirror named then.
+    const mirror = await readEmailDomainMirror(env.ROUTING, relay.domain);
+    if (!mirror || mirror.projectId !== relay.projectId || mirror.status !== 'active') {
+      throw new Error('email domain registration is no longer active');
+    }
+    if (!mirror.accountId) {
+      throw new Error('email domain registration is incomplete');
+    }
+    const lease = await leaseEmailDomainCredential(env, relay.domain);
+    if (!lease) {
+      throw new Error('could not lease the domain credential');
+    }
+    // send_raw carries the MIME as a JSON string. Decode FATALLY, as the
+    // outbound fork does: relayed mail is remote-sender bytes, and a lenient
+    // decode would silently alter a non-UTF-8 body.
+    const mimeMessage = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(raw);
+    let res: Response;
+    try {
+      res = await fetch(
+        `https://api.cloudflare.com/client/v4/accounts/${mirror.accountId}/email/sending/send_raw`,
+        {
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${leaseBearer(lease)}`,
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({ from, recipients: [to], mime_message: mimeMessage }),
+        },
+      );
+    } catch {
+      throw new Error('email sending request failed');
+    }
+    // A refused credential evicts the cached lease so the next action
+    // re-leases. CF's error body is never echoed or logged — it is not ours
+    // to surface.
+    if (res.status === 401 || res.status === 403) {
+      dropEmailDomainLease(relay.domain);
+    }
+    if (!res.ok) {
+      throw new Error(`email sending API returned ${res.status}`);
+    }
+    let data: unknown = null;
+    try {
+      data = await res.json();
+    } catch {
+      data = null;
+    }
+    const success =
+      typeof data === 'object' && data !== null && (data as { success?: unknown }).success === true;
+    if (!success) {
+      throw new Error('email sending API refused the message');
+    }
+    // success:true with the one recipient on a failure list is NOT sent —
+    // the same per-recipient read the outbound fork makes.
+    const result = (data as { result?: SendRawResult | null }).result;
+    const target = to.toLowerCase();
+    if (readSendRawAddressList(result?.permanent_bounces).has(target)) {
+      throw new Error('recipient permanently bounced');
+    }
+    if (readSendRawAddressList(result?.suppressed_recipients).has(target)) {
+      throw new Error('recipient is on the suppression list');
+    }
+  }
+
+  const message = {
+    from: envelope.from,
+    to: envelope.to,
+    rawSize: envelope.rawSize,
+    headers: new Headers(envelope.headers),
+    raw: envelopeRawStream(envelope.raw),
+    setReject(r: string) {
+      reason = r;
+    },
+    async forward(to: string, _headers?: Headers) {
+      await sendRaw(envelope.from, to, envelope.raw);
+    },
+    // The reply channel `enactSanitized` prefers when present. A native
+    // reply needs both the CF email event this lane never had and a genuine
+    // EmailMessage — whose class exposes no body accessor, so the recorded
+    // reply bytes could not cross it anyway; they arrive on the action.
+    async __voidRelayReply(from: string, to: string, raw: Uint8Array) {
+      await sendRaw(from, to, raw);
+    },
+  };
+  return {
+    message: message as unknown as ForwardableEmailMessage,
+    rejectedReason: () => reason,
+  };
+}
+
+function envelopeRawStream(bytes: Uint8Array): ReadableStream<Uint8Array> {
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(bytes);
+      controller.close();
+    },
+  });
 }
 
 /**
@@ -1076,10 +1460,10 @@ type SanitizedAction =
  *
  * Stops walking at the first `reject` (terminal in CF's runtime).
  */
-function validateActions(
+async function validateActions(
   actions: Array<EmailAction>,
   replySender: ReplySenderPin,
-): Array<SanitizedAction> | null {
+): Promise<Array<SanitizedAction> | null> {
   // Before the loop allocates anything. `out` is not even built yet: the
   // per-entry work below (address regex, `new Headers()`, `sanitize()` on
   // every drop log) is what an over-long list is buying, and it is bought in
@@ -1151,7 +1535,7 @@ function validateActions(
       // `checkOutboundGate`; this gates who we are allowed to BE. Dropped
       // here rather than at enaction so an impersonating reply never
       // reaches the quota counters.
-      if (!isPermittedReplySender(action.from, replySender)) {
+      if (!(await isPermittedReplySender(action.from, replySender))) {
         console.error(
           `[email-router] reply dropped: sender not owned by project "${sanitize(replySender.slug, 64)}" (from=${logAddress(action.from)})`,
         );
@@ -1248,7 +1632,7 @@ async function enactActions(
   gate: OutboundGate,
   replySender: ReplySenderPin,
 ): Promise<void> {
-  const sanitized = validateActions(actions, replySender);
+  const sanitized = await validateActions(actions, replySender);
   if (sanitized === null) {
     // Header construction failed mid-validation — drop the whole list
     // (already logged in validateActions). Don't even attempt to commit
@@ -1296,17 +1680,33 @@ async function enactSanitized(
         continue;
       }
       try {
-        // EmailMessage's `raw` parameter is `string | ReadableStream`;
-        // wrap the action's bytes as a one-shot stream rather than
-        // decoding to UTF-8 (which would corrupt non-text MIME parts).
-        const stream = new ReadableStream<Uint8Array>({
-          start(controller) {
-            controller.enqueue(action.raw);
-            controller.close();
-          },
-        });
-        const reply = new EmailMessage(action.from, action.to, stream);
-        await message.reply(reply as never);
+        // The relay lane's stand-in holds no CF email event, so a reply is
+        // a fresh REST send of the recorded bytes through the customer
+        // account (send_raw with the domain's leased credential — design
+        // doc 0078, "Inbound identity"), not a native reply on a real
+        // message. The stand-in advertises that channel as
+        // `__voidRelayReply`; a native EmailMessage could not carry the
+        // bytes anyway (no public body accessor).
+        const relayReply = (
+          message as unknown as {
+            __voidRelayReply?: (from: string, to: string, raw: Uint8Array) => Promise<void>;
+          }
+        ).__voidRelayReply;
+        if (relayReply !== undefined) {
+          await relayReply(action.from, action.to, action.raw);
+        } else {
+          // EmailMessage's `raw` parameter is `string | ReadableStream`;
+          // wrap the action's bytes as a one-shot stream rather than
+          // decoding to UTF-8 (which would corrupt non-text MIME parts).
+          const stream = new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(action.raw);
+              controller.close();
+            },
+          });
+          const reply = new EmailMessage(action.from, action.to, stream);
+          await message.reply(reply as never);
+        }
         gate.burstCurrent += 1;
         gate.monthCurrent += 1;
         counterDirty = true;

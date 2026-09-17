@@ -1,3 +1,4 @@
+import { eq } from 'drizzle-orm';
 import {
   afterAll,
   afterEach,
@@ -9,7 +10,15 @@ import {
   vi,
 } from 'vite-plus/test';
 import { createEmailDestination, getEmailDestinationsByProjectId } from '../../src/db.ts';
+import {
+  encryptEmailDomainRelaySecret,
+  encryptEmailDomainToken,
+  hashEmailRelaySecret,
+  writeEmailDomainMirror,
+  type EmailDomain,
+} from '../../src/email/domains.ts';
 import { app } from '../../src/index.ts';
+import { emailDomains } from '../../src/schema.ts';
 import {
   setupEnv,
   teardownEnv,
@@ -509,5 +518,416 @@ describe('POST /admin/email/:projectId/destinations/:destId/delete', () => {
 
     expect(res.status).toBe(404);
     expect(cfCalls).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Custom email domains (design doc 0078). The admin page lists the project's
+// email_domains rows; the revoke route clears the ROUTING mirror, best-effort
+// deletes the relay + catch-all in the customer's account via the relay
+// engine, then drops the row. All credential-shaped strings are dummy
+// stand-ins, and no assertion may contain one — the page and the error
+// bodies must never render them.
+// ---------------------------------------------------------------------------
+
+// Dummy stand-ins — never real token/secret material.
+const CUSTOMER_TOKEN = 'cf-customer-token-dummy';
+const GRANT_REFRESH_TOKEN = 'cf-grant-refresh-dummy';
+const RELAY_SECRET = 'admin-relay-secret-dummy';
+
+/**
+ * Seed an email_domains row directly (no orchestration), always with its
+ * ROUTING mirror — the revoke's first job is clearing that key. `deployed:
+ * false` seeds a row whose setup failed before the relay deploy, so there is
+ * nothing in the customer account to clean up. Domains must be unique per
+ * test: ROUTING is file-scoped here and the mirror key is domain-scoped.
+ */
+async function seedEmailDomain(
+  projectId: string,
+  domain: string,
+  options: {
+    status?: EmailDomain['status'];
+    deployed?: boolean;
+    credentialKind?: EmailDomain['credential_kind'];
+  } = {},
+): Promise<EmailDomain> {
+  const deployed = options.deployed ?? true;
+  const credentialKind = options.credentialKind ?? 'api_token';
+  // The stored credential is the pasted API token, or the grant's refresh
+  // token on the oauth_grant path.
+  const tokenEnc = await encryptEmailDomainToken(
+    env,
+    projectId,
+    domain,
+    credentialKind === 'oauth_grant' ? GRANT_REFRESH_TOKEN : CUSTOMER_TOKEN,
+  );
+  const relayEnc = await encryptEmailDomainRelaySecret(env, projectId, domain, RELAY_SECRET);
+  await env.db.insert(emailDomains).values({
+    id: `edom_admin_${domain.replace(/[^a-z0-9]/g, '')}`,
+    project_id: projectId,
+    domain,
+    zone_id: deployed ? 'zone_customer_1' : null,
+    account_id: deployed ? 'acct_customer_1' : null,
+    mode: deployed ? 'apex' : null,
+    status: options.status ?? 'active',
+    credential_kind: credentialKind,
+    token_ciphertext: tokenEnc.ciphertext,
+    token_iv: tokenEnc.iv,
+    token_key_version: tokenEnc.keyVersion,
+    relay_ciphertext: relayEnc.ciphertext,
+    relay_iv: relayEnc.iv,
+    relay_key_version: relayEnc.keyVersion,
+    relay_worker_name: deployed ? 'void-email-relay' : null,
+    relay_version: deployed ? 1 : null,
+    token_id: deployed ? 'tok_dummy' : null,
+    token_expires_on: null,
+    setup_state: deployed ? null : { failed_step: 'zone_lookup' },
+  });
+  const row = (await domainRow(projectId, domain))!;
+  await writeEmailDomainMirror(env.ROUTING, row, await hashEmailRelaySecret(RELAY_SECRET));
+  return row;
+}
+
+async function domainRow(projectId: string, domain: string): Promise<EmailDomain | undefined> {
+  const rows = await env.db
+    .select()
+    .from(emailDomains)
+    .where(eq(emailDomains.project_id, projectId));
+  return rows.find((row) => row.domain === domain);
+}
+
+/**
+ * Record the customer-account CF calls the relay engine makes (method, url,
+ * parsed JSON body) and answer each with a success envelope. The remove path
+ * DELETEs the relay script and resets the catch-all — but only after an
+ * ownership read, so the catch-all GET answers with a rule naming this
+ * row's relay. The OAuth grant revoke (dash.cloudflare.com — NOT
+ * api.cloudflare.com) is tagged `oauthRevoke` so a test can assert it fired.
+ */
+function recordCustomerCfCalls(): Array<{
+  method: string;
+  url: string;
+  body?: unknown;
+  tag?: 'oauthRevoke';
+}> {
+  const calls: Array<{ method: string; url: string; body?: unknown; tag?: 'oauthRevoke' }> = [];
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const url = typeof input === 'string' ? input : (input as Request).url;
+    let body: unknown;
+    if (typeof init?.body === 'string') {
+      try {
+        body = JSON.parse(init.body) as unknown;
+      } catch {
+        body = init.body;
+      }
+    }
+    const method = init?.method ?? 'GET';
+    calls.push({
+      method,
+      url,
+      body,
+      ...(url.startsWith('https://dash.cloudflare.com/oauth2/revoke')
+        ? { tag: 'oauthRevoke' as const }
+        : {}),
+    });
+    if (method === 'GET' && url.includes('/email/routing/rules/catch_all')) {
+      return Response.json({
+        success: true,
+        errors: [],
+        result: {
+          enabled: true,
+          matchers: [{ type: 'all' }],
+          actions: [{ type: 'worker', value: ['void-email-relay'] }],
+        },
+      });
+    }
+    return Response.json({ success: true, errors: [], result: {} });
+  });
+  return calls;
+}
+
+/** Every CF call fails — the revoke must still complete (cleanup is best-effort). */
+function failCustomerCfCalls(): Array<string> {
+  const calls: Array<string> = [];
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const url = typeof input === 'string' ? input : (input as Request).url;
+    calls.push(`${init?.method ?? 'GET'} ${url}`);
+    return Response.json({ success: false, errors: [{ message: 'boom' }] }, { status: 500 });
+  });
+  return calls;
+}
+
+/** Fail one domain's mirror-key delete, leaving every other KV op intact. */
+function breakMirrorDelete(domain: string): void {
+  const key = `email-domain:${domain}`;
+  const originalDelete = env.ROUTING.delete.bind(env.ROUTING);
+  vi.spyOn(env.ROUTING, 'delete').mockImplementation((async (k: string) => {
+    if (k === key) {
+      throw new Error('forced mirror KV failure for test');
+    }
+    return originalDelete(k as never);
+  }) as typeof env.ROUTING.delete);
+}
+
+describe('GET /admin/email/:projectId — custom domains', () => {
+  test('renders domain rows with relay and token metadata, and never secret material', async () => {
+    const { adminJwt, projectId } = await seedAdminAndProject();
+    const row = await seedEmailDomain(projectId, 'acme-admin.com');
+
+    const res = await get(`/admin/email/${projectId}`, adminJwt);
+
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain('Custom domains (1)');
+    expect(html).toContain('acme-admin.com');
+    expect(html).toContain('apex');
+    expect(html).toContain('void-email-relay');
+    expect(html).toContain('tok_dummy');
+    expect(html).toContain(`/admin/email/${projectId}/domains/acme-admin.com/revoke`);
+    // Neither ciphertext triple nor any plaintext credential/relay secret
+    // ever renders — the page carries metadata only.
+    expect(html).not.toContain(CUSTOMER_TOKEN);
+    expect(html).not.toContain(RELAY_SECRET);
+    expect(html).not.toContain(row.token_ciphertext);
+    expect(html).not.toContain(row.relay_ciphertext);
+  });
+
+  test('shows the empty state when the project has no custom domains', async () => {
+    const { adminJwt, projectId } = await seedAdminAndProject();
+
+    const html = await (await get(`/admin/email/${projectId}`, adminJwt)).text();
+
+    expect(html).toContain('Custom domains (0)');
+    expect(html).toContain('No custom domains.');
+  });
+});
+
+describe('POST /admin/email/:projectId/domains/:domain/revoke', () => {
+  test('clears the mirror first, then deletes CF state best-effort and the row', async () => {
+    const { adminJwt, projectId, slug } = await seedAdminAndProject();
+    await seedEmailDomain(projectId, 'acme-revoke.com');
+    const cfCalls = recordCustomerCfCalls();
+
+    // Ordering pin, same contract as the destination tighten above: when the
+    // mirror key is deleted the row must still exist — it is what a retry
+    // re-runs from if the request dies after the clear.
+    let rowPresentAtMirrorClear: boolean | undefined;
+    const originalDelete = env.ROUTING.delete.bind(env.ROUTING);
+    vi.spyOn(env.ROUTING, 'delete').mockImplementation((async (k: string) => {
+      await originalDelete(k as never);
+      if (k === 'email-domain:acme-revoke.com') {
+        rowPresentAtMirrorClear = (await domainRow(projectId, 'acme-revoke.com')) !== undefined;
+      }
+    }) as typeof env.ROUTING.delete);
+
+    const res = await post(`/admin/email/${projectId}/domains/acme-revoke.com/revoke`, adminJwt, {
+      confirm: slug,
+    });
+
+    expect(res.status).toBe(302);
+    expect(res.headers.get('Location')).toBe(`/admin/email/${projectId}`);
+    expect(rowPresentAtMirrorClear).toBe(true);
+    // Contract 7 remove shape: the catch-all ownership read, the
+    // conditional reset (the read shows it still naming our relay), then
+    // the relay DELETE — the enabled rule never outlives its worker.
+    expect(cfCalls.map((call) => `${call.method} ${call.url}`)).toEqual([
+      'GET https://api.cloudflare.com/client/v4/zones/zone_customer_1/email/routing/rules/catch_all',
+      'PUT https://api.cloudflare.com/client/v4/zones/zone_customer_1/email/routing/rules/catch_all',
+      'DELETE https://api.cloudflare.com/client/v4/accounts/acct_customer_1/workers/scripts/void-email-relay',
+    ]);
+    expect(cfCalls[1]?.body).toEqual({
+      matchers: [{ type: 'all' }],
+      actions: [{ type: 'drop' }],
+      enabled: false,
+    });
+    expect(await env.ROUTING.get('email-domain:acme-revoke.com')).toBeNull();
+    expect(await domainRow(projectId, 'acme-revoke.com')).toBeUndefined();
+  });
+
+  test('refuses without the typed slug and leaves everything intact', async () => {
+    const { adminJwt, projectId } = await seedAdminAndProject();
+    await seedEmailDomain(projectId, 'acme-noconfirm.com');
+    const cfCalls = recordCustomerCfCalls();
+
+    const res = await post(
+      `/admin/email/${projectId}/domains/acme-noconfirm.com/revoke`,
+      adminJwt,
+      {},
+    );
+
+    expect(res.status).toBe(400);
+    expect(await domainRow(projectId, 'acme-noconfirm.com')).toBeDefined();
+    expect(await env.ROUTING.get('email-domain:acme-noconfirm.com')).not.toBeNull();
+    expect(cfCalls).toEqual([]);
+  });
+
+  test('refuses when the typed slug is wrong', async () => {
+    const { adminJwt, projectId } = await seedAdminAndProject();
+    await seedEmailDomain(projectId, 'acme-wrongslug.com');
+    const cfCalls = recordCustomerCfCalls();
+
+    const res = await post(
+      `/admin/email/${projectId}/domains/acme-wrongslug.com/revoke`,
+      adminJwt,
+      { confirm: 'not-the-slug' },
+    );
+
+    expect(res.status).toBe(400);
+    expect(await domainRow(projectId, 'acme-wrongslug.com')).toBeDefined();
+    expect(await env.ROUTING.get('email-domain:acme-wrongslug.com')).not.toBeNull();
+    expect(cfCalls).toEqual([]);
+  });
+
+  test('404s for a domain row that belongs to another project', async () => {
+    const { adminJwt, projectId, slug } = await seedAdminAndProject();
+    const sibling = await createTestProject(env.db, (await createTestUser(env.db)).id);
+    await seedEmailDomain(sibling.id, 'acme-elsewhere.com');
+    const cfCalls = recordCustomerCfCalls();
+
+    const res = await post(
+      `/admin/email/${projectId}/domains/acme-elsewhere.com/revoke`,
+      adminJwt,
+      { confirm: slug },
+    );
+
+    expect(res.status).toBe(404);
+    expect(await domainRow(sibling.id, 'acme-elsewhere.com')).toBeDefined();
+    expect(await env.ROUTING.get('email-domain:acme-elsewhere.com')).not.toBeNull();
+    expect(cfCalls).toEqual([]);
+  });
+
+  test('keeps the row and runs nothing destructive when the mirror clear fails', async () => {
+    const { adminJwt, projectId, slug } = await seedAdminAndProject();
+    await seedEmailDomain(projectId, 'acme-kvfail.com');
+    breakMirrorDelete('acme-kvfail.com');
+    const cfCalls = recordCustomerCfCalls();
+
+    const res = await post(`/admin/email/${projectId}/domains/acme-kvfail.com/revoke`, adminJwt, {
+      confirm: slug,
+    });
+
+    // Tighten-before-delete: the failed clear is the ONLY thing that ran, so
+    // the operator can just click again — dropping the row first and
+    // swallowing the KV error would strand the domain working in the proxy
+    // with no row left to revoke.
+    expect(res.status).toBe(503);
+    expect(await domainRow(projectId, 'acme-kvfail.com')).toBeDefined();
+    expect(await env.ROUTING.get('email-domain:acme-kvfail.com')).not.toBeNull();
+    expect(cfCalls).toEqual([]);
+  });
+
+  test('still clears the mirror and row when the CF cleanup fails', async () => {
+    const { adminJwt, projectId, slug } = await seedAdminAndProject();
+    await seedEmailDomain(projectId, 'acme-cffail.com');
+    failCustomerCfCalls();
+
+    const res = await post(`/admin/email/${projectId}/domains/acme-cffail.com/revoke`, adminJwt, {
+      confirm: slug,
+    });
+
+    // Best-effort CF cleanup: a stranded relay is inert without the mirror
+    // entry, so the revoke completes and the log line carries the trace.
+    expect(res.status).toBe(302);
+    expect(await domainRow(projectId, 'acme-cffail.com')).toBeUndefined();
+    expect(await env.ROUTING.get('email-domain:acme-cffail.com')).toBeNull();
+  });
+
+  test('revokes a row whose relay never deployed without any CF call', async () => {
+    const { adminJwt, projectId, slug } = await seedAdminAndProject();
+    await seedEmailDomain(projectId, 'acme-failed.com', { status: 'failed', deployed: false });
+    const cfCalls = recordCustomerCfCalls();
+
+    const res = await post(`/admin/email/${projectId}/domains/acme-failed.com/revoke`, adminJwt, {
+      confirm: slug,
+    });
+
+    expect(res.status).toBe(302);
+    expect(cfCalls).toEqual([]);
+    expect(await domainRow(projectId, 'acme-failed.com')).toBeUndefined();
+    expect(await env.ROUTING.get('email-domain:acme-failed.com')).toBeNull();
+  });
+
+  test('still revokes when the stored credential can no longer be decrypted', async () => {
+    const { adminJwt, projectId, slug } = await seedAdminAndProject();
+    const row = await seedEmailDomain(projectId, 'acme-badkey.com');
+    // Re-encrypt under a different domain's AAD: the revoke's decrypt fails
+    // the GCM tag check, as a rotated-away key version would. The row must
+    // still be revocable — only the CF cleanup is skipped.
+    const foreign = await encryptEmailDomainToken(env, projectId, 'other.com', CUSTOMER_TOKEN);
+    await env.db
+      .update(emailDomains)
+      .set({
+        token_ciphertext: foreign.ciphertext,
+        token_iv: foreign.iv,
+        token_key_version: foreign.keyVersion,
+      })
+      .where(eq(emailDomains.id, row.id));
+    const cfCalls = recordCustomerCfCalls();
+
+    const res = await post(`/admin/email/${projectId}/domains/acme-badkey.com/revoke`, adminJwt, {
+      confirm: slug,
+    });
+
+    expect(res.status).toBe(302);
+    expect(cfCalls).toEqual([]);
+    expect(await domainRow(projectId, 'acme-badkey.com')).toBeUndefined();
+    expect(await env.ROUTING.get('email-domain:acme-badkey.com')).toBeNull();
+  });
+});
+
+describe('POST /admin/email/:projectId/domains/:domain/revoke-grant', () => {
+  test('revokes the grant at Cloudflare and flips the row to token_revoked', async () => {
+    const { adminJwt, projectId } = await seedAdminAndProject();
+    await seedEmailDomain(projectId, 'acme-grant.com', { credentialKind: 'oauth_grant' });
+    const cfCalls = recordCustomerCfCalls();
+
+    const res = await post(
+      `/admin/email/${projectId}/domains/acme-grant.com/revoke-grant`,
+      adminJwt,
+    );
+
+    expect(res.status).toBe(302);
+    expect(res.headers.get('Location')).toBe(`/admin/email/${projectId}`);
+    // Exactly one RFC 7009 revocation against dash.cloudflare.com, and no
+    // relay-engine cleanup — the row (and its relay) stay in place.
+    expect(cfCalls.filter((call) => call.tag === 'oauthRevoke')).toHaveLength(1);
+    expect(cfCalls).toHaveLength(1);
+    const row = await domainRow(projectId, 'acme-grant.com');
+    expect(row?.status).toBe('token_revoked');
+    expect(await env.ROUTING.get('email-domain:acme-grant.com')).not.toBeNull();
+  });
+
+  test('refuses for an api_token row — the customer revokes those themselves', async () => {
+    const { adminJwt, projectId } = await seedAdminAndProject();
+    await seedEmailDomain(projectId, 'acme-token.com');
+    const cfCalls = recordCustomerCfCalls();
+
+    const res = await post(
+      `/admin/email/${projectId}/domains/acme-token.com/revoke-grant`,
+      adminJwt,
+    );
+
+    expect(res.status).toBe(400);
+    expect(await res.text()).toContain('dash.cloudflare.com');
+    expect(cfCalls).toEqual([]);
+    expect((await domainRow(projectId, 'acme-token.com'))?.status).toBe('active');
+  });
+
+  test('404s for a domain row that belongs to another project', async () => {
+    const { adminJwt, projectId } = await seedAdminAndProject();
+    const sibling = await createTestProject(env.db, (await createTestUser(env.db)).id);
+    await seedEmailDomain(sibling.id, 'acme-grant-elsewhere.com', {
+      credentialKind: 'oauth_grant',
+    });
+    const cfCalls = recordCustomerCfCalls();
+
+    const res = await post(
+      `/admin/email/${projectId}/domains/acme-grant-elsewhere.com/revoke-grant`,
+      adminJwt,
+    );
+
+    expect(res.status).toBe(404);
+    expect(cfCalls).toEqual([]);
+    expect((await domainRow(sibling.id, 'acme-grant-elsewhere.com'))?.status).toBe('active');
   });
 });

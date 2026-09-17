@@ -329,7 +329,12 @@ const INBOUND_MIME =
  * the actions" and "enact them on the native message" is what is under test.
  */
 function buildHandleEmail(
-  userHandler: (message: ForwardableEmailMessage, env: unknown, ctx: unknown) => Promise<void>,
+  userHandler: (
+    message: ForwardableEmailMessage,
+    env: unknown,
+    ctx: unknown,
+    opts?: { slug?: string },
+  ) => Promise<void>,
 ): (envelope: unknown, env: unknown, ctx: unknown) => Promise<unknown> {
   const code = compileWorkerEntry({ hasEmail: true });
   const start = code.indexOf('async function handleEmail');
@@ -684,5 +689,105 @@ describe('generated handleEmail on a native ForwardableEmailMessage', () => {
 
     expect(actions).toEqual([{ type: 'reject', reason: 'spam' }]);
     expect(isForwardableEmailMessage(envelope)).toBe(false);
+  });
+});
+
+/**
+ * The relay lane (design doc 0078, "Custom domains on Cloudflare"): the
+ * envelope arrives over the platform router's `/email/relay` RPC with
+ * `viaDomain` set and a recipient that carries NO `<slug>+` prefix, while
+ * provisioning still injects `__VOID_PROJECT_SLUG` unconditionally. The
+ * generated `handleEmail` must suppress the slug so the dispatcher runs in
+ * no-prefix mode (Mode B item 4) — left applied, the strip would take
+ * everything up to the first `+` and `support+T-42@acme.com` would dispatch
+ * as `T-42` to `_default` or a wrong `[user]` param.
+ */
+describe('generated handleEmail on a relayed envelope (viaDomain)', () => {
+  function relayEnvelope(to = 'support+T-42@acme.com') {
+    return {
+      from: 'sender@example.com',
+      to,
+      headers: {},
+      raw: new TextEncoder().encode(INBOUND_MIME),
+      rawSize: INBOUND_MIME.length,
+      viaDomain: 'acme.com',
+    };
+  }
+
+  it('suppresses the injected slug: the recipient reaches the handler unstripped', async () => {
+    const seen: Array<{ to: string; slug: unknown; platformTo: unknown }> = [];
+    const handleEmail = buildHandleEmail(async (message, _env, _ctx, opts) => {
+      seen.push({
+        to: message.to,
+        slug: opts?.slug,
+        platformTo: (message as { __voidPlatformTo?: unknown }).__voidPlatformTo,
+      });
+    });
+
+    // The slug deliberately equals the local-part prefix: stripping keyed on
+    // the slug alone would turn `support+T-42@` into `T-42@`.
+    const actions = await handleEmail(relayEnvelope(), { __VOID_PROJECT_SLUG: 'support' }, {});
+
+    expect(seen).toEqual([{ to: 'support+T-42@acme.com', slug: undefined, platformTo: undefined }]);
+    expect(actions).toEqual([]);
+  });
+
+  it('still strips the slug for a platform-lane envelope (no viaDomain)', async () => {
+    const seen: Array<{ to: string; slug: unknown }> = [];
+    const handleEmail = buildHandleEmail(async (message, _env, _ctx, opts) => {
+      seen.push({ to: message.to, slug: opts?.slug });
+    });
+    const envelope = {
+      from: 'sender@example.com',
+      to: 'acme+support@mail.void.cloud',
+      headers: {},
+      raw: new TextEncoder().encode(INBOUND_MIME),
+      rawSize: INBOUND_MIME.length,
+    };
+
+    await handleEmail(envelope, { __VOID_PROJECT_SLUG: 'acme' }, {});
+
+    expect(seen).toEqual([{ to: 'support@mail.void.cloud', slug: 'acme' }]);
+  });
+
+  it('defaults replyEmail from to the receiving address on the customer domain', async () => {
+    const handleEmail = buildHandleEmail(async (message) => {
+      await replyEmail(message, { text: 'ack' });
+    });
+
+    const actions = (await handleEmail(
+      relayEnvelope(),
+      { __VOID_PROJECT_SLUG: 'acme', __VOID_EMAIL_DOMAIN: 'mail.void.cloud' },
+      {},
+    )) as Array<{ type: string; from: string; to: string }>;
+
+    // The spec's "Inbound identity": a reply to a relayed message leaves
+    // from the address that received it, on the customer domain — the
+    // platform's reply pin accepts exactly that shape for the receiving
+    // project, and the shared-sender `<slug>+noreply@` default would fail it.
+    expect(actions).toMatchObject([
+      { type: 'reply', from: 'support+T-42@acme.com', to: 'sender@example.com' },
+    ]);
+  });
+
+  it('keeps the shared-sender reply default on the platform lane', async () => {
+    const handleEmail = buildHandleEmail(async (message) => {
+      await replyEmail(message, { text: 'ack' });
+    });
+    const envelope = {
+      from: 'sender@example.com',
+      to: 'acme+support@mail.void.cloud',
+      headers: {},
+      raw: new TextEncoder().encode(INBOUND_MIME),
+      rawSize: INBOUND_MIME.length,
+    };
+
+    const actions = (await handleEmail(
+      envelope,
+      { __VOID_PROJECT_SLUG: 'acme', __VOID_EMAIL_DOMAIN: 'mail.void.cloud' },
+      {},
+    )) as Array<{ type: string; from: string }>;
+
+    expect(actions).toMatchObject([{ type: 'reply', from: 'acme+noreply@mail.void.cloud' }]);
   });
 });

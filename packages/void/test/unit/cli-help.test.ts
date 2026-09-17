@@ -155,4 +155,53 @@ describe('rendered help advertises the flags the parser honours', () => {
     expect(group).toContain('status --platform cloudflare');
     expect(group).toContain('setup --platform cloudflare');
   });
+
+  // The nested `domain` group is the one email command with its own verbs; the
+  // group entry is on the email page, and every verb keeps its own page so the
+  // printed `void help email domain <command>` hint actually resolves.
+  it('lists `email domain` on the email page and resolves the domain help pages', () => {
+    expect(
+      parseEmailArgs(['domain', 'add', 'acme.com', '--subdomain', 'mail', '--project', 'acme']),
+    ).toMatchObject({
+      subcommand: 'domain',
+      domainVerb: 'add',
+      domain: 'acme.com',
+      subdomain: 'mail',
+      projectSlug: 'acme',
+    });
+
+    const group = render(['email']);
+    expect(group).toContain('domain <add|status|list|sync|remove>');
+
+    expect(hasHelpPage(['email', 'domain'])).toBe(true);
+    expect(getHelpPath(['email', 'domain', '--help'])).toEqual(['email', 'domain']);
+    const page = render(['email', 'domain']);
+    for (const verb of [
+      'add <domain>',
+      'status <domain>',
+      'list',
+      'sync <domain>',
+      'remove <domain>',
+    ]) {
+      expect(page).toContain(verb);
+    }
+    expect(page).toContain('--subdomain <label|host>');
+    expect(page).toContain('--project <name>');
+
+    for (const verb of ['add', 'status', 'list', 'sync', 'remove']) {
+      expect(hasHelpPage(['email', 'domain', verb])).toBe(true);
+    }
+    expect(render(['email', 'domain', 'add'])).toContain(
+      'void email domain add <domain> [options]',
+    );
+
+    // `remove` is the one domain verb with a flag of its own.
+    expect(parseEmailArgs(['domain', 'remove', 'acme.com', '--force'])).toMatchObject({
+      domainVerb: 'remove',
+      force: true,
+    });
+    const removePage = render(['email', 'domain', 'remove']);
+    expect(removePage).toContain('--force');
+    expect(removePage).toContain('--project <name>');
+  });
 });

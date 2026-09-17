@@ -1,3 +1,4 @@
+import { and, asc, eq, inArray, isNotNull, ne, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { signConfirmToken, type ConfirmTokenPayload } from '../auth/confirm-token.ts';
@@ -15,8 +16,36 @@ import {
   type Db,
   type OwnerVerificationAudit,
 } from '../db.ts';
+import { OAuthGrantError, createCfCustomerClient, revokeOauthGrant } from '../email/cf-customer.ts';
+import type { CfCustomerClient } from '../email/cf-customer.ts';
+import { refreshOauthGrantSerialized } from '../email/credential-lease.ts';
+import {
+  applyEmailDomainDeployCheckpoint,
+  clearEmailDomainMirror,
+  decryptEmailDomainRelaySecret,
+  decryptEmailDomainToken,
+  EmailDomainRowGoneError,
+  encryptEmailDomainRelaySecret,
+  encryptEmailDomainToken,
+  generateEmailRelaySecret,
+  hashEmailRelaySecret,
+  markEmailDomainRemovalFailed,
+  writeEmailDomainMirror,
+  type EmailDomain,
+  type EmailDomainMirror,
+} from '../email/domains.ts';
+import {
+  ROUTING_SUBDOMAIN_STEP,
+  domainHasRoutingMx,
+  removeEmailDomain,
+  setupEmailDomain,
+  syncEmailDomain,
+  type EmailDomainSetupResult,
+} from '../email/relay-engine.ts';
+import { RELAY_VERSION } from '../email/relay-worker.ts';
 import { sendPlatformVerificationEmail } from '../email/send-verification.ts';
 import type { ApiEnv } from '../env.ts';
+import { generateId } from '../id.ts';
 import {
   projectAllowlistKvDiffers,
   syncProjectAllowlistKv,
@@ -29,6 +58,7 @@ import {
   listDestinations,
   type CfDestinationAddress,
 } from '../provisioning/email-routing.ts';
+import { emailDomains, type EmailDomainSetupState } from '../schema.ts';
 import type { EmailDestination } from '../types.ts';
 
 /**
@@ -59,6 +89,17 @@ const ADD_RATE_PER_DAY = 50;
  * address. Same value as the proxy's `MAX_RECIPIENT_LENGTH`.
  */
 const MAX_ADDRESS_LENGTH = 320;
+
+/**
+ * Caps for the custom-domain add route, checked on the RAW strings before
+ * normalization (same reasoning as MAX_ADDRESS_LENGTH). 253 is the DNS
+ * name cap from RFC 1035 — no legitimate domain exceeds it, IDN punycode
+ * included. The credential cap is generous for either kind (a pasted API
+ * token is ~50 chars; an OAuth refresh token a few hundred) and exists only
+ * to bound the encrypt + CF call work.
+ */
+const MAX_DOMAIN_LENGTH = 253;
+const MAX_CREDENTIAL_LENGTH = 2048;
 
 /**
  * Email observability + destinations management.
@@ -619,7 +660,1182 @@ const app = new Hono<ApiEnv>()
     // project-level lock class from design doc 0067, deliberately not here.
     await syncProjectAllowlistKvBestEffort(context.get('db'), context.env.ROUTING, projectId);
     return context.json({ ok: true });
+  })
+
+  // -------------------------------------------------------------------------
+  // Custom email domains on the customer's own Cloudflare zone (design doc
+  // 0078, "Custom domains on Cloudflare"). The add/sync/remove orchestration
+  // lives in src/email/relay-engine.ts (contract 7); these routes own the
+  // owner guard, the `email_domains` row, both encrypted triples, and the
+  // ROUTING KV mirror the proxy reads (contract 2). Neither the credential
+  // nor the relay secret is ever returned — serializers carry metadata only.
+  // -------------------------------------------------------------------------
+  .get('/:id/email/domains', async (context) => {
+    const projectId = context.req.param('id');
+    const project = await getProject(context.get('db'), projectId);
+    if (!project) {
+      return context.json({ error: 'project not found' }, 404);
+    }
+    if (project.user_id !== context.get('user').id) {
+      return context.json({ error: 'forbidden' }, 403);
+    }
+
+    const rows = await context
+      .get('db')
+      .select()
+      .from(emailDomains)
+      .where(eq(emailDomains.project_id, projectId))
+      .orderBy(asc(emailDomains.created_at));
+    return context.json(rows.map((row) => serializeEmailDomain(row)));
+  })
+
+  .post('/:id/email/domains', async (context) => {
+    const projectId = context.req.param('id');
+    const project = await getProject(context.get('db'), projectId);
+    if (!project) {
+      return context.json({ error: 'project not found' }, 404);
+    }
+    if (project.user_id !== context.get('user').id) {
+      return context.json({ error: 'forbidden' }, 403);
+    }
+    // Same teardown guard the destinations POST uses.
+    if (project.status === 'deleting') {
+      return context.json({ error: 'Project is being deleted' }, 409);
+    }
+
+    let body: {
+      domain?: unknown;
+      mode?: unknown;
+      refreshToken?: unknown;
+      apiToken?: unknown;
+    } = {};
+    try {
+      body = await context.req.json();
+    } catch {
+      return context.json({ error: 'invalid domain' }, 400);
+    }
+    // Length is checked on the RAW string before any normalization — same
+    // reason as MAX_ADDRESS_LENGTH above: the 400 costs nothing, the
+    // normalization and regex never run on attacker-sized input.
+    if (typeof body.domain !== 'string' || body.domain.length > MAX_DOMAIN_LENGTH) {
+      return context.json({ error: 'invalid domain' }, 400);
+    }
+    const domain = normalizeEmailDomain(body.domain);
+    if (!isValidEmailDomain(domain)) {
+      return context.json({ error: 'invalid domain' }, 400);
+    }
+    if (body.mode !== undefined && body.mode !== 'apex' && body.mode !== 'subdomain') {
+      return context.json({ error: 'invalid mode' }, 400);
+    }
+    const refreshToken =
+      typeof body.refreshToken === 'string' && body.refreshToken.length > 0
+        ? body.refreshToken
+        : undefined;
+    const apiToken =
+      typeof body.apiToken === 'string' && body.apiToken.length > 0 ? body.apiToken : undefined;
+    if ((refreshToken === undefined) === (apiToken === undefined)) {
+      return context.json({ error: 'exactly one of refreshToken or apiToken is required' }, 400);
+    }
+    const credential = (refreshToken ?? apiToken)!;
+    if (credential.length > MAX_CREDENTIAL_LENGTH) {
+      return context.json({ error: 'invalid credential' }, 400);
+    }
+    const credentialKind: EmailDomain['credential_kind'] =
+      refreshToken !== undefined ? 'oauth_grant' : 'api_token';
+    const db = context.get('db');
+    const proxyOrigin = proxyOriginForEmail(context.env);
+
+    const existing = await getEmailDomainRow(db, projectId, domain);
+    if (existing) {
+      // "add again replaces the token, rules stay" (design doc, branch
+      // table) — the credential renewal path for token_expired /
+      // token_revoked rows, and the retry path for failed ones.
+      return await replaceEmailDomainCredential(
+        context,
+        projectId,
+        existing,
+        credentialKind,
+        credential,
+        proxyOrigin,
+        body.mode,
+      );
+    }
+
+    // A domain belongs to exactly one project: the proxy proves a relay
+    // secret against the single `email-domain:<domain>` mirror key, and two
+    // projects registering the same domain would flip-flop that key and
+    // misroute inbound mail. Reject before any credential work.
+    const claimed = await getEmailDomainRowByDomain(db, domain);
+    if (claimed && claimed.project_id !== projectId) {
+      return context.json({ error: 'domain is registered to another project' }, 409);
+    }
+
+    // New domain. Persist the credential + a fresh relay secret FIRST: the
+    // oauth_grant setup refreshes THROUGH the row (the serialized dep locks
+    // and re-reads it), so the grant must be stored before the engine runs.
+    const relaySecret = generateEmailRelaySecret();
+    const tokenEnc = await encryptEmailDomainToken(context.env, projectId, domain, credential);
+    const relayEnc = await encryptEmailDomainRelaySecret(
+      context.env,
+      projectId,
+      domain,
+      relaySecret,
+    );
+    const id = generateId('edom');
+    try {
+      await db.insert(emailDomains).values({
+        id,
+        project_id: projectId,
+        domain,
+        credential_kind: credentialKind,
+        token_ciphertext: tokenEnc.ciphertext,
+        token_iv: tokenEnc.iv,
+        token_key_version: tokenEnc.keyVersion,
+        relay_ciphertext: relayEnc.ciphertext,
+        relay_iv: relayEnc.iv,
+        relay_key_version: relayEnc.keyVersion,
+      });
+    } catch (err) {
+      if (isUniqueViolation(err)) {
+        // Lost an add/add race on the domain-wide unique index. The winner
+        // decides the error: another project claimed the domain, or this
+        // project registered it concurrently.
+        const winner = await getEmailDomainRowByDomain(db, domain);
+        if (winner && winner.project_id !== projectId) {
+          return context.json({ error: 'domain is registered to another project' }, 409);
+        }
+        return context.json({ error: 'domain concurrently modified, try again' }, 409);
+      }
+      throw err;
+    }
+
+    // The checkpoint makes first-to-persist win — a racing loser 23505s
+    // HERE, right after its relay deploy, and never writes its catch-all.
+    let checkpoint: {
+      zone_id: string | null;
+      account_id: string | null;
+      mode: 'apex' | 'subdomain' | null;
+      relay_worker_name: string;
+    } | null = null;
+    let result: EmailDomainSetupResult;
+    try {
+      result = await setupEmailDomain(
+        { row: { domain, credential_kind: credentialKind }, credential, relaySecret, proxyOrigin },
+        {
+          refreshGrant: () => refreshOauthGrantSerialized(db, context.env, id),
+          persistProgress: async (progress) => {
+            // Capture BEFORE the write: a 23505 throw still needs the
+            // checkpoint for compensation below.
+            checkpoint = progress;
+            await applyEmailDomainDeployCheckpoint(db, id, progress);
+          },
+        },
+      );
+    } catch (err) {
+      if (err instanceof EmailDomainRowGoneError) {
+        return context.json({ error: 'project is being deleted' }, 409);
+      }
+      if (isUniqueViolation(err) && checkpoint !== null) {
+        const conflict = await compensateEmailDomainRace(
+          context,
+          id,
+          { credentialKind, credential },
+          checkpoint,
+          err,
+        );
+        return context.json({ error: conflict }, 409);
+      }
+      throw err;
+    }
+    // The serialized refreshGrant already persisted any rotation under the
+    // row lock — result.rotated_refresh_token is deliberately NOT written
+    // again (a second write could overwrite a newer rotation a concurrent
+    // lease committed in between, killing the chain).
+    const applied = await applyEmailDomainSetupResultOrConflict(context, id, result, {
+      credentialKind,
+      credential,
+    });
+    if ('conflict' in applied) {
+      // The row stays in its pre-apply state; the loser's CF-side work was
+      // already compensated best-effort inside.
+      return context.json({ error: applied.conflict }, 409);
+    }
+    const row = applied.row;
+    const modeMismatch = body.mode !== undefined && row.mode !== null && body.mode !== row.mode;
+    // Mirror AFTER the row is final — the proxy reads only the mirror.
+    await writeEmailDomainMirror(context.env.ROUTING, row, await hashEmailRelaySecret(relaySecret));
+    if (modeMismatch) {
+      return context.json(
+        {
+          error: `requested mode ${String(body.mode)} but ${domain} is ${row.mode} on its zone`,
+          domain: serializeEmailDomain(row, result.error),
+        },
+        409,
+      );
+    }
+    return context.json(serializeEmailDomain(row, result.error), 201);
+  })
+
+  .get('/:id/email/domains/:domain', async (context) => {
+    const projectId = context.req.param('id');
+    const project = await getProject(context.get('db'), projectId);
+    if (!project) {
+      return context.json({ error: 'project not found' }, 404);
+    }
+    if (project.user_id !== context.get('user').id) {
+      return context.json({ error: 'forbidden' }, 403);
+    }
+
+    const domain = normalizeEmailDomain(context.req.param('domain'));
+    const db = context.get('db');
+    const row = await getEmailDomainRow(db, projectId, domain);
+    if (!row) {
+      return context.json({ error: 'email domain not found' }, 404);
+    }
+
+    // Re-probe with the decrypted credential. Probe failures never hide the
+    // stored view — the row answers with credential_status 'probe_failed',
+    // the same non-fatal shape as the destinations listing's CF refresh.
+    let credentialStatus: 'active' | 'expired' | 'revoked' | 'probe_failed';
+    let probeClient: CfCustomerClient | null = null;
+    let tokenPatch: { token_id: string | null; token_expires_on: string | null } | null = null;
+    if (row.credential_kind === 'api_token') {
+      try {
+        const credential = await decryptEmailDomainToken(context.env, projectId, row.domain, row);
+        const client = createCfCustomerClient(credential);
+        const verification = await client.verifyToken();
+        if (verification.status === 'active') {
+          credentialStatus = 'active';
+          probeClient = client;
+          tokenPatch = {
+            token_id: verification.id,
+            token_expires_on: verification.expires_on ?? null,
+          };
+        } else if (verification.status === 'expired') {
+          credentialStatus = 'expired';
+        } else {
+          credentialStatus = 'revoked';
+        }
+      } catch (err) {
+        console.error('[email] domain credential probe failed:', err);
+        credentialStatus = 'probe_failed';
+      }
+    } else {
+      try {
+        // The ONLY probe a grant supports is one refresh round-trip. The
+        // rotation is persisted under the row lock inside; the access token
+        // rides the drift probe below and is then dropped.
+        const tokens = await refreshOauthGrantSerialized(db, context.env, row.id);
+        credentialStatus = 'active';
+        probeClient = createCfCustomerClient(tokens.accessToken);
+      } catch (err) {
+        if (err instanceof OAuthGrantError && err.code === 'invalid_grant') {
+          // The row was already marked token_revoked under the lock.
+          credentialStatus = 'revoked';
+        } else {
+          console.error('[email] domain grant probe failed:', err);
+          credentialStatus = 'probe_failed';
+        }
+      }
+    }
+
+    // Persist what the probe learned. A dead credential flips the row (and,
+    // via the mirror repair below, the proxy's view) to token_expired /
+    // token_revoked; a healthy api_token refreshes token_id/expires_on.
+    // Probes never RESURRECT a row — re-running add is the renewal path.
+    const patch: {
+      status?: EmailDomain['status'];
+      token_id?: string | null;
+      token_expires_on?: string | null;
+    } = {};
+    if (credentialStatus === 'expired' && row.status !== 'token_expired') {
+      patch.status = 'token_expired';
+    } else if (credentialStatus === 'revoked' && row.status !== 'token_revoked') {
+      patch.status = 'token_revoked';
+    }
+    if (
+      tokenPatch &&
+      (tokenPatch.token_id !== row.token_id || tokenPatch.token_expires_on !== row.token_expires_on)
+    ) {
+      patch.token_id = tokenPatch.token_id;
+      patch.token_expires_on = tokenPatch.token_expires_on;
+    }
+    if (Object.keys(patch).length > 0) {
+      await db
+        .update(emailDomains)
+        .set({ ...patch, updated_at: sql`now()` })
+        .where(eq(emailDomains.id, row.id));
+    }
+
+    let fresh = await getEmailDomainRowById(db, row.id);
+    if (!fresh) {
+      // Project teardown's cascade can take the row mid-request.
+      return context.json({ error: 'email domain not found' }, 404);
+    }
+
+    // Self-clear the routing-subdomain human step: the dashboard form's
+    // observable effect is public MX records naming Cloudflare's inbound
+    // exchanges. On that evidence the step is done — flip the row to
+    // active (the mirror repair below carries the new status to the
+    // proxy). No evidence — MX not there yet, or the lookup failed —
+    // leaves the row pending for the next poll.
+    if (
+      fresh.status === 'pending' &&
+      fresh.setup_state?.remaining_steps?.length === 1 &&
+      fresh.setup_state.remaining_steps[0] === ROUTING_SUBDOMAIN_STEP &&
+      (await domainHasRoutingMx(fresh.domain))
+    ) {
+      await db
+        .update(emailDomains)
+        .set({ status: 'active', setup_state: null, updated_at: sql`now()` })
+        .where(eq(emailDomains.id, fresh.id));
+      fresh = await getEmailDomainRowById(db, row.id);
+      if (!fresh) {
+        return context.json({ error: 'email domain not found' }, 404);
+      }
+    }
+
+    // Relay drift: the version the row recorded vs the embedded
+    // RELAY_VERSION, plus an existence probe — the customer can edit or
+    // delete the relay in their own account, and status reports drift
+    // rather than fighting it.
+    let relayMissing: boolean | null = null;
+    if (probeClient && fresh.account_id && fresh.relay_worker_name) {
+      try {
+        relayMissing = !(await probeClient.relayScriptExists(
+          fresh.account_id,
+          fresh.relay_worker_name,
+        ));
+      } catch (err) {
+        console.error('[email] relay existence probe failed:', err);
+      }
+    }
+    const relayDrift = fresh.relay_version !== RELAY_VERSION || relayMissing === true;
+
+    // Catch-all drift probe — the same try/catch-and-report-never-fight
+    // doctrine as the relay probe above. Read-only: healing is the sync
+    // POST's job (its ensure runs in the engine).
+    let catchAll: 'points_here' | 'points_elsewhere' | 'missing' | 'disabled' | 'unknown' =
+      'unknown';
+    if (probeClient && fresh.zone_id && fresh.relay_worker_name) {
+      try {
+        const rule = await probeClient.getCatchAll(fresh.zone_id);
+        catchAll =
+          rule === null
+            ? 'missing'
+            : !rule.enabled
+              ? 'disabled'
+              : rule.workerName === fresh.relay_worker_name
+                ? 'points_here'
+                : 'points_elsewhere';
+      } catch (err) {
+        console.error('[email] catch-all probe failed:', err);
+      }
+    }
+    const catchAllDrift =
+      (fresh.status === 'active' || fresh.status === 'pending') &&
+      (catchAll === 'points_elsewhere' || catchAll === 'missing' || catchAll === 'disabled');
+
+    // This GET is the mirror's repair point (the same read-compare-write
+    // self-heal shape as the allowlist listing): probe transitions and any
+    // other drift land here; no difference means no write. Suppressed
+    // while a removal failure is pending — the row is mid-removal, and the
+    // proxy mirror must not be "repaired" against a state the operator is
+    // about to finish removing.
+    if (fresh.setup_state?.failed_step !== 'remove') {
+      await repairEmailDomainMirrorIfDrifted(context.env, fresh);
+    }
+
+    return context.json({
+      ...serializeEmailDomain(fresh),
+      credential_status: credentialStatus,
+      current_relay_version: RELAY_VERSION,
+      relay_drift: relayDrift,
+      relay_missing: relayMissing,
+      catch_all: catchAll,
+      catch_all_drift: catchAllDrift,
+    });
+  })
+
+  .post('/:id/email/domains/:domain/sync', async (context) => {
+    const projectId = context.req.param('id');
+    const project = await getProject(context.get('db'), projectId);
+    if (!project) {
+      return context.json({ error: 'project not found' }, 404);
+    }
+    if (project.user_id !== context.get('user').id) {
+      return context.json({ error: 'forbidden' }, 403);
+    }
+    // Sync mutates CF state and the row — same teardown guard as add/remove.
+    if (project.status === 'deleting') {
+      return context.json({ error: 'Project is being deleted' }, 409);
+    }
+
+    const domain = normalizeEmailDomain(context.req.param('domain'));
+    const db = context.get('db');
+    const row = await getEmailDomainRow(db, projectId, domain);
+    if (!row) {
+      return context.json({ error: 'email domain not found' }, 404);
+    }
+
+    const credential = await decryptEmailDomainToken(context.env, projectId, row.domain, row);
+    // Sync redeploys the relay in place at RELAY_VERSION and rotates its
+    // secret (overwrite, never read-compare — worker secrets are
+    // write-only).
+    const result = await syncEmailDomain(
+      {
+        row: {
+          domain: row.domain,
+          credential_kind: row.credential_kind,
+          account_id: row.account_id,
+          relay_worker_name: row.relay_worker_name,
+          zone_id: row.zone_id,
+        },
+        credential,
+        proxyOrigin: proxyOriginForEmail(context.env),
+      },
+      { refreshGrant: () => refreshOauthGrantSerialized(db, context.env, row.id) },
+    );
+
+    let relaySecretSha256: string;
+    const relayPatch: {
+      relay_ciphertext?: string;
+      relay_iv?: string;
+      relay_key_version?: string;
+    } = {};
+    if (result.new_relay_secret !== undefined) {
+      const relayEnc = await encryptEmailDomainRelaySecret(
+        context.env,
+        projectId,
+        row.domain,
+        result.new_relay_secret,
+      );
+      relayPatch.relay_ciphertext = relayEnc.ciphertext;
+      relayPatch.relay_iv = relayEnc.iv;
+      relayPatch.relay_key_version = relayEnc.keyVersion;
+      relaySecretSha256 = await hashEmailRelaySecret(result.new_relay_secret);
+    } else {
+      // No rotation happened (failed before the secret PUT) — the mirror
+      // still moves with the new status, hashed from the existing secret.
+      relaySecretSha256 = await hashEmailRelaySecret(
+        await decryptEmailDomainRelaySecret(context.env, projectId, row.domain, row),
+      );
+    }
+    // A successful sync does not clear a pending human step: the engine
+    // cannot observe the routing-subdomain dashboard form, so
+    // remaining_steps survive and the row stays 'pending'.
+    const remainingSteps = row.setup_state?.remaining_steps;
+    const setupState: EmailDomainSetupState | null =
+      result.setup_state !== null
+        ? result.setup_state
+        : remainingSteps && remainingSteps.length > 0
+          ? { remaining_steps: remainingSteps }
+          : null;
+    const status: EmailDomain['status'] =
+      result.status === 'active' && setupState?.remaining_steps?.length ? 'pending' : result.status;
+    try {
+      await db
+        .update(emailDomains)
+        .set({
+          status,
+          relay_version: result.relay_version,
+          setup_state: setupState,
+          ...relayPatch,
+          updated_at: sql`now()`,
+        })
+        .where(eq(emailDomains.id, row.id));
+    } catch (err) {
+      if (isUniqueViolation(err)) {
+        // NO compensation here — sync deployed in place on the row's OWN
+        // relay, so the 409 just refuses the live-status flip: a 'failed'
+        // row carrying its zone can collide with the winner when sync
+        // flips it back to a live status.
+        return context.json(
+          {
+            error: uniqueViolationConstraintName(err).includes('relay')
+              ? 'another email domain is deploying the same relay worker — retry'
+              : 'another active email domain already uses this zone — remove it first',
+          },
+          409,
+        );
+      }
+      throw err;
+    }
+
+    const fresh = await getEmailDomainRowById(db, row.id);
+    if (!fresh) {
+      throw new Error('email_domains row vanished mid-sync');
+    }
+    await writeEmailDomainMirror(context.env.ROUTING, fresh, relaySecretSha256);
+    return context.json({
+      ...serializeEmailDomain(fresh, result.error),
+      ...(result.catch_all === undefined ? {} : { catch_all: result.catch_all }),
+    });
+  })
+
+  .delete('/:id/email/domains/:domain', async (context) => {
+    const projectId = context.req.param('id');
+    const project = await getProject(context.get('db'), projectId);
+    if (!project) {
+      return context.json({ error: 'project not found' }, 404);
+    }
+    if (project.user_id !== context.get('user').id) {
+      return context.json({ error: 'forbidden' }, 403);
+    }
+    if (project.status === 'deleting') {
+      return context.json({ error: 'Project is being deleted' }, 409);
+    }
+
+    const domain = normalizeEmailDomain(context.req.param('domain'));
+    const db = context.get('db');
+    const row = await getEmailDomainRow(db, projectId, domain);
+    if (!row) {
+      return context.json({ error: 'email domain not found' }, 404);
+    }
+
+    const force = context.req.query('force') === '1';
+
+    // Remove: best-effort CF cleanup (catch-all reset, relay DELETE, grant
+    // revoke LAST), then the row and the mirror key. removeEmailDomain
+    // never throws; a decrypt failure skips CF cleanup entirely. A failed
+    // DESTRUCTIVE step (catch-all or relay delete) KEEPS the row so the
+    // operator can retry — unless forced, or the grant is already dead:
+    // token_revoked rows are always deleted (CF may be unreachable and
+    // keeping buys no retry leverage — re-add is the renewal path), and a
+    // 'revoke_grant'-only failure still deletes (a stranded grant breaks
+    // no mail).
+    let failedSteps: ReadonlyArray<string>;
+    try {
+      const credential = await decryptEmailDomainToken(context.env, projectId, row.domain, row);
+      const result = await removeEmailDomain(
+        {
+          row: {
+            credential_kind: row.credential_kind,
+            account_id: row.account_id,
+            relay_worker_name: row.relay_worker_name,
+            zone_id: row.zone_id,
+          },
+          credential,
+        },
+        {
+          // Refresh rotations must persist through the row's serialized
+          // chain while the row lives — in the keep-row world a failed
+          // removal KEEPS the row, and a bricked rotation would kill the
+          // retry.
+          refreshGrant: () => refreshOauthGrantSerialized(db, context.env, row.id),
+          ...(row.credential_kind === 'oauth_grant' ? { revokeGrant: revokeOauthGrant } : {}),
+        },
+      );
+      failedSteps = result.failed_steps;
+    } catch (err) {
+      console.error('[email] domain remove credential decrypt failed:', err);
+      failedSteps = ['delete_relay', 'catch_all'];
+    }
+
+    const destructive = failedSteps.some((s) => s === 'catch_all' || s === 'delete_relay');
+    if (destructive && !force && row.status !== 'token_revoked') {
+      await markEmailDomainRemovalFailed(db, row.id, failedSteps);
+      return context.json({ ok: false, removed: false, failed_steps: failedSteps }, 200);
+    }
+
+    // Mirror key BEFORE the row — never destroy the record a retry would
+    // re-derive the mirror from (the destinations DELETE inversion). A KV
+    // failure 500s here with the row intact, so the retry can finish it.
+    await clearEmailDomainMirror(context.env.ROUTING, row.domain);
+    await db.delete(emailDomains).where(eq(emailDomains.id, row.id));
+    return context.json({
+      ok: true,
+      removed: true,
+      ...(force && failedSteps.length > 0 ? { forced: true } : {}),
+      ...(failedSteps.length > 0 ? { failed_steps: failedSteps } : {}),
+    });
   });
+
+/**
+ * The proxy origin baked into the relay worker as VOID_PROXY_ORIGIN — the
+ * same resolution the platform discovery document uses.
+ */
+function proxyOriginForEmail(env: ApiEnv['Bindings']): string {
+  const origin =
+    env.PROXY_URL ??
+    (env.PLATFORM_ENV === 'staging'
+      ? 'https://proxy.staging.void.cloud'
+      : 'https://proxy.void.cloud');
+  return origin.replace(/\/+$/, '');
+}
+
+function normalizeEmailDomain(raw: string): string {
+  return raw.trim().toLowerCase().replace(/\.$/, '');
+}
+
+/**
+ * DNS hostname shape: two or more labels, each 1–63 chars, alphanumeric +
+ * interior hyphens. Real validation is the engine's zone lookup — this
+ * keeps junk out of the encrypt and CF calls.
+ */
+function isValidEmailDomain(domain: string): boolean {
+  return /^(?!-)[a-z0-9-]{1,63}(?<!-)(\.(?!-)[a-z0-9-]{1,63}(?<!-))+$/.test(domain);
+}
+
+/**
+ * The mirror key spelling is owned by `src/email/domains.ts` (the writer —
+ * frozen for this phase); the status route's read-compare repair reads the
+ * same key. A rename there must move this spelling with it.
+ */
+function emailDomainMirrorKey(domain: string): string {
+  return `email-domain:${domain}`;
+}
+
+async function getEmailDomainRow(
+  db: Db,
+  projectId: string,
+  domain: string,
+): Promise<EmailDomain | null> {
+  const rows = await db
+    .select()
+    .from(emailDomains)
+    .where(and(eq(emailDomains.project_id, projectId), eq(emailDomains.domain, domain)))
+    .limit(1);
+  return rows[0] ?? null;
+}
+
+async function getEmailDomainRowById(db: Db, id: string): Promise<EmailDomain | null> {
+  const rows = await db.select().from(emailDomains).where(eq(emailDomains.id, id)).limit(1);
+  return rows[0] ?? null;
+}
+
+/**
+ * Cross-project lookup: a domain is globally unique across projects
+ * (`email_domains_domain_uq`), because one domain produces exactly one
+ * `email-domain:<domain>` mirror key and one relay secret.
+ */
+async function getEmailDomainRowByDomain(db: Db, domain: string): Promise<EmailDomain | null> {
+  const rows = await db.select().from(emailDomains).where(eq(emailDomains.domain, domain)).limit(1);
+  return rows[0] ?? null;
+}
+
+/**
+ * The public shape of an email_domains row — metadata only. Neither
+ * ciphertext triple nor any plaintext secret ever appears here.
+ */
+function serializeEmailDomain(row: EmailDomain, error?: string) {
+  return {
+    id: row.id,
+    domain: row.domain,
+    mode: row.mode,
+    status: row.status,
+    credential_kind: row.credential_kind,
+    relay_worker_name: row.relay_worker_name,
+    relay_version: row.relay_version,
+    token_id: row.token_id,
+    token_expires_on: row.token_expires_on,
+    setup_state: row.setup_state,
+    // The engine's failure text names the failing step / CF error — never
+    // credential material — so the CLI can print it verbatim.
+    ...(error === undefined ? {} : { error }),
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
+/**
+ * Persist the engine's setup outcome onto the row and return the final
+ * row. Never touches the token_* triple: the caller wrote it at insert,
+ * and any rotation since was persisted by the serialized refresh under the
+ * row lock.
+ */
+async function applyEmailDomainSetupResult(
+  db: Db,
+  id: string,
+  result: EmailDomainSetupResult,
+  relay?: { ciphertext: string; iv: string; keyVersion: string },
+): Promise<EmailDomain> {
+  await db
+    .update(emailDomains)
+    .set({
+      status: result.status,
+      zone_id: result.zone_id,
+      account_id: result.account_id,
+      mode: result.mode,
+      relay_worker_name: result.relay_worker_name,
+      relay_version: result.relay_version,
+      token_id: result.token_id,
+      token_expires_on: result.token_expires_on,
+      setup_state: result.setup_state,
+      ...(relay === undefined
+        ? {}
+        : {
+            relay_ciphertext: relay.ciphertext,
+            relay_iv: relay.iv,
+            relay_key_version: relay.keyVersion,
+          }),
+      updated_at: sql`now()`,
+    })
+    .where(eq(emailDomains.id, id));
+  const row = await getEmailDomainRowById(db, id);
+  if (!row) {
+    throw new Error('email_domains row vanished mid-setup');
+  }
+  return row;
+}
+
+/**
+ * The 23505 loser's best-effort CF compensation, shared by the apply-time
+ * backstop (applyEmailDomainSetupResultOrConflict) and the deploy-time
+ * checkpoint (persistProgress): both lose a zone (or one account's relay
+ * name) to a setup that already passed the engine's CF-side reads —
+ * first-to-persist wins.
+ *
+ * Works from what the engine RETURNED or checkpointed (the loser's row
+ * still holds nulls). A relay-NAME conflict never deletes the worker —
+ * the name is contested, the winner is using it — so the compensation
+ * runs with account_id nulled: only the loser's zone rule is detached. On
+ * a ZONE conflict the winner is looked up and an owned catch-all is
+ * REPOINTED at its relay: the loser's conditional reset only detaches a
+ * rule naming its OWN relay, so without a repoint target the zone's rule
+ * dies with the loser; repointing hands it to the winner instead. (At
+ * checkpoint-time conflicts the loser never wrote its rule, so the
+ * repoint probe is a harmless no-op — one code path.) A failed winner
+ * lookup degrades to the plain reset. Deliberately NO revokeGrant dep:
+ * the loser's row/credential may survive — conflict compensation is not
+ * removal.
+ */
+async function compensateEmailDomainRace(
+  context: Context<ApiEnv>,
+  loserRowId: string,
+  race: {
+    credentialKind: EmailDomain['credential_kind'];
+    credential: string;
+  },
+  loser: {
+    zone_id: string | null;
+    account_id: string | null;
+    relay_worker_name: string | null;
+  },
+  err: unknown,
+): Promise<string> {
+  const relayRace = uniqueViolationConstraintName(err).includes('relay');
+  let repointTo: string | null = null;
+  if (!relayRace && loser.zone_id !== null) {
+    try {
+      const winners = await context
+        .get('db')
+        .select()
+        .from(emailDomains)
+        .where(
+          and(
+            eq(emailDomains.zone_id, loser.zone_id),
+            // The exact live-status set of the schema's
+            // email_domains_zone_uq partial index — the rows this loser
+            // lost to.
+            inArray(emailDomains.status, ['active', 'pending']),
+            isNotNull(emailDomains.relay_worker_name),
+            ne(emailDomains.id, loserRowId),
+          ),
+        )
+        .limit(1);
+      repointTo = winners[0]?.relay_worker_name ?? null;
+    } catch (lookupErr) {
+      console.error('[email] race winner lookup failed; falling back to reset:', lookupErr);
+    }
+  }
+  try {
+    await removeEmailDomain(
+      {
+        row: {
+          credential_kind: race.credentialKind,
+          // A contested relay name is never deleted (see the header).
+          account_id: relayRace ? null : loser.account_id,
+          relay_worker_name: loser.relay_worker_name,
+          zone_id: loser.zone_id,
+        },
+        credential: race.credential,
+        ...(repointTo === null ? {} : { repoint_catch_all_to: repointTo }),
+      },
+      {
+        // Grant refresh tokens are single-use: the compensation's refresh
+        // must persist its rotation through the row's serialized chain,
+        // or the cleanup would brick the credential it leaves behind.
+        refreshGrant: () => refreshOauthGrantSerialized(context.get('db'), context.env, loserRowId),
+      },
+    );
+  } catch (compensationErr) {
+    // removeEmailDomain never throws; this is paranoia for the log only.
+    console.error('[email] race compensation failed:', compensationErr);
+  }
+  return relayRace
+    ? 'another email domain is deploying the same relay worker — retry'
+    : 'another active email domain already uses this zone — remove it first';
+}
+
+/**
+ * applyEmailDomainSetupResult + the concurrent-add backstop (schema's
+ * partial unique indexes): two setups racing one zone (or one account's
+ * relay name) both pass the engine's CF-side reads, so the loser is caught
+ * here — a 409, never a falsely-active second row.
+ *
+ * A NON-unique apply failure after the engine may have deployed CF-side is
+ * reconciled against the row (orphan-relay fix): if the UPDATE actually
+ * committed — the failure was the follow-up read — the committed row
+ * stands; otherwise the possibly-deployed relay is compensated
+ * best-effort, so no orphan worker is left for a zone the row never
+ * recorded.
+ */
+async function applyEmailDomainSetupResultOrConflict(
+  context: Context<ApiEnv>,
+  id: string,
+  result: EmailDomainSetupResult,
+  race: {
+    credentialKind: EmailDomain['credential_kind'];
+    credential: string;
+  },
+  relay?: { ciphertext: string; iv: string; keyVersion: string },
+): Promise<{ row: EmailDomain } | { conflict: string }> {
+  try {
+    return { row: await applyEmailDomainSetupResult(context.get('db'), id, result, relay) };
+  } catch (err) {
+    if (isUniqueViolation(err)) {
+      const conflict = await compensateEmailDomainRace(
+        context,
+        id,
+        race,
+        {
+          zone_id: result.zone_id,
+          account_id: result.account_id,
+          relay_worker_name: result.relay_worker_name,
+        },
+        err,
+      );
+      return { conflict };
+    }
+    // Nothing to clean when setup failed before the deploy.
+    if (result.relay_worker_name === null) {
+      throw err;
+    }
+    let reread: EmailDomain | null;
+    try {
+      reread = await getEmailDomainRowById(context.get('db'), id);
+    } catch (rereadErr) {
+      console.error(
+        '[email] post-apply re-read failed; possible orphan relay left for sync/drift',
+        rereadErr,
+      );
+      throw err;
+    }
+    // Committed ⟺ the row carries the apply's relay_version, not only the
+    // name: the deploy checkpoint persists relay_worker_name first, so a
+    // name match alone cannot tell a committed apply apart from a failed
+    // one on a checkpointed row. A same-version re-run whose UPDATE fails
+    // still reads as committed — the benign direction: CF state was
+    // redeployed in place, only status/token fields stay stale until the
+    // next sync, and no referenced relay is torn down.
+    if (
+      reread &&
+      reread.relay_worker_name === result.relay_worker_name &&
+      reread.relay_version === result.relay_version
+    ) {
+      // The UPDATE committed despite the error (the failure was the
+      // follow-up read).
+      return { row: reread };
+    }
+    try {
+      // Not a name race — the loser owns its relay, so the compensation
+      // runs with the result's OWN account_id (not nulled).
+      await removeEmailDomain(
+        {
+          row: {
+            credential_kind: race.credentialKind,
+            account_id: result.account_id,
+            relay_worker_name: result.relay_worker_name,
+            zone_id: result.zone_id,
+          },
+          credential: race.credential,
+        },
+        {
+          // Same single-use refresh doctrine as the race compensation.
+          refreshGrant: () => refreshOauthGrantSerialized(context.get('db'), context.env, id),
+        },
+      );
+    } catch (compErr) {
+      console.error('[email] orphan compensation failed:', compErr);
+    }
+    throw err;
+  }
+}
+
+/**
+ * POST /domains on an existing row — "add again replaces the token, rules
+ * stay" (design doc, branch table). The new credential is stored first
+ * because the oauth_grant engine path refreshes THROUGH the row. Healthy
+ * rows (active / pending / credential renewal) take the sync path —
+ * redeploy in place + rotate the relay secret. A row that never finished
+ * setup re-runs the FULL engine with a fresh relay secret: status
+ * 'failed', or the relay/account fields missing. The engine is
+ * re-runnable against the row's recorded progress, so a catch-all
+ * failure gets its rule written rather than just re-deploying the relay.
+ */
+async function replaceEmailDomainCredential(
+  context: Context<ApiEnv>,
+  projectId: string,
+  existing: EmailDomain,
+  credentialKind: EmailDomain['credential_kind'],
+  credential: string,
+  proxyOrigin: string,
+  requestedMode: unknown,
+): Promise<Response> {
+  const db = context.get('db');
+  const domain = existing.domain;
+  // Captured BEFORE the replace overwrites the ciphertext triple — the old
+  // grant is revoked below once the new credential is safely stored.
+  let oldGrantRefreshToken: string | null = null;
+  if (existing.credential_kind === 'oauth_grant') {
+    try {
+      oldGrantRefreshToken = await decryptEmailDomainToken(
+        context.env,
+        projectId,
+        domain,
+        existing,
+      );
+    } catch (err) {
+      console.error('[email] old grant decrypt failed; skipping revoke:', err);
+    }
+  }
+  const tokenEnc = await encryptEmailDomainToken(context.env, projectId, domain, credential);
+  await db
+    .update(emailDomains)
+    .set({
+      credential_kind: credentialKind,
+      token_ciphertext: tokenEnc.ciphertext,
+      token_iv: tokenEnc.iv,
+      token_key_version: tokenEnc.keyVersion,
+      // Re-derived by the engine for api_token; grants carry neither.
+      token_id: null,
+      token_expires_on: null,
+      updated_at: sql`now()`,
+    })
+    .where(eq(emailDomains.id, existing.id));
+
+  // Revoke AFTER the commit so a failed replace never strands the old
+  // grant; a re-pasted identical grant is skipped — revoking it would
+  // brick the just-stored credential.
+  if (oldGrantRefreshToken !== null && oldGrantRefreshToken !== credential) {
+    await revokeOauthGrant(oldGrantRefreshToken);
+  }
+
+  // Sync keeps a healthy row healthy; anything that never finished setup
+  // re-runs the full engine (see the header). A catch-all failure is the
+  // one 'failed' shape that still carries relay_worker_name/account_id —
+  // it must NOT take the sync path, which never writes the catch-all.
+  const setupIncomplete =
+    existing.status === 'failed' || !existing.relay_worker_name || !existing.account_id;
+  if (!setupIncomplete) {
+    const result = await syncEmailDomain(
+      {
+        row: {
+          domain,
+          credential_kind: credentialKind,
+          account_id: existing.account_id,
+          relay_worker_name: existing.relay_worker_name,
+          zone_id: existing.zone_id,
+        },
+        credential,
+        proxyOrigin,
+      },
+      { refreshGrant: () => refreshOauthGrantSerialized(db, context.env, existing.id) },
+    );
+    let relaySecretSha256: string;
+    const relayPatch: {
+      relay_ciphertext?: string;
+      relay_iv?: string;
+      relay_key_version?: string;
+    } = {};
+    if (result.new_relay_secret !== undefined) {
+      const relayEnc = await encryptEmailDomainRelaySecret(
+        context.env,
+        projectId,
+        domain,
+        result.new_relay_secret,
+      );
+      relayPatch.relay_ciphertext = relayEnc.ciphertext;
+      relayPatch.relay_iv = relayEnc.iv;
+      relayPatch.relay_key_version = relayEnc.keyVersion;
+      relaySecretSha256 = await hashEmailRelaySecret(result.new_relay_secret);
+    } else {
+      relaySecretSha256 = await hashEmailRelaySecret(
+        await decryptEmailDomainRelaySecret(context.env, projectId, domain, existing),
+      );
+    }
+    // A successful sync does not clear a pending human step — the engine
+    // cannot observe the routing-subdomain dashboard form, so
+    // remaining_steps survive and the row stays 'pending'.
+    const remainingSteps = existing.setup_state?.remaining_steps;
+    const setupState: EmailDomainSetupState | null =
+      result.setup_state !== null
+        ? result.setup_state
+        : remainingSteps && remainingSteps.length > 0
+          ? { remaining_steps: remainingSteps }
+          : null;
+    const status: EmailDomain['status'] =
+      result.status === 'active' && setupState?.remaining_steps?.length ? 'pending' : result.status;
+    try {
+      await db
+        .update(emailDomains)
+        .set({
+          status,
+          relay_version: result.relay_version,
+          setup_state: setupState,
+          ...relayPatch,
+          updated_at: sql`now()`,
+        })
+        .where(eq(emailDomains.id, existing.id));
+    } catch (err) {
+      if (isUniqueViolation(err)) {
+        // Same refusal as the sync route: the deploy ran in place on the
+        // row's OWN relay, so there is nothing to compensate — only the
+        // live-status flip is refused.
+        return context.json(
+          {
+            error: uniqueViolationConstraintName(err).includes('relay')
+              ? 'another email domain is deploying the same relay worker — retry'
+              : 'another active email domain already uses this zone — remove it first',
+          },
+          409,
+        );
+      }
+      throw err;
+    }
+    const row = await getEmailDomainRowById(db, existing.id);
+    if (!row) {
+      throw new Error('email_domains row vanished mid-update');
+    }
+    await writeEmailDomainMirror(context.env.ROUTING, row, relaySecretSha256);
+    return context.json(
+      {
+        ...serializeEmailDomain(row, result.error),
+        ...(result.catch_all === undefined ? {} : { catch_all: result.catch_all }),
+      },
+      200,
+    );
+  }
+
+  // Setup never finished — re-run the full engine with a fresh relay
+  // secret, carrying the row's recorded progress so completed steps are
+  // idempotent (mode skips the MX check; a relay name redeploys in
+  // place; 'already done' 4xx is believed only on a confirming read-back).
+  const relaySecret = generateEmailRelaySecret();
+  const relayEnc = await encryptEmailDomainRelaySecret(context.env, projectId, domain, relaySecret);
+  // The checkpoint makes first-to-persist win — a racing loser 23505s
+  // HERE, right after its relay deploy, and never writes its catch-all.
+  let checkpoint: {
+    zone_id: string | null;
+    account_id: string | null;
+    mode: 'apex' | 'subdomain' | null;
+    relay_worker_name: string;
+  } | null = null;
+  let result: EmailDomainSetupResult;
+  try {
+    result = await setupEmailDomain(
+      {
+        row: {
+          domain,
+          credential_kind: credentialKind,
+          ...(existing.mode === null ? {} : { mode: existing.mode }),
+          ...(existing.relay_worker_name === null
+            ? {}
+            : { relay_worker_name: existing.relay_worker_name }),
+          ...(existing.zone_id === null ? {} : { zone_id: existing.zone_id }),
+          ...(existing.account_id === null ? {} : { account_id: existing.account_id }),
+        },
+        credential,
+        relaySecret,
+        proxyOrigin,
+      },
+      {
+        refreshGrant: () => refreshOauthGrantSerialized(db, context.env, existing.id),
+        persistProgress: async (progress) => {
+          // Capture BEFORE the write: a 23505 throw still needs the
+          // checkpoint for compensation below.
+          checkpoint = progress;
+          await applyEmailDomainDeployCheckpoint(db, existing.id, progress);
+        },
+      },
+    );
+  } catch (err) {
+    if (err instanceof EmailDomainRowGoneError) {
+      return context.json({ error: 'project is being deleted' }, 409);
+    }
+    if (isUniqueViolation(err) && checkpoint !== null) {
+      const conflict = await compensateEmailDomainRace(
+        context,
+        existing.id,
+        { credentialKind, credential },
+        checkpoint,
+        err,
+      );
+      return context.json({ error: conflict }, 409);
+    }
+    throw err;
+  }
+  const applied = await applyEmailDomainSetupResultOrConflict(
+    context,
+    existing.id,
+    result,
+    { credentialKind, credential },
+    relayEnc,
+  );
+  if ('conflict' in applied) {
+    return context.json({ error: applied.conflict }, 409);
+  }
+  const row = applied.row;
+  await writeEmailDomainMirror(context.env.ROUTING, row, await hashEmailRelaySecret(relaySecret));
+  if (requestedMode !== undefined && row.mode !== null && requestedMode !== row.mode) {
+    return context.json(
+      {
+        error: `requested mode ${String(requestedMode)} but ${domain} is ${row.mode} on its zone`,
+        domain: serializeEmailDomain(row, result.error),
+      },
+      409,
+    );
+  }
+  return context.json(serializeEmailDomain(row, result.error), 200);
+}
+
+/**
+ * The status GET's mirror repair — the same read-compare-write self-heal
+ * shape as the allowlist listing (`projectAllowlistKvDiffers`): rewrite
+ * only on a real difference, so polling never amplifies into KV writes.
+ */
+async function repairEmailDomainMirrorIfDrifted(
+  env: Pick<
+    ApiEnv['Bindings'],
+    'ROUTING' | 'PROJECT_SECRET_KEYS_JSON' | 'PROJECT_SECRET_ACTIVE_KEY_VERSION'
+  >,
+  row: EmailDomain,
+): Promise<void> {
+  const relaySecretSha256 = await hashEmailRelaySecret(
+    await decryptEmailDomainRelaySecret(env, row.project_id, row.domain, row),
+  );
+  const raw = await env.ROUTING.get(emailDomainMirrorKey(row.domain));
+  if (raw !== null) {
+    try {
+      const mirror = JSON.parse(raw) as Partial<EmailDomainMirror>;
+      if (
+        mirror.projectId === row.project_id &&
+        mirror.status === row.status &&
+        mirror.relaySecretSha256 === relaySecretSha256 &&
+        mirror.relayWorkerName === row.relay_worker_name &&
+        mirror.accountId === row.account_id &&
+        mirror.zoneId === row.zone_id &&
+        mirror.mode === row.mode
+      ) {
+        return;
+      }
+    } catch {
+      // Unparseable mirror — rewrite below.
+    }
+  }
+  await writeEmailDomainMirror(env.ROUTING, row, relaySecretSha256);
+}
 
 function monthBucket(): string {
   const d = new Date();
@@ -774,11 +1990,13 @@ async function tryInsertWithRetry(
   return { row: null, inserted: false };
 }
 
-/** Postgres `foreign_key_violation` SQLSTATE — surfaced by both `pg` and PGlite. */
+/** Postgres SQLSTATEs — surfaced by both `pg` and PGlite. */
 const PG_FOREIGN_KEY_VIOLATION = '23503';
+const PG_UNIQUE_VIOLATION = '23505';
 
 /**
- * The project row vanished under an insert that references it.
+ * Does this error carry the given Postgres SQLSTATE anywhere in its cause
+ * chain?
  *
  * The SQLSTATE rides on the DRIVER error, and drizzle wraps that in a
  * `DrizzleQueryError` whose own `code` is undefined — so the `cause` chain
@@ -786,18 +2004,54 @@ const PG_FOREIGN_KEY_VIOLATION = '23503';
  * PGlite in `api-delete.test.ts`; `pg` reports the same code the same way.
  * Bounded so a self-referencing `cause` cannot spin.
  */
-function isForeignKeyViolation(err: unknown): boolean {
+function hasSqlState(err: unknown, code: string): boolean {
   let cursor: unknown = err;
   for (let depth = 0; depth < 8; depth++) {
     if (typeof cursor !== 'object' || cursor === null) {
       return false;
     }
-    if ((cursor as { code?: unknown }).code === PG_FOREIGN_KEY_VIOLATION) {
+    if ((cursor as { code?: unknown }).code === code) {
       return true;
     }
     cursor = (cursor as { cause?: unknown }).cause;
   }
   return false;
+}
+
+/** The project row vanished under an insert that references it. */
+function isForeignKeyViolation(err: unknown): boolean {
+  return hasSqlState(err, PG_FOREIGN_KEY_VIOLATION);
+}
+
+/** Lost an insert race on a unique index (the add/add domains race). */
+function isUniqueViolation(err: unknown): boolean {
+  return hasSqlState(err, PG_UNIQUE_VIOLATION);
+}
+
+/**
+ * The constraint behind a unique violation, walked like hasSqlState: the
+ * `23505` code can sit on a nested cause (drizzle wraps the driver error),
+ * and the constraint name rides the same frame the code does. Both drivers
+ * here — PGlite and `pg` via pg-protocol — expose it as `constraint`
+ * (`constraint_name` is postgres.js naming, not used in this repo). An
+ * empty answer classifies as a zone race — the relay race is the
+ * destructive misclassification (its compensation would delete a worker
+ * another live row owns), so the name must be found wherever the driver
+ * put it.
+ */
+function uniqueViolationConstraintName(err: unknown): string {
+  let cursor: unknown = err;
+  for (let depth = 0; depth < 8; depth++) {
+    if (typeof cursor !== 'object' || cursor === null) {
+      return '';
+    }
+    const name = (cursor as { constraint?: unknown }).constraint;
+    if (typeof name === 'string' && name !== '') {
+      return name;
+    }
+    cursor = (cursor as { cause?: unknown }).cause;
+  }
+  return '';
 }
 
 /**

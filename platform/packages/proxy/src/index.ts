@@ -3,8 +3,15 @@ import { cors } from 'hono/cors';
 import { ai } from './ai.ts';
 import { asNumber, asString, isProxyBody } from './body.ts';
 import { d1 } from './d1.ts';
+import { emailRelay } from './email-relay.ts';
 import { routeInbound } from './email-router.ts';
-import { email, MAX_RECIPIENT_LENGTH, MAX_SENDER_LENGTH } from './email.ts';
+import {
+  email,
+  MAX_MIME_BYTES,
+  MAX_RECIPIENT_LENGTH,
+  MAX_SENDER_LENGTH,
+  readEmailDomainMirror,
+} from './email.ts';
 import { kv } from './kv.ts';
 import { PLATFORM_DISABLED_KEY, PLATFORM_DISABLED_VALUE } from './platform-lifecycle.ts';
 import { r2 } from './r2.ts';
@@ -106,6 +113,87 @@ const PLATFORM_TOKEN_LENGTH = 43;
 
 // Auth middleware — parses body, authenticates, sets projectId
 app.post('/*', async (context, next) => {
+  const path = new URL(context.req.url).pathname;
+
+  // /email/relay — the custom-domain inbound hop (design doc 0078, "Custom
+  // domains on Cloudflare"). A relay worker in the CUSTOMER's account POSTs
+  // the raw MIME as the request body — not JSON — with the envelope in
+  // headers:
+  //
+  //   Authorization: Bearer <relay secret>
+  //   X-Void-Email-Domain / X-Void-Email-From / X-Void-Email-To
+  //
+  // so this branch MUST run ahead of the JSON parse below. Modelled on the
+  // /email/internal/ branch: every size bound runs BEFORE any crypto, so an
+  // unauthenticated caller cannot choose how much hashing or KV work a
+  // malformed request buys.
+  if (path === '/email/relay') {
+    const relayDomain = context.req.header('X-Void-Email-Domain');
+    const relayFrom = context.req.header('X-Void-Email-From');
+    const relayTo = context.req.header('X-Void-Email-To');
+    const relayAuth = context.req.header('Authorization');
+    if (!relayDomain || !relayFrom || !relayTo || !relayAuth) {
+      return context.json({ error: 'relay envelope required' }, 400);
+    }
+    // Each header is bounded before it is used. 256 is generous: the
+    // bearer is a 43-char secret and RFC 5321 caps an address at 254.
+    if (
+      relayDomain.length > 256 ||
+      relayFrom.length > 256 ||
+      relayTo.length > 256 ||
+      relayAuth.length > 256
+    ) {
+      return context.json({ error: 'relay envelope required' }, 400);
+    }
+    // The MIME cap is checked against the DECLARED length before the body
+    // is touched; the handler re-bounds while streaming, since a declared
+    // length can lie. A missing length is refused outright — the relay
+    // knows rawSize and always sets it.
+    const contentLengthRaw = context.req.header('content-length');
+    if (!contentLengthRaw) {
+      return context.json({ error: 'content-length required' }, 400);
+    }
+    const contentLength = Number(contentLengthRaw);
+    if (!Number.isInteger(contentLength) || contentLength < 0) {
+      return context.json({ error: 'content-length required' }, 400);
+    }
+    if (contentLength > MAX_MIME_BYTES) {
+      return context.json({ error: 'mime too large' }, 413);
+    }
+    const relaySecret = relayAuth.startsWith('Bearer ') ? relayAuth.slice(7) : null;
+    if (!relaySecret) {
+      return context.json({ error: 'invalid relay credentials' }, 403);
+    }
+    // Attribution binds to the envelope RECIPIENT's domain, never to the
+    // relay's declared domain header: a catch-all rule can be zone-wide, so
+    // a relay can receive mail addressed to a different domain on the same
+    // zone — and its secret must not author that mail. The declared header
+    // must equal the recipient's domain; a mismatch means the relay or its
+    // wiring is wrong, and the cheap string check runs before any KV work.
+    const recipientDomain = relayTo.slice(relayTo.lastIndexOf('@') + 1).toLowerCase();
+    if (recipientDomain.length === 0 || recipientDomain !== relayDomain.toLowerCase()) {
+      return context.json({ error: 'relay domain mismatch' }, 403);
+    }
+    // secret → domain → project. The mirror carries only the sha256 of the
+    // relay secret, so knowledge is proved without KV holding anything
+    // reusable; the compare is constant-time against that hash. Read
+    // uncached: a revoked or rotated secret must stop working at KV speed.
+    const mirror = await readEmailDomainMirror(context.env.ROUTING, recipientDomain);
+    if (!mirror) {
+      return context.json({ error: 'invalid relay credentials' }, 403);
+    }
+    const presented = await sha256Hex(relaySecret);
+    if (!constantTimeEqual(presented, mirror.relaySecretSha256)) {
+      return context.json({ error: 'invalid relay credentials' }, 403);
+    }
+    if (mirror.status !== 'active') {
+      return context.json({ error: 'email domain is not active' }, 403);
+    }
+    context.set('projectId', mirror.projectId);
+    await next();
+    return;
+  }
+
   let body: ProxyBody;
   try {
     const json = await context.req.json<unknown>();
@@ -144,7 +232,6 @@ app.post('/*', async (context, next) => {
   // `/internal` would silently inherit sentinel-only auth with no projectId
   // set. Today no such handler exists; if one ever does, it should be
   // mounted under its own feature-prefixed namespace.
-  const path = new URL(context.req.url).pathname;
   if (path.startsWith('/email/internal/')) {
     const platformToken = asString(body.platformToken);
     const platformTimestamp = asNumber(body.platformTimestamp);
@@ -322,6 +409,7 @@ app.route('/r2', r2);
 app.route('/revalidate', revalidate);
 app.route('/sandbox', sandbox);
 app.route('/email', email);
+app.route('/email', emailRelay);
 
 export default {
   fetch: app.fetch,
@@ -382,6 +470,23 @@ async function sha256Hex(input: string): Promise<string> {
     out += b.toString(16).padStart(2, '0');
   }
   return out;
+}
+
+/**
+ * Constant-time equality for two sha256-hex strings. Length is checked
+ * first: both sides are 64-char hex digests in every legitimate use (the
+ * mirror's `relaySecretSha256` and the presented secret's hash), so the
+ * early out leaks nothing an attacker doesn't already know.
+ */
+function constantTimeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) {
+    return false;
+  }
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) {
+    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return diff === 0;
 }
 
 async function verifyHmac(data: string, signature: string, secret: string): Promise<boolean> {

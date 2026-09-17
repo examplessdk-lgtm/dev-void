@@ -1,0 +1,189 @@
+import { describe, expect, it } from 'vite-plus/test';
+import { parseEmailArgs } from '../../src/cli/email-args.ts';
+
+/**
+ * The nested `void email domain <verb>` group (design doc 0078, "Custom
+ * domains on Cloudflare"). `runSubcommandGroup` handles one level, so the
+ * group parses its own positionals: verb first, domain second.
+ */
+describe('parseEmailArgs — domain group', () => {
+  it('parses domain add with a domain', () => {
+    expect(parseEmailArgs(['domain', 'add', 'acme.com'])).toEqual({
+      subcommand: 'domain',
+      domainVerb: 'add',
+      domain: 'acme.com',
+      subdomain: undefined,
+      projectSlug: undefined,
+      limit: undefined,
+      platform: undefined,
+    });
+  });
+
+  it('parses status, sync and remove with a domain, and list without one', () => {
+    for (const verb of ['status', 'sync', 'remove'] as const) {
+      expect(parseEmailArgs(['domain', verb, 'mail.acme.com'])).toMatchObject({
+        subcommand: 'domain',
+        domainVerb: verb,
+        domain: 'mail.acme.com',
+      });
+    }
+    expect(parseEmailArgs(['domain', 'list'])).toMatchObject({
+      subcommand: 'domain',
+      domainVerb: 'list',
+      domain: undefined,
+    });
+  });
+
+  it('parses --project on every domain verb', () => {
+    expect(parseEmailArgs(['domain', 'add', 'acme.com', '--project', 'my-app'])).toMatchObject({
+      domainVerb: 'add',
+      domain: 'acme.com',
+      projectSlug: 'my-app',
+    });
+    expect(parseEmailArgs(['domain', 'list', '--project=my-app'])).toMatchObject({
+      domainVerb: 'list',
+      projectSlug: 'my-app',
+    });
+  });
+
+  it('parses --subdomain on domain add (space and = forms)', () => {
+    expect(parseEmailArgs(['domain', 'add', 'acme.com', '--subdomain', 'mx'])).toMatchObject({
+      domainVerb: 'add',
+      domain: 'acme.com',
+      subdomain: 'mx',
+    });
+    expect(
+      parseEmailArgs(['domain', 'add', 'acme.com', '--subdomain=mail.acme.com']),
+    ).toMatchObject({
+      domainVerb: 'add',
+      domain: 'acme.com',
+      subdomain: 'mail.acme.com',
+    });
+  });
+
+  it('errors on a missing or unknown domain verb', () => {
+    expect(() => parseEmailArgs(['domain'])).toThrow(
+      'email: Usage: void email domain <add|status|list|sync|remove> [<domain>] [--project <name>].',
+    );
+    expect(() => parseEmailArgs(['domain', 'frobnicate', 'acme.com'])).toThrow(
+      /Usage: void email domain/,
+    );
+  });
+
+  it('errors when a domain verb is missing its domain', () => {
+    for (const verb of ['add', 'status', 'sync', 'remove']) {
+      expect(() => parseEmailArgs(['domain', verb])).toThrow(
+        `email: Usage: void email domain ${verb} <domain> [--project <name>].`,
+      );
+    }
+  });
+
+  it('errors when domain list receives a domain', () => {
+    expect(() => parseEmailArgs(['domain', 'list', 'acme.com'])).toThrow(
+      'email: `void email domain list` takes no domain argument.',
+    );
+  });
+
+  it('errors on extra positionals, naming them like the allow rule does', () => {
+    expect(() => parseEmailArgs(['domain', 'add', 'a.com', 'b.com'])).toThrow(
+      /`void email domain add` takes exactly one domain argument \(got 2: "a.com", "b.com"\)/,
+    );
+    expect(() => parseEmailArgs(['domain', 'status', 'a.com', 'b.com', 'c.com'])).toThrow(
+      /takes exactly one domain argument \(got 3/,
+    );
+  });
+
+  it('rejects --subdomain on the other domain verbs and on non-domain subcommands', () => {
+    for (const args of [
+      ['domain', 'status', 'acme.com', '--subdomain', 'mx'],
+      ['domain', 'list', '--subdomain=mx'],
+      ['domain', 'remove', 'acme.com', '--subdomain', 'mx'],
+    ]) {
+      expect(() => parseEmailArgs(args)).toThrow(
+        'email: --subdomain applies to `void email domain add` only.',
+      );
+    }
+    expect(() => parseEmailArgs(['usage', '--subdomain', 'mx'])).toThrow(
+      'email: --subdomain applies to `void email domain add` only.',
+    );
+    expect(() => parseEmailArgs(['allow', 'a@x.dev', '--subdomain', 'mx'])).toThrow(
+      'email: --subdomain applies to `void email domain add` only.',
+    );
+  });
+
+  it('parses --force on domain remove only', () => {
+    expect(parseEmailArgs(['domain', 'remove', 'acme.com', '--force'])).toMatchObject({
+      domainVerb: 'remove',
+      domain: 'acme.com',
+      force: true,
+    });
+    // Off by default, on every verb.
+    expect(parseEmailArgs(['domain', 'remove', 'acme.com'])).toMatchObject({
+      domainVerb: 'remove',
+      force: undefined,
+    });
+    for (const args of [
+      ['domain', 'add', 'acme.com', '--force'],
+      ['domain', 'status', 'acme.com', '--force'],
+      ['domain', 'sync', 'acme.com', '--force'],
+      ['domain', 'list', '--force'],
+      ['usage', '--force'],
+      ['disallow', 'a@x.dev', '--force'],
+    ]) {
+      expect(() => parseEmailArgs(args)).toThrow(
+        'email: --force applies to `void email domain remove` only.',
+      );
+    }
+  });
+
+  it('rejects --force with a value or repeated', () => {
+    expect(() => parseEmailArgs(['domain', 'remove', 'acme.com', '--force=yes'])).toThrow(
+      'email: --force takes no value.',
+    );
+    expect(() => parseEmailArgs(['domain', 'remove', 'acme.com', '--force', '--force'])).toThrow(
+      'email: --force can only be specified once.',
+    );
+  });
+
+  it('rejects --subdomain without a value, with an empty value, or repeated', () => {
+    expect(() => parseEmailArgs(['domain', 'add', 'acme.com', '--subdomain'])).toThrow(
+      'email: --subdomain requires a value (a subdomain label or host).',
+    );
+    expect(() =>
+      parseEmailArgs(['domain', 'add', 'acme.com', '--subdomain', '--project', 'x']),
+    ).toThrow(/--subdomain requires a value/);
+    expect(() => parseEmailArgs(['domain', 'add', 'acme.com', '--subdomain='])).toThrow(
+      /--subdomain requires a value/,
+    );
+    expect(() =>
+      parseEmailArgs(['domain', 'add', 'acme.com', '--subdomain', 'mx', '--subdomain', 'mg']),
+    ).toThrow('email: --subdomain can only be specified once.');
+  });
+
+  // Mode B (0078): the developer's own zone needs none of this group — same
+  // rejection the platform-only subcommands already had.
+  it('rejects --platform cloudflare on the domain group, accepts --platform void', () => {
+    expect(() => parseEmailArgs(['domain', 'add', 'acme.com', '--platform', 'cloudflare'])).toThrow(
+      'email: --platform cloudflare applies to `void email status` and `void email setup` only (`domain` is a Void platform command).',
+    );
+    expect(() => parseEmailArgs(['domain', 'list', '--backend', 'cloudflare'])).toThrow(
+      /applies to `void email status` and `void email setup` only/,
+    );
+    expect(parseEmailArgs(['domain', 'list', '--platform', 'void'])).toMatchObject({
+      domainVerb: 'list',
+      platform: 'void',
+    });
+  });
+
+  it('keeps the existing subcommands parsing unchanged with the group registered', () => {
+    // The shared flag rules still bind inside the group.
+    expect(() => parseEmailArgs(['domain', 'list', '--project', 'a', '--project', 'b'])).toThrow(
+      'email: --project can only be specified once.',
+    );
+    expect(() => parseEmailArgs(['domain', 'add', 'acme.com', '--project='])).toThrow(
+      'email: --project requires a value (a project name).',
+    );
+    // And the top-level usage error names the group.
+    expect(() => parseEmailArgs(['nope'])).toThrow(/email: Usage: void email .*domain/);
+  });
+});

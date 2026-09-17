@@ -16,6 +16,11 @@ import {
   getProjectResources,
   terminateBuildsForProject,
 } from '../db.ts';
+import { revokeOauthGrant } from '../email/cf-customer.ts';
+import { refreshOauthGrantSerialized } from '../email/credential-lease.ts';
+import { clearEmailDomainMirror, decryptEmailDomainToken } from '../email/domains.ts';
+import type { EmailDomain } from '../email/domains.ts';
+import { removeEmailDomain } from '../email/relay-engine.ts';
 import type { ApiEnv } from '../env.ts';
 import { cancelContainerBuildDos } from '../github/cancel-builds.ts';
 import {
@@ -23,7 +28,11 @@ import {
   getProjectDeploymentWorkerName,
   getProjectQueueName,
 } from '../naming.ts';
-import { deployments as deploymentsTable, projects as projectsTable } from '../schema.ts';
+import {
+  deployments as deploymentsTable,
+  emailDomains,
+  projects as projectsTable,
+} from '../schema.ts';
 import type { Build, DeployManifest, Project, Resource } from '../types.ts';
 import {
   deleteCustomHostname,
@@ -497,10 +506,15 @@ export async function teardownProject(
   await cancelContainerBuildDos(context.env, cancelledOnLock, 'project deleted');
 
   await cleanupCriticalResources(context, projectId, project);
-  // Fail-closed, and BEFORE anything below is destroyed: these two KV keys
-  // are what still authorizes the project's non-expiring proxy token to send
-  // mail, and the project row is the only handle a retry has for them.
-  await revokeProjectEmailSendAuthorization(context.env.ROUTING, projectId);
+  // Fail-closed, and BEFORE anything below is destroyed: these KV keys are
+  // what still authorizes the project's non-expiring proxy token to send
+  // mail and its relay secrets to submit inbound mail, and the project row
+  // is the only handle a retry has for them.
+  await revokeProjectEmailSendAuthorization(context.get('db'), context.env.ROUTING, projectId);
+  // Best-effort, and AFTER the mirrors above are gone: the relay worker and
+  // zone catch-all live in the CUSTOMER's account, so a stranded relay is
+  // already denied by the proxy.
+  await cleanupProjectEmailDomains(context, projectId);
   const { warnings: bestEffortWarnings, cleanedCfIds } = await cleanupBestEffortResources(
     context,
     projectId,
@@ -599,8 +613,9 @@ export class EmailSendRevocationError extends Error {
 }
 
 /**
- * Delete the two KV mirrors that authorize `/email/send` for this project,
- * and FAIL the teardown if either delete does.
+ * Delete the KV mirrors that authorize `/email/send` and `/email/relay` for
+ * this project, and FAIL the teardown if any delete (or the domain
+ * enumeration) does.
  *
  * `__VOID_PROXY_TOKEN` is an HMAC of the project id that never expires, and
  * the tenant's own worker code can read it, so after teardown the proxy's
@@ -608,18 +623,26 @@ export class EmailSendRevocationError extends Error {
  * shared `send_email` binding: `email-slug:<projectId>` absent is a 502 and
  * `email-allowlist:<projectId>` absent denies every recipient, while a
  * missing ROUTING blob (`cleanupBestEffortResources` deletes it, also
- * best-effort) is deliberately read as "not suspended". Once
- * `deleteProjectCascade` has run there is no row to retry from and nothing
+ * best-effort) is deliberately read as "not suspended". The same holds on
+ * the inbound lane: a registered domain's relay secret never expires
+ * either, and the `email-domain:<domain>` mirror is what `/email/relay`
+ * proves it against — a mirror that outlives the project keeps the dead
+ * tenant's domain relayable (rejected only later, at slug resolution).
+ * Once `deleteProjectCascade` has run there is no row to retry from —
+ * the FK cascade takes the `email_domains` rows with it — and nothing
  * sweeps these keys, so a delete that was swallowed here would leave the
- * dead project sendable for as long as the slug and allowlist stayed behind.
- * Failing closed keeps the row — the retry handle — exactly as the
+ * dead project sendable and relayable for as long as the mirrors stayed
+ * behind. Failing closed keeps the row — the retry handle — exactly as the
  * destination revoke paths keep theirs when the mirror write fails.
  *
  * The slug mirror goes first: it is the stronger gate (a 502 whatever the
- * allowlist says), so if the second delete is the one that fails the send
- * path is already closed while the row waits for the retry.
+ * allowlist says), so if a later delete is the one that fails the send path
+ * is already closed while the row waits for the retry. The domain rows must
+ * be read here, before the cascade: afterwards the set of mirrors to clear
+ * is unrecoverable.
  */
 async function revokeProjectEmailSendAuthorization(
+  db: Db,
   kv: KVNamespace,
   projectId: string,
 ): Promise<void> {
@@ -629,6 +652,120 @@ async function revokeProjectEmailSendAuthorization(
     } catch (err) {
       console.error(`[cleanup] KV delete failed for ${key}:`, err);
       throw new EmailSendRevocationError(key, err);
+    }
+  }
+  let domains: Array<{ domain: string }>;
+  try {
+    domains = await db
+      .select({ domain: emailDomains.domain })
+      .from(emailDomains)
+      .where(eq(emailDomains.project_id, projectId));
+  } catch (err) {
+    console.error(`[cleanup] email domain lookup failed for project=${projectId}:`, err);
+    throw new EmailSendRevocationError(`email-domain:* (project ${projectId})`, err);
+  }
+  for (const { domain } of domains) {
+    try {
+      await clearEmailDomainMirror(kv, domain);
+    } catch (err) {
+      console.error(`[cleanup] KV delete failed for email-domain:${domain}:`, err);
+      throw new EmailSendRevocationError(`email-domain:${domain}`, err);
+    }
+  }
+}
+
+/**
+ * Best-effort teardown of the CUSTOMER-side state each `email_domains` row
+ * created: the relay worker in the customer's account, and the zone
+ * catch-all naming it (removeEmailDomain owns the conditional-reset rule).
+ * Runs after the KV mirrors are revoked, so a relay that strands here is
+ * already denied by the proxy, and before the cascade, which destroys the
+ * rows read here.
+ *
+ * The grant refresh goes through the row's serialized chain: refresh
+ * tokens are single-use, and a teardown that crashes before the cascade
+ * must leave the row's credential live for the retry. A row that never
+ * deployed a relay has no customer-side state and is skipped — its
+ * refresh would burn a single-use rotation for nothing. Never throws: a
+ * project delete must not 5xx on the customer's CF account being
+ * unreachable or the grant being revoked.
+ */
+async function cleanupProjectEmailDomains(
+  context: Context<ApiEnv>,
+  projectId: string,
+): Promise<void> {
+  const db = context.get('db');
+  let rows: Array<
+    Pick<
+      EmailDomain,
+      | 'id'
+      | 'domain'
+      | 'credential_kind'
+      | 'zone_id'
+      | 'account_id'
+      | 'relay_worker_name'
+      | 'token_ciphertext'
+      | 'token_iv'
+      | 'token_key_version'
+    >
+  > = [];
+  try {
+    rows = await db
+      .select({
+        id: emailDomains.id,
+        domain: emailDomains.domain,
+        credential_kind: emailDomains.credential_kind,
+        zone_id: emailDomains.zone_id,
+        account_id: emailDomains.account_id,
+        relay_worker_name: emailDomains.relay_worker_name,
+        token_ciphertext: emailDomains.token_ciphertext,
+        token_iv: emailDomains.token_iv,
+        token_key_version: emailDomains.token_key_version,
+      })
+      .from(emailDomains)
+      .where(eq(emailDomains.project_id, projectId));
+  } catch (err) {
+    console.error(`[cleanup] email domain lookup failed for project=${projectId}:`, err);
+  }
+  for (const row of rows) {
+    if (!row.relay_worker_name) {
+      continue;
+    }
+    try {
+      const credential = await decryptEmailDomainToken(context.env, projectId, row.domain, row);
+      const { failed_steps } = await removeEmailDomain(
+        {
+          row: {
+            credential_kind: row.credential_kind,
+            account_id: row.account_id,
+            relay_worker_name: row.relay_worker_name,
+            zone_id: row.zone_id,
+          },
+          credential,
+        },
+        {
+          // The row is cascade-deleted either way, but the customer's
+          // Cloudflare grant must not outlive the project — revoke it for
+          // oauth_grant rows. Refresh rotations must persist through the
+          // row's serialized chain while it still exists.
+          refreshGrant: () => refreshOauthGrantSerialized(db, context.env, row.id),
+          ...(row.credential_kind === 'oauth_grant' ? { revokeGrant: revokeOauthGrant } : {}),
+        },
+      );
+      if (failed_steps.length > 0) {
+        // Teardown proceeds regardless — the cascade owns the row, and the
+        // residue is visible in the customer's own Cloudflare account.
+        console.warn('[email] teardown left CF-side residue', {
+          projectId,
+          domain: row.domain,
+          failed_steps,
+        });
+      }
+    } catch (err) {
+      console.error(
+        `[cleanup] email domain CF cleanup failed for project=${projectId} domain=${row.domain}:`,
+        err,
+      );
     }
   }
 }

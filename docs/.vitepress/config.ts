@@ -43,6 +43,7 @@ const referenceItems = [
       { text: 'void secret', link: '/reference/cli#secrets' },
       { text: 'void github', link: '/reference/cli#github' },
       { text: 'void domain', link: '/reference/cli#custom-domains' },
+      { text: 'void email', link: '/reference/cli#email' },
       { text: 'void init --agents', link: '/reference/cli#agent' },
     ],
   },

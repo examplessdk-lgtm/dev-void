@@ -2344,6 +2344,165 @@ describe('routeInbound — reply sender pin (F1)', () => {
 });
 
 // -----------------------------------------------------------------------
+// Reply sender pin extension (design doc 0078, "What changes in the
+// existing rules"): beyond `<slug>[+tag]@<received-domain>`, a reply may
+// send as ANY address on a custom domain whose `email-domain:<domain>`
+// mirror is `active` and maps to the receiving project. The mirror is the
+// authorization — the router has no other view of `email_domains`.
+// -----------------------------------------------------------------------
+
+describe('routeInbound — reply sender pin: registered custom domains', () => {
+  // Dummy mirror fixture — the sha field is a placeholder hex string, never
+  // a real secret or checksum of one.
+  const registeredMirror = (projectId = 'p_test', status = 'active') =>
+    JSON.stringify({
+      projectId,
+      status,
+      relaySecretSha256: '00'.repeat(32),
+      relayWorkerName: 'void-email-relay',
+      accountId: 'acct_customer',
+      zoneId: 'zone_1',
+      mode: 'subdomain',
+    });
+
+  it('accepts any address on a domain whose active mirror maps to the receiving project', async () => {
+    const { env } = makeEnv({
+      kvSeed: withAllowlist(['admin@example.com'], {
+        'email-domain:acme.com': registeredMirror(),
+      }),
+      emailReturn: [
+        {
+          type: 'reply',
+          from: 'support@acme.com',
+          to: 'admin@example.com',
+          raw: replyRaw('support@acme.com', 'r'),
+        },
+      ],
+    });
+    const { message, replyCalls } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(replyCalls).toHaveLength(1);
+    expect(replyCalls[0]?.from).toBe('support@acme.com');
+  });
+
+  it('rejects a custom-domain sender whose mirror maps to ANOTHER project', async () => {
+    const { env } = makeEnv({
+      kvSeed: withAllowlist(['admin@example.com'], {
+        'email-domain:acme.com': registeredMirror('p_other'),
+      }),
+      emailReturn: [
+        {
+          type: 'reply',
+          from: 'support@acme.com',
+          to: 'admin@example.com',
+          raw: replyRaw('support@acme.com', 'r'),
+        },
+      ],
+    });
+    const { message, replyCalls } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(replyCalls).toHaveLength(0);
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('reply dropped'));
+  });
+
+  it.each(['pending', 'token_revoked', 'token_expired', 'failed'])(
+    'rejects a custom-domain sender whose mirror status is %s',
+    async (status) => {
+      const { env } = makeEnv({
+        kvSeed: withAllowlist(['admin@example.com'], {
+          'email-domain:acme.com': registeredMirror('p_test', status),
+        }),
+        emailReturn: [
+          {
+            type: 'reply',
+            from: 'support@acme.com',
+            to: 'admin@example.com',
+            raw: replyRaw('support@acme.com', 'r'),
+          },
+        ],
+      });
+      const { message, replyCalls } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
+      const { ctx } = createCtx();
+      await routeInbound(message, env, ctx);
+      expect(replyCalls).toHaveLength(0);
+    },
+  );
+
+  it('rejects a custom-domain sender with no mirror at all', async () => {
+    const { env } = makeEnv({
+      kvSeed: withAllowlist(['admin@example.com']),
+      emailReturn: [
+        {
+          type: 'reply',
+          from: 'support@unregistered.example',
+          to: 'admin@example.com',
+          raw: replyRaw('support@unregistered.example', 'r'),
+        },
+      ],
+    });
+    const { message, replyCalls } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(replyCalls).toHaveLength(0);
+  });
+
+  it('fails closed when the mirror read throws — the reply is dropped, the delivery is not retried', async () => {
+    const { env } = makeEnv({
+      kvSeed: withAllowlist(['admin@example.com'], {
+        'email-domain:acme.com': registeredMirror(),
+      }),
+      kvGetFailures: ['email-domain:acme.com'],
+      emailReturn: [
+        {
+          type: 'reply',
+          from: 'support@acme.com',
+          to: 'admin@example.com',
+          raw: replyRaw('support@acme.com', 'r'),
+        },
+      ],
+    });
+    const { message, rejectCalls, replyCalls } = createFakeMessage({
+      to: `myslug+tag@${PROD_DOMAIN}`,
+    });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(replyCalls).toHaveLength(0);
+    // A dropped action is not a bounce.
+    expect(rejectCalls).toHaveLength(0);
+  });
+
+  it('memoizes the mirror lookup across replies from one domain in a message', async () => {
+    const { env, kv } = makeEnv({
+      kvSeed: withAllowlist(['admin@example.com'], {
+        'email-domain:acme.com': registeredMirror(),
+      }),
+      emailReturn: [
+        {
+          type: 'reply',
+          from: 'support@acme.com',
+          to: 'admin@example.com',
+          raw: replyRaw('support@acme.com', 'r'),
+        },
+        {
+          type: 'reply',
+          from: 'sales@acme.com',
+          to: 'admin@example.com',
+          raw: replyRaw('sales@acme.com', 'r'),
+        },
+      ],
+    });
+    const { message, replyCalls } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(replyCalls).toHaveLength(2);
+    const mirrorReads = kv.get.mock.calls.filter(([key]) => key === 'email-domain:acme.com');
+    expect(mirrorReads).toHaveLength(1);
+  });
+});
+
+// -----------------------------------------------------------------------
 // Reject reasons are truncated BEFORE control chars are stripped.
 //
 // `sanitize()` used to run its global replacement over the whole string and

@@ -434,7 +434,8 @@ const HELP_TREE: HelpTree = {
     },
   },
   email: {
-    summary: 'Inspect email activity and manage verified recipients.',
+    summary:
+      'Inspect email activity, manage verified recipients, and send and receive at your own domain.',
     usage: ['void email <command>'],
     commands: [
       { command: 'usage', description: 'Show monthly outbound/inbound counts and quota' },
@@ -442,6 +443,10 @@ const HELP_TREE: HelpTree = {
       { command: 'destinations', description: 'List verified recipient addresses' },
       { command: 'allow <address>', description: 'Add a recipient and trigger CF verification' },
       { command: 'disallow <address>', description: 'Remove a recipient from the allowlist' },
+      {
+        command: 'domain <add|status|list|sync|remove>',
+        description: 'Send and receive at your own domain on a Cloudflare zone',
+      },
       {
         command: 'status --platform cloudflare',
         description: 'Show the email setup state and address map on your own account',
@@ -482,6 +487,77 @@ const HELP_TREE: HelpTree = {
         'Remove a recipient from the verified allowlist.',
         'void email disallow <address> [options]',
       ),
+      // The one nested group: verbs parse in email-args.ts (`domain <add|status|list|sync|remove>`).
+      // Void-platform-only, so `--project` is global here; `--subdomain` is `add`-only.
+      domain: {
+        summary: 'Send and receive at your own domain on a Cloudflare zone.',
+        usage: ['void email domain <verb> [<domain>] [options]'],
+        commands: [
+          {
+            command: 'add <domain>',
+            description: 'Register the domain (OAuth grant, or a scoped API token)',
+          },
+          {
+            command: 'status <domain>',
+            description: 'Show state; re-probes the credential and relay, polls a pending row',
+          },
+          { command: 'list', description: 'List registered email domains' },
+          {
+            command: 'sync <domain>',
+            description: 'Redeploy the relay at the current version and rotate its secret',
+          },
+          {
+            command: 'remove <domain>',
+            description: 'Delete the registration, stored credential, and relay secret',
+          },
+        ],
+        options: [
+          {
+            command: '--subdomain <label|host>',
+            description: 'On add: register this subdomain instead of the proposed mail.<domain>',
+          },
+          { command: '--project <name>', description: 'Project name override' },
+        ],
+        children: {
+          add: {
+            summary:
+              'Register a domain on a Cloudflare zone you own for sending and receiving. Proposes mail.<domain> when the apex already carries MX.',
+            usage: ['void email domain add <domain> [options]'],
+            options: [
+              {
+                command: '--subdomain <label|host>',
+                description: 'Register this subdomain instead of the proposed mail.<domain>',
+              },
+              { command: '--project <name>', description: 'Project name override' },
+            ],
+          },
+          status: withProjectOption(
+            'Show a registered domain, re-probing its credential and relay.',
+            'void email domain status <domain> [options]',
+          ),
+          list: withProjectOption(
+            'List registered email domains.',
+            'void email domain list [options]',
+          ),
+          sync: withProjectOption(
+            'Redeploy the relay at the current version and rotate its secret.',
+            'void email domain sync <domain> [options]',
+          ),
+          // Not `withProjectOption`: `remove` has a flag of its own (`--force`),
+          // same shape as the `email logs` page above.
+          remove: {
+            summary: 'Delete the registration, stored credential, and relay secret.',
+            usage: ['void email domain remove <domain> [options]'],
+            options: [
+              {
+                command: '--force',
+                description: 'Drop the row even when Cloudflare-side cleanup fails',
+              },
+              { command: '--project <name>', description: 'Project name override' },
+            ],
+          },
+        },
+      },
       // Mode B (design doc 0078): both read the local project + your wrangler session,
       // never a Void project, so neither takes `--project`.
       status: {

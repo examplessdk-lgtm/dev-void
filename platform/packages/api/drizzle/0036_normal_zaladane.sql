@@ -1,0 +1,2 @@
+CREATE UNIQUE INDEX "email_domains_zone_uq" ON "email_domains" USING btree ("zone_id") WHERE "email_domains"."zone_id" IS NOT NULL AND "email_domains"."status" IN ('active', 'pending');--> statement-breakpoint
+CREATE UNIQUE INDEX "email_domains_relay_uq" ON "email_domains" USING btree ("account_id","relay_worker_name") WHERE "email_domains"."relay_worker_name" IS NOT NULL;

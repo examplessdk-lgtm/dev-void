@@ -197,6 +197,20 @@
       "when": 1789475317696,
       "tag": "0034_email_destinations",
       "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "version": "7",
+      "when": 1789561767537,
+      "tag": "0035_email_domains",
+      "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1789584738552,
+      "tag": "0036_normal_zaladane",
+      "breakpoints": true
     }
   ]
 }

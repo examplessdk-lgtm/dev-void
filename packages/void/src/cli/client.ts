@@ -252,6 +252,80 @@ export type EmailDestinationResponse = {
   verificationSent?: boolean;
 };
 
+/**
+ * The public shape of an `email_domains` row (design doc 0078, contract 1) —
+ * metadata only. The api's serializer never carries the credential, the
+ * relay secret, or any ciphertext, so this type can never accidentally
+ * contain one.
+ */
+export type EmailDomainResponse = {
+  id: string;
+  domain: string;
+  mode: 'apex' | 'subdomain' | null;
+  status: 'pending' | 'active' | 'token_revoked' | 'token_expired' | 'failed';
+  credential_kind: 'oauth_grant' | 'api_token';
+  relay_worker_name: string | null;
+  relay_version: number | null;
+  /** Metadata from GET /user/tokens/verify (api_token rows) — safe to print. */
+  token_id: string | null;
+  token_expires_on: string | null;
+  setup_state: {
+    /** Orchestration step that left the row 'failed'. */
+    failed_step?: string;
+    /** Steps still owed by the human (the routing-subdomain dashboard form). */
+    remaining_steps?: Array<string>;
+  } | null;
+  /**
+   * Present on add/sync outcomes that failed a step. The api guarantees the
+   * text names the failing step or CF error — never credential material — so
+   * the CLI prints it verbatim.
+   */
+  error?: string;
+  created_at: string;
+  updated_at: string;
+};
+
+/** The zone catch-all outcome of a sync — absent when the row has no zone_id. */
+export type EmailDomainSyncCatchAll =
+  | 'ensured'
+  | 'already_set'
+  | 'foreign_conflict'
+  | 'probe_failed';
+
+/** POST .../email/domains/:domain/sync adds the catch-all outcome at the top level. */
+export type EmailDomainSyncResponse = EmailDomainResponse & {
+  catch_all?: EmailDomainSyncCatchAll;
+};
+
+/** GET /email/domains/:domain adds a live credential probe and the relay-drift read. */
+export type EmailDomainStatusResponse = EmailDomainResponse & {
+  credential_status: 'active' | 'expired' | 'revoked' | 'probe_failed';
+  current_relay_version: number;
+  relay_drift: boolean;
+  relay_missing: boolean | null;
+  /** Live read of the zone's catch-all rule relative to this domain's relay. */
+  catch_all: 'points_here' | 'points_elsewhere' | 'missing' | 'disabled' | 'unknown';
+  /** true when the zone's catch-all no longer points at this relay — `domain sync` re-points it. */
+  catch_all_drift: boolean;
+};
+
+/** A Cloudflare-side cleanup step the email-domain delete orchestration can fail. */
+export type RemoveEmailDomainFailedStep = 'catch_all' | 'delete_relay' | 'revoke_grant';
+
+export type RemoveEmailDomainResponse = {
+  ok: boolean;
+  /**
+   * false = the row was KEPT for retry: a Cloudflare-side step failed and
+   * the remove was not forced, so the credential stays for the retry.
+   * true = the platform row, the stored credential and the relay secret
+   * are gone.
+   */
+  removed: boolean;
+  /** true when `?force=1` dropped the row despite Cloudflare-side failures. */
+  forced?: true;
+  failed_steps?: Array<RemoveEmailDomainFailedStep>;
+};
+
 export type DomainResponse = {
   id: string;
   project_id: string;
@@ -1342,6 +1416,118 @@ export class PlatformClient {
 
     if (!res.ok) {
       await throwPlatformApiError('Failed to remove email destination', res);
+    }
+
+    return res.json();
+  }
+
+  async listEmailDomains(projectId: string): Promise<Array<EmailDomainResponse>> {
+    const res = await fetch(`${this.baseUrl}/projects/${projectId}/email/domains`, {
+      headers: {
+        ...this.authHeaders,
+      },
+    });
+
+    if (!res.ok) {
+      await throwPlatformApiError('Failed to list email domains', res);
+    }
+
+    return res.json();
+  }
+
+  /**
+   * `domain add` sends the credential exactly once — the OAuth grant's
+   * refresh token xor a pasted API token (the api enforces exactly one). It
+   * is the only call that ever carries it: the platform stores it encrypted
+   * per project, and every later step (`status`, `sync`, `remove`) addresses
+   * the row by domain. The caller must not log the input.
+   */
+  async addEmailDomain(
+    projectId: string,
+    input: { domain: string; refreshToken?: string; apiToken?: string },
+  ): Promise<EmailDomainResponse> {
+    const res = await fetch(`${this.baseUrl}/projects/${projectId}/email/domains`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...this.authHeaders,
+      },
+      body: JSON.stringify({
+        domain: input.domain,
+        ...(input.refreshToken !== undefined ? { refreshToken: input.refreshToken } : {}),
+        ...(input.apiToken !== undefined ? { apiToken: input.apiToken } : {}),
+      }),
+    });
+
+    if (!res.ok) {
+      await throwPlatformApiError('Failed to add email domain', res);
+    }
+
+    return res.json();
+  }
+
+  async getEmailDomain(projectId: string, domain: string): Promise<EmailDomainStatusResponse> {
+    const res = await fetch(
+      `${this.baseUrl}/projects/${projectId}/email/domains/${encodeURIComponent(domain)}`,
+      {
+        headers: {
+          ...this.authHeaders,
+        },
+      },
+    );
+
+    if (!res.ok) {
+      await throwPlatformApiError('Failed to fetch email domain status', res);
+    }
+
+    return res.json();
+  }
+
+  /** Redeploys the relay at the current version and rotates its secret (0078, `sync`). */
+  async syncEmailDomain(projectId: string, domain: string): Promise<EmailDomainSyncResponse> {
+    const res = await fetch(
+      `${this.baseUrl}/projects/${projectId}/email/domains/${encodeURIComponent(domain)}/sync`,
+      {
+        method: 'POST',
+        headers: {
+          ...this.authHeaders,
+        },
+      },
+    );
+
+    if (!res.ok) {
+      await throwPlatformApiError('Failed to sync email domain', res);
+    }
+
+    return res.json();
+  }
+
+  /**
+   * `force` appends `?force=1`: the api drops the row even when a
+   * Cloudflare-side cleanup step fails (and answers `forced: true` +
+   * `failed_steps`). Without it a CF-side failure keeps the row for retry
+   * (`removed: false`).
+   */
+  async removeEmailDomain(
+    projectId: string,
+    domain: string,
+    force?: boolean,
+  ): Promise<RemoveEmailDomainResponse> {
+    const url = new URL(
+      `${this.baseUrl}/projects/${projectId}/email/domains/${encodeURIComponent(domain)}`,
+    );
+    if (force) {
+      url.searchParams.set('force', '1');
+    }
+    const res = await fetch(url, {
+      method: 'DELETE',
+      headers: {
+        ...this.authHeaders,
+      },
+    });
+
+    if (!res.ok) {
+      await throwPlatformApiError('Failed to remove email domain', res);
     }
 
     return res.json();
