@@ -274,7 +274,10 @@ OUTBOUND  sendEmail({ from: "noreply@acme.com", … })
 lines: the `email()` handler streams `message.raw` straight into a POST with
 the domain's relay secret — no parsing, no buffering, so it stays inside
 Workers Free CPU limits, and messages over the 25 MiB inbound cap never
-reach it (Cloudflare rejects them first). `message.to` is a single address
+reach it (Cloudflare rejects them first). The stream rides through a
+`FixedLengthStream(rawSize)`: the runtime derives Content-Length from the
+body and ignores a hand-set one, so a plain stream would go out chunked —
+and the proxy refuses a length-less body before any crypto. `message.to` is a single address
 (the envelope RCPT TO), so a multi-recipient message arrives as one
 invocation per recipient. The catch-all is zone-scoped with no domain
 parameter, so mail for a second domain on the same zone can land on the
@@ -560,7 +563,9 @@ false, failed_steps }`. The owner retries once the CF-side problem is
   `status: 'pending' | 'active' | 'token_revoked' | 'token_expired' |
 'failed'`, `relay_worker_name`, `relay_version`, the relay secret
   ciphertext triple, `setup_state` (a jsonb carrying `failed_step`,
-  `remaining_steps` or `removal_failed_steps`), `token_id` and
+  `remaining_steps` or `removal_failed_steps`), `attempt_id` (the CLI add
+  attempt that last wrote the credential — null on rows an older CLI
+  wrote), `token_id` and
   `token_expires_on` from `GET /user/tokens/verify` (so `status` can name
   the token to revoke and warn before a TTL runs out), timestamps. The two
   partial unique indexes from the backstops section ride the same table.
@@ -646,15 +651,30 @@ just-stored credential) and a revoke failure is logged, never fatal.
 Teardown and admin removal revoke. Conflict compensation deliberately does
 NOT — the loser's credential may survive on another row. A REJECTED add
 attempt revokes too: the CLI mints a fresh grant per attempt and drops its
-only copy on an error response, so every validation 400, cross-project
-conflict 409, and teardown 409 revokes the posted grant first — with one
-guard: a re-pasted grant equal to the conflicting row's stored credential is
-kept (revoking it would brick the live row). A LOST answer is not a
-rejection: when the add POST never gets its response the CLI re-reads the
-domain's status — a row means the add committed (printed, done); a 404
-means nothing persisted, so the CLI revokes the grant it still holds via
-its own best-effort copy of the same RFC 7009 POST; anything else is
-reported as unknown — a blind revoke could brick a row that did commit.
+only copy on ANY error response, so every rejection — validation 400,
+cross-project conflict 409, teardown 409, and the project guards' 404/403 —
+revokes the posted grant first. Revocation asks for no ownership: for a
+public client the token itself is the only credential the RFC 7009 endpoint
+wants, so revoking what was posted grants the caller nothing they did not
+already hold. One guard: a re-pasted grant equal to the conflicting row's
+stored credential is kept (revoking it would brick the live row). A LOST answer is not a
+rejection either: every add attempt carries a random attempt id, stamped
+on the row at insert and at credential replace, and always serialized on
+the status GET (null on rows an older CLI wrote — an api predating
+attempt identity omits the key, and key presence is how a new CLI detects
+one). When the POST's response never arrives the CLI polls the status —
+15 tries, 1s apart, because a lost answer does not stop the api worker
+mid-commit. The row carrying THIS attempt's id means the add committed
+(printed, done, never revoked). A row stamped with a DIFFERENT id — or
+null — kept its existing credential: a committed add of mine would have
+stamped my id, so this attempt's grant was never stored and is revoked,
+and the failure says to re-run. A 404 at every poll means nothing
+persisted: the held grant is revoked (via the CLI's own best-effort copy
+of the same RFC 7009 POST). A row from an api without the key is trusted
+like the pre-attempt flow, never revoked — a committed add there is
+indistinguishable from a pre-existing row. And no informative read at all
+is reported as unknown — a blind revoke could brick a row that did
+commit.
 The consent flow's own straggler dies the same way: an exchange that
 completes after the flow settled (Enter, an abort, the timeout) minted a
 grant only the CLI holds, so it is revoked fire-and-forget and the browser

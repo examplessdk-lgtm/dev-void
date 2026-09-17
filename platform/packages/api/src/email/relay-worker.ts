@@ -16,7 +16,7 @@
  * a worker detaches every routing rule that points at it.
  */
 
-export const RELAY_VERSION = 2;
+export const RELAY_VERSION = 3;
 
 // Baked into the upload metadata; bump with RELAY_VERSION if the source
 // ever depends on newer runtime behavior.
@@ -34,19 +34,21 @@ export const RELAY_EMAIL_DOMAIN_BINDING = 'VOID_EMAIL_DOMAIN';
  * 0078, contract 3): POST {VOID_PROXY_ORIGIN}/email/relay, bearer =
  * VOID_RELAY_SECRET, X-Void-Email-* headers carrying the domain and the
  * envelope sender/recipient, body = the raw MIME streamed straight from
- * message.raw. Content-Length comes from message.rawSize because the proxy
- * rejects a length-less body before any crypto, and a streamed body would
- * otherwise go out chunked. The POST rides ctx.waitUntil AND is awaited:
- * waitUntil keeps the stream alive, the await is what lets a non-2xx
- * answer reject the message. The reject reason is deliberately generic —
- * it travels back to the original sender in a bounce.
+ * message.raw. The stream is piped through a FixedLengthStream(rawSize):
+ * the runtime derives Content-Length from the body and IGNORES a manually
+ * set one, so a plain ReadableStream would go out chunked — and the proxy
+ * rejects a length-less body before any crypto. The POST rides
+ * ctx.waitUntil AND is awaited: waitUntil keeps the stream alive, the
+ * await is what lets a non-2xx answer reject the message. The reject
+ * reason is deliberately generic — it travels back to the original sender
+ * in a bounce.
  *
  * The recipient-domain guard is the relay-side half of the proxy's
  * recipient-domain attribution rule: a catch-all rule can be zone-wide,
  * so mail addressed to a DIFFERENT domain on the same zone can land here.
  * That mail is not this relay's to forward — the proxy would (correctly)
  * refuse it against this domain's secret — so it is refused here, loudly,
- * rather than dropped. RELAY_VERSION 2.
+ * rather than dropped. RELAY_VERSION 3.
  */
 export const RELAY_SOURCE = `export default {
   async email(message, env, ctx) {
@@ -55,6 +57,7 @@ export const RELAY_SOURCE = `export default {
       message.setReject('Unable to deliver message');
       return;
     }
+    const { readable, writable } = new FixedLengthStream(message.rawSize);
     const relay = fetch(env.VOID_PROXY_ORIGIN + '/email/relay', {
       method: 'POST',
       headers: {
@@ -62,10 +65,10 @@ export const RELAY_SOURCE = `export default {
         'X-Void-Email-Domain': env.VOID_EMAIL_DOMAIN,
         'X-Void-Email-From': message.from,
         'X-Void-Email-To': message.to,
-        'Content-Length': String(message.rawSize),
       },
-      body: message.raw,
+      body: readable,
     });
+    ctx.waitUntil(message.raw.pipeTo(writable));
     ctx.waitUntil(relay);
     const response = await relay;
     if (!response.ok) {

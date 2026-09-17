@@ -10,12 +10,40 @@ import {
 
 // Dummy stand-ins — never real secret material.
 const RELAY_SECRET = 'relay-secret-dummy';
+const MIME_BODY = 'MIME-DUMMY-BODY';
+
+// Node lacks the Workers-only FixedLengthStream global the relay source
+// pipes through — mirror workerd's semantics (same shape as the
+// integration harness's polyfill) so the evaluated source runs as-is.
+if ((globalThis as { FixedLengthStream?: unknown }).FixedLengthStream === undefined) {
+  class NodeFixedLengthStream extends TransformStream<Uint8Array, Uint8Array> {
+    constructor(expectedLength: number) {
+      let written = 0;
+      super({
+        transform(chunk, controller) {
+          written += chunk.byteLength;
+          if (written > expectedLength) {
+            controller.error(new TypeError('FixedLengthStream: length exceeded'));
+            return;
+          }
+          controller.enqueue(chunk);
+        },
+        flush(controller) {
+          if (written !== expectedLength) {
+            controller.error(new TypeError('FixedLengthStream: length mismatch'));
+          }
+        },
+      });
+    }
+  }
+  (globalThis as { FixedLengthStream?: unknown }).FixedLengthStream = NodeFixedLengthStream;
+}
 
 type RelayEnv = Record<string, string>;
 type RelayMessage = {
   from: string;
   to: string;
-  raw: string;
+  raw: ReadableStream<Uint8Array>;
   rawSize: number;
   setReject: (reason: string) => void;
 };
@@ -47,12 +75,17 @@ function relayContext() {
     [RELAY_PROXY_ORIGIN_BINDING]: 'https://proxy.example.test',
     [RELAY_EMAIL_DOMAIN_BINDING]: 'acme.com',
   };
-  const raw = 'MIME-DUMMY-BODY';
+  const rawBytes = new TextEncoder().encode(MIME_BODY);
   const message: RelayMessage = {
     from: 'sender@example.org',
     to: 'support@acme.com',
-    raw,
-    rawSize: raw.length,
+    raw: new ReadableStream({
+      start(controller) {
+        controller.enqueue(rawBytes);
+        controller.close();
+      },
+    }),
+    rawSize: rawBytes.byteLength,
     setReject: vi.fn(),
   };
   const ctx = { waitUntil: vi.fn() };
@@ -83,7 +116,7 @@ describe('RELAY_SOURCE', () => {
     expect(RELAY_COMPATIBILITY_DATE).toMatch(/^\d{4}-\d{2}-\d{2}$/);
   });
 
-  it('POSTs the raw MIME to /email/relay with the contract-3 headers', async () => {
+  it('POSTs the raw MIME to /email/relay through a FixedLengthStream with the contract-3 headers', async () => {
     const fetchMock = vi.fn().mockResolvedValueOnce(new Response('ok', { status: 200 }));
     vi.stubGlobal('fetch', fetchMock);
     const { env, message, ctx } = relayContext();
@@ -94,16 +127,27 @@ describe('RELAY_SOURCE', () => {
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toBe('https://proxy.example.test/email/relay');
     expect(init.method).toBe('POST');
+    // No hand-set Content-Length: the runtime ignores one on a stream body
+    // and derives it from the FixedLengthStream instead — a plain stream
+    // would go out chunked, and the proxy refuses a length-less body.
     expect(init.headers).toEqual({
       Authorization: `Bearer ${RELAY_SECRET}`,
       'X-Void-Email-Domain': 'acme.com',
       'X-Void-Email-From': 'sender@example.org',
       'X-Void-Email-To': 'support@acme.com',
-      'Content-Length': String(message.rawSize),
     });
-    // Streamed straight through — no base64, no JSON envelope.
-    expect(init.body).toBe(message.raw);
-    expect(ctx.waitUntil).toHaveBeenCalledOnce();
+    // Streamed straight through — no base64, no JSON envelope. The body is
+    // the fixed-length transform's readable side, not the raw stream, and
+    // draining it yields exactly rawSize bytes of the raw MIME.
+    expect(RELAY_SOURCE).toContain('FixedLengthStream');
+    const body = init.body as ReadableStream<Uint8Array>;
+    expect(body).toBeInstanceOf(ReadableStream);
+    expect(body).not.toBe(message.raw);
+    const drained = await new Response(body).arrayBuffer();
+    expect(drained.byteLength).toBe(message.rawSize);
+    expect(new TextDecoder().decode(drained)).toBe(MIME_BODY);
+    // The pump and the POST both ride waitUntil.
+    expect(ctx.waitUntil).toHaveBeenCalledTimes(2);
     expect(message.setReject).not.toHaveBeenCalled();
   });
 
@@ -111,7 +155,7 @@ describe('RELAY_SOURCE', () => {
     // The catch-all can be zone-wide: mail addressed to a DIFFERENT domain
     // on the same zone can land here. It is not this relay's to forward —
     // refuse it loudly (a bounce for the sender), never forward it under
-    // this domain's secret. RELAY_VERSION 2.
+    // this domain's secret. RELAY_VERSION 3.
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
     const { env, message, ctx } = relayContext();

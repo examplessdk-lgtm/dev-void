@@ -271,6 +271,13 @@ export type EmailDomainResponse = {
   /** Metadata from GET /user/tokens/verify (api_token rows) — safe to print. */
   token_id: string | null;
   token_expires_on: string | null;
+  /**
+   * The add attempt that last wrote the credential (null when an older CLI
+   * wrote it). Optional: apis predating attempt identity omit the key
+   * entirely, and `in`-operator detection on the raw row is how the add
+   * reconcile tells that apart from a stamped null.
+   */
+  attemptId?: string | null;
   setup_state: {
     /** Orchestration step that left the row 'failed'. */
     failed_step?: string;
@@ -1447,7 +1454,7 @@ export class PlatformClient {
    */
   async addEmailDomain(
     projectId: string,
-    input: { domain: string; refreshToken?: string; apiToken?: string },
+    input: { domain: string; refreshToken?: string; apiToken?: string; attemptId?: string },
   ): Promise<EmailDomainResponse> {
     const res = await fetch(`${this.baseUrl}/projects/${projectId}/email/domains`, {
       method: 'POST',
@@ -1459,6 +1466,7 @@ export class PlatformClient {
         domain: input.domain,
         ...(input.refreshToken !== undefined ? { refreshToken: input.refreshToken } : {}),
         ...(input.apiToken !== undefined ? { apiToken: input.apiToken } : {}),
+        ...(input.attemptId !== undefined ? { attemptId: input.attemptId } : {}),
       }),
     });
 

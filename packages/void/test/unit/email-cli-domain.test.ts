@@ -207,6 +207,9 @@ describe('domain input helpers', () => {
 });
 
 describe('emailDomainAdd', () => {
+  // The fixed per-invocation attempt id the randomUUID spy returns.
+  const ATTEMPT_ID = '11111111-2222-4333-8444-555555555555';
+
   function addDeps(overrides: Partial<EmailDomainAddDeps> = {}): EmailDomainAddDeps {
     return {
       dns: { resolveMx: vi.fn(async () => []) },
@@ -215,9 +218,16 @@ describe('emailDomainAdd', () => {
       waitForEnter: neverEnter,
       watchIntervalMs: 1,
       watchTimeoutMs: 50,
+      // Instant reconcile polls — the loop is bounded by attempt count.
+      sleep: vi.fn(async () => {}),
       exit: exitSpy(),
       ...overrides,
     };
+  }
+
+  /** Pins the per-invocation attempt id (restored by the outer afterEach). */
+  function mockAttemptId(id: string = ATTEMPT_ID): void {
+    vi.spyOn(crypto, 'randomUUID').mockReturnValue(id as ReturnType<typeof crypto.randomUUID>);
   }
 
   it('runs the grant and POSTs the refresh token for an MX-empty apex', async () => {
@@ -235,6 +245,7 @@ describe('emailDomainAdd', () => {
     expect(addEmailDomain).toHaveBeenCalledWith('prj_1', {
       domain: 'acme.com',
       refreshToken: GRANT_SENTINEL,
+      attemptId: expect.any(String),
     });
     expect(printed(infoSpy)).toContain('acme.com has no MX records → using the apex');
     expect(printed(successSpy)).toContain(
@@ -269,6 +280,7 @@ describe('emailDomainAdd', () => {
     expect(addEmailDomain).toHaveBeenCalledWith('prj_1', {
       domain: 'mail.acme.com',
       refreshToken: GRANT_SENTINEL,
+      attemptId: expect.any(String),
     });
   });
 
@@ -288,6 +300,7 @@ describe('emailDomainAdd', () => {
     expect(addEmailDomain).toHaveBeenCalledWith('prj_1', {
       domain: 'mx.acme.com',
       refreshToken: GRANT_SENTINEL,
+      attemptId: expect.any(String),
     });
   });
 
@@ -372,6 +385,7 @@ describe('emailDomainAdd', () => {
     expect(addEmailDomain).toHaveBeenCalledWith('prj_1', {
       domain: 'acme.com',
       apiToken: token,
+      attemptId: expect.any(String),
     });
     expect(printed(successSpy)).toContain(
       'Token stored on the platform, encrypted for this project — nothing is kept on this machine.',
@@ -407,6 +421,7 @@ describe('emailDomainAdd', () => {
     expect(addEmailDomain).toHaveBeenCalledWith('prj_1', {
       domain: 'acme.com',
       apiToken: LEGACY_TOKEN,
+      attemptId: expect.any(String),
     });
   });
 
@@ -437,6 +452,7 @@ describe('emailDomainAdd', () => {
     expect(addEmailDomain).toHaveBeenCalledWith('prj_1', {
       domain: 'acme.com',
       apiToken: LEGACY_TOKEN,
+      attemptId: expect.any(String),
     });
 
     // Esc at the paste prompt: nothing is POSTed, nothing is stored.
@@ -506,6 +522,7 @@ describe('emailDomainAdd', () => {
     expect(addEmailDomain).toHaveBeenCalledWith('prj_1', {
       domain: 'acme.com',
       apiToken: LEGACY_TOKEN,
+      attemptId: expect.any(String),
     });
     // The settled race stopped the poll loop: no further clipboard reads (so
     // no timer chain and no stray verify from the watch) past this point.
@@ -649,10 +666,76 @@ describe('emailDomainAdd', () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  it('reconciles a lost answer: the row exists, nothing is revoked', async () => {
+  it('reconciles a lost answer: the row carries this attempt id, nothing is revoked', async () => {
+    mockAttemptId();
     const addEmailDomain = vi.fn(async () => {
       throw new TypeError('fetch failed');
     });
+    const getEmailDomain = vi.fn(async () => statusRow({ attemptId: ATTEMPT_ID }));
+    const fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+
+    await emailDomainAdd(
+      { addEmailDomain, getEmailDomain },
+      'prj_1',
+      'acme.com',
+      undefined,
+      addDeps(),
+    );
+
+    // One read settles it: the stamped attempt id proves this attempt's
+    // POST committed, so the platform holds the credential and the row
+    // renders like any other add.
+    expect(getEmailDomain).toHaveBeenCalledTimes(1);
+    expect(getEmailDomain).toHaveBeenCalledWith('prj_1', 'acme.com');
+    expect(printed(warnSpy)).toContain('answer was lost');
+    expect(notedBlocks()).toContain('Domain:      acme.com');
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('reconciles a lost answer: a 404 then the row with this attempt id — the insert was still in flight', async () => {
+    mockAttemptId();
+    const addEmailDomain = vi.fn(async () => {
+      throw new TypeError('fetch failed');
+    });
+    const getEmailDomain = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new PlatformApiError(
+          'Failed to fetch email domain status',
+          404,
+          '{"error":"email domain not found"}',
+        ),
+      )
+      .mockResolvedValueOnce(statusRow({ attemptId: ATTEMPT_ID }));
+    const fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+
+    await emailDomainAdd(
+      { addEmailDomain, getEmailDomain },
+      'prj_1',
+      'acme.com',
+      undefined,
+      addDeps(),
+    );
+
+    // The lost answer did not stop the API worker: the row committed
+    // between polls, and the stamped attempt id proves the credential is
+    // this attempt's — revoking here would brick the row.
+    expect(getEmailDomain).toHaveBeenCalledTimes(2);
+    expect(printed(warnSpy)).toContain('answer was lost');
+    expect(notedBlocks()).toContain('Domain:      acme.com');
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('reconciles a lost answer against an api without attempt identity: the row exists, nothing is revoked', async () => {
+    mockAttemptId();
+    const addEmailDomain = vi.fn(async () => {
+      throw new TypeError('fetch failed');
+    });
+    // No attemptId key in the parsed row at all (statusRow carries none):
+    // an old api, where this could be my committed add — indistinguishable
+    // from a pre-existing row, so trust it and never revoke.
     const getEmailDomain = vi.fn(async () => statusRow({ status: 'pending' }));
     const fetchSpy = vi.fn();
     vi.stubGlobal('fetch', fetchSpy);
@@ -665,15 +748,70 @@ describe('emailDomainAdd', () => {
       addDeps(),
     );
 
-    // The POST committed and only the answer was lost: the platform holds
-    // the credential now, and the row renders like any other add.
+    expect(getEmailDomain).toHaveBeenCalledTimes(1);
     expect(getEmailDomain).toHaveBeenCalledWith('prj_1', 'acme.com');
     expect(printed(warnSpy)).toContain('answer was lost');
     expect(notedBlocks()).toContain('Domain:      acme.com');
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
+  it('revokes the minted grant when the row keeps a different attempt id through the deadline', async () => {
+    mockAttemptId();
+    const addEmailDomain = vi.fn(async () => {
+      throw new TypeError('fetch failed');
+    });
+    // The pre-existing row, stamped by an earlier attempt: this attempt's
+    // replace POST never landed, and a committed mine would carry my id.
+    const getEmailDomain = vi.fn(async () =>
+      statusRow({ attemptId: '99999999-9999-4999-8999-999999999999' }),
+    );
+    const fetchSpy = vi.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(null, { status: 200 }),
+    );
+    vi.stubGlobal('fetch', fetchSpy);
+
+    await expect(
+      emailDomainAdd({ addEmailDomain, getEmailDomain }, 'prj_1', 'acme.com', undefined, addDeps()),
+    ).rejects.toThrow('exit 1');
+
+    expect(getEmailDomain).toHaveBeenCalledTimes(15);
+    // Exactly one call: the RFC 7009 revoke of the grant this process held.
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchSpy.mock.calls[0]!;
+    expect(String(url)).toBe('https://dash.cloudflare.com/oauth2/revoke');
+    const form = new URLSearchParams(String(init?.body));
+    expect(form.get('token')).toBe(GRANT_SENTINEL);
+    expect(form.get('token_type_hint')).toBe('refresh_token');
+    expect(printed(errorSpy)).toContain("kept the row's existing credential");
+    expect(printed(errorSpy)).toContain('revoked');
+    // The token itself never reaches an output line.
+    expect(printed(errorSpy) + printed(infoSpy) + printed(warnSpy)).not.toContain(GRANT_SENTINEL);
+  });
+
+  it('treats a stamped null attempt id as foreign — a row an older CLI wrote', async () => {
+    mockAttemptId();
+    const addEmailDomain = vi.fn(async () => {
+      throw new TypeError('fetch failed');
+    });
+    const getEmailDomain = vi.fn(async () => statusRow({ attemptId: null }));
+    const fetchSpy = vi.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(null, { status: 200 }),
+    );
+    vi.stubGlobal('fetch', fetchSpy);
+
+    await expect(
+      emailDomainAdd({ addEmailDomain, getEmailDomain }, 'prj_1', 'acme.com', undefined, addDeps()),
+    ).rejects.toThrow('exit 1');
+
+    // The key is present (new api) but null — not this attempt, so the
+    // posted grant was never stored and the revoke is safe.
+    expect(getEmailDomain).toHaveBeenCalledTimes(15);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(printed(errorSpy)).toContain("kept the row's existing credential");
+  });
+
   it('revokes the minted grant when a transport failure provably never persisted it', async () => {
+    mockAttemptId();
     const addEmailDomain = vi.fn(async () => {
       throw new TypeError('fetch failed');
     });
@@ -693,6 +831,8 @@ describe('emailDomainAdd', () => {
       emailDomainAdd({ addEmailDomain, getEmailDomain }, 'prj_1', 'acme.com', undefined, addDeps()),
     ).rejects.toThrow('exit 1');
 
+    // 404 at every one of the 15 polls — provably nothing persisted.
+    expect(getEmailDomain).toHaveBeenCalledTimes(15);
     // Exactly one call: the RFC 7009 revoke of the grant this process held.
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     const [url, init] = fetchSpy.mock.calls[0]!;
@@ -707,6 +847,7 @@ describe('emailDomainAdd', () => {
   });
 
   it('never revokes on an indeterminate reconcile — the grant may be the row’s credential', async () => {
+    mockAttemptId();
     const addEmailDomain = vi.fn(async () => {
       throw new TypeError('fetch failed');
     });
@@ -720,7 +861,9 @@ describe('emailDomainAdd', () => {
       emailDomainAdd({ addEmailDomain, getEmailDomain }, 'prj_1', 'acme.com', undefined, addDeps()),
     ).rejects.toThrow('exit 1');
 
-    // A blind revoke could brick a committed row — report, don't revoke.
+    // No poll produced any read: a blind revoke could brick a committed
+    // row — report, don't revoke.
+    expect(getEmailDomain).toHaveBeenCalledTimes(15);
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(printed(errorSpy)).toContain('state is unknown');
   });

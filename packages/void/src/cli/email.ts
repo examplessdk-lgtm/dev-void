@@ -494,6 +494,8 @@ export interface EmailDomainAddDeps {
   watchIntervalMs?: number;
   /** Default 10 minutes (0078's clipboard watch bound). */
   watchTimeoutMs?: number;
+  /** Sleep between reconcile polls after a lost add answer (default: setTimeout). */
+  sleep?: (ms: number) => Promise<void>;
   /** Default: wrangler's interactivity gate, same as `void email setup`. */
   isInteractive?: boolean;
   exit?: (code: number) => never;
@@ -513,6 +515,16 @@ async function defaultPasteToken(): Promise<string | null> {
 type EmailDomainCredential =
   | { kind: 'oauth_grant'; refreshToken: string }
   | { kind: 'api_token'; apiToken: string };
+
+/**
+ * Lost-answer reconcile bounds for `domain add`: attempt-count bounded (not
+ * wall clock) so the worst case is finite and tests are deterministic. The
+ * API's pre-insert phase is DB-only but takes tens of ms to seconds of
+ * Hyperdrive RTTs, and a lost answer does not stop the API worker — a single
+ * immediate status read can 404 while the POST is still committing.
+ */
+const ADD_RECONCILE_ATTEMPTS = 15;
+const ADD_RECONCILE_INTERVAL_MS = 1000;
 
 /**
  * `void email domain add <domain>` — exported for the unit test; the command
@@ -757,7 +769,10 @@ export async function emailDomainAdd(
   }
 
   // 3. The one call that carries the credential. Everything after it
-  //    (status, sync, remove) addresses the row by domain.
+  //    (status, sync, remove) addresses the row by domain. The attempt id
+  //    is stamped on the row by the api, so a reconcile after a lost answer
+  //    can tell this attempt's committed row apart from a pre-existing one.
+  const attemptId = crypto.randomUUID();
   let row: EmailDomainResponse;
   try {
     row = await client.addEmailDomain(projectId, {
@@ -765,6 +780,7 @@ export async function emailDomainAdd(
       ...(credential.kind === 'oauth_grant'
         ? { refreshToken: credential.refreshToken }
         : { apiToken: credential.apiToken }),
+      attemptId,
     });
   } catch (err) {
     if (err instanceof PlatformApiError) {
@@ -777,40 +793,81 @@ export async function emailDomainAdd(
     // API, or it COMMITTED and only the answer was lost. The CLI holds the
     // only copy of a freshly minted grant, so reconcile before anything
     // irreversible — a committed row is the grant's revocation handle, and
-    // only a definitive "no row" makes a CLI-side revoke safe (revoking a
-    // stored-and-unrotated grant would brick the row it belongs to).
-    let existing: EmailDomainStatusResponse | undefined;
-    let unknown = false;
-    try {
-      existing = await client.getEmailDomain(projectId, target.emailDomain);
-    } catch (statusErr) {
-      if (statusErr instanceof PlatformApiError && statusErr.status === 404) {
-        existing = undefined;
-      } else {
-        unknown = true;
+    // only a definitive "not on the row" makes a CLI-side revoke safe
+    // (revoking a stored-and-unrotated grant would brick the row it
+    // belongs to).
+    const sleep =
+      deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+    // The last informative read picks the deadline branch: a row carrying a
+    // DIFFERENT attempt id means the platform kept the row's existing
+    // credential; a 404 means nothing persisted (yet).
+    let lastRead: 'foreign' | 'missing' | undefined;
+    for (let attempt = 0; attempt < ADD_RECONCILE_ATTEMPTS; attempt++) {
+      if (attempt > 0) {
+        await sleep(ADD_RECONCILE_INTERVAL_MS);
       }
-    }
-    if (existing !== undefined) {
+      let existing: EmailDomainStatusResponse;
+      try {
+        existing = await client.getEmailDomain(projectId, target.emailDomain);
+      } catch (statusErr) {
+        if (statusErr instanceof PlatformApiError && statusErr.status === 404) {
+          lastRead = 'missing';
+        }
+        // Any other error is no read at all — keep polling.
+        continue;
+      }
+      if ('attemptId' in existing) {
+        if (existing.attemptId === attemptId) {
+          // My POST committed. NEVER revoke — the row is the grant's handle.
+          log.warn("The add's answer was lost on the network, but the platform has the row.");
+          printEmailDomainOutcome(existing);
+          return;
+        }
+        // Not mine (yet) — my in-flight POST could still commit a replace
+        // stamping this id, so keep polling to the deadline.
+        lastRead = 'foreign';
+        continue;
+      }
+      // An api without attempt identity (the key is absent): this could be
+      // my add committed there, indistinguishable from a pre-existing row.
+      // Trust the row like the pre-attempt flow did — NEVER revoke.
       log.warn("The add's answer was lost on the network, but the platform has the row.");
       printEmailDomainOutcome(existing);
       return;
     }
-    if (unknown) {
+    if (lastRead === 'foreign') {
+      // The row settled on another attempt id (or none), so this attempt's
+      // credential was never stored — a committed mine would have stamped
+      // my id. The revoke cannot brick the row.
+      if (credential.kind === 'oauth_grant') {
+        await revokeCfOauthGrant(credential.refreshToken);
+        return fail(
+          `email: could not reach the platform, and ${target.emailDomain} kept the row's existing credential; the OAuth grant minted for this attempt was revoked — re-run to retry the replace.`,
+        );
+      }
       return fail(
-        `email: network failure adding ${target.emailDomain}, and the follow-up check failed too — the add's state is unknown, so nothing was revoked. A grant minted for this attempt may still be live: once connectivity is back, run \`void email domain status ${target.emailDomain}\`; if it shows no row, revoke the grant in the Cloudflare dashboard before retrying.`,
+        `email: could not reach the platform, and ${target.emailDomain} kept the row's existing credential. The token was not stored anywhere; delete it in the Cloudflare dashboard if you are not retrying.`,
       );
     }
-    // 404 — provably nothing persisted. The minted grant's only copy is in
-    // this process: revoke it rather than strand it live (an api_token has
-    // no revoke primitive — the customer deletes it themselves).
-    if (credential.kind === 'oauth_grant') {
-      await revokeCfOauthGrant(credential.refreshToken);
+    if (lastRead === 'missing') {
+      // 404 at every poll — provably nothing persisted. The minted grant's
+      // only copy is in this process: revoke it rather than strand it live
+      // (an api_token has no revoke primitive — the customer deletes it
+      // themselves).
+      if (credential.kind === 'oauth_grant') {
+        await revokeCfOauthGrant(credential.refreshToken);
+        return fail(
+          `email: could not reach the platform — ${target.emailDomain} was not registered, and the OAuth grant minted for this attempt was revoked.`,
+        );
+      }
       return fail(
-        `email: could not reach the platform — ${target.emailDomain} was not registered, and the OAuth grant minted for this attempt was revoked.`,
+        `email: could not reach the platform — ${target.emailDomain} was not registered. The token was not stored anywhere; delete it in the Cloudflare dashboard if you are not retrying.`,
       );
     }
+    // No poll produced any read — the add's state is unknown, and a blind
+    // revoke could brick a committed row: report, don't revoke.
     return fail(
-      `email: could not reach the platform — ${target.emailDomain} was not registered. The token was not stored anywhere; delete it in the Cloudflare dashboard if you are not retrying.`,
+      `email: network failure adding ${target.emailDomain}, and the follow-up check failed too — the add's state is unknown, so nothing was revoked. A grant minted for this attempt may still be live: once connectivity is back, run \`void email domain status ${target.emailDomain}\`; if it shows no row, revoke the grant in the Cloudflare dashboard before retrying.`,
     );
   }
   log.success(

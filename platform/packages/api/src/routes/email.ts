@@ -700,34 +700,39 @@ const app = new Hono<ApiEnv>()
 
   .post('/:id/email/domains', async (context) => {
     const projectId = context.req.param('id');
-    const project = await getProject(context.get('db'), projectId);
-    if (!project) {
-      return context.json({ error: 'project not found' }, 404);
-    }
-    if (project.user_id !== context.get('user').id) {
-      return context.json({ error: 'forbidden' }, 403);
-    }
     let body: {
       domain?: unknown;
       mode?: unknown;
       refreshToken?: unknown;
       apiToken?: unknown;
+      attemptId?: unknown;
     } = {};
     try {
       body = await context.req.json();
     } catch {
       return context.json({ error: 'invalid domain' }, 400);
     }
-    // Parsed up-front so EVERY rejection below can revoke a posted grant:
-    // the CLI mints a fresh user-wide OAuth grant per attempt and drops its
-    // only copy on an error response, so any reject without a revoke strands
-    // a live broad grant in the customer's account per retry. (The 404/403
-    // guards above stay pre-parse: a non-owner's grant is not ours to read
-    // or revoke.)
+    // Parsed before EVERY guard so every rejection can revoke a posted
+    // grant: the CLI mints a fresh user-wide OAuth grant per attempt and
+    // drops its only copy on any error response, so any reject without a
+    // revoke strands a live broad grant in the customer's account per
+    // retry. Revocation asks for no ownership: for wrangler's public client
+    // the token itself is the only credential the RFC 7009 endpoint wants,
+    // so revoking what was posted grants no capability the caller did not
+    // already hold.
     const postedRefreshToken =
       typeof body.refreshToken === 'string' && body.refreshToken.length > 0
         ? body.refreshToken
         : undefined;
+    const project = await getProject(context.get('db'), projectId);
+    if (!project) {
+      await revokeRejectedGrant(context, postedRefreshToken);
+      return context.json({ error: 'project not found' }, 404);
+    }
+    if (project.user_id !== context.get('user').id) {
+      await revokeRejectedGrant(context, postedRefreshToken);
+      return context.json({ error: 'forbidden' }, 403);
+    }
     // Same teardown guard the destinations POST uses — but after the parse,
     // so it too can revoke the stranded grant.
     if (project.status === 'deleting') {
@@ -750,6 +755,19 @@ const app = new Hono<ApiEnv>()
       await revokeRejectedGrant(context, postedRefreshToken);
       return context.json({ error: 'invalid mode' }, 400);
     }
+    // Optional attempt identity from the CLI (absent on older clients): when
+    // present it is stamped on the row so a CLI that lost this POST's answer
+    // can recognize its own commit.
+    if (
+      body.attemptId !== undefined &&
+      (typeof body.attemptId !== 'string' ||
+        body.attemptId.length < 1 ||
+        body.attemptId.length > 128)
+    ) {
+      await revokeRejectedGrant(context, postedRefreshToken);
+      return context.json({ error: 'invalid attemptId' }, 400);
+    }
+    const attemptId = body.attemptId as string | undefined;
     const refreshToken = postedRefreshToken;
     const apiToken =
       typeof body.apiToken === 'string' && body.apiToken.length > 0 ? body.apiToken : undefined;
@@ -780,6 +798,7 @@ const app = new Hono<ApiEnv>()
         credential,
         proxyOrigin,
         body.mode,
+        attemptId,
       );
     }
 
@@ -839,6 +858,7 @@ const app = new Hono<ApiEnv>()
           project_id: projectId,
           domain,
           credential_kind: credentialKind,
+          attempt_id: attemptId ?? null,
           token_ciphertext: tokenEnc.ciphertext,
           token_iv: tokenEnc.iv,
           token_key_version: tokenEnc.keyVersion,
@@ -1372,6 +1392,9 @@ function serializeEmailDomain(row: EmailDomain, error?: string) {
     relay_version: row.relay_version,
     token_id: row.token_id,
     token_expires_on: row.token_expires_on,
+    // Always present (null when the row predates attempt identity): key
+    // presence is how a reconciling CLI detects an api that stamps it.
+    attemptId: row.attempt_id ?? null,
     setup_state: row.setup_state,
     // The engine's failure text names the failing step / CF error — never
     // credential material — so the CLI can print it verbatim.
@@ -2188,6 +2211,7 @@ async function replaceEmailDomainCredential(
   credential: string,
   proxyOrigin: string,
   requestedMode: unknown,
+  attemptId: string | undefined,
 ): Promise<Response> {
   const db = context.get('db');
   const domain = existing.domain;
@@ -2257,6 +2281,7 @@ async function replaceEmailDomainCredential(
         // Re-derived by the engine for api_token; grants carry neither.
         token_id: null,
         token_expires_on: null,
+        attempt_id: attemptId ?? null,
         updated_at: sql`now()`,
       })
       .where(eq(emailDomains.id, existing.id));

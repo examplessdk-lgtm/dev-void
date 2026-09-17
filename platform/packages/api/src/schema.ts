@@ -373,6 +373,10 @@ export const emailDomains = pgTable(
     relay_version: integer('relay_version'),
     token_id: text('token_id'),
     token_expires_on: timestamp('token_expires_on', { mode: 'string' }),
+    // The CLI add attempt that last wrote the credential — lets a CLI that
+    // lost the POST's answer tell its own committed row apart from the
+    // pre-existing one. Null on rows written by an older CLI.
+    attempt_id: text('attempt_id'),
     setup_state: jsonb('setup_state').$type<EmailDomainSetupState | null>(),
     created_at: timestamp('created_at', { mode: 'string' }).notNull().defaultNow(),
     updated_at: timestamp('updated_at', { mode: 'string' }).notNull().defaultNow(),

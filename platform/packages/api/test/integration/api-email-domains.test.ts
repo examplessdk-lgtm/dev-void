@@ -1252,6 +1252,42 @@ describe('POST /projects/:id/email/domains', () => {
     expect(await rowFor(project.id, 'acme.com')).toBeUndefined();
   });
 
+  it('404s and revokes the posted grant when the project is gone', async () => {
+    const user = await createTestUser(env.db);
+    const stub = stubCustomerCf({});
+
+    // The project guard rejects like every other guard — the CLI drops its
+    // only copy of the grant on the 404, so the route revokes it first.
+    const res = await addDomain('prj_gone', user.jwt, {
+      domain: 'acme.com',
+      refreshToken: REFRESH_TOKEN,
+    });
+    expect(res.status).toBe(404);
+    expect(((await res.json()) as { error: string }).error).toBe('project not found');
+    expect(tags(stub.calls)).toEqual(['oauthRevoke']);
+    expect(stub.calls[0]!.form!.token).toBe(REFRESH_TOKEN);
+  });
+
+  it('403s and revokes the posted grant when the caller does not own the project', async () => {
+    const owner = await createTestUser(env.db);
+    const project = await createTestProject(env.db, owner.id);
+    const stranger = await createTestUser(env.db);
+    const stub = stubCustomerCf({});
+
+    // Possession of the token already authorizes its revocation (RFC 7009 on
+    // a public client), so the ownership rejection revokes too — otherwise
+    // the CLI drops the grant it minted and nobody kills it.
+    const res = await addDomain(project.id, stranger.jwt, {
+      domain: 'acme.com',
+      refreshToken: REFRESH_TOKEN,
+    });
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe('forbidden');
+    expect(tags(stub.calls)).toEqual(['oauthRevoke']);
+    expect(stub.calls[0]!.form!.token).toBe(REFRESH_TOKEN);
+    expect(await rowFor(project.id, 'acme.com')).toBeUndefined();
+  });
+
   it('500s when the checkpoint write fails for a non-race reason — and compensates the deployed relay', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id);
@@ -1444,6 +1480,74 @@ describe('POST /projects/:id/email/domains', () => {
     const raw = JSON.stringify(json);
     expect(raw).not.toContain(REFRESH_TOKEN);
     expect(raw).not.toContain('cf-rotated-refresh-dummy-1');
+  });
+
+  it('stamps a posted attemptId on the row and serializes it back', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    stubCustomerCf({ zones: { 'acme.com': ZONE } });
+
+    const res = await addDomain(project.id, user.jwt, {
+      domain: 'acme.com',
+      apiToken: API_TOKEN,
+      attemptId: 'attempt-add-1',
+    });
+    expect(res.status).toBe(201);
+    const json = (await res.json()) as Record<string, unknown>;
+    expect(json.attemptId).toBe('attempt-add-1');
+    expect((await rowFor(project.id, 'acme.com'))!.attempt_id).toBe('attempt-add-1');
+  });
+
+  it('serializes attemptId as null when the add posted none — the old-CLI shape', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    stubCustomerCf({ zones: { 'acme.com': ZONE } });
+
+    const res = await addDomain(project.id, user.jwt, { domain: 'acme.com', apiToken: API_TOKEN });
+    expect(res.status).toBe(201);
+    const json = (await res.json()) as Record<string, unknown>;
+    // The key is always present — presence is the new-api signal.
+    expect(json.attemptId).toBeNull();
+    expect((await rowFor(project.id, 'acme.com'))!.attempt_id).toBeNull();
+  });
+
+  it('rejects a malformed attemptId and revokes the posted grant', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    const stub = stubCustomerCf({ zones: { 'acme.com': ZONE } });
+
+    for (const attemptId of [42, '', 'x'.repeat(129)]) {
+      const res = await addDomain(project.id, user.jwt, {
+        domain: 'acme.com',
+        refreshToken: REFRESH_TOKEN,
+        attemptId,
+      });
+      expect(res.status, JSON.stringify(attemptId)).toBe(400);
+    }
+    // Every rejection revokes a posted grant — this one included.
+    expect(tags(stub.calls)).toEqual(['oauthRevoke', 'oauthRevoke', 'oauthRevoke']);
+    expect(await rowFor(project.id, 'acme.com')).toBeUndefined();
+  });
+
+  it('re-stamps attempt_id when a re-add replaces the credential', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    await addActiveDomain(project.id, user.jwt);
+    expect((await rowFor(project.id, 'acme.com'))!.attempt_id).toBeNull();
+
+    stubCustomerCf({
+      zones: { 'acme.com': ZONE },
+      catchAllRule: { enabled: true, workerName: RELAY_WORKER_BASE_NAME },
+    });
+    const res = await addDomain(project.id, user.jwt, {
+      domain: 'acme.com',
+      apiToken: API_TOKEN_REPLACEMENT,
+      attemptId: 'attempt-readd-1',
+    });
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as Record<string, unknown>;
+    expect(json.attemptId).toBe('attempt-readd-1');
+    expect((await rowFor(project.id, 'acme.com'))!.attempt_id).toBe('attempt-readd-1');
   });
 
   it('maps invalid_grant on add to token_revoked, mirrored', async () => {
