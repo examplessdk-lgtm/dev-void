@@ -643,6 +643,8 @@ async function getMonthlyLimit(kv: KVNamespace, projectId: string): Promise<numb
 interface OutboundGate {
   /** undefined when routing has no projectId; gate is then closed. */
   projectId: string | undefined;
+  /** Relay lane (custom-domain sends): the recipient allowlist does not gate; quotas still apply. */
+  skipAllowlist: boolean;
   allowlist: Set<string>;
   burstKey: string;
   burstLimit: number;
@@ -859,6 +861,7 @@ export async function routeInbound(
     // that quota exhaustion never breaks message acceptance.
     gate = {
       projectId: routing.projectId,
+      skipAllowlist: false,
       allowlist: new Set(),
       burstKey: '',
       burstLimit: 0,
@@ -1051,15 +1054,19 @@ export async function routeRelayed(
   // (the customer account's send_raw with the domain's leased credential).
   const relayed = createRelayedMessage(env, envelope, { domain, projectId });
 
-  // Same rule as the platform lane: the forward/reply actions the handler
-  // records run through the per-project allowlist + quota gate.
+  // Unlike the platform lane, the recipient allowlist does not gate these
+  // actions (design doc 0078, "What changes in the existing rules"): the
+  // send leaves through the customer's own account, credential, DKIM and
+  // quota — the reputation at stake is theirs. The burst cap and the kill
+  // switch still apply.
   let gate: OutboundGate;
   try {
-    gate = await loadOutboundGate(env, projectId);
+    gate = await loadOutboundGate(env, projectId, { skipAllowlist: true });
   } catch (e) {
     console.error(`[email-relay] failed to load outbound gate for ${sanitize(projectId, 64)}:`, e);
     gate = {
       projectId,
+      skipAllowlist: true,
       allowlist: new Set(),
       burstKey: '',
       burstLimit: 0,
@@ -1278,13 +1285,20 @@ function envelopeRawStream(bytes: Uint8Array): ReadableStream<Uint8Array> {
  * so `enactActions` can apply the same gates `/email/send` uses without
  * reissuing KV reads inside the loop. The counter values mutate as
  * actions enact; we write the totals back at the end via
- * `commitGateCounters`.
+ * `commitGateCounters`. `skipAllowlist` (relay lane) skips the allowlist
+ * read entirely — custom-domain sends are not allowlist-gated.
  */
-async function loadOutboundGate(env: Env, projectId: string | undefined): Promise<OutboundGate> {
+async function loadOutboundGate(
+  env: Env,
+  projectId: string | undefined,
+  opts?: { skipAllowlist?: boolean },
+): Promise<OutboundGate> {
+  const skipAllowlist = opts?.skipAllowlist ?? false;
   if (!projectId) {
     // No projectId on the routing entry → can't authorize anything.
     return {
       projectId: undefined,
+      skipAllowlist,
       allowlist: new Set(),
       burstKey: '',
       burstLimit: 0,
@@ -1295,7 +1309,7 @@ async function loadOutboundGate(env: Env, projectId: string | undefined): Promis
       quotaExhausted: true,
     };
   }
-  const allowlist = await readAllowlist(env.ROUTING, projectId);
+  const allowlist = skipAllowlist ? new Set<string>() : await readAllowlist(env.ROUTING, projectId);
   const now = new Date();
   const burstKey = `email-burst:${projectId}:${minuteBucket(now)}`;
   const monthKey = `email-sent:${projectId}:${monthBucket(now)}`;
@@ -1307,6 +1321,7 @@ async function loadOutboundGate(env: Env, projectId: string | undefined): Promis
   ]);
   return {
     projectId,
+    skipAllowlist,
     allowlist,
     burstKey,
     burstLimit,
@@ -1767,7 +1782,7 @@ function checkOutboundGate(gate: OutboundGate, target: string, kind: 'forward' |
     return false;
   }
   const lowered = target.toLowerCase();
-  if (!gate.allowlist.has(lowered)) {
+  if (!gate.skipAllowlist && !gate.allowlist.has(lowered)) {
     console.error(
       `[email-router] ${kind} dropped: recipient not in project allowlist (target=${sanitize(target, 320)})`,
     );

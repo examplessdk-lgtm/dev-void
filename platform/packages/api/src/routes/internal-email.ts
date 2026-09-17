@@ -1,7 +1,7 @@
 import { and, eq } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { hmacVerifyState } from '../auth/hmac.ts';
-import { leaseEmailDomainCredential } from '../email/credential-lease.ts';
+import { leaseEmailDomainCredential, withEmailDomainRowLock } from '../email/credential-lease.ts';
 import {
   decryptEmailDomainRelaySecret,
   hashEmailRelaySecret,
@@ -93,21 +93,44 @@ app.post('/', async (context) => {
   if (!outcome.ok) {
     if (outcome.status === 'token_revoked') {
       // The row flip was persisted inside the refresh transaction; re-mirror
-      // so the proxy stops accepting this domain's relay and sends. The row
-      // is authoritative, so a KV failure here is logged, not fatal — the
-      // next mutation (or status probe) rewrites the mirror.
+      // so the proxy stops accepting this domain's relay and sends. The write
+      // is fenced through the row lock: the row is re-read FOR UPDATE and the
+      // mirror is published from the LOCKED row inside the same transaction,
+      // and only while it still holds the credential that was revoked — a
+      // replace that committed in between published its own active mirror
+      // under the same lock, and this write must not overwrite it with the
+      // stale status and relay hash. The row is authoritative, so a KV
+      // failure here is logged, not fatal — the next mutation (or status
+      // probe) rewrites the mirror.
       try {
-        const relaySecret = await decryptEmailDomainRelaySecret(
-          context.env,
-          row.project_id,
-          row.domain,
-          row,
-        );
-        await writeEmailDomainMirror(
-          context.env.ROUTING,
-          { ...row, status: 'token_revoked' },
-          await hashEmailRelaySecret(relaySecret),
-        );
+        await withEmailDomainRowLock(db, row.id, async (tx) => {
+          const locked = await tx
+            .select()
+            .from(emailDomains)
+            .where(eq(emailDomains.id, row.id))
+            .for('update')
+            .limit(1);
+          const current = locked[0];
+          if (
+            !current ||
+            current.status !== 'token_revoked' ||
+            current.credential_kind !== row.credential_kind ||
+            current.token_ciphertext !== row.token_ciphertext
+          ) {
+            return;
+          }
+          const relaySecret = await decryptEmailDomainRelaySecret(
+            context.env,
+            current.project_id,
+            current.domain,
+            current,
+          );
+          await writeEmailDomainMirror(
+            context.env.ROUTING,
+            current,
+            await hashEmailRelaySecret(relaySecret),
+          );
+        });
       } catch (err) {
         console.error('[email] domain mirror update after revocation failed:', err);
       }

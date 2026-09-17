@@ -548,7 +548,12 @@ describe('POST /email/relay — dispatch', () => {
     });
   });
 
-  it('drops a forward to a non-allowlisted address but still accepts the message', async () => {
+  it('sends a forward to a non-allowlisted address through the customer account and accepts the message', async () => {
+    // The recipient allowlist does not gate the relay lane (design doc
+    // 0078, "What changes in the existing rules"): the send leaves through
+    // the customer's own account, credential, DKIM and quota — the
+    // reputation at stake is theirs. The seeded allowlist proves absence
+    // from it no longer drops the action.
     const kv = await relayKv({
       'email-allowlist:p_test': JSON.stringify(['admin@example.com']),
     });
@@ -559,8 +564,75 @@ describe('POST /email/relay — dispatch', () => {
     const res = await postRelay(env as never);
     expect(res.status).toBe(200);
     expect(env.SEND_EMAIL.send).not.toHaveBeenCalled();
-    expect(calls).toHaveLength(0);
-    expect(env.API.fetch).not.toHaveBeenCalled();
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.url).toBe(
+      'https://api.cloudflare.com/client/v4/accounts/acct_customer/email/sending/send_raw',
+    );
+    expect(JSON.parse(calls[0]?.init.body as string)).toEqual({
+      // Same sender substitution as the allowlisted forward above.
+      from: 'support+T-42@acme.com',
+      recipients: ['stranger@example.net'],
+      mime_message: MIME,
+    });
+    // The allowlist is not even read on this lane.
+    expect(
+      kv.get.mock.calls.filter((call) => String(call[0]).startsWith('email-allowlist:')),
+    ).toHaveLength(0);
+  });
+
+  it('sends a relay-lane reply to the non-allowlisted original sender via send_raw', async () => {
+    // Same carve-out for a reply: the original external sender is not on
+    // the project's allowlist, and the reply still leaves through the
+    // customer account.
+    const kv = await relayKv({
+      'email-allowlist:p_test': JSON.stringify(['admin@example.com']),
+    });
+    const replyFrom = 'support@acme.com';
+    const replyMime = `From: ${replyFrom}\r\n\r\nreply body\r\n`;
+    const replyRaw = new TextEncoder().encode(replyMime);
+    const { env } = createMockEnv(kv, {
+      emailReturn: [{ type: 'reply', from: replyFrom, to: 'sender@example.com', raw: replyRaw }],
+    });
+    const calls = stubRelayRest(env as never);
+    const res = await postRelay(env as never);
+    expect(res.status).toBe(200);
+    expect(env.SEND_EMAIL.send).not.toHaveBeenCalled();
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.url).toBe(
+      'https://api.cloudflare.com/client/v4/accounts/acct_customer/email/sending/send_raw',
+    );
+    expect(JSON.parse(calls[0]?.init.body as string)).toEqual({
+      from: replyFrom,
+      recipients: ['sender@example.com'],
+      mime_message: replyMime,
+    });
+  });
+
+  it('still drops relay-lane actions when the burst quota is exhausted', async () => {
+    // skipAllowlist lifts ONLY the allowlist gate — the burst cap still
+    // applies (design doc 0078). Frozen clock so the seeded counter lands
+    // in the minute bucket the router reads.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-04-29T12:34:56.000Z'));
+    try {
+      const kv = await relayKv({
+        'email-allowlist:p_test': JSON.stringify(['admin@example.com']),
+        'email-burst-limit:p_test': '1',
+        // Pre-seed the counter at the limit so +1 trips.
+        'email-burst:p_test:20260429T1234': '1',
+      });
+      const { env } = createMockEnv(kv, {
+        emailReturn: [{ type: 'forward', to: 'stranger@example.net' }],
+      });
+      const calls = stubRelayRest(env as never);
+      const res = await postRelay(env as never);
+      // Quota exhaustion never breaks message acceptance.
+      expect(res.status).toBe(200);
+      expect(calls).toHaveLength(0);
+      expect(env.API.fetch).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('enacts a reply from an address on the relayed domain via send_raw (registered-domain pin)', async () => {

@@ -80,15 +80,19 @@ const RELAY_SECRET = 'relay-secret-dummy';
 const ZONE = { id: 'zone_1', name: 'acme.com', accountId: 'acct_1' };
 
 /**
- * Pause the app's FIRST `db.transaction` until released — the seam for
+ * Pause the app's Nth `db.transaction` until released — the seam for
  * landing a committed write (a replace, a teardown status flip) between a
  * route's unlocked entry checks and its serialized section. PGlite's
  * single connection forbids touching the db from inside an open
  * transaction, so the write must happen BEFORE the tx starts: the proxy
  * pauses prior to delegating, the test writes through the unwrapped
- * `realDb`, then releases. Same pattern as cli-version-gate.test.ts.
+ * `realDb` (or a concurrent request's pass-through transactions), then
+ * releases. Same pattern as cli-version-gate.test.ts.
  */
-function pauseFirstTransaction(realDb: Db): {
+function pauseNthTransaction(
+  realDb: Db,
+  n: number,
+): {
   wrappedDb: Db;
   reached: Promise<void>;
   release: () => void;
@@ -99,13 +103,13 @@ function pauseFirstTransaction(realDb: Db): {
   const reached = new Promise<void>((r) => {
     reachedFn = r;
   });
-  let fired = false;
+  let seen = 0;
   const wrappedDb = new Proxy(realDb, {
     get(target, prop, receiver) {
       if (prop === 'transaction') {
         return (async (fn: never) => {
-          if (!fired) {
-            fired = true;
+          seen += 1;
+          if (seen === n) {
             reachedFn?.();
             await new Promise<void>((r) => {
               releaseFn = r;
@@ -118,6 +122,10 @@ function pauseFirstTransaction(realDb: Db): {
     },
   }) as Db;
   return { wrappedDb, reached, release: () => releaseFn?.() };
+}
+
+function pauseFirstTransaction(realDb: Db) {
+  return pauseNthTransaction(realDb, 1);
 }
 
 beforeAll(async () => {
@@ -3054,6 +3062,68 @@ describe('POST /internal/email/domain-credential', () => {
     // The lease failure never carries credential material.
     const body = await res.text();
     expect(body).not.toContain(REFRESH_TOKEN);
+  });
+
+  it('fences the revoked mirror write against a replace that committed first', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    await seedEmailDomain(project.id, 'acme.com', {
+      status: 'active',
+      credentialKind: 'oauth_grant',
+      credential: REFRESH_TOKEN,
+    });
+    const oldHash = (await mirrorFor('acme.com'))!.relaySecretSha256;
+
+    // A's refresh gets invalid_grant (committing token_revoked); B's
+    // api_token replace + sync never touches the OAuth token endpoint, so
+    // one stub covers both requests.
+    stubCustomerCf({ zones: { 'acme.com': ZONE }, oauth: 'invalid_grant' });
+
+    // Park the lease route's SECOND transaction — the fenced mirror write —
+    // so B's replace commits and publishes its active mirror in between.
+    const realDb = env.db;
+    const gate = pauseNthTransaction(realDb, 2);
+    setTestDb(gate.wrappedDb);
+    try {
+      const reqPromise = leaseCredential('acme.com');
+      const parked = await Promise.race([
+        gate.reached.then(() => 'parked' as const),
+        reqPromise.then(() => 'settled' as const),
+      ]);
+      // The mirror write must be a transaction of its own: unfenced, the
+      // request settles without one and its stale write can land last.
+      expect(parked).toBe('parked');
+
+      try {
+        const replaceRes = await addDomain(project.id, user.jwt, {
+          domain: 'acme.com',
+          apiToken: API_TOKEN_REPLACEMENT,
+        });
+        expect(replaceRes.status).toBe(200);
+      } finally {
+        gate.release();
+      }
+
+      // The caller's answer is unchanged: the grant the lease refreshed
+      // was revoked, even though the row has since been replaced.
+      const res = await reqPromise;
+      expect(res.status).toBe(403);
+
+      // The replacement's under-lock publication is authoritative: no
+      // token_revoked write with the pre-rotation hash landed after it.
+      const row = (await rowFor(project.id, 'acme.com'))!;
+      expect(row.status).toBe('active');
+      const mirror = (await mirrorFor('acme.com'))!;
+      expect(mirror.status).toBe('active');
+      expect(mirror.relaySecretSha256).toBe(
+        await hashEmailRelaySecret(
+          await decryptEmailDomainRelaySecret(env, project.id, 'acme.com', row),
+        ),
+      );
+      expect(mirror.relaySecretSha256).not.toBe(oldHash);
+    } finally {
+      setTestDb(realDb);
+    }
   });
 
   it('502s a transient OAuth failure without touching the row status', async () => {

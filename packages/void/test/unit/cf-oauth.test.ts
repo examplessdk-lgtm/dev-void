@@ -9,6 +9,7 @@ import {
   CF_OAUTH_REVOKE_URL,
   CF_OAUTH_SCOPE,
   CF_OAUTH_TOKEN_URL,
+  revokeCfOauthGrant,
   runCfOauthGrant,
 } from '../../src/cli/cf-oauth.ts';
 
@@ -326,5 +327,43 @@ describe('runCfOauthGrant', () => {
     denied.searchParams.set('error', 'access_denied');
     await fetch(denied);
     await rejection;
+  });
+});
+
+describe('revokeCfOauthGrant', () => {
+  it('posts the RFC 7009 form and reports true on a 2xx', async () => {
+    const fetchSpy = vi.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(null, { status: 200 }),
+    );
+    vi.stubGlobal('fetch', fetchSpy);
+
+    await expect(revokeCfOauthGrant(REFRESH_SENTINEL)).resolves.toBe(true);
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchSpy.mock.calls[0]!;
+    expect(String(url)).toBe(CF_OAUTH_REVOKE_URL);
+    const form = new URLSearchParams(String(init?.body));
+    expect(form.get('token')).toBe(REFRESH_SENTINEL);
+    expect(form.get('token_type_hint')).toBe('refresh_token');
+    expect(form.get('client_id')).toBe(CF_OAUTH_CLIENT_ID);
+  });
+
+  it('reports false on a non-2xx answer — the grant may still be live', async () => {
+    const fetchSpy = vi.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit) =>
+        new Response('nope', { status: 500 }),
+    );
+    vi.stubGlobal('fetch', fetchSpy);
+
+    await expect(revokeCfOauthGrant(REFRESH_SENTINEL)).resolves.toBe(false);
+  });
+
+  it('reports false on a network failure, never throwing', async () => {
+    const fetchSpy = vi.fn(async () => {
+      throw new TypeError('fetch failed');
+    });
+    vi.stubGlobal('fetch', fetchSpy);
+
+    await expect(revokeCfOauthGrant(REFRESH_SENTINEL)).resolves.toBe(false);
   });
 });

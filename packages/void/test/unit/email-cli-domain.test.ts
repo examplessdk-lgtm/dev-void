@@ -666,6 +666,92 @@ describe('emailDomainAdd', () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
+  it('routes a 500 answer through the attempt-id reconcile — the row committed', async () => {
+    mockAttemptId();
+    const addEmailDomain = vi.fn(async () => {
+      throw new PlatformApiError('Failed to add email domain', 500, '{"error":"internal error"}');
+    });
+    // A 500 is ambiguous — the add may have committed before the error. The
+    // reconcile proves it did: the row carries this attempt's id.
+    const getEmailDomain = vi.fn(async () => statusRow({ attemptId: ATTEMPT_ID }));
+    const fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+
+    await emailDomainAdd(
+      { addEmailDomain, getEmailDomain },
+      'prj_1',
+      'acme.com',
+      undefined,
+      addDeps(),
+    );
+
+    expect(getEmailDomain).toHaveBeenCalledTimes(1);
+    expect(printed(warnSpy)).toContain('answer was lost');
+    expect(notedBlocks()).toContain('Domain:      acme.com');
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('routes a 500 answer through the attempt-id reconcile — nothing persisted, the grant is revoked', async () => {
+    mockAttemptId();
+    const addEmailDomain = vi.fn(async () => {
+      throw new PlatformApiError('Failed to add email domain', 500, '{"error":"internal error"}');
+    });
+    const getEmailDomain = vi.fn(async () => {
+      throw new PlatformApiError(
+        'Failed to fetch email domain status',
+        404,
+        '{"error":"email domain not found"}',
+      );
+    });
+    const fetchSpy = vi.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(null, { status: 200 }),
+    );
+    vi.stubGlobal('fetch', fetchSpy);
+
+    await expect(
+      emailDomainAdd({ addEmailDomain, getEmailDomain }, 'prj_1', 'acme.com', undefined, addDeps()),
+    ).rejects.toThrow('exit 1');
+
+    // The 500 did not prove a server-side revoke, so the CLI kills the grant
+    // it still holds once the polls prove nothing persisted.
+    expect(getEmailDomain).toHaveBeenCalledTimes(15);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(String(fetchSpy.mock.calls[0]![0])).toBe('https://dash.cloudflare.com/oauth2/revoke');
+    expect(printed(errorSpy)).toContain('was not registered');
+    expect(printed(errorSpy)).toContain('was revoked');
+  });
+
+  it('reports a failed revocation instead of claiming it — the grant may still be live', async () => {
+    mockAttemptId();
+    const addEmailDomain = vi.fn(async () => {
+      throw new TypeError('fetch failed');
+    });
+    const getEmailDomain = vi.fn(async () => {
+      throw new PlatformApiError(
+        'Failed to fetch email domain status',
+        404,
+        '{"error":"email domain not found"}',
+      );
+    });
+    // Cloudflare answers the revoke with a 500: fetch resolves, and a helper
+    // that ignored the status would let the CLI claim a revocation that
+    // never happened.
+    const fetchSpy = vi.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit) =>
+        new Response('nope', { status: 500 }),
+    );
+    vi.stubGlobal('fetch', fetchSpy);
+
+    await expect(
+      emailDomainAdd({ addEmailDomain, getEmailDomain }, 'prj_1', 'acme.com', undefined, addDeps()),
+    ).rejects.toThrow('exit 1');
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(printed(errorSpy)).toContain('could not be revoked');
+    expect(printed(errorSpy)).toContain('revoke it in the Cloudflare dashboard');
+    expect(printed(errorSpy)).not.toContain('was revoked');
+  });
+
   it('reconciles a lost answer: the row carries this attempt id, nothing is revoked', async () => {
     mockAttemptId();
     const addEmailDomain = vi.fn(async () => {

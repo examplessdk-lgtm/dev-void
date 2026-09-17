@@ -501,6 +501,16 @@ path.
   another on the row and mirror. The engine's checkpoint and apply writes
   ride savepoints inside that transaction, keeping it committable when an
   expected 23505 lands; the compensations above then run outside it.
+- **A lease-time revocation publishes its mirror under the row lock,
+  conditioned on the revoked credential.** When a lease refresh hits
+  `invalid_grant` the `token_revoked` flip commits inside the lease
+  transaction, and the ROUTING mirror write that must follow runs in a
+  second locked section: the row is re-read FOR UPDATE and the mirror is
+  published from the LOCKED row — the relay hash is never a stale
+  snapshot — and only while the row still holds the credential that was
+  revoked. A credential replace that committed in between published its
+  own active mirror under the same lock, so the revocation write skips
+  rather than overwrite it and leave an active row with dead mail.
 
 ### Removal and teardown
 
@@ -662,9 +672,12 @@ rejection either: every add attempt carries a random attempt id, stamped
 on the row at insert and at credential replace, and always serialized on
 the status GET (null on rows an older CLI wrote — an api predating
 attempt identity omits the key, and key presence is how a new CLI detects
-one). When the POST's response never arrives the CLI polls the status —
-15 tries, 1s apart, because a lost answer does not stop the api worker
-mid-commit. The row carrying THIS attempt's id means the add committed
+one). When the POST's response never arrives — or the answer is ambiguous:
+a 5xx, or a 401/413/429 from middleware or the edge; only the route's
+deliberate 400/403/404/409 rejections prove a server-side revoke — the CLI
+polls the status, 15 tries, 1s apart, because a lost answer does not stop
+the api worker mid-commit. The row carrying THIS attempt's id means the
+add committed
 (printed, done, never revoked). A row stamped with a DIFFERENT id — or
 null — kept its existing credential: a committed add of mine would have
 stamped my id, so this attempt's grant was never stored and is revoked,
@@ -674,7 +687,9 @@ of the same RFC 7009 POST). A row from an api without the key is trusted
 like the pre-attempt flow, never revoked — a committed add there is
 indistinguishable from a pre-existing row. And no informative read at all
 is reported as unknown — a blind revoke could brick a row that did
-commit.
+commit. Where the CLI does revoke, it claims the revocation only when
+Cloudflare confirms it (200 — CF answers 200 even for a bogus token); a
+failed revoke is reported with manual-revocation steps, never claimed.
 The consent flow's own straggler dies the same way: an exchange that
 completes after the flow settled (Enter, an abort, the timeout) minted a
 grant only the CLI holds, so it is revoked fire-and-forget and the browser
@@ -797,10 +812,10 @@ token is the default.
 
 - **Reply-sender pin** — accepts the receiving slug on the shared domain
   _or_ any address on a domain registered to the project.
-- **Recipient allowlist** — does not gate custom-domain sends: Cloudflare's
-  verified-destination gate is lifted by the customer's own onboarding, and
-  the reputation at stake is the customer's own. The burst cap and the kill
-  switch still apply.
+- **Recipient allowlist** — does not gate custom-domain sends, relayed
+  forward/reply actions included: Cloudflare's verified-destination gate is
+  lifted by the customer's own onboarding, and the reputation at stake is
+  the customer's own. The burst cap and the kill switch still apply.
 - **Quotas and kill switch** — the platform's burst cap and suspend switch
   keep applying to every send that passes through the proxy, custom domain
   or not; the daily quota is the customer's account's.

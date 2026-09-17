@@ -47,14 +47,18 @@ export type CfOauthGrant = Readonly<{
 /**
  * Revoke a grant at Cloudflare — RFC 7009 on wrangler's public client, the
  * same form wrangler's `logout` posts (a public client authenticates with
- * the token itself; no Authorization header). Best-effort: never throws,
- * never logs the token. For when the CLI holds a grant it will not hand to
- * the platform: a consent exchange that completed after the flow settled,
- * or an add request that provably never persisted one.
+ * the token itself; no Authorization header). Never throws, never logs the
+ * token; the boolean is whether Cloudflare CONFIRMED the revocation (200 —
+ * CF answers 200 even for a bogus token), so `false` means the grant's
+ * state is unknown and it may still be live: callers that print an outcome
+ * must not claim a revocation they cannot prove. For when the CLI holds a
+ * grant it will not hand to the platform: a consent exchange that
+ * completed after the flow settled (fire-and-forget there — the flow is
+ * settled), or an add request that provably never persisted one.
  */
-export async function revokeCfOauthGrant(refreshToken: string): Promise<void> {
+export async function revokeCfOauthGrant(refreshToken: string): Promise<boolean> {
   try {
-    await fetch(CF_OAUTH_REVOKE_URL, {
+    const res = await fetch(CF_OAUTH_REVOKE_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
@@ -63,8 +67,10 @@ export async function revokeCfOauthGrant(refreshToken: string): Promise<void> {
         client_id: CF_OAUTH_CLIENT_ID,
       }).toString(),
     });
+    return res.ok;
   } catch {
-    // Best effort — the grant's state at Cloudflare is unknown either way.
+    // The grant's state at Cloudflare is unknown either way.
+    return false;
   }
 }
 
