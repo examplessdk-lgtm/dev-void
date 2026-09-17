@@ -330,15 +330,21 @@ export type UploadUrlAssetRequest = DeployAssetUploadRequest;
 export type ManifestOnlyDeployPayload = DeployUploadPayload;
 
 /**
- * Retry budget for the deploy POST's transport phase. A rejected `fetch`
- * means no HTTP response ever arrived (e.g. ECONNRESET on a stale pooled
- * keep-alive socket after the long R2-upload window), so the platform
- * cannot have emitted a deploy event yet — replaying is safe. Once a
- * Response exists, even a 4xx/5xx, the server answered: surface it
- * verbatim rather than risk processing the same deploy twice.
+ * Retry contract for the deploy POST's transport phase.
+ *
+ * - Only `fetch` rejections (`TypeError` — no HTTP response) are retried.
+ *   A Response of any status means the server answered; surface it
+ *   verbatim rather than replay a request it may have accepted.
+ * - A rejected fetch does NOT prove the request never arrived — the
+ *   connection may have dropped after delivery. Before each retry we look
+ *   for a deployment created inside DEPLOY_POST_DEDUPE_WINDOW_MS; finding
+ *   one means the earlier attempt reached the platform, so the retry is
+ *   suppressed instead of bouncing off the server's concurrency guard
+ *   (409) or registering a duplicate deployment.
  */
 const DEPLOY_POST_MAX_RETRIES = 3;
 const DEPLOY_POST_BACKOFF_MS = [1000, 5000, 10000];
+const DEPLOY_POST_DEDUPE_WINDOW_MS = 120_000;
 
 /**
  * HTTP client for the Void platform API.
@@ -570,7 +576,7 @@ export class PlatformClient {
     payload: ManifestOnlyDeployPayload,
   ): AsyncGenerator<DeployEvent> {
     const url = `${this.baseUrl}/projects/${projectId}/deploy`;
-    yield* this.streamDeployRequest(url, {
+    yield* this.streamDeployRequest(url, projectId, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -584,7 +590,11 @@ export class PlatformClient {
    * POST + NDJSON-stream-reader used by `finalizeDeploy()`. Captures
    * `cf-ray` + `cf-cache-status` for postmortem correlation.
    */
-  private async *streamDeployRequest(url: string, init: RequestInit): AsyncGenerator<DeployEvent> {
+  private async *streamDeployRequest(
+    url: string,
+    projectId: string,
+    init: RequestInit,
+  ): AsyncGenerator<DeployEvent> {
     const cliLog = this.cliLog;
     cliLog?.info('deploy_post', { url });
 
@@ -601,6 +611,23 @@ export class PlatformClient {
         if (!(err instanceof TypeError) || attempt >= DEPLOY_POST_MAX_RETRIES) {
           cliLog?.error('deploy_fetch_rejected', err, { url, attempts: attempt + 1 });
           throw err;
+        }
+        const existing = await this.findRecentDeployment(projectId, DEPLOY_POST_DEDUPE_WINDOW_MS);
+        if (existing) {
+          cliLog?.warn('deploy_retry_suppressed', {
+            url,
+            deploymentId: existing.id,
+            status: existing.status,
+          });
+          yield {
+            event: 'error',
+            step: 'finalize',
+            message:
+              `an earlier attempt of this deploy may have created deployment ${existing.id} ` +
+              `(status: ${existing.status}) — not retrying to avoid a duplicate deploy; ` +
+              'inspect with `void project status` before redeploying',
+          };
+          return;
         }
         cliLog?.warn('deploy_fetch_retry', {
           url,
@@ -680,6 +707,33 @@ export class PlatformClient {
         lastEvent: lastEventName,
       });
       throw err;
+    }
+  }
+
+  /**
+   * Best-effort lookup for a deployment created within `windowMs` — the
+   * deploy retry path uses it to detect that an earlier attempt reached
+   * the platform before the connection dropped. Returns `undefined` on
+   * any failure or ambiguity: the retried POST then still runs, with the
+   * server's own concurrency guard (409) as the backstop.
+   */
+  private async findRecentDeployment(
+    projectId: string,
+    windowMs: number,
+  ): Promise<DeploymentResponse | undefined> {
+    try {
+      const { deployments } = await this.listDeployments(projectId);
+      const newest = deployments[0];
+      if (!newest) {
+        return undefined;
+      }
+      const createdMs = Date.parse(newest.created_at);
+      if (Number.isNaN(createdMs)) {
+        return undefined;
+      }
+      return Date.now() - createdMs <= windowMs ? newest : undefined;
+    } catch {
+      return undefined;
     }
   }
 

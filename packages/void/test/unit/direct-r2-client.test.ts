@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
-import { PlatformClient, type ManifestOnlyDeployPayload } from '../../src/cli/client.ts';
+import {
+  PlatformClient,
+  type DeploymentResponse,
+  type ManifestOnlyDeployPayload,
+} from '../../src/cli/client.ts';
 import type { DeployManifest } from '../../src/cli/types.ts';
 
 const fetchMock = vi.fn();
@@ -238,17 +242,8 @@ describe('PlatformClient.finalizeDeploy', () => {
     });
   });
 
-  it('retries a transport-level fetch rejection with backoff, then streams events', async () => {
-    vi.useFakeTimers();
-    fetchMock
-      .mockRejectedValueOnce(new TypeError('fetch failed', { cause: new Error('read ECONNRESET') }))
-      .mockResolvedValueOnce(
-        ndjsonStreamResponse([
-          { event: 'done', deployment: 'd1', url: 'https://x', urls: [], assets: 0, workers: 0 },
-        ]),
-      );
-
-    const cliLog = {
+  function makeCliLog() {
+    return {
       info: vi.fn(),
       warn: vi.fn(),
       error: vi.fn(),
@@ -256,6 +251,53 @@ describe('PlatformClient.finalizeDeploy', () => {
       path: '/tmp/test.jsonl',
       close: vi.fn(),
     };
+  }
+
+  function makeDeployment(overrides: Partial<DeploymentResponse> = {}): DeploymentResponse {
+    return {
+      id: 'dpl_existing',
+      status: 'pending',
+      source: 'manual',
+      commit: null,
+      manifest: null,
+      error_message: null,
+      retained: false,
+      applied_migrations: null,
+      created_at: new Date().toISOString(),
+      deployed_at: null,
+      ...overrides,
+    };
+  }
+
+  function deploymentListResponse(deployments: Array<DeploymentResponse>): Response {
+    return jsonResponse({ deployments, activeDeploymentId: null });
+  }
+
+  const deployPostCalls = () => fetchMock.mock.calls.filter(([u]) => String(u).endsWith('/deploy'));
+  const deploymentListCalls = () =>
+    fetchMock.mock.calls.filter(([u]) => String(u).includes('/deployments'));
+
+  it('retries a transport-level fetch rejection with backoff, then streams events', async () => {
+    vi.useFakeTimers();
+    let posts = 0;
+    fetchMock.mockImplementation((url: string) => {
+      if (String(url).includes('/deployments')) {
+        return Promise.resolve(deploymentListResponse([]));
+      }
+      posts++;
+      if (posts === 1) {
+        return Promise.reject(
+          new TypeError('fetch failed', { cause: new Error('read ECONNRESET') }),
+        );
+      }
+      return Promise.resolve(
+        ndjsonStreamResponse([
+          { event: 'done', deployment: 'd1', url: 'https://x', urls: [], assets: 0, workers: 0 },
+        ]),
+      );
+    });
+
+    const cliLog = makeCliLog();
     const client = new PlatformClient(token, { apiUrl, cliLog });
     try {
       const events: Array<unknown> = [];
@@ -267,7 +309,8 @@ describe('PlatformClient.finalizeDeploy', () => {
       await vi.runAllTimersAsync();
       await consume;
 
-      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(deployPostCalls()).toHaveLength(2);
+      expect(deploymentListCalls()).toHaveLength(1);
       expect(events).toEqual([
         { event: 'done', deployment: 'd1', url: 'https://x', urls: [], assets: 0, workers: 0 },
       ]);
@@ -283,16 +326,14 @@ describe('PlatformClient.finalizeDeploy', () => {
 
   it('throws the original error after exhausting transport retries', async () => {
     vi.useFakeTimers();
-    fetchMock.mockRejectedValue(new TypeError('fetch failed'));
+    fetchMock.mockImplementation((url: string) => {
+      if (String(url).includes('/deployments')) {
+        return Promise.resolve(deploymentListResponse([]));
+      }
+      return Promise.reject(new TypeError('fetch failed'));
+    });
 
-    const cliLog = {
-      info: vi.fn(),
-      warn: vi.fn(),
-      error: vi.fn(),
-      debug: vi.fn(),
-      path: '/tmp/test.jsonl',
-      close: vi.fn(),
-    };
+    const cliLog = makeCliLog();
     const client = new PlatformClient(token, { apiUrl, cliLog });
     try {
       const consume = (async () => {
@@ -304,8 +345,9 @@ describe('PlatformClient.finalizeDeploy', () => {
       await vi.runAllTimersAsync();
       await assertion;
 
-      // 1 initial attempt + 3 retries.
-      expect(fetchMock).toHaveBeenCalledTimes(4);
+      // 1 initial attempt + 3 retries, one dedupe GET per retry.
+      expect(deployPostCalls()).toHaveLength(4);
+      expect(deploymentListCalls()).toHaveLength(3);
       const retries = cliLog.warn.mock.calls.filter(([msg]) => msg === 'deploy_fetch_retry');
       expect(retries.map(([, fields]) => fields?.delayMs)).toEqual([1000, 5000, 10000]);
       expect(cliLog.error).toHaveBeenCalledWith(
@@ -316,6 +358,113 @@ describe('PlatformClient.finalizeDeploy', () => {
           attempts: 4,
         }),
       );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('suppresses the retry when an earlier attempt already created a deployment', async () => {
+    const existing = makeDeployment({ id: 'dpl_existing', status: 'in-progress' });
+    fetchMock.mockImplementation((url: string) => {
+      if (String(url).includes('/deployments')) {
+        return Promise.resolve(deploymentListResponse([existing]));
+      }
+      return Promise.reject(new TypeError('fetch failed'));
+    });
+
+    const cliLog = makeCliLog();
+    const client = new PlatformClient(token, { apiUrl, cliLog });
+    const events: Array<unknown> = [];
+    for await (const event of client.finalizeDeploy(projectId, makePayload())) {
+      events.push(event);
+    }
+
+    // The POST is never replayed — the platform keeps its only deployment.
+    expect(deployPostCalls()).toHaveLength(1);
+    expect(deploymentListCalls()).toHaveLength(1);
+    expect(events).toEqual([
+      {
+        event: 'error',
+        step: 'finalize',
+        message: expect.stringContaining('dpl_existing'),
+      },
+    ]);
+    expect(cliLog.warn).toHaveBeenCalledWith(
+      'deploy_retry_suppressed',
+      expect.objectContaining({ deploymentId: 'dpl_existing', status: 'in-progress' }),
+    );
+  });
+
+  it('still retries when the newest deployment is older than the dedupe window', async () => {
+    vi.useFakeTimers();
+    const stale = makeDeployment({
+      created_at: new Date(Date.now() - 10 * 60_000).toISOString(),
+    });
+    let posts = 0;
+    fetchMock.mockImplementation((url: string) => {
+      if (String(url).includes('/deployments')) {
+        return Promise.resolve(deploymentListResponse([stale]));
+      }
+      posts++;
+      if (posts === 1) {
+        return Promise.reject(new TypeError('fetch failed'));
+      }
+      return Promise.resolve(
+        ndjsonStreamResponse([
+          { event: 'done', deployment: 'd1', url: 'https://x', urls: [], assets: 0, workers: 0 },
+        ]),
+      );
+    });
+
+    const client = makeClient();
+    try {
+      const events: Array<unknown> = [];
+      const consume = (async () => {
+        for await (const event of client.finalizeDeploy(projectId, makePayload())) {
+          events.push(event);
+        }
+      })();
+      await vi.runAllTimersAsync();
+      await consume;
+
+      expect(deployPostCalls()).toHaveLength(2);
+      expect(events[0]).toMatchObject({ event: 'done' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('still retries when the recent-deployment check itself fails', async () => {
+    vi.useFakeTimers();
+    let posts = 0;
+    fetchMock.mockImplementation((url: string) => {
+      if (String(url).includes('/deployments')) {
+        return Promise.reject(new TypeError('fetch failed'));
+      }
+      posts++;
+      if (posts === 1) {
+        return Promise.reject(new TypeError('fetch failed'));
+      }
+      return Promise.resolve(
+        ndjsonStreamResponse([
+          { event: 'done', deployment: 'd1', url: 'https://x', urls: [], assets: 0, workers: 0 },
+        ]),
+      );
+    });
+
+    const client = makeClient();
+    try {
+      const events: Array<unknown> = [];
+      const consume = (async () => {
+        for await (const event of client.finalizeDeploy(projectId, makePayload())) {
+          events.push(event);
+        }
+      })();
+      await vi.runAllTimersAsync();
+      await consume;
+
+      expect(deployPostCalls()).toHaveLength(2);
+      expect(events[0]).toMatchObject({ event: 'done' });
     } finally {
       vi.useRealTimers();
     }
