@@ -19,6 +19,7 @@ import {
 import { OAuthGrantError, createCfCustomerClient, revokeOauthGrant } from '../email/cf-customer.ts';
 import type { CfCustomerClient } from '../email/cf-customer.ts';
 import {
+  EmailDomainCredentialChangedError,
   refreshOauthGrantSerialized,
   revokeOauthGrantSerialized,
   withEmailDomainRowLock,
@@ -40,8 +41,10 @@ import {
 } from '../email/domains.ts';
 import {
   ROUTING_SUBDOMAIN_STEP,
+  SENDING_ONBOARDING_STEP,
   domainHasRoutingMx,
   removeEmailDomain,
+  sendingOnboardedReadback,
   setupEmailDomain,
   syncEmailDomain,
   type EmailDomainSetupResult,
@@ -62,7 +65,7 @@ import {
   listDestinations,
   type CfDestinationAddress,
 } from '../provisioning/email-routing.ts';
-import { emailDomains, type EmailDomainSetupState } from '../schema.ts';
+import { emailDomains, projects, type EmailDomainSetupState } from '../schema.ts';
 import type { EmailDestination } from '../types.ts';
 
 /**
@@ -942,7 +945,12 @@ const app = new Hono<ApiEnv>()
         credentialStatus = 'active';
         probeClient = createCfCustomerClient(tokens.accessToken);
       } catch (err) {
-        if (err instanceof OAuthGrantError && err.code === 'invalid_grant') {
+        if (err instanceof EmailDomainCredentialChangedError) {
+          // A replace committed mid-probe — the probe is void, nothing
+          // was written, and the fresh re-read below answers for the
+          // replacement credential.
+          credentialStatus = 'probe_failed';
+        } else if (err instanceof OAuthGrantError && err.code === 'invalid_grant') {
           // The row was already marked token_revoked under the lock.
           credentialStatus = 'revoked';
         } else {
@@ -974,10 +982,26 @@ const app = new Hono<ApiEnv>()
       patch.token_expires_on = tokenPatch.token_expires_on;
     }
     if (Object.keys(patch).length > 0) {
-      await db
+      // Fenced on the probed credential's identity: a replace committing
+      // mid-probe (renewing an expired token is the case that bites) must
+      // not have the OLD credential's verdict — status flip or token
+      // metadata — stamped on the NEW one. A fenced-out patch voids the
+      // probe: the fresh re-read answers, and the next poll re-probes.
+      const applied = await db
         .update(emailDomains)
         .set({ ...patch, updated_at: sql`now()` })
-        .where(eq(emailDomains.id, row.id));
+        .where(
+          and(
+            eq(emailDomains.id, row.id),
+            eq(emailDomains.credential_kind, row.credential_kind),
+            eq(emailDomains.token_ciphertext, row.token_ciphertext),
+          ),
+        )
+        .returning({ id: emailDomains.id });
+      if (applied.length === 0) {
+        credentialStatus = 'probe_failed';
+        probeClient = null;
+      }
     }
 
     let fresh = await getEmailDomainRowById(db, row.id);
@@ -986,25 +1010,48 @@ const app = new Hono<ApiEnv>()
       return context.json({ error: 'email domain not found' }, 404);
     }
 
-    // Self-clear the routing-subdomain human step: the dashboard form's
-    // observable effect is public MX records naming Cloudflare's inbound
-    // exchanges. On that evidence the step is done — flip the row to
-    // active (the mirror repair below carries the new status to the
-    // proxy). No evidence — MX not there yet, or the lookup failed —
-    // leaves the row pending for the next poll.
-    if (
-      fresh.status === 'pending' &&
-      fresh.setup_state?.remaining_steps?.length === 1 &&
-      fresh.setup_state.remaining_steps[0] === ROUTING_SUBDOMAIN_STEP &&
-      (await domainHasRoutingMx(fresh.domain))
-    ) {
-      await db
-        .update(emailDomains)
-        .set({ status: 'active', setup_state: null, updated_at: sql`now()` })
-        .where(eq(emailDomains.id, fresh.id));
-      fresh = await getEmailDomainRowById(db, row.id);
-      if (!fresh) {
-        return context.json({ error: 'email domain not found' }, 404);
+    // Self-clear recorded remaining steps on observable evidence. The
+    // routing-subdomain step's effect is public MX records naming
+    // Cloudflare's inbound exchanges; the sending-onboarding step's is
+    // the customer-credential read-back showing the subdomain onboarded
+    // (a Workers Paid upgrade plus a sync, which re-attempts the POST).
+    // No evidence — the probe failed or the step is genuinely undone —
+    // leaves the row for the next poll. The row flips pending → active
+    // only once no INBOUND-BLOCKING step (routing_subdomain) remains; a
+    // sending_onboarding step rides along on an active row.
+    const pendingSteps = fresh.setup_state?.remaining_steps;
+    if (pendingSteps && pendingSteps.length > 0) {
+      const cleared: Array<string> = [];
+      if (
+        pendingSteps.includes(ROUTING_SUBDOMAIN_STEP) &&
+        (await domainHasRoutingMx(fresh.domain))
+      ) {
+        cleared.push(ROUTING_SUBDOMAIN_STEP);
+      }
+      if (
+        pendingSteps.includes(SENDING_ONBOARDING_STEP) &&
+        probeClient !== null &&
+        fresh.zone_id !== null &&
+        (await sendingOnboardedReadback(probeClient, fresh.zone_id, fresh.domain))
+      ) {
+        cleared.push(SENDING_ONBOARDING_STEP);
+      }
+      if (cleared.length > 0) {
+        const keptSteps = pendingSteps.filter((step) => !cleared.includes(step));
+        await db
+          .update(emailDomains)
+          .set({
+            ...(fresh.status === 'pending' && !keptSteps.includes(ROUTING_SUBDOMAIN_STEP)
+              ? { status: 'active' as const }
+              : {}),
+            setup_state: keptSteps.length > 0 ? { remaining_steps: keptSteps } : null,
+            updated_at: sql`now()`,
+          })
+          .where(eq(emailDomains.id, fresh.id));
+        fresh = await getEmailDomainRowById(db, row.id);
+        if (!fresh) {
+          return context.json({ error: 'email domain not found' }, 404);
+        }
       }
     }
 
@@ -1056,7 +1103,7 @@ const app = new Hono<ApiEnv>()
     // proxy mirror must not be "repaired" against a state the operator is
     // about to finish removing.
     if (fresh.setup_state?.failed_step !== 'remove') {
-      await repairEmailDomainMirrorIfDrifted(context.env, fresh);
+      await repairEmailDomainMirrorIfDrifted(db, context.env, fresh);
     }
 
     return context.json({
@@ -1577,6 +1624,9 @@ async function syncEmailDomainAndApply(
             account_id: row.account_id,
             relay_worker_name: row.relay_worker_name,
             zone_id: row.zone_id,
+            // Lets sync re-attempt a pending sending onboarding (a
+            // Workers Paid upgrade) and report the cleared step.
+            setup_remaining_steps: row.setup_state?.remaining_steps,
           },
           credential,
           proxyOrigin,
@@ -1609,18 +1659,23 @@ async function syncEmailDomainAndApply(
           await decryptEmailDomainRelaySecret(context.env, projectId, domain, row),
         );
       }
-      // A successful sync does not clear a pending human step: the engine
-      // cannot observe the routing-subdomain dashboard form, so
-      // remaining_steps survive and the row stays 'pending'.
-      const remainingSteps = row.setup_state?.remaining_steps;
+      // A successful sync does not clear a pending human step on its own:
+      // the engine cannot observe the routing-subdomain dashboard form,
+      // so remaining_steps survive — minus any the sync itself cleared
+      // (the sending-onboarding retry). The row stays 'pending' only
+      // while an INBOUND-BLOCKING step (routing_subdomain) remains; a
+      // sending_onboarding step rides along on an active row.
+      const keptSteps = row.setup_state?.remaining_steps?.filter(
+        (step) => !(result.cleared_steps ?? []).includes(step),
+      );
       const setupState: EmailDomainSetupState | null =
         result.setup_state !== null
           ? result.setup_state
-          : remainingSteps && remainingSteps.length > 0
-            ? { remaining_steps: remainingSteps }
+          : keptSteps && keptSteps.length > 0
+            ? { remaining_steps: keptSteps }
             : null;
       const status: EmailDomain['status'] =
-        result.status === 'active' && setupState?.remaining_steps?.length
+        result.status === 'active' && setupState?.remaining_steps?.includes(ROUTING_SUBDOMAIN_STEP)
           ? 'pending'
           : result.status;
       await tx
@@ -1869,8 +1924,21 @@ async function replaceEmailDomainCredential(
  * The status GET's mirror repair — the same read-compare-write self-heal
  * shape as the allowlist listing (`projectAllowlistKvDiffers`): rewrite
  * only on a real difference, so polling never amplifies into KV writes.
+ *
+ * The write is fenced against project teardown: the mirror is
+ * authorization material, and once the cascade takes the row nothing
+ * sweeps the key. Holding `SELECT … FOR UPDATE` on the PROJECT row across
+ * the KV put gives a total order with teardown's 'deleting' flip and its
+ * cascade (both take the same lock): either they committed first — the
+ * project reads deleting or gone, or the domain row is cascaded away —
+ * and the write is skipped, or this write lands first and teardown's own
+ * mirror clear removes it. Without the fence, a status poll admitted
+ * before teardown could recreate an active mirror after teardown cleared
+ * it, re-authorizing a possibly-stranded relay with no row left to retry
+ * from.
  */
 async function repairEmailDomainMirrorIfDrifted(
+  db: Db,
   env: Pick<
     ApiEnv['Bindings'],
     'ROUTING' | 'PROJECT_SECRET_KEYS_JSON' | 'PROJECT_SECRET_ACTIVE_KEY_VERSION'
@@ -1899,7 +1967,26 @@ async function repairEmailDomainMirrorIfDrifted(
       // Unparseable mirror — rewrite below.
     }
   }
-  await writeEmailDomainMirror(env.ROUTING, row, relaySecretSha256);
+  await db.transaction(async (tx) => {
+    const lockedProject = await tx
+      .select({ status: projects.status })
+      .from(projects)
+      .where(eq(projects.id, row.project_id))
+      .for('update')
+      .limit(1);
+    if (!lockedProject[0] || lockedProject[0].status === 'deleting') {
+      return;
+    }
+    const alive = await tx
+      .select({ id: emailDomains.id })
+      .from(emailDomains)
+      .where(eq(emailDomains.id, row.id))
+      .limit(1);
+    if (!alive[0]) {
+      return;
+    }
+    await writeEmailDomainMirror(env.ROUTING, row, relaySecretSha256);
+  });
 }
 
 function monthBucket(): string {

@@ -17,10 +17,13 @@ type CfApiResult<T> = Readonly<{
  */
 export class CloudflareApiError extends Error {
   readonly status: number;
-  constructor(message: string, status: number) {
+  /** The envelope's numeric error codes (empty for hand-built errors). */
+  readonly codes: ReadonlyArray<number>;
+  constructor(message: string, status: number, codes: ReadonlyArray<number> = []) {
     super(message);
     this.name = 'CloudflareApiError';
     this.status = status;
+    this.codes = codes;
   }
 }
 
@@ -43,7 +46,11 @@ export async function cfFetch<T>(url: string, apiToken: string, init?: RequestIn
   const json = (await response.json()) as CfApiResult<T>;
   if (!json.success) {
     const message = json.errors.map((error) => error.message).join(', ');
-    throw new CloudflareApiError(`Cloudflare API error: ${message}`, response.status);
+    throw new CloudflareApiError(
+      `Cloudflare API error: ${message}`,
+      response.status,
+      json.errors.map((error) => error.code),
+    );
   }
   return json.result;
 }

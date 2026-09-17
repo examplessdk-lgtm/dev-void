@@ -840,6 +840,11 @@ function printEmailDomainOutcome(row: EmailDomainResponse): void {
     );
     return;
   }
+  if (remaining.includes('sending_onboarding')) {
+    log.info(
+      `Inbound is live. Sending to arbitrary recipients needs Workers Paid — until then sendEmail() works to verified destinations only. After upgrading, run \`void email domain sync ${row.domain}\` to finish onboarding.`,
+    );
+  }
   log.success(
     `${row.domain} is live — send with \`sendEmail({ from: 'you@${row.domain}', … })\`; inbound mail to any address on ${row.domain} reaches your email/ handlers.`,
   );
@@ -894,6 +899,11 @@ export async function emailDomainStatus(
   const remaining = row.setup_state?.remaining_steps ?? [];
   if (remaining.includes('routing_subdomain')) {
     log.warn(`One step only you can do: ${routingSubdomainInstruction(row.domain, row.mode)}.`);
+  }
+  if (remaining.includes('sending_onboarding')) {
+    log.info(
+      `Sending to arbitrary recipients needs Workers Paid — inbound works; sendEmail() to verified destinations only. After upgrading, run \`void email domain sync ${row.domain}\`.`,
+    );
   }
   if (row.relay_missing === true || row.relay_drift) {
     log.info(`Run \`void email domain sync ${row.domain}\` to redeploy the relay in place.`);

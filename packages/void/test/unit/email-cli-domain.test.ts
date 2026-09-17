@@ -568,6 +568,22 @@ describe('emailDomainAdd', () => {
     expect(printed(warnSpy)).toContain('Email Routing → acme.com → Settings → Subdomains');
     expect(printed(infoSpy)).toContain('void email domain status mail.acme.com');
   });
+
+  it('renders the Workers Free hint when sending onboarding is still pending on a live row', async () => {
+    const addEmailDomain = vi.fn(async () =>
+      domainRow({
+        status: 'active',
+        setup_state: { remaining_steps: ['sending_onboarding'] },
+      }),
+    );
+
+    await emailDomainAdd({ addEmailDomain }, 'prj_1', 'acme.com', undefined, addDeps());
+
+    expect(printed(infoSpy)).toContain('Workers Paid');
+    expect(printed(infoSpy)).toContain('void email domain sync acme.com');
+    // The row is live — the success line still prints.
+    expect(printed(successSpy)).toContain('acme.com is live');
+  });
 });
 
 describe('emailDomainStatus', () => {

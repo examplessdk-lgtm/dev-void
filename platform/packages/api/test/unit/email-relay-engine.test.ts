@@ -305,6 +305,62 @@ describe('setupEmailDomain', () => {
     });
   });
 
+  it('continues past a Workers Free sending-onboarding refusal — inbound deploys, the step is recorded', async () => {
+    const { client, calls } = makeFakeClient({
+      zones: { 'acme.com': ZONE },
+      failOn: {
+        onboardSending: new CloudflareApiError(
+          'Cloudflare API error: account is not entitled to Email Sending',
+          403,
+          [10105],
+        ),
+      },
+    });
+
+    const result = await setupEmailDomain(setupInput(), depsFor(client));
+
+    // Email Routing needs no paid plan, so the relay and catch-all still
+    // deploy and the row goes ACTIVE — only the outbound lane stays
+    // refused at CF until a plan upgrade.
+    expect(result.status).toBe('active');
+    expect(result.setup_state).toEqual({ remaining_steps: ['sending_onboarding'] });
+    expect(result.relay_worker_name).toBe(RELAY_WORKER_BASE_NAME);
+    expect(methods(calls)).toEqual([
+      'verifyToken',
+      'findZone',
+      'enableRouting',
+      'onboardSending',
+      'relayScriptExists',
+      'putRelayScript',
+      'putRelaySecret',
+      'getCatchAll',
+      'setCatchAll',
+    ]);
+  });
+
+  it('holds the row pending when a Free-plan refusal combines with the routing-subdomain step', async () => {
+    const { client } = makeFakeClient({
+      zones: { 'acme.com': ZONE },
+      failOn: {
+        enableRouting: new CloudflareApiError('Cloudflare API error: forbidden', 403),
+        onboardSending: new CloudflareApiError(
+          'Cloudflare API error: account is not entitled to Email Sending',
+          400,
+          [2036],
+        ),
+      },
+    });
+
+    const result = await setupEmailDomain(setupInput('mail.acme.com'), depsFor(client));
+
+    // routing_subdomain is inbound-blocking; sending_onboarding is not.
+    expect(result.status).toBe('pending');
+    expect(result.setup_state).toEqual({
+      remaining_steps: ['routing_subdomain', 'sending_onboarding'],
+    });
+    expect(result.relay_worker_name).toBe(RELAY_WORKER_BASE_NAME);
+  });
+
   it('fails at deploy_relay when the secret PUT fails, after the script upload succeeded — and records the relay name', async () => {
     const { client } = makeFakeClient({
       zones: { 'acme.com': ZONE },
@@ -904,6 +960,112 @@ describe('syncEmailDomain', () => {
     expect(result.status).toBe('active');
     expect(result.catch_all).toBe('probe_failed');
     expect(result.new_relay_secret).toBeDefined();
+  });
+
+  it('re-attempts a pending sending onboarding after the catch-all ensure, reporting it cleared', async () => {
+    const { client, calls } = makeFakeClient({
+      catchAll: { enabled: true, workerName: RELAY_WORKER_BASE_NAME },
+    });
+
+    const result = await syncEmailDomain(
+      {
+        ...syncInput,
+        row: {
+          ...syncInput.row,
+          zone_id: 'zone_1',
+          setup_remaining_steps: ['sending_onboarding'],
+        },
+      },
+      depsFor(client),
+    );
+
+    expect(result.status).toBe('active');
+    expect(result.cleared_steps).toEqual(['sending_onboarding']);
+    // The retry runs after the redeploy, rotation, and catch-all ensure.
+    expect(methods(calls)).toEqual([
+      'verifyToken',
+      'putRelayScript',
+      'putRelaySecret',
+      'getCatchAll',
+      'onboardSending',
+    ]);
+  });
+
+  it('keeps the step when the onboarding retry is refused again, without failing the sync', async () => {
+    const { client } = makeFakeClient({
+      catchAll: { enabled: true, workerName: RELAY_WORKER_BASE_NAME },
+      failOn: {
+        onboardSending: new CloudflareApiError(
+          'Cloudflare API error: account is not entitled to Email Sending',
+          403,
+          [10105],
+        ),
+      },
+    });
+
+    const result = await syncEmailDomain(
+      {
+        ...syncInput,
+        row: {
+          ...syncInput.row,
+          zone_id: 'zone_1',
+          setup_remaining_steps: ['sending_onboarding'],
+        },
+      },
+      depsFor(client),
+    );
+
+    expect(result.status).toBe('active');
+    expect(result.catch_all).toBe('already_set');
+    expect(result.cleared_steps).toBeUndefined();
+    expect(result.new_relay_secret).toBeDefined();
+  });
+
+  it('clears the step on a confirming read-back behind a 409', async () => {
+    const { client } = makeFakeClient({
+      catchAll: { enabled: true, workerName: RELAY_WORKER_BASE_NAME },
+      sendingSubdomains: [{ name: 'acme.com', enabled: true }],
+      failOn: {
+        onboardSending: new CloudflareApiError('Cloudflare API error: already onboarded', 409),
+      },
+    });
+
+    const result = await syncEmailDomain(
+      {
+        ...syncInput,
+        row: {
+          ...syncInput.row,
+          zone_id: 'zone_1',
+          setup_remaining_steps: ['sending_onboarding'],
+        },
+      },
+      depsFor(client),
+    );
+
+    expect(result.status).toBe('active');
+    expect(result.cleared_steps).toEqual(['sending_onboarding']);
+  });
+
+  it('makes no sending-onboarding call when the row carries no such step', async () => {
+    const { client, calls } = makeFakeClient({
+      catchAll: { enabled: true, workerName: RELAY_WORKER_BASE_NAME },
+    });
+
+    const result = await syncEmailDomain(
+      {
+        ...syncInput,
+        row: {
+          ...syncInput.row,
+          zone_id: 'zone_1',
+          setup_remaining_steps: ['routing_subdomain'],
+        },
+      },
+      depsFor(client),
+    );
+
+    expect(result.status).toBe('active');
+    expect(result.cleared_steps).toBeUndefined();
+    expect(methods(calls)).not.toContain('onboardSending');
   });
 
   it('makes no catch-all calls when the row carries no zone_id, and omits the field', async () => {

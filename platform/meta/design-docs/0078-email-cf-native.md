@@ -376,6 +376,15 @@ row's relay; a foreign or unreadable rule is left alone (the latter reports
 CF's list endpoint returns 20 per page, so confirmation walks
 `?page=N&per_page=50` until a short page.
 
+Email Sending is paid-plan-only while Email Routing is not, so an
+entitlement refusal (CF error codes 2036/10105 — a Workers Free account)
+does not fail setup: the relay and catch-all still deploy, and the row
+lands `active` with `remaining_steps: ['sending_onboarding']`. Inbound
+works; only the outbound lane (`send_raw`) stays refused at Cloudflare
+until a plan upgrade, and the CLI prints that hint. Only the
+inbound-blocking step gates the row: `routing_subdomain` holds it at
+`pending`, while `sending_onboarding` rides along on an active row.
+
 `void email domain status`, `list`, `sync`, `remove`. `sync` redeploys the
 relay in place, rotates its secret, and runs the catch-all ensure whenever
 the row carries a zone: missing, disabled or non-worker rules are repointed
@@ -389,7 +398,11 @@ CLI's drift hint names. A `pending` row whose only remaining step is
 `routing_subdomain` self-clears: the status GET probes public DNS for MX
 naming Cloudflare's inbound exchanges (`route1..3.mx.cloudflare.net`) — the
 dashboard form's observable effect — and on evidence flips the row to
-`active` and the mirror follows. The customer can also revoke the credential
+`active` and the mirror follows. The `sending_onboarding` step self-clears
+the same way on its own evidence — the customer-credential read-back
+showing the subdomain onboarded — and `sync` re-attempts the onboarding
+POST outright, so a Workers Paid upgrade completes the row without
+re-adding. The customer can also revoke the credential
 at Cloudflare at any time; the next probe sees it and the row reads
 `token_revoked` / `token_expired`, with inbound continuing until they delete
 the rule or the relay themselves.

@@ -58,7 +58,11 @@ export async function cfCustomerFetch<T>(
   const json = (await response.json()) as CfCustomerResult<T>;
   if (!json.success) {
     const message = json.errors.map((error) => error.message).join(', ');
-    throw new CloudflareApiError(`Cloudflare API error: ${message}`, response.status);
+    throw new CloudflareApiError(
+      `Cloudflare API error: ${message}`,
+      response.status,
+      json.errors.map((error) => error.code),
+    );
   }
   return json.result;
 }

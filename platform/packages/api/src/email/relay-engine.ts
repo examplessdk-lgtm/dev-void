@@ -72,6 +72,25 @@ export const RELAY_WORKER_BASE_NAME = 'void-email-relay';
 /** Human step recorded when the subdomain routing POST is refused. */
 export const ROUTING_SUBDOMAIN_STEP = 'routing_subdomain';
 
+/**
+ * Plan step recorded when Email Sending onboarding is refused for
+ * entitlement (CF error codes 2036/10105 — Workers Free). Unlike
+ * routing_subdomain it is NOT inbound-blocking: Email Routing works on
+ * Free, so the relay and catch-all still deploy and the row can go
+ * active with this step recorded. Only the outbound lane (send_raw)
+ * stays refused until a plan upgrade; a sync re-attempts the onboarding
+ * POST, and the status GET self-clears the step on a confirming
+ * read-back.
+ */
+export const SENDING_ONBOARDING_STEP = 'sending_onboarding';
+
+/** CF's entitlement refusal for Email Sending on a Workers Free account. */
+function isSendingEntitlementRefusal(err: unknown): boolean {
+  return (
+    err instanceof CloudflareApiError && (err.codes.includes(2036) || err.codes.includes(10105))
+  );
+}
+
 const MAX_RELAY_NAME_SUFFIX = 50;
 
 export type RelayEngineDeps = Readonly<{
@@ -136,7 +155,15 @@ export type EmailDomainSyncInput = Readonly<{
   row: Pick<EmailDomain, 'domain' | 'credential_kind' | 'account_id' | 'relay_worker_name'> &
     // zone_id drives the catch-all ensure; absent/null → the ensure is
     // skipped entirely (older callers pass no zone).
-    Partial<Pick<EmailDomain, 'zone_id'>>;
+    Partial<Pick<EmailDomain, 'zone_id'>> & {
+      /**
+       * The row's recorded remaining steps. When sending_onboarding is
+       * among them (a Workers Free refusal at setup), sync RE-ATTEMPTS
+       * the onboarding POST after the catch-all ensure — the post-plan-
+       * upgrade completion path — and reports it in cleared_steps.
+       */
+      setup_remaining_steps?: ReadonlyArray<string>;
+    };
   credential: string;
   proxyOrigin: string;
 }>;
@@ -186,6 +213,12 @@ export type EmailDomainSyncResult = Readonly<{
    *     non-fatal, the redeploy/rotation still succeeded.
    */
   catch_all?: 'ensured' | 'already_set' | 'foreign_conflict' | 'probe_failed';
+  /**
+   * Remaining steps the sync itself completed (the sending-onboarding
+   * retry) — the caller subtracts them from the row's recorded
+   * remaining_steps instead of carrying them verbatim.
+   */
+  cleared_steps?: ReadonlyArray<string>;
   /** Fresh relay secret — the caller re-encrypts it into relay_* and sha256s it into the mirror. */
   new_relay_secret?: string;
   rotated_refresh_token?: string;
@@ -251,7 +284,7 @@ async function routingEnabledReadback(client: CfCustomerClient, zoneId: string):
  * apex re-run whose onboard actually succeeded may still fail with the
  * original CF error; the message names the step either way.
  */
-async function sendingOnboardedReadback(
+export async function sendingOnboardedReadback(
   client: CfCustomerClient,
   zoneId: string,
   domain: string,
@@ -482,11 +515,17 @@ export async function setupEmailDomain(
   }
 
   // Step 5: onboard sending (cf-bounce MX, SPF, DKIM, DMARC). Same
-  // re-run read-back as step 4, through the sending-subdomain list.
+  // re-run read-back as step 4, through the sending-subdomain list. An
+  // ENTITLEMENT refusal (Workers Free) is not fatal: Email Routing needs
+  // no paid plan, so the inbound lane deploys anyway and the step is
+  // recorded for a post-upgrade sync — only the outbound lane (send_raw)
+  // stays refused at CF until then.
   try {
     await client.onboardSending(zone.id, input.row.domain);
   } catch (err) {
-    if (
+    if (isSendingEntitlementRefusal(err)) {
+      remainingSteps.push(SENDING_ONBOARDING_STEP);
+    } else if (
       !(
         err instanceof CloudflareApiError &&
         (err.status === 400 || err.status === 409) &&
@@ -571,7 +610,11 @@ export async function setupEmailDomain(
   }
 
   return {
-    status: remainingSteps.length > 0 ? 'pending' : 'active',
+    // Only an inbound-blocking step holds the row at 'pending': a lone
+    // sending_onboarding step leaves inbound live (the proxy gates on the
+    // mirror's active status), with outbound refused at CF until a plan
+    // upgrade and a sync complete it.
+    status: remainingSteps.includes(ROUTING_SUBDOMAIN_STEP) ? 'pending' : 'active',
     ...progress,
     relay_version: RELAY_VERSION,
     setup_state: remainingSteps.length > 0 ? { remaining_steps: remainingSteps } : null,
@@ -614,6 +657,12 @@ async function chooseFreeRelayName(client: CfCustomerClient, accountId: string):
  * — the drift doctrine is report, don't fight. A failed probe or write
  * lands in 'probe_failed', non-fatal: the redeploy and rotation already
  * succeeded and must still report success.
+ *
+ * When the caller passes a row whose remaining steps include
+ * sending_onboarding (a Workers Free entitlement refusal at setup), sync
+ * also RE-ATTEMPTS the onboarding POST — the completion path after a
+ * plan upgrade — and reports it in cleared_steps; a repeated refusal or
+ * any other failure keeps the step, non-fatally.
  */
 export async function syncEmailDomain(
   input: EmailDomainSyncInput,
@@ -680,11 +729,32 @@ export async function syncEmailDomain(
       catchAll = 'probe_failed';
     }
   }
+  // Sending-onboarding retry — only when setup recorded the step (a
+  // Workers Free entitlement refusal). A success, or a confirming
+  // read-back behind a 400/409, clears the step; a repeated entitlement
+  // refusal or any other error keeps it, non-fatally — the redeploy and
+  // rotation already succeeded and outbound stays refused at CF.
+  let clearedSteps: ReadonlyArray<string> | undefined;
+  if (input.row.zone_id && input.row.setup_remaining_steps?.includes(SENDING_ONBOARDING_STEP)) {
+    try {
+      await resolved.client.onboardSending(input.row.zone_id, input.row.domain);
+      clearedSteps = [SENDING_ONBOARDING_STEP];
+    } catch (err) {
+      if (
+        err instanceof CloudflareApiError &&
+        (err.status === 400 || err.status === 409) &&
+        (await sendingOnboardedReadback(resolved.client, input.row.zone_id, input.row.domain))
+      ) {
+        clearedSteps = [SENDING_ONBOARDING_STEP];
+      }
+    }
+  }
   return {
     status: 'active',
     relay_version: RELAY_VERSION,
     setup_state: null,
     ...(catchAll === undefined ? {} : { catch_all: catchAll }),
+    ...(clearedSteps === undefined ? {} : { cleared_steps: clearedSteps }),
     new_relay_secret: newRelaySecret,
     ...(resolved.rotated_refresh_token === undefined
       ? {}

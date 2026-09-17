@@ -32,7 +32,10 @@ import {
   vi,
 } from 'vite-plus/test';
 import { hmacSignState } from '../../src/auth/hmac.ts';
-import { refreshOauthGrantSerialized } from '../../src/email/credential-lease.ts';
+import {
+  leaseEmailDomainCredential,
+  refreshOauthGrantSerialized,
+} from '../../src/email/credential-lease.ts';
 import {
   decryptEmailDomainRelaySecret,
   decryptEmailDomainToken,
@@ -145,7 +148,7 @@ function stubCustomerCf(
     routingSettings?: Record<string, unknown>;
     /** GET sending/subdomains entries; default []. */
     sendingSubdomains?: ReadonlyArray<{ name: string; enabled: boolean }>;
-    failOn?: Partial<Record<StubFailTag, { message: string; status: number }>>;
+    failOn?: Partial<Record<StubFailTag, { message: string; status: number; code?: number }>>;
     /** Side-effect hook fired right after a call is recorded (mid-request seams). */
     on?: Partial<Record<StubFailTag, () => void | Promise<void>>>;
     oauth?: 'rotate' | 'invalid_grant' | 'server_error';
@@ -155,7 +158,7 @@ function stubCustomerCf(
   let oauthRound = 0;
   const fail = (tag: StubFailTag): Response | null => {
     const failure = config.failOn?.[tag];
-    return failure ? cfError(failure.message, failure.status) : null;
+    return failure ? cfError(failure.message, failure.status, failure.code) : null;
   };
   const record = async (call: RecordedCall): Promise<void> => {
     calls.push(call);
@@ -822,6 +825,35 @@ describe('POST /projects/:id/email/domains', () => {
     // Everything after the refused POST still ran — relay deployed, mirror written.
     expect(json.relay_worker_name).toBe(RELAY_WORKER_BASE_NAME);
     expect((await mirrorFor('mail.acme.com'))!.status).toBe('pending');
+  });
+
+  it('completes inbound setup on a Workers Free sending refusal — active, the plan step recorded', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    const stub = stubCustomerCf({
+      zones: { 'acme.com': ZONE },
+      failOn: {
+        onboardSending: {
+          message: 'account is not entitled to Email Sending',
+          status: 403,
+          code: 10105,
+        },
+      },
+    });
+
+    const res = await addDomain(project.id, user.jwt, { domain: 'acme.com', apiToken: API_TOKEN });
+    expect(res.status).toBe(201);
+    const json = (await res.json()) as Record<string, unknown>;
+    // Email Routing needs no paid plan: the relay deployed, the catch-all
+    // was written, and the row + mirror are ACTIVE — inbound works. Only
+    // the outbound lane stays refused at CF until a plan upgrade.
+    expect(json.status).toBe('active');
+    expect(json.setup_state).toEqual({ remaining_steps: ['sending_onboarding'] });
+    expect(json.relay_worker_name).toBe(RELAY_WORKER_BASE_NAME);
+    expect(tags(stub.calls)).toEqual(
+      expect.arrayContaining(['onboardSending', 'scriptPut', 'secretPut', 'catchAll']),
+    );
+    expect((await mirrorFor('acme.com'))!.status).toBe('active');
   });
 
   it('fails at mx_check when the domain already carries MX', async () => {
@@ -1704,6 +1736,117 @@ describe('GET /projects/:id/email/domains/:domain', () => {
     expect(await env.ROUTING.get('email-domain:acme.com')).toBe(drifted);
   });
 
+  it('self-clears the sending-onboarding step once the read-back confirms it', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    const row = await seedEmailDomain(project.id, 'acme.com', { status: 'active' });
+    await env.db
+      .update(emailDomains)
+      .set({ setup_state: { remaining_steps: ['sending_onboarding'] } })
+      .where(eq(emailDomains.id, row.id));
+
+    // Not onboarded yet — the step survives the poll.
+    stubCustomerCf({
+      zones: { 'acme.com': ZONE },
+      existingScripts: [RELAY_WORKER_BASE_NAME],
+      catchAllRule: { enabled: true, workerName: RELAY_WORKER_BASE_NAME },
+    });
+    let res = await domainStatus(project.id, 'acme.com', user.jwt);
+    expect(res.status).toBe(200);
+    expect((await rowFor(project.id, 'acme.com'))!.setup_state).toEqual({
+      remaining_steps: ['sending_onboarding'],
+    });
+
+    // Onboarded (a post-upgrade sync landed it) — the poll clears the
+    // step; the row was already active, so only setup_state moves.
+    const stub2 = stubCustomerCf({
+      zones: { 'acme.com': ZONE },
+      existingScripts: [RELAY_WORKER_BASE_NAME],
+      catchAllRule: { enabled: true, workerName: RELAY_WORKER_BASE_NAME },
+      sendingSubdomains: [{ name: 'acme.com', enabled: true }],
+    });
+    res = await domainStatus(project.id, 'acme.com', user.jwt);
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as Record<string, unknown>;
+    expect(json.status).toBe('active');
+    expect(json.setup_state).toBeNull();
+    expect(callsByTag(stub2.calls, 'sendingSubdomainsGet')).toHaveLength(1);
+  });
+
+  it('does not apply a stale probe verdict when the credential was replaced mid-poll', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    const row = await seedEmailDomain(project.id, 'acme.com', { status: 'active' });
+    stubCustomerCf({
+      zones: { 'acme.com': ZONE },
+      verifyStatus: 'expired',
+      existingScripts: [RELAY_WORKER_BASE_NAME],
+      catchAllRule: { enabled: true, workerName: RELAY_WORKER_BASE_NAME },
+      on: {
+        // A renewal replace commits while the expired-verdict probe is in
+        // flight: the OLD token's verdict must not land on the NEW
+        // credential.
+        verifyToken: async () => {
+          const enc = await encryptEmailDomainToken(
+            env,
+            project.id,
+            'acme.com',
+            API_TOKEN_REPLACEMENT,
+          );
+          await env.db
+            .update(emailDomains)
+            .set({
+              credential_kind: 'api_token',
+              token_ciphertext: enc.ciphertext,
+              token_iv: enc.iv,
+              token_key_version: enc.keyVersion,
+              token_id: null,
+              token_expires_on: null,
+            })
+            .where(eq(emailDomains.id, row.id));
+        },
+      },
+    });
+
+    const res = await domainStatus(project.id, 'acme.com', user.jwt);
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as Record<string, unknown>;
+    // The fenced update refused the stale verdict; the probe is reported
+    // void, and the row keeps the replacement's state and status.
+    expect(json.credential_status).toBe('probe_failed');
+    const fresh = (await rowFor(project.id, 'acme.com'))!;
+    expect(fresh.status).toBe('active');
+    expect(await decryptEmailDomainToken(env, project.id, 'acme.com', fresh)).toBe(
+      API_TOKEN_REPLACEMENT,
+    );
+    expect((await mirrorFor('acme.com'))!.status).toBe('active');
+  });
+
+  it('does not recreate the mirror when the project is torn down mid-poll', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    await addActiveDomain(project.id, user.jwt);
+
+    stubCustomerCf({
+      zones: { 'acme.com': ZONE },
+      existingScripts: [RELAY_WORKER_BASE_NAME],
+      catchAllRule: { enabled: true, workerName: RELAY_WORKER_BASE_NAME },
+      on: {
+        // Teardown lands between the last row re-read and the mirror
+        // repair: its mirror clear ran, then the cascade took the rows.
+        catchAllGet: async () => {
+          await env.ROUTING.delete('email-domain:acme.com');
+          await env.db.delete(projects).where(eq(projects.id, project.id));
+        },
+      },
+    });
+    const res = await domainStatus(project.id, 'acme.com', user.jwt);
+    expect(res.status).toBe(200);
+    // The repair must not resurrect the key teardown cleared — nothing
+    // else would ever sweep it.
+    expect(await env.ROUTING.get('email-domain:acme.com')).toBeNull();
+  });
+
   it('flips a revoked token to token_revoked and repairs the mirror', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id);
@@ -1931,6 +2074,57 @@ describe('POST /projects/:id/email/domains/:domain/sync', () => {
     const json = (await res.json()) as Record<string, unknown>;
     expect(json.status).toBe('pending');
     expect(json.setup_state).toEqual({ remaining_steps: ['routing_subdomain'] });
+  });
+
+  it('re-attempts a pending sending onboarding and clears the step', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    const row = await seedEmailDomain(project.id, 'acme.com', { status: 'active' });
+    await env.db
+      .update(emailDomains)
+      .set({ setup_state: { remaining_steps: ['sending_onboarding'] } })
+      .where(eq(emailDomains.id, row.id));
+
+    // The upgrade landed; the sync's retry onboards and the step clears.
+    const stub = stubCustomerCf({
+      zones: { 'acme.com': ZONE },
+      catchAllRule: { enabled: true, workerName: RELAY_WORKER_BASE_NAME },
+    });
+    const res = await syncDomain(project.id, 'acme.com', user.jwt);
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as Record<string, unknown>;
+    expect(json.status).toBe('active');
+    expect(json.setup_state).toBeNull();
+    expect(callsByTag(stub.calls, 'onboardSending')).toHaveLength(1);
+  });
+
+  it('keeps the sending step when the sync retry is refused again', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    const row = await seedEmailDomain(project.id, 'acme.com', { status: 'active' });
+    await env.db
+      .update(emailDomains)
+      .set({ setup_state: { remaining_steps: ['sending_onboarding'] } })
+      .where(eq(emailDomains.id, row.id));
+
+    const stub = stubCustomerCf({
+      zones: { 'acme.com': ZONE },
+      catchAllRule: { enabled: true, workerName: RELAY_WORKER_BASE_NAME },
+      failOn: {
+        onboardSending: {
+          message: 'account is not entitled to Email Sending',
+          status: 403,
+          code: 10105,
+        },
+      },
+    });
+    const res = await syncDomain(project.id, 'acme.com', user.jwt);
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as Record<string, unknown>;
+    // The sync itself succeeded; only the step rides along.
+    expect(json.status).toBe('active');
+    expect(json.setup_state).toEqual({ remaining_steps: ['sending_onboarding'] });
+    expect(callsByTag(stub.calls, 'onboardSending')).toHaveLength(1);
   });
 
   it('marks the row failed when the redeploy fails', async () => {
@@ -2276,6 +2470,38 @@ describe('POST /internal/email/domain-credential', () => {
       REFRESH_TOKEN,
       'cf-rotated-refresh-dummy-1',
     ]);
+  });
+
+  it('leases the replacement credential when a replace commits before the refresh lock', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    const row = await seedEmailDomain(project.id, 'acme.com', {
+      status: 'active',
+      credentialKind: 'oauth_grant',
+      credential: REFRESH_TOKEN,
+    });
+    const stub = stubCustomerCf();
+    // The replace commits between the caller's unlocked row read and the
+    // refresh's lock: the row now holds an API token.
+    const replacement = await encryptEmailDomainToken(env, project.id, 'acme.com', API_TOKEN);
+    await env.db
+      .update(emailDomains)
+      .set({
+        credential_kind: 'api_token',
+        token_ciphertext: replacement.ciphertext,
+        token_iv: replacement.iv,
+        token_key_version: replacement.keyVersion,
+      })
+      .where(eq(emailDomains.id, row.id));
+
+    // The stale oauth snapshot re-reads and leases what the row NOW
+    // holds. The grant endpoint never sees the API token — a real one
+    // would answer invalid_grant and the flip would mark the FRESH
+    // credential revoked.
+    const outcome = await leaseEmailDomainCredential(env.db, env, row);
+    expect(outcome).toEqual({ ok: true, lease: { kind: 'api_token', token: API_TOKEN } });
+    expect(callsByTag(stub.calls, 'oauthToken')).toEqual([]);
+    expect((await rowFor(project.id, 'acme.com'))!.status).toBe('active');
   });
 
   it('maps invalid_grant at lease time to token_revoked, persisted and mirrored', async () => {

@@ -647,8 +647,8 @@ export function cfSuccess(result: unknown): Response {
   return Response.json({ success: true, errors: [], result });
 }
 
-export function cfError(message: string, status = 400): Response {
-  return Response.json({ success: false, errors: [{ code: 1000, message }] }, { status });
+export function cfError(message: string, status = 400, code = 1000): Response {
+  return Response.json({ success: false, errors: [{ code, message }] }, { status });
 }
 
 // ---------------------------------------------------------------------------

@@ -40,6 +40,23 @@ export type EmailDomainLeaseOutcome =
   | Readonly<{ ok: true; lease: EmailDomainLease }>
   | Readonly<{ ok: false; status: 'token_revoked' | 'failed'; error: string }>;
 
+/**
+ * The row's stored credential kind changed under the caller — a
+ * concurrent `domain add` (replace) committed a different credential
+ * before the row lock was acquired. Thrown by the serialized helpers
+ * INSTEAD of operating on the wrong credential: submitting a fresh API
+ * token to the grant endpoint would answer invalid_grant, and the
+ * refresh's token_revoked flip would then disable the replacement.
+ * Nothing is written; the caller re-reads the row and retries (or fails
+ * the operation as transient).
+ */
+export class EmailDomainCredentialChangedError extends Error {
+  constructor(rowId: string) {
+    super(`email_domains row ${rowId} changed credential kind mid-operation`);
+    this.name = 'EmailDomainCredentialChangedError';
+  }
+}
+
 type SecretBindings = Pick<
   ApiEnv['Bindings'],
   'PROJECT_SECRET_KEYS_JSON' | 'PROJECT_SECRET_ACTIVE_KEY_VERSION'
@@ -55,7 +72,11 @@ function errorMessage(err: unknown): string {
  * row's fixed AAD name) in the same transaction that held the lock.
  *
  * Throws OAuthGrantError on a token-endpoint failure — `invalid_grant`
- * included, with the row already marked `token_revoked`. Callers that run
+ * included, with the row already marked `token_revoked`. That flip runs
+ * only against a row confirmed `oauth_grant` under this lock: a
+ * credential kind changed by a concurrent replace throws
+ * EmailDomainCredentialChangedError instead, with nothing written.
+ * Callers that run
  * the relay engine hand this in as `deps.refreshGrant`; the engine maps
  * `invalid_grant` to the same `token_revoked` outcome, so the persisted
  * status and the engine's result agree. The relay engine's own
@@ -83,6 +104,7 @@ export async function refreshOauthGrantSerialized(
           id: emailDomains.id,
           project_id: emailDomains.project_id,
           domain: emailDomains.domain,
+          credential_kind: emailDomains.credential_kind,
           token_ciphertext: emailDomains.token_ciphertext,
           token_iv: emailDomains.token_iv,
           token_key_version: emailDomains.token_key_version,
@@ -94,6 +116,14 @@ export async function refreshOauthGrantSerialized(
       const row = rows[0];
       if (!row) {
         throw new Error(`email_domains row ${rowId} vanished mid-refresh`);
+      }
+      if (row.credential_kind !== 'oauth_grant') {
+        // A replace committed a different credential before this lock.
+        // Decrypting it as a grant would submit an API token to the token
+        // endpoint, and the invalid_grant answer would mark the FRESH
+        // credential revoked. Thrown inside the transaction: nothing is
+        // written.
+        throw new EmailDomainCredentialChangedError(rowId);
       }
 
       const refreshToken = await decryptEmailDomainToken(env, row.project_id, row.domain, {
@@ -149,9 +179,12 @@ export async function refreshOauthGrantSerialized(
  * answers 200 whether the presented token was live or dead — so only a
  * capture under the lock makes the 200 mean the chain is dead. The lock is
  * held across the revocation call, exactly like the refresh. A gone row
- * (teardown's cascade won) has nothing left to revoke. Throws on a network
- * or non-2xx failure — the caller decides what that means (failed_steps,
- * a 502, …). No status flip here: the caller owns the row's fate.
+ * (teardown's cascade won) has nothing left to revoke; a row whose
+ * credential kind changed under the caller (a replace committed first)
+ * throws EmailDomainCredentialChangedError rather than submitting the
+ * replacement credential. Throws on a network or non-2xx failure — the
+ * caller decides what that means (failed_steps, a 502, …). No status flip
+ * here: the caller owns the row's fate.
  */
 export async function revokeOauthGrantSerialized(
   db: DbOrTx,
@@ -164,6 +197,7 @@ export async function revokeOauthGrantSerialized(
         id: emailDomains.id,
         project_id: emailDomains.project_id,
         domain: emailDomains.domain,
+        credential_kind: emailDomains.credential_kind,
         token_ciphertext: emailDomains.token_ciphertext,
         token_iv: emailDomains.token_iv,
         token_key_version: emailDomains.token_key_version,
@@ -175,6 +209,13 @@ export async function revokeOauthGrantSerialized(
     const row = rows[0];
     if (!row) {
       return;
+    }
+    if (row.credential_kind !== 'oauth_grant') {
+      // A replace committed a different credential before this lock:
+      // revoking must not submit the NEW credential to the grant
+      // endpoint, whose answers-200-for-anything semantics would read as
+      // success to the caller.
+      throw new EmailDomainCredentialChangedError(rowId);
     }
     const head = await decryptEmailDomainToken(env, row.project_id, row.domain, {
       token_ciphertext: row.token_ciphertext,
@@ -222,21 +263,39 @@ export async function leaseEmailDomainCredential(
   env: SecretBindings,
   row: EmailDomain,
 ): Promise<EmailDomainLeaseOutcome> {
-  if (row.credential_kind === 'api_token') {
-    const token = await decryptEmailDomainToken(env, row.project_id, row.domain, row);
-    return { ok: true, lease: { kind: 'api_token', token } };
-  }
-  try {
-    const tokens = await refreshOauthGrantSerialized(db, env, row.id);
-    return { ok: true, lease: { kind: 'oauth_grant', accessToken: tokens.accessToken } };
-  } catch (err) {
-    if (err instanceof OAuthGrantError && err.code === 'invalid_grant') {
-      return {
-        ok: false,
-        status: 'token_revoked',
-        error: 'the Cloudflare OAuth grant was revoked',
-      };
+  // The caller's row snapshot is unlocked; a replace can commit between
+  // its read and the refresh's lock. One re-read converges on what the
+  // row NOW holds — a second mid-lease change fails as transient.
+  let current = row;
+  for (let attempt = 0; ; attempt++) {
+    if (current.credential_kind === 'api_token') {
+      const token = await decryptEmailDomainToken(env, current.project_id, current.domain, current);
+      return { ok: true, lease: { kind: 'api_token', token } };
     }
-    return { ok: false, status: 'failed', error: errorMessage(err) };
+    try {
+      const tokens = await refreshOauthGrantSerialized(db, env, current.id);
+      return { ok: true, lease: { kind: 'oauth_grant', accessToken: tokens.accessToken } };
+    } catch (err) {
+      if (err instanceof EmailDomainCredentialChangedError && attempt === 0) {
+        const fresh = await db
+          .select()
+          .from(emailDomains)
+          .where(eq(emailDomains.id, current.id))
+          .limit(1);
+        if (fresh[0]) {
+          current = fresh[0];
+          continue;
+        }
+        return { ok: false, status: 'failed', error: 'email domain row vanished mid-lease' };
+      }
+      if (err instanceof OAuthGrantError && err.code === 'invalid_grant') {
+        return {
+          ok: false,
+          status: 'token_revoked',
+          error: 'the Cloudflare OAuth grant was revoked',
+        };
+      }
+      return { ok: false, status: 'failed', error: errorMessage(err) };
+    }
   }
 }
