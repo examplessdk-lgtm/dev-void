@@ -560,4 +560,54 @@ describe('scheduled()', () => {
 
     expect(JSON.parse((await env.ROUTING.get(proj.slug))!).suspended).toBe('requests_exceeded');
   });
+
+  it('does not clear a transferred project from the former owner rollover snapshot', async () => {
+    const formerOwner = await createTestUser(
+      env.db,
+      'rollover-former',
+      'github',
+      undefined,
+      'free',
+    );
+    const newOwner = await createTestUser(env.db, 'rollover-current', 'github', undefined, 'free');
+    const project = await createTestProject(env.db, formerOwner.id, 'rollover-transferred');
+    await env.ROUTING.put(
+      project.slug,
+      JSON.stringify({
+        projectId: project.id,
+        userId: newOwner.id,
+        suspended: 'requests_exceeded',
+      }),
+    );
+    let transferred = false;
+    const usageCounter = {
+      idFromName: (name: string) => ({ toString: () => name }),
+      get: (id: { toString(): string }) => ({
+        fetch: async (request: Request) => {
+          if (
+            id.toString() === formerOwner.id &&
+            new URL(request.url).pathname === '/rollover' &&
+            !transferred
+          ) {
+            transferred = true;
+            await env.db
+              .update(projects)
+              .set({ user_id: newOwner.id })
+              .where(eq(projects.id, project.id));
+          }
+          return new URL(request.url).pathname === '/rollover'
+            ? Response.json({ rolled: false, requestsSuspended: false })
+            : Response.json({ ok: true });
+        },
+      }),
+    } as unknown as DurableObjectNamespace;
+
+    await scheduled(mockController, { ...makeBindings(env), USAGE_COUNTER: usageCounter }, mockCtx);
+
+    expect(transferred).toBe(true);
+    expect(JSON.parse((await env.ROUTING.get(project.slug))!)).toMatchObject({
+      userId: newOwner.id,
+      suspended: 'requests_exceeded',
+    });
+  });
 });

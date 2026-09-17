@@ -12,7 +12,7 @@ import { getRequestedProjectSlug, resolveProjectBySlug } from './resolve-project
 
 type ProjectTeamArgs = Exclude<Extract<ProjectArgs, { subcommand: 'team' }>, { action: '' }>;
 
-function clean(value: string | undefined): string {
+function clean(value: string | null | undefined): string {
   // Tenant text must not execute terminal control sequences.
   // eslint-disable-next-line no-control-regex
   return (value ?? '—').replace(/[\u0000-\u001f\u007f]/g, ' ');
@@ -20,9 +20,9 @@ function clean(value: string | undefined): string {
 
 function memberLines(members: Array<ProjectMemberResponse>): string {
   const rows = members.map((member) => ({
-    id: member.user?.id ?? member.user_id,
-    login: member.user?.login ?? member.login ?? '—',
-    email: member.user?.email ?? member.email ?? '—',
+    id: member.user.id,
+    login: member.user.login ?? '—',
+    email: member.user.email ?? '—',
     role: member.role,
   }));
   const widths = {
@@ -40,9 +40,7 @@ function memberLines(members: Array<ProjectMemberResponse>): string {
 }
 
 function invitationEmail(invitation: ProjectInvitationResponse): string {
-  return (
-    invitation.target?.email ?? invitation.target_email ?? invitation.target_email_snapshot ?? '—'
-  );
+  return invitation.target?.email ?? invitation.target_email ?? '—';
 }
 
 function invitationLines(invitations: Array<ProjectInvitationResponse>, pending: boolean): string {

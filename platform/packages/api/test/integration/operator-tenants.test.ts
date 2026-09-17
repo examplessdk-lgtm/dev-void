@@ -11,11 +11,16 @@ import {
 } from 'vite-plus/test';
 import {
   acceptInvitationByEmail,
+  createBuild,
+  createGitHubConnection,
   createInvitation,
+  getBuild,
   getInvitation,
   getUser,
   revokeInvitation,
+  upsertGitHubInstallation,
 } from '../../src/db.ts';
+import * as dbModule from '../../src/db.ts';
 import type { ApiEnv } from '../../src/env.ts';
 import { app } from '../../src/index.ts';
 import {
@@ -48,6 +53,22 @@ import {
 let env: TestEnv;
 let token: string;
 let operatorAdminId: string;
+
+function recordingBuildManager(): {
+  namespace: DurableObjectNamespace;
+  cancelledIds: ReadonlyArray<string>;
+} {
+  const cancelledIds: Array<string> = [];
+  const namespace = {
+    idFromName: (name: string) => ({ toString: () => name }) as unknown as DurableObjectId,
+    get: (id: DurableObjectId) => ({
+      cancelBuild: async () => {
+        cancelledIds.push(id.toString());
+      },
+    }),
+  } as unknown as DurableObjectNamespace;
+  return { namespace, cancelledIds };
+}
 
 beforeAll(async () => {
   env = await setupEnv();
@@ -110,6 +131,14 @@ function captureUsageCounter(
       },
     }),
   } as unknown as DurableObjectNamespace;
+}
+
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
 }
 
 describe('operator tenant reads', () => {
@@ -351,13 +380,12 @@ describe('operator tenant mutations', () => {
       {
         ownerId: target.id,
         path: '/attach-project',
-        body: expect.objectContaining({
+        body: {
           projectId: project.id,
           userId: target.id,
           slug: project.slug,
           ownershipStartedAt: current.starts_at,
-          plan: 'pro',
-        }),
+        },
       },
     ]);
     expect(JSON.parse((await env.ROUTING.get(project.slug))!)).toMatchObject({
@@ -385,6 +413,147 @@ describe('operator tenant mutations', () => {
         .where(eq(projectOwnershipPeriods.project_id, project.id)),
     ).toHaveLength(2);
     expect(counterCalls.map((call) => call.path)).toEqual(['/detach-project', '/attach-project']);
+  });
+
+  test('converges plan, suspension, and restore changes interleaved with a transfer', async () => {
+    const owner = await createTestUser(env.db, 'concurrent-transfer-owner');
+    const target = await createTestUser(env.db, 'concurrent-transfer-target');
+    const project = await createTestProject(env.db, owner.id, 'concurrent-transfer-project');
+    await env.ROUTING.put(
+      project.slug,
+      JSON.stringify({ workerName: 'worker', projectId: project.id, userId: owner.id }),
+    );
+
+    const transferCounterCalls: Array<{
+      ownerId: string;
+      path: string;
+      body: Record<string, unknown>;
+    }> = [];
+    const pausingCounter = (
+      detachStarted: ReturnType<typeof deferred>,
+      resumeTransfer: ReturnType<typeof deferred>,
+    ) =>
+      ({
+        idFromName: (name: string) => name,
+        get: (ownerId: string) => ({
+          fetch: async (request: Request) => {
+            const path = new URL(request.url).pathname;
+            const body = (await request.json()) as Record<string, unknown>;
+            transferCounterCalls.push({ ownerId, path, body });
+            if (path === '/detach-project') {
+              detachStarted.resolve();
+              await resumeTransfer.promise;
+            }
+            return Response.json({ ok: true });
+          },
+        }),
+      }) as unknown as DurableObjectNamespace;
+
+    const detachStarted = deferred();
+    const resumeTransfer = deferred();
+
+    const transferPromise = req(
+      `/projects/${project.id}/owner`,
+      { userId: target.id },
+      { USAGE_COUNTER: pausingCounter(detachStarted, resumeTransfer) },
+    );
+    await detachStarted.promise;
+
+    const planCounterCalls: Array<{
+      ownerId: string;
+      path: string;
+      body: Record<string, unknown>;
+    }> = [];
+    const planChange = await req(
+      `/users/${target.id}/plan`,
+      { plan: 'pro' },
+      { USAGE_COUNTER: captureUsageCounter(planCounterCalls) },
+    );
+    expect(planChange.status).toBe(200);
+
+    const suspendDbStarted = deferred();
+    const resumeSuspendDb = deferred();
+    const suspendUser = dbModule.suspendUser;
+    const suspendSpy = vi.spyOn(dbModule, 'suspendUser').mockImplementation(async (...args) => {
+      suspendDbStarted.resolve();
+      await resumeSuspendDb.promise;
+      return suspendUser(...args);
+    });
+    const suspensionPromise = req(`/users/${target.id}/suspend`, {
+      reason: 'operator_review',
+    });
+    await suspendDbStarted.promise;
+
+    resumeTransfer.resolve();
+    const transfer = await transferPromise;
+
+    expect(transfer.status).toBe(200);
+    expect(await transfer.json()).toMatchObject({
+      newOwner: {
+        id: target.id,
+        plan: 'pro',
+        suspended: false,
+      },
+    });
+    expect(transferCounterCalls).toMatchObject([
+      { ownerId: owner.id, path: '/detach-project' },
+      {
+        ownerId: target.id,
+        path: '/attach-project',
+        body: { projectId: project.id, userId: target.id },
+      },
+    ]);
+    expect(transferCounterCalls[1]!.body).not.toHaveProperty('plan');
+    expect(planCounterCalls.map((call) => call.path)).toEqual(['/reevaluate-sandbox']);
+    expect(JSON.parse((await env.ROUTING.get(project.slug))!).suspended).toBeUndefined();
+
+    resumeSuspendDb.resolve();
+    const suspension = await suspensionPromise;
+    suspendSpy.mockRestore();
+    expect(suspension.status).toBe(200);
+    expect(JSON.parse((await env.ROUTING.get(project.slug))!)).toMatchObject({
+      userId: target.id,
+      suspended: 'operator_review',
+      limits: { cpuMs: 50, subRequests: 1000 },
+    });
+    expect(JSON.parse((await env.ROUTING.get(`project:${project.id}`))!)).toEqual({
+      userId: target.id,
+      plan: 'pro',
+    });
+
+    const retryDetachStarted = deferred();
+    const resumeRetry = deferred();
+    const retryPromise = req(
+      `/projects/${project.id}/owner`,
+      { userId: target.id },
+      { USAGE_COUNTER: pausingCounter(retryDetachStarted, resumeRetry) },
+    );
+    await retryDetachStarted.promise;
+
+    const restoreDbStarted = deferred();
+    const resumeRestoreDb = deferred();
+    const unsuspendUser = dbModule.unsuspendUser;
+    const restoreSpy = vi.spyOn(dbModule, 'unsuspendUser').mockImplementation(async (...args) => {
+      restoreDbStarted.resolve();
+      await resumeRestoreDb.promise;
+      return unsuspendUser(...args);
+    });
+    const restorePromise = req(`/users/${target.id}/restore`, {});
+    await restoreDbStarted.promise;
+
+    resumeRetry.resolve();
+    expect((await retryPromise).status).toBe(200);
+    expect(JSON.parse((await env.ROUTING.get(project.slug))!).suspended).toBe('operator_review');
+
+    resumeRestoreDb.resolve();
+    const restore = await restorePromise;
+    restoreSpy.mockRestore();
+    expect(restore.status).toBe(200);
+    expect(await getUser(env.db, target.id)).toMatchObject({
+      plan: 'pro',
+      suspended_reason: null,
+    });
+    expect(JSON.parse((await env.ROUTING.get(project.slug))!).suspended).toBeUndefined();
   });
 
   test('rejects unknown owners and deleting, deploy, rollback, and build work', async () => {
@@ -480,6 +649,18 @@ describe('operator tenant mutations', () => {
       (await env.db.select().from(projects).where(eq(projects.id, project.id)))[0],
     ).toMatchObject({ user_id: target.id });
     expect(JSON.parse((await env.ROUTING.get(project.slug))!)).toMatchObject({ userId: owner.id });
+
+    const recoveryPreview = await req(`/projects/${project.id}/owner`, {
+      userId: target.id,
+      dryRun: true,
+    });
+    expect(recoveryPreview.status).toBe(200);
+    expect(await recoveryPreview.json()).toMatchObject({
+      previousOwner: { id: owner.id },
+      newOwner: { id: target.id },
+      formerOwnerRole: 'admin',
+      counterUpdates: { detachUserId: owner.id, attachUserId: target.id },
+    });
 
     const retryCalls: Array<{
       ownerId: string;
@@ -648,6 +829,70 @@ describe('operator tenant mutations', () => {
     });
     expect(await getUser(env.db, user.id)).toBeNull();
     expect((await req(`/projects/${project.id}`)).status).toBe(404);
+  });
+
+  test('does not delete a project transferred away after owned-project discovery', async () => {
+    const formerOwner = await createTestUser(env.db, 'former-delete-owner');
+    const newOwner = await createTestUser(env.db, 'new-delete-owner');
+    const project = await createTestProject(env.db, formerOwner.id, 'transferred-before-delete');
+    const staleProject = await dbModule.getProject(env.db, project.id);
+    expect(staleProject).not.toBeNull();
+
+    // Force the operator workflow to consume the pre-transfer enumeration
+    // while the authoritative project row already names the new owner. The
+    // teardown lock must treat this as a stale snapshot and skip all cleanup.
+    await env.db.update(projects).set({ user_id: newOwner.id }).where(eq(projects.id, project.id));
+    vi.spyOn(dbModule, 'getProjectsByUserId').mockResolvedValue([staleProject!]);
+    const cf = mockCfApi();
+
+    const response = await req(`/users/${formerOwner.id}/delete`, {});
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ deleted: true, deletedProjects: [] });
+    expect(await dbModule.getProject(env.db, project.id)).toMatchObject({ user_id: newOwner.id });
+    expect(await getUser(env.db, formerOwner.id)).toBeNull();
+    expect(cf).not.toHaveBeenCalled();
+  });
+
+  test('stops shared-project container builds invalidated by deleting their authorizer', async () => {
+    const owner = await createTestUser(env.db, 'surviving-owner');
+    const authorizer = await createTestUser(env.db, 'deleted-authorizer');
+    const project = await createTestProject(env.db, owner.id, 'surviving-project');
+    await env.db.insert(projectMembers).values({
+      project_id: project.id,
+      user_id: authorizer.id,
+      role: 'admin',
+      added_by_user_id: owner.id,
+    });
+    await upsertGitHubInstallation(env.db, {
+      installationId: 'deleted-authorizer-installation',
+      userId: authorizer.id,
+      accountLogin: authorizer.login,
+      accountId: 'deleted-authorizer-account',
+      accountType: 'User',
+      repositories: [{ full_name: `${authorizer.login}/app`, id: 8811 }],
+    });
+    await createGitHubConnection(env.db, {
+      projectId: project.id,
+      installationId: 'deleted-authorizer-installation',
+      repoFullName: `${authorizer.login}/app`,
+      repositoryId: '8811',
+      authorizedByUserId: authorizer.id,
+    });
+    const build = await createBuild(env.db, {
+      projectId: project.id,
+      userId: owner.id,
+      executor: 'container',
+      status: 'building',
+    });
+    const { namespace, cancelledIds } = recordingBuildManager();
+
+    const response = await req(`/users/${authorizer.id}/delete`, {}, { BUILD_MANAGER: namespace });
+
+    expect(response.status).toBe(200);
+    expect(await getUser(env.db, authorizer.id)).toBeNull();
+    expect((await getBuild(env.db, build.id))?.status).toBe('cancelled');
+    expect(cancelledIds).toEqual([build.id]);
   });
 
   test('deletes invitation actors while preserving invitation history and revoking sessions', async () => {

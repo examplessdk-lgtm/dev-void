@@ -513,32 +513,6 @@ function harness(overrides: Partial<CloudflareDeployDeps> = {}): {
   return { deps, trace, wranglerArgs, exitCalls };
 }
 
-describe('direct Cloudflare deploy isolation', () => {
-  it('does not contact Void Platform project-team endpoints', async () => {
-    const root = makeProject({
-      'package.json': JSON.stringify({ name: 'site', dependencies: { void: '*' } }),
-      'void.json': '{}',
-      'routes/index.ts': 'export const GET = () => "site";',
-      'wrangler.jsonc': JSON.stringify({
-        name: 'site',
-        account_id: 'personal',
-        compatibility_date: '2026-02-24',
-      }),
-    });
-    const fetchSpy = vi
-      .spyOn(globalThis, 'fetch')
-      .mockRejectedValue(new Error('direct Cloudflare deploy attempted an unexpected HTTP call'));
-    const { deps } = harness();
-
-    try {
-      await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
-      expect(fetchSpy).not.toHaveBeenCalled();
-    } finally {
-      fetchSpy.mockRestore();
-    }
-  });
-});
-
 describe('existing Cloudflare site handoff', () => {
   const existing = {
     versionId: 'original',

@@ -1,6 +1,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import {
   createDb,
+  getUser,
   getProjectOwnershipPeriodsByProjectIds,
   getProjectsByIds,
   suspendUser,
@@ -351,6 +352,15 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
         this.suspendProjects(getDb(), state.projectSlugs, body.userId, REASON_REQUESTS_EXCEEDED),
         suspendUser(getDb(), body.userId, REASON_REQUESTS_EXCEEDED),
       ]);
+      // The first route stamp and account-row update intentionally run
+      // together. An ownership-transfer republish can land between them after
+      // reading the old account row, so reconcile once more after both settle.
+      await this.suspendProjects(
+        getDb(),
+        state.projectSlugs,
+        body.userId,
+        REASON_REQUESTS_EXCEEDED,
+      );
       state.requestsSuspended = true;
     }
 
@@ -527,7 +537,6 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
       projectId: string;
       slug: string;
       ownershipStartedAt: string;
-      plan?: string;
       userId?: string;
     };
     if (
@@ -547,11 +556,16 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
     if (!ownedProjectIds.has(body.projectId)) {
       return Response.json({ error: 'project owner changed' }, { status: 409 });
     }
+    const owner = state.ownerUserId ? await getUser(db, state.ownerUserId) : null;
+    if (!owner) {
+      return Response.json({ error: 'project owner changed' }, { status: 409 });
+    }
     state.projectSlugs[body.projectId] = body.slug;
     state.projectOwnershipStarts[body.projectId] = body.ownershipStartedAt;
-    if (body.plan) {
-      state.plan = body.plan;
-    }
+    // Ownership transfer requests may have waited behind a concurrent plan
+    // change. PostgreSQL is authoritative; never restore the caller's stale
+    // pre-transfer snapshot into this counter.
+    state.plan = owner.plan;
     if (state.requestsSuspended) {
       await this.suspendProjects(
         db,

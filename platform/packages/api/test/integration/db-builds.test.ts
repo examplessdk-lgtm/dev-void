@@ -2026,7 +2026,6 @@ describe('createGithubActionsBuildWithinLimit', () => {
     expect(created.outcome).toBe('created');
     if (created.outcome === 'created') {
       expect(created.build.user_id).toBe(currentOwner.id);
-      expect(created.build.triggered_by_user_id).toBeNull();
     }
   });
 

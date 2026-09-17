@@ -1363,7 +1363,7 @@ export const githubRoutes = new Hono<ApiEnv>()
 // The OIDC exchange (`routes/auth-oidc.ts`) binds a deploy token to the
 // workflow file at the connection's `workflow_path`. GitHub only runs workflows
 // under `.github/workflows/`, so a path outside it (or one with `..`) can never
-// match a real OIDC `workflow_ref` — reject it here at the owner-authenticated
+// match a real OIDC `workflow_ref` — reject it here at the settings-authorized
 // setter for a clear error, rather than a silently-never-authorized deploy.
 function isValidWorkflowPath(path: string): boolean {
   return (

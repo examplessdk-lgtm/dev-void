@@ -35,6 +35,7 @@ import {
   updateUserPlan,
 } from '../db.ts';
 import type { ApiEnv } from '../env.ts';
+import { cancelContainerBuildDos } from '../github/cancel-builds.ts';
 import { generateId } from '../id.ts';
 import { teardownProject } from '../provisioning/cleanup.ts';
 import { getRequestsDataset, queryBatchProjectUsage, ZERO_USAGE } from '../routes/usage.ts';
@@ -42,7 +43,6 @@ import {
   buildProjectAccountJson,
   computeDispatchLimits,
   projectAccountKey,
-  refreshProjectKvForUser,
   sandboxBlockKey,
   setProjectsRoutingSuspension,
 } from '../routing.ts';
@@ -312,7 +312,42 @@ async function inspectOwnershipTransfer(db: Db, projectId: string, targetUserId:
       : []),
     ...activeWork,
   ];
-  return { project, currentOwner, newOwner, blockers, targetMembership, github, domains };
+  const previousTransfer =
+    currentOwner.id === newOwner.id
+      ? await getPreviousOwnershipTransfer(db, projectId, newOwner)
+      : null;
+  return {
+    project,
+    previousOwner: previousTransfer?.owner ?? currentOwner,
+    newOwner,
+    blockers,
+    targetMembership,
+    github,
+    domains,
+  };
+}
+
+async function getPreviousOwnershipTransfer(
+  db: Db,
+  projectId: string,
+  fallbackOwner: User,
+): Promise<{ owner: User; startsAt: string } | null> {
+  const [period] = await db
+    .select()
+    .from(projectOwnershipPeriods)
+    .where(
+      and(
+        eq(projectOwnershipPeriods.project_id, projectId),
+        isNotNull(projectOwnershipPeriods.ends_at),
+      ),
+    )
+    .orderBy(desc(projectOwnershipPeriods.ends_at))
+    .limit(1);
+  if (!period) {
+    return null;
+  }
+  const [owner] = await db.select().from(users).where(eq(users.id, period.owner_user_id)).limit(1);
+  return { owner: owner ?? fallbackOwner, startsAt: period.starts_at };
 }
 
 type OwnershipTransferCommit = Readonly<{
@@ -401,31 +436,12 @@ async function commitOwnershipTransfer(
       );
 
     if (lockedProject.user_id === targetUserId) {
-      const [previousPeriod] = await txDb
-        .select()
-        .from(projectOwnershipPeriods)
-        .where(
-          and(
-            eq(projectOwnershipPeriods.project_id, projectId),
-            isNotNull(projectOwnershipPeriods.ends_at),
-          ),
-        )
-        .orderBy(desc(projectOwnershipPeriods.ends_at))
-        .limit(1);
-      const previousOwner = previousPeriod
-        ? ((
-            await txDb
-              .select()
-              .from(users)
-              .where(eq(users.id, previousPeriod.owner_user_id))
-              .limit(1)
-          )[0] ?? newOwner)
-        : newOwner;
+      const previousTransfer = await getPreviousOwnershipTransfer(txDb, projectId, newOwner);
       return {
         project: lockedProject,
-        previousOwner,
+        previousOwner: previousTransfer?.owner ?? newOwner,
         newOwner,
-        previousOwnershipStartedAt: previousPeriod?.starts_at ?? lockedProject.created_at,
+        previousOwnershipStartedAt: previousTransfer?.startsAt ?? lockedProject.created_at,
         transferredAt: openPeriod?.starts_at ?? lockedProject.created_at,
         changed: false,
       };
@@ -530,27 +546,28 @@ async function updateOwnershipCounters(
     userId: transfer.newOwner.id,
     slug: transfer.project.slug,
     ownershipStartedAt: transfer.transferredAt,
-    plan: transfer.newOwner.plan,
   });
 }
 
-async function republishTransferredProject(
+async function republishProjectOwnerState(
   context: Context<ApiEnv>,
-  transfer: OwnershipTransferCommit,
-): Promise<void> {
+  projectId: string,
+  expectedOwnerUserId: string,
+): Promise<User | null> {
   const db = context.get('db');
-  await db.transaction(async (tx) => {
+  return db.transaction(async (tx) => {
     const txDb = tx as unknown as Db;
     const [project] = await txDb
       .select()
       .from(projects)
-      .where(eq(projects.id, transfer.project.id))
+      .where(eq(projects.id, projectId))
       .for('update')
       .limit(1);
-    if (!project || project.user_id !== transfer.newOwner.id || project.status === 'deleting') {
-      throw new Error('Project ownership changed again before routing convergence.');
+    if (!project || project.user_id !== expectedOwnerUserId || project.status === 'deleting') {
+      return null;
     }
-    const [activeDeployment, domains] = await Promise.all([
+    const [owner, activeDeployment, domains] = await Promise.all([
+      requireUser(txDb, project.user_id),
       project.active_deployment_id
         ? txDb
             .select({ manifest: deployments.manifest })
@@ -565,17 +582,14 @@ async function republishTransferredProject(
     if (activeDeployment?.manifest) {
       manifest = JSON.parse(activeDeployment.manifest) as DeployManifest;
     }
-    const dispatchLimits = computeDispatchLimits(
-      PLAN_LIMITS[transfer.newOwner.plan],
-      manifest?.limits,
-    );
+    const dispatchLimits = computeDispatchLimits(PLAN_LIMITS[owner.plan], manifest?.limits);
     for (const key of [project.slug, ...domains.map((domain) => `domain:${domain.hostname}`)]) {
       const raw = await context.env.ROUTING.get(key);
       if (!raw) {
         continue;
       }
       const entry = JSON.parse(raw) as Record<string, unknown>;
-      entry.userId = transfer.newOwner.id;
+      entry.userId = owner.id;
       if ('workerName' in entry) {
         if (dispatchLimits) {
           entry.limits = dispatchLimits;
@@ -583,8 +597,8 @@ async function republishTransferredProject(
           delete entry.limits;
         }
       }
-      if (transfer.newOwner.suspended_reason) {
-        entry.suspended = transfer.newOwner.suspended_reason;
+      if (owner.suspended_reason) {
+        entry.suspended = owner.suspended_reason;
       } else {
         delete entry.suspended;
       }
@@ -592,9 +606,35 @@ async function republishTransferredProject(
     }
     await context.env.ROUTING.put(
       projectAccountKey(project.id),
-      buildProjectAccountJson({ userId: transfer.newOwner.id, plan: transfer.newOwner.plan }),
+      buildProjectAccountJson({ userId: owner.id, plan: owner.plan }),
     );
+    return owner;
   });
+}
+
+async function republishTransferredProject(
+  context: Context<ApiEnv>,
+  transfer: OwnershipTransferCommit,
+): Promise<User> {
+  const owner = await republishProjectOwnerState(
+    context,
+    transfer.project.id,
+    transfer.newOwner.id,
+  );
+  if (!owner) {
+    throw new Error('Project ownership changed again before routing convergence.');
+  }
+  return owner;
+}
+
+async function reconcileOperatorUserProjects(
+  context: Context<ApiEnv>,
+  userId: string,
+): Promise<void> {
+  const projects = await getProjectsByUserId(context.get('db'), userId);
+  for (const project of projects) {
+    await republishProjectOwnerState(context, project.id, userId);
+  }
 }
 
 export async function transferOperatorProjectOwner(
@@ -610,9 +650,9 @@ export async function transferOperatorProjectOwner(
       'project.owner',
       { id: inspection.project.id, slug: inspection.project.slug, userId: targetUserId },
       {
-        previousOwner: accountSummary(inspection.currentOwner),
+        previousOwner: accountSummary(inspection.previousOwner),
         newOwner: accountSummary(inspection.newOwner),
-        formerOwnerRole: 'admin',
+        formerOwnerRole: inspection.previousOwner.id === inspection.newOwner.id ? null : 'admin',
         targetPreviousRole: inspection.targetMembership?.role ?? null,
         blockers: inspection.blockers,
         github: inspection.github,
@@ -622,7 +662,10 @@ export async function transferOperatorProjectOwner(
           projectAccountKey(inspection.project.id),
         ],
         counterUpdates: {
-          detachUserId: inspection.currentOwner.id,
+          detachUserId:
+            inspection.previousOwner.id === inspection.newOwner.id
+              ? null
+              : inspection.previousOwner.id,
           attachUserId: inspection.newOwner.id,
         },
         usageTransfer: 'non-retroactive',
@@ -637,10 +680,11 @@ export async function transferOperatorProjectOwner(
     context.get('user').id,
   );
   const convergence = { countersComplete: false, routingComplete: false };
+  let convergedOwner = transfer.newOwner;
   try {
     await updateOwnershipCounters(context, transfer);
     convergence.countersComplete = true;
-    await republishTransferredProject(context, transfer);
+    convergedOwner = await republishTransferredProject(context, transfer);
     convergence.routingComplete = true;
   } catch (error) {
     console.error('[admin] project owner convergence failed', { projectId, targetUserId, error });
@@ -654,7 +698,7 @@ export async function transferOperatorProjectOwner(
         ownershipTransferred: true,
         transferredAt: transfer.transferredAt,
         previousOwner: accountSummary(transfer.previousOwner),
-        newOwner: accountSummary(transfer.newOwner),
+        newOwner: accountSummary(convergedOwner),
         convergence,
       },
     );
@@ -663,7 +707,7 @@ export async function transferOperatorProjectOwner(
     action: 'project.owner',
     target: { id: transfer.project.id, slug: transfer.project.slug, userId: targetUserId },
     previousOwner: accountSummary(transfer.previousOwner),
-    newOwner: accountSummary(transfer.newOwner),
+    newOwner: accountSummary(convergedOwner),
     transferredAt: transfer.transferredAt,
     formerOwnerRole: transfer.previousOwner.id === transfer.newOwner.id ? null : 'admin',
     changed: transfer.changed,
@@ -698,11 +742,6 @@ export async function changeOperatorUserPlan(
   try {
     const stub = context.env.USAGE_COUNTER.get(context.env.USAGE_COUNTER.idFromName(id));
     const results = await Promise.allSettled([
-      refreshProjectKvForUser(db, context.env.ROUTING, id),
-      setProjectsRoutingSuspension(context.env.ROUTING, db, projects, {
-        op: 'unsuspend',
-        matchReason: REASON_REQUESTS_EXCEEDED,
-      }),
       context.env.ROUTING.delete(sandboxBlockKey(id)),
       unsuspendUserIfReason(db, id, REASON_REQUESTS_EXCEEDED),
       unsuspendUserIfReason(db, id, REASON_SANDBOX_RUNTIME_EXCEEDED),
@@ -718,10 +757,14 @@ export async function changeOperatorUserPlan(
     if (failed?.status === 'rejected') {
       throw failed.reason;
     }
-    const reeval = results[5];
+    const reeval = results[3];
     if (reeval.status === 'fulfilled' && !reeval.value.ok) {
       throw new Error(`reevaluate-sandbox DO returned HTTP ${reeval.value.status}`);
     }
+    // A transfer can republish between the mixed-order cleanup writes above.
+    // Re-enumerate current ownership after the account row has settled and
+    // publish the authoritative plan and suspension state once more.
+    await reconcileOperatorUserProjects(context, id);
   } catch (error) {
     console.error('[admin] plan-change cleanup failed', { userId: id, error });
     throw new OperatorError(
@@ -765,6 +808,7 @@ export async function suspendOperatorUser(
       force: true,
     });
     await suspendUser(db, id, reason);
+    await reconcileOperatorUserProjects(context, id);
   } catch (error) {
     console.error('[admin] suspend failed', { userId: id, error });
     throw new OperatorError(
@@ -810,6 +854,7 @@ export async function restoreOperatorUser(context: Context<ApiEnv>, id: string, 
       throw new Error(`clear-suspension DO returned HTTP ${cleared.value.status}`);
     }
     await unsuspendUser(db, id);
+    await reconcileOperatorUserProjects(context, id);
   } catch (error) {
     console.error('[admin] unsuspend cleanup failed', { userId: id, error });
     throw new OperatorError(
@@ -863,12 +908,22 @@ export async function deleteOperatorUser(context: Context<ApiEnv>, id: string, d
   try {
     for (const project of projects) {
       currentProject = project.id;
-      const result = await teardownProject(context, project.id, project);
+      const result = await teardownProject(context, project.id, project, {
+        expectedOwnerUserId: id,
+      });
+      if (result.ownerChanged) {
+        continue;
+      }
       deletedProjects.push(project.id);
       warnings.push(...result.warnings);
     }
     currentProject = undefined;
-    await deleteUser(db, id);
+    const cancelledBuilds = await deleteUser(db, id);
+    await cancelContainerBuildDos(
+      context.env,
+      cancelledBuilds,
+      'github connection authorizer account deleted',
+    );
   } catch (error) {
     console.error('[admin] user delete failed', { userId: id, error });
     throw new OperatorError(

@@ -53,19 +53,6 @@ async function selectProjectAccess(
   };
 }
 
-/** Resolve current access without asserting a capability. */
-export async function getProjectAccess(
-  db: Db,
-  projectId: string,
-  actorUserId: string,
-): Promise<ProjectAccess | null> {
-  const row = await selectProjectAccess(db, projectId, actorUserId);
-  if (!row?.memberRole) {
-    return null;
-  }
-  return { project: row.project, role: row.memberRole, owner: row.owner };
-}
-
 export class ProjectNotFoundError extends Error {
   readonly status = 404 as const;
 

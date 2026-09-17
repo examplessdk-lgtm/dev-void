@@ -39,7 +39,9 @@ export async function runProjectCommand(root: string, args: ProjectArgs): Promis
       printHelpPage(['project', 'team']);
       return;
     }
-    if (cloudflare) {
+    const accountInvitationAction =
+      args.action === 'pending' || args.action === 'accept' || args.action === 'decline';
+    if (cloudflare && !accountInvitationAction) {
       throw new Error(
         'project: Teams are available only for projects hosted on a Void platform, not direct Cloudflare deployments.',
       );

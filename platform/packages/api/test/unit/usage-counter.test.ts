@@ -26,7 +26,7 @@ vi.mock('../../src/db.ts', () => ({
   }),
   // The DO module also re-exports nothing else from db.ts at module scope,
   // so a minimal mock is sufficient.
-  getUser: vi.fn(),
+  getUser: vi.fn(async (_db: unknown, id: string) => ({ id, plan: 'pro' })),
   getProject: vi.fn(async (_db: unknown, id: string) => ({ id, user_id: 'u1', slug: id })),
   getProjectsByIds: vi.fn(async (_db: unknown, ids: ReadonlyArray<string>) =>
     ids.map((id) => ({ id, user_id: 'u1', slug: id })),
@@ -1002,6 +1002,36 @@ describe('UsageCounter.handleRecord — request suspension fans out to custom do
     expect(JSON.parse(kv.store.get('domain:custom.com')!).suspended).toBe('requests_exceeded');
   });
 
+  it('restamps a request suspension overwritten between its edge and account writes', async () => {
+    const { counter, kv } = makeCounter({ plan: 'free', totalRequests: 3_000_000 });
+    const route = { workerName: 'w', projectId: 'p1', userId: 'u1' };
+    kv.store.set('s1', JSON.stringify(route));
+    const realPut = kv.put;
+    let suspensionWrites = 0;
+    kv.put = async (key, value) => {
+      await realPut(key, value);
+      if (key === 's1' && JSON.parse(value).suspended === 'requests_exceeded') {
+        suspensionWrites += 1;
+        if (suspensionWrites === 1) {
+          // A transfer republish read the old user row and landed after the
+          // edge-first stamp but before suspendUser settled.
+          kv.store.set('s1', JSON.stringify(route));
+        }
+      }
+    };
+
+    await counter.fetch(
+      recordRequest(
+        [{ projectId: 'p1', userId: 'u1', slug: 's1', requests: 1, responseBytes: 0 }],
+        'u1',
+        'free',
+      ),
+    );
+
+    expect(suspensionWrites).toBe(2);
+    expect(JSON.parse(kv.store.get('s1')!).suspended).toBe('requests_exceeded');
+  });
+
   it('does NOT downgrade an existing admin suspension on the route when crossing the request cap', async () => {
     const { counter, kv } = makeCounter({ plan: 'free', totalRequests: 3_000_000 });
     // An admin already suspended this user — the route carries `admin_suspended`.
@@ -1021,9 +1051,9 @@ describe('UsageCounter.handleRecord — request suspension fans out to custom do
   });
 
   it('does not suspend a project transferred after the counter ownership precheck', async () => {
-    vi.mocked(getProjectsByIds).mockResolvedValueOnce([
-      { id: 'p1', user_id: 'u1', slug: 's1' } as never,
-    ]);
+    vi.mocked(getProjectsByIds)
+      .mockResolvedValueOnce([{ id: 'p1', user_id: 'u1', slug: 's1' } as never])
+      .mockResolvedValueOnce([{ id: 'p1', user_id: 'new-owner', slug: 's1' } as never]);
     vi.mocked(getProject).mockResolvedValueOnce({
       id: 'p1',
       user_id: 'new-owner',
@@ -1132,7 +1162,9 @@ describe('UsageCounter ownership changes', () => {
           projectId: 'next',
           slug: 'next-app',
           ownershipStartedAt: startedAt,
-          plan: 'pro',
+          // Simulate the transfer caller's pre-plan-change snapshot. The DO
+          // must use PostgreSQL's current `pro` plan from the getUser mock.
+          plan: 'free',
         }),
       }),
     );

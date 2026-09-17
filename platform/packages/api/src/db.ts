@@ -7,7 +7,6 @@ import {
   eq,
   ne,
   lt,
-  lte,
   gt,
   gte,
   inArray,
@@ -610,19 +609,6 @@ export async function createProjectAccessEvent(
   return event;
 }
 
-export async function getProjectAccessEvents(
-  db: Db,
-  projectId: string,
-  limit = 100,
-): Promise<ReadonlyArray<ProjectAccessEvent>> {
-  return db
-    .select()
-    .from(projectAccessEvents)
-    .where(eq(projectAccessEvents.project_id, projectId))
-    .orderBy(desc(projectAccessEvents.created_at))
-    .limit(limit);
-}
-
 export async function setProjectMemberRole(
   db: Db,
   args: {
@@ -631,7 +617,7 @@ export async function setProjectMemberRole(
     role: ProjectMemberRole;
     actorUserId: string;
   },
-): Promise<ProjectMember> {
+): Promise<{ member: ProjectMember; cancelledBuilds: ReadonlyArray<TerminatedBuild> }> {
   return db.transaction(async (tx) => {
     const txDb = tx as unknown as Db;
     const project = await lockProject(txDb, args.projectId);
@@ -644,7 +630,7 @@ export async function setProjectMemberRole(
       throw new ProjectTeamMutationError('member-not-found');
     }
     if (current.role === args.role) {
-      return current;
+      return { member: current, cancelledBuilds: [] };
     }
     const [member] = await txDb
       .update(projectMembers)
@@ -664,22 +650,23 @@ export async function setProjectMemberRole(
       previousRole: current.role,
       newRole: args.role,
     });
-    if (args.role !== 'admin') {
-      await invalidateGitHubConnectionAuthorizedBy(
-        txDb,
-        args.projectId,
-        args.subjectUserId,
-        'github connection authorizer lost admin access',
-      );
-    }
-    return member;
+    const cancelledBuilds =
+      args.role === 'admin'
+        ? []
+        : await invalidateGitHubConnectionAuthorizedBy(
+            txDb,
+            args.projectId,
+            args.subjectUserId,
+            'github connection authorizer lost admin access',
+          );
+    return { member, cancelledBuilds };
   });
 }
 
 export async function removeProjectMember(
   db: Db,
   args: { projectId: string; subjectUserId: string; actorUserId: string },
-): Promise<ProjectMember> {
+): Promise<{ member: ProjectMember; cancelledBuilds: ReadonlyArray<TerminatedBuild> }> {
   return db.transaction(async (tx) => {
     const txDb = tx as unknown as Db;
     const project = await lockProject(txDb, args.projectId);
@@ -712,13 +699,13 @@ export async function removeProjectMember(
       action: args.actorUserId === args.subjectUserId ? 'left' : 'member_removed',
       previousRole: member.role,
     });
-    await invalidateGitHubConnectionAuthorizedBy(
+    const cancelledBuilds = await invalidateGitHubConnectionAuthorizedBy(
       txDb,
       args.projectId,
       args.subjectUserId,
       'github connection authorizer removed from project',
     );
-    return member;
+    return { member, cancelledBuilds };
   });
 }
 
@@ -1078,17 +1065,6 @@ export async function respondToProjectInvitation(
 
 // --- Project ownership history ---
 
-export async function getProjectOwnershipPeriods(
-  db: Db,
-  projectId: string,
-): Promise<ReadonlyArray<ProjectOwnershipPeriod>> {
-  return db
-    .select()
-    .from(projectOwnershipPeriods)
-    .where(eq(projectOwnershipPeriods.project_id, projectId))
-    .orderBy(asc(projectOwnershipPeriods.starts_at));
-}
-
 export async function getProjectOwnershipPeriodsByProjectIds(
   db: Db,
   projectIds: ReadonlyArray<string>,
@@ -1118,30 +1094,6 @@ export async function getOpenProjectOwnershipPeriod(
     )
     .limit(1);
   return row ?? null;
-}
-
-/** Ownership intervals use [starts_at, ends_at), so a boundary bills new owner. */
-export async function getProjectOwnerAt(
-  db: Db,
-  projectId: string,
-  occurredAt: string,
-): Promise<string | null> {
-  const [row] = await db
-    .select({ ownerUserId: projectOwnershipPeriods.owner_user_id })
-    .from(projectOwnershipPeriods)
-    .where(
-      and(
-        eq(projectOwnershipPeriods.project_id, projectId),
-        lte(projectOwnershipPeriods.starts_at, occurredAt),
-        or(
-          isNull(projectOwnershipPeriods.ends_at),
-          gt(projectOwnershipPeriods.ends_at, occurredAt),
-        ),
-      ),
-    )
-    .orderBy(desc(projectOwnershipPeriods.starts_at))
-    .limit(1);
-  return row?.ownerUserId ?? null;
 }
 
 export async function getLatestDeploymentsByProjectIds(
@@ -3053,9 +3005,63 @@ export async function updateUserRole(db: Db, id: string, role: 'user' | 'admin')
   }
 }
 
-export async function deleteUser(db: Db, id: string): Promise<void> {
-  await withAdminRemovalGuard(db, id, async (tx) => {
+export async function deleteUser(db: Db, id: string): Promise<ReadonlyArray<TerminatedBuild>> {
+  return withAdminRemovalGuard(db, id, async (tx) => {
+    const cancelledBuilds: Array<TerminatedBuild> = [];
+    const [memberships, existingConnections] = await Promise.all([
+      tx
+        .select({ projectId: projectMembers.project_id })
+        .from(projectMembers)
+        .where(eq(projectMembers.user_id, id)),
+      tx
+        .select({ projectId: githubConnections.project_id })
+        .from(githubConnections)
+        .where(eq(githubConnections.authorized_by_user_id, id)),
+    ]);
+    const projectIds = [
+      ...new Set([
+        ...memberships.map(({ projectId }) => projectId),
+        ...existingConnections.map(({ projectId }) => projectId),
+      ]),
+    ].sort();
+    if (projectIds.length > 0) {
+      // GitHub connection CRUD and build creation take the project lock before
+      // the connection lock. Preserve that order here so deleting an
+      // authorizing member serializes with both paths without deadlocking.
+      await tx
+        .select({ id: projects.id })
+        .from(projects)
+        .where(inArray(projects.id, projectIds))
+        .orderBy(asc(projects.id))
+        .for('update');
+
+      // A connection creator that held one of the project locks before this
+      // deletion may have inserted after the initial discovery query. Re-read
+      // under all membership project locks so its connection cannot escape
+      // invalidation and be reduced to legacy NULL provenance by the user FK.
+      const authorizedConnections = await tx
+        .select({ projectId: githubConnections.project_id })
+        .from(githubConnections)
+        .where(
+          and(
+            eq(githubConnections.authorized_by_user_id, id),
+            inArray(githubConnections.project_id, projectIds),
+          ),
+        )
+        .orderBy(asc(githubConnections.project_id));
+      for (const { projectId } of authorizedConnections) {
+        cancelledBuilds.push(
+          ...(await invalidateGitHubConnectionAuthorizedBy(
+            tx,
+            projectId,
+            id,
+            'github connection authorizer account deleted',
+          )),
+        );
+      }
+    }
     await tx.delete(users).where(eq(users.id, id));
+    return cancelledBuilds;
   });
 }
 
@@ -3635,7 +3641,6 @@ export async function createBuild(
     logsUrl?: string | null;
     instanceType?: string | null;
     status?: Build['status'];
-    triggeredByUserId?: string | null;
   },
 ): Promise<Build> {
   const id = generateId('bld');
@@ -3645,7 +3650,6 @@ export async function createBuild(
       id,
       project_id: args.projectId,
       user_id: args.userId,
-      triggered_by_user_id: args.triggeredByUserId ?? null,
       executor: args.executor ?? 'container',
       status: args.status ?? 'queued',
       commit_sha: args.commitSha ?? null,
@@ -3973,57 +3977,6 @@ export async function hasQueuedContainerBuilds(db: Db): Promise<boolean> {
 }
 
 /**
- * Atomically supersede older queued container builds and enqueue a new one for
- * a push, under a per-project FOR UPDATE lock so concurrent webhook deliveries
- * for the same project+branch can't interleave their supersede+create steps
- * (which previously let an older push cancel a newer queued build and then
- * enqueue the older commit). Semantics are LAST-PROCESSED-WINS — the honest
- * guarantee for unordered webhooks; the GitHub push payload carries no reliable
- * commit-ordering signal, so true latest-commit-wins under out-of-order delivery
- * of DIFFERENT commits is intentionally NOT attempted.
- *
- * Reuse vs. rebuild for this EXACT commit on this project+branch:
- *   - An ACTIVE build (queued/starting/building/deploying) is ALWAYS reused
- *     (in-flight idempotency for a redelivered push).
- *   - A `complete` build is reused ONLY when this commit is what the project is
- *     CURRENTLY LIVE ON (a true webhook redelivery). If the live deployment is a
- *     DIFFERENT commit — a force-push ROLLBACK to a previously-deployed SHA
- *     (deploy A, deploy B, force-push branch back to A) — the old `complete`
- *     build is NOT reused; a fresh `queued` build is enqueued so the rollback
- *     actually re-deploys A. "Live is this commit" is decided inside the same
- *     transaction under the project lock: prefer the authoritative
- *     `builds.deployment_id == projects.active_deployment_id` link, falling back
- *     to `deployments.commit == args.commitSha`. Container builds record NEITHER
- *     (`deployment_id` and `deployments.commit` are both NULL for the default
- *     executor), so a complete-SHA push that can't be PROVEN live conservatively
- *     rebuilds — at worst a redundant rebuild of an identical commit, never a
- *     missed rollback.
- *   - A prior `failed`/`cancelled` build does NOT block a new one, so re-pushing
- *     a commit after a failed build still retries.
- *
- * Conflicting active builds are ALWAYS terminated first — before the reuse
- * lookup — so this holds even on a `complete`-SHA reuse/rebuild: a force-push
- * ROLLBACK to a previously-deployed SHA still cancels any newer in-flight build
- * for the now-off-branch commit (which would otherwise keep a live deploy token
- * and publish the stale newer commit). `exceptCommitSha` spares this push's own
- * commit, so a same-commit redelivery still dedups with `cancelled: []` and
- * never self-cancels.
- *
- * Serializes against a concurrent `PATCH /projects/:id/github` (which locks
- * `github_connections`, can re-point the branch / switch executor, and
- * terminates old-config builds). After taking the project lock, this LOCKS and
- * RE-READS the project's single `github_connections` row (the column is UNIQUE
- * per project) and rejects — returning `{ build: null, skipped: 'config-changed' }`
- * with `cancelled: []` — when the connection no longer matches this push's
- * branch or its executor is no longer `container`. Either ordering is safe: a
- * PATCH that committed first is observed here (we see the new config and skip);
- * if we committed first, the PATCH's own terminate step (it holds the same lock)
- * catches the build we just enqueued. Lock order is projects -> github_connections
- * (no path inverts it), so no deadlock. This closes the gap where an orphan
- * queued build for a now-disabled branch/executor escaped both the scheduler and
- * the JIT freshness gate.
- */
-/**
  * Re-check, INSIDE a build-creation transaction, that the GitHub App installation
  * still grants access to the repo. Both build txns already hold a `FOR UPDATE`
  * lock on the `github_connections` row, which serializes against the revocation
@@ -4075,7 +4028,7 @@ async function invalidateGitHubConnectionAuthorizedBy(
   projectId: string,
   userId: string,
   reason: string,
-): Promise<void> {
+): Promise<ReadonlyArray<TerminatedBuild>> {
   const [connection] = await db
     .select({ id: githubConnections.id })
     .from(githubConnections)
@@ -4088,10 +4041,11 @@ async function invalidateGitHubConnectionAuthorizedBy(
     .for('update')
     .limit(1);
   if (!connection) {
-    return;
+    return [];
   }
-  await terminateBuildsForProject(db, projectId, { reason });
+  const cancelledBuilds = await terminateBuildsForProject(db, projectId, { reason });
   await db.delete(githubConnections).where(eq(githubConnections.id, connection.id));
+  return cancelledBuilds;
 }
 
 async function installationCoversRepoInTx(
@@ -4192,6 +4146,12 @@ export async function installationCoversRepo(
   return row !== undefined;
 }
 
+/**
+ * Serialize webhook enqueue with project and connection changes. The last
+ * processed push wins; an active identical commit is reused, while a completed
+ * commit is reused only when it is still live so force-push rollbacks rebuild.
+ * Connection configuration and repository authority are rechecked under lock.
+ */
 export async function supersedeAndCreateContainerBuild(
   db: Db,
   args: {
@@ -4459,6 +4419,13 @@ export async function getBuildByProjectRunIdAndAttempt(
  * prior status) so the caller can best-effort stop active container BuildManager
  * DOs.
  */
+export type TerminatedBuild = Readonly<{
+  id: string;
+  executor: Build['executor'];
+  status: Build['status'];
+  instance_type: string | null;
+}>;
+
 export async function terminateBuildsForProject(
   db: Db,
   projectId: string,
@@ -4483,14 +4450,7 @@ export async function terminateBuildsForProject(
     // and misfires under any non-UTC session timezone.
     createdBefore?: string;
   },
-): Promise<
-  ReadonlyArray<{
-    id: string;
-    executor: Build['executor'];
-    status: Build['status'];
-    instance_type: string | null;
-  }>
-> {
+): Promise<ReadonlyArray<TerminatedBuild>> {
   const conds = [
     eq(builds.project_id, projectId),
     inArray(builds.status, ['queued', 'starting', 'building', 'deploying']),
@@ -5008,9 +4968,9 @@ export async function createGitHubConnection(
     // pre-existing callers/tests compile; the connect handler always supplies it
     // and webhook/OIDC resolution keys on it (full_name is mutable).
     repositoryId?: string | null;
-    // Set only after an organization repository was proven with the project
-    // owner's own GitHub OAuth token. Legacy organization connections remain
-    // null and are rejected by every runtime resolver until reconnected.
+    // Set after repository access was proven with the project owner or
+    // administrator's own GitHub OAuth token. Legacy organization connections
+    // remain null and are rejected by every runtime resolver until reconnected.
     authorizedByUserId?: string | null;
     branch?: string;
     buildExecutor?: GitHubConnection['build_executor'];

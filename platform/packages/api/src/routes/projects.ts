@@ -179,7 +179,7 @@ const DESTRUCTIVE_PRAGMA = '-- void:allow-destructive';
 
 /**
  * Sentinel error used by the /rollback handler to signal an HTTP
- * response status from inside the advisory-locked tx callback.
+ * response status from inside the row-locked transaction callback.
  * `db.transaction` rolls back on any throw, so we use this wrapper to
  * distinguish "user-facing 404/400" from unexpected exceptions that
  * should surface as 500. Handling is local to the /rollback handler.
@@ -839,20 +839,29 @@ const app = new Hono<ApiEnv>()
       return access;
     }
 
-    const deployment = await getDeployment(context.get('db'), deploymentId);
-    if (!deployment || deployment.project_id !== projectId) {
-      return context.json({ error: 'deployment not found' }, 404);
-    }
+    return context.get('db').transaction(async (tx) => {
+      await tx.execute(drizzleSql`SELECT id FROM projects WHERE id = ${projectId} FOR UPDATE`);
+      const txDb = tx as unknown as Db;
+      const lockedAccess = await requireProjectRouteCapability(context, projectId, 'deploy', txDb);
+      if (lockedAccess instanceof Response) {
+        return lockedAccess;
+      }
 
-    const canceling = await cancelDeployment(context.get('db'), deploymentId, 'canceled by user');
-    if (!canceling) {
-      return context.json(
-        { error: 'deployment already completed', status: deployment.status },
-        409,
-      );
-    }
+      const deployment = await getDeployment(txDb, deploymentId);
+      if (!deployment || deployment.project_id !== projectId) {
+        return context.json({ error: 'deployment not found' }, 404);
+      }
 
-    return context.json({ ok: true, deploymentId, status: 'canceling' });
+      const canceling = await cancelDeployment(txDb, deploymentId, 'canceled by user');
+      if (!canceling) {
+        return context.json(
+          { error: 'deployment already completed', status: deployment.status },
+          409,
+        );
+      }
+
+      return context.json({ ok: true, deploymentId, status: 'canceling' });
+    });
   })
 
   // Rollback to a previous deployment
@@ -2769,17 +2778,8 @@ const app = new Hono<ApiEnv>()
       return access;
     }
     const project = access.project;
-    // Refuse to provision once teardown has begun. Project teardown revokes
-    // in-flight build deploy tokens up front, but a token captured just before
-    // that (or a full `api` token used by the owner concurrently with their own
-    // delete) could otherwise still reach this provisioning route and create a
-    // Hyperdrive whose `resources` row the teardown cascade then deletes WITHOUT
-    // deleting the CF Hyperdrive (no name-based orphan sweep for hyperdrive).
-    // This closes the COMMON case (teardown already started at read time). The
-    // narrow residual — status flips after this unlocked read but before the
-    // resources-row INSERT lands — is the pre-existing orphan-on-concurrent-
-    // create class (design-doc 0067; the full fix is project-level locking, not
-    // scoped here). Bail before touching Cloudflare.
+    // Fast rejection; the transaction below rechecks status and capability
+    // under the project lock before touching Cloudflare.
     if (project.status === 'deleting') {
       return context.json({ error: 'Project is being deleted' }, 409);
     }
@@ -2935,11 +2935,7 @@ const app = new Hono<ApiEnv>()
       return access;
     }
     const project = access.project;
-    // Same teardown guard as POST /:id/database — its create-new-Hyperdrive
-    // branch below can orphan a CF Hyperdrive the same way. This route is
-    // `api`-token-only (not deploy-token-reachable), so the only racer is the
-    // owner deleting their own project concurrently; bail once teardown has
-    // begun. Same pre-existing residual TOCTOU applies (design-doc 0067).
+    // Fast rejection; the transaction below performs the authoritative check.
     if (project.status === 'deleting') {
       return context.json({ error: 'Project is being deleted' }, 409);
     }

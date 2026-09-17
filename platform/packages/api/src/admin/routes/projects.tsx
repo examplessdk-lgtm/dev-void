@@ -33,7 +33,7 @@ type OwnerTransferPreview = Readonly<{
   target: { id: string; slug: string; userId: string };
   previousOwner: OwnerSummary;
   newOwner: OwnerSummary;
-  formerOwnerRole: 'admin';
+  formerOwnerRole: 'admin' | null;
   targetPreviousRole: string | null;
   blockers: ReadonlyArray<{ kind: string; id: string; status: string }>;
   github: {
@@ -43,7 +43,7 @@ type OwnerTransferPreview = Readonly<{
     executor: string;
   } | null;
   routingUpdates: ReadonlyArray<string>;
-  counterUpdates: { detachUserId: string; attachUserId: string };
+  counterUpdates: { detachUserId: string | null; attachUserId: string };
   usageTransfer: string;
 }>;
 
@@ -258,10 +258,16 @@ app.post('/:id/owner/preview', async (context) => {
     userId,
     true,
   )) as unknown as OwnerTransferPreview;
+  const convergenceOnly = result.formerOwnerRole === null;
 
   return context.html(
-    <Layout title={`Transfer ${result.target.slug}`} username={context.get('user').login}>
-      <h1>Transfer Ownership: {result.target.slug}</h1>
+    <Layout
+      title={`${convergenceOnly ? 'Converge' : 'Transfer'} ${result.target.slug}`}
+      username={context.get('user').login}
+    >
+      <h1>
+        {convergenceOnly ? 'Converge Ownership State' : 'Transfer Ownership'}: {result.target.slug}
+      </h1>
       <table>
         <thead>
           <tr>
@@ -291,11 +297,21 @@ app.post('/:id/owner/preview', async (context) => {
         </tbody>
       </table>
 
-      <p>
-        The former owner will become a <strong>{result.formerOwnerRole}</strong>. The target's
-        current project role is <strong>{result.targetPreviousRole ?? 'none'}</strong>. Usage
-        transfer is {result.usageTransfer}.
-      </p>
+      {convergenceOnly ? (
+        <p>
+          This project is already owned by the target. This is a convergence-only operation:
+          applying it repairs membership, usage-counter, routing, and account metadata without
+          changing ownership. The owner's stored project role is{' '}
+          <strong>{result.targetPreviousRole ?? 'none'}</strong>. Usage transfer is{' '}
+          {result.usageTransfer}.
+        </p>
+      ) : (
+        <p>
+          The former owner will become a <strong>{result.formerOwnerRole}</strong>. The target's
+          current project role is <strong>{result.targetPreviousRole ?? 'none'}</strong>. Usage
+          transfer is {result.usageTransfer}.
+        </p>
+      )}
 
       <h2>Active-work blockers</h2>
       {result.blockers.length > 0 ? (
@@ -312,8 +328,17 @@ app.post('/:id/owner/preview', async (context) => {
 
       <h2>Convergence</h2>
       <p>
-        Usage counters: detach from <code>{result.counterUpdates.detachUserId}</code>, attach to{' '}
-        <code>{result.counterUpdates.attachUserId}</code>.
+        {result.counterUpdates.detachUserId ? (
+          <>
+            Usage counters: detach from <code>{result.counterUpdates.detachUserId}</code>, attach to{' '}
+            <code>{result.counterUpdates.attachUserId}</code>.
+          </>
+        ) : (
+          <>
+            Usage counters: attach or reconcile with{' '}
+            <code>{result.counterUpdates.attachUserId}</code>; no former-owner detachment is needed.
+          </>
+        )}
       </p>
       <p>Routing and account entries: {result.routingUpdates.join(', ')}</p>
 
@@ -331,7 +356,7 @@ app.post('/:id/owner/preview', async (context) => {
         <form method="post" action={`/admin/projects/${projectId}/owner`}>
           <input type="hidden" name="userId" value={userId} />
           <button type="submit" class="danger">
-            Apply Ownership Transfer
+            {convergenceOnly ? 'Apply Convergence' : 'Apply Ownership Transfer'}
           </button>
         </form>
       ) : (

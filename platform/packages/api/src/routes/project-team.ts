@@ -16,6 +16,7 @@ import {
 } from '../db.ts';
 import { sendProjectInvitationEmail } from '../email.ts';
 import type { ApiEnv } from '../env.ts';
+import { cancelContainerBuildDos } from '../github/cancel-builds.ts';
 import {
   ProjectAccessDeniedError,
   ProjectNotFoundError,
@@ -31,6 +32,8 @@ import type {
 } from '../types.ts';
 
 const MEMBER_ROLES = new Set<ProjectMemberRole>(['reader', 'collaborator', 'admin']);
+const INVITATION_EMAILS_PER_MINUTE = 5;
+const INVITATION_EMAILS_PER_DAY = 50;
 
 type MemberJson = Readonly<{
   user: Readonly<Pick<User, 'id' | 'login' | 'email'>>;
@@ -149,11 +152,14 @@ async function deliverInvitation(
   invitation: ProjectInvitation,
   target: User,
   projectSlug: string,
-): Promise<{ status: 'sent' | 'not_configured' | 'failed' }> {
+): Promise<{ status: 'sent' | 'not_configured' | 'rate_limited' | 'failed' }> {
   if (!context.env.EMAIL || !target.email) {
     return { status: 'not_configured' };
   }
   try {
+    if (!(await consumeInvitationEmailDelivery(context.env.ROUTING, invitation.project_id))) {
+      return { status: 'rate_limited' };
+    }
     await sendProjectInvitationEmail(context.env, {
       to: target.email,
       invitationId: invitation.id,
@@ -169,6 +175,47 @@ async function deliverInvitation(
     });
     return { status: 'failed' };
   }
+}
+
+/**
+ * Approximate per-project delivery limit. KV can briefly undercount concurrent
+ * requests across colos, which is acceptable for an email abuse guard. The
+ * counter is consumed before sending so provider failures cannot be retried to
+ * generate unlimited delivery attempts.
+ */
+async function consumeInvitationEmailDelivery(
+  kv: KVNamespace,
+  projectId: string,
+): Promise<boolean> {
+  const now = new Date();
+  const minute = `${now.getUTCFullYear()}${String(now.getUTCMonth() + 1).padStart(2, '0')}${String(
+    now.getUTCDate(),
+  ).padStart(2, '0')}T${String(now.getUTCHours()).padStart(2, '0')}${String(
+    now.getUTCMinutes(),
+  ).padStart(2, '0')}`;
+  const day = minute.slice(0, 8);
+  const minuteKey = `project-invitation-email-rate:${projectId}:${minute}`;
+  const dayKey = `project-invitation-email-rate:${projectId}:${day}`;
+  const [minuteRaw, dayRaw] = await Promise.all([kv.get(minuteKey), kv.get(dayKey)]);
+  const minuteCount = parseDeliveryCounter(minuteRaw);
+  const dayCount = parseDeliveryCounter(dayRaw);
+
+  if (minuteCount >= INVITATION_EMAILS_PER_MINUTE || dayCount >= INVITATION_EMAILS_PER_DAY) {
+    return false;
+  }
+  await Promise.all([
+    kv.put(minuteKey, String(minuteCount + 1), { expirationTtl: 5 * 60 }),
+    kv.put(dayKey, String(dayCount + 1), { expirationTtl: 25 * 60 * 60 }),
+  ]);
+  return true;
+}
+
+function parseDeliveryCounter(raw: string | null): number {
+  if (!raw) {
+    return 0;
+  }
+  const count = parseInt(raw, 10);
+  return Number.isFinite(count) && count >= 0 ? count : 0;
 }
 
 export const projectTeamRoutes = new Hono<ApiEnv>()
@@ -320,12 +367,17 @@ export const projectTeamRoutes = new Hono<ApiEnv>()
       return context.json({ error: 'role must be reader, collaborator, or admin' }, 400);
     }
     try {
-      const member = await setProjectMemberRole(context.get('db'), {
+      const { member, cancelledBuilds } = await setProjectMemberRole(context.get('db'), {
         projectId,
         subjectUserId: context.req.param('userId'),
         role,
         actorUserId: context.get('user').id,
       });
+      await cancelContainerBuildDos(
+        context.env,
+        cancelledBuilds,
+        'github connection authorizer lost admin access',
+      );
       const user = await getUser(context.get('db'), member.user_id);
       if (!user) {
         return context.json({ error: 'project member not found' }, 404);
@@ -347,11 +399,16 @@ export const projectTeamRoutes = new Hono<ApiEnv>()
       return access;
     }
     try {
-      await removeProjectMember(context.get('db'), {
+      const { cancelledBuilds } = await removeProjectMember(context.get('db'), {
         projectId,
         subjectUserId: context.req.param('userId'),
         actorUserId: context.get('user').id,
       });
+      await cancelContainerBuildDos(
+        context.env,
+        cancelledBuilds,
+        'github connection authorizer removed from project',
+      );
       return context.body(null, 204);
     } catch (error) {
       const response = mutationErrorResponse(context, error);
@@ -372,11 +429,16 @@ export const projectTeamRoutes = new Hono<ApiEnv>()
       return context.json({ error: 'the project owner cannot leave the project' }, 409);
     }
     try {
-      await removeProjectMember(context.get('db'), {
+      const { cancelledBuilds } = await removeProjectMember(context.get('db'), {
         projectId,
         subjectUserId: context.get('user').id,
         actorUserId: context.get('user').id,
       });
+      await cancelContainerBuildDos(
+        context.env,
+        cancelledBuilds,
+        'github connection authorizer removed from project',
+      );
       return context.body(null, 204);
     } catch (error) {
       const response = mutationErrorResponse(context, error);

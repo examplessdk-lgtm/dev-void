@@ -1396,6 +1396,37 @@ describe('POST /admin/projects/:id/owner', () => {
     ).toMatchObject({ user_id: owner.id });
   });
 
+  test('renders a same-owner preview as convergence-only without null placeholders', async () => {
+    const admin = await createTestUser(
+      env.db,
+      'admin-convergence-preview',
+      'github',
+      undefined,
+      'free',
+      'admin',
+    );
+    const owner = await createTestUser(env.db, 'browser-convergence-owner');
+    const project = await createTestProject(env.db, owner.id, 'browser-convergence-project');
+
+    const response = await req(`/admin/projects/${project.id}/owner/preview`, admin.adminJwt, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: new URLSearchParams({ userId: owner.id }),
+    });
+
+    expect(response.status).toBe(200);
+    const html = await response.text();
+    expect(html).toContain(`Converge Ownership State: ${project.slug}`);
+    expect(html).toContain('This is a convergence-only operation');
+    expect(html).toContain('no former-owner detachment is needed');
+    expect(html).toContain('Apply Convergence');
+    expect(html).not.toContain('The former owner will become');
+    expect(html).not.toContain('detach from <code></code>');
+    expect(await env.db.select().from(operatorEvents)).toEqual([]);
+  });
+
   test('applies the confirmed transfer, audits it, and redirects to project detail', async () => {
     const admin = await createTestUser(
       env.db,

@@ -98,9 +98,11 @@ For every project operation, authorization has two independent inputs:
 2. the current owner's account determines the applicable plan and quota.
 
 The actor's personal plan never raises or lowers the project's limits. This
-applies to request and AI usage, Sandbox runtime and concurrency, deploys per
-day, build concurrency and timeout, build instance size, CPU and subrequest
-limits, deployment retention, and future account-level storage enforcement.
+applies to request and AI usage, deploys per day, build concurrency and timeout,
+build instance size, CPU and subrequest limits, deployment retention, and future
+account-level storage enforcement. Managed Sandbox is currently hard-disabled;
+its runtime and concurrency attribution must be specified before that capability
+is reintroduced.
 
 A manually suspended actor cannot authenticate, even if they are a member. An
 actor automatically suspended for usage on projects they own may still work on
@@ -131,10 +133,9 @@ former owner afterward.
 
 The target must be an existing Platform user. The preview names the target's
 plan and suspension state. A transfer is rejected while the project is deleting
-or has a nonterminal deploy, rollback, managed build, or Sandbox lifecycle
-operation. The administrator can cancel or wait for that work and retry. This
-keeps a single operation from beginning under one owner's plan and publishing
-under another's.
+or has a nonterminal deploy, rollback, or managed build. The administrator can
+cancel or wait for that work and retry. This keeps a single operation from
+beginning under one owner's plan and publishing under another's.
 
 ## Data model
 
@@ -202,9 +203,9 @@ event occurred.
 Account usage queries intersect these ownership periods with each user's
 billing window. Project usage remains a complete project history, while an
 owner's aggregate contains only the portions billed to that owner. Request
-events use their queue enqueue time, Sandbox intervals are split at an
-ownership boundary, and AI queries start at the later of the billing-period or
-ownership-period boundary.
+events use their queue enqueue time, and AI queries start at the later of the
+billing-period or ownership-period boundary. Managed Sandbox interval splitting
+is deferred until that hard-disabled capability is reintroduced.
 
 ### Actor and billing attribution
 
@@ -214,10 +215,9 @@ Daily deploy counts use `billing_user_id` instead of joining to the project's
 current owner.
 
 `builds.user_id` remains the billing owner for compatibility with the build
-scheduler and its per-user locks. Add `builds.triggered_by_user_id` for a human
-trigger where one exists. Automated GitHub builds use the current project owner
-for `builds.user_id`; their GitHub authorization provenance remains on the
-connection.
+scheduler and its per-user locks. Automated GitHub builds use the current
+project owner for `builds.user_id`; their GitHub authorization provenance
+remains on the connection.
 
 ### Audit events
 
@@ -278,10 +278,9 @@ has `deploy` capability as well as checking the bound build. Therefore:
 - publication that gets the lock first completes before the membership change;
 - a leaked unexpired deploy token cannot start new work after removal.
 
-The binding proxy's internal `verify-owner` route becomes a capability check
-for `deploy` and is renamed or versioned so old and new proxies can coexist
-during rollout. Build-bound prerender credentials retain their build-state
-check.
+The binding proxy's existing internal `verify-owner` route checks the `deploy`
+capability without changing its wire contract. Build-bound prerender
+credentials retain their build-state check.
 
 ## Invitation flow
 
@@ -350,13 +349,14 @@ void project team decline <invitation-id>
 ```
 
 The existing project selector and repository link identify the project when
-`--project` is absent. Commands require a connected Void Platform and give a
-clear error for a direct Cloudflare target. Project list output gains a role
-column so shared projects are distinguishable.
+`--project` is absent. Project-scoped commands require a connected Void Platform
+project and give a clear error for a direct Cloudflare target. The account-scoped
+`pending`, `accept`, and `decline` commands use the connected Void Platform even
+when the current directory targets Cloudflare directly. Project list output
+gains a role column so shared projects are distinguishable.
 
-The optional user dashboard adds a Team tab to project details and a pending
-invitation page. The core acceptance landing route belongs to the API so a
-self-hosted installation does not require the optional dashboard.
+The API-owned invitation landing route shows the CLI connection and acceptance
+commands, so self-hosted installations do not require the optional dashboard.
 
 ### Installation administrator API
 
@@ -397,26 +397,22 @@ new ownership period.
 
 The operator transfer performs these steps:
 
-1. Write a retryable transfer fence that prevents new Sandbox acquisitions for
-   the project while ordinary application requests continue.
-2. In one database transaction, lock the project then both users in stable ID
+1. In one database transaction, lock the project then both users in stable ID
    order; reject active lifecycle work; close/open the ownership periods;
    update `projects.user_id`; remove the target's membership; add the former
    owner as project admin; and record the event.
-3. Detach/attach the UsageCounter project mapping.
-4. Republish the project-account and active routing entries with the new owner
+2. Detach/attach the UsageCounter project mapping.
+3. Republish the project-account and active routing entries with the new owner
    ID, plan limits, and suspension state. Usage ingestion already uses the
    database period, so stale producer hints cannot misbill requests.
-5. Clear the transfer fence.
 
 If a post-commit external update fails, the database transfer remains committed
-and the fence stays closed for Sandboxes. The operator response identifies the
-partial state and a repeat apply resumes the idempotent convergence steps.
-Application requests continue to be metered to the database-authoritative
-owner during recovery.
+and the operator response identifies the partial state. A repeat apply resumes
+the idempotent convergence steps. Application requests continue to be metered
+to the database-authoritative owner during recovery.
 
 GitHub connection authorization provenance may name any member who had
-`configure` capability when the connection was created. Removing or
+`settings` capability when the connection was created. Removing or
 downgrading that authorizer below project administrator invalidates the
 connection and cancels its active builds unless another project administrator
 reauthorizes it first. A transfer normally preserves it because the former
@@ -445,17 +441,15 @@ acquire capacity and select a build size from the current billing owner.
    deploy readers that tolerate absent optional data.
 2. **Central authorization.** Introduce the capability service and move every
    project route to it while owner remains the only possible role. Move all
-   plan lookups to the returned owner. Version the proxy verification endpoint.
+   plan lookups to the returned owner. Update the existing proxy verification
+   endpoint to enforce deploy capability without changing its wire contract.
 3. **Counter correctness.** Resolve usage by ownership period, split billed
-   totals from current project mappings, and add the Sandbox transfer fence and
-   stale-counter ownership checks.
+   totals from current project mappings, and add stale-counter ownership checks.
 4. **Membership and invitations.** Enable member rows, registered-user lookup,
    acceptance/decline, access audit, email delivery, API routes, CLI commands,
-   and dashboard surfaces.
+   and the API-owned CLI instruction page.
 5. **Operator transfer.** Enable dry-run/apply in the shared operator service,
    browser administrator UI, and CLI after quota convergence is deployed.
-6. **Cleanup.** Remove the old owner-only proxy endpoint and temporary fallback
-   paths after all packaged runtime revisions require the new capability.
 
 No phase changes direct Cloudflare deployment configuration, bindings, upload
 logic, or manifests.
@@ -486,9 +480,7 @@ Coverage must include:
   rejection, delayed events on both sides of the timestamp, billing rollover,
   stale DO writes, routing partial failure, and idempotent recovery;
 - plan changes, suspension, user deletion, and project deletion ignoring shared
-  membership where ownership is required;
-- `void deploy --platform cloudflare` emitting no team binding/configuration,
-  making no team API request, and retaining its existing Free-compatible path.
+  membership where ownership is required.
 
 When all batches are complete, run `vp lint`, `vp fmt`, `vp run check`, and the
 full `vp test run` suite.
@@ -504,17 +496,3 @@ After verification, document only the public behavior and workflows:
 - update `packages/void/skills/void` when the CLI guidance changes;
 - leave `packages/void/AGENTS_TEMPLATE.md` unchanged unless a brief generated
   app instruction is genuinely necessary.
-
-## Confirmed product decisions
-
-Confirmed on 2026-09-17:
-
-1. Project administrators can change roles and remove any non-owner member,
-   including another project administrator.
-2. Collaborators receive all deploy-equivalent production authority described
-   in the role table; project settings and team management remain admin-only.
-3. The former owner becomes a project administrator on transfer.
-4. Ownership transfer is non-retroactive for usage already incurred.
-5. Invitations resolve a registered email to an existing Void Platform user.
-   They cannot create an account or admit an unregistered user through
-   restricted signup.

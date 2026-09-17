@@ -1,12 +1,16 @@
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vite-plus/test';
 import {
+  createBuild,
+  createGitHubConnection,
   createOrRefreshProjectInvitation,
   createProject,
   deleteProjectCascade,
   deleteUser,
   getAccessibleProjectsByUserId,
   getOwnedProjectsByUserId,
+  getBuild,
+  getGitHubConnection,
   getProject,
   getProjectsByUserId,
   respondToProjectInvitation,
@@ -39,7 +43,7 @@ async function setEmail(userId: string, email: string): Promise<void> {
 }
 
 describe('project team lifecycle', () => {
-  it('deleting a non-owner removes their live access but preserves the project audit trail', async () => {
+  it('deleting a non-owner revokes their GitHub authority and preserves access audit history', async () => {
     const owner = await createTestUser(env.db, 'owner');
     const member = await createTestUser(env.db, 'member');
     await setEmail(member.id, 'member@example.com');
@@ -48,13 +52,25 @@ describe('project team lifecycle', () => {
     const { invitation } = await createOrRefreshProjectInvitation(env.db, {
       projectId: project.id,
       email: 'member@example.com',
-      role: 'collaborator',
+      role: 'admin',
       actorUserId: owner.id,
     });
     await respondToProjectInvitation(env.db, {
       invitationId: invitation.id,
       actorUserId: member.id,
       response: 'accept',
+    });
+    await createGitHubConnection(env.db, {
+      projectId: project.id,
+      installationId: 'member-authorized-installation',
+      repoFullName: 'void/member-authorized',
+      repositoryId: '101',
+      authorizedByUserId: member.id,
+    });
+    const activeBuild = await createBuild(env.db, {
+      projectId: project.id,
+      userId: owner.id,
+      status: 'building',
     });
 
     await deleteUser(env.db, member.id);
@@ -69,6 +85,12 @@ describe('project team lifecycle', () => {
         .from(projectInvitations)
         .where(eq(projectInvitations.target_user_id, member.id)),
     ).toEqual([]);
+    expect(await getGitHubConnection(env.db, project.id)).toBeNull();
+    expect(await getBuild(env.db, activeBuild.id)).toMatchObject({
+      status: 'cancelled',
+      error: 'github connection authorizer account deleted',
+      completed_at: expect.any(String),
+    });
 
     const events = await env.db
       .select()
@@ -163,7 +185,7 @@ describe('project team lifecycle', () => {
     expect(await getProject(env.db, shared.id)).not.toBeNull();
 
     await deleteProjectCascade(env.db, owned.id);
-    await expect(deleteUser(env.db, owner.id)).resolves.toBeUndefined();
+    await expect(deleteUser(env.db, owner.id)).resolves.toEqual([]);
 
     expect(await getProject(env.db, owned.id)).toBeNull();
     expect(await getProject(env.db, shared.id)).not.toBeNull();

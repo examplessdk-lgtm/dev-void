@@ -52,7 +52,6 @@ CREATE TABLE "project_ownership_periods" (
 	CONSTRAINT "project_ownership_periods_time_check" CHECK ("project_ownership_periods"."ends_at" IS NULL OR "project_ownership_periods"."ends_at" >= "project_ownership_periods"."starts_at")
 );
 --> statement-breakpoint
-ALTER TABLE "builds" ADD COLUMN "triggered_by_user_id" text;--> statement-breakpoint
 ALTER TABLE "deployments" ADD COLUMN "billing_user_id" text;--> statement-breakpoint
 ALTER TABLE "deployments" ADD COLUMN "initiated_by_user_id" text;--> statement-breakpoint
 UPDATE "deployments" AS "deployment"

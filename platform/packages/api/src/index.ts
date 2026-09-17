@@ -401,20 +401,30 @@ const app = new Hono<ApiEnv>()
   })
   .get('/invite', (context) => {
     const name = escapeHtml(getPlatformDisplayName(context.env, context.req.url));
+    const invitationId = context.req.query('project-invitation')?.trim();
     const command = escapeHtml(
       platformConnectCommand(getPlatformApiUrl(context.env, context.req.url)),
     );
+    const invitationCommand = invitationId
+      ? escapeHtml(`void project team accept ${invitationId}`)
+      : null;
     return context.html(`<!DOCTYPE html>
 <html><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Get Started - ${name}</title>
+<title>${invitationCommand ? 'Accept Project Invitation' : 'Get Started'} - ${name}</title>
 <style>body{font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#fafafa}.card{max-width:520px;padding:40px}h1{font-size:1.5rem;margin-bottom:12px}p{color:#666;line-height:1.6;margin-bottom:20px}pre{background:#eee;padding:16px;overflow:auto}a{color:inherit}</style>
 </head><body>
 <div class="card">
-<h1>Get Started with ${name}</h1>
+<h1>${invitationCommand ? 'Accept your project invitation' : `Get Started with ${name}`}</h1>
 <p>Connect the Void CLI to this platform. When prompted, sign in with an account whose verified email address matches your invitation:</p>
 <pre><code>${command}</code></pre>
+${
+  invitationCommand
+    ? `<p>Then accept the project invitation:</p>
+<pre><code>${invitationCommand}</code></pre>`
+    : ''
+}
 <p>The CLI opens your browser to sign in when needed. If your application is already linked to another project, run <code>void project link</code> from its directory to choose a project on this platform before deploying.</p>
 <p>Need to create an application? Read the <a href="https://void.cloud/guide/quickstart">Void quickstart</a>, then return here to connect to this platform before deploying.</p>
 </div>
@@ -1048,10 +1058,15 @@ async function processUserRollover(
     // the latch is true. (`undefined` from an old DO during a deploy: skipped,
     // and reconciled on the next pass once the DO is updated.)
     if (result.requestsSuspended === false) {
-      await setProjectsRoutingSuspension(env.ROUTING, db, userProjects, {
-        op: 'unsuspend',
-        matchReason: REASON_REQUESTS_EXCEEDED,
-      });
+      await setProjectsRoutingSuspension(
+        env.ROUTING,
+        db,
+        userProjects.map((project) => ({ ...project, user_id: user.id })),
+        {
+          op: 'unsuspend',
+          matchReason: REASON_REQUESTS_EXCEEDED,
+        },
+      );
     }
   }
 

@@ -971,20 +971,24 @@ describe('email verification gating on account linking', () => {
           ],
         });
       });
-      // The route's owner read returns the OLD address; the login lands
-      // right after it and before the insert. The auth middleware resolves
-      // the caller through the same helper first, so fire on the SECOND
-      // read only — the one the route makes after Cloudflare answered.
-      const realGetUser = dbModule.getUser;
-      let loginDuringAdd: Response | undefined;
-      let reads = 0;
-      vi.spyOn(dbModule, 'getUser').mockImplementation(async (...args) => {
-        const owner = await realGetUser(...args);
-        reads += 1;
-        if (reads === 2) {
-          loginDuringAdd = await loginAs('949494', 'racing-manual');
+      // The route has already captured the OLD owner address in
+      // `lockedAccess` when it reaches the owner-audited insert. Rotate the
+      // user row at that seam, then run the real helper: its owner-row
+      // re-check must see the NEW address and refuse the stale inheritance.
+      //
+      // The production interleaving uses the login transaction on a second
+      // Postgres session. PGlite exposes one session, so model the same
+      // committed row state through the route's existing transaction. There
+      // are no inherited destinations yet, making this update the complete
+      // database effect of that login for this fixture.
+      const realTryCreate = dbModule.tryCreateEmailDestination;
+      let rotatedDuringAdd = false;
+      vi.spyOn(dbModule, 'tryCreateEmailDestination').mockImplementation(async (...args) => {
+        if (!rotatedDuringAdd) {
+          rotatedDuringAdd = true;
+          await dbModule.updateUser(args[0], existing.id, 'racing-manual', 'new-owner@example.com');
         }
-        return owner;
+        return realTryCreate(...args);
       });
 
       const res = await app.fetch(
@@ -996,9 +1000,15 @@ describe('email verification gating on account linking', () => {
         emailEnv(),
         executionCtx,
       );
-      expect(loginDuringAdd?.status).toBe(302);
+      expect(rotatedDuringAdd).toBe(true);
       expect(res.status).toBe(409);
       expect(await res.json()).toEqual({ error: 'destination concurrently modified, try again' });
+
+      const [rotatedOwner] = await env.db
+        .select({ email: users.email })
+        .from(users)
+        .where(eq(users.id, existing.id));
+      expect(rotatedOwner?.email).toBe('new-owner@example.com');
 
       const rows = await env.db
         .select()

@@ -166,7 +166,9 @@ export async function processUsageEventBatch(
     if (!project) {
       return [];
     }
-    const occurredAt = event.sandboxMeteredThrough !== undefined ? event.sandboxMeteredThrough : at;
+    // Queue enqueue time is the single attribution timestamp. Managed Sandbox
+    // is hard-disabled; split interval attribution is deferred until reintroduction.
+    const occurredAt = at;
     const ownershipPeriod = ownershipPeriodsByProject
       .get(event.projectId)
       ?.find(

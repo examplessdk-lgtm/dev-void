@@ -1,5 +1,11 @@
 import { and, eq } from 'drizzle-orm';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vite-plus/test';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
+import {
+  createBuild,
+  createGitHubConnection,
+  getBuild,
+  upsertGitHubInstallation,
+} from '../../src/db.ts';
 import app from '../../src/index.ts';
 import {
   projectAccessEvents,
@@ -18,6 +24,22 @@ import {
 } from './helpers.ts';
 
 let env: TestEnv;
+
+function recordingBuildManager(): {
+  namespace: DurableObjectNamespace;
+  cancelledIds: ReadonlyArray<string>;
+} {
+  const cancelledIds: Array<string> = [];
+  const namespace = {
+    idFromName: (name: string) => ({ toString: () => name }) as unknown as DurableObjectId,
+    get: (id: DurableObjectId) => ({
+      cancelBuild: async () => {
+        cancelledIds.push(id.toString());
+      },
+    }),
+  } as unknown as DurableObjectNamespace;
+  return { namespace, cancelledIds };
+}
 
 beforeAll(async () => {
   env = await setupEnv();
@@ -101,6 +123,52 @@ describe('project team API', () => {
     );
     expect(forbidden.status).toBe(403);
     expect(await forbidden.json()).toEqual({ error: 'forbidden' });
+  });
+
+  it('stops container builds when an authorizing admin is downgraded', async () => {
+    const owner = await createTestUser(env.db, 'build-owner');
+    const admin = await createTestUser(env.db, 'build-admin');
+    const project = await createTestProject(env.db, owner.id, 'build-access-project');
+    await env.db.insert(projectMembers).values({
+      project_id: project.id,
+      user_id: admin.id,
+      role: 'admin',
+      added_by_user_id: owner.id,
+    });
+    await upsertGitHubInstallation(env.db, {
+      installationId: 'build-access-installation',
+      userId: admin.id,
+      accountLogin: admin.login,
+      accountId: 'build-access-account',
+      accountType: 'User',
+      repositories: [{ full_name: `${admin.login}/app`, id: 7711 }],
+    });
+    await createGitHubConnection(env.db, {
+      projectId: project.id,
+      installationId: 'build-access-installation',
+      repoFullName: `${admin.login}/app`,
+      repositoryId: '7711',
+      authorizedByUserId: admin.id,
+    });
+    const build = await createBuild(env.db, {
+      projectId: project.id,
+      userId: owner.id,
+      executor: 'container',
+      status: 'building',
+    });
+    const { namespace, cancelledIds } = recordingBuildManager();
+
+    const response = await app.fetch(
+      request(`/projects/${project.id}/members/${admin.id}`, owner.jwt, {
+        method: 'PATCH',
+        body: { role: 'collaborator' },
+      }),
+      { ...env, BUILD_MANAGER: namespace },
+    );
+
+    expect(response.status).toBe(200);
+    expect((await getBuild(env.db, build.id))?.status).toBe('cancelled');
+    expect(cancelledIds).toEqual([build.id]);
   });
 
   it('requires an existing registered user and supports target-only acceptance', async () => {
@@ -386,11 +454,127 @@ describe('project team API', () => {
     expect(acceptRevoked.status).toBe(409);
   });
 
-  it('lets project admins manage any non-owner member and members leave', async () => {
+  it('rate-limits create, refresh, and resend delivery while preserving invitations', async () => {
+    const owner = await createTestUser(env.db, 'owner');
+    const target = await createTestUser(env.db, 'target');
+    await setEmail(target.id, 'target@example.com');
+    const project = await createTestProject(env.db, owner.id, 'delivery-limited');
+    const send = vi.fn(async () => {});
+    const emailEnv = {
+      ...env,
+      EMAIL: { send } as unknown as SendEmail,
+      EMAIL_FROM: 'Void Platform <platform@example.com>',
+      AUTH_REDIRECT_URI: 'http://localhost/auth/callback',
+      PLATFORM_INSTALLATION_ID: 'test-installation',
+    };
+    const createOrRefresh = (role: 'reader' | 'collaborator' | 'admin') =>
+      app.fetch(
+        request(`/projects/${project.id}/invitations`, owner.jwt, {
+          method: 'POST',
+          body: { email: 'target@example.com', role },
+        }),
+        emailEnv,
+      );
+
+    const created = await createOrRefresh('reader');
+    expect(created.status).toBe(201);
+    const invitationId = ((await created.json()) as { invitation: { id: string } }).invitation.id;
+
+    const refreshed = await createOrRefresh('admin');
+    expect(refreshed.status).toBe(200);
+    expect(await refreshed.json()).toMatchObject({
+      invitation: { id: invitationId, role: 'admin' },
+      refreshed: true,
+      delivery: { status: 'sent' },
+    });
+
+    const resend = () =>
+      app.fetch(
+        request(`/projects/${project.id}/invitations/${invitationId}/resend`, owner.jwt, {
+          method: 'POST',
+        }),
+        emailEnv,
+      );
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const response = await resend();
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ delivery: { status: 'sent' } });
+    }
+
+    send.mockRejectedValueOnce(new Error('provider unavailable'));
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    let failed: Response;
+    try {
+      failed = await resend();
+    } finally {
+      consoleError.mockRestore();
+    }
+    expect(failed.status).toBe(200);
+    expect(await failed.json()).toMatchObject({ delivery: { status: 'failed' } });
+
+    const shortExpiry = new Date(Date.now() + 60_000).toISOString();
+    await env.db
+      .update(projectInvitations)
+      .set({ expires_at: shortExpiry })
+      .where(eq(projectInvitations.id, invitationId));
+    const limited = await resend();
+    expect(limited.status).toBe(200);
+    expect(await limited.json()).toMatchObject({
+      invitation: { id: invitationId, role: 'admin' },
+      delivery: { status: 'rate_limited' },
+    });
+    expect(send).toHaveBeenCalledTimes(5);
+
+    const [persisted] = await env.db
+      .select()
+      .from(projectInvitations)
+      .where(eq(projectInvitations.id, invitationId));
+    expect(persisted.status).toBe('pending');
+    expect(Date.parse(persisted.expires_at)).toBeGreaterThan(Date.parse(shortExpiry));
+  });
+
+  it('applies the daily delivery limit without rolling back a new invitation', async () => {
+    const owner = await createTestUser(env.db, 'owner');
+    const target = await createTestUser(env.db, 'target');
+    await setEmail(target.id, 'target@example.com');
+    const project = await createTestProject(env.db, owner.id, 'daily-delivery-limited');
+    const now = new Date();
+    const day = `${now.getUTCFullYear()}${String(now.getUTCMonth() + 1).padStart(2, '0')}${String(
+      now.getUTCDate(),
+    ).padStart(2, '0')}`;
+    await env.ROUTING.put(`project-invitation-email-rate:${project.id}:${day}`, '50');
+    const send = vi.fn(async () => {});
+
+    const response = await app.fetch(
+      request(`/projects/${project.id}/invitations`, owner.jwt, {
+        method: 'POST',
+        body: { email: 'target@example.com', role: 'reader' },
+      }),
+      {
+        ...env,
+        EMAIL: { send } as unknown as SendEmail,
+        EMAIL_FROM: 'Void Platform <platform@example.com>',
+        AUTH_REDIRECT_URI: 'http://localhost/auth/callback',
+        PLATFORM_INSTALLATION_ID: 'test-installation',
+      },
+    );
+
+    expect(response.status).toBe(201);
+    expect(await response.json()).toMatchObject({
+      invitation: { target: { id: target.id }, role: 'reader', status: 'pending' },
+      delivery: { status: 'rate_limited' },
+    });
+    expect(send).not.toHaveBeenCalled();
+    expect(await env.db.select().from(projectInvitations)).toHaveLength(1);
+  });
+
+  it('lets project admins invite and manage any non-owner member, and lets members leave', async () => {
     const owner = await createTestUser(env.db, 'owner');
     const admin = await createTestUser(env.db, 'admin');
     const collaborator = await createTestUser(env.db, 'collaborator');
     const peerAdmin = await createTestUser(env.db, 'peer-admin');
+    const invitee = await createTestUser(env.db, 'invitee');
+    await setEmail(invitee.id, 'invitee@example.com');
     const project = await createTestProject(env.db, owner.id);
     await env.db.insert(projectMembers).values([
       {
@@ -422,6 +606,14 @@ describe('project team API', () => {
     );
     expect(changed.status).toBe(200);
     expect(await changed.json()).toMatchObject({ member: { role: 'admin' } });
+
+    const adminInvitation = await invite(project.id, admin.jwt, 'invitee@example.com', 'reader');
+    const accepted = await app.fetch(
+      request(`/project-invitations/${adminInvitation.id}/accept`, invitee.jwt, { method: 'POST' }),
+      env,
+    );
+    expect(accepted.status).toBe(200);
+    expect(await accepted.json()).toMatchObject({ member: { role: 'reader' } });
 
     const removedPeerAdmin = await app.fetch(
       request(`/projects/${project.id}/members/${peerAdmin.id}`, admin.jwt, {

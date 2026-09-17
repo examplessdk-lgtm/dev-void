@@ -194,7 +194,7 @@ void platform project owner <project-id> <new-owner-user-id> --plan
 void platform project owner <project-id> <new-owner-user-id> --yes
 ```
 
-The preview shows both owners, their plans and suspension state, active work that blocks the transfer, and the changes to routing and usage counters. Wait for or cancel any active deploy, rollback, build, or Sandbox lifecycle operation before retrying.
+The preview shows both owners, their plans and suspension state, active work that blocks the transfer, and the changes to routing and usage counters. Wait for or cancel any active deploy, rollback, or build before retrying.
 
 After the transfer, the former owner becomes a project administrator. The new owner's plan and limits apply immediately. Usage before the transfer remains charged to the former owner; later usage is charged to the new owner. If an apply reports partial convergence, inspect the project and operator event log before repeating it.
 

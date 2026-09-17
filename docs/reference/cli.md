@@ -251,7 +251,10 @@ Project-scoped commands use `--project`, then `VOID_PROJECT`, then the linked pr
 
 Readers can view the project but cannot deploy. Collaborators can deploy and manage deploy prerequisites. Project administrators can additionally configure the project and manage its team. The owner alone can delete the project. See [Project Collaboration](../guide/project-collaboration.md) for the full role boundaries.
 
-Team commands are not available for projects deployed directly to Cloudflare.
+Project-scoped team management commands are not available for projects deployed
+directly to Cloudflare. The account-scoped `pending`, `accept`, and `decline`
+commands do not depend on the project deploy target and can be run from a direct
+Cloudflare project directory that resolves the connected Void platform account.
 
 ### `void project token <create|list|renew|revoke>`
 

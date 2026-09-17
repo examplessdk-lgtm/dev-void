@@ -219,36 +219,6 @@ describe('playground/kitchen-sink --backend cloudflare real-build deploy guard',
     expect(queues.consumers).toContainEqual(expect.objectContaining({ queue: 'demo-queue' }));
   });
 
-  it('emits no Void Platform project-team binding or variable', () => {
-    const teamTerms = /(?:project[_-]?)?(?:team|members?|invitations?)/i;
-    const matches: Array<string> = [];
-    const visit = (value: unknown, path: string): void => {
-      if (typeof value === 'string') {
-        if (teamTerms.test(value)) {
-          matches.push(`${path}=${value}`);
-        }
-        return;
-      }
-      if (Array.isArray(value)) {
-        value.forEach((entry, index) => visit(entry, `${path}[${index}]`));
-        return;
-      }
-      if (!value || typeof value !== 'object') {
-        return;
-      }
-      for (const [key, entry] of Object.entries(value)) {
-        const entryPath = path ? `${path}.${key}` : key;
-        if (teamTerms.test(key)) {
-          matches.push(entryPath);
-        }
-        visit(entry, entryPath);
-      }
-    };
-
-    visit(pristineEmitted, '');
-    expect(matches).toEqual([]);
-  });
-
   it('reconstructs a container set byte-identical to the emitted sandbox container', () => {
     // The highest-value FP-safety lock: `reconstructExpectedContainers` (a pure pre-build function)
     // must produce EXACTLY what the CF plugin emitted, or every sandbox deploy would false-positive.

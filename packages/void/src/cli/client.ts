@@ -125,23 +125,17 @@ export type ProjectResponse = {
 export type ProjectRole = 'reader' | 'collaborator' | 'admin' | 'owner';
 
 export type ProjectMemberResponse = {
-  user_id?: string;
   role: ProjectRole;
-  login?: string;
-  email?: string;
-  created_at?: string;
-  user?: {
+  created_at: string;
+  user: {
     id: string;
-    login?: string;
-    email?: string;
+    login: string | null;
+    email: string | null;
   };
 };
 
 export type ProjectInvitationResponse = {
   id: string;
-  project_id?: string;
-  target_user_id?: string;
-  target_email_snapshot?: string;
   target_email?: string;
   role: Exclude<ProjectRole, 'owner'>;
   status?: 'pending' | 'accepted' | 'declined' | 'revoked' | 'expired';
@@ -154,24 +148,24 @@ export type ProjectInvitationResponse = {
     slug: string;
     owner?: {
       id: string;
-      login?: string;
-      email?: string;
+      login: string | null;
+      email: string | null;
     };
   };
   target?: {
     id: string;
-    login?: string;
-    email?: string;
+    login: string | null;
+    email: string | null;
   };
   invited_by?: {
     id: string;
-    login?: string;
-    email?: string;
+    login: string | null;
+    email: string | null;
   };
 };
 
 export type ProjectInvitationDelivery = {
-  status: 'sent' | 'not_configured' | 'failed';
+  status: 'sent' | 'not_configured' | 'rate_limited' | 'failed';
 };
 
 export type ProjectDeployCredentialResponse = {
@@ -657,10 +651,8 @@ export class PlatformClient {
     if (!res.ok) {
       await throwPlatformApiError('Failed to list project members', res);
     }
-    const body = (await res.json()) as
-      | Array<ProjectMemberResponse>
-      | { members: Array<ProjectMemberResponse> };
-    return Array.isArray(body) ? body : body.members;
+    const body = (await res.json()) as { members: Array<ProjectMemberResponse> };
+    return body.members;
   }
 
   async listProjectInvitations(projectId: string): Promise<Array<ProjectInvitationResponse>> {
@@ -670,10 +662,8 @@ export class PlatformClient {
     if (!res.ok) {
       await throwPlatformApiError('Failed to list project invitations', res);
     }
-    const body = (await res.json()) as
-      | Array<ProjectInvitationResponse>
-      | { invitations: Array<ProjectInvitationResponse> };
-    return Array.isArray(body) ? body : body.invitations;
+    const body = (await res.json()) as { invitations: Array<ProjectInvitationResponse> };
+    return body.invitations;
   }
 
   async inviteProjectMember(
@@ -785,10 +775,8 @@ export class PlatformClient {
     if (!res.ok) {
       await throwPlatformApiError('Failed to list pending project invitations', res);
     }
-    const body = (await res.json()) as
-      | Array<ProjectInvitationResponse>
-      | { invitations: Array<ProjectInvitationResponse> };
-    return Array.isArray(body) ? body : body.invitations;
+    const body = (await res.json()) as { invitations: Array<ProjectInvitationResponse> };
+    return body.invitations;
   }
 
   async respondToProjectInvitation(

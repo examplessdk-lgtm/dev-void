@@ -1088,11 +1088,12 @@ export const githubConnections = pgTable(
     // name fallback left is for callers with no id at all (malformed/partial
     // webhook). A `repo_full_name` match is used solely in that no-id case.
     repository_id: text('repository_id'),
-    // The project owner whose own GitHub OAuth token proved access to this
-    // organization repository during connect. NULL on legacy rows and personal
-    // installations. Runtime authorization accepts an organization connection
-    // only when this still names the owning Void user; rows created before the
-    // per-repository proof flow therefore fail closed until reconnected.
+    // The project owner or administrator whose own GitHub OAuth token proved
+    // repository access during connect. NULL on legacy rows. Runtime
+    // authorization accepts a current row only while this still names the
+    // owner or a project administrator. Legacy organization rows without
+    // per-repository proof fail closed; legacy personal rows retain their
+    // owner-installation fallback.
     authorized_by_user_id: text('authorized_by_user_id').references(() => users.id, {
       onDelete: 'set null',
     }),
@@ -1102,10 +1103,10 @@ export const githubConnections = pgTable(
       .default('container')
       .$type<'container' | 'github_actions'>(),
     // The `.github/workflows/*.yml` file the GitHub Actions OIDC exchange binds
-    // the deploy token to (see `routes/auth-oidc.ts`). Owner-configurable per
-    // connection; defaults to the file `void init --github` scaffolds. Only the
-    // owner-authenticated connect/update routes write this — never the webhook
-    // or the OIDC path — so it stays a trusted, server-side pin.
+    // the deploy token to (see `routes/auth-oidc.ts`). Configurable by members
+    // with project settings access; defaults to the file `void init --github`
+    // scaffolds. Only the authenticated connect/update routes write this —
+    // never the webhook or the OIDC path — so it stays a trusted server-side pin.
     workflow_path: text('workflow_path').notNull().default('.github/workflows/void-deploy.yml'),
     created_at: timestamp('created_at', { mode: 'string' }).notNull().defaultNow(),
     updated_at: timestamp('updated_at', { mode: 'string' }).notNull().defaultNow(),
@@ -1271,7 +1272,6 @@ export const builds = pgTable(
     user_id: text('user_id')
       .notNull()
       .references(() => users.id),
-    triggered_by_user_id: text('triggered_by_user_id'),
     executor: text('executor')
       .notNull()
       .default('container')

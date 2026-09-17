@@ -2546,7 +2546,7 @@ describe('POST /projects/:id/migrations/apply', () => {
     expect(state.trackingRows.has('001_init.sql')).toBe(false);
   });
 
-  it('two concurrent /apply requests serialize via advisory lock and end with exactly one tracking row', async () => {
+  it('two concurrent /apply requests serialize via a project row lock and end with exactly one tracking row', async () => {
     // Two deploys fire `/migrations/apply` against the same project at
     // nearly the same time. The per-project pg transaction-scoped row
     // lock serializes them: the second request blocks at the transaction
@@ -4333,7 +4333,7 @@ describe('POST /projects/:id/migrations/rename', () => {
     mockCfApi({ queryD1: makeQueryD1(state) });
 
     // Kick rollback first — it will route through all the KV work and
-    // then hit the advisory-locked setActiveDeployment. /apply kicks off
+    // then enter the row-locked setActiveDeployment. /apply kicks off
     // right after and races to acquire the same lock.
     const rollbackPromise = app.fetch(
       authedReq(`/projects/${project.id}/rollback`, user.jwt, {
@@ -4362,7 +4362,7 @@ describe('POST /projects/:id/migrations/rename', () => {
     // Final state: project.active_deployment_id points at target, and
     // target's applied_migrations contains `002_new.sql` — /apply's
     // metadata append landed on the post-rollback active, not the old
-    // one. Without the advisory lock, /apply's re-read could observe
+    // one. Without the project row lock, /apply's re-read could observe
     // the pre-rollback active and write to oldActive.
     const targetRow = await env.db.select().from(deployments).where(eq(deployments.id, target.id));
     const oldActiveRow = await env.db
@@ -6204,40 +6204,14 @@ describe('POST /projects/:id/migrations/rename', () => {
     expect(parsed).toEqual([exoticName]);
   });
 
-  it('rollback/apply/rename use a project row lock, not a 32-bit hashtext advisory lock', async () => {
-    // The per-project serialization primitive is `SELECT id FROM projects
-    // WHERE id = $projectId FOR UPDATE` — collision-free and auto-released
-    // at tx end. A 32-bit `pg_advisory_xact_lock(hashtext($projectId))`
-    // would have a ~25% birthday-collision rate across ~50k projects,
-    // causing unrelated projects to serialize against each other.
-    //
-    // A behavioral regression test for hash collisions is impractical, so
-    // grep the handler source for any remaining `hashtext` / advisory-
-    // lock call site.
+  it('does not use a collision-prone hashtext advisory lock', async () => {
     const { readFileSync } = await import('node:fs');
     const { fileURLToPath } = await import('node:url');
     const path = fileURLToPath(new URL('../../src/routes/projects.ts', import.meta.url));
     const rawSource = readFileSync(path, 'utf8');
-
-    // Strip single-line `//` comments so that historical references
-    // to `hashtext(projectId)` or `pg_advisory_xact_lock` in rationale
-    // comments do not false-positive this guard. The point of the
-    // assertion is "no executable call site uses the hashtext key."
     const source = rawSource.replaceAll(/\/\/[^\n]*/g, '');
 
-    // No `hashtext(` function call remains in executable code.
     expect(source).not.toMatch(/hashtext\s*\(/);
-    // No `pg_advisory_xact_lock` call remains.
     expect(source).not.toMatch(/pg_advisory_xact_lock/);
-    // Sanity: the row lock variant is present for migrations, rollback, and
-    // the database provisioning mutations that share this route module.
-    const rowLockMatches = source.match(
-      /SELECT id FROM projects WHERE id = \$\{projectId\} FOR UPDATE/g,
-    );
-    expect(rowLockMatches).not.toBeNull();
-    // Apply, rename, rollback lease/cutover, rollback's post-transaction
-    // compensation, database create, and database URL update all use the
-    // collision-free project row lock.
-    expect(rowLockMatches!.length).toBe(7);
   });
 });

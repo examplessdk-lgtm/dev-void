@@ -55,6 +55,24 @@ describe('platform onboarding pages', () => {
     expect(html).not.toContain('attacker.example');
   });
 
+  it('turns a project invitation link into CLI acceptance instructions', async () => {
+    const response = await app.fetch(
+      new Request('https://api.example.com/invite?project-invitation=pinv_a1b2c3d4e5f6'),
+      {
+        ...env,
+        AUTH_REDIRECT_URI: 'https://api.example.com/auth/callback',
+        PLATFORM_INSTALLATION_ID: 'example-installation',
+      },
+    );
+
+    expect(response.status).toBe(200);
+    const html = await response.text();
+    expect(html).toContain('<title>Accept Project Invitation - Void Platform</title>');
+    expect(html).toContain('void connect &#39;https://api.example.com&#39;');
+    expect(html).toContain('void project team accept pinv_a1b2c3d4e5f6');
+    expect(html).not.toMatch(/dashboard/i);
+  });
+
   it.each(['/invite', '/signup-restricted'])(
     'uses a generic name for source deployments at %s',
     async (path) => {

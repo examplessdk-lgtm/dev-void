@@ -22,6 +22,7 @@ import {
   type Db,
 } from '../../src/db.ts';
 import app from '../../src/index.ts';
+import * as projectAccess from '../../src/project-access.ts';
 import { validateManifestShape } from '../../src/routes/deploy.ts';
 import {
   builds,
@@ -2979,6 +2980,57 @@ describe('Deploy serialization (concurrent deploy guard)', () => {
       .from(deployments)
       .where(eq(deployments.id, 'dpl_cancel_active'));
     expect(stillCanceling?.status).toBe('canceling');
+  });
+
+  it('rechecks deploy access under the project lock before cancelling', async () => {
+    const owner = await createTestUser(env.db, 'cancel-race-owner');
+    const collaborator = await createTestUser(env.db, 'cancel-race-collaborator');
+    const project = await createTestProject(env.db, owner.id, 'cancel-access-race');
+    await env.db.insert(projectMembers).values({
+      project_id: project.id,
+      user_id: collaborator.id,
+      role: 'collaborator',
+      added_by_user_id: owner.id,
+    });
+    await env.db.insert(deployments).values({
+      id: 'dpl_cancel_access_race',
+      project_id: project.id,
+      status: 'uploading',
+      created_at: sql`now()`,
+    });
+
+    const requireCapability = projectAccess.requireProjectCapability;
+    let downgraded = false;
+    vi.spyOn(projectAccess, 'requireProjectCapability').mockImplementation(async (...args) => {
+      const result = await requireCapability(...args);
+      if (!downgraded && args[3] === 'deploy') {
+        downgraded = true;
+        await env.db
+          .update(projectMembers)
+          .set({ role: 'reader' })
+          .where(eq(projectMembers.user_id, collaborator.id));
+      }
+      return result;
+    });
+
+    const response = await app.fetch(
+      new Request(
+        `http://localhost/projects/${project.id}/deployments/dpl_cancel_access_race/cancel`,
+        {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${collaborator.jwt}` },
+        },
+      ),
+      env,
+    );
+
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({ error: 'forbidden' });
+    expect(downgraded).toBe(true);
+    expect(await getDeployment(env.db, 'dpl_cancel_access_race')).toMatchObject({
+      status: 'uploading',
+      error_message: null,
+    });
   });
 
   it('does not cancel a terminal deployment', async () => {

@@ -353,20 +353,27 @@ async function lockAndMarkDeleting(
   db: Db,
   projectId: string,
   actorUserId?: string,
-): Promise<
-  ReadonlyArray<{
-    id: string;
-    executor: Build['executor'];
-    status: Build['status'];
-    instance_type: string | null;
-  }>
-> {
+  expectedOwnerUserId?: string,
+): Promise<ReadonlyArray<{
+  id: string;
+  executor: Build['executor'];
+  status: Build['status'];
+  instance_type: string | null;
+}> | null> {
   return await db.transaction(async (tx) => {
     await tx.execute(drizzleSql`SELECT id FROM projects WHERE id = ${projectId} FOR UPDATE`);
     const txDb = tx as unknown as Db;
     const lockedProject = await getProject(txDb, projectId);
     if (!lockedProject) {
       throw new Error('project disappeared during deletion');
+    }
+    // Operator user deletion enumerates the user's owned projects before it
+    // starts their slow external teardown. Ownership transfer can complete in
+    // between. Treat that stale snapshot as a skip while holding the same lock
+    // transfer uses; deleting the new owner's project is never a valid cleanup
+    // consequence of deleting the former owner's account.
+    if (expectedOwnerUserId && lockedProject.user_id !== expectedOwnerUserId) {
+      return null;
     }
     // API-initiated teardown starts with an unlocked route check so it can
     // return the established 404/403 response quickly. Ownership can transfer
@@ -496,8 +503,8 @@ export async function teardownProject(
   context: Context<ApiEnv>,
   projectId: string,
   project: Pick<Project, 'slug' | 'status'>,
-  options: Readonly<{ actorUserId?: string }> = {},
-): Promise<{ warnings: ReadonlyArray<string> }> {
+  options: Readonly<{ actorUserId?: string; expectedOwnerUserId?: string }> = {},
+): Promise<{ warnings: ReadonlyArray<string>; ownerChanged?: true }> {
   // Always run lock + mark — idempotent for `status='deleting'` (the helper
   // skips the flip and just (re-)marks any non-terminal deployments + builds).
   // This covers retried teardown after partial failure where the previous
@@ -506,7 +513,11 @@ export async function teardownProject(
     context.get('db'),
     projectId,
     options.actorUserId,
+    options.expectedOwnerUserId,
   );
+  if (cancelledOnLock === null) {
+    return { warnings: [], ownerChanged: true };
+  }
   // Stop the container DOs for the builds revoked above BEFORE any CF cleanup
   // begins (post-commit, never under the row lock — it's a DO round-trip), so
   // their tokens are dead and their containers stopped before we touch CF.

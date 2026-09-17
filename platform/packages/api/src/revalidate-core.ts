@@ -13,7 +13,7 @@ import {
 import { platformProjectHostnames, readPlatformApplication } from '@void/platform';
 import type { Context } from 'hono';
 import { R2_CONCURRENCY, uploadPool } from './concurrency.ts';
-import { getDomainsByProjectId } from './db.ts';
+import { getDomainsByProjectId, type Db } from './db.ts';
 import type { ApiEnv } from './env.ts';
 import { resolveCurrentIsrDeployments, type IsrRoutingTarget } from './isr-cache.ts';
 import { purgeZoneCache } from './provisioning/cloudflare-api.ts';
@@ -71,8 +71,8 @@ export async function runRevalidate(
   projectId: string,
   project: RevalidateProject,
   body: RevalidateRequestBody,
+  db: Db = context.get('db'),
 ): Promise<Response> {
-  const db = context.get('db');
   const application = readPlatformApplication(context.env);
 
   const customDomains = await getDomainsByProjectId(db, projectId);

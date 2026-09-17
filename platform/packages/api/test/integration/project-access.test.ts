@@ -1,26 +1,24 @@
-import { eq } from 'drizzle-orm';
+import { desc, eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vite-plus/test';
 import { hmacSignState } from '../../src/auth/hmac.ts';
 import {
-  createBuild,
   createDeployment,
   createOrRefreshProjectInvitation,
   createProject,
   getAccessibleProjectsByUserId,
-  getProjectAccessEvents,
   getProjectMember,
-  getProjectOwnerAt,
   removeProjectMember,
   respondToProjectInvitation,
   setProjectMemberRole,
 } from '../../src/db.ts';
 import app from '../../src/index.ts';
+import { ProjectAccessDeniedError, requireProjectCapability } from '../../src/project-access.ts';
 import {
-  ProjectAccessDeniedError,
-  getProjectAccess,
-  requireProjectCapability,
-} from '../../src/project-access.ts';
-import { users } from '../../src/schema.ts';
+  projectAccessEvents,
+  projectMembers,
+  projectOwnershipPeriods,
+  users,
+} from '../../src/schema.ts';
 import {
   clearTables,
   createTestProject,
@@ -63,33 +61,24 @@ describe('project access', () => {
   });
 
   it('enforces reader and collaborator capabilities using the owner for billing', async () => {
-    const owner = await userWithEmail('access-owner');
-    const reader = await userWithEmail('access-reader');
-    const collaborator = await userWithEmail('access-collaborator');
+    const owner = await createTestUser(env.db, 'access-owner');
+    const reader = await createTestUser(env.db, 'access-reader');
+    const collaborator = await createTestUser(env.db, 'access-collaborator');
     const project = await createProject(env.db, owner.id, 'shared-access');
-
-    const readerInvite = await createOrRefreshProjectInvitation(env.db, {
-      projectId: project.id,
-      email: reader.email,
-      role: 'reader',
-      actorUserId: owner.id,
-    });
-    await respondToProjectInvitation(env.db, {
-      invitationId: readerInvite.invitation.id,
-      actorUserId: reader.id,
-      response: 'accept',
-    });
-    const collaboratorInvite = await createOrRefreshProjectInvitation(env.db, {
-      projectId: project.id,
-      email: collaborator.email,
-      role: 'collaborator',
-      actorUserId: owner.id,
-    });
-    await respondToProjectInvitation(env.db, {
-      invitationId: collaboratorInvite.invitation.id,
-      actorUserId: collaborator.id,
-      response: 'accept',
-    });
+    await env.db.insert(projectMembers).values([
+      {
+        project_id: project.id,
+        user_id: reader.id,
+        role: 'reader',
+        added_by_user_id: owner.id,
+      },
+      {
+        project_id: project.id,
+        user_id: collaborator.id,
+        role: 'collaborator',
+        added_by_user_id: owner.id,
+      },
+    ]);
 
     expect((await requireProjectCapability(env.db, project.id, reader.id, 'read')).owner.id).toBe(
       owner.id,
@@ -157,32 +146,37 @@ describe('project access', () => {
       actorUserId: target.id,
     });
 
-    expect(await getProjectAccess(env.db, project.id, target.id)).toBeNull();
-    expect((await getProjectAccessEvents(env.db, project.id)).map((event) => event.action)).toEqual(
-      ['left', 'role_changed', 'accepted', 'invited'],
-    );
+    await expect(
+      requireProjectCapability(env.db, project.id, target.id, 'read'),
+    ).rejects.toBeInstanceOf(ProjectAccessDeniedError);
+    const events = await env.db
+      .select()
+      .from(projectAccessEvents)
+      .where(eq(projectAccessEvents.project_id, project.id))
+      .orderBy(desc(projectAccessEvents.created_at));
+    expect(events.map((event) => event.action)).toEqual([
+      'left',
+      'role_changed',
+      'accepted',
+      'invited',
+    ]);
   });
 
-  it('records owner attribution on new projects, deployments, and human builds', async () => {
+  it('records owner attribution on new projects and deployments', async () => {
     const owner = await createTestUser(env.db, 'attribution-owner');
     const actor = await createTestUser(env.db, 'attribution-actor');
     const project = await createProject(env.db, owner.id, 'attribution');
-    const period = await getProjectOwnerAt(env.db, project.id, project.created_at);
-    expect(period).toBe(owner.id);
+    const [period] = await env.db
+      .select()
+      .from(projectOwnershipPeriods)
+      .where(eq(projectOwnershipPeriods.project_id, project.id));
+    expect(period).toMatchObject({ owner_user_id: owner.id, starts_at: project.created_at });
 
     const deployment = await createDeployment(env.db, project.id, '{}', 'manual', null, {
       initiatedByUserId: actor.id,
     });
     expect(deployment.billing_user_id).toBe(owner.id);
     expect(deployment.initiated_by_user_id).toBe(actor.id);
-
-    const build = await createBuild(env.db, {
-      projectId: project.id,
-      userId: owner.id,
-      triggeredByUserId: actor.id,
-    });
-    expect(build.user_id).toBe(owner.id);
-    expect(build.triggered_by_user_id).toBe(actor.id);
   });
 
   it('rejects a team mutation after the actor loses admin access', async () => {
@@ -190,16 +184,11 @@ describe('project access', () => {
     const admin = await userWithEmail('lock-admin');
     const target = await userWithEmail('lock-target');
     const project = await createProject(env.db, owner.id, 'locked-auth');
-    const invite = await createOrRefreshProjectInvitation(env.db, {
-      projectId: project.id,
-      email: admin.email,
+    await env.db.insert(projectMembers).values({
+      project_id: project.id,
+      user_id: admin.id,
       role: 'admin',
-      actorUserId: owner.id,
-    });
-    await respondToProjectInvitation(env.db, {
-      invitationId: invite.invitation.id,
-      actorUserId: admin.id,
-      response: 'accept',
+      added_by_user_id: owner.id,
     });
     await setProjectMemberRole(env.db, {
       projectId: project.id,
@@ -219,26 +208,24 @@ describe('project access', () => {
   });
 
   it('keeps the legacy internal verifier URL but live-checks deploy capability', async () => {
-    const owner = await userWithEmail('verify-owner');
-    const reader = await userWithEmail('verify-reader');
-    const collaborator = await userWithEmail('verify-collaborator');
+    const owner = await createTestUser(env.db, 'verify-owner');
+    const reader = await createTestUser(env.db, 'verify-reader');
+    const collaborator = await createTestUser(env.db, 'verify-collaborator');
     const project = await createProject(env.db, owner.id, 'verify-access');
-    for (const [user, role] of [
-      [reader, 'reader'],
-      [collaborator, 'collaborator'],
-    ] as const) {
-      const invite = await createOrRefreshProjectInvitation(env.db, {
-        projectId: project.id,
-        email: user.email,
-        role,
-        actorUserId: owner.id,
-      });
-      await respondToProjectInvitation(env.db, {
-        invitationId: invite.invitation.id,
-        actorUserId: user.id,
-        response: 'accept',
-      });
-    }
+    await env.db.insert(projectMembers).values([
+      {
+        project_id: project.id,
+        user_id: reader.id,
+        role: 'reader',
+        added_by_user_id: owner.id,
+      },
+      {
+        project_id: project.id,
+        user_id: collaborator.id,
+        role: 'collaborator',
+        added_by_user_id: owner.id,
+      },
+    ]);
     const internalAuth = await hmacSignState(project.id, env.JWT_SECRET);
     const verify = (userId: string) =>
       app.fetch(

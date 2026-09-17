@@ -46,6 +46,9 @@ void project team decline <invitation-id>
 ```
 
 An invitation is bound to the registered account. Forwarding its ID does not let another user accept it.
+These three invitation-response commands are account-scoped and do not depend
+on the current project's deploy target. They can run from a direct Cloudflare
+project directory when it resolves your connected Void platform account.
 
 ## Change or Remove Access
 

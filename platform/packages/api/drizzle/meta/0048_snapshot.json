@@ -75,12 +75,6 @@
           "primaryKey": false,
           "notNull": true
         },
-        "triggered_by_user_id": {
-          "name": "triggered_by_user_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
         "executor": {
           "name": "executor",
           "type": "text",
