@@ -345,17 +345,22 @@ failed_steps }`. The owner retries once the CF-side problem is fixed,
   `revokeOauthGrant` POSTs RFC 7009 form to
   `dash.cloudflare.com/oauth2/revoke` (wrangler's public client id,
   `token_type_hint=refresh_token`, no secret — exactly wrangler's
-  `logout`; it never throws and never logs the token). Remove revokes
+  `logout`; it throws on a network failure or non-2xx — CF answers 200
+  even for a bogus token, so a failure leaves the grant's state genuinely
+  unknown and callers record `revoke_grant` in failed_steps — and never
+  logs the token). Remove revokes
   LAST, with the rotated chain head (a transient refresh failure revokes
   the original stored token instead; `invalid_grant` skips — CF already
   killed it). Replace revokes the old grant after the credential commit
   (a re-pasted identical grant is skipped — revoking it would brick the
-  just-stored credential). Teardown revokes. Conflict compensation
+  just-stored credential; a revoke failure is logged, never fatal).
+  Teardown revokes. Conflict compensation
   deliberately does NOT — the loser's credential may survive. The
   operator escape hatch is `POST
-/admin/email/:projectId/domains/:domain/revoke-grant` (revoke + flip
-  to `token_revoked`; the proxy mirror keeps the old status until the
-  next repair — accepted for an operator tool). Revocation's cascade
+/admin/email/:projectId/domains/:domain/revoke-grant` (mirror flipped
+  to `token_revoked` FIRST so inbound stops at the proxy, then revoke,
+  then the row flip; a failed revoke leaves the row active and the next
+  status GET repairs the mirror). Revocation's cascade
   scope (access tokens minted from the grant) is undocumented and
   unprobed — accepted.
 - **Live write probes settled the API-level questions** (voidcloud.dev,
@@ -387,6 +392,46 @@ recipients, mime_message}` (a raw `message/rfc822` body earns
   show the manual token-creation steps rather than a guessed pre-fill
   link; `send_raw` accepts user and account tokens (account-owned
   recommended).
+
+### Fix round — review follow-ups: leak closure and revoke propagation _(added 2026-09-17)_
+
+Post-review fixes, all in the custom-domain lifecycle:
+
+- **The relay name is recorded before the fallible writes.** Setup step 6
+  chooses (or reuses) the relay name and lands it in progress BEFORE the
+  script upload and secret PUT, so a failed PUT still records the name on
+  the row: a retry redeploys in place instead of leaking the uploaded
+  worker and walking to `-2`, and a remove can find it. Name exhaustion
+  still fails with no name recorded (nothing was uploaded). This replaced
+  the review suggestion of a blind compensating delete, which would race
+  a concurrent deploy's upsert of the same name.
+- **Any checkpoint failure compensates from the captured payload.** A
+  non-unique checkpoint error (or the row cascade-deleted by teardown
+  mid-setup) previously rethrew with the relay deployed but unrecorded;
+  the route now runs `removeEmailDomain` from the in-memory checkpoint
+  before propagating (the catch-all was never written, so the
+  conditional reset is a no-op; a gone row switches the refresh to the
+  engine default, which acts on the held credential directly).
+- **`revokeOauthGrant` throws on failure.** It previously logged and
+  returned on network/non-2xx, making the engine's `revoke_grant`
+  failed_step unreachable — owner/project removal reported success while
+  the grant stayed live. CF answers 200 even for a bogus token, so a
+  non-2xx is a genuine failure; the DELETE now surfaces
+  `{ok, removed: true, failed_steps: ['revoke_grant']}` (non-destructive,
+  removal still proceeds), and the replace path's post-commit revoke
+  logs and continues.
+- **The operator revoke-grant route flips the mirror first.** It marked
+  only the Postgres row, so `/email/relay` kept authenticating the
+  already-deployed relay until a status probe happened to repair the
+  mirror. The route now writes the mirror as `token_revoked` (the
+  proxy's relay auth checks `active`), then revokes, then flips the row;
+  a failed revoke returns 502 with the row active, and the next status
+  GET repairs the mirror.
+- **The admin full-removal route revokes the grant.** It called
+  `removeEmailDomain` without the `revokeGrant` dep, orphaning the
+  rotated grant as the row — the only place the token existed — was
+  deleted. It now passes the same serialized-refresh + revoke deps as
+  the owner DELETE.
 
 ## Deferred decisions
 

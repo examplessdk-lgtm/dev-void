@@ -493,31 +493,32 @@ export async function setupEmailDomain(
     }
   }
 
-  // Step 6: deploy the relay and its secret. A re-run with a recorded
-  // relay name redeploys IN PLACE — the name-walk would take a fresh
-  // '-2' and orphan the first relay (renaming detaches routing rules).
+  // Step 6: pick a free relay name — or reuse the recorded one, since a
+  // re-run redeploys IN PLACE (the name-walk would take a fresh '-2' and
+  // orphan the first relay; renaming detaches routing rules). The name
+  // lands in progress the moment it is chosen, BEFORE the fallible writes:
+  // a failed upload or secret PUT then still records it on the row, so a
+  // retry redeploys in place and a remove can find the worker — an
+  // unrecorded upload would leak it and walk the next retry to '-2'.
   let relayWorkerName: string;
   try {
-    if (input.row.relay_worker_name) {
-      relayWorkerName = input.row.relay_worker_name;
-      await client.putRelayScript(zone.account.id, relayWorkerName, {
-        source: RELAY_SOURCE,
-        compatibilityDate: RELAY_COMPATIBILITY_DATE,
-        proxyOrigin: input.proxyOrigin,
-        emailDomain: input.row.domain,
-      });
-      await client.putRelaySecret(zone.account.id, relayWorkerName, input.relaySecret);
-    } else {
-      relayWorkerName = await deployRelay(client, zone.account.id, {
-        proxyOrigin: input.proxyOrigin,
-        emailDomain: input.row.domain,
-        relaySecret: input.relaySecret,
-      });
-    }
+    relayWorkerName =
+      input.row.relay_worker_name ?? (await chooseFreeRelayName(client, zone.account.id));
   } catch (err) {
     return fail('deploy_relay', err);
   }
   progress.relay_worker_name = relayWorkerName;
+  try {
+    await client.putRelayScript(zone.account.id, relayWorkerName, {
+      source: RELAY_SOURCE,
+      compatibilityDate: RELAY_COMPATIBILITY_DATE,
+      proxyOrigin: input.proxyOrigin,
+      emailDomain: input.row.domain,
+    });
+    await client.putRelaySecret(zone.account.id, relayWorkerName, input.relaySecret);
+  } catch (err) {
+    return fail('deploy_relay', err);
+  }
 
   // Checkpoint: let the caller persist the mid-setup progress BEFORE the
   // catch-all write, so a failed row persist aborts setup here rather
@@ -575,38 +576,22 @@ export async function setupEmailDomain(
 }
 
 /**
- * Setup step 6: pick a free relay name — the base name, then '-2', '-3'…
- * on collision within the account (a second registered domain of the same
- * customer) — upload the source, then set the secret. The name is stable
- * once chosen: renaming a worker detaches every routing rule pointing at
- * it, so sync redeploys in place and never re-walks.
+ * Setup step 6's name-walk: the base name, then '-2', '-3'… on collision
+ * within the account (a second registered domain of the same customer).
+ * The caller records the chosen name before any fallible write; the name
+ * is stable once chosen — renaming a worker detaches every routing rule
+ * pointing at it, so sync redeploys in place and never re-walks.
  */
-async function deployRelay(
-  client: CfCustomerClient,
-  accountId: string,
-  input: Readonly<{ proxyOrigin: string; emailDomain: string; relaySecret: string }>,
-): Promise<string> {
-  let relayWorkerName: string | null = null;
+async function chooseFreeRelayName(client: CfCustomerClient, accountId: string): Promise<string> {
   for (let suffix = 1; suffix <= MAX_RELAY_NAME_SUFFIX; suffix++) {
     const candidate = suffix === 1 ? RELAY_WORKER_BASE_NAME : `${RELAY_WORKER_BASE_NAME}-${suffix}`;
     if (!(await client.relayScriptExists(accountId, candidate))) {
-      relayWorkerName = candidate;
-      break;
+      return candidate;
     }
   }
-  if (!relayWorkerName) {
-    throw new Error(
-      `no free relay worker name in this account (${RELAY_WORKER_BASE_NAME}-1..${MAX_RELAY_NAME_SUFFIX} all taken)`,
-    );
-  }
-  await client.putRelayScript(accountId, relayWorkerName, {
-    source: RELAY_SOURCE,
-    compatibilityDate: RELAY_COMPATIBILITY_DATE,
-    proxyOrigin: input.proxyOrigin,
-    emailDomain: input.emailDomain,
-  });
-  await client.putRelaySecret(accountId, relayWorkerName, input.relaySecret);
-  return relayWorkerName;
+  throw new Error(
+    `no free relay worker name in this account (${RELAY_WORKER_BASE_NAME}-1..${MAX_RELAY_NAME_SUFFIX} all taken)`,
+  );
 }
 
 /**

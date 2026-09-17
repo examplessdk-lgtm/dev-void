@@ -608,9 +608,14 @@ function recordCustomerCfCalls(): Array<{
   method: string;
   url: string;
   body?: unknown;
-  tag?: 'oauthRevoke';
+  tag?: 'oauthRevoke' | 'oauthToken';
 }> {
-  const calls: Array<{ method: string; url: string; body?: unknown; tag?: 'oauthRevoke' }> = [];
+  const calls: Array<{
+    method: string;
+    url: string;
+    body?: unknown;
+    tag?: 'oauthRevoke' | 'oauthToken';
+  }> = [];
   vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
     const url = typeof input === 'string' ? input : (input as Request).url;
     let body: unknown;
@@ -622,14 +627,25 @@ function recordCustomerCfCalls(): Array<{
       }
     }
     const method = init?.method ?? 'GET';
+    const isTokenEndpoint = url.startsWith('https://dash.cloudflare.com/oauth2/token');
     calls.push({
       method,
       url,
       body,
+      ...(isTokenEndpoint ? { tag: 'oauthToken' as const } : {}),
       ...(url.startsWith('https://dash.cloudflare.com/oauth2/revoke')
         ? { tag: 'oauthRevoke' as const }
         : {}),
     });
+    if (isTokenEndpoint) {
+      // Grant refresh tokens rotate on every use; the caller persists this
+      // replacement and revokes the chain HEAD, not the presented token.
+      return Response.json({
+        access_token: 'cf-access-dummy-1',
+        refresh_token: 'cf-rotated-refresh-dummy-1',
+        expires_in: 3600,
+      });
+    }
     if (method === 'GET' && url.includes('/email/routing/rules/catch_all')) {
       return Response.json({
         success: true,
@@ -742,6 +758,38 @@ describe('POST /admin/email/:projectId/domains/:domain/revoke', () => {
     });
     expect(await env.ROUTING.get('email-domain:acme-revoke.com')).toBeNull();
     expect(await domainRow(projectId, 'acme-revoke.com')).toBeUndefined();
+  });
+
+  test('revokes the OAuth grant during a full domain revoke for an oauth_grant row', async () => {
+    const { adminJwt, projectId, slug } = await seedAdminAndProject();
+    await seedEmailDomain(projectId, 'acme-revoke-oauth.com', { credentialKind: 'oauth_grant' });
+    const cfCalls = recordCustomerCfCalls();
+
+    const res = await post(
+      `/admin/email/${projectId}/domains/acme-revoke-oauth.com/revoke`,
+      adminJwt,
+      { confirm: slug },
+    );
+
+    expect(res.status).toBe(302);
+    // Same remove contract as the owner DELETE: the serialized grant
+    // refresh FIRST (its rotation persists through the row while it
+    // lives), the customer-side cleanup, then the grant revoke LAST —
+    // against the ROTATED chain head. Without the revokeGrant dep the
+    // row's deletion would orphan the live grant with no platform handle.
+    expect(cfCalls.map((call) => `${call.method} ${call.url}`)).toEqual([
+      'POST https://dash.cloudflare.com/oauth2/token',
+      'GET https://api.cloudflare.com/client/v4/zones/zone_customer_1/email/routing/rules/catch_all',
+      'PUT https://api.cloudflare.com/client/v4/zones/zone_customer_1/email/routing/rules/catch_all',
+      'DELETE https://api.cloudflare.com/client/v4/accounts/acct_customer_1/workers/scripts/void-email-relay',
+      'POST https://dash.cloudflare.com/oauth2/revoke',
+    ]);
+    const revokeBody = cfCalls.find((call) => call.tag === 'oauthRevoke')!.body;
+    const form = new URLSearchParams(String(revokeBody));
+    expect(form.get('token_type_hint')).toBe('refresh_token');
+    expect(form.get('token')).toBe('cf-rotated-refresh-dummy-1');
+    expect(await domainRow(projectId, 'acme-revoke-oauth.com')).toBeUndefined();
+    expect(await env.ROUTING.get('email-domain:acme-revoke-oauth.com')).toBeNull();
   });
 
   test('refuses without the typed slug and leaves everything intact', async () => {
@@ -894,7 +942,72 @@ describe('POST /admin/email/:projectId/domains/:domain/revoke-grant', () => {
     expect(cfCalls).toHaveLength(1);
     const row = await domainRow(projectId, 'acme-grant.com');
     expect(row?.status).toBe('token_revoked');
-    expect(await env.ROUTING.get('email-domain:acme-grant.com')).not.toBeNull();
+    // The mirror flipped FIRST (same inversion as the removal route): the
+    // proxy's relay auth checks its `active` status, so inbound stops here
+    // rather than whenever the next status GET happens to repair drift.
+    const mirror = JSON.parse((await env.ROUTING.get('email-domain:acme-grant.com'))!) as {
+      status: string;
+      relayWorkerName: string | null;
+    };
+    expect(mirror.status).toBe('token_revoked');
+    expect(mirror.relayWorkerName).toBe('void-email-relay');
+  });
+
+  test('keeps the row active when the grant revoke fails — the mirror already flipped', async () => {
+    const { adminJwt, projectId } = await seedAdminAndProject();
+    await seedEmailDomain(projectId, 'acme-revokefail.com', { credentialKind: 'oauth_grant' });
+    // The revoke request fails (the helper throws on a non-2xx); nothing
+    // else is called on this route.
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+      return Response.json({ error: 'boom' }, { status: 500 });
+    });
+
+    const res = await post(
+      `/admin/email/${projectId}/domains/acme-revokefail.com/revoke-grant`,
+      adminJwt,
+    );
+
+    // The grant's state is unknown, so the row keeps its status and the
+    // operator retries; the mirror already flipped (mirror-first), and the
+    // next status GET repairs it while the row stays active.
+    expect(res.status).toBe(502);
+    expect((await domainRow(projectId, 'acme-revokefail.com'))?.status).toBe('active');
+    const mirror = JSON.parse((await env.ROUTING.get('email-domain:acme-revokefail.com'))!) as {
+      status: string;
+    };
+    expect(mirror.status).toBe('token_revoked');
+  });
+
+  test('fails the grant revoke without touching CF when the mirror write fails', async () => {
+    const { adminJwt, projectId } = await seedAdminAndProject();
+    await seedEmailDomain(projectId, 'acme-mirrorfail.com', { credentialKind: 'oauth_grant' });
+    const originalPut = env.ROUTING.put.bind(env.ROUTING);
+    vi.spyOn(env.ROUTING, 'put').mockImplementation((async (
+      key: string,
+      value: string,
+      options?: unknown,
+    ) => {
+      if (key === 'email-domain:acme-mirrorfail.com') {
+        throw new Error('forced mirror KV failure for test');
+      }
+      return originalPut(key, value, options as never);
+    }) as typeof env.ROUTING.put);
+    const cfCalls = recordCustomerCfCalls();
+
+    const res = await post(
+      `/admin/email/${projectId}/domains/acme-mirrorfail.com/revoke-grant`,
+      adminJwt,
+    );
+
+    // Mirror-first: nothing else ran — the grant is still live, the row is
+    // still active, and the operator can just click again.
+    expect(res.status).toBe(503);
+    expect(cfCalls).toEqual([]);
+    expect((await domainRow(projectId, 'acme-mirrorfail.com'))?.status).toBe('active');
+    const mirror = JSON.parse((await env.ROUTING.get('email-domain:acme-mirrorfail.com'))!) as {
+      status: string;
+    };
+    expect(mirror.status).toBe('active');
   });
 
   test('refuses for an api_token row — the customer revokes those themselves', async () => {

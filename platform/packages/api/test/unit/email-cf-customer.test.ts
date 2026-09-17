@@ -541,11 +541,11 @@ describe('revokeOauthGrant', () => {
     expect(errorSpy).not.toHaveBeenCalled();
   });
 
-  it('resolves without throwing on a non-2xx, logging an error that never carries the token', async () => {
+  it('throws on a non-2xx, logging an error that never carries the token', async () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     for (const status of [400, 500]) {
       fetchMock.mockResolvedValueOnce(new Response('boom', { status }));
-      await expect(revokeOauthGrant('cf-refresh-dummy')).resolves.toBeUndefined();
+      await expect(revokeOauthGrant('cf-refresh-dummy')).rejects.toThrow(`HTTP ${status}`);
     }
 
     expect(errorSpy).toHaveBeenCalledTimes(2);
@@ -555,11 +555,11 @@ describe('revokeOauthGrant', () => {
     expect(logged).not.toContain('cf-refresh-dummy');
   });
 
-  it('resolves without throwing on a network rejection, logging an error that never carries the token', async () => {
+  it('rethrows a network rejection, logging an error that never carries the token', async () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     fetchMock.mockRejectedValueOnce(new TypeError('fetch failed'));
 
-    await expect(revokeOauthGrant('cf-refresh-dummy')).resolves.toBeUndefined();
+    await expect(revokeOauthGrant('cf-refresh-dummy')).rejects.toThrow('fetch failed');
 
     expect(errorSpy).toHaveBeenCalledTimes(1);
     expect(loggedText(errorSpy)).not.toContain('cf-refresh-dummy');

@@ -7,7 +7,14 @@ import {
   getProject,
 } from '../../db.ts';
 import { revokeOauthGrant } from '../../email/cf-customer.ts';
-import { clearEmailDomainMirror, decryptEmailDomainToken } from '../../email/domains.ts';
+import { refreshOauthGrantSerialized } from '../../email/credential-lease.ts';
+import {
+  clearEmailDomainMirror,
+  decryptEmailDomainRelaySecret,
+  decryptEmailDomainToken,
+  hashEmailRelaySecret,
+  writeEmailDomainMirror,
+} from '../../email/domains.ts';
 import { removeEmailDomain } from '../../email/relay-engine.ts';
 import type { ApiEnv } from '../../env.ts';
 import {
@@ -508,15 +515,26 @@ app.post('/:projectId/domains/:domain/revoke', async (context) => {
   // deleteDestination failure above.
   try {
     const credential = await decryptEmailDomainToken(context.env, projectId, row.domain, row);
-    const { failed_steps } = await removeEmailDomain({
-      row: {
-        credential_kind: row.credential_kind,
-        account_id: row.account_id,
-        relay_worker_name: row.relay_worker_name,
-        zone_id: row.zone_id,
+    const { failed_steps } = await removeEmailDomain(
+      {
+        row: {
+          credential_kind: row.credential_kind,
+          account_id: row.account_id,
+          relay_worker_name: row.relay_worker_name,
+          zone_id: row.zone_id,
+        },
+        credential,
       },
-      credential,
-    });
+      {
+        // Same doctrine as the owner DELETE: rotations persist through the
+        // row's serialized chain while it lives, and the grant is revoked
+        // (last, with the rotated head) — the row being deleted is the only
+        // place the rotated token exists, so omitting revokeGrant here
+        // would orphan a live grant with no platform handle.
+        refreshGrant: () => refreshOauthGrantSerialized(context.get('db'), context.env, row.id),
+        ...(row.credential_kind === 'oauth_grant' ? { revokeGrant: revokeOauthGrant } : {}),
+      },
+    );
     if (failed_steps.length > 0) {
       console.error('[admin-email] email-domain CF cleanup incomplete', {
         projectId,
@@ -538,10 +556,11 @@ app.post('/:projectId/domains/:domain/revoke', async (context) => {
 
 // POST /email/:projectId/domains/:domain/revoke-grant — operator revocation
 // of one domain's OAuth grant: the support escape hatch when a customer asks
-// us to kill their grant without tearing the domain down. RFC 7009 against
-// dash.cloudflare.com, then the row flips to 'token_revoked'. The proxy's
-// `email-domain:` mirror keeps the old status until the next status-GET
-// repair or sync — accepted for an operator tool.
+// us to kill their grant without tearing the domain down. Order is
+// mirror-first (the proxy's relay auth checks the mirror's `active` status,
+// so inbound stops here), then RFC 7009 against dash.cloudflare.com, then
+// the row flip — a failed revoke leaves the row active, and the next status
+// GET repairs the mirror back (self-healing, same as any drift).
 app.post('/:projectId/domains/:domain/revoke-grant', async (context) => {
   const projectId = context.req.param('projectId');
   const project = await getProject(context.get('db'), projectId);
@@ -565,10 +584,14 @@ app.post('/:projectId/domains/:domain/revoke-grant', async (context) => {
     );
   }
   let refreshToken: string;
+  let relaySecretSha256: string;
   try {
     refreshToken = await decryptEmailDomainToken(context.env, projectId, row.domain, row);
+    relaySecretSha256 = await hashEmailRelaySecret(
+      await decryptEmailDomainRelaySecret(context.env, projectId, row.domain, row),
+    );
   } catch (error) {
-    // No status change: without the credential there is nothing to revoke.
+    // No status change: without the credentials there is nothing to revoke.
     console.error('[admin-email] grant revoke failed to decrypt the stored credential', {
       projectId,
       domain: row.domain,
@@ -579,9 +602,35 @@ app.post('/:projectId/domains/:domain/revoke-grant', async (context) => {
       500,
     );
   }
-  // Never throws; RFC 7009 answers 200 whether the token was live or already
-  // dead, so the status flip is safe either way.
-  await revokeOauthGrant(refreshToken);
+  // Mirror BEFORE the revoke — the same inversion as the removal route. A
+  // failed write leaves the row, the grant, and the old mirror untouched.
+  try {
+    await writeEmailDomainMirror(
+      context.env.ROUTING,
+      { ...row, status: 'token_revoked' },
+      relaySecretSha256,
+    );
+  } catch (error) {
+    console.error('[admin-email] grant revoke failed to tighten the mirror', {
+      projectId,
+      domain: row.domain,
+      error,
+    });
+    return context.html('<h1>Failed to tighten the domain mirror. Try again.</h1>', 503);
+  }
+  try {
+    await revokeOauthGrant(refreshToken);
+  } catch (error) {
+    // Network/non-2xx — the grant's state is unknown, so the row keeps its
+    // status and the operator retries. The mirror already flipped; the next
+    // status GET repairs it while the row stays active.
+    console.error('[admin-email] grant revoke request failed', {
+      projectId,
+      domain: row.domain,
+      error,
+    });
+    return context.html('<h1>Failed to revoke the grant at Cloudflare. Try again.</h1>', 502);
+  }
   await context
     .get('db')
     .update(emailDomains)

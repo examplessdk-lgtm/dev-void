@@ -305,7 +305,7 @@ describe('setupEmailDomain', () => {
     });
   });
 
-  it('fails at deploy_relay when the secret PUT fails, after the script upload succeeded', async () => {
+  it('fails at deploy_relay when the secret PUT fails, after the script upload succeeded — and records the relay name', async () => {
     const { client } = makeFakeClient({
       zones: { 'acme.com': ZONE },
       failOn: { putRelaySecret: new CloudflareApiError('Cloudflare API error: quota', 400) },
@@ -315,6 +315,26 @@ describe('setupEmailDomain', () => {
 
     expect(result.status).toBe('failed');
     expect(result.setup_state).toEqual({ failed_step: 'deploy_relay' });
+    // The upload already happened, so the chosen name is recorded even on
+    // the failure: a retry redeploys in place instead of leaking this
+    // worker and walking to '-2', and a remove can find it.
+    expect(result.relay_worker_name).toBe(RELAY_WORKER_BASE_NAME);
+    expect(result.relay_version).toBeNull();
+  });
+
+  it('fails at deploy_relay with no relay name when every name is taken', async () => {
+    const { client } = makeFakeClient({
+      zones: { 'acme.com': ZONE },
+      scriptNamesTaken: Array.from({ length: 50 }, (_, i) =>
+        i === 0 ? RELAY_WORKER_BASE_NAME : `${RELAY_WORKER_BASE_NAME}-${i + 1}`,
+      ),
+    });
+
+    const result = await setupEmailDomain(setupInput(), depsFor(client));
+
+    expect(result.status).toBe('failed');
+    expect(result.setup_state).toEqual({ failed_step: 'deploy_relay' });
+    // Nothing was uploaded, so there is no name to record.
     expect(result.relay_worker_name).toBeNull();
     expect(result.relay_version).toBeNull();
   });

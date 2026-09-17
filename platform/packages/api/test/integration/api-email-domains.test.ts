@@ -596,6 +596,36 @@ async function dropApplySentinelTrigger(): Promise<void> {
   await env.db.execute(sql.raw('DROP FUNCTION IF EXISTS email_apply_sentinel_raise()'));
 }
 
+// Same mechanism as the apply sentinel, but firing on the deploy
+// CHECKPOINT write instead: relay_worker_name null→non-null happens only
+// there (the final apply writes it already-set), so a NON-unique error
+// here fails exactly the checkpoint.
+async function installCheckpointSentinelTrigger(): Promise<void> {
+  await env.db.execute(
+    sql.raw(
+      `CREATE OR REPLACE FUNCTION email_checkpoint_sentinel_raise() RETURNS trigger
+       LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'email checkpoint sentinel'; END; $$`,
+    ),
+  );
+  await env.db.execute(
+    sql.raw(`DROP TRIGGER IF EXISTS email_checkpoint_sentinel ON email_domains`),
+  );
+  await env.db.execute(
+    sql.raw(
+      `CREATE TRIGGER email_checkpoint_sentinel AFTER UPDATE ON email_domains
+       FOR EACH ROW WHEN (OLD.relay_worker_name IS NULL AND NEW.relay_worker_name IS NOT NULL)
+       EXECUTE FUNCTION email_checkpoint_sentinel_raise()`,
+    ),
+  );
+}
+
+async function dropCheckpointSentinelTrigger(): Promise<void> {
+  await env.db.execute(
+    sql.raw('DROP TRIGGER IF EXISTS email_checkpoint_sentinel ON email_domains'),
+  );
+  await env.db.execute(sql.raw('DROP FUNCTION IF EXISTS email_checkpoint_sentinel_raise()'));
+}
+
 // ---------------------------------------------------------------------------
 // Owner guard
 // ---------------------------------------------------------------------------
@@ -815,6 +845,44 @@ describe('POST /projects/:id/email/domains', () => {
     expect((await mirrorFor('acme.com'))!.status).toBe('failed');
   });
 
+  it('records the relay name when the secret PUT fails — a re-add redeploys in place', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    stubCustomerCf({
+      zones: { 'acme.com': ZONE },
+      failOn: { secretPut: { message: 'quota', status: 400 } },
+    });
+
+    const res = await addDomain(project.id, user.jwt, { domain: 'acme.com', apiToken: API_TOKEN });
+    expect(res.status).toBe(201);
+    const json = (await res.json()) as Record<string, unknown>;
+    expect(json.status).toBe('failed');
+    expect(json.setup_state).toEqual({ failed_step: 'deploy_relay' });
+
+    // The script upload succeeded before the secret PUT failed, so the row
+    // records the chosen name — a blind delete would race a concurrent
+    // deploy's upsert, and an unrecorded upload would leak the worker and
+    // walk the retry to '-2'.
+    const failedRow = (await rowFor(project.id, 'acme.com'))!;
+    expect(failedRow.relay_worker_name).toBe(RELAY_WORKER_BASE_NAME);
+    expect(failedRow.relay_version).toBeNull();
+
+    // The customer fixes the quota and re-adds: the recorded name is
+    // redeployed IN PLACE — no name-walk (no scriptGet), no '-2'.
+    const stub = stubCustomerCf({ zones: { 'acme.com': ZONE } });
+    const retry = await addDomain(project.id, user.jwt, {
+      domain: 'acme.com',
+      apiToken: API_TOKEN,
+    });
+    expect(retry.status).toBe(200);
+    expect(((await retry.json()) as Record<string, unknown>).status).toBe('active');
+    expect(callsByTag(stub.calls, 'scriptGet')).toEqual([]);
+    expect(callsByTag(stub.calls, 'scriptPut').map((call) => call.url)).toEqual([
+      `https://api.cloudflare.com/client/v4/accounts/${ZONE.accountId}/workers/scripts/${RELAY_WORKER_BASE_NAME}`,
+    ]);
+    expect((await rowFor(project.id, 'acme.com'))!.relay_worker_name).toBe(RELAY_WORKER_BASE_NAME);
+  });
+
   it('maps a non-active api token to token_revoked at verify_credential', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id);
@@ -1021,9 +1089,47 @@ describe('POST /projects/:id/email/domains', () => {
     const res = await addDomain(project.id, user.jwt, { domain: 'acme.com', apiToken: API_TOKEN });
     expect(res.status).toBe(409);
     expect(((await res.json()) as { error: string }).error).toBe('project is being deleted');
-    // The abort precedes the catch-all step; no row and no mirror survive.
-    expect(callsByTag(stub.calls, 'catchAllGet')).toEqual([]);
+    // The abort precedes the catch-all step, and the row is gone — but the
+    // relay WAS deployed, so the route compensates from the captured
+    // checkpoint (teardown's per-row cleanup can't see it): ONE ownership
+    // read (the untouched disabled-drop default names no relay, so no
+    // reset) and the relay DELETE.
+    expect(callsByTag(stub.calls, 'catchAllGet')).toHaveLength(1);
+    expect(callsByTag(stub.calls, 'catchAll')).toEqual([]);
+    expect(callsByTag(stub.calls, 'scriptDelete').map((call) => call.url)).toEqual([
+      `https://api.cloudflare.com/client/v4/accounts/${ZONE.accountId}/workers/scripts/${RELAY_WORKER_BASE_NAME}`,
+    ]);
     expect(await rowFor(project.id, 'acme.com')).toBeUndefined();
+    expect(await mirrorFor('acme.com')).toBeNull();
+  });
+
+  it('500s when the checkpoint write fails for a non-race reason — and compensates the deployed relay', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    const stub = stubCustomerCf({ zones: { 'acme.com': ZONE } });
+    await installCheckpointSentinelTrigger();
+    let res;
+    try {
+      res = await addDomain(project.id, user.jwt, { domain: 'acme.com', apiToken: API_TOKEN });
+    } finally {
+      await dropCheckpointSentinelTrigger();
+    }
+
+    // A non-unique checkpoint failure is NOT a race: it propagates.
+    expect(res.status).toBe(500);
+    // …but only after compensating the relay the rolled-back UPDATE never
+    // recorded: ONE ownership read (no reset — the zone's default names no
+    // relay) and the relay DELETE.
+    expect(callsByTag(stub.calls, 'catchAllGet')).toHaveLength(1);
+    expect(callsByTag(stub.calls, 'catchAll')).toEqual([]);
+    expect(callsByTag(stub.calls, 'scriptDelete').map((call) => call.url)).toEqual([
+      `https://api.cloudflare.com/client/v4/accounts/${ZONE.accountId}/workers/scripts/${RELAY_WORKER_BASE_NAME}`,
+    ]);
+    // The row carries no reference to the deleted relay.
+    expect((await rowFor(project.id, 'acme.com'))!).toMatchObject({
+      status: 'pending',
+      relay_worker_name: null,
+    });
     expect(await mirrorFor('acme.com')).toBeNull();
   });
 
@@ -1996,9 +2102,10 @@ describe('DELETE /projects/:id/email/domains/:domain', () => {
     });
     const res = await removeDomain(project.id, 'acme.com', user.jwt);
     expect(res.status).toBe(200);
-    // A stranded grant breaks no mail: revokeOauthGrant never throws, so a
-    // failed revocation surfaces no failed_steps and never blocks removal.
-    expect(await res.json()).toEqual({ ok: true, removed: true });
+    // A stranded grant breaks no mail, but it is no longer SILENT:
+    // revokeOauthGrant throws on the 500, the engine records revoke_grant,
+    // and the route surfaces it — non-destructive, so removal proceeds.
+    expect(await res.json()).toEqual({ ok: true, removed: true, failed_steps: ['revoke_grant'] });
     expect(callsByTag(stub.calls, 'oauthRevoke')).toHaveLength(1);
     expect(await rowFor(project.id, 'acme.com')).toBeUndefined();
     expect(await mirrorFor('acme.com')).toBeNull();

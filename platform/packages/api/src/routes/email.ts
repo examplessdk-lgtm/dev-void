@@ -832,9 +832,6 @@ const app = new Hono<ApiEnv>()
         },
       );
     } catch (err) {
-      if (err instanceof EmailDomainRowGoneError) {
-        return context.json({ error: 'project is being deleted' }, 409);
-      }
       if (isUniqueViolation(err) && checkpoint !== null) {
         const conflict = await compensateEmailDomainRace(
           context,
@@ -844,6 +841,18 @@ const app = new Hono<ApiEnv>()
           err,
         );
         return context.json({ error: conflict }, 409);
+      }
+      // Any other checkpoint failure leaves the deployed relay
+      // unreferenced (the UPDATE rolled back — or the row is gone
+      // entirely, so teardown's per-row cleanup can't see it either):
+      // compensate from the captured checkpoint before propagating.
+      if (checkpoint !== null) {
+        await compensateCheckpointDeploy(context, id, { credentialKind, credential }, checkpoint, {
+          rowGone: err instanceof EmailDomainRowGoneError,
+        });
+      }
+      if (err instanceof EmailDomainRowGoneError) {
+        return context.json({ error: 'project is being deleted' }, 409);
       }
       throw err;
     }
@@ -1564,6 +1573,46 @@ async function applyEmailDomainSetupResultOrConflict(
 }
 
 /**
+ * Best-effort compensation for a checkpoint write that failed for any
+ * non-race reason (a DB error, or the row cascade-deleted by teardown
+ * mid-setup): the relay and its secret are deployed but the row carries
+ * no reference to them, so remove them from the captured checkpoint
+ * payload before the error propagates. The catch-all was never written
+ * (the checkpoint precedes it), so the conditional reset is a no-op.
+ * `rowGone` switches the refresh to the engine default, which acts on the
+ * held credential directly — the serialized chain needs the row.
+ */
+async function compensateCheckpointDeploy(
+  context: Context<ApiEnv>,
+  rowId: string,
+  race: { credentialKind: EmailDomain['credential_kind']; credential: string },
+  checkpoint: { zone_id: string | null; account_id: string | null; relay_worker_name: string },
+  opts: { rowGone: boolean },
+): Promise<void> {
+  try {
+    await removeEmailDomain(
+      {
+        row: {
+          credential_kind: race.credentialKind,
+          account_id: checkpoint.account_id,
+          relay_worker_name: checkpoint.relay_worker_name,
+          zone_id: checkpoint.zone_id,
+        },
+        credential: race.credential,
+      },
+      opts.rowGone
+        ? {}
+        : {
+            // Same single-use refresh doctrine as the race compensation.
+            refreshGrant: () => refreshOauthGrantSerialized(context.get('db'), context.env, rowId),
+          },
+    );
+  } catch (compErr) {
+    console.error('[email] checkpoint-failure compensation failed:', compErr);
+  }
+}
+
+/**
  * POST /domains on an existing row — "add again replaces the token, rules
  * stay" (design doc, branch table). The new credential is stored first
  * because the oauth_grant engine path refreshes THROUGH the row. Healthy
@@ -1617,9 +1666,15 @@ async function replaceEmailDomainCredential(
 
   // Revoke AFTER the commit so a failed replace never strands the old
   // grant; a re-pasted identical grant is skipped — revoking it would
-  // brick the just-stored credential.
+  // brick the just-stored credential. A revoke failure (network/non-2xx —
+  // the helper throws on both) is logged, never fatal: the new credential
+  // is already committed.
   if (oldGrantRefreshToken !== null && oldGrantRefreshToken !== credential) {
-    await revokeOauthGrant(oldGrantRefreshToken);
+    try {
+      await revokeOauthGrant(oldGrantRefreshToken);
+    } catch (err) {
+      console.error('[email] old grant revoke failed after credential replace:', err);
+    }
   }
 
   // Sync keeps a healthy row healthy; anything that never finished setup
@@ -1761,9 +1816,6 @@ async function replaceEmailDomainCredential(
       },
     );
   } catch (err) {
-    if (err instanceof EmailDomainRowGoneError) {
-      return context.json({ error: 'project is being deleted' }, 409);
-    }
     if (isUniqueViolation(err) && checkpoint !== null) {
       const conflict = await compensateEmailDomainRace(
         context,
@@ -1773,6 +1825,22 @@ async function replaceEmailDomainCredential(
         err,
       );
       return context.json({ error: conflict }, 409);
+    }
+    // Any other checkpoint failure leaves the deployed relay unreferenced
+    // (the UPDATE rolled back — or the row is gone entirely, so teardown's
+    // per-row cleanup can't see it either): compensate from the captured
+    // checkpoint before propagating.
+    if (checkpoint !== null) {
+      await compensateCheckpointDeploy(
+        context,
+        existing.id,
+        { credentialKind, credential },
+        checkpoint,
+        { rowGone: err instanceof EmailDomainRowGoneError },
+      );
+    }
+    if (err instanceof EmailDomainRowGoneError) {
+      return context.json({ error: 'project is being deleted' }, 409);
     }
     throw err;
   }

@@ -22,6 +22,10 @@
 - `vp run <script> -- <args>` forwards the literal `--`. For Wrangler that
   hides `--env`: use `vp run --filter <pkg> deploy --env production|staging`.
   Production deploys must select `--env production` explicitly.
+- There is no separate `void-platform` repo: the platform was merged into
+  the unified `voidzero-dev/void` repo. Framework code is `packages/`,
+  platform code is `platform/packages/`, platform meta is `platform/meta/`.
+  Do not reason about submodule pointers or a sibling platform checkout.
 
 ## Stale branches and reviews
 

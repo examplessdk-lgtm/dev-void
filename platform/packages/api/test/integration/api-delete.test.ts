@@ -1150,6 +1150,58 @@ describe('DELETE /projects/:id — customer-side email domain cleanup', () => {
     expect(await env.ROUTING.get('email-domain:acme-relay-oauth.example')).toBeNull();
   });
 
+  it('still deletes the project when the grant revoke fails — revoke_grant lands in failed_steps', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'mail-relay-revoke-down');
+    mockCfApi();
+    const customerCalls = captureCustomerEmailCleanup({
+      catchAllRule: { enabled: true, workerName: RELAY_WORKER_BASE_NAME },
+      failOn: { oauthRevoke: { message: 'boom', status: 500 } },
+    });
+    await seedCustomerEmailDomain(project.id, 'acme-relay-revoke-down.example', {
+      credentialKind: 'oauth_grant',
+    });
+    // revokeOauthGrant THROWS on the 500 (a silent return would make the
+    // engine's revoke_grant failed_step unreachable); the warn spy catches
+    // the residue report, the error spy silences the helper's own log.
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const res = await app.fetch(
+      new Request(`http://localhost/projects/${project.id}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${user.jwt}` },
+      }),
+      env,
+    );
+    // Best-effort: the customer-side cleanup all ran; only the terminal
+    // revoke failed, and teardown proceeds regardless.
+    expect(res.status).toBe(200);
+    expect(customerCalls.map((call) => call.tag)).toEqual([
+      'oauthToken',
+      'catchAllGet',
+      'catchAll',
+      'scriptDelete',
+      'oauthRevoke',
+    ]);
+    // The revoke targeted the ROTATED chain head, as on the happy path.
+    expect(customerCalls[4]!.form).toMatchObject({
+      token_type_hint: 'refresh_token',
+      token: 'cf-rotated-refresh-dummy-1',
+    });
+    expect(
+      warnSpy.mock.calls.some(
+        (call) =>
+          String(call[0]).includes('teardown left CF-side residue') &&
+          JSON.stringify(call[1]).includes('revoke_grant'),
+      ),
+    ).toBe(true);
+
+    const [dbProject] = await env.db.select().from(projects).where(eq(projects.id, project.id));
+    expect(dbProject).toBeUndefined();
+    expect(await env.ROUTING.get('email-domain:acme-relay-revoke-down.example')).toBeNull();
+  });
+
   it('still deletes the project when the grant refresh fails transiently — and revokes the stored token', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id, 'mail-relay-oauth-down');

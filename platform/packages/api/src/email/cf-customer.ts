@@ -418,12 +418,12 @@ export async function refreshOauthGrant(refreshToken: string): Promise<OauthGran
  * client_id + token_type_hint + token, and NO Authorization header (a
  * public client authenticates with the token itself).
  *
- * NEVER throws, and the response body is ignored: RFC 7009 answers 200
- * whether the token was revoked or already invalid. A non-2xx status or
- * network failure is console.error'd and swallowed — the caller (the
- * remove path) is tearing down regardless, and a failed revoke must not
- * strand the row removal. The token is never logged or interpolated into
- * anything.
+ * THROWS on a network failure or a non-2xx status: CF answers 200 whether
+ * the token was live or already dead (probed 2026-09-17), so a failure
+ * leaves the grant's state genuinely unknown — and `removeEmailDomain`
+ * records `revoke_grant` in failed_steps only when its dep throws. The
+ * response body is ignored. The token is never logged or interpolated
+ * into anything.
  */
 export async function revokeOauthGrant(refreshToken: string): Promise<void> {
   let response: Response;
@@ -441,9 +441,10 @@ export async function revokeOauthGrant(refreshToken: string): Promise<void> {
     // Network-level failure. A fetch TypeError carries no request body, so
     // the token cannot leak through it.
     console.error('Cloudflare OAuth grant revocation request failed', err);
-    return;
+    throw err;
   }
   if (!response.ok) {
     console.error(`Cloudflare OAuth grant revocation failed with HTTP ${response.status}`);
+    throw new Error(`Cloudflare OAuth grant revocation failed with HTTP ${response.status}`);
   }
 }
