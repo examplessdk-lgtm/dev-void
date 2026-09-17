@@ -1098,31 +1098,28 @@ describe('POST /admin/email/:projectId/domains/:domain/revoke-grant', () => {
       credentialKind: 'oauth_grant',
     });
     const cfCalls = recordCustomerCfCalls();
-    // A lease rotation landing after the mirror flip, before the revoke:
+    // A lease rotation landing before the revoke's serialized section:
     // the originally stored token is consumed by it, so a revoke captured
     // beforehand would submit a dead token — CF answers 200 either way,
-    // and the rotated head would live on with no handle.
-    const originalPut = env.ROUTING.put.bind(env.ROUTING);
-    let rotated = false;
-    vi.spyOn(env.ROUTING, 'put').mockImplementation((async (
-      key: string,
-      value: string,
-      options?: unknown,
-    ) => {
-      const result = await originalPut(key, value, options as never);
-      if (key === 'email-domain:acme-grant-race.com' && !rotated) {
-        rotated = true;
-        await refreshOauthGrantSerialized(env.db, env, row.id);
-      }
-      return result;
-    }) as typeof env.ROUTING.put);
+    // and the rotated head would live on with no handle. The seam pauses
+    // the route's transaction BEFORE it opens (no locks held), so the
+    // rotation's own lock cannot deadlock the single-connection database.
+    const gate = pauseFirstTransaction(env.db);
+    setTestDb(gate.wrappedDb);
+    try {
+      const resPromise = post(
+        `/admin/email/${projectId}/domains/acme-grant-race.com/revoke-grant`,
+        adminJwt,
+      );
+      await gate.reached;
+      await refreshOauthGrantSerialized(env.db, env, row.id);
+      gate.release();
+      const res = await resPromise;
+      expect(res.status).toBe(302);
+    } finally {
+      setTestDb(env.db);
+    }
 
-    const res = await post(
-      `/admin/email/${projectId}/domains/acme-grant-race.com/revoke-grant`,
-      adminJwt,
-    );
-
-    expect(res.status).toBe(302);
     const revocations = cfCalls.filter((call) => call.tag === 'oauthRevoke');
     expect(revocations).toHaveLength(1);
     // The revoke went through the row lock, so it submitted the ROTATED
@@ -1130,6 +1127,69 @@ describe('POST /admin/email/:projectId/domains/:domain/revoke-grant', () => {
     expect(String(revocations[0]!.body)).toContain('cf-rotated-refresh-dummy-1');
     expect(String(revocations[0]!.body)).not.toContain(GRANT_REFRESH_TOKEN);
     expect((await domainRow(projectId, 'acme-grant-race.com'))?.status).toBe('token_revoked');
+  });
+
+  test('a credential replace committed mid-revoke is revoked and marked — mirror and row stay paired', async () => {
+    const { adminJwt, projectId } = await seedAdminAndProject();
+    const row = await seedEmailDomain(projectId, 'acme-grant-swap.com', {
+      credentialKind: 'oauth_grant',
+    });
+    const cfCalls = recordCustomerCfCalls();
+    // Land a committed credential replace + an `active` mirror republish
+    // while the revoke's serialized section is paused BEFORE it opens.
+    // Everything the route does must follow the LOCKED row: revoke the
+    // replacement grant and flip it, leaving mirror and row both
+    // token_revoked — never an `active` mirror over a revoked row, and
+    // never a revoked row over a live grant.
+    const gate = pauseFirstTransaction(env.db);
+    setTestDb(gate.wrappedDb);
+    try {
+      const resPromise = post(
+        `/admin/email/${projectId}/domains/acme-grant-swap.com/revoke-grant`,
+        adminJwt,
+      );
+      await gate.reached;
+      const swapped = await encryptEmailDomainToken(
+        env,
+        projectId,
+        'acme-grant-swap.com',
+        'cf-grant-refresh-dummy-2',
+      );
+      await env.db
+        .update(emailDomains)
+        .set({
+          token_ciphertext: swapped.ciphertext,
+          token_iv: swapped.iv,
+          token_key_version: swapped.keyVersion,
+        })
+        .where(eq(emailDomains.id, row.id));
+      await writeEmailDomainMirror(
+        env.ROUTING,
+        (await domainRow(projectId, 'acme-grant-swap.com'))!,
+        await hashEmailRelaySecret(RELAY_SECRET),
+      );
+      gate.release();
+      const res = await resPromise;
+      expect(res.status).toBe(302);
+    } finally {
+      setTestDb(env.db);
+    }
+
+    // The revoke submitted the REPLACEMENT grant (the row's live head at
+    // lock time) — not the stale snapshot's original…
+    const revocations = cfCalls.filter((call) => call.tag === 'oauthRevoke');
+    expect(revocations).toHaveLength(1);
+    // Compare the parsed form field exactly — the replacement value carries
+    // the original as a prefix, so substring checks cannot tell them apart.
+    const revokedToken = new URLSearchParams(String(revocations[0]!.body)).get('token');
+    expect(revokedToken).toBe('cf-grant-refresh-dummy-2');
+    expect(revokedToken).not.toBe(GRANT_REFRESH_TOKEN);
+    // …and mirror and row agree.
+    expect((await domainRow(projectId, 'acme-grant-swap.com'))?.status).toBe('token_revoked');
+    const mirror = JSON.parse((await env.ROUTING.get('email-domain:acme-grant-swap.com'))!) as {
+      status: string;
+    };
+    expect(mirror.status).toBe('token_revoked');
   });
 
   test('fails the grant revoke without touching CF when the mirror write fails', async () => {

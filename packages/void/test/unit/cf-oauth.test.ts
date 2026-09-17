@@ -6,6 +6,7 @@ import {
   CF_OAUTH_CALLBACK_PORT,
   CF_OAUTH_CLIENT_ID,
   CF_OAUTH_REDIRECT_URI,
+  CF_OAUTH_REVOKE_URL,
   CF_OAUTH_SCOPE,
   CF_OAUTH_TOKEN_URL,
   runCfOauthGrant,
@@ -26,7 +27,7 @@ const AUTH_CODE = 'cf-auth-code-placeholder';
 const REFRESH_SENTINEL = 'cf-refresh-token-placeholder';
 
 let tokenExchangeBodies: Array<URLSearchParams>;
-let tokenEndpointResponse: () => Response;
+let tokenEndpointResponse: () => Response | Promise<Response>;
 
 function codeChallengeFor(verifier: string): string {
   return createHash('sha256')
@@ -240,6 +241,75 @@ describe('runCfOauthGrant', () => {
     callback.searchParams.set('code', AUTH_CODE);
     expect((await fetch(callback)).status).toBe(200);
     await expect(secondGrant).resolves.toEqual({ refreshToken: REFRESH_SENTINEL });
+  });
+
+  it('revokes the minted grant when the exchange resolves after the flow settled', async () => {
+    const controller = new AbortController();
+    const revokeBodies: Array<URLSearchParams> = [];
+    let resolveExchange!: (response: Response) => void;
+    tokenEndpointResponse = () =>
+      new Promise<Response>((resolve) => {
+        resolveExchange = resolve;
+      });
+    // The default stub throws on the revoke endpoint — re-stub with a branch
+    // that captures it.
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        input instanceof Request ? input.url : input instanceof URL ? input.href : input.toString();
+      if (url.startsWith('http://localhost:') || url.startsWith('http://127.0.0.1:')) {
+        return originalFetch(input, init);
+      }
+      if (url === CF_OAUTH_TOKEN_URL) {
+        tokenExchangeBodies.push(new URLSearchParams(init?.body?.toString() ?? ''));
+        return tokenEndpointResponse();
+      }
+      if (url === CF_OAUTH_REVOKE_URL) {
+        revokeBodies.push(new URLSearchParams(init?.body?.toString() ?? ''));
+        return new Response(null, { status: 200 });
+      }
+      throw new Error(`unexpected network call in test: ${url}`);
+    });
+
+    let ready!: (url: URL) => void;
+    const urlPromise = new Promise<URL>((resolve) => {
+      ready = resolve;
+    });
+    const grant = runCfOauthGrant({
+      timeoutMs: 5000,
+      signal: controller.signal,
+      onUrl: (url) => ready(new URL(url)),
+    });
+    const url = await urlPromise;
+    const rejection = expect(grant).rejects.toThrow(/cancelled/);
+
+    // Fire the valid callback; the exchange hangs inside the handler.
+    const callback = callbackUrl();
+    callback.searchParams.set('state', url.searchParams.get('state')!);
+    callback.searchParams.set('code', AUTH_CODE);
+    const pagePromise = fetch(callback);
+    await vi.waitFor(() => expect(tokenExchangeBodies).toHaveLength(1));
+
+    // Enter switching to the token path settles the flow mid-exchange.
+    controller.abort();
+    await rejection;
+
+    // The exchange then completes: Cloudflare minted the grant and the CLI is
+    // the only actor holding it — it must be revoked, not stranded.
+    resolveExchange(
+      Response.json({
+        access_token: 'cf-access-token-placeholder',
+        refresh_token: REFRESH_SENTINEL,
+        expires_in: 3600,
+      }),
+    );
+    const pageResponse = await pagePromise;
+    expect(pageResponse.status).toBe(200);
+    expect(await pageResponse.text()).toContain('cancelled');
+
+    await vi.waitFor(() => expect(revokeBodies).toHaveLength(1));
+    expect(revokeBodies[0]!.get('token')).toBe(REFRESH_SENTINEL);
+    expect(revokeBodies[0]!.get('token_type_hint')).toBe('refresh_token');
+    expect(revokeBodies[0]!.get('client_id')).toBe(CF_OAUTH_CLIENT_ID);
   });
 
   it(`listens on the pinned ${CF_OAUTH_CALLBACK_PORT}${CF_OAUTH_CALLBACK_PATH} and 404s everything else`, async () => {

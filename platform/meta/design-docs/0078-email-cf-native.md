@@ -543,11 +543,15 @@ false, failed_steps }`. The owner retries once the CF-side problem is
   grant deps below), then deletes the row; a mirror-clear failure keeps the
   row and runs nothing destructive. The operator escape hatch `POST
 /admin/email/:projectId/domains/:domain/revoke-grant` kills one domain's
-  grant without tearing the domain down: it writes the mirror as
-  `token_revoked` FIRST (the proxy's relay auth checks `active`, so inbound
-  stops here), then revokes, then flips the row. A failed revoke answers 502
-  with the row still active, and the next status GET repairs the mirror —
-  the same self-heal as any drift.
+  grant without tearing the domain down: the whole operation runs as one
+  serialized section under the same row lock with the row — credential
+  included — re-read inside it, so the grant it revokes is the row's live
+  head at lock time (a credential replace committed before the lock is
+  revoked as the NEW grant, never stranded live under a `token_revoked`
+  row). It writes the mirror as `token_revoked` FIRST (the proxy's relay
+  auth checks `active`, so inbound stops here), then revokes, then flips
+  the row. A failed revoke answers 502 with the row still active, and the
+  next status GET repairs the mirror — the same self-heal as any drift.
 
 ### Data and the credential
 
@@ -645,9 +649,18 @@ attempt revokes too: the CLI mints a fresh grant per attempt and drops its
 only copy on an error response, so every validation 400, cross-project
 conflict 409, and teardown 409 revokes the posted grant first — with one
 guard: a re-pasted grant equal to the conflicting row's stored credential is
-kept (revoking it would brick the live row). The revocation's
-cascade scope (access tokens minted from the grant) is undocumented and
-unprobed — accepted.
+kept (revoking it would brick the live row). A LOST answer is not a
+rejection: when the add POST never gets its response the CLI re-reads the
+domain's status — a row means the add committed (printed, done); a 404
+means nothing persisted, so the CLI revokes the grant it still holds via
+its own best-effort copy of the same RFC 7009 POST; anything else is
+reported as unknown — a blind revoke could brick a row that did commit.
+The consent flow's own straggler dies the same way: an exchange that
+completes after the flow settled (Enter, an abort, the timeout) minted a
+grant only the CLI holds, so it is revoked fire-and-forget and the browser
+tab gets a cancelled page rather than hanging on the closed server. The
+revocation's cascade scope (access tokens minted from the grant) is
+undocumented and unprobed — accepted.
 
 And the path that does **not** work, so nobody designs it again: minting a
 long-lived scoped API token from the session (`POST /user/tokens` with the

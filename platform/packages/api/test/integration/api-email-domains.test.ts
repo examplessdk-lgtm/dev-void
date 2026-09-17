@@ -1233,6 +1233,25 @@ describe('POST /projects/:id/email/domains', () => {
     }
   });
 
+  it('409s and revokes the posted grant when the project is already being deleted on arrival', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    await env.db.update(projects).set({ status: 'deleting' }).where(eq(projects.id, project.id));
+    const stub = stubCustomerCf({});
+
+    // The ENTRY guard rejects — the body is parsed before it precisely so
+    // this 409 can revoke the grant the CLI drops on the error response.
+    const res = await addDomain(project.id, user.jwt, {
+      domain: 'acme.com',
+      refreshToken: REFRESH_TOKEN,
+    });
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: string }).error).toBe('Project is being deleted');
+    expect(tags(stub.calls)).toEqual(['oauthRevoke']);
+    expect(stub.calls[0]!.form!.token).toBe(REFRESH_TOKEN);
+    expect(await rowFor(project.id, 'acme.com')).toBeUndefined();
+  });
+
   it('500s when the checkpoint write fails for a non-race reason — and compensates the deployed relay', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id);

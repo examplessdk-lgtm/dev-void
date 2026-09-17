@@ -707,11 +707,6 @@ const app = new Hono<ApiEnv>()
     if (project.user_id !== context.get('user').id) {
       return context.json({ error: 'forbidden' }, 403);
     }
-    // Same teardown guard the destinations POST uses.
-    if (project.status === 'deleting') {
-      return context.json({ error: 'Project is being deleted' }, 409);
-    }
-
     let body: {
       domain?: unknown;
       mode?: unknown;
@@ -726,11 +721,19 @@ const app = new Hono<ApiEnv>()
     // Parsed up-front so EVERY rejection below can revoke a posted grant:
     // the CLI mints a fresh user-wide OAuth grant per attempt and drops its
     // only copy on an error response, so any reject without a revoke strands
-    // a live broad grant in the customer's account per retry.
+    // a live broad grant in the customer's account per retry. (The 404/403
+    // guards above stay pre-parse: a non-owner's grant is not ours to read
+    // or revoke.)
     const postedRefreshToken =
       typeof body.refreshToken === 'string' && body.refreshToken.length > 0
         ? body.refreshToken
         : undefined;
+    // Same teardown guard the destinations POST uses — but after the parse,
+    // so it too can revoke the stranded grant.
+    if (project.status === 'deleting') {
+      await revokeRejectedGrant(context, postedRefreshToken);
+      return context.json({ error: 'Project is being deleted' }, 409);
+    }
     // Length is checked on the RAW string before any normalization — same
     // reason as MAX_ADDRESS_LENGTH above: the 400 costs nothing, the
     // normalization and regex never run on attacker-sized input.

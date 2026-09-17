@@ -25,6 +25,7 @@ import { createCodeChallenge, createCodeVerifier, openBrowser } from './auth.ts'
 export const CF_OAUTH_CLIENT_ID = '54d11594-84e4-41aa-b438-e81b8fa78ee7';
 export const CF_OAUTH_AUTHORIZE_URL = 'https://dash.cloudflare.com/oauth2/auth';
 export const CF_OAUTH_TOKEN_URL = 'https://dash.cloudflare.com/oauth2/token';
+export const CF_OAUTH_REVOKE_URL = 'https://dash.cloudflare.com/oauth2/revoke';
 /**
  * The redirect registered on wrangler's client. Fixed port and path: the
  * consent flow redirects here and only here, so the loopback server binds
@@ -42,6 +43,30 @@ export type CfOauthGrant = Readonly<{
   /** The grant's refresh token. Never logged, never persisted locally. */
   refreshToken: string;
 }>;
+
+/**
+ * Revoke a grant at Cloudflare — RFC 7009 on wrangler's public client, the
+ * same form wrangler's `logout` posts (a public client authenticates with
+ * the token itself; no Authorization header). Best-effort: never throws,
+ * never logs the token. For when the CLI holds a grant it will not hand to
+ * the platform: a consent exchange that completed after the flow settled,
+ * or an add request that provably never persisted one.
+ */
+export async function revokeCfOauthGrant(refreshToken: string): Promise<void> {
+  try {
+    await fetch(CF_OAUTH_REVOKE_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        token: refreshToken,
+        token_type_hint: 'refresh_token',
+        client_id: CF_OAUTH_CLIENT_ID,
+      }).toString(),
+    });
+  } catch {
+    // Best effort — the grant's state at Cloudflare is unknown either way.
+  }
+}
 
 /** The consent URL the browser opens — PKCE S256, state-bound to the loopback server. */
 export function buildCfOauthAuthorizeUrl(params: { state: string; codeChallenge: string }): string {
@@ -161,6 +186,18 @@ export async function runCfOauthGrant(options: {
       resolve(grant);
     };
 
+    // server.close() stops new connections but leaves the in-flight callback
+    // socket open — both settled branches below still answer the tab.
+    const cancelled = (res: import('node:http').ServerResponse): void => {
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.end(
+        page(
+          'Authorization cancelled',
+          'This sign-in was cancelled in the terminal. You can close this tab.',
+        ),
+      );
+    };
+
     const server = http.createServer(async (req, res) => {
       const url = new URL(req.url!, 'http://localhost');
       if (url.pathname !== CF_OAUTH_CALLBACK_PATH) {
@@ -206,6 +243,7 @@ export async function runCfOauthGrant(options: {
         grant = await exchangeCfOauthCode(code, codeVerifier);
       } catch (err) {
         if (settled) {
+          cancelled(res);
           return;
         }
         res.writeHead(400, { 'Content-Type': 'text/html' });
@@ -222,6 +260,13 @@ export async function runCfOauthGrant(options: {
       }
 
       if (settled) {
+        // The flow settled (Enter, abort, or the timeout) while the
+        // exchange was in flight — but Cloudflare still minted the grant,
+        // and the CLI is the only actor holding it. Revoke rather than
+        // strand a live user-wide grant with no handle. Fire-and-forget:
+        // the flow is settled, so this must never throw or stall anything.
+        void revokeCfOauthGrant(grant.refreshToken);
+        cancelled(res);
         return;
       }
       res.writeHead(200, { 'Content-Type': 'text/html' });

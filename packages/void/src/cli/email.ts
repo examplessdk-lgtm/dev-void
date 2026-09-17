@@ -5,8 +5,9 @@ import { readConfig } from '../config.ts';
 import { readProjectPaths } from '../project-paths.ts';
 import { scanEmailHandlersSync } from '../router/email.ts';
 import { getToken, openBrowser } from './auth.ts';
-import { runCfOauthGrant, type CfOauthGrant } from './cf-oauth.ts';
+import { revokeCfOauthGrant, runCfOauthGrant, type CfOauthGrant } from './cf-oauth.ts';
 import {
+  PlatformApiError,
   PlatformClient,
   type EmailDomainResponse,
   type EmailDomainStatusResponse,
@@ -524,7 +525,7 @@ type EmailDomainCredential =
  * the credential — the api's replace path, not anything here.
  */
 export async function emailDomainAdd(
-  client: Pick<PlatformClient, 'addEmailDomain'>,
+  client: Pick<PlatformClient, 'addEmailDomain' | 'getEmailDomain'>,
   projectId: string,
   rawDomain: string,
   subdomain: string | undefined,
@@ -757,12 +758,61 @@ export async function emailDomainAdd(
 
   // 3. The one call that carries the credential. Everything after it
   //    (status, sync, remove) addresses the row by domain.
-  const row = await client.addEmailDomain(projectId, {
-    domain: target.emailDomain,
-    ...(credential.kind === 'oauth_grant'
-      ? { refreshToken: credential.refreshToken }
-      : { apiToken: credential.apiToken }),
-  });
+  let row: EmailDomainResponse;
+  try {
+    row = await client.addEmailDomain(projectId, {
+      domain: target.emailDomain,
+      ...(credential.kind === 'oauth_grant'
+        ? { refreshToken: credential.refreshToken }
+        : { apiToken: credential.apiToken }),
+    });
+  } catch (err) {
+    if (err instanceof PlatformApiError) {
+      // The API answered: every rejection there revokes a posted grant
+      // server-side, and the error names the reason.
+      throw err;
+    }
+    // A transport failure (DNS, a connection reset, a lost answer) leaves
+    // the add's outcome unknown: the request may never have reached the
+    // API, or it COMMITTED and only the answer was lost. The CLI holds the
+    // only copy of a freshly minted grant, so reconcile before anything
+    // irreversible — a committed row is the grant's revocation handle, and
+    // only a definitive "no row" makes a CLI-side revoke safe (revoking a
+    // stored-and-unrotated grant would brick the row it belongs to).
+    let existing: EmailDomainStatusResponse | undefined;
+    let unknown = false;
+    try {
+      existing = await client.getEmailDomain(projectId, target.emailDomain);
+    } catch (statusErr) {
+      if (statusErr instanceof PlatformApiError && statusErr.status === 404) {
+        existing = undefined;
+      } else {
+        unknown = true;
+      }
+    }
+    if (existing !== undefined) {
+      log.warn("The add's answer was lost on the network, but the platform has the row.");
+      printEmailDomainOutcome(existing);
+      return;
+    }
+    if (unknown) {
+      return fail(
+        `email: network failure adding ${target.emailDomain}, and the follow-up check failed too — the add's state is unknown, so nothing was revoked. A grant minted for this attempt may still be live: once connectivity is back, run \`void email domain status ${target.emailDomain}\`; if it shows no row, revoke the grant in the Cloudflare dashboard before retrying.`,
+      );
+    }
+    // 404 — provably nothing persisted. The minted grant's only copy is in
+    // this process: revoke it rather than strand it live (an api_token has
+    // no revoke primitive — the customer deletes it themselves).
+    if (credential.kind === 'oauth_grant') {
+      await revokeCfOauthGrant(credential.refreshToken);
+      return fail(
+        `email: could not reach the platform — ${target.emailDomain} was not registered, and the OAuth grant minted for this attempt was revoked.`,
+      );
+    }
+    return fail(
+      `email: could not reach the platform — ${target.emailDomain} was not registered. The token was not stored anywhere; delete it in the Cloudflare dashboard if you are not retrying.`,
+    );
+  }
   log.success(
     credential.kind === 'oauth_grant'
       ? 'Grant stored on the platform, encrypted for this project — nothing is kept on this machine.'
