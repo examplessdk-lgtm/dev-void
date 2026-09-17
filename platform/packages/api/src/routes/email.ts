@@ -1018,9 +1018,18 @@ const app = new Hono<ApiEnv>()
     // No evidence — the probe failed or the step is genuinely undone —
     // leaves the row for the next poll. The row flips pending → active
     // only once no INBOUND-BLOCKING step (routing_subdomain) remains; a
-    // sending_onboarding step rides along on an active row.
-    const pendingSteps = fresh.setup_state?.remaining_steps;
-    if (pendingSteps && pendingSteps.length > 0) {
+    // sending_onboarding step rides along on an active row. Suppressed
+    // while a removal failure is pending — the same doctrine as the
+    // mirror repair below: the row is mid-removal, and neither its
+    // status nor its setup state is this route's to rewrite.
+    const probedSetupState = fresh.setup_state;
+    const pendingSteps = probedSetupState?.remaining_steps;
+    if (
+      probedSetupState &&
+      probedSetupState.failed_step !== 'remove' &&
+      pendingSteps &&
+      pendingSteps.length > 0
+    ) {
       const cleared: Array<string> = [];
       if (
         pendingSteps.includes(ROUTING_SUBDOMAIN_STEP) &&
@@ -1038,6 +1047,12 @@ const app = new Hono<ApiEnv>()
       }
       if (cleared.length > 0) {
         const keptSteps = pendingSteps.filter((step) => !cleared.includes(step));
+        // Fenced on the probed state: a revocation (or a removal-failure
+        // marker) landing while the evidence checks were in flight must
+        // not be overwritten back to a live state — the subsequent
+        // mirror repair would reauthorize inbound against it. A
+        // fenced-out update voids the self-clear: the re-read answers
+        // this poll, and the next poll re-proves the evidence.
         await db
           .update(emailDomains)
           .set({
@@ -1047,7 +1062,13 @@ const app = new Hono<ApiEnv>()
             setup_state: keptSteps.length > 0 ? { remaining_steps: keptSteps } : null,
             updated_at: sql`now()`,
           })
-          .where(eq(emailDomains.id, fresh.id));
+          .where(
+            and(
+              eq(emailDomains.id, fresh.id),
+              eq(emailDomains.status, fresh.status),
+              sql`${emailDomains.setup_state} IS NOT DISTINCT FROM ${JSON.stringify(probedSetupState)}::jsonb`,
+            ),
+          );
         fresh = await getEmailDomainRowById(db, row.id);
         if (!fresh) {
           return context.json({ error: 'email domain not found' }, 404);
@@ -1138,11 +1159,12 @@ const app = new Hono<ApiEnv>()
       return context.json({ error: 'email domain not found' }, 404);
     }
 
-    const credential = await decryptEmailDomainToken(context.env, projectId, row.domain, row);
     // Sync redeploys the relay in place at RELAY_VERSION and rotates its
     // secret (overwrite, never read-compare — worker secrets are
-    // write-only).
-    return syncEmailDomainAndApply(context, row, credential, proxyOriginForEmail(context.env));
+    // write-only). The row and credential are re-read inside the row
+    // lock, so a replace that lands while this request waits is synced
+    // as the NEW credential, never verified as the superseded one.
+    return syncEmailDomainAndApply(context, row.id, proxyOriginForEmail(context.env));
   })
 
   .delete('/:id/email/domains/:domain', async (context) => {
@@ -1589,49 +1611,70 @@ async function compensateCheckpointDeploy(
 }
 
 /**
- * The sync sequence — relay redeploy, secret rotation, row apply — under
- * the credential chain's row lock, shared by the sync route and the
- * replace path's healthy-row branch. The lock must span the worker secret
- * PUT and the row persist: two overlapping syncs would otherwise
- * interleave them (A-put, B-put, B-apply, A-apply) and leave the worker
- * holding a secret the row and mirror no longer name — inbound
- * authentication fails until the next sync. The lock is the lease chain's
- * own (`withEmailDomainRowLock`), held across the CF calls exactly like
- * the refresh holds it across the token round-trip; concurrent sends on
- * an oauth_grant domain wait out the sync, which is rare and manual. The
- * mirror write stays AFTER the commit — KV is not transactional.
+ * The sync sequence — relay redeploy, secret rotation, row apply, mirror
+ * publication — under the credential chain's row lock, shared by the sync
+ * route and the replace path's healthy-row branch. The lock must span the
+ * worker secret PUT, the row persist, and the mirror PUT: two overlapping
+ * syncs would otherwise interleave them (A-put, B-put, B-apply, A-apply)
+ * and leave the worker or the mirror holding a secret the other side no
+ * longer names — inbound authentication fails until the next sync. The
+ * lock is the lease chain's own (`withEmailDomainRowLock`), held across
+ * the CF calls exactly like the refresh holds it across the token
+ * round-trip; concurrent sends on an oauth_grant domain wait out the
+ * sync, which is rare and manual.
+ *
+ * The row — credential included — is RE-READ inside the lock: a replace
+ * that committed while this request waited for the lock is synced as its
+ * new credential, never verified as the superseded one (whose expired or
+ * revoked verdict would otherwise be stamped onto the replacement). The
+ * mirror PUT runs inside the serialized section even though KV is not
+ * transactional: a commit failure after it leaves the mirror briefly
+ * ahead of the row, which the status GET's drift repair converges — the
+ * inverse (publishing outside the lock) would let an older sync's hash
+ * land last and break inbound auth until someone polls.
  */
 async function syncEmailDomainAndApply(
   context: Context<ApiEnv>,
-  row: EmailDomain,
-  credential: string,
+  rowId: string,
   proxyOrigin: string,
 ): Promise<Response> {
   const db = context.get('db');
-  const domain = row.domain;
-  const projectId = row.project_id;
   let outcome: {
     result: Awaited<ReturnType<typeof syncEmailDomain>>;
-    relaySecretSha256: string;
+    applied: EmailDomain;
   };
   try {
-    outcome = await withEmailDomainRowLock(db, row.id, async (tx) => {
+    outcome = await withEmailDomainRowLock(db, rowId, async (tx) => {
+      const locked = await tx
+        .select()
+        .from(emailDomains)
+        .where(eq(emailDomains.id, rowId))
+        .limit(1);
+      const current = locked[0];
+      if (!current) {
+        // Teardown's cascade can take the row while this request waited
+        // on the lock.
+        throw new Error('email_domains row vanished mid-sync');
+      }
+      const domain = current.domain;
+      const projectId = current.project_id;
+      const credential = await decryptEmailDomainToken(context.env, projectId, domain, current);
       const result = await syncEmailDomain(
         {
           row: {
             domain,
-            credential_kind: row.credential_kind,
-            account_id: row.account_id,
-            relay_worker_name: row.relay_worker_name,
-            zone_id: row.zone_id,
+            credential_kind: current.credential_kind,
+            account_id: current.account_id,
+            relay_worker_name: current.relay_worker_name,
+            zone_id: current.zone_id,
             // Lets sync re-attempt a pending sending onboarding (a
             // Workers Paid upgrade) and report the cleared step.
-            setup_remaining_steps: row.setup_state?.remaining_steps,
+            setup_remaining_steps: current.setup_state?.remaining_steps,
           },
           credential,
           proxyOrigin,
         },
-        { refreshGrant: () => refreshOauthGrantSerialized(tx, context.env, row.id) },
+        { refreshGrant: () => refreshOauthGrantSerialized(tx, context.env, current.id) },
       );
 
       let relaySecretSha256: string;
@@ -1656,7 +1699,7 @@ async function syncEmailDomainAndApply(
         // mirror still moves with the new status, hashed from the
         // existing secret.
         relaySecretSha256 = await hashEmailRelaySecret(
-          await decryptEmailDomainRelaySecret(context.env, projectId, domain, row),
+          await decryptEmailDomainRelaySecret(context.env, projectId, domain, current),
         );
       }
       // A successful sync does not clear a pending human step on its own:
@@ -1665,7 +1708,7 @@ async function syncEmailDomainAndApply(
       // (the sending-onboarding retry). The row stays 'pending' only
       // while an INBOUND-BLOCKING step (routing_subdomain) remains; a
       // sending_onboarding step rides along on an active row.
-      const keptSteps = row.setup_state?.remaining_steps?.filter(
+      const keptSteps = current.setup_state?.remaining_steps?.filter(
         (step) => !(result.cleared_steps ?? []).includes(step),
       );
       const setupState: EmailDomainSetupState | null =
@@ -1678,7 +1721,7 @@ async function syncEmailDomainAndApply(
         result.status === 'active' && setupState?.remaining_steps?.includes(ROUTING_SUBDOMAIN_STEP)
           ? 'pending'
           : result.status;
-      await tx
+      const appliedRows = await tx
         .update(emailDomains)
         .set({
           status,
@@ -1687,8 +1730,18 @@ async function syncEmailDomainAndApply(
           ...relayPatch,
           updated_at: sql`now()`,
         })
-        .where(eq(emailDomains.id, row.id));
-      return { result, relaySecretSha256 };
+        .where(eq(emailDomains.id, current.id))
+        .returning();
+      const applied = appliedRows[0];
+      if (!applied) {
+        throw new Error('email_domains row vanished mid-sync');
+      }
+      // Mirror publication stays inside the serialized section (see the
+      // header): an overlapping sync publishes its own rotation behind
+      // this lock, so hashes land in the same order the secrets were
+      // written to the worker.
+      await writeEmailDomainMirror(context.env.ROUTING, applied, relaySecretSha256);
+      return { result, applied };
     });
   } catch (err) {
     if (isUniqueViolation(err)) {
@@ -1708,14 +1761,9 @@ async function syncEmailDomainAndApply(
     throw err;
   }
 
-  const fresh = await getEmailDomainRowById(db, row.id);
-  if (!fresh) {
-    throw new Error('email_domains row vanished mid-sync');
-  }
-  await writeEmailDomainMirror(context.env.ROUTING, fresh, outcome.relaySecretSha256);
   return context.json(
     {
-      ...serializeEmailDomain(fresh, outcome.result.error),
+      ...serializeEmailDomain(outcome.applied, outcome.result.error),
       ...(outcome.result.catch_all === undefined ? {} : { catch_all: outcome.result.catch_all }),
     },
     200,
@@ -1813,16 +1861,10 @@ async function replaceEmailDomainCredential(
   const setupIncomplete =
     existing.status === 'failed' || !existing.relay_worker_name || !existing.account_id;
   if (!setupIncomplete) {
-    // The row in the DB already carries the NEW credential — the engine
-    // must see the new kind (a stale 'oauth_grant' would refresh the new
-    // API token at the token endpoint; a stale 'api_token' would spend
-    // the new refresh token as an access token).
-    return syncEmailDomainAndApply(
-      context,
-      { ...existing, credential_kind: credentialKind },
-      credential,
-      proxyOrigin,
-    );
+    // The row in the DB already carries the NEW credential — the sync
+    // re-reads it under the row lock, so the engine always sees the
+    // committed kind.
+    return syncEmailDomainAndApply(context, existing.id, proxyOrigin);
   }
 
   // Setup never finished — re-run the full engine with a fresh relay

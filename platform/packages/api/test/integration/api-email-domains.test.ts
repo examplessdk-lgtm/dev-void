@@ -42,6 +42,7 @@ import {
   encryptEmailDomainRelaySecret,
   encryptEmailDomainToken,
   hashEmailRelaySecret,
+  markEmailDomainRemovalFailed,
   writeEmailDomainMirror,
 } from '../../src/email/domains.ts';
 import type { EmailDomain } from '../../src/email/domains.ts';
@@ -1939,6 +1940,84 @@ describe('GET /projects/:id/email/domains/:domain', () => {
     expect((await mirrorFor('mail.acme.com'))!.status).toBe('active');
   });
 
+  it('does not self-clear steps or reactivate while a removal failure is pending', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    stubCustomerCf({
+      zones: { 'acme.com': ZONE },
+      failOn: { routingDns: { message: 'forbidden', status: 403 } },
+    });
+    await addDomain(project.id, user.jwt, { domain: 'mail.acme.com', apiToken: API_TOKEN });
+    const pending = (await rowFor(project.id, 'mail.acme.com'))!;
+    expect(pending.status).toBe('pending');
+
+    // A DELETE then fails its CF cleanup: the row is kept for retry,
+    // marked with failed_step 'remove' (the DELETE route's real writer).
+    await markEmailDomainRemovalFailed(env.db, pending.id, ['relay_delete']);
+
+    // The human did the dashboard step mid-removal: the subdomain's MX
+    // now points at Cloudflare. The poll must neither clear the steps
+    // nor flip active — the row is the operator's to finish removing,
+    // and the mirror repair suppression (failed_step) must survive.
+    stubCustomerCf({
+      zones: { 'acme.com': ZONE },
+      mx: { 'mail.acme.com': ['route1.mx.cloudflare.net', 'route2.mx.cloudflare.net'] },
+      existingScripts: [RELAY_WORKER_BASE_NAME],
+    });
+    const res = await domainStatus(project.id, 'mail.acme.com', user.jwt);
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as Record<string, unknown>;
+    expect(json.status).toBe('pending');
+    const fresh = (await rowFor(project.id, 'mail.acme.com'))!;
+    expect(fresh.status).toBe('pending');
+    expect(fresh.setup_state).toEqual({
+      remaining_steps: ['routing_subdomain'],
+      failed_step: 'remove',
+      removal_failed_steps: ['relay_delete'],
+    });
+    // The mirror keeps the pending status — not reactivated mid-removal.
+    expect((await mirrorFor('mail.acme.com'))!.status).toBe('pending');
+  });
+
+  it('does not flip a revoked row back to active when the revocation lands mid-poll', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    stubCustomerCf({
+      zones: { 'acme.com': ZONE },
+      failOn: { routingDns: { message: 'forbidden', status: 403 } },
+    });
+    await addDomain(project.id, user.jwt, { domain: 'mail.acme.com', apiToken: API_TOKEN });
+    const pending = (await rowFor(project.id, 'mail.acme.com'))!;
+
+    stubCustomerCf({
+      zones: { 'acme.com': ZONE },
+      mx: { 'mail.acme.com': ['route1.mx.cloudflare.net', 'route2.mx.cloudflare.net'] },
+      existingScripts: [RELAY_WORKER_BASE_NAME],
+      on: {
+        // A concurrent refresh consumes the dead grant (invalid_grant)
+        // and persists token_revoked while the MX evidence check is in
+        // flight — the self-clear must not overwrite it back to active.
+        mxLookup: async () => {
+          await env.db
+            .update(emailDomains)
+            .set({ status: 'token_revoked', updated_at: sql`now()` })
+            .where(eq(emailDomains.id, pending.id));
+        },
+      },
+    });
+    const res = await domainStatus(project.id, 'mail.acme.com', user.jwt);
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as Record<string, unknown>;
+    // The fenced-out self-clear voided: the row keeps the revoked state
+    // and its recorded steps...
+    expect(json.status).toBe('token_revoked');
+    const fresh = (await rowFor(project.id, 'mail.acme.com'))!;
+    expect(fresh.status).toBe('token_revoked');
+    expect(fresh.setup_state).toEqual({ remaining_steps: ['routing_subdomain'] });
+    // ...and the mirror repair converges the mirror to the true row.
+    expect((await mirrorFor('mail.acme.com'))!.status).toBe('token_revoked');
+  });
+
   it('stays pending while the subdomain has no Cloudflare MX', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id);
@@ -1998,6 +2077,31 @@ describe('POST /projects/:id/email/domains/:domain/sync', () => {
     });
     const after = await mirrorFor('acme.com');
     expect(after!.relaySecretSha256).not.toBe(before!.relaySecretSha256);
+  });
+
+  it('rolls the row back when the mirror write fails mid-sync', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    await addActiveDomain(project.id, user.jwt);
+    const before = (await rowFor(project.id, 'acme.com'))!;
+    const beforeMirror = (await mirrorFor('acme.com'))!;
+
+    stubCustomerCf({ zones: { 'acme.com': ZONE } });
+    // The mirror PUT is part of the serialized sync: its failure must
+    // roll the row apply back with it — never leave the row rotated to a
+    // secret the mirror does not name. (The reverse ordering is what the
+    // lock is for: two overlapping syncs publishing hashes out of order
+    // would break inbound auth the same way.)
+    const put = vi.spyOn(env.ROUTING, 'put').mockRejectedValueOnce(new Error('kv down'));
+    const res = await syncDomain(project.id, 'acme.com', user.jwt);
+    expect(res.status).toBe(500);
+    put.mockRestore();
+
+    const after = (await rowFor(project.id, 'acme.com'))!;
+    expect(after.relay_ciphertext).toBe(before.relay_ciphertext);
+    expect(after.relay_version).toBe(before.relay_version);
+    expect(after.status).toBe(before.status);
+    expect((await mirrorFor('acme.com'))!.relaySecretSha256).toBe(beforeMirror.relaySecretSha256);
   });
 
   it('reports a foreign catch-all without overwriting it', async () => {

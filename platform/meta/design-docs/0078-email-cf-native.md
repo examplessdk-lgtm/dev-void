@@ -402,7 +402,10 @@ dashboard form's observable effect — and on evidence flips the row to
 the same way on its own evidence — the customer-credential read-back
 showing the subdomain onboarded — and `sync` re-attempts the onboarding
 POST outright, so a Workers Paid upgrade completes the row without
-re-adding. The customer can also revoke the credential
+re-adding. The self-clear write is fenced on the probed status and setup
+state, and is suppressed while a removal failure (`failed_step: 'remove'`)
+is pending, so a poll never rewrites a row that a concurrent revocation or
+an unfinished removal just changed. The customer can also revoke the credential
 at Cloudflare at any time; the next probe sees it and the row reads
 `token_revoked` / `token_expired`, with inbound continuing until they delete
 the rule or the relay themselves.
@@ -470,6 +473,13 @@ path.
   never compensates. The sync route's live-status flip can also 23505 (a
   `failed` row rejoining the live set while a winner holds its zone) —
   mapped to the same 409 zone message, deliberately without compensation.
+- **Sync serializes the whole rotation under the credential row lock.**
+  Relay redeploy, secret PUT, row apply and mirror publication run inside
+  `withEmailDomainRowLock`, and the row — credential included — is re-read
+  under the lock: a credential replace that lands while a sync waits is
+  synced as the new credential, never verified as the superseded one, and
+  two overlapping syncs publish the worker secret and its mirror hash in
+  the same order. A mirror PUT failure rolls the row apply back with it.
 
 ### Removal and teardown
 
