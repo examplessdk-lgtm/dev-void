@@ -10,6 +10,7 @@ import {
   vi,
 } from 'vite-plus/test';
 import { createEmailDestination, getEmailDestinationsByProjectId } from '../../src/db.ts';
+import type { Db } from '../../src/db.ts';
 import { refreshOauthGrantSerialized } from '../../src/email/credential-lease.ts';
 import {
   encryptEmailDomainRelaySecret,
@@ -28,8 +29,50 @@ import {
   createTestProject,
   type TestEnv,
 } from './helpers.ts';
+import { setTestDb } from './setup.ts';
 
 let env: TestEnv;
+
+/**
+ * Pause the app's FIRST `db.transaction` until released — the seam for
+ * landing a committed write (a credential replace) between a route's
+ * unlocked entry checks and its serialized section. PGlite's single
+ * connection forbids touching the db from inside an open transaction, so
+ * the write must happen BEFORE the tx starts: the proxy pauses prior to
+ * delegating, the test writes through the unwrapped `realDb`, then
+ * releases. Same pattern as api-email-domains.test.ts.
+ */
+function pauseFirstTransaction(realDb: Db): {
+  wrappedDb: Db;
+  reached: Promise<void>;
+  release: () => void;
+} {
+  const realTransaction = realDb.transaction.bind(realDb);
+  let releaseFn: (() => void) | undefined;
+  let reachedFn: (() => void) | undefined;
+  const reached = new Promise<void>((r) => {
+    reachedFn = r;
+  });
+  let fired = false;
+  const wrappedDb = new Proxy(realDb, {
+    get(target, prop, receiver) {
+      if (prop === 'transaction') {
+        return (async (fn: never) => {
+          if (!fired) {
+            fired = true;
+            reachedFn?.();
+            await new Promise<void>((r) => {
+              releaseFn = r;
+            });
+          }
+          return realTransaction(fn);
+        }) as unknown as typeof realDb.transaction;
+      }
+      return Reflect.get(target, prop, receiver);
+    },
+  }) as Db;
+  return { wrappedDb, reached, release: () => releaseFn?.() };
+}
 
 beforeAll(async () => {
   env = await setupEnv();
@@ -725,15 +768,20 @@ describe('POST /admin/email/:projectId/domains/:domain/revoke', () => {
     await seedEmailDomain(projectId, 'acme-revoke.com');
     const cfCalls = recordCustomerCfCalls();
 
-    // Ordering pin, same contract as the destination tighten above: when the
-    // mirror key is deleted the row must still exist — it is what a retry
-    // re-runs from if the request dies after the clear.
-    let rowPresentAtMirrorClear: boolean | undefined;
+    // Ordering pin, same contract as the destination tighten above: the
+    // mirror key is deleted BEFORE any customer-side CF call. The row
+    // outliving the clear is now structural — the clear and the row delete
+    // are the first and last statements of ONE serialized transaction, so
+    // a request dying mid-cleanup rolls the row back for the operator's
+    // retry to re-run from. (A mid-transaction row read would deadlock
+    // the single-connection test database, so the pin is on the CF
+    // ordering instead.)
+    let cfCallsAtMirrorClear: number | undefined;
     const originalDelete = env.ROUTING.delete.bind(env.ROUTING);
     vi.spyOn(env.ROUTING, 'delete').mockImplementation((async (k: string) => {
       await originalDelete(k as never);
       if (k === 'email-domain:acme-revoke.com') {
-        rowPresentAtMirrorClear = (await domainRow(projectId, 'acme-revoke.com')) !== undefined;
+        cfCallsAtMirrorClear = cfCalls.length;
       }
     }) as typeof env.ROUTING.delete);
 
@@ -743,7 +791,7 @@ describe('POST /admin/email/:projectId/domains/:domain/revoke', () => {
 
     expect(res.status).toBe(302);
     expect(res.headers.get('Location')).toBe(`/admin/email/${projectId}`);
-    expect(rowPresentAtMirrorClear).toBe(true);
+    expect(cfCallsAtMirrorClear).toBe(0);
     // Contract 7 remove shape: the catch-all ownership read, the
     // conditional reset (the read shows it still naming our relay), then
     // the relay DELETE — the enabled rule never outlives its worker.
@@ -791,6 +839,71 @@ describe('POST /admin/email/:projectId/domains/:domain/revoke', () => {
     expect(form.get('token')).toBe('cf-rotated-refresh-dummy-1');
     expect(await domainRow(projectId, 'acme-revoke-oauth.com')).toBeUndefined();
     expect(await env.ROUTING.get('email-domain:acme-revoke-oauth.com')).toBeNull();
+  });
+
+  test('re-reads the row under the lock — a credential replace committed mid-removal is not orphaned', async () => {
+    const { adminJwt, projectId, slug } = await seedAdminAndProject();
+    const row = await seedEmailDomain(projectId, 'acme-midswap.com');
+    const cfCalls = recordCustomerCfCalls();
+
+    // Pause the removal's serialized section BEFORE it opens (no locks
+    // held), then land a committed credential replace: the entry snapshot
+    // says api_token, the LOCKED re-read says oauth_grant — the cleanup
+    // must follow the locked row, or the fresh grant's only handle goes
+    // with the row delete.
+    const gate = pauseFirstTransaction(env.db);
+    setTestDb(gate.wrappedDb);
+    try {
+      const resPromise = post(
+        `/admin/email/${projectId}/domains/acme-midswap.com/revoke`,
+        adminJwt,
+        { confirm: slug },
+      );
+      const winner = await Promise.race([
+        gate.reached.then(() => 'paused' as const),
+        resPromise.then(() => 'settled' as const),
+      ]);
+      if (winner === 'paused') {
+        const swapped = await encryptEmailDomainToken(
+          env,
+          projectId,
+          'acme-midswap.com',
+          GRANT_REFRESH_TOKEN,
+        );
+        await env.db
+          .update(emailDomains)
+          .set({
+            credential_kind: 'oauth_grant',
+            token_ciphertext: swapped.ciphertext,
+            token_iv: swapped.iv,
+            token_key_version: swapped.keyVersion,
+            token_id: null,
+            token_expires_on: null,
+          })
+          .where(eq(emailDomains.id, row.id));
+        gate.release();
+      }
+      const res = await resPromise;
+      expect(res.status).toBe(302);
+      // The cleanup followed the LOCKED row: the grant was refreshed (its
+      // rotation persisted while the row lived), then revoked LAST with
+      // the rotated chain head — not silently dropped by an api_token
+      // cleanup built on the stale entry snapshot.
+      expect(cfCalls.map((call) => `${call.method} ${call.url}`)).toEqual([
+        'POST https://dash.cloudflare.com/oauth2/token',
+        'GET https://api.cloudflare.com/client/v4/zones/zone_customer_1/email/routing/rules/catch_all',
+        'PUT https://api.cloudflare.com/client/v4/zones/zone_customer_1/email/routing/rules/catch_all',
+        'DELETE https://api.cloudflare.com/client/v4/accounts/acct_customer_1/workers/scripts/void-email-relay',
+        'POST https://dash.cloudflare.com/oauth2/revoke',
+      ]);
+      expect(String(cfCalls.find((call) => call.tag === 'oauthRevoke')!.body)).toContain(
+        'cf-rotated-refresh-dummy-1',
+      );
+      expect(await domainRow(projectId, 'acme-midswap.com')).toBeUndefined();
+      expect(await env.ROUTING.get('email-domain:acme-midswap.com')).toBeNull();
+    } finally {
+      setTestDb(env.db);
+    }
   });
 
   test('refuses without the typed slug and leaves everything intact', async () => {

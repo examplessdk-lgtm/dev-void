@@ -588,6 +588,85 @@ describe('POST /email/relay — dispatch', () => {
     });
   });
 
+  it('enacts a reply from a SECOND project domain through that domain’s own account and credential', async () => {
+    // One project, two customer domains in DIFFERENT accounts: the message
+    // arrives on acme.com, but the reply's from sits on billing.com.
+    // isPermittedReplySender permits any active project domain, and Email
+    // Service rejects a sender outside the sending account's verified
+    // zones — so the mirror + lease must key off the FROM domain, not the
+    // receiving one (a cross-account send under the receiving domain's
+    // credential is CF-rejected).
+    const kv = await relayKv({
+      'email-domain:billing.com': JSON.stringify({
+        projectId: 'p_test',
+        status: 'active',
+        relaySecretSha256: await sha256Hex(RELAY_SECRET),
+        relayWorkerName: 'void-email-relay',
+        accountId: 'acct_customer_b',
+        zoneId: 'zone_b',
+        mode: 'apex',
+      }),
+      'email-allowlist:p_test': JSON.stringify(['admin@example.com']),
+    });
+    const replyFrom = 'billing@billing.com';
+    const replyMime = `From: ${replyFrom}\r\n\r\nreply body\r\n`;
+    const replyRaw = new TextEncoder().encode(replyMime);
+    const { env } = createMockEnv(kv, {
+      emailReturn: [{ type: 'reply', from: replyFrom, to: 'admin@example.com', raw: replyRaw }],
+    });
+    // The lease answers per-domain, so the asserted Bearer proves WHICH
+    // domain's credential carried the send.
+    const LEASED_B = 'leased-credential-fixture-billing';
+    env.API.fetch.mockImplementation(async (_url: string, init?: RequestInit) => {
+      const { domain } = JSON.parse(String(init?.body)) as { domain: string };
+      return new Response(
+        JSON.stringify({ kind: 'api_token', token: domain === 'billing.com' ? LEASED_B : LEASED }),
+        { status: 200 },
+      );
+    });
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init: RequestInit) => {
+        calls.push({ url, init });
+        return new Response(
+          JSON.stringify({
+            success: true,
+            result: {
+              message_id: 'cf_msg_relay',
+              delivered: ['admin@example.com'],
+              permanent_bounces: [],
+              queued: [],
+              suppressed_recipients: [],
+            },
+          }),
+          { status: 200 },
+        );
+      }),
+    );
+
+    const res = await postRelay(env as never);
+    expect(res.status).toBe(200);
+
+    // The lease named the SENDER domain…
+    const leaseBodies = env.API.fetch.mock.calls.map(
+      ([, init]) => JSON.parse(String((init as RequestInit)?.body)) as { domain: string },
+    );
+    expect(leaseBodies).toEqual([{ domain: 'billing.com' }]);
+    // …and the send went to the SENDER domain's account under its
+    // credential — not the receiving domain's.
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.url).toBe(
+      'https://api.cloudflare.com/client/v4/accounts/acct_customer_b/email/sending/send_raw',
+    );
+    expect(new Headers(calls[0]?.init.headers).get('authorization')).toBe(`Bearer ${LEASED_B}`);
+    expect(JSON.parse(calls[0]?.init.body as string)).toEqual({
+      from: replyFrom,
+      recipients: ['admin@example.com'],
+      mime_message: replyMime,
+    });
+  });
+
   it('a failed relayed send is logged like the platform lane and the message stays accepted', async () => {
     const kv = await relayKv({
       'email-allowlist:p_test': JSON.stringify(['admin@example.com']),

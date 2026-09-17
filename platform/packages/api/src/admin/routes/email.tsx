@@ -9,6 +9,7 @@ import {
 import {
   refreshOauthGrantSerialized,
   revokeOauthGrantSerialized,
+  withEmailDomainRowLock,
 } from '../../email/credential-lease.ts';
 import {
   clearEmailDomainMirror,
@@ -494,69 +495,114 @@ app.post('/:projectId/domains/:domain/revoke', async (context) => {
     );
   }
 
-  // Tighten BEFORE anything destructive — the same inversion as the
-  // destination revoke above. The proxy trusts only the mirror key, and the
-  // row is what a retry re-runs from, so a failed clear keeps the row and
-  // nothing else has happened yet.
-  try {
-    await clearEmailDomainMirror(context.env.ROUTING, row.domain);
-  } catch (error) {
-    console.error('[admin-email] email-domain mirror clear failed; keeping the row', {
-      projectId,
-      domain: row.domain,
-      error,
-    });
-    return context.html('<h1>Failed to clear the domain mirror. Try again.</h1>', 503);
-  }
+  // Remove under the row's serialized lock, with the row and credential
+  // re-read inside it — the same shape as the owner DELETE. A replace that
+  // commits between the entry read and the cleanup must not have its fresh
+  // credential orphaned by the row delete: the replace never invalidates an
+  // old api_token, so cleanup built on a stale snapshot would SUCCEED and
+  // a newly committed oauth grant's only handle would go with the row. The
+  // lock also orders the mirror clear against a replacement sync's
+  // republish (both hold the row lock across their KV write). The
+  // serialized helpers take THIS tx — passing the pool handle would
+  // deadlock against the held FOR UPDATE.
+  const removal: Readonly<{ kind: 'removed' } | { kind: 'vanished' }> | null = await (async () => {
+    try {
+      return await withEmailDomainRowLock(context.get('db'), row.id, async (tx) => {
+        const locked = await tx
+          .select()
+          .from(emailDomains)
+          .where(eq(emailDomains.id, row.id))
+          .limit(1);
+        const current = locked[0];
+        if (!current) {
+          // Teardown's cascade can take the row mid-request — the
+          // idempotent re-clear below proceeds.
+          return { kind: 'vanished' } as const;
+        }
 
-  // Best-effort CF cleanup (relay script DELETE + catch-all reset);
-  // removeEmailDomain never throws. A stranded relay or rule in the
-  // customer's account is inert without the mirror entry, so neither a CF
-  // failure nor a decrypt failure (a rotated-away key version) may block the
-  // revoke — this log line is the trace an operator gets, same as the CF
-  // deleteDestination failure above.
-  try {
-    const credential = await decryptEmailDomainToken(context.env, projectId, row.domain, row);
-    const { failed_steps } = await removeEmailDomain(
-      {
-        row: {
-          credential_kind: row.credential_kind,
-          account_id: row.account_id,
-          relay_worker_name: row.relay_worker_name,
-          zone_id: row.zone_id,
-        },
-        credential,
-      },
-      {
-        // Same doctrine as the owner DELETE: rotations persist through the
-        // row's serialized chain while it lives, and the grant is revoked
-        // (last, with the rotated head) — the row being deleted is the only
-        // place the rotated token exists, so omitting revokeGrant here
-        // would orphan a live grant with no platform handle.
-        refreshGrant: () => refreshOauthGrantSerialized(context.get('db'), context.env, row.id),
-        ...(row.credential_kind === 'oauth_grant'
-          ? {
-              revokeGrant: () => revokeOauthGrantSerialized(context.get('db'), context.env, row.id),
-            }
-          : {}),
-      },
-    );
-    if (failed_steps.length > 0) {
-      console.error('[admin-email] email-domain CF cleanup incomplete', {
+        // Tighten BEFORE anything destructive — the same inversion as the
+        // destination revoke above. The proxy trusts only the mirror key,
+        // and the row is what a retry re-runs from: a KV failure here
+        // throws, the transaction rolls back with the row intact, and the
+        // operator's retry starts from nothing-happened.
+        await clearEmailDomainMirror(context.env.ROUTING, current.domain);
+
+        // Best-effort CF cleanup (relay script DELETE + catch-all reset);
+        // removeEmailDomain never throws. A stranded relay or rule in the
+        // customer's account is inert without the mirror entry, so neither
+        // a CF failure nor a decrypt failure (a rotated-away key version)
+        // may block the revoke — this log line is the trace an operator
+        // gets, same as the CF deleteDestination failure above.
+        try {
+          const credential = await decryptEmailDomainToken(
+            context.env,
+            projectId,
+            current.domain,
+            current,
+          );
+          const { failed_steps } = await removeEmailDomain(
+            {
+              row: {
+                credential_kind: current.credential_kind,
+                account_id: current.account_id,
+                relay_worker_name: current.relay_worker_name,
+                zone_id: current.zone_id,
+              },
+              credential,
+            },
+            {
+              // Same doctrine as the owner DELETE: rotations persist
+              // through the row's serialized chain while it lives, and the
+              // grant is revoked (last, with the rotated head) — the row
+              // being deleted is the only place the rotated token exists,
+              // so omitting revokeGrant here would orphan a live grant
+              // with no platform handle.
+              refreshGrant: () => refreshOauthGrantSerialized(tx, context.env, current.id),
+              ...(current.credential_kind === 'oauth_grant'
+                ? {
+                    revokeGrant: () => revokeOauthGrantSerialized(tx, context.env, current.id),
+                  }
+                : {}),
+            },
+          );
+          if (failed_steps.length > 0) {
+            console.error('[admin-email] email-domain CF cleanup incomplete', {
+              projectId,
+              domain: current.domain,
+              failedSteps: failed_steps,
+            });
+          }
+        } catch (error) {
+          console.error(
+            '[admin-email] email-domain credential decrypt failed; skipping CF cleanup',
+            {
+              projectId,
+              domain: current.domain,
+              error,
+            },
+          );
+        }
+
+        await tx.delete(emailDomains).where(eq(emailDomains.id, current.id));
+        return { kind: 'removed' } as const;
+      });
+    } catch (error) {
+      console.error('[admin-email] email-domain mirror clear failed; keeping the row', {
         projectId,
         domain: row.domain,
-        failedSteps: failed_steps,
+        error,
       });
+      return null;
     }
-  } catch (error) {
-    console.error('[admin-email] email-domain credential decrypt failed; skipping CF cleanup', {
-      projectId,
-      domain: row.domain,
-      error,
-    });
-  }
+  })();
 
-  await context.get('db').delete(emailDomains).where(eq(emailDomains.id, row.id));
+  if (removal === null) {
+    return context.html('<h1>Failed to clear the domain mirror. Try again.</h1>', 503);
+  }
+  if (removal.kind === 'vanished') {
+    // Teardown already cleared the mirror; the re-clear is idempotent.
+    await clearEmailDomainMirror(context.env.ROUTING, row.domain);
+  }
   return context.redirect(`/admin/email/${projectId}`);
 });
 

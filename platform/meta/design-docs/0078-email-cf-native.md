@@ -330,7 +330,10 @@ before any crypto, looks the domain's mirror up in ROUTING KV, compares the
 secret's sha256 in constant time, and refuses any mirror whose status is not
 `active` — a revoked or removed domain stops receiving at the proxy, not at
 the relay. The reply-sender pin gains a second accepted shape: any address
-on a domain registered to the receiving project.
+on a domain registered to the receiving project. A reply send then runs
+through the FROM domain's own mirror and credential lease — two domains of
+one project can live in different customer accounts, and Email Service
+rejects a sender outside the sending account's verified zones.
 
 ### The flow — `void email domain add acme.com`
 
@@ -484,6 +487,17 @@ path.
   the new credential, never verified as the superseded one, and two
   overlapping syncs publish the worker secret and its mirror hash in the
   same order. A mirror PUT failure rolls the row apply back with it.
+- **The add path serializes the same way, in two transactions.** The row
+  insert (credential + fresh relay secret) commits under the project lock
+  with the `deleting` verdict re-read inside — so teardown's one-time
+  cleanup enumerations can never miss an in-flight add — and the engine
+  then runs in the follow-up serialized section, which re-takes both locks
+  and decides sync vs full setup on the LOCKED row. A retry that queued
+  behind a completed setup takes the sync branch, so two concurrent retries
+  of an incomplete setup cannot write one secret to the worker and record
+  another on the row and mirror. The engine's checkpoint and apply writes
+  ride savepoints inside that transaction, keeping it committable when an
+  expected 23505 lands; the compensations above then run outside it.
 
 ### Removal and teardown
 
@@ -522,6 +536,9 @@ false, failed_steps }`. The owner retries once the CF-side problem is
   relay inert, and the grant refresh goes through the row's serialized chain
   so a crash before the cascade leaves the credential live for the retry.
 - **The admin surface follows the same order.** The full-removal route
+  runs under the same row lock with the row — credential included —
+  re-read inside it (a credential replace committed mid-removal is cleaned
+  up as the NEW credential, never orphaned by a stale-snapshot delete),
   clears the ROUTING mirror first, runs the same engine removal (with the
   grant deps below), then deletes the row; a mirror-clear failure keeps the
   row and runs nothing destructive. The operator escape hatch `POST
@@ -554,7 +571,10 @@ false, failed_steps }`. The owner retries once the CF-side problem is
   ROUTING KV as `email-domain:<domain>` — `{ projectId, status,
 relaySecretSha256, relayWorkerName, accountId, zoneId, mode }` — rewritten
   on every status transition and secret rotation, tightened before any
-  revoke, deleted on removal, and repaired by the status GET when it drifts.
+  revoke, deleted on removal, and repaired by the status GET when it drifts
+  (the repair re-reads the row under the lock and re-checks drift against
+  it, so a rotation committed mid-poll is never overwritten back to the
+  pre-rotation hash).
 - Scopes, minimum: zone-scoped `Zone Read` (to find the zone id), `Email
 Routing Rules Edit` (the catch-all) and `Zone Settings Edit` (the routing
   POST, both paths); account-scoped `Workers Scripts: Write` (to deploy and
@@ -620,7 +640,12 @@ already killed it). Credential replace revokes the old grant after the
 commit — a re-pasted identical grant is skipped (revoking it would brick the
 just-stored credential) and a revoke failure is logged, never fatal.
 Teardown and admin removal revoke. Conflict compensation deliberately does
-NOT — the loser's credential may survive on another row. The revocation's
+NOT — the loser's credential may survive on another row. A REJECTED add
+attempt revokes too: the CLI mints a fresh grant per attempt and drops its
+only copy on an error response, so every validation 400, cross-project
+conflict 409, and teardown 409 revokes the posted grant first — with one
+guard: a re-pasted grant equal to the conflicting row's stored credential is
+kept (revoking it would brick the live row). The revocation's
 cascade scope (access tokens minted from the grant) is undocumented and
 unprobed — accepted.
 

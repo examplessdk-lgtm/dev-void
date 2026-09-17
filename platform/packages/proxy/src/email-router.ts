@@ -1156,18 +1156,28 @@ function createRelayedMessage(
   // loop's per-action try/catch logs it and the message stays accepted,
   // exactly as a failed native forward/reply does on the platform lane.
   async function sendRaw(from: string, to: string, raw: Uint8Array): Promise<void> {
+    // The send goes through the account that owns the FROM domain: a
+    // forward's substituted MAIL FROM is the envelope recipient (on the
+    // receiving domain), but a reply's from may sit on ANY active domain
+    // registered to the project (isPermittedReplySender) — and two domains
+    // of one project can live in different customer accounts. Email
+    // Service rejects a sender outside the sending account's verified
+    // zones, so keying the mirror + lease off the receiving domain would
+    // submit a cross-account reply under the wrong credential and have CF
+    // reject it.
+    const senderDomain = from.slice(from.indexOf('@') + 1).toLowerCase();
     // Re-read the mirror at send time (uncached, like the relay auth
     // branch): the account id comes from it, and a row revoked or
     // re-registered to another project between the auth and this send must
     // not push mail into the account the mirror named then.
-    const mirror = await readEmailDomainMirror(env.ROUTING, relay.domain);
+    const mirror = await readEmailDomainMirror(env.ROUTING, senderDomain);
     if (!mirror || mirror.projectId !== relay.projectId || mirror.status !== 'active') {
       throw new Error('email domain registration is no longer active');
     }
     if (!mirror.accountId) {
       throw new Error('email domain registration is incomplete');
     }
-    const lease = await leaseEmailDomainCredential(env, relay.domain);
+    const lease = await leaseEmailDomainCredential(env, senderDomain);
     if (!lease) {
       throw new Error('could not lease the domain credential');
     }
@@ -1195,7 +1205,7 @@ function createRelayedMessage(
     // re-leases. CF's error body is never echoed or logged — it is not ours
     // to surface.
     if (res.status === 401 || res.status === 403) {
-      dropEmailDomainLease(relay.domain);
+      dropEmailDomainLease(senderDomain);
     }
     if (!res.ok) {
       throw new Error(`email sending API returned ${res.status}`);

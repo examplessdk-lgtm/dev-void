@@ -209,7 +209,7 @@ export class EmailDomainRowGoneError extends Error {
  * columns stay untouched; the final apply owns those.
  */
 export async function applyEmailDomainDeployCheckpoint(
-  db: Db,
+  db: DbOrTx,
   rowId: string,
   progress: Readonly<{
     zone_id: string | null;

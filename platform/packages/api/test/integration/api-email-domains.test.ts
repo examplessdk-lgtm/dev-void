@@ -211,6 +211,8 @@ function stubCustomerCf(
 
   // Per-zone catch-all rule state, lazily seeded from the config.
   const catchAllStates = new Map<string, { enabled: boolean; workerName: string | null } | null>();
+  // Per-script sha256 of the last secret PUT text (never the text).
+  const secretHashes = new Map<string, string>();
   const catchAllStateFor = (zoneId: string) => {
     if (!catchAllStates.has(zoneId)) {
       catchAllStates.set(
@@ -389,10 +391,14 @@ function stubCustomerCf(
       return cfSuccess({});
     }
 
-    const secretsMatch = /\/workers\/scripts\/[^/]+\/secrets$/.exec(path);
+    const secretsMatch = /\/workers\/scripts\/([^/]+)\/secrets$/.exec(path);
     if (secretsMatch && method === 'PUT') {
       const parsed = typeof init?.body === 'string' ? JSON.parse(init.body) : {};
       const text = typeof parsed.text === 'string' ? parsed.text : '';
+      // The worker's CURRENT secret, tracked by sha256 only — the same
+      // form the ROUTING mirror stores — so a test can prove worker, row
+      // and mirror carry ONE secret without the value ever being recorded.
+      secretHashes.set(secretsMatch[1]!, await hashEmailRelaySecret(text));
       await record({
         tag: 'secretPut',
         method,
@@ -440,11 +446,15 @@ function stubCustomerCf(
   });
 
   vi.stubGlobal('fetch', fn);
-  return { calls, fn, catchAllStates };
+  return { calls, fn, catchAllStates, secretHashes };
 }
 
 function callsByTag(calls: Array<RecordedCall>, tag: StubFailTag): Array<RecordedCall> {
   return calls.filter((call) => call.tag === tag);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function tags(calls: Array<RecordedCall>): Array<StubFailTag> {
@@ -625,8 +635,8 @@ async function installApplySentinelTrigger(): Promise<void> {
   );
   await env.db.execute(
     sql.raw(
-      // Idempotent: the stub hook fires on EVERY catch-all call, so a test
-      // whose compensation resets the rule re-enters this installer.
+      // Idempotent: tests pre-install before the request and the sentinel
+      // must survive any number of non-apply UPDATEs until the apply fires.
       `DROP TRIGGER IF EXISTS email_apply_sentinel ON email_domains`,
     ),
   );
@@ -738,8 +748,12 @@ describe('POST /projects/:id/email/domains', () => {
       const res = await addDomain(project.id, user.jwt, body);
       expect(res.status, label).toBe(400);
     }
-    // Nothing reached CF, nothing was stored.
-    expect(stub.calls).toEqual([]);
+    // Nothing was stored. The only CF call is the revoke of the 'both
+    // credentials' case's posted grant — a rejected minted grant whose only
+    // copy the CLI drops must not be stranded live in the customer's
+    // account. api_token bodies carry no revoke primitive.
+    expect(tags(stub.calls)).toEqual(['oauthRevoke']);
+    expect(stub.calls[0]!.form!.token).toBe(REFRESH_TOKEN);
     expect(await rowFor(project.id, 'acme.com')).toBeUndefined();
   });
 
@@ -1032,6 +1046,44 @@ describe('POST /projects/:id/email/domains', () => {
     expect((await mirrorFor('acme.com'))!.projectId).toBe(first.id);
   });
 
+  it('409s a conflicting oauth add and revokes the rejected grant — unless it is the winner’s own', async () => {
+    const user = await createTestUser(env.db);
+    const first = await createTestProject(env.db, user.id);
+    const second = await createTestProject(env.db, user.id);
+    // The winner holds an oauth grant.
+    await seedEmailDomain(first.id, 'acme.com', {
+      status: 'active',
+      credentialKind: 'oauth_grant',
+      credential: REFRESH_TOKEN,
+    });
+    const stub = stubCustomerCf({});
+
+    // A DIFFERENT freshly minted grant loses the claim: revoked. The CLI
+    // drops its only copy of the grant on the 409, so without the revoke a
+    // live broad grant strands in the customer's account per retry.
+    const res = await addDomain(second.id, user.jwt, {
+      domain: 'acme.com',
+      refreshToken: 'cf-refresh-token-dummy-other',
+    });
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: string }).error).toBe(
+      'domain is registered to another project',
+    );
+    expect(tags(stub.calls)).toEqual(['oauthRevoke']);
+    expect(stub.calls[0]!.form!.token).toBe('cf-refresh-token-dummy-other');
+
+    // The SAME grant re-pasted must NOT be revoked — revoking the winner's
+    // own stored credential would brick its live row (the decrypt-compare
+    // guard fails safe toward keeping).
+    const repasted = await addDomain(second.id, user.jwt, {
+      domain: 'acme.com',
+      refreshToken: REFRESH_TOKEN,
+    });
+    expect(repasted.status).toBe(409);
+    expect(tags(stub.calls)).toEqual(['oauthRevoke']);
+    expect((await rowFor(first.id, 'acme.com'))!.status).toBe('active');
+  });
+
   it('409s when another live row already claims the zone — the loser is compensated, never activated', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id);
@@ -1148,36 +1200,37 @@ describe('POST /projects/:id/email/domains', () => {
     expect((await mirrorFor('acme.com'))!.projectId).toBe(project.id);
   });
 
-  it('409s when the project is torn down mid-setup — the checkpoint finds the row gone', async () => {
+  it('409s and revokes the posted grant when the project is marked deleting before setup', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id);
-    const stub = stubCustomerCf({
-      zones: { 'acme.com': ZONE },
-      on: {
-        // The secret PUT is the CF call immediately before the deploy
-        // checkpoint: teardown's cascade removes the email_domains row
-        // here, so the checkpoint's UPDATE ... RETURNING finds nothing.
-        secretPut: async () => {
-          await env.db.delete(projects).where(eq(projects.id, project.id));
-        },
-      },
-    });
-
-    const res = await addDomain(project.id, user.jwt, { domain: 'acme.com', apiToken: API_TOKEN });
-    expect(res.status).toBe(409);
-    expect(((await res.json()) as { error: string }).error).toBe('project is being deleted');
-    // The abort precedes the catch-all step, and the row is gone — but the
-    // relay WAS deployed, so the route compensates from the captured
-    // checkpoint (teardown's per-row cleanup can't see it): ONE ownership
-    // read (the untouched disabled-drop default names no relay, so no
-    // reset) and the relay DELETE.
-    expect(callsByTag(stub.calls, 'catchAllGet')).toHaveLength(1);
-    expect(callsByTag(stub.calls, 'catchAll')).toEqual([]);
-    expect(callsByTag(stub.calls, 'scriptDelete').map((call) => call.url)).toEqual([
-      `https://api.cloudflare.com/client/v4/accounts/${ZONE.accountId}/workers/scripts/${RELAY_WORKER_BASE_NAME}`,
-    ]);
-    expect(await rowFor(project.id, 'acme.com')).toBeUndefined();
-    expect(await mirrorFor('acme.com')).toBeNull();
+    const stub = stubCustomerCf({ zones: { 'acme.com': ZONE } });
+    // Pause the route's FIRST transaction — the project-lock + insert tx —
+    // before it opens (no locks held yet), so the teardown mark lands
+    // first and the locked re-read sees it. The engine can no longer be
+    // mid-flight when teardown starts: it runs under this same lock.
+    const gate = pauseFirstTransaction(env.db);
+    setTestDb(gate.wrappedDb);
+    try {
+      const resPromise = addDomain(project.id, user.jwt, {
+        domain: 'acme.com',
+        refreshToken: REFRESH_TOKEN,
+      });
+      await gate.reached;
+      await env.db.update(projects).set({ status: 'deleting' }).where(eq(projects.id, project.id));
+      gate.release();
+      const res = await resPromise;
+      expect(res.status).toBe(409);
+      expect(((await res.json()) as { error: string }).error).toBe('Project is being deleted');
+      // Nothing was persisted: no row, no mirror, no CF calls — and the
+      // freshly minted grant, whose only copy the CLI drops on an error
+      // response, was revoked rather than stranded.
+      expect(tags(stub.calls)).toEqual(['oauthRevoke']);
+      expect(callsByTag(stub.calls, 'oauthRevoke')[0]!.form!.token).toBe(REFRESH_TOKEN);
+      expect(await rowFor(project.id, 'acme.com')).toBeUndefined();
+      expect(await mirrorFor('acme.com')).toBeNull();
+    } finally {
+      setTestDb(env.db);
+    }
   });
 
   it('500s when the checkpoint write fails for a non-race reason — and compensates the deployed relay', async () => {
@@ -1282,6 +1335,58 @@ describe('POST /projects/:id/email/domains', () => {
       zone_id: ZONE.id,
       relay_worker_name: `${RELAY_WORKER_BASE_NAME}-b`,
     });
+  });
+
+  it('serializes concurrent setup retries — the worker secret, row and mirror move together', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    // A row whose setup never finished: both retries re-run the full
+    // engine (the branch is decided on the LOCKED row).
+    await seedEmailDomain(project.id, 'acme.com', { status: 'failed' });
+
+    // Hold the FIRST engine run at its secret PUT until the other request
+    // has settled (or a cap fires) — the maximal-overlap window. The hook
+    // touches no db, so holding it inside the serialized section is safe;
+    // the queued second request cannot settle, so the cap is what
+    // releases the first.
+    let holdFirstSecretPut = true;
+    const stub = stubCustomerCf({
+      zones: { 'acme.com': ZONE },
+      failOn: {
+        routingDns: { message: 'already enabled', status: 400 },
+        onboardSending: { message: 'already exists', status: 409 },
+      },
+      routingSettings: { enabled: true, status: 'ready' },
+      sendingSubdomains: [{ name: 'acme.com', enabled: true }],
+      existingScripts: [RELAY_WORKER_BASE_NAME],
+      on: {
+        secretPut: async () => {
+          if (!holdFirstSecretPut) {
+            return;
+          }
+          holdFirstSecretPut = false;
+          await Promise.race([bothSettled, sleep(500)]);
+        },
+      },
+    });
+    const first = addDomain(project.id, user.jwt, { domain: 'acme.com', apiToken: API_TOKEN });
+    const second = addDomain(project.id, user.jwt, { domain: 'acme.com', apiToken: API_TOKEN });
+    const bothSettled = Promise.allSettled([first, second]);
+    const [firstRes, secondRes] = await Promise.all([first, second]);
+    expect(firstRes.status).toBe(200);
+    expect(secondRes.status).toBe(200);
+
+    // THE invariant: the secret on the worker, the row's stored triple,
+    // and the proxy mirror's hash are ONE secret. Two UNLOCKED engine
+    // runs interleave their secret PUTs and applies — the last PUT is one
+    // request's secret, the last apply the other's — and this diverges.
+    const row = (await rowFor(project.id, 'acme.com'))!;
+    expect(row.status).toBe('active');
+    const rowHash = await hashEmailRelaySecret(
+      await decryptEmailDomainRelaySecret(env, project.id, 'acme.com', row),
+    );
+    expect(stub.secretHashes.get(RELAY_WORKER_BASE_NAME)).toBe(rowHash);
+    expect((await mirrorFor('acme.com'))!.relaySecretSha256).toBe(rowHash);
   });
 
   it('adds an oauth_grant domain — one refresh round-trip, rotation persisted', async () => {
@@ -1555,17 +1660,15 @@ describe('POST /projects/:id/email/domains', () => {
     const stub = stubCustomerCf({
       zones: { 'acme.com': ZONE },
       verifyExpiresOn: APPLY_SENTINEL_EXPIRY,
-      on: {
-        // Installed in the catch-all PUT — the engine's last CF call before
-        // the apply, so the deploy checkpoint has already committed. The
-        // apply's UPDATE then fails NON-unique. The reconciliation's
-        // re-read finds the checkpoint-persisted relay NAME but not the
-        // apply's relay_version (the checkpoint never writes it), so the
-        // row is NOT taken as applied: the orphaned relay is compensated
-        // and the original error rethrows.
-        catchAll: installApplySentinelTrigger,
-      },
     });
+    // Pre-installed: the sentinel fires only on the apply's UPDATE (the
+    // checkpoint never writes token_expires_on), so installing it up front
+    // fails exactly the apply — with a NON-unique error. The reconciliation's
+    // re-read finds the checkpoint-persisted relay NAME but not the
+    // apply's relay_version (the checkpoint never writes it), so the
+    // row is NOT taken as applied: the orphaned relay is compensated
+    // and the original error rethrows.
+    await installApplySentinelTrigger();
     try {
       const res = await addDomain(project.id, user.jwt, {
         domain: 'acme.com',
@@ -1605,8 +1708,10 @@ describe('POST /projects/:id/email/domains', () => {
       zones: { 'acme.com': ZONE },
       mx: { 'acme.com': ['aspmx.l.google.com'] },
       verifyExpiresOn: APPLY_SENTINEL_EXPIRY,
-      on: { mxLookup: installApplySentinelTrigger },
     });
+    // Same pre-install: the MX conflict fails setup before any deploy, so
+    // the sentinel's first victim is the FAILURE-result apply.
+    await installApplySentinelTrigger();
     try {
       const res = await addDomain(project.id, user.jwt, {
         domain: 'acme.com',
@@ -1778,6 +1883,59 @@ describe('GET /projects/:id/email/domains/:domain', () => {
     // The proxy mirror must not be "repaired" against a state the operator
     // is about to finish removing.
     expect(await env.ROUTING.get('email-domain:acme.com')).toBe(drifted);
+  });
+
+  it('repairs a drifted mirror from the LOCKED row — a concurrent rotation is not overwritten', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    await addActiveDomain(project.id, user.jwt);
+    // Force drift: the mirror is missing, so the poll's repair path runs.
+    await env.ROUTING.delete('email-domain:acme.com');
+
+    const ROTATED_SECRET = 'relay-secret-rotated-dummy';
+    stubCustomerCf({
+      zones: { 'acme.com': ZONE },
+      existingScripts: [RELAY_WORKER_BASE_NAME],
+      catchAllRule: { enabled: true, workerName: RELAY_WORKER_BASE_NAME },
+      on: {
+        // The catch-all probe runs AFTER the route's row snapshot was read
+        // and BEFORE the repair: a concurrent sync rotating the relay
+        // secret and republishing the mirror lands exactly in the repair's
+        // race window. No transaction is open during the probes, so these
+        // writes are safe.
+        catchAllGet: async () => {
+          const rotated = await encryptEmailDomainRelaySecret(
+            env,
+            project.id,
+            'acme.com',
+            ROTATED_SECRET,
+          );
+          await env.db
+            .update(emailDomains)
+            .set({
+              relay_ciphertext: rotated.ciphertext,
+              relay_iv: rotated.iv,
+              relay_key_version: rotated.keyVersion,
+            })
+            .where(eq(emailDomains.domain, 'acme.com'));
+          await writeEmailDomainMirror(
+            env.ROUTING,
+            (await rowFor(project.id, 'acme.com'))!,
+            await hashEmailRelaySecret(ROTATED_SECRET),
+          );
+        },
+      },
+    });
+    const res = await domainStatus(project.id, 'acme.com', user.jwt);
+    expect(res.status).toBe(200);
+
+    // The mirror converges to the ROTATED secret: the repair re-reads the
+    // row under the lock, finds the republished mirror already matching,
+    // and writes nothing. Writing from the route's stale snapshot would
+    // restore the pre-rotation hash — inbound would reject every message.
+    expect((await mirrorFor('acme.com'))!.relaySecretSha256).toBe(
+      await hashEmailRelaySecret(ROTATED_SECRET),
+    );
   });
 
   it('self-clears the sending-onboarding step once the read-back confirms it', async () => {
