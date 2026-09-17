@@ -330,6 +330,17 @@ export type UploadUrlAssetRequest = DeployAssetUploadRequest;
 export type ManifestOnlyDeployPayload = DeployUploadPayload;
 
 /**
+ * Retry budget for the deploy POST's transport phase. A rejected `fetch`
+ * means no HTTP response ever arrived (e.g. ECONNRESET on a stale pooled
+ * keep-alive socket after the long R2-upload window), so the platform
+ * cannot have emitted a deploy event yet — replaying is safe. Once a
+ * Response exists, even a 4xx/5xx, the server answered: surface it
+ * verbatim rather than risk processing the same deploy twice.
+ */
+const DEPLOY_POST_MAX_RETRIES = 3;
+const DEPLOY_POST_BACKOFF_MS = [1000, 5000, 10000];
+
+/**
  * HTTP client for the Void platform API.
  */
 export class PlatformClient {
@@ -577,12 +588,29 @@ export class PlatformClient {
     const cliLog = this.cliLog;
     cliLog?.info('deploy_post', { url });
 
+    // `fetch` reports transport failures as TypeError ('fetch failed') —
+    // the only retryable case per the DEPLOY_POST_* contract above.
+    // Anything else (e.g. AbortError) is not transient and fails fast.
     let res: Response;
-    try {
-      res = await fetch(url, init);
-    } catch (err) {
-      cliLog?.error('deploy_fetch_rejected', err, { url });
-      throw err;
+    let attempt = 0;
+    while (true) {
+      try {
+        res = await fetch(url, init);
+        break;
+      } catch (err) {
+        if (!(err instanceof TypeError) || attempt >= DEPLOY_POST_MAX_RETRIES) {
+          cliLog?.error('deploy_fetch_rejected', err, { url, attempts: attempt + 1 });
+          throw err;
+        }
+        cliLog?.warn('deploy_fetch_retry', {
+          url,
+          attempt: attempt + 1,
+          delayMs: DEPLOY_POST_BACKOFF_MS[attempt],
+          error: err instanceof Error ? err.message : String(err),
+        });
+        await sleep(DEPLOY_POST_BACKOFF_MS[attempt]);
+        attempt++;
+      }
     }
 
     // `cf-ray` and `cf-cache-status` are the correlation keys that platform
@@ -1349,4 +1377,8 @@ export class PlatformClient {
 
     return res.json();
   }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
