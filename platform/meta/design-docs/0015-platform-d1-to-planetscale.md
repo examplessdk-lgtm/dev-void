@@ -446,10 +446,8 @@ After stable on Postgres:
 
 1. **Latency.** D1 is colocated with the Worker. PlanetScale is a network hop away, even with Hyperdrive connection pooling. Measure P50/P99 latency before and after. Placement hints help.
 
-2. **Cost.** D1 has a generous free tier. PlanetScale starts at $5/month + per-query costs. For the control plane's volume this is negligible.
+2. **Timestamp semantics.** D1 stores datetimes as text strings. Postgres has native `TIMESTAMP`. With `mode: "string"`, Drizzle returns ISO strings, so the JS-side behavior is the same. But sorting/filtering on timestamps is now done natively by Postgres (faster, correct timezone handling).
 
-3. **Timestamp semantics.** D1 stores datetimes as text strings. Postgres has native `TIMESTAMP`. With `mode: "string"`, Drizzle returns ISO strings, so the JS-side behavior is the same. But sorting/filtering on timestamps is now done natively by Postgres (faster, correct timezone handling).
+3. **Connection limits.** PlanetScale with PgBouncer (port 6432) handles high concurrency. Hyperdrive adds its own connection pooling on top. Should be fine for a control plane workload.
 
-4. **Connection limits.** PlanetScale with PgBouncer (port 6432) handles high concurrency. Hyperdrive adds its own connection pooling on top. Should be fine for a control plane workload.
-
-5. **Test speed.** Miniflare D1 is fast (in-memory SQLite). PGlite is also fast but not as fast. Real Postgres adds network overhead. Measure and decide.
+4. **Test speed.** Miniflare D1 is fast (in-memory SQLite). PGlite is also fast but not as fast. Real Postgres adds network overhead. Measure and decide.

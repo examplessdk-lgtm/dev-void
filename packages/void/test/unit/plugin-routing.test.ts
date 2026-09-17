@@ -89,6 +89,53 @@ describe('routingPlugin', () => {
     expect(entry).not.toContain('accept.includes("text/html")');
   });
 
+  it('bakes explicit page opt-outs into the native ISR policy', async () => {
+    const root = createTempRoot();
+    mkdirSync(join(root, 'pages'), { recursive: true });
+    writeFileSync(join(root, 'pages', 'private.tsx'), 'export default function Page() {}\n');
+    writeFileSync(join(root, 'pages', 'private.server.ts'), 'export const revalidate = 0;\n');
+    writeFileSync(
+      join(root, 'void.json'),
+      JSON.stringify({ routing: { revalidate: { '/private': 60 } } }),
+    );
+
+    const savedProjectId = process.env.VOID_DEPLOY_PROJECT_ID;
+    delete process.env.VOID_DEPLOY_PROJECT_ID;
+    try {
+      const plugin = routingPlugin(root, { isAuthEnabled: () => false });
+      const config = getHookHandler(plugin.config) as (
+        config: import('vite').UserConfig,
+        env: import('vite').ConfigEnv,
+      ) => void;
+      const configResolved = getHookHandler(plugin.configResolved) as (
+        config: import('vite').ResolvedConfig,
+      ) => void;
+      const buildStart = getHookHandler(plugin.buildStart) as () => Promise<void>;
+      const load = getHookHandler(plugin.load) as (id: string) => Promise<string | undefined>;
+
+      config({}, { command: 'build', mode: 'production' });
+      configResolved({
+        build: { assetsDir: 'assets' },
+        command: 'build',
+        mode: 'production',
+        plugins: [],
+      } as unknown as import('vite').ResolvedConfig);
+      await buildStart.call({} as never);
+      const routes = await load('virtual:void-routes');
+
+      expect(routes).toContain(
+        'export const __VOID_ISR_PAGES = [{"pattern":"/private","revalidate":0}];',
+      );
+      expect(routes).toContain('export const __VOID_ISR_PATH_REVALIDATE = {"/private":60};');
+    } finally {
+      if (savedProjectId === undefined) {
+        delete process.env.VOID_DEPLOY_PROJECT_ID;
+      } else {
+        process.env.VOID_DEPLOY_PROJECT_ID = savedProjectId;
+      }
+    }
+  });
+
   it('resolves explicit framework client subpaths to framework auth clients', async () => {
     const root = createBareTempRoot();
     const plugin = routingPlugin(root, { isAuthEnabled: () => false });

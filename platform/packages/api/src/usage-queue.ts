@@ -1,11 +1,73 @@
-import { createDb, getUser } from './db.ts';
+import { createDb, getProjectsByIds, getUser } from './db.ts';
 import type { ApiEnv } from './env.ts';
-import { getPlanLimits } from './tiers.ts';
+import { getCurrentBillingPeriodStart, getPlanLimits } from './tiers.ts';
+import {
+  ensureUsageSigningKey,
+  SANDBOX_USAGE_RETENTION_MS,
+  verifyUsageEnvelope,
+} from './usage-auth.ts';
 import type { UsageEvent } from './usage-counter.ts';
 
 const PLATFORM_STATIC_ASSET_FAILURES: ReadonlySet<NonNullable<UsageEvent['failureKind']>> = new Set(
   ['platform-static-asset-timeout', 'platform-static-asset-error', 'platform-static-asset-missing'],
 );
+
+const FAILURE_KINDS = new Set([
+  'platform-static-asset-timeout',
+  'platform-static-asset-error',
+  'platform-static-asset-missing',
+]);
+
+function nonnegativeSafeInteger(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= 0;
+}
+
+function validSignedEvent(
+  source: 'dispatch' | 'sandbox-counter',
+  value: unknown,
+): UsageEvent | null {
+  if (typeof value !== 'object' || value === null) {
+    return null;
+  }
+  const event = value as Record<string, unknown>;
+  if (
+    typeof event.projectId !== 'string' ||
+    event.projectId.length === 0 ||
+    event.projectId.length > 256
+  ) {
+    return null;
+  }
+  if (source === 'dispatch') {
+    if (event.requests !== 1 || !nonnegativeSafeInteger(event.responseBytes)) {
+      return null;
+    }
+    if (
+      (event.status !== undefined && !nonnegativeSafeInteger(event.status)) ||
+      (event.failureKind !== undefined && !FAILURE_KINDS.has(event.failureKind as string)) ||
+      event.sandboxRuntimeSeconds !== undefined ||
+      event.sandboxInstanceId !== undefined ||
+      event.sandboxMeteredFrom !== undefined ||
+      event.sandboxMeteredThrough !== undefined
+    ) {
+      return null;
+    }
+  } else if (
+    event.requests !== 0 ||
+    event.responseBytes !== 0 ||
+    typeof event.sandboxInstanceId !== 'string' ||
+    event.sandboxInstanceId.length === 0 ||
+    event.sandboxInstanceId.length > 1024 ||
+    !nonnegativeSafeInteger(event.sandboxMeteredFrom) ||
+    !nonnegativeSafeInteger(event.sandboxMeteredThrough) ||
+    event.sandboxMeteredThrough < Date.now() - SANDBOX_USAGE_RETENTION_MS ||
+    event.sandboxMeteredThrough <= event.sandboxMeteredFrom ||
+    (event.sandboxMeteredThrough - event.sandboxMeteredFrom) % 1000 !== 0 ||
+    event.sandboxRuntimeSeconds !== undefined
+  ) {
+    return null;
+  }
+  return event as UsageEvent;
+}
 
 export function groupEventsByUser(
   events: ReadonlyArray<UsageEvent>,
@@ -31,14 +93,63 @@ export async function processUsageEventBatch(
   // must report when the errors happened, not when this consumer drained the
   // batch (a backlog or a retried batch can put hours between the two).
   // Defensive fallback because this is also the billing path.
-  const records = batch.messages.map((message) => ({
-    event: message.body as UsageEvent,
-    at: message.timestamp instanceof Date ? message.timestamp.getTime() : Date.now(),
-  }));
+  let signingKey: string;
+  try {
+    signingKey = await ensureUsageSigningKey(env.ROUTING, env.JWT_SECRET);
+  } catch (error) {
+    console.error('[usage-queue] could not load signing key:', error);
+    batch.retryAll();
+    return;
+  }
+
+  const verified = await Promise.all(
+    batch.messages.map(async (message) => {
+      const envelope = await verifyUsageEnvelope<UsageEvent>(message.body, signingKey);
+      if (!envelope) {
+        return null;
+      }
+      const event = validSignedEvent(envelope.source, envelope.event);
+      return event
+        ? {
+            event,
+            at: message.timestamp instanceof Date ? message.timestamp.getTime() : Date.now(),
+          }
+        : null;
+    }),
+  );
+  const authenticatedRecords = verified.filter((record) => record !== null);
+  if (authenticatedRecords.length === 0) {
+    // Legacy tenant producers and malformed/forged envelopes have no
+    // authority. Acknowledge them so an old deployment cannot cause an
+    // endless retry loop after the consumer upgrade.
+    batch.ackAll();
+    return;
+  }
+
+  const db = createDb(env.HYPERDRIVE.connectionString);
+  let projects: Awaited<ReturnType<typeof getProjectsByIds>>;
+  try {
+    projects = await getProjectsByIds(db, [
+      ...new Set(authenticatedRecords.map(({ event }) => event.projectId)),
+    ]);
+  } catch (error) {
+    console.error('[usage-queue] project identity lookup failed:', error);
+    batch.retryAll();
+    return;
+  }
+  const projectsById = new Map(projects.map((project) => [project.id, project]));
+  const records = authenticatedRecords.flatMap(({ event, at }) => {
+    const project = projectsById.get(event.projectId);
+    if (!project) {
+      return [];
+    }
+    // PostgreSQL owns account identity and the canonical slug. Producer
+    // hints are never forwarded into enforcement or alert routing.
+    return [{ event: { ...event, userId: project.user_id, slug: project.slug }, at }];
+  });
   const events = records.map((record) => record.event);
 
   const grouped = groupEventsByUser(events);
-  const db = createDb(env.HYPERDRIVE.connectionString);
 
   const results = await Promise.allSettled(
     [...grouped.entries()].map(async ([userId, userEvents]) => {
@@ -60,7 +171,14 @@ export async function processUsageEventBatch(
         new Request('https://do/record', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ events: userEvents, plan, userId }),
+          body: JSON.stringify({
+            events: userEvents,
+            plan,
+            userId,
+            billingPeriodStart: getCurrentBillingPeriodStart(
+              user.billing_cycle_start ?? user.created_at,
+            ).toISOString(),
+          }),
         }),
       );
 

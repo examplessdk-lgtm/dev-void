@@ -1,6 +1,7 @@
 import type { StandardSchemaV1 } from '../standard-schema.ts';
 import { authContext, type AuthState, type AuthUser } from './auth.ts';
 import type { VoidAuthEnv, VoidAuthRuntimeOptions } from './better-auth-shared.ts';
+import { withRuntimeEnv } from './env.ts';
 import type { CloudEnv } from './handler.ts';
 import type {
   AnyWebSocketDefinition,
@@ -287,7 +288,11 @@ export function createWebSocketDurableObject(
       public readonly env: Record<string, unknown>,
     ) {}
 
-    async fetch(request: Request): Promise<Response> {
+    fetch(request: Request): Promise<Response> {
+      return withRuntimeEnv(this.env, () => this.handleFetch(request));
+    }
+
+    private async handleFetch(request: Request): Promise<Response> {
       const params = getRouteMatch(request, route) ?? {};
       const roomId = buildWebSocketInstanceId(route, params);
       const authState =
@@ -406,7 +411,14 @@ export function createWebSocketDurableObject(
       return withAuthState(authState, () => (definition as SocketDefinition).onRequest!(ctx));
     }
 
-    async webSocketMessage(
+    webSocketMessage(
+      webSocket: WebSocket,
+      message: string | ArrayBuffer | ArrayBufferView,
+    ): Promise<void> {
+      return withRuntimeEnv(this.env, () => this.handleWebSocketMessage(webSocket, message));
+    }
+
+    private async handleWebSocketMessage(
       webSocket: WebSocket,
       message: string | ArrayBuffer | ArrayBufferView,
     ): Promise<void> {
@@ -456,7 +468,18 @@ export function createWebSocketDurableObject(
       }
     }
 
-    async webSocketClose(
+    webSocketClose(
+      webSocket: WebSocket,
+      code: number,
+      reason: string,
+      wasClean: boolean,
+    ): Promise<void> {
+      return withRuntimeEnv(this.env, () =>
+        this.handleWebSocketClose(webSocket, code, reason, wasClean),
+      );
+    }
+
+    private async handleWebSocketClose(
       webSocket: WebSocket,
       code: number,
       reason: string,

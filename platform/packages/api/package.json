@@ -3,24 +3,14 @@
   "private": true,
   "type": "module",
   "exports": {
-    "./db": "./src/db.ts",
-    "./types": "./src/types.ts",
-    "./id": "./src/id.ts",
     "./tiers": "./src/tiers.ts",
-    "./auth/jwt": "./src/auth/jwt.ts",
-    "./auth/dashboard": "./src/auth/dashboard.ts",
-    "./auth/github": "./src/auth/github.ts",
-    "./auth/google": "./src/auth/google.ts",
-    "./usage": "./src/routes/usage.ts",
     "./api": "./src/api.ts",
-    "./env": "./src/env.ts",
     "./reserved-slugs": "./src/reserved-slugs.ts",
-    "./suspension": "./src/suspension.ts",
-    "./routing": "./src/routing.ts"
+    "./routing": "./src/routing.ts",
+    "./usage-auth": "./src/usage-auth.ts"
   },
   "scripts": {
     "db:generate": "drizzle-kit generate",
-    "db:push": "drizzle-kit push",
     "deploy": "node ../../scripts/wrangler-deploy.ts",
     "dev": "wrangler dev",
     "migrate": "drizzle-kit migrate",
@@ -30,7 +20,6 @@
   },
   "dependencies": {
     "@cloudflare/containers": "0.3.7",
-    "@cloudflare/sandbox": "0.12.9",
     "@void/deploy-core": "workspace:*",
     "@void/isr": "workspace:*",
     "@xterm/headless": "^6.0.0",
@@ -46,10 +35,8 @@
   "devDependencies": {
     "@cloudflare/workers-types": "catalog:platform",
     "@electric-sql/pglite": "0.5.8",
-    "@napi-rs/keyring": "2.0.0",
     "@types/pg": "8.23.1",
     "drizzle-kit": "^0.31.10",
-    "miniflare": "^4.20260421.0",
     "typescript": "catalog:",
     "vite-plus": "catalog:",
     "wrangler": "catalog:platform"

@@ -13,14 +13,8 @@ import { existsSync, writeFileSync } from 'node:fs';
 import { join } from 'pathslash';
 import { expandDotenv, parseDotenvFile as sharedParseDotenvFile } from '../shared/dotenv.ts';
 
-/** Dotenv files we harvest keys from, in trust order (first wins per key). */
-export const SCAFFOLD_SOURCE_FILES = [
-  '.env',
-  '.env.local',
-  '.env.development',
-  '.env.development.local',
-  '.env.example',
-] as const;
+/** Void has one local dotenv source. */
+export const SCAFFOLD_SOURCE_FILES = ['.env'] as const;
 
 export type InferredHelper = 'string' | 'number' | 'boolean' | 'url';
 
@@ -75,12 +69,8 @@ export function parseDotenvFile(filePath: string): Record<string, string> {
 /** Collect a deduped list of inferred entries from the dotenv files we find. */
 export function collectInferredEntries(root: string): Array<InferredEntry> {
   const seen = new Map<string, InferredEntry>();
-  // Walk files in trust order (first wins). At each step we expand the
-  // current file's values against the cumulative "earliest-wins" record so
-  // that a value like `API_URL=${BASE_URL}/v1` resolves even when
-  // `BASE_URL` lives in a previously-seen file. A per-file expanded view is
-  // what feeds type inference, so an unresolved literal isn't mis-classified
-  // as a plain string when it would have been a URL after expansion.
+  // Keep this loop-shaped so the parser remains easy to extend, while the
+  // supported source set intentionally contains only `.env`.
   const cumulative: Record<string, string> = {};
   for (const file of SCAFFOLD_SOURCE_FILES) {
     const parsed = sharedParseDotenvFile(join(root, file), { expand: false });
@@ -97,9 +87,7 @@ export function collectInferredEntries(root: string): Array<InferredEntry> {
       }
       const existing = seen.get(key);
       // First file to mention the key wins for the sample value, but a
-      // later file with a non-empty value can still upgrade inference if
-      // the earlier value was empty (e.g. `.env.example` had `FOO=` and
-      // `.env.local` has `FOO=3000`).
+      // later source with a non-empty value can still upgrade inference.
       if (!existing) {
         seen.set(key, {
           key,
@@ -144,7 +132,7 @@ export function renderEnvTs(entries: Array<InferredEntry>): string {
   const lines: Array<string> = [];
   lines.push(`import { defineEnv, ${importList.join(', ')} } from 'void/env';`);
   lines.push('');
-  lines.push(`// Scaffolded from your .env files. Inference is conservative — review each`);
+  lines.push(`// Scaffolded from .env. Inference is conservative — review each`);
   lines.push(`// entry and tighten types as needed (e.g. oneOf([...]), url(), .optional(),`);
   lines.push(`// .default(value), or a Standard Schema validator from valibot/zod/arktype).`);
   lines.push(`export default defineEnv({`);
@@ -165,7 +153,7 @@ export type ScaffoldResult = {
 };
 
 /**
- * If the project has no `env.ts`, scaffold one based on `.env*` files the
+ * If the project has no `env.ts`, scaffold one based on the local `.env`
  * user already has. Safe to call unconditionally during `void init` — it
  * no-ops when `env.ts` is present. Never overwrites an existing file.
  */

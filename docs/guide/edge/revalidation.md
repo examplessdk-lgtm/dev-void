@@ -96,7 +96,10 @@ export const GET = defineHandler(async (c) => {
 - `x-revalidate: 0`: skip caching for this response
 - `x-revalidate: 300`: cache for 5 minutes instead of the default
 
-Only successful responses (2xx) are cached.
+Only complete `200` responses are cached. A response with `Cache-Control: private`,
+`no-store`, or `no-cache`, or any `Set-Cookie` header, stays private to that request.
+If a previously public page starts returning one of those headers during background
+revalidation, Void removes its HTML, Pages JSON, and KV cache entries.
 
 ## Cache bypass
 
@@ -112,7 +115,9 @@ Purge the destination pathname with `revalidate({ paths })`. Purging `/en/docs/f
 
 ::: details Upgrading from the older ISR cache format
 
-The current format uses a `v2` prefix and doesn't read older unversioned entries. The first deploy using it starts with a cold cache for every page. Entries fill as requests arrive; old entries expire without a manual purge.
+The current format uses a `v3` host-scoped prefix and a cache-policy version in its
+metadata. Entries written before the current response-privacy policy are treated as
+cold misses and refill only from responses that are safe to share.
 
 Adding a rewrite also changes the affected page's cache key, so that page starts with a cold cache again.
 

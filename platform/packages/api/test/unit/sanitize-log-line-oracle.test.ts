@@ -1,9 +1,10 @@
 import { Terminal } from '@xterm/headless';
 import { describe, expect, it } from 'vite-plus/test';
-import { sanitizeLogLineForMarkdown, TERMINAL_RENDER_COLUMNS } from '../../src/build-manager.ts';
+import { TERMINAL_RENDER_COLUMNS } from '../../src/build-manager.ts';
+import { renderCapturedLog } from './log-tail-helpers.ts';
 
 /**
- * Differential test: `sanitizeLogLineForMarkdown` must render each captured log
+ * Differential test: `renderCapturedLog` must render each captured log
  * line exactly as a real terminal would.
  *
  * The unit tests next door assert specific strings, which only ever confirm the
@@ -237,10 +238,10 @@ const CASES: Record<string, string> = {
   'form feed blanks the row': 'SECRET_TOKEN\f\x1b[1GERR',
 };
 
-describe('sanitizeLogLineForMarkdown matches a real terminal (xterm.js oracle)', () => {
+describe('renderCapturedLog matches a real terminal (xterm.js oracle)', () => {
   for (const [name, raw] of Object.entries(CASES)) {
     it(name, async () => {
-      expect(await sanitizeLogLineForMarkdown(raw)).toBe(await render(raw));
+      expect(await renderCapturedLog(raw)).toBe(await render(raw));
     });
   }
 
@@ -343,9 +344,7 @@ describe('sanitizeLogLineForMarkdown matches a real terminal (xterm.js oracle)',
       for (let j = 0; j < len; j++) {
         raw += atoms[rand(atoms.length)];
       }
-      expect(await sanitizeLogLineForMarkdown(raw), JSON.stringify(raw)).toBe(
-        await renderReused(raw),
-      );
+      expect(await renderCapturedLog(raw), JSON.stringify(raw)).toBe(await renderReused(raw));
     }
     term.dispose();
   }, 60_000);

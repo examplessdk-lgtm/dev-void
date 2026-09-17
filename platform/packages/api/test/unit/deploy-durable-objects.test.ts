@@ -2,12 +2,9 @@ import { describe, expect, it } from 'vite-plus/test';
 import {
   buildDurableObjectUploadMigrations,
   buildLiveUploadBindings,
-  buildSandboxIdentityBindings,
-  buildSandboxPlatformBindings,
   buildSandboxUploadBindings,
   buildSandboxUploadContainers,
   buildWebSocketUploadBindings,
-  buildWebSocketUploadMigrations,
   enrichLiveManifest,
   enrichSandboxManifest,
   enrichWebSocketManifest,
@@ -316,44 +313,36 @@ describe('enrichWebSocketManifest', () => {
   });
 });
 
-describe('buildWebSocketUploadMigrations', () => {
+describe('buildDurableObjectUploadMigrations for WebSocket-only deployments', () => {
   it('returns Cloudflare upload metadata with new_tag and steps', () => {
     expect(
-      buildWebSocketUploadMigrations([
-        { tag: 'ws-v1', newClasses: ['ChatRoom', 'LegacyRoom'] },
-        { tag: 'ws-v2', newClasses: ['PresenceRoom'] },
-      ]),
+      buildDurableObjectUploadMigrations(
+        [
+          { tag: 'ws-v1', newClasses: ['ChatRoom', 'LegacyRoom'] },
+          { tag: 'ws-v2', newClasses: ['PresenceRoom'] },
+        ],
+        undefined,
+      ),
     ).toEqual({
       new_tag: 'ws-v2',
       steps: [{ new_classes: ['ChatRoom', 'LegacyRoom'] }, { new_classes: ['PresenceRoom'] }],
     });
   });
 
-  it('strips deleted_classes from legacy migration data', () => {
-    // Old migration data may still contain deletedClasses from before the fix.
-    // buildWebSocketUploadMigrations should not pass them to Cloudflare.
-    expect(
-      buildWebSocketUploadMigrations([
-        { tag: 'ws-v1', newClasses: ['ChatRoom'] },
-        { tag: 'ws-v2', deletedClasses: ['ChatRoom'] },
-      ]),
-    ).toEqual({
-      new_tag: 'ws-v2',
-      steps: [{ new_classes: ['ChatRoom'] }, {}],
-    });
-  });
-
   it('returns undefined when there are no websocket migrations', () => {
-    expect(buildWebSocketUploadMigrations([])).toBeUndefined();
-    expect(buildWebSocketUploadMigrations(undefined)).toBeUndefined();
+    expect(buildDurableObjectUploadMigrations([], undefined)).toBeUndefined();
+    expect(buildDurableObjectUploadMigrations(undefined, undefined)).toBeUndefined();
   });
 
   it('serializes SQLite WebSocket migrations without changing legacy steps', () => {
     expect(
-      buildWebSocketUploadMigrations([
-        { tag: 'ws-v1', newClasses: ['LegacyRoom'] },
-        { tag: 'ws-v2', newSqliteClasses: ['ChatRoom'] },
-      ]),
+      buildDurableObjectUploadMigrations(
+        [
+          { tag: 'ws-v1', newClasses: ['LegacyRoom'] },
+          { tag: 'ws-v2', newSqliteClasses: ['ChatRoom'] },
+        ],
+        undefined,
+      ),
     ).toEqual({
       new_tag: 'ws-v2',
       steps: [{ new_classes: ['LegacyRoom'] }, { new_sqlite_classes: ['ChatRoom'] }],
@@ -658,75 +647,6 @@ describe('buildSandboxUploadMetadata', () => {
         { new_classes: ['PresenceRoom'] },
       ],
     });
-  });
-});
-
-describe('buildSandboxPlatformBindings', () => {
-  const sandbox: NonNullable<DeployManifest['sandbox']> = {
-    bindingName: 'SANDBOX',
-    className: 'Sandbox',
-    containerName: 'void-sandbox',
-    image: 'docker.io/cloudflare/sandbox:0.8.11',
-  };
-
-  it('returns the queue producer binding when sandbox is present', () => {
-    expect(
-      buildSandboxPlatformBindings({ USAGE_EVENTS_QUEUE_NAME: 'void-usage-events' }, sandbox),
-    ).toEqual([{ type: 'queue', name: 'USAGE_EVENTS_QUEUE', queue_name: 'void-usage-events' }]);
-  });
-
-  it('returns an empty list when sandbox is absent (no sandbox = no platform bindings)', () => {
-    expect(
-      buildSandboxPlatformBindings({ USAGE_EVENTS_QUEUE_NAME: 'void-usage-events' }, undefined),
-    ).toEqual([]);
-  });
-
-  it('falls back to production defaults when env vars are unset', () => {
-    expect(buildSandboxPlatformBindings({}, sandbox)).toEqual([
-      { type: 'queue', name: 'USAGE_EVENTS_QUEUE', queue_name: 'void-usage-events' },
-    ]);
-  });
-
-  it('honors staging overrides when env vars carry the staging names', () => {
-    expect(
-      buildSandboxPlatformBindings(
-        { USAGE_EVENTS_QUEUE_NAME: 'void-usage-events-staging' },
-        sandbox,
-      ),
-    ).toEqual([
-      { type: 'queue', name: 'USAGE_EVENTS_QUEUE', queue_name: 'void-usage-events-staging' },
-    ]);
-  });
-});
-
-describe('buildSandboxIdentityBindings', () => {
-  const sandbox: NonNullable<DeployManifest['sandbox']> = {
-    bindingName: 'SANDBOX',
-    className: 'Sandbox',
-    containerName: 'void-sandbox',
-    image: 'docker.io/cloudflare/sandbox:0.8.11',
-  };
-
-  it('returns the __VOID_USER_ID plain-text binding the framework runtime reads', () => {
-    expect(buildSandboxIdentityBindings(sandbox, { userId: 'user_1' })).toEqual([
-      { type: 'plain_text', name: '__VOID_USER_ID', text: 'user_1' },
-    ]);
-  });
-
-  it('does NOT emit __VOID_PROJECT_SLUG — provisionBindings is its sole producer', () => {
-    // `void/email` needs the slug on every worker, not just sandbox ones, so
-    // it moved to `provisionBindings`. Emitting it here too would upload the
-    // same binding name twice in one `metadata.bindings` array.
-    // `api-sandbox.test.ts` pins that sandbox workers still receive it.
-    expect(
-      buildSandboxIdentityBindings(sandbox, { userId: 'user_1' }).some(
-        (b) => b.name === '__VOID_PROJECT_SLUG',
-      ),
-    ).toBe(false);
-  });
-
-  it('returns an empty list when sandbox is absent', () => {
-    expect(buildSandboxIdentityBindings(undefined, { userId: 'user_1' })).toEqual([]);
   });
 });
 

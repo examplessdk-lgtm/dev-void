@@ -1,0 +1,36 @@
+name: Set up tests
+description: Install the pinned toolchain and optional browser with the same runner policy.
+inputs:
+  browser:
+    description: Install Chromium for browser integration tests.
+    default: 'false'
+runs:
+  using: composite
+  steps:
+    # Preserve scanning for fork PRs. Maintainer jobs may exclude generated paths
+    # on their ephemeral runner; refusal warns and never skips a check.
+    - name: Exclude build paths from Windows Defender
+      if: >-
+        ${{ runner.os == 'Windows'
+        && (github.event_name == 'push'
+        || github.event.pull_request.head.repo.full_name == github.repository) }}
+      shell: pwsh
+      run: |
+        foreach ($path in @('${{ github.workspace }}', '${{ runner.temp }}')) {
+          try {
+            Add-MpPreference -ExclusionPath $path -ErrorAction Stop
+            Write-Host "Defender exclusion added: $path"
+          } catch {
+            Write-Host "::warning::could not add Defender exclusion for ${path}: $_"
+          }
+        }
+    - uses: voidzero-dev/setup-vp@2dec1e33f4ab2c6d5bce1b0c4607961bb1a3f7a1 # v1.12.0
+      with:
+        node-version-file: .node-version
+        cache: true
+    - run: vp exec playwright install chromium
+      shell: bash
+      if: ${{ inputs.browser == 'true' && (runner.os != 'Linux' || github.repository == 'voidzero-dev/void') }}
+    - run: vp exec playwright install --with-deps chromium
+      shell: bash
+      if: ${{ inputs.browser == 'true' && runner.os == 'Linux' && github.repository != 'voidzero-dev/void' }}

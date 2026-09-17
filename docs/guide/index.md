@@ -8,6 +8,8 @@ Void is a fullstack SDK for Vite apps. It connects your server code, database, a
 
 Add the Vite plugin to your app. As you use features such as a database, key-value storage, or queues, Void detects what you need and sets up the corresponding resources.
 
+The CLI and build tools require Node.js 24.21.0 or later.
+
 ```sh
 npm install -D vite void
 ```

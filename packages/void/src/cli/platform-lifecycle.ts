@@ -7,8 +7,16 @@ import {
 } from '@void/platform';
 import { cliTitle } from './output.ts';
 import type { PlatformArgs } from './platform-args.ts';
-import { resolvePlatformCloudflareCredential } from './platform-auth.ts';
-import { PlatformCloudflareClient, type CloudflareAccount } from './platform-cloudflare.ts';
+import {
+  assertPlatformOperatorCredentialCanApplyPlan,
+  resolvePlatformCloudflareCredential,
+} from './platform-auth.ts';
+import {
+  PlatformCloudflareClient,
+  PlatformCloudflareApiError,
+  verifyPlatformRuntimeTokenPermissions,
+  type CloudflareAccount,
+} from './platform-cloudflare.ts';
 import {
   acquirePlatformDatabaseLifecycleLock,
   createPlatformInstallationSecrets,
@@ -25,10 +33,22 @@ import {
 import {
   acquirePlatformLifecycleLock,
   assertPlatformInstallationSlugAvailable,
+  listInstallationManifests,
   readPendingInstallationSecrets,
   resolveInstallationManifest,
   writeInstallationManifest,
+  writePendingInstallationSecrets,
 } from './platform-registry.ts';
+import {
+  completePlatformSetupDraft,
+  isPlatformSetupDraft,
+  savePlatformSetupDraft,
+} from './platform-setup-draft.ts';
+import {
+  formatPlatformSetupPlan,
+  openPlatformSetupPage,
+  platformSetupPages,
+} from './platform-setup.ts';
 
 export function resolvePlatformInstallDatabaseUrl(
   checkpoint: Record<string, string> | null,
@@ -73,6 +93,11 @@ export function resolvePlatformInstallDatabaseUrl(
 }
 
 export async function runPlatformLifecycleCommand(args: PlatformArgs): Promise<void> {
+  if (args.subcommand === 'domain') {
+    const { runPlatformDomainCommand } = await import('./platform-domain.ts');
+    await runPlatformDomainCommand(args);
+    return;
+  }
   if (args.subcommand === 'discover') {
     const credential = await resolvePlatformCloudflareCredential();
     const client = new PlatformCloudflareClient(credential.token);
@@ -109,33 +134,109 @@ export async function runPlatformLifecycleCommand(args: PlatformArgs): Promise<v
   console.log();
   intro(cliTitle('platform install'));
   const operatorCredential = await resolvePlatformCloudflareCredential();
-  const client = new PlatformCloudflareClient(operatorCredential.token);
+  let client = new PlatformCloudflareClient(operatorCredential.token);
   let existing = args.resume ? resolveInstallationManifest(args.name) : null;
+  let automaticDraft = false;
+  if (!existing && !args.name && !args.resume) {
+    const drafts = listInstallationManifests().filter(
+      (manifest) =>
+        isPlatformSetupDraft(manifest) &&
+        (!args.account ||
+          manifest.account.id === args.account ||
+          manifest.account.name.toLowerCase() === args.account.toLowerCase()),
+    );
+    if (drafts.length === 1) {
+      existing = drafts[0]!;
+      automaticDraft = true;
+      log.info('Continuing saved credential setup; your callback URL stays the same.');
+    }
+  }
   if (existing?.endpoints.apiUrl && !readPendingInstallationSecrets(existing)) {
     throw new Error(
       `platform: Installation ${existing.id} has already been deployed. Use \`void platform repair ${existing.id}\` or \`void platform upgrade ${existing.id}\` instead.`,
     );
   }
-  const recorded = existing?.deployment;
   const name =
-    recorded?.installationSlug ??
+    existing?.deployment.installationSlug ??
     (args.name || (await promptText('Installation name:', 'company')));
   const installationSlug = normalizeInstallationSlug(name);
-  if (!existing) {
-    assertPlatformInstallationSlugAvailable(installationSlug);
-  }
   const accounts = await readAccounts(client);
-  const accountId = recorded ? existing!.account.id : await selectAccount(accounts, args.account);
+  const accountId = existing ? existing.account.id : await selectAccount(accounts, args.account);
+  if (
+    existing &&
+    args.account &&
+    (await selectAccount(accounts, args.account)) !== existing.account.id
+  ) {
+    throw new Error('platform: The installation belongs to a different Cloudflare account.');
+  }
+  if (!existing) {
+    existing =
+      listInstallationManifests().find(
+        (manifest) =>
+          manifest.account.id === accountId &&
+          manifest.deployment.installationSlug === installationSlug &&
+          isPlatformSetupDraft(manifest),
+      ) ?? null;
+    automaticDraft = existing !== null;
+    if (automaticDraft) {
+      log.info('Continuing saved credential setup; your callback URL stays the same.');
+    } else {
+      assertPlatformInstallationSlugAvailable(installationSlug);
+    }
+  }
+  const recorded = existing?.deployment;
+  if (
+    existing &&
+    isPlatformSetupDraft(existing) &&
+    ((args.applicationDomain &&
+      normalizeApplicationDomain(args.applicationDomain) !== recorded!.application.baseDomain) ||
+      (args.zone && normalizeApplicationDomain(args.zone) !== recorded!.application.zoneName) ||
+      (args.workersDev && !!recorded!.application.zoneName) ||
+      (args.controlPlaneDomain &&
+        normalizeApplicationDomain(args.controlPlaneDomain) !==
+          recorded!.controlPlane.apiHostname) ||
+      (args.dedicatedZone && !recorded!.application.dedicatedZone))
+  ) {
+    throw new Error(
+      'platform: These options differ from the saved setup. Resume its recorded configuration or choose another installation name.',
+    );
+  }
+  let workersDev =
+    (!!recorded?.application.workersDev && !recorded.application.zoneName) ||
+    args.workersDev === true;
+  if (
+    !recorded &&
+    !args.workersDev &&
+    !args.applicationDomain &&
+    !args.zone &&
+    process.stdin.isTTY
+  ) {
+    const mode = await select({
+      message: 'Where should your apps live?',
+      options: [
+        { value: 'domain', label: 'Use a domain', hint: 'recommended' },
+        { value: 'workers-dev', label: 'Use workers.dev for testing', hint: 'add a domain later' },
+      ],
+    });
+    if (isCancel(mode)) {
+      throw new Error('platform: Cancelled.');
+    }
+    workersDev = mode === 'workers-dev';
+  }
   const applicationDomain =
     recorded?.application.baseDomain ??
-    normalizeApplicationDomain(
-      args.applicationDomain || (await promptText('Application base domain:', 'apps.example.com')),
-    );
+    (workersDev
+      ? ''
+      : normalizeApplicationDomain(
+          args.applicationDomain || (await promptText('Application base domain:', 'example.app')),
+        ));
   const zoneName =
     recorded?.application.zoneName ??
-    normalizeApplicationDomain(
-      args.zone || (await promptText('Cloudflare zone:', applicationDomain)),
-    );
+    (workersDev
+      ? ''
+      : normalizeApplicationDomain(
+          args.zone || (await promptText('Cloudflare zone:', applicationDomain)),
+        ));
   const displayName =
     recorded?.displayName ??
     (args.displayName || (await promptText('Platform display name:', `${installationSlug} Void`)));
@@ -146,7 +247,13 @@ export async function runPlatformLifecycleCommand(args: PlatformArgs): Promise<v
         ? await promptText('Optional custom API hostname (leave empty for workers.dev):', '', true)
         : ''));
   let dedicatedZone = recorded?.application.dedicatedZone ?? args.dedicatedZone;
-  if (!recorded && !args.dedicatedZone && applicationDomain === zoneName && process.stdin.isTTY) {
+  if (
+    !workersDev &&
+    !recorded &&
+    !args.dedicatedZone &&
+    applicationDomain === zoneName &&
+    process.stdin.isTTY
+  ) {
     const catchAll = await confirm({
       message: `Dedicate all unmatched ${zoneName} traffic to Void apps?`,
       initialValue: false,
@@ -163,11 +270,16 @@ export async function runPlatformLifecycleCommand(args: PlatformArgs): Promise<v
     }
     if (existing && !args.plan) {
       existing = resolveInstallationManifest(existing.id);
+      if (automaticDraft && !isPlatformSetupDraft(existing)) {
+        throw new Error(
+          'platform: Setup advanced in another process. Rerun with --resume to review its current state.',
+        );
+      }
     }
     const checkpoint = existing ? readPendingInstallationSecrets(existing) : null;
     const databaseUrl = resolvePlatformInstallDatabaseUrl(checkpoint, existing);
     let authoritativeProvisionIntents = false;
-    if (existing) {
+    if (existing && !isPlatformSetupDraft(existing)) {
       if (!databaseUrl) {
         throw new Error(
           'platform: DATABASE_URL is required to verify an interrupted installation before resuming it.',
@@ -196,8 +308,9 @@ export async function runPlatformLifecycleCommand(args: PlatformArgs): Promise<v
       displayName,
       installationSlug,
       zoneName,
+      ...(workersDev ? { workersDev: true } : {}),
     };
-    const plan = await createInitialPlatformInstallPlan(
+    let plan = await createInitialPlatformInstallPlan(
       client,
       planInput,
       existing,
@@ -209,11 +322,12 @@ export async function runPlatformLifecycleCommand(args: PlatformArgs): Promise<v
       args.plan ? 'Read-only installation plan' : 'Installation plan',
     );
     note(formatPlatformRuntime(runtime), 'Platform runtime');
-    note(formatPlatformAuthenticationSetup(plan.apiUrl, accountId), 'Authentication setup');
     if (args.plan) {
+      console.log(formatPlatformSetupPlan(plan, existing !== null));
       outro('No Cloudflare or local installation state was changed.');
       return;
     }
+    assertPlatformOperatorCredentialCanApplyPlan(operatorCredential, plan);
     if (process.stdin.isTTY && !args.yes) {
       const proceed = await confirm({ message: 'Apply this plan?', initialValue: false });
       if (isCancel(proceed) || !proceed) {
@@ -222,44 +336,207 @@ export async function runPlatformLifecycleCommand(args: PlatformArgs): Promise<v
       }
     }
 
-    const runtimeCloudflareApiToken =
-      checkpoint?.cloudflareApiToken ||
-      process.env.VOID_PLATFORM_RUNTIME_CLOUDFLARE_API_TOKEN ||
-      (await promptSecret('Void runtime Cloudflare API token:'));
-    const bootstrapGitHubLogin =
-      checkpoint?.bootstrapGitHubLogin ||
-      process.env.VOID_PLATFORM_ADMIN_GITHUB_LOGIN ||
-      (await promptSecret('Initial administrator GitHub username:', false));
+    if (!existing) {
+      existing = savePlatformSetupDraft(plan, runtime.manifest.platformVersion);
+    }
+    const credentialSetup = isPlatformSetupDraft(existing);
+    const values: Record<string, string> = { ...checkpoint };
+    const saveValues = (updates: Record<string, string>) => {
+      Object.assign(values, updates);
+      if (credentialSetup) {
+        writePendingInstallationSecrets(existing!, values);
+      }
+    };
+    const configured = (key: string, environment: string) =>
+      credentialSetup
+        ? process.env[environment] || values[key] || ''
+        : values[key] || process.env[environment] || '';
+    const collect = async (
+      key: string,
+      environment: string,
+      message: string,
+      masked = true,
+      persist = true,
+      validate?: (value: string) => string | undefined,
+    ) => {
+      const value = configured(key, environment) || (await promptSecret(message, masked, validate));
+      const error = validate?.(value);
+      if (error) {
+        throw new Error('platform: ' + error);
+      }
+      if (persist) {
+        saveValues({ [key]: value });
+      }
+      return value;
+    };
+    const pages = platformSetupPages(plan, true);
+    if (!configured('cloudflareApiToken', 'VOID_PLATFORM_RUNTIME_CLOUDFLARE_API_TOKEN')) {
+      openPlatformSetupPage(pages.runtime);
+    }
+
+    const runtimeCloudflareApiToken = await collect(
+      'cloudflareApiToken',
+      'VOID_PLATFORM_RUNTIME_CLOUDFLARE_API_TOKEN',
+      'Paste runtime API token:',
+      true,
+      false,
+    );
+    try {
+      await verifyPlatformRuntimeTokenPermissions(
+        new PlatformCloudflareClient(runtimeCloudflareApiToken),
+        {
+          accountId,
+          applicationDomain,
+          customDomains: plan.deployment.capabilities.customDomains,
+          zoneId: plan.zone?.id ?? null,
+        },
+      );
+      if (plan.actions.some((action) => action.action === 'inspect')) {
+        client = client.withAiGatewayToken(runtimeCloudflareApiToken);
+        plan = await verifyPlatformAiGatewayPlan(
+          client,
+          planInput,
+          existing,
+          plan,
+          authoritativeProvisionIntents,
+        );
+      }
+    } catch (error) {
+      let cause: unknown = error;
+      for (let depth = 0; depth < 5 && cause instanceof Error; depth++, cause = cause.cause) {
+        if (
+          credentialSetup &&
+          cause instanceof PlatformCloudflareApiError &&
+          [401, 403].includes(cause.status)
+        ) {
+          delete values.cloudflareApiToken;
+          writePendingInstallationSecrets(existing, values);
+          break;
+        }
+      }
+      throw error;
+    }
+    saveValues({ cloudflareApiToken: runtimeCloudflareApiToken });
+    const previousLogin = values.bootstrapGitHubLogin;
+    const bootstrapGitHubLogin = await collect(
+      'bootstrapGitHubLogin',
+      'VOID_PLATFORM_ADMIN_GITHUB_LOGIN',
+      'Initial administrator GitHub username:',
+      false,
+    );
     const bootstrapGitHubId =
-      checkpoint?.bootstrapGitHubId ||
+      (previousLogin === bootstrapGitHubLogin ? values.bootstrapGitHubId : '') ||
       process.env.VOID_PLATFORM_ADMIN_GITHUB_ID ||
       (await resolveBootstrapGitHubId(bootstrapGitHubLogin));
+    saveValues({ bootstrapGitHubId });
+    const installationDatabaseUrl =
+      databaseUrl ||
+      (await collect('databaseUrl', 'VOID_PLATFORM_DATABASE_URL', 'PostgreSQL DATABASE_URL:'));
+    saveValues({ databaseUrl: installationDatabaseUrl });
+    if (
+      !configured('githubClientId', 'VOID_PLATFORM_GITHUB_CLIENT_ID') ||
+      !configured('githubClientSecret', 'VOID_PLATFORM_GITHUB_CLIENT_SECRET')
+    ) {
+      openPlatformSetupPage(
+        configured('githubClientId', 'VOID_PLATFORM_GITHUB_CLIENT_ID')
+          ? { ...pages.github, url: 'https://github.com/settings/developers' }
+          : pages.github,
+      );
+    }
+    const githubClientId = await collect(
+      'githubClientId',
+      'VOID_PLATFORM_GITHUB_CLIENT_ID',
+      'GitHub OAuth client ID:',
+      false,
+      false,
+    );
+    const githubClientSecret = await collect(
+      'githubClientSecret',
+      'VOID_PLATFORM_GITHUB_CLIENT_SECRET',
+      'GitHub OAuth client secret:',
+      true,
+      false,
+    );
+    saveValues({ githubClientId, githubClientSecret });
+    if (
+      !configured('r2AccessKeyId', 'VOID_PLATFORM_R2_ACCESS_KEY_ID') ||
+      !configured('r2SecretAccessKey', 'VOID_PLATFORM_R2_SECRET_ACCESS_KEY')
+    ) {
+      openPlatformSetupPage(pages.r2);
+    }
+    const r2AccessKeyId = await collect(
+      'r2AccessKeyId',
+      'VOID_PLATFORM_R2_ACCESS_KEY_ID',
+      'R2 access key ID:',
+      false,
+      false,
+    );
+    const r2SecretAccessKey = await collect(
+      'r2SecretAccessKey',
+      'VOID_PLATFORM_R2_SECRET_ACCESS_KEY',
+      'R2 secret access key:',
+      true,
+      false,
+    );
+    saveValues({ r2AccessKeyId, r2SecretAccessKey });
+    const hasFullProjectSecretKeyring = Boolean(
+      checkpoint?.projectSecretKeysJson ||
+      checkpoint?.projectSecretActiveKeyVersion ||
+      process.env.VOID_PLATFORM_PROJECT_SECRET_KEYS_JSON ||
+      process.env.VOID_PLATFORM_PROJECT_SECRET_ACTIVE_KEY_VERSION,
+    );
     const secrets = createPlatformInstallationSecrets({
       bootstrapGitHubId,
       bootstrapGitHubLogin,
       cloudflareApiToken: runtimeCloudflareApiToken,
-      checkpoint,
-      databaseUrl: databaseUrl || (await promptSecret('PostgreSQL DATABASE_URL:')),
-      githubClientId:
-        checkpoint?.githubClientId ||
-        process.env.VOID_PLATFORM_GITHUB_CLIENT_ID ||
-        (await promptSecret('GitHub OAuth client ID:', false)),
-      githubClientSecret:
-        checkpoint?.githubClientSecret ||
-        process.env.VOID_PLATFORM_GITHUB_CLIENT_SECRET ||
-        (await promptSecret('GitHub OAuth client secret:')),
-      existingInstallation: existing !== null,
-      jwtSecret: process.env.VOID_PLATFORM_JWT_SECRET || '',
-      projectSecretKey: process.env.VOID_PLATFORM_PROJECT_SECRET_KEY || '',
-      r2AccessKeyId:
-        checkpoint?.r2AccessKeyId ||
-        process.env.VOID_PLATFORM_R2_ACCESS_KEY_ID ||
-        (await promptSecret('R2 access key ID:', false)),
-      r2SecretAccessKey:
-        checkpoint?.r2SecretAccessKey ||
-        process.env.VOID_PLATFORM_R2_SECRET_ACCESS_KEY ||
-        (await promptSecret('R2 secret access key:')),
+      checkpoint: values,
+      databaseUrl: installationDatabaseUrl,
+      githubClientId,
+      githubClientSecret,
+      r2AccessKeyId,
+      r2SecretAccessKey,
+      existingInstallation: !credentialSetup,
+      jwtSecret: await collect(
+        'jwtSecret',
+        'VOID_PLATFORM_JWT_SECRET',
+        'JWT signing secret from your password manager (at least 32 random bytes):',
+        true,
+        true,
+        credentialSetup
+          ? (value) =>
+              Buffer.byteLength(value, 'utf8') >= 32
+                ? undefined
+                : 'The JWT signing secret must contain at least 32 random bytes.'
+          : undefined,
+      ),
+      projectSecretKey:
+        configured('projectSecretKey', 'VOID_PLATFORM_PROJECT_SECRET_KEY') ||
+        (hasFullProjectSecretKeyring
+          ? ''
+          : await collect(
+              'projectSecretKey',
+              'VOID_PLATFORM_PROJECT_SECRET_KEY',
+              'Project encryption key from your password manager (base64, 32 bytes):',
+              true,
+              true,
+              credentialSetup
+                ? (value) => {
+                    const key = Buffer.from(value, 'base64');
+                    return key.length === 32 && key.toString('base64') === value
+                      ? undefined
+                      : 'The project encryption key must be canonical base64 encoding of exactly 32 bytes.';
+                  }
+                : undefined,
+            )),
+      projectSecretKeysJson: process.env.VOID_PLATFORM_PROJECT_SECRET_KEYS_JSON || '',
+      projectSecretActiveKeyVersion:
+        process.env.VOID_PLATFORM_PROJECT_SECRET_ACTIVE_KEY_VERSION || '',
     });
+    if (credentialSetup) {
+      // Stop treating this as an untouched local draft before any database claim is attempted.
+      saveValues({ projectSecretKey: secrets.projectSecretKey });
+      existing = completePlatformSetupDraft(existing);
+    }
     const result = await installPlatform(plan, secrets, existing, {
       acquireDatabaseLifecycleLock: acquirePlatformDatabaseLifecycleLock,
       client,
@@ -300,27 +577,29 @@ export async function runPlatformLifecycleCommand(args: PlatformArgs): Promise<v
       outro(`Installation ${result.manifest.id} is safely checkpointed.`);
       return;
     }
+    if (result.waitingForSandboxDrain) {
+      note(
+        "The compatible candidate runtime is live in sandbox-drain maintenance mode and application traffic remains disabled. Preview bounded work with `void platform system sandbox-drain --plan`; follow any returned `nextCursor` with `--cursor '<value>'`. Then apply with `void platform system sandbox-drain --yes` and rerun until it reports DB-backed `complete: true`. Rerun this install command afterward to enable traffic.",
+        'Waiting for managed Sandbox drain',
+      );
+      outro(`Installation ${result.manifest.id} is safely checkpointed.`);
+      return;
+    }
     log.success(`${result.manifest.deployment.displayName} is installed at ${plan.apiUrl}.`);
+    if (!plan.deployment.application.zoneName) {
+      log.info(
+        'Apps will use workers.dev addresses. When your domain is ready: void platform domain set <domain>',
+      );
+    }
     outro('Run `void auth login`, then deploy an app with `void deploy --platform void`.');
+  } catch (error) {
+    if (existing && !args.plan) {
+      log.info('Continue with: void platform install --resume --name ' + existing.id);
+    }
+    throw error;
   } finally {
     release?.();
   }
-}
-
-function platformRuntimeTokenUrl(accountId: string): string {
-  const query = new URLSearchParams({ name: 'Void Platform Runtime' });
-  return `https://dash.cloudflare.com/?to=/${encodeURIComponent(accountId)}/api-tokens&${query}`;
-}
-
-function formatPlatformAuthenticationSetup(apiUrl: string, accountId: string): string {
-  return (
-    `Create a GitHub OAuth App with this callback URL:\n${apiUrl}/auth/callback\n\n` +
-    'For direct asset uploads, create an R2 API token with Object Read & Write access to this account.\n\n' +
-    `Create a separate, scoped Void runtime API token here:\n${platformRuntimeTokenUrl(accountId)}\n` +
-    'Account permissions: Workers Scripts: Edit, Workers Tail: Read, D1: Edit, Workers KV Storage: Edit, Workers R2 Storage: Edit, Queues: Edit, Account Analytics: Read.\n' +
-    'Zone permission for the application zone: SSL and Certificates: Edit.\n' +
-    'The runtime token provisions application resources; your browser OAuth session is used only for platform lifecycle operations.'
-  );
 }
 
 function formatPlatformRuntime(runtime: ReturnType<typeof loadPlatformRuntime>): string {
@@ -330,6 +609,48 @@ function formatPlatformRuntime(runtime: ReturnType<typeof loadPlatformRuntime>):
     `Revision: ${runtime.manifest.sourceRevision ?? 'not recorded'}`,
     `Manifest SHA-256: ${runtime.manifestSha256}`,
   ].join('\n');
+}
+
+export async function verifyPlatformAiGatewayPlan(
+  client: Parameters<typeof createPlatformInstallPlan>[0],
+  input: Parameters<typeof createPlatformInstallPlan>[1],
+  existing: PlatformInstallationManifest | null,
+  preview: Awaited<ReturnType<typeof createPlatformInstallPlan>>,
+  authoritativeProvisionIntents: boolean,
+): Promise<Awaited<ReturnType<typeof createPlatformInstallPlan>>> {
+  let verified: Awaited<ReturnType<typeof createPlatformInstallPlan>>;
+  try {
+    verified = await createPlatformInstallPlan(client, input, existing, {
+      authoritativeProvisionIntents,
+      provisioningSuffix: preview.provisioningSuffix,
+    });
+  } catch (error) {
+    if (
+      error instanceof PlatformCloudflareApiError &&
+      (error.status === 401 || error.status === 403) &&
+      error.requestPath?.includes('/ai-gateway/')
+    ) {
+      throw new Error(
+        'platform: The runtime token could not verify AI Gateway access. Include Account → AI Gateway → Edit for this account, then retry. No platform resources were created.',
+        { cause: error },
+      );
+    }
+    throw error;
+  }
+  const infrastructure = (plan: typeof preview) =>
+    plan.actions
+      .filter((action) => action.kind !== 'ai-gateway')
+      .map(({ action, id, key, kind, name }) => ({ action, id, key, kind, name }));
+  if (
+    verified.installationId !== preview.installationId ||
+    JSON.stringify(verified.deployment) !== JSON.stringify(preview.deployment) ||
+    JSON.stringify(infrastructure(verified)) !== JSON.stringify(infrastructure(preview))
+  ) {
+    throw new Error(
+      'platform: Resources changed while checking AI Gateway access. Rerun the command to review the updated plan. No platform resources were created.',
+    );
+  }
+  return verified;
 }
 
 export function assertNoninteractivePlatformMutationAcknowledged(
@@ -362,6 +683,7 @@ async function createInitialPlatformInstallPlan(
   if (existing || planOnly) {
     return createPlatformInstallPlan(client, input, existing, {
       authoritativeProvisionIntents,
+      allowUnverifiedAiGateway: true,
     });
   }
   let collision: unknown;
@@ -369,6 +691,7 @@ async function createInitialPlatformInstallPlan(
     try {
       return await createPlatformInstallPlan(client, input, null, {
         authoritativeProvisionIntents,
+        allowUnverifiedAiGateway: true,
         // A fresh apply receives a 128-bit resource namespace. Independent installers
         // therefore cannot accidentally choose the same Worker name during the API's
         // non-atomic create precondition window; installers resuming the SAME installation
@@ -391,7 +714,8 @@ async function createInitialPlatformInstallPlan(
 async function readAccounts(
   client: PlatformCloudflareClient,
 ): Promise<ReadonlyArray<CloudflareAccount>> {
-  await client.verifyToken();
+  // Listing authorized accounts works for browser OAuth and both account- and
+  // user-scoped API tokens. /user/tokens/verify only understands the latter.
   const accounts = await client.listAccounts();
   if (accounts.length === 0) {
     throw new Error('platform: This Cloudflare token has no accessible accounts.');
@@ -458,14 +782,21 @@ async function promptText(
   return value;
 }
 
-async function promptSecret(message: string, masked = true): Promise<string> {
+async function promptSecret(
+  message: string,
+  masked = true,
+  validate?: (value: string) => string | undefined,
+): Promise<string> {
   if (!process.stdin.isTTY) {
     throw new Error(
       `platform: ${message.replace(/:$/, '')} is required in non-interactive mode. Set the documented VOID_PLATFORM_* environment variable.`,
     );
   }
   const value = masked
-    ? await password({ message, validate: (input) => (input ? undefined : 'A value is required.') })
+    ? await password({
+        message,
+        validate: (input) => (input ? validate?.(input) : 'A value is required.'),
+      })
     : await text({ message, validate: (input) => (input ? undefined : 'A value is required.') });
   if (isCancel(value) || typeof value === 'symbol') {
     throw new Error('platform: Cancelled.');

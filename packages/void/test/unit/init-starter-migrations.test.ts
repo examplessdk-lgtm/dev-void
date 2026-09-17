@@ -37,7 +37,9 @@ afterEach(() => {
   }
 });
 
-describe('starter migration generation', () => {
+// Each case runs real Drizzle Kit subprocesses for generation and drift checking.
+// Windows CI needs more than the default five seconds to start both processes.
+describe('starter migration generation', { timeout: 30_000 }, () => {
   it('creates a sqlite starter migration that deploy sees as drift-free', () => {
     const root = createStarterApp('sqlite');
 

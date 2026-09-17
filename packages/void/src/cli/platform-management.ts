@@ -15,12 +15,16 @@ import {
   type PlatformInstallationManifest,
 } from '@void/platform';
 import type { PlatformArgs } from './platform-args.ts';
-import { resolvePlatformCloudflareCredential } from './platform-auth.ts';
+import {
+  assertPlatformOperatorCredentialCanApplyPlan,
+  resolvePlatformCloudflareCredential,
+} from './platform-auth.ts';
 import {
   hyperdriveOriginConfigHash,
   hyperdriveOriginFromConnectionString,
   hyperdriveOriginMatches,
   PlatformCloudflareClient,
+  verifyPlatformRuntimeTokenPermissions,
 } from './platform-cloudflare.ts';
 import {
   acquirePlatformDatabaseLifecycleLock,
@@ -160,6 +164,7 @@ export function selectAuthoritativePlatformManifest(
 export async function runInstalledPlatformCommand(args: PlatformArgs): Promise<void> {
   if (
     args.subcommand !== 'upgrade' &&
+    args.subcommand !== 'rollback' &&
     args.subcommand !== 'repair' &&
     args.subcommand !== 'disable' &&
     args.subcommand !== 'enable' &&
@@ -170,11 +175,13 @@ export async function runInstalledPlatformCommand(args: PlatformArgs): Promise<v
   assertNoninteractivePlatformMutationAcknowledged(args, process.stdin.isTTY === true);
   const manifest = await resolveInstalledPlatformManifest(args.selector);
   const operatorCredential = await resolvePlatformCloudflareCredential();
-  const client = new PlatformCloudflareClient(operatorCredential.token);
+  const operatorClient = new PlatformCloudflareClient(operatorCredential.token);
   const runtime =
     args.subcommand === 'uninstall' || args.subcommand === 'disable'
       ? null
       : loadPlatformRuntime(args.runtime);
+  const rollbackSourceRuntime =
+    args.subcommand === 'rollback' ? loadPlatformRuntime(args.fromRuntime) : null;
 
   const execute = async (
     currentManifest: PlatformInstallationManifest,
@@ -182,7 +189,16 @@ export async function runInstalledPlatformCommand(args: PlatformArgs): Promise<v
     databaseCheckpointExists = false,
   ): Promise<void> => {
     const manifest = currentManifest;
+    if (args.subcommand === 'rollback') {
+      assertPlatformRollbackCompatibility(manifest, runtime!, rollbackSourceRuntime!);
+    }
     const recovery = readInstallationRecoverySecrets(manifest);
+    const gatewayToken =
+      process.env.VOID_PLATFORM_RUNTIME_CLOUDFLARE_API_TOKEN || recovery?.cloudflareApiToken;
+    const client =
+      operatorCredential.source === 'oauth' && gatewayToken
+        ? operatorClient.withAiGatewayToken(gatewayToken)
+        : operatorClient;
     const databaseUrl = resolvePlatformInstallDatabaseUrl(recovery, manifest);
 
     if (args.subcommand === 'disable') {
@@ -221,14 +237,17 @@ export async function runInstalledPlatformCommand(args: PlatformArgs): Promise<v
     const plan = await createPlatformInstallPlan(client, planInput, manifest, {
       authoritativeProvisionIntents: databaseCheckpointExists,
       repairMissing: args.subcommand === 'repair',
+      allowUnverifiedAiGateway: args.plan,
     });
     note(
       formatPlatformInstallPlan(plan),
       args.subcommand === 'upgrade'
         ? 'Upgrade plan'
-        : args.subcommand === 'enable'
-          ? 'Enable plan'
-          : 'Repair plan',
+        : args.subcommand === 'rollback'
+          ? 'Rollback plan'
+          : args.subcommand === 'enable'
+            ? 'Enable plan'
+            : 'Repair plan',
     );
     note(
       [
@@ -243,6 +262,7 @@ export async function runInstalledPlatformCommand(args: PlatformArgs): Promise<v
       outro('No Cloudflare or local installation state was changed.');
       return;
     }
+    assertPlatformOperatorCredentialCanApplyPlan(operatorCredential, plan);
     const repairingMissingRoutingCheckpoint =
       args.subcommand === 'repair' &&
       plan.actions.some(
@@ -292,13 +312,29 @@ export async function runInstalledPlatformCommand(args: PlatformArgs): Promise<v
       checkpoint: recovery,
       databaseUrl,
       existingInstallation: true,
+      updateExistingWorkers: true,
       githubClientId: process.env.VOID_PLATFORM_GITHUB_CLIENT_ID || '',
       githubClientSecret: process.env.VOID_PLATFORM_GITHUB_CLIENT_SECRET || '',
       jwtSecret: process.env.VOID_PLATFORM_JWT_SECRET || '',
       projectSecretKey: process.env.VOID_PLATFORM_PROJECT_SECRET_KEY || '',
+      projectSecretKeysJson: process.env.VOID_PLATFORM_PROJECT_SECRET_KEYS_JSON || '',
+      projectSecretActiveKeyVersion:
+        process.env.VOID_PLATFORM_PROJECT_SECRET_ACTIVE_KEY_VERSION || '',
       r2AccessKeyId: process.env.VOID_PLATFORM_R2_ACCESS_KEY_ID || '',
       r2SecretAccessKey: process.env.VOID_PLATFORM_R2_SECRET_ACCESS_KEY || '',
     });
+    const runtimeTokenToPreflight = resolvePlatformRuntimeTokenToPreflight(plan, secrets);
+    if (runtimeTokenToPreflight) {
+      await verifyPlatformRuntimeTokenPermissions(
+        new PlatformCloudflareClient(runtimeTokenToPreflight),
+        {
+          accountId: manifest.account.id,
+          applicationDomain: deployment.application.baseDomain,
+          customDomains: plan.deployment.capabilities.customDomains,
+          zoneId: plan.zone?.id ?? null,
+        },
+      );
+    }
     const result = await installPlatform(plan, secrets, installation, {
       // runInstalledPlatformCommand holds the database session lock across the
       // entire replan and mutation sequence.
@@ -306,8 +342,12 @@ export async function runInstalledPlatformCommand(args: PlatformArgs): Promise<v
         Object.assign(async () => {}, {
           checkpoint: databaseLock?.checkpoint,
           prepareDatabase: databaseLock?.prepareDatabase,
+          prepareSandboxDrain: databaseLock?.prepareSandboxDrain,
+          requiredSafetyProtocols: databaseLock?.requiredSafetyProtocols,
+          verifyDatabase: databaseLock?.verifyDatabase,
         }),
       client,
+      databaseRollbackSource: rollbackSourceRuntime ?? undefined,
       runtime: runtime!,
       replanWorkers: async (recoveryManifest) =>
         (
@@ -328,7 +368,18 @@ export async function runInstalledPlatformCommand(args: PlatformArgs): Promise<v
       );
       return;
     }
-    log.success(`${deployment.displayName} is healthy at ${plan.apiUrl}.`);
+    if (result.waitingForSandboxDrain) {
+      note(
+        "The compatible candidate runtime is live in sandbox-drain maintenance mode and application traffic remains disabled. Preview bounded work with `void platform system sandbox-drain --plan`; follow any returned `nextCursor` with `--cursor '<value>'`. Then apply with `void platform system sandbox-drain --yes` and rerun until it reports DB-backed `complete: true`. Rerun this lifecycle command afterward to enable traffic.",
+        'Waiting for managed Sandbox drain',
+      );
+      return;
+    }
+    log.success(
+      args.subcommand === 'rollback'
+        ? `${deployment.displayName} is running compatible runtime ${runtime!.manifest.platformVersion}; PostgreSQL remains at schema ${rollbackSourceRuntime!.manifest.database.schemaDigest}.`
+        : `${deployment.displayName} is healthy at ${plan.apiUrl}.`,
+    );
   };
 
   if (args.plan) {
@@ -370,6 +421,82 @@ export async function runInstalledPlatformCommand(args: PlatformArgs): Promise<v
   } finally {
     release();
   }
+}
+
+export function assertPlatformRollbackCompatibility(
+  installation: PlatformInstallationManifest,
+  target: ReturnType<typeof loadPlatformRuntime>,
+  source: ReturnType<typeof loadPlatformRuntime>,
+): void {
+  if (!installation.runtime) {
+    throw new Error(
+      'platform: The installed runtime has no artifact provenance, so post-success rollback cannot identify its compatibility manifest.',
+    );
+  }
+  if (
+    source.manifest.platformVersion !== installation.platformVersion ||
+    source.manifestSha256 !== installation.runtime.manifestSha256
+  ) {
+    throw new Error(
+      'platform: --from-runtime does not exactly match the installed runtime artifact digest. Supply the runtime used by the current successful deployment.',
+    );
+  }
+  if (target.manifestSha256 === source.manifestSha256) {
+    throw new Error('platform: The rollback target is already the installed runtime artifact.');
+  }
+  if (target.manifest.database.lineage !== source.manifest.database.lineage) {
+    throw new Error('platform: The rollback target belongs to a different database lineage.');
+  }
+  const prefix = source.manifest.database.migrations.slice(
+    0,
+    target.manifest.database.migrations.length,
+  );
+  if (JSON.stringify(prefix) !== JSON.stringify(target.manifest.database.migrations)) {
+    throw new Error(
+      'platform: The rollback target database migrations are not an exact prefix of the installed runtime.',
+    );
+  }
+  const compatible = source.manifest.database.rollbackSafeFrom.some(
+    (entry) =>
+      entry.platformVersion === target.manifest.platformVersion &&
+      entry.schemaDigest === target.manifest.database.schemaDigest,
+  );
+  if (!compatible) {
+    throw new Error(
+      `platform: Installed runtime ${source.manifest.platformVersion} does not declare post-success rollback compatibility with ${target.manifest.platformVersion} at schema ${target.manifest.database.schemaDigest}.`,
+    );
+  }
+  if (installation.databaseSchemaDigest !== source.manifest.database.schemaDigest) {
+    throw new Error(
+      'platform: The authoritative installation checkpoint does not record the installed runtime database schema. Repair or roll forward before rollback.',
+    );
+  }
+  if (
+    (target.manifest.safetyProtocols?.sandboxDrain ?? 0) <
+    (installation.safetyProtocols?.sandboxDrain ?? 0)
+  ) {
+    throw new Error(
+      'platform: The rollback target predates the installed sandbox-drain safety protocol.',
+    );
+  }
+}
+
+export function resolvePlatformRuntimeTokenToPreflight(
+  plan: {
+    actions: ReadonlyArray<{ action: string; kind: string }>;
+  },
+  secrets: Pick<
+    ReturnType<typeof createPlatformInstallationSecrets>,
+    'cloudflareApiToken' | 'workerSecretUpdates'
+  >,
+): string {
+  const explicitUpdate = secrets.workerSecretUpdates?.CF_API_TOKEN;
+  if (explicitUpdate) {
+    return explicitUpdate;
+  }
+  return plan.actions.some((action) => action.kind === 'worker' && action.action === 'create')
+    ? secrets.cloudflareApiToken
+    : '';
 }
 
 export async function resolveInstalledPlatformManifest(
@@ -467,7 +594,7 @@ export async function disablePlatform(
   }
   try {
     await writeRemoteManifestIfPresent(client, next);
-    const zone = requireResource(next, 'zone');
+    const zone = next.resources.find((resource) => resource.key === 'zone');
     const routing = requireResource(next, 'routing-kv');
     const trafficGeneration = currentTrafficGeneration(next);
     await client.putKvValue(
@@ -479,7 +606,7 @@ export async function disablePlatform(
     const trackedTraffic = trackedPlatformWorkerTraffic(next);
     await client.removeRoutes(
       next.account.id,
-      missing.has(zone.key) ? null : zone.id,
+      !zone || missing.has(zone.key) ? null : zone.id,
       trackedTraffic,
     );
     next = markTrafficAttachmentsRetained(next);

@@ -1,6 +1,7 @@
+import { verifyUsageEnvelope } from '@voidcloud/api/usage-auth';
 import { describe, it, expect } from 'vite-plus/test';
 import type { Env } from '../../src/env.ts';
-import { recordRequest } from '../../src/metering.ts';
+import { recordRequest, sendUsageEvent } from '../../src/metering.ts';
 
 function createMockEnv(): { env: Env; writes: Array<unknown> } {
   const writes: Array<unknown> = [];
@@ -128,5 +129,42 @@ describe('recordRequest', () => {
     expect(writes).toHaveLength(5);
     const recordedTypes = (writes as Array<{ blobs: Array<string> }>).map((w) => w.blobs[1]);
     expect(recordedTypes).toEqual(['api', 'static', 'ssr', 'isr', 'websocket']);
+  });
+});
+
+describe('sendUsageEvent', () => {
+  const event = {
+    projectId: 'project-1',
+    userId: 'user-1',
+    slug: 'my-app',
+    requests: 1,
+    responseBytes: 123,
+  };
+
+  it('publishes an authenticated dispatch envelope with the private KV key', async () => {
+    const key = 'dispatch-usage-test-key';
+    const sent: Array<unknown> = [];
+    const env = {
+      ROUTING: { get: async () => key },
+      USAGE_QUEUE: { send: async (message: unknown) => sent.push(message) },
+    } as unknown as Env;
+
+    await sendUsageEvent(env, event);
+
+    expect(sent).toHaveLength(1);
+    const envelope = await verifyUsageEnvelope<typeof event>(sent[0], key);
+    expect(envelope?.source).toBe('dispatch');
+    expect(envelope?.event).toEqual(event);
+  });
+
+  it('does not emit an unsigned compatibility frame while the key is unavailable', async () => {
+    const sent: Array<unknown> = [];
+    const env = {
+      ROUTING: { get: async () => null },
+      USAGE_QUEUE: { send: async (message: unknown) => sent.push(message) },
+    } as unknown as Env;
+
+    await expect(sendUsageEvent(env, event)).rejects.toThrow('Usage metering is not initialized');
+    expect(sent).toEqual([]);
   });
 });

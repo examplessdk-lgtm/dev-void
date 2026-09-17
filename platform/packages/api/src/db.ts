@@ -46,6 +46,11 @@ import {
 } from './schema.ts';
 import type { DomainVerificationData, GitHubInstallationRepository } from './schema.ts';
 import type { AllowlistEntry } from './signup-allowlist.ts';
+import {
+  isAdminSuspended,
+  REASON_REQUESTS_EXCEEDED,
+  REASON_SANDBOX_RUNTIME_EXCEEDED,
+} from './suspension.ts';
 import type { PlanId } from './tiers.ts';
 import type {
   Build,
@@ -144,19 +149,6 @@ export class SelfHostedSignupRestrictedError extends Error {
     super('Self-hosted platform signup is restricted.');
     this.name = 'SelfHostedSignupRestrictedError';
   }
-}
-
-export async function getUserByProvider(
-  db: Db,
-  provider: string,
-  providerId: string,
-): Promise<User | null> {
-  const [row] = await db
-    .select()
-    .from(users)
-    .where(and(eq(users.provider, provider), eq(users.provider_id, providerId)))
-    .limit(1);
-  return row ?? null;
 }
 
 export async function getUserByEmail(db: Db, email: string): Promise<User | null> {
@@ -864,21 +856,6 @@ export async function markDeploymentRetained(
   await db.update(deployments).set({ retained }).where(eq(deployments.id, deploymentId));
 }
 
-/**
- * Mark a deployment's worker bundle as durably persisted to R2 under
- * `worker-bundles/{project_id}/{deployment_id}/`. Set immediately AFTER
- * `persistWorkerBundle` resolves and BEFORE any cancellation check, so
- * the invariant `bundle_stored=true ⇒ rollbackable` holds: a future
- * rollback can validate the flag before invoking `replayWorkerBundle`.
- *
- * Static / SPA deploys never call this — they have no worker module to
- * bundle (their assets are content-addressed in R2 already), so their
- * `bundle_stored` correctly remains false.
- */
-export async function markDeploymentBundleStored(db: Db, deploymentId: string): Promise<void> {
-  await db.update(deployments).set({ bundle_stored: true }).where(eq(deployments.id, deploymentId));
-}
-
 export async function setAppliedMigrations(
   db: Db,
   deploymentId: string,
@@ -1273,19 +1250,6 @@ export async function listProjectSecretNames(
     .orderBy(asc(projectSecrets.name));
 }
 
-export async function getProjectSecret(
-  db: Db,
-  projectId: string,
-  name: string,
-): Promise<ProjectSecret | null> {
-  const [row] = await db
-    .select()
-    .from(projectSecrets)
-    .where(and(eq(projectSecrets.project_id, projectId), eq(projectSecrets.name, name)))
-    .limit(1);
-  return row ?? null;
-}
-
 export async function getProjectSecrets(
   db: Db,
   projectId: string,
@@ -1374,12 +1338,6 @@ export async function getProjectDatabaseUrl(
   return row ?? null;
 }
 
-export async function deleteProjectDatabaseUrl(db: Db, projectId: string): Promise<void> {
-  await db
-    .delete(projectDatabaseCredentials)
-    .where(eq(projectDatabaseCredentials.project_id, projectId));
-}
-
 // --- Resources ---
 
 export async function createResource(
@@ -1421,64 +1379,6 @@ export async function getResourceByBinding(
       ),
     )
     .then((rows) => rows[0]);
-}
-
-/**
- * Upsert a `container` resource row, returning the prior `cf_id` when an
- * existing row's id was updated to a new application id.
- *
- * Container applications can be replaced out-of-band: the CF API can return
- * 404 when an operator deletes a stale same-name app (or the namespace-mismatch
- * remediation the deploy path now relies on tells the operator to delete it).
- * In those cases `upsertSandboxContainerApplication` POSTs a fresh app and
- * returns a new `application.id`. The old `createResource`-only path skipped
- * persistence whenever a row already existed for the binding, leaving the DB
- * pointing at a dead `cf_id` — cleanup later 404s on that id and the new app
- * leaks. This helper closes that hole by reconciling on the natural unique
- * key `(project_id, type, binding_name)`.
- *
- * Returns `{ priorCfId }` so callers can log the transition. `priorCfId` is
- * `null` when a new row was inserted, the same string as `cfId` when the row
- * already pointed at the same id (no-op), and the prior id when an existing
- * row was updated to point at a new application.
- */
-export async function upsertContainerResource(
-  db: Db,
-  projectId: string,
-  bindingName: string,
-  cfId: string,
-): Promise<{ priorCfId: string | null }> {
-  // Read first so we can report the prior cf_id even on the update path.
-  // Drizzle's RETURNING returns post-update columns; without this read we
-  // could not distinguish "inserted" from "updated to same id" from
-  // "updated to a new id" cleanly.
-  const prior = await db
-    .select({ cf_id: resources.cf_id })
-    .from(resources)
-    .where(
-      and(
-        eq(resources.project_id, projectId),
-        eq(resources.type, 'container'),
-        eq(resources.binding_name, bindingName),
-      ),
-    )
-    .then((rows) => rows[0]);
-
-  await db
-    .insert(resources)
-    .values({
-      id: generateId('res'),
-      project_id: projectId,
-      type: 'container',
-      cf_id: cfId,
-      binding_name: bindingName,
-    })
-    .onConflictDoUpdate({
-      target: [resources.project_id, resources.type, resources.binding_name],
-      set: { cf_id: cfId },
-    });
-
-  return { priorCfId: prior?.cf_id ?? null };
 }
 
 // --- Domains ---
@@ -1635,10 +1535,6 @@ export async function deleteDomainIfPending(db: Db, id: string): Promise<boolean
     .where(and(eq(domains.id, id), eq(domains.status, 'pending')))
     .returning({ id: domains.id });
   return deleted.length > 0;
-}
-
-export async function deleteProjectDomains(db: Db, projectId: string): Promise<void> {
-  await db.delete(domains).where(eq(domains.project_id, projectId));
 }
 
 // --- Email destinations ---
@@ -2090,14 +1986,6 @@ export async function promoteEmailDestinationWithOwnerAudit(
 
 // --- Deletion ---
 
-export async function deleteProjectResources(db: Db, projectId: string): Promise<void> {
-  await db.delete(resources).where(eq(resources.project_id, projectId));
-}
-
-export async function deleteProjectDeployments(db: Db, projectId: string): Promise<void> {
-  await db.delete(deployments).where(eq(deployments.project_id, projectId));
-}
-
 export async function deleteProject(db: Db, id: string): Promise<void> {
   await db.delete(projects).where(eq(projects.id, id));
 }
@@ -2249,8 +2137,85 @@ export async function getCliVersionDeploymentStats(
     .orderBy(desc(sql`count(*)`));
 }
 
+export class LastAdminError extends Error {
+  constructor() {
+    super('The last active administrator cannot be deleted, suspended, or demoted.');
+    this.name = 'LastAdminError';
+  }
+}
+
+/** Keep this transaction limited to database work, never external cleanup. */
+async function withAdminRemovalGuard<T>(
+  db: Db,
+  id: string,
+  change: (db: Db, user: User | null) => Promise<T>,
+): Promise<T> {
+  return db.transaction(async (tx) => {
+    // Serialize the check and access change with other removals and bootstrap.
+    // A count outside this lock lets two administrators remove each other.
+    await tx.execute(sql`LOCK TABLE ${users} IN SHARE ROW EXCLUSIVE MODE`);
+    const transactionDb = tx as unknown as Db;
+    const user = await getUser(transactionDb, id);
+    if (user?.role === 'admin') {
+      const others = await tx
+        .select({ suspended_reason: users.suspended_reason })
+        .from(users)
+        .where(and(eq(users.role, 'admin'), ne(users.id, id)));
+      if (!others.some((admin) => !isAdminSuspended(admin.suspended_reason))) {
+        throw new LastAdminError();
+      }
+    }
+    return change(transactionDb, user);
+  });
+}
+
+/**
+ * Revoke administrator access before external deletion/suspension work begins.
+ * This durable change prevents another removal from counting this administrator
+ * while cleanup is in flight. Keep it on cleanup failure so retries stay safe.
+ */
+export async function prepareUserRemoval(
+  db: Db,
+  id: string,
+  action: { kind: 'delete' } | { kind: 'suspend'; reason: string },
+  dryRun = false,
+): Promise<User | null> {
+  return withAdminRemovalGuard(db, id, async (tx, user) => {
+    if (user?.role === 'admin' && !dryRun) {
+      await tx
+        .update(users)
+        .set(action.kind === 'delete' ? { role: 'user' } : { suspended_reason: action.reason })
+        .where(eq(users.id, id));
+    }
+    return user;
+  });
+}
+
 export async function suspendUser(db: Db, id: string, reason: string): Promise<void> {
-  await db.update(users).set({ suspended_reason: reason }).where(eq(users.id, id));
+  const suspend = async (target: Db) => {
+    await target.update(users).set({ suspended_reason: reason }).where(eq(users.id, id));
+  };
+  if (isAdminSuspended(reason)) {
+    await withAdminRemovalGuard(db, id, suspend);
+  } else {
+    // Usage limits suspend app traffic, not administrator access. A delayed
+    // quota write must not undo an administrator's manual access revocation.
+    await db
+      .update(users)
+      .set({ suspended_reason: reason })
+      .where(
+        and(
+          eq(users.id, id),
+          or(
+            isNull(users.suspended_reason),
+            inArray(users.suspended_reason, [
+              REASON_REQUESTS_EXCEEDED,
+              REASON_SANDBOX_RUNTIME_EXCEEDED,
+            ]),
+          ),
+        ),
+      );
+  }
 }
 
 export async function unsuspendUser(db: Db, id: string): Promise<void> {
@@ -2258,19 +2223,20 @@ export async function unsuspendUser(db: Db, id: string): Promise<void> {
 }
 
 export async function updateUserRole(db: Db, id: string, role: 'user' | 'admin'): Promise<void> {
-  await db.update(users).set({ role }).where(eq(users.id, id));
+  const update = async (target: Db) => {
+    await target.update(users).set({ role }).where(eq(users.id, id));
+  };
+  if (role === 'user') {
+    await withAdminRemovalGuard(db, id, update);
+  } else {
+    await update(db);
+  }
 }
 
 export async function deleteUser(db: Db, id: string): Promise<void> {
-  await db.delete(users).where(eq(users.id, id));
-}
-
-export async function getAllProjects(
-  db: Db,
-  limit: number,
-  offset: number,
-): Promise<ReadonlyArray<Project>> {
-  return db.select().from(projects).orderBy(desc(projects.created_at)).limit(limit).offset(offset);
+  await withAdminRemovalGuard(db, id, async (tx) => {
+    await tx.delete(users).where(eq(users.id, id));
+  });
 }
 
 function getLatestDeploymentByProjectSubquery(db: Db) {
@@ -2394,16 +2360,6 @@ export async function getFirstAdmin(db: Db) {
 
 export async function updateUserProviderId(db: Db, id: string, providerId: string): Promise<void> {
   await db.update(users).set({ provider_id: providerId }).where(eq(users.id, id));
-}
-
-export async function getAllUsersWithPlan(db: Db) {
-  return db
-    .select({
-      id: users.id,
-      plan: users.plan,
-      billing_cycle_start: users.billing_cycle_start,
-    })
-    .from(users);
 }
 
 export async function getUsersWithProjectsBatch(db: Db, limit: number, offset: number) {
@@ -2569,14 +2525,6 @@ export async function unsuspendUserIfReason(db: Db, id: string, reason: string):
 
 // --- Platform Events ---
 
-export async function createPlatformEvent(
-  db: Db,
-  event: Omit<PlatformEvent, 'created_at'>,
-): Promise<PlatformEvent> {
-  const [row] = await db.insert(platformEvents).values(event).returning();
-  return row;
-}
-
 export async function updatePlatformEventStatus(
   db: Db,
   id: string,
@@ -2587,13 +2535,6 @@ export async function updatePlatformEventStatus(
     .update(platformEvents)
     .set({ status, error_message: errorMessage ?? null })
     .where(eq(platformEvents.id, id));
-}
-
-export async function skipPendingBatchEvents(db: Db, batchId: string): Promise<void> {
-  await db
-    .update(platformEvents)
-    .set({ status: 'skipped' })
-    .where(and(eq(platformEvents.batch_id, batchId), eq(platformEvents.status, 'pending')));
 }
 
 export async function getPlatformEventsByBatchId(
@@ -3019,19 +2960,6 @@ function updatedRowCount(result: { rowCount?: number | null; affectedRows?: numb
 }
 
 /**
- * Count a user's in-flight builds (statuses `starting`/`building`/`deploying`).
- * Used by the scheduler to enforce per-user tier build concurrency before
- * claiming a queued build.
- */
-export async function countUserActiveBuilds(db: Db, userId: string): Promise<number> {
-  const [result] = await db
-    .select({ count: count() })
-    .from(builds)
-    .where(and(eq(builds.user_id, userId), inArray(builds.status, ACTIVE_BUILD_STATUSES)));
-  return result?.count ?? 0;
-}
-
-/**
  * The oldest queued container build for each project that has NO active build
  * (at most one row per project per tick). Only `container` builds are scheduled
  * by the platform — `github_actions` builds run on GitHub's runners and never
@@ -3173,59 +3101,6 @@ export async function hasQueuedContainerBuilds(db: Db): Promise<boolean> {
 }
 
 /**
- * Supersede older queued container builds when a newer push arrives for the
- * same project+branch, so the newest commit wins instead of whichever build
- * happens to finish last. Only QUEUED rows are cancelled — already-running
- * builds are left alone (cancelling them would waste in-flight compute).
- */
-export async function cancelQueuedBuildsForProjectBranch(
-  db: Db,
-  projectId: string,
-  branch: string,
-): Promise<void> {
-  await db
-    .update(builds)
-    .set({ status: 'cancelled', error: 'superseded by newer push', completed_at: sql`now()` })
-    .where(
-      and(
-        eq(builds.project_id, projectId),
-        eq(builds.branch, branch),
-        eq(builds.status, 'queued'),
-        eq(builds.executor, 'container'),
-      ),
-    );
-}
-
-/**
- * The newest non-terminal (queued/starting/building/deploying) container build
- * for this exact commit on this project+branch, or null. Used to make webhook
- * redelivery idempotent — a redelivered push for a commit already in flight
- * must not create a duplicate build.
- */
-export async function findNonTerminalBuildForCommit(
-  db: Db,
-  projectId: string,
-  branch: string,
-  commitSha: string,
-): Promise<Build | null> {
-  const [row] = await db
-    .select()
-    .from(builds)
-    .where(
-      and(
-        eq(builds.project_id, projectId),
-        eq(builds.branch, branch),
-        eq(builds.commit_sha, commitSha),
-        inArray(builds.status, ['queued', 'starting', 'building', 'deploying']),
-        eq(builds.executor, 'container'),
-      ),
-    )
-    .orderBy(desc(builds.created_at))
-    .limit(1);
-  return row ?? null;
-}
-
-/**
  * Atomically supersede older queued container builds and enqueue a new one for
  * a push, under a per-project FOR UPDATE lock so concurrent webhook deliveries
  * for the same project+branch can't interleave their supersede+create steps
@@ -3287,16 +3162,32 @@ export async function findNonTerminalBuildForCommit(
  * BEFORE this tx is caught. The same lock order in both paths means no deadlock,
  * and the plain read avoids any lock-order concern on `github_installations`.
  *
- * FAILS CLOSED: returns false unless the row exists AND `status === 'active'` AND
- * the repo is still in the install's selection — an `all`-repos install grants
- * every repo (membership not enforced, so the repo id is irrelevant), a `selected`
- * install requires the repo's immutable numeric id to be in the cached set. A null
- * `repositoryId` fails closed for a `selected` install (membership unprovable by
- * id) but an active `all` install still grants coverage. Mirrors the membership
- * predicate in `getGitHubActionsConnectionsByRepo` / `getGitHubConnectionsByRepo`.
+ * FAILS CLOSED unless the exact connection still belongs to the project, has
+ * durable authority, and its active installation still covers the repo. Personal
+ * authority is the installation owner matching the project owner. Organization
+ * authority is `authorized_by_user_id` matching the project owner, written only
+ * after per-repo OAuth proof. Legacy organization rows are null and stop here.
+ * An `all` install covers every repo; a `selected` install requires the immutable
+ * repo id in its cache. This is the shared predicate used by webhook and OIDC
+ * resolvers as well as enqueue and final startup checks.
  */
+function githubConnectionAuthorityClause() {
+  return or(
+    and(
+      eq(githubInstallations.account_type, 'User'),
+      eq(githubInstallations.user_id, projects.user_id),
+    ),
+    and(
+      eq(githubInstallations.account_type, 'Organization'),
+      eq(githubConnections.authorized_by_user_id, projects.user_id),
+    ),
+  );
+}
+
 async function installationCoversRepoInTx(
   tx: Db,
+  connectionId: string,
+  projectId: string,
   installationId: string,
   repositoryId: string | null,
 ): Promise<boolean> {
@@ -3306,15 +3197,20 @@ async function installationCoversRepoInTx(
   // BEFORE the `all` branch (the old unconditional `return false`) wrongly treated
   // a legacy null-id connection on an `all` install as install-revoked.
   const [row] = await tx
-    .select({
-      status: githubInstallations.status,
-      repository_selection: githubInstallations.repository_selection,
-    })
-    .from(githubInstallations)
+    .select({ id: githubConnections.id })
+    .from(githubConnections)
+    .innerJoin(projects, eq(githubConnections.project_id, projects.id))
+    .innerJoin(
+      githubInstallations,
+      eq(githubConnections.installation_id, githubInstallations.installation_id),
+    )
     .where(
       and(
+        eq(githubConnections.id, connectionId),
+        eq(githubConnections.project_id, projectId),
         eq(githubInstallations.installation_id, installationId),
         eq(githubInstallations.status, 'active'),
+        githubConnectionAuthorityClause(),
         or(
           eq(githubInstallations.repository_selection, 'all'),
           repositoryId === null
@@ -3346,24 +3242,34 @@ async function installationCoversRepoInTx(
  */
 export async function installationCoversRepo(
   db: Db,
+  connectionId: string | null | undefined,
+  projectId: string,
   installationId: string,
   repositoryId: string | null,
 ): Promise<boolean> {
+  if (!connectionId) {
+    return false;
+  }
   // An `all`-repos install grants every repo regardless of id; only a `selected`
   // install needs the immutable numeric id in the cached set, so a null repo id
   // can't match there and fails closed via the `false` arm below. Checking null
   // BEFORE the `all` branch (the old unconditional `return false`) wrongly treated
   // a legacy null-id connection on an `all` install as install-revoked.
   const [row] = await db
-    .select({
-      status: githubInstallations.status,
-      repository_selection: githubInstallations.repository_selection,
-    })
-    .from(githubInstallations)
+    .select({ id: githubConnections.id })
+    .from(githubConnections)
+    .innerJoin(projects, eq(githubConnections.project_id, projects.id))
+    .innerJoin(
+      githubInstallations,
+      eq(githubConnections.installation_id, githubInstallations.installation_id),
+    )
     .where(
       and(
+        eq(githubConnections.id, connectionId),
+        eq(githubConnections.project_id, projectId),
         eq(githubInstallations.installation_id, installationId),
         eq(githubInstallations.status, 'active'),
+        githubConnectionAuthorityClause(),
         or(
           eq(githubInstallations.repository_selection, 'all'),
           repositoryId === null
@@ -3471,6 +3377,8 @@ export async function supersedeAndCreateContainerBuild(
     if (
       !(await installationCoversRepoInTx(
         tx as unknown as Db,
+        args.connectionId,
+        args.projectId,
         args.installationId,
         args.repositoryId,
       ))
@@ -3592,62 +3500,14 @@ export async function supersedeAndCreateContainerBuild(
 }
 
 /**
- * Atomically claim a queued build for starting. The `WHERE id=? AND
- * status='queued'` guard plus `RETURNING` removes the read-then-write race:
- * only one caller can flip a given build out of `queued`, so two schedulers
- * racing the same build will see exactly one non-null return. Stamps
- * `started_at` at claim time.
- */
-export async function claimBuildForStart(db: Db, id: string): Promise<Build | null> {
-  const [row] = await db
-    .update(builds)
-    .set({ status: 'starting', started_at: sql`now()` })
-    .where(and(eq(builds.id, id), eq(builds.status, 'queued')))
-    .returning();
-  return row ?? null;
-}
-
-/**
- * Look up a build by its owning project and the GitHub Actions `workflow_run.id`
- * recorded on the row at OIDC-exchange time. A GitHub `run_id` is unique only
- * WITHIN a repository, not globally, so build identity is scoped to the
- * connection's project: matching by `run_id` alone would let a `workflow_run`
- * webhook (or an OIDC reuse lookup) from one repo resolve a different project's
- * build that happens to share the numeric id. Used by the `workflow_run`
- * webhook (after resolving the connection by repo) to mark an Actions build
- * complete/failed, and by the OIDC exchange to reuse an in-flight build.
- *
- * A GitHub RERUN of the same `run_id` creates a fresh build once the prior
- * attempt is terminal, so a (project, run_id) can have multiple rows (one
- * active rerun + older terminal attempts). Active builds are ordered first so
- * the `workflow_run` webhook finalizes the in-flight rerun rather than an old
- * terminal row even when `created_at` ties; `created_at desc` breaks ties
- * within each group.
- */
-export async function getBuildByProjectAndRunId(
-  db: Db,
-  projectId: string,
-  githubRunId: string,
-): Promise<Build | null> {
-  const [row] = await db
-    .select()
-    .from(builds)
-    .where(and(eq(builds.project_id, projectId), eq(builds.github_run_id, githubRunId)))
-    .orderBy(sql`(${inArray(builds.status, ACTIVE_BUILD_STATUSES)}) desc`, desc(builds.created_at))
-    .limit(1);
-  return row ?? null;
-}
-
-/**
- * Resolve a build by `(project, run_id, run_attempt)` — the attempt-aware
- * counterpart of `getBuildByProjectAndRunId`. A GitHub RERUN reuses the same
- * `run_id` with an incremented `run_attempt`, so the `workflow_run` completion
+ * Resolve a build by `(project, run_id, run_attempt)`. A GitHub RERUN reuses
+ * the same `run_id` with an incremented `run_attempt`, so the `workflow_run` completion
  * handler must scope to the attempt: a redelivered/late completion for attempt
  * 1 must NOT resolve to attempt 2's active build (which would let it finalize
  * the wrong attempt). When `githubRunAttempt` is null (an old delivery whose
  * payload lacks `run_attempt`), it falls back to `IS NULL` so old null-attempt
  * rows still match. Active builds are ordered first (then `created_at desc`),
- * mirroring `getBuildByProjectAndRunId`, so the in-flight attempt wins on a tie.
+ * so the in-flight attempt wins on a tie.
  */
 export async function getBuildByProjectRunIdAndAttempt(
   db: Db,
@@ -3668,40 +3528,6 @@ export async function getBuildByProjectRunIdAndAttempt(
     .orderBy(sql`(${inArray(builds.status, ACTIVE_BUILD_STATUSES)}) desc`, desc(builds.created_at))
     .limit(1);
   return row ?? null;
-}
-
-/**
- * Terminalize every ACTIVE (`starting`/`building`/`deploying`) GitHub Actions
- * build for a project, marking them `cancelled` and stamping `completed_at`.
- *
- * Called when a project's GitHub connection is deleted. GitHub Actions builds
- * are created ACTIVE by the OIDC exchange and finalized by the `workflow_run`
- * webhook, which first resolves the CURRENT connection — so if the connection
- * is gone, a completion webhook is ignored and the build would stay active
- * forever, permanently consuming one of the owner's concurrency slots. Scoped
- * to `executor = 'github_actions'`: container builds free their slot via the
- * BuildManager DO timeout and must not be touched here. Returns the number of
- * builds terminalized.
- */
-export async function terminateActiveGithubActionsBuildsForProject(
-  db: Db,
-  projectId: string,
-): Promise<number> {
-  const result = await db
-    .update(builds)
-    .set({
-      status: 'cancelled',
-      error: sql`COALESCE(${builds.error}, 'github connection removed')`,
-      completed_at: sql`COALESCE(${builds.completed_at}, now())`,
-    })
-    .where(
-      and(
-        eq(builds.project_id, projectId),
-        eq(builds.executor, 'github_actions'),
-        inArray(builds.status, ACTIVE_BUILD_STATUSES),
-      ),
-    );
-  return result.rowCount ?? 0;
 }
 
 /**
@@ -4007,6 +3833,8 @@ export async function createGithubActionsBuildWithinLimit(
     if (
       !(await installationCoversRepoInTx(
         tx as unknown as Db,
+        args.connectionId,
+        args.projectId,
         args.installationId,
         args.repositoryId,
       ))
@@ -4248,6 +4076,10 @@ export async function createGitHubConnection(
     // pre-existing callers/tests compile; the connect handler always supplies it
     // and webhook/OIDC resolution keys on it (full_name is mutable).
     repositoryId?: string | null;
+    // Set only after an organization repository was proven with the project
+    // owner's own GitHub OAuth token. Legacy organization connections remain
+    // null and are rejected by every runtime resolver until reconnected.
+    authorizedByUserId?: string | null;
     branch?: string;
     buildExecutor?: GitHubConnection['build_executor'];
     // The `.github/workflows/*.yml` file the OIDC exchange binds the deploy
@@ -4266,6 +4098,7 @@ export async function createGitHubConnection(
       installation_id: args.installationId,
       repo_full_name: args.repoFullName,
       repository_id: args.repositoryId ?? null,
+      authorized_by_user_id: args.authorizedByUserId ?? null,
       branch: args.branch ?? 'main',
       build_executor: args.buildExecutor ?? 'container',
       ...(args.workflowPath !== undefined ? { workflow_path: args.workflowPath } : {}),
@@ -4283,6 +4116,58 @@ export async function getGitHubConnection(
     .from(githubConnections)
     .where(eq(githubConnections.project_id, projectId))
     .limit(1);
+  return row ?? null;
+}
+
+export async function hasGitHubConnectionAuthority(
+  db: Db,
+  connectionId: string,
+  projectId: string,
+): Promise<boolean> {
+  const [row] = await db
+    .select({ id: githubConnections.id })
+    .from(githubConnections)
+    .innerJoin(projects, eq(githubConnections.project_id, projects.id))
+    .innerJoin(
+      githubInstallations,
+      eq(githubConnections.installation_id, githubInstallations.installation_id),
+    )
+    .where(
+      and(
+        eq(githubConnections.id, connectionId),
+        eq(githubConnections.project_id, projectId),
+        githubConnectionAuthorityClause(),
+      ),
+    )
+    .limit(1);
+  return row !== undefined;
+}
+
+export async function authorizeGitHubOrganizationConnection(
+  db: Db,
+  args: {
+    projectId: string;
+    installationId: string;
+    repoFullName: string;
+    repositoryId: string;
+    userId: string;
+  },
+): Promise<GitHubConnection | null> {
+  const [row] = await db
+    .update(githubConnections)
+    .set({
+      authorized_by_user_id: args.userId,
+      repository_id: args.repositoryId,
+      updated_at: sql`now()`,
+    })
+    .where(
+      and(
+        eq(githubConnections.project_id, args.projectId),
+        eq(githubConnections.installation_id, args.installationId),
+        eq(githubConnections.repo_full_name, args.repoFullName),
+      ),
+    )
+    .returning();
   return row ?? null;
 }
 
@@ -4349,6 +4234,7 @@ export async function getGitHubConnectionsByRepo(
         eq(githubConnections.installation_id, installationId),
         matchClause,
         eq(githubInstallations.status, 'active'),
+        githubConnectionAuthorityClause(),
         or(
           // "all repositories" install => every repo is granted.
           eq(githubInstallations.repository_selection, 'all'),
@@ -4469,6 +4355,7 @@ export async function getGitHubActionsConnectionsByRepo(
           : eq(githubInstallations.account_id, repositoryOwnerId),
         eq(githubConnections.build_executor, 'github_actions'),
         eq(githubInstallations.status, 'active'),
+        githubConnectionAuthorityClause(),
         or(
           // "all repositories" install => every repo is granted.
           eq(githubInstallations.repository_selection, 'all'),
@@ -4640,7 +4527,9 @@ export async function getGitHubInstallationsByUser(
   db: Db,
   userId: string,
 ): Promise<ReadonlyArray<GitHubInstallation>> {
-  // Owner OR active member. The EXISTS correlates on the NUMERIC
+  // Personal-account owner OR active member. Organization `user_id` values
+  // written by older code are visibility hints, not authority, so they never
+  // satisfy this query without a live membership. The EXISTS correlates on the NUMERIC
   // `installation_id` (githubInstallations.installation_id) — the key the
   // membership cache is stored under — NOT the surrogate `.id`. The membership
   // arm honors the TTL (`expires_at > now()`, DB clock). owner-OR-EXISTS yields
@@ -4651,7 +4540,7 @@ export async function getGitHubInstallationsByUser(
     .from(githubInstallations)
     .where(
       or(
-        eq(githubInstallations.user_id, userId),
+        and(eq(githubInstallations.account_type, 'User'), eq(githubInstallations.user_id, userId)),
         sql`EXISTS (SELECT 1 FROM ${githubInstallationMembers} m
              WHERE m.installation_id = ${githubInstallations.installation_id}
                AND m.user_id = ${userId}
@@ -4755,7 +4644,13 @@ export async function linkGitHubInstallationToUser(
   await db
     .update(githubInstallations)
     .set({ user_id: userId, updated_at: sql`now()` })
-    .where(and(eq(githubInstallations.account_id, accountId), isNull(githubInstallations.user_id)));
+    .where(
+      and(
+        eq(githubInstallations.account_id, accountId),
+        eq(githubInstallations.account_type, 'User'),
+        isNull(githubInstallations.user_id),
+      ),
+    );
 }
 
 /**
@@ -5127,21 +5022,6 @@ export async function getInstallationRevocationAt(
     .limit(1);
   const value = rows[0]?.revokedAtMs;
   return value == null ? null : Number(value);
-}
-
-/**
- * True iff ANY revocation tombstone exists for this installation (any github account).
- * Used to tell a CLEARED-owner org install (member_removed wrote a tombstone atomically
- * with the owner-clear) apart from a FRESH webhook-precreated null-owner org install
- * (no tombstone), so the install callback never re-owns a cleared install (R15-1).
- */
-export async function hasInstallationRevocation(db: Db, installationId: string): Promise<boolean> {
-  const rows = await db
-    .select({ one: sql`1` })
-    .from(githubInstallationRevocations)
-    .where(eq(githubInstallationRevocations.installation_id, installationId))
-    .limit(1);
-  return rows.length > 0;
 }
 
 /**

@@ -456,15 +456,6 @@ export function readPendingInstallationSecrets(
   return readRecoveryMaterial(manifest, 'pending', directory);
 }
 
-export function removePendingInstallationSecrets(
-  manifest: PlatformInstallationManifest,
-  directory: string = platformRegistryDirectory(),
-): void {
-  const manifestPath = installationManifestPath(manifest.account.id, manifest.id, directory);
-  rmSync(manifestPath.replace(/\.json$/, '.secrets.enc'), { force: true });
-  rmSync(manifestPath.replace(/\.json$/, '.secrets'), { force: true });
-}
-
 export function promoteInstallationSecrets(
   manifest: PlatformInstallationManifest,
   directory: string = platformRegistryDirectory(),
@@ -485,9 +476,96 @@ export function readInstallationRecoverySecrets(
   manifest: PlatformInstallationManifest,
   directory: string = platformRegistryDirectory(),
 ): Record<string, string> | null {
-  return (
-    readRecoveryMaterial(manifest, 'recovery', directory) ??
-    readPendingInstallationSecrets(manifest, directory)
+  const pending = readPendingInstallationSecrets(manifest, directory);
+  if (!pending) {
+    return readRecoveryMaterial(manifest, 'recovery', directory);
+  }
+  const updateState = pendingWorkerSecretUpdateState(manifest, pending.workerSecretUpdatesJson);
+  if (updateState === 'stale') {
+    return readRecoveryMaterial(manifest, 'recovery', directory);
+  }
+  if (updateState === 'committed') {
+    return Object.fromEntries(
+      Object.entries(pending).filter(([name]) => name !== 'workerSecretUpdatesJson'),
+    );
+  }
+  return pending;
+}
+
+function pendingWorkerSecretUpdateState(
+  manifest: PlatformInstallationManifest,
+  value: string | undefined,
+): 'active' | 'committed' | 'stale' {
+  if (!value) {
+    return 'active';
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    // Preserve malformed pending material so the installer reports corruption.
+    return 'active';
+  }
+  if (
+    !parsed ||
+    typeof parsed !== 'object' ||
+    !('schema' in parsed) ||
+    parsed.schema !== 1 ||
+    !('id' in parsed) ||
+    typeof parsed.id !== 'string' ||
+    !('baselineGeneration' in parsed) ||
+    !Number.isSafeInteger(parsed.baselineGeneration) ||
+    !('generation' in parsed) ||
+    (parsed.generation !== null && !Number.isSafeInteger(parsed.generation))
+  ) {
+    return 'active';
+  }
+  return platformWorkerSecretUpdateIntentState(manifest, {
+    baselineGeneration: Number(parsed.baselineGeneration),
+    generation: parsed.generation === null ? null : Number(parsed.generation),
+    id: parsed.id,
+  });
+}
+
+export function platformWorkerSecretUpdateIntentState(
+  manifest: PlatformInstallationManifest,
+  intent: Readonly<{
+    baselineGeneration: number;
+    generation: number | null;
+    id: string;
+  }>,
+): 'active' | 'committed' | 'stale' {
+  const latestGeneration = latestPlatformWorkerCutoverGeneration(manifest);
+  const latestState = manifest.steps
+    .flatMap((step) => {
+      const match = /^worker-secret-updates:(\d+):(pending|committed)$/.exec(step.key);
+      return match ? [{ generation: Number(match[1]), id: step.resultHash, state: match[2] }] : [];
+    })
+    .sort(
+      (left, right) =>
+        right.generation - left.generation ||
+        (left.state === right.state ? 0 : left.state === 'committed' ? -1 : 1),
+    )[0];
+  if (!latestState) {
+    return intent.generation === null && intent.baselineGeneration === latestGeneration
+      ? 'active'
+      : 'stale';
+  }
+  if (latestState.generation !== latestGeneration || latestState.id !== intent.id) {
+    return 'stale';
+  }
+  return latestState.state === 'committed' ? 'committed' : 'active';
+}
+
+export function latestPlatformWorkerCutoverGeneration(
+  manifest: PlatformInstallationManifest,
+): number {
+  return Math.max(
+    0,
+    ...manifest.steps.flatMap((step) => {
+      const match = /^worker-(?:cutover|secret-updates|traffic-state):(\d+)/.exec(step.key);
+      return match ? [Number(match[1])] : [];
+    }),
   );
 }
 

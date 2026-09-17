@@ -1,6 +1,8 @@
-import { availableParallelism } from 'node:os';
+import { randomUUID } from 'node:crypto';
+import { availableParallelism, tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vite-plus';
+import { SuiteSequencer } from './test/sequencer.ts';
 
 const maxWorkers = process.env.CI ? 2 : Math.max(2, Math.floor(availableParallelism() * 0.75));
 
@@ -13,6 +15,7 @@ const e2eWorkerEnv = {
   VOID_E2E_CF_TOKEN: process.env.VOID_E2E_CF_TOKEN ?? '',
   VOID_E2E_CF_ACCOUNT_ID: process.env.VOID_E2E_CF_ACCOUNT_ID ?? '',
   VOID_E2E_RUN_ID: process.env.VOID_E2E_RUN_ID ?? '',
+  VOID_TEST_SOURCE_SNAPSHOTS: `${tmpdir().replaceAll('\\', '/')}/void-playground-sources-${randomUUID()}`,
 };
 
 // Windows CI runners are 2-3x slower for builds and server startup.
@@ -47,7 +50,7 @@ export default defineConfig({
       },
       'test:all': {
         command:
-          'vp fmt --check && vp lint && vp run lint:platform && vp run build:all && vp run check && vp test run',
+          'vp fmt --check && vp lint && vp run build:all && vp run lint:platform && vp run check && vp test run',
         // `vp run` passes ONLY the env vars a task declares to that task — not the full environment.
         // Without this, the gated live Cloudflare e2e's credentials never reach `vp test run`, so it
         // skips even when the CI job injects them. `untrackedEnv` forwards them without folding them
@@ -346,13 +349,12 @@ export default defineConfig({
   resolve: { alias: platformAlias },
   test: {
     silent: 'passed-only',
+    sequence: { sequencer: SuiteSequencer },
     projects: [
       {
         test: {
           name: 'unit',
           include: ['packages/*/test/unit/**/*.test.ts'],
-          // Share one worker pool with independent integrations. This lets long integration
-          // startups begin immediately while short unit files fill otherwise-idle workers.
           sequence: { groupOrder: 2 },
           maxWorkers,
         },
@@ -382,6 +384,9 @@ export default defineConfig({
           // Every integration file here owns its fixture directory, so one worker pool can
           // schedule the longest files first and fill idle slots across package boundaries.
           name: 'parallel-integration',
+          globalSetup: ['test/playground-snapshots.ts'],
+          // Bound simultaneous database engines and framework compilers locally.
+          // Unit tests still fill unused integration workers in the same phase.
           sequence: { groupOrder: 2 },
           // maxWorkers limits files, not describe.concurrent tests. On Windows CI, two files
           // at Vitest's default concurrency open up to ten isolated browser contexts at once.

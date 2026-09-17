@@ -1,3 +1,4 @@
+import { readUsageSigningKey, signUsageEvent } from '@voidcloud/api/usage-auth';
 import type { Env } from './env.ts';
 
 export type RequestType = 'api' | 'static' | 'ssr' | 'isr' | 'websocket';
@@ -193,5 +194,13 @@ export async function sendUsageEvent(
     failureKind?: FailureKind;
   },
 ): Promise<void> {
-  await env.USAGE_QUEUE.send(data);
+  const key = await readUsageSigningKey(env.ROUTING);
+  if (!key) {
+    // The API health check creates the key before installation traffic is
+    // enabled. During a staged upgrade, fail closed rather than emitting an
+    // unsigned frame the hardened consumer would (correctly) reject.
+    throw new Error('Usage metering is not initialized. Check the platform API /health endpoint.');
+  }
+  const eventId = crypto.randomUUID();
+  await env.USAGE_QUEUE.send(await signUsageEvent(key, 'dispatch', eventId, data));
 }

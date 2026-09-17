@@ -22,7 +22,7 @@ Add a direct connection for local development:
 DATABASE_URL=mysql://user:password@host:3306/app
 ```
 
-Void reads `.env.local` for `void dev` and `void db` commands. In production, the Worker connects through the inferred `HYPERDRIVE` binding.
+Void reads `.env` for `void dev` and `void db` commands. In production, the Worker connects through the inferred `HYPERDRIVE` binding.
 
 ## Define a schema
 
@@ -57,4 +57,4 @@ MySQL may implicitly commit schema changes. If a multi-statement migration fails
 
 ## Database commands
 
-`void db push`, `generate`, `migrate`, `status`, `reset`, `seed`, `execute`, `studio`, `export`, `rename-migrations`, and `set-url` all understand MySQL. Local commands use `DATABASE_URL` from `.env.local`; `--remote` execution and Studio use the encrypted URL stored for a linked Void project.
+`void db push`, `generate`, `migrate`, `status`, `reset`, `seed`, `execute`, `studio`, `export`, `rename-migrations`, and `set-url` all understand MySQL. Local commands use `DATABASE_URL` from `.env`; `--remote` execution and Studio use the encrypted URL stored for a linked Void project.

@@ -1,4 +1,5 @@
-import { requireRuntimeBinding } from './env.ts';
+import { DurableObject as CloudflareDurableObject } from 'cloudflare:workers';
+import { requireRuntimeBinding, withRuntimeEnv } from './env.ts';
 
 const DEFAULT_STORAGE_KEY = '__void_durable_state';
 
@@ -143,27 +144,34 @@ export function defineDurableState<
     return requireRuntimeBinding<DurableObjectNamespace>(bindingName);
   }
 
-  class VoidDurableState {
-    private value!: TState;
-    private ready: Promise<void>;
-    private queue: Promise<void> = Promise.resolve();
+  class VoidDurableState extends CloudflareDurableObject<TEnv> {
+    #value!: TState;
+    #ready: Promise<void>;
+    #queue: Promise<void> = Promise.resolve();
 
-    constructor(
-      private readonly objectState: DurableObjectState,
-      private readonly env: TEnv,
-    ) {
-      this.ready = objectState.blockConcurrencyWhile(() => this.load());
+    readonly #objectState: DurableObjectState;
+    readonly #runtimeEnv: TEnv;
+
+    constructor(objectState: DurableObjectState, env: TEnv) {
+      super(objectState, env);
+      this.#objectState = objectState;
+      this.#runtimeEnv = env;
+      this.#ready = objectState.blockConcurrencyWhile(() =>
+        withRuntimeEnv(this.#runtimeEnv, () => this.#load()),
+      );
     }
 
-    private async load(): Promise<void> {
-      const stored = await this.objectState.storage.get<StoredState<TState>>(storageKey);
+    async #load(): Promise<void> {
+      const stored = await this.#objectState.storage.get<StoredState<TState>>(storageKey);
       if (!stored) {
         const initial =
           typeof definition.initialState === 'function'
-            ? await (definition.initialState as (env: TEnv) => TState | Promise<TState>)(this.env)
+            ? await (definition.initialState as (env: TEnv) => TState | Promise<TState>)(
+                this.#runtimeEnv,
+              )
             : cloneInitialState(definition.initialState);
-        this.value = initial;
-        await this.persist();
+        this.#value = initial;
+        await this.#persist();
         return;
       }
       if (stored.__voidDurableState !== true || !Number.isInteger(stored.version)) {
@@ -183,63 +191,65 @@ export function defineDurableState<
         }
         value = await migration.migrate(value);
       }
-      this.value = value as TState;
+      this.#value = value as TState;
       if (stored.version !== version) {
-        await this.persist();
+        await this.#persist();
       }
     }
 
-    private persist(): Promise<void> {
-      return this.objectState.storage.put(storageKey, {
+    #persist(): Promise<void> {
+      return this.#objectState.storage.put(storageKey, {
         __voidDurableState: true,
         version,
-        value: this.value,
+        value: this.#value,
       } satisfies StoredState<TState>);
     }
 
-    private context(): DurableStateContext<TState, TEnv> {
+    #context(): DurableStateContext<TState, TEnv> {
       const instance = this;
       return {
         get state() {
-          return instance.value;
+          return instance.#value;
         },
         set state(value: TState) {
-          instance.value = value;
+          instance.#value = value;
         },
-        env: this.env,
-        id: this.objectState.id,
-        storage: this.objectState.storage,
-        setAlarm: (scheduledTime) => this.objectState.storage.setAlarm(scheduledTime),
-        deleteAlarm: () => this.objectState.storage.deleteAlarm(),
+        env: this.#runtimeEnv,
+        id: this.#objectState.id,
+        storage: this.#objectState.storage,
+        setAlarm: (scheduledTime) => this.#objectState.storage.setAlarm(scheduledTime),
+        deleteAlarm: () => this.#objectState.storage.deleteAlarm(),
       };
     }
 
-    private run<TResult>(operation: () => Promise<TResult>): Promise<TResult> {
-      const result = this.queue.then(async () => {
-        await this.ready;
-        const previousValue = structuredClone(this.value);
-        try {
-          const operationResult = await operation();
-          await this.persist();
-          return operationResult;
-        } catch (error) {
-          this.value = previousValue;
-          throw error;
-        }
+    #run<TResult>(operation: () => Promise<TResult>): Promise<TResult> {
+      return withRuntimeEnv(this.#runtimeEnv, () => {
+        const result = this.#queue.then(async () => {
+          await this.#ready;
+          const previousValue = structuredClone(this.#value);
+          try {
+            const operationResult = await operation();
+            await this.#persist();
+            return operationResult;
+          } catch (error) {
+            this.#value = previousValue;
+            throw error;
+          }
+        });
+        this.#queue = result.then(
+          () => undefined,
+          () => undefined,
+        );
+        return result;
       });
-      this.queue = result.then(
-        () => undefined,
-        () => undefined,
-      );
-      return result;
     }
 
     fetch(request: Request): Promise<Response> {
       if (!definition.fetch) {
         return Promise.resolve(new Response('Not Found', { status: 404 }));
       }
-      return this.run(async () => {
-        return definition.fetch!(this.context(), request);
+      return this.#run(async () => {
+        return definition.fetch!(this.#context(), request);
       });
     }
 
@@ -247,25 +257,31 @@ export function defineDurableState<
       if (!definition.alarm) {
         return Promise.resolve();
       }
-      return this.run(async () => {
-        await definition.alarm!(this.context());
+      return this.#run(async () => {
+        await definition.alarm!(this.#context());
       });
     }
-  }
-
-  for (const [name, method] of Object.entries(definition.methods)) {
-    if (name === 'fetch' || name === 'alarm' || name === 'constructor') {
-      throw new Error(`durable: method name '${name}' is reserved.`);
-    }
-    Object.defineProperty(VoidDurableState.prototype, name, {
-      enumerable: false,
-      value(this: VoidDurableState, ...args: Array<unknown>) {
-        return this['run'](async () => {
-          const runtimeMethod = method as DurableStateMethod<TState, TEnv, Array<unknown>, unknown>;
-          return runtimeMethod(this['context'](), ...args);
+    static {
+      for (const [name, method] of Object.entries(definition.methods)) {
+        if (name === 'fetch' || name === 'alarm' || name === 'constructor') {
+          throw new Error(`durable: method name '${name}' is reserved.`);
+        }
+        Object.defineProperty(this.prototype, name, {
+          enumerable: false,
+          value(this: VoidDurableState, ...args: Array<unknown>) {
+            return this.#run(async () => {
+              const runtimeMethod = method as DurableStateMethod<
+                TState,
+                TEnv,
+                Array<unknown>,
+                unknown
+              >;
+              return runtimeMethod(this.#context(), ...args);
+            });
+          },
         });
-      },
-    });
+      }
+    }
   }
 
   return {

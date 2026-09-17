@@ -4,7 +4,6 @@ import { join } from 'pathslash';
 import { describe, expect, it, vi } from 'vite-plus/test';
 import {
   expandDotenv,
-  mergeAndExpand,
   parseDotenv,
   parseDotenvFile,
   parseDotenvLine,
@@ -201,24 +200,5 @@ describe('expandDotenv — security', () => {
         process.env.VOID_DOTENV_EXPAND_TEST = previous;
       }
     }
-  });
-});
-
-describe('mergeAndExpand', () => {
-  it('later records win for conflicting keys, then expansion sees the union', () => {
-    const out = mergeAndExpand([
-      { BASE: 'https://one.com', URL: '${BASE}/v1' },
-      { BASE: 'https://two.com' },
-    ]);
-    expect(out).toEqual({
-      BASE: 'https://two.com',
-      URL: 'https://two.com/v1',
-    });
-  });
-
-  it('expands across file boundaries', () => {
-    // e.g. .env declares BASE, .env.local references it.
-    const out = mergeAndExpand([{ BASE: 'x' }, { URL: '${BASE}/y' }]);
-    expect(out).toEqual({ BASE: 'x', URL: 'x/y' });
   });
 });

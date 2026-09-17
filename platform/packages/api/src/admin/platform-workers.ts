@@ -63,10 +63,6 @@ export const PLATFORM_WORKERS: ReadonlyArray<PlatformWorker> = WORKER_DEFS.map((
 
 export type PlatformEnv = 'production' | 'staging';
 
-export function parseEnv(raw: string | undefined): PlatformEnv {
-  return raw === 'staging' ? 'staging' : 'production';
-}
-
 export function getScriptName(worker: PlatformWorker, env: PlatformEnv): string {
   return env === 'staging' ? worker.stagingScript : worker.prodScript;
 }

@@ -18,6 +18,7 @@ import {
   consumeOAuthNonce,
 } from '../../db.ts';
 import type { ApiEnv } from '../../env.ts';
+import { isAdminSuspended } from '../../suspension.ts';
 
 const app = new Hono<ApiEnv>();
 type AdminProvider = 'github' | 'google';
@@ -194,7 +195,7 @@ export async function handleAdminOAuthCallback(context: Context<ApiEnv>): Promis
     }
   }
 
-  if (!user || user.role !== 'admin') {
+  if (!user || user.role !== 'admin' || isAdminSuspended(user.suspended_reason)) {
     return context.html(
       '<h1>403 Forbidden</h1><p>Admin access required. You must have an admin account to sign in.</p>',
       403,

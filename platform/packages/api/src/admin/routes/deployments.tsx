@@ -7,6 +7,7 @@ import {
   getProject,
 } from '../../db.ts';
 import { type ApiEnv } from '../../env.ts';
+import { executeAuditedMutation, operatorAuditIntent } from '../../operator/audit.ts';
 import { OperatorError } from '../../operator/common.ts';
 import {
   deploymentLogs,
@@ -243,20 +244,33 @@ app.get('/:id', async (context) => {
 
 // POST /deployments/:id/cancel
 app.post('/:id/cancel', async (context) => {
-  const deployment = await getDeployment(context.get('db'), context.req.param('id'));
-  if (!deployment) {
-    return context.html('<h1>Deployment not found</h1>', 404);
-  }
+  const deploymentId = context.req.param('id');
+  return executeAuditedMutation(
+    context,
+    operatorAuditIntent(`deployments/${deploymentId}/cancel`),
+    async () => {
+      const deployment = await getDeployment(context.get('db'), deploymentId);
+      if (!deployment) {
+        return {
+          response: context.html('<h1>Deployment not found</h1>', 404),
+          succeeded: false,
+        };
+      }
 
-  try {
-    await requestDeploymentCancellation(context.get('db'), deployment.id);
-  } catch (error) {
-    if (error instanceof OperatorError) {
-      return context.text(error.message, error.status);
-    }
-    throw error;
-  }
-  return context.redirect(`/admin/deployments/${deployment.id}`);
+      try {
+        await requestDeploymentCancellation(context.get('db'), deployment.id);
+      } catch (error) {
+        if (error instanceof OperatorError) {
+          return { response: context.text(error.message, error.status), succeeded: false };
+        }
+        throw error;
+      }
+      return {
+        response: context.redirect(`/admin/deployments/${deployment.id}`),
+        succeeded: true,
+      };
+    },
+  );
 });
 
 // GET /deployments/:id/logs — shared historical log reader.

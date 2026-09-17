@@ -1,9 +1,10 @@
 import { log } from '@clack/prompts';
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
+import { cloudflareAuthEnvironment } from '../../src/cli/cloudflare-auth.ts';
 import {
+  assertPlatformOperatorCredentialCanApplyPlan,
   readWranglerOAuthCredential,
   resolvePlatformCloudflareCredential,
-  wranglerAuthEnvironment,
 } from '../../src/cli/platform-auth.ts';
 
 afterEach(() => {
@@ -13,6 +14,36 @@ afterEach(() => {
 });
 
 describe('platform Cloudflare authentication', () => {
+  it('requires an API token before browser OAuth applies zone or DNS writes', () => {
+    const action = (kind: 'dns-record' | 'zone', action: 'create' | 'reuse') => ({
+      action,
+      id: action === 'reuse' ? `${kind}-id` : null,
+      key: kind,
+      kind,
+      name: 'example.com',
+      reason: 'test',
+    });
+
+    expect(() =>
+      assertPlatformOperatorCredentialCanApplyPlan(
+        { source: 'oauth', token: 'browser-token' },
+        { actions: [action('zone', 'create'), action('dns-record', 'create')] },
+      ),
+    ).toThrow('Account → Zone → Edit and Zone → DNS → Edit');
+    expect(() =>
+      assertPlatformOperatorCredentialCanApplyPlan(
+        { source: 'oauth', token: 'browser-token' },
+        { actions: [action('zone', 'reuse'), action('dns-record', 'reuse')] },
+      ),
+    ).not.toThrow();
+    expect(() =>
+      assertPlatformOperatorCredentialCanApplyPlan(
+        { source: 'environment', token: 'scoped-token' },
+        { actions: [action('zone', 'create'), action('dns-record', 'create')] },
+      ),
+    ).not.toThrow();
+  });
+
   it('uses explicit environment credentials without invoking Wrangler', async () => {
     process.env.CLOUDFLARE_API_TOKEN = 'ci-token';
     const runWrangler = vi.fn();
@@ -90,7 +121,7 @@ describe('platform Cloudflare authentication', () => {
 
   it('does not expose platform recovery or service secrets to Wrangler auth commands', () => {
     expect(
-      wranglerAuthEnvironment({
+      cloudflareAuthEnvironment({
         CF_ACCESS_CLIENT_SECRET: 'access-secret',
         DATABASE_URL: 'postgres://secret',
         PATH: '/bin',

@@ -6,13 +6,11 @@ import type {
   emailDestinations,
   githubConnections,
   githubInstallationMembers,
-  githubInstallationRevocations,
   githubInstallations,
   invitations,
   oauthAccounts,
   platformEvents,
   projectDatabaseCredentials,
-  projectMigrations,
   projects,
   projectSecrets,
   resources,
@@ -63,10 +61,8 @@ export type Domain = InferSelectModel<typeof domains>;
 export type EmailDestination = InferSelectModel<typeof emailDestinations>;
 export type PlatformEvent = InferSelectModel<typeof platformEvents>;
 export type Invitation = InferSelectModel<typeof invitations>;
-export type ProjectMigration = InferSelectModel<typeof projectMigrations>;
 export type ProjectDatabaseCredentials = InferSelectModel<typeof projectDatabaseCredentials>;
 export type Build = InferSelectModel<typeof builds>;
 export type GitHubConnection = InferSelectModel<typeof githubConnections>;
 export type GitHubInstallation = InferSelectModel<typeof githubInstallations>;
 export type GitHubInstallationMember = InferSelectModel<typeof githubInstallationMembers>;
-export type GitHubInstallationRevocation = InferSelectModel<typeof githubInstallationRevocations>;

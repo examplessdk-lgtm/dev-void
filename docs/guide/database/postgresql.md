@@ -26,7 +26,7 @@ Add to your `void.json`:
 
 ### 2. Add your connection string
 
-For local development, add `DATABASE_URL` to `.env.local`:
+For local development, add `DATABASE_URL` to `.env`:
 
 ```
 DATABASE_URL=postgresql://user:password@host:5432/mydb?sslmode=require

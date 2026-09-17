@@ -54,6 +54,27 @@ export type WranglerPublishedTrafficSnapshot = {
   routes: Array<unknown>;
 };
 
+export type RootWranglerConfig = {
+  configPath: string;
+  config: Record<string, unknown>;
+};
+
+/** Read the root Wrangler config with the same JSONC parser used by binding sync. */
+export function readRootWranglerConfig(root: string): RootWranglerConfig | undefined {
+  for (const name of ['wrangler.jsonc', 'wrangler.json']) {
+    const configPath = join(root, name);
+    if (!existsSync(configPath)) {
+      continue;
+    }
+    const parsed = parseJsonc(readFileSync(configPath, 'utf-8'));
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new SyntaxError(`Failed to parse ${configPath}: expected a JSON object.`);
+    }
+    return { configPath, config: parsed };
+  }
+  return undefined;
+}
+
 /** Read the last traffic attachment state Void successfully published remotely. */
 export function readWranglerPublishedTrafficSnapshot(
   configPath: string,
@@ -810,7 +831,7 @@ export function syncWranglerWebSockets(
   ) {
     return false;
   }
-  return syncWranglerBindings(root, NO_INFERRED_BINDINGS, { websockets });
+  return writeProvisionedWranglerConfig(root, { webSockets: websockets }).modified;
 }
 
 /**
@@ -1005,6 +1026,8 @@ export type ProvisionedWranglerPatch = {
   kv?: { binding: string; id: string };
   r2?: { binding: string; bucketName: string };
   hyperdrive?: { binding: string; id: string };
+  /** Persist WebSocket bindings and append-only Durable Object migration history. */
+  webSockets?: Array<Pick<WebSocketRouteDefinition, 'bindingName' | 'className' | 'filePath'>>;
   /**
    * Queue producer/consumer bindings, upserted into `queues.producers[]` /
    * `queues.consumers[]` idempotently, keyed by each section's wrangler identity
@@ -1180,11 +1203,9 @@ export type WriteProvisionedWranglerResult = {
 };
 
 /**
- * Fill the parts of the root wrangler config that `wrangler <res> create
- * --update-config` leaves blank: top-level `account_id`, `name`,
- * `compatibility_date`, and `migrations_dir` on a specific D1 entry — plus the
- * Mode B email fields (`send_email`, `addresses`, `vars`) that have no wrangler
- * command at all.
+ * Fill root Wrangler config fields required by generated/provisioned resources, including
+ * append-only WebSocket Durable Object bindings and migrations, and Mode B email fields
+ * (`send_email`, `addresses`, `vars`) that have no Wrangler command.
  *
  * Comment-preserving: uses `jsonc-parser` `modify()` + `applyEdits()` so
  * comments and unrelated content survive (unlike `syncWranglerBindings`, which
@@ -1304,6 +1325,95 @@ export function writeProvisionedWranglerConfig(
   // `parsed`). The adopt guard below rebuilds its own view per adopt (it must
   // include queues.producers, which this collector deliberately omits).
   let workerBindingOwners: Map<string, string> | undefined;
+
+  if (patch.webSockets && patch.webSockets.length > 0) {
+    const requested = new Map<string, (typeof patch.webSockets)[number]>();
+    for (const route of patch.webSockets) {
+      const existing = requested.get(route.bindingName);
+      if (existing && existing.className !== route.className) {
+        throw new Error(
+          `websocket: binding '${route.bindingName}' resolves to both '${existing.className}' and '${route.className}'. Rename one of the route files.`,
+        );
+      }
+      requested.set(route.bindingName, route);
+    }
+
+    const initialConfig = parseJsonc(text);
+    const initialBindings = bindingEntriesForField(
+      'durable_objects',
+      initialConfig.durable_objects,
+    );
+    const knownExistingClasses = initialBindings.map(({ entry }, index) => {
+      if (typeof entry.class_name !== 'string' || entry.class_name.length === 0) {
+        throw new Error(
+          `deploy: cannot update "${configPath}" — "durable_objects.bindings" entry at index ${index} is missing a non-empty string "class_name".`,
+        );
+      }
+      return entry.class_name;
+    });
+
+    for (const route of requested.values()) {
+      const currentConfig = parseJsonc(text);
+      const durableObjectBindings = bindingEntriesForField(
+        'durable_objects',
+        currentConfig.durable_objects,
+      );
+      const matches = durableObjectBindings.filter(({ name }) => name === route.bindingName);
+      if (matches.length > 1) {
+        throw new Error(
+          `deploy: cannot update "${configPath}" — Durable Object binding '${route.bindingName}' is declared more than once.`,
+        );
+      }
+      if (matches.length === 1) {
+        const entry = matches[0].entry;
+        if (
+          entry.class_name !== route.className ||
+          entry.script_name !== undefined ||
+          entry.environment !== undefined
+        ) {
+          throw new Error(
+            `websocket: binding '${route.bindingName}' is already configured for another class, script, or environment, but '${route.filePath}' requires the local class '${route.className}'.`,
+          );
+        }
+        continue;
+      }
+
+      const owners = collectWorkerBindingNames(
+        configWithoutField(currentConfig, 'durable_objects'),
+      );
+      addQueueProducerOwners(owners, currentConfig);
+      const owner = owners.get(route.bindingName);
+      if (owner) {
+        throw new Error(
+          `deploy: cannot update "${configPath}" — WebSocket binding '${route.bindingName}' is already used by a ${owner} binding.`,
+        );
+      }
+      text = applyMemberEdit(
+        text,
+        ['durable_objects', 'bindings', durableObjectBindings.length],
+        { name: route.bindingName, class_name: route.className },
+        { formattingOptions, isArrayInsertion: true },
+      );
+    }
+
+    const currentConfig = parseJsonc(text);
+    const rawMigrations = currentConfig.migrations;
+    const migrations = validateDurableObjectMigrations(rawMigrations, configPath);
+    const planned = appendSqliteClassMigration(
+      migrations,
+      [...requested.values()].map((route) => route.className),
+      'void-ws-v1',
+      knownExistingClasses,
+    );
+    if (planned.added) {
+      text = applyMemberEdit(
+        text,
+        ['migrations', migrations.length],
+        planned.migrations[planned.migrations.length - 1],
+        { formattingOptions, isArrayInsertion: true },
+      );
+    }
+  }
 
   // Adopt fields — write the REAL id/name of an already-existing resource into
   // the binding's config entry (create the array + entry if absent), keyed by
@@ -2389,6 +2499,75 @@ function offsetToLineColumn(text: string, offset: number): { line: number; colum
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function validateDurableObjectMigrations(
+  value: unknown,
+  configPath: string,
+): Array<DurableObjectMigration> {
+  if (value === undefined) {
+    return [];
+  }
+  if (!Array.isArray(value)) {
+    throw new Error(
+      `deploy: cannot update "${configPath}" — "migrations" must be an array of Durable Object migration steps.`,
+    );
+  }
+  const tags = new Set<string>();
+  for (const [index, migration] of value.entries()) {
+    if (!isRecord(migration) || typeof migration.tag !== 'string' || migration.tag.length === 0) {
+      throw new Error(
+        `deploy: cannot update "${configPath}" — migration at index ${index} must be an object with a non-empty string "tag".`,
+      );
+    }
+    if (tags.has(migration.tag)) {
+      throw new Error(
+        `deploy: cannot update "${configPath}" — migration tag '${migration.tag}' is declared more than once.`,
+      );
+    }
+    tags.add(migration.tag);
+    for (const field of ['new_classes', 'new_sqlite_classes', 'deleted_classes'] as const) {
+      const classes = migration[field];
+      if (
+        classes !== undefined &&
+        (!Array.isArray(classes) || classes.some((className) => typeof className !== 'string'))
+      ) {
+        throw new Error(
+          `deploy: cannot update "${configPath}" — "migrations[${index}].${field}" must be an array of class names.`,
+        );
+      }
+    }
+    const renamed = migration.renamed_classes;
+    if (
+      renamed !== undefined &&
+      (!Array.isArray(renamed) ||
+        renamed.some(
+          (entry) =>
+            !isRecord(entry) || typeof entry.from !== 'string' || typeof entry.to !== 'string',
+        ))
+    ) {
+      throw new Error(
+        `deploy: cannot update "${configPath}" — "migrations[${index}].renamed_classes" has an invalid entry.`,
+      );
+    }
+    const transferred = migration.transferred_classes;
+    if (
+      transferred !== undefined &&
+      (!Array.isArray(transferred) ||
+        transferred.some(
+          (entry) =>
+            !isRecord(entry) ||
+            typeof entry.from !== 'string' ||
+            typeof entry.from_script !== 'string' ||
+            typeof entry.to !== 'string',
+        ))
+    ) {
+      throw new Error(
+        `deploy: cannot update "${configPath}" — "migrations[${index}].transferred_classes" has an invalid entry.`,
+      );
+    }
+  }
+  return value as Array<DurableObjectMigration>;
 }
 
 /**

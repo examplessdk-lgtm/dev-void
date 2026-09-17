@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { getRecentPlatformEvents } from '../../db.ts';
 import type { ApiEnv } from '../../env.ts';
+import { executeAuditedMutation, operatorAuditIntent } from '../../operator/audit.ts';
 import { OperatorError } from '../../operator/common.ts';
 import {
   workerEnvironment,
@@ -107,23 +108,34 @@ app.post('/rollback-all', async (context) => {
   const versions = Object.fromEntries(
     PLATFORM_WORKERS.map((worker) => [worker.name, body[`version_${worker.name}`]]),
   );
-  const targets = await prepareAllWorkerRollbacks(context.env, environment, versions);
-  const result = await executeWorkerRollbacks(
-    context.get('db'),
-    context.env,
-    context.get('user'),
-    environment,
-    targets,
-    true,
-  );
-  return context.html(
-    <PlatformRollbackResultPage
-      events={result.events}
-      batchId={result.batchId!}
-      env={environment}
-      username={context.get('user').login}
-      tz={context.req.raw.cf?.timezone as string | undefined}
-    />,
+  return executeAuditedMutation(
+    context,
+    operatorAuditIntent('workers/rollback-all', { environment, versions }),
+    async () => {
+      const targets = await prepareAllWorkerRollbacks(context.env, environment, versions);
+      const result = await executeWorkerRollbacks(
+        context.get('db'),
+        context.env,
+        context.get('user'),
+        environment,
+        targets,
+        true,
+      );
+      return {
+        response: await context.html(
+          <PlatformRollbackResultPage
+            events={result.events}
+            batchId={result.batchId!}
+            env={environment}
+            username={context.get('user').login}
+            tz={context.req.raw.cf?.timezone as string | undefined}
+          />,
+        ),
+        // The browser result page intentionally renders at 200 even when the
+        // batch failed or partially applied, so classify the operation result.
+        succeeded: result.ok,
+      };
+    },
   );
 });
 
@@ -159,34 +171,50 @@ app.post('/:name/rollback', async (context) => {
   if (typeof body.version_id !== 'string') {
     throw new OperatorError(400, 'Missing version_id.');
   }
-  const target = await prepareWorkerRollback(
-    context.env,
-    environment,
-    context.req.param('name'),
-    body.version_id,
+  const workerName = context.req.param('name');
+  return executeAuditedMutation(
+    context,
+    operatorAuditIntent(`workers/${workerName}/rollback`, {
+      environment,
+      versionId: body.version_id,
+    }),
+    async () => {
+      const target = await prepareWorkerRollback(
+        context.env,
+        environment,
+        workerName,
+        body.version_id as string,
+      );
+      const result = await executeWorkerRollbacks(
+        context.get('db'),
+        context.env,
+        context.get('user'),
+        environment,
+        [target],
+      );
+      if (!result.ok) {
+        const detail = await workerDetail(context.env, environment, target.worker.name);
+        const outcome = result.events[0];
+        return {
+          response: await context.html(
+            <PlatformWorkerDetailPage
+              {...detail}
+              env={environment}
+              error={`Rollback outcome: ${outcome.status}. ${outcome.error_message ?? outcome.auditError ?? ''}`}
+              username={context.get('user').login}
+              tz={context.req.raw.cf?.timezone as string | undefined}
+            />,
+            502,
+          ),
+          succeeded: false,
+        };
+      }
+      return {
+        response: context.redirect(`/admin/platform/${target.worker.name}`),
+        succeeded: true,
+      };
+    },
   );
-  const result = await executeWorkerRollbacks(
-    context.get('db'),
-    context.env,
-    context.get('user'),
-    environment,
-    [target],
-  );
-  if (!result.ok) {
-    const detail = await workerDetail(context.env, environment, target.worker.name);
-    const outcome = result.events[0];
-    return context.html(
-      <PlatformWorkerDetailPage
-        {...detail}
-        env={environment}
-        error={`Rollback outcome: ${outcome.status}. ${outcome.error_message ?? outcome.auditError ?? ''}`}
-        username={context.get('user').login}
-        tz={context.req.raw.cf?.timezone as string | undefined}
-      />,
-      502,
-    );
-  }
-  return context.redirect(`/admin/platform/${target.worker.name}`);
 });
 
 export default app;

@@ -10,7 +10,9 @@ const HOSTED_CAPABILITIES: PlatformCapabilities = {
   githubOAuth: true,
   googleOAuth: true,
   managedBuilds: true,
-  sandbox: true,
+  // Managed Sandbox is disabled while the beta lifecycle is drained. Keep
+  // this false even on hosted installations where configuration is absent.
+  sandbox: false,
 };
 
 const CAPABILITY_NAMES = Object.keys(HOSTED_CAPABILITIES) as Array<keyof PlatformCapabilities>;
@@ -37,7 +39,7 @@ export function getPlatformCapabilities(
     }
   }
   return Object.fromEntries(
-    CAPABILITY_NAMES.map((name) => [name, record[name]]),
+    CAPABILITY_NAMES.map((name) => [name, name === 'sandbox' ? false : record[name]]),
   ) as unknown as PlatformCapabilities;
 }
 

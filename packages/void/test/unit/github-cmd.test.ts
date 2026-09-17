@@ -147,6 +147,12 @@ describe('formatConnection', () => {
     expect(out).toContain('Build executor');
     expect(out).toContain('Deploy workflow');
   });
+
+  it('shows the organization reconnect action when authorization is unproven', () => {
+    const out = formatConnection(makeConnection({ requires_reconnect: true }));
+    expect(out).toContain('Reconnect required');
+    expect(out).toContain('void github connect');
+  });
 });
 
 describe('parseGithubRepoFullName', () => {

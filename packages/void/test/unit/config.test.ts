@@ -17,7 +17,6 @@ import {
   resolveBindingNames,
   isNodeTarget,
   getDatabaseDialect,
-  getEmailFromHost,
   VALID_REDIRECT_STATUSES,
   countSplats,
 } from '../../src/config.ts';
@@ -185,22 +184,25 @@ describe('readConfig', () => {
     cleanup();
   });
 
-  it('accepts string binding names for db/kv/storage', () => {
+  it('accepts string binding names for db/kv/storage/ai', () => {
     setup(
       JSON.stringify({
-        inference: { bindings: { db: 'MY_DB', kv: 'MY_KV', storage: 'MY_R2' } },
+        inference: {
+          bindings: { db: 'MY_DB', kv: 'MY_KV', storage: 'MY_R2', ai: 'MY_AI' },
+        },
       }),
     );
     const config = readConfig(tmpDir);
     expect(config.inference?.bindings?.db).toBe('MY_DB');
     expect(config.inference?.bindings?.kv).toBe('MY_KV');
     expect(config.inference?.bindings?.storage).toBe('MY_R2');
+    expect(config.inference?.bindings?.ai).toBe('MY_AI');
     cleanup();
   });
 
-  it('throws on non-boolean ai binding value', () => {
-    setup(JSON.stringify({ inference: { bindings: { ai: 'yes' } } }));
-    expect(() => readConfig(tmpDir)).toThrow('must be a boolean');
+  it('throws on invalid ai binding value', () => {
+    setup(JSON.stringify({ inference: { bindings: { ai: 42 } } }));
+    expect(() => readConfig(tmpDir)).toThrow('must be a boolean or a string');
     cleanup();
   });
 
@@ -871,7 +873,7 @@ describe('readConfig redirects', () => {
 });
 
 describe('routing.rewrites validation', () => {
-  it('accepts valid rewrites', () => {
+  it('accepts static rewrites without wildcards', () => {
     setup(JSON.stringify({ routing: { rewrites: { '/docs': '/en/docs' } } }));
     const config = readConfig(tmpDir);
     expect(config.routing?.rewrites).toEqual({ '/docs': '/en/docs' });
@@ -1167,13 +1169,6 @@ describe('duplicate "*" wildcards in rule sources', () => {
     setup(JSON.stringify({ routing: { rewrites: { '/docs/*': '/en/docs/:splat' } } }));
     const config = readConfig(tmpDir);
     expect(config.routing?.rewrites).toEqual({ '/docs/*': '/en/docs/:splat' });
-    cleanup();
-  });
-
-  it('accepts a source with zero "*"', () => {
-    setup(JSON.stringify({ routing: { rewrites: { '/docs': '/en/docs' } } }));
-    const config = readConfig(tmpDir);
-    expect(config.routing?.rewrites).toEqual({ '/docs': '/en/docs' });
     cleanup();
   });
 
@@ -1619,10 +1614,11 @@ describe('resolveBindingNames', () => {
   });
 
   it('returns all custom names', () => {
-    expect(resolveBindingNames({ db: 'D', kv: 'K', storage: 'S' })).toEqual({
+    expect(resolveBindingNames({ db: 'D', kv: 'K', storage: 'S', ai: 'A' })).toEqual({
       d1: 'D',
       kv: 'K',
       r2: 'S',
+      ai: 'A',
     });
   });
 });
@@ -1709,31 +1705,5 @@ describe('top-level email config validation', () => {
     expect(config.email?.from).toBe('noreply@mail.acme.com');
     expect(config.inference?.bindings?.email).toBe(true);
     cleanup();
-  });
-});
-
-describe('getEmailFromHost', () => {
-  it('returns the lowercased host of a bare address', () => {
-    expect(getEmailFromHost({ email: { from: 'noreply@Mail.Acme.com' } })).toBe('mail.acme.com');
-  });
-
-  it('returns the host from behind a display name', () => {
-    expect(getEmailFromHost({ email: { from: 'Acme <noreply@mail.acme.com>' } })).toBe(
-      'mail.acme.com',
-    );
-    expect(getEmailFromHost({ email: { from: '"Acme, Inc." <noreply@acme.com>' } })).toBe(
-      'acme.com',
-    );
-  });
-
-  it('returns undefined when email.from is not set', () => {
-    expect(getEmailFromHost({})).toBeUndefined();
-    expect(getEmailFromHost({ email: {} })).toBeUndefined();
-  });
-
-  it('throws the config error for an unparsable address', () => {
-    expect(() => getEmailFromHost({ email: { from: 'noreply' } })).toThrow(
-      '"email.from" in void.json must be a single email address',
-    );
   });
 });

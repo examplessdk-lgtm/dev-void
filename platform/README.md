@@ -33,7 +33,7 @@ relative to `platform/` unless they begin with `../`.
 
 - **Always** read `meta/lessons.md` at the start of each session before taking any action.
 - **Never** commit without asking for confirmation.
-- When writing design docs or implementation plans to disk, place them in `meta/design-docs` and follow existing file name and frontmatter conventions.
+- When writing technical design docs or implementation plans to disk, place them in `meta/design-docs` and follow existing file name and frontmatter conventions. Keep commercial strategy, pricing research, competitor analysis, and private operational inventories out of the repository.
 - When adding new dependencies to the project, always run `npm view [package] version` to get the latest version.
 
 2. Subagent Strategy
@@ -68,7 +68,7 @@ relative to `platform/` unless they begin with `../`.
    - Documentation: after verification, update all docs if relevant and applicable:
      - `README.md` (this file)
      - affected packages's `README.md` or `AGENTS.md`
-   - Record implementation progress in the relevant current design or issue; the old `meta/progress.md` launch tracker is retired.
+   - Record implementation progress in the relevant current technical design or issue.
 
 ## Quick Reference
 
@@ -105,10 +105,26 @@ Commands use the selected platform connection. Add `--plan` to preview a change,
 the workflows; the [CLI reference](../docs/reference/cli.md#operator-commands)
 lists all commands and options.
 
-The CLI and browser admin UI share the same server operations. The operator API
-is served at `/operator/v1` and records changes in `operator_events`. Apply
+The CLI and browser admin UI share the same server operations and record their
+mutations in `operator_events`. The operator API is served at `/operator/v1`. Apply
 `0033_operator_sessions_and_events` before deploying the API; the migration adds
 tables and indexes that remain compatible with existing Workers.
+
+Both interfaces prevent deletion or suspension of the last active administrator.
+Allowed administrator removals revoke access before resource cleanup and preserve
+that revocation if cleanup fails, so concurrent removals cannot lock out the
+remaining administrator.
+
+When upgrading an installation that previously enabled managed Sandbox, run
+`void platform system sandbox-drain --plan`, then apply it and rerun until it
+reports `complete: true`. Preview later bounded pages by passing the returned
+`nextCursor` to `--cursor`. The lifecycle installer keeps application traffic
+closed while this database-backed drain is required. An active deployment is
+first asked to cancel; rerun the drain after 10 minutes if its request was
+abandoned. A protected cutover remains fenced for 90 minutes before the drain
+can compensate it, while an interrupted rollback is adopted through its
+database lease. These retries restore the committed deployment before deleting
+the managed Sandbox container.
 
 ## Local Development
 
@@ -149,14 +165,12 @@ Void is one repository with an explicit dependency boundary:
 | [`packages/dispatch`](./packages/dispatch/README.md)   | Edge router for installation app domains and custom domains               |
 | [`packages/proxy`](./packages/proxy/README.md)         | AI proxy, remote D1/KV/R2 proxy, ISR revalidation bridge                  |
 | [`packages/tail`](./packages/tail/README.md)           | Runtime log ingestion into Analytics Engine                               |
-| [`packages/ui`](./packages/ui)                         | Shared platform CSS tokens and UI components                              |
 | [`../packages/void`](../packages/void/AGENTS.md)       | Main `void` package: Vite plugin, CLI, runtime, codegen, deploy packaging |
 | `../packages/{vue,react,svelte,solid}`                 | Pages-mode adapters and runtime helpers                                   |
 | `../packages/create-void`                              | Scaffolding package                                                       |
 | `../packages/md`                                       | Markdown package                                                          |
 | `../docs`                                              | Public-facing SDK docs                                                    |
 | `meta/design-docs`                                     | Historical design archive                                                 |
-| `meta/progress.md`                                     | Retired launch tracker                                                    |
 | `meta/operations.md`                                   | Operations/runbook                                                        |
 
 ### Where Code for X Lives
@@ -179,47 +193,17 @@ Void is one repository with an explicit dependency boundary:
 | AI metering, BYOK AI gateway, remote D1/KV/R2 access, revalidation bridge     | `packages/proxy/src/*`                                                                                                                                                                                                                 |
 | Runtime logs and live tailing                                                 | `packages/tail/src/index.ts`, `packages/api/src/admin/routes/deployments.tsx`                                                                                                                                                          |
 | User-facing dashboard                                                         | `packages/dashboard/pages/*`, `packages/dashboard/middleware/01.auth.ts`, `packages/dashboard/lib/api.ts`                                                                                                                              |
-| Shared internal styling                                                       | `packages/ui/src/base.css`, `packages/ui/src/theme.css`                                                                                                                                                                                |
+| Dashboard styling                                                             | `packages/dashboard/ui/styles/base.css`, `packages/dashboard/ui/styles/tokens.css`                                                                                                                                                     |
 
 The dashboard depends on `void` and `@void/react` through normal `workspace:*` dependencies. Those packages export only their `dist/` output, so run `vp run build` before `vp run --filter @voidcloud/platform deploy` on a fresh checkout. The platform workflows do this; the task graph does not.
 
-## SDK overview
+## SDK guidance
 
-The repository-level packages and docs are the public product surface.
-
-### `../packages/void`
-
-This is the main `void` package.
-
-- `src/index.ts` wires together routing, pages-mode infrastructure, codegen, migrations, prerendering, Cloudflare integration, and non-CF targets.
-- `src/cli/*` contains the CLI.
-- `src/router/*` handles `routes/` scanning and route compilation.
-- `src/pages/*` handles pages-mode scanning, protocol, head management, defer, and manifest generation.
-- `src/runtime/*` contains helpers exposed as `void/db`, `void/kv`, `void/storage`, `void/ai`, `void/isr`, `void/client`, and auth utilities.
-- `src/codegen/*` generates `.void/routes.d.ts`, `.void/db.d.ts`, `.void/queues.d.ts`, and tsconfig glue.
-- `src/drizzle/*` and `src/migrations/*` handle schema discovery and migration execution.
-- `src/plugin-node-target.ts` supports `target: "node" | "bun" | "deno"`.
-
-### Adapter packages
-
-- `../packages/vue`
-- `../packages/react`
-- `../packages/svelte`
-- `../packages/solid`
-
-These packages provide pages-mode adapters, links, forms, router helpers, prefetching, and framework-specific client behavior.
-
-### Framework support
-
-Current public support is:
-
-- TanStack Start
-- React Router
-- SvelteKit
-- Nuxt
-- Astro
-
-There is Vinext-specific source in the framework repo, but it is intentionally on hold and not part of the current public support matrix.
+Public SDK architecture and adapter guidance live in the
+[root instructions](../AGENTS.md) and
+[core package instructions](../packages/void/AGENTS.md).
+Use the [framework integration guide](../docs/integrations/frameworks/overview.md)
+for the supported framework list.
 
 ## Platform Package Overview
 
@@ -251,8 +235,16 @@ The edge router.
 - Reads slug/domain routing from KV.
 - Sends worker projects to Workers for Platforms.
 - Serves current static/SPA deployments directly from R2, while retaining KV reads for small assets carried forward from legacy deploys.
-- Handles ISR, edge caching, redirect/rewrite rules, header rules, and request metering.
+- Handles ISR, edge caching, redirect/rewrite rules, header rules, and signed request metering.
 - Relays Cloudflare Queue batches to user workers.
+
+Request and sandbox usage queue messages are authenticated with a
+purpose-separated key held in the platform's private routing KV. The API health
+check initializes that key before installation traffic is enabled. Sandbox
+elapsed time is measured from API-owned lease transitions; tenant Workers do
+not receive the usage queue producer binding. After an upgrade, unsigned frames
+from older deployed SDK runtimes are acknowledged and ignored. Redeploy those
+apps to remove the dormant legacy binding.
 
 ### `packages/proxy`
 

@@ -127,12 +127,12 @@ Add a "Logs" section to the deployment detail page (`/admin/deployments/:id`).
 | ----------------------------------------------------------------------- | --------------------------------------------------------------- |
 | CF Observability API query format underdocumented                       | Experiment during implementation; Tail API as reliable fallback |
 | `observability` metadata may not work via dispatch namespace upload API | Test early; if fails, enable via Tail Worker config             |
-| Cost of 100% sampling at scale                                          | Start with 100%, add per-plan sampling rates later              |
+| Cost of 100% sampling at scale                                          | Make sampling configurable to bound log volume                  |
 | 7-day retention insufficient                                            | Acceptable for MVP; Tail Worker + R2 for longer retention later |
 
 ## Future Extensions
 
-- Per-plan sampling rates (free=10%, paid=100%)
+- Configurable sampling rates
 - User-facing dashboard logs (not just admin)
 - Error alerting (webhook/email on exception spikes)
 - Tail Worker + R2 for longer retention

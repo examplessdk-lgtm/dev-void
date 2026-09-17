@@ -19,14 +19,6 @@
       "types": "./dist/plugin.d.mts",
       "import": "./dist/plugin.mjs"
     },
-    "./runtime": {
-      "types": "./dist/runtime/index.d.mts",
-      "import": "./dist/runtime/index.mjs"
-    },
-    "./prefetch": {
-      "types": "./dist/runtime/prefetch.d.mts",
-      "import": "./dist/runtime/prefetch.mjs"
-    },
     "./pages-client": {
       "types": "./dist/runtime/pages-client.d.mts",
       "import": "./dist/runtime/pages-client.mjs"

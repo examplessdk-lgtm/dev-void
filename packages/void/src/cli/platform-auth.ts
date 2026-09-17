@@ -1,8 +1,5 @@
-import {
-  announceCloudflareLogin,
-  cloudflareAuthEnvironment,
-  createBundledCloudflareAuthRunner,
-} from './cloudflare-auth.ts';
+import { announceCloudflareLogin, createBundledCloudflareAuthRunner } from './cloudflare-auth.ts';
+import type { PlatformInstallPlan } from './platform-plan.ts';
 
 export type PlatformCloudflareCredential = Readonly<{
   source: 'environment' | 'oauth';
@@ -19,6 +16,31 @@ export type PlatformCloudflareAuthDependencies = Readonly<{
   interactive?: boolean;
   runWrangler?: (args: ReadonlyArray<string>, capture: boolean) => WranglerAuthResult;
 }>;
+
+export function assertPlatformOperatorCredentialCanApplyPlan(
+  credential: PlatformCloudflareCredential,
+  plan: Pick<PlatformInstallPlan, 'actions'>,
+): void {
+  if (credential.source !== 'oauth') {
+    return;
+  }
+  const createsZone = plan.actions.some(
+    (action) => action.kind === 'zone' && action.action === 'create',
+  );
+  const writesDns = plan.actions.some(
+    (action) => action.kind === 'dns-record' && action.action !== 'reuse',
+  );
+  if (!createsZone && !writesDns) {
+    return;
+  }
+  const permissions = [
+    ...(createsZone ? ['Account → Zone → Edit'] : []),
+    ...(writesDns ? ['Zone → DNS → Edit'] : []),
+  ];
+  throw new Error(
+    `platform: Cloudflare browser OAuth grants Zone Read and cannot apply the planned zone or DNS changes. Set CLOUDFLARE_API_TOKEN with ${permissions.join(' and ')}, scoped to the selected account and application zone, then rerun the command.`,
+  );
+}
 
 export async function resolvePlatformCloudflareCredential(
   dependencies: PlatformCloudflareAuthDependencies = {},
@@ -84,10 +106,4 @@ function defaultWranglerAuthRunner(
   capture: boolean,
 ): WranglerAuthResult {
   return createBundledCloudflareAuthRunner(process.cwd())(args, capture) as WranglerAuthResult;
-}
-
-export function wranglerAuthEnvironment(
-  source: NodeJS.ProcessEnv = process.env,
-): NodeJS.ProcessEnv {
-  return cloudflareAuthEnvironment(source);
 }

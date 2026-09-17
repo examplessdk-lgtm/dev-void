@@ -1,3 +1,4 @@
+import { readPlatformApplication, type PlatformApplication } from './application.ts';
 import { normalizeApplicationDomain, type PlatformCapabilities } from './manifest.ts';
 
 export const PLATFORM_DISCOVERY_SCHEMA_VERSION = 1 as const;
@@ -5,13 +6,15 @@ export const PLATFORM_DISCOVERY_SCHEMA_VERSION = 1 as const;
 export type PlatformDiscoveryDocument = Readonly<{
   apiUrl: string;
   applicationDomain: string;
+  applicationRouting?: PlatformApplication;
   authenticationProviders: ReadonlyArray<'github' | 'google'>;
   capabilities: PlatformCapabilities;
   displayName: string;
   installationId: string | null;
   platformVersion: string;
   proxyUrl: string;
-  schemaVersion: typeof PLATFORM_DISCOVERY_SCHEMA_VERSION;
+  schemaVersion: typeof PLATFORM_DISCOVERY_SCHEMA_VERSION | 2;
+  usageProtocolVersion: 0 | 1;
 }>;
 
 function normalizeOrigin(value: string, name: 'apiUrl' | 'proxyUrl'): string {
@@ -34,13 +37,36 @@ function normalizeOrigin(value: string, name: 'apiUrl' | 'proxyUrl'): string {
 }
 
 export function createPlatformDiscoveryDocument(
-  input: Omit<PlatformDiscoveryDocument, 'schemaVersion'>,
+  input: Omit<PlatformDiscoveryDocument, 'schemaVersion' | 'usageProtocolVersion'> & {
+    usageProtocolVersion?: 0 | 1;
+  },
 ): PlatformDiscoveryDocument {
   if (!input.displayName.trim()) {
     throw new Error('displayName must not be empty.');
   }
   if (!input.platformVersion.trim()) {
     throw new Error('platformVersion must not be empty.');
+  }
+  if (input.applicationRouting) {
+    const application = readPlatformApplication({
+      PLATFORM_APPLICATION: JSON.stringify(input.applicationRouting),
+    });
+    if (
+      !application.workersDev ||
+      application.baseDomain !== input.applicationDomain ||
+      application.workersDev.installationId !== input.installationId
+    ) {
+      throw new Error(
+        'Application routing must match the discovery domain and installation identity.',
+      );
+    }
+  }
+  if (
+    input.usageProtocolVersion !== undefined &&
+    input.usageProtocolVersion !== 0 &&
+    input.usageProtocolVersion !== 1
+  ) {
+    throw new Error('usageProtocolVersion must be 0 or 1.');
   }
   if (input.authenticationProviders.length === 0) {
     throw new Error('At least one authentication provider is required.');
@@ -60,7 +86,8 @@ export function createPlatformDiscoveryDocument(
     installationId: input.installationId?.trim() || null,
     platformVersion: input.platformVersion.trim(),
     proxyUrl: normalizeOrigin(input.proxyUrl, 'proxyUrl'),
-    schemaVersion: PLATFORM_DISCOVERY_SCHEMA_VERSION,
+    schemaVersion: input.applicationRouting?.workersDev ? 2 : PLATFORM_DISCOVERY_SCHEMA_VERSION,
+    usageProtocolVersion: input.usageProtocolVersion ?? 0,
   };
 }
 
@@ -69,12 +96,18 @@ export function parsePlatformDiscoveryDocument(value: unknown): PlatformDiscover
     throw new Error('Platform discovery document must be an object.');
   }
   const document = value as Record<string, unknown>;
-  if (document.schemaVersion !== PLATFORM_DISCOVERY_SCHEMA_VERSION) {
+  if (
+    document.schemaVersion !== PLATFORM_DISCOVERY_SCHEMA_VERSION &&
+    document.schemaVersion !== 2
+  ) {
     throw new Error(
       `Unsupported platform discovery schema version: ${String(document.schemaVersion)}.`,
     );
   }
   const capabilities = document.capabilities;
+  if (document.schemaVersion === 1 && document.applicationRouting !== undefined) {
+    throw new Error('Application routing requires discovery schema version 2.');
+  }
   if (!capabilities || typeof capabilities !== 'object' || Array.isArray(capabilities)) {
     throw new Error('capabilities must be an object.');
   }
@@ -122,11 +155,29 @@ export function parsePlatformDiscoveryDocument(value: unknown): PlatformDiscover
   return createPlatformDiscoveryDocument({
     apiUrl,
     applicationDomain: string('applicationDomain'),
+    ...(document.schemaVersion === 2
+      ? {
+          applicationRouting: readPlatformApplication({
+            PLATFORM_APPLICATION: JSON.stringify(document.applicationRouting ?? null),
+          }),
+        }
+      : {}),
     authenticationProviders: providers as Array<'github' | 'google'>,
     capabilities: parsedCapabilities,
     displayName: string('displayName'),
     installationId: document.installationId === null ? null : string('installationId'),
     platformVersion: string('platformVersion'),
     proxyUrl,
+    usageProtocolVersion: parseUsageProtocolVersion(document.usageProtocolVersion),
   });
+}
+
+function parseUsageProtocolVersion(value: unknown): 0 | 1 {
+  if (value === undefined || value === 0) {
+    return 0;
+  }
+  if (value === 1) {
+    return 1;
+  }
+  throw new Error('usageProtocolVersion must be 0 or 1.');
 }

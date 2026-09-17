@@ -8,8 +8,9 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { pathToFileURL } from 'node:url';
 import { join } from 'pathslash';
-import { afterEach, describe, expect, it } from 'vite-plus/test';
+import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 import {
   cleanupWrapper,
   needsWrapper,
@@ -23,6 +24,77 @@ const base: WrapperFeatures = {
   crons: [],
   queues: [],
 };
+
+describe('repeated wrapper generation', () => {
+  const roots: Array<string> = [];
+  afterEach(() => {
+    for (const root of roots.splice(0)) {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('preserves the real application across repeated skip-build preparation', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-repeat-wrapper-'));
+    roots.push(root);
+    const original = 'export default { fetch() { return new Response("application"); } };';
+    writeFileSync(join(root, 'index.mjs'), original);
+    await generateWrapper(root, 'index.mjs', root, { ...base, readiness: true });
+    await generateWrapper(root, 'index.mjs', root, { ...base, readiness: true });
+    expect(readFileSync(join(root, '__original.mjs'), 'utf8')).toBe(original);
+    const worker = (await import(pathToFileURL(join(root, 'index.mjs')).href)).default;
+    expect(await (await worker.fetch(new Request('https://app/'), {}, {})).text()).toBe(
+      'application',
+    );
+    expect((await worker.fetch(new Request('https://app/__void/ready'), {}, {})).status).toBe(200);
+  });
+
+  it('keeps the entry intact when compiling handlers fails', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-failed-wrapper-'));
+    roots.push(root);
+    const original = 'export default { fetch() { return new Response("application"); } };';
+    writeFileSync(join(root, 'index.mjs'), original);
+    await expect(
+      generateWrapper(root, 'index.mjs', root, {
+        ...base,
+        crons: [{ name: 'missing', filePath: 'missing.ts', crons: ['* * * * *'] }],
+      }),
+    ).rejects.toThrow();
+    expect(readFileSync(join(root, 'index.mjs'), 'utf8')).toBe(original);
+    await generateWrapper(root, 'index.mjs', root, { ...base, readiness: true });
+    expect(readFileSync(join(root, '__original.mjs'), 'utf8')).toBe(original);
+  });
+
+  it('recognizes legacy wrappers and refreshes the original after a new build', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-legacy-wrapper-'));
+    roots.push(root);
+    const original = 'export default { fetch() { return new Response("first"); } };';
+    writeFileSync(join(root, 'index.mjs'), original);
+    await generateWrapper(root, 'index.mjs', root, { ...base, readiness: true });
+    const legacy = readFileSync(join(root, 'index.mjs'), 'utf8').replace(
+      /^\/\/ Generated[^\n]*\n/,
+      '',
+    );
+    writeFileSync(join(root, 'index.mjs'), legacy);
+    await generateWrapper(root, 'index.mjs', root, { ...base, readiness: true });
+    expect(readFileSync(join(root, '__original.mjs'), 'utf8')).toBe(original);
+    const rebuilt = original.replace('first', 'second');
+    writeFileSync(join(root, 'index.mjs'), rebuilt);
+    await generateWrapper(root, 'index.mjs', root, { ...base, readiness: true });
+    expect(readFileSync(join(root, '__original.mjs'), 'utf8')).toBe(rebuilt);
+  });
+
+  it('requires a rebuild if an older repeated deploy already destroyed the original', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-corrupt-wrapper-'));
+    roots.push(root);
+    const wrapper =
+      'import original from "./__original.mjs";\nexport default { fetch: original.fetch };';
+    writeFileSync(join(root, 'index.mjs'), wrapper);
+    writeFileSync(join(root, '__original.mjs'), wrapper);
+    await expect(
+      generateWrapper(root, 'index.mjs', root, { ...base, readiness: true }),
+    ).rejects.toThrow('Rebuild');
+  });
+});
 
 describe('needsWrapper', () => {
   it('returns false when no features are set', () => {
@@ -102,6 +174,209 @@ describe('cleanupWrapper', () => {
     for (const directory of temporaryDirectories) {
       expect(existsSync(join(voidDir, directory))).toBe(false);
     }
+  });
+});
+
+describe('generated wrapper queue dispatch', () => {
+  const roots: Array<string> = [];
+
+  afterEach(() => {
+    for (const root of roots.splice(0, roots.length)) {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  async function createRelayWorker() {
+    const root = mkdtempSync(join(tmpdir(), 'void-queue-relay-'));
+    roots.push(root);
+    mkdirSync(join(root, 'queues'));
+    writeFileSync(
+      join(root, 'index.mjs'),
+      'export default { fetch() { return Response.json({ app: true }); } };',
+    );
+    writeFileSync(
+      join(root, 'queues/emails.ts'),
+      `export default function(batch, env) {
+      env.calls.push(batch.messages[0].timestamp.getTime());
+      batch.messages[0].ack();
+      if (env.fail) throw new Error('after first message');
+      batch.messages[0].retry();
+      batch.messages[1].retry({ delaySeconds: 9 });
+      batch.ackAll();
+    }`,
+    );
+    await generateWrapper(root, 'index.mjs', root, {
+      ...base,
+      queues: [{ name: 'emails', filePath: 'emails.ts', bindingName: 'QUEUE_EMAILS' }],
+    });
+    return (await import(pathToFileURL(join(root, 'index.mjs')).href)).default;
+  }
+
+  const relayRequest = (token?: string) =>
+    new Request('https://worker/__void/queue', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        ...(token ? { 'x-void-internal': token } : {}),
+      },
+      body: JSON.stringify({
+        queue: 'emails',
+        messages: ['one', 'two'].map((id) => ({
+          id,
+          timestamp: '2026-01-01T00:00:00Z',
+          body: {},
+          attempts: 1,
+        })),
+      }),
+    });
+
+  it('delivers managed HTTP batches and returns first-wins acknowledgment decisions', async () => {
+    const worker = await createRelayWorker();
+    const env = { __VOID_PROXY_TOKEN: 'token', calls: [] as Array<number> };
+    const response = await worker.fetch(relayRequest('token'), env, {});
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      ok: true,
+      decisions: {
+        one: { action: 'ack' },
+        two: { action: 'retry', delaySeconds: 9 },
+      },
+    });
+    expect(env.calls).toEqual([Date.parse('2026-01-01T00:00:00Z')]);
+    const failed = await worker.fetch(relayRequest('token'), { ...env, fail: true }, {});
+    expect(await failed.json()).toEqual({ ok: false, decisions: { one: { action: 'ack' } } });
+    expect((await worker.fetch(new Request('https://worker/__void/ready'), env, {})).status).toBe(
+      200,
+    );
+  });
+
+  it('requires a configured token before invoking a managed queue consumer', async () => {
+    const worker = await createRelayWorker();
+    const calls: Array<number> = [];
+    for (const [request, env] of [
+      [relayRequest(), { __VOID_PROXY_TOKEN: 'token', calls }],
+      [relayRequest('wrong'), { __VOID_PROXY_TOKEN: 'token', calls }],
+      [relayRequest('token'), { calls }],
+    ] as const) {
+      expect((await worker.fetch(request, env, {})).status).toBe(401);
+    }
+    expect(calls).toEqual([]);
+  });
+
+  it('uses exact or unique longest suffix matches and rejects unknown queues', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-wrapper-queues-'));
+    const workerDir = join(root, 'server');
+    roots.push(root);
+    mkdirSync(workerDir, { recursive: true });
+    mkdirSync(join(root, 'queues'), { recursive: true });
+    writeFileSync(
+      join(workerDir, 'index.mjs'),
+      'export default { fetch() { return new Response("ok"); } };',
+    );
+    writeFileSync(
+      join(root, 'queues/emails.ts'),
+      'export default async function(_batch, env) { env.calls.push("emails"); }',
+    );
+    writeFileSync(
+      join(root, 'queues/order-emails.ts'),
+      'export default async function(_batch, env) { env.calls.push("order-emails"); }',
+    );
+
+    await generateWrapper(workerDir, 'index.mjs', root, {
+      ...base,
+      queues: [
+        { name: 'emails', filePath: 'emails.ts', bindingName: 'QUEUE_EMAILS' },
+        {
+          name: 'order-emails',
+          filePath: 'order-emails.ts',
+          bindingName: 'CUSTOM_ORDER_EMAILS',
+        },
+      ],
+    });
+
+    const wrapper = (await import(
+      `${pathToFileURL(join(workerDir, 'index.mjs')).href}?test=${crypto.randomUUID()}`
+    )) as {
+      default: {
+        queue(
+          batch: MessageBatch,
+          env: { calls: Array<string> },
+          ctx: ExecutionContext,
+        ): Promise<void>;
+      };
+    };
+    const makeBatch = (queue: string, retryAll = vi.fn()) =>
+      ({
+        queue,
+        messages: [],
+        ackAll: vi.fn(),
+        retryAll,
+      }) as unknown as MessageBatch;
+
+    for (const [queue, expected] of [
+      ['emails', 'emails'],
+      ['project-emails', 'emails'],
+      ['order-emails', 'order-emails'],
+      ['project-order-emails', 'order-emails'],
+    ]) {
+      const env = { calls: [] as Array<string> };
+      await wrapper.default.queue(makeBatch(queue), env, {} as ExecutionContext);
+      expect(env.calls).toEqual([expected]);
+    }
+
+    const retryAll = vi.fn();
+    const env = { calls: [] as Array<string> };
+    await expect(
+      wrapper.default.queue(makeBatch('project-unknown', retryAll), env, {} as ExecutionContext),
+    ).rejects.toThrow('No unambiguous queue handler matches "project-unknown"');
+    expect(retryAll).toHaveBeenCalledOnce();
+    expect(env.calls).toEqual([]);
+  });
+
+  it('passes native queue messages, dates, and acknowledgment methods through unchanged', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-native-queue-'));
+    roots.push(root);
+    const workerDir = join(root, 'server');
+    mkdirSync(workerDir, { recursive: true });
+    mkdirSync(join(root, 'queues'));
+    writeFileSync(
+      join(workerDir, 'index.mjs'),
+      'export default { fetch() { return new Response("app"); } };',
+    );
+    writeFileSync(
+      join(root, 'queues/emails.ts'),
+      `export default async function(batch, env) {
+      env.received = batch;
+      env.timestamp = batch.messages[0].timestamp.getTime();
+      batch.messages[0].ack();
+      batch.messages[1].retry({ delaySeconds: 12 });
+      batch.ackAll();
+      batch.retryAll({ delaySeconds: 30 });
+    }`,
+    );
+    await generateWrapper(workerDir, 'index.mjs', root, {
+      ...base,
+      queues: [{ name: 'emails', filePath: 'emails.ts', bindingName: 'QUEUE_EMAILS' }],
+    });
+    const wrapper = (await import(pathToFileURL(join(workerDir, 'index.mjs')).href)).default;
+    const timestamp = new Date('2026-01-01T00:00:00Z');
+    const batch = {
+      queue: 'emails',
+      ackAll: vi.fn(),
+      retryAll: vi.fn(),
+      messages: [
+        { id: '1', body: {}, attempts: 1, timestamp, ack: vi.fn(), retry: vi.fn() },
+        { id: '2', body: {}, attempts: 1, timestamp, ack: vi.fn(), retry: vi.fn() },
+      ],
+    };
+    const env: { received?: unknown; timestamp?: number } = {};
+    await wrapper.queue(batch, env, {});
+    expect(env.received).toBe(batch);
+    expect(env.timestamp).toBe(timestamp.getTime());
+    expect(batch.messages[0].ack).toHaveBeenCalledOnce();
+    expect(batch.messages[1].retry).toHaveBeenCalledWith({ delaySeconds: 12 });
+    expect(batch.ackAll).toHaveBeenCalledOnce();
+    expect(batch.retryAll).toHaveBeenCalledWith({ delaySeconds: 30 });
   });
 });
 

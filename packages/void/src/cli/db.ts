@@ -11,6 +11,7 @@ import {
   type DatabaseDialect,
 } from '../config.ts';
 import type { DatabaseProviderAdapter, DatabaseProviderDialect } from '../database-provider.ts';
+import { resolveLocalD1Target, type LocalD1Target } from '../local-d1.ts';
 import {
   collectMigrations,
   readJournal,
@@ -26,9 +27,16 @@ import { detectFramework } from '../plugin-inference.ts';
 import { readProjectPaths } from '../project-paths.ts';
 import type { SeedFn } from '../runtime/seed.ts';
 import { cfAccessHeaders } from '../shared/cf-access.ts';
+import { loadLocalEnv } from '../shared/env.ts';
 import { getProxyUrl, getToken } from './auth.ts';
 import { PlatformApiError, PlatformClient } from './client.ts';
 import type { DbArgs } from './db-args.ts';
+import {
+  exportPgConstraints,
+  exportPgSequences,
+  quoteSqlIdentifier,
+  quoteSqlString,
+} from './db-export-sequences.ts';
 import { formatTimestamp } from './gen.ts';
 import { cliTitle, dim, pc } from './output.ts';
 import { readDeploymentPlatform, readProjectConfig } from './project.ts';
@@ -43,11 +51,18 @@ const DEFAULT_SEED_FILES = [
 ];
 const MODULE_SEED_EXTENSIONS = new Set(['.ts', '.mts', '.js', '.mjs']);
 
-export function getLocalD1PersistRoot(root: string): string {
+export function getLocalD1Target(root: string): LocalD1Target {
   const detected = detectFramework(root);
-  return detected && (detected.class === 'b' || detected.class === 'c')
-    ? join(root, '.wrangler', 'state')
-    : join(root, '.void');
+  const defaultPersistRoot =
+    detected && (detected.class === 'b' || detected.class === 'c')
+      ? join(root, '.wrangler', 'state')
+      : join(root, '.void');
+  const bindingName = resolveBindingNames(readConfig(root).inference?.bindings)?.d1 ?? 'DB';
+  return resolveLocalD1Target(root, {
+    bindingName,
+    defaultPersistRoot,
+    readPersistState: true,
+  });
 }
 
 function runDrizzleKit(root: string, args: Array<string>): void {
@@ -84,51 +99,22 @@ function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function readEnvLocal(root: string): Record<string, string> {
-  const envPath = join(root, '.env.local');
-  if (!existsSync(envPath)) {
-    return {};
-  }
-  const content = readFileSync(envPath, 'utf-8');
-  const vars: Record<string, string> = {};
-  for (const line of content.split('\n')) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith('#')) {
-      continue;
-    }
-    const eqIndex = trimmed.indexOf('=');
-    if (eqIndex === -1) {
-      continue;
-    }
-    const key = trimmed.slice(0, eqIndex).trim();
-    let value = trimmed.slice(eqIndex + 1).trim();
-    if (
-      (value.startsWith('"') && value.endsWith('"')) ||
-      (value.startsWith("'") && value.endsWith("'"))
-    ) {
-      value = value.slice(1, -1);
-    }
-    vars[key] = value;
-  }
-  return vars;
-}
-
 function getPgUrl(root: string): string {
-  const vars = readEnvLocal(root);
+  const vars = loadLocalEnv(root);
   const url = vars.DATABASE_URL;
   if (!url) {
     throw new Error(
-      'DATABASE_URL not found in .env.local. Add it to connect to your PostgreSQL database.',
+      'DATABASE_URL not found in .env. Add it to connect to your local PostgreSQL database.',
     );
   }
   return url;
 }
 
 function getMySqlUrl(root: string): string {
-  const url = readEnvLocal(root).DATABASE_URL;
+  const url = loadLocalEnv(root).DATABASE_URL;
   if (!url) {
     throw new Error(
-      'DATABASE_URL not found in .env.local. Add it to connect to your MySQL database.',
+      'DATABASE_URL not found in .env. Add it to connect to your local MySQL database.',
     );
   }
   return url;
@@ -222,7 +208,7 @@ export async function runDbCommand(root: string, args: DbArgs): Promise<void> {
 }
 
 export function writeLocalDatabaseUrl(root: string, connectionString: string): void {
-  const envPath = join(root, '.env.local');
+  const envPath = join(root, '.env');
   const original = existsSync(envPath) ? readFileSync(envPath, 'utf-8') : '';
   const lines = original ? original.replace(/\r\n/g, '\n').split('\n') : [];
   const assignment = `DATABASE_URL=${JSON.stringify(connectionString)}`;
@@ -351,7 +337,7 @@ async function runConnect(
   }
 
   writeLocalDatabaseUrl(root, connectionString);
-  log.success('Saved DATABASE_URL to .env.local.');
+  log.success('Saved DATABASE_URL to .env.');
 
   if (!args.localOnly) {
     const token = getToken(root);
@@ -378,9 +364,7 @@ async function runPush(root: string, dialect: DatabaseDialect): Promise<void> {
   } else {
     const { mkdirSync } = await import('node:fs');
     const { dirname } = await import('pathslash');
-    const { getMiniflareDatabasePath } = await import('../migrations/runner.ts');
-    const persistRoot = getLocalD1PersistRoot(root);
-    const dbPath = getMiniflareDatabasePath(persistRoot, 'local');
+    const { databasePath: dbPath } = getLocalD1Target(root);
     mkdirSync(dirname(dbPath), { recursive: true });
     configPath = writeDrizzleConfig(root, dbPath);
   }
@@ -397,11 +381,10 @@ async function runGenerate(root: string, dialect: DatabaseDialect): Promise<void
   const { prepareProject } = await import('../codegen/prepare.ts');
   const { writeDrizzleConfig } = await import('../drizzle/config.ts');
 
-  // Generate the auth schema using the same production env mode Cloudflare deploy
-  // builds with, then include those tables in Drizzle Kit's schema input. This makes
+  // Generate the auth schema, then include those tables in Drizzle Kit's schema input. This makes
   // Better Auth tables ordinary, reviewable migration SQL instead of a deploy-time
   // side effect. `prepareProject` removes a stale file when auth is no longer enabled.
-  await prepareProject(root, { mode: 'production' });
+  await prepareProject(root);
   const authSchemaPath = join(root, '.void', 'better-auth-schema.ts');
   const additionalSchemas = existsSync(authSchemaPath) ? [authSchemaPath] : undefined;
 
@@ -473,10 +456,8 @@ async function runStatus(root: string, dialect: DatabaseDialect): Promise<void> 
       localApplied = [];
     }
   } else {
-    const { getMiniflareDatabasePath, getAppliedMigrations } =
-      await import('../migrations/runner.ts');
-    const persistRoot = getLocalD1PersistRoot(root);
-    const dbPath = getMiniflareDatabasePath(persistRoot, 'local');
+    const { getAppliedMigrations } = await import('../migrations/runner.ts');
+    const { databasePath: dbPath } = getLocalD1Target(root);
     localApplied = await getAppliedMigrations(dbPath);
   }
   const localSet = new Set(localApplied.map((m) => m.name));
@@ -629,9 +610,8 @@ async function resetDatabase(root: string, dialect: DatabaseDialect): Promise<nu
     return migrations.length;
   }
 
-  const { getMiniflareDatabasePath, runMigrations } = await import('../migrations/runner.ts');
-  const persistRoot = getLocalD1PersistRoot(root);
-  const dbPath = getMiniflareDatabasePath(persistRoot, 'local');
+  const { runMigrations } = await import('../migrations/runner.ts');
+  const { databasePath: dbPath } = getLocalD1Target(root);
 
   rmSync(dbPath, { force: true });
   rmSync(dbPath + '-wal', { force: true });
@@ -682,10 +662,8 @@ async function runSeed(
       return;
     }
 
-    const { getMiniflareDatabasePath, openSqliteDatabase } =
-      await import('../migrations/runner.ts');
-    const persistRoot = getLocalD1PersistRoot(root);
-    const dbPath = getMiniflareDatabasePath(persistRoot, 'local');
+    const { openSqliteDatabase } = await import('../migrations/runner.ts');
+    const { databasePath: dbPath } = getLocalD1Target(root);
     const db = await openSqliteDatabase(dbPath);
     try {
       db.exec(sql);
@@ -996,9 +974,8 @@ async function runExecute(
     return;
   }
 
-  const { getMiniflareDatabasePath, openSqliteDatabase } = await import('../migrations/runner.ts');
-  const persistRoot = getLocalD1PersistRoot(root);
-  const dbPath = getMiniflareDatabasePath(persistRoot, 'local');
+  const { openSqliteDatabase } = await import('../migrations/runner.ts');
+  const { databasePath: dbPath } = getLocalD1Target(root);
 
   if (!existsSync(dbPath)) {
     log.error('No local database found. Run `void dev` first.');
@@ -1321,10 +1298,8 @@ async function runMigrate(root: string, dialect: DatabaseDialect, remote?: boole
     return;
   }
 
-  const { getMiniflareDatabasePath, getAppliedMigrations, runMigrations } =
-    await import('../migrations/runner.ts');
-  const persistRoot = getLocalD1PersistRoot(root);
-  const dbPath = getMiniflareDatabasePath(persistRoot, 'local');
+  const { getAppliedMigrations, runMigrations } = await import('../migrations/runner.ts');
+  const { databasePath: dbPath } = getLocalD1Target(root);
 
   try {
     const existingRows = await getAppliedMigrations(dbPath);
@@ -1406,10 +1381,7 @@ async function runStudio(root: string, dialect: DatabaseDialect, remote?: boolea
   }
 
   const { writeDrizzleConfig } = await import('../drizzle/config.ts');
-  const { getMiniflareDatabasePath } = await import('../migrations/runner.ts');
-
-  const persistRoot = getLocalD1PersistRoot(root);
-  const dbPath = getMiniflareDatabasePath(persistRoot, 'local');
+  const { databasePath: dbPath } = getLocalD1Target(root);
 
   if (!existsSync(dbPath)) {
     log.error('No local database found. Run `void dev` first.');
@@ -1856,10 +1828,8 @@ async function runRenameMigrations(root: string, dialect: DatabaseDialect): Prom
       process.exit(1);
     }
   } else {
-    const { getMiniflareDatabasePath, openSqliteDatabase } =
-      await import('../migrations/runner.ts');
-    const persistRoot = getLocalD1PersistRoot(root);
-    const dbPath = getMiniflareDatabasePath(persistRoot, 'local');
+    const { openSqliteDatabase } = await import('../migrations/runner.ts');
+    const { databasePath: dbPath } = getLocalD1Target(root);
     if (existsSync(dbPath)) {
       try {
         const db = await openSqliteDatabase(dbPath);
@@ -1955,15 +1925,19 @@ async function runExport(
         tables = result.rows.map((row) => String(row.tablename));
       }
 
+      const sequences = await exportPgSequences(client, tables, args);
+      parts.push(...sequences.before);
       for (const table of tables) {
+        const cols = await client.query(
+          `SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns WHERE table_name = $1 AND table_schema = 'public' ORDER BY ordinal_position`,
+          [table],
+        );
+        const names = cols.rows.map((column) => quoteSqlIdentifier(String(column.column_name)));
+        const tableName = `"public".${quoteSqlIdentifier(table)}`;
         if (!args.noSchema) {
           // Get CREATE TABLE statement (simplified — pg_dump would be more complete)
-          const cols = await client.query(
-            `SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns WHERE table_name = $1 AND table_schema = 'public' ORDER BY ordinal_position`,
-            [table],
-          );
           const colDefs = cols.rows.map((column) => {
-            let def = `  "${String(column.column_name)}" ${String(column.data_type)}`;
+            let def = `  ${quoteSqlIdentifier(String(column.column_name))} ${String(column.data_type)}`;
             if (column.is_nullable === 'NO') {
               def += ' NOT NULL';
             }
@@ -1972,11 +1946,16 @@ async function runExport(
             }
             return def;
           });
-          parts.push(`CREATE TABLE "${table}" (\n${colDefs.join(',\n')}\n);`);
+          parts.push(`CREATE TABLE ${tableName} (\n${colDefs.join(',\n')}\n);`);
         }
 
         if (!args.noData) {
-          const rows = await client.query(`SELECT * FROM "${table}"`);
+          // Ask PostgreSQL for its lossless text values. Driver Date conversion
+          // loses timestamp microseconds and introduces the client's time zone;
+          // JSON/large numeric values must not pass through JavaScript coercion.
+          const rows = await client.query(
+            `SELECT ${names.map((name) => `${name}::text AS ${name}`).join(', ')} FROM ${tableName}`,
+          );
           for (const row of rows.rows) {
             const cols = Object.keys(row);
             const vals = cols.map((column) => {
@@ -1989,10 +1968,16 @@ async function runExport(
               }
               return `'${String(value).replace(/'/g, "''")}'`;
             });
-            parts.push(`INSERT INTO "${table}" (${cols.join(', ')}) VALUES (${vals.join(', ')});`);
+            parts.push(
+              `INSERT INTO ${tableName} (${cols.map(quoteSqlIdentifier).join(', ')}) VALUES (${vals.join(', ')});`,
+            );
           }
         }
         parts.push('');
+      }
+      parts.push(...sequences.after);
+      if (!args.noSchema) {
+        parts.push(...(await exportPgConstraints(client, tables)));
       }
     });
 
@@ -2066,9 +2051,8 @@ async function runExport(
     return;
   }
 
-  const { getMiniflareDatabasePath, openSqliteDatabase } = await import('../migrations/runner.ts');
-  const persistRoot = getLocalD1PersistRoot(root);
-  const dbPath = getMiniflareDatabasePath(persistRoot, 'local');
+  const { openSqliteDatabase } = await import('../migrations/runner.ts');
+  const { databasePath: dbPath } = getLocalD1Target(root);
 
   if (!existsSync(dbPath)) {
     log.error('No local database found. Run `void dev` first.', errOut);
@@ -2093,7 +2077,8 @@ async function runExport(
           "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE '\\_%' ESCAPE '\\' ORDER BY name",
         )
         .all()
-        .map((row) => String(row.name));
+        .map((row) => String(row.name))
+        .filter((name) => !name.startsWith('sqlite_'));
     }
 
     const parts: Array<string> = [];
@@ -2107,7 +2092,9 @@ async function runExport(
       }
 
       if (!args.noData) {
-        const rows = db.prepare(`SELECT * FROM "${table}"`).all() as Array<Record<string, unknown>>;
+        const rows = db.prepare(`SELECT * FROM ${quoteSqlIdentifier(table)}`).all() as Array<
+          Record<string, unknown>
+        >;
         for (const row of rows) {
           const cols = Object.keys(row);
           const vals = cols.map((column) => {
@@ -2120,11 +2107,32 @@ async function runExport(
             }
             return `'${String(value).replace(/'/g, "''")}'`;
           });
-          parts.push(`INSERT INTO "${table}" (${cols.join(', ')}) VALUES (${vals.join(', ')});`);
+          parts.push(
+            `INSERT INTO ${quoteSqlIdentifier(table)} (${cols.map(quoteSqlIdentifier).join(', ')}) VALUES (${vals.join(', ')});`,
+          );
         }
       }
 
       parts.push('');
+    }
+
+    // SQLite creates sqlite_sequence itself when an AUTOINCREMENT table is
+    // restored. Preserve its high-water marks after all table data, including
+    // deleted IDs, without attempting to CREATE this reserved system table.
+    if (
+      !args.noData &&
+      db.prepare("SELECT name FROM sqlite_master WHERE name='sqlite_sequence'").get()
+    ) {
+      const sequences = db
+        .prepare<{ name: string; seq: number }>('SELECT name, seq FROM sqlite_sequence')
+        .all();
+      for (const sequence of sequences) {
+        if (tables.includes(sequence.name)) {
+          const name = quoteSqlString(sequence.name);
+          parts.push(`DELETE FROM sqlite_sequence WHERE name = ${name};`);
+          parts.push(`INSERT INTO sqlite_sequence (name, seq) VALUES (${name}, ${sequence.seq});`);
+        }
+      }
     }
 
     const output = parts.join('\n');
@@ -2279,9 +2287,8 @@ async function runSeedModule(
   }
 
   const { drizzle } = await import('drizzle-orm/better-sqlite3');
-  const { getMiniflareDatabasePath, openSqliteDatabase } = await import('../migrations/runner.ts');
-  const persistRoot = getLocalD1PersistRoot(root);
-  const dbPath = getMiniflareDatabasePath(persistRoot, 'local');
+  const { openSqliteDatabase } = await import('../migrations/runner.ts');
+  const { databasePath: dbPath } = getLocalD1Target(root);
   const sqlite = await openSqliteDatabase(dbPath);
   try {
     const options = getDrizzleSchemaOptions(schema);

@@ -1,3 +1,4 @@
+import { eq } from 'drizzle-orm';
 import {
   describe,
   it,
@@ -8,7 +9,9 @@ import {
   afterEach,
   vi,
 } from 'vite-plus/test';
+import { getProjectSecrets } from '../../src/db.ts';
 import app from '../../src/index.ts';
+import { deployments, projects } from '../../src/schema.ts';
 import {
   setupEnv,
   teardownEnv,
@@ -41,6 +44,68 @@ afterEach(() => {
 });
 
 describe('project secrets API', () => {
+  it.each(['pending', 'cutover', 'compensating'] as const)(
+    'rejects secret writes and deletes while deployment is %s without changing stored or live values',
+    async (status) => {
+      const user = await createTestUser(env.db);
+      const project = await createTestProject(env.db, user.id, `secret-busy-${status}`);
+      await createTestDeployment(env.db, project.id, 'live');
+      const pending = await createTestDeployment(env.db, project.id, 'pending');
+      await env.db.update(deployments).set({ status }).where(eq(deployments.id, pending.id));
+      await createTestProjectSecret(env.db, env, project.id, 'API_KEY', 'old');
+      const before = await getProjectSecrets(env.db, project.id);
+      const fetchMock = mockCfApi();
+      for (const method of ['PUT', 'DELETE']) {
+        const response = await app.fetch(
+          new Request(`http://localhost/projects/${project.id}/secrets/API_KEY`, {
+            method,
+            headers: { Authorization: `Bearer ${user.jwt}`, 'content-type': 'application/json' },
+            ...(method === 'PUT' ? { body: JSON.stringify({ value: 'new' }) } : {}),
+          }),
+          env,
+        );
+        expect(response.status).toBe(409);
+        expect(await response.json()).toMatchObject({ deployment: pending.id });
+        expect(await getProjectSecrets(env.db, project.id)).toEqual(before);
+      }
+      expect(fetchMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it('resolves the current active worker after a cutover during secret encryption', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'secret-raced-cutover');
+    const first = await createTestDeployment(env.db, project.id, 'live');
+    const next = await createTestDeployment(env.db, project.id, 'pending');
+    const encrypt = crypto.subtle.encrypt.bind(crypto.subtle);
+    vi.spyOn(crypto.subtle, 'encrypt').mockImplementationOnce(async (...args) => {
+      const result = await encrypt(...args);
+      await env.db.update(deployments).set({ status: 'live' }).where(eq(deployments.id, next.id));
+      await env.db
+        .update(projects)
+        .set({ active_deployment_id: next.id })
+        .where(eq(projects.id, project.id));
+      return result;
+    });
+    const fetchMock = mockCfApi();
+    const response = await app.fetch(
+      new Request(`http://localhost/projects/${project.id}/secrets/API_KEY`, {
+        method: 'PUT',
+        headers: { Authorization: `Bearer ${user.jwt}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ value: 'new' }),
+      }),
+      env,
+    );
+    expect(response.status).toBe(200);
+    const urls = fetchMock.mock.calls.map(([url]) => String(url));
+    expect(
+      urls.some((url) => url.includes(`/scripts/user-${project.slug}-${next.id}/secrets`)),
+    ).toBe(true);
+    expect(
+      urls.some((url) => url.includes(`/scripts/user-${project.slug}-${first.id}/secrets`)),
+    ).toBe(false);
+  });
+
   it('returns 401 without auth', async () => {
     const res = await app.fetch(
       new Request('http://localhost/projects/proj_x/secrets/API_KEY', {

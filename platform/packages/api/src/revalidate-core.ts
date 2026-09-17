@@ -10,9 +10,9 @@ import {
   isrLegacyCacheVariantPrefix,
   splitIsrCacheKey,
 } from '@void/isr';
+import { platformProjectHostnames, readPlatformApplication } from '@void/platform';
 import type { Context } from 'hono';
 import { R2_CONCURRENCY, uploadPool } from './concurrency.ts';
-import { SITE_DOMAIN } from './constants.ts';
 import { getDomainsByProjectId } from './db.ts';
 import type { ApiEnv } from './env.ts';
 import { resolveCurrentIsrDeployments, type IsrRoutingTarget } from './isr-cache.ts';
@@ -73,7 +73,7 @@ export async function runRevalidate(
   body: RevalidateRequestBody,
 ): Promise<Response> {
   const db = context.get('db');
-  const siteDomain = context.env.SITE_DOMAIN ?? SITE_DOMAIN;
+  const application = readPlatformApplication(context.env);
 
   const customDomains = await getDomainsByProjectId(db, projectId);
   // Include `pending` domains, not only `active`. Activation writes the
@@ -88,7 +88,9 @@ export async function runRevalidate(
   // are harmless no-ops. Domains are only ever `pending`|`active` (deletion
   // removes the row), so this is every routable host for the project.
   const targets: Array<IsrRoutingTarget> = [
-    { hostname: `${project.slug}.${siteDomain}`, routingKey: project.slug },
+    ...platformProjectHostnames({ id: projectId, slug: project.slug }, application).map(
+      (hostname) => ({ hostname, routingKey: project.slug }),
+    ),
     ...customDomains.map((d) => ({
       hostname: d.hostname,
       routingKey: `domain:${d.hostname}`,
@@ -161,14 +163,14 @@ export async function runRevalidate(
               });
             }
           }
-          await uploadPool(listed.keys, R2_CONCURRENCY, (key) =>
-            context.env.ISR_CACHE.delete(key.name),
-          );
           const pageTargets: Array<PurgeEdgeTarget> = [];
           for (const { host, pathname } of pageDirect.values()) {
             pageTargets.push({ host, pathname, deploymentId, variantToken: null });
           }
           pageTargets.push(...pageVariants);
+          await uploadPool(listed.keys, R2_CONCURRENCY, (key) =>
+            context.env.ISR_CACHE.delete(key.name),
+          );
           await purgeEdgeCache(context, pageTargets);
         }
         cursor = listed.list_complete ? undefined : listed.cursor;
@@ -210,14 +212,14 @@ export async function runRevalidate(
               }
             }
           }
-          await uploadPool(listed.keys, R2_CONCURRENCY, (key) =>
-            context.env.ISR_CACHE.delete(key.name),
-          );
           const pageTargets: Array<PurgeEdgeTarget> = [];
           for (const { host, pathname } of pageDirect.values()) {
             pageTargets.push({ host, pathname, deploymentId, variantToken: null });
           }
           pageTargets.push(...pageVariants);
+          await uploadPool(listed.keys, R2_CONCURRENCY, (key) =>
+            context.env.ISR_CACHE.delete(key.name),
+          );
           await purgeEdgeCache(context, pageTargets);
         }
         legacyCursor = listed.list_complete ? undefined : listed.cursor;
@@ -351,6 +353,7 @@ async function purgeEdgeCache(
   context: Context<ApiEnv>,
   targets: ReadonlyArray<PurgeEdgeTarget>,
 ): Promise<void> {
+  targets = targets.filter((target) => !target.host.endsWith('.workers.dev'));
   if (targets.length === 0) {
     return;
   }
@@ -366,12 +369,12 @@ async function purgeEdgeCache(
         urls.push(isrEdgeCacheUrl(host, pathname, deploymentId, 'json'));
       }
     }
-    if (urls.length === 0) {
-      return;
-    }
     // `purgeZoneCache` batches internally at 100 URLs per CF API request.
     await purgeZoneCache(context.env.CF_ZONE_ID, context.env.CF_API_TOKEN, urls);
-  } catch {
-    // Best-effort: KV is already purged, worst case is stale edge for remaining TTL.
+  } catch (error) {
+    console.error(
+      '[api] ISR edge cache purge failed; stale entries may remain until their TTL expires.',
+      error,
+    );
   }
 }

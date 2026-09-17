@@ -26,7 +26,7 @@ export async function runProjectsCommand(root: string): Promise<void> {
     appType: p.type ?? 'worker',
     url: p.custom_domain
       ? `https://${p.custom_domain}`
-      : `https://${p.slug}.${getSiteDomain(root)}`,
+      : (p.url ?? `https://${p.slug}.${getSiteDomain(root)}`),
   }));
 
   const slugWidth = Math.max('slug'.length, ...rows.map((r) => r.slug.length));

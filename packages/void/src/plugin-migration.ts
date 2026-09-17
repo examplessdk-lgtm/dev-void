@@ -1,45 +1,19 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { join } from 'pathslash';
 import type { Plugin } from 'vite';
 import type { DatabaseDialect } from './config.ts';
 import { voidLog, voidWarn, voidError } from './log.ts';
 import { readProjectPaths } from './project-paths.ts';
+import { loadLocalEnv } from './shared/env.ts';
 
 function readDatabaseUrl(root: string): string | undefined {
-  const envPath = join(root, '.env.local');
-  if (!existsSync(envPath)) {
-    return undefined;
-  }
-  const content = readFileSync(envPath, 'utf-8');
-  for (const line of content.split('\n')) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith('#')) {
-      continue;
-    }
-    const eqIndex = trimmed.indexOf('=');
-    if (eqIndex === -1) {
-      continue;
-    }
-    const key = trimmed.slice(0, eqIndex).trim();
-    if (key !== 'DATABASE_URL') {
-      continue;
-    }
-    let value = trimmed.slice(eqIndex + 1).trim();
-    if (
-      (value.startsWith('"') && value.endsWith('"')) ||
-      (value.startsWith("'") && value.endsWith("'"))
-    ) {
-      value = value.slice(1, -1);
-    }
-    return value;
-  }
-  return undefined;
+  return loadLocalEnv(root).DATABASE_URL;
 }
 
 /**
  * Vite plugin that runs local migrations on dev server startup.
  * For SQLite/D1: applies migrations to the local miniflare database.
- * For PostgreSQL/MySQL: connects via DATABASE_URL from .env.local.
+ * For PostgreSQL/MySQL: connects via DATABASE_URL from .env.
  */
 export function migrationPlugin(
   root: string,
@@ -68,7 +42,7 @@ export function migrationPlugin(
             const warn = () => {
               console.log();
               voidError(
-                `DATABASE_URL not found in .env.local — skipping ${dialect === 'mysql' ? 'MySQL' : 'PostgreSQL'} migrations.`,
+                `DATABASE_URL not found in .env — skipping ${dialect === 'mysql' ? 'MySQL' : 'PostgreSQL'} migrations.`,
               );
             };
             if (server.httpServer) {

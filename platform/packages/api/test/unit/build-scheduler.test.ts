@@ -48,6 +48,7 @@ const db = {
   connections: new Map<
     string,
     {
+      id?: string;
       repo_full_name: string;
       installation_id: string;
       branch: string;
@@ -55,6 +56,7 @@ const db = {
     } | null
   >(),
   projects: new Map<string, { slug: string } | null>(),
+  unauthorizedConnectionIds: new Set<string>(),
   // ids that should fail the atomic claim (simulate a lost race)
   unclaimable: new Set<string>(),
   // ids a concurrent terminalizer (push-supersede / branch-executor change /
@@ -145,6 +147,9 @@ vi.mock('../../src/db.ts', () => ({
   getGitHubConnection: vi.fn(async (_db: unknown, projectId: string) => {
     return db.connections.get(projectId) ?? null;
   }),
+  hasGitHubConnectionAuthority: vi.fn(
+    async (_db: unknown, connectionId: string) => !db.unauthorizedConnectionIds.has(connectionId),
+  ),
   getProject: vi.fn(async (_db: unknown, id: string) => db.projects.get(id) ?? null),
   updateBuildStatus: vi.fn(
     async (_db: unknown, id: string, status: string, opts?: { error?: string }) => {
@@ -269,6 +274,7 @@ function resetDb() {
   db.activeByUser = new Map();
   db.connections = new Map();
   db.projects = new Map();
+  db.unauthorizedConnectionIds = new Set();
   db.unclaimable = new Set();
   db.terminalized = new Set();
   db.failed = [];
@@ -329,6 +335,7 @@ describe('BuildScheduler.alarm', () => {
     }
     if (!db.connections.has(build.project_id)) {
       db.connections.set(build.project_id, {
+        id: `connection-${build.project_id}`,
         repo_full_name: 'owner/repo',
         installation_id: 'inst1',
         branch: 'main',
@@ -342,6 +349,25 @@ describe('BuildScheduler.alarm', () => {
     const s = makeScheduler(ctx, env);
     await s.alarm();
     expect(ctx.storage.setAlarm).not.toHaveBeenCalled();
+  });
+
+  it('cancels an unproven legacy organization connection before claiming the build', async () => {
+    db.users.set('u1', { plan: 'free', login: 'octocat' });
+    enqueue({ id: 'b1', user_id: 'u1', project_id: 'p1' });
+    db.unauthorizedConnectionIds.add('connection-p1');
+    const startBuild = vi.fn(async () => {});
+    const s = makeScheduler(makeStubCtx(), makeEnv(startBuild));
+
+    await s.alarm();
+
+    expect(startBuild).not.toHaveBeenCalled();
+    expect(db.claimArgs).toEqual([]);
+    expect(db.cancelled).toEqual([
+      {
+        id: 'b1',
+        error: 'github organization repository must be reconnected to renew authorization',
+      },
+    ]);
   });
 
   it('re-arms the alarm when the queue is fully blocked (nothing startable but queued work remains)', async () => {

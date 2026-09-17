@@ -70,7 +70,7 @@ function resolveColumnType(
     if (field.type === 'json' || field.type === 'string[]' || field.type === 'number[]') {
       return 'json';
     }
-    return 'varchar(255)';
+    return field.unbounded ? 'text' : 'varchar(255)';
   }
 
   if (dialect === 'postgresql') {
@@ -178,6 +178,20 @@ function buildAddColumnSql(
   const ifNotExists = schema.dialect === 'sqlite' ? '' : ' IF NOT EXISTS';
   return `ALTER TABLE ${quoteIdentifier(tableName, schema.dialect)} ADD COLUMN${ifNotExists} ${buildColumnDefinition(
     schema.dialect,
+    schema,
+    fieldName,
+    field,
+  )}`;
+}
+
+function buildModifyMySqlColumnSql(
+  schema: VoidAuthMigrationSchema,
+  tableName: string,
+  fieldName: string,
+  field: VoidAuthMigrationField,
+): string {
+  return `ALTER TABLE ${quoteIdentifier(tableName, 'mysql')} MODIFY COLUMN ${buildColumnDefinition(
+    'mysql',
     schema,
     fieldName,
     field,
@@ -329,14 +343,26 @@ export async function applyMySqlAuthMigrations(
       await runner.run(buildCreateTableSql(schema, table));
       existingTables.add(table.name);
     } else {
-      const columnRows = await runner.all<{ column_name?: string }>(
-        'SELECT column_name FROM information_schema.columns WHERE table_schema = ? AND table_name = ?',
+      const columnRows = await runner.all<{
+        column_name?: string;
+        data_type?: string;
+        character_maximum_length?: number | string | null;
+      }>(
+        'SELECT column_name, data_type, character_maximum_length FROM information_schema.columns WHERE table_schema = ? AND table_name = ?',
         [databaseName, table.name],
       );
-      const existingColumns = new Set(columnRows.map((row) => String(row.column_name)));
+      const existingColumns = new Map(
+        columnRows.map((row) => [String(row.column_name), row] as const),
+      );
       for (const [fieldName, field] of Object.entries(table.fields)) {
-        if (!existingColumns.has(fieldName)) {
+        const existingColumn = existingColumns.get(fieldName);
+        if (!existingColumn) {
           await runner.run(buildAddColumnSql(schema, table.name, fieldName, field));
+        } else if (
+          field.unbounded &&
+          String(existingColumn.data_type ?? '').toLowerCase() === 'varchar'
+        ) {
+          await runner.run(buildModifyMySqlColumnSql(schema, table.name, fieldName, field));
         }
       }
     }

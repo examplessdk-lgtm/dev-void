@@ -1,4 +1,5 @@
 import { retryWithBackoff } from '../cf-api.ts';
+import { assertSandboxContainerCreationAllowed } from '../sandbox-drain.ts';
 import { CF_API_BASE, cfFetch, CloudflareApiError } from './cloudflare-api.ts';
 
 export type ContainerApplicationInfo = Readonly<{
@@ -100,6 +101,24 @@ export async function deleteContainerApplicationIdempotent(
       return;
     }
     throw err;
+  }
+}
+
+export async function getContainerApplication(
+  accountId: string,
+  apiToken: string,
+  applicationId: string,
+): Promise<ContainerApplicationInfo | undefined> {
+  try {
+    return await cfFetch<ContainerApplicationInfo>(
+      `${containersUrl(accountId)}/applications/${applicationId}`,
+      apiToken,
+    );
+  } catch (error) {
+    if (error instanceof CloudflareApiError && error.status === 404) {
+      return undefined;
+    }
+    throw error;
   }
 }
 
@@ -218,6 +237,7 @@ export async function provisionPerDeployContainer(
   bindingName: string,
   className: string,
   sandbox: { image: string; instanceType?: string; maxInstances?: number },
+  routing: Pick<KVNamespace, 'get'>,
 ): Promise<{ namespaceId: string; containerApplicationId: string }> {
   const namespaceId = await retryWithBackoff(
     async () => {
@@ -245,6 +265,7 @@ export async function provisionPerDeployContainer(
     },
   );
 
+  await assertSandboxContainerCreationAllowed(routing);
   const created = await tryCreateContainerApplication(accountId, apiToken, {
     name: containerAppName,
     image: sandbox.image,
@@ -274,7 +295,20 @@ export async function provisionPerDeployContainer(
           `instead of expected ${namespaceId}; refusing to reuse`,
       );
     }
+    try {
+      await assertSandboxContainerCreationAllowed(routing);
+    } catch (error) {
+      await deleteContainerApplicationIdempotent(accountId, apiToken, existing.id);
+      throw error;
+    }
     return { namespaceId, containerApplicationId: existing.id };
+  }
+
+  try {
+    await assertSandboxContainerCreationAllowed(routing);
+  } catch (error) {
+    await deleteContainerApplicationIdempotent(accountId, apiToken, created.id);
+    throw error;
   }
 
   return { namespaceId, containerApplicationId: created.id };

@@ -8,6 +8,37 @@ Use `void deploy` to deploy your app to your own Cloudflare account or a Void pl
 
 Choose Cloudflare if you're deploying an app yourself. Choose Void if your team has a shared platform you can connect to. You can also [install a Void platform](./self-hosted-platform.md) in your company's Cloudflare account.
 
+## Beta Support
+
+Direct Cloudflare deployment runs an application in your account. A self-hosted
+Void platform provides that deployment service to a team using the operator's
+account. Both use the same application APIs, with the following differences:
+
+| Feature                                          | Direct Cloudflare                | Core self-hosted platform                 |
+| ------------------------------------------------ | -------------------------------- | ----------------------------------------- |
+| Static sites, SPAs, and native Pages SSR         | Supported                        | Supported                                 |
+| Routing rules, WebSockets, queues, cron, and ISR | Supported                        | Supported                                 |
+| D1, KV, R2, and external SQL through Hyperdrive  | Supported                        | Supported                                 |
+| Workers AI and provider requests                 | Your account and gateway         | Installation gateway and proxy            |
+| Runtime logs                                     | Live Cloudflare tail             | Retained platform logs                    |
+| Application rollback                             | Worker versions                  | Retained platform deployments             |
+| Typed Durable State                              | Supported                        | Unavailable                               |
+| Sandboxes                                        | Requires Workers Paid and Docker | Unavailable in beta                       |
+| Custom application domains                       | Supported                        | Unavailable in the core installation      |
+| Generated GitHub deployment workflow             | Supported                        | Use your CI with a scoped developer token |
+| User dashboard and managed GitHub builds         | Not required                     | Not included in a standard installation   |
+
+Ordinary native applications remain compatible with Workers Free within its
+quotas. Installing a team platform requires Workers for Platforms and the
+[documented infrastructure](./self-hosted-platform.md#cloudflare-footprint).
+Application rollback never reverses database migrations.
+
+Routing-rule parity applies to native Void applications and static deployments.
+Framework-owned Worker output uses its framework's routing and asset policy;
+unsupported Void routing rules are rejected before direct deployment.
+
+Use matching CLI and framework adapter versions. For a team platform, the available features depend on its installed version and configuration. Ask your administrator if a feature is unavailable or an upgrade is required.
+
 ## CLI
 
 ### First deploy
@@ -27,7 +58,7 @@ Your choice is saved in `.void/project.json`, so the next deploy is just `void d
 
 Already have a Cloudflare Worker and a root `wrangler.jsonc` or `wrangler.json`? Run `void deploy`. If no destination is selected, Void offers to link and deploy using the existing Worker and resources. Accept once to keep deploying to that site. See [Deploy an existing Worker](../integrations/cloudflare.md#deploy-an-existing-worker) for the first-deployment checks.
 
-To connect to your team's platform and sign in, run `void connect <url>` using the URL from your administrator. Use `void connect --platform cloudflare` to set up your own Cloudflare account. Connecting preserves existing project links. New Void projects need a platform connection. Older projects already linked to Void Cloud continue to use it.
+To connect to your team's platform and sign in, run `void connect <url>` using the URL from your administrator. Use `void connect --platform cloudflare` to set up your own Cloudflare account. Connecting preserves existing project links. New Void projects need a platform connection.
 
 ### Migrations
 
@@ -124,6 +155,8 @@ void github join
 void github connect --executor container
 ```
 
+Organization installations always require a browser proof for the specific repository, including for the person who installed the App. Void does not reveal the installation's full private repository list. If an upgraded platform marks an older organization connection as requiring reconnection, run the same `void github connect` command again to renew that repository-scoped authorization before builds resume.
+
 4. Verify the connection
 
 ```bash
@@ -206,12 +239,14 @@ Select Cloudflare during setup, or run:
 void deploy --platform cloudflare
 ```
 
-Void supports full Worker apps, static sites, SPAs, and Cloudflare builds from supported frameworks. It provisions resources, applies migrations, and manages secrets for you. Commands such as `void secret put`, `void project logs`, and `void project rollback` then use the same account and Worker.
+Void supports full Worker apps, static sites, SPAs, and Cloudflare builds from supported frameworks. It provisions resources, applies migrations, and manages secrets for you. `.env` stays local; production server keys declared in `env.ts` must exist in encrypted remote secret storage and are rejected as plaintext Worker vars. Commands such as `void secret put`, `void project logs`, and `void project rollback` then use the same account and Worker.
 
 See the [Cloudflare guide](../integrations/cloudflare.md#deploy-to-your-own-cloudflare-account) for supported features, CI setup, and deployment limits.
 
 ### Node.js, Bun, and Deno
 
 Set [`target`](../reference/config.md#target) in `void.json` to build a standalone server for Node.js, Bun, or Deno. You can run the result on your own server or in a container.
+
+Deploy `dist/ssr` and `dist/client` together. The server loads the Pages client manifest and assets relative to its emitted module; start it from the app root with `node dist/ssr/index.js`, `bun dist/ssr/index.js`, or `deno run -A dist/ssr/index.js`.
 
 These targets don't provide Cloudflare bindings such as D1, KV, R2, and Workers AI. See the [Node.js, Bun, and Deno guide](../integrations/nodejs-bun-deno.md) for the features available on each target.

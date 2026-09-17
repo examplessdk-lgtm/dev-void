@@ -4,6 +4,7 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -17,12 +18,12 @@ import {
   extractPnpmWorkspacePackages,
   generateStarterMigration,
   getWorkflowYaml,
-  getTodayCompatDate,
   isScaffoldableEmptyProject,
   isVoidResolvableFrom,
   runInitCommand,
 } from '../../src/cli/init.ts';
 import { savePlatformConnection } from '../../src/cli/platform-registry.ts';
+import { LATEST_KNOWN_COMPAT_DATE } from '../../src/cli/wrangler.ts';
 import { buildDrizzleKitSpawnEnv } from '../../src/cli/yarn-pnp.ts';
 
 const mockSpawnSync = vi.fn();
@@ -79,7 +80,7 @@ describe('GitHub Actions deployment workflows', () => {
 function expectPnpmAllowBuilds(root: string): void {
   const yaml = readFileSync(join(root, 'pnpm-workspace.yaml'), 'utf-8');
   expect(yaml).toContain('allowBuilds:\n');
-  expect(yaml).toContain('  better-sqlite3: true');
+  expect(yaml).toContain('  better-sqlite3: false');
   expect(yaml).toContain('  esbuild: true');
   expect(yaml).toContain('  sharp: true');
   expect(yaml).toContain('  workerd: true');
@@ -226,8 +227,6 @@ function selectCloudflareDuringInit(accountId?: string): void {
     switch (options.message) {
       case 'Choose a database setup for this project:':
         return 'none';
-      case 'Could not detect your coding agent. Which one are you using?':
-        return 'generic';
       case 'Where should this project deploy?':
         return 'cloudflare';
       case 'Choose a Cloudflare account:':
@@ -1249,8 +1248,7 @@ describe('isScaffoldableEmptyProject', () => {
       mockSelect
         .mockResolvedValueOnce('vite')
         .mockResolvedValueOnce('svelte')
-        .mockResolvedValueOnce('static')
-        .mockResolvedValueOnce('generic');
+        .mockResolvedValueOnce('static');
       mockConfirm.mockResolvedValueOnce(false).mockResolvedValueOnce(false);
 
       await runInitCommand(root);
@@ -1303,8 +1301,7 @@ describe('isScaffoldableEmptyProject', () => {
       mockSelect
         .mockResolvedValueOnce('vite-plus')
         .mockResolvedValueOnce('react')
-        .mockResolvedValueOnce('sqlite')
-        .mockResolvedValueOnce('generic');
+        .mockResolvedValueOnce('sqlite');
       mockConfirm.mockResolvedValueOnce(false).mockResolvedValueOnce(false);
 
       await runInitCommand(root);
@@ -1359,7 +1356,7 @@ describe('isScaffoldableEmptyProject', () => {
       expect(JSON.parse(readFileSync(join(root, 'void.json'), 'utf-8'))).toEqual({
         $schema: './node_modules/void/schema.json',
         worker: {
-          compatibility_date: getTodayCompatDate(),
+          compatibility_date: LATEST_KNOWN_COMPAT_DATE,
         },
       });
       expect(() =>
@@ -1381,8 +1378,7 @@ describe('isScaffoldableEmptyProject', () => {
       mockSelect
         .mockResolvedValueOnce('vite-plus')
         .mockResolvedValueOnce('vue')
-        .mockResolvedValueOnce('postgresql')
-        .mockResolvedValueOnce('generic');
+        .mockResolvedValueOnce('postgresql');
       mockConfirm.mockResolvedValueOnce(false).mockResolvedValueOnce(false);
 
       await runInitCommand(root);
@@ -1396,7 +1392,7 @@ describe('isScaffoldableEmptyProject', () => {
         $schema: './node_modules/void/schema.json',
         database: 'pg',
         worker: {
-          compatibility_date: getTodayCompatDate(),
+          compatibility_date: LATEST_KNOWN_COMPAT_DATE,
         },
       });
 
@@ -1489,8 +1485,7 @@ describe('isScaffoldableEmptyProject', () => {
       mockSelect
         .mockResolvedValueOnce('vite-plus')
         .mockResolvedValueOnce('react')
-        .mockResolvedValueOnce('static')
-        .mockResolvedValueOnce('generic');
+        .mockResolvedValueOnce('static');
       mockConfirm.mockResolvedValueOnce(false);
 
       await runInitCommand(root);
@@ -1502,7 +1497,7 @@ describe('isScaffoldableEmptyProject', () => {
       expect(pkg.devDependencies.void).toBeDefined();
       expect(pkg.devDependencies['@void/react']).toBeDefined();
       expect(pkg.devDependencies['vite-plus']).toBe('^0.1.21');
-      expect(pkg.packageManager).toBe('pnpm@^12.4.1');
+      expect(pkg.packageManager).toBe('pnpm@12.4.1');
       expect(pkg.scripts.dev).toBe('vp dev');
 
       expect(readFileSync(join(root, 'pages', 'index.tsx'), 'utf-8')).toContain(
@@ -1519,7 +1514,7 @@ describe('isScaffoldableEmptyProject', () => {
       expect(JSON.parse(readFileSync(join(root, 'void.json'), 'utf-8'))).toEqual({
         $schema: './node_modules/void/schema.json',
         worker: {
-          compatibility_date: getTodayCompatDate(),
+          compatibility_date: LATEST_KNOWN_COMPAT_DATE,
         },
       });
     } finally {
@@ -1533,8 +1528,7 @@ describe('isScaffoldableEmptyProject', () => {
       mockSelect
         .mockResolvedValueOnce('vite')
         .mockResolvedValueOnce('react')
-        .mockResolvedValueOnce('static')
-        .mockResolvedValueOnce('generic');
+        .mockResolvedValueOnce('static');
       mockConfirm.mockResolvedValueOnce(false);
 
       await runInitCommand(root);
@@ -1585,8 +1579,7 @@ describe('isScaffoldableEmptyProject', () => {
       mockSelect
         .mockResolvedValueOnce('vite-plus')
         .mockResolvedValueOnce('react')
-        .mockResolvedValueOnce('static')
-        .mockResolvedValueOnce('generic');
+        .mockResolvedValueOnce('static');
       mockConfirm.mockResolvedValueOnce(false);
 
       await runInitCommand(root);
@@ -1617,8 +1610,7 @@ describe('isScaffoldableEmptyProject', () => {
         .mockResolvedValueOnce('subfolder')
         .mockResolvedValueOnce('vite-plus')
         .mockResolvedValueOnce('react')
-        .mockResolvedValueOnce('static')
-        .mockResolvedValueOnce('generic');
+        .mockResolvedValueOnce('static');
       mockText.mockResolvedValueOnce('my-new-app');
       mockConfirm.mockResolvedValueOnce(false);
 
@@ -1648,7 +1640,7 @@ describe('isScaffoldableEmptyProject', () => {
       );
       expect(mockSpawnSync).toHaveBeenCalledWith(
         'pnpm',
-        ['install'],
+        ['install', '--no-frozen-lockfile'],
         expect.objectContaining({
           cwd: appRoot,
           stdio: 'inherit',
@@ -1664,10 +1656,7 @@ describe('isScaffoldableEmptyProject', () => {
     const root = mkdtempSync(join(tmpdir(), 'void-init-'));
     try {
       mkdirSync(join(root, 'existing-project'));
-      mockSelect
-        .mockResolvedValueOnce('current')
-        .mockResolvedValueOnce('none')
-        .mockResolvedValueOnce('generic');
+      mockSelect.mockResolvedValueOnce('current').mockResolvedValueOnce('none');
       mockConfirm.mockResolvedValueOnce(false).mockResolvedValueOnce(false);
 
       await runInitCommand(root);
@@ -1691,7 +1680,7 @@ describe('isScaffoldableEmptyProject', () => {
         join(root, 'package.json'),
         JSON.stringify({ name: 'existing-app', private: true }, null, 2) + '\n',
       );
-      mockSelect.mockResolvedValueOnce('none').mockResolvedValueOnce('generic');
+      mockSelect.mockResolvedValueOnce('none');
       mockConfirm.mockResolvedValueOnce(false).mockResolvedValueOnce(false);
 
       await runInitCommand(root);
@@ -1829,10 +1818,9 @@ describe('isScaffoldableEmptyProject', () => {
           custom_domain: null,
         },
       ]);
-      // database → none, agent → generic, then the project-selection prompt → proj_789.
+      // database → none, then the project-selection prompt → proj_789.
       mockSelect
         .mockResolvedValueOnce('none')
-        .mockResolvedValueOnce('generic')
         .mockResolvedValueOnce('void')
         .mockResolvedValueOnce('proj_789');
       // GitHub Actions confirm → true; deploy-setup link confirm → true;
@@ -1920,7 +1908,7 @@ jobs:
           2,
         ) + '\n',
       );
-      mockSelect.mockResolvedValueOnce('none').mockResolvedValueOnce('generic');
+      mockSelect.mockResolvedValueOnce('none');
       mockConfirm.mockResolvedValueOnce(false).mockResolvedValueOnce(false);
 
       await runInitCommand(root);
@@ -1961,7 +1949,7 @@ jobs:
           2,
         ) + '\n',
       );
-      mockSelect.mockResolvedValueOnce('none').mockResolvedValueOnce('generic');
+      mockSelect.mockResolvedValueOnce('none');
       mockConfirm.mockResolvedValueOnce(false).mockResolvedValueOnce(false);
 
       await runInitCommand(root);
@@ -2013,7 +2001,7 @@ export default defineConfig({
 });
 `,
       );
-      mockSelect.mockResolvedValueOnce('none').mockResolvedValueOnce('generic');
+      mockSelect.mockResolvedValueOnce('none');
       mockConfirm.mockResolvedValueOnce(false).mockResolvedValueOnce(false);
 
       await runInitCommand(root);
@@ -2078,7 +2066,7 @@ export default defineConfig({
 });
 `,
       );
-      mockSelect.mockResolvedValueOnce('none').mockResolvedValueOnce('generic');
+      mockSelect.mockResolvedValueOnce('none');
       mockConfirm.mockResolvedValueOnce(false).mockResolvedValueOnce(false);
 
       await runInitCommand(root);
@@ -2126,7 +2114,7 @@ export default defineConfig({
 });
 `,
       );
-      mockSelect.mockResolvedValueOnce('none').mockResolvedValueOnce('generic');
+      mockSelect.mockResolvedValueOnce('none');
       mockConfirm.mockResolvedValueOnce(false).mockResolvedValueOnce(false);
 
       await runInitCommand(root);
@@ -2167,7 +2155,7 @@ export default defineConfig({
 export default config;
 `,
       );
-      mockSelect.mockResolvedValueOnce('none').mockResolvedValueOnce('generic');
+      mockSelect.mockResolvedValueOnce('none');
       mockConfirm.mockResolvedValueOnce(false).mockResolvedValueOnce(false);
 
       await runInitCommand(root);
@@ -2216,7 +2204,7 @@ export default config;
 export default config;
 `,
       );
-      mockSelect.mockResolvedValueOnce('none').mockResolvedValueOnce('generic');
+      mockSelect.mockResolvedValueOnce('none');
       mockConfirm.mockResolvedValueOnce(false).mockResolvedValueOnce(false);
 
       await runInitCommand(root);
@@ -2260,6 +2248,85 @@ export default config;
     }
   });
 
+  it('creates AGENTS.md without prompting when no coding agent is detected', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-init-'));
+    try {
+      await runInitCommand(root, { tsconfig: false, github: false, agents: true });
+
+      const instructions = readFileSync(join(root, 'AGENTS.md'), 'utf-8');
+      expect(instructions).toContain('## Void');
+      expect(instructions).toContain('node_modules/void/skills/void/docs/');
+      expect(existsSync(join(root, 'CLAUDE.md'))).toBe(false);
+      expect(mockSelect).not.toHaveBeenCalled();
+      expect(mockConfirm).not.toHaveBeenCalled();
+
+      await runInitCommand(root, { tsconfig: false, github: false, agents: true });
+      expect(readFileSync(join(root, 'AGENTS.md'), 'utf-8')).toBe(instructions);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it.each([false, true])(
+    'writes AGENTS.md and preserves CLAUDE.md when Claude is detected (existing AGENTS.md: %s)',
+    async (hasAgentsFile) => {
+      // Resolve macOS's /var alias so relative skill symlinks use the fixture's real path.
+      const root = realpathSync(mkdtempSync(join(tmpdir(), 'void-init-')));
+      try {
+        const claudeInstructions = '# Claude instructions\n\nKeep these instructions.\n';
+        const projectInstructions = '# Project instructions\n\nKeep this guidance.\n';
+        writeFileSync(join(root, 'CLAUDE.md'), claudeInstructions);
+        mkdirSync(join(root, '.claude'));
+        if (hasAgentsFile) {
+          writeFileSync(join(root, 'AGENTS.md'), projectInstructions);
+        }
+
+        await runInitCommand(root, { tsconfig: false, github: false, agents: true });
+
+        const instructions = readFileSync(join(root, 'AGENTS.md'), 'utf-8');
+        expect(instructions).toContain('## Void');
+        if (hasAgentsFile) {
+          expect(instructions.startsWith(projectInstructions)).toBe(true);
+        }
+        expect(readFileSync(join(root, 'CLAUDE.md'), 'utf-8')).toBe(claudeInstructions);
+        expect(existsSync(join(root, '.claude/skills/void/SKILL.md'))).toBe(true);
+        expect(mockSelect).not.toHaveBeenCalled();
+        expect(mockConfirm).not.toHaveBeenCalled();
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('updates prerelease agent instructions without changing surrounding prose', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-init-'));
+    try {
+      const currentVersion = JSON.parse(
+        readFileSync(join(process.cwd(), 'packages/void/package.json'), 'utf-8'),
+      ).version;
+      const before = '# Project guidance\n\nKeep this user-authored introduction.\n\n';
+      const after = '\n\nKeep this user-authored footer.\n';
+      writeFileSync(
+        join(root, 'AGENTS.md'),
+        `${before}<!--injected-by-void-v1.2.3-beta.2+build.7-->\nStale managed instructions.\n<!--/injected-by-void-->${after}`,
+      );
+
+      await runInitCommand(root, { tsconfig: false, github: false, agents: true });
+
+      const updated = readFileSync(join(root, 'AGENTS.md'), 'utf-8');
+      expect(updated.startsWith(before)).toBe(true);
+      expect(updated.endsWith(after)).toBe(true);
+      expect(updated).toContain(`<!--injected-by-void-v${currentVersion}-->`);
+      expect(updated).not.toContain('1.2.3-beta.2+build.7');
+      expect(updated).not.toContain('Stale managed instructions.');
+      expect(updated).toContain('node_modules/void/skills/void/docs/');
+      expect(updated.match(/<!--injected-by-void-v/g)).toHaveLength(1);
+      expect(updated.match(/<!--\/injected-by-void-->/g)).toHaveLength(1);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('creates .gitignore with Void defaults during targeted setup', async () => {
     const root = mkdtempSync(join(tmpdir(), 'void-init-'));
     try {
@@ -2269,8 +2336,7 @@ export default config;
       expect(gitignore).toContain('node_modules');
       expect(gitignore).toContain('.void');
       expect(gitignore).toContain('.wrangler');
-      expect(gitignore).toContain('.env.local');
-      expect(gitignore).toContain('.env.*.local');
+      expect(gitignore).toContain('.env');
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -2287,8 +2353,7 @@ export default config;
       expect(gitignore).toContain('custom-cache');
       expect(gitignore).toContain('.void');
       expect(gitignore).toContain('.wrangler');
-      expect(gitignore).toContain('.env.local');
-      expect(gitignore).toContain('.env.*.local');
+      expect(gitignore).toContain('.env');
       expect(gitignore.match(/^node_modules$/gm)).toHaveLength(1);
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -2520,10 +2585,7 @@ export default config;
       );
       writeFileSync(join(root, 'pnpm-lock.yaml'), "lockfileVersion: '9.0'\n");
 
-      mockSelect
-        .mockResolvedValueOnce('vite-plus')
-        .mockResolvedValueOnce('sqlite')
-        .mockResolvedValueOnce('generic');
+      mockSelect.mockResolvedValueOnce('vite-plus').mockResolvedValueOnce('sqlite');
       mockConfirm.mockResolvedValueOnce(false).mockResolvedValueOnce(false);
 
       await runInitCommand(root);
@@ -2552,7 +2614,7 @@ export default config;
       );
       expect(mockSpawnSync).toHaveBeenCalledWith(
         'pnpm',
-        ['install'],
+        ['install', '--no-frozen-lockfile'],
         expect.objectContaining({
           cwd: root,
           stdio: 'inherit',
@@ -2568,7 +2630,7 @@ export default config;
     const root = mkdtempSync(join(tmpdir(), 'void-init-'));
     try {
       writeFileSync(join(root, 'void.json'), JSON.stringify({ database: 'pg' }, null, 2) + '\n');
-      mockSelect.mockResolvedValueOnce('sqlite').mockResolvedValueOnce('generic');
+      mockSelect.mockResolvedValueOnce('sqlite');
       mockConfirm
         .mockResolvedValueOnce(false)
         .mockResolvedValueOnce(false)
@@ -2579,7 +2641,7 @@ export default config;
       expect(JSON.parse(readFileSync(join(root, 'void.json'), 'utf-8'))).toEqual({
         $schema: './node_modules/void/schema.json',
         worker: {
-          compatibility_date: getTodayCompatDate(),
+          compatibility_date: LATEST_KNOWN_COMPAT_DATE,
         },
       });
     } finally {
@@ -2603,7 +2665,7 @@ export default config;
           2,
         ) + '\n',
       );
-      mockSelect.mockResolvedValueOnce('sqlite').mockResolvedValueOnce('generic');
+      mockSelect.mockResolvedValueOnce('sqlite');
       mockConfirm
         .mockResolvedValueOnce(false)
         .mockResolvedValueOnce(false)
@@ -2617,7 +2679,7 @@ export default config;
           prerender: ['/'],
         },
         worker: {
-          compatibility_date: getTodayCompatDate(),
+          compatibility_date: LATEST_KNOWN_COMPAT_DATE,
         },
       });
     } finally {
@@ -2628,7 +2690,7 @@ export default config;
     const root = mkdtempSync(join(tmpdir(), 'void-init-'));
     try {
       writeFileSync(join(root, 'void.json'), JSON.stringify({ database: 'pg' }, null, 2) + '\n');
-      mockSelect.mockResolvedValueOnce('none').mockResolvedValueOnce('generic');
+      mockSelect.mockResolvedValueOnce('none');
       mockConfirm.mockResolvedValueOnce(false);
 
       await runInitCommand(root);
@@ -2636,7 +2698,7 @@ export default config;
       expect(JSON.parse(readFileSync(join(root, 'void.json'), 'utf-8'))).toEqual({
         $schema: './node_modules/void/schema.json',
         worker: {
-          compatibility_date: getTodayCompatDate(),
+          compatibility_date: LATEST_KNOWN_COMPAT_DATE,
         },
       });
     } finally {
@@ -2651,7 +2713,6 @@ export default config;
         .mockResolvedValueOnce('vite-plus')
         .mockResolvedValueOnce('react')
         .mockResolvedValueOnce('sqlite')
-        .mockResolvedValueOnce('generic')
         .mockResolvedValueOnce('void')
         .mockResolvedValueOnce('github');
       mockConfirm.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
@@ -2687,7 +2748,6 @@ export default config;
         .mockResolvedValueOnce('vite-plus')
         .mockResolvedValueOnce('react')
         .mockResolvedValueOnce('sqlite')
-        .mockResolvedValueOnce('generic')
         .mockResolvedValueOnce('void')
         .mockResolvedValueOnce('github');
       mockConfirm.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
@@ -2728,7 +2788,6 @@ export default config;
         .mockResolvedValueOnce('vite-plus')
         .mockResolvedValueOnce('react')
         .mockResolvedValueOnce('sqlite')
-        .mockResolvedValueOnce('generic')
         .mockResolvedValueOnce('void')
         .mockResolvedValueOnce('proj_456');
       mockConfirm
@@ -2791,7 +2850,7 @@ export default config;
         platform: 'cloudflare',
       });
       expect(JSON.parse(readFileSync(join(root, 'wrangler.jsonc'), 'utf-8'))).toEqual({
-        compatibility_date: getTodayCompatDate(),
+        compatibility_date: LATEST_KNOWN_COMPAT_DATE,
         compatibility_flags: ['nodejs_als'],
       });
       expect(mockSpawnSync).toHaveBeenCalledWith(
@@ -2951,7 +3010,7 @@ export default config;
       await runInitCommand(root);
 
       expect(JSON.parse(readFileSync(join(root, 'wrangler.jsonc'), 'utf-8'))).toEqual({
-        compatibility_date: getTodayCompatDate(),
+        compatibility_date: LATEST_KNOWN_COMPAT_DATE,
         compatibility_flags: ['nodejs_als'],
       });
       expect(
@@ -2978,10 +3037,7 @@ export default config;
           2,
         ) + '\n',
       );
-      mockSelect
-        .mockResolvedValueOnce('none')
-        .mockResolvedValueOnce('generic')
-        .mockResolvedValueOnce('none');
+      mockSelect.mockResolvedValueOnce('none').mockResolvedValueOnce('none');
 
       await runInitCommand(root);
 
@@ -3018,7 +3074,7 @@ export default config;
           2,
         ) + '\n',
       );
-      mockSelect.mockResolvedValueOnce('none').mockResolvedValueOnce('generic');
+      mockSelect.mockResolvedValueOnce('none');
       mockConfirm.mockResolvedValueOnce(false).mockResolvedValueOnce(false);
 
       await runInitCommand(root);
@@ -3091,7 +3147,7 @@ export default config;
       // No lockfile, no packageManager — `detectProjectState` falls back
       // to `npm`, which would blow up on the `workspace:` spec if install
       // actually ran.
-      mockSelect.mockResolvedValueOnce('none').mockResolvedValueOnce('generic');
+      mockSelect.mockResolvedValueOnce('none');
       // Demo confirm → true; GitHub Actions confirm → false; deploy-setup
       // confirm falls through to the mock default (undefined).
       mockConfirm.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
@@ -3155,7 +3211,7 @@ export default config;
           2,
         ) + '\n',
       );
-      mockSelect.mockResolvedValueOnce('none').mockResolvedValueOnce('generic');
+      mockSelect.mockResolvedValueOnce('none');
       mockConfirm.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
 
       await runInitCommand(subpkgRoot);
@@ -3231,7 +3287,7 @@ export default config;
       // Signal npm via a lockfile so the install invocation is
       // unambiguous.
       writeFileSync(join(childRoot, 'package-lock.json'), '{}\n');
-      mockSelect.mockResolvedValueOnce('none').mockResolvedValueOnce('generic');
+      mockSelect.mockResolvedValueOnce('none');
       mockConfirm.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
 
       await runInitCommand(childRoot);
@@ -3307,7 +3363,7 @@ export default config;
           2,
         ) + '\n',
       );
-      mockSelect.mockResolvedValueOnce('none').mockResolvedValueOnce('generic');
+      mockSelect.mockResolvedValueOnce('none');
       mockConfirm.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
 
       await runInitCommand(subpkgRoot);
@@ -3390,7 +3446,7 @@ export default config;
           2,
         ) + '\n',
       );
-      mockSelect.mockResolvedValueOnce('none').mockResolvedValueOnce('generic');
+      mockSelect.mockResolvedValueOnce('none');
       mockConfirm.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
 
       await runInitCommand(subpkgRoot);
@@ -3461,7 +3517,7 @@ export default config;
           2,
         ) + '\n',
       );
-      mockSelect.mockResolvedValueOnce('none').mockResolvedValueOnce('generic');
+      mockSelect.mockResolvedValueOnce('none');
       mockConfirm.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
 
       await runInitCommand(subpkgRoot);
@@ -3543,7 +3599,7 @@ export default config;
       );
       // Signal npm via lockfile so install is unambiguous.
       writeFileSync(join(subpkgRoot, 'package-lock.json'), '{}\n');
-      mockSelect.mockResolvedValueOnce('none').mockResolvedValueOnce('generic');
+      mockSelect.mockResolvedValueOnce('none');
       mockConfirm.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
 
       await runInitCommand(subpkgRoot);
@@ -3611,7 +3667,7 @@ export default config;
         ) + '\n',
       );
       writeFileSync(join(subpkgRoot, 'package-lock.json'), '{}\n');
-      mockSelect.mockResolvedValueOnce('none').mockResolvedValueOnce('generic');
+      mockSelect.mockResolvedValueOnce('none');
       mockConfirm.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
 
       await runInitCommand(subpkgRoot);
@@ -3667,7 +3723,7 @@ export default config;
       // Signal npm via lockfile. No `node_modules` directory — drizzle-
       // kit couldn't resolve `void/schema-d1` without an install first.
       writeFileSync(join(root, 'package-lock.json'), '{}\n');
-      mockSelect.mockResolvedValueOnce('none').mockResolvedValueOnce('generic');
+      mockSelect.mockResolvedValueOnce('none');
       mockConfirm.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
 
       await runInitCommand(root);
@@ -3722,7 +3778,7 @@ export default config;
       // Yarn Berry lockfile exists but `.pnp.cjs` does NOT yet —
       // `yarn install` creates it below.
       writeFileSync(join(root, 'yarn.lock'), '# yarn lockfile v1\n');
-      mockSelect.mockResolvedValueOnce('none').mockResolvedValueOnce('generic');
+      mockSelect.mockResolvedValueOnce('none');
       mockConfirm.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
 
       // Normalize NODE_OPTIONS so assertions aren't contaminated by
@@ -3853,7 +3909,7 @@ export default config;
       // instead.
       writeFileSync(join(root, 'yarn.lock'), '# yarn lockfile v1\n');
       writeFileSync(join(root, '.yarnrc.yml'), 'nodeLinker: node-modules\n');
-      mockSelect.mockResolvedValueOnce('none').mockResolvedValueOnce('generic');
+      mockSelect.mockResolvedValueOnce('none');
       mockConfirm.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
 
       // Simulate `yarn install` populating `node_modules/void` — no
@@ -3943,7 +3999,7 @@ export default config;
         ) + '\n',
       );
       writeFileSync(join(root, 'yarn.lock'), '# yarn lockfile v1\n');
-      mockSelect.mockResolvedValueOnce('none').mockResolvedValueOnce('generic');
+      mockSelect.mockResolvedValueOnce('none');
       mockConfirm.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
 
       mockSpawnSync.mockImplementation((command, args, options) => {
@@ -4034,7 +4090,7 @@ export default config;
           2,
         ) + '\n',
       );
-      mockSelect.mockResolvedValueOnce('none').mockResolvedValueOnce('generic');
+      mockSelect.mockResolvedValueOnce('none');
       mockConfirm.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
 
       await runInitCommand(subpkgRoot);
@@ -4096,7 +4152,7 @@ export default config;
           2,
         ) + '\n',
       );
-      mockSelect.mockResolvedValueOnce('none').mockResolvedValueOnce('generic');
+      mockSelect.mockResolvedValueOnce('none');
       mockConfirm.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
 
       await runInitCommand(subpkgRoot);
@@ -4149,7 +4205,7 @@ export default config;
           2,
         ) + '\n',
       );
-      mockSelect.mockResolvedValueOnce('none').mockResolvedValueOnce('generic');
+      mockSelect.mockResolvedValueOnce('none');
       mockConfirm.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
 
       await runInitCommand(subpkgRoot);
@@ -4200,7 +4256,7 @@ export default config;
         ) + '\n',
       );
       writeFileSync(join(subpkgRoot, 'package-lock.json'), '{}\n');
-      mockSelect.mockResolvedValueOnce('none').mockResolvedValueOnce('generic');
+      mockSelect.mockResolvedValueOnce('none');
       mockConfirm.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
 
       await runInitCommand(subpkgRoot);
@@ -4261,7 +4317,7 @@ export default config;
           2,
         ) + '\n',
       );
-      mockSelect.mockResolvedValueOnce('none').mockResolvedValueOnce('generic');
+      mockSelect.mockResolvedValueOnce('none');
       mockConfirm.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
 
       await runInitCommand(subpkgRoot);
@@ -4312,7 +4368,7 @@ export default config;
           2,
         ) + '\n',
       );
-      mockSelect.mockResolvedValueOnce('none').mockResolvedValueOnce('generic');
+      mockSelect.mockResolvedValueOnce('none');
       mockConfirm.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
 
       await runInitCommand(subpkgRoot);
@@ -4359,7 +4415,7 @@ export default config;
         ) + '\n',
       );
       writeFileSync(join(subpkgRoot, 'package-lock.json'), '{}\n');
-      mockSelect.mockResolvedValueOnce('none').mockResolvedValueOnce('generic');
+      mockSelect.mockResolvedValueOnce('none');
       mockConfirm.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
 
       await runInitCommand(subpkgRoot);
@@ -4420,7 +4476,7 @@ export default config;
           2,
         ) + '\n',
       );
-      mockSelect.mockResolvedValueOnce('none').mockResolvedValueOnce('generic');
+      mockSelect.mockResolvedValueOnce('none');
       mockConfirm.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
 
       await runInitCommand(subpkgRoot);
@@ -4462,13 +4518,11 @@ export default config;
       const subpkgRoot = join(wsroot, 'packages', 'my-new-app');
       mkdirSync(subpkgRoot, { recursive: true });
 
-      // Toolchain prompt → Vite+, framework prompt → vue, starter mode → sqlite,
-      // agent prompt → generic.
+      // Toolchain prompt → Vite+, framework prompt → vue, starter mode → sqlite.
       mockSelect
         .mockResolvedValueOnce('vite-plus')
         .mockResolvedValueOnce('vue')
-        .mockResolvedValueOnce('sqlite')
-        .mockResolvedValueOnce('generic');
+        .mockResolvedValueOnce('sqlite');
       mockConfirm.mockResolvedValueOnce(false).mockResolvedValueOnce(false);
 
       await runInitCommand(subpkgRoot);
@@ -4546,8 +4600,7 @@ export default config;
       mockSelect
         .mockResolvedValueOnce('vite-plus')
         .mockResolvedValueOnce('react')
-        .mockResolvedValueOnce('static')
-        .mockResolvedValueOnce('generic');
+        .mockResolvedValueOnce('static');
       mockConfirm.mockResolvedValueOnce(false).mockResolvedValueOnce(false);
 
       await runInitCommand(subpkgRoot);
@@ -4692,8 +4745,7 @@ export default config;
       mockSelect
         .mockResolvedValueOnce('vite-plus')
         .mockResolvedValueOnce('react')
-        .mockResolvedValueOnce('sqlite')
-        .mockResolvedValueOnce('generic');
+        .mockResolvedValueOnce('sqlite');
       mockConfirm.mockResolvedValueOnce(false).mockResolvedValueOnce(false);
 
       await runInitCommand(subpkgRoot);
@@ -4743,8 +4795,7 @@ export default config;
       mockSelect
         .mockResolvedValueOnce('vite-plus')
         .mockResolvedValueOnce('vue')
-        .mockResolvedValueOnce('sqlite')
-        .mockResolvedValueOnce('generic');
+        .mockResolvedValueOnce('sqlite');
       mockConfirm.mockResolvedValueOnce(false).mockResolvedValueOnce(false);
 
       await runInitCommand(subpkgRoot);
@@ -4784,8 +4835,7 @@ export default config;
       mockSelect
         .mockResolvedValueOnce('vite-plus')
         .mockResolvedValueOnce('vue')
-        .mockResolvedValueOnce('sqlite')
-        .mockResolvedValueOnce('generic');
+        .mockResolvedValueOnce('sqlite');
       // Demo prompt → no, GitHub Actions prompt → yes (the user opts in
       // but the skip path must override it because the workflow file
       // would land in the wrong place).
@@ -4822,8 +4872,7 @@ export default config;
       mockSelect
         .mockResolvedValueOnce('vite-plus')
         .mockResolvedValueOnce('react')
-        .mockResolvedValueOnce('sqlite')
-        .mockResolvedValueOnce('generic');
+        .mockResolvedValueOnce('sqlite');
       mockConfirm.mockResolvedValueOnce(false).mockResolvedValueOnce(false);
 
       await runInitCommand(appRoot);
@@ -4885,8 +4934,7 @@ export default config;
       mockSelect
         .mockResolvedValueOnce('vite-plus')
         .mockResolvedValueOnce('vue')
-        .mockResolvedValueOnce('sqlite')
-        .mockResolvedValueOnce('generic');
+        .mockResolvedValueOnce('sqlite');
       mockConfirm.mockResolvedValueOnce(false).mockResolvedValueOnce(false);
 
       await runInitCommand(subpkgRoot);
@@ -4926,8 +4974,7 @@ export default config;
       mockSelect
         .mockResolvedValueOnce('vite-plus')
         .mockResolvedValueOnce('react')
-        .mockResolvedValueOnce('sqlite')
-        .mockResolvedValueOnce('generic');
+        .mockResolvedValueOnce('sqlite');
       mockConfirm.mockResolvedValueOnce(false).mockResolvedValueOnce(false);
 
       await runInitCommand(subpkgRoot);
@@ -4950,15 +4997,14 @@ export default config;
       mockSelect
         .mockResolvedValueOnce('vite-plus')
         .mockResolvedValueOnce('vue')
-        .mockResolvedValueOnce('sqlite')
-        .mockResolvedValueOnce('generic');
+        .mockResolvedValueOnce('sqlite');
       mockConfirm.mockResolvedValueOnce(false).mockResolvedValueOnce(false);
 
       await runInitCommand(root);
 
       const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf-8'));
       expectPnpmAllowBuilds(root);
-      expect(pkg.packageManager).toBe('pnpm@^12.4.1');
+      expect(pkg.packageManager).toBe('pnpm@12.4.1');
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

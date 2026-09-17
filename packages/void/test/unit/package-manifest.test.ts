@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vite-plus/test';
 
 type PackageJson = {
   name?: string;
+  engines?: { node?: string };
   dependencies?: Record<string, string>;
   devDependencies?: Record<string, string>;
   optionalDependencies?: Record<string, string>;
@@ -32,6 +33,13 @@ const packageRoots = [
 
 const readPackageJson = (packageDir: string): PackageJson =>
   JSON.parse(readFileSync(join(root, packageDir, 'package.json'), 'utf-8')) as PackageJson;
+
+it('declares the tested minimum Node version for both CLI entry packages', () => {
+  const minimum = readFileSync(join(root, '.node-version'), 'utf8').trim();
+  for (const name of ['void', 'create-void']) {
+    expect(readPackageJson(`packages/${name}`).engines?.node).toBe(`>=${minimum}`);
+  }
+});
 
 const packages = packageRoots.map((packageRoot) => ({
   manifest: readPackageJson(packageRoot),

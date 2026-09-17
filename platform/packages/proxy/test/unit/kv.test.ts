@@ -1,5 +1,4 @@
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vite-plus/test';
-import { clearWorkerNameCache } from '../../src/dispatch.ts';
 import worker from '../../src/index.ts';
 
 const JWT_SECRET = 'test-secret-key';
@@ -92,7 +91,6 @@ describe('KV proxy endpoints', () => {
 
   afterEach(() => {
     globalThis.fetch = originalFetch;
-    clearWorkerNameCache();
     vi.restoreAllMocks();
   });
 

@@ -1,5 +1,4 @@
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vite-plus/test';
-import { clearWorkerNameCache } from '../../src/dispatch.ts';
 import worker from '../../src/index.ts';
 
 const JWT_SECRET = 'test-secret-key';
@@ -103,7 +102,6 @@ describe('D1 proxy endpoints', () => {
 
   afterEach(() => {
     globalThis.fetch = originalFetch;
-    clearWorkerNameCache();
     vi.restoreAllMocks();
   });
 
@@ -284,14 +282,8 @@ describe('D1 proxy endpoints', () => {
   });
 
   describe('POST /d1/batch', () => {
-    it('executes multiple statements and returns array of results', async () => {
-      const callCount = { n: 0 };
-      globalThis.fetch = asFetchMock(
-        vi.fn(async () => {
-          callCount.n++;
-          return cfD1Response([{ count: callCount.n }]);
-        }),
-      );
+    it('fails before writing when the active deployment has no native batch handler', async () => {
+      globalThis.fetch = asFetchMock(vi.fn(async () => cfD1Response([{ count: 1 }])));
 
       const env = createEnv({ 'proj_1:d1:DB': 'd1-uuid-abc' });
       const res = await worker.fetch(
@@ -307,12 +299,11 @@ describe('D1 proxy endpoints', () => {
         env,
       );
 
-      expect(res.status).toBe(200);
-      const data = (await res.json()) as Array<{ results: Array<unknown>; success: boolean }>;
-      expect(data).toHaveLength(2);
-      expect(data[0].results).toEqual([{ count: 1 }]);
-      expect(data[1].results).toEqual([{ count: 2 }]);
-      expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+      expect(res.status).toBe(503);
+      expect(await res.json()).toEqual({
+        error: 'atomic D1 batch unavailable for active deployment',
+      });
+      expect(globalThis.fetch).not.toHaveBeenCalled();
     });
 
     it('returns 400 when statements is missing', async () => {
@@ -326,7 +317,7 @@ describe('D1 proxy endpoints', () => {
       expect(await res.json()).toEqual({ error: 'binding and statements required' });
     });
 
-    it('returns 404 for unknown binding', async () => {
+    it('does not use resource REST fallback for an unknown native binding', async () => {
       const env = createEnv({});
       const res = await worker.fetch(
         post('/d1/batch', {
@@ -338,7 +329,7 @@ describe('D1 proxy endpoints', () => {
         env,
       );
 
-      expect(res.status).toBe(404);
+      expect(res.status).toBe(503);
     });
   });
 });

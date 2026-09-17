@@ -6,7 +6,7 @@ Shared proxy worker for platform-owned capabilities: AI metering, ISR revalidati
 
 - **AI traffic** goes through AI Gateway so usage cannot bypass platform metering.
 - **ISR revalidation** forwards to the API worker over a service binding.
-- **Remote bindings** try the deployed user worker first via `DISPATCH` and its `/__void/*` endpoints, then fall back to Cloudflare REST APIs for older deployments.
+- **Remote bindings** resolve the active deployment on every operation, then try its user worker via `DISPATCH` and `/__void/*`. Read operations can fall back to Cloudflare REST APIs when native dispatch is unavailable.
 - **Resource resolution** happens through internal API endpoints, not direct DB reads inside the proxy.
 - **Email** is centralized here: the proxy holds the account-level `send_email` binding and is the catch-all inbound router for the platform mail zone. User workers hold no mail binding, so per-project allowlists and quotas cannot be bypassed.
 
@@ -63,9 +63,11 @@ at deployment or project-management APIs.
 
 The remote-binding path is:
 
-1. resolve the active worker or resource via internal API
+1. resolve the active deployment's versioned worker or resource via internal API
 2. try the deployed worker's native binding handler through `DISPATCH`
-3. fall back to the Cloudflare REST API if the worker does not support `/__void/*`
+3. fall back to the Cloudflare REST API when the operation is safe to retry and the worker does not support `/__void/*`
+
+`D1Database.batch()` has no REST fallback. It runs once through the active worker's native D1 binding, which preserves D1's atomic batch contract, or fails before executing any statement when that capability is unavailable. If a write dispatch fails after it may have committed, the proxy returns an unknown-result error and does not replay the operation through REST.
 
 ### ISR revalidation
 
@@ -157,6 +159,10 @@ and deploys run `--env production`. Deployed user workers receive the same value
 `__VOID_EMAIL_DOMAIN` plain-text binding so the framework builds its default `from` against the same
 zone. There is no baked-in fallback: if the var is missing, both send endpoints fail closed with a
 502 rather than sending on the production zone from a staging worker.
+
+### Managed Sandbox
+
+Authenticated `POST /sandbox/*` requests return `501` because managed Sandbox is unavailable. The proxy has no Sandbox handlers or concurrency-counter binding. Native `void/sandbox` on direct Cloudflare deployments is independent of this proxy.
 
 ### Health
 

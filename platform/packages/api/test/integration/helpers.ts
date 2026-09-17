@@ -23,6 +23,7 @@ import {
   authCodes,
   operatorSessions,
   operatorEvents,
+  sandboxDrainCheckpoints,
   builds,
   githubConnections,
   githubInstallations,
@@ -463,6 +464,7 @@ export async function teardownEnv(): Promise<void> {
 }
 
 export async function clearTables(db: Db): Promise<void> {
+  await db.delete(sandboxDrainCheckpoints);
   await db.delete(domains);
   await db.delete(resources);
   await db.delete(projectSecrets);

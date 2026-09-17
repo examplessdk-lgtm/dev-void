@@ -874,14 +874,6 @@ function preflightTerminalGroup(group: TerminalRenderGroup): TerminalPreflight {
   };
 }
 
-function serializeTerminalGroups(groups: Array<TerminalRenderGroup>): string {
-  return groups
-    .flatMap((group) =>
-      group.lines.map((line) => `${line.raw}${LINE_ENDING_TEXT[line.lineEnding]}`),
-    )
-    .join('');
-}
-
 /**
  * Preserve parser/REP boundaries without treating the at-most-100 captured
  * delimiters as hostile full-grid controls. A CR executes in the same ESC/CSI
@@ -996,41 +988,6 @@ async function renderTerminalGroups(groups: Array<TerminalRenderGroup>): Promise
   }
 }
 
-/**
- * Render one captured log line through the same maintained VT engine used by
- * VS Code. A token parser is insufficient here: correctness depends on screen
- * state (cursor, tab stops, protected cells, wide glyphs, REP, and erase modes),
- * which is exactly the terminal emulator's job.
- *
- * Input is untrusted. xterm correctly bounds mutations to its configured grid,
- * but some handlers loop or allocate from raw numeric parameters. The deterministic
- * preflight above bounds those paths before allocation; an unsafe row is omitted
- * rather than risking resource exhaustion or resurrecting text a terminal erased.
- */
-export async function sanitizeLogLineForMarkdown(raw: string): Promise<string> {
-  // Nearly every captured line is ordinary text. It cannot mutate terminal
-  // state, so avoid constructing a grid or yielding through the write queue.
-  if (!hasTerminalControl(raw)) {
-    return raw.trimEnd();
-  }
-  const preflight = preflightTerminalInput(raw);
-  if (!preflight.safe) {
-    return '';
-  }
-  const term = new Terminal({
-    cols: TERMINAL_RENDER_COLUMNS,
-    rows: 1,
-    allowProposedApi: true,
-    scrollback: 0,
-  });
-  try {
-    await new Promise<void>((resolve) => term.write(raw, resolve));
-    const buffer = term.buffer.active;
-    return (buffer.getLine(buffer.baseY)?.translateToString(false) ?? '').trimEnd();
-  } finally {
-    term.dispose();
-  }
-}
 /**
  * Render the check-run `output.text` log tail: `lines` (already chronological —
  * the newest CHECK_RUN_LOG_TAIL_LINES captured) in a `text` fence under a
@@ -1209,6 +1166,11 @@ type ManagerState = BuildConfig & { status: StoredBuildStatus };
 
 type LogDrainState = { state: 'open' } | { state: 'complete'; finalSeq: number };
 
+type BuildLaunch = {
+  controller: AbortController;
+  containerStartPending: boolean;
+};
+
 /**
  * The narrow slice of `ctx.container` the log pull needs (the base class copies it
  * into a private field, so we read it back through a cast): `running` for the
@@ -1296,6 +1258,28 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
    * either emit falsely or miss the only truthful marker.
    */
   private teardownInFlight: Promise<boolean> | null = null;
+
+  /**
+   * The launch attempt currently preparing or starting this container. External
+   * cancellation aborts it synchronously before awaiting Postgres, so every
+   * later startup continuation can tell that its authority was revoked. The
+   * object identity is the generation fence: cleanup from an older attempt must
+   * never stop a newer attempt using the same per-build Durable Object.
+   */
+  private activeLaunch: BuildLaunch | null = null;
+  private buildLaunchInFlight: Promise<void> | null = null;
+  // A cancellation can stop before the base class has issued container.start().
+  // Keep its marker reservation until that start settles and the last teardown
+  // proves no late producer remains. This preserves first-caller-wins ownership.
+  private deferredLaunchTermination: string | null = null;
+
+  private launchIsCurrent(launch: BuildLaunch): boolean {
+    return this.activeLaunch === launch && !launch.controller.signal.aborted;
+  }
+
+  private abortActiveLaunch(): void {
+    this.activeLaunch?.controller.abort();
+  }
 
   /**
    * First-caller-wins claim on the termination marker, so overlapping teardowns
@@ -1398,6 +1382,36 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
    * (the only place it is persisted) via a `starting`-guarded CAS.
    */
   async startBuild(config: BuildConfig): Promise<void> {
+    // One DO is keyed to one build. Coalesce duplicate scheduler RPCs onto the
+    // same attempt so a stale continuation can never share the base container's
+    // internal start promise with a newer generation and mistake its onStart for
+    // the new attempt. Capacity retries arrive only after this promise rejects
+    // and the scheduler requeues the row, so they create a fresh generation.
+    if (this.buildLaunchInFlight) {
+      return this.buildLaunchInFlight;
+    }
+    const attempt = this.runStartBuild(config);
+    this.buildLaunchInFlight = attempt;
+    try {
+      await attempt;
+    } finally {
+      if (this.buildLaunchInFlight === attempt) {
+        this.buildLaunchInFlight = null;
+      }
+    }
+  }
+
+  private async runStartBuild(config: BuildConfig): Promise<void> {
+    const launch: BuildLaunch = {
+      controller: new AbortController(),
+      containerStartPending: false,
+    };
+    // A duplicate scheduler delivery cannot legitimately own two concurrent
+    // launches for one build. Invalidate any older continuation; identity checks
+    // below keep its eventual cleanup from touching this newer generation.
+    this.abortActiveLaunch();
+    this.activeLaunch = launch;
+
     // Written before the config becomes visible so every new build is explicitly
     // incomplete until a producer barrier publishes its final SQLite sequence.
     await this.ctx.storage.put<LogDrainState>(STORAGE_KEY_LOG_DRAIN, { state: 'open' });
@@ -1513,12 +1527,14 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
       // no container to tear down.
       const covered = await installationCoversRepo(
         this.db(),
+        config.connectionId,
+        config.projectId,
         config.installationId,
         config.repositoryId,
       );
       if (!covered) {
         const won = await markBuildTerminalIfActive(this.db(), config.buildId, 'cancelled', {
-          error: 'github app installation no longer covers this repository',
+          error: 'github repository authorization is no longer valid; reconnect the repository',
           completedAt: new Date().toISOString(),
         });
         await this.setStatus('cancelled');
@@ -1681,6 +1697,13 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
         this.env.JWT_SECRET,
         { ttlSeconds },
       );
+      // signDeployToken is asynchronous. A cancellation can commit the terminal
+      // row and finish its pre-launch teardown while signing is in flight; never
+      // continue from that revoked generation into source-token minting.
+      if (!this.launchIsCurrent(launch)) {
+        await this.pokeScheduler();
+        return;
+      }
       // Repo-scope the source token to the ONE repo being built, read-only. The
       // build agent uses it solely as the Bearer to download this repo's tarball,
       // but it's injected into the container env where an untrusted dependency
@@ -1696,6 +1719,13 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
               permissions: { contents: 'read' },
             })
           : await getInstallationToken(this.env, config.installationId);
+      // The installation-token fetch is the longest pre-launch await and was the
+      // original orphan window: cancellation observed no live container, returned,
+      // and this continuation launched afterward. The generation fence closes it.
+      if (!this.launchIsCurrent(launch)) {
+        await this.pokeScheduler();
+        return;
+      }
       const sourceTarballUrl = generateSourceTarballUrl(config.repoFullName, config.commitSha);
       const voidApiUrl =
         this.env.PLATFORM_ENV === 'staging'
@@ -1727,6 +1757,11 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
       // build status even if it discovers the DO endpoint.
       const agentToken = crypto.randomUUID();
       await this.ctx.storage.put<string>(STORAGE_KEY_AGENT_TOKEN, agentToken);
+
+      if (!this.launchIsCurrent(launch)) {
+        await this.pokeScheduler();
+        return;
+      }
 
       // Real Container env-var mechanism: set `this.envVars` then start(). The
       // base class forwards these into the container's `start({ env })` call.
@@ -1772,7 +1807,30 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
       // BEFORE any launch and the catch re-throws it before the stop block, and
       // token-mint throws happen above this line with the marker still false.
       containerStarted = true;
-      await this.start();
+      launch.containerStartPending = true;
+      try {
+        await this.start(undefined, {
+          signal: launch.controller.signal,
+          portToCheck: this.defaultPort,
+        });
+      } finally {
+        launch.containerStartPending = false;
+      }
+
+      // The base launches before awaiting onStart. A cancellation can therefore
+      // stop the container while start() is still resolving, or onStart can reject
+      // its starting->building claim after a terminal write. Do not arm a timeout
+      // for either abandoned generation, and ensure a producer that appeared after
+      // the canceller's early no-container teardown is gone.
+      if (!this.launchIsCurrent(launch)) {
+        await this.forceStopContainer(
+          'build cancelled during startup',
+          this.claimTerminationMarker(),
+          false,
+        );
+        await this.pokeScheduler();
+        return;
+      }
 
       // Wall-clock timeout. Use the base Container's public scheduler instead of
       // writing the DO alarm directly: a DO has a SINGLE alarm and the base
@@ -1802,6 +1860,22 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
           : DEPLOY_TOKEN_HARD_MAX_MINUTES;
       await this.schedule(effectiveTimeout * 60 + LOG_DRAIN_GRACE_SECONDS, 'enforceTimeout');
     } catch (error) {
+      // Cancellation is an authoritative terminal path handled by cancelBuild,
+      // not a startup failure. The base start() may reject its abort signal only
+      // after launching, so teardown remains mandatory when launch was attempted.
+      // Identity fencing prevents a stale continuation from stopping a later
+      // generation in the same Durable Object.
+      if (!this.launchIsCurrent(launch)) {
+        if (containerStarted && this.activeLaunch === launch) {
+          await this.forceStopContainer(
+            'build cancelled during startup',
+            this.claimTerminationMarker(),
+            false,
+          );
+        }
+        await this.pokeScheduler();
+        return;
+      }
       if (isContainerCapacityError(error)) {
         // Capacity-to-start (fleet full), not a build failure. Nothing was started
         // (containerStarted is false here), so there's nothing to stop. Leave the row
@@ -1928,6 +2002,10 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
         throw terminalError;
       }
       throw error;
+    } finally {
+      if (this.activeLaunch === launch) {
+        this.activeLaunch = null;
+      }
     }
   }
 
@@ -1958,6 +2036,17 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
     opts: { detailsUrl?: string; title: string; summary: string },
     explicitId?: string | null,
   ): Promise<void> {
+    if (this.activeLaunch?.containerStartPending && this.deferredLaunchTermination !== null) {
+      // Startup still owns a possible late producer. Its continuation publishes
+      // the reserved marker and reconciles the recorded outcome after teardown;
+      // also arm recovery in case this invocation is lost before it gets there.
+      try {
+        await this.schedule(RECONCILE_RETRY_SECONDS, 'reconcileTerminalWrite');
+      } catch (err) {
+        console.warn('finalizeCheckRun: scheduling startup finalization failed', err);
+      }
+      return;
+    }
     // Prefer the in-hand id, then the in-memory field (survives create→terminal within
     // the build's lifetime), then the durable sources. The first two are authoritative
     // even when BOTH the DO-storage put and the Postgres persist failed.
@@ -2133,6 +2222,20 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
     if (!config) {
       return;
     }
+    const launchAtEntry = this.activeLaunch;
+    if (launchAtEntry && !this.launchIsCurrent(launchAtEntry)) {
+      // The base callback is post-launch. If cancellation invalidated this
+      // generation while start() was waiting, do not even attempt the
+      // starting->building CAS: a failed cancellation write could otherwise be
+      // followed by this stale callback restoring active token authority.
+      await this.forceStopContainer(
+        'build cancelled during startup',
+        this.claimTerminationMarker(),
+        false,
+      );
+      await this.pokeScheduler();
+      return;
+    }
     // CAS `starting -> building` and land the `instance_type` (its only persist
     // point — the scheduler's claim set `starting` without it). The base
     // `start()` runs onStart inside `blockConcurrencyWhile` before resolving, so
@@ -2140,10 +2243,74 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
     // is the authoritative protection against resurrecting it. Only sync the
     // in-memory status (used by the other lifecycle guards) when the CAS won, so
     // a no-op onStart can't downgrade an already-terminal in-memory status.
-    const moved = await markBuildBuildingIfStarting(this.db(), config.buildId, {
-      instanceType: config.instanceType,
-    });
+    // A callback after startBuild settled (or after eviction) can describe an
+    // already-active producer, but only the current startBuild attempt may claim
+    // a row that is still starting.
+    const moved =
+      launchAtEntry !== null &&
+      (await withDeadline(
+        markBuildBuildingIfStarting(this.db(), config.buildId, {
+          instanceType: config.instanceType,
+        }),
+        TERMINAL_WRITE_TIMEOUT_MS,
+        `build ${config.buildId}: startup claim did not settle within ${TERMINAL_WRITE_TIMEOUT_MS}ms`,
+      ));
     if (!moved) {
+      // The container is already live when the base class invokes onStart. A
+      // missed claim therefore cannot be a passive return: an out-of-band cancel
+      // may have terminalized the row while token/source preparation or start()
+      // was awaiting, and leaving this producer alive pins fleet capacity and
+      // lets it keep attempting deployment until the long idle timeout.
+      //
+      // Read the winner before deciding. `building`/`deploying` can be a
+      // legitimate duplicate/late lifecycle callback for the current generation;
+      // never kill that producer. Terminal, missing, queued, or otherwise
+      // unclaimed rows cannot authorize this launch and are torn down. A read
+      // failure throws into startBuild's startup catch, which revokes first and
+      // still performs the same teardown.
+      const row = await withDeadline(
+        getBuild(this.db(), config.buildId),
+        TERMINAL_WRITE_TIMEOUT_MS,
+        `build ${config.buildId}: startup recovery read did not settle within ${TERMINAL_WRITE_TIMEOUT_MS}ms`,
+      );
+      const currentConfig = await this.getConfig();
+      if (
+        row &&
+        (row.status === 'building' || row.status === 'deploying') &&
+        currentConfig &&
+        !TERMINAL_STATUSES.includes(currentConfig.status) &&
+        (launchAtEntry === null || this.launchIsCurrent(launchAtEntry))
+      ) {
+        await this.setStatus(row.status);
+        await this.schedule(1, 'pollLogs');
+        return;
+      }
+      this.abortActiveLaunch();
+      if (row && TERMINAL_STATUSES.includes(row.status)) {
+        await this.setStatus(row.status);
+      }
+      await this.forceStopContainer(
+        'build lost its startup claim',
+        this.claimTerminationMarker(),
+        row === null || TERMINAL_STATUSES.includes(row.status),
+      );
+      if (row && TERMINAL_STATUSES.includes(row.status)) {
+        await this.finalizeCheckRunToStatus(config, row.status, row.check_run_id);
+      }
+      await this.pokeScheduler();
+      return;
+    }
+    if (launchAtEntry === null || !this.launchIsCurrent(launchAtEntry)) {
+      // Cancellation can interleave while the CAS itself is awaiting Postgres.
+      // Even if this invocation briefly won `starting -> building`, the cancel
+      // path owns the terminal outcome; do not overwrite its local status or arm
+      // producers. Kill immediately while its authoritative DB write proceeds.
+      await this.forceStopContainer(
+        'build cancelled during startup',
+        this.claimTerminationMarker(),
+        false,
+      );
+      await this.pokeScheduler();
       return;
     }
     await this.setStatus('building');
@@ -2506,6 +2673,22 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
     }
     const producerStopped = teardown ? await teardown : false;
 
+    if (markerAuthoritative && producerStopped && this.activeLaunch?.containerStartPending) {
+      // The base start path awaits storage/network I/O BEFORE launching, and its
+      // abort signal only cancels readiness waiting. Seeing no container here is
+      // therefore not a producer barrier yet. Transfer the reservation to the
+      // startup continuation, which tears down again after start() settles.
+      this.deferredLaunchTermination = reason;
+      return;
+    }
+    const resumeFinalization =
+      !this.activeLaunch?.containerStartPending && this.deferredLaunchTermination !== null;
+    if (resumeFinalization) {
+      markerAuthoritative = true;
+      reason = this.deferredLaunchTermination!;
+      this.deferredLaunchTermination = null;
+    }
+
     // AFTER the drain AND a successful signal so it reads as the truthful last
     // line of the build's output. Ingested through the same sink as pulled lines,
     // so it reaches the live WS tail, `void build logs`, and the check-run tail.
@@ -2550,6 +2733,11 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
       // attempt. Non-owners can kill the container, but they cannot tell readers
       // the stream is complete while the owner is still waiting to append it.
       await this.markLogDrainComplete();
+      if (resumeFinalization) {
+        await this.reconcileTerminalWrite().catch((err) => {
+          console.warn('forceStopContainer: deferred startup finalization failed', err);
+        });
+      }
     } else if (markerAuthoritative) {
       // Container control did not prove the producer stopped. Release the claim
       // so a later recovery attempt can own both the marker and completion.
@@ -2569,8 +2757,59 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
    * scheduler's `(payload, schedule)` args (unused here).
    */
   async enforceTimeout(): Promise<void> {
+    this.abortActiveLaunch();
     const config = await this.getConfig();
-    if (!config || TERMINAL_STATUSES.includes(config.status)) {
+    if (!config) {
+      return;
+    }
+    if (TERMINAL_STATUSES.includes(config.status)) {
+      // Local terminal state is not a producer barrier. Cancellation writes it
+      // before awaiting Postgres and before signalling the container, so an
+      // interrupted/racing cancellation can leave a live startup producer behind.
+      // The timeout is the durable recovery path: revoke the build-bound token
+      // first when possible, then tear down regardless of Postgres health.
+      if (this.rawContainer()?.running !== true) {
+        return;
+      }
+      const ownsMarker = this.claimTerminationMarker();
+      let authorityRevoked = false;
+      let terminalError: unknown;
+      try {
+        if (config.status === 'failed' || config.status === 'cancelled') {
+          await this.revokeBuildRow(config.buildId, config.status, {
+            error:
+              config.status === 'cancelled'
+                ? 'build cancelled during startup'
+                : 'build failed during startup',
+            completedAt: new Date().toISOString(),
+          });
+          authorityRevoked = true;
+        } else {
+          const row = await withDeadline(
+            getBuild(this.db(), config.buildId),
+            TERMINAL_WRITE_TIMEOUT_MS,
+            `build ${config.buildId}: terminal recovery read did not settle within ${TERMINAL_WRITE_TIMEOUT_MS}ms`,
+          );
+          authorityRevoked = row === null || TERMINAL_STATUSES.includes(row.status);
+        }
+      } catch (err) {
+        terminalError = err;
+      }
+      try {
+        await this.forceStopContainer(
+          'build terminated before startup completed',
+          ownsMarker,
+          authorityRevoked,
+        );
+        // Recovery may be the first completed terminal invocation. Finalize from
+        // the recorded winner even when this revocation succeeded or lost its CAS.
+        await this.reconcileTerminalWrite();
+      } finally {
+        await this.pokeScheduler();
+      }
+      if (terminalError) {
+        throw terminalError;
+      }
       return;
     }
     // Set the LOCAL terminal status first (DO storage — can't fail on Hyperdrive)
@@ -2618,9 +2857,8 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
       terminalError = err;
     }
     try {
-      // Always marker-authoritative: this method early-returns on an already-terminal
-      // LOCAL status, so reaching here proves no other in-DO teardown claimed the
-      // build. The Postgres CAS can still lose to an out-of-band terminalization
+      // Marker ownership was claimed before this branch's terminal transition.
+      // The Postgres CAS can still lose to an out-of-band terminalization
       // (an external cancel committing the row), and that must NOT silence the
       // marker — nobody else emits one on that path. See cancelBuild.
       // Reason, not ownership, defers to the CAS. Ownership must stay independent of
@@ -2682,6 +2920,10 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
    * concurrency slot is reclaimed.
    */
   async cancelBuild(reason = 'build cancelled'): Promise<void> {
+    // Invalidate startup synchronously, before the first storage/Postgres await.
+    // A token fetch or base start() already in flight will observe the aborted
+    // generation and cannot resume into an unconditional container launch.
+    this.abortActiveLaunch();
     const config = await this.getConfig();
     const shouldTerminalize = config != null && !TERMINAL_STATUSES.includes(config.status);
     // Claimed HERE, synchronously, not at the `forceStopContainer` call below: the
@@ -2698,10 +2940,9 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
     // reaches the same state with no `onError` involved: durable terminal status, and
     // a restarted instance whose claim flag is back to false.
     //
-    // Burning the claim when the container is already dead is harmless —
-    // `containerTornDown` stays false so nothing is emitted, and no later teardown can
-    // want it (enforceTimeout early-returns on terminal status, and one DO starts
-    // exactly one container).
+    // A pending base start can still launch after an early no-container teardown.
+    // forceStopContainer defers this reservation until that continuation settles,
+    // so its eventual kill can publish the marker and the producer barrier.
     const ownsMarker = this.claimTerminationMarker();
     // Set the LOCAL terminal status first (DO storage — can't fail on Hyperdrive)
     // so onStop, triggered by stop() below, sees the terminal status and won't

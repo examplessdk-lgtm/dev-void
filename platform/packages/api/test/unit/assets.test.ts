@@ -1,17 +1,11 @@
 import { afterEach, describe, it, expect, vi } from 'vite-plus/test';
 import {
-  applyDeclaredAssetManifest,
-  AssetHashMismatchError,
-  computeAssetHash,
   createAssetUploadSession,
   deleteUnreferencedAssets,
   deleteWorkerBundle,
   normalizeForCfAssetSession,
-  persistWorkerBundle,
-  replayWorkerBundle,
   scanProjectAssetOrphanCandidates,
   uploadAssetBuckets,
-  uploadStaticAssets,
   type AssetEntry,
 } from '../../src/assets.ts';
 
@@ -72,21 +66,6 @@ function createMockR2() {
   } as unknown as R2Bucket & { store: Map<string, ArrayBuffer> };
 }
 
-function toArrayBuffer(value: unknown): ArrayBuffer {
-  if (value instanceof ArrayBuffer) {
-    return value;
-  }
-  if (ArrayBuffer.isView(value)) {
-    const copy = new Uint8Array(value.byteLength);
-    copy.set(new Uint8Array(value.buffer, value.byteOffset, value.byteLength));
-    return copy.buffer;
-  }
-  if (typeof value === 'string') {
-    return new TextEncoder().encode(value).buffer;
-  }
-  throw new Error('unsupported mock storage value');
-}
-
 async function readBodyText(body: unknown): Promise<string> {
   if (body instanceof ReadableStream) {
     const reader = body.getReader();
@@ -120,185 +99,9 @@ function makeJwt(exp: number): string {
   return `${header}.${payload}.fake-signature`;
 }
 
-const KV_THRESHOLD = 2 * 1024 * 1024; // 2 MB
-
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
-});
-
-describe('applyDeclaredAssetManifest', () => {
-  it('prefers the declared entry when both hash and size match the built entry', () => {
-    const bytes = enc.encode('hello');
-    const hash = computeAssetHash(bytes.buffer, '/index.html');
-    const built = { '/index.html': { hash, size: bytes.length } };
-    const declared = { '/index.html': { hash, size: bytes.length } };
-
-    const result = applyDeclaredAssetManifest(built, declared);
-
-    expect(result).toEqual(built);
-    expect(result['/index.html']).toBe(declared['/index.html']);
-  });
-
-  it('keeps the built entry when the declared size does not match', () => {
-    const bytes = enc.encode('hello');
-    const hash = computeAssetHash(bytes.buffer, '/index.html');
-    const built = { '/index.html': { hash, size: bytes.length } };
-    const declared = { '/index.html': { hash, size: bytes.length + 1 } };
-
-    const result = applyDeclaredAssetManifest(built, declared);
-
-    expect(result['/index.html']).toBe(built['/index.html']);
-  });
-
-  it('throws AssetHashMismatchError when the declared hash does not match the built hash', () => {
-    const bytes = enc.encode('hello');
-    const hash = computeAssetHash(bytes.buffer, '/index.html');
-    const built = { '/index.html': { hash, size: bytes.length } };
-    const declared = { '/index.html': { hash: 'a'.repeat(32), size: bytes.length } };
-
-    expect(() => applyDeclaredAssetManifest(built, declared)).toThrow(AssetHashMismatchError);
-  });
-});
-
-describe('uploadStaticAssets', () => {
-  it('uploads small assets to KV and large assets to R2', async () => {
-    const kv = createMockKV();
-    const r2 = createMockR2();
-
-    const assetsByHash = new Map<string, AssetEntry>([
-      ['smallhash0000000000000000000000', entry('small file', 'text/html')],
-      ['largehash0000000000000000000000', entry(new Uint8Array(KV_THRESHOLD + 1), 'video/mp4')],
-    ]);
-
-    const largeHashes = await uploadStaticAssets(kv, r2, assetsByHash, 'proj_test');
-
-    expect(kv.put).toHaveBeenCalledTimes(1); // small asset
-    expect(r2.put).toHaveBeenCalledTimes(1); // large asset
-    expect(largeHashes.has('largehash0000000000000000000000')).toBe(true);
-    expect(largeHashes.has('smallhash0000000000000000000000')).toBe(false);
-  });
-
-  it('overwrites assets that already exist in KV (idempotent puts)', async () => {
-    const kv = createMockKV();
-    const r2 = createMockR2();
-    kv.store.set('assets/proj_test/existinghash000000000000000000', new ArrayBuffer(1));
-
-    const assetsByHash = new Map<string, AssetEntry>([
-      ['existinghash000000000000000000', entry('exists', 'text/html')],
-      ['newhash00000000000000000000000', entry('new', 'text/css')],
-    ]);
-
-    await uploadStaticAssets(kv, r2, assetsByHash, 'proj_test');
-
-    expect(kv.put).toHaveBeenCalledTimes(2); // both assets, no existence check
-  });
-
-  it('retries transient KV upload failures', async () => {
-    const kv = createMockKV();
-    const r2 = createMockR2();
-    let attempts = 0;
-    vi.mocked(kv.put).mockImplementation(async (key, value, _opts) => {
-      attempts++;
-      if (attempts === 1) {
-        throw new Error('temporary KV failure');
-      }
-      kv.store.set(key, toArrayBuffer(value));
-    });
-
-    const assetsByHash = new Map<string, AssetEntry>([
-      ['retryhash000000000000000000000', entry('retry', 'text/plain')],
-    ]);
-
-    await uploadStaticAssets(kv, r2, assetsByHash, 'proj_test', { retryDelayMs: 0 });
-
-    expect(kv.put).toHaveBeenCalledTimes(2);
-    expect(kv.store.has('assets/proj_test/retryhash000000000000000000000')).toBe(true);
-  });
-
-  it('overwrites assets that already exist in R2 (idempotent puts)', async () => {
-    const kv = createMockKV();
-    const r2 = createMockR2();
-    r2.store.set(
-      'assets/proj_test/existinglarge00000000000000000',
-      new ArrayBuffer(KV_THRESHOLD + 1),
-    );
-
-    const assetsByHash = new Map<string, AssetEntry>([
-      ['existinglarge00000000000000000', entry(new Uint8Array(KV_THRESHOLD + 1), 'video/mp4')],
-    ]);
-
-    const largeHashes = await uploadStaticAssets(kv, r2, assetsByHash, 'proj_test');
-
-    expect(r2.put).toHaveBeenCalledTimes(1); // idempotent put, no existence check
-    expect(largeHashes.has('existinglarge00000000000000000')).toBe(true);
-  });
-
-  it('retries transient R2 upload failures', async () => {
-    const kv = createMockKV();
-    const r2 = createMockR2();
-    let attempts = 0;
-    vi.mocked(r2.put).mockImplementation(async (key, value, _opts) => {
-      attempts++;
-      if (attempts === 1) {
-        throw new Error('temporary R2 failure');
-      }
-      r2.store.set(key, toArrayBuffer(value));
-      return { key } as R2Object;
-    });
-
-    const assetsByHash = new Map<string, AssetEntry>([
-      ['retrylarge00000000000000000000', entry(new Uint8Array(KV_THRESHOLD + 1), 'video/mp4')],
-    ]);
-
-    const largeHashes = await uploadStaticAssets(kv, r2, assetsByHash, 'proj_test', {
-      retryDelayMs: 0,
-    });
-
-    expect(r2.put).toHaveBeenCalledTimes(2);
-    expect(r2.store.has('assets/proj_test/retrylarge00000000000000000000')).toBe(true);
-    expect(largeHashes.has('retrylarge00000000000000000000')).toBe(true);
-  });
-
-  it('scopes asset keys by project ID', async () => {
-    const kv = createMockKV();
-    const r2 = createMockR2();
-
-    const assetsByHash = new Map<string, AssetEntry>([
-      ['deadbeef12345678', entry('test', 'text/plain')],
-    ]);
-
-    await uploadStaticAssets(kv, r2, assetsByHash, 'proj_abc123');
-
-    expect(kv.put).toHaveBeenCalledWith(
-      'assets/proj_abc123/deadbeef12345678',
-      expect.any(Uint8Array),
-      expect.anything(),
-    );
-  });
-
-  it('different projects get different keys for same hash', async () => {
-    const kv = createMockKV();
-    const r2 = createMockR2();
-
-    const assetsByHash = new Map<string, AssetEntry>([
-      ['deadbeef12345678', entry('test', 'text/plain')],
-    ]);
-
-    await uploadStaticAssets(kv, r2, assetsByHash, 'proj_aaa');
-    await uploadStaticAssets(kv, r2, assetsByHash, 'proj_bbb');
-
-    expect(kv.put).toHaveBeenCalledWith(
-      'assets/proj_aaa/deadbeef12345678',
-      expect.any(Uint8Array),
-      expect.anything(),
-    );
-    expect(kv.put).toHaveBeenCalledWith(
-      'assets/proj_bbb/deadbeef12345678',
-      expect.any(Uint8Array),
-      expect.anything(),
-    );
-  });
 });
 
 describe('deleteUnreferencedAssets', () => {
@@ -905,52 +708,14 @@ describe('normalizeForCfAssetSession', () => {
   });
 });
 
-type BundleR2Entry = {
-  bytes: ArrayBuffer;
-  contentType: string;
-};
-
 function createBundleR2Mock(opts?: { listPageSize?: number }) {
-  const store = new Map<string, BundleR2Entry>();
+  const store = new Set<string>();
   const listPageSize = opts?.listPageSize ?? 1000;
   return {
     store,
-    put: vi.fn(
-      async (
-        key: string,
-        value: ArrayBuffer | ArrayBufferView,
-        options?: { httpMetadata?: { contentType?: string } },
-      ) => {
-        const buf =
-          value instanceof ArrayBuffer
-            ? value.slice(0)
-            : (() => {
-                const view = value as ArrayBufferView;
-                const copy = new Uint8Array(view.byteLength);
-                copy.set(new Uint8Array(view.buffer, view.byteOffset, view.byteLength));
-                return copy.buffer;
-              })();
-        store.set(key, {
-          bytes: buf,
-          contentType: options?.httpMetadata?.contentType ?? '',
-        });
-        return { key } as R2Object;
-      },
-    ),
-    get: vi.fn(async (key: string) => {
-      const entry = store.get(key);
-      if (!entry) {
-        return null;
-      }
-      return {
-        key,
-        httpMetadata: { contentType: entry.contentType },
-        arrayBuffer: async () => entry.bytes.slice(0),
-      } as unknown as R2ObjectBody;
-    }),
     list: vi.fn(async (options?: { prefix?: string; cursor?: string }) => {
       const prefix = options?.prefix ?? '';
-      const allKeys = [...store.keys()].filter((k) => k.startsWith(prefix)).sort();
+      const allKeys = [...store].filter((k) => k.startsWith(prefix)).sort();
       const startIndex = options?.cursor ? Number(options.cursor) : 0;
       const slice = allKeys.slice(startIndex, startIndex + listPageSize);
       const nextIndex = startIndex + slice.length;
@@ -976,204 +741,15 @@ function createBundleR2Mock(opts?: { listPageSize?: number }) {
         store.delete(k);
       }
     }),
-  } as unknown as R2Bucket & { store: Map<string, BundleR2Entry> };
+  } as unknown as R2Bucket & { store: Set<string> };
 }
-
-describe('persistWorkerBundle', () => {
-  it('writes one R2 object per file with correct key and content-type', async () => {
-    const r2 = createBundleR2Mock();
-    const files = [
-      { name: 'index.js', content: new Blob(['main code'], { type: 'application/javascript' }) },
-      {
-        name: 'chunks/x.js',
-        content: new Blob(['chunk code'], { type: 'application/javascript+module' }),
-      },
-      {
-        name: 'data.json',
-        content: new Blob(['{"k":1}'], { type: 'application/json' }),
-      },
-    ];
-
-    await persistWorkerBundle(r2, 'p_1', 'd_2', files);
-
-    expect(r2.put).toHaveBeenCalledTimes(3);
-    expect(r2.store.has('worker-bundles/p_1/d_2/index.js')).toBe(true);
-    expect(r2.store.has('worker-bundles/p_1/d_2/chunks/x.js')).toBe(true);
-    expect(r2.store.has('worker-bundles/p_1/d_2/data.json')).toBe(true);
-
-    const indexEntry = r2.store.get('worker-bundles/p_1/d_2/index.js');
-    expect(indexEntry?.contentType).toBe('application/javascript');
-    expect(new TextDecoder().decode(indexEntry?.bytes)).toBe('main code');
-
-    const chunkEntry = r2.store.get('worker-bundles/p_1/d_2/chunks/x.js');
-    expect(chunkEntry?.contentType).toBe('application/javascript+module');
-    expect(new TextDecoder().decode(chunkEntry?.bytes)).toBe('chunk code');
-  });
-
-  it('rejects when an R2 put fails', async () => {
-    const r2 = createBundleR2Mock();
-    vi.mocked(r2.put).mockImplementationOnce(async () => {
-      throw new Error('R2 transport down');
-    });
-
-    await expect(
-      persistWorkerBundle(r2, 'p_1', 'd_2', [
-        { name: 'index.js', content: new Blob(['x'], { type: 'application/javascript' }) },
-      ]),
-    ).rejects.toThrow('R2 transport down');
-  });
-
-  it('awaits all in-flight sibling puts before rejecting on first failure', async () => {
-    // Reproduces the race that adversarial review flagged: with Promise.all,
-    // persistWorkerBundle returned on the first rejection while sibling writes
-    // were still landing in R2, leaving partial rollback artifacts under the
-    // deployment prefix when the deploy abort cleanup ran.
-    const r2 = createBundleR2Mock();
-    const settled: Array<string> = [];
-    let releaseDelayed: (() => void) | undefined;
-    const delayedPut = new Promise<void>((resolve) => {
-      releaseDelayed = resolve;
-    });
-
-    const realPut = vi.mocked(r2.put).getMockImplementation()!;
-    vi.mocked(r2.put).mockImplementation(async (key, value, options) => {
-      if (key.endsWith('/fail.js')) {
-        settled.push(key);
-        throw new Error('R2 transport down');
-      }
-      if (key.endsWith('/slow.js')) {
-        await delayedPut;
-        const result = await realPut(key, value, options);
-        settled.push(key);
-        return result;
-      }
-      const result = await realPut(key, value, options);
-      settled.push(key);
-      return result;
-    });
-
-    const files = [
-      { name: 'fail.js', content: new Blob(['boom'], { type: 'application/javascript' }) },
-      { name: 'slow.js', content: new Blob(['slow'], { type: 'application/javascript' }) },
-      { name: 'fast.js', content: new Blob(['fast'], { type: 'application/javascript' }) },
-    ];
-    const pending = persistWorkerBundle(r2, 'p_1', 'd_2', files);
-    // Swallow the eventual rejection so an unhandled rejection doesn't
-    // poison the test runner; we still await the original `pending` below
-    // for the real assertion.
-    pending.catch(() => {});
-
-    // Race the bundle promise against a marker that resolves on a clearly
-    // later turn. With the bounded-worker fix, the bundle promise must NOT
-    // win the race — slow.js is still parked on `delayedPut`. With the
-    // pre-fix Promise.all, the bundle promise rejects as soon as fail.js
-    // throws and wins the race.
-    const marker = Symbol('marker');
-    const winner = await Promise.race([
-      pending.then(
-        () => 'resolved' as const,
-        () => 'rejected' as const,
-      ),
-      new Promise<typeof marker>((r) => setTimeout(() => r(marker), 25)),
-    ]);
-    expect(winner).toBe(marker);
-    expect(settled).toContain('worker-bundles/p_1/d_2/fail.js');
-    // slow.js is still parked on the gate.
-    expect(settled).not.toContain('worker-bundles/p_1/d_2/slow.js');
-
-    releaseDelayed!();
-    await expect(pending).rejects.toThrow('R2 transport down');
-
-    // After rejection, every sibling that was scheduled must have settled.
-    expect(settled).toContain('worker-bundles/p_1/d_2/slow.js');
-  });
-});
-
-describe('replayWorkerBundle', () => {
-  it('reads all modules back with bytes and content-type intact', async () => {
-    const r2 = createBundleR2Mock();
-    const files = [
-      { name: 'index.js', content: new Blob(['main()'], { type: 'application/javascript' }) },
-      {
-        name: 'chunks/a.js',
-        content: new Blob(['chunk a'], { type: 'application/javascript+module' }),
-      },
-      {
-        name: 'chunks/b.js',
-        content: new Blob([new Uint8Array([0, 1, 2, 3, 255])], {
-          type: 'application/octet-stream',
-        }),
-      },
-    ];
-    await persistWorkerBundle(r2, 'p_1', 'd_2', files);
-
-    const replayed = await replayWorkerBundle(r2, 'p_1', 'd_2');
-
-    expect(replayed).toHaveLength(3);
-    const byName = new Map(replayed.map((f) => [f.name, f.content]));
-
-    expect(byName.get('index.js')?.type).toBe('application/javascript');
-    expect(await byName.get('index.js')?.text()).toBe('main()');
-
-    expect(byName.get('chunks/a.js')?.type).toBe('application/javascript+module');
-    expect(await byName.get('chunks/a.js')?.text()).toBe('chunk a');
-
-    const binary = byName.get('chunks/b.js');
-    expect(binary?.type).toBe('application/octet-stream');
-    expect(new Uint8Array(await binary!.arrayBuffer())).toEqual(new Uint8Array([0, 1, 2, 3, 255]));
-  });
-
-  it('paginates through multiple R2 list pages', async () => {
-    const r2 = createBundleR2Mock({ listPageSize: 2 });
-    const files = Array.from({ length: 5 }, (_, i) => ({
-      name: `mod${i}.js`,
-      content: new Blob([`code${i}`], { type: 'application/javascript' }),
-    }));
-    await persistWorkerBundle(r2, 'p_1', 'd_2', files);
-
-    const replayed = await replayWorkerBundle(r2, 'p_1', 'd_2');
-
-    expect(replayed).toHaveLength(5);
-    expect(vi.mocked(r2.list).mock.calls.length).toBeGreaterThan(1);
-    const names = new Set(replayed.map((f) => f.name));
-    for (let i = 0; i < 5; i++) {
-      expect(names.has(`mod${i}.js`)).toBe(true);
-    }
-  });
-
-  it('throws a clear error when no bundle objects exist', async () => {
-    const r2 = createBundleR2Mock();
-    await expect(replayWorkerBundle(r2, 'p_1', 'missing')).rejects.toThrow(
-      /no bundle objects found for deploy missing/,
-    );
-  });
-
-  it('does not pick up bundles for other deploys with shared prefix', async () => {
-    const r2 = createBundleR2Mock();
-    await persistWorkerBundle(r2, 'p_1', 'd_1', [
-      { name: 'index.js', content: new Blob(['a'], { type: 'application/javascript' }) },
-    ]);
-    await persistWorkerBundle(r2, 'p_1', 'd_2', [
-      { name: 'index.js', content: new Blob(['b'], { type: 'application/javascript' }) },
-      { name: 'extra.js', content: new Blob(['b2'], { type: 'application/javascript' }) },
-    ]);
-
-    const replayed = await replayWorkerBundle(r2, 'p_1', 'd_1');
-    expect(replayed).toHaveLength(1);
-    expect(await replayed[0].content.text()).toBe('a');
-  });
-});
 
 describe('deleteWorkerBundle', () => {
   it('deletes all keys under the deploy prefix', async () => {
     const r2 = createBundleR2Mock();
-    await persistWorkerBundle(r2, 'p_1', 'd_2', [
-      { name: 'index.js', content: new Blob(['x'], { type: 'application/javascript' }) },
-      { name: 'chunks/a.js', content: new Blob(['y'], { type: 'application/javascript' }) },
-    ]);
-    await persistWorkerBundle(r2, 'p_1', 'd_3', [
-      { name: 'index.js', content: new Blob(['z'], { type: 'application/javascript' }) },
-    ]);
+    r2.store.add('worker-bundles/p_1/d_2/index.js');
+    r2.store.add('worker-bundles/p_1/d_2/chunks/a.js');
+    r2.store.add('worker-bundles/p_1/d_3/index.js');
     expect(r2.store.size).toBe(3);
 
     await deleteWorkerBundle(r2, 'p_1', 'd_2');
@@ -1191,11 +767,9 @@ describe('deleteWorkerBundle', () => {
 
   it('paginates through multiple R2 list pages and batch-deletes in chunks of 1000', async () => {
     const r2 = createBundleR2Mock({ listPageSize: 250 });
-    const files = Array.from({ length: 1500 }, (_, i) => ({
-      name: `mod${i}.js`,
-      content: new Blob([`code${i}`], { type: 'application/javascript' }),
-    }));
-    await persistWorkerBundle(r2, 'p_1', 'd_big', files);
+    for (let index = 0; index < 1500; index++) {
+      r2.store.add(`worker-bundles/p_1/d_big/mod${index}.js`);
+    }
     expect(r2.store.size).toBe(1500);
 
     await deleteWorkerBundle(r2, 'p_1', 'd_big');

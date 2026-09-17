@@ -81,6 +81,7 @@ export type VoidRouterAdapter = {
     pageData: PageData,
     component: unknown,
     layouts: Array<unknown>,
+    options: { preserveState: boolean },
   ): void | Promise<void>;
   onDeferredUpdate?(props: Record<string, unknown>): void;
 };
@@ -365,7 +366,9 @@ export async function createVoidRouter(config: VoidRouterConfig): Promise<{
         );
 
         const applyUpdate = () =>
-          config.adapter.applyUpdate(result.pageData, result.component, result.layouts);
+          config.adapter.applyUpdate(result.pageData, result.component, result.layouts, {
+            preserveState: resource.options.preserveState ?? resource.method !== 'GET',
+          });
 
         const useTransition = resource.options.viewTransition ?? config.viewTransitions;
         if (useTransition && document.startViewTransition) {

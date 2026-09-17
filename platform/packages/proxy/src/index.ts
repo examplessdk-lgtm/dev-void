@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { ai } from './ai.ts';
 import { asNumber, asString, isProxyBody } from './body.ts';
+import { proxyCapabilityEnabled } from './capabilities.ts';
 import { d1 } from './d1.ts';
 import { emailRelay } from './email-relay.ts';
 import { routeInbound } from './email-router.ts';
@@ -17,7 +18,6 @@ import { PLATFORM_DISABLED_KEY, PLATFORM_DISABLED_VALUE } from './platform-lifec
 import { r2 } from './r2.ts';
 import { verifyPrerenderBuild, verifyProjectOwner } from './resolve.ts';
 import { revalidate } from './revalidate.ts';
-import { sandbox } from './sandbox.ts';
 import type { Env, JwtPayload, ProxyBody, ProxyEnv } from './types.ts';
 
 const app = new Hono<ProxyEnv>();
@@ -32,6 +32,7 @@ app.use('/*', async (context, next) => {
   if (
     !installerProbe &&
     (context.env.PLATFORM_TRAFFIC_STATE === 'staging' ||
+      context.env.PLATFORM_TRAFFIC_STATE === 'sandbox-drain' ||
       (context.env.PLATFORM_INSTALLATION_ID &&
         (await context.env.ROUTING.get(PLATFORM_DISABLED_KEY)) === PLATFORM_DISABLED_VALUE))
   ) {
@@ -366,19 +367,17 @@ app.post('/ai/*', async (context, next) => {
   await next();
 });
 
-app.post('/sandbox/*', async (context, next) => {
-  if (!proxyCapabilityEnabled(context.env.PLATFORM_CAPABILITIES, 'sandbox')) {
-    return context.json(
-      {
-        error: 'platform capability unavailable',
-        capability: 'sandbox',
-        message: 'This Void platform does not enable sandbox.',
-      },
-      501,
-    );
-  }
-  await next();
-});
+// Managed Sandbox is unavailable; retain its authenticated error response.
+app.post('/sandbox/*', (context) =>
+  context.json(
+    {
+      error: 'platform capability unavailable',
+      capability: 'sandbox',
+      message: 'This Void platform does not enable sandbox.',
+    },
+    501,
+  ),
+);
 
 // Same gate for the email group. A deployed worker on a platform without
 // the email module still holds `__VOID_PROXY` and a valid project token, so
@@ -407,7 +406,6 @@ app.route('/d1', d1);
 app.route('/kv', kv);
 app.route('/r2', r2);
 app.route('/revalidate', revalidate);
-app.route('/sandbox', sandbox);
 app.route('/email', email);
 app.route('/email', emailRelay);
 
@@ -421,23 +419,6 @@ export default {
     await routeInbound(message, env, ctx);
   },
 };
-
-function proxyCapabilityEnabled(value: string | undefined, capability: string): boolean {
-  if (!value) {
-    return true;
-  }
-  try {
-    const parsed = JSON.parse(value) as unknown;
-    return (
-      !!parsed &&
-      typeof parsed === 'object' &&
-      !Array.isArray(parsed) &&
-      (parsed as Record<string, unknown>)[capability] === true
-    );
-  } catch {
-    return false;
-  }
-}
 
 // --- HMAC verification ---
 

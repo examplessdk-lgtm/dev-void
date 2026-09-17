@@ -1,0 +1,360 @@
+import assert from 'node:assert/strict';
+import { spawn, execFileSync } from 'node:child_process';
+import { once } from 'node:events';
+import {
+  createWriteStream,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  writeFileSync,
+} from 'node:fs';
+import { createServer } from 'node:net';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path/posix';
+import { fileURLToPath } from 'node:url';
+import { collectBrowserDiagnostics } from '../../test/browser-helpers.ts';
+import { inspectPackage, startPackedRegistry } from './packed-registry.mjs';
+
+const root = fileURLToPath(new URL('../../', import.meta.url));
+const suite = process.env.VOID_PACKED_SUITE ?? 'smoke';
+assert(['smoke', 'full'].includes(suite), 'VOID_PACKED_SUITE must be smoke or full');
+const full = suite === 'full';
+const work = mkdtempSync(join(tmpdir(), 'void-packed-consumer-'));
+const archiveDir = join(work, 'archives');
+mkdirSync(archiveDir);
+console.log(`Packed consumer artifacts: ${work}`);
+console.log(`Packed consumer suite: ${suite}`);
+const environment = { ...process.env, CI: 'true' };
+for (const key of Object.keys(environment)) {
+  if (/^(VOID_|CLOUDFLARE_|CF_|WRANGLER_|NPM_TOKEN$|NODE_AUTH_TOKEN$)/i.test(key)) {
+    delete environment[key];
+  }
+}
+const config = join(work, 'npmrc');
+writeFileSync(config, 'audit=false\nfund=false\nengine-strict=true\n');
+environment.npm_config_userconfig = config;
+environment.NPM_CONFIG_USERCONFIG = config;
+environment.PNPM_CONFIG_NPMRC_AUTH_FILE = config;
+let commandNumber = 0;
+
+function launch(command, args, cwd, env = environment) {
+  const logPath = join(work, `command-${++commandNumber}.log`);
+  const log = createWriteStream(logPath, { mode: 0o600 });
+  const child = spawn(command, args, {
+    cwd,
+    env,
+    detached: true,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let tail = '';
+  for (const stream of [child.stdout, child.stderr]) {
+    stream.on('data', (chunk) => {
+      log.write(chunk);
+      tail = (tail + chunk.toString()).slice(-16000);
+    });
+  }
+  const completion = new Promise((resolve, reject) => {
+    child.once('error', reject);
+    child.once('close', (code) => {
+      log.end();
+      resolve(code);
+    });
+  });
+  return {
+    child,
+    completion,
+    logPath,
+    failure() {
+      return `${command} ${args.join(' ')} failed; ${logPath}\n${tail}`;
+    },
+    async stop() {
+      if (child.exitCode === null) {
+        try {
+          process.kill(-child.pid, 'SIGTERM');
+        } catch {
+          /* already exited */
+        }
+        const force = setTimeout(() => {
+          try {
+            process.kill(-child.pid, 'SIGKILL');
+          } catch {
+            /* already exited */
+          }
+        }, 5000);
+        await completion.finally(() => clearTimeout(force));
+      }
+    },
+  };
+}
+
+async function run(command, args, cwd, env = environment) {
+  const task = launch(command, args, cwd, env);
+  const timeout = setTimeout(() => {
+    void task.stop();
+  }, 300_000);
+  try {
+    const code = await task.completion;
+    assert.equal(code, 0, task.failure());
+  } finally {
+    clearTimeout(timeout);
+    await task.stop();
+  }
+}
+
+async function port() {
+  const server = createServer();
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const value = server.address().port;
+  await new Promise((resolve) => server.close(resolve));
+  return value;
+}
+
+const packages = [];
+for (const entry of readdirSync(join(root, 'packages'), { withFileTypes: true })) {
+  if (!entry.isDirectory()) {
+    continue;
+  }
+  const directory = join(root, 'packages', entry.name);
+  const manifest = JSON.parse(readFileSync(join(directory, 'package.json'), 'utf8'));
+  if (manifest.private) {
+    continue;
+  }
+  const archive = join(archiveDir, `${entry.name}.tgz`);
+  await run('vp', ['pm', 'pack', '--out', archive], directory);
+  packages.push(inspectPackage(archive));
+}
+const registry = await startPackedRegistry(packages);
+environment.npm_config_registry = registry.origin;
+environment.NPM_CONFIG_REGISTRY = registry.origin;
+environment.PNPM_CONFIG_REGISTRY = registry.origin;
+const version = packages.find((pkg) => pkg.manifest.name === 'void').manifest.version;
+const managers = process.env.VOID_PACKED_PM ? [process.env.VOID_PACKED_PM] : ['npm', 'pnpm'];
+assert(managers.every((manager) => ['npm', 'pnpm'].includes(manager)));
+const frameworks = process.env.VOID_PACKED_FRAMEWORK
+  ? [process.env.VOID_PACKED_FRAMEWORK]
+  : full
+    ? ['react', 'vue', 'svelte', 'solid']
+    : ['react'];
+assert(frameworks.every((framework) => ['react', 'vue', 'svelte', 'solid'].includes(framework)));
+const pages = {
+  react: `import { useState } from 'react';
+import { Link } from '@void/react';
+export default function Page({ message }: { message: string }) {
+  const [count, setCount] = useState(0);
+  return <><h1>{message}</h1><button onClick={() => setCount(count + 1)}>Count {count}</button><Link href="/next">Next page</Link></>;
+}`,
+  vue: `<script setup lang="ts">
+import { ref } from 'vue';
+import { Link } from '@void/vue';
+defineProps<{ message: string }>();
+const count = ref(0);
+</script><template><h1>{{ message }}</h1><button @click="count++">Count {{ count }}</button><Link href="/next">Next page</Link></template>`,
+  svelte: `<script lang="ts">
+import { Link } from '@void/svelte';
+let { message }: { message: string } = $props();
+let count = $state(0);
+</script><h1>{message}</h1><button onclick={() => count++}>Count {count}</button><Link href="/next">Next page</Link>`,
+  solid: `import { createSignal } from 'solid-js';
+import { Link } from '@void/solid';
+export default function Page(props: { message: string }) {
+  const [count, setCount] = createSignal(0);
+  return <><h1>{props.message}</h1><button onClick={() => setCount(count() + 1)}>Count {count()}</button><Link href="/next">Next page</Link></>;
+}`,
+};
+
+let browser;
+const failures = [];
+try {
+  if (full) {
+    const { chromium } = await import('playwright');
+    browser = await chromium.launch({ headless: true });
+  }
+  for (const manager of managers) {
+    for (const framework of frameworks) {
+      const label = `${manager}-${framework}`;
+      try {
+        const fixture = join(work, label);
+        console.log(`Checking packed ${label}: create-void and interactive init`);
+        await run(
+          process.execPath,
+          [join(root, '.github/scripts/packed-init.mjs'), fixture, framework, manager, version],
+          work,
+        );
+        writeFileSync(
+          join(fixture, '.npmrc'),
+          `registry=${registry.origin}\nengine-strict=true\n${manager === 'pnpm' ? 'strict-peer-dependencies=true\n' : ''}audit=false\nfund=false\n`,
+        );
+        const cli = join(fixture, 'node_modules/void/dist/cli/cli.mjs');
+        await run(process.execPath, [cli, '--help'], fixture);
+        if (full && framework === 'react') {
+          await run(
+            manager,
+            manager === 'npm'
+              ? ['install', '--save-dev', `@void/md@${version}`]
+              : ['add', '-D', `@void/md@${version}`],
+            fixture,
+          );
+          writeFileSync(
+            join(fixture, 'pages/markdown.md'),
+            '# Packed Markdown\n\nThe installed Markdown package renders this page.\n',
+          );
+          const viteConfig = join(fixture, 'vite.config.ts');
+          writeFileSync(
+            viteConfig,
+            `import { voidMarkdown } from '@void/md/plugin';\n` +
+              readFileSync(viteConfig, 'utf8').replace(
+                /plugins:\s*\[/,
+                'plugins: [voidMarkdown(),',
+              ),
+          );
+        }
+        const manifest = JSON.parse(readFileSync(join(fixture, 'package.json'), 'utf8'));
+        assert(!manifest.devDependencies?.['vite-plus'], 'Plain Vite init must not install Vite+');
+        const installedVite = JSON.parse(
+          readFileSync(join(fixture, 'node_modules/vite/package.json'), 'utf8'),
+        );
+        assert.equal(installedVite.name, 'vite');
+        assert(installedVite.version.startsWith('8.'), 'The consumer must use public Vite 8');
+        assert.equal(
+          JSON.parse(readFileSync(join(fixture, 'node_modules/void/package.json'), 'utf8')).version,
+          version,
+        );
+        await run(process.execPath, [cli, 'prepare'], fixture);
+        await run(manager, manager === 'npm' ? ['ci'] : ['install', '--frozen-lockfile'], fixture);
+        const extension = framework === 'vue' ? 'vue' : framework === 'svelte' ? 'svelte' : 'tsx';
+        writeFileSync(join(fixture, `pages/index.${extension}`), pages[framework]);
+        writeFileSync(join(fixture, `pages/next.${extension}`), pages[framework]);
+        writeFileSync(
+          join(fixture, 'pages/index.server.ts'),
+          `import { defineHandler } from 'void';\nexport const loader = defineHandler(() => ({ message: 'Packed ${label}' }));\n`,
+        );
+        writeFileSync(
+          join(fixture, 'pages/next.server.ts'),
+          `import { defineHandler } from 'void';\nexport const loader = defineHandler(() => ({ message: 'Next ${label}' }));\n`,
+        );
+        mkdirSync(join(fixture, 'routes/api'), { recursive: true });
+        writeFileSync(
+          join(fixture, 'routes/api/packed.ts'),
+          `import { defineHandler } from 'void';\nimport { kv } from 'void/kv';\nexport const GET = defineHandler(async () => { await kv.put('packed', 'ok'); return { value: await kv.get('packed') }; });\n`,
+        );
+        mkdirSync(join(fixture, 'public'), { recursive: true });
+        writeFileSync(join(fixture, 'public/packed.txt'), label);
+        const vite = join(fixture, 'node_modules/vite/bin/vite.js');
+        await run(process.execPath, [vite, 'build'], fixture);
+        await run(
+          process.execPath,
+          [join(fixture, 'node_modules/typescript/bin/tsc'), '--noEmit'],
+          fixture,
+        );
+        // The installed package must find and verify every bundled runtime artifact.
+        await run(
+          process.execPath,
+          [
+            '--input-type=module',
+            '-e',
+            `import { findPackageJSON } from 'node:module';
+import { readFileSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
+const manifestPath = findPackageJSON('@void/platform', import.meta.resolve('void'));
+const entry = JSON.parse(readFileSync(manifestPath, 'utf8')).exports['./installer'].import;
+const { resolvePlatformRuntime } = await import(new URL(entry, pathToFileURL(manifestPath)));
+const runtime = resolvePlatformRuntime();
+if (runtime.manifest.platformVersion !== ${JSON.stringify(version)}) throw new Error('Runtime version mismatch');`,
+          ],
+          fixture,
+        );
+        for (const mode of full ? ['dev', 'preview'] : ['dev']) {
+          const httpPort = await port();
+          const base = `http://127.0.0.1:${httpPort}`;
+          const task = launch(
+            process.execPath,
+            [vite, mode, '--host', '127.0.0.1', '--port', String(httpPort), '--strictPort'],
+            fixture,
+          );
+          try {
+            const deadline = Date.now() + 90_000;
+            let response;
+            while (Date.now() < deadline) {
+              if (task.child.exitCode !== null) {
+                throw new Error(task.failure());
+              }
+              try {
+                response = await fetch(base, { signal: AbortSignal.timeout(2000) });
+                if (response.ok) {
+                  break;
+                }
+              } catch {
+                /* server is starting */
+              }
+              await new Promise((resolve) => setTimeout(resolve, 200));
+            }
+            assert(response?.ok, task.failure());
+            assert((await response.text()).includes(`Packed ${label}`));
+            assert.equal(await (await fetch(`${base}/packed.txt`)).text(), label);
+            const apiResponse = await fetch(`${base}/api/packed`);
+            const apiBody = await apiResponse.text();
+            assert.equal(apiResponse.status, 200, `${apiBody}\n${task.failure()}`);
+            assert.deepEqual(JSON.parse(apiBody), { value: 'ok' });
+            if (full && framework === 'react') {
+              const markdown = await fetch(`${base}/markdown`);
+              assert.equal(markdown.status, 200, task.failure());
+              assert((await markdown.text()).includes('Packed Markdown'));
+            }
+            if (!browser) {
+              continue;
+            }
+            const page = await browser.newPage();
+            const diagnostics = collectBrowserDiagnostics(page);
+            try {
+              await page.goto(base);
+              // SSR makes the button visible before the client has attached
+              // its event handlers. Verify hydration before testing clicks.
+              await page.locator('#app[data-hydrated="true"]').waitFor();
+              await page.getByRole('button', { name: 'Count 0', exact: true }).click();
+              await page.getByRole('button', { name: 'Count 1', exact: true }).waitFor();
+              await page.evaluate(() => {
+                window.__packedNavigation = 'preserved';
+              });
+              await page.getByRole('link', { name: 'Next page', exact: true }).click();
+              await page.getByRole('heading', { name: `Next ${label}`, exact: true }).waitFor();
+              assert.equal(
+                await page.evaluate(() => window.__packedNavigation),
+                'preserved',
+                'Link navigation must preserve the document',
+              );
+            } catch (error) {
+              throw new Error(
+                `Packed ${label} ${mode} browser verification failed:\n${String(error.stack ?? error)}\n${diagnostics()}`,
+                { cause: error },
+              );
+            } finally {
+              await page.close();
+            }
+          } finally {
+            await task.stop();
+          }
+        }
+        console.log(
+          `Passed packed ${label} (${suite}): init, frozen install, public Vite build/typecheck, assets, KV, runtime integrity${full ? ', dev/preview, hydration/navigation' : ', dev HTTP'}`,
+        );
+      } catch (error) {
+        failures.push({ fixture: label, error: String(error.stack ?? error) });
+        console.error(`Failed packed ${label}: ${String(error.stack ?? error)}`);
+      }
+    }
+  }
+} finally {
+  await browser?.close();
+  await registry.close();
+}
+if (failures.length) {
+  const path = join(work, 'failures.json');
+  writeFileSync(path, JSON.stringify(failures, null, 2), { mode: 0o600 });
+  throw new Error(
+    `${failures.length} packed consumer fixture(s) failed. Full diagnostics: ${path}`,
+  );
+}
+console.log(`Packed consumer acceptance passed. Logs and fixtures: ${work}`);

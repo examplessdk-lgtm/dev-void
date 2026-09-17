@@ -584,7 +584,6 @@ export async function createPageNavigationEngine(
     url: string,
     fetchUrl: string,
     method: string,
-    hash: string,
     options: VisitOptions,
     signal: AbortSignal,
     commitTarget: { fetchUrl: string; hash: string },
@@ -700,7 +699,6 @@ export async function createPageNavigationEngine(
           redirectUrl.pathname + redirectUrl.search + redirectUrl.hash,
           redirectUrl.pathname + redirectUrl.search,
           'GET',
-          redirectUrl.hash,
           {
             preserveScroll: options.preserveScroll,
             preserveState: options.preserveState,
@@ -991,7 +989,6 @@ export async function createPageNavigationEngine(
         url,
         effectiveFetchUrl,
         method,
-        hash,
         options,
         controller.signal,
         commitTarget,

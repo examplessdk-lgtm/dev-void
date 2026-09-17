@@ -3,7 +3,6 @@ import footerBg from '@assets/viteplus/footer-background.jpg';
 import BaseTheme, { themeContextKey } from '@voidzero-dev/vitepress-theme';
 import type { Theme } from 'vitepress';
 import { h } from 'vue';
-import AlphaBanner from './AlphaBanner.vue';
 import CodeGroupSync from './CodeGroupSync.vue';
 import 'virtual:group-icons.css';
 import './styles.css';
@@ -59,7 +58,6 @@ export default {
   extends: BaseTheme,
   Layout() {
     return h(BaseTheme.Layout, null, {
-      'doc-before': () => h(AlphaBanner),
       'aside-ads-before': () => h(AsideCredit),
       'layout-bottom': () => [h(DocFooter), h(CodeGroupSync)],
     });

@@ -118,10 +118,6 @@ const agents: Record<string, AgentConfig> = {
   },
 };
 
-export function getAgentById(id: string): AgentConfig | undefined {
-  return agents[id];
-}
-
 export function detectAgents(root: string): Array<AgentConfig> {
   return Object.values(agents).filter((a) => a.detect(root));
 }

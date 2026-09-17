@@ -52,17 +52,8 @@ const ASSET_BUCKET_UPLOAD_RETRY_DELAY_MS = 1000;
 
 const MAX_UPLOAD_RETRIES = 5; // 5 retries + 1 initial = 6 total tries (matching Wrangler)
 const UPLOAD_CONCURRENCY = 3;
-/**
- * Maximum concurrent static-asset KV/R2 PUTs per deploy. Used by the
- * worker-free (streamed) deploy path so the handler can fan uploads out
- * while the main parse loop keeps draining the inbound multipart request
- * body. Exported so the deploy handler shares the limit with
- * `uploadStaticAssets` (post-parse bulk upload), keeping the two paths
- * from accidentally drifting.
- */
+/** Maximum concurrent static-asset storage operations per deploy. */
 export const STATIC_ASSET_UPLOAD_CONCURRENCY = 4;
-const STATIC_ASSET_UPLOAD_MAX_RETRIES = 3;
-const STATIC_ASSET_UPLOAD_RETRY_DELAY_MS = 250;
 const GATEWAY_BACKOFF_BASE_MS = 5000;
 const MAX_GATEWAY_ERRORS = 5; // start counting attempts after this many 524s (4 free retries)
 
@@ -446,46 +437,6 @@ export function computeAssetHash(content: ArrayBuffer, filePath: string): string
   return digestToAssetHash(blake3hash(input));
 }
 
-export class AssetHashMismatchError extends Error {}
-
-/**
- * Merge a declared (client-sent) asset manifest into a built-from-content manifest.
- * Validates that declared hashes match what we computed; if so, prefers the declared
- * entry verbatim so the upload manifest matches what the CLI sent.
- */
-export function applyDeclaredAssetManifest(
-  built: Record<string, AssetManifestEntry>,
-  declared: Record<string, AssetManifestEntry> | undefined,
-): Record<string, AssetManifestEntry> {
-  // Always return a fresh object so callers may freely mutate the result
-  // (e.g. preflight fill-ins) without reaching back through a shared reference
-  // into the builder's state.
-  const result: Record<string, AssetManifestEntry> = { ...built };
-  if (!declared) {
-    return result;
-  }
-  for (const [path, entry] of Object.entries(built)) {
-    const declaredEntry = declared[path];
-    if (
-      declaredEntry &&
-      typeof declaredEntry.hash === 'string' &&
-      declaredEntry.hash.length === 32 &&
-      Number.isFinite(declaredEntry.size) &&
-      declaredEntry.size >= 0
-    ) {
-      if (declaredEntry.hash !== entry.hash) {
-        throw new AssetHashMismatchError(
-          `asset hash mismatch for ${path}: declared ${declaredEntry.hash}, computed ${entry.hash}`,
-        );
-      }
-      if (declaredEntry.size === entry.size) {
-        result[path] = declaredEntry;
-      }
-    }
-  }
-  return result;
-}
-
 /**
  * Determine content type from file path using the `mime` package (same as Wrangler).
  * Falls back to "application/null" for unknown extensions — a sentinel value that
@@ -524,97 +475,6 @@ export function buildAssetMetadata(
 }
 
 export const KV_THRESHOLD = 2 * 1024 * 1024; // 2 MB
-
-async function uploadStaticAssetWithRetries(
-  kv: KVNamespace,
-  r2: R2Bucket,
-  key: string,
-  entry: AssetEntry,
-  retryDelayMs: number,
-): Promise<'kv' | 'r2'> {
-  const store = entry.bytes.byteLength >= KV_THRESHOLD ? 'r2' : 'kv';
-  let lastErr: unknown;
-
-  for (let attempt = 0; attempt <= STATIC_ASSET_UPLOAD_MAX_RETRIES; attempt++) {
-    if (attempt > 0) {
-      await new Promise((r) => setTimeout(r, retryDelayMs * 2 ** (attempt - 1)));
-    }
-
-    try {
-      if (store === 'r2') {
-        await r2.put(key, entry.bytes, {
-          httpMetadata: { contentType: entry.contentType },
-        });
-      } else {
-        await kv.put(key, entry.bytes, {
-          metadata: { ct: entry.contentType },
-        });
-      }
-      return store;
-    } catch (err) {
-      lastErr = err;
-      console.warn(
-        `[assets] static ${store} upload failed for ${key} ` +
-          `(attempt ${attempt + 1}/${STATIC_ASSET_UPLOAD_MAX_RETRIES + 1})`,
-        err instanceof Error ? err.message : err,
-      );
-    }
-  }
-
-  throw lastErr ?? new Error(`static asset upload failed for ${key}`);
-}
-
-/**
- * Upload static assets to KV (< 2 MB) or R2 (>= 2 MB).
- * Content-addressed keys make puts idempotent, so no existence checks needed.
- * Uploads run with bounded concurrency to avoid holding every asset body in Worker memory.
- * Returns the set of hashes that were stored in R2 (large assets).
- */
-export async function uploadStaticAssets(
-  kv: KVNamespace,
-  r2: R2Bucket,
-  assetsByHash: Map<string, AssetEntry>,
-  projectId: string,
-  { retryDelayMs = STATIC_ASSET_UPLOAD_RETRY_DELAY_MS }: { retryDelayMs?: number } = {},
-): Promise<Set<string>> {
-  const largeHashes = new Set<string>();
-  const entries = Array.from(assetsByHash);
-  let index = 0;
-  // Collected across all workers so that every in-flight put settles (or
-  // stops picking up new entries) before this function returns. Without
-  // this, Promise.all would reject on the first worker failure while the
-  // remaining workers keep writing bytes in the background, racing any
-  // abort-cleanup the caller triggers.
-  let firstError: unknown;
-
-  async function worker(): Promise<void> {
-    while (firstError === undefined && index < entries.length) {
-      const [hash, entry] = entries[index++];
-      const key = `assets/${projectId}/${hash}`;
-      try {
-        const store = await uploadStaticAssetWithRetries(kv, r2, key, entry, retryDelayMs);
-        if (store === 'r2') {
-          largeHashes.add(hash);
-        }
-      } catch (err) {
-        if (firstError === undefined) {
-          firstError = err;
-        }
-        return;
-      }
-    }
-  }
-
-  await Promise.all(
-    Array.from({ length: Math.min(STATIC_ASSET_UPLOAD_CONCURRENCY, entries.length) }, () =>
-      worker(),
-    ),
-  );
-  if (firstError !== undefined) {
-    throw firstError;
-  }
-  return largeHashes;
-}
 
 /**
  * Delete assets that are no longer referenced by any retained deployment.
@@ -702,105 +562,6 @@ function workerBundlePrefix(projectId: string, deploymentId: string): string {
 }
 
 /**
- * Persist a user-worker bundle to R2 so a future rollback can re-PUT the
- * exact same bytes. Each file becomes one R2 object under the key
- * `worker-bundles/{projectId}/{deploymentId}/{filePath}`.
- *
- * Caller MUST set `deployments.bundle_stored = true` only after this resolves
- * — the invariant is `bundle_stored=true ⇒ rollbackable`.
- *
- * Failure semantics: a bounded worker pool drains until either every file is
- * written or one put rejects. On the first rejection, we stop scheduling new
- * files but await all in-flight workers before re-throwing — without this,
- * Promise.all would reject while sibling writes were still in flight, racing
- * the deploy abort cleanup and leaking partial rollback artifacts under the
- * deployment prefix.
- */
-const BUNDLE_UPLOAD_CONCURRENCY = 8;
-
-export async function persistWorkerBundle(
-  r2: R2Bucket,
-  projectId: string,
-  deploymentId: string,
-  files: ReadonlyArray<{ name: string; content: Blob }>,
-): Promise<void> {
-  if (files.length === 0) {
-    return;
-  }
-  const prefix = workerBundlePrefix(projectId, deploymentId);
-  let index = 0;
-  let firstError: unknown;
-
-  async function worker(): Promise<void> {
-    while (firstError === undefined && index < files.length) {
-      const file = files[index++];
-      try {
-        const bytes = await file.content.arrayBuffer();
-        await r2.put(`${prefix}${file.name}`, bytes, {
-          httpMetadata: { contentType: file.content.type },
-        });
-      } catch (err) {
-        if (firstError === undefined) {
-          firstError = err;
-        }
-        return;
-      }
-    }
-  }
-
-  await Promise.all(
-    Array.from({ length: Math.min(BUNDLE_UPLOAD_CONCURRENCY, files.length) }, () => worker()),
-  );
-  if (firstError !== undefined) {
-    throw firstError;
-  }
-}
-
-/**
- * Read all bundle modules for a deploy from R2. Returns the module list ready
- * to drop into a multipart user-worker PUT (same shape as the in-memory
- * `workerFiles[]` collected during a fresh deploy).
- *
- * Throws if no bundle objects are found (rollback caller should validate
- * `target.bundle_stored=true` BEFORE calling this).
- */
-export async function replayWorkerBundle(
-  r2: R2Bucket,
-  projectId: string,
-  deploymentId: string,
-): Promise<ReadonlyArray<{ name: string; content: Blob }>> {
-  const prefix = workerBundlePrefix(projectId, deploymentId);
-  const keys: Array<string> = [];
-  let cursor: string | undefined;
-  do {
-    const listed = await r2.list({ prefix, cursor });
-    for (const obj of listed.objects) {
-      keys.push(obj.key);
-    }
-    cursor = listed.truncated ? listed.cursor : undefined;
-  } while (cursor !== undefined);
-
-  if (keys.length === 0) {
-    throw new Error(`no bundle objects found for deploy ${deploymentId} (project ${projectId})`);
-  }
-
-  return Promise.all(
-    keys.map(async (key) => {
-      const obj = await r2.get(key);
-      if (obj === null) {
-        throw new Error(`bundle object ${key} disappeared between list and get`);
-      }
-      const bytes = await obj.arrayBuffer();
-      const contentType = obj.httpMetadata?.contentType ?? '';
-      return {
-        name: key.slice(prefix.length),
-        content: new Blob([bytes], { type: contentType }),
-      };
-    }),
-  );
-}
-
-/**
  * Skip keys uploaded within the pending-upload protection window. These may
  * be in-flight uploads for a not-yet-finalized deploy — `POST /deploy/upload-urls`
  * mints presigned PUTs that are not bound to a deploy lifecycle, so bytes
@@ -820,27 +581,16 @@ const R2_DELETE_BATCH = 1000;
  * cleanup) run far from request critical paths and a single delete batch
  * is already a fan-out under the hood.
  *
- * `keepIf` is consulted per object — return `true` to KEEP, `false` to
- * delete. Omit it to delete every object under the prefix.
- *
  * Idempotent: a missing key inside a delete batch is a no-op on R2 (and on
  * the in-memory mock used in tests). Returns the number of keys actually
  * deleted so callers can log meaningful sweep counts.
  */
-export async function paginatedR2Delete(
-  r2: R2Bucket,
-  prefix: string,
-  options: { keepIf?: (obj: R2Object) => boolean } = {},
-): Promise<number> {
-  const keepIf = options.keepIf;
+export async function paginatedR2Delete(r2: R2Bucket, prefix: string): Promise<number> {
   const toDelete: Array<string> = [];
   let cursor: string | undefined;
   do {
     const listed = await r2.list({ prefix, cursor, limit: R2_DELETE_BATCH });
     for (const obj of listed.objects) {
-      if (keepIf && keepIf(obj)) {
-        continue;
-      }
       toDelete.push(obj.key);
     }
     cursor = listed.truncated ? listed.cursor : undefined;
@@ -943,51 +693,4 @@ export async function scanProjectAssetOrphanCandidates(
   } while (cursor !== undefined);
 
   return candidateCount;
-}
-
-/**
- * Delete R2 objects under `assets/{projectId}/...` whose blake3 hash (the
- * trailing path segment) is NOT in `retainedHashes`. Used opportunistically
- * by retention cleanup to catch direct-to-R2 orphans (bytes uploaded via
- * presigned PUTs that never finalized into a live deploy on this project).
- *
- * Returns the number of orphan keys deleted.
- *
- * Race protection: keys uploaded within `PENDING_UPLOAD_PROTECTION_SECONDS`
- * are preserved even when not in `retainedHashes`. Without this guard, a
- * concurrent `upload-urls` flow on the same project (or even the same
- * deploy, finalizing slightly after the sweep starts) can have its bytes
- * deleted out from under it, breaking the next finalize with "asset not
- * found". Tradeoff: orphans uploaded within the window only get cleaned up
- * on the NEXT eligible deploy ≥ 1h later — see the `TODO(orphan-gc)` in
- * `routes/deploy.ts` for the periodic-sweep follow-up.
- *
- * KV is intentionally NOT swept here: KV-resident assets are written by the
- * server-side mirror path during finalize, not by direct-to-R2 PUTs, so
- * orphans only accrue in R2.
- */
-export async function sweepProjectAssetOrphans(
-  r2: R2Bucket,
-  projectId: string,
-  retainedHashes: Set<string>,
-): Promise<number> {
-  const prefix = `assets/${projectId}/`;
-  const now = Date.now();
-  const protectionMs = PENDING_UPLOAD_PROTECTION_SECONDS * 1000;
-  return paginatedR2Delete(r2, prefix, {
-    keepIf: (obj) => {
-      const hash = obj.key.slice(prefix.length);
-      // Malformed key (no hash segment after the prefix) — fall through
-      // to the delete bucket so the cleanup loop self-heals.
-      if (hash.length === 0) {
-        return false;
-      }
-      // Manifest-referenced bytes are retained.
-      if (retainedHashes.has(hash)) {
-        return true;
-      }
-      // Pending-upload protection window — see `PENDING_UPLOAD_PROTECTION_SECONDS`.
-      return now - obj.uploaded.getTime() < protectionMs;
-    },
-  });
 }

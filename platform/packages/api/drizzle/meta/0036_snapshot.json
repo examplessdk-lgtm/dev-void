@@ -1,6 +1,6 @@
 {
-  "id": "8658ab2f-2cbb-4d46-85a1-729100c4bd7e",
-  "prevId": "3106792f-7aee-4ea7-acfc-c7390dd7614b",
+  "id": "c718ab53-51e8-49e8-aa0c-ff0648385602",
+  "prevId": "16873c10-81f3-4a4d-bcbd-2235cdacfa6b",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -727,231 +727,6 @@
       },
       "isRLSEnabled": false
     },
-    "public.email_domains": {
-      "name": "email_domains",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "text",
-          "primaryKey": true,
-          "notNull": true
-        },
-        "project_id": {
-          "name": "project_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "domain": {
-          "name": "domain",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "zone_id": {
-          "name": "zone_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "account_id": {
-          "name": "account_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "mode": {
-          "name": "mode",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "status": {
-          "name": "status",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'pending'"
-        },
-        "credential_kind": {
-          "name": "credential_kind",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "token_ciphertext": {
-          "name": "token_ciphertext",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "token_iv": {
-          "name": "token_iv",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "token_key_version": {
-          "name": "token_key_version",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "relay_ciphertext": {
-          "name": "relay_ciphertext",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "relay_iv": {
-          "name": "relay_iv",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "relay_key_version": {
-          "name": "relay_key_version",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "relay_worker_name": {
-          "name": "relay_worker_name",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "relay_version": {
-          "name": "relay_version",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "token_id": {
-          "name": "token_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "token_expires_on": {
-          "name": "token_expires_on",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "setup_state": {
-          "name": "setup_state",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "updated_at": {
-          "name": "updated_at",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {
-        "idx_email_domains_project_id": {
-          "name": "idx_email_domains_project_id",
-          "columns": [
-            {
-              "expression": "project_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "email_domains_zone_uq": {
-          "name": "email_domains_zone_uq",
-          "columns": [
-            {
-              "expression": "zone_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "where": "\"email_domains\".\"zone_id\" IS NOT NULL AND \"email_domains\".\"status\" IN ('active', 'pending')",
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "email_domains_relay_uq": {
-          "name": "email_domains_relay_uq",
-          "columns": [
-            {
-              "expression": "account_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "relay_worker_name",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "where": "\"email_domains\".\"relay_worker_name\" IS NOT NULL",
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "email_domains_project_id_projects_id_fk": {
-          "name": "email_domains_project_id_projects_id_fk",
-          "tableFrom": "email_domains",
-          "tableTo": "projects",
-          "columnsFrom": ["project_id"],
-          "columnsTo": ["id"],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {
-        "email_domains_domain_uq": {
-          "name": "email_domains_domain_uq",
-          "nullsNotDistinct": false,
-          "columns": ["domain"]
-        }
-      },
-      "policies": {},
-      "checkConstraints": {
-        "email_domains_mode_check": {
-          "name": "email_domains_mode_check",
-          "value": "\"email_domains\".\"mode\" IN ('apex', 'subdomain')"
-        },
-        "email_domains_status_check": {
-          "name": "email_domains_status_check",
-          "value": "\"email_domains\".\"status\" IN ('pending', 'active', 'token_revoked', 'token_expired', 'failed')"
-        },
-        "email_domains_credential_kind_check": {
-          "name": "email_domains_credential_kind_check",
-          "value": "\"email_domains\".\"credential_kind\" IN ('oauth_grant', 'api_token')"
-        }
-      },
-      "isRLSEnabled": false
-    },
     "public.github_connections": {
       "name": "github_connections",
       "schema": "",
@@ -1020,6 +795,12 @@
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
+        },
+        "authorized_by_user_id": {
+          "name": "authorized_by_user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {
@@ -1083,6 +864,15 @@
           "columnsFrom": ["project_id"],
           "columnsTo": ["id"],
           "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "github_connections_authorized_by_user_id_users_id_fk": {
+          "name": "github_connections_authorized_by_user_id_users_id_fk",
+          "tableFrom": "github_connections",
+          "tableTo": "users",
+          "columnsFrom": ["authorized_by_user_id"],
+          "columnsTo": ["id"],
+          "onDelete": "set null",
           "onUpdate": "no action"
         }
       },
@@ -1559,35 +1349,7 @@
           "with": {}
         }
       },
-      "foreignKeys": {
-        "invitations_invited_by_users_id_fk": {
-          "name": "invitations_invited_by_users_id_fk",
-          "tableFrom": "invitations",
-          "tableTo": "users",
-          "columnsFrom": ["invited_by"],
-          "columnsTo": ["id"],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        },
-        "invitations_accepted_by_users_id_fk": {
-          "name": "invitations_accepted_by_users_id_fk",
-          "tableFrom": "invitations",
-          "tableTo": "users",
-          "columnsFrom": ["accepted_by"],
-          "columnsTo": ["id"],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        },
-        "invitations_revoked_by_users_id_fk": {
-          "name": "invitations_revoked_by_users_id_fk",
-          "tableFrom": "invitations",
-          "tableTo": "users",
-          "columnsFrom": ["revoked_by"],
-          "columnsTo": ["id"],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        }
-      },
+      "foreignKeys": {},
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},

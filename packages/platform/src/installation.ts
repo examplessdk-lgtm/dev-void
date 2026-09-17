@@ -1,11 +1,17 @@
-import { parsePlatformDeploymentManifest, type PlatformDeploymentManifest } from './manifest.ts';
+import {
+  createPlatformDeploymentManifest,
+  parsePlatformDeploymentManifest,
+  type PlatformDeploymentManifest,
+} from './manifest.ts';
 
 export const PLATFORM_INSTALLATION_SCHEMA_VERSION = 1 as const;
 export const PLATFORM_DISABLED_KEY = '__void/platform/disabled/v1';
 export const PLATFORM_DISABLED_VALUE = 'disabled';
 export const PLATFORM_REMOTE_INSTALLATION_MANIFEST_KEY = '__void/platform/installation/v1';
+export const PLATFORM_SANDBOX_DRAIN_KEY = '__void/platform/sandbox-drain/v1';
 export const PLATFORM_R2_OWNERSHIP_MARKER_KEY = '__void/platform/ownership/v1';
 export const PLATFORM_RESOURCE_OWNERSHIP_SCHEMA_VERSION = 1 as const;
+export const PLATFORM_USAGE_PROTOCOL_VERSION = 1 as const;
 
 export type InstallationStatus =
   | 'draft'
@@ -72,7 +78,11 @@ export type PlatformInstallationManifest = Readonly<{
     name: string;
   }>;
   createdAt: string;
+  /** Actual forward-only PostgreSQL schema, independent of the running runtime. */
+  databaseSchemaDigest: string | null;
   deployment: PlatformDeploymentManifest;
+  /** Desired domain while DNS/TLS activation is pending; current addressing remains live. */
+  pendingDomain?: PlatformDeploymentManifest['application'];
   desiredState: 'enabled' | 'disabled';
   endpoints: PlatformInstallationEndpoints;
   id: string;
@@ -80,10 +90,13 @@ export type PlatformInstallationManifest = Readonly<{
   platformVersion: string;
   resources: ReadonlyArray<InstallationResource>;
   runtime: PlatformRuntimeProvenance | null;
+  safetyProtocols: Readonly<{ sandboxDrain: 0 | 1 | 2 }>;
   schemaVersion: typeof PLATFORM_INSTALLATION_SCHEMA_VERSION;
   status: InstallationStatus;
   steps: ReadonlyArray<InstallationStep>;
   updatedAt: string;
+  /** Last usage protocol proven live across the installed Worker set. */
+  usageProtocolVersion: 0 | 1;
 }>;
 
 export type PlatformResourceOwnershipMarker = Readonly<{
@@ -227,6 +240,8 @@ export function createPlatformInstallationManifest(input: {
   id: string;
   ownershipNonce: string;
   platformVersion: string;
+  safetyProtocols?: Readonly<{ sandboxDrain: 0 | 1 | 2 }>;
+  usageProtocolVersion?: 0 | 1;
 }): PlatformInstallationManifest {
   const createdAt = assertTimestamp(input.createdAt, 'createdAt');
   if (!/^[a-z0-9][a-z0-9-]{7,79}$/.test(input.id)) {
@@ -241,6 +256,7 @@ export function createPlatformInstallationManifest(input: {
       name: requiredString(input.account.name, 'account.name'),
     },
     createdAt,
+    databaseSchemaDigest: null,
     deployment: parsePlatformDeploymentManifest(
       JSON.parse(JSON.stringify(input.deployment)) as unknown,
     ),
@@ -251,10 +267,12 @@ export function createPlatformInstallationManifest(input: {
     platformVersion: requiredString(input.platformVersion, 'platformVersion'),
     resources: [],
     runtime: null,
+    safetyProtocols: input.safetyProtocols ?? { sandboxDrain: 0 },
     schemaVersion: PLATFORM_INSTALLATION_SCHEMA_VERSION,
     status: 'draft',
     steps: [],
     updatedAt: createdAt,
+    usageProtocolVersion: input.usageProtocolVersion ?? 0,
   };
 }
 
@@ -378,8 +396,26 @@ export function parsePlatformInstallationManifest(value: unknown): PlatformInsta
     id: requiredString(value.id, 'id'),
     ownershipNonce: requiredString(value.ownershipNonce, 'ownershipNonce'),
     platformVersion: requiredString(value.platformVersion, 'platformVersion'),
+    safetyProtocols: parseSafetyProtocols(value.safetyProtocols),
+    usageProtocolVersion: parseUsageProtocolVersion(value.usageProtocolVersion),
   });
   const runtime = parsePlatformRuntimeProvenance(value.runtime);
+  let pendingDomain: PlatformDeploymentManifest['application'] | undefined;
+  if (value.pendingDomain !== undefined) {
+    assertRecord(value.pendingDomain, 'pendingDomain');
+    pendingDomain = createPlatformDeploymentManifest({
+      ...manifest.deployment,
+      application: value.pendingDomain as PlatformDeploymentManifest['application'],
+    }).application;
+    if (
+      !manifest.deployment.application.workersDev ||
+      !pendingDomain.zoneName ||
+      JSON.stringify(pendingDomain.workersDev) !==
+        JSON.stringify(manifest.deployment.application.workersDev)
+    ) {
+      throw new Error('Pending domain must retain the installation workers.dev identity.');
+    }
+  }
   const updatedAt = assertTimestamp(requiredString(value.updatedAt, 'updatedAt'), 'updatedAt');
   let next: PlatformInstallationManifest = setInstallationEndpoints(
     {
@@ -392,6 +428,7 @@ export function parsePlatformInstallationManifest(value: unknown): PlatformInsta
             : 'enabled',
       status: value.status,
       runtime,
+      ...(pendingDomain ? { pendingDomain } : {}),
       updatedAt,
     },
     {
@@ -445,7 +482,33 @@ export function parsePlatformInstallationManifest(value: unknown): PlatformInsta
       next.updatedAt,
     );
   }
-  return { ...next, updatedAt };
+  const recordedDatabaseSchemaDigest =
+    value.databaseSchemaDigest === undefined || value.databaseSchemaDigest === null
+      ? ([...next.steps].reverse().find((step) => step.key.startsWith('database-schema:'))
+          ?.resultHash ?? null)
+      : requiredString(value.databaseSchemaDigest, 'databaseSchemaDigest');
+  return { ...next, databaseSchemaDigest: recordedDatabaseSchemaDigest, updatedAt };
+}
+
+function parseUsageProtocolVersion(value: unknown): 0 | 1 {
+  if (value === undefined || value === 0) {
+    return 0;
+  }
+  if (value === 1) {
+    return 1;
+  }
+  throw new Error('usageProtocolVersion must be 0 or 1.');
+}
+
+function parseSafetyProtocols(value: unknown): PlatformInstallationManifest['safetyProtocols'] {
+  if (value === undefined) {
+    return { sandboxDrain: 0 };
+  }
+  assertRecord(value, 'safetyProtocols');
+  if (value.sandboxDrain !== 0 && value.sandboxDrain !== 1 && value.sandboxDrain !== 2) {
+    throw new Error('safetyProtocols.sandboxDrain must be 0, 1, or 2.');
+  }
+  return { sandboxDrain: value.sandboxDrain };
 }
 
 function parsePlatformRuntimeProvenance(value: unknown): PlatformRuntimeProvenance | null {

@@ -39,6 +39,17 @@ afterEach(() => {
 });
 
 describe('void help (subprocess)', () => {
+  it.each(['--help', '-h', 'help'])('prints global help through `void %s`', (argument) => {
+    const root = createProject();
+    const { output, status } = runVoid(root, [argument]);
+
+    expect(status, output).toBe(0);
+    expect(output).toContain('void env check');
+    expect(output).toContain('void env types');
+    expect(output).not.toContain('void env example');
+    expect(output).not.toContain('Missing help page');
+  });
+
   it('prints command help through `void help deploy`', () => {
     const root = createProject();
     const { output, status } = runVoid(root, ['help', 'deploy']);

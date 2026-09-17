@@ -66,17 +66,21 @@ export function createIsolatedPlayground(
   sourceWorkspacePath: string,
 ): IsolatedPlayground {
   const sourceRoot = join(workspaceRoot, sourceWorkspacePath);
+  const snapshot = process.env.VOID_TEST_SOURCE_SNAPSHOTS
+    ? join(process.env.VOID_TEST_SOURCE_SNAPSHOTS, sourceWorkspacePath)
+    : undefined;
+  const copySource = snapshot && existsSync(snapshot) ? snapshot : sourceRoot;
   const playgroundLocal = join(workspaceRoot, 'playground-local');
   mkdirSync(playgroundLocal, { recursive: true });
   const root = mkdtempSync(join(playgroundLocal, `test-${basename(sourceWorkspacePath)}-`));
 
-  cpSync(sourceRoot, root, {
+  cpSync(copySource, root, {
     recursive: true,
     filter(path) {
       // `cpSync` reports native backslash paths on Windows, while these workspace paths are
       // normalized to forward slashes. Normalize before using the POSIX path helpers or the
       // top-level `node_modules` junction is copied and the replacement junction already exists.
-      return shouldCopyPlaygroundPath(sourceRoot, path);
+      return shouldCopyPlaygroundPath(copySource, path);
     },
   });
 
@@ -129,6 +133,7 @@ export async function waitForServer(
     expectStatus?: number;
     isAlive?: () => boolean;
     requestTimeoutMs?: number;
+    diagnostics?: () => string;
   },
 ): Promise<void> {
   // Release the held port so the child process can bind to it.
@@ -145,7 +150,9 @@ export async function waitForServer(
   const start = Date.now();
   while (Date.now() - start < effectiveTimeout) {
     if (options?.isAlive && !options.isAlive()) {
-      throw new Error(`Server process exited while waiting for ${url}`);
+      throw new Error(
+        `Server process exited while waiting for ${url}\n${options.diagnostics?.() ?? ''}`,
+      );
     }
     try {
       const remainingMs = effectiveTimeout - (Date.now() - start);
@@ -174,8 +181,21 @@ export async function waitForServer(
     await new Promise((resolve) => setTimeout(resolve, 200));
   }
   throw new Error(
-    `Timed out waiting for server at ${url} (waited ${effectiveTimeout}ms, scale=${CI_TIMEOUT_SCALE})`,
+    `Timed out waiting for server at ${url} (waited ${effectiveTimeout}ms, scale=${CI_TIMEOUT_SCALE})\n${options?.diagnostics?.() ?? ''}`,
   );
+}
+
+/** Drain both pipes during startup and retain bounded diagnostics for failures. */
+export function collectServerOutput(child: ReturnType<typeof spawn>): () => string {
+  let stdout = '';
+  let stderr = '';
+  child.stdout?.on('data', (chunk) => {
+    stdout = (stdout + String(chunk)).slice(-16000);
+  });
+  child.stderr?.on('data', (chunk) => {
+    stderr = (stderr + String(chunk)).slice(-16000);
+  });
+  return () => `Server stdout:\n${stdout}\nServer stderr:\n${stderr}`;
 }
 
 export async function killChild(child: ReturnType<typeof spawn>): Promise<void> {
@@ -198,7 +218,17 @@ export async function killChild(child: ReturnType<typeof spawn>): Promise<void> 
     } else {
       child.kill('SIGTERM');
     }
-    await Promise.race([once(child, 'exit'), new Promise((resolve) => setTimeout(resolve, 5_000))]);
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        once(child, 'exit'),
+        new Promise((resolve) => {
+          deadline = setTimeout(resolve, 5_000);
+        }),
+      ]);
+    } finally {
+      clearTimeout(deadline);
+    }
     if (child.exitCode === null && child.signalCode === null) {
       if (process.platform !== 'win32' && child.pid) {
         killTree(child.pid, 'SIGKILL');

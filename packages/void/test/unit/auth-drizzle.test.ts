@@ -61,6 +61,39 @@ describe('Better Auth Drizzle codegen', () => {
     expect(code).toContain('"dialect": "mysql"');
   });
 
+  it('uses unbounded MySQL text for OAuth tokens while preserving constrained strings', () => {
+    const code = generateVoidAuthDrizzleSchema({
+      dialect: 'mysql',
+      providers: ['google'],
+      userConfig: ({ defaults }) => ({
+        ...defaults,
+        account: {
+          fields: { idToken: 'google_id_token' },
+          additionalFields: {
+            pluginLookup: { type: 'string', index: true },
+          },
+        },
+      }),
+    });
+
+    expect(code).toContain('import { boolean, index, mysqlTable, text, timestamp, varchar }');
+    expect(code).toContain('"accessToken": text("accessToken")');
+    expect(code).toContain('"refreshToken": text("refreshToken")');
+    expect(code).toContain('"google_id_token": text("google_id_token")');
+    expect(code).toContain('"email": varchar("email", { length: 255 }).notNull().unique()');
+    expect(code).toContain('"pluginLookup": varchar("pluginLookup", { length: 255 }).notNull()');
+    expect(code).toContain('index("account_pluginLookup_idx").on(table["pluginLookup"])');
+    expect(code).toContain('"google_id_token": {');
+    expect(code).toContain('"unbounded": true');
+  });
+
+  it('does not add MySQL storage metadata to PostgreSQL or SQLite schemas', () => {
+    for (const dialect of ['postgresql', 'sqlite'] as const) {
+      const code = generateVoidAuthDrizzleSchema({ dialect, providers: ['google'] });
+      expect(code).not.toContain('"unbounded"');
+    }
+  });
+
   it('lazily creates an auth database adapter that reuses void/db', () => {
     const code = generateVoidAuthDatabaseModule({
       dialect: 'postgresql',

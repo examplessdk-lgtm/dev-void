@@ -111,10 +111,9 @@ describe('maybeScaffoldEnvTs', () => {
     expect(result.skipReason).toBe('no-dotenv-files');
   });
 
-  it('merges keys across .env and .env.example, first non-empty value wins', () => {
+  it('collects keys from the single .env file', () => {
     const root = tmpProject();
-    writeFileSync(join(root, '.env.example'), 'PORT=\nSTRIPE_KEY=\n');
-    writeFileSync(join(root, '.env'), 'PORT=3000\nDEBUG=true\n');
+    writeFileSync(join(root, '.env'), 'PORT=3000\nDEBUG=true\nSTRIPE_KEY=\n');
 
     const entries = collectInferredEntries(root);
     expect(entries.map((e) => e.key)).toEqual(['DEBUG', 'PORT', 'STRIPE_KEY']);

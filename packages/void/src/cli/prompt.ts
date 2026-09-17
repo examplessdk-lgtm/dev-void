@@ -49,7 +49,7 @@ export async function promptProjectSelection(
       : [{ value: '__create__', label: 'Create new project' }]),
     ...projects.map((p) => ({
       value: p.id,
-      label: `${p.slug} (${p.slug}.${getSiteDomain(root)})`,
+      label: `${p.slug} (${p.url ?? `${p.slug}.${getSiteDomain(root)}`})`,
     })),
   ];
 
@@ -72,7 +72,7 @@ export async function promptProjectSelection(
     const confirmed = await confirm({
       message:
         `Linking to an existing project. Running \`void deploy\` will overwrite the current deployment of ` +
-        `${project.slug}.${getSiteDomain(root)}. Continue?`,
+        `${project.url ?? `${project.slug}.${getSiteDomain(root)}`}. Continue?`,
     });
     if (isCancel(confirmed) || !confirmed) {
       cancel('Project link cancelled.');

@@ -79,7 +79,13 @@ Any request that resolves to a routing entry and is not suspended records:
 - duration
 - slug/hostname
 
-Analytics Engine is the source for usage reporting. Dispatch also publishes lightweight usage events to `USAGE_QUEUE` when the routing entry includes a `userId`.
+Analytics Engine is the source for usage reporting. Dispatch also publishes
+lightweight usage events to `USAGE_QUEUE` when the routing entry includes a
+`userId`. Queue messages use a platform-only signing key read from `ROUTING`;
+if the API health bootstrap has not created that key, dispatch reports a metering
+error instead of emitting an unsigned compatibility frame. The API consumer
+resolves account ownership and the canonical project slug from Postgres before
+applying a valid event.
 
 ### Explaining a dispatch-generated 503
 
@@ -97,10 +103,17 @@ Because the failure is swallowed, the row must never be one Analytics Engine wou
 - **Versioned static assets**: `s-maxage=31536000, max-age=0, must-revalidate`
 - **ISR HTML/JSON**: edge cache backed by `ISR_CACHE` KV
 
+The deploy-versioned static cache accepts only uncredentialed GET requests. In
+SSR deployments, a dotted URL is cached there only when the deployment's asset
+manifest contains that exact path. Unknown legacy assets render through the
+worker without entering this shared cache. Hashed assets use their earlier
+content-addressed cache path.
+
 Not cached:
 
 - `/api/*`
 - non-GET requests
+- requests with `Cookie`, `Authorization`, `Range`, Pages protocol, or EventSource semantics
 - private/no-store/no-cache responses
 - SSR pages without ISR
 
@@ -114,5 +127,5 @@ Not cached:
 - `test/unit/fallback-rules.test.ts` — post-asset fallback rewrite rules (static deployments)
 - `test/unit/headers.test.ts` — header rule application
 - `test/unit/hostname.test.ts` — slug extraction
-- `test/unit/metering.test.ts` — Analytics Engine payload shape
+- `test/unit/metering.test.ts` — Analytics Engine payload shape and signed usage envelopes
 - `test/unit/platform-log.test.ts` — `void_logs` row shape, and lockstep with `packages/tail`'s script-name split

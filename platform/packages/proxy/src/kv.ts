@@ -19,7 +19,9 @@ kv.post('/get', async (context) => {
   }
 
   // Try WfP dispatch first
-  const dispatchRes = await dispatchToWorker(context.env, projectId, '/kv/get', body);
+  const dispatchRes = await dispatchToWorker(context.env, projectId, '/kv/get', body, {
+    fallbackOnDispatchError: true,
+  });
   if (dispatchRes) {
     return dispatchRes;
   }
@@ -180,7 +182,9 @@ kv.post('/list', async (context) => {
   }
 
   // Try WfP dispatch first
-  const dispatchRes = await dispatchToWorker(context.env, projectId, '/kv/list', body);
+  const dispatchRes = await dispatchToWorker(context.env, projectId, '/kv/list', body, {
+    fallbackOnDispatchError: true,
+  });
   if (dispatchRes) {
     return dispatchRes;
   }

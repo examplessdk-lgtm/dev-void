@@ -23,7 +23,9 @@ r2.post('/get', async (context) => {
   }
 
   // Try WfP dispatch first
-  const dispatchRes = await dispatchToWorker(context.env, projectId, '/r2/get', body);
+  const dispatchRes = await dispatchToWorker(context.env, projectId, '/r2/get', body, {
+    fallbackOnDispatchError: true,
+  });
   if (dispatchRes) {
     return dispatchRes;
   }
@@ -71,7 +73,7 @@ r2.post('/get', async (context) => {
   return new Response(cfRes.body, { headers });
 });
 
-r2.post('/put', async (context) => {
+r2.on('POST', ['/put', '/put-conditional'], async (context) => {
   const body = context.get('body');
   const projectId = context.get('projectId');
   const binding = asString(body.binding);
@@ -83,9 +85,25 @@ r2.post('/put', async (context) => {
   }
 
   // Try WfP dispatch first
-  const dispatchRes = await dispatchToWorker(context.env, projectId, '/r2/put', body);
+  const conditional = body.onlyIf !== undefined || context.req.path.endsWith('/put-conditional');
+  const dispatchRes = await dispatchToWorker(
+    context.env,
+    projectId,
+    conditional ? '/r2/put-conditional' : '/r2/put',
+    body,
+  );
   if (dispatchRes) {
     return dispatchRes;
+  }
+
+  if (conditional) {
+    return context.json(
+      {
+        error:
+          'R2 conditional writes require an active deployment with the current Void remote-binding handler. Update your Void platform and redeploy the project.',
+      },
+      501,
+    );
   }
 
   // Fallback: CF REST API
@@ -192,7 +210,9 @@ r2.post('/list', async (context) => {
   }
 
   // Try WfP dispatch first
-  const dispatchRes = await dispatchToWorker(context.env, projectId, '/r2/list', body);
+  const dispatchRes = await dispatchToWorker(context.env, projectId, '/r2/list', body, {
+    fallbackOnDispatchError: true,
+  });
   if (dispatchRes) {
     return dispatchRes;
   }
@@ -265,7 +285,9 @@ r2.post('/head', async (context) => {
   }
 
   // Try WfP dispatch first
-  const dispatchRes = await dispatchToWorker(context.env, projectId, '/r2/head', body);
+  const dispatchRes = await dispatchToWorker(context.env, projectId, '/r2/head', body, {
+    fallbackOnDispatchError: true,
+  });
   if (dispatchRes) {
     return dispatchRes;
   }

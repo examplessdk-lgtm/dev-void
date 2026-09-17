@@ -1,6 +1,15 @@
-import { describe, expect, it } from 'vite-plus/test';
+import { describe, expect, it, vi } from 'vite-plus/test';
 import { defineDurableState } from '../../src/runtime/durable.ts';
-import { withRuntimeEnv } from '../../src/runtime/env.ts';
+import { getRuntimeRequestResource, withRuntimeEnv } from '../../src/runtime/env.ts';
+
+vi.mock('cloudflare:workers', () => ({
+  DurableObject: class {
+    constructor(
+      readonly ctx: DurableObjectState,
+      readonly env: Record<string, unknown>,
+    ) {}
+  },
+}));
 
 function createObjectState(initial?: unknown): {
   state: DurableObjectState;
@@ -155,6 +164,26 @@ describe('defineDurableState', () => {
       alarmCount: 1,
     });
     expect(fixture.alarms).toHaveLength(1);
+  });
+
+  it('uses one request resource per durable object invocation', async () => {
+    const resourceKey = {};
+    let nextResource = 0;
+    const State = defineDurableState({
+      initialState: {},
+      methods: {
+        readResource() {
+          const first = getRuntimeRequestResource(resourceKey, () => ++nextResource);
+          const second = getRuntimeRequestResource(resourceKey, () => ++nextResource);
+          return [first, second];
+        },
+      },
+    });
+    const fixture = createObjectState();
+    const object = new State.class(fixture.state, {});
+
+    expect(await object.readResource()).toEqual([1, 1]);
+    expect(await object.readResource()).toEqual([2, 2]);
   });
 
   it('resolves its convention-bound namespace for typed stub lookup', async () => {

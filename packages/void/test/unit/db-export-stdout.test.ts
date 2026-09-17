@@ -36,7 +36,7 @@ vi.mock('../../src/migrations/runner', () => {
 
 const EXPECTED_SQL =
   'CREATE TABLE notes (id INTEGER PRIMARY KEY, title TEXT NOT NULL);\n' +
-  'INSERT INTO "notes" (id, title) VALUES (1, \'hi\');\n';
+  'INSERT INTO "notes" ("id", "title") VALUES (1, \'hi\');\n';
 
 describe('void db export → stdout', () => {
   const roots: Array<string> = [];

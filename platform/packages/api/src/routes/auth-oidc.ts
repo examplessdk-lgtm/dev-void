@@ -122,7 +122,13 @@ app.post('/github-oidc', async (context) => {
     claims.repository_owner_id,
   );
   if (connections.length === 0) {
-    return context.json({ error: 'no github actions connection for repository' }, 401);
+    return context.json(
+      {
+        error:
+          'no authorized github actions connection for repository; reconnect the organization repository',
+      },
+      401,
+    );
   }
 
   // A repo may back multiple github_actions projects. When the workflow declares

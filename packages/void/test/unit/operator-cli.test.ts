@@ -91,6 +91,13 @@ describe('operator argument and help coverage', () => {
     expect(parsePlatformArgs(['--timeout', '600', 'user', 'delete', 'id'])).toMatchObject({
       timeoutMs: 600_000,
     });
+    expect(
+      parsePlatformArgs(['system', 'sandbox-drain', '--plan', '--cursor', '{"phase":"resources"}']),
+    ).toMatchObject({
+      method: 'POST',
+      plan: true,
+      body: { cursor: '{"phase":"resources"}' },
+    });
   });
   it.each([
     ['user', 'list', '--limit', '101'],

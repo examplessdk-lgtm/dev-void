@@ -1,12 +1,10 @@
 import { useNavigation, useShared } from '@void/react';
-import { AppHeader, FooterNav, ThemeContextProvider } from '@voidcloud/ui';
-import monoIcon from '@voidcloud/ui/assets/icons/void-icon.svg';
-import logoDark from '@voidcloud/ui/assets/logos/void-dark.svg';
-import logoLight from '@voidcloud/ui/assets/logos/void-light.svg';
-import footerBg from '@voidcloud/ui/assets/vite/footer-background.jpg';
 import { useEffect, type ReactNode } from 'react';
 import preventDragging from '../lib/preventDragging.ts';
 import type { DashboardShared } from '../middleware/01.auth.ts';
+import logoDark from '../ui/assets/logos/void-dark.svg';
+import logoLight from '../ui/assets/logos/void-light.svg';
+import { AppHeader, FooterNav, ThemeContextProvider } from '../ui/index.ts';
 import '../app.css';
 
 const footerConfig = {
@@ -59,11 +57,9 @@ export default function Layout({ children }: { children: ReactNode }) {
       {isLoading && <div className="nav-progress loading" />}
       <ThemeContextProvider
         value={{
-          footerBg,
           logoAlt: 'Void',
           logoDark,
           logoLight,
-          monoIcon,
         }}
       >
         <div className="marketing-layout flex min-h-screen flex-col bg-white text-primary dark:bg-primary dark:text-white">

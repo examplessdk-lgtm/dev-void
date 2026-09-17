@@ -1,3 +1,4 @@
+import { SHARED_CACHE_POLICY_VERSION } from '@void/isr/core';
 import { desc, eq, sql } from 'drizzle-orm';
 import {
   describe,
@@ -404,6 +405,76 @@ describe('POST /projects/:id/deploy', () => {
       limits: { cpuMs: 10, subRequests: 50 },
     });
   });
+
+  it.each([
+    { notFoundHandling: 'single-page-application', framework: undefined, type: 'void' },
+    { notFoundHandling: '404-page', framework: undefined, type: 'void' },
+    { notFoundHandling: 'single-page-application', framework: 'nuxt', type: 'framework' },
+  ])(
+    'rolls back a retained $type Worker with $notFoundHandling assets without storing R2 bundles',
+    async ({ notFoundHandling, framework, type }) => {
+      const user = await createTestUser(env.db, 'retained-worker', 'github', undefined, 'solo');
+      const project = await createTestProject(env.db, user.id, 'retained-worker');
+      const cf = mockCfApi();
+      const put = vi.spyOn(env.STATIC_ASSETS_R2, 'put');
+
+      // Omitted type and workerMain are accepted on the wire. Persist the
+      // Worker identity so asset fallback settings cannot make rollback static.
+      const first = await app.fetch(
+        await buildDeployRequest(env, project.id, user.jwt, {
+          manifest: {
+            version: 3,
+            bindings: {},
+            ...(framework ? { framework } : {}),
+            assetConfig: { not_found_handling: notFoundHandling },
+          },
+        }),
+        env,
+      );
+      expect(first.status).toBe(200);
+      const original = requireEvent<DoneEvent>(await readAllEvents(first), 'done');
+      const row = await getDeployment(env.db, original.deployment);
+      expect(row?.bundle_stored).toBe(false);
+      expect(JSON.parse(row!.manifest!)).toMatchObject({ type });
+
+      const second = await app.fetch(
+        await buildDeployRequest(env, project.id, user.jwt, {
+          workers: { 'index.js': "export default { fetch() { return new Response('v2'); } }" },
+        }),
+        env,
+      );
+      expect(second.status).toBe(200);
+      const latest = requireEvent<DoneEvent>(await readAllEvents(second), 'done');
+      expect(latest.deployment).not.toBe(original.deployment);
+      const workerName = `user-${project.slug}-${original.deployment}`;
+      expect(cf.state.hostScripts.has(workerName)).toBe(true);
+      const workerUploads = () =>
+        cf.state.recordedCalls.filter(
+          (call) => call.method === 'PUT' && call.url.includes('/scripts/'),
+        ).length;
+      const uploadsBeforeRollback = workerUploads();
+
+      const rollback = await app.fetch(
+        new Request(`http://localhost/projects/${project.id}/rollback`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${user.jwt}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ deploymentId: original.deployment }),
+        }),
+        env,
+      );
+      expect(rollback.status).toBe(200);
+      expect(await env.ROUTING.get(project.slug, 'json')).toMatchObject({ workerName, type });
+      expect((await getProject(env.db, project.id))?.type).toBe(type);
+      expect(workerUploads()).toBe(uploadsBeforeRollback);
+      expect(put.mock.calls.some(([key]) => key.startsWith('worker-bundles/'))).toBe(false);
+      expect(
+        (await env.STATIC_ASSETS_R2.list({ prefix: `worker-bundles/${project.id}/` })).objects,
+      ).toEqual([]);
+    },
+  );
 
   it('stores ssr flag in KV routing when manifest enables ssr', async () => {
     const user = await createTestUser(env.db);
@@ -4253,7 +4324,7 @@ describe('Deploy with prerendering', () => {
     expect(privateValue).toBeNull();
   });
 
-  it('skips prerender paths whose render opts out (x-revalidate:0 / Cache-Control:private)', async () => {
+  it('skips prerender paths whose render opts out of shared caching', async () => {
     // Parity with dispatch's live-miss/background write gate: a render that opts
     // out at request time — `x-revalidate: 0` or `Cache-Control: private/no-store/
     // no-cache` — must NOT be warmed, even though its path carries a positive
@@ -4278,6 +4349,12 @@ describe('Deploy with prerendering', () => {
           headers: { 'content-type': 'text/html', 'cache-control': 'private' },
         });
       }
+      if (pathname === '/optout-cookie') {
+        return new Response('<html>session</html>', {
+          status: 200,
+          headers: { 'content-type': 'text/html', 'set-cookie': 'sid=secret; Path=/' },
+        });
+      }
       return new Response('<html>warm</html>', {
         status: 200,
         headers: { 'content-type': 'text/html' },
@@ -4294,7 +4371,7 @@ describe('Deploy with prerendering', () => {
           version: 3,
           bindings: {},
           revalidate: 3600, // positive TTL for every path — the render decides opt-out
-          prerender: ['/warm', '/optout-header', '/optout-cc'],
+          prerender: ['/warm', '/optout-header', '/optout-cc', '/optout-cookie'],
         },
       }),
       env,
@@ -4303,7 +4380,7 @@ describe('Deploy with prerendering', () => {
     await res.text();
 
     // All three cleared the manifest-TTL gate, so all three were fetched.
-    expect(dispatchFetch).toHaveBeenCalledTimes(3);
+    expect(dispatchFetch).toHaveBeenCalledTimes(4);
 
     const [deployment] = await env.db
       .select({ id: deployments.id })
@@ -4313,8 +4390,11 @@ describe('Deploy with prerendering', () => {
     const base = `${project.id}/isr/v3/${deployment!.id}/${project.slug}.void.app`;
 
     // The normal 200 render is warmed.
-    const { value: warmValue } = await env.ISR_CACHE.getWithMetadata(`${base}/warm`, 'arrayBuffer');
+    const { value: warmValue, metadata: warmMetadata } = await env.ISR_CACHE.getWithMetadata<{
+      p: number;
+    }>(`${base}/warm`, 'arrayBuffer');
     expect(warmValue).not.toBeNull();
+    expect(warmMetadata?.p).toBe(SHARED_CACHE_POLICY_VERSION);
 
     // Neither opt-out render is warmed.
     const { value: headerOptOut } = await env.ISR_CACHE.getWithMetadata(
@@ -4327,6 +4407,11 @@ describe('Deploy with prerendering', () => {
       'arrayBuffer',
     );
     expect(ccOptOut).toBeNull();
+    const { value: cookieOptOut } = await env.ISR_CACHE.getWithMetadata(
+      `${base}/optout-cookie`,
+      'arrayBuffer',
+    );
+    expect(cookieOptOut).toBeNull();
   });
 
   it('resolves an inherit-eligible page against pathRevalidate per-path (object config)', async () => {

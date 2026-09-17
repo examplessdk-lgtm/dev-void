@@ -680,7 +680,7 @@ describe('compileRouteTable with pages', () => {
     expect(code.match(/app\.notFound\(async \(c\) => \{/g)?.length).toBe(1);
   });
 
-  it('omits fallback rules on default target prod (pages notFound stays pure)', () => {
+  it('emits fallback rules on native Cloudflare prod', () => {
     const scan = makeScan({
       pages: [
         {
@@ -718,7 +718,54 @@ describe('compileRouteTable with pages', () => {
         ...testOptions,
         nodeTarget: false,
         dev: false,
+        managedDispatch: false,
         fallbackRules,
+      },
+      pagesOptions,
+    );
+
+    expect(code).toContain('const __fallbackRules =');
+    expect(code).toContain('if (assetRes.status !== 404) return assetRes;');
+  });
+
+  it('omits fallback rules from managed Cloudflare prod', () => {
+    const scan = makeScan({
+      pages: [
+        {
+          pattern: '/',
+          params: [],
+          catchAll: false,
+          componentPath: 'index.vue',
+          serverPath: null,
+          methods: [],
+          componentId: 'index',
+        },
+      ],
+      layouts: [],
+      namedLayouts: [],
+    });
+
+    const code = compileRouteTable(
+      scan,
+      '/routes',
+      '/middleware',
+      '/crons',
+      '/queues',
+      null,
+      {
+        ...testOptions,
+        nodeTarget: false,
+        dev: false,
+        managedDispatch: true,
+        fallbackRules: [
+          {
+            source: '/docs/*',
+            destination: '/docs.html',
+            status: 200,
+            force: false,
+            origin: 'void.json#routing.fallbacks',
+          },
+        ],
       },
       pagesOptions,
     );

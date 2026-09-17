@@ -95,19 +95,30 @@ export function getSiteDomain(root: string = process.cwd()): string {
 
 /**
  * Read the deploy token.
- * Priority: VOID_TOKEN env var > system keychain > ~/.void/config.json (auto-migrated)
+ * Priority: origin-bound VOID_TOKEN > system keychain > migrated config.
+ * An unscoped environment token retains its historical Void Cloud destination.
  */
 export function getToken(root: string = process.cwd()): string | null {
   const envToken = process.env.VOID_TOKEN;
-  if (envToken) {
-    return envToken;
-  }
-
   let apiUrl: string;
   try {
     apiUrl = getApiUrl(root);
-  } catch {
+  } catch (error) {
+    if (envToken) {
+      throw error;
+    }
     return null;
+  }
+  if (envToken) {
+    const tokenOrigin = process.env.VOID_API_URL
+      ? normalizePlatformApiUrl(process.env.VOID_API_URL)
+      : DEFAULT_API_URL;
+    if (apiUrl !== tokenOrigin) {
+      throw new Error(
+        `auth: VOID_TOKEN is not bound to ${apiUrl}. Set VOID_API_URL to this platform's URL with its matching token, or unset VOID_TOKEN to use the saved login.`,
+      );
+    }
+    return envToken;
   }
   const account = platformCredentialAccount(apiUrl);
 
@@ -418,8 +429,8 @@ export function openBrowser(
   // argument so shell metacharacters in it can't be interpreted as commands.
   const ignore = (): void => {};
   if (process.platform === 'win32') {
-    // `start` is a cmd builtin; the empty "" is the (ignored) window title.
-    execFile('cmd.exe', ['/c', 'start', '', url], ignore);
+    // Avoid cmd.exe interpreting URL query separators such as & as shell commands.
+    execFile('rundll32.exe', ['url.dll,FileProtocolHandler', url], ignore);
     return;
   }
   if (process.platform === 'darwin') {
@@ -427,11 +438,11 @@ export function openBrowser(
     return;
   }
   // Linux — including WSL2 where `xdg-open` typically has no usable handler.
-  // Try `wslview` (wslu), then fall back to Windows `start` via cmd.exe.
+  // Try `wslview` (wslu), then fall back to the Windows URL handler.
   if (process.env.WSL_DISTRO_NAME || process.env.WSL_INTEROP) {
     execFile('wslview', [url], (error) => {
       if (error) {
-        execFile('cmd.exe', ['/c', 'start', '', url], ignore);
+        execFile('rundll32.exe', ['url.dll,FileProtocolHandler', url], ignore);
       }
     });
     return;

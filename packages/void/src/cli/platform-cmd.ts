@@ -107,7 +107,11 @@ function showConnection(connection: PlatformConnection, activeId: string | null)
   console.log(`${marker} ${pc.bold(connection.displayName)}  ${pc.dim(connection.id)}`);
   console.log(`  ${connection.apiUrl}`);
   if (connection.applicationDomain) {
-    console.log(`  apps: *.${connection.applicationDomain}`);
+    console.log(
+      connection.applicationDomain.endsWith('.workers.dev')
+        ? '  apps: workers.dev (testing)'
+        : `  apps: *.${connection.applicationDomain}`,
+    );
   }
 }
 
@@ -154,7 +158,12 @@ export async function runPlatformCommand(_root: string, args: PlatformArgs): Pro
     log.success(`${discovery.displayName} is reachable.`);
     console.log(`API: ${discovery.apiUrl}`);
     console.log(`Proxy: ${discovery.proxyUrl}`);
-    console.log(`Applications: *.${discovery.applicationDomain}`);
+    if (discovery.applicationRouting?.workersDev && !discovery.applicationRouting.zoneName) {
+      console.log('Application domain: workers.dev (testing)');
+      console.log('Add a domain: void platform domain set <domain>');
+    } else {
+      console.log(`Applications: *.${discovery.applicationDomain}`);
+    }
     console.log(`Version: ${discovery.platformVersion}`);
     console.log(
       `Capabilities: ${Object.entries(discovery.capabilities)

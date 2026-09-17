@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 import type { Env } from '../../src/env.ts';
 import app from '../../src/index.ts';
+import { SHARED_CACHE_POLICY_VERSION } from '../../src/isr.ts';
 import type { AssetConfig } from '../../src/static.ts';
 
 // Mock caches.default (same pattern as index.test.ts).
@@ -397,12 +398,21 @@ function createWorkerEnv(opts: {
 }): {
   env: Env;
   workerFetch: ReturnType<typeof vi.fn>;
-  kvStore: Map<string, { value: ArrayBuffer; metadata: { s: number; c: number; t: number } }>;
+  kvStore: Map<
+    string,
+    {
+      value: ArrayBuffer;
+      metadata: { s: number; c: number; t: number; p: typeof SHARED_CACHE_POLICY_VERSION };
+    }
+  >;
 } {
   const workerFetch = vi.fn(async (req: Request) => opts.workerHandler(req));
   const kvStore = new Map<
     string,
-    { value: ArrayBuffer; metadata: { s: number; c: number; t: number } }
+    {
+      value: ArrayBuffer;
+      metadata: { s: number; c: number; t: number; p: typeof SHARED_CACHE_POLICY_VERSION };
+    }
   >();
   const env = {
     ROUTING: {
@@ -422,9 +432,24 @@ function createWorkerEnv(opts: {
       put: async (
         key: string,
         value: ArrayBuffer,
-        opts?: { metadata?: { s: number; c: number; t: number } },
+        opts?: {
+          metadata?: {
+            s: number;
+            c: number;
+            t: number;
+            p: typeof SHARED_CACHE_POLICY_VERSION;
+          };
+        },
       ) => {
-        kvStore.set(key, { value, metadata: opts?.metadata ?? { s: 200, c: Date.now(), t: 60 } });
+        kvStore.set(key, {
+          value,
+          metadata: opts?.metadata ?? {
+            s: 200,
+            c: Date.now(),
+            t: 60,
+            p: SHARED_CACHE_POLICY_VERSION,
+          },
+        });
       },
       list: async (opts: { prefix: string; limit?: number }) => {
         const keys = [...kvStore.keys()]

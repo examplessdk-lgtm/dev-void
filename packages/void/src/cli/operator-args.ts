@@ -243,6 +243,14 @@ export const operatorCommands: Array<OperatorCommand> = [
     method: 'POST',
   },
   {
+    group: 'system',
+    action: 'sandbox-drain',
+    description: 'Drain and verify managed Sandbox container applications',
+    path: '/system/sandbox-drain',
+    values: { cursor: 'Opaque cursor returned by --plan' },
+    method: 'POST',
+  },
+  {
     group: 'worker',
     action: 'list',
     description: 'List hosted platform workers',

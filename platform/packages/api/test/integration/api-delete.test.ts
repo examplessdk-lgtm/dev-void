@@ -65,6 +65,13 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
+  // The orphan sweep waits two seconds for real Cloudflare writes to settle.
+  // This fixture's provider is synchronous and in-memory: keep both sweeps,
+  // but schedule that delay immediately instead of paying it in every case.
+  const schedule = globalThis.setTimeout;
+  vi.spyOn(globalThis, 'setTimeout').mockImplementation((callback, delay, ...args) =>
+    schedule(callback, delay === 2000 ? 0 : delay, ...args),
+  );
   await clearTables(env.db);
 });
 

@@ -1,4 +1,5 @@
 import type { ProxyClient } from './client.ts';
+import { serializeR2Conditional } from './r2-conditions.ts';
 
 /**
  * R2Bucket implementation backed by the remote proxy.
@@ -65,7 +66,7 @@ export class ProxyR2Bucket {
     } else if (value instanceof ArrayBuffer) {
       base64 = arrayBufferToBase64(value);
     } else if (ArrayBuffer.isView(value)) {
-      base64 = arrayBufferToBase64(value.buffer as ArrayBuffer);
+      base64 = arrayBufferToBase64(value.buffer as ArrayBuffer, value.byteOffset, value.byteLength);
     } else if (value instanceof Blob) {
       base64 = arrayBufferToBase64(await value.arrayBuffer());
     } else {
@@ -93,7 +94,7 @@ export class ProxyR2Bucket {
       binding: this.binding,
       key,
     };
-    if (base64) {
+    if (base64 !== undefined) {
       body.base64 = base64;
     } else {
       body.value = textValue;
@@ -110,7 +111,27 @@ export class ProxyR2Bucket {
       body.customMetadata = options.customMetadata;
     }
 
-    await this.client.fetch('/r2/put', body);
+    const conditional = options?.onlyIf !== undefined;
+    if (conditional) {
+      body.onlyIf = serializeR2Conditional(options.onlyIf!);
+    }
+    // A separate endpoint prevents older proxies/workers from silently ignoring onlyIf.
+    const res = await this.client.fetch(conditional ? '/r2/put-conditional' : '/r2/put', body);
+    const result = (await res.json()) as
+      | Parameters<typeof makeR2Object>[0]
+      | null
+      | { success: true };
+    if (result === null) {
+      return null;
+    }
+    if ('key' in result) {
+      return makeR2Object(result);
+    }
+    if (conditional) {
+      throw new Error(
+        'remote: R2 conditional put requires a compatible Void platform and deployment.',
+      );
+    }
 
     // Return a minimal R2Object
     return makeR2Object({
@@ -171,8 +192,12 @@ export class ProxyR2Bucket {
   }
 }
 
-function arrayBufferToBase64(buffer: ArrayBuffer): string {
-  const bytes = new Uint8Array(buffer);
+function arrayBufferToBase64(
+  buffer: ArrayBuffer,
+  byteOffset = 0,
+  byteLength = buffer.byteLength,
+): string {
+  const bytes = new Uint8Array(buffer, byteOffset, byteLength);
   let binary = '';
   for (const byte of bytes) {
     binary += String.fromCharCode(byte);
@@ -186,17 +211,20 @@ function makeR2Object(data: {
   etag: string;
   lastModified: string;
   contentType: string;
+  version?: string;
+  httpMetadata?: R2HTTPMetadata;
+  customMetadata?: Record<string, string>;
 }): R2Object {
   return {
     key: data.key,
-    version: '',
+    version: data.version ?? '',
     size: data.size,
     etag: data.etag,
     httpEtag: data.etag ? `"${data.etag}"` : '',
     checksums: { toJSON: () => ({}) } as R2Checksums,
     uploaded: new Date(data.lastModified || Date.now()),
-    httpMetadata: { contentType: data.contentType },
-    customMetadata: {},
+    httpMetadata: data.httpMetadata ?? { contentType: data.contentType },
+    customMetadata: data.customMetadata ?? {},
     storageClass: 'Standard',
     range: undefined,
     writeHttpMetadata(_headers: Headers) {

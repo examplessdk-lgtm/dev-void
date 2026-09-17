@@ -9,7 +9,20 @@ import {
   afterEach,
   vi,
 } from 'vite-plus/test';
-import { markDeploymentRetained } from '../../src/db.ts';
+
+vi.mock('../../src/capabilities.ts', async (importOriginal) => {
+  const original = await importOriginal<typeof import('../../src/capabilities.ts')>();
+  return {
+    ...original,
+    getPlatformCapabilities(env: { PLATFORM_CAPABILITIES?: string }) {
+      // Keep exercising the dormant provisioning, rollback, and cleanup
+      // implementation. Production hard-disable behavior has a separate
+      // integration test that imports the unmocked capability resolver.
+      return { ...original.getPlatformCapabilities(env), sandbox: true };
+    },
+  };
+});
+
 import app from '../../src/index.ts';
 import { deployments, projects, resources } from '../../src/schema.ts';
 import {
@@ -38,12 +51,9 @@ import {
 // dispatch namespace are rejected by CF (the mock guards this); the
 // regression test asserts the rejection still fires.
 //
-// Worker bytes are stored in R2 at
-// `worker-bundles/{projectId}/{deploymentId}/{path}` so future rollbacks
-// can re-PUT them. `deployments.bundle_stored=true` after R2 puts succeed.
-// Retention deletes the per-deploy container app + R2 bundle objects when
-// evicting; project teardown deletes ALL retained deployments' container
-// apps via the orphan-recovery enumeration in `cleanup.ts`.
+// Retention deletes the per-deploy container app and any historical R2 bundle
+// objects when evicting. Project teardown deletes all retained deployments'
+// container apps via the orphan-recovery enumeration in cleanup.ts.
 // ---------------------------------------------------------------------------
 
 let env: TestEnv;
@@ -266,33 +276,6 @@ describe('per-deploy sandbox integration', () => {
   });
 
   // ----------------------------------------------------------------------
-  // 3. R2 bundle write
-  // ----------------------------------------------------------------------
-  it('successful sandbox deploy persists worker bundle to R2 and flips bundle_stored=true', async () => {
-    const user = await createTestUser(env.db);
-    const project = await createTestProject(env.db, user.id, 'sb-bundle');
-    mockCfApi();
-
-    const workerSource = "export default { fetch() { return new Response('hi'); } }";
-    const res = await deploy(project.id, user.jwt, buildSandboxManifest(), {
-      'index.js': workerSource,
-    });
-    expect(res.status).toBe(200);
-    const done = getDoneEvent(await readAllEvents(res));
-    expect(done).toBeDefined();
-    const deployId = done!.deployment;
-
-    // R2 has at least one object under `worker-bundles/{projectId}/{deploymentId}/`.
-    const bundleKeys = await listR2Keys(`worker-bundles/${project.id}/${deployId}/`);
-    expect(bundleKeys.length).toBeGreaterThan(0);
-    expect(bundleKeys).toContain(`worker-bundles/${project.id}/${deployId}/index.js`);
-
-    // bundle_stored flipped to true.
-    const [row] = await env.db.select().from(deployments).where(eq(deployments.id, deployId));
-    expect(row!.bundle_stored).toBe(true);
-  });
-
-  // ----------------------------------------------------------------------
   // 4. Static-only deploy doesn't write bundle
   // ----------------------------------------------------------------------
   it('static-only deploy does NOT write a worker bundle (bundle_stored stays false, no R2 objects)', async () => {
@@ -374,6 +357,13 @@ describe('per-deploy sandbox integration', () => {
     const v1Id = done1!.deployment;
     const v1WorkerName = `user-${project.slug}-${v1Id}`;
     const v1ContainerName = `${project.id}-${v1Id}-void-sandbox`.toLowerCase().replaceAll('_', '-');
+
+    // Model a retained deployment created before Worker bundle storage stopped.
+    await env.STATIC_ASSETS_R2.put(
+      `worker-bundles/${project.id}/${v1Id}/index.js`,
+      'legacy Worker bundle',
+    );
+    await env.db.update(deployments).set({ bundle_stored: true }).where(eq(deployments.id, v1Id));
 
     // Sanity: v1 state is in place.
     expect(cf.state.hostScripts.has(v1WorkerName)).toBe(true);
@@ -772,11 +762,11 @@ describe('per-deploy sandbox integration', () => {
 
   // ----------------------------------------------------------------------
   // deploy-pipeline integration — sandbox-using user worker uploads
-  // include the platform queue + identity bindings, and the routing-switch
+  // exclude platform queue + account identity bindings, and the routing-switch
   // step writes the per-project `{userId, plan}` entry the proxy's sandbox
   // gate reads (packages/proxy/src/sandbox.ts).
   // ----------------------------------------------------------------------
-  it('sandbox deploy injects USAGE_EVENTS_QUEUE + __VOID_USER_ID/__VOID_PROJECT_SLUG and a single __VOID_PROXY', async () => {
+  it('sandbox deploy keeps the usage queue and account identity out of the tenant while injecting one __VOID_PROXY', async () => {
     const user = await createTestUser(env.db, 'sb-p6-user', 'github', undefined, 'pro');
     const project = await createTestProject(env.db, user.id, 'sb-p6');
     const cf = mockCfApi();
@@ -791,35 +781,32 @@ describe('per-deploy sandbox integration', () => {
     expect(userWorker).toBeDefined();
     const bindings = userWorker!.bindings;
 
-    // Queue producer for the framework's container-runtime metering path.
+    // Metering is produced by the trusted API lease counter. Tenant Workers
+    // never receive producer authority, including sandbox-enabled apps.
     const queueBindings = bindings.filter(
       (b) => b.type === 'queue' && b.name === 'USAGE_EVENTS_QUEUE',
     );
-    expect(queueBindings).toHaveLength(1);
-    expect(queueBindings[0].queue_name).toBe('void-usage-events');
+    expect(queueBindings).toHaveLength(0);
 
     // `__VOID_PROXY` is injected once by `provisionBindings` (AI / revalidation
     // / sandbox gate all share the same service binding).
     const proxyBindings = bindings.filter((b) => b.type === 'service' && b.name === '__VOID_PROXY');
     expect(proxyBindings).toHaveLength(1);
 
-    // Identity plain-text bindings the framework's sandbox runtime reads
-    // before publishing to USAGE_EVENTS_QUEUE. Project id is sourced from
-    // the shared `__PROJECT_ID` slot injected by `provisionBindings`.
+    // Account identity stays in platform-owned routing state.
     const userIdBinding = bindings.find((b) => b.name === '__VOID_USER_ID');
-    expect(userIdBinding).toBeDefined();
-    expect(userIdBinding!.type).toBe('plain_text');
-    expect((userIdBinding as { text?: string }).text).toBe(user.id);
+    expect(userIdBinding).toBeUndefined();
 
     const projectIdBinding = bindings.find((b) => b.name === '__PROJECT_ID');
     expect(projectIdBinding).toBeDefined();
     expect(projectIdBinding!.type).toBe('plain_text');
     expect((projectIdBinding as { text?: string }).text).toBe(project.id);
 
-    const slugBinding = bindings.find((b) => b.name === '__VOID_PROJECT_SLUG');
-    expect(slugBinding).toBeDefined();
-    expect(slugBinding!.type).toBe('plain_text');
-    expect((slugBinding as { text?: string }).text).toBe(project.slug);
+    // Email uses the slug identity on every application Worker.
+    const slugBindings = bindings.filter((b) => b.name === '__VOID_PROJECT_SLUG');
+    expect(slugBindings).toEqual([
+      { type: 'plain_text', name: '__VOID_PROJECT_SLUG', text: project.slug },
+    ]);
   });
 
   it('sandbox deploy writes `project:{projectId}` routing entry with { userId, plan } shape', async () => {

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vite-plus/test';
 import type { VoidAuthMigrationSchema } from '../../src/auth/drizzle.ts';
 import { resolveVoidAuthMigrationSchema } from '../../src/auth/drizzle.ts';
 import {
+  applyMySqlAuthMigrations,
   applyPgAuthMigrations,
   applySqliteAuthMigrations,
 } from '../../src/runtime/auth-migrations.ts';
@@ -138,5 +139,99 @@ describe('auth migration runner', () => {
     expect(reads).toContain("PRAGMA index_list('user')");
     expect(reads).not.toContain('PRAGMA table_info("user")');
     expect(reads).not.toContain('PRAGMA index_list("user")');
+  });
+
+  it('creates MySQL OAuth token columns as unbounded text', async () => {
+    const statements: Array<string> = [];
+    const schema = resolveVoidAuthMigrationSchema({
+      dialect: 'mysql',
+      providers: ['google'],
+      userConfig: ({ defaults }) => ({
+        ...defaults,
+        account: { fields: { idToken: 'google_id_token' } },
+      }),
+    });
+
+    await applyMySqlAuthMigrations(
+      {
+        async all<T extends Record<string, unknown>>(sql: string) {
+          if (sql.includes('SELECT DATABASE()')) {
+            return [{ database_name: 'app' }] as unknown as Array<T>;
+          }
+          return [] as Array<T>;
+        },
+        async run(sql: string) {
+          statements.push(sql);
+        },
+      },
+      schema,
+    );
+
+    const account = statements.find(
+      (sql) => sql.startsWith('CREATE TABLE') && sql.includes('`account`'),
+    );
+    const user = statements.find((sql) => sql.startsWith('CREATE TABLE') && sql.includes('`user`'));
+    expect(account).toContain('`accessToken` text');
+    expect(account).toContain('`refreshToken` text');
+    expect(account).toContain('`google_id_token` text');
+    expect(account).toContain('`userId` varchar(255)');
+    expect(user).toContain('`email` varchar(255) NOT NULL');
+  });
+
+  it('widens existing renamed MySQL OAuth token columns without changing indexed strings', async () => {
+    const statements: Array<string> = [];
+    const resolved = resolveVoidAuthMigrationSchema({
+      dialect: 'mysql',
+      providers: ['google'],
+      userConfig: ({ defaults }) => ({
+        ...defaults,
+        account: { fields: { idToken: 'google_id_token' } },
+      }),
+    });
+    const account = resolved.tables.find((table) => table.name === 'account')!;
+    const schema: VoidAuthMigrationSchema = { ...resolved, tables: [account] };
+    const columnTypes = new Map([
+      ['id', 'varchar'],
+      ...Object.keys(account.fields).map((fieldName) => [fieldName, 'varchar'] as const),
+    ]);
+
+    const runner = {
+      async all<T extends Record<string, unknown>>(sql: string) {
+        if (sql.includes('SELECT DATABASE()')) {
+          return [{ database_name: 'app' }] as unknown as Array<T>;
+        }
+        if (sql.includes('information_schema.tables')) {
+          return [{ table_name: 'account' }] as unknown as Array<T>;
+        }
+        if (sql.includes('information_schema.columns')) {
+          return [...columnTypes].map(([column_name, data_type]) => ({
+            column_name,
+            data_type,
+            character_maximum_length: data_type === 'varchar' ? 255 : 65_535,
+          })) as unknown as Array<T>;
+        }
+        if (sql.includes('information_schema.statistics')) {
+          return [{ index_name: 'account_userId_idx' }] as unknown as Array<T>;
+        }
+        return [] as Array<T>;
+      },
+      async run(sql: string) {
+        statements.push(sql);
+        const changedColumn = sql.match(/MODIFY COLUMN `([^`]+)` text$/)?.[1];
+        if (changedColumn) {
+          columnTypes.set(changedColumn, 'text');
+        }
+      },
+    };
+
+    await applyMySqlAuthMigrations(runner, schema);
+    await applyMySqlAuthMigrations(runner, schema);
+
+    expect(statements).toEqual([
+      'ALTER TABLE `account` MODIFY COLUMN `accessToken` text',
+      'ALTER TABLE `account` MODIFY COLUMN `refreshToken` text',
+      'ALTER TABLE `account` MODIFY COLUMN `google_id_token` text',
+    ]);
+    expect(statements.some((sql) => sql.includes('`userId`'))).toBe(false);
   });
 });

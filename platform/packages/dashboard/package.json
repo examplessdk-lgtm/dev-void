@@ -12,8 +12,9 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@base-ui/react": "1.8.0",
+    "@iconify/react": "^6.0.2",
     "@nkzw/stack": "2.3.2",
-    "@voidcloud/ui": "workspace:*",
     "hono": "catalog:platform",
     "react": "^19.3.0",
     "react-dom": "^19.3.0"

@@ -11,8 +11,17 @@ export const platformSubcommands: Array<SubcommandDef> = [
   { name: 'use', arg: '[id]', description: 'Select the default Void platform' },
   { name: 'status', arg: '[id]', description: 'Inspect a platform and its health' },
   { name: 'discover', description: 'Recover installations from a Cloudflare account' },
-  { name: 'install', description: 'Install a Void platform in Cloudflare' },
+  {
+    name: 'domain',
+    hint: 'Set an application domain',
+    description: 'Add a domain to a workers.dev test platform',
+  },
+  {
+    name: 'install',
+    description: 'Install a Void platform with a domain or workers.dev for testing',
+  },
   { name: 'upgrade', arg: '[id]', description: 'Upgrade an installed Void platform' },
+  { name: 'rollback', arg: '[id]', description: 'Restore a compatible earlier platform runtime' },
   { name: 'repair', arg: '[id]', description: 'Reconcile an installed Void platform' },
   { name: 'disable', arg: '[id]', description: 'Disable traffic without deleting data' },
   { name: 'enable', arg: '[id]', description: 'Restore traffic for a disabled platform' },
@@ -26,6 +35,15 @@ export type PlatformArgs =
   | { subcommand: 'status'; selector: string }
   | { subcommand: 'discover'; account: string; selector: string }
   | {
+      subcommand: 'domain';
+      domain: string;
+      selector: string;
+      zone: string;
+      dedicatedZone: boolean;
+      plan: boolean;
+      yes: boolean;
+    }
+  | {
       subcommand: 'install';
       account: string;
       applicationDomain: string;
@@ -38,12 +56,21 @@ export type PlatformArgs =
       runtime: string;
       yes: boolean;
       zone: string;
+      workersDev?: boolean;
     }
   | {
       subcommand: 'upgrade' | 'repair' | 'disable' | 'enable';
       selector: string;
       plan: boolean;
       runtime: string;
+      yes: boolean;
+    }
+  | {
+      subcommand: 'rollback';
+      selector: string;
+      plan: boolean;
+      runtime: string;
+      fromRuntime: string;
       yes: boolean;
     }
   | {
@@ -92,10 +119,11 @@ function parseSelector(
 
 function parseLifecycleSelector(
   rest: Array<string>,
-  subcommand: 'upgrade' | 'repair' | 'disable' | 'enable',
-): { selector: string; plan: boolean; runtime: string; yes: boolean } {
+  subcommand: 'upgrade' | 'rollback' | 'repair' | 'disable' | 'enable',
+): { selector: string; plan: boolean; runtime: string; fromRuntime: string; yes: boolean } {
   const positional: Array<string> = [];
   let runtime = '';
+  let fromRuntime = '';
   for (let index = 0; index < rest.length; index++) {
     const arg = rest[index]!;
     if (arg === '--runtime') {
@@ -105,12 +133,19 @@ function parseLifecycleSelector(
       const [value, next] = readValue(rest, index, arg);
       runtime = value;
       index = next;
+    } else if (arg === '--from-runtime' && subcommand === 'rollback') {
+      const [value, next] = readValue(rest, index, arg);
+      fromRuntime = value;
+      index = next;
     } else {
       positional.push(arg);
     }
   }
   const parsed = parseSelector(positional, subcommand, { allowYes: true });
-  return { ...parsed, runtime };
+  if (subcommand === 'rollback' && !runtime) {
+    throw new Error('platform: rollback requires --runtime <earlier-runtime-directory>.');
+  }
+  return { ...parsed, runtime, fromRuntime };
 }
 
 export function parsePlatformArgs(args: Array<string>): PlatformArgs {
@@ -121,6 +156,60 @@ export function parsePlatformArgs(args: Array<string>): PlatformArgs {
     return parseOperatorArgs(args);
   }
   const [subcommand, ...rest] = args;
+
+  if (subcommand === 'domain') {
+    if (rest.length === 0) {
+      return {
+        subcommand,
+        domain: '',
+        selector: '',
+        zone: '',
+        dedicatedZone: false,
+        plan: false,
+        yes: false,
+      };
+    }
+    if (rest[0] !== 'set') {
+      throw new Error(
+        'platform: Usage: void platform domain set <domain> [--installation <id>] [--zone <domain>] [--dedicated-zone] [--plan] [--yes].',
+      );
+    }
+    let domain = '';
+    let selector = '';
+    let zone = '';
+    let plan = false;
+    let yes = false;
+    let dedicatedZone = false;
+    for (let index = 1; index < rest.length; index++) {
+      const arg = rest[index]!;
+      if (arg === '--installation' || arg === '--zone') {
+        const [value, next] = readValue(rest, index, arg);
+        index = next;
+        if (arg === '--zone') {
+          zone = value;
+        } else {
+          selector = value;
+        }
+      } else if (arg === '--plan') {
+        plan = true;
+      } else if (arg === '--yes') {
+        yes = true;
+      } else if (arg === '--dedicated-zone') {
+        dedicatedZone = true;
+      } else if (!arg.startsWith('-') && !domain) {
+        domain = arg;
+      } else {
+        throw new Error(`platform: Unexpected argument '${arg}'.`);
+      }
+    }
+    if (!domain) {
+      throw new Error('platform: domain set requires an application domain.');
+    }
+    if (plan && yes) {
+      throw new Error('platform: Use either --plan or --yes.');
+    }
+    return { subcommand, domain, selector, zone, dedicatedZone, plan, yes };
+  }
 
   if (subcommand === 'list') {
     if (rest.length > 0) {
@@ -162,12 +251,15 @@ export function parsePlatformArgs(args: Array<string>): PlatformArgs {
   }
   if (
     subcommand === 'upgrade' ||
+    subcommand === 'rollback' ||
     subcommand === 'repair' ||
     subcommand === 'disable' ||
     subcommand === 'enable'
   ) {
-    const { selector, plan, runtime, yes } = parseLifecycleSelector(rest, subcommand);
-    return { subcommand, selector, plan, runtime, yes };
+    const { selector, plan, runtime, fromRuntime, yes } = parseLifecycleSelector(rest, subcommand);
+    return subcommand === 'rollback'
+      ? { subcommand, selector, plan, runtime, fromRuntime, yes }
+      : { subcommand, selector, plan, runtime, yes };
   }
   if (subcommand === 'uninstall') {
     const parsed = parseSelector(
@@ -206,6 +298,7 @@ export function parsePlatformArgs(args: Array<string>): PlatformArgs {
       '--runtime',
       '--zone',
     ]);
+    let workersDev = false;
     for (let i = 0; i < rest.length; i++) {
       const arg = rest[i]!;
       if (valueFlags.has(arg)) {
@@ -220,12 +313,23 @@ export function parsePlatformArgs(args: Array<string>): PlatformArgs {
         dedicatedZone = true;
       } else if (arg === '--yes') {
         yes = true;
+      } else if (arg === '--workers-dev') {
+        workersDev = true;
       } else {
         throw new Error(`platform: Unexpected argument '${arg}'.`);
       }
     }
+    if (
+      workersDev &&
+      (values.has('--application-domain') || values.has('--zone') || dedicatedZone)
+    ) {
+      throw new Error(
+        'platform: --workers-dev cannot be combined with a domain, zone, or --dedicated-zone.',
+      );
+    }
     return {
       subcommand,
+      ...(workersDev ? { workersDev: true } : {}),
       account: values.get('--account') ?? '',
       applicationDomain: values.get('--application-domain') ?? '',
       controlPlaneDomain: values.get('--control-plane-domain') ?? '',
@@ -241,6 +345,6 @@ export function parsePlatformArgs(args: Array<string>): PlatformArgs {
   }
 
   throw new Error(
-    'platform: Usage: void platform <auth|user|project|deployment|build|signup|invitation|system|worker|list|use|status|discover|install|upgrade|repair|disable|enable|uninstall>.',
+    'platform: Usage: void platform <auth|user|project|deployment|build|signup|invitation|system|worker|list|use|status|discover|install|domain|upgrade|rollback|repair|disable|enable|uninstall>.',
   );
 }

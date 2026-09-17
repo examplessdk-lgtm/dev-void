@@ -6,7 +6,7 @@ outline: deep
 
 The framework, CLI, and platform live in one repository. You can change the platform, test it locally, and deploy a runtime built from your fork into your own Cloudflare account.
 
-If you want to run the released platform without changing its implementation, start with [Self-host a Void Platform](./self-hosted-platform.md). Use [Platform Administration](./platform-administration.md) for managing an installed platform.
+If you want to run the released platform without changing its implementation, start with [Install a Void Platform](./self-hosted-platform.md). Use [Platform Administration](./platform-administration.md) for managing an installed platform.
 
 ## Setting Up the Repository
 
@@ -16,25 +16,26 @@ Clone your fork and install the workspace dependencies with Vite+:
 git clone https://github.com/your-org/void.git
 cd void
 vp install
-vp run build:core
+vpr install:void-dev
+void-dev --help
 ```
 
 Use the Node.js version recorded in `.node-version`. The workspace uses public npm packages; a GitHub Packages token is not required.
 
-`build:core` builds the CLI, shared packages, and the platform runtime. Public packages export their built files, so run it before starting a source app or testing changes that use package exports. All commands in this guide run from the repository root.
+`install:void-dev` builds the CLI, shared packages, and platform runtime, then makes this checkout's built CLI globally available as `void-dev`. Public packages export their built files, so run `vp run build:core` after later source changes to refresh the alias. The installer refuses to replace an unrelated global command. Remove only this checkout's alias with `vpr uninstall:void-dev`. All commands in this guide run from the repository root.
 
 ## Finding the Implementation
 
-| Directory                                             | Purpose                                                              |
-| ----------------------------------------------------- | -------------------------------------------------------------------- |
-| `packages/void`                                       | Framework, application runtime, and CLI                              |
-| `packages/platform`                                   | Installer contracts, packaged Workers, and platform migrations       |
-| `packages/deploy-core`, `packages/deploy-cloudflare`  | Shared deployment contracts and Cloudflare upload code               |
-| `platform/packages/api`                               | Users, projects, deployments, provisioning, and administrator API/UI |
-| `platform/packages/dispatch`                          | Application routing and static assets                                |
-| `platform/packages/proxy`                             | AI, remote bindings, and revalidation                                |
-| `platform/packages/tail`                              | Runtime log ingestion                                                |
-| `platform/packages/dashboard`, `platform/packages/ui` | Dashboard source and shared UI                                       |
+| Directory                                            | Purpose                                                              |
+| ---------------------------------------------------- | -------------------------------------------------------------------- |
+| `packages/void`                                      | Framework, application runtime, and CLI                              |
+| `packages/platform`                                  | Installer contracts, packaged Workers, and platform migrations       |
+| `packages/deploy-core`, `packages/deploy-cloudflare` | Shared deployment contracts and Cloudflare upload code               |
+| `platform/packages/api`                              | Users, projects, deployments, provisioning, and administrator API/UI |
+| `platform/packages/dispatch`                         | Application routing and static assets                                |
+| `platform/packages/proxy`                            | AI, remote bindings, and revalidation                                |
+| `platform/packages/tail`                             | Runtime log ingestion                                                |
+| `platform/packages/dashboard`                        | Dashboard source and local UI components in `ui/`                    |
 
 The `@voidcloud/*` names identify workspace implementation packages. Their `private: true` flags prevent publishing those packages to npm. Deployable core Workers are bundled into the public `@void/platform` package.
 
@@ -111,34 +112,66 @@ To exercise a deployed application, deploy a disposable copy of `playground/kitc
 
 ## Deploying Your Runtime
 
-Build the runtime with a source revision that identifies the code you are deploying:
+Build the runtime. From a Git checkout, the build automatically records the current commit in the runtime manifest. An uncommitted checkout is recorded with a `-dirty` suffix:
 
 ```sh
-export VOID_PLATFORM_SOURCE_REVISION="$(git rev-parse HEAD)"
 vp run build:core
 ```
+
+Build systems may set `VOID_PLATFORM_SOURCE_REVISION` when they need to override automatic detection with another immutable revision. A source archive without Git metadata builds normally but leaves the revision unrecorded.
 
 The runtime is written to `packages/platform/dist/runtime`. Use the built CLI to preview a new installation from those files:
 
 ```sh
-node packages/void/dist/cli/cli.mjs platform install \
+void-dev platform install \
   --name my-team \
-  --application-domain apps.example.com \
-  --zone example.com \
+  --application-domain example.app \
+  --zone example.app \
   --runtime packages/platform/dist/runtime \
   --plan
 ```
 
-After reviewing the plan, run it without `--plan` to install. The command asks for the remaining account, database, domain, and OAuth configuration described in the [installation guide](./self-hosted-platform.md#install).
+Before applying the plan, complete the [first-install walkthrough](./self-hosted-platform.md). Run the command without `--plan` to install. For testing before your domain is ready, replace `--application-domain` and `--zone` with `--workers-dev`; PostgreSQL and the runtime/GitHub/R2 credentials are still needed. Use `void-dev` in place of `void` and keep `--runtime packages/platform/dist/runtime` on install and resume commands. For an interrupted installation, keep that runtime build available until it completes.
+
+Later, run `void-dev platform domain set example.app`. Domain setup uses the existing installed runtime and needs no `--runtime`, rebuild, or app redeploy. It keeps the platform API URL and original workers.dev app URLs available.
 
 For an existing installation, preview an upgrade using its connection ID:
 
 ```sh
-node packages/void/dist/cli/cli.mjs platform upgrade <installation-id> \
+void-dev platform upgrade <installation-id> \
   --runtime packages/platform/dist/runtime --plan
 ```
 
 Then run it without `--plan` to apply the upgrade. Source-built runtimes go through the same artifact, database, ownership, and health checks as released runtimes. The CLI preserves a disabled installation's state and records the source revision in its installation checkpoint.
+
+## Deploying Source Builds from CI {#source-build-ci}
+
+Build `@void/platform` from your checkout and pass its runtime directory to `install`, `upgrade`, `repair`, `enable`, or `rollback` with `--runtime`. Custom runtimes get the same integrity, migration, health, and rollback checks as packaged releases.
+
+Void records the runtime's manifest digest, whether it was packaged or custom, and its source revision. A build from a Git checkout automatically records `HEAD`, or `<HEAD>-dirty` when the checkout has uncommitted files. Build systems can set `VOID_PLATFORM_SOURCE_REVISION` to override automatic detection.
+
+A fresh CI runner can discover the installation each time. Set `CLOUDFLARE_API_TOKEN` and `VOID_PLATFORM_DATABASE_URL` through its protected environment, then:
+
+::: details CI commands and recovery inputs
+
+```sh
+vp run build:core
+
+export VOID_PLATFORM_REGISTRY_DIR="$RUNNER_TEMP/void-platform-registry"
+export VOID_PLATFORM_RECOVERY_KEY="$(openssl rand -base64 32)"
+node packages/void/dist/cli/cli.mjs platform discover --account "$CLOUDFLARE_ACCOUNT_ID" \
+  --installation "$VOID_PLATFORM_INSTALLATION"
+node packages/void/dist/cli/cli.mjs platform upgrade "$VOID_PLATFORM_INSTALLATION" \
+  --runtime packages/platform/dist/runtime --plan
+node packages/void/dist/cli/cli.mjs platform upgrade "$VOID_PLATFORM_INSTALLATION" \
+  --runtime packages/platform/dist/runtime --yes
+```
+
+Omit the installation selector only if the account has one discoverable installation. Run one deployment per installation at a time, and let it finish before starting the next. Cancelling during migrations or Worker rollout can leave an installation waiting for recovery.
+
+Keep the management token, database URL, JWT signing secret, and complete project-encryption keyring in a protected CI environment. Upgrades inherit deployed Worker secrets. The original values are needed when recreating a missing Worker; configuration credentials are also needed when explicitly rotating them.
+
+:::
 
 ## Changing the Platform Schema
 
@@ -156,8 +189,32 @@ Review the generated SQL and migration journal before committing them. Released 
 
 The uncredentialed test workflows use GitHub-hosted runners in forks. They build and test the workspace without requiring Void Cloud accounts, tokens, or deployment access.
 
-If your fork has a released platform version, set the repository variable `VOID_PLATFORM_PRODUCTION_REF` to its branch, tag, or commit. Platform pull requests will then test that version against the proposed database schema using a disposable PostgreSQL service. A workflow that explicitly requests this compatibility check must provide a usable baseline.
+If your fork has a released platform version, set the repository variable
+`VOID_PLATFORM_PRODUCTION_REF` to its immutable 40-character commit SHA. Platform
+pull requests then create that version's database, seed representative user,
+project, and encrypted-secret records, and apply the proposed migrations. The
+check verifies existing data and runs the previous runtime against the upgraded
+schema. Mutable branch or tag names are rejected.
 
-The upstream repository also contains workflows for deploying Void Cloud and publishing the official npm packages. Forks should configure their own release workflow around the built CLI and `platform upgrade --runtime`; the [source-build CI example](./self-hosted-platform.md#continuously-deploy-a-source-build) shows the required inputs. Keep production credentials in protected environments restricted to the appropriate release refs.
+Without an explicit SHA, required compatibility checks use the latest successful
+GitHub deployment to `Prod` (or `VOID_PLATFORM_PRODUCTION_ENV`). They require
+read access to deployment history and stop if no completed deployment is found.
+Advancing the production branch does not change the selected baseline. Fork
+workflows that call platform CI must grant `deployments: read` alongside
+`contents: read`.
+
+The upstream repository also contains workflows for deploying Void Cloud and publishing the official npm packages. Forks should configure their own release workflow around the built CLI and `platform upgrade --runtime`; the [source-build CI example](#source-build-ci) shows the required inputs. Keep production credentials in protected environments restricted to the appropriate release refs.
+
+Public releases use matching versions for the CLI, scaffolder, adapters, and
+packaged platform. The publish workflow rejects mismatched versions and previously
+unpublished `void` versions that npm cannot reuse. Stable versions use `latest`;
+prereleases use their named channel, such as `beta` or `rc`. Numeric prereleases
+use `next`. The scaffolder installs its exact matching CLI version, so
+`create-void@beta` cannot silently select the stable CLI. Packaged platform
+runtimes record the release commit as their source revision.
+
+Publishing requires both SDK CI and platform CI, including the platform unit and
+API integration suites. Release tags also run the Windows SDK checks; a passing
+SDK-only build cannot publish a changed control plane.
 
 For implementation history, use the design archive at `platform/meta/design-docs/README.md`. Its proposals explain earlier decisions; the source and current guides define the supported behavior.

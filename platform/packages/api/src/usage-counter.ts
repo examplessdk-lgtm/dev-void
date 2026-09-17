@@ -5,6 +5,7 @@ import { queryProjectAiUsage } from './routes/usage.ts';
 import { sandboxBlockKey, setProjectsRoutingSuspension } from './routing.ts';
 import { REASON_REQUESTS_EXCEEDED, REASON_SANDBOX_RUNTIME_EXCEEDED } from './suspension.ts';
 import { getPlanLimits, isWithinLimit } from './tiers.ts';
+import { SANDBOX_USAGE_RETENTION_MS } from './usage-auth.ts';
 
 // --- Exported types ---
 
@@ -14,11 +15,27 @@ export type CounterState = {
   totalSandboxSeconds: number;
   plan: string;
   billingPeriodStart: string; // ISO date
+  billingPeriodInitialized?: boolean;
   requestsSuspended: boolean;
   aiSuspended: boolean;
   sandboxRuntimeSuspended: boolean;
   projectSlugs: Record<string, string>; // projectId → slug
 };
+
+const SANDBOX_WATERMARK_PREFIX = 'sandbox-usage:watermark:';
+const SANDBOX_PRUNE_CURSOR_KEY = 'sandbox-usage:prune-cursor';
+const SANDBOX_PRUNE_BATCH_SIZE = 64;
+
+async function sandboxWatermarkKey(leaseId: string, from: number): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    'SHA-256',
+    new TextEncoder().encode(JSON.stringify([leaseId, from])),
+  );
+  const hash = Array.from(new Uint8Array(digest), (byte) =>
+    byte.toString(16).padStart(2, '0'),
+  ).join('');
+  return `${SANDBOX_WATERMARK_PREFIX}${hash}`;
+}
 
 export type UsageEvent = Readonly<{
   projectId: string;
@@ -33,6 +50,9 @@ export type UsageEvent = Readonly<{
     | 'platform-static-asset-missing';
   sandboxRuntimeSeconds?: number;
   sandboxInstanceId?: string;
+  /** Cumulative server-owned lease generation; from stays fixed across heartbeats. */
+  sandboxMeteredFrom?: number;
+  sandboxMeteredThrough?: number;
 }>;
 
 // --- Pure functions (exported for unit testing) ---
@@ -67,6 +87,7 @@ function defaultState(): CounterState {
     totalSandboxSeconds: 0,
     plan: 'free',
     billingPeriodStart: new Date().toISOString(),
+    billingPeriodInitialized: false,
     requestsSuspended: false,
     aiSuspended: false,
     sandboxRuntimeSuspended: false,
@@ -74,27 +95,101 @@ function defaultState(): CounterState {
   };
 }
 
+async function settleWrites(writes: Array<Promise<unknown>>): Promise<void> {
+  // A rejected write must not release the operation queue while a sibling
+  // write can still land and undo the next operation's suspension decision.
+  const results = await Promise.allSettled(writes);
+  for (const result of results) {
+    if (result.status === 'rejected') {
+      throw result.reason;
+    }
+  }
+}
+
 // --- UsageCounter Durable Object ---
 
 export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
   private state: CounterState | null = null;
+  private operationTail: Promise<void> = Promise.resolve();
 
-  private async getState(): Promise<CounterState> {
-    if (this.state) {
-      return this.state;
-    }
-    const stored = await this.ctx.storage.get<CounterState>('state');
-    // Backfill defaults so DOs with pre-sandbox state load cleanly.
-    this.state = stored ? { ...defaultState(), ...stored } : defaultState();
-    return this.state;
+  private serialize<T>(operation: () => Promise<T>): Promise<T> {
+    // External suspension writes and AI queries open the DO input gate. Keep
+    // each request/alarm in order through its durable save, including retries.
+    const result = this.operationTail.then(operation);
+    this.operationTail = result.then(
+      () => {},
+      () => {},
+    );
+    return result;
   }
 
-  private async saveState(state: CounterState): Promise<void> {
+  private async getState(): Promise<CounterState> {
+    if (!this.state) {
+      const stored = await this.ctx.storage.get<CounterState>('state');
+      // Backfill defaults so DOs with pre-sandbox state load cleanly.
+      this.state = stored
+        ? {
+            ...defaultState(),
+            ...stored,
+            billingPeriodInitialized: stored.billingPeriodInitialized ?? true,
+          }
+        : defaultState();
+    }
+    // Every operation edits its own copy. Neither a failed external write nor
+    // a failed storage put may silently commit totals/latches to the cache.
+    return {
+      ...this.state,
+      projectSlugs: { ...this.state.projectSlugs },
+    };
+  }
+
+  private async saveState(
+    state: CounterState,
+    watermarks: ReadonlyMap<string, number> = new Map(),
+  ): Promise<boolean> {
+    const cutoff = Date.now() - SANDBOX_USAGE_RETENTION_MS;
+    const hasWatermarks = await this.ctx.storage.transaction(async (transaction) => {
+      // Receipts live in separate bounded-size records. Never evict a fresh
+      // generation to make room: its next cumulative frame would rebill it.
+      for (const [key, through] of watermarks) {
+        await transaction.put(key, through);
+      }
+
+      // Advance a durable cursor through at most one page per operation.
+      // Hash ordering is unrelated to age, so wrap after the last page and
+      // eventually revisit every receipt without ever scanning the full set.
+      const cursor = await transaction.get<string>(SANDBOX_PRUNE_CURSOR_KEY);
+      const page = await transaction.list<number>({
+        prefix: SANDBOX_WATERMARK_PREFIX,
+        ...(cursor ? { startAfter: cursor } : {}),
+        limit: SANDBOX_PRUNE_BATCH_SIZE,
+      });
+      const expired = Array.from(page, ([key, through]) => (through < cutoff ? key : null)).filter(
+        (key) => key !== null,
+      );
+      if (expired.length > 0) {
+        await transaction.delete(expired);
+      }
+      if (page.size === SANDBOX_PRUNE_BATCH_SIZE) {
+        await transaction.put(SANDBOX_PRUNE_CURSOR_KEY, Array.from(page.keys()).at(-1)!);
+      } else {
+        await transaction.delete(SANDBOX_PRUNE_CURSOR_KEY);
+      }
+
+      // Counters, receipts, and pruning progress commit together. Publishing
+      // the isolate cache afterwards also keeps a rejected commit retryable.
+      await transaction.put('state', state);
+      return page.size > expired.length || page.size === SANDBOX_PRUNE_BATCH_SIZE || !!cursor;
+    });
     this.state = state;
-    await this.ctx.storage.put('state', state);
+    return hasWatermarks;
   }
 
   async fetch(request: Request): Promise<Response> {
+    return this.serialize(() => this.handleFetch(request));
+  }
+
+  private async handleFetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
 
@@ -125,21 +220,58 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
       events: ReadonlyArray<UsageEvent>;
       plan?: string;
       userId: string;
+      billingPeriodStart?: string;
     };
     const state = await this.getState();
+    // A new counter can first see an interval after that interval has ended.
+    // Its construction time is not the account's billing-period boundary.
+    if (!state.billingPeriodInitialized && body.billingPeriodStart) {
+      if (!Number.isFinite(Date.parse(body.billingPeriodStart))) {
+        return Response.json({ error: 'invalid billing period' }, { status: 400 });
+      }
+      state.billingPeriodStart = body.billingPeriodStart;
+      state.billingPeriodInitialized = true;
+    }
 
     // Sum incoming requests
     const incomingRequests = body.events.reduce((sum, e) => sum + e.requests, 0);
     state.totalRequests += incomingRequests;
 
-    // Sum incoming sandbox runtime seconds. Treat missing as 0 so request-only
-    // events from non-sandbox workers don't perturb the counter.
-    // At-least-once delivery can re-add up to one heartbeat window (~5 min) on
-    // retry; acceptable for a soft cap.
-    const incomingSandboxSeconds = body.events.reduce(
-      (sum, e) => sum + (e.sandboxRuntimeSeconds ?? 0),
-      0,
-    );
+    // The API-owned producer sends cumulative intervals with a stable start
+    // per lease generation. A high watermark handles retries and out-of-order
+    // delivery, while a new generation excludes idle time between leases.
+    const periodStart = state.billingPeriodInitialized ? Date.parse(state.billingPeriodStart) : 0;
+    const watermarkCutoff = Date.now() - SANDBOX_USAGE_RETENTION_MS;
+    const watermarks = new Map<string, number>();
+    let incomingSandboxSeconds = 0;
+    for (const event of body.events) {
+      const leaseId = event.sandboxInstanceId;
+      const from = event.sandboxMeteredFrom;
+      const through = event.sandboxMeteredThrough;
+      if (
+        !leaseId ||
+        !Number.isSafeInteger(from) ||
+        !Number.isSafeInteger(through) ||
+        through! <= from! ||
+        through! < watermarkCutoff
+      ) {
+        continue;
+      }
+      const key = await sandboxWatermarkKey(leaseId, from!);
+      const previous = watermarks.get(key) ?? (await this.ctx.storage.get<number>(key)) ?? from!;
+      const billFrom = Math.max(
+        previous,
+        from!,
+        Number.isFinite(periodStart) ? periodStart : from!,
+        // Receipts older than retention may already be pruned. A cumulative
+        // frame must not revive their billed prefix after a long delivery gap.
+        watermarkCutoff,
+      );
+      if (through! > billFrom) {
+        incomingSandboxSeconds += (through! - billFrom) / 1000;
+      }
+      watermarks.set(key, Math.max(previous, through!));
+    }
     state.totalSandboxSeconds += incomingSandboxSeconds;
 
     // Update projectSlugs map
@@ -159,28 +291,19 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
       return db;
     };
 
-    // Evaluate request limit. Flip the latch only AFTER the KV/DB writes succeed:
-    // getState() caches and returns the same object on a queue retry, so flipping
-    // first then throwing on a write would make the retry skip this (now-true)
-    // branch and persist enforcement as done while the writes never ran. (Requests
-    // self-heal via the `/init` re-stamp, but ordering it the same as sandbox keeps
-    // the two paths consistent.)
+    // Commit each suspension latch only after every enforcement write succeeds.
     const exceedsLimit = evaluateRequestLimit(state, 0); // already added above
     if (exceedsLimit && !state.requestsSuspended) {
-      await Promise.all([
+      await settleWrites([
         this.suspendProjects(getDb(), state.projectSlugs, REASON_REQUESTS_EXCEEDED),
         suspendUser(getDb(), body.userId, REASON_REQUESTS_EXCEEDED),
       ]);
       state.requestsSuspended = true;
     }
 
-    // Evaluate sandbox runtime limit. Latch AFTER the writes for the same reason —
-    // and here it is load-bearing: there is NO `/init` re-stamp for sandbox-block,
-    // so a latch persisted true with a failed block write would leave an over-budget
-    // account serving sandbox traffic unblocked until the next limit re-evaluation.
     const exceedsSandbox = evaluateSandboxRuntimeLimit(state, 0); // already added above
     if (exceedsSandbox && !state.sandboxRuntimeSuspended) {
-      await Promise.all([
+      await settleWrites([
         this.env.ROUTING.put(sandboxBlockKey(body.userId), '1'),
         suspendUser(getDb(), body.userId, REASON_SANDBOX_RUNTIME_EXCEEDED),
       ]);
@@ -193,7 +316,7 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
       await this.ctx.storage.setAlarm(Date.now() + 15 * 60 * 1000);
     }
 
-    await this.saveState(state);
+    await this.saveState(state, watermarks);
 
     return Response.json({
       totalRequests: state.totalRequests,
@@ -229,13 +352,8 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
     const wasAiSuspended = state.aiSuspended;
     const wasSandboxRuntimeSuspended = state.sandboxRuntimeSuspended;
 
-    // Run all external (KV/DB) cleanup BEFORE mutating the cached state. getState()
-    // returns the same cached object on a retry, and the rollover guard above keys
-    // on billingPeriodStart, so mutating it (or any latch) before a throwing await
-    // would make the retried call short-circuit as `rolled: false` and strand the
-    // half-finished cleanup. Deferring every cached mutation until after the awaits
-    // succeed keeps the retry re-entering the rollover body until cleanup completes
-    // (the KV deletes / unsuspend are idempotent).
+    // Finish idempotent external cleanup before committing the new period.
+    // A failure leaves the cached and persisted period unchanged for retry.
     if (wasAiSuspended) {
       // The alarm's delete branch requires aiSuspended to still be true AND returns
       // early for unlimited-AI plans, so without this the proxy keeps 429ing AI
@@ -246,18 +364,19 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
     }
     if (wasSandboxRuntimeSuspended) {
       const db = createDb(this.env.HYPERDRIVE.connectionString);
-      await Promise.all([
+      await settleWrites([
         this.env.ROUTING.delete(sandboxBlockKey(body.userId)),
         unsuspendUserIfReason(db, body.userId, REASON_SANDBOX_RUNTIME_EXCEEDED),
       ]);
     }
 
-    // All external cleanup succeeded — now mutate the cached state and persist.
+    // All external cleanup succeeded — persist the operation's new state.
     state.totalRequests = 0;
     state.totalNeurons = 0;
     state.totalSandboxSeconds = 0;
     state.plan = body.plan;
     state.billingPeriodStart = body.billingPeriodStart;
+    state.billingPeriodInitialized = true;
     if (wasRequestsSuspended) {
       state.requestsSuspended = false;
     }
@@ -294,6 +413,7 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
     Object.assign(state.projectSlugs, body.projectSlugs);
     state.plan = body.plan;
     state.billingPeriodStart = body.billingPeriodStart;
+    state.billingPeriodInitialized = true;
 
     // Re-suspend any newly added project slugs if user is currently suspended
     if (state.requestsSuspended) {
@@ -327,12 +447,7 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
     state.requestsSuspended = false;
     state.sandboxRuntimeSuspended = false;
     if (state.aiSuspended) {
-      // Delete BEFORE flipping the cached `aiSuspended` latch. getState() caches
-      // and returns the same object on a retry; if a delete throws after the flip,
-      // saveState is never reached but the in-memory latch is already false, so the
-      // retried call skips this branch and persists `aiSuspended: false` with the
-      // remaining ai-block keys stranded. Deleting first keeps the latch true until
-      // every key is gone, so a retry re-enters and finishes the (idempotent) cleanup.
+      // Keep the durable latch set until every idempotent delete succeeds.
       for (const projectId of Object.keys(state.projectSlugs)) {
         await this.env.ROUTING.delete(`ai-block:${projectId}`);
       }
@@ -350,8 +465,7 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
    * branch) and lets the next `/record` re-evaluate against current usage. AI
    * self-heals via the alarm, so `aiSuspended` is intentionally left untouched.
    * This is a latch reset only — no counters change (unlike a billing rollover).
-   * Trivial set-and-save, so no `blockConcurrencyWhile` is needed (no non-storage
-   * await between read+save).
+   * Shares the operation queue so an in-flight record cannot restore the latch.
    */
   private async handleClearSuspension(): Promise<Response> {
     const state = await this.getState();
@@ -369,17 +483,20 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
   // --- AI alarm handler ---
 
   async alarm(): Promise<void> {
+    return this.serialize(() => this.handleAlarm());
+  }
+
+  private async handleAlarm(): Promise<void> {
     const state = await this.getState();
     const limits = getPlanLimits(state.plan);
 
-    // Skip if plan has unlimited AI
-    if (limits.aiNeuronsPerMonth === 0) {
-      return;
-    }
-
-    // Skip if no projects
     const projectIds = Object.keys(state.projectSlugs);
-    if (projectIds.length === 0) {
+    // Unlimited/no-project accounts still need bounded receipt cleanup. Keep
+    // waking only while the scan may have retained or not-yet-visited records.
+    if (limits.aiNeuronsPerMonth === 0 || projectIds.length === 0) {
+      if (await this.saveState(state)) {
+        await this.ctx.storage.setAlarm(Date.now() + 15 * 60 * 1000);
+      }
       return;
     }
 

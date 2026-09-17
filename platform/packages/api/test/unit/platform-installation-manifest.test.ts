@@ -78,6 +78,19 @@ describe('platform installation manifest', () => {
     ).toThrow('SHA-256');
   });
 
+  it('treats manifests before authenticated usage as protocol zero', () => {
+    const legacy = JSON.parse(JSON.stringify(installation())) as Record<string, unknown>;
+    delete legacy.usageProtocolVersion;
+    expect(parsePlatformInstallationManifest(legacy).usageProtocolVersion).toBe(0);
+    expect(
+      parsePlatformInstallationManifest({ ...installation(), usageProtocolVersion: 1 })
+        .usageProtocolVersion,
+    ).toBe(1);
+    expect(() =>
+      parsePlatformInstallationManifest({ ...installation(), usageProtocolVersion: 2 }),
+    ).toThrow('usageProtocolVersion must be 0 or 1');
+  });
+
   it('rejects invalid state transitions', () => {
     expect(() => transitionInstallation(installation(), 'installed', now)).toThrow(
       'draft -> installed',

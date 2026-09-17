@@ -193,6 +193,24 @@ describe('chunkMessages', () => {
 });
 
 describe('CronScheduler.alarm', () => {
+  it('enqueues one delivery for jobs sharing the same expression', async () => {
+    const ctx = makeStubCtx({
+      state: {
+        workerName: 'worker',
+        schedules: [
+          { name: 'first', cron: '* * * * *' },
+          { name: 'second', cron: '* * * * *' },
+        ],
+        proxyToken: 'token',
+      },
+    });
+    const sendBatch = vi.fn(async (_batch?: unknown) => {});
+    const scheduler = makeScheduler(ctx, { CRON_FIRES_QUEUE: { sendBatch } });
+    await scheduler.alarm();
+    expect(sendBatch).toHaveBeenCalledOnce();
+    expect(sendBatch.mock.calls[0][0]).toHaveLength(1);
+  });
+
   type StubCtx = ReturnType<typeof makeStubCtx>;
 
   function makeStubCtx(initial: Record<string, unknown> = {}) {
@@ -256,7 +274,7 @@ describe('CronScheduler.alarm', () => {
     // double-fire the successful chunk, so we accept the loss and proceed.
     const schedules = Array.from({ length: 200 }, (_, i) => ({
       name: `job${i}`,
-      cron: '* * * * *',
+      cron: `0,${i % 60} 0,${Math.floor(i / 60)} * * *`,
     }));
     const ctx = makeStubCtx({
       state: { workerName: 'user-foo', schedules, proxyToken: 'tok' },
@@ -272,7 +290,10 @@ describe('CronScheduler.alarm', () => {
     const env = { CRON_FIRES_QUEUE: { sendBatch } };
 
     const s = makeScheduler(ctx, env);
-    await expect(s.alarm()).resolves.toBeUndefined();
+    await expect(
+      s.alarm({ scheduledTime: Date.UTC(2026, 0, 1), isRetry: false, retryCount: 0 }),
+    ).resolves.toBeUndefined();
+    expect(sendBatch).toHaveBeenCalledTimes(2);
     // scheduleNextAlarm must run on partial success
     expect(ctx.storage.setAlarm).toHaveBeenCalledOnce();
   });

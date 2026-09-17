@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vite-plus/test';
-import { clearWorkerNameCache } from '../../src/dispatch.ts';
+import { createBindingHandler } from '../../../../../packages/void/src/runtime/remote/binding-handler.ts';
 import worker from '../../src/index.ts';
 
 const JWT_SECRET = 'test-secret-key';
@@ -38,7 +38,7 @@ function createMockApi(workerNames: Record<string, string> = {}) {
         const projectId = match[1];
         const workerName = workerNames[projectId];
         if (workerName) {
-          return Response.json({ workerName });
+          return Response.json({ workerName, deploymentId: 'dpl_active' });
         }
         return Response.json({ error: 'not found' }, { status: 404 });
       }
@@ -89,6 +89,67 @@ function asFetchMock(mock: unknown): typeof fetch {
   return mock as typeof fetch;
 }
 
+type InMemoryStatement = D1PreparedStatement & {
+  sql: string;
+  params: Array<unknown>;
+};
+
+function createAtomicD1() {
+  const rows = new Map<number, string>();
+  const prepare = vi.fn((sql: string) => {
+    const statement = {
+      sql,
+      params: [] as Array<unknown>,
+      bind(...params: Array<unknown>) {
+        statement.params = params;
+        return statement;
+      },
+    } as unknown as InMemoryStatement;
+    return statement;
+  });
+  const batch = vi.fn(async (statements: Array<D1PreparedStatement>) => {
+    const pending = new Map(rows);
+    const results: Array<Record<string, unknown>> = [];
+    for (const rawStatement of statements) {
+      const statement = rawStatement as InMemoryStatement;
+      if (!/^INSERT INTO users\b/i.test(statement.sql)) {
+        throw new Error(`unsupported test SQL: ${statement.sql}`);
+      }
+      const id = Number(statement.params[0]);
+      const name = String(statement.params[1]);
+      if (pending.has(id)) {
+        throw new Error('UNIQUE constraint failed: users.id');
+      }
+      pending.set(id, name);
+      results.push({ results: [], success: true, meta: { changes: 1 } });
+    }
+    rows.clear();
+    for (const [id, name] of pending) {
+      rows.set(id, name);
+    }
+    return results as Array<D1Result>;
+  });
+  return { db: { prepare, batch } as unknown as D1Database, rows, batch };
+}
+
+function attachNativeBindingHandler(
+  env: ReturnType<typeof createEnv>,
+  token: string,
+  db: D1Database,
+  afterResponse?: (response: Response) => void,
+): void {
+  const bindingHandler = createBindingHandler({ DB: db, __VOID_PROXY_TOKEN: token });
+  env.DISPATCH.get = vi.fn(() => ({
+    fetch: async (url: string, init: RequestInit) => {
+      const target = new URL(url);
+      target.pathname = target.pathname.replace(/^\/__void/, '');
+      const response = await bindingHandler.fetch(new Request(target, init));
+      afterResponse?.(response);
+      return response;
+    },
+  })) as unknown as typeof env.DISPATCH.get;
+}
+
 // --- Tests ---
 
 describe('WfP dispatch path', () => {
@@ -99,7 +160,6 @@ describe('WfP dispatch path', () => {
   });
 
   afterEach(() => {
-    clearWorkerNameCache();
     vi.restoreAllMocks();
   });
 
@@ -166,6 +226,96 @@ describe('WfP dispatch path', () => {
       }>;
       expect(data).toHaveLength(2);
     });
+
+    it('keeps a native batch atomic when the second statement violates a constraint', async () => {
+      const native = createAtomicD1();
+      const env = createEnv({ proj_1: 'user-my-app-dpl_active' });
+      attachNativeBindingHandler(env, token, native.db);
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      const restFetch = vi.spyOn(globalThis, 'fetch');
+
+      const res = await worker.fetch(
+        post('/d1/batch', {
+          binding: 'DB',
+          statements: [
+            { sql: 'INSERT INTO users (id, name) VALUES (?, ?)', params: [1, 'Alice'] },
+            { sql: 'INSERT INTO users (id, name) VALUES (?, ?)', params: [1, 'Bob'] },
+          ],
+          projectId: 'proj_1',
+          aiToken: token,
+        }),
+        env,
+      );
+
+      expect(res.status).toBe(500);
+      expect(native.batch).toHaveBeenCalledTimes(1);
+      expect(native.rows.size).toBe(0);
+      expect(restFetch).not.toHaveBeenCalled();
+    });
+
+    it('commits a successful native batch exactly once', async () => {
+      const native = createAtomicD1();
+      const env = createEnv({ proj_1: 'user-my-app-dpl_active' });
+      attachNativeBindingHandler(env, token, native.db);
+      const restFetch = vi.spyOn(globalThis, 'fetch');
+
+      const res = await worker.fetch(
+        post('/d1/batch', {
+          binding: 'DB',
+          statements: [
+            { sql: 'INSERT INTO users (id, name) VALUES (?, ?)', params: [1, 'Alice'] },
+            { sql: 'INSERT INTO users (id, name) VALUES (?, ?)', params: [2, 'Bob'] },
+          ],
+          projectId: 'proj_1',
+          aiToken: token,
+        }),
+        env,
+      );
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toHaveLength(2);
+      expect(native.batch).toHaveBeenCalledTimes(1);
+      expect([...native.rows]).toEqual([
+        [1, 'Alice'],
+        [2, 'Bob'],
+      ]);
+      expect(restFetch).not.toHaveBeenCalled();
+    });
+
+    it('does not replay a native batch when transport fails after the commit', async () => {
+      const native = createAtomicD1();
+      const env = createEnv({ proj_1: 'user-my-app-dpl_active' });
+      attachNativeBindingHandler(env, token, native.db, (response) => {
+        if (response.ok) {
+          throw new Error('response lost after native commit');
+        }
+      });
+      const restFetch = vi.spyOn(globalThis, 'fetch');
+
+      const res = await worker.fetch(
+        post('/d1/batch', {
+          binding: 'DB',
+          statements: [
+            { sql: 'INSERT INTO users (id, name) VALUES (?, ?)', params: [1, 'Alice'] },
+            { sql: 'INSERT INTO users (id, name) VALUES (?, ?)', params: [2, 'Bob'] },
+          ],
+          projectId: 'proj_1',
+          aiToken: token,
+        }),
+        env,
+      );
+
+      expect(res.status).toBe(502);
+      expect(await res.json()).toEqual({
+        error: 'worker dispatch failed; operation result is unknown',
+      });
+      expect(native.batch).toHaveBeenCalledTimes(1);
+      expect([...native.rows]).toEqual([
+        [1, 'Alice'],
+        [2, 'Bob'],
+      ]);
+      expect(restFetch).not.toHaveBeenCalled();
+    });
   });
 
   describe('KV via dispatch', () => {
@@ -205,6 +355,58 @@ describe('WfP dispatch path', () => {
 
       expect(res.status).toBe(200);
       expect(await res.json()).toEqual({ success: true });
+    });
+
+    it('preserves the REST fallback for a read-only dispatch transport failure', async () => {
+      const env = createEnv({ proj_1: 'user-my-app' }, async () => {
+        throw new Error('dispatch transport unavailable');
+      });
+      env.API.fetch = vi.fn(async (url: string) => {
+        const path = new URL(url).pathname;
+        return path.includes('/internal/resolve-worker/')
+          ? Response.json({ workerName: 'user-my-app', deploymentId: 'dpl_active' })
+          : Response.json({ cf_id: 'kv-namespace' });
+      }) as unknown as typeof env.API.fetch;
+      const restFetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('from-rest'));
+
+      const res = await worker.fetch(
+        post('/kv/get', {
+          binding: 'CACHE',
+          key: 'greeting',
+          type: 'text',
+          projectId: 'proj_1',
+          aiToken: token,
+        }),
+        env,
+      );
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toBe('from-rest');
+      expect(restFetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not replay a write after a dispatch transport failure', async () => {
+      const env = createEnv({ proj_1: 'user-my-app' }, async () => {
+        throw new Error('response lost after KV write');
+      });
+      const restFetch = vi.spyOn(globalThis, 'fetch');
+
+      const res = await worker.fetch(
+        post('/kv/put', {
+          binding: 'CACHE',
+          key: 'greeting',
+          value: 'hello',
+          projectId: 'proj_1',
+          aiToken: token,
+        }),
+        env,
+      );
+
+      expect(res.status).toBe(502);
+      expect(await res.json()).toEqual({
+        error: 'worker dispatch failed; operation result is unknown',
+      });
+      expect(restFetch).not.toHaveBeenCalled();
     });
   });
 
@@ -315,7 +517,7 @@ describe('WfP dispatch path', () => {
       env.API.fetch = vi.fn(async (url: string, init?: RequestInit) => {
         const path = new URL(url).pathname;
         if (path.includes('/internal/resolve-worker/')) {
-          return Response.json({ workerName: 'user-my-app' });
+          return Response.json({ workerName: 'user-my-app', deploymentId: 'dpl_active' });
         }
         const body = JSON.parse(init?.body as string) as { type?: string; binding?: string };
         if (body.type === 'd1' && body.binding === 'DB') {
@@ -342,11 +544,19 @@ describe('WfP dispatch path', () => {
     });
   });
 
-  describe('worker name caching', () => {
-    it('caches worker name after first resolution', async () => {
-      const env = createEnv({ proj_1: 'user-my-app' }, async () =>
+  describe('active worker resolution', () => {
+    it('resolves every operation so rollback immediately selects the active deployment', async () => {
+      const workerNames = ['user-my-app-dpl_new', 'user-my-app-dpl_rollback'];
+      const env = createEnv({}, async () =>
         Response.json({ results: [], success: true, meta: {} }),
       );
+      env.API.fetch = vi.fn(async () => {
+        const workerName = workerNames.shift();
+        return Response.json({
+          workerName,
+          deploymentId: workerName?.split('-').at(-1),
+        });
+      }) as unknown as typeof env.API.fetch;
 
       // First call
       await worker.fetch(
@@ -360,7 +570,7 @@ describe('WfP dispatch path', () => {
         env,
       );
 
-      // Second call — should use cached worker name
+      // A rollback changes the active deployment between operations.
       await worker.fetch(
         post('/d1/query', {
           binding: 'DB',
@@ -372,11 +582,9 @@ describe('WfP dispatch path', () => {
         env,
       );
 
-      // API should only be called once for resolve-worker (cached after first call)
-      const resolveWorkerCalls = env.API.fetch.mock.calls.filter((call: Array<unknown>) =>
-        new URL(call[0]).pathname.includes('/internal/resolve-worker/'),
-      );
-      expect(resolveWorkerCalls).toHaveLength(1);
+      expect(env.API.fetch).toHaveBeenCalledTimes(2);
+      expect(env.DISPATCH.get).toHaveBeenNthCalledWith(1, 'user-my-app-dpl_new');
+      expect(env.DISPATCH.get).toHaveBeenNthCalledWith(2, 'user-my-app-dpl_rollback');
     });
   });
 

@@ -189,13 +189,13 @@ export default defineHandler((c) => {
 });
 ```
 
-The edge passes the original URL to the Worker, which keeps it as request metadata. Further middleware rewrites update that metadata without requiring you to parse headers.
+On managed Void deployments, the edge passes the original URL to the Worker as trusted request metadata. On direct Cloudflare deployments, the generated Worker records that metadata when it applies the rewrite itself. Further middleware rewrites update the same metadata without requiring you to parse headers.
 
 ## Fallbacks
 
 `routing.fallbacks` shares the same shape as `rewrites` but runs **only when no static asset or route matched** — i.e. the request would otherwise return a 404. This lets you add catch-all rewrites without preempting real routes.
 
-In Void apps, production dispatch only treats generated no-route 404s as fallback-eligible. A route handler or API endpoint that intentionally returns `404` is returned as-is, so catch-all fallbacks do not turn missing API resources into HTML. Third-party framework deployments do not expose Void's no-route marker, so their fallback rules still apply after the framework worker returns `404`.
+Void only treats generated no-route 404s as fallback-eligible, whether the check runs in managed dispatch or in a native Cloudflare Worker. A route handler or API endpoint that intentionally returns `404` is returned as-is, so catch-all fallbacks do not turn missing API resources into HTML. Third-party framework deployments do not expose Void's no-route marker, so their fallback rules still apply after the framework worker returns `404`.
 
 ```json
 {
@@ -298,11 +298,13 @@ To confirm precedence in practice, check the [`X-Void-Routing` dev header](#debu
 
 ## How rewrites work
 
-**Static rewrites** (`void.json` and `_redirects` file):
+**Static rewrites** (`void.json` and `_redirects` file) on managed Void deployments:
 
 1. `void deploy` reads rewrite rules from the `_redirects` file (status `200` entries) and `routing.rewrites` in `void.json`, then includes them in the deploy manifest alongside redirect rules.
 2. The platform stores the rules in the KV routing entry for your project.
 3. The dispatch worker evaluates all routing rules (redirects and rewrites) before any worker invocation. If a rewrite matches, the request pathname is updated internally and the request continues through the normal pipeline (static assets, ISR, worker). The original URL is passed as `X-Void-Original-URL`.
+
+On direct Cloudflare deployments of native Void apps, Vite compiles the same merged redirects, rewrites, headers, and fallbacks into the generated Worker. They run there without managed dispatch, and rewrite metadata remains internal to the Worker.
 
 **Middleware rewrites** (`c.rewrite()`):
 
@@ -310,7 +312,7 @@ To confirm precedence in practice, check the [`X-Void-Routing` dev header](#debu
 2. Your middleware calls `c.rewrite(newPath)`, which constructs a new request with the rewritten pathname and re-dispatches it through the Hono router.
 3. The re-dispatched request runs through all middleware and route handlers as if it were a fresh request to the new path.
 
-Static rewrites run at the edge before the application Worker. Middleware rewrites run inside the Worker and repeat routing, which lets them use request-specific logic.
+Static rewrites run before application routes: in dispatch for managed deployments and in generated middleware for direct Cloudflare deployments. Middleware rewrites repeat routing inside the Worker, which lets them use request-specific logic.
 
 ## Caveat: client navigation skips rewrites
 

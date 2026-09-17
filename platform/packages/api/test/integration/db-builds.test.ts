@@ -1,18 +1,13 @@
 import { eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vite-plus/test';
 import {
-  ACTIVE_BUILD_STATUSES,
-  cancelQueuedBuildsForProjectBranch,
-  claimBuildForStart,
   claimBuildForStartWithinLimit,
-  countUserActiveBuilds,
   createBuild,
-  createGitHubConnection,
+  createGitHubConnection as createGitHubConnectionRecord,
   createGithubActionsBuildWithinLimit,
   deleteGitHubConnection,
   deleteProjectCascade,
   failStaleActiveContainerBuilds,
-  findNonTerminalBuildForCommit,
   getBuild,
   getBuildByProjectRunIdAndAttempt,
   getDeploymentByProjectAndCommit,
@@ -20,6 +15,7 @@ import {
   getGitHubConnectionsByRepo,
   getGitHubInstallation,
   getGitHubInstallationsByUser,
+  getProject,
   getProjectBuilds,
   getProjectResources,
   getQueuedBuilds,
@@ -86,6 +82,21 @@ async function clearBuildTables(db: Db): Promise<void> {
 // repositoryId arg is non-null (a null id fails closed).
 const DEFAULT_REPO_ID = '42';
 
+async function createGitHubConnection(
+  db: Db,
+  args: Parameters<typeof createGitHubConnectionRecord>[1],
+) {
+  const project = await getProject(db, args.projectId);
+  if (!project) {
+    throw new Error('test project missing');
+  }
+  return createGitHubConnectionRecord(db, {
+    ...args,
+    authorizedByUserId:
+      args.authorizedByUserId === undefined ? project.user_id : args.authorizedByUserId,
+  });
+}
+
 // Seed an ACTIVE GitHub App installation so the in-tx re-check
 // (`installationCoversRepoInTx`) passes. Defaults to an `all`-repos install
 // (membership not enforced); pass `repositories` for a `selected` install.
@@ -100,7 +111,7 @@ async function seedActiveInstall(
     userId: null,
     accountLogin: `acct-${installationId}`,
     accountId: installationId,
-    accountType: 'User',
+    accountType: 'Organization',
     repositories,
     repositorySelection,
   });
@@ -381,71 +392,6 @@ describe('builds', () => {
     expect(await hasQueuedContainerBuilds(env.db)).toBe(false);
   });
 
-  it('cancelQueuedBuildsForProjectBranch supersedes only queued container rows for that project+branch', async () => {
-    const user = await createTestUser(env.db);
-    const project = await createTestProject(env.db, user.id);
-    const otherProject = await createTestProject(env.db, user.id);
-
-    // Cancelled: a queued container build on (project, main).
-    const queued = await createBuild(env.db, {
-      projectId: project.id,
-      userId: user.id,
-      commitSha: 'aaa',
-      branch: 'main',
-    });
-    // Left alone: a RUNNING build on the same project+branch.
-    const running = await createBuild(env.db, {
-      projectId: project.id,
-      userId: user.id,
-      status: 'building',
-      commitSha: 'bbb',
-      branch: 'main',
-    });
-    // Left alone: a COMPLETE build on the same project+branch.
-    const complete = await createBuild(env.db, {
-      projectId: project.id,
-      userId: user.id,
-      status: 'complete',
-      commitSha: 'ccc',
-      branch: 'main',
-    });
-    // Left alone: a queued build on a DIFFERENT branch.
-    const otherBranch = await createBuild(env.db, {
-      projectId: project.id,
-      userId: user.id,
-      commitSha: 'ddd',
-      branch: 'develop',
-    });
-    // Left alone: a queued build on a DIFFERENT project.
-    const otherProj = await createBuild(env.db, {
-      projectId: otherProject.id,
-      userId: user.id,
-      commitSha: 'eee',
-      branch: 'main',
-    });
-    // Left alone: a queued GITHUB_ACTIONS build on the same project+branch.
-    const ghActions = await createBuild(env.db, {
-      projectId: project.id,
-      userId: user.id,
-      executor: 'github_actions',
-      commitSha: 'fff',
-      branch: 'main',
-    });
-
-    await cancelQueuedBuildsForProjectBranch(env.db, project.id, 'main');
-
-    const cancelled = await getBuild(env.db, queued.id);
-    expect(cancelled!.status).toBe('cancelled');
-    expect(cancelled!.error).toBe('superseded by newer push');
-    expect(cancelled!.completed_at).not.toBeNull();
-
-    expect((await getBuild(env.db, running.id))!.status).toBe('building');
-    expect((await getBuild(env.db, complete.id))!.status).toBe('complete');
-    expect((await getBuild(env.db, otherBranch.id))!.status).toBe('queued');
-    expect((await getBuild(env.db, otherProj.id))!.status).toBe('queued');
-    expect((await getBuild(env.db, ghActions.id))!.status).toBe('queued');
-  });
-
   it('terminateBuildsForProject cancels every queued+active build (both executors), leaves terminal+other-project alone', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id);
@@ -572,48 +518,6 @@ describe('builds', () => {
     // Nothing in-flight left -> no-op, empty result.
     const empty = await terminateBuildsForProject(env.db, project.id);
     expect(empty).toHaveLength(0);
-  });
-
-  it('findNonTerminalBuildForCommit returns in-flight builds and null for terminal/non-matching', async () => {
-    const user = await createTestUser(env.db);
-    const project = await createTestProject(env.db, user.id);
-
-    // A queued build for commit aaa on main is non-terminal -> returned.
-    const queued = await createBuild(env.db, {
-      projectId: project.id,
-      userId: user.id,
-      commitSha: 'aaa',
-      branch: 'main',
-    });
-    expect((await findNonTerminalBuildForCommit(env.db, project.id, 'main', 'aaa'))?.id).toBe(
-      queued.id,
-    );
-
-    // A building build for commit bbb on main is non-terminal -> returned.
-    const building = await createBuild(env.db, {
-      projectId: project.id,
-      userId: user.id,
-      status: 'building',
-      commitSha: 'bbb',
-      branch: 'main',
-    });
-    expect((await findNonTerminalBuildForCommit(env.db, project.id, 'main', 'bbb'))?.id).toBe(
-      building.id,
-    );
-
-    // A commit whose only build is terminal -> null.
-    await createBuild(env.db, {
-      projectId: project.id,
-      userId: user.id,
-      status: 'complete',
-      commitSha: 'ccc',
-      branch: 'main',
-    });
-    expect(await findNonTerminalBuildForCommit(env.db, project.id, 'main', 'ccc')).toBeNull();
-
-    // Non-matching commit / branch -> null.
-    expect(await findNonTerminalBuildForCommit(env.db, project.id, 'main', 'zzz')).toBeNull();
-    expect(await findNonTerminalBuildForCommit(env.db, project.id, 'develop', 'aaa')).toBeNull();
   });
 
   it('supersedeAndCreateContainerBuild creates, supersedes older queued, and reuses in-flight/complete', async () => {
@@ -1529,31 +1433,6 @@ describe('builds', () => {
     expect(ok.build!.commit_sha).toBe('aaa');
   });
 
-  it('countUserActiveBuilds counts starting/building/deploying but not queued/terminal', async () => {
-    const user = await createTestUser(env.db);
-    const other = await createTestUser(env.db, 'otheruser');
-    const project = await createTestProject(env.db, user.id);
-    const otherProject = await createTestProject(env.db, other.id);
-
-    for (const status of ACTIVE_BUILD_STATUSES) {
-      await createBuild(env.db, { projectId: project.id, userId: user.id, status });
-    }
-    // Not counted: queued + terminal statuses.
-    await createBuild(env.db, { projectId: project.id, userId: user.id, status: 'queued' });
-    await createBuild(env.db, { projectId: project.id, userId: user.id, status: 'complete' });
-    await createBuild(env.db, { projectId: project.id, userId: user.id, status: 'failed' });
-    await createBuild(env.db, { projectId: project.id, userId: user.id, status: 'cancelled' });
-    // Active build for a DIFFERENT user — must not leak into this user's count.
-    await createBuild(env.db, {
-      projectId: otherProject.id,
-      userId: other.id,
-      status: 'building',
-    });
-
-    expect(await countUserActiveBuilds(env.db, user.id)).toBe(ACTIVE_BUILD_STATUSES.length);
-    expect(await countUserActiveBuilds(env.db, other.id)).toBe(1);
-  });
-
   it('failStaleActiveContainerBuilds fails over-age container builds (by started_at) and frees the slot', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id);
@@ -1585,8 +1464,6 @@ describe('builds', () => {
       .set({ started_at: sql`now() - interval '5 minute'` })
       .where(eq(builds.id, fresh.id));
 
-    expect(await countUserActiveBuilds(env.db, user.id)).toBe(2);
-
     // Returns the reaped builds (not just a count, and now each with its
     // instance_type) so the scheduled handler can best-effort stop the
     // still-alive containers via the correctly-sized BuildManager namespace.
@@ -1602,9 +1479,6 @@ describe('builds', () => {
     const freshRow = await getBuild(env.db, fresh.id);
     expect(freshRow?.status).toBe('building');
     expect(freshRow?.completed_at).toBeNull();
-
-    // The stale row's slot is freed.
-    expect(await countUserActiveBuilds(env.db, user.id)).toBe(1);
   });
 
   it('failStaleActiveContainerBuilds leaves over-age github_actions builds alone', async () => {
@@ -1631,19 +1505,32 @@ describe('builds', () => {
     expect(actionsRow?.completed_at).toBeNull();
   });
 
-  it('claimBuildForStart atomically flips queued -> starting once', async () => {
+  it('claimBuildForStartWithinLimit atomically flips queued -> starting once', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id);
     const build = await createBuild(env.db, { projectId: project.id, userId: user.id });
 
-    const claimed = await claimBuildForStart(env.db, build.id);
-    expect(claimed?.id).toBe(build.id);
-    expect(claimed?.status).toBe('starting');
-    expect(claimed?.started_at).not.toBeNull();
+    const claimed = await claimBuildForStartWithinLimit(env.db, {
+      buildId: build.id,
+      userId: user.id,
+      projectId: project.id,
+      limit: 1,
+      instanceType: 'basic',
+    });
+    expect(claimed).toBe(true);
+    const row = await getBuild(env.db, build.id);
+    expect(row?.status).toBe('starting');
+    expect(row?.started_at).not.toBeNull();
 
-    // Second claim of the same build sees it is no longer queued -> null.
-    const reclaimed = await claimBuildForStart(env.db, build.id);
-    expect(reclaimed).toBeNull();
+    // Second claim of the same build sees it is no longer queued.
+    const reclaimed = await claimBuildForStartWithinLimit(env.db, {
+      buildId: build.id,
+      userId: user.id,
+      projectId: project.id,
+      limit: 1,
+      instanceType: 'basic',
+    });
+    expect(reclaimed).toBe(false);
   });
 
   it('requeueBuildIfStarting returns a starting row to queued (CAS)', async () => {
@@ -1652,7 +1539,13 @@ describe('builds', () => {
     const build = await createBuild(env.db, { projectId: project.id, userId: user.id });
 
     // Claim flips queued -> starting.
-    await claimBuildForStart(env.db, build.id);
+    await claimBuildForStartWithinLimit(env.db, {
+      buildId: build.id,
+      userId: user.id,
+      projectId: project.id,
+      limit: 1,
+      instanceType: 'basic',
+    });
     expect((await getBuild(env.db, build.id))!.status).toBe('starting');
 
     // The CAS matches the `starting` row and bounces it back to `queued`.
@@ -1666,7 +1559,13 @@ describe('builds', () => {
     const build = await createBuild(env.db, { projectId: project.id, userId: user.id });
 
     // Claim -> starting, then a concurrent terminalizer cancels it.
-    await claimBuildForStart(env.db, build.id);
+    await claimBuildForStartWithinLimit(env.db, {
+      buildId: build.id,
+      userId: user.id,
+      projectId: project.id,
+      limit: 1,
+      instanceType: 'basic',
+    });
     await terminateBuildsForProject(env.db, project.id, { reason: 'project disconnected' });
     expect((await getBuild(env.db, build.id))!.status).toBe('cancelled');
 
@@ -1681,7 +1580,13 @@ describe('builds', () => {
     const build = await createBuild(env.db, { projectId: project.id, userId: user.id });
 
     // Claim -> starting, then onStart's CAS flips starting -> building.
-    await claimBuildForStart(env.db, build.id);
+    await claimBuildForStartWithinLimit(env.db, {
+      buildId: build.id,
+      userId: user.id,
+      projectId: project.id,
+      limit: 1,
+      instanceType: 'basic',
+    });
     await markBuildBuildingIfStarting(env.db, build.id);
     expect((await getBuild(env.db, build.id))!.status).toBe('building');
 
@@ -1699,7 +1604,13 @@ describe('builds', () => {
     const build = await createBuild(env.db, { projectId: project.id, userId: user.id });
 
     // Drive the row active: queued -> starting -> building.
-    await claimBuildForStart(env.db, build.id);
+    await claimBuildForStartWithinLimit(env.db, {
+      buildId: build.id,
+      userId: user.id,
+      projectId: project.id,
+      limit: 1,
+      instanceType: 'basic',
+    });
     await markBuildBuildingIfStarting(env.db, build.id);
     expect((await getBuild(env.db, build.id))!.status).toBe('building');
 
@@ -1716,7 +1627,13 @@ describe('builds', () => {
     const build = await createBuild(env.db, { projectId: project.id, userId: user.id });
 
     // Claim -> starting, then a concurrent terminalizer cancels it.
-    await claimBuildForStart(env.db, build.id);
+    await claimBuildForStartWithinLimit(env.db, {
+      buildId: build.id,
+      userId: user.id,
+      projectId: project.id,
+      limit: 1,
+      instanceType: 'basic',
+    });
     await terminateBuildsForProject(env.db, project.id, { reason: 'project disconnected' });
     expect((await getBuild(env.db, build.id))!.status).toBe('cancelled');
 
@@ -2241,6 +2158,7 @@ describe('createGithubActionsBuildWithinLimit', () => {
       repoFullName: 'acme/cap-other',
       buildExecutor: 'github_actions',
     });
+    await seedActiveInstall(env.db, 'inst-cap-other');
     const capped = await createGithubActionsBuildWithinLimit(env.db, {
       projectId: otherProject.id,
       connectionId: (await getGitHubConnection(env.db, otherProject.id))!.id,
@@ -2248,7 +2166,7 @@ describe('createGithubActionsBuildWithinLimit', () => {
       limit: 1,
       branch: 'main',
       githubRunId: '4003',
-      installationId: 'inst-cap',
+      installationId: 'inst-cap-other',
       repositoryId: DEFAULT_REPO_ID,
       expectedWorkflowPath: '.github/workflows/void-deploy.yml',
     });

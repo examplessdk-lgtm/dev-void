@@ -8,6 +8,7 @@ import {
   S_CHECKBOX_ACTIVE,
   S_CHECKBOX_INACTIVE,
 } from '@clack/prompts';
+import { wrapAnsi } from 'fast-wrap-ansi';
 import { pc } from './output.ts';
 
 export type FlagDef = {
@@ -54,7 +55,7 @@ export function promptSubcommand(
     let phase: Phase = 'select';
     let cursor = 0;
     let input = '';
-    let prevLineCount = 0;
+    let previousFrame = '';
     let resolved = false;
 
     // Accumulated state across phases
@@ -78,12 +79,53 @@ export function promptSubcommand(
     stdout.write('\x1B[?25l'); // hide cursor
 
     function clear() {
-      if (prevLineCount > 0) {
-        stdout.write(`\x1B[${prevLineCount}A\x1B[0J`);
+      if (previousFrame) {
+        const rows = wrapAnsi(previousFrame, stdout.columns || 80, {
+          hard: true,
+          trim: false,
+        }).split('\n').length;
+        stdout.write(`\x1B[${rows}A\r\x1B[0J`);
+        previousFrame = '';
       }
     }
 
+    function truncate(text: string, columns = (stdout.columns || 80) - 1, tail = false): string {
+      const width = Math.max(1, columns - 1);
+      const wrap = (value: string) => wrapAnsi(value, width, { hard: true, trim: false });
+      const lines = wrap(text).split('\n');
+      if (lines.length === 1) {
+        return lines[0];
+      }
+      if (tail) {
+        const suffix = Array.from(text).slice(-width);
+        while (wrap(suffix.join('')).includes('\n')) {
+          suffix.shift();
+        }
+        return `…${suffix.join('')}`;
+      }
+      return `${lines[0]}…`;
+    }
+
+    function writeFrame(header: string, options: Array<string>, footer: Array<string>) {
+      // Show at most seven single-line options, keeping the current selection in view.
+      const count = Math.max(1, Math.min(7, (stdout.rows || 24) - footer.length - 5));
+      const start = Math.max(0, Math.min(cursor - Math.floor(count / 2), options.length - count));
+      const lines = [
+        truncate(header),
+        pc.gray(S_BAR),
+        ...options.slice(start, start + count).map((option) => truncate(option)),
+        pc.gray(S_BAR),
+        ...footer.map((line) => truncate(line)),
+        pc.gray(S_BAR_END),
+      ];
+      previousFrame = lines.join('\n');
+      stdout.write(previousFrame + '\n');
+    }
+
     function render() {
+      if (resolved) {
+        return;
+      }
       clear();
       if (phase === 'select') {
         renderSelect();
@@ -110,9 +152,6 @@ export function promptSubcommand(
       const lines: Array<string> = [];
       const focused = subcommands[cursor];
 
-      lines.push(`${pc.cyan(S_STEP_ACTIVE)}  ${pc.cyan(title)}`);
-      lines.push(pc.gray(S_BAR));
-
       const maxName = Math.max(...subcommands.map((s) => s.name.length));
 
       for (let i = 0; i < subcommands.length; i++) {
@@ -124,7 +163,7 @@ export function promptSubcommand(
         let suffix = '';
         if (sub.arg) {
           if (isFocused && input.length > 0) {
-            suffix = `  ${pc.cyan(input)}`;
+            suffix = `  ${pc.cyan(truncate(input, (stdout.columns || 80) - maxName - 9, true))}`;
           } else {
             suffix = `  ${pc.dim(sub.arg)}`;
           }
@@ -139,30 +178,23 @@ export function promptSubcommand(
         }
       }
 
-      lines.push(pc.gray(S_BAR));
-      lines.push(`${pc.gray(S_BAR)}  ${pc.dim(focused.description)}`);
+      const footer = [`${pc.gray(S_BAR)}  ${pc.dim(focused.description)}`];
       if (focused.arg) {
         if (focused.arg.startsWith('<')) {
-          lines.push(`${pc.gray(S_BAR)}  ${pc.dim(`Type ${focused.arg}, then press Enter`)}`);
+          footer.push(`${pc.gray(S_BAR)}  ${pc.dim(`Type ${focused.arg}, then press Enter`)}`);
         } else {
-          lines.push(
+          footer.push(
             `${pc.gray(S_BAR)}  ${pc.dim(`Type ${focused.arg}, then press Enter, or press Enter to skip`)}`,
           );
         }
       }
-      lines.push(pc.gray(S_BAR_END));
-
-      stdout.write(lines.join('\n') + '\n');
-      prevLineCount = lines.length;
+      writeFrame(`${pc.cyan(S_STEP_ACTIVE)}  ${pc.cyan(title)}`, lines, footer);
     }
 
     function renderFlags() {
       const flags = selectedSub!.flags!;
       const focused = flags[cursor];
       const lines: Array<string> = [];
-
-      lines.push(headerLine());
-      lines.push(pc.gray(S_BAR));
 
       const maxFlag = Math.max(...flags.map((f) => f.name.length));
 
@@ -181,7 +213,8 @@ export function promptSubcommand(
         let valueText = '';
         if (flag.arg) {
           if (state.enabled && state.value.length > 0) {
-            valueText = `  ${isFocused ? pc.cyan(state.value) : pc.dim(state.value)}`;
+            const value = truncate(state.value, (stdout.columns || 80) - maxFlag - 9, true);
+            valueText = `  ${isFocused ? pc.cyan(value) : pc.dim(value)}`;
           } else {
             valueText = `  ${pc.dim(flag.arg)}`;
           }
@@ -194,21 +227,13 @@ export function promptSubcommand(
         }
       }
 
-      lines.push(pc.gray(S_BAR));
-      lines.push(`${pc.gray(S_BAR)}  ${pc.dim(focused.description)}`);
-      lines.push(pc.gray(S_BAR_END));
-
-      stdout.write(lines.join('\n') + '\n');
-      prevLineCount = lines.length;
+      writeFrame(headerLine(), lines, [`${pc.gray(S_BAR)}  ${pc.dim(focused.description)}`]);
     }
 
     function renderMultiSelect() {
       const followUp = selectedSub!.followUp as Extract<FollowUpDef, { type: 'multi-select' }>;
       const options = followUp.options;
       const lines: Array<string> = [];
-
-      lines.push(headerLine());
-      lines.push(pc.gray(S_BAR));
 
       const maxLabel = Math.max(...options.map((o) => o.label.length));
 
@@ -231,37 +256,31 @@ export function promptSubcommand(
         }
       }
 
-      lines.push(pc.gray(S_BAR));
-      lines.push(`${pc.gray(S_BAR)}  ${pc.dim('space to toggle, enter to confirm')}`);
-      lines.push(pc.gray(S_BAR_END));
-
-      stdout.write(lines.join('\n') + '\n');
-      prevLineCount = lines.length;
+      writeFrame(headerLine(), lines, [
+        `${pc.gray(S_BAR)}  ${pc.dim('space to toggle, enter to confirm')}`,
+      ]);
     }
 
     function renderRepeatInput() {
       const followUp = selectedSub!.followUp as Extract<FollowUpDef, { type: 'repeat-input' }>;
       const lines: Array<string> = [];
 
-      lines.push(headerLine());
-      lines.push(pc.gray(S_BAR));
-
       for (const entry of repeatEntries) {
         lines.push(`${pc.gray(S_BAR)}  ${pc.dim(entry)}`);
       }
 
       if (repeatInput.length > 0) {
-        lines.push(`${pc.gray(S_BAR)}  ${pc.cyan(repeatInput)}`);
+        lines.push(
+          `${pc.gray(S_BAR)}  ${pc.cyan(truncate(repeatInput, (stdout.columns || 80) - 4, true))}`,
+        );
       } else {
         lines.push(`${pc.gray(S_BAR)}  ${pc.dim(followUp.placeholder)}`);
       }
 
-      lines.push(pc.gray(S_BAR));
-      lines.push(`${pc.gray(S_BAR)}  ${pc.dim('enter to add, empty to finish')}`);
-      lines.push(pc.gray(S_BAR_END));
-
-      stdout.write(lines.join('\n') + '\n');
-      prevLineCount = lines.length;
+      cursor = lines.length - 1;
+      writeFrame(headerLine(), lines, [
+        `${pc.gray(S_BAR)}  ${pc.dim('enter to add, empty to finish')}`,
+      ]);
     }
 
     // --- Lifecycle ---
@@ -274,7 +293,9 @@ export function promptSubcommand(
       stdin.setRawMode(wasRaw);
       stdin.pause();
       stdin.removeListener('data', onData);
-      stdout.write('\x1B[?25h'); // show cursor
+      stdout.removeListener('resize', render);
+      process.removeListener('exit', onExit);
+      stdout.write('\x1B[?25h');
     }
 
     function submit(result: SubcommandResult | null) {
@@ -382,7 +403,6 @@ export function promptSubcommand(
         }
         selectedSub = focused;
         selectedArg = focused.arg ? input || undefined : undefined;
-        clear();
         advancePhase();
         return;
       }
@@ -447,7 +467,6 @@ export function promptSubcommand(
           }
         }
 
-        clear();
         advancePhase();
         return;
       }
@@ -502,7 +521,6 @@ export function promptSubcommand(
           return;
         }
         selectedFlags[followUp.flag] = selected.map((o) => o.value).join(',');
-        clear();
         finalize();
         return;
       }
@@ -516,7 +534,6 @@ export function promptSubcommand(
           repeatInput = '';
           render();
         } else {
-          clear();
           finalize();
         }
         return;
@@ -588,13 +605,15 @@ export function promptSubcommand(
     }
 
     stdin.on('data', onData);
+    stdout.on('resize', render);
 
     // Safety cleanup on exit
-    process.on('exit', () => {
+    function onExit() {
       if (!resolved) {
         stdout.write('\x1B[?25h');
       }
-    });
+    }
+    process.on('exit', onExit);
 
     render();
   });

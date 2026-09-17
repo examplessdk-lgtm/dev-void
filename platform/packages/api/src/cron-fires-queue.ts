@@ -2,7 +2,7 @@ import type { ApiEnv } from './env.ts';
 
 /**
  * One enqueued cron firing. The CronScheduler DO writes one of these per
- * schedule whose minute matches `now`. The DO itself can no longer reach the
+ * distinct cron expression whose minute matches `now`. The DO itself can no longer reach the
  * user worker via `DISPATCH.get(...).fetch(...)` because workerd dispatches
  * such calls to a named entrypoint matching the calling DO's class —
  * "CronScheduler" — which doesn't exist on user workers, so every fetch fails

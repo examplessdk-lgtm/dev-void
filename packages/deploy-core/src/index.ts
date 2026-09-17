@@ -61,6 +61,8 @@ export type DurableObjectMigrationStep = {
   new_classes?: ReadonlyArray<string>;
   new_sqlite_classes?: ReadonlyArray<string>;
   deleted_classes?: ReadonlyArray<string>;
+  renamed_classes?: ReadonlyArray<{ from: string; to: string }>;
+  transferred_classes?: ReadonlyArray<{ from: string; from_script: string; to: string }>;
 };
 
 export type PlannedWebSocketMigrations = {
@@ -145,6 +147,13 @@ export function appendSqliteClassMigration(
     }
     for (const name of migration.new_sqlite_classes ?? []) {
       existingClasses.add(name);
+    }
+    for (const rename of migration.renamed_classes ?? []) {
+      existingClasses.delete(rename.from);
+      existingClasses.add(rename.to);
+    }
+    for (const transfer of migration.transferred_classes ?? []) {
+      existingClasses.add(transfer.to);
     }
     for (const name of migration.deleted_classes ?? []) {
       existingClasses.delete(name);

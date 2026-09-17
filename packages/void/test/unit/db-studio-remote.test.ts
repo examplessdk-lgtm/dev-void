@@ -297,7 +297,7 @@ describe('void db studio (local, regression)', () => {
   it('local PG studio does not call getDatabaseUrl (uses local URL path)', async () => {
     const root = createProjectRoot({ database: 'pg' });
 
-    // The local PG path calls getPgUrl (reads .env.local). No DATABASE_URL set, so it throws.
+    // The local PG path calls getPgUrl (reads .env). No DATABASE_URL set, so it throws.
     // Regardless, getDatabaseUrl must NOT be called — it's only used for --remote.
     await expect(runDbCommand(root, { action: 'studio' })).rejects.toThrow();
 

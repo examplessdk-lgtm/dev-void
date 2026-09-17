@@ -3,7 +3,8 @@ import { createHash } from 'node:crypto';
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { dirname, join } from 'pathslash';
+import { basename, dirname, join } from 'pathslash';
+import { resolvePlatformSourceRevision } from './source-revision.mjs';
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 const repositoryRoot = join(packageRoot, '..', '..');
@@ -13,6 +14,9 @@ const wrangler = fileURLToPath(import.meta.resolve('wrangler'));
 const drizzleRoot = join(repositoryRoot, 'platform', 'packages', 'api', 'drizzle');
 const { parsePlatformRuntimeManifest, platformDatabaseSchemaDigest } = await import(
   pathToFileURL(join(packageRoot, 'dist', 'installer.mjs')).href
+);
+const { PLATFORM_USAGE_PROTOCOL_VERSION } = await import(
+  pathToFileURL(join(packageRoot, 'dist', 'index.mjs')).href
 );
 
 const workers = [
@@ -65,15 +69,23 @@ try {
     };
   }
 
-  cpSync(drizzleRoot, join(runtimeRoot, 'drizzle'), { recursive: true });
+  cpSync(drizzleRoot, join(runtimeRoot, 'drizzle'), {
+    recursive: true,
+    // Drizzle snapshots support authoring new migrations, not applying them.
+    filter: (source) => !/^\d{4}_snapshot\.json$/.test(basename(source)),
+  });
   const packageJson = JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf8'));
   const database = buildDatabaseManifest();
+  const sourceRevision = resolvePlatformSourceRevision({ repositoryRoot });
   const manifest = parsePlatformRuntimeManifest({
     artifacts,
+    applicationRoutingVersion: 1,
     database,
     platformVersion: packageJson.version,
+    safetyProtocols: { sandboxDrain: 2 },
     schemaVersion: 2,
-    sourceRevision: process.env.VOID_PLATFORM_SOURCE_REVISION || null,
+    sourceRevision,
+    usageProtocolVersion: PLATFORM_USAGE_PROTOCOL_VERSION,
   });
   writeFileSync(join(runtimeRoot, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
 } finally {

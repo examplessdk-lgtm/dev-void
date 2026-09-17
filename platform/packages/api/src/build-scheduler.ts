@@ -10,6 +10,7 @@ import {
   getQueuedBuilds,
   getUser,
   getUsersWithQueuedContainerBuilds,
+  hasGitHubConnectionAuthority,
   hasQueuedContainerBuilds,
   markBuildTerminalIfActive,
   requeueBuildIfStarting,
@@ -138,6 +139,13 @@ export class BuildScheduler extends DurableObject<ApiEnv['Bindings']> {
         });
         continue;
       }
+      if (!(await hasGitHubConnectionAuthority(db, connection.id, build.project_id))) {
+        await updateBuildStatus(db, build.id, 'cancelled', {
+          error: 'github organization repository must be reconnected to renew authorization',
+          completedAt: new Date().toISOString(),
+        });
+        continue;
+      }
 
       // Defense-in-depth: refuse to START a queued build whose stored
       // branch/executor no longer matches the current connection. The enqueue
@@ -229,6 +237,7 @@ export class BuildScheduler extends DurableObject<ApiEnv['Bindings']> {
         branch: build.branch ?? connection.branch,
         repoFullName: connection.repo_full_name,
         installationId: connection.installation_id,
+        connectionId: connection.id,
         // The build row carries no repository id, so the connection bound to this
         // project (resolved above by the UNIQUE project_id) is the source of
         // truth — mirrors webhooks.ts / auth-oidc.ts. startBuild re-verifies the

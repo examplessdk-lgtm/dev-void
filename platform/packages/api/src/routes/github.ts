@@ -11,6 +11,7 @@ import { capabilityMiddleware } from '../capabilities.ts';
 import { DEFAULT_DASHBOARD_URL, MEMBERSHIP_TTL_SECONDS } from '../constants.ts';
 import type { Db } from '../db.ts';
 import {
+  authorizeGitHubOrganizationConnection,
   createGitHubConnection,
   deleteGitHubConnection,
   getGitHubAccountIdForUser,
@@ -18,12 +19,12 @@ import {
   getDbNowMs,
   getGitHubInstallation,
   getGitHubInstallationsByUser,
+  hasGitHubConnectionAuthority,
   getInstallationRevocationAt,
   getInstallationRevocationsForAccount,
   GitHubIdentityAlreadyLinkedError,
   GitHubIdentityConflictError,
   hasActiveInstallationMembership,
-  hasInstallationRevocation,
   linkGitHubIdentity,
   linkGitHubInstallationToUser,
   getProject,
@@ -46,11 +47,17 @@ import {
 import { localhostRedirectResponse } from '../html-redirect.ts';
 import { authMiddleware } from '../middleware/auth.ts';
 import { githubConnections, githubInstallations, oauthAccounts } from '../schema.ts';
-import type { Build, GitHubInstallation } from '../types.ts';
+import type { Build, GitHubConnection, GitHubInstallation } from '../types.ts';
 import { isLocalhostRedirect } from './auth.ts';
 
 const GITHUB_API_BASE = 'https://api.github.com';
 const GITHUB_API_VERSION = '2026-03-10';
+
+function publicGitHubConnection(connection: GitHubConnection) {
+  const { authorized_by_user_id: authorizationProvenance, ...result } = connection;
+  void authorizationProvenance;
+  return result;
+}
 
 // RFC 0074 link flow. The signed `state` carried through the GitHub
 // App user-authorization redirect lives 10 minutes (the human takes the
@@ -372,18 +379,16 @@ export const githubRoutes = new Hono<ApiEnv>()
   .get('/installations', authMiddleware, async (context) => {
     const user = context.get('user');
     const installations = await getGitHubInstallationsByUser(context.get('db'), user.id);
-    // Non-owner (member) rows must not leak the install's cached repository list:
-    // the owner-OR-active-member JOIN proves only installation-level access, and
-    // per-repo access is proven separately at connect-authorize
-    // (verifyUserRepoAccess, the member's own token). Owners keep the full list
-    // (they installed the app). Only `repositories` is sensitive; every other
-    // field (repository_selection, account_*, installation_id, status,
-    // timestamps) is not a leak (R6-2). `user_id` is nullable, but a null-owner
-    // row only ever reaches a caller via the membership EXISTS arm, so
-    // `null !== user.id` correctly redacts it.
+    // Organization installation visibility proves only that the caller can see
+    // the installation, not every repository it covers. Never expose its cached
+    // repository list; each repo is disclosed only after the caller proves access
+    // with their own OAuth token in the connect-authorize flow. Personal-account
+    // owners control the account itself and retain the complete list.
     return context.json(
       installations.map((inst) =>
-        inst.user_id === user.id ? inst : { ...inst, repositories: [] },
+        inst.account_type === 'User' && inst.user_id === user.id
+          ? inst
+          : { ...inst, repositories: [] },
       ),
     );
   })
@@ -1176,16 +1181,16 @@ export const githubRoutes = new Hono<ApiEnv>()
       account = { login: resolved.login, id: resolved.accountId, type: resolved.type };
     }
 
-    // Ownership check. Two paths, in order:
+    // Installation visibility check. Two paths, in order:
     //
     // 1. User-authorization-on-install (preferred; supports BOTH personal and
     //    org installs). When the App has "Request user authorization (OAuth)
     //    during installation" enabled, GitHub appends a `code` to this
     //    callback. We exchange it for a transient USER-to-server token and
-    //    confirm `installation_id` is in the user's accessible installations
-    //    (`GET /user/installations`) — which lists every installation the user
-    //    can manage, including on organizations whose account id differs from
-    //    the user's personal id. The token is used transiently and discarded.
+    //    confirm `installation_id` is in the user's visible installations
+    //    (`GET /user/installations`). For an organization this proves only that
+    //    the caller may join the installation; repository authority is proven
+    //    later with the caller's token. The token is transient and discarded.
     //
     // 2. Personal account-id match (fallback; personal installs only). When no
     //    `code` is present (App not configured for user-auth-on-install), the
@@ -1195,8 +1200,7 @@ export const githubRoutes = new Hono<ApiEnv>()
     //    ops/config item: turn on user-auth-on-install on the GitHub App and
     //    set GITHUB_APP_CLIENT_ID / GITHUB_APP_CLIENT_SECRET.
     //
-    // Either way the owner-guard backstop below still applies, so a valid state
-    // alone never lets one Void user claim another's installation.
+    // Either way, a valid state alone never grants repository authority.
     //
     // Stamp the proof-of-access moment BEFORE the USER-access proof
     // (`authorizeInstallViaUserToken`) so `proofIatMs` is a CONSERVATIVE lower
@@ -1246,98 +1250,74 @@ export const githubRoutes = new Hono<ApiEnv>()
       return context.json({ error: 'installation does not belong to the caller' }, 403);
     }
 
-    // Backstop + tombstone gates under an INSTALL-row lock. member_removed and
+    // Visibility + tombstone gates under an INSTALL-row lock. member_removed and
     // the connect gate lock the SAME install row install-first, so a concurrent
     // revocation and this callback are serialized: whichever commits second sees
     // the other's effect. This closes the CONCURRENT R4-3 interleaving (this
     // proof succeeds, then member_removed clears+tombstones, then this grant
-    // commits) at BOTH org-shared grant points — the owner re-adopt and the
-    // membership backstop. Install-only locking (no connections) → install-first
-    // → cannot deadlock with member_removed / teardown / the connect gate. The
-    // durable variant remains a live-proof-bounded residual (see above).
+    // commits) before an organization membership is recorded. Install-only
+    // locking (no connections) → install-first → cannot deadlock with
+    // member_removed / teardown / the connect gate. The durable variant remains
+    // a live-proof-bounded residual (see above).
     const result = await context.get('db').transaction(async (tx) => {
       const txDb = tx as unknown as Db;
-      // Lock the install row FIRST. A fresh install id locks nothing (no row
-      // yet) and proceeds to the owner-adopt insert below.
+      // Lock the install row FIRST. A fresh installation id locks nothing and
+      // proceeds to the personal-owner insert or organization-member insert.
       await tx
         .select({ id: githubInstallations.id })
         .from(githubInstallations)
         .where(eq(githubInstallations.installation_id, installationId))
         .for('update');
 
-      // Backstop: never re-own an installation already linked to a *different*
-      // Void user. Defends against account-id collisions/derivation gaps and the
-      // unconditional adopt-userId behavior of upsertGitHubInstallation.
       const existing = await getGitHubInstallation(txDb, installationId);
-      // A null-owner ORG install is either FRESH (webhook-precreated, first installer
-      // may adopt) or CLEARED by member_removed (which wrote a revocation tombstone
-      // atomically with the owner-clear). A cleared install is shared/member-only and
-      // must NEVER be re-owned by a completing member — that would convert the member
-      // flow back to the owner flow and bypass per-repo proof (R15-1). Detect "cleared"
-      // via the tombstone (queried ONLY for the null-owner org case). Personal installs
-      // are never cleared this way, so their null-owner rows stay owner-adoptable
-      // (backfill).
-      const isClearedSharedOrg =
-        existing !== null &&
-        existing.user_id === null &&
-        account.type === 'Organization' &&
-        (await hasInstallationRevocation(txDb, installationId));
-      if (
-        (existing && existing.user_id !== null && existing.user_id !== userId) ||
-        isClearedSharedOrg
-      ) {
-        // Org-shared installs: a DIFFERENT Void user reaching an installation the
-        // installer already owns — OR a CLEARED (null-owner + tombstone) org install
-        // reached by any completing member — is granted access ONLY on the PROVEN
-        // user-token path AND only for Organization accounts, where
-        // `GET /user/installations` confirmed the caller can manage THIS installation
-        // (real org co-membership). Record a TTL-cached membership WITHOUT re-owning
-        // the installation (a cleared install stays ownerless; an owned install keeps
-        // its owner; we never call upsertGitHubInstallation here). A personal
-        // (account_type='User') install reached by a different user is a collision, not
-        // shareable — it has no member_removed revocation path, so it falls through to
-        // the 403 below.
-        if (authResult.authorized && account.type === 'Organization') {
-          // Membership backstop — reject when this GitHub identity was revoked at
-          // or after the proof (a concurrent member_removed committed its
-          // tombstone under this same lock). `callerAccountId` is the proven
-          // GitHub id (non-null and == stateGitHubAccountId, enforced above), the
-          // SAME decimal-string form member_removed tombstones (`String(id)`).
-          const revokedAtMs = await getInstallationRevocationAt(
-            txDb,
-            installationId,
-            authResult.callerAccountId as string,
-          );
-          if (revokedAtMs !== null && revokedAtMs >= proofIatMs) {
-            return { kind: 'revoked' as const };
-          }
-          await upsertGitHubInstallationMember(txDb, {
-            installationId,
-            userId,
-            githubAccountId: authResult.callerAccountId,
-            ttlSeconds: MEMBERSHIP_TTL_SECONDS,
-          });
-          return { kind: 'member' as const };
+      // Organization installation visibility never confers repository authority.
+      // Record every org participant as a TTL membership, including the person
+      // who completed a fresh installation and users that older code marked as
+      // owner. The project connect gate consequently requires a fresh per-repo
+      // OAuth grant for every organization path. Persist the installation with a
+      // null proposed owner; on conflict this also preserves any legacy pointer,
+      // which remains inert for organization authorization.
+      if (account.type === 'Organization') {
+        if (!authResult.authorized || authResult.callerAccountId === null) {
+          return { kind: 'conflict' as const };
         }
-        // Fallback path (authorized false OR personal-account install): a
-        // different-user hit is an account-id collision / a non-shareable personal
-        // install, NOT proof of org co-membership → keep the 403.
+        const revokedAtMs = await getInstallationRevocationAt(
+          txDb,
+          installationId,
+          authResult.callerAccountId,
+        );
+        if (revokedAtMs !== null && revokedAtMs >= proofIatMs) {
+          return { kind: 'revoked' as const };
+        }
+        await upsertGitHubInstallation(txDb, {
+          installationId,
+          userId: null,
+          accountLogin: account.login,
+          accountId: account.id,
+          accountType: account.type,
+          repositories,
+          repositorySelection,
+          refreshMembership: true,
+        });
+        await upsertGitHubInstallationMember(txDb, {
+          installationId,
+          userId,
+          githubAccountId: authResult.callerAccountId,
+          ttlSeconds: MEMBERSHIP_TTL_SECONDS,
+        });
+        return { kind: 'member' as const };
+      }
+
+      // Personal installations are not shareable. A different linked user is
+      // an account collision; the matching personal GitHub identity may adopt a
+      // fresh/null row or refresh its own existing row.
+      if (existing && existing.user_id !== null && existing.user_id !== userId) {
         return { kind: 'conflict' as const };
       }
 
-      // Owner (re-)adopt — reached by: existing === null (fresh install, callback
-      // wins the race), a same-owner refresh (user_id === userId), and a FRESH
-      // null-owner ORG install (webhook-precreated, NO tombstone → isClearedSharedOrg
-      // is false → the first installer legitimately adopts). Reject re-adopting an
-      // owner whose GitHub identity was revoked at or after the proof (member_removed
-      // cleared the owner pointer and tombstoned under this same lock; the callback
-      // re-adopts a null pointer via upsertGitHubInstallation's adopt-guard). Key on
-      // stateGitHubAccountId — the owner's proven GitHub id (== callerAccountId
-      // on the authorized path; == account.id on the personal-install fallback,
-      // which is NEVER an org install so member_removed never tombstones it →
-      // ownerRevokedAtMs is null → a personal reconnect is never falsely
-      // blocked). A legit fresh install / same-owner refresh has no qualifying
-      // tombstone → proceeds.
+      // Personal owner (re-)adopt. Key the concurrency tombstone check on the
+      // owner's proven GitHub id. Organization installs returned above, so this
+      // branch cannot turn organization visibility into ownership.
       const ownerRevokedAtMs = await getInstallationRevocationAt(
         txDb,
         installationId,
@@ -1373,8 +1353,8 @@ export const githubRoutes = new Hono<ApiEnv>()
     if (result.kind === 'revoked') {
       return context.json({ error: 'installation access revoked' }, 403);
     }
-    // Redirect to the dashboard connections page (owner adopt + membership
-    // backstop share the same target). Prod DASHBOARD_URL is https, so the
+    // Redirect to the dashboard connections page (personal owner and organization
+    // member flows share the same target). Prod DASHBOARD_URL is https, so the
     // wrangler localhost-redirect mangling (see lessons.md) does not apply here.
     const dashboardUrl = context.env.DASHBOARD_URL ?? DEFAULT_DASHBOARD_URL;
     return context.redirect(`${dashboardUrl}/settings/connections`);
@@ -1451,10 +1431,10 @@ export const githubProjectRoutes = new Hono<ApiEnv>()
       return context.json({ error: 'installation not found' }, 404);
     }
     const caller = context.get('user').id;
-    const isOwner = installation.user_id === caller;
+    const isOwner = installation.account_type === 'User' && installation.user_id === caller;
 
-    // Authorization. The OWNER passes straight through (behavior unchanged). A
-    // non-owner must be an ACTIVE MEMBER of this org-shared install; if not, we
+    // A personal-account owner passes through directly. Every organization
+    // participant must be an ACTIVE MEMBER of the shared install; if not, we
     // return the SAME opaque 404 the owner-miss returns — never reveal the
     // install exists to a non-member (privacy). Membership is TTL-honored.
     if (!isOwner) {
@@ -1481,12 +1461,12 @@ export const githubProjectRoutes = new Hono<ApiEnv>()
       if (installation.account_type !== 'Organization') {
         return context.json({ error: 'installation not found' }, 404);
       }
-      // Fail closed: the member connect path depends on App user OAuth (the membership +
+      // Fail closed: the organization connect path depends on App user OAuth (the membership +
       // connect_grant were minted via it). Reject a pre-minted connect_grant redemption when
       // the config was removed (R10-1). This runs LAST — only a caller ALREADY proven to be
       // an active member of an Organization install reaches it, so the 503 no longer
-      // distinguishes an existing install from a nonexistent one (R13-1). Owners connect
-      // directly (no user OAuth) and skip this whole block, so they are unaffected.
+      // distinguishes an existing install from a nonexistent one (R13-1). Personal-account
+      // owners connect directly and skip this block.
       if (!isAppUserOAuthConfigured(context.env)) {
         return context.json(
           {
@@ -1498,7 +1478,7 @@ export const githubProjectRoutes = new Hono<ApiEnv>()
       }
     }
 
-    // Reachable only by the owner or an authorized member — safe to reveal status.
+    // Reachable only by a personal owner or an authorized organization member.
     // A suspended/deleted install can still carry cached repos, but every build
     // resolver requires status='active', so connecting it would produce a
     // connection that never builds.
@@ -1510,7 +1490,7 @@ export const githubProjectRoutes = new Hono<ApiEnv>()
     // (rename/delete/name-reuse), so webhook + OIDC routing keys on this id
     // instead. Resolution DIVERGES by path:
     //
-    //   OWNER  → resolve with the INSTALLATION token (unchanged). Keyed off
+    //   PERSONAL OWNER → resolve with the INSTALLATION token. Keyed off
     //     `repository_selection`:
     //       - `all`: the install covers every repo in the account (including
     //         ones created after install), so the cached `repositories` array
@@ -1518,12 +1498,13 @@ export const githubProjectRoutes = new Hono<ApiEnv>()
     //         `GET /repos/:full_name`; a non-ok response fails closed with 400.
     //       - `selected`: the cached set is authoritative — look up by name.
     //         Still 400s when absent.
-    //   MEMBER → the member has no rights on the installation token, so trusting
-    //     it here would be a confused-deputy. Instead we require a per-repo
+    //   ORGANIZATION PARTICIPANT → installation visibility is not repository
+    //     authority, so trusting the installation token here would be a
+    //     confused-deputy. Instead we require a per-repo
     //     `connect_grant` minted by /github/connect-authorize-callback (Task 7),
     //     which carries a `repositoryId` the member PROVED under their OWN token.
     //     We trust that id and SKIP the installation-token resolution entirely.
-    // The member grant's proof-of-access moment (Task 14), captured here so the
+    // The organization grant's proof-of-access moment (Task 14), captured here so the
     // go-live transaction below can compare it to the install's revocation
     // tombstone under the row lock. `undefined` on the owner path (no grant).
     let memberGrantIat: number | undefined;
@@ -1633,6 +1614,7 @@ export const githubProjectRoutes = new Hono<ApiEnv>()
       const [lockedInstall] = await tx
         .select({
           user_id: githubInstallations.user_id,
+          account_type: githubInstallations.account_type,
           status: githubInstallations.status,
           repository_selection: githubInstallations.repository_selection,
           repositories: githubInstallations.repositories,
@@ -1653,7 +1635,8 @@ export const githubProjectRoutes = new Hono<ApiEnv>()
       // member insert (that would be a confused-deputy on the install token). Reject;
       // a fresh request re-derives the caller's real (now non-owner) status and
       // requires a connect_grant.
-      const lockedIsOwner = lockedInstall.user_id === caller;
+      const lockedIsOwner =
+        lockedInstall.account_type === 'User' && lockedInstall.user_id === caller;
       if (isOwner && !lockedIsOwner) {
         return { ok: false as const, status: 404 as const, error: 'installation not found' };
       }
@@ -1716,6 +1699,24 @@ export const githubProjectRoutes = new Hono<ApiEnv>()
       }
       const existing = await getGitHubConnection(txDb, projectId);
       if (existing) {
+        if (lockedInstall.account_type === 'Organization') {
+          const reauthorized = await authorizeGitHubOrganizationConnection(txDb, {
+            projectId,
+            installationId,
+            repoFullName,
+            repositoryId: String(repositoryId),
+            userId: caller,
+          });
+          if (reauthorized) {
+            return { ok: true as const, connection: reauthorized };
+          }
+          return {
+            ok: false as const,
+            status: 409 as const,
+            error:
+              'organization repository authorization changed; disconnect and reconnect the repository',
+          };
+        }
         return { ok: false as const, status: 409 as const, error: 'project already connected' };
       }
       const connection = await createGitHubConnection(txDb, {
@@ -1723,6 +1724,7 @@ export const githubProjectRoutes = new Hono<ApiEnv>()
         installationId,
         repoFullName,
         repositoryId: String(repositoryId),
+        authorizedByUserId: lockedInstall.account_type === 'Organization' ? caller : null,
         branch,
         buildExecutor,
         workflowPath,
@@ -1732,7 +1734,7 @@ export const githubProjectRoutes = new Hono<ApiEnv>()
     if (!result.ok) {
       return context.json({ error: result.error }, result.status);
     }
-    return context.json(result.connection);
+    return context.json(publicGitHubConnection(result.connection));
   })
 
   // Read the project's connection.
@@ -1751,7 +1753,15 @@ export const githubProjectRoutes = new Hono<ApiEnv>()
       return context.json({ error: 'connection not found' }, 404);
     }
 
-    return context.json(connection);
+    const authorized = await hasGitHubConnectionAuthority(
+      context.get('db'),
+      connection.id,
+      projectId,
+    );
+    return context.json({
+      ...publicGitHubConnection(connection),
+      requires_reconnect: !authorized,
+    });
   })
 
   // Update branch / build executor.
@@ -1868,7 +1878,7 @@ export const githubProjectRoutes = new Hono<ApiEnv>()
       return { cancelled: terminated, updated: next, gone: false };
     });
 
-    if (gone) {
+    if (gone || !updated) {
       return context.json({ error: 'connection not found' }, 404);
     }
 
@@ -1876,7 +1886,7 @@ export const githubProjectRoutes = new Hono<ApiEnv>()
     // stop the container DOs for any cancelled container builds.
     await cancelContainerBuildDos(context.env, cancelled, 'project disconnected');
 
-    return context.json(updated);
+    return context.json(publicGitHubConnection(updated));
   })
 
   // Disconnect the project.

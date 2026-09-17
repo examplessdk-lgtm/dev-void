@@ -53,7 +53,7 @@ afterEach(() => {
  * exercise the full runRemoteMigrations code path end-to-end through
  * the Hono app: the tracking-table create, legacy-table detection and
  * upgrade, the `_void_migrations` select, per-migration execution,
- * the INSERT OR IGNORE tracking write, and the rename UPDATE.
+ * the atomic SQL/tracking batch, and the rename UPDATE.
  *
  * Failure injection hooks:
  *   - `failingSqlPatterns`: list of `{ match, message, status? }` rules
@@ -258,16 +258,21 @@ function makeQueryD1(state: D1MockState) {
       return cfSuccess([{ results }]);
     }
 
-    // INSERT OR IGNORE tracking row (runRemoteMigrations per-migration)
-    if (/INSERT\s+OR\s+IGNORE\s+INTO\s+_void_migrations[\s\S]*VALUES/i.test(sql)) {
+    // The migration SQL and tracking row share one atomic request. Failure
+    // injection above rejects the entire request before either is persisted.
+    const tracking =
+      /\n;\nINSERT INTO _void_migrations \(name, applied_at\) VALUES \('((?:[^']|'')*)', '([^']+)'\);$/.exec(
+        sql,
+      );
+    if (tracking) {
       if (!state.voidTableExists) {
         return noVoidTable();
       }
-      if (Array.isArray(params) && typeof params[0] === 'string' && typeof params[1] === 'string') {
-        if (!state.trackingRows.has(params[0])) {
-          state.trackingRows.set(params[0], params[1]);
-        }
+      const name = tracking[1].replaceAll("''", "'");
+      if (state.trackingRows.has(name)) {
+        return cfError('UNIQUE constraint failed: _void_migrations.name', 500);
       }
+      state.trackingRows.set(name, tracking[2]);
       return cfSuccess([{ results: [] }]);
     }
 
@@ -2462,7 +2467,7 @@ describe('POST /projects/:id/migrations/apply', () => {
     expect(state.trackingRows.has('001_delete.sql')).toBe(true);
   });
 
-  it('reconciles a single-statement migration via the "already exists" recovery path', async () => {
+  it('requires a tracking row before accepting an existing schema object', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id, 'recovery-single');
     await insertD1Resource(env.db, project.id);
@@ -2496,14 +2501,9 @@ describe('POST /projects/:id/migrations/apply', () => {
       }),
       env,
     );
-    expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({
-      ok: true,
-      applied: ['001_init.sql'],
-      skipped: [],
-    });
-    // Recovery wrote the tracking row
-    expect(state.trackingRows.has('001_init.sql')).toBe(true);
+    expect(res.status).toBe(500);
+    expect(await res.json()).toMatchObject({ ok: false });
+    expect(state.trackingRows.has('001_init.sql')).toBe(false);
   });
 
   it('does NOT use the recovery path for a multi-statement migration and surfaces the error', async () => {
@@ -2666,7 +2666,7 @@ describe('POST /projects/:id/migrations/apply', () => {
 
     // With the lock, only the winner dispatches the body — the loser
     // observes the tracking row and skips.
-    const multiCalls = state.queries.filter((q) => q.sql.trim() === multiSql).length;
+    const multiCalls = state.queries.filter((q) => q.sql.startsWith(multiSql)).length;
     expect(multiCalls).toBe(1);
   });
 

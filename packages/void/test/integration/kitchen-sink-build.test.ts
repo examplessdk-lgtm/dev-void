@@ -9,6 +9,7 @@ import {
 import { assembleVoidManifest } from '../../src/cli/deploy.ts';
 import { readConfig } from '../../src/config.ts';
 import { scanPages } from '../../src/pages/scan.ts';
+import { collectPrerenderPaths } from '../../src/prerender.ts';
 import { resolveProjectPaths } from '../../src/project-paths.ts';
 import { toSlash } from '../../src/shared/utils.ts';
 
@@ -24,9 +25,6 @@ describe('playground/kitchen-sink build', () => {
     playground = createIsolatedPlayground(ROOT, SOURCE_PLAYGROUND);
     const pg = playground.root;
     dist = join(pg, 'dist');
-    const envProductionPath = join(pg, '.env.production');
-    const envLocalPath = join(pg, '.env.local');
-    const envProductionLocalPath = join(pg, '.env.production.local');
 
     rmSync(join(pg, 'dist'), { recursive: true, force: true });
     rmSync(join(pg, '.void'), { recursive: true, force: true });
@@ -37,47 +35,42 @@ describe('playground/kitchen-sink build', () => {
       JSON.stringify({ projectId: 'test-leak-project-id', slug: 'test-leak' }),
     );
 
-    writeFileSync(
-      envProductionPath,
-      [
-        '__VOID_TOKEN=polluted-from-env-file-do-not-use',
-        '__VOID_PROJECT_ID=polluted-project-id',
-        '__VOID_REMOTE=1',
-        'LEGIT_USER_VAR=kept',
-      ].join('\n') + '\n',
-    );
-    writeFileSync(
-      envLocalPath,
-      ['LOCAL_ONLY_VAR=must-not-ship', 'LEGIT_USER_VAR=local-override'].join('\n') + '\n',
-    );
-    writeFileSync(
-      envProductionLocalPath,
-      ['PRODUCTION_LOCAL_ONLY_VAR=must-not-ship', 'LEGIT_USER_VAR=production-local-override'].join(
-        '\n',
-      ) + '\n',
-    );
-
-    const result = spawn.sync('vp', ['run', '--filter', `./${playground.workspacePath}`, 'build'], {
-      cwd: ROOT,
+    // Build this fixture directly. Other suites create and remove temporary
+    // workspace packages concurrently, so rediscovering the whole task graph
+    // adds an unrelated race to a test of Vite's emitted worker artifacts.
+    const result = spawn.sync('vp', ['build'], {
+      cwd: pg,
       encoding: 'utf8',
       maxBuffer: 10 * 1024 * 1024,
       env: {
         ...process.env,
         VOID_TOKEN: 'test-leak-token-do-not-use',
         VOID_CLOUDFLARE_DEPLOY_BUILD: '1',
+        VITE_APP_TITLE: 'Kitchen Sink Production',
       },
     });
 
     buildOutput = `${result.stdout ?? ''}${result.stderr ?? ''}`;
-    expect(result.status).toBe(0);
+    expect(result.status, buildOutput).toBe(0);
   });
 
   afterAll(() => {
     playground?.cleanup();
   });
-
   it('emits the SSR worker entry', () => {
     expect(existsSync(join(dist, 'ssr/index.js'))).toBe(true);
+  });
+
+  it('discovers prerender paths without remote production secrets', async () => {
+    await expect(
+      collectPrerenderPaths({
+        root: playground.root,
+        workerDir: join(dist, 'ssr'),
+        persistDir: join(playground.root, '.void'),
+        projectId: 'test-leak-project-id',
+        voidToken: '',
+      }),
+    ).resolves.toEqual([]);
   });
 
   it('does not warn about unexpected Node.js imports', () => {
@@ -101,10 +94,11 @@ describe('playground/kitchen-sink build', () => {
   it('does not leak __VOID_* credentials into dist/ssr/wrangler.json', () => {
     const wranglerConfig = JSON.parse(readFileSync(join(dist, 'ssr', 'wrangler.json'), 'utf-8'));
     const vars = (wranglerConfig.vars ?? {}) as Record<string, unknown>;
-    // `__VOID_AI_GATEWAY` is a legitimate, non-credential runtime var emitted from
-    // `ai.gateway` in void.json (asserted below) — exclude it from the leak filter.
+    // These are legitimate, non-credential runtime routing vars for a custom Workers AI
+    // binding / AI Gateway. Exclude them from the credential leak filter.
+    const allowedRuntimeMarkers = new Set(['__VOID_AI_BINDING', '__VOID_AI_GATEWAY']);
     const leakedKeys = Object.keys(vars).filter(
-      (key) => key.startsWith('__VOID_') && key !== '__VOID_AI_GATEWAY',
+      (key) => key.startsWith('__VOID_') && !allowedRuntimeMarkers.has(key),
     );
     expect(leakedKeys).toEqual([]);
   });
@@ -120,10 +114,19 @@ describe('playground/kitchen-sink build', () => {
     expect(vars.__VOID_AI_GATEWAY).toBe('kitchen-sink-gw');
   });
 
-  it('keeps non-internal .env.production vars in dist/ssr/wrangler.json', () => {
+  it('does not ship local .env values and declares required server secrets', () => {
     const wranglerConfig = JSON.parse(readFileSync(join(dist, 'ssr', 'wrangler.json'), 'utf-8'));
     const vars = (wranglerConfig.vars ?? {}) as Record<string, unknown>;
-    expect(vars.LEGIT_USER_VAR).toBe('kept');
+    expect(vars.APP_NAME).toBeUndefined();
+    expect(vars.SECRET_KEY).toBeUndefined();
+    expect(vars.API_URL).toBeUndefined();
+    expect(vars.VITE_APP_TITLE).toBeUndefined();
+    expect(wranglerConfig.secrets?.required).toEqual([
+      'APP_NAME',
+      'SECRET_KEY',
+      'API_URL',
+      'BETTER_AUTH_SECRET',
+    ]);
   });
 
   it('requires auth deployments to inherit BETTER_AUTH_SECRET without emitting plaintext', () => {
@@ -131,15 +134,6 @@ describe('playground/kitchen-sink build', () => {
     const vars = (wranglerConfig.vars ?? {}) as Record<string, unknown>;
     expect(wranglerConfig.secrets?.required).toContain('BETTER_AUTH_SECRET');
     expect(vars.BETTER_AUTH_SECRET).toBeUndefined();
-  });
-
-  it('excludes local dotenv files from Cloudflare deploy worker vars', () => {
-    const wranglerConfig = JSON.parse(readFileSync(join(dist, 'ssr', 'wrangler.json'), 'utf-8'));
-    const vars = (wranglerConfig.vars ?? {}) as Record<string, unknown>;
-    expect(vars.LOCAL_ONLY_VAR).toBeUndefined();
-    expect(vars.PRODUCTION_LOCAL_ONLY_VAR).toBeUndefined();
-    // A local override must not replace the portable production value.
-    expect(vars.LEGIT_USER_VAR).toBe('kept');
   });
 
   it('emits manifest.pages for the Void pages app (scan order, RAW patterns)', async () => {

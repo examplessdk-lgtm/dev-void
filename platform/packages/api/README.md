@@ -30,7 +30,9 @@ src/
   cf-api.ts                   # Cloudflare API helpers
   cron-scheduler.ts           # Durable Object for project crons
   usage-counter.ts            # Durable Object for per-user usage counters
+  sandbox-concurrency-counter.ts # Trusted sandbox leases and server-clock metering
   usage-queue.ts              # Queue consumer logic
+  usage-auth.ts               # Platform-only signing envelope and ROUTING key bootstrap
   tiers.ts                    # Plan limits + helpers (incl. concurrentBuilds, buildTimeoutMinutes; getBuildInstanceType selects the build-container size/class by plan)
   build-scheduler.ts          # Durable Object: global build queue + per-tier concurrency
   build-manager.ts            # Durable Objects (extend @cloudflare/containers Container): BuildManager (free standard-3 = 2/8/16) + BuildManagerLarge (paid standard-4)
@@ -38,7 +40,7 @@ src/
   build-types.ts              # BuildConfig, BuildLogLine
   github/                     # GitHub App crypto: app-jwt, installation-token, webhook-verify, oidc-verify
   provisioning/               # Worker/resource provisioning + cleanup
-  migrations/                 # Validation + legacy remote D1 runner
+  migrations/                 # Validation + remote D1 migration runner
   auth/
     deploy-token.ts           # Mint short-lived project-scoped deploy JWT (aud: "deploy")
   routes/
@@ -83,7 +85,9 @@ drizzle/
   - CRUD
   - deploys and rollbacks
   - migrations and logs
+    - Managed D1 apply submits each migration's SQL and `_void_migrations` insert in one transactional query batch. Retries require a tracking row to establish success; an existing table or column alone is insufficient. Failures retain the confirmed committed prefix in project metadata. Reconcile older untracked schema changes explicitly before retrying.
   - secrets
+    - Secret changes hold the project row lock through active-Worker propagation. A nonterminal deployment or rollback lease returns HTTP 409 before storage changes; retry after that operation completes. Propagation requests time out after 30 seconds so an unavailable upstream cannot hold the project fence indefinitely.
   - domains
   - usage
   - PostgreSQL and MySQL project database provisioning/update
@@ -106,7 +110,7 @@ The webhook and OIDC endpoints return `503` when the GitHub App secrets are unse
 
 - `POST /internal/revalidate/:projectId`
 - `POST /internal/resolve-resource/:projectId`
-- `POST /internal/resolve-worker/:projectId`
+- `POST /internal/resolve-worker/:projectId` — resolve the active deployment's versioned worker; static active deployments report that no worker exists
 
 ### Operator API
 
@@ -119,16 +123,39 @@ deploy tokens cannot authenticate this API, including in development bypass mode
 
 Routes under `src/operator/` share user/project/access and operational services
 with `src/admin/routes/`. Operational POSTs accept `dryRun: true` for validation
-and a concrete preview without side effects. Actual mutations persist an audit
-intent before execution and its outcome afterward. `/system/events` paginates
-those records. Audit targets contain JSON-encoded, action-specific identifiers
-and bounded change arguments; unrelated request fields and credentials are
-excluded. JSON errors use `{ error, message, details? }`; partial external
-failures report completed work instead of silently retrying. Requests are bounded
-to 32 KiB, list pages to 100 rows, and responses disable caching.
+and a concrete preview without side effects. CLI and browser mutations persist an
+audit intent before execution and its outcome afterward. `/system/events`
+paginates those records. Audit targets contain JSON-encoded, action-specific
+identifiers and bounded change arguments; unrelated request fields and
+credentials are excluded. JSON errors use `{ error, message, details? }`;
+partial external failures report completed work instead of silently retrying.
+Requests are bounded to 32 KiB, list pages to 100 rows, and responses disable
+caching.
+
+Managed Sandbox disablement uses `void platform system sandbox-drain`. The
+preview inventories bounded pages of deployment manifests and container
+resources without writing. Apply closes the activation gate, cancels active
+Sandbox deployments, and deletes only container applications corroborated by a
+managed dispatch binding. A leased PostgreSQL checkpoint advances each page and
+requires two passes, so incomplete and concurrent runs resume without accepting
+stale completion. A probe-authenticated installer preflight trusts that database
+checkpoint; platform activation must remain closed until it reports complete.
+Operator retries terminalize an abandoned ordinary cancellation after its
+10-minute grace period. Protected cutovers wait 90 minutes before ownership is
+fenced and external state is compensated; retryable rollback leases are adopted
+through their database owner token and reconciled to the committed deployment.
 
 Integration tests cover operator authentication, tenant operations, operational
 parity, dry runs, and capability guards in `test/integration/operator-*.test.ts`.
+
+User deletion, demotion, and manual suspension preserve at least one active
+administrator. Short PostgreSQL transactions serialize the check and access
+revocation before external cleanup. Deleting an administrator first demotes the
+account; failed cleanup retains that revocation and reports it as a partial
+result. Project teardown checkpoints still commit independently. Automatic quota
+suspensions retain administrator access and cannot overwrite manual suspension.
+The CLI and browser UI return the same last-administrator rejection, with no
+recovery or promotion bypass.
 
 ### Admin UI
 
@@ -243,8 +270,29 @@ Every admin write is additionally same-origin checked in `admin/middleware/auth.
 
 - **Deploy/day limits** are checked from the platform Postgres database.
 - **Request usage** is counted asynchronously through `USAGE_QUEUE` and the `UsageCounter` DO.
+- **Usage provenance** is authenticated before accounting. The API health check
+  creates a purpose-separated signing key in the private routing KV; dispatch
+  and the API-owned sandbox lease counter sign every accepted queue envelope.
+  The consumer resolves project ownership and the canonical slug from Postgres,
+  validates finite nonnegative quantities, and acknowledges unsigned or invalid
+  frames without applying them.
+- **Sandbox runtime** comes from the API-owned lease clock at acquire, heartbeat,
+  release, and stale-lease cleanup. Each lease generation publishes cumulative
+  intervals, so reordered messages and retries count elapsed time once. Separate
+  durable receipts are committed atomically with account totals and survive billing
+  rollover. Signed intervals and receipts expire after eight days; expired usage
+  cannot be replayed after its receipt has been pruned.
+  Tenant Workers do not receive the usage queue producer or account identity
+  bindings. Workers deployed by older platform versions may still have the
+  dormant producer binding; their unsigned SDK frames are ignored. Redeploying
+  removes those legacy bindings but is not required for trusted gate metering.
 - **Scheduled enforcement** runs hourly from the worker cron and reconciles request/AI usage against plan limits.
 - **Per-request runtime limits** are carried in routing data and enforced by `dispatch`.
+
+Build cancellation invalidates pending startup immediately. If container startup
+has already begun, the manager stops any late producer before publishing final
+log completion. Startup claims and recovery reads are bounded; terminal recovery
+still releases container capacity when Postgres is unavailable.
 
 ## Admin UI
 

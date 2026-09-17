@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -15,11 +15,33 @@ import { describe, expect, it } from 'vite-plus/test';
 import { loadPlatformRuntime } from '../../src/cli/platform-installer.ts';
 
 describe('platform runtime manifest', () => {
+  it('packages migration inputs without Drizzle authoring snapshots', () => {
+    const runtimeDirectory = getPlatformRuntimeDirectory();
+    const manifest = readPlatformRuntimeManifest();
+    const migrationsDirectory = join(runtimeDirectory, 'drizzle');
+
+    expect(readdirSync(migrationsDirectory).sort()).toEqual(
+      [
+        'compatibility.json',
+        'meta',
+        ...manifest.database.migrations.map((migration) => `${migration.tag}.sql`),
+      ].sort(),
+    );
+    expect(readdirSync(join(migrationsDirectory, 'meta'))).toEqual(['_journal.json']);
+    const compatibility = JSON.parse(
+      readFileSync(join(migrationsDirectory, 'compatibility.json'), 'utf8'),
+    );
+    expect(compatibility.lineage).toBe(manifest.database.lineage);
+    expect(compatibility.rollbackSafeFrom).toEqual(manifest.database.rollbackSafeFrom);
+  });
+
   it('binds every packaged migration and Worker artifact to the manifest', () => {
     const runtimeDirectory = getPlatformRuntimeDirectory();
     const manifest = readPlatformRuntimeManifest();
 
     expect(manifest.schemaVersion).toBe(2);
+    expect(manifest.safetyProtocols).toEqual({ sandboxDrain: 2 });
+    expect(manifest.usageProtocolVersion).toBe(1);
     expect(manifest.database.schemaDigest).toBe(
       platformDatabaseSchemaDigest(manifest.database.lineage, manifest.database.migrations),
     );
@@ -75,6 +97,19 @@ describe('platform runtime manifest', () => {
     expect(() =>
       parsePlatformRuntimeManifest({ ...manifest, sourceRevision: 'revision with spaces' }),
     ).toThrow('sourceRevision is invalid');
+    expect(() => parsePlatformRuntimeManifest({ ...manifest, usageProtocolVersion: 2 })).toThrow(
+      'usageProtocolVersion must be 0 or 1',
+    );
+    expect(() =>
+      parsePlatformRuntimeManifest({
+        ...manifest,
+        safetyProtocols: { sandboxDrain: 3 },
+      }),
+    ).toThrow('safetyProtocols.sandboxDrain must be 0, 1, or 2');
+    const { usageProtocolVersion: _usageProtocolVersion, ...legacy } = manifest;
+    expect(parsePlatformRuntimeManifest(legacy).usageProtocolVersion).toBe(0);
+    const { safetyProtocols: _safetyProtocols, ...legacySafety } = manifest;
+    expect(parsePlatformRuntimeManifest(legacySafety).safetyProtocols).toEqual({ sandboxDrain: 0 });
   });
 
   it('resolves packaged and explicit runtime directories with provenance', () => {

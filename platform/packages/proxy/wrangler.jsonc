@@ -22,18 +22,6 @@
       "namespace": "void-users",
     },
   ],
-  // Cross-script DO binding into the api worker's SandboxConcurrencyCounter.
-  // Both top-level and per-env declarations must stay in sync — top-level is
-  // used by `wrangler dev` (no --env), per-env entries by deploys.
-  "durable_objects": {
-    "bindings": [
-      {
-        "name": "SANDBOX_CONCURRENCY_COUNTER",
-        "class_name": "SandboxConcurrencyCounter",
-        "script_name": "void-api",
-      },
-    ],
-  },
   // Account-level send_email binding. No allowed_destination_addresses or
   // destination_address — the proxy enforces per-project allowlists itself by
   // reading email-allowlist:<projectId> from ROUTING KV. CF accepts sends to
@@ -76,15 +64,6 @@
           "namespace": "void-users",
         },
       ],
-      "durable_objects": {
-        "bindings": [
-          {
-            "name": "SANDBOX_CONCURRENCY_COUNTER",
-            "class_name": "SandboxConcurrencyCounter",
-            "script_name": "void-api",
-          },
-        ],
-      },
       "send_email": [{ "name": "SEND_EMAIL" }],
       "vars": { "EMAIL_SENDER_DOMAIN": "mail.void.cloud" },
       "routes": [{ "pattern": "proxy.void.cloud", "custom_domain": true }],
@@ -110,15 +89,6 @@
           "namespace": "void-users-staging",
         },
       ],
-      "durable_objects": {
-        "bindings": [
-          {
-            "name": "SANDBOX_CONCURRENCY_COUNTER",
-            "class_name": "SandboxConcurrencyCounter",
-            "script_name": "void-api-staging",
-          },
-        ],
-      },
       "send_email": [{ "name": "SEND_EMAIL" }],
       "vars": { "EMAIL_SENDER_DOMAIN": "mail.staging.void.cloud" },
       "routes": [{ "pattern": "proxy.staging.void.cloud", "custom_domain": true }],

@@ -1,5 +1,23 @@
 import { matchLiteralPattern, matchSegmentPattern } from '@void/edge';
 
+/**
+ * Bump when a cached response accepted by an older writer can no longer be
+ * proven safe to share. Readers reject entries from earlier policies instead
+ * of replaying opaque bodies whose private headers were stripped at write time.
+ */
+export const SHARED_CACHE_POLICY_VERSION = 1 as const;
+export const SHARED_CACHE_POLICY_HEADER = 'x-void-shared-cache-policy';
+
+/** Stamp an internal edge-cache representation with the policy that admitted it. */
+export function markSharedCachePolicy(headers: Headers): void {
+  headers.set(SHARED_CACHE_POLICY_HEADER, String(SHARED_CACHE_POLICY_VERSION));
+}
+
+/** Reject opaque edge entries admitted before the current privacy policy. */
+export function hasCurrentSharedCachePolicy(response: Response): boolean {
+  return response.headers.get(SHARED_CACHE_POLICY_HEADER) === String(SHARED_CACHE_POLICY_VERSION);
+}
+
 export type IsrCacheMetadata = Readonly<{
   /** HTTP status code. */
   s: number;
@@ -7,6 +25,8 @@ export type IsrCacheMetadata = Readonly<{
   c: number;
   /** Freshness lifetime in seconds. */
   t: number;
+  /** Shared-response privacy policy version. */
+  p: typeof SHARED_CACHE_POLICY_VERSION;
 }>;
 
 export type IsrCacheEntry = Readonly<{
@@ -143,7 +163,8 @@ export function decodeIsrCacheEntry(
     !Number.isFinite(metadata.c) ||
     metadata.c <= 0 ||
     !Number.isFinite(metadata.t) ||
-    metadata.t <= 0
+    metadata.t <= 0 ||
+    metadata.p !== SHARED_CACHE_POLICY_VERSION
   ) {
     return null;
   }
@@ -194,6 +215,7 @@ export function isrCacheResponse(
       `public, s-maxage=${remainingSeconds}, max-age=0, must-revalidate`,
     );
   }
+  markSharedCachePolicy(headers);
   return new Response(entry.body, { status: entry.status, headers });
 }
 
@@ -226,6 +248,26 @@ export function shouldBypassIsr(request: Request): boolean {
   );
 }
 
+/** Return whether a response explicitly forbids storage in a shared cache. */
+export function hasSharedCacheOptOut(response: Response): boolean {
+  if (response.headers.has('Set-Cookie')) {
+    return true;
+  }
+  const cacheControl = response.headers.get('Cache-Control');
+  if (!cacheControl) {
+    return false;
+  }
+  return cacheControl.split(',').some((part) => {
+    const directive = part.split('=', 1)[0]?.trim().toLowerCase();
+    return directive === 'private' || directive === 'no-store' || directive === 'no-cache';
+  });
+}
+
+/** Return whether a complete render may be persisted in the shared ISR cache. */
+export function isSharedCacheableResponse(response: Response): boolean {
+  return response.status === 200 && !hasSharedCacheOptOut(response);
+}
+
 /** Resolve the first matching path TTL using Void route-pattern semantics. */
 export function resolvePathTtl(
   revalidate: number | Record<string, number> | undefined,
@@ -243,6 +285,37 @@ export function resolvePathTtl(
     }
   }
   return 0;
+}
+
+/** One ordered page-route entry in the shared ISR TTL policy. */
+export type IsrPageTtl = Readonly<{ pattern: string; revalidate?: number }>;
+
+/**
+ * Resolve ISR TTL from the framework's ordered page table.
+ *
+ * The first matching page is authoritative. A baked positive TTL enables ISR,
+ * a baked `0` opts out, and an absent TTL inherits from the raw per-path config.
+ * Only requests that match no page fall back to the flattened revalidate config.
+ */
+export function resolvePageTtl(
+  pages: ReadonlyArray<IsrPageTtl> | undefined,
+  revalidate: number | Record<string, number> | undefined,
+  pathRevalidate: Record<string, number> | undefined,
+  pathname: string,
+): number {
+  if (pages) {
+    for (const page of pages) {
+      if (!matchSegmentPattern(page.pattern, pathname)) {
+        continue;
+      }
+      return page.revalidate === undefined
+        ? resolvePathTtl(pathRevalidate, pathname)
+        : page.revalidate > 0
+          ? page.revalidate
+          : 0;
+    }
+  }
+  return resolvePathTtl(revalidate, pathname);
 }
 
 /** Extract response headers while removing ISR-managed and private headers. */

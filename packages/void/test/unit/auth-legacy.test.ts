@@ -128,3 +128,97 @@ describe('legacy Void Cloud authentication', () => {
     });
   });
 });
+
+describe('environment token destinations', () => {
+  async function connectedProject(withProject: boolean) {
+    const root = mkdtempSync(join(tmpdir(), 'void-auth-origin-'));
+    directories.push(root);
+    const origin = 'https://other-platform.example.test';
+    const { savePlatformConnection, platformCredentialAccount } =
+      await import('../../src/cli/platform-registry.ts');
+    savePlatformConnection({
+      accountId: null,
+      apiUrl: origin,
+      applicationDomain: 'apps.example.test',
+      displayName: 'Other platform',
+      installationId: null,
+      kind: 'connected',
+      proxyUrl: 'https://proxy.example.test',
+    });
+    state.passwords.set(platformCredentialAccount(origin), 'other-platform-saved-token');
+    if (withProject) {
+      mkdirSync(join(root, '.void'));
+      writeFileSync(
+        join(root, '.void', 'project.json'),
+        JSON.stringify({
+          projectId: 'project',
+          slug: 'app',
+          platform: 'void',
+          platformUrl: origin,
+        }),
+      );
+    }
+    return { root, origin };
+  }
+
+  it.each([true, false])(
+    'never forwards an ambient token to a selected custom platform (project=%s)',
+    async (withProject) => {
+      const { root, origin } = await connectedProject(withProject);
+      process.env.VOID_TOKEN = 'legacy-cloud-token';
+      const { getApiUrl, getToken } = await import('../../src/cli/auth.ts');
+      const { runAuthCommand } = await import('../../src/cli/auth-cmd.ts');
+      const fetcher = vi.spyOn(globalThis, 'fetch');
+      try {
+        expect(getApiUrl(root)).toBe(origin);
+        expect(() => getToken(root)).toThrow('VOID_TOKEN is not bound');
+        await expect(runAuthCommand(root, { subcommand: 'whoami' })).rejects.toThrow(
+          'VOID_TOKEN is not bound',
+        );
+        expect(fetcher).not.toHaveBeenCalled();
+        delete process.env.VOID_TOKEN;
+        expect(getToken(root)).toBe('other-platform-saved-token');
+      } finally {
+        fetcher.mockRestore();
+      }
+    },
+  );
+
+  it('uses an explicitly bound custom-platform token and normalized origin', async () => {
+    const { root, origin } = await connectedProject(true);
+    process.env.VOID_TOKEN = 'custom-platform-ci-token';
+    process.env.VOID_API_URL = origin + '/';
+    const { getApiUrl, getToken } = await import('../../src/cli/auth.ts');
+    const { PlatformClient } = await import('../../src/cli/client.ts');
+    const fetcher = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(Response.json({ login: 'operator', plan: 'free' }));
+    try {
+      await new PlatformClient(getToken(root)!, { root }).whoami();
+      expect(getApiUrl(root)).toBe(origin);
+      expect(fetcher).toHaveBeenCalledWith(
+        origin + '/me',
+        expect.objectContaining({
+          headers: expect.objectContaining({ Authorization: 'Bearer custom-platform-ci-token' }),
+        }),
+      );
+    } finally {
+      fetcher.mockRestore();
+    }
+  });
+
+  it('does not send an unscoped production token to a staging project', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-auth-staging-origin-'));
+    directories.push(root);
+    mkdirSync(join(root, '.void'));
+    writeFileSync(
+      join(root, '.void', 'project.json'),
+      JSON.stringify({ voidInternalStaging: true }),
+    );
+    process.env.VOID_TOKEN = 'production-token';
+    const { getToken } = await import('../../src/cli/auth.ts');
+    expect(() => getToken(root)).toThrow('VOID_TOKEN is not bound');
+    process.env.VOID_API_URL = 'https://api.staging.void.cloud';
+    expect(getToken(root)).toBe('production-token');
+  });
+});

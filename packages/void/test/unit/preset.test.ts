@@ -9,7 +9,6 @@ import {
   hasBackendFiles,
   resolveProjectCommand,
   resolveWranglerArgv,
-  resolveWranglerCommand,
 } from '../../src/cli/preset.ts';
 
 const TMP = join(import.meta.dirname, '.tmp-preset');
@@ -370,14 +369,14 @@ describe('project Vite commands', () => {
   });
 });
 
-describe('resolveWranglerCommand', () => {
+describe('resolveProjectCommand with Wrangler', () => {
   it('resolves to the local wrangler binary with the subcommand', () => {
     const root = setupProject({
       pkg: { dependencies: { wrangler: '^4.0.0' } },
       files: { 'node_modules/.bin/wrangler': '' },
     });
 
-    expect(resolveWranglerCommand(root, 'deploy')).toBe(
+    expect(resolveProjectCommand(root, 'wrangler deploy')).toBe(
       `${join(root, 'node_modules', '.bin', 'wrangler')} deploy`,
     );
   });
@@ -388,7 +387,7 @@ describe('resolveWranglerCommand', () => {
       files: { 'node_modules/.bin/wrangler': '' },
     });
 
-    expect(resolveWranglerCommand(root, 'd1 create foo --binding DB --update-config')).toBe(
+    expect(resolveProjectCommand(root, 'wrangler d1 create foo --binding DB --update-config')).toBe(
       `${join(root, 'node_modules', '.bin', 'wrangler')} d1 create foo --binding DB --update-config`,
     );
   });
@@ -398,7 +397,7 @@ describe('resolveWranglerCommand', () => {
       pkg: { dependencies: { wrangler: '^4.0.0' } },
     });
 
-    expect(resolveWranglerCommand(root, 'deploy')).toBe('wrangler deploy');
+    expect(resolveProjectCommand(root, 'wrangler deploy')).toBe('wrangler deploy');
   });
 });
 
@@ -530,7 +529,7 @@ describe('resolveProjectCommand shell safety (project root with spaces)', () => 
 
   it('quotes the resolved executable path so the shell does not word-split it', () => {
     const { root, binPath } = setupSpacedProject('wrangler');
-    const cmd = resolveWranglerCommand(root, 'deploy');
+    const cmd = resolveProjectCommand(root, 'wrangler deploy');
 
     // The bin path (which contains a space and a single quote) must be quoted
     // as a single token, not left as a bare substring the shell would split.
@@ -548,7 +547,7 @@ describe('resolveProjectCommand shell safety (project root with spaces)', () => 
     'executes the correct binary through a shell for a spaced root',
     () => {
       const { root } = setupSpacedProject('wrangler');
-      const cmd = resolveWranglerCommand(root, 'deploy --dry-run');
+      const cmd = resolveProjectCommand(root, 'wrangler deploy --dry-run');
       const out = execSync(cmd, { encoding: 'utf-8' });
       expect(out).toContain('VOID_BIN_OK');
       expect(out).toContain('args=deploy --dry-run');

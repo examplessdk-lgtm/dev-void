@@ -6,6 +6,8 @@ import { chromium, type Browser, type Page } from 'playwright';
 import { describe, expect, it, beforeAll, afterAll } from 'vite-plus/test';
 import { waitForIslandsHydrated } from '../../../../test/browser-helpers.ts';
 import { getPort, waitForServer, killChild } from '../../../../test/integration-helpers.ts';
+import { registerSharedClientTests } from '../../../../test/pages-client-contract.ts';
+import { defineSharedIslandTests } from '../../../../test/pages-island-contract.ts';
 
 declare global {
   interface Window {
@@ -68,6 +70,8 @@ function defineClientTests(getBase: () => string) {
 }
 
 function registerClientTests(getBase: () => string) {
+  registerSharedClientTests({ getBase, newPage, waitForHydration });
+
   let BASE: string;
   beforeAll(() => {
     BASE = getBase();
@@ -83,6 +87,48 @@ function registerClientTests(getBase: () => string) {
   async function waitForHydration(page: Page) {
     await page.waitForSelector('#app[data-hydrated="true"]');
   }
+
+  it('form follows record identity while retaining edits on refresh and submit', async () => {
+    const page = await newPage();
+    const errors: Array<string> = [];
+    page.on('pageerror', (error) => errors.push(error.message));
+    try {
+      await page.goto(BASE + '/form-records/first');
+      await waitForHydration(page).catch((error) => {
+        throw new Error(`${String(error)}\n${errors.join('\n')}`);
+      });
+      await page.evaluate(() => {
+        (document.querySelector('nav') as NavElement).__stamp = 42;
+      });
+      await page.getByRole('link', { name: 'Next record' }).click();
+      await page.waitForFunction(
+        () => document.querySelector('h1')?.textContent === 'Editing second',
+      );
+      expect(await page.getByLabel('Record name').inputValue()).toBe('Record second');
+      await page.getByLabel('Record name').fill('Edited second');
+      const refresh = page.waitForResponse((response) =>
+        response.url().includes('/form-records/second'),
+      );
+      await page.getByRole('button', { name: 'Refresh record' }).click();
+      await refresh;
+      expect(await page.getByLabel('Record name').inputValue()).toBe('Edited second');
+      const saved = page.waitForRequest((request) => request.method() === 'POST');
+      const savedResponse = page.waitForResponse(
+        (response) => response.request().method() === 'POST',
+      );
+      await page.getByRole('button', { name: 'Save record' }).click();
+      const request = await saved;
+      expect(new URL(request.url()).pathname).toBe('/form-records/second');
+      expect(request.postDataJSON()).toEqual({ name: 'Edited second' });
+      await savedResponse;
+      expect(await page.getByLabel('Record name').inputValue()).toBe('Edited second');
+      expect(await page.evaluate(() => (document.querySelector('nav') as NavElement).__stamp)).toBe(
+        42,
+      );
+    } finally {
+      await page.context().close();
+    }
+  });
 
   it('hydrates without Vue warnings', async () => {
     const page = await newPage();
@@ -107,57 +153,6 @@ function registerClientTests(getBase: () => string) {
       expect(warnings.filter((w) => w.includes('Hydration') || w.includes('[Vue warn]'))).toEqual(
         [],
       );
-    } finally {
-      await page.context().close();
-    }
-  });
-
-  it('SPA navigation: home → users', async () => {
-    const page = await newPage();
-
-    try {
-      await page.goto(BASE + '/');
-      await waitForHydration(page);
-
-      // Set a marker to detect if a full page reload happens
-      await page.evaluate(() => {
-        window.__SPA_MARKER = true;
-      });
-
-      await page.click('a[href="/users"]');
-      await page.waitForFunction(() =>
-        document.querySelector('h1')?.textContent?.includes('Users'),
-      );
-
-      expect(page.url()).toBe(BASE + '/users');
-
-      const marker = await page.evaluate(() => window.__SPA_MARKER);
-      expect(marker).toBe(true);
-
-      const text = await page.textContent('body');
-      expect(text).toContain('Alice');
-      expect(text).toContain('Bob');
-    } finally {
-      await page.context().close();
-    }
-  });
-
-  it('SPA navigation: users → user detail', async () => {
-    const page = await newPage();
-
-    try {
-      await page.goto(BASE + '/users');
-      await waitForHydration(page);
-
-      await page.click('a[href="/users/1"]');
-      await page.waitForFunction(() =>
-        document.querySelector('h1')?.textContent?.includes('Alice'),
-      );
-
-      expect(page.url()).toBe(BASE + '/users/1');
-
-      const text = await page.textContent('body');
-      expect(text).toContain('alice@example.com');
     } finally {
       await page.context().close();
     }
@@ -192,117 +187,6 @@ function registerClientTests(getBase: () => string) {
     }
   });
 
-  it('browser back/forward navigation', async () => {
-    const page = await newPage();
-
-    try {
-      await page.goto(BASE + '/');
-      await waitForHydration(page);
-
-      await page.click('a[href="/users"]');
-      await page.waitForFunction(() =>
-        document.querySelector('h1')?.textContent?.includes('Users'),
-      );
-
-      await page.click('a[href="/users/1"]');
-      await page.waitForFunction(() =>
-        document.querySelector('h1')?.textContent?.includes('Alice'),
-      );
-
-      await page.goBack();
-      await page.waitForFunction(() =>
-        document.querySelector('h1')?.textContent?.includes('Users'),
-      );
-      expect(page.url()).toBe(BASE + '/users');
-
-      await page.goBack();
-      await page.waitForFunction(() =>
-        document.querySelector('h1')?.textContent?.includes('Welcome'),
-      );
-      expect(page.url()).toBe(BASE + '/');
-
-      await page.goForward();
-      await page.waitForFunction(() =>
-        document.querySelector('h1')?.textContent?.includes('Users'),
-      );
-      expect(page.url()).toBe(BASE + '/users');
-    } finally {
-      await page.context().close();
-    }
-  });
-
-  it('form validation errors display', async () => {
-    const page = await newPage();
-
-    try {
-      await page.goto(BASE + '/users');
-      await waitForHydration(page);
-
-      // Submit form without filling fields
-      await page.click('button[type="submit"]');
-      await page.waitForFunction(() => document.body.textContent?.includes('Name is required'));
-
-      const text = await page.textContent('body');
-      expect(text).toContain('Name is required');
-      expect(text).toContain('Email is required');
-
-      // User list should still be present (GET re-ran)
-      expect(text).toContain('Alice');
-      expect(text).toContain('Bob');
-    } finally {
-      await page.context().close();
-    }
-  });
-
-  it.sequential('form submission adds user', async () => {
-    const page = await newPage();
-
-    try {
-      await page.goto(BASE + '/users');
-      await waitForHydration(page);
-
-      await page.fill('input:near(:text("Name:"))', 'Charlie');
-      await page.fill('input:near(:text("Email:"))', 'charlie@example.com');
-
-      await page.click('button[type="submit"]');
-      await page.waitForFunction(() => document.body.textContent?.includes('Charlie'));
-
-      const text = await page.textContent('body');
-      expect(text).toContain('Charlie');
-      expect(text).not.toContain('Name is required');
-      expect(text).not.toContain('Email is required');
-      expect(page.url()).toBe(BASE + '/users');
-    } finally {
-      await page.context().close();
-    }
-  });
-
-  it.sequential('navigate to newly added user detail', async () => {
-    const page = await newPage();
-
-    try {
-      await page.goto(BASE + '/users');
-      await waitForHydration(page);
-
-      // Add a new user
-      await page.fill('input:near(:text("Name:"))', 'Dana');
-      await page.fill('input:near(:text("Email:"))', 'dana@example.com');
-      await page.click('button[type="submit"]');
-      await page.waitForFunction(() => document.body.textContent?.includes('Dana'));
-
-      // Click the link to the newly added user's detail page
-      await page.click('a:has-text("Dana")');
-      await page.waitForFunction(() => document.querySelector('h1')?.textContent?.includes('Dana'));
-
-      expect(page.url()).toMatch(/\/users\/\d+$/);
-      const text = await page.textContent('body');
-      expect(text).toContain('Dana');
-      expect(text).toContain('dana@example.com');
-    } finally {
-      await page.context().close();
-    }
-  });
-
   it('deferred props: SPA navigation resolves in browser', async () => {
     const page = await newPage();
     try {
@@ -316,274 +200,6 @@ function registerClientTests(getBase: () => string) {
       const text = await page.textContent('[data-testid="deferred-resolved"]');
       expect(text).toBe('Count: 42');
       expect(page.url()).toBe(BASE + '/deferred');
-    } finally {
-      await page.context().close();
-    }
-  });
-
-  it('Link composes user onClick before SPA navigation', async () => {
-    const page = await newPage();
-    try {
-      await page.goto(BASE + '/link-behavior');
-      await waitForHydration(page);
-
-      await page.evaluate(() => {
-        window.__SPA_MARKER = true;
-      });
-      await page.click('[data-testid="onclick-link"]');
-      await page.waitForFunction(() =>
-        document.querySelector('h1')?.textContent?.includes('Users'),
-      );
-
-      expect(await page.evaluate(() => window.__linkOnClick)).toBe(true);
-      expect(await page.evaluate(() => window.__SPA_MARKER)).toBe(true);
-      expect(page.url()).toBe(BASE + '/users');
-    } finally {
-      await page.context().close();
-    }
-  });
-
-  it('Link respects onClick preventDefault', async () => {
-    const page = await newPage();
-    try {
-      await page.goto(BASE + '/link-behavior');
-      await waitForHydration(page);
-
-      await page.click('[data-testid="prevented-click-link"]');
-      await page.waitForFunction(() => window.__preventedClick === true);
-
-      expect(page.url()).toBe(BASE + '/link-behavior');
-    } finally {
-      await page.context().close();
-    }
-  });
-
-  it('Link supports cancellable onNavigate', async () => {
-    const page = await newPage();
-    try {
-      await page.goto(BASE + '/link-behavior');
-      await waitForHydration(page);
-
-      await page.click('[data-testid="prevented-navigate-link"]');
-      await page.waitForFunction(() => window.__preventedNavigate === true);
-
-      expect(page.url()).toBe(BASE + '/link-behavior');
-    } finally {
-      await page.context().close();
-    }
-  });
-
-  it('Link replace updates the current history entry', async () => {
-    const page = await newPage();
-    try {
-      await page.goto(BASE + '/');
-      await waitForHydration(page);
-
-      await page.click('a[href="/link-behavior"]');
-      await page.waitForFunction(() =>
-        document.querySelector('h1')?.textContent?.includes('Link Behavior'),
-      );
-      await waitForHydration(page);
-
-      await page.click('[data-testid="replace-link"]');
-      await page.waitForFunction(() =>
-        document.querySelector('h1')?.textContent?.includes('Users'),
-      );
-      expect(page.url()).toBe(BASE + '/users');
-
-      await page.goBack();
-      await page.waitForFunction(() =>
-        document.querySelector('h1')?.textContent?.includes('Welcome'),
-      );
-      expect(page.url()).toBe(BASE + '/');
-    } finally {
-      await page.context().close();
-    }
-  });
-
-  it('Link reloadDocument uses browser navigation', async () => {
-    const page = await newPage();
-    try {
-      await page.goto(BASE + '/link-behavior');
-      await waitForHydration(page);
-
-      await page.evaluate(() => {
-        window.__SPA_MARKER = true;
-      });
-      await page.click('[data-testid="reload-link"]');
-      await page.waitForFunction(() =>
-        document.querySelector('h1')?.textContent?.includes('Users'),
-      );
-
-      expect(page.url()).toBe(BASE + '/users');
-      expect(await page.evaluate(() => window.__SPA_MARKER)).toBeUndefined();
-    } finally {
-      await page.context().close();
-    }
-  });
-
-  it('Link leaves target and download links to the browser', async () => {
-    const page = await newPage();
-    try {
-      await page.goto(BASE + '/link-behavior');
-      await waitForHydration(page);
-
-      const popupPromise = page.context().waitForEvent('page');
-      await page.click('[data-testid="blank-link"]');
-      const popup = await popupPromise;
-      await popup.waitForLoadState();
-      expect(page.url()).toBe(BASE + '/link-behavior');
-      expect(popup.url()).toBe(BASE + '/users');
-      await popup.close();
-
-      const downloadPromise = page.waitForEvent('download');
-      await page.click('[data-testid="download-link"]');
-      const download = await downloadPromise;
-      expect(download.suggestedFilename()).toBe('users.html');
-      expect(page.url()).toBe(BASE + '/link-behavior');
-      await download.delete();
-    } finally {
-      await page.context().close();
-    }
-  });
-
-  it('Link merges GET data into href and navigation URL', async () => {
-    const page = await newPage();
-    try {
-      await page.goto(BASE + '/link-behavior');
-      await waitForHydration(page);
-
-      const href = await page.getAttribute('[data-testid="query-data-link"]', 'href');
-      expect(href).toBe('/link-behavior?tag=a&tag=b&page=2&active=true');
-
-      await page.click('[data-testid="query-data-link"]');
-      await page.waitForURL(BASE + '/link-behavior?tag=a&tag=b&page=2&active=true');
-      expect(page.url()).toBe(BASE + '/link-behavior?tag=a&tag=b&page=2&active=true');
-    } finally {
-      await page.context().close();
-    }
-  });
-}
-
-function defineIslandTests(getBase: () => string) {
-  describe.concurrent('shared island behavior', () => registerIslandTests(getBase));
-}
-
-function registerIslandTests(getBase: () => string) {
-  let BASE: string;
-  beforeAll(() => {
-    BASE = getBase();
-  });
-
-  async function newPage(): Promise<Page> {
-    const context = await browser.newContext();
-    const page = await context.newPage();
-    page.setDefaultTimeout(10_000);
-    return page;
-  }
-
-  it('island hydration: data-hydrated appears after load', async () => {
-    const page = await newPage();
-    try {
-      await page.goto(BASE + '/blog');
-      await waitForIslandsHydrated(page, 2);
-
-      const islands = await page.$$eval('[data-island]', (els) =>
-        els.map((el) => ({
-          id: el.getAttribute('data-island'),
-          hydrated: el.getAttribute('data-hydrated'),
-        })),
-      );
-
-      expect(islands.length).toBeGreaterThanOrEqual(2);
-      for (const island of islands) {
-        expect(island.hydrated).toBe('true');
-      }
-    } finally {
-      await page.context().close();
-    }
-  });
-
-  it('island interaction: counter increments on click', async () => {
-    const page = await newPage();
-    try {
-      await page.goto(BASE + '/blog');
-      await waitForIslandsHydrated(page);
-
-      const countBefore = await page.textContent('[data-testid="count"]');
-      expect(countBefore).toBe('Count: 0');
-
-      await page.click("button:has-text('Increment')");
-      await page.waitForFunction(
-        () => document.querySelector('[data-testid="count"]')?.textContent === 'Count: 1',
-      );
-
-      const countAfter = await page.textContent('[data-testid="count"]');
-      expect(countAfter).toBe('Count: 1');
-    } finally {
-      await page.context().close();
-    }
-  });
-
-  it('island form: validation errors display', async () => {
-    const page = await newPage();
-    try {
-      await page.goto(BASE + '/blog');
-      await waitForIslandsHydrated(page);
-
-      await page.click('button:has-text("Add Post")');
-      await page.waitForFunction(() => document.body.textContent?.includes('Title is required'));
-
-      const text = await page.textContent('body');
-      expect(text).toContain('Title is required');
-      expect(text).toContain('Body is required');
-    } finally {
-      await page.context().close();
-    }
-  });
-
-  it('island form: successful submission reloads page', async () => {
-    const page = await newPage();
-    try {
-      await page.goto(BASE + '/blog');
-      await waitForIslandsHydrated(page);
-
-      await page.fill('input:near(:text("Title:"))', 'New Post');
-      await page.fill('textarea:near(:text("Body:"))', 'Some content');
-
-      await page.click('button:has-text("Add Post")');
-      await page.waitForFunction(() => document.body.textContent?.includes('New Post'));
-
-      const text = await page.textContent('body');
-      expect(text).toContain('New Post');
-    } finally {
-      await page.context().close();
-    }
-  });
-
-  it('cross-navigation: Inertia page to island page falls back to full navigation', async () => {
-    const page = await newPage();
-    try {
-      await page.goto(BASE + '/');
-      await page.waitForSelector('#app[data-hydrated="true"]');
-
-      // Set SPA marker to detect full page reload
-      await page.evaluate(() => {
-        window.__SPA_MARKER = true;
-      });
-
-      // Click Blog link (goes through Void Router visit)
-      await page.click('a[href="/blog"]');
-      await page.waitForFunction(() => document.querySelector('h1')?.textContent?.includes('Blog'));
-
-      expect(page.url()).toBe(BASE + '/blog');
-
-      // SPA marker should be gone — full page navigation happened
-      const marker = await page.evaluate(() => window.__SPA_MARKER);
-      expect(marker).toBeUndefined();
-
-      // Islands should be hydrated
-      await waitForIslandsHydrated(page);
     } finally {
       await page.context().close();
     }
@@ -856,7 +472,10 @@ describe('vue-pages client (dev)', () => {
   });
 
   defineClientTests(() => DEV_BASE);
-  defineIslandTests(() => DEV_BASE);
+  defineSharedIslandTests(
+    () => DEV_BASE,
+    () => browser,
+  );
 
   it(
     'page component HMR updates when defineProps<Props>() comes from companion server types',
@@ -1081,5 +700,8 @@ describe('vue-pages client (preview)', { retry: 2 }, () => {
   });
 
   defineClientTests(() => PREVIEW_BASE);
-  defineIslandTests(() => PREVIEW_BASE);
+  defineSharedIslandTests(
+    () => PREVIEW_BASE,
+    () => browser,
+  );
 });

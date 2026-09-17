@@ -13,6 +13,7 @@ import {
   type PlatformDeploymentManifest,
   type PlatformInstallationManifest,
 } from '@void/platform';
+import { PlatformCloudflareApiError } from './platform-cloudflare.ts';
 import type {
   CloudflareAccount,
   CloudflareDnsRecord,
@@ -22,7 +23,7 @@ import type {
 } from './platform-cloudflare.ts';
 
 export type PlatformInstallPlanAction = Readonly<{
-  action: 'adopt' | 'create' | 'reuse' | 'update';
+  action: 'adopt' | 'create' | 'reuse' | 'update' | 'inspect';
   id: string | null;
   key: string;
   kind: InstallationResourceKind;
@@ -39,6 +40,7 @@ export type PlatformInstallPlan = Readonly<{
   proxyUrl: string;
   workersSubdomain: string;
   zone: CloudflareZone | null;
+  provisioningSuffix?: string;
 }>;
 
 export type PlatformInstallPlanInput = Readonly<{
@@ -49,6 +51,7 @@ export type PlatformInstallPlanInput = Readonly<{
   displayName: string;
   installationSlug: string;
   zoneName: string;
+  workersDev?: boolean;
 }>;
 
 type PlanningClient = Pick<
@@ -59,6 +62,7 @@ type PlanningClient = Pick<
   | 'getR2Object'
   | 'getWorkerPlainTextBindings'
   | 'getWorkersSubdomain'
+  | 'hasActiveCertificateForHostname'
   | 'listAiGateways'
   | 'listAccounts'
   | 'listDispatchNamespaces'
@@ -70,7 +74,6 @@ type PlanningClient = Pick<
   | 'listWorkerNames'
   | 'listWorkerDomains'
   | 'listWorkerRoutes'
-  | 'verifyToken'
 >;
 
 export async function createPlatformInstallPlan(
@@ -81,9 +84,9 @@ export async function createPlatformInstallPlan(
     authoritativeProvisionIntents?: boolean;
     provisioningSuffix?: string;
     repairMissing?: boolean;
+    allowUnverifiedAiGateway?: boolean;
   },
 ): Promise<PlatformInstallPlan> {
-  await client.verifyToken();
   const accounts = await client.listAccounts();
   const account = resolveAccount(accounts, input.accountId);
   if (existing && existing.account.id !== account.id) {
@@ -106,11 +109,25 @@ export async function createPlatformInstallPlan(
       )
       .digest('hex')
       .slice(0, 12)}`;
+  const accountSubdomain = await client.getWorkersSubdomain(account.id);
+  const workersDev =
+    existing?.deployment.application.workersDev ??
+    (input.workersDev ? { subdomain: accountSubdomain, installationId } : undefined);
+  if (workersDev && workersDev.subdomain !== accountSubdomain) {
+    throw new Error(
+      'platform: The account workers.dev subdomain changed. Restore it before continuing.',
+    );
+  }
+  const testing = !!workersDev && !input.zoneName;
   const deployment = createPlatformDeploymentManifest({
     application: {
-      baseDomain: input.applicationDomain,
+      baseDomain: testing ? `${accountSubdomain}.workers.dev` : input.applicationDomain,
       dedicatedZone: input.dedicatedZone,
       zoneName: input.zoneName,
+      ...(workersDev ? { workersDev } : {}),
+      ...(existing?.deployment.application.zoneId
+        ? { zoneId: existing.deployment.application.zoneId }
+        : {}),
     },
     controlPlane: {
       apiHostname: input.controlPlaneDomain || null,
@@ -133,9 +150,47 @@ export async function createPlatformInstallPlan(
 
   const names = deployment.resources;
   const wildcardHostname = `*.${deployment.application.baseDomain}`;
+  const zone = testing ? null : await client.findZone(account.id, deployment.application.zoneName);
+  if (!testing && deployment.application.baseDomain !== deployment.application.zoneName) {
+    const certificateHelp =
+      `Use the zone apex ${deployment.application.zoneName} as --application-domain, or provision an active ${wildcardHostname} edge certificate in the existing zone before installing. ` +
+      'Cloudflare Advanced Certificate Manager is a paid add-on; an existing custom wildcard certificate also works. ' +
+      `Manage certificates at https://dash.cloudflare.com/${account.id}/${deployment.application.zoneName}/ssl-tls/edge-certificates. ` +
+      'Certificate inspection requires Zone > SSL and Certificates > Read (or Edit) on this zone.';
+    if (!zone || zone.status !== 'active') {
+      throw new Error(
+        `platform: Nested application domain ${deployment.application.baseDomain} needs an active zone and wildcard certificate. ${certificateHelp}`,
+      );
+    }
+    let covered: boolean;
+    try {
+      covered = await client.hasActiveCertificateForHostname(zone.id, wildcardHostname);
+    } catch (error) {
+      throw new Error(
+        `platform: Could not verify edge certificate coverage for ${wildcardHostname}. ${certificateHelp}`,
+        { cause: error },
+      );
+    }
+    if (!covered) {
+      throw new Error(
+        `platform: No active edge certificate covers ${wildcardHostname}. Universal SSL for ${deployment.application.zoneName} does not cover these deeper application hostnames. ${certificateHelp}`,
+      );
+    }
+  }
+  let needsAiGatewayCredential = false;
+  const gatewayInventory = client.listAiGateways(account.id).catch((error) => {
+    if (
+      options?.allowUnverifiedAiGateway &&
+      error instanceof PlatformCloudflareApiError &&
+      error.status === 403
+    ) {
+      needsAiGatewayCredential = true;
+      return [];
+    }
+    throw error;
+  });
   const [
     workersSubdomain,
-    zone,
     aiGateways,
     routingKv,
     isrKv,
@@ -147,9 +202,8 @@ export async function createPlatformInstallPlan(
     hyperdrives,
     workers,
   ] = await Promise.all([
-    client.getWorkersSubdomain(account.id),
-    client.findZone(account.id, deployment.application.zoneName),
-    client.listAiGateways(account.id),
+    Promise.resolve(accountSubdomain),
+    gatewayInventory,
     client.listKvNamespaces(account.id, names.routingKv),
     client.listKvNamespaces(account.id, names.isrCacheKv),
     client.listKvNamespaces(account.id, names.legacyAssetsKv),
@@ -277,54 +331,68 @@ export async function createPlatformInstallPlan(
     }
   }
   const actions: Array<PlatformInstallPlanAction> = [];
-  const recordedZone = existing?.resources.find((resource) => resource.key === 'zone');
-  const remotelyOwnedZone = remoteOwnership?.resources.some(
-    (resource) => resource.key === 'zone' && resource.id === zone?.id,
-  );
-  const repairCreatedZone =
-    options?.repairMissing && recordedZone?.ownership === 'created' && !zone;
-  if (
-    recordedZone &&
-    !repairCreatedZone &&
-    (!zone || recordedZone.id !== zone.id || recordedZone.kind !== 'zone')
-  ) {
-    throw new Error(
-      `platform: Recorded zone ${recordedZone.name} (${recordedZone.id}) no longer matches the Cloudflare account.`,
+  if (!testing) {
+    const recordedZone = existing?.resources.find((resource) => resource.key === 'zone');
+    const remotelyOwnedZone = remoteOwnership?.resources.some(
+      (resource) => resource.key === 'zone' && resource.id === zone?.id,
+    );
+    const repairCreatedZone =
+      options?.repairMissing && recordedZone?.ownership === 'created' && !zone;
+    if (
+      recordedZone &&
+      !repairCreatedZone &&
+      (!zone || recordedZone.id !== zone.id || recordedZone.kind !== 'zone')
+    ) {
+      throw new Error(
+        `platform: Recorded zone ${recordedZone.name} (${recordedZone.id}) no longer matches the Cloudflare account.`,
+      );
+    }
+    actions.push({
+      action: repairCreatedZone
+        ? 'create'
+        : recordedZone || (zone && remotelyOwnedZone)
+          ? 'reuse'
+          : zone
+            ? 'adopt'
+            : 'create',
+      id: zone?.id ?? null,
+      key: 'zone',
+      kind: 'zone',
+      name: deployment.application.zoneName,
+      reason: repairCreatedZone
+        ? 'Recreate the missing installer-owned zone.'
+        : recordedZone || remotelyOwnedZone
+          ? 'Reuse the recorded zone.'
+          : zone
+            ? 'Use the existing zone without taking ownership.'
+            : 'Create the requested zone.',
+    });
+    addDnsPlan(actions, existing, wildcardHostname, dnsRecords, options);
+  }
+  if (needsAiGatewayCredential) {
+    actions.push({
+      action: 'inspect',
+      id: null,
+      key: 'ai-gateway',
+      kind: 'ai-gateway',
+      name: names.aiGateway,
+      reason:
+        'AI Gateway access will be verified with the runtime token before provisioning (AI Gateway: Edit required).',
+    });
+  } else {
+    addNamedPlan(
+      actions,
+      existing,
+      'ai-gateway',
+      'ai-gateway',
+      names.aiGateway,
+      aiGateways.filter((resource) => resource.id === names.aiGateway),
+      'reuse',
+      options,
+      remoteOwnership,
+      intentProofs,
     );
   }
-  actions.push({
-    action: repairCreatedZone
-      ? 'create'
-      : recordedZone || (zone && remotelyOwnedZone)
-        ? 'reuse'
-        : zone
-          ? 'adopt'
-          : 'create',
-    id: zone?.id ?? null,
-    key: 'zone',
-    kind: 'zone',
-    name: deployment.application.zoneName,
-    reason: repairCreatedZone
-      ? 'Recreate the missing installer-owned zone.'
-      : recordedZone || remotelyOwnedZone
-        ? 'Reuse the recorded zone.'
-        : zone
-          ? 'Use the existing zone without taking ownership.'
-          : 'Create the requested zone.',
-  });
-  addDnsPlan(actions, existing, wildcardHostname, dnsRecords, options);
-  addNamedPlan(
-    actions,
-    existing,
-    'ai-gateway',
-    'ai-gateway',
-    names.aiGateway,
-    aiGateways.filter((resource) => resource.id === names.aiGateway),
-    'reuse',
-    options,
-    remoteOwnership,
-    intentProofs,
-  );
   addNamedPlan(
     actions,
     existing,
@@ -462,6 +530,7 @@ export async function createPlatformInstallPlan(
     proxyUrl,
     workersSubdomain,
     zone,
+    ...(options?.provisioningSuffix ? { provisioningSuffix: options.provisioningSuffix } : {}),
   };
 }
 
@@ -956,13 +1025,18 @@ async function readRemoteOwnership(
 export function formatPlatformInstallPlan(plan: PlatformInstallPlan): string {
   const lines = [
     `${plan.deployment.displayName} in ${plan.account.name} (${plan.account.id})`,
-    `Applications: *.${plan.deployment.application.baseDomain}`,
+    plan.deployment.application.zoneName
+      ? `Applications: *.${plan.deployment.application.baseDomain}`
+      : 'Applications: workers.dev (testing); add a domain with void platform domain set <domain>',
     `Control plane: ${plan.apiUrl}`,
     `Resource proxy: ${plan.proxyUrl}`,
     '',
   ];
   for (const action of plan.actions) {
     lines.push(`${action.action.padEnd(6)} ${action.kind.padEnd(19)} ${action.name}`);
+    if (action.action === 'inspect') {
+      lines.push(`       ${action.reason}`);
+    }
   }
   return lines.join('\n');
 }

@@ -1,4 +1,5 @@
 export type Env = Readonly<{
+  PLATFORM_APPLICATION?: string;
   DISPATCH: DispatchNamespace;
   ISR_CACHE: KVNamespace;
   ROUTING: KVNamespace;

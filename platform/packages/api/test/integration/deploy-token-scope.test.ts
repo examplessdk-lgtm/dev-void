@@ -21,6 +21,7 @@ import {
   createTestUser,
   createTestProject,
   mockCfApi,
+  cfSuccess,
   readAllEvents,
   type TestEnv,
 } from './helpers.ts';
@@ -556,10 +557,7 @@ describe('deploy token scope enforcement', () => {
   //
   // This test proves the FINAL-tx re-check fires (not just the up-front guard):
   // the build is `building` at request entry (so the up-front guard PASSES),
-  // and the mid-flight cancel is injected by spying `markDeploymentBundleStored`
-  // — the last db.ts call before the routing switch + final publish tx in the
-  // WfP path. The spy flips the bound build to `cancelled` (mimicking the
-  // supersede UPDATE in createGithubActionsBuildWithinLimit) then calls through.
+  // and the mid-flight cancel is injected during the Cloudflare Worker upload.
   // The final-tx row-locked re-check then observes the terminal build and
   // aborts the publish.
   it('rejects a deploy whose bound build is cancelled mid-flight (final-tx re-check)', async () => {
@@ -572,25 +570,18 @@ describe('deploy token scope enforcement', () => {
       status: 'building', // ACTIVE at the up-front guard
     });
     const token = await deployToken(project.id, user.id, 'octocat', build.id);
-    mockCfApi();
-
-    // Inject the mid-flight cancel: between the up-front guard and the final
-    // publish tx, `markDeploymentBundleStored` runs exactly once in the WfP
-    // path. The spy supersedes the bound build before the publish tx runs, then
-    // delegates to the captured original (calling `db.markDeploymentBundleStored`
-    // would re-enter the spy and recurse).
-    const originalMarkBundleStored = db.markDeploymentBundleStored;
     let cancelInjected = false;
-    const spy = vi
-      .spyOn(db, 'markDeploymentBundleStored')
-      .mockImplementation(async (database, deploymentId) => {
+    mockCfApi({
+      uploadWorker: async () => {
+        // Supersede the build after its request-entry guard, before final publish.
         await env.db
           .update(builds)
           .set({ status: 'cancelled', error: 'superseded by newer run' })
           .where(eq(builds.id, build.id));
         cancelInjected = true;
-        return originalMarkBundleStored(database, deploymentId);
-      });
+        return cfSuccess({ id: 'uploaded-worker' });
+      },
+    });
 
     const res = await app.fetch(fullDeployRequest(project.id, token), env);
     expect(res.status).toBe(200); // streaming NDJSON response
@@ -616,8 +607,6 @@ describe('deploy token scope enforcement', () => {
     // The project must not point at any deployment (publish tx rolled back).
     const updatedProject = await db.getProject(env.db, project.id);
     expect(updatedProject?.active_deployment_id ?? null).toBeNull();
-
-    spy.mockRestore();
   });
 
   // Control: a bound build that stays ACTIVE through the entire pipeline

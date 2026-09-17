@@ -117,6 +117,10 @@ export const deployments = pgTable(
     commit_url: text('commit_url'),
     git_ref: text('git_ref'),
     cli_version: text('cli_version'),
+    admission_protocol: integer('admission_protocol')
+      .notNull()
+      .default(0)
+      .$default(() => 2),
     error_message: text('error_message'),
     asset_hashes: text('asset_hashes'),
     created_at: timestamp('created_at', { mode: 'string' }).notNull().defaultNow(),
@@ -129,6 +133,7 @@ export const deployments = pgTable(
   (table) => [
     index('idx_deployments_project_id').on(table.project_id, table.created_at),
     index('idx_deployments_project_status').on(table.project_id, table.status),
+    index('idx_deployments_created_id').on(table.created_at, table.id),
   ],
 );
 
@@ -444,6 +449,21 @@ export const operatorEvents = pgTable(
   (table) => [index('idx_operator_events_created').on(table.created_at, table.id)],
 );
 
+/** Authoritative, serialized checkpoint for the managed Sandbox shutdown. */
+export const sandboxDrainCheckpoints = pgTable('sandbox_drain_checkpoints', {
+  singleton: boolean('singleton').primaryKey(),
+  admission_protocol: integer('admission_protocol').notNull().default(0),
+  generation: text('generation').notNull(),
+  state: text('state').notNull().$type<'draining' | 'complete'>(),
+  phase: text('phase').notNull().$type<'deployments' | 'resources'>(),
+  cursor: jsonb('cursor').$type<Record<string, string> | null>(),
+  lease_owner: text('lease_owner'),
+  lease_expires_at: timestamp('lease_expires_at', { mode: 'string' }),
+  started_at: timestamp('started_at', { mode: 'string' }).notNull().defaultNow(),
+  updated_at: timestamp('updated_at', { mode: 'string' }).notNull().defaultNow(),
+  completed_at: timestamp('completed_at', { mode: 'string' }),
+});
+
 // ---------------------------------------------------------------------------
 // platform_events (audit log for admin platform rollbacks)
 // ---------------------------------------------------------------------------
@@ -645,6 +665,14 @@ export const githubConnections = pgTable(
     // name fallback left is for callers with no id at all (malformed/partial
     // webhook). A `repo_full_name` match is used solely in that no-id case.
     repository_id: text('repository_id'),
+    // The project owner whose own GitHub OAuth token proved access to this
+    // organization repository during connect. NULL on legacy rows and personal
+    // installations. Runtime authorization accepts an organization connection
+    // only when this still names the owning Void user; rows created before the
+    // per-repository proof flow therefore fail closed until reconnected.
+    authorized_by_user_id: text('authorized_by_user_id').references(() => users.id, {
+      onDelete: 'set null',
+    }),
     branch: text('branch').notNull().default('main'),
     build_executor: text('build_executor')
       .notNull()
@@ -896,12 +924,12 @@ export const invitations = pgTable(
     id: text('id').primaryKey(),
     email: text('email').notNull(),
     status: text('status').notNull().default('pending').$type<InvitationStatus>(),
-    invited_by: text('invited_by')
-      .notNull()
-      .references(() => users.id),
-    accepted_by: text('accepted_by').references(() => users.id),
+    // Invitation actor ids are durable audit data. They deliberately outlive
+    // the corresponding user rows, like operator_events.user_id.
+    invited_by: text('invited_by').notNull(),
+    accepted_by: text('accepted_by'),
     revoked_at: timestamp('revoked_at', { mode: 'string' }),
-    revoked_by: text('revoked_by').references(() => users.id),
+    revoked_by: text('revoked_by'),
     created_at: timestamp('created_at', { mode: 'string' }).notNull().defaultNow(),
     accepted_at: timestamp('accepted_at', { mode: 'string' }),
   },

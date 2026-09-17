@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
+import { renderCapturedLog } from './log-tail-helpers.ts';
 
 // `@cloudflare/containers` Container base class isn't available in unit tests.
 // Stub it with a minimal shape the manager relies on: ctx/env wiring plus
@@ -21,6 +22,21 @@ const containerCalls = {
   baseAlarms: 0,
 };
 type ScheduledTask = { whenSeconds: number; callback: string };
+
+function createDeferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T | PromiseLike<T>) => void;
+  reject: (reason?: unknown) => void;
+} {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 vi.mock('@cloudflare/containers', () => ({
   Container: class {
     ctx: unknown;
@@ -219,7 +235,13 @@ vi.mock('../../src/db.ts', () => ({
   // JIT App-installation coverage recheck (fresh, non-locking Postgres read).
   // Fails closed on a null repository id, exactly like the real helper.
   installationCoversRepo: vi.fn(
-    async (_db: unknown, _installationId: string, repositoryId: string | null) => {
+    async (
+      _db: unknown,
+      _connectionId: string | undefined,
+      _projectId: string,
+      _installationId: string,
+      repositoryId: string | null,
+    ) => {
       if (repositoryId === null) {
         return false;
       }
@@ -336,7 +358,6 @@ import {
   MAX_LOG_SINK_OPS_PER_DRAIN,
   MAX_STORED_LOG_LINES,
   PINNED_VOID_CLI_VERSION,
-  sanitizeLogLineForMarkdown,
   TERMINAL_RENDER_COLUMNS,
   TERMINAL_RENDER_MAX_INPUT_CODE_UNITS,
   TERMINAL_RENDER_MAX_PARAMETER_WORK,
@@ -530,6 +551,7 @@ function makeConfig(overrides: Partial<BuildConfig> = {}): BuildConfig {
     branch: 'main',
     repoFullName: 'owner/repo',
     installationId: 'inst1',
+    connectionId: 'connection-1',
     repositoryId: 'repo1',
     instanceType: 'standard-1',
     timeoutMinutes: 10,
@@ -1254,6 +1276,306 @@ describe('BuildManager.startBuild', () => {
         .get,
     ).toHaveBeenCalled();
   });
+
+  it('does not launch after cancellation completes while the source token is awaiting', async () => {
+    const tokenStarted = createDeferred<void>();
+    const releaseToken = createDeferred<void>();
+    vi.mocked(getInstallationToken).mockImplementationOnce(async () => {
+      tokenStarted.resolve(undefined);
+      await releaseToken.promise;
+      return 'late-install-token';
+    });
+
+    const ctx = makeStubCtx();
+    const env = makeEnv();
+    const m = makeManager(ctx, env);
+    const starting = m.startBuild(makeConfig());
+    await tokenStarted.promise;
+
+    await m.cancelBuild('build superseded');
+    expect(dbState.status.get('b1')).toBe('cancelled');
+    releaseToken.resolve(undefined);
+    await starting;
+
+    // The cancelled build-bound deploy token stays revoked and the continuation
+    // holding the newly returned source token never consumes fleet capacity.
+    expect(containerCalls.started).toBe(0);
+    expect(containerCalls.stopped).toBe(0);
+    expect(dbState.writes.some((write) => write.status === 'building')).toBe(false);
+    expect(ctx._kv.get('buildConfig')).toMatchObject({ status: 'cancelled' });
+    expect(ctx._kv.get('logDrainState')).toMatchObject({ state: 'complete' });
+    expect(
+      (env as unknown as { BUILD_SCHEDULER: { get: ReturnType<typeof vi.fn> } }).BUILD_SCHEDULER
+        .get,
+    ).toHaveBeenCalled();
+  });
+
+  it('does not mint a source token when cancellation finishes during deploy-token signing', async () => {
+    const signing = createDeferred<void>();
+    const releaseToken = createDeferred<string>();
+    vi.mocked(signDeployToken).mockImplementationOnce(async () => {
+      signing.resolve(undefined);
+      return releaseToken.promise;
+    });
+    const ctx = makeStubCtx();
+    const m = makeManager(ctx, makeEnv());
+    const starting = m.startBuild(makeConfig());
+    await signing.promise;
+    await m.cancelBuild('build superseded');
+    releaseToken.resolve('late-deploy-token');
+    await starting;
+
+    expect(getInstallationToken).not.toHaveBeenCalled();
+    expect(containerCalls.started).toBe(0);
+    expect(dbState.status.get('b1')).toBe('cancelled');
+    expect(ctx._kv.get('logDrainState')).toMatchObject({ state: 'complete' });
+  });
+
+  it('coalesces duplicate scheduler deliveries and allows a fresh capacity retry', async () => {
+    const tokenStarted = createDeferred<void>();
+    const releaseToken = createDeferred<string>();
+    vi.mocked(getInstallationToken).mockImplementationOnce(async () => {
+      tokenStarted.resolve(undefined);
+      return releaseToken.promise;
+    });
+    const m = makeManager(makeStubCtx(), makeEnv());
+    const startSpy = vi
+      .spyOn(m as unknown as { start: () => Promise<void> }, 'start')
+      .mockRejectedValueOnce(
+        new Error('there is no container instance that can be provided to this durable object'),
+      );
+    const first = m.startBuild(makeConfig());
+    const firstResult = expect(first).rejects.toThrow('no container instance');
+    await tokenStarted.promise;
+    const duplicate = m.startBuild(makeConfig());
+    const duplicateResult = expect(duplicate).rejects.toThrow('no container instance');
+    releaseToken.resolve('install-token');
+    await Promise.all([firstResult, duplicateResult]);
+    expect(getInstallationToken).toHaveBeenCalledOnce();
+    expect(startSpy).toHaveBeenCalledOnce();
+    expect(dbState.status.get('b1')).toBe('starting');
+
+    // The scheduler reclaims the requeued row before its next RPC. The rejected
+    // attempt must release the coalescing gate and its aborted generation.
+    startSpy.mockRestore();
+    await m.startBuild(makeConfig());
+    expect(getInstallationToken).toHaveBeenCalledTimes(2);
+    expect(containerCalls.started).toBe(1);
+    expect(dbState.status.get('b1')).toBe('building');
+  });
+
+  it('kills a producer launched after cancellation saw no container, before completing its logs', async () => {
+    const preparingLaunch = createDeferred<void>();
+    const releaseLaunch = createDeferred<void>();
+    const ctx = makeStubCtx();
+    ctx._kv.set('checkRunId', '99001');
+    const m = makeManager(ctx, makeEnv());
+    const startSpy = vi
+      .spyOn(
+        m as unknown as {
+          start: (options?: unknown, wait?: { signal?: AbortSignal }) => Promise<void>;
+        },
+        'start',
+      )
+      .mockImplementationOnce(async (_options, wait) => {
+        // The real base awaits scheduleNextAlarm/refreshOutboundInterception
+        // before container.start(), and checks abort only during readiness.
+        preparingLaunch.resolve(undefined);
+        await releaseLaunch.promise;
+        containerCalls.started += 1;
+        (m as unknown as { _containerRunning: boolean })._containerRunning = true;
+        expect(wait?.signal?.aborted).toBe(true);
+        throw new Error('Aborted waiting for container to start');
+      });
+    const starting = m.startBuild(makeConfig());
+    await preparingLaunch.promise;
+    await m.cancelBuild('build superseded');
+    expect(containerCalls.started).toBe(0);
+    expect(containerCalls.stopped).toBe(0);
+    expect(ctx._kv.get('logDrainState')).toMatchObject({ state: 'open' });
+    expect(completeCheckRun).not.toHaveBeenCalled();
+
+    releaseLaunch.resolve(undefined);
+    await starting;
+
+    expect(dbState.status.get('b1')).toBe('cancelled');
+    expect(containerCalls.stopped).toBe(1);
+    expect(containerCalls.destroyed).toBe(1);
+    expect((m as unknown as { _containerRunning: boolean })._containerRunning).toBe(false);
+    expect(ctx._logs.filter((row) => row.line.includes('container terminated'))).toEqual([
+      expect.objectContaining({
+        line: '[build-manager] container terminated: build superseded',
+      }),
+    ]);
+    expect(ctx._kv.get('logDrainState')).toMatchObject({
+      state: 'complete',
+      finalSeq: ctx._logs.at(-1)?.seq,
+    });
+    expect(completeCheckRun).toHaveBeenCalledOnce();
+    expect(vi.mocked(completeCheckRun).mock.calls[0][4]).toMatchObject({
+      conclusion: 'cancelled',
+      text: expect.stringContaining('container terminated: build superseded'),
+    });
+    expect(scheduledTasks(m).some((task) => task.callback === 'enforceTimeout')).toBe(false);
+    startSpy.mockRestore();
+  });
+
+  it.each(['cancelled', 'failed', 'complete', 'queued', null])(
+    'tears down an unclaimed launch when onStart finds an out-of-band %s row',
+    async (status) => {
+      const tokenStarted = createDeferred<void>();
+      const releaseToken = createDeferred<string>();
+      vi.mocked(getInstallationToken).mockImplementationOnce(async () => {
+        tokenStarted.resolve(undefined);
+        return releaseToken.promise;
+      });
+      const ctx = makeStubCtx();
+      ctx._kv.set('checkRunId', '99001');
+      const m = makeManager(ctx, makeEnv());
+      const starting = m.startBuild(makeConfig());
+      await tokenStarted.promise;
+      // The transaction committed, but its best-effort cancel RPC has not
+      // arrived. Only the onStart CAS can detect this remote winner.
+      if (status === null) {
+        dbState.status.delete('b1');
+      } else {
+        dbState.status.set('b1', status);
+      }
+      releaseToken.resolve('install-token');
+      await starting;
+
+      expect(containerCalls.started).toBe(1);
+      expect(containerCalls.stopped).toBe(1);
+      expect(containerCalls.destroyed).toBe(1);
+      expect(dbState.status.get('b1')).toBe(status ?? undefined);
+      expect(dbState.writes).toEqual([]);
+      expect(ctx._logs.filter((row) => row.line.includes('container terminated'))).toHaveLength(1);
+      expect(ctx._kv.get('logDrainState')).toMatchObject({ state: 'complete' });
+      expect(scheduledTasks(m).some((task) => task.callback === 'enforceTimeout')).toBe(false);
+      if (status === 'cancelled' || status === 'failed' || status === 'complete') {
+        expect(completeCheckRun).toHaveBeenCalledOnce();
+        expect(vi.mocked(completeCheckRun).mock.calls[0][4]).toMatchObject({
+          conclusion:
+            status === 'complete' ? 'success' : status === 'failed' ? 'failure' : 'cancelled',
+        });
+      }
+    },
+  );
+
+  it('bounds a hung startup CAS and tears down before its late result can restore authority', async () => {
+    vi.useFakeTimers();
+    const claimed = createDeferred<void>();
+    const releaseClaim = createDeferred<void>();
+    vi.mocked(markBuildBuildingIfStarting).mockImplementationOnce(async (_db, id) => {
+      claimed.resolve(undefined);
+      await releaseClaim.promise;
+      // Model the real guarded UPDATE when it finally acquires its row lock.
+      if (dbState.status.get(id) !== 'starting') {
+        return false;
+      }
+      dbState.status.set(id, 'building');
+      return true;
+    });
+    const ctx = makeStubCtx();
+    const m = makeManager(ctx, makeEnv());
+    try {
+      const starting = m.startBuild(makeConfig());
+      const result = expect(starting).rejects.toThrow('startup claim did not settle');
+      await claimed.promise;
+      await vi.advanceTimersByTimeAsync(TERMINAL_WRITE_TIMEOUT_MS);
+      await result;
+      expect(dbState.status.get('b1')).toBe('failed');
+      expect(containerCalls.stopped).toBe(1);
+      expect(containerCalls.destroyed).toBe(1);
+      releaseClaim.resolve(undefined);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(dbState.status.get('b1')).toBe('failed');
+      expect(ctx._kv.get('logDrainState')).toMatchObject({ state: 'complete' });
+    } finally {
+      releaseClaim.resolve(undefined);
+      vi.useRealTimers();
+    }
+  });
+
+  it('tears down a cancelled launch when the real-class start order reaches onStart late', async () => {
+    const launched = createDeferred<void>();
+    const releaseOnStart = createDeferred<void>();
+    const ctx = makeStubCtx();
+    const env = makeEnv();
+    const m = makeManager(ctx, env);
+    const startSpy = vi
+      .spyOn(
+        m as unknown as {
+          start: (options?: unknown, wait?: { signal?: AbortSignal }) => Promise<void>;
+        },
+        'start',
+      )
+      .mockImplementationOnce(async (_options, wait) => {
+        // Match @cloudflare/containers: launch first, await readiness, then call
+        // onStart before resolving. Cancellation lands in that middle window.
+        containerCalls.started += 1;
+        (m as unknown as { _containerRunning: boolean })._containerRunning = true;
+        launched.resolve(undefined);
+        await releaseOnStart.promise;
+        expect(wait?.signal?.aborted).toBe(true);
+        await m.onStart();
+      });
+
+    const starting = m.startBuild(makeConfig());
+    await launched.promise;
+    await m.cancelBuild('build superseded');
+    releaseOnStart.resolve(undefined);
+    await starting;
+
+    expect(dbState.status.get('b1')).toBe('cancelled');
+    expect(dbState.writes.some((write) => write.status === 'building')).toBe(false);
+    expect(containerCalls.stopped).toBe(1);
+    expect(containerCalls.destroyed).toBe(1);
+    expect((m as unknown as { _containerRunning: boolean })._containerRunning).toBe(false);
+    expect(ctx._kv.get('logDrainState')).toMatchObject({ state: 'complete' });
+    expect(ctx._logs.filter((row) => row.line.includes('container terminated'))).toHaveLength(1);
+    expect(scheduledTasks(m).some((task) => task.callback === 'enforceTimeout')).toBe(false);
+    startSpy.mockRestore();
+  });
+
+  it('still tears down a cancelled launch when the Postgres revocation fails', async () => {
+    const launched = createDeferred<void>();
+    const releaseOnStart = createDeferred<void>();
+    const ctx = makeStubCtx();
+    const env = makeEnv();
+    const m = makeManager(ctx, env);
+    vi.mocked(markBuildTerminalIfActive).mockRejectedValueOnce(
+      new Error('postgres cancellation failed'),
+    );
+    const startSpy = vi
+      .spyOn(m as unknown as { start: () => Promise<void> }, 'start')
+      .mockImplementationOnce(async () => {
+        containerCalls.started += 1;
+        (m as unknown as { _containerRunning: boolean })._containerRunning = true;
+        launched.resolve(undefined);
+        await releaseOnStart.promise;
+        await m.onStart();
+      });
+
+    const starting = m.startBuild(makeConfig());
+    await launched.promise;
+    await expect(m.cancelBuild('build superseded')).rejects.toThrow('postgres cancellation failed');
+    releaseOnStart.resolve(undefined);
+    await starting;
+
+    // Database uncertainty never gates fleet cleanup, and the aborted late
+    // onStart callback cannot restore `building` authority afterward.
+    expect(containerCalls.stopped).toBe(1);
+    expect(containerCalls.destroyed).toBe(1);
+    expect((m as unknown as { _containerRunning: boolean })._containerRunning).toBe(false);
+    expect(dbState.writes.some((write) => write.status === 'building')).toBe(false);
+    expect(ctx._kv.get('buildConfig')).toMatchObject({ status: 'cancelled' });
+    expect(
+      (env as unknown as { BUILD_SCHEDULER: { get: ReturnType<typeof vi.fn> } }).BUILD_SCHEDULER
+        .get,
+    ).toHaveBeenCalled();
+    startSpy.mockRestore();
+  });
 });
 
 // The container build agent uses SOURCE_TOKEN only as the Bearer to download
@@ -1443,7 +1765,7 @@ describe('BuildManager.startBuild installation coverage recheck (TOCTOU)', () =>
     const cancelled = lastWrite('cancelled');
     expect(cancelled).toBeDefined();
     expect(cancelled?.id).toBe('b1');
-    expect(cancelled?.opts?.error).toMatch(/installation no longer covers/i);
+    expect(cancelled?.opts?.error).toMatch(/reconnect the repository/i);
     expect(dbState.status.get('b1')).toBe('cancelled');
     // NO deploy token minted and NO container started.
     expect(vi.mocked(signDeployToken)).not.toHaveBeenCalled();
@@ -1452,6 +1774,8 @@ describe('BuildManager.startBuild installation coverage recheck (TOCTOU)', () =>
     // The coverage helper was consulted with this build's installation + repo id.
     expect(vi.mocked(installationCoversRepo)).toHaveBeenCalledWith(
       expect.anything(),
+      'connection-1',
+      'p1',
       'inst1',
       'repo1',
     );
@@ -1487,6 +1811,8 @@ describe('BuildManager.startBuild installation coverage recheck (TOCTOU)', () =>
 
     expect(vi.mocked(installationCoversRepo)).toHaveBeenCalledWith(
       expect.anything(),
+      'connection-1',
+      'p1',
       'inst1',
       'repo1',
     );
@@ -1993,6 +2319,26 @@ describe('BuildManager.onError', () => {
 // compare-and-set in db.ts (markBuildBuildingIfStarting / markBuildTerminalIfActive),
 // not the in-memory `config.status` early-returns (which only see the DO copy).
 describe('BuildManager lifecycle status-race CAS guards', () => {
+  it.each(['building', 'deploying'])(
+    'preserves a legitimate late onStart callback for %s',
+    async (status) => {
+      const ctx = makeStubCtx();
+      const m = makeManager(ctx, makeEnv());
+      await m.startBuild(makeConfig());
+      dbState.status.set('b1', status);
+      dbState.writes = [];
+
+      await m.onStart();
+
+      expect(dbState.status.get('b1')).toBe(status);
+      expect(ctx._kv.get('buildConfig')).toMatchObject({ status });
+      expect(containerCalls.stopped).toBe(0);
+      expect(containerCalls.destroyed).toBe(0);
+      expect(dbState.writes).toEqual([]);
+      expect(ctx._kv.get('logDrainState')).toMatchObject({ state: 'open' });
+    },
+  );
+
   it('a fast-exit onStop right after startBuild lands a terminal row that is never reset to starting', async () => {
     const ctx = makeStubCtx();
     const env = makeEnv();
@@ -2145,6 +2491,9 @@ describe('BuildManager timeout integration (base-owned alarm + scheduled enforce
     const m = makeManager(ctx, env);
     await m.startBuild(makeConfig());
     await m.onStop({ exitCode: 0, reason: 'exit' });
+    // A real onStop callback means the producer is already gone. The unit stub
+    // calls the hook directly, so model that base-class liveness transition.
+    (m as unknown as { _containerRunning: boolean })._containerRunning = false;
     dbState.writes = [];
     containerCalls.stopped = 0;
 
@@ -2153,6 +2502,77 @@ describe('BuildManager timeout integration (base-owned alarm + scheduled enforce
     expect(containerCalls.stopped).toBe(0);
     expect(dbState.writes).toEqual([]);
   });
+
+  it('recovers a live producer even when local cancellation was already persisted', async () => {
+    const ctx = makeStubCtx();
+    const env = makeEnv();
+    const m = makeManager(ctx, env);
+    await m.startBuild(makeConfig());
+    ctx._kv.set('checkRunId', '99001');
+
+    // Model an interrupted cancellation invocation: local durable state reached
+    // terminal, but the producer is still live and Postgres is still active.
+    await ctx.storage.put('buildConfig', {
+      ...makeConfig(),
+      status: 'cancelled',
+    });
+    dbState.status.set('b1', 'building');
+    dbState.writes = [];
+    containerCalls.stopped = 0;
+    containerCalls.destroyed = 0;
+
+    await m.enforceTimeout();
+
+    // Recovery revokes the build-bound token before teardown, releases the
+    // global container slot, publishes the producer barrier, and re-arms queue
+    // progress rather than returning until sleepAfter.
+    expect(dbState.status.get('b1')).toBe('cancelled');
+    expect(lastWrite('cancelled')).toBeDefined();
+    expect(containerCalls.stopped).toBe(1);
+    expect(containerCalls.destroyed).toBe(1);
+    expect(ctx._kv.get('logDrainState')).toMatchObject({ state: 'complete' });
+    expect(completeCheckRun).toHaveBeenCalledOnce();
+    expect(vi.mocked(completeCheckRun).mock.calls[0][4]).toMatchObject({
+      conclusion: 'cancelled',
+      text: expect.stringContaining('container terminated'),
+    });
+    expect(
+      (env as unknown as { BUILD_SCHEDULER: { get: ReturnType<typeof vi.fn> } }).BUILD_SCHEDULER
+        .get,
+    ).toHaveBeenCalled();
+  });
+
+  it.each(['failed', 'cancelled'])(
+    'recovers a locally %s producer when its Postgres revocation rejects',
+    async (status) => {
+      const ctx = makeStubCtx();
+      const env = makeEnv();
+      const m = makeManager(ctx, env);
+      await m.startBuild(makeConfig());
+      // Interruption between a real terminal path's local write and its signal.
+      await ctx.storage.put('buildConfig', { ...makeConfig(), status });
+      vi.mocked(markBuildTerminalIfActive).mockRejectedValueOnce(new Error('postgres offline'));
+      const portFetch = vi.fn();
+      (m as unknown as { _portFetch: unknown })._portFetch = portFetch;
+
+      await expect(m.enforceTimeout()).rejects.toThrow('postgres offline');
+
+      expect(dbState.status.get('b1')).toBe('building');
+      expect(containerCalls.stopped).toBe(1);
+      expect(containerCalls.destroyed).toBe(1);
+      // An uncertain revocation must not open another log fetch with live token
+      // authority. The durable reconciler observes any later terminal write.
+      expect(portFetch).not.toHaveBeenCalled();
+      expect(ctx._kv.get('logDrainState')).toMatchObject({ state: 'complete' });
+      expect(scheduledTasks(m).some((task) => task.callback === 'reconcileTerminalWrite')).toBe(
+        true,
+      );
+      expect(
+        (env as unknown as { BUILD_SCHEDULER: { get: ReturnType<typeof vi.fn> } }).BUILD_SCHEDULER
+          .get,
+      ).toHaveBeenCalled();
+    },
+  );
 
   it('stops the container AND pokes the scheduler even when the terminal DB write throws', async () => {
     // `markBuildTerminalIfActive` has no internal try/catch: a Hyperdrive/Postgres
@@ -2508,23 +2928,6 @@ describe('BuildManager log ingest + WebSocket replay', () => {
 
     const live = server.sent.map((s) => JSON.parse(s));
     expect(live.some((msg) => msg.type === 'log' && msg.line === 'live line')).toBe(true);
-  });
-
-  it('POST /status updates status and broadcasts', async () => {
-    const ctx = makeStubCtx();
-    const env = makeEnv();
-    const m = makeManager(ctx, env);
-    await m.startBuild(makeConfig());
-    dbState.writes = [];
-
-    const res = await m.fetch(
-      agentRequest(ctx, 'https://manager/status', {
-        method: 'POST',
-        body: JSON.stringify({ status: 'deploying' }),
-      }),
-    );
-    expect(res.status).toBe(200);
-    expect(lastWrite('deploying')).toBeDefined();
   });
 
   it('POST /cancel stops the container and records cancelled', async () => {
@@ -4965,11 +5368,11 @@ describe('formatLogTailMarkdown (pure check-run output.text renderer)', () => {
 // `^[[32m` / `^[[1G` noise, with every erased spinner frame still glued onto one
 // line — the agent splits on CR/LF and a clack spinner separates frames with
 // `ESC[1G ESC[J` and no newline.
-describe('sanitizeLogLineForMarkdown (terminal-visible text for the check run)', () => {
+describe('renderCapturedLog (terminal-visible text for the check run)', () => {
   const ESC = '\x1b';
 
   it('leaves a plain line untouched', async () => {
-    expect(await sanitizeLogLineForMarkdown('[build-agent] source extracted')).toBe(
+    expect(await renderCapturedLog('[build-agent] source extracted')).toBe(
       '[build-agent] source extracted',
     );
   });
@@ -4982,7 +5385,7 @@ describe('sanitizeLogLineForMarkdown (terminal-visible text for the check run)',
       `◐  Hashing assets (200/281)${ESC}[1G${ESC}[J` +
       `◓  Hashing assets (281/281)${ESC}[1G${ESC}[J` +
       '◇  Checked for changes';
-    expect(await sanitizeLogLineForMarkdown(line)).toBe('◇  Checked for changes');
+    expect(await renderCapturedLog(line)).toBe('◇  Checked for changes');
   });
 
   it('renders a trailing erase as the blank row a terminal would show', async () => {
@@ -4992,28 +5395,26 @@ describe('sanitizeLogLineForMarkdown (terminal-visible text for the check run)',
     // sanitize-log-line-oracle.test.ts). Nothing real is lost, because clack
     // erases BEFORE writing each frame, so the final message lands after the
     // last erase and survives — second assertion.
-    expect(await sanitizeLogLineForMarkdown(`◆  Deployed!${ESC}[1G${ESC}[J`)).toBe('');
-    expect(await sanitizeLogLineForMarkdown(`◒ Hash${ESC}[1G${ESC}[J◆  Deployed!`)).toBe(
-      '◆  Deployed!',
-    );
+    expect(await renderCapturedLog(`◆  Deployed!${ESC}[1G${ESC}[J`)).toBe('');
+    expect(await renderCapturedLog(`◒ Hash${ESC}[1G${ESC}[J◆  Deployed!`)).toBe('◆  Deployed!');
   });
 
   it('strips SGR color codes emitted by third-party build tools', async () => {
     // vitepress/rolldown colorized despite the piped (non-TTY) stdio, and does
     // not consult CI — which is why the render-time strip has to exist.
     expect(
-      await sanitizeLogLineForMarkdown(`${ESC}[32m✓${ESC}[0m building client + server bundles...`),
+      await renderCapturedLog(`${ESC}[32m✓${ESC}[0m building client + server bundles...`),
     ).toBe('✓ building client + server bundles...');
   });
 
   it('strips DEC private cursor hide/show, which clack emits around every spinner', async () => {
-    expect(await sanitizeLogLineForMarkdown(`${ESC}[?25l│`)).toBe('│');
-    expect(await sanitizeLogLineForMarkdown(`${ESC}[?25h└  Done!`)).toBe('└  Done!');
+    expect(await renderCapturedLog(`${ESC}[?25l│`)).toBe('│');
+    expect(await renderCapturedLog(`${ESC}[?25h└  Done!`)).toBe('└  Done!');
   });
 
   it('strips OSC sequences (window title / hyperlink) under both BEL and ST terminators', async () => {
-    expect(await sanitizeLogLineForMarkdown(`${ESC}]0;building\x07done`)).toBe('done');
-    expect(await sanitizeLogLineForMarkdown(`${ESC}]8;;https://void.app${ESC}\\link`)).toBe('link');
+    expect(await renderCapturedLog(`${ESC}]0;building\x07done`)).toBe('done');
+    expect(await renderCapturedLog(`${ESC}]8;;https://void.app${ESC}\\link`)).toBe('link');
   });
 
   // Expectations for the string-control cases below are ground truth from
@@ -5023,16 +5424,16 @@ describe('sanitizeLogLineForMarkdown (terminal-visible text for the check run)',
   it('consumes every C1 string control WHOLE, payload included', async () => {
     // A terminal displays nothing for any of these; leaving the payload behind
     // spends the check-run tail budget on bytes no reader will ever see.
-    expect(await sanitizeLogLineForMarkdown(`before${ESC}Pq#0;2;0;0;0payload${ESC}\\after`)).toBe(
+    expect(await renderCapturedLog(`before${ESC}Pq#0;2;0;0;0payload${ESC}\\after`)).toBe(
       'beforeafter',
     );
-    expect(await sanitizeLogLineForMarkdown(`before${ESC}_Ga=T,f=100;BASE64${ESC}\\after`)).toBe(
+    expect(await renderCapturedLog(`before${ESC}_Ga=T,f=100;BASE64${ESC}\\after`)).toBe(
       'beforeafter',
     );
-    expect(await sanitizeLogLineForMarkdown(`before${ESC}Xsos${ESC}\\after`)).toBe('beforeafter');
-    expect(await sanitizeLogLineForMarkdown(`before${ESC}^pm${ESC}\\after`)).toBe('beforeafter');
+    expect(await renderCapturedLog(`before${ESC}Xsos${ESC}\\after`)).toBe('beforeafter');
+    expect(await renderCapturedLog(`before${ESC}^pm${ESC}\\after`)).toBe('beforeafter');
     // DECRQSS reply — a real one a tool can receive and echo.
-    expect(await sanitizeLogLineForMarkdown(`${ESC}P1$r0m${ESC}\\ok`)).toBe('ok');
+    expect(await renderCapturedLog(`${ESC}P1$r0m${ESC}\\ok`)).toBe('ok');
   });
 
   it('consumes an UNTERMINATED string control to end of line', async () => {
@@ -5040,10 +5441,8 @@ describe('sanitizeLogLineForMarkdown (terminal-visible text for the check run)',
     // a long payload reaches us with its ST already cut off. A VT parser stays
     // in the string state to end of input, so this is faithful, and it is what
     // stops a 128KB truncated blob from surviving into the fence.
-    expect(await sanitizeLogLineForMarkdown(`before${ESC}_Gpayload with no terminator`)).toBe(
-      'before',
-    );
-    expect(await sanitizeLogLineForMarkdown(`before${ESC}]0;title never closed`)).toBe('before');
+    expect(await renderCapturedLog(`before${ESC}_Gpayload with no terminator`)).toBe('before');
+    expect(await renderCapturedLog(`before${ESC}]0;title never closed`)).toBe('before');
   });
 
   it('terminates on BEL for OSC only — DCS/SOS/PM/APC run to ST', async () => {
@@ -5052,31 +5451,31 @@ describe('sanitizeLogLineForMarkdown (terminal-visible text for the check run)',
     // state, so the payload after an embedded BEL is still invisible. BEL is also
     // an ordinary data byte inside sixel, so this is reachable from real payloads.
     for (const intro of ['P', 'X', '^', '_']) {
-      expect(
-        await sanitizeLogLineForMarkdown(`before${ESC}${intro}hidden\x07still${ESC}\\after`),
-      ).toBe('beforeafter');
+      expect(await renderCapturedLog(`before${ESC}${intro}hidden\x07still${ESC}\\after`)).toBe(
+        'beforeafter',
+      );
     }
     // ...and with no ST at all, the string still runs to end of line.
-    expect(await sanitizeLogLineForMarkdown(`${ESC}Pabc\x07def`)).toBe('');
+    expect(await renderCapturedLog(`${ESC}Pabc\x07def`)).toBe('');
     // OSC keeps BEL as a terminator (the legacy xterm convention).
-    expect(await sanitizeLogLineForMarkdown(`${ESC}]0;title\x07visible`)).toBe('visible');
+    expect(await renderCapturedLog(`${ESC}]0;title\x07visible`)).toBe('visible');
   });
 
   it('aborts a string control on an embedded ESC, as a VT parser does', async () => {
-    expect(await sanitizeLogLineForMarkdown(`${ESC}Pq${ESC}[2Kmore${ESC}\\tail`)).toBe('moretail');
+    expect(await renderCapturedLog(`${ESC}Pq${ESC}[2Kmore${ESC}\\tail`)).toBe('moretail');
   });
 
   it('treats bare CR as a rewrite too (progress bars that never emit LF)', async () => {
-    expect(await sanitizeLogLineForMarkdown('12%\r45%\r100%')).toBe('100%');
+    expect(await renderCapturedLog('12%\r45%\r100%')).toBe('100%');
   });
 
   it('returns empty for a line that was pure control output', async () => {
-    expect(await sanitizeLogLineForMarkdown(`${ESC}[?25l${ESC}[1G${ESC}[J`)).toBe('');
-    expect(await sanitizeLogLineForMarkdown('')).toBe('');
+    expect(await renderCapturedLog(`${ESC}[?25l${ESC}[1G${ESC}[J`)).toBe('');
+    expect(await renderCapturedLog('')).toBe('');
   });
 
   it('does not mistake ordinary text for an escape sequence', async () => {
-    expect(await sanitizeLogLineForMarkdown('cost [32m] and \\x1b are literal')).toBe(
+    expect(await renderCapturedLog('cost [32m] and \\x1b are literal')).toBe(
       'cost [32m] and \\x1b are literal',
     );
   });
@@ -5094,22 +5493,20 @@ describe('sanitizeLogLineForMarkdown (terminal-visible text for the check run)',
   // prefix-erasing.
   it('keeps the prefix across erase-FORWARD, which clears only from the cursor on', async () => {
     // Terminal renders each of these as 'Downloading done'.
-    expect(await sanitizeLogLineForMarkdown(`Downloading${ESC}[K done`)).toBe('Downloading done');
-    expect(await sanitizeLogLineForMarkdown(`Downloading${ESC}[0K done`)).toBe('Downloading done');
-    expect(await sanitizeLogLineForMarkdown(`Downloading${ESC}[J done`)).toBe('Downloading done');
-    expect(await sanitizeLogLineForMarkdown(`Downloading${ESC}[0J done`)).toBe('Downloading done');
+    expect(await renderCapturedLog(`Downloading${ESC}[K done`)).toBe('Downloading done');
+    expect(await renderCapturedLog(`Downloading${ESC}[0K done`)).toBe('Downloading done');
+    expect(await renderCapturedLog(`Downloading${ESC}[J done`)).toBe('Downloading done');
+    expect(await renderCapturedLog(`Downloading${ESC}[0J done`)).toBe('Downloading done');
     // ED 3 ("Erase Saved Lines", an xterm extension) drops scrollback rows ABOVE
     // the viewport and writes no visible cell, so the prefix survives.
-    expect(await sanitizeLogLineForMarkdown(`Downloading${ESC}[3J done`)).toBe('Downloading done');
+    expect(await renderCapturedLog(`Downloading${ESC}[3J done`)).toBe('Downloading done');
   });
 
   it('drops the prefix for erases that reach back past the cursor', async () => {
     // Terminal blanks the prefix for each of these. 2J is here and 3J is not:
     // 2J clears the entire screen INCLUDING the cursor's own row.
     for (const seq of ['[1K', '[2K', '[1J', '[2J']) {
-      expect((await sanitizeLogLineForMarkdown(`Downloading${ESC}${seq} done`)).trim()).toBe(
-        'done',
-      );
+      expect((await renderCapturedLog(`Downloading${ESC}${seq} done`)).trim()).toBe('done');
     }
   });
 
@@ -5122,7 +5519,7 @@ describe('sanitizeLogLineForMarkdown (terminal-visible text for the check run)',
       `${ESC}[3J${ESC}[H${ESC}[2J`,
       `${ESC}[H${ESC}[2J${ESC}[3J`,
     ]) {
-      expect((await sanitizeLogLineForMarkdown(`Downloading${combo} done`)).trim()).toBe('done');
+      expect((await renderCapturedLog(`Downloading${combo} done`)).trim()).toBe('done');
     }
   });
 
@@ -5131,7 +5528,7 @@ describe('sanitizeLogLineForMarkdown (terminal-visible text for the check run)',
     // cursor at column 5 and the text that follows overwrites from there,
     // leaving the tail of the old content visible. The previous sanitizer
     // approximated this as 'Downloading done'; a terminal shows the splice.
-    expect(await sanitizeLogLineForMarkdown(`Downloading${ESC}[5G done`)).toBe('Down doneng');
+    expect(await renderCapturedLog(`Downloading${ESC}[5G done`)).toBe('Down doneng');
   });
 
   it('bounds the row against a hostile cursor parameter', async () => {
@@ -5141,7 +5538,7 @@ describe('sanitizeLogLineForMarkdown (terminal-visible text for the check run)',
     // terminates. This runs inside the DO while finalizing the check run, so it
     // could take out the BuildManager before its scheduler cleanup ran.
     for (const seq of ['[999999999G', '[1;999999999H', '[999999999C', `[${'9'.repeat(400)}G`]) {
-      const out = await sanitizeLogLineForMarkdown(`x${ESC}${seq}y`);
+      const out = await renderCapturedLog(`x${ESC}${seq}y`);
       // FAIL-WITHOUT-FIX: allocates until the isolate dies. Resource-bound rows
       // drop fail-closed instead of partially applying a terminal mutation.
       expect(out).toBe('');
@@ -5150,7 +5547,7 @@ describe('sanitizeLogLineForMarkdown (terminal-visible text for the check run)',
 
   it('preflights every parameter-driven loop before xterm executes it', async () => {
     for (const final of ['S', 'T', 'L', 'M', 'I', 'Z', 'b', '@', 'P', 'X']) {
-      await expect(sanitizeLogLineForMarkdown(`SECRET${ESC}[999999999${final}`)).resolves.toBe('');
+      await expect(renderCapturedLog(`SECRET${ESC}[999999999${final}`)).resolves.toBe('');
     }
   });
 
@@ -5158,14 +5555,14 @@ describe('sanitizeLogLineForMarkdown (terminal-visible text for the check run)',
     for (const final of ['J', 'K']) {
       const selectiveEraseFlood = `x${`${ESC}[?2${final}`.repeat(2_700)}ERR`;
       expect(selectiveEraseFlood.length).toBeLessThanOrEqual(TERMINAL_RENDER_MAX_INPUT_CODE_UNITS);
-      await expect(sanitizeLogLineForMarkdown(selectiveEraseFlood)).resolves.toBe('');
+      await expect(renderCapturedLog(selectiveEraseFlood)).resolves.toBe('');
     }
   });
 
   it('bounds REP allocation by preceding-grapheme length as well as Ps', async () => {
     const combining = `a${'\u0301'.repeat(131)}`;
     expect(combining.length * 8_000).toBeGreaterThan(TERMINAL_RENDER_MAX_REPEAT_CODE_UNITS);
-    expect(await sanitizeLogLineForMarkdown(`${combining}${ESC}[8000b`)).toBe('');
+    expect(await renderCapturedLog(`${combining}${ESC}[8000b`)).toBe('');
   });
 
   it('does not treat adjacent REP commands as repeated allocations', async () => {
@@ -5173,28 +5570,26 @@ describe('sanitizeLogLineForMarkdown (terminal-visible text for the check run)',
     // first REP can repeat the preceding grapheme; an adjacent REP is a no-op.
     // Preflight must reset the source at the same boundary rather than charging
     // a second allocation that the maintained parser will never perform.
-    expect(await sanitizeLogLineForMarkdown(`a${ESC}[2b${ESC}[2b`)).toBe('aaa');
+    expect(await renderCapturedLog(`a${ESC}[2b${ESC}[2b`)).toBe('aaa');
   });
 
   it('preserves the REP source across an aborted or ignored escape sequence', async () => {
-    expect(await sanitizeLogLineForMarkdown(`a${ESC}[${ESC}[2b`)).toBe('aaa');
-    expect(await sanitizeLogLineForMarkdown(`a${ESC}[??x${ESC}[2b`)).toBe('aaa');
+    expect(await renderCapturedLog(`a${ESC}[${ESC}[2b`)).toBe('aaa');
+    expect(await renderCapturedLog(`a${ESC}[??x${ESC}[2b`)).toBe('aaa');
 
     const grapheme = `a${'\u0301'.repeat(131)}`;
-    expect(await sanitizeLogLineForMarkdown(`${grapheme}${ESC}[${ESC}[8000b`)).toBe('');
-    expect(await sanitizeLogLineForMarkdown(`${grapheme}${ESC}[??x${ESC}[8000b`)).toBe('');
+    expect(await renderCapturedLog(`${grapheme}${ESC}[${ESC}[8000b`)).toBe('');
+    expect(await renderCapturedLog(`${grapheme}${ESC}[??x${ESC}[8000b`)).toBe('');
   });
 
   it('does not charge a whole ordinary ASCII run as REP source', async () => {
     const text = 'a'.repeat(132);
-    expect(await sanitizeLogLineForMarkdown(`${text}${ESC}[8000b`)).toBe(
-      `${text}${'a'.repeat(8_000)}`,
-    );
+    expect(await renderCapturedLog(`${text}${ESC}[8000b`)).toBe(`${text}${'a'.repeat(8_000)}`);
   });
 
   it('does not charge unsupported private REP identities', async () => {
     const grapheme = `a${'\u0301'.repeat(131)}`;
-    expect(await sanitizeLogLineForMarkdown(`${grapheme}${ESC}[?8000b`)).toBe(grapheme);
+    expect(await renderCapturedLog(`${grapheme}${ESC}[?8000b`)).toBe(grapheme);
   });
 
   it('bounds cumulative REP expansion from distinct printable graphemes', async () => {
@@ -5203,37 +5598,35 @@ describe('sanitizeLogLineForMarkdown (terminal-visible text for the check run)',
     expect(allocation).toBeLessThan(TERMINAL_RENDER_MAX_REPEAT_CODE_UNITS);
     expect(allocation * 3).toBeGreaterThan(TERMINAL_RENDER_MAX_REPEAT_CODE_UNITS);
     const segment = `${grapheme}${ESC}[200b${ESC}[2K`;
-    expect(await sanitizeLogLineForMarkdown(segment.repeat(3))).toBe('');
+    expect(await renderCapturedLog(segment.repeat(3))).toBe('');
   });
 
   it('drops insert mode because printable writes would shift the full dense row', async () => {
-    expect(await sanitizeLogLineForMarkdown(`${ESC}[4hSECRET`)).toBe('');
+    expect(await renderCapturedLog(`${ESC}[4hSECRET`)).toBe('');
   });
 
   it('uses a fixed right margin independent of non-painting control bytes', async () => {
     const raw = `SECRET${ESC}[200GZ`;
     const padded = `SECRET${ESC}[m${ESC}[m${ESC}[m${ESC}[m${ESC}[m${ESC}[200GZ`;
-    const expected = await sanitizeLogLineForMarkdown(raw);
-    expect(await sanitizeLogLineForMarkdown(padded)).toBe(expected);
+    const expected = await renderCapturedLog(raw);
+    expect(await renderCapturedLog(padded)).toBe(expected);
     expect(expected).toHaveLength(200);
   });
 
   it('keeps a long diagnostic with harmless SGR instead of charging queue latency', async () => {
     const text = 'x'.repeat(10_000);
-    expect(await sanitizeLogLineForMarkdown(`${text}${ESC}[0m`)).toBe(text);
+    expect(await renderCapturedLog(`${text}${ESC}[0m`)).toBe(text);
   });
 
   it('does not charge truecolor values as parser work', async () => {
     const truecolor = `${ESC}[38;2;255;255;255m`;
-    expect(await sanitizeLogLineForMarkdown(`${truecolor.repeat(11)}VISIBLE${ESC}[0m`)).toBe(
-      'VISIBLE',
-    );
+    expect(await renderCapturedLog(`${truecolor.repeat(11)}VISIBLE${ESC}[0m`)).toBe('VISIBLE');
   });
 
   it('rejects repeated full terminal resets before allocating the xterm grid', async () => {
     const resets = `${ESC}c`.repeat(TERMINAL_RENDER_MAX_INPUT_CODE_UNITS / 2);
     expect(resets).toHaveLength(TERMINAL_RENDER_MAX_INPUT_CODE_UNITS);
-    expect(await sanitizeLogLineForMarkdown(resets)).toBe('');
+    expect(await renderCapturedLog(resets)).toBe('');
   });
 
   it('bounds tab searches after output clears every configured stop', async () => {
@@ -5242,7 +5635,7 @@ describe('sanitizeLogLineForMarkdown (terminal-visible text for the check run)',
       Math.floor((TERMINAL_RENDER_MAX_INPUT_CODE_UNITS - prefix.length) / 2),
     )}`;
     expect(hostile.length).toBeLessThanOrEqual(TERMINAL_RENDER_MAX_INPUT_CODE_UNITS);
-    expect(await sanitizeLogLineForMarkdown(hostile)).toBe('');
+    expect(await renderCapturedLog(hostile)).toBe('');
   });
 
   it('does not let tab expansion amplify a hostile line', async () => {
@@ -5252,7 +5645,7 @@ describe('sanitizeLogLineForMarkdown (terminal-visible text for the check run)',
     // any, so a repo could hold ~100 of those live at once inside the DO while
     // publishing 60KB of them.
     const hostile = '\t'.repeat(MAX_PARTIAL_LINE_CHARS) + 'END';
-    const row = await sanitizeLogLineForMarkdown(hostile);
+    const row = await renderCapturedLog(hostile);
     // The controlled input cap is checked before allocating the fixed grid.
     expect(hostile.length).toBeGreaterThan(TERMINAL_RENDER_MAX_INPUT_CODE_UNITS);
     expect(row).toBe('');
@@ -5273,7 +5666,7 @@ describe('sanitizeLogLineForMarkdown (terminal-visible text for the check run)',
     // allocates a grid or executes any insertion.
     const hostile = `seed${`${ESC}[130000@`.repeat(2000)}END`;
     // FAIL-WITHOUT-FIX: RangeError from the spread, or minutes of quadratic copying.
-    expect(await sanitizeLogLineForMarkdown(hostile)).toBe('');
+    expect(await renderCapturedLog(hostile)).toBe('');
   });
 
   it('skips visually inert ICH beyond the modeled row instead of allocating blanks', async () => {
@@ -5283,7 +5676,7 @@ describe('sanitizeLogLineForMarkdown (terminal-visible text for the check run)',
     // near-capture-limit line requested about 1.3 billion blank assignments.
     const pair = `${ESC}[2K${ESC}[131072@`;
     const hostile = pair.repeat(Math.floor(MAX_PARTIAL_LINE_CHARS / pair.length));
-    const out = await sanitizeLogLineForMarkdown(hostile);
+    const out = await renderCapturedLog(hostile);
     expect(out).toBe('');
   });
 
@@ -5293,7 +5686,7 @@ describe('sanitizeLogLineForMarkdown (terminal-visible text for the check run)',
     // requested about one billion assignments while barely touching the budget.
     const pair = `${ESC}[2Kx${ESC}[G${ESC}[131071@`;
     const hostile = pair.repeat(Math.floor(MAX_PARTIAL_LINE_CHARS / pair.length));
-    const out = await sanitizeLogLineForMarkdown(hostile);
+    const out = await renderCapturedLog(hostile);
     // Once growth spends the cumulative work budget, fail closed rather than
     // preserving a cell that a later terminal mutation could hide.
     expect(out).toBe('');
@@ -5307,7 +5700,7 @@ describe('sanitizeLogLineForMarkdown (terminal-visible text for the check run)',
     // inside the capture cap and still asks for 20,000 full-row shifts.
     const hostile = `${'a'.repeat(65_000)}${ESC}[G${`${ESC}[@`.repeat(20_000)}`;
     expect(hostile.length).toBeLessThanOrEqual(MAX_PARTIAL_LINE_CHARS);
-    const out = await sanitizeLogLineForMarkdown(hostile);
+    const out = await renderCapturedLog(hostile);
     // The first over-budget shift clears the row rather than preserving content
     // a real terminal continued to mutate.
     expect(out).toBe('');
@@ -5319,7 +5712,7 @@ describe('sanitizeLogLineForMarkdown (terminal-visible text for the check run)',
     // rewrite almost all of a 100,000-cell row 3,000 times — roughly 300 million
     // assignments in the DO while it is trying to finalize a check run.
     const hostile = `SECRET${'a'.repeat(99_994)}${ESC}[7G${`${ESC}[999999X`.repeat(3_000)}`;
-    const out = await sanitizeLogLineForMarkdown(hostile);
+    const out = await renderCapturedLog(hostile);
     // Once the budget is spent, fail closed by dropping the modeled row. Ignoring
     // an over-budget erase could resurrect text a real terminal hid.
     expect(out).toBe('');
@@ -5328,33 +5721,31 @@ describe('sanitizeLogLineForMarkdown (terminal-visible text for the check run)',
   it('spends the shift budget on ordinary work before the fail-closed limit', async () => {
     // The bound must not bite ordinary output. A handful of inserts on a normal
     // row is far under the budget and behaves exactly as a terminal would.
-    expect(await sanitizeLogLineForMarkdown(`abcdef${ESC}[3D${ESC}[2@`)).toBe('abc  def');
-    expect(await sanitizeLogLineForMarkdown(`abcdef${ESC}[6D${ESC}[2P`)).toBe('cdef');
+    expect(await renderCapturedLog(`abcdef${ESC}[3D${ESC}[2@`)).toBe('abc  def');
+    expect(await renderCapturedLog(`abcdef${ESC}[6D${ESC}[2P`)).toBe('cdef');
   });
 
   it('fails closed when aggregate CSI parameter work exceeds its deterministic budget', async () => {
     const command = `${ESC}[64@`;
     const hostile = command.repeat(Math.floor(TERMINAL_RENDER_MAX_PARAMETER_WORK / 64) + 1);
     expect(hostile.length).toBeLessThan(TERMINAL_RENDER_MAX_INPUT_CODE_UNITS);
-    expect(await sanitizeLogLineForMarkdown(hostile)).toBe('');
+    expect(await renderCapturedLog(hostile)).toBe('');
     expect(TERMINAL_RENDER_COLUMNS).toBe(32 * 1024);
   });
 
   it('strips colon-form truecolor SGR (ITU-T T.416)', async () => {
-    expect(await sanitizeLogLineForMarkdown(`${ESC}[38:2::255:0:0mRED${ESC}[0m done`)).toBe(
-      'RED done',
-    );
+    expect(await renderCapturedLog(`${ESC}[38:2::255:0:0mRED${ESC}[0m done`)).toBe('RED done');
   });
 
   it('strips private-parameter CSI', async () => {
-    expect(await sanitizeLogLineForMarkdown(`${ESC}[>4;2mtext`)).toBe('text');
-    expect(await sanitizeLogLineForMarkdown(`${ESC}[=7htext`)).toBe('text');
+    expect(await renderCapturedLog(`${ESC}[>4;2mtext`)).toBe('text');
+    expect(await renderCapturedLog(`${ESC}[=7htext`)).toBe('text');
   });
 
   it('leaves no ESC byte behind for any sequence it handles', async () => {
     const line = `${ESC}[?25l${ESC}[38:2::0:255:0m✓${ESC}[0m built${ESC}[K${ESC}[?25h`;
-    expect(await sanitizeLogLineForMarkdown(line)).toBe('✓ built');
-    expect(await sanitizeLogLineForMarkdown(line)).not.toContain(ESC);
+    expect(await renderCapturedLog(line)).toBe('✓ built');
+    expect(await renderCapturedLog(line)).not.toContain(ESC);
   });
 });
 

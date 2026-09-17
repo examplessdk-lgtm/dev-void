@@ -192,8 +192,22 @@ describe('scanRoutes', () => {
 
     const result = await scanRoutes(TMP);
     expect(result.queues).toHaveLength(1);
-    expect(result.queues[0].name).toBe('order/notifications');
+    expect(result.queues[0].name).toBe('order-notifications');
     expect(result.queues[0].bindingName).toBe('QUEUE_ORDER_NOTIFICATIONS');
+  });
+
+  it('rejects nested queue names that collide after normalization', async () => {
+    createFile('routes/api/hello.ts');
+    createFile('queues/order-notifications.ts', 'export default async () => {}');
+    createFile('queues/order/notifications.ts', 'export default async () => {}');
+
+    await expect(scanRoutes(TMP)).rejects.toThrow(
+      [
+        'queue: Multiple queue files resolve to the same queue name:',
+        '  "order-notifications": "order-notifications.ts", "order/notifications.ts"',
+        'Rename the conflicting files so each queue has a unique name.',
+      ].join('\n'),
+    );
   });
 
   it('extracts maxBatchSize and maxBatchTimeout', async () => {

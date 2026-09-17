@@ -283,7 +283,6 @@ function makeEnv(options: MakeEnvOptions = {}) {
     CF_API_TOKEN: 'token',
     API: { fetch: vi.fn() },
     DISPATCH: { get: dispatchGet },
-    SANDBOX_CONCURRENCY_COUNTER: {},
     SEND_EMAIL: { send: vi.fn() },
     ...(senderDomain === null ? {} : { EMAIL_SENDER_DOMAIN: senderDomain }),
   } as unknown as Env;

@@ -197,14 +197,20 @@ const HELP_TREE: HelpTree = {
     summary: 'Manage Cloudflare authentication used by Void.',
     usage: ['void cloudflare <command>'],
     commands: [
-      { command: 'login', description: 'Sign in securely with browser OAuth' },
-      { command: 'status', description: 'Show authentication and accessible accounts' },
+      { command: 'login', description: 'Sign in or switch users with browser OAuth' },
+      {
+        command: 'status',
+        description: 'Show identity, authentication, and the deployment account',
+      },
       { command: 'logout', description: 'Remove the local browser session' },
     ],
     children: {
-      login: basicSubcommand('Sign in securely with browser OAuth.', 'void cloudflare login'),
+      login: basicSubcommand(
+        'Sign in again or switch Cloudflare users with browser OAuth.',
+        'void cloudflare login',
+      ),
       status: basicSubcommand(
-        'Show Cloudflare authentication and accessible accounts.',
+        'Show Cloudflare identity, authentication, accessible accounts, and the pinned deployment account.',
         'void cloudflare status',
       ),
       logout: basicSubcommand('Remove the local browser session.', 'void cloudflare logout'),
@@ -223,8 +229,16 @@ const HELP_TREE: HelpTree = {
       { command: 'use [id]', description: 'Select the default Void platform' },
       { command: 'status [id]', description: 'Inspect a platform and its health' },
       { command: 'discover', description: 'Recover installations from a Cloudflare account' },
+      {
+        command: 'domain set <domain>',
+        description: 'Add an application domain to a test platform',
+      },
       { command: 'install', description: 'Install a Void platform in Cloudflare' },
       { command: 'upgrade [id]', description: 'Upgrade an installed Void platform' },
+      {
+        command: 'rollback [id]',
+        description: 'Restore a compatible earlier platform runtime',
+      },
       { command: 'repair [id]', description: 'Reconcile an installed Void platform' },
       { command: 'disable [id]', description: 'Disable traffic without deleting data' },
       { command: 'enable [id]', description: 'Restore traffic for a disabled platform' },
@@ -232,6 +246,33 @@ const HELP_TREE: HelpTree = {
     ],
     children: {
       ...operatorHelpTree(),
+      domain: {
+        summary: 'Add an application domain while keeping existing workers.dev URLs.',
+        usage: ['void platform domain set <domain> [options]'],
+        children: {
+          set: {
+            summary:
+              'Set up DNS and verify HTTPS before making an application domain canonical. Rerun to resume.',
+            usage: ['void platform domain set <domain> [options]'],
+            options: [
+              {
+                command: '--installation <id>',
+                description: 'Choose an installed platform; otherwise select interactively',
+              },
+              {
+                command: '--zone <domain>',
+                description: 'Containing Cloudflare zone; detected when it already exists',
+              },
+              {
+                command: '--dedicated-zone',
+                description: 'Add catch-all routes for a zone dedicated to this platform',
+              },
+              { command: '--plan', description: 'Preview without making changes' },
+              { command: '--yes', description: 'Apply without an interactive confirmation' },
+            ],
+          },
+        },
+      },
       list: basicSubcommand('List installed and connected platforms.', 'void platform list'),
       use: basicSubcommand('Select the default Void platform.', 'void platform use [id]'),
       status: basicSubcommand('Inspect a platform and its health.', 'void platform status [id]'),
@@ -247,13 +288,20 @@ const HELP_TREE: HelpTree = {
         ],
       },
       install: {
-        summary: 'Install or resume a Void platform in Cloudflare.',
+        summary: 'Install or resume a Void platform with a domain, or workers.dev for testing.',
         usage: ['void platform install [options]'],
         options: [
           { command: '--name <slug>', description: 'Installation name' },
+          {
+            command: '--workers-dev',
+            description: 'Use workers.dev for testing; add a domain later',
+          },
           { command: '--display-name <name>', description: 'Human-readable platform name' },
           { command: '--account <id>', description: 'Cloudflare account id' },
-          { command: '--application-domain <domain>', description: 'Base domain for applications' },
+          {
+            command: '--application-domain <domain>',
+            description: 'Base domain for applications (zone apex is simplest)',
+          },
           { command: '--zone <domain>', description: 'Cloudflare zone containing the app domain' },
           {
             command: '--dedicated-zone',
@@ -273,6 +321,21 @@ const HELP_TREE: HelpTree = {
         'upgrade',
         'Upgrade an installed platform without deleting resources.',
       ),
+      rollback: {
+        summary: 'Restore a compatible earlier runtime without reversing database migrations.',
+        usage: [
+          'void platform rollback [id] --runtime <earlier-path> [--from-runtime <current-path>] [--plan] [--yes]',
+        ],
+        options: [
+          { command: '--runtime <path>', description: 'Earlier compatible runtime to restore' },
+          {
+            command: '--from-runtime <path>',
+            description: 'Current installed runtime when it differs from the packaged runtime',
+          },
+          { command: '--plan', description: 'Print the exact plan without making changes' },
+          { command: '--yes', description: 'Acknowledge non-interactive Cloudflare changes' },
+        ],
+      },
       repair: lifecycleHelp('repair', 'Reconcile drift using the installation ownership manifest.'),
       disable: lifecycleHelp('disable', 'Disable platform traffic without deleting data.'),
       enable: lifecycleHelp('enable', 'Restore configured traffic for a disabled platform.'),
@@ -882,27 +945,21 @@ const HELP_TREE: HelpTree = {
     },
   },
   env: {
-    summary: 'Validate env.ts and generate environment artifacts.',
+    summary: 'Validate env.ts and generate environment types.',
     usage: ['void env <command>'],
     commands: [
-      { command: 'check', description: 'Validate env.ts against .env files' },
+      { command: 'check', description: 'Validate local .env or remote secret names' },
       { command: 'types', description: 'Regenerate .void/env.d.ts from env.ts' },
-      { command: 'example', description: 'Generate .env.example from env.ts schema' },
     ],
     children: {
       check: {
-        summary: 'Validate env.ts against .env files and optionally remote secrets.',
+        summary: 'Validate local .env or required remote secret names.',
         usage: ['void env check [options]'],
         options: [
-          { command: '--remote', description: 'Also check required keys as remote secrets' },
+          { command: '--remote', description: 'Check required server keys as remote secrets' },
         ],
       },
       types: basicSubcommand('Regenerate .void/env.d.ts from env.ts.', 'void env types'),
-      example: {
-        summary: 'Refresh the Void-managed block in .env.example.',
-        usage: ['void env example [options]'],
-        options: [{ command: '--force', description: 'Suppress the appended block notice' }],
-      },
     },
   },
   gen: {
@@ -1046,7 +1103,6 @@ export function printGlobalHelp(): void {
       '',
       ...globalCommandGroup('env'),
       ...globalOptionLines(['env', 'check']),
-      ...globalOptionLines(['env', 'example']),
       '',
       categoryTitle('codegen'),
       globalCommandLine(['prepare'], 'void prepare'),

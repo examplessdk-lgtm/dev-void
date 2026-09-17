@@ -12,15 +12,33 @@ jobs:
     uses: ./.github/workflows/ci.yml
     permissions:
       contents: read
+
+  platform-ci:
+    uses: ./.github/workflows/platform-ci.yml
     with:
-      skip_windows: true
+      require-schema-compat: true
+    permissions:
+      contents: read
+      deployments: read
+
+  prepublish-test:
+    name: Prepublish Test
+    uses: ./.github/workflows/prepublish-test.yml
+    with:
+      suite: full
+      include_macos: true
+    permissions:
+      contents: read
+      pull-requests: read
 
   publish:
-    needs: ci
+    needs: [ci, platform-ci, prepublish-test]
     runs-on: ubuntu-latest
     environment: Release
     permissions:
       contents: read
+    env:
+      VOID_PLATFORM_SOURCE_REVISION: ${{ github.sha }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
@@ -30,6 +48,9 @@ jobs:
           node-version-file: .node-version
           cache: true
           registry-url: https://registry.npmjs.org
+      - name: Validate release versions and channel
+        id: release
+        run: node .github/scripts/release-policy.ts
       - run: vp run build
 
       - run: npm install -g npm@11
@@ -42,4 +63,5 @@ jobs:
       - name: Publish public packages
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: vp pm publish -r --access public --tag latest --no-git-checks
+          RELEASE_NPM_TAG: ${{ steps.release.outputs.npm-tag }}
+        run: vp pm publish -r --access public --tag "$RELEASE_NPM_TAG" --no-git-checks

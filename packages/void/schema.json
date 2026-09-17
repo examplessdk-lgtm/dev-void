@@ -257,8 +257,8 @@
               "description": "Enable R2 bucket binding. `true` uses default name \"STORAGE\", a string sets a custom binding name."
             },
             "ai": {
-              "type": "boolean",
-              "description": "Enable Workers AI binding"
+              "oneOf": [{ "type": "boolean" }, { "type": "string" }],
+              "description": "Enable Workers AI binding. `true` uses default name \"AI\", a string sets a custom binding name."
             },
             "email": {
               "type": "boolean",

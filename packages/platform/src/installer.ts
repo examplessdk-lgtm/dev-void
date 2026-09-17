@@ -31,11 +31,15 @@ export type PlatformRuntimeDatabaseManifest = Readonly<{
 }>;
 
 export type PlatformRuntimeManifest = Readonly<{
+  applicationRoutingVersion?: 1;
   artifacts: Readonly<Record<'api' | 'dispatch' | 'proxy' | 'tail', PlatformRuntimeArtifact>>;
   database: PlatformRuntimeDatabaseManifest;
   platformVersion: string;
+  safetyProtocols: Readonly<{ sandboxDrain: 0 | 1 | 2 }>;
   schemaVersion: 2;
   sourceRevision: string | null;
+  /** Queue payload contract shared by the API consumer and trusted producers. */
+  usageProtocolVersion: 0 | 1;
 }>;
 
 export type PlatformRuntime = Readonly<{
@@ -148,6 +152,7 @@ export function parsePlatformRuntimeManifest(value: unknown): PlatformRuntimeMan
   }
   return {
     artifacts,
+    ...(root.applicationRoutingVersion === 1 ? { applicationRoutingVersion: 1 as const } : {}),
     database: {
       journalSha256: sha256(databaseValue.journalSha256, 'database journal digest'),
       lineage,
@@ -157,12 +162,43 @@ export function parsePlatformRuntimeManifest(value: unknown): PlatformRuntimeMan
       schemaDigest,
     },
     platformVersion: nonemptyString(root.platformVersion, 'runtime manifest platformVersion'),
+    safetyProtocols: parseSafetyProtocols(root.safetyProtocols),
     schemaVersion: 2,
     sourceRevision:
       root.sourceRevision === undefined || root.sourceRevision === null
         ? null
         : sourceRevision(root.sourceRevision),
+    // Runtime manifests released before authenticated usage envelopes did not
+    // declare a protocol. Keep them usable for explicit rollback while making
+    // the installer treat every move to or from that legacy contract as a
+    // traffic-fenced transition.
+    usageProtocolVersion: usageProtocolVersion(root.usageProtocolVersion),
   };
+}
+
+function parseSafetyProtocols(value: unknown): PlatformRuntimeManifest['safetyProtocols'] {
+  if (value === undefined) {
+    return { sandboxDrain: 0 };
+  }
+  const protocols = record(value, 'runtime manifest safetyProtocols');
+  if (
+    protocols.sandboxDrain !== 0 &&
+    protocols.sandboxDrain !== 1 &&
+    protocols.sandboxDrain !== 2
+  ) {
+    throw new Error('runtime manifest safetyProtocols.sandboxDrain must be 0, 1, or 2');
+  }
+  return { sandboxDrain: protocols.sandboxDrain };
+}
+
+function usageProtocolVersion(value: unknown): 0 | 1 {
+  if (value === undefined || value === 0) {
+    return 0;
+  }
+  if (value === 1) {
+    return 1;
+  }
+  throw new Error('runtime manifest usageProtocolVersion must be 0 or 1');
 }
 
 export function getPlatformRuntimeDirectory(): string {

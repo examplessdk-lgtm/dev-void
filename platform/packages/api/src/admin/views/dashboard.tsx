@@ -5,6 +5,7 @@ import type { ProjectRow } from './projects-table.tsx';
 import { ProjectsTable } from './projects-table.tsx';
 
 export type TopProjectRow = Readonly<{
+  url?: string;
   id: string;
   user_id: string;
   slug: string;
@@ -132,11 +133,11 @@ function TopProjectsWidget({
                   </div>
                   <div style="font-size: 0.75rem; color: #666">
                     <a
-                      href={`https://${project.slug}.${siteDomain}`}
+                      href={project.url ?? `https://${project.slug}.${siteDomain}`}
                       target="_blank"
                       rel="noopener noreferrer"
                     >
-                      {project.slug}.{siteDomain}
+                      {project.url ?? `${project.slug}.${siteDomain}`}
                     </a>{' '}
                     · {project.type}
                   </div>

@@ -57,6 +57,7 @@ Handler signature:
 Notes:
 
 - Jobs are matched by exact cron string.
+- When jobs share an expression, each matching job runs once per invocation. Void waits for all matching jobs, even if one fails, then reports any failures. Native triggers and managed deliveries are deduplicated by expression.
 - Job modules are lazy-loaded at runtime.
 - Files or directories starting with `_` are ignored.
 - Missing `cron` export causes an error during scan/build.
@@ -82,10 +83,12 @@ curl -X POST http://localhost:5173/__void/scheduled \
   -d '{"cron":"0 * * * *","scheduledTime":'"$(date +%s000)"'}'
 ```
 
-If you set `__VOID_PROXY_TOKEN` in `.dev.vars`, that explicit token takes precedence and the printed curl command uses `x-void-internal: <your-token>` instead.
+If you set `__VOID_PROXY_TOKEN` in `.env`, that explicit token takes precedence and the printed curl command uses `x-void-internal: <your-token>` instead.
 
 The endpoint works in native Void apps and supported frameworks. Framework jobs run in the adapter's development runtime and use the bindings it provides.
 
 ## Deployment behavior
 
 On deploy, Void includes all discovered job schedules in the deploy manifest and configures worker cron triggers automatically.
+
+Native scheduled events do not require a manual HTTP token. For framework deployments, HTTP requests to `/__void/scheduled` require a matching `x-void-internal` token: the managed platform supplies its proxy token, or you can explicitly configure `CRON_SECRET` for manual calls. An absent or mismatched token returns `401` without running a job.

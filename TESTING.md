@@ -9,6 +9,17 @@ vp test run packages/void
 vp run check
 ```
 
+The named shortcuts select the current test projects:
+
+```sh
+vp run test:unit
+vp run test:integration
+vp run test:metaframeworks
+vp run test:pages:react-vue
+vp run test:pages:svelte-solid
+vp run test:platform
+```
+
 Run the complete SDK and platform verification before handing off a finished change:
 
 ```sh
@@ -17,6 +28,73 @@ vpr test:all
 
 `vpr test:all` formats, lints, builds, typechecks, and tests the merged monorepo. Investigate slow
 or hanging tests when they occur instead of routinely increasing timeouts.
+
+Platform projects run first; SDK unit and integration files then share a worker pool. This keeps
+database engines from competing with all framework compilers at startup. Keep module isolation
+enabled: these suites mock globals, keep database state, and exercise real process/lock boundaries.
+The full verification command builds before running the platform's type-aware lint, so it also
+works without a pre-existing dashboard `.void/tsconfig.json`.
+
+## Suite organization and CI scheduling
+
+CI builds and typechecks every playground once per OS in a dedicated required job. Integration
+shards build the public packages and then only the fixtures their tests use; they do not depend
+on generated output from another job. The `done` check requires both the tests and build/type
+checks. Linux and Windows coverage and the credentialed live-deploy gate are unchanged.
+
+Integration sharding uses [measured duration estimates](test/integration-timings.ts), rather than
+filename hashes. [The sequencer](test/sequencer.ts) packs the longest files first and starts costly
+fixtures early. Estimates affect scheduling only: new files receive a fallback estimate, and
+membership tests ensure every discovered file appears exactly once. Refresh the estimates when
+the suite's costs change materially. Seeded file shuffling remains available for isolation checks.
+
+The four adapter suites share their client and island test definitions in `test/`, while retaining
+each framework's own dev, preview, SSR, hydration, and HMR execution. Before integrations start,
+their sources are snapshotted so another test cloning a fixture cannot capture an in-flight HMR
+edit. Dependencies stay linked to the installed workspace, and snapshots are removed afterward.
+
+Use production functions in unit tests. A copy of a hook's implementation inside a test cannot
+catch regressions in the real hook. Shared form-value equality has one direct suite, and actual
+form interactions run in the adapter browser matrix.
+
+The in-memory API deletion tests schedule the fixed container-orphan sweep delay immediately.
+They still execute both sweeps and all provider/database assertions. Production timing and the
+real subprocess/lock deadline tests retain their actual timing semantics.
+
+## Prepublish Test
+
+Packed tests install the current tarballs into fresh applications through a temporary local
+registry. They catch dependency, export, type-declaration, and installed-runtime problems that
+workspace links can hide. They do not publish packages or deploy applications.
+
+| Change or trigger                                                                                    | Packed coverage                         |
+| ---------------------------------------------------------------------------------------------------- | --------------------------------------- |
+| Documentation only                                                                                   | Skip install/build/browser jobs         |
+| Routine code changes                                                                                 | One React app with each of npm and pnpm |
+| Package manifests, lockfiles, packaging configuration, adapters, scaffolding, or packed-test tooling | Full four-framework matrix              |
+| Release tags                                                                                         | Full matrix on Linux and macOS          |
+| Manual workflow run                                                                                  | Choose smoke or full                    |
+
+Smoke coverage checks package contents and exports, real initialization, CLI help, a frozen
+reinstall, public Vite builds, TypeScript, and development HTTP requests for pages, assets, and
+KV. It uses no browser. Full coverage adds Vue, Svelte, Solid, Markdown, production preview,
+and browser hydration/navigation. Superseded PR/main runs are cancelled; release runs are not.
+
+The selector reads all PR file pages or the complete pushed commit range. Renames consider both
+paths. Incomplete or unavailable change lists fall back to full coverage.
+
+Run these checks on Linux or macOS:
+
+```sh
+vp run build
+node .github/scripts/packed-consumer.mjs
+VOID_PACKED_SUITE=full node .github/scripts/packed-consumer.mjs
+node --test --test-timeout=10000 .github/scripts/packed-*.test.mjs
+```
+
+`VOID_PACKED_PM=npm|pnpm` and `VOID_PACKED_FRAMEWORK=react|vue|svelte|solid` select a focused
+local run. The interactive initializer is a Node.js script using the system `script` PTY
+utility and Bash; it has no Python or native npm dependency.
 
 ## Browser readiness and Windows CI
 

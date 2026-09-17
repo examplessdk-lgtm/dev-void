@@ -4,6 +4,23 @@ outline: deep
 
 # Sandboxes
 
+> **Managed platform beta paused:** New managed Sandbox deployments and retained
+> Sandbox rollbacks are currently disabled. Native Cloudflare deployments keep
+> using Cloudflare Sandboxes directly. Platform operators upgrading an existing
+> installation must preview and complete
+> `void platform system sandbox-drain` before reopening platform traffic. The
+> preview is bounded; pass its `nextCursor` back with `--cursor` to inspect later
+> pages. Apply is resumable through a leased database checkpoint: rerun it after
+> active deployments settle, after it advances a page, or after resolving any
+> ownership verification blocker.
+
+For an `unverified_container` blocker, use the reported resource, project,
+binding, application ID, and application name to compare the application's
+Durable Object namespace with the project's managed dispatch script. Never
+delete an account application by name alone. Remove the application and stale
+resource row only after proving that both belong to this platform installation,
+then rerun the drain.
+
 Use a Cloudflare Sandbox to run commands, work with files, and expose ports from server code. Each session gets an isolated container.
 
 ```ts

@@ -6,6 +6,10 @@ outline: deep
 
 Let's create a Void app, run it locally, and deploy it. You can start in an empty directory or [add Void to an existing Vite app](#adding-to-an-existing-vite-app).
 
+Use Node.js 24.21.0 or later. New projects pin the SDK's tested Workers
+compatibility date, so the bundled local runtime can start them. An existing
+compatibility date in your project is preserved.
+
 ## Start in an Empty Directory
 
 Install Void in your project directory:
@@ -31,6 +35,16 @@ bun add -D void
 :::
 
 Then run the setup command:
+
+With pnpm, you can also start with `pnpm create void my-app`; the scaffolder sets
+up the required native build permissions before installing Void. If a manual
+installation reports blocked build scripts, approve `esbuild`, `sharp`, and
+`workerd` with `pnpm approve-builds`. Set `better-sqlite3: false` in
+`pnpm-workspace.yaml`'s `allowBuilds`: Void uses version 13's bundled binaries,
+so it does not need a native rebuild.
+
+The setup install updates the pnpm lockfile to match the generated dependencies,
+including when setup runs in CI. Later builds can use `pnpm install --frozen-lockfile`.
 
 ::: code-group
 

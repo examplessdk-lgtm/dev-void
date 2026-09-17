@@ -1,8 +1,8 @@
 import type { SubcommandDef } from './subcommand-prompt.ts';
 
 export const cloudflareSubcommands: Array<SubcommandDef> = [
-  { name: 'login', description: 'Sign in to Cloudflare securely' },
-  { name: 'status', description: 'Show Cloudflare authentication and accounts' },
+  { name: 'login', description: 'Sign in or switch Cloudflare users securely' },
+  { name: 'status', description: 'Show Cloudflare identity and the pinned deployment account' },
   { name: 'logout', description: 'Remove the local Cloudflare browser session' },
 ];
 

@@ -22,6 +22,7 @@ export type VoidAuthMigrationField = {
   unique: boolean;
   index: boolean;
   bigint: boolean;
+  unbounded?: boolean;
   references?: {
     table: string;
     field: string;
@@ -148,6 +149,27 @@ function resolveFieldName(defaultFieldName: string, field: DBFieldAttribute): st
   return field.fieldName ?? defaultFieldName;
 }
 
+const UNBOUNDED_MYSQL_AUTH_FIELDS = new Set([
+  'account.accessToken',
+  'account.refreshToken',
+  'account.idToken',
+]);
+
+function usesUnboundedMySqlText(
+  defaultModelName: string,
+  defaultFieldName: string,
+  field: DBFieldAttribute,
+): boolean {
+  return (
+    field.type === 'string' &&
+    !field.unique &&
+    !field.index &&
+    !field.references &&
+    !field.sortable &&
+    UNBOUNDED_MYSQL_AUTH_FIELDS.has(`${defaultModelName}.${defaultFieldName}`)
+  );
+}
+
 function resolveReferenceFieldName(
   schema: BetterAuthDBSchema,
   model: string,
@@ -163,6 +185,8 @@ function resolveReferenceFieldName(
 function createColumnBuilder(
   dialect: 'sqlite' | 'postgresql' | 'mysql',
   idStrategy: AuthIdStrategy,
+  defaultModelName: string,
+  defaultFieldName: string,
   fieldName: string,
   field: DBFieldAttribute,
 ): string {
@@ -190,7 +214,9 @@ function createColumnBuilder(
           ? `bigint(${JSON.stringify(fieldName)}, { mode: "number" })`
           : `int(${JSON.stringify(fieldName)})`;
       default:
-        return `varchar(${JSON.stringify(fieldName)}, { length: 255 })`;
+        return usesUnboundedMySqlText(defaultModelName, defaultFieldName, field)
+          ? `text(${JSON.stringify(fieldName)})`
+          : `varchar(${JSON.stringify(fieldName)}, { length: 255 })`;
     }
   }
 
@@ -257,11 +283,21 @@ function createColumnDefinition(
   schema: BetterAuthDBSchema,
   idStrategy: AuthIdStrategy,
   defaultToVariable: Map<string, string>,
+  defaultModelName: string,
   defaultFieldName: string,
   field: DBFieldAttribute,
 ): string {
   const actualFieldName = resolveFieldName(defaultFieldName, field);
-  const parts = [createColumnBuilder(dialect, idStrategy, actualFieldName, field)];
+  const parts = [
+    createColumnBuilder(
+      dialect,
+      idStrategy,
+      defaultModelName,
+      defaultFieldName,
+      actualFieldName,
+      field,
+    ),
+  ];
 
   if (actualFieldName === 'id') {
     parts.push('.primaryKey()');
@@ -315,7 +351,7 @@ function collectCoreImports(
     imports.add('uuid');
   }
 
-  for (const [, table] of Object.entries(schema)) {
+  for (const [defaultModelName, table] of Object.entries(schema)) {
     for (const [defaultFieldName, field] of Object.entries(table.fields)) {
       const actualFieldName = resolveFieldName(defaultFieldName, field);
       if (actualFieldName === 'id' || field.references?.field === 'id') {
@@ -333,7 +369,11 @@ function collectCoreImports(
       }
 
       if (Array.isArray(field.type) || field.type === 'string') {
-        imports.add(dialect === 'mysql' ? 'varchar' : 'text');
+        imports.add(
+          dialect === 'mysql' && !usesUnboundedMySqlText(defaultModelName, defaultFieldName, field)
+            ? 'varchar'
+            : 'text',
+        );
         continue;
       }
       if (isJsonField(field)) {
@@ -410,6 +450,7 @@ export function generateVoidAuthDrizzleSchema(
         schema,
         idStrategy,
         defaultToVariable,
+        defaultModelName,
         'id',
         { type: idStrategy === 'serial' ? 'number' : 'string', required: true },
       )},`,
@@ -420,6 +461,7 @@ export function generateVoidAuthDrizzleSchema(
           schema,
           idStrategy,
           defaultToVariable,
+          defaultModelName,
           defaultFieldName,
           field,
         )},`;
@@ -468,7 +510,21 @@ export function resolveVoidAuthMigrationSchema(
   env: Record<string, unknown> = {},
 ): VoidAuthMigrationSchema {
   const options = resolveSchemaOptions(runtime, env);
+  const logicalSchema = getAuthTables(options);
   const schema = getBetterAuthSchema(options);
+  const unboundedMySqlFields = new Set<string>();
+
+  if (runtime.dialect === 'mysql') {
+    for (const [defaultModelName, table] of Object.entries(logicalSchema)) {
+      for (const [defaultFieldName, field] of Object.entries(table.fields)) {
+        if (usesUnboundedMySqlText(defaultModelName, defaultFieldName, field)) {
+          unboundedMySqlFields.add(
+            `${table.modelName}\0${resolveFieldName(defaultFieldName, field)}`,
+          );
+        }
+      }
+    }
+  }
 
   return {
     dialect: runtime.dialect,
@@ -490,6 +546,7 @@ export function resolveVoidAuthMigrationSchema(
               unique: field.unique === true,
               index: field.index === true,
               bigint: field.bigint === true,
+              ...(unboundedMySqlFields.has(`${name}\0${fieldName}`) ? { unbounded: true } : {}),
               ...(field.references
                 ? {
                     references: {

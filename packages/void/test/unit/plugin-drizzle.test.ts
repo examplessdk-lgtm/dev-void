@@ -1,5 +1,6 @@
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { pathToFileURL } from 'node:url';
 import { dirname, join } from 'pathslash';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 
@@ -14,6 +15,7 @@ import { getMiniflareDatabasePath, openSqliteDatabase } from '../../src/migratio
 import { drizzlePlugin } from '../../src/plugin-drizzle.ts';
 
 const roots: Array<string> = [];
+const fakeStateKeys: Array<string> = [];
 const warnMock = vi.mocked(voidWarn);
 
 function createProjectRoot(options?: { schema?: boolean }): string {
@@ -36,9 +38,140 @@ function getHookHandler<T>(hook: T | { handler: T } | undefined): T {
   throw new Error('Expected Vite hook handler.');
 }
 
+type FakePoolRecord = {
+  dialect: 'postgresql' | 'mysql';
+  options: Record<string, unknown>;
+};
+
+type FakeDatabaseState = {
+  nextId: number;
+  pools: Array<FakePoolRecord>;
+};
+
+type ExecutableDbModule = {
+  db: {
+    instanceId: number;
+    query(expectedOwner: string): Promise<number>;
+    transaction<T>(callback: (tx: { instanceId: number }) => T | Promise<T>): Promise<T>;
+  };
+  createDb(connectionString: string): ExecutableDbModule['db'];
+  withEnv<T>(env: Record<string, unknown>, callback: () => T): T;
+};
+
+async function loadExecutableDbModule(
+  dialect: 'postgresql' | 'mysql',
+): Promise<{ module: ExecutableDbModule; state: FakeDatabaseState }> {
+  const root = createProjectRoot();
+  const plugin = drizzlePlugin(root, false, dialect);
+  const load = getHookHandler(plugin.load) as (this: object, id: string) => string;
+  let code = load.call({}, '\0virtual:void-db');
+  const stateKey = `__void_db_scope_${dialect}_${crypto.randomUUID().replaceAll('-', '')}`;
+  const state: FakeDatabaseState = { nextId: 0, pools: [] };
+  (globalThis as Record<string, unknown>)[stateKey] = state;
+  fakeStateKeys.push(stateKey);
+
+  const fakeDriverPath = join(root, 'fake-driver.mjs');
+  const fakePgPath = join(root, 'fake-pg.mjs');
+  const envUrl = new URL('../../src/runtime/env.ts', import.meta.url).href;
+  const stateExpression = `globalThis[${JSON.stringify(stateKey)}]`;
+  const createDatabaseSource = `
+function createDatabase(dialect, pool) {
+  const state = ${stateExpression};
+  const instanceId = ++state.nextId;
+  const connectionOwner = dialect === "postgresql" ? pool.options.connectionString : pool.options.uri;
+  let owner = connectionOwner;
+  try { owner = getTestRuntimeBinding("REQUEST_ID") ?? connectionOwner; } catch {}
+  const database = {
+    instanceId,
+    async query(expectedOwner) {
+      if (owner !== expectedOwner) throw new Error("database instance crossed request ownership");
+      return instanceId;
+    },
+    async transaction(callback) {
+      return callback(database);
+    },
+  };
+  return database;
+}
+`;
+
+  if (dialect === 'postgresql') {
+    writeFileSync(
+      fakePgPath,
+      `const state = ${stateExpression};
+export class Pool {
+  constructor(options) {
+    this.options = options;
+    state.pools.push({ dialect: "postgresql", options });
+  }
+}
+export default { Pool };
+`,
+    );
+    writeFileSync(
+      fakeDriverPath,
+      `import { getRuntimeBinding as getTestRuntimeBinding } from ${JSON.stringify(envUrl)};
+${createDatabaseSource}
+export function drizzle(pool) {
+  if (typeof pool === "string") pool = { options: { connectionString: pool } };
+  return createDatabase("postgresql", pool);
+}
+`,
+    );
+    code = code
+      .replace(/^import \{ drizzle \} from .*;$/m, `import { drizzle } from "./fake-driver.mjs";`)
+      .replace('import pg from "pg";', 'import pg from "./fake-pg.mjs";');
+  } else {
+    writeFileSync(
+      fakeDriverPath,
+      `import { getRuntimeBinding as getTestRuntimeBinding } from ${JSON.stringify(envUrl)};
+const state = ${stateExpression};
+${createDatabaseSource}
+export function createPool(options) {
+  const pool = { options };
+  state.pools.push({ dialect: "mysql", options });
+  return pool;
+}
+export function drizzle(pool) {
+  if (typeof pool === "string") pool = { options: { uri: pool } };
+  return createDatabase("mysql", pool);
+}
+`,
+    );
+    code = code
+      .replace(/^import \{ drizzle \} from .*;$/m, `import { drizzle } from "./fake-driver.mjs";`)
+      .replace(
+        /^import \{ createPool \} from .*;$/m,
+        `import { createPool } from "./fake-driver.mjs";`,
+      );
+  }
+
+  code = code.replace(
+    /^import \{ getRuntimeBinding, getRuntimeRequestResource \} from .*;$/m,
+    `import { getRuntimeBinding, getRuntimeRequestResource } from ${JSON.stringify(envUrl)};`,
+  );
+  writeFileSync(join(root, 'virtual-db.mjs'), code);
+  writeFileSync(
+    join(root, 'harness.mjs'),
+    `import { db, createDb } from "./virtual-db.mjs";
+import { withRuntimeEnv } from ${JSON.stringify(envUrl)};
+export { db, createDb };
+export const withEnv = (env, callback) => withRuntimeEnv(env, callback);
+`,
+  );
+
+  const module = (await import(
+    `${pathToFileURL(join(root, 'harness.mjs')).href}?test=${crypto.randomUUID()}`
+  )) as ExecutableDbModule;
+  return { module, state };
+}
+
 afterEach(() => {
   for (const root of roots.splice(0, roots.length)) {
     rmSync(root, { recursive: true, force: true });
+  }
+  for (const key of fakeStateKeys.splice(0, fakeStateKeys.length)) {
+    delete (globalThis as Record<string, unknown>)[key];
   }
 });
 
@@ -80,6 +213,109 @@ describe('drizzlePlugin db typing generation', () => {
     expect(dts).toContain('export type { MySql2Database } from "void/_db-mysql";');
   });
 
+  it.each(['postgresql', 'mysql'] as const)(
+    'keeps %s Hyperdrive clients inside one runtime invocation',
+    async (dialect) => {
+      const { module, state } = await loadExecutableDbModule(dialect);
+      const sharedEnv = {
+        HYPERDRIVE: { connectionString: `${dialect}://hyperdrive` },
+        REQUEST_ID: 'request-one',
+      };
+
+      const sameRequest = await module.withEnv(sharedEnv, async () => {
+        const first = await module.db.query('request-one');
+        const second = await module.db.query('request-one');
+        const transaction = await module.db.transaction(async (tx) => ({
+          proxy: module.db.instanceId,
+          transaction: tx.instanceId,
+        }));
+        return { first, second, transaction };
+      });
+
+      expect(sameRequest.first).toBe(sameRequest.second);
+      expect(sameRequest.transaction).toEqual({
+        proxy: sameRequest.first,
+        transaction: sameRequest.first,
+      });
+
+      sharedEnv.REQUEST_ID = 'request-two';
+      const nextRequest = await module.withEnv(sharedEnv, () => module.db.query('request-two'));
+      expect(nextRequest).not.toBe(sameRequest.first);
+
+      const localOwner = `${dialect}://local`;
+      await expect(
+        module.withEnv({ DATABASE_URL: localOwner, REQUEST_ID: 'local' }, () =>
+          module.db.query('local'),
+        ),
+      ).resolves.toBeTypeOf('number');
+
+      const explicitOwner = `${dialect}://explicit`;
+      await expect(module.createDb(explicitOwner).query(explicitOwner)).resolves.toBeTypeOf(
+        'number',
+      );
+
+      let releaseFirst!: () => void;
+      let releaseSecond!: () => void;
+      const firstGate = new Promise<void>((resolve) => (releaseFirst = resolve));
+      const secondGate = new Promise<void>((resolve) => (releaseSecond = resolve));
+      const firstOverlap = module.withEnv(
+        {
+          HYPERDRIVE: { connectionString: `${dialect}://hyperdrive` },
+          REQUEST_ID: 'overlap-one',
+        },
+        async () => {
+          const before = await module.db.query('overlap-one');
+          await firstGate;
+          const after = await module.db.query('overlap-one');
+          return { before, after };
+        },
+      );
+      const secondOverlap = module.withEnv(
+        {
+          HYPERDRIVE: { connectionString: `${dialect}://hyperdrive` },
+          REQUEST_ID: 'overlap-two',
+        },
+        async () => {
+          const before = await module.db.query('overlap-two');
+          await secondGate;
+          const after = await module.db.query('overlap-two');
+          return { before, after };
+        },
+      );
+      releaseSecond();
+      releaseFirst();
+      const [overlapOne, overlapTwo] = await Promise.all([firstOverlap, secondOverlap]);
+      expect(overlapOne.before).toBe(overlapOne.after);
+      expect(overlapTwo.before).toBe(overlapTwo.after);
+      expect(overlapOne.before).not.toBe(overlapTwo.before);
+
+      let background!: Promise<number>;
+      const responseInstance = await module.withEnv(
+        {
+          HYPERDRIVE: { connectionString: `${dialect}://hyperdrive` },
+          REQUEST_ID: 'background',
+        },
+        async () => {
+          const instance = module.db.instanceId;
+          background = new Promise((resolve, reject) => {
+            setTimeout(() => module.db.query('background').then(resolve, reject), 0);
+          });
+          return instance;
+        },
+      );
+      expect(await background).toBe(responseInstance);
+
+      expect(state.pools).toHaveLength(6);
+      for (const pool of state.pools) {
+        if (dialect === 'postgresql') {
+          expect(pool.options).toMatchObject({ max: 1, idleTimeoutMillis: 1000 });
+        } else {
+          expect(pool.options).toMatchObject({ connectionLimit: 1, maxIdle: 1, idleTimeout: 1000 });
+        }
+      }
+    },
+  );
+
   it('uses the required default mode for MySQL databases with a schema', () => {
     const root = createProjectRoot();
     const plugin = drizzlePlugin(root, false, 'mysql');
@@ -87,10 +323,7 @@ describe('drizzlePlugin db typing generation', () => {
 
     const code = load.call({}, '\0virtual:void-db');
 
-    expect(code).toContain(
-      'drizzle(getRuntimeBinding("DATABASE_URL"), { schema, mode: "default" })',
-    );
-    expect(code).toContain('drizzle(getConnectionString(), { schema, mode: "default" })');
+    expect(code).toContain('return drizzle(pool, { schema, mode: "default" })');
     expect(code).toContain('drizzle(connectionString, { schema, mode: "default" })');
   });
 
@@ -146,7 +379,7 @@ describe('drizzlePlugin db typing generation', () => {
     const code = load.call({}, '\0virtual:void-db');
     expect(code).toContain('import { drizzle } from "');
     expect(code).not.toContain('import * as schema');
-    expect(code).toContain('drizzle(getConnectionString())');
+    expect(code).toContain('return drizzle(pool)');
   });
 
   it('uses a custom D1 binding name in the sqlite virtual module', () => {
@@ -210,6 +443,32 @@ describe('drizzlePlugin db typing generation', () => {
     }
 
     const plugin = drizzlePlugin(root, false, 'sqlite', { localD1PersistRoot: persistRoot });
+    const configureServer = getHookHandler(plugin.configureServer) as (
+      server: unknown,
+    ) => Promise<void>;
+
+    await configureServer({ watcher: { on: vi.fn() } });
+
+    expect(warnMock).not.toHaveBeenCalled();
+  });
+
+  it('checks schema state using the configured local D1 database ID', async () => {
+    const root = createProjectRoot();
+    const persistRoot = join(root, 'local-state');
+    const databaseId = 'configured-preview-id';
+    const dbPath = getMiniflareDatabasePath(persistRoot, databaseId);
+    mkdirSync(dirname(dbPath), { recursive: true });
+    const db = await openSqliteDatabase(dbPath);
+    try {
+      db.exec('CREATE TABLE users (id TEXT PRIMARY KEY)');
+    } finally {
+      db.close();
+    }
+
+    const plugin = drizzlePlugin(root, false, 'sqlite', {
+      localD1DatabaseId: databaseId,
+      localD1PersistRoot: persistRoot,
+    });
     const configureServer = getHookHandler(plugin.configureServer) as (
       server: unknown,
     ) => Promise<void>;

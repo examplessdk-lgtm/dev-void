@@ -1,4 +1,5 @@
-import { Hono } from 'hono';
+import { sql } from 'drizzle-orm';
+import { Hono, type Context } from 'hono';
 import {
   DEFAULT_DISPATCH_NAMESPACE,
   MAX_SECRET_NAME_LENGTH,
@@ -6,9 +7,11 @@ import {
 } from '../constants.ts';
 import {
   deleteProjectSecret,
+  getActiveDeployment,
   getProject,
   listProjectSecretNames,
   upsertProjectSecret,
+  type Db,
 } from '../db.ts';
 import type { ApiEnv } from '../env.ts';
 import {
@@ -21,6 +24,44 @@ import { isReservedBindingName } from '../reserved-bindings.ts';
 
 function isValidSecretName(name: string): boolean {
   return /^[A-Z][A-Z0-9_]*$/.test(name);
+}
+
+async function withProjectSecretUpdate(
+  context: Context<ApiEnv>,
+  update: (
+    db: Db,
+    project: NonNullable<Awaited<ReturnType<typeof getProject>>>,
+  ) => Promise<Response>,
+): Promise<Response> {
+  const projectId = context.req.param('id')!;
+  return context.get('db').transaction(async (tx) => {
+    // This is the same fence used to claim deploys/rollback leases and switch
+    // routing. Hold it through live propagation, and reject in-flight work
+    // before changing storage: a candidate may already have captured secrets.
+    await tx.execute(sql`SELECT id FROM projects WHERE id = ${projectId} FOR UPDATE`);
+    const db = tx as unknown as Db;
+    const project = await getProject(db, projectId);
+    if (!project) {
+      return context.json({ error: 'project not found' }, 404);
+    }
+    if (project.user_id !== context.get('user').id) {
+      return context.json({ error: 'forbidden' }, 403);
+    }
+    if (project.status === 'deleting') {
+      return context.json({ error: 'project is being deleted' }, 410);
+    }
+    const pending = await getActiveDeployment(db, projectId);
+    if (pending) {
+      return context.json(
+        {
+          error: 'deployment or rollback in progress; retry secret changes when it completes',
+          deployment: pending.id,
+        },
+        409,
+      );
+    }
+    return update(db, project);
+  });
 }
 
 const app = new Hono<ApiEnv>()
@@ -77,34 +118,37 @@ const app = new Hono<ApiEnv>()
     }
 
     const encrypted = await encryptProjectSecret(context.env, projectId, secretName, body.value);
-    await upsertProjectSecret(
-      context.get('db'),
-      projectId,
-      secretName,
-      encrypted.ciphertext,
-      encrypted.iv,
-      encrypted.keyVersion,
-    );
+    const value = body.value;
+    return withProjectSecretUpdate(context, async (db, project) => {
+      await upsertProjectSecret(
+        db,
+        projectId,
+        secretName,
+        encrypted.ciphertext,
+        encrypted.iv,
+        encrypted.keyVersion,
+      );
 
-    if (project.active_deployment_id) {
-      const dispatchNamespace = context.env.DISPATCH_NAMESPACE ?? DEFAULT_DISPATCH_NAMESPACE;
-      const workerName = getVersionedWorkerName(project.slug, project.active_deployment_id);
-      try {
-        await putWorkerSecret(context.env, dispatchNamespace, workerName, secretName, body.value);
-      } catch (error) {
-        return context.json(
-          {
-            error: 'secret stored but live propagation failed',
-            name: secretName,
-            liveUpdated: false,
-            details: error instanceof Error ? error.message : String(error),
-          },
-          502,
-        );
+      if (project.active_deployment_id) {
+        const dispatchNamespace = context.env.DISPATCH_NAMESPACE ?? DEFAULT_DISPATCH_NAMESPACE;
+        const workerName = getVersionedWorkerName(project.slug, project.active_deployment_id);
+        try {
+          await putWorkerSecret(context.env, dispatchNamespace, workerName, secretName, value);
+        } catch (error) {
+          return context.json(
+            {
+              error: 'secret stored but live propagation failed',
+              name: secretName,
+              liveUpdated: false,
+              details: error instanceof Error ? error.message : String(error),
+            },
+            502,
+          );
+        }
       }
-    }
 
-    return context.json({ ok: true, name: secretName });
+      return context.json({ ok: true, name: secretName });
+    });
   })
 
   .delete('/:id/secrets/:name', async (context) => {
@@ -122,27 +166,29 @@ const app = new Hono<ApiEnv>()
       return context.json({ error: 'forbidden' }, 403);
     }
 
-    await deleteProjectSecret(context.get('db'), projectId, secretName);
+    return withProjectSecretUpdate(context, async (db, project) => {
+      await deleteProjectSecret(db, projectId, secretName);
 
-    if (project.active_deployment_id) {
-      const dispatchNamespace = context.env.DISPATCH_NAMESPACE ?? DEFAULT_DISPATCH_NAMESPACE;
-      const workerName = getVersionedWorkerName(project.slug, project.active_deployment_id);
-      try {
-        await deleteWorkerSecret(context.env, dispatchNamespace, workerName, secretName);
-      } catch (error) {
-        return context.json(
-          {
-            error: 'secret deleted from storage but live propagation failed',
-            name: secretName,
-            liveUpdated: false,
-            details: error instanceof Error ? error.message : String(error),
-          },
-          502,
-        );
+      if (project.active_deployment_id) {
+        const dispatchNamespace = context.env.DISPATCH_NAMESPACE ?? DEFAULT_DISPATCH_NAMESPACE;
+        const workerName = getVersionedWorkerName(project.slug, project.active_deployment_id);
+        try {
+          await deleteWorkerSecret(context.env, dispatchNamespace, workerName, secretName);
+        } catch (error) {
+          return context.json(
+            {
+              error: 'secret deleted from storage but live propagation failed',
+              name: secretName,
+              liveUpdated: false,
+              details: error instanceof Error ? error.message : String(error),
+            },
+            502,
+          );
+        }
       }
-    }
 
-    return context.json({ ok: true, name: secretName });
+      return context.json({ ok: true, name: secretName });
+    });
   });
 
 export default app;

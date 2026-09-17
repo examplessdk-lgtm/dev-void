@@ -1,25 +1,12 @@
 #!/usr/bin/env node
 
-import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import * as p from '@clack/prompts';
 import { resolve } from 'pathslash';
 import pc from 'picocolors';
-import { detectPM, pmExec, pmInstall, run } from './pm.ts';
+import { detectPM, pmExec, pmInstall, run, writePnpmBuildPolicy } from './pm.ts';
 
 const pm = detectPM();
-
-async function getLatestVersion(pkg: string): Promise<string> {
-  try {
-    const res = await fetch(`https://registry.npmjs.org/${pkg}/latest`);
-    const data = (await res.json()) as { version?: string };
-    if (data.version) {
-      return `^${data.version}`;
-    }
-  } catch {
-    // Empty.
-  }
-  return 'latest';
-}
 
 async function main() {
   console.log();
@@ -57,8 +44,11 @@ async function main() {
     }
   }
 
-  // 3. Resolve the CLI version first so we can run void init locally
-  const voidVersion = await getLatestVersion('void');
+  // The release publishes the scaffolder and CLI at the same version. Preserve
+  // that exact version, including prereleases, instead of switching to latest.
+  const { version: voidVersion } = JSON.parse(
+    readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
+  ) as { version: string };
 
   // 4. Scaffold: create dir, write package.json, install void, run init, install starter deps
   mkdirSync(targetDir, { recursive: true });
@@ -73,6 +63,10 @@ async function main() {
   };
 
   writeFileSync(resolve(targetDir, 'package.json'), JSON.stringify(pkg, null, 2) + '\n');
+  // pnpm 12 fails the first install when a dependency has an unapproved build
+  // script. Write Void's narrow policy before installing the CLI so a fresh
+  // project can bootstrap without disabling pnpm's build-script protection.
+  writePnpmBuildPolicy(targetDir, pm);
 
   p.log.step('Installing Void...');
   await run([...pmInstall(pm)], targetDir);

@@ -99,12 +99,12 @@ Bindings are [inferred automatically](../reference/resource-inference.md) by sca
 ```json
 {
   "inference": {
-    "bindings": { "db": true, "kv": true, "storage": false, "ai": true }
+    "bindings": { "db": true, "kv": true, "storage": false, "ai": "MY_AI" }
   }
 }
 ```
 
-`db`, `kv`, and `storage` accept a string to customize the binding name (e.g. `"db": "MY_DB"`). `ai` only accepts a boolean.
+`db`, `kv`, `storage`, and `ai` accept a string to customize the binding name (for example, `"db": "MY_DB"` or `"ai": "MY_AI"`). `email` is a boolean feature switch.
 
 See [Configuration](../reference/config.md) for details.
 
@@ -121,7 +121,7 @@ You can set non-binding Cloudflare fields like `compatibility_date` and `compati
 }
 ```
 
-For environment variables, use `.env` files for local values and secrets. Void automatically loads `.env` files through Vite's `loadEnv` and merges them into the worker's `vars` bindings:
+For environment variables, declare the schema in `env.ts` and put local values in the single root `.env` file. Void loads `.env` into local development bindings only; it never becomes production configuration:
 
 ```bash
 # .env
@@ -130,7 +130,7 @@ API_URL=https://api.example.com
 
 Binding arrays such as `d1_databases`, `kv_namespaces`, and `r2_buckets` are not allowed in the `worker` field because Void manages bindings for you. If you need custom bindings with real resource IDs, add a `wrangler.jsonc` to the project root instead. See [Cloudflare config merging](#cloudflare-config-merging) for details.
 
-For non-secret plain-text defaults, you can also set `worker.vars` in `void.json`. Values from `.env` files override `worker.vars`.
+For non-secret plain-text defaults, you can also set `worker.vars` in `void.json`. Local `.env` values override `worker.vars` during development. Production builds reject any `worker.vars` name that is declared as a server key in `env.ts`; store those values remotely with `void secret put` instead.
 
 ## Cloudflare config merging
 
@@ -148,6 +148,8 @@ In Void's default mode and when using frameworks where Void controls the Cloudfl
 4. The merged config is used for both `vite dev` (Miniflare) and `vite build` (output `wrangler.json` in `dist/`).
 
 All other fields in your `wrangler.jsonc` -- `name`, `routes`, `services`, `vars`, `env`, `compatibility_date`, etc. -- are preserved in the resolved config and flow through to the build output.
+
+Compatibility flags from the root config, `void.json`, and Void's runtime requirements are combined without duplicates. This also applies after linking an existing Worker copies its production flags into the root config. The deploy CLI also removes duplicate flags from generated output produced by older project plugins, preserving the distinct flags and leaving the root config untouched.
 
 Fields that Void always sets (`main`, `triggers`, `assets`) don't need to be in your Cloudflare config -- they're added programmatically based on your project structure.
 
@@ -249,6 +251,10 @@ The first handoff preserves resource bindings, production variables, encrypted s
 
 Keep this first deployment focused on the existing site. New resources, auth setup, runtime features, database migrations, and secret overrides stop the handoff before activation. A later code-only deploy continues to preserve dashboard-managed routes and visibility. Before adding a cron, queue consumer, workflow, or visibility change when those values exist only in the dashboard, add the current `routes`, `workers_dev`, and `preview_urls` values to the root Wrangler config. If the build fails, fix it and rerun `void deploy`; Void remembers the destination and checks the existing Worker again.
 
+Pages with `prerender = true` (including automatically prerendered Markdown pages) also enable revalidation. If the existing Worker has no `ISR_CACHE` binding, the handoff preserves rendering on each request without creating a cache. You can keep your prerender settings. Once linking succeeds, the next ordinary deployment provisions the cache if prerendering or revalidation remains enabled. An existing cache keeps its configured namespace ID.
+
+If linking reports other missing inferred resources, the error lists each binding and why the app needs it. Check that the root config uses the existing Worker's binding names and resource IDs, and that `inference.bindings` in `void.json` matches those names. An application KV binding explicitly named `ISR_CACHE` is still required. An existing D1 binding without checked-in migrations can keep its current `migrations_dir`, including an omitted value; linking does not provision a database or change its migration settings. Keep `.void/cloudflare-link.json` when retrying so the handoff checks remain in place.
+
 Declining the prompt leaves the project unchanged. Explicit platform choices and existing project links take precedence. In CI, select the destination with `--platform cloudflare` and provide Cloudflare credentials.
 
 Direct deployment uses the top-level JSON/JSONC configuration; convert a `wrangler.toml` with the same settings before linking. Named environments need a separate top-level config. If previews are disabled, include the existing production hostname in your config so Void can check the candidate through it.
@@ -261,7 +267,7 @@ Void reads your app's configuration and source, then:
 2. If the app uses email (`sendEmail()` or `email/` handlers), reads your zone's email state and, before any project code runs, asks once to set it up. See [Your own Cloudflare account](../guide/email.md#your-own-cloudflare-account) in the email guide.
 3. Creates missing resources or reuses resources already in your account.
 4. Builds the app and checks the generated Worker config, secrets, and migration history.
-5. Preserves or creates the auth secret, applies pending migrations, and uploads keys marked `.secret()` as encrypted Worker secrets.
+5. Preserves or creates the auth secret, verifies required server keys in encrypted remote storage, and applies pending migrations.
 6. Uploads a Worker Version and checks that it is ready.
 7. Sends traffic to the new version and applies routes, custom domains, cron schedules, queue consumers, and Email Routing rules.
 
@@ -301,9 +307,7 @@ For auth-enabled apps, run `void db generate` and commit the migrations. Void in
 
 Custom D1 layouts are supported through `migrations_dir`, `migrations_table`, and `migrations_pattern`. The files Cloudflare will apply must match the files Void validated, including their content and numeric order. Missing, extra, or reordered migrations stop deployment.
 
-Mark sensitive values with [`.secret()`](../guide/env-vars.md). Void removes them from plaintext Worker vars and uploads them as encrypted secrets. Values can come from `.env`, `.env.production`, `.env.production.local`, or the deploy environment; the environment takes precedence. Existing remote secrets are preserved, optional missing secrets are skipped, and deploy doesn't delete remote secrets.
-
-Unmarked values from `.env` and `.env.production` are deployed as plaintext vars. Unmarked local and shell values aren't deployed. Warnings about likely secrets don't encrypt them for you; use `.secret()`.
+Root `.env` is local-only and is never emitted into Worker vars. Every non-client key declared in `env.ts` is a server value: store it with `void secret put <NAME>`. Void emits required server names through `secrets.required`, rejects plaintext Worker vars with those names, and preserves existing remote secrets.
 
 For apps using auth, Void creates a random 32-byte `BETTER_AUTH_SECRET` only when the remote secret is missing. It reuses that value on later deploys. Both auth secrets and schema-marked secrets can be set up on a new Worker's draft before its first upload.
 
@@ -328,9 +332,16 @@ Rollback does not reverse database migrations. Void asks for confirmation when t
 
 #### Scope and limitations
 
-Void supports Worker apps, static sites, SPAs, known SSGs, `--dir` deploys, and fully prerenderable Pages apps with `output: "static"`. It also deploys Cloudflare output from TanStack Start, React Router, vinext App Router and Pages Router, SvelteKit, Nuxt, Analog, and Astro.
+Void supports Worker apps, static sites, SPAs, known SSGs, `--dir` deploys, and fully prerenderable Pages apps with `output: "static"`. It also deploys Cloudflare output from TanStack Start, React Router, SvelteKit, Nuxt, Analog, and Astro. The vinext adapters remain experimental and are outside the beta support commitment.
 
 Static sites use a small Worker in front of Workers Assets to handle redirects, rewrites, fallbacks, and headers. Hybrid and SSR apps keep their application Worker. A page that opts out of prerendering, a dynamic page without `getPrerenderPaths()`, or another runtime feature keeps the app on a Worker even with `output: "static"`.
+
+Native Void applications apply `void.json` routing rules in their Worker.
+Framework-owned Workers do not yet support those Void redirects, rewrites,
+fallbacks, or headers on the direct target. The CLI rejects such configuration
+before provisioning or building; configure the rules in the framework or its
+Worker instead. This restriction does not change an explicit asset policy for
+`routing.notFound`.
 
 Worker apps support D1, KV, R2, Queues, typed state, PostgreSQL and MySQL through Hyperdrive, auth, WebSockets, AI, cron jobs, and ISR. The main limits are:
 
@@ -341,6 +352,8 @@ Worker apps support D1, KV, R2, Queues, typed state, PostgreSQL and MySQL throug
 - **Email is set up on the first deploy, on a zone you own.** Put `email.from` in `void.json`; the deploy reads your account, prints a checklist of what it would change, and asks once. See [Your own Cloudflare account](../guide/email.md#your-own-cloudflare-account). Outside Void's reach: `email/_default.ts` and dynamic local parts (`email/[user].ts`) need a catch-all, which exists only on a zone apex, so on a mail subdomain they get no rule; a mail domain that already has non-Cloudflare MX records is refused, never routed over; `sendEmail()` to arbitrary recipients needs Workers Paid (Email Sending onboarding), otherwise verified destinations only; Void owns the top-level `addresses` array in `wrangler.jsonc`, so hand-written entries there skip the email step; and `void email usage`, `logs`, `allow`, and `destinations` are platform-only.
 
 WebSocket routes and typed state use SQLite-backed Durable Objects. Commit the bindings and `new_sqlite_classes` migration history in `wrangler.jsonc`; don't delete or reorder deployed migration steps. Older hosted classes using `new_classes` keep their existing storage.
+
+Bare `vite build && wrangler deploy` does not provision schema-declared secrets. Use `wrangler secret bulk` / `wrangler secret put` and list every inherited name under `secrets.required` yourself.
 
 ISR uses the shared cache protocol. Entries are scoped to a deployment and hostname, and `routing.revalidateQueryAllowlist` adds bounded query variants. `revalidate()` purges matching entries and variants from KV and the local edge cache. See [ISR](#isr-self-host) below for cache behavior across regions.
 
@@ -364,11 +377,11 @@ These checks detect changes to the deployment target or uploader, but they don't
 
 `pnpm dev` continues to work as before -- Miniflare creates local instances of all bindings regardless of the IDs in your `wrangler.jsonc`. Your real resource IDs are only used during direct Cloudflare deployment.
 
-### AI (self-host)
+### AI on your Cloudflare account {#ai-self-host}
 
 `void/ai` works on your own Cloudflare account, along two paths:
 
-- **Workers AI** (`ai.run`, `ai.stream`, `ai.image`) works out of the box. When your app imports `void/ai`, `vite build` infers that you need AI and adds a Workers AI binding (`env.AI`) to the generated `wrangler.json` automatically -- you do **not** add it to `wrangler.jsonc`.
+- **Workers AI** (`ai.run`, `ai.stream`, `ai.image`) works out of the box. When your app imports `void/ai`, `vite build` infers that you need AI and adds a Workers AI binding (`env.AI`) to the generated `wrangler.json` automatically -- you do **not** add it to `wrangler.jsonc`. Set `inference.bindings.ai` to a string to use a custom name.
 - **Provider models** (`ai.provider("openai").fetch(...)`) route through _your own_ Cloudflare AI Gateway. Set its id in `void.json` and add the provider's API key as a Worker secret.
 
 ```jsonc
@@ -391,7 +404,7 @@ import { defineHandler } from 'void';
 import { ai } from 'void/ai';
 
 export const POST = defineHandler(async (c) => {
-  // Workers AI -- uses env.AI directly
+  // Workers AI -- uses the inferred or configured AI binding directly
   const summary = await ai.run('@cf/meta/llama-3.1-8b-instruct', {
     prompt: 'Summarize the changelog.',
   });
@@ -411,11 +424,11 @@ Set `ai.gateway` before calling `ai.provider().fetch()`; otherwise it returns `5
 
 Notes:
 
-- **No cross-tenant usage metering.** On the Void platform, AI calls are metered and billed through a shared proxy. Self-hosted, there is no metering -- you get your own [Cloudflare AI Gateway analytics](https://developers.cloudflare.com/ai-gateway/) instead.
-- **The runtime reads the `env.AI` binding by name** -- a custom-named root AI binding is not supported.
-- **`void dev` has no local Workers AI emulation.** In development, AI still routes through Void, so `void dev` AI requires `void auth login` even when you deploy self-hosted.
+- **Account-owned usage.** Direct deployments use your own [Cloudflare AI Gateway analytics](https://developers.cloudflare.com/ai-gateway/). A team platform meters requests through its shared proxy; those usage records do not automatically bill application developers.
+- **Custom AI binding names are supported.** Configure `"inference": { "bindings": { "ai": "MY_AI" } }`, or declare the custom `ai.binding` in your root Wrangler config; the generated worker records the resolved name for `void/ai` automatically.
+- **Workers AI runs remotely during development.** After `void connect --platform cloudflare`, an app importing `void/ai` uses your account's remote AI binding with your Cloudflare login or API token. Development and preview calls consume that account's allowance. Apps without AI imports add no AI binding or authentication probe.
 
-### ISR (self-host)
+### ISR on your Cloudflare account {#isr-self-host}
 
 [Revalidation (ISR)](../guide/edge/revalidation.md) works self-hosted. `void deploy --platform cloudflare` automatically creates or reuses the cache KV namespace and persists its `ISR_CACHE` binding in `wrangler.jsonc`, just like the other inferred resources.
 

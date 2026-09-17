@@ -1,5 +1,7 @@
 import {
   createPlatformDiscoveryDocument,
+  readPlatformApplication,
+  resolvePlatformApplicationEnvironment,
   PLATFORM_DISABLED_KEY,
   PLATFORM_DISABLED_VALUE,
 } from '@void/platform';
@@ -47,6 +49,7 @@ import { ErrorAlertMonitor } from './error-alert-monitor.ts';
 import { cancelContainerBuildDos } from './github/cancel-builds.ts';
 import { authMiddleware } from './middleware/auth.ts';
 import { operatorApi } from './operator/index.ts';
+import { sandboxDrainStatus } from './operator/sandbox-operations.ts';
 import {
   getPlatformApiUrl,
   getPlatformDisplayName,
@@ -86,10 +89,29 @@ import { operatorSessions } from './schema.ts';
 import { isAdminSuspended, REASON_REQUESTS_EXCEEDED } from './suspension.ts';
 import { getCurrentBillingPeriodStart, getPlanLimits } from './tiers.ts';
 import type { Domain, Project } from './types.ts';
+import { ensureUsageSigningKey, USAGE_PROTOCOL_VERSION } from './usage-auth.ts';
 import { UsageCounter } from './usage-counter.ts';
 import { replayFailedWebhookDeliveries } from './webhook-replay.ts';
 
+function isSandboxDrainMaintenanceRequest(request: Request): boolean {
+  const path = new URL(request.url).pathname;
+  const method = request.method;
+  return (
+    (path === '/operator/v1/system/sandbox-drain' && method === 'POST') ||
+    (path === '/operator/v1/session' && (method === 'GET' || method === 'POST')) ||
+    (path === '/operator/v1/session/logout' && method === 'POST') ||
+    (path === '/auth/login' && method === 'GET') ||
+    (path === '/auth/callback' && method === 'GET') ||
+    (path === '/auth/exchange' && method === 'POST') ||
+    (path === '/auth/cli/token' && method === 'POST')
+  );
+}
+
 const app = new Hono<ApiEnv>()
+  .use('*', async (context, next) => {
+    context.env = await resolvePlatformApplicationEnvironment(context.env);
+    await next();
+  })
 
   // Catch-all error handler. Without this, Hono returns a plain-text
   // `Internal Server Error` body which is opaque to the CLI and dashboard.
@@ -112,10 +134,19 @@ const app = new Hono<ApiEnv>()
       healthProbeToken !== undefined &&
       healthProbeToken !== '' &&
       context.req.header('X-Void-Platform-Probe') === healthProbeToken &&
-      (context.req.path === '/health' || context.req.path === '/.well-known/void-platform');
+      (context.req.path === '/health' ||
+        context.req.path === '/.well-known/void-platform' ||
+        context.req.path === '/internal/platform/sandbox-drain' ||
+        (context.req.path === '/internal/platform/domain-preflight' &&
+          context.req.method === 'POST'));
+    const maintenanceSandboxDrain =
+      context.env.PLATFORM_TRAFFIC_STATE === 'sandbox-drain' &&
+      isSandboxDrainMaintenanceRequest(context.req.raw);
     if (
       !installerProbe &&
+      !maintenanceSandboxDrain &&
       (context.env.PLATFORM_TRAFFIC_STATE === 'staging' ||
+        context.env.PLATFORM_TRAFFIC_STATE === 'sandbox-drain' ||
         (context.env.PLATFORM_INSTALLATION_ID &&
           (await context.env.ROUTING.get(PLATFORM_DISABLED_KEY)) === PLATFORM_DISABLED_VALUE))
     ) {
@@ -132,6 +163,10 @@ const app = new Hono<ApiEnv>()
 
   .get('/health', async (context) => {
     try {
+      // Provision the trusted queue key before an installer enables traffic.
+      // Dispatch receives only this purpose-separated derivative via ROUTING;
+      // tenant Workers receive neither the key nor a ROUTING binding.
+      await ensureUsageSigningKey(context.env.ROUTING, context.env.JWT_SECRET);
       const installationId = context.env.PLATFORM_INSTALLATION_ID;
       if (installationId) {
         const result = await context.get('db').execute<{
@@ -166,6 +201,9 @@ const app = new Hono<ApiEnv>()
       createPlatformDiscoveryDocument({
         apiUrl: new URL(context.req.url).origin,
         applicationDomain: context.env.SITE_DOMAIN ?? 'void.app',
+        ...(context.env.PLATFORM_APPLICATION
+          ? { applicationRouting: readPlatformApplication(context.env) }
+          : {}),
         authenticationProviders: [
           ...(capabilities.githubOAuth ? (['github'] as const) : []),
           ...(capabilities.googleOAuth ? (['google'] as const) : []),
@@ -179,8 +217,30 @@ const app = new Hono<ApiEnv>()
           (context.env.PLATFORM_ENV === 'staging'
             ? 'https://proxy.staging.void.cloud'
             : 'https://proxy.void.cloud'),
+        usageProtocolVersion: USAGE_PROTOCOL_VERSION,
       }),
     );
+  })
+  .post('/internal/platform/domain-preflight', platformDomainPreflight)
+  .get('/internal/platform/sandbox-drain', async (context) => {
+    const healthProbeToken = context.env.PLATFORM_HEALTH_PROBE_TOKEN;
+    if (!healthProbeToken || context.req.header('X-Void-Platform-Probe') !== healthProbeToken) {
+      return context.json({ error: 'not found' }, 404);
+    }
+    try {
+      return context.json(await sandboxDrainStatus(context.get('db')));
+    } catch (error) {
+      console.error('[api] sandbox drain status failed', error);
+      return context.json(
+        {
+          version: 1,
+          state: 'invalid',
+          complete: false,
+          checkpoint: 'sandbox_drain_checkpoints',
+        },
+        503,
+      );
+    }
   })
   .get('/capabilities', (context) =>
     context.json({
@@ -310,6 +370,7 @@ async function scheduled(
 ): Promise<void> {
   if (
     env.PLATFORM_TRAFFIC_STATE === 'staging' ||
+    env.PLATFORM_TRAFFIC_STATE === 'sandbox-drain' ||
     (env.PLATFORM_INSTALLATION_ID &&
       (await env.ROUTING.get(PLATFORM_DISABLED_KEY)) === PLATFORM_DISABLED_VALUE)
   ) {
@@ -867,7 +928,6 @@ export {
   BuildManager,
   BuildManagerLarge,
 };
-export type AppType = typeof app;
 export { app, scheduled };
 
 export default {
@@ -877,3 +937,4 @@ export default {
     await processPlatformQueue(batch, env);
   },
 } satisfies ExportedHandler<ApiEnv['Bindings']>;
+import { platformDomainPreflight } from './platform-domain-preflight.ts';

@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { isDeepStrictEqual } from 'node:util';
 import { join } from 'pathslash';
 import { parseRootWranglerConfig } from './config.ts';
+import { cloudflareCommandDiagnostic } from './diagnostics.ts';
 import type { CloudflareCommandResult, CloudflareCommandRunner } from './execute.ts';
 
 const VERSION_ID_RE = /(?:Worker|Current) Version ID:\s*([0-9a-f]{8}-[0-9a-f-]{27})/i;
@@ -85,6 +86,8 @@ export type CloudflareVersionActivation =
         | 'triggers-failed';
       status?: number;
       cloudflareErrorCode?: number;
+      /** Bounded uploader error text with terminal escapes removed and common credential formats redacted. */
+      diagnostic?: string;
       /** Wrangler reached Cloudflare's Containers entitlement endpoint and received a 403. */
       containersUnavailable?: boolean;
       versionId?: string;
@@ -99,6 +102,17 @@ export type CloudflareVersionActivation =
 type ProductionDeployment = Readonly<{
   versions?: ReadonlyArray<Readonly<{ version_id?: unknown; percentage?: unknown }>>;
 }>;
+
+type ProductionVersionPercentage = Readonly<{ versionId: string; percentage: number }>;
+
+type CurrentProductionVersion =
+  | {
+      kind: 'ok';
+      versionId: string | null;
+      versions: ReadonlyArray<ProductionVersionPercentage>;
+    }
+  | { kind: 'failed'; status: number }
+  | { kind: 'split' };
 
 type RecentCloudflareVersion = Readonly<{
   id: string;
@@ -688,8 +702,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-/** Upload, probe, and atomically activate a verified Worker Version. */
-export async function activateCloudflareVersion(options: {
+export type CloudflareVersionActivationOptions = {
   /** Reuse an inspected Worker without republishing its domains or other triggers. */
   preserveTriggers?: boolean;
   expectedPreviousVersionId?: string;
@@ -727,7 +740,47 @@ export async function activateCloudflareVersion(options: {
   fetch?: typeof globalThis.fetch;
   sleep?: (milliseconds: number) => Promise<void>;
   readinessAttempts?: number;
-}): Promise<CloudflareVersionActivation> {
+  /** Verify that omitted remote secrets come from the active Worker Version before uploading. */
+  verifyInheritedSecrets?: boolean;
+  /**
+   * Plaintext secrets to attach only to the uploaded candidate version. Supplying every remote
+   * `secret_text` binding lets a deployment recover safely when an inactive upload is newer than
+   * production; `secret_key` bindings cannot be replaced through this option.
+   */
+  candidateSecrets?: Readonly<Record<string, string>>;
+};
+
+type InternalCloudflareVersionActivationOptions = CloudflareVersionActivationOptions & {
+  candidateSecretsFilePath?: string;
+};
+
+/** Upload, probe, and atomically activate a verified Worker Version. */
+export async function activateCloudflareVersion(
+  options: CloudflareVersionActivationOptions,
+): Promise<CloudflareVersionActivation> {
+  const candidateSecrets = Object.entries(options.candidateSecrets ?? {});
+  if (candidateSecrets.length === 0) {
+    return activateCloudflareVersionWithSecretsFile(options);
+  }
+
+  const directory = mkdtempSync(join(tmpdir(), 'void-version-secrets-'));
+  const path = join(directory, 'secrets.json');
+  try {
+    writeFileSync(path, `${JSON.stringify(Object.fromEntries(candidateSecrets))}\n`, {
+      mode: 0o600,
+    });
+    return await activateCloudflareVersionWithSecretsFile({
+      ...options,
+      candidateSecretsFilePath: path,
+    });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+async function activateCloudflareVersionWithSecretsFile(
+  options: InternalCloudflareVersionActivationOptions,
+): Promise<CloudflareVersionActivation> {
   const configArgs = options.configPath ? ['-c', options.configPath] : [];
   const commonArgs = [...configArgs, '--env='];
   if (!options.verifyUploader()) {
@@ -754,28 +807,52 @@ export async function activateCloudflareVersion(options: {
   if (!options.verifyUploader()) {
     return { ok: false, reason: 'uploader-changed' };
   }
+  const previousVersionId = previous.versionId;
   let inheritanceBaseline: Array<RecentCloudflareVersion> | undefined;
-  if (options.expectedPreviousVersionId !== undefined) {
+  if (options.expectedPreviousVersionId !== undefined || options.verifyInheritedSecrets === true) {
     const recent = await readRecentCloudflareVersionIds(options, commonArgs);
     if (recent === null) {
       return { ok: false, reason: 'inheritance-source-unavailable' };
     }
-    const activeIndex = recent.findIndex((version) => version.id === previous.versionId);
-    const inheritedChain = activeIndex < 0 ? [] : recent.slice(activeIndex);
-    const inheritedCandidates = inheritedChain.slice(1).map((version) => version.id);
-    const safeInheritanceChain =
-      inheritedChain.length > 0 &&
-      inheritedChain.every(
-        (version, index) => index === 0 || version.number === inheritedChain[index - 1]!.number + 1,
-      ) &&
-      arraysEqual(inheritedCandidates, options.trustedInheritanceVersionIds ?? []);
-    if (!safeInheritanceChain) {
-      return {
-        ok: false,
-        reason: 'inheritance-source-changed',
-        activeVersionId: recent.at(-1)?.id ?? null,
-        rollback: 'not-needed',
-      };
+    const latestVersionId = recent.at(-1)?.id ?? null;
+    if (options.expectedPreviousVersionId !== undefined) {
+      const activeIndex = recent.findIndex((version) => version.id === previous.versionId);
+      const inheritedChain = activeIndex < 0 ? [] : recent.slice(activeIndex);
+      const inheritedCandidates = inheritedChain.slice(1).map((version) => version.id);
+      const safeInheritanceChain =
+        inheritedChain.length > 0 &&
+        inheritedChain.every(
+          (version, index) =>
+            index === 0 || version.number === inheritedChain[index - 1]!.number + 1,
+        ) &&
+        arraysEqual(inheritedCandidates, options.trustedInheritanceVersionIds ?? []);
+      if (!safeInheritanceChain) {
+        return {
+          ok: false,
+          reason: 'inheritance-source-changed',
+          activeVersionId: recent.at(-1)?.id ?? null,
+          rollback: 'not-needed',
+        };
+      }
+    }
+    if (options.verifyInheritedSecrets === true && previous.versionId !== latestVersionId) {
+      const replacesAllRemoteSecrets = await candidateReplacesAllRemoteSecrets(
+        options,
+        commonArgs,
+        previous.versionId,
+        latestVersionId,
+      );
+      if (replacesAllRemoteSecrets === null) {
+        return { ok: false, reason: 'inheritance-source-unavailable' };
+      }
+      if (!replacesAllRemoteSecrets) {
+        return {
+          ok: false,
+          reason: 'inheritance-source-changed',
+          activeVersionId: latestVersionId,
+          rollback: 'not-needed',
+        };
+      }
     }
     inheritanceBaseline = recent;
   }
@@ -786,10 +863,22 @@ export async function activateCloudflareVersion(options: {
       : options.configPath
         ? readCloudflareTriggerConfig(options.configPath)
         : triggerConfigFromWrangler({});
-  const previousMetadata =
-    previous.versionId && desiredMetadata?.schema === 2
-      ? await readCloudflareVersionMetadata(options, commonArgs, previous.versionId)
+  let previousVersion =
+    previousVersionId && desiredMetadata?.schema === 2
+      ? await readCloudflareVersionInspection(options, commonArgs, previousVersionId)
       : null;
+  async function previousIsSecretOnlyDraft(): Promise<boolean> {
+    if (!previousVersionId) {
+      return false;
+    }
+    previousVersion ??= await readCloudflareVersionInspection(
+      options,
+      commonArgs,
+      previousVersionId,
+    );
+    return previousVersion?.isSecretOnlyDraft === true;
+  }
+  const previousMetadata = desiredMetadata?.schema === 2 ? previousVersion?.metadata : null;
   const continuesOpaqueTriggerPreservation =
     !options.preserveTriggers &&
     !options.previousTrafficConfig &&
@@ -823,7 +912,7 @@ export async function activateCloudflareVersion(options: {
     const resolved = resolvePreservedTraffic(
       desiredTriggerConfig,
       previousTrafficConfig,
-      previous.versionId !== null,
+      previous.versionId !== null && !(await previousIsSecretOnlyDraft()),
     );
     if (!resolved) {
       return {
@@ -861,6 +950,9 @@ export async function activateCloudflareVersion(options: {
         options.workerName,
         '--message',
         message,
+        ...(options.candidateSecretsFilePath
+          ? ['--secrets-file', options.candidateSecretsFilePath]
+          : []),
         ...(options.assetsDirectoryOverride ? ['--assets', options.assetsDirectoryOverride] : []),
         '--preview-alias',
         alias,
@@ -874,11 +966,15 @@ export async function activateCloudflareVersion(options: {
   if (!isCleanCommandExit(upload)) {
     const output = `${upload.stdout}\n${upload.stderr}`;
     const cloudflareErrorCode = parseCloudflareErrorCode(output);
+    const isBootstrapError =
+      cloudflareErrorCode === DURABLE_MIGRATION_VERSION_ERROR ||
+      /cannot upload a new version of a worker that does not yet exist/i.test(output);
     if (
       !options.preserveTriggers &&
-      (previous.versionId === null || options.allowFirstDeploymentBootstrap === true) &&
-      (cloudflareErrorCode === DURABLE_MIGRATION_VERSION_ERROR ||
-        /cannot upload a new version of a worker that does not yet exist/i.test(output))
+      isBootstrapError &&
+      (previous.versionId === null ||
+        options.allowFirstDeploymentBootstrap === true ||
+        (await previousIsSecretOnlyDraft()))
     ) {
       return bootstrapFirstDeployment({ ...options, message }, commonArgs, previous.versionId);
     }
@@ -886,6 +982,7 @@ export async function activateCloudflareVersion(options: {
       ok: false,
       reason: 'upload-failed',
       status: upload.status,
+      ...commandDiagnosticFields(upload),
       ...(cloudflareErrorCode === undefined ? {} : { cloudflareErrorCode }),
       ...(isContainersUnavailable(output) ? { containersUnavailable: true } : {}),
     };
@@ -898,7 +995,7 @@ export async function activateCloudflareVersion(options: {
   }
   if (inheritanceBaseline) {
     const recent = await readRecentCloudflareVersionIds(options, commonArgs);
-    const previousLatest = inheritanceBaseline.at(-1)!;
+    const previousLatest = inheritanceBaseline.at(-1);
     const expected = [...inheritanceBaseline.map((version) => version.id), versionId].slice(-10);
     if (recent === null) {
       return {
@@ -913,7 +1010,7 @@ export async function activateCloudflareVersion(options: {
     if (
       !uploadedVersion ||
       uploadedVersion.id !== versionId ||
-      uploadedVersion.number !== previousLatest.number + 1 ||
+      uploadedVersion.number !== (previousLatest?.number ?? 0) + 1 ||
       !arraysEqual(
         recent.map((version) => version.id),
         expected,
@@ -946,7 +1043,9 @@ export async function activateCloudflareVersion(options: {
   if (!readinessUrl) {
     if (
       !options.preserveTriggers &&
-      (previous.versionId === null || options.allowFirstDeploymentBootstrap === true)
+      (previous.versionId === null ||
+        options.allowFirstDeploymentBootstrap === true ||
+        (await previousIsSecretOnlyDraft()))
     ) {
       return bootstrapFirstDeployment({ ...options, message }, commonArgs, previous.versionId);
     }
@@ -974,6 +1073,15 @@ export async function activateCloudflareVersion(options: {
         previousVersionId: previous.versionId,
         rollback: 'not-needed',
       };
+    }
+    const stagingOwnerFailure = await verifyReadinessStagingOwner(
+      options,
+      commonArgs,
+      previous.versionId,
+      versionId,
+    );
+    if (stagingOwnerFailure) {
+      return stagingOwnerFailure;
     }
     const staged = await deployVersionPercentages(
       options,
@@ -1029,6 +1137,15 @@ export async function activateCloudflareVersion(options: {
           rollback: 'not-needed',
         };
       }
+      const stagingOwnerFailure = await verifyReadinessStagingOwner(
+        options,
+        commonArgs,
+        previous.versionId,
+        versionId,
+      );
+      if (stagingOwnerFailure) {
+        return stagingOwnerFailure;
+      }
       const staged = await deployVersionPercentages(
         options,
         commonArgs,
@@ -1068,7 +1185,13 @@ export async function activateCloudflareVersion(options: {
       versionId,
       previousVersionId: previous.versionId,
       rollback: stagedVersionOverride
-        ? await restorePreviousVersion(options, commonArgs, previous.versionId, 'readiness failed')
+        ? await restorePreviousVersion(
+            options,
+            commonArgs,
+            previous.versionId,
+            'readiness failed',
+            [stagedVersionPercentages(previous.versionId, versionId)],
+          )
         : 'not-needed',
     };
   }
@@ -1084,6 +1207,7 @@ export async function activateCloudflareVersion(options: {
             commonArgs,
             previous.versionId,
             'uploader verification failed',
+            [stagedVersionPercentages(previous.versionId, versionId)],
           )
         : 'not-needed',
     };
@@ -1109,7 +1233,18 @@ export async function activateCloudflareVersion(options: {
       previousVersionId: previous.versionId,
     };
   }
-  if (ownerBeforeActivation.versionId !== previous.versionId) {
+  const expectedTrafficBeforeActivation = stagedVersionOverride
+    ? stagedVersionPercentages(previous.versionId, versionId)
+    : previous.versionId
+      ? [{ versionId: previous.versionId, percentage: 100 }]
+      : [];
+  if (
+    ownerBeforeActivation.versionId !== previous.versionId ||
+    !productionVersionPercentagesEqual(
+      ownerBeforeActivation.versions,
+      expectedTrafficBeforeActivation,
+    )
+  ) {
     return {
       ok: false,
       reason: 'deployment-changed',
@@ -1140,6 +1275,10 @@ export async function activateCloudflareVersion(options: {
             commonArgs,
             previous.versionId,
             'version activation failed',
+            [
+              stagedVersionPercentages(previous.versionId, versionId),
+              [{ versionId, percentage: 100 }],
+            ],
           )
         : 'not-needed',
     };
@@ -1260,6 +1399,8 @@ export async function activateCloudflareVersion(options: {
       previous.versionId,
       'trigger activation failed',
       desiredTriggerConfig,
+      versionId,
+      versionedPreviousTriggerConfigWithTraffic,
     );
     return {
       ok: false,
@@ -1311,16 +1452,38 @@ async function restorePreviousVersionAndTriggers(
   previousVersionId: string | null,
   cause: string,
   failedTriggerConfig: CloudflareTriggerConfig,
+  failedVersionId: string,
+  capturedTriggerConfig?: CloudflareTriggerConfig,
 ): Promise<'succeeded' | 'failed' | 'unavailable' | 'unsafe'> {
-  const traffic = await restorePreviousVersion(options, commonArgs, previousVersionId, cause);
+  const traffic = await restorePreviousVersion(options, commonArgs, previousVersionId, cause, [
+    [{ versionId: failedVersionId, percentage: 100 }],
+  ]);
   if (traffic !== 'succeeded' || !previousVersionId) {
     return traffic;
   }
   if (!options.verifyUploader()) {
     return 'unsafe';
   }
-  const metadata = await readCloudflareVersionMetadata(options, commonArgs, previousVersionId);
-  if (metadata?.schema !== 2) {
+  // Traffic attachments can change between uploads (for example `void domain
+  // add`). Restore the snapshot captured before this deployment, not the older
+  // immutable version annotation. Cleanup-only queue names are deliberately not
+  // part of this target snapshot.
+  let targetTriggerConfig = capturedTriggerConfig;
+  if (!targetTriggerConfig) {
+    const metadata = await readCloudflareVersionMetadata(options, commonArgs, previousVersionId);
+    if (metadata?.schema !== 2) {
+      return 'unavailable';
+    }
+    targetTriggerConfig = metadata.triggerConfig;
+  }
+  // A preserve marker records that the previous version inherited live trigger
+  // state; its routes, schedules, queue consumers, and workflows are therefore
+  // intentionally opaque. The traffic snapshot can restore workers.dev, preview
+  // visibility, and routes for version activation, but merging those fields into
+  // this marker does not turn the unknown trigger surfaces into a restorable
+  // snapshot. Traffic is already back on the previous version at this point, so
+  // report trigger recovery as unavailable without publishing invented state.
+  if (targetTriggerConfig.preserve) {
     return 'unavailable';
   }
   if (!options.verifyUploader()) {
@@ -1331,9 +1494,9 @@ async function restorePreviousVersionAndTriggers(
     workerName: options.workerName,
     configPath: options.configPath,
     targetVersionId: previousVersionId,
-    targetTriggerConfig: metadata.triggerConfig,
+    targetTriggerConfig,
     previousTriggerConfig: failedTriggerConfig,
-    knownTriggerConfigs: { [previousVersionId]: metadata.triggerConfig },
+    knownTriggerConfigs: { [previousVersionId]: targetTriggerConfig },
     publishEmptyCustomDomains: options.publishEmptyCustomDomains,
   });
   return triggers.ok && triggers.targetOwnsTraffic ? 'succeeded' : 'failed';
@@ -1344,6 +1507,19 @@ async function readCloudflareVersionMetadata(
   commonArgs: Array<string>,
   versionId: string,
 ): Promise<CloudflareVersionMetadata | null> {
+  return (await readCloudflareVersionInspection(options, commonArgs, versionId))?.metadata ?? null;
+}
+
+type CloudflareVersionInspection = Readonly<{
+  metadata: CloudflareVersionMetadata | null;
+  isSecretOnlyDraft: boolean;
+}>;
+
+async function readCloudflareVersionInspection(
+  options: Pick<Parameters<typeof activateCloudflareVersion>[0], 'runWrangler' | 'workerName'>,
+  commonArgs: Array<string>,
+  versionId: string,
+): Promise<CloudflareVersionInspection | null> {
   const result = await Promise.resolve(
     options.runWrangler(
       ['versions', 'list', ...commonArgs, '--name', options.workerName, '--json'],
@@ -1359,11 +1535,15 @@ async function readCloudflareVersionMetadata(
       return null;
     }
     for (const entry of versions) {
-      if (!isRecord(entry) || entry.id !== versionId || !isRecord(entry.annotations)) {
+      if (!isRecord(entry) || entry.id !== versionId) {
         continue;
       }
-      const message = entry.annotations['workers/message'];
-      return typeof message === 'string' ? parseCloudflareVersionMessage(message) : null;
+      const annotations = isRecord(entry.annotations) ? entry.annotations : undefined;
+      const message = annotations?.['workers/message'];
+      return {
+        metadata: typeof message === 'string' ? parseCloudflareVersionMessage(message) : null,
+        isSecretOnlyDraft: isWranglerSecretOnlyDraft(entry),
+      };
     }
   } catch {
     return null;
@@ -1382,6 +1562,10 @@ async function readRecentCloudflareVersionIds(
     ),
   );
   if (!isCleanCommandExit(result)) {
+    const output = `${result.stdout}\n${result.stderr}`;
+    if (isMissingWorkerOutput(output)) {
+      return [];
+    }
     return null;
   }
   try {
@@ -1411,6 +1595,132 @@ function arraysEqual(left: ReadonlyArray<string>, right: ReadonlyArray<string>):
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
+async function candidateReplacesAllRemoteSecrets(
+  options: Pick<
+    Parameters<typeof activateCloudflareVersion>[0],
+    'candidateSecrets' | 'runWrangler' | 'workerName'
+  >,
+  commonArgs: Array<string>,
+  activeVersionId: string | null,
+  latestVersionId: string | null,
+): Promise<boolean | null> {
+  const versionIds = [
+    ...new Set([activeVersionId, latestVersionId].filter(Boolean)),
+  ] as Array<string>;
+  const secretBindings: Array<Array<{ name: string; type: 'secret_key' | 'secret_text' }>> = [];
+  for (const versionId of versionIds) {
+    const bindings = await readCloudflareVersionSecretBindings(options, commonArgs, versionId);
+    if (bindings === null) {
+      return null;
+    }
+    secretBindings.push(bindings);
+  }
+  return secretBindings.every((bindings) =>
+    bindings.every(
+      (binding) =>
+        binding.type === 'secret_text' &&
+        Object.hasOwn(options.candidateSecrets ?? {}, binding.name),
+    ),
+  );
+}
+
+async function readCloudflareVersionSecretBindings(
+  options: Pick<Parameters<typeof activateCloudflareVersion>[0], 'runWrangler' | 'workerName'>,
+  commonArgs: Array<string>,
+  versionId: string,
+): Promise<Array<{ name: string; type: 'secret_key' | 'secret_text' }> | null> {
+  const result = await Promise.resolve(
+    options.runWrangler(
+      ['versions', 'view', versionId, ...commonArgs, '--name', options.workerName, '--json'],
+      { capture: true },
+    ),
+  );
+  if (!isCleanCommandExit(result)) {
+    return null;
+  }
+  try {
+    const version = JSON.parse(result.stdout) as unknown;
+    if (!isRecord(version) || version.id !== versionId || !isRecord(version.resources)) {
+      return null;
+    }
+    const bindings = version.resources.bindings;
+    if (!Array.isArray(bindings) || !bindings.every(isRecord)) {
+      return null;
+    }
+    const secrets: Array<{ name: string; type: 'secret_key' | 'secret_text' }> = [];
+    for (const binding of bindings) {
+      if (binding.type !== 'secret_text' && binding.type !== 'secret_key') {
+        continue;
+      }
+      if (typeof binding.name !== 'string') {
+        return null;
+      }
+      secrets.push({ name: binding.name, type: binding.type });
+    }
+    return secrets;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * `wrangler secret put` creates a fetch-only draft before attaching a first secret to a Worker.
+ * Accept that draft as first-deployment proof only when its complete deployable shape contains no
+ * application code configuration or non-secret resource that an ordinary deploy could own.
+ */
+function isWranglerSecretOnlyDraft(entry: Record<string, unknown>): boolean {
+  if (!isRecord(entry.annotations)) {
+    return false;
+  }
+  const annotationKeys = Object.keys(entry.annotations);
+  if (
+    entry.annotations['workers/triggered_by'] !== 'secret' ||
+    annotationKeys.some((key) => key !== 'workers/triggered_by')
+  ) {
+    return false;
+  }
+
+  if (!isRecord(entry.resources)) {
+    return false;
+  }
+  const { bindings, script, script_runtime: scriptRuntime } = entry.resources;
+  if (
+    !Array.isArray(bindings) ||
+    bindings.length === 0 ||
+    !bindings.every(
+      (binding) =>
+        isRecord(binding) &&
+        typeof binding.name === 'string' &&
+        binding.name.length > 0 &&
+        binding.type === 'secret_text' &&
+        Object.keys(binding).every((key) => key === 'name' || key === 'type'),
+    )
+  ) {
+    return false;
+  }
+
+  if (
+    !isRecord(script) ||
+    !Array.isArray(script.handlers) ||
+    script.handlers.length !== 1 ||
+    script.handlers[0] !== 'fetch' ||
+    script.placement_mode !== undefined
+  ) {
+    return false;
+  }
+
+  if (!isRecord(scriptRuntime)) {
+    return false;
+  }
+  const runtimeKeys = Object.keys(scriptRuntime);
+  return (
+    scriptRuntime.usage_model === 'standard' &&
+    isRecord(scriptRuntime.limits) &&
+    Object.keys(scriptRuntime.limits).length === 0 &&
+    runtimeKeys.every((key) => key === 'usage_model' || key === 'limits')
+  );
+}
+
 /**
  * The Versions API cannot create a Worker or its initial Durable Object migration history, and
  * some accounts do not expose a version preview until their first ordinary deployment. A
@@ -1418,7 +1728,7 @@ function arraysEqual(left: ReadonlyArray<string>, right: ReadonlyArray<string>):
  * version activation. This fallback requires prior proof that no application had been deployed.
  */
 async function bootstrapFirstDeployment(
-  options: Parameters<typeof activateCloudflareVersion>[0],
+  options: InternalCloudflareVersionActivationOptions,
   commonArgs: Array<string>,
   previousVersionId: string | null,
 ): Promise<CloudflareVersionActivation> {
@@ -1434,6 +1744,9 @@ async function bootstrapFirstDeployment(
         options.workerName,
         '--message',
         options.message,
+        ...(options.candidateSecretsFilePath
+          ? ['--secrets-file', options.candidateSecretsFilePath]
+          : []),
         ...(options.assetsDirectoryOverride ? ['--assets', options.assetsDirectoryOverride] : []),
         '--strict',
         '--experimental-provision=false',
@@ -1450,6 +1763,7 @@ async function bootstrapFirstDeployment(
       ok: false,
       reason: 'bootstrap-failed',
       status: bootstrap.status,
+      ...commandDiagnosticFields(bootstrap),
       ...(cloudflareErrorCode === undefined ? {} : { cloudflareErrorCode }),
       ...(isContainersUnavailable(output) ? { containersUnavailable: true } : {}),
     };
@@ -1489,7 +1803,11 @@ async function bootstrapFirstDeployment(
     undefined,
     options.fetch ?? globalThis.fetch,
     options.sleep ?? defaultSleep,
-    options.readinessAttempts ?? 6,
+    // A new Worker also needs its public route/DNS to propagate. Subsequent
+    // version previews can use the shorter retry window, but bootstrap needs
+    // more than its roughly six seconds of backoff. Keep an overall deadline.
+    options.readinessAttempts ?? 30,
+    60_000,
   );
   if (ready !== 'ready') {
     return {
@@ -1517,6 +1835,18 @@ function parseCloudflareErrorCode(output: string): number | undefined {
   return value === undefined ? undefined : Number(value);
 }
 
+function commandDiagnosticFields(result: CloudflareCommandResult): { diagnostic?: string } {
+  const diagnostic = cloudflareCommandDiagnostic(result);
+  return diagnostic ? { diagnostic } : {};
+}
+
+function isMissingWorkerOutput(output: string): boolean {
+  return (
+    parseCloudflareErrorCode(output) === 10007 ||
+    /no deployments|\bworker\b.*\b(?:does not exist|not found)\b/i.test(output)
+  );
+}
+
 /** Recognize the Containers account-entitlement failure Wrangler exposes during upload. */
 function isContainersUnavailable(output: string): boolean {
   return (
@@ -1530,9 +1860,7 @@ function isContainersUnavailable(output: string): boolean {
 async function readCurrentProductionVersion(
   options: Pick<Parameters<typeof activateCloudflareVersion>[0], 'runWrangler' | 'workerName'>,
   commonArgs: Array<string>,
-): Promise<
-  { kind: 'ok'; versionId: string | null } | { kind: 'failed'; status: number } | { kind: 'split' }
-> {
+): Promise<CurrentProductionVersion> {
   const result = await Promise.resolve(
     options.runWrangler(
       ['deployments', 'status', ...commonArgs, '--name', options.workerName, '--json'],
@@ -1541,30 +1869,114 @@ async function readCurrentProductionVersion(
   );
   if (!isCleanCommandExit(result)) {
     const output = `${result.stdout}\n${result.stderr}`;
-    if (
-      parseCloudflareErrorCode(output) === 10007 ||
-      /no deployments|\bworker\b.*\b(?:does not exist|not found)\b/i.test(output)
-    ) {
-      return { kind: 'ok', versionId: null };
+    if (isMissingWorkerOutput(output)) {
+      return { kind: 'ok', versionId: null, versions: [] };
     }
     return { kind: 'failed', status: result.status };
   }
   try {
     const deployment = JSON.parse(result.stdout) as ProductionDeployment;
-    const versions = (deployment.versions ?? []).filter(
-      (version) => Number(version.percentage) > 0,
-    );
-    if (versions.length > 1 || (versions.length === 1 && Number(versions[0]?.percentage) !== 100)) {
+    const versions = (deployment.versions ?? []).map((version) => ({
+      versionId: typeof version.version_id === 'string' ? version.version_id : '',
+      percentage: Number(version.percentage),
+    }));
+    if (
+      versions.some(
+        (version) =>
+          version.versionId.length === 0 ||
+          !Number.isFinite(version.percentage) ||
+          version.percentage < 0 ||
+          version.percentage > 100,
+      )
+    ) {
+      return { kind: 'failed', status: result.status };
+    }
+    const activeVersions = versions.filter((version) => version.percentage > 0);
+    if (
+      activeVersions.length > 1 ||
+      (activeVersions.length === 1 && activeVersions[0]?.percentage !== 100)
+    ) {
       return { kind: 'split' };
     }
-    const active = versions[0];
+    const active = activeVersions[0];
     return {
       kind: 'ok',
-      versionId: typeof active?.version_id === 'string' ? active.version_id : null,
+      versionId: active?.versionId ?? null,
+      versions,
     };
   } catch {
     return { kind: 'failed', status: result.status };
   }
+}
+
+function productionVersionPercentagesEqual(
+  actual: ReadonlyArray<ProductionVersionPercentage>,
+  expected: ReadonlyArray<ProductionVersionPercentage>,
+): boolean {
+  return (
+    actual.length === expected.length &&
+    expected.every((entry) =>
+      actual.some(
+        (candidate) =>
+          candidate.versionId === entry.versionId && candidate.percentage === entry.percentage,
+      ),
+    )
+  );
+}
+
+function stagedVersionPercentages(
+  previousVersionId: string | null,
+  versionId: string,
+): Array<ProductionVersionPercentage> {
+  return previousVersionId
+    ? [
+        { versionId: previousVersionId, percentage: 100 },
+        { versionId, percentage: 0 },
+      ]
+    : [];
+}
+
+async function verifyReadinessStagingOwner(
+  options: Pick<Parameters<typeof activateCloudflareVersion>[0], 'runWrangler' | 'workerName'>,
+  commonArgs: Array<string>,
+  previousVersionId: string | null,
+  versionId: string,
+): Promise<Extract<CloudflareVersionActivation, { ok: false }> | null> {
+  const owner = await readCurrentProductionVersion(options, commonArgs);
+  if (owner.kind === 'failed') {
+    return {
+      ok: false,
+      reason: 'status-failed',
+      status: owner.status,
+      versionId,
+      previousVersionId,
+      rollback: 'not-needed',
+    };
+  }
+  if (owner.kind === 'split') {
+    return {
+      ok: false,
+      reason: 'traffic-split-unsupported',
+      versionId,
+      previousVersionId,
+      rollback: 'not-needed',
+    };
+  }
+  const expected = previousVersionId ? [{ versionId: previousVersionId, percentage: 100 }] : [];
+  if (
+    owner.versionId !== previousVersionId ||
+    !productionVersionPercentagesEqual(owner.versions, expected)
+  ) {
+    return {
+      ok: false,
+      reason: 'deployment-changed',
+      versionId,
+      previousVersionId,
+      activeVersionId: owner.versionId,
+      rollback: 'not-needed',
+    };
+  }
+  return null;
 }
 
 async function probeReadiness(
@@ -1576,6 +1988,7 @@ async function probeReadiness(
   fetcher: typeof globalThis.fetch,
   sleep: (milliseconds: number) => Promise<void>,
   attempts: number,
+  timeoutMs = Number.POSITIVE_INFINITY,
 ): Promise<'ready' | 'failed' | 'access-denied'> {
   const headers = guardedReadinessHeaders(
     url,
@@ -1586,9 +1999,15 @@ async function probeReadiness(
   if (headers === null) {
     return 'failed';
   }
+  const deadline = Date.now() + timeoutMs;
   for (let attempt = 0; attempt < Math.max(1, attempts); attempt++) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      break;
+    }
+    let response: Response | undefined;
     try {
-      const response = await fetcher(url, {
+      response = await fetcher(url, {
         headers: {
           'user-agent': 'void-deploy-readiness/1',
           ...headers,
@@ -1599,7 +2018,7 @@ async function probeReadiness(
             : {}),
         },
         redirect: 'manual',
-        signal: AbortSignal.timeout(10_000),
+        signal: AbortSignal.timeout(Math.max(1, Math.min(10_000, remaining))),
       });
       if (response.ok) {
         const body = (await response.json()) as { ready?: unknown };
@@ -1611,9 +2030,16 @@ async function probeReadiness(
       }
     } catch {
       // Preview propagation is eventually consistent; retry below.
+    } finally {
+      if (response && !response.bodyUsed) {
+        await response.body?.cancel().catch(() => {});
+      }
     }
     if (attempt + 1 < attempts) {
-      await sleep(Math.min(250 * 2 ** attempt, 2_000));
+      const delay = Math.min(250 * 2 ** attempt, 2_000, deadline - Date.now());
+      if (delay > 0) {
+        await sleep(delay);
+      }
     }
   }
   return 'failed';
@@ -1749,11 +2175,21 @@ async function restorePreviousVersion(
   commonArgs: Array<string>,
   previousVersionId: string | null,
   cause: string,
+  expectedOwnedTraffic: ReadonlyArray<ReadonlyArray<ProductionVersionPercentage>>,
 ): Promise<'succeeded' | 'failed' | 'unavailable' | 'unsafe'> {
   if (!previousVersionId) {
     return 'unavailable';
   }
   if (!options.verifyUploader()) {
+    return 'unsafe';
+  }
+  const owner = await readCurrentProductionVersion(options, commonArgs);
+  if (
+    owner.kind !== 'ok' ||
+    !expectedOwnedTraffic.some((expected) =>
+      productionVersionPercentagesEqual(owner.versions, expected),
+    )
+  ) {
     return 'unsafe';
   }
   const result = await deployVersionPercentages(

@@ -26,7 +26,7 @@ vp test run
 
 Void Cloud deploys the API after PostgreSQL migrations, then the proxy, tail, dispatch, and dashboard Workers. The API hosts the build scheduler and build-container Durable Objects. The optional dashboard uses the API for authentication and is deployed after the API it depends on.
 
-The `deploy` and `deploy:staging` scripts in `platform/package.json` target these existing hosted environments. Forks should use `void platform upgrade --runtime` as described in [source deployment](../../docs/guide/self-hosted-platform.md#continuously-deploy-a-source-build).
+The `deploy` and `deploy:staging` scripts in `platform/package.json` target these existing hosted environments. Forks should use `void platform upgrade --runtime` as described in [source deployment](../../docs/guide/platform-development.md#source-build-ci).
 
 ### GitHub Actions
 
@@ -41,7 +41,28 @@ These deployment and smoke-test workflows target Void Cloud, from `prod` for pro
 
 Both deploy workflows serialize deployments without cancelling an active rollout. Advancing `prod` requests a production deployment. A failed or interrupted deployment needs inspection before another rollout, particularly when database migrations already ran.
 
-The environment provides `CF_API_TOKEN`, `CF_ACCOUNT_ID`, and `DATABASE_URL` for production or `STAGING_DATABASE_URL` for staging. The staging smoke test also uses `CF_ACCESS_CLIENT_ID_STAGING` and `CF_ACCESS_CLIENT_SECRET_STAGING` when protected by Cloudflare Access. Consult the workflow files for their current inputs.
+Consult the workflow files for their current inputs. Store credentials in the
+selected GitHub environment and the deployment owner's secret manager. Keep
+secret-manager locations, account access assignments and credential-issuance
+procedures in that owner's private runbook.
+
+## Hosted Worker Maintenance
+
+Void Cloud operators can inspect the platform's five Workers and their versions:
+
+```sh
+void platform worker list
+void platform worker show <proxy|tail|api|dashboard|dispatch>
+void platform worker rollback <name> <version-id>
+void platform worker rollback-all
+void platform worker events [batch-id]
+```
+
+Each command accepts `--environment production|staging`. By default, it uses the platform's environment; `events <batch-id>` uses the batch's environment. Worker event lists accept `--page` and `--limit` when no batch ID is given. `worker list` always returns the fixed Worker inventory.
+
+Choose a version from `worker show` for a single rollback. `rollback-all` selects the previous version of each Worker, shows those versions in its preview, and rolls them back in dependency order. A failure stops the remaining changes and reports which Workers succeeded, failed, or were skipped. Use `worker events <batch-id>` to inspect the result.
+
+These commands are for Void Cloud's Workers. Self-hosted installations use the [platform lifecycle commands](../../docs/guide/self-hosted-platform.md#resume-repair-recover-and-upgrade).
 
 ## Secrets
 
@@ -84,7 +105,7 @@ Every project sends as `<slug>[+tag]@<mail domain>` and receives at `<slug>+anyt
 
 ### One-time zone setup, per environment
 
-Do these in order; step 4 before step 5, or the catch-all points at a Worker with no `email()` export. As of 2026-09-11 no step has been done in either environment.
+Do these in order; step 4 before step 5, or the catch-all points at a Worker with no `email()` export.
 
 1. Extend `CF_API_TOKEN` with Email Routing: Edit. Without it every destination add returns 403, which the CLI reports as a 502 and the owner auto-add on project creation swallows.
 2. Add the subdomain to Email Routing (dashboard: Email → Email Routing → the zone → Settings → Subdomains). Cloudflare adds and locks the MX, SPF, and DKIM records. The two-label staging name is unverified against this form.

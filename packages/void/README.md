@@ -31,7 +31,11 @@ npm install -D void
 
 If you run `void init` in an empty directory, the scaffold flow adds the matching Pages adapter and Vite+ by default.
 
-Then run `npx void init`. In an empty directory, the full interactive flow can scaffold a starter and configure local project files. It then asks where to deploy: Cloudflare (the default) creates or augments `wrangler.jsonc`, handles secure browser sign-in through Void's bundled tooling, and saves the selected account; Void asks for the API URL of an explicitly connected company platform (`void connect <url>` or `void platform install`). Back up `~/.void/platforms/` after installing a company platform because its owner-only recovery material contains runtime keys that Cloudflare cannot return. The next app step is just `npx void deploy`. Auth-enabled deploys preserve an existing `BETTER_AUTH_SECRET` or create a persistent encrypted secret when missing on either platform. Direct Cloudflare deploys also promote env schema keys explicitly marked `.secret()` to encrypted Worker secrets, removing them from plaintext vars; values may come from production dotenv files or the deploy process environment. In an existing app, init configures Void in place by adding missing Vite scripts and creating or patching `vite.config.*` with `voidPlugin()`.
+To install a team platform, use `void platform install`. A domain is recommended; the visible workers.dev testing option is also available as `--workers-dev`. Add a domain later with `void platform domain set example.com`, preserving projects, deployments, and API connections. See the [platform setup guide](../../docs/guide/self-hosted-platform.md).
+
+Init always writes brief coding-agent instructions to `AGENTS.md`, pointing to `node_modules/void/skills/void/docs/`, and links skills for detected agents. Run `void init --agents` to add or refresh just this setup without choosing an agent.
+
+Then run `npx void init`. In an empty directory, the full interactive flow can scaffold a starter and configure local project files. It then asks where to deploy: Cloudflare (the default) creates or augments `wrangler.jsonc`, handles secure browser sign-in through Void's bundled tooling, and saves the selected account; Void asks for the API URL of an explicitly connected company platform (`void connect <url>` or `void platform install`). Back up `~/.void/platforms/` after installing a company platform because its owner-only recovery material contains runtime keys that Cloudflare cannot return. The next app step is just `npx void deploy`. Auth-enabled deploys preserve an existing `BETTER_AUTH_SECRET` or create a persistent encrypted secret when missing on either platform. Root `.env` is local-only; production server keys declared in `env.ts` use encrypted remote secret storage and are rejected as plaintext Worker vars. In an existing app, init configures Void in place by adding missing Vite scripts and creating or patching `vite.config.*` with `voidPlugin()`.
 
 ```ts
 // vite.config.ts
@@ -89,13 +93,17 @@ Direct Cloudflare deployments also support D1, KV, R2, Queues, Hyperdrive, auth,
 
 Self-hosted platform upgrades verify every packaged PostgreSQL migration and require the live Drizzle history to be an exact prefix. Pending SQL is allowed only for an explicitly attested old-version/schema compatibility edge, runs in one transaction, and leaves the old Worker version authoritative until the target runtime passes discovery and health checks.
 
+An upgrade that changes the authenticated usage protocol briefly gates application traffic while it verifies the complete Worker set. An interruption leaves the gate closed for the next resumable upgrade instead of enabling an unsigned compatibility path.
+
 ## Database Model
 
 `void/db` is Drizzle-first.
 
-- D1 is the default managed database target
+- D1 is the default managed database target; development and local database commands share the configured binding ID and persistence directory
 - apps can opt into PostgreSQL or MySQL mode
 - route types, DB types, and queue types are generated into `.void/*.d.ts`
+
+Node.js, Bun, and Deno Pages builds include production hydration assets. Deploy `dist/ssr` together with `dist/client`; the server loads its manifest and assets relative to the emitted module.
 
 ## Documentation
 

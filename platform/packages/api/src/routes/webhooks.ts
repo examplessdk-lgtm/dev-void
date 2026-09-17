@@ -246,7 +246,6 @@ async function rerunBuildForCommit(
     repoFullName: string | undefined;
     repoId: number | string | undefined;
     headSha: string | undefined;
-    headBranch: string | null | undefined;
     event: string;
     // Present only for `check_run`: the run the user actually clicked. `buildId`
     // narrows the rebuild to that run's project; `checkRunId` lets an accepted
@@ -255,7 +254,7 @@ async function rerunBuildForCommit(
     checkRun?: { id: string | null; buildId: string | null; conclusion: unknown };
   },
 ) {
-  const { installationId, repoFullName, repoId, headSha, headBranch, event, checkRun } = args;
+  const { installationId, repoFullName, repoId, headSha, event, checkRun } = args;
 
   // GitHub flips the suite back to `queued` the moment the button is clicked. If
   // we then enqueue nothing and say nothing, the user sees exactly what was
@@ -1167,7 +1166,6 @@ app.post('/github', async (context) => {
         repoFullName: data.repository?.full_name,
         repoId: data.repository?.id,
         headSha: data.check_run?.head_sha,
-        headBranch: data.check_run?.check_suite?.head_branch,
         event: 'check_run',
         checkRun: {
           id: runId === undefined || runId === null ? null : String(runId),
@@ -1190,7 +1188,6 @@ app.post('/github', async (context) => {
         repoFullName: data.repository?.full_name,
         repoId: data.repository?.id,
         headSha: data.check_suite?.head_sha,
-        headBranch: data.check_suite?.head_branch,
         event: 'check_suite',
       });
     }

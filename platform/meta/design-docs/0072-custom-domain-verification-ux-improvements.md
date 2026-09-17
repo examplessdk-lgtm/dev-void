@@ -141,7 +141,7 @@ workspace. This TXT-DCV rollout is superseded by [0073](./0073-custom-domain-htt
 
 ## Rejected Alternative: Per-Project CNAME Targets + HTTP-DCV
 
-An earlier draft of this RFC proposed minting a per-project random token, using `<token>.cname.apps.example.com` as the CNAME target, switching to `ssl.method: "http"`, and dropping both `_cf-custom-hostname` and `_acme-challenge` records — yielding a single-CNAME happy path matching Vercel's UX.
+An earlier draft of this RFC proposed minting a per-project random token, using `<token>.cname.apps.example.com` as the CNAME target, switching to `ssl.method: "http"`, and dropping both `_cf-custom-hostname` and `_acme-challenge` records — yielding a single-CNAME setup.
 
 **The premise was wrong.** Cloudflare for SaaS HTTP-DCV correlates validation requests at the zone level, not at the CNAME-chain-terminal-endpoint level. The earlier investigation recorded in commit `14de2767` reproduced the problem: a wildcard CNAME pointing at the shared SaaS target allowed an attacker to register a victim subdomain without proving ownership. Per-project CNAME targets do not change which CNAME chains terminate within the SaaS zone's namespace; a victim's wildcard pointing at any reachable subdomain of `apps.example.com` still satisfies CF's HTTP-DCV check for _any_ attacker-registered custom hostname in that zone.
 
@@ -149,7 +149,7 @@ CF docs reinforce this. The HTTP-DCV doc says validation succeeds "as long as yo
 
 The only paths that achieve true single-CNAME UX safely are:
 
-- **Run our own ACME** (Vercel's approach). They don't use CF for SaaS for cert issuance; they implement their own DCV that validates the chain endpoint, so per-project CNAMEs _are_ a security boundary for them. This is a major architectural change for Void — moving custom-hostname TLS termination off CF for SaaS — and should be considered as its own RFC if record-count UX becomes a strategic priority.
+- **Run our own ACME.** An independent certificate validation flow could validate the chain endpoint and make per-project CNAMEs a security boundary. This would move custom-hostname TLS termination off CF for SaaS and requires a separate technical design.
 - **Move to wildcard custom hostnames at CF** — Enterprise-gated and orthogonal to our use case; not viable.
 
 Per-project CNAME tokens may still have value as a defense-in-depth layer or routing-attribution mechanism in a future change, but they must not be sold as the wildcard-hijack mitigation. The mitigation is TXT-DCV, and as long as we use CF for SaaS for cert issuance, that's the floor.

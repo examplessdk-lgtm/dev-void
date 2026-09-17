@@ -2,6 +2,7 @@ import { describe, expect, it, vi, beforeEach, afterEach } from 'vite-plus/test'
 import type { Env } from '../../src/env.ts';
 import {
   MAX_ISR_VARIANTS_PER_PATH,
+  SHARED_CACHE_POLICY_VERSION,
   isrCacheKey,
   isStale,
   resolveRevalidateTtl,
@@ -721,7 +722,15 @@ describe('writeIsrCache — variant cap', () => {
         getWithMetadata: async (key: string) => {
           const value = kvStore.get(key);
           return value
-            ? { value, metadata: { s: 200, c: Date.now(), t: 60 } }
+            ? {
+                value,
+                metadata: {
+                  s: 200,
+                  c: Date.now(),
+                  t: 60,
+                  p: SHARED_CACHE_POLICY_VERSION,
+                },
+              }
             : { value: null, metadata: null };
         },
         put: async (key: string, value: ArrayBuffer) => {

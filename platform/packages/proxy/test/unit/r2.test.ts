@@ -1,5 +1,4 @@
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vite-plus/test';
-import { clearWorkerNameCache } from '../../src/dispatch.ts';
 import worker from '../../src/index.ts';
 
 const JWT_SECRET = 'test-secret-key';
@@ -92,7 +91,6 @@ describe('R2 proxy endpoints', () => {
 
   afterEach(() => {
     globalThis.fetch = originalFetch;
-    clearWorkerNameCache();
     vi.restoreAllMocks();
   });
 
@@ -180,6 +178,54 @@ describe('R2 proxy endpoints', () => {
   });
 
   describe('POST /r2/put', () => {
+    it('does not replay a conditional write through REST when an old worker returns 404', async () => {
+      const env = createEnv();
+      env.API.fetch = vi.fn(async () =>
+        Response.json({ workerName: 'old-worker', deploymentId: 'old' }),
+      );
+      const dispatchFetch = vi.fn(async () => new Response('Not Found', { status: 404 }));
+      env.DISPATCH.get = vi.fn(() => ({ fetch: dispatchFetch })) as never;
+      const fetchMock = vi.fn();
+      globalThis.fetch = asFetchMock(fetchMock);
+      const response = await worker.fetch(
+        post('/r2/put-conditional', {
+          projectId: 'proj_1',
+          aiToken: token,
+          binding: 'STORAGE',
+          key: 'key',
+          value: 'new',
+          onlyIf: { etagMatches: 'old' },
+        }),
+        env,
+      );
+      expect(response.status).toBe(501);
+      expect(dispatchFetch).toHaveBeenCalledWith(
+        'https://worker/__void/r2/put-conditional',
+        expect.anything(),
+      );
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('rejects conditional writes without a compatible deployed worker before REST fallback', async () => {
+      const fetchMock = vi.fn(async () => Response.json({ success: true }));
+      globalThis.fetch = asFetchMock(fetchMock);
+      const env = createEnv({ 'proj_1:r2:STORAGE': 'bucket' });
+      const res = await worker.fetch(
+        post('/r2/put-conditional', {
+          projectId: 'proj_1',
+          aiToken: token,
+          binding: 'STORAGE',
+          key: 'key',
+          value: 'new',
+          onlyIf: { etagMatches: 'old' },
+        }),
+        env as never,
+      );
+      expect(res.status).toBe(501);
+      expect(await res.text()).toContain('conditional');
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
     it('writes base64-encoded data via CF R2 API', async () => {
       globalThis.fetch = asFetchMock(vi.fn(async () => Response.json({ success: true })));
 

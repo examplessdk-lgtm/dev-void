@@ -25,7 +25,7 @@ export function createPlatformWorkerConfigs(input: {
   proxyUrl: string;
   resources: PlatformProvisionedResourceIds;
   runtimeEntrypoints: Readonly<Record<'api' | 'dispatch' | 'proxy' | 'tail', string>>;
-  trafficState?: 'enabled' | 'staging';
+  trafficState?: 'enabled' | 'sandbox-drain' | 'staging';
 }): PlatformWorkerConfigSet {
   const {
     accountId,
@@ -90,13 +90,16 @@ export function createPlatformWorkerConfigs(input: {
       ],
     },
     migrations: [
-      { tag: 'v1', new_classes: ['UsageCounter'] },
-      { tag: 'v2', new_classes: ['CronScheduler'] },
-      { tag: 'v3', new_classes: ['ErrorAlertMonitor'] },
-      { tag: 'v4', new_classes: ['SandboxConcurrencyCounter'] },
+      { tag: 'v1', new_sqlite_classes: ['UsageCounter'] },
+      { tag: 'v2', new_sqlite_classes: ['CronScheduler'] },
+      { tag: 'v3', new_sqlite_classes: ['ErrorAlertMonitor'] },
+      { tag: 'v4', new_sqlite_classes: ['SandboxConcurrencyCounter'] },
     ],
     queues: {
-      producers: [{ binding: 'CRON_FIRES_QUEUE', queue: names.cronQueue }],
+      producers: [
+        { binding: 'CRON_FIRES_QUEUE', queue: names.cronQueue },
+        { binding: 'USAGE_EVENTS_QUEUE', queue: names.usageQueue },
+      ],
       consumers: [
         { queue: names.usageQueue, max_batch_size: 100, max_batch_timeout: 5 },
         { queue: names.cronQueue, max_batch_size: 50, max_batch_timeout: 1, max_retries: 3 },
@@ -122,8 +125,10 @@ export function createPlatformWorkerConfigs(input: {
       R2_STATIC_ASSETS_BUCKET: names.assetsBucket,
       REQUESTS_DATASET: names.requestsDataset,
       SITE_DOMAIN: deployment.application.baseDomain,
+      ...(deployment.application.workersDev
+        ? { PLATFORM_APPLICATION: JSON.stringify(deployment.application) }
+        : {}),
       TAIL_SERVICE_NAME: names.tailWorker,
-      USAGE_EVENTS_QUEUE_NAME: names.usageQueue,
       VOID_PROXY_SERVICE: names.proxyWorker,
     },
   };
@@ -141,15 +146,6 @@ export function createPlatformWorkerConfigs(input: {
     kv_namespaces: [{ binding: 'ROUTING', id: resources.routingKv }],
     services: [{ binding: 'API', service: names.apiWorker }],
     dispatch_namespaces: dispatchNamespace,
-    durable_objects: {
-      bindings: [
-        {
-          name: 'SANDBOX_CONCURRENCY_COUNTER',
-          class_name: 'SandboxConcurrencyCounter',
-          script_name: names.apiWorker,
-        },
-      ],
-    },
     vars: {
       AI_GATEWAY_ID: names.aiGateway,
       PLATFORM_CAPABILITIES: JSON.stringify(deployment.capabilities),
@@ -201,6 +197,9 @@ export function createPlatformWorkerConfigs(input: {
       tail_consumers: [{ service: names.tailWorker }],
       vars: {
         BASE_HOSTNAME: deployment.application.baseDomain,
+        ...(deployment.application.workersDev
+          ? { PLATFORM_APPLICATION: JSON.stringify(deployment.application) }
+          : {}),
         PLATFORM_HEALTH_PROBE_TOKEN: healthProbeToken,
         PLATFORM_INSTALLATION_ID: installationId,
         PLATFORM_TRAFFIC_STATE: trafficState,

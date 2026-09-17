@@ -66,7 +66,9 @@ deno run -A npm:vite build
 deno run -A dist/ssr/index.js
 ```
 
-The server listens on `PORT` (env variable) or `3000` by default.
+Run these commands from your app directory. The server listens on `PORT` (env variable) or `3000` by default.
+
+Pages builds load their client manifest from `dist/client/.vite/manifest.json` and serve the generated JavaScript, CSS, and public assets. Keep `dist/ssr` and `dist/client` together when deploying. Asset paths resolve from the emitted server module, so the app also works when imported or started from another working directory.
 
 ## Build Output
 
@@ -78,6 +80,7 @@ dist/
     app.js       ← Hono app with static asset middleware (default export)
     index.js     ← imports app.js and starts the HTTP server
   client/        ← static assets (pages mode only)
+    .vite/manifest.json
     assets/
       ...
 ```

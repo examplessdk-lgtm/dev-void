@@ -93,6 +93,27 @@ describe('scheduled()', () => {
     ).resolves.toBeUndefined();
   });
 
+  it.each([null, 'enabled'])(
+    'blocks scheduled work during a Sandbox drain without consulting a %s KV marker',
+    async (marker) => {
+      const get = vi.fn(async () => marker);
+      const bindings = {
+        ...makeBindings(env),
+        PLATFORM_INSTALLATION_ID: 'installation-id',
+        PLATFORM_TRAFFIC_STATE: 'sandbox-drain',
+        ROUTING: { get },
+      } as unknown as ReturnType<typeof makeBindings>;
+      Object.defineProperty(bindings, 'HYPERDRIVE', {
+        get() {
+          throw new Error('Sandbox drain must return before creating a database connection.');
+        },
+      });
+
+      await expect(scheduled(mockController, bindings, mockCtx)).resolves.toBeUndefined();
+      expect(get).not.toHaveBeenCalled();
+    },
+  );
+
   it('skips unlimited plan users', async () => {
     const { id } = await createTestUser(env.db, 'sponsor', 'github', undefined, 'sponsored');
     const proj = await createTestProject(env.db, id);

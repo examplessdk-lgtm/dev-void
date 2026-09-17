@@ -60,6 +60,40 @@ function stubClientGlobals() {
 }
 
 describe('createVoidRouter prefetch', () => {
+  it.each([
+    [{}, false],
+    [{ method: 'POST' }, true],
+    [{ preserveState: true }, true],
+    [{ method: 'POST', preserveState: false }, false],
+  ] as const)('passes page preservation to the adapter for %j', async (options, preserveState) => {
+    stubClientGlobals();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        Response.json({ component: 'home', props: {} }, { headers: { 'X-VoidPages': 'true' } }),
+      ),
+    );
+    const applyUpdate = vi.fn();
+    const { router } = await createVoidRouter({
+      adapter: {
+        applyUpdate,
+        createDeferred: () => ({}),
+        isLoading: () => false,
+        resolveDeferred: (_ref, value) => value,
+        rejectDeferred: (_ref, error) => error,
+      },
+      components: { home: async () => ({ default: {} }) },
+      layoutTree: {},
+      routeMeta: {},
+      matchRoute: () => 'home',
+      viewTransitions: false,
+      prefetchHoverDelay: 75,
+      prefetchDefaultCacheFor: parseCacheFor('30s'),
+    });
+    await router.visit('/next', options);
+    expect(applyUpdate.mock.calls[0][3]).toEqual({ preserveState });
+  });
+
   afterEach(() => {
     vi.unstubAllGlobals();
   });
@@ -266,6 +300,7 @@ describe('createVoidRouter prefetch', () => {
       expect.objectContaining({ component: 'next' }),
       {},
       [],
+      expect.objectContaining({ preserveState: expect.any(Boolean) }),
     );
     expect(rejectDeferred).toHaveBeenCalledTimes(1);
 
@@ -397,6 +432,7 @@ describe('createVoidRouter prefetch', () => {
       expect.objectContaining({ component: 'fast' }),
       {},
       [],
+      expect.objectContaining({ preserveState: expect.any(Boolean) }),
     );
   });
 
@@ -628,6 +664,7 @@ describe('createVoidRouter prefetch', () => {
       expect.objectContaining({ component: 'next' }),
       {},
       [],
+      expect.objectContaining({ preserveState: expect.any(Boolean) }),
     );
 
     fetchMock.mockClear();
@@ -761,6 +798,7 @@ describe('createVoidRouter prefetch', () => {
       expect.objectContaining({ component: 'docs' }),
       {},
       [],
+      expect.objectContaining({ preserveState: expect.any(Boolean) }),
     );
   });
 
@@ -837,6 +875,7 @@ describe('createVoidRouter prefetch', () => {
       }),
       expect.anything(),
       [],
+      expect.objectContaining({ preserveState: expect.any(Boolean) }),
     );
     expect(rejectDeferred).not.toHaveBeenCalled();
 

@@ -13,8 +13,7 @@
     "dist",
     "schema.json",
     "skills",
-    "AGENT_PROMPT.md",
-    "getting-started-prompt.txt",
+    "AGENTS_TEMPLATE.md",
     "README.md"
   ],
   "type": "module",
@@ -113,16 +112,6 @@
       "types": "./dist/runtime/client-solid.d.mts",
       "import": "./dist/runtime/client-solid.mjs",
       "require": "./dist/runtime/client-solid.mjs"
-    },
-    "./runtime/fetch": {
-      "types": "./dist/runtime/fetch.d.mts",
-      "import": "./dist/runtime/fetch.mjs",
-      "require": "./dist/runtime/fetch.mjs"
-    },
-    "./runtime/fetch-stream": {
-      "types": "./dist/runtime/fetch-stream.d.mts",
-      "import": "./dist/runtime/fetch-stream.mjs",
-      "require": "./dist/runtime/fetch-stream.mjs"
     },
     "./sse": {
       "types": "./dist/runtime/sse.d.mts",
@@ -244,31 +233,6 @@
       "import": "./dist/runtime/remote/index.mjs",
       "require": "./dist/runtime/remote/index.mjs"
     },
-    "./remote/binding-handler": {
-      "types": "./dist/runtime/remote/binding-handler.d.mts",
-      "import": "./dist/runtime/remote/binding-handler.mjs",
-      "require": "./dist/runtime/remote/binding-handler.mjs"
-    },
-    "./runtime/migration-handler": {
-      "types": "./dist/runtime/migration-handler.d.mts",
-      "import": "./dist/runtime/migration-handler.mjs",
-      "require": "./dist/runtime/migration-handler.mjs"
-    },
-    "./runtime/migration-handler-pg": {
-      "types": "./dist/runtime/migration-handler-pg.d.mts",
-      "import": "./dist/runtime/migration-handler-pg.mjs",
-      "require": "./dist/runtime/migration-handler-pg.mjs"
-    },
-    "./runtime/migration-handler-mysql": {
-      "types": "./dist/runtime/migration-handler-mysql.d.mts",
-      "import": "./dist/runtime/migration-handler-mysql.mjs",
-      "require": "./dist/runtime/migration-handler-mysql.mjs"
-    },
-    "./runtime/ws-server": {
-      "types": "./dist/runtime/ws-server.d.mts",
-      "import": "./dist/runtime/ws-server.mjs",
-      "require": "./dist/runtime/ws-server.mjs"
-    },
     "./pages": {
       "types": "./dist/pages/index.d.mts",
       "import": "./dist/pages/index.mjs",
@@ -283,11 +247,6 @@
       "types": "./dist/pages/head.d.mts",
       "import": "./dist/pages/head.mjs",
       "require": "./dist/pages/head.mjs"
-    },
-    "./pages-head-client": {
-      "types": "./dist/pages/head-client.d.mts",
-      "import": "./dist/pages/head-client.mjs",
-      "require": "./dist/pages/head-client.mjs"
     },
     "./pages-prefetch": {
       "types": "./dist/pages/prefetch.d.mts",
@@ -358,7 +317,6 @@
     "@cloudflare/sandbox": "^0.12.9",
     "@cloudflare/vite-plugin": "1.54.7",
     "@cloudflare/workers-types": "catalog:",
-    "@hono/oauth-providers": "^0.9.0",
     "@napi-rs/keyring": "2.0.0",
     "@void/deploy-cloudflare": "workspace:*",
     "@void/deploy-core": "workspace:*",
@@ -395,6 +353,7 @@
     "arktype": "^2.2.3",
     "ci-info": "^4.4.0",
     "estree-walker": "^3.0.3",
+    "fast-wrap-ansi": "^0.2.2",
     "magic-string": "^1.3.1",
     "ofetch": "2.0.0-alpha.3",
     "pathslash": "catalog:",
@@ -427,5 +386,8 @@
     "zod": {
       "optional": true
     }
+  },
+  "engines": {
+    "node": ">=24.21.0"
   }
 }

@@ -87,6 +87,9 @@ function run(args: Array<string>, input?: string) {
         ...process.env,
         VOID_API_URL: origin,
         VOID_OPERATOR_TOKEN: operatorToken,
+        // `vp run` forces color; combining it with NO_COLOR emits a Node warning
+        // on stderr and corrupts the JSON error response this fixture asserts.
+        FORCE_COLOR: undefined,
         NO_COLOR: '1',
       },
       stdio: ['pipe', 'pipe', 'pipe'],

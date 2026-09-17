@@ -340,6 +340,7 @@ const params = reactive({});
 const currentComponent = shallowRef(null);
 const currentLayouts = shallowRef([]);
 const currentProps = shallowRef({});
+const currentPageKey = ref(0);
 const routeUrl = ref(window.location.pathname + window.location.search + window.location.hash);
 const navigation = reactive(idleNavigationState());
 
@@ -361,7 +362,8 @@ const { router, initialPageData, initialComponent, initialLayouts, start } =
       resolveDeferred(ref, value) { resolveDeferred(ref, value); return ref; },
       rejectDeferred(ref, error) { rejectDeferred(ref, error); return ref; },
       isLoading: (ref) => ref.loading,
-      applyUpdate(pageData, comp, layouts) {
+      applyUpdate(pageData, comp, layouts, options) {
+        if (!options?.preserveState) currentPageKey.value++;
         Object.assign(shared, pageData.shared || {});
         replaceRecord(errors, pageData.errors || {});
         replaceRecord(params, pageData.params || {});
@@ -412,7 +414,7 @@ const app = createVoidApp({
     return () => {
       if (!currentComponent.value) return null;
       patchProps(currentComponent.value, currentProps.value);
-      let vnode = h(currentComponent.value, currentProps.value);
+      let vnode = h(currentComponent.value, { ...currentProps.value, key: currentPageKey.value });
       for (let i = currentLayouts.value.length - 1; i >= 0; i--) {
         const inner = vnode;
         vnode = h(currentLayouts.value[i], null, { default: () => inner });

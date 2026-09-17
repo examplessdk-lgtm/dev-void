@@ -181,11 +181,6 @@ export function readProjectApplicationDomain(root: string): string | null {
   return typeof value === 'string' && value !== '' ? normalizeApplicationDomain(value) : null;
 }
 
-export function readProjectProxyUrl(root: string): string | null {
-  const value = readProjectConfigFile(root)?.proxyUrl;
-  return typeof value === 'string' && value !== '' ? normalizePlatformApiUrl(value) : null;
-}
-
 /** Resolve the immutable platform identity that every newly linked project records. */
 export function attachSelectedPlatform(
   root: string,
@@ -226,17 +221,6 @@ export function isLegacyVoidCloudProject(root: string): boolean {
     typeof config.slug === 'string' &&
     typeof config.platformUrl !== 'string'
   );
-}
-
-export function legacyVoidCloudProjectMetadata(): Pick<
-  ProjectConfig,
-  'applicationDomain' | 'platformUrl' | 'proxyUrl'
-> {
-  return {
-    applicationDomain: VOID_CLOUD_PLATFORM.applicationDomain,
-    platformUrl: VOID_CLOUD_PLATFORM.apiUrl,
-    proxyUrl: VOID_CLOUD_PLATFORM.proxyUrl,
-  };
 }
 
 /**

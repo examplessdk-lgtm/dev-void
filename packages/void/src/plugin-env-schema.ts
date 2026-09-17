@@ -5,8 +5,7 @@ import { findEnvFile, generateEnvTypes } from './codegen/env-types.ts';
 import { writeFileIfChanged } from './codegen/write-if-changed.ts';
 import { loadUserEnvFile } from './host/load-user-env.ts';
 import { voidLog, voidWarn } from './log.ts';
-import { getSecretOverride } from './runtime/env-helpers.ts';
-import { filterLoadedEnv } from './shared/env.ts';
+import { CLIENT_ENV_PREFIX, findLegacyEnvFiles, loadLocalEnv } from './shared/env.ts';
 
 type RegisteredSchemaModule = {
   _getRegisteredSchema(): Record<
@@ -24,16 +23,17 @@ type RegisteredSchemaModule = {
 
 export type EnvSchemaPluginOptions = {
   /**
-   * Called with the schema's `.default(value)` entries (stringified) so the
-   * caller can seed worker bindings, deploy manifest vars, or any other env
-   * sink. Invoked after the user's `env.ts` has been imported so the
-   * registered schema is up-to-date. User-provided values in `.env*` /
-   * shell env should take precedence — the caller is responsible for
-   * "skip if already set" semantics.
+   * Called after env.ts is imported with the structural facts needed to
+   * configure production bindings. Values never cross this callback.
    */
-  onDefaults?: (defaults: Record<string, string>) => void;
-  /** Called with keys explicitly marked `.secret()` in the registered schema. */
-  onSecrets?: (secretKeys: Array<string>) => void;
+  onSchema?: (facts: EnvSchemaFacts) => void;
+};
+
+export type EnvSchemaFacts = {
+  keys: Array<string>;
+  clientKeys: Array<string>;
+  serverKeys: Array<string>;
+  requiredServerKeys: Array<string>;
 };
 
 let cachedSchemaModule: RegisteredSchemaModule | null = null;
@@ -51,49 +51,46 @@ async function loadSchemaModule(): Promise<RegisteredSchemaModule> {
  * Vite plugin that auto-discovers `env.ts` at the project root and:
  *   - imports it (registering the user's schema via `defineEnv`)
  *   - generates `.void/env.d.ts` so `env.X` and `c.env.X` are typed
- *   - validates the merged dev env (.env files + process.env) and warns
+ *   - validates the local dev env (`.env` + process.env) and warns
  *     on missing/invalid required keys
  *   - regenerates types + re-validates when env.ts changes (HMR)
  *
  * Hard errors are reserved for `void deploy`; dev keeps moving with warnings
- * so unrelated work isn't blocked by a stale .env.local.
+ * so unrelated work isn't blocked by a stale local value.
  */
 /** Patterns Vite's `define` typically uses for env-shaped constants. */
 const DEFINE_ENV_PATTERN =
   /^(?:globalThis\.)?(?:process\.env|import\.meta\.env)\.([A-Z_][A-Z0-9_]*)$/;
-const DEFAULT_ENV_PREFIXES: ReadonlyArray<string> = ['VITE_'];
-
-function resolveEnvPrefixes(prefix: ResolvedConfig['envPrefix']): ReadonlyArray<string> {
-  if (typeof prefix === 'string') {
-    return [prefix];
-  }
-  if (Array.isArray(prefix) && prefix.length > 0) {
-    return prefix;
-  }
-  return DEFAULT_ENV_PREFIXES;
-}
+const CLIENT_ENV_PREFIXES: ReadonlyArray<string> = [CLIENT_ENV_PREFIX];
 
 export function envSchemaPlugin(root: string, options: EnvSchemaPluginOptions = {}): Plugin {
   const outDir = join(root, '.void');
   let envFile: string | null = null;
-  let viteMode = 'development';
-  let envDir = root;
+  let command: 'serve' | 'build' = 'serve';
   const appliedClientDefaults = new Map<string, string>();
 
-  async function emitSchemaMetadata() {
-    if (!envFile || (!options.onDefaults && !options.onSecrets)) {
+  async function emitSchemaFacts(prefixes: ReadonlyArray<string>) {
+    if (!envFile || !options.onSchema) {
       return;
     }
-    const { _hasRegisteredSchema, _getRegisteredSchema, _getSchemaDefaults } =
-      await loadSchemaModule();
+    const { _hasRegisteredSchema, _getRegisteredSchema } = await loadSchemaModule();
     if (!_hasRegisteredSchema()) {
       return;
     }
-    options.onDefaults?.(_getSchemaDefaults());
     const schema = _getRegisteredSchema() ?? {};
-    options.onSecrets?.(
-      Object.keys(schema).filter((key) => getSecretOverride(schema[key]) === 'secret'),
-    );
+    const keys = Object.keys(schema);
+    const clientKeys = keys.filter((key) => prefixes.some((prefix) => key.startsWith(prefix)));
+    const clientKeySet = new Set(clientKeys);
+    const serverKeys = keys.filter((key) => !clientKeySet.has(key));
+    const requiredServerKeys: Array<string> = [];
+    for (const key of serverKeys) {
+      const result = schema[key]!['~standard'].validate(undefined);
+      const resolved = result instanceof Promise ? await result : result;
+      if (resolved && typeof resolved === 'object' && 'issues' in resolved && resolved.issues) {
+        requiredServerKeys.push(key);
+      }
+    }
+    options.onSchema({ keys, clientKeys, serverKeys, requiredServerKeys });
   }
 
   function regenerateTypes() {
@@ -105,13 +102,16 @@ export function envSchemaPlugin(root: string, options: EnvSchemaPluginOptions = 
     writeFileIfChanged(join(outDir, 'env.d.ts'), dts);
   }
 
-  async function importUserEnv() {
+  async function importUserEnv(strict = false) {
     if (!envFile) {
       return;
     }
     try {
       await loadUserEnvFile(envFile);
     } catch (err) {
+      if (strict) {
+        throw err;
+      }
       voidWarn((err as Error).message);
     }
   }
@@ -157,15 +157,14 @@ export function envSchemaPlugin(root: string, options: EnvSchemaPluginOptions = 
     if (!_hasRegisteredSchema()) {
       return;
     }
-    const { loadEnv } = await import('vite');
-    const merged = filterLoadedEnv(loadEnv(viteMode, envDir, ''));
-    const report = await validateAllEnv(merged as Record<string, unknown>);
+    const local = loadLocalEnv(root, { onWarn: (message) => voidWarn(message) });
+    const report = await validateAllEnv({ ...local, ...process.env });
     if (report.valid) {
       return;
     }
     const lines: Array<string> = ['Env validation issues:'];
     for (const key of report.missing) {
-      lines.push(`  • ${key} is required but missing — add it to .env.local or set in your shell`);
+      lines.push(`  • ${key} is required but missing — add it to .env or set it in your shell`);
     }
     for (const { key, messages } of report.invalid) {
       lines.push(`  • ${key}: ${messages.join('; ')}`);
@@ -173,55 +172,107 @@ export function envSchemaPlugin(root: string, options: EnvSchemaPluginOptions = 
     voidWarn(lines.join('\n'));
   }
 
-  async function applyClientDefaultsToViteEnv(config: ResolvedConfig) {
+  async function applyClientValuesToViteEnv(config: ResolvedConfig) {
     if (!envFile) {
       return;
     }
+    const configEnv = config.env ?? {};
 
     for (const [key, value] of appliedClientDefaults) {
-      if (config.env[key] === value) {
-        delete config.env[key];
+      if (configEnv[key] === value) {
+        delete configEnv[key];
       }
     }
     appliedClientDefaults.clear();
 
-    const { _hasRegisteredSchema, _getSchemaDefaults } = await loadSchemaModule();
+    const { _hasRegisteredSchema, _getRegisteredSchema, _getSchemaDefaults } =
+      await loadSchemaModule();
     if (!_hasRegisteredSchema()) {
       return;
     }
 
-    const prefixes = resolveEnvPrefixes(config.envPrefix);
+    const schema = _getRegisteredSchema() ?? {};
+    const local = command === 'serve' ? loadLocalEnv(root) : {};
+    const readable = { ...local, ...process.env };
+    for (const key of Object.keys(schema)) {
+      if (!key.startsWith(CLIENT_ENV_PREFIX) || configEnv[key] !== undefined) {
+        continue;
+      }
+      const value = readable[key];
+      if (value !== undefined) {
+        configEnv[key] = value;
+      }
+    }
+
     for (const [key, value] of Object.entries(_getSchemaDefaults())) {
-      if (!prefixes.some((prefix) => key.startsWith(prefix))) {
+      if (!key.startsWith(CLIENT_ENV_PREFIX)) {
         continue;
       }
-      if (config.env[key] !== undefined) {
+      if (configEnv[key] !== undefined) {
         continue;
       }
-      config.env[key] = value;
+      configEnv[key] = value;
       appliedClientDefaults.set(key, value);
     }
   }
 
   return {
     name: 'void:env-schema',
-    async config() {
+    enforce: 'pre',
+    async config(_config, environment) {
+      const legacyFiles = findLegacyEnvFiles(root);
+      if (legacyFiles.length > 0) {
+        throw new Error(
+          `void/env supports one local file: .env. Remove ${legacyFiles.join(', ')} and follow the env migration guide.`,
+        );
+      }
       envFile = findEnvFile(root);
       if (!envFile) {
         return;
       }
       regenerateTypes();
-      // Import env.ts at config time so onDefaults can fire before the
-      // Cloudflare plugin's mergeBindings reads workerConfig.vars.
-      await importUserEnv();
-      await emitSchemaMetadata();
+      // Import env.ts at config time so onSchema can configure required
+      // secrets before the Cloudflare plugin resolves worker bindings.
+      await importUserEnv(environment.command === 'build');
+      await emitSchemaFacts(CLIENT_ENV_PREFIXES);
     },
     async configResolved(config) {
-      viteMode = config.mode;
-      // `envDir: false` disables Vite's .env loading entirely — fall back to
-      // root so our own validate-against-merged-env still picks up shell vars.
-      envDir = typeof config.envDir === 'string' ? config.envDir : root;
-      await applyClientDefaultsToViteEnv(config);
+      command = config.command;
+      await emitSchemaFacts(CLIENT_ENV_PREFIXES);
+
+      // `.env` is local-only. Vite loads it during production builds by
+      // default, so remove file-sourced client values before its replacement
+      // pass. CI/shell values remain available, and schema defaults are added
+      // immediately below.
+      if (command === 'build') {
+        const local = loadLocalEnv(root, { onWarn: (message) => voidWarn(message) });
+        for (const [key, value] of Object.entries(local)) {
+          if (process.env[key] === undefined && config.env[key] === value) {
+            delete config.env[key];
+          }
+        }
+      }
+      await applyClientValuesToViteEnv(config);
+
+      if (command === 'build' && envFile) {
+        const { validateAllEnv } = await loadSchemaModule();
+        const report = await validateAllEnv({ ...config.env, ...process.env });
+        const clientKey = (key: string) => key.startsWith(CLIENT_ENV_PREFIX);
+        const missing = report.missing.filter(clientKey);
+        const invalid = report.invalid.filter(({ key }) => clientKey(key));
+        if (missing.length > 0 || invalid.length > 0) {
+          const lines = ['Client env validation failed:'];
+          for (const key of missing) {
+            lines.push(
+              `  • ${key} is required — set it in the build shell or add a schema default`,
+            );
+          }
+          for (const { key, messages } of invalid) {
+            lines.push(`  • ${key}: ${messages.join('; ')}`);
+          }
+          throw new Error(lines.join('\n'));
+        }
+      }
       // Warn when vite `define` shadows a schema key. The two systems coexist
       // — define replaces source literals at build time; defineEnv types and
       // validates the runtime env — but using both for the same name causes
@@ -250,8 +301,8 @@ export function envSchemaPlugin(root: string, options: EnvSchemaPluginOptions = 
           voidLog('env.ts changed — regenerating types');
           regenerateTypes();
           await importUserEnv();
-          await emitSchemaMetadata();
-          await applyClientDefaultsToViteEnv(server.config);
+          await emitSchemaFacts(CLIENT_ENV_PREFIXES);
+          await applyClientValuesToViteEnv(server.config);
           await validateAndWarn();
           server.ws.send({ type: 'full-reload' });
         }

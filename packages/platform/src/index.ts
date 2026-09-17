@@ -20,6 +20,8 @@ export {
   PLATFORM_R2_OWNERSHIP_MARKER_KEY,
   PLATFORM_REMOTE_INSTALLATION_MANIFEST_KEY,
   PLATFORM_RESOURCE_OWNERSHIP_SCHEMA_VERSION,
+  PLATFORM_SANDBOX_DRAIN_KEY,
+  PLATFORM_USAGE_PROTOCOL_VERSION,
   createPlatformResourceOwnershipMarker,
   createPlatformInstallationManifest,
   parsePlatformResourceOwnershipMarker,
@@ -50,3 +52,16 @@ export {
   type PlatformProvisionedResourceIds,
   type PlatformWorkerConfigSet,
 } from './worker-config.ts';
+export {
+  platformProjectHostname,
+  platformProjectHostnames,
+  platformProjectIngressName,
+  platformProjectWorkersDevHostname,
+  platformWorkersDevAliasKey,
+  readPlatformApplication,
+  PLATFORM_APPLICATION_KEY,
+  PLATFORM_PROJECT_INGRESS_SOURCE,
+  resolvePlatformApplicationEnvironment,
+  type PlatformApplication,
+  type PlatformApplicationProject,
+} from './application.ts';

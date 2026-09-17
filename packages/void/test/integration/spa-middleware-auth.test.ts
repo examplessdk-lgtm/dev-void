@@ -21,7 +21,10 @@ let middlewareDir = '';
 let middlewareBackupDir = '';
 let publicDir = '';
 let protectedAsset = '';
+let edgeHeaderAsset = '';
+let edgeRedirectAsset = '';
 let wranglerConfig = '';
+let voidConfig = '';
 let dist = '';
 const AUTH_HEADER = 'Basic Z3Vlc3Q6d2VkZGluZw==';
 
@@ -52,6 +55,7 @@ const staleWranglerSource = `{
 let child: ReturnType<typeof spawn> | undefined;
 let stderr = '';
 let previousWrangler: string | undefined;
+let previousVoidConfig: string | undefined;
 let middlewareBackedUp = false;
 let publicDirCreated = false;
 
@@ -66,6 +70,17 @@ function restoreWranglerConfig(): void {
     writeFileSync(wranglerConfig, previousWrangler);
   }
   previousWrangler = undefined;
+}
+
+function saveVoidConfig(): void {
+  previousVoidConfig = readFileSync(voidConfig, 'utf-8');
+}
+
+function restoreVoidConfig(): void {
+  if (previousVoidConfig !== undefined) {
+    writeFileSync(voidConfig, previousVoidConfig);
+    previousVoidConfig = undefined;
+  }
 }
 
 function disableMiddlewareDir(): void {
@@ -122,6 +137,28 @@ async function startSpaDevServer(): Promise<string> {
   return base;
 }
 
+async function startSpaPreviewServer(): Promise<string> {
+  const port = await getPort();
+  const base = `http://127.0.0.1:${port}`;
+  stderr = '';
+  child = spawn(
+    'vp',
+    ['run', '--filter', playgroundFilter, 'preview', '--host', '127.0.0.1', '--port', String(port)],
+    {
+      cwd: ROOT,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, VOID_INSPECTOR_PORT: 'false' },
+    },
+  );
+  child.stderr!.on('data', (chunk: Buffer) => {
+    stderr += String(chunk);
+  });
+  await waitForServer(base, 30_000, {
+    isAlive: () => child?.exitCode === null && child.signalCode === null,
+  });
+  return base;
+}
+
 function readBuiltAssetConfig(): {
   not_found_handling?: string;
   run_worker_first?: boolean | Array<string>;
@@ -144,7 +181,10 @@ beforeAll(() => {
   middlewareBackupDir = join(playground.root, `.middleware.e2e-backup-${process.pid}`);
   publicDir = join(playground.root, 'public');
   protectedAsset = join(publicDir, 'void-basic-auth-regression.txt');
+  edgeHeaderAsset = join(publicDir, 'void-native-header-regression.txt');
+  edgeRedirectAsset = join(publicDir, 'void-native-redirect-regression.txt');
   wranglerConfig = join(playground.root, 'wrangler.jsonc');
+  voidConfig = join(playground.root, 'void.json');
   dist = join(playground.root, 'dist');
 });
 
@@ -161,12 +201,18 @@ afterEach(async () => {
   restoreMiddlewareDir();
   rmSync(authMiddleware, { force: true });
   rmSync(protectedAsset, { force: true });
+  rmSync(edgeHeaderAsset, { force: true });
+  rmSync(edgeRedirectAsset, { force: true });
   if (publicDirCreated) {
     rmSync(publicDir, { recursive: true, force: true });
     publicDirCreated = false;
   }
   restoreWranglerConfig();
-  if (stderr.includes('error when starting dev server')) {
+  restoreVoidConfig();
+  if (
+    stderr.includes('error when starting dev server') ||
+    stderr.includes('error when starting preview server')
+  ) {
     throw new Error(stderr);
   }
 });
@@ -183,6 +229,49 @@ describe('SPA asset routing policy', () => {
     const assetConfig = readBuiltAssetConfig();
     expect(assetConfig.not_found_handling).toBe('single-page-application');
     expect(assetConfig.run_worker_first).toEqual(['/api', '/api/*', '/__void', '/__void/*']);
+  });
+
+  it('applies native production routing rules before existing static assets', async () => {
+    saveWranglerConfig();
+    saveVoidConfig();
+    disableMiddlewareDir();
+    writeFileSync(wranglerConfig, staleWranglerSource);
+    mkdirSync(publicDir, { recursive: true });
+    writeFileSync(edgeHeaderAsset, 'header asset');
+    writeFileSync(edgeRedirectAsset, 'redirect asset must not win');
+    const config = JSON.parse(previousVoidConfig!) as Record<string, unknown>;
+    config.routing = {
+      headers: {
+        '/void-native-header-regression.txt': ['X-Void-Native-Rule: applied'],
+      },
+      redirects: {
+        '/void-native-redirect-regression.txt': { to: '/redirect-target', status: 302 },
+      },
+    };
+    writeFileSync(voidConfig, `${JSON.stringify(config, null, 2)}\n`);
+    rmSync(dist, { recursive: true, force: true });
+    const buildEnv = { ...process.env };
+    delete buildEnv.VOID_DEPLOY_PROJECT_ID;
+    delete buildEnv.VOID_DEPLOY_BUILD;
+    execSync(`vp run --filter ${playgroundFilter} build`, {
+      cwd: ROOT,
+      stdio: 'pipe',
+      env: buildEnv,
+    });
+
+    expect(readBuiltAssetConfig().run_worker_first).toEqual(['/**']);
+    const base = await startSpaPreviewServer();
+    const headerResponse = await fetch(`${base}/void-native-header-regression.txt`);
+    expect(headerResponse.status).toBe(200);
+    expect(await headerResponse.text()).toBe('header asset');
+    expect(headerResponse.headers.get('x-void-native-rule')).toBe('applied');
+
+    const redirectResponse = await fetch(`${base}/void-native-redirect-regression.txt`, {
+      redirect: 'manual',
+    });
+    expect(redirectResponse.status).toBe(302);
+    expect(redirectResponse.headers.get('location')).toContain('/redirect-target');
+    expect(await redirectResponse.text()).not.toContain('redirect asset must not win');
   });
 
   it('routes document routes through the worker before SPA fallback HTML', async () => {

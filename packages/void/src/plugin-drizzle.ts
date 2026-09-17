@@ -16,6 +16,7 @@ const envModuleResolved = fileURLToPath(import.meta.resolve('#self/_env'));
 const drizzleNodePgResolved = fileURLToPath(import.meta.resolve('drizzle-orm/node-postgres'));
 const drizzleMysql2Resolved = fileURLToPath(import.meta.resolve('drizzle-orm/mysql2'));
 const pgResolved = fileURLToPath(import.meta.resolve('pg'));
+const mysql2Resolved = fileURLToPath(import.meta.resolve('mysql2'));
 
 const VIRTUAL_DB_ID = '\0virtual:void-db';
 const VIRTUAL_SCHEMA_DB_ID = '\0virtual:void-db-schema';
@@ -155,26 +156,31 @@ export function createDb() {
         if (dialect === 'mysql') {
           return `
 import { drizzle } from ${JSON.stringify(drizzleMysql2Resolved)};
-import { getRuntimeBinding } from ${JSON.stringify(envModuleResolved)};
+import { createPool } from ${JSON.stringify(mysql2Resolved)};
+import { getRuntimeBinding, getRuntimeRequestResource } from ${JSON.stringify(envModuleResolved)};
 ${schemaImport}
 export { ${DRIZZLE_OPERATORS} } from ${JSON.stringify(drizzleOrmResolved)};
 
-let _prodInstance;
+const _requestResourceKey = {};
 
 function getConnectionString() {
   const url = getRuntimeBinding("DATABASE_URL");
   if (url) return url;
   const hd = getRuntimeBinding("HYPERDRIVE");
   if (hd?.connectionString) return hd.connectionString;
-  throw new Error("db: MySQL is not configured. Add DATABASE_URL to .env.local for local dev, or configure Hyperdrive for production.");
+  throw new Error("db: MySQL is not configured. Add DATABASE_URL to .env for local dev, or configure Hyperdrive for production.");
 }
 
 function getInstance() {
-  if (getRuntimeBinding("DATABASE_URL")) {
-    return drizzle(getRuntimeBinding("DATABASE_URL")${drizzleConfig});
-  }
-  _prodInstance ??= drizzle(getConnectionString()${drizzleConfig});
-  return _prodInstance;
+  return getRuntimeRequestResource(_requestResourceKey, () => {
+    const pool = createPool({
+      uri: getConnectionString(),
+      connectionLimit: 1,
+      maxIdle: 1,
+      idleTimeout: 1000,
+    });
+    return drizzle(pool${drizzleConfig});
+  });
 }
 
 export const db = new Proxy({}, {
@@ -193,30 +199,29 @@ export function createDb(connectionString) {
           return `
 import { drizzle } from ${JSON.stringify(drizzleNodePgResolved)};
 import pg from "pg";
-import { getRuntimeBinding } from ${JSON.stringify(envModuleResolved)};
+import { getRuntimeBinding, getRuntimeRequestResource } from ${JSON.stringify(envModuleResolved)};
 ${schemaImport}
 export { ${DRIZZLE_OPERATORS} } from ${JSON.stringify(drizzleOrmResolved)};
 
-let _prodInstance;
+const _requestResourceKey = {};
 
 function getConnectionString() {
   const url = getRuntimeBinding("DATABASE_URL");
   if (url) return url;
   const hd = getRuntimeBinding("HYPERDRIVE");
   if (hd?.connectionString) return hd.connectionString;
-  throw new Error("db: PostgreSQL is not configured. Add DATABASE_URL to .env.local for local dev, or configure Hyperdrive for production.");
+  throw new Error("db: PostgreSQL is not configured. Add DATABASE_URL to .env for local dev, or configure Hyperdrive for production.");
 }
 
 function getInstance() {
-  // Local dev (DATABASE_URL): create a fresh Pool per query chain.
-  // workerd kills TCP sockets between requests, so pg.Pool's cached
-  // connections go stale and hang. Fresh Pool = fresh connection every time.
-  if (getRuntimeBinding("DATABASE_URL")) {
-    return drizzle(new pg.Pool({ connectionString: getRuntimeBinding("DATABASE_URL"), max: 1 })${drizzleConfig});
-  }
-  // Production (Hyperdrive): cache the instance — Hyperdrive handles pooling.
-  _prodInstance ??= drizzle(getConnectionString()${drizzleConfig});
-  return _prodInstance;
+  return getRuntimeRequestResource(_requestResourceKey, () => {
+    const pool = new pg.Pool({
+      connectionString: getConnectionString(),
+      max: 1,
+      idleTimeoutMillis: 1000,
+    });
+    return drizzle(pool${drizzleConfig});
+  });
 }
 
 export const db = new Proxy({}, {

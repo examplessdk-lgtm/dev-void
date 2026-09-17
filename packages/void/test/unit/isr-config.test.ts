@@ -75,6 +75,11 @@ describe('collectRevalidate', () => {
     expect(Object.keys(result as Record<string, number>)).toEqual(['/blog/:slug', '*']);
   });
 
+  it('does not let the numeric fallback overwrite a page catch-all opt-out', () => {
+    const scan = makeScan([makePage('*', 0)]);
+    expect(collectRevalidate(configWith(60), scan)).toEqual({ '*': 0 });
+  });
+
   it('merges per-page rules ahead of an object config (per-page first in match order)', () => {
     const scan = makeScan([makePage('/blog/:slug', 120)]);
     const result = collectRevalidate(configWith({ '/docs/*': 30, '*': 10 }), scan);
@@ -85,6 +90,11 @@ describe('collectRevalidate', () => {
       ['/docs/*', 30],
       ['*', 10],
     ]);
+  });
+
+  it('does not let a duplicate object-config key overwrite an explicit page opt-out', () => {
+    const scan = makeScan([makePage('/private', 0)]);
+    expect(collectRevalidate(configWith({ '/private': 60 }), scan)).toEqual({ '/private': 0 });
   });
 
   it('ignores pages that declare no revalidate', () => {

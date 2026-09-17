@@ -7,6 +7,16 @@ import { attachSelectedPlatform, readProjectConfig, writeProjectConfig } from '.
 import { promptProjectSelection } from './prompt.ts';
 import { resolveProjectBySlug } from './resolve-project.ts';
 
+function projectLabel(slug: string, root: string, url?: string): string {
+  if (url) {
+    return url;
+  }
+  const domain = getSiteDomain(root);
+  return domain.endsWith('.workers.dev')
+    ? `${pc.blue(slug)} (workers.dev)`
+    : `${pc.blue(slug)}.${domain}`;
+}
+
 export async function runLink(root: string, slug?: string): Promise<void> {
   console.log();
   intro(cliTitle('project link'));
@@ -14,7 +24,7 @@ export async function runLink(root: string, slug?: string): Promise<void> {
   // Check if already linked
   const existing = readProjectConfig(root);
   if (existing) {
-    log.warn(`Already linked to ${pc.blue(existing.slug)}.${getSiteDomain(root)}`);
+    log.warn(`Already linked to ${projectLabel(existing.slug, root)}`);
     outro('To re-link, delete .void/project.json and run again.');
     return;
   }
@@ -38,7 +48,9 @@ export async function runLink(root: string, slug?: string): Promise<void> {
     }
     const config = attachSelectedPlatform(root, resolved, client.apiUrl);
     writeProjectConfig(root, config);
-    outro(`Linked to ${pc.blue(config.slug)}.${getSiteDomain(root)}`);
+    outro(
+      `Linked to ${projectLabel(config.slug, root, projects.find((project) => project.id === config.projectId)?.url)}`,
+    );
     return;
   }
 
@@ -49,7 +61,7 @@ export async function runLink(root: string, slug?: string): Promise<void> {
 
   if (result.action === 'create') {
     const config = await promptAndCreateProject(root, client);
-    outro(`Created and linked to ${pc.blue(config.slug)}.${getSiteDomain(root)}`);
+    outro(`Created and linked to ${projectLabel(config.slug, root)}`);
     return;
   }
 
@@ -61,5 +73,5 @@ export async function runLink(root: string, slug?: string): Promise<void> {
       client.apiUrl,
     ),
   );
-  outro(`Linked to ${pc.blue(result.project.slug)}.${getSiteDomain(root)}`);
+  outro(`Linked to ${projectLabel(result.project.slug, root, result.project.url)}`);
 }

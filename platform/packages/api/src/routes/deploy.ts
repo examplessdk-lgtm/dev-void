@@ -5,11 +5,21 @@ import {
   validateManifestShape,
 } from '@void/deploy-core';
 import { isrCacheKey, isrCachePrefix, isrLegacyCachePrefix } from '@void/isr';
-import type { IsrCacheMetadata } from '@void/isr';
+import {
+  hasSharedCacheOptOut,
+  resolvePageTtl,
+  resolveRevalidateTtl,
+  SHARED_CACHE_POLICY_VERSION,
+  type IsrCacheMetadata,
+} from '@void/isr/core';
+import {
+  platformProjectHostname,
+  platformProjectHostnames,
+  readPlatformApplication,
+} from '@void/platform';
 import { eq, sql as drizzleSql } from 'drizzle-orm';
 import { Hono, type Context } from 'hono';
 import {
-  AssetHashMismatchError,
   computeAssetHash,
   createAssetUploadSession,
   deleteWorkerBundle,
@@ -18,10 +28,8 @@ import {
   scanProjectAssetOrphanCandidates,
   uploadAssetBuckets,
   buildAssetMetadata,
-  uploadStaticAssets,
   deleteUnreferencedAssets,
   getContentType,
-  persistWorkerBundle,
   type AssetEntry,
   type AssetManifestEntry,
 } from '../assets.ts';
@@ -29,7 +37,6 @@ import { hmacSignState } from '../auth/hmac.ts';
 import { getPlatformCapabilities } from '../capabilities.ts';
 import { deleteDispatchScript, retryWithBackoff } from '../cf-api.ts';
 import { R2_CONCURRENCY, uploadPool } from '../concurrency.ts';
-import { SITE_DOMAIN } from '../constants.ts';
 import {
   clearCronScheduler,
   restoreCronScheduler,
@@ -39,10 +46,14 @@ import {
 } from '../cron-scheduler-client.ts';
 import {
   getProject,
+  getUser,
   getDeployment,
+  cancelDeployment,
   createDeployment,
   updateDeploymentManifest,
   updateDeploymentStatus,
+  deleteRollbackLease,
+  updateRollbackLeaseState,
   beginDeploymentCompensation,
   beginDeploymentCutover,
   updateProjectType,
@@ -55,7 +66,6 @@ import {
   getLastLiveAssetManifest,
   setActiveDeployment,
   markDeploymentRetained,
-  markDeploymentBundleStored,
   setAppliedMigrations,
   appendProjectMigrations,
   getRetainedDeployments,
@@ -76,6 +86,7 @@ import { generateId } from '../id.ts';
 import { checkCliVersionOrRespond } from '../middleware/cli-version.ts';
 import { getProjectQueueName } from '../naming.ts';
 import { createDeployLogger, type DeployLogger } from '../observability/logger.ts';
+import { ensureProjectIngress } from '../project-ingress.ts';
 import {
   BETTER_AUTH_SECRET_NAME,
   decryptProjectSecret,
@@ -126,10 +137,22 @@ export { MAX_REVALIDATE_QUERY_ALLOWLIST_ENTRIES, MAX_ROUTING_RULES, validateMani
 const DEFAULT_DISPATCH_NAMESPACE = 'void-users';
 const DEFAULT_TAIL_SERVICE_NAME = 'void-tail';
 const CUTOVER_RECOVERY_STALE_MS = 90 * 60 * 1000;
+const DEPLOYMENT_CANCEL_STALE_MS = 10 * 60 * 1000;
 const cutoverIntentKey = (deploymentId: string): string => `cutover-intent:${deploymentId}`;
 const cutoverReadyKey = (deploymentId: string): string => `cutover-ready:${deploymentId}`;
 const cutoverCompensatedKey = (deploymentId: string): string =>
   `cutover-compensated:${deploymentId}`;
+
+export function databaseTimestampMs(value: string): number | null {
+  const withSeparator = value.includes('T') ? value : value.replace(' ', 'T');
+  const withZone = /[+-]\d{2}$/.test(withSeparator)
+    ? `${withSeparator}:00`
+    : /(?:Z|[+-]\d{2}:?\d{2})$/i.test(withSeparator)
+      ? withSeparator
+      : `${withSeparator}Z`;
+  const parsed = new Date(withZone).getTime();
+  return Number.isFinite(parsed) ? parsed : null;
+}
 
 type CutoverMarker = {
   projectId: string;
@@ -445,6 +468,253 @@ async function clearProjectExternalState(
     }
     await env.ROUTING.delete(`queue:${getProjectQueueName(project.id, queueName)}`);
   }
+}
+
+export type SandboxDrainDeploymentSettlement = Readonly<{
+  state: 'terminal' | 'cancel_requested' | 'waiting' | 'recovery_incomplete';
+}>;
+
+/**
+ * Settle one abandoned deployment before the managed Sandbox drain deletes its
+ * container. Ordinary requests receive the same two-phase cancellation grace
+ * used by deploy admission. Protected cutovers are fenced by replacing their
+ * owner marker under the project lock, then compensating every external
+ * surface back to PostgreSQL's committed active deployment.
+ */
+export async function settleDeploymentForSandboxDrain(
+  env: ApiEnv['Bindings'],
+  db: Db,
+  deploymentId: string,
+): Promise<SandboxDrainDeploymentSettlement> {
+  const initial = await getDeployment(db, deploymentId);
+  if (!initial || TERMINAL_DEPLOYMENT_STATUSES.includes(initial.status)) {
+    return { state: 'terminal' };
+  }
+
+  const markerKeys: Array<string> = [];
+  const settlement = await db.transaction(async (tx) => {
+    await tx.execute(
+      drizzleSql`SELECT id FROM projects WHERE id = ${initial.project_id} FOR UPDATE`,
+    );
+    const txDb = tx as unknown as Db;
+    const deployment = await getDeployment(txDb, deploymentId);
+    if (!deployment || TERMINAL_DEPLOYMENT_STATUSES.includes(deployment.status)) {
+      return { state: 'terminal' } as const;
+    }
+    const updatedAtMs = databaseTimestampMs(deployment.updated_at);
+    if (updatedAtMs === null) {
+      return { state: 'waiting' } as const;
+    }
+    const ageMs = Date.now() - updatedAtMs;
+    if (deployment.source === 'rollback-lease') {
+      const project = await getProject(txDb, deployment.project_id);
+      if (!project || project.status === 'deleting' || !deployment.manifest) {
+        return { state: 'recovery_incomplete' } as const;
+      }
+      let lease: {
+        targetDeploymentId: string;
+        state: 'running' | 'retryable' | 'applied';
+        ownerId: string;
+      };
+      try {
+        const parsed = JSON.parse(deployment.manifest) as Partial<typeof lease>;
+        if (
+          typeof parsed.targetDeploymentId !== 'string' ||
+          typeof parsed.ownerId !== 'string' ||
+          (parsed.state !== 'running' && parsed.state !== 'retryable' && parsed.state !== 'applied')
+        ) {
+          return { state: 'recovery_incomplete' } as const;
+        }
+        lease = parsed as typeof lease;
+      } catch {
+        return { state: 'recovery_incomplete' } as const;
+      }
+      if (lease.state === 'applied') {
+        if (project.active_deployment_id !== lease.targetDeploymentId) {
+          return { state: 'recovery_incomplete' } as const;
+        }
+        return {
+          state: (await deleteRollbackLease(txDb, deployment.id, lease.ownerId))
+            ? 'terminal'
+            : 'waiting',
+        } as const;
+      }
+      if (lease.state === 'running' && ageMs < 30 * 60 * 1000) {
+        return { state: 'waiting' } as const;
+      }
+
+      const owner = await getUser(txDb, project.user_id);
+      if (!owner) {
+        return { state: 'recovery_incomplete' } as const;
+      }
+      const recoveryOwnerId = crypto.randomUUID();
+      const adopted = await updateRollbackLeaseState(
+        txDb,
+        deployment.id,
+        lease.targetDeploymentId,
+        'running',
+        recoveryOwnerId,
+        lease.ownerId,
+      );
+      if (!adopted) {
+        return { state: 'waiting' } as const;
+      }
+      const committedActive = project.active_deployment_id
+        ? await getDeployment(txDb, project.active_deployment_id)
+        : await resolveLegacyActiveDeployment(env, txDb, project);
+      try {
+        if (committedActive) {
+          if (!project.active_deployment_id) {
+            await setActiveDeployment(txDb, project.id, committedActive.id);
+          }
+          await replayDeploymentCutover(
+            env,
+            txDb,
+            project,
+            committedActive,
+            owner.plan,
+            project.type,
+          );
+        } else {
+          await clearProjectExternalState(env, txDb, project);
+        }
+      } catch {
+        await updateRollbackLeaseState(
+          txDb,
+          deployment.id,
+          lease.targetDeploymentId,
+          'retryable',
+          recoveryOwnerId,
+          recoveryOwnerId,
+        );
+        return { state: 'recovery_incomplete' } as const;
+      }
+      return {
+        state: (await deleteRollbackLease(txDb, deployment.id, recoveryOwnerId))
+          ? 'terminal'
+          : 'recovery_incomplete',
+      } as const;
+    }
+
+    if (deployment.status !== 'cutover' && deployment.status !== 'compensating') {
+      if (deployment.status !== 'canceling') {
+        const requested = await cancelDeployment(txDb, deployment.id, 'managed Sandbox disabled');
+        return { state: requested ? 'cancel_requested' : 'waiting' } as const;
+      }
+      if (ageMs < DEPLOYMENT_CANCEL_STALE_MS) {
+        return { state: 'waiting' } as const;
+      }
+      await updateDeploymentStatus(txDb, deployment.id, 'canceled', 'managed Sandbox disabled', {
+        force: true,
+      });
+      return { state: 'terminal' } as const;
+    }
+
+    const project = await getProject(txDb, deployment.project_id);
+    if (!project || project.status === 'deleting') {
+      return { state: 'waiting' } as const;
+    }
+    const compensatedKey = cutoverCompensatedKey(deployment.id);
+    const [intentRaw, compensated] = await Promise.all([
+      env.ROUTING.get(cutoverIntentKey(deployment.id)),
+      env.ROUTING.get(compensatedKey),
+    ]);
+    if (compensated === project.id) {
+      await updateDeploymentStatus(
+        txDb,
+        deployment.id,
+        'failed',
+        'cutover compensation completed',
+        { force: true },
+      );
+      markerKeys.push(
+        cutoverIntentKey(deployment.id),
+        cutoverReadyKey(deployment.id),
+        compensatedKey,
+      );
+      return { state: 'terminal' } as const;
+    }
+    if (deployment.status === 'cutover' && ageMs < CUTOVER_RECOVERY_STALE_MS) {
+      return { state: 'waiting' } as const;
+    }
+
+    let committedActiveDeploymentId = project.active_deployment_id;
+    if (!committedActiveDeploymentId) {
+      const legacyActive = await resolveLegacyActiveDeployment(env, txDb, project);
+      if (legacyActive) {
+        committedActiveDeploymentId = legacyActive.id;
+        await setActiveDeployment(txDb, project.id, legacyActive.id);
+      }
+    }
+    if (committedActiveDeploymentId === deployment.id) {
+      return { state: 'waiting' } as const;
+    }
+    const owner = await getUser(txDb, project.user_id);
+    if (!owner) {
+      return { state: 'recovery_incomplete' } as const;
+    }
+
+    const intent = parseCutoverMarker(intentRaw);
+    const recoveryMarker: CutoverMarker = {
+      projectId: project.id,
+      ownerId: crypto.randomUUID(),
+      buildId: intent?.buildId ?? null,
+    };
+    // This durable owner change is the fence checked by the original cutover
+    // and by its compensation path before either may mutate another surface.
+    await env.ROUTING.put(cutoverIntentKey(deployment.id), JSON.stringify(recoveryMarker));
+
+    const committedActive = committedActiveDeploymentId
+      ? await getDeployment(txDb, committedActiveDeploymentId)
+      : null;
+    try {
+      if (committedActive) {
+        await replayDeploymentCutover(
+          env,
+          txDb,
+          project,
+          committedActive,
+          owner.plan,
+          project.type,
+        );
+      } else {
+        await clearProjectExternalState(env, txDb, project);
+      }
+      // Persist this before the database transition so a lost COMMIT
+      // acknowledgement can be completed safely by the next drain request.
+      await env.ROUTING.put(compensatedKey, project.id);
+    } catch {
+      await updateDeploymentStatus(
+        txDb,
+        deployment.id,
+        'compensating',
+        'Sandbox drain cutover compensation incomplete',
+        { force: true },
+      );
+      return { state: 'recovery_incomplete' } as const;
+    }
+    await updateDeploymentStatus(
+      txDb,
+      deployment.id,
+      'failed',
+      'abandoned cutover recovered for managed Sandbox disable',
+      { force: true },
+    );
+    markerKeys.push(
+      cutoverIntentKey(deployment.id),
+      cutoverReadyKey(deployment.id),
+      compensatedKey,
+    );
+    return { state: 'terminal' } as const;
+  });
+
+  for (const markerKey of markerKeys) {
+    await env.ROUTING.delete(markerKey).catch(() => {
+      // The acknowledged database transition is authoritative. A later
+      // recovery can safely remove any stale marker left by a failed cleanup.
+    });
+  }
+  return settlement;
 }
 
 // CF's worker script size limit (free plan 1 MiB, paid plan 10 MiB compressed).
@@ -1112,21 +1382,6 @@ async function assertBoundBuildStillActive(
   }
 }
 
-export function buildWebSocketUploadMigrations(
-  migrations: ReadonlyArray<WebSocketMigrationMeta> | undefined,
-):
-  | {
-      new_tag: string;
-      steps: ReadonlyArray<{
-        new_classes?: ReadonlyArray<string>;
-        new_sqlite_classes?: ReadonlyArray<string>;
-        deleted_classes?: ReadonlyArray<string>;
-      }>;
-    }
-  | undefined {
-  return buildLegacyWebSocketUploadMigrations(migrations);
-}
-
 export function buildDurableObjectUploadMigrations(
   websocketMigrations: ReadonlyArray<WebSocketMigrationMeta> | undefined,
   sandboxMigrations: ReadonlyArray<SandboxMigrationMeta> | undefined,
@@ -1211,33 +1466,6 @@ function parseMigrationTagVersion(tag: string): number | null {
   return match ? Number(match[1]) : null;
 }
 
-export function buildLegacyWebSocketUploadMigrations(
-  migrations: ReadonlyArray<WebSocketMigrationMeta> | undefined,
-):
-  | {
-      new_tag: string;
-      steps: ReadonlyArray<{
-        new_classes?: ReadonlyArray<string>;
-        new_sqlite_classes?: ReadonlyArray<string>;
-        deleted_classes?: ReadonlyArray<string>;
-      }>;
-    }
-  | undefined {
-  if (!migrations || migrations.length === 0) {
-    return undefined;
-  }
-
-  return {
-    new_tag: migrations[migrations.length - 1].tag,
-    steps: migrations.map((migration) => ({
-      ...(migration.newClasses?.length ? { new_classes: migration.newClasses } : {}),
-      ...(migration.newSqliteClasses?.length
-        ? { new_sqlite_classes: migration.newSqliteClasses }
-        : {}),
-    })),
-  };
-}
-
 export function buildWebSocketUploadBindings(
   websocket: DeployManifest['websocket'] | undefined,
 ): ReadonlyArray<{
@@ -1315,52 +1543,6 @@ export function buildSandboxUploadContainers(
   sandbox: DeployManifest['sandbox'] | undefined,
 ): ReadonlyArray<{ class_name: string }> | undefined {
   return sandbox ? [{ class_name: sandbox.className }] : undefined;
-}
-
-/**
- * Builds the `USAGE_EVENTS_QUEUE` producer binding sandbox-using user
- * workers need for container-runtime metering. The API itself consumes this
- * queue (see `processUsageEventBatch`). The `__VOID_PROXY` service binding
- * needed for the sandbox gate is injected unconditionally by
- * `provisionBindings`, so it isn't duplicated here.
- *
- * Queue name comes from the API worker env so staging (`*-staging`) and
- * production stay in sync with what the API itself binds.
- */
-export function buildSandboxPlatformBindings(
-  env: Pick<ApiEnv['Bindings'], 'USAGE_EVENTS_QUEUE_NAME'>,
-  sandbox: DeployManifest['sandbox'] | undefined,
-): ReadonlyArray<{ type: 'queue'; name: string; queue_name: string }> {
-  if (!sandbox) {
-    return [];
-  }
-  return [
-    {
-      type: 'queue',
-      name: 'USAGE_EVENTS_QUEUE',
-      queue_name: env.USAGE_EVENTS_QUEUE_NAME ?? 'void-usage-events',
-    },
-  ];
-}
-
-/**
- * Builds the sandbox-only plain-text identity bindings the framework's
- * sandbox runtime reads when emitting metering messages to
- * `USAGE_EVENTS_QUEUE` (see `packages/void/src/runtime/sandbox.ts`).
- * Project id is read from the shared `__PROJECT_ID` slot injected by
- * `provisionBindings` for AI/ISR, and `__VOID_PROJECT_SLUG` likewise — it
- * moved there when `void/email` made it needed on every worker, not just
- * sandbox ones. Two producers of one binding name would upload the name
- * twice, so this builder deliberately no longer emits it.
- */
-export function buildSandboxIdentityBindings(
-  sandbox: DeployManifest['sandbox'] | undefined,
-  identity: { userId: string },
-): ReadonlyArray<{ type: 'plain_text'; name: string; text: string }> {
-  if (!sandbox) {
-    return [];
-  }
-  return [{ type: 'plain_text', name: '__VOID_USER_ID', text: identity.userId }];
 }
 
 export function enrichWebSocketManifest(
@@ -1926,6 +2108,7 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
   if (versionReject) {
     return versionReject;
   }
+  await ensureProjectIngress(context.env, project);
   const cliVersion = context.req.header('x-void-cli-version') ?? null;
 
   const user = context.get('user');
@@ -2368,14 +2551,13 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
               }
             }
           }
-          const updatedAt = protectedDeployment.updated_at.includes('T')
-            ? protectedDeployment.updated_at
-            : `${protectedDeployment.updated_at.replace(' ', 'T')}Z`;
+          const protectedUpdatedAtMs = databaseTimestampMs(protectedDeployment.updated_at);
           if (
             protectedDeployment.status !== 'compensating' &&
             !protectedBuildInactive &&
             !protectedAssetsMissing &&
-            Date.now() - new Date(updatedAt).getTime() < CUTOVER_RECOVERY_STALE_MS
+            (protectedUpdatedAtMs === null ||
+              Date.now() - protectedUpdatedAtMs < CUTOVER_RECOVERY_STALE_MS)
           ) {
             throw new ConcurrentDeployError(protectedDeployment.id);
           }
@@ -2515,10 +2697,11 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
         if (activeDeploy.source === 'rollback-lease') {
           throw new ConcurrentDeployError(activeDeploy.id);
         }
-        const updatedAt = activeDeploy.updated_at.includes('T')
-          ? activeDeploy.updated_at
-          : activeDeploy.updated_at.replace(' ', 'T') + 'Z';
-        const ageMs = Date.now() - new Date(updatedAt).getTime();
+        const activeUpdatedAtMs = databaseTimestampMs(activeDeploy.updated_at);
+        if (activeUpdatedAtMs === null) {
+          throw new ConcurrentDeployError(activeDeploy.id);
+        }
+        const ageMs = Date.now() - activeUpdatedAtMs;
         if (ageMs < 10 * 60 * 1000) {
           throw new ConcurrentDeployError(activeDeploy.id);
         }
@@ -2688,6 +2871,22 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
         }
         if (lockedProject.active_deployment_id !== originalActiveDeploymentId) {
           return;
+        }
+        if (cutoverProtected) {
+          const ownedDeployment = await getDeployment(txDb, currentDeploymentId);
+          if (
+            !ownedDeployment ||
+            ownedDeployment.status !== 'compensating' ||
+            TERMINAL_DEPLOYMENT_STATUSES.includes(ownedDeployment.status)
+          ) {
+            return;
+          }
+          const intent = parseCutoverMarker(
+            await context.env.ROUTING.get(cutoverIntentKey(currentDeploymentId)),
+          );
+          if (intent?.projectId !== projectId || intent.ownerId !== cutoverOwnerId) {
+            return;
+          }
         }
         const competingOperation = await getActiveDeployment(txDb, projectId);
         if (competingOperation && competingOperation.id !== currentDeploymentId) {
@@ -2886,7 +3085,6 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
     let workerUploadUrl: string | undefined;
     let sandboxContainerAppId: string | undefined;
     let sandboxContainerAppName: string | undefined;
-    let bundleStored = false;
     let manifest: DeployManifest | undefined;
     let workerName: string | undefined;
     let dispatchNamespace: string | undefined;
@@ -2899,16 +3097,6 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
     // from R2 fetches further down — the CF asset upload session needs
     // the actual bytes to fan into upload buckets.
     const assetsByHash = new Map<string, AssetEntry>();
-    // For JSON mode, every asset lives in R2 (direct-to-R2 uploads never
-    // touch KV). We still pass `streamedHashStores` / `streamedLargeHashes`
-    // / `streamedStaticAssets=true` into the static branch so it builds
-    // the serving manifest correctly with `!` prefixes on every entry.
-    // The map stays empty for cleanup-on-abort: the bytes pre-existed
-    // this deploy and may be needed for a retry, so we never delete them
-    // on a JSON-mode failure.
-    const streamedHashStores = new Map<string, 'kv' | 'r2'>();
-    const streamedLargeHashes = new Set<string>();
-
     const heartbeat = setInterval(() => {
       emit(
         currentDeploymentId
@@ -3026,15 +3214,20 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
         enrichedManifestResult.changed ||
         liveManifestResult.changed;
       manifest = liveManifestResult.manifest;
+      if (hasWorkerFiles && manifest.type === undefined) {
+        // Rollback identifies retained Workers from their manifest, including
+        // older clients that omit type and workerMain but configure asset fallbacks.
+        manifest = { ...manifest, type: manifest.framework ? 'framework' : 'void' };
+      }
       const finalManifestRaw = JSON.stringify(manifest);
 
       // Host-scoped routing rules — same logic as multipart path.
       const hostScopedRedirects = manifest.redirectRules?.some((r) => r.host) ?? false;
       const hostScopedFallbacks = manifest.fallbackRules?.some((r) => r.host) ?? false;
       if (hostScopedRedirects || hostScopedFallbacks) {
-        const siteDomain = context.env.SITE_DOMAIN ?? SITE_DOMAIN;
+        const application = readPlatformApplication(context.env);
         projectDomains ??= await getDomainsByProjectId(context.get('db'), projectId);
-        const boundHosts = new Set<string>([`${project.slug}.${siteDomain}`]);
+        const boundHosts = new Set<string>(platformProjectHostnames(project, application));
         for (const d of projectDomains) {
           boundHosts.add(d.hostname);
         }
@@ -3072,13 +3265,13 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
           parseAssetManifest(currentLiveDeployment.asset_hashes),
         );
         if (sameManifest && sameAssets) {
-          const siteDomain = context.env.SITE_DOMAIN ?? SITE_DOMAIN;
+          const application = readPlatformApplication(context.env);
           projectDomains ??= await getDomainsByProjectId(context.get('db'), projectId);
           const activeDomains = projectDomains.filter((d) => d.status === 'active');
           const fullUrl =
             activeDomains.length > 0
               ? `https://${activeDomains[0].hostname}`
-              : `https://${project.slug}.${siteDomain}`;
+              : `https://${platformProjectHostname(project, application)}`;
 
           emit({ event: 'start', deploymentId: currentLiveDeployment.id });
           emit({
@@ -3087,7 +3280,7 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
             url: fullUrl,
             urls: [
               ...activeDomains.map((d) => `https://${d.hostname}`),
-              `https://${project.slug}.${siteDomain}`,
+              `https://${platformProjectHostname(project, application)}`,
             ],
             assets: 0,
             workers: 0,
@@ -3185,7 +3378,6 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
         await assertDeploymentNotCanceled(context.get('db'), deployment.id);
         await assertProjectNotDeleting(context.get('db'), projectId);
 
-        const preflightUsed = preflightRaw === 'true';
         const isStaticOnly = !hasWorkerFiles;
         logger = logger.with({ branch: isStaticOnly ? 'static' : 'wfp' });
 
@@ -3250,7 +3442,7 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
           // direct-to-R2 by the CLI and always use the `!` prefix.
           //
           // We always read the prior serving manifest (not just when
-          // `preflightUsed` is true) — a CLI that re-declares the same
+          // preflight is used) — a CLI that re-declares the same
           // hashes without preflight still relies on carry-forward to
           // serve those bytes from their existing KV/R2 home.
           let prevServingManifest: Record<string, string> | null = null;
@@ -3597,12 +3789,12 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
             }
           }
 
-          const siteDomain = context.env.SITE_DOMAIN ?? SITE_DOMAIN;
+          const application = readPlatformApplication(context.env);
           const activeDomains = projectDomains.filter((d) => d.status === 'active');
           const url =
             activeDomains.length > 0
               ? `https://${activeDomains[0].hostname}`
-              : `https://${project.slug}.${siteDomain}`;
+              : `https://${platformProjectHostname(project, application)}`;
 
           emit({
             event: 'done',
@@ -3610,7 +3802,7 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
             url,
             urls: [
               ...activeDomains.map((d) => `https://${d.hostname}`),
-              `https://${project.slug}.${siteDomain}`,
+              `https://${platformProjectHostname(project, application)}`,
             ],
             assets: assetCount,
             workers: 0,
@@ -3918,10 +4110,6 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
         const websocketBindings = buildWebSocketUploadBindings(manifest.websocket);
         const sandboxBindings = buildSandboxUploadBindings(manifest.sandbox);
         const liveBindings = buildLiveUploadBindings(manifest.live);
-        const sandboxPlatformBindings = buildSandboxPlatformBindings(context.env, manifest.sandbox);
-        const sandboxIdentityBindings = buildSandboxIdentityBindings(manifest.sandbox, {
-          userId: user.id,
-        });
         // No per-project `send_email` binding is uploaded. The framework's
         // `sendEmail()` POSTs MIME + recipients to `__VOID_PROXY/email/send`;
         // the proxy holds the account-level send_email binding and enforces
@@ -3929,8 +4117,6 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
         // `email-allowlist:<projectId>` KV mirror. See
         // `meta/design-docs/0078-email-cf-native.md` and `packages/proxy/src/email.ts`.
         const allBindings = [
-          ...sandboxIdentityBindings,
-          ...sandboxPlatformBindings,
           ...plainTextBindings,
           ...secretBindings,
           ...workerBindings,
@@ -4015,27 +4201,6 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
         );
         workerUploaded = true;
 
-        if (hasWorkerFiles) {
-          try {
-            await persistWorkerBundle(
-              context.env.STATIC_ASSETS_R2,
-              projectId,
-              deployment.id,
-              workerFiles,
-            );
-          } catch (err) {
-            await deleteWorkerBundle(context.env.STATIC_ASSETS_R2, projectId, deployment.id).catch(
-              (e) =>
-                logger.error('worker_upload', 'partial_bundle_cleanup_failed', e, {
-                  deploymentId: deployment!.id,
-                }),
-            );
-            throw err;
-          }
-          await markDeploymentBundleStored(context.get('db'), deployment.id);
-          bundleStored = true;
-        }
-
         await assertDeploymentNotCanceled(context.get('db'), deployment.id);
         await assertProjectNotDeleting(context.get('db'), projectId);
 
@@ -4060,6 +4225,7 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
               instanceType: manifest.sandbox.instanceType,
               maxInstances: manifest.sandbox.maxInstances,
             },
+            context.env.ROUTING,
           );
           sandboxContainerAppId = containerApplicationId;
           await assertDeploymentNotCanceled(context.get('db'), deployment.id);
@@ -4501,7 +4667,7 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
           }
           await assertDeploymentNotCanceled(context.get('db'), deployment.id);
           await assertProjectNotDeleting(context.get('db'), projectId);
-          const siteDomain = context.env.SITE_DOMAIN ?? SITE_DOMAIN;
+          const application = readPlatformApplication(context.env);
 
           await uploadPool(manifest.prerender, 3, async (pathname) => {
             const ttl = resolvePageTtl(
@@ -4515,7 +4681,7 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
             }
             try {
               const userWorker = context.env.DISPATCH.get(workerName);
-              const slugHost = `${project.slug}.${siteDomain}`;
+              const slugHost = platformProjectHostname(project, application);
               const url = `https://${slugHost}${pathname}`;
               const response = await userWorker.fetch(new Request(url));
               // Mirror dispatch's live-miss / background write gate so prewarm
@@ -4528,7 +4694,7 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
               // dispatch's `resolveRevalidateTtl` does; a full 200 is required
               // (parity with the dispatch write sites — no partial/redirect body).
               const effectiveTtl = resolveRevalidateTtl(response, ttl);
-              if (response.status === 200 && effectiveTtl > 0 && !hasCacheOptOut(response)) {
+              if (response.status === 200 && effectiveTtl > 0 && !hasSharedCacheOptOut(response)) {
                 // Host-scope the warmed key to the slug host implied by the
                 // fetch URL — dispatch reads `<pid>/isr/v3/<did>/<host>/<path>`
                 // keyed on the request hostname, so without this the warmed
@@ -4547,6 +4713,7 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
                     s: response.status,
                     c: Date.now(),
                     t: effectiveTtl,
+                    p: SHARED_CACHE_POLICY_VERSION,
                   } satisfies IsrCacheMetadata,
                 });
               }
@@ -4886,12 +5053,12 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
           }
         }
 
-        const siteDomain = context.env.SITE_DOMAIN ?? SITE_DOMAIN;
+        const application = readPlatformApplication(context.env);
         const activeDomains = projectDomains.filter((d) => d.status === 'active');
         const fullUrl =
           activeDomains.length > 0
             ? `https://${activeDomains[0].hostname}`
-            : `https://${project.slug}.${siteDomain}`;
+            : `https://${platformProjectHostname(project, application)}`;
 
         emit({
           event: 'done',
@@ -4899,7 +5066,7 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
           url: fullUrl,
           urls: [
             ...activeDomains.map((d) => `https://${d.hostname}`),
-            `https://${project.slug}.${siteDomain}`,
+            `https://${platformProjectHostname(project, application)}`,
           ],
           assets: assetCount,
           workers: workerFiles.length,
@@ -4918,7 +5085,6 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
           currentPhase: currentStep,
           routingSwitched,
           workerUploaded,
-          bundleStored,
         });
 
         // Wfp mirror manifest cleanup on pre-routing failure (mirror of
@@ -5136,17 +5302,6 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
               }),
             );
           }
-          if (bundleStored) {
-            await deleteWorkerBundle(
-              context.env.STATIC_ASSETS_R2,
-              projectId,
-              failedDeployment.id,
-            ).catch((e) =>
-              logger.error('catch', 'worker_bundle_delete_failed', e, {
-                deploymentId: failedDeployment.id,
-              }),
-            );
-          }
           if (sandboxContainerAppId) {
             await deleteContainerApplicationWithRetry(
               context.env.CF_ACCOUNT_ID,
@@ -5229,8 +5384,8 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
             ]).catch(() => {
               // Stale markers are harmless once PostgreSQL is live.
             });
-            const siteDomain = context.env.SITE_DOMAIN ?? SITE_DOMAIN;
-            const slugUrl = `https://${project.slug}.${siteDomain}`;
+            const application = readPlatformApplication(context.env);
+            const slugUrl = `https://${platformProjectHostname(project, application)}`;
             emit({
               event: 'done',
               deployment: failedDeployment.id,
@@ -5268,8 +5423,8 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
           await markDeploymentRetained(context.get('db'), failedDeployment.id, true).catch(
             () => {},
           );
-          const siteDomain = context.env.SITE_DOMAIN ?? SITE_DOMAIN;
-          const slugUrl = `https://${project.slug}.${siteDomain}`;
+          const application = readPlatformApplication(context.env);
+          const slugUrl = `https://${platformProjectHostname(project, application)}`;
           emit({
             event: 'done',
             deployment: failedDeployment.id,
@@ -5295,17 +5450,6 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
               workerName: failedWorkerName,
             }),
           );
-          if (bundleStored) {
-            await deleteWorkerBundle(
-              context.env.STATIC_ASSETS_R2,
-              projectId,
-              failedDeployment.id,
-            ).catch((e) =>
-              logger.error('catch', 'worker_bundle_delete_failed', e, {
-                deploymentId: failedDeployment.id,
-              }),
-            );
-          }
           if (sandboxContainerAppId) {
             await deleteContainerApplicationWithRetry(
               context.env.CF_ACCOUNT_ID,
@@ -5578,7 +5722,7 @@ async function deleteIsrKeysByPrefix(kv: KVNamespace, prefix: string): Promise<v
   } while (cursor);
 }
 
-// --- ISR prerender helpers (inlined from dispatch to avoid cross-package dependency) ---
+// --- ISR prerender helpers ---
 
 /**
  * Pack response headers + body into a single ArrayBuffer.
@@ -5592,165 +5736,6 @@ function packIsrValue(headers: Record<string, string>, body: ArrayBuffer): Array
   new Uint8Array(buffer, 4, headerJson.byteLength).set(headerJson);
   new Uint8Array(buffer, 4 + headerJson.byteLength).set(new Uint8Array(body));
   return buffer;
-}
-
-/**
- * Resolve the ISR TTL for a given pathname.
- * For object form, first matching pattern wins.
- */
-function resolvePathTtl(
-  revalidate: number | Record<string, number> | undefined,
-  pathname: string,
-): number {
-  if (revalidate == null) {
-    return 0;
-  }
-  if (typeof revalidate === 'number') {
-    return revalidate;
-  }
-  for (const [pattern, ttl] of Object.entries(revalidate)) {
-    if (matchLiteralPattern(pattern, pathname)) {
-      return ttl;
-    }
-  }
-  return 0;
-}
-
-/**
- * Route-aware ISR TTL resolution for prewarming — a mirror of dispatch's
- * `resolvePageTtl` (`packages/dispatch/src/isr.ts`). First-match over the ordered
- * `pages` table (do NOT re-sort — it is already the framework's authoritative
- * `matchRoute` order), where the winning route's TTL is authoritative (0 when it
- * opts out); only when NO page route matches do we fall back to the flat
- * `revalidate` map. When `pages` is absent, behavior is identical to
- * `resolvePathTtl`. Keep in sync with dispatch so prewarm resolves the SAME TTL
- * dispatch will serve — otherwise a specific non-ISR page beneath a flat
- * catch-all would be warmed with the catch-all's TTL and become a misleading
- * cache entry. (Uses the api's `matchLiteralPattern`, the mirror of dispatch's
- * `matchSegmentPattern`.)
- */
-function resolvePageTtl(
-  pages: ReadonlyArray<{ pattern: string; revalidate?: number }> | undefined,
-  revalidate: number | Record<string, number> | undefined,
-  pathRevalidate: Record<string, number> | undefined,
-  pathname: string,
-): number {
-  if (pages && pages.length > 0) {
-    for (const page of pages) {
-      if (matchLiteralPattern(page.pattern, pathname)) {
-        return matchedPageTtl(page, pathRevalidate, pathname);
-      }
-    }
-    return resolvePathTtl(revalidate, pathname);
-  }
-  return resolvePathTtl(revalidate, pathname);
-}
-
-/**
- * Effective ISR TTL for a `pages` entry that ALREADY matched `pathname`,
- * decoding the framework's 3-state table — a mirror of dispatch's
- * `matchedPageTtl` (`packages/dispatch/src/isr.ts`). A baked number is
- * authoritative (`> 0` on, `0` explicit opt-out); an ABSENT `revalidate` is
- * inherit-eligible and resolves the RAW per-path `pathRevalidate` object config
- * against the actual path (honoring per-path `0` opt-outs). Keep in sync with
- * dispatch and the framework's `collectPages`.
- */
-function matchedPageTtl(
-  page: { pattern: string; revalidate?: number },
-  pathRevalidate: Record<string, number> | undefined,
-  pathname: string,
-): number {
-  if (page.revalidate === undefined) {
-    return resolvePathTtl(pathRevalidate, pathname);
-  }
-  return page.revalidate > 0 ? page.revalidate : 0;
-}
-
-/**
- * Resolve the effective ISR TTL honoring a worker `x-revalidate` header — a
- * mirror of dispatch's `resolveRevalidateTtl` (`packages/dispatch/src/isr.ts`).
- * A valid non-negative `x-revalidate` overrides `defaultTtl` (so `0` opts the
- * render OUT of caching); an absent/invalid header keeps `defaultTtl`. Kept in
- * sync with dispatch so prewarm applies the SAME opt-out the edge write sites do.
- */
-function resolveRevalidateTtl(response: Response, defaultTtl: number): number {
-  const header = response.headers.get('x-revalidate');
-  if (header === null) {
-    return defaultTtl;
-  }
-  const value = parseInt(header, 10);
-  if (isNaN(value) || value < 0) {
-    return defaultTtl;
-  }
-  return value;
-}
-
-/**
- * True when a response carries a `Cache-Control` opt-out — a mirror of
- * dispatch's `hasCacheOptOut` (`packages/dispatch/src/index.ts`). Directive
- * names are case-insensitive (RFC 9111 §5.2). Kept in sync so a `private` /
- * `no-store` / `no-cache` render is never warmed into ISR KV (dispatch strips
- * `Cache-Control` at write and serves HITs without re-checking, so this gate is
- * the only place the opt-out can be honored for a prewarmed entry).
- */
-function hasCacheOptOut(response: Response): boolean {
-  const cacheControl = response.headers.get('Cache-Control');
-  if (!cacheControl) {
-    return false;
-  }
-  return /\b(private|no-store|no-cache)\b/i.test(cacheControl);
-}
-
-const MAX_CACHE = 256;
-const regexCache = new Map<string, RegExp>();
-
-/**
- * Match a `routing.revalidate` pattern against a pathname using SEGMENT-ANCHORED
- * semantics. `*` is special (matches any characters including `/`); a
- * WHOLE-SEGMENT `:name` (a `:` right after `/` or at the start of the pattern,
- * whose name is any non-empty run of non-`/` characters — NOT just JS-identifier
- * chars, so `:post-id`, `:post.id`, etc. all anchor — up to the next `/` or end
- * of string) matches exactly ONE non-empty path segment (`[^/]+`). A
- * whole-segment NAMED CATCH-ALL `:name{.+}` (a named catch-all page `[...path]`
- * → `/docs/:path{.+}`) matches ONE-OR-MORE characters that MAY cross `/` (`.+`,
- * so `/docs/a` and `/docs/a/b` both match, but bare `/docs` / `/docs/` do NOT).
- * Only the exact `{.+}` constraint widens — a regex-constrained param like
- * `:path{[0-9]+}` keeps its single-segment `[^/]+` meaning. A mid-segment `:`
- * (e.g. `/api/v1:health`) stays a LITERAL; every other character is literal.
- *
- * Mirrors `matchSegmentPattern` in `packages/dispatch/src/pattern.ts` (despite
- * the local name). Keep the two implementations in sync — `routing.revalidate`
- * keys are written here (during deploy/prerender) and read by dispatch, so both
- * sides must agree on what each pattern matches.
- */
-function matchLiteralPattern(pattern: string, pathname: string): boolean {
-  let regex = regexCache.get(pattern);
-  if (regex) {
-    regexCache.delete(pattern);
-    regexCache.set(pattern, regex);
-  } else {
-    // Two private-use sentinels stand in for route params so the regex-special
-    // escape step below can't touch the classes we swap in last:
-    //   \uE000 - a whole-segment `:name`       -> one path segment (`[^/]+`)
-    //   \uE001 - a named catch-all `:name{.+}`  -> >=1 char, crosses `/` (`.+`)
-    // The named-catch-all rule runs FIRST so `:name{.+}` is consumed as a unit
-    // before the plain `:name` rule can grab `:name` and strand the `{.+}`. The
-    // `{.+}` name class is `[^/{}]+` (excludes braces) so a REGEX-constrained
-    // param like `:path{[0-9]+}` does NOT match and stays a single segment.
-    const escaped = pattern
-      .replace(/(^|\/):[^/{}]+\{\.\+\}(?=\/|$)/g, '$1\uE001') // named catch-all :name{.+} -> catch-all sentinel
-      .replace(/(^|\/):[^/]+(?=\/|$)/g, '$1\uE000') // whole-segment :name -> segment sentinel
-      .replace(/[.+?^${}()|[\]\\]/g, '\\$&') // escape regex specials
-      .replaceAll('*', '.*') // legacy `*` crosses '/'
-      .replaceAll('\uE000', '[^/]+') // segment sentinel -> one segment
-      .replaceAll('\uE001', '.+'); // catch-all sentinel -> >=1 char, crosses '/'
-    regex = new RegExp(`^${escaped}$`);
-    if (regexCache.size >= MAX_CACHE) {
-      regexCache.delete(regexCache.keys().next().value!);
-    }
-    regexCache.set(pattern, regex);
-  }
-  return regex.test(pathname);
 }
 
 /**

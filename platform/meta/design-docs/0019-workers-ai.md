@@ -488,16 +488,7 @@ query {
 
 This gives us per-project, per-model breakdowns of requests, tokens, and cost — with zero custom metering infrastructure.
 
-### Billing tiers
-
-AI usage fits into the existing tier system in `src/tiers.ts`. Possible limits:
-
-| Tier   | AI Requests/day | Neurons/day  |
-| ------ | --------------- | ------------ |
-| Free   | 100             | 10,000       |
-| Solo   | 1,000           | 100,000      |
-| Pro    | 10,000          | 1,000,000    |
-| Custom | Configurable    | Configurable |
+### Usage enforcement
 
 Enforcement happens in the proxy worker — it can check usage against limits before forwarding to `env.AI.run()`. The proxy can cache the current period's usage count (from a KV lookup or an in-memory counter with periodic AE/GraphQL sync) to avoid per-request latency.
 

@@ -24,7 +24,7 @@ The framework, CLI, and platform share one workspace:
 | `platform/packages/dispatch`                         | Application ingress, asset serving, queue delivery and metering |
 | `platform/packages/proxy`                            | Workers AI, remote bindings and ISR revalidation                |
 | `platform/packages/tail`                             | Runtime log ingestion into Analytics Engine                     |
-| `platform/packages/dashboard`                        | User dashboard source                                           |
+| `platform/packages/dashboard`                        | User dashboard and its local UI components, styles and assets   |
 
 The installer consumes integrity-checked runtime artifacts from
 [`@void/platform`](../../packages/platform/README.md). It generates resource

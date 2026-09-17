@@ -1,14 +1,17 @@
 import { describe, expect, it } from 'vite-plus/test';
-import { shouldBindWorkersAi } from '../../src/index.ts';
+import { resolveWorkersAiBindingName, shouldBindWorkersAi } from '../../src/index.ts';
 
-// `shouldBindWorkersAi(command, needsAI, resolvedAi, resultAi)` is the pure,
-// testable surface of the self-host serve-gate (the surrounding `mergeBindings`
+// `shouldBindWorkersAi(...)` is the pure, testable surface of the destination
+// gate (the surrounding `mergeBindings`
 // is an unexported closure). It decides whether the built wrangler config gets
 // an injected Workers AI binding. Assert the real return values.
 describe('shouldBindWorkersAi', () => {
-  it('never binds Workers AI during dev/serve (miniflare has no local AI)', () => {
-    // Dev uses the P2 `__VOID_TOKEN` proxy path instead of `env.AI`.
+  it('keeps managed dev on the Void proxy path', () => {
     expect(shouldBindWorkersAi('serve', true, undefined, undefined)).toBe(false);
+  });
+
+  it('binds remote Workers AI during direct Cloudflare dev', () => {
+    expect(shouldBindWorkersAi('serve', true, undefined, undefined, true)).toBe(true);
   });
 
   it('binds Workers AI on a self-host build when the app uses AI', () => {
@@ -22,5 +25,20 @@ describe('shouldBindWorkersAi', () => {
 
   it('does not bind Workers AI when the app does not use AI', () => {
     expect(shouldBindWorkersAi('build', false, undefined, undefined)).toBe(false);
+    expect(shouldBindWorkersAi('serve', false, undefined, undefined, true)).toBe(false);
+  });
+});
+
+describe('resolveWorkersAiBindingName', () => {
+  it('uses a custom inference binding name', () => {
+    expect(resolveWorkersAiBindingName(undefined, 'MY_AI')).toBe('MY_AI');
+  });
+
+  it('preserves a root Wrangler binding over the inference name', () => {
+    expect(resolveWorkersAiBindingName({ binding: 'ROOT_AI' }, 'MY_AI')).toBe('ROOT_AI');
+  });
+
+  it('defaults to AI', () => {
+    expect(resolveWorkersAiBindingName(undefined)).toBe('AI');
   });
 });

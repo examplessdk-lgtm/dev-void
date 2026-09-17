@@ -51,11 +51,11 @@ Cached at the edge until the next deploy. Browsers always revalidate on the next
 - `/api/*` routes, which always hit the worker
 - SSR-rendered pages (paths without file extensions in SSR projects)
 - Non-GET requests
-- Non-2xx responses
+- Responses other than a complete `200`
 
 ### Opting out
 
-If your worker serves dynamic content at a URL that looks static (e.g., a dynamically generated image at `/avatar.jpg`), you can prevent caching by setting `Cache-Control: private` or `Cache-Control: no-store` in your response headers. Any response with `Cache-Control` containing `private`, `no-store`, or `no-cache` will bypass the edge cache.
+If your worker serves dynamic content at a URL that looks static (e.g., a dynamically generated image at `/avatar.jpg`), you can prevent caching by setting `Cache-Control: private` or `Cache-Control: no-store` in your response headers. Any response with `Cache-Control` containing `private`, `no-store`, or `no-cache`, or with a `Set-Cookie` header, bypasses the edge cache.
 
 ## ETags and 304 Not Modified
 

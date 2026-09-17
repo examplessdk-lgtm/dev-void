@@ -130,16 +130,16 @@ describe('envClientFoldPlugin', () => {
     expect(result).toBeFalsy();
   });
 
-  it('honours a custom envPrefix string', async () => {
+  it('does not fold custom-prefix keys', async () => {
     const code = `import { env } from "void/env";\nconsole.log(env.PUBLIC_TITLE);\n`;
     const { result } = await runFold(code, `${ROOT}/src/page.ts`, {
       envPrefix: 'PUBLIC_',
       env: { PUBLIC_TITLE: 'Public' },
     });
-    expect(result?.code).toContain(`"Public"`);
+    expect(result).toBeFalsy();
   });
 
-  it('honours a custom envPrefix array', async () => {
+  it('does not fold keys from custom prefix arrays', async () => {
     const code = [
       `import { env } from "void/env";`,
       `const a = env.PUBLIC_A;`,
@@ -149,8 +149,7 @@ describe('envClientFoldPlugin', () => {
       envPrefix: ['PUBLIC_', 'NEXT_PUBLIC_'],
       env: { PUBLIC_A: 'aa', NEXT_PUBLIC_B: 'bb' },
     });
-    expect(result?.code).toContain(`"aa"`);
-    expect(result?.code).toContain(`"bb"`);
+    expect(result).toBeFalsy();
   });
 
   it('leaves unknown keys untouched so the runtime Proxy can serve them', async () => {

@@ -161,24 +161,41 @@ void describe(`kitchen-sink smoke (${BASE})`, { concurrency: true }, () => {
       const assetMatch = html.match(/\/(assets\/[^"']+[-._][A-Za-z0-9_-]{6,}\.(js|css))/);
       assert.ok(assetMatch, 'found hashed asset URL in HTML');
 
-      const assetUrl = `${BASE}/${assetMatch![1]}`;
+      const assetUrl = `${BASE}/${assetMatch![1]}?smoke=${uid}`;
 
-      // `cache: 'no-store'` makes this a NETWORK get, so the assertion reads the
-      // response the platform just produced. Reading the stored entry instead
-      // (plain HEAD after the page load, which is how this test used to run)
-      // reports whatever the browser cached earlier: the dispatch edge cache only
-      // stamps `immutable` on gets to hashed paths, so a conditional HEAD is both
-      // answered from the store and outside the caching contract under test.
-      // Use in-browser fetch (not curl) — CF edge cache rules differ for browser vs non-browser
+      // A unique URL forces a fresh network GET without sending cache-bypass
+      // directives to the origin. Omit application/Access session cookies too.
+      // Cookie-bearing requests deliberately bypass the shared asset cache.
+      // The browser context still supplies Access service-token headers when
+      // configured; those protected requests exercise the private cache policy.
       const asset = await page.evaluate(async (url) => {
-        const res = await fetch(url, { cache: 'no-store' });
-        return { status: res.status, cacheControl: res.headers.get('cache-control') || '' };
+        const res = await fetch(url, { credentials: 'omit' });
+        return {
+          status: res.status,
+          cacheControl: res.headers.get('cache-control') || '',
+          contentType: res.headers.get('content-type'),
+          cfCacheStatus: res.headers.get('cf-cache-status'),
+        };
       }, assetUrl);
 
       assert.equal(asset.status, 200, `asset GET succeeds (got ${asset.status})`);
+      const accessProtected = Object.keys(CF_ACCESS).length > 0;
+      const expectedDirective = accessProtected ? 'no-store' : 'immutable';
+      const directives = asset.cacheControl
+        .toLowerCase()
+        .split(',')
+        .map((part) => part.trim());
       assert.ok(
-        asset.cacheControl.includes('immutable'),
-        `Cache-Control includes immutable (got: ${asset.cacheControl})`,
+        directives.includes(expectedDirective),
+        `Cache-Control includes ${expectedDirective} for ${assetUrl} (got: ${JSON.stringify(asset)})`,
+      );
+      assert.ok(
+        accessProtected
+          ? !directives.includes('immutable') && !directives.includes('public')
+          : !directives.some((directive) =>
+              ['private', 'no-store', 'no-cache'].includes(directive),
+            ),
+        `Cache-Control has no contradictory directives (got: ${asset.cacheControl})`,
       );
     } finally {
       await ctx.close();

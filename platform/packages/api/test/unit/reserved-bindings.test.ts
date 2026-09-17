@@ -2,10 +2,6 @@ import { describe, it, expect } from 'vite-plus/test';
 import type { Db } from '../../src/db.ts';
 import { provisionBindings } from '../../src/provisioning/provision.ts';
 import { RESERVED_BINDING_NAMES, isReservedBindingName } from '../../src/reserved-bindings.ts';
-import {
-  buildSandboxIdentityBindings,
-  buildSandboxPlatformBindings,
-} from '../../src/routes/deploy.ts';
 import type { DeployManifest } from '../../src/types.ts';
 
 /**
@@ -27,13 +23,6 @@ const stubDb = {
 
 const EMPTY_MANIFEST: DeployManifest = { version: 1, bindings: {} };
 
-const SANDBOX: NonNullable<DeployManifest['sandbox']> = {
-  bindingName: 'SANDBOX',
-  className: 'Sandbox',
-  containerName: 'void-sandbox',
-  image: 'docker.io/cloudflare/sandbox:0.8.11',
-};
-
 async function platformBindingNames(): Promise<ReadonlyArray<string>> {
   const provisioned = await provisionBindings(
     stubDb,
@@ -45,13 +34,7 @@ async function platformBindingNames(): Promise<ReadonlyArray<string>> {
     'void-proxy',
     { projectSlug: 'my-app', emailSenderDomain: 'mail.staging.void.cloud' },
   );
-  return [
-    ...provisioned.map((b) => b.name),
-    ...buildSandboxIdentityBindings(SANDBOX, { userId: 'user_1' }).map((b) => b.name),
-    ...buildSandboxPlatformBindings({ USAGE_EVENTS_QUEUE_NAME: 'void-usage-events' }, SANDBOX).map(
-      (b) => b.name,
-    ),
-  ];
+  return provisioned.map((binding) => binding.name);
 }
 
 describe('reserved binding names cover every platform-injected binding', () => {
@@ -75,29 +58,9 @@ describe('reserved binding names cover every platform-injected binding', () => {
     }
   });
 
-  it('reserves every name buildSandboxIdentityBindings emits', () => {
-    const bindings = buildSandboxIdentityBindings(SANDBOX, { userId: 'user_1' });
-    expect(bindings.length).toBeGreaterThan(0);
-    for (const binding of bindings) {
-      expect(
-        isReservedBindingName(binding.name),
-        `buildSandboxIdentityBindings emits "${binding.name}" — add it to RESERVED_BINDING_NAMES`,
-      ).toBe(true);
-    }
-  });
-
-  it('reserves every name buildSandboxPlatformBindings emits', () => {
-    const bindings = buildSandboxPlatformBindings(
-      { USAGE_EVENTS_QUEUE_NAME: 'void-usage-events' },
-      SANDBOX,
-    );
-    expect(bindings.length).toBeGreaterThan(0);
-    for (const binding of bindings) {
-      expect(
-        isReservedBindingName(binding.name),
-        `buildSandboxPlatformBindings emits "${binding.name}" — add it to RESERVED_BINDING_NAMES`,
-      ).toBe(true);
-    }
+  it('keeps retired sandbox identity and queue names reserved', () => {
+    expect(isReservedBindingName('__VOID_USER_ID')).toBe(true);
+    expect(isReservedBindingName('USAGE_EVENTS_QUEUE')).toBe(true);
   });
 
   it('reserves ASSETS, which the deploy route appends inline rather than via a builder', () => {
@@ -107,9 +70,7 @@ describe('reserved binding names cover every platform-injected binding', () => {
   it('names every binding the producers actually emit today', async () => {
     // The dual of the tests above: they catch a NEW platform binding that was
     // never reserved. This one catches a reserved name silently DROPPED from
-    // the set — the regression that unreserved `__VOID_USER_ID`,
-    // `__VOID_PROJECT_SLUG` and `USAGE_EVENTS_QUEUE` when the list was first
-    // hoisted out of `routes/deploy.ts`.
+    // the set. Retired Sandbox producer names are checked separately above.
     expect(new Set(await platformBindingNames())).toEqual(
       new Set([
         '__VOID_PROXY',
@@ -117,8 +78,6 @@ describe('reserved binding names cover every platform-injected binding', () => {
         '__VOID_PROXY_TOKEN',
         '__VOID_PROJECT_SLUG',
         '__VOID_EMAIL_DOMAIN',
-        '__VOID_USER_ID',
-        'USAGE_EVENTS_QUEUE',
       ]),
     );
   });

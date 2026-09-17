@@ -4,7 +4,7 @@ import type { SubcommandDef } from './subcommand-prompt.ts';
 export const envSubcommands: Array<SubcommandDef> = [
   {
     name: 'check',
-    description: 'Validate env.ts schema against .env files (and optionally remote secrets)',
+    description: 'Validate local .env or required remote secret names',
     flags: [
       {
         name: '--remote',
@@ -16,22 +16,9 @@ export const envSubcommands: Array<SubcommandDef> = [
     name: 'types',
     description: 'Regenerate .void/env.d.ts from env.ts',
   },
-  {
-    name: 'example',
-    description: 'Refresh the void-managed block in .env.example',
-    flags: [
-      {
-        name: '--force',
-        description: 'Suppress the "appended block" notice (for scripted runs)',
-      },
-    ],
-  },
 ];
 
-export type EnvArgs =
-  | { subcommand: 'check'; useRemoteSecrets: boolean }
-  | { subcommand: 'types' }
-  | { subcommand: 'example'; force: boolean };
+export type EnvArgs = { subcommand: 'check'; useRemoteSecrets: boolean } | { subcommand: 'types' };
 
 export function parseEnvArgs(args: Array<string>): EnvArgs {
   const [subcommand, ...rest] = args;
@@ -53,17 +40,5 @@ export function parseEnvArgs(args: Array<string>): EnvArgs {
     }
     return { subcommand: 'types' };
   }
-  if (subcommand === 'example') {
-    const parsed = parseArgs({
-      args: rest,
-      options: { force: { type: 'boolean' } },
-      allowPositionals: true,
-      strict: true,
-    });
-    if (parsed.positionals.length > 0) {
-      throw new Error(`env: Unexpected argument '${parsed.positionals[0]}'.`);
-    }
-    return { subcommand: 'example', force: !!parsed.values.force };
-  }
-  throw new Error('env: Usage: void env <check|types|example>.');
+  throw new Error('env: Usage: void env <check|types>.');
 }

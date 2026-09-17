@@ -85,6 +85,28 @@ describe('platform queue lifecycle', () => {
     warning.mockRestore();
   });
 
+  it.each([null, 'enabled'])(
+    'cancels Sandbox-drain cron fires without consulting a %s KV marker',
+    async (marker) => {
+      const input = batch('cron');
+      const get = vi.fn(async () => marker);
+      const bindings = env({
+        PLATFORM_INSTALLATION_ID: 'installation-id',
+        PLATFORM_TRAFFIC_STATE: 'sandbox-drain',
+        ROUTING: { get },
+      });
+      const handlers = processors();
+      const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      await processPlatformQueue(input, bindings as never, handlers);
+
+      expect(input.ackAll).toHaveBeenCalledOnce();
+      expect(get).not.toHaveBeenCalled();
+      expect(handlers.cron).not.toHaveBeenCalled();
+      warning.mockRestore();
+    },
+  );
+
   it('keeps hosted Void Cloud cron delivery unchanged', async () => {
     const input = batch('cron');
     const bindings = env();

@@ -212,6 +212,7 @@ export async function putWorkerSecret(
   value: string,
 ): Promise<void> {
   const cfRes = await fetch(buildWorkerSecretUrl(env, dispatchNamespace, workerName), {
+    signal: AbortSignal.timeout(30_000),
     method: 'PUT',
     headers: {
       Authorization: `Bearer ${env.CF_API_TOKEN}`,
@@ -237,6 +238,7 @@ export async function deleteWorkerSecret(
   name: string,
 ): Promise<void> {
   const cfRes = await fetch(buildWorkerSecretUrl(env, dispatchNamespace, workerName, name), {
+    signal: AbortSignal.timeout(30_000),
     method: 'DELETE',
     headers: {
       Authorization: `Bearer ${env.CF_API_TOKEN}`,

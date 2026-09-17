@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vite-plus/test';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vite-plus/test';
 
 // Mock cloudflare:workers since DurableObject base class isn't available in unit tests
 vi.mock('cloudflare:workers', () => ({
@@ -33,6 +33,9 @@ vi.mock('../../src/db.ts', () => ({
   getDomainsByProjectIds: vi.fn(async () => new Map()),
 }));
 
+import { suspendUser } from '../../src/db.ts';
+import { queryProjectAiUsage } from '../../src/routes/usage.ts';
+import { SANDBOX_USAGE_RETENTION_MS } from '../../src/usage-auth.ts';
 import {
   evaluateRequestLimit,
   evaluateAiLimit,
@@ -41,6 +44,10 @@ import {
   type CounterState,
   type UsageEvent,
 } from '../../src/usage-counter.ts';
+
+vi.mock('../../src/routes/usage.ts', () => ({
+  queryProjectAiUsage: vi.fn(async () => ({ neurons: 0 })),
+}));
 
 function makeState(overrides: Partial<CounterState> = {}): CounterState {
   return {
@@ -238,18 +245,77 @@ function makeFakeKV() {
 
 function makeFakeStorage() {
   const data = new Map<string, unknown>();
+  let pending: Map<string, unknown> | null = null;
+  let rejectCommit = false;
   let alarm: number | null = null;
-  return {
+  type ListOptions = { prefix: string; startAfter?: string; limit: number };
+  type Transaction = {
+    get: <T>(key: string) => Promise<T | undefined>;
+    put: (key: string, value: unknown) => Promise<void>;
+    delete: (key: string | Array<string>) => Promise<void>;
+    list: <T>(options: ListOptions) => Promise<Map<string, T>>;
+  };
+  const storage = {
     data,
-    get: async <T>(key: string): Promise<T | undefined> => data.get(key) as T | undefined,
+    failNextCommit: () => {
+      rejectCommit = true;
+    },
+    get: async <T>(key: string): Promise<T | undefined> => {
+      const value = (pending ?? data).get(key);
+      return value === undefined ? undefined : (structuredClone(value) as T);
+    },
     put: async (key: string, value: unknown) => {
-      data.set(key, value);
+      (pending ?? data).set(key, structuredClone(value));
+    },
+    delete: async (keys: string | Array<string>) => {
+      for (const key of typeof keys === 'string' ? [keys] : keys) {
+        (pending ?? data).delete(key);
+      }
+    },
+    list: vi.fn(async <T>(options: ListOptions): Promise<Map<string, T>> => {
+      const page = Array.from(pending ?? data)
+        .filter(
+          ([key]) =>
+            key.startsWith(options.prefix) && (!options.startAfter || key > options.startAfter),
+        )
+        .sort(([left], [right]) => left.localeCompare(right))
+        .slice(0, options.limit);
+      return new Map(page.map(([key, value]) => [key, structuredClone(value) as T]));
+    }),
+    transaction: async <T>(callback: (transaction: Transaction) => Promise<T>): Promise<T> => {
+      pending = new Map(data);
+      try {
+        const result = await callback({
+          ...storage,
+          list: <U>(options: ListOptions) => storage.list(options) as Promise<Map<string, U>>,
+        });
+        if (rejectCommit) {
+          rejectCommit = false;
+          throw new Error('transaction commit failed');
+        }
+        data.clear();
+        for (const [key, value] of pending) {
+          data.set(key, value);
+        }
+        return result;
+      } finally {
+        pending = null;
+      }
     },
     getAlarm: async () => alarm,
     setAlarm: async (ts: number) => {
       alarm = ts;
     },
   };
+  return storage;
+}
+
+function storedWatermarks(storage: ReturnType<typeof makeFakeStorage>): Map<string, number> {
+  return new Map(
+    Array.from(storage.data)
+      .filter(([key]) => key.startsWith('sandbox-usage:watermark:'))
+      .map(([key, through]) => [key, through as number]),
+  );
 }
 
 function makeCounter(initialState: Partial<CounterState> = {}) {
@@ -291,10 +357,56 @@ function rolloverRequest(billingPeriodStart: string, plan: string, userId?: stri
   });
 }
 
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+function sandboxInterval(from: number, through: number, requests = 0): UsageEvent {
+  return {
+    projectId: 'p1',
+    userId: 'u1',
+    slug: 's1',
+    requests,
+    responseBytes: 0,
+    sandboxInstanceId: 'lease-1',
+    sandboxMeteredFrom: from,
+    sandboxMeteredThrough: through,
+  };
+}
+
 describe('UsageCounter.handleRecord — sandbox', () => {
+  const intervalStart = Math.floor(Date.now() / 1000) * 1000 - 60_000;
   beforeEach(() => {
     dbCalls.suspend.length = 0;
     dbCalls.unsuspendIfReason.length = 0;
+  });
+
+  it('counts the first completed interval using the account period rather than counter creation time', async () => {
+    const { counter, storage } = makeCounter();
+    const from = Date.now() - 60_000;
+    const billingPeriodStart = new Date(from - 60_000).toISOString();
+    const response = await counter.fetch(
+      new Request('https://do/record', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userId: 'u1',
+          plan: 'pro',
+          billingPeriodStart,
+          events: [sandboxInterval(from, from + 30_000)],
+        }),
+      }),
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ totalSandboxSeconds: 30 });
+    expect(storage.data.get('state')).toMatchObject({
+      billingPeriodStart,
+      billingPeriodInitialized: true,
+    });
   });
 
   it('accumulates totalSandboxSeconds from a sandbox-only event', async () => {
@@ -306,8 +418,9 @@ describe('UsageCounter.handleRecord — sandbox', () => {
         slug: 's1',
         requests: 0,
         responseBytes: 0,
-        sandboxRuntimeSeconds: 42,
         sandboxInstanceId: 'sb-1',
+        sandboxMeteredFrom: intervalStart,
+        sandboxMeteredThrough: intervalStart + 42_000,
       },
     ];
     const res = await counter.fetch(recordRequest(events, 'u1', 'pro'));
@@ -333,18 +446,21 @@ describe('UsageCounter.handleRecord — sandbox', () => {
         slug: 's1',
         requests: 0,
         responseBytes: 0,
-        sandboxRuntimeSeconds: 30,
         sandboxInstanceId: 'sb-1',
+        sandboxMeteredFrom: intervalStart,
+        sandboxMeteredThrough: intervalStart + 30_000,
       },
       {
         projectId: 'p1',
         userId: 'u1',
         slug: 's1',
-        requests: 2,
+        requests: 0,
         responseBytes: 0,
-        sandboxRuntimeSeconds: 10,
         sandboxInstanceId: 'sb-1',
+        sandboxMeteredFrom: intervalStart + 30_000,
+        sandboxMeteredThrough: intervalStart + 40_000,
       },
+      { projectId: 'p1', userId: 'u1', slug: 's1', requests: 2, responseBytes: 0 },
     ];
     const res = await counter.fetch(recordRequest(events, 'u1', 'pro'));
     const body = await res.json<{
@@ -382,8 +498,9 @@ describe('UsageCounter.handleRecord — sandbox', () => {
         slug: 's1',
         requests: 0,
         responseBytes: 0,
-        sandboxRuntimeSeconds: 20,
         sandboxInstanceId: 'sb-1',
+        sandboxMeteredFrom: intervalStart,
+        sandboxMeteredThrough: intervalStart + 20_000,
       },
     ];
     const res = await counter.fetch(recordRequest(events, 'u1', 'solo'));
@@ -413,8 +530,9 @@ describe('UsageCounter.handleRecord — sandbox', () => {
         slug: 's1',
         requests: 0,
         responseBytes: 0,
-        sandboxRuntimeSeconds: 20,
         sandboxInstanceId: 'sb-1',
+        sandboxMeteredFrom: intervalStart,
+        sandboxMeteredThrough: intervalStart + 20_000,
       },
     ];
     await counter.fetch(recordRequest(events, 'u1', 'solo'));
@@ -436,8 +554,9 @@ describe('UsageCounter.handleRecord — sandbox', () => {
         slug: 's1',
         requests: 0,
         responseBytes: 0,
-        sandboxRuntimeSeconds: 60,
         sandboxInstanceId: 'sb-1',
+        sandboxMeteredFrom: intervalStart,
+        sandboxMeteredThrough: intervalStart + 60_000,
       },
     ];
     await counter.fetch(recordRequest(events, 'u1', 'pro'));
@@ -485,6 +604,58 @@ describe('UsageCounter.handleRecord — sandbox', () => {
 
     expect(kv.store.get('sandbox-block:u1')).toBe('1');
     expect((storage.data.get('state') as CounterState).sandboxRuntimeSuspended).toBe(true);
+  });
+
+  it('bills only the unrecorded suffix of overlapping lease intervals', async () => {
+    const { counter, storage } = makeCounter({ plan: 'pro' });
+    const interval = (from: number, through: number): UsageEvent => ({
+      projectId: 'p1',
+      userId: 'u1',
+      slug: 's1',
+      requests: 0,
+      responseBytes: 0,
+      sandboxInstanceId: 'lease-1',
+      sandboxMeteredFrom: from,
+      sandboxMeteredThrough: through,
+    });
+
+    await counter.fetch(recordRequest([interval(intervalStart, intervalStart + 30_000)], 'u1'));
+    // Same persisted start with a later end models queue publish succeeding
+    // before the lease counter's state write fails and gets retried.
+    await counter.fetch(recordRequest([interval(intervalStart, intervalStart + 45_000)], 'u1'));
+    await counter.fetch(recordRequest([interval(intervalStart, intervalStart + 30_000)], 'u1'));
+
+    const persisted = storage.data.get('state') as CounterState;
+    expect(persisted.totalSandboxSeconds).toBe(45);
+    expect(Array.from(storedWatermarks(storage).values())).toEqual([intervalStart + 45_000]);
+  });
+
+  it('retains lease watermarks across rollover so delayed prior-period envelopes add nothing', async () => {
+    const boundary = Math.floor(Date.now() / 1000) * 1000;
+    const boundaryIso = new Date(boundary).toISOString();
+    const { counter, storage } = makeCounter({
+      plan: 'pro',
+      billingPeriodStart: '2026-01-01T00:00:00Z',
+    });
+    const interval = (from: number, through: number): UsageEvent => ({
+      projectId: 'p1',
+      userId: 'u1',
+      slug: 's1',
+      requests: 0,
+      responseBytes: 0,
+      sandboxInstanceId: 'lease-rollover',
+      sandboxMeteredFrom: from,
+      sandboxMeteredThrough: through,
+    });
+
+    const old = interval(boundary - 30_000, boundary);
+    await counter.fetch(recordRequest([old], 'u1'));
+    await counter.fetch(rolloverRequest(boundaryIso, 'pro', 'u1'));
+    await counter.fetch(recordRequest([old], 'u1'));
+    await counter.fetch(recordRequest([interval(boundary, boundary + 20_000)], 'u1'));
+
+    const persisted = storage.data.get('state') as CounterState;
+    expect(persisted.totalSandboxSeconds).toBe(20);
   });
 });
 
@@ -859,5 +1030,339 @@ describe('UsageCounter.handleRollover — request latch in response', () => {
     const body = await res.json<{ rolled: boolean; requestsSuspended: boolean }>();
     expect(body.rolled).toBe(false);
     expect(body.requestsSuspended).toBe(false);
+  });
+});
+
+describe('UsageCounter operation ordering and persistence', () => {
+  beforeEach(() => {
+    vi.mocked(queryProjectAiUsage).mockReset().mockResolvedValue({ neurons: 0 });
+  });
+
+  it('preserves distinct records and initialization while a suspension write is pending', async () => {
+    const from = Date.now() - 60_000;
+    const { counter, kv, storage } = makeCounter({ plan: 'free' });
+    const writing = deferred();
+    const resume = deferred();
+    const realPut = kv.put;
+    kv.put = async (key, value) => {
+      writing.resolve();
+      await resume.promise;
+      await realPut(key, value);
+    };
+    const first = counter.fetch(recordRequest([sandboxInterval(from, from + 2_000, 3)], 'u1'));
+    await writing.promise;
+    const initialize = counter.fetch(
+      new Request('https://do/init', {
+        method: 'POST',
+        body: JSON.stringify({
+          plan: 'pro',
+          billingPeriodStart: '2026-01-01T00:00:00Z',
+          projectSlugs: { p2: 's2' },
+        }),
+      }),
+    );
+    const second = counter.fetch(recordRequest([sandboxInterval(from, from + 3_000, 5)], 'u1'));
+    resume.resolve();
+    await Promise.all([first, initialize, second]);
+    expect(storage.data.get('state')).toMatchObject({
+      totalRequests: 8,
+      totalSandboxSeconds: 3,
+      plan: 'pro',
+      projectSlugs: { p1: 's1', p2: 's2' },
+    });
+  });
+
+  it('finishes an AI query before rollover and the next period record', async () => {
+    const querying = deferred();
+    const resume = deferred();
+    vi.mocked(queryProjectAiUsage).mockImplementationOnce(async () => {
+      querying.resolve();
+      await resume.promise;
+      return { neurons: 100_001 };
+    });
+    const boundary = Date.now() - 60_000;
+    const { counter, storage, kv } = makeCounter({
+      totalRequests: 10,
+      plan: 'free',
+      projectSlugs: { p1: 's1' },
+    });
+    const alarm = counter.alarm();
+    await querying.promise;
+    const rollover = counter.fetch(rolloverRequest(new Date(boundary).toISOString(), 'pro', 'u1'));
+    const record = counter.fetch(
+      recordRequest([sandboxInterval(boundary, boundary + 20_000, 4)], 'u1'),
+    );
+    resume.resolve();
+    await Promise.all([alarm, rollover, record]);
+    expect(storage.data.get('state')).toMatchObject({
+      totalRequests: 4,
+      totalNeurons: 0,
+      totalSandboxSeconds: 20,
+      plan: 'pro',
+      billingPeriodStart: new Date(boundary).toISOString(),
+      aiSuspended: false,
+    });
+    expect(kv.store.has('ai-block:p1')).toBe(false);
+  });
+
+  it('holds the operation queue until sibling writes settle after an external failure', async () => {
+    const suspending = deferred();
+    const resume = deferred();
+    vi.mocked(suspendUser).mockImplementationOnce(async () => {
+      suspending.resolve();
+      await resume.promise;
+    });
+    const { counter, kv } = makeCounter({ plan: 'free' });
+    kv.put = async () => {
+      throw new Error('KV unavailable');
+    };
+    const from = Date.now() - 60_000;
+    const record = counter.fetch(recordRequest([sandboxInterval(from, from + 2_000)], 'u1'));
+    const failed = expect(record).rejects.toThrow('KV unavailable');
+    await suspending.promise;
+    let stateRead = false;
+    const read = counter.fetch(new Request('https://do/state')).then(() => {
+      stateRead = true;
+    });
+    // Let a prematurely rejected Promise.all and its queued read settle.
+    for (let i = 0; i < 20; i++) {
+      await Promise.resolve();
+    }
+    expect(stateRead).toBe(false);
+    resume.resolve();
+    await failed;
+    await read;
+    expect(stateRead).toBe(true);
+  });
+
+  it('retries a record after storage failure without duplicating requests or losing sandbox usage', async () => {
+    const from = Date.now() - 60_000;
+    const { counter, storage } = makeCounter({ plan: 'pro' });
+    vi.spyOn(storage, 'put').mockRejectedValueOnce(new Error('storage unavailable'));
+    const event = sandboxInterval(from, from + 10_000, 7);
+    await expect(counter.fetch(recordRequest([event], 'u1'))).rejects.toThrow(
+      'storage unavailable',
+    );
+    const unsaved = await counter.fetch(new Request('https://do/state'));
+    expect(await unsaved.json()).toMatchObject({ totalRequests: 0, totalSandboxSeconds: 0 });
+    await counter.fetch(recordRequest([event], 'u1'));
+    expect(storage.data.get('state')).toMatchObject({ totalRequests: 7, totalSandboxSeconds: 10 });
+  });
+
+  it('retries rollover after storage failure without short-circuiting on the unsaved period', async () => {
+    const { counter, storage, kv } = makeCounter({
+      totalRequests: 20,
+      plan: 'free',
+      aiSuspended: true,
+      projectSlugs: { p1: 's1' },
+    });
+    kv.store.set('ai-block:p1', '1');
+    vi.spyOn(storage, 'put').mockRejectedValueOnce(new Error('storage unavailable'));
+    await expect(
+      counter.fetch(rolloverRequest('2026-02-01T00:00:00Z', 'pro', 'u1')),
+    ).rejects.toThrow('storage unavailable');
+    const unsaved = await counter.fetch(new Request('https://do/state'));
+    expect(await unsaved.json()).toMatchObject({
+      totalRequests: 20,
+      billingPeriodStart: '2026-01-01T00:00:00Z',
+      aiSuspended: true,
+    });
+    const retried = await counter.fetch(rolloverRequest('2026-02-01T00:00:00Z', 'pro', 'u1'));
+    expect(await retried.json()).toMatchObject({ rolled: true });
+    expect(storage.data.get('state')).toMatchObject({ totalRequests: 0, aiSuspended: false });
+  });
+
+  it('does not retain an unsaved init merge or plan change in the isolate cache', async () => {
+    const { counter, storage } = makeCounter({ plan: 'free', projectSlugs: { p1: 's1' } });
+    vi.spyOn(storage, 'put').mockRejectedValueOnce(new Error('storage unavailable'));
+    await expect(
+      counter.fetch(
+        new Request('https://do/init', {
+          method: 'POST',
+          body: JSON.stringify({
+            plan: 'pro',
+            billingPeriodStart: '2026-02-01T00:00:00Z',
+            projectSlugs: { p2: 's2' },
+          }),
+        }),
+      ),
+    ).rejects.toThrow('storage unavailable');
+    await counter.fetch(recordRequest([], 'u1'));
+    expect(storage.data.get('state')).toMatchObject({
+      plan: 'free',
+      billingPeriodStart: '2026-01-01T00:00:00Z',
+      projectSlugs: { p1: 's1' },
+    });
+    expect((storage.data.get('state') as CounterState).projectSlugs).not.toHaveProperty('p2');
+  });
+
+  it('retries AI enforcement after a failed KV write instead of retaining its unsaved latch', async () => {
+    const { counter, kv, storage } = makeCounter({ plan: 'free', projectSlugs: { p1: 's1' } });
+    vi.mocked(queryProjectAiUsage).mockResolvedValue({ neurons: 100_001 });
+    vi.spyOn(kv, 'put').mockRejectedValueOnce(new Error('KV unavailable'));
+    await expect(counter.alarm()).rejects.toThrow('KV unavailable');
+    const unsaved = await counter.fetch(new Request('https://do/state'));
+    expect(await unsaved.json()).toMatchObject({ totalNeurons: 0, aiSuspended: false });
+    await counter.alarm();
+    expect(kv.store.get('ai-block:p1')).toBe('1');
+    expect(storage.data.get('state')).toMatchObject({ totalNeurons: 100_001, aiSuspended: true });
+  });
+
+  it('bills cumulative intervals arriving newest first only once', async () => {
+    const from = Date.now() - 60_000;
+    const { counter, storage } = makeCounter({ plan: 'pro' });
+    await counter.fetch(recordRequest([sandboxInterval(from, from + 45_000)], 'u1'));
+    await counter.fetch(recordRequest([sandboxInterval(from, from + 30_000)], 'u1'));
+    await counter.fetch(recordRequest([sandboxInterval(from, from + 60_000)], 'u1'));
+    expect((storage.data.get('state') as CounterState).totalSandboxSeconds).toBe(60);
+  });
+
+  it('counts both lease generations delivered out of order without billing their idle gap', async () => {
+    const from = Date.now() - 120_000;
+    const { counter, storage } = makeCounter({ plan: 'pro' });
+    const first = sandboxInterval(from, from + 10_000);
+    const next = sandboxInterval(from + 60_000, from + 80_000);
+    await counter.fetch(recordRequest([next, first], 'u1'));
+    await counter.fetch(recordRequest([first, next], 'u1'));
+    const persisted = storage.data.get('state') as CounterState;
+    expect(persisted.totalSandboxSeconds).toBe(30);
+    expect(Array.from(storedWatermarks(storage).values()).sort()).toEqual([
+      from + 10_000,
+      from + 80_000,
+    ]);
+  });
+});
+
+describe('UsageCounter durable sandbox receipts', () => {
+  const now = 1_800_000_000_000;
+  const prefix = 'sandbox-usage:watermark:';
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('rolls back counters and advanced receipts together when transaction commit fails', async () => {
+    const from = now - 60_000;
+    const { counter, storage } = makeCounter({ plan: 'pro' });
+    await counter.fetch(recordRequest([sandboxInterval(from, from + 10_000, 2)], 'u1'));
+    const committedReceipts = storedWatermarks(storage);
+    storage.failNextCommit();
+    await expect(
+      counter.fetch(recordRequest([sandboxInterval(from, from + 20_000, 5)], 'u1')),
+    ).rejects.toThrow('transaction commit failed');
+
+    expect(storedWatermarks(storage)).toEqual(committedReceipts);
+    const response = await counter.fetch(new Request('https://do/state'));
+    expect(await response.json()).toMatchObject({ totalRequests: 2, totalSandboxSeconds: 10 });
+    await counter.fetch(recordRequest([sandboxInterval(from, from + 20_000, 5)], 'u1'));
+    expect(storage.data.get('state')).toMatchObject({ totalRequests: 7, totalSandboxSeconds: 20 });
+    expect(Array.from(storedWatermarks(storage).values())).toEqual([from + 20_000]);
+  });
+
+  it('does not leave an advanced receipt behind if the counter write fails inside the transaction', async () => {
+    const { counter, storage } = makeCounter({ plan: 'pro' });
+    const realPut = storage.put;
+    vi.spyOn(storage, 'put').mockImplementation(async (key, value) => {
+      if (key === 'state') {
+        throw new Error('counter write failed');
+      }
+      await realPut(key, value);
+    });
+    const event = sandboxInterval(now - 60_000, now - 30_000);
+    await expect(counter.fetch(recordRequest([event], 'u1'))).rejects.toThrow(
+      'counter write failed',
+    );
+    expect(storedWatermarks(storage).size).toBe(0);
+    vi.mocked(storage.put).mockImplementation(realPut);
+    await counter.fetch(recordRequest([event], 'u1'));
+    expect((storage.data.get('state') as CounterState).totalSandboxSeconds).toBe(30);
+  });
+
+  it('retains more than 10,000 fresh generations without expanding the counter state or rebilling', async () => {
+    const from = now - 60_000;
+    const { counter, storage } = makeCounter({ plan: 'pro' });
+    const event = sandboxInterval(from, from + 10_000);
+    await counter.fetch(recordRequest([event], 'u1'));
+    const originalKey = Array.from(storedWatermarks(storage).keys())[0]!;
+    // Seed the same durable record shape at scale; avoid 10,000 simulated
+    // network requests merely to establish the old eviction threshold.
+    for (let i = 0; i < 10_000; i++) {
+      storage.data.set(`${prefix}${i.toString(16).padStart(64, '0')}`, now);
+    }
+    const listsBefore = storage.list.mock.calls.length;
+    await counter.fetch(
+      recordRequest([sandboxInterval(from + 30_000, from + 40_000), event], 'u1'),
+    );
+    expect(storedWatermarks(storage).size).toBe(10_002);
+    expect(storage.data.get(originalKey)).toBe(from + 10_000);
+    expect((storage.data.get('state') as CounterState).totalSandboxSeconds).toBe(20);
+    expect(JSON.stringify(storage.data.get('state')).length).toBeLessThan(1000);
+    expect(Array.from(storedWatermarks(storage).keys()).every((key) => key.length < 128)).toBe(
+      true,
+    );
+    expect(storage.list.mock.calls.length - listsBefore).toBe(1);
+    expect(storage.list.mock.calls.at(-1)?.[0].limit).toBe(64);
+  });
+
+  it('bounds each prune scan and continues from its saved cursor after a cold load', async () => {
+    const first = makeCounter({ plan: 'sponsored' });
+    const expired = now - SANDBOX_USAGE_RETENTION_MS - 1;
+    const retained = `${prefix}${'f'.repeat(64)}`;
+    for (let i = 0; i < 130; i++) {
+      first.storage.data.set(`${prefix}${i.toString(16).padStart(64, '0')}`, expired);
+    }
+    first.storage.data.set(retained, now);
+    first.storage.failNextCommit();
+    await expect(first.counter.alarm()).rejects.toThrow('transaction commit failed');
+    expect(storedWatermarks(first.storage).size).toBe(131);
+    expect(first.storage.data.has('sandbox-usage:prune-cursor')).toBe(false);
+    first.storage.list.mockClear();
+    await first.counter.alarm();
+    expect(storedWatermarks(first.storage).size).toBe(67);
+    expect(first.storage.list.mock.calls).toHaveLength(1);
+    expect(first.storage.list.mock.calls[0]?.[0]).toMatchObject({ limit: 64 });
+
+    const next = makeCounter();
+    for (const [key, value] of first.storage.data) {
+      next.storage.data.set(key, structuredClone(value));
+    }
+    await next.counter.alarm();
+    expect(storedWatermarks(next.storage).size).toBe(3);
+    expect(next.storage.list.mock.calls[0]?.[0].startAfter).toBe(
+      `${prefix}${(63).toString(16).padStart(64, '0')}`,
+    );
+    await next.counter.alarm();
+    expect(storedWatermarks(next.storage)).toEqual(new Map([[retained, now]]));
+    expect(next.storage.data.has('sandbox-usage:prune-cursor')).toBe(false);
+    expect(await next.storage.getAlarm()).toBe(now + 15 * 60_000);
+  });
+
+  it('prunes only expired receipts and never reapplies their old cumulative prefix', async () => {
+    const from = now - SANDBOX_USAGE_RETENTION_MS - 60_000;
+    const { counter, storage } = makeCounter({
+      plan: 'sponsored',
+      billingPeriodStart: new Date(from - 60_000).toISOString(),
+    });
+    // Bill a generation while its initial interval is still inside retention.
+    vi.setSystemTime(from + 30_000);
+    const old = sandboxInterval(from, from + 20_000);
+    await counter.fetch(recordRequest([old], 'u1'));
+    expect((storage.data.get('state') as CounterState).totalSandboxSeconds).toBe(20);
+
+    vi.setSystemTime(now);
+    await counter.alarm();
+    expect(storedWatermarks(storage).size).toBe(0);
+    await counter.fetch(recordRequest([old], 'u1'));
+    expect((storage.data.get('state') as CounterState).totalSandboxSeconds).toBe(20);
+    // A fresh cumulative frame can span an expired prefix after a delivery
+    // outage; only its retained suffix is eligible after that receipt is gone.
+    await counter.fetch(recordRequest([sandboxInterval(from, now)], 'u1'));
+    expect((storage.data.get('state') as CounterState).totalSandboxSeconds).toBe(
+      20 + SANDBOX_USAGE_RETENTION_MS / 1000,
+    );
   });
 });

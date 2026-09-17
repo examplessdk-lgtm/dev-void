@@ -120,17 +120,6 @@ describe('resolveAssetConfig', () => {
     ).toEqual(NONE);
   });
 
-  it('uses none when the project has middleware/', () => {
-    expect(
-      resolveAssetConfig({
-        isSsr: false,
-        hasPages: false,
-        hasDocumentRoutes: false,
-        hasMiddleware: true,
-      }),
-    ).toEqual(NONE);
-  });
-
   it('uses none when the project has document websocket routes', () => {
     expect(
       resolveAssetConfig({
@@ -681,15 +670,8 @@ describe('generated serveWithAssets — routing.notFound end to end', () => {
       expect(res.headers.get('access-control-allow-origin')).toBe('https://client.test');
     });
 
-    // Regression guards for the intended target — both document shapes still
-    // get the generator's 404 page. The `.html` case matters because VitePress
-    // defaults to `cleanUrls: false`, so its URLs carry the extension.
-    it('still serves the HTML 404 page for a browser navigation to an extension-less path', async () => {
-      expect(await serveUnmatched({ ...ssgWithMiddleware, notFound: '404-page' })).toEqual({
-        status: 404,
-        body: '<html>GENERATED 404</html>',
-      });
-    });
+    // The extension-less document is covered above. Also check `.html`, because
+    // VitePress defaults to `cleanUrls: false` and keeps the extension.
 
     it('still serves the HTML 404 page for a browser navigation to a .html path', async () => {
       const res = await serveRaw(

@@ -28,6 +28,7 @@ type RecoveryClient = Pick<
   | 'getR2Object'
   | 'getWorkerPlainTextBindings'
   | 'getWorkersSubdomain'
+  | 'hasActiveCertificateForHostname'
   | 'listAccounts'
   | 'listAiGateways'
   | 'listDispatchNamespaces'
@@ -39,7 +40,6 @@ type RecoveryClient = Pick<
   | 'listWorkerNames'
   | 'listWorkerDomains'
   | 'listWorkerRoutes'
-  | 'verifyToken'
 >;
 
 export async function recoverPlatformInstallations(
@@ -50,7 +50,6 @@ export async function recoverPlatformInstallations(
   ) => Promise<void> = verifyInstallationEndpoint,
   selector = '',
 ): Promise<ReadonlyArray<PlatformInstallationManifest>> {
-  await client.verifyToken();
   const accounts = await client.listAccounts();
   if (!accounts.some((account) => account.id === accountId)) {
     throw new Error(`platform: Cloudflare account ${JSON.stringify(accountId)} is unavailable.`);
@@ -106,6 +105,7 @@ export async function recoverPlatformInstallations(
     if (manifest.status === 'uninstalled') {
       continue;
     }
+    manifest = await recoverDurablyMarkedProvisionIntents(client, manifest);
     const deployment = manifest.deployment;
     const plan = await createPlatformInstallPlan(
       client,
@@ -119,11 +119,12 @@ export async function recoverPlatformInstallations(
         zoneName: deployment.application.zoneName,
       },
       manifest,
+      { repairMissing: true },
     );
-    manifest = await recoverDurablyMarkedProvisionIntents(client, manifest);
     manifest = reconcileRecoveredEndpoints(manifest, plan);
     await verifyPlatformInstallationOwnership(client, manifest);
-    if (manifest.desiredState === 'enabled' && manifest.status === 'installed') {
+    const requiresRepair = plan.actions.some((action) => action.action === 'create');
+    if (!requiresRepair && manifest.desiredState === 'enabled' && manifest.status === 'installed') {
       await verifyEndpoint(manifest);
     }
     recovered.push({ manifest, plan });

@@ -64,7 +64,7 @@ export type InferenceConfig = {
     db?: boolean | string;
     kv?: boolean | string;
     storage?: boolean | string;
-    ai?: boolean;
+    ai?: boolean | string;
     email?: boolean;
   };
   scanDirs?: ReadonlyArray<string>;
@@ -775,7 +775,7 @@ export function readConfig(root: string): VoidConfig {
             `config: Unknown binding '${key}' in ${CONFIG_FILE}. Valid: db, kv, storage, ai, email.`,
           );
         }
-        if (key === 'ai' || key === 'email') {
+        if (key === 'email') {
           if (typeof b[key] !== 'boolean') {
             throw new Error(
               `config: "inference.bindings.${key}" in ${CONFIG_FILE} must be a boolean.`,
@@ -1028,18 +1028,6 @@ function parseEmailFrom(value: unknown): { email: string; name?: string } {
   }
 }
 
-/**
- * The host of `email.from`, lowercased — the domain `void deploy --platform
- * cloudflare` sets email up on. `undefined` when `email.from` is not set.
- */
-export function getEmailFromHost(config: VoidConfig): string | undefined {
-  if (config.email?.from === undefined) {
-    return undefined;
-  }
-  const { email } = parseEmailFrom(config.email.from);
-  return email.slice(email.indexOf('@') + 1).toLowerCase();
-}
-
 /** Returns true if the target is a non-Cloudflare runtime (Node.js, Bun, Deno). */
 export function isNodeTarget(target: VoidConfig['target']): boolean {
   return target === 'node' || target === 'bun' || target === 'deno';
@@ -1051,11 +1039,11 @@ export function isNodeTarget(target: VoidConfig['target']): boolean {
  */
 export function resolveBindingNames(
   bindings: InferenceConfig['bindings'],
-): { d1?: string; kv?: string; r2?: string } | undefined {
+): { d1?: string; kv?: string; r2?: string; ai?: string } | undefined {
   if (!bindings) {
     return undefined;
   }
-  const names: { d1?: string; kv?: string; r2?: string } = {};
+  const names: { d1?: string; kv?: string; r2?: string; ai?: string } = {};
   let hasCustom = false;
   if (typeof bindings.db === 'string') {
     names.d1 = bindings.db;
@@ -1067,6 +1055,10 @@ export function resolveBindingNames(
   }
   if (typeof bindings.storage === 'string') {
     names.r2 = bindings.storage;
+    hasCustom = true;
+  }
+  if (typeof bindings.ai === 'string') {
+    names.ai = bindings.ai;
     hasCustom = true;
   }
   return hasCustom ? names : undefined;

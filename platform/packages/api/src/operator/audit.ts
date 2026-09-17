@@ -1,8 +1,8 @@
 import { count, desc, eq } from 'drizzle-orm';
-import { Hono, type MiddlewareHandler } from 'hono';
+import { Hono, type Context, type MiddlewareHandler } from 'hono';
 import type { ApiEnv } from '../env.ts';
 import { operatorEvents } from '../schema.ts';
-import { dryRun, pagination, readBody } from './common.ts';
+import { dryRun, OperatorError, pagination, readBody } from './common.ts';
 
 const WORKER_NAMES = ['dispatch', 'dashboard', 'api', 'tail', 'proxy'] as const;
 
@@ -28,6 +28,16 @@ function invitationEmails(value: unknown) {
     : undefined;
 }
 
+function accessPatterns(value: unknown) {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 100) {
+    return undefined;
+  }
+  const patterns = value.map((pattern) => boundedString(pattern, 320, true));
+  return patterns.every((pattern): pattern is string => pattern !== undefined)
+    ? [...new Set(patterns)]
+    : undefined;
+}
+
 function rollbackVersions(value: unknown) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return undefined;
@@ -42,7 +52,11 @@ function rollbackVersions(value: unknown) {
   return Object.keys(versions).length > 0 ? versions : undefined;
 }
 
-function auditTarget(path: string, body: Record<string, unknown>, platformEnvironment?: unknown) {
+function auditTarget(
+  path: string,
+  body: Record<string, unknown>,
+  platformEnvironment?: unknown,
+): string | undefined {
   const segments = path.split('/');
   const id = pathIdentifier(segments[1]);
   if (segments[0] === 'users' && id) {
@@ -67,9 +81,11 @@ function auditTarget(path: string, body: Record<string, unknown>, platformEnviro
       return JSON.stringify({ restrictionsEnabled: segments[1] === 'restrict' });
     }
     if (segments[1] === 'allow' || segments[1] === 'remove') {
+      const patterns = accessPatterns(body.patterns);
       return JSON.stringify({
         type: boundedString(body.type, 512),
         pattern: boundedString(body.pattern, 320, true),
+        ...(patterns ? { patterns } : {}),
         ...(segments[1] === 'allow' ? { note: boundedString(body.note, 1000) } : {}),
       });
     }
@@ -88,6 +104,9 @@ function auditTarget(path: string, body: Record<string, unknown>, platformEnviro
   if (segments[0] === 'system' && segments[1] === 'backfill-queue-tokens') {
     return JSON.stringify({ entries: 'queue:*' });
   }
+  if (segments[0] === 'system' && segments[1] === 'sandbox-drain') {
+    return JSON.stringify({ applications: 'managed-sandbox-containers' });
+  }
   if (segments[0] === 'workers') {
     const environment = boundedString(body.environment ?? platformEnvironment, 512) ?? 'production';
     if (segments[1] === 'rollback-all') {
@@ -101,7 +120,30 @@ function auditTarget(path: string, body: Record<string, unknown>, platformEnviro
       });
     }
   }
-  return '';
+  return undefined;
+}
+
+export type OperatorAuditIntent = Readonly<{
+  action: string;
+  target: string;
+}>;
+
+/**
+ * Normalize a mutation to the operator API's canonical action and its
+ * action-specific, allowlisted audit target. Browser handlers use this before
+ * calling a shared operation so form field names and route aliases never leak
+ * into the durable audit log.
+ */
+export function operatorAuditIntent(
+  action: string,
+  body: Record<string, unknown> = {},
+  platformEnvironment?: unknown,
+): OperatorAuditIntent {
+  const target = auditTarget(action, body, platformEnvironment);
+  if (target === undefined) {
+    throw new Error(`Unknown audited operator mutation: ${action}`);
+  }
+  return { action, target };
 }
 
 async function mutationSucceeded(response: Response) {
@@ -124,6 +166,93 @@ async function mutationSucceeded(response: Response) {
   }
 }
 
+async function insertAuditIntent(context: Context<ApiEnv>, intent: OperatorAuditIntent) {
+  const id = crypto.randomUUID();
+  const user = context.get('user');
+  await context.get('db').insert(operatorEvents).values({
+    id,
+    user_id: user.id,
+    login: user.login,
+    action: intent.action,
+    target: intent.target,
+    status: 'pending',
+  });
+  return id;
+}
+
+async function completeAudit(
+  context: Context<ApiEnv>,
+  id: string,
+  succeeded: boolean,
+  httpStatus: number,
+  response?: Response,
+): Promise<Response | undefined> {
+  let pending = false;
+  try {
+    await context
+      .get('db')
+      .update(operatorEvents)
+      .set({ status: succeeded ? 'success' : 'failed', http_status: httpStatus })
+      .where(eq(operatorEvents.id, id));
+  } catch (error) {
+    // The mutation may already have completed. Its durable pending intent is
+    // the recovery signal, so preserve the original response or thrown error.
+    console.error('[operator] audit completion failed', id, error);
+    pending = true;
+    if (!response) {
+      context.header('X-Void-Audit-Status', 'pending');
+    }
+  }
+  if (response) {
+    // Redirect responses have immutable headers. Clone all responses so the
+    // audit metadata is applied consistently without changing their body or
+    // status.
+    const headers = new Headers(response.headers);
+    headers.set('X-Void-Audit-Id', id);
+    if (pending) {
+      headers.set('X-Void-Audit-Status', 'pending');
+    }
+    return new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers,
+    });
+  } else {
+    context.header('X-Void-Audit-Id', id);
+  }
+}
+
+export type AuditedMutationResult = Readonly<{
+  response: Response;
+  succeeded: boolean;
+}>;
+
+/** Execute a browser mutation behind the same durable intent/outcome audit as the CLI. */
+export async function executeAuditedMutation(
+  context: Context<ApiEnv>,
+  intent: OperatorAuditIntent,
+  mutation: () => Promise<AuditedMutationResult>,
+): Promise<Response> {
+  // Deliberately outside the try block: an intent insert failure must prevent
+  // the mutation instead of becoming an unaudited change.
+  const id = await insertAuditIntent(context, intent);
+  try {
+    const result = await mutation();
+    return (
+      (await completeAudit(
+        context,
+        id,
+        result.succeeded,
+        result.response.status,
+        result.response,
+      )) ?? result.response
+    );
+  } catch (error) {
+    await completeAudit(context, id, false, error instanceof OperatorError ? error.status : 500);
+    throw error;
+  }
+}
+
 /** Persist intent before a mutation so an interrupted request stays observable. */
 export const operatorAudit: MiddlewareHandler<ApiEnv> = async (context, next) => {
   if (context.req.method !== 'POST' || context.req.path.endsWith('/session/logout')) {
@@ -133,35 +262,18 @@ export const operatorAudit: MiddlewareHandler<ApiEnv> = async (context, next) =>
   if (dryRun(body)) {
     return next();
   }
-  const id = crypto.randomUUID();
-  const user = context.get('user');
-  const db = context.get('db');
   const path = context.req.path.replace(/^\/operator\/v1\//, '');
-  await db.insert(operatorEvents).values({
-    id,
-    user_id: user.id,
-    login: user.login,
+  // Keep the middleware's catch-all behavior for authenticated POSTs. Known
+  // operations use the canonical allowlist; an unknown future route still gets
+  // an observable intent with an empty target, matching the original API.
+  const id = await insertAuditIntent(context, {
     action: path,
-    target: auditTarget(path, body, context.env.PLATFORM_ENV),
-    status: 'pending',
+    target: auditTarget(path, body, context.env.PLATFORM_ENV) ?? '',
   });
   await next();
-  try {
-    const succeeded = await mutationSucceeded(context.res);
-    await db
-      .update(operatorEvents)
-      .set({
-        status: succeeded ? 'success' : 'failed',
-        http_status: context.res.status,
-      })
-      .where(eq(operatorEvents.id, id));
-  } catch (error) {
-    // The mutation may already have completed. Keep its response intact: the
-    // durable pending entry signals an outcome requiring investigation.
-    console.error('[operator] audit completion failed', id, error);
-    context.header('X-Void-Audit-Status', 'pending');
-  }
-  context.header('X-Void-Audit-Id', id);
+  const succeeded = await mutationSucceeded(context.res);
+  context.res =
+    (await completeAudit(context, id, succeeded, context.res.status, context.res)) ?? context.res;
 };
 
 export const operatorAuditRoutes = new Hono<ApiEnv>();

@@ -50,6 +50,18 @@ it('honors an explicit CI account without prompting and preserves JSONC', async 
   expect(config).toContain('"account_id": "two"');
   expect(mocks.select).not.toHaveBeenCalled();
 });
+it('accepts trailing commas through the shared Wrangler JSONC parser', async () => {
+  writeFileSync(
+    join(root, 'wrangler.jsonc'),
+    '{\n  // keep the supported JSONC shape\n  "account_id": "one",\n  "vars": { "VALUE": "yes", },\n}\n',
+  );
+
+  await expect(connectCloudflare(root, false)).resolves.toEqual({ id: 'one', name: 'One' });
+  const config = readFileSync(join(root, 'wrangler.jsonc'), 'utf8');
+  expect(config).toContain('// keep the supported JSONC shape');
+  expect(config).toContain('"VALUE": "yes"');
+  expect(mocks.authenticate).toHaveBeenCalledOnce();
+});
 it('refuses to silently replace an inaccessible pinned account', async () => {
   writeFileSync(join(root, 'wrangler.jsonc'), '{"account_id":"original"}');
   await expect(connectCloudflare(root, true)).rejects.toThrow('cannot access account original');

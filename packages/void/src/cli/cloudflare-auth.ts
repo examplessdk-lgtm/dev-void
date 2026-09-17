@@ -22,6 +22,8 @@ export type CloudflareAuthRunner = (
 
 export type CloudflareAuthSession = Readonly<{
   accounts: ReadonlyArray<CloudflareAccount>;
+  email?: string;
+  authType?: string;
 }>;
 
 export type EnsureCloudflareAuthenticationOptions = Readonly<{
@@ -30,6 +32,8 @@ export type EnsureCloudflareAuthenticationOptions = Readonly<{
    * The operation itself remains the authoritative permission and validity check.
    */
   acceptApiToken?: boolean;
+  /** Explicit login must authenticate again, even when an existing session works. */
+  forceLogin?: boolean;
   beforeRun?: () => boolean;
   interactive?: boolean;
   /** Require whoami JSON to contain at least one account (account onboarding). */
@@ -40,7 +44,12 @@ export type EnsureCloudflareAuthenticationOptions = Readonly<{
 
 export class CloudflareAuthenticationError extends Error {
   override name = 'CloudflareAuthenticationError';
-  readonly reason: 'keyring' | 'login' | 'not-authenticated' | 'uploader-changed';
+  readonly reason:
+    | 'keyring'
+    | 'login'
+    | 'not-authenticated'
+    | 'uploader-changed'
+    | 'environment-credentials';
 
   constructor(message: string, reason: CloudflareAuthenticationError['reason']) {
     super(message);
@@ -58,6 +67,15 @@ export class CloudflareAuthenticationError extends Error {
 export async function ensureCloudflareAuthentication(
   options: EnsureCloudflareAuthenticationOptions,
 ): Promise<CloudflareAuthSession> {
+  if (options.forceLogin) {
+    const overrides = cloudflareCredentialOverrides();
+    if (overrides.length > 0) {
+      throw new CloudflareAuthenticationError(
+        `Cloudflare browser login cannot replace credentials supplied by ${overrides.join(', ')}. Remove these overrides from this shell and rerun \`void cloudflare login\`.`,
+        'environment-credentials',
+      );
+    }
+  }
   if (
     options.acceptApiToken &&
     !options.requireAccounts &&
@@ -80,17 +98,22 @@ export async function ensureCloudflareAuthentication(
     if (!isCleanExit(result)) {
       return null;
     }
-    const accounts = parseCloudflareAccounts(result.stdout);
+    const session = parseCloudflareAuthSession(result.stdout);
     if (options.requireAccounts) {
-      return accounts && accounts.length > 0 ? { accounts } : null;
+      return session && session.accounts.length > 0 ? session : null;
     }
     // Credentialed deploy commands only need Wrangler's clean exit. Keeping
     // account parsing optional also tolerates older Wrangler JSON shapes.
-    return { accounts: accounts ?? [] };
+    return session ?? (options.forceLogin ? null : { accounts: [] });
   };
 
-  const existing = await readSession();
+  const existing = options.forceLogin ? null : await readSession();
   if (existing) {
+    if (existing.authType === 'OAuth Token') {
+      // A secure whoami can migrate default.toml to default.enc. Persist the
+      // same storage preference so a later CLI login updates that same store.
+      await enableCloudflareKeyring(run);
+    }
     return existing;
   }
 
@@ -102,13 +125,7 @@ export async function ensureCloudflareAuthentication(
     );
   }
 
-  const keyring = await run(['auth', 'keyring', 'enable'], true);
-  if (!isCleanExit(keyring)) {
-    throw new CloudflareAuthenticationError(
-      'Void could not enable secure Cloudflare credential storage in your operating-system keychain.',
-      'keyring',
-    );
-  }
+  await enableCloudflareKeyring(run);
 
   announceCloudflareLogin();
   const login = await run(['login', '--use-keyring'], true);
@@ -129,7 +146,27 @@ export async function ensureCloudflareAuthentication(
   return authenticated;
 }
 
-export function parseCloudflareAccounts(stdout: string): Array<CloudflareAccount> | null {
+export async function enableCloudflareKeyring(run: CloudflareAuthRunner): Promise<void> {
+  const keyring = await run(['auth', 'keyring', 'enable'], true);
+  if (!isCleanExit(keyring)) {
+    throw new CloudflareAuthenticationError(
+      'Void could not enable secure Cloudflare credential storage in your operating-system keychain.',
+      'keyring',
+    );
+  }
+}
+
+/** Credential names only: never include their values in diagnostics. */
+export function cloudflareCredentialOverrides(
+  source: NodeJS.ProcessEnv = process.env,
+): Array<string> {
+  const tokens = ['CLOUDFLARE_API_TOKEN', 'CF_API_TOKEN'].filter((key) => Boolean(source[key]));
+  const key = ['CLOUDFLARE_API_KEY', 'CF_API_KEY'].find((key) => Boolean(source[key]));
+  const email = ['CLOUDFLARE_EMAIL', 'CF_EMAIL'].find((key) => Boolean(source[key]));
+  return [...tokens, ...(key && email ? [key, email] : [])];
+}
+
+export function parseCloudflareAuthSession(stdout: string): CloudflareAuthSession | null {
   let value: unknown;
   try {
     value = JSON.parse(stdout.trim());
@@ -159,7 +196,13 @@ export function parseCloudflareAccounts(stdout: string): Array<CloudflareAccount
         typeof item.name === 'string' && item.name.length > 0 ? item.name : 'Cloudflare account',
     });
   }
-  return accounts;
+  return {
+    accounts,
+    ...(typeof record.email === 'string' && record.email ? { email: record.email } : {}),
+    ...(typeof record.authType === 'string' && record.authType
+      ? { authType: record.authType }
+      : {}),
+  };
 }
 
 export function createBundledCloudflareAuthRunner(root: string): CloudflareAuthRunner {

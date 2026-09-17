@@ -1,8 +1,12 @@
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'pathslash';
-import { afterEach, beforeEach, describe, expect, it } from 'vite-plus/test';
-import { formatEnvReport, validateProdEnv } from '../../src/cli/env-validation.ts';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
+import {
+  formatEnvReport,
+  validateProdEnv,
+  validateSecretValues,
+} from '../../src/cli/env-validation.ts';
 import { number, string } from '../../src/runtime/env-helpers.ts';
 import { defineEnv } from '../../src/runtime/env-public.ts';
 
@@ -11,8 +15,8 @@ import { defineEnv } from '../../src/runtime/env-public.ts';
  * `assertEnvSchemaValid` wrapper inside `deploy.ts` is a thin layer over
  * `validateProdEnv` — it resolves the remote secret list, calls
  * `validateProdEnv`, and throws when the report is invalid. Exercising
- * `validateProdEnv` across the realistic source combinations (.env,
- * .env.production, .env.local, remote secrets) is what catches the
+ * `validateProdEnv` across the local `.env`, build shell, and remote
+ * secret sources is what catches the
  * regressions that silently break `void deploy`.
  *
  * Schema registration is done directly via `defineEnv` rather than via an
@@ -44,7 +48,40 @@ beforeEach(() => {
   defineEnv({});
 });
 
+describe('validateSecretValues — upload-time validation', () => {
+  it('accepts declared server values that pass env.ts validation', async () => {
+    const root = createTempProject();
+    defineEnv({ PORT: number() });
+
+    await expect(
+      validateSecretValues(root, [{ name: 'PORT', value: '8080' }]),
+    ).resolves.toBeUndefined();
+  });
+
+  it('rejects invalid values without echoing the plaintext', async () => {
+    const root = createTempProject();
+    defineEnv({ PORT: number() });
+
+    await expect(
+      validateSecretValues(root, [{ name: 'PORT', value: 'not-a-number' }]),
+    ).rejects.toThrow('PORT failed env.ts validation');
+  });
+
+  it('rejects undeclared and client-exposed names', async () => {
+    const root = createTempProject();
+    defineEnv({ SERVER_URL: string(), VITE_API_URL: string() });
+
+    await expect(validateSecretValues(root, [{ name: 'OTHER', value: 'x' }])).rejects.toThrow(
+      'OTHER is not declared in env.ts',
+    );
+    await expect(
+      validateSecretValues(root, [{ name: 'VITE_API_URL', value: 'https://example.com' }]),
+    ).rejects.toThrow('VITE_API_URL is client-exposed');
+  });
+});
+
 afterEach(() => {
+  vi.unstubAllEnvs();
   for (const root of roots.splice(0, roots.length)) {
     rmSync(root, { recursive: true, force: true });
   }
@@ -58,7 +95,7 @@ describe('validateProdEnv — deploy-time schema enforcement', () => {
     expect(result.report.valid).toBe(true);
   });
 
-  it('reports missing required keys when neither .env* files nor remote secrets supply them', async () => {
+  it('reports missing required keys when no remote secrets supply them', async () => {
     const root = createTempProject();
     defineEnv({ STRIPE_KEY: string(), DATABASE_URL: string() });
 
@@ -101,24 +138,31 @@ describe('validateProdEnv — deploy-time schema enforcement', () => {
     expect(report.invalid).toEqual([]);
   });
 
-  it('merges .env and .env.production values, with later files winning', async () => {
+  it('never reads .env during production validation', async () => {
     const root = createTempProject();
     defineEnv({ STRIPE_KEY: string(), PORT: number() });
     writeDotenv(root, '.env', 'STRIPE_KEY=base\nPORT=3000\n');
-    // .env.production overrides PORT — deploy-safe.
-    writeDotenv(root, '.env.production', 'PORT=8080\n');
 
     const { report } = await validateProdEnv(root, { productionOnly: true });
+
+    expect(report.valid).toBe(false);
+    expect(report.missing.sort()).toEqual(['PORT', 'STRIPE_KEY']);
+  });
+
+  it('reads only .env in local mode', async () => {
+    const root = createTempProject();
+    defineEnv({ STRIPE_KEY: string() });
+    writeDotenv(root, '.env', 'STRIPE_KEY=sk_dev\n');
+
+    const { report } = await validateProdEnv(root, { productionOnly: false });
 
     expect(report.valid).toBe(true);
   });
 
-  it('does NOT read .env.local in productionOnly mode — .env.local must not plug prod gaps', async () => {
+  it('ignores server values from the production shell', async () => {
     const root = createTempProject();
     defineEnv({ STRIPE_KEY: string() });
-    // .env.local has the key — but productionOnly excludes it. This is the
-    // guardrail that stops local-only secrets from masking a missing prod secret.
-    writeDotenv(root, '.env.local', 'STRIPE_KEY=sk_dev\n');
+    vi.stubEnv('STRIPE_KEY', 'sk_live');
 
     const { report } = await validateProdEnv(root, { productionOnly: true });
 
@@ -126,53 +170,31 @@ describe('validateProdEnv — deploy-time schema enforcement', () => {
     expect(report.missing).toEqual(['STRIPE_KEY']);
   });
 
-  it('reads .env.local in non-productionOnly mode (the `void env check` local path)', async () => {
+  it('validates client-prefixed values from the production shell', async () => {
     const root = createTempProject();
-    defineEnv({ STRIPE_KEY: string() });
-    writeDotenv(root, '.env.local', 'STRIPE_KEY=sk_dev\n');
-
-    const { report } = await validateProdEnv(root, { productionOnly: false });
-
-    expect(report.valid).toBe(true);
-  });
-
-  it('surfaces invalid (not missing) values when a .env value fails schema validation', async () => {
-    const root = createTempProject();
-    defineEnv({ PORT: number() });
-    writeDotenv(root, '.env.production', 'PORT=not-a-number\n');
+    defineEnv({ VITE_PORT: number() });
+    vi.stubEnv('VITE_PORT', 'not-a-number');
 
     const { report } = await validateProdEnv(root, { productionOnly: true });
 
     expect(report.valid).toBe(false);
     expect(report.missing).toEqual([]);
-    expect(report.invalid.map((i) => i.key)).toEqual(['PORT']);
+    expect(report.invalid.map((i) => i.key)).toEqual(['VITE_PORT']);
     const formatted = formatEnvReport(report);
     expect(formatted).toContain('Invalid env vars');
-    expect(formatted).toContain('PORT');
+    expect(formatted).toContain('VITE_PORT');
   });
 
-  it('redacts invalid values in formatEnvReport when the value or key looks secret', async () => {
+  it('redacts invalid client values in formatEnvReport', async () => {
     const root = createTempProject();
-    defineEnv({ PORT: number() });
-    // `PORT=sk_live_abc123` is a "wrong-file typo" — the value itself is
-    // secret-looking, so it must not surface in the CLI report.
-    writeDotenv(root, '.env.production', 'PORT=sk_live_abc123\n');
+    defineEnv({ VITE_PORT: number() });
+    vi.stubEnv('VITE_PORT', 'sk_live_abc123');
 
     const { report } = await validateProdEnv(root, { productionOnly: true });
     const formatted = formatEnvReport(report);
     expect(formatted).not.toContain('sk_live_abc123');
     expect(formatted).toContain('<redacted>');
     // Key name is still there so the user can find it.
-    expect(formatted).toContain('PORT');
-  });
-
-  it('strips surrounding quotes in .env values so quoted prod secrets validate correctly', async () => {
-    const root = createTempProject();
-    defineEnv({ STRIPE_KEY: string() });
-    writeDotenv(root, '.env.production', 'STRIPE_KEY="sk_live_abc"\n');
-
-    const { report } = await validateProdEnv(root, { productionOnly: true });
-
-    expect(report.valid).toBe(true);
+    expect(formatted).toContain('VITE_PORT');
   });
 });

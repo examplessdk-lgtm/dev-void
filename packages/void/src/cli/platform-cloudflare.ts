@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { resolvePinnedApiBaseUrl } from './provision.ts';
 
 type CloudflareEnvelope<T> = Readonly<{
@@ -15,11 +15,13 @@ type CloudflareEnvelope<T> = Readonly<{
 
 export class PlatformCloudflareApiError extends Error {
   readonly status: number;
+  readonly requestPath?: string;
 
-  constructor(message: string, status: number) {
+  constructor(message: string, status: number, requestPath?: string) {
     super(message);
     this.name = 'PlatformCloudflareApiError';
     this.status = status;
+    this.requestPath = requestPath;
   }
 }
 
@@ -95,12 +97,68 @@ export type PlatformTrackedWorkerTraffic = Readonly<{
   routes: ReadonlyArray<Readonly<{ id: string; pattern: string; script: string }>>;
 }>;
 
+export type PlatformRuntimeTokenPreflightClient = Pick<
+  PlatformCloudflareClient,
+  'listHyperdriveConfigs' | 'request'
+>;
+
+export async function verifyPlatformRuntimeTokenPermissions(
+  client: PlatformRuntimeTokenPreflightClient,
+  input: {
+    accountId: string;
+    applicationDomain: string;
+    customDomains: boolean;
+    zoneId: string | null;
+  },
+): Promise<void> {
+  try {
+    await client.listHyperdriveConfigs(input.accountId);
+  } catch (error) {
+    throw runtimeTokenPreflightError('Account → Hyperdrive → Write', error);
+  }
+
+  if (!input.zoneId) {
+    return;
+  }
+
+  const probeUrl = `https://${input.applicationDomain}/.well-known/void/runtime-token-preflight-${randomUUID()}`;
+  try {
+    await client.request(`/zones/${encodeURIComponent(input.zoneId)}/purge_cache`, {
+      body: JSON.stringify({ files: [probeUrl] }),
+      method: 'POST',
+    });
+  } catch (error) {
+    throw runtimeTokenPreflightError('Zone → Cache Purge → Purge', error);
+  }
+
+  if (input.customDomains) {
+    try {
+      await client.request(
+        `/zones/${encodeURIComponent(input.zoneId)}/custom_hostnames?per_page=1`,
+      );
+    } catch (error) {
+      throw runtimeTokenPreflightError('Zone → SSL and Certificates → Edit', error);
+    }
+  }
+}
+
+function runtimeTokenPreflightError(permission: string, cause: unknown): Error {
+  return new Error(
+    `platform: The Void runtime API token failed its permission preflight. Required permission or scope: ${permission}.`,
+    { cause },
+  );
+}
+
 export class PlatformCloudflareClient {
   readonly apiBaseUrl: string;
   readonly #fetcher: typeof fetch;
   readonly #token: string;
+  readonly #aiGatewayClient?: PlatformCloudflareClient;
 
-  constructor(token: string, options?: { apiBase?: string; fetcher?: typeof fetch }) {
+  constructor(
+    token: string,
+    options?: { apiBase?: string; fetcher?: typeof fetch; aiGatewayToken?: string },
+  ) {
     if (!token) {
       throw new Error(
         'platform: CLOUDFLARE_API_TOKEN is required. The installed control plane also uses this scoped token to provision app resources.',
@@ -109,6 +167,21 @@ export class PlatformCloudflareClient {
     this.#token = token;
     this.apiBaseUrl = (options?.apiBase ?? resolvePinnedApiBaseUrl()).replace(/\/+$/, '');
     this.#fetcher = options?.fetcher ?? fetch;
+    if (options?.aiGatewayToken) {
+      this.#aiGatewayClient = new PlatformCloudflareClient(options.aiGatewayToken, {
+        apiBase: this.apiBaseUrl,
+        fetcher: this.#fetcher,
+      });
+    }
+  }
+
+  /** Keep operator auth for infrastructure; use the existing runtime credential only for AI Gateway. */
+  withAiGatewayToken(token: string): PlatformCloudflareClient {
+    return new PlatformCloudflareClient(this.#token, {
+      apiBase: this.apiBaseUrl,
+      fetcher: this.#fetcher,
+      aiGatewayToken: token,
+    });
   }
 
   async request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -136,6 +209,7 @@ export class PlatformCloudflareClient {
       throw new PlatformCloudflareApiError(
         `Cloudflare returned a non-JSON response (HTTP ${response.status}).`,
         response.status,
+        path.split('?')[0],
       );
     }
     if (!response.ok || envelope.success !== true || envelope.result === undefined) {
@@ -144,13 +218,13 @@ export class PlatformCloudflareClient {
           ?.map((error) => error.message)
           .filter(Boolean)
           .join(', ') || `HTTP ${response.status}`;
-      throw new PlatformCloudflareApiError(`Cloudflare API error: ${details}`, response.status);
+      throw new PlatformCloudflareApiError(
+        `Cloudflare API error: ${details} (HTTP ${response.status}; ${init?.method ?? 'GET'} ${path.split('?')[0]}).`,
+        response.status,
+        path.split('?')[0],
+      );
     }
     return { result: envelope.result, resultInfo: envelope.result_info };
-  }
-
-  async verifyToken(): Promise<void> {
-    await this.request('/user/tokens/verify');
   }
 
   async listAccounts(): Promise<ReadonlyArray<CloudflareAccount>> {
@@ -171,13 +245,38 @@ export class PlatformCloudflareClient {
   }
 
   async getWorkersSubdomain(accountId: string): Promise<string> {
-    const result = await this.request<{ subdomain?: unknown }>(
-      `/accounts/${encodeURIComponent(accountId)}/workers/subdomain`,
-    );
-    return requiredString(result.subdomain, 'Cloudflare workers.dev subdomain');
+    const setupUrl = `https://dash.cloudflare.com/${encodeURIComponent(accountId)}/workers-and-pages`;
+    let result: { subdomain?: unknown } | null;
+    try {
+      result = await this.request<{ subdomain?: unknown }>(
+        `/accounts/${encodeURIComponent(accountId)}/workers/subdomain`,
+      );
+    } catch (error) {
+      const status = error instanceof PlatformCloudflareApiError ? error.status : null;
+      const reason = status === null ? 'the request failed' : `HTTP ${status}`;
+      const guidance =
+        status === 401 || status === 403
+          ? 'Check your Cloudflare login or API token permissions for this account, then rerun the command.'
+          : status === 404
+            ? `Check ${setupUrl}. If no subdomain is shown, finish Workers onboarding and choose one; otherwise check account access and retry.`
+            : 'Rerun the command. If the dashboard already shows a subdomain, no Workers onboarding change is needed.';
+      throw new Error(
+        `platform: Could not read the workers.dev subdomain for account ${accountId} (${reason}). ${guidance}`,
+        { cause: error },
+      );
+    }
+    if (typeof result?.subdomain !== 'string' || result.subdomain.trim() === '') {
+      throw new Error(
+        `platform: This Cloudflare account does not have a workers.dev subdomain. Open ${setupUrl}, finish Workers onboarding, choose a subdomain, and rerun the command.`,
+      );
+    }
+    return result.subdomain.trim();
   }
 
   async listAiGateways(accountId: string): Promise<ReadonlyArray<CloudflareNamedResource>> {
+    if (this.#aiGatewayClient) {
+      return this.#aiGatewayClient.listAiGateways(accountId);
+    }
     const entries: Array<{ id?: unknown }> = [];
     for (let page = 1; ; page++) {
       const result = await this.request<ReadonlyArray<{ id?: unknown }>>(
@@ -195,6 +294,9 @@ export class PlatformCloudflareClient {
   }
 
   async createAiGateway(accountId: string, id: string): Promise<CloudflareNamedResource> {
+    if (this.#aiGatewayClient) {
+      return this.#aiGatewayClient.createAiGateway(accountId, id);
+    }
     const result = await this.request<{ id?: unknown }>(
       `/accounts/${encodeURIComponent(accountId)}/ai-gateway/gateways`,
       {
@@ -421,6 +523,68 @@ export class PlatformCloudflareClient {
       `/zones/${encodeURIComponent(zoneId)}/dns_records?${query}`,
     );
     return result.map(parseDnsRecord);
+  }
+
+  /** Read deployed edge certificates; requesting a pack is not proof of issuance. */
+  async hasActiveCertificateForHostname(zoneId: string, hostname: string): Promise<boolean> {
+    const expected = hostname.toLowerCase().replace(/\.$/, '');
+    const covers = (value: unknown): boolean => {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        return false;
+      }
+      const cert = value as Record<string, unknown>;
+      if (cert.status !== 'active' || !Array.isArray(cert.hosts)) {
+        return false;
+      }
+      if (
+        cert.expires_on !== undefined &&
+        (typeof cert.expires_on !== 'string' ||
+          !Number.isFinite(Date.parse(cert.expires_on)) ||
+          Date.parse(cert.expires_on) <= Date.now())
+      ) {
+        return false;
+      }
+      return cert.hosts.some(
+        (host) => typeof host === 'string' && host.toLowerCase().replace(/\.$/, '') === expected,
+      );
+    };
+    for (const kind of ['ssl/certificate_packs', 'custom_certificates']) {
+      for (let page = 1; page <= 200; page++) {
+        const query = new URLSearchParams({ page: String(page), per_page: '50' });
+        if (kind === 'ssl/certificate_packs') {
+          query.set('deploy', 'production');
+        }
+        const { result, resultInfo } = await this.#requestEnvelope<
+          ReadonlyArray<Record<string, unknown>>
+        >(`/zones/${encodeURIComponent(zoneId)}/${kind}?${query}`);
+        if (!Array.isArray(result)) {
+          throw new Error('platform: Cloudflare returned an invalid certificate inventory.');
+        }
+        for (const entry of result) {
+          const certificates =
+            kind === 'ssl/certificate_packs'
+              ? Array.isArray(entry.certificates)
+                ? entry.certificates
+                : []
+              : [entry];
+          if (certificates.some(covers)) {
+            return true;
+          }
+        }
+        if (
+          result.length === 0 ||
+          (resultInfo?.total_pages !== undefined
+            ? page >= resultInfo.total_pages
+            : result.length < 50)
+        ) {
+          break;
+        }
+        if (page === 200) {
+          throw new Error('platform: Certificate inventory is too large to verify safely.');
+        }
+      }
+    }
+    return false;
   }
 
   async createDnsRecord(zoneId: string, name: string): Promise<CloudflareDnsRecord> {

@@ -425,24 +425,6 @@ The admin dashboard (Hono JSX, server-rendered) gets a builds section for operat
 
 ---
 
-## Cost
-
-Per build on `standard-2` (1 vCPU, 6 GiB, 12 GB disk), 60s average:
-
-| Resource         | Cost/build             | Free tier/month            |
-| ---------------- | ---------------------- | -------------------------- |
-| Container memory | 60s x 6 GiB = $0.0009  | 25 GiB-hr (~375 builds)    |
-| Container CPU    | 60s x 1 vCPU = $0.0012 | 375 vCPU-min (~375 builds) |
-| Container disk   | 60s x 12 GB ≈ $0       | 200 GB-hr                  |
-| DO duration      | 60s x 128 MB ≈ $0.0001 | included                   |
-| DO requests      | ~100 ≈ $0              | 1M free                    |
-| Network egress   | ~15 MB ≈ $0.0004       | 1 TB                       |
-| **Total**        | **~$0.0025**           | **~375 builds free**       |
-
-At 10,000 builds/month: ~$25 in CF costs.
-
----
-
 ## Future Phases
 
 These can be cleanly added without modifying the Phase 1 architecture:

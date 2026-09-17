@@ -1,9 +1,9 @@
-import apkProtocolMedium from '@voidcloud/ui/fonts/APK-Protocol-Medium.woff2';
-import interRomanLatin from '@voidcloud/ui/fonts/inter-roman-latin.woff2';
-import khTekaMonoRegular from '@voidcloud/ui/fonts/KHTekaMono-Regular.woff2';
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
 import { defineHandler, defineHead } from 'void';
 import { getPublicApiUrl } from '../lib/api.ts';
+import apkProtocolMedium from '../ui/fonts/APK-Protocol-Medium.woff2';
+import interRomanLatin from '../ui/fonts/inter-roman-latin.woff2';
+import khTekaMonoRegular from '../ui/fonts/KHTekaMono-Regular.woff2';
 
 export type Props = Readonly<{
   githubUrl: string;

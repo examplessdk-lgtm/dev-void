@@ -609,7 +609,6 @@ describe('POST /projects/:id/revalidate', () => {
       isrKey(project.id, deployment.id, `${project.slug}.void.app`, 'about'),
       'about',
     );
-
     const res = await app.fetch(
       new Request(`http://localhost/projects/${project.id}/revalidate`, {
         method: 'POST',
@@ -1013,7 +1012,7 @@ describe('POST /projects/:id/revalidate', () => {
     expect(batch2).toHaveLength(2);
   });
 
-  it('succeeds even if edge cache purge fails', async () => {
+  it('logs edge cache purge failures after deleting the KV entry', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id);
     const deployment = await createTestDeployment(env.db, project.id, 'live');
@@ -1026,6 +1025,7 @@ describe('POST /projects/:id/revalidate', () => {
       isrKey(project.id, deployment.id, `${project.slug}.void.app`, 'about'),
       'about',
     );
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
 
     const res = await app.fetch(
       new Request(`http://localhost/projects/${project.id}/revalidate`, {
@@ -1039,16 +1039,16 @@ describe('POST /projects/:id/revalidate', () => {
       env,
     );
 
-    // Should still succeed — KV deletion happened, edge purge is best-effort
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { purged: number };
-    expect(body.purged).toBe(1);
 
-    // KV entry should still be deleted
     const about = await env.ISR_CACHE.get(
       isrKey(project.id, deployment.id, `${project.slug}.void.app`, 'about'),
     );
     expect(about).toBeNull();
+    expect(error).toHaveBeenCalledWith(
+      '[api] ISR edge cache purge failed; stale entries may remain until their TTL expires.',
+      expect.any(Error),
+    );
   });
 
   it('purges each hostname under its own routing version', async () => {

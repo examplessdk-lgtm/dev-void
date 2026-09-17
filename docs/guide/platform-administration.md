@@ -6,7 +6,7 @@ outline: deep
 
 `void platform` lets you manage the people and apps on a Void platform from your terminal. You can give teammates access, inspect their projects, follow deployment logs, and check the platform's health.
 
-These commands require an administrator account. If you're setting up a platform for the first time, start with [Self-host a Void Platform](./self-hosted-platform.md).
+These commands require an administrator account. If you're setting up a platform for the first time, start with [Install a Void Platform](./self-hosted-platform.md).
 
 ## Signing In
 
@@ -78,6 +78,9 @@ void platform signup show
 void platform invitation list
 ```
 
+Invitation history remains available after an involved account is removed. The stored actor ID
+remains visible when that account's login no longer exists.
+
 `void platform signup open` allows anyone to sign up. Use `void platform signup restrict` to require an allowlist match again. Removing an allowlist entry affects future signup; it does not suspend an existing account.
 
 ## Managing Users and Projects
@@ -98,6 +101,23 @@ void platform project show <project-id>
 ```
 
 Project details include resources, domains, and recent builds and deployments. The [command reference](../reference/cli.md#operator-commands) also covers suspending and restoring users, deleting projects, and removing accounts.
+
+New users on a self-hosted installation start with the `custom` profile, which
+does not cap application requests, AI usage, deployment frequency, or retained
+Worker deployments. Named profiles such as `pro` apply the platform's quota and
+retention policies; they do not purchase Cloudflare services or bill your users.
+Storage figures are not a hard storage-quota boundary. Set an operating budget
+and retention policy before opening signup beyond your invited team.
+
+The last active administrator cannot be deleted or suspended, including through
+the browser admin UI. Another administrator must still have access. Automatic
+usage limits do not remove administrator access and do not count as a manual
+suspension.
+
+When removing another administrator, Void revokes their administrator access
+before changing application traffic or deleting resources. If cleanup fails,
+access stays revoked and the error describes the partial result. A remaining
+administrator can inspect it and retry cleanup.
 
 ## Previewing Changes
 
@@ -155,7 +175,9 @@ void platform system health
 
 Health checks use the services configured for the selected platform. An unhealthy result exits with a nonzero status, so the same command can be used in a script.
 
-Self-hosted installations use `void platform upgrade`, `repair`, `disable`, and `enable` to manage their Workers. See [platform maintenance](./self-hosted-platform.md#resume-repair-recover-and-upgrade). Void Cloud operators can also inspect Worker versions and roll them back with the [`worker` commands](../reference/cli.md#operator-workers).
+Use `void platform upgrade`, `repair`, `disable`, and `enable` to maintain your platform. See [platform maintenance](./self-hosted-platform.md#resume-repair-recover-and-upgrade).
+
+For disaster recovery, keep a matching PostgreSQL backup, provider data backups, installation identity and complete project-encryption keyring, and immutable runtime artifacts. Keep traffic disabled while restoring data, run `discover` to reconstruct verified local metadata, and review `repair --plan` before recreating missing installer-owned infrastructure. Neither command restores backed-up data. See [Prepare for disaster recovery](./self-hosted-platform.md#prepare-for-disaster-recovery) for the full sequence.
 
 ## Using Scripts
 
@@ -168,18 +190,19 @@ void platform system health --json
 
 Results go to standard output. Command errors go to standard error as JSON and exit with a nonzero status. With `--follow`, each log response is a separate JSON line.
 
-For CI, supply `VOID_OPERATOR_TOKEN` from your secret manager and choose its platform explicitly:
+Operator tokens expire after one hour. For CI, mint a new operator token at the start of each job from a valid full API login session belonging to an active administrator. Choose the platform explicitly, inject the full session as `VOID_TOKEN` from your secret manager, and capture the exchange output directly into the protected job environment:
 
 ```sh
 export VOID_API_URL=https://platform.example.com
-# Supply VOID_OPERATOR_TOKEN from your secret manager.
+VOID_OPERATOR_TOKEN="$(
+  printf '%s' "$VOID_TOKEN" | void platform auth token --token-stdin
+)" || exit 1
+export VOID_OPERATOR_TOKEN
+unset VOID_TOKEN
 void platform system health --json
+unset VOID_OPERATOR_TOKEN
 ```
 
-To obtain a one-hour administrator token from an existing full API login session, pipe that session token to `auth token --token-stdin`:
+Disable shell tracing for the exchange and do not write either token to logs or plaintext files. A full API login session expires after 30 days and can be revoked sooner; renew it through the normal authenticated login flow and update the protected CI secret. A job that runs longer than one hour must repeat the exchange while its full API session is still valid. An expired operator token cannot refresh itself, and Void does not issue permanent service tokens for administrator automation.
 
-```sh
-printf '%s' "$VOID_TOKEN" | void platform auth token --token-stdin
-```
-
-The API login session must belong to an administrator on `VOID_API_URL`. This prints the new operator token to standard output. `auth login --token-stdin` performs the same exchange and saves the result in the system keychain instead. See [operator authentication](../reference/cli.md#operator-authentication) for the full command syntax.
+`auth login --token-stdin` performs the same elevation and saves the one-hour operator token in the system keychain for interactive use. See [operator authentication](../reference/cli.md#operator-authentication) for the full command syntax.

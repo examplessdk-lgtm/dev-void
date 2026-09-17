@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vite-plus/test';
 import { ProxyClient } from '../../../src/runtime/remote/client.ts';
-import { ProxyD1Database, ProxyD1PreparedStatement } from '../../../src/runtime/remote/d1.ts';
+import { ProxyD1Database } from '../../../src/runtime/remote/d1.ts';
 
 function createClient() {
   return new ProxyClient('https://proxy.void.cloud', 'jwt-token', 'proj_1');
@@ -130,6 +130,22 @@ describe('ProxyD1Database', () => {
   });
 
   describe('batch()', () => {
+    it('keeps independent bindings when reusing a prepared statement', async () => {
+      mockFetch([]);
+      const db = new ProxyD1Database(createClient(), 'DB');
+      const prepared = db.prepare('INSERT INTO users (name) VALUES (?)');
+      const alice = prepared.bind('Alice');
+      const bob = alice.bind('Bob');
+      await db.batch([alice, bob] as unknown as Array<D1PreparedStatement>);
+
+      const call = vi.mocked(globalThis.fetch).mock.calls[0] as [string, RequestInit];
+      expect(JSON.parse(String(call[1].body)).statements).toEqual([
+        { sql: 'INSERT INTO users (name) VALUES (?)', params: ['Alice'] },
+        { sql: 'INSERT INTO users (name) VALUES (?)', params: ['Bob'] },
+      ]);
+      expect(prepared._params).toEqual([]);
+    });
+
     it('sends all statements in a batch request', async () => {
       mockFetch([
         { results: [], success: true, meta: {} },
@@ -167,20 +183,20 @@ describe('ProxyD1Database', () => {
     });
   });
 
-  describe('bind() accumulation', () => {
-    it('replaces params on each bind() call', async () => {
+  describe('bind()', () => {
+    it('replaces params only on the returned statement', async () => {
       mockFetch({ results: [], success: true });
 
       const db = new ProxyD1Database(createClient(), 'DB');
       const stmt = db.prepare('SELECT * FROM users WHERE id = ?');
 
-      // First bind
-      stmt.bind(1);
-      expect((stmt as ProxyD1PreparedStatement)._params).toEqual([1]);
-
-      // Second bind replaces
-      stmt.bind(2, 3);
-      expect((stmt as ProxyD1PreparedStatement)._params).toEqual([2, 3]);
+      const first = stmt.bind(1);
+      const second = first.bind(2, 3);
+      const unbound = second.bind();
+      expect(stmt._params).toEqual([]);
+      expect(first._params).toEqual([1]);
+      expect(second._params).toEqual([2, 3]);
+      expect(unbound._params).toEqual([]);
     });
   });
 });

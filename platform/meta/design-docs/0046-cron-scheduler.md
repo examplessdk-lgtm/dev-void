@@ -121,7 +121,3 @@ Staging environment inherits the DO binding (same class, isolated storage).
 | Redeploy with updated crons | Sync new schedules to DO, recompute alarm            |
 | Redeploy with no crons      | POST `/clear` to DO — cancels alarm, deletes storage |
 | Project deleted             | POST `/clear` to DO                                  |
-
-## Cost
-
-DO alarms are billed as DO requests ($0.15/M, first 1M free). Cost scales linearly with (projects × cron frequency). At 1,000 projects with minutely crons: ~$6/month in DO requests.

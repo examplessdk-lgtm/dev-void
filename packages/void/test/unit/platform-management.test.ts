@@ -18,6 +18,7 @@ import { join } from 'pathslash';
 import { afterEach, beforeEach, describe, expect, it } from 'vite-plus/test';
 import {
   disablePlatform,
+  resolvePlatformRuntimeTokenToPreflight,
   resolveInstalledPlatformManifest,
   selectAuthoritativePlatformManifest,
   uninstallPlatform,
@@ -292,6 +293,31 @@ const uninstallArgs = {
 };
 
 describe('platform lifecycle management', () => {
+  it('preflights only a runtime token that will be applied', () => {
+    const updatePlan = { actions: [{ action: 'update', kind: 'worker' }] };
+    expect(
+      resolvePlatformRuntimeTokenToPreflight(updatePlan, {
+        cloudflareApiToken: 'stale-checkpoint-token',
+        workerSecretUpdates: {},
+      }),
+    ).toBe('');
+    expect(
+      resolvePlatformRuntimeTokenToPreflight(updatePlan, {
+        cloudflareApiToken: 'stale-checkpoint-token',
+        workerSecretUpdates: { CF_API_TOKEN: 'explicit-rotation-token' },
+      }),
+    ).toBe('explicit-rotation-token');
+    expect(
+      resolvePlatformRuntimeTokenToPreflight(
+        { actions: [{ action: 'create', kind: 'worker' }] },
+        {
+          cloudflareApiToken: 'recovery-token',
+          workerSecretUpdates: {},
+        },
+      ),
+    ).toBe('recovery-token');
+  });
+
   it('requires explicit acknowledgement for a non-interactive uninstall', async () => {
     const manifest = installedManifest();
     persist(manifest);

@@ -31,6 +31,10 @@ jobs:
     # Configure all three credentials in Staging. Reusable callers must declare
     # these secret names explicitly for GitHub to resolve the environment values.
     environment: Staging
+    # Serialize fixture initialization and resets across scheduled/reusable runs.
+    concurrency:
+      group: staging-kitchen-sink-smoke
+      cancel-in-progress: false
     timeout-minutes: 15
     permissions:
       contents: read
@@ -55,8 +59,18 @@ jobs:
           cache: true
           node-version-file: .node-version
       - run: vp run build
+      - name: Initialize missing kitchen-sink fixture secrets
+        run: node platform/scripts/kitchen-sink-staging-env.ts
+        env:
+          VOID_TOKEN: ${{ secrets.VOID_TOKEN_STAGING }}
+          VOID_API_URL: https://api.staging.void.cloud
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID_STAGING }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET_STAGING }}
+      - name: Prepare the hosted kitchen-sink fixture
+        id: fixture
+        run: node platform/scripts/kitchen-sink-platform-fixture.ts
       - name: Deploy kitchen-sink
-        working-directory: playground/kitchen-sink
+        working-directory: ${{ steps.fixture.outputs.path }}
         run: node ../../packages/void/dist/cli/cli.mjs deploy --project kitchen-sink
         env:
           VOID_TOKEN: ${{ secrets.VOID_TOKEN_STAGING }}

@@ -14,10 +14,11 @@ import { verifyDeployToken } from '../../src/auth/deploy-token.ts';
 import {
   claimBuildForStartWithinLimit,
   createBuild,
-  createGitHubConnection,
+  createGitHubConnection as createGitHubConnectionRecord,
   createGithubActionsBuildWithinLimit,
   deleteGitHubConnection,
   getBuild,
+  getProject,
   getProjectBuilds,
   markGitHubInstallationStatus,
   setBuildCheckRunId,
@@ -245,6 +246,21 @@ async function seedActiveInstallation(
   });
 }
 
+async function createGitHubConnection(
+  db: Db,
+  args: Parameters<typeof createGitHubConnectionRecord>[1],
+) {
+  const project = await getProject(db, args.projectId);
+  if (!project) {
+    throw new Error('test project missing');
+  }
+  return createGitHubConnectionRecord(db, {
+    ...args,
+    authorizedByUserId:
+      args.authorizedByUserId === undefined ? project.user_id : args.authorizedByUserId,
+  });
+}
+
 beforeAll(async () => {
   env = await setupEnv();
 });
@@ -360,6 +376,30 @@ describe('POST /auth/github-oidc', () => {
     setVerifyResult(makeClaims({ repository: 'octo/unconnected' }));
     const res = await exchange(app, env, { oidcToken: 't', project: 'p' });
     expect(res.status).toBe(401);
+  });
+
+  it('returns 401 for a legacy organization connection without per-repo proof', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'oidc-legacy-org');
+    await seedActiveInstallation(env.db, '1');
+    await createGitHubConnection(env.db, {
+      projectId: project.id,
+      installationId: '1',
+      repoFullName: 'octo/repo',
+      repositoryId: '42',
+      buildExecutor: 'github_actions',
+      authorizedByUserId: null,
+    });
+    const app = makeApp(env);
+    setVerifyResult(makeClaims());
+
+    const res = await exchange(app, env, { oidcToken: 't', project: project.slug });
+
+    expect(res.status).toBe(401);
+    expect(((await res.json()) as { error: string }).error).toContain(
+      'reconnect the organization repository',
+    );
+    expect(await getProjectBuilds(env.db, project.id)).toEqual([]);
   });
 
   it('returns 401 when the connection is a container executor', async () => {

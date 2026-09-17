@@ -64,6 +64,8 @@ The same name always resolves to the same Durable Object. Use `getById(id)` when
 
 ## Execution and persistence
 
+Typed methods run through Cloudflare RPC on the generated Durable Object class. Only your declared methods are exposed; Void’s state-loading and persistence helpers stay private.
+
 Void loads state before the first operation and runs RPC methods one at a time. After a method, `fetch`, or `alarm` handler succeeds, it saves the updated state.
 
 If the handler or save fails, Void restores `context.state` to its previous value. Direct writes to `context.storage` aren't included in that rollback.
@@ -127,7 +129,7 @@ export default Counter;
 
 These state migrations are separate from Cloudflare's Durable Object class migration. Void generates the latter with `new_sqlite_classes` when it discovers the file.
 
-Do not delete or reorder generated Durable Object migrations in `wrangler.jsonc` after deployment. Renaming or removing a Durable Object class requires an explicit Cloudflare class migration and is not automated yet.
+Do not delete or reorder generated Durable Object migrations in `wrangler.jsonc` after deployment. Native Cloudflare beta deploys can create these classes with the Worker's first deployment, but do not yet apply a later class migration to an existing Worker. Additions, renames, and removals require an explicit supported Cloudflare deployment workflow; after its migration tag is active, `void deploy --platform cloudflare` can resume ordinary version uploads.
 
 ## Deployment support
 

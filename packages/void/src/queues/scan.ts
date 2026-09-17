@@ -7,7 +7,7 @@ const QUEUE_EXTENSIONS = ['ts', 'mts', 'js', 'mjs'];
 export type QueueDefinition = {
   /** Relative file path from queues/ */
   filePath: string;
-  /** Deterministic name (path without extension) */
+  /** Deterministic name (path without extension, with directories joined by `-`) */
   name: string;
   /** Binding name: QUEUE_ + uppercased name */
   bindingName: string;
@@ -22,7 +22,7 @@ export type QueueDefinition = {
 };
 
 function extractName(filePath: string): string {
-  return filePath.replace(/\.[^.]+$/, '');
+  return filePath.replace(/\.[^.]+$/, '').replaceAll('/', '-');
 }
 
 export function deriveQueueBindingName(name: string): string {
@@ -41,9 +41,9 @@ function parseQueueFiles(
   files: Array<string>,
 ): Array<QueueDefinition> {
   const queuesDirPath = isAbsolute(queuesDir) ? queuesDir : join(root, queuesDir);
-  return files
+  const definitions = files
     .filter((filePath) => !filePath.split('/').some((segment) => segment.startsWith('_')))
-    .sort((leftFilePath, rightFilePath) => leftFilePath.localeCompare(rightFilePath))
+    .sort()
     .map((filePath) => {
       const absPath = join(queuesDirPath, filePath);
       const source = readFileSync(absPath, 'utf-8');
@@ -58,6 +58,32 @@ function parseQueueFiles(
         retryDelay: extractConsumerOption(source, 'retryDelay'),
       };
     });
+
+  const filesByName = new Map<string, Array<string>>();
+  for (const definition of definitions) {
+    const matchingFiles = filesByName.get(definition.name) ?? [];
+    matchingFiles.push(definition.filePath);
+    filesByName.set(definition.name, matchingFiles);
+  }
+
+  const collisions = [...filesByName]
+    .filter(([, matchingFiles]) => matchingFiles.length > 1)
+    .sort(([leftName], [rightName]) => (leftName < rightName ? -1 : leftName > rightName ? 1 : 0))
+    .map(
+      ([name, matchingFiles]) =>
+        `  ${JSON.stringify(name)}: ${matchingFiles.map((file) => JSON.stringify(file)).join(', ')}`,
+    );
+  if (collisions.length > 0) {
+    throw new Error(
+      [
+        'queue: Multiple queue files resolve to the same queue name:',
+        ...collisions,
+        'Rename the conflicting files so each queue has a unique name.',
+      ].join('\n'),
+    );
+  }
+
+  return definitions;
 }
 
 export async function scanQueues(

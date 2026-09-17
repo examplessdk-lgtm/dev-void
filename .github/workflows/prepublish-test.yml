@@ -1,0 +1,88 @@
+name: Prepublish Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: Prepublish Test coverage to run.
+        type: choice
+        options: [smoke, full]
+        default: full
+  workflow_call:
+    inputs:
+      suite:
+        description: Reusable callers run full release acceptance by default.
+        type: string
+        required: false
+        default: full
+      include_macos:
+        description: Also verify packed packages on macOS.
+        type: boolean
+        required: false
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: prepublish-test-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  scope:
+    name: Select Prepublish Test coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      suite: ${{ steps.scope.outputs.suite }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - run: node --test .github/scripts/packed-consumer-scope.test.mjs
+      - id: scope
+        run: node .github/scripts/packed-consumer-scope.mjs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PACKED_REQUESTED_SUITE: ${{ inputs.suite || 'auto' }}
+
+  prepublish-test:
+    needs: scope
+    if: ${{ needs.scope.outputs.suite != 'skip' }}
+    name: Prepublish Test (${{ matrix.os }}, ${{ matrix.pm }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ needs.scope.outputs.suite == 'full' && 25 || 10 }}
+    permissions:
+      contents: read
+    env:
+      VOID_PLATFORM_SOURCE_REVISION: ${{ github.sha }}
+      VOID_PACKED_SUITE: ${{ needs.scope.outputs.suite }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: '${{ inputs.include_macos && fromJSON(''["ubuntu-latest","macos-latest"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+        pm: [npm, pnpm]
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - uses: voidzero-dev/setup-vp@2dec1e33f4ab2c6d5bce1b0c4607961bb1a3f7a1 # v1.12.0
+        with:
+          node-version-file: .node-version
+          cache: true
+      - run: vp exec playwright install --with-deps chromium
+        if: ${{ needs.scope.outputs.suite == 'full' && runner.os == 'Linux' }}
+      - run: vp exec playwright install chromium
+        if: ${{ needs.scope.outputs.suite == 'full' && runner.os != 'Linux' }}
+      - run: node --test --test-timeout=10000 .github/scripts/packed-init.test.mjs
+      - run: vp run build
+      - name: Prepublish Test with ${{ matrix.pm }}
+        env:
+          VOID_PACKED_PM: ${{ matrix.pm }}
+        run: node .github/scripts/packed-consumer.mjs

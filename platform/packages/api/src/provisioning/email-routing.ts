@@ -9,7 +9,7 @@
  *
  * `addDestination` triggers CF to email the recipient with a verification
  * link. Status flips from `pending` → `verified` once they click. We poll
- * via `getDestination` (or `listDestinations` in bulk) on read to surface
+ * via `listDestinations` on read to surface
  * fresh status to the caller.
  */
 
@@ -49,15 +49,6 @@ export async function addDestination(
     method: 'POST',
     body: JSON.stringify({ email }),
   });
-}
-
-/** Fetch one destination by CF's tag; throws if not found. */
-export async function getDestination(
-  accountId: string,
-  apiToken: string,
-  destinationTag: string,
-): Promise<CfDestinationAddress> {
-  return cfFetch<CfDestinationAddress>(`${ROUTING_BASE(accountId)}/${destinationTag}`, apiToken);
 }
 
 /**

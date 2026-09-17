@@ -1,6 +1,12 @@
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'pathslash';
 import { describe, expect, it, vi } from 'vite-plus/test';
 import {
+  assertCloudflareDurableObjectLifecycleSupported,
+  readCloudflareWorkerMigrationTag,
   readExistingCloudflareWorker,
+  readCloudflareVersionMigrationTag,
   assertExistingCloudflareConfig,
   assertCloudflareBindingsPreserved,
   type ExistingCloudflareWorker,
@@ -134,6 +140,31 @@ describe('existing Worker preservation', () => {
     expect(runWrangler.mock.calls[1]![0]).toContain('original');
     expect(runWrangler.mock.calls.every(([args]) => args.includes('--json'))).toBe(true);
   });
+
+  it('does not infer an active migration tag from an explicitly requested candidate', async () => {
+    const runWrangler = vi.fn((_args: Array<string>, _options: { capture: boolean }) => ({
+      status: 0,
+      stderr: '',
+      stdout: JSON.stringify({
+        id: 'candidate',
+        migration_tag: 'not-authoritative',
+        resources: {
+          bindings: [],
+          script: { handlers: ['fetch'] },
+          script_runtime: { migration_tag: 'still-not-authoritative' },
+        },
+      }),
+    }));
+    const candidate = await readExistingCloudflareWorker({
+      runWrangler,
+      workerName: 'site',
+      configPath: '/app/wrangler.jsonc',
+      versionId: 'candidate',
+    });
+    expect(candidate.script).toEqual({ handlers: ['fetch'] });
+    expect(runWrangler).toHaveBeenCalledTimes(1);
+    expect(runWrangler.mock.calls[0]![0].slice(0, 3)).toEqual(['versions', 'view', 'candidate']);
+  });
   it.each([403, 404, 1])('never turns a failed read (%s) into Worker creation', async (status) => {
     await expect(
       readExistingCloudflareWorker({
@@ -142,5 +173,221 @@ describe('existing Worker preservation', () => {
         configPath: '/app/wrangler.jsonc',
       }),
     ).rejects.toThrow('Could not verify existing');
+  });
+
+  it('rejects a pending class migration on an existing Worker', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-do-lifecycle-'));
+    const configPath = join(root, 'wrangler.jsonc');
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        migrations: [
+          { tag: 'v1', new_sqlite_classes: ['Room'] },
+          { tag: 'v2', new_sqlite_classes: ['Counter'] },
+        ],
+      }),
+    );
+    const runWrangler = vi.fn((args: Array<string>) => ({
+      status: 0,
+      stderr: '',
+      stdout: JSON.stringify(
+        args[0] === 'deployments'
+          ? { versions: [{ version_id: 'active', percentage: 100 }] }
+          : {
+              id: 'active',
+              resources: {
+                bindings: [],
+                script: { handlers: ['fetch'] },
+                script_runtime: { migration_tag: 'v1' },
+              },
+            },
+      ),
+    }));
+    try {
+      await expect(
+        assertCloudflareDurableObjectLifecycleSupported({
+          runWrangler,
+          configPath,
+          workerName: 'app',
+          accountId: 'account',
+          apiBaseUrl: 'https://api.cloudflare.test/client/v4',
+          readMigrationTag: async () => 'v1',
+        }),
+      ).rejects.toThrow(/native Cloudflare beta.*existing Worker[\s\S]*v2/);
+      expect(runWrangler).toHaveBeenCalledTimes(6);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('allows first deployment and an already-active class migration', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-do-lifecycle-'));
+    const configPath = join(root, 'wrangler.jsonc');
+    writeFileSync(
+      configPath,
+      JSON.stringify({ migrations: [{ tag: 'v1', new_sqlite_classes: ['Room'] }] }),
+    );
+    const missing = vi.fn(() => ({
+      status: 1,
+      stdout: '',
+      stderr: 'This Worker does not exist. [code: 10007]',
+    }));
+    const active = vi.fn((args: Array<string>) => ({
+      status: 0,
+      stderr: '',
+      stdout: JSON.stringify(
+        args[0] === 'deployments'
+          ? { versions: [{ version_id: 'active', percentage: 100 }] }
+          : {
+              id: 'active',
+              resources: {
+                bindings: [],
+                script: { handlers: ['fetch'] },
+                script_runtime: { migration_tag: 'v1' },
+              },
+            },
+      ),
+    }));
+    try {
+      await expect(
+        assertCloudflareDurableObjectLifecycleSupported({
+          runWrangler: missing,
+          configPath,
+          workerName: 'first',
+          accountId: 'account',
+          apiBaseUrl: 'https://api.cloudflare.test/client/v4',
+        }),
+      ).resolves.toBeUndefined();
+      await expect(
+        assertCloudflareDurableObjectLifecycleSupported({
+          runWrangler: active,
+          configPath,
+          workerName: 'app',
+          accountId: 'account',
+          apiBaseUrl: 'https://api.cloudflare.test/client/v4',
+          readMigrationTag: async () => 'v1',
+        }),
+      ).resolves.toBeUndefined();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('does not authenticate or read metadata without a class migration', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-do-lifecycle-'));
+    const configPath = join(root, 'wrangler.jsonc');
+    writeFileSync(configPath, JSON.stringify({ migrations: [{ tag: 'v1' }] }));
+    const runWrangler = vi.fn(() => {
+      throw new Error('must not run');
+    });
+    try {
+      await expect(
+        assertCloudflareDurableObjectLifecycleSupported({
+          runWrangler,
+          configPath,
+          workerName: 'app',
+          accountId: 'account',
+          apiBaseUrl: 'https://api.cloudflare.test/client/v4',
+        }),
+      ).resolves.toBeUndefined();
+      expect(runWrangler).not.toHaveBeenCalled();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('reads current and legacy Worker version migration-tag shapes', () => {
+    expect(
+      readCloudflareVersionMigrationTag({
+        resources: { script_runtime: { migration_tag: 'current' } },
+      }),
+    ).toBe('current');
+    expect(
+      readCloudflareVersionMigrationTag({ resources: { script: { migration_tag: 'legacy' } } }),
+    ).toBe('legacy');
+    expect(readCloudflareVersionMigrationTag({ script: { migration_tag: 'older' } })).toBe('older');
+    expect(readCloudflareVersionMigrationTag({})).toBeNull();
+  });
+
+  it('reads the authoritative migration tag from Worker script metadata', async () => {
+    const runWrangler = vi.fn(() => ({
+      status: 0,
+      stdout: JSON.stringify({ type: 'oauth', token: 'private-token' }),
+      stderr: '',
+    }));
+    const fetchMock = vi.fn(async () =>
+      Response.json({
+        success: true,
+        result: [
+          { id: 'other', migration_tag: 'v0' },
+          { id: 'app', migration_tag: 'v2' },
+        ],
+      }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      await expect(
+        readCloudflareWorkerMigrationTag({
+          runWrangler,
+          accountId: 'account/id',
+          apiBaseUrl: 'https://api.cloudflare.test/client/v4/',
+          workerName: 'app',
+        }),
+      ).resolves.toBe('v2');
+      expect(runWrangler).toHaveBeenCalledWith(['auth', 'token', '--json'], { capture: true });
+      expect(fetchMock).toHaveBeenCalledWith(
+        'https://api.cloudflare.test/client/v4/accounts/account%2Fid/workers/scripts',
+        expect.objectContaining({
+          headers: { Authorization: 'Bearer private-token' },
+          redirect: 'error',
+        }),
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('rejects migration state that changes during lifecycle verification', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-do-lifecycle-'));
+    const configPath = join(root, 'wrangler.jsonc');
+    writeFileSync(
+      configPath,
+      JSON.stringify({ migrations: [{ tag: 'v1', new_sqlite_classes: ['Room'] }] }),
+    );
+    const runWrangler = vi.fn((args: Array<string>) => ({
+      status: 0,
+      stderr: '',
+      stdout: JSON.stringify(
+        args[0] === 'deployments'
+          ? { versions: [{ version_id: 'active', percentage: 100 }] }
+          : {
+              id: 'active',
+              resources: {
+                bindings: [],
+                script: { handlers: ['fetch'] },
+                script_runtime: {},
+              },
+            },
+      ),
+    }));
+    const readMigrationTag = vi
+      .fn<() => Promise<string | null>>()
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce('v1');
+    try {
+      await expect(
+        assertCloudflareDurableObjectLifecycleSupported({
+          runWrangler,
+          configPath,
+          workerName: 'app',
+          accountId: 'account',
+          apiBaseUrl: 'https://api.cloudflare.test/client/v4',
+          readMigrationTag,
+        }),
+      ).rejects.toThrow('migration state changed');
+      expect(readMigrationTag).toHaveBeenCalledTimes(2);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

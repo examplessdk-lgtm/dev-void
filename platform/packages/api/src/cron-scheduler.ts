@@ -246,10 +246,13 @@ export class CronScheduler extends DurableObject<ApiEnv['Bindings']> {
     // CronScheduler was not found in this worker`. The queue handler runs as
     // a fresh fetch event with no DO context, so the dispatch resolves to the
     // user worker's default entrypoint as expected.
-    const messages = matching.map((schedule) => ({
+    // The worker fans an expression out to every matching job. Deliver the
+    // expression once, even when multiple named jobs share it.
+    const expressions = [...new Set(matching.map((schedule) => schedule.cron))];
+    const messages = expressions.map((cron) => ({
       body: {
         workerName: state.workerName,
-        cron: schedule.cron,
+        cron,
         scheduledTime: now,
         ...(state.proxyToken !== undefined && { proxyToken: state.proxyToken }),
       },

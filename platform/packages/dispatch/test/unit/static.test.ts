@@ -26,13 +26,6 @@ describe('resolveStaticPath', () => {
   describe('html_handling: auto-trailing-slash (default)', () => {
     const config: AssetConfig = {};
 
-    it('resolves /about to /about.html', () => {
-      expect(resolveStaticPath('/about', manifest, config)).toEqual({
-        path: '/about.html',
-        hash: 'hash_about',
-      });
-    });
-
     it('resolves /blog to /blog/index.html when no .html exists', () => {
       const m = { '/blog/index.html': 'hash_blog_index' };
       expect(resolveStaticPath('/blog', m, config)).toEqual({

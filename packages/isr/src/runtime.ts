@@ -3,12 +3,19 @@ import {
   buildVariantOriginalUrl,
   decodeIsrCacheEntry,
   extractPageDataFromHtml,
+  hasCurrentSharedCachePolicy,
+  hasSharedCacheOptOut,
+  isSharedCacheableResponse,
   isrCacheResponse,
   isStale,
   normalizePageDataForJsonCache,
   packIsrValue,
+  markSharedCachePolicy,
+  resolvePageTtl,
   resolvePathTtl,
   resolveRevalidateTtl,
+  SHARED_CACHE_POLICY_VERSION,
+  SHARED_CACHE_POLICY_HEADER,
   serializeHeaders,
   shouldBypassIsr,
   type IsrCacheEntry,
@@ -19,14 +26,20 @@ import { isrCacheKey, isrCachePrefix, isrCacheVariantPrefix, isrEdgeCacheUrl } f
 
 export {
   extractPageDataFromHtml,
+  hasCurrentSharedCachePolicy,
+  hasSharedCacheOptOut,
+  isSharedCacheableResponse,
   isrCacheResponse,
   isStale,
   normalizePageDataForJsonCache,
   packIsrValue,
+  markSharedCachePolicy,
   resolvePathTtl,
   resolveRevalidateTtl,
   serializeHeaders,
   shouldBypassIsr,
+  SHARED_CACHE_POLICY_HEADER,
+  SHARED_CACHE_POLICY_VERSION,
   unpackIsrValue,
   type IsrCacheEntry,
   type IsrCacheMetadata,
@@ -80,6 +93,8 @@ export type RenderFn = (request: Request) => Promise<Response>;
 
 export type HandleIsrOptions = Readonly<{
   revalidate: number | Record<string, number> | undefined;
+  pages?: ReadonlyArray<{ pattern: string; revalidate?: number }>;
+  pathRevalidate?: Record<string, number>;
   deploymentId: string;
   queryAllowlist?: QueryAllowlist;
 }>;
@@ -226,6 +241,7 @@ export async function writeIsrCache(
         s: status,
         c: Date.now(),
         t: ttl,
+        p: SHARED_CACHE_POLICY_VERSION,
       } satisfies IsrCacheMetadata,
     });
   } catch {
@@ -335,6 +351,7 @@ const CLIENT_REVALIDATE_CACHE_CONTROL = 'public, max-age=0, must-revalidate';
 export function clientRevalidateResponse(response: Response): Response {
   const res = new Response(response.body, response);
   res.headers.set('Cache-Control', CLIENT_REVALIDATE_CACHE_CONTROL);
+  res.headers.delete(SHARED_CACHE_POLICY_HEADER);
   return res;
 }
 
@@ -346,7 +363,7 @@ export function isEventStreamResponse(response: Response): boolean {
 }
 
 function jsonCacheResponse(pageData: string, ttl: number, state: 'HIT' | 'MISS'): Response {
-  return new Response(pageData, {
+  const response = new Response(pageData, {
     headers: {
       'content-type': 'application/json',
       // Mirror the live JSON responder `pageJsonResponse` (pages/protocol.ts):
@@ -360,6 +377,8 @@ function jsonCacheResponse(pageData: string, ttl: number, state: 'HIT' | 'MISS')
       'x-isr-cache': state,
     },
   });
+  markSharedCachePolicy(response.headers);
+  return response;
 }
 
 /**
@@ -443,6 +462,19 @@ async function safeCacheDelete(cache: Cache | undefined, key: string): Promise<v
   }
 }
 
+async function deleteSharedIsrVariants(
+  env: IsrCacheEnv,
+  cache: Cache | undefined,
+  host: string,
+  pathname: string,
+  keys: { htmlKey: string; jsonKey: string },
+  variantUrl: string | null,
+): Promise<void> {
+  await deleteIsrCache(env, host, pathname, variantUrl);
+  await safeCacheDelete(cache, keys.htmlKey);
+  await safeCacheDelete(cache, keys.jsonKey);
+}
+
 // ---------------------------------------------------------------------------
 // Background revalidation (ported from dispatch/src/index.ts:1206–1295,
 // stripped of getWorker / applyWorkerFallbackRules / maybeServeWfpAssetFallback
@@ -468,8 +500,8 @@ export function cloneWithoutVoidPages(request: Request): Request {
  * Revalidate an ISR page in the background. Re-renders as HTML (X-VoidPages
  * stripped), writes fresh HTML to KV + HTML edge cache, and populates the JSON
  * edge cache from embedded page data. Errors are caught and logged — serve
- * stale, don't retry. `ttl === 0` means the worker permanently opted out:
- * delete the KV entry and both edge variants.
+ * stale, don't retry. An explicit cache opt-out (including `ttl === 0`)
+ * deletes the KV entry and both edge variants.
  */
 async function revalidateInBackground(
   env: IsrCacheEnv,
@@ -484,17 +516,21 @@ async function revalidateInBackground(
   try {
     const cleanRequest = cloneWithoutVoidPages(request);
     const response = await render(cleanRequest);
-    if (isEventStreamResponse(response)) {
-      return;
-    }
     const ttl = resolveRevalidateTtl(response, defaultTtl);
     const cache = edgeCache();
-    if (ttl > 0 && response.status === 200) {
+    if (isEventStreamResponse(response)) {
+      if (ttl === 0 || hasSharedCacheOptOut(response)) {
+        await deleteSharedIsrVariants(env, cache, host, pathname, keys, variantUrl);
+      }
+      return;
+    }
+    if (ttl > 0 && isSharedCacheableResponse(response)) {
       await writeIsrCache(env, host, pathname, response, ttl, variantUrl);
       // Update HTML edge cache with the fresh response.
       const headers = new Headers(response.headers);
       headers.set('x-isr-cache', 'HIT');
       headers.set('Cache-Control', `public, s-maxage=${ttl}, max-age=0, must-revalidate`);
+      markSharedCachePolicy(headers);
       headers.delete('set-cookie');
       headers.delete('x-void-page-data');
       await safeCachePut(
@@ -506,11 +542,9 @@ async function revalidateInBackground(
         }),
       );
       await populateJsonEdgeCache(cache, keys.jsonKey, response, ttl, 'HIT');
-    } else if (ttl === 0) {
-      // Worker permanently opted out — remove KV + both edge variants.
-      await deleteIsrCache(env, host, pathname, variantUrl);
-      await safeCacheDelete(cache, keys.htmlKey);
-      await safeCacheDelete(cache, keys.jsonKey);
+    } else if (ttl === 0 || hasSharedCacheOptOut(response)) {
+      // An authoritative opt-out invalidates every previously public variant.
+      await deleteSharedIsrVariants(env, cache, host, pathname, keys, variantUrl);
     }
   } catch (err) {
     console.error('ISR revalidation failed:', err);
@@ -529,8 +563,8 @@ async function revalidateInBackground(
  * cache op failed open).
  *
  * Ladder:
- *   - Bail (`null`) if not GET, a Range request, `shouldBypassIsr`, or the path
- *     has no ISR TTL. Range requests bail BEFORE any cache read/write so they
+ *   - Bail (`null`) if not GET, an API path, a Range request, `shouldBypassIsr`,
+ *     or the path has no ISR TTL. Range requests bail BEFORE any cache read/write so they
  *     render live (correct 206) and never touch the shared full-response entry.
  *   - JSON (X-VoidPages) path: edge match → hit serves `clientRevalidateResponse`;
  *     miss renders live JSON and returns it — the JSON path never writes the edge
@@ -547,7 +581,7 @@ export async function handleIsr(
   options: HandleIsrOptions,
   render: RenderFn,
 ): Promise<Response | null> {
-  const { revalidate, deploymentId, queryAllowlist } = options;
+  const { revalidate, pages, pathRevalidate, deploymentId, queryAllowlist } = options;
 
   if (request.method !== 'GET') {
     return null;
@@ -567,7 +601,10 @@ export async function handleIsr(
 
   const url = new URL(request.url);
   const pathname = url.pathname;
-  const isrTtl = resolvePathTtl(revalidate, pathname);
+  if (pathname === '/api' || pathname.startsWith('/api/')) {
+    return null;
+  }
+  const isrTtl = resolvePageTtl(pages, revalidate, pathRevalidate, pathname);
   if (isrTtl <= 0) {
     return null;
   }
@@ -582,10 +619,11 @@ export async function handleIsr(
   const normalizedVariantUrl = buildVariantOriginalUrl(request.url, pathname, queryAllowlist);
   const variantUrl = new URL(normalizedVariantUrl).search ? normalizedVariantUrl : null;
   const cache = edgeCache();
+  const htmlKey = htmlEdgeKey(host, pathname, deploymentId, variantUrl);
+  const jsonKey = jsonEdgeKey(host, pathname, deploymentId, variantUrl);
 
   // Pages protocol: JSON edge cache only (cold colo re-renders JSON).
   if (request.headers.has('X-VoidPages')) {
-    const jsonKey = jsonEdgeKey(host, pathname, deploymentId, variantUrl);
     let jsonCached: Response | undefined;
     try {
       // `cache?.` — an absent/degraded Cache API (edgeCache() → undefined) is a
@@ -594,19 +632,27 @@ export async function handleIsr(
     } catch {
       return null; // fail open → caller renders live
     }
-    if (jsonCached) {
+    if (jsonCached && hasCurrentSharedCachePolicy(jsonCached)) {
       return clientRevalidateResponse(jsonCached);
+    }
+    if (jsonCached) {
+      await safeCacheDelete(cache, jsonKey);
     }
     // Miss — render live JSON and return it. The JSON path never writes the edge
     // cache: a pages-protocol JSON response carries no embedded page data, so the
     // JSON edge variant is warmed only as a side-effect of the HTML render path
     // (cold colo re-renders JSON). Matches the platform dispatch behavior.
-    return render(request);
+    const response = await render(request);
+    const ttl = resolveRevalidateTtl(response, isrTtl);
+    if (response.status === 200 && (ttl === 0 || hasSharedCacheOptOut(response))) {
+      ctx.waitUntil(
+        deleteSharedIsrVariants(env, cache, host, pathname, { htmlKey, jsonKey }, variantUrl),
+      );
+    }
+    return response;
   }
 
   // HTML path: L1 edge → L2 KV → live render.
-  const htmlKey = htmlEdgeKey(host, pathname, deploymentId, variantUrl);
-  const jsonKey = jsonEdgeKey(host, pathname, deploymentId, variantUrl);
 
   // L1: edge cache (per-colo, sub-ms).
   let edgeCached: Response | undefined;
@@ -618,8 +664,11 @@ export async function handleIsr(
   } catch {
     return null; // fail open → caller renders live
   }
-  if (edgeCached) {
+  if (edgeCached && hasCurrentSharedCachePolicy(edgeCached)) {
     return clientRevalidateResponse(edgeCached);
+  }
+  if (edgeCached) {
+    await safeCacheDelete(cache, htmlKey);
   }
 
   // L2: KV (global, authoritative). `readIsrCache` fails open to null.
@@ -646,8 +695,12 @@ export async function handleIsr(
         );
       }
       const cacheResponse = isrCacheResponse(cached, stale);
-      // Warm the edge cache from KV; client consumes the original body.
-      ctx.waitUntil(safeCachePut(cache, htmlKey, cacheResponse.clone()));
+      // A stale entry is being replaced or evicted by revalidation. Warming it
+      // concurrently can race an authoritative private/no-store response and
+      // restore stale public HTML after that response deletes the cache.
+      if (!stale) {
+        ctx.waitUntil(safeCachePut(cache, htmlKey, cacheResponse.clone()));
+      }
       return clientRevalidateResponse(cacheResponse);
     } catch {
       return null; // fail open → caller renders live
@@ -660,7 +713,7 @@ export async function handleIsr(
     return response;
   }
   const ttl = resolveRevalidateTtl(response, isrTtl);
-  if (ttl > 0 && response.status === 200) {
+  if (ttl > 0 && isSharedCacheableResponse(response)) {
     // Every clone below is taken synchronously (before `response.body` is read
     // for the client) so no consumer races the body away.
     ctx.waitUntil(writeIsrCache(env, host, pathname, response, ttl, variantUrl));
@@ -669,6 +722,7 @@ export async function handleIsr(
     const cacheHeaders = new Headers(response.headers);
     cacheHeaders.set('Cache-Control', `public, s-maxage=${ttl}, max-age=0, must-revalidate`);
     cacheHeaders.set('x-isr-cache', 'MISS');
+    markSharedCachePolicy(cacheHeaders);
     cacheHeaders.delete('x-void-page-data');
     cacheHeaders.delete('set-cookie');
     const cacheResponse = new Response(response.clone().body, {
@@ -679,20 +733,16 @@ export async function handleIsr(
 
     const clientHeaders = new Headers(cacheHeaders);
     clientHeaders.set('Cache-Control', CLIENT_REVALIDATE_CACHE_CONTROL);
-    // The shared cache/KV/edge copy above is intentionally stripped of Set-Cookie,
-    // but the CLIENT must still receive the first-render cookies (session/CSRF/
-    // prefs). Re-append each Set-Cookie from the ORIGINAL render response — folding
-    // via `getSetCookie()` preserves multiple distinct cookies.
-    const cookies = (
-      response.headers as Headers & { getSetCookie(): Array<string> }
-    ).getSetCookie();
-    for (const cookie of cookies) {
-      clientHeaders.append('set-cookie', cookie);
-    }
+    clientHeaders.delete(SHARED_CACHE_POLICY_HEADER);
     return new Response(response.body, {
       status: response.status,
       headers: clientHeaders,
     });
+  }
+  if (response.status === 200 && (ttl === 0 || hasSharedCacheOptOut(response))) {
+    ctx.waitUntil(
+      deleteSharedIsrVariants(env, cache, host, pathname, { htmlKey, jsonKey }, variantUrl),
+    );
   }
   return response;
 }

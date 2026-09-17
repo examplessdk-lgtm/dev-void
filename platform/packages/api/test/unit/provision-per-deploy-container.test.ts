@@ -3,6 +3,7 @@ import {
   perDeployContainerApplicationName,
   provisionPerDeployContainer,
 } from '../../src/provisioning/containers.ts';
+import { SANDBOX_DRAIN_STATE_KEY } from '../../src/sandbox-drain.ts';
 
 const ACCOUNT = 'acc_test';
 const TOKEN = 'token_test';
@@ -13,6 +14,9 @@ const BINDING_NAME = 'SANDBOX';
 const CLASS_NAME = 'Sandbox';
 const NAMESPACE_ID = 'ns_user_myapp_dpl_abc_Sandbox';
 const SANDBOX_IMAGE = 'registry.cloudflare.com/sandbox:1.0.0';
+const OPEN_ROUTING = {
+  get: async () => null,
+} as unknown as Pick<KVNamespace, 'get'>;
 
 function cfSuccess(result: unknown): Response {
   return Response.json({ success: true, errors: [], result });
@@ -72,6 +76,7 @@ describe('provisionPerDeployContainer', () => {
       BINDING_NAME,
       CLASS_NAME,
       { image: SANDBOX_IMAGE, instanceType: 'lite', maxInstances: 20 },
+      OPEN_ROUTING,
     );
 
     expect(result).toEqual({ namespaceId: NAMESPACE_ID, containerApplicationId: 'app_test' });
@@ -131,6 +136,7 @@ describe('provisionPerDeployContainer', () => {
       BINDING_NAME,
       CLASS_NAME,
       { image: SANDBOX_IMAGE },
+      OPEN_ROUTING,
     );
 
     expect(result).toEqual({ namespaceId: NAMESPACE_ID, containerApplicationId: 'app_existing' });
@@ -169,6 +175,7 @@ describe('provisionPerDeployContainer', () => {
         BINDING_NAME,
         CLASS_NAME,
         { image: SANDBOX_IMAGE },
+        OPEN_ROUTING,
       ),
     ).rejects.toThrow(/refusing to reuse/i);
   });
@@ -200,9 +207,102 @@ describe('provisionPerDeployContainer', () => {
       BINDING_NAME,
       CLASS_NAME,
       { image: SANDBOX_IMAGE },
+      OPEN_ROUTING,
     );
 
     expect(result).toEqual({ namespaceId: NAMESPACE_ID, containerApplicationId: 'app_x' });
     expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('checks the drain gate immediately before creating an application', async () => {
+    fetchMock.mockResolvedValueOnce(
+      cfSuccess([
+        {
+          type: 'durable_object_namespace',
+          name: BINDING_NAME,
+          class_name: CLASS_NAME,
+          namespace_id: NAMESPACE_ID,
+        },
+      ]),
+    );
+    const routing = {
+      get: vi.fn(async (key: string) => {
+        expect(key).toBe(SANDBOX_DRAIN_STATE_KEY);
+        return JSON.stringify({
+          version: 1,
+          generation: 'generation-1',
+          state: 'draining',
+          startedAt: '2026-09-16T00:00:00.000Z',
+          updatedAt: '2026-09-16T00:00:00.000Z',
+        });
+      }),
+    };
+
+    await expect(
+      provisionPerDeployContainer(
+        ACCOUNT,
+        TOKEN,
+        DISPATCH,
+        SCRIPT,
+        APP_NAME,
+        BINDING_NAME,
+        CLASS_NAME,
+        { image: SANDBOX_IMAGE },
+        routing as unknown as Pick<KVNamespace, 'get'>,
+      ),
+    ).rejects.toThrow(/disabled by the platform drain gate/i);
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it('deletes a late-created application when the drain gate closes during creation', async () => {
+    fetchMock
+      .mockResolvedValueOnce(
+        cfSuccess([
+          {
+            type: 'durable_object_namespace',
+            name: BINDING_NAME,
+            class_name: CLASS_NAME,
+            namespace_id: NAMESPACE_ID,
+          },
+        ]),
+      )
+      .mockResolvedValueOnce(cfSuccess({ id: 'app_late', name: APP_NAME }))
+      .mockResolvedValueOnce(cfSuccess(null));
+    const routing = {
+      get: vi
+        .fn<(key: string) => Promise<string | null>>()
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(
+          JSON.stringify({
+            version: 1,
+            generation: 'generation-1',
+            state: 'draining',
+            startedAt: '2026-09-16T00:00:00.000Z',
+            updatedAt: '2026-09-16T00:00:01.000Z',
+          }),
+        ),
+    };
+
+    await expect(
+      provisionPerDeployContainer(
+        ACCOUNT,
+        TOKEN,
+        DISPATCH,
+        SCRIPT,
+        APP_NAME,
+        BINDING_NAME,
+        CLASS_NAME,
+        { image: SANDBOX_IMAGE },
+        routing as unknown as Pick<KVNamespace, 'get'>,
+      ),
+    ).rejects.toThrow(/disabled by the platform drain gate/i);
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    const [deleteUrl, deleteInit] = fetchMock.mock.calls[2]!;
+    expect(String(deleteUrl)).toBe(
+      `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT}/containers/applications/app_late`,
+    );
+    expect((deleteInit as RequestInit).method).toBe('DELETE');
   });
 });

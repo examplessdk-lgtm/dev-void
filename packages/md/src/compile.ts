@@ -195,8 +195,3 @@ export async function compile(source: string, options?: CompileOptions): Promise
 
   return { html, frontmatter, headings, title };
 }
-
-/** Reset the compiler (for testing or options change) */
-export function resetCompiler(): void {
-  compilerPromise = null;
-}

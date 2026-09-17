@@ -5,10 +5,9 @@ import { findEnvFile, generateEnvTypes } from '../codegen/env-types.ts';
 import { getToken } from './auth.ts';
 import { PlatformClient } from './client.ts';
 import type { EnvArgs } from './env-args.ts';
-import { runEnvExample } from './env-example.ts';
 import { fetchRemoteSecretNames, formatEnvReport, validateProdEnv } from './env-validation.ts';
 import { cliTitle } from './output.ts';
-import { readProjectConfig } from './project.ts';
+import { readDeploymentPlatform, readProjectConfig } from './project.ts';
 
 export async function runEnvCommand(root: string, args: EnvArgs): Promise<void> {
   console.log();
@@ -22,31 +21,37 @@ export async function runEnvCommand(root: string, args: EnvArgs): Promise<void> 
     runTypes(root);
     return;
   }
-  if (args.subcommand === 'example') {
-    await runEnvExample(root, { force: args.force });
-    return;
-  }
 }
 
 async function runCheck(root: string, useRemoteSecrets: boolean): Promise<void> {
   let remoteSecrets: Array<string> | undefined;
   if (useRemoteSecrets) {
-    const token = getToken(root);
-    if (!token) {
-      log.error('--remote requires authentication. Run `void auth login` first.');
-      process.exit(1);
+    const platform = readDeploymentPlatform(root);
+    if (platform === 'none') {
+      throw new Error('env: Deployment is disabled. Run `void init` to choose a platform.');
     }
-    const config = readProjectConfig(root);
-    if (!config) {
-      log.error('--remote requires a linked project. Run `void project link` first.');
-      process.exit(1);
+    if (platform === 'cloudflare') {
+      const { listCloudflareSecrets, resolveCloudflareOperationContext } =
+        await import('./cloudflare-operations.ts');
+      remoteSecrets = await listCloudflareSecrets(resolveCloudflareOperationContext(root));
+    } else {
+      const token = getToken(root);
+      if (!token) {
+        log.error('--remote requires authentication. Run `void auth login` first.');
+        process.exit(1);
+      }
+      const config = readProjectConfig(root);
+      if (!config) {
+        log.error('--remote requires a linked project. Run `void project link` first.');
+        process.exit(1);
+      }
+      const client = new PlatformClient(token, { root });
+      remoteSecrets = await fetchRemoteSecretNames(client, config.projectId);
     }
-    const client = new PlatformClient(token, { root });
-    remoteSecrets = await fetchRemoteSecretNames(client, config.projectId);
   }
 
   const { hasSchema, report } = await validateProdEnv(root, {
-    productionOnly: true,
+    productionOnly: useRemoteSecrets,
     remoteSecrets,
   });
 
@@ -55,14 +60,20 @@ async function runCheck(root: string, useRemoteSecrets: boolean): Promise<void> 
     return;
   }
   if (report.valid) {
-    outro('All required env vars are present and valid.');
+    outro(
+      useRemoteSecrets
+        ? 'All required remote env names are present; values validate at runtime.'
+        : 'Local .env values are valid.',
+    );
     return;
   }
 
   note(formatEnvReport(report), 'Env validation failed');
   if (report.missing.length > 0) {
     log.info(
-      `Set missing values via .env / .env.production, or upload as secrets with \`void secret put <NAME>\`.`,
+      useRemoteSecrets
+        ? 'Upload missing server values with `void secret put <NAME>`; set VITE_* values in the build shell or schema defaults.'
+        : 'Add the missing values to .env or set them in your shell.',
     );
   }
   process.exit(1);

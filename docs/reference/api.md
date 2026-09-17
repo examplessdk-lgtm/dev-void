@@ -905,10 +905,10 @@ Register an env schema and return the typed [`env`](#env) proxy. Void auto-disco
 import { defineEnv, string, number, oneOf, url } from 'void/env';
 
 export default defineEnv({
-  STRIPE_KEY: string().secret(),
+  STRIPE_KEY: string(),
   PORT: number().default(3000),
   NODE_ENV: oneOf(['development', 'production']),
-  VITE_PUBLIC_URL: url().public(),
+  VITE_PUBLIC_URL: url(),
 });
 ```
 
@@ -924,7 +924,9 @@ const port = env.PORT;
 
 ### Schema helpers
 
-`void/env` includes Standard Schema-compatible helpers: `string()`, `number()`, `boolean()`, `url()`, `email()`, `oneOf([...])`, and `json<T>()`. Each helper supports `.optional()`, `.default(value)`, `.secret()`, and `.public()`. Besides forcing redaction, `.secret()` tells `void deploy --platform cloudflare` to remove the value from plaintext Worker vars and upload it through Cloudflare's encrypted secret mechanism. This automation applies only to built-in helpers and the Void CLI deploy path.
+`void/env` includes Standard Schema-compatible helpers: `string()`, `number()`, `boolean()`, `url()`, `email()`, `oneOf([...])`, and `json<T>()`. Each helper supports `.optional()` and `.default(value)`.
+
+Non-client keys are server values and use remote secret storage in production. `VITE_*` keys are public build-time client values. Invalid input is redacted uniformly; storage is not selected with schema modifiers.
 
 ### Types
 
@@ -987,6 +989,8 @@ Imported from `"@void/vue"`.
 | `useShared()`                      | Returns shared data injected by middleware via `c.set("shared", {...})`.                                                                                                                                                                          |
 
 Vue `Link` GET `data` is merged into the rendered `href` query string. Primitive values are serialized with `String(value)`, arrays become repeated keys, `null` and `undefined` are omitted, and nested objects throw. `prefetch` and `reloadDocument` are GET-only and throw for mutation links.
+
+Vue GET navigation remounts the page so `useForm()` picks up the destination record's URL and defaults; layouts persist. Mutations and `router.refresh()` preserve page state by default. Set `preserveState` explicitly to override the default for navigation within the same record.
 
 ### `@void/react`
 

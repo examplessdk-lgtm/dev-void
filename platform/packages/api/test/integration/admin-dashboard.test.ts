@@ -88,6 +88,44 @@ describe('auth middleware', () => {
     expect(res.status).toBe(200);
   });
 
+  test('returns 403 for an administrator suspended by another administrator', async () => {
+    const admin = await createTestUser(
+      env.db,
+      'suspended-admin',
+      'github',
+      undefined,
+      'free',
+      'admin',
+    );
+    await env.db
+      .update(users)
+      .set({ suspended_reason: 'admin_suspended' })
+      .where(eq(users.id, admin.id));
+
+    const res = await req('/admin/', admin.adminJwt);
+
+    expect(res.status).toBe(403);
+  });
+
+  test('allows an administrator suspended only by a usage limit', async () => {
+    const admin = await createTestUser(
+      env.db,
+      'usage-suspended-admin',
+      'github',
+      undefined,
+      'free',
+      'admin',
+    );
+    await env.db
+      .update(users)
+      .set({ suspended_reason: 'requests_exceeded' })
+      .where(eq(users.id, admin.id));
+
+    const res = await req('/admin/', admin.adminJwt);
+
+    expect(res.status).toBe(200);
+  });
+
   test('rejects same-site sibling origins for admin mutations', async () => {
     const admin = await createTestUser(env.db, 'admin-csrf', 'github', undefined, 'free', 'admin');
     const res = await req('/admin/signup-control/toggle', admin.adminJwt, {
@@ -1232,6 +1270,65 @@ describe('GET /admin/login', () => {
       vi.unstubAllGlobals();
     }
   });
+
+  test.each([
+    { reason: 'admin_suspended', expectedStatus: 403, issuesCookie: false },
+    { reason: 'requests_exceeded', expectedStatus: 302, issuesCookie: true },
+  ])(
+    'handles an OAuth login for an administrator suspended with $reason',
+    async ({ reason, expectedStatus, issuesCookie }) => {
+      const admin = await createTestUser(
+        env.db,
+        `oauth-${reason}`,
+        'github',
+        '4343',
+        'custom',
+        'admin',
+      );
+      await env.db.update(users).set({ suspended_reason: reason }).where(eq(users.id, admin.id));
+      const start = await app.fetch(
+        new Request('http://localhost/admin/login/github', { redirect: 'manual' }),
+        env,
+      );
+      const authorization = new URL(start.headers.get('Location')!);
+      const state = authorization.searchParams.get('state')!;
+      const browserCookie = start.headers.get('Set-Cookie')!.split(';', 1)[0]!;
+
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (input: string | URL | Request): Promise<Response> => {
+          const url =
+            typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+          if (url === 'https://github.com/login/oauth/access_token') {
+            return Response.json({ access_token: 'github-token' });
+          }
+          if (url === 'https://api.github.com/user') {
+            return Response.json({ id: 4343, login: 'octocat', email: null });
+          }
+          if (url === 'https://api.github.com/user/emails') {
+            return Response.json([]);
+          }
+          throw new Error(`Unexpected fetch: ${url}`);
+        }),
+      );
+      try {
+        const callback = await app.fetch(
+          new Request(
+            `http://localhost/auth/callback?code=test-code&state=${encodeURIComponent(state)}`,
+            { headers: { Cookie: browserCookie }, redirect: 'manual' },
+          ),
+          env,
+        );
+
+        expect(callback.status).toBe(expectedStatus);
+        expect(callback.headers.get('Set-Cookie')?.includes('admin_token=') ?? false).toBe(
+          issuesCookie,
+        );
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    },
+  );
 });
 
 describe('GET /admin/logout', () => {

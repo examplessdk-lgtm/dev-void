@@ -1,7 +1,7 @@
+import { resolvePlatformApplicationEnvironment } from '@void/platform';
 import type { Env } from './env.ts';
 import { createErrorResponse } from './error-page.ts';
 import { applyHeaderRules, type HeaderRule } from './headers.ts';
-import { extractSlug } from './hostname.ts';
 import {
   readIsrCache,
   writeIsrCache,
@@ -10,6 +10,10 @@ import {
   isrCacheResponse,
   isrEdgeCacheKey,
   isrEdgeCacheKeyJson,
+  hasCurrentSharedCachePolicy,
+  hasSharedCacheOptOut,
+  SHARED_CACHE_POLICY_HEADER,
+  markSharedCachePolicy,
   resolveRevalidateTtl,
   resolvePathTtl,
   resolvePageTtl,
@@ -27,6 +31,7 @@ import {
   type RequestType,
 } from './metering.ts';
 import { PLATFORM_DISABLED_KEY, PLATFORM_DISABLED_VALUE } from './platform-lifecycle.ts';
+import { applicationEdgeCache, resolveProjectHostname } from './project-hostname.ts';
 import { classifyDynamicRequestType, hasExtension } from './request-type.ts';
 import { applyRoutingRules, mergeQueryIntoLocation, type RedirectRule } from './routing-rules.ts';
 import { resolveStaticPath, resolveAssetContentType, safeDecodePathname } from './static.ts';
@@ -102,16 +107,10 @@ const PLATFORM_STATIC_ASSET_MISSING: FailureKind = 'platform-static-asset-missin
 // far above any transient deploy-race 404 so normal stale-while-revalidate is intact.
 const ISR_STALE_EVICT_GRACE_SECONDS = 86_400; // 24h of STALE tolerance
 
-// `Headers.getSetCookie()` is a standard Fetch API method the Workers runtime
-// supports, but it is absent from `@cloudflare/workers-types`. Reach it through a
-// narrow cast so multiple distinct Set-Cookie headers survive as separate values.
-function readSetCookies(headers: Headers): Array<string> {
-  return (headers as Headers & { getSetCookie(): Array<string> }).getSetCookie();
-}
-
 function clientRevalidateResponse(response: Response): Response {
   const res = new Response(response.body, response);
   res.headers.set('Cache-Control', CLIENT_REVALIDATE_CACHE_CONTROL);
+  res.headers.delete(SHARED_CACHE_POLICY_HEADER);
   return res;
 }
 
@@ -156,13 +155,15 @@ export function isHtmlResponse(response: Response): boolean {
 }
 
 function jsonCacheResponse(pageData: string, ttl: number, state: 'HIT' | 'MISS'): Response {
-  return new Response(pageData, {
+  const response = new Response(pageData, {
     headers: {
       'content-type': 'application/json',
       'Cache-Control': `public, s-maxage=${ttl}, max-age=0, must-revalidate`,
       'x-isr-cache': state,
     },
   });
+  markSharedCachePolicy(response.headers);
+  return response;
 }
 
 async function populateJsonEdgeCache(
@@ -180,6 +181,31 @@ async function populateJsonEdgeCache(
     return;
   }
   await cache.put(cacheKey, jsonCacheResponse(pageData, ttl, state));
+}
+
+type SharedIsrEntry = Readonly<{
+  projectId: string;
+  deploymentId: string;
+  host: string;
+  pathname: string;
+  originalUrl?: string;
+  htmlKey: Request;
+  jsonKey: Request;
+}>;
+
+async function deleteSharedIsrEntry(env: Env, entry: SharedIsrEntry): Promise<void> {
+  await Promise.all([
+    deleteIsrCache(
+      env,
+      entry.projectId,
+      entry.deploymentId,
+      entry.host,
+      entry.pathname,
+      entry.originalUrl,
+    ),
+    applicationEdgeCache.delete(entry.htmlKey),
+    applicationEdgeCache.delete(entry.jsonKey),
+  ]);
 }
 
 async function applyWorkerFallbackRules(opts: {
@@ -585,6 +611,7 @@ export function rebuildRequest(
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    env = await resolvePlatformApplicationEnvironment(env);
     const url = new URL(request.url);
     if (
       !env.PLATFORM_INSTALLATION_ID &&
@@ -601,10 +628,14 @@ export default {
       url.pathname === '/health' &&
       request.headers.get('X-Void-Platform-Probe') === env.PLATFORM_HEALTH_PROBE_TOKEN
     ) {
-      return Response.json({ ok: true });
+      return Response.json({
+        ok: true,
+        ...(env.PLATFORM_APPLICATION ? { installationId: env.PLATFORM_INSTALLATION_ID } : {}),
+      });
     }
     if (
       env.PLATFORM_TRAFFIC_STATE === 'staging' ||
+      env.PLATFORM_TRAFFIC_STATE === 'sandbox-drain' ||
       (env.PLATFORM_INSTALLATION_ID &&
         (await env.ROUTING.get(PLATFORM_DISABLED_KEY)) === PLATFORM_DISABLED_VALUE)
     ) {
@@ -634,7 +665,11 @@ export default {
       return createErrorResponse(request, 404, 'Not Found');
     }
 
-    const slug = extractSlug(url.hostname, env.BASE_HOSTNAME);
+    const selected = await resolveProjectHostname(url.hostname, env);
+    const slug = selected.slug;
+    if (selected.workersDev && !selected.projectId) {
+      return createErrorResponse(request, 404, 'Not Found');
+    }
     const routingKey = slug ?? `domain:${url.hostname}`;
 
     const routingRaw = await env.ROUTING.get(routingKey, { cacheTtl: 60 });
@@ -645,6 +680,9 @@ export default {
     }
 
     const routing: RoutingEntry = JSON.parse(routingRaw);
+    if (selected.projectId && selected.projectId !== routing.projectId) {
+      return createErrorResponse(request, 404, 'Not Found');
+    }
 
     // Check if project is suspended
     if (routing.suspended) {
@@ -665,6 +703,7 @@ export default {
       );
     }
     let pathname = url.pathname;
+    let sharedIsrEntry: SharedIsrEntry | undefined;
     let requestType: RequestType =
       request.headers.get('upgrade')?.toLowerCase() === 'websocket' ? 'websocket' : 'static';
 
@@ -757,7 +796,7 @@ export default {
     }
 
     // Edge-cache hashed static assets (immutable, content-addressed URLs)
-    if (request.method === 'GET' && routing.hashedAssetsPrefix) {
+    if (routing.hashedAssetsPrefix && isSharedStaticCacheRequestEligible(request)) {
       const prefix = '/' + routing.hashedAssetsPrefix + '/';
       if (pathname.startsWith(prefix)) {
         // Cache key tracks the post-rewrite (hash-bearing) URL, not the
@@ -823,12 +862,16 @@ export default {
               }
             }
           }
+          ruled.headers.delete(SHARED_CACHE_POLICY_HEADER);
           return meter(ruled, failureKind ? { failureKind } : undefined);
         };
 
-        const cache = caches.default;
+        const cache = applicationEdgeCache;
         const cached = await cache.match(cacheKey);
-        if (cached?.headers.get('Cache-Control')?.includes('immutable')) {
+        if (
+          cached?.headers.get('Cache-Control')?.includes('immutable') &&
+          isCurrentStaticCacheResponse(cached)
+        ) {
           if (!routing.staticDeploymentId) {
             const repairResult = await maybeServeWfpAssetFallback({
               env,
@@ -839,9 +882,10 @@ export default {
               timeoutMs,
             });
             if (repairResult.response !== cached) {
-              if (repairResult.response.ok) {
+              if (isStaticCacheResponseEligible(repairResult.response)) {
                 const repaired = new Response(repairResult.response.body, repairResult.response);
                 repaired.headers.set('Cache-Control', 'public, max-age=31536000, immutable');
+                markSharedCachePolicy(repaired.headers);
                 const repairedForCache = repaired.clone();
                 ctx.waitUntil(
                   cache.delete(cacheKey).then(() => cache.put(cacheKey, repairedForCache)),
@@ -853,6 +897,9 @@ export default {
             }
           }
           return finalizeAsset(cached);
+        }
+        if (cached) {
+          await cache.delete(cacheKey);
         }
         // Cache miss — fetch from KV/R2 for static deployments, or invoke worker
         if (routing.staticDeploymentId) {
@@ -931,9 +978,10 @@ export default {
           } else {
             response = createErrorResponse(request, 404, 'Not Found');
           }
-          if (response.ok && !isEventStreamResponse(response)) {
+          if (isStaticCacheResponseEligible(response)) {
             const res = new Response(response.body, response);
             res.headers.set('Cache-Control', 'public, max-age=31536000, immutable');
+            markSharedCachePolicy(res.headers);
             ctx.waitUntil(cache.put(cacheKey, res.clone()));
             return finalizeAsset(res);
           }
@@ -960,9 +1008,10 @@ export default {
           });
           response = fallbackResult.response;
           const failureKind = fallbackResult.failureKind;
-          if (response.ok && !isEventStreamResponse(response)) {
+          if (isStaticCacheResponseEligible(response)) {
             const res = new Response(response.body, response);
             res.headers.set('Cache-Control', 'public, max-age=31536000, immutable');
+            markSharedCachePolicy(res.headers);
             ctx.waitUntil(cache.put(cacheKey, res.clone()));
             return finalizeAsset(res, failureKind);
           }
@@ -1011,7 +1060,7 @@ export default {
       ) {
         const isPagesRequest = request.headers.has('X-VoidPages');
         const isrDeploymentId = routing.version ?? 'legacy';
-        const cache = caches.default;
+        const cache = applicationEdgeCache;
         const isrOriginalUrlVariant = buildFallbackOriginalUrlVariant(
           request.url,
           pathname,
@@ -1019,53 +1068,43 @@ export default {
           routing,
           originalUrlVariant,
         );
+        const cacheKey = isrEdgeCacheKey(request, pathname, isrDeploymentId, isrOriginalUrlVariant);
+        const jsonCacheKey = isrEdgeCacheKeyJson(
+          request,
+          pathname,
+          isrDeploymentId,
+          isrOriginalUrlVariant,
+        );
+        sharedIsrEntry = {
+          projectId: routing.projectId,
+          deploymentId: isrDeploymentId,
+          host: url.hostname,
+          pathname,
+          originalUrl: isrOriginalUrlVariant,
+          htmlKey: cacheKey,
+          jsonKey: jsonCacheKey,
+        };
 
         // Pages protocol: check JSON edge cache, fall through on miss
         if (isPagesRequest) {
-          const jsonCacheKey = isrEdgeCacheKeyJson(
-            request,
-            pathname,
-            isrDeploymentId,
-            isrOriginalUrlVariant,
-          );
           const jsonCached = await cache.match(jsonCacheKey);
-          if (jsonCached) {
+          if (jsonCached && hasCurrentSharedCachePolicy(jsonCached)) {
             requestType = 'isr';
             return meter(clientRevalidateResponse(jsonCached));
+          }
+          if (jsonCached) {
+            await cache.delete(jsonCacheKey);
           }
           // Miss — fall through to general dispatch (worker returns JSON for X-VoidPages)
         } else {
           // HTML path: Edge → R2 → Worker
-          const cacheKey = isrEdgeCacheKey(
-            request,
-            pathname,
-            isrDeploymentId,
-            isrOriginalUrlVariant,
-          );
-          const jsonCacheKey = isrEdgeCacheKeyJson(
-            request,
-            pathname,
-            isrDeploymentId,
-            isrOriginalUrlVariant,
-          );
           const purgePoisonedIsrEntry = async (): Promise<void> => {
-            await Promise.all([
-              deleteIsrCache(
-                env,
-                routing.projectId,
-                isrDeploymentId,
-                url.hostname,
-                pathname,
-                isrOriginalUrlVariant,
-              ),
-              cache.delete(cacheKey),
-              cache.delete(jsonCacheKey),
-            ]);
+            await deleteSharedIsrEntry(env, sharedIsrEntry!);
           };
 
           // L1: Edge cache (per-colo)
           const edgeCached = await cache.match(cacheKey);
-          if (edgeCached) {
+          if (edgeCached && hasCurrentSharedCachePolicy(edgeCached)) {
             requestType = 'isr';
             const repairResult = await maybeServeWfpAssetFallback({
               env,
@@ -1086,6 +1125,9 @@ export default {
               );
             }
             return meter(clientRevalidateResponse(edgeCached));
+          }
+          if (edgeCached) {
+            await cache.delete(cacheKey);
           }
 
           // L2: R2 (global)
@@ -1120,6 +1162,7 @@ export default {
               );
             }
             if (stale) {
+              const staleCacheResponse = cacheResponse.clone();
               ctx.waitUntil(
                 revalidateInBackground(
                   env,
@@ -1133,11 +1176,17 @@ export default {
                   cached.createdAt + cached.ttl * 1000,
                   isrOriginalUrlVariant,
                   timeoutMs,
-                ),
+                ).then(async (sharedEntryChanged) => {
+                  if (!sharedEntryChanged) {
+                    await cache.put(cacheKey, staleCacheResponse);
+                  }
+                }),
               );
             }
             requestType = 'isr';
-            ctx.waitUntil(cache.put(cacheKey, cacheResponse.clone()));
+            if (!stale) {
+              ctx.waitUntil(cache.put(cacheKey, cacheResponse.clone()));
+            }
             return meter(clientRevalidateResponse(cacheResponse));
           }
 
@@ -1250,7 +1299,7 @@ export default {
             ttl > 0 &&
             workerResponse.status === 200 &&
             !isApiPath(effectiveMissPathname) &&
-            !hasCacheOptOut(workerResponse) &&
+            !hasSharedCacheOptOut(workerResponse) &&
             (!missFallbackApplied ||
               isFallbackTargetCacheable(
                 routing.pages,
@@ -1280,6 +1329,7 @@ export default {
               `public, s-maxage=${ttl}, max-age=0, must-revalidate`,
             );
             cacheHeaders.set('x-isr-cache', 'MISS');
+            markSharedCachePolicy(cacheHeaders);
             cacheHeaders.delete('x-void-page-data');
             cacheHeaders.delete('set-cookie');
             const cacheResponse = new Response(workerResponse.clone().body, {
@@ -1290,14 +1340,7 @@ export default {
 
             const clientHeaders = new Headers(cacheHeaders);
             clientHeaders.set('Cache-Control', CLIENT_REVALIDATE_CACHE_CONTROL);
-            // The shared cache/KV/edge copy above is intentionally stripped of
-            // Set-Cookie, but the CLIENT must still receive the first-render
-            // cookies (session/CSRF/prefs). Re-append each Set-Cookie from the
-            // ORIGINAL worker response — folding via `getSetCookie()` preserves
-            // multiple distinct cookies.
-            for (const cookie of readSetCookies(workerResponse.headers)) {
-              clientHeaders.append('set-cookie', cookie);
-            }
+            clientHeaders.delete(SHARED_CACHE_POLICY_HEADER);
             const clientResponse = new Response(workerResponse.body, {
               status: workerResponse.status,
               headers: clientHeaders,
@@ -1307,6 +1350,13 @@ export default {
               workerResponseFailureKind ? { failureKind: workerResponseFailureKind } : undefined,
             );
           }
+          if (
+            workerResponse.status === 200 &&
+            !missFallbackApplied &&
+            (ttl === 0 || hasSharedCacheOptOut(workerResponse))
+          ) {
+            ctx.waitUntil(purgePoisonedIsrEntry());
+          }
           return meter(
             workerResponse,
             workerResponseFailureKind ? { failureKind: workerResponseFailureKind } : undefined,
@@ -1315,12 +1365,15 @@ export default {
       }
     }
 
-    // Edge-cache non-hashed static assets using deploy-versioned cache keys
+    // Edge-cache non-hashed static assets using deploy-versioned cache keys.
+    // The same request gate feeds both cache reads and writes. Credentialed,
+    // Range, and Pages-protocol requests must reach the worker instead of a
+    // shared representation. For SSR deployments, a dotted path is only a
+    // candidate when the emitted asset manifest positively identifies it.
+    const staticCachePathname = pathname;
     const isStaticCandidate =
-      request.method === 'GET' &&
-      routing.version &&
-      !(pathname.startsWith('/api/') || pathname === '/api') &&
-      (hasExtension(pathname) || !routing.ssr);
+      isStaticCacheRequestEligible(request, staticCachePathname, routing) &&
+      (await isKnownStaticAssetPath(env, staticCachePathname, routing, timeoutMs));
 
     let staticCacheKey: Request | undefined;
     if (isStaticCandidate) {
@@ -1345,9 +1398,9 @@ export default {
       cacheUrl.searchParams.set('_v', String(routing.version));
       const candidateCacheKey = new Request(cacheUrl.toString());
       staticCacheKey = candidateCacheKey;
-      const staticCache = caches.default;
+      const staticCache = applicationEdgeCache;
       const cached = await staticCache.match(candidateCacheKey);
-      if (cached) {
+      if (cached && isCurrentStaticCacheResponse(cached)) {
         requestType = 'static';
         if (!routing.staticDeploymentId) {
           const repairResult = await maybeServeWfpAssetFallback({
@@ -1360,7 +1413,7 @@ export default {
             fallbackPathname: resolveCachedWfpFallbackPathname(pathname, routing, url.hostname),
           });
           if (repairResult.response !== cached) {
-            if (repairResult.response.ok) {
+            if (isStaticCacheResponseEligible(repairResult.response)) {
               const finalRes = applyHeaderRules(
                 repairResult.response,
                 repairResult.pathname,
@@ -1371,6 +1424,7 @@ export default {
                 'Cache-Control',
                 'public, s-maxage=31536000, max-age=0, must-revalidate',
               );
+              markSharedCachePolicy(repaired.headers);
               const repairedForCache = repaired.clone();
               ctx.waitUntil(
                 staticCache
@@ -1387,6 +1441,11 @@ export default {
           }
         }
         return meter(clientRevalidateResponse(cached));
+      }
+      if (cached) {
+        // Entries written by older dispatch versions may contain an unverified
+        // dynamic response. Do not serve it, and remove it opportunistically.
+        await staticCache.delete(candidateCacheKey);
       }
     }
 
@@ -1508,16 +1567,17 @@ export default {
       // rewrite target — otherwise future requests to the original path miss.
       const edgeCacheKey =
         staticCacheKey ??
-        (request.method === 'GET'
+        (isSharedStaticCacheRequestEligible(request)
           ? new Request(`${url.origin}${fallbackOriginPathname}?_v=${routing.staticDeploymentId}`)
           : undefined);
-      if (edgeCacheKey && status === 200) {
+      if (edgeCacheKey && isStaticCacheResponseEligible(finalRes)) {
         const cached = new Response(finalRes.clone().body, finalRes);
         cached.headers.set(
           'Cache-Control',
           'public, s-maxage=31536000, max-age=0, must-revalidate',
         );
-        ctx.waitUntil(caches.default.put(edgeCacheKey, cached.clone()));
+        markSharedCachePolicy(cached.headers);
+        ctx.waitUntil(applicationEdgeCache.put(edgeCacheKey, cached.clone()));
       }
 
       return meter(clientRevalidateResponse(finalRes));
@@ -1612,17 +1672,30 @@ export default {
         }
       }
 
+      if (
+        sharedIsrEntry &&
+        response.status === 200 &&
+        !writebackFallbackApplied &&
+        (resolveRevalidateTtl(
+          response,
+          resolvePageTtl(
+            routing.pages,
+            routing.revalidate,
+            routing.pathRevalidate,
+            sharedIsrEntry.pathname,
+          ),
+        ) === 0 ||
+          hasSharedCacheOptOut(response))
+      ) {
+        ctx.waitUntil(deleteSharedIsrEntry(env, sharedIsrEntry));
+      }
+
       // Cache static asset at edge if eligible. Require a full 200 — `.ok` is
       // 200–299 and would admit a `206 Partial Content` (a Range request to a
       // dotted SSR path skips the ISR ladder and falls through here), poisoning
       // the shared `<path>?_v=` key with a partial body that a later full request
       // could then be served. Mirrors the `status === 200` guard at the ISR sites.
-      if (
-        staticCacheKey &&
-        response.status === 200 &&
-        !isEventStream &&
-        !hasCacheOptOut(response)
-      ) {
+      if (staticCacheKey && !writebackFallbackApplied && isStaticCacheResponseEligible(response)) {
         const res = new Response(response.body, response);
         res.headers.delete('x-void-page-data');
         const finalRes = applyHeaderRules(res, pathname, routing.headerRules);
@@ -1631,7 +1704,8 @@ export default {
           'Cache-Control',
           'public, s-maxage=31536000, max-age=0, must-revalidate',
         );
-        ctx.waitUntil(caches.default.put(staticCacheKey, cacheRes.clone()));
+        markSharedCachePolicy(cacheRes.headers);
+        ctx.waitUntil(applicationEdgeCache.put(staticCacheKey, cacheRes.clone()));
         return meter(
           clientRevalidateResponse(finalRes),
           responseFailureKind ? { failureKind: responseFailureKind } : undefined,
@@ -1688,7 +1762,7 @@ export default {
           isrTtl > 0 &&
           response.status === 200 &&
           requestType === 'ssr' &&
-          !hasCacheOptOut(response) &&
+          !hasSharedCacheOptOut(response) &&
           (!writebackFallbackApplied ||
             isFallbackTargetCacheable(routing.pages, pathname, response, routing.pathRevalidate))
         ) {
@@ -1712,7 +1786,7 @@ export default {
             originalUrlVariant,
           );
           ctx.waitUntil(
-            populateJsonEdgeCache(caches.default, jsonCacheKey, response, isrTtl, 'MISS'),
+            populateJsonEdgeCache(applicationEdgeCache, jsonCacheKey, response, isrTtl, 'MISS'),
           );
         }
       }
@@ -1756,7 +1830,10 @@ export default {
   },
 
   async queue(batch: MessageBatch, env: Env): Promise<void> {
-    if (env.PLATFORM_TRAFFIC_STATE === 'staging') {
+    if (
+      env.PLATFORM_TRAFFIC_STATE === 'staging' ||
+      env.PLATFORM_TRAFFIC_STATE === 'sandbox-drain'
+    ) {
       console.warn(
         `[queue-relay] platform traffic is staging; retrying queue="${batch.queue}" in ${PLATFORM_QUEUE_RETRY_DELAY_SECONDS}s`,
       );
@@ -2107,7 +2184,7 @@ async function revalidateInBackground(
   staleSinceMs: number,
   originalUrl?: string | null,
   timeoutMs = 10000,
-): Promise<void> {
+): Promise<boolean> {
   try {
     const worker = getWorker(env, routing);
     const revalidationStartedAt = Date.now();
@@ -2124,7 +2201,7 @@ async function revalidateInBackground(
       'dispatch',
     );
     if (isEventStreamResponse(response)) {
-      return;
+      return false;
     }
     // Capture the ORIGIN page's OWN pre-fallback status. Only a genuine removal
     // signal (404/410 Gone) may later drive grace-eviction; a transient 5xx / 429 /
@@ -2145,7 +2222,7 @@ async function revalidateInBackground(
     });
     response = fallbackResult.response;
     if (isEventStreamResponse(response)) {
-      return;
+      return false;
     }
     const assetFallbackResult = await maybeServeWfpAssetFallback({
       env,
@@ -2157,10 +2234,10 @@ async function revalidateInBackground(
     });
     response = assetFallbackResult.response;
     if (isEventStreamResponse(response)) {
-      return;
+      return false;
     }
     const ttl = resolveRevalidateTtl(response, defaultTtl);
-    const cache = caches.default;
+    const cache = applicationEdgeCache;
     // Evict every shared representation of this entry: R2/KV + HTML edge + JSON edge.
     const evictSharedEntry = async () => {
       await deleteIsrCache(
@@ -2190,7 +2267,7 @@ async function revalidateInBackground(
       ttl > 0 &&
       response.status === 200 &&
       !isApiPath(effectiveBgPathname) &&
-      !hasCacheOptOut(response) &&
+      !hasSharedCacheOptOut(response) &&
       (!fallbackResult.applied ||
         isFallbackTargetCacheable(
           routing.pages,
@@ -2213,6 +2290,7 @@ async function revalidateInBackground(
       const headers = new Headers(response.headers);
       headers.set('x-isr-cache', 'HIT');
       headers.set('Cache-Control', `public, s-maxage=${ttl}, max-age=0, must-revalidate`);
+      markSharedCachePolicy(headers);
       headers.delete('set-cookie');
       headers.delete('x-void-page-data');
       await cache.put(
@@ -2223,11 +2301,12 @@ async function revalidateInBackground(
         }),
       );
       await populateJsonEdgeCache(cache, jsonCacheKey, response, ttl, 'HIT');
+      return true;
     } else if (
       response.status === 200 &&
       !isApiPath(effectiveBgPathname) &&
       !fallbackResult.applied &&
-      (ttl === 0 || hasCacheOptOut(response))
+      (ttl === 0 || hasSharedCacheOptOut(response))
     ) {
       // Evict the stale shared entry ONLY on an AUTHORITATIVE opt-out render of the
       // ORIGIN page itself: a successful render (200, NOT an `/api/*` fallback, and
@@ -2241,7 +2320,12 @@ async function revalidateInBackground(
       // serving the last known-good entry (stale-while-revalidate resilience). The
       // write gate already refuses to cache non-authoritative content, so eviction
       // must mirror it. Removes R2/KV + HTML + JSON edge.
-      await evictSharedEntry();
+      try {
+        await evictSharedEntry();
+      } catch (error) {
+        console.error('ISR privacy eviction failed:', error);
+      }
+      return true;
     } else if (
       (originalStatus === 404 || originalStatus === 410) &&
       Date.now() - staleSinceMs > ISR_STALE_EVICT_GRACE_SECONDS * 1000
@@ -2258,10 +2342,17 @@ async function revalidateInBackground(
       // request), so it never reaches this branch. Measuring from stale-onset (not
       // creation) means a long-TTL entry still gets the full grace and a transient
       // failure right after expiry keeps serving stale within the grace.
-      await evictSharedEntry();
+      try {
+        await evictSharedEntry();
+      } catch (error) {
+        console.error('ISR stale-entry eviction failed:', error);
+      }
+      return true;
     }
+    return false;
   } catch (err) {
     console.error('ISR revalidation failed:', err);
+    return false;
   }
 }
 
@@ -2314,12 +2405,78 @@ function isFallbackTargetCacheable(
   return isHtmlResponse(response) && matchesLiteralPage(pages, targetPathname, pathRevalidate);
 }
 
-function hasCacheOptOut(response: Response): boolean {
-  const cacheControl = response.headers.get('Cache-Control');
-  if (!cacheControl) {
+/**
+ * Every static cache shares one representation across callers, so credentials,
+ * EventSource semantics, partial requests, and Pages-protocol requests bypass it.
+ */
+function isSharedStaticCacheRequestEligible(request: Request): boolean {
+  return Boolean(
+    request.method === 'GET' &&
+    !request.headers.has('Range') &&
+    !request.headers.has('X-VoidPages') &&
+    !shouldBypassIsr(request),
+  );
+}
+
+/** Shared request-side eligibility for the deploy-versioned static cache. */
+function isStaticCacheRequestEligible(
+  request: Request,
+  pathname: string,
+  routing: RoutingEntry,
+): boolean {
+  return Boolean(
+    isSharedStaticCacheRequestEligible(request) &&
+    routing.version &&
+    !isApiPath(pathname) &&
+    (hasExtension(pathname) || !routing.ssr),
+  );
+}
+
+async function isKnownStaticAssetPath(
+  env: Env,
+  pathname: string,
+  routing: RoutingEntry,
+  timeoutMs: number,
+): Promise<boolean> {
+  if (routing.staticDeploymentId) {
+    return true;
+  }
+  if (!routing.ssr) {
+    return true;
+  }
+  if (!routing.assetManifestId) {
     return false;
   }
-  // Cache-Control directive names are case-insensitive (RFC 9111 §5.2): a
-  // `No-Store` / `PRIVATE` opt-out must be honored exactly like its lowercase form.
-  return /\b(private|no-store|no-cache)\b/i.test(cacheControl);
+  try {
+    const manifest = await fetchAssetManifest(
+      env,
+      routing.assetManifestId,
+      routing.projectId,
+      Math.min(timeoutMs, STATIC_ASSET_HEDGE_DELAY_MS),
+    );
+    if (!manifest) {
+      return false;
+    }
+    if (Object.hasOwn(manifest, pathname)) {
+      return true;
+    }
+    const decoded = safeDecodePathname(pathname);
+    return decoded !== pathname && Object.hasOwn(manifest, decoded);
+  } catch {
+    // Asset identity is an optimization gate. If the manifest is unavailable,
+    // dispatch the request live instead of guessing from the URL or response.
+    return false;
+  }
+}
+
+/** Apply the same origin/cached response policy to static reads and writes. */
+function isStaticCacheResponseEligible(response: Response): boolean {
+  return (
+    response.status === 200 && !isEventStreamResponse(response) && !hasSharedCacheOptOut(response)
+  );
+}
+
+/** Only entries written under the current shared-cache policy are safe to serve. */
+function isCurrentStaticCacheResponse(response: Response): boolean {
+  return hasCurrentSharedCachePolicy(response) && isStaticCacheResponseEligible(response);
 }

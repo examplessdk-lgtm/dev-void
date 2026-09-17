@@ -60,13 +60,28 @@ describe('internal route blocking', () => {
     expect(response.headers.get('Cache-Control')).toBe('no-store');
   });
 
-  it('fails closed in staging even when routing KV is missing the disabled value', async () => {
+  it.each(['staging', 'sandbox-drain'])(
+    'fails closed in %s even when routing KV is missing the disabled value',
+    async (trafficState) => {
+      const response = await app.fetch(
+        new Request('https://my-app.void.app/normal-path'),
+        createEnv(false, true, undefined, trafficState),
+        createCtx(),
+      );
+      expect(response.status).toBe(503);
+    },
+  );
+
+  it('admits the installer health check during sandbox drain maintenance', async () => {
     const response = await app.fetch(
-      new Request('https://my-app.void.app/normal-path'),
-      createEnv(false, true, undefined, 'staging'),
+      new Request('https://my-app.void.app/health', {
+        headers: { 'X-Void-Platform-Probe': 'probe-token' },
+      }),
+      createEnv(false, true, 'probe-token', 'sandbox-drain'),
       createCtx(),
     );
-    expect(response.status).toBe(503);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true });
   });
 
   it('admits installer health checks while public traffic is disabled', async () => {

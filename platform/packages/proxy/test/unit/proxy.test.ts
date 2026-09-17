@@ -200,6 +200,24 @@ describe('proxy worker', () => {
     expect(res.status).toBe(503);
   });
 
+  it('fails closed during a sandbox drain even when routing KV is missing the disabled value', async () => {
+    const res = await worker.fetch(
+      new Request('https://proxy.void.cloud/health'),
+      createEnv(undefined, undefined, undefined, 'installation-id', undefined, 'sandbox-drain'),
+    );
+    expect(res.status).toBe(503);
+  });
+
+  it('admits installer health checks during a sandbox drain', async () => {
+    const res = await worker.fetch(
+      new Request('https://proxy.void.cloud/health', {
+        headers: { 'X-Void-Platform-Probe': 'probe-token' },
+      }),
+      createEnv(undefined, undefined, undefined, 'installation-id', 'probe-token', 'sandbox-drain'),
+    );
+    expect(res.status).toBe(200);
+  });
+
   it('admits installer health checks while public traffic is disabled', async () => {
     const res = await worker.fetch(
       new Request('https://proxy.void.cloud/health', {
@@ -263,7 +281,7 @@ describe('proxy worker', () => {
   });
 
   describe('JWT authentication (HTTPS path)', () => {
-    it('accepts valid JWT', async () => {
+    it('accepts valid JWT for the project owner', async () => {
       const env = createEnv();
       const res = await worker.fetch(
         post(
@@ -337,21 +355,6 @@ describe('proxy worker', () => {
   });
 
   describe('JWT project ownership verification', () => {
-    it('allows access when user owns the project', async () => {
-      const env = createEnv();
-      const res = await worker.fetch(
-        post(
-          '/ai/run',
-          { model: 'test-model', inputs: {}, projectId: 'proj_1' },
-          { authorization: `Bearer ${validToken}` },
-        ),
-        env,
-      );
-
-      expect(res.status).toBe(200);
-      expect(env.AI.run).toHaveBeenCalled();
-    });
-
     it('accepts a prerender token only for its scoped project', async () => {
       const token = await signJwt(
         { sub: 'user_1', login: 'testuser', aud: 'prerender', project: 'proj_1' },

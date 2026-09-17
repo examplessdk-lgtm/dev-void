@@ -8,6 +8,7 @@ import {
   packIsrValue,
   resolvePathTtl,
   resolveRevalidateTtl,
+  SHARED_CACHE_POLICY_VERSION,
   serializeHeaders,
   shouldBypassIsr,
   type IsrCacheEntry,
@@ -19,14 +20,20 @@ import { matchSegmentPattern } from './pattern.ts';
 // Re-export so callers that import from `./isr` (tests, index.ts) still work.
 export {
   extractPageDataFromHtml,
+  hasCurrentSharedCachePolicy,
+  hasSharedCacheOptOut,
   isrCacheResponse,
   isStale,
   normalizePageDataForJsonCache,
   packIsrValue,
+  resolvePageTtl,
   resolvePathTtl,
   resolveRevalidateTtl,
   serializeHeaders,
   shouldBypassIsr,
+  SHARED_CACHE_POLICY_HEADER,
+  SHARED_CACHE_POLICY_VERSION,
+  markSharedCachePolicy,
   unpackIsrValue,
 } from '@void/isr/core';
 export { isrCacheKey } from '@void/isr';
@@ -123,6 +130,7 @@ export async function writeIsrCache(
       s: status,
       c: Date.now(),
       t: ttl,
+      p: SHARED_CACHE_POLICY_VERSION,
     } satisfies IsrCacheMetadata,
   });
 }
@@ -175,34 +183,6 @@ function matchedPageTtl(
     return resolvePathTtl(pathRevalidate, pathname);
   }
   return page.revalidate > 0 ? page.revalidate : 0;
-}
-
-/**
- * Route-aware ISR TTL resolution. Iterates `pages` in the framework's
- * authoritative order (do NOT re-sort — it is already the order the worker's
- * own matchRoute resolves in) and first-matches via `matchSegmentPattern`, so
- * dispatch picks the SAME winning route the worker renders. The winner's TTL is
- * authoritative via `matchedPageTtl` (0 when it opts out; an inherit-eligible
- * winner resolves the per-path `pathRevalidate` object config). Only when NO
- * page route matches do we fall back to the flat `revalidate` map (user
- * void.json patterns). When `pages` is absent, behavior is identical to
- * `resolvePathTtl`.
- */
-export function resolvePageTtl(
-  pages: ReadonlyArray<{ pattern: string; revalidate?: number }> | undefined,
-  revalidate: number | Record<string, number> | undefined,
-  pathRevalidate: Record<string, number> | undefined,
-  pathname: string,
-): number {
-  if (pages && pages.length > 0) {
-    for (const page of pages) {
-      if (matchSegmentPattern(page.pattern, pathname)) {
-        return matchedPageTtl(page, pathRevalidate, pathname);
-      }
-    }
-    return resolvePathTtl(revalidate, pathname);
-  }
-  return resolvePathTtl(revalidate, pathname);
 }
 
 /**

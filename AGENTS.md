@@ -14,6 +14,7 @@ The `void` package on npm has these previous versions: '0.0.1', '0.1.0', '0.1.2'
 
 ## Best Practices That Must Be Followed
 
+- **Do not use Python for repository scripts or automation**, including inline CI scripts and ad-hoc maintenance commands. Use Node.js with TypeScript/JavaScript, or shell/PowerShell where appropriate.
 - **Never** commit without asking for confirmation.
 - When adding new dependencies to the project, always run `npm view [package] version` to get the latest version.
 - **Keep native Cloudflare deploys Workers Free-compatible by default.** New public Void SDK/runtime features must work with `void deploy --platform cloudflare` on Workers Free unless the underlying Cloudflare product has no Free offering. Paid-only functionality must be explicitly opt-in, inferred and emitted only when the app uses it, and checked before provisioning or building. Its documentation and deploy error must name the required Cloudflare product/plan, link to enable it, and explain any API-token permissions. Platform-internal paid services must never become requirements of a single-app native Cloudflare deploy. Add regression coverage proving that an app which does not use the paid feature emits no paid binding and performs no entitlement probe.
@@ -28,8 +29,7 @@ The `void` package on npm has these previous versions: '0.0.1', '0.1.0', '0.1.2'
     - affected packages's `README.md` or `AGENTS.md`
     - relevant docs md files in `docs`
     - `packages/void/skills/void` (if change affects skill/CLI guidance)
-    - `packages/void/AGENT_PROMPT.md`
-    - `packages/void/getting-started-prompt.txt`
+    - `packages/void/AGENTS_TEMPLATE.md` (keep at most four brief bullets; detailed guidance belongs in docs)
 - When adding new CLI commands, always remember to update the following:
   - CLI help message
   - The hint message for command groups in the interactive list when running `void` with no args
@@ -74,86 +74,25 @@ The platform source is part of this repository. Its workspace-only packages keep
 
 Platform packages live under `platform/packages/*` and may depend on public/shared root packages. Public SDK packages under `packages/*` must not import from `platform/`.
 
-## `void` Overview
+## Package guidance
 
-The `void` package contains two parts:
+Read [the core package instructions](./packages/void/AGENTS.md) for plugin,
+runtime, code-generation and CLI invariants. Each framework adapter has its
+own README under `packages/{react,vue,svelte,solid}`.
+The [API reference](./docs/reference/api.md) and
+[CLI reference](./docs/reference/cli.md) describe the supported public surface.
 
-**Vite plugin** — `voidPlugin()` returns `[routingPlugin, migrationPlugin, cloudflare({...inferredBindings})]` for the default Cloudflare target, or `[routingPlugin, prerenderPlugin, nodeTargetPlugin()]` for non-CF targets (`node`, `bun`, `deno`). Depends on `@cloudflare/vite-plugin` and transitively on wrangler/miniflare (Cloudflare target only).
-
-- **Routing** — file-based API routing on Hono with named HTTP method exports
-- **Validation** — request body/query/params validation via any Standard Schema library
-- **Typed env** — `defineEnv()` in `env.ts` validates and types env vars; `void deploy` hard-fails on missing prod secrets
-- **Typed fetch client** — fully-inferred client from route definitions
-- **Typed DB** — auto-generated types from SQL migrations
-- **Auth** — built-in email/password + OAuth, auto-detected from imports and env vars
-- **Cron jobs** — scheduled handlers via `defineScheduled`
-- **Queues** — typed producers and consumers via `defineQueue`
-- **AI** — `import { ai } from "void/ai"` for Workers AI inference, metered via AI Gateway proxy
-- **Remote bindings** — `remote: true` in `void.json` to use real D1/KV/R2 during local dev via proxy
-- **Binding inference** — auto-detects D1, KV, R2, AI, queues from source code
-- **Migration runner** — applies SQL migrations to local D1 on dev startup
-
-**CLI (`void`)** — commands for local development DX and deployment:
-
-- **`deploy`** — builds, validates migrations, and deploys to the configured Cloudflare or Void target
-- **`platform`** — installs, maintains, and administers a self-hosted Void platform
-- **`gen`** — scaffolds models, routes, middleware, SSR entries, cron jobs, and queue consumers
-- **`init`** — sets up agent instructions, skills, and reference prompts for coding agents
-- **`db`** — manages migrations and inspects the local D1 database
-- **`auth`** — login, logout, and token management
-- **`project`** — link, create, and manage Void projects
-- **`domain`** — configure custom domains for deployed projects
-- **`secret`** — manage production environment variables
-
-See [`packages/void/AGENTS.md`](./packages/void/AGENTS.md) for architecture, source layout, design decisions, package exports, route parsing rules, code generation, and agent integration.
-
-**Note:** `packages/void/skills/void/docs` is ignored from git and is auto copied during build. Ignore files in this directory.
-
-## `@void/vue` Overview
-
-Vue framework adapter for Pages mode — Inertia-inspired full-stack DX with SSR.
-
-- **Plugin** (`@void/vue/plugin`): `voidVue()` — compiles Vue SFCs, generates SSR + client hydration entries
-- **Runtime** (`@void/vue`): `Link`, `useForm`, `useShared` composables
-- **Server handlers**: Remix-style `loader` (GET → props) and `action` (mutations) exports in companion `.server.ts` files
-
-See [`packages/vue/README.md`](./packages/vue/README.md) for architecture.
-
-## `@void/svelte` Overview
-
-Svelte 5 framework adapter for Pages mode — same Inertia-inspired DX as Vue/React.
-
-- **Plugin** (`@void/svelte/plugin`): `voidSvelte()` — wraps `@sveltejs/vite-plugin-svelte`, generates SSR + client hydration entries
-- **Runtime** (`@void/svelte`): `Link`, `useForm`, `useShared`, `useRouter` — uses Svelte 5 runes (`$state`, `$derived`) and `getContext`
-- **Server handlers**: companion `.server.ts` files with `loader` and `action` exports (same as React adapter)
-
-See [`packages/svelte/README.md`](./packages/svelte/README.md) for details.
-
-## `@void/solid` Overview
-
-SolidJS framework adapter for Pages mode — same Inertia-inspired DX as Vue/React/Svelte.
-
-- **Plugin** (`@void/solid/plugin`): `voidSolid()` — wraps `vite-plugin-solid`, generates SSR + client hydration entries
-- **Runtime** (`@void/solid`): `Link`, `useForm`, `useShared`, `useRouter` — uses Solid signals (`createSignal`, `createStore`) and `createContext`/`useContext`
-- **Server handlers**: companion `.server.ts` files with `loader` and `action` exports (same as React/Svelte adapter)
-
-See [`packages/solid/README.md`](./packages/solid/README.md) for details.
+`packages/void/skills/void/docs` is ignored by Git and copied from `docs/`
+during the build. Edit the source documentation instead.
 
 ## Tooling
 
-| Tool     | Version   | Purpose                                                                                        |
-| -------- | --------- | ---------------------------------------------------------------------------------------------- |
-| Node.js  | 24.21.0   | Runtime (TS type stripping enabled natively — no `tsx` or `--experimental-strip-types` needed) |
-| Vite+    | 0.1.x     | Unified toolchain (`vp`, Vite, Vitest, Oxlint, Oxfmt, tsdown)                                  |
-| pnpm     | 11.x      | Package manager used by Vite+ for this workspace                                               |
-| tsdown   | via Vite+ | Library packaging through `vp pack`                                                            |
-| wrangler | 4.x       | CF Worker dev/deploy                                                                           |
-| vitest   | via Vite+ | Unit + integration tests via `vp test`                                                         |
-| oxlint   | via Vite+ | Linting via `vp lint` / `vp check`                                                             |
-| oxfmt    | via Vite+ | Formatting via `vp fmt` / `vp check`                                                           |
-| vite     | via Vite+ | Dev server + build                                                                             |
+Use the versions declared in `.node-version`, the root `package.json`
+and `pnpm-workspace.yaml`. Vite+ supplies build, test, lint, formatting and
+packaging commands. Node supports TypeScript stripping without `tsx`.
 
-TypeScript 7 is the workspace compiler. The Analog playground remains pinned to TypeScript 6 because Angular 22's compiler API requires `typescript >=6.0 <6.1`.
+The Analog playground's TypeScript version follows Angular's compiler
+compatibility range independently of the workspace compiler.
 
 ## Testing
 
@@ -163,18 +102,9 @@ Tests run from root with `vp test run`. See each package README for detailed tes
 
 Local apps for testing features end-to-end. Run scripts with `vp run --filter ./playground/<app> <script>` (e.g. `vp run --filter ./playground/spa dev`).
 
-| App                                                       | Description                                                                                           |
-| --------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| [`kitchen-sink`](./playground/kitchen-sink)               | Vue Pages mode — DB, KV, R2, AI, Auth, Cron, Queues, Env, ISR (exercises every major feature)         |
-| [`spa`](./playground/spa/README.md)                       | React SPA — API routes, valibot validation, typed DB, typed fetch client, middleware, cron jobs       |
-| [`ssr`](./playground/ssr/README.md)                       | React SSR — `defineRender()`, client hydration, KV storage, dynamic markdown blog                     |
-| [`websockets`](./playground/websockets/README.md)         | React Pages mode — typed chat room and single-socket notification stream via `void/ws`                |
-| [`vue-pages`](./playground/vue-pages/README.md)           | Vue Pages mode — companion `.server.ts` files, Inertia protocol, SSR, layouts, `useForm`, `useShared` |
-| [`svelte-pages`](./playground/svelte-pages)               | Svelte 5 Pages mode — companion `.server.ts` files, Inertia protocol, SSR, layouts, `useForm`         |
-| [`solid-pages`](./playground/solid-pages)                 | SolidJS Pages mode — companion `.server.ts` files, Inertia protocol, SSR, layouts, `useForm`          |
-| [`tanstack-start`](./playground/tanstack-start/README.md) | TanStack Start meta-framework — server functions, D1 queries, SSR via TanStack                        |
-| [`node-app`](./playground/node-app)                       | Node.js target — Hono API routes without CF bindings, `@hono/node-server` for production              |
-| [`pg-test`](./playground/pg-test)                         | React Pages mode — PostgreSQL via Hyperdrive, Drizzle ORM CRUD, `useForm`                             |
+Use the README and manifest in the relevant playground for its supported
+commands and dependencies. See [TESTING.md](./TESTING.md) for focused test
+targets and the shared browser fixtures.
 
 `playground-local/` is gitignored and used for ad-hoc local testing apps that are not part of the codebase.
 

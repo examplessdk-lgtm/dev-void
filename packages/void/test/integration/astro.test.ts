@@ -48,6 +48,7 @@ describe('playground/astro build', () => {
 describe('playground/astro dev', () => {
   let child: ReturnType<typeof spawn>;
   let stderr = '';
+  let stdout = '';
 
   const startDev = async () => {
     DEV_PORT = await getPort();
@@ -77,10 +78,19 @@ describe('playground/astro dev', () => {
     );
 
     child.stderr!.on('data', (chunk: Buffer) => {
-      stderr += String(chunk);
+      stderr = (stderr + String(chunk)).slice(-16000);
+    });
+    child.stdout!.on('data', (chunk: Buffer) => {
+      stdout = (stdout + String(chunk)).slice(-16000);
     });
 
-    await waitForServer(DEV_BASE, 20_000);
+    try {
+      await waitForServer(DEV_BASE, 20_000, {
+        isAlive: () => child.exitCode === null && child.signalCode === null,
+      });
+    } catch (error) {
+      throw new Error(`${String(error)}\nAstro stdout:\n${stdout}\nAstro stderr:\n${stderr}`);
+    }
   };
 
   beforeAll(async () => {

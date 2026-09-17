@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { parseR2Conditional } from './r2-conditions.ts';
 
 /**
  * Creates a Hono app that handles `/__void/*` routes for native binding access.
@@ -271,13 +272,15 @@ export function createBindingHandler(env: Record<string, unknown>): Hono {
     return new Response(obj.body, { headers });
   });
 
-  app.post('/r2/put', async (c) => {
+  app.on('POST', ['/r2/put', '/r2/put-conditional'], async (c) => {
     const body = await c.req.json<{
       binding: string;
       key: string;
       base64?: string;
       value?: string;
       contentType?: string;
+      customMetadata?: Record<string, string>;
+      onlyIf?: unknown;
     }>();
 
     if (!body.binding || !body.key) {
@@ -293,11 +296,33 @@ export function createBindingHandler(env: Record<string, unknown>): Hono {
       ? Uint8Array.from(atob(body.base64), (ch) => ch.charCodeAt(0))
       : new TextEncoder().encode(body.value ?? '');
 
-    await bucket.put(body.key, data, {
+    let onlyIf: R2Conditional | Headers | undefined;
+    try {
+      if (body.onlyIf !== undefined || c.req.path.endsWith('/put-conditional')) {
+        onlyIf = parseR2Conditional(body.onlyIf);
+      }
+    } catch (error) {
+      return c.json({ error: String(error) }, 400);
+    }
+    const obj = await bucket.put(body.key, data, {
       httpMetadata: { contentType: body.contentType ?? 'application/octet-stream' },
+      customMetadata: body.customMetadata,
+      onlyIf,
     });
 
-    return c.json({ success: true });
+    if (!obj) {
+      return c.json(null);
+    }
+    return c.json({
+      key: obj.key,
+      size: obj.size,
+      etag: obj.etag,
+      version: obj.version,
+      lastModified: obj.uploaded.toISOString(),
+      contentType: obj.httpMetadata?.contentType ?? 'application/octet-stream',
+      httpMetadata: obj.httpMetadata,
+      customMetadata: obj.customMetadata,
+    });
   });
 
   app.post('/r2/delete', async (c) => {

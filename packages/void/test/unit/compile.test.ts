@@ -118,7 +118,7 @@ describe('compileRouteTable', () => {
     expect(code).not.toContain('if (!_mod_api_hello_ts)');
   });
 
-  it('generates multiple case labels for multi-cron jobs', () => {
+  it('matches every expression of a multi-cron job', () => {
     const scan: ScanResult = {
       routes: [],
       middleware: [],
@@ -138,9 +138,7 @@ describe('compileRouteTable', () => {
     );
 
     expect(code).toContain('const job0Crons = ["0 * * * *","30 * * * *"]');
-    // Two case labels falling through to the same handler
-    expect(code).toContain('case job0Crons[0]:');
-    expect(code).toContain('case job0Crons[1]: {');
+    expect(code).toContain('job0Crons.includes(controller.cron)');
     expect(code).toContain('import("/crons/multi.ts")');
   });
 
@@ -296,13 +294,13 @@ describe('compileRouteTable', () => {
     );
 
     expect(code).toContain('app.post("/__void/queue"');
-    expect(code).toContain('const queue0Name = "emails"');
+    expect(code).toContain('const __queueNames = ["emails"]');
     expect(code).toContain('import("/queues/emails.ts")');
     expect(code).toContain('mod.default(batch, env)');
     expect(code).toContain('export async function __processQueue');
   });
 
-  it('matches queue name with endsWith for prefixed names', () => {
+  it('resolves exact queue names before the longest prefixed-name suffix', () => {
     const scan: ScanResult = {
       routes: [],
       middleware: [],
@@ -327,7 +325,13 @@ describe('compileRouteTable', () => {
       testOptions,
     );
 
-    expect(code).toContain('queueSuffix.endsWith("-" + queue0Name)');
+    expect(code).toContain('if (exact !== -1) return exact');
+    expect(code).toContain('if (!queueName.endsWith("-" + name)) continue');
+    expect(code).toContain('if (name.length > matchLength)');
+    expect(code).toContain('else if (name.length === matchLength)');
+    expect(code).toContain('match = -1');
+    expect(code).toContain('if (__queueIndex === -1)');
+    expect(code).toContain('return { ok: false, error:');
   });
 
   it('omits /__void/queue route when no queues defined', () => {
@@ -512,7 +516,7 @@ describe('compileRouteTable', () => {
           hasAuthGate: true,
         },
       ],
-      middleware: [],
+      middleware: [{ order: 1, filePath: '01.auth.ts' }],
       jobs: [],
       queues: [],
       pages: { pages: [], layouts: [], namedLayouts: [] },
@@ -532,9 +536,14 @@ describe('compileRouteTable', () => {
     expect(code).toContain('createWebSocketDurableObject');
     expect(code).toContain('export const ChatRoomWs = __createWebSocketDurableObject');
     expect(code).toContain('const __voidWebSocketRoutes = [{"pattern":"/chat/:room"');
-    expect(code).toContain('export async function __voidHandleWebSocket(request, env)');
     expect(code).toContain('app.all("/chat/:room"');
+    expect(code).toContain(
+      'if (c.req.raw.headers.get("upgrade")?.toLowerCase() !== "websocket") return next()',
+    );
     expect(code).toContain('__forwardWebSocketRequest');
+    expect(code.indexOf('app.use(middleware0)')).toBeLessThan(
+      code.indexOf('app.all("/chat/:room"'),
+    );
   });
 
   it('exports tombstones for removed websocket Durable Object classes', () => {
@@ -1965,6 +1974,13 @@ describe('default-target dev parity', () => {
       status: 301,
       origin: 'void.json#routing.redirects',
     },
+    {
+      source: '/rewrite',
+      destination: '/new',
+      status: 200,
+      force: true,
+      origin: 'void.json#routing.rewrites',
+    },
   ];
   const headerRules = [{ pattern: '/*', headers: [['x-test', '1']] as Array<[string, string]> }];
   const fallbackRules = [
@@ -1977,7 +1993,13 @@ describe('default-target dev parity', () => {
     },
   ];
 
-  function compile(opts: Partial<typeof testOptions> & { dev?: boolean; nodeTarget?: boolean }) {
+  function compile(
+    opts: Partial<typeof testOptions> & {
+      dev?: boolean;
+      nodeTarget?: boolean;
+      managedDispatch?: boolean;
+    },
+  ) {
     return compileRouteTable(emptyScan, '/routes', '/middleware', '/crons', '/queues', null, {
       ...testOptions,
       redirectRules,
@@ -1988,7 +2010,7 @@ describe('default-target dev parity', () => {
   }
 
   it('emits redirect + header middleware on the default target in dev', () => {
-    const code = compile({ nodeTarget: false, dev: true });
+    const code = compile({ nodeTarget: false, dev: true, managedDispatch: true });
     expect(code).toContain('const __routingRules =');
     expect(code).toContain('const __headerRules =');
     // Fallback rules are emitted inside the assets-then-fallback notFound body
@@ -2017,9 +2039,66 @@ describe('default-target dev parity', () => {
     expect(res.headers.get('x-test')).toBe('1');
   });
 
-  it('omits redirect + header + fallback middleware on the default target in prod', () => {
-    const code = compile({ nodeTarget: false, dev: false });
-    // Production bundles let the platform dispatch worker own the pipeline
+  it('emits redirect + header + fallback middleware on native Cloudflare in prod', () => {
+    const code = compile({ nodeTarget: false, dev: false, managedDispatch: false });
+    expect(code).toContain('const __routingRules =');
+    expect(code).toContain('const __headerRules =');
+    expect(code).toContain('const __fallbackRules =');
+  });
+
+  it('runs native Cloudflare prod rewrites, headers, and post-asset fallbacks', async () => {
+    const code = compile({ nodeTarget: false, dev: false, managedDispatch: false });
+    const app = evalCompiledApp(code);
+    app.get('/new', (c: any) =>
+      c.text(c.originalUrl()?.pathname === '/rewrite' ? 'rewritten' : 'new'),
+    );
+    app.get('/docs.html', (c) => c.text('fallback'));
+
+    const env = {
+      ASSETS: { fetch: async () => new Response('missing', { status: 404 }) },
+    };
+    const ctx = {
+      waitUntil: () => undefined,
+      passThroughOnException: () => undefined,
+      props: {},
+    } as unknown as ExecutionContext;
+
+    const rewrite = await app.fetch(new Request('http://localhost/rewrite'), env, ctx);
+    expect(await rewrite.text()).toBe('rewritten');
+    expect(rewrite.headers.get('x-test')).toBe('1');
+
+    const fallback = await app.fetch(new Request('http://localhost/docs/guide'), env, ctx);
+    expect(await fallback.text()).toBe('fallback');
+    expect(fallback.headers.get('x-test')).toBe('1');
+  });
+
+  it('applies native Cloudflare prod headers to assets without fallback rules', async () => {
+    const code = compileRouteTable(emptyScan, '/routes', '/middleware', '/crons', '/queues', null, {
+      ...testOptions,
+      nodeTarget: false,
+      dev: false,
+      managedDispatch: false,
+      headerRules,
+    });
+    const app = evalCompiledApp(code);
+    const ctx = {
+      waitUntil: () => undefined,
+      passThroughOnException: () => undefined,
+      props: {},
+    } as unknown as ExecutionContext;
+    const res = await app.fetch(
+      new Request('http://localhost/logo.svg'),
+      { ASSETS: { fetch: async () => new Response('asset') } },
+      ctx,
+    );
+
+    expect(await res.text()).toBe('asset');
+    expect(res.headers.get('x-test')).toBe('1');
+    expect(code).not.toContain('const __fallbackRules =');
+  });
+
+  it('omits redirect + header + fallback middleware from managed bundles', () => {
+    const code = compile({ nodeTarget: false, dev: false, managedDispatch: true });
     expect(code).not.toContain('const __routingRules =');
     expect(code).not.toContain('const __headerRules =');
     expect(code).not.toContain('const __fallbackRules =');
@@ -2061,12 +2140,10 @@ describe('default-target dev parity', () => {
     expect(prodCode).toContain('"source":"/docs/*"');
   });
 
-  // Only the CF-prod build trusts an inbound `X-Void-Original-URL` header:
-  // dispatch strips client-supplied values on ingress, so any header the
-  // worker sees there is dispatch-authored. CF-dev (no dispatch in front)
-  // and node/bun/deno self-hosted (user owns ingress) must NOT trust the
-  // header — clients could spoof `c.originalUrl()` / `c.isRewritten()` for
-  // user code that branches on them.
+  // Only a managed build trusts an inbound `X-Void-Original-URL` header:
+  // dispatch strips client-supplied values on ingress. Native CF, CF dev,
+  // and node/bun/deno targets have no trusted dispatch in front, so clients
+  // must not be able to spoof rewrite metadata.
   //
   // This is a behavioral test that evaluates the actual compiled artifact
   // (not the `installVoidWrappers` mirror) and drives a real Request through
@@ -2077,16 +2154,29 @@ describe('default-target dev parity', () => {
   // - false positives a string check would silently miss (e.g. emitting the
   //   header read in BOTH dev and prod but only honoring it in prod — the
   //   substring is present in cfDev's output but the runtime ignores it).
-  it('reads inbound X-Void-Original-URL only on CF-prod (CF with dev=false)', async () => {
+  it('reads inbound X-Void-Original-URL only behind managed dispatch', async () => {
     type Permutation = {
       readonly label: string;
-      readonly opts: { nodeTarget: boolean; dev: boolean };
+      readonly opts: { nodeTarget: boolean; dev: boolean; managedDispatch?: boolean };
       readonly trustsHeader: boolean;
     };
     const permutations: Array<Permutation> = [
-      { label: 'cfProd', opts: { nodeTarget: false, dev: false }, trustsHeader: true },
-      { label: 'cfDev', opts: { nodeTarget: false, dev: true }, trustsHeader: false },
-      { label: 'nodeProd', opts: { nodeTarget: true, dev: false }, trustsHeader: false },
+      {
+        label: 'managedCfProd',
+        opts: { nodeTarget: false, dev: false, managedDispatch: true },
+        trustsHeader: true,
+      },
+      { label: 'nativeCfProd', opts: { nodeTarget: false, dev: false }, trustsHeader: false },
+      {
+        label: 'cfDev',
+        opts: { nodeTarget: false, dev: true, managedDispatch: true },
+        trustsHeader: false,
+      },
+      {
+        label: 'nodeProd',
+        opts: { nodeTarget: true, dev: false, managedDispatch: true },
+        trustsHeader: false,
+      },
       { label: 'nodeDev', opts: { nodeTarget: true, dev: true }, trustsHeader: false },
     ];
 
@@ -2238,8 +2328,8 @@ describe('default-target dev parity', () => {
   });
 
   it('keeps node target emissions identical in dev and prod', () => {
-    const devCode = compile({ nodeTarget: true, dev: true });
-    const prodCode = compile({ nodeTarget: true, dev: false });
+    const devCode = compile({ nodeTarget: true, dev: true, managedDispatch: true });
+    const prodCode = compile({ nodeTarget: true, dev: false, managedDispatch: true });
     expect(devCode).toContain('const __routingRules =');
     expect(prodCode).toContain('const __routingRules =');
     expect(devCode).toContain('const __headerRules =');
@@ -2293,10 +2383,10 @@ describe('compileWorkerEntry', () => {
       webSocketClasses: ['ChatRoomWs'],
     });
 
-    expect(code).toContain('__voidHandleWebSocket');
+    expect(code).not.toContain('__voidHandleWebSocket');
     expect(code).toContain('ChatRoomWs');
     expect(code).toContain('export { ChatRoomWs };');
-    expect(code).toContain('const ws = await __voidHandleWebSocket(request, env);');
+    expect(code).toContain('await app.fetch(request, userEnv, ctx)');
   });
 
   it('re-exports the live Durable Object class when enabled', () => {
@@ -2626,6 +2716,9 @@ describe('compileWorkerEntry', () => {
     // Spliced into fetch, scheduled, AND queue handlers
     const callCount = (code.match(/_validateEnvOnce\(env\)/g) ?? []).length;
     expect(callCount).toBe(3);
+    expect(code).toContain(
+      'if (request.method !== "POST" || new URL(request.url).pathname !== "/__void/prerender-paths") await _validateEnvOnce(env)',
+    );
   });
 
   it('wraps remote-mode fetch and scheduled handlers with resolved runtime env', () => {
@@ -2705,11 +2798,13 @@ describe('compileNodeApp', () => {
     expect(code).toContain('import "/abs/path/to/env.ts"');
     // Helper import
     expect(code).toContain('import { _validateEnvOnce } from "/resolved/env-public.mjs"');
-    // Middleware runs validation on every request before route handlers,
-    // including the /__void/prerender-paths endpoint used by the prerender
-    // child process. Node/Bun read env from process.env.
+    // Only path discovery can run without remote production secrets.
+    // Node/Bun read the application request environment from process.env.
     expect(code).toContain('app.use("*", async (c, next)');
     expect(code).toContain('await _validateEnvOnce(process.env)');
+    expect(code).toContain(
+      'if (c.req.method !== "POST" || c.req.path !== "/__void/prerender-paths")',
+    );
   });
 
   it('uses Deno.env.toObject() as the env source on the deno target', () => {
@@ -2976,12 +3071,13 @@ describe('compileWorkerEntry — ISR wiring', () => {
     expect(code).toContain('import { handleIsr } from "void/isr"');
     // Baked import #2: the two consts from the compiled route table (single source of truth).
     expect(code).toContain(
-      "import { __VOID_ISR_REVALIDATE, __VOID_ISR_DEPLOYMENT_ID } from 'virtual:void-routes'",
+      "import { __VOID_ISR_REVALIDATE, __VOID_ISR_PAGES, __VOID_ISR_PATH_REVALIDATE, __VOID_ISR_DEPLOYMENT_ID } from 'virtual:void-routes'",
     );
     // Render path threaded through handleIsr, guarded on the ISR_CACHE binding.
-    expect(code).toContain('if (env.ISR_CACHE)');
+    expect(code).toContain('if (env.ISR_CACHE &&');
+    expect(code).toContain('request.headers.get("upgrade")?.toLowerCase() !== "websocket"');
     expect(code).toContain(
-      'handleIsr(request, env, ctx, { revalidate: __VOID_ISR_REVALIDATE, deploymentId: __VOID_ISR_DEPLOYMENT_ID, queryAllowlist: {"/search":["q"]} }, __render)',
+      'handleIsr(request, env, ctx, { revalidate: __VOID_ISR_REVALIDATE, pages: __VOID_ISR_PAGES, pathRevalidate: __VOID_ISR_PATH_REVALIDATE, deploymentId: __VOID_ISR_DEPLOYMENT_ID, queryAllowlist: {"/search":["q"]} }, __render)',
     );
     // Deployment id + host captured on the raw env so revalidate() can purge even
     // on requests that never enter the render ladder.
@@ -3126,5 +3222,26 @@ describe('compileRouteTable — baked ISR consts', () => {
       { '/blog/*': 30 },
     );
     expect(map).toContain('export const __VOID_ISR_REVALIDATE = {"/blog/*":30};');
+  });
+
+  it('bakes the ordered page policy and raw path config for native ISR', () => {
+    const code = compileRouteTable(
+      scan,
+      '/routes',
+      '/middleware',
+      '/crons',
+      '/queues',
+      null,
+      testOptions,
+      null,
+      { '/private': 60 },
+      [{ pattern: '/private', revalidate: 0 }],
+      { '/private': 60 },
+    );
+
+    expect(code).toContain(
+      'export const __VOID_ISR_PAGES = [{"pattern":"/private","revalidate":0}];',
+    );
+    expect(code).toContain('export const __VOID_ISR_PATH_REVALIDATE = {"/private":60};');
   });
 });

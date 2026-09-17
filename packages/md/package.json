@@ -20,10 +20,6 @@
       "types": "./dist/plugin.d.mts",
       "import": "./dist/plugin.mjs"
     },
-    "./runtime": {
-      "types": "./dist/runtime/index.d.mts",
-      "import": "./dist/runtime/index.mjs"
-    },
     "./pages": {
       "types": "./pages.d.ts"
     },

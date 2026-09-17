@@ -18,7 +18,10 @@ import { afterEach, describe, expect, it } from 'vite-plus/test';
 import { hyperdriveOriginConfigHash } from '../../src/cli/platform-cloudflare.ts';
 import { REMOTE_INSTALLATION_MANIFEST_KEY } from '../../src/cli/platform-installer.ts';
 import { disablePlatform } from '../../src/cli/platform-management.ts';
-import { platformProvisionIntentHash } from '../../src/cli/platform-plan.ts';
+import {
+  createPlatformInstallPlan,
+  platformProvisionIntentHash,
+} from '../../src/cli/platform-plan.ts';
 import {
   recoverPlatformInstallations,
   verifyInstallationEndpoint,
@@ -159,9 +162,9 @@ function client(manifest = remoteManifest()) {
     deleteResource: async () => {},
     deleteR2Object: async () => {},
     emptyR2Bucket: async () => {},
-    verifyToken: async () => {},
     listAccounts: async () => [{ id: 'account', name: 'Account' }],
     getWorkersSubdomain: async () => 'example-workers',
+    hasActiveCertificateForHostname: async () => true,
     listAiGateways: async () => [
       {
         id: manifest.deployment.resources.aiGateway,
@@ -317,6 +320,76 @@ describe('platform recovery', () => {
       installationId: 'example-a1b2c3d4',
       kind: 'installed',
     });
+  });
+
+  it('recovers a verified installation with a missing owned Worker so repair can recreate it', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'void-platform-recovery-test-'));
+    directories.push(directory);
+    process.env.VOID_PLATFORM_REGISTRY_DIR = directory;
+    const remote = remoteManifest();
+    const missingWorker = remote.deployment.resources.apiWorker;
+    const fake = client(remote);
+    fake.listWorkerNames = async () =>
+      remote.resources
+        .filter((resource) => resource.kind === 'worker' && resource.name !== missingWorker)
+        .map((resource) => resource.name);
+    let endpointChecks = 0;
+
+    const recovered = await recoverPlatformInstallations(fake, 'account', async () => {
+      endpointChecks++;
+    });
+
+    expect(recovered).toHaveLength(1);
+    expect(listInstallationManifests(directory)).toEqual(recovered);
+    expect(endpointChecks).toBe(0);
+    const manifest = recovered[0]!;
+    const repairPlan = await createPlatformInstallPlan(
+      fake,
+      {
+        accountId: manifest.account.id,
+        applicationDomain: manifest.deployment.application.baseDomain,
+        controlPlaneDomain: manifest.deployment.controlPlane.apiHostname ?? '',
+        dedicatedZone: manifest.deployment.application.dedicatedZone,
+        displayName: manifest.deployment.displayName,
+        installationSlug: manifest.deployment.installationSlug,
+        zoneName: manifest.deployment.application.zoneName,
+      },
+      manifest,
+      { repairMissing: true },
+    );
+    expect(repairPlan.actions.find((action) => action.key === 'api-worker')).toMatchObject({
+      action: 'create',
+      id: null,
+      name: missingWorker,
+    });
+  });
+
+  it('rejects discovery when a surviving Worker belongs to another installation', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'void-platform-recovery-test-'));
+    directories.push(directory);
+    process.env.VOID_PLATFORM_REGISTRY_DIR = directory;
+    const remote = remoteManifest();
+    const fake = client(remote);
+    const conflicting = {
+      ...remote,
+      ownershipNonce: 'fedcba9876543210fedcba9876543210',
+    };
+    fake.getWorkerPlainTextBindings = async (_account, name) => {
+      const resource = remote.resources.find(
+        (entry) => entry.kind === 'worker' && entry.name === name,
+      )!;
+      return {
+        PLATFORM_OWNERSHIP_MARKER:
+          name === remote.deployment.resources.apiWorker
+            ? ownershipMarker(conflicting, resource)
+            : ownershipMarker(remote, resource),
+      };
+    };
+
+    await expect(recoverPlatformInstallations(fake, 'account', async () => {})).rejects.toThrow(
+      'belongs to another installation',
+    );
+    expect(listInstallationManifests(directory)).toEqual([]);
   });
 
   it('discovers a routing namespace created under a retry name', async () => {

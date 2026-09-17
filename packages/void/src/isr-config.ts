@@ -27,18 +27,18 @@ export function hasRevalidate(r: unknown): boolean {
  * final revalidate map that gets baked into the deploy manifest (managed
  * `void deploy`) or the self-hosted worker build.
  *
- * This is the single source of truth for the merge so the managed and
- * self-host build paths cannot diverge. Behaviour is preserved verbatim from
- * the original inline logic in `void deploy`:
+ * This is the single source of truth for the flat fallback map shared by
+ * managed and native builds. Page requests also carry `collectPages()`'s
+ * ordered three-state policy, which is authoritative at runtime:
  *
  * - Config value seeds the result (`number | Record<string, number> | undefined`).
  * - Per-page rules (page pattern → revalidate seconds) are collected from the
  *   already-computed page scan (`null` when the app has no pages dir).
  * - When there are per-page rules:
  *   - config is a plain number → path map with per-page entries first and the
- *     config number applied to `"*"` as a fallback;
+ *     config number applied to `"*"` as a fallback unless that page key exists;
  *   - config is an object map → per-page entries first (higher precedence in
- *     first-match ordering), then the config entries;
+ *     first-match ordering), then non-duplicate config entries;
  *   - config is absent → the per-page rules alone.
  * - Empty results (no config, no per-page rules) return `undefined`.
  */
@@ -69,12 +69,19 @@ export function collectRevalidate(
     if (Object.keys(perPageRules).length > 0) {
       if (typeof revalidate === 'number') {
         // Global number → pathmap with "*" fallback, per-page entries first
-        revalidate = Object.fromEntries([...Object.entries(perPageRules), ['*', revalidate]]);
+        if (!Object.hasOwn(perPageRules, '*')) {
+          perPageRules['*'] = revalidate;
+        }
+        revalidate = perPageRules;
       } else if (typeof revalidate === 'object') {
-        // Per-page entries first (higher precedence in first-match)
+        // Per-page entries first (higher precedence in first-match). Remove
+        // duplicate config keys so a later Object.fromEntries entry cannot
+        // overwrite an explicit page opt-out while retaining its earlier slot.
         revalidate = Object.fromEntries([
           ...Object.entries(perPageRules),
-          ...Object.entries(revalidate),
+          ...Object.entries(revalidate).filter(
+            ([pattern]) => !Object.hasOwn(perPageRules, pattern),
+          ),
         ]);
       } else {
         revalidate = perPageRules;

@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import {
   createServer,
@@ -12,6 +12,7 @@ import { tmpdir } from 'node:os';
 import {
   encodeCloudflareVersionMessage,
   parseCloudflareVersionMessage,
+  readCloudflareVersionMigrationTag,
   readCloudflareTriggerConfig,
   stabilizeCloudflareVersionTriggers,
   type CloudflareCommandResult,
@@ -28,6 +29,7 @@ import {
   PLATFORM_DISABLED_VALUE,
   PLATFORM_R2_OWNERSHIP_MARKER_KEY,
   PLATFORM_REMOTE_INSTALLATION_MANIFEST_KEY,
+  PLATFORM_SANDBOX_DRAIN_KEY,
   recordInstallationResource,
   recordInstallationStep,
   setInstallationDesiredState,
@@ -61,11 +63,14 @@ import {
   type PlatformInstallPlanAction,
 } from './platform-plan.ts';
 import {
+  latestPlatformWorkerCutoverGeneration,
+  platformWorkerSecretUpdateIntentState,
   promoteInstallationSecrets,
   savePlatformConnection,
   writeInstallationManifest,
   writePendingInstallationSecrets,
 } from './platform-registry.ts';
+import { assertPlatformWorkerSecretUpdateAuthority } from './platform-secret-update-authority.ts';
 import {
   platformManagedWorkerTraffic,
   recordPlatformWorkerTraffic,
@@ -84,9 +89,46 @@ export type PlatformInstallationSecrets = Readonly<{
   githubClientId: string;
   githubClientSecret: string;
   jwtSecret: string;
+  projectSecretActiveKeyVersion: string;
   projectSecretKey: string;
+  projectSecretKeysJson: string;
   r2AccessKeyId: string;
   r2SecretAccessKey: string;
+  /** Explicit configuration changes only; never populated from recovery data. */
+  workerSecretUpdates?: Readonly<
+    Partial<
+      Record<
+        | 'CF_API_TOKEN'
+        | 'GITHUB_CLIENT_ID'
+        | 'GITHUB_CLIENT_SECRET'
+        | 'R2_ACCESS_KEY_ID'
+        | 'R2_SECRET_ACCESS_KEY',
+        string
+      >
+    >
+  >;
+  /** Encrypted recovery intent; applied only while its Worker cutover is authoritative. */
+  pendingWorkerSecretUpdateIntent?: PlatformWorkerSecretUpdateIntent;
+}>;
+
+const PLATFORM_WORKER_SECRET_UPDATE_NAMES = [
+  'CF_API_TOKEN',
+  'GITHUB_CLIENT_ID',
+  'GITHUB_CLIENT_SECRET',
+  'R2_ACCESS_KEY_ID',
+  'R2_SECRET_ACCESS_KEY',
+] as const;
+
+type PlatformWorkerSecretUpdateName = (typeof PLATFORM_WORKER_SECRET_UPDATE_NAMES)[number];
+
+type PlatformWorkerSecretUpdates = Partial<Record<PlatformWorkerSecretUpdateName, string>>;
+
+type PlatformWorkerSecretUpdateIntent = Readonly<{
+  baselineGeneration: number;
+  generation: number | null;
+  id: string;
+  schema: 1;
+  updates: Readonly<PlatformWorkerSecretUpdates>;
 }>;
 
 export type PlatformDatabaseLifecycleLock = (() => Promise<void>) & {
@@ -98,11 +140,26 @@ export type PlatformDatabaseLifecycleLock = (() => Promise<void>) & {
     sourcePlatformVersion: string | null,
     hasPriorWorkers: boolean,
   ) => Promise<PlatformDatabaseMigrationResult>;
+  prepareSandboxDrain?: (
+    requiredAdmissionProtocol?: 0 | 2,
+  ) => Promise<PlatformSandboxDrainPreparation>;
+  requiredSafetyProtocols?: Readonly<{ sandboxDrain: 0 | 1 | 2 }>;
+  verifyDatabase?: (
+    runtimeDirectory: string,
+    database: PlatformRuntimeDatabaseManifest,
+  ) => Promise<void>;
 };
 
 export type PlatformDatabaseState = Readonly<{
   pendingMigrations: ReadonlyArray<PlatformRuntimeMigration>;
   schemaDigest: string;
+}>;
+
+export type PlatformSandboxDrainPreparation = Readonly<{
+  admissionProtocol: 0 | 2;
+  generation: string;
+  mirrorValue: string;
+  state: 'complete' | 'pending';
 }>;
 
 export type PlatformDatabaseMigrationResult = Readonly<{
@@ -164,6 +221,7 @@ export type PlatformInstallerDependencies = Readonly<{
     ownershipNonce: string,
   ) => Promise<void>;
   client: InstallerClient;
+  databaseRollbackSource?: PlatformRuntime;
   deployWorker?: (
     config: Record<string, unknown>,
     secrets: Record<string, string> | null,
@@ -177,6 +235,9 @@ export type PlatformInstallerDependencies = Readonly<{
     sourcePlatformVersion: string | null,
     hasPriorWorkers: boolean,
   ) => Promise<PlatformDatabaseMigrationResult>;
+  prepareSandboxDrain?: (
+    requiredAdmissionProtocol?: 0 | 2,
+  ) => Promise<PlatformSandboxDrainPreparation>;
   recoverWorkerCutover?: (input: {
     key: PlatformWorkerKey;
     preserveCustomDomains: boolean;
@@ -202,8 +263,12 @@ export type PlatformInstallerDependencies = Readonly<{
     proxyUrl: string,
     applicationBaseDomain: string,
     platformVersion: string,
+    usageProtocolVersion: 0 | 1,
     healthProbeToken: string,
+    fetcher?: typeof fetch,
+    dispatchOrigin?: string,
   ) => Promise<void>;
+  verifySandboxDrain?: (apiUrl: string, healthProbeToken: string) => Promise<boolean>;
   verifyWorkerCutover?: (
     manifest: PlatformInstallationManifest,
     generation: number,
@@ -213,6 +278,7 @@ export type PlatformInstallerDependencies = Readonly<{
 export type PlatformInstallationResult = Readonly<{
   manifest: PlatformInstallationManifest;
   waitingForDns: boolean;
+  waitingForSandboxDrain: boolean;
   zoneNameServers: ReadonlyArray<string>;
 }>;
 
@@ -230,8 +296,12 @@ export function createPlatformInstallationSecrets(input: {
   githubClientId: string;
   githubClientSecret: string;
   existingInstallation?: boolean;
+  /** The caller supplies current explicit rotation inputs, not resumed inputs. */
+  updateExistingWorkers?: boolean;
   jwtSecret?: string;
+  projectSecretActiveKeyVersion?: string;
   projectSecretKey?: string;
+  projectSecretKeysJson?: string;
   r2AccessKeyId: string;
   r2SecretAccessKey: string;
   checkpoint?: Record<string, string> | null;
@@ -243,30 +313,46 @@ export function createPlatformInstallationSecrets(input: {
     }
     return value;
   };
-  // Runtime signing/encryption keys are installation identity, not rotating
-  // configuration. Once recovery material exists, an unrelated exported key
-  // must never replace it during repair, upgrade, enable, or resume.
+  // Runtime signing/encryption keys are installation identity, not ordinary
+  // configuration. A checkpoint wins over the legacy single-key inputs. The
+  // explicit complete-keyring pair is the only supported way to supersede a
+  // stale encryption checkpoint, and existing Workers still inherit live keys.
   const existingInstallation = input.existingInstallation === true;
   const restoredIdentity = (explicit: string, name: string): string =>
     existingInstallation ? checkpoint[name] || explicit || '' : explicit || checkpoint[name] || '';
   const configured = (explicit: string, name: string): string => explicit || checkpoint[name] || '';
   const jwtSecret = restoredIdentity(input.jwtSecret || '', 'jwtSecret');
-  const projectSecretKey = restoredIdentity(input.projectSecretKey || '', 'projectSecretKey');
   const resolvedJwtSecret = input.existingInstallation
     ? jwtSecret
-    : jwtSecret || randomBytes(32).toString('base64url');
-  const resolvedProjectSecretKey = input.existingInstallation
-    ? projectSecretKey
-    : projectSecretKey || randomBytes(32).toString('base64');
-  if (
-    resolvedProjectSecretKey &&
-    Buffer.from(resolvedProjectSecretKey, 'base64').byteLength !== 32
-  ) {
+    : required(jwtSecret, 'VOID_PLATFORM_JWT_SECRET');
+  if (!existingInstallation && Buffer.byteLength(resolvedJwtSecret, 'utf8') < 32) {
     throw new Error(
-      'platform: VOID_PLATFORM_PROJECT_SECRET_KEY must be a base64-encoded 32-byte key.',
+      'platform: VOID_PLATFORM_JWT_SECRET must contain at least 32 bytes of secret material unique to this installation.',
     );
   }
+  const projectSecretKeyring = resolveProjectSecretKeyring({
+    checkpoint,
+    existingInstallation,
+    projectSecretActiveKeyVersion: input.projectSecretActiveKeyVersion || '',
+    projectSecretKey: input.projectSecretKey || '',
+    projectSecretKeysJson: input.projectSecretKeysJson || '',
+    required,
+  });
+  const pendingWorkerSecretUpdateIntent = parseWorkerSecretUpdateIntent(
+    checkpoint.workerSecretUpdatesJson,
+  );
+  const explicitWorkerSecretUpdates = withoutEmptySecrets({
+    CF_API_TOKEN: input.cloudflareApiToken,
+    GITHUB_CLIENT_ID: input.githubClientId,
+    GITHUB_CLIENT_SECRET: input.githubClientSecret,
+    R2_ACCESS_KEY_ID: input.r2AccessKeyId,
+    R2_SECRET_ACCESS_KEY: input.r2SecretAccessKey,
+  });
   return {
+    workerSecretUpdates: input.updateExistingWorkers ? explicitWorkerSecretUpdates : {},
+    pendingWorkerSecretUpdateIntent: input.updateExistingWorkers
+      ? pendingWorkerSecretUpdateIntent
+      : undefined,
     bootstrapGitHubId: existingInstallation
       ? configured(input.bootstrapGitHubId, 'bootstrapGitHubId')
       : required(
@@ -299,7 +385,9 @@ export function createPlatformInstallationSecrets(input: {
           'VOID_PLATFORM_GITHUB_CLIENT_SECRET',
         ),
     jwtSecret: resolvedJwtSecret,
-    projectSecretKey: resolvedProjectSecretKey,
+    projectSecretActiveKeyVersion: projectSecretKeyring.activeVersion,
+    projectSecretKey: projectSecretKeyring.v1Key,
+    projectSecretKeysJson: projectSecretKeyring.keysJson,
     r2AccessKeyId: existingInstallation
       ? configured(input.r2AccessKeyId, 'r2AccessKeyId')
       : required(
@@ -315,7 +403,131 @@ export function createPlatformInstallationSecrets(input: {
   };
 }
 
-function secretCheckpoint(secrets: PlatformInstallationSecrets): Record<string, string> {
+function resolveProjectSecretKeyring(input: {
+  checkpoint: Record<string, string>;
+  existingInstallation: boolean;
+  projectSecretActiveKeyVersion: string;
+  projectSecretKey: string;
+  projectSecretKeysJson: string;
+  required: (value: string, name: string) => string;
+}): Readonly<{ activeVersion: string; keysJson: string; v1Key: string }> {
+  const explicitFullKeyring =
+    input.projectSecretKeysJson !== '' || input.projectSecretActiveKeyVersion !== '';
+  if (
+    explicitFullKeyring &&
+    (!input.projectSecretKeysJson || !input.projectSecretActiveKeyVersion)
+  ) {
+    throw new Error(
+      'platform: VOID_PLATFORM_PROJECT_SECRET_KEYS_JSON and VOID_PLATFORM_PROJECT_SECRET_ACTIVE_KEY_VERSION must be supplied together.',
+    );
+  }
+  if (explicitFullKeyring && !input.existingInstallation) {
+    throw new Error(
+      'platform: Fresh installations use VOID_PLATFORM_PROJECT_SECRET_KEY to initialize key version v1. The full project-secret keyring inputs are for restoring an existing installation.',
+    );
+  }
+
+  const checkpointKeysJson = input.checkpoint.projectSecretKeysJson || '';
+  const checkpointActiveVersion = input.checkpoint.projectSecretActiveKeyVersion || '';
+  if (
+    !explicitFullKeyring &&
+    (checkpointKeysJson !== '' || checkpointActiveVersion !== '') &&
+    (!checkpointKeysJson || !checkpointActiveVersion)
+  ) {
+    throw new Error(
+      'platform: Encrypted recovery material must contain both the project-secret keyring and its active version.',
+    );
+  }
+
+  if (explicitFullKeyring) {
+    return normalizeProjectSecretKeyring(
+      input.projectSecretKeysJson,
+      input.projectSecretActiveKeyVersion,
+      'VOID_PLATFORM_PROJECT_SECRET_KEYS_JSON',
+      'VOID_PLATFORM_PROJECT_SECRET_ACTIVE_KEY_VERSION',
+    );
+  }
+  if (checkpointKeysJson) {
+    return normalizeProjectSecretKeyring(
+      checkpointKeysJson,
+      checkpointActiveVersion,
+      'encrypted recovery project-secret keyring',
+      'encrypted recovery project-secret active version',
+    );
+  }
+
+  const v1Key = input.existingInstallation
+    ? input.checkpoint.projectSecretKey || input.projectSecretKey || ''
+    : input.required(
+        input.projectSecretKey || input.checkpoint.projectSecretKey || '',
+        'VOID_PLATFORM_PROJECT_SECRET_KEY',
+      );
+  if (!v1Key) {
+    return { activeVersion: '', keysJson: '', v1Key: '' };
+  }
+  assertCanonicalProjectSecretKey(v1Key, 'VOID_PLATFORM_PROJECT_SECRET_KEY', true);
+  return {
+    activeVersion: 'v1',
+    keysJson: JSON.stringify({ v1: v1Key }),
+    v1Key,
+  };
+}
+
+function normalizeProjectSecretKeyring(
+  keysJson: string,
+  activeVersion: string,
+  keysName: string,
+  activeVersionName: string,
+): Readonly<{ activeVersion: string; keysJson: string; v1Key: string }> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(keysJson);
+  } catch {
+    throw new Error(`platform: ${keysName} must be valid JSON.`);
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error(`platform: ${keysName} must be a JSON object.`);
+  }
+  const entries = Object.entries(parsed);
+  if (entries.length === 0) {
+    throw new Error(`platform: ${keysName} must define at least one key.`);
+  }
+  for (const [version, key] of entries) {
+    if (!version || typeof key !== 'string' || !key) {
+      throw new Error(`platform: ${keysName} must map non-empty versions to keys.`);
+    }
+    assertCanonicalProjectSecretKey(key, `${keysName} entry ${JSON.stringify(version)}`);
+  }
+  if (!Object.hasOwn(parsed, activeVersion)) {
+    throw new Error(`platform: ${activeVersionName} must identify a key in ${keysName}.`);
+  }
+  const keys = Object.fromEntries(
+    entries.sort(([left], [right]) => left.localeCompare(right)),
+  ) as Record<string, string>;
+  return {
+    activeVersion,
+    keysJson: JSON.stringify(keys),
+    v1Key: keys.v1 || '',
+  };
+}
+
+function assertCanonicalProjectSecretKey(
+  value: string,
+  name: string,
+  uniqueToInstallation = false,
+): void {
+  const decoded = Buffer.from(value, 'base64');
+  if (decoded.byteLength !== 32 || decoded.toString('base64') !== value) {
+    throw new Error(
+      `platform: ${name} must be the canonical base64 encoding of a 32-byte key${uniqueToInstallation ? ' unique to this installation' : ''}.`,
+    );
+  }
+}
+
+function secretCheckpoint(
+  secrets: PlatformInstallationSecrets,
+  workerSecretUpdateIntent?: PlatformWorkerSecretUpdateIntent | null,
+): Record<string, string> {
   return {
     bootstrapGitHubId: secrets.bootstrapGitHubId,
     bootstrapGitHubLogin: secrets.bootstrapGitHubLogin,
@@ -324,10 +536,85 @@ function secretCheckpoint(secrets: PlatformInstallationSecrets): Record<string, 
     githubClientId: secrets.githubClientId,
     githubClientSecret: secrets.githubClientSecret,
     jwtSecret: secrets.jwtSecret,
+    projectSecretActiveKeyVersion: secrets.projectSecretActiveKeyVersion,
     projectSecretKey: secrets.projectSecretKey,
+    projectSecretKeysJson: secrets.projectSecretKeysJson,
     r2AccessKeyId: secrets.r2AccessKeyId,
     r2SecretAccessKey: secrets.r2SecretAccessKey,
+    ...(workerSecretUpdateIntent
+      ? { workerSecretUpdatesJson: JSON.stringify(workerSecretUpdateIntent) }
+      : {}),
   };
+}
+
+function parseWorkerSecretUpdateIntent(
+  value: string | undefined,
+): PlatformWorkerSecretUpdateIntent | undefined {
+  if (!value) {
+    return undefined;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new Error('platform: Encrypted pending Worker secret updates must be valid JSON.');
+  }
+  if (
+    !parsed ||
+    typeof parsed !== 'object' ||
+    Array.isArray(parsed) ||
+    !('schema' in parsed) ||
+    parsed.schema !== 1 ||
+    !('id' in parsed) ||
+    typeof parsed.id !== 'string' ||
+    parsed.id === '' ||
+    !('baselineGeneration' in parsed) ||
+    !Number.isSafeInteger(parsed.baselineGeneration) ||
+    Number(parsed.baselineGeneration) < 0 ||
+    !('generation' in parsed) ||
+    (parsed.generation !== null &&
+      (!Number.isSafeInteger(parsed.generation) || Number(parsed.generation) <= 0)) ||
+    !('updates' in parsed) ||
+    !parsed.updates ||
+    typeof parsed.updates !== 'object' ||
+    Array.isArray(parsed.updates)
+  ) {
+    throw new Error('platform: Encrypted pending Worker secret update intent is invalid.');
+  }
+  const updates: Partial<Record<PlatformWorkerSecretUpdateName, string>> = {};
+  for (const [name, entry] of Object.entries(parsed.updates)) {
+    if (
+      !PLATFORM_WORKER_SECRET_UPDATE_NAMES.includes(name as PlatformWorkerSecretUpdateName) ||
+      typeof entry !== 'string' ||
+      entry === ''
+    ) {
+      throw new Error('platform: Encrypted pending Worker secret updates are invalid.');
+    }
+    updates[name as PlatformWorkerSecretUpdateName] = entry;
+  }
+  if (Object.keys(updates).length === 0) {
+    throw new Error('platform: Encrypted pending Worker secret update intent is empty.');
+  }
+  return {
+    baselineGeneration: Number(parsed.baselineGeneration),
+    generation: parsed.generation === null ? null : Number(parsed.generation),
+    id: parsed.id,
+    schema: 1,
+    updates,
+  };
+}
+
+function sanitizeWorkerSecretUpdates(
+  updates: PlatformInstallationSecrets['workerSecretUpdates'],
+): PlatformWorkerSecretUpdates {
+  return Object.fromEntries(
+    Object.entries(updates ?? {}).filter(
+      ([name, value]) =>
+        PLATFORM_WORKER_SECRET_UPDATE_NAMES.includes(name as PlatformWorkerSecretUpdateName) &&
+        typeof value === 'string' &&
+        value !== '',
+    ),
+  );
 }
 
 export async function installPlatform(
@@ -336,6 +623,11 @@ export async function installPlatform(
   existing: PlatformInstallationManifest | null,
   dependencies: PlatformInstallerDependencies,
 ): Promise<PlatformInstallationResult> {
+  if (plan.actions.some((action) => action.action === 'inspect')) {
+    throw new Error(
+      'platform: AI Gateway access must be verified before provisioning. Provide AI Gateway: Edit on the runtime token, then retry.',
+    );
+  }
   const now = dependencies.now ?? (() => new Date().toISOString());
   const cloudflareApiBaseUrl = dependencies.client.apiBaseUrl ?? resolvePinnedApiBaseUrl();
   const runPinnedPlatformWrangler: typeof runPlatformWrangler = (args, accountId, cwd, capture) =>
@@ -343,6 +635,11 @@ export async function installPlatform(
   const resolvedRuntime = dependencies.runtime ?? resolvePlatformRuntime();
   const runtimeDirectory = resolvedRuntime.directory;
   const runtime = resolvedRuntime.manifest;
+  if (plan.deployment.application.workersDev && runtime.applicationRoutingVersion !== 1) {
+    throw new Error(
+      'platform: This runtime does not support workers.dev application routing. Use a current platform runtime.',
+    );
+  }
   verifyRuntimeArtifacts(runtimeDirectory, runtime);
   const runtimeProvenance = {
     manifestSha256: resolvedRuntime.manifestSha256,
@@ -350,6 +647,7 @@ export async function installPlatform(
     sourceRevision: runtime.sourceRevision,
   } as const;
   const version = runtime.platformVersion;
+  const targetUsageProtocolVersion = runtime.usageProtocolVersion;
   const sourcePlatformVersion = existing?.platformVersion ?? null;
   const hadPriorWorkers =
     existing !== null &&
@@ -380,12 +678,33 @@ export async function installPlatform(
   } else if (manifest.status === 'uninstalled') {
     throw new Error(`platform: Installation ${manifest.id} has already been uninstalled.`);
   }
+  const explicitWorkerSecretUpdates = sanitizeWorkerSecretUpdates(secrets.workerSecretUpdates);
+  const hasExplicitWorkerSecretUpdates = Object.keys(explicitWorkerSecretUpdates).length > 0;
+  const resumedWorkerSecretUpdateIntent =
+    secrets.pendingWorkerSecretUpdateIntent &&
+    platformWorkerSecretUpdateIntentState(manifest, secrets.pendingWorkerSecretUpdateIntent) ===
+      'active'
+      ? secrets.pendingWorkerSecretUpdateIntent
+      : null;
+  let workerSecretUpdateIntent: PlatformWorkerSecretUpdateIntent | null =
+    hasExplicitWorkerSecretUpdates
+      ? {
+          baselineGeneration: latestPlatformWorkerCutoverGeneration(manifest),
+          generation: null,
+          id: randomUUID(),
+          schema: 1,
+          updates: {
+            ...resumedWorkerSecretUpdateIntent?.updates,
+            ...explicitWorkerSecretUpdates,
+          },
+        }
+      : resumedWorkerSecretUpdateIntent;
   if (preserveDisabled && manifest.desiredState !== 'disabled') {
     manifest = setInstallationDesiredState(manifest, 'disabled', now());
     writeInstallationManifest(manifest);
   }
   assertRequiredPlatformSecrets(plan, manifest, secrets);
-  const pendingSecrets = secretCheckpoint(secrets);
+  const pendingSecrets = secretCheckpoint(secrets, workerSecretUpdateIntent);
   writePendingInstallationSecrets(manifest, {
     ...pendingSecrets,
     databaseClaimState: 'claiming',
@@ -433,6 +752,32 @@ export async function installPlatform(
     );
   }
   try {
+    assertPlatformWorkerSecretUpdateAuthority({
+      explicitUpdates: explicitWorkerSecretUpdates,
+      localIntent: secrets.pendingWorkerSecretUpdateIntent,
+      manifest,
+    });
+  } catch (error) {
+    await releaseDatabaseLock();
+    throw error;
+  }
+  if (
+    workerSecretUpdateIntent &&
+    !hasExplicitWorkerSecretUpdates &&
+    platformWorkerSecretUpdateIntentState(manifest, workerSecretUpdateIntent) !== 'active'
+  ) {
+    workerSecretUpdateIntent = null;
+  }
+  const workerDeploymentSecrets: PlatformInstallationSecrets = {
+    ...secrets,
+    workerSecretUpdates: workerSecretUpdateIntent?.updates ?? {},
+  };
+  try {
+    assertPlatformRuntimeSafety(
+      runtime,
+      manifest.safetyProtocols,
+      releaseDatabaseLock.requiredSafetyProtocols,
+    );
     if (existing) {
       await dependencies.verifyExistingOwnership?.(
         manifest,
@@ -480,42 +825,49 @@ export async function installPlatform(
     }
     await writeRemoteInstallationCheckpoint(dependencies.client, plan, manifest);
 
-    const zoneAction = plan.actions.find((action) => action.key === 'zone')!;
+    const zoneAction = plan.actions.find((action) => action.key === 'zone');
     let zone = plan.zone;
-    if (zoneAction.action === 'create') {
-      manifest = recordProvisionIntent(manifest, zoneAction, now());
+    if (zoneAction) {
+      if (zoneAction.action === 'create') {
+        manifest = recordProvisionIntent(manifest, zoneAction, now());
+        writeInstallationManifest(manifest);
+        await writeRemoteInstallationCheckpoint(dependencies.client, plan, manifest);
+        zone = await dependencies.client.createZone(plan.account.id, zoneAction.name);
+      }
+      if (!zone) {
+        throw new Error('platform: Cloudflare did not return the platform zone.');
+      }
+      if (zoneAction.action === 'adopt') {
+        manifest = recordAdoptionIntent(manifest, zoneAction, zone.id, now());
+        writeInstallationManifest(manifest);
+        await writeRemoteInstallationCheckpoint(dependencies.client, plan, manifest);
+      }
+      manifest = recordResource(
+        manifest,
+        zoneAction,
+        zone.id,
+        zoneAction.action === 'adopt'
+          ? 'adopted'
+          : zoneAction.action === 'create' || hasProvisionIntent(manifest, zoneAction)
+            ? 'created'
+            : undefined,
+        now(),
+      );
       writeInstallationManifest(manifest);
       await writeRemoteInstallationCheckpoint(dependencies.client, plan, manifest);
-      zone = await dependencies.client.createZone(plan.account.id, zoneAction.name);
+      if (zone.status !== 'active') {
+        manifest = transitionInstallation(manifest, 'waiting-for-dns', now());
+        writeInstallationManifest(manifest);
+        await writeRemoteInstallationCheckpoint(dependencies.client, plan, manifest);
+        return {
+          manifest,
+          waitingForDns: true,
+          waitingForSandboxDrain: false,
+          zoneNameServers: zone.nameServers,
+        };
+      }
     }
-    if (!zone) {
-      throw new Error('platform: Cloudflare did not return the platform zone.');
-    }
-    if (zoneAction.action === 'adopt') {
-      manifest = recordAdoptionIntent(manifest, zoneAction, zone.id, now());
-      writeInstallationManifest(manifest);
-      await writeRemoteInstallationCheckpoint(dependencies.client, plan, manifest);
-    }
-    manifest = recordResource(
-      manifest,
-      zoneAction,
-      zone.id,
-      zoneAction.action === 'adopt'
-        ? 'adopted'
-        : zoneAction.action === 'create' || hasProvisionIntent(manifest, zoneAction)
-          ? 'created'
-          : undefined,
-      now(),
-    );
-    writeInstallationManifest(manifest);
-    await writeRemoteInstallationCheckpoint(dependencies.client, plan, manifest);
-    if (zone.status !== 'active') {
-      manifest = transitionInstallation(manifest, 'waiting-for-dns', now());
-      writeInstallationManifest(manifest);
-      await writeRemoteInstallationCheckpoint(dependencies.client, plan, manifest);
-      return { manifest, waitingForDns: true, zoneNameServers: zone.nameServers };
-    }
-
+    const zoneId = zone?.id ?? '';
     for (const action of plan.actions.filter(
       (entry) => entry.key !== 'routing-kv' && entry.kind !== 'zone' && entry.kind !== 'worker',
     )) {
@@ -572,7 +924,7 @@ export async function installPlatform(
         plan,
         action,
         secrets.databaseUrl,
-        zone.id,
+        zoneId,
       );
       manifest = recordResource(
         manifest,
@@ -588,8 +940,24 @@ export async function installPlatform(
       await writeRemoteInstallationCheckpoint(dependencies.client, plan, manifest);
     }
 
+    const rollbackDatabase = dependencies.databaseRollbackSource;
     const migrationStep = `database-schema:${runtime.database.schemaDigest}`;
-    if (!manifest.steps.some((step) => step.key === migrationStep)) {
+    if (rollbackDatabase) {
+      const verifyDatabase = releaseDatabaseLock.verifyDatabase;
+      if (!verifyDatabase) {
+        throw new Error(
+          'platform: The PostgreSQL lifecycle lock cannot verify the forward-only rollback schema.',
+        );
+      }
+      await verifyDatabase(rollbackDatabase.directory, rollbackDatabase.manifest.database);
+      manifest = {
+        ...manifest,
+        databaseSchemaDigest: rollbackDatabase.manifest.database.schemaDigest,
+        updatedAt: now(),
+      };
+      writeInstallationManifest(manifest);
+      await writeRemoteInstallationCheckpoint(dependencies.client, plan, manifest);
+    } else if (!manifest.steps.some((step) => step.key === migrationStep)) {
       const legacyMigrationStep = `database-migrations:${runtime.database.journalSha256}`;
       if (dependencies.migrateDatabase) {
         if (!manifest.steps.some((step) => step.key === legacyMigrationStep)) {
@@ -621,6 +989,63 @@ export async function installPlatform(
         },
         now(),
       );
+      manifest = {
+        ...manifest,
+        databaseSchemaDigest: runtime.database.schemaDigest,
+        updatedAt: now(),
+      };
+      writeInstallationManifest(manifest);
+      await writeRemoteInstallationCheckpoint(dependencies.client, plan, manifest);
+    } else if (releaseDatabaseLock.verifyDatabase) {
+      await releaseDatabaseLock.verifyDatabase(runtimeDirectory, runtime.database);
+      if (manifest.databaseSchemaDigest !== runtime.database.schemaDigest) {
+        manifest = {
+          ...manifest,
+          databaseSchemaDigest: runtime.database.schemaDigest,
+          updatedAt: now(),
+        };
+        writeInstallationManifest(manifest);
+        await writeRemoteInstallationCheckpoint(dependencies.client, plan, manifest);
+      }
+    }
+
+    const targetSandboxDrainProtocol = runtime.safetyProtocols?.sandboxDrain ?? 0;
+    const prepareSandboxDrain =
+      dependencies.prepareSandboxDrain ?? releaseDatabaseLock.prepareSandboxDrain;
+    if (targetSandboxDrainProtocol >= 1 && !prepareSandboxDrain) {
+      throw new Error(
+        'platform: The PostgreSQL lifecycle lock cannot establish the sandbox-drain safety checkpoint.',
+      );
+    }
+    const sandboxDrainPreparation =
+      targetSandboxDrainProtocol >= 1
+        ? await prepareSandboxDrain!(targetSandboxDrainProtocol >= 2 ? 2 : 0)
+        : null;
+    const sandboxDrainRoutingKvId = requireId(
+      Object.fromEntries(manifest.resources.map((resource) => [resource.key, resource.id])),
+      'routing-kv',
+    );
+    const writeSandboxDrainMirror = async (preparation: PlatformSandboxDrainPreparation) => {
+      await dependencies.client.putKvValue(
+        plan.account.id,
+        sandboxDrainRoutingKvId,
+        PLATFORM_SANDBOX_DRAIN_KEY,
+        preparation.mirrorValue,
+      );
+    };
+    if (sandboxDrainPreparation) {
+      await writeSandboxDrainMirror(sandboxDrainPreparation);
+    }
+    const sandboxDrainState = sandboxDrainPreparation?.state ?? 'complete';
+    if (
+      targetSandboxDrainProtocol >= 1 &&
+      (manifest.safetyProtocols?.sandboxDrain ?? 0) < targetSandboxDrainProtocol
+    ) {
+      manifest = {
+        ...manifest,
+        safetyProtocols: { sandboxDrain: targetSandboxDrainProtocol },
+        updatedAt: now(),
+      };
       writeInstallationManifest(manifest);
       await writeRemoteInstallationCheckpoint(dependencies.client, plan, manifest);
     }
@@ -667,11 +1092,15 @@ export async function installPlatform(
       [...interruptedCutover.staged.values()].some(
         (snapshot) => snapshot.previousVersionId === null,
       );
+    const requiresSandboxDrain =
+      !preserveDisabled && targetSandboxDrainProtocol >= 1 && sandboxDrainState === 'pending';
     const requiresTrafficGuard =
       !previousPublicEndpoints ||
       recoveringUnsafeTraffic ||
       createsWorker ||
-      recoveringCreatedWorker;
+      recoveringCreatedWorker ||
+      manifest.usageProtocolVersion !== targetUsageProtocolVersion ||
+      requiresSandboxDrain;
     if (requiresTrafficGuard) {
       await dependencies.client.putKvValue(
         plan.account.id,
@@ -709,7 +1138,7 @@ export async function installPlatform(
         isrCacheKv: requireId(ids, 'isr-cache-kv'),
         legacyAssetsKv: requireId(ids, 'legacy-assets-kv'),
         routingKv: requireId(ids, 'routing-kv'),
-        zone: zone.id,
+        zone: zoneId,
       },
       runtimeEntrypoints: entrypoints,
     };
@@ -723,7 +1152,7 @@ export async function installPlatform(
       ? createPlatformWorkerConfigs({
           ...configInput,
           publicEndpoints: true,
-          trafficState: 'staging',
+          trafficState: requiresSandboxDrain ? 'sandbox-drain' : 'staging',
         })
       : enabledConfigs;
     const previousConfigs = createPlatformWorkerConfigs({
@@ -794,7 +1223,7 @@ export async function installPlatform(
               }
               await dependencies.client.removeRoutes(
                 plan.account.id,
-                zone.id,
+                zoneId,
                 trackedPlatformWorkerTraffic(manifest!, new Set([snapshot.workerName])),
               );
             },
@@ -854,14 +1283,34 @@ export async function installPlatform(
       }
     }
     workerCutoverGeneration = nextWorkerCutoverGeneration(manifest);
+    if (workerSecretUpdateIntent) {
+      manifest = recordWorkerSecretUpdateState(
+        manifest,
+        workerCutoverGeneration,
+        'pending',
+        workerSecretUpdateIntent.id,
+        now(),
+      );
+      writeInstallationManifest(manifest);
+      await writeRemoteInstallationCheckpoint(dependencies.client, plan, manifest);
+      workerSecretUpdateIntent = {
+        ...workerSecretUpdateIntent,
+        generation: workerCutoverGeneration,
+      };
+      writePendingInstallationSecrets(
+        manifest,
+        secretCheckpoint(secrets, workerSecretUpdateIntent),
+      );
+    }
     for (const key of ['api', 'proxy', 'tail', 'dispatch'] as const) {
       const action = workerActions.find((entry) => entry.key === `${key}-worker`)!;
-      const workerSecrets =
-        key === 'api'
-          ? apiWorkerSecrets(secrets, plan.account.id, zone.id)
-          : key === 'proxy'
-            ? proxyWorkerSecrets(secrets, plan.account.id)
-            : null;
+      const workerSecrets = platformWorkerSecretPayload(
+        key,
+        workerDeploymentSecrets,
+        plan.account.id,
+        zoneId,
+        action.action !== 'create',
+      );
       manifest = recordProvisionIntent(manifest, action, now());
       writeInstallationManifest(manifest);
       await writeRemoteInstallationCheckpoint(dependencies.client, plan, manifest);
@@ -900,7 +1349,7 @@ export async function installPlatform(
               }
               const [customDomains, routes] = await Promise.all([
                 dependencies.client.listWorkerDomains(plan.account.id),
-                dependencies.client.listWorkerRoutes(zone.id),
+                zoneId ? dependencies.client.listWorkerRoutes(zoneId) : Promise.resolve([]),
               ]);
               manifest = recordPlatformWorkerTraffic(
                 manifest!,
@@ -941,7 +1390,11 @@ export async function installPlatform(
                   'platform: Safe Cloudflare Worker route publication is unavailable.',
                 );
               }
-              await dependencies.client.publishWorkerRoutesSafely(zone.id, workerName, patterns);
+              if (zoneId) {
+                await dependencies.client.publishWorkerRoutesSafely(zoneId, workerName, patterns);
+              } else if (patterns.length > 0) {
+                throw new Error('platform: Cannot publish zone routes in workers.dev mode.');
+              }
             },
             previousConfig: previousWorkerConfig,
             previousPublicEndpoints,
@@ -959,7 +1412,7 @@ export async function installPlatform(
               }
               await dependencies.client.removeRoutes(
                 plan.account.id,
-                zone.id,
+                zoneId,
                 trackedPlatformWorkerTraffic(manifest!, new Set([action.name])),
               );
             },
@@ -996,18 +1449,34 @@ export async function installPlatform(
         now(),
       );
       manifest = recordWorkerTrafficState(manifest, workerCutoverGeneration, false, now());
+      if (workerSecretUpdateIntent) {
+        manifest = recordWorkerSecretUpdateState(
+          manifest,
+          workerCutoverGeneration,
+          'committed',
+          workerSecretUpdateIntent.id,
+          now(),
+        );
+      }
       manifest = {
         ...manifest,
         platformVersion: version,
         runtime: runtimeProvenance,
         updatedAt: now(),
+        usageProtocolVersion: targetUsageProtocolVersion,
       };
       manifest = transitionInstallation(manifest, 'disabled', now());
       writeInstallationManifest(manifest);
       await writeRemoteInstallationCheckpoint(dependencies.client, plan, manifest);
+      writePendingInstallationSecrets(manifest, secretCheckpoint(secrets));
       promoteInstallationSecrets(manifest);
       saveInstalledPlatformConnection(plan, manifest);
-      return { manifest, waitingForDns: false, zoneNameServers: zone.nameServers };
+      return {
+        manifest,
+        waitingForDns: false,
+        waitingForSandboxDrain: false,
+        zoneNameServers: zone?.nameServers ?? [],
+      };
     }
     manifest = transitionInstallation(manifest, 'verifying', now());
     writeInstallationManifest(manifest);
@@ -1017,8 +1486,55 @@ export async function installPlatform(
       plan.proxyUrl,
       plan.deployment.application.baseDomain,
       version,
+      targetUsageProtocolVersion,
       createPlatformHealthProbeToken(manifest.ownershipNonce),
+      undefined,
+      !plan.deployment.application.zoneName
+        ? `https://${plan.deployment.resources.dispatchWorker}.${plan.workersSubdomain}.workers.dev`
+        : undefined,
     );
+    if (requiresSandboxDrain) {
+      const drainComplete = await (dependencies.verifySandboxDrain ?? verifyPlatformSandboxDrain)(
+        plan.apiUrl,
+        createPlatformHealthProbeToken(manifest.ownershipNonce),
+      );
+      if (!drainComplete) {
+        manifest = recordWorkerCutoverResolution(
+          manifest,
+          workerCutoverGeneration,
+          'committed',
+          now(),
+        );
+        manifest = recordWorkerTrafficState(manifest, workerCutoverGeneration, false, now());
+        manifest = recordInstallationStep(
+          manifest,
+          {
+            completedAt: now(),
+            key: 'sandbox-drain:maintenance-runtime:v1',
+            resultHash: resolvedRuntime.manifestSha256,
+          },
+          now(),
+        );
+        writeInstallationManifest(manifest);
+        await writeRemoteInstallationCheckpoint(dependencies.client, plan, manifest);
+        workerRollbacks = [];
+        workerDeploymentCommitted = true;
+        saveInstalledPlatformConnection(plan, manifest);
+        return {
+          manifest,
+          waitingForDns: false,
+          waitingForSandboxDrain: true,
+          zoneNameServers: zone?.nameServers ?? [],
+        };
+      }
+      const completedDrain = await prepareSandboxDrain!();
+      if (completedDrain.state !== 'complete') {
+        throw new Error(
+          'platform: Sandbox drain completion changed while it was being verified. Traffic remains disabled.',
+        );
+      }
+      await writeSandboxDrainMirror(completedDrain);
+    }
     if (requiresStagedCommit) {
       manifest = recordWorkerCutoverResolution(
         manifest,
@@ -1032,14 +1548,34 @@ export async function installPlatform(
       workerRollbacks = [];
 
       workerCutoverGeneration = nextWorkerCutoverGeneration(manifest);
+      if (workerSecretUpdateIntent) {
+        manifest = recordWorkerSecretUpdateState(
+          manifest,
+          workerCutoverGeneration,
+          'pending',
+          workerSecretUpdateIntent.id,
+          now(),
+        );
+        writeInstallationManifest(manifest);
+        await writeRemoteInstallationCheckpoint(dependencies.client, plan, manifest);
+        workerSecretUpdateIntent = {
+          ...workerSecretUpdateIntent,
+          generation: workerCutoverGeneration,
+        };
+        writePendingInstallationSecrets(
+          manifest,
+          secretCheckpoint(secrets, workerSecretUpdateIntent),
+        );
+      }
       for (const key of ['api', 'proxy', 'tail', 'dispatch'] as const) {
         const action = workerActions.find((entry) => entry.key === `${key}-worker`)!;
-        const workerSecrets =
-          key === 'api'
-            ? apiWorkerSecrets(secrets, plan.account.id, zone.id)
-            : key === 'proxy'
-              ? proxyWorkerSecrets(secrets, plan.account.id)
-              : null;
+        const workerSecrets = platformWorkerSecretPayload(
+          key,
+          workerDeploymentSecrets,
+          plan.account.id,
+          zoneId,
+          action.action !== 'create',
+        );
         const preservedRoutes = dependencies.deployWorker
           ? []
           : await inventoryUnmanagedPlatformWorkerTraffic(dependencies.client, plan, action.name);
@@ -1075,7 +1611,7 @@ export async function installPlatform(
                 }
                 const [customDomains, routes] = await Promise.all([
                   dependencies.client.listWorkerDomains(plan.account.id),
-                  dependencies.client.listWorkerRoutes(zone.id),
+                  zoneId ? dependencies.client.listWorkerRoutes(zoneId) : Promise.resolve([]),
                 ]);
                 manifest = recordPlatformWorkerTraffic(
                   manifest!,
@@ -1114,7 +1650,11 @@ export async function installPlatform(
                     'platform: Safe Cloudflare Worker route publication is unavailable.',
                   );
                 }
-                await dependencies.client.publishWorkerRoutesSafely(zone.id, workerName, patterns);
+                if (zoneId) {
+                  await dependencies.client.publishWorkerRoutesSafely(zoneId, workerName, patterns);
+                } else if (patterns.length > 0) {
+                  throw new Error('platform: Cannot publish zone routes in workers.dev mode.');
+                }
               },
               previousConfig: previousWorkerConfig,
               previousPublicEndpoints: true,
@@ -1132,7 +1672,7 @@ export async function installPlatform(
                 }
                 await dependencies.client.removeRoutes(
                   plan.account.id,
-                  zone.id,
+                  zoneId,
                   trackedPlatformWorkerTraffic(manifest!, new Set([action.name])),
                 );
               },
@@ -1185,26 +1725,48 @@ export async function installPlatform(
         plan.proxyUrl,
         plan.deployment.application.baseDomain,
         version,
+        targetUsageProtocolVersion,
         createPlatformHealthProbeToken(manifest.ownershipNonce),
+        undefined,
+        !plan.deployment.application.zoneName
+          ? `https://${plan.deployment.resources.dispatchWorker}.${plan.workersSubdomain}.workers.dev`
+          : undefined,
       );
       await verifyCurrentWorkerCutover();
     }
     workerDeploymentCommitted = true;
     manifest = recordWorkerCutoverResolution(manifest, workerCutoverGeneration, 'committed', now());
     manifest = recordWorkerTrafficState(manifest, workerCutoverGeneration, true, now());
+    if (workerSecretUpdateIntent) {
+      manifest = recordWorkerSecretUpdateState(
+        manifest,
+        workerCutoverGeneration,
+        'committed',
+        workerSecretUpdateIntent.id,
+        now(),
+      );
+    }
     manifest = {
       ...manifest,
       platformVersion: version,
       runtime: runtimeProvenance,
+      safetyProtocols: runtime.safetyProtocols ?? { sandboxDrain: 0 },
       updatedAt: now(),
+      usageProtocolVersion: targetUsageProtocolVersion,
     };
     manifest = transitionInstallation(manifest, 'installed', now());
     writeInstallationManifest(manifest);
     await writeRemoteInstallationCheckpoint(dependencies.client, plan, manifest);
     workerTrafficGuarded = false;
+    writePendingInstallationSecrets(manifest, secretCheckpoint(secrets));
     promoteInstallationSecrets(manifest);
     saveInstalledPlatformConnection(plan, manifest);
-    return { manifest, waitingForDns: false, zoneNameServers: zone.nameServers };
+    return {
+      manifest,
+      waitingForDns: false,
+      waitingForSandboxDrain: false,
+      zoneNameServers: zone?.nameServers ?? [],
+    };
   } catch (error) {
     let failure: unknown = error;
     const currentWorkerRecoveryIncomplete = error instanceof PlatformWorkerRecoveryIncompleteError;
@@ -1446,7 +2008,7 @@ async function createResource(
   }
 }
 
-function recordResource(
+export function recordResource(
   manifest: PlatformInstallationManifest,
   action: PlatformInstallPlanAction,
   id: string,
@@ -1752,15 +2314,49 @@ export function apiWorkerSecrets(
     GITHUB_CLIENT_SECRET: secrets.githubClientSecret,
     JWT_SECRET: secrets.jwtSecret,
     PLATFORM_BOOTSTRAP_GITHUB_ID: secrets.bootstrapGitHubId,
-    ...(secrets.projectSecretKey
+    ...(secrets.projectSecretKeysJson && secrets.projectSecretActiveKeyVersion
       ? {
-          PROJECT_SECRET_ACTIVE_KEY_VERSION: 'v1',
-          PROJECT_SECRET_KEYS_JSON: JSON.stringify({ v1: secrets.projectSecretKey }),
+          PROJECT_SECRET_ACTIVE_KEY_VERSION: secrets.projectSecretActiveKeyVersion,
+          PROJECT_SECRET_KEYS_JSON: secrets.projectSecretKeysJson,
         }
       : {}),
     R2_ACCESS_KEY_ID: secrets.r2AccessKeyId,
     R2_SECRET_ACCESS_KEY: secrets.r2SecretAccessKey,
   });
+}
+
+/** Existing Workers inherit live secrets, including complete encryption keyrings. */
+export function platformWorkerSecretPayload(
+  worker: 'api' | 'proxy' | 'tail' | 'dispatch',
+  secrets: PlatformInstallationSecrets,
+  accountId: string,
+  zoneId: string,
+  existingWorker: boolean,
+): Record<string, string> | null {
+  if (worker !== 'api' && worker !== 'proxy') {
+    return null;
+  }
+  if (!existingWorker) {
+    return worker === 'api'
+      ? apiWorkerSecrets(secrets, accountId, zoneId)
+      : proxyWorkerSecrets(secrets, accountId);
+  }
+  const allowed =
+    worker === 'api'
+      ? [
+          'CF_API_TOKEN',
+          'GITHUB_CLIENT_ID',
+          'GITHUB_CLIENT_SECRET',
+          'R2_ACCESS_KEY_ID',
+          'R2_SECRET_ACCESS_KEY',
+        ]
+      : ['CF_API_TOKEN'];
+  const updates = Object.fromEntries(
+    Object.entries(secrets.workerSecretUpdates ?? {}).filter(
+      ([name, value]) => allowed.includes(name) && typeof value === 'string' && value !== '',
+    ),
+  );
+  return Object.keys(updates).length > 0 ? updates : null;
 }
 
 export async function resolveBootstrapGitHubId(
@@ -1837,7 +2433,14 @@ export function assertRequiredPlatformSecrets(
     requireSecret(secrets.githubClientId, 'VOID_PLATFORM_GITHUB_CLIENT_ID');
     requireSecret(secrets.githubClientSecret, 'VOID_PLATFORM_GITHUB_CLIENT_SECRET');
     requireSecret(secrets.jwtSecret, 'VOID_PLATFORM_JWT_SECRET');
-    requireSecret(secrets.projectSecretKey, 'VOID_PLATFORM_PROJECT_SECRET_KEY');
+    requireSecret(
+      secrets.projectSecretKeysJson,
+      'VOID_PLATFORM_PROJECT_SECRET_KEYS_JSON (or VOID_PLATFORM_PROJECT_SECRET_KEY for v1)',
+    );
+    requireSecret(
+      secrets.projectSecretActiveKeyVersion,
+      'VOID_PLATFORM_PROJECT_SECRET_ACTIVE_KEY_VERSION (or VOID_PLATFORM_PROJECT_SECRET_KEY for v1)',
+    );
     requireSecret(secrets.r2AccessKeyId, 'VOID_PLATFORM_R2_ACCESS_KEY_ID');
     requireSecret(secrets.r2SecretAccessKey, 'VOID_PLATFORM_R2_SECRET_ACCESS_KEY');
   }
@@ -2195,6 +2798,7 @@ export async function acquirePlatformDatabaseLifecycleLockConnection(
     await client.query('SELECT pg_advisory_unlock(hashtextextended($1, 0))', [lockIdentity]);
   };
   release.authoritativeManifest = authoritativeManifest;
+  release.requiredSafetyProtocols = await readRequiredPlatformSafetyProtocols(client);
   release.checkpoint = async (manifest) => {
     if (released) {
       throw new Error('platform: Cannot checkpoint lifecycle state after releasing its lock.');
@@ -2224,7 +2828,263 @@ export async function acquirePlatformDatabaseLifecycleLockConnection(
       sourcePlatformVersion,
       hasPriorWorkers,
     );
+  release.prepareSandboxDrain = (requiredAdmissionProtocol) =>
+    preparePlatformSandboxDrainConnection(client, requiredAdmissionProtocol);
+  release.verifyDatabase = (runtimeDirectory, database) =>
+    verifyPlatformDatabaseConnection(client, runtimeDirectory, database);
   return release;
+}
+
+export async function preparePlatformSandboxDrainConnection(
+  client: DatabaseClaimConnection,
+  requiredAdmissionProtocol: 0 | 2 = 0,
+): Promise<PlatformSandboxDrainPreparation> {
+  const relation = await client.query<{ relation: string | null }>(
+    `SELECT to_regclass('"sandbox_drain_checkpoints"')::text AS "relation"`,
+  );
+  if (!relation.rows[0]?.relation) {
+    throw new Error(
+      'platform: Runtime declares sandbox-drain safety but its database checkpoint table is missing.',
+    );
+  }
+  const admissionColumn = await client.query<{ present: boolean }>(
+    `SELECT EXISTS(
+       SELECT 1
+       FROM information_schema.columns
+       WHERE table_schema = 'public'
+         AND table_name = 'sandbox_drain_checkpoints'
+         AND column_name = 'admission_protocol'
+     ) AS "present"`,
+  );
+  const hasAdmissionColumn = admissionColumn.rows[0]?.present === true;
+  if (requiredAdmissionProtocol === 2 && !hasAdmissionColumn) {
+    throw new Error(
+      'platform: The runtime database does not include the sandbox deployment admission barrier.',
+    );
+  }
+  const readCheckpoint = () =>
+    client.query<{
+      admission_protocol: number;
+      completed_at: string | null;
+      cursor: unknown;
+      generation: string;
+      phase: string;
+      started_at: string;
+      state: string;
+      updated_at: string;
+    }>(
+      `SELECT ${hasAdmissionColumn ? '"admission_protocol"' : '0 AS "admission_protocol"'}, "generation", "state", "phase", "cursor", "started_at", "updated_at", "completed_at"
+       FROM "sandbox_drain_checkpoints"
+       WHERE "singleton" = true`,
+    );
+  const classify = (
+    row:
+      | {
+          admission_protocol: number;
+          completed_at: string | null;
+          cursor: unknown;
+          generation: string;
+          phase: string;
+          started_at: string;
+          state: string;
+          updated_at: string;
+        }
+      | undefined,
+  ): PlatformSandboxDrainPreparation | null => {
+    if (!row) {
+      return null;
+    }
+    const cursor = row.cursor as Record<string, unknown> | null;
+    if (
+      !row.generation ||
+      (row.admission_protocol !== 0 && row.admission_protocol !== 2) ||
+      !row.started_at ||
+      !row.updated_at ||
+      (row.state !== 'draining' && row.state !== 'complete') ||
+      (row.phase !== 'deployments' && row.phase !== 'resources') ||
+      !cursor ||
+      (cursor.pass !== '1' && cursor.pass !== '2') ||
+      (row.state === 'complete' &&
+        (!row.completed_at || row.phase !== 'resources' || cursor.pass !== '2')) ||
+      (row.state === 'draining' && row.completed_at !== null)
+    ) {
+      throw new Error(
+        'platform: The authoritative sandbox-drain database checkpoint is invalid. Traffic remains disabled.',
+      );
+    }
+    return {
+      admissionProtocol: row.admission_protocol,
+      generation: row.generation,
+      mirrorValue: JSON.stringify({
+        version: 1,
+        generation: row.generation,
+        state: row.state,
+        startedAt: row.started_at,
+        updatedAt: row.updated_at,
+        ...(row.completed_at ? { completedAt: row.completed_at } : {}),
+      }),
+      state: row.state === 'complete' ? 'complete' : 'pending',
+    };
+  };
+  const existing = await readCheckpoint();
+  const existingState = classify(existing.rows[0]);
+  if (
+    existingState &&
+    (requiredAdmissionProtocol === 0 ||
+      existingState.admissionProtocol >= requiredAdmissionProtocol)
+  ) {
+    return existingState;
+  }
+  if (requiredAdmissionProtocol === 2) {
+    const generation = randomUUID();
+    await client.query('BEGIN');
+    try {
+      await client.query('LOCK TABLE "deployments" IN SHARE MODE');
+      await client.query(
+        `INSERT INTO "sandbox_drain_checkpoints" (
+           "singleton", "admission_protocol", "generation", "state", "phase", "cursor"
+         ) VALUES (true, 2, $1, 'draining', 'deployments', '{"pass":"1"}'::jsonb)
+         ON CONFLICT ("singleton") DO UPDATE
+         SET "admission_protocol" = 2,
+             "generation" = EXCLUDED."generation",
+             "state" = 'draining',
+             "phase" = 'deployments',
+             "cursor" = '{"pass":"1"}'::jsonb,
+             "lease_owner" = NULL,
+             "lease_expires_at" = NULL,
+             "started_at" = now(),
+             "updated_at" = now(),
+             "completed_at" = NULL`,
+        [generation],
+      );
+      const inventory = await client.query<{ empty: boolean }>(
+        `SELECT
+           NOT EXISTS(SELECT 1 FROM "deployments" LIMIT 1)
+           AND NOT EXISTS(SELECT 1 FROM "resources" WHERE "type" = 'container' LIMIT 1)
+           AS "empty"`,
+      );
+      if (inventory.rows[0]?.empty === true) {
+        await client.query(
+          `UPDATE "sandbox_drain_checkpoints"
+           SET "state" = 'complete',
+               "phase" = 'resources',
+               "cursor" = '{"pass":"2"}'::jsonb,
+               "lease_owner" = NULL,
+               "lease_expires_at" = NULL,
+               "updated_at" = now(),
+               "completed_at" = now()
+           WHERE "singleton" = true
+             AND "admission_protocol" = 2
+             AND "generation" = $1`,
+          [generation],
+        );
+      }
+      const armed = classify((await readCheckpoint()).rows[0]);
+      if (!armed || armed.admissionProtocol !== 2) {
+        throw new Error('platform: The sandbox deployment admission barrier could not be armed.');
+      }
+      await client.query('COMMIT');
+      return armed;
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      throw error;
+    }
+  }
+  const inventory = await client.query<{ empty: boolean }>(
+    `SELECT
+       NOT EXISTS(SELECT 1 FROM "deployments" LIMIT 1)
+       AND NOT EXISTS(SELECT 1 FROM "resources" WHERE "type" = 'container' LIMIT 1)
+       AS "empty"`,
+  );
+  const empty = inventory.rows[0]?.empty === true;
+  const generation = randomUUID();
+  const state = empty ? 'complete' : 'draining';
+  const phase = empty ? 'resources' : 'deployments';
+  const cursor = JSON.stringify({ pass: empty ? '2' : '1' });
+  await client.query(
+    `INSERT INTO "sandbox_drain_checkpoints" (
+       "singleton", "generation", "state", "phase", "cursor", "completed_at"
+     ) VALUES (true, $1, $2, $3, $4::jsonb, CASE WHEN $2 = 'complete' THEN now() ELSE NULL END)
+     ON CONFLICT ("singleton") DO NOTHING`,
+    [generation, state, phase, cursor],
+  );
+  const checkpoint = await readCheckpoint();
+  const preparedState = classify(checkpoint.rows[0]);
+  if (!preparedState) {
+    throw new Error('platform: The sandbox-drain database checkpoint could not be established.');
+  }
+  return preparedState;
+}
+
+export async function verifyPlatformDatabaseConnection(
+  client: DatabaseClaimConnection,
+  runtimeDirectory: string,
+  database: PlatformRuntimeDatabaseManifest,
+): Promise<void> {
+  verifyPlatformDatabaseArtifacts(runtimeDirectory, database);
+  const state = await inspectPlatformDatabaseStateConnection(client, database);
+  if (state.pendingMigrations.length !== 0 || state.schemaDigest !== database.schemaDigest) {
+    throw new Error(
+      'platform: PostgreSQL is not at the exact forward-only schema recorded by the installed runtime.',
+    );
+  }
+}
+
+async function readRequiredPlatformSafetyProtocols(
+  client: DatabaseClaimConnection,
+): Promise<Readonly<{ sandboxDrain: 0 | 1 | 2 }>> {
+  const relation = await client.query<{ relation: string | null }>(
+    `SELECT to_regclass('"sandbox_drain_checkpoints"')::text AS "relation"`,
+  );
+  if (!relation.rows[0]?.relation) {
+    return { sandboxDrain: 0 };
+  }
+  const admissionColumn = await client.query<{ present: boolean }>(
+    `SELECT EXISTS(
+       SELECT 1
+       FROM information_schema.columns
+       WHERE table_schema = 'public'
+         AND table_name = 'sandbox_drain_checkpoints'
+         AND column_name = 'admission_protocol'
+     ) AS "present"`,
+  );
+  if (admissionColumn.rows[0]?.present === true) {
+    const admission = await client.query<{ required: boolean }>(
+      `SELECT EXISTS(
+         SELECT 1
+         FROM "sandbox_drain_checkpoints"
+         WHERE "singleton" = true
+           AND "admission_protocol" >= 2
+       ) AS "required"`,
+    );
+    if (admission.rows[0]?.required === true) {
+      return { sandboxDrain: 2 };
+    }
+  }
+  const checkpoint = await client.query<{ required: boolean }>(
+    `SELECT EXISTS(
+       SELECT 1
+       FROM "sandbox_drain_checkpoints"
+       WHERE "singleton" = true
+     ) AS "required"`,
+  );
+  return { sandboxDrain: checkpoint.rows[0]?.required === true ? 1 : 0 };
+}
+
+export function assertPlatformRuntimeSafety(
+  runtime: Pick<PlatformRuntimeManifest, 'platformVersion' | 'safetyProtocols'>,
+  installed: Readonly<{ sandboxDrain: 0 | 1 | 2 }>,
+  database: Readonly<{ sandboxDrain: 0 | 1 | 2 }> = { sandboxDrain: 0 },
+): void {
+  const requiredSandboxDrain = Math.max(
+    installed?.sandboxDrain ?? 0,
+    database?.sandboxDrain ?? 0,
+  ) as 0 | 1 | 2;
+  if ((runtime.safetyProtocols?.sandboxDrain ?? 0) < requiredSandboxDrain) {
+    throw new Error(
+      `platform: Void Platform ${runtime.platformVersion} predates the required sandbox-drain safety protocol. Refusing to upload or activate a runtime that could reopen sandbox creation after drain.`,
+    );
+  }
 }
 
 export async function claimPlatformDatabaseConnection(
@@ -2337,7 +3197,7 @@ async function deployPlatformWorker(
   let previousVersionId: string | null = null;
   const nextTraffic = isolatePlatformWorkerCustomDomains(config);
   const previousTraffic = isolatePlatformWorkerCustomDomains(options.previousConfig);
-  const uploadConfig = withoutPlatformWorkerTrafficAttachments(nextTraffic.wranglerConfig);
+  let uploadConfig = withoutPlatformWorkerTrafficAttachments(nextTraffic.wranglerConfig);
   const nextTriggers = readTriggerConfigFromObject(nextTraffic.wranglerConfig);
   let previousTriggers = readTriggerConfigFromObject(previousTraffic.wranglerConfig);
   try {
@@ -2367,6 +3227,10 @@ async function deployPlatformWorker(
       }
       previousDeployment = deployments[0]!;
       previousDeploymentId = previousDeployment.id;
+      uploadConfig = withoutCompletedPlatformWorkerMigrations(uploadConfig, previous.migrationTag);
+      writeFileSync(configPath, `${JSON.stringify(uploadConfig, null, 2)}\n`, {
+        mode: 0o600,
+      });
       previousTriggers = resolvePlatformPreviousTriggerConfig(
         withoutPlatformCustomDomainTriggers(previous.triggerConfig),
         previousTriggers,
@@ -3340,7 +4204,11 @@ export async function readActivePlatformWorkerSnapshot(
   workerName: string,
   expectedOwnershipMarker: string,
   runner: typeof runPlatformWrangler = runPlatformWrangler,
-): Promise<{ triggerConfig: CloudflareTriggerConfig; versionId: string }> {
+): Promise<{
+  migrationTag: string | null;
+  triggerConfig: CloudflareTriggerConfig;
+  versionId: string;
+}> {
   const readActiveVersion = () =>
     readActivePlatformWorkerVersion(configPath, accountId, workerName, runner);
   const versionId = await readActiveVersion();
@@ -3406,7 +4274,28 @@ export async function readActivePlatformWorkerSnapshot(
       `platform: Active Worker ${workerName} predates safe trigger snapshots. Refusing to upgrade because its routes, cron, and queue consumers could not be restored after a failed cutover.`,
     );
   }
-  return { triggerConfig: metadata.triggerConfig, versionId };
+  const migrationTag = readCloudflareVersionMigrationTag(value);
+  return { migrationTag, triggerConfig: metadata.triggerConfig, versionId };
+}
+
+export function withoutCompletedPlatformWorkerMigrations(
+  config: Record<string, unknown>,
+  activeMigrationTag: string | null,
+): Record<string, unknown> {
+  const migrations = Array.isArray(config.migrations) ? config.migrations : [];
+  const target = migrations.at(-1);
+  if (
+    activeMigrationTag === null ||
+    !target ||
+    typeof target !== 'object' ||
+    Array.isArray(target) ||
+    (target as { tag?: unknown }).tag !== activeMigrationTag
+  ) {
+    return config;
+  }
+  const result = { ...config };
+  delete result.migrations;
+  return result;
 }
 
 function parseUploadedPlatformWorkerVersion(output: string): string | null {
@@ -3535,14 +4424,24 @@ type InterruptedWorkerCutover = Readonly<{
 }>;
 
 function nextWorkerCutoverGeneration(manifest: PlatformInstallationManifest): number {
-  return (
-    Math.max(
-      0,
-      ...manifest.steps.flatMap((step) => {
-        const match = /^worker-(?:cutover|traffic-state):(\d+)/.exec(step.key);
-        return match ? [Number(match[1])] : [];
-      }),
-    ) + 1
+  return latestPlatformWorkerCutoverGeneration(manifest) + 1;
+}
+
+function recordWorkerSecretUpdateState(
+  manifest: PlatformInstallationManifest,
+  generation: number,
+  state: 'pending' | 'committed',
+  intentId: string,
+  completedAt: string,
+): PlatformInstallationManifest {
+  return recordInstallationStep(
+    manifest,
+    {
+      completedAt,
+      key: `worker-secret-updates:${generation}:${state}`,
+      resultHash: intentId,
+    },
+    completedAt,
   );
 }
 
@@ -3840,8 +4739,10 @@ export async function verifyPlatformHealth(
   proxyUrl: string,
   applicationBaseDomain: string,
   platformVersion: string,
+  usageProtocolVersion: 0 | 1,
   healthProbeToken: string,
   fetcher: typeof fetch = fetch,
+  dispatchOrigin?: string,
 ): Promise<void> {
   const request = (url: string) =>
     fetcher(url, {
@@ -3855,7 +4756,7 @@ export async function verifyPlatformHealth(
     request(`${apiUrl}/health`),
     request(`${apiUrl}/.well-known/void-platform`),
     request(`${proxyUrl}/health`),
-    request(`https://test.${applicationBaseDomain}/health`),
+    request(`${dispatchOrigin ?? `https://test.${applicationBaseDomain}`}/health`),
   ]);
   if (!health.ok) {
     throw new Error(`platform: Health check failed at ${apiUrl} (HTTP ${health.status}).`);
@@ -3866,12 +4767,18 @@ export async function verifyPlatformHealth(
   const body = (await discovery.json()) as {
     installationId?: unknown;
     platformVersion?: unknown;
+    usageProtocolVersion?: unknown;
   };
   if (body.installationId !== installationId) {
     throw new Error('platform: Deployed API discovery identity does not match this installation.');
   }
   if (body.platformVersion !== platformVersion) {
     throw new Error('platform: Deployed API discovery version does not match this release.');
+  }
+  if ((body.usageProtocolVersion ?? 0) !== usageProtocolVersion) {
+    throw new Error(
+      'platform: Deployed API usage protocol does not match this runtime. Traffic remains disabled.',
+    );
   }
   if (!proxy.ok) {
     throw new Error(`platform: Proxy health check failed at ${proxyUrl} (HTTP ${proxy.status}).`);
@@ -3881,6 +4788,73 @@ export async function verifyPlatformHealth(
       `platform: Dispatch health check failed at https://test.${applicationBaseDomain} (HTTP ${dispatch.status}).`,
     );
   }
+}
+
+export async function verifyPlatformSandboxDrain(
+  apiUrl: string,
+  healthProbeToken: string,
+  fetcher: typeof fetch = fetch,
+): Promise<boolean> {
+  const response = await fetcher(`${apiUrl}/internal/platform/sandbox-drain`, {
+    headers: {
+      'X-Void-Platform-Probe': healthProbeToken,
+      ...cfAccessHeaders(process.env, apiUrl),
+    },
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (!response.ok) {
+    throw new Error(
+      `platform: Sandbox drain probe failed at ${apiUrl} (HTTP ${response.status}). Traffic remains disabled.`,
+    );
+  }
+  let value: unknown;
+  try {
+    value = await response.json();
+  } catch {
+    throw new Error(
+      'platform: Sandbox drain probe did not return its DB-backed protocol v1 document. Traffic remains disabled.',
+    );
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(
+      'platform: Sandbox drain probe returned an invalid DB-backed protocol v1 document. Traffic remains disabled.',
+    );
+  }
+  const status = value as Record<string, unknown>;
+  const validState =
+    status.state === 'required' || status.state === 'draining' || status.state === 'complete';
+  const validPhase =
+    status.phase === null || status.phase === 'deployments' || status.phase === 'resources';
+  if (
+    status.version !== 1 ||
+    !validState ||
+    typeof status.complete !== 'boolean' ||
+    !validPhase ||
+    (status.generation !== null &&
+      (typeof status.generation !== 'string' || status.generation.length === 0)) ||
+    (status.updatedAt !== null &&
+      (typeof status.updatedAt !== 'string' || !Number.isFinite(Date.parse(status.updatedAt)))) ||
+    (status.state === 'required' &&
+      (status.complete ||
+        status.generation !== null ||
+        status.updatedAt !== null ||
+        status.phase !== null)) ||
+    (status.state === 'draining' &&
+      (status.complete ||
+        typeof status.generation !== 'string' ||
+        typeof status.updatedAt !== 'string' ||
+        status.phase === null)) ||
+    (status.state === 'complete' &&
+      (!status.complete ||
+        typeof status.generation !== 'string' ||
+        typeof status.updatedAt !== 'string' ||
+        status.phase === null))
+  ) {
+    throw new Error(
+      'platform: Sandbox drain probe returned an invalid DB-backed protocol v1 document. Traffic remains disabled.',
+    );
+  }
+  return status.state === 'complete';
 }
 
 export function createPlatformHealthProbeToken(ownershipNonce: string): string {

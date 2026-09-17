@@ -256,7 +256,7 @@ if (helpPath) {
     {
       name: 'cloudflare',
       hint: 'login | status | logout',
-      description: 'Manage Cloudflare authentication',
+      description: 'Manage Cloudflare sign-in and inspect the deployment account',
     },
     {
       name: 'project',
@@ -291,8 +291,8 @@ if (helpPath) {
     },
     {
       name: 'env',
-      hint: 'check | types | example',
-      description: 'Validate env.ts, generate types, or scaffold .env.example',
+      hint: 'check | types',
+      description: 'Validate env.ts or generate types',
     },
     {
       name: 'gen',

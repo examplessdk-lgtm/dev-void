@@ -1,7 +1,6 @@
 /**
- * Shared dotenv parser + variable expander used by every CLI path that reads
- * `.env*` files (`void env check`, `void deploy`, `void init` scaffold
- * inference). A single source of truth avoids the drift we hit when two
+ * Shared dotenv parser + variable expander used by local `.env` consumers and
+ * explicit `void secret sync <file>` input. A single source of truth avoids drift when two
  * hand-rolled parsers diverged on quoting / expansion semantics.
  *
  * Expansion supports `${VAR}` and `$VAR`, a `\$VAR` literal-escape, and
@@ -10,14 +9,8 @@
  *
  * Security note: expansion is deliberately scoped to the in-file record.
  * We do NOT consult `process.env` the way `dotenv-expand` does — a shell
- * env leaking into an `.env.example` via expansion would silently reveal
- * developer machine state in committed output, and `void env check` /
- * `void deploy` would then pass with values that aren't present in CI.
- *
- * The runtime path (Vite's own `loadEnv`) DOES consult `process.env` for
- * expansion. That's a deliberate Vite choice; `filterLoadedEnv` strips
- * shell pollution from the final worker vars so the two sides agree on
- * the observable surface even when expansion sources differ.
+ * env leaking into a parsed dotenv file would silently change its meaning
+ * across machines.
  *
  * This module is a leaf — it must not import from `../log` or any non-leaf
  * module so that the prerender subprocess's worker bundle doesn't pick up
@@ -221,23 +214,6 @@ function expandValue(value: string, resolve: (key: string) => string): string {
     cursor++;
   }
   return result;
-}
-
-/**
- * Merge multiple parsed dotenv records with later-entries-win semantics,
- * then expand across the combined set. This is the recommended path for
- * callers reading multiple `.env*` files (Vite-style precedence), since
- * expansion sees every earlier file's keys at once.
- */
-export function mergeAndExpand(
-  records: Array<Record<string, string>>,
-  options: { onWarn?: (message: string) => void } = {},
-): Record<string, string> {
-  const merged: Record<string, string> = {};
-  for (const record of records) {
-    Object.assign(merged, record);
-  }
-  return expandDotenv(merged, options);
 }
 
 /**

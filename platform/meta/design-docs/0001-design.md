@@ -426,26 +426,6 @@ This section is about features offered to apps after they are deployed on Void.
 - project usage views
 - plan enforcement and suspension
 
-### Planned / Roadmap
-
-These fit the current architecture but are not fully implemented platform behavior yet.
-
-- GitHub App push-to-deploy
-- preview deployments
-- preview database copies or forks
-- richer deploy-status streaming UX
-- per-route observability
-- Core Web Vitals collection
-- privacy-first product analytics
-- error tracking
-- better user-facing log exploration and live tailing
-- team collaboration, RBAC, and audit logs
-- environment promotion flows
-- enterprise SSO
-- first-class email integrations
-- first-class WebSocket support
-- integration marketplace / provider packages
-
 ### What This Platform Is Not Trying to Be
 
 Void is not trying to re-implement every meta-framework feature itself.

@@ -11,6 +11,8 @@ import {
   getProjectResources,
   getProjectsByUserId,
   getUser,
+  LastAdminError,
+  prepareUserRemoval,
   suspendUser,
   unsuspendUser,
   unsuspendUserIfReason,
@@ -111,6 +113,26 @@ async function requireUser(db: Db, id: string) {
     throw new OperatorError(404, 'User not found');
   }
   return user;
+}
+
+async function prepareRemoval(
+  db: Db,
+  id: string,
+  action: Parameters<typeof prepareUserRemoval>[2],
+  dryRun: boolean,
+) {
+  try {
+    const user = await prepareUserRemoval(db, id, action, dryRun);
+    if (!user) {
+      throw new OperatorError(404, 'User not found');
+    }
+    return user;
+  } catch (error) {
+    if (error instanceof LastAdminError) {
+      throw new OperatorError(409, error.message, 'last_admin');
+    }
+    throw error;
+  }
 }
 
 async function requireProject(db: Db, id: string) {
@@ -237,7 +259,6 @@ export async function suspendOperatorUser(
   dryRun = false,
 ) {
   const db = context.get('db');
-  const user = await requireUser(db, id);
   if (!isAdminSuspended(reason)) {
     throw new OperatorError(
       400,
@@ -245,6 +266,7 @@ export async function suspendOperatorUser(
     );
   }
   const projects = await getProjectsByUserId(db, id);
+  const user = await prepareRemoval(db, id, { kind: 'suspend', reason }, dryRun);
   const target = { id, login: user.login };
   if (dryRun) {
     return preview('user.suspend', target, {
@@ -252,7 +274,8 @@ export async function suspendOperatorUser(
       projects: projects.map((p) => ({ id: p.id, slug: p.slug })),
     });
   }
-  // Edge first, DB last: a failed fan-out leaves a retryable control-plane state.
+  // Ordinary users remain edge-first. Administrators have already lost access
+  // atomically, so concurrent removals cannot count them during this fan-out.
   try {
     await setProjectsRoutingSuspension(context.env.ROUTING, db, projects, {
       op: 'suspend',
@@ -264,9 +287,11 @@ export async function suspendOperatorUser(
     console.error('[admin] suspend failed', { userId: id, error });
     throw new OperatorError(
       500,
-      'Suspend incomplete. Edge enforcement could not be fully stamped. Retry the suspend; the stamp is idempotent.',
+      'Suspend incomplete. Edge enforcement could not be fully stamped. ' +
+        (user.role === 'admin' ? 'Administrator access remains revoked. ' : '') +
+        'Retry the suspend; the stamp is idempotent.',
       'partial_failure',
-      { partial: true, target, reason },
+      { partial: true, target, reason, adminAccessRevoked: user.role === 'admin' },
     );
   }
   return { action: 'user.suspend', target, reason };
@@ -341,8 +366,8 @@ export async function deleteOperatorProject(context: Context<ApiEnv>, id: string
 
 export async function deleteOperatorUser(context: Context<ApiEnv>, id: string, dryRun = false) {
   const db = context.get('db');
-  const user = await requireUser(db, id);
   const projects = await getProjectsByUserId(db, id);
+  const user = await prepareRemoval(db, id, { kind: 'delete' }, dryRun);
   const target = { id, login: user.login };
   if (dryRun) {
     return preview('user.delete', target, {
@@ -366,9 +391,18 @@ export async function deleteOperatorUser(context: Context<ApiEnv>, id: string, d
     console.error('[admin] user delete failed', { userId: id, error });
     throw new OperatorError(
       500,
-      'User deletion incomplete. Some projects or resources may already be removed; inspect the user before retrying.',
+      'User deletion incomplete. Some projects or resources may already be removed. ' +
+        (user.role === 'admin' ? 'Administrator access remains revoked. ' : '') +
+        'Inspect the user before retrying.',
       'partial_failure',
-      { partial: true, target, deletedProjects, currentProject, warnings },
+      {
+        partial: true,
+        target,
+        deletedProjects,
+        currentProject,
+        warnings,
+        adminAccessRevoked: user.role === 'admin',
+      },
     );
   }
   return { action: 'user.delete', target, deleted: true, deletedProjects, warnings };

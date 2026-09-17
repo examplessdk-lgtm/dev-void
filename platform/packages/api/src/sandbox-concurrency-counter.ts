@@ -1,5 +1,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import type { ApiEnv } from './env.ts';
+import { ensureUsageSigningKey, signUsageEvent } from './usage-auth.ts';
+import type { UsageEvent } from './usage-counter.ts';
 
 // --- Exported constants (used by tests + the proxy caller) ---
 
@@ -16,7 +18,19 @@ export const RECONCILE_INTERVAL_MS = 60 * 60_000;
 
 // --- Storage shape ---
 
-type Entry = { acquiredAt: number };
+export type SandboxUsageAttribution = Readonly<{
+  projectId: string;
+  userId: string;
+  slug: string;
+}>;
+
+type Entry = {
+  acquiredAt: number;
+  /** Stable generation start; acquiredAt is only the last heartbeat. */
+  meteringStart?: number;
+  meteredThrough?: number;
+  attribution?: SandboxUsageAttribution;
+};
 
 type EntriesMap = Record<string, Entry>;
 
@@ -31,32 +45,42 @@ export type RefreshResult = { ok: true } | { ok: false; reason: 'not_held' };
 /**
  * Per-account counter for live sandbox containers.
  *
- * The DO is intentionally storage-only: it does not query the platform DB or
- * KV. The caller (the proxy worker) is responsible for plan lookups and KV
- * `sandbox-block:{userId}` checks before invoking `acquire`. Keeping this DO
- * stateless aside from its in-memory/persisted slot map keeps it cheap and
- * avoids cross-binding chatter on the hot path.
+ * The caller (the proxy worker) owns plan lookups and KV
+ * `sandbox-block:{userId}` checks before invoking `acquire`. This DO owns the
+ * lease clock and publishes signed usage intervals to the platform queue.
  *
  * Addressing convention: callers derive the DO id with
- * `idFromName('account:${userId}')`. The DO itself does not know its userId
- * — the caller passes the plan limit in to `acquire`, so the DO only ever
- * compares against an opaque integer.
+ * `idFromName('account:${userId}')`. The trusted proxy supplies attribution
+ * and the plan limit; the DO compares capacity against that integer.
  */
 export class SandboxConcurrencyCounter extends DurableObject<ApiEnv['Bindings']> {
   private entries: EntriesMap | null = null;
+  private operationTail: Promise<void> = Promise.resolve();
+
+  private serialize<T>(operation: () => Promise<T>): Promise<T> {
+    // KV and Queue I/O open the DO input gate. Queue every distinct operation
+    // through persistence so a heartbeat cannot resurrect a released lease.
+    const result = this.operationTail.then(operation);
+    this.operationTail = result.then(
+      () => {},
+      () => {},
+    );
+    return result;
+  }
 
   private async getEntries(): Promise<EntriesMap> {
-    if (this.entries) {
-      return this.entries;
+    if (!this.entries) {
+      const stored = await this.ctx.storage.get<EntriesMap>(STORAGE_KEY);
+      this.entries = stored ?? {};
     }
-    const stored = await this.ctx.storage.get<EntriesMap>(STORAGE_KEY);
-    this.entries = stored ?? {};
-    return this.entries;
+    // Entries themselves are replaced, never mutated. A private map keeps a
+    // failed publish or storage put from committing changes to the cache.
+    return { ...this.entries };
   }
 
   private async saveEntries(entries: EntriesMap): Promise<void> {
-    this.entries = entries;
     await this.ctx.storage.put(STORAGE_KEY, entries);
+    this.entries = entries;
   }
 
   private async ensureAlarm(): Promise<void> {
@@ -66,25 +90,96 @@ export class SandboxConcurrencyCounter extends DurableObject<ApiEnv['Bindings']>
     }
   }
 
+  private attributeEntry(entry: Entry, attribution: SandboxUsageAttribution | undefined): Entry {
+    if (!attribution) {
+      return entry;
+    }
+    // Old leases have no trustworthy attribution or metering generation.
+    // Adopt them from this server timestamp instead of guessing prior usage.
+    return { ...entry, attribution, meteringStart: entry.meteringStart ?? Date.now() };
+  }
+
+  /** Publish cumulative whole-second usage using only the DO's clock. */
+  private async meterThrough(
+    projectScopedSandboxInstanceId: string,
+    entry: Entry,
+    through: number,
+  ): Promise<Entry> {
+    const attribution = entry.attribution;
+    if (!attribution || entry.meteringStart === undefined) {
+      // An entry persisted by the previous class version has no trustworthy
+      // attribution. A proxy refresh/release backfills it; the stale sweep
+      // must not guess identity for an orphan that never called either path.
+      return entry;
+    }
+    const from = entry.meteringStart;
+    const seconds = Math.floor(Math.max(0, through - from) / 1000);
+    const meteredThrough = from + seconds * 1000;
+    if (meteredThrough <= (entry.meteredThrough ?? from)) {
+      return entry;
+    }
+    // Queue delivery can be out of order. Keeping the start fixed lets the
+    // consumer bill only the unseen suffix of this lease generation.
+    const eventId = `sandbox:${projectScopedSandboxInstanceId}:${from}:${meteredThrough}`;
+    const event: UsageEvent = {
+      ...attribution,
+      requests: 0,
+      responseBytes: 0,
+      sandboxInstanceId: projectScopedSandboxInstanceId,
+      sandboxMeteredFrom: from,
+      sandboxMeteredThrough: meteredThrough,
+    };
+    if (!this.env.USAGE_EVENTS_QUEUE) {
+      throw new Error('trusted usage queue binding is unavailable');
+    }
+    const key = await ensureUsageSigningKey(this.env.ROUTING, this.env.JWT_SECRET);
+    await this.env.USAGE_EVENTS_QUEUE.send(
+      await signUsageEvent(key, 'sandbox-counter', eventId, event),
+    );
+    return { ...entry, meteredThrough };
+  }
+
   /**
-   * Try to claim a sandbox slot for `sandboxInstanceId`.
+   * Try to claim a sandbox slot for `projectScopedSandboxInstanceId`.
    *
    * `planLimit` is the per-account cap (`PlanLimits.sandboxMaxConcurrentInstances`).
    * A value of `0` follows the project's standard "0 means unlimited"
    * convention used elsewhere in `tiers.ts` / `isWithinLimit`.
    *
-   * Idempotent: if `sandboxInstanceId` is already held, the call refreshes
+   * Idempotent: if `projectScopedSandboxInstanceId` is already held, the call refreshes
    * its `acquiredAt` timestamp (which keeps the alarm sweep from reaping a
    * still-live session) and returns `{ ok: true }` without double-counting.
    */
-  async acquire(sandboxInstanceId: string, planLimit: number): Promise<AcquireResult> {
+  async acquire(
+    projectScopedSandboxInstanceId: string,
+    planLimit: number,
+    attribution?: SandboxUsageAttribution,
+  ): Promise<AcquireResult> {
+    return this.serialize(() =>
+      this.handleAcquire(projectScopedSandboxInstanceId, planLimit, attribution),
+    );
+  }
+
+  private async handleAcquire(
+    projectScopedSandboxInstanceId: string,
+    planLimit: number,
+    attribution?: SandboxUsageAttribution,
+  ): Promise<AcquireResult> {
     const entries = await this.getEntries();
+    const now = Date.now();
 
     // Idempotent refresh — don't double-count an already-held slot. Avoids
     // a leak when the proxy retries `acquire` for the same sandbox after a
     // transient network error.
-    if (entries[sandboxInstanceId]) {
-      entries[sandboxInstanceId] = { acquiredAt: Date.now() };
+    if (entries[projectScopedSandboxInstanceId]) {
+      const current = entries[projectScopedSandboxInstanceId]!;
+      const withAttribution = this.attributeEntry(current, attribution);
+      const metered = await this.meterThrough(projectScopedSandboxInstanceId, withAttribution, now);
+      entries[projectScopedSandboxInstanceId] = {
+        ...metered,
+        acquiredAt: now,
+        ...(attribution ? { attribution } : {}),
+      };
       await this.saveEntries(entries);
       await this.ensureAlarm();
       return { ok: true };
@@ -96,7 +191,12 @@ export class SandboxConcurrencyCounter extends DurableObject<ApiEnv['Bindings']>
       return { ok: false, reason: 'concurrency' };
     }
 
-    entries[sandboxInstanceId] = { acquiredAt: Date.now() };
+    entries[projectScopedSandboxInstanceId] = {
+      acquiredAt: now,
+      meteringStart: now,
+      meteredThrough: now,
+      ...(attribution ? { attribution } : {}),
+    };
     await this.saveEntries(entries);
     await this.ensureAlarm();
     return { ok: true };
@@ -117,28 +217,62 @@ export class SandboxConcurrencyCounter extends DurableObject<ApiEnv['Bindings']>
    * which keeps the DO's accounting simple (no surprise re-claim that
    * bypasses the planLimit check on the acquire path).
    */
-  async refresh(sandboxInstanceId: string): Promise<RefreshResult> {
+  async refresh(
+    projectScopedSandboxInstanceId: string,
+    attribution?: SandboxUsageAttribution,
+  ): Promise<RefreshResult> {
+    return this.serialize(() => this.handleRefresh(projectScopedSandboxInstanceId, attribution));
+  }
+
+  private async handleRefresh(
+    projectScopedSandboxInstanceId: string,
+    attribution?: SandboxUsageAttribution,
+  ): Promise<RefreshResult> {
     const entries = await this.getEntries();
-    if (!entries[sandboxInstanceId]) {
+    const current = entries[projectScopedSandboxInstanceId];
+    if (!current) {
       return { ok: false, reason: 'not_held' };
     }
-    entries[sandboxInstanceId] = { acquiredAt: Date.now() };
+    const now = Date.now();
+    const withAttribution = this.attributeEntry(current, attribution);
+    const metered = await this.meterThrough(projectScopedSandboxInstanceId, withAttribution, now);
+    entries[projectScopedSandboxInstanceId] = {
+      ...metered,
+      acquiredAt: now,
+      ...(attribution ? { attribution } : {}),
+    };
     await this.saveEntries(entries);
     await this.ensureAlarm();
     return { ok: true };
   }
 
   /**
-   * Release the slot held by `sandboxInstanceId`. Idempotent: missing ids
+   * Release the slot held by `projectScopedSandboxInstanceId`. Idempotent: missing ids
    * are a no-op so the proxy can call `release` from both happy-path and
    * cleanup code paths without coordination.
    */
-  async release(sandboxInstanceId: string): Promise<void> {
+  async release(
+    projectScopedSandboxInstanceId: string,
+    attribution?: SandboxUsageAttribution,
+  ): Promise<void> {
+    return this.serialize(() => this.handleRelease(projectScopedSandboxInstanceId, attribution));
+  }
+
+  private async handleRelease(
+    projectScopedSandboxInstanceId: string,
+    attribution?: SandboxUsageAttribution,
+  ): Promise<void> {
     const entries = await this.getEntries();
-    if (!(sandboxInstanceId in entries)) {
+    const current = entries[projectScopedSandboxInstanceId];
+    if (!current) {
       return;
     }
-    delete entries[sandboxInstanceId];
+    await this.meterThrough(
+      projectScopedSandboxInstanceId,
+      this.attributeEntry(current, attribution),
+      Date.now(),
+    );
+    delete entries[projectScopedSandboxInstanceId];
     await this.saveEntries(entries);
   }
 
@@ -149,11 +283,19 @@ export class SandboxConcurrencyCounter extends DurableObject<ApiEnv['Bindings']>
    * we let the alarm lapse to keep the DO cold.
    */
   async alarm(): Promise<void> {
+    return this.serialize(() => this.handleAlarm());
+  }
+
+  private async handleAlarm(): Promise<void> {
     const entries = await this.getEntries();
     const now = Date.now();
     let changed = false;
     for (const [id, entry] of Object.entries(entries)) {
       if (entry.acquiredAt < now - STALE_MS) {
+        // Bill through the exact stale boundary, not the later alarm fire
+        // time. If publishing fails, retain the entry so the next alarm can
+        // retry the same deterministic interval id.
+        await this.meterThrough(id, entry, entry.acquiredAt + STALE_MS);
         delete entries[id];
         changed = true;
       }

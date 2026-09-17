@@ -1,27 +1,23 @@
 import type { Env } from './types.ts';
 
-// In-memory cache: worker names are stable (only change on slug rename, which is rare).
-const workerNameCache = new Map<string, string>();
+type WorkerResolution = Readonly<{ workerName: string; deploymentId: string }>;
 
-/** @internal Exposed for testing only. */
-export function clearWorkerNameCache() {
-  workerNameCache.clear();
-}
+type DispatchOptions = Readonly<{
+  /** Read-only operations may retry through their REST fallback after a transport failure. */
+  fallbackOnDispatchError?: boolean;
+}>;
 
 /**
- * Resolves a project's worker name via the API service binding.
- * Results are cached in-memory per isolate.
+ * Resolve the active deployment's worker through the API service binding.
+ *
+ * This lookup intentionally runs for every operation. The project id is stable,
+ * while rollback changes the active deployment and therefore the worker name.
  */
-async function resolveWorkerName(
+async function resolveWorker(
   api: Fetcher,
   jwtSecret: string,
   projectId: string,
-): Promise<string | null> {
-  const cached = workerNameCache.get(projectId);
-  if (cached) {
-    return cached;
-  }
-
+): Promise<WorkerResolution | null> {
   const token = await hmacSign(projectId, jwtSecret);
   const res = await api.fetch(`https://api/internal/resolve-worker/${projectId}`, {
     method: 'POST',
@@ -31,13 +27,18 @@ async function resolveWorkerName(
     },
   });
 
-  if (!res.ok) {
+  if (res.status === 404 || res.status === 409) {
     return null;
   }
+  if (!res.ok) {
+    throw new Error(`worker resolution failed with status ${res.status}`);
+  }
 
-  const data = await res.json<{ workerName: string }>();
-  workerNameCache.set(projectId, data.workerName);
-  return data.workerName;
+  const data = await res.json<Partial<WorkerResolution>>();
+  if (typeof data.workerName !== 'string' || typeof data.deploymentId !== 'string') {
+    throw new Error('worker resolution returned an invalid response');
+  }
+  return { workerName: data.workerName, deploymentId: data.deploymentId };
 }
 
 /**
@@ -52,15 +53,29 @@ export async function dispatchToWorker(
   projectId: string,
   path: string,
   body: Record<string, unknown>,
+  options: DispatchOptions = {},
 ): Promise<Response | null> {
+  let resolution: WorkerResolution | null;
   try {
-    const workerName = await resolveWorkerName(env.API, env.JWT_SECRET, projectId);
-    if (!workerName) {
-      return null;
-    }
+    resolution = await resolveWorker(env.API, env.JWT_SECRET, projectId);
+  } catch {
+    return options.fallbackOnDispatchError
+      ? null
+      : Response.json({ error: 'active worker resolution failed' }, { status: 502 });
+  }
+  if (!resolution) {
+    return null;
+  }
 
-    const proxyToken = await hmacSign(projectId, env.JWT_SECRET);
-    const worker = env.DISPATCH.get(workerName);
+  const proxyToken = await hmacSign(projectId, env.JWT_SECRET);
+  let worker: Fetcher;
+  try {
+    worker = env.DISPATCH.get(resolution.workerName);
+  } catch {
+    return null;
+  }
+
+  try {
     const res = await worker.fetch(`https://worker/__void${path}`, {
       method: 'POST',
       headers: {
@@ -77,8 +92,14 @@ export async function dispatchToWorker(
 
     return res;
   } catch {
-    // Dispatch failure (worker not found, name resolution failed, etc.) → fall back
-    return null;
+    // A write may already have committed before a response/transport failure.
+    // Only explicitly read-only callers may replay through a REST fallback.
+    return options.fallbackOnDispatchError
+      ? null
+      : Response.json(
+          { error: 'worker dispatch failed; operation result is unknown' },
+          { status: 502 },
+        );
   }
 }
 

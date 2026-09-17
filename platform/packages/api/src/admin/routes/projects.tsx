@@ -2,7 +2,9 @@ import { Hono } from 'hono';
 import { SITE_DOMAIN } from '../../constants.ts';
 import { getAllProjectsWithOwner, countProjects, searchProjects } from '../../db.ts';
 import type { ApiEnv } from '../../env.ts';
+import { executeAuditedMutation, operatorAuditIntent } from '../../operator/audit.ts';
 import { deleteOperatorProject, getOperatorProject } from '../../operator/tenant-service.ts';
+import { projectUrl, projectWithUrl } from '../../project-url.ts';
 import { renderOperationError } from '../operation-error.tsx';
 import { BuildTable } from '../views/build-table.tsx';
 import { DeploymentTable } from '../views/deployment-table.tsx';
@@ -21,7 +23,7 @@ app.get('/', async (context) => {
     const projects = await searchProjects(context.get('db'), search);
     return context.html(
       <ProjectsListPage
-        projects={projects}
+        projects={projects.map((project) => projectWithUrl(project, context.env))}
         search={search}
         siteDomain={siteDomain}
         username={context.get('user').login}
@@ -37,7 +39,7 @@ app.get('/', async (context) => {
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   return context.html(
     <ProjectsListPage
-      projects={projects}
+      projects={projects.map((project) => projectWithUrl(project, context.env))}
       page={page}
       totalPages={totalPages}
       siteDomain={siteDomain}
@@ -54,8 +56,7 @@ app.get('/:id', async (context) => {
   );
 
   const cfAccountId = context.env.CF_ACCOUNT_ID;
-  const siteDomain = context.env.SITE_DOMAIN ?? SITE_DOMAIN;
-  const deployUrl = `https://${project.slug}.${siteDomain}`;
+  const deployUrl = projectUrl(project, context.env);
   const tz = (context.req.raw.cf?.timezone as string | undefined) ?? undefined;
 
   return context.html(
@@ -191,8 +192,15 @@ app.get('/:id', async (context) => {
 
 // POST /projects/:id/delete
 app.post('/:id/delete', async (context) => {
-  await deleteOperatorProject(context, context.req.param('id'));
-  return context.redirect('/admin/projects');
+  const projectId = context.req.param('id');
+  return executeAuditedMutation(
+    context,
+    operatorAuditIntent(`projects/${projectId}/delete`),
+    async () => {
+      await deleteOperatorProject(context, projectId);
+      return { response: context.redirect('/admin/projects'), succeeded: true };
+    },
+  );
 });
 
 export default app;

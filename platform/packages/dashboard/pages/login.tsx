@@ -1,11 +1,9 @@
 import Stack, { VStack } from '@nkzw/stack';
-import { AppHeader, FooterNav, ThemeContextProvider } from '@voidcloud/ui';
-import heroBackground from '@voidcloud/ui/assets/hero-background.jpg';
-import monoIcon from '@voidcloud/ui/assets/icons/void-icon.svg';
-import logoDark from '@voidcloud/ui/assets/logos/void-dark.svg';
-import logoLight from '@voidcloud/ui/assets/logos/void-light.svg';
-import footerBg from '@voidcloud/ui/assets/vite/footer-background.jpg';
 import type { ReactNode } from 'react';
+import heroBackground from '../ui/assets/hero-background.jpg';
+import logoDark from '../ui/assets/logos/void-dark.svg';
+import logoLight from '../ui/assets/logos/void-light.svg';
+import { AppHeader, FooterNav, ThemeContextProvider } from '../ui/index.ts';
 import type { Props } from './login.server.ts';
 
 function FlexibleSpacer() {
@@ -41,11 +39,9 @@ function LoginPageShell({ children }: { children: ReactNode }) {
   return (
     <ThemeContextProvider
       value={{
-        footerBg,
         logoAlt: 'Void',
         logoDark,
         logoLight,
-        monoIcon,
       }}
     >
       <div className="login-public-shell marketing-layout flex min-h-screen flex-col bg-white text-primary dark:bg-primary dark:text-white">

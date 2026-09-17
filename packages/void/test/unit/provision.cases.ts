@@ -5695,11 +5695,13 @@ describe('createDefaultRunWrangler — parent-signal forwarding awaits confirmed
 describe('createDefaultRunWrangler — normal close confirms the whole GROUP', () => {
   const GROUP_CLOSE_TMP = join(import.meta.dirname, '.tmp-group-close');
   beforeEach(() => {
-    rmSync(GROUP_CLOSE_TMP, { recursive: true, force: true });
+    rmSync(GROUP_CLOSE_TMP, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
     mkdirSync(GROUP_CLOSE_TMP, { recursive: true });
   });
   afterEach(() => {
-    rmSync(GROUP_CLOSE_TMP, { recursive: true, force: true });
+    // Windows may retain the exited child's cwd handle briefly after the
+    // liveness assertion passes. Retry removal without weakening that assertion.
+    rmSync(GROUP_CLOSE_TMP, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
   });
 
   it('an exit-0 leader that leaves a SAME-GROUP grandchild alive: the runner resolves only after the group is dead', async () => {

@@ -100,14 +100,14 @@ describe('devTriggersHintPlugin', () => {
     expect(output).toContain('"queue":"emails"');
   });
 
-  it('prints x-void-internal when .dev.vars defines __VOID_PROXY_TOKEN', async () => {
+  it('prints x-void-internal when .env defines __VOID_PROXY_TOKEN', async () => {
     const root = createTempRoot();
     mkdirSync(join(root, 'crons'), { recursive: true });
     writeFileSync(
       join(root, 'crons', 'heartbeat.ts'),
       'export const cron = "0 * * * *";\nexport default async () => {};\n',
     );
-    writeFileSync(join(root, '.dev.vars'), '__VOID_PROXY_TOKEN=local-proxy-token\n');
+    writeFileSync(join(root, '.env'), '__VOID_PROXY_TOKEN=local-proxy-token\n');
     const log = vi.spyOn(console, 'log').mockImplementation(() => {});
 
     await runConfigureServer(

@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { pathToFileURL } from 'node:url';
-import { join } from 'pathslash';
+import { dirname, join, relative } from 'pathslash';
 import type { Plugin } from 'vite';
 import { readProjectPaths } from './project-paths.ts';
 
@@ -123,6 +123,22 @@ export function nodeTargetPlugin(target: NodeTarget): Array<Plugin> {
             `CF bindings require target: "cloudflare".`,
         );
       },
+    },
+
+    renderChunk(code, chunk) {
+      if (!code.includes('import.meta.voidClientDirectory')) {
+        return null;
+      }
+      // app.js may re-export a shared module under assets/. Compute from the
+      // actual emitted chunk rather than the source entry or process cwd.
+      const clientPath = relative(dirname(chunk.fileName), '../client');
+      return {
+        code: code.replaceAll(
+          'import.meta.voidClientDirectory',
+          `new URL(${JSON.stringify(`${clientPath}/`)}, import.meta.url)`,
+        ),
+        map: null,
+      };
     },
 
     config(_, { command }) {

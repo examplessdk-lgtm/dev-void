@@ -34,6 +34,7 @@ jobs:
       require-schema-compat: true
     permissions:
       contents: read
+      deployments: read
 
   deploy:
     if: ${{ vars.VOID_PLATFORM_DEPLOY_ENABLED == 'true' && github.ref == 'refs/heads/prod' }}

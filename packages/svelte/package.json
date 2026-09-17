@@ -20,16 +20,9 @@
       "types": "./dist/plugin.d.mts",
       "import": "./dist/plugin.mjs"
     },
-    "./runtime": {
-      "svelte": "./src/runtime/index.ts",
-      "default": "./src/runtime/index.ts"
-    },
     "./App.svelte": {
       "svelte": "./src/runtime/App.svelte",
       "default": "./src/runtime/App.svelte"
-    },
-    "./prefetch": {
-      "default": "./src/runtime/prefetch.ts"
     }
   },
   "publishConfig": {

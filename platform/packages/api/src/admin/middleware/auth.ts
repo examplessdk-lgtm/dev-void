@@ -3,6 +3,7 @@ import { getCookie } from 'hono/cookie';
 import { verifyJwt } from '../../auth/jwt.ts';
 import { getUser, getFirstAdmin } from '../../db.ts';
 import { type ApiEnv, isDevBypass } from '../../env.ts';
+import { isAdminSuspended } from '../../suspension.ts';
 
 export const adminAuthMiddleware: MiddlewareHandler<ApiEnv> = async (context, next) => {
   // CSRF defense: every admin write is state-changing and authenticated by a
@@ -44,7 +45,7 @@ export const adminAuthMiddleware: MiddlewareHandler<ApiEnv> = async (context, ne
   }
 
   const user = await getUser(context.get('db'), payload.sub);
-  if (!user || user.role !== 'admin') {
+  if (!user || user.role !== 'admin' || isAdminSuspended(user.suspended_reason)) {
     return context.html('<h1>403 Forbidden</h1><p>Admin access required.</p>', 403);
   }
 

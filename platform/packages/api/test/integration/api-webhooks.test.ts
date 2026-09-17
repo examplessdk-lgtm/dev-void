@@ -12,13 +12,14 @@ import {
 } from 'vite-plus/test';
 import {
   createBuild,
-  createGitHubConnection,
+  createGitHubConnection as createGitHubConnectionRecord,
   deleteGitHubConnection,
   getBuild,
   getGitHubConnection,
   getGitHubInstallation,
   getGitHubInstallationMembers,
   getInstallationRevocationAt,
+  getProject,
   getProjectBuilds,
   markGitHubInstallationStatus,
   setBuildCheckRunId,
@@ -219,6 +220,21 @@ function recordingBuildManager(): {
   return { namespace, cancelledIds };
 }
 
+async function createGitHubConnection(
+  db: Db,
+  args: Parameters<typeof createGitHubConnectionRecord>[1],
+) {
+  const project = await getProject(db, args.projectId);
+  if (!project) {
+    throw new Error('test project missing');
+  }
+  return createGitHubConnectionRecord(db, {
+    ...args,
+    authorizedByUserId:
+      args.authorizedByUserId === undefined ? project.user_id : args.authorizedByUserId,
+  });
+}
+
 // Seed an ACTIVE github_installations row. The push resolver
 // (`getGitHubConnectionsByRepo`) now INNER JOINs github_installations and
 // requires status='active' plus repo membership, so every push test that
@@ -236,7 +252,7 @@ async function seedInstallation(
     userId: null,
     accountLogin: `acct-${installationId}`,
     accountId: installationId,
-    accountType: 'User',
+    accountType: 'Organization',
     repositories,
     repositorySelection,
   });

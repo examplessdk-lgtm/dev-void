@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { getAllUsers, countUsers, searchUsers } from '../../db.ts';
 import type { ApiEnv } from '../../env.ts';
+import { executeAuditedMutation, operatorAuditIntent } from '../../operator/audit.ts';
 import {
   changeOperatorUserPlan,
   deleteOperatorUser,
@@ -50,28 +51,53 @@ app.get('/:id', async (context) => {
 
 app.post('/:id/plan', async (context) => {
   const body = await context.req.parseBody();
-  await changeOperatorUserPlan(context, context.req.param('id'), String(body.plan ?? ''));
-  return context.redirect(`/admin/users/${context.req.param('id')}`);
+  const userId = context.req.param('id');
+  return executeAuditedMutation(
+    context,
+    operatorAuditIntent(`users/${userId}/plan`, { plan: body.plan }),
+    async () => {
+      await changeOperatorUserPlan(context, userId, String(body.plan ?? ''));
+      return { response: context.redirect(`/admin/users/${userId}`), succeeded: true };
+    },
+  );
 });
 
 app.post('/:id/suspend', async (context) => {
   const body = await context.req.parseBody();
-  await suspendOperatorUser(
+  const userId = context.req.param('id');
+  const reason = String(body.reason || 'admin_suspended');
+  return executeAuditedMutation(
     context,
-    context.req.param('id'),
-    String(body.reason || 'admin_suspended'),
+    operatorAuditIntent(`users/${userId}/suspend`, { reason }),
+    async () => {
+      await suspendOperatorUser(context, userId, reason);
+      return { response: context.redirect(`/admin/users/${userId}`), succeeded: true };
+    },
   );
-  return context.redirect(`/admin/users/${context.req.param('id')}`);
 });
 
 app.post('/:id/unsuspend', async (context) => {
-  await restoreOperatorUser(context, context.req.param('id'));
-  return context.redirect(`/admin/users/${context.req.param('id')}`);
+  const userId = context.req.param('id');
+  return executeAuditedMutation(
+    context,
+    operatorAuditIntent(`users/${userId}/restore`),
+    async () => {
+      await restoreOperatorUser(context, userId);
+      return { response: context.redirect(`/admin/users/${userId}`), succeeded: true };
+    },
+  );
 });
 
 app.post('/:id/delete', async (context) => {
-  await deleteOperatorUser(context, context.req.param('id'));
-  return context.redirect('/admin/users');
+  const userId = context.req.param('id');
+  return executeAuditedMutation(
+    context,
+    operatorAuditIntent(`users/${userId}/delete`),
+    async () => {
+      await deleteOperatorUser(context, userId);
+      return { response: context.redirect('/admin/users'), succeeded: true };
+    },
+  );
 });
 
 export default app;

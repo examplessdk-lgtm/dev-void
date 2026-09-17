@@ -95,43 +95,10 @@ d1.post('/batch', async (context) => {
     return dispatchRes;
   }
 
-  // Fallback: CF REST API (sequential, no transaction)
-  let dbId: string;
-  try {
-    dbId = await resolveResource(context.env.API, context.env.JWT_SECRET, projectId, 'd1', binding);
-  } catch {
-    return context.json({ error: `unknown binding "${binding}"` }, 404);
-  }
-
-  const results = [];
-  for (const stmt of body.statements as ReadonlyArray<{
-    sql: string;
-    params?: ReadonlyArray<unknown>;
-  }>) {
-    const cfRes = await fetch(
-      `${CF_API}/accounts/${context.env.CF_ACCOUNT_ID}/d1/database/${dbId}/query`,
-      {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${context.env.CF_API_TOKEN}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ sql: stmt.sql, params: stmt.params ?? [] }),
-      },
-    );
-
-    if (!cfRes.ok) {
-      return context.json({ error: 'D1 batch query failed', status: cfRes.status }, 502);
-    }
-
-    const cfData = (await cfRes.json()) as {
-      result?: ReadonlyArray<{ results?: ReadonlyArray<unknown>; meta?: Record<string, unknown> }>;
-    };
-    const queryResult = cfData.result?.[0];
-    results.push({ results: queryResult?.results ?? [], success: true, meta: queryResult?.meta });
-  }
-
-  return context.json(results);
+  // There is no sequential fallback: D1Database.batch() promises one atomic
+  // native batch. If the active worker cannot provide that capability, fail
+  // before issuing any statement rather than partially applying the batch.
+  return context.json({ error: 'atomic D1 batch unavailable for active deployment' }, 503);
 });
 
 export { d1 };

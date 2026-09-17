@@ -17,7 +17,7 @@ created: 2026-06-23
 
 A Void user who signed up with **Google** (or any non-GitHub provider) currently cannot use Deploy-on-GitHub. `GET /github/install-url` returns **403** unless the caller already has a linked GitHub OAuth identity (`getCallerGitHubAccountId !== null`, `github.ts:131-134`). The only way to get that identity today is to **log in with GitHub** — which, if the GitHub primary email differs from the account email (or is unverified), creates a **separate Void user** instead of linking (`auth.ts:321-342`). So the practical state is: _Google users can't deploy on GitHub without risking an account fork._
 
-This RFC makes obtaining a GitHub identity a **first-class, authenticated linking action that is independent of how you log in** — the Vercel "connect your Git provider" model. `void github install` auto-runs the link when the caller has no GitHub identity, then the **existing, audited install/connect flow runs unchanged**. The security-sensitive public callback (`/github/callback`) and its confused-deputy protections are **not touched**.
+This RFC makes obtaining a GitHub identity a **first-class, authenticated linking action that is independent of how you log in**. `void github install` auto-runs the link when the caller has no GitHub identity, then the **existing, audited install/connect flow runs unchanged**. The security-sensitive public callback (`/github/callback`) and its confused-deputy protections are **not touched**.
 
 ## Background
 
@@ -26,15 +26,6 @@ Two facts, both verified in source:
 1. **The install gate is real and load-bearing.** `install-url` embeds `{userId, githubAccountId}` into HMAC-signed `state`. The public `/callback` uses `githubAccountId` to prove — against GitHub — that the person completing the install is the same GitHub account that initiated it (`github.ts:262-279`). This closes a confused-deputy hole: without it, an attacker could phish a victim into installing the App and have the victim's installation (and private repos) bound to the attacker's Void account.
 
 2. **The only path to a GitHub identity is login.** `oauth_accounts(provider='github')` rows are created only in the OAuth login callback. For a user already logged in via Google, the sole way to add a GitHub row is to log in via GitHub, which links **only if** the GitHub primary email is verified **and** matches the existing account email — otherwise it forks a new user (`auth.ts:321-342`). There is **no** "link my GitHub account to my current account" action.
-
-### Comparison: how Vercel handles this
-
-| Axis                     | Vercel                                                                                                                | Implication for Void                                                                                        |
-| ------------------------ | --------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| Login identity ↔ account | **1:1** (one GitHub login → one Vercel account)                                                                       | Void's 1:1 is not an outlier; not the thing to fix                                                          |
-| Git-for-deploys ↔ login  | **Decoupled** — "connect to other GitHub accounts/orgs from a Vercel account or Team" regardless of how you signed in | **This is the lever.** Void should let any authenticated user connect GitHub, independent of login provider |
-
-Sources: [How to connect a single GitHub account to multiple Vercel accounts](https://community.vercel.com/t/how-to-connect-a-single-github-account-to-multiple-vercel-accounts/37062), [Vercel KB: connecting teams with personal Git accounts](https://vercel.com/kb/guide/connecting-teams-with-personal-git-accounts).
 
 ## The root constraint (why we can't just remove the gate)
 
@@ -66,7 +57,7 @@ This is **rejected** (see Alternatives). The continuity check (`github.ts:270`) 
 **Non-Goals**
 
 - Changing the login model or the 1:1 login↔account relationship.
-- Allowing one GitHub org to map to multiple Void accounts (mirrors Vercel's unsolved case). Deferred from the linking work; **now designed as a planned follow-up — see [§Follow-up: Org-Shared GitHub App Installations](#follow-up-org-shared-github-app-installations-planned) below.**
+- Allowing one GitHub org to map to multiple Void accounts. Deferred from the linking work; **now designed as a planned follow-up — see [§Follow-up: Org-Shared GitHub App Installations](#follow-up-org-shared-github-app-installations-planned) below.**
 - Reworking the public `/callback` ownership proof.
 - Closing the pre-existing org-install `read:org` confused-deputy edge (GitHub organization installation ownership) — tracked separately **— addressed by the follow-up below.**
 

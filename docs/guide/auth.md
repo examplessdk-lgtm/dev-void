@@ -253,6 +253,8 @@ void db generate
 
 Void adds the production Better Auth schema, including configured model names and plugin tables, to Drizzle's migration input. Review and commit the SQL before deploying. You don't need to duplicate the auth tables in `db/schema.ts` or run a separate Better Auth CLI.
 
+MySQL stores OAuth access, refresh, and ID tokens as unbounded text. Existing direct-deploy MySQL apps should run `void db generate` once after upgrading to widen earlier `varchar(255)` token columns. Void platform deployments apply the same safe widening automatically.
+
 ## Unsupported Modes
 
 Void-managed Better Auth is supported only for Cloudflare Void apps in v1.

@@ -407,8 +407,12 @@ function resolveBackend(): AiBackend {
     return makeHttpBackend(token, projectId, runtimeEnv);
   }
 
-  // Priority 3: Direct AI binding (user's own CF account)
-  const directAi = runtimeEnv.AI as Ai | undefined;
+  // Priority 3: Direct AI binding (user's own CF account). Void's generated
+  // wrangler config stamps custom binding names into a private runtime var;
+  // default and managed deployments continue to use `AI`.
+  const aiBindingName =
+    typeof runtimeEnv.__VOID_AI_BINDING === 'string' ? runtimeEnv.__VOID_AI_BINDING : 'AI';
+  const directAi = runtimeEnv[aiBindingName] as Ai | undefined;
   if (directAi) {
     return makeDirectBackend(
       directAi,
@@ -418,7 +422,7 @@ function resolveBackend(): AiBackend {
   }
 
   throw new Error(
-    'ai: Not available. Run `void auth login` and `void project link` first, or bind Workers AI (env.AI) for self-hosted deploys.',
+    `ai: Not available. Run \`void auth login\` and \`void project link\` first, or bind Workers AI (env.${aiBindingName}) for self-hosted deploys.`,
   );
 }
 

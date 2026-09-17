@@ -11,9 +11,9 @@ import {
 import { fileURLToPath } from 'node:url';
 import { cloudflare, type PluginConfig, type WorkerConfig } from '@cloudflare/vite-plugin';
 import { appendSqliteClassMigration } from '@void/deploy-core';
-import { join } from 'pathslash';
+import { join, resolve } from 'pathslash';
 import pc from 'picocolors';
-import { loadEnv, type Plugin } from 'vite';
+import { type Plugin } from 'vite';
 import {
   hasApiRoutes as routeScanHasApiRoutes,
   hasDocumentRoutes as routeScanHasDocumentRoutes,
@@ -23,7 +23,8 @@ import {
 import { findVoidAuthConfig } from './auth/config.ts';
 import { getApiUrl, getProxyUrl, getToken, isStagingMode } from './cli/auth.ts';
 import { SEND_EMAIL_BINDING } from './cli/email-cloudflare.ts';
-import { readProjectConfig } from './cli/project.ts';
+import { mergeRoutingRules } from './cli/headers.ts';
+import { readDeploymentPlatform, readProjectConfig } from './cli/project.ts';
 import {
   ensureWranglerCompat,
   ensureWranglerCompatibilityDate,
@@ -51,6 +52,7 @@ import {
 import { scanJobsSync } from './crons/scan.ts';
 import { scanDurableObjectModules } from './durable/scan.ts';
 import { inferBindingsFromSource } from './inference/walk.ts';
+import { resolveLocalD1Target, writeLocalD1PersistState } from './local-d1.ts';
 import { voidLog, voidWarn, voidError } from './log.ts';
 import { pagesDevCssAssetsPlugin } from './pages/dev-css-assets.ts';
 import { bindingRuntimePlugin } from './plugin-binding-runtime.ts';
@@ -59,7 +61,7 @@ import { drizzlePlugin } from './plugin-drizzle.ts';
 import { emailDevInboxPlugin } from './plugin-email-dev-inbox.ts';
 import { envClientFoldPlugin } from './plugin-env-client-fold.ts';
 import { envClientGuardPlugin } from './plugin-env-client-guard.ts';
-import { envSchemaPlugin } from './plugin-env-schema.ts';
+import { envSchemaPlugin, type EnvSchemaFacts } from './plugin-env-schema.ts';
 import {
   analogDevTriggerInjectPlugin,
   astroDevTriggerInjectPlugin,
@@ -89,10 +91,9 @@ import { scanMiddlewareSync, scanRoutePatternsSync } from './router/scan.ts';
 import { scanWebSocketRoutesSync } from './router/websocket.ts';
 import { DEV_INBOX_ENV_VAR, DEV_INBOX_TOKEN_ENV_VAR } from './runtime/email/dev-inbox.ts';
 import { SANDBOX_MIGRATION_TAG, isSandboxEnabled, resolveSandboxConfig } from './sandbox/config.ts';
-import { mergeAndExpand, parseDotenvFile } from './shared/dotenv.ts';
 import {
   CLOUDFLARE_DEPLOY_BUILD_ENV,
-  filterLoadedEnv,
+  loadLocalEnv,
   resolveRemoteMode,
   stripInternalEnvKeys,
 } from './shared/env.ts';
@@ -414,8 +415,9 @@ function hasBinding(list: Array<{ binding: string }> | undefined, name: string):
 /**
  * Decide whether to inject a Workers AI binding into the built wrangler config.
  *
- * Build-only: dev/miniflare has no local Workers AI, so serve must never bind
- * `env.AI` (dev uses the P2 `__VOID_TOKEN` proxy path instead).
+ * Builds use the production binding. During dev, a project explicitly saved
+ * with the direct Cloudflare destination uses Cloudflare's remote binding;
+ * managed and unsaved projects keep using the Void HTTPS proxy.
  *
  * `!resolvedAi` is load-bearing: mergeBindings' return is defu-merged over the
  * resolved root-wrangler config and wins, so skipping when the user already
@@ -427,8 +429,14 @@ export function shouldBindWorkersAi(
   needsAI: boolean,
   resolvedAi: unknown,
   resultAi: unknown,
+  directCloudflareDev: boolean = false,
 ): boolean {
-  return needsAI && command === 'build' && !resultAi && !resolvedAi;
+  return (
+    needsAI &&
+    (command === 'build' || (command === 'serve' && directCloudflareDev)) &&
+    !resultAi &&
+    !resolvedAi
+  );
 }
 
 /**
@@ -463,6 +471,17 @@ export function shouldInjectEmailDevInboxVar(
     typeof assetsBinding === 'string' &&
     !!assetsBinding
   );
+}
+
+/** Resolve the runtime Workers AI binding, preserving a root Wrangler declaration. */
+export function resolveWorkersAiBindingName(resolvedAi: unknown, configuredName?: string): string {
+  if (typeof resolvedAi === 'object' && resolvedAi !== null) {
+    const binding = (resolvedAi as { binding?: unknown }).binding;
+    if (typeof binding === 'string') {
+      return binding;
+    }
+  }
+  return configuredName ?? 'AI';
 }
 
 const CLOUDFLARE_BUILTIN_IMPORT = /^cloudflare:/;
@@ -743,6 +762,7 @@ export function voidPlugin(options?: {
 }): Array<Plugin> {
   // Resolve root relative to CWD — this runs at config time
   const root = process.cwd();
+  const directCloudflareDestination = readDeploymentPlatform(root) === 'cloudflare';
   warnIfPackageJsonIsNotEsm(root);
   // Token only matters in serve — the dispatch module that uses it is
   // DCE'd from production worker bundles. In build/preview we still need
@@ -765,6 +785,21 @@ export function voidPlugin(options?: {
     ? { bindings: config.inference.bindings }
     : undefined;
   const bindingNames = resolveBindingNames(config.inference?.bindings);
+  const frameworkOwnsCloudflareRuntime =
+    detected !== undefined && (detected.class === 'b' || detected.class === 'c');
+  const localD1PersistRoot = frameworkOwnsCloudflareRuntime
+    ? join(root, '.wrangler', 'state')
+    : (options?.persistTo ?? join(root, '.void'));
+  const localD1 = resolveLocalD1Target(root, {
+    bindingName: bindingNames?.d1 ?? 'DB',
+    persistRoot: localD1PersistRoot,
+  });
+  writeLocalD1PersistState(
+    root,
+    !isNodeTarget(config.target) && !frameworkOwnsCloudflareRuntime
+      ? options?.persistTo
+      : undefined,
+  );
   const inferredBindings = inferProjectBindings(root, { ...inferenceOptions, paths }, scanDirs);
   const sandboxEnabled = isSandboxEnabled(config);
   const bindings = sandboxEnabled ? { ...inferredBindings, needsSandbox: true } : inferredBindings;
@@ -811,7 +846,7 @@ export function voidPlugin(options?: {
     'void/storage': 'export const storage = {}; export const createStorage = () => ({});',
     'void/isr': 'export const revalidate = async () => {};',
     // Client stub must mirror the real runtime/sandbox.ts surface so any
-    // client-side `instanceof SandboxLimitError` check doesn't crash with a
+    // client-side `instanceof` check for either runtime error doesn't crash with a
     // TypeError, and async `await getSandbox(...)` callers don't silently
     // mis-handle a sync return. Throwing here makes accidental client imports
     // fail loudly rather than returning a misleading bare `{}`.
@@ -821,6 +856,12 @@ export function voidPlugin(options?: {
           super(message ?? 'Sandbox limit reached: ' + reason);
           this.name = 'SandboxLimitError';
           this.reason = reason;
+        }
+      }
+      export class SandboxUnavailableError extends Error {
+        constructor(message = 'Managed Sandbox is unavailable on this Void platform.') {
+          super(message);
+          this.name = 'SandboxUnavailableError';
         }
       }
       export async function getSandbox() {
@@ -895,6 +936,20 @@ export function voidPlugin(options?: {
     },
   };
 
+  // Generated server entries import the env module by its resolved file path.
+  // Prebundling a bare `void` runtime subpath creates another package module
+  // graph and therefore another envContext, so request bindings disappear for
+  // the prebundled copy. Every return path includes this plugin, including
+  // framework and Node targets that do not all use bindingRuntimePlugin.
+  const serverRuntimeOptimizerPlugin: Plugin = {
+    name: 'void:server-runtime-optimizer',
+    configEnvironment(name) {
+      if (name !== 'client') {
+        return { optimizeDeps: { exclude: ['void'] } };
+      }
+    },
+  };
+
   // Scan queues/websocket routes early so both framework-mode and default-mode
   // branches can safely close over these bindings.
   const queues = framework ? [] : scanQueuesSync(root, paths.queuesDir);
@@ -960,7 +1015,7 @@ export function voidPlugin(options?: {
   // voidPlugin() only provides DB type codegen, migration management, and
   // wrangler.jsonc binding sync for local dev.
   if (detected && (detected.class === 'b' || detected.class === 'c')) {
-    const frameworkPersistRoot = join(root, '.wrangler', 'state');
+    const frameworkPersistRoot = localD1.persistRoot;
     const syncFrameworkCompat = (compat: ReturnType<typeof readWranglerCompat>) => {
       const syncedDate = ensureWranglerCompatibilityDate(root, compat.compatibilityDate);
       if (syncedDate) {
@@ -1094,6 +1149,7 @@ export function voidPlugin(options?: {
       ...(nuxtVite8WebSocketCompatPlugin ? [nuxtVite8WebSocketCompatPlugin] : []),
       svelteKitHooksInjectPlugin,
       clientStubsPlugin,
+      serverRuntimeOptimizerPlugin,
       bindingRuntimePlugin(bindingNames),
       // Framework-agnostic env DX: typegen, client leak guard, and build-time
       // folding all operate on env.ts + the Vite client module graph, so they
@@ -1106,9 +1162,10 @@ export function voidPlugin(options?: {
       drizzlePlugin(root, false, dialect, {
         d1BindingName: bindingNames?.d1,
         forceVirtualDb: authEnabled || bindingNames?.d1 !== undefined,
+        localD1DatabaseId: localD1.databaseId,
         localD1PersistRoot: frameworkPersistRoot,
       }),
-      migrationPlugin(root, dialect, 'local', frameworkPersistRoot, {
+      migrationPlugin(root, dialect, localD1.databaseId, frameworkPersistRoot, {
         enabled: false,
       }),
       devTriggersHintPlugin(root, { framework: true, devTriggerToken }),
@@ -1130,9 +1187,10 @@ export function voidPlugin(options?: {
   const jobs = scanJobsSync(root, paths.cronsDir);
   if (jobs.length > 0) {
     workerConfig.triggers = {
-      crons: jobs.flatMap((job) => job.crons),
+      crons: [...new Set(jobs.flatMap((job) => job.crons))],
     };
   }
+  let envSchemaFacts: EnvSchemaFacts | undefined;
   let assetRouting: AssetRoutingPolicy;
   if (config.worker?.vars) {
     workerConfig.vars = { ...config.worker.vars };
@@ -1188,16 +1246,43 @@ export function voidPlugin(options?: {
     );
     const result: Record<string, unknown> = { ...workerConfig };
 
-    // Direct Cloudflare deploys create BETTER_AUTH_SECRET before upload. Tell
-    // Wrangler to inherit that remote secret into the new Worker version;
-    // otherwise a normal deploy can replace the version without carrying the
-    // secret forward. Scope this to the Void CLI's Cloudflare build marker so
-    // local dev, managed Void deploys, and bare user builds keep their existing
-    // behavior. Preserve and dedupe any user-declared required secrets.
-    if (authEnabled && process.env[CLOUDFLARE_DEPLOY_BUILD_ENV] === '1') {
-      const resolvedSecrets = (resolved as { secrets?: { required?: Array<string> } }).secrets;
-      if (!resolvedSecrets?.required?.includes('BETTER_AUTH_SECRET')) {
-        result.secrets = { required: ['BETTER_AUTH_SECRET'] };
+    // The Cloudflare plugin defu-merges this patch over resolved, concatenating arrays.
+    // Flags read from the root config therefore occur in both inputs. Emit their union
+    // once and clear only the in-memory fallback so uploads never repeat a flag.
+    result.compatibility_flags = [
+      ...new Set([
+        ...((result.compatibility_flags as Array<string> | undefined) ?? []),
+        ...(resolved.compatibility_flags ?? []),
+      ]),
+    ];
+    resolved.compatibility_flags = [];
+
+    if (envSchemaFacts || (authEnabled && process.env[CLOUDFLARE_DEPLOY_BUILD_ENV] === '1')) {
+      const plaintextVars = {
+        ...((resolved.vars as Record<string, unknown> | undefined) ?? {}),
+        ...((result.vars as Record<string, unknown> | undefined) ?? {}),
+      };
+      const plaintextServerKeys = (envSchemaFacts?.serverKeys ?? []).filter(
+        (key) => key in plaintextVars,
+      );
+      if (viteCommand === 'build' && plaintextServerKeys.length > 0) {
+        throw new Error(
+          `Server env keys cannot be Worker plaintext vars: ${plaintextServerKeys.join(', ')}. ` +
+            'Remove them from worker.vars/wrangler vars and set them with the remote secret store.',
+        );
+      }
+      const configuredRequired = resolved.secrets?.required ?? [];
+      const required = [
+        ...new Set([
+          ...configuredRequired,
+          ...(envSchemaFacts?.requiredServerKeys ?? []),
+          ...(authEnabled && process.env[CLOUDFLARE_DEPLOY_BUILD_ENV] === '1'
+            ? ['BETTER_AUTH_SECRET']
+            : []),
+        ]),
+      ];
+      if (required.length > 0) {
+        result.secrets = { required };
       }
     }
 
@@ -1238,31 +1323,54 @@ export function voidPlugin(options?: {
       result.r2_buckets = [{ binding: r2Name, bucket_name: 'default' }];
     }
 
-    // Workers AI — self-host only. The managed deploy ignores dist/wrangler.json,
-    // so this binding only takes effect on a real `wrangler deploy`. Build-gated
-    // because dev/miniflare has no local Workers AI (dev uses the P2
-    // __VOID_TOKEN proxy path). The `ai` config is a single object (not an array)
-    // and needs no external id, so it is safe to inject unconditionally here.
-    // Guard rationale: mergeBindings' return is defu-merged over `resolved` and
-    // wins, so `!resolvedAi` is load-bearing (prevents clobbering a user's own
-    // root-wrangler `ai` binding); `!resultAi` is harmless defense-in-depth
-    // (nothing else in mergeBindings ever sets `result.ai`).
+    // Workers AI — direct builds use the production binding. A saved direct
+    // Cloudflare destination uses the owner's remote Workers AI binding during
+    // dev because Workers AI has no local simulator. Managed and unsaved dev
+    // projects continue through the Void HTTPS proxy below.
+    // An explicit root binding keeps its name and staging choice. Direct dev
+    // only adds `remote: true`, which is required because there is no local AI
+    // simulator. Builds never override the user's root binding.
+    const resolvedAi = (resolved as { ai?: unknown }).ai;
+    const resultAi = (result as { ai?: unknown }).ai;
+    const aiBindingName = resolveWorkersAiBindingName(resolvedAi, bindingNames?.ai);
     if (
+      viteCommand === 'serve' &&
+      bindings.needsAI &&
+      directCloudflareDestination &&
+      !resultAi &&
+      typeof resolvedAi === 'object' &&
+      resolvedAi !== null &&
+      'binding' in resolvedAi &&
+      typeof resolvedAi.binding === 'string'
+    ) {
+      // Preserve an explicit binding name and staging choice while selecting
+      // its only supported local mode.
+      (result as Record<string, unknown>).ai = { ...resolvedAi, remote: true };
+    } else if (
       shouldBindWorkersAi(
         viteCommand,
         bindings.needsAI,
-        (resolved as { ai?: unknown }).ai,
-        (result as { ai?: unknown }).ai,
+        resolvedAi,
+        resultAi,
+        directCloudflareDestination,
       )
     ) {
-      (result as Record<string, unknown>).ai = { binding: 'AI' };
+      (result as Record<string, unknown>).ai = {
+        binding: aiBindingName,
+        ...(viteCommand === 'serve' && { remote: true }),
+      };
     }
 
-    // AI Gateway id → runtime var (harmless in serve; only read by the P3 direct
-    // backend that routes Workers AI inference through the user's own Gateway).
-    if (config.ai?.gateway) {
+    // AI binding name / Gateway id → runtime vars (harmless in serve; only read
+    // by the P3 direct backend). The default binding needs no extra variable.
+    if (aiBindingName !== 'AI' || config.ai?.gateway) {
       const vars = (result.vars as Record<string, string>) ?? {};
-      vars.__VOID_AI_GATEWAY = config.ai.gateway;
+      if (aiBindingName !== 'AI') {
+        vars.__VOID_AI_BINDING = aiBindingName;
+      }
+      if (config.ai?.gateway) {
+        vars.__VOID_AI_GATEWAY = config.ai.gateway;
+      }
       result.vars = vars;
     }
 
@@ -1599,7 +1707,7 @@ export function voidPlugin(options?: {
 
     // AI — in local dev, inject VC credentials for HTTPS proxy path.
     // In production, the platform adds a __VOID_PROXY service binding instead.
-    if (viteCommand === 'serve' && bindings.needsAI) {
+    if (viteCommand === 'serve' && bindings.needsAI && !directCloudflareDestination) {
       const credentials = readVoidDevCredentials(root);
       if (credentials.status === 'ok') {
         // Prefer HTTPS proxy — inject credentials, skip direct AI binding
@@ -1636,81 +1744,27 @@ export function voidPlugin(options?: {
     return result as Partial<WorkerConfig>;
   }
 
-  // Merge schema defaults from env.ts into workerConfig.vars without
-  // shadowing values already provided by .env files / shell. Wired into
-  // envSchemaPlugin's onDefaults callback for CF targets only (the node
-  // target reads from process.env at runtime).
-  function applySchemaDefaultsToWorkerVars(defaults: Record<string, string>): void {
-    const vars = (workerConfig.vars as Record<string, string> | undefined) ?? {};
-    for (const [key, value] of Object.entries(defaults)) {
-      if (vars[key] === undefined) {
-        vars[key] = value;
-      }
-    }
-    workerConfig.vars = vars;
+  function applyEnvSchema(facts: EnvSchemaFacts): void {
+    envSchemaFacts = facts;
   }
 
-  // A direct Cloudflare deploy promotes only explicitly `.secret()`-marked
-  // schema values to Worker secrets. Make production-local and CI shell values
-  // available to the post-build validator/uploader without exposing unrelated
-  // machine env or changing ordinary Vite build behaviour.
-  function applySchemaSecretsToWorkerVars(secretKeys: Array<string>): void {
-    if (process.env[CLOUDFLARE_DEPLOY_BUILD_ENV] !== '1' || secretKeys.length === 0) {
-      return;
-    }
-    const mode = voidDeployBuildConfig?.mode ?? 'production';
-    const rawEnvDir = voidDeployBuildConfig?.envDir;
-    const envDir = rawEnvDir ? join(root, rawEnvDir) : root;
-    const local = mergeAndExpand(
-      [parseDotenvFile(join(envDir, `.env.${mode}.local`), { expand: false })],
-      { onWarn: (message) => voidWarn(message) },
-    );
-    const selected: Record<string, string> = {};
-    for (const key of secretKeys) {
-      if (authEnabled && key === 'BETTER_AUTH_SECRET') {
-        continue;
-      }
-      if (Object.prototype.hasOwnProperty.call(local, key)) {
-        selected[key] = local[key]!;
-      }
-      if (process.env[key] !== undefined) {
-        selected[key] = process.env[key]!;
-      }
-    }
-    const { sanitized, stripped } = stripInternalEnvKeys(selected);
-    if (stripped.length > 0) {
-      voidWarn(
-        `Ignoring schema secret keys reserved for Void runtime use: ${stripped.join(', ')}.`,
-      );
-    }
-    workerConfig.vars = {
-      ...(workerConfig.vars as Record<string, string> | undefined),
-      ...sanitized,
-    };
-  }
-
-  // Plugin that loads .env files and merges them into workerConfig.vars.
-  // Runs before the Cloudflare plugin so vars are available as worker bindings.
-  //
-  // The `{ mode, envDir }` this hook OBSERVES (raw, root-relative) is exposed via `api` so the
-  // self-host `void deploy --platform cloudflare` secret preflight can validate the SAME `.env*`
-  // set the build ships. It must be captured HERE, at this hook's position, not read off the
-  // final `resolved.envDir`: config hooks run in sequence, and a LATER plugin's `config` hook
-  // that returns a different `envDir` would change `resolved.envDir` while this hook already
-  // loaded env from the value it saw — the preflight reading the final value would then diverge
-  // from what the build baked.
-  let voidDeployBuildConfig: { mode: string; envDir: string | undefined } | undefined;
+  // Plugin that loads the single local `.env` file into worker bindings for
+  // local dev and preview only. Production values come from remote secrets;
+  // builds never turn local dotenv entries into deployable Worker vars.
   const envPlugin: Plugin = {
     name: 'void:env',
-    api: {
-      getVoidDeployBuildConfig: (): { mode: string; envDir: string | undefined } | undefined =>
-        voidDeployBuildConfig,
-    },
-    config(userConfig, { mode, command, isPreview }) {
+    config(userConfig, { command, isPreview }) {
       viteCommand = command;
       // `dev` is the Vite dev server only. Every build, `void deploy`, and
       // `vite preview` (which reports `command: 'serve'`) is `prod`.
       routeEnvironment = command === 'serve' && !isPreview ? 'dev' : 'prod';
+      // `void cloudflare login` stores OAuth in Wrangler's OS-keychain-backed
+      // credential store. The Cloudflare Vite plugin runs in this process, so
+      // select that same store before it opens the remote Workers AI session.
+      // Explicit API tokens remain Wrangler's highest-priority credential.
+      if (command === 'serve' && directCloudflareDestination && bindings.needsAI) {
+        process.env.CLOUDFLARE_AUTH_USE_KEYRING = 'true';
+      }
       // Re-resolve now that the environment is known — the construction-time
       // value below always assumes `prod`.
       //
@@ -1722,56 +1776,41 @@ export function voidPlugin(options?: {
       // `workerConfig.assets` at all — `mergeBindings` keys off it staying
       // unset.
       if (!framework && !isNodeTarget(config.target)) {
+        managedCloudflareBuild = command === 'build' && Boolean(process.env.VOID_DEPLOY_PROJECT_ID);
+        assetRoutingPublicDir =
+          userConfig.publicDir === false
+            ? null
+            : typeof userConfig.publicDir === 'string'
+              ? resolve(root, userConfig.publicDir)
+              : join(root, 'public');
         assetRouting = resolveConfiguredAssetRoutingPolicy();
         applyAssetRoutingPolicy(assetRouting);
       }
       // Exclude the .void cache directory from the file watcher so that
       // miniflare SQLite writes don't trigger infinite HMR refreshes.
       const ignored = ['**/.void/**'];
-      // Honour the user's `envDir` config — projects that keep .env files
-      // in `config/` or similar would otherwise be silently ignored. Falls
-      // back to the project root, matching Vite's own default.
-      const rawEnvDir =
-        typeof userConfig.envDir === 'string' && userConfig.envDir.length > 0
-          ? userConfig.envDir
-          : undefined;
-      voidDeployBuildConfig = { mode, envDir: rawEnvDir };
-      const envDir = rawEnvDir ? join(root, rawEnvDir) : root;
-      // Direct Cloudflare deploys must never turn machine-local dotenv files
-      // into plaintext Worker vars. Rebuild the deploy env from the two
-      // portable files instead of trying to delete `.local` keys from Vite's
-      // already-merged result: a key overridden by `.env.production.local`
-      // must fall back to its `.env.production` value, not disappear or retain
-      // the local override. Development and ordinary Vite builds keep Vite's
-      // standard four-file loading for compatibility.
-      let filtered: Record<string, string>;
-      if (process.env[CLOUDFLARE_DEPLOY_BUILD_ENV] === '1') {
-        const deployFiles = ['.env', `.env.${mode}`];
-        filtered = mergeAndExpand(
-          deployFiles.map((file) => parseDotenvFile(join(envDir, file), { expand: false })),
-          { onWarn: (message) => voidWarn(message) },
-        );
-        // Vite gives the shell precedence over dotenv, after which
-        // filterLoadedEnv removes those shell-sourced keys. Preserve that
-        // invariant so credentials exported for the CLI never become vars.
-        for (const key of Object.keys(process.env)) {
-          delete filtered[key];
+      if (command === 'serve') {
+        const local = loadLocalEnv(root, { onWarn: (message) => voidWarn(message) });
+        const { sanitized: env, stripped } = stripInternalEnvKeys(local);
+        if (stripped.length > 0) {
+          voidWarn(
+            `Ignoring internal env keys from .env: ${stripped.join(', ')}. These are reserved for Void runtime use.`,
+          );
         }
-      } else {
-        // loadEnv with prefix "" returns .env file vars AND all process.env
-        // vars. filterLoadedEnv strips shell pollution (PATH, HOME, etc.) so
-        // only .env-file vars reach worker bindings.
-        filtered = filterLoadedEnv(loadEnv(mode, envDir, ''));
+        workerConfig.vars = {
+          ...(workerConfig.vars as Record<string, string> | undefined),
+          ...env,
+        };
+        // The Cloudflare preview server runs the already-built wrangler
+        // artifact and sources its declared secrets from process.env instead
+        // of the in-memory worker config. Populate only missing entries so the
+        // shell still wins and `.env` remains a local runtime input.
+        if (isPreview) {
+          for (const [key, value] of Object.entries(env)) {
+            process.env[key] ??= value;
+          }
+        }
       }
-      // Remove any internal Void keys a user may have set in portable env
-      // files so they cannot hijack credential-shaped Worker bindings.
-      const { sanitized: env, stripped } = stripInternalEnvKeys(filtered);
-      if (stripped.length > 0) {
-        voidWarn(
-          `Ignoring internal env keys from .env files: ${stripped.join(', ')}. These are reserved for Void runtime use.`,
-        );
-      }
-      workerConfig.vars = { ...(workerConfig.vars as Record<string, string> | undefined), ...env };
 
       // In dev, keep document requests on the user worker. If this is deleted,
       // the CF router may route a page request to the user worker, the dev
@@ -1845,7 +1884,7 @@ export function voidPlugin(options?: {
       }
 
       // AI onboarding: detect missing credentials early and guide users
-      if (bindings.needsAI) {
+      if (bindings.needsAI && !directCloudflareDestination) {
         const credentials = readVoidDevCredentials(root);
         if (credentials.status === 'no-token') {
           afterReady(() => {
@@ -2064,28 +2103,27 @@ export function voidPlugin(options?: {
       bindingWatchPlugin,
       ...(bindings.needsEmail ? [emailDevInboxPlugin({ devTriggerToken })] : []),
       envPlugin,
-      envSchemaPlugin(root, {
-        onDefaults: applySchemaDefaultsToWorkerVars,
-        onSecrets: applySchemaSecretsToWorkerVars,
-      }),
+      envSchemaPlugin(root, { onSchema: applyEnvSchema }),
       envClientGuardPlugin(root),
       envClientFoldPlugin(),
       clientStubsPlugin,
+      serverRuntimeOptimizerPlugin,
       bindingRuntimePlugin(bindingNames),
       drizzlePlugin(root, false, getDatabaseDialect(config), {
         d1BindingName: bindingNames?.d1,
         forceVirtualDb: authEnabled || bindingNames?.d1 !== undefined,
-        localD1PersistRoot: options?.persistTo ?? outDir,
+        localD1DatabaseId: localD1.databaseId,
+        localD1PersistRoot: localD1.persistRoot,
         redirectDbTypePaths,
       }),
-      migrationPlugin(root, getDatabaseDialect(config)),
+      migrationPlugin(root, getDatabaseDialect(config), localD1.databaseId, localD1.persistRoot),
       ...(vinextCompat ? [vinextCompat] : []),
       frameworkBuildWrapperPlugin,
       frameworkTriggersPlugin(root, { devTriggerToken }),
       devTriggersHintPlugin(root, { framework: true, devTriggerToken }),
       ...cloudflare({
         ...inspectorPortOption,
-        persistState: { path: options?.persistTo ?? outDir },
+        persistState: { path: localD1.persistRoot },
         auxiliaryWorkers: options?.auxiliaryWorkers,
         viteEnvironment,
         config: mergeBindings,
@@ -2145,6 +2183,7 @@ export function voidPlugin(options?: {
     return [
       restartPlugin(),
       envPlugin,
+      serverRuntimeOptimizerPlugin,
       envSchemaPlugin(root),
       ...pagesDevCssAssetsPlugin(root, devTriggerToken),
       routingPlugin(root, {
@@ -2181,13 +2220,15 @@ export function voidPlugin(options?: {
   const ssrEntry = validateSsrEntry(root, paths);
   const hasPages = existsSync(paths.pagesDir);
   const hasMiddleware = scanMiddlewareSync(root, paths).length > 0;
+  let assetRoutingPublicDir: string | null = join(root, 'public');
+  let managedCloudflareBuild = false;
 
   function resolveConfiguredAssetRoutingPolicy(): AssetRoutingPolicy {
     const routePatterns = scanRoutePatternsSync(root, paths, routeEnvironment);
     const environmentWebsocketRoutes = websocketRoutes.filter((route) =>
       isRouteEnabledForEnvironment(route, routeEnvironment),
     );
-    return resolveAssetRoutingPolicy({
+    const policy = resolveAssetRoutingPolicy({
       isSsr: Boolean(ssrEntry),
       hasPages,
       hasApiRoutes:
@@ -2201,6 +2242,31 @@ export function voidPlugin(options?: {
       liveEnabled: liveConfig !== undefined,
       notFound: config.routing?.notFound,
     });
+    const rules = mergeRoutingRules({ dir: assetRoutingPublicDir, routing: config.routing });
+    const nativeOwnsEdgeRouting =
+      !managedCloudflareBuild &&
+      (rules.headerRules.length > 0 ||
+        rules.redirectRules.length > 0 ||
+        (rules.fallbackRules?.length ?? 0) > 0);
+    if (nativeOwnsEdgeRouting) {
+      // Cloudflare otherwise serves an existing asset before the generated
+      // Worker can apply redirects or response headers. Native builds own the
+      // rule pipeline, so send every path through the Worker first. Managed
+      // builds keep their inferred policy because dispatch owns these rules.
+      policy.assetConfig.run_worker_first = ['/**'];
+      // A SPA asset binding resolves its shell before the Worker can observe
+      // an asset miss. Disable that platform fallback when native fallback
+      // rules exist, then restore the SPA shell in serveWithAssets after the
+      // ordered user fallbacks have had their chance.
+      if (
+        rules.fallbackRules?.length &&
+        policy.assetConfig.not_found_handling === 'single-page-application'
+      ) {
+        policy.assetConfig.not_found_handling = 'none';
+        policy.workerSpaFallback = true;
+      }
+    }
+    return policy;
   }
 
   // Provisional: `routeEnvironment` is still its `prod` default here, because no
@@ -2245,13 +2311,11 @@ export function voidPlugin(options?: {
     bindingWatchPlugin,
     ...(bindings.needsEmail ? [emailDevInboxPlugin({ devTriggerToken })] : []),
     envPlugin,
-    envSchemaPlugin(root, {
-      onDefaults: applySchemaDefaultsToWorkerVars,
-      onSecrets: applySchemaSecretsToWorkerVars,
-    }),
+    envSchemaPlugin(root, { onSchema: applyEnvSchema }),
     envClientGuardPlugin(root),
     envClientFoldPlugin(),
     clientStubsPlugin,
+    serverRuntimeOptimizerPlugin,
     bindingRuntimePlugin(bindingNames),
     ...(bindings.needsSandbox ? [createSandboxSdkResolvePlugin()] : []),
     ...pagesDevCssAssetsPlugin(root, devTriggerToken),
@@ -2264,9 +2328,8 @@ export function voidPlugin(options?: {
       remoteMode,
       // Pass the full routing section so the plugin can merge
       // `public/_redirects` / `public/_headers` with `void.json` rules for
-      // dev-time parity with the deployment runtime. In production the
-      // platform dispatch worker owns the pipeline and the plugin compiles
-      // these rules out of the worker bundle.
+      // parity with the deployment runtime. Managed production builds omit
+      // the rules because dispatch owns them; native builds keep them.
       routing: config.routing,
       bindingNames,
       hasSandbox: bindings.needsSandbox,
@@ -2280,9 +2343,10 @@ export function voidPlugin(options?: {
     drizzlePlugin(root, true, dialect, {
       d1BindingName: bindingNames?.d1,
       forceVirtualDb: authEnabled || bindingNames?.d1 !== undefined,
-      localD1PersistRoot: options?.persistTo ?? outDir,
+      localD1DatabaseId: localD1.databaseId,
+      localD1PersistRoot: localD1.persistRoot,
     }),
-    migrationPlugin(root, dialect, 'local', join(root, '.void'), {
+    migrationPlugin(root, dialect, localD1.databaseId, localD1.persistRoot, {
       enabled: authEnabled,
       configPath: authConfigPath,
     }),
@@ -2290,7 +2354,7 @@ export function voidPlugin(options?: {
     devTriggersHintPlugin(root, { framework: false, devTriggerToken }),
     ...cloudflare({
       ...inspectorPortOption,
-      persistState: { path: options?.persistTo ?? outDir },
+      persistState: { path: localD1.persistRoot },
       auxiliaryWorkers: options?.auxiliaryWorkers,
       viteEnvironment: { name: DEFAULT_WORKER_ENVIRONMENT_NAME },
       config: mergeBindings,

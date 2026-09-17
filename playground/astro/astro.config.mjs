@@ -23,6 +23,11 @@ export default defineConfig({
     driver: sessionDrivers.lruCache(),
   },
   vite: {
+    // These server imports are discovered on the first request. Optimize them
+    // up front to avoid serial worker reloads while the smoke server warms up.
+    optimizeDeps: {
+      include: ['astro/logger/console', 'drizzle-orm/sqlite-core'],
+    },
     plugins: [voidPlugin(), vite8AstroDevToolbarCompat()],
   },
 });

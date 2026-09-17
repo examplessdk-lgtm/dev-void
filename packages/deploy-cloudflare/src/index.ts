@@ -1,7 +1,11 @@
 export {
   readExistingCloudflareWorker,
+  readCloudflareWorkerMigrationTag,
+  readCloudflareVersionMigrationTag,
+  assertCloudflareDurableObjectLifecycleSupported,
   assertExistingCloudflareConfig,
   assertCloudflareBindingsPreserved,
+  type CloudflareWorkerMigrationTagOptions,
   type ExistingCloudflareWorker,
 } from './existing.ts';
 export {
@@ -42,5 +46,6 @@ export {
   type CloudflareTriggerConfig,
   type CloudflareTrafficConfig,
   type CloudflareVersionActivation,
+  type CloudflareVersionActivationOptions,
   type CloudflareVersionMetadata,
 } from './version.ts';

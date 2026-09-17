@@ -11,6 +11,8 @@ on:
       - 'pnpm-workspace.yaml'
       - 'vite.config.ts'
       - '.github/workflows/platform-*.yml'
+      - '.github/scripts/production-baseline.ts'
+      - '.github/scripts/schema-fixture.mjs'
   workflow_call:
     inputs:
       require-schema-compat:
@@ -80,19 +82,8 @@ jobs:
       - run: vp run --filter './platform/packages/**' build
       - run: vp test run --project ${{ matrix.project }}
 
-  # The production guard. `platform-deploy.yml` migrates before it deploys the api worker, so a
-  # push to `prod` applies a new schema while the previous release is still serving traffic. This
-  # migrates a real Postgres with the migrations under test, then runs the selected released ref's
-  # integration tests against that schema: if the code that is live cannot run on the new schema,
-  # the push must not ship. Void Cloud defaults to `prod`; forks opt in by setting the repository
-  # variable VOID_PLATFORM_PRODUCTION_REF to their released branch, tag, or commit. The selected
-  # ref must represent the deployed version, and released migrations are assumed append-only
-  # (drizzle never re-applies an entry and skips entries not newer than the last applied).
-  #
-  # It has teeth on PRs, where the code under test is a different commit from the one that is
-  # live. The production deploy explicitly requests `require-schema-compat`, including on
-  # manual dispatch. Fork reusable-workflow callers can request it with their own baseline.
-  # Staging deploys run source checks without the production compatibility comparison.
+  # Upgrade a populated previous schema, then run that immutable runtime's tests.
+  # The prod branch can already be the candidate, so never use it as the baseline.
   schema-compat:
     if: >-
       ${{ inputs.require-schema-compat || (github.event_name == 'pull_request'
@@ -101,14 +92,14 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
+      deployments: read
     env:
-      PRODUCTION_REF: ${{ vars.VOID_PLATFORM_PRODUCTION_REF || 'prod' }}
+      PRODUCTION_REF: ${{ vars.VOID_PLATFORM_PRODUCTION_REF }}
+      PRODUCTION_ENVIRONMENT: ${{ vars.VOID_PLATFORM_PRODUCTION_ENV || 'Prod' }}
       POSTGRES_USER: void_ci
       POSTGRES_PASSWORD: void_ci_pass
       POSTGRES_DB: void_schema_compat
       COMPAT_DATABASE_URL: postgresql://void_ci:void_ci_pass@localhost:5432/void_schema_compat
-      # Pinned: the suite compares timestamps written by Postgres with local time, so a
-      # runner whose locale is not UTC shifts them by the offset.
       TZ: UTC
     services:
       postgres:
@@ -125,12 +116,6 @@ jobs:
           --health-timeout=5s
           --health-retries=5
     steps:
-      - name: Require a production baseline for fork deployment checks
-        if: ${{ github.repository != 'voidzero-dev/void' && vars.VOID_PLATFORM_PRODUCTION_REF == '' }}
-        run: |
-          echo '::error::Set the repository variable VOID_PLATFORM_PRODUCTION_REF to the released platform ref before requesting schema compatibility checks.'
-          exit 1
-      # Phase 1 — apply the migrations under test to a real Postgres.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -138,28 +123,52 @@ jobs:
         with:
           cache: true
           node-version-file: .node-version
-      - run: vp run build
-      - run: vp run --filter @voidcloud/api migrate
+      - name: Resolve the immutable deployed runtime
+        id: baseline
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          node .github/scripts/production-baseline.ts
+          cp .github/scripts/schema-fixture.mjs "$RUNNER_TEMP/void-schema-fixture.mjs"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.baseline.outputs.sha }}
+          persist-credentials: false
+      - name: Require platform code in the deployed revision
+        run: test -d platform/packages/api
+      - uses: voidzero-dev/setup-vp@1b32467adbe183473499fd9d5d372c3ed9641754 # v1.18.0
+        with:
+          cache: true
+          node-version-file: .node-version
+      - name: Create and populate the previous schema
+        run: |
+          vp run --filter @voidcloud/api migrate
+          node "$RUNNER_TEMP/void-schema-fixture.mjs" seed
         env:
           DATABASE_URL: ${{ env.COMPAT_DATABASE_URL }}
-
-      # Phase 2 — the selected released ref must still run on the migrated schema.
-      # Forks opt in with VOID_PLATFORM_PRODUCTION_REF; Void Cloud defaults to prod.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ env.PRODUCTION_REF }}
+          ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Require platform code in the baseline
-        run: |
-          if [ ! -d platform/packages/api ]; then
-            echo '::error::The selected production baseline does not contain the platform. Choose a released platform ref with VOID_PLATFORM_PRODUCTION_REF.'
-            exit 1
-          fi
       - uses: voidzero-dev/setup-vp@1b32467adbe183473499fd9d5d372c3ed9641754 # v1.18.0
         with:
           cache: true
           node-version-file: .node-version
-      - name: Run the production ref's integration tests on the migrated schema
+      - name: Upgrade the populated database and verify preserved data
+        run: |
+          vp run --filter @voidcloud/api migrate
+          node "$RUNNER_TEMP/void-schema-fixture.mjs" verify
+        env:
+          DATABASE_URL: ${{ env.COMPAT_DATABASE_URL }}
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.baseline.outputs.sha }}
+          persist-credentials: false
+      - uses: voidzero-dev/setup-vp@1b32467adbe183473499fd9d5d372c3ed9641754 # v1.18.0
+        with:
+          cache: true
+          node-version-file: .node-version
+      - name: Run the deployed runtime against the upgraded schema
         run: |
           vp run build
           vp run --filter './platform/packages/**' build

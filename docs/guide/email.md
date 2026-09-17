@@ -231,7 +231,7 @@ During `void dev`, sends are captured to an in-memory inbox instead of going to 
 
 The inbox shows a list view with subject, sender, recipient, and timestamp. Click a message to see headers, attachments, and an HTML preview rendered in a sandboxed iframe. Each message can be downloaded as a `.eml` file.
 
-Every inbox route requires the local dev trigger token — the same token `/__void/scheduled` and `/__void/queue` use, stored in `.void/dev-trigger-token` (created owner-only, `0600`; an older file with wider permissions is tightened on the next `void dev`). The browser carries it as `?token=` (the printed URL and every link inside the inbox include it); curl sends it as the `x-void-dev-trigger` header. A request without it gets a `401`. Vite's host check only blocks DNS-rebinding hostnames, so without the token anyone who can reach the port — every peer on the network under `--host` — could read raw MIME (including Bcc recipients and attachments), clear the buffer, or plant messages.
+Every inbox route requires a local access token. Void includes it in the printed inbox URL and browser links. For command-line requests, send it in the `x-void-dev-trigger` header as shown below; requests without it return `401`. The token is stored in `.void/dev-trigger-token`. Treat inbox URLs as credentials, especially when exposing your dev server to a network.
 
 ```bash
 # download a message as .eml

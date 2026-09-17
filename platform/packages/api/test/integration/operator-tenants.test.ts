@@ -9,10 +9,16 @@ import {
   test,
   vi,
 } from 'vite-plus/test';
-import { getInvitation, getUser } from '../../src/db.ts';
+import {
+  acceptInvitationByEmail,
+  createInvitation,
+  getInvitation,
+  getUser,
+  revokeInvitation,
+} from '../../src/db.ts';
 import type { ApiEnv } from '../../src/env.ts';
 import { app } from '../../src/index.ts';
-import { invitations, users } from '../../src/schema.ts';
+import { invitations, resources, users } from '../../src/schema.ts';
 import { getAllowlist } from '../../src/signup-allowlist.ts';
 import {
   clearTables,
@@ -248,6 +254,119 @@ describe('operator tenant mutations', () => {
     });
     expect(await getUser(env.db, user.id)).toBeNull();
     expect((await req(`/projects/${project.id}`)).status).toBe(404);
+  });
+
+  test('deletes invitation actors while preserving invitation history and revoking sessions', async () => {
+    const inviter = await createTestUser(
+      env.db,
+      'inviting-admin',
+      'github',
+      undefined,
+      'free',
+      'admin',
+    );
+    const revoker = await createTestUser(
+      env.db,
+      'revoking-admin',
+      'github',
+      undefined,
+      'free',
+      'admin',
+    );
+    const invited = await createTestUser(env.db, 'invited-user');
+    const inviterToken = await createOperatorToken(env.db, inviter);
+    const revokerToken = await createOperatorToken(env.db, revoker);
+
+    const accepted = await createInvitation(env.db, 'accepted@example.com', inviter.id);
+    await acceptInvitationByEmail(env.db, accepted.email, invited.id);
+    const revoked = await createInvitation(env.db, 'revoked@example.com', inviter.id);
+    expect(await revokeInvitation(env.db, revoked.id, revoker.id)).toBe(true);
+
+    const project = await createTestProject(env.db, invited.id, 'invited-project');
+    await env.db.insert(resources).values({
+      id: 'res_invited_user_d1',
+      project_id: project.id,
+      type: 'd1',
+      cf_id: 'd1-invited-user',
+      binding_name: 'DB',
+    });
+    await env.ROUTING.put(
+      project.slug,
+      JSON.stringify({ workerName: 'worker', projectId: project.id }),
+    );
+    const cf = mockCfApi();
+
+    const deleteInvited = await req(`/users/${invited.id}/delete`, {});
+    expect(deleteInvited.status).toBe(200);
+    expect(await deleteInvited.json()).toMatchObject({
+      deleted: true,
+      deletedProjects: [project.id],
+      warnings: [],
+    });
+    expect(await getUser(env.db, invited.id)).toBeNull();
+    expect(
+      await env.db.select().from(resources).where(eq(resources.project_id, project.id)),
+    ).toEqual([]);
+    expect(await env.ROUTING.get(project.slug)).toBeNull();
+    expect(
+      cf.mock.calls.some(
+        ([input, init]) =>
+          (init as RequestInit | undefined)?.method === 'DELETE' &&
+          String(input).includes('/d1/database/d1-invited-user'),
+      ),
+    ).toBe(true);
+    const staleUserSession = await app.fetch(
+      new Request('http://localhost/me', {
+        headers: { Authorization: `Bearer ${invited.jwt}` },
+      }),
+      env,
+    );
+    expect(staleUserSession.status).toBe(401);
+
+    expect((await req(`/users/${inviter.id}/delete`, {})).status).toBe(200);
+    expect((await req(`/users/${revoker.id}/delete`, {})).status).toBe(200);
+    for (const staleToken of [inviterToken, revokerToken]) {
+      const staleAdminSession = await app.fetch(
+        new Request('http://localhost/operator/v1/session', {
+          headers: { Authorization: `Bearer ${staleToken}` },
+        }),
+        env,
+      );
+      expect(staleAdminSession.status).toBe(401);
+    }
+
+    expect(await getInvitation(env.db, accepted.id)).toMatchObject({
+      id: accepted.id,
+      status: 'accepted',
+      invited_by: inviter.id,
+      accepted_by: invited.id,
+    });
+    expect(await getInvitation(env.db, revoked.id)).toMatchObject({
+      id: revoked.id,
+      status: 'revoked',
+      invited_by: inviter.id,
+      revoked_by: revoker.id,
+    });
+    const history = (await (await req('/invitations?limit=100')).json()) as {
+      invitations: Array<Record<string, unknown>>;
+    };
+    expect(history.invitations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: accepted.id,
+          invited_by: inviter.id,
+          accepted_by: invited.id,
+          invited_by_login: null,
+        }),
+        expect.objectContaining({
+          id: revoked.id,
+          invited_by: inviter.id,
+          revoked_by: revoker.id,
+          invited_by_login: null,
+          revoked_by_login: null,
+        }),
+      ]),
+    );
   });
 });
 

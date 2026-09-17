@@ -1,4 +1,4 @@
-import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -8,8 +8,10 @@ import {
   createPlatformDeploymentManifest,
   createPlatformInstallationManifest,
   createPlatformResourceOwnershipMarker,
+  parsePlatformInstallationManifest,
   PLATFORM_DISABLED_KEY,
   PLATFORM_DISABLED_VALUE,
+  PLATFORM_SANDBOX_DRAIN_KEY,
   recordInstallationResource,
   recordInstallationStep,
   setInstallationDesiredState,
@@ -31,6 +33,7 @@ import {
 import {
   acquirePlatformDatabaseLifecycleLockConnection,
   apiWorkerSecrets,
+  platformWorkerSecretPayload,
   assertRequiredPlatformSecrets,
   classifyPlatformWorkerDeploymentLineage,
   installPlatform,
@@ -44,6 +47,7 @@ import {
   mergePlatformWorkerTrafficConfig,
   mergePreservedTriggerRoutes,
   preparePlatformDatabaseConnection,
+  preparePlatformSandboxDrainConnection,
   PlatformWorkerRecoveryIncompleteError,
   r2BucketConfigHash,
   readPlatformWorkerDeployments,
@@ -56,7 +60,9 @@ import {
   restorePlatformWorkerDeployment,
   stablePublicEndpointState,
   verifyPlatformHealth,
+  verifyPlatformSandboxDrain,
   withConditionalPlatformWorkerCreate,
+  withoutCompletedPlatformWorkerMigrations,
   withoutPlatformWorkerTrafficAttachments,
 } from '../../src/cli/platform-installer.ts';
 import {
@@ -65,10 +71,36 @@ import {
 } from '../../src/cli/platform-plan.ts';
 import {
   listInstallationManifests,
+  promoteInstallationSecrets,
+  readInstallationRecoverySecrets,
   writeInstallationManifest,
+  writePendingInstallationSecrets,
 } from '../../src/cli/platform-registry.ts';
+import {
+  completePlatformSetupDraft,
+  savePlatformSetupDraft,
+} from '../../src/cli/platform-setup-draft.ts';
 
 const directories: Array<string> = [];
+const TEST_PLATFORM_JWT_SECRET = 'test-only-platform-jwt-secret-material';
+const TEST_PLATFORM_PROJECT_SECRET_KEY = Buffer.alloc(32, 5).toString('base64');
+
+function sandboxDrainPreparation(state: 'complete' | 'pending') {
+  const checkpointState = state === 'complete' ? 'complete' : 'draining';
+  return {
+    admissionProtocol: 2 as const,
+    generation: 'generation-1',
+    mirrorValue: JSON.stringify({
+      completedAt: state === 'complete' ? '2026-09-16T00:00:00.000Z' : undefined,
+      generation: 'generation-1',
+      startedAt: '2026-09-16T00:00:00.000Z',
+      state: checkpointState,
+      updatedAt: '2026-09-16T00:00:00.000Z',
+      version: 1,
+    }),
+    state,
+  } as const;
+}
 
 beforeEach(() => {
   process.env.VOID_PLATFORM_RECOVERY_KEY = Buffer.alloc(32, 7).toString('base64');
@@ -86,9 +118,9 @@ afterEach(() => {
 
 function planningClient() {
   return {
-    verifyToken: async () => {},
     listAccounts: async () => [{ id: 'account', name: 'Account' }],
     getWorkersSubdomain: async () => 'workers-subdomain',
+    hasActiveCertificateForHostname: async () => true,
     getKvValue: async () => null,
     getR2Object: async () => null,
     getWorkerPlainTextBindings: async () => ({}),
@@ -133,7 +165,203 @@ async function close(server: Server): Promise<void> {
 
 describe('platform installer', () => {
   const claimDatabase = async () => {};
-  const acquireDatabaseLifecycleLock = async () => async () => {};
+  const acquireDatabaseLifecycleLock = async () =>
+    Object.assign(async () => {}, {
+      prepareSandboxDrain: async () => sandboxDrainPreparation('complete'),
+    });
+
+  it.each([false, true])(
+    'installs all four Workers without a zone and probes the actual dispatch hostname (credential draft: %s)',
+    async (fromDraft) => {
+      const directory = mkdtempSync(join(tmpdir(), 'void-platform-workers-dev-test-'));
+      directories.push(directory);
+      process.env.VOID_PLATFORM_REGISTRY_DIR = directory;
+      const forbidden = async (): Promise<never> => {
+        throw new Error('no zone or DNS access allowed');
+      };
+      const plan = await createPlatformInstallPlan(
+        {
+          ...planningClient(),
+          findZone: forbidden,
+          listDnsRecords: forbidden,
+          listWorkerRoutes: forbidden,
+          hasActiveCertificateForHostname: forbidden,
+        },
+        {
+          accountId: 'account',
+          applicationDomain: '',
+          zoneName: '',
+          workersDev: true,
+          controlPlaneDomain: '',
+          dedicatedZone: false,
+          displayName: 'Testing',
+          installationSlug: 'testing',
+        },
+        null,
+      );
+      let index = 0;
+      const create = async (_account: string, name: string) => ({
+        id: `resource-${index++}`,
+        name,
+      });
+      const configs: Array<Record<string, unknown>> = [];
+      const secrets = createPlatformInstallationSecrets({
+        bootstrapGitHubId: '583231',
+        bootstrapGitHubLogin: 'octocat',
+        cloudflareApiToken: 'test-token',
+        databaseUrl: 'postgres://user:password@db.example.com/testing',
+        githubClientId: 'id',
+        githubClientSecret: 'secret',
+        jwtSecret: TEST_PLATFORM_JWT_SECRET,
+        projectSecretKey: TEST_PLATFORM_PROJECT_SECRET_KEY,
+        r2AccessKeyId: 'id',
+        r2SecretAccessKey: 'secret',
+      });
+      const draft = fromDraft
+        ? completePlatformSetupDraft(
+            savePlatformSetupDraft(plan, resolvePlatformRuntime().manifest.platformVersion),
+          )
+        : null;
+      const result = await installPlatform(plan, secrets, draft, {
+        claimDatabase,
+        acquireDatabaseLifecycleLock,
+        client: {
+          createAiGateway: create,
+          createDnsRecord: forbidden,
+          createZone: forbidden,
+          createKvNamespace: create,
+          createR2Bucket: create,
+          createQueue: create,
+          createDispatchNamespace: create,
+          createHyperdrive: create,
+          putKvValue: async () => {},
+          deleteKvValue: async () => {},
+          putR2Object: async () => {},
+        },
+        deployWorker: async (config) => {
+          configs.push(config);
+        },
+        migrateDatabase: async () => {},
+        revalidateBeforeWorkerDeploy: async () => {},
+        verifyHealth: async (
+          _api,
+          _id,
+          _proxy,
+          _domain,
+          _version,
+          _protocol,
+          _token,
+          _fetcher,
+          dispatchOrigin,
+        ) => {
+          expect(dispatchOrigin).toBe(
+            `https://${plan.deployment.resources.dispatchWorker}.workers-subdomain.workers.dev`,
+          );
+        },
+      });
+      expect(result.manifest.status).toBe('installed');
+      expect(
+        result.manifest.resources.some(
+          (resource) => resource.kind === 'zone' || resource.kind === 'dns-record',
+        ),
+      ).toBe(false);
+      expect(new Set(configs.map((config) => config.name)).size).toBe(4);
+      expect(
+        configs.every((config) => !config.routes || (config.routes as Array<unknown>).length === 0),
+      ).toBe(true);
+      expect(parsePlatformInstallationManifest(result.manifest)).toEqual(result.manifest);
+    },
+  );
+
+  it('requires externally custodied identity keys for a fresh installation', () => {
+    const input = {
+      bootstrapGitHubId: '583231',
+      bootstrapGitHubLogin: 'octocat',
+      cloudflareApiToken: 'cf-token',
+      databaseUrl: 'postgres://user:password@db.example.com/void',
+      githubClientId: 'github-id',
+      githubClientSecret: 'github-secret',
+      r2AccessKeyId: 'r2-id',
+      r2SecretAccessKey: 'r2-secret',
+    };
+
+    expect(() => createPlatformInstallationSecrets(input)).toThrow(
+      'VOID_PLATFORM_JWT_SECRET is required',
+    );
+    expect(() =>
+      createPlatformInstallationSecrets({ ...input, jwtSecret: TEST_PLATFORM_JWT_SECRET }),
+    ).toThrow('VOID_PLATFORM_PROJECT_SECRET_KEY is required');
+    expect(() =>
+      createPlatformInstallationSecrets({
+        ...input,
+        jwtSecret: 'short',
+        projectSecretKey: TEST_PLATFORM_PROJECT_SECRET_KEY,
+      }),
+    ).toThrow('at least 32 bytes');
+    expect(() =>
+      createPlatformInstallationSecrets({
+        ...input,
+        jwtSecret: TEST_PLATFORM_JWT_SECRET,
+        projectSecretKey: TEST_PLATFORM_PROJECT_SECRET_KEY.replace(/=+$/, ''),
+      }),
+    ).toThrow('canonical base64');
+    expect(() =>
+      createPlatformInstallationSecrets({
+        ...input,
+        jwtSecret: TEST_PLATFORM_JWT_SECRET,
+        projectSecretActiveKeyVersion: 'v1',
+        projectSecretKeysJson: JSON.stringify({ v1: TEST_PLATFORM_PROJECT_SECRET_KEY }),
+      }),
+    ).toThrow('Fresh installations use VOID_PLATFORM_PROJECT_SECRET_KEY');
+    expect(
+      createPlatformInstallationSecrets({
+        ...input,
+        jwtSecret: TEST_PLATFORM_JWT_SECRET,
+        projectSecretKey: TEST_PLATFORM_PROJECT_SECRET_KEY,
+      }),
+    ).toMatchObject({
+      jwtSecret: TEST_PLATFORM_JWT_SECRET,
+      projectSecretActiveKeyVersion: 'v1',
+      projectSecretKey: TEST_PLATFORM_PROJECT_SECRET_KEY,
+      projectSecretKeysJson: JSON.stringify({ v1: TEST_PLATFORM_PROJECT_SECRET_KEY }),
+    });
+  });
+
+  it('validates complete project-secret keyring restoration inputs', () => {
+    const input = {
+      bootstrapGitHubId: '583231',
+      bootstrapGitHubLogin: 'octocat',
+      cloudflareApiToken: 'cf-token',
+      databaseUrl: 'postgres://user:password@db.example.com/void',
+      existingInstallation: true,
+      githubClientId: 'github-id',
+      githubClientSecret: 'github-secret',
+      r2AccessKeyId: 'r2-id',
+      r2SecretAccessKey: 'r2-secret',
+    };
+    expect(() =>
+      createPlatformInstallationSecrets({
+        ...input,
+        projectSecretKeysJson: JSON.stringify({ v1: TEST_PLATFORM_PROJECT_SECRET_KEY }),
+      }),
+    ).toThrow('must be supplied together');
+    expect(() =>
+      createPlatformInstallationSecrets({
+        ...input,
+        projectSecretActiveKeyVersion: 'v2',
+        projectSecretKeysJson: JSON.stringify({ v1: TEST_PLATFORM_PROJECT_SECRET_KEY }),
+      }),
+    ).toThrow('must identify a key');
+    expect(() =>
+      createPlatformInstallationSecrets({
+        ...input,
+        projectSecretActiveKeyVersion: 'v1',
+        projectSecretKeysJson: JSON.stringify({
+          v1: TEST_PLATFORM_PROJECT_SECRET_KEY.replace(/=+$/, ''),
+        }),
+      }),
+    ).toThrow('canonical base64');
+  });
 
   it('attempts Worker rollback even when closing an unsafe routing gate fails', async () => {
     const events: Array<string> = [];
@@ -580,6 +808,7 @@ describe('platform installer', () => {
               annotations: {
                 'workers/message': encodeCloudflareVersionMessage([], triggerConfig),
               },
+              script: { migration_tag: 'v4' },
               resources: {
                 bindings: [{ name: 'PLATFORM_OWNERSHIP_MARKER', type: 'plain_text', text: marker }],
               },
@@ -588,7 +817,7 @@ describe('platform installer', () => {
 
     await expect(
       readActivePlatformWorkerSnapshot('wrangler.json', 'account', 'worker', marker, runner),
-    ).resolves.toEqual({ triggerConfig, versionId });
+    ).resolves.toEqual({ migrationTag: 'v4', triggerConfig, versionId });
     await expect(
       readActivePlatformWorkerSnapshot(
         'wrangler.json',
@@ -598,6 +827,21 @@ describe('platform installer', () => {
         runner,
       ),
     ).rejects.toThrow('does not belong to this installation');
+  });
+
+  it('omits completed Durable Object migrations without rewriting earlier history', () => {
+    const migrations = [
+      { tag: 'v1', new_sqlite_classes: ['UsageCounter'] },
+      { tag: 'v2', new_sqlite_classes: ['CronScheduler'] },
+      { tag: 'v3', new_sqlite_classes: ['ErrorAlertMonitor'] },
+      { tag: 'v4', new_sqlite_classes: ['SandboxConcurrencyCounter'] },
+    ];
+    const config = { migrations, name: 'void-api' };
+
+    expect(withoutCompletedPlatformWorkerMigrations(config, 'v4')).toEqual({ name: 'void-api' });
+    expect(withoutCompletedPlatformWorkerMigrations(config, 'v3')).toBe(config);
+    expect(withoutCompletedPlatformWorkerMigrations(config, null)).toBe(config);
+    expect(config.migrations).toBe(migrations);
   });
 
   it('rejects a Worker replacement during immutable version inspection', async () => {
@@ -836,7 +1080,11 @@ describe('platform installer', () => {
       requests.push({ headers: new Headers(init?.headers), url });
       return Response.json(
         url.endsWith('/.well-known/void-platform')
-          ? { installationId: 'example-a1b2c3d4', platformVersion: '1.2.3' }
+          ? {
+              installationId: 'example-a1b2c3d4',
+              platformVersion: '1.2.3',
+              usageProtocolVersion: 1,
+            }
           : { ok: true },
       );
     }) as typeof fetch;
@@ -847,6 +1095,7 @@ describe('platform installer', () => {
       'https://proxy.example.com',
       'apps.example.com',
       '1.2.3',
+      1,
       'probe-token',
       fetcher,
     );
@@ -871,7 +1120,11 @@ describe('platform installer', () => {
       requests.push(new Headers(init?.headers));
       return Response.json(
         String(input).endsWith('/.well-known/void-platform')
-          ? { installationId: 'example-a1b2c3d4', platformVersion: '1.2.3' }
+          ? {
+              installationId: 'example-a1b2c3d4',
+              platformVersion: '1.2.3',
+              usageProtocolVersion: 1,
+            }
           : { ok: true },
       );
     }) as typeof fetch;
@@ -882,6 +1135,7 @@ describe('platform installer', () => {
       'https://proxy.staging.void.cloud',
       'staging.void.app',
       '1.2.3',
+      1,
       'probe-token',
       fetcher,
     );
@@ -893,6 +1147,90 @@ describe('platform installer', () => {
           headers.get('CF-Access-Client-Secret') === 'service-secret',
       ),
     ).toBe(true);
+  });
+
+  it('requires the live API to report the target usage protocol before traffic opens', async () => {
+    const legacyFetcher = (async (input: string | URL | Request) =>
+      Response.json(
+        String(input).endsWith('/.well-known/void-platform')
+          ? { installationId: 'example-a1b2c3d4', platformVersion: '1.2.3' }
+          : { ok: true },
+      )) as typeof fetch;
+
+    await verifyPlatformHealth(
+      'https://api.example.com',
+      'example-a1b2c3d4',
+      'https://proxy.example.com',
+      'apps.example.com',
+      '1.2.3',
+      0,
+      'probe-token',
+      legacyFetcher,
+    );
+    await expect(
+      verifyPlatformHealth(
+        'https://api.example.com',
+        'example-a1b2c3d4',
+        'https://proxy.example.com',
+        'apps.example.com',
+        '1.2.3',
+        1,
+        'probe-token',
+        legacyFetcher,
+      ),
+    ).rejects.toThrow('usage protocol does not match');
+  });
+
+  it('trusts only a valid DB-backed sandbox drain protocol v1 response', async () => {
+    const statuses = [
+      {
+        complete: false,
+        generation: null,
+        phase: null,
+        state: 'required',
+        updatedAt: null,
+        version: 1,
+      },
+      {
+        complete: true,
+        generation: 'generation-1',
+        phase: 'resources',
+        state: 'complete',
+        updatedAt: '2026-09-16T00:00:00.000Z',
+        version: 1,
+      },
+    ];
+    const headers: Array<Headers> = [];
+    const fetcher = (async (_input: string | URL | Request, init?: RequestInit) => {
+      headers.push(new Headers(init?.headers));
+      return Response.json(statuses.shift());
+    }) as typeof fetch;
+
+    await expect(
+      verifyPlatformSandboxDrain('https://api.example.com', 'probe-token', fetcher),
+    ).resolves.toBe(false);
+    await expect(
+      verifyPlatformSandboxDrain('https://api.example.com', 'probe-token', fetcher),
+    ).resolves.toBe(true);
+    expect(headers.every((value) => value.get('X-Void-Platform-Probe') === 'probe-token')).toBe(
+      true,
+    );
+
+    await expect(
+      verifyPlatformSandboxDrain('https://api.example.com', 'probe-token', (async () =>
+        Response.json({
+          complete: true,
+          generation: null,
+          phase: null,
+          state: 'complete',
+          updatedAt: null,
+          version: 1,
+        })) as typeof fetch),
+    ).rejects.toThrow('invalid DB-backed protocol v1');
+    await expect(
+      verifyPlatformSandboxDrain('https://api.example.com', 'probe-token', (async () =>
+        Response.json({ error: 'invalid' }, { status: 503 })) as typeof fetch),
+    ).rejects.toThrow('Traffic remains disabled');
   });
 
   it('derives an installation-specific high-entropy health probe token', () => {
@@ -911,7 +1249,11 @@ describe('platform installer', () => {
       }
       return Response.json(
         url.endsWith('/.well-known/void-platform')
-          ? { installationId: 'example-a1b2c3d4', platformVersion: '1.2.3' }
+          ? {
+              installationId: 'example-a1b2c3d4',
+              platformVersion: '1.2.3',
+              usageProtocolVersion: 1,
+            }
           : { ok: true },
       );
     }) as typeof fetch;
@@ -923,6 +1265,7 @@ describe('platform installer', () => {
         'https://proxy.example.com',
         'apps.example.com',
         '1.2.3',
+        1,
         'probe-token',
         fetcher,
       ),
@@ -1035,6 +1378,230 @@ describe('platform installer', () => {
     expect(connection.queries).toContain('ROLLBACK');
     expect(connection.queries).not.toContain('COMMIT');
     expect(connection.rows).toEqual([]);
+  });
+
+  it.each([
+    { empty: true, expected: 'complete', phase: 'resources', state: 'complete' },
+    { empty: false, expected: 'pending', phase: 'deployments', state: 'draining' },
+  ] as const)(
+    'establishes a $state sandbox drain checkpoint when database inventory empty=$empty',
+    async ({ empty, expected, phase, state }) => {
+      let checkpoint: Record<string, unknown> | undefined;
+      const inserts: Array<ReadonlyArray<unknown> | undefined> = [];
+      const checkpointReads: Array<string> = [];
+      const connection = {
+        query: async <Row extends Record<string, unknown>>(
+          sql: string,
+          values?: ReadonlyArray<unknown>,
+        ) => {
+          if (sql.includes('to_regclass')) {
+            return {
+              rows: [{ relation: 'sandbox_drain_checkpoints' }] as unknown as ReadonlyArray<Row>,
+            };
+          }
+          if (sql.includes('FROM "sandbox_drain_checkpoints"')) {
+            checkpointReads.push(sql);
+            return {
+              rows: (checkpoint ? [checkpoint] : []) as unknown as ReadonlyArray<Row>,
+            };
+          }
+          if (sql.includes('NOT EXISTS(SELECT 1 FROM "deployments"')) {
+            return { rows: [{ empty }] as unknown as ReadonlyArray<Row> };
+          }
+          if (sql.includes('INSERT INTO "sandbox_drain_checkpoints"')) {
+            inserts.push(values);
+            checkpoint = {
+              admission_protocol: 0,
+              completed_at: empty ? '2026-09-16T00:00:00.000Z' : null,
+              cursor: { pass: empty ? '2' : '1' },
+              generation: values?.[0],
+              phase: values?.[2],
+              started_at: '2026-09-16T00:00:00.000Z',
+              state: values?.[1],
+              updated_at: '2026-09-16T00:00:00.000Z',
+            };
+          }
+          return { rows: [] as ReadonlyArray<Row> };
+        },
+      };
+
+      const prepared = await preparePlatformSandboxDrainConnection(connection);
+      expect(prepared.state).toBe(expected);
+      expect(prepared.admissionProtocol).toBe(0);
+      expect(JSON.parse(prepared.mirrorValue)).toEqual({
+        ...(empty ? { completedAt: '2026-09-16T00:00:00.000Z' } : {}),
+        generation: expect.stringMatching(/^[0-9a-f-]{36}$/),
+        startedAt: '2026-09-16T00:00:00.000Z',
+        state,
+        updatedAt: '2026-09-16T00:00:00.000Z',
+        version: 1,
+      });
+      expect(inserts).toHaveLength(1);
+      expect(inserts[0]?.slice(1)).toEqual([
+        state,
+        phase,
+        JSON.stringify({ pass: empty ? '2' : '1' }),
+      ]);
+      expect(checkpointReads).toEqual([
+        expect.stringContaining('0 AS "admission_protocol"'),
+        expect.stringContaining('0 AS "admission_protocol"'),
+      ]);
+    },
+  );
+
+  it('requires the database admission column before arming protocol v2', async () => {
+    const queries: Array<string> = [];
+    const connection = {
+      query: async <Row extends Record<string, unknown>>(sql: string) => {
+        queries.push(sql);
+        if (sql.includes('to_regclass')) {
+          return {
+            rows: [{ relation: 'sandbox_drain_checkpoints' }] as unknown as ReadonlyArray<Row>,
+          };
+        }
+        if (sql.includes('information_schema.columns')) {
+          return { rows: [{ present: false }] as unknown as ReadonlyArray<Row> };
+        }
+        return { rows: [] as ReadonlyArray<Row> };
+      },
+    };
+
+    await expect(preparePlatformSandboxDrainConnection(connection, 2)).rejects.toThrow(
+      'database does not include the sandbox deployment admission barrier',
+    );
+    expect(queries).not.toContain('BEGIN');
+  });
+
+  it('arms deployment admission before accepting an empty legacy drain inventory', async () => {
+    let checkpoint: Record<string, unknown> = {
+      admission_protocol: 0,
+      completed_at: '2026-09-16T00:00:00.000Z',
+      cursor: { pass: '2' },
+      generation: 'pre-fence-generation',
+      phase: 'resources',
+      started_at: '2026-09-16T00:00:00.000Z',
+      state: 'complete',
+      updated_at: '2026-09-16T00:00:00.000Z',
+    };
+    const events: Array<string> = [];
+    const connection = {
+      query: async <Row extends Record<string, unknown>>(
+        sql: string,
+        values?: ReadonlyArray<unknown>,
+      ) => {
+        if (sql.includes('to_regclass')) {
+          return {
+            rows: [{ relation: 'sandbox_drain_checkpoints' }] as unknown as ReadonlyArray<Row>,
+          };
+        }
+        if (sql.includes('information_schema.columns')) {
+          return { rows: [{ present: true }] as unknown as ReadonlyArray<Row> };
+        }
+        if (sql === 'BEGIN') {
+          events.push('transaction:begin');
+        } else if (sql.includes('LOCK TABLE "deployments" IN SHARE MODE')) {
+          events.push('deployments:locked');
+        } else if (sql === 'COMMIT') {
+          events.push('transaction:commit');
+        }
+        if (sql.includes('FROM "sandbox_drain_checkpoints"') && sql.includes('SELECT')) {
+          return { rows: [checkpoint] as unknown as ReadonlyArray<Row> };
+        }
+        if (sql.includes('INSERT INTO "sandbox_drain_checkpoints"')) {
+          events.push('admission:armed');
+          checkpoint = {
+            ...checkpoint,
+            admission_protocol: 2,
+            completed_at: null,
+            cursor: { pass: '1' },
+            generation: values?.[0],
+            phase: 'deployments',
+            state: 'draining',
+          };
+        } else if (sql.includes('NOT EXISTS(SELECT 1 FROM "deployments"')) {
+          events.push('inventory:empty');
+          return { rows: [{ empty: true }] as unknown as ReadonlyArray<Row> };
+        } else if (sql.includes('SET "state" = \'complete\'')) {
+          events.push('checkpoint:complete');
+          checkpoint = {
+            ...checkpoint,
+            completed_at: '2026-09-16T00:01:00.000Z',
+            cursor: { pass: '2' },
+            phase: 'resources',
+            state: 'complete',
+          };
+        }
+        return { rows: [] as ReadonlyArray<Row> };
+      },
+    };
+
+    const prepared = await preparePlatformSandboxDrainConnection(connection, 2);
+    expect(events).toEqual([
+      'transaction:begin',
+      'deployments:locked',
+      'admission:armed',
+      'inventory:empty',
+      'checkpoint:complete',
+      'transaction:commit',
+    ]);
+    expect(prepared).toMatchObject({
+      admissionProtocol: 2,
+      generation: expect.not.stringMatching(/^pre-fence/),
+      state: 'complete',
+    });
+  });
+
+  it('rolls back deployment admission arming when inventory cannot be read', async () => {
+    const events: Array<string> = [];
+    const checkpoint = {
+      admission_protocol: 0,
+      completed_at: null,
+      cursor: { pass: '1' },
+      generation: 'pre-fence-generation',
+      phase: 'deployments',
+      started_at: '2026-09-16T00:00:00.000Z',
+      state: 'draining',
+      updated_at: '2026-09-16T00:00:00.000Z',
+    };
+    const connection = {
+      query: async <Row extends Record<string, unknown>>(sql: string) => {
+        if (sql.includes('to_regclass')) {
+          return {
+            rows: [{ relation: 'sandbox_drain_checkpoints' }] as unknown as ReadonlyArray<Row>,
+          };
+        }
+        if (sql.includes('information_schema.columns')) {
+          return { rows: [{ present: true }] as unknown as ReadonlyArray<Row> };
+        }
+        if (sql.includes('FROM "sandbox_drain_checkpoints"') && sql.includes('SELECT')) {
+          return { rows: [checkpoint] as unknown as ReadonlyArray<Row> };
+        }
+        if (sql === 'BEGIN') {
+          events.push('transaction:begin');
+        } else if (sql.includes('LOCK TABLE "deployments" IN SHARE MODE')) {
+          events.push('deployments:locked');
+        } else if (sql.includes('INSERT INTO "sandbox_drain_checkpoints"')) {
+          events.push('admission:armed');
+        } else if (sql.includes('NOT EXISTS(SELECT 1 FROM "deployments"')) {
+          events.push('inventory:error');
+          throw new Error('inventory unavailable');
+        } else if (sql === 'ROLLBACK') {
+          events.push('transaction:rollback');
+        }
+        return { rows: [] as ReadonlyArray<Row> };
+      },
+    };
+
+    await expect(preparePlatformSandboxDrainConnection(connection, 2)).rejects.toThrow(
+      'inventory unavailable',
+    );
+    expect(events).toEqual([
+      'transaction:begin',
+      'deployments:locked',
+      'admission:armed',
+      'inventory:error',
+      'transaction:rollback',
+    ]);
   });
 
   it('serializes lifecycle changes with the claimed PostgreSQL database', async () => {
@@ -1279,6 +1846,332 @@ describe('platform installer', () => {
       jwtSecret: 'recovered-jwt-secret',
       projectSecretKey: recoveredProjectSecretKey,
     });
+
+    const currentV1 = Buffer.alloc(32, 10).toString('base64');
+    const currentV2 = Buffer.alloc(32, 11).toString('base64');
+    const restoredKeyring = createPlatformInstallationSecrets({
+      ...input,
+      checkpoint: {
+        projectSecretActiveKeyVersion: 'v1',
+        projectSecretKey: recoveredProjectSecretKey,
+        projectSecretKeysJson: JSON.stringify({ v1: recoveredProjectSecretKey }),
+      },
+      projectSecretActiveKeyVersion: 'v2',
+      projectSecretKeysJson: JSON.stringify({ v2: currentV2, v1: currentV1 }),
+    });
+    expect(restoredKeyring).toMatchObject({
+      projectSecretActiveKeyVersion: 'v2',
+      projectSecretKey: currentV1,
+      projectSecretKeysJson: JSON.stringify({ v1: currentV1, v2: currentV2 }),
+    });
+    expect(
+      platformWorkerSecretPayload('api', restoredKeyring, 'account', 'zone', false),
+    ).toMatchObject({
+      PROJECT_SECRET_ACTIVE_KEY_VERSION: 'v2',
+      PROJECT_SECRET_KEYS_JSON: JSON.stringify({ v1: currentV1, v2: currentV2 }),
+    });
+    expect(platformWorkerSecretPayload('api', restoredKeyring, 'account', 'zone', true)).toBeNull();
+  });
+
+  it('stores a restored complete project-secret keyring in encrypted recovery state', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'void-platform-keyring-recovery-test-'));
+    directories.push(directory);
+    process.env.VOID_PLATFORM_REGISTRY_DIR = directory;
+    const plan = await createPlatformInstallPlan(
+      planningClient(),
+      {
+        accountId: 'account',
+        applicationDomain: 'apps.example.com',
+        controlPlaneDomain: '',
+        dedicatedZone: false,
+        displayName: 'Example',
+        installationSlug: 'example',
+        zoneName: 'example.com',
+      },
+      null,
+    );
+    const manifest = createPlatformInstallationManifest({
+      account: plan.account,
+      createdAt: '2026-09-16T00:00:00.000Z',
+      deployment: plan.deployment,
+      id: plan.installationId,
+      ownershipNonce: 'ownership-nonce-0123456789abcdef',
+      platformVersion: '1.0.0',
+    });
+    writeInstallationManifest(manifest);
+    const v1 = Buffer.alloc(32, 12).toString('base64');
+    const v2 = Buffer.alloc(32, 13).toString('base64');
+    const secrets = createPlatformInstallationSecrets({
+      bootstrapGitHubId: '583231',
+      bootstrapGitHubLogin: 'octocat',
+      cloudflareApiToken: 'cf-token',
+      checkpoint: {
+        projectSecretActiveKeyVersion: 'v1',
+        projectSecretKey: TEST_PLATFORM_PROJECT_SECRET_KEY,
+        projectSecretKeysJson: JSON.stringify({ v1: TEST_PLATFORM_PROJECT_SECRET_KEY }),
+      },
+      databaseUrl: 'postgres://user:password@db.example.com/void',
+      existingInstallation: true,
+      githubClientId: 'github-id',
+      githubClientSecret: 'github-secret',
+      jwtSecret: TEST_PLATFORM_JWT_SECRET,
+      projectSecretActiveKeyVersion: 'v2',
+      projectSecretKeysJson: JSON.stringify({ v1, v2 }),
+      r2AccessKeyId: 'r2-id',
+      r2SecretAccessKey: 'r2-secret',
+    });
+
+    await expect(
+      installPlatform(plan, secrets, manifest, {
+        acquireDatabaseLifecycleLock: async () => {
+          throw new Error('must stop before acquiring a lock');
+        },
+        claimDatabase: async () => {
+          throw new Error('stop after the encrypted checkpoint');
+        },
+        client: {} as never,
+        revalidateBeforeWorkerDeploy: async () => {},
+      }),
+    ).rejects.toThrow('stop after the encrypted checkpoint');
+
+    expect(readInstallationRecoverySecrets(manifest)).toMatchObject({
+      projectSecretActiveKeyVersion: 'v2',
+      projectSecretKey: v1,
+      projectSecretKeysJson: JSON.stringify({ v1, v2 }),
+    });
+    const envelope = readFileSync(join(directory, 'account', `${manifest.id}.secrets.enc`), 'utf8');
+    expect(envelope).not.toContain(v1);
+    expect(envelope).not.toContain(v2);
+  });
+
+  it("does not replay another workstation's stale recovery secrets during an upgrade", () => {
+    const stale = {
+      cloudflareApiToken: 'revoked-old-token',
+      githubClientId: 'old-oauth-id',
+      githubClientSecret: 'old-oauth-secret',
+      r2AccessKeyId: 'old-r2-id',
+      r2SecretAccessKey: 'old-r2-secret',
+      jwtSecret: 'old-jwt',
+      projectSecretKey: Buffer.alloc(32, 9).toString('base64'),
+    };
+    const input = {
+      bootstrapGitHubId: '',
+      bootstrapGitHubLogin: '',
+      cloudflareApiToken: '',
+      databaseUrl: 'postgres://user:password@db.example.com/void',
+      existingInstallation: true,
+      updateExistingWorkers: true,
+      githubClientId: '',
+      githubClientSecret: '',
+      r2AccessKeyId: '',
+      r2SecretAccessKey: '',
+      checkpoint: stale,
+    };
+    const rotatedOnOtherHost = createPlatformInstallationSecrets({
+      ...input,
+      cloudflareApiToken: 'new-runtime-token',
+    });
+    expect(platformWorkerSecretPayload('api', rotatedOnOtherHost, 'account', 'zone', true)).toEqual(
+      { CF_API_TOKEN: 'new-runtime-token' },
+    );
+    expect(
+      platformWorkerSecretPayload('proxy', rotatedOnOtherHost, 'account', 'zone', true),
+    ).toEqual({ CF_API_TOKEN: 'new-runtime-token' });
+    const routineUpgrade = createPlatformInstallationSecrets(input);
+    expect(routineUpgrade.cloudflareApiToken).toBe(stale.cloudflareApiToken);
+    expect(platformWorkerSecretPayload('api', routineUpgrade, 'account', 'zone', true)).toBeNull();
+    expect(
+      platformWorkerSecretPayload('proxy', routineUpgrade, 'account', 'zone', true),
+    ).toBeNull();
+    // Recovery still supplies the known credentials when a Worker is missing.
+    expect(
+      platformWorkerSecretPayload('api', routineUpgrade, 'account', 'zone', false),
+    ).toMatchObject({
+      CF_API_TOKEN: stale.cloudflareApiToken,
+      JWT_SECRET: stale.jwtSecret,
+      PROJECT_SECRET_KEYS_JSON: JSON.stringify({ v1: stale.projectSecretKey }),
+    });
+    // Resuming install may pass values already read from its checkpoint; these
+    // are not a request to replace secrets on Workers that already exist.
+    const resumed = createPlatformInstallationSecrets({
+      ...input,
+      ...stale,
+      updateExistingWorkers: false,
+    });
+    expect(platformWorkerSecretPayload('api', resumed, 'account', 'zone', true)).toBeNull();
+  });
+
+  it('resumes encrypted per-Worker credential updates without replaying the baseline', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'void-platform-secret-update-recovery-test-'));
+    directories.push(directory);
+    process.env.VOID_PLATFORM_REGISTRY_DIR = directory;
+    const deployment = createPlatformDeploymentManifest({
+      application: { baseDomain: 'apps.example.com', zoneName: 'example.com' },
+      displayName: 'Example',
+      installationSlug: 'example',
+    });
+    const manifest = createPlatformInstallationManifest({
+      account: { id: 'account', name: 'Account' },
+      createdAt: '2026-09-16T00:00:00.000Z',
+      deployment,
+      id: 'example-a1b2c3d4',
+      ownershipNonce: '0123456789abcdef0123456789abcdef',
+      platformVersion: '1.0.0',
+    });
+    writeInstallationManifest(manifest);
+    const baseline = {
+      cloudflareApiToken: 'old-runtime-token',
+      databaseUrl: 'postgres://user:password@db.example.com/void',
+      githubClientId: 'old-github-id',
+      githubClientSecret: 'old-github-secret',
+      jwtSecret: TEST_PLATFORM_JWT_SECRET,
+      projectSecretKey: TEST_PLATFORM_PROJECT_SECRET_KEY,
+      r2AccessKeyId: 'old-r2-id',
+      r2SecretAccessKey: 'old-r2-secret',
+    };
+    writePendingInstallationSecrets(manifest, baseline);
+    promoteInstallationSecrets(manifest);
+
+    const updates = {
+      CF_API_TOKEN: 'new-runtime-token',
+      GITHUB_CLIENT_ID: 'new-github-id',
+      GITHUB_CLIENT_SECRET: 'new-github-secret',
+      R2_ACCESS_KEY_ID: 'new-r2-id',
+      R2_SECRET_ACCESS_KEY: 'new-r2-secret',
+    };
+    writePendingInstallationSecrets(manifest, {
+      ...baseline,
+      cloudflareApiToken: updates.CF_API_TOKEN,
+      githubClientId: updates.GITHUB_CLIENT_ID,
+      githubClientSecret: updates.GITHUB_CLIENT_SECRET,
+      r2AccessKeyId: updates.R2_ACCESS_KEY_ID,
+      r2SecretAccessKey: updates.R2_SECRET_ACCESS_KEY,
+      workerSecretUpdatesJson: JSON.stringify({
+        baselineGeneration: 0,
+        generation: null,
+        id: 'rotation-intent-a',
+        schema: 1,
+        updates,
+      }),
+    });
+    const checkpoint = readInstallationRecoverySecrets(manifest)!;
+    expect(checkpoint.cloudflareApiToken).toBe('new-runtime-token');
+    const resumed = createPlatformInstallationSecrets({
+      bootstrapGitHubId: '',
+      bootstrapGitHubLogin: '',
+      cloudflareApiToken: '',
+      checkpoint,
+      databaseUrl: baseline.databaseUrl,
+      existingInstallation: true,
+      githubClientId: '',
+      githubClientSecret: '',
+      r2AccessKeyId: '',
+      r2SecretAccessKey: '',
+      updateExistingWorkers: true,
+    });
+    expect(resumed.workerSecretUpdates).toEqual({});
+    expect(resumed.pendingWorkerSecretUpdateIntent).toMatchObject({
+      baselineGeneration: 0,
+      generation: null,
+      id: 'rotation-intent-a',
+      updates,
+    });
+
+    writePendingInstallationSecrets(manifest, {
+      ...checkpoint,
+      workerSecretUpdatesJson: '',
+    });
+    promoteInstallationSecrets(manifest);
+    const later = createPlatformInstallationSecrets({
+      bootstrapGitHubId: '',
+      bootstrapGitHubLogin: '',
+      cloudflareApiToken: '',
+      checkpoint: readInstallationRecoverySecrets(manifest),
+      databaseUrl: baseline.databaseUrl,
+      existingInstallation: true,
+      githubClientId: '',
+      githubClientSecret: '',
+      r2AccessKeyId: '',
+      r2SecretAccessKey: '',
+      updateExistingWorkers: true,
+    });
+    expect(platformWorkerSecretPayload('api', later, 'account', 'zone', true)).toBeNull();
+    expect(platformWorkerSecretPayload('proxy', later, 'account', 'zone', true)).toBeNull();
+
+    writePendingInstallationSecrets(manifest, {
+      ...baseline,
+      cloudflareApiToken: updates.CF_API_TOKEN,
+      workerSecretUpdatesJson: JSON.stringify({
+        baselineGeneration: 0,
+        generation: 1,
+        id: 'rotation-intent-a',
+        schema: 1,
+        updates,
+      }),
+    });
+    const completedElsewhere = {
+      ...manifest,
+      steps: [
+        ...manifest.steps,
+        {
+          completedAt: '2026-09-16T00:01:00.000Z',
+          key: 'worker-secret-updates:1:pending',
+          resultHash: 'rotation-intent-a',
+        },
+        {
+          completedAt: '2026-09-16T00:01:01.000Z',
+          key: 'worker-cutover:1:committed',
+          resultHash: 'committed',
+        },
+        {
+          completedAt: '2026-09-16T00:01:02.000Z',
+          key: 'worker-secret-updates:1:committed',
+          resultHash: 'rotation-intent-a',
+        },
+      ],
+    };
+    expect(readInstallationRecoverySecrets(completedElsewhere)).toMatchObject({
+      cloudflareApiToken: updates.CF_API_TOKEN,
+    });
+    expect(readInstallationRecoverySecrets(completedElsewhere)?.workerSecretUpdatesJson).toBe(
+      undefined,
+    );
+
+    writePendingInstallationSecrets(manifest, {
+      ...baseline,
+      cloudflareApiToken: 'stale-runtime-token',
+      workerSecretUpdatesJson: JSON.stringify({
+        baselineGeneration: 0,
+        generation: 1,
+        id: 'rotation-intent-a',
+        schema: 1,
+        updates,
+      }),
+    });
+    const supersededElsewhere = {
+      ...completedElsewhere,
+      steps: [
+        ...completedElsewhere.steps,
+        {
+          completedAt: '2026-09-16T00:02:00.000Z',
+          key: 'worker-secret-updates:2:pending',
+          resultHash: 'rotation-intent-b',
+        },
+        {
+          completedAt: '2026-09-16T00:02:01.000Z',
+          key: 'worker-cutover:2:committed',
+          resultHash: 'committed',
+        },
+        {
+          completedAt: '2026-09-16T00:02:02.000Z',
+          key: 'worker-secret-updates:2:committed',
+          resultHash: 'rotation-intent-b',
+        },
+      ],
+    };
+    expect(readInstallationRecoverySecrets(supersededElsewhere)).toMatchObject({
+      cloudflareApiToken: updates.CF_API_TOKEN,
+    });
   });
 
   it('omits unavailable composite secrets so Cloudflare preserves deployed values', () => {
@@ -1394,6 +2287,8 @@ describe('platform installer', () => {
           databaseUrl: 'postgres://user:password@db.example.com/void',
           githubClientId: 'github-id',
           githubClientSecret: 'github-secret',
+          jwtSecret: TEST_PLATFORM_JWT_SECRET,
+          projectSecretKey: TEST_PLATFORM_PROJECT_SECRET_KEY,
           r2AccessKeyId: 'r2-id',
           r2SecretAccessKey: 'r2-secret',
         }),
@@ -1499,6 +2394,8 @@ describe('platform installer', () => {
           databaseUrl: 'postgres://user:password@db.example.com/void',
           githubClientId: 'github-id',
           githubClientSecret: 'github-secret',
+          jwtSecret: TEST_PLATFORM_JWT_SECRET,
+          projectSecretKey: TEST_PLATFORM_PROJECT_SECRET_KEY,
           r2AccessKeyId: 'r2-id',
           r2SecretAccessKey: 'r2-secret',
         }),
@@ -1580,6 +2477,8 @@ describe('platform installer', () => {
         databaseUrl: 'postgres://user:password@db.example.com/void',
         githubClientId: 'github-id',
         githubClientSecret: 'github-secret',
+        jwtSecret: TEST_PLATFORM_JWT_SECRET,
+        projectSecretKey: TEST_PLATFORM_PROJECT_SECRET_KEY,
         r2AccessKeyId: 'r2-id',
         r2SecretAccessKey: 'r2-secret',
       }),
@@ -1625,6 +2524,10 @@ describe('platform installer', () => {
         },
         deployWorker: async (config, secrets) => {
           expect(routingValues.get(PLATFORM_DISABLED_KEY)).toBe(PLATFORM_DISABLED_VALUE);
+          expect(JSON.parse(routingValues.get(PLATFORM_SANDBOX_DRAIN_KEY)!)).toMatchObject({
+            state: 'complete',
+            version: 1,
+          });
           lifecycleEvents.push(`deploy:${String(config.name)}`);
           deployed.push(String(config.name));
           deployedTrafficStates.push(
@@ -1635,12 +2538,16 @@ describe('platform installer', () => {
           }
         },
         migrateDatabase: async () => {},
+        prepareSandboxDrain: async () => sandboxDrainPreparation('complete'),
         revalidateBeforeWorkerDeploy: async () => {},
         verifyHealth: async () => {
           expect(routingValues.get(PLATFORM_DISABLED_KEY)).toBe(
             lifecycleEvents.includes('verify') ? undefined : PLATFORM_DISABLED_VALUE,
           );
           lifecycleEvents.push('verify');
+        },
+        verifySandboxDrain: async () => {
+          throw new Error('an empty fresh installation must not require a manual drain');
         },
       },
     );
@@ -1728,6 +2635,8 @@ describe('platform installer', () => {
           databaseUrl: 'postgres://user:password@db.example.com/void',
           githubClientId: 'github-id',
           githubClientSecret: 'github-secret',
+          jwtSecret: TEST_PLATFORM_JWT_SECRET,
+          projectSecretKey: TEST_PLATFORM_PROJECT_SECRET_KEY,
           r2AccessKeyId: 'r2-id',
           r2SecretAccessKey: 'r2-secret',
         }),
@@ -1806,6 +2715,8 @@ describe('platform installer', () => {
           databaseUrl: 'postgres://user:password@db.example.com/void',
           githubClientId: 'github-id',
           githubClientSecret: 'github-secret',
+          jwtSecret: TEST_PLATFORM_JWT_SECRET,
+          projectSecretKey: TEST_PLATFORM_PROJECT_SECRET_KEY,
           r2AccessKeyId: 'r2-id',
           r2SecretAccessKey: 'r2-secret',
         }),
@@ -1947,6 +2858,8 @@ describe('platform installer', () => {
         databaseUrl: 'postgres://user:password@db.example.com/void',
         githubClientId: 'github-id',
         githubClientSecret: 'github-secret',
+        jwtSecret: TEST_PLATFORM_JWT_SECRET,
+        projectSecretKey: TEST_PLATFORM_PROJECT_SECRET_KEY,
         r2AccessKeyId: 'r2-id',
         r2SecretAccessKey: 'r2-secret',
       }),
@@ -2026,6 +2939,8 @@ describe('platform installer', () => {
       databaseUrl: 'postgres://user:password@db.example.com/void',
       githubClientId: 'github-id',
       githubClientSecret: 'github-secret',
+      jwtSecret: TEST_PLATFORM_JWT_SECRET,
+      projectSecretKey: TEST_PLATFORM_PROJECT_SECRET_KEY,
       r2AccessKeyId: 'r2-id',
       r2SecretAccessKey: 'r2-secret',
     });
@@ -2155,6 +3070,319 @@ describe('platform installer', () => {
       putR2Object: async () => {},
     };
     const sourceManifest = { ...installed.manifest, platformVersion: '0.10.13' };
+    const interruptedProtocolEvents: Array<string> = [];
+    const legacySourceManifest = {
+      ...sourceManifest,
+      usageProtocolVersion: 0 as const,
+    };
+    const rotatedWorkerSecrets = createPlatformInstallationSecrets({
+      bootstrapGitHubId: '',
+      bootstrapGitHubLogin: '',
+      cloudflareApiToken: 'rotated-cf-token',
+      checkpoint: readInstallationRecoverySecrets(installed.manifest),
+      databaseUrl: secrets.databaseUrl,
+      existingInstallation: true,
+      githubClientId: 'rotated-github-id',
+      githubClientSecret: 'rotated-github-secret',
+      r2AccessKeyId: 'rotated-r2-id',
+      r2SecretAccessKey: 'rotated-r2-secret',
+      updateExistingWorkers: true,
+    });
+    await expect(
+      installPlatform(upgradedPlan, rotatedWorkerSecrets, legacySourceManifest, {
+        acquireDatabaseLifecycleLock,
+        claimDatabase,
+        client: {
+          ...upgradeClient,
+          putKvValue: async (_account, _namespace, key) => {
+            if (key === PLATFORM_DISABLED_KEY) {
+              interruptedProtocolEvents.push('gate:closed');
+            }
+          },
+        },
+        deployWorker: async (config, secretPayload) => {
+          const name = String(config.name);
+          interruptedProtocolEvents.push(`deploy:${name}`);
+          if (name === deployment.resources.apiWorker) {
+            expect(secretPayload).toEqual({
+              CF_API_TOKEN: 'rotated-cf-token',
+              GITHUB_CLIENT_ID: 'rotated-github-id',
+              GITHUB_CLIENT_SECRET: 'rotated-github-secret',
+              R2_ACCESS_KEY_ID: 'rotated-r2-id',
+              R2_SECRET_ACCESS_KEY: 'rotated-r2-secret',
+            });
+          }
+          if (name === deployment.resources.proxyWorker) {
+            expect(secretPayload).toEqual({ CF_API_TOKEN: 'rotated-cf-token' });
+          }
+          if (name === deployment.resources.proxyWorker) {
+            throw new Error('interrupted after API activation');
+          }
+          return async () => {
+            interruptedProtocolEvents.push(`rollback:${name}`);
+          };
+        },
+        migrateDatabase: async () => {},
+        revalidateBeforeWorkerDeploy: async () => {},
+        verifyHealth: async () => {
+          throw new Error('health must not run before every Worker is staged');
+        },
+      }),
+    ).rejects.toThrow('interrupted after API activation');
+    expect(interruptedProtocolEvents).toEqual([
+      'gate:closed',
+      `deploy:${deployment.resources.apiWorker}`,
+      `deploy:${deployment.resources.proxyWorker}`,
+      'gate:closed',
+      `rollback:${deployment.resources.apiWorker}`,
+    ]);
+    const interruptedManifest = listInstallationManifests(directory)[0]!;
+    expect(interruptedManifest).toMatchObject({
+      status: 'failed',
+      usageProtocolVersion: 0,
+    });
+    const interruptedSecretCheckpoint = readInstallationRecoverySecrets(interruptedManifest)!;
+    const resumedWorkerSecrets = createPlatformInstallationSecrets({
+      bootstrapGitHubId: '',
+      bootstrapGitHubLogin: '',
+      cloudflareApiToken: 'retry-cf-token',
+      checkpoint: interruptedSecretCheckpoint,
+      databaseUrl: secrets.databaseUrl,
+      existingInstallation: true,
+      githubClientId: '',
+      githubClientSecret: '',
+      r2AccessKeyId: '',
+      r2SecretAccessKey: '',
+      updateExistingWorkers: true,
+    });
+    expect(resumedWorkerSecrets.workerSecretUpdates).toEqual({
+      CF_API_TOKEN: 'retry-cf-token',
+    });
+    expect(resumedWorkerSecrets.pendingWorkerSecretUpdateIntent?.updates).toEqual(
+      rotatedWorkerSecrets.workerSecretUpdates,
+    );
+    const resumedUpdates = {
+      ...rotatedWorkerSecrets.workerSecretUpdates,
+      CF_API_TOKEN: 'retry-cf-token',
+    };
+
+    const emptyCoreUpgradeConfigs: Array<Record<string, unknown>> = [];
+    const resumedSecretPayloads: Array<Record<string, string> | null> = [];
+    const emptyCoreUpgrade = await installPlatform(
+      upgradedPlan,
+      resumedWorkerSecrets,
+      {
+        ...sourceManifest,
+        safetyProtocols: { sandboxDrain: 0 },
+        steps: interruptedManifest.steps,
+      },
+      {
+        acquireDatabaseLifecycleLock,
+        claimDatabase,
+        client: upgradeClient,
+        deployWorker: async (config, secretPayload) => {
+          emptyCoreUpgradeConfigs.push(config);
+          resumedSecretPayloads.push(secretPayload);
+        },
+        migrateDatabase: async () => {},
+        prepareSandboxDrain: async () => sandboxDrainPreparation('complete'),
+        revalidateBeforeWorkerDeploy: async () => {},
+        verifyHealth: async () => {},
+        verifySandboxDrain: async () => {
+          throw new Error('empty core upgrade must not require a manual drain');
+        },
+      },
+    );
+    expect(emptyCoreUpgrade.waitingForSandboxDrain).toBe(false);
+    expect(emptyCoreUpgrade.manifest.safetyProtocols).toEqual({ sandboxDrain: 2 });
+    expect(emptyCoreUpgradeConfigs).toHaveLength(4);
+    expect(resumedSecretPayloads.slice(0, 2)).toEqual([
+      resumedUpdates,
+      { CF_API_TOKEN: 'retry-cf-token' },
+    ]);
+    expect(
+      readInstallationRecoverySecrets(emptyCoreUpgrade.manifest)?.workerSecretUpdatesJson,
+    ).toBe(undefined);
+    for (const index of [0, 1, 3]) {
+      expect(
+        (emptyCoreUpgradeConfigs[index]!.vars as Record<string, unknown>).PLATFORM_TRAFFIC_STATE,
+      ).toBe('enabled');
+    }
+    const nextRotationSecrets = createPlatformInstallationSecrets({
+      bootstrapGitHubId: '',
+      bootstrapGitHubLogin: '',
+      cloudflareApiToken: 'next-cf-token',
+      checkpoint: readInstallationRecoverySecrets(emptyCoreUpgrade.manifest),
+      databaseUrl: secrets.databaseUrl,
+      existingInstallation: true,
+      githubClientId: '',
+      githubClientSecret: '',
+      r2AccessKeyId: '',
+      r2SecretAccessKey: '',
+      updateExistingWorkers: true,
+    });
+    const nextRotationPayloads: Array<Record<string, string> | null> = [];
+    const nextRotation = await installPlatform(
+      upgradedPlan,
+      nextRotationSecrets,
+      emptyCoreUpgrade.manifest,
+      {
+        acquireDatabaseLifecycleLock,
+        claimDatabase,
+        client: upgradeClient,
+        deployWorker: async (_config, secretPayload) => {
+          nextRotationPayloads.push(secretPayload);
+        },
+        migrateDatabase: async () => {},
+        revalidateBeforeWorkerDeploy: async () => {},
+        verifyHealth: async () => {},
+      },
+    );
+    expect(nextRotationPayloads.slice(0, 2)).toEqual([
+      { CF_API_TOKEN: 'next-cf-token' },
+      { CF_API_TOKEN: 'next-cf-token' },
+    ]);
+    expect(
+      nextRotation.manifest.steps.filter((step) => step.key.startsWith('worker-secret-updates:')),
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ key: expect.stringMatching(/:pending$/) }),
+        expect.objectContaining({ key: expect.stringMatching(/:committed$/) }),
+      ]),
+    );
+    upgradeKvWrites.splice(0);
+    deletedKvValues.splice(0);
+
+    const sandboxDrainDeployments: Array<string> = [];
+    const sandboxDrainTrafficStates: Array<unknown> = [];
+    const sandboxDrainEvents: Array<string> = [];
+    const waitingForSandboxDrain = await installPlatform(
+      upgradedPlan,
+      secrets,
+      { ...sourceManifest, safetyProtocols: { sandboxDrain: 0 } },
+      {
+        acquireDatabaseLifecycleLock,
+        claimDatabase,
+        client: {
+          ...upgradeClient,
+          deleteKvValue: async () => {
+            sandboxDrainEvents.push('gate:open');
+          },
+          putKvValue: async (_account, _namespace, key) => {
+            if (key === PLATFORM_DISABLED_KEY) {
+              sandboxDrainEvents.push('gate:closed');
+            }
+          },
+        },
+        deployWorker: async (config) => {
+          sandboxDrainDeployments.push(String(config.name));
+          sandboxDrainTrafficStates.push(
+            (config.vars as Record<string, unknown> | undefined)?.PLATFORM_TRAFFIC_STATE,
+          );
+        },
+        migrateDatabase: async () => {},
+        prepareSandboxDrain: async () => sandboxDrainPreparation('pending'),
+        revalidateBeforeWorkerDeploy: async () => {},
+        verifyHealth: async () => {
+          sandboxDrainEvents.push('health');
+        },
+        verifySandboxDrain: async () => {
+          sandboxDrainEvents.push('drain:required');
+          return false;
+        },
+      },
+    );
+    expect(waitingForSandboxDrain.waitingForSandboxDrain).toBe(true);
+    expect(waitingForSandboxDrain.manifest).toMatchObject({
+      platformVersion: '0.10.13',
+      safetyProtocols: { sandboxDrain: 2 },
+      status: 'verifying',
+    });
+    expect(sandboxDrainDeployments).toEqual([
+      deployment.resources.apiWorker,
+      deployment.resources.proxyWorker,
+      deployment.resources.tailWorker,
+      deployment.resources.dispatchWorker,
+    ]);
+    expect(sandboxDrainTrafficStates).toEqual([
+      'sandbox-drain',
+      'sandbox-drain',
+      undefined,
+      'sandbox-drain',
+    ]);
+    expect(sandboxDrainEvents).toEqual(['gate:closed', 'health', 'drain:required']);
+
+    const resumedDrainDeployments: Array<string> = [];
+    const resumedDrainEvents: Array<string> = [];
+    let resumedDrainPreparations = 0;
+    const resumedAfterSandboxDrain = await installPlatform(
+      upgradedPlan,
+      secrets,
+      waitingForSandboxDrain.manifest,
+      {
+        acquireDatabaseLifecycleLock,
+        claimDatabase,
+        client: {
+          ...upgradeClient,
+          deleteKvValue: async (_account, _namespace, key) => {
+            if (key === PLATFORM_DISABLED_KEY) {
+              resumedDrainEvents.push('gate:open');
+            }
+          },
+          putKvValue: async (_account, _namespace, key) => {
+            if (key === PLATFORM_DISABLED_KEY) {
+              resumedDrainEvents.push('gate:closed');
+            }
+          },
+        },
+        deployWorker: async (config) => {
+          resumedDrainDeployments.push(
+            `${String(config.name)}:${String(
+              (config.vars as Record<string, unknown> | undefined)?.PLATFORM_TRAFFIC_STATE,
+            )}`,
+          );
+        },
+        migrateDatabase: async () => {},
+        prepareSandboxDrain: async () =>
+          sandboxDrainPreparation(resumedDrainPreparations++ === 0 ? 'pending' : 'complete'),
+        revalidateBeforeWorkerDeploy: async () => {},
+        verifyHealth: async () => {
+          resumedDrainEvents.push('health');
+        },
+        verifySandboxDrain: async () => {
+          resumedDrainEvents.push('drain:complete');
+          return true;
+        },
+      },
+    );
+    expect(resumedAfterSandboxDrain.waitingForSandboxDrain).toBe(false);
+    expect(resumedAfterSandboxDrain.manifest).toMatchObject({
+      safetyProtocols: { sandboxDrain: 2 },
+      status: 'installed',
+    });
+    expect(resumedDrainDeployments).toHaveLength(8);
+    expect(resumedDrainDeployments.slice(0, 4)).toEqual([
+      `${deployment.resources.apiWorker}:sandbox-drain`,
+      `${deployment.resources.proxyWorker}:sandbox-drain`,
+      `${deployment.resources.tailWorker}:undefined`,
+      `${deployment.resources.dispatchWorker}:sandbox-drain`,
+    ]);
+    expect(resumedDrainDeployments.slice(4)).toEqual([
+      `${deployment.resources.apiWorker}:enabled`,
+      `${deployment.resources.proxyWorker}:enabled`,
+      `${deployment.resources.tailWorker}:undefined`,
+      `${deployment.resources.dispatchWorker}:enabled`,
+    ]);
+    expect(resumedDrainEvents).toEqual([
+      'gate:closed',
+      'health',
+      'drain:complete',
+      'gate:open',
+      'health',
+    ]);
+    upgradeKvWrites.splice(0);
+    deletedKvValues.splice(0);
+
     let verifiedTargetVersion = '';
     await expect(
       installPlatform(upgradedPlan, secrets, sourceManifest, {
@@ -2177,7 +3405,8 @@ describe('platform installer', () => {
       acquireDatabaseLifecycleLock,
       claimDatabase,
       client: upgradeClient,
-      deployWorker: async (config) => {
+      deployWorker: async (config, secretPayload) => {
+        expect(secretPayload).toBeNull();
         deployed.push(String(config.name));
       },
       migrateDatabase: async () => {
@@ -2195,7 +3424,9 @@ describe('platform installer', () => {
       deployment.resources.dispatchWorker,
     ]);
     expect(migrations).toBe(0);
-    expect(new Set(upgradeKvWrites)).toEqual(new Set(['__void/platform/installation/v1']));
+    expect(new Set(upgradeKvWrites)).toEqual(
+      new Set(['__void/platform/installation/v1', PLATFORM_SANDBOX_DRAIN_KEY]),
+    );
     expect(upgraded.manifest.status).toBe('installed');
     expect(upgraded.manifest.platformVersion).toBe(readPlatformRuntimeManifest().platformVersion);
     expect(upgraded.manifest.runtime).toMatchObject({
@@ -2203,6 +3434,148 @@ describe('platform installer', () => {
       source: 'custom',
     });
     expect(upgraded.manifest.resources).toHaveLength(15);
+
+    const currentRuntime = resolvePlatformRuntime(getPlatformRuntimeDirectory());
+    const earlierDatabase = migrationSubset(currentRuntime.manifest.database.migrations.length - 1);
+    const earlierRuntime = {
+      ...currentRuntime,
+      manifest: {
+        ...currentRuntime.manifest,
+        database: earlierDatabase,
+        platformVersion: '0.10.13-compatible',
+      },
+      manifestSha256: 'a'.repeat(64),
+    };
+    const rollbackSource = {
+      ...currentRuntime,
+      manifest: {
+        ...currentRuntime.manifest,
+        database: {
+          ...currentRuntime.manifest.database,
+          rollbackSafeFrom: [
+            ...currentRuntime.manifest.database.rollbackSafeFrom,
+            {
+              platformVersion: earlierRuntime.manifest.platformVersion,
+              schemaDigest: earlierDatabase.schemaDigest,
+            },
+          ],
+        },
+      },
+      manifestSha256: 'b'.repeat(64),
+    };
+    const rollbackStartingPoint = {
+      ...upgraded.manifest,
+      databaseSchemaDigest: rollbackSource.manifest.database.schemaDigest,
+      platformVersion: rollbackSource.manifest.platformVersion,
+      runtime: {
+        manifestSha256: rollbackSource.manifestSha256,
+        source: rollbackSource.source,
+        sourceRevision: rollbackSource.manifest.sourceRevision,
+      },
+    };
+    const verifiedRollbackSchemas: Array<string> = [];
+    const rollbackResult = await installPlatform(upgradedPlan, secrets, rollbackStartingPoint, {
+      acquireDatabaseLifecycleLock: async () =>
+        Object.assign(async () => {}, {
+          prepareSandboxDrain: async () => sandboxDrainPreparation('complete'),
+          verifyDatabase: async (
+            _runtimeDirectory: string,
+            database: PlatformRuntimeDatabaseManifest,
+          ) => {
+            verifiedRollbackSchemas.push(database.schemaDigest);
+          },
+        }),
+      claimDatabase,
+      client: upgradeClient,
+      databaseRollbackSource: rollbackSource,
+      deployWorker: async () => {},
+      revalidateBeforeWorkerDeploy: async () => {},
+      runtime: earlierRuntime,
+      verifyHealth: async () => {},
+    });
+    expect(verifiedRollbackSchemas).toEqual([rollbackSource.manifest.database.schemaDigest]);
+    expect(rollbackResult.manifest).toMatchObject({
+      databaseSchemaDigest: rollbackSource.manifest.database.schemaDigest,
+      platformVersion: earlierRuntime.manifest.platformVersion,
+      runtime: { manifestSha256: earlierRuntime.manifestSha256 },
+    });
+
+    const cleanMachineDiscovery = parsePlatformInstallationManifest(
+      JSON.parse(JSON.stringify(rollbackResult.manifest)),
+    );
+    expect(cleanMachineDiscovery.databaseSchemaDigest).toBe(
+      rollbackSource.manifest.database.schemaDigest,
+    );
+    expect(cleanMachineDiscovery.runtime?.manifestSha256).toBe(earlierRuntime.manifestSha256);
+
+    const verifiedRollForwardSchemas: Array<string> = [];
+    const rollForwardResult = await installPlatform(upgradedPlan, secrets, cleanMachineDiscovery, {
+      acquireDatabaseLifecycleLock: async () =>
+        Object.assign(async () => {}, {
+          prepareSandboxDrain: async () => sandboxDrainPreparation('complete'),
+          verifyDatabase: async (
+            _runtimeDirectory: string,
+            database: PlatformRuntimeDatabaseManifest,
+          ) => {
+            verifiedRollForwardSchemas.push(database.schemaDigest);
+          },
+        }),
+      claimDatabase,
+      client: upgradeClient,
+      deployWorker: async () => {},
+      revalidateBeforeWorkerDeploy: async () => {},
+      runtime: rollbackSource,
+      verifyHealth: async () => {},
+    });
+    expect(verifiedRollForwardSchemas).toEqual([rollbackSource.manifest.database.schemaDigest]);
+    expect(rollForwardResult.manifest).toMatchObject({
+      databaseSchemaDigest: rollbackSource.manifest.database.schemaDigest,
+      platformVersion: rollbackSource.manifest.platformVersion,
+      runtime: { manifestSha256: rollbackSource.manifestSha256 },
+    });
+
+    const downgradeEvents: Array<string> = [];
+    const downgraded = await installPlatform(upgradedPlan, secrets, upgraded.manifest, {
+      acquireDatabaseLifecycleLock,
+      claimDatabase,
+      client: {
+        ...upgradeClient,
+        deleteKvValue: async (_account, _namespace, key) => {
+          if (key === PLATFORM_DISABLED_KEY) {
+            downgradeEvents.push('gate:open');
+          }
+        },
+        putKvValue: async (_account, _namespace, key) => {
+          if (key === PLATFORM_DISABLED_KEY) {
+            downgradeEvents.push('gate:closed');
+          }
+        },
+      },
+      deployWorker: async (config) => {
+        downgradeEvents.push(`deploy:${String(config.name)}`);
+      },
+      migrateDatabase: async () => {},
+      revalidateBeforeWorkerDeploy: async () => {},
+      runtime: {
+        ...currentRuntime,
+        manifest: { ...currentRuntime.manifest, usageProtocolVersion: 0 },
+      },
+      verifyHealth: async () => {
+        downgradeEvents.push('health');
+      },
+      verifyWorkerCutover: async () => {
+        downgradeEvents.push('cutover');
+      },
+    });
+    expect(downgradeEvents[0]).toBe('gate:closed');
+    expect(downgradeEvents.filter((event) => event.startsWith('deploy:'))).toHaveLength(8);
+    expect(downgradeEvents.indexOf('gate:open')).toBeGreaterThan(
+      downgradeEvents.lastIndexOf(`deploy:${deployment.resources.dispatchWorker}`),
+    );
+    expect(downgradeEvents.indexOf('gate:open')).toBeGreaterThan(
+      downgradeEvents.indexOf('cutover'),
+    );
+    expect(downgraded.manifest.usageProtocolVersion).toBe(0);
 
     const repairedWorkerConfigs: Array<Record<string, unknown>> = [];
     const repairEvents: Array<string> = [];
@@ -2267,6 +3640,67 @@ describe('platform installer', () => {
       expect(
         (repairedWorkerConfigs[index + 4]!.vars as Record<string, unknown>).PLATFORM_TRAFFIC_STATE,
       ).toBe('enabled');
+    }
+
+    const legacyDisabled = {
+      ...setInstallationDesiredState(upgraded.manifest, 'disabled', '2026-09-14T00:00:03.500Z'),
+      safetyProtocols: { sandboxDrain: 0 as const },
+      status: 'disabled' as const,
+    };
+    const disabledLegacyUpgrade = await installPlatform(upgradedPlan, secrets, legacyDisabled, {
+      acquireDatabaseLifecycleLock,
+      claimDatabase,
+      client: upgradeClient,
+      deployWorker: async () => {},
+      migrateDatabase: async () => {},
+      prepareSandboxDrain: async () => sandboxDrainPreparation('pending'),
+      revalidateBeforeWorkerDeploy: async () => {},
+      verifySandboxDrain: async () => {
+        throw new Error('a disabled upgrade must defer drain verification until enablement');
+      },
+    });
+    expect(disabledLegacyUpgrade.manifest).toMatchObject({
+      desiredState: 'disabled',
+      safetyProtocols: { sandboxDrain: 2 },
+      status: 'disabled',
+    });
+
+    const legacyEnableConfigs: Array<Record<string, unknown>> = [];
+    let legacyEnableGateOpened = false;
+    const legacyEnableResult = await installPlatform(
+      upgradedPlan,
+      secrets,
+      setInstallationDesiredState(
+        disabledLegacyUpgrade.manifest,
+        'enabled',
+        '2026-09-14T00:00:03.750Z',
+      ),
+      {
+        acquireDatabaseLifecycleLock,
+        claimDatabase,
+        client: {
+          ...upgradeClient,
+          deleteKvValue: async () => {
+            legacyEnableGateOpened = true;
+          },
+        },
+        deployWorker: async (config) => {
+          legacyEnableConfigs.push(config);
+        },
+        migrateDatabase: async () => {},
+        prepareSandboxDrain: async () => sandboxDrainPreparation('pending'),
+        revalidateBeforeWorkerDeploy: async () => {},
+        verifyHealth: async () => {},
+        verifySandboxDrain: async () => false,
+      },
+    );
+    expect(legacyEnableResult.waitingForSandboxDrain).toBe(true);
+    expect(legacyEnableGateOpened).toBe(false);
+    expect(legacyEnableConfigs).toHaveLength(4);
+    for (const index of [0, 1, 3]) {
+      expect(
+        (legacyEnableConfigs[index]!.vars as Record<string, unknown>).PLATFORM_TRAFFIC_STATE,
+      ).toBe('sandbox-drain');
     }
 
     const disabledConfigs: Array<Record<string, unknown>> = [];

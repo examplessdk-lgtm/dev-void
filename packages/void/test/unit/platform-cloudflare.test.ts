@@ -5,9 +5,196 @@ import {
   parsePostgresConnectionString,
   PlatformCloudflareClient,
   PlatformWorkerCustomDomainsChangedError,
+  verifyPlatformRuntimeTokenPermissions,
 } from '../../src/cli/platform-cloudflare.ts';
 
 describe('platform Cloudflare client', () => {
+  it('uses the runtime credential only for AI Gateway operations while keeping the API origin pinned', async () => {
+    const requests: Array<{ path: string; authorization: string | null }> = [];
+    const client = new PlatformCloudflareClient('operator-token', {
+      apiBase: 'https://cloudflare.example.test/client/v4',
+      fetcher: async (input, init) => {
+        const url = new URL(String(input));
+        expect(url.origin).toBe('https://cloudflare.example.test');
+        requests.push({
+          path: url.pathname,
+          authorization: new Headers(init?.headers).get('Authorization'),
+        });
+        return Response.json({
+          success: true,
+          result: init?.method === 'POST' ? { id: 'gateway' } : [],
+        });
+      },
+    }).withAiGatewayToken('runtime-token');
+    await client.listAiGateways('account');
+    await client.createAiGateway('account', 'gateway');
+    await client.listWorkerNames('account');
+    expect(requests.map((request) => request.authorization)).toEqual([
+      'Bearer runtime-token',
+      'Bearer runtime-token',
+      'Bearer operator-token',
+    ]);
+  });
+
+  it('identifies the rejected API operation without including query parameters or credentials', async () => {
+    const client = new PlatformCloudflareClient('secret-token', {
+      fetcher: async () =>
+        Response.json(
+          { success: false, errors: [{ message: 'Authentication error' }] },
+          { status: 403 },
+        ),
+    });
+    const error = await client
+      .request('/accounts/account/ai-gateway/gateways?secret=query-value')
+      .catch((error) => error as Error);
+    expect((error as Error).message).toContain(
+      'HTTP 403; GET /accounts/account/ai-gateway/gateways',
+    );
+    expect((error as Error).message).not.toContain('query-value');
+    expect((error as Error).message).not.toContain('secret-token');
+  });
+  it.each([401, 403, 429, 500, 503])(
+    'distinguishes HTTP %s from missing workers.dev onboarding',
+    async (status) => {
+      const client = new PlatformCloudflareClient('secret-token', {
+        fetcher: async () =>
+          Response.json({ success: false, errors: [{ message: 'provider failure' }] }, { status }),
+      });
+      const error = await client.getWorkersSubdomain('account').catch((error) => error as Error);
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toContain(`HTTP ${status}`);
+      expect((error as Error).message).not.toContain('finish Workers onboarding');
+      expect((error as Error).message).not.toContain('secret-token');
+      expect((error as Error).message).toContain(
+        status === 401 || status === 403 ? 'permissions' : 'Rerun',
+      );
+    },
+  );
+
+  it('does not infer missing onboarding from a failed network request', async () => {
+    const client = new PlatformCloudflareClient('token', {
+      fetcher: async () => {
+        throw new TypeError('fetch failed');
+      },
+    });
+    await expect(client.getWorkersSubdomain('account')).rejects.toThrow('the request failed');
+    await expect(client.getWorkersSubdomain('account')).rejects.toThrow(
+      'no Workers onboarding change is needed',
+    );
+  });
+
+  it('accepts an existing subdomain and handles an empty result without a property access error', async () => {
+    const client = new PlatformCloudflareClient('token', {
+      fetcher: async () =>
+        Response.json({ success: true, result: { subdomain: 'void-platform-e2e-test' } }),
+    });
+    await expect(client.getWorkersSubdomain('account')).resolves.toBe('void-platform-e2e-test');
+    const empty = new PlatformCloudflareClient('token', {
+      fetcher: async () => Response.json({ success: true, result: null }),
+    });
+    await expect(empty.getWorkersSubdomain('account')).rejects.toThrow(
+      'does not have a workers.dev subdomain',
+    );
+  });
+  it('explains workers.dev onboarding for a fresh account', async () => {
+    const missing = new PlatformCloudflareClient('token', {
+      fetcher: async () => Response.json({ success: true, result: { subdomain: null } }),
+    });
+    await expect(missing.getWorkersSubdomain('account')).rejects.toThrow(
+      'https://dash.cloudflare.com/account/workers-and-pages',
+    );
+
+    const notOnboarded = new PlatformCloudflareClient('token', {
+      fetcher: async () =>
+        Response.json(
+          { errors: [{ message: 'workers.dev subdomain is not registered' }], success: false },
+          { status: 404 },
+        ),
+    });
+    await expect(notOnboarded.getWorkersSubdomain('account')).rejects.toThrow(
+      'finish Workers onboarding',
+    );
+  });
+
+  it('requires an active deployed certificate for the exact application wildcard', async () => {
+    const requested: Array<string> = [];
+    const future = new Date(Date.now() + 86_400_000).toISOString();
+    const cert = (hosts: Array<string>, status = 'active', expires_on = future) => ({
+      hosts,
+      status,
+      expires_on,
+    });
+    const client = new PlatformCloudflareClient('token', {
+      apiBase: 'https://cloudflare.example.test/client/v4',
+      fetcher: async (input, init) => {
+        const url = new URL(String(input));
+        requested.push(url.pathname);
+        expect(init?.method ?? 'GET').toBe('GET');
+        if (url.pathname.endsWith('/certificate_packs')) {
+          expect(url.searchParams.get('deploy')).toBe('production');
+          return Response.json({
+            success: true,
+            result: [
+              {
+                status: 'active',
+                hosts: ['*.apps.example.com'],
+                certificates: [cert(['*.example.com'])],
+              },
+              { certificates: [cert(['*.apps.example.com'], 'pending_validation')] },
+              { certificates: [cert(['*.apps.example.com'], 'active', '2020-01-01T00:00:00Z')] },
+            ],
+          });
+        }
+        return Response.json({ success: true, result: [cert(['*.APPS.EXAMPLE.COM.'])] });
+      },
+    });
+    await expect(
+      client.hasActiveCertificateForHostname('zone', '*.apps.example.com'),
+    ).resolves.toBe(true);
+    expect(requested).toEqual([
+      '/client/v4/zones/zone/ssl/certificate_packs',
+      '/client/v4/zones/zone/custom_certificates',
+    ]);
+  });
+
+  it('finds covering certificates on later pages and rejects pending-only coverage', async () => {
+    const requested: Array<string> = [];
+    const client = new PlatformCloudflareClient('token', {
+      fetcher: async (input) => {
+        const url = new URL(String(input));
+        requested.push(url.searchParams.get('page')!);
+        return Response.json({
+          success: true,
+          result:
+            url.searchParams.get('page') === '1'
+              ? [{ certificates: [{ status: 'active', hosts: ['*.example.com'] }] }]
+              : [{ certificates: [{ status: 'active', hosts: ['*.apps.example.com'] }] }],
+          result_info: { total_pages: 2 },
+        });
+      },
+    });
+    await expect(
+      client.hasActiveCertificateForHostname('zone', '*.apps.example.com'),
+    ).resolves.toBe(true);
+    expect(requested).toEqual(['1', '2']);
+    const pending = new PlatformCloudflareClient('token', {
+      fetcher: async () =>
+        Response.json({
+          success: true,
+          result: [
+            {
+              status: 'pending_validation',
+              hosts: ['*.apps.example.com'],
+              certificates: [],
+            },
+          ],
+        }),
+    });
+    await expect(
+      pending.hasActiveCertificateForHostname('zone', '*.apps.example.com'),
+    ).resolves.toBe(false);
+  });
+
   it('pins every Wrangler Cloudflare transport selector exactly once', () => {
     const keys = [
       'CLOUDFLARE_API_BASE_URL',
@@ -157,12 +344,96 @@ describe('platform Cloudflare client', () => {
     });
     let message = '';
     try {
-      await client.verifyToken();
+      await client.listAccounts();
     } catch (error) {
       message = String(error);
     }
     expect(message).not.toContain(token);
     expect(message).toContain('non-JSON');
+  });
+
+  it('preflights core runtime-token access with a nonexistent cache URL', async () => {
+    const requests: Array<{ body: string; method: string; pathname: string }> = [];
+    const client = new PlatformCloudflareClient('token', {
+      fetcher: async (input, init) => {
+        const url = new URL(String(input));
+        requests.push({
+          body: String(init?.body ?? ''),
+          method: init?.method ?? 'GET',
+          pathname: url.pathname,
+        });
+        if (url.pathname.endsWith('/hyperdrive/configs')) {
+          return Response.json({ success: true, result: [] });
+        }
+        return Response.json({ success: true, result: { id: 'zone' } });
+      },
+    });
+
+    await verifyPlatformRuntimeTokenPermissions(client, {
+      accountId: 'account',
+      applicationDomain: 'apps.example.com',
+      customDomains: false,
+      zoneId: 'zone',
+    });
+
+    expect(requests.map(({ method, pathname }) => `${method} ${pathname}`)).toEqual([
+      'GET /client/v4/accounts/account/hyperdrive/configs',
+      'POST /client/v4/zones/zone/purge_cache',
+    ]);
+    const purge = JSON.parse(requests[1]!.body) as { files: ReadonlyArray<string> };
+    expect(purge.files).toHaveLength(1);
+    expect(purge.files[0]).toMatch(
+      /^https:\/\/apps\.example\.com\/\.well-known\/void\/runtime-token-preflight-[a-f0-9-]+$/,
+    );
+  });
+
+  it('checks custom-hostname access only when the runtime enables it', async () => {
+    const paths: Array<string> = [];
+    const client = new PlatformCloudflareClient('token', {
+      fetcher: async (input) => {
+        const url = new URL(String(input));
+        paths.push(url.pathname);
+        if (url.pathname.endsWith('/hyperdrive/configs')) {
+          return Response.json({ success: true, result: [] });
+        }
+        return Response.json({ success: true, result: [] });
+      },
+    });
+
+    await verifyPlatformRuntimeTokenPermissions(client, {
+      accountId: 'account',
+      applicationDomain: 'example.com',
+      customDomains: true,
+      zoneId: 'zone',
+    });
+
+    expect(paths.at(-1)).toBe('/client/v4/zones/zone/custom_hostnames');
+  });
+
+  it('names missing runtime permissions without exposing the token', async () => {
+    const token = 'runtime-token-that-must-stay-secret';
+    const client = new PlatformCloudflareClient(token, {
+      fetcher: async () => {
+        return Response.json(
+          { errors: [{ message: 'permission denied' }], success: false },
+          { status: 403 },
+        );
+      },
+    });
+
+    let message = '';
+    try {
+      await verifyPlatformRuntimeTokenPermissions(client, {
+        accountId: 'account',
+        applicationDomain: 'example.com',
+        customDomains: false,
+        zoneId: 'zone',
+      });
+    } catch (error) {
+      message = String(error);
+    }
+    expect(message).toContain('Hyperdrive → Write');
+    expect(message).not.toContain(token);
   });
 
   it('refuses unattended custom-domain deletion without a generation precondition', async () => {

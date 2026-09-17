@@ -9,12 +9,9 @@
  * shadows the platform value or is silently shadowed by it — both are
  * unexplainable at runtime. So the whole set is rejected up front.
  *
- * Two hazards, one list:
- *   - shadowed platform binding: `__VOID_USER_ID` / `__VOID_PROJECT_SLUG`
- *     are emitted BEFORE user vars, so a user var of the same name wins
- *     and the sandbox runtime meters usage against the attacker's value.
- *   - shadowed user binding: `__VOID_PROXY` and friends are emitted AFTER,
- *     so a user's own var of that name never reaches their code.
+ * Platform proxy and identity bindings must not collide with user values.
+ * Retired Sandbox identity and queue names remain reserved so older runtime
+ * conventions cannot turn into ambiguous user bindings after an upgrade.
  *
  * Hoisted out of `routes/deploy.ts` so `PUT /projects/:id/secrets/:name`
  * can reject a reserved name before it is encrypted and persisted —

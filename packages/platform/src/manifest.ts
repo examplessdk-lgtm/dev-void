@@ -1,3 +1,5 @@
+import type { PlatformApplication } from './application.ts';
+
 export const PLATFORM_DEPLOYMENT_SCHEMA_VERSION = 1 as const;
 
 export type PlatformCapabilities = Readonly<{
@@ -37,11 +39,7 @@ export type PlatformResourceNames = Readonly<{
 }>;
 
 export type PlatformDeploymentManifest = Readonly<{
-  application: Readonly<{
-    baseDomain: string;
-    dedicatedZone: boolean;
-    zoneName: string;
-  }>;
+  application: PlatformApplication;
   authentication: Readonly<{
     providers: ReadonlyArray<'github' | 'google'>;
   }>;
@@ -50,7 +48,7 @@ export type PlatformDeploymentManifest = Readonly<{
   displayName: string;
   installationSlug: string;
   resources: PlatformResourceNames;
-  schemaVersion: typeof PLATFORM_DEPLOYMENT_SCHEMA_VERSION;
+  schemaVersion: typeof PLATFORM_DEPLOYMENT_SCHEMA_VERSION | 2;
 }>;
 
 export type PlatformDeploymentManifestInput = Readonly<{
@@ -58,6 +56,8 @@ export type PlatformDeploymentManifestInput = Readonly<{
     baseDomain: string;
     dedicatedZone?: boolean;
     zoneName: string;
+    workersDev?: PlatformApplication['workersDev'];
+    zoneId?: string;
   }>;
   authentication?: Readonly<{
     providers?: ReadonlyArray<'github' | 'google'>;
@@ -162,6 +162,12 @@ export function createPlatformResourceNames(installationSlug: string): PlatformR
 export function createApplicationRoutes(
   application: PlatformDeploymentManifest['application'],
 ): ReadonlyArray<PlatformApplicationRoute> {
+  if (!application.zoneName && application.workersDev) {
+    if (application.dedicatedZone) {
+      throw new Error('workers.dev cannot use a dedicated-zone catch-all.');
+    }
+    return [];
+  }
   const baseDomain = normalizeApplicationDomain(application.baseDomain);
   const zoneName = normalizeApplicationDomain(application.zoneName);
   if (baseDomain !== zoneName && !baseDomain.endsWith(`.${zoneName}`)) {
@@ -185,7 +191,21 @@ export function createPlatformDeploymentManifest(
 ): PlatformDeploymentManifest {
   const installationSlug = normalizeInstallationSlug(input.installationSlug);
   const baseDomain = normalizeApplicationDomain(input.application.baseDomain);
-  const zoneName = normalizeApplicationDomain(input.application.zoneName);
+  const workersDev = input.application.workersDev;
+  if (
+    workersDev &&
+    (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(workersDev.subdomain) ||
+      !/^[a-z0-9][a-z0-9-]{0,80}$/.test(workersDev.installationId))
+  ) {
+    throw new Error('Invalid workers.dev installation identity.');
+  }
+  const zoneName =
+    workersDev && input.application.zoneName === ''
+      ? ''
+      : normalizeApplicationDomain(input.application.zoneName);
+  if (!zoneName && baseDomain !== `${workersDev!.subdomain}.workers.dev`) {
+    throw new Error('workers.dev application domain must match its account subdomain.');
+  }
   const resources = { ...createPlatformResourceNames(installationSlug), ...input.resources };
   const capabilities = { ...CORE_CAPABILITIES, ...input.capabilities };
   if (capabilities.managedBuilds && !capabilities.githubActions) {
@@ -206,6 +226,10 @@ export function createPlatformDeploymentManifest(
       baseDomain,
       dedicatedZone: input.application.dedicatedZone ?? false,
       zoneName,
+      ...(workersDev ? { workersDev: { ...workersDev } } : {}),
+      ...(input.application.zoneId
+        ? { zoneId: requiredString(input.application.zoneId, 'application.zoneId') }
+        : {}),
     },
     authentication: { providers: [...providers] },
     capabilities,
@@ -213,7 +237,7 @@ export function createPlatformDeploymentManifest(
     displayName: requiredString(input.displayName, 'displayName').trim(),
     installationSlug,
     resources,
-    schemaVersion: PLATFORM_DEPLOYMENT_SCHEMA_VERSION,
+    schemaVersion: workersDev ? 2 : PLATFORM_DEPLOYMENT_SCHEMA_VERSION,
   };
   createApplicationRoutes(manifest.application);
   for (const [key, value] of Object.entries(manifest.controlPlane)) {
@@ -232,7 +256,7 @@ export function createPlatformDeploymentManifest(
 
 export function parsePlatformDeploymentManifest(value: unknown): PlatformDeploymentManifest {
   assertRecord(value, 'Platform deployment manifest');
-  if (value.schemaVersion !== PLATFORM_DEPLOYMENT_SCHEMA_VERSION) {
+  if (value.schemaVersion !== PLATFORM_DEPLOYMENT_SCHEMA_VERSION && value.schemaVersion !== 2) {
     throw new Error(
       `Unsupported platform deployment schema version: ${String(value.schemaVersion)}.`,
     );
@@ -243,6 +267,19 @@ export function parsePlatformDeploymentManifest(value: unknown): PlatformDeploym
   const controlPlane = value.controlPlane;
   const rawResources = value.resources;
   assertRecord(application, 'application');
+  let workersDev: PlatformApplication['workersDev'];
+  if (value.schemaVersion === 2) {
+    assertRecord(application.workersDev, 'application.workersDev');
+    workersDev = {
+      subdomain: requiredString(application.workersDev.subdomain, 'workersDev.subdomain'),
+      installationId: requiredString(
+        application.workersDev.installationId,
+        'workersDev.installationId',
+      ),
+    };
+  } else if (application.workersDev !== undefined) {
+    throw new Error('workers.dev requires platform deployment schema version 2.');
+  }
   assertRecord(rawCapabilities, 'capabilities');
   assertRecord(controlPlane, 'controlPlane');
   assertRecord(authentication, 'authentication');
@@ -278,7 +315,12 @@ export function parsePlatformDeploymentManifest(value: unknown): PlatformDeploym
     application: {
       baseDomain: requiredString(application.baseDomain, 'application.baseDomain'),
       dedicatedZone: application.dedicatedZone === true,
-      zoneName: requiredString(application.zoneName, 'application.zoneName'),
+      zoneName:
+        workersDev && application.zoneName === ''
+          ? ''
+          : requiredString(application.zoneName, 'application.zoneName'),
+      ...(workersDev ? { workersDev } : {}),
+      ...(typeof application.zoneId === 'string' ? { zoneId: application.zoneId } : {}),
     },
     authentication: { providers: providers as Array<'github' | 'google'> },
     capabilities,

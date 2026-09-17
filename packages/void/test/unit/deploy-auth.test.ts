@@ -22,6 +22,7 @@ const mockClientCtor = vi.fn();
 
 const originalIsTTY = process.stdin.isTTY;
 let savedVoidToken: string | undefined;
+let savedVoidApiUrl: string | undefined;
 
 vi.mock('@clack/prompts', () => ({
   intro: vi.fn(),
@@ -102,7 +103,9 @@ beforeEach(() => {
   // Isolate process.env.VOID_TOKEN across tests: the OIDC branch now exports
   // the minted token there, so start each test clean and restore afterwards.
   savedVoidToken = process.env.VOID_TOKEN;
+  savedVoidApiUrl = process.env.VOID_API_URL;
   delete process.env.VOID_TOKEN;
+  delete process.env.VOID_API_URL;
 });
 
 describe('runDeploy auth failures', () => {
@@ -207,19 +210,18 @@ describe('runDeploy GitHub Actions OIDC exchange', () => {
     expect(process.env.VOID_TOKEN).toBeUndefined();
   });
 
-  it('exports the minted token to process.env.VOID_TOKEN so the build/prerender getToken sees it', async () => {
+  it('binds the minted token to its issuing platform for later credential reads', async () => {
     mockGetToken.mockReturnValue(null);
     mockIsOidcAvailable.mockReturnValue(true);
     mockExchangeOidc.mockResolvedValue('minted-token');
 
-    // The deploy throws later (listProjects rejects), but the OIDC branch runs
-    // first. The minted token must land in process.env.VOID_TOKEN — the
-    // downstream `vite build` child (which inherits process.env) and the
-    // in-process prerender both re-read it via getToken(), which reads
-    // process.env.VOID_TOKEN first. A local variable can't reach either.
+    // The deploy throws later, but any in-process credential read must retain
+    // the issuing origin; a saved project must not redirect the minted token.
     await expect(runDeploy(process.cwd(), { projectSlug: 'my-app' })).rejects.toThrow();
 
     expect(process.env.VOID_TOKEN).toBe('minted-token');
+    expect(process.env.VOID_API_URL).toBe('https://api.test');
+    expect(mockExchangeOidc).toHaveBeenCalledWith('https://api.test', 'my-app');
   });
 
   it('does NOT overwrite an explicit VOID_TOKEN in process.env (no mint)', async () => {
@@ -234,6 +236,48 @@ describe('runDeploy GitHub Actions OIDC exchange', () => {
 
     expect(mockExchangeOidc).not.toHaveBeenCalled();
     expect(process.env.VOID_TOKEN).toBe('explicit-env-token');
+  });
+
+  it('rejects an explicit token before constructing a client when a custom origin is selected', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-deploy-origin-guard-'));
+    const registry = join(root, 'registry');
+    const savedRegistry = process.env.VOID_PLATFORM_REGISTRY_DIR;
+    const fetcher = vi.spyOn(globalThis, 'fetch');
+    try {
+      process.env.VOID_PLATFORM_REGISTRY_DIR = registry;
+      process.env.VOID_TOKEN = 'unbound-production-token';
+      const { getToken: realGetToken } =
+        await vi.importActual<typeof import('../../src/cli/auth.ts')>('../../src/cli/auth.ts');
+      const { savePlatformConnection } = await vi.importActual<
+        typeof import('../../src/cli/platform-registry.ts')
+      >('../../src/cli/platform-registry.ts');
+      savePlatformConnection({
+        accountId: null,
+        apiUrl: 'https://platform.example.test',
+        applicationDomain: 'apps.example.test',
+        displayName: 'Company Void',
+        installationId: null,
+        kind: 'connected',
+        proxyUrl: 'https://proxy.example.test',
+      });
+      mockGetToken.mockImplementation((tokenRoot: string) => realGetToken(tokenRoot));
+
+      await expect(runDeploy(root, { platform: 'void', projectSlug: 'my-app' })).rejects.toThrow(
+        'VOID_TOKEN is not bound to https://platform.example.test',
+      );
+
+      expect(mockGetToken).toHaveBeenCalledWith(root);
+      expect(mockClientCtor).not.toHaveBeenCalled();
+      expect(fetcher).not.toHaveBeenCalled();
+    } finally {
+      fetcher.mockRestore();
+      if (savedRegistry === undefined) {
+        delete process.env.VOID_PLATFORM_REGISTRY_DIR;
+      } else {
+        process.env.VOID_PLATFORM_REGISTRY_DIR = savedRegistry;
+      }
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('errors when in Actions but the project is unknown', async () => {
@@ -551,5 +595,10 @@ afterEach(() => {
     delete process.env.VOID_TOKEN;
   } else {
     process.env.VOID_TOKEN = savedVoidToken;
+  }
+  if (savedVoidApiUrl === undefined) {
+    delete process.env.VOID_API_URL;
+  } else {
+    process.env.VOID_API_URL = savedVoidApiUrl;
   }
 });

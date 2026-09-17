@@ -10,12 +10,11 @@ import {
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import { dirname, join, relative } from 'pathslash';
-import { loadEnv } from 'vite';
 import { getProxyUrl, getToken, isStagingMode } from './cli/auth.ts';
 import { ensureWranglerCompat } from './cli/wrangler.ts';
 import { readConfig } from './config.ts';
 import { voidLog, voidWarn } from './log.ts';
-import { filterLoadedEnv, stripInternalEnvKeys } from './shared/env.ts';
+import { stripInternalEnvKeys } from './shared/env.ts';
 import { DEFAULT_PROXY_URL, STAGING_PROXY_URL } from './shared/proxy.ts';
 import { buildEnv } from './shared/untrusted-env.ts';
 
@@ -256,7 +255,9 @@ async function createCloudflarePrerenderRunner(options: {
   const wranglerCompat = ensureWranglerCompat(root, readConfig(root), workerDir);
   const workerMain = wranglerConfig.main ?? 'index.js';
 
-  const env = filterLoadedEnv(loadEnv('production', root, ''));
+  // Local `.env` values never enter a production prerender. Code that needs
+  // production server configuration must read it at runtime from remote secrets.
+  const env: Record<string, string> = {};
 
   // Resolve Void projectId via a three-level chain:
   //   1. explicit options.projectId — passed from runFullDeploy so the
@@ -463,19 +464,6 @@ type NodeRunnerConfig =
   | { mode: 'collect-and-render'; ssrDir: string; clientDir: string };
 
 async function runNodePrerenderRunner<T>(root: string, config: NodeRunnerConfig): Promise<T> {
-  // Mirror the sanitization pipeline used by envPlugin.config (index.ts),
-  // buildPrerenderBindings (CF runner), and loadDeployEnv (deploy.ts): strip
-  // any internal Void keys a user may have placed in .env.production so they
-  // can't shadow or pollute the child process env via the `...env` spread
-  // below. Consistency matters — all sites that ingest user .env files must
-  // run the same sanitizer, or drift will reintroduce the leak.
-  const filtered = filterLoadedEnv(loadEnv('production', root, ''));
-  const { sanitized: env, stripped } = stripInternalEnvKeys(filtered);
-  if (stripped.length > 0) {
-    voidWarn(
-      `Ignoring internal env keys from .env files in Node prerender runner: ${stripped.join(', ')}. These are reserved for Void runtime use.`,
-    );
-  }
   const runnerPath = join(root, '.void', 'prerender-runner.mjs');
   mkdirSync(dirname(runnerPath), { recursive: true });
   writeFileSync(
@@ -483,19 +471,10 @@ async function runNodePrerenderRunner<T>(root: string, config: NodeRunnerConfig)
     `
 import { pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 
 const config = JSON.parse(process.argv[2]);
 const { mode, ssrDir, clientDir } = config;
-
-if (clientDir) {
-  try {
-    const manifestPath = join(clientDir, ".vite", "manifest.json");
-    globalThis.__VITE_MANIFEST__ = JSON.parse(readFileSync(manifestPath, "utf-8"));
-  } catch {
-    // Ignore missing manifests so prerender can continue without client assets.
-  }
-}
 
 const appUrl = pathToFileURL(join(ssrDir, "app.js")).href;
 const app = await import(appUrl);
@@ -571,7 +550,7 @@ if (mode === "collect") {
       execFile(
         process.execPath,
         [runnerPath, JSON.stringify(config)],
-        { env: buildEnv(env), cwd: root, maxBuffer: 10 * 1024 * 1024 },
+        { env: buildEnv(), cwd: root, maxBuffer: 10 * 1024 * 1024 },
         (error, stdout, stderr) => {
           if (stderr) {
             process.stderr.write(stderr);

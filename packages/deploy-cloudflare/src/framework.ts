@@ -13,6 +13,7 @@ export type CloudflareFrameworkDeployConfig = Readonly<{
   compatibilityFlags?: ReadonlyArray<string>;
   assetsIgnore?: ReadonlyArray<string>;
   crons?: ReadonlyArray<string>;
+  requiredSecrets?: ReadonlyArray<string>;
 }>;
 
 /**
@@ -56,6 +57,26 @@ export function writeCloudflareFrameworkDeployConfig(
   upsert(['assets', 'not_found_handling'], 'none');
   if (options.crons !== undefined) {
     upsert(['triggers', 'crons'], [...options.crons]);
+  }
+  if (options.requiredSecrets && options.requiredSecrets.length > 0) {
+    const config = parse(content) as { secrets?: unknown };
+    if (
+      config.secrets !== undefined &&
+      (typeof config.secrets !== 'object' ||
+        config.secrets === null ||
+        Array.isArray(config.secrets))
+    ) {
+      throw new Error('Cloudflare framework config has a malformed secrets field.');
+    }
+    const required = (config.secrets as { required?: unknown } | undefined)?.required;
+    if (
+      required !== undefined &&
+      (!Array.isArray(required) || !required.every((name) => typeof name === 'string'))
+    ) {
+      throw new Error('Cloudflare framework config has a malformed secrets.required field.');
+    }
+    const current = (required as Array<string> | undefined) ?? [];
+    upsert(['secrets', 'required'], [...new Set([...current, ...options.requiredSecrets])]);
   }
 
   let changed = content !== initial;

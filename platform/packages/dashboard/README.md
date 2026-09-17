@@ -9,8 +9,8 @@ mode app. The administrator UI is served by the API Worker.
 - **Auth** - OAuth (GitHub/Google) via the platform's `/auth/login` flow. The JWT is
   stored in an httpOnly cookie (`void_token`). Middleware validates the token with
   `GET /me`.
-- **Styling** - Tailwind CSS v4 with the Void design system from `@voidcloud/ui`
-  (VoidZero theme styles, fonts, assets, and React UI primitives).
+- **Styling** - Tailwind CSS v4 with dashboard-local styles, fonts, assets,
+  and React components in `ui/`.
 
 ## Pages
 
@@ -65,6 +65,12 @@ install the dashboard; running this app locally does not add it to an installati
 ```text
 lib/
   api.ts                    # Typed authentication API fetch helpers
+ui/
+  components/               # Dashboard header and footer
+  context/                  # Logo configuration
+  styles/                   # Tailwind tokens, reset, shell and button styles
+  assets/                   # Void logos and dashboard backgrounds
+  fonts/                    # APK Protocol, KH Teka Mono, and Inter
 middleware/
   01.auth.ts                # void_token validation through /me
 pages/
@@ -79,3 +85,11 @@ pages/
     callback.tsx
     callback.server.ts      # OAuth callback token/code exchange
 ```
+
+## Inter license
+
+The `ui/fonts/inter-*.woff2` files are copyright (c) 2016 The Inter Project
+Authors and are distributed under the SIL Open Font License 1.1. The full
+copyright notice and license are included in
+[`ui/fonts/Inter-LICENSE.txt`](./ui/fonts/Inter-LICENSE.txt). Keep that file with
+copies of the Inter fonts. This notice applies specifically to Inter.

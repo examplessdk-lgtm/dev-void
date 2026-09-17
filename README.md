@@ -24,6 +24,8 @@ export default defineConfig({
 
 ## Starting a New Project
 
+Use Node.js 24.21.0 or later for the CLI and build tools.
+
 1. Install the Void CLI:
 
 ```sh
@@ -34,6 +36,8 @@ pnpm add -D void
 
 In an empty project, `void init` asks which framework and starter you want, then installs the dependencies. It uses Vite+ by default. In an existing app, it adds missing scripts and configures the Vite plugin.
 
+Init also adds brief instructions to `AGENTS.md`, pointing coding agents to the bundled docs at `node_modules/void/skills/void/docs/`. Run `void init --agents` to add or refresh just the agent setup.
+
 Then run:
 
 ```sh
@@ -43,6 +47,8 @@ pnpm void deploy     # deploy to the saved Cloudflare or Void target
 ```
 
 ## Adding Void to an Existing Project
+
+To switch Cloudflare users, run `void cloudflare login`. Use `void cloudflare status` to check the signed-in identity and the project's pinned deployment account; signing in leaves the project target unchanged.
 
 Already deploy the same Void app directly to Cloudflare? Run `void deploy`. If your project has a `wrangler.jsonc` or `wrangler.json` and no deployment destination, Void offers to link and deploy using the existing Worker and resources. Accept once, then use `void deploy` for future deployments. See [Deploy an existing Worker](./docs/integrations/cloudflare.md#deploy-an-existing-worker).
 
@@ -80,7 +86,7 @@ pnpm void deploy
 - **One CLI** — deploy and manage your app on your Cloudflare account or your team's Void platform
 - **Team platforms** — install a shared deployment service in your company's Cloudflare account and connect developers through the same CLI
 - **Automatic provisioning** — use `void/db`, `void/kv`, `void/storage`, or `void/ai`, and Void provisions the resources your app needs
-- **Typed secrets** — mark env schema keys with `.secret()`; direct Cloudflare deploys upload them as encrypted Worker secrets instead of plaintext vars
+- **Typed production secrets** — schema-declared server keys are required in remote secret storage and rejected as plaintext Worker vars
 - **File-based routing** — drop a file in `routes/`, get an endpoint with method exports, dynamic params, middleware, and [Standard Schema](https://standardschema.dev/) validation
 - **Full-stack pages** — `pages/` directory for server-rendered UI with co-located data loading, SPA navigation, and typed forms (React, Vue, Svelte, Solid)
 - **End-to-end type safety** — SQL migrations generate DB types, route handlers infer return types, typed fetch client checks everything at the call site
@@ -93,9 +99,11 @@ Full docs at [void.cloud](https://void.cloud). Run `vp run dev:docs` in this rep
 
 Run `void connect` to choose a deployment destination and sign in, `void connect --platform cloudflare` for your own account, or `void connect <url>` for your team's platform. See the [connection reference](./docs/reference/cli.md#connect).
 
-To install a shared company platform, start with `void platform install --plan`. It packages the core API, routing, proxy, and telemetry Workers without requiring the dashboard, GitHub App, or build Containers. See [Self-host a Void platform](./docs/guide/self-hosted-platform.md).
+To install a shared company platform, follow [Install a Void Platform](./docs/guide/self-hosted-platform.md). The walkthrough covers Cloudflare setup, a domain, PostgreSQL, credentials, and GitHub sign-in, then previews the installation with `void platform install --plan`. Void creates the core API, routing, proxy, and telemetry resources.
 
 Platform upgrades verify migrations and check the new Workers before completing the rollout. If a rollout fails, Void can restore the previous Workers against the compatible database schema. See the platform guide for recovery and upgrade details.
+
+For a test platform before your domain is ready, use `void platform install --workers-dev`. Later, `void platform domain set example.com` guides DNS setup and verifies HTTPS while preserving existing app URLs and the platform API connection.
 
 ## Contributing
 
@@ -121,6 +129,22 @@ vp run dev:docs        # local docs dev server
 
 See [TESTING.md](./TESTING.md) for targeted verification and the account-neutral, non-destructive
 native Cloudflare live E2E procedure.
+
+Build the public packages and smoke-test their actual tarballs outside the workspace:
+
+```sh
+vp run build
+node .github/scripts/packed-consumer.mjs
+```
+
+The default smoke test uses a React app with npm and pnpm, public Vite, and HTTP
+checks for assets and KV. Set `VOID_PACKED_SUITE=full` for all four native Pages
+adapters, Markdown, production preview, and browser hydration/navigation tests.
+The Prepublish Test workflow selects smoke coverage for routine code changes, full coverage
+for packaging/dependency/adapter changes, and skip expensive jobs for docs-only changes.
+Release CI always runs the full matrix on Linux and macOS.
+The [release acceptance procedure](./platform/meta/release-acceptance.md)
+separates these local checks from the credentialed Cloudflare signoff.
 
 ### Project Structure
 

@@ -7,15 +7,28 @@ vi.mock('cloudflare:workers', () => ({
 
 // Mock db.ts (createDb is called inside processUsageEventBatch).
 const getUserMock = vi.fn();
+const getProjectsByIdsMock = vi.fn();
 vi.mock('../../src/db.ts', () => ({
   createDb: () => ({ __mock: 'db' }),
-  getUser: (...args: Array<unknown>) => getUserMock(...args),
+  getUser: async (...args: Array<unknown>) => {
+    const user = await getUserMock(...args);
+    return user ? { created_at: '2020-01-01T00:00:00.000Z', ...user } : user;
+  },
+  getProjectsByIds: (...args: Array<unknown>) => getProjectsByIdsMock(...args),
   suspendUser: vi.fn(),
   unsuspendUserIfReason: vi.fn(),
 }));
 
+import {
+  signUsageEvent,
+  SANDBOX_USAGE_RETENTION_MS,
+  USAGE_SIGNING_KEY_KV_KEY,
+  type UsageEventSource,
+} from '../../src/usage-auth.ts';
 import type { UsageEvent } from '../../src/usage-counter.ts';
 import { groupEventsByUser, processUsageEventBatch } from '../../src/usage-queue.ts';
+
+const SIGNING_KEY = 'unit-test-usage-signing-key';
 
 describe('groupEventsByUser', () => {
   it('groups events by userId', () => {
@@ -54,7 +67,7 @@ function fetchCalls(mock: ReturnType<typeof vi.fn>): Array<[Request, ...Array<un
   return (mock as unknown as { mock: { calls: Array<[Request, ...Array<unknown>]> } }).mock.calls;
 }
 
-function makeBatch(events: ReadonlyArray<UsageEvent>, timestamps?: ReadonlyArray<number>) {
+function makeBatch(events: ReadonlyArray<unknown>, timestamps?: ReadonlyArray<number>) {
   // Cloudflare stamps every queue message with its enqueue time.
   const messages = events.map((event, i) => ({
     body: event,
@@ -74,11 +87,27 @@ function makeBatch(events: ReadonlyArray<UsageEvent>, timestamps?: ReadonlyArray
   };
 }
 
+async function makeSignedBatch(
+  events: ReadonlyArray<UsageEvent>,
+  timestamps?: ReadonlyArray<number>,
+  source: UsageEventSource = 'dispatch',
+) {
+  const envelopes = await Promise.all(
+    events.map((event, index) => signUsageEvent(SIGNING_KEY, source, `event-${index}`, event)),
+  );
+  return makeBatch(envelopes, timestamps);
+}
+
 function makeEnv(stubFetch: FakeStubFetch, errorStub?: FakeStubFetch) {
   const errorStubFetch: FakeStubFetch =
     errorStub ?? (async () => new Response(null, { status: 200 }));
   return {
     HYPERDRIVE: { connectionString: 'postgres://mock' },
+    JWT_SECRET: 'jwt-secret',
+    ROUTING: {
+      get: vi.fn(async (key: string) => (key === USAGE_SIGNING_KEY_KV_KEY ? SIGNING_KEY : null)),
+      put: vi.fn(async () => {}),
+    },
     USAGE_COUNTER: {
       idFromName: (name: string) => ({ __id: name }),
       get: (_id: unknown) => ({ fetch: stubFetch }),
@@ -93,11 +122,17 @@ function makeEnv(stubFetch: FakeStubFetch, errorStub?: FakeStubFetch) {
 describe('processUsageEventBatch — sandbox events', () => {
   beforeEach(() => {
     getUserMock.mockReset();
+    getProjectsByIdsMock.mockReset();
+    getProjectsByIdsMock.mockImplementation(async (_db, ids: ReadonlyArray<string>) =>
+      ids.map((id) => ({ id, user_id: 'u1', slug: `slug-${id}` })),
+    );
   });
 
   it('forwards a sandbox event with userId to the DO', async () => {
     const stubFetch = vi.fn(async () => new Response(null, { status: 200 }));
     getUserMock.mockResolvedValue({ id: 'u1', plan: 'solo' });
+    const through = Date.now();
+    const from = through - 30_000;
 
     const events: Array<UsageEvent> = [
       {
@@ -106,11 +141,12 @@ describe('processUsageEventBatch — sandbox events', () => {
         slug: 's1',
         requests: 0,
         responseBytes: 0,
-        sandboxRuntimeSeconds: 30,
         sandboxInstanceId: 'sb-1',
+        sandboxMeteredFrom: from,
+        sandboxMeteredThrough: through,
       },
     ];
-    const batch = makeBatch(events);
+    const batch = await makeSignedBatch(events, undefined, 'sandbox-counter');
     const env = makeEnv(stubFetch);
 
     await processUsageEventBatch(batch as never, env as never);
@@ -123,7 +159,107 @@ describe('processUsageEventBatch — sandbox events', () => {
     };
     expect(payload.userId).toBe('u1');
     expect(payload.events).toHaveLength(1);
-    expect(payload.events[0].sandboxRuntimeSeconds).toBe(30);
+    expect(payload.events[0]).toMatchObject({
+      sandboxMeteredFrom: from,
+      sandboxMeteredThrough: through,
+      userId: 'u1',
+      slug: 'slug-p1',
+    });
+    expect(batch.calls.ackAll).toBe(1);
+  });
+});
+
+describe('processUsageEventBatch — trusted provenance', () => {
+  beforeEach(() => {
+    getUserMock.mockReset();
+    getProjectsByIdsMock.mockReset();
+  });
+
+  it('ignores expired signed sandbox intervals before their replay receipts can be pruned', async () => {
+    const through = Date.now() - SANDBOX_USAGE_RETENTION_MS - 1;
+    const envelope = await signUsageEvent(SIGNING_KEY, 'sandbox-counter', 'expired-interval', {
+      projectId: 'p1',
+      requests: 0,
+      responseBytes: 0,
+      sandboxInstanceId: 'instance',
+      sandboxMeteredFrom: through - 1000,
+      sandboxMeteredThrough: through,
+    });
+    const batch = makeBatch([envelope]);
+    const stubFetch = vi.fn(async () => new Response(null, { status: 200 }));
+    await processUsageEventBatch(batch as never, makeEnv(stubFetch) as never);
+    expect(getProjectsByIdsMock).not.toHaveBeenCalled();
+    expect(stubFetch).not.toHaveBeenCalled();
+    expect(batch.calls.ackAll).toBe(1);
+    expect(batch.calls.retryAll).toBe(0);
+  });
+
+  it('acknowledges forged, negative, and foreign raw legacy events without effects', async () => {
+    const stubFetch = vi.fn(async () => new Response(null, { status: 200 }));
+    const bodies: Array<unknown> = [
+      { projectId: 'victim', userId: 'victim-user', slug: 'victim', requests: 1, responseBytes: 0 },
+      {
+        projectId: 'attacker',
+        userId: 'attacker',
+        slug: 'attacker',
+        requests: -10,
+        responseBytes: -1,
+      },
+      {
+        version: 1,
+        source: 'dispatch',
+        eventId: 'forged',
+        event: { projectId: 'victim', requests: 1, responseBytes: 0 },
+        signature: 'not-a-valid-signature',
+      },
+    ];
+    const batch = makeBatch(bodies);
+
+    await processUsageEventBatch(batch as never, makeEnv(stubFetch) as never);
+
+    expect(getProjectsByIdsMock).not.toHaveBeenCalled();
+    expect(getUserMock).not.toHaveBeenCalled();
+    expect(stubFetch).not.toHaveBeenCalled();
+    expect(batch.calls.retryAll).toBe(0);
+    expect(batch.calls.ackAll).toBe(1);
+  });
+
+  it('accepts signed request usage but replaces producer identity with database ownership', async () => {
+    const stubFetch = vi.fn(async () => new Response(null, { status: 200 }));
+    getProjectsByIdsMock.mockResolvedValue([
+      { id: 'p1', user_id: 'owner', slug: 'canonical-slug' },
+    ]);
+    getUserMock.mockResolvedValue({ id: 'owner', plan: 'solo' });
+    const event: UsageEvent = {
+      projectId: 'p1',
+      userId: 'forged-hint',
+      slug: 'forged-hint',
+      requests: 1,
+      responseBytes: 12,
+    };
+    const batch = await makeSignedBatch([event]);
+
+    await processUsageEventBatch(batch as never, makeEnv(stubFetch) as never);
+
+    expect(getUserMock).toHaveBeenCalledWith(expect.anything(), 'owner');
+    const payload = (await fetchCalls(stubFetch)[0][0].json()) as { events: Array<UsageEvent> };
+    expect(payload.events[0]).toMatchObject({ userId: 'owner', slug: 'canonical-slug' });
+    expect(batch.calls.ackAll).toBe(1);
+  });
+
+  it('rejects a correctly signed event with invalid quantities', async () => {
+    const stubFetch = vi.fn(async () => new Response(null, { status: 200 }));
+    const invalid = {
+      projectId: 'p1',
+      requests: 1,
+      responseBytes: -1,
+    } as unknown as UsageEvent;
+    const batch = await makeSignedBatch([invalid]);
+
+    await processUsageEventBatch(batch as never, makeEnv(stubFetch) as never);
+
+    expect(getProjectsByIdsMock).not.toHaveBeenCalled();
+    expect(stubFetch).not.toHaveBeenCalled();
     expect(batch.calls.ackAll).toBe(1);
   });
 });
@@ -131,6 +267,10 @@ describe('processUsageEventBatch — sandbox events', () => {
 describe('processUsageEventBatch — 5xx alert window', () => {
   beforeEach(() => {
     getUserMock.mockReset();
+    getProjectsByIdsMock.mockReset();
+    getProjectsByIdsMock.mockImplementation(async (_db, ids: ReadonlyArray<string>) =>
+      ids.map((id) => ({ id, user_id: 'u1', slug: id })),
+    );
   });
 
   function error5xx(projectId: string): UsageEvent {
@@ -156,7 +296,10 @@ describe('processUsageEventBatch — 5xx alert window', () => {
     const t1 = Date.parse('2026-07-23T10:05:00Z');
     const t2 = Date.parse('2026-07-23T10:10:00Z');
     // Deliberately out of order: queues do not guarantee ordering.
-    const batch = makeBatch([error5xx('p1'), error5xx('p1'), error5xx('p1')], [t1, t0, t2]);
+    const batch = await makeSignedBatch(
+      [error5xx('p1'), error5xx('p1'), error5xx('p1')],
+      [t1, t0, t2],
+    );
 
     await processUsageEventBatch(batch as never, makeEnv(stubFetch, errorStubFetch) as never);
 
@@ -178,7 +321,7 @@ describe('processUsageEventBatch — 5xx alert window', () => {
 
     const early = Date.parse('2026-07-23T10:00:00Z');
     const late = Date.parse('2026-07-23T10:30:00Z');
-    const batch = makeBatch([error5xx('p1'), error5xx('p2')], [early, late]);
+    const batch = await makeSignedBatch([error5xx('p1'), error5xx('p2')], [early, late]);
 
     await processUsageEventBatch(batch as never, makeEnv(stubFetch, errorStubFetch) as never);
 
@@ -203,7 +346,7 @@ describe('processUsageEventBatch — 5xx alert window', () => {
       { ...error5xx('docs'), failureKind: 'platform-static-asset-error' },
       { ...error5xx('docs'), failureKind: 'platform-static-asset-missing' },
     ];
-    const batch = makeBatch(platformFailures);
+    const batch = await makeSignedBatch(platformFailures);
 
     await processUsageEventBatch(batch as never, makeEnv(stubFetch, errorStubFetch) as never);
 
@@ -226,7 +369,7 @@ describe('processUsageEventBatch — 5xx alert window', () => {
       failureKind: 'platform-static-asset-timeout',
     };
     const appFailure = error5xx('repl');
-    const batch = makeBatch([platformTimeout, appFailure]);
+    const batch = await makeSignedBatch([platformTimeout, appFailure]);
 
     await processUsageEventBatch(batch as never, makeEnv(stubFetch, errorStubFetch) as never);
 

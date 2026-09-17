@@ -21,6 +21,11 @@ export type BuildConfig = {
   repoFullName: string;
   installationId: string;
   /**
+   * Exact connection row authorized at enqueue. Older persisted manager state
+   * may omit it; the final authority check treats that as unproven and cancels.
+   */
+  connectionId?: string;
+  /**
    * The connection's immutable numeric GitHub repository id (as text), or null
    * for a legacy/partial connection that never populated it. Carried so
    * `BuildManager.startBuild` can re-verify the App installation still covers

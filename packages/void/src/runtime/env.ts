@@ -5,6 +5,7 @@
  * Internal platform bindings (__VOID_*, __PROJECT_*) are filtered
  * from getRuntimeEnv() and blocked in getRuntimeBinding().
  */
+import { AsyncLocalStorage } from 'node:async_hooks';
 import {
   envContext,
   asEnv,
@@ -17,12 +18,37 @@ import {
 
 export type { RuntimeEnv };
 
+type RuntimeRequestScope = {
+  resources: Map<object, unknown>;
+};
+
+const runtimeRequestContext = new AsyncLocalStorage<RuntimeRequestScope>();
+
+/** @internal Reuse a resource only within the current runtime request. */
+export function getRuntimeRequestResource<T>(key: object, initialize: () => T): T {
+  const scope = runtimeRequestContext.getStore();
+  if (!scope) {
+    throw new Error('env: Request-scoped resource is unavailable outside a runtime handler.');
+  }
+  if (scope.resources.has(key)) {
+    return scope.resources.get(key) as T;
+  }
+  const resource = initialize();
+  scope.resources.set(key, resource);
+  return resource;
+}
+
 export function withRuntimeEnv<T>(env: unknown, fn: () => T): T {
   const resolved = asEnv(env);
   if (!resolved) {
     return fn();
   }
-  return envContext.run(resolved, fn);
+  if (runtimeRequestContext.getStore()) {
+    return envContext.run(resolved, fn);
+  }
+
+  const scope: RuntimeRequestScope = { resources: new Map() };
+  return envContext.run(resolved, () => runtimeRequestContext.run(scope, fn));
 }
 
 /**

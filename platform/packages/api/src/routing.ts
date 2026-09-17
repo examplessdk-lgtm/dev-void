@@ -30,20 +30,6 @@ export function buildProjectAccountJson(entry: ProjectAccountEntry): string {
 }
 
 /**
- * Write the per-project routing entry the proxy's sandbox gate reads.
- * Called from every deploy's routing-switch step so a plan-change picked up
- * by `provisionBindings` propagates to the proxy without a separate write.
- */
-export async function writeProjectAccountEntry(
-  routing: KVNamespace,
-  projectId: string,
-  userId: string,
-  plan: string,
-): Promise<void> {
-  await routing.put(projectAccountKey(projectId), buildProjectAccountJson({ userId, plan }));
-}
-
-/**
  * Re-publish every `project:{projectId}` routing entry for `userId`. Invoked
  * after a plan-change so the proxy's sandbox gate sees the new concurrency
  * cap on the next acquire without waiting for the user to redeploy. Best-

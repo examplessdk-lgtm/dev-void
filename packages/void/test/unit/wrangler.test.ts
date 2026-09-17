@@ -794,6 +794,71 @@ describe('writeProvisionedWranglerConfig', () => {
     return parseJsoncRaw(readRaw(filename)) as Record<string, unknown>;
   }
 
+  it('preserves comments and appends stable WebSocket migration history', () => {
+    setup(
+      'wrangler.jsonc',
+      `{
+  // Keep the worker identity comment.
+  "name": "chat-app",
+  "vars": {
+    // Keep unrelated bindings untouched.
+    "FEATURE": "on"
+  }
+}`,
+    );
+    const route = (className: string) => ({
+      bindingName: className.toUpperCase(),
+      className,
+      filePath: `${className}.ws.ts`,
+    });
+
+    const first = writeProvisionedWranglerConfig(tmpDir, {
+      webSockets: [route('ChatWs')],
+    });
+    expect(first.modified).toBe(true);
+    const afterFirst = readRaw('wrangler.jsonc');
+    expect(afterFirst).toContain('// Keep the worker identity comment.');
+    expect(afterFirst).toContain('// Keep unrelated bindings untouched.');
+
+    const unchanged = writeProvisionedWranglerConfig(tmpDir, {
+      webSockets: [route('ChatWs')],
+    });
+    expect(unchanged.modified).toBe(false);
+    expect(readRaw('wrangler.jsonc')).toBe(afterFirst);
+
+    const second = writeProvisionedWranglerConfig(tmpDir, {
+      webSockets: [route('ChatWs'), route('NotificationsWs')],
+    });
+    expect(second.modified).toBe(true);
+    const parsed = parseRaw('wrangler.jsonc');
+    expect(parsed.vars).toEqual({ FEATURE: 'on' });
+    expect((parsed.durable_objects as { bindings: unknown }).bindings).toEqual([
+      { name: 'CHATWS', class_name: 'ChatWs' },
+      { name: 'NOTIFICATIONSWS', class_name: 'NotificationsWs' },
+    ]);
+    expect(parsed.migrations).toEqual([
+      { tag: 'void-ws-v1', new_sqlite_classes: ['ChatWs'] },
+      { tag: 'void-ws-v1-2', new_sqlite_classes: ['NotificationsWs'] },
+    ]);
+    expect(readRaw('wrangler.jsonc')).toContain('// Keep unrelated bindings untouched.');
+  });
+
+  it('keeps an existing legacy WebSocket namespace authoritative', () => {
+    const config = `{
+  "durable_objects": {
+    "bindings": [{ "name": "CHAT", "class_name": "ChatWs" }]
+  },
+  // This class is already deployed with legacy KV storage.
+  "migrations": [{ "tag": "void-ws-v1", "new_classes": ["ChatWs"] }]
+}`;
+    setup('wrangler.jsonc', config);
+    const result = writeProvisionedWranglerConfig(tmpDir, {
+      webSockets: [{ bindingName: 'CHAT', className: 'ChatWs', filePath: 'chat.ws.ts' }],
+    });
+    expect(result.modified).toBe(false);
+    expect(readRaw('wrangler.jsonc')).toBe(config);
+  });
+
   it('preserves comments while filling account_id, name, compatibility_date, and migrations_dir', () => {
     setup('wrangler.jsonc', commentedFixture);
     const result = writeProvisionedWranglerConfig(tmpDir, {

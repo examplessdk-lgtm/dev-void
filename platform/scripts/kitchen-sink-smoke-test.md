@@ -2,7 +2,7 @@
 
 Use `playground/kitchen-sink` to verify a platform with a disposable app. The automated suite resets the app's database, KV, and storage, then exercises navigation, mutations, authentication, queues, and caching.
 
-Deploy the app to the platform you want to test, then pass its URL explicitly from the repository root:
+Managed Sandboxes are paused. Prepare the hosted fixture with `node platform/scripts/kitchen-sink-platform-fixture.ts`, then deploy the isolated app directory it prints to the platform you want to test. This copy omits the unsupported Sandbox routes and navigation; the original playground and native Cloudflare Sandbox build coverage are preserved. Pass the deployed URL explicitly from the repository root:
 
 ```sh
 vp exec playwright install chromium
@@ -10,6 +10,11 @@ SMOKE_URL=https://kitchen-sink.apps.example.com node platform/scripts/kitchen-si
 ```
 
 Use an app whose data can be deleted. The script has no default destination. If Cloudflare Access protects the app, supply that application's `CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET` from your secret manager.
+
+The hosted staging CI workflow initializes missing server values before deploying its existing `kitchen-sink` project at `https://api.staging.void.cloud`. This is CI fixture setup: it sets `APP_NAME` to `Kitchen Sink`, `API_URL` to `https://api.example.com`, and generates a random `SECRET_KEY` only when absent. It validates new values against `env.ts`, preserves configured secrets, and uses the workflow's existing staging credentials. It never reads a local `.env` or prints values. Smoke jobs are serialized; avoid editing these fixture secrets manually during setup because the secret API uses an upsert after listing names.
+
+Setup failures report the operation and HTTP status when available, without printing API response bodies or secret values.
+If the API confirms a value was stored but updating the old worker failed, setup verifies the stored name and continues without retrying the write. The following deployment applies all stored values and must pass the smoke tests. Other errors, or a missing stored name, still fail setup.
 
 The checklist below can also be run manually or with browser automation. Use unique values for created records, wait for each mutation to appear, and remove test records afterward. KV listings are eventually consistent; poll them instead of relying on a fixed delay. Record each result and report failures after completing the remaining cases.
 
@@ -20,20 +25,18 @@ The checklist below can also be run manually or with browser automation. Use uni
 1. Visit `/`.
 2. Assert the page contains "Kitchen Sink" and "Auth" in its text.
 3. Inspect the page's HTML source for hashed asset URLs (e.g. `.js` or `.css` files with hash in the filename).
-4. Use the browser to GET one of those asset URLs with a cache-busting query parameter, and assert its `Cache-Control` header contains `immutable`. Inspect a `GET` response rather than `HEAD`: the dispatch edge cache stamps `immutable` on `GET`s to hashed paths only, and a conditional `HEAD` is answered from the entry the browser already stored, so it reports `no-store` and looks like a failure.
+4. Use the browser to GET one of those asset URLs with a unique query parameter and `credentials: 'omit'`. For a public target, assert `Cache-Control` contains `immutable` without a private/no-cache/no-store directive. For an Access-protected target, keep the service-token headers configured on the browser context and assert `no-store` without public/immutable directives: the authenticated staging request bypasses the shared cache even when browser cookies are omitted. A unique URL bypasses the browser's stored response without sending cache-bypass directives to the origin. Inspect a fresh `GET` response rather than a browser-cached response or `HEAD`.
 
    ```js
    const el =
      document.querySelector('script[src*="/assets/"]') ||
      document.querySelector('link[href*="/assets/"]');
    const url = el.src || el.href;
-   const xhr = new XMLHttpRequest();
-   xhr.open('GET', url + (url.includes('?') ? '&' : '?') + 'smoke=' + Date.now(), false);
-   xhr.send();
-   xhr.status + ' ' + xhr.getResponseHeader('cache-control');
+   const response = await fetch(url + '?smoke=' + Date.now(), { credentials: 'omit' });
+   response.status + ' ' + response.headers.get('cache-control');
    ```
 
-   Expect `200 public, max-age=31536000, immutable`.
+   Expect `200 public, max-age=31536000, immutable` for a public target or `200 no-store` for the Access-protected staging target. Cloudflare also documents that its [Cache API is unavailable for Workers fronted by Access](https://developers.cloudflare.com/workers/runtime-apis/cache/#background); this authenticated check does not assert an edge-cache hit.
 
 ### 2. SPA navigation (no full reload)
 

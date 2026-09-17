@@ -3,6 +3,39 @@ import { parsePlatformArgs } from '../../src/cli/platform-args.ts';
 import { assertNoninteractivePlatformMutationAcknowledged } from '../../src/cli/platform-lifecycle.ts';
 
 describe('platform args', () => {
+  it('parses resumable domain setup without confusing app-domain commands', () => {
+    expect(
+      parsePlatformArgs(['domain', 'set', 'example.com', '--installation', 'team', '--plan']),
+    ).toEqual({
+      subcommand: 'domain',
+      domain: 'example.com',
+      selector: 'team',
+      zone: '',
+      dedicatedZone: false,
+      plan: true,
+      yes: false,
+    });
+    expect(() => parsePlatformArgs(['domain', 'set'])).toThrow('requires an application domain');
+    expect(() => parsePlatformArgs(['domain', 'set', 'example.com', '--plan', '--yes'])).toThrow(
+      'either',
+    );
+  });
+  it('makes testing explicit and rejects competing domain choices', () => {
+    expect(parsePlatformArgs(['install', '--workers-dev', '--plan'])).toMatchObject({
+      workersDev: true,
+      plan: true,
+    });
+    expect(parsePlatformArgs(['install'])).not.toHaveProperty('workersDev');
+    for (const flags of [
+      ['--zone', 'example.com'],
+      ['--application-domain', 'example.com'],
+      ['--dedicated-zone'],
+    ]) {
+      expect(() => parsePlatformArgs(['install', '--workers-dev', ...flags])).toThrow(
+        'cannot be combined',
+      );
+    }
+  });
   it('parses connection and lifecycle selectors', () => {
     expect(() => parsePlatformArgs(['connect', 'https://api.example.com'])).toThrow();
     expect(parsePlatformArgs(['repair', 'example-a1b2c3d4', '--plan'])).toEqual({
@@ -61,6 +94,27 @@ describe('platform args', () => {
     expect(() => parsePlatformArgs(['disable', '--runtime', '/tmp/void-runtime'])).toThrow(
       "Unknown flag '--runtime'",
     );
+    expect(
+      parsePlatformArgs([
+        'rollback',
+        'example-a1b2c3d4',
+        '--runtime',
+        '/tmp/earlier-runtime',
+        '--from-runtime',
+        '/tmp/current-runtime',
+        '--plan',
+      ]),
+    ).toEqual({
+      fromRuntime: '/tmp/current-runtime',
+      plan: true,
+      runtime: '/tmp/earlier-runtime',
+      selector: 'example-a1b2c3d4',
+      subcommand: 'rollback',
+      yes: false,
+    });
+    expect(() => parsePlatformArgs(['rollback', 'example-a1b2c3d4'])).toThrow(
+      'rollback requires --runtime',
+    );
   });
 
   it('parses safe uninstall choices explicitly', () => {
@@ -109,20 +163,29 @@ describe('platform args', () => {
   });
 
   it('fails closed for every unacknowledged non-interactive mutation', () => {
-    for (const command of ['install', 'upgrade', 'repair', 'disable', 'enable', 'uninstall']) {
-      const parsed = parsePlatformArgs([command]);
+    for (const command of [
+      'install',
+      'upgrade',
+      'rollback',
+      'repair',
+      'disable',
+      'enable',
+      'uninstall',
+    ]) {
+      const runtime = command === 'rollback' ? ['--runtime', '/tmp/earlier'] : [];
+      const parsed = parsePlatformArgs([command, ...runtime]);
       expect(() => assertNoninteractivePlatformMutationAcknowledged(parsed, false)).toThrow(
         'requires --yes',
       );
       expect(() =>
         assertNoninteractivePlatformMutationAcknowledged(
-          parsePlatformArgs([command, '--yes']),
+          parsePlatformArgs([command, ...runtime, '--yes']),
           false,
         ),
       ).not.toThrow();
       expect(() =>
         assertNoninteractivePlatformMutationAcknowledged(
-          parsePlatformArgs([command, '--plan']),
+          parsePlatformArgs([command, ...runtime, '--plan']),
           false,
         ),
       ).not.toThrow();

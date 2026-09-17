@@ -3,6 +3,7 @@ import type { DevRedirectRule, HeaderRule } from '../cli/types.ts';
 import type { NotFoundHandling } from '../config.ts';
 import type { MigrationPlanBundle } from '../migrations/plan.ts';
 import { resolveLayoutIds } from '../pages/layout-resolution.ts';
+import { generateQueueResolverSource } from '../queues/dispatch.ts';
 import { INTERNAL_BINDING_EXACT_NAMES, INTERNAL_BINDING_PREFIXES } from '../runtime/env-raw.ts';
 import type { ScanResult } from './scan.ts';
 
@@ -676,6 +677,8 @@ export type CompileOptions = {
   auth: AuthCompileOptions | null;
   /** `node`/`bun`/`deno` target — omits executionCtx from ALS context */
   nodeTarget?: boolean;
+  /** Managed Cloudflare build whose dispatch worker owns edge routing. */
+  managedDispatch?: boolean;
   /** Absolute path to the binding handler module (for /__void/* native binding access) */
   bindingHandlerPath?: string;
   /** Absolute path to the migration handler module */
@@ -688,15 +691,15 @@ export type CompileOptions = {
   migrationDialect?: 'sqlite' | 'postgresql' | 'mysql';
   /** Custom binding names configured through inference.bindings. */
   bindingNames?: { d1?: string; kv?: string; r2?: string };
-  /** Header rules from routing.headers config (node/bun/deno targets only) */
+  /** Header rules from routing.headers config. */
   headerRules?: Array<HeaderRule>;
-  /** Redirect rules from routing.redirects config (node/bun/deno targets only) */
+  /** Pre-route redirects and rewrites. */
   redirectRules?: Array<DevRedirectRule>;
   /**
    * Post-asset fallback rules (plain `_redirects` 200 + `routing.fallbacks`).
    * Only fire when no route/SSR handler matched — emitted inside Hono's
-   * `notFound` hook on `node`/`bun`/`deno` targets. Empty/undefined skips
-   * the fallback middleware entirely.
+   * `notFound` hook on runtimes without managed dispatch. Empty/undefined
+   * skips the fallback middleware entirely.
    */
   fallbackRules?: Array<DevRedirectRule>;
   /** Explicit prerender paths from void.json routing.prerender */
@@ -759,10 +762,16 @@ export function compileRouteTable(
    * unaffected — the const is only imported/used when the entry wires ISR.
    */
   mergedRevalidate?: number | Record<string, number>,
+  /** Ordered page TTL policy used by native ISR before the flat fallback map. */
+  isrPages?: ReadonlyArray<{ pattern: string; revalidate?: number }>,
+  /** Raw object-form routing.revalidate config for inherit-eligible pages. */
+  isrPathRevalidate?: Record<string, number>,
 ): string {
   const lines: Array<string> = [];
   const auth = options.auth;
   const webSockets = scan.websockets ?? [];
+  const managedDispatch =
+    options.nodeTarget !== true && options.dev !== true && options.managedDispatch === true;
 
   lines.push(`import { AsyncLocalStorage } from "node:async_hooks";`);
   lines.push(`import { Hono } from ${JSON.stringify(options.honoPath)};`);
@@ -801,7 +810,7 @@ export function compileRouteTable(
     options.webSocketRuntimePath
   ) {
     lines.push(
-      `import { createWebSocketDurableObject as __createWebSocketDurableObject, createWebSocketTombstoneDurableObject as __createWebSocketTombstoneDurableObject, handleWebSocketUpgrade as __handleWebSocketUpgrade, forwardWebSocketRequest as __forwardWebSocketRequest } from ${JSON.stringify(options.webSocketRuntimePath)};`,
+      `import { createWebSocketDurableObject as __createWebSocketDurableObject, createWebSocketTombstoneDurableObject as __createWebSocketTombstoneDurableObject, forwardWebSocketRequest as __forwardWebSocketRequest } from ${JSON.stringify(options.webSocketRuntimePath)};`,
     );
   }
   if (options.hasLive && options.liveRuntimePath) {
@@ -931,7 +940,7 @@ export function compileRouteTable(
   );
   lines.push('}');
   lines.push('');
-  // Internal signal consumed by platform dispatch: a 404 came from generated
+  // Internal signal consumed by managed platform dispatch: a 404 came from generated
   // no-route handling, not from a user route intentionally returning 404.
   // Dispatch strips the header before responding to the client.
   lines.push('function __voidShouldMarkNoMatch(request) {');
@@ -962,16 +971,12 @@ export function compileRouteTable(
   // Also wrap `c.redirect` so dynamic redirects preserve the incoming query
   // string the same way static `_redirects` entries do.
   lines.push('app.use(async (c, next) => {');
-  // Migrate `X-Void-Original-URL` set by an outer edge dispatcher into the
-  // WeakMap exactly once per request. Only emitted for the CF-prod target,
-  // where dispatch runs in front of the worker and strips any client-supplied
-  // value on ingress — making the header a trusted, dispatch-authored
-  // handoff. On CF-dev (no dispatch) and on node/bun/deno self-hosted
-  // targets (user owns ingress) the header is client-controlled and not
-  // trustworthy, so the read is skipped. In-worker `c.rewrite` / static-
-  // rewrite re-dispatches populate the WeakMap directly on the `rewriteReq`
-  // and never depend on this header-read path.
-  if (!options.nodeTarget && options.dev !== true) {
+  // Migrate `X-Void-Original-URL` set by managed dispatch into the WeakMap
+  // exactly once per request. Managed dispatch strips any client-supplied
+  // value on ingress, making the header a trusted handoff. Native Cloudflare,
+  // dev, and node/bun/deno targets have no trusted dispatcher in front, so the
+  // read is skipped. In-worker rewrites populate the WeakMap directly.
+  if (managedDispatch) {
     lines.push('  if (!__voidOriginalUrls.has(c.req.raw)) {');
     lines.push('    const __h = c.req.raw.headers.get("X-Void-Original-URL");');
     lines.push('    if (__h != null) {');
@@ -1074,12 +1079,10 @@ export function compileRouteTable(
   lines.push('});');
   lines.push('');
 
-  // Edge routing middleware. On `node`/`bun`/`deno` targets the emitted Hono
-  // app owns routing end-to-end, so the middleware runs in both dev and prod.
-  // On the default target the platform dispatch worker applies these rules in
-  // front of the user worker at deploy time — we only emit them in dev there
-  // so `vite dev` mirrors deployed behavior locally.
-  const emitEdgeRules = options.nodeTarget || options.dev === true;
+  // Edge routing middleware. Every target without managed platform dispatch
+  // owns routing end-to-end, including native Cloudflare production builds.
+  // Managed bundles omit it because dispatch applies the same rules first.
+  const emitEdgeRules = !managedDispatch;
   if (emitEdgeRules && options.redirectRules?.length) {
     compileRoutingRulesMiddleware(
       lines,
@@ -1106,6 +1109,25 @@ export function compileRouteTable(
     lines.push(`app.use(middleware${i});`);
   }
   if (scan.middleware.length > 0) {
+    lines.push('');
+  }
+
+  // WebSocket upgrades must enter the Hono app so global auth and user
+  // middleware run before the Durable Object receives the request. Register
+  // them before HTTP routes to preserve WebSocket priority when both route
+  // kinds share a path, while non-upgrade requests continue through normally.
+  for (let i = 0; i < webSockets.length; i++) {
+    const route = webSockets[i];
+    lines.push(`app.all(${JSON.stringify(route.pattern)}, async (c, next) => {`);
+    lines.push(
+      `  if (c.req.raw.headers.get("upgrade")?.toLowerCase() !== "websocket") return next();`,
+    );
+    lines.push(
+      `  return __forwardWebSocketRequest(c.req.raw, c.env, __voidWebSocketRoutes[${i}]);`,
+    );
+    lines.push('});');
+  }
+  if (webSockets.length > 0) {
     lines.push('');
   }
 
@@ -1189,21 +1211,6 @@ export function compileRouteTable(
         })),
       )};`,
     );
-    lines.push('export async function __voidHandleWebSocket(request, env) {');
-    lines.push('  return __handleWebSocketUpgrade(request, env, __voidWebSocketRoutes);');
-    lines.push('}');
-    lines.push('');
-    for (let i = 0; i < webSockets.length; i++) {
-      const route = webSockets[i];
-      lines.push(`app.all(${JSON.stringify(route.pattern)}, async (c) => {`);
-      lines.push(
-        `  return __forwardWebSocketRequest(c.req.raw, c.env, __voidWebSocketRoutes[${i}]);`,
-      );
-      lines.push('});');
-    }
-    lines.push('');
-  } else {
-    lines.push('export async function __voidHandleWebSocket() { return null; }');
     lines.push('');
   }
   for (const className of options.webSocketTombstones ?? []) {
@@ -1377,12 +1384,10 @@ window.__vite_plugin_react_preamble_installed__ = true;
       );
     }
     lines.push(`  if (!shouldHandleSsrRequest(c)) {`);
-    if (!options.nodeTarget && options.dev === true && options.fallbackRules?.length) {
-      // Default target in dev: static assets are served by the platform
-      // runtime in front of this worker in production, so to reproduce that
-      // behavior locally we look up assets first, then apply fallback rules
-      // on a 404. Production builds on the default target skip this and let
-      // the platform dispatch worker own the fallback phase.
+    if (!options.nodeTarget && emitEdgeRules && options.fallbackRules?.length) {
+      // Cloudflare without managed dispatch (dev or native production) looks
+      // up assets first, then applies fallback rules on a 404. Managed builds
+      // let dispatch own this phase.
       lines.push(`    const __assetRes = await fetchFromAssets(c);`);
       lines.push(`    if (__assetRes.status !== 404) return __assetRes;`);
       // This branch is gated on `!options.nodeTarget`, so pass `false`.
@@ -1397,12 +1402,13 @@ window.__vite_plugin_react_preamble_installed__ = true;
     lines.push(`});`);
     lines.push('');
   } else if (
-    (options.nodeTarget || options.dev === true) &&
-    options.fallbackRules?.length &&
+    emitEdgeRules &&
+    (options.fallbackRules?.length || (!options.nodeTarget && options.headerRules?.length)) &&
     !(pages && scan.pages.pages.length > 0)
   ) {
     // No SSR entry and no pages mode — emit a standalone notFound hook so
-    // `_redirects` / `routing.fallbacks` rules still fire on asset-miss.
+    // Cloudflare asset responses pass through header middleware, then run
+    // `_redirects` / `routing.fallbacks` rules on asset-miss when configured.
     // Pages mode owns its own notFound (with its own assets-first + SPA
     // fallback logic) and injects the fallback check inline at the correct
     // point; see `compilePageRoutes`.
@@ -1410,25 +1416,25 @@ window.__vite_plugin_react_preamble_installed__ = true;
     // On `node`/`bun`/`deno` the Hono app owns asset serving, so "no route"
     // already means "no asset" — fallbacks run straight away.
     //
-    // On the default target in dev we first ask the platform asset binding
-    // (`env.ASSETS`) so the in-worker flow matches production, where the
-    // platform serves static files before the worker even sees the request.
+    // On Cloudflare without managed dispatch we first ask the asset binding.
     // Fallbacks only fire when the asset lookup also 404s.
     lines.push(`app.notFound(async (c) => {`);
-    if (!options.nodeTarget && options.dev === true) {
+    if (!options.nodeTarget) {
       lines.push(`  const assets = c.env?.ASSETS;`);
       lines.push(`  if (assets && typeof assets.fetch === "function") {`);
       lines.push(`    const __assetRes = await assets.fetch(c.req.raw);`);
       lines.push(`    if (__assetRes.status !== 404) return __assetRes;`);
       lines.push(`  }`);
     }
-    emitFallbackRulesCheck(
-      lines,
-      options.fallbackRules,
-      options.dev === true,
-      '  ',
-      options.nodeTarget === true,
-    );
+    if (options.fallbackRules?.length) {
+      emitFallbackRulesCheck(
+        lines,
+        options.fallbackRules,
+        options.dev === true,
+        '  ',
+        options.nodeTarget === true,
+      );
+    }
     lines.push(
       `  return __voidMarkNoMatch(c.req.raw, new Response("Not Found", { status: 404 }));`,
     );
@@ -1443,27 +1449,24 @@ window.__vite_plugin_react_preamble_installed__ = true;
     }
     lines.push('');
     lines.push('export async function scheduled(controller, env, ctx) {');
-    lines.push('  switch (controller.cron) {');
+    lines.push('  const tasks = [];');
     for (let i = 0; i < scan.jobs.length; i++) {
       const job = scan.jobs[i];
       const filePath = JSON.stringify(`${jobsDir}/${job.filePath}`);
-      for (let j = 0; j < job.crons.length; j++) {
-        if (j < job.crons.length - 1) {
-          lines.push(`    case job${i}Crons[${j}]:`);
-        } else {
-          lines.push(`    case job${i}Crons[${j}]: {`);
-        }
-      }
+      lines.push(`  if (job${i}Crons.includes(controller.cron)) {`);
+      lines.push('    tasks.push((async () => {');
       lines.push(`      const mod = await import(${filePath});`);
-      lines.push("      if (typeof mod.default === 'function') {");
-      lines.push('        await mod.default(controller, env, ctx);');
-      lines.push('      }');
-      lines.push('      return;');
-      lines.push('    }');
+      lines.push(
+        "      if (typeof mod.default === 'function') await mod.default(controller, env, ctx);",
+      );
+      lines.push('    })());');
+      lines.push('  }');
     }
-    lines.push('    default:');
-    lines.push('      return;');
-    lines.push('  }');
+    lines.push('  const results = await Promise.allSettled(tasks);');
+    lines.push(
+      '  const errors = results.filter(result => result.status === "rejected").map(result => result.reason);',
+    );
+    lines.push('  if (errors.length) throw new AggregateError(errors, "Scheduled jobs failed");');
     lines.push('}');
     lines.push('');
   } else {
@@ -1491,14 +1494,18 @@ window.__vite_plugin_react_preamble_installed__ = true;
   }
 
   if (scan.queues.length > 0) {
-    for (let i = 0; i < scan.queues.length; i++) {
-      lines.push(`const queue${i}Name = ${JSON.stringify(scan.queues[i].name)};`);
-    }
+    lines.push(generateQueueResolverSource(scan.queues.map((queue) => queue.name)));
     lines.push('');
     // Queue dispatch as a standalone function — called directly by native queue handler
     // and via the authenticated HTTP route. No global mutable state needed.
     lines.push('export async function __processQueue(payload, env) {');
     lines.push('  const queueSuffix = payload.queue;');
+    lines.push('  const __queueIndex = __resolveQueueIndex(queueSuffix);');
+    lines.push('  if (__queueIndex === -1) {');
+    lines.push(
+      '    return { ok: false, error: `No unambiguous queue handler matches "${String(queueSuffix)}"` };',
+    );
+    lines.push('  }');
     lines.push('  const __decisions = new Map();');
     lines.push('  function __wrapMsg(m) {');
     lines.push('    let decided = false;');
@@ -1523,16 +1530,16 @@ window.__vite_plugin_react_preamble_installed__ = true;
     lines.push('  };');
     lines.push('  let __ok = true;');
     lines.push('  try {');
+    lines.push('    switch (__queueIndex) {');
     for (let i = 0; i < scan.queues.length; i++) {
       const q = scan.queues[i];
-      const cond = i === 0 ? 'if' : '} else if';
+      lines.push(`      case ${i}: {`);
       lines.push(
-        `    ${cond} (queueSuffix === queue${i}Name || queueSuffix.endsWith("-" + queue${i}Name)) {`,
+        `        const mod = await import(${JSON.stringify(`${queuesDir}/${q.filePath}`)});`,
       );
-      lines.push(
-        `      const mod = await import(${JSON.stringify(`${queuesDir}/${q.filePath}`)});`,
-      );
-      lines.push("      if (typeof mod.default === 'function') await mod.default(batch, env);");
+      lines.push("        if (typeof mod.default === 'function') await mod.default(batch, env);");
+      lines.push('        break;');
+      lines.push('      }');
     }
     lines.push('    }');
     lines.push('  } catch { __ok = false; }');
@@ -1853,13 +1860,16 @@ window.__vite_plugin_react_preamble_installed__ = true;
   lines.push(
     `export const __VOID_DEV_TRIGGER_TOKEN = ${JSON.stringify(options.devTriggerToken ?? crypto.randomUUID())};`,
   );
-  // Baked ISR config. `__VOID_ISR_REVALIDATE` is the merged revalidate map/number
-  // (or `undefined`). `__VOID_ISR_DEPLOYMENT_ID` MUST be a COMPILE-TIME LITERAL —
+  // Baked ISR policy. The ordered page table preserves explicit opt-outs and
+  // object-config inheritance before the flat fallback map is consulted.
+  // `__VOID_ISR_DEPLOYMENT_ID` MUST be a COMPILE-TIME LITERAL —
   // stringified here at build time exactly like `__VOID_BUILD_KEY` above — so every
   // isolate of a deployment shares one id (edge-cache keys, KV keys, and the
   // `revalidate()` purge path must all agree). A runtime `crypto.randomUUID()` in the
   // emitted source would mint a fresh id per isolate and break cache reads + purge.
   lines.push(`export const __VOID_ISR_REVALIDATE = ${JSON.stringify(mergedRevalidate)};`);
+  lines.push(`export const __VOID_ISR_PAGES = ${JSON.stringify(isrPages)};`);
+  lines.push(`export const __VOID_ISR_PATH_REVALIDATE = ${JSON.stringify(isrPathRevalidate)};`);
   lines.push(`export const __VOID_ISR_DEPLOYMENT_ID = ${JSON.stringify(crypto.randomUUID())};`);
   lines.push('');
   lines.push(`export default app;`);
@@ -2453,11 +2463,11 @@ function compilePageRoutes(
   lines.push(`  if (assetRes.status !== 404) return assetRes;`);
   // Post-asset fallback phase — `routing.fallbacks` / plain `_redirects 200`
   // rules re-dispatch through the app when assets miss but before the SPA
-  // fallback renders. Node/bun/deno targets emit this in both dev and prod
-  // (the Hono app owns the full pipeline there); the default target only
-  // emits it in dev, since production relies on the platform dispatch
-  // worker to apply fallbacks before assets are even served.
-  if ((options.nodeTarget || options.dev === true) && options.fallbackRules?.length) {
+  // fallback renders. Targets without managed dispatch emit this themselves;
+  // managed bundles rely on the platform dispatch worker.
+  const managedDispatch =
+    options.nodeTarget !== true && options.dev !== true && options.managedDispatch === true;
+  if (!managedDispatch && options.fallbackRules?.length) {
     emitFallbackRulesCheck(
       lines,
       options.fallbackRules,
@@ -2735,6 +2745,11 @@ export function compileWorkerEntry(options: WorkerEntryOptions = {}): string {
     ? `import ${JSON.stringify(envSchemaModule.importPath)};\nimport { _validateEnvOnce } from ${JSON.stringify(envSchemaModule.helperPath)};\n`
     : '';
   const envValidateCall = envSchemaModule ? '  await _validateEnvOnce(env);\n' : '';
+  // Discovery reads route metadata in a build-time worker without remote
+  // secrets. Readiness and application requests must still validate at boot.
+  const fetchEnvValidateCall = envSchemaModule
+    ? '  if (request.method !== "POST" || new URL(request.url).pathname !== "/__void/prerender-paths") await _validateEnvOnce(env);\n'
+    : '';
 
   // Filter internal platform bindings so user code cannot access them via c.env.
   // The original env is preserved for framework internals (withRuntimeEnv, etc.).
@@ -2783,7 +2798,7 @@ function __filterInternalBindings(env) {
   // `isr` is absent every fragment below is an empty string, so the generated
   // fetch handler is byte-identical to the pre-ISR output.
   const isrImport = isr
-    ? `import { handleIsr } from ${JSON.stringify(isr.runtimePath)};\nimport { __VOID_ISR_REVALIDATE, __VOID_ISR_DEPLOYMENT_ID } from 'virtual:void-routes';\n`
+    ? `import { handleIsr } from ${JSON.stringify(isr.runtimePath)};\nimport { __VOID_ISR_REVALIDATE, __VOID_ISR_PAGES, __VOID_ISR_PATH_REVALIDATE, __VOID_ISR_DEPLOYMENT_ID } from 'virtual:void-routes';\n`
     : '';
   // Capture deployment id + host on the raw env at the top of fetch(), before
   // dispatch — always, so `revalidate()` (which reads the raw env) can see them
@@ -2806,8 +2821,8 @@ function __filterInternalBindings(env) {
   // closure is threaded through the ISR cache ladder (only when ISR_CACHE binds).
   const renderBlock = isr
     ? `      const __render = async (req) => serveWithAssets(req, env, await app.fetch(req, userEnv, ctx));
-      if (env.ISR_CACHE) {
-        const __isr = await handleIsr(request, env, ctx, { revalidate: __VOID_ISR_REVALIDATE, deploymentId: __VOID_ISR_DEPLOYMENT_ID, queryAllowlist: ${JSON.stringify(isr?.queryAllowlist)} }, __render);
+      if (env.ISR_CACHE && request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
+        const __isr = await handleIsr(request, env, ctx, { revalidate: __VOID_ISR_REVALIDATE, pages: __VOID_ISR_PAGES, pathRevalidate: __VOID_ISR_PATH_REVALIDATE, deploymentId: __VOID_ISR_DEPLOYMENT_ID, queryAllowlist: ${JSON.stringify(isr?.queryAllowlist)} }, __render);
         if (__isr) return __isr;
       }
       return __render(request);`
@@ -2815,9 +2830,7 @@ function __filterInternalBindings(env) {
 
   const fetchHandler = remotePath
     ? `async (request, env, ctx) => {
-${envValidateCall}  const ws = await __voidHandleWebSocket(request, env);
-  if (ws) return ws;
-  if (env.__VOID_REMOTE === "1") env = ${createRemoteEnvCall};
+${fetchEnvValidateCall}  if (env.__VOID_REMOTE === "1") env = ${createRemoteEnvCall};
 ${isrEnvCapture}  return __withRawEnv(env, () => {
     const userEnv = __filterInternalBindings(env);
     return withRuntimeEnv(env, async () => {
@@ -2828,9 +2841,7 @@ ${renderBlock}
   });
 }`
     : `async (request, env, ctx) => {
-${envValidateCall}  const ws = await __voidHandleWebSocket(request, env);
-  if (ws) return ws;
-${isrEnvCapture}  return __withRawEnv(env, () => {
+${fetchEnvValidateCall}${isrEnvCapture}  return __withRawEnv(env, () => {
     const userEnv = __filterInternalBindings(env);
     return withRuntimeEnv(env, async () => {
       const internal = await __handleInternal(request, env, ctx);
@@ -2946,7 +2957,7 @@ ${envValidateCall}  const userEnv = __filterInternalBindings(env);
 ${queueMethodBody}${emailMethodBody}}`;
 
   if (hasQueues) {
-    return `${sandboxImport}${entryImport}${liveRuntimeImport}import app, { scheduled, __voidCollectPrerenderPaths, __voidHandleInternalRoute, __voidHandleWebSocket, __withRawEnv, __processQueue${emailImport}${webSocketClasses.length > 0 ? `, ${webSocketClasses.join(', ')}` : ''}${liveRouteImport} } from 'virtual:void-routes';
+    return `${sandboxImport}${entryImport}${liveRuntimeImport}import app, { scheduled, __voidCollectPrerenderPaths, __voidHandleInternalRoute, __withRawEnv, __processQueue${emailImport}${webSocketClasses.length > 0 ? `, ${webSocketClasses.join(', ')}` : ''}${liveRouteImport} } from 'virtual:void-routes';
 ${durableObjectImports}\n${runtimeEnvImport}${emailProxyImport}${envSchemaImport}${remoteImport}${isrImport}${filterBindingsHelper}${assetHelper}
 ${internalRouteHelper}
 ${fetchDeclaration}
@@ -2979,7 +2990,7 @@ ${sandboxExport}
 ${durableObjectExports}
 ${entryClass}`;
   }
-  return `${sandboxImport}${entryImport}${liveRuntimeImport}import app, { scheduled, __voidCollectPrerenderPaths, __voidHandleInternalRoute, __voidHandleWebSocket, __withRawEnv${emailImport}${webSocketClasses.length > 0 ? `, ${webSocketClasses.join(', ')}` : ''}${liveRouteImport} } from 'virtual:void-routes';
+  return `${sandboxImport}${entryImport}${liveRuntimeImport}import app, { scheduled, __voidCollectPrerenderPaths, __voidHandleInternalRoute, __withRawEnv${emailImport}${webSocketClasses.length > 0 ? `, ${webSocketClasses.join(', ')}` : ''}${liveRouteImport} } from 'virtual:void-routes';
 ${durableObjectImports}\n${runtimeEnvImport}${emailProxyImport}${envSchemaImport}${remoteImport}${isrImport}${filterBindingsHelper}${assetHelper}
 ${internalRouteHelper}
 ${fetchDeclaration}
@@ -3024,13 +3035,19 @@ export function compileNodeApp(
     : '';
   const envSource = target === 'deno' ? 'Deno.env.toObject()' : 'process.env';
   const envMiddleware = envSchemaModule
-    ? `app.use("*", async (c, next) => { await _validateEnvOnce(${envSource}); return next(); });\n`
+    ? `app.use("*", async (c, next) => { if (c.req.method !== "POST" || c.req.path !== "/__void/prerender-paths") await _validateEnvOnce(${envSource}); return next(); });\n`
     : '';
 
   return `${staticImport}
+import { fileURLToPath } from "node:url";
 import { Hono } from ${JSON.stringify(honoPath)};
 import innerApp, { __voidCollectPrerenderPaths } from "virtual:void-routes";
 ${envSchemaImport}
+// Resolved by nodeTargetPlugin for this emitted chunk, including shared chunks.
+const clientRoot = fileURLToPath(import.meta.voidClientDirectory);
+const assetApp = new Hono();
+assetApp.get("*", serveStatic({ root: clientRoot }));
+const assets = { fetch: (request) => assetApp.fetch(request) };
 const app = new Hono();
 ${envMiddleware}app.post("/__void/prerender-paths", async (c) => {
   const __expected = c.env?.__VOID_PROXY_TOKEN;
@@ -3041,8 +3058,8 @@ ${envMiddleware}app.post("/__void/prerender-paths", async (c) => {
   const paths = await __voidCollectPrerenderPaths(c.req.raw);
   return c.json({ paths });
 });
-app.use("/assets/*", serveStatic({ root: "./client" }));
-app.all("*", (c) => innerApp.fetch(c.req.raw));
+app.get("/assets/*", (c) => assets.fetch(c.req.raw));
+app.all("*", (c) => innerApp.fetch(c.req.raw, { ...c.env, ASSETS: assets }));
 export default app;`;
 }
 

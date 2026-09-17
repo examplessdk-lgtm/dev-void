@@ -33,108 +33,6 @@ export type MigrationResult = {
 };
 
 /**
- * drizzle-kit unconditionally emits `--> statement-breakpoint` between
- * every generated statement in a migration (see drizzle-orm's
- * `migrator.js`, which splits on this exact literal at runtime). Its
- * presence in a migration body is a load-bearing declaration that the
- * body is multi-statement — independently of any SQL parsing.
- *
- * The regex is deliberately permissive so future drizzle-kit tweaks
- * (extra dashes, casing, whitespace, `_` / `-` separators) still match
- * and fail safely. A false positive on this check only disables the
- * narrow recovery path — the safe direction — so loosening is fine;
- * tightening would risk silently enabling recovery on a multi-statement
- * body and letting the second statement go un-applied.
- */
-const DRIZZLE_STATEMENT_BREAKPOINT = /-{2,}\s*>\s*statement[\s\-_]*breakpoint/i;
-
-/**
- * Returns `true` iff `sql` contains exactly one effective statement.
- *
- * Used to gate the "already exists / duplicate column" recovery path in
- * `runRemoteMigrations`. Only single-statement migrations can safely be
- * marked applied on an `already exists` error — multi-statement bodies
- * may have a half-applied partial commit where the failing statement is
- * NOT the one that already exists, in which case D1 aborts the batch at
- * the first error and later statements never run.
- *
- * Two-tier strategy:
- *
- *   1. **Marker short-circuit.** If `sql` contains drizzle-kit's
- *      `--> statement-breakpoint` marker anywhere, the body is
- *      declared multi-statement by drizzle itself — return `false`
- *      without tokenizing. This is the cheapest and most authoritative
- *      signal we have for the overwhelmingly common drizzle-generated
- *      case, and it is immune to the quote / comment edge cases that
- *      a tokenizer must handle.
- *   2. **Char-by-char tokenizer fallback.** For hand-written or
- *      non-drizzle migrations with no marker, walk the SQL char-by-char
- *      and count statements. A naive "strip comments, split on `;`"
- *      regex pipeline cannot tell the difference between a real
- *      comment / terminator and one that appears inside a quoted
- *      string literal — for example,
- *      `CREATE TABLE t (x TEXT DEFAULT '-- none'); CREATE TABLE u (y)`
- *      would get "stripped" from the first `--` onward and misclassify
- *      as a single statement, masking a multi-statement body whose
- *      second statement would silently be marked applied.
- *
- * Lexical forms and the rationale for honoring quotes/comments live in
- * `../sql/tokenize.ts` — both the destructive-SQL guard in
- * `routes/projects.ts` and this classifier share that tokenizer so a
- * new quoting-form fix lands in one place.
- *
- * A `;` or `--` inside a backtick/bracket identifier must not be
- * interpreted as a terminator or comment — otherwise a body like
- * ``CREATE TABLE `a--x` (id INT); CREATE INDEX idx ON `a--x`(id);`` is
- * misclassified as a single statement and the recovery path could mark
- * a half-applied body as complete.
- *
- * Edge case, documented: if a hand-written migration embeds the literal
- * string `--> statement-breakpoint` inside a quoted literal (e.g. a
- * seed row), the marker short-circuit will return `false` and the
- * tokenizer is not consulted. That's a safe false-positive: recovery is
- * disabled, the operator sees the underlying error, no data is lost.
- */
-export function isSingleStatement(sql: string): boolean {
-  // Primary: drizzle-kit marker is authoritative. Present ⇒ multi-statement.
-  if (DRIZZLE_STATEMENT_BREAKPOINT.test(sql)) {
-    return false;
-  }
-  // Fallback: walk tokenized segments and count `;`-terminated runs.
-  let statements = 0;
-  let inStatement = false;
-
-  for (const seg of tokenizeSql(sql)) {
-    if (seg.kind === 'line-comment' || seg.kind === 'block-comment') {
-      continue;
-    }
-    if (seg.kind === 'string' || seg.kind === 'ident-quote') {
-      inStatement = true;
-      continue;
-    }
-    // seg.kind === 'sql' — raw run between special regions.
-    for (let i = seg.start; i < seg.end; i++) {
-      const character = sql[i];
-      if (character === ';') {
-        if (inStatement) {
-          statements++;
-          inStatement = false;
-        }
-        continue;
-      }
-      if (character !== ' ' && character !== '\t' && character !== '\n' && character !== '\r') {
-        inStatement = true;
-      }
-    }
-  }
-
-  if (inStatement) {
-    statements++;
-  }
-  return statements === 1;
-}
-
-/**
  * One-time migration: rename legacy `_migrations` table to `_void_migrations`.
  * Copies all rows from the old table to the new one, then drops the old table.
  */
@@ -157,8 +55,7 @@ async function upgradeTrackingTable(
   // is a benign interleaving — the rows were copied successfully by the
   // winner — so swallow exactly that error text and continue. Any other
   // failure (auth, quota, schema mismatch on `_void_migrations`) still
-  // propagates. Mirrors the `already exists` recovery pattern in
-  // runRemoteMigrations.
+  // propagates.
   try {
     await queryD1(accountId, apiToken, databaseId, {
       sql: `INSERT OR IGNORE INTO _void_migrations (name, applied_at) SELECT name, applied_at FROM _migrations`,
@@ -181,61 +78,6 @@ async function upgradeTrackingTable(
   }
 }
 
-/**
- * Bounded retry/poll on `_void_migrations` for a specific migration name.
- *
- * This exists to close a remaining race in the multi-statement concurrent
- * recovery path. The winner's flow is two awaited HTTP calls — apply SQL,
- * then write the tracking row — with no atomicity between them. A loser
- * arriving in between will see `already exists` from the SQL, then a
- * recheck of `_void_migrations` that is racing the winner's still-in-flight
- * tracking INSERT. A single recheck can return zero rows even though the
- * winner is microseconds away from inserting.
- *
- * Polling a few times with a short backoff turns that interleaving into a
- * harmless wait: the loser pauses long enough for the winner's tracking
- * INSERT to land (typically a few ms in practice — the winner's SQL
- * already committed before the loser's failing call returned), then sees
- * the row and reports skipped. If the row genuinely never appears within
- * the bound, the failure is real (a true partial commit, or an unrelated
- * `already exists` from a hand-merged schema conflict) and we propagate.
- *
- * Bound: 5 attempts × 50ms ≈ 250ms total wall time on a missed first
- * check. The first attempt is immediate, so the happy path (winner already
- * landed) pays nothing. The maximum wait only fires when the winner is
- * genuinely still in flight, which is exactly the case we are trying to
- * survive.
- */
-async function isMigrationTracked(
-  accountId: string,
-  apiToken: string,
-  databaseId: string,
-  name: string,
-): Promise<boolean> {
-  const RECHECK_ATTEMPTS = 5;
-  const RECHECK_DELAY_MS = 50;
-  for (let attempt = 0; attempt < RECHECK_ATTEMPTS; attempt++) {
-    const recheck = await queryD1(accountId, apiToken, databaseId, {
-      sql: 'SELECT name FROM _void_migrations WHERE name = ?',
-      params: [name],
-    });
-    if (recheck.results && recheck.results.length > 0) {
-      return true;
-    }
-    if (attempt < RECHECK_ATTEMPTS - 1) {
-      await new Promise((resolve) => setTimeout(resolve, RECHECK_DELAY_MS));
-    }
-  }
-  return false;
-}
-
-/**
- * Run migrations against a remote D1 database via the CF REST API.
- *
- * 1. Ensure _void_migrations tracking table exists
- * 2. Query already-applied migrations
- * 3. For each pending: execute SQL + record in _void_migrations
- */
 /**
  * Ensure _void_migrations table exists and upgrade legacy _migrations if present.
  * Returns the set of already-applied migration names.
@@ -266,7 +108,6 @@ export async function runRemoteMigrations(
   appliedSet?: Set<string>,
 ): Promise<MigrationResult> {
   const applied = appliedSet ?? (await ensureTrackingTable(accountId, apiToken, databaseId));
-
   const result: MigrationResult = { applied: [], skipped: [] };
 
   for (const migration of migrations) {
@@ -274,126 +115,54 @@ export async function runRemoteMigrations(
       result.skipped.push(migration.name);
       continue;
     }
-
-    // Execute migration SQL, then record the tracking row. The two queries
-    // are not atomic (D1 exposes them as separate HTTP requests), so a retry
-    // after the SQL committed but before the tracking INSERT landed will
-    // re-run the migration against an object that already exists.
-    //
-    // The narrow recovery below catches exactly that case: if `applied`
-    // (populated from `_void_migrations`) does NOT contain this migration,
-    // we have never successfully recorded it, so the only way to hit an
-    // "already exists" / "duplicate column" error from a fresh run is a
-    // prior post-SQL failure (network blip, 429, timeout) that committed
-    // the SQL but lost the tracking INSERT. Reconciling via INSERT OR
-    // IGNORE is correct in that case and restores the deploy-retry path
-    // after user SQL was committed without its tracking row.
-    //
-    // Restriction: the unconditional fall-through is gated on
-    // `isSingleStatement(migration.sql)`. For a multi-statement migration
-    // (e.g. `CREATE TABLE a; CREATE INDEX idx ON a(id);`) a mid-migration
-    // partial commit is not safely recoverable from a stale `applied` set
-    // alone: if statement 1 committed on a prior deploy and statement 2
-    // failed, the retry re-runs the whole body, D1 aborts the batch at the
-    // first "already exists" error, and marking the migration applied
-    // would let statement 2 silently never run.
-    //
-    // However, the multi-statement path also has a benign concurrent-winner
-    // case that we must NOT confuse with partial commits: two overlapping
-    // /apply requests racing on the same multi-statement migration. The
-    // first call lands the SQL and the tracking INSERT, the second call
-    // (with its stale preflight `appliedSet` from before the winner
-    // finished) re-runs the body, hits "already exists", and previously
-    // got rejected as a 500 even though the database was already in the
-    // intended state. To distinguish a true concurrent winner from a
-    // partial commit, re-check `_void_migrations` directly: if the row
-    // is present, a concurrent caller fully reconciled this migration and
-    // we can mark it skipped; otherwise the failure is real and we
-    // propagate so an operator can investigate.
-    //
-    // Trade-off (single-statement path): the unconditional fall-through
-    // CAN mask a hand-merged schema conflict where two different migrations
-    // create the same object. In a drizzle-managed workflow that's
-    // extremely unlikely (drizzle-kit guarantees unique object names per
-    // snapshot), and the alternative — propagate every such error — breaks
-    // deploy retries for every transient network failure, which is the
-    // main symptom users hit.
-    //
-    // Per-migration errors are NEVER thrown. A thrown error inside
-    // /apply's pg transaction rolls the transaction back, discarding the
-    // committed prefix (earlier migrations whose SQL AND tracking row both
-    // landed in D1) and releasing the row lock without persisting the
-    // `applied + skipped` union to pg metadata. D1 keeps the prefix, pg
-    // forgets it — durable drift that poisons rollback diffs and rename
-    // corroboration. Instead, stash the failure on `result.failed`, break
-    // out of the loop, and let the caller persist the confirmed-landed
-    // subset before surfacing the error.
-    try {
-      await queryD1(accountId, apiToken, databaseId, { sql: migration.sql });
-    } catch (err) {
-      const msg = String((err as Error)?.message ?? err);
-      if (!/already exists|duplicate column/i.test(msg)) {
-        result.failed = { name: migration.name, error: msg };
-        return result;
-      }
-      if (!isSingleStatement(migration.sql)) {
-        // Multi-statement: only safe to recover if a concurrent caller has
-        // already recorded the tracking row for this migration. Otherwise
-        // a partial commit would silently be marked applied.
-        //
-        // The recheck is bounded-retried because the winner's SQL commit and
-        // tracking INSERT are two non-atomic awaited HTTP calls. A loser that
-        // fires between them must wait long enough for the winner's tracking
-        // write to land before treating absence as a partial commit; see
-        // `isMigrationTracked` for the full rationale.
-        let tracked = false;
-        try {
-          tracked = await isMigrationTracked(accountId, apiToken, databaseId, migration.name);
-        } catch (recheckErr) {
-          // A failure on the recheck itself must also return a partial
-          // result, not throw — otherwise we lose the committed prefix
-          // that landed before this migration.
-          result.failed = {
-            name: migration.name,
-            error: String((recheckErr as Error)?.message ?? recheckErr),
-          };
-          return result;
-        }
-        if (!tracked) {
-          result.failed = { name: migration.name, error: msg };
-          return result;
-        }
-        result.skipped.push(migration.name);
-        continue;
-      }
-      // Single-statement: fall through to the tracking INSERT below — the
-      // object already exists on the remote DB and the applied set says we
-      // never recorded it, so reconcile by writing the tracking row.
-    }
-
-    // INSERT OR IGNORE makes the tracking write idempotent, so a retry that
-    // re-runs the same migration (e.g. after a network blip on a previous
-    // tracking INSERT) never produces a duplicate tracking row.
-    //
-    // Same partial-result discipline as the SQL execute above — a
-    // tracking INSERT failure after the SQL committed must still return
-    // the already-committed prefix to the caller.
-    try {
-      await queryD1(accountId, apiToken, databaseId, {
-        sql: 'INSERT OR IGNORE INTO _void_migrations (name, applied_at) VALUES (?, ?)',
-        params: [migration.name, new Date().toISOString()],
-      });
-    } catch (err) {
-      result.failed = {
-        name: migration.name,
-        error: String((err as Error)?.message ?? err),
-      };
+    if (
+      Array.from(tokenizeSql(migration.sql)).some(
+        (segment) =>
+          segment.kind === 'block-comment' &&
+          !migration.sql.slice(segment.start, segment.end).endsWith('*/'),
+      )
+    ) {
+      result.failed = { name: migration.name, error: 'Unterminated SQL block comment' };
       return result;
     }
-
+    // Like Wrangler's migration runner, submit SQL and its tracking INSERT
+    // together to D1's transactional query batch. A plain INSERT makes a
+    // stale applied-set retry roll back its SQL on the unique-name conflict.
+    // The newline also terminates any trailing line comment in user SQL.
+    const name = migration.name.replaceAll("'", "''");
+    const sql =
+      migration.sql +
+      "\n;\nINSERT INTO _void_migrations (name, applied_at) VALUES ('" +
+      name +
+      "', '" +
+      new Date().toISOString() +
+      "');";
+    try {
+      await queryD1(accountId, apiToken, databaseId, { sql });
+    } catch (error) {
+      // A lost response or a concurrent winner is successful only if D1
+      // recorded the migration. Never infer success from an existing object.
+      try {
+        const tracked = await queryD1(accountId, apiToken, databaseId, {
+          sql: 'SELECT name FROM _void_migrations WHERE name = ?',
+          params: [migration.name],
+        });
+        if (tracked.results.length > 0) {
+          applied.add(migration.name);
+          result.skipped.push(migration.name);
+          continue;
+        }
+      } catch {
+        // Preserve the original error if reconciliation is unavailable.
+      }
+      // Return the committed prefix so the caller can persist its metadata
+      // before surfacing failure, rather than rolling back its pg transaction.
+      result.failed = { name: migration.name, error: String((error as Error)?.message ?? error) };
+      return result;
+    }
+    applied.add(migration.name);
     result.applied.push(migration.name);
   }
-
   return result;
 }
 
@@ -457,7 +226,7 @@ export async function queryD1(
   let json: {
     success: boolean;
     errors: ReadonlyArray<{ code: number; message: string }>;
-    result: ReadonlyArray<D1QueryResponse & { meta?: D1QueryResponseMeta }>;
+    result: ReadonlyArray<D1QueryResponse & { success?: boolean; error?: string }>;
   };
   try {
     const response = await fetch(url, {
@@ -488,6 +257,11 @@ export async function queryD1(
   if (!json.success) {
     const message = json.errors.map((error) => error.message).join(', ');
     throw new Error(`D1 migration failed: ${message}`);
+  }
+
+  const failed = json.result.find((entry) => entry.success === false);
+  if (failed) {
+    throw new Error('D1 migration failed: ' + (failed.error ?? 'statement failed'));
   }
 
   // D1 query API returns an array of results (one per statement). Forward

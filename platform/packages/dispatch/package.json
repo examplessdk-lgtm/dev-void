@@ -10,7 +10,8 @@
   "dependencies": {
     "@void/deploy-core": "workspace:*",
     "@void/edge": "workspace:*",
-    "@void/isr": "workspace:*"
+    "@void/isr": "workspace:*",
+    "@voidcloud/api": "workspace:*"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "catalog:platform",

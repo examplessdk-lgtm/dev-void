@@ -144,12 +144,18 @@ export function formatConnection(connection: GithubConnection): string {
     connection.build_executor === 'github_actions'
       ? connection.workflow_path
       : `${connection.workflow_path} (unused for container builds)`;
-  return [
+  const rows = [
     row('Repository', connection.repo_full_name),
     row('Branch', connection.branch),
     row('Build executor', connection.build_executor),
     row('Deploy workflow', workflow),
-  ].join('\n');
+  ];
+  if (connection.requires_reconnect) {
+    rows.push(
+      row('Authorization', 'Reconnect required: run `void github connect` for this repository'),
+    );
+  }
+  return rows.join('\n');
 }
 
 // ---------------------------------------------------------------------------
@@ -623,10 +629,10 @@ export async function runConnect(
     repoFullName = args.repo;
   } else if (installation.repository_selection === 'selected') {
     if (installation.repositories.length === 0) {
-      // The server redacts `repositories` to [] for non-owner (member) rows of
-      // shared org installations, and an owner install can genuinely have zero
-      // grants. Either way the list is not enumerable here — take free text
-      // and let the server's access check decide.
+      // The server redacts `repositories` to [] for every organization
+      // installation. A personal installation can also genuinely have zero
+      // grants. Either way the list is not enumerable here — take free text and
+      // let the server's per-repository access check decide.
       if (!isTTY) {
         log.error(
           'connect: --repo <owner/repo> is required — this installation does not expose a repository list to your account.',
@@ -779,7 +785,7 @@ export async function runConnect(
         );
         process.exit(1);
       }
-      // Non-owner org member: prove per-repo access via an authorize round-trip,
+      // Organization participant: prove per-repo access via an authorize round-trip,
       // then retry the connect EXACTLY ONCE with the resulting grant. This MUST
       // come before the generic `describeConnectError` branch below, which maps
       // ANY 403 to "no project access" and would otherwise swallow this signal.

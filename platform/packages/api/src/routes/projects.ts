@@ -34,7 +34,6 @@ import {
   updateRollbackLeaseState,
   cancelDeployment,
   setActiveDeployment,
-  updateDeploymentStatus,
   updateProjectType,
   appendAppliedMigrations,
   appendProjectMigrations,
@@ -188,7 +187,7 @@ const DESTRUCTIVE_PRAGMA = '-- void:allow-destructive';
  */
 class RollbackError extends Error {
   constructor(
-    public readonly status: 400 | 404 | 409,
+    public readonly status: 400 | 404 | 409 | 501,
     message: string,
     /**
      * For destructive-rollback rejections, we surface the server-computed
@@ -207,6 +206,7 @@ class RollbackError extends Error {
 }
 
 type ProjectListItem = Awaited<ReturnType<typeof getProjectsByUserId>>[number] & {
+  url?: string;
   custom_domain: string | null;
   latest_deployment: Awaited<ReturnType<typeof getLatestDeploymentsByProjectIds>> extends Map<
     string,
@@ -579,7 +579,7 @@ const app = new Hono<ApiEnv>()
         pDomains?.find((d: { status: string }) => d.status === 'active') ?? pDomains?.[0];
       const overview = requestOverview.get(p.id);
       return {
-        ...p,
+        ...projectWithUrl(p, context.env),
         custom_domain: domain?.hostname ?? null,
         latest_deployment: latestDeployments.get(p.id) ?? null,
         traffic: {
@@ -689,7 +689,7 @@ const app = new Hono<ApiEnv>()
         // shows the outcome.
         return context.json({ ...project, owner_email_destination: { address } }, 201);
       }
-      return context.json(project, 201);
+      return context.json(projectWithUrl(project, context.env), 201);
     } catch (err) {
       // Unique constraint violation — slug was taken between check and insert
       if (
@@ -711,7 +711,7 @@ const app = new Hono<ApiEnv>()
     if (project.user_id !== context.get('user').id) {
       return context.json({ error: 'forbidden' }, 403);
     }
-    return context.json(project);
+    return context.json(projectWithUrl(project, context.env));
   })
 
   // Mint a narrowly scoped credential for deploy-time remote-binding access.
@@ -879,6 +879,16 @@ const app = new Hono<ApiEnv>()
     if (!preCheck.retained) {
       return context.json({ error: 'deployment not retained (worker script evicted)' }, 400);
     }
+    if (
+      preCheck.manifest &&
+      (JSON.parse(preCheck.manifest) as DeployManifest).sandbox &&
+      !getPlatformCapabilities(context.env).sandbox
+    ) {
+      return context.json(
+        { error: 'This Void platform does not enable rollback to Sandbox deployments.' },
+        501,
+      );
+    }
 
     const planLimits = getPlanLimits(context.get('user').plan);
 
@@ -1029,6 +1039,16 @@ const app = new Hono<ApiEnv>()
           }
           if (!target.retained) {
             throw new RollbackError(400, 'deployment not retained (worker script evicted)');
+          }
+          if (
+            target.manifest &&
+            (JSON.parse(target.manifest) as DeployManifest).sandbox &&
+            !getPlatformCapabilities(context.env).sandbox
+          ) {
+            throw new RollbackError(
+              501,
+              'This Void platform does not enable rollback to Sandbox deployments.',
+            );
           }
 
           // Re-read project so `active_deployment_id` and `type` reflect
@@ -3250,3 +3270,4 @@ function isSyntheticProviderEmail(email: string): boolean {
 }
 
 export default app;
+import { projectWithUrl } from '../project-url.ts';

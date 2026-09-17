@@ -17,6 +17,7 @@ describe('Cloudflare framework deployment', () => {
       `{
   // retain operator context
   "compatibility_flags": ["custom-flag"],
+  "secrets": { "required": ["MANUAL_SECRET"] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Room"] }],
   "kv_namespaces": [{ "binding": "KV", "id": "abc" }]
 }\n`,
@@ -33,6 +34,7 @@ describe('Cloudflare framework deployment', () => {
       compatibilityFlags: ['nodejs_als'],
       assetsIgnore: ['_worker.js', '_routes.json'],
       crons: ['0 * * * *'],
+      requiredSecrets: ['API_TOKEN', 'MANUAL_SECRET'],
     };
     expect(writeCloudflareFrameworkDeployConfig(input)).toBe(true);
     expect(writeCloudflareFrameworkDeployConfig(input)).toBe(false);
@@ -55,6 +57,7 @@ describe('Cloudflare framework deployment', () => {
         not_found_handling: 'none',
       },
       triggers: { crons: ['0 * * * *'] },
+      secrets: { required: ['MANUAL_SECRET', 'API_TOKEN'] },
     });
     expect(JSON.parse(readFileSync(pointerPath, 'utf-8'))).toEqual({
       configPath: '../../wrangler.jsonc',
@@ -87,5 +90,27 @@ describe('Cloudflare framework deployment', () => {
     });
 
     expect(parseRootWranglerConfig(configPath)).toMatchObject({ triggers: { crons: [] } });
+  });
+
+  it('rejects a malformed existing secrets.required field without writing', () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-framework-config-'));
+    const configPath = join(root, 'wrangler.jsonc');
+    const pointerPath = join(root, '.wrangler/deploy/config.json');
+    const original = '{ "secrets": { "required": "API_TOKEN" } }\n';
+    writeFileSync(configPath, original);
+
+    expect(() =>
+      writeCloudflareFrameworkDeployConfig({
+        configPath,
+        deployPointerPath: pointerPath,
+        name: 'framework-app',
+        accountId: 'account-id',
+        main: 'dist/worker.js',
+        assetsDirectory: 'dist/assets',
+        compatibilityDate: '2026-09-11',
+        requiredSecrets: ['API_TOKEN'],
+      }),
+    ).toThrow('malformed secrets.required');
+    expect(readFileSync(configPath, 'utf-8')).toBe(original);
   });
 });

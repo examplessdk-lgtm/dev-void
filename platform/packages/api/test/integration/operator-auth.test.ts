@@ -2,6 +2,7 @@ import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, test, vi } from 'vite-plus/test';
 import { signJwt, verifyJwt } from '../../src/auth/jwt.ts';
 import { app } from '../../src/index.ts';
+import { SANDBOX_DRAIN_STATE_KEY } from '../../src/sandbox-drain.ts';
 import { operatorEvents, operatorSessions, users } from '../../src/schema.ts';
 import {
   clearTables,
@@ -21,6 +22,7 @@ afterAll(async () => {
 });
 beforeEach(async () => {
   await clearTables(env.db);
+  await env.ROUTING.delete(SANDBOX_DRAIN_STATE_KEY);
   vi.restoreAllMocks();
 });
 
@@ -67,6 +69,99 @@ describe('operator authentication', () => {
         )
       ).status,
     ).toBe(401);
+  });
+
+  test('keeps login, elevation, authenticated drain, session, and logout usable in drain maintenance', async () => {
+    const admin = await createTestUser(
+      env.db,
+      'maintenance-operator',
+      'github',
+      undefined,
+      'free',
+      'admin',
+    );
+    const maintenanceEnv = { ...env, PLATFORM_TRAFFIC_STATE: 'sandbox-drain' };
+
+    const login = await app.fetch(
+      new Request(
+        'http://localhost/auth/login?redirect=http%3A%2F%2Flocalhost%3A8787%2Fcallback&provider=github',
+      ),
+      maintenanceEnv,
+    );
+    expect(login.status).toBe(302);
+    for (const [path, init] of [
+      ['/auth/callback', undefined],
+      [
+        '/auth/exchange',
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' },
+      ],
+      [
+        '/auth/cli/token',
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' },
+      ],
+    ] as const) {
+      const response = await app.fetch(
+        new Request(`http://localhost${path}`, init),
+        maintenanceEnv,
+      );
+      expect(response.status).not.toBe(503);
+    }
+
+    const elevation = await app.fetch(
+      new Request('http://localhost/operator/v1/session', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${admin.jwt}`, 'Content-Type': 'application/json' },
+        body: '{}',
+      }),
+      maintenanceEnv,
+    );
+    expect(elevation.status).toBe(200);
+    const { token } = (await elevation.json()) as { token: string };
+    expect(
+      (
+        await app.fetch(
+          new Request('http://localhost/operator/v1/session', {
+            headers: { Authorization: `Bearer ${token}` },
+          }),
+          maintenanceEnv,
+        )
+      ).status,
+    ).toBe(200);
+
+    const drain = await app.fetch(
+      new Request('http://localhost/operator/v1/system/sandbox-drain', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: '{}',
+      }),
+      maintenanceEnv,
+    );
+    expect(drain.status).toBe(207);
+    expect(await drain.json()).toMatchObject({ complete: false });
+
+    expect(
+      (
+        await app.fetch(
+          new Request('http://localhost/me', {
+            headers: { Authorization: `Bearer ${admin.jwt}` },
+          }),
+          maintenanceEnv,
+        )
+      ).status,
+    ).toBe(503);
+    expect(
+      (
+        await app.fetch(
+          new Request('http://localhost/operator/v1/session/logout', {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+            body: '{}',
+          }),
+          maintenanceEnv,
+        )
+      ).status,
+    ).toBe(200);
+    await env.ROUTING.delete(SANDBOX_DRAIN_STATE_KEY);
   });
 
   test('rejects regular users, browser cookies, API tokens and scoped deploy tokens for operations', async () => {

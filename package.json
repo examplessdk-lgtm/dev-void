@@ -12,15 +12,17 @@
     "dev:docs": "vp run --filter ./docs dev",
     "dev:platform": "vp run --filter @voidcloud/platform dev",
     "fmt": "vp fmt --write .",
+    "install:void-dev": "vp run build:core && node scripts/void-dev-link.mjs install",
     "lint": "vp lint",
     "prepare": "vp config",
     "test": "vp test run",
-    "test:integration": "vp test run --project core-markdown",
-    "test:metaframeworks": "vp test run --project metaframeworks",
-    "test:pages:react-vue": "vp test run --project pages-react-vue",
-    "test:pages:svelte-solid": "vp test run --project pages-svelte-solid",
+    "test:integration": "vp test run --project parallel-integration",
+    "test:metaframeworks": "vp test run --project parallel-integration analog.test.ts astro.test.ts nuxt.test.ts react-router.test.ts sveltekit.test.ts tanstack-start.test.ts vinext-app.test.ts vinext-pages.test.ts",
+    "test:pages:react-vue": "vp test run --project parallel-integration packages/react packages/vue",
+    "test:pages:svelte-solid": "vp test run --project parallel-integration packages/svelte packages/solid",
     "test:platform": "vp test run --project 'platform-*'",
-    "test:unit": "vp test run --project unit"
+    "test:unit": "vp test run --project unit",
+    "uninstall:void-dev": "node scripts/void-dev-link.mjs uninstall"
   },
   "devDependencies": {
     "@types/cross-spawn": "^6.0.6",

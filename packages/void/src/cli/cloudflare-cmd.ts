@@ -1,40 +1,49 @@
 import { log } from '@clack/prompts';
+import { basename } from 'pathslash';
 import type { CloudflareArgs } from './cloudflare-args.ts';
 import {
   createBundledCloudflareAuthRunner,
+  cloudflareCredentialOverrides,
+  enableCloudflareKeyring,
   ensureCloudflareAuthentication,
-  parseCloudflareAccounts,
+  parseCloudflareAuthSession,
+  type CloudflareAuthSession,
 } from './cloudflare-auth.ts';
+import { readRootWranglerConfig } from './wrangler.ts';
 
 export async function runCloudflareCommand(root: string, args: CloudflareArgs): Promise<void> {
   const runWrangler = createBundledCloudflareAuthRunner(root);
   switch (args.subcommand) {
     case 'login': {
-      const session = await ensureCloudflareAuthentication({ runWrangler });
-      log.success(formatAccounts('Signed in to Cloudflare.', session.accounts));
+      const session = await ensureCloudflareAuthentication({ runWrangler, forceLogin: true });
+      log.success(formatSession(root, session));
       return;
     }
     case 'status': {
       const result = await runWrangler(['whoami', '--json'], true);
-      const accounts = result.status === 0 ? parseCloudflareAccounts(result.stdout) : null;
-      if (!accounts) {
+      const session =
+        result.status === 0 && !result.signal && !result.error
+          ? parseCloudflareAuthSession(result.stdout)
+          : null;
+      if (!session) {
         throw new Error('Not signed in to Cloudflare. Run `void cloudflare login`.');
       }
-      log.info(formatAccounts('Signed in to Cloudflare.', accounts));
+      if (session.authType === 'OAuth Token') {
+        await enableCloudflareKeyring(runWrangler);
+      }
+      log.info(formatSession(root, session));
       return;
     }
     case 'logout': {
-      const keyring = await runWrangler(['auth', 'keyring', 'enable'], true);
-      if (keyring.status !== 0) {
-        throw new Error('Could not access secure Cloudflare credential storage.');
-      }
+      await enableCloudflareKeyring(runWrangler);
       const result = await runWrangler(['logout'], true);
       if (result.status !== 0) {
         throw new Error('Could not remove the local Cloudflare browser session.');
       }
-      if (process.env.CLOUDFLARE_API_TOKEN || process.env.CF_API_TOKEN) {
+      const overrides = cloudflareCredentialOverrides();
+      if (overrides.length > 0) {
         log.warn(
-          'Removed the local Cloudflare browser session. An API token is still set in this environment.',
+          `Removed the local Cloudflare browser session. Environment credentials remain active: ${overrides.join(', ')}.`,
         );
       } else {
         log.success('Signed out of Cloudflare.');
@@ -44,12 +53,61 @@ export async function runCloudflareCommand(root: string, args: CloudflareArgs): 
   }
 }
 
-function formatAccounts(
-  heading: string,
-  accounts: ReadonlyArray<{ id: string; name: string }>,
-): string {
-  if (accounts.length === 0) {
-    return `${heading} No accessible accounts were returned.`;
+function formatSession(root: string, session: CloudflareAuthSession): string {
+  const lines = ['Signed in to Cloudflare.'];
+  if (session.email) {
+    lines.push(`User: ${session.email}`);
   }
-  return [heading, ...accounts.map((account) => `  ${account.name} (${account.id})`)].join('\n');
+  if (session.authType) {
+    lines.push(`Authentication: ${session.authType}`);
+  }
+  if (session.authType === 'OAuth Token') {
+    lines.push('Credential storage: encrypted file protected by the OS keychain.');
+  }
+  const overrides = cloudflareCredentialOverrides();
+  if (overrides.length > 0) {
+    lines.push(`Environment credentials: ${overrides.join(', ')}`);
+  }
+  lines.push('Accessible accounts:');
+  lines.push(
+    ...(session.accounts.length > 0
+      ? session.accounts.map((account) => `  ${account.name} (${account.id})`)
+      : ['  No accessible accounts were returned.']),
+  );
+
+  try {
+    const rootConfig = readRootWranglerConfig(root);
+    const configured = rootConfig?.config.account_id;
+    const environment = process.env.CLOUDFLARE_ACCOUNT_ID || process.env.CF_ACCOUNT_ID;
+    const accountId = typeof configured === 'string' && configured ? configured : environment;
+    if (accountId) {
+      const source =
+        accountId === configured
+          ? basename(rootConfig!.configPath)
+          : process.env.CLOUDFLARE_ACCOUNT_ID
+            ? 'CLOUDFLARE_ACCOUNT_ID'
+            : 'CF_ACCOUNT_ID';
+      const account = session.accounts.find((account) => account.id === accountId);
+      lines.push(
+        `Deployment account: ${account ? `${account.name} (${accountId})` : accountId} (from ${source}).`,
+      );
+      if (!account) {
+        lines.push(
+          'The pinned deployment account was not returned by this authentication check. Signing in does not change the project target.',
+        );
+      }
+      if (configured && environment && configured !== environment) {
+        lines.push(
+          'The environment account conflicts with the project configuration; resolve the mismatch before deploying.',
+        );
+      }
+    } else {
+      lines.push('Deployment account: not selected.');
+    }
+  } catch {
+    lines.push(
+      'Deployment account: unavailable because the Cloudflare configuration could not be read.',
+    );
+  }
+  return lines.join('\n');
 }

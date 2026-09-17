@@ -104,6 +104,7 @@ export function isExpiredTokenError(error: unknown): boolean {
 }
 
 export type ProjectResponse = {
+  url?: string;
   id: string;
   user_id: string;
   slug: string;
@@ -113,6 +114,7 @@ export type ProjectResponse = {
 };
 
 export type CreateProjectResponse = {
+  url?: string;
   id: string;
   slug: string;
   /**
@@ -375,6 +377,7 @@ export type GithubConnection = {
   branch: string;
   build_executor: 'container' | 'github_actions';
   workflow_path: string;
+  requires_reconnect?: boolean;
   created_at: string;
   updated_at: string;
 };

@@ -3,7 +3,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'pathslash';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 import {
-  collectPlaintextVarWarningsFromVars,
   computeInvalidEmittedKeys,
   createDefaultSecretListRunner,
   deriveSelfHostEnvContextFromVars,
@@ -95,8 +94,8 @@ const CONFIG_PATH = '/tmp/proj/wrangler.jsonc';
 // A schema requiring exactly one non-secret key, reused across the gate tests.
 const requiredStripe: SelfHostSchemaFacts = {
   hasSchema: true,
+  serverKeys: ['STRIPE_KEY'],
   requiredKeys: ['STRIPE_KEY'],
-  secretKeys: [],
 };
 
 // ---------------------------------------------------------------------------
@@ -143,7 +142,7 @@ describe('deriveSelfHostEnvContextFromVars — ground-truth context from the emi
   it('hasSchema:false yields the empty context shape (nothing to gate)', () => {
     const ctx = deriveSelfHostEnvContextFromVars(
       { STRIPE_KEY: '' },
-      { hasSchema: false, requiredKeys: [], secretKeys: [] },
+      { hasSchema: false, serverKeys: [], requiredKeys: [] },
     );
 
     expect(ctx).toEqual({
@@ -157,123 +156,17 @@ describe('deriveSelfHostEnvContextFromVars — ground-truth context from the emi
 });
 
 // ---------------------------------------------------------------------------
-// PURE unit — collectPlaintextVarWarningsFromVars (emitted vars + secret flags)
-// ---------------------------------------------------------------------------
-
-describe('collectPlaintextVarWarningsFromVars — plaintext worker-vars classification', () => {
-  it('classifies .secret()-flagged, heuristic, and benign emitted keys; sorted, keys only', () => {
-    // APP_PEPPER is `.secret()`-flagged (it does NOT trip the name heuristic on
-    // its own). API_TOKEN trips the heuristic but is not flagged. GREETING is benign.
-    const result = collectPlaintextVarWarningsFromVars(
-      { APP_PEPPER: 'super-pepper-value', API_TOKEN: 'heuristic-value', GREETING: 'hello' },
-      ['APP_PEPPER'],
-    );
-
-    // Every emitted key is counted…
-    expect(result.totalVarKeys).toBe(3);
-    // …and the warnings are sorted by key (API_TOKEN < APP_PEPPER).
-    expect(result.secretKeys).toEqual([
-      { key: 'API_TOKEN', reason: 'heuristic' },
-      { key: 'APP_PEPPER', reason: 'schema-secret' },
-    ]);
-    // Keys only — no emitted value ever rides along on the result.
-    const serialized = JSON.stringify(result);
-    expect(serialized).not.toContain('super-pepper-value');
-    expect(serialized).not.toContain('heuristic-value');
-    expect(serialized).not.toContain('hello');
-  });
-
-  it('warns nothing for a benign-only set but still counts every key', () => {
-    const result = collectPlaintextVarWarningsFromVars({ GREETING: 'hi', REGION: 'us' }, []);
-
-    expect(result.secretKeys).toEqual([]);
-    expect(result.totalVarKeys).toBe(2);
-  });
-
-  it('warns on a credential-bearing connection URL whose KEY name looks benign', () => {
-    // DATABASE_URL trips NO name heuristic (SECRET_KEY_RE has no URL/DATABASE branch)
-    // and no shared value heuristic either (HIGH_ENTROPY_RE excludes `@`), so before
-    // the value-shape check this shipped as plaintext with no warning at all.
-    const result = collectPlaintextVarWarningsFromVars(
-      { DATABASE_URL: 'postgres://admin:hunter2@db.example.com:5432/app' },
-      [],
-    );
-
-    expect(result.secretKeys).toEqual([{ key: 'DATABASE_URL', reason: 'value-shape' }]);
-    // The value decided the classification but must never ride along on the result.
-    const serialized = JSON.stringify(result);
-    expect(serialized).not.toContain('hunter2');
-    expect(serialized).not.toContain('db.example.com');
-    expect(serialized).not.toContain('admin');
-  });
-
-  it('flags the credential URL shape across schemes, but not a benign URL value', () => {
-    const result = collectPlaintextVarWarningsFromVars(
-      {
-        // Credential-bearing → flagged regardless of scheme. Every key name here is
-        // deliberately one the NAME heuristic does NOT match, so only the value can
-        // have caused the warning.
-        MYSQL_ENDPOINT: 'mysql://root:s3cr3t@10.0.0.4/prod',
-        REDIS_ENDPOINT: 'rediss://default:abc123@cache.internal:6379',
-        // Benign URLs → NOT flagged: no userinfo, or userinfo with no password.
-        PUBLIC_SITE: 'https://example.com/a/b?c=d',
-        USERINFO_ONLY: 'https://someuser@example.com/path',
-        NO_USERINFO: 'postgres://db.example.com:5432/app',
-        // A bare value containing an @ is not a URL at all.
-        CONTACT: 'ops@example.com',
-      },
-      [],
-    );
-
-    expect(result.secretKeys).toEqual([
-      { key: 'MYSQL_ENDPOINT', reason: 'value-shape' },
-      { key: 'REDIS_ENDPOINT', reason: 'value-shape' },
-    ]);
-    expect(result.totalVarKeys).toBe(6);
-  });
-
-  it('keeps the KEY-name heuristic and .secret() flags winning over the value shape', () => {
-    // Regression guard: the value-shape check is additive — an existing secret-looking
-    // KEY is still reported as `heuristic`, and a flagged key still as `schema-secret`,
-    // even when its value ALSO happens to be a credential URL.
-    const result = collectPlaintextVarWarningsFromVars(
-      {
-        API_TOKEN: 'plain-token-value',
-        APP_PEPPER: 'postgres://u:p@h/db',
-        DB_URI: 'postgres://u:p@h/db',
-      },
-      ['APP_PEPPER'],
-    );
-
-    expect(result.secretKeys).toEqual([
-      { key: 'API_TOKEN', reason: 'heuristic' },
-      { key: 'APP_PEPPER', reason: 'schema-secret' },
-      { key: 'DB_URI', reason: 'value-shape' },
-    ]);
-  });
-
-  it('ignores non-string emitted values without throwing', () => {
-    const result = collectPlaintextVarWarningsFromVars(
-      { PORT: 8080, FLAG: true, NOTHING: null, NESTED: { url: 'postgres://u:p@h/db' } },
-      [],
-    );
-
-    expect(result.secretKeys).toEqual([]);
-    expect(result.totalVarKeys).toBe(4);
-  });
-});
-
-// ---------------------------------------------------------------------------
 // deriveSelfHostSchemaFacts — env-insensitive schema facts (imports env.ts)
 // ---------------------------------------------------------------------------
 
 describe('deriveSelfHostSchemaFacts — env-insensitive schema facts', () => {
-  it('derives required key names + .secret() flags; a `.default()` key is NOT required', async () => {
+  it('derives server and required key names while excluding client keys', async () => {
     const root = createTempProject();
     defineEnv({
-      STRIPE_KEY: string().secret(),
+      STRIPE_KEY: string(),
       API_URL: string(),
       GREETING: string().default('hi'),
+      VITE_TITLE: string(),
     });
 
     const facts = await deriveSelfHostSchemaFacts(root);
@@ -282,8 +175,7 @@ describe('deriveSelfHostSchemaFacts — env-insensitive schema facts', () => {
     // STRIPE_KEY + API_URL reject `undefined` → required; GREETING has a default → not required.
     expect([...facts.requiredKeys].sort()).toEqual(['API_URL', 'STRIPE_KEY']);
     expect(facts.requiredKeys).not.toContain('GREETING');
-    // Only the explicitly `.secret()`-flagged key is a schema secret.
-    expect(facts.secretKeys).toEqual(['STRIPE_KEY']);
+    expect([...facts.serverKeys].sort()).toEqual(['API_URL', 'GREETING', 'STRIPE_KEY']);
   });
 
   it('a project with no env.ts has no schema facts', async () => {
@@ -291,7 +183,7 @@ describe('deriveSelfHostSchemaFacts — env-insensitive schema facts', () => {
 
     const facts = await deriveSelfHostSchemaFacts(root);
 
-    expect(facts).toEqual({ hasSchema: false, requiredKeys: [], secretKeys: [] });
+    expect(facts).toEqual({ hasSchema: false, serverKeys: [], requiredKeys: [] });
   });
 
   // --- schema load / validator throws never leak a value, even under VOID_ENV_UNMASK ---
@@ -593,7 +485,7 @@ describe('dischargeSelfHostEnvContext — ground-truth secret gate', () => {
     // BEFORE any remote apply: a remote secret cannot rescue an invalid SHIPPED value.
     const ctx = deriveSelfHostEnvContextFromVars(
       {},
-      { hasSchema: true, requiredKeys: [], secretKeys: [] },
+      { hasSchema: true, serverKeys: [], requiredKeys: [] },
     );
     ctx.invalidKeys = ['OPT_URL'];
     const { run, calls } = stubRunner(okList(['OPT_URL']));
@@ -618,7 +510,7 @@ describe('dischargeSelfHostEnvContext — ground-truth secret gate', () => {
     const root = createTempProject({ withEnvTs: false });
     const ctx = deriveSelfHostEnvContextFromVars(
       {},
-      { hasSchema: false, requiredKeys: [], secretKeys: [] },
+      { hasSchema: false, serverKeys: [], requiredKeys: [] },
     );
     const { run, calls } = stubRunner(okList([]));
 
@@ -764,7 +656,11 @@ describe('dischargeSelfHostEnvContext — ground-truth secret gate', () => {
       const root = createTempProject({ withEnvTs: false });
       const ctx = deriveSelfHostEnvContextFromVars(
         {},
-        { hasSchema: true, requiredKeys: ['FOO', 'API_TOKEN'], secretKeys: [] },
+        {
+          hasSchema: true,
+          serverKeys: ['FOO', 'API_TOKEN'],
+          requiredKeys: ['FOO', 'API_TOKEN'],
+        },
       );
       const { run } = stubRunner({ stdout: '', stderr: WORKER_NOT_FOUND_STDERR, status: 1 });
 
@@ -781,8 +677,8 @@ describe('dischargeSelfHostEnvContext — ground-truth secret gate', () => {
       const fde = error as SelfHostFirstDeployError;
       expect(fde.workerNotFound).toBe(true);
       expect([...fde.missingKeys].sort()).toEqual(['API_TOKEN', 'FOO']);
-      expect(fde.message).toContain('wrangler secret put FOO');
-      expect(fde.message).toContain('wrangler secret put API_TOKEN');
+      expect(fde.message).toContain('void secret put FOO');
+      expect(fde.message).toContain('void secret put API_TOKEN');
       // Still a fail-closed list error at heart (subclass).
       expect(error).toBeInstanceOf(SelfHostSecretListError);
     });
@@ -1005,7 +901,11 @@ describe('dischargeSelfHostEnvContext — ground-truth secret gate', () => {
       const root = createTempProject({ withEnvTs: false });
       const ctx = deriveSelfHostEnvContextFromVars(
         {},
-        { hasSchema: true, requiredKeys: ['FOO', 'API_TOKEN'], secretKeys: [] },
+        {
+          hasSchema: true,
+          serverKeys: ['FOO', 'API_TOKEN'],
+          requiredKeys: ['FOO', 'API_TOKEN'],
+        },
       );
       // The worker-not-found signal AND a sentinel share the child's stderr: the
       // signal must be read (classification), the sentinel must not leak.
@@ -1030,7 +930,7 @@ describe('dischargeSelfHostEnvContext — ground-truth secret gate', () => {
       expect(error).toBeInstanceOf(SelfHostFirstDeployError);
       expect(error.workerNotFound).toBe(true);
       expect([...error.missingKeys].sort()).toEqual(['API_TOKEN', 'FOO']);
-      expect(error.message).toContain('wrangler secret put FOO');
+      expect(error.message).toContain('void secret put FOO');
       expect(error.message).not.toContain(SENTINEL);
       expect(fullySerialize(error)).not.toContain(SENTINEL);
     });

@@ -7,9 +7,10 @@ import {
   type PlatformInstallationManifest,
 } from '@void/platform';
 import { getPlatformRuntimeDirectory, resolvePlatformRuntime } from '@void/platform/installer';
-import { beforeEach, describe, expect, it, vi } from 'vite-plus/test';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 
 const state = vi.hoisted(() => ({
+  createSecrets: vi.fn(),
   events: [] as Array<string>,
   manifest: undefined as PlatformInstallationManifest | undefined,
   prepareDatabase: vi.fn(),
@@ -26,6 +27,7 @@ vi.mock('@clack/prompts', () => ({
 }));
 
 vi.mock('../../src/cli/platform-auth.ts', () => ({
+  assertPlatformOperatorCredentialCanApplyPlan: vi.fn(),
   resolvePlatformCloudflareCredential: async () => ({ token: 'token' }),
 }));
 
@@ -83,7 +85,7 @@ vi.mock('../../src/cli/platform-installer.ts', async (importOriginal) => {
       );
       return release;
     }),
-    createPlatformInstallationSecrets: vi.fn(() => ({})),
+    createPlatformInstallationSecrets: state.createSecrets,
     installPlatform: vi.fn(async (...args: Parameters<typeof actual.installPlatform>) => {
       const existing = args[2];
       const dependencies = args[3];
@@ -102,7 +104,12 @@ vi.mock('../../src/cli/platform-installer.ts', async (importOriginal) => {
       );
       state.events.push('installer-finish');
       await borrowed();
-      return { manifest: existing!, waitingForDns: false, zoneNameServers: [] };
+      return {
+        manifest: existing!,
+        waitingForDns: false,
+        waitingForSandboxDrain: false,
+        zoneNameServers: [],
+      };
     }),
     loadPlatformRuntime: vi.fn(() => state.runtime),
     resolveBootstrapGitHubId: vi.fn(),
@@ -158,6 +165,7 @@ import { runInstalledPlatformCommand } from '../../src/cli/platform-management.t
 
 describe('installed platform upgrade', () => {
   beforeEach(() => {
+    state.createSecrets.mockReset().mockReturnValue({});
     state.events.length = 0;
     state.prepareDatabase.mockReset().mockImplementation(async (_directory, database) => {
       state.events.push(`prepare:${database.schemaDigest}`);
@@ -215,6 +223,11 @@ describe('installed platform upgrade', () => {
     state.manifest = manifest;
   });
 
+  afterEach(() => {
+    delete process.env.VOID_PLATFORM_PROJECT_SECRET_ACTIVE_KEY_VERSION;
+    delete process.env.VOID_PLATFORM_PROJECT_SECRET_KEYS_JSON;
+  });
+
   it('borrows database preparation from the held lifecycle lock', async () => {
     await runInstalledPlatformCommand({
       plan: false,
@@ -237,6 +250,30 @@ describe('installed platform upgrade', () => {
       'outer-release',
       'local-release',
     ]);
+  });
+
+  it('forwards an explicitly restored complete project-secret keyring during repair', async () => {
+    const keysJson = JSON.stringify({
+      v1: Buffer.alloc(32, 1).toString('base64'),
+      v2: Buffer.alloc(32, 2).toString('base64'),
+    });
+    process.env.VOID_PLATFORM_PROJECT_SECRET_ACTIVE_KEY_VERSION = 'v2';
+    process.env.VOID_PLATFORM_PROJECT_SECRET_KEYS_JSON = keysJson;
+
+    await runInstalledPlatformCommand({
+      plan: false,
+      runtime: '',
+      selector: state.manifest!.id,
+      subcommand: 'repair',
+      yes: true,
+    });
+
+    expect(state.createSecrets).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        projectSecretActiveKeyVersion: 'v2',
+        projectSecretKeysJson: keysJson,
+      }),
+    );
   });
 
   it('releases the held lifecycle lock when database preparation fails', async () => {

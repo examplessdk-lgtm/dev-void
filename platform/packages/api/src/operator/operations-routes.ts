@@ -8,6 +8,7 @@ import {
   listOperatorDeployments,
   requestDeploymentCancellation,
 } from './deployment-operations.ts';
+import { drainManagedSandboxes } from './sandbox-operations.ts';
 import {
   backfillPlatformQueueTokens,
   cliVersionStats,
@@ -93,6 +94,17 @@ operationsRoutes.post('/system/backfill-queue-tokens', async (context) => {
       : { ...result, ok: result.errored === 0, partial: result.errored > 0 && result.updated > 0 },
     result.errored > 0 && !dryRun(body) ? 207 : 200,
   );
+});
+operationsRoutes.post('/system/sandbox-drain', async (context) => {
+  const body = await readBody(context);
+  const preview = dryRun(body);
+  const cursor = body.cursor;
+  if (cursor !== undefined && typeof cursor !== 'string') {
+    throw new OperatorError(400, 'cursor must be a string.', 'invalid_argument');
+  }
+  const result = await drainManagedSandboxes(context.get('db'), context.env, preview, cursor);
+  const incomplete = !preview && (!('complete' in result) || !result.complete);
+  return context.json(result, incomplete ? 207 : 200);
 });
 
 operationsRoutes.get('/workers', async (context) =>

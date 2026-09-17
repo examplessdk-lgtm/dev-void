@@ -9,9 +9,23 @@ import {
   SandboxConcurrencyCounter,
   STALE_MS,
   RECONCILE_INTERVAL_MS,
+  type SandboxUsageAttribution,
 } from '../../src/sandbox-concurrency-counter.ts';
+import { verifyUsageEnvelope } from '../../src/usage-auth.ts';
+import type { UsageEvent } from '../../src/usage-counter.ts';
 
-type StoredEntry = { acquiredAt: number };
+const SIGNING_KEY = 'sandbox-counter-test-key';
+const ATTRIBUTION: SandboxUsageAttribution = {
+  projectId: 'project-1',
+  userId: 'user-1',
+  slug: 'project-one',
+};
+
+type StoredEntry = {
+  acquiredAt: number;
+  meteredThrough?: number;
+  attribution?: SandboxUsageAttribution;
+};
 
 function makeFakeStorage() {
   const data = new Map<string, unknown>();
@@ -46,20 +60,43 @@ function makeFakeStorage() {
   };
 }
 
-function makeCounter() {
+function makeCounter(options?: { send?: (message: unknown) => Promise<void> }) {
   const storage = makeFakeStorage();
-  const env = {} as never;
+  const sent: Array<unknown> = [];
+  const env = {
+    JWT_SECRET: 'jwt-secret',
+    ROUTING: {
+      get: async () => SIGNING_KEY,
+      put: async () => {},
+    },
+    USAGE_EVENTS_QUEUE: {
+      send: async (message: unknown) => {
+        if (options?.send) {
+          await options.send(message);
+        }
+        sent.push(message);
+      },
+    },
+  } as never;
   const ctx = { storage } as never;
   const counter = new SandboxConcurrencyCounter(ctx, env);
   // Mocked DurableObject base doesn't run super(); assign manually so
   // `this.ctx` / `this.env` resolve.
   (counter as unknown as { ctx: unknown; env: unknown }).ctx = ctx;
   (counter as unknown as { ctx: unknown; env: unknown }).env = env;
-  return { counter, storage };
+  return { counter, storage, sent };
 }
 
 function entries(storage: ReturnType<typeof makeFakeStorage>): Record<string, StoredEntry> {
   return (storage.data.get('entries') as Record<string, StoredEntry>) ?? {};
+}
+
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
 }
 
 describe('SandboxConcurrencyCounter.acquire', () => {
@@ -95,6 +132,32 @@ describe('SandboxConcurrencyCounter.acquire', () => {
       // A different id should now be rejected because limit is still 1.
       const r3 = await counter.acquire('sb-2', 1);
       expect(r3).toEqual({ ok: false, reason: 'concurrency' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('publishes server-clock elapsed usage when an existing lease is acquired again', async () => {
+    vi.useFakeTimers();
+    const t0 = 1_100_000_000_000;
+    vi.setSystemTime(t0);
+    try {
+      const { counter, sent } = makeCounter();
+      await counter.acquire('lease-1', 2, ATTRIBUTION);
+      vi.setSystemTime(t0 + 30_500);
+      await counter.acquire('lease-1', 2, ATTRIBUTION);
+
+      expect(sent).toHaveLength(1);
+      const envelope = await verifyUsageEnvelope<UsageEvent>(sent[0], SIGNING_KEY);
+      expect(envelope?.source).toBe('sandbox-counter');
+      expect(envelope?.event).toMatchObject({
+        ...ATTRIBUTION,
+        requests: 0,
+        responseBytes: 0,
+        sandboxInstanceId: 'lease-1',
+        sandboxMeteredFrom: t0,
+        sandboxMeteredThrough: t0 + 30_000,
+      });
     } finally {
       vi.useRealTimers();
     }
@@ -164,6 +227,63 @@ describe('SandboxConcurrencyCounter.release', () => {
     await counter.release('sb-1');
     expect(await counter.acquire('sb-2', 1)).toEqual({ ok: true });
   });
+
+  it('publishes final server-clock usage before removing the lease', async () => {
+    vi.useFakeTimers();
+    const t0 = 1_200_000_000_000;
+    vi.setSystemTime(t0);
+    try {
+      const { counter, storage, sent } = makeCounter();
+      await counter.acquire('lease-release', 1, ATTRIBUTION);
+      vi.setSystemTime(t0 + 12_000);
+      await counter.release('lease-release', ATTRIBUTION);
+
+      expect(sent).toHaveLength(1);
+      expect(entries(storage)).toEqual({});
+      const envelope = await verifyUsageEnvelope<UsageEvent>(sent[0], SIGNING_KEY);
+      expect(envelope?.event).toMatchObject({
+        sandboxMeteredFrom: t0,
+        sandboxMeteredThrough: t0 + 12_000,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('retains the lease when publishing fails so later release can retry', async () => {
+    vi.useFakeTimers();
+    const t0 = 1_300_000_000_000;
+    vi.setSystemTime(t0);
+    let fail = true;
+    try {
+      const { counter, storage, sent } = makeCounter({
+        send: async () => {
+          if (fail) {
+            fail = false;
+            throw new Error('queue unavailable');
+          }
+        },
+      });
+      await counter.acquire('lease-retry', 1, ATTRIBUTION);
+      vi.setSystemTime(t0 + 10_000);
+      await expect(counter.release('lease-retry', ATTRIBUTION)).rejects.toThrow(
+        'queue unavailable',
+      );
+      expect(entries(storage)['lease-retry']).toBeDefined();
+
+      vi.setSystemTime(t0 + 15_000);
+      await counter.release('lease-retry', ATTRIBUTION);
+      expect(sent).toHaveLength(1);
+      expect(entries(storage)).toEqual({});
+      const envelope = await verifyUsageEnvelope<UsageEvent>(sent[0], SIGNING_KEY);
+      expect(envelope?.event).toMatchObject({
+        sandboxMeteredFrom: t0,
+        sandboxMeteredThrough: t0 + 15_000,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe('SandboxConcurrencyCounter.refresh', () => {
@@ -188,6 +308,23 @@ describe('SandboxConcurrencyCounter.refresh', () => {
     expect(entries(storage)['sb-live']?.acquiredAt).toBe(t0 + STALE_MS / 2);
     // Slot count unchanged — refresh never adds entries.
     expect(Object.keys(entries(storage))).toEqual(['sb-live']);
+  });
+
+  it('publishes heartbeat usage from the server clock', async () => {
+    const t0 = 4_100_000_000_000;
+    vi.setSystemTime(t0);
+    const { counter, sent } = makeCounter();
+    await counter.acquire('lease-heartbeat', 10, ATTRIBUTION);
+    vi.setSystemTime(t0 + 5 * 60_000);
+
+    await counter.refresh('lease-heartbeat', ATTRIBUTION);
+
+    expect(sent).toHaveLength(1);
+    const envelope = await verifyUsageEnvelope<UsageEvent>(sent[0], SIGNING_KEY);
+    expect(envelope?.event).toMatchObject({
+      sandboxMeteredFrom: t0,
+      sandboxMeteredThrough: t0 + 5 * 60_000,
+    });
   });
 
   it('returns not_held when the slot is missing (already swept or never acquired)', async () => {
@@ -268,5 +405,187 @@ describe('SandboxConcurrencyCounter.alarm', () => {
     // No new alarm scheduled — DO is idle, leave it cold.
     expect(storage.setAlarmCalls.length).toBe(setAlarmCallsBeforeAlarm);
     expect(storage.getAlarmRef()).toBe(null);
+  });
+});
+
+describe('SandboxConcurrencyCounter operation ordering and persistence', () => {
+  const t0 = 1_800_000_000_000;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(t0);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('finishes a blocked heartbeat before release and a distinct acquire claim the slot', async () => {
+    const publishing = deferred();
+    const resume = deferred();
+    const { counter, storage, sent } = makeCounter({
+      send: async () => {
+        publishing.resolve();
+        await resume.promise;
+      },
+    });
+    await counter.acquire('lease-1', 1, ATTRIBUTION);
+    vi.setSystemTime(t0 + 30_000);
+    const heartbeat = counter.refresh('lease-1', ATTRIBUTION);
+    await publishing.promise;
+
+    vi.setSystemTime(t0 + 45_000);
+    const release = counter.release('lease-1', ATTRIBUTION);
+    const acquire = counter.acquire('lease-2', 1, ATTRIBUTION);
+    resume.resolve();
+    expect(await heartbeat).toEqual({ ok: true });
+    await release;
+    expect(await acquire).toEqual({ ok: true });
+
+    expect(Object.keys(entries(storage))).toEqual(['lease-2']);
+    const frames = await Promise.all(
+      sent.map((message) => verifyUsageEnvelope<UsageEvent>(message, SIGNING_KEY)),
+    );
+    expect(frames.map((frame) => frame?.event)).toMatchObject([
+      { sandboxMeteredFrom: t0, sandboxMeteredThrough: t0 + 30_000 },
+      { sandboxMeteredFrom: t0, sandboxMeteredThrough: t0 + 45_000 },
+    ]);
+  });
+
+  it('finishes a blocked stale sweep before a heartbeat and acquire inspect capacity', async () => {
+    const publishing = deferred();
+    const resume = deferred();
+    const { counter, storage, sent } = makeCounter({
+      send: async () => {
+        publishing.resolve();
+        await resume.promise;
+      },
+    });
+    await counter.acquire('lease-stale', 1, ATTRIBUTION);
+    vi.setSystemTime(t0 + STALE_MS + 1);
+    storage.fireAlarm();
+    const sweep = counter.alarm();
+    await publishing.promise;
+    const heartbeat = counter.refresh('lease-stale', ATTRIBUTION);
+    const acquire = counter.acquire('lease-new', 1, ATTRIBUTION);
+    resume.resolve();
+    await sweep;
+    expect(await heartbeat).toEqual({ ok: false, reason: 'not_held' });
+    expect(await acquire).toEqual({ ok: true });
+    expect(Object.keys(entries(storage))).toEqual(['lease-new']);
+    expect(sent).toHaveLength(1);
+    expect((await verifyUsageEnvelope<UsageEvent>(sent[0], SIGNING_KEY))?.event).toMatchObject({
+      sandboxMeteredFrom: t0,
+      sandboxMeteredThrough: t0 + STALE_MS,
+    });
+  });
+
+  it('keeps capacity held after publish succeeds but the release storage put fails', async () => {
+    const { counter, storage, sent } = makeCounter();
+    await counter.acquire('lease-retry', 1, ATTRIBUTION);
+    vi.setSystemTime(t0 + 10_000);
+    vi.spyOn(storage, 'put').mockRejectedValueOnce(new Error('storage unavailable'));
+    await expect(counter.release('lease-retry')).rejects.toThrow('storage unavailable');
+    expect(await counter.acquire('lease-new', 1, ATTRIBUTION)).toEqual({
+      ok: false,
+      reason: 'concurrency',
+    });
+
+    vi.setSystemTime(t0 + 15_000);
+    await counter.release('lease-retry');
+    expect(entries(storage)).toEqual({});
+    const frames = await Promise.all(
+      sent.map((message) => verifyUsageEnvelope<UsageEvent>(message, SIGNING_KEY)),
+    );
+    expect(frames.map((frame) => frame?.event)).toMatchObject([
+      { sandboxMeteredFrom: t0, sandboxMeteredThrough: t0 + 10_000 },
+      { sandboxMeteredFrom: t0, sandboxMeteredThrough: t0 + 15_000 },
+    ]);
+  });
+
+  it('does not cache a slot whose initial storage put failed', async () => {
+    const { counter, storage } = makeCounter();
+    vi.spyOn(storage, 'put').mockRejectedValueOnce(new Error('storage unavailable'));
+    await expect(counter.acquire('lease-failed', 1, ATTRIBUTION)).rejects.toThrow(
+      'storage unavailable',
+    );
+    expect(await counter.acquire('lease-new', 1, ATTRIBUTION)).toEqual({ ok: true });
+    expect(Object.keys(entries(storage))).toEqual(['lease-new']);
+  });
+
+  it('retries every stale lease when a later publish fails before the sweep is saved', async () => {
+    let sends = 0;
+    const { counter, storage, sent } = makeCounter({
+      send: async () => {
+        if (++sends === 2) {
+          throw new Error('queue unavailable');
+        }
+      },
+    });
+    await counter.acquire('lease-1', 2, ATTRIBUTION);
+    await counter.acquire('lease-2', 2, ATTRIBUTION);
+    vi.setSystemTime(t0 + STALE_MS + 1);
+    await expect(counter.alarm()).rejects.toThrow('queue unavailable');
+    expect(Object.keys(entries(storage))).toEqual(['lease-1', 'lease-2']);
+
+    await counter.alarm();
+    expect(entries(storage)).toEqual({});
+    const frames = await Promise.all(
+      sent.map((message) => verifyUsageEnvelope<UsageEvent>(message, SIGNING_KEY)),
+    );
+    expect(frames.map((frame) => frame?.event.sandboxInstanceId)).toEqual([
+      'lease-1',
+      'lease-1',
+      'lease-2',
+    ]);
+    expect(frames[0]?.eventId).toBe(frames[1]?.eventId);
+  });
+
+  it('starts a fresh cumulative generation when the same instance reacquires after idle time', async () => {
+    const { counter, sent } = makeCounter();
+    await counter.acquire('lease-1', 1, ATTRIBUTION);
+    vi.setSystemTime(t0 + 10_000);
+    await counter.release('lease-1');
+    vi.setSystemTime(t0 + 60_000);
+    await counter.acquire('lease-1', 1, ATTRIBUTION);
+    vi.setSystemTime(t0 + 80_000);
+    await counter.release('lease-1');
+    const frames = await Promise.all(
+      sent.map((message) => verifyUsageEnvelope<UsageEvent>(message, SIGNING_KEY)),
+    );
+    expect(frames.map((frame) => frame?.event)).toMatchObject([
+      { sandboxMeteredFrom: t0, sandboxMeteredThrough: t0 + 10_000 },
+      { sandboxMeteredFrom: t0 + 60_000, sandboxMeteredThrough: t0 + 80_000 },
+    ]);
+  });
+
+  it('preserves the cumulative generation start after a cold load', async () => {
+    const first = makeCounter();
+    await first.counter.acquire('lease-1', 1, ATTRIBUTION);
+    vi.setSystemTime(t0 + 10_000);
+    await first.counter.refresh('lease-1');
+
+    const next = makeCounter();
+    next.storage.data.set('entries', structuredClone(first.storage.data.get('entries')));
+    vi.setSystemTime(t0 + 25_000);
+    await next.counter.release('lease-1');
+    expect((await verifyUsageEnvelope<UsageEvent>(next.sent[0], SIGNING_KEY))?.event).toMatchObject(
+      {
+        sandboxMeteredFrom: t0,
+        sandboxMeteredThrough: t0 + 25_000,
+      },
+    );
+  });
+
+  it('adopts a pre-metering lease at the first trusted refresh without billing its unknown history', async () => {
+    const { counter, storage, sent } = makeCounter();
+    storage.data.set('entries', { 'lease-old': { acquiredAt: t0 - 30_000 } });
+    await counter.refresh('lease-old', ATTRIBUTION);
+    expect(sent).toHaveLength(0);
+    vi.setSystemTime(t0 + 10_000);
+    await counter.release('lease-old');
+    expect((await verifyUsageEnvelope<UsageEvent>(sent[0], SIGNING_KEY))?.event).toMatchObject({
+      sandboxMeteredFrom: t0,
+      sandboxMeteredThrough: t0 + 10_000,
+    });
   });
 });

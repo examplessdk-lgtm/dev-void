@@ -2,7 +2,7 @@ import type { ProxyClient } from './client.ts';
 
 type ProxyPreparedStatement = D1PreparedStatement & {
   _sql: string;
-  _params: Array<unknown>;
+  readonly _params: Array<unknown>;
 };
 
 /**
@@ -63,14 +63,14 @@ export class ProxyD1PreparedStatement {
     private client: ProxyClient,
     private binding: string,
     sql: string,
+    params: Array<unknown> = [],
   ) {
     this._sql = sql;
-    this._params = [];
+    this._params = params;
   }
 
   bind(...values: Array<unknown>): ProxyD1PreparedStatement {
-    this._params = values;
-    return this;
+    return new ProxyD1PreparedStatement(this.client, this.binding, this._sql, values);
   }
 
   async all<T = Record<string, unknown>>(): Promise<D1Result<T>> {

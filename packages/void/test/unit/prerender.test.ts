@@ -112,7 +112,7 @@ describe('collectPrerenderWorkerModules', () => {
 });
 
 describe('collectPrerenderPathsNode', () => {
-  it('scrubs orchestrator credentials before importing the built app', async () => {
+  it('scrubs orchestrator credentials and ignores production dotenv before importing the built app', async () => {
     const root = createTempWorkerDir();
     const ssrDir = join(root, 'dist', 'ssr');
     mkdirSync(ssrDir, { recursive: true });
@@ -149,7 +149,7 @@ export default {
       process.env[name] = `secret-${name}`;
     }
     try {
-      await expect(collectPrerenderPathsNode({ root, ssrDir })).resolves.toEqual(['/safe']);
+      await expect(collectPrerenderPathsNode({ root, ssrDir })).resolves.toEqual(['/safe-missing']);
     } finally {
       for (const [name, value] of previous) {
         if (value === undefined) {
@@ -230,7 +230,7 @@ describe('buildPrerenderBindings', () => {
       wranglerVars: {},
       env: {},
       voidToken: null,
-      voidProjectId: undefined,
+      voidProjectId: 'proj',
       voidStaging: false,
       remoteMode: false,
     });

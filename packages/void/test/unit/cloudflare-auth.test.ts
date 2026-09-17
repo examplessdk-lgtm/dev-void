@@ -4,7 +4,7 @@ import {
   cloudflareAuthCommandEnvironment,
   cloudflareAuthEnvironment,
   ensureCloudflareAuthentication,
-  parseCloudflareAccounts,
+  parseCloudflareAuthSession,
 } from '../../src/cli/cloudflare-auth.ts';
 
 const SESSION = JSON.stringify({
@@ -86,14 +86,14 @@ describe('Cloudflare authentication', () => {
 
   it('parses only valid account records', () => {
     expect(
-      parseCloudflareAccounts(
+      parseCloudflareAuthSession(
         JSON.stringify({
           loggedIn: true,
           accounts: [{ id: 'one', name: 'One' }, { id: '', name: 'Invalid' }, null],
         }),
-      ),
+      )?.accounts,
     ).toEqual([{ id: 'one', name: 'One' }]);
-    expect(parseCloudflareAccounts('not json')).toBeNull();
+    expect(parseCloudflareAuthSession('not json')).toBeNull();
   });
 
   it('forces keyring storage and removes unrelated sensitive values', () => {

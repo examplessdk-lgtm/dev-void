@@ -63,6 +63,11 @@ state, `errors` for field validation, and `error` for non-validation call-site
 failures. The submit helpers return promises so boundary-class failures can
 propagate through Vue async error handling or explicit `catch` handlers.
 
+GET navigation creates a fresh page instance, so forms receive the destination
+record's URL and defaults. Layouts remain mounted. Mutations and
+`router.refresh()` preserve page state by default; use `preserveState` to override
+this behavior when navigating within the same record.
+
 ```vue
 <script setup lang="ts">
 import { useForm } from '@void/vue';
@@ -111,8 +116,10 @@ request.
 
 ## Tests
 
-- `test/unit/use-form.test.ts`
-- `test/unit/prefetch.test.ts`
+Shared prefetch-cache tests live in `packages/void/test/unit/prefetch.test.ts`.
+
 - `test/integration/vue-pages-client.test.ts`
 
 Cross-package SSR/protocol coverage for Vue pages mode also lives in `packages/void/test/integration/*`.
+
+The [shared client](../../test/pages-client-contract.ts) and [island](../../test/pages-island-contract.ts) contracts run against this adapter in both dev and preview. Shared form equality is tested directly in [Void](../void/test/unit/form-value-equality.test.ts); tests do not copy the hook implementation.

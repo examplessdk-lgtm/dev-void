@@ -3,7 +3,7 @@ import adminPlatform from '../../src/admin/routes/platform.tsx';
 import { getPlatformCapabilities } from '../../src/capabilities.ts';
 
 describe('platform capabilities', () => {
-  it('keeps all hosted Void Cloud capabilities enabled when configuration is absent', () => {
+  it('keeps managed Sandbox disabled when hosted configuration is absent', () => {
     expect(getPlatformCapabilities({})).toEqual({
       ai: true,
       customDomains: true,
@@ -12,8 +12,25 @@ describe('platform capabilities', () => {
       githubOAuth: true,
       googleOAuth: true,
       managedBuilds: true,
-      sandbox: true,
+      sandbox: false,
     });
+  });
+
+  it('overrides a stale configured sandbox capability to disabled', () => {
+    expect(
+      getPlatformCapabilities({
+        PLATFORM_CAPABILITIES: JSON.stringify({
+          ai: true,
+          customDomains: true,
+          email: true,
+          githubActions: true,
+          githubOAuth: true,
+          googleOAuth: true,
+          managedBuilds: true,
+          sandbox: true,
+        }),
+      }).sandbox,
+    ).toBe(false);
   });
 
   it('rejects incomplete capability configuration', () => {

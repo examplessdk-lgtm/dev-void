@@ -1,7 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 import type { Env } from '../../src/env.ts';
 import app from '../../src/index.ts';
-import { isrEdgeCacheKey, packIsrValue } from '../../src/isr.ts';
+import {
+  SHARED_CACHE_POLICY_VERSION,
+  isrEdgeCacheKey,
+  markSharedCachePolicy,
+  packIsrValue,
+} from '../../src/isr.ts';
 
 const edgeCacheStore = new Map<string, Response>();
 
@@ -66,6 +71,7 @@ function delayedStubBodyResponse(delayMs: number): Response {
 function cachedStubResponse(cacheControl: string): Response {
   const response = stubResponse();
   response.headers.set('Cache-Control', cacheControl);
+  markSharedCachePolicy(response.headers);
   return response;
 }
 
@@ -96,7 +102,7 @@ type Harness = {
   manifestGet?: (key: string) => Promise<string | null>;
   isrCacheEntry?: {
     value: ArrayBuffer;
-    metadata: { s: number; c: number; t: number };
+    metadata: { s: number; c: number; t: number; p: typeof SHARED_CACHE_POLICY_VERSION };
   };
   dispatchTimeoutMs?: string;
   workerResponse: Response | ((req: Request) => Response | Promise<Response>);
@@ -567,8 +573,10 @@ describe('WfP asset fallback on CF stub', () => {
     expect(workerFetch).toHaveBeenCalledOnce();
     expect(res.status).toBe(503);
     expect(res.headers.get('x-void-timeout')).toBe('dispatch');
-    expect(usageSend).toHaveBeenCalledWith(expect.objectContaining({ status: 503 }));
-    expect(usageSend.mock.calls[0]?.[0]).not.toHaveProperty('failureKind');
+    expect(usageSend).toHaveBeenCalledWith(
+      expect.objectContaining({ event: expect.objectContaining({ status: 503 }) }),
+    );
+    expect(usageSend.mock.calls[0]?.[0].event).not.toHaveProperty('failureKind');
     expect(edgeCacheStore.size).toBe(0);
   });
 
@@ -890,10 +898,9 @@ describe('WfP asset fallback on CF stub', () => {
   it('repairs and purges a pre-existing ISR edge poison entry', async () => {
     const request = new Request('https://my-app.void.app/page');
     const cacheKey = isrEdgeCacheKey(request, '/page', 'v1');
-    edgeCacheStore.set(
-      cacheKey.url,
-      cachedStubResponse('public, s-maxage=60, max-age=0, must-revalidate'),
-    );
+    const cachedStub = cachedStubResponse('public, s-maxage=60, max-age=0, must-revalidate');
+    markSharedCachePolicy(cachedStub.headers);
+    edgeCacheStore.set(cacheKey.url, cachedStub);
     const html = '<html>mirror</html>';
     const { env, workerFetch } = createEnv({
       routing: {
@@ -952,7 +959,7 @@ describe('WfP asset fallback on CF stub', () => {
           },
           stubBytes.buffer as ArrayBuffer,
         ),
-        metadata: { s: 200, c: Date.now(), t: 60 },
+        metadata: { s: 200, c: Date.now(), t: 60, p: SHARED_CACHE_POLICY_VERSION },
       },
       workerResponse: new Response('should not run'),
     });

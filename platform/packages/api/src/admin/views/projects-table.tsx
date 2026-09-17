@@ -1,6 +1,7 @@
 import type { Project } from '../../types.ts';
 
 export type ProjectRow = Project & {
+  url?: string;
   owner_login: string | null;
   last_deploy: string | null;
   last_deploy_id: string | null;
@@ -35,11 +36,11 @@ export function ProjectsTable({
               </td>
               <td>
                 <a
-                  href={`https://${p.slug}.${siteDomain}`}
+                  href={p.url ?? `https://${p.slug}.${siteDomain}`}
                   target="_blank"
                   rel="noopener noreferrer"
                 >
-                  {p.slug}.{siteDomain}
+                  {p.url ?? `${p.slug}.${siteDomain}`}
                 </a>
               </td>
               <td>

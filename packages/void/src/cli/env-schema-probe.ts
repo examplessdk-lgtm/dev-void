@@ -1,7 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { writeSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { join } from 'pathslash';
 import type { SelfHostSchemaFacts, SelfHostSchemaFailureReason } from './env-validation.ts';
 
 /**
@@ -12,15 +11,8 @@ import type { SelfHostSchemaFacts, SelfHostSchemaFailureReason } from './env-val
  * token / `CLOUDFLARE_API_TOKEN` in `process.env`) and must NOT evaluate arbitrary
  * project code in-process:
  *
- *   1. `facts` — the env-INSENSITIVE schema facts (required-secret NAMES + the
- *      `.secret()` flags), fixed by env.ts's structure. The child ALSO resolves the
- *      Vite config here purely to read the final `{ envDir, mode }` and reject a
- *      custom `envDir` or a non-`production` build mode (v1 supports neither): the
- *      build generates the auth artifact under the project root while the worker
- *      `vars` come from the build's `envDir`, so a custom `envDir` could validate a
- *      different table set than the worker ships. Resolving the config runs the full
- *      plugin pipeline (arbitrary code, timers/`beforeExit` risk) — safe HERE in the
- *      child (which `process.exit`s), never in the credentialed parent.
+ *   1. `facts` — the env-INSENSITIVE server and required key names, fixed by
+ *      env.ts's structure.
  *   2. `validate-emitted` — validate the REAL emitted worker `vars` (post-build
  *      ground truth) against the schema's Standard-Schema validators and return the
  *      FAILING key NAMES only. A required var shipped with an INVALID value (fails
@@ -54,23 +46,12 @@ export type EnvSchemaProbeInput = { root: string };
 /** Full child input (adds the operation discriminant to {@link EnvSchemaProbeInput}). */
 type ChildInput = { op: EnvSchemaProbeOp; root: string };
 
-/** The reason the `facts` probe rejected the app as unsupported (values-free). */
-export type EnvSchemaProbeRejectReason = 'custom-envdir' | 'non-production-mode';
-
 /**
  * The structured result of the `facts` operation. `ok` carries the env-insensitive
- * schema facts; `reject` fails the deploy closed pre-account with clear v1-scope
- * guidance; `schema-error` surfaces a values-free env.ts/validator failure.
- *
- * `reject` crosses the process boundary as a FIXED reason CODE only — never the raw
- * resolved `mode` / `envDir` strings. Those are arbitrary Vite-config-derived values
- * (a config could set `envDir`/`mode` from any inherited secret), so echoing them
- * over fd 3 or into a parent log would break the values-free boundary; the parent
- * renders fixed guidance from the code alone.
+ * schema facts; `schema-error` surfaces a values-free env.ts/validator failure.
  */
 export type EnvSchemaProbeResult =
   | { kind: 'ok'; facts: SelfHostSchemaFacts }
-  | { kind: 'reject'; reason: EnvSchemaProbeRejectReason }
   | { kind: 'schema-error'; reason: SelfHostSchemaFailureReason };
 
 /**
@@ -168,9 +149,8 @@ async function spawnEnvSchemaProbe(
 }
 
 /**
- * PARENT side (`facts`): return the env-insensitive schema facts + the v1 envDir/mode
- * narrowing. Runs pre-build so a custom envDir / non-production mode / broken env.ts
- * fails fast, before any account op.
+ * PARENT side (`facts`): return the env-insensitive schema facts. Runs pre-build so
+ * a broken env.ts fails fast, before any account operation.
  */
 export async function resolveEnvSchemaFactsViaSubprocess(
   input: EnvSchemaProbeInput,
@@ -196,8 +176,8 @@ export async function validateEmittedVarsViaSubprocess(
   spawn: EnvSchemaProbeSpawn = defaultSpawn,
 ): Promise<EnvSchemaValidateResult> {
   const result = await spawnEnvSchemaProbe('validate-emitted', input, env, spawn);
-  if (result.kind === 'ok' || result.kind === 'reject') {
-    // The `validate-emitted` operation never emits ok/reject; treat it as infra.
+  if (result.kind === 'ok') {
+    // The `validate-emitted` operation never emits ok; treat it as infra.
     throw new Error(
       'the env-schema probe returned an unexpected result for the validate-emitted operation.',
     );
@@ -236,12 +216,6 @@ function parseProbeResult(fd3: string): EnvSchemaProbeRawResult | undefined {
     return { kind: 'ok', facts: record.facts };
   }
   if (
-    record.kind === 'reject' &&
-    (record.reason === 'custom-envdir' || record.reason === 'non-production-mode')
-  ) {
-    return { kind: 'reject', reason: record.reason };
-  }
-  if (
     record.kind === 'invalid-keys' &&
     Array.isArray(record.invalidKeys) &&
     record.invalidKeys.every((k) => typeof k === 'string')
@@ -262,13 +236,13 @@ function isSchemaFacts(value: unknown): value is SelfHostSchemaFacts {
   if (!value || typeof value !== 'object') {
     return false;
   }
-  const f = value as { hasSchema?: unknown; requiredKeys?: unknown; secretKeys?: unknown };
+  const f = value as { hasSchema?: unknown; serverKeys?: unknown; requiredKeys?: unknown };
   return (
     typeof f.hasSchema === 'boolean' &&
     Array.isArray(f.requiredKeys) &&
     f.requiredKeys.every((k) => typeof k === 'string') &&
-    Array.isArray(f.secretKeys) &&
-    f.secretKeys.every((k) => typeof k === 'string')
+    Array.isArray(f.serverKeys) &&
+    f.serverKeys.every((k) => typeof k === 'string')
   );
 }
 
@@ -278,84 +252,10 @@ function emitResult(result: EnvSchemaProbeRawResult): void {
 }
 
 /**
- * Read the RAW (root-relative, unnormalized) envDir the build's worker-vars loader
- * actually uses, straight from the `void:env` config hook's captured value (exposed on
- * that plugin's `api.getVoidDeployBuildConfig`). This is the only faithful input to the
- * build's OWN `join(root, rawEnvDir)` computation: Vite's `resolved.envDir` is already
- * normalized (`path.resolve`), which loses the distinction an absolute-root envDir needs.
- * Returns `undefined` when the hook is absent (a non-void config), which the caller
- * treats as "no custom raw envDir" and falls back to Vite's normalized view.
- */
-function readBuildRawEnvDir(
-  plugins: ReadonlyArray<{ name: string; api?: unknown }>,
-): string | undefined {
-  const plugin = plugins.find((p) => p.name === 'void:env');
-  const api = plugin?.api as
-    | { getVoidDeployBuildConfig?: () => { mode: string; envDir: string | undefined } | undefined }
-    | undefined;
-  return api?.getVoidDeployBuildConfig?.()?.envDir;
-}
-
-/**
- * CHILD side (`facts`): resolve the Vite config HERE (the FULL plugin pipeline the
- * real `vite build` runs, under the scrubbed env — never in the parent) purely to
- * read the effective `{ envDir, mode }` and reject a custom envDir / non-production
- * mode; then, when accepted, import the user's env.ts and derive the env-insensitive
- * schema facts. All heavy imports are DYNAMIC so a plain library import of this
- * module (by the CLI, for the parent-side helper) never pulls Vite / env-validation /
- * the user's env.ts in.
+ * CHILD side (`facts`): import the user's env.ts and derive its structural schema
+ * facts. The import stays isolated because env.ts is arbitrary project code.
  */
 async function runFactsChild(root: string): Promise<void> {
-  const { resolveConfig } = await import('vite');
-  // The FULL config-hook pipeline (exactly what `vite build` runs) so a top-level
-  // `mode`/`envDir` a config file or plugin sets is observed. `resolved.envDir` is
-  // `false` (env loading disabled) or the absolute normalized dir; the default
-  // equals `resolved.root`.
-  const resolved = await resolveConfig({ root }, 'build', 'production', 'production');
-  // Reject a custom envDir by the SAME computation the BUILD uses. Vite normalizes
-  // `resolved.envDir` via `path.resolve(root, envDir)` (absolute-safe), so an ABSOLUTE
-  // envDir equal to the project root collapses to `resolved.root` and would ACCEPT — but
-  // the build's worker-vars loader (`index.ts`) uses `join(root, rawEnvDir)`, and
-  // `join(root, <absolute root>)` DUPLICATES the path (`/proj/proj`), so the build loads
-  // `vars` from the WRONG dir while the auth artifact is generated under the root: the
-  // exact vars-vs-auth divergence this guard exists to reject. So derive the build's
-  // ACTUAL vars dir from the RAW envDir the `void:env` hook captured and reject unless it
-  // equals the root — unset / `'.'` → root → accept; a relative subdir → non-root →
-  // reject; an absolute-root → `join` duplicates → non-root → reject. Also keep rejecting
-  // Vite's own `envDir === false` (env loading disabled) and its normalized-non-root view
-  // (a robust fallback that still catches a custom subdir if the `void:env` hook is absent).
-  // NOTE: `index.ts` uses `join` (not Vite's `resolve`) for the raw envDir, so the build
-  // itself mishandles an absolute envDir; this guard fails such configs CLOSED here.
-  // Switching `index.ts` `join`→`resolve` is a separate build-side follow-up (not done here).
-  const rawEnvDir = readBuildRawEnvDir(resolved.plugins);
-  const buildVarsDir = rawEnvDir ? join(resolved.root, rawEnvDir) : resolved.root;
-  if (
-    resolved.envDir === false ||
-    resolved.envDir !== resolved.root ||
-    buildVarsDir !== resolved.root
-  ) {
-    // v1 supports only a root-relative envDir. Only the fixed reason code crosses the
-    // boundary (never the raw envDir string).
-    emitResult({ kind: 'reject', reason: 'custom-envdir' });
-    return;
-  }
-  if (resolved.mode !== 'production') {
-    // A non-production build mode selects a different `.env.<mode>` set than the
-    // deploy validates — v1 supports only the production build. Fixed reason code only.
-    emitResult({ kind: 'reject', reason: 'non-production-mode' });
-    return;
-  }
-
-  // `resolveConfig` above already ran `void:env-schema`'s config hook, which imports the
-  // user's `env.ts` — so deriving the facts imports it a SECOND time, through the
-  // cache-busting loader. That is deliberate, and reusing the registration from config
-  // resolution instead would be unsafe: `importUserEnv` SWALLOWS a load error (it warns
-  // and returns), so a throwing `env.ts` would leave nothing registered, report
-  // `hasSchema: false`, and the required-secret gate would then validate ZERO keys and let
-  // the deploy through. Re-importing surfaces that failure as `schema-error`, which the
-  // orchestrator treats as fatal. Re-evaluation is a supported path — `defineEnv` is
-  // last-write-wins and resets its caches for exactly this (HMR re-imports do the same),
-  // and the build itself evaluates `env.ts` several times per process.
   const { deriveSelfHostSchemaFacts, SelfHostSchemaError } = await import('./env-validation.ts');
   try {
     const facts = await deriveSelfHostSchemaFacts(root);

@@ -27,6 +27,7 @@ describe('GET /.well-known/void-platform', () => {
       displayName: 'Void Cloud',
       proxyUrl: 'https://proxy.void.cloud',
       schemaVersion: 1,
+      usageProtocolVersion: 1,
     });
     const serialized = JSON.stringify(document);
     expect(serialized).not.toMatch(/token|secret|accountId|zoneId|resource/i);
@@ -63,6 +64,7 @@ describe('GET /.well-known/void-platform', () => {
       installationId: 'dpx-a1b2c3d4',
       platformVersion: '0.10.13',
       proxyUrl: 'https://proxy.platform.example.com',
+      usageProtocolVersion: 1,
     });
 
     const google = await app.fetch(

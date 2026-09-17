@@ -2,7 +2,7 @@ import { existsSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, relative } from 'pathslash';
-import { loadEnv, normalizePath, type Plugin } from 'vite';
+import { normalizePath, type Plugin } from 'vite';
 import {
   hasApiRoutes,
   hasDocumentRoutes,
@@ -17,7 +17,7 @@ import { generateQueueTypes } from './codegen/queue-types.ts';
 import { generateRouteTypes } from './codegen/route-types.ts';
 import { writeFileIfChanged } from './codegen/write-if-changed.ts';
 import { readConfig, getDatabaseDialect, type NotFoundHandling } from './config.ts';
-import { collectRevalidate, hasRevalidate } from './isr-config.ts';
+import { collectPages, collectRevalidate, hasRevalidate } from './isr-config.ts';
 import { readProjectPaths } from './project-paths.ts';
 import {
   compileRouteTable,
@@ -34,6 +34,7 @@ import {
 import type { RouteEnvironment } from './router/parse-filename.ts';
 import { scanRoutes, type ScanResult } from './router/scan.ts';
 import type { VoidAuthRuntimeOptions } from './runtime/better-auth-shared.ts';
+import { loadLocalEnv } from './shared/env.ts';
 import {
   validateSsrEntries,
   SSR_SERVER_ENTRY_RELATIVE_PATHS,
@@ -83,10 +84,9 @@ type RoutingPluginOptions = {
    * The watcher also watches those two files during `vite dev` and
    * re-runs the merge + invalidates the route module when either changes.
    *
-   * On `node`/`bun`/`deno` targets the merged rules are emitted into the
-   * Hono app in both dev and prod. On the default target they are emitted
-   * only in dev so `vite dev` matches the deployed runtime — in production
-   * the platform dispatch worker owns the pipeline instead.
+   * The merged rules are emitted into every runtime that owns its routing.
+   * Managed Cloudflare builds omit them because platform dispatch owns the
+   * same pipeline.
    */
   routing?: import('./config.ts').RoutingConfig;
   hasSandbox?: boolean;
@@ -222,17 +222,15 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
     devTriggerToken: options.devTriggerToken,
     auth: null,
     nodeTarget: !!options.target,
+    managedDispatch: false,
     explicitPrerenderPaths: options.prerenderPaths,
     bindingHandlerPath: options.target ? undefined : resolveFile('#self/remote/binding-handler'),
     bindingNames: options.bindingNames,
   };
 
-  // Static `_redirects` / `_headers` are always merged on every target so
-  // `vite dev` mirrors the deployed routing pipeline. On `node`/`bun`/`deno`
-  // targets the compiled Hono app emits the middleware in both dev and
-  // prod. On the default target the middleware is only emitted in dev —
-  // in production the platform dispatch worker owns the pipeline and the
-  // rules are stripped out of the worker bundle (see `compile.ts`).
+  // Static `_redirects` / `_headers` are always merged. The compiled Hono app
+  // emits them for native Cloudflare, local dev, and non-CF targets. Managed
+  // builds strip the duplicate pipeline because dispatch owns it.
   //
   // `publicDir` starts at `<root>/public` (Vite's default) and is
   // re-resolved from the resolved config in `configResolved`. For
@@ -291,7 +289,8 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
       providers: compileOptions.auth.providers,
       userConfig: await loadVoidAuthConfig(compileOptions.auth.authConfigPath),
     };
-    const env = loadEnv(resolvedConfig?.mode ?? 'development', root, '') as Record<string, unknown>;
+    const local = resolvedConfig?.command === 'serve' ? loadLocalEnv(root) : {};
+    const env = { ...local, ...process.env } as Record<string, unknown>;
     const schemaPath = join(outDir, 'better-auth-schema.ts');
     const databasePath = join(outDir, 'better-auth-db.ts');
 
@@ -310,13 +309,12 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
 
   let resolvedConfig: import('vite').ResolvedConfig | null = null;
 
-  // Merged ISR revalidate map for the CURRENT build, gated by `emitIsr` (see
-  // buildStart). The `load` hook threads this into `compileRouteTable` so the
-  // baked `__VOID_ISR_REVALIDATE` const and the worker entry's `handleIsr`
-  // wiring derive from the SAME decision within one build. `undefined` whenever
-  // ISR is not emitted (dev, managed `void deploy`, non-CF target, or no
-  // revalidate config), keeping today's behavior byte-identical.
+  // ISR policy for the CURRENT build, gated by `emitIsr` (see buildStart). The
+  // ordered page table is the same 3-state policy shipped to managed dispatch:
+  // positive TTL, explicit 0 opt-out, or absent to inherit path config.
   let isrRevalidate: number | Record<string, number> | undefined;
+  let isrPages: Array<{ pattern: string; revalidate?: number }> | undefined;
+  let isrPathRevalidate: Record<string, number> | undefined;
 
   function resolveAuthClientPath(config: import('vite').ResolvedConfig): string {
     if (config.plugins.some((plugin) => plugin.name === 'void-react:pages')) {
@@ -488,6 +486,8 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
     },
     config(_, env) {
       routeEnvironment = env.command === 'serve' && !env.isPreview ? 'dev' : 'prod';
+      compileOptions.managedDispatch =
+        !options.target && env.command === 'build' && Boolean(process.env.VOID_DEPLOY_PROJECT_ID);
 
       if (env.command === 'serve' && options.isAuthEnabled()) {
         // Alias better-auth client subpaths to absolute file paths so
@@ -569,16 +569,20 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
         // captured value.
         const buildConfig = readConfig(root);
         const merged = collectRevalidate(buildConfig, scan!.pages);
+        const configuredRevalidate = buildConfig.routing?.revalidate;
         const emitIsr =
           !options.target &&
           resolvedConfig?.command === 'build' &&
           !process.env.VOID_DEPLOY_PROJECT_ID &&
           hasRevalidate(merged);
-        // Route table + worker entry must agree within one build: the load hook
-        // bakes `__VOID_ISR_REVALIDATE`/`__VOID_ISR_DEPLOYMENT_ID` from
-        // `isrRevalidate`, and the entry's `handleIsr` wiring imports those same
-        // consts. Both derive from `emitIsr` so they are present or absent together.
+        // Route table + worker entry must agree within one build. All constants
+        // derive from `emitIsr` so they are present or absent together.
         isrRevalidate = emitIsr ? merged : undefined;
+        isrPages = emitIsr ? collectPages(scan!.pages, configuredRevalidate) : undefined;
+        isrPathRevalidate =
+          emitIsr && configuredRevalidate && typeof configuredRevalidate === 'object'
+            ? configuredRevalidate
+            : undefined;
         // Resolve the ISR runtime path LAZILY — only when ISR is actually emitted
         // — so non-ISR/managed/dev builds never depend on it.
         const isr = emitIsr
@@ -674,6 +678,8 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
           compileOptions,
           getPagesCompileOptions(),
           isrRevalidate,
+          isrPages,
+          isrPathRevalidate,
         );
       },
     },

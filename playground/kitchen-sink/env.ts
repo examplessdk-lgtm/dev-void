@@ -6,4 +6,5 @@ export default defineEnv({
   FEATURE_FLAG: boolean().default(false),
   API_URL: url(),
   LOG_LEVEL: oneOf(['debug', 'info', 'warn', 'error']).default('info'),
+  VITE_APP_TITLE: string().default('Kitchen Sink'),
 });

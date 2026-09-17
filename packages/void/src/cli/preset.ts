@@ -195,28 +195,11 @@ function shellQuoteExecutable(value: string): string {
 }
 
 /**
- * Resolve a command that runs the project's local `wrangler` binary with the
- * given subcommand, preferring `node_modules/.bin/wrangler` when available.
- *
- * Thin wrapper over {@link resolveProjectCommand}: `wrangler` is not a
- * special-cased bin (unlike `vite` → `vp`), so delegating reuses the exact
- * local-bin resolution without duplicating it. Returns a shell command string
- * suitable for `execSync`/`spawnSync` in the deploy path.
- */
-export function resolveWranglerCommand(root: string, subcommand: string): string {
-  return resolveProjectCommand(root, `wrangler ${subcommand}`);
-}
-
-/**
  * Resolve the project-local `wrangler` as an ARGV LAUNCHER — an array of tokens
  * `[executable, ...prefixArgs]` meant to be spawned with `shell: false` and the
  * real wrangler subcommand appended as further DISCRETE argv elements.
  *
- * Unlike {@link resolveWranglerCommand} (which returns a shell-quoted STRING for
- * `shell: true` callers), this never builds a shell command line, so untrusted
- * values — resource names, a Postgres connection string riddled with `&`/`$`/`;`,
- * a config path containing spaces — can be passed as their own argv elements and
- * are IMMUNE to shell metacharacter injection/splitting.
+ * Values are passed as discrete argv elements without shell expansion.
  *
  * Resolution order — ALWAYS launches the resolved JS entry as
  * `[process.execPath, <wrangler-dist/cli.js>]`, which is shell-free AND

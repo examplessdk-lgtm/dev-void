@@ -16,8 +16,10 @@ import { createCodeChallenge } from '../../src/auth/pkce.ts';
 import type { Db } from '../../src/db.ts';
 import {
   createBuild,
+  createGitHubConnection,
   getBuild,
   getGitHubConnection,
+  getGitHubConnectionsByRepo,
   getGitHubInstallation,
   getGitHubInstallationMembers,
   getInstallationRevocationAt,
@@ -464,7 +466,7 @@ describe('POST /projects/:id/github', () => {
       userId: user.id,
       accountLogin: 'acme',
       accountId: 'acc_1',
-      accountType: 'Organization',
+      accountType: 'User',
       repositories: [{ full_name: 'acme/app', id: 1 }],
     });
 
@@ -512,7 +514,7 @@ describe('POST /projects/:id/github', () => {
       userId: user.id,
       accountLogin: 'acme',
       accountId: 'acc_1',
-      accountType: 'Organization',
+      accountType: 'User',
       repositories: [{ full_name: 'acme/app', id: 4242 }],
     });
 
@@ -542,7 +544,7 @@ describe('POST /projects/:id/github', () => {
       userId: user.id,
       accountLogin: 'acme',
       accountId: 'acc_1',
-      accountType: 'Organization',
+      accountType: 'User',
       repositories: [{ full_name: 'acme/app', id: 1 }],
     });
 
@@ -568,7 +570,7 @@ describe('POST /projects/:id/github', () => {
       userId: user.id,
       accountLogin: 'acme',
       accountId: 'acc_1',
-      accountType: 'Organization',
+      accountType: 'User',
       repositories: [{ full_name: 'acme/app', id: 1 }],
     });
 
@@ -600,7 +602,7 @@ describe('POST /projects/:id/github', () => {
       userId: user.id,
       accountLogin: 'acme',
       accountId: 'acc_1',
-      accountType: 'Organization',
+      accountType: 'User',
       repositories: [{ full_name: 'acme/app', id: 1 }],
     });
 
@@ -626,7 +628,7 @@ describe('POST /projects/:id/github', () => {
       userId: user.id,
       accountLogin: 'acme',
       accountId: 'acc_1',
-      accountType: 'Organization',
+      accountType: 'User',
       repositories: [{ full_name: 'acme/app', id: 1 }],
     });
 
@@ -658,7 +660,7 @@ describe('POST /projects/:id/github', () => {
       userId: user.id,
       accountLogin: 'acme',
       accountId: 'acc_1',
-      accountType: 'Organization',
+      accountType: 'User',
       repositories: [{ full_name: 'acme/app', id: 1 }],
     });
 
@@ -692,7 +694,7 @@ describe('POST /projects/:id/github', () => {
       userId: user.id,
       accountLogin: 'acme',
       accountId: 'acc_1',
-      accountType: 'Organization',
+      accountType: 'User',
       repositories: [{ full_name: 'acme/app', id: 1 }],
     });
     await env.db
@@ -831,7 +833,7 @@ describe('POST /projects/:id/github', () => {
       userId: user.id,
       accountLogin: 'acme',
       accountId: 'acc_8',
-      accountType: 'Organization',
+      accountType: 'User',
       // Cache lists a DIFFERENT repo; the target is not in it.
       repositories: [{ full_name: 'acme/old', id: 1 }],
       repositorySelection: 'all',
@@ -876,7 +878,7 @@ describe('POST /projects/:id/github', () => {
       userId: user.id,
       accountLogin: 'acme',
       accountId: 'acc_9',
-      accountType: 'Organization',
+      accountType: 'User',
       repositories: [{ full_name: 'acme/old', id: 1 }],
       repositorySelection: 'all',
     });
@@ -917,7 +919,7 @@ describe('POST /projects/:id/github', () => {
       userId: user.id,
       accountLogin: 'acme',
       accountId: 'acc_10',
-      accountType: 'Organization',
+      accountType: 'User',
       repositories: [{ full_name: 'acme/app', id: 5151 }],
       repositorySelection: 'selected',
     });
@@ -1187,6 +1189,98 @@ describe('POST /projects/:id/github — non-owner member connect grant', () => {
 
     expect(res.status).toBe(200);
     expect((await getGitHubConnection(env.db, project.id))?.repository_id).toBe('4242');
+  });
+
+  it('requires per-repo proof for a legacy organization owner and disables its old cross-repo connection', async () => {
+    const user = await createTestUser(env.db, 'legacy-org-owner', 'github', '5551234');
+    const authorizedProject = await createTestProject(env.db, user.id, 'legacy-org-a');
+    const inaccessibleProject = await createTestProject(env.db, user.id, 'legacy-org-b');
+    await upsertGitHubInstallation(env.db, {
+      installationId: '3011',
+      // Older versions wrote this pointer after seeing the installation through
+      // /user/installations. It is discovery metadata, not org-wide authority.
+      userId: user.id,
+      accountLogin: 'org',
+      accountId: 'acc_3011',
+      accountType: 'Organization',
+      repositories: [
+        { full_name: 'org/authorized-a', id: 301101 },
+        { full_name: 'org/inaccessible-b', id: 301102 },
+      ],
+      repositorySelection: 'selected',
+    });
+    await upsertGitHubInstallationMember(env.db, {
+      installationId: '3011',
+      userId: user.id,
+      githubAccountId: '5551234',
+      ttlSeconds: 3600,
+    });
+    await createGitHubConnection(env.db, {
+      projectId: inaccessibleProject.id,
+      installationId: '3011',
+      repoFullName: 'org/inaccessible-b',
+      repositoryId: '301102',
+      authorizedByUserId: null,
+    });
+    await createGitHubConnection(env.db, {
+      projectId: authorizedProject.id,
+      installationId: '3011',
+      repoFullName: 'org/authorized-a',
+      repositoryId: '301101',
+      authorizedByUserId: null,
+    });
+
+    const listed = await app.fetch(
+      new Request('http://localhost/github/installations', authed(user.jwt)),
+      env,
+    );
+    const installation = (
+      (await listed.json()) as Array<{ installation_id: string; repositories: Array<unknown> }>
+    ).find((row) => row.installation_id === '3011');
+    expect(installation?.repositories).toEqual([]);
+
+    // The old unproven connection cannot resolve from a signed push, so it
+    // cannot enqueue a build or reach the installation-token clone path.
+    expect(
+      await getGitHubConnectionsByRepo(env.db, '3011', 'org/inaccessible-b', '301102'),
+    ).toEqual([]);
+    const status = await app.fetch(
+      new Request(`http://localhost/projects/${inaccessibleProject.id}/github`, authed(user.jwt)),
+      env,
+    );
+    expect(status.status).toBe(200);
+    expect(((await status.json()) as { requires_reconnect: boolean }).requires_reconnect).toBe(
+      true,
+    );
+
+    const withoutProof = await memberConnect(user, authorizedProject.id, {
+      installationId: '3011',
+      repoFullName: 'org/authorized-a',
+    });
+    expect(withoutProof.status).toBe(403);
+    expect(((await withoutProof.json()) as { error: string }).error).toBe(
+      'connect_authorization_required',
+    );
+
+    const grant = await mintConnectGrant({
+      installationId: '3011',
+      repoFullName: 'org/authorized-a',
+      repositoryId: 301101,
+      githubAccountId: '5551234',
+    });
+    const connected = await memberConnect(user, authorizedProject.id, {
+      installationId: '3011',
+      repoFullName: 'org/authorized-a',
+      connectGrant: grant,
+      codeVerifier: CONNECT_VERIFIER,
+    });
+    expect(connected.status).toBe(200);
+    expect((await getGitHubConnection(env.db, authorizedProject.id))?.authorized_by_user_id).toBe(
+      user.id,
+    );
+    expect(
+      await getGitHubConnectionsByRepo(env.db, '3011', 'org/authorized-a', '301101'),
+    ).toHaveLength(1);
   });
 
   // A grant minted for a DIFFERENT repo than the one being connected is rejected.
@@ -1777,7 +1871,7 @@ describe('POST /projects/:id/github — non-owner member connect grant', () => {
       userId: owner.id,
       accountLogin: 'acme',
       accountId: 'acc_3018',
-      accountType: 'Organization',
+      accountType: 'User',
       repositories: [{ full_name: 'acme/app', id: 42 }],
       repositorySelection: 'selected',
     });
@@ -1905,7 +1999,7 @@ describe('POST /projects/:id/github — non-owner member connect grant', () => {
       userId: owner.id,
       accountLogin: 'acme',
       accountId: 'acc_7300',
-      accountType: 'Organization',
+      accountType: 'User',
       repositories: [{ full_name: 'acme/app', id: 4242 }],
       repositorySelection: 'selected',
     });
@@ -2057,7 +2151,7 @@ describe('POST /projects/:id/github — post-lock status + coverage re-check (Co
       userId: owner.id,
       accountLogin: 'org',
       accountId: 'acc_4001',
-      accountType: 'Organization',
+      accountType: 'User',
       repositories: [{ full_name: 'org/old', id: 1 }],
       // `all` forces the live GET /repos resolution — the interposition seam.
       repositorySelection: 'all',
@@ -2109,7 +2203,7 @@ describe('POST /projects/:id/github — post-lock status + coverage re-check (Co
       userId: owner.id,
       accountLogin: 'org',
       accountId: 'acc_4002',
-      accountType: 'Organization',
+      accountType: 'User',
       repositories: [{ full_name: 'org/old', id: 1 }],
       repositorySelection: 'all',
     });
@@ -3010,9 +3104,9 @@ describe('GET /github/installations', () => {
     expect(installations).toHaveLength(0);
   });
 
-  // (d) Owner + member DEDUP: userA owns install X AND has a membership row for X
-  // → X appears exactly once (owner-OR-EXISTS on the githubInstallations PK).
-  it('returns an owned-and-membered installation exactly once', async () => {
+  // A legacy organization owner pointer plus an active membership still yields
+  // one row. The membership is the authority; the old pointer adds no access.
+  it('returns a legacy-owned organization installation exactly once via membership', async () => {
     const userA = await createTestUser(env.db, 'owner-member-a');
     await upsertGitHubInstallation(env.db, {
       installationId: '913',
@@ -3039,10 +3133,11 @@ describe('GET /github/installations', () => {
     expect(matching).toHaveLength(1);
   });
 
-  // (e) PRIVACY: a member sees the shared install (visibility preserved) but its
-  // cached `repositories` list is redacted to []; the owner still sees the full
-  // array. Redaction is tight — installation_id / repository_selection unchanged.
-  it('redacts repositories for a member but not the owner', async () => {
+  // Organization owner pointers written by older versions are not repository
+  // authority. The pointed-at user sees nothing without an active membership;
+  // once membership is proven, both that user and other members see only the
+  // installation metadata. Personal installation owners retain their repo list.
+  it('never exposes organization repositories through a legacy owner pointer', async () => {
     const owner = await createTestUser(env.db, 'repo-owner');
     const member = await createTestUser(env.db, 'repo-member');
     const seededRepos = [
@@ -3071,16 +3166,28 @@ describe('GET /github/installations', () => {
       repositories: Array<{ full_name: string; id: number }>;
     };
 
-    // Owner keeps the full cached list.
+    // A stale organization owner pointer alone does not make the installation
+    // visible, much less disclose every private repository in its cache.
     const ownerRes = await app.fetch(
       new Request('http://localhost/github/installations', authed(owner.jwt)),
       env,
     );
     expect(ownerRes.status).toBe(200);
     const ownerRows = (await ownerRes.json()) as Array<Row>;
-    const ownerRow = ownerRows.find((r) => r.installation_id === '920');
-    expect(ownerRow).toBeDefined();
-    expect(ownerRow!.repositories).toEqual(seededRepos);
+    expect(ownerRows.find((r) => r.installation_id === '920')).toBeUndefined();
+
+    await upsertGitHubInstallationMember(env.db, {
+      installationId: '920',
+      userId: owner.id,
+      githubAccountId: 'gh_owner',
+      ttlSeconds: 3600,
+    });
+    const provenOwnerRes = await app.fetch(
+      new Request('http://localhost/github/installations', authed(owner.jwt)),
+      env,
+    );
+    const provenOwnerRows = (await provenOwnerRes.json()) as Array<Row>;
+    expect(provenOwnerRows.find((r) => r.installation_id === '920')?.repositories).toEqual([]);
 
     // Member sees the same install (visibility preserved) but repositories is [].
     const memberRes = await app.fetch(
@@ -3095,6 +3202,24 @@ describe('GET /github/installations', () => {
     // Redaction is tight: no other field is blanked.
     expect(memberRow!.installation_id).toBe('920');
     expect(memberRow!.repository_selection).toBe('selected');
+
+    const personalRepos = [{ full_name: 'repo-owner/personal', id: 3 }];
+    await upsertGitHubInstallation(env.db, {
+      installationId: '921',
+      userId: owner.id,
+      accountLogin: 'repo-owner',
+      accountId: 'acc_921',
+      accountType: 'User',
+      repositories: personalRepos,
+    });
+    const personalRes = await app.fetch(
+      new Request('http://localhost/github/installations', authed(owner.jwt)),
+      env,
+    );
+    const personalRows = (await personalRes.json()) as Array<Row>;
+    expect(personalRows.find((r) => r.installation_id === '921')?.repositories).toEqual(
+      personalRepos,
+    );
   });
 
   it('requires auth', async () => {
@@ -3348,8 +3473,9 @@ describe('GET /github/callback', () => {
   // install". The installation's derived account is the ORG (id 9001), which
   // differs from the caller's personal GitHub id (7777) — so the account-id
   // fallback would 403. But GitHub appends a `code`; exchanging it yields a user
-  // token whose GET /user/installations includes installation_id 5000, which
-  // authorizes the link.
+  // token whose GET /user/installations includes installation_id 5000. That
+  // proves only installation visibility, so the callback records membership
+  // without making the caller an owner.
   it('links an org install authorized via user-auth-on-install code', async () => {
     const user = await createTestUser(env.db, 'orgadmin', 'github', '7777');
     const { calls } = mockUserAuthInstall({
@@ -3374,10 +3500,13 @@ describe('GET /github/callback', () => {
     expect(calls.userInstallations).toBe(true);
     expect(calls.user).toBe(true);
     const persisted = await getGitHubInstallation(env.db, '5000');
-    expect(persisted?.user_id).toBe(user.id);
+    expect(persisted?.user_id).toBeNull();
     // Linked under the ORG account, not the caller's personal id.
     expect(persisted?.account_id).toBe('9001');
     expect(persisted?.account_type).toBe('Organization');
+    expect(
+      (await getGitHubInstallationMembers(env.db, '5000')).some((row) => row.user_id === user.id),
+    ).toBe(true);
   });
 
   // (b): a code is present but GET /user/installations does NOT include the
@@ -3690,7 +3819,8 @@ describe('GET /github/callback', () => {
   // initiator's state account id (111) matches their own GET /user id (111),
   // and the org installation 5000 is in their accessible list — even though the
   // installation's derived account is the ORG (999, != 111), proving org
-  // installs still work once the code-holder is confirmed to be the initiator.
+  // installs still work once the code-holder is confirmed to be the initiator,
+  // while remaining ownerless and requiring per-repo proof.
   it('links an org install when the code-holder matches the state initiator', async () => {
     const initiator = await createTestUser(env.db, 'orgadmin', 'github', '111');
 
@@ -3714,10 +3844,15 @@ describe('GET /github/callback', () => {
     expect(calls.user).toBe(true);
     expect(calls.userInstallations).toBe(true);
     const persisted = await getGitHubInstallation(env.db, '5000');
-    expect(persisted?.user_id).toBe(initiator.id);
+    expect(persisted?.user_id).toBeNull();
     // Linked under the ORG account (999), not the initiator's personal id.
     expect(persisted?.account_id).toBe('999');
     expect(persisted?.account_type).toBe('Organization');
+    expect(
+      (await getGitHubInstallationMembers(env.db, '5000')).some(
+        (row) => row.user_id === initiator.id,
+      ),
+    ).toBe(true);
   });
 
   // An install with NO repositories selected yet has no repo owner to derive the
@@ -3951,11 +4086,9 @@ describe('GET /github/callback', () => {
     expect(members[0]?.user_id).toBe(memberB.id);
   });
 
-  // Fresh-install guard: an `installation.created`-precreated null-owner ORG row
-  // with NO revocation tombstone is FRESH (never cleared), so the first installer
-  // legitimately ADOPTS ownership. The new cleared-owner branch keys on the
-  // tombstone's presence, so it must NOT catch this tombstone-free fresh row.
-  it('fresh null-owner org install (no tombstone): first installer adopts ownership', async () => {
+  // A webhook-precreated organization row remains ownerless even when fresh.
+  // Installation visibility cannot prove organization-wide repository access.
+  it('fresh null-owner org install records membership without adopting ownership', async () => {
     const installer = await createTestUser(env.db, 'org-first-installer', 'github', '7020');
     // Precreated by the installation.created webhook: null owner, NO tombstone.
     await upsertGitHubInstallation(env.db, {
@@ -3983,14 +4116,13 @@ describe('GET /github/callback', () => {
     );
 
     expect(res.status).toBe(302);
-    // No tombstone → fresh → the first installer becomes OWNER.
-    expect((await getGitHubInstallation(env.db, '9120'))?.user_id).toBe(installer.id);
-    // No spurious membership row on the owner-adopt path.
+    expect((await getGitHubInstallation(env.db, '9120'))?.user_id).toBeNull();
     const members = await env.db
       .select()
       .from(githubInstallationMembers)
       .where(eq(githubInstallationMembers.installation_id, '9120'));
-    expect(members).toHaveLength(0);
+    expect(members).toHaveLength(1);
+    expect(members[0]?.user_id).toBe(installer.id);
   });
 
   // Membership backstop, CONCURRENT: a co-member (A) reaches an install the

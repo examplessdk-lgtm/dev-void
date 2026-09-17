@@ -158,14 +158,14 @@ describe('getAppliedMigrations', () => {
   });
 });
 
-describe('getLocalD1PersistRoot', () => {
+describe('getLocalD1Target', () => {
   it('uses .void for Void apps', async () => {
     const root = mkdtempSync(join(tmpdir(), 'void-db-persist-'));
     try {
       writeFileSync(join(root, 'package.json'), JSON.stringify({ dependencies: { void: '*' } }));
 
-      const { getLocalD1PersistRoot } = await import('../../src/cli/db.ts');
-      expect(getLocalD1PersistRoot(root)).toBe(join(root, '.void'));
+      const { getLocalD1Target } = await import('../../src/cli/db.ts');
+      expect(getLocalD1Target(root).persistRoot).toBe(join(root, '.void'));
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -179,8 +179,8 @@ describe('getLocalD1PersistRoot', () => {
         JSON.stringify({ dependencies: { '@sveltejs/kit': '*' } }),
       );
 
-      const { getLocalD1PersistRoot } = await import('../../src/cli/db.ts');
-      expect(getLocalD1PersistRoot(root)).toBe(join(root, '.wrangler', 'state'));
+      const { getLocalD1Target } = await import('../../src/cli/db.ts');
+      expect(getLocalD1Target(root).persistRoot).toBe(join(root, '.wrangler', 'state'));
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -314,7 +314,7 @@ describe('void db drizzle-kit subprocesses', () => {
     expect(mockExecFileSync).toHaveBeenCalledOnce();
   });
 
-  it('resolves function-based Better Auth schemas with production env values', async () => {
+  it('resolves function-based Better Auth schemas with local env values', async () => {
     const root = createDrizzleProjectRoot();
     const voidStubDir = join(root, 'node_modules', 'void');
     mkdirSync(voidStubDir, { recursive: true });
@@ -335,13 +335,11 @@ describe('void db drizzle-kit subprocesses', () => {
       ].join('\n'),
     );
     writeFileSync(join(root, '.env'), 'AUTH_USER_TABLE=development_users\n');
-    writeFileSync(join(root, '.env.production'), 'AUTH_USER_TABLE=production_users\n');
 
     await runDbCommand(root, { action: 'generate' });
 
     const authSchema = readFileSync(join(root, '.void', 'better-auth-schema.ts'), 'utf-8');
-    expect(authSchema).toContain('sqliteTable("production_users"');
-    expect(authSchema).not.toContain('sqliteTable("development_users"');
+    expect(authSchema).toContain('sqliteTable("development_users"');
   });
 
   it('uses the framework emulator store for SQLite push in SvelteKit apps', async () => {
