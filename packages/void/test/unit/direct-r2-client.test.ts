@@ -263,7 +263,8 @@ describe('PlatformClient.finalizeDeploy', () => {
       error_message: null,
       retained: false,
       applied_migrations: null,
-      created_at: new Date().toISOString(),
+      // Postgres `timestamp` mode:'string' wire format — no zone marker.
+      created_at: new Date().toISOString().replace('T', ' ').slice(0, 19),
       deployed_at: null,
       ...overrides,
     };
@@ -670,7 +671,7 @@ describe('PlatformClient.finalizeDeploy', () => {
   it('still retries when the newest deployment is older than the dedupe window', async () => {
     vi.useFakeTimers();
     const stale = makeDeployment({
-      created_at: new Date(Date.now() - 10 * 60_000).toISOString(),
+      created_at: new Date(Date.now() - 10 * 60_000).toISOString().replace('T', ' ').slice(0, 19),
     });
     let posts = 0;
     fetchMock.mockImplementation((url: string) => {

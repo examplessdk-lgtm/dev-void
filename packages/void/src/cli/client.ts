@@ -366,6 +366,23 @@ const DEPLOY_DEDUPE_BLOCKING_STATUSES = new Set([
 ]);
 
 /**
+ * Parse a PostgreSQL `timestamp` column value (`mode: 'string'` emits
+ * `2026-09-18 12:00:00` — no zone marker, stored in UTC). `Date.parse`
+ * alone would read it as LOCAL time, skewing comparisons by the host's
+ * offset. Mirrors the platform's `databaseTimestampMs` helper.
+ */
+function databaseTimestampMs(value: string): number | null {
+  const withSeparator = value.includes('T') ? value : value.replace(' ', 'T');
+  const withZone = /[+-]\d{2}$/.test(withSeparator)
+    ? `${withSeparator}:00`
+    : /(?:Z|[+-]\d{2}:?\d{2})$/i.test(withSeparator)
+      ? withSeparator
+      : `${withSeparator}Z`;
+  const parsed = new Date(withZone).getTime();
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+/**
  * HTTP client for the Void platform API.
  */
 export class PlatformClient {
@@ -765,8 +782,8 @@ export class PlatformClient {
         if (!DEPLOY_DEDUPE_BLOCKING_STATUSES.has(deployment.status)) {
           return false;
         }
-        const createdMs = Date.parse(deployment.created_at);
-        return Number.isFinite(createdMs) && now - createdMs <= windowMs;
+        const createdMs = databaseTimestampMs(deployment.created_at);
+        return createdMs !== null && now - createdMs <= windowMs;
       });
     } catch {
       return undefined;
