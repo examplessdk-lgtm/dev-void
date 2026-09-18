@@ -321,11 +321,78 @@ describe('emailDomainAdd', () => {
     expect(printed(infoSpy)).toContain(
       'void platform email domain-add acme.com --project hr-portal',
     );
-    // Nothing else ran: no MX read, no browser, no POST — and a clean exit.
-    expect(resolveMx).not.toHaveBeenCalled();
+    // The target was decided, but no browser or POST ran — and exit was clean.
+    expect(resolveMx).toHaveBeenCalledWith('acme.com');
     expect(runGrant).not.toHaveBeenCalled();
     expect(addEmailDomain).not.toHaveBeenCalled();
     expect(exit).toHaveBeenCalledWith(0);
+  });
+
+  it('prints the mail subdomain for an admin-managed apex that already receives mail', async () => {
+    const addEmailDomain = vi.fn();
+    const runGrant = vi.fn();
+    const resolveMx = vi.fn(async (name: string) =>
+      name === 'acme.com' ? [{ exchange: 'aspmx.l.google.com.', priority: 1 }] : [],
+    );
+    const exit = exitSpy();
+
+    await expect(
+      emailDomainAdd(
+        {
+          addEmailDomain,
+          getEmailDomain: vi.fn(),
+          getEmailSettings: async () => ({
+            domains: { management: 'admin' as const, projectSlug: 'hr-portal' },
+          }),
+          listEmailDomains: noEmailDomains,
+        },
+        'prj_1',
+        'acme.com',
+        undefined,
+        addDeps({ runGrant, dns: { resolveMx }, exit }),
+      ),
+    ).rejects.toThrow('exit 0');
+
+    expect(printed(infoSpy)).toContain('acme.com carries MX for aspmx.l.google.com');
+    expect(printed(infoSpy)).toContain(
+      'void platform email domain-add mail.acme.com --project hr-portal',
+    );
+    expect(runGrant).not.toHaveBeenCalled();
+    expect(addEmailDomain).not.toHaveBeenCalled();
+    expect(exit).toHaveBeenCalledWith(0);
+  });
+
+  it('keeps a forced admin-managed subdomain in the printed command and warns on its MX', async () => {
+    const addEmailDomain = vi.fn();
+    const runGrant = vi.fn();
+    const resolveMx = vi.fn(async () => [{ exchange: 'aspmx.l.google.com.', priority: 1 }]);
+    const exit = exitSpy();
+
+    await expect(
+      emailDomainAdd(
+        {
+          addEmailDomain,
+          getEmailDomain: vi.fn(),
+          getEmailSettings: async () => ({
+            domains: { management: 'admin' as const, projectSlug: 'hr-portal' },
+          }),
+          listEmailDomains: noEmailDomains,
+        },
+        'prj_1',
+        'acme.com',
+        'mx',
+        addDeps({ runGrant, dns: { resolveMx }, exit }),
+      ),
+    ).rejects.toThrow('exit 0');
+
+    expect(resolveMx).toHaveBeenCalledWith('mx.acme.com');
+    expect(printed(warnSpy)).toContain('mx.acme.com already carries MX');
+    expect(printed(warnSpy)).toContain('may refuse it');
+    expect(printed(infoSpy)).toContain(
+      'void platform email domain-add mx.acme.com --project hr-portal',
+    );
+    expect(runGrant).not.toHaveBeenCalled();
+    expect(addEmailDomain).not.toHaveBeenCalled();
   });
 
   it('prints the administrator command when the target is already an administrator row', async () => {
@@ -354,7 +421,7 @@ describe('emailDomainAdd', () => {
     expect(printed(infoSpy)).toContain(
       'void platform email domain-add acme.com --project hr-portal',
     );
-    expect(resolveMx).not.toHaveBeenCalled();
+    expect(resolveMx).toHaveBeenCalledWith('acme.com');
     expect(runGrant).not.toHaveBeenCalled();
     expect(addEmailDomain).not.toHaveBeenCalled();
   });

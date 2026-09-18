@@ -565,10 +565,48 @@ export async function emailDomainAdd(
     return fail(err instanceof Error ? err.message : String(err));
   }
 
+  // The MX decision. Forced (--subdomain) needs no default, only a warning
+  // when the named host already carries MX; unforced reads the apex and
+  // falls back to mail.<domain>. Shared by the owner flow and the printed
+  // administrator command, so the handoff names the target setup accepts.
+  const dns = deps.dns ?? (await createNodeEmailDns());
+  const decideTarget = async (): Promise<void> => {
+    if (target.forced) {
+      const mx = await lookupMxForRender(dns, target.emailDomain);
+      if (mx !== null && mx.length > 0) {
+        log.warn(
+          `MX        ${target.emailDomain} already carries MX (${mx.join(', ')}) — the platform re-checks over public DNS and may refuse it.`,
+        );
+      }
+    } else {
+      const mx = await lookupMxForRender(dns, domain);
+      if (mx === null) {
+        log.info(
+          `MX        could not read ${domain}'s MX from here — the platform decides over public DNS.`,
+        );
+      } else if (mx.length > 0) {
+        target = { emailDomain: `mail.${domain}`, forced: false };
+        log.info(
+          `MX        ${domain} carries MX for ${mx[0]} → apex is off limits\n          using ${target.emailDomain}  [change with --subdomain]`,
+        );
+        const subMx = await lookupMxForRender(dns, target.emailDomain);
+        if (subMx !== null && subMx.length > 0) {
+          log.warn(
+            `MX        ${target.emailDomain} also carries MX (${subMx.join(', ')}) — the platform may refuse it; pick another with --subdomain.`,
+          );
+        }
+      } else {
+        log.info(`MX        ${domain} has no MX records → using the apex`);
+      }
+    }
+  };
+
   // On an administrator-managed platform owners normally hold no Cloudflare
-  // credential, so there is no grant to open a browser for. A row the owner
-  // registered before the switch stays theirs to renew (ownership table: add
-  // on an owner row), so that owner flow continues for an existing target.
+  // credential, so there is no grant to open a browser for. The handoff does
+  // DNS and the two platform GETs, never a Cloudflare call or browser flow. A
+  // row the owner registered before the switch stays theirs to renew
+  // (ownership table: add on an owner row), so that owner flow continues for
+  // an existing target.
   let renewal: string | undefined;
   const settings = await client.getEmailSettings(projectId);
   if (settings.domains.management === 'admin') {
@@ -580,6 +618,7 @@ export async function emailDomainAdd(
       )
       .find((row) => row !== undefined);
     if (!existing) {
+      await decideTarget();
       const project = settings.domains.projectSlug ?? projectId;
       log.info(
         [
@@ -599,39 +638,12 @@ export async function emailDomainAdd(
     target = { emailDomain: existing.domain, forced: true };
   }
 
-  // Renewals preserve their stored target. New forced domains only warn on
-  // existing MX; an unforced new domain falls back to mail.<domain> when its
-  // apex already receives mail.
-  const dns = deps.dns ?? (await createNodeEmailDns());
+  // A renewal keeps its stored target: Email Routing itself put MX on the
+  // apex it serves, so the MX decision would retarget it.
   if (renewal !== undefined) {
     log.info(`Renewing ${renewal} — the stored credential is replaced; rules and the relay stay.`);
-  } else if (target.forced) {
-    const mx = await lookupMxForRender(dns, target.emailDomain);
-    if (mx !== null && mx.length > 0) {
-      log.warn(
-        `MX        ${target.emailDomain} already carries MX (${mx.join(', ')}) — the platform re-checks over public DNS and may refuse it.`,
-      );
-    }
   } else {
-    const mx = await lookupMxForRender(dns, domain);
-    if (mx === null) {
-      log.info(
-        `MX        could not read ${domain}'s MX from here — the platform decides over public DNS.`,
-      );
-    } else if (mx.length > 0) {
-      target = { emailDomain: `mail.${domain}`, forced: false };
-      log.info(
-        `MX        ${domain} carries MX for ${mx[0]} → apex is off limits\n          using ${target.emailDomain}  [change with --subdomain]`,
-      );
-      const subMx = await lookupMxForRender(dns, target.emailDomain);
-      if (subMx !== null && subMx.length > 0) {
-        log.warn(
-          `MX        ${target.emailDomain} also carries MX (${subMx.join(', ')}) — the platform may refuse it; pick another with --subdomain.`,
-        );
-      }
-    } else {
-      log.info(`MX        ${domain} has no MX records → using the apex`);
-    }
+    await decideTarget();
   }
 
   // Both grant paths need a human: a browser, a clipboard, or a paste prompt.

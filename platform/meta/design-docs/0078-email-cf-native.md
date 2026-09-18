@@ -886,15 +886,19 @@ browser or Cloudflare work. In `admin` mode the CLI then lists the project's
 rows once: a row the owner registered before the switch for the domain this
 run targets (or its `mail.` fallback) keeps the owner flow — that is the
 renewal path, and the matched row IS the target, skipping the MX decision
-that would otherwise retarget an apex Email Routing has since put MX on —
-and any other input prints:
+that would otherwise retarget an apex Email Routing has since put MX on.
+Any other input goes through the owner flow's own MX decision over public
+DNS first, so the printed command names the target setup will accept
+(`mail.example.com` when the apex already receives mail), then prints:
 
 ```
 $ void email domain add example.com
+  MX        example.com carries MX for aspmx.l.google.com → apex is off limits
+            using mail.example.com  [change with --subdomain]
   Email domains on this platform are managed by its administrator.
   Ask them to run:
 
-    void platform email domain-add example.com --project hr-portal
+    void platform email domain-add mail.example.com --project hr-portal
 
   `void email domain list` and `void email domain status` keep working here.
 ```
