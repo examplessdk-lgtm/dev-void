@@ -18,6 +18,10 @@ vi.mock('../../src/db.ts', () => ({
   getProjectsByIds: (...args: Array<unknown>) => getProjectsByIdsMock(...args),
   getProjectOwnershipPeriodsByProjectIds: (...args: Array<unknown>) =>
     getProjectOwnershipPeriodsByProjectIdsMock(...args),
+  getProjectUsageOwnershipSnapshot: async (...args: Array<unknown>) => ({
+    projects: await getProjectsByIdsMock(...args),
+    ownershipPeriods: await getProjectOwnershipPeriodsByProjectIdsMock(...args),
+  }),
   suspendUser: vi.fn(),
   unsuspendUserIfReason: vi.fn(),
 }));

@@ -106,10 +106,6 @@ export async function runProjectTeamCommand(root: string, args: ProjectTeamArgs)
   );
   if (args.action === 'list') {
     const members = await client.listProjectMembers(projectId);
-    if (members.length === 0) {
-      outro('No project members found.');
-      return;
-    }
     note(memberLines(members), 'Project Team');
     outro(`${members.length} member(s)`);
     return;

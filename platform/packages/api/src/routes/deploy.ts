@@ -4396,6 +4396,7 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
                 drizzleSql`SELECT id FROM projects WHERE id = ${projectId} FOR UPDATE`,
               );
               const txDb = tx as unknown as Db;
+              await requireActiveDeployAccess(txDb, projectId, actor.id);
               const appResult = await dispatchStableAppMigration(
                 context.env.DISPATCH.get(workerName),
                 proxyTokenBinding?.text ?? '',
@@ -4410,6 +4411,12 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
               if (confirmed.length > 0) {
                 await appendProjectMigrations(txDb, projectId, confirmed, deployment.id);
                 await setAppliedMigrations(txDb, deployment.id, confirmed);
+              }
+              if (appResult.ok && stableCapabilities.endpoints.auth) {
+                await dispatchStableAuthMigration(
+                  context.env.DISPATCH.get(workerName),
+                  proxyTokenBinding?.text ?? '',
+                );
               }
               return { confirmed, result: appResult };
             });
@@ -4432,12 +4439,6 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
                 migrationsApplied++;
               }
             }
-            if (stableCapabilities.endpoints.auth) {
-              await dispatchStableAuthMigration(
-                context.env.DISPATCH.get(workerName),
-                proxyTokenBinding?.text ?? '',
-              );
-            }
           } else {
             const migrationRetry =
               probeResult === 'ready' ? CF_MIGRATION_RETRY : CF_READINESS_RETRY;
@@ -4447,6 +4448,7 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
                 drizzleSql`SELECT id FROM projects WHERE id = ${projectId} FOR UPDATE`,
               );
               const txDb = tx as unknown as Db;
+              await requireActiveDeployAccess(txDb, projectId, actor.id);
               const legacyResult = await retryWithBackoff<UserWorkerMigrationResult>(
                 async (attempt) => {
                   const attemptStart = Date.now();

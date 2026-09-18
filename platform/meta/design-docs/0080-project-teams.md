@@ -264,9 +264,12 @@ project. The server, not the CLI, filters this list.
 
 ### Locks and credential revocation
 
-Roles are never embedded as trusted JWT state. Full API, deploy, and prerender
-credentials carry the actor ID and project scope, and every request resolves
-current access from PostgreSQL.
+Roles are never embedded as trusted JWT state. Full API credentials and manual
+prerender credentials carry the actor ID. Remote-build deploy and prerender
+credentials carry the build's billing-owner ID plus project and build scope.
+For GitHub Actions builds, the connection records the user whose GitHub
+authorization admitted the build. Every request resolves current project access
+and build state from PostgreSQL.
 
 Membership writes take the project row `FOR UPDATE` before changing a member.
 Long or externally visible project mutations recheck the capability while
@@ -352,7 +355,7 @@ void project team accept <invitation-id>
 void project team decline <invitation-id>
 ```
 
-The existing project selector and repository link identify the project when
+The existing project selector and saved project link identify the project when
 `--project` is absent. Project-scoped commands require a connected Void Platform
 project and give a clear error for a direct Cloudflare target. The account-scoped
 `pending`, `accept`, and `decline` commands use the connected Void Platform even

@@ -116,7 +116,11 @@ describe('project team target selection', () => {
           },
         ]),
       )
-      .mockResolvedValueOnce(Response.json({ members: [] }));
+      .mockResolvedValueOnce(
+        Response.json({
+          members: [{ user: { id: 'owner_1', login: 'owner' }, role: 'owner' }],
+        }),
+      );
     vi.stubGlobal('fetch', fetchMock);
     vi.spyOn(console, 'log').mockImplementation(() => undefined);
     vi.spyOn(process.stdout, 'write').mockImplementation(() => true);

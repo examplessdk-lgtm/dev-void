@@ -65,6 +65,7 @@ import {
   isAdminSuspended,
   REASON_REQUESTS_EXCEEDED,
   REASON_SANDBOX_RUNTIME_EXCEEDED,
+  routingSuspensionReason,
 } from '../suspension.ts';
 import { getCurrentBillingPeriodStart, PLAN_LIMITS, type PlanId } from '../tiers.ts';
 import type { DeployManifest, Project, User } from '../types.ts';
@@ -483,10 +484,18 @@ async function commitOwnershipTransfer(
         'ownership_state_conflict',
       );
     }
+    const [clock] = await txDb
+      .select({
+        transferredAt: sql<string>`to_char(date_trunc('milliseconds', clock_timestamp()), 'YYYY-MM-DD HH24:MI:SS.MS')`,
+      })
+      .from(projects)
+      .where(eq(projects.id, projectId))
+      .limit(1);
+    const transferBoundary = clock!.transferredAt;
     if (openPeriod) {
       await txDb
         .update(projectOwnershipPeriods)
-        .set({ ends_at: sql`now()` })
+        .set({ ends_at: transferBoundary })
         .where(eq(projectOwnershipPeriods.id, openPeriod.id));
     } else {
       await txDb.insert(projectOwnershipPeriods).values({
@@ -494,7 +503,7 @@ async function commitOwnershipTransfer(
         project_id: projectId,
         owner_user_id: currentOwner.id,
         starts_at: lockedProject.created_at,
-        ends_at: sql`now()`,
+        ends_at: transferBoundary,
       });
     }
     const [newPeriod] = await txDb
@@ -503,10 +512,11 @@ async function commitOwnershipTransfer(
         id: generateId('pown'),
         project_id: projectId,
         owner_user_id: newOwner.id,
-        starts_at: sql`now()`,
+        starts_at: transferBoundary,
         changed_by_user_id: operatorUserId,
       })
-      .returning();
+      .returning({ startsAt: projectOwnershipPeriods.starts_at });
+    const transferredAt = newPeriod!.startsAt;
     const [updatedProject] = await txDb
       .update(projects)
       .set({ user_id: newOwner.id })
@@ -531,7 +541,7 @@ async function commitOwnershipTransfer(
       previousOwnerBillingCycleStart: currentOwner.billing_cycle_start,
       newOwner,
       previousOwnershipStartedAt: openPeriod?.starts_at ?? lockedProject.created_at,
-      transferredAt: newPeriod!.starts_at,
+      transferredAt,
       changed: true,
     };
   });
@@ -625,8 +635,9 @@ async function republishProjectOwnerState(
           delete entry.limits;
         }
       }
-      if (owner.suspended_reason) {
-        entry.suspended = owner.suspended_reason;
+      const suspensionReason = routingSuspensionReason(owner.suspended_reason);
+      if (suspensionReason) {
+        entry.suspended = suspensionReason;
       } else {
         delete entry.suspended;
       }

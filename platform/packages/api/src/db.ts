@@ -1085,6 +1085,42 @@ export async function getProjectOwnershipPeriodsByProjectIds(
     .orderBy(asc(projectOwnershipPeriods.project_id), asc(projectOwnershipPeriods.starts_at));
 }
 
+export async function getProjectUsageOwnershipSnapshot(
+  db: Db,
+  projectIds: ReadonlyArray<string>,
+): Promise<
+  Readonly<{
+    projects: ReadonlyArray<Project>;
+    ownershipPeriods: ReadonlyArray<ProjectOwnershipPeriod>;
+  }>
+> {
+  const ids = [...new Set(projectIds)].sort();
+  if (ids.length === 0) {
+    return { projects: [], ownershipPeriods: [] };
+  }
+  return db.transaction(async (tx) => {
+    const lockedProjects = await tx
+      .select()
+      .from(projects)
+      .where(inArray(projects.id, ids))
+      .orderBy(asc(projects.id))
+      .for('share');
+    const lockedProjectIds = lockedProjects.map((project) => project.id);
+    const ownershipPeriods =
+      lockedProjectIds.length === 0
+        ? []
+        : await tx
+            .select()
+            .from(projectOwnershipPeriods)
+            .where(inArray(projectOwnershipPeriods.project_id, lockedProjectIds))
+            .orderBy(
+              asc(projectOwnershipPeriods.project_id),
+              asc(projectOwnershipPeriods.starts_at),
+            );
+    return { projects: lockedProjects, ownershipPeriods };
+  });
+}
+
 export async function getOpenProjectOwnershipPeriodsByProjectIds(
   db: Db,
   projectIds: ReadonlyArray<string>,

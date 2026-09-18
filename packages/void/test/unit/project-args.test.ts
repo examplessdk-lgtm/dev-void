@@ -100,9 +100,11 @@ describe('parseProjectArgs', () => {
     });
 
     it('requires a registered email input and valid roles', () => {
-      expect(() => parseProjectArgs(['team', 'invite', 'member', '--role', 'reader'])).toThrow(
-        'Invitee must be a registered email address',
-      );
+      for (const email of ['member', '@example.com', 'member@']) {
+        expect(() => parseProjectArgs(['team', 'invite', email, '--role', 'reader'])).toThrow(
+          'Invitee must be a registered email address',
+        );
+      }
       expect(() =>
         parseProjectArgs(['team', 'invite', 'member@example.com', '--role', 'owner']),
       ).toThrow("Invalid role 'owner'");

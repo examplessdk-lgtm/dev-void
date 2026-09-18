@@ -2022,6 +2022,66 @@ describe('POST /projects/:id/deploy', () => {
       }
     });
 
+    it('rechecks collaborator access under the project lock before dispatching migrations', async () => {
+      const owner = await createTestUser(env.db, 'migration-race-owner');
+      const collaborator = await createTestUser(env.db, 'migration-race-collaborator');
+      const project = await createTestProject(env.db, owner.id, 'migration-access-race');
+      await env.db.insert(projectMembers).values({
+        project_id: project.id,
+        user_id: collaborator.id,
+        role: 'collaborator',
+        added_by_user_id: owner.id,
+      });
+      mockCfApi({
+        createD1: () => cfSuccess({ uuid: 'd1-access-race', name: 'test-db' }),
+      });
+
+      let migrateCalls = 0;
+      const originalDispatch = env.DISPATCH;
+      env.DISPATCH = {
+        get: () => ({
+          fetch: async (req: Request) => {
+            const url = new URL(req.url);
+            if (url.pathname === '/__void/ready') {
+              await env.db
+                .update(projectMembers)
+                .set({ role: 'reader' })
+                .where(eq(projectMembers.user_id, collaborator.id));
+              return Response.json({ ready: true });
+            }
+            migrateCalls++;
+            return Response.json({
+              ok: true,
+              migrations: [{ name: '001_create_table.sql', applied: true, durationMs: 1 }],
+            });
+          },
+        }),
+      } as unknown as DispatchNamespace;
+
+      try {
+        const response = await app.fetch(
+          await buildDeployRequest(env, project.id, collaborator.jwt, {
+            manifest: {
+              version: 3,
+              bindings: { d1: ['DB'] },
+              migrations: { dialect: 'sqlite', pending: 1 },
+            },
+          }),
+          env,
+        );
+        expect(response.status).toBe(200);
+        const events = parseDeployStream(await response.text());
+        expect(events.at(-1)).toMatchObject({
+          event: 'error',
+          step: 'migration',
+          message: 'forbidden',
+        });
+        expect(migrateCalls).toBe(0);
+      } finally {
+        env.DISPATCH = originalDispatch;
+      }
+    });
+
     it('treats 404 from readiness probe as compatible (older worker without /__void/ready)', async () => {
       const user = await createTestUser(env.db);
       const project = await createTestProject(env.db, user.id, 'migrate-compat-404-test');

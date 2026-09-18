@@ -1,9 +1,4 @@
-import {
-  createDb,
-  getProjectOwnershipPeriodsByProjectIds,
-  getProjectsByIds,
-  getUser,
-} from './db.ts';
+import { createDb, getProjectUsageOwnershipSnapshot, getUser } from './db.ts';
 import type { ApiEnv } from './env.ts';
 import { getCurrentBillingPeriodStart, getPlanLimits } from './tiers.ts';
 import {
@@ -132,34 +127,25 @@ export async function processUsageEventBatch(
   }
 
   const db = createDb(env.HYPERDRIVE.connectionString);
-  let projects: Awaited<ReturnType<typeof getProjectsByIds>>;
+  let ownershipSnapshot: Awaited<ReturnType<typeof getProjectUsageOwnershipSnapshot>>;
   try {
-    projects = await getProjectsByIds(db, [
-      ...new Set(authenticatedRecords.map(({ event }) => event.projectId)),
-    ]);
-  } catch (error) {
-    console.error('[usage-queue] project identity lookup failed:', error);
-    batch.retryAll();
-    return;
-  }
-  const projectsById = new Map(projects.map((project) => [project.id, project]));
-  let ownershipPeriodsByProject: Map<
-    string,
-    Array<Awaited<ReturnType<typeof getProjectOwnershipPeriodsByProjectIds>>[number]>
-  >;
-  try {
-    const periods = await getProjectOwnershipPeriodsByProjectIds(
+    ownershipSnapshot = await getProjectUsageOwnershipSnapshot(
       db,
-      projects.map((project) => project.id),
+      authenticatedRecords.map(({ event }) => event.projectId),
     );
-    ownershipPeriodsByProject = new Map(projects.map((project) => [project.id, []]));
-    for (const period of periods) {
-      ownershipPeriodsByProject.get(period.project_id)?.push(period);
-    }
   } catch (error) {
     console.error('[usage-queue] project ownership lookup failed:', error);
     batch.retryAll();
     return;
+  }
+  const projects = ownershipSnapshot.projects;
+  const projectsById = new Map(projects.map((project) => [project.id, project]));
+  const ownershipPeriodsByProject = new Map<
+    string,
+    Array<(typeof ownershipSnapshot.ownershipPeriods)[number]>
+  >(projects.map((project) => [project.id, []]));
+  for (const period of ownershipSnapshot.ownershipPeriods) {
+    ownershipPeriodsByProject.get(period.project_id)?.push(period);
   }
   const records = authenticatedRecords.flatMap(({ event, at }) => {
     const project = projectsById.get(event.projectId);

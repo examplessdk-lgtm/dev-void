@@ -350,7 +350,7 @@ function parseTeamArgs(rest: Array<string>): ProjectArgs {
       );
     }
     const email = positionals[0]!;
-    if (!email.includes('@') || /\s/.test(email)) {
+    if (email.length > 320 || !/^[^\s@]+@[^\s@]+$/.test(email)) {
       throw new Error('project: Invitee must be a registered email address.');
     }
     return { subcommand: 'team', action, email, role: role as TeamRole, projectSlug };
