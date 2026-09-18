@@ -258,7 +258,10 @@ async function operatorResult(
         : 'The email domain operation failed.';
     throw new OperatorError(response.status, message, 'email_domain_error', body);
   }
-  return { action, target, domain: body };
+  // A kept row after a failed destructive step answers 200 with
+  // `ok: false` (the owner contract); surface that at the top level so the
+  // audit records a failed mutation and the CLI reports the partial result.
+  return { action, target, ...(body.ok === false ? { ok: false } : {}), domain: body };
 }
 
 function requireDomain(raw: string): string {
@@ -390,7 +393,11 @@ export async function syncOperatorEmailDomain(
         'Redeploys the relay worker at the current version, rotates its secret and re-ensures the zone catch-all.',
     });
   }
-  return operatorResult(await syncEmailDomainForProject(context, project, domain), action, target);
+  return operatorResult(
+    await syncEmailDomainForProject(context, project, domain, 'admin'),
+    action,
+    target,
+  );
 }
 
 export async function removeOperatorEmailDomain(
@@ -413,7 +420,7 @@ export async function removeOperatorEmailDomain(
     });
   }
   return operatorResult(
-    await removeEmailDomainForProject(context, project, domain, force),
+    await removeEmailDomainForProject(context, project, domain, force, 'admin'),
     action,
     target,
   );

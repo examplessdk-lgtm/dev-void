@@ -76,10 +76,15 @@ Custom-domain sends are unchanged. Burst cap, monthly cap, the
 Storage: authoritative in the `platform_settings` table (key/value jsonb —
 the installation's runtime-changeable settings), mirrored to routing KV as
 `email-recipient-policy` for the proxy's hot path (`cacheTtl: 60`, like the
-allowlist). An absent or unreadable mirror means `verified`; the writer
-publishes DB first, then KV, and every read surface repairs a drifted mirror.
-Surface: the admin UI's **Email** page and `void platform email policy` /
-`policy-set <mode> [--domains a,b]`, recorded in `operator_events`.
+allowlist). An absent or unreadable mirror means `verified` — `any` included
+when its shape is not the api's. The writer publishes delete mirror → write
+DB → put mirror inside one transaction, so a KV failure rolls the DB back and
+leaves the proxy closed rather than on an older, looser mirror; publisher and
+repair serialize on a transaction-scoped advisory lock because KV has no
+compare-and-set, and every read surface (operator, owner settings, admin
+page) repairs a drifted mirror. Surface: the admin UI's **Email** page and
+`void platform email policy` / `policy-set <mode> [--domains a,b]`, recorded
+in `operator_events`.
 
 #### Quotas and visibility
 
@@ -755,7 +760,10 @@ void platform email limit    <project> [--monthly N] [--burst N]
 the token is read from standard input once and rides both the preview (which
 only classifies it) and the apply, never the audit target. Every POST previews
 first: the add preview resolves the project, the existing row and the public
-MX decision without a single Cloudflare call. The admin UI's project page has
+MX decision without a single Cloudflare call. A kept row after a failed
+destructive step (the owner contract's `200 { ok: false }`) surfaces as a
+top-level `ok: false` on the operator result, so the audit records a failed
+mutation and the CLI reports a partial result. The admin UI's project page has
 the add form (blank token = platform credential) and shows `managed_by`; its
 `revoke` and `revoke-grant` actions stay.
 
@@ -786,7 +794,19 @@ unchanged, and the operator layer re-shapes its JSON responses.
   token is not a user token) and refuses at `zone_lookup`, before any write,
   when the zone's account is not `CF_ACCOUNT_ID`, naming `--token-stdin` for
   a zone in another account. On the managed platform this is always the case,
-  so the platform's own token never touches a customer zone.
+  so the platform's own token never touches a customer zone. The same pin
+  guards every later path: a pasted-token row whose recorded account is
+  foreign cannot be re-added or synced on the platform credential (409, the
+  stored token untouched), checked on the locked row.
+- Ownership is authorized on the LOCKED row for add, sync and remove alike —
+  an owner's request and an administrator's add can interleave, and the
+  unlocked read only chooses the message. An administrator never takes over
+  an owner's row (409, "ask them to remove it first"); an owner never rotates
+  or removes an administrator's (403, the operator command named).
+- A row of the `platform` kind is readable only by a runtime that knows the
+  kind: an api or proxy still serving from before the upgrade would fail its
+  lease. Register administrator domains after an upgrade has finished; the
+  migration itself is compatible with the previous Workers.
 - The status probe for a `platform` row is a zone-scoped read
   (`GET /zones/{z}/email/routing`, or the zone lookup before a zone is known).
   A refusal reads `probe_failed`, never `token_revoked` / `token_expired` —

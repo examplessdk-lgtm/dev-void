@@ -1262,8 +1262,13 @@ describe('POST /admin/email/:projectId/domains/:domain/revoke-grant', () => {
 describe('admin email settings page', () => {
   test('renders the recipient policy and domain management forms with the defaults selected', async () => {
     const { adminJwt } = await seedAdminAndProject();
+    // A stale, looser mirror is republished from the database on this read.
+    await env.ROUTING.put('email-recipient-policy', JSON.stringify({ mode: 'any', domains: [] }));
     const res = await get('/admin/email', adminJwt);
     expect(res.status).toBe(200);
+    expect(await env.ROUTING.get('email-recipient-policy')).toBe(
+      JSON.stringify({ mode: 'verified', domains: [] }),
+    );
     const html = await res.text();
     expect(html).toContain('Recipient policy');
     expect(html).toContain('Domain management');
@@ -1372,6 +1377,23 @@ describe('admin add domain form', () => {
 
     const html = await (await get(`/admin/email/${projectId}`, adminJwt)).text();
     expect(html).toContain('admin (platform credential)');
+  });
+
+  test('refuses to take over a row the project owner registered', async () => {
+    const { adminJwt, projectId } = await seedAdminAndProject();
+    const row = await seedEmailDomain(projectId, 'owned.test', { credentialKind: 'api_token' });
+    const cfCalls = recordCustomerCfCalls();
+    const res = await post(`/admin/email/${projectId}/domains/add`, adminJwt, {
+      domain: 'owned.test',
+      token: '',
+    });
+    expect(res.status).toBe(409);
+    expect(await res.text()).toContain('registered by its project owner');
+    const after = (await domainRow(projectId, 'owned.test'))!;
+    expect(after.managed_by).toBe('owner');
+    expect(after.credential_kind).toBe('api_token');
+    expect(after.token_ciphertext).toBe(row.token_ciphertext);
+    expect(cfCalls).toEqual([]);
   });
 
   test('renders a 400 for a blank domain and records the failed attempt', async () => {

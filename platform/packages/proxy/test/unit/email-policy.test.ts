@@ -77,6 +77,8 @@ describe('readRecipientPolicy', () => {
     ['a JSON array', JSON.stringify(['acme.test'])],
     ['null', 'null'],
     ['an unknown mode', JSON.stringify({ mode: 'open', domains: [] })],
+    ['`any` without a list', JSON.stringify({ mode: 'any' })],
+    ['`any` with a non-array list', JSON.stringify({ mode: 'any', domains: 'corrupt' })],
     ['`domains` without a list', JSON.stringify({ mode: 'domains' })],
     ['`domains` with an empty list', JSON.stringify({ mode: 'domains', domains: [] })],
     ['`domains` with only non-strings', JSON.stringify({ mode: 'domains', domains: [1, null] })],

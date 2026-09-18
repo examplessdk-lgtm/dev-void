@@ -28,7 +28,11 @@ import {
   parseEmailLimit as parseLimit,
 } from '../../email/limits.ts';
 import { removeEmailDomain } from '../../email/relay-engine.ts';
-import { getEmailDomainManagement, getEmailRecipientPolicy } from '../../email/settings.ts';
+import {
+  getEmailDomainManagement,
+  getEmailRecipientPolicy,
+  repairEmailRecipientPolicyMirror,
+} from '../../email/settings.ts';
 import type { ApiEnv } from '../../env.ts';
 import { executeAuditedMutation, operatorAuditIntent } from '../../operator/audit.ts';
 import { OperatorError } from '../../operator/common.ts';
@@ -71,6 +75,10 @@ const META = 'font-size: 0.8rem; color: #666';
 // GET /email/ — installation-wide recipient policy and domain management
 app.get('/', async (context) => {
   const db = context.get('db');
+  // Every read surface republishes a drifted mirror, this page included:
+  // an administrator who sees `verified` here must be seeing what the
+  // proxy enforces.
+  await repairEmailRecipientPolicyMirror(db, context.env.ROUTING);
   const [policy, management] = await Promise.all([
     getEmailRecipientPolicy(db),
     getEmailDomainManagement(db),

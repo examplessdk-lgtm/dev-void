@@ -236,6 +236,34 @@ describe('operator email domain-add', () => {
     expect(JSON.stringify(recorded)).not.toContain(CUSTOMER_TOKEN);
   });
 
+  test('refuses to re-run a pasted-token row on the platform credential when its zone is elsewhere', async () => {
+    const project = await seedProject();
+    stubCustomerCf({ zones: { 'elsewhere.test': FOREIGN_ZONE } });
+    expect(
+      (
+        await req('/email/domains', {
+          domain: 'elsewhere.test',
+          project: project.id,
+          apiToken: CUSTOMER_TOKEN,
+        })
+      ).status,
+    ).toBe(200);
+    const before = (await rowFor('elsewhere.test'))!;
+    expect(before).toMatchObject({ credential_kind: 'api_token', status: 'active' });
+
+    const stub = stubCustomerCf({ zones: { 'elsewhere.test': FOREIGN_ZONE } });
+    const response = await req('/email/domains', { domain: 'elsewhere.test', project: project.id });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({
+      message: expect.stringContaining(FOREIGN_ZONE.accountId),
+    });
+    // The stored token is untouched and the runtime token never left.
+    const after = (await rowFor('elsewhere.test'))!;
+    expect(after.credential_kind).toBe('api_token');
+    expect(after.token_ciphertext).toBe(before.token_ciphertext);
+    expect(stub.calls).toEqual([]);
+  });
+
   test('does not take over a row the project owner registered', async () => {
     const project = await seedProject();
     await seedOwnerDomain(project.id, 'owned.test');
@@ -396,6 +424,29 @@ describe('operator email domain list, status, sync and remove', () => {
     expect(await env.ROUTING.get('email-domain:example.com')).toBeNull();
     const recorded = await events();
     expect(JSON.parse(recorded.at(-1)!.target)).toEqual({ domain: 'example.com', force: false });
+  });
+
+  test('a kept row after a failed relay delete is reported as a failed mutation, not success', async () => {
+    const project = await seedProject();
+    await addPlatformDomain(project.id);
+    stubCustomerCf({
+      zones: { 'example.com': PLATFORM_ZONE },
+      catchAllRule: { enabled: true, workerName: RELAY_WORKER_BASE_NAME },
+      failOn: { scriptDelete: { message: 'boom', status: 500 } },
+    });
+    const response = await req('/email/domains/example.com/remove', {});
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      action: 'email.domain.remove',
+      ok: false,
+      domain: { ok: false, removed: false, failed_steps: expect.arrayContaining(['delete_relay']) },
+    });
+    expect((await rowFor('example.com'))?.setup_state).toMatchObject({ failed_step: 'remove' });
+    const recorded = await events();
+    expect(recorded.at(-1)).toMatchObject({
+      action: 'email/domains/example.com/remove',
+      status: 'failed',
+    });
   });
 
   test('remove --force is a JSON boolean and drops the row past a failed relay delete', async () => {

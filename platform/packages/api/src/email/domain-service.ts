@@ -95,6 +95,51 @@ export function adminEmailDomainCommand(
 }
 
 /**
+ * Who may change a row: its `managed_by` side, and nobody else. An owner
+ * touching an administrator's row is pointed at the operator command (403);
+ * an administrator touching an owner's row is asked to have it removed
+ * first (409) — a takeover would revoke the owner's grant. `null` when the
+ * actor matches. Callers run this on the unlocked read for the message and
+ * AGAIN on the locked row, because either side can commit in between.
+ */
+function refuseCrossOwnership(
+  context: Context<ApiEnv>,
+  row: Pick<EmailDomain, 'managed_by' | 'domain'>,
+  actor: EmailDomain['managed_by'],
+  slug: string,
+  verb: 'add' | 'sync' | 'remove' = 'add',
+): Response | null {
+  if (row.managed_by === actor) {
+    return null;
+  }
+  if (actor === 'owner') {
+    return context.json(
+      {
+        error: 'this email domain is managed by the platform administrator',
+        adminCommand: adminEmailDomainCommand(verb, row.domain, slug),
+      },
+      403,
+    );
+  }
+  return context.json(
+    { error: 'this email domain was registered by its project owner; ask them to remove it first' },
+    409,
+  );
+}
+
+/**
+ * A `platform` row may only act on a zone in the platform's own account.
+ * A row that has not learned its account yet passes — the engine's zone
+ * lookup pins it before any write.
+ */
+function platformAccountAllows(
+  context: Context<ApiEnv>,
+  row: Pick<EmailDomain, 'account_id'>,
+): boolean {
+  return row.account_id === null || row.account_id === context.env.CF_ACCOUNT_ID;
+}
+
+/**
  * The proxy origin baked into the relay worker as VOID_PROXY_ORIGIN — the
  * same resolution the platform discovery document uses.
  */
@@ -454,6 +499,8 @@ export async function syncEmailDomainAndApply(
   projectId: string,
   rowId: string,
   proxyOrigin: string,
+  /** Who asked; authorization runs on the locked row, where it cannot be raced. */
+  actor: Readonly<{ managedBy: EmailDomain['managed_by']; projectSlug: string }>,
 ): Promise<Response> {
   const db = context.get('db');
   let outcome:
@@ -463,7 +510,8 @@ export async function syncEmailDomainAndApply(
         applied: EmailDomain;
       }>
     | Readonly<{ kind: 'project_gone' }>
-    | Readonly<{ kind: 'project_deleting' }>;
+    | Readonly<{ kind: 'project_deleting' }>
+    | Readonly<{ kind: 'refused'; response: Response }>;
   try {
     outcome = await db.transaction(async (tx) => {
       // The project lock comes FIRST — teardown's own order
@@ -505,6 +553,12 @@ export async function syncEmailDomainAndApply(
         // on the lock.
         throw new Error('email_domains row vanished mid-sync');
       }
+      const refused =
+        refuseCrossOwnership(context, current, actor.managedBy, actor.projectSlug, 'sync') ??
+        refusePlatformCredentialOffAccount(context, current);
+      if (refused) {
+        return { kind: 'refused', response: refused } as const;
+      }
       const { result, applied } = await syncEmailDomainLocked(
         context,
         tx,
@@ -538,12 +592,37 @@ export async function syncEmailDomainAndApply(
   if (outcome.kind === 'project_deleting') {
     return context.json({ error: 'Project is being deleted' }, 409);
   }
+  if (outcome.kind === 'refused') {
+    return outcome.response;
+  }
   return context.json(
     {
       ...serializeEmailDomain(outcome.applied, outcome.result.error),
       ...(outcome.result.catch_all === undefined ? {} : { catch_all: outcome.result.catch_all }),
     },
     200,
+  );
+}
+
+/**
+ * A `platform` row whose recorded account is not the platform's must not be
+ * synced or re-run: that would send the runtime token to a customer account.
+ * Such a row can only come from a pasted-token registration later re-added
+ * on the platform credential, which the add path already refuses; this is
+ * the locked-row backstop.
+ */
+function refusePlatformCredentialOffAccount(
+  context: Context<ApiEnv>,
+  row: Pick<EmailDomain, 'credential_kind' | 'account_id' | 'domain'>,
+): Response | null {
+  if (row.credential_kind !== 'platform' || platformAccountAllows(context, row)) {
+    return null;
+  }
+  return context.json(
+    {
+      error: `the zone for ${row.domain} is in Cloudflare account ${row.account_id}, not the platform's; re-add it with --token-stdin and a token for that account`,
+    },
+    409,
   );
 }
 
@@ -722,6 +801,7 @@ export async function runEmailDomainEngineSerialized(
     | Readonly<{ kind: 'project_gone' }>
     | Readonly<{ kind: 'project_deleting' }>
     | Readonly<{ kind: 'row_gone' }>
+    | Readonly<{ kind: 'refused'; response: Response }>
     | Readonly<{
         kind: 'engine_failed';
         err: unknown;
@@ -771,6 +851,10 @@ export async function runEmailDomainEngineSerialized(
       const setupIncomplete =
         current.status === 'failed' || !current.relay_worker_name || !current.account_id;
       if (!setupIncomplete) {
+        const refused = refusePlatformCredentialOffAccount(context, current);
+        if (refused) {
+          return { kind: 'refused', response: refused } as const;
+        }
         const { result, applied } = await syncEmailDomainLocked(
           context,
           tx,
@@ -921,6 +1005,9 @@ export async function runEmailDomainEngineSerialized(
   if (outcome.kind === 'row_gone') {
     return context.json({ error: 'email domain not found' }, 404);
   }
+  if (outcome.kind === 'refused') {
+    return outcome.response;
+  }
   if (outcome.kind === 'engine_failed') {
     const err = outcome.err;
     if (isUniqueViolation(err) && checkpoint !== null) {
@@ -1046,6 +1133,7 @@ async function replaceEmailDomainCredential(
   requestedMode: unknown,
   attemptId: string | undefined,
   managedBy: EmailDomain['managed_by'],
+  projectSlug: string,
 ): Promise<Response> {
   const db = context.get('db');
   const domain = existing.domain;
@@ -1062,7 +1150,12 @@ async function replaceEmailDomainCredential(
   // commit the row holds the NEW credential, so no old-chain rotation can
   // follow.
   let oldGrantRefreshToken: string | null = null;
-  type SwapOutcome = 'swapped' | 'project_gone' | 'project_deleting' | 'row_gone';
+  type SwapOutcome =
+    | 'swapped'
+    | 'project_gone'
+    | 'project_deleting'
+    | 'row_gone'
+    | Readonly<{ refused: Response }>;
   const swap: SwapOutcome = await db.transaction(async (tx): Promise<SwapOutcome> => {
     // The PROJECT row lock comes first — teardown's own order — with the
     // 'deleting' verdict re-read under it: a replace admitted on the
@@ -1085,6 +1178,8 @@ async function replaceEmailDomainCredential(
     const locked = await tx
       .select({
         credential_kind: emailDomains.credential_kind,
+        managed_by: emailDomains.managed_by,
+        account_id: emailDomains.account_id,
         token_ciphertext: emailDomains.token_ciphertext,
         token_iv: emailDomains.token_iv,
         token_key_version: emailDomains.token_key_version,
@@ -1096,6 +1191,22 @@ async function replaceEmailDomainCredential(
     const current = locked[0];
     if (!current) {
       return 'row_gone';
+    }
+    // The unlocked checks in addEmailDomainForProject again, on the locked
+    // row: the other side may have committed its own add in between.
+    const refused = refuseCrossOwnership(context, { ...current, domain }, managedBy, projectSlug);
+    if (refused) {
+      return { refused };
+    }
+    if (credentialKind === 'platform' && !platformAccountAllows(context, current)) {
+      return {
+        refused: context.json(
+          {
+            error: `the zone for ${domain} is in Cloudflare account ${current.account_id}, not the platform's; re-add it with --token-stdin and a token for that account`,
+          },
+          409,
+        ),
+      };
     }
     if (current.credential_kind === 'oauth_grant') {
       try {
@@ -1135,6 +1246,9 @@ async function replaceEmailDomainCredential(
       credentialKind === 'oauth_grant' && credential !== null ? credential : undefined,
       swap === 'project_deleting' ? existing : null,
     );
+    if (typeof swap === 'object') {
+      return swap.refused;
+    }
     return swap === 'project_gone'
       ? context.json({ error: 'project not found' }, 404)
       : swap === 'project_deleting'
@@ -1359,17 +1473,26 @@ export async function addEmailDomainForProject(
 
   const existing = await getEmailDomainRow(db, projectId, domain);
   if (existing) {
-    // An administrator's row is not an owner's to re-run: the credential it
-    // runs on is the platform's, and a replace would swap it for the
-    // owner's grant.
-    if (existing.managed_by === 'admin' && input.managedBy === 'owner') {
+    // Neither side re-runs the other's row. An administrator's row runs on
+    // the platform's credential, which a replace would swap for the owner's
+    // grant; an owner's row holds the owner's credential, which an
+    // administrator's re-add would revoke while flipping the row to admin.
+    // Both are re-checked under the row lock in replaceEmailDomainCredential.
+    const refused = refuseCrossOwnership(context, existing, input.managedBy, project.slug);
+    if (refused) {
       await revokeRejectedGrant(context, postedRefreshToken);
+      return refused;
+    }
+    // The platform's own token must never be pointed at a customer zone: a
+    // row that learned a foreign account (registered with a pasted token)
+    // cannot be re-run on the platform credential, and refusing here keeps
+    // the stored token in place.
+    if (credentialKind === 'platform' && !platformAccountAllows(context, existing)) {
       return context.json(
         {
-          error: 'this email domain is managed by the platform administrator',
-          adminCommand: adminEmailDomainCommand('add', domain, project.slug),
+          error: `the zone for ${domain} is in Cloudflare account ${existing.account_id}, not the platform's; re-add it with --token-stdin and a token for that account`,
         },
-        403,
+        409,
       );
     }
     // "add again replaces the token, rules stay" (design doc, branch
@@ -1384,7 +1507,8 @@ export async function addEmailDomainForProject(
       proxyOrigin,
       input.mode,
       attemptId,
-      input.managedBy === 'admin' ? 'admin' : existing.managed_by,
+      input.managedBy,
+      project.slug,
     );
   }
 
@@ -1750,6 +1874,8 @@ export async function syncEmailDomainForProject(
   context: Context<ApiEnv>,
   project: Project,
   rawDomain: string,
+  /** Who asked: an owner may not touch an administrator's row, and vice versa. */
+  actor: EmailDomain['managed_by'],
 ): Promise<Response> {
   const projectId = project.id;
   // Sync mutates CF state and the row — same teardown guard as add/remove.
@@ -1767,7 +1893,10 @@ export async function syncEmailDomainForProject(
   // write-only). The row and credential are re-read inside the row
   // lock, so a replace that lands while this request waits is synced
   // as the NEW credential, never verified as the superseded one.
-  return syncEmailDomainAndApply(context, projectId, row.id, proxyOriginForEmail(context.env));
+  return syncEmailDomainAndApply(context, projectId, row.id, proxyOriginForEmail(context.env), {
+    managedBy: actor,
+    projectSlug: project.slug,
+  });
 }
 
 export async function removeEmailDomainForProject(
@@ -1775,6 +1904,8 @@ export async function removeEmailDomainForProject(
   project: Project,
   rawDomain: string,
   force: boolean,
+  /** Who asked: an owner may not touch an administrator's row, and vice versa. */
+  actor: EmailDomain['managed_by'],
 ): Promise<Response> {
   const projectId = project.id;
   if (project.status === 'deleting') {
@@ -1807,7 +1938,8 @@ export async function removeEmailDomainForProject(
   type Removal =
     | Readonly<{ kind: 'removed'; failedSteps: ReadonlyArray<string> }>
     | Readonly<{ kind: 'kept'; failedSteps: ReadonlyArray<string> }>
-    | Readonly<{ kind: 'vanished' }>;
+    | Readonly<{ kind: 'vanished' }>
+    | Readonly<{ kind: 'refused'; response: Response }>;
   const removal: Removal = await withEmailDomainRowLock(db, row.id, async (tx) => {
     const locked = await tx.select().from(emailDomains).where(eq(emailDomains.id, row.id)).limit(1);
     const current = locked[0];
@@ -1815,6 +1947,12 @@ export async function removeEmailDomainForProject(
       // Teardown's cascade can take the row mid-request — the
       // idempotent delete branch below proceeds.
       return { kind: 'vanished' };
+    }
+    // Authorization on the LOCKED row: the other side may have committed
+    // its own add between this request's entry read and the lock.
+    const refused = refuseCrossOwnership(context, current, actor, project.slug, 'remove');
+    if (refused) {
+      return { kind: 'refused', response: refused };
     }
     let failedSteps: ReadonlyArray<string>;
     try {
@@ -1883,6 +2021,9 @@ export async function removeEmailDomainForProject(
     return { kind: 'removed', failedSteps };
   });
 
+  if (removal.kind === 'refused') {
+    return removal.response;
+  }
   if (removal.kind === 'kept') {
     return context.json({ ok: false, removed: false, failed_steps: removal.failedSteps }, 200);
   }

@@ -22,7 +22,6 @@ import { MAX_DOMAIN_LENGTH, normalizeEmailDomain } from '../email/domain-name.ts
 import {
   addEmailDomainForProject,
   adminEmailDomainCommand,
-  getEmailDomainRow,
   getEmailDomainStatusForProject,
   removeEmailDomainForProject,
   revokeRejectedGrant,
@@ -781,17 +780,7 @@ const app = new Hono<ApiEnv>()
     if (project.user_id !== context.get('user').id) {
       return context.json({ error: 'forbidden' }, 403);
     }
-    const refused = await refuseOwnerChangeToAdminRow(
-      context,
-      db,
-      projectId,
-      context.req.param('domain'),
-      'sync',
-    );
-    if (refused) {
-      return refused;
-    }
-    return syncEmailDomainForProject(context, project, context.req.param('domain'));
+    return syncEmailDomainForProject(context, project, context.req.param('domain'), 'owner');
   })
 
   .delete('/:id/email/domains/:domain', async (context) => {
@@ -804,49 +793,14 @@ const app = new Hono<ApiEnv>()
     if (project.user_id !== context.get('user').id) {
       return context.json({ error: 'forbidden' }, 403);
     }
-    const refused = await refuseOwnerChangeToAdminRow(
-      context,
-      db,
-      projectId,
-      context.req.param('domain'),
-      'remove',
-    );
-    if (refused) {
-      return refused;
-    }
     return removeEmailDomainForProject(
       context,
       project,
       context.req.param('domain'),
       context.req.query('force') === '1',
+      'owner',
     );
   });
-
-/**
- * An administrator's row runs on the platform's credential; the owner may
- * read it but must not rotate or tear it down. `null` when the row is the
- * owner's (or absent — the operation then answers its own 404).
- */
-async function refuseOwnerChangeToAdminRow(
-  context: Context<ApiEnv>,
-  db: Db,
-  projectId: string,
-  rawDomain: string,
-  verb: 'sync' | 'remove',
-): Promise<Response | null> {
-  const domain = normalizeEmailDomain(rawDomain);
-  const row = await getEmailDomainRow(db, projectId, domain);
-  if (!row || row.managed_by !== 'admin') {
-    return null;
-  }
-  return context.json(
-    {
-      error: 'this email domain is managed by the platform administrator',
-      adminCommand: adminEmailDomainCommand(verb, domain),
-    },
-    403,
-  );
-}
 
 function monthBucket(): string {
   const d = new Date();

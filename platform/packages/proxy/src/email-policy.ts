@@ -47,16 +47,19 @@ export async function readRecipientPolicy(kv: KVNamespace): Promise<RecipientPol
     return VERIFIED_ONLY;
   }
   const { mode, domains } = parsed as { mode?: unknown; domains?: unknown };
+  // The api always writes `{ mode, domains: [] }`; anything else is not the
+  // api's mirror and must not widen the gate, `any` included.
+  if (!Array.isArray(domains)) {
+    return VERIFIED_ONLY;
+  }
   if (mode === 'any') {
     return { mode: 'any', domains: new Set() };
   }
   if (mode === 'domains') {
     const set = new Set<string>();
-    if (Array.isArray(domains)) {
-      for (const d of domains) {
-        if (typeof d === 'string' && d !== '') {
-          set.add(d.toLowerCase());
-        }
+    for (const d of domains) {
+      if (typeof d === 'string' && d !== '') {
+        set.add(d.toLowerCase());
       }
     }
     // An empty list is `verified` wearing another name; the api refuses to
