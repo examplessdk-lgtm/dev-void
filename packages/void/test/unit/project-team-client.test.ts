@@ -80,10 +80,8 @@ describe('PlatformClient project teams', () => {
     fetchMock.mockResolvedValueOnce(new Response(null, { status: 204 }));
     fetchMock.mockResolvedValueOnce(new Response(null, { status: 204 }));
 
-    await expect(client().revokeProjectInvitation(projectId, 'invite / 1')).resolves.toEqual({
-      ok: true,
-    });
-    await expect(client().leaveProject(projectId)).resolves.toEqual({ ok: true });
+    await client().revokeProjectInvitation(projectId, 'invite / 1');
+    await client().leaveProject(projectId);
     expect(request(0)[0]).toBe(`${apiUrl}/projects/${projectId}/invitations/invite%20%2F%201`);
     expect(request(1)[0]).toBe(`${apiUrl}/projects/${projectId}/leave`);
   });
@@ -95,15 +93,8 @@ describe('PlatformClient project teams', () => {
     fetchMock.mockResolvedValueOnce(new Response(null, { status: 204 }));
 
     await expect(client().listPendingProjectInvitations()).resolves.toEqual([invitation]);
-    await expect(
-      client().respondToProjectInvitation('invite / 1', 'accept'),
-    ).resolves.toMatchObject({
-      ok: true,
-      member: { role: 'reader' },
-    });
-    await expect(client().respondToProjectInvitation('invite / 1', 'decline')).resolves.toEqual({
-      ok: true,
-    });
+    await client().respondToProjectInvitation('invite / 1', 'accept');
+    await client().respondToProjectInvitation('invite / 1', 'decline');
     expect(request(0)[0]).toBe(`${apiUrl}/me/project-invitations`);
     expect(request(1)[0]).toBe(`${apiUrl}/project-invitations/invite%20%2F%201/accept`);
     expect(request(2)[0]).toBe(`${apiUrl}/project-invitations/invite%20%2F%201/decline`);

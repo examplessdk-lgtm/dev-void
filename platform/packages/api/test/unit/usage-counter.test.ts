@@ -649,7 +649,7 @@ describe('UsageCounter.handleRecord — sandbox', () => {
   it('retains lease watermarks across rollover so delayed prior-period envelopes add nothing', async () => {
     const boundary = Math.floor(Date.now() / 1000) * 1000;
     const boundaryIso = new Date(boundary).toISOString();
-    const { counter, storage, kv } = makeCounter({
+    const { counter, storage } = makeCounter({
       plan: 'pro',
       billingPeriodStart: '2026-01-01T00:00:00Z',
     });

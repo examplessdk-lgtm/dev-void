@@ -7,7 +7,7 @@ const LOG_LEVELS = new Set(['error', 'warn', 'info', 'log', 'debug', 'all']);
 const STATUS_FILTER = /^([1-5]xx|[1-5]\d{2}|all)$/;
 const TEAM_ROLES = new Set(['reader', 'collaborator', 'admin']);
 
-export type TeamRole = 'reader' | 'collaborator' | 'admin';
+type TeamRole = 'reader' | 'collaborator' | 'admin';
 
 export const projectSubcommands: Array<SubcommandDef> = [
   { name: 'status', arg: '[name]', description: 'Show deployments (omit name for linked project)' },

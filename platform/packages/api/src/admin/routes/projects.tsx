@@ -7,6 +7,7 @@ import { OperatorError } from '../../operator/common.ts';
 import {
   deleteOperatorProject,
   getOperatorProject,
+  previewOperatorProjectOwner,
   transferOperatorProjectOwner,
 } from '../../operator/tenant-service.ts';
 import { projectUrl, projectWithUrl } from '../../project-url.ts';
@@ -20,35 +21,6 @@ const PAGE_SIZE = 20;
 const app = new Hono<ApiEnv>();
 app.onError(renderOperationError);
 
-type OwnerSummary = Readonly<{
-  id: string;
-  login: string;
-  email: string | null;
-  plan: string;
-  suspended: boolean;
-  suspendedReason: string | null;
-}>;
-
-type OwnerTransferPreview = Readonly<{
-  target: { id: string; slug: string; userId: string };
-  currentOwner: OwnerSummary;
-  previousOwner: OwnerSummary | { id: string; deleted: true };
-  newOwner: OwnerSummary;
-  changed: boolean;
-  formerOwnerRole: 'admin' | null;
-  targetPreviousRole: string | null;
-  blockers: ReadonlyArray<{ kind: string; id: string; status: string }>;
-  github: {
-    installationId: string;
-    repository: string;
-    authorizedByUserId: string | null;
-    executor: string;
-  } | null;
-  routingUpdates: ReadonlyArray<string>;
-  counterUpdates: { detachUserId: string | null; attachUserId: string };
-  usageTransfer: string;
-}>;
-
 function transferTarget(body: Record<string, string | File>) {
   const value = body.userId;
   if (typeof value !== 'string' || !value.trim() || value.length > 512) {
@@ -57,7 +29,7 @@ function transferTarget(body: Record<string, string | File>) {
   return value.trim();
 }
 
-function suspensionLabel(owner: OwnerSummary) {
+function suspensionLabel(owner: { suspended: boolean; suspendedReason: string | null }) {
   return owner.suspended ? `Suspended (${owner.suspendedReason ?? 'unknown reason'})` : 'Active';
 }
 
@@ -254,13 +226,11 @@ app.post('/:id/owner/preview', async (context) => {
   const projectId = context.req.param('id');
   const body = await context.req.parseBody();
   const userId = transferTarget(body);
-  const result = (await transferOperatorProjectOwner(
-    context,
-    projectId,
-    userId,
-    true,
-  )) as unknown as OwnerTransferPreview;
+  const result = await previewOperatorProjectOwner(context, projectId, userId);
   const convergenceOnly = !result.changed;
+  const operationBlocked = result.blockers.some(
+    (blocker) => !convergenceOnly || blocker.kind === 'deletion',
+  );
 
   return context.html(
     <Layout
@@ -315,15 +285,20 @@ app.post('/:id/owner/preview', async (context) => {
         </p>
       )}
 
-      <h2>Active-work blockers</h2>
+      <h2>Operation blockers</h2>
       {result.blockers.length > 0 ? (
-        <ul>
-          {result.blockers.map((blocker) => (
-            <li key={`${blocker.kind}:${blocker.id}`}>
-              {blocker.kind}: {blocker.id} ({blocker.status})
-            </li>
-          ))}
-        </ul>
+        <>
+          <ul>
+            {result.blockers.map((blocker) => (
+              <li key={`${blocker.kind}:${blocker.id}`}>
+                {blocker.kind}: {blocker.id} ({blocker.status})
+              </li>
+            ))}
+          </ul>
+          {convergenceOnly && !operationBlocked ? (
+            <p>Active work does not block convergence.</p>
+          ) : null}
+        </>
       ) : (
         <p>None.</p>
       )}
@@ -354,7 +329,7 @@ app.post('/:id/owner/preview', async (context) => {
         <p>No GitHub connection.</p>
       )}
 
-      {result.blockers.length === 0 ? (
+      {!operationBlocked ? (
         <form method="post" action={`/admin/projects/${projectId}/owner`}>
           <input type="hidden" name="userId" value={userId} />
           <button type="submit" class="danger">
@@ -362,7 +337,11 @@ app.post('/:id/owner/preview', async (context) => {
           </button>
         </form>
       ) : (
-        <p>Resolve or cancel all active work before applying this transfer.</p>
+        <p>
+          {convergenceOnly
+            ? 'Project deletion blocks convergence.'
+            : 'Resolve or cancel all active work before applying this transfer.'}
+        </p>
       )}
       <p>
         <a href={`/admin/projects/${projectId}`}>Back to project</a>

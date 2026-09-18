@@ -1409,6 +1409,7 @@ describe('POST /admin/projects/:id/owner', () => {
     const formerOwner = await createTestUser(env.db, 'browser-convergence-former-owner');
     const owner = await createTestUser(env.db, 'browser-convergence-owner');
     const project = await createTestProject(env.db, owner.id, 'browser-convergence-project');
+    const deployment = await createTestDeployment(env.db, project.id, 'pending');
     await env.db.insert(projectOwnershipPeriods).values([
       {
         id: 'pown_browser_convergence_former',
@@ -1438,7 +1439,11 @@ describe('POST /admin/projects/:id/owner', () => {
     expect(html).toContain(`Converge Ownership State: ${project.slug}`);
     expect(html).toContain('This is a convergence-only operation');
     expect(html).toContain(`detach from <code>${formerOwner.id}</code>`);
+    expect(html).toContain(`deployment: ${deployment.id} (pending)`);
+    expect(html).toContain('Active work does not block convergence.');
     expect(html).toContain('Apply Convergence');
+    expect(html).toContain(`action="/admin/projects/${project.id}/owner"`);
+    expect(html).not.toContain('Resolve or cancel all active work');
     expect(html).not.toContain('The former owner will become');
     expect(html).not.toContain('detach from <code></code>');
     expect(await env.db.select().from(operatorEvents)).toEqual([]);

@@ -14,7 +14,6 @@ import {
   getGitHubInstallation,
   getGitHubInstallationsByAccount,
   getOwnedProjectsByUserId,
-  getUser,
   getUserByOAuthAccount,
   markBuildTerminalIfActive,
   markGitHubInstallationStatus,

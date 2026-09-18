@@ -732,7 +732,7 @@ export class PlatformClient {
     return res.json();
   }
 
-  async removeProjectMember(projectId: string, userId: string): Promise<{ ok: boolean }> {
+  async removeProjectMember(projectId: string, userId: string): Promise<void> {
     const res = await this.request(
       `${this.baseUrl}/projects/${projectId}/members/${encodeURIComponent(userId)}`,
       { method: 'DELETE', headers: { ...this.authHeaders } },
@@ -740,10 +740,9 @@ export class PlatformClient {
     if (!res.ok) {
       await throwPlatformApiError('Failed to remove project member', res);
     }
-    return { ok: true };
   }
 
-  async revokeProjectInvitation(projectId: string, invitationId: string): Promise<{ ok: boolean }> {
+  async revokeProjectInvitation(projectId: string, invitationId: string): Promise<void> {
     const res = await this.request(
       `${this.baseUrl}/projects/${projectId}/invitations/${encodeURIComponent(invitationId)}`,
       { method: 'DELETE', headers: { ...this.authHeaders } },
@@ -751,10 +750,9 @@ export class PlatformClient {
     if (!res.ok) {
       await throwPlatformApiError('Failed to revoke project invitation', res);
     }
-    return { ok: true };
   }
 
-  async leaveProject(projectId: string): Promise<{ ok: boolean }> {
+  async leaveProject(projectId: string): Promise<void> {
     const res = await this.request(`${this.baseUrl}/projects/${projectId}/leave`, {
       method: 'POST',
       headers: { ...this.authHeaders },
@@ -762,7 +760,6 @@ export class PlatformClient {
     if (!res.ok) {
       await throwPlatformApiError('Failed to leave project', res);
     }
-    return { ok: true };
   }
 
   async listPendingProjectInvitations(): Promise<Array<ProjectInvitationResponse>> {
@@ -779,7 +776,7 @@ export class PlatformClient {
   async respondToProjectInvitation(
     invitationId: string,
     action: 'accept' | 'decline',
-  ): Promise<{ ok: true; member?: ProjectMemberResponse }> {
+  ): Promise<void> {
     const res = await this.request(
       `${this.baseUrl}/project-invitations/${encodeURIComponent(invitationId)}/${action}`,
       { method: 'POST', headers: { ...this.authHeaders } },
@@ -787,11 +784,6 @@ export class PlatformClient {
     if (!res.ok) {
       await throwPlatformApiError(`Failed to ${action} project invitation`, res);
     }
-    if (action === 'decline' || res.status === 204) {
-      return { ok: true };
-    }
-    const body = (await res.json()) as { member: ProjectMemberResponse };
-    return { ok: true, member: body.member };
   }
 
   async listDeployments(projectId: string): Promise<DeploymentListResponse> {

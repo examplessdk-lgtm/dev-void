@@ -17,12 +17,6 @@ import {
 import { sendProjectInvitationEmail } from '../email.ts';
 import type { ApiEnv } from '../env.ts';
 import { cancelContainerBuildDos } from '../github/cancel-builds.ts';
-import {
-  ProjectAccessDeniedError,
-  ProjectNotFoundError,
-  requireProjectCapability,
-  type ProjectAccess,
-} from '../project-access.ts';
 import type {
   ProjectInvitation,
   ProjectInvitationStatus,
@@ -30,6 +24,7 @@ import type {
   ProjectMemberRole,
   User,
 } from '../types.ts';
+import { requireProjectRouteCapability } from './project-access.ts';
 
 const MEMBER_ROLES = new Set<ProjectMemberRole>(['reader', 'collaborator', 'admin']);
 const INVITATION_EMAILS_PER_MINUTE = 5;
@@ -104,9 +99,6 @@ function parseRole(value: unknown): ProjectMemberRole | null {
 }
 
 function mutationErrorResponse(context: Context<ApiEnv>, error: unknown): Response | null {
-  if (error instanceof ProjectNotFoundError || error instanceof ProjectAccessDeniedError) {
-    return context.json({ error: error.message }, error.status);
-  }
   if (!(error instanceof ProjectTeamMutationError)) {
     return null;
   }
@@ -126,27 +118,6 @@ function mutationErrorResponse(context: Context<ApiEnv>, error: unknown): Respon
     forbidden: 'forbidden',
   };
   return context.json({ error: messages[error.reason] }, error.status);
-}
-
-async function requireAccess(
-  context: Context<ApiEnv>,
-  projectId: string,
-  capability: 'read' | 'members',
-): Promise<ProjectAccess | Response> {
-  try {
-    return await requireProjectCapability(
-      context.get('db'),
-      projectId,
-      context.get('user').id,
-      capability,
-    );
-  } catch (error) {
-    const response = mutationErrorResponse(context, error);
-    if (response) {
-      return response;
-    }
-    throw error;
-  }
 }
 
 async function deliverInvitation(
@@ -223,7 +194,7 @@ function parseDeliveryCounter(raw: string | null): number {
 export const projectTeamRoutes = new Hono<ApiEnv>()
   .get('/:id/members', async (context) => {
     const projectId = context.req.param('id');
-    const access = await requireAccess(context, projectId, 'read');
+    const access = await requireProjectRouteCapability(context, projectId, 'read');
     if (access instanceof Response) {
       return access;
     }
@@ -242,7 +213,7 @@ export const projectTeamRoutes = new Hono<ApiEnv>()
 
   .get('/:id/invitations', async (context) => {
     const projectId = context.req.param('id');
-    const access = await requireAccess(context, projectId, 'members');
+    const access = await requireProjectRouteCapability(context, projectId, 'members');
     if (access instanceof Response) {
       return access;
     }
@@ -262,7 +233,7 @@ export const projectTeamRoutes = new Hono<ApiEnv>()
 
   .post('/:id/invitations', async (context) => {
     const projectId = context.req.param('id');
-    const access = await requireAccess(context, projectId, 'members');
+    const access = await requireProjectRouteCapability(context, projectId, 'members');
     if (access instanceof Response) {
       return access;
     }
@@ -307,7 +278,7 @@ export const projectTeamRoutes = new Hono<ApiEnv>()
 
   .post('/:id/invitations/:invitationId/resend', async (context) => {
     const projectId = context.req.param('id');
-    const access = await requireAccess(context, projectId, 'members');
+    const access = await requireProjectRouteCapability(context, projectId, 'members');
     if (access instanceof Response) {
       return access;
     }
@@ -337,7 +308,7 @@ export const projectTeamRoutes = new Hono<ApiEnv>()
 
   .delete('/:id/invitations/:invitationId', async (context) => {
     const projectId = context.req.param('id');
-    const access = await requireAccess(context, projectId, 'members');
+    const access = await requireProjectRouteCapability(context, projectId, 'members');
     if (access instanceof Response) {
       return access;
     }
@@ -359,7 +330,7 @@ export const projectTeamRoutes = new Hono<ApiEnv>()
 
   .patch('/:id/members/:userId', async (context) => {
     const projectId = context.req.param('id');
-    const access = await requireAccess(context, projectId, 'members');
+    const access = await requireProjectRouteCapability(context, projectId, 'members');
     if (access instanceof Response) {
       return access;
     }
@@ -396,7 +367,7 @@ export const projectTeamRoutes = new Hono<ApiEnv>()
 
   .delete('/:id/members/:userId', async (context) => {
     const projectId = context.req.param('id');
-    const access = await requireAccess(context, projectId, 'members');
+    const access = await requireProjectRouteCapability(context, projectId, 'members');
     if (access instanceof Response) {
       return access;
     }
@@ -423,7 +394,7 @@ export const projectTeamRoutes = new Hono<ApiEnv>()
 
   .post('/:id/leave', async (context) => {
     const projectId = context.req.param('id');
-    const access = await requireAccess(context, projectId, 'read');
+    const access = await requireProjectRouteCapability(context, projectId, 'read');
     if (access instanceof Response) {
       return access;
     }

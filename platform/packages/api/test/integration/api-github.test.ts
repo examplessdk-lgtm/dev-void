@@ -4260,7 +4260,6 @@ describe('GET /github/callback', () => {
   // MEMBERSHIP row (per-repo proof required to connect), the owner pointer stays
   // NULL, and B is NOT the owner.
   it('cleared-owner org install: a different member B gets membership, not ownership (R15-1 confused-deputy closed)', async () => {
-    const formerOwner = await createTestUser(env.db, 'org-former-owner', 'github', '7010');
     const memberB = await createTestUser(env.db, 'org-member-b', 'github', '7011');
     // Cleared state member_removed leaves: null owner + tombstone for the FORMER
     // owner's GitHub id (7010). Member B has NO tombstone.

@@ -90,10 +90,10 @@ export function dryRun(body: Record<string, unknown>): boolean {
   return body.dryRun === true;
 }
 
-export function preview(
-  action: string,
-  target: string | Record<string, unknown>,
-  details: Record<string, unknown> = {},
-) {
+export function preview<
+  const Action extends string,
+  const Target extends string | Record<string, unknown>,
+  const Details extends Record<string, unknown> = Record<string, never>,
+>(action: Action, target: Target, details: Details = {} as Details) {
   return { ...details, dryRun: true as const, action, target };
 }

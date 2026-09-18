@@ -4483,7 +4483,7 @@ export async function getBuildByProjectRunIdAndAttempt(
  * prior status) so the caller can best-effort stop active container BuildManager
  * DOs.
  */
-export type TerminatedBuild = Readonly<{
+type TerminatedBuild = Readonly<{
   id: string;
   executor: Build['executor'];
   status: Build['status'];

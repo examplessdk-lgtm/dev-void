@@ -299,15 +299,17 @@ credentials retain their build-state check.
    invitation accepted, and records the access event. Decline follows the same
    target-account check without creating membership.
 
-The role is always read from the database invitation. Acceptance is single-use
-and idempotent for its target user. Forwarding or guessing an invitation ID
-does not grant access to another account. A project invitation never creates an
-account, bypasses restricted signup, or adds a platform allowlist entry.
+The role is always read from the database invitation. Acceptance is single-use.
+Retrying it as the target user returns the existing membership while that
+membership remains; after removal, the old invitation is rejected and a new
+invitation is required. Forwarding or guessing an invitation ID does not grant
+access to another account. A project invitation never creates an account,
+bypasses restricted signup, or adds a platform allowlist entry.
 
-An invitation expires after seven days by default. Revoking it prevents later
+An invitation expires after seven days. Revoking it prevents later
 acceptance. Resend uses the target account's current registered email, keeps the
-same account binding, and follows the platform email rate limiter and a bounded
-pending-invitation limit.
+same account binding, and follows the per-project invitation email rate limiter
+and a bounded pending-invitation limit.
 
 ## API and user experience
 
@@ -328,8 +330,10 @@ POST   /project-invitations/:invitationId/decline
 ```
 
 Member listings are visible to all project roles. Invitation addresses and
-mutation endpoints require `members`. `PATCH` accepts only a role. The owner is
-returned in the member list with role `owner`, but owner mutations return 409.
+project-management mutations require `members`. Leaving requires current
+project access, while accepting or declining requires the authenticated target
+account. `PATCH` accepts only a role. The owner is returned in the member list
+with role `owner`, but owner mutations return 409.
 
 ### CLI
 
@@ -400,11 +404,14 @@ The operator transfer performs these steps:
 1. In one database transaction, lock the project then both users in stable ID
    order; reject active lifecycle work; close/open the ownership periods;
    update `projects.user_id`; remove the target's membership; add the former
-   owner as project admin; and record the event.
+   owner as project admin.
 2. Detach/attach the UsageCounter project mapping.
 3. Republish the project-account and active routing entries with the new owner
    ID, plan limits, and suspension state. Usage ingestion already uses the
    database period, so stale producer hints cannot misbill requests.
+
+The surrounding operator audit records the ownership mutation separately from
+the ownership transaction.
 
 If a post-commit external update fails, the database transfer remains committed
 and the operator response identifies the partial state. A repeat apply resumes

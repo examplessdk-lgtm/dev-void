@@ -249,7 +249,7 @@ void project team decline <invitation-id>
 
 Project-scoped commands use `--project`, then `VOID_PROJECT`, then the linked project. Invitations can target only an email address already registered to a user on that platform; they do not create accounts or grant signup access. Only the invited account can accept or decline its invitation.
 
-Readers can view the project but cannot deploy. Collaborators can deploy and manage deploy prerequisites. Project administrators can additionally configure the project and manage its team. The owner alone can delete the project. See [Project Collaboration](../guide/project-collaboration.md) for the full role boundaries.
+Readers can view the project but cannot deploy. Collaborators can deploy and manage deploy prerequisites. Project administrators can additionally manage domains, email destinations, GitHub configuration, and the project team. The owner alone can delete the project. See [Project Collaboration](../guide/project-collaboration.md) for the full role boundaries.
 
 Project-scoped team management commands are not available for projects deployed
 directly to Cloudflare. The account-scoped `pending`, `accept`, and `decline`

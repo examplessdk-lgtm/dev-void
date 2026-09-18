@@ -666,10 +666,14 @@ describe('operator tenant mutations', () => {
     }
   });
 
-  test('resumes post-commit counter convergence after the former owner is deleted', async () => {
+  test('converges routing despite counter failure and resumes after the former owner is deleted', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
     const owner = await createTestUser(env.db, 'partial-transfer-owner');
     const target = await createTestUser(env.db, 'partial-transfer-target');
+    await env.db
+      .update(users)
+      .set({ suspended_reason: 'operator_review' })
+      .where(eq(users.id, target.id));
     const project = await createTestProject(env.db, owner.id, 'partial-transfer-project');
     await env.ROUTING.put(
       project.slug,
@@ -694,13 +698,16 @@ describe('operator tenant mutations', () => {
         ownershipTransferred: true,
         previousOwner: { id: owner.id },
         newOwner: { id: target.id },
-        convergence: { countersComplete: false, routingComplete: false },
+        convergence: { countersComplete: false, routingComplete: true },
       },
     });
     expect(
       (await env.db.select().from(projects).where(eq(projects.id, project.id)))[0],
     ).toMatchObject({ user_id: target.id });
-    expect(JSON.parse((await env.ROUTING.get(project.slug))!)).toMatchObject({ userId: owner.id });
+    expect(JSON.parse((await env.ROUTING.get(project.slug))!)).toMatchObject({
+      userId: target.id,
+      suspended: 'operator_review',
+    });
 
     const recoveryPreview = await req(`/projects/${project.id}/owner`, {
       userId: target.id,

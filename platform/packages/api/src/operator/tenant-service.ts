@@ -665,47 +665,50 @@ async function reconcileOperatorUserProjects(
   }
 }
 
+export async function previewOperatorProjectOwner(
+  context: Context<ApiEnv>,
+  projectId: string,
+  targetUserId: string,
+) {
+  const inspection = await inspectOwnershipTransfer(context.get('db'), projectId, targetUserId);
+  return preview(
+    'project.owner',
+    { id: inspection.project.id, slug: inspection.project.slug, userId: targetUserId },
+    {
+      currentOwner: accountSummary(inspection.currentOwner),
+      previousOwner: historicalAccountSummary(inspection.previousOwner, inspection.previousOwnerId),
+      newOwner: accountSummary(inspection.newOwner),
+      changed: inspection.currentOwner.id !== inspection.newOwner.id,
+      formerOwnerRole: inspection.previousOwnerId === inspection.newOwner.id ? null : 'admin',
+      targetPreviousRole: inspection.targetMembership?.role ?? null,
+      blockers: inspection.blockers,
+      github: inspection.github,
+      routingUpdates: [
+        inspection.project.slug,
+        ...inspection.domains.map((domain) => `domain:${domain.hostname}`),
+        projectAccountKey(inspection.project.id),
+      ],
+      counterUpdates: {
+        detachUserId:
+          inspection.previousOwnerId === inspection.newOwner.id ? null : inspection.previousOwnerId,
+        attachUserId: inspection.newOwner.id,
+      },
+      usageTransfer: 'non-retroactive',
+    },
+  );
+}
+
 export async function transferOperatorProjectOwner(
   context: Context<ApiEnv>,
   projectId: string,
   targetUserId: string,
   dryRun = false,
 ) {
-  const db = context.get('db');
   if (dryRun) {
-    const inspection = await inspectOwnershipTransfer(db, projectId, targetUserId);
-    return preview(
-      'project.owner',
-      { id: inspection.project.id, slug: inspection.project.slug, userId: targetUserId },
-      {
-        currentOwner: accountSummary(inspection.currentOwner),
-        previousOwner: historicalAccountSummary(
-          inspection.previousOwner,
-          inspection.previousOwnerId,
-        ),
-        newOwner: accountSummary(inspection.newOwner),
-        changed: inspection.currentOwner.id !== inspection.newOwner.id,
-        formerOwnerRole: inspection.previousOwnerId === inspection.newOwner.id ? null : 'admin',
-        targetPreviousRole: inspection.targetMembership?.role ?? null,
-        blockers: inspection.blockers,
-        github: inspection.github,
-        routingUpdates: [
-          inspection.project.slug,
-          ...inspection.domains.map((domain) => `domain:${domain.hostname}`),
-          projectAccountKey(inspection.project.id),
-        ],
-        counterUpdates: {
-          detachUserId:
-            inspection.previousOwnerId === inspection.newOwner.id
-              ? null
-              : inspection.previousOwnerId,
-          attachUserId: inspection.newOwner.id,
-        },
-        usageTransfer: 'non-retroactive',
-      },
-    );
+    return previewOperatorProjectOwner(context, projectId, targetUserId);
   }
 
+  const db = context.get('db');
   const transfer = await commitOwnershipTransfer(
     db,
     projectId,
@@ -714,13 +717,33 @@ export async function transferOperatorProjectOwner(
   );
   const convergence = { countersComplete: false, routingComplete: false };
   let convergedOwner = transfer.newOwner;
-  try {
-    await updateOwnershipCounters(context, transfer);
+  // Publish immediately even if counter reconciliation fails, then repeat after
+  // it settles so a concurrent plan or suspension change wins in the final state.
+  const [counterResult, earlyRoutingResult] = await Promise.allSettled([
+    updateOwnershipCounters(context, transfer),
+    republishTransferredProject(context, transfer),
+  ]);
+  if (counterResult.status === 'fulfilled') {
     convergence.countersComplete = true;
-    convergedOwner = await republishTransferredProject(context, transfer);
+  }
+  if (earlyRoutingResult.status === 'fulfilled') {
+    convergedOwner = earlyRoutingResult.value;
+  }
+  const [finalRoutingResult] = await Promise.allSettled([
+    republishTransferredProject(context, transfer),
+  ] as const);
+  if (finalRoutingResult.status === 'fulfilled') {
+    convergedOwner = finalRoutingResult.value;
     convergence.routingComplete = true;
-  } catch (error) {
-    console.error('[admin] project owner convergence failed', { projectId, targetUserId, error });
+  }
+  if (counterResult.status === 'rejected' || finalRoutingResult.status === 'rejected') {
+    console.error('[admin] project owner convergence failed', {
+      projectId,
+      targetUserId,
+      counterError: counterResult.status === 'rejected' ? counterResult.reason : undefined,
+      routingError:
+        finalRoutingResult.status === 'rejected' ? finalRoutingResult.reason : undefined,
+    });
     throw new OperatorError(
       500,
       'Project ownership changed, but external accounting or routing convergence is incomplete. Inspect the project and retry this ownership transfer.',

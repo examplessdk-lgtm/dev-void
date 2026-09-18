@@ -829,16 +829,8 @@ const app = new Hono<ApiEnv>()
     const project = access.project;
 
     const deployments = await getProjectDeployments(context.get('db'), project.id, 20);
-    // A project-scoped deploy token (aud:'deploy') runs in the UNTRUSTED build
-    // environment (CF Container / GitHub Actions). The deploy manifest's `vars`
-    // field carries plaintext env values (uploaded as plain_text Worker
-    // bindings), so returning full historical manifests here would let a leaked
-    // build token or a compromised build dependency read every project's env
-    // history. Strip the secret-bearing fields for deploy-token callers while
-    // KEEPING `manifest.live` — the deploy CLI reads only `manifest.live`
-    // (bindingName/className) from this endpoint to restore live bindings on
-    // deploy-on-GitHub builds. Full `api` tokens (deployScope unset) leave the
-    // rows untouched, so the dashboard/admin still see complete manifests.
+    // Deploy tokens run untrusted build code, and readers lack configure access.
+    // Strip plaintext vars while preserving `live`, which the deploy CLI consumes.
     const sanitized =
       context.get('deployScope') || access.role === 'reader'
         ? deployments.map((deployment) => ({
@@ -1867,7 +1859,6 @@ const app = new Hono<ApiEnv>()
     if (access instanceof Response) {
       return access;
     }
-    const project = access.project;
 
     const body = await context.req.json<{
       migrations: ReadonlyArray<{ name: string; sql: string }>;
@@ -2056,7 +2047,6 @@ const app = new Hono<ApiEnv>()
     if (access instanceof Response) {
       return access;
     }
-    const project = access.project;
 
     const body = await context.req.json<{ renames: ReadonlyArray<{ from: string; to: string }> }>();
     if (!body.renames || !Array.isArray(body.renames) || body.renames.length === 0) {

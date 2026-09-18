@@ -9,10 +9,10 @@ import { isAdminSuspended } from '../suspension.ts';
 
 /**
  * Endpoints a scoped (`aud:'deploy'`) token may call. A deploy token
- * authenticates as the project owner but is minted for one purpose only —
- * running the real `void deploy` CLI against the single project named in
- * `payload.project`. Without this allowlist the token would satisfy the
- * owner-identity check on EVERY route mounted under `/projects/*` (delete,
+ * authenticates as its initiating project member but is minted for one purpose
+ * only — running the real `void deploy` CLI against the single project named in
+ * `payload.project`. Without this allowlist the token could reach every route
+ * mounted under `/projects/*` (delete,
  * secrets PUT, github connect, domains, rollback, cancel), so a leaked
  * 15-minute CI token could take over the project. Default-deny: anything not
  * listed here is rejected with 403.
