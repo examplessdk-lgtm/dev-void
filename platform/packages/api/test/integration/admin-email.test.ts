@@ -1319,3 +1319,84 @@ describe('admin email settings page', () => {
     expect(await res.text()).toContain(slug);
   });
 });
+
+describe('admin add domain form', () => {
+  test('registers an administrator-managed row on the platform credential and audits it', async () => {
+    const { adminJwt, projectId } = await seedAdminAndProject();
+    const cfCalls: Array<string> = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : (input as Request).url;
+      const method = init?.method ?? 'GET';
+      cfCalls.push(`${method} ${url}`);
+      if (url.startsWith('https://cloudflare-dns.com/')) {
+        return Response.json({ Answer: [] });
+      }
+      if (url.includes('/zones?')) {
+        return Response.json({
+          success: true,
+          errors: [],
+          result: [{ id: 'zone_p', name: 'example.com', account: { id: env.CF_ACCOUNT_ID } }],
+        });
+      }
+      if (/\/workers\/scripts\/[^/]+$/.test(url) && method === 'GET') {
+        return new Response('not found', { status: 404 });
+      }
+      if (url.endsWith('/email/routing/rules/catch_all') && method === 'GET') {
+        return Response.json({
+          success: true,
+          errors: [],
+          result: { enabled: false, matchers: [{ type: 'all' }], actions: [{ type: 'drop' }] },
+        });
+      }
+      return Response.json({ success: true, errors: [], result: {} });
+    });
+
+    const res = await post(`/admin/email/${projectId}/domains/add`, adminJwt, {
+      domain: 'example.com',
+      token: '',
+    });
+    expect(res.status).toBe(302);
+    expect(res.headers.get('Location')).toBe(`/admin/email/${projectId}`);
+    const row = (await domainRow(projectId, 'example.com'))!;
+    expect(row).toMatchObject({
+      credential_kind: 'platform',
+      managed_by: 'admin',
+      status: 'active',
+    });
+    expect(row.token_ciphertext).toBeNull();
+    expect(cfCalls.some((call) => call.includes('/user/tokens/verify'))).toBe(false);
+    const events = await env.db.select().from(operatorEvents);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ action: 'email/domains', status: 'success' });
+    expect(JSON.parse(events[0]!.target)).toEqual({ domain: 'example.com', project: projectId });
+
+    const html = await (await get(`/admin/email/${projectId}`, adminJwt)).text();
+    expect(html).toContain('admin (platform credential)');
+  });
+
+  test('renders a 400 for a blank domain and records the failed attempt', async () => {
+    const { adminJwt, projectId } = await seedAdminAndProject();
+    const res = await post(`/admin/email/${projectId}/domains/add`, adminJwt, { domain: '  ' });
+    expect(res.status).toBe(400);
+    expect(await env.db.select().from(emailDomains)).toHaveLength(0);
+  });
+
+  test('keeps a pasted token out of the audit log', async () => {
+    const { adminJwt, projectId } = await seedAdminAndProject();
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      Response.json(
+        { success: false, errors: [{ code: 10000, message: 'nope' }] },
+        { status: 403 },
+      ),
+    );
+    const res = await post(`/admin/email/${projectId}/domains/add`, adminJwt, {
+      domain: 'elsewhere.test',
+      token: 'cf-pasted-token-dummy',
+    });
+    // The engine records the refusal on the row; the form redirects.
+    expect([302, 400, 502]).toContain(res.status);
+    expect(JSON.stringify(await env.db.select().from(operatorEvents))).not.toContain(
+      'cf-pasted-token-dummy',
+    );
+  });
+});

@@ -11,6 +11,7 @@ import {
   revokeOauthGrantSerialized,
   withEmailDomainRowLock,
 } from '../../email/credential-lease.ts';
+import { addEmailDomainForProject } from '../../email/domain-service.ts';
 import {
   clearEmailDomainMirror,
   decryptEmailDomainRelaySecret,
@@ -30,6 +31,7 @@ import { removeEmailDomain } from '../../email/relay-engine.ts';
 import { getEmailDomainManagement, getEmailRecipientPolicy } from '../../email/settings.ts';
 import type { ApiEnv } from '../../env.ts';
 import { executeAuditedMutation, operatorAuditIntent } from '../../operator/audit.ts';
+import { OperatorError } from '../../operator/common.ts';
 import { setOperatorEmailPolicy, setOperatorEmailSettings } from '../../operator/email-routes.ts';
 import {
   syncProjectAllowlistKv,
@@ -320,16 +322,40 @@ app.get('/:projectId', async (context) => {
 
       <h2>Custom domains ({domains.length})</h2>
       <p style={META}>
-        Sender/recipient domains on the customer's own Cloudflare zone, registered by the project
-        owner through <code>POST /projects/:id/email/domains</code>. Revoke clears the{' '}
-        <code>email-domain:</code> ROUTING mirror FIRST — the proxy trusts only that key, and a
-        failed clear keeps the row so the retry can finish — then deletes the relay worker and
-        catch-all rule in the customer's account best-effort (a stranded relay is inert without the
-        mirror entry) and drops the row. For <code>oauth_grant</code> rows, revoke grant is the
-        lighter escape hatch: it kills just the customer's OAuth grant at Cloudflare and flips the
-        row to <code>token_revoked</code>, leaving the row and mirror in place. The customer's
-        credential and the relay secret are never shown here.
+        Sender/recipient domains on a Cloudflare zone, registered by the project owner through{' '}
+        <code>void email domain add</code> or by an administrator below (the row then runs on the
+        platform's own credential and the zone must be in the platform's account — paste a token for
+        a zone elsewhere). Revoke clears the <code>email-domain:</code> ROUTING mirror FIRST — the
+        proxy trusts only that key, and a failed clear keeps the row so the retry can finish — then
+        deletes the relay worker and catch-all rule in the customer's account best-effort (a
+        stranded relay is inert without the mirror entry) and drops the row. For{' '}
+        <code>oauth_grant</code> rows, revoke grant is the lighter escape hatch: it kills just the
+        customer's OAuth grant at Cloudflare and flips the row to <code>token_revoked</code>,
+        leaving the row and mirror in place. The customer's credential and the relay secret are
+        never shown here.
       </p>
+      <form
+        method="post"
+        action={`/admin/email/${projectId}/domains/add`}
+        style="margin-bottom: 12px; display: flex; gap: 8px; align-items: center"
+      >
+        <input
+          type="text"
+          name="domain"
+          placeholder="mail.example.com"
+          autocomplete="off"
+          required
+          style="width: 240px"
+        />
+        <input
+          type="password"
+          name="token"
+          placeholder="API token (blank = platform credential)"
+          autocomplete="off"
+          style="width: 300px"
+        />
+        <button type="submit">Add domain</button>
+      </form>
       {domains.length === 0 ? (
         <p>
           <em>No custom domains.</em>
@@ -340,6 +366,7 @@ app.get('/:projectId', async (context) => {
             <tr>
               <th>Domain</th>
               <th>Status</th>
+              <th>Managed by</th>
               <th>Mode</th>
               <th>Relay worker</th>
               <th>v</th>
@@ -354,6 +381,10 @@ app.get('/:projectId', async (context) => {
                 <td>{domain.domain}</td>
                 <td>
                   <span style={`color: ${domainStatusColor(domain.status)}`}>{domain.status}</span>
+                </td>
+                <td>
+                  {domain.managed_by}
+                  {domain.credential_kind === 'platform' ? ' (platform credential)' : ''}
                 </td>
                 <td>{domain.mode ?? '-'}</td>
                 <td>{domain.relay_worker_name ?? '-'}</td>
@@ -406,6 +437,43 @@ app.get('/:projectId', async (context) => {
         </table>
       )}
     </Layout>,
+  );
+});
+
+// POST /email/:projectId/domains/add — register a domain for the project as
+// an administrator (design doc 0078, "Administrator-managed domains"). The
+// same operation the operator CLI runs; a blank token means the platform's
+// own credential. The token is never echoed or audited.
+app.post('/:projectId/domains/add', async (context) => {
+  const projectId = context.req.param('projectId');
+  const project = await getProject(context.get('db'), projectId);
+  if (!project) {
+    return context.html('<h1>Project not found</h1>', 404);
+  }
+  const body = await context.req.parseBody();
+  const domain = typeof body.domain === 'string' ? body.domain.trim() : '';
+  const token = typeof body.token === 'string' ? body.token.trim() : '';
+  if (domain === '' || domain.length > 253) {
+    throw new OperatorError(400, 'Enter the mail domain to register.');
+  }
+  return executeAuditedMutation(
+    context,
+    operatorAuditIntent('email/domains', { domain, project: projectId }),
+    async () => {
+      const res = await addEmailDomainForProject(context, project, {
+        domain,
+        apiToken: token || undefined,
+        managedBy: 'admin',
+      });
+      if (!res.ok) {
+        const json = (await res.json()) as { error?: unknown };
+        throw new OperatorError(
+          res.status,
+          typeof json.error === 'string' ? json.error : 'Adding the email domain failed.',
+        );
+      }
+      return { response: context.redirect(`/admin/email/${projectId}`), succeeded: true };
+    },
   );
 });
 

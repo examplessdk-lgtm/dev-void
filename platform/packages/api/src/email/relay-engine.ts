@@ -170,12 +170,19 @@ export type EmailDomainSetupInput = Readonly<{
    */
   row: Pick<EmailDomain, 'domain' | 'credential_kind'> &
     Partial<Pick<EmailDomain, 'mode' | 'relay_worker_name' | 'zone_id' | 'account_id'>>;
-  /** Decrypted credential: the pasted API token, or the grant's refresh token. */
+  /** Decrypted credential: the pasted API token, the grant's refresh token, or the platform's runtime token. */
   credential: string;
   /** Decrypted relay secret, handed to the relay worker as VOID_RELAY_SECRET. */
   relaySecret: string;
   /** Baked into the relay as the VOID_PROXY_ORIGIN plain-text var. */
   proxyOrigin: string;
+  /**
+   * A `platform` row may only register a zone in the platform's own
+   * Cloudflare account: the runtime token must never be pointed at a
+   * customer zone. Setup fails at zone_lookup, before any write, when the
+   * zone's account differs.
+   */
+  requireAccountId?: string;
 }>;
 
 export type EmailDomainSyncInput = Readonly<{
@@ -269,7 +276,7 @@ const defaultCreateClient = (credential: string): CfCustomerClient =>
  * Returns the MX exchange hostnames (priority and trailing dot stripped).
  * Public DNS — no credential involved.
  */
-async function lookupMxOverDns(domain: string): Promise<ReadonlyArray<string>> {
+export async function lookupMxOverDns(domain: string): Promise<ReadonlyArray<string>> {
   const response = await fetch(
     `https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(domain)}&type=MX`,
     { headers: { accept: 'application/dns-json' } },
@@ -356,7 +363,10 @@ type CredentialResolution =
  * Setup step 1. api_token rows verify via GET /user/tokens/verify (which
  * also yields token_id/expires_on for `status` output); oauth_grant rows
  * verify by running one refresh round-trip and continuing on the fresh
- * access token.
+ * access token. `platform` rows carry the runtime token, which is not a
+ * user token: there is nothing to verify up front, and the first
+ * authenticated step (zone_lookup) fails the row with Cloudflare's own
+ * message when a permission is missing.
  */
 async function resolveCredential(
   credentialKind: EmailDomain['credential_kind'],
@@ -364,6 +374,9 @@ async function resolveCredential(
   deps: RelayEngineDeps,
 ): Promise<CredentialResolution> {
   const createClient = deps.createClient ?? defaultCreateClient;
+  if (credentialKind === 'platform') {
+    return { ok: true, client: createClient(credential), token_id: null, token_expires_on: null };
+  }
   if (credentialKind === 'api_token') {
     const client = createClient(credential);
     let verification: CfTokenVerification;
@@ -482,6 +495,13 @@ export async function setupEmailDomain(
       'failed',
       'zone_lookup',
       `no Cloudflare zone found for ${input.row.domain} in an account this credential can see`,
+    );
+  }
+  if (input.requireAccountId !== undefined && zone.account.id !== input.requireAccountId) {
+    return failWith(
+      'failed',
+      'zone_lookup',
+      `zone for ${input.row.domain} is in Cloudflare account ${zone.account.id}, not the platform's account ${input.requireAccountId}; register it with --token-stdin and a token for that account`,
     );
   }
   progress.zone_id = zone.id;

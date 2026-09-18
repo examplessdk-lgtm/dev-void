@@ -39,6 +39,7 @@ describe('email domain credential encryption', () => {
   it('round-trips the customer token under its fixed AAD name', async () => {
     const encrypted = await encryptEmailDomainToken(env, 'proj_1', 'acme.com', 'token-plaintext');
     const decrypted = await decryptEmailDomainToken(env, 'proj_1', 'acme.com', {
+      credential_kind: 'api_token',
       token_ciphertext: encrypted.ciphertext,
       token_iv: encrypted.iv,
       token_key_version: encrypted.keyVersion,
@@ -77,6 +78,7 @@ describe('email domain credential encryption', () => {
   it('binds the ciphertext to the project and the domain', async () => {
     const encrypted = await encryptEmailDomainToken(env, 'proj_1', 'acme.com', 'token-plaintext');
     const row = {
+      credential_kind: 'api_token' as const,
       token_ciphertext: encrypted.ciphertext,
       token_iv: encrypted.iv,
       token_key_version: encrypted.keyVersion,
@@ -87,6 +89,32 @@ describe('email domain credential encryption', () => {
     await expect(decryptEmailDomainToken(env, 'proj_1', 'other.com', row)).rejects.toThrow(
       'Failed to decrypt project secret',
     );
+  });
+
+  it("resolves a platform row to the runtime token without touching the row's triple", async () => {
+    const row = {
+      credential_kind: 'platform' as const,
+      token_ciphertext: null,
+      token_iv: null,
+      token_key_version: null,
+    };
+    await expect(
+      decryptEmailDomainToken({ ...env, CF_API_TOKEN: 'runtime-token' }, 'proj_1', 'acme.com', row),
+    ).resolves.toBe('runtime-token');
+    await expect(decryptEmailDomainToken(env, 'proj_1', 'acme.com', row)).rejects.toThrow(
+      'CF_API_TOKEN is not configured',
+    );
+  });
+
+  it('refuses a stored-credential row whose triple is missing', async () => {
+    await expect(
+      decryptEmailDomainToken(env, 'proj_1', 'acme.com', {
+        credential_kind: 'api_token',
+        token_ciphertext: null,
+        token_iv: null,
+        token_key_version: null,
+      }),
+    ).rejects.toThrow('missing its stored credential');
   });
 });
 

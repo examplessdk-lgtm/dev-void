@@ -86,12 +86,30 @@ export function encryptEmailDomainToken(
   return encryptProjectSecret(env, projectId, emailDomainTokenAadName(domain), token);
 }
 
-export function decryptEmailDomainToken(
-  env: EmailDomainSecretBindings,
+export type PlatformCredentialBindings = Pick<ApiEnv['Bindings'], 'CF_API_TOKEN'>;
+
+/**
+ * The one place a row's credential is resolved. `platform` rows (an
+ * administrator's, design doc 0078 "Administrator-managed domains") hold
+ * no credential and resolve to the platform's own runtime token, which is
+ * never written to the row, a mirror or a log; every other kind decrypts
+ * the stored triple.
+ */
+export async function decryptEmailDomainToken(
+  env: EmailDomainSecretBindings & Partial<PlatformCredentialBindings>,
   projectId: string,
   domain: string,
-  row: Pick<EmailDomain, 'token_ciphertext' | 'token_iv' | 'token_key_version'>,
+  row: Pick<EmailDomain, 'credential_kind' | 'token_ciphertext' | 'token_iv' | 'token_key_version'>,
 ): Promise<string> {
+  if (row.credential_kind === 'platform') {
+    if (!env.CF_API_TOKEN) {
+      throw new Error('platform credential unavailable: CF_API_TOKEN is not configured');
+    }
+    return env.CF_API_TOKEN;
+  }
+  if (row.token_ciphertext === null || row.token_iv === null || row.token_key_version === null) {
+    throw new Error('email_domains row is missing its stored credential');
+  }
   return decryptProjectSecret(env, projectId, {
     name: emailDomainTokenAadName(domain),
     ciphertext: row.token_ciphertext,

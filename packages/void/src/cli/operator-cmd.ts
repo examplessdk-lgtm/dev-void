@@ -459,6 +459,13 @@ export async function runOperatorCommand(args: OperatorArgs): Promise<void> {
         'confirmation_required',
       );
     }
+    // `email domain-add --token-stdin`: a Cloudflare API token for a zone
+    // outside the platform's account, read once and carried in the body of
+    // both the preview (which only classifies it) and the apply. Never
+    // printed; the server keeps it out of the audit log.
+    if (args.tokenStdin && args.group === 'email' && args.action === 'domain-add') {
+      args = { ...args, body: { ...args.body, apiToken: await readOperatorApiTokenStdin() } };
+    }
     const preview = await client.request(args.path, {
       method: 'POST',
       body: { ...args.body, dryRun: true },

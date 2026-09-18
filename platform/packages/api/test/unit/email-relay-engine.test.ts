@@ -180,6 +180,61 @@ describe('setupEmailDomain', () => {
     expect(calls[8].args).toEqual(['zone_1', RELAY_WORKER_BASE_NAME]);
   });
 
+  it("runs a platform row on the runtime token with no user-token verify, pinned to the platform's account", async () => {
+    const { client, calls } = makeFakeClient({ zones: { 'acme.com': ZONE } });
+    const seenCredentials: Array<string> = [];
+
+    const result = await setupEmailDomain(
+      {
+        ...setupInput(),
+        row: { domain: 'acme.com', credential_kind: 'platform' },
+        credential: 'runtime-token-dummy',
+        requireAccountId: 'acct_1',
+      },
+      depsFor(client, { seenCredentials }),
+    );
+
+    expect(result.status).toBe('active');
+    expect(result.token_id).toBeNull();
+    expect(result.token_expires_on).toBeNull();
+    expect(seenCredentials).toEqual(['runtime-token-dummy']);
+    expect(methods(calls)[0]).toBe('findZone');
+    expect(methods(calls)).not.toContain('verifyToken');
+  });
+
+  it('fails at zone_lookup, before any write, when the zone is outside the required account', async () => {
+    const { client, calls } = makeFakeClient({
+      zones: { 'acme.com': { ...ZONE, accountId: 'acct_customer' } },
+    });
+
+    const result = await setupEmailDomain(
+      {
+        ...setupInput(),
+        row: { domain: 'acme.com', credential_kind: 'platform' },
+        requireAccountId: 'acct_platform',
+      },
+      depsFor(client),
+    );
+
+    expect(result.status).toBe('failed');
+    expect(result.setup_state).toEqual({ failed_step: 'zone_lookup' });
+    expect(result.error).toContain('acct_customer');
+    expect(result.error).toContain('acct_platform');
+    expect(result.error).toContain('--token-stdin');
+    expect(result.zone_id).toBeNull();
+    expect(result.account_id).toBeNull();
+    expect(methods(calls)).toEqual(['findZone']);
+  });
+
+  it('leaves an unpinned row free to register a zone in any account', async () => {
+    const { client } = makeFakeClient({
+      zones: { 'acme.com': { ...ZONE, accountId: 'acct_customer' } },
+    });
+    const result = await setupEmailDomain(setupInput(), depsFor(client));
+    expect(result.status).toBe('active');
+    expect(result.account_id).toBe('acct_customer');
+  });
+
   it('walks the labels up to the registrable zone and takes the subdomain path', async () => {
     const { client, calls } = makeFakeClient({ zones: { 'acme.com': ZONE } });
 

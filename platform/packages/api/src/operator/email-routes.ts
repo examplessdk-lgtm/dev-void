@@ -1,7 +1,21 @@
+import { asc, eq, inArray } from 'drizzle-orm';
 import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { capabilityMiddleware } from '../capabilities.ts';
 import { getProject, getProjectBySlug, type Db } from '../db.ts';
+import {
+  MAX_DOMAIN_LENGTH,
+  isValidEmailDomain,
+  normalizeEmailDomain,
+} from '../email/domain-name.ts';
+import {
+  addEmailDomainForProject,
+  getEmailDomainRowByDomain,
+  getEmailDomainStatusForProject,
+  removeEmailDomainForProject,
+  serializeEmailDomain,
+  syncEmailDomainForProject,
+} from '../email/domain-service.ts';
 import {
   emailBurstLimitKey,
   emailMonthlyLimitKey,
@@ -9,6 +23,7 @@ import {
   parseEmailLimitInput,
   MAX_EMAIL_LIMIT,
 } from '../email/limits.ts';
+import { lookupMxOverDns } from '../email/relay-engine.ts';
 import {
   EmailSettingsError,
   getEmailDomainManagement,
@@ -21,6 +36,7 @@ import {
   type EmailRecipientPolicy,
 } from '../email/settings.ts';
 import type { ApiEnv } from '../env.ts';
+import { emailDomains, projects } from '../schema.ts';
 import { dryRun, OperatorError, preview, readBody, stringField } from './common.ts';
 
 /**
@@ -216,6 +232,229 @@ emailOperatorRoutes.post('/email/projects/:project/limit', async (context) => {
         monthly: stringField(body, 'monthly', { optional: true, maxLength: 16 }) || undefined,
         burst: stringField(body, 'burst', { optional: true, maxLength: 16 }) || undefined,
       },
+      dryRun(body),
+    ),
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Administrator-managed domains. The operations are the owner routes' own
+// (email/domain-service.ts); this layer resolves the project for the
+// administrator, previews without touching Cloudflare, and re-shapes the
+// service's JSON responses into operator results.
+// ---------------------------------------------------------------------------
+
+/** The service answers with the owner routes' JSON; carry a refusal over as an OperatorError. */
+async function operatorResult(
+  response: Response,
+  action: string,
+  target: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const body = (await response.json()) as Record<string, unknown>;
+  if (!response.ok) {
+    const message =
+      typeof body.error === 'string' && body.error !== ''
+        ? body.error
+        : 'The email domain operation failed.';
+    throw new OperatorError(response.status, message, 'email_domain_error', body);
+  }
+  return { action, target, domain: body };
+}
+
+function requireDomain(raw: string): string {
+  if (raw.length > MAX_DOMAIN_LENGTH) {
+    throw new OperatorError(400, 'Invalid domain.', 'invalid_argument');
+  }
+  const domain = normalizeEmailDomain(raw);
+  if (!isValidEmailDomain(domain)) {
+    throw new OperatorError(400, 'Invalid domain.', 'invalid_argument');
+  }
+  return domain;
+}
+
+async function requireDomainRow(db: Db, raw: string) {
+  const domain = requireDomain(raw);
+  const row = await getEmailDomainRowByDomain(db, domain);
+  if (!row) {
+    throw new OperatorError(404, 'Email domain not found.');
+  }
+  const project = await getProject(db, row.project_id);
+  if (!project) {
+    throw new OperatorError(404, 'Project not found.');
+  }
+  return { domain, row, project };
+}
+
+export async function listOperatorEmailDomains(context: Context<ApiEnv>, selector?: string) {
+  const db = context.get('db');
+  const project = selector ? await resolveProject(db, selector) : null;
+  const rows = await db
+    .select()
+    .from(emailDomains)
+    .where(project ? eq(emailDomains.project_id, project.id) : undefined)
+    .orderBy(asc(emailDomains.created_at));
+  const projectIds = [...new Set(rows.map((row) => row.project_id))];
+  const owners =
+    projectIds.length === 0
+      ? []
+      : await db
+          .select({ id: projects.id, slug: projects.slug })
+          .from(projects)
+          .where(inArray(projects.id, projectIds));
+  const slugs = new Map(owners.map((owner) => [owner.id, owner.slug]));
+  return {
+    domains: rows.map((row) => ({
+      ...serializeEmailDomain(row),
+      project: { id: row.project_id, slug: slugs.get(row.project_id) ?? null },
+    })),
+  };
+}
+
+export async function addOperatorEmailDomain(
+  context: Context<ApiEnv>,
+  input: { domain: string; project: string; apiToken?: string },
+  dryRunRequested = false,
+) {
+  const db = context.get('db');
+  const domain = requireDomain(input.domain);
+  const project = await resolveProject(db, input.project);
+  const existing = await getEmailDomainRowByDomain(db, domain);
+  if (existing && existing.project_id !== project.id) {
+    throw new OperatorError(409, 'This email domain is registered to another project.');
+  }
+  if (existing && existing.managed_by === 'owner') {
+    throw new OperatorError(
+      409,
+      'This email domain was registered by its project owner; ask them to remove it first.',
+    );
+  }
+  const credentialKind = input.apiToken ? 'api_token' : 'platform';
+  const action = 'email.domain.add';
+  const target = { domain, projectId: project.id, slug: project.slug, credentialKind };
+  if (dryRunRequested) {
+    // Read-only: the engine's own MX rule, previewed over public DNS. No
+    // Cloudflare call — the preview must never spend the credential.
+    let mx: 'apex' | 'subdomain' | 'unknown' = 'unknown';
+    try {
+      mx = (await lookupMxOverDns(domain)).length > 0 ? 'subdomain' : 'apex';
+    } catch {
+      mx = 'unknown';
+    }
+    return preview(action, target, {
+      existing: existing ? { status: existing.status, managed_by: existing.managed_by } : null,
+      plan: existing ? 'rerun' : 'setup',
+      mx,
+      effect:
+        mx === 'subdomain'
+          ? `${domain} already receives mail; setup will refuse it — name a subdomain such as mail.${domain} instead.`
+          : credentialKind === 'platform'
+            ? `Registers ${domain} for ${project.slug} on the platform's own Cloudflare credential; the zone must be in the platform's account.`
+            : `Registers ${domain} for ${project.slug} with the supplied API token.`,
+    });
+  }
+  return operatorResult(
+    await addEmailDomainForProject(context, project, {
+      domain,
+      apiToken: input.apiToken,
+      managedBy: 'admin',
+    }),
+    action,
+    target,
+  );
+}
+
+export async function getOperatorEmailDomain(context: Context<ApiEnv>, rawDomain: string) {
+  const { row, project } = await requireDomainRow(context.get('db'), rawDomain);
+  const response = await getEmailDomainStatusForProject(context, project, row.domain);
+  const body = (await response.json()) as Record<string, unknown>;
+  if (!response.ok) {
+    throw new OperatorError(response.status, String(body.error ?? 'status failed'));
+  }
+  return { ...body, project: { id: project.id, slug: project.slug } };
+}
+
+export async function syncOperatorEmailDomain(
+  context: Context<ApiEnv>,
+  rawDomain: string,
+  dryRunRequested = false,
+) {
+  const { domain, row, project } = await requireDomainRow(context.get('db'), rawDomain);
+  const action = 'email.domain.sync';
+  const target = { domain, projectId: project.id, slug: project.slug };
+  if (dryRunRequested) {
+    return preview(action, target, {
+      status: row.status,
+      managed_by: row.managed_by,
+      relay_worker_name: row.relay_worker_name,
+      effect:
+        'Redeploys the relay worker at the current version, rotates its secret and re-ensures the zone catch-all.',
+    });
+  }
+  return operatorResult(await syncEmailDomainForProject(context, project, domain), action, target);
+}
+
+export async function removeOperatorEmailDomain(
+  context: Context<ApiEnv>,
+  rawDomain: string,
+  force: boolean,
+  dryRunRequested = false,
+) {
+  const { domain, row, project } = await requireDomainRow(context.get('db'), rawDomain);
+  const action = 'email.domain.remove';
+  const target = { domain, projectId: project.id, slug: project.slug, force };
+  if (dryRunRequested) {
+    return preview(action, target, {
+      status: row.status,
+      managed_by: row.managed_by,
+      relay_worker_name: row.relay_worker_name,
+      effect: force
+        ? 'Deletes the row even if the Cloudflare cleanup fails; anything left behind is reported for manual removal.'
+        : 'Resets the zone catch-all, deletes the relay worker, then deletes the row; a failed destructive step keeps the row for retry.',
+    });
+  }
+  return operatorResult(
+    await removeEmailDomainForProject(context, project, domain, force),
+    action,
+    target,
+  );
+}
+
+emailOperatorRoutes.get('/email/domains', async (context) =>
+  context.json(await listOperatorEmailDomains(context, context.req.query('project') || undefined)),
+);
+emailOperatorRoutes.post('/email/domains', async (context) => {
+  const body = await readBody(context);
+  return context.json(
+    await addOperatorEmailDomain(
+      context,
+      {
+        domain: stringField(body, 'domain', { maxLength: MAX_DOMAIN_LENGTH }),
+        project: stringField(body, 'project'),
+        apiToken: stringField(body, 'apiToken', { optional: true, maxLength: 2048 }) || undefined,
+      },
+      dryRun(body),
+    ),
+  );
+});
+emailOperatorRoutes.get('/email/domains/:domain', async (context) =>
+  context.json(await getOperatorEmailDomain(context, context.req.param('domain'))),
+);
+emailOperatorRoutes.post('/email/domains/:domain/sync', async (context) => {
+  const body = await readBody(context);
+  return context.json(
+    await syncOperatorEmailDomain(context, context.req.param('domain'), dryRun(body)),
+  );
+});
+emailOperatorRoutes.post('/email/domains/:domain/remove', async (context) => {
+  const body = await readBody(context);
+  if (body.force !== undefined && typeof body.force !== 'boolean') {
+    throw new OperatorError(400, 'force must be a boolean.', 'invalid_argument');
+  }
+  return context.json(
+    await removeOperatorEmailDomain(
+      context,
+      context.req.param('domain'),
+      body.force === true,
       dryRun(body),
     ),
   );

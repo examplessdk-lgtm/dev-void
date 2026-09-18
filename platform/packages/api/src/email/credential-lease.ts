@@ -30,7 +30,7 @@ import { emailDomains } from '../schema.ts';
 import { OAuthGrantError, refreshOauthGrant, revokeOauthGrant } from './cf-customer.ts';
 import type { OauthGrantTokens } from './cf-customer.ts';
 import { decryptEmailDomainToken, encryptEmailDomainToken } from './domains.ts';
-import type { EmailDomain } from './domains.ts';
+import type { EmailDomain, PlatformCredentialBindings } from './domains.ts';
 
 export type EmailDomainLease =
   | Readonly<{ kind: 'api_token'; token: string }>
@@ -127,6 +127,7 @@ export async function refreshOauthGrantSerialized(
       }
 
       const refreshToken = await decryptEmailDomainToken(env, row.project_id, row.domain, {
+        credential_kind: row.credential_kind,
         token_ciphertext: row.token_ciphertext,
         token_iv: row.token_iv,
         token_key_version: row.token_key_version,
@@ -218,6 +219,7 @@ export async function revokeOauthGrantSerialized(
       throw new EmailDomainCredentialChangedError(rowId);
     }
     const head = await decryptEmailDomainToken(env, row.project_id, row.domain, {
+      credential_kind: row.credential_kind,
       token_ciphertext: row.token_ciphertext,
       token_iv: row.token_iv,
       token_key_version: row.token_key_version,
@@ -260,7 +262,7 @@ export async function withEmailDomainRowLock<T>(
  */
 export async function leaseEmailDomainCredential(
   db: Db,
-  env: SecretBindings,
+  env: SecretBindings & Partial<PlatformCredentialBindings>,
   row: EmailDomain,
 ): Promise<EmailDomainLeaseOutcome> {
   // The caller's row snapshot is unlocked; a replace can commit between
@@ -268,8 +270,16 @@ export async function leaseEmailDomainCredential(
   // row NOW holds — a second mid-lease change fails as transient.
   let current = row;
   for (let attempt = 0; ; attempt++) {
-    if (current.credential_kind === 'api_token') {
-      const token = await decryptEmailDomainToken(env, current.project_id, current.domain, current);
+    // An api_token row leases its stored token; a platform row leases the
+    // runtime token the same seam resolves. Both are long-lived and travel
+    // to the proxy as `api_token` — it never needs to tell them apart.
+    if (current.credential_kind === 'api_token' || current.credential_kind === 'platform') {
+      let token: string;
+      try {
+        token = await decryptEmailDomainToken(env, current.project_id, current.domain, current);
+      } catch (err) {
+        return { ok: false, status: 'failed', error: errorMessage(err) };
+      }
       return { ok: true, lease: { kind: 'api_token', token } };
     }
     try {

@@ -126,6 +126,49 @@ describe('operator argument and help coverage', () => {
     expect(() => parseOperatorArgs(['email', 'policy', '--domains', 'x'])).toThrow();
     expect(() => parseOperatorArgs(['email', 'limit'])).toThrow();
   });
+  it('routes the email domain verbs and carries their booleans in the body', () => {
+    expect(parseOperatorArgs(['email', 'domains', '--project', 'hr-portal'])).toMatchObject({
+      method: 'GET',
+      path: '/email/domains',
+      query: { project: 'hr-portal' },
+    });
+    expect(
+      parseOperatorArgs([
+        'email',
+        'domain-add',
+        'mail.example.com',
+        '--project',
+        'hr-portal',
+        '--token-stdin',
+        '--yes',
+      ]),
+    ).toMatchObject({
+      method: 'POST',
+      path: '/email/domains',
+      body: { domain: 'mail.example.com', project: 'hr-portal' },
+      tokenStdin: true,
+      yes: true,
+    });
+    expect(parseOperatorArgs(['email', 'domain-status', 'mail.example.com'])).toMatchObject({
+      method: 'GET',
+      path: '/email/domains/mail.example.com',
+    });
+    expect(parseOperatorArgs(['email', 'domain-sync', 'mail.example.com'])).toMatchObject({
+      method: 'POST',
+      path: '/email/domains/mail.example.com/sync',
+      body: {},
+    });
+    expect(
+      parseOperatorArgs(['email', 'domain-remove', 'mail.example.com', '--force']),
+    ).toMatchObject({
+      method: 'POST',
+      path: '/email/domains/mail.example.com/remove',
+      body: { force: true },
+    });
+    expect(parseOperatorArgs(['email', 'domain-remove', 'mail.example.com']).body).toEqual({});
+    expect(() => parseOperatorArgs(['email', 'domain-sync', 'x', '--force'])).toThrow();
+    expect(() => parseOperatorArgs(['email', 'domain-add', 'x', '--force'])).toThrow();
+  });
   it.each([
     ['user', 'list', '--limit', '101'],
     ['user', 'list', '--page', '1e3'],
