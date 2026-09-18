@@ -32,6 +32,11 @@ export const DEFAULT_EMAIL_RECIPIENT_POLICY: EmailRecipientPolicy = {
 export const MAX_POLICY_DOMAINS = 100;
 
 const POLICY_MODES: ReadonlyArray<EmailRecipientPolicyMode> = ['verified', 'domains', 'any'];
+const MODE_RANK: Readonly<Record<EmailRecipientPolicyMode, number>> = {
+  verified: 0,
+  domains: 1,
+  any: 2,
+};
 const MANAGEMENT_MODES: ReadonlyArray<EmailDomainManagement> = ['self-serve', 'admin'];
 
 export class EmailSettingsError extends Error {
@@ -97,6 +102,26 @@ export function normalizeEmailRecipientPolicy(input: unknown): EmailRecipientPol
   return { mode: 'domains', domains: [...normalized].sort() };
 }
 
+/**
+ * True when `next` lets through everything `prev` did and more: a higher
+ * mode, or the same `domains` list grown. Anything else — a lower mode, a
+ * shrunk list, a list edited both ways, or no change — publishes as a
+ * tightening.
+ */
+export function widensEmailRecipientPolicy(
+  prev: EmailRecipientPolicy,
+  next: EmailRecipientPolicy,
+): boolean {
+  if (next.mode !== prev.mode) {
+    return MODE_RANK[next.mode] > MODE_RANK[prev.mode];
+  }
+  if (next.mode !== 'domains') {
+    return false;
+  }
+  const grown = new Set(next.domains);
+  return next.domains.length > prev.domains.length && prev.domains.every((d) => grown.has(d));
+}
+
 function readStoredPolicy(value: unknown): EmailRecipientPolicy | null {
   try {
     return normalizeEmailRecipientPolicy(value);
@@ -142,38 +167,55 @@ function withRecipientPolicyLock<T>(db: Db, fn: (tx: Tx) => Promise<T>): Promise
 }
 
 /**
- * Publish in two locked steps: (1) delete the mirror and commit the new
- * database value; (2) republish the mirror FROM the committed value. The
- * mirror is therefore never ahead of the database — a put that lands
- * without its response, or a commit that fails, cannot leave a policy in
- * force that the database does not hold. Every partial outcome fails
- * closed: an absent mirror reads as `verified` at the proxy, and whatever
- * the database holds is what step (2) or the next read republishes.
+ * One KV write per publish — Workers KV refuses a second write to a key
+ * within a second, so the mirror is never cleared and re-put. The write is
+ * ordered so the mirror is never LOOSER than the database in any partial
+ * outcome:
+ *   tightening  put the mirror, then commit. A failed put changes nothing;
+ *               a failed commit leaves the proxy stricter than the database
+ *               until the next read republishes.
+ *   widening    commit, then put. A failed put leaves the proxy on the old,
+ *               stricter policy — the operator is told — until a retry or
+ *               the next read republishes.
+ * A `domains` list edited both ways publishes as a tightening: the added
+ * domain is the one exposure a failed commit can leave, and the next read
+ * closes it. Publisher and repair share the advisory lock.
  */
 export async function setEmailRecipientPolicy(
   db: Db,
   kv: KVNamespace,
   policy: EmailRecipientPolicy,
 ): Promise<void> {
-  await withRecipientPolicyLock(db, async (tx) => {
-    try {
-      await kv.delete(EMAIL_RECIPIENT_POLICY_MIRROR_KEY);
-    } catch (err) {
-      console.error('[email-settings] recipient policy mirror clear failed:', err);
-      throw new Error('the recipient policy routing mirror could not be updated; nothing changed');
+  const widened = await withRecipientPolicyLock(db, async (tx) => {
+    const widening = widensEmailRecipientPolicy(await getEmailRecipientPolicy(tx), policy);
+    if (!widening) {
+      try {
+        await kv.put(
+          EMAIL_RECIPIENT_POLICY_MIRROR_KEY,
+          serializeEmailRecipientPolicyMirror(policy),
+        );
+      } catch (err) {
+        console.error('[email-settings] recipient policy mirror write failed:', err);
+        throw new Error(
+          'the recipient policy routing mirror could not be updated; nothing changed',
+        );
+      }
     }
     await setPlatformSetting(tx, EMAIL_RECIPIENT_POLICY_SETTING, {
       mode: policy.mode,
       domains: [...policy.domains],
     });
+    return widening;
   });
-  try {
-    await publishEmailRecipientPolicyMirror(db, kv);
-  } catch (err) {
-    console.error('[email-settings] recipient policy mirror write failed:', err);
-    throw new Error(
-      'recipient policy saved; publishing it to routing failed and it reads as verified until a retry or the next read republishes it',
-    );
+  if (widened) {
+    try {
+      await publishEmailRecipientPolicyMirror(db, kv);
+    } catch (err) {
+      console.error('[email-settings] recipient policy mirror write failed:', err);
+      throw new Error(
+        'recipient policy saved; publishing it to routing failed and the previous policy stays in force until a retry or the next read republishes it',
+      );
+    }
   }
 }
 

@@ -1,5 +1,5 @@
 {
-  "id": "a3a47ddf-0f1b-4a42-b174-fd4a19e3820d",
+  "id": "cec856d6-a0fd-4cf6-aa55-1b9673a14f8b",
   "prevId": "b78c690a-2a77-495e-832b-f86dfb7078f8",
   "version": "7",
   "dialect": "postgresql",
@@ -992,7 +992,7 @@
         },
         "email_domains_platform_token_check": {
           "name": "email_domains_platform_token_check",
-          "value": "(\"email_domains\".\"credential_kind\" = 'platform') = (\"email_domains\".\"token_ciphertext\" IS NULL AND \"email_domains\".\"token_iv\" IS NULL AND \"email_domains\".\"token_key_version\" IS NULL)"
+          "value": "(\"email_domains\".\"credential_kind\" = 'platform' AND \"email_domains\".\"token_ciphertext\" IS NULL AND \"email_domains\".\"token_iv\" IS NULL AND \"email_domains\".\"token_key_version\" IS NULL) OR (\"email_domains\".\"credential_kind\" <> 'platform' AND \"email_domains\".\"token_ciphertext\" IS NOT NULL AND \"email_domains\".\"token_iv\" IS NOT NULL AND \"email_domains\".\"token_key_version\" IS NOT NULL)"
         },
         "email_domains_managed_by_check": {
           "name": "email_domains_managed_by_check",

@@ -157,55 +157,88 @@ describe('operator email recipient policy', () => {
     expect(recorded[0]).toMatchObject({ action: 'email/policy', status: 'failed' });
   });
 
-  test('a mirror write failure commits the policy but leaves the proxy closed until republished', async () => {
+  test('a mirror write failure commits the policy but leaves the proxy on the previous, stricter policy until republished', async () => {
     await req('/email/policy', { mode: 'domains', domains: 'corp.example' });
     const put = vi.spyOn(env.ROUTING, 'put').mockRejectedValueOnce(new Error('kv down'));
     const response = await req('/email/policy', { mode: 'any' });
     expect(response.status).toBe(503);
     expect(await response.json()).toMatchObject({ error: 'mirror_failed' });
-    // The database holds the new policy; the mirror was cleared before the
-    // failed put, so the proxy reads `verified` — never a policy the
-    // database does not hold, and never the stale one.
     expect(await setting(EMAIL_RECIPIENT_POLICY_SETTING)).toEqual({ mode: 'any', domains: [] });
-    expect(await env.ROUTING.get(EMAIL_RECIPIENT_POLICY_MIRROR_KEY)).toBeNull();
+    expect(await env.ROUTING.get(EMAIL_RECIPIENT_POLICY_MIRROR_KEY)).toBe(
+      JSON.stringify({ mode: 'domains', domains: ['corp.example'] }),
+    );
     put.mockRestore();
-    // The next read republishes the committed policy.
     await req('/email/policy');
     expect(await env.ROUTING.get(EMAIL_RECIPIENT_POLICY_MIRROR_KEY)).toBe(
       JSON.stringify({ mode: 'any', domains: [] }),
     );
   });
 
-  test('tightening from `any` never leaves the looser mirror behind on a KV failure', async () => {
+  test('a failed tightening changes nothing', async () => {
     await req('/email/policy', { mode: 'any' });
-    expect(await env.ROUTING.get(EMAIL_RECIPIENT_POLICY_MIRROR_KEY)).toBe(
-      JSON.stringify({ mode: 'any', domains: [] }),
-    );
     const put = vi.spyOn(env.ROUTING, 'put').mockRejectedValueOnce(new Error('kv down'));
     const response = await req('/email/policy', { mode: 'verified' });
     expect(response.status).toBe(503);
-    expect(await setting(EMAIL_RECIPIENT_POLICY_SETTING)).toEqual({
-      mode: 'verified',
-      domains: [],
-    });
-    // Absent reads as verified at the proxy: closed, not the stale `any`.
-    expect(await env.ROUTING.get(EMAIL_RECIPIENT_POLICY_MIRROR_KEY)).toBeNull();
+    expect(await setting(EMAIL_RECIPIENT_POLICY_SETTING)).toEqual({ mode: 'any', domains: [] });
+    expect(await env.ROUTING.get(EMAIL_RECIPIENT_POLICY_MIRROR_KEY)).toBe(
+      JSON.stringify({ mode: 'any', domains: [] }),
+    );
     put.mockRestore();
   });
 
-  test('a failed mirror clear changes nothing', async () => {
-    await req('/email/policy', { mode: 'domains', domains: 'corp.example' });
-    const del = vi.spyOn(env.ROUTING, 'delete').mockRejectedValueOnce(new Error('kv down'));
-    const response = await req('/email/policy', { mode: 'any' });
+  test('publishes with exactly one KV write', async () => {
+    const put = vi.spyOn(env.ROUTING, 'put');
+    const del = vi.spyOn(env.ROUTING, 'delete');
+
+    expect((await req('/email/policy', { mode: 'domains', domains: 'a.example' })).status).toBe(
+      200,
+    );
+    expect(put).toHaveBeenCalledTimes(1);
+    expect(del).not.toHaveBeenCalled();
+
+    expect((await req('/email/policy', { mode: 'verified' })).status).toBe(200);
+    expect(put).toHaveBeenCalledTimes(2);
+    expect(del).not.toHaveBeenCalled();
+  });
+
+  test('a list edited both ways publishes as a tightening', async () => {
+    await req('/email/policy', { mode: 'domains', domains: 'a.example,b.example' });
+    const put = vi.spyOn(env.ROUTING, 'put').mockRejectedValueOnce(new Error('kv down'));
+    const response = await req('/email/policy', {
+      mode: 'domains',
+      domains: 'b.example,c.example',
+    });
     expect(response.status).toBe(503);
     expect(await setting(EMAIL_RECIPIENT_POLICY_SETTING)).toEqual({
       mode: 'domains',
-      domains: ['corp.example'],
+      domains: ['a.example', 'b.example'],
     });
     expect(await env.ROUTING.get(EMAIL_RECIPIENT_POLICY_MIRROR_KEY)).toBe(
-      JSON.stringify({ mode: 'domains', domains: ['corp.example'] }),
+      JSON.stringify({ mode: 'domains', domains: ['a.example', 'b.example'] }),
     );
-    del.mockRestore();
+    put.mockRestore();
+  });
+
+  test('a grown list is a widening', async () => {
+    await req('/email/policy', { mode: 'domains', domains: 'a.example' });
+    const put = vi.spyOn(env.ROUTING, 'put').mockRejectedValueOnce(new Error('kv down'));
+    const response = await req('/email/policy', {
+      mode: 'domains',
+      domains: 'a.example,b.example',
+    });
+    expect(response.status).toBe(503);
+    expect(await setting(EMAIL_RECIPIENT_POLICY_SETTING)).toEqual({
+      mode: 'domains',
+      domains: ['a.example', 'b.example'],
+    });
+    expect(await env.ROUTING.get(EMAIL_RECIPIENT_POLICY_MIRROR_KEY)).toBe(
+      JSON.stringify({ mode: 'domains', domains: ['a.example'] }),
+    );
+    put.mockRestore();
+    await req('/email/policy');
+    expect(await env.ROUTING.get(EMAIL_RECIPIENT_POLICY_MIRROR_KEY)).toBe(
+      JSON.stringify({ mode: 'domains', domains: ['a.example', 'b.example'] }),
+    );
   });
 
   test('is unavailable when the platform does not enable email', async () => {

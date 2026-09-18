@@ -428,7 +428,7 @@ export const emailDomains = pgTable(
     ),
     check(
       'email_domains_platform_token_check',
-      sql`(${table.credential_kind} = 'platform') = (${table.token_ciphertext} IS NULL AND ${table.token_iv} IS NULL AND ${table.token_key_version} IS NULL)`,
+      sql`(${table.credential_kind} = 'platform' AND ${table.token_ciphertext} IS NULL AND ${table.token_iv} IS NULL AND ${table.token_key_version} IS NULL) OR (${table.credential_kind} <> 'platform' AND ${table.token_ciphertext} IS NOT NULL AND ${table.token_iv} IS NOT NULL AND ${table.token_key_version} IS NOT NULL)`,
     ),
     check('email_domains_managed_by_check', sql`${table.managed_by} IN ('owner', 'admin')`),
   ],

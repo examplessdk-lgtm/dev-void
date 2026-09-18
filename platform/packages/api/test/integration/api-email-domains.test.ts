@@ -302,6 +302,47 @@ async function seedEmailDomain(
   return row;
 }
 
+describe('email_domains token triple constraint', () => {
+  it('rejects a partially-null stored token triple', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    await expect(
+      env.db.insert(emailDomains).values({
+        id: 'edom_partial_token',
+        project_id: project.id,
+        domain: 'partial-token.example',
+        credential_kind: 'api_token',
+        token_ciphertext: 'ciphertext',
+        token_iv: null,
+        token_key_version: 'v1',
+        relay_ciphertext: 'relay-ciphertext',
+        relay_iv: 'relay-iv',
+        relay_key_version: 'v1',
+      }),
+    ).rejects.toThrow();
+  });
+
+  it('rejects a stored token on a platform row', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    await expect(
+      env.db.insert(emailDomains).values({
+        id: 'edom_platform_token',
+        project_id: project.id,
+        domain: 'platform-token.example',
+        credential_kind: 'platform',
+        managed_by: 'admin',
+        token_ciphertext: 'must-not-be-stored',
+        token_iv: null,
+        token_key_version: null,
+        relay_ciphertext: 'relay-ciphertext',
+        relay_iv: 'relay-iv',
+        relay_key_version: 'v1',
+      }),
+    ).rejects.toThrow();
+  });
+});
+
 /** Add an active api_token domain through the real route. */
 async function addActiveDomain(
   projectId: string,

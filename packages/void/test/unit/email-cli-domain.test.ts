@@ -389,7 +389,10 @@ describe('emailDomainAdd', () => {
         addDeps({ runGrant, dns: { resolveMx }, exit }),
       );
 
-      expect(resolveMx).toHaveBeenCalledWith('acme.com');
+      expect(resolveMx).not.toHaveBeenCalled();
+      expect(printed(infoSpy)).toContain(
+        'Renewing mail.acme.com — the stored credential is replaced; rules and the relay stay.',
+      );
       expect(runGrant).toHaveBeenCalled();
       expect(addEmailDomain).toHaveBeenCalledWith('prj_1', {
         domain: 'mail.acme.com',
@@ -399,6 +402,38 @@ describe('emailDomainAdd', () => {
       expect(exit).not.toHaveBeenCalledWith(0);
     },
   );
+
+  it.each([
+    ['an apex row', 'acme.com'],
+    ['an already-prefixed mail row', 'mail.acme.com'],
+  ])('renews %s without re-running the MX decision', async (_label, existingDomain) => {
+    const addEmailDomain = vi.fn(async () => domainRow({ domain: existingDomain }));
+    const runGrant = vi.fn(async () => ({ refreshToken: GRANT_SENTINEL }));
+    const resolveMx = vi.fn(async () => [{ exchange: 'route1.mx.cloudflare.net.', priority: 10 }]);
+
+    await emailDomainAdd(
+      {
+        addEmailDomain,
+        getEmailDomain: vi.fn(),
+        getEmailSettings: async () => ({
+          domains: { management: 'admin' as const, projectSlug: 'hr-portal' },
+        }),
+        listEmailDomains: async () => [domainRow({ domain: existingDomain, managed_by: 'owner' })],
+      },
+      'prj_1',
+      existingDomain,
+      undefined,
+      addDeps({ runGrant, dns: { resolveMx } }),
+    );
+
+    expect(resolveMx).not.toHaveBeenCalled();
+    expect(printed(infoSpy)).toContain(`Renewing ${existingDomain}`);
+    expect(addEmailDomain).toHaveBeenCalledWith('prj_1', {
+      domain: existingDomain,
+      refreshToken: GRANT_SENTINEL,
+      attemptId: expect.any(String),
+    });
+  });
 
   it('proposes mail.<domain> when the apex carries MX, and says so', async () => {
     const addEmailDomain = vi.fn(async () =>
@@ -1488,6 +1523,43 @@ describe('emailDomainStatus', () => {
     expect(printed(infoSpy)).toContain('void platform email domain-sync mail.acme.com');
     expect(printed(infoSpy)).not.toContain('void email domain sync');
   });
+
+  it.each([
+    ['platform credential', 'platform' as const, false],
+    ['pasted API token', 'api_token' as const, true],
+  ])(
+    'points failed administrator setup using a %s at domain-add',
+    async (_label, kind, tokenStdin) => {
+      const getEmailSettings = vi.fn(async () => ({
+        domains: { management: 'admin' as const, projectSlug: 'hr-portal' },
+      }));
+      await emailDomainStatus(
+        {
+          getEmailDomain: vi.fn(async () =>
+            statusRow({
+              managed_by: 'admin',
+              credential_kind: kind,
+              status: 'failed',
+              relay_worker_name: null,
+              relay_version: null,
+              relay_drift: true,
+              catch_all_drift: true,
+              setup_state: { failed_step: 'zone_lookup' },
+            }),
+          ),
+          getEmailSettings,
+        },
+        'prj_1',
+        'acme.com',
+      );
+
+      const output = printed(warnSpy) + printed(infoSpy);
+      expect(output).toContain('void platform email domain-add acme.com --project hr-portal');
+      expect(output.includes('--token-stdin')).toBe(tokenStdin);
+      expect(output).not.toContain('domain-sync');
+      expect(getEmailSettings).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it('points an expired administrator API token at platform domain-add with the project slug', async () => {
     const getEmailSettings = vi.fn(async () => ({

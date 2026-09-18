@@ -569,12 +569,17 @@ export async function emailDomainAdd(
   // credential, so there is no grant to open a browser for. A row the owner
   // registered before the switch stays theirs to renew (ownership table: add
   // on an owner row), so that owner flow continues for an existing target.
+  let renewal: string | undefined;
   const settings = await client.getEmailSettings(projectId);
   if (settings.domains.management === 'admin') {
     const rows = await client.listEmailDomains(projectId);
-    const targets = new Set([target.emailDomain, ...(target.forced ? [] : [`mail.${domain}`])]);
-    const renewable = rows.some((row) => targets.has(row.domain) && row.managed_by !== 'admin');
-    if (!renewable) {
+    const candidates = [target.emailDomain, ...(target.forced ? [] : [`mail.${domain}`])];
+    const existing = candidates
+      .map((candidate) =>
+        rows.find((row) => row.domain === candidate && row.managed_by !== 'admin'),
+      )
+      .find((row) => row !== undefined);
+    if (!existing) {
       const project = settings.domains.projectSlug ?? projectId;
       log.info(
         [
@@ -588,13 +593,19 @@ export async function emailDomainAdd(
       );
       return exit(0);
     }
+    // The pre-switch row IS the target: Email Routing itself put MX on the
+    // apex it serves, so the MX decision below would retarget a renewal.
+    renewal = existing.domain;
+    target = { emailDomain: existing.domain, forced: true };
   }
 
-  // The MX decision. Forced (--subdomain) needs no default, only a warning
-  // when the named host already carries MX; unforced reads the apex and
-  // falls back to mail.<domain> — exactly the doc's two render lines.
+  // Renewals preserve their stored target. New forced domains only warn on
+  // existing MX; an unforced new domain falls back to mail.<domain> when its
+  // apex already receives mail.
   const dns = deps.dns ?? (await createNodeEmailDns());
-  if (target.forced) {
+  if (renewal !== undefined) {
+    log.info(`Renewing ${renewal} — the stored credential is replaced; rules and the relay stay.`);
+  } else if (target.forced) {
     const mx = await lookupMxForRender(dns, target.emailDomain);
     if (mx !== null && mx.length > 0) {
       log.warn(
@@ -1063,6 +1074,13 @@ export async function emailDomainStatus(
   if (row.error) {
     log.error(`email: ${row.error}`);
   }
+  const failedAdminRow = adminRow && row.status === 'failed';
+  if (failedAdminRow) {
+    const slug = (await client.getEmailSettings(projectId)).domains.projectSlug ?? projectId;
+    log.warn(
+      `Ask your administrator to re-run the setup: \`void platform email domain-add ${row.domain} --project ${slug}${row.credential_kind === 'api_token' ? ' --token-stdin' : ''}\` — adding again retries the failed step; rules stay.`,
+    );
+  }
   const remaining = row.setup_state?.remaining_steps ?? [];
   if (remaining.includes('routing_subdomain')) {
     log.warn(
@@ -1078,14 +1096,14 @@ export async function emailDomainStatus(
         : `Sending to arbitrary recipients needs Workers Paid — inbound works; sendEmail() to verified destinations only. After upgrading, run \`void email domain sync ${row.domain}\`.`,
     );
   }
-  if (row.relay_missing === true || row.relay_drift) {
+  if (!failedAdminRow && (row.relay_missing === true || row.relay_drift)) {
     log.info(
       adminRow
         ? `Ask your administrator to run \`void platform email domain-sync ${row.domain}\` to redeploy the relay in place.`
         : `Run \`void email domain sync ${row.domain}\` to redeploy the relay in place.`,
     );
   }
-  if (row.catch_all_drift) {
+  if (!failedAdminRow && row.catch_all_drift) {
     log.info(
       adminRow
         ? `Catch-all drifted — ask your administrator to run \`void platform email domain-sync ${row.domain}\` to re-point it.`

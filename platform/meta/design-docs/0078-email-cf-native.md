@@ -84,15 +84,18 @@ Storage: authoritative in the `platform_settings` table (key/value jsonb —
 the installation's runtime-changeable settings), mirrored to routing KV as
 `email-recipient-policy` for the proxy's hot path (`cacheTtl: 60`, like the
 allowlist). An absent or unreadable mirror means `verified` — `any` included
-when its shape is not the api's. The writer publishes in two locked steps:
-delete the mirror and commit the database value, then republish the mirror
-FROM the committed value. The mirror is therefore never ahead of the
-database: a failed clear changes nothing; a failed republish leaves the
-policy saved, the proxy on `verified`, and the operator told so (the
-response is an error) until a retry or the next read republishes it.
-Publisher and repair serialize on a transaction-scoped advisory lock because
-KV has no compare-and-set, and every read surface (operator, owner settings,
-admin page) repairs a drifted mirror. Surface: the admin UI's **Email** page and
+when its shape is not the api's. A publish is ONE KV write — Workers KV
+refuses a second write to a key within a second, so the mirror is never
+cleared and re-put — ordered so the mirror is never looser than the
+database in any partial outcome: a tightening puts the mirror before the
+database commits (a failed put changes nothing; a failed commit leaves the
+proxy stricter until the next read republishes), a widening commits first
+and puts after (a failed put leaves the old, stricter policy in force and
+the operator told so, until a retry or the next read republishes). A
+`domains` list edited both ways publishes as a tightening. Publisher and
+repair serialize on a transaction-scoped advisory lock because KV has no
+compare-and-set, and every read surface (operator, owner settings, admin
+page) repairs a drifted mirror. Surface: the admin UI's **Email** page and
 `void platform email policy` / `policy-set <mode> [--domains a,b]`, recorded
 in `operator_events`.
 
@@ -795,8 +798,9 @@ unchanged, and the operator layer re-shapes its JSON responses.
 ```
 
 - Schema: `credential_kind` includes `'platform'`; the `token_*` columns are
-  nullable with a CHECK that they are null exactly when the kind is
-  `platform`; `managed_by` defaults to `owner`.
+  nullable with a CHECK that all three are null when the kind is `platform`
+  and all three present otherwise — the NOT NULL guarantee every other kind
+  had before, kept; `managed_by` defaults to `owner`.
 - `decryptEmailDomainToken` is the one seam: a `platform` row resolves to
   `CF_API_TOKEN` there, so the engine, the lease route (which hands it to the
   proxy as an `api_token` lease), teardown and the admin surface all follow.
@@ -872,7 +876,9 @@ the printed command), so `void email domain add` reads it before any DNS,
 browser or Cloudflare work. In `admin` mode the CLI then lists the project's
 rows once: a row the owner registered before the switch for the domain this
 run targets (or its `mail.` fallback) keeps the owner flow — that is the
-renewal path — and any other input prints:
+renewal path, and the matched row IS the target, skipping the MX decision
+that would otherwise retarget an apex Email Routing has since put MX on —
+and any other input prints:
 
 ```
 $ void email domain add example.com
@@ -888,8 +894,8 @@ Exit 0, Cloudflare never contacted, nothing stored. The mode is enforced
 server-side — the add route answers 403 with the same text and revokes a
 posted grant — so the CLI check only spares the browser round trip. `status`
 on an administrator's row names the operator command for each step the owner
-cannot take (`domain-sync` for drift, `domain-add … --token-stdin` for an
-expired pasted token). The default policy and mode
+cannot take (`domain-sync` for drift, `domain-add` for a failed setup,
+`domain-add … --token-stdin` for an expired pasted token). The default policy and mode
 leave the managed platform's behavior unchanged: no new probe, binding or
 account call for a platform that sets neither.
 
