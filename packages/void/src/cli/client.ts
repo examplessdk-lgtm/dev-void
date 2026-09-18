@@ -336,51 +336,17 @@ export type ManifestOnlyDeployPayload = DeployUploadPayload;
  *   A Response of any status means the server answered; surface it
  *   verbatim rather than replay a request it may have accepted.
  * - A rejected fetch does NOT prove the request never arrived — the
- *   connection may have dropped after delivery. Before each retry we look
- *   for an IN-FLIGHT deployment row created inside
- *   DEPLOY_POST_DEDUPE_WINDOW_MS. Any such row — ours or a concurrent
- *   deploy's — makes the replay hit the server's concurrency guard
- *   (409), so suppressing is equivalent to retrying and yields a better
- *   error. Terminal rows (`live`/`failed`/`canceled`) never suppress:
- *   attributing them to our attempt needs a server-persisted request id
- *   we don't have, and misattribution would drop a deploy the user
- *   asked for. A completed attempt of ours instead gets replayed as an
- *   identical re-deploy — rare (a deploy finishing within seconds) and
- *   the benign side of the ambiguity.
+ *   connection may have dropped after delivery. Arbitration is left to
+ *   the server's precheck, the only atomic (project-locked) verdict: if
+ *   an earlier attempt or a concurrent deploy is still in flight, the
+ *   replay is rejected with 409 and surfaced as a deploy conflict
+ *   naming the deployment id. A client-side GET-then-decide lookup can
+ *   never be authoritative (the row can transition between lookup and
+ *   replay), so no dedupe query is made — the residual case is the lost
+ *   attempt completing within seconds and being redeployed identically.
  */
 const DEPLOY_POST_MAX_RETRIES = 3;
 const DEPLOY_POST_BACKOFF_MS = [1000, 5000, 10000];
-const DEPLOY_POST_DEDUPE_WINDOW_MS = 120_000;
-/**
- * Non-terminal deployment statuses whose fresh row makes a replayed
- * deploy POST hit the server's concurrency guard unconditionally.
- * `cutover`/`compensating` are deliberately absent: the precheck can
- * reconcile those and accept the deploy, so the replay must run.
- */
-const DEPLOY_DEDUPE_BLOCKING_STATUSES = new Set([
-  'pending',
-  'uploading',
-  'migrating',
-  'prerendering',
-  'canceling',
-]);
-
-/**
- * Parse a PostgreSQL `timestamp` column value (`mode: 'string'` emits
- * `2026-09-18 12:00:00` — no zone marker, stored in UTC). `Date.parse`
- * alone would read it as LOCAL time, skewing comparisons by the host's
- * offset. Mirrors the platform's `databaseTimestampMs` helper.
- */
-function databaseTimestampMs(value: string): number | null {
-  const withSeparator = value.includes('T') ? value : value.replace(' ', 'T');
-  const withZone = /[+-]\d{2}$/.test(withSeparator)
-    ? `${withSeparator}:00`
-    : /(?:Z|[+-]\d{2}:?\d{2})$/i.test(withSeparator)
-      ? withSeparator
-      : `${withSeparator}Z`;
-  const parsed = new Date(withZone).getTime();
-  return Number.isFinite(parsed) ? parsed : null;
-}
 
 /**
  * HTTP client for the Void platform API.
@@ -656,28 +622,6 @@ export class PlatformClient {
         });
         await sleep(DEPLOY_POST_BACKOFF_MS[attempt]);
         attempt++;
-        // Recheck only now — right before the replay. The lost POST's
-        // placeholder may not have existed at rejection time (precheck
-        // still running), and the backoff gives the server time to
-        // insert it.
-        const existing = await this.findInFlightDeployment(projectId, DEPLOY_POST_DEDUPE_WINDOW_MS);
-        if (existing) {
-          cliLog?.warn('deploy_retry_suppressed', {
-            url,
-            deploymentId: existing.id,
-            status: existing.status,
-          });
-          yield {
-            event: 'error',
-            step: 'finalize',
-            message:
-              `deployment ${existing.id} is already in progress (status: ${existing.status}) — ` +
-              'it may be an earlier attempt of this deploy or a concurrent one; ' +
-              'not retrying to avoid a duplicate deploy; ' +
-              'inspect with `void project status` before redeploying',
-          };
-          return;
-        }
       }
     }
 
@@ -694,7 +638,36 @@ export class PlatformClient {
     });
 
     if (!res.ok) {
-      await throwPlatformApiError('Deploy failed', res);
+      const body = await res.text();
+      if (res.status === 409) {
+        // The precheck's authoritative verdict — a deployment is already
+        // in flight (possibly the earlier attempt of this same deploy,
+        // or a concurrent one). Surface it as a structured error event
+        // naming the deployment rather than a bare HTTP failure.
+        let parsed: { error?: string; deployment?: string } | null = null;
+        try {
+          parsed = JSON.parse(body) as typeof parsed;
+        } catch {
+          // Non-JSON 409 — fall through to the generic error below.
+        }
+        if (parsed?.deployment) {
+          cliLog?.warn('deploy_conflict', {
+            url,
+            deploymentId: parsed.deployment,
+            error: parsed.error,
+          });
+          yield {
+            event: 'error',
+            step: 'finalize',
+            message:
+              `${parsed.error ?? 'deploy in progress'}: deployment ${parsed.deployment} — ` +
+              'it may be an earlier attempt of this deploy or a concurrent one; ' +
+              'inspect with `void project status` before redeploying',
+          };
+          return;
+        }
+      }
+      throw new PlatformApiError('Deploy failed', res.status, body);
     }
 
     const reader = res.body!.getReader();
@@ -748,45 +721,6 @@ export class PlatformClient {
         lastEvent: lastEventName,
       });
       throw err;
-    }
-  }
-
-  /**
-   * Best-effort lookup for a deployment created within `windowMs` whose
-   * status makes a replayed POST redundant — the deploy retry path uses
-   * it to decide whether suppressing is equivalent to retrying.
-   *
-   * A row counts only when its status guarantees the server's precheck
-   * rejects the replay with 409 (`getActiveDeployment` →
-   * `ConcurrentDeployError` for any fresh active row). `cutover` and
-   * `compensating` are excluded: the precheck can reconcile those
-   * (completed compensation → failed, marker-verified cutover → live)
-   * and accept the new deploy, so a replay is NOT guaranteed redundant
-   * and must reach the server. Terminal rows (`live`/`failed`/
-   * `canceled`) likewise never block a replay.
-   *
-   * Ownership of the row is deliberately NOT inferred (commit equality
-   * is non-unique: same-SHA redeploys, commit-less manual deploys): a
-   * deploy the user asked for is always submitted. Returns `undefined`
-   * on any failure: the retried POST then still runs, with the server's
-   * guard as the backstop.
-   */
-  private async findInFlightDeployment(
-    projectId: string,
-    windowMs: number,
-  ): Promise<DeploymentResponse | undefined> {
-    try {
-      const { deployments } = await this.listDeployments(projectId);
-      const now = Date.now();
-      return deployments.find((deployment) => {
-        if (!DEPLOY_DEDUPE_BLOCKING_STATUSES.has(deployment.status)) {
-          return false;
-        }
-        const createdMs = databaseTimestampMs(deployment.created_at);
-        return createdMs !== null && now - createdMs <= windowMs;
-      });
-    } catch {
-      return undefined;
     }
   }
 
