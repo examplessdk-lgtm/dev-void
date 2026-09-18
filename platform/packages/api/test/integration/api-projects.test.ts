@@ -1678,6 +1678,51 @@ describe('GET /projects/:id/deployments', () => {
     expect(byId[d2.id].commit_url).toBeNull();
     expect(byId[d2.id].status).toBe('pending');
   });
+
+  it('hides manifest environment values from readers but not deploy-capable members', async () => {
+    const owner = await createTestUser(env.db, 'manifest-owner');
+    const reader = await createTestUser(env.db, 'manifest-reader');
+    const collaborator = await createTestUser(env.db, 'manifest-collaborator');
+    const project = await createTestProject(env.db, owner.id, 'manifest-project');
+    await env.db.insert(projectMembers).values([
+      {
+        project_id: project.id,
+        user_id: reader.id,
+        role: 'reader',
+        added_by_user_id: owner.id,
+      },
+      {
+        project_id: project.id,
+        user_id: collaborator.id,
+        role: 'collaborator',
+        added_by_user_id: owner.id,
+      },
+    ]);
+    await createDeployment(
+      env.db,
+      project.id,
+      JSON.stringify({ version: 1, vars: { TOKEN: 'plaintext' }, ssr: true }),
+    );
+
+    const listAs = async (jwt: string) => {
+      const response = await app.fetch(
+        new Request(`http://localhost/projects/${project.id}/deployments`, {
+          headers: { Authorization: `Bearer ${jwt}` },
+        }),
+        env,
+      );
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as { deployments: Array<{ manifest: string }> };
+      return JSON.parse(body.deployments[0]!.manifest) as Record<string, unknown>;
+    };
+
+    expect(await listAs(reader.jwt)).toEqual({ version: 1, ssr: true });
+    expect(await listAs(collaborator.jwt)).toEqual({
+      version: 1,
+      vars: { TOKEN: 'plaintext' },
+      ssr: true,
+    });
+  });
 });
 
 describe('POST /projects/:id/rollback', () => {
@@ -1730,10 +1775,7 @@ describe('POST /projects/:id/rollback', () => {
   });
 
   it('clamps a stored manifest limits.cpuMs to the current plan ceiling (never rejects)', async () => {
-    // Free plan ceiling is 10 cpuMs; the target manifest requests 60000 —
-    // e.g. deployed under a higher plan before a downgrade. Rollback must
-    // clamp with min() and go through, not 400.
-    const user = await createTestUser(env.db);
+    const user = await createTestUser(env.db, 'rollback-plan-owner', 'github', undefined, 'pro');
     const project = await createTestProject(env.db, user.id, 'clamp-rollback-app');
 
     const d1 = await createDeployment(
@@ -1753,6 +1795,17 @@ describe('POST /projects/:id/rollback', () => {
     await markDeploymentRetained(env.db, d2.id, true);
     await setActiveDeployment(env.db, project.id, d2.id);
 
+    const requireCapability = projectAccess.requireProjectCapability;
+    let downgraded = false;
+    vi.spyOn(projectAccess, 'requireProjectCapability').mockImplementation(async (...args) => {
+      const result = await requireCapability(...args);
+      if (!downgraded && args[3] === 'deploy') {
+        downgraded = true;
+        await env.db.update(users).set({ plan: 'free' }).where(eq(users.id, user.id));
+      }
+      return result;
+    });
+
     const res = await app.fetch(
       new Request(`http://localhost/projects/${project.id}/rollback`, {
         method: 'POST',
@@ -1765,6 +1818,7 @@ describe('POST /projects/:id/rollback', () => {
       env,
     );
     expect(res.status).toBe(200);
+    expect(downgraded).toBe(true);
 
     const routing = (await env.ROUTING.get(project.slug, 'json')) as {
       limits: { cpuMs: number; subRequests: number };

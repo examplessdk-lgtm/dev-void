@@ -36,7 +36,7 @@ const INVITATION_EMAILS_PER_MINUTE = 5;
 const INVITATION_EMAILS_PER_DAY = 50;
 
 type MemberJson = Readonly<{
-  user: Readonly<Pick<User, 'id' | 'login' | 'email'>>;
+  user: Readonly<Pick<User, 'id' | 'login'>>;
   role: ProjectMemberRole | 'owner';
   created_at: string;
 }>;
@@ -53,13 +53,13 @@ type InvitationJson = Readonly<{
   revoked_at: string | null;
 }>;
 
-function userJson(user: User): Pick<User, 'id' | 'login' | 'email'> {
-  return { id: user.id, login: user.login, email: user.email };
+function userSummary(user: User): Pick<User, 'id' | 'login'> {
+  return { id: user.id, login: user.login };
 }
 
 function memberJson(member: ProjectMember, user: User): MemberJson {
   return {
-    user: userJson(user),
+    user: userSummary(user),
     role: member.role,
     created_at: member.created_at,
   };
@@ -75,7 +75,7 @@ function effectiveInvitationStatus(invitation: ProjectInvitation): ProjectInvita
 function invitationJson(invitation: ProjectInvitation, target: User): InvitationJson {
   return {
     id: invitation.id,
-    target: userJson(target),
+    target: { ...userSummary(target), email: target.email },
     target_email: invitation.target_email_snapshot,
     role: invitation.role,
     status: effectiveInvitationStatus(invitation),
@@ -231,7 +231,7 @@ export const projectTeamRoutes = new Hono<ApiEnv>()
     return context.json({
       members: [
         {
-          user: userJson(access.owner),
+          user: userSummary(access.owner),
           role: 'owner' as const,
           created_at: access.project.created_at,
         },
@@ -486,11 +486,11 @@ export const myProjectInvitationRoutes = new Hono<ApiEnv>().get(
             project: {
               id: project.id,
               slug: project.slug,
-              owner: owner ? userJson(owner) : { id: project.user_id, login: null, email: null },
+              owner: owner ? userSummary(owner) : { id: project.user_id, login: null },
             },
             invited_by: inviter
-              ? userJson(inviter)
-              : { id: invitation.invited_by_user_id, login: null, email: null },
+              ? userSummary(inviter)
+              : { id: invitation.invited_by_user_id, login: null },
             role: invitation.role,
             created_at: invitation.created_at,
             expires_at: invitation.expires_at,

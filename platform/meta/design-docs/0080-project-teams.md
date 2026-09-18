@@ -421,8 +421,8 @@ acquire capacity and select a build size from the current billing owner.
 
 ## User and project lifecycle
 
-- Deleting a non-owner user cascades their memberships. It also revokes their
-  pending project invitations and invalidates GitHub connections whose proof
+- Deleting a non-owner user cascades their memberships and project invitations
+  targeting that account. It also invalidates GitHub connections whose proof
   depended on them.
 - Deleting an owner keeps the existing behavior: owned projects are torn down
   before the account is removed. Being a member of other projects does not
@@ -433,66 +433,3 @@ acquire capacity and select a build size from the current billing owner.
   owned projects, never projects on which the user is merely a member.
 - Invitations remain bound to the resolved target user ID if that account's
   registered email changes. A resend uses the account's current email.
-
-## Rollout
-
-1. **Schema and attribution.** Add the tables and attribution columns, backfill
-   one ownership period and deployment billing owner per existing project, and
-   deploy readers that tolerate absent optional data.
-2. **Central authorization.** Introduce the capability service and move every
-   project route to it while owner remains the only possible role. Move all
-   plan lookups to the returned owner. Update the existing proxy verification
-   endpoint to enforce deploy capability without changing its wire contract.
-3. **Counter correctness.** Resolve usage by ownership period, split billed
-   totals from current project mappings, and add stale-counter ownership checks.
-4. **Membership and invitations.** Enable member rows, registered-user lookup,
-   acceptance/decline, access audit, email delivery, API routes, CLI commands,
-   and the API-owned CLI instruction page.
-5. **Operator transfer.** Enable dry-run/apply in the shared operator service,
-   browser administrator UI, and CLI after quota convergence is deployed.
-
-No phase changes direct Cloudflare deployment configuration, bindings, upload
-logic, or manifests.
-
-## Verification plan
-
-During each implementation batch:
-
-- run `vp test run` only for the affected API, proxy, dispatch, dashboard, or
-  CLI test files;
-- run `vp run check` after the batch;
-- investigate and fix any newly slow or hanging focused test immediately.
-
-Coverage must include:
-
-- every role/capability pair and accessible-project listing;
-- owner-implicit access for a pre-feature project;
-- reader deploy denial and collaborator deploy success under the owner's plan;
-- actor suspension versus owner usage/manual suspension;
-- secret, migration, domain, email, database, GitHub, logs, and usage routes;
-- rejection of unregistered invitees, invitation expiry, refresh, revocation,
-  target-only acceptance/decline, forwarded IDs, concurrent acceptance, email
-  changes, and audit history;
-- member removal/role downgrade racing deploy start and final publish;
-- deploy and prerender tokens minted before access revocation;
-- GitHub connection authorizer removal and builds charged to the owner;
-- transfer dry run, former-owner role, existing-member target, active-work
-  rejection, delayed events on both sides of the timestamp, billing rollover,
-  stale DO writes, routing partial failure, and idempotent recovery;
-- plan changes, suspension, user deletion, and project deletion ignoring shared
-  membership where ownership is required.
-
-When all batches are complete, run `vp lint`, `vp fmt`, `vp run check`, and the
-full `vp test run` suite.
-
-After verification, document only the public behavior and workflows:
-
-- add a project collaboration guide and link it from deployment guidance;
-- update CLI help, the no-argument project-group hint, and
-  `docs/reference/cli.md` for every new command;
-- update `docs/guide/platform-administration.md` for ownership transfer;
-- update relevant package README files only where their supported interfaces
-  changed;
-- update `packages/void/skills/void` when the CLI guidance changes;
-- leave `packages/void/AGENTS_TEMPLATE.md` unchanged unless a brief generated
-  app instruction is genuinely necessary.

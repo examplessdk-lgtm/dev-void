@@ -187,7 +187,9 @@ export async function processUsageEventBatch(
           ...event,
           userId: ownerUserId,
           slug: project.slug,
-          currentOwner: ownershipPeriod ? ownershipPeriod.ends_at === null : true,
+          currentOwner:
+            project.status !== 'deleting' &&
+            (ownershipPeriod ? ownershipPeriod.ends_at === null : true),
           ownershipStartedAt: ownershipPeriod?.starts_at ?? project.created_at,
         },
         at,

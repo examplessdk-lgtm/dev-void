@@ -9,7 +9,6 @@ import {
 } from '../project-access.ts';
 import type { ProjectCapability } from '../types.ts';
 
-/** Preserve the project routes' established 404/403 JSON contract. */
 export async function requireProjectRouteCapability(
   context: Context<ApiEnv>,
   projectId: string,

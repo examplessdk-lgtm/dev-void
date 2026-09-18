@@ -9,6 +9,7 @@ import {
   platformLoginConnections,
   platformLoginRevisions,
   operatorEvents,
+  projectOwnershipPeriods,
   projects,
   users,
 } from '../../src/schema.ts';
@@ -330,7 +331,7 @@ describe('GET /admin/users/:id', () => {
     await createTestDeployment(env.db, project.id, 'live');
     await createTestDeployment(env.db, project.id, 'live');
 
-    // Mock CF API — the user detail page calls queryBatchProjectUsage which
+    // Mock CF API — the user detail page calls queryBatchProjectUsageWindows which
     // fetches from Analytics Engine. Without a mock, the real fetch hangs in CI.
     mockCfApi();
 
@@ -1405,8 +1406,24 @@ describe('POST /admin/projects/:id/owner', () => {
       'free',
       'admin',
     );
+    const formerOwner = await createTestUser(env.db, 'browser-convergence-former-owner');
     const owner = await createTestUser(env.db, 'browser-convergence-owner');
     const project = await createTestProject(env.db, owner.id, 'browser-convergence-project');
+    await env.db.insert(projectOwnershipPeriods).values([
+      {
+        id: 'pown_browser_convergence_former',
+        project_id: project.id,
+        owner_user_id: formerOwner.id,
+        starts_at: '2026-01-01T00:00:00.000Z',
+        ends_at: '2026-02-01T00:00:00.000Z',
+      },
+      {
+        id: 'pown_browser_convergence_current',
+        project_id: project.id,
+        owner_user_id: owner.id,
+        starts_at: '2026-02-01T00:00:00.000Z',
+      },
+    ]);
 
     const response = await req(`/admin/projects/${project.id}/owner/preview`, admin.adminJwt, {
       method: 'POST',
@@ -1420,7 +1437,7 @@ describe('POST /admin/projects/:id/owner', () => {
     const html = await response.text();
     expect(html).toContain(`Converge Ownership State: ${project.slug}`);
     expect(html).toContain('This is a convergence-only operation');
-    expect(html).toContain('no former-owner detachment is needed');
+    expect(html).toContain(`detach from <code>${formerOwner.id}</code>`);
     expect(html).toContain('Apply Convergence');
     expect(html).not.toContain('The former owner will become');
     expect(html).not.toContain('detach from <code></code>');

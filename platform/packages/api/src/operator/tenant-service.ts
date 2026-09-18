@@ -24,7 +24,7 @@ import {
   getProjectBuilds,
   getProjectDeployments,
   getProjectResources,
-  getProjectsByUserId,
+  getOwnedProjectsByUserId,
   getUser,
   TERMINAL_DEPLOYMENT_STATUSES,
   LastAdminError,
@@ -181,7 +181,7 @@ async function requireProject(db: Db, id: string) {
 export async function getOperatorUser(context: Context<ApiEnv>, id: string) {
   const user = await requireUser(context.get('db'), id);
   const [projects, deploysToday] = await Promise.all([
-    getProjectsByUserId(context.get('db'), id),
+    getOwnedProjectsByUserId(context.get('db'), id),
     countUserDeploymentsToday(context.get('db'), id),
   ]);
   const since = user.billing_cycle_start
@@ -244,6 +244,10 @@ function accountSummary(user: User) {
     suspended: user.suspended_reason !== null,
     suspendedReason: user.suspended_reason,
   };
+}
+
+function historicalAccountSummary(user: User | null, userId: string) {
+  return user ? accountSummary(user) : { id: userId, deleted: true as const };
 }
 
 async function getOwnershipTransferBlockers(
@@ -323,12 +327,12 @@ async function inspectOwnershipTransfer(db: Db, projectId: string, targetUserId:
     ...activeWork,
   ];
   const previousTransfer =
-    currentOwner.id === newOwner.id
-      ? await getPreviousOwnershipTransfer(db, projectId, newOwner)
-      : null;
+    currentOwner.id === newOwner.id ? await getPreviousOwnershipTransfer(db, projectId) : null;
   return {
     project,
-    previousOwner: previousTransfer?.owner ?? currentOwner,
+    currentOwner,
+    previousOwner: previousTransfer ? previousTransfer.owner : currentOwner,
+    previousOwnerId: previousTransfer?.ownerId ?? currentOwner.id,
     newOwner,
     blockers,
     targetMembership,
@@ -340,8 +344,7 @@ async function inspectOwnershipTransfer(db: Db, projectId: string, targetUserId:
 async function getPreviousOwnershipTransfer(
   db: Db,
   projectId: string,
-  fallbackOwner: User,
-): Promise<{ owner: User; startsAt: string } | null> {
+): Promise<{ owner: User | null; ownerId: string; startsAt: string } | null> {
   const [period] = await db
     .select()
     .from(projectOwnershipPeriods)
@@ -357,12 +360,14 @@ async function getPreviousOwnershipTransfer(
     return null;
   }
   const [owner] = await db.select().from(users).where(eq(users.id, period.owner_user_id)).limit(1);
-  return { owner: owner ?? fallbackOwner, startsAt: period.starts_at };
+  return { owner: owner ?? null, ownerId: period.owner_user_id, startsAt: period.starts_at };
 }
 
 type OwnershipTransferCommit = Readonly<{
   project: Project;
-  previousOwner: User;
+  previousOwner: User | null;
+  previousOwnerId: string;
+  previousOwnerBillingCycleStart: string | null;
   newOwner: User;
   previousOwnershipStartedAt: string;
   transferredAt: string;
@@ -446,10 +451,14 @@ async function commitOwnershipTransfer(
       );
 
     if (lockedProject.user_id === targetUserId) {
-      const previousTransfer = await getPreviousOwnershipTransfer(txDb, projectId, newOwner);
+      const previousTransfer = await getPreviousOwnershipTransfer(txDb, projectId);
       return {
         project: lockedProject,
-        previousOwner: previousTransfer?.owner ?? newOwner,
+        previousOwner: previousTransfer ? previousTransfer.owner : newOwner,
+        previousOwnerId: previousTransfer?.ownerId ?? newOwner.id,
+        previousOwnerBillingCycleStart: previousTransfer
+          ? (previousTransfer.owner?.billing_cycle_start ?? null)
+          : newOwner.billing_cycle_start,
         newOwner,
         previousOwnershipStartedAt: previousTransfer?.startsAt ?? lockedProject.created_at,
         transferredAt: openPeriod?.starts_at ?? lockedProject.created_at,
@@ -518,6 +527,8 @@ async function commitOwnershipTransfer(
     return {
       project: updatedProject!,
       previousOwner: currentOwner,
+      previousOwnerId: currentOwner.id,
+      previousOwnerBillingCycleStart: currentOwner.billing_cycle_start,
       newOwner,
       previousOwnershipStartedAt: openPeriod?.starts_at ?? lockedProject.created_at,
       transferredAt: newPeriod!.starts_at,
@@ -543,10 +554,17 @@ async function updateOwnershipCounters(
       throw new Error(`UsageCounter ${path} returned HTTP ${response.status}`);
     }
   };
-  if (transfer.previousOwner.id !== transfer.newOwner.id) {
-    await request(transfer.previousOwner.id, '/detach-project', {
+  if (transfer.previousOwnerId !== transfer.newOwner.id) {
+    await request(transfer.previousOwnerId, '/detach-project', {
       projectId: transfer.project.id,
-      userId: transfer.previousOwner.id,
+      userId: transfer.previousOwnerId,
+      ...(transfer.previousOwnerBillingCycleStart
+        ? {
+            billingPeriodStart: getCurrentBillingPeriodStart(
+              transfer.previousOwnerBillingCycleStart,
+            ).toISOString(),
+          }
+        : {}),
       ownershipStartedAt: transfer.previousOwnershipStartedAt,
       ownershipEndedAt: transfer.transferredAt,
     });
@@ -641,7 +659,7 @@ async function reconcileOperatorUserProjects(
   context: Context<ApiEnv>,
   userId: string,
 ): Promise<void> {
-  const projects = await getProjectsByUserId(context.get('db'), userId);
+  const projects = await getOwnedProjectsByUserId(context.get('db'), userId);
   for (const project of projects) {
     await republishProjectOwnerState(context, project.id, userId);
   }
@@ -660,9 +678,14 @@ export async function transferOperatorProjectOwner(
       'project.owner',
       { id: inspection.project.id, slug: inspection.project.slug, userId: targetUserId },
       {
-        previousOwner: accountSummary(inspection.previousOwner),
+        currentOwner: accountSummary(inspection.currentOwner),
+        previousOwner: historicalAccountSummary(
+          inspection.previousOwner,
+          inspection.previousOwnerId,
+        ),
         newOwner: accountSummary(inspection.newOwner),
-        formerOwnerRole: inspection.previousOwner.id === inspection.newOwner.id ? null : 'admin',
+        changed: inspection.currentOwner.id !== inspection.newOwner.id,
+        formerOwnerRole: inspection.previousOwnerId === inspection.newOwner.id ? null : 'admin',
         targetPreviousRole: inspection.targetMembership?.role ?? null,
         blockers: inspection.blockers,
         github: inspection.github,
@@ -673,9 +696,9 @@ export async function transferOperatorProjectOwner(
         ],
         counterUpdates: {
           detachUserId:
-            inspection.previousOwner.id === inspection.newOwner.id
+            inspection.previousOwnerId === inspection.newOwner.id
               ? null
-              : inspection.previousOwner.id,
+              : inspection.previousOwnerId,
           attachUserId: inspection.newOwner.id,
         },
         usageTransfer: 'non-retroactive',
@@ -707,7 +730,7 @@ export async function transferOperatorProjectOwner(
         target: { id: transfer.project.id, slug: transfer.project.slug, userId: targetUserId },
         ownershipTransferred: true,
         transferredAt: transfer.transferredAt,
-        previousOwner: accountSummary(transfer.previousOwner),
+        previousOwner: historicalAccountSummary(transfer.previousOwner, transfer.previousOwnerId),
         newOwner: accountSummary(convergedOwner),
         convergence,
       },
@@ -716,10 +739,10 @@ export async function transferOperatorProjectOwner(
   return {
     action: 'project.owner',
     target: { id: transfer.project.id, slug: transfer.project.slug, userId: targetUserId },
-    previousOwner: accountSummary(transfer.previousOwner),
+    previousOwner: historicalAccountSummary(transfer.previousOwner, transfer.previousOwnerId),
     newOwner: accountSummary(convergedOwner),
     transferredAt: transfer.transferredAt,
-    formerOwnerRole: transfer.previousOwner.id === transfer.newOwner.id ? null : 'admin',
+    formerOwnerRole: transfer.previousOwnerId === transfer.newOwner.id ? null : 'admin',
     changed: transfer.changed,
     convergence,
   };
@@ -739,7 +762,7 @@ export async function changeOperatorUserPlan(
   const newPlan = plan as PlanId;
   const target = { id, login: user.login };
   if (dryRun) {
-    const projects = await getProjectsByUserId(db, id);
+    const projects = await getOwnedProjectsByUserId(db, id);
     return preview('user.plan', target, {
       previousPlan: user.plan,
       plan,
@@ -800,7 +823,7 @@ export async function suspendOperatorUser(
       'Reserved reason: automatic usage enforcement reasons cannot be used for an admin suspension.',
     );
   }
-  const projects = await getProjectsByUserId(db, id);
+  const projects = await getOwnedProjectsByUserId(db, id);
   const user = await prepareRemoval(db, id, { kind: 'suspend', reason }, dryRun);
   const target = { id, login: user.login };
   if (dryRun) {
@@ -836,7 +859,7 @@ export async function suspendOperatorUser(
 export async function restoreOperatorUser(context: Context<ApiEnv>, id: string, dryRun = false) {
   const db = context.get('db');
   const user = await requireUser(db, id);
-  const projects = await getProjectsByUserId(db, id);
+  const projects = await getOwnedProjectsByUserId(db, id);
   const target = { id, login: user.login };
   if (dryRun) {
     return preview('user.restore', target, {
@@ -903,7 +926,7 @@ export async function deleteOperatorProject(context: Context<ApiEnv>, id: string
 
 export async function deleteOperatorUser(context: Context<ApiEnv>, id: string, dryRun = false) {
   const db = context.get('db');
-  const projects = await getProjectsByUserId(db, id);
+  const projects = await getOwnedProjectsByUserId(db, id);
   const user = await prepareRemoval(db, id, { kind: 'delete' }, dryRun);
   const target = { id, login: user.login };
   if (dryRun) {

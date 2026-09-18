@@ -31,8 +31,10 @@ type OwnerSummary = Readonly<{
 
 type OwnerTransferPreview = Readonly<{
   target: { id: string; slug: string; userId: string };
-  previousOwner: OwnerSummary;
+  currentOwner: OwnerSummary;
+  previousOwner: OwnerSummary | { id: string; deleted: true };
   newOwner: OwnerSummary;
+  changed: boolean;
   formerOwnerRole: 'admin' | null;
   targetPreviousRole: string | null;
   blockers: ReadonlyArray<{ kind: string; id: string; status: string }>;
@@ -258,7 +260,7 @@ app.post('/:id/owner/preview', async (context) => {
     userId,
     true,
   )) as unknown as OwnerTransferPreview;
-  const convergenceOnly = result.formerOwnerRole === null;
+  const convergenceOnly = !result.changed;
 
   return context.html(
     <Layout
@@ -281,10 +283,10 @@ app.post('/:id/owner/preview', async (context) => {
           <tr>
             <th>Current owner</th>
             <td>
-              {result.previousOwner.login} (<code>{result.previousOwner.id}</code>)
+              {result.currentOwner.login} (<code>{result.currentOwner.id}</code>)
             </td>
-            <td>{result.previousOwner.plan}</td>
-            <td>{suspensionLabel(result.previousOwner)}</td>
+            <td>{result.currentOwner.plan}</td>
+            <td>{suspensionLabel(result.currentOwner)}</td>
           </tr>
           <tr>
             <th>New owner</th>

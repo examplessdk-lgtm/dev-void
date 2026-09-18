@@ -47,6 +47,7 @@ describe('PlatformClient project teams', () => {
   it('invites only by email and role', async () => {
     const result = {
       invitation: { id: 'invite_1', role: 'collaborator' },
+      refreshed: false,
       delivery: { status: 'not_configured' },
     };
     fetchMock.mockResolvedValueOnce(json(result, 201));
@@ -106,12 +107,5 @@ describe('PlatformClient project teams', () => {
     expect(request(0)[0]).toBe(`${apiUrl}/me/project-invitations`);
     expect(request(1)[0]).toBe(`${apiUrl}/project-invitations/invite%20%2F%201/accept`);
     expect(request(2)[0]).toBe(`${apiUrl}/project-invitations/invite%20%2F%201/decline`);
-  });
-
-  it('surfaces an unknown registered email response', async () => {
-    fetchMock.mockResolvedValueOnce(json({ error: 'user_not_found' }, 404));
-    await expect(
-      client().inviteProjectMember(projectId, 'unknown@example.com', 'reader'),
-    ).rejects.toMatchObject({ name: 'PlatformApiError', status: 404 });
   });
 });

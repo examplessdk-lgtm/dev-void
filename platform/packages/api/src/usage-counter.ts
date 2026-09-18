@@ -589,6 +589,7 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
     const body = (await request.json()) as {
       projectId: string;
       userId?: string;
+      billingPeriodStart?: string;
       ownershipStartedAt?: string;
       ownershipEndedAt?: string;
     };
@@ -596,6 +597,7 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
       return Response.json({ error: 'projectId is required' }, { status: 400 });
     }
     if (
+      (body.billingPeriodStart && !Number.isFinite(Date.parse(body.billingPeriodStart))) ||
       (body.ownershipStartedAt && !Number.isFinite(Date.parse(body.ownershipStartedAt))) ||
       (body.ownershipEndedAt && !Number.isFinite(Date.parse(body.ownershipEndedAt)))
     ) {
@@ -604,6 +606,15 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
     const state = await this.getState();
     if (body.userId) {
       state.ownerUserId = body.userId;
+    }
+    const db = createDb(this.env.HYPERDRIVE.connectionString);
+    const owner = state.ownerUserId ? await getUser(db, state.ownerUserId) : null;
+    if (owner) {
+      state.plan = owner.plan;
+    }
+    if (!state.billingPeriodInitialized && body.billingPeriodStart) {
+      state.billingPeriodStart = body.billingPeriodStart;
+      state.billingPeriodInitialized = true;
     }
     if (body.ownershipEndedAt) {
       const windowKey = this.retainHistoricalAiWindow(
@@ -619,11 +630,7 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
       this.retainHistoricalAiSample(state, body.projectId);
     }
     if (state.aiSuspended) {
-      const ownedProjectIds = await this.ownedProjectIds(
-        createDb(this.env.HYPERDRIVE.connectionString),
-        [body.projectId],
-        state.ownerUserId,
-      );
+      const ownedProjectIds = await this.ownedProjectIds(db, [body.projectId], state.ownerUserId);
       if (ownedProjectIds.has(body.projectId)) {
         await this.env.ROUTING.delete(`ai-block:${body.projectId}`);
       }
@@ -951,7 +958,9 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
     const projects = await getProjectsByIds(db, projectIds);
     return new Set(
       projects
-        .filter((project) => project.user_id === expectedOwnerUserId)
+        .filter(
+          (project) => project.user_id === expectedOwnerUserId && project.status !== 'deleting',
+        )
         .map((project) => project.id),
     );
   }

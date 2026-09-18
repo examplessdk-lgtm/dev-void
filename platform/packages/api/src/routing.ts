@@ -160,7 +160,7 @@ export async function applyRoutingSuspension(
 export async function setProjectsRoutingSuspension(
   routing: KVNamespace,
   db: Db,
-  projects: ReadonlyArray<{ id: string; slug: string; user_id?: string }>,
+  projects: ReadonlyArray<{ id: string; slug: string; user_id: string }>,
   update: RoutingSuspensionUpdate,
 ): Promise<void> {
   if (projects.length === 0) {
@@ -169,14 +169,11 @@ export async function setProjectsRoutingSuspension(
   for (const project of projects) {
     await db.transaction(async (tx) => {
       await tx.execute(drizzleSql`SELECT id FROM projects WHERE id = ${project.id} FOR UPDATE`);
-      if (project.user_id !== undefined) {
-        const current = await getProject(tx as unknown as Db, project.id);
-        // User-level suspension/restore callers pass Project snapshots from an
-        // owned-project query. If ownership changed before this lock, transfer
-        // convergence owns the route and this stale fan-out must stand down.
-        if (current?.user_id !== project.user_id) {
-          return;
-        }
+      const current = await getProject(tx as unknown as Db, project.id);
+      // If ownership changed before this lock, transfer convergence owns the
+      // route and this stale fan-out must stand down.
+      if (current?.user_id !== project.user_id) {
+        return;
       }
       // Resolve domains only after the project lock. Domain activation takes
       // the same lock before publishing a route, so this read must happen

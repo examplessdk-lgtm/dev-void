@@ -42,7 +42,7 @@ import {
   failStaleActiveGithubActionsBuilds,
   hasQueuedContainerBuilds,
   getProject,
-  getOpenProjectOwnershipPeriod,
+  getOpenProjectOwnershipPeriodsByProjectIds,
   getProjectsByIds,
   getUsersByIds,
   type Db,
@@ -116,7 +116,7 @@ import {
   platformHumanSessions,
 } from './schema.ts';
 import { isAdminSuspended, REASON_REQUESTS_EXCEEDED } from './suspension.ts';
-import { getCurrentBillingPeriodStart, getPlanLimits } from './tiers.ts';
+import { getCurrentBillingPeriodStart } from './tiers.ts';
 import type { Domain, Project } from './types.ts';
 import { ensureUsageSigningKey, USAGE_PROTOCOL_VERSION } from './usage-auth.ts';
 import { UsageCounter } from './usage-counter.ts';
@@ -754,7 +754,9 @@ async function scheduled(
     }
 
     await Promise.allSettled(
-      batch.map(({ user, projects }) => processUserRollover(env, db, user, projects)),
+      batch.map(({ user, projects, needsUsageReconciliation }) =>
+        processUserRollover(env, db, user, projects, needsUsageReconciliation),
+      ),
     );
 
     offset += BATCH_SIZE;
@@ -950,6 +952,7 @@ async function processUserRollover(
   db: Db,
   user: { id: string; plan: string; billing_cycle_start: string; suspended_reason: string | null },
   userProjects: ReadonlyArray<{ id: string; slug: string; created_at: string }>,
+  needsUsageReconciliation: boolean,
 ): Promise<void> {
   // Backfill userId into old KV routing entries (all plans, before early return).
   // Wrapped in try/catch so a malformed KV entry doesn't block rollover/unsuspension.
@@ -996,24 +999,23 @@ async function processUserRollover(
     console.error(`[backfill] userId backfill failed for user ${user.id}:`, err);
   }
 
-  const limits = getPlanLimits(user.plan);
-  // Skip unlimited plans (no enforcement needed)
-  if (limits.requestsPerMonth === 0 && limits.aiNeuronsPerMonth === 0) {
-    return;
-  }
-  if (userProjects.length === 0) {
+  if (!needsUsageReconciliation) {
     return;
   }
 
   const billingPeriodStart = getCurrentBillingPeriodStart(user.billing_cycle_start).toISOString();
   const projectSlugs: Record<string, string> = {};
   const projectOwnershipStarts: Record<string, string> = {};
-  const ownershipPeriods = await Promise.all(
-    userProjects.map((project) => getOpenProjectOwnershipPeriod(db, project.id)),
+  const ownershipPeriods = await getOpenProjectOwnershipPeriodsByProjectIds(
+    db,
+    userProjects.map((project) => project.id),
   );
-  for (const [index, p] of userProjects.entries()) {
+  const ownershipStarts = new Map(
+    ownershipPeriods.map((period) => [period.project_id, period.starts_at]),
+  );
+  for (const p of userProjects) {
     projectSlugs[p.id] = p.slug;
-    projectOwnershipStarts[p.id] = ownershipPeriods[index]?.starts_at ?? p.created_at;
+    projectOwnershipStarts[p.id] = ownershipStarts.get(p.id) ?? p.created_at;
   }
 
   const doId = env.USAGE_COUNTER.idFromName(user.id);

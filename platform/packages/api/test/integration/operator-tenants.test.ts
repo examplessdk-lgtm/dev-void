@@ -424,6 +424,7 @@ describe('operator tenant mutations', () => {
         body: {
           projectId: project.id,
           userId: owner.id,
+          billingPeriodStart: expect.any(String),
           ownershipStartedAt: former.starts_at,
           ownershipEndedAt: current.starts_at,
         },
@@ -665,7 +666,7 @@ describe('operator tenant mutations', () => {
     }
   });
 
-  test('reports post-commit counter failure and resumes convergence on retry', async () => {
+  test('resumes post-commit counter convergence after the former owner is deleted', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
     const owner = await createTestUser(env.db, 'partial-transfer-owner');
     const target = await createTestUser(env.db, 'partial-transfer-target');
@@ -707,10 +708,25 @@ describe('operator tenant mutations', () => {
     });
     expect(recoveryPreview.status).toBe(200);
     expect(await recoveryPreview.json()).toMatchObject({
+      currentOwner: { id: target.id },
       previousOwner: { id: owner.id },
       newOwner: { id: target.id },
+      changed: false,
       formerOwnerRole: 'admin',
       counterUpdates: { detachUserId: owner.id, attachUserId: target.id },
+    });
+    expect((await req(`/users/${owner.id}/delete`, {})).status).toBe(200);
+
+    const deletedOwnerPreview = await req(`/projects/${project.id}/owner`, {
+      userId: target.id,
+      dryRun: true,
+    });
+    expect(deletedOwnerPreview.status).toBe(200);
+    expect(await deletedOwnerPreview.json()).toMatchObject({
+      currentOwner: { id: target.id },
+      previousOwner: { id: owner.id, deleted: true },
+      newOwner: { id: target.id },
+      changed: false,
     });
 
     const retryCalls: Array<{
@@ -728,6 +744,10 @@ describe('operator tenant mutations', () => {
       changed: false,
       convergence: { countersComplete: true, routingComplete: true },
     });
+    expect(retryCalls.map(({ ownerId, path }) => ({ ownerId, path }))).toEqual([
+      { ownerId: owner.id, path: '/detach-project' },
+      { ownerId: target.id, path: '/attach-project' },
+    ]);
     expect(JSON.parse((await env.ROUTING.get(project.slug))!)).toMatchObject({ userId: target.id });
   });
 
@@ -893,7 +913,7 @@ describe('operator tenant mutations', () => {
     // while the authoritative project row already names the new owner. The
     // teardown lock must treat this as a stale snapshot and skip all cleanup.
     await env.db.update(projects).set({ user_id: newOwner.id }).where(eq(projects.id, project.id));
-    vi.spyOn(dbModule, 'getProjectsByUserId').mockResolvedValue([staleProject!]);
+    vi.spyOn(dbModule, 'getOwnedProjectsByUserId').mockResolvedValue([staleProject!]);
     const cf = mockCfApi();
 
     const response = await req(`/users/${formerOwner.id}/delete`, {});

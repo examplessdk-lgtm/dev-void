@@ -322,6 +322,41 @@ describe('processUsageEventBatch — trusted provenance', () => {
     expect(batch.calls.ackAll).toBe(1);
   });
 
+  it('bills queued usage without reattaching a project being deleted', async () => {
+    const stubFetch = vi.fn(async () => new Response(null, { status: 200 }));
+    getProjectsByIdsMock.mockResolvedValue([
+      {
+        id: 'p1',
+        user_id: 'owner',
+        slug: 'canonical-slug',
+        status: 'deleting',
+        created_at: '2026-01-01T00:00:00.000Z',
+      },
+    ]);
+    getProjectOwnershipPeriodsByProjectIdsMock.mockResolvedValue([
+      {
+        id: 'period',
+        project_id: 'p1',
+        owner_user_id: 'owner',
+        starts_at: '2026-01-01T00:00:00.000Z',
+        ends_at: null,
+        changed_by_user_id: null,
+      },
+    ]);
+    getUserMock.mockResolvedValue({ id: 'owner', plan: 'solo' });
+    const batch = await makeSignedBatch([
+      { projectId: 'p1', requests: 1, responseBytes: 12 } as UsageEvent,
+    ]);
+
+    await processUsageEventBatch(batch as never, makeEnv(stubFetch) as never);
+
+    const payload = (await fetchCalls(stubFetch)[0][0].json()) as {
+      events: Array<UsageEvent>;
+    };
+    expect(payload.events[0]).toMatchObject({ userId: 'owner', currentOwner: false });
+    expect(batch.calls.ackAll).toBe(1);
+  });
+
   it('rejects a correctly signed event with invalid quantities', async () => {
     const stubFetch = vi.fn(async () => new Response(null, { status: 200 }));
     const invalid = {

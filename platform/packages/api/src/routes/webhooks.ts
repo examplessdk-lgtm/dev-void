@@ -13,7 +13,7 @@ import {
   getGitHubConnectionsByRepo,
   getGitHubInstallation,
   getGitHubInstallationsByAccount,
-  getProjectsByUserId,
+  getOwnedProjectsByUserId,
   getUser,
   getUserByOAuthAccount,
   markBuildTerminalIfActive,
@@ -1486,7 +1486,9 @@ export async function handleVerifiedGitHubWebhook(
           instance_type: string | null;
         }> = [];
         if (removedUser) {
-          const projectIds = (await getProjectsByUserId(txDb, removedUser.id)).map((p) => p.id);
+          const projectIds = (await getOwnedProjectsByUserId(txDb, removedUser.id)).map(
+            (project) => project.id,
+          );
           if (projectIds.length > 0) {
             // Single-table FOR UPDATE on githubConnections (NOT joined to
             // projects) keeps the lock scope identical to the installation path;

@@ -344,57 +344,6 @@ async function queryBatchProjectUsageWindows(
   );
 }
 
-async function queryBatchProjectUsage(
-  accountId: string,
-  apiToken: string,
-  requestsDataset: string,
-  projectIds: ReadonlyArray<string>,
-  since: Date,
-): Promise<Map<string, UsageEntry>> {
-  if (projectIds.length === 0) {
-    return new Map();
-  }
-
-  const sinceStr = since.toISOString().replace('T', ' ').slice(0, 19);
-  const inList = projectIds.map((id) => `'${id}'`).join(', ');
-  const query = `
-    SELECT
-      blob1,
-      SUM(_sample_interval * double1) as requests,
-      SUM(_sample_interval * double2) as bandwidth_bytes
-    FROM ${requestsDataset}
-    WHERE blob1 IN (${inList})
-      AND timestamp >= toDateTime('${sinceStr}')
-    GROUP BY blob1
-  `;
-
-  const response = await fetch(
-    `https://api.cloudflare.com/client/v4/accounts/${accountId}/analytics_engine/sql`,
-    {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiToken}`,
-        'Content-Type': 'text/plain',
-      },
-      body: query,
-    },
-  );
-
-  if (!response.ok) {
-    return new Map();
-  }
-
-  const json = (await response.json()) as { data: ReadonlyArray<BatchAnalyticsRow> };
-  const result = new Map<string, UsageEntry>();
-  for (const row of json.data ?? []) {
-    result.set(row.blob1, {
-      requests: Math.round(row.requests ?? 0),
-      bandwidthBytes: Math.round(row.bandwidth_bytes ?? 0),
-    });
-  }
-  return result;
-}
-
 async function queryTopProjectTraffic(
   accountId: string,
   apiToken: string,
@@ -641,7 +590,6 @@ async function queryProjectAiUsage(
 export {
   getRequestsDataset,
   queryProjectUsage,
-  queryBatchProjectUsage,
   queryBatchProjectUsageWindows,
   queryTopProjectTraffic,
   queryProjectRequestOverview,

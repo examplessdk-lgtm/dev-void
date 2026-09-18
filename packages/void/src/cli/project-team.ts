@@ -22,19 +22,17 @@ function memberLines(members: Array<ProjectMemberResponse>): string {
   const rows = members.map((member) => ({
     id: member.user.id,
     login: member.user.login ?? '—',
-    email: member.user.email ?? '—',
     role: member.role,
   }));
   const widths = {
     id: Math.max(2, ...rows.map((row) => clean(row.id).length)),
     login: Math.max(5, ...rows.map((row) => clean(row.login).length)),
-    email: Math.max(5, ...rows.map((row) => clean(row.email).length)),
   };
   return [
-    `${'ID'.padEnd(widths.id)}  ${'LOGIN'.padEnd(widths.login)}  ${'EMAIL'.padEnd(widths.email)}  ROLE`,
+    `${'ID'.padEnd(widths.id)}  ${'LOGIN'.padEnd(widths.login)}  ROLE`,
     ...rows.map(
       (row) =>
-        `${clean(row.id).padEnd(widths.id)}  ${clean(row.login).padEnd(widths.login)}  ${clean(row.email).padEnd(widths.email)}  ${row.role}`,
+        `${clean(row.id).padEnd(widths.id)}  ${clean(row.login).padEnd(widths.login)}  ${row.role}`,
     ),
   ].join('\n');
 }
@@ -132,7 +130,8 @@ export async function runProjectTeamCommand(root: string, args: ProjectTeamArgs)
       result.delivery.status === 'sent'
         ? ''
         : ` (email delivery: ${result.delivery.status.replace('_', ' ')})`;
-    outro(`Invited ${invitationEmail(result.invitation)} as ${args.role}${delivery}.`);
+    const action = result.refreshed ? 'Updated invitation for' : 'Invited';
+    outro(`${action} ${invitationEmail(result.invitation)} as ${args.role}${delivery}.`);
     return;
   }
   if (args.action === 'role') {

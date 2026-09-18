@@ -11,14 +11,14 @@ export type ProjectAccess = Readonly<{
   owner: User;
 }>;
 
-export const PROJECT_ROLE_CAPABILITIES = {
+const PROJECT_ROLE_CAPABILITIES = {
   reader: ['read'],
   collaborator: ['read', 'deploy', 'configure'],
   admin: ['read', 'deploy', 'configure', 'settings', 'members'],
   owner: ['read', 'deploy', 'configure', 'settings', 'members', 'delete'],
 } as const satisfies Record<ProjectRole, ReadonlyArray<ProjectCapability>>;
 
-export function hasProjectCapability(role: ProjectRole, capability: ProjectCapability): boolean {
+function hasProjectCapability(role: ProjectRole, capability: ProjectCapability): boolean {
   return (PROJECT_ROLE_CAPABILITIES[role] as ReadonlyArray<ProjectCapability>).includes(capability);
 }
 

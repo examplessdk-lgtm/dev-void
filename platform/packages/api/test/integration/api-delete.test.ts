@@ -211,14 +211,29 @@ describe('DELETE /projects/:id', () => {
   it('deletes project with no resources', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id, 'empty-app');
+    await env.ROUTING.put(`ai-block:${project.id}`, '1');
     mockCfApi();
+    const usageCalls: Array<{ ownerId: string; path: string; body: unknown }> = [];
+    const usageCounter = {
+      idFromName: (name: string) => name,
+      get: (ownerId: string) => ({
+        fetch: async (request: Request) => {
+          usageCalls.push({
+            ownerId,
+            path: new URL(request.url).pathname,
+            body: await request.json(),
+          });
+          return Response.json({ ok: true });
+        },
+      }),
+    } as unknown as DurableObjectNamespace;
 
     const res = await app.fetch(
       new Request(`http://localhost/projects/${project.id}`, {
         method: 'DELETE',
         headers: { Authorization: `Bearer ${user.jwt}` },
       }),
-      env,
+      { ...env, USAGE_COUNTER: usageCounter },
     );
     expect(res.status).toBe(200);
     const body = (await res.json()) as { ok: boolean; id: string; slug: string };
@@ -227,6 +242,14 @@ describe('DELETE /projects/:id', () => {
     // Verify project is gone from DB
     const [dbProject] = await env.db.select().from(projects).where(eq(projects.id, project.id));
     expect(dbProject).toBeUndefined();
+    expect(await env.ROUTING.get(`ai-block:${project.id}`)).toBeNull();
+    expect(usageCalls).toEqual([
+      {
+        ownerId: user.id,
+        path: '/detach-project',
+        body: { projectId: project.id, userId: user.id },
+      },
+    ]);
   });
 
   it('deletes project with resources, assets, and routing', async () => {

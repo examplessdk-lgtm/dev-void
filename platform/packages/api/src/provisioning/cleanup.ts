@@ -288,6 +288,11 @@ async function cleanupBestEffortResources(
   cleanup.push(
     context.env.ROUTING.delete(project.slug).catch(warn('Failed to delete routing entry')),
   );
+  cleanup.push(
+    context.env.ROUTING.delete(`ai-block:${projectId}`).catch(
+      warn('Failed to delete AI block entry'),
+    ),
+  );
 
   // NOTE: `projectAccountKey(projectId)` (`project:{projectId}`) is intentionally
   // NOT deleted here — the sandbox gate's release path in `packages/proxy/src/sandbox.ts`
@@ -354,11 +359,14 @@ async function lockAndMarkDeleting(
   projectId: string,
   actorUserId?: string,
   expectedOwnerUserId?: string,
-): Promise<ReadonlyArray<{
-  id: string;
-  executor: Build['executor'];
-  status: Build['status'];
-  instance_type: string | null;
+): Promise<Readonly<{
+  ownerUserId: string;
+  cancelledBuilds: ReadonlyArray<{
+    id: string;
+    executor: Build['executor'];
+    status: Build['status'];
+    instance_type: string | null;
+  }>;
 }> | null> {
   return await db.transaction(async (tx) => {
     await tx.execute(drizzleSql`SELECT id FROM projects WHERE id = ${projectId} FOR UPDATE`);
@@ -367,20 +375,13 @@ async function lockAndMarkDeleting(
     if (!lockedProject) {
       throw new Error('project disappeared during deletion');
     }
-    // Operator user deletion enumerates the user's owned projects before it
-    // starts their slow external teardown. Ownership transfer can complete in
-    // between. Treat that stale snapshot as a skip while holding the same lock
-    // transfer uses; deleting the new owner's project is never a valid cleanup
-    // consequence of deleting the former owner's account.
+    // User deletion discovers projects before teardown. Recheck ownership
+    // under the lock shared with transfers before deleting anything.
     if (expectedOwnerUserId && lockedProject.user_id !== expectedOwnerUserId) {
       return null;
     }
-    // API-initiated teardown starts with an unlocked route check so it can
-    // return the established 404/403 response quickly. Ownership can transfer
-    // before this transaction acquires the project lock, however. Re-resolve
-    // the actor under the same lock as the irreversible `deleting` status flip
-    // so a former owner cannot finish a stale delete request. Operator cleanup
-    // omits actorUserId and remains authorized by its separate admin guard.
+    // The route precheck can go stale. Authorize again under the same lock as
+    // the irreversible status transition. Operator cleanup has no actor here.
     if (actorUserId) {
       await requireProjectCapability(txDb, projectId, actorUserId, 'delete');
     }
@@ -415,8 +416,31 @@ async function lockAndMarkDeleting(
       );
     // Revoke in-flight build deploy tokens up front (see doc above). Idempotent
     // on replay (already-terminal builds are not re-matched by the CAS).
-    return await terminateBuildsForProject(txDb, projectId, { reason: 'project deleted' });
+    return {
+      ownerUserId: lockedProject.user_id,
+      cancelledBuilds: await terminateBuildsForProject(txDb, projectId, {
+        reason: 'project deleted',
+      }),
+    };
   });
+}
+
+async function detachProjectUsage(
+  context: Context<ApiEnv>,
+  projectId: string,
+  ownerUserId: string,
+): Promise<void> {
+  const stub = context.env.USAGE_COUNTER.get(context.env.USAGE_COUNTER.idFromName(ownerUserId));
+  const response = await stub.fetch(
+    new Request('https://do/detach-project', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ projectId, userId: ownerUserId }),
+    }),
+  );
+  if (!response.ok) {
+    throw new Error(`UsageCounter /detach-project returned HTTP ${response.status}`);
+  }
 }
 
 export class ProjectOperationInProgressError extends Error {
@@ -509,19 +533,23 @@ export async function teardownProject(
   // skips the flip and just (re-)marks any non-terminal deployments + builds).
   // This covers retried teardown after partial failure where the previous
   // attempt crashed before the cancellations committed.
-  const cancelledOnLock = await lockAndMarkDeleting(
+  const deletion = await lockAndMarkDeleting(
     context.get('db'),
     projectId,
     options.actorUserId,
     options.expectedOwnerUserId,
   );
-  if (cancelledOnLock === null) {
+  if (deletion === null) {
     return { warnings: [], ownerChanged: true };
   }
   // Stop the container DOs for the builds revoked above BEFORE any CF cleanup
   // begins (post-commit, never under the row lock — it's a DO round-trip), so
   // their tokens are dead and their containers stopped before we touch CF.
-  await cancelContainerBuildDos(context.env, cancelledOnLock, 'project deleted');
+  await cancelContainerBuildDos(context.env, deletion.cancelledBuilds, 'project deleted');
+
+  // Detach after the durable status change and before cleanup so a failed DO
+  // call leaves the project row available for retry.
+  await detachProjectUsage(context, projectId, deletion.ownerUserId);
 
   const emailDrain = await drainProjectEmailAdmissions(context.get('db'), projectId);
   if (emailDrain.inFlight > 0) {

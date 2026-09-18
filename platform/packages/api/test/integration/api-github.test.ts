@@ -44,6 +44,7 @@ import {
   githubInstallationRevocations,
   oauthAccounts,
   projectMembers,
+  projects,
 } from '../../src/schema.ts';
 import {
   JWT_SECRET,
@@ -433,6 +434,54 @@ function mockEmptyInstallAccount(opts: {
 }
 
 describe('POST /projects/:id/github', () => {
+  it('rejects connection mutations while the project is being deleted', async () => {
+    const owner = await createTestUser(env.db, 'deleting-github-owner');
+    const project = await createTestProject(env.db, owner.id, 'deleting-github');
+    await upsertGitHubInstallation(env.db, {
+      installationId: 'deleting-111',
+      userId: owner.id,
+      accountLogin: owner.login,
+      accountId: 'deleting-owner-account',
+      accountType: 'User',
+      repositories: [{ full_name: `${owner.login}/app`, id: 9101 }],
+    });
+    await createGitHubConnection(env.db, {
+      projectId: project.id,
+      installationId: 'deleting-111',
+      repoFullName: `${owner.login}/app`,
+      repositoryId: '9101',
+      authorizedByUserId: owner.id,
+    });
+    await env.db.update(projects).set({ status: 'deleting' }).where(eq(projects.id, project.id));
+
+    const requests = [
+      new Request(`http://localhost/projects/${project.id}/github`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${owner.jwt}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          installationId: 'deleting-111',
+          repoFullName: `${owner.login}/app`,
+        }),
+      }),
+      new Request(`http://localhost/projects/${project.id}/github`, {
+        method: 'PATCH',
+        headers: { Authorization: `Bearer ${owner.jwt}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ branch: 'release' }),
+      }),
+      new Request(`http://localhost/projects/${project.id}/github`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${owner.jwt}` },
+      }),
+    ];
+
+    for (const request of requests) {
+      const response = await app.fetch(request, env);
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({ error: 'project is being deleted' });
+    }
+    expect((await getGitHubConnection(env.db, project.id))?.branch).toBe('main');
+  });
+
   it('lets project admins manage connections while readers and collaborators can only read them', async () => {
     const owner = await createTestUser(env.db, 'team-github-owner');
     const admin = await createTestUser(env.db, 'team-github-admin');

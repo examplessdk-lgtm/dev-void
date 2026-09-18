@@ -10,7 +10,6 @@ import type {
   invitations,
   oauthAccounts,
   platformEvents,
-  projectAccessEvents,
   projectDatabaseCredentials,
   projectInvitations,
   projectMembers,
@@ -73,7 +72,6 @@ export type Project = InferSelectModel<typeof projects>;
 export type ProjectMember = InferSelectModel<typeof projectMembers>;
 export type ProjectInvitation = InferSelectModel<typeof projectInvitations>;
 export type ProjectOwnershipPeriod = InferSelectModel<typeof projectOwnershipPeriods>;
-export type ProjectAccessEvent = InferSelectModel<typeof projectAccessEvents>;
 export type Deployment = InferSelectModel<typeof deployments>;
 export type DeploymentStatus = Deployment['status'];
 export type ProjectSecret = InferSelectModel<typeof projectSecrets>;

@@ -971,16 +971,8 @@ describe('email verification gating on account linking', () => {
           ],
         });
       });
-      // The route has already captured the OLD owner address in
-      // `lockedAccess` when it reaches the owner-audited insert. Rotate the
-      // user row at that seam, then run the real helper: its owner-row
-      // re-check must see the NEW address and refuse the stale inheritance.
-      //
-      // The production interleaving uses the login transaction on a second
-      // Postgres session. PGlite exposes one session, so model the same
-      // committed row state through the route's existing transaction. There
-      // are no inherited destinations yet, making this update the complete
-      // database effect of that login for this fixture.
+      // Rotate the owner after the route captures its access snapshot. PGlite
+      // has one session, so update through the route's existing transaction.
       const realTryCreate = dbModule.tryCreateEmailDestination;
       let rotatedDuringAdd = false;
       vi.spyOn(dbModule, 'tryCreateEmailDestination').mockImplementation(async (...args) => {

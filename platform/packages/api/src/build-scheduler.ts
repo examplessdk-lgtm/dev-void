@@ -19,7 +19,7 @@ import {
 } from './db.ts';
 import type { ApiEnv } from './env.ts';
 import { isAdminSuspended } from './suspension.ts';
-import { getBuildInstanceType, getPlanLimits } from './tiers.ts';
+import { getPlanLimits } from './tiers.ts';
 
 /** A poke arms the alarm this far ahead so the next scan runs almost immediately. */
 const POKE_DELAY_MS = 50;
@@ -68,12 +68,8 @@ export class BuildScheduler extends DurableObject<ApiEnv['Bindings']> {
   async alarm(): Promise<void> {
     const db = createDb(this.env.HYPERDRIVE.connectionString);
 
-    // Cancel queued work for manually suspended owners before computing cap
-    // exclusions. The batch also reaches queued rows hidden behind an active
-    // build, so suspended work cannot keep the scheduler heartbeat alive forever.
-    // Then exclude owners at their plan's concurrency cap from the scan; without
-    // that exclusion, a capped tenant can fill the scan window and starve an
-    // unrelated owner. Usage-limit suspensions are not included in the batch.
+    // Clear manually suspended owners' whole queues, including builds hidden
+    // behind active work, then exclude capped owners to avoid scan starvation.
     const owners = await getUsersWithQueuedContainerBuilds(db);
     const suspendedUserIds = owners
       .filter((owner) => isAdminSuspended(owner.suspendedReason))
@@ -189,54 +185,36 @@ export class BuildScheduler extends DurableObject<ApiEnv['Bindings']> {
         continue;
       }
 
-      // Container size of record: prefer the value persisted at enqueue; only
-      // recompute from the plan for legacy rows queued before enqueue-persistence
-      // (instance_type === null). The persisted value is authoritative — it is
-      // what onStart's CAS lands and what dictates which DO namespace this build
-      // runs on, so a plan change between enqueue and start can't relocate an
-      // in-flight build to a different container size. Computed BEFORE the claim
-      // so the claim can persist it in the same tx (see below) and so its target
-      // namespace can be checked against this tick's saturated set.
-      const instanceType = build.instance_type ?? getBuildInstanceType(user.plan);
-
-      // Route the container start to the DO class matching the build's size.
-      // `@cloudflare/containers` has no per-start sizing, so each size is a
-      // distinct DO class; buildManagerNamespace maps standard-4 → the large
-      // class and everything else (free/legacy/null) → the base class.
-      const ns = buildManagerNamespace(this.env, instanceType);
-
-      // Per-namespace shedding: if this build's target fleet already hit capacity
-      // THIS tick, skip it without attempting a start (and without claiming) —
-      // it would only hit the same full fleet, burning a GitHub compare + token
-      // mint. A build targeting the OTHER (non-saturated) fleet is unaffected, so
-      // the scan keeps draining it.
-      if (saturatedNamespaces.has(ns)) {
+      // Persisted sizes can be shed before claiming. Legacy-null rows need the
+      // owner's plan under lock before their target fleet is known.
+      if (
+        build.instance_type &&
+        saturatedNamespaces.has(buildManagerNamespace(this.env, build.instance_type))
+      ) {
         continue;
       }
 
-      // Atomically enforce the per-user cap AND claim queued->starting in a
-      // SINGLE transaction holding `SELECT ... FOR UPDATE` on the owner's users
-      // row — the SAME lock the OIDC path (`createGithubActionsBuildWithinLimit`)
-      // takes. This makes the container-scheduler path and the OIDC path
-      // mutually exclusive per user, so a scheduler scan and a parallel OIDC
-      // exchange can't both observe sub-cap capacity and both create active
-      // builds (which the old separate count-then-claim allowed). The claim reads
-      // the owner's plan under that lock, so a concurrent downgrade takes effect
-      // before admission commits. Returns false when the owner is unavailable or suspended,
-      // at cap, the project has active work, or the build was claimed elsewhere;
-      // either way leave it for a later tick. The claim also
-      // persists the effective instanceType in the same tx, so a cancel/reap in
-      // the START->onStart window reads the correct size and addresses the right
-      // DO namespace. This is the commit point: only pure config assembly + the
-      // try/catch-wrapped startBuild follow it, so nothing can throw between the
-      // claim and the BuildManager that owns the timeout.
+      // Admission, legacy size resolution, and the owner plan are read under the
+      // same user lock used by GitHub Actions admission.
       const claimed = await claimBuildForStartWithinLimit(db, {
         buildId: build.id,
         userId: build.user_id,
         projectId: build.project_id,
-        instanceType,
       });
       if (!claimed) {
+        continue;
+      }
+      const instanceType = claimed.instanceType;
+      const ns = buildManagerNamespace(this.env, instanceType);
+      if (saturatedNamespaces.has(ns)) {
+        try {
+          await requeueBuildIfStarting(db, build.id);
+        } catch (error) {
+          console.error(
+            `[build-scheduler] failed to requeue build ${build.id} after its fleet saturated; it will be reaped as stale`,
+            error,
+          );
+        }
         continue;
       }
 
@@ -257,10 +235,8 @@ export class BuildScheduler extends DurableObject<ApiEnv['Bindings']> {
         // App installation still covers this repo before minting the deploy
         // token; a null id fails that check closed.
         repositoryId: connection.repository_id,
-        // Carry the effective size into the config so onStart's CAS persists it
-        // for any legacy-null row (back-filling the size-of-record on first start).
         instanceType,
-        timeoutMinutes: getPlanLimits(user.plan).buildTimeoutMinutes,
+        timeoutMinutes: getPlanLimits(claimed.ownerPlan).buildTimeoutMinutes,
       };
 
       // `ns` (the build's target fleet) was resolved above; address the per-build

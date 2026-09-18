@@ -73,7 +73,6 @@ import type {
   Invitation,
   OAuthAccount,
   PlatformEvent,
-  ProjectAccessEvent,
   ProjectAccessEventAction,
   ProjectDatabaseCredentials,
   ProjectInvitation,
@@ -449,11 +448,6 @@ export async function getProjectBySlug(db: Db, slug: string): Promise<Project | 
   return row ?? null;
 }
 
-export async function getProjectsByUserId(db: Db, userId: string): Promise<ReadonlyArray<Project>> {
-  return getOwnedProjectsByUserId(db, userId);
-}
-
-/** Projects for which userId is the billing owner. */
 export async function getOwnedProjectsByUserId(
   db: Db,
   userId: string,
@@ -465,7 +459,7 @@ export async function getOwnedProjectsByUserId(
     .orderBy(desc(projects.created_at));
 }
 
-export type AccessibleProject = Readonly<{
+type AccessibleProject = Readonly<{
   project: Project;
   role: ProjectRole;
   owner: User;
@@ -500,9 +494,9 @@ export async function getAccessibleProjectsByUserId(
 
 // --- Project team membership and invitations ---
 
-export type ProjectMemberWithUser = Readonly<{ member: ProjectMember; user: User }>;
+type ProjectMemberWithUser = Readonly<{ member: ProjectMember; user: User }>;
 
-export async function getProjectMember(
+async function getProjectMember(
   db: Db,
   projectId: string,
   userId: string,
@@ -527,7 +521,7 @@ export async function getProjectMembers(
     .orderBy(asc(projectMembers.created_at), asc(projectMembers.user_id));
 }
 
-export type ProjectTeamMutationErrorReason =
+type ProjectTeamMutationErrorReason =
   | 'project-not-found'
   | 'project-deleting'
   | 'target-user-not-found'
@@ -601,7 +595,7 @@ async function requireLockedProjectOwnerActive(db: Db, project: Project): Promis
   }
 }
 
-export async function createProjectAccessEvent(
+async function createProjectAccessEvent(
   db: Db,
   args: {
     projectId: string;
@@ -612,21 +606,17 @@ export async function createProjectAccessEvent(
     previousRole?: ProjectMemberRole | null;
     newRole?: ProjectMemberRole | null;
   },
-): Promise<ProjectAccessEvent> {
-  const [event] = await db
-    .insert(projectAccessEvents)
-    .values({
-      id: generateId('pae'),
-      project_id: args.projectId,
-      actor_user_id: args.actorUserId,
-      subject_user_id: args.subjectUserId ?? null,
-      invitation_email_snapshot: args.invitationEmailSnapshot ?? null,
-      previous_role: args.previousRole ?? null,
-      new_role: args.newRole ?? null,
-      action: args.action,
-    })
-    .returning();
-  return event;
+): Promise<void> {
+  await db.insert(projectAccessEvents).values({
+    id: generateId('pae'),
+    project_id: args.projectId,
+    actor_user_id: args.actorUserId,
+    subject_user_id: args.subjectUserId ?? null,
+    invitation_email_snapshot: args.invitationEmailSnapshot ?? null,
+    previous_role: args.previousRole ?? null,
+    new_role: args.newRole ?? null,
+    action: args.action,
+  });
 }
 
 export async function setProjectMemberRole(
@@ -686,7 +676,7 @@ export async function setProjectMemberRole(
 export async function removeProjectMember(
   db: Db,
   args: { projectId: string; subjectUserId: string; actorUserId: string },
-): Promise<{ member: ProjectMember; cancelledBuilds: ReadonlyArray<TerminatedBuild> }> {
+): Promise<{ cancelledBuilds: ReadonlyArray<TerminatedBuild> }> {
   return db.transaction(async (tx) => {
     const txDb = tx as unknown as Db;
     const project = await lockProject(txDb, args.projectId);
@@ -727,11 +717,11 @@ export async function removeProjectMember(
       args.subjectUserId,
       'github connection authorizer removed from project',
     );
-    return { member, cancelledBuilds };
+    return { cancelledBuilds };
   });
 }
 
-export async function getProjectInvitation(
+async function getProjectInvitation(
   db: Db,
   invitationId: string,
 ): Promise<ProjectInvitation | null> {
@@ -778,7 +768,6 @@ export async function createOrRefreshProjectInvitation(
     email: string;
     role: ProjectMemberRole;
     actorUserId: string;
-    expiresAt?: string;
   },
 ): Promise<Readonly<{ invitation: ProjectInvitation; target: User; refreshed: boolean }>> {
   const normalizedEmail = args.email.trim().toLowerCase();
@@ -791,7 +780,7 @@ export async function createOrRefreshProjectInvitation(
     throw new ProjectTeamMutationError('target-user-not-found');
   }
   const target = targets[0]!;
-  const expiresAt = args.expiresAt ?? new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+  const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
 
   return db.transaction(async (tx) => {
     const txDb = tx as unknown as Db;
@@ -885,9 +874,9 @@ export async function createOrRefreshProjectInvitation(
 
 export async function resendProjectInvitation(
   db: Db,
-  args: { projectId: string; invitationId: string; actorUserId: string; expiresAt?: string },
+  args: { projectId: string; invitationId: string; actorUserId: string },
 ): Promise<Readonly<{ invitation: ProjectInvitation; target: User }>> {
-  const expiresAt = args.expiresAt ?? new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+  const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
   return db.transaction(async (tx) => {
     const txDb = tx as unknown as Db;
     const project = await lockProject(txDb, args.projectId);
@@ -938,8 +927,8 @@ export async function resendProjectInvitation(
 export async function revokeProjectInvitation(
   db: Db,
   args: { projectId: string; invitationId: string; actorUserId: string },
-): Promise<ProjectInvitation> {
-  return db.transaction(async (tx) => {
+): Promise<void> {
+  await db.transaction(async (tx) => {
     const txDb = tx as unknown as Db;
     const project = await lockProject(txDb, args.projectId);
     await requireLockedMembersCapability(txDb, project, args.actorUserId);
@@ -960,15 +949,14 @@ export async function revokeProjectInvitation(
     if (invitation.status !== 'pending') {
       throw new ProjectTeamMutationError('invitation-not-pending');
     }
-    const [updated] = await txDb
+    await txDb
       .update(projectInvitations)
       .set({
         status: 'revoked',
         revoked_at: sql`now()`,
         revoked_by_user_id: args.actorUserId,
       })
-      .where(eq(projectInvitations.id, invitation.id))
-      .returning();
+      .where(eq(projectInvitations.id, invitation.id));
     await createProjectAccessEvent(txDb, {
       projectId: args.projectId,
       actorUserId: args.actorUserId,
@@ -977,14 +965,13 @@ export async function revokeProjectInvitation(
       action: 'invitation_revoked',
       previousRole: invitation.role,
     });
-    return updated;
   });
 }
 
 export async function respondToProjectInvitation(
   db: Db,
   args: { invitationId: string; actorUserId: string; response: 'accept' | 'decline' },
-): Promise<Readonly<{ invitation: ProjectInvitation; member: ProjectMember | null }>> {
+): Promise<Readonly<{ member: ProjectMember | null }>> {
   const locator = await getProjectInvitation(db, args.invitationId);
   if (!locator) {
     throw new ProjectTeamMutationError('invitation-not-found');
@@ -1025,10 +1012,7 @@ export async function respondToProjectInvitation(
       if (args.response === 'accept' && !member) {
         throw new ProjectTeamMutationError('invitation-not-pending');
       }
-      return {
-        invitation,
-        member,
-      };
+      return { member };
     }
     if (invitation.status !== 'pending') {
       throw new ProjectTeamMutationError('invitation-not-pending');
@@ -1060,15 +1044,14 @@ export async function respondToProjectInvitation(
         })
         .returning();
     }
-    const [updated] = await txDb
+    await txDb
       .update(projectInvitations)
       .set({
         status: resultingStatus,
         accepted_by_user_id: args.response === 'accept' ? args.actorUserId : null,
         accepted_at: args.response === 'accept' ? sql`now()` : null,
       })
-      .where(eq(projectInvitations.id, invitation.id))
-      .returning();
+      .where(eq(projectInvitations.id, invitation.id));
     await createProjectAccessEvent(txDb, {
       projectId: project.id,
       actorUserId: args.actorUserId,
@@ -1077,7 +1060,7 @@ export async function respondToProjectInvitation(
       action: args.response === 'accept' ? 'accepted' : 'declined',
       newRole: args.response === 'accept' ? invitation.role : null,
     });
-    return { invitation: updated, member };
+    return { member };
   });
 
   if ('error' in result) {
@@ -1102,21 +1085,22 @@ export async function getProjectOwnershipPeriodsByProjectIds(
     .orderBy(asc(projectOwnershipPeriods.project_id), asc(projectOwnershipPeriods.starts_at));
 }
 
-export async function getOpenProjectOwnershipPeriod(
+export async function getOpenProjectOwnershipPeriodsByProjectIds(
   db: Db,
-  projectId: string,
-): Promise<ProjectOwnershipPeriod | null> {
-  const [row] = await db
+  projectIds: ReadonlyArray<string>,
+): Promise<ReadonlyArray<ProjectOwnershipPeriod>> {
+  if (projectIds.length === 0) {
+    return [];
+  }
+  return db
     .select()
     .from(projectOwnershipPeriods)
     .where(
       and(
-        eq(projectOwnershipPeriods.project_id, projectId),
+        inArray(projectOwnershipPeriods.project_id, projectIds),
         isNull(projectOwnershipPeriods.ends_at),
       ),
-    )
-    .limit(1);
-  return row ?? null;
+    );
 }
 
 export async function getLatestDeploymentsByProjectIds(
@@ -3229,15 +3213,21 @@ export async function getUsersWithProjectsBatch(db: Db, limit: number, offset: n
   }
 
   const userIds = userRows.map((u) => u.id);
-  const projectRows = await db
-    .select({
-      id: projects.id,
-      slug: projects.slug,
-      user_id: projects.user_id,
-      created_at: projects.created_at,
-    })
-    .from(projects)
-    .where(inArray(projects.user_id, userIds));
+  const [projectRows, ownershipRows] = await Promise.all([
+    db
+      .select({
+        id: projects.id,
+        slug: projects.slug,
+        user_id: projects.user_id,
+        created_at: projects.created_at,
+      })
+      .from(projects)
+      .where(inArray(projects.user_id, userIds)),
+    db
+      .selectDistinct({ user_id: projectOwnershipPeriods.owner_user_id })
+      .from(projectOwnershipPeriods)
+      .where(inArray(projectOwnershipPeriods.owner_user_id, userIds)),
+  ]);
 
   const projectsByUser = new Map<string, typeof projectRows>();
   for (const p of projectRows) {
@@ -3246,10 +3236,15 @@ export async function getUsersWithProjectsBatch(db: Db, limit: number, offset: n
     projectsByUser.set(p.user_id, list);
   }
 
-  return userRows.map((user) => ({
-    user,
-    projects: projectsByUser.get(user.id) ?? [],
-  }));
+  const usersWithOwnership = new Set(ownershipRows.map((row) => row.user_id));
+  return userRows.map((user) => {
+    const projects = projectsByUser.get(user.id) ?? [];
+    return {
+      user,
+      projects,
+      needsUsageReconciliation: projects.length > 0 || usersWithOwnership.has(user.id),
+    };
+  });
 }
 
 export async function getAllowlistEntryStatuses(
@@ -4225,15 +4220,11 @@ export async function supersedeAndCreateContainerBuild(
   db: Db,
   args: {
     projectId: string;
-    /** @deprecated Enqueue attribution is resolved from the locked project owner. */
-    userId?: string;
     branch: string;
     commitSha: string;
     connectionId: string;
     installationId: string;
     repositoryId: string | null;
-    /** @deprecated Enqueue sizing is resolved from the locked owner plan. */
-    instanceType?: string | null;
   },
 ): Promise<{
   build: Build | null;
@@ -4679,10 +4670,6 @@ export async function createGithubActionsBuildWithinLimit(
   db: Db,
   args: {
     projectId: string;
-    /** @deprecated Build attribution is resolved from the locked project owner. */
-    userId?: string;
-    /** @deprecated Admission limits are resolved from the locked owner plan. */
-    limit?: number;
     commitSha?: string | null;
     branch?: string | null;
     githubRunId: string;
@@ -4913,43 +4900,9 @@ export async function createGithubActionsBuildWithinLimit(
 }
 
 /**
- * Atomically claim a QUEUED container build for starting, enforcing the owner's
- * per-user active-build cap in the SAME transaction.
- *
- * This is the container-scheduler counterpart to
- * `createGithubActionsBuildWithinLimit`: it takes the SAME `SELECT … FOR UPDATE`
- * lock on the owner's `users` row, so the scheduler path and the OIDC path are
- * mutually exclusive per user and can't both observe sub-cap capacity and both
- * create active builds. The previous flow (`countUserActiveBuilds` then a
- * separate `claimBuildForStart`) read the count outside the claim, so a parallel
- * OIDC exchange could slip a build in between and bust the cap.
- *
- * Steps inside one transaction, under the per-user lock:
- *   1. `SELECT … FOR UPDATE` the owner's users row (serializes with the OIDC
- *      path and other scheduler scans for the same owner), including the plan
- *      used for admission.
- *   2. If `limit > 0` and the owner already has `>= limit` active builds, return
- *      false WITHOUT claiming. `limit === 0` means unlimited (no cap).
- *   3. If the build's project already has an active build, return false WITHOUT
- *      claiming (leave this build queued for a later tick). This enforces AT
- *      MOST ONE active build per project at a time, which serializes
- *      same-branch deploys (project↔branch is 1:1 via the unique
- *      `github_connections.project_id`). Serializing per project avoids the
- *      project-level deploy guard's 409 (`getActiveDeployment` →
- *      `ConcurrentDeployError`) and gives latest-wins via FIFO queue drain:
- *      two rapid pushes no longer both reach `void deploy` and leave the older
- *      commit live. Liveness: a stuck active build is freed by the build
- *      wall-clock timeout (`enforceTimeout`) and the deploy stale reaper, so the
- *      queue can't deadlock.
- *   4. Otherwise flip THIS build `queued -> starting` only if it is STILL
- *      `queued` (guards the read-then-write race: only one caller wins), stamp
- *      `started_at`, and return true. Return false if it was no longer queued
- *      (already claimed elsewhere).
- *
- * Returns true iff this call claimed the build (caller should proceed to start
- * it); false when the owner is unavailable or manually suspended, at cap, the
- * project already has an active build, or the build was already claimed (caller
- * leaves it for a later tick).
+ * Claims a queued container build under the same owner lock used by GitHub
+ * Actions admission. The lock protects both the per-owner limit and the
+ * one-active-build-per-project invariant.
  */
 export async function claimBuildForStartWithinLimit(
   db: Db,
@@ -4957,20 +4910,9 @@ export async function claimBuildForStartWithinLimit(
     buildId: string;
     userId: string;
     projectId: string;
-    /** @deprecated Admission limits are resolved from the locked owner plan. */
-    limit?: number;
-    // The effective container size the scheduler will route this start on (the
-    // persisted value, or a plan recompute for a legacy-null row). Persisted in
-    // THIS claim tx — before the DO is addressed — so a cancel/reap in the
-    // START->onStart window reads the correct size and addresses the namespace
-    // that actually owns the running container. onStart's CAS later lands the
-    // same value (now idempotent).
-    instanceType: string;
   },
-): Promise<boolean> {
+): Promise<{ instanceType: string; ownerPlan: PlanId } | null> {
   return db.transaction(async (tx) => {
-    // Serialize per-user slot acquisition against the OIDC path and other
-    // scheduler scans for the same owner.
     const [owner] = await tx
       .select({ plan: users.plan, suspendedReason: users.suspended_reason })
       .from(users)
@@ -4978,7 +4920,7 @@ export async function claimBuildForStartWithinLimit(
       .for('update')
       .limit(1);
     if (!owner || isAdminSuspended(owner.suspendedReason)) {
-      return false;
+      return null;
     }
 
     const limit = getPlanLimits(owner.plan).concurrentBuilds;
@@ -4988,15 +4930,13 @@ export async function claimBuildForStartWithinLimit(
         .from(builds)
         .where(and(eq(builds.user_id, args.userId), inArray(builds.status, ACTIVE_BUILD_STATUSES)));
       if ((result?.count ?? 0) >= limit) {
-        return false;
+        return null;
       }
     }
 
-    // Per-project serialization: at most one active build per project. All
-    // builds for a project share one owner (`projects.user_id`), so this read
-    // is race-free under the per-user FOR UPDATE lock taken above. No executor
-    // filtering on purpose: an active github_actions build also blocks starting
-    // a container build for the same project, which is correct.
+    // All builds for a project share an owner, so this is protected by the
+    // owner lock. GitHub Actions builds count because deployments serialize at
+    // the project level regardless of executor.
     const [active] = await tx
       .select({ count: count() })
       .from(builds)
@@ -5004,21 +4944,28 @@ export async function claimBuildForStartWithinLimit(
         and(eq(builds.project_id, args.projectId), inArray(builds.status, ACTIVE_BUILD_STATUSES)),
       );
     if ((active?.count ?? 0) > 0) {
-      return false;
+      return null;
     }
 
-    // Atomic claim: only flips the row if it is still `queued`, so two scans
-    // racing the same build see exactly one non-empty RETURNING. Persist the
-    // effective instance_type in the SAME SET so the size-of-record is correct
-    // the instant the row goes `starting` — a cancel/reap in the START->onStart
-    // window then addresses the right DO namespace instead of mapping a still-
-    // NULL value to the base class and leaking the paid container.
-    const claimed = await tx
+    const [claimed] = await tx
       .update(builds)
-      .set({ status: 'starting', started_at: sql`now()`, instance_type: args.instanceType })
+      .set({
+        status: 'starting',
+        started_at: sql`now()`,
+        instance_type: sql`coalesce(${builds.instance_type}, ${getBuildInstanceType(owner.plan)})`,
+      })
       .where(and(eq(builds.id, args.buildId), eq(builds.status, 'queued')))
-      .returning({ id: builds.id });
-    return claimed.length > 0;
+      .returning();
+    if (!claimed) {
+      return null;
+    }
+    if (!claimed.instance_type) {
+      throw new Error('claimed build has no instance type');
+    }
+    return {
+      instanceType: claimed.instance_type,
+      ownerPlan: owner.plan,
+    };
   });
 }
 

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vite-plus/test';
+import * as dbModule from '../../src/db.ts';
 import {
   applyRoutingSuspension,
   buildProjectAccountJson,
@@ -32,7 +33,13 @@ function createKvStore(initial: Record<string, string> = {}): {
   return { store, puts, kv };
 }
 
-function createRoutingDb(): Parameters<typeof setProjectsRoutingSuspension>[1] {
+function createRoutingDb(ownerId?: string): Parameters<typeof setProjectsRoutingSuspension>[1] {
+  if (ownerId) {
+    vi.spyOn(dbModule, 'getProject').mockResolvedValue({
+      id: 'proj_a',
+      user_id: ownerId,
+    } as Awaited<ReturnType<typeof dbModule.getProject>>);
+  }
   return {
     transaction: async (fn: (tx: { execute: () => Promise<void> }) => Promise<unknown>) =>
       fn({ execute: async () => {} }),
@@ -385,12 +392,21 @@ describe('setProjectsRoutingSuspension', () => {
           },
         }),
     } as unknown as Parameters<typeof setProjectsRoutingSuspension>[1];
+    vi.spyOn(dbModule, 'getProject').mockResolvedValue({
+      id: 'proj_a',
+      user_id: 'owner_a',
+    } as Awaited<ReturnType<typeof dbModule.getProject>>);
 
-    await setProjectsRoutingSuspension(kv, db, [{ id: 'proj_a', slug: 'slug-a' }], {
-      op: 'suspend',
-      reason: 'admin_suspended',
-      force: true,
-    });
+    await setProjectsRoutingSuspension(
+      kv,
+      db,
+      [{ id: 'proj_a', slug: 'slug-a', user_id: 'owner_a' }],
+      {
+        op: 'suspend',
+        reason: 'admin_suspended',
+        force: true,
+      },
+    );
 
     expect(events).toEqual(['lock-project', 'read-domains']);
     vi.restoreAllMocks();
@@ -420,12 +436,17 @@ describe('setProjectsRoutingSuspension', () => {
         ],
       ]) as unknown as Awaited<ReturnType<typeof import('../../src/db.ts').getDomainsByProjectIds>>,
     );
-    const db = createRoutingDb();
-    await setProjectsRoutingSuspension(kv, db, [{ id: 'proj_a', slug: 'slug-a' }], {
-      op: 'suspend',
-      reason: 'requests_exceeded',
-      force: false,
-    });
+    const db = createRoutingDb('owner_a');
+    await setProjectsRoutingSuspension(
+      kv,
+      db,
+      [{ id: 'proj_a', slug: 'slug-a', user_id: 'owner_a' }],
+      {
+        op: 'suspend',
+        reason: 'requests_exceeded',
+        force: false,
+      },
+    );
     expect(JSON.parse(store.get('slug-a')!).suspended).toBe('requests_exceeded');
     expect(JSON.parse(store.get('domain:active.com')!).suspended).toBe('requests_exceeded');
     expect(JSON.parse(store.get('domain:crash-pending.com')!).suspended).toBe('requests_exceeded');
@@ -443,11 +464,16 @@ describe('setProjectsRoutingSuspension', () => {
         ['proj_a', [{ project_id: 'proj_a', hostname: 'active.com', status: 'active' }]],
       ]) as unknown as Awaited<ReturnType<typeof import('../../src/db.ts').getDomainsByProjectIds>>,
     );
-    const db = createRoutingDb();
-    await setProjectsRoutingSuspension(kv, db, [{ id: 'proj_a', slug: 'slug-a' }], {
-      op: 'unsuspend',
-      matchReason: null,
-    });
+    const db = createRoutingDb('owner_a');
+    await setProjectsRoutingSuspension(
+      kv,
+      db,
+      [{ id: 'proj_a', slug: 'slug-a', user_id: 'owner_a' }],
+      {
+        op: 'unsuspend',
+        matchReason: null,
+      },
+    );
     expect(JSON.parse(store.get('slug-a')!).suspended).toBeUndefined();
     expect(JSON.parse(store.get('domain:active.com')!).suspended).toBeUndefined();
     vi.restoreAllMocks();
@@ -463,11 +489,16 @@ describe('setProjectsRoutingSuspension', () => {
         ['proj_a', [{ project_id: 'proj_a', hostname: 'active.com', status: 'active' }]],
       ]) as unknown as Awaited<ReturnType<typeof import('../../src/db.ts').getDomainsByProjectIds>>,
     );
-    const db = createRoutingDb();
-    await setProjectsRoutingSuspension(kv, db, [{ id: 'proj_a', slug: 'slug-a' }], {
-      op: 'unsuspend',
-      matchReason: 'requests_exceeded',
-    });
+    const db = createRoutingDb('owner_a');
+    await setProjectsRoutingSuspension(
+      kv,
+      db,
+      [{ id: 'proj_a', slug: 'slug-a', user_id: 'owner_a' }],
+      {
+        op: 'unsuspend',
+        matchReason: 'requests_exceeded',
+      },
+    );
     expect(JSON.parse(store.get('slug-a')!).suspended).toBe('admin_suspended');
     expect(JSON.parse(store.get('domain:active.com')!).suspended).toBe('admin_suspended');
     vi.restoreAllMocks();

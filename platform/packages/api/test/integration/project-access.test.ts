@@ -6,7 +6,6 @@ import {
   createOrRefreshProjectInvitation,
   createProject,
   getAccessibleProjectsByUserId,
-  getProjectMember,
   removeProjectMember,
   setProjectMemberRole,
 } from '../../src/db.ts';
@@ -48,7 +47,9 @@ describe('project access', () => {
     const access = await requireProjectCapability(env.db, project.id, owner.id, 'delete');
     expect(access.role).toBe('owner');
     expect(access.owner.id).toBe(owner.id);
-    expect(await getProjectMember(env.db, project.id, owner.id)).toBeNull();
+    expect(
+      await env.db.select().from(projectMembers).where(eq(projectMembers.project_id, project.id)),
+    ).toEqual([]);
   });
 
   it('enforces reader and collaborator capabilities using the owner for billing', async () => {

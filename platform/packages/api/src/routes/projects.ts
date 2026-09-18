@@ -230,7 +230,7 @@ class DatabaseUrlPersistenceError extends Error {
 
 type ProjectListItem = Project & {
   role: ProjectRole;
-  owner: Pick<User, 'id' | 'login' | 'email'>;
+  owner: Pick<User, 'id' | 'login'>;
   url?: string;
   custom_domain: string | null;
   latest_deployment: Awaited<ReturnType<typeof getLatestDeploymentsByProjectIds>> extends Map<
@@ -608,7 +608,7 @@ const app = new Hono<ApiEnv>()
       return {
         ...projectWithUrl(p, context.env),
         role,
-        owner: { id: owner.id, login: owner.login, email: owner.email },
+        owner: { id: owner.id, login: owner.login },
         custom_domain: domain?.hostname ?? null,
         latest_deployment: latestDeployments.get(p.id) ?? null,
         traffic: {
@@ -735,7 +735,6 @@ const app = new Hono<ApiEnv>()
       owner: {
         id: access.owner.id,
         login: access.owner.login,
-        email: access.owner.email,
       },
     });
   })
@@ -840,12 +839,13 @@ const app = new Hono<ApiEnv>()
     // (bindingName/className) from this endpoint to restore live bindings on
     // deploy-on-GitHub builds. Full `api` tokens (deployScope unset) leave the
     // rows untouched, so the dashboard/admin still see complete manifests.
-    const sanitized = context.get('deployScope')
-      ? deployments.map((deployment) => ({
-          ...deployment,
-          manifest: sanitizeManifestForDeployToken(deployment.manifest),
-        }))
-      : deployments;
+    const sanitized =
+      context.get('deployScope') || access.role === 'reader'
+        ? deployments.map((deployment) => ({
+            ...deployment,
+            manifest: sanitizeDeploymentManifest(deployment.manifest),
+          }))
+        : deployments;
     return context.json({
       deployments: sanitized,
       activeDeploymentId: project.active_deployment_id,
@@ -931,8 +931,6 @@ const app = new Hono<ApiEnv>()
         501,
       );
     }
-
-    const planLimits = getPlanLimits(access.owner.plan);
 
     // A committed rollback lease blocks deploys and other rollbacks while
     // the cutover transaction commits or external compensation runs. Keeping
@@ -1200,12 +1198,10 @@ const app = new Hono<ApiEnv>()
           const manifest: DeployManifest | null = target.manifest
             ? JSON.parse(target.manifest)
             : null;
-          // Effective dispatch limits honor the TARGET manifest's per-project
-          // override, clamped to the CURRENT plan ceiling — a rollback under a
-          // downgraded plan clamps, never rejects. Computed here (pure CPU, no
-          // I/O added inside the lock) because the manifest is re-read inside
-          // the lock; `planLimits` itself is resolved before the tx.
-          const dispatchLimits = computeDispatchLimits(planLimits, manifest?.limits);
+          const dispatchLimits = computeDispatchLimits(
+            getPlanLimits(lockedAccess.owner.plan),
+            manifest?.limits,
+          );
           // Rollback external-write pass depends only on authoritative
           // persistent sources (pg deployments table for queue activation
           // history; target's manifest + unconditional DO reconciliation
@@ -3187,23 +3183,8 @@ function toDatabaseProvisioningError(
   return null;
 }
 
-/**
- * Strip plaintext-secret-bearing fields from a deployment manifest before it
- * is returned to a project-scoped deploy token (aud:'deploy').
- *
- * `manifest.vars` is the only top-level manifest field carrying raw env values
- * — they are uploaded as `plain_text` Worker bindings at deploy time (see
- * `routes/deploy.ts`). Real secrets travel as `secret_text` sourced from the
- * project secrets store, NOT from the manifest, so there is no `manifest.secrets`
- * field to strip. The CLI reads ONLY `manifest.live` (bindingName/className)
- * from the deployments endpoint to restore live bindings, so every other field
- * — including `live` — is preserved.
- *
- * Fail-safe: a null/empty input, or any manifest that does not parse as JSON,
- * collapses to `null`. We never return an unparseable manifest string that
- * might still contain secret values to an untrusted build environment.
- */
-function sanitizeManifestForDeployToken(raw: string | null): string | null {
+/** Remove plaintext environment values from manifests returned to read-only callers. */
+function sanitizeDeploymentManifest(raw: string | null): string | null {
   if (!raw) {
     return null;
   }

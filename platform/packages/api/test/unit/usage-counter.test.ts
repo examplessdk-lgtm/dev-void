@@ -42,6 +42,7 @@ import {
   getProject,
   getProjectOwnershipPeriodsByProjectIds,
   getProjectsByIds,
+  getUser,
   suspendUser,
 } from '../../src/db.ts';
 import { queryProjectAiUsage } from '../../src/routes/usage.ts';
@@ -1109,6 +1110,15 @@ describe('UsageCounter ownership changes', () => {
   beforeEach(() => {
     vi.mocked(queryProjectAiUsage).mockReset().mockResolvedValue({ neurons: 0 });
     vi.mocked(getProjectOwnershipPeriodsByProjectIds).mockReset().mockResolvedValue([]);
+    vi.mocked(getUser)
+      .mockReset()
+      .mockImplementation(
+        async (_db, id) =>
+          ({
+            id,
+            plan: 'pro',
+          }) as never,
+      );
   });
 
   it('bills a delayed former-owner event without reattaching the project', async () => {
@@ -1178,6 +1188,28 @@ describe('UsageCounter ownership changes', () => {
     expect(kv.calls).toContainEqual(['delete', 'ai-block:next']);
   });
 
+  it('does not attach a project after deletion has started', async () => {
+    vi.mocked(getProjectsByIds).mockResolvedValueOnce([
+      { id: 'deleting', user_id: 'u1', slug: 'app', status: 'deleting' } as never,
+    ]);
+    const { counter, storage } = makeCounter();
+
+    const response = await counter.fetch(
+      new Request('https://do/attach-project', {
+        method: 'POST',
+        body: JSON.stringify({
+          projectId: 'deleting',
+          slug: 'app',
+          ownershipStartedAt: '2026-01-01T00:00:00.000Z',
+          userId: 'u1',
+        }),
+      }),
+    );
+
+    expect(response.status).toBe(409);
+    expect(storage.data.get('state')).toBeUndefined();
+  });
+
   it('reconciles the complete pre-transfer AI window and resamples it idempotently', async () => {
     const ownershipStartedAt = '2026-02-01T00:00:00.000Z';
     const ownershipEndedAt = '2026-03-01T00:00:00.000Z';
@@ -1236,6 +1268,50 @@ describe('UsageCounter ownership changes', () => {
       historicalAiWindows: {
         [JSON.stringify(['transferred', ownershipStartedAt, ownershipEndedAt])]: {
           neurons: 61,
+        },
+      },
+    });
+  });
+
+  it('initializes a fresh counter from the former owner billing window before detaching', async () => {
+    const billingPeriodStart = '2026-01-15T00:00:00.000Z';
+    const ownershipStartedAt = '2026-02-01T00:00:00.000Z';
+    const ownershipEndedAt = '2026-03-01T00:00:00.000Z';
+    vi.mocked(getUser).mockResolvedValueOnce({ id: 'former-owner', plan: 'custom' } as never);
+    vi.mocked(queryProjectAiUsage).mockResolvedValueOnce({ neurons: 57 });
+    const { counter, storage } = makeCounter();
+
+    const response = await counter.fetch(
+      new Request('https://do/detach-project', {
+        method: 'POST',
+        body: JSON.stringify({
+          projectId: 'transferred',
+          userId: 'former-owner',
+          billingPeriodStart,
+          ownershipStartedAt,
+          ownershipEndedAt,
+        }),
+      }),
+    );
+
+    expect(response.ok).toBe(true);
+    expect(queryProjectAiUsage).toHaveBeenCalledWith(
+      undefined,
+      undefined,
+      'void',
+      'transferred',
+      new Date(ownershipStartedAt),
+      new Date(ownershipEndedAt),
+      true,
+    );
+    expect(storage.data.get('state')).toMatchObject({
+      billingPeriodStart,
+      billingPeriodInitialized: true,
+      plan: 'custom',
+      totalNeurons: 57,
+      historicalAiWindows: {
+        [JSON.stringify(['transferred', ownershipStartedAt, ownershipEndedAt])]: {
+          neurons: 57,
         },
       },
     });

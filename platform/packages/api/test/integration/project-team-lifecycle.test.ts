@@ -12,7 +12,6 @@ import {
   getBuild,
   getGitHubConnection,
   getProject,
-  getProjectsByUserId,
   respondToProjectInvitation,
 } from '../../src/db.ts';
 import {
@@ -115,9 +114,6 @@ describe('project team lifecycle', () => {
     expect(
       (await getOwnedProjectsByUserId(env.db, member.id)).map((project) => project.id),
     ).toEqual([owned.id]);
-    expect((await getProjectsByUserId(env.db, member.id)).map((project) => project.id)).toEqual([
-      owned.id,
-    ]);
     expect(
       (await getAccessibleProjectsByUserId(env.db, member.id)).map(({ project, role }) => ({
         id: project.id,

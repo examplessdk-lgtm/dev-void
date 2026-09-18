@@ -1645,6 +1645,9 @@ export const githubProjectRoutes = new Hono<ApiEnv>()
       if (lockedAccess instanceof Response) {
         return lockedAccess;
       }
+      if (lockedAccess.project.status === 'deleting') {
+        return context.json({ error: 'project is being deleted' }, 409);
+      }
       // Re-derive ownership from the LOCKED row, not the stale pre-tx snapshot. If
       // member_removed cleared the owner pointer while we waited on the lock, the
       // pre-tx owner path is stale: we already resolved repositoryId via the
@@ -1843,6 +1846,9 @@ export const githubProjectRoutes = new Hono<ApiEnv>()
       if (lockedAccess instanceof Response) {
         return lockedAccess;
       }
+      if (lockedAccess.project.status === 'deleting') {
+        return context.json({ error: 'project is being deleted' }, 409);
+      }
       await tx
         .select({ id: githubConnections.id })
         .from(githubConnections)
@@ -1956,6 +1962,9 @@ export const githubProjectRoutes = new Hono<ApiEnv>()
       );
       if (lockedAccess instanceof Response) {
         return lockedAccess;
+      }
+      if (lockedAccess.project.status === 'deleting') {
+        return context.json({ error: 'project is being deleted' }, 409);
       }
       // Lock the connection row(s) so an in-flight OIDC exchange (which re-reads +
       // FOR UPDATE-locks the same row before inserting its build) is serialized:

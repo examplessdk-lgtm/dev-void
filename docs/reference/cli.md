@@ -228,7 +228,7 @@ Link current directory to an existing hosted Void project by slug, or select int
 
 ### `void project list`
 
-List all accessible hosted projects (slug, role, mode, URL). Shared projects are included and the role column distinguishes them from projects you own. For a saved Cloudflare target, this displays the current Worker's versions instead because there is no Void project registry.
+List all accessible hosted projects (slug, role, type, URL). Shared projects are included and the role column distinguishes them from projects you own. For a saved Cloudflare target, this displays the current Worker's versions instead because there is no Void project registry.
 
 ### `void project team`
 

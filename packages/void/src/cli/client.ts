@@ -130,7 +130,6 @@ export type ProjectMemberResponse = {
   user: {
     id: string;
     login: string | null;
-    email: string | null;
   };
 };
 
@@ -149,7 +148,6 @@ export type ProjectInvitationResponse = {
     owner?: {
       id: string;
       login: string | null;
-      email: string | null;
     };
   };
   target?: {
@@ -160,11 +158,10 @@ export type ProjectInvitationResponse = {
   invited_by?: {
     id: string;
     login: string | null;
-    email: string | null;
   };
 };
 
-export type ProjectInvitationDelivery = {
+type ProjectInvitationDelivery = {
   status: 'sent' | 'not_configured' | 'rate_limited' | 'failed';
 };
 
@@ -672,7 +669,7 @@ export class PlatformClient {
     role: Exclude<ProjectRole, 'owner'>,
   ): Promise<{
     invitation: ProjectInvitationResponse;
-    refreshed?: boolean;
+    refreshed: boolean;
     delivery: ProjectInvitationDelivery;
   }> {
     const res = await this.request(`${this.baseUrl}/projects/${projectId}/invitations`, {
