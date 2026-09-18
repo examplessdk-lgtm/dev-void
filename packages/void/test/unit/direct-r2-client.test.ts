@@ -364,7 +364,7 @@ describe('PlatformClient.finalizeDeploy', () => {
   });
 
   it('suppresses the retry when an earlier attempt already created a deployment', async () => {
-    // makeDeployment().commit === null matches makePayload().commit === null.
+    vi.useFakeTimers();
     const existing = makeDeployment({ id: 'dpl_existing', status: 'uploading' });
     fetchMock.mockImplementation((url: string) => {
       if (String(url).includes('/deployments')) {
@@ -375,28 +375,37 @@ describe('PlatformClient.finalizeDeploy', () => {
 
     const cliLog = makeCliLog();
     const client = new PlatformClient(token, { apiUrl, cliLog });
-    const events: Array<unknown> = [];
-    for await (const event of client.finalizeDeploy(projectId, makePayload())) {
-      events.push(event);
-    }
+    try {
+      const events: Array<unknown> = [];
+      const consume = (async () => {
+        for await (const event of client.finalizeDeploy(projectId, makePayload())) {
+          events.push(event);
+        }
+      })();
+      await vi.runAllTimersAsync();
+      await consume;
 
-    // The POST is never replayed — the platform keeps its only deployment.
-    expect(deployPostCalls()).toHaveLength(1);
-    expect(deploymentListCalls()).toHaveLength(1);
-    expect(events).toEqual([
-      {
-        event: 'error',
-        step: 'finalize',
-        message: expect.stringContaining('dpl_existing'),
-      },
-    ]);
-    expect(cliLog.warn).toHaveBeenCalledWith(
-      'deploy_retry_suppressed',
-      expect.objectContaining({ deploymentId: 'dpl_existing', status: 'uploading' }),
-    );
+      // The POST is never replayed — the platform keeps its only deployment.
+      expect(deployPostCalls()).toHaveLength(1);
+      expect(deploymentListCalls()).toHaveLength(1);
+      expect(events).toEqual([
+        {
+          event: 'error',
+          step: 'finalize',
+          message: expect.stringContaining('dpl_existing'),
+        },
+      ]);
+      expect(cliLog.warn).toHaveBeenCalledWith(
+        'deploy_retry_suppressed',
+        expect.objectContaining({ deploymentId: 'dpl_existing', status: 'uploading' }),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('suppresses when an in-flight deployment carries the same commit as the payload', async () => {
+    vi.useFakeTimers();
     const existing = makeDeployment({ id: 'dpl_same', commit: 'sha_ours' });
     fetchMock.mockImplementation((url: string) => {
       if (String(url).includes('/deployments')) {
@@ -407,21 +416,30 @@ describe('PlatformClient.finalizeDeploy', () => {
 
     const client = makeClient();
     const payload = { ...makePayload(), commit: 'sha_ours' };
-    const events: Array<unknown> = [];
-    for await (const event of client.finalizeDeploy(projectId, payload)) {
-      events.push(event);
-    }
+    try {
+      const events: Array<unknown> = [];
+      const consume = (async () => {
+        for await (const event of client.finalizeDeploy(projectId, payload)) {
+          events.push(event);
+        }
+      })();
+      await vi.runAllTimersAsync();
+      await consume;
 
-    expect(deployPostCalls()).toHaveLength(1);
-    expect(events[0]).toMatchObject({
-      event: 'error',
-      message: expect.stringContaining('dpl_same'),
-    });
+      expect(deployPostCalls()).toHaveLength(1);
+      expect(events[0]).toMatchObject({
+        event: 'error',
+        message: expect.stringContaining('dpl_same'),
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('suppresses when an unrelated deployment is already in flight', async () => {
-    // Commit does not disambiguate: any in-flight row makes the replay
-    // hit the server's 409 guard, so suppressing is the same outcome.
+    vi.useFakeTimers();
+    // Commit does not disambiguate: any blocking-status row makes the
+    // replay hit the server's 409 guard, so suppressing is equivalent.
     const unrelated = makeDeployment({ id: 'dpl_theirs', commit: 'sha_theirs' });
     fetchMock.mockImplementation((url: string) => {
       if (String(url).includes('/deployments')) {
@@ -432,19 +450,28 @@ describe('PlatformClient.finalizeDeploy', () => {
 
     const client = makeClient();
     const payload = { ...makePayload(), commit: 'sha_ours' };
-    const events: Array<unknown> = [];
-    for await (const event of client.finalizeDeploy(projectId, payload)) {
-      events.push(event);
-    }
+    try {
+      const events: Array<unknown> = [];
+      const consume = (async () => {
+        for await (const event of client.finalizeDeploy(projectId, payload)) {
+          events.push(event);
+        }
+      })();
+      await vi.runAllTimersAsync();
+      await consume;
 
-    expect(deployPostCalls()).toHaveLength(1);
-    expect(events[0]).toMatchObject({
-      event: 'error',
-      message: expect.stringContaining('dpl_theirs'),
-    });
+      expect(deployPostCalls()).toHaveLength(1);
+      expect(events[0]).toMatchObject({
+        event: 'error',
+        message: expect.stringContaining('dpl_theirs'),
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('suppresses when an in-flight placeholder row has no commit yet', async () => {
+    vi.useFakeTimers();
     // The server inserts the deployment as a concurrency claim with
     // commit=NULL and only fills it after R2 inventory — our own attempt
     // reads commit:null for its first seconds.
@@ -458,17 +485,67 @@ describe('PlatformClient.finalizeDeploy', () => {
 
     const client = makeClient();
     const payload = { ...makePayload(), commit: 'sha_ours' };
-    const events: Array<unknown> = [];
-    for await (const event of client.finalizeDeploy(projectId, payload)) {
-      events.push(event);
-    }
+    try {
+      const events: Array<unknown> = [];
+      const consume = (async () => {
+        for await (const event of client.finalizeDeploy(projectId, payload)) {
+          events.push(event);
+        }
+      })();
+      await vi.runAllTimersAsync();
+      await consume;
 
-    expect(deployPostCalls()).toHaveLength(1);
-    expect(events[0]).toMatchObject({
-      event: 'error',
-      message: expect.stringContaining('dpl_placeholder'),
-    });
+      expect(deployPostCalls()).toHaveLength(1);
+      expect(events[0]).toMatchObject({
+        event: 'error',
+        message: expect.stringContaining('dpl_placeholder'),
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
+
+  it.each(['cutover', 'compensating'])(
+    'retries when the recent deployment is %s — the server can reconcile it',
+    async (status) => {
+      vi.useFakeTimers();
+      // The precheck can finish a marker-verified cutover or a completed
+      // compensation and then accept the new deploy — the replay must run.
+      const reconcilable = makeDeployment({ id: 'dpl_reconcilable', status });
+      let posts = 0;
+      fetchMock.mockImplementation((url: string) => {
+        if (String(url).includes('/deployments')) {
+          return Promise.resolve(deploymentListResponse([reconcilable]));
+        }
+        posts++;
+        if (posts === 1) {
+          return Promise.reject(new TypeError('fetch failed'));
+        }
+        return Promise.resolve(
+          ndjsonStreamResponse([
+            { event: 'done', deployment: 'd1', url: 'https://x', urls: [], assets: 0, workers: 0 },
+          ]),
+        );
+      });
+
+      const client = makeClient();
+      try {
+        const events: Array<unknown> = [];
+        const consume = (async () => {
+          for await (const event of client.finalizeDeploy(projectId, makePayload())) {
+            events.push(event);
+          }
+        })();
+        await vi.runAllTimersAsync();
+        await consume;
+
+        expect(deployPostCalls()).toHaveLength(2);
+        expect(events[0]).toMatchObject({ event: 'done' });
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
 
   it('retries when the only recent commit-less deployment is already live', async () => {
     vi.useFakeTimers();
