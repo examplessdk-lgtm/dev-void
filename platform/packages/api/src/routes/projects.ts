@@ -204,6 +204,23 @@ class RollbackError extends Error {
   }
 }
 
+async function getProjectAccessErrorMessage(response: Response): Promise<string> {
+  try {
+    const body: unknown = await response.json();
+    if (
+      typeof body === 'object' &&
+      body !== null &&
+      'error' in body &&
+      typeof body.error === 'string'
+    ) {
+      return body.error;
+    }
+  } catch {
+    // Preserve the established fallback if a future access response is not JSON.
+  }
+  return response.status === 404 ? 'project not found' : 'forbidden';
+}
+
 class DatabaseUrlPersistenceError extends Error {
   constructor(cause: unknown) {
     super('failed to persist database configuration', { cause });
@@ -777,9 +794,11 @@ const app = new Hono<ApiEnv>()
           'deploy',
           txDb,
         );
+        if (lockedAccess instanceof Response) {
+          return lockedAccess;
+        }
         const boundBuild = await getBuild(txDb, deployBuild);
         if (
-          lockedAccess instanceof Response ||
           lockedAccess.project.status === 'deleting' ||
           !boundBuild ||
           boundBuild.project_id !== project.id ||
@@ -789,6 +808,9 @@ const app = new Hono<ApiEnv>()
         }
         return signToken(deployBuild);
       });
+      if (minted instanceof Response) {
+        return minted;
+      }
       if (!minted) {
         return context.json({ error: 'deploy token build is no longer active' }, 403);
       }
@@ -960,7 +982,10 @@ const app = new Hono<ApiEnv>()
           txDb,
         );
         if (lockedAccess instanceof Response) {
-          throw new RollbackError(lockedAccess.status as 403 | 404, 'forbidden');
+          throw new RollbackError(
+            lockedAccess.status as 403 | 404,
+            await getProjectAccessErrorMessage(lockedAccess),
+          );
         }
         const lockedProject = lockedAccess.project;
         if (lockedProject.status === 'deleting') {
@@ -1061,7 +1086,10 @@ const app = new Hono<ApiEnv>()
             txDb,
           );
           if (lockedAccess instanceof Response) {
-            throw new RollbackError(lockedAccess.status as 403 | 404, 'forbidden');
+            throw new RollbackError(
+              lockedAccess.status as 403 | 404,
+              await getProjectAccessErrorMessage(lockedAccess),
+            );
           }
 
           // Re-read target INSIDE the lock. applied_migrations can be
@@ -1902,7 +1930,7 @@ const app = new Hono<ApiEnv>()
           return {
             status: lockedAccess.status as 403 | 404,
             body: {
-              error: lockedAccess.status === 404 ? 'project not found' : 'forbidden',
+              error: await getProjectAccessErrorMessage(lockedAccess),
             },
           };
         }
@@ -2103,7 +2131,7 @@ const app = new Hono<ApiEnv>()
             status: lockedAccess.status as 403 | 404,
             body: {
               ok: false,
-              error: lockedAccess.status === 404 ? 'project not found' : 'forbidden',
+              error: await getProjectAccessErrorMessage(lockedAccess),
             },
           };
         }

@@ -473,7 +473,7 @@ export type AccessibleProject = Readonly<{
 
 const accessibleProjectOwner = alias(users, 'accessible_project_owner');
 
-/** Owned and shared projects visible to an actor, with explicit billing owner. */
+/** Accessible projects whose billing owner is not manually suspended. */
 export async function getAccessibleProjectsByUserId(
   db: Db,
   userId: string,
@@ -695,6 +695,8 @@ export async function removeProjectMember(
     }
     if (args.actorUserId !== args.subjectUserId) {
       await requireLockedMembersCapability(txDb, project, args.actorUserId);
+    } else {
+      await requireLockedProjectOwnerActive(txDb, project);
     }
     const [member] = await txDb
       .delete(projectMembers)
@@ -4957,8 +4959,9 @@ export async function createGithubActionsBuildWithinLimit(
  *      (already claimed elsewhere).
  *
  * Returns true iff this call claimed the build (caller should proceed to start
- * it); false when at cap, when the project already has an active build, or when
- * already claimed (caller leaves it for a later tick).
+ * it); false when the owner is unavailable or manually suspended, at cap, the
+ * project already has an active build, or the build was already claimed (caller
+ * leaves it for a later tick).
  */
 export async function claimBuildForStartWithinLimit(
   db: Db,

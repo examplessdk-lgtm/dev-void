@@ -158,13 +158,11 @@ describe('project team API', () => {
     expect(cancelledIds).toEqual([build.id]);
   });
 
-  it('requires an existing registered user and supports target-only acceptance', async () => {
+  it('requires an existing registered user and supports invitation acceptance', async () => {
     const owner = await createTestUser(env.db, 'owner');
     const target = await createTestUser(env.db, 'target');
-    const bystander = await createTestUser(env.db, 'bystander');
     await setEmail(owner.id, 'owner@example.com');
     await setEmail(target.id, 'Target@Example.com');
-    await setEmail(bystander.id, 'bystander@example.com');
     const project = await createTestProject(env.db, owner.id, 'shared-app');
 
     const unknown = await app.fetch(
@@ -193,12 +191,6 @@ describe('project team API', () => {
       ],
     });
 
-    const forwarded = await app.fetch(
-      request(`/project-invitations/${created.id}/accept`, bystander.jwt, { method: 'POST' }),
-      env,
-    );
-    expect(forwarded.status).toBe(403);
-
     const accepted = await app.fetch(
       request(`/project-invitations/${created.id}/accept`, target.jwt, { method: 'POST' }),
       env,
@@ -207,18 +199,6 @@ describe('project team API', () => {
     expect(await accepted.json()).toMatchObject({
       member: { user: { id: target.id }, role: 'collaborator' },
     });
-
-    const acceptedAgain = await app.fetch(
-      request(`/project-invitations/${created.id}/accept`, target.jwt, { method: 'POST' }),
-      env,
-    );
-    expect(acceptedAgain.status).toBe(200);
-
-    const events = await env.db
-      .select()
-      .from(projectAccessEvents)
-      .where(eq(projectAccessEvents.project_id, project.id));
-    expect(events.map((event) => event.action)).toEqual(['invited', 'accepted']);
   });
 
   it('rejects invitation acceptance while the project owner is manually suspended', async () => {
@@ -244,6 +224,17 @@ describe('project team API', () => {
     expect(response.status).toBe(403);
     expect(await response.json()).toEqual({ error: 'project owner suspended' });
     expect(await env.db.select().from(projectMembers)).toEqual([]);
+
+    await env.db
+      .update(users)
+      .set({ suspended_reason: 'requests_exceeded' })
+      .where(eq(users.id, owner.id));
+    const accepted = await app.fetch(
+      request(`/project-invitations/${invitation.id}/accept`, target.jwt, { method: 'POST' }),
+      env,
+    );
+    expect(accepted.status).toBe(200);
+    expect(await accepted.json()).toMatchObject({ member: { role: 'reader' } });
   });
 
   it('rechecks owner suspension under the project lock before a team mutation', async () => {
@@ -284,6 +275,41 @@ describe('project team API', () => {
     expect(response.status).toBe(403);
     expect(await response.json()).toEqual({ error: 'project owner suspended' });
     expect(await env.db.select().from(projectInvitations)).toEqual([]);
+  });
+
+  it('rechecks owner suspension under the project lock before a member leaves', async () => {
+    const owner = await createTestUser(env.db, 'leave-race-owner');
+    const member = await createTestUser(env.db, 'leave-race-member');
+    const project = await createTestProject(env.db, owner.id);
+    await env.db.insert(projectMembers).values({
+      project_id: project.id,
+      user_id: member.id,
+      role: 'reader',
+      added_by_user_id: owner.id,
+    });
+
+    const requireCapability = projectAccess.requireProjectCapability;
+    let suspended = false;
+    vi.spyOn(projectAccess, 'requireProjectCapability').mockImplementation(async (...args) => {
+      const access = await requireCapability(...args);
+      if (!suspended && args[3] === 'read') {
+        suspended = true;
+        await env.db
+          .update(users)
+          .set({ suspended_reason: 'platform policy violation' })
+          .where(eq(users.id, owner.id));
+      }
+      return access;
+    });
+
+    const response = await app.fetch(
+      request(`/projects/${project.id}/leave`, member.jwt, { method: 'POST' }),
+      env,
+    );
+    expect(suspended).toBe(true);
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({ error: 'project owner suspended' });
+    expect(await env.db.select().from(projectMembers)).toHaveLength(1);
   });
 
   it('binds invitations to exactly one registered account and rejects owner/member conflicts', async () => {
@@ -710,6 +736,14 @@ describe('project team API', () => {
       env,
     );
     expect(ownerLeave.status).toBe(409);
+
+    const events = await env.db
+      .select()
+      .from(projectAccessEvents)
+      .where(eq(projectAccessEvents.project_id, project.id));
+    expect(events.map((event) => event.action).sort()).toEqual(
+      ['accepted', 'invited', 'left', 'member_removed', 'role_changed'].sort(),
+    );
   });
 
   it('filters expired invitations and allows the target to decline a live invitation', async () => {

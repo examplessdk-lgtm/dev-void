@@ -1,4 +1,4 @@
-import { desc, eq } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vite-plus/test';
 import { hmacSignState } from '../../src/auth/hmac.ts';
 import {
@@ -8,7 +8,6 @@ import {
   getAccessibleProjectsByUserId,
   getProjectMember,
   removeProjectMember,
-  respondToProjectInvitation,
   setProjectMemberRole,
 } from '../../src/db.ts';
 import app from '../../src/index.ts';
@@ -17,20 +16,8 @@ import {
   ProjectOwnerSuspendedError,
   requireProjectCapability,
 } from '../../src/project-access.ts';
-import {
-  projectAccessEvents,
-  projectMembers,
-  projectOwnershipPeriods,
-  users,
-} from '../../src/schema.ts';
-import {
-  clearTables,
-  createTestProject,
-  createTestUser,
-  setupEnv,
-  teardownEnv,
-  type TestEnv,
-} from './helpers.ts';
+import { projectMembers, projectOwnershipPeriods, users } from '../../src/schema.ts';
+import { clearTables, createTestUser, setupEnv, teardownEnv, type TestEnv } from './helpers.ts';
 
 let env: TestEnv;
 
@@ -54,9 +41,9 @@ async function userWithEmail(login: string) {
 }
 
 describe('project access', () => {
-  it('grants implicit owner access to a legacy project with no member row', async () => {
-    const owner = await createTestUser(env.db, 'legacy-owner');
-    const project = await createTestProject(env.db, owner.id, 'legacy-access');
+  it('grants implicit owner access without a member row', async () => {
+    const owner = await createTestUser(env.db, 'implicit-owner');
+    const project = await createProject(env.db, owner.id, 'implicit-access');
 
     const access = await requireProjectCapability(env.db, project.id, owner.id, 'delete');
     expect(access.role).toBe('owner');
@@ -129,105 +116,6 @@ describe('project access', () => {
     expect(
       (await requireProjectCapability(env.db, project.id, collaborator.id, 'deploy')).role,
     ).toBe('collaborator');
-  });
-
-  it('requires a registered target, binds acceptance to it, and audits mutations', async () => {
-    const owner = await userWithEmail('invite-owner');
-    const target = await userWithEmail('invite-target');
-    const forwardedTo = await userWithEmail('invite-forwarded');
-    const project = await createProject(env.db, owner.id, 'invitation-security');
-
-    await expect(
-      createOrRefreshProjectInvitation(env.db, {
-        projectId: project.id,
-        email: 'missing@example.com',
-        role: 'reader',
-        actorUserId: owner.id,
-      }),
-    ).rejects.toMatchObject({ reason: 'target-user-not-found', status: 404 });
-
-    const { invitation } = await createOrRefreshProjectInvitation(env.db, {
-      projectId: project.id,
-      email: target.email.toUpperCase(),
-      role: 'reader',
-      actorUserId: owner.id,
-    });
-    await expect(
-      respondToProjectInvitation(env.db, {
-        invitationId: invitation.id,
-        actorUserId: forwardedTo.id,
-        response: 'accept',
-      }),
-    ).rejects.toMatchObject({ reason: 'invitation-not-target', status: 403 });
-
-    const accepted = await respondToProjectInvitation(env.db, {
-      invitationId: invitation.id,
-      actorUserId: target.id,
-      response: 'accept',
-    });
-    expect(accepted.member?.role).toBe('reader');
-    await setProjectMemberRole(env.db, {
-      projectId: project.id,
-      subjectUserId: target.id,
-      role: 'collaborator',
-      actorUserId: owner.id,
-    });
-    await removeProjectMember(env.db, {
-      projectId: project.id,
-      subjectUserId: target.id,
-      actorUserId: target.id,
-    });
-
-    await expect(
-      requireProjectCapability(env.db, project.id, target.id, 'read'),
-    ).rejects.toBeInstanceOf(ProjectAccessDeniedError);
-    const events = await env.db
-      .select()
-      .from(projectAccessEvents)
-      .where(eq(projectAccessEvents.project_id, project.id))
-      .orderBy(desc(projectAccessEvents.created_at));
-    expect(events.map((event) => event.action)).toEqual([
-      'left',
-      'role_changed',
-      'accepted',
-      'invited',
-    ]);
-  });
-
-  it('does not grant invitation access while the project owner is manually suspended', async () => {
-    const owner = await userWithEmail('suspended-invite-owner');
-    const target = await userWithEmail('suspended-invite-target');
-    const project = await createProject(env.db, owner.id, 'suspended-invitation');
-    const { invitation } = await createOrRefreshProjectInvitation(env.db, {
-      projectId: project.id,
-      email: target.email,
-      role: 'reader',
-      actorUserId: owner.id,
-    });
-
-    await env.db
-      .update(users)
-      .set({ suspended_reason: 'platform policy violation' })
-      .where(eq(users.id, owner.id));
-    await expect(
-      respondToProjectInvitation(env.db, {
-        invitationId: invitation.id,
-        actorUserId: target.id,
-        response: 'accept',
-      }),
-    ).rejects.toMatchObject({ reason: 'owner-suspended', status: 403 });
-    expect(await getProjectMember(env.db, project.id, target.id)).toBeNull();
-
-    await env.db
-      .update(users)
-      .set({ suspended_reason: 'requests_exceeded' })
-      .where(eq(users.id, owner.id));
-    const accepted = await respondToProjectInvitation(env.db, {
-      invitationId: invitation.id,
-      actorUserId: target.id,
-      response: 'accept',
-    });
-    expect(accepted.member?.role).toBe('reader');
   });
 
   it('records owner attribution on new projects and deployments', async () => {

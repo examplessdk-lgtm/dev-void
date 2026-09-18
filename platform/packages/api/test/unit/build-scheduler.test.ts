@@ -86,10 +86,8 @@ const db = {
 // The scheduler now enforces the per-user cap AND claims queued->starting in a
 // SINGLE primitive (`claimBuildForStartWithinLimit`) that holds a per-user
 // FOR UPDATE lock — the same lock the OIDC path takes — instead of a separate
-// countUserActiveBuilds + claimBuildForStart pair. The fake reproduces the
-// primitive's contract: false when at cap (limit > 0 && active >= limit) or
-// when the build is unclaimable (lost the queued->starting race); true
-// otherwise. limit === 0 means unlimited.
+// countUserActiveBuilds + claimBuildForStart pair. This fake models the cap and
+// queued->starting race outcomes exercised by the scheduler unit tests.
 vi.mock('../../src/db.ts', () => ({
   createDb: () => ({ __mock: 'db' }),
   // Models the real helper: excludes builds owned by `excludeUserIds`, then
@@ -492,11 +490,8 @@ describe('BuildScheduler.alarm', () => {
     expect(ctx.storage.setAlarm).toHaveBeenCalledOnce();
   });
 
-  // the scheduler must start a build ONLY when the atomic cap+claim primitive
-  // returns true; when it returns false (at cap OR lost the claim race) the build
-  // is left for a later tick. This mirrors the OIDC path's per-user FOR UPDATE
-  // lock so the container scan and a parallel OIDC exchange can't both create
-  // active builds beyond the cap.
+  // The scheduler starts a build only when the atomic cap+claim primitive
+  // returns true; false leaves it for a later tick.
   it('starts only when claimBuildForStartWithinLimit returns true; leaves it otherwise', async () => {
     db.users.set('u1', { plan: 'pro', login: 'octocat' });
     // b1 will be claimed (under cap); b2 is forced unclaimable → primitive false.

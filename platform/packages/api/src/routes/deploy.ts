@@ -2005,7 +2005,7 @@ app.post('/:id/deploy/upload-urls', async (context) => {
       });
     });
   } catch (err) {
-    if (err instanceof ProjectAccessDeniedError || err instanceof ProjectOwnerSuspendedError) {
+    if (err instanceof ProjectAccessDeniedError) {
       return context.json(
         { error: err instanceof ProjectOwnerSuspendedError ? err.message : 'forbidden' },
         403,
@@ -2726,7 +2726,7 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
       } as const;
     });
   } catch (err) {
-    if (err instanceof ProjectAccessDeniedError || err instanceof ProjectOwnerSuspendedError) {
+    if (err instanceof ProjectAccessDeniedError) {
       return context.json(
         { error: err instanceof ProjectOwnerSuspendedError ? err.message : 'forbidden' },
         403,

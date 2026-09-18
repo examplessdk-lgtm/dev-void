@@ -160,7 +160,7 @@ app.post('/github-oidc', async (context) => {
   }
 
   // Bind the deploy token to the connection's authorized workflow file
-  // (owner-configured `workflow_path`, default `.github/workflows/void-deploy.yml`
+  // (project-configured `workflow_path`, default `.github/workflows/void-deploy.yml`
   // as scaffolded by `void init --github`). The running workflow file must equal
   // that path under the OIDC token's OWN repository, so any OTHER workflow in the
   // repo that can request `id-token: write` (a hand-added workflow, an unsafe
@@ -309,7 +309,7 @@ app.post('/github-oidc', async (context) => {
     return context.json({ error: 'connected branch changed concurrently' }, 409);
   }
   if (result.outcome === 'workflow-mismatch') {
-    // The owner re-pinned workflow_path between the pre-tx gate and this locked
+    // The workflow_path was re-pinned between the pre-tx gate and this locked
     // re-read; the token's workflow is no longer the authorized one. Do not mint.
     // 409: a concurrent config change, same class as branch-mismatch above.
     return context.json({ error: 'authorized workflow changed concurrently' }, 409);

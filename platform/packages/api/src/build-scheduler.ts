@@ -221,8 +221,9 @@ export class BuildScheduler extends DurableObject<ApiEnv['Bindings']> {
       // mutually exclusive per user, so a scheduler scan and a parallel OIDC
       // exchange can't both observe sub-cap capacity and both create active
       // builds (which the old separate count-then-claim allowed). `limit === 0`
-      // means unlimited. Returns false when at cap OR when the build was already
-      // claimed elsewhere; either way leave it for a later tick. The claim also
+      // means unlimited. Returns false when the owner is unavailable or suspended,
+      // at cap, the project has active work, or the build was claimed elsewhere;
+      // either way leave it for a later tick. The claim also
       // persists the effective instanceType in the same tx, so a cancel/reap in
       // the START->onStart window reads the correct size and addresses the right
       // DO namespace. This is the commit point: only pure config assembly + the

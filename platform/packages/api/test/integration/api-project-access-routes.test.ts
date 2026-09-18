@@ -186,17 +186,4 @@ describe('ownership-period account usage', () => {
     expect(graphqlQueries[0]).toContain(`datetime_geq: "${ownedFrom.toISOString()}"`);
     expect(graphqlQueries[0]).toContain(`datetime_lt: "${transferredAt.toISOString()}"`);
   });
-
-  it('keeps current-owner usage for legacy projects without ownership periods', async () => {
-    const owner = await createTestUser(env.db, 'legacy-owner');
-    const project = await createTestProject(env.db, owner.id, 'legacy-app');
-    const response = await app.fetch(authed('/usage', owner.jwt), {
-      ...env,
-      DEV_AUTH_BYPASS: 'true',
-    });
-    expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({
-      projects: [{ projectId: project.id, slug: project.slug }],
-    });
-  });
 });

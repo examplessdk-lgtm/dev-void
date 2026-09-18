@@ -632,6 +632,58 @@ describe('POST /projects/:id/prerender-token', () => {
     expect(parentStillValid.status).toBe(200);
   });
 
+  it('preserves the owner-suspension error from the locked capability recheck', async () => {
+    const owner = await createTestUser(env.db, 'prerender-suspended-owner');
+    const collaborator = await createTestUser(env.db, 'prerender-suspended-collaborator');
+    const project = await createTestProject(env.db, owner.id, 'prerender-suspended-app');
+    await env.db.insert(projectMembers).values({
+      project_id: project.id,
+      user_id: collaborator.id,
+      role: 'collaborator',
+      added_by_user_id: owner.id,
+    });
+    const build = await db.createBuild(env.db, {
+      projectId: project.id,
+      userId: collaborator.id,
+      status: 'building',
+    });
+    const deployToken = await signDeployToken(
+      {
+        projectId: project.id,
+        userId: collaborator.id,
+        login: collaborator.login,
+        buildId: build.id,
+      },
+      env.JWT_SECRET,
+    );
+
+    const requireCapability = projectAccess.requireProjectCapability;
+    let suspended = false;
+    vi.spyOn(projectAccess, 'requireProjectCapability').mockImplementation(async (...args) => {
+      const access = await requireCapability(...args);
+      if (!suspended && args[3] === 'deploy') {
+        suspended = true;
+        await env.db
+          .update(users)
+          .set({ suspended_reason: 'platform policy violation' })
+          .where(eq(users.id, owner.id));
+      }
+      return access;
+    });
+
+    const response = await app.fetch(
+      new Request(`http://localhost/projects/${project.id}/prerender-token`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${deployToken}` },
+      }),
+      env,
+    );
+
+    expect(suspended).toBe(true);
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({ error: 'project owner suspended' });
+  });
+
   it("does not mint a token for another user's project", async () => {
     const owner = await createTestUser(env.db, 'prerender-owner-two');
     const attacker = await createTestUser(env.db, 'prerender-attacker');

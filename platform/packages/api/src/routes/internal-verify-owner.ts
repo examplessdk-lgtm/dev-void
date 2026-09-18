@@ -94,10 +94,7 @@ app.post('/:projectId', async (context) => {
   }
 
   try {
-    const access = await requireProjectCapability(context.get('db'), projectId, userId, 'deploy');
-    if (isAdminSuspended(access.owner.suspended_reason)) {
-      throw new Error('suspended');
-    }
+    await requireProjectCapability(context.get('db'), projectId, userId, 'deploy');
   } catch {
     // This internal authorization oracle deliberately does not disclose
     // whether the project or membership exists.

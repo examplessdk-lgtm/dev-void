@@ -186,6 +186,72 @@ describe('operator tenant reads', () => {
     });
   });
 
+  test('attributes operator user usage only to ownership intervals in the billing window', async () => {
+    const formerOwner = await createTestUser(env.db, 'operator-usage-former');
+    const currentOwner = await createTestUser(env.db, 'operator-usage-current');
+    const project = await createTestProject(env.db, currentOwner.id, 'operator-usage-project');
+    const ownedFrom = new Date(Date.now() - 5 * 24 * 60 * 60 * 1_000);
+    const transferredAt = new Date(Date.now() - 2 * 24 * 60 * 60 * 1_000);
+    await env.db
+      .update(users)
+      .set({ billing_cycle_start: '2020-01-01T00:00:00.000Z' })
+      .where(eq(users.id, formerOwner.id));
+    await env.db
+      .update(users)
+      .set({ billing_cycle_start: '2020-01-01T00:00:00.000Z' })
+      .where(eq(users.id, currentOwner.id));
+    await env.db.insert(projectOwnershipPeriods).values([
+      {
+        id: 'pown_operator_former',
+        project_id: project.id,
+        owner_user_id: formerOwner.id,
+        starts_at: ownedFrom.toISOString(),
+        ends_at: transferredAt.toISOString(),
+      },
+      {
+        id: 'pown_operator_current',
+        project_id: project.id,
+        owner_user_id: currentOwner.id,
+        starts_at: transferredAt.toISOString(),
+      },
+    ]);
+
+    const queries: Array<string> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+        queries.push(String(init?.body));
+        return Response.json({
+          data: [{ blob1: project.id, requests: 12, bandwidth_bytes: 34 }],
+        });
+      }),
+    );
+
+    const formerResponse = await req(`/users/${formerOwner.id}`);
+    expect(formerResponse.status).toBe(200);
+    expect(await formerResponse.json()).toMatchObject({
+      projects: [],
+      usage: {
+        totalRequests: 12,
+        projects: [{ projectId: project.id, slug: project.slug }],
+      },
+    });
+    const currentResponse = await req(`/users/${currentOwner.id}`);
+    expect(currentResponse.status).toBe(200);
+    expect(await currentResponse.json()).toMatchObject({
+      projects: [{ id: project.id }],
+      usage: {
+        totalRequests: 12,
+        projects: [{ projectId: project.id, slug: project.slug }],
+      },
+    });
+
+    expect(queries).toHaveLength(2);
+    expect(queries[0]).toContain(ownedFrom.toISOString().replace('T', ' ').slice(0, 19));
+    expect(queries[0]).toContain(transferredAt.toISOString().replace('T', ' ').slice(0, 19));
+    expect(queries[1]).toContain(transferredAt.toISOString().replace('T', ' ').slice(0, 19));
+  });
+
   test('rejects invalid pagination and missing detail targets', async () => {
     for (const query of ['limit=101', 'page=0', 'page=2abc', 'limit=-1']) {
       expect((await req(`/users?${query}`)).status).toBe(400);

@@ -514,7 +514,8 @@ async function rerunBuildForCommit(
       );
     } else {
       // Everything left is a `skipped` reason from the supersede tx: project
-      // deleting, connection reconfigured or replaced, or installation revoked.
+      // deleting, owner suspended, connection reconfigured/replaced, or
+      // installation revoked.
       await completeRerun(
         refusedConclusion,
         'Nothing to rebuild',
@@ -818,8 +819,8 @@ export async function handleVerifiedGitHubWebhook(
         });
         cancelledContainerBuilds.push(...cancelled);
         // `build` is null on any skip: a concurrent PATCH /projects/:id/github
-        // changed the connection's branch/executor first (config-changed), or the
-        // project is being torn down (project-deleting). Either way no row is
+        // changed the connection, the project is being torn down, its owner is
+        // suspended, or installation authority was revoked. Either way no row is
         // enqueued and there's no id to push; the early-out + DO teardown below
         // tolerate the empty case.
         if (build) {

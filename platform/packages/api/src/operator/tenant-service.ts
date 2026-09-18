@@ -38,7 +38,12 @@ import type { ApiEnv } from '../env.ts';
 import { cancelContainerBuildDos } from '../github/cancel-builds.ts';
 import { generateId } from '../id.ts';
 import { teardownProject } from '../provisioning/cleanup.ts';
-import { getRequestsDataset, queryBatchProjectUsage, ZERO_USAGE } from '../routes/usage.ts';
+import {
+  getAccountUsageProjectWindows,
+  getRequestsDataset,
+  queryBatchProjectUsageWindows,
+  ZERO_USAGE,
+} from '../routes/usage.ts';
 import {
   buildProjectAccountJson,
   computeDispatchLimits,
@@ -182,17 +187,22 @@ export async function getOperatorUser(context: Context<ApiEnv>, id: string) {
   const since = user.billing_cycle_start
     ? getCurrentBillingPeriodStart(user.billing_cycle_start)
     : new Date();
-  const usageMap = await queryBatchProjectUsage(
+  const usageWindows = await getAccountUsageProjectWindows(
+    context.get('db'),
+    id,
+    since,
+    new Date(),
+  );
+  const usageMap = await queryBatchProjectUsageWindows(
     context.env.CF_ACCOUNT_ID,
     context.env.CF_API_TOKEN,
     getRequestsDataset(context.env),
-    projects.map((p) => p.id),
-    since,
+    usageWindows,
   );
-  const projectUsages = projects.map((p) => ({
-    projectId: p.id,
-    slug: p.slug,
-    ...(usageMap.get(p.id) ?? ZERO_USAGE),
+  const projectUsages = usageWindows.map(({ project }) => ({
+    projectId: project.id,
+    slug: project.slug,
+    ...(usageMap.get(project.id) ?? ZERO_USAGE),
   }));
   return {
     user,

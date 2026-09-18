@@ -1,6 +1,6 @@
-import { and, eq, gt, inArray, isNull, lt, or } from 'drizzle-orm';
+import { and, eq, gt, isNull, lt, or } from 'drizzle-orm';
 import { Hono } from 'hono';
-import { getOwnedProjectsByUserId, type Db } from '../db.ts';
+import type { Db } from '../db.ts';
 import { type ApiEnv, isDevBypass } from '../env.ts';
 import { projectOwnershipPeriods, projects as projectsTable } from '../schema.ts';
 import { getCurrentBillingPeriodStart } from '../tiers.ts';
@@ -245,8 +245,7 @@ function databaseTimestampMs(value: string): number {
 
 /**
  * Resolve the portions of the actor's current billing window for which they
- * owned each project. Projects without ownership-period rows are legacy/test
- * data and retain the former current-owner behavior.
+ * owned each project.
  */
 async function getAccountUsageProjectWindows(
   db: Db,
@@ -282,26 +281,6 @@ async function getAccountUsageProjectWindows(
       const entry = windows.get(row.project.id) ?? { project: row.project, intervals: [] };
       entry.intervals.push({ start, end });
       windows.set(row.project.id, entry);
-    }
-  }
-
-  // Compatibility for projects created by an older runtime (and lightweight
-  // test fixtures) before ownership periods were written.
-  const currentlyOwned = await getOwnedProjectsByUserId(db, userId);
-  const currentIds = currentlyOwned.map((project) => project.id);
-  const projectsWithAnyPeriod = new Set<string>();
-  if (currentIds.length > 0) {
-    const periodRows = await db
-      .select({ projectId: projectOwnershipPeriods.project_id })
-      .from(projectOwnershipPeriods)
-      .where(inArray(projectOwnershipPeriods.project_id, currentIds));
-    for (const row of periodRows) {
-      projectsWithAnyPeriod.add(row.projectId);
-    }
-  }
-  for (const project of currentlyOwned) {
-    if (!windows.has(project.id) && !projectsWithAnyPeriod.has(project.id)) {
-      windows.set(project.id, { project, intervals: [{ start: since, end: until }] });
     }
   }
 

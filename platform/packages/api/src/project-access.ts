@@ -80,8 +80,8 @@ export class ProjectOwnerSuspendedError extends ProjectAccessDeniedError {
 }
 
 /**
- * Assert a live project role from PostgreSQL. The owner account is returned
- * separately so plan/quota callers do not accidentally consult the actor.
+ * Assert a live project role and an owner not manually suspended. The owner is
+ * returned separately so plan/quota callers do not consult the actor.
  */
 export async function requireProjectCapability(
   db: Db,

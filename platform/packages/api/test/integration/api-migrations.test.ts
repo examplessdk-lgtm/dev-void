@@ -13,7 +13,16 @@ import {
 import { deleteRollbackLease, type Db } from '../../src/db.ts';
 import app from '../../src/index.ts';
 import { canonicalJson } from '../../src/migrations/canonical-json.ts';
-import { deployments, domains, projectMigrations, projects, resources } from '../../src/schema.ts';
+import * as projectAccess from '../../src/project-access.ts';
+import {
+  deployments,
+  domains,
+  projectMembers,
+  projectMigrations,
+  projects,
+  resources,
+  users,
+} from '../../src/schema.ts';
 import {
   setupEnv,
   teardownEnv,
@@ -653,6 +662,44 @@ describe('POST /projects/:id/migrations/apply', () => {
       env,
     );
     expect(res.status).toBe(404);
+  });
+
+  it('preserves the owner-suspension error from the locked capability recheck', async () => {
+    const owner = await createTestUser(env.db, 'suspended-apply-owner');
+    const collaborator = await createTestUser(env.db, 'suspended-apply-collaborator');
+    const project = await createTestProject(env.db, owner.id, 'suspended-apply-project');
+    await env.db.insert(projectMembers).values({
+      project_id: project.id,
+      user_id: collaborator.id,
+      role: 'collaborator',
+      added_by_user_id: owner.id,
+    });
+
+    const requireCapability = projectAccess.requireProjectCapability;
+    let suspended = false;
+    vi.spyOn(projectAccess, 'requireProjectCapability').mockImplementation(async (...args) => {
+      const access = await requireCapability(...args);
+      if (!suspended && args[3] === 'configure') {
+        suspended = true;
+        await env.db
+          .update(users)
+          .set({ suspended_reason: 'platform policy violation' })
+          .where(eq(users.id, owner.id));
+      }
+      return access;
+    });
+
+    const response = await app.fetch(
+      authedReq(`/projects/${project.id}/migrations/apply`, collaborator.jwt, {
+        method: 'POST',
+        body: JSON.stringify({ migrations: [] }),
+      }),
+      env,
+    );
+
+    expect(suspended).toBe(true);
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({ error: 'project owner suspended' });
   });
 
   it('returns 400 when no D1 resource exists', async () => {
