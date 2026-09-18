@@ -3,6 +3,7 @@ import type { BuildManager } from './build-manager.ts';
 import { buildManagerNamespace } from './build-namespace.ts';
 import { type BuildConfig, isContainerCapacityError } from './build-types.ts';
 import {
+  cancelQueuedContainerBuildsForUsers,
   claimBuildForStartWithinLimit,
   createDb,
   getGitHubConnection,
@@ -17,6 +18,7 @@ import {
   updateBuildStatus,
 } from './db.ts';
 import type { ApiEnv } from './env.ts';
+import { isAdminSuspended } from './suspension.ts';
 import { getBuildInstanceType, getPlanLimits } from './tiers.ts';
 
 /** A poke arms the alarm this far ahead so the next scan runs almost immediately. */
@@ -66,18 +68,22 @@ export class BuildScheduler extends DurableObject<ApiEnv['Bindings']> {
   async alarm(): Promise<void> {
     const db = createDb(this.env.HYPERDRIVE.connectionString);
 
-    // Compute which queue owners are AT their plan's concurrency cap and exclude
-    // them from the scan. The cap is plan-derived (`getPlanLimits`), not a DB
-    // column, so it can't be filtered in SQL — without this, a capped tenant's
-    // lowest-project_id rows would fill the scan limit every tick and the claim
-    // step would reject them all, indefinitely delaying an unrelated under-cap
-    // tenant. `limit === 0` means unlimited (never capped). `hasQueuedContainer-
-    // Builds` below still reflects ANY queued work, so the alarm keeps re-arming
-    // while an excluded owner's work waits — it becomes claimable the moment they
-    // free a slot.
+    // Cancel queued work for manually suspended owners before computing cap
+    // exclusions. The batch also reaches queued rows hidden behind an active
+    // build, so suspended work cannot keep the scheduler heartbeat alive forever.
+    // Then exclude owners at their plan's concurrency cap from the scan; without
+    // that exclusion, a capped tenant can fill the scan window and starve an
+    // unrelated owner. Usage-limit suspensions are not included in the batch.
     const owners = await getUsersWithQueuedContainerBuilds(db);
+    const suspendedUserIds = owners
+      .filter((owner) => isAdminSuspended(owner.suspendedReason))
+      .map((owner) => owner.userId);
+    await cancelQueuedContainerBuildsForUsers(db, suspendedUserIds);
     const cappedUserIds = owners
       .filter((o) => {
+        if (isAdminSuspended(o.suspendedReason)) {
+          return false;
+        }
         const limit = getPlanLimits(o.plan).concurrentBuilds;
         return limit > 0 && o.activeBuilds >= limit;
       })
@@ -115,6 +121,13 @@ export class BuildScheduler extends DurableObject<ApiEnv['Bindings']> {
         // mint a token. Fail it so it leaves the queue and never blocks.
         await updateBuildStatus(db, build.id, 'failed', {
           error: 'owning user not found',
+          completedAt: new Date().toISOString(),
+        });
+        continue;
+      }
+      if (isAdminSuspended(user.suspended_reason)) {
+        await updateBuildStatus(db, build.id, 'cancelled', {
+          error: 'project owner suspended',
           completedAt: new Date().toISOString(),
         });
         continue;

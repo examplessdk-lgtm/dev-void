@@ -121,6 +121,7 @@ function mutationErrorResponse(context: Context<ApiEnv>, error: unknown): Respon
     'invitation-not-target': 'forbidden',
     'invitation-expired': 'project invitation has expired',
     'pending-invitation-limit': 'project has too many pending invitations',
+    'owner-suspended': 'project owner suspended',
     forbidden: 'forbidden',
   };
   return context.json({ error: messages[error.reason] }, error.status);

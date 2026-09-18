@@ -45,6 +45,7 @@ import {
   createTestProject,
   createTestUser,
   mockCfApi,
+  recordingBuildManager,
   setupEnv,
   teardownEnv,
   type TestEnv,
@@ -53,22 +54,6 @@ import {
 let env: TestEnv;
 let token: string;
 let operatorAdminId: string;
-
-function recordingBuildManager(): {
-  namespace: DurableObjectNamespace;
-  cancelledIds: ReadonlyArray<string>;
-} {
-  const cancelledIds: Array<string> = [];
-  const namespace = {
-    idFromName: (name: string) => ({ toString: () => name }) as unknown as DurableObjectId,
-    get: (id: DurableObjectId) => ({
-      cancelBuild: async () => {
-        cancelledIds.push(id.toString());
-      },
-    }),
-  } as unknown as DurableObjectNamespace;
-  return { namespace, cancelledIds };
-}
 
 beforeAll(async () => {
   env = await setupEnv();

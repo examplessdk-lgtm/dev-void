@@ -43,7 +43,7 @@ const db = {
   // — queued rows exist but none are startable.
   queued: [] as Array<FakeBuild>,
   startable: null as Array<FakeBuild> | null,
-  users: new Map<string, { plan: string; login: string }>(),
+  users: new Map<string, { plan: string; login: string; suspended_reason?: string | null }>(),
   activeByUser: new Map<string, number>(),
   connections: new Map<
     string,
@@ -114,13 +114,30 @@ vi.mock('../../src/db.ts', () => ({
     return Array.from(ownerIds).map((userId) => ({
       userId,
       plan: db.users.get(userId)?.plan ?? 'free',
+      suspendedReason: db.users.get(userId)?.suspended_reason ?? null,
       activeBuilds: db.activeByUser.get(userId) ?? 0,
     }));
   }),
+  cancelQueuedContainerBuildsForUsers: vi.fn(
+    async (_db: unknown, userIds: ReadonlyArray<string>) => {
+      const suspended = new Set(userIds);
+      const cancelled = db.queued.filter((build) => suspended.has(build.user_id));
+      for (const build of cancelled) {
+        db.cancelled.push({ id: build.id, error: 'project owner suspended' });
+      }
+      db.queued = db.queued.filter((build) => !suspended.has(build.user_id));
+      if (db.startable) {
+        db.startable = db.startable.filter((build) => !suspended.has(build.user_id));
+      }
+      return cancelled.length;
+    },
+  ),
   hasQueuedContainerBuilds: vi.fn(async (_db: unknown) => db.queued.length > 0),
   getUser: vi.fn(async (_db: unknown, id: string) => {
     const u = db.users.get(id);
-    return u ? { id, plan: u.plan, login: u.login } : null;
+    return u
+      ? { id, plan: u.plan, login: u.login, suspended_reason: u.suspended_reason ?? null }
+      : null;
   }),
   claimBuildForStartWithinLimit: vi.fn(
     async (
@@ -368,6 +385,25 @@ describe('BuildScheduler.alarm', () => {
         error: 'github organization repository must be reconnected to renew authorization',
       },
     ]);
+  });
+
+  it('cancels a queued build owned by a manually suspended user before claiming it', async () => {
+    db.users.set('u1', {
+      plan: 'free',
+      login: 'octocat',
+      suspended_reason: 'platform policy violation',
+    });
+    enqueue({ id: 'b1', user_id: 'u1', project_id: 'p1' });
+    db.activeByUser.set('u1', 1);
+    db.startable = [];
+    const startBuild = vi.fn(async () => {});
+    const s = makeScheduler(makeStubCtx(), makeEnv(startBuild));
+
+    await s.alarm();
+
+    expect(startBuild).not.toHaveBeenCalled();
+    expect(db.claimArgs).toEqual([]);
+    expect(db.cancelled).toEqual([{ id: 'b1', error: 'project owner suspended' }]);
   });
 
   it('re-arms the alarm when the queue is fully blocked (nothing startable but queued work remains)', async () => {

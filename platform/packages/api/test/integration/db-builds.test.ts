@@ -1,6 +1,7 @@
 import { eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vite-plus/test';
 import {
+  cancelQueuedContainerBuildsForUsers,
   claimBuildForStartWithinLimit,
   createBuild,
   createGitHubConnection as createGitHubConnectionRecord,
@@ -44,6 +45,7 @@ import {
   projectMembers,
   projects,
   resources,
+  users,
 } from '../../src/schema.ts';
 import {
   clearTables,
@@ -365,7 +367,59 @@ describe('builds', () => {
 
     const owners = await getUsersWithQueuedContainerBuilds(env.db);
     expect(owners).toHaveLength(1);
-    expect(owners[0]).toEqual({ userId: withQueued.id, plan: 'free', activeBuilds: 2 });
+    expect(owners[0]).toEqual({
+      userId: withQueued.id,
+      plan: 'free',
+      suspendedReason: null,
+      activeBuilds: 2,
+    });
+  });
+
+  it('cancels all queued container builds for suspended owners, including blocked projects', async () => {
+    const suspended = await createTestUser(env.db, 'batch-suspended-owner');
+    const usageSuspended = await createTestUser(env.db, 'batch-usage-suspended-owner');
+    const activeProject = await createTestProject(env.db, suspended.id, 'batch-active');
+    const idleProject = await createTestProject(env.db, suspended.id, 'batch-idle');
+    const usageProject = await createTestProject(env.db, usageSuspended.id, 'batch-usage');
+    await createBuild(env.db, {
+      projectId: activeProject.id,
+      userId: suspended.id,
+      status: 'building',
+    });
+    const blocked = await createBuild(env.db, {
+      projectId: activeProject.id,
+      userId: suspended.id,
+    });
+    const idle = await createBuild(env.db, { projectId: idleProject.id, userId: suspended.id });
+    const usageQueued = await createBuild(env.db, {
+      projectId: usageProject.id,
+      userId: usageSuspended.id,
+    });
+    await env.db
+      .update(users)
+      .set({ suspended_reason: 'platform policy violation' })
+      .where(eq(users.id, suspended.id));
+    await env.db
+      .update(users)
+      .set({ suspended_reason: 'requests_exceeded' })
+      .where(eq(users.id, usageSuspended.id));
+
+    expect(
+      (await getUsersWithQueuedContainerBuilds(env.db)).find(
+        (owner) => owner.userId === suspended.id,
+      ),
+    ).toMatchObject({
+      userId: suspended.id,
+      suspendedReason: 'platform policy violation',
+      activeBuilds: 1,
+    });
+    expect(
+      await cancelQueuedContainerBuildsForUsers(env.db, [suspended.id, usageSuspended.id]),
+    ).toBe(2);
+    expect((await getBuild(env.db, blocked.id))?.status).toBe('cancelled');
+    expect((await getBuild(env.db, idle.id))?.status).toBe('cancelled');
+    expect((await getBuild(env.db, usageQueued.id))?.status).toBe('queued');
+    expect(await hasQueuedContainerBuilds(env.db)).toBe(true);
   });
 
   it('hasQueuedContainerBuilds reflects whether any queued container build exists', async () => {
@@ -1200,6 +1254,45 @@ describe('builds', () => {
     expect(await getProjectBuilds(env.db, project.id)).toEqual([]);
   });
 
+  it('supersedeAndCreateContainerBuild skips manual owner suspension but permits usage suspension', async () => {
+    const user = await createTestUser(env.db, 'container-suspended-owner');
+    const project = await createTestProject(env.db, user.id);
+    await createGitHubConnection(env.db, {
+      projectId: project.id,
+      installationId: 'container-suspended-owner',
+      repoFullName: 'acme/suspended-owner',
+      repositoryId: DEFAULT_REPO_ID,
+      branch: 'main',
+      buildExecutor: 'container',
+    });
+    await seedActiveInstall(env.db, 'container-suspended-owner');
+    const connectionId = (await getGitHubConnection(env.db, project.id))!.id;
+    const args = {
+      projectId: project.id,
+      connectionId,
+      userId: user.id,
+      branch: 'main',
+      commitSha: 'suspended-owner',
+      installationId: 'container-suspended-owner',
+      repositoryId: DEFAULT_REPO_ID,
+    } as const;
+
+    await env.db
+      .update(users)
+      .set({ suspended_reason: 'platform policy violation' })
+      .where(eq(users.id, user.id));
+    const suspended = await supersedeAndCreateContainerBuild(env.db, args);
+    expect(suspended).toMatchObject({ build: null, skipped: 'owner-suspended' });
+    expect(await getProjectBuilds(env.db, project.id)).toEqual([]);
+
+    await env.db
+      .update(users)
+      .set({ suspended_reason: 'requests_exceeded' })
+      .where(eq(users.id, user.id));
+    const usageSuspended = await supersedeAndCreateContainerBuild(env.db, args);
+    expect(usageSuspended.build?.status).toBe('queued');
+  });
+
   it('supersedeAndCreateContainerBuild inserts when the connection branch+executor match', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id);
@@ -1577,6 +1670,27 @@ describe('builds', () => {
       instanceType: 'basic',
     });
     expect(reclaimed).toBe(false);
+  });
+
+  it('claimBuildForStartWithinLimit does not start a queued build for a manually suspended owner', async () => {
+    const user = await createTestUser(env.db, 'claim-suspended-owner');
+    const project = await createTestProject(env.db, user.id);
+    const build = await createBuild(env.db, { projectId: project.id, userId: user.id });
+    await env.db
+      .update(users)
+      .set({ suspended_reason: 'platform policy violation' })
+      .where(eq(users.id, user.id));
+
+    expect(
+      await claimBuildForStartWithinLimit(env.db, {
+        buildId: build.id,
+        userId: user.id,
+        projectId: project.id,
+        limit: 1,
+        instanceType: 'basic',
+      }),
+    ).toBe(false);
+    expect((await getBuild(env.db, build.id))?.status).toBe('queued');
   });
 
   it('requeueBuildIfStarting returns a starting row to queued (CAS)', async () => {
@@ -1968,6 +2082,52 @@ describe('builds', () => {
 // ---------------------------------------------------------------------------
 
 describe('createGithubActionsBuildWithinLimit', () => {
+  it('rejects manual owner suspension but permits usage suspension', async () => {
+    const user = await createTestUser(env.db, 'actions-suspended-owner');
+    const project = await createTestProject(env.db, user.id);
+    await createGitHubConnection(env.db, {
+      projectId: project.id,
+      installationId: 'actions-suspended-owner',
+      repoFullName: 'acme/actions-suspended-owner',
+      repositoryId: DEFAULT_REPO_ID,
+      buildExecutor: 'github_actions',
+    });
+    await seedActiveInstall(env.db, 'actions-suspended-owner');
+    const args = {
+      projectId: project.id,
+      connectionId: (await getGitHubConnection(env.db, project.id))!.id,
+      userId: user.id,
+      limit: 3,
+      branch: 'main',
+      githubRunId: 'suspended-owner-1',
+      installationId: 'actions-suspended-owner',
+      repositoryId: DEFAULT_REPO_ID,
+      expectedWorkflowPath: '.github/workflows/void-deploy.yml',
+    } as const;
+
+    await env.db
+      .update(users)
+      .set({ suspended_reason: 'platform policy violation' })
+      .where(eq(users.id, user.id));
+    expect((await createGithubActionsBuildWithinLimit(env.db, args)).outcome).toBe(
+      'owner-suspended',
+    );
+    expect(await getProjectBuilds(env.db, project.id)).toEqual([]);
+
+    await env.db
+      .update(users)
+      .set({ suspended_reason: 'requests_exceeded' })
+      .where(eq(users.id, user.id));
+    expect(
+      (
+        await createGithubActionsBuildWithinLimit(env.db, {
+          ...args,
+          githubRunId: 'suspended-owner-2',
+        })
+      ).outcome,
+    ).toBe('created');
+  });
+
   it('recomputes concurrency and attribution from the locked current owner after transfer', async () => {
     const staleOwner = await createTestUser(
       env.db,

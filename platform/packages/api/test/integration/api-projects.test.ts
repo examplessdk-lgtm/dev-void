@@ -147,6 +147,44 @@ describe('GET /projects', () => {
     expect(projects[0].slug).toBe('alice-app');
   });
 
+  it('omits shared projects whose owner is manually suspended but keeps usage-suspended projects', async () => {
+    const owner = await createTestUser(env.db, 'list-suspended-owner');
+    const collaborator = await createTestUser(env.db, 'list-suspended-collaborator');
+    const project = await createTestProject(env.db, owner.id, 'list-suspended-project');
+    await env.db.insert(projectMembers).values({
+      project_id: project.id,
+      user_id: collaborator.id,
+      role: 'collaborator',
+      added_by_user_id: owner.id,
+    });
+    await env.db
+      .update(users)
+      .set({ suspended_reason: 'platform policy violation' })
+      .where(eq(users.id, owner.id));
+
+    const list = () =>
+      app.fetch(
+        new Request('http://localhost/projects', {
+          headers: { Authorization: `Bearer ${collaborator.jwt}` },
+        }),
+        env,
+      );
+    const suspended = await list();
+    expect(suspended.status).toBe(200);
+    expect(await suspended.json()).toEqual([]);
+
+    await env.db
+      .update(users)
+      .set({ suspended_reason: 'requests_exceeded' })
+      .where(eq(users.id, owner.id));
+    mockCfApi();
+    const usageSuspended = await list();
+    expect(usageSuspended.status).toBe(200);
+    expect((await usageSuspended.json()) as Array<{ id: string }>).toMatchObject([
+      { id: project.id },
+    ]);
+  });
+
   it('returns deployment, traffic, and health summaries sorted by attention', async () => {
     const user = await createTestUser(env.db, 'overview-user');
     const alpha = await createTestProject(env.db, user.id, 'alpha');
@@ -238,6 +276,31 @@ describe('GET /projects/:id', () => {
     const body = (await res.json()) as { id: string; slug: string };
     expect(body.id).toBe(project.id);
     expect(body.slug).toBe('my-app');
+  });
+
+  it('rejects a collaborator when the owner is manually suspended', async () => {
+    const owner = await createTestUser(env.db, 'get-suspended-owner');
+    const collaborator = await createTestUser(env.db, 'get-suspended-collaborator');
+    const project = await createTestProject(env.db, owner.id, 'get-suspended-project');
+    await env.db.insert(projectMembers).values({
+      project_id: project.id,
+      user_id: collaborator.id,
+      role: 'reader',
+      added_by_user_id: owner.id,
+    });
+    await env.db
+      .update(users)
+      .set({ suspended_reason: 'platform policy violation' })
+      .where(eq(users.id, owner.id));
+
+    const res = await app.fetch(
+      new Request(`http://localhost/projects/${project.id}`, {
+        headers: { Authorization: `Bearer ${collaborator.jwt}` },
+      }),
+      env,
+    );
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: 'project owner suspended' });
   });
 
   it('returns 403 when user does not own the project', async () => {

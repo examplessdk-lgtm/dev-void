@@ -7,6 +7,7 @@ import {
   upsertGitHubInstallation,
 } from '../../src/db.ts';
 import app from '../../src/index.ts';
+import * as projectAccess from '../../src/project-access.ts';
 import {
   projectAccessEvents,
   projectInvitations,
@@ -18,28 +19,13 @@ import {
   clearTables,
   createTestProject,
   createTestUser,
+  recordingBuildManager,
   setupEnv,
   teardownEnv,
   type TestEnv,
 } from './helpers.ts';
 
 let env: TestEnv;
-
-function recordingBuildManager(): {
-  namespace: DurableObjectNamespace;
-  cancelledIds: ReadonlyArray<string>;
-} {
-  const cancelledIds: Array<string> = [];
-  const namespace = {
-    idFromName: (name: string) => ({ toString: () => name }) as unknown as DurableObjectId,
-    get: (id: DurableObjectId) => ({
-      cancelBuild: async () => {
-        cancelledIds.push(id.toString());
-      },
-    }),
-  } as unknown as DurableObjectNamespace;
-  return { namespace, cancelledIds };
-}
 
 beforeAll(async () => {
   env = await setupEnv();
@@ -51,6 +37,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await clearTables(env.db);
+  vi.restoreAllMocks();
 });
 
 function request(
@@ -232,6 +219,71 @@ describe('project team API', () => {
       .from(projectAccessEvents)
       .where(eq(projectAccessEvents.project_id, project.id));
     expect(events.map((event) => event.action)).toEqual(['invited', 'accepted']);
+  });
+
+  it('rejects invitation acceptance while the project owner is manually suspended', async () => {
+    const owner = await createTestUser(env.db, 'accept-suspended-owner');
+    const target = await createTestUser(env.db, 'accept-suspended-target');
+    await setEmail(target.id, 'accept-suspended@example.com');
+    const project = await createTestProject(env.db, owner.id);
+    const invitation = await invite(
+      project.id,
+      owner.jwt,
+      'accept-suspended@example.com',
+      'reader',
+    );
+    await env.db
+      .update(users)
+      .set({ suspended_reason: 'platform policy violation' })
+      .where(eq(users.id, owner.id));
+
+    const response = await app.fetch(
+      request(`/project-invitations/${invitation.id}/accept`, target.jwt, { method: 'POST' }),
+      env,
+    );
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({ error: 'project owner suspended' });
+    expect(await env.db.select().from(projectMembers)).toEqual([]);
+  });
+
+  it('rechecks owner suspension under the project lock before a team mutation', async () => {
+    const owner = await createTestUser(env.db, 'team-race-owner');
+    const admin = await createTestUser(env.db, 'team-race-admin');
+    const target = await createTestUser(env.db, 'team-race-target');
+    await setEmail(target.id, 'team-race-target@example.com');
+    const project = await createTestProject(env.db, owner.id);
+    await env.db.insert(projectMembers).values({
+      project_id: project.id,
+      user_id: admin.id,
+      role: 'admin',
+      added_by_user_id: owner.id,
+    });
+
+    const requireCapability = projectAccess.requireProjectCapability;
+    let suspended = false;
+    vi.spyOn(projectAccess, 'requireProjectCapability').mockImplementation(async (...args) => {
+      const access = await requireCapability(...args);
+      if (!suspended && args[3] === 'members') {
+        suspended = true;
+        await env.db
+          .update(users)
+          .set({ suspended_reason: 'platform policy violation' })
+          .where(eq(users.id, owner.id));
+      }
+      return access;
+    });
+
+    const response = await app.fetch(
+      request(`/projects/${project.id}/invitations`, admin.jwt, {
+        method: 'POST',
+        body: { email: 'team-race-target@example.com', role: 'reader' },
+      }),
+      env,
+    );
+    expect(suspended).toBe(true);
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({ error: 'project owner suspended' });
+    expect(await env.db.select().from(projectInvitations)).toEqual([]);
   });
 
   it('binds invitations to exactly one registered account and rejects owner/member conflicts', async () => {

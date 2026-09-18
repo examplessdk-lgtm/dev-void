@@ -12,7 +12,11 @@ import {
   setProjectMemberRole,
 } from '../../src/db.ts';
 import app from '../../src/index.ts';
-import { ProjectAccessDeniedError, requireProjectCapability } from '../../src/project-access.ts';
+import {
+  ProjectAccessDeniedError,
+  ProjectOwnerSuspendedError,
+  requireProjectCapability,
+} from '../../src/project-access.ts';
 import {
   projectAccessEvents,
   projectMembers,
@@ -99,6 +103,34 @@ describe('project access', () => {
     ]);
   });
 
+  it('suspends shared access only when the owner is manually suspended', async () => {
+    const owner = await createTestUser(env.db, 'suspended-owner');
+    const collaborator = await createTestUser(env.db, 'suspended-collaborator');
+    const project = await createProject(env.db, owner.id, 'suspended-owner-project');
+    await env.db.insert(projectMembers).values({
+      project_id: project.id,
+      user_id: collaborator.id,
+      role: 'collaborator',
+      added_by_user_id: owner.id,
+    });
+
+    await env.db
+      .update(users)
+      .set({ suspended_reason: 'platform policy violation' })
+      .where(eq(users.id, owner.id));
+    await expect(
+      requireProjectCapability(env.db, project.id, collaborator.id, 'read'),
+    ).rejects.toBeInstanceOf(ProjectOwnerSuspendedError);
+
+    await env.db
+      .update(users)
+      .set({ suspended_reason: 'requests_exceeded' })
+      .where(eq(users.id, owner.id));
+    expect(
+      (await requireProjectCapability(env.db, project.id, collaborator.id, 'deploy')).role,
+    ).toBe('collaborator');
+  });
+
   it('requires a registered target, binds acceptance to it, and audits mutations', async () => {
     const owner = await userWithEmail('invite-owner');
     const target = await userWithEmail('invite-target');
@@ -160,6 +192,42 @@ describe('project access', () => {
       'accepted',
       'invited',
     ]);
+  });
+
+  it('does not grant invitation access while the project owner is manually suspended', async () => {
+    const owner = await userWithEmail('suspended-invite-owner');
+    const target = await userWithEmail('suspended-invite-target');
+    const project = await createProject(env.db, owner.id, 'suspended-invitation');
+    const { invitation } = await createOrRefreshProjectInvitation(env.db, {
+      projectId: project.id,
+      email: target.email,
+      role: 'reader',
+      actorUserId: owner.id,
+    });
+
+    await env.db
+      .update(users)
+      .set({ suspended_reason: 'platform policy violation' })
+      .where(eq(users.id, owner.id));
+    await expect(
+      respondToProjectInvitation(env.db, {
+        invitationId: invitation.id,
+        actorUserId: target.id,
+        response: 'accept',
+      }),
+    ).rejects.toMatchObject({ reason: 'owner-suspended', status: 403 });
+    expect(await getProjectMember(env.db, project.id, target.id)).toBeNull();
+
+    await env.db
+      .update(users)
+      .set({ suspended_reason: 'requests_exceeded' })
+      .where(eq(users.id, owner.id));
+    const accepted = await respondToProjectInvitation(env.db, {
+      invitationId: invitation.id,
+      actorUserId: target.id,
+      response: 'accept',
+    });
+    expect(accepted.member?.role).toBe('reader');
   });
 
   it('records owner attribution on new projects and deployments', async () => {

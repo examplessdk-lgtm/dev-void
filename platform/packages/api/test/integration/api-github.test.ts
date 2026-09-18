@@ -50,6 +50,7 @@ import {
   clearTables,
   createTestProject,
   createTestUser,
+  recordingBuildManager,
   setupEnv,
   teardownEnv,
   type TestEnv,
@@ -183,36 +184,6 @@ function authed(jwt: string, body?: unknown): RequestInit {
     },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   };
-}
-
-// A BUILD_MANAGER stand-in that records which build ids (keyed by the DO name,
-// which the handler sets to the build id) received a `cancelBuild` RPC. The
-// handler tears down orphaned containers via the trusted `cancelBuild` RPC on
-// BuildManager; the call is best-effort, so here we only assert it was ATTEMPTED
-// for the right (active container) builds. A `fetch` shim is kept for any
-// agent-authenticated `POST /cancel` path so the mock degrades gracefully.
-function recordingBuildManager(): {
-  namespace: DurableObjectNamespace;
-  cancelledIds: ReadonlyArray<string>;
-} {
-  const cancelledIds: Array<string> = [];
-  const namespace = {
-    idFromName: (name: string) => ({ toString: () => name }) as unknown as DurableObjectId,
-    get: (id: DurableObjectId) => ({
-      cancelBuild: async (_reason?: string) => {
-        cancelledIds.push(id.toString());
-      },
-      fetch: async (input: string | URL | Request) => {
-        const url =
-          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-        if (new URL(url).pathname === '/cancel') {
-          cancelledIds.push(id.toString());
-        }
-        return Response.json({ ok: true });
-      },
-    }),
-  } as unknown as DurableObjectNamespace;
-  return { namespace, cancelledIds };
 }
 
 // Minimal GitHub App env so isGitHubAppConfigured() is true. The private key is
@@ -2696,7 +2667,7 @@ describe('PATCH /projects/:id/github', () => {
       branch: 'develop',
     });
 
-    const { namespace, cancelledIds } = recordingBuildManager();
+    const { namespace, cancelledIds } = recordingBuildManager({ recordFetchCancel: true });
     const res = await app.fetch(
       new Request(`http://localhost/projects/${project.id}/github`, {
         method: 'PATCH',
@@ -2754,7 +2725,7 @@ describe('PATCH /projects/:id/github', () => {
       status: 'building',
     });
 
-    const { namespace, cancelledIds } = recordingBuildManager();
+    const { namespace, cancelledIds } = recordingBuildManager({ recordFetchCancel: true });
     const res = await app.fetch(
       new Request(`http://localhost/projects/${project.id}/github`, {
         method: 'PATCH',
@@ -2815,7 +2786,7 @@ describe('PATCH /projects/:id/github', () => {
       status: 'building',
     });
 
-    const { namespace, cancelledIds } = recordingBuildManager();
+    const { namespace, cancelledIds } = recordingBuildManager({ recordFetchCancel: true });
     const res = await app.fetch(
       new Request(`http://localhost/projects/${project.id}/github`, {
         method: 'PATCH',
@@ -2872,7 +2843,7 @@ describe('PATCH /projects/:id/github', () => {
       branch: 'main',
     });
 
-    const { namespace, cancelledIds } = recordingBuildManager();
+    const { namespace, cancelledIds } = recordingBuildManager({ recordFetchCancel: true });
     const res = await app.fetch(
       new Request(`http://localhost/projects/${project.id}/github`, {
         method: 'PATCH',
@@ -2943,7 +2914,7 @@ describe('PATCH /projects/:id/github', () => {
       branch: 'release',
     });
 
-    const { namespace, cancelledIds } = recordingBuildManager();
+    const { namespace, cancelledIds } = recordingBuildManager({ recordFetchCancel: true });
     const res = await app.fetch(
       new Request(`http://localhost/projects/${project.id}/github`, {
         method: 'PATCH',
@@ -3075,7 +3046,7 @@ describe('DELETE /projects/:id/github', () => {
       status: 'complete',
     });
 
-    const { namespace, cancelledIds } = recordingBuildManager();
+    const { namespace, cancelledIds } = recordingBuildManager({ recordFetchCancel: true });
     const res = await app.fetch(
       new Request(`http://localhost/projects/${project.id}/github`, {
         method: 'DELETE',

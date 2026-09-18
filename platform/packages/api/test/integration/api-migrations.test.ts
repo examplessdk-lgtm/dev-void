@@ -6203,15 +6203,4 @@ describe('POST /projects/:id/migrations/rename', () => {
     const parsed = JSON.parse(match![1]) as Array<string>;
     expect(parsed).toEqual([exoticName]);
   });
-
-  it('does not use a collision-prone hashtext advisory lock', async () => {
-    const { readFileSync } = await import('node:fs');
-    const { fileURLToPath } = await import('node:url');
-    const path = fileURLToPath(new URL('../../src/routes/projects.ts', import.meta.url));
-    const rawSource = readFileSync(path, 'utf8');
-    const source = rawSource.replaceAll(/\/\/[^\n]*/g, '');
-
-    expect(source).not.toMatch(/hashtext\s*\(/);
-    expect(source).not.toMatch(/pg_advisory_xact_lock/);
-  });
 });

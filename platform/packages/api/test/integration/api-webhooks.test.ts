@@ -41,6 +41,7 @@ import {
   createTestDeployment,
   createTestProject,
   createTestUser,
+  recordingBuildManager,
   setupEnv,
   teardownEnv,
   type TestEnv,
@@ -200,29 +201,6 @@ async function clearBuildTables(db: Db): Promise<void> {
   await db.delete(builds);
   await db.delete(githubConnections);
   await db.delete(githubInstallations);
-}
-
-// A BUILD_MANAGER stand-in that records which build ids (keyed by the DO name,
-// which the handler sets to the build id) received a `cancelBuild` RPC. The
-// webhook revocation handlers tear down orphaned containers via the trusted
-// `cancelBuild` RPC on BuildManager (best-effort), so here we only assert it was
-// ATTEMPTED for the right (active container) builds. A `fetch` shim is kept for
-// any agent-authenticated `POST /cancel` path so the mock degrades gracefully.
-function recordingBuildManager(): {
-  namespace: DurableObjectNamespace;
-  cancelledIds: ReadonlyArray<string>;
-} {
-  const cancelledIds: Array<string> = [];
-  const namespace = {
-    idFromName: (name: string) => ({ toString: () => name }) as unknown as DurableObjectId,
-    get: (id: DurableObjectId) => ({
-      cancelBuild: async (_reason?: string) => {
-        cancelledIds.push(id.toString());
-      },
-      fetch: async () => Response.json({ ok: true }),
-    }),
-  } as unknown as DurableObjectNamespace;
-  return { namespace, cancelledIds };
 }
 
 async function createGitHubConnection(

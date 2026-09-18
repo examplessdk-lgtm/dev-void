@@ -2,6 +2,7 @@ import { and, eq } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
 import type { Db } from './db.ts';
 import { projectMembers, projects, users } from './schema.ts';
+import { isAdminSuspended } from './suspension.ts';
 import type { Project, ProjectCapability, ProjectRole, User } from './types.ts';
 
 export type ProjectAccess = Readonly<{
@@ -65,9 +66,16 @@ export class ProjectNotFoundError extends Error {
 export class ProjectAccessDeniedError extends Error {
   readonly status = 403 as const;
 
-  constructor() {
-    super('forbidden');
+  constructor(message = 'forbidden') {
+    super(message);
     this.name = 'ProjectAccessDeniedError';
+  }
+}
+
+export class ProjectOwnerSuspendedError extends ProjectAccessDeniedError {
+  constructor() {
+    super('project owner suspended');
+    this.name = 'ProjectOwnerSuspendedError';
   }
 }
 
@@ -87,6 +95,9 @@ export async function requireProjectCapability(
   }
   if (!row.memberRole || !hasProjectCapability(row.memberRole, capability)) {
     throw new ProjectAccessDeniedError();
+  }
+  if (isAdminSuspended(row.owner.suspended_reason)) {
+    throw new ProjectOwnerSuspendedError();
   }
   return { project: row.project, role: row.memberRole, owner: row.owner };
 }

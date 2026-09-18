@@ -31,7 +31,13 @@ import type { Db } from '../../src/db.ts';
 import type { ApiEnv } from '../../src/env.ts';
 import type { GithubOidcClaims } from '../../src/github/oidc-verify.ts';
 import { oidcRoutes } from '../../src/routes/auth-oidc.ts';
-import { builds, githubConnections, githubInstallations, projects } from '../../src/schema.ts';
+import {
+  builds,
+  githubConnections,
+  githubInstallations,
+  projects,
+  users,
+} from '../../src/schema.ts';
 import {
   JWT_SECRET,
   clearTables,
@@ -624,6 +630,32 @@ describe('POST /auth/github-oidc', () => {
     expect(build.branch).toBe('main');
     expect(build.github_run_id).toBe('424242');
     expect(build.logs_url).toBe('https://github.com/octo/repo/actions/runs/424242');
+  });
+
+  it('returns 403 and creates no build when the project owner is manually suspended', async () => {
+    const user = await createTestUser(env.db, 'oidc-suspended-owner');
+    const project = await createTestProject(env.db, user.id, 'oidc-suspended');
+    await seedActiveInstallation(env.db, '1');
+    await createGitHubConnection(env.db, {
+      projectId: project.id,
+      installationId: '1',
+      repoFullName: 'octo/repo',
+      repositoryId: '42',
+      branch: 'main',
+      buildExecutor: 'github_actions',
+    });
+    await env.db
+      .update(users)
+      .set({ suspended_reason: 'platform policy violation' })
+      .where(eq(users.id, user.id));
+    const app = makeApp(env);
+    setVerifyResult(makeClaims());
+
+    const res = await exchange(app, env, { oidcToken: 'good', project: project.slug });
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: 'project owner suspended' });
+    expect(await getProjectBuilds(env.db, project.id)).toEqual([]);
+    expect(checkRunCreateCount).toBe(0);
   });
 
   // The github_actions executor has no BuildManager DO, so the OIDC exchange is

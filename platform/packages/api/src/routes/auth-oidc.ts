@@ -14,6 +14,7 @@ import {
   getRepoInstallation,
 } from '../github/installation-token.ts';
 import { verifyGithubOidcToken } from '../github/oidc-verify.ts';
+import { isAdminSuspended } from '../suspension.ts';
 import { getPlanLimits } from '../tiers.ts';
 
 const app = new Hono<ApiEnv>();
@@ -178,6 +179,9 @@ app.post('/github-oidc', async (context) => {
   if (!user) {
     return context.json({ error: 'connection owner not found' }, 401);
   }
+  if (isAdminSuspended(user.suspended_reason)) {
+    return context.json({ error: 'project owner suspended' }, 403);
+  }
 
   // Only branch pushes to the connected branch may mint a deploy token. This
   // mirrors the webhook push guard (`branch !== connection.branch`) and rejects
@@ -315,6 +319,9 @@ app.post('/github-oidc', async (context) => {
     // exchange; do not mint a deploy token for a deleting project. 409: a
     // concurrent lifecycle change, same class as the other concurrency rejects.
     return context.json({ error: 'project is being deleted' }, 409);
+  }
+  if (result.outcome === 'owner-suspended') {
+    return context.json({ error: 'project owner suspended' }, 403);
   }
   const build = result.build;
   // The build helper re-reads and locks the project, so `build.user_id` is the

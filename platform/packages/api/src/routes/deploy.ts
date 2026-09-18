@@ -87,7 +87,11 @@ import { generateId } from '../id.ts';
 import { checkCliVersionOrRespond } from '../middleware/cli-version.ts';
 import { getProjectQueueName } from '../naming.ts';
 import { createDeployLogger, type DeployLogger } from '../observability/logger.ts';
-import { ProjectAccessDeniedError, requireProjectCapability } from '../project-access.ts';
+import {
+  ProjectAccessDeniedError,
+  ProjectOwnerSuspendedError,
+  requireProjectCapability,
+} from '../project-access.ts';
 import { ensureProjectIngress } from '../project-ingress.ts';
 import {
   BETTER_AUTH_SECRET_NAME,
@@ -121,7 +125,6 @@ import {
   resolveRoutingUndo,
 } from '../routing.ts';
 import { builds, deployments } from '../schema.ts';
-import { isAdminSuspended } from '../suspension.ts';
 import { getPlanLimits, isWithinLimit, STATIC_RETENTION_LIMIT, type PlanId } from '../tiers.ts';
 import {
   SUPPORTED_MANIFEST_VERSIONS,
@@ -147,19 +150,8 @@ const cutoverReadyKey = (deploymentId: string): string => `cutover-ready:${deplo
 const cutoverCompensatedKey = (deploymentId: string): string =>
   `cutover-compensated:${deploymentId}`;
 
-class ProjectOwnerSuspendedError extends Error {
-  constructor() {
-    super('project owner suspended');
-    this.name = 'ProjectOwnerSuspendedError';
-  }
-}
-
 async function requireActiveDeployAccess(db: Db, projectId: string, actorUserId: string) {
-  const access = await requireProjectCapability(db, projectId, actorUserId, 'deploy');
-  if (isAdminSuspended(access.owner.suspended_reason)) {
-    throw new ProjectOwnerSuspendedError();
-  }
-  return access;
+  return requireProjectCapability(db, projectId, actorUserId, 'deploy');
 }
 
 export function databaseTimestampMs(value: string): number | null {
@@ -1850,9 +1842,6 @@ app.post('/:id/deploy/upload-urls', async (context) => {
   if (access instanceof Response) {
     return access;
   }
-  if (isAdminSuspended(access.owner.suspended_reason)) {
-    return context.json({ error: 'project owner suspended' }, 403);
-  }
   const project = access.project;
   // Fast 410 — mirror `handleManifestOnlyDeploy`. The unlocked read here
   // is a TOCTOU best-effort: it short-circuits the common case (project
@@ -2080,9 +2069,6 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
   const access = await requireProjectRouteCapability(context, projectId, 'deploy');
   if (access instanceof Response) {
     return access;
-  }
-  if (isAdminSuspended(access.owner.suspended_reason)) {
-    return context.json({ error: 'project owner suspended' }, 403);
   }
   let project = access.project;
   // Scoped deploy tokens (aud:'deploy') are pinned to a single project. Reject
@@ -5592,9 +5578,6 @@ app.post('/:id/deploy/preflight', async (context) => {
   if (access instanceof Response) {
     return access;
   }
-  if (isAdminSuspended(access.owner.suspended_reason)) {
-    return context.json({ error: 'project owner suspended' }, 403);
-  }
   const project = access.project;
   // Mirror /upload-urls and handleManifestOnlyDeploy: short-circuit when
   // the project is being torn down so callers get the more specific 410
@@ -5662,11 +5645,11 @@ app.post('/:id/deploy/preflight', async (context) => {
       try {
         await requireActiveDeployAccess(txDb, projectId, context.get('user').id);
       } catch (error) {
-        if (error instanceof ProjectAccessDeniedError) {
-          return { kind: 'forbidden' as const };
-        }
         if (error instanceof ProjectOwnerSuspendedError) {
           return { kind: 'owner-suspended' as const };
+        }
+        if (error instanceof ProjectAccessDeniedError) {
+          return { kind: 'forbidden' as const };
         }
         throw error;
       }

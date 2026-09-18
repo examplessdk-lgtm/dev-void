@@ -489,11 +489,13 @@ export async function getAccessibleProjectsByUserId(
     .where(or(eq(projects.user_id, userId), eq(projectMembers.user_id, userId)))
     .orderBy(desc(projects.created_at));
 
-  return rows.map((row) => ({
-    project: row.project,
-    role: row.project.user_id === userId ? 'owner' : row.memberRole!,
-    owner: row.owner,
-  }));
+  return rows
+    .filter((row) => !isAdminSuspended(row.owner.suspended_reason))
+    .map((row) => ({
+      project: row.project,
+      role: row.project.user_id === userId ? 'owner' : row.memberRole!,
+      owner: row.owner,
+    }));
 }
 
 // --- Project team membership and invitations ---
@@ -536,6 +538,7 @@ export type ProjectTeamMutationErrorReason =
   | 'invitation-not-target'
   | 'invitation-expired'
   | 'pending-invitation-limit'
+  | 'owner-suspended'
   | 'forbidden';
 
 export class ProjectTeamMutationError extends Error {
@@ -545,7 +548,7 @@ export class ProjectTeamMutationError extends Error {
     super(reason);
     this.name = 'ProjectTeamMutationError';
     this.status =
-      reason === 'invitation-not-target' || reason === 'forbidden'
+      reason === 'invitation-not-target' || reason === 'owner-suspended' || reason === 'forbidden'
         ? 403
         : reason.endsWith('not-found')
           ? 404
@@ -572,12 +575,25 @@ async function requireLockedMembersCapability(
   project: Project,
   actorUserId: string,
 ): Promise<void> {
+  await requireLockedProjectOwnerActive(db, project);
   if (project.user_id === actorUserId) {
     return;
   }
   const actorMember = await getProjectMember(db, project.id, actorUserId);
   if (actorMember?.role !== 'admin') {
     throw new ProjectTeamMutationError('forbidden');
+  }
+}
+
+async function requireLockedProjectOwnerActive(db: Db, project: Project): Promise<void> {
+  const [owner] = await db
+    .select({ suspendedReason: users.suspended_reason })
+    .from(users)
+    .where(eq(users.id, project.user_id))
+    .for('share')
+    .limit(1);
+  if (owner && isAdminSuspended(owner.suspendedReason)) {
+    throw new ProjectTeamMutationError('owner-suspended');
   }
 }
 
@@ -1027,6 +1043,7 @@ export async function respondToProjectInvitation(
 
     let member: ProjectMember | null = null;
     if (args.response === 'accept') {
+      await requireLockedProjectOwnerActive(txDb, project);
       [member] = await txDb
         .insert(projectMembers)
         .values({
@@ -3915,7 +3932,7 @@ export async function getQueuedBuilds(
 
 /**
  * For each user that owns at least one QUEUED container build, returns their
- * plan plus the count of their builds currently in `ACTIVE_BUILD_STATUSES`
+ * plan, suspension reason, and count of builds in `ACTIVE_BUILD_STATUSES`
  * (`starting`/`building`/`deploying`). The scheduler uses this to decide which
  * owners are AT their plan's concurrency cap (cap is plan-derived in
  * `getPlanLimits`, NOT a DB column) and pass those ids to `getQueuedBuilds` as
@@ -3927,13 +3944,19 @@ export async function getQueuedBuilds(
  * `claimBuildForStartWithinLimit`'s per-user count), so it must count toward the
  * cap.
  */
-export async function getUsersWithQueuedContainerBuilds(
-  db: Db,
-): Promise<ReadonlyArray<{ userId: string; plan: string; activeBuilds: number }>> {
+export async function getUsersWithQueuedContainerBuilds(db: Db): Promise<
+  ReadonlyArray<{
+    userId: string;
+    plan: string;
+    suspendedReason: string | null;
+    activeBuilds: number;
+  }>
+> {
   const rows = await db
     .select({
       userId: users.id,
       plan: users.plan,
+      suspendedReason: users.suspended_reason,
       // Correlated count of this user's in-flight builds (any executor). The
       // FILTER over a LEFT JOIN keeps users whose only builds are queued
       // (activeBuilds = 0) in the result.
@@ -3956,8 +3979,48 @@ export async function getUsersWithQueuedContainerBuilds(
   return rows.map((r) => ({
     userId: r.userId,
     plan: r.plan,
+    suspendedReason: r.suspendedReason,
     activeBuilds: Number(r.activeBuilds),
   }));
+}
+
+/** Cancel queued container work only for users who are still manually suspended. */
+export async function cancelQueuedContainerBuildsForUsers(
+  db: Db,
+  userIds: ReadonlyArray<string>,
+): Promise<number> {
+  if (userIds.length === 0) {
+    return 0;
+  }
+  const suspendedOwners = db
+    .select({ id: users.id })
+    .from(users)
+    .where(
+      and(
+        inArray(users.id, [...userIds]),
+        isNotNull(users.suspended_reason),
+        notInArray(users.suspended_reason, [
+          REASON_REQUESTS_EXCEEDED,
+          REASON_SANDBOX_RUNTIME_EXCEEDED,
+        ]),
+      ),
+    );
+  const cancelled = await db
+    .update(builds)
+    .set({
+      status: 'cancelled',
+      error: 'project owner suspended',
+      completed_at: sql`now()`,
+    })
+    .where(
+      and(
+        inArray(builds.user_id, suspendedOwners),
+        eq(builds.executor, 'container'),
+        eq(builds.status, 'queued'),
+      ),
+    )
+    .returning({ id: builds.id });
+  return cancelled.length;
 }
 
 /**
@@ -4179,7 +4242,12 @@ export async function supersedeAndCreateContainerBuild(
     status: Build['status'];
     instance_type: string | null;
   }>;
-  skipped?: 'config-changed' | 'install-revoked' | 'connection-replaced' | 'project-deleting';
+  skipped?:
+    | 'config-changed'
+    | 'install-revoked'
+    | 'connection-replaced'
+    | 'project-deleting'
+    | 'owner-suspended';
 }> {
   return db.transaction(async (tx) => {
     // Serialize all push processing for this project (project<->branch is 1:1 via
@@ -4201,6 +4269,15 @@ export async function supersedeAndCreateContainerBuild(
       .limit(1);
     if (!proj || proj.status === 'deleting') {
       return { build: null, reused: false, cancelled: [], skipped: 'project-deleting' };
+    }
+    const [ownerState] = await tx
+      .select({ suspendedReason: users.suspended_reason })
+      .from(users)
+      .where(eq(users.id, proj.user_id))
+      .for('update')
+      .limit(1);
+    if (ownerState && isAdminSuspended(ownerState.suspendedReason)) {
+      return { build: null, reused: false, cancelled: [], skipped: 'owner-suspended' };
     }
     const ownerChanged = proj.user_id !== args.userId;
     let instanceType = args.instanceType ?? null;
@@ -4631,6 +4708,7 @@ export async function createGithubActionsBuildWithinLimit(
   | { outcome: 'workflow-mismatch' }
   | { outcome: 'install-revoked' }
   | { outcome: 'project-deleting' }
+  | { outcome: 'owner-suspended' }
 > {
   return db.transaction(async (tx) => {
     // Lock the PROJECT row FIRST — before the users + github_connections locks
@@ -4657,7 +4735,15 @@ export async function createGithubActionsBuildWithinLimit(
     // Serialize per-user slot acquisition. Concurrent exchanges for the same
     // owner block here until the holder commits, so the count below always
     // observes prior inserts.
-    await tx.execute(sql`SELECT id FROM ${users} WHERE id = ${proj.user_id} FOR UPDATE`);
+    const [ownerState] = await tx
+      .select({ suspendedReason: users.suspended_reason })
+      .from(users)
+      .where(eq(users.id, proj.user_id))
+      .for('update')
+      .limit(1);
+    if (ownerState && isAdminSuspended(ownerState.suspendedReason)) {
+      return { outcome: 'owner-suspended' };
+    }
 
     let limit = args.limit;
     if (proj.user_id !== args.userId) {
@@ -4893,7 +4979,15 @@ export async function claimBuildForStartWithinLimit(
   return db.transaction(async (tx) => {
     // Serialize per-user slot acquisition against the OIDC path and other
     // scheduler scans for the same owner.
-    await tx.execute(sql`SELECT id FROM ${users} WHERE id = ${args.userId} FOR UPDATE`);
+    const [owner] = await tx
+      .select({ suspendedReason: users.suspended_reason })
+      .from(users)
+      .where(eq(users.id, args.userId))
+      .for('update')
+      .limit(1);
+    if (!owner || isAdminSuspended(owner.suspendedReason)) {
+      return false;
+    }
 
     if (args.limit > 0) {
       const [result] = await tx
