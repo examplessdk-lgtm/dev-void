@@ -401,7 +401,9 @@ const app = new Hono<ApiEnv>()
   })
   .get('/invite', (context) => {
     const name = escapeHtml(getPlatformDisplayName(context.env, context.req.url));
-    const invitationId = context.req.query('project-invitation')?.trim();
+    const invitationIdParam = context.req.query('project-invitation')?.trim();
+    const invitationId =
+      invitationIdParam && /^pinv_[0-9a-z]{12}$/.test(invitationIdParam) ? invitationIdParam : null;
     const command = escapeHtml(
       platformConnectCommand(getPlatformApiUrl(context.env, context.req.url)),
     );
