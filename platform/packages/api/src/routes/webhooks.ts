@@ -50,7 +50,6 @@ import {
 import { verifyGithubWebhookSignature } from '../github/webhook-verify.ts';
 import { githubConnections, githubInstallations } from '../schema.ts';
 import type { GitHubInstallationRepository } from '../schema.ts';
-import { getBuildInstanceType } from '../tiers.ts';
 import type { Build } from '../types.ts';
 
 const app = new Hono<ApiEnv>();
@@ -452,16 +451,13 @@ async function rerunBuildForCommit(
       sawActions = true;
       continue;
     }
-    const owner = await getUser(db, connection.user_id);
     const { build, reused, cancelled } = await supersedeAndCreateContainerBuild(db, {
       projectId: connection.project_id,
-      userId: connection.user_id,
       branch: connection.branch,
       commitSha: headSha,
       connectionId: connection.id,
       installationId: connection.installation_id,
       repositoryId: connection.repository_id,
-      instanceType: owner ? getBuildInstanceType(owner.plan) : null,
     });
     cancelledContainerBuilds.push(...cancelled);
     if (!build) {
@@ -802,20 +798,13 @@ export async function handleVerifiedGitHubWebhook(
         // enqueued to re-deploy it. The supersede also terminalizes older ACTIVE
         // builds (revoking their deploy token + freeing their slot); their DOs are
         // torn down after the tx commits, below.
-        // Resolve the owner's plan to fix the build's container size AT ENQUEUE so
-        // the row carries its own size-of-record. An orphaned connection (owner
-        // deleted) yields a null instance_type — START recomputes from plan there,
-        // and a null/unknown value routes to the safe base namespace either way.
-        const owner = await getUser(db, connection.user_id);
         const { build, cancelled } = await supersedeAndCreateContainerBuild(db, {
           projectId: connection.project_id,
-          userId: connection.user_id,
           branch,
           commitSha: after,
           connectionId: connection.id,
           installationId: connection.installation_id,
           repositoryId: connection.repository_id,
-          instanceType: owner ? getBuildInstanceType(owner.plan) : null,
         });
         cancelledContainerBuilds.push(...cancelled);
         // `build` is null on any skip: a concurrent PATCH /projects/:id/github

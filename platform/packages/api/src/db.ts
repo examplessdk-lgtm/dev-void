@@ -529,6 +529,7 @@ export async function getProjectMembers(
 
 export type ProjectTeamMutationErrorReason =
   | 'project-not-found'
+  | 'project-deleting'
   | 'target-user-not-found'
   | 'owner-conflict'
   | 'member-conflict'
@@ -565,6 +566,9 @@ async function lockProject(db: Db, projectId: string): Promise<Project> {
     .limit(1);
   if (!project) {
     throw new ProjectTeamMutationError('project-not-found');
+  }
+  if (project.status === 'deleting') {
+    throw new ProjectTeamMutationError('project-deleting');
   }
   return project;
 }
@@ -4221,18 +4225,14 @@ export async function supersedeAndCreateContainerBuild(
   db: Db,
   args: {
     projectId: string;
-    userId: string;
+    /** @deprecated Enqueue attribution is resolved from the locked project owner. */
+    userId?: string;
     branch: string;
     commitSha: string;
     connectionId: string;
     installationId: string;
     repositoryId: string | null;
-    /**
-     * Container size of record for this build, resolved from the owner's plan at
-     * enqueue (`getBuildInstanceType`). Persisted on the row so START routes to
-     * the matching DO namespace deterministically; omit/null leaves a legacy-null
-     * row that START recomputes from the plan.
-     */
+    /** @deprecated Enqueue sizing is resolved from the locked owner plan. */
     instanceType?: string | null;
   },
 ): Promise<{
@@ -4273,7 +4273,7 @@ export async function supersedeAndCreateContainerBuild(
       return { build: null, reused: false, cancelled: [], skipped: 'project-deleting' };
     }
     const [ownerState] = await tx
-      .select({ suspendedReason: users.suspended_reason })
+      .select({ plan: users.plan, suspendedReason: users.suspended_reason })
       .from(users)
       .where(eq(users.id, proj.user_id))
       .for('update')
@@ -4281,16 +4281,10 @@ export async function supersedeAndCreateContainerBuild(
     if (ownerState && isAdminSuspended(ownerState.suspendedReason)) {
       return { build: null, reused: false, cancelled: [], skipped: 'owner-suspended' };
     }
-    const ownerChanged = proj.user_id !== args.userId;
-    let instanceType = args.instanceType ?? null;
-    if (ownerChanged) {
-      const [owner] = await tx
-        .select({ plan: users.plan })
-        .from(users)
-        .where(eq(users.id, proj.user_id))
-        .limit(1);
-      instanceType = owner ? getBuildInstanceType(owner.plan) : null;
-    }
+    // Resolve the size of record from the same owner row whose lock serializes
+    // admission. A plan change that lands while webhook processing is doing its
+    // network checks must take effect before this enqueue commits.
+    const instanceType = ownerState ? getBuildInstanceType(ownerState.plan) : null;
 
     // Serialize against PATCH /projects/:id/github: lock + re-read the single
     // connection (project_id is UNIQUE). If a concurrent config change committed
@@ -4685,8 +4679,10 @@ export async function createGithubActionsBuildWithinLimit(
   db: Db,
   args: {
     projectId: string;
-    userId: string;
-    limit: number;
+    /** @deprecated Build attribution is resolved from the locked project owner. */
+    userId?: string;
+    /** @deprecated Admission limits are resolved from the locked owner plan. */
+    limit?: number;
     commitSha?: string | null;
     branch?: string | null;
     githubRunId: string;
@@ -4738,7 +4734,7 @@ export async function createGithubActionsBuildWithinLimit(
     // owner block here until the holder commits, so the count below always
     // observes prior inserts.
     const [ownerState] = await tx
-      .select({ suspendedReason: users.suspended_reason })
+      .select({ plan: users.plan, suspendedReason: users.suspended_reason })
       .from(users)
       .where(eq(users.id, proj.user_id))
       .for('update')
@@ -4746,16 +4742,7 @@ export async function createGithubActionsBuildWithinLimit(
     if (ownerState && isAdminSuspended(ownerState.suspendedReason)) {
       return { outcome: 'owner-suspended' };
     }
-
-    let limit = args.limit;
-    if (proj.user_id !== args.userId) {
-      const [owner] = await tx
-        .select({ plan: users.plan })
-        .from(users)
-        .where(eq(users.id, proj.user_id))
-        .limit(1);
-      limit = owner ? getPlanLimits(owner.plan).concurrentBuilds : 0;
-    }
+    const limit = ownerState ? getPlanLimits(ownerState.plan).concurrentBuilds : 0;
 
     // Serialize against DELETE /projects/:id/github: lock + re-read the connection
     // inside this tx. If a concurrent disconnect committed first, the row is gone
@@ -4939,7 +4926,8 @@ export async function createGithubActionsBuildWithinLimit(
  *
  * Steps inside one transaction, under the per-user lock:
  *   1. `SELECT … FOR UPDATE` the owner's users row (serializes with the OIDC
- *      path and other scheduler scans for the same owner).
+ *      path and other scheduler scans for the same owner), including the plan
+ *      used for admission.
  *   2. If `limit > 0` and the owner already has `>= limit` active builds, return
  *      false WITHOUT claiming. `limit === 0` means unlimited (no cap).
  *   3. If the build's project already has an active build, return false WITHOUT
@@ -4969,7 +4957,8 @@ export async function claimBuildForStartWithinLimit(
     buildId: string;
     userId: string;
     projectId: string;
-    limit: number;
+    /** @deprecated Admission limits are resolved from the locked owner plan. */
+    limit?: number;
     // The effective container size the scheduler will route this start on (the
     // persisted value, or a plan recompute for a legacy-null row). Persisted in
     // THIS claim tx — before the DO is addressed — so a cancel/reap in the
@@ -4983,7 +4972,7 @@ export async function claimBuildForStartWithinLimit(
     // Serialize per-user slot acquisition against the OIDC path and other
     // scheduler scans for the same owner.
     const [owner] = await tx
-      .select({ suspendedReason: users.suspended_reason })
+      .select({ plan: users.plan, suspendedReason: users.suspended_reason })
       .from(users)
       .where(eq(users.id, args.userId))
       .for('update')
@@ -4992,12 +4981,13 @@ export async function claimBuildForStartWithinLimit(
       return false;
     }
 
-    if (args.limit > 0) {
+    const limit = getPlanLimits(owner.plan).concurrentBuilds;
+    if (limit > 0) {
       const [result] = await tx
         .select({ count: count() })
         .from(builds)
         .where(and(eq(builds.user_id, args.userId), inArray(builds.status, ACTIVE_BUILD_STATUSES)));
-      if ((result?.count ?? 0) >= args.limit) {
+      if ((result?.count ?? 0) >= limit) {
         return false;
       }
     }

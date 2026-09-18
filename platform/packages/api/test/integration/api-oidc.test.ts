@@ -2532,8 +2532,14 @@ describe('claimBuildForStartWithinLimit', () => {
     expect(claimed).toBe(false);
   });
 
-  it('treats limit === 0 as unlimited', async () => {
-    const user = await createTestUser(env.db);
+  it('treats the locked custom owner plan as unlimited', async () => {
+    const user = await createTestUser(
+      env.db,
+      'claim-unlimited-user',
+      'github',
+      undefined,
+      'custom',
+    );
     // The active builds live on OTHER projects so they exercise the per-user
     // cap (here unlimited) without tripping the per-project active-build guard,
     // which serializes builds within a single project regardless of the cap.
@@ -2552,7 +2558,6 @@ describe('claimBuildForStartWithinLimit', () => {
       buildId: queued.id,
       userId: user.id,
       projectId: project.id,
-      limit: 0,
       instanceType: 'standard-4',
     });
     expect(claimed).toBe(true);

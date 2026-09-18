@@ -267,11 +267,8 @@ app.post('/github-oidc', async (context) => {
   // so the workflow_run completion handler can finalize the RIGHT attempt's
   // build. Null-tolerant: a token lacking the claim creates a NULL-attempt row.
   const githubRunAttempt = claims.run_attempt != null ? String(claims.run_attempt) : null;
-  const limit = getPlanLimits(user.plan).concurrentBuilds;
   const result = await createGithubActionsBuildWithinLimit(db, {
     projectId: connection.project_id,
-    userId: connection.user_id,
-    limit,
     commitSha: claims.sha,
     branch,
     githubRunId,

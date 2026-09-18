@@ -598,10 +598,14 @@ describe('builds', () => {
       commitSha: 'aaa',
       installationId: '12345',
       repositoryId: DEFAULT_REPO_ID,
+      // Simulate a plan snapshot resolved before the locked enqueue. The free
+      // owner row is authoritative, so this stale paid size must be ignored.
+      instanceType: 'standard-4',
     });
     expect(created.reused).toBe(false);
     expect(created.build!.status).toBe('queued');
     expect(created.build!.commit_sha).toBe('aaa');
+    expect(created.build!.instance_type).toBe('standard-3');
     expect(created.cancelled).toEqual([]);
 
     // Newer push for bbb -> the aaa build is superseded (cancelled) and a new
@@ -620,7 +624,12 @@ describe('builds', () => {
     // The returned `status` reflects the post-UPDATE row (RETURNING returns new
     // values), so the superseded build reports `cancelled`.
     expect(superseded.cancelled).toEqual([
-      { id: created.build!.id, executor: 'container', status: 'cancelled', instance_type: null },
+      {
+        id: created.build!.id,
+        executor: 'container',
+        status: 'cancelled',
+        instance_type: 'standard-3',
+      },
     ]);
     const cancelledAaa = await getBuild(env.db, created.build!.id);
     expect(cancelledAaa!.status).toBe('cancelled');
@@ -1693,6 +1702,33 @@ describe('builds', () => {
     expect((await getBuild(env.db, build.id))?.status).toBe('queued');
   });
 
+  it('claimBuildForStartWithinLimit uses the locked owner plan instead of a stale limit', async () => {
+    const user = await createTestUser(env.db, 'claim-current-plan');
+    const activeProject = await createTestProject(env.db, user.id);
+    const queuedProject = await createTestProject(env.db, user.id);
+    await createBuild(env.db, {
+      projectId: activeProject.id,
+      userId: user.id,
+      status: 'building',
+    });
+    const queued = await createBuild(env.db, {
+      projectId: queuedProject.id,
+      userId: user.id,
+    });
+
+    expect(
+      await claimBuildForStartWithinLimit(env.db, {
+        buildId: queued.id,
+        userId: user.id,
+        projectId: queuedProject.id,
+        // Simulate a stale pro-plan snapshot; the locked DB owner is free.
+        limit: 3,
+        instanceType: 'standard-3',
+      }),
+    ).toBe(false);
+    expect((await getBuild(env.db, queued.id))?.status).toBe('queued');
+  });
+
   it('requeueBuildIfStarting returns a starting row to queued (CAS)', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id);
@@ -2430,7 +2466,9 @@ describe('createGithubActionsBuildWithinLimit', () => {
       projectId: otherProject.id,
       connectionId: (await getGitHubConnection(env.db, otherProject.id))!.id,
       userId: user.id,
-      limit: 1,
+      // Simulate a stale pro-plan snapshot; the locked DB owner is free and
+      // already occupies its single slot.
+      limit: 3,
       branch: 'main',
       githubRunId: '4003',
       installationId: 'inst-cap-other',

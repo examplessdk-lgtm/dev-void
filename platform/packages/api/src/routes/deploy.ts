@@ -125,6 +125,7 @@ import {
   resolveRoutingUndo,
 } from '../routing.ts';
 import { builds, deployments } from '../schema.ts';
+import { REASON_REQUESTS_EXCEEDED } from '../suspension.ts';
 import { getPlanLimits, isWithinLimit, STATIC_RETENTION_LIMIT, type PlanId } from '../tiers.ts';
 import {
   SUPPORTED_MANIFEST_VERSIONS,
@@ -1812,8 +1813,8 @@ function validateUploadUrlsAsset(asset: unknown, index: number): string | null {
 /**
  * Issue presigned R2 PUT URLs for a batch of declared assets.
  *
- * Auth and ownership are handled the same way as `/deploy/preflight`:
- * project loaded, `user_id` checked, 403 on mismatch, 404 on missing.
+ * Project access is handled the same way as `/deploy/preflight`: the actor
+ * needs deploy capability and the current owner must be active.
  * Each asset's blake3 keys it under `assets/${projectId}/${blake3}`; MD5
  * is signed into the URL's headers so R2 enforces "uploaded bytes' MD5
  * matches declared MD5" at write time. URLs expire in 30 minutes.
@@ -3541,7 +3542,11 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
             deploymentId: deployment.id,
             assetConfig,
             manifest,
-            suspended: existingEntry?.suspended,
+            suspended:
+              existingEntry?.suspended ??
+              (owner.suspended_reason === REASON_REQUESTS_EXCEEDED
+                ? REASON_REQUESTS_EXCEEDED
+                : undefined),
           });
           currentStep = 'cutover_intent';
           const cutoverMarker: CutoverMarker = {
@@ -4738,7 +4743,11 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
           manifest,
           deploymentId: deployment.id,
           dispatchLimits,
-          suspended: existingEntry?.suspended,
+          suspended:
+            existingEntry?.suspended ??
+            (owner.suspended_reason === REASON_REQUESTS_EXCEEDED
+              ? REASON_REQUESTS_EXCEEDED
+              : undefined),
           hasCrons,
           assetManifestId: assetCount > 0 ? deployment.id : undefined,
           assetConfig: assetCount > 0 ? assetConfig : undefined,

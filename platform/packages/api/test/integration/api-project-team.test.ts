@@ -237,6 +237,45 @@ describe('project team API', () => {
     expect(await accepted.json()).toMatchObject({ member: { role: 'reader' } });
   });
 
+  it('rejects team mutations after project deletion begins', async () => {
+    const owner = await createTestUser(env.db, 'deleting-team-owner');
+    const invited = await createTestUser(env.db, 'deleting-team-invited');
+    const other = await createTestUser(env.db, 'deleting-team-other');
+    await setEmail(invited.id, 'deleting-team-invited@example.com');
+    await setEmail(other.id, 'deleting-team-other@example.com');
+    const project = await createTestProject(env.db, owner.id);
+    const invitation = await invite(
+      project.id,
+      owner.jwt,
+      'deleting-team-invited@example.com',
+      'reader',
+    );
+    await env.db.update(projects).set({ status: 'deleting' }).where(eq(projects.id, project.id));
+
+    const createResponse = await app.fetch(
+      request(`/projects/${project.id}/invitations`, owner.jwt, {
+        method: 'POST',
+        body: { email: 'deleting-team-other@example.com', role: 'admin' },
+      }),
+      env,
+    );
+    expect(createResponse.status).toBe(409);
+    expect(await createResponse.json()).toEqual({ error: 'project is being deleted' });
+
+    const acceptResponse = await app.fetch(
+      request(`/project-invitations/${invitation.id}/accept`, invited.jwt, { method: 'POST' }),
+      env,
+    );
+    expect(acceptResponse.status).toBe(409);
+    expect(await acceptResponse.json()).toEqual({ error: 'project is being deleted' });
+
+    expect(await env.db.select().from(projectMembers)).toEqual([]);
+    expect(await env.db.select().from(projectInvitations)).toMatchObject([
+      { id: invitation.id, status: 'pending' },
+    ]);
+    expect(await env.db.select().from(projectAccessEvents)).toMatchObject([{ action: 'invited' }]);
+  });
+
   it('rechecks owner suspension under the project lock before a team mutation', async () => {
     const owner = await createTestUser(env.db, 'team-race-owner');
     const admin = await createTestUser(env.db, 'team-race-admin');

@@ -418,6 +418,37 @@ describe('POST /projects/:id/deploy', () => {
     expect(routing.userId).toBe(owner.id);
   });
 
+  it("preserves the owner's request suspension on a collaborator's first deploy", async () => {
+    const owner = await createTestUser(env.db, 'suspended-team-owner');
+    const collaborator = await createTestUser(env.db, 'suspended-team-collaborator');
+    const project = await createTestProject(env.db, owner.id, 'suspended-team-deploy');
+    await env.db.insert(projectMembers).values({
+      project_id: project.id,
+      user_id: collaborator.id,
+      role: 'collaborator',
+      added_by_user_id: owner.id,
+    });
+    await env.db
+      .update(users)
+      .set({ suspended_reason: 'requests_exceeded' })
+      .where(eq(users.id, owner.id));
+    expect(await env.ROUTING.get(project.slug)).toBeNull();
+    mockCfApi();
+
+    const response = await app.fetch(
+      await buildDeployRequest(env, project.id, collaborator.jwt),
+      env,
+    );
+
+    expect(response.status).toBe(200);
+    requireEvent<DoneEvent>(await readAllEvents(response), 'done');
+    expect(await env.ROUTING.get(project.slug, 'json')).toMatchObject({
+      projectId: project.id,
+      userId: owner.id,
+      suspended: 'requests_exceeded',
+    });
+  });
+
   it("uses the owner's plan rather than a collaborator's plan", async () => {
     const owner = await createTestUser(env.db, 'limited-owner');
     const collaborator = await createTestUser(

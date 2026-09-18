@@ -557,7 +557,7 @@ void platform project owner <project-id> <user-id>
 
 Search matches a project's slug, ID, or owner's login. `show` includes resources, domains, the latest 10 deployments, and the latest 20 builds. `delete` removes the project and its resources.
 
-`owner` transfers a project to another registered user. Preview it with `--plan`; apply it interactively or with `--yes`. The preview reports active-work blockers and the account limits that will apply. The former owner becomes a project administrator, and usage already incurred remains with the former owner.
+`owner` transfers a project to another registered user. Preview it with `--plan`; apply it interactively or with `--yes`. The preview reports active-work blockers and the account plan that will apply. The former owner becomes a project administrator, and usage already incurred remains with the former owner.
 
 #### Deployments {#operator-deployments}
 

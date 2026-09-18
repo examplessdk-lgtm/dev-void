@@ -737,9 +737,9 @@ export async function changeOperatorUserPlan(
     throw new OperatorError(400, 'Invalid plan');
   }
   const newPlan = plan as PlanId;
-  const projects = await getProjectsByUserId(db, id);
   const target = { id, login: user.login };
   if (dryRun) {
+    const projects = await getProjectsByUserId(db, id);
     return preview('user.plan', target, {
       previousPlan: user.plan,
       plan,

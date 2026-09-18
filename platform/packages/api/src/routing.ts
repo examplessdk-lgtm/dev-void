@@ -1,5 +1,5 @@
 import { sql as drizzleSql } from 'drizzle-orm';
-import { getDomainsByProjectIds, getProject, getProjectsByUserId, getUser, type Db } from './db.ts';
+import { getDomainsByProjectIds, getProject, type Db } from './db.ts';
 import type { PlanLimits } from './tiers.ts';
 import type { AssetConfig, DeployManifest } from './types.ts';
 
@@ -27,43 +27,6 @@ export function sandboxBlockKey(userId: string): string {
 
 export function buildProjectAccountJson(entry: ProjectAccountEntry): string {
   return JSON.stringify({ userId: entry.userId, plan: entry.plan });
-}
-
-/**
- * Re-publish every `project:{projectId}` routing entry for `userId`. Invoked
- * after a plan-change so the proxy's sandbox gate sees the new concurrency
- * cap on the next acquire without waiting for the user to redeploy. Best-
- * effort: KV writes are idempotent and bounded by the user's project count,
- * but a failure here means stale plan data lives in KV until the next deploy
- * for that project — callers should log on failure.
- */
-export async function refreshProjectKvForUser(
-  db: Db,
-  routing: KVNamespace,
-  userId: string,
-): Promise<void> {
-  const user = await getUser(db, userId);
-  if (!user) {
-    return;
-  }
-  const projects = await getProjectsByUserId(db, userId);
-  if (projects.length === 0) {
-    return;
-  }
-  const payload = buildProjectAccountJson({ userId, plan: user.plan });
-  for (const project of projects) {
-    await db.transaction(async (tx) => {
-      await tx.execute(drizzleSql`SELECT id FROM projects WHERE id = ${project.id} FOR UPDATE`);
-      const current = await getProject(tx as unknown as Db, project.id);
-      // The owned-project list was read before this lock. An ownership transfer
-      // can commit in between; in that ordering its project-account entry is now
-      // authoritative and a stale plan refresh must not overwrite it.
-      if (current?.user_id !== userId) {
-        return;
-      }
-      await routing.put(projectAccountKey(project.id), payload);
-    });
-  }
 }
 
 /**

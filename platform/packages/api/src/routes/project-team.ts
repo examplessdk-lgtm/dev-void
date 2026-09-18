@@ -112,6 +112,7 @@ function mutationErrorResponse(context: Context<ApiEnv>, error: unknown): Respon
   }
   const messages: Record<ProjectTeamMutationError['reason'], string> = {
     'project-not-found': 'project not found',
+    'project-deleting': 'project is being deleted',
     'target-user-not-found': 'registered user not found',
     'owner-conflict': 'the project owner cannot be invited or changed as a member',
     'member-conflict': 'user is already a project member',

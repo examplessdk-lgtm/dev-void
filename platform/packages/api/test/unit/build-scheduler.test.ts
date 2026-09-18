@@ -78,7 +78,6 @@ const db = {
     buildId: string;
     userId: string;
     projectId: string;
-    limit: number;
     instanceType: string;
   }>,
 };
@@ -144,13 +143,23 @@ vi.mock('../../src/db.ts', () => ({
         buildId: string;
         userId: string;
         projectId: string;
-        limit: number;
         instanceType: string;
       },
     ) => {
       db.claimArgs.push(args);
       const active = db.activeByUser.get(args.userId) ?? 0;
-      if (args.limit > 0 && active >= args.limit) {
+      const plan = db.users.get(args.userId)?.plan ?? 'free';
+      const limit =
+        plan === 'custom'
+          ? 0
+          : plan === 'sponsored'
+            ? 6
+            : plan === 'pro'
+              ? 3
+              : plan === 'solo'
+                ? 2
+                : 1;
+      if (limit > 0 && active >= limit) {
         return false;
       }
       if (db.unclaimable.has(args.buildId)) {
@@ -461,10 +470,10 @@ describe('BuildScheduler.alarm', () => {
         .idFromName,
     ).toHaveBeenCalledWith('b1');
     // the cap + claim went through the single atomic primitive holding the
-    // per-user FOR UPDATE lock, with the plan's concurrency cap (free = 1).
+    // per-user FOR UPDATE lock; no stale plan-derived cap is passed in.
     expect(claimBuildForStartWithinLimit).toHaveBeenCalledOnce();
     expect(db.claimArgs).toEqual([
-      { buildId: 'b1', userId: 'u1', projectId: 'p1', limit: 1, instanceType: 'standard-3' },
+      { buildId: 'b1', userId: 'u1', projectId: 'p1', instanceType: 'standard-3' },
     ]);
   });
 
@@ -507,8 +516,8 @@ describe('BuildScheduler.alarm', () => {
 
     // Both builds went through the atomic primitive (FIFO scan preserved).
     expect(db.claimArgs).toEqual([
-      { buildId: 'b1', userId: 'u1', projectId: 'p1', limit: 3, instanceType: 'standard-4' },
-      { buildId: 'b2', userId: 'u1', projectId: 'p2', limit: 3, instanceType: 'standard-4' },
+      { buildId: 'b1', userId: 'u1', projectId: 'p1', instanceType: 'standard-4' },
+      { buildId: 'b2', userId: 'u1', projectId: 'p2', instanceType: 'standard-4' },
     ]);
     // Only the claimed build (b1) was started.
     expect(startBuild).toHaveBeenCalledOnce();
@@ -725,7 +734,7 @@ describe('BuildScheduler.alarm', () => {
     // Only the eligible owner's build was claimed + started; the capped owner's
     // build was never even inspected (no claim attempt for b1).
     expect(db.claimArgs).toEqual([
-      { buildId: 'b2', userId: 'u2', projectId: 'p2', limit: 1, instanceType: 'standard-3' },
+      { buildId: 'b2', userId: 'u2', projectId: 'p2', instanceType: 'standard-3' },
     ]);
     expect(startBuild).toHaveBeenCalledOnce();
     expect((startBuild.mock.calls[0][0] as { buildId: string }).buildId).toBe('b2');
@@ -869,7 +878,7 @@ describe('BuildScheduler.alarm', () => {
     expect((base.mock.calls[0][0] as { buildId: string }).buildId).toBe('b1');
     // Only b1 was claimed; b2 (same saturated fleet) was never claimed or started.
     expect(db.claimArgs).toEqual([
-      { buildId: 'b1', userId: 'uf', projectId: 'p1', limit: 1, instanceType: 'standard-3' },
+      { buildId: 'b1', userId: 'uf', projectId: 'p1', instanceType: 'standard-3' },
     ]);
     // Only b1 (the claimed row) was requeued; b2 stays queued; nothing dropped.
     expect(db.requeued).toEqual(['b1']);
