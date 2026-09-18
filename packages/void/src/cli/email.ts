@@ -537,7 +537,7 @@ const ADD_RECONCILE_INTERVAL_MS = 1000;
  * the credential — the api's replace path, not anything here.
  */
 export async function emailDomainAdd(
-  client: Pick<PlatformClient, 'addEmailDomain' | 'getEmailDomain'>,
+  client: Pick<PlatformClient, 'addEmailDomain' | 'getEmailDomain' | 'getEmailSettings'>,
   projectId: string,
   rawDomain: string,
   subdomain: string | undefined,
@@ -558,6 +558,25 @@ export async function emailDomainAdd(
     target = resolveEmailDomainTarget(domain, subdomain);
   } catch (err) {
     return fail(err instanceof Error ? err.message : String(err));
+  }
+
+  // On an administrator-managed platform owners hold no Cloudflare
+  // credential, so there is no grant to open a browser for: print the
+  // administrator's command and stop before any network or clipboard work.
+  const settings = await client.getEmailSettings(projectId);
+  if (settings.domains.management === 'admin') {
+    const project = settings.domains.projectSlug ?? projectId;
+    log.info(
+      [
+        'Email domains on this platform are managed by its administrator.',
+        'Ask them to run:',
+        '',
+        `  void platform email domain-add ${target.emailDomain} --project ${project}`,
+        '',
+        '`void email domain list` and `void email domain status` keep working here.',
+      ].join('\n'),
+    );
+    return exit(0);
   }
 
   // The MX decision. Forced (--subdomain) needs no default, only a warning
@@ -896,6 +915,17 @@ export async function emailDomainAdd(
   printEmailDomainOutcome(row);
 }
 
+/** An administrator's row runs on the platform's own credential; the owner never held one. */
+function emailCredentialLabel(row: Pick<EmailDomainResponse, 'credential_kind' | 'managed_by'>) {
+  const kind =
+    row.credential_kind === 'oauth_grant'
+      ? 'OAuth grant'
+      : row.credential_kind === 'platform'
+        ? 'platform credential'
+        : 'API token';
+  return row.managed_by === 'admin' ? `${kind} · managed by the administrator` : kind;
+}
+
 function emailDomainStatusText(status: EmailDomainResponse['status']): string {
   if (status === 'active') {
     return pc.green('active');
@@ -937,7 +967,7 @@ function printEmailDomainOutcome(row: EmailDomainResponse): void {
     `Domain:      ${row.domain}`,
     `Status:      ${emailDomainStatusText(row.status)}`,
     `Mode:        ${row.mode ?? '—'}`,
-    `Credential:  ${row.credential_kind === 'oauth_grant' ? 'OAuth grant' : 'API token'}`,
+    `Credential:  ${emailCredentialLabel(row)}`,
   ];
   if (row.relay_worker_name) {
     lines.push(
@@ -995,8 +1025,8 @@ export async function emailDomainStatus(
   ];
   const credential =
     row.credential_status === 'probe_failed'
-      ? `${row.credential_kind === 'oauth_grant' ? 'OAuth grant' : 'API token'} · probe failed (stored view shown)`
-      : `${row.credential_kind === 'oauth_grant' ? 'OAuth grant' : 'API token'} · ${row.credential_status}`;
+      ? `${emailCredentialLabel(row)} · probe failed (stored view shown)`
+      : `${emailCredentialLabel(row)} · ${row.credential_status}`;
   lines.push(`Credential:  ${credential}`);
   if (row.token_id) {
     lines.push(

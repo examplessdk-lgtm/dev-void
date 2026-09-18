@@ -7,11 +7,10 @@ updated: 2026-09-18
 
 # Cloudflare-native email design
 
-The [email guide](../../../docs/guide/email.md) describes the supported API
-and setup. This record holds the trust boundaries, lifecycle rules and
-accepted limitations behind it. Sections marked **planned** describe the
-target design for a self-hosted platform whose users hold no Cloudflare
-credential; they are not built yet.
+The [email guide](../../../docs/guide/email.md) and the
+[administration guide](../../../docs/guide/platform-administration.md#managing-email)
+describe the supported API and setup. This record holds the trust boundaries,
+lifecycle rules and accepted limitations behind them.
 
 ## Hosting modes
 
@@ -50,7 +49,7 @@ verified rows; an absent mirror fails closed. A verified platform row is not
 revoked by an out-of-band Cloudflare deletion; Cloudflare refuses the actual
 send until its destination is verified again.
 
-#### Recipient policy (planned)
+#### Recipient policy
 
 One installation-wide setting decides whether the per-project allowlist gates
 shared-sender recipients:
@@ -67,18 +66,20 @@ The policy does not fake delivery: Cloudflare's `send_email` binding still
 refuses an unverified destination unless the platform mail domain is onboarded
 for Email Sending (Workers Paid on the operator's account). Under `domains` or
 `any` that refusal still arrives as a per-recipient `UNVERIFIED_DESTINATION`;
-the admin UI, the CLI and the health check say so next to the policy.
+the admin UI and the operator preview say so next to the policy.
 
-Scope: shared-sender sends and the inbound forward/reply gate. Custom-domain
-sends are unchanged. Burst cap, monthly cap, the `email-suspended:` kill
-switch and the reply-sender pin do not move.
+Scope: shared-sender sends and the inbound forward/reply gate
+(`recipientAllowed` in the proxy's `email-policy.ts`, one gate for both).
+Custom-domain sends are unchanged. Burst cap, monthly cap, the
+`email-suspended:` kill switch and the reply-sender pin do not move.
 
-Storage: authoritative in PostgreSQL with the other installation settings,
-mirrored to routing KV as `email-recipient-policy` for the proxy's hot path
-(`cacheTtl: 60`, like the allowlist). An absent or unreadable mirror means
-`verified`. Surface: a platform-wide email section in the admin UI and
-`void platform email policy show | set <mode> [--domain example.com …]`,
-recorded in `operator_events`.
+Storage: authoritative in the `platform_settings` table (key/value jsonb —
+the installation's runtime-changeable settings), mirrored to routing KV as
+`email-recipient-policy` for the proxy's hot path (`cacheTtl: 60`, like the
+allowlist). An absent or unreadable mirror means `verified`; the writer
+publishes DB first, then KV, and every read surface repairs a drifted mirror.
+Surface: the admin UI's **Email** page and `void platform email policy` /
+`policy-set <mode> [--domains a,b]`, recorded in `operator_events`.
 
 #### Quotas and visibility
 
@@ -181,7 +182,7 @@ before enabling email; core installation does not do this automatically. Use
 [platform operations](../operations.md) for the operator workflow.
 
 Users of a self-hosted platform may hold no Cloudflare credential at all.
-[Administrator-managed domains](#administrator-managed-domains-planned) covers
+[Administrator-managed domains](#administrator-managed-domains) covers
 that case; the engine below is unchanged by it.
 
 ## Cross-worker dispatch
@@ -688,7 +689,7 @@ and every operation above with an **account-owned** token.
   `/projects/:id/email/…` methods; owner-guard routes in `routes/email.ts`;
   the admin section in `admin/routes/email.tsx`.
 
-## Administrator-managed domains (planned)
+## Administrator-managed domains
 
 ### The scenario
 
@@ -710,26 +711,28 @@ blocker there is the verified-destination gate, not the lack of a domain.
    every project:   <slug>+tag@mail.example.com, in and out, no per-project work
 
  Lane 2  per-project domain          the administrator runs the engine
-   admin per project:  void platform email domain add hr.example.com --project hr-portal
+   admin per project:  void platform email domain-add hr.example.com --project hr-portal
    gives:              hr@hr.example.com-style addresses, the zone's own DKIM
    costs:              one dashboard form per subdomain, 1 domain → 1 project
 ```
 
-Lane 1 is delivered first. Lane 2 reuses the custom-domain engine unchanged
-and adds an operator entry point.
+Lane 2 reuses the custom-domain engine unchanged and adds an operator entry
+point.
 
 ### Decisions
 
-| #   | Decision                                                                                                                                                                     | Reason                                                                                                                                                          |
-| --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | One domain → one project stays; a company uses one subdomain per project.                                                                                                    | Address→project routing would change the relay lane, the mirror key and the trust model.                                                                        |
-| 2   | Administrators manage domains through `void platform email domain …` and the admin UI, running the same `setupEmailDomain` / `syncEmailDomain` / `removeEmailDomain` engine. | One engine, two entry points. Owner-guard routes keep their behavior; operator routes act on any project.                                                       |
-| 3   | New credential kind **`platform`**: the row holds no credential and the engine uses the runtime token (`CF_API_TOKEN`). A pasted token stays available as the fallback.      | No per-domain token, nothing expires. Valid only when the zone is in the platform's own account (`CF_ACCOUNT_ID`); the zone lookup already returns the account. |
-| 4   | The relay worker is kept even when the zone is in the platform's account.                                                                                                    | Engine, probes, mirror and tests assume one; pointing the catch-all at the proxy directly is a second code path to save one hop.                                |
-| 5   | Installation setting `email.domains`: `self-serve` (default) or `admin`. In `admin` mode the user CLI prints the administrator's command instead of starting a grant.        | The CLI must know before it opens a browser. The printed command is the whole request flow.                                                                     |
-| 6   | A request inbox in the admin UI is not built.                                                                                                                                | A table, a page and a notification for what one printed line does.                                                                                              |
-| 7   | Rows carry `managed_by: 'owner' \| 'admin'`. Owners can list and read an admin row; `sync` and `remove` on it are refused with the administrator's command named.            | An admin row runs on the platform's credential; a user must not tear it down or rotate it.                                                                      |
-| 8   | No OAuth on the operator path.                                                                                                                                               | A grant is user-wide across the administrator's accounts, and the operator CLI is `--plan` / `--yes` first.                                                     |
+| #   | Decision                                                                                                                                                                      | Reason                                                                                                                                                          |
+| --- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | One domain → one project stays; a company uses one subdomain per project.                                                                                                     | Address→project routing would change the relay lane, the mirror key and the trust model.                                                                        |
+| 2   | Administrators manage domains through `void platform email domain-…` and the admin UI, running the same `setupEmailDomain` / `syncEmailDomain` / `removeEmailDomain` engine.  | One engine, two entry points. Owner-guard routes keep their behavior; operator routes act on any project.                                                       |
+| 3   | Credential kind **`platform`**: the row holds no credential and the engine uses the runtime token (`CF_API_TOKEN`). A pasted token stays available as the fallback.           | No per-domain token, nothing expires. Valid only when the zone is in the platform's own account (`CF_ACCOUNT_ID`); the zone lookup already returns the account. |
+| 4   | The relay worker is kept even when the zone is in the platform's account.                                                                                                     | Engine, probes, mirror and tests assume one; pointing the catch-all at the proxy directly is a second code path to save one hop.                                |
+| 5   | Installation setting `email.domains`: `self-serve` (default) or `admin`. In `admin` mode the user CLI prints the administrator's command instead of starting a grant.         | The CLI must know before it opens a browser. The printed command is the whole request flow.                                                                     |
+| 6   | A request inbox in the admin UI is not built.                                                                                                                                 | A table, a page and a notification for what one printed line does.                                                                                              |
+| 7   | Rows carry `managed_by: 'owner' \| 'admin'`. Owners can list and read an admin row; `sync`, `remove` and a re-`add` on it are refused with the administrator's command named. | An admin row runs on the platform's credential; a user must not tear it down, rotate it, or swap in their own grant.                                            |
+| 8   | No OAuth on the operator path.                                                                                                                                                | A grant is user-wide across the administrator's accounts, and the operator CLI is `--plan` / `--yes` first.                                                     |
+| 9   | Operator verbs are single tokens (`domain-add`, `policy-set`, …), and the administrator names the exact mail domain — no `--subdomain`.                                       | The operator table is `<group> <action>`; nested verbs would need parser and help-tree nesting for no functional gain. The engine's MX rule still applies.      |
+| 10  | The user CLI reads the mode from the authenticated `GET /projects/:id/email/settings`, not the discovery document.                                                            | Discovery is env-only and unauthenticated; the setting lives in the database. A platform predating the route answers 404, which reads as `self-serve`.          |
 
 ### Command surface
 
@@ -738,24 +741,29 @@ served under `/operator/v1/email/…`, with the group's `--plan`, `--yes` and
 `--json`, recorded in `operator_events`:
 
 ```
-void platform email domain list   [--project <slug|id>]
-void platform email domain add    <domain> --project <slug|id> [--subdomain <label|host>] [--token-stdin]
-void platform email domain status <domain>
-void platform email domain sync   <domain>
-void platform email domain remove <domain> [--force]
-void platform email settings      show | set --domains self-serve|admin
-void platform email policy        show | set <mode> [--domain example.com …]
-void platform email limit         <project> [--monthly N] [--burst N]
+void platform email domains        [--project <slug|id>]
+void platform email domain-add     <domain> --project <slug|id> [--token-stdin]
+void platform email domain-status  <domain>
+void platform email domain-sync    <domain>
+void platform email domain-remove  <domain> [--force]
+void platform email settings | settings-set --domains self-serve|admin
+void platform email policy   | policy-set <mode> [--domains a,b]
+void platform email limit    <project> [--monthly N] [--burst N]
 ```
 
-`add` without `--token-stdin` uses the `platform` credential. The admin UI's
-email page gains an add form, a domain list with the same actions and the
-platform-wide policy section; its `revoke` and `revoke-grant` actions stay.
+`domain-add` without `--token-stdin` uses the `platform` credential; with it
+the token is read from standard input once and rides both the preview (which
+only classifies it) and the apply, never the audit target. Every POST previews
+first: the add preview resolves the project, the existing row and the public
+MX decision without a single Cloudflare call. The admin UI's project page has
+the add form (blank token = platform credential) and shows `managed_by`; its
+`revoke` and `revoke-grant` actions stay.
 
 The owner verbs keep their paths and guard. Both surfaces call one service
-module that owns the serialized sections above (row insert under the project
-lock, engine run under the row lock, checkpoint, compensation); the
-orchestration moves out of `routes/email.ts` into it.
+module, `email/domain-service.ts`, that owns the serialized sections above
+(row insert under the project lock, engine run under the row lock,
+checkpoint, compensation); the orchestration moved out of `routes/email.ts`
+unchanged, and the operator layer re-shapes its JSON responses.
 
 ### The `platform` credential
 
@@ -767,65 +775,72 @@ orchestration moves out of `routes/email.ts` into it.
  platform      nothing                        env.CF_API_TOKEN               nothing
 ```
 
-- Schema: `credential_kind` gains `'platform'`; the `token_*` columns become
+- Schema: `credential_kind` includes `'platform'`; the `token_*` columns are
   nullable with a CHECK that they are null exactly when the kind is
-  `platform`; `managed_by` is added.
-- `leaseEmailDomainCredential` and the proxy's
-  `/internal/email/domain-credential` return the runtime token for a
-  `platform` row. It is never written to the row, a mirror, a manifest or a
-  log.
-- The engine refuses `platform` when the zone's account is not
-  `CF_ACCOUNT_ID`, naming `--token-stdin` for a zone in another account. On
-  the managed platform this is always the case, so the platform's own token
-  never touches a customer zone.
-- A failed credential probe on a `platform` row reads `failed` /
-  `verify_credential`, not `token_revoked` / `token_expired` — those describe
-  a stored credential's lifecycle. The health check names the missing runtime
-  token permission.
+  `platform`; `managed_by` defaults to `owner`.
+- `decryptEmailDomainToken` is the one seam: a `platform` row resolves to
+  `CF_API_TOKEN` there, so the engine, the lease route (which hands it to the
+  proxy as an `api_token` lease), teardown and the admin surface all follow.
+  It is never written to the row, a mirror, a manifest or a log.
+- The engine skips the user-token verify for a `platform` row (the runtime
+  token is not a user token) and refuses at `zone_lookup`, before any write,
+  when the zone's account is not `CF_ACCOUNT_ID`, naming `--token-stdin` for
+  a zone in another account. On the managed platform this is always the case,
+  so the platform's own token never touches a customer zone.
+- The status probe for a `platform` row is a zone-scoped read
+  (`GET /zones/{z}/email/routing`, or the zone lookup before a zone is known).
+  A refusal reads `probe_failed`, never `token_revoked` / `token_expired` —
+  those describe a stored credential's lifecycle. The probe's fenced update
+  compares `token_ciphertext IS NULL` for such rows; `= NULL` would never
+  match.
 - The runtime token needs, beyond the self-hosting guide's table: **Zone
   Read**, **Email Routing Rules Edit** and **Zone Settings Edit** on the mail
-  zones; **Email Sending Edit** on the account. The installer's token link and
-  the health check learn them; a missing one fails `add` at
-  `verify_credential` before anything is written to the zone.
+  zones; **Email Sending Edit** on the account. The installer's token link
+  preselects them when the runtime enables email; a missing one fails `add`
+  at the first Cloudflare step with Cloudflare's own message.
 
 ### Relay, limits and the human steps
 
 The relay is deployed into the platform's own account, so its name walk caps
 admin-managed domains at 50 per platform account, and Cloudflare caps Email
-Routing subdomains per zone; the administration guide states both. The two
-human steps are unchanged, now done by the administrator: the Email Routing
-**Subdomains** form (the status poll self-clears the row) and the Workers Paid
-upgrade for Email Sending, after which `sync` re-attempts the onboarding.
+Routing subdomains per zone. The two human steps are unchanged, now done by
+the administrator: the Email Routing **Subdomains** form (the status poll
+self-clears the row) and the Workers Paid upgrade for Email Sending, after
+which `domain-sync` re-attempts the onboarding.
 
 ### Ownership
 
-| Actor            | On an `owner` row                                   | On an `admin` row                                                                                |
-| ---------------- | --------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
-| project owner    | list · status · sync · remove · add                 | list · status; `sync` / `remove` → 403 naming the admin command; `add` only in `self-serve` mode |
-| administrator    | list · status · sync · remove · revoke              | list · status · sync · remove · revoke · add                                                     |
-| project teardown | removes relay + catch-all with the row's credential | same, with the runtime token                                                                     |
+| Actor            | On an `owner` row                                   | On an `admin` row                                                                                           |
+| ---------------- | --------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| project owner    | list · status · sync · remove · add                 | list · status; `sync` / `remove` / re-`add` → 403 naming the admin command; `add` only in `self-serve` mode |
+| administrator    | list · status · sync · remove · revoke              | list · status · sync · remove · revoke · add                                                                |
+| project teardown | removes relay + catch-all with the row's credential | same, with the runtime token                                                                                |
+
+An administrator never takes over an owner's row: `domain-add` on one answers
+409 and asks for the owner to remove it first.
 
 ### The mode switch
 
-`email.domains` lives with the other installation settings in PostgreSQL and
-is served to the CLI through the platform's discovery response, so `void email
-domain add` reads it before any Cloudflare call. In `admin` mode:
+`email.domains` lives in `platform_settings` and is served to the CLI on the
+authenticated `GET /projects/:id/email/settings` (with the project slug for
+the printed command), so `void email domain add` reads it before any DNS,
+browser or Cloudflare work. In `admin` mode:
 
 ```
 $ void email domain add example.com
   Email domains on this platform are managed by its administrator.
   Ask them to run:
 
-    void platform email domain add example.com --project hr-portal
+    void platform email domain-add example.com --project hr-portal
 
-  `void email domain list` and `status` keep working here.
+  `void email domain list` and `void email domain status` keep working here.
 ```
 
 Exit 0, nothing contacted, nothing stored. The mode is enforced server-side —
-the add route answers 403 with the same text — so the CLI check only spares
-the browser round trip. The default policy and mode leave the managed
-platform's behavior unchanged: no new probe, binding or account call for a
-platform that sets neither.
+the add route answers 403 with the same text and revokes a posted grant — so
+the CLI check only spares the browser round trip. The default policy and mode
+leave the managed platform's behavior unchanged: no new probe, binding or
+account call for a platform that sets neither.
 
 ## Out of scope
 

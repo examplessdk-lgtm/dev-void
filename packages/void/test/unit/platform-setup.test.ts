@@ -133,6 +133,29 @@ describe('platform credential setup links', () => {
     expect(permissions(custom)).toContainEqual({ key: 'ssl_and_certificates', type: 'edit' });
     expect(permissions(original)).not.toContainEqual({ key: 'ssl_and_certificates', type: 'edit' });
   });
+  it('requests the email zone and sending permissions only when email is enabled', () => {
+    const original = plan('example.com');
+    const withEmail = {
+      ...original,
+      deployment: {
+        ...original.deployment,
+        capabilities: { ...original.deployment.capabilities, email: true },
+      },
+    };
+    const permissions = (input: PlatformInstallPlan) =>
+      JSON.parse(
+        new URL(platformSetupPages(input).runtime.url).searchParams.get('permissionGroupKeys')!,
+      ) as Array<{ key: string; type: string }>;
+    const emailKeys = ['zone', 'zone_settings', 'email_routing_rule', 'email_sending'];
+    expect(permissions(withEmail).map((permission) => permission.key)).toEqual(
+      expect.arrayContaining(emailKeys),
+    );
+    expect(permissions(original).some((permission) => emailKeys.includes(permission.key))).toBe(
+      false,
+    );
+    expect(platformSetupPages(withEmail).runtime.instructions).toContain('Email Sending: Edit');
+    expect(platformSetupPages(original).runtime.instructions).not.toContain('Email Sending');
+  });
   it('shows the final callback in previews as well as interactive setup', () => {
     const preview = formatPlatformSetupPlan(plan());
     expect(preview).toContain('https://github.com/settings/applications/new');

@@ -134,6 +134,8 @@ Use the following permissions for the core platform. Cloudflare may label write 
 
 The management token also needs **Zone Edit** with authority to create zones if you ask Void to create the zone. If it already exists, use the selected zone with Zone Read and DNS Edit. Nested application domains additionally need **SSL and Certificates: Read** on the management token. A custom runtime that enables custom project domains needs **SSL and Certificates: Edit** on the runtime token; the core runtime does not enable that feature.
 
+A custom runtime that enables email lets administrators [register email domains for projects](./platform-administration.md#registering-email-domains-for-projects) on the runtime token. That needs **Zone: Read**, **Zone Settings: Edit** and **Email Routing Rules: Edit** on the zones that will carry mail, and **Email Sending: Edit** on the account; the token link preselects them when the runtime enables email. Email Sending onboarding itself needs Workers Paid on the account.
+
 Void checks access before provisioning. If it reports a missing permission, update the token's permissions for the selected account or zone and retry.
 
 :::

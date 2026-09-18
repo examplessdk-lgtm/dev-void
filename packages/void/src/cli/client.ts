@@ -254,6 +254,16 @@ export type EmailDestinationResponse = {
   verificationSent?: boolean;
 };
 
+/** GET /projects/:id/email/settings — installation settings the CLI reads before acting. */
+export type EmailSettingsResponse = {
+  domains: {
+    /** `admin`: administrators register email domains; `void email domain add` prints their command. */
+    management: 'self-serve' | 'admin';
+    projectSlug?: string;
+  };
+  recipientPolicy?: { mode: 'verified' | 'domains' | 'any'; domains: Array<string> };
+};
+
 /**
  * The public shape of an `email_domains` row (design doc 0078, contract 1) —
  * metadata only. The api's serializer never carries the credential, the
@@ -265,7 +275,10 @@ export type EmailDomainResponse = {
   domain: string;
   mode: 'apex' | 'subdomain' | null;
   status: 'pending' | 'active' | 'token_revoked' | 'token_expired' | 'failed';
-  credential_kind: 'oauth_grant' | 'api_token';
+  /** `platform` rows run on the platform's own credential — an administrator's row. */
+  credential_kind: 'oauth_grant' | 'api_token' | 'platform';
+  /** Who registered the row; owners may read an `admin` row but not sync or remove it. */
+  managed_by?: 'owner' | 'admin';
   relay_worker_name: string | null;
   relay_version: number | null;
   /** Metadata from GET /user/tokens/verify (api_token rows) — safe to print. */
@@ -1426,6 +1439,28 @@ export class PlatformClient {
 
     if (!res.ok) {
       await throwPlatformApiError('Failed to remove email destination', res);
+    }
+
+    return res.json();
+  }
+
+  /**
+   * Installation email settings the CLI reads before acting. A platform
+   * predating the route answers 404, which reads as the defaults — owners
+   * register their own domains there.
+   */
+  async getEmailSettings(projectId: string): Promise<EmailSettingsResponse> {
+    const res = await fetch(`${this.baseUrl}/projects/${projectId}/email/settings`, {
+      headers: {
+        ...this.authHeaders,
+      },
+    });
+
+    if (res.status === 404) {
+      return { domains: { management: 'self-serve' } };
+    }
+    if (!res.ok) {
+      await throwPlatformApiError('Failed to read email settings', res);
     }
 
     return res.json();

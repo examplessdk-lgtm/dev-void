@@ -36,6 +36,8 @@ vi.mock('@clack/prompts', async (importOriginal) => {
 const LEGACY_TOKEN = `Lgcy-${'a1'.repeat(17)}B`; // 40 chars, [A-Za-z0-9_-]
 const CFUT_TOKEN = `cfut_${'c0'.repeat(20)}${'deed'.repeat(2)}`; // 40-char core + checksum tail
 const GRANT_SENTINEL = 'grant-refresh-token-placeholder';
+/** The default platform: owners register their own domains. */
+const selfServeSettings = async () => ({ domains: { management: 'self-serve' as const } });
 
 type LogSpy = ReturnType<typeof vi.spyOn>;
 
@@ -235,7 +237,7 @@ describe('emailDomainAdd', () => {
     const deps = addDeps();
 
     await emailDomainAdd(
-      { addEmailDomain, getEmailDomain: vi.fn() },
+      { addEmailDomain, getEmailDomain: vi.fn(), getEmailSettings: selfServeSettings },
       'prj_1',
       'acme.com',
       undefined,
@@ -257,6 +259,41 @@ describe('emailDomainAdd', () => {
     expect(printed(infoSpy) + printed(successSpy) + notedBlocks()).not.toContain(GRANT_SENTINEL);
   });
 
+  it('prints the administrator command and stops on an admin-managed platform', async () => {
+    const addEmailDomain = vi.fn();
+    const runGrant = vi.fn();
+    const resolveMx = vi.fn(async () => []);
+    const exit = exitSpy();
+
+    await expect(
+      emailDomainAdd(
+        {
+          addEmailDomain,
+          getEmailDomain: vi.fn(),
+          getEmailSettings: async () => ({
+            domains: { management: 'admin' as const, projectSlug: 'hr-portal' },
+          }),
+        },
+        'prj_1',
+        'acme.com',
+        undefined,
+        addDeps({ runGrant, dns: { resolveMx }, exit }),
+      ),
+    ).rejects.toThrow('exit 0');
+
+    expect(printed(infoSpy)).toContain(
+      'Email domains on this platform are managed by its administrator.',
+    );
+    expect(printed(infoSpy)).toContain(
+      'void platform email domain-add acme.com --project hr-portal',
+    );
+    // Nothing else ran: no MX read, no browser, no POST — and a clean exit.
+    expect(resolveMx).not.toHaveBeenCalled();
+    expect(runGrant).not.toHaveBeenCalled();
+    expect(addEmailDomain).not.toHaveBeenCalled();
+    expect(exit).toHaveBeenCalledWith(0);
+  });
+
   it('proposes mail.<domain> when the apex carries MX, and says so', async () => {
     const addEmailDomain = vi.fn(async () =>
       domainRow({ domain: 'mail.acme.com', mode: 'subdomain' }),
@@ -266,7 +303,7 @@ describe('emailDomainAdd', () => {
     );
 
     await emailDomainAdd(
-      { addEmailDomain, getEmailDomain: vi.fn() },
+      { addEmailDomain, getEmailDomain: vi.fn(), getEmailSettings: selfServeSettings },
       'prj_1',
       'acme.com',
       undefined,
@@ -290,7 +327,7 @@ describe('emailDomainAdd', () => {
     );
 
     await emailDomainAdd(
-      { addEmailDomain, getEmailDomain: vi.fn() },
+      { addEmailDomain, getEmailDomain: vi.fn(), getEmailSettings: selfServeSettings },
       'prj_1',
       '  ACME.com. ',
       'mx',
@@ -310,7 +347,7 @@ describe('emailDomainAdd', () => {
 
     await expect(
       emailDomainAdd(
-        { addEmailDomain, getEmailDomain: vi.fn() },
+        { addEmailDomain, getEmailDomain: vi.fn(), getEmailSettings: selfServeSettings },
         'prj_1',
         'not a domain',
         undefined,
@@ -321,7 +358,7 @@ describe('emailDomainAdd', () => {
 
     await expect(
       emailDomainAdd(
-        { addEmailDomain, getEmailDomain: vi.fn() },
+        { addEmailDomain, getEmailDomain: vi.fn(), getEmailSettings: selfServeSettings },
         'prj_1',
         'acme.com',
         'other.com',
@@ -337,7 +374,7 @@ describe('emailDomainAdd', () => {
     const runGrant = vi.fn();
     await expect(
       emailDomainAdd(
-        { addEmailDomain: vi.fn(), getEmailDomain: vi.fn() },
+        { addEmailDomain: vi.fn(), getEmailDomain: vi.fn(), getEmailSettings: selfServeSettings },
         'prj_1',
         'acme.com',
         undefined,
@@ -361,7 +398,7 @@ describe('emailDomainAdd', () => {
     );
 
     await emailDomainAdd(
-      { addEmailDomain, getEmailDomain: vi.fn() },
+      { addEmailDomain, getEmailDomain: vi.fn(), getEmailSettings: selfServeSettings },
       'prj_1',
       'acme.com',
       undefined,
@@ -401,7 +438,7 @@ describe('emailDomainAdd', () => {
     const addEmailDomain = vi.fn(async () => domainRow({ credential_kind: 'api_token' }));
 
     await emailDomainAdd(
-      { addEmailDomain, getEmailDomain: vi.fn() },
+      { addEmailDomain, getEmailDomain: vi.fn(), getEmailSettings: selfServeSettings },
       'prj_1',
       'acme.com',
       undefined,
@@ -434,7 +471,7 @@ describe('emailDomainAdd', () => {
     const pendingGrant = vi.fn(() => new Promise<never>(() => {}));
 
     await emailDomainAdd(
-      { addEmailDomain, getEmailDomain: vi.fn() },
+      { addEmailDomain, getEmailDomain: vi.fn(), getEmailSettings: selfServeSettings },
       'prj_1',
       'acme.com',
       undefined,
@@ -458,7 +495,11 @@ describe('emailDomainAdd', () => {
     // Esc at the paste prompt: nothing is POSTed, nothing is stored.
     const addEmailDomain2 = vi.fn();
     await emailDomainAdd(
-      { addEmailDomain: addEmailDomain2, getEmailDomain: vi.fn() },
+      {
+        addEmailDomain: addEmailDomain2,
+        getEmailDomain: vi.fn(),
+        getEmailSettings: selfServeSettings,
+      },
       'prj_1',
       'acme.com',
       undefined,
@@ -485,7 +526,7 @@ describe('emailDomainAdd', () => {
     });
 
     const run = emailDomainAdd(
-      { addEmailDomain, getEmailDomain: vi.fn() },
+      { addEmailDomain, getEmailDomain: vi.fn(), getEmailSettings: selfServeSettings },
       'prj_1',
       'acme.com',
       undefined,
@@ -538,7 +579,7 @@ describe('emailDomainAdd', () => {
 
     await expect(
       emailDomainAdd(
-        { addEmailDomain, getEmailDomain: vi.fn() },
+        { addEmailDomain, getEmailDomain: vi.fn(), getEmailSettings: selfServeSettings },
         'prj_1',
         'acme.com',
         undefined,
@@ -561,7 +602,7 @@ describe('emailDomainAdd', () => {
     const addEmailDomain = vi.fn();
     await expect(
       emailDomainAdd(
-        { addEmailDomain, getEmailDomain: vi.fn() },
+        { addEmailDomain, getEmailDomain: vi.fn(), getEmailSettings: selfServeSettings },
         'prj_1',
         'acme.com',
         undefined,
@@ -589,7 +630,7 @@ describe('emailDomainAdd', () => {
     );
 
     await emailDomainAdd(
-      { addEmailDomain, getEmailDomain: vi.fn() },
+      { addEmailDomain, getEmailDomain: vi.fn(), getEmailSettings: selfServeSettings },
       'prj_1',
       'acme.com',
       undefined,
@@ -612,7 +653,7 @@ describe('emailDomainAdd', () => {
     );
 
     await emailDomainAdd(
-      { addEmailDomain, getEmailDomain: vi.fn() },
+      { addEmailDomain, getEmailDomain: vi.fn(), getEmailSettings: selfServeSettings },
       'prj_1',
       'acme.com',
       undefined,
@@ -633,7 +674,7 @@ describe('emailDomainAdd', () => {
     );
 
     await emailDomainAdd(
-      { addEmailDomain, getEmailDomain: vi.fn() },
+      { addEmailDomain, getEmailDomain: vi.fn(), getEmailSettings: selfServeSettings },
       'prj_1',
       'acme.com',
       undefined,
@@ -659,7 +700,13 @@ describe('emailDomainAdd', () => {
     vi.stubGlobal('fetch', fetchSpy);
 
     await expect(
-      emailDomainAdd({ addEmailDomain, getEmailDomain }, 'prj_1', 'acme.com', undefined, addDeps()),
+      emailDomainAdd(
+        { addEmailDomain, getEmailDomain, getEmailSettings: selfServeSettings },
+        'prj_1',
+        'acme.com',
+        undefined,
+        addDeps(),
+      ),
     ).rejects.toThrow(PlatformApiError);
     // No reconciliation, no CLI-side revoke: the API's rejection owns both.
     expect(getEmailDomain).not.toHaveBeenCalled();
@@ -678,7 +725,7 @@ describe('emailDomainAdd', () => {
     vi.stubGlobal('fetch', fetchSpy);
 
     await emailDomainAdd(
-      { addEmailDomain, getEmailDomain },
+      { addEmailDomain, getEmailDomain, getEmailSettings: selfServeSettings },
       'prj_1',
       'acme.com',
       undefined,
@@ -709,7 +756,13 @@ describe('emailDomainAdd', () => {
     vi.stubGlobal('fetch', fetchSpy);
 
     await expect(
-      emailDomainAdd({ addEmailDomain, getEmailDomain }, 'prj_1', 'acme.com', undefined, addDeps()),
+      emailDomainAdd(
+        { addEmailDomain, getEmailDomain, getEmailSettings: selfServeSettings },
+        'prj_1',
+        'acme.com',
+        undefined,
+        addDeps(),
+      ),
     ).rejects.toThrow('exit 1');
 
     // The 500 did not prove a server-side revoke, so the CLI kills the grant
@@ -746,7 +799,13 @@ describe('emailDomainAdd', () => {
     vi.stubGlobal('fetch', fetchSpy);
 
     await expect(
-      emailDomainAdd({ addEmailDomain, getEmailDomain }, 'prj_1', 'acme.com', undefined, addDeps()),
+      emailDomainAdd(
+        { addEmailDomain, getEmailDomain, getEmailSettings: selfServeSettings },
+        'prj_1',
+        'acme.com',
+        undefined,
+        addDeps(),
+      ),
     ).rejects.toThrow('exit 1');
 
     expect(getEmailDomain).toHaveBeenCalledTimes(15);
@@ -775,7 +834,13 @@ describe('emailDomainAdd', () => {
     vi.stubGlobal('fetch', fetchSpy);
 
     await expect(
-      emailDomainAdd({ addEmailDomain, getEmailDomain }, 'prj_1', 'acme.com', undefined, addDeps()),
+      emailDomainAdd(
+        { addEmailDomain, getEmailDomain, getEmailSettings: selfServeSettings },
+        'prj_1',
+        'acme.com',
+        undefined,
+        addDeps(),
+      ),
     ).rejects.toThrow('exit 1');
 
     // No poll produced a read — the grant may be live, and a blind revoke
@@ -807,7 +872,13 @@ describe('emailDomainAdd', () => {
     vi.stubGlobal('fetch', fetchSpy);
 
     await expect(
-      emailDomainAdd({ addEmailDomain, getEmailDomain }, 'prj_1', 'acme.com', undefined, addDeps()),
+      emailDomainAdd(
+        { addEmailDomain, getEmailDomain, getEmailSettings: selfServeSettings },
+        'prj_1',
+        'acme.com',
+        undefined,
+        addDeps(),
+      ),
     ).rejects.toThrow('exit 1');
 
     expect(fetchSpy).toHaveBeenCalledTimes(1);
@@ -826,7 +897,7 @@ describe('emailDomainAdd', () => {
     vi.stubGlobal('fetch', fetchSpy);
 
     await emailDomainAdd(
-      { addEmailDomain, getEmailDomain },
+      { addEmailDomain, getEmailDomain, getEmailSettings: selfServeSettings },
       'prj_1',
       'acme.com',
       undefined,
@@ -862,7 +933,7 @@ describe('emailDomainAdd', () => {
     vi.stubGlobal('fetch', fetchSpy);
 
     await emailDomainAdd(
-      { addEmailDomain, getEmailDomain },
+      { addEmailDomain, getEmailDomain, getEmailSettings: selfServeSettings },
       'prj_1',
       'acme.com',
       undefined,
@@ -891,7 +962,7 @@ describe('emailDomainAdd', () => {
     vi.stubGlobal('fetch', fetchSpy);
 
     await emailDomainAdd(
-      { addEmailDomain, getEmailDomain },
+      { addEmailDomain, getEmailDomain, getEmailSettings: selfServeSettings },
       'prj_1',
       'acme.com',
       undefined,
@@ -921,7 +992,13 @@ describe('emailDomainAdd', () => {
     vi.stubGlobal('fetch', fetchSpy);
 
     await expect(
-      emailDomainAdd({ addEmailDomain, getEmailDomain }, 'prj_1', 'acme.com', undefined, addDeps()),
+      emailDomainAdd(
+        { addEmailDomain, getEmailDomain, getEmailSettings: selfServeSettings },
+        'prj_1',
+        'acme.com',
+        undefined,
+        addDeps(),
+      ),
     ).rejects.toThrow('exit 1');
 
     expect(getEmailDomain).toHaveBeenCalledTimes(15);
@@ -950,7 +1027,13 @@ describe('emailDomainAdd', () => {
     vi.stubGlobal('fetch', fetchSpy);
 
     await expect(
-      emailDomainAdd({ addEmailDomain, getEmailDomain }, 'prj_1', 'acme.com', undefined, addDeps()),
+      emailDomainAdd(
+        { addEmailDomain, getEmailDomain, getEmailSettings: selfServeSettings },
+        'prj_1',
+        'acme.com',
+        undefined,
+        addDeps(),
+      ),
     ).rejects.toThrow('exit 1');
 
     // The key is present (new api) but null — not this attempt, so the
@@ -978,7 +1061,13 @@ describe('emailDomainAdd', () => {
     vi.stubGlobal('fetch', fetchSpy);
 
     await expect(
-      emailDomainAdd({ addEmailDomain, getEmailDomain }, 'prj_1', 'acme.com', undefined, addDeps()),
+      emailDomainAdd(
+        { addEmailDomain, getEmailDomain, getEmailSettings: selfServeSettings },
+        'prj_1',
+        'acme.com',
+        undefined,
+        addDeps(),
+      ),
     ).rejects.toThrow('exit 1');
 
     // 404 at every one of the 15 polls — provably nothing persisted.
@@ -1008,7 +1097,13 @@ describe('emailDomainAdd', () => {
     vi.stubGlobal('fetch', fetchSpy);
 
     await expect(
-      emailDomainAdd({ addEmailDomain, getEmailDomain }, 'prj_1', 'acme.com', undefined, addDeps()),
+      emailDomainAdd(
+        { addEmailDomain, getEmailDomain, getEmailSettings: selfServeSettings },
+        'prj_1',
+        'acme.com',
+        undefined,
+        addDeps(),
+      ),
     ).rejects.toThrow('exit 1');
 
     // No poll produced any read: a blind revoke could brick a committed

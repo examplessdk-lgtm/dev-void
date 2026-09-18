@@ -121,6 +121,57 @@ before changing application traffic or deleting resources. If cleanup fails,
 access stays revoked and the error describes the partial result. A remaining
 administrator can inspect it and retry cleanup.
 
+## Managing Email
+
+These commands apply to a platform that enables email. Every project can send from and receive at `<slug>+tag@<mail domain>` on the platform's shared mail domain; the [email guide](./email.md) describes what applications do with that.
+
+### Deciding who mail may reach
+
+By default, mail from the shared sender reaches only the recipients each project has verified. For a team whose applications mainly mail colleagues, widen that once for the whole installation:
+
+```sh
+void platform email policy
+void platform email policy-set domains --domains example.com,corp.example.net
+void platform email policy-set any
+void platform email policy-set verified
+```
+
+`domains` lets every project mail any address on the listed domains in addition to its verified recipients; `any` lifts the check. Cloudflare still refuses a recipient it has not verified until your mail domain is onboarded for Email Sending, which needs Workers Paid on the platform's account. Until then such sends come back as `UNVERIFIED_DESTINATION` for that recipient, whatever the policy says. Sends from a project's own custom domain are not affected by the policy. The same setting is on the admin UI's **Email** page.
+
+### Project caps
+
+Each project may send 200 messages a month and 10 a minute by default. Raise or lower a project's caps by id or slug:
+
+```sh
+void platform email limit hr-portal --monthly 2000 --burst 30
+```
+
+The project's page in the admin UI shows the current values and clears an override.
+
+### Registering email domains for projects
+
+Your users may hold no Cloudflare account. Tell the platform that administrators register email domains, so `void email domain add` prints the command to ask you for instead of opening a Cloudflare consent:
+
+```sh
+void platform email settings-set --domains admin
+```
+
+Then register a domain for a project. The zone must be in the platform's Cloudflare account; the platform's own credential does the setup, and nothing is stored per domain:
+
+```sh
+void platform email domain-add mail.example.com --project hr-portal
+void platform email domain-status mail.example.com
+void platform email domains
+```
+
+Name the exact mail domain: a subdomain such as `mail.example.com` when the apex already receives mail, otherwise the apex itself. Enabling Email Routing on a subdomain is a one-time step in the Cloudflare dashboard; `domain-status` names it and reports the domain active once the MX records appear. Email Sending onboarding needs Workers Paid; after upgrading, `domain-sync` re-attempts it. For a zone in another Cloudflare account, pipe an API token for that account on standard input:
+
+```sh
+void platform email domain-add mail.other.example --project hr-portal --token-stdin --yes < token.txt
+```
+
+Project owners see administrator-registered domains in `void email domain list` and `status`; `sync` and `remove` point them at `void platform email domain-sync` and `domain-remove`. The runtime token needs the email permissions listed in the [self-hosting guide](./self-hosted-platform.md#runtime-token-permissions) for this to work.
+
 ## Previewing Changes
 
 Commands that change the platform show the affected objects before asking for confirmation. To inspect a change without applying it, add `--plan`:
