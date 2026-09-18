@@ -1613,6 +1613,28 @@ describe('POST /email/send — recipient policy', () => {
       'email-recipient-policy': typeof policy === 'string' ? policy : JSON.stringify(policy),
     });
 
+  it('still delivers to an allowlisted recipient when the policy read rejects', async () => {
+    const kv = policyKv({ mode: 'any', domains: [] });
+    kv.get.mockImplementation(async (key: string) => {
+      if (key === 'email-recipient-policy') {
+        throw new Error('policy KV unavailable');
+      }
+      return kv.store.get(key) ?? null;
+    });
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const sender = createSender();
+    const res = await postSend(
+      createMockEnv(kv, { SEND_EMAIL: sender.binding }),
+      await sendBody({ recipients: ['dev@example.com'] }),
+    );
+    expect((await readSend(res)).ok).toBe(true);
+    expect(sender.recipients()).toEqual(['dev@example.com']);
+    expect(error).toHaveBeenCalledWith(
+      '[email-policy] recipient policy read failed; enforcing verified:',
+      expect.any(Error),
+    );
+  });
+
   it('under `domains`, reaches a same-domain recipient the allowlist lacks and refuses others', async () => {
     const kv = policyKv({ mode: 'domains', domains: ['acme.test'] });
     const sender = createSender();

@@ -1794,6 +1794,22 @@ describe('routeInbound — per-project gating on forward/reply (HIGH H1)', () =>
     expect(forwardCalls.map((call) => call.to)).toEqual(['anyone@corp.test']);
   });
 
+  it('still enacts an allowlisted forward when the recipient-policy read rejects', async () => {
+    const { env } = makeEnv({
+      kvSeed: withAllowlist(['admin@example.com']),
+      kvGetFailures: ['email-recipient-policy'],
+      emailReturn: [{ type: 'forward', to: 'admin@example.com' }],
+    });
+    const { message, forwardCalls } = createFakeMessage({ to: `myslug@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(forwardCalls.map((call) => call.to)).toEqual(['admin@example.com']);
+    expect(errorSpy).toHaveBeenCalledWith(
+      '[email-policy] recipient policy read failed; enforcing verified:',
+      expect.any(Error),
+    );
+  });
+
   it('under `any`, still drops a reply that claims another project as sender', async () => {
     const { env } = makeEnv({
       kvSeed: withAllowlist([], {

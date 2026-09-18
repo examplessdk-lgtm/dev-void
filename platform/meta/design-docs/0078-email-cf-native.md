@@ -86,17 +86,17 @@ the installation's runtime-changeable settings), mirrored to routing KV as
 allowlist). An absent or unreadable mirror means `verified` — `any` included
 when its shape is not the api's. A publish is ONE KV write — Workers KV
 refuses a second write to a key within a second, so the mirror is never
-cleared and re-put — ordered so the mirror is never looser than the
-database in any partial outcome of a mode change or a list grown or shrunk:
-a tightening puts the mirror before the database commits (a refused put
-leaves the saved policy unchanged; a failed commit leaves the proxy stricter
-until the next read republishes), a widening commits first and puts after
-(a failed put leaves the old, stricter policy in force and the operator told
-so, until a retry or the next read republishes). The one exception is a
-`domains` list edited both ways in a single publish: it goes as a
-tightening, so a failed commit can leave the ADDED domain reachable until
-the next read republishes the database's list — the removed ones are
-closed at once. Publisher and
+cleared and re-put — ordered so the mirror never authorizes a recipient the
+database has not committed: a tightening (a lower mode, or a list that only
+shrinks) puts the mirror before the database commits — a refused put leaves
+the saved policy unchanged, a failed commit leaves the proxy stricter until
+the next read republishes; a widening (a higher mode, or a list that gains
+any domain, even one that also drops others) commits first and puts after —
+a failed put leaves the previous policy in force, the operator told so,
+until a retry or the next read republishes. The one residual is that
+previous policy: for a list edited both ways, its removed domains stay
+reachable until the republish, exactly as they were a moment earlier.
+Publisher and
 repair serialize on a transaction-scoped advisory lock because KV has no
 compare-and-set, and every read surface (operator, owner settings, admin
 page) repairs a drifted mirror. Surface: the admin UI's **Email** page and

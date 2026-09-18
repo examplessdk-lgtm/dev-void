@@ -103,10 +103,9 @@ export function normalizeEmailRecipientPolicy(input: unknown): EmailRecipientPol
 }
 
 /**
- * True when `next` lets through everything `prev` did and more: a higher
- * mode, or the same `domains` list grown. Anything else — a lower mode, a
- * shrunk list, a list edited both ways, or no change — publishes as a
- * tightening.
+ * True when `next` lets through anything `prev` did not: a higher mode, or
+ * a `domains` list that gains a domain — even one that also drops others.
+ * Only a lower mode or a pure shrink is a tightening.
  */
 export function widensEmailRecipientPolicy(
   prev: EmailRecipientPolicy,
@@ -118,8 +117,8 @@ export function widensEmailRecipientPolicy(
   if (next.mode !== 'domains') {
     return false;
   }
-  const grown = new Set(next.domains);
-  return next.domains.length > prev.domains.length && prev.domains.every((d) => grown.has(d));
+  const before = new Set(prev.domains);
+  return next.domains.some((domain) => !before.has(domain));
 }
 
 function readStoredPolicy(value: unknown): EmailRecipientPolicy | null {
@@ -177,9 +176,10 @@ function withRecipientPolicyLock<T>(db: Db, fn: (tx: Tx) => Promise<T>): Promise
  *   widening    commit, then put. A failed put leaves the proxy on the old,
  *               stricter policy — the operator is told — until a retry or
  *               the next read republishes.
- * A `domains` list edited both ways publishes as a tightening: the added
- * domain is the one exposure a failed commit can leave, and the next read
- * closes it. Publisher and repair share the advisory lock.
+ * The mirror therefore never authorizes a domain the database has not
+ * committed; a list edited both ways goes as a widening, so its one residual
+ * is the removed domains staying reachable — the policy in force a moment
+ * earlier — until the republish. Publisher and repair share the advisory lock.
  */
 export async function setEmailRecipientPolicy(
   db: Db,

@@ -101,7 +101,19 @@ describe('widensEmailRecipientPolicy', () => {
       'edited domains list',
       { mode: 'domains', domains: ['a.example', 'b.example'] },
       { mode: 'domains', domains: ['b.example', 'c.example'] },
+      true,
+    ],
+    [
+      'pure shrink retaining a different entry',
+      { mode: 'domains', domains: ['a.example', 'b.example'] },
+      { mode: 'domains', domains: ['b.example'] },
       false,
+    ],
+    [
+      'replaced domains list',
+      { mode: 'domains', domains: ['a.example'] },
+      { mode: 'domains', domains: ['b.example'] },
+      true,
     ],
     [
       'unchanged domains list',

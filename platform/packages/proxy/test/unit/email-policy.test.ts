@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vite-plus/test';
+import { describe, expect, it, vi } from 'vite-plus/test';
 import {
   RECIPIENT_POLICY_KEY,
   VERIFIED_ONLY,
@@ -88,6 +88,21 @@ describe('readRecipientPolicy', () => {
       kvWith({ [RECIPIENT_POLICY_KEY]: JSON.stringify({ mode: 'any', domains: [] }) }),
     );
     expect(policy.mode).toBe('any');
+  });
+
+  it('falls back to verified-only when the KV read rejects', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const kv = {
+      get: async () => {
+        throw new Error('kv unavailable');
+      },
+    } as unknown as KVNamespace;
+    await expect(readRecipientPolicy(kv)).resolves.toBe(VERIFIED_ONLY);
+    expect(error).toHaveBeenCalledWith(
+      '[email-policy] recipient policy read failed; enforcing verified:',
+      expect.any(Error),
+    );
+    error.mockRestore();
   });
 
   it.each([

@@ -207,7 +207,7 @@ describe('operator email recipient policy', () => {
     expect(del).not.toHaveBeenCalled();
   });
 
-  test('a list edited both ways publishes as a tightening', async () => {
+  test('a list edited both ways publishes as a widening', async () => {
     await req('/email/policy', { mode: 'domains', domains: 'a.example,b.example' });
     const put = vi.spyOn(env.ROUTING, 'put').mockRejectedValueOnce(new Error('kv down'));
     const response = await req('/email/policy', {
@@ -217,12 +217,16 @@ describe('operator email recipient policy', () => {
     expect(response.status).toBe(503);
     expect(await setting(EMAIL_RECIPIENT_POLICY_SETTING)).toEqual({
       mode: 'domains',
-      domains: ['a.example', 'b.example'],
+      domains: ['b.example', 'c.example'],
     });
     expect(await env.ROUTING.get(EMAIL_RECIPIENT_POLICY_MIRROR_KEY)).toBe(
       JSON.stringify({ mode: 'domains', domains: ['a.example', 'b.example'] }),
     );
     put.mockRestore();
+    await req('/email/policy');
+    expect(await env.ROUTING.get(EMAIL_RECIPIENT_POLICY_MIRROR_KEY)).toBe(
+      JSON.stringify({ mode: 'domains', domains: ['b.example', 'c.example'] }),
+    );
   });
 
   test('a grown list is a widening', async () => {

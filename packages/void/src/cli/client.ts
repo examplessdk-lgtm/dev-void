@@ -1670,7 +1670,7 @@ export class PlatformClient {
    * mint a grant for nothing.
    */
   async getEmailSettings(projectId: string): Promise<EmailSettingsResponse> {
-    const res = await fetch(`${this.baseUrl}/projects/${projectId}/email/settings`, {
+    const res = await this.request(`${this.baseUrl}/projects/${projectId}/email/settings`, {
       headers: {
         ...this.authHeaders,
       },

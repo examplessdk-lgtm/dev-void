@@ -33,10 +33,17 @@ export const VERIFIED_ONLY: RecipientPolicy = Object.freeze({
 /**
  * Reads `email-recipient-policy`. `cacheTtl` bounds per-colo convergence at
  * ~60s, like the allowlist. Anything that is not `{ mode, domains[] }` with
- * a known mode reads as `verified`.
+ * a known mode reads as `verified`. An unreadable mirror — a rejected read
+ * included — is `verified`.
  */
 export async function readRecipientPolicy(kv: KVNamespace): Promise<RecipientPolicy> {
-  const raw = await kv.get(RECIPIENT_POLICY_KEY, { cacheTtl: 60 });
+  let raw: string | null;
+  try {
+    raw = await kv.get(RECIPIENT_POLICY_KEY, { cacheTtl: 60 });
+  } catch (err) {
+    console.error('[email-policy] recipient policy read failed; enforcing verified:', err);
+    return VERIFIED_ONLY;
+  }
   if (!raw) {
     return VERIFIED_ONLY;
   }
