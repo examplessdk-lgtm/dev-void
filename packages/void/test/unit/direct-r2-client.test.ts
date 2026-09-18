@@ -396,7 +396,7 @@ describe('PlatformClient.finalizeDeploy', () => {
     );
   });
 
-  it('suppresses when the recent deployment carries the same commit as the payload', async () => {
+  it('suppresses when an in-flight deployment carries the same commit as the payload', async () => {
     const existing = makeDeployment({ id: 'dpl_same', commit: 'sha_ours' });
     fetchMock.mockImplementation((url: string) => {
       if (String(url).includes('/deployments')) {
@@ -419,43 +419,29 @@ describe('PlatformClient.finalizeDeploy', () => {
     });
   });
 
-  it('retries when the recent deployment carries a different commit than the payload', async () => {
-    vi.useFakeTimers();
-    // A racing deploy's row — not ours, so the POST must still be replayed.
+  it('suppresses when an unrelated deployment is already in flight', async () => {
+    // Commit does not disambiguate: any in-flight row makes the replay
+    // hit the server's 409 guard, so suppressing is the same outcome.
     const unrelated = makeDeployment({ id: 'dpl_theirs', commit: 'sha_theirs' });
-    let posts = 0;
     fetchMock.mockImplementation((url: string) => {
       if (String(url).includes('/deployments')) {
         return Promise.resolve(deploymentListResponse([unrelated]));
       }
-      posts++;
-      if (posts === 1) {
-        return Promise.reject(new TypeError('fetch failed'));
-      }
-      return Promise.resolve(
-        ndjsonStreamResponse([
-          { event: 'done', deployment: 'd1', url: 'https://x', urls: [], assets: 0, workers: 0 },
-        ]),
-      );
+      return Promise.reject(new TypeError('fetch failed'));
     });
 
     const client = makeClient();
     const payload = { ...makePayload(), commit: 'sha_ours' };
-    try {
-      const events: Array<unknown> = [];
-      const consume = (async () => {
-        for await (const event of client.finalizeDeploy(projectId, payload)) {
-          events.push(event);
-        }
-      })();
-      await vi.runAllTimersAsync();
-      await consume;
-
-      expect(deployPostCalls()).toHaveLength(2);
-      expect(events[0]).toMatchObject({ event: 'done' });
-    } finally {
-      vi.useRealTimers();
+    const events: Array<unknown> = [];
+    for await (const event of client.finalizeDeploy(projectId, payload)) {
+      events.push(event);
     }
+
+    expect(deployPostCalls()).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      event: 'error',
+      message: expect.stringContaining('dpl_theirs'),
+    });
   });
 
   it('suppresses when an in-flight placeholder row has no commit yet', async () => {
@@ -493,6 +479,47 @@ describe('PlatformClient.finalizeDeploy', () => {
     fetchMock.mockImplementation((url: string) => {
       if (String(url).includes('/deployments')) {
         return Promise.resolve(deploymentListResponse([unrelated]));
+      }
+      posts++;
+      if (posts === 1) {
+        return Promise.reject(new TypeError('fetch failed'));
+      }
+      return Promise.resolve(
+        ndjsonStreamResponse([
+          { event: 'done', deployment: 'd1', url: 'https://x', urls: [], assets: 0, workers: 0 },
+        ]),
+      );
+    });
+
+    const client = makeClient();
+    const payload = { ...makePayload(), commit: 'sha_ours' };
+    try {
+      const events: Array<unknown> = [];
+      const consume = (async () => {
+        for await (const event of client.finalizeDeploy(projectId, payload)) {
+          events.push(event);
+        }
+      })();
+      await vi.runAllTimersAsync();
+      await consume;
+
+      expect(deployPostCalls()).toHaveLength(2);
+      expect(events[0]).toMatchObject({ event: 'done' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('retries when a same-commit deployment is already live', async () => {
+    vi.useFakeTimers();
+    // Same-SHA redeploys are common (dirty tree, config-only): a live row
+    // may be an earlier SUCCESSFUL deploy of ours or an unrelated one —
+    // either way replaying submits the deploy the user asked for.
+    const prior = makeDeployment({ id: 'dpl_prior', commit: 'sha_ours', status: 'live' });
+    let posts = 0;
+    fetchMock.mockImplementation((url: string) => {
+      if (String(url).includes('/deployments')) {
+        return Promise.resolve(deploymentListResponse([prior]));
       }
       posts++;
       if (posts === 1) {

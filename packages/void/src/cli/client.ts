@@ -337,13 +337,16 @@ export type ManifestOnlyDeployPayload = DeployUploadPayload;
  *   verbatim rather than replay a request it may have accepted.
  * - A rejected fetch does NOT prove the request never arrived — the
  *   connection may have dropped after delivery. Before each retry we look
- *   for a deployment created inside DEPLOY_POST_DEDUPE_WINDOW_MS that
- *   could be our earlier attempt: same git commit as this payload, or a
- *   still-in-flight commit-less placeholder row (the server writes the
- *   commit only after R2 inventory). A correlated row means the earlier
- *   attempt reached the platform, so the retry is suppressed instead of
- *   bouncing off the server's concurrency guard (409) or registering a
- *   duplicate deployment.
+ *   for an IN-FLIGHT deployment row created inside
+ *   DEPLOY_POST_DEDUPE_WINDOW_MS. Any such row — ours or a concurrent
+ *   deploy's — makes the replay hit the server's concurrency guard
+ *   (409), so suppressing is equivalent to retrying and yields a better
+ *   error. Terminal rows (`live`/`failed`/`canceled`) never suppress:
+ *   attributing them to our attempt needs a server-persisted request id
+ *   we don't have, and misattribution would drop a deploy the user
+ *   asked for. A completed attempt of ours instead gets replayed as an
+ *   identical re-deploy — rare (a deploy finishing within seconds) and
+ *   the benign side of the ambiguity.
  */
 const DEPLOY_POST_MAX_RETRIES = 3;
 const DEPLOY_POST_BACKOFF_MS = [1000, 5000, 10000];
@@ -579,7 +582,7 @@ export class PlatformClient {
     payload: ManifestOnlyDeployPayload,
   ): AsyncGenerator<DeployEvent> {
     const url = `${this.baseUrl}/projects/${projectId}/deploy`;
-    yield* this.streamDeployRequest(url, projectId, payload.commit ?? null, {
+    yield* this.streamDeployRequest(url, projectId, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -596,7 +599,6 @@ export class PlatformClient {
   private async *streamDeployRequest(
     url: string,
     projectId: string,
-    dedupeCommit: string | null,
     init: RequestInit,
   ): AsyncGenerator<DeployEvent> {
     const cliLog = this.cliLog;
@@ -616,11 +618,7 @@ export class PlatformClient {
           cliLog?.error('deploy_fetch_rejected', err, { url, attempts: attempt + 1 });
           throw err;
         }
-        const existing = await this.findRecentDeployment(
-          projectId,
-          DEPLOY_POST_DEDUPE_WINDOW_MS,
-          dedupeCommit,
-        );
+        const existing = await this.findInFlightDeployment(projectId, DEPLOY_POST_DEDUPE_WINDOW_MS);
         if (existing) {
           cliLog?.warn('deploy_retry_suppressed', {
             url,
@@ -631,8 +629,9 @@ export class PlatformClient {
             event: 'error',
             step: 'finalize',
             message:
-              `an earlier attempt of this deploy may have created deployment ${existing.id} ` +
-              `(status: ${existing.status}) — not retrying to avoid a duplicate deploy; ` +
+              `deployment ${existing.id} is already in progress (status: ${existing.status}) — ` +
+              'it may be an earlier attempt of this deploy or a concurrent one; ' +
+              'not retrying to avoid a duplicate deploy; ' +
               'inspect with `void project status` before redeploying',
           };
           return;
@@ -719,50 +718,39 @@ export class PlatformClient {
   }
 
   /**
-   * Best-effort lookup for a deployment created within `windowMs` that
-   * could be OUR earlier attempt — the deploy retry path uses it to
-   * detect that the lost POST reached the platform before the connection
-   * dropped. A candidate must be recent and either:
+   * Best-effort lookup for a deployment created within `windowMs` whose
+   * status is non-terminal. The deploy retry path uses it to decide
+   * whether replaying the lost POST could conflict: the server's
+   * `getActiveDeployment` guard treats any non-terminal row
+   * (`live`/`failed`/`canceled` are the terminal set) as an active
+   * deploy and answers 409, so whenever such a row exists the replay is
+   * guaranteed redundant — suppressing is equivalent to retrying and
+   * produces the clearer error.
    *
-   * - carry `expectedCommit` (`null === null` counts — ownership cannot
-   *   be disproved without metadata on either side), or
-   * - be a still-in-flight `commit: null` row while we sent a commit:
-   *   `createDeployment` inserts the row as a concurrency claim with
-   *   NULL metadata and `updateDeploymentManifest` fills it only after
-   *   R2 inventory, so our own attempt reads `commit: null` for its
-   *   first seconds. Suppressing here is safe — an unrelated in-flight
-   *   deploy would reject the replay with 409 anyway.
-   *
-   * A `failed`/`canceled` row is a dead attempt and never suppresses:
-   * replaying is exactly what we want. Returns `undefined` on any
-   * failure or ambiguity: the retried POST then still runs, with the
-   * server's own concurrency guard (409) as the backstop.
+   * Ownership of the row is deliberately NOT inferred (commit equality
+   * is non-unique: same-SHA redeploys, commit-less manual deploys): a
+   * terminal row never suppresses, so a deploy the user asked for is
+   * always submitted. Returns `undefined` on any failure: the retried
+   * POST then still runs, with the server's guard as the backstop.
    */
-  private async findRecentDeployment(
+  private async findInFlightDeployment(
     projectId: string,
     windowMs: number,
-    expectedCommit: string | null,
   ): Promise<DeploymentResponse | undefined> {
     try {
       const { deployments } = await this.listDeployments(projectId);
-      const newest = deployments[0];
-      if (!newest) {
-        return undefined;
-      }
-      const createdMs = Date.parse(newest.created_at);
-      if (Number.isNaN(createdMs) || Date.now() - createdMs > windowMs) {
-        return undefined;
-      }
-      if (newest.status === 'failed' || newest.status === 'canceled') {
-        return undefined;
-      }
-      if (newest.commit === expectedCommit) {
-        return newest;
-      }
-      if (expectedCommit !== null && newest.commit === null && newest.status !== 'live') {
-        return newest;
-      }
-      return undefined;
+      const now = Date.now();
+      return deployments.find((deployment) => {
+        if (
+          deployment.status === 'live' ||
+          deployment.status === 'failed' ||
+          deployment.status === 'canceled'
+        ) {
+          return false;
+        }
+        const createdMs = Date.parse(deployment.created_at);
+        return Number.isFinite(createdMs) && now - createdMs <= windowMs;
+      });
     } catch {
       return undefined;
     }
