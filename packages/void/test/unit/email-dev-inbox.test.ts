@@ -246,15 +246,11 @@ async function serializedSizeOf(
 }
 
 describe('dev inbox capture cap (sized for the serialized capture)', () => {
-  // 3.31M x \x01. Quoted-printable renders each as `=01` plus a soft break
-  // every 25, so the MIME is 10.3 MB — under MAX_MESSAGE_BYTES, so production
-  // sends it — while the capture renders each as `\u0001` (19.9 MB) next to
-  // the base64 of that MIME (13.8 MB): 33.6 MB, over the 32 MiB the cap used
-  // to be. The dev server answered 413 and `sendEmail` reported the legal
-  // message as UPSTREAM_ERROR. The smallest such body is 3,303,000 characters;
-  // the margin keeps the test off the edge of the old cap.
-  it('captures a legal message whose serialized capture exceeds 32 MiB', async () => {
-    const text = '\x01'.repeat(3_310_000);
+  // Quoted-printable expands each control byte to `=01` plus soft breaks.
+  // The capture also carries JSON-escaped text and base64 MIME, so even a
+  // message below the 5 MiB sending limit exceeds three times that budget.
+  it('captures a legal message whose serialized capture exceeds three MIME budgets', async () => {
+    const text = '\x01'.repeat(Math.floor(MAX_MESSAGE_BYTES / 3.15));
     const server = createFakeViteServer();
     const assets = fakeAssetsBinding(server);
     const result = await withRuntimeEnv(devEnv(assets), () =>
@@ -266,8 +262,8 @@ describe('dev inbox capture cap (sized for the serialized capture)', () => {
     expect(message.raw.byteLength).toBeLessThanOrEqual(MAX_MESSAGE_BYTES);
     expect(message.text).toBe(text);
     // What crossed the wire: the same JSON the worker POSTed (ASCII, so its
-    // length is its byte size), and it is over the former cap.
-    expect(serializeCapturedMessage(message).length).toBeGreaterThan(32 * 1024 * 1024);
+    // length is its byte size), including both expanded representations.
+    expect(serializeCapturedMessage(message).length).toBeGreaterThan(3 * MAX_MESSAGE_BYTES);
   });
 
   // The bound behind the constant: base64 raw (4/3) plus every caller string
@@ -293,7 +289,10 @@ describe('dev inbox capture cap (sized for the serialized capture)', () => {
       // encoded-word header: base64 plus framing (1.6) in the MIME, 6 in JSON — 3.75x
       ['control subject', { ...base, subject: control, text: 't' }],
       ['control display name', { ...base, to: [{ email: 'b@y.dev', name: control }], text: 't' }],
-      ['control custom header value', { ...base, headers: { 'X-Note': control }, text: 't' }],
+      [
+        'control custom header value',
+        { ...base, headers: { 'X-Note': control.slice(0, 8_192) }, text: 't' },
+      ],
     ];
     const shapes: Array<[string, Parameters<typeof normalizeEmail>[0]]> = [
       // body: `=01` (3) in the MIME, `\u0001` (6) in JSON — 2x
@@ -309,7 +308,7 @@ describe('dev inbox capture cap (sized for the serialized capture)', () => {
           ...base,
           text: 't',
           headers: Object.fromEntries(
-            Array.from({ length: 50 }, (_, i) => [`${'"'.repeat(900)}${i}`, 'v']),
+            Array.from({ length: 12 }, (_, i) => [`${'"'.repeat(900)}${i}`, 'v']),
           ),
         },
       ],

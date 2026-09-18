@@ -19,9 +19,11 @@
 
 import { CloudflareApiError } from '../provisioning/cloudflare-api.ts';
 import {
-  RELAY_EMAIL_DOMAIN_BINDING,
-  RELAY_PROXY_ORIGIN_BINDING,
+  RELAY_ACCOUNT_BINDING,
+  RELAY_GATEWAY_ORIGIN_BINDING,
+  RELAY_INGRESS_BINDING,
   RELAY_SECRET_BINDING,
+  RELAY_ZONE_BINDING,
 } from './relay-worker.ts';
 
 export const CF_CUSTOMER_API_BASE = 'https://api.cloudflare.com/client/v4';
@@ -83,10 +85,13 @@ export type RelayScriptUpload = Readonly<{
   /** Module-syntax worker source (RELAY_SOURCE). */
   source: string;
   compatibilityDate: string;
-  /** Declared as the VOID_PROXY_ORIGIN plain-text var. */
-  proxyOrigin: string;
-  /** Declared as the VOID_EMAIL_DOMAIN plain-text var. */
-  emailDomain: string;
+  gatewayOrigin?: string;
+  accountId?: string;
+  zoneId?: string;
+  ingressName?: string;
+  /** Pre-release call sites still pass these while migration is in progress. */
+  proxyOrigin?: string;
+  emailDomain?: string;
 }>;
 
 export type SendRawMessage = Readonly<{
@@ -103,6 +108,11 @@ export type CfCatchAllRule = Readonly<{
   enabled: boolean;
   /** The worker name a 'worker' action points at; null for any other action shape. */
   workerName: string | null;
+}>;
+export type CfEmailRoutingRule = Readonly<{
+  enabled: boolean;
+  name: string | null;
+  addresses: ReadonlyArray<string>;
 }>;
 
 /** One entry of the sending-subdomain list; name + enabled are required on the wire. */
@@ -145,6 +155,10 @@ export type CfCustomerClient = Readonly<{
   ) => Promise<void>;
   /** PUT .../secrets — the non-namespace variant of putWorkerSecret (project-secrets.ts). */
   putRelaySecret: (accountId: string, scriptName: string, secret: string) => Promise<void>;
+  /** Public probe routing for the deployed ingress Worker. */
+  getWorkersSubdomain: (accountId: string) => Promise<string>;
+  getScriptSubdomainEnabled: (accountId: string, scriptName: string) => Promise<boolean>;
+  enableScriptSubdomain: (accountId: string, scriptName: string) => Promise<void>;
   /** PUT catch-all pointing the zone at the relay. `value` is a one-entry array, one action only. */
   setCatchAll: (zoneId: string, relayWorkerName: string) => Promise<void>;
   /**
@@ -154,6 +168,8 @@ export type CfCustomerClient = Readonly<{
    * write what they own. 404 → null.
    */
   getCatchAll: (zoneId: string) => Promise<CfCatchAllRule | null>;
+  /** Enabled explicit address rules outrank a zone catch-all. */
+  listRoutingRules: (zoneId: string) => Promise<ReadonlyArray<CfEmailRoutingRule>>;
   /** PUT catch-all with wrangler's reset shape: one drop action, disabled. */
   resetCatchAll: (zoneId: string) => Promise<void>;
   /**
@@ -253,8 +269,18 @@ export function createCfCustomerClient(credential: string): CfCustomerClient {
         main_module: 'index.js',
         compatibility_date: upload.compatibilityDate,
         bindings: [
-          { type: 'plain_text', name: RELAY_PROXY_ORIGIN_BINDING, text: upload.proxyOrigin },
-          { type: 'plain_text', name: RELAY_EMAIL_DOMAIN_BINDING, text: upload.emailDomain },
+          {
+            type: 'plain_text',
+            name: RELAY_GATEWAY_ORIGIN_BINDING,
+            text: upload.gatewayOrigin ?? upload.proxyOrigin,
+          },
+          { type: 'plain_text', name: RELAY_ACCOUNT_BINDING, text: upload.accountId ?? accountId },
+          { type: 'plain_text', name: RELAY_ZONE_BINDING, text: upload.zoneId ?? '' },
+          {
+            type: 'plain_text',
+            name: RELAY_INGRESS_BINDING,
+            text: upload.ingressName ?? scriptName,
+          },
         ],
       };
       const formData = new FormData();
@@ -277,6 +303,28 @@ export function createCfCustomerClient(credential: string): CfCustomerClient {
       await call(`/accounts/${accountId}/workers/scripts/${scriptName}/secrets`, {
         method: 'PUT',
         body: JSON.stringify({ name: RELAY_SECRET_BINDING, text: secret, type: 'secret_text' }),
+      });
+    },
+
+    getWorkersSubdomain: async (accountId) => {
+      const result = await call<{ subdomain: string }>(`/accounts/${accountId}/workers/subdomain`);
+      if (!result?.subdomain) {
+        throw new Error('Cloudflare Workers account subdomain is unavailable');
+      }
+      return result.subdomain;
+    },
+
+    getScriptSubdomainEnabled: async (accountId, scriptName) => {
+      const result = await call<{ enabled: boolean }>(
+        `/accounts/${accountId}/workers/scripts/${scriptName}/subdomain`,
+      );
+      return result.enabled === true;
+    },
+
+    enableScriptSubdomain: async (accountId, scriptName) => {
+      await call(`/accounts/${accountId}/workers/scripts/${scriptName}/subdomain`, {
+        method: 'POST',
+        body: JSON.stringify({ enabled: true, previews_enabled: false }),
       });
     },
 
@@ -315,6 +363,47 @@ export function createCfCustomerClient(credential: string): CfCustomerClient {
           ? (((first as { value: Array<unknown> }).value[0] as string | undefined) ?? null)
           : null;
       return { enabled: (rule as { enabled?: unknown }).enabled === true, workerName };
+    },
+
+    listRoutingRules: async (zoneId) => {
+      const rules: Array<CfEmailRoutingRule> = [];
+      for (let page = 1; page <= 20; page++) {
+        const result = await call<unknown>(
+          `/zones/${zoneId}/email/routing/rules?page=${page}&per_page=50`,
+        );
+        if (!Array.isArray(result)) {
+          throw new Error('Cloudflare routing rules response was not an array');
+        }
+        for (const value of result) {
+          if (!value || typeof value !== 'object') {
+            continue;
+          }
+          const rule = value as { enabled?: unknown; name?: unknown; matchers?: unknown };
+          const addresses = Array.isArray(rule.matchers)
+            ? rule.matchers.flatMap((matcher: unknown) => {
+                if (!matcher || typeof matcher !== 'object') {
+                  return [];
+                }
+                const m = matcher as { type?: unknown; field?: unknown; value?: unknown };
+                return m.type === 'literal' && typeof m.value === 'string'
+                  ? [m.value.toLowerCase()]
+                  : [];
+              })
+            : [];
+          rules.push({
+            enabled: rule.enabled === true,
+            name: typeof rule.name === 'string' ? rule.name : null,
+            addresses,
+          });
+        }
+        if (result.length < 50) {
+          break;
+        }
+        if (page === 20) {
+          throw new Error('Cloudflare routing rule list exceeded 1,000 entries');
+        }
+      }
+      return rules;
     },
 
     resetCatchAll: async (zoneId) => {

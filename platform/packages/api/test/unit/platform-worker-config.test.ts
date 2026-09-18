@@ -17,6 +17,7 @@ describe('platform Worker configuration', () => {
       ownershipNonce: '0123456789abcdef0123456789abcdef',
       platformVersion: '1.0.0',
       proxyUrl: 'https://void-example-proxy.example.workers.dev',
+      emailGatewayUrl: 'https://void-example-email-gateway.example.workers.dev',
       resources: {
         hyperdrive: 'hyperdrive',
         isrCacheKv: 'isr',
@@ -28,11 +29,14 @@ describe('platform Worker configuration', () => {
         api: '/runtime/api.js',
         dispatch: '/runtime/dispatch.js',
         proxy: '/runtime/proxy.js',
+        emailGateway: '/runtime/email-gateway.js',
         tail: '/runtime/tail.js',
       },
     });
 
     expect(configs.api).not.toHaveProperty('containers');
+    expect(configs.emailGateway).not.toHaveProperty('send_email');
+    expect(configs.emailGateway.vars).not.toHaveProperty('EMAIL_SHARED_ZONE_ID');
     expect(JSON.stringify(configs)).not.toContain('BuildManager');
     expect(JSON.stringify(configs)).not.toContain('BUILD_SCHEDULER');
     expect(configs.proxy.vars).toMatchObject({
@@ -84,6 +88,7 @@ describe('platform Worker configuration', () => {
       ownershipNonce: '0123456789abcdef0123456789abcdef',
       platformVersion: '1.0.0',
       proxyUrl: 'https://proxy.example.com',
+      emailGatewayUrl: 'https://void-example-email-gateway.example.workers.dev',
       publicEndpoints: false,
       trafficState: 'staging',
       resources: {
@@ -97,6 +102,7 @@ describe('platform Worker configuration', () => {
         api: '/runtime/api.js',
         dispatch: '/runtime/dispatch.js',
         proxy: '/runtime/proxy.js',
+        emailGateway: '/runtime/email-gateway.js',
         tail: '/runtime/tail.js',
       },
     });

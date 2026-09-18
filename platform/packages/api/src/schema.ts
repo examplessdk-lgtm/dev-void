@@ -1222,3 +1222,7 @@ export const invitations = pgTable(
     index('idx_invitations_status').on(table.status),
   ],
 );
+
+export * from './email/connection-schema.ts';
+
+export * from './email/admission-schema.ts';

@@ -218,6 +218,11 @@
       "import": "./dist/runtime/email.mjs",
       "require": "./dist/runtime/email.mjs"
     },
+    "./_email-protocol": {
+      "types": "./dist/runtime/email-protocol.d.mts",
+      "import": "./dist/runtime/email-protocol.mjs",
+      "require": "./dist/runtime/email-protocol.mjs"
+    },
     "./email/testing": {
       "types": "./dist/runtime/email/testing.d.mts",
       "import": "./dist/runtime/email/testing.mjs",

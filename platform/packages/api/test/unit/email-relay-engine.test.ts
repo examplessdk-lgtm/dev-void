@@ -74,6 +74,10 @@ function makeFakeClient(config: FakeClientConfig = {}): {
       record('listSendingSubdomains')(zoneId);
       return config.sendingSubdomains ?? [];
     },
+    listRoutingRules: async (zoneId: string) => {
+      record('listRoutingRules')(zoneId);
+      return [];
+    },
     relayScriptExists: async (accountId: string, scriptName: string) => {
       record('relayScriptExists')(accountId, scriptName);
       return config.scriptNamesTaken?.includes(scriptName) ?? false;
@@ -82,6 +86,16 @@ function makeFakeClient(config: FakeClientConfig = {}): {
       record('putRelayScript')(accountId, scriptName, upload),
     putRelaySecret: async (accountId: string, scriptName: string, secret: string) =>
       record('putRelaySecret')(accountId, scriptName, secret),
+    getWorkersSubdomain: async (accountId: string) => {
+      record('getWorkersSubdomain')(accountId);
+      return 'example';
+    },
+    getScriptSubdomainEnabled: async (accountId: string, scriptName: string) => {
+      record('getScriptSubdomainEnabled')(accountId, scriptName);
+      return true;
+    },
+    enableScriptSubdomain: async (accountId: string, scriptName: string) =>
+      record('enableScriptSubdomain')(accountId, scriptName),
     setCatchAll: async (zoneId: string, relayWorkerName: string) =>
       record('setCatchAll')(zoneId, relayWorkerName),
     getCatchAll: async (zoneId: string) => {

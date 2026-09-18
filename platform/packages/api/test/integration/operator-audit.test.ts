@@ -149,6 +149,7 @@ test('records complete and partial 207 mutation outcomes as failed', async () =>
     environment: 'staging',
     versions: {
       dispatch: 'previous',
+      'email-gateway': 'previous',
       dashboard: 'previous',
       api: 'previous',
       tail: 'previous',
@@ -250,6 +251,7 @@ test('browser rollback-all records a failed outcome when its result page is HTML
     '/platform/rollback-all',
     new URLSearchParams({
       version_dispatch: 'previous',
+      'version_email-gateway': 'previous',
       version_dashboard: 'previous',
       version_api: 'previous',
       version_tail: 'previous',
@@ -273,6 +275,7 @@ test('records the effective worker environment for implicit and explicit rollbac
   const staging = { ...env, PLATFORM_ENV: 'staging' };
   const versions = {
     dispatch: 'previous',
+    'email-gateway': 'previous',
     dashboard: 'previous',
     api: 'previous',
     tail: 'previous',

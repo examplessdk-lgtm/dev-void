@@ -3,6 +3,57 @@ import { createPlatformDeploymentManifest } from '../../src/manifest.ts';
 import { createPlatformWorkerConfigs } from '../../src/worker-config.ts';
 
 describe('platform usage queue bindings', () => {
+  it('routes shared mail through its configured zone, independent of the application zone', () => {
+    const deployment = createPlatformDeploymentManifest({
+      application: { baseDomain: 'apps.example.com', zoneName: 'example.com' },
+      emailSharedZoneId: 'mail-zone-id',
+      emailSenderDomain: 'mail.example.org',
+      capabilities: { email: true },
+      displayName: 'Example',
+      installationSlug: 'example',
+    });
+    const configs = createPlatformWorkerConfigs({
+      accountId: 'account',
+      apiUrl: 'https://api.example.com',
+      proxyUrl: 'https://proxy.example.com',
+      emailGatewayUrl: 'https://email-gateway.account.workers.dev',
+      deployment,
+      healthProbeToken: 'probe',
+      installationId: 'installation',
+      ownershipNonce: 'ownership',
+      platformVersion: '1.0.0',
+      resources: {
+        hyperdrive: 'db',
+        isrCacheKv: 'isr',
+        legacyAssetsKv: 'assets',
+        routingKv: 'routing',
+        zone: 'app-zone-id',
+      },
+      runtimeEntrypoints: {
+        api: 'api.mjs',
+        proxy: 'proxy.mjs',
+        emailGateway: 'email-gateway.mjs',
+        tail: 'tail.mjs',
+        dispatch: 'dispatch.mjs',
+      },
+    });
+    const expected = {
+      EMAIL_SHARED_ACCOUNT_ID: 'account',
+      EMAIL_SHARED_ZONE_ID: 'mail-zone-id',
+      EMAIL_SHARED_INGRESS_NAME: deployment.resources.emailGatewayWorker,
+    };
+    expect(configs.api.vars).toMatchObject(expected);
+    expect(configs.emailGateway.vars).toMatchObject(expected);
+    expect(configs.api.vars).toHaveProperty('EMAIL_SENDER_DOMAIN', 'mail.example.org');
+    expect(configs.proxy.vars).toHaveProperty('EMAIL_SENDER_DOMAIN', 'mail.example.org');
+    expect(configs.emailGateway.vars).toHaveProperty('EMAIL_SENDER_DOMAIN', 'mail.example.org');
+    expect(configs.emailGateway).toHaveProperty('send_email', [{ name: 'SEND_EMAIL' }]);
+    expect(configs.api.vars).toHaveProperty(
+      'EMAIL_GATEWAY_ORIGIN',
+      'https://email-gateway.account.workers.dev',
+    );
+  });
+
   it.each([
     {
       apiUrl: 'https://api.example.com',
@@ -46,6 +97,7 @@ describe('platform usage queue bindings', () => {
         accountId: 'account',
         apiUrl,
         proxyUrl,
+        emailGatewayUrl: 'https://email-gateway.account.workers.dev',
         deployment,
         healthProbeToken: 'probe',
         installationId: 'example-123456abcdef',
@@ -61,6 +113,7 @@ describe('platform usage queue bindings', () => {
         runtimeEntrypoints: {
           api: 'api.mjs',
           proxy: 'proxy.mjs',
+          emailGateway: 'email-gateway.mjs',
           dispatch: 'dispatch.mjs',
           tail: 'tail.mjs',
         },
@@ -74,7 +127,13 @@ describe('platform usage queue bindings', () => {
       expect(configs.proxy.services).toEqual([
         { binding: 'API', service: deployment.resources.apiWorker },
       ]);
-      expect(Object.keys(configs).sort()).toEqual(['api', 'dispatch', 'proxy', 'tail']);
+      expect(Object.keys(configs).sort()).toEqual([
+        'api',
+        'dispatch',
+        'emailGateway',
+        'proxy',
+        'tail',
+      ]);
     },
   );
 
@@ -93,6 +152,7 @@ describe('platform usage queue bindings', () => {
       ownershipNonce: 'ownership',
       platformVersion: '1.0.0',
       proxyUrl: 'https://proxy.example.com',
+      emailGatewayUrl: 'https://email-gateway.account.workers.dev',
       resources: {
         hyperdrive: 'hyperdrive-id',
         isrCacheKv: 'isr-id',
@@ -104,6 +164,7 @@ describe('platform usage queue bindings', () => {
         api: 'api.mjs',
         dispatch: 'dispatch.mjs',
         proxy: 'proxy.mjs',
+        emailGateway: 'email-gateway.mjs',
         tail: 'tail.mjs',
       },
     });
@@ -135,6 +196,7 @@ describe('platform usage queue bindings', () => {
       ownershipNonce: 'ownership',
       platformVersion: '1.0.0',
       proxyUrl: 'https://proxy.example.com',
+      emailGatewayUrl: 'https://email-gateway.account.workers.dev',
       resources: {
         hyperdrive: 'hyperdrive-id',
         isrCacheKv: 'isr-id',
@@ -146,6 +208,7 @@ describe('platform usage queue bindings', () => {
         api: 'api.mjs',
         dispatch: 'dispatch.mjs',
         proxy: 'proxy.mjs',
+        emailGateway: 'email-gateway.mjs',
         tail: 'tail.mjs',
       },
     });

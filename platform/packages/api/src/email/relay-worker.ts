@@ -1,22 +1,20 @@
 /**
  * The relay worker — the one worker the platform deploys into the
- * CUSTOMER's Cloudflare account, one per registered email domain (design
- * doc 0078, "The two paths"). A routing rule can only name a worker in its
- * own account, so inbound from a customer zone cannot reach the proxy
- * directly; this ~30-line worker is the cross-account hop. It streams the
- * raw MIME, unparsed and unbuffered, into the proxy's POST /email/relay
- * with the domain's relay secret as the bearer.
+ * CUSTOMER's Cloudflare account, one per connected zone. An Email Routing
+ * catch-all can only name a Worker in its own account, so this Worker streams
+ * the raw MIME and SMTP envelope into the installation email gateway's
+ * POST /email/ingress, authenticated by the zone connection secret.
  *
  * The source is embedded as a string because the api deploys it at runtime
  * into an account it does not own — it is never bundled into the api
  * worker itself.
  *
- * `void email domain sync` redeploys at the current RELAY_VERSION and
- * rotates the secret. The deployed worker NAME is stable forever: renaming
- * a worker detaches every routing rule that points at it.
+ * `void email domain sync` redeploys at the current RELAY_VERSION. Secret
+ * rotation is a separate durable operation proven against the deployed
+ * Worker before promotion. The Worker name stays stable for its zone.
  */
 
-export const RELAY_VERSION = 3;
+export const RELAY_VERSION = 6;
 
 // Baked into the upload metadata; bump with RELAY_VERSION if the source
 // ever depends on newer runtime behavior.
@@ -26,43 +24,54 @@ export const RELAY_COMPATIBILITY_DATE = '2026-09-01';
 // the source reads. Pinned to RELAY_SOURCE by the unit tests — the two
 // must move together or the deployed relay reads undefined bindings.
 export const RELAY_SECRET_BINDING = 'VOID_RELAY_SECRET';
-export const RELAY_PROXY_ORIGIN_BINDING = 'VOID_PROXY_ORIGIN';
-export const RELAY_EMAIL_DOMAIN_BINDING = 'VOID_EMAIL_DOMAIN';
+export const RELAY_GATEWAY_ORIGIN_BINDING = 'VOID_EMAIL_GATEWAY_ORIGIN';
+export const RELAY_ACCOUNT_BINDING = 'VOID_EMAIL_ACCOUNT';
+export const RELAY_ZONE_BINDING = 'VOID_EMAIL_ZONE';
+export const RELAY_INGRESS_BINDING = 'VOID_EMAIL_INGRESS';
+// Legacy exports keep older pre-release fixtures compiling.
+export const RELAY_PROXY_ORIGIN_BINDING = RELAY_GATEWAY_ORIGIN_BINDING;
+export const RELAY_EMAIL_DOMAIN_BINDING = RELAY_ZONE_BINDING;
 
 /**
- * Module-syntax worker source. Wire contract with the proxy (design doc
- * 0078, contract 3): POST {VOID_PROXY_ORIGIN}/email/relay, bearer =
- * VOID_RELAY_SECRET, X-Void-Email-* headers carrying the domain and the
- * envelope sender/recipient, body = the raw MIME streamed straight from
- * message.raw. The stream is piped through a FixedLengthStream(rawSize):
+ * Module-syntax Worker source. POST /email/ingress on the configured gateway
+ * with zone identity, envelope sender/recipient and the unparsed MIME.
+ * The stream is piped through a FixedLengthStream(rawSize):
  * the runtime derives Content-Length from the body and IGNORES a manually
- * set one, so a plain ReadableStream would go out chunked — and the proxy
+ * set one, so a plain ReadableStream would go out chunked — and the gateway
  * rejects a length-less body before any crypto. The POST rides
  * ctx.waitUntil AND is awaited: waitUntil keeps the stream alive, the
  * await is what lets a non-2xx answer reject the message. The reject
  * reason is deliberately generic — it travels back to the original sender
  * in a bounce.
  *
- * The recipient-domain guard is the relay-side half of the proxy's
- * recipient-domain attribution rule: a catch-all rule can be zone-wide,
- * so mail addressed to a DIFFERENT domain on the same zone can land here.
- * That mail is not this relay's to forward — the proxy would (correctly)
- * refuse it against this domain's secret — so it is refused here, loudly,
- * rather than dropped. RELAY_VERSION 3.
+ * The gateway resolves the exact envelope recipient domain against the
+ * authoritative connection route map. This relay therefore forwards every
+ * recipient on its zone, including sibling domains.
  */
 export const RELAY_SOURCE = `export default {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+    if (request.method !== 'POST' || url.pathname !== '/__void/email/probe') return new Response(null, { status: 404 });
+    const challenge = request.headers.get('X-Void-Probe-Challenge') ?? '';
+    const generation = request.headers.get('X-Void-Probe-Generation') ?? '';
+    if (!/^[a-f0-9]{64}$/.test(challenge) || !/^[1-9][0-9]{0,9}$/.test(generation)) return new Response(null, { status: 400 });
+    const payload = ['email-relay-proof-v1', env.VOID_EMAIL_ACCOUNT, env.VOID_EMAIL_ZONE, env.VOID_EMAIL_INGRESS, generation, challenge].join('\\n');
+    const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(env.VOID_RELAY_SECRET), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+    const signature = new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(payload)));
+    const proof = Array.from(signature, byte => byte.toString(16).padStart(2, '0')).join('');
+    return Response.json({ accountId: env.VOID_EMAIL_ACCOUNT, zoneId: env.VOID_EMAIL_ZONE, ingressName: env.VOID_EMAIL_INGRESS, generation: Number(generation), challenge, proof }, { headers: { 'Cache-Control': 'no-store' } });
+  },
   async email(message, env, ctx) {
-    const recipientDomain = message.to.slice(message.to.lastIndexOf('@') + 1).toLowerCase();
-    if (recipientDomain !== env.VOID_EMAIL_DOMAIN) {
-      message.setReject('Unable to deliver message');
-      return;
-    }
+    const requestId = crypto.randomUUID();
     const { readable, writable } = new FixedLengthStream(message.rawSize);
-    const relay = fetch(env.VOID_PROXY_ORIGIN + '/email/relay', {
+    const relay = fetch(env.VOID_EMAIL_GATEWAY_ORIGIN + '/email/ingress', {
       method: 'POST',
       headers: {
         Authorization: 'Bearer ' + env.VOID_RELAY_SECRET,
-        'X-Void-Email-Domain': env.VOID_EMAIL_DOMAIN,
+        'X-Void-Email-Account': env.VOID_EMAIL_ACCOUNT,
+        'X-Void-Email-Zone': env.VOID_EMAIL_ZONE,
+        'X-Void-Email-Ingress': env.VOID_EMAIL_INGRESS,
+        'X-Void-Email-Request-Id': requestId,
         'X-Void-Email-From': message.from,
         'X-Void-Email-To': message.to,
       },
@@ -71,6 +80,9 @@ export const RELAY_SOURCE = `export default {
     ctx.waitUntil(message.raw.pipeTo(writable));
     ctx.waitUntil(relay);
     const response = await relay;
+    if (response.status >= 500 || response.status === 408 || response.status === 429) {
+      throw new Error('Email gateway temporarily unavailable');
+    }
     if (!response.ok) {
       message.setReject('Unable to deliver message');
     }

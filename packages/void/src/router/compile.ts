@@ -2853,6 +2853,7 @@ ${renderBlock}
 
   const internalRouteHelper = `async function __handleInternal(request, env, ctx) {
   const url = new URL(request.url);
+  ${hasEmail ? `if (url.pathname === "/__void/email/receipt/v1") return __handleEmailReceipt(request, env, ctx);` : ''}
   // Readiness probe — platform polls this to confirm the worker is live after WfP upload.
   // Handled here (before app.fetch) so user middleware cannot block it.
   if (request.method === "GET" && url.pathname === "/__void/ready") {
@@ -2897,7 +2898,7 @@ ${envValidateCall}${isrDeploymentStamp}  const userEnv = __filterInternalBinding
   const emailImport = hasEmail ? ', __emailHandler' : '';
   const emailRuntimePath = runtimeEmailPath ?? deriveEmailRuntimePath(runtimeEnvPath);
   const emailProxyImport = hasEmail
-    ? `import { createMessageProxy as __createMessageProxy, enactEmailActions as __enactEmailActions, isForwardableEmailMessage as __isForwardableEmailMessage } from ${JSON.stringify(emailRuntimePath)};\n`
+    ? `import { createMessageProxy as __createMessageProxy, enactEmailActions as __enactEmailActions, isForwardableEmailMessage as __isForwardableEmailMessage } from ${JSON.stringify(emailRuntimePath)};\nimport { EMAIL_PROTOCOL_VERSION as __EMAIL_PROTOCOL_VERSION, encodeEmailActions as __encodeEmailActions, readEmailEnvelope as __readEmailEnvelope } from "void/_email-protocol";\n`
     : '';
   // `__VOID_PROJECT_SLUG` is the same binding the outbound `sendEmail` reads to
   // default `from`. It is passed to `createMessageProxy` so the user-visible
@@ -2938,6 +2939,37 @@ ${envValidateCall}  const userEnv = __filterInternalBindings(env);
 }`
     : '';
 
+  const emailReceiptHandler = hasEmail
+    ? `async function __handleEmailReceipt(request, env, ctx) {
+  if (request.method !== "POST" || request.headers.get("content-encoding")) return new Response(null, { status: 404 });
+  const __token = request.headers.get("x-void-email-receipt");
+  const __recipient = request.headers.get("x-void-email-recipient");
+  if (!__token || __token.length > 1536 || !__recipient || __recipient.length > 320 ||
+      !env.__VOID_PROXY_TOKEN || !env.__PROJECT_ID || !env.__VOID_EMAIL_DEPLOYMENT_ID || !env.__VOID_PROXY) {
+    return new Response(null, { status: 404 });
+  }
+  const __verificationBody = JSON.stringify({ receipt: __token, projectId: env.__PROJECT_ID,
+    deploymentId: env.__VOID_EMAIL_DEPLOYMENT_ID, recipient: __recipient });
+  const __verification = await env.__VOID_PROXY.fetch("https://proxy/email/verify-receipt", {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-void-internal": env.__VOID_PROXY_TOKEN },
+    body: __verificationBody,
+  });
+  if (!__verification.ok) return new Response(null, { status: 404 });
+  const __verified = await __verification.json();
+  if (__verified?.valid !== true) return new Response(null, { status: 404 });
+  let __envelope;
+  try { __envelope = await __readEmailEnvelope(request.body); }
+  catch { return new Response(null, { status: 400 }); }
+  if (__envelope.to !== __recipient) return new Response(null, { status: 400 });
+  const __actions = await handleEmail(__envelope, env, ctx);
+  return new Response(__encodeEmailActions(__actions), {
+    headers: { "content-type": "application/vnd.void.email-actions; version=" + __EMAIL_PROTOCOL_VERSION,
+      "cache-control": "no-store" },
+  });
+}`
+    : '';
+
   // The default export is a `WorkerEntrypoint` subclass. A plain default object
   // only exposes `.fetch()` through a Workers-for-Platforms dispatch stub, so
   // `email()` would be unreachable; class methods on a `WorkerEntrypoint`
@@ -2963,6 +2995,7 @@ ${internalRouteHelper}
 ${fetchDeclaration}
 ${scheduledHandler}
 ${emailHandler}
+${emailReceiptHandler}
 async function __voidQueue(batch, env, ctx) {
 ${envValidateCall}${remotePath ? `  if (env.__VOID_REMOTE === "1") env = ${createRemoteEnvCall};\n` : ''}${isrDeploymentStamp}  const userEnv = __filterInternalBindings(env);
   const messages = [...batch.messages].map(m => ({
@@ -2996,6 +3029,7 @@ ${internalRouteHelper}
 ${fetchDeclaration}
 ${scheduledHandler}
 ${emailHandler}
+${emailReceiptHandler}
 ${webSocketClasses.map((name) => `export { ${name} };`).join('\n')}
 ${liveExport}
 ${sandboxExport}

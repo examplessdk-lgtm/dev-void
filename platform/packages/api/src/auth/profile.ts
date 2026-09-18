@@ -1,4 +1,5 @@
 import { updateUser, revokeOwnerVerifiedDestinationsForUserChange, type Db } from '../db.ts';
+import { lockEmailPolicy } from '../email/admission.ts';
 import {
   syncProjectAllowlistKv,
   syncProjectAllowlistKvBestEffort,
@@ -112,6 +113,7 @@ export async function updateUserRevokingInheritedDestinations(
   let projectIds: Array<string>;
   try {
     projectIds = await db.transaction(async (tx) => {
+      await lockEmailPolicy(tx);
       const txDb = tx as unknown as Db;
       await updateUser(txDb, userId, login, nextEmail);
       const affected = await revokeOwnerVerifiedDestinationsForUserChange(

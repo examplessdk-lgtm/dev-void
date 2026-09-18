@@ -518,7 +518,7 @@ describe('platform installer', () => {
         },
         deployWorker: async (config) => {
           expect(progress.at(-1)).toMatch(
-            /^(Deploying|Enabling) the (api|proxy|tail|dispatch) service/,
+            /^(Deploying|Enabling) the (api|proxy|emailGateway|tail|dispatch) service/,
           );
           configs.push(config);
         },
@@ -546,6 +546,7 @@ describe('platform installer', () => {
             workers: [
               plan.deployment.resources.apiWorker,
               plan.deployment.resources.proxyWorker,
+              plan.deployment.resources.emailGatewayWorker,
               plan.deployment.resources.dispatchWorker,
             ],
             resumeCommand: undefined,
@@ -558,7 +559,7 @@ describe('platform installer', () => {
           (resource) => resource.kind === 'zone' || resource.kind === 'dns-record',
         ),
       ).toBe(false);
-      expect(new Set(configs.map((config) => config.name)).size).toBe(4);
+      expect(new Set(configs.map((config) => config.name)).size).toBe(5);
       expect(
         configs.every((config) => !config.routes || (config.routes as Array<unknown>).length === 0),
       ).toBe(true);
@@ -2886,171 +2887,194 @@ describe('platform installer', () => {
     expect(released).toBe(true);
   });
 
-  it('checkpoints every resource and removes pending secrets only after verification', async () => {
-    const directory = mkdtempSync(join(tmpdir(), 'void-platform-installer-test-'));
-    directories.push(directory);
-    process.env.VOID_PLATFORM_REGISTRY_DIR = directory;
-    const plan = await createPlatformInstallPlan(
-      planningClient(),
-      {
-        accountId: 'account',
-        applicationDomain: 'apps.example.com',
-        controlPlaneDomain: '',
-        dedicatedZone: false,
-        displayName: 'Example',
-        installationSlug: 'example',
-        zoneName: 'example.com',
-      },
-      null,
-    );
-    let resourceIndex = 0;
-    const created = async (_account: string, name: string) => ({
-      id: `resource-${resourceIndex++}`,
-      name,
-    });
-    const deployed: Array<string> = [];
-    const deployedTrafficStates: Array<unknown> = [];
-    let apiSecrets: Record<string, string> | null = null;
-    let r2OwnershipMarker = '';
-    const routingValues = new Map<string, string>();
-    const lifecycleEvents: Array<string> = [];
-    let remoteManifest = '';
-    const databaseClaims: Array<[string, string]> = [];
-    const result = await installPlatform(
-      plan,
-      createPlatformInstallationSecrets({
-        bootstrapGitHubId: '583231',
-        bootstrapGitHubLogin: 'octocat',
-        cloudflareApiToken: 'cf-token',
-        databaseUrl: 'postgres://user:password@db.example.com/void',
-        githubClientId: 'github-id',
-        githubClientSecret: 'github-secret',
-        jwtSecret: TEST_PLATFORM_JWT_SECRET,
-        projectSecretKey: TEST_PLATFORM_PROJECT_SECRET_KEY,
-        r2AccessKeyId: 'r2-id',
-        r2SecretAccessKey: 'r2-secret',
-      }),
-      null,
-      {
-        acquireDatabaseLifecycleLock,
-        claimDatabase: async (_url, installationId, ownershipNonce) => {
-          databaseClaims.push([installationId, ownershipNonce]);
+  it.each([false, true])(
+    'checkpoints every resource and removes pending secrets only after verification (legacy runtime: %s)',
+    async (legacyRuntime) => {
+      const directory = mkdtempSync(join(tmpdir(), 'void-platform-installer-test-'));
+      directories.push(directory);
+      process.env.VOID_PLATFORM_REGISTRY_DIR = directory;
+      const plan = await createPlatformInstallPlan(
+        planningClient(),
+        {
+          accountId: 'account',
+          applicationDomain: 'apps.example.com',
+          controlPlaneDomain: '',
+          dedicatedZone: false,
+          displayName: 'Example',
+          installationSlug: 'example',
+          zoneName: 'example.com',
         },
-        client: {
-          createAiGateway: created,
-          createDnsRecord: async (_zone, name) => ({
-            content: '100::',
-            id: `resource-${resourceIndex++}`,
-            name,
-            proxied: true,
-            type: 'AAAA',
-          }),
-          createZone: async () => {
-            throw new Error('existing zone must not be created');
-          },
-          createKvNamespace: created,
-          createR2Bucket: created,
-          createQueue: created,
-          createDispatchNamespace: created,
-          createHyperdrive: async (account, name) => created(account, name),
-          deleteKvValue: async (_account, _namespace, key) => {
-            lifecycleEvents.push(`delete:${key}`);
-            routingValues.delete(key);
-          },
-          putKvValue: async (_account, _namespace, key, value) => {
-            routingValues.set(key, value);
-            if (key === PLATFORM_DISABLED_KEY) {
-              lifecycleEvents.push(`put:${key}`);
-            }
-            if (key === '__void/platform/installation/v1') {
-              remoteManifest = value;
-            }
-          },
-          putR2Object: async (_account, _bucket, _key, value) => {
-            r2OwnershipMarker = value;
-          },
-        },
-        deployWorker: async (config, secrets) => {
-          expect(routingValues.get(PLATFORM_DISABLED_KEY)).toBe(PLATFORM_DISABLED_VALUE);
-          expect(JSON.parse(routingValues.get(PLATFORM_SANDBOX_DRAIN_KEY)!)).toMatchObject({
-            state: 'complete',
-            version: 1,
-          });
-          lifecycleEvents.push(`deploy:${String(config.name)}`);
-          deployed.push(String(config.name));
-          deployedTrafficStates.push(
-            (config.vars as Record<string, unknown>).PLATFORM_TRAFFIC_STATE,
-          );
-          if (String(config.name).endsWith('-api')) {
-            apiSecrets = secrets;
+        null,
+        { includeEmailGateway: !legacyRuntime },
+      );
+      const packagedRuntime = resolvePlatformRuntime(getPlatformRuntimeDirectory());
+      const { emailGateway: _legacyGateway, ...legacyArtifacts } =
+        packagedRuntime.manifest.artifacts;
+      const { emailProtocolVersion: _legacyProtocol, ...legacyManifest } = packagedRuntime.manifest;
+      const selectedRuntime = legacyRuntime
+        ? {
+            ...packagedRuntime,
+            manifest: { ...legacyManifest, artifacts: legacyArtifacts },
           }
+        : packagedRuntime;
+      if (legacyRuntime) {
+        expect(plan.actions.some((action) => action.key === 'email-gateway-worker')).toBe(false);
+      }
+      let resourceIndex = 0;
+      const created = async (_account: string, name: string) => ({
+        id: `resource-${resourceIndex++}`,
+        name,
+      });
+      const deployed: Array<string> = [];
+      const deployedTrafficStates: Array<unknown> = [];
+      let apiSecrets: Record<string, string> | null = null;
+      let r2OwnershipMarker = '';
+      const routingValues = new Map<string, string>();
+      const lifecycleEvents: Array<string> = [];
+      let remoteManifest = '';
+      const databaseClaims: Array<[string, string]> = [];
+      const result = await installPlatform(
+        plan,
+        createPlatformInstallationSecrets({
+          bootstrapGitHubId: '583231',
+          bootstrapGitHubLogin: 'octocat',
+          cloudflareApiToken: 'cf-token',
+          databaseUrl: 'postgres://user:password@db.example.com/void',
+          githubClientId: 'github-id',
+          githubClientSecret: 'github-secret',
+          jwtSecret: TEST_PLATFORM_JWT_SECRET,
+          projectSecretKey: TEST_PLATFORM_PROJECT_SECRET_KEY,
+          r2AccessKeyId: 'r2-id',
+          r2SecretAccessKey: 'r2-secret',
+        }),
+        null,
+        {
+          runtime: selectedRuntime,
+          acquireDatabaseLifecycleLock,
+          claimDatabase: async (_url, installationId, ownershipNonce) => {
+            databaseClaims.push([installationId, ownershipNonce]);
+          },
+          client: {
+            createAiGateway: created,
+            createDnsRecord: async (_zone, name) => ({
+              content: '100::',
+              id: `resource-${resourceIndex++}`,
+              name,
+              proxied: true,
+              type: 'AAAA',
+            }),
+            createZone: async () => {
+              throw new Error('existing zone must not be created');
+            },
+            createKvNamespace: created,
+            createR2Bucket: created,
+            createQueue: created,
+            createDispatchNamespace: created,
+            createHyperdrive: async (account, name) => created(account, name),
+            deleteKvValue: async (_account, _namespace, key) => {
+              lifecycleEvents.push(`delete:${key}`);
+              routingValues.delete(key);
+            },
+            putKvValue: async (_account, _namespace, key, value) => {
+              routingValues.set(key, value);
+              if (key === PLATFORM_DISABLED_KEY) {
+                lifecycleEvents.push(`put:${key}`);
+              }
+              if (key === '__void/platform/installation/v1') {
+                remoteManifest = value;
+              }
+            },
+            putR2Object: async (_account, _bucket, _key, value) => {
+              r2OwnershipMarker = value;
+            },
+          },
+          deployWorker: async (config, secrets) => {
+            expect(routingValues.get(PLATFORM_DISABLED_KEY)).toBe(PLATFORM_DISABLED_VALUE);
+            expect(JSON.parse(routingValues.get(PLATFORM_SANDBOX_DRAIN_KEY)!)).toMatchObject({
+              state: 'complete',
+              version: 1,
+            });
+            lifecycleEvents.push(`deploy:${String(config.name)}`);
+            deployed.push(String(config.name));
+            deployedTrafficStates.push(
+              (config.vars as Record<string, unknown>).PLATFORM_TRAFFIC_STATE,
+            );
+            if (String(config.name).endsWith('-api')) {
+              apiSecrets = secrets;
+            }
+          },
+          migrateDatabase: async () => {},
+          prepareSandboxDrain: async () => sandboxDrainPreparation('complete'),
+          revalidateBeforeWorkerDeploy: async () => {},
+          verifyHealth: async () => {
+            expect(routingValues.get(PLATFORM_DISABLED_KEY)).toBe(
+              lifecycleEvents.includes('verify') ? undefined : PLATFORM_DISABLED_VALUE,
+            );
+            lifecycleEvents.push('verify');
+          },
+          verifySandboxDrain: async () => {
+            throw new Error('an empty fresh installation must not require a manual drain');
+          },
         },
-        migrateDatabase: async () => {},
-        prepareSandboxDrain: async () => sandboxDrainPreparation('complete'),
-        revalidateBeforeWorkerDeploy: async () => {},
-        verifyHealth: async () => {
-          expect(routingValues.get(PLATFORM_DISABLED_KEY)).toBe(
-            lifecycleEvents.includes('verify') ? undefined : PLATFORM_DISABLED_VALUE,
-          );
-          lifecycleEvents.push('verify');
-        },
-        verifySandboxDrain: async () => {
-          throw new Error('an empty fresh installation must not require a manual drain');
-        },
-      },
-    );
+      );
 
-    expect(result.manifest.status).toBe('installed');
-    expect(result.manifest.steps.some((step) => step.key === 'adoption-intent:zone')).toBe(true);
-    expect(databaseClaims).toEqual([[result.manifest.id, result.manifest.ownershipNonce]]);
-    expect(result.manifest.resources).toHaveLength(15);
-    expect(deployed).toEqual([
-      result.manifest.deployment.resources.apiWorker,
-      result.manifest.deployment.resources.proxyWorker,
-      result.manifest.deployment.resources.tailWorker,
-      result.manifest.deployment.resources.dispatchWorker,
-      result.manifest.deployment.resources.apiWorker,
-      result.manifest.deployment.resources.proxyWorker,
-      result.manifest.deployment.resources.tailWorker,
-      result.manifest.deployment.resources.dispatchWorker,
-    ]);
-    expect(deployedTrafficStates).toEqual([
-      'staging',
-      'staging',
-      undefined,
-      'staging',
-      'enabled',
-      'enabled',
-      undefined,
-      'enabled',
-    ]);
-    expect(apiSecrets).toMatchObject({ PLATFORM_BOOTSTRAP_GITHUB_ID: '583231' });
-    expect(JSON.parse(r2OwnershipMarker)).toMatchObject({
-      accountId: 'account',
-      installationId: result.manifest.id,
-      ownershipNonce: result.manifest.ownershipNonce,
-      resourceKey: 'assets-bucket',
-    });
-    expect(JSON.parse(remoteManifest)).toMatchObject({
-      id: result.manifest.id,
-      status: 'installed',
-    });
-    expect(routingValues.get('signup:enabled')).toBe('true');
-    expect(JSON.parse(routingValues.get('signup:allowlist')!)).toEqual([]);
-    expect(routingValues.has(PLATFORM_DISABLED_KEY)).toBe(false);
-    expect(lifecycleEvents[0]).toBe(`put:${PLATFORM_DISABLED_KEY}`);
-    expect(lifecycleEvents.filter((event) => event === 'verify')).toHaveLength(2);
-    expect(lifecycleEvents.indexOf('verify')).toBeLessThan(
-      lifecycleEvents.lastIndexOf(`deploy:${result.manifest.deployment.resources.dispatchWorker}`),
-    );
-    expect(lifecycleEvents.indexOf(`delete:${PLATFORM_DISABLED_KEY}`)).toBeLessThan(
-      lifecycleEvents.lastIndexOf('verify'),
-    );
-    expect(listInstallationManifests(directory)).toHaveLength(1);
-    expect(readdirSync(join(directory, 'account')).some((name) => name.endsWith('.secrets'))).toBe(
-      false,
-    );
-  });
+      expect(result.manifest.status).toBe('installed');
+      expect(result.manifest.steps.some((step) => step.key === 'adoption-intent:zone')).toBe(true);
+      expect(databaseClaims).toEqual([[result.manifest.id, result.manifest.ownershipNonce]]);
+      expect(result.manifest.resources).toHaveLength(legacyRuntime ? 15 : 16);
+      const workerOrder = [
+        result.manifest.deployment.resources.apiWorker,
+        result.manifest.deployment.resources.proxyWorker,
+        ...(!legacyRuntime ? [result.manifest.deployment.resources.emailGatewayWorker] : []),
+        result.manifest.deployment.resources.tailWorker,
+        result.manifest.deployment.resources.dispatchWorker,
+      ];
+      expect(deployed).toEqual([...workerOrder, ...workerOrder]);
+      const trafficStates = legacyRuntime
+        ? ['staging', 'staging', undefined, 'staging', 'enabled', 'enabled', undefined, 'enabled']
+        : [
+            'staging',
+            'staging',
+            'staging',
+            undefined,
+            'staging',
+            'enabled',
+            'enabled',
+            'enabled',
+            undefined,
+            'enabled',
+          ];
+      expect(deployedTrafficStates).toEqual(trafficStates);
+      expect(apiSecrets).toMatchObject({ PLATFORM_BOOTSTRAP_GITHUB_ID: '583231' });
+      expect(JSON.parse(r2OwnershipMarker)).toMatchObject({
+        accountId: 'account',
+        installationId: result.manifest.id,
+        ownershipNonce: result.manifest.ownershipNonce,
+        resourceKey: 'assets-bucket',
+      });
+      expect(JSON.parse(remoteManifest)).toMatchObject({
+        id: result.manifest.id,
+        status: 'installed',
+      });
+      expect(routingValues.get('signup:enabled')).toBe('true');
+      expect(JSON.parse(routingValues.get('signup:allowlist')!)).toEqual([]);
+      expect(routingValues.has(PLATFORM_DISABLED_KEY)).toBe(false);
+      expect(lifecycleEvents[0]).toBe(`put:${PLATFORM_DISABLED_KEY}`);
+      expect(lifecycleEvents.filter((event) => event === 'verify')).toHaveLength(2);
+      expect(lifecycleEvents.indexOf('verify')).toBeLessThan(
+        lifecycleEvents.lastIndexOf(
+          `deploy:${result.manifest.deployment.resources.dispatchWorker}`,
+        ),
+      );
+      expect(lifecycleEvents.indexOf(`delete:${PLATFORM_DISABLED_KEY}`)).toBeLessThan(
+        lifecycleEvents.lastIndexOf('verify'),
+      );
+      expect(listInstallationManifests(directory)).toHaveLength(1);
+      expect(
+        readdirSync(join(directory, 'account')).some((name) => name.endsWith('.secrets')),
+      ).toBe(false);
+    },
+  );
 
   it('closes the routing gate before an ambiguous fresh Worker upload', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'void-platform-worker-ambiguity-test-'));
@@ -3473,6 +3497,7 @@ describe('platform installer', () => {
         listWorkerNames: async () => [
           deployment.resources.apiWorker,
           deployment.resources.proxyWorker,
+          deployment.resources.emailGatewayWorker,
           deployment.resources.tailWorker,
           deployment.resources.dispatchWorker,
         ],
@@ -3665,7 +3690,7 @@ describe('platform installer', () => {
       authentication: { configurable: true, providers: ['google', 'oidc'] },
       capabilities: { githubOAuth: false, googleOAuth: true },
     });
-    expect(emptyCoreUpgradeConfigs).toHaveLength(8);
+    expect(emptyCoreUpgradeConfigs).toHaveLength(10);
     expect(resumedSecretPayloads.slice(0, 2)).toEqual([
       resumedUpdates,
       { CF_API_TOKEN: 'retry-cf-token' },
@@ -3673,12 +3698,12 @@ describe('platform installer', () => {
     expect(
       readInstallationRecoverySecrets(emptyCoreUpgrade.manifest)?.workerSecretUpdatesJson,
     ).toBe(undefined);
-    for (const index of [0, 1, 3]) {
+    for (const index of [0, 1, 2, 4]) {
       expect(
         (emptyCoreUpgradeConfigs[index]!.vars as Record<string, unknown>).PLATFORM_TRAFFIC_STATE,
       ).toBe('staging');
     }
-    for (const index of [4, 5, 7]) {
+    for (const index of [5, 6, 7, 9]) {
       expect(
         (emptyCoreUpgradeConfigs[index]!.vars as Record<string, unknown>).PLATFORM_TRAFFIC_STATE,
       ).toBe('enabled');
@@ -3776,10 +3801,12 @@ describe('platform installer', () => {
     expect(sandboxDrainDeployments).toEqual([
       deployment.resources.apiWorker,
       deployment.resources.proxyWorker,
+      deployment.resources.emailGatewayWorker,
       deployment.resources.tailWorker,
       deployment.resources.dispatchWorker,
     ]);
     expect(sandboxDrainTrafficStates).toEqual([
+      'sandbox-drain',
       'sandbox-drain',
       'sandbox-drain',
       undefined,
@@ -3835,16 +3862,18 @@ describe('platform installer', () => {
       safetyProtocols: { sandboxDrain: 2 },
       status: 'installed',
     });
-    expect(resumedDrainDeployments).toHaveLength(8);
-    expect(resumedDrainDeployments.slice(0, 4)).toEqual([
+    expect(resumedDrainDeployments).toHaveLength(10);
+    expect(resumedDrainDeployments.slice(0, 5)).toEqual([
       `${deployment.resources.apiWorker}:sandbox-drain`,
       `${deployment.resources.proxyWorker}:sandbox-drain`,
+      `${deployment.resources.emailGatewayWorker}:sandbox-drain`,
       `${deployment.resources.tailWorker}:undefined`,
       `${deployment.resources.dispatchWorker}:sandbox-drain`,
     ]);
-    expect(resumedDrainDeployments.slice(4)).toEqual([
+    expect(resumedDrainDeployments.slice(5)).toEqual([
       `${deployment.resources.apiWorker}:enabled`,
       `${deployment.resources.proxyWorker}:enabled`,
+      `${deployment.resources.emailGatewayWorker}:enabled`,
       `${deployment.resources.tailWorker}:undefined`,
       `${deployment.resources.dispatchWorker}:enabled`,
     ]);
@@ -3895,10 +3924,12 @@ describe('platform installer', () => {
     expect(deployed).toEqual([
       deployment.resources.apiWorker,
       deployment.resources.proxyWorker,
+      deployment.resources.emailGatewayWorker,
       deployment.resources.tailWorker,
       deployment.resources.dispatchWorker,
       deployment.resources.apiWorker,
       deployment.resources.proxyWorker,
+      deployment.resources.emailGatewayWorker,
       deployment.resources.tailWorker,
       deployment.resources.dispatchWorker,
     ]);
@@ -3916,7 +3947,7 @@ describe('platform installer', () => {
       manifestSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
       source: 'custom',
     });
-    expect(upgraded.manifest.resources).toHaveLength(15);
+    expect(upgraded.manifest.resources).toHaveLength(16);
 
     const currentRuntime = resolvePlatformRuntime(getPlatformRuntimeDirectory());
     const earlierDatabase = migrationSubset(currentRuntime.manifest.database.migrations.length - 1);
@@ -4051,7 +4082,7 @@ describe('platform installer', () => {
       },
     });
     expect(downgradeEvents[0]).toBe('gate:closed');
-    expect(downgradeEvents.filter((event) => event.startsWith('deploy:'))).toHaveLength(8);
+    expect(downgradeEvents.filter((event) => event.startsWith('deploy:'))).toHaveLength(10);
     expect(downgradeEvents.indexOf('gate:open')).toBeGreaterThan(
       downgradeEvents.lastIndexOf(`deploy:${deployment.resources.dispatchWorker}`),
     );
@@ -4115,13 +4146,13 @@ describe('platform installer', () => {
         ...repairEvents.flatMap((event, index) => (event.startsWith('deploy:') ? [index] : [])),
       ),
     );
-    expect(repairedWorkerConfigs).toHaveLength(8);
-    for (const index of [0, 1, 3]) {
+    expect(repairedWorkerConfigs).toHaveLength(10);
+    for (const index of [0, 1, 2, 4]) {
       expect(
         (repairedWorkerConfigs[index]!.vars as Record<string, unknown>).PLATFORM_TRAFFIC_STATE,
       ).toBe('staging');
       expect(
-        (repairedWorkerConfigs[index + 4]!.vars as Record<string, unknown>).PLATFORM_TRAFFIC_STATE,
+        (repairedWorkerConfigs[index + 5]!.vars as Record<string, unknown>).PLATFORM_TRAFFIC_STATE,
       ).toBe('enabled');
     }
 
@@ -4179,8 +4210,8 @@ describe('platform installer', () => {
     );
     expect(legacyEnableResult.waitingForSandboxDrain).toBe(true);
     expect(legacyEnableGateOpened).toBe(false);
-    expect(legacyEnableConfigs).toHaveLength(4);
-    for (const index of [0, 1, 3]) {
+    expect(legacyEnableConfigs).toHaveLength(5);
+    for (const index of [0, 1, 2, 4]) {
       expect(
         (legacyEnableConfigs[index]!.vars as Record<string, unknown>).PLATFORM_TRAFFIC_STATE,
       ).toBe('sandbox-drain');
@@ -4213,7 +4244,7 @@ describe('platform installer', () => {
     );
     expect(disabledUpgrade.manifest.status).toBe('disabled');
     expect(disabledHealthChecks).toBe(0);
-    expect(disabledConfigs).toHaveLength(4);
+    expect(disabledConfigs).toHaveLength(5);
     for (const config of disabledConfigs) {
       expect(config.workers_dev).toBe(false);
       expect(config.preview_urls).toBe(false);
@@ -4256,7 +4287,7 @@ describe('platform installer', () => {
       },
     );
     expect(resumedDisabledUpgrade.manifest.status).toBe('disabled');
-    expect(resumedConfigs).toHaveLength(4);
+    expect(resumedConfigs).toHaveLength(5);
     for (const config of resumedConfigs) {
       expect(config.workers_dev).toBe(false);
       expect(config.preview_urls).toBe(false);
@@ -4325,12 +4356,12 @@ describe('platform installer', () => {
           deployWorker: async (config) => {
             const deploymentIndex = ++failedEnableDeploys;
             failedEnableEvents.push(`deploy:${deploymentIndex}:${String(config.name)}`);
-            if (deploymentIndex === 6) {
+            if (deploymentIndex === 7) {
               throw new Error('generation 2 deployment failed');
             }
             return async () => {
               failedEnableEvents.push(`rollback:${deploymentIndex}:${String(config.name)}`);
-              if (deploymentIndex === 5) {
+              if (deploymentIndex === 6) {
                 throw new Error('generation 2 rollback failed');
               }
             };
@@ -4344,7 +4375,7 @@ describe('platform installer', () => {
       'generation 2 deployment failed Automatic Worker rollback was incomplete: generation 2 rollback failed',
     );
     expect(failedEnableEvents.filter((event) => event.startsWith('rollback:'))).toEqual([
-      `rollback:5:${deployment.resources.apiWorker}`,
+      `rollback:6:${deployment.resources.apiWorker}`,
     ]);
 
     const failedEnableManifest = listInstallationManifests(directory)[0]!;
@@ -4361,14 +4392,14 @@ describe('platform installer', () => {
       verifyHealth: async () => {},
     });
     expect(retriedEnable.manifest.status).toBe('installed');
-    expect(retryPreviousConfigs).toHaveLength(8);
-    expect(retryPreviousConfigs.slice(0, 4).every((config) => config.workers_dev === false)).toBe(
+    expect(retryPreviousConfigs).toHaveLength(10);
+    expect(retryPreviousConfigs.slice(0, 5).every((config) => config.workers_dev === false)).toBe(
       true,
     );
-    expect(retryPreviousConfigs.slice(4).every((config) => config.workers_dev === true)).toBe(true);
+    expect(retryPreviousConfigs.slice(5).every((config) => config.workers_dev === true)).toBe(true);
     expect(
       retryPreviousConfigs
-        .slice(4)
+        .slice(5)
         .filter((config) => !String(config.name).endsWith('-tail'))
         .every(
           (config) => (config.vars as Record<string, unknown>).PLATFORM_TRAFFIC_STATE === 'staging',
@@ -4404,19 +4435,19 @@ describe('platform installer', () => {
     expect(enabledUpgrade.manifest.deployment.authentication.configurable).toBe(true);
     expect(enabledHealthChecks).toBe(2);
     expect(deletedKvValues).toContain('__void/platform/disabled/v1');
-    expect(enabledConfigs).toHaveLength(8);
-    for (const config of enabledConfigs.slice(0, 4)) {
+    expect(enabledConfigs).toHaveLength(10);
+    for (const config of enabledConfigs.slice(0, 5)) {
       expect((config.vars as Record<string, unknown>).PLATFORM_TRAFFIC_STATE).not.toBe('enabled');
     }
-    for (const config of enabledConfigs.slice(4)) {
+    for (const config of enabledConfigs.slice(5)) {
       expect(config.workers_dev).toBe(true);
-      expect(config.preview_urls).toBe(true);
+      expect(config.preview_urls).toBe(config.name !== deployment.resources.emailGatewayWorker);
       if (!String(config.name).endsWith('-tail')) {
         expect((config.vars as Record<string, unknown>).PLATFORM_TRAFFIC_STATE).toBe('enabled');
       }
     }
     expect(
-      enabledConfigs.slice(4).find((config) => config.name === deployment.resources.dispatchWorker),
+      enabledConfigs.slice(5).find((config) => config.name === deployment.resources.dispatchWorker),
     ).toHaveProperty('routes');
 
     const disabledRollbackStates: Array<unknown> = [];
@@ -4494,7 +4525,7 @@ describe('platform installer', () => {
     expect(partialEvents).toEqual([
       `deploy:${deployment.resources.apiWorker}`,
       `deploy:${deployment.resources.proxyWorker}`,
-      `deploy:${deployment.resources.tailWorker}`,
+      `deploy:${deployment.resources.emailGatewayWorker}`,
       `rollback:${deployment.resources.proxyWorker}`,
       `rollback:${deployment.resources.apiWorker}`,
     ]);
@@ -4519,9 +4550,10 @@ describe('platform installer', () => {
         },
       }),
     ).rejects.toThrow('health check failed');
-    expect(healthEvents.slice(-4)).toEqual([
+    expect(healthEvents.slice(-5)).toEqual([
       `rollback:${deployment.resources.dispatchWorker}`,
       `rollback:${deployment.resources.tailWorker}`,
+      `rollback:${deployment.resources.emailGatewayWorker}`,
       `rollback:${deployment.resources.proxyWorker}`,
       `rollback:${deployment.resources.apiWorker}`,
     ]);
@@ -4547,7 +4579,7 @@ describe('platform installer', () => {
     ).rejects.toThrow(
       'health check failed Automatic Worker rollback was incomplete: rollback unavailable',
     );
-    expect(rollbackIndex).toBe(4);
+    expect(rollbackIndex).toBe(5);
 
     const interruptedCutover = {
       ...enabledUpgrade.manifest,

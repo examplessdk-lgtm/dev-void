@@ -35,6 +35,12 @@ export interface SendEmailOptions {
   headers?: Record<string, string>;
   attachments?: Array<Attachment>;
   /**
+   * Deduplicates a platform send for 30 days. Reuse the same key and message
+   * when checking an uncertain attempt; a changed message is a conflict.
+   * Native Cloudflare bindings do not provide this guarantee.
+   */
+  idempotencyKey?: string;
+  /**
    * Per-call escape hatch for local development. When true, bypasses the
    * `void dev` in-memory inbox for this one send.
    *
@@ -58,6 +64,8 @@ export type SendEmailErrorCode =
   | 'UNVERIFIED_DESTINATION'
   | 'MIME_ERROR'
   | 'QUOTA_EXCEEDED'
+  | 'IDEMPOTENCY_CONFLICT'
+  | 'OUTCOME_UNKNOWN'
   | 'UPSTREAM_ERROR';
 
 export interface SendEmailError {
@@ -74,7 +82,17 @@ export interface SendEmailError {
 export interface SendEmailDelivery {
   recipient: string;
   messageId: string;
+  state?: 'provider_accepted';
 }
+
+export type EmailDeliveryState =
+  | 'rejected'
+  | 'reserved'
+  | 'attempt_started'
+  | 'provider_accepted'
+  | 'failed'
+  | 'outcome_unknown'
+  | 'cancelled';
 
 /**
  * Per-recipient outcome for a multi-recipient send. `ok: true` carries the
@@ -82,8 +100,8 @@ export interface SendEmailDelivery {
  * recipient (e.g. one address is unverified while others succeed).
  */
 export type SendEmailRecipientResult =
-  | { recipient: string; ok: true; messageId: string }
-  | { recipient: string; ok: false; error: SendEmailError };
+  | { recipient: string; ok: true; messageId: string; state?: 'provider_accepted' }
+  | { recipient: string; ok: false; error: SendEmailError; state?: EmailDeliveryState };
 
 /**
  * Result of `sendEmail`.
@@ -93,20 +111,19 @@ export type SendEmailRecipientResult =
  * `'deliveries' in result` (per-recipient failure, some may have succeeded):
  *
  * - `{ ok: true, ids }`            — every envelope succeeded.
- * - `{ ok: false, error }`         — pre-flight failure (validation, MIME,
- *                                     missing binding); no envelopes attempted.
+ * - `{ ok: false, error }`         — validation or transport failure. An
+ *                                     OUTCOME_UNKNOWN may have been submitted;
+ *                                     never retry it with a new idempotency key.
  * - `{ ok: false, deliveries }`    — sends were attempted; at least one failed.
  *                                     `deliveries` carries the per-recipient
- *                                     outcome so callers can safely retry only
- *                                     the failed ones. There is no aggregate
- *                                     top-level error — distinct recipients can
- *                                     fail with distinct errors, and picking one
- *                                     would be arbitrary.
+ *                                     outcome. Provider acceptance does not
+ *                                     establish mailbox delivery. Unknown
+ *                                     outcomes must not be blindly retried.
  */
 export type SendEmailResult =
-  | { ok: true; ids: Array<SendEmailDelivery> }
-  | { ok: false; error: SendEmailError }
-  | { ok: false; deliveries: Array<SendEmailRecipientResult> };
+  | { ok: true; ids: Array<SendEmailDelivery>; operationId?: string }
+  | { ok: false; error: SendEmailError; operationId?: string }
+  | { ok: false; deliveries: Array<SendEmailRecipientResult>; operationId?: string };
 
 /**
  * Normalized representation produced by validation, consumed by both the

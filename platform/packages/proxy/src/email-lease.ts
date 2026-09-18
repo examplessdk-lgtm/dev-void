@@ -19,9 +19,8 @@
  * The api owns the OAuth refresh chain (serialized per row, the rotated
  * refresh token persisted atomically with it) and returns a fresh access
  * token on every lease — there is no access-token cache on the api side.
- * The proxy caches the leased credential in-memory per domain for at most
- * 45 minutes; the OAuth access token (~1 hour) outlives that, so a cached
- * lease is never used past its own validity.
+ * The proxy requests a fresh lease for every provider submission so a
+ * revoked or rotated credential cannot be reused from an isolate cache.
  *
  * A leased credential is a customer secret: it is never logged, never
  * interpolated into an error message, and never leaves this module except
@@ -31,34 +30,18 @@
 import type { Env } from './types.ts';
 
 export type EmailDomainLease =
-  | { kind: 'api_token'; token: string }
-  | { kind: 'oauth_grant'; accessToken: string };
-
-/** The contract's ceiling for the proxy-side cache: at most 45 minutes. */
-const LEASE_CACHE_TTL_MS = 45 * 60 * 1000;
-
-interface LeaseCacheEntry {
-  lease: EmailDomainLease;
-  expiresAt: number;
-}
-
-// In-memory per-isolate cache, keyed by domain. Same pattern as
-// resolve.ts's resource cache.
-const leaseCache = new Map<string, LeaseCacheEntry>();
+  | { kind: 'api_token'; token: string; accountId: string }
+  | { kind: 'oauth_grant'; accessToken: string; accountId: string };
 
 /** @internal Exposed for testing only. */
-export function clearEmailDomainLeaseCache(): void {
-  leaseCache.clear();
-}
+export function clearEmailDomainLeaseCache(): void {}
 
 /**
  * Drop one cached lease. Called when Cloudflare refused the credential
  * (401/403 from send_raw) so the next send re-leases instead of replaying a
  * credential the api may already have marked revoked.
  */
-export function dropEmailDomainLease(domain: string): void {
-  leaseCache.delete(domain);
-}
+export function dropEmailDomainLease(_domain: string): void {}
 
 /** The bearer value for the send_raw Authorization header. */
 export function leaseBearer(lease: EmailDomainLease): string {
@@ -74,21 +57,21 @@ export function leaseBearer(lease: EmailDomainLease): string {
 export async function leaseEmailDomainCredential(
   env: Pick<Env, 'API' | 'JWT_SECRET'>,
   domain: string,
+  projectId: string,
 ): Promise<EmailDomainLease | null> {
-  const cached = leaseCache.get(domain);
-  if (cached && cached.expiresAt > Date.now()) {
-    return cached.lease;
-  }
   let res: Response;
   try {
-    const token = await hmacSign(domain, env.JWT_SECRET);
+    const token = await hmacSign(
+      `email-lease-v1\n${projectId}\n${domain.toLowerCase()}`,
+      env.JWT_SECRET,
+    );
     res = await env.API.fetch('https://api/internal/email/domain-credential', {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
         'x-void-internal': token,
       },
-      body: JSON.stringify({ domain }),
+      body: JSON.stringify({ domain, projectId }),
     });
   } catch {
     return null;
@@ -106,7 +89,6 @@ export async function leaseEmailDomainCredential(
   if (!lease) {
     return null;
   }
-  leaseCache.set(domain, { lease, expiresAt: Date.now() + LEASE_CACHE_TTL_MS });
   return lease;
 }
 
@@ -115,13 +97,19 @@ function parseLease(data: unknown): EmailDomainLease | null {
     return null;
   }
   const kind = (data as { kind?: unknown }).kind;
+  const accountId = (data as { accountId?: unknown }).accountId;
+  if (typeof accountId !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(accountId)) {
+    return null;
+  }
   if (kind === 'api_token') {
     const token = (data as { token?: unknown }).token;
-    return typeof token === 'string' && token.length > 0 ? { kind, token } : null;
+    return typeof token === 'string' && token.length > 0 ? { kind, token, accountId } : null;
   }
   if (kind === 'oauth_grant') {
     const accessToken = (data as { accessToken?: unknown }).accessToken;
-    return typeof accessToken === 'string' && accessToken.length > 0 ? { kind, accessToken } : null;
+    return typeof accessToken === 'string' && accessToken.length > 0
+      ? { kind, accessToken, accountId }
+      : null;
   }
   return null;
 }

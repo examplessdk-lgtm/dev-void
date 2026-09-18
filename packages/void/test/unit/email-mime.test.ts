@@ -503,7 +503,7 @@ describe('normalizeEmail', () => {
 
     it('is derived from the per-part floor and the message cap', () => {
       expect(MAX_ATTACHMENTS).toBe(Math.floor(MAX_MESSAGE_BYTES / PART_MIN_OCTETS));
-      expect(MAX_ATTACHMENTS).toBe(88_115);
+      expect(MAX_ATTACHMENTS).toBe(44_057);
     });
 
     it('refuses one over MAX_ATTACHMENTS before normalizing any of them', async () => {
@@ -2440,7 +2440,7 @@ describe('buildMime body size projection', () => {
 
   it('counts text and html together', async () => {
     // Each alone projects under the limit; together they cannot fit.
-    const half = '漢'.repeat(Math.ceil((1.8 * 1024 * 1024) / 3));
+    const half = '漢'.repeat(Math.ceil((0.9 * 1024 * 1024) / 3));
     await expect(
       build({ from: 'a@x.dev', to: 'b@y.dev', subject: 's', text: half }),
     ).resolves.toBeTruthy();
@@ -2455,7 +2455,7 @@ describe('buildMime body size projection', () => {
     // The projection must let it through; the post-render check must reject
     // it. One full ~10 MB render, so it carries its own timeout (0.4 s here,
     // several times that on a loaded CI runner).
-    const nearly = '漢'.repeat(Math.ceil((3.3 * 1024 * 1024) / 3));
+    const nearly = '漢'.repeat(Math.ceil((1.65 * 1024 * 1024) / 3));
     const email = await normalizeEmail({
       from: 'a@x.dev',
       to: 'b@y.dev',
@@ -2517,81 +2517,21 @@ describe('buildMime header size projection', () => {
     });
   });
 
-  it('counts a custom header, and not a reserved one that is never rendered', async () => {
-    const big = 'x'.repeat(11 * 1024 * 1024);
-    await expectProjected({
-      from: 'a@x.dev',
-      to: 'b@y.dev',
-      subject: 's',
-      text: 'hi',
-      headers: { 'X-Note': big },
-    });
-    // `Subject` in the custom map is dropped by `buildMime`, so charging it
-    // would reject a message that fits.
-    const { text } = await build({
-      from: 'a@x.dev',
-      to: 'b@y.dev',
-      subject: 's',
-      text: 'hi',
-      headers: { Subject: big },
-    });
-    expect(text).toContain('Subject: s\r\n');
-  });
-
-  // A custom header's NAME is rendered verbatim too, and `normalizeEmail`
-  // bounds one name at under a kilobyte — not the sum, nor the count. With
-  // empty values the names and the `: ` CRLF around each are the whole
-  // message, and none of it was charged: 60k empty headers with
-  // 500-character names — a 30 MB message — projected to zero, rendered in
-  // full and peaked at 121 MB of a 128 MB isolate (measured, 240 ms); 100k
-  // of them went to 169 MB. Every name and its framing is charged now, so
-  // the same set is refused before a line is built (98 ms, 67 MB peak).
-  it('counts every custom header name and the framing around it', async () => {
-    const names = (count: number, len: number) =>
-      Object.fromEntries(Array.from({ length: count }, (_, i) => [`X${i}`.padEnd(len, 'a'), '']));
-    const started = performance.now();
-    // 22k names of 500 characters: 11 MB of names, nothing else.
-    await expectProjected({
-      from: 'a@x.dev',
-      to: 'b@y.dev',
-      subject: 's',
-      text: 't',
-      headers: names(22_000, 500),
-    });
-    // 31 ms measured; the bound leaves room for a loaded CI runner.
-    expect(performance.now() - started).toBeLessThan(2000);
-    // The bound is exact for a header with an empty value: 10,485 names of
-    // 996 characters project 745 octets under the cap and render 548 under
-    // it, so they build. One more 600-character name projects 141 under
-    // and renders 57 over, so the post-render check — not the projection —
-    // must be the one to refuse it. One more 996-character name is over
-    // by projection alone.
-    const fits = names(10_485, 996);
-    const { raw } = await build({
-      from: 'a@x.dev',
-      to: 'b@y.dev',
-      subject: 's',
-      text: 't',
-      headers: fits,
-    });
-    expect(raw.byteLength).toBeLessThanOrEqual(MAX_MESSAGE_BYTES);
+  it('bounds aggregate custom headers before rendering, including names and UTF-8 bytes', async () => {
+    const base = { from: 'a@x.dev', to: 'b@y.dev', subject: 's', text: 'hi' };
     await expect(
-      build({
-        from: 'a@x.dev',
-        to: 'b@y.dev',
-        subject: 's',
-        text: 't',
-        headers: { ...fits, ['Y'.padEnd(600, 'a')]: '' },
-      }),
-    ).rejects.toThrow(/message size \d+ bytes exceeds Cloudflare limit/);
-    await expectProjected({
-      from: 'a@x.dev',
-      to: 'b@y.dev',
-      subject: 's',
-      text: 't',
-      headers: names(10_486, 996),
-    });
-  }, 30_000);
+      normalizeEmail({ ...base, headers: { 'X-Note': 'x'.repeat(16 * 1024) } }),
+    ).rejects.toThrow('16 KiB');
+    await expect(
+      normalizeEmail({ ...base, headers: { 'X-Note': '漢'.repeat(6000) } }),
+    ).rejects.toThrow('16 KiB');
+    const names = Object.fromEntries(
+      Array.from({ length: 40 }, (_, i) => [`X${i}`.padEnd(500, 'a'), '']),
+    );
+    await expect(normalizeEmail({ ...base, headers: names })).rejects.toThrow('16 KiB');
+    const { text } = await build({ ...base, headers: { 'X-Note': 'short note' } });
+    expect(text).toContain('X-Note: short note');
+  });
 
   // The runner's own heap is not capped, so the pin runs the projection in
   // a child with the isolate's cap. 60k empty headers with 996-character
@@ -2609,9 +2549,8 @@ describe('buildMime header size projection', () => {
       const headers = {};
       for (let i = 0; i < 60_000; i++) headers['X' + i + 'a'.repeat(996 - 1 - String(i).length)] = '';
       const t0 = performance.now();
-      const email = await normalizeEmail({ from: 'a@x.dev', to: 'b@y.dev', subject: 's', text: 't', headers });
       let error;
-      try { buildMime(email); } catch (e) { error = e; }
+      try { const email = await normalizeEmail({ from: 'a@x.dev', to: 'b@y.dev', subject: 's', text: 't', headers }); buildMime(email); } catch (e) { error = e; }
       console.log(JSON.stringify({ code: error?.code, message: error?.message, ms: performance.now() - t0 }));
     `;
     const stdout = execFileSync(
@@ -2625,7 +2564,7 @@ describe('buildMime header size projection', () => {
       ms: number;
     };
     expect(result.code).toBe('MIME_ERROR');
-    expect(result.message).toMatch(PROJECTION);
+    expect(result.message).toContain('16 KiB');
     // 173 ms measured locally; the bound leaves room for CI's slower runner
     // (about 6x), where the old shape did not finish at all.
     expect(result.ms).toBeLessThan(5000);
@@ -2718,13 +2657,13 @@ describe('buildMime header size projection', () => {
       to: 'b@y.dev',
       subject: 's',
       text: 't',
-      attachments: parts(50_000),
+      attachments: parts(25_000),
     });
     // The bound is exact for a part with no content: 5,012 parts project to
     // 640 octets under the cap and render to 10.66 MB, so the post-render
     // check — not the projection — must be the one to refuse them.
     await expect(
-      build({ from: 'a@x.dev', to: 'b@y.dev', subject: 's', text: 't', attachments: parts(5_012) }),
+      build({ from: 'a@x.dev', to: 'b@y.dev', subject: 's', text: 't', attachments: parts(2_506) }),
     ).rejects.toThrow(/message size \d+ bytes exceeds Cloudflare limit/);
     // And 4,900 parts, a 10.42 MB message, build.
     const { raw } = await build({
@@ -2732,7 +2671,7 @@ describe('buildMime header size projection', () => {
       to: 'b@y.dev',
       subject: 's',
       text: 't',
-      attachments: parts(4_900),
+      attachments: parts(2_450),
     });
     expect(raw.byteLength).toBeLessThanOrEqual(MAX_MESSAGE_BYTES);
   });
@@ -2741,7 +2680,10 @@ describe('buildMime header size projection', () => {
     // A 5 MB chain of short ids is a legal message: it folds at its spaces
     // into 76-column lines and renders under the cap.
     const id = '<abcdefgh@x>';
-    const chain = Array.from({ length: Math.floor((5 * 1024 * 1024) / (id.length + 1)) }, () => id);
+    const chain = Array.from(
+      { length: Math.floor((2.5 * 1024 * 1024) / (id.length + 1)) },
+      () => id,
+    );
     const { raw, text } = await build({
       from: 'a@x.dev',
       to: 'b@y.dev',
@@ -2771,7 +2713,7 @@ describe('buildMime header size projection', () => {
     // reject it. This is the one case that needs a full ~10 MB render (the
     // property is AT the boundary), so it carries its own timeout: 0.8 s
     // here, 5.4 s on a loaded 4-vCPU CI runner.
-    const nearly = '漢'.repeat(2_150_000);
+    const nearly = '漢'.repeat(1_075_000);
     const email = await normalizeEmail({
       from: 'a@x.dev',
       to: 'b@y.dev',
@@ -2825,7 +2767,7 @@ describe('body line scan memory', () => {
   // runner's heap is not the isolate's; this pins the rendered shape and
   // that the scans stay linear.
   it('builds a legal message of millions of short lines in text and html', async () => {
-    const lines = 1_500_000;
+    const lines = 750_000;
     const started = performance.now();
     const { raw, text } = await build({
       from: 'a@x.dev',

@@ -506,6 +506,7 @@ export function detectNonSpaFallbackWarning(
  */
 export function buildVoidManifest(opts: {
   bindings: InferredBindings;
+  hasEmailHandlers?: boolean;
   migrations?: Array<MigrationFile>;
   schedules?: Array<ScheduleMeta>;
   ssr?: boolean;
@@ -549,6 +550,9 @@ export function buildVoidManifest(opts: {
   const resolvedDialect = dialect ?? 'sqlite';
 
   const manifest: DeployManifest = { version: 3, assetManifestVersion: 2, bindings: {} };
+  if (opts.hasEmailHandlers) {
+    manifest.emailProtocolVersion = 1;
+  }
   if (bindings.needsAuth) {
     manifest.auth = true;
   }

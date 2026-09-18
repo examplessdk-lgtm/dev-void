@@ -77,6 +77,56 @@ function installed(source: PlatformRuntime) {
 }
 
 describe('platform post-success rollback', () => {
+  it('blocks rollback to a four-Worker runtime after the email gateway was installed', () => {
+    const target = runtime({
+      digest: 'a'.repeat(64),
+      migrations: [firstMigration],
+      platformVersion: '1.0.0',
+      schemaDigest: 'c'.repeat(64),
+    });
+    const source = runtime({
+      digest: 'b'.repeat(64),
+      migrations: [firstMigration, secondMigration],
+      platformVersion: '1.1.0',
+      schemaDigest: 'd'.repeat(64),
+      rollbackSafeFrom: [{ platformVersion: '1.0.0', schemaDigest: 'c'.repeat(64) }],
+    });
+    const installation = installed(source);
+    expect(() =>
+      assertPlatformRollbackCompatibility(
+        {
+          ...installation,
+          resources: [
+            ...installation.resources,
+            {
+              configHash: '',
+              key: 'email-gateway-worker',
+              kind: 'worker',
+              id: installation.deployment.resources.emailGatewayWorker,
+              name: installation.deployment.resources.emailGatewayWorker,
+              ownership: 'created',
+              state: 'ready',
+            },
+          ],
+        },
+        target,
+        source,
+      ),
+    ).toThrow('predates the email gateway');
+    expect(() =>
+      assertPlatformRollbackCompatibility(
+        {
+          ...installation,
+          deployment: {
+            ...installation.deployment,
+            capabilities: { ...installation.deployment.capabilities, email: true },
+          },
+        },
+        target,
+        source,
+      ),
+    ).toThrow('predates the email gateway');
+  });
   it('blocks a runtime without human-session revocation even when its database rollback is declared safe', () => {
     const target = runtime({
       digest: 'a'.repeat(64),

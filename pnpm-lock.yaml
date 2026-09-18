@@ -435,7 +435,7 @@ importers:
         version: 0.3.1(@types/node@26.5.1)(esbuild@0.27.7)(jiti@2.7.0)(sass@1.101.0)(svelte@5.57.0)(terser@5.51.2)(tsx@4.23.0)(typescript@7.0.2)(yaml@2.9.0)
       wrangler:
         specifier: 'catalog:'
-        version: 4.131.0(@cloudflare/workers-types@4.20260702.1)(@types/node@26.5.1)
+        version: 4.131.0(@cloudflare/workers-types@5.20260910.1)(@types/node@26.5.1)
 
   packages/react:
     dependencies:
@@ -875,8 +875,36 @@ importers:
         specifier: catalog:platform
         version: 4.130.0(@cloudflare/workers-types@5.20260910.1)
 
+  platform/packages/email-gateway:
+    dependencies:
+      '@void/platform':
+        specifier: workspace:*
+        version: link:../../../packages/platform
+      '@voidcloud/api':
+        specifier: workspace:*
+        version: link:../api
+      '@voidcloud/proxy':
+        specifier: workspace:*
+        version: link:../proxy
+    devDependencies:
+      '@cloudflare/workers-types':
+        specifier: catalog:platform
+        version: 5.20260910.1
+      typescript:
+        specifier: 'catalog:'
+        version: 7.0.2
+      vite-plus:
+        specifier: 'catalog:'
+        version: 0.3.1(@types/node@26.5.1)(esbuild@0.27.7)(jiti@2.7.0)(sass@1.101.0)(svelte@5.57.0)(terser@5.51.2)(tsx@4.23.0)(typescript@7.0.2)(yaml@2.9.0)
+      wrangler:
+        specifier: catalog:platform
+        version: 4.131.0(@cloudflare/workers-types@5.20260910.1)(@types/node@26.5.1)
+
   platform/packages/proxy:
     dependencies:
+      '@void/platform':
+        specifier: workspace:*
+        version: link:../../../packages/platform
       '@voidcloud/api':
         specifier: workspace:*
         version: link:../api
@@ -21643,6 +21671,24 @@ snapshots:
       blake3-wasm: 2.1.5
       esbuild: 0.27.7
       miniflare: 5.20260910.0-alpha(@types/node@26.1.0)
+      path-to-regexp: 6.3.0
+      unenv: 2.0.0-rc.24
+      workerd: 1.20260910.1
+    optionalDependencies:
+      '@cloudflare/workers-types': 5.20260910.1
+      fsevents: 2.3.3
+    transitivePeerDependencies:
+      - '@types/node'
+      - bufferutil
+      - utf-8-validate
+
+  wrangler@4.131.0(@cloudflare/workers-types@5.20260910.1)(@types/node@26.5.1):
+    dependencies:
+      '@cloudflare/kv-asset-handler': 0.5.0
+      '@cloudflare/unenv-preset': 2.16.1(unenv@2.0.0-rc.24)(workerd@1.20260910.1)
+      blake3-wasm: 2.1.5
+      esbuild: 0.27.7
+      miniflare: 5.20260910.0-alpha(@types/node@26.5.1)
       path-to-regexp: 6.3.0
       unenv: 2.0.0-rc.24
       workerd: 1.20260910.1

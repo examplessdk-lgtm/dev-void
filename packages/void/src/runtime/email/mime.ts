@@ -9,8 +9,8 @@
 import { validate as isValidEmailSyntax } from 'email-validator';
 import type { Address, Attachment, NormalizedAttachment, NormalizedEmail } from './types.ts';
 
-/** Cloudflare Email Workers reject messages larger than ~10 MB after base64 expansion. */
-export const MAX_MESSAGE_BYTES: number = 10 * 1024 * 1024;
+/** Encoded outbound MIME ceiling, separate from the 10 MiB inbound limit. */
+export const MAX_MESSAGE_BYTES: number = 5 * 1024 * 1024;
 
 /**
  * Upper bound on the TOTAL attachment bytes `normalizeEmail` will materialize.
@@ -43,7 +43,7 @@ const MAX_ATTACHMENT_BYTES_TOTAL: number = Math.floor((MAX_MESSAGE_BYTES * 3) / 
  * Cap on the recipient count across `to`, `cc` and `bcc`, checked against
  * the RAW input before a single address is parsed.
  *
- * The platform proxy refuses more than 100 recipients (`MAX_RECIPIENTS` in
+ * The platform proxy refuses more than 50 recipients (`MAX_RECIPIENTS` in
  * `proxy/src/email.ts`, counted on the deduplicated list this module
  * produces), so on the platform a larger list is always rejected — but only
  * after the tenant has parsed every address and rendered the whole `To:`
@@ -64,7 +64,7 @@ const MAX_ATTACHMENT_BYTES_TOTAL: number = Math.floor((MAX_MESSAGE_BYTES * 3) / 
  * this bound exists to skip, so a list of 150 entries with 100 unique
  * addresses is refused here where the proxy would have accepted it.
  */
-export const MAX_RECIPIENTS: number = 100;
+export const MAX_RECIPIENTS: number = 50;
 
 /**
  * Pre-parse cap on one parsed address, in characters. RFC 5321 §4.5.3.1
@@ -749,6 +749,7 @@ export async function normalizeEmail(opts: {
     rejectCRLF('subject', opts.subject);
   }
   if (opts.headers) {
+    let headerBytes = 0;
     for (const [name, value] of Object.entries(opts.headers)) {
       if (!HEADER_NAME.test(name)) {
         throw new MimeError(
@@ -773,6 +774,13 @@ export async function normalizeEmail(opts: {
           `headers: a header name is ${name.length} characters; a field name cannot be folded, ` +
             `so its line would exceed the ${MAX_LINE_OCTETS}-octet limit in RFC 5322 §2.1.1. Shorten the name.`,
         );
+      }
+      if (headerBytes + name.length + value.length + 4 > 16 * 1024) {
+        throw new MimeError('MIME_ERROR', 'email: custom headers exceed the 16 KiB limit.');
+      }
+      headerBytes += name.length + new TextEncoder().encode(value).byteLength + 4;
+      if (headerBytes > 16 * 1024) {
+        throw new MimeError('MIME_ERROR', 'email: custom headers exceed the 16 KiB limit.');
       }
       rejectCRLF(`header '${name}'`, value);
     }

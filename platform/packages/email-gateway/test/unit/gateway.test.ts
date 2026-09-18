@@ -1,0 +1,286 @@
+import { beforeEach, describe, expect, it, vi } from 'vite-plus/test';
+
+const router = vi.hoisted(() => ({ routeInbound: vi.fn(), routeRelayed: vi.fn() }));
+vi.mock('../../../proxy/src/email-router.ts', () => ({
+  ...router,
+  MAX_INBOUND_BYTES: 10 * 1024 * 1024,
+  MAX_INBOUND_HEADERS: 1024,
+}));
+
+import { hmacVerifyState } from '../../../api/src/auth/hmac.ts';
+import gateway from '../../src/index.ts';
+
+const identityHeaders = {
+  authorization: 'Bearer relay-secret',
+  'x-void-email-account': 'account-1',
+  'x-void-email-zone': 'zone-1',
+  'x-void-email-ingress': 'gateway-1',
+  'x-void-email-request-id': '12345678-1234-4234-8234-123456789abc',
+  'x-void-email-from': 'sender@example.net',
+  'x-void-email-to': 'support@example.com',
+};
+const route = {
+  connectionId: 'connection-1',
+  projectId: 'project-1',
+  slug: 'support',
+  deploymentId: 'deployment-1',
+  workerName: 'worker-1',
+  addressing: 'custom',
+  domain: 'example.com',
+};
+const context = { waitUntil: vi.fn() } as unknown as ExecutionContext;
+const env = (apiFetch: (...args: Array<unknown>) => Promise<Response>) =>
+  ({
+    JWT_SECRET: 'platform-secret',
+    API: { fetch: apiFetch },
+    EMAIL_SHARED_ACCOUNT_ID: 'account-1',
+    EMAIL_SHARED_ZONE_ID: 'zone-1',
+    EMAIL_SHARED_INGRESS_NAME: 'gateway-1',
+  }) as never;
+
+function request(body: BodyInit, headers: Record<string, string> = {}) {
+  return new Request('https://gateway.example/email/ingress', {
+    method: 'POST',
+    body,
+    headers: {
+      ...identityHeaders,
+      'content-length': String(body instanceof Uint8Array ? body.byteLength : 0),
+      ...headers,
+    },
+    ...(body instanceof ReadableStream ? { duplex: 'half' as const } : {}),
+  } as RequestInit);
+}
+
+beforeEach(() => {
+  router.routeInbound.mockReset();
+  router.routeRelayed.mockReset();
+  router.routeRelayed.mockResolvedValue({ reject: false });
+});
+
+describe('dedicated email gateway', () => {
+  function receiptApi() {
+    const receipts = new Map<string, { digest: string; reject?: boolean }>();
+    return vi.fn(async (url: unknown, init?: unknown) => {
+      if (String(url).endsWith('/resolve-ingress')) {
+        return Response.json(route);
+      }
+      const request = new Request(String(url), init as RequestInit);
+      const raw = await request.text();
+      expect(
+        await hmacVerifyState(raw, request.headers.get('x-void-internal') ?? '', 'platform-secret'),
+      ).toBe(true);
+      const input = JSON.parse(raw);
+      const existing = receipts.get(input.receiptId);
+      if (String(url).endsWith('/receipts/claim')) {
+        if (!existing) {
+          receipts.set(input.receiptId, { digest: input.payloadDigest });
+          return Response.json({ state: 'claimed' });
+        }
+        if (existing.digest !== input.payloadDigest) {
+          return Response.json({ error: 'content conflict' }, { status: 409 });
+        }
+        return Response.json(
+          existing.reject === undefined
+            ? { state: 'in_progress' }
+            : { state: 'completed', reject: existing.reject },
+        );
+      }
+      expect(String(url)).toContain('/receipts/complete');
+      existing!.reject = input.reject;
+      return Response.json({ ok: true });
+    });
+  }
+
+  it('deduplicates completed HTTP attempts and binds the invocation to sender, recipient and MIME', async () => {
+    const environment = env(receiptApi());
+    const raw = new TextEncoder().encode('From: sender@example.net\r\n\r\nbody');
+    const first = await gateway.fetch(request(raw), environment, context);
+    expect(first.status).toBe(204);
+    expect(first.headers.get('x-void-email-receipt')).toMatch(/^[a-f0-9]{64}$/);
+    expect((await gateway.fetch(request(raw), environment, context)).status).toBe(204);
+    for (const headers of [
+      { 'x-void-email-from': 'other@example.net' },
+      { 'x-void-email-to': 'other@example.com' },
+    ]) {
+      expect((await gateway.fetch(request(raw, headers), environment, context)).status).toBe(409);
+    }
+    expect(
+      (
+        await gateway.fetch(
+          request(new TextEncoder().encode('From: sender@example.net\r\n\r\nchanged')),
+          environment,
+          context,
+        )
+      ).status,
+    ).toBe(409);
+    expect(router.routeRelayed).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not rerun an in-progress invocation on a concurrent duplicate', async () => {
+    const environment = env(receiptApi());
+    let finish!: () => void;
+    let started!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    router.routeRelayed.mockImplementationOnce(async () => {
+      started();
+      await new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      return { reject: false };
+    });
+    const raw = new TextEncoder().encode('From: sender@example.net\r\n\r\nbody');
+    const first = gateway.fetch(request(raw), environment, context);
+    await entered;
+    expect((await gateway.fetch(request(raw), environment, context)).status).toBe(503);
+    finish();
+    expect((await first).status).toBe(204);
+    expect(router.routeRelayed).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves transient routing failures for both HTTP and native ingress', async () => {
+    const environment = env(async () => new Response(null, { status: 503 }));
+    expect((await gateway.fetch(request(new Uint8Array()), environment, context)).status).toBe(503);
+    const message = {
+      from: 'sender@example.net',
+      to: 'support@example.com',
+      setReject: vi.fn(),
+    } as unknown as ForwardableEmailMessage;
+    await expect(gateway.email(message, environment, context)).rejects.toThrow(
+      'temporarily unavailable',
+    );
+    expect(message.setReject).not.toHaveBeenCalled();
+  });
+  it('authenticates ingress before consuming MIME bytes', async () => {
+    const pulled = vi.fn(() => {
+      throw new Error('body must stay unread');
+    });
+    const body = new ReadableStream<Uint8Array>({ pull: pulled }, { highWaterMark: 0 });
+    const response = await gateway.fetch(
+      request(body, { 'content-length': '5' }),
+      env(async () => new Response(null, { status: 403 })),
+      context,
+    );
+    expect(response.status).toBe(403);
+    expect(pulled).not.toHaveBeenCalled();
+  });
+
+  it('rejects oversize MIME before route resolution or body reading', async () => {
+    const apiFetch = vi.fn();
+    const response = await gateway.fetch(
+      request(new Uint8Array(), { 'content-length': String(10 * 1024 * 1024 + 1) }),
+      env(apiFetch),
+      context,
+    );
+    expect(response.status).toBe(413);
+    expect(apiFetch).not.toHaveBeenCalled();
+  });
+
+  it('requires complete ingress identity', async () => {
+    const apiFetch = vi.fn();
+    const response = await gateway.fetch(
+      request(new Uint8Array(), { 'x-void-email-zone': '' }),
+      env(apiFetch),
+      context,
+    );
+    expect(response.status).toBe(400);
+    expect(apiFetch).not.toHaveBeenCalled();
+  });
+
+  it('counts repeated physical MIME headers before routing to a tenant', async () => {
+    const raw = new TextEncoder().encode(`${'X-A: value\r\n'.repeat(1025)}\r\nbody`);
+    const response = await gateway.fetch(
+      request(raw),
+      env(async () => Response.json(route)),
+      context,
+    );
+    expect(response.status).toBe(502);
+    expect(router.routeRelayed).not.toHaveBeenCalled();
+  });
+
+  it('limits concurrent deliveries per isolate', async () => {
+    let finish!: (response: Response) => void;
+    const pending = new Promise<Response>((resolve) => {
+      finish = resolve;
+    });
+    const environment = env(async () => pending);
+    const first = gateway.fetch(request(new Uint8Array()), environment, context);
+    const second = gateway.fetch(request(new Uint8Array()), environment, context);
+    const third = await gateway.fetch(request(new Uint8Array()), environment, context);
+    expect(third.status).toBe(503);
+    finish(new Response(null, { status: 403 }));
+    expect((await first).status).toBe(403);
+    expect((await second).status).toBe(403);
+  });
+
+  it('passes an authenticated custom domain on the platform zone to the native email router', async () => {
+    const rejects: Array<string> = [];
+    const message = {
+      from: 'sender@example.net',
+      to: 'support@example.com',
+      setReject: (reason: string) => rejects.push(reason),
+    } as ForwardableEmailMessage;
+    await gateway.email(
+      message,
+      env(async (url, init) => {
+        expect(url).toBe('https://api/internal/email/resolve-ingress');
+        const request = new Request(String(url), init as RequestInit);
+        const identity = (await request.json()) as Record<string, unknown>;
+        expect(identity).toMatchObject({
+          accountId: 'account-1',
+          zoneId: 'zone-1',
+          ingressName: 'gateway-1',
+          native: true,
+        });
+        expect(
+          await hmacVerifyState(
+            'email-ingress-v1\naccount-1\nzone-1\ngateway-1\nsupport@example.com',
+            request.headers.get('x-void-internal') ?? '',
+            'platform-secret',
+          ),
+        ).toBe(true);
+        return Response.json(route);
+      }),
+      context,
+    );
+    expect(rejects).toEqual([]);
+    expect(router.routeInbound).toHaveBeenCalledWith(message, expect.anything(), context, route);
+  });
+
+  it('probes exact staged ingress identity through the authoritative API', async () => {
+    const body = JSON.stringify({
+      accountId: 'account-1',
+      zoneId: 'zone-1',
+      ingressName: 'gateway-1',
+    });
+    const probe = new Request('https://gateway.example/email/probe', {
+      method: 'POST',
+      body,
+      headers: { authorization: 'Bearer staged-secret', 'content-type': 'application/json' },
+    });
+    const response = await gateway.fetch(
+      probe,
+      env(async (url, init) => {
+        expect(url).toBe('https://api/internal/email/probe-ingress');
+        const request = new Request(String(url), init as RequestInit);
+        expect(
+          await hmacVerifyState(
+            'email-probe-v1\naccount-1\nzone-1\ngateway-1',
+            request.headers.get('x-void-internal') ?? '',
+            'platform-secret',
+          ),
+        ).toBe(true);
+        expect(await request.json()).toEqual({
+          accountId: 'account-1',
+          zoneId: 'zone-1',
+          ingressName: 'gateway-1',
+          secret: 'staged-secret',
+        });
+        return new Response(null, { status: 204 });
+      }),
+      context,
+    );
+    expect(response.status).toBe(204);
+  });
+});

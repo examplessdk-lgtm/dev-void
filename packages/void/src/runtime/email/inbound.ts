@@ -10,13 +10,7 @@
 
 import type { Email as PostalMimeEmail } from 'postal-mime';
 import { getRawRuntimeEnv } from '../env-raw.ts';
-import {
-  buildMime,
-  MAX_MESSAGE_BYTES,
-  MimeError,
-  normalizeEmail,
-  validateAddressParts,
-} from './mime.ts';
+import { buildMime, MimeError, normalizeEmail, validateAddressParts } from './mime.ts';
 import type { Address, Attachment } from './types.ts';
 
 // Mirror the slug-validity rule from runtime/email.ts so a malformed
@@ -38,6 +32,7 @@ const VALID_SLUG = /^[a-z0-9](?:[a-z0-9-]{0,54}[a-z0-9])?$/;
  */
 const MAX_ACTIONS = 100;
 const MAX_ACTION_ADDRESS_LENGTH = 320;
+const MAX_ACTION_METADATA_BYTES = 8 * 1024;
 
 /**
  * Bounds on one forward's header bag: how many, and how long a name or a
@@ -89,7 +84,8 @@ export const MAX_INBOUND_HEADERS: number = 1024;
  * past any legitimate use, and failing here names the exact call that
  * overran.
  */
-const MAX_REPLY_BYTES_TOTAL = 2 * MAX_MESSAGE_BYTES;
+const MAX_REPLY_BYTES = 5 * 1024 * 1024;
+const MAX_REPLY_BYTES_TOTAL = 8 * 1024 * 1024;
 
 function readRawProjectSlug(): string | undefined {
   let raw: unknown;
@@ -181,10 +177,10 @@ export class ParseEmailError extends Error {
  * one-shot.
  */
 export async function parseEmail(message: ForwardableEmailMessage): Promise<ParsedEmail> {
-  if (message.rawSize > MAX_MESSAGE_BYTES) {
+  if (message.rawSize > MAX_INBOUND_BYTES) {
     throw new ParseEmailError(
       'INBOUND_TOO_LARGE',
-      `parseEmail: message size ${message.rawSize} bytes exceeds maximum of ${MAX_MESSAGE_BYTES} bytes.`,
+      `parseEmail: message size ${message.rawSize} bytes exceeds maximum of ${MAX_INBOUND_BYTES} bytes.`,
     );
   }
   const { default: PostalMime } = await import('postal-mime');
@@ -309,7 +305,7 @@ function stripSlugFromAddress(address: string, slug: string | undefined): string
 function replyTooLarge(size: number): MimeError {
   return new MimeError(
     'MIME_ERROR',
-    `reply: message size ${size} bytes exceeds Cloudflare limit of ${MAX_MESSAGE_BYTES} bytes.`,
+    `reply: message size ${size} bytes exceeds Void's sending limit of ${MAX_REPLY_BYTES} bytes.`,
   );
 }
 
@@ -660,7 +656,18 @@ export function createMessageProxy(
       if (headersObj) {
         assertForwardHeadersWithinBounds(headersObj);
       }
-      actions.push({ type: 'forward', to, ...(headersObj ? { headers: headersObj } : {}) });
+      const action = {
+        type: 'forward' as const,
+        to,
+        ...(headersObj ? { headers: headersObj } : {}),
+      };
+      if (new TextEncoder().encode(JSON.stringify(action)).byteLength > MAX_ACTION_METADATA_BYTES) {
+        throw new MimeError(
+          'MIME_ERROR',
+          `forward: action metadata exceeds ${MAX_ACTION_METADATA_BYTES} bytes.`,
+        );
+      }
+      actions.push(action);
     },
     async reply(reply: { from: string; to: string; raw: ReadableStream<Uint8Array> | Uint8Array }) {
       if (rejected) {
@@ -690,7 +697,7 @@ export function createMessageProxy(
       const remaining = MAX_REPLY_BYTES_TOTAL - replyBytesUsed;
       let rawBytes: Uint8Array;
       if (reply.raw instanceof Uint8Array) {
-        if (reply.raw.byteLength > MAX_MESSAGE_BYTES) {
+        if (reply.raw.byteLength > MAX_REPLY_BYTES) {
           throw replyTooLarge(reply.raw.byteLength);
         }
         if (reply.raw.byteLength > remaining) {
@@ -719,9 +726,9 @@ export function createMessageProxy(
         // already spent part of it, and the stream must stop where the budget
         // does. Whichever bound is lower is the one that fires, so the
         // callback names the one that actually bound this read.
-        const limit = Math.min(MAX_MESSAGE_BYTES, remaining);
+        const limit = Math.min(MAX_REPLY_BYTES, remaining);
         rawBytes = await readStreamToBytes(reply.raw, limit, (total) =>
-          limit === MAX_MESSAGE_BYTES
+          limit === MAX_REPLY_BYTES
             ? replyTooLarge(total)
             : replyBudgetExhausted(replyBytesUsed + total),
         );

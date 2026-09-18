@@ -809,6 +809,7 @@ describe('operator installation-aware system and worker operations', () => {
         api: 'previous',
         dashboard: 'previous',
         dispatch: 'previous',
+        'email-gateway': 'previous',
       },
     });
     expect(fetch.mock.calls.every(([, init]) => init?.method !== 'POST')).toBe(true);
@@ -819,6 +820,7 @@ describe('operator installation-aware system and worker operations', () => {
     const fetch = cloudflareWorkerStub('void-dashboard-staging');
     const versions = {
       dispatch: 'previous',
+      'email-gateway': 'previous',
       dashboard: 'previous',
       api: 'previous',
       tail: 'previous',
@@ -830,13 +832,14 @@ describe('operator installation-aware system and worker operations', () => {
     expect(result).toMatchObject({ ok: false, partial: true, environment: 'staging' });
     expect(result.events.map((event: { status: string }) => event.status)).toEqual([
       'success',
+      'success',
       'failed',
       'skipped',
       'skipped',
       'skipped',
     ]);
     const writes = fetch.mock.calls.filter(([, init]) => init?.method === 'POST');
-    expect(writes).toHaveLength(2);
+    expect(writes).toHaveLength(3);
     expect(writes[0][0]).toContain('void-dispatch-staging');
     expect(JSON.parse(String(writes[0][1]?.body))).toMatchObject({
       versions: [{ version_id: 'previous', percentage: 100 }],

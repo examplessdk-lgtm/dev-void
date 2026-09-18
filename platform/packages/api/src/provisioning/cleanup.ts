@@ -16,6 +16,9 @@ import {
   getProjectResources,
   terminateBuildsForProject,
 } from '../db.ts';
+import { drainProjectEmailAdmissions } from '../email/admission.ts';
+import { emailDomainRoutes } from '../email/connection-schema.ts';
+import { requestEmailDomainRemove, runEmailOperation } from '../email/connection-service.ts';
 import {
   refreshOauthGrantSerialized,
   revokeOauthGrantSerialized,
@@ -411,8 +414,8 @@ async function lockAndMarkDeleting(
 }
 
 export class ProjectOperationInProgressError extends Error {
-  constructor() {
-    super('project operation in progress');
+  constructor(message = 'project operation in progress') {
+    super(message);
     this.name = 'ProjectOperationInProgressError';
   }
 }
@@ -507,15 +510,24 @@ export async function teardownProject(
   // their tokens are dead and their containers stopped before we touch CF.
   await cancelContainerBuildDos(context.env, cancelledOnLock, 'project deleted');
 
+  const emailDrain = await drainProjectEmailAdmissions(context.get('db'), projectId);
+  if (emailDrain.inFlight > 0) {
+    throw new ProjectOperationInProgressError(
+      `${emailDrain.inFlight} email provider attempt(s) have unresolved outcomes`,
+    );
+  }
+
   await cleanupCriticalResources(context, projectId, project);
-  // Fail-closed, and BEFORE anything below is destroyed: these KV keys are
-  // what still authorizes the project's non-expiring proxy token to send
-  // mail and its relay secrets to submit inbound mail, and the project row
-  // is the only handle a retry has for them.
-  await revokeProjectEmailSendAuthorization(context.get('db'), context.env.ROUTING, projectId);
-  // Best-effort, and AFTER the mirrors above are gone: the relay worker and
-  // zone catch-all live in the CUSTOMER's account, so a stranded relay is
-  // already denied by the proxy.
+  // Legacy KV mirrors are display/routing hints. Database admission and
+  // exact route state are the authority, so a KV outage cannot block teardown.
+  await revokeProjectEmailSendAuthorization(
+    context.get('db'),
+    context.env.ROUTING,
+    projectId,
+  ).catch((error) => {
+    console.warn('[email] legacy mirror cleanup deferred', projectId, error);
+  });
+  // Customer-side cleanup is durable and may continue after project deletion.
   await cleanupProjectEmailDomains(context, projectId);
   const { warnings: bestEffortWarnings, cleanedCfIds } = await cleanupBestEffortResources(
     context,
@@ -699,6 +711,38 @@ async function cleanupProjectEmailDomains(
   projectId: string,
 ): Promise<void> {
   const db = context.get('db');
+  // New connection-backed assignments are independent of project cascade.
+  // Disable authority first; provider cleanup remains in the operation ledger
+  // even if project teardown later removes its owning row.
+  const assignments = await db
+    .select()
+    .from(emailDomainRoutes)
+    .where(eq(emailDomainRoutes.project_id, projectId));
+  for (const assignment of assignments) {
+    if (assignment.desired_state === 'removed') {
+      continue;
+    }
+    // The durable intent must exist before the project can cascade away.
+    // A provider failure after that point is safe to reconcile later.
+    const opId = await requestEmailDomainRemove(
+      db,
+      context.env,
+      assignment.id,
+      { kind: 'system' },
+      `teardown:${projectId}:${assignment.id}`,
+    );
+    try {
+      await runEmailOperation(db, context.env, opId);
+    } catch (error) {
+      // The disabled assignment and connection survive project deletion; the
+      // scheduled reconciler or operator can inspect and resume the cleanup.
+      console.error(
+        '[email] project teardown left pending connection cleanup',
+        assignment.id,
+        error,
+      );
+    }
+  }
   let rows: Array<
     Pick<
       EmailDomain,

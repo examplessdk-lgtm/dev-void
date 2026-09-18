@@ -3,6 +3,9 @@ import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { capabilityMiddleware } from '../capabilities.ts';
 import { getProject, getProjectBySlug, type Db } from '../db.ts';
+import { emailProjectControls } from '../email/admission-schema.ts';
+import { setProjectEmailLimits } from '../email/admission.ts';
+import { emailDomainRoutes, emailZoneConnections } from '../email/connection-schema.ts';
 import {
   MAX_DOMAIN_LENGTH,
   isValidEmailDomain,
@@ -13,7 +16,8 @@ import {
   getEmailDomainRowByDomain,
   getEmailDomainStatusForProject,
   removeEmailDomainForProject,
-  serializeEmailDomain,
+  rotateEmailIngressSecretForProject,
+  serializeEmailRoute,
   syncEmailDomainForProject,
 } from '../email/domain-service.ts';
 import {
@@ -36,7 +40,7 @@ import {
   type EmailRecipientPolicy,
 } from '../email/settings.ts';
 import type { ApiEnv } from '../env.ts';
-import { emailDomains, projects } from '../schema.ts';
+import { projects } from '../schema.ts';
 import { dryRun, OperatorError, preview, readBody, stringField } from './common.ts';
 
 /**
@@ -164,11 +168,13 @@ export async function setOperatorEmailLimit(
   }
   const db = context.get('db');
   const project = await resolveProject(db, selector);
-  const kv = context.env.ROUTING;
-  const [previousMonthly, previousBurst] = await Promise.all([
-    kv.get(emailMonthlyLimitKey(project.id)),
-    kv.get(emailBurstLimitKey(project.id)),
-  ]);
+  const controls = (
+    await db
+      .select()
+      .from(emailProjectControls)
+      .where(eq(emailProjectControls.project_id, project.id))
+      .limit(1)
+  )[0];
   const action = 'email.limit.set';
   const target = {
     projectId: project.id,
@@ -177,41 +183,14 @@ export async function setOperatorEmailLimit(
     ...(burst === undefined ? {} : { burst }),
   };
   const previous = {
-    monthly: parseEmailLimit(previousMonthly) ?? null,
-    burst: parseEmailLimit(previousBurst) ?? null,
+    monthly: controls?.monthly_limit ?? 200,
+    burst: controls?.burst_limit ?? 10,
   };
   if (dryRunRequested) {
     return preview(action, target, { previous });
   }
-  const applied: Array<'monthly' | 'burst'> = [];
-  const failed: Array<'monthly' | 'burst'> = [];
-  for (const [name, key, value] of [
-    ['monthly', emailMonthlyLimitKey(project.id), monthly],
-    ['burst', emailBurstLimitKey(project.id), burst],
-  ] as const) {
-    if (value === undefined) {
-      continue;
-    }
-    try {
-      await kv.put(key, String(value));
-      applied.push(name);
-    } catch (err) {
-      console.error(`[operator-email] ${name} cap write failed:`, err);
-      failed.push(name);
-    }
-  }
-  if (failed.length === 0) {
-    return { action, target, previous };
-  }
-  if (applied.length === 0) {
-    throw new OperatorError(
-      502,
-      'No cap was changed: routing storage refused the write.',
-      'kv_failed',
-      { failed },
-    );
-  }
-  return { action, target, previous, ok: false as const, partial: true as const, applied, failed };
+  await setProjectEmailLimits(db, project.id, { monthly, burst });
+  return { action, target, previous };
 }
 
 emailOperatorRoutes.get('/email/policy', async (context) =>
@@ -309,6 +288,9 @@ async function requireDomainRow(db: Db, raw: string) {
   if (!row) {
     throw new OperatorError(404, 'Email domain not found.');
   }
+  if (!row.project_id) {
+    throw new OperatorError(404, 'Project not found.');
+  }
   const project = await getProject(db, row.project_id);
   if (!project) {
     throw new OperatorError(404, 'Project not found.');
@@ -320,11 +302,14 @@ export async function listOperatorEmailDomains(context: Context<ApiEnv>, selecto
   const db = context.get('db');
   const project = selector ? await resolveProject(db, selector) : null;
   const rows = await db
-    .select()
-    .from(emailDomains)
-    .where(project ? eq(emailDomains.project_id, project.id) : undefined)
-    .orderBy(asc(emailDomains.created_at));
-  const projectIds = [...new Set(rows.map((row) => row.project_id))];
+    .select({ route: emailDomainRoutes, connection: emailZoneConnections })
+    .from(emailDomainRoutes)
+    .innerJoin(emailZoneConnections, eq(emailDomainRoutes.connection_id, emailZoneConnections.id))
+    .where(project ? eq(emailDomainRoutes.project_id, project.id) : undefined)
+    .orderBy(asc(emailDomainRoutes.created_at));
+  const projectIds = [
+    ...new Set(rows.map(({ route }) => route.project_id).filter((id): id is string => id !== null)),
+  ];
   const owners =
     projectIds.length === 0
       ? []
@@ -334,9 +319,12 @@ export async function listOperatorEmailDomains(context: Context<ApiEnv>, selecto
           .where(inArray(projects.id, projectIds));
   const slugs = new Map(owners.map((owner) => [owner.id, owner.slug]));
   return {
-    domains: rows.map((row) => ({
-      ...serializeEmailDomain(row),
-      project: { id: row.project_id, slug: slugs.get(row.project_id) ?? null },
+    domains: rows.map(({ route, connection }) => ({
+      ...serializeEmailRoute(route, connection),
+      project: {
+        id: route.project_id,
+        slug: route.project_id ? (slugs.get(route.project_id) ?? null) : null,
+      },
     })),
   };
 }
@@ -372,11 +360,13 @@ export async function addOperatorEmailDomain(
       mx = 'unknown';
     }
     return preview(action, target, {
-      existing: existing ? { status: existing.status, managed_by: existing.managed_by } : null,
-      plan: existing ? 'rerun' : 'setup',
+      existing: existing
+        ? { status: existing.inbound_status, managed_by: existing.managed_by }
+        : null,
+      plan: existing ? 'sync' : 'setup',
       mx,
-      effect: existing?.mode
-        ? `Re-runs setup for ${domain} on ${project.slug} in its stored ${existing.mode} mode; the credential is replaced, rules and the relay stay.`
+      effect: existing
+        ? `The existing assignment for ${domain} belongs to ${project.slug}; use sync to reconcile it.`
         : mx === 'subdomain'
           ? `${domain} already receives mail; setup will refuse it — name a subdomain such as mail.${domain} instead.`
           : credentialKind === 'platform'
@@ -415,11 +405,10 @@ export async function syncOperatorEmailDomain(
   const target = { domain, projectId: project.id, slug: project.slug };
   if (dryRunRequested) {
     return preview(action, target, {
-      status: row.status,
+      status: row.inbound_status,
       managed_by: row.managed_by,
-      relay_worker_name: row.relay_worker_name,
-      effect:
-        'Redeploys the relay worker at the current version, rotates its secret and re-ensures the zone catch-all.',
+      connection_id: row.connection_id,
+      effect: 'Reconciles the shared zone ingress and this exact mail-domain assignment.',
     });
   }
   return operatorResult(
@@ -440,16 +429,37 @@ export async function removeOperatorEmailDomain(
   const target = { domain, projectId: project.id, slug: project.slug, force };
   if (dryRunRequested) {
     return preview(action, target, {
-      status: row.status,
+      status: row.inbound_status,
       managed_by: row.managed_by,
-      relay_worker_name: row.relay_worker_name,
+      connection_id: row.connection_id,
       effect: force
-        ? 'Deletes the row even if the Cloudflare cleanup fails; anything left behind is reported for manual removal.'
-        : 'Resets the zone catch-all, deletes the relay worker, then deletes the row; a failed destructive step keeps the row for retry.',
+        ? 'Disables the assignment and records any unresolved provider cleanup for manual recovery.'
+        : 'Disables this assignment; shared ingress remains while sibling domains use it.',
     });
   }
   return operatorResult(
     await removeEmailDomainForProject(context, project, domain, force, 'admin'),
+    action,
+    target,
+  );
+}
+
+export async function rotateOperatorEmailIngressSecret(
+  context: Context<ApiEnv>,
+  rawDomain: string,
+  dryRunRequested = false,
+) {
+  const { domain, row, project } = await requireDomainRow(context.get('db'), rawDomain);
+  const action = 'email.domain.rotate-secret',
+    target = { domain, projectId: project.id, slug: project.slug, connectionId: row.connection_id };
+  if (dryRunRequested) {
+    return preview(action, target, {
+      effect:
+        'Stages a new ingress secret and promotes it only after the deployed Worker proves it received the value.',
+    });
+  }
+  return operatorResult(
+    await rotateEmailIngressSecretForProject(context, project, domain, 'admin'),
     action,
     target,
   );
@@ -479,6 +489,12 @@ emailOperatorRoutes.post('/email/domains/:domain/sync', async (context) => {
   const body = await readBody(context);
   return context.json(
     await syncOperatorEmailDomain(context, context.req.param('domain'), dryRun(body)),
+  );
+});
+emailOperatorRoutes.post('/email/domains/:domain/rotate-secret', async (context) => {
+  const body = await readBody(context);
+  return context.json(
+    await rotateOperatorEmailIngressSecret(context, context.req.param('domain'), dryRun(body)),
   );
 });
 emailOperatorRoutes.post('/email/domains/:domain/remove', async (context) => {

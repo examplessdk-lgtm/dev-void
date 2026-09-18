@@ -47,6 +47,15 @@ import {
   type Db,
 } from './db.ts';
 import { escapeHtml } from './email.ts';
+import { pruneEmailActionHistory } from './email/admission.ts';
+import {
+  ensureSharedEmailConnection,
+  reconcilePendingEmailOperations,
+  runEmailOperation,
+  flushEmailCacheOutbox,
+} from './email/connection-service.ts';
+import emailIngressResolution from './email/ingress-resolution.ts';
+import { repairEmailRecipientPolicyMirror } from './email/settings.ts';
 import type { ApiEnv } from './env.ts';
 import { ErrorAlertMonitor } from './error-alert-monitor.ts';
 import { cancelContainerBuildDos } from './github/cancel-builds.ts';
@@ -75,6 +84,7 @@ import domains from './routes/domains.ts';
 import emailConfirm from './routes/email-confirm.ts';
 import emailRoutes from './routes/email.ts';
 import { githubProjectRoutes, githubRoutes } from './routes/github.ts';
+import internalEmailActions from './routes/internal-email-actions.ts';
 import internalEmailDomainCredential from './routes/internal-email.ts';
 import internalGitHubWebhook from './routes/internal-github-webhook.ts';
 import internalResolveResource from './routes/internal-resolve-resource.ts';
@@ -335,6 +345,8 @@ const app = new Hono<ApiEnv>()
   .route('/internal/revalidate', internalRevalidate)
   .use('/internal/email/*', capabilityMiddleware('email'))
   .route('/internal/email/domain-credential', internalEmailDomainCredential)
+  .route('/internal/email/actions', internalEmailActions)
+  .route('/internal/email', emailIngressResolution)
   .use('/internal/github-webhook', capabilityMiddleware('managedBuilds'))
   .route('/internal/github-webhook', internalGitHubWebhook)
   .route('/internal/resolve-resource', internalResolveResource)
@@ -430,6 +442,27 @@ async function scheduled(
   }
   const db = createDb(env.HYPERDRIVE.connectionString);
   const capabilities = getPlatformCapabilities(env);
+
+  if (capabilities.email) {
+    await (async () => {
+      const operationId = await ensureSharedEmailConnection(db, env);
+      if (operationId) {
+        await runEmailOperation(db, env, operationId);
+      }
+    })().catch((error) => console.error('[scheduled] shared email setup failed:', error));
+    await reconcilePendingEmailOperations(db, env).catch((error) =>
+      console.error('[scheduled] email operation reconciliation failed:', error),
+    );
+    await flushEmailCacheOutbox(db, env.ROUTING).catch((error) =>
+      console.error('[scheduled] email display publication failed:', error),
+    );
+    if (controller.cron !== FAST_CRON) {
+      await pruneEmailActionHistory(db).catch((error) =>
+        console.error('[scheduled] email history cleanup failed:', error),
+      );
+      await repairEmailRecipientPolicyMirror(db, env.ROUTING);
+    }
+  }
 
   // Fast tier (every 2 min): only reconcile recently-created pending domains
   // (within the last 30 min) so a freshly-configured custom domain comes online

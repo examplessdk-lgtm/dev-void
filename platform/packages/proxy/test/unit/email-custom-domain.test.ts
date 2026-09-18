@@ -83,9 +83,74 @@ function createMockKv(data: Record<string, string> = {}) {
 }
 
 function createMockEnv(kv: MockKv) {
-  const apiFetch = vi.fn(
-    async () => new Response(JSON.stringify({ kind: 'api_token', token: LEASED }), { status: 200 }),
-  );
+  const actions = new Map<
+    string,
+    {
+      operationId: string;
+      digest: string;
+      recipients: Array<{
+        recipient: string;
+        state: string;
+        errorCode: string | null;
+        providerReference: string | null;
+      }>;
+    }
+  >();
+  const apiFetch = vi.fn(async (url: string, init: RequestInit) => {
+    const path = new URL(url).pathname;
+    if (path.endsWith('/domain-credential')) {
+      return Response.json({ kind: 'api_token', token: LEASED, accountId: 'acct_customer' });
+    }
+    const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+    if (path.endsWith('/admit')) {
+      const key = body.key as string;
+      const previous = actions.get(key);
+      if (previous && previous.digest !== body.digest) {
+        return Response.json({ code: 'CONFLICT' }, { status: 409 });
+      }
+      if (previous) {
+        return Response.json({
+          operationId: previous.operationId,
+          replay: true,
+          recipients: previous.recipients,
+          accountId: 'acct_customer',
+        });
+      }
+      const entry = {
+        operationId: `act_${actions.size + 1}`,
+        digest: body.digest as string,
+        recipients: (body.recipients as Array<string>).map((recipient) => ({
+          recipient,
+          state: 'reserved',
+          errorCode: null,
+          providerReference: null,
+        })),
+      };
+      actions.set(key, entry);
+      return Response.json({
+        operationId: entry.operationId,
+        replay: false,
+        recipients: entry.recipients,
+        accountId: 'acct_customer',
+      });
+    }
+    const operationId = path.split('/').at(-2)!;
+    const entry = [...actions.values()].find((action) => action.operationId === operationId)!;
+    if (path.endsWith('/start')) {
+      for (const recipient of body.recipients as Array<string>) {
+        entry.recipients.find((row) => row.recipient === recipient)!.state = 'attempt_started';
+      }
+    }
+    if (path.endsWith('/finish')) {
+      for (const recipient of body.recipients as Array<string>) {
+        const row = entry.recipients.find((item) => item.recipient === recipient)!;
+        row.state = body.state as string;
+        row.errorCode = (body.errorCode as string) ?? null;
+        row.providerReference = (body.providerReference as string) ?? null;
+      }
+    }
+    return Response.json({ recipients: entry.recipients });
+  });
   const sendEmail = vi.fn(async () => ({ messageId: 'msg_platform' }));
   const env = {
     AI: {},
@@ -223,16 +288,26 @@ describe('POST /email/send — custom sender domain', () => {
     expect(await res.json()).toEqual({
       ok: true,
       ids: [{ recipient: 'dev@example.com', messageId: 'cf_msg_1' }],
+      operationId: 'act_1',
     });
 
     // The lease: one POST to the api's internal endpoint, HMAC-authed.
-    expect(apiFetch).toHaveBeenCalledTimes(1);
-    const [leaseUrl, leaseInit] = apiFetch.mock.calls[0] as [string, RequestInit];
+    expect(
+      apiFetch.mock.calls.filter(([url]) => String(url).endsWith('/domain-credential')),
+    ).toHaveLength(1);
+    const [leaseUrl, leaseInit] = apiFetch.mock.calls.find(([url]) =>
+      String(url).endsWith('/domain-credential'),
+    )! as [string, RequestInit];
     expect(leaseUrl).toBe('https://api/internal/email/domain-credential');
     expect(leaseInit.method).toBe('POST');
-    expect(JSON.parse(leaseInit.body as string)).toEqual({ domain: CUSTOM_DOMAIN });
+    expect(JSON.parse(leaseInit.body as string)).toEqual({
+      domain: CUSTOM_DOMAIN,
+      projectId: 'proj_1',
+    });
     const leaseHeaders = new Headers(leaseInit.headers);
-    expect(leaseHeaders.get('x-void-internal')).toBe(await signHmac(CUSTOM_DOMAIN, JWT_SECRET));
+    expect(leaseHeaders.get('x-void-internal')).toBe(
+      await signHmac(`email-lease-v1\nproj_1\n${CUSTOM_DOMAIN}`, JWT_SECRET),
+    );
 
     // The delivery: one POST to the CUSTOMER account's send_raw, leased
     // credential as Bearer, envelope + MIME in the JSON body.
@@ -251,19 +326,18 @@ describe('POST /email/send — custom sender domain', () => {
     // The platform binding is never touched on this path.
     expect(sendEmail).not.toHaveBeenCalled();
 
-    // Quota counters burned exactly as the shared path does.
-    expect(kvKeysMatching(kv, 'email-sent:proj_1:')).toHaveLength(1);
-    expect(kvKeysMatching(kv, 'email-burst:proj_1:')).toHaveLength(1);
+    expect(kvKeysMatching(kv, 'email-sent:proj_1:')).toHaveLength(0);
+    expect(kvKeysMatching(kv, 'email-burst:proj_1:')).toHaveLength(0);
   });
 
   it('sends with an oauth_grant lease (accessToken) as the Bearer', async () => {
     const kv = customDomainKv();
     const { env, apiFetch } = createMockEnv(kv);
-    apiFetch.mockImplementation(
-      async () =>
-        new Response(JSON.stringify({ kind: 'oauth_grant', accessToken: LEASED }), {
-          status: 200,
-        }),
+    const normalFetch = apiFetch.getMockImplementation()!;
+    apiFetch.mockImplementation(async (url, init) =>
+      String(url).endsWith('/domain-credential')
+        ? Response.json({ kind: 'oauth_grant', accessToken: LEASED, accountId: 'acct_customer' })
+        : normalFetch(url, init),
     );
     const calls = stubCloudflare();
     const res = await postSend(env, await sendBody());
@@ -272,16 +346,34 @@ describe('POST /email/send — custom sender domain', () => {
     expect(sendHeaders.get('authorization')).toBe(`Bearer ${LEASED}`);
   });
 
-  it('caches the lease per domain: two sends cost one api call', async () => {
+  it('re-leases the domain for each send', async () => {
     const kv = customDomainKv();
     const { env, apiFetch } = createMockEnv(kv);
     stubCloudflare();
     await postSend(env, await sendBody());
     await postSend(env, await sendBody({ requestId: 'req_2' }));
-    expect(apiFetch).toHaveBeenCalledTimes(1);
+    expect(
+      apiFetch.mock.calls.filter(([url]) => String(url).endsWith('/domain-credential')),
+    ).toHaveLength(2);
   });
 
-  it('drops the cached lease on a 401 from send_raw and re-leases next time', async () => {
+  it('replays a completed operation without consulting a later revoked credential', async () => {
+    const { env, apiFetch } = createMockEnv(customDomainKv());
+    const calls = stubCloudflare();
+    const body = await sendBody({ idempotencyKey: 'same-operation' });
+    expect((await (await postSend(env, body)).json()).ok).toBe(true);
+    const leaseCalls = apiFetch.mock.calls.filter(([url]) =>
+      String(url).endsWith('/domain-credential'),
+    ).length;
+    const replay = await postSend(env, body);
+    expect((await replay.json()).ok).toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(
+      apiFetch.mock.calls.filter(([url]) => String(url).endsWith('/domain-credential')),
+    ).toHaveLength(leaseCalls);
+  });
+
+  it('re-leases after a definitive 401 from send_raw', async () => {
     const kv = customDomainKv();
     const { env, apiFetch } = createMockEnv(kv);
     let sendCount = 0;
@@ -310,10 +402,12 @@ describe('POST /email/send — custom sender domain', () => {
     expect(first.status).toBe(200);
     expect(await first.json()).toEqual({
       ok: false,
+      operationId: 'act_1',
       deliveries: [
         {
           recipient: 'dev@example.com',
           ok: false,
+          state: 'failed',
           error: { code: 'UPSTREAM_ERROR', message: 'email sending API returned 401' },
         },
       ],
@@ -324,8 +418,11 @@ describe('POST /email/send — custom sender domain', () => {
     expect(await second.json()).toEqual({
       ok: true,
       ids: [{ recipient: 'dev@example.com', messageId: 'cf_msg_2' }],
+      operationId: 'act_2',
     });
-    expect(apiFetch).toHaveBeenCalledTimes(2);
+    expect(
+      apiFetch.mock.calls.filter(([url]) => String(url).endsWith('/domain-credential')),
+    ).toHaveLength(2);
   });
 
   it('maps a 429 from send_raw to QUOTA_EXCEEDED', async () => {
@@ -339,7 +436,7 @@ describe('POST /email/send — custom sender domain', () => {
     expect(body.deliveries[0].error.code).toBe('QUOTA_EXCEEDED');
   });
 
-  it('maps a network failure on send_raw to UPSTREAM_ERROR', async () => {
+  it('marks a network failure on send_raw as an unknown outcome', async () => {
     const kv = customDomainKv();
     const { env } = createMockEnv(kv);
     vi.stubGlobal(
@@ -353,59 +450,36 @@ describe('POST /email/send — custom sender domain', () => {
     const body = await res.json();
     expect(body.ok).toBe(false);
     expect(body.deliveries[0].error).toEqual({
-      code: 'UPSTREAM_ERROR',
-      message: 'email sending request failed',
+      code: 'OUTCOME_UNKNOWN',
+      message: 'provider outcome unknown; inspect email logs before retrying',
     });
   });
 
-  it.each([
-    ['another project', domainMirror({ projectId: 'p_other' })],
-    ['a non-active status', domainMirror({ status: 'pending' })],
-  ])('rejects a mirror naming %s with 403 before any external call', async (_label, mirror) => {
-    const kv = customDomainKv({ [`email-domain:${CUSTOM_DOMAIN}`]: mirror });
-    const { env, apiFetch } = createMockEnv(kv);
-    const cfFetch = vi.fn();
-    vi.stubGlobal('fetch', cfFetch);
-    const res = await postSend(env, await sendBody());
-    expect(res.status).toBe(403);
-    const body = await res.json();
-    expect(body.error.code).toBe('INVALID_FROM');
-    expect(body.error.message).toContain('registered to this project');
-    expect(apiFetch).not.toHaveBeenCalled();
-    expect(cfFetch).not.toHaveBeenCalled();
-    // No quota burned on an unauthorized send.
-    expect(kvKeysMatching(kv, 'email-sent:proj_1:')).toHaveLength(0);
-  });
-
-  it('rejects a from on an unregistered domain with 403', async () => {
-    const kv = createMockKv({ 'email-slug:proj_1': 'acme' });
-    const { env, apiFetch } = createMockEnv(kv);
-    const cfFetch = vi.fn();
-    vi.stubGlobal('fetch', cfFetch);
-    const res = await postSend(env, await sendBody());
-    expect(res.status).toBe(403);
-    expect(apiFetch).not.toHaveBeenCalled();
-    expect(cfFetch).not.toHaveBeenCalled();
-  });
-
-  it('answers 502 when the mirror is missing the account id', async () => {
+  it('sends with a stale KV domain mirror when PostgreSQL lease and admission agree', async () => {
     const kv = customDomainKv({
-      [`email-domain:${CUSTOM_DOMAIN}`]: domainMirror({ accountId: null }),
+      [`email-domain:${CUSTOM_DOMAIN}`]: domainMirror({
+        projectId: 'p_other',
+        status: 'pending',
+        accountId: null,
+      }),
     });
-    const { env, apiFetch } = createMockEnv(kv);
-    const cfFetch = vi.fn();
-    vi.stubGlobal('fetch', cfFetch);
+    const { env } = createMockEnv(kv);
+    const calls = stubCloudflare();
     const res = await postSend(env, await sendBody());
-    expect(res.status).toBe(502);
-    expect((await res.json()).error.code).toBe('UPSTREAM_ERROR');
-    expect(apiFetch).not.toHaveBeenCalled();
-    expect(cfFetch).not.toHaveBeenCalled();
+    expect(res.status).toBe(200);
+    expect((await res.json()).ok).toBe(true);
+    expect(calls).toHaveLength(1);
   });
 
   it('answers 502 when the lease fails, without burning quota or calling send_raw', async () => {
     const kv = customDomainKv();
     const { env, apiFetch } = createMockEnv(kv);
-    apiFetch.mockImplementation(async () => new Response('denied', { status: 403 }));
+    const normalFetch = apiFetch.getMockImplementation()!;
+    apiFetch.mockImplementation(async (url, init) =>
+      String(url).endsWith('/domain-credential')
+        ? new Response('denied', { status: 403 })
+        : normalFetch(url, init),
+    );
     const cfFetch = vi.fn();
     vi.stubGlobal('fetch', cfFetch);
     const res = await postSend(env, await sendBody());
@@ -417,34 +491,6 @@ describe('POST /email/send — custom sender domain', () => {
     expect(cfFetch).not.toHaveBeenCalled();
     expect(kvKeysMatching(kv, 'email-sent:proj_1:')).toHaveLength(0);
     expect(kvKeysMatching(kv, 'email-burst:proj_1:')).toHaveLength(0);
-  });
-
-  it('honors the email kill-switch before leasing', async () => {
-    const kv = customDomainKv({ 'email-suspended:proj_1': '1' });
-    const { env, apiFetch } = createMockEnv(kv);
-    const cfFetch = vi.fn();
-    vi.stubGlobal('fetch', cfFetch);
-    const res = await postSend(env, await sendBody());
-    expect(res.status).toBe(200);
-    expect((await res.json()).error.code).toBe('QUOTA_EXCEEDED');
-    expect(apiFetch).not.toHaveBeenCalled();
-    expect(cfFetch).not.toHaveBeenCalled();
-  });
-
-  it('honors the burst quota before leasing', async () => {
-    // Freeze the clock so the seeded bucket is the handler's bucket even at
-    // a minute boundary.
-    vi.useFakeTimers({ toFake: ['Date'] });
-    vi.setSystemTime(new Date('2026-04-29T12:34:56.000Z'));
-    const kv = customDomainKv({ 'email-burst:proj_1:20260429T1234': '9999' });
-    const { env, apiFetch } = createMockEnv(kv);
-    const cfFetch = vi.fn();
-    vi.stubGlobal('fetch', cfFetch);
-    const res = await postSend(env, await sendBody());
-    expect(res.status).toBe(429);
-    expect((await res.json()).error.code).toBe('QUOTA_EXCEEDED');
-    expect(apiFetch).not.toHaveBeenCalled();
-    expect(cfFetch).not.toHaveBeenCalled();
   });
 
   it('pins the MIME From to the envelope sender on the custom domain too', async () => {
@@ -507,10 +553,12 @@ describe('POST /email/send — custom sender domain', () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({
       ok: false,
+      operationId: 'act_1',
       deliveries: [
         {
           recipient: 'dev@example.com',
           ok: false,
+          state: 'failed',
           error: {
             code: 'UNVERIFIED_DESTINATION',
             message: "recipient 'dev@example.com' permanently bounced",
@@ -543,10 +591,12 @@ describe('POST /email/send — custom sender domain', () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({
       ok: false,
+      operationId: 'act_1',
       deliveries: [
         {
           recipient: 'dev@example.com',
           ok: false,
+          state: 'failed',
           error: {
             code: 'UNVERIFIED_DESTINATION',
             message: "recipient 'dev@example.com' is on the suppression list",
@@ -582,11 +632,18 @@ describe('POST /email/send — custom sender domain', () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({
       ok: false,
+      operationId: 'act_1',
       deliveries: [
-        { recipient: 'dev@example.com', ok: true, messageId: 'cf_msg_m' },
+        {
+          recipient: 'dev@example.com',
+          ok: true,
+          state: 'provider_accepted',
+          messageId: 'cf_msg_m',
+        },
         {
           recipient: 'gone@example.com',
           ok: false,
+          state: 'failed',
           error: {
             code: 'UNVERIFIED_DESTINATION',
             message: "recipient 'gone@example.com' permanently bounced",

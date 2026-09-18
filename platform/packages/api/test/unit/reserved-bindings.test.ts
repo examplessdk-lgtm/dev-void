@@ -107,3 +107,37 @@ describe('reserved binding names cover every platform-injected binding', () => {
     expect(RESERVED_BINDING_NAMES.has('__VOID_PROXY_TOKEN')).toBe(true);
   });
 });
+
+it('pins managed email to its deployment identity and reserves that binding', async () => {
+  const args = [
+    stubDb,
+    'test-account',
+    'test-token',
+    'proj_abc123',
+    { ...EMPTY_MANIFEST, emailProtocolVersion: 1 },
+    'test-jwt-secret',
+    'void-proxy',
+    { projectSlug: 'my-app', deploymentId: 'deploy_a' },
+  ] as const;
+  const bindings = await provisionBindings(...args);
+  expect(bindings).toContainEqual({
+    type: 'plain_text',
+    name: '__VOID_EMAIL_DEPLOYMENT_ID',
+    text: 'deploy_a',
+  });
+  expect(isReservedBindingName('__VOID_EMAIL_DEPLOYMENT_ID')).toBe(true);
+  await expect(
+    provisionBindings(
+      ...(args.slice(0, 7) as [
+        (typeof args)[0],
+        string,
+        string,
+        string,
+        (typeof args)[4],
+        string,
+        string,
+      ]),
+      { projectSlug: 'my-app' },
+    ),
+  ).rejects.toThrow('deployment identity');
+});

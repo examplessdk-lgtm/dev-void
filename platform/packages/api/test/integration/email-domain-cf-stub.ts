@@ -15,9 +15,14 @@ export type StubFailTag =
   | 'sendingSubdomainsGet'
   | 'scriptGet'
   | 'scriptPut'
+  | 'workersSubdomain'
+  | 'scriptSubdomain'
+  | 'relayProbe'
+  | 'gatewayProbe'
   | 'secretPut'
   | 'catchAll'
   | 'catchAllGet'
+  | 'routingRulesGet'
   | 'routingSettingsGet'
   | 'scriptDelete'
   | 'oauthToken'
@@ -74,6 +79,8 @@ export function stubCustomerCf(
   const catchAllStates = new Map<string, { enabled: boolean; workerName: string | null } | null>();
   // Per-script sha256 of the last secret PUT text (never the text).
   const secretHashes = new Map<string, string>();
+  const relaySecrets = new Map<string, string>();
+  const scriptSubdomains = new Map<string, boolean>();
   const catchAllStateFor = (zoneId: string) => {
     if (!catchAllStates.has(zoneId)) {
       catchAllStates.set(
@@ -149,10 +156,97 @@ export function stubCustomerCf(
       });
     }
 
+    if (url.endsWith('.workers.dev/__void/email/probe')) {
+      await record({ tag: 'relayProbe', method, url });
+      const failure = fail('relayProbe');
+      if (failure) {
+        return failure;
+      }
+      const name = new URL(url).hostname.split('.')[0]!;
+      const secret = relaySecrets.get(name);
+      if (!secret || !scriptSubdomains.get(name)) {
+        return new Response(null, { status: 404 });
+      }
+      const challenge = new Headers(init?.headers).get('X-Void-Probe-Challenge') ?? '';
+      const generation = Number(new Headers(init?.headers).get('X-Void-Probe-Generation'));
+      const metadata = [...calls]
+        .reverse()
+        .find((call) => call.tag === 'scriptPut' && call.url.includes(`/scripts/${name}`))?.body as
+        | { bindings?: Array<{ name: string; text: string }> }
+        | undefined;
+      const binding = (name: string) =>
+        metadata?.bindings?.find((row) => row.name === name)?.text ?? '';
+      const accountId = binding('VOID_EMAIL_ACCOUNT'),
+        zoneId = binding('VOID_EMAIL_ZONE'),
+        ingressName = binding('VOID_EMAIL_INGRESS');
+      const data = [
+        'email-relay-proof-v1',
+        accountId,
+        zoneId,
+        ingressName,
+        String(generation),
+        challenge,
+      ].join('\n');
+      const key = await crypto.subtle.importKey(
+        'raw',
+        new TextEncoder().encode(secret),
+        { name: 'HMAC', hash: 'SHA-256' },
+        false,
+        ['sign'],
+      );
+      const proof = Array.from(
+        new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(data))),
+        (byte) => byte.toString(16).padStart(2, '0'),
+      ).join('');
+      return Response.json({ accountId, zoneId, ingressName, generation, challenge, proof });
+    }
+
+    if (url === 'https://email-gateway.example.test/email/probe') {
+      await record({ tag: 'gatewayProbe', method, url });
+      const failure = fail('gatewayProbe');
+      if (failure) {
+        return failure;
+      }
+      const body =
+        typeof init?.body === 'string' ? (JSON.parse(init.body) as { ingressName?: string }) : {};
+      const bearer = new Headers(init?.headers).get('Authorization')?.replace(/^Bearer /, '');
+      if (
+        !bearer ||
+        (relaySecrets.has(body.ingressName ?? '') &&
+          relaySecrets.get(body.ingressName ?? '') !== bearer)
+      ) {
+        return new Response(null, { status: 403 });
+      }
+      return new Response(null, { status: 204 });
+    }
+
     if (!url.startsWith('https://api.cloudflare.com/client/v4/')) {
       throw new Error(`Unmocked fetch: ${method} ${url}`);
     }
     const path = url.slice('https://api.cloudflare.com/client/v4'.length);
+
+    if (/\/accounts\/[^/]+\/workers\/subdomain$/.test(path) && method === 'GET') {
+      await record({ tag: 'workersSubdomain', method, url });
+      return fail('workersSubdomain') ?? cfSuccess({ subdomain: 'customer' });
+    }
+    const scriptSubdomainMatch = /\/accounts\/[^/]+\/workers\/scripts\/([^/]+)\/subdomain$/.exec(
+      path,
+    );
+    if (scriptSubdomainMatch) {
+      await record({ tag: 'scriptSubdomain', method, url });
+      const failure = fail('scriptSubdomain');
+      if (failure) {
+        return failure;
+      }
+      if (method === 'POST') {
+        scriptSubdomains.set(scriptSubdomainMatch[1]!, true);
+        return cfSuccess({ enabled: true, previews_enabled: false });
+      }
+      return cfSuccess({
+        enabled: scriptSubdomains.get(scriptSubdomainMatch[1]!) ?? false,
+        previews_enabled: false,
+      });
+    }
 
     if (path === '/user/tokens/verify') {
       await record({ tag: 'verifyToken', method, url });
@@ -212,6 +306,11 @@ export function stubCustomerCf(
       return cfSuccess(config.routingSettings ?? { enabled: true });
     }
 
+    if (/\/zones\/[^/]+\/email\/routing\/rules\?/.test(path) && method === 'GET') {
+      await record({ tag: 'routingRulesGet', method, url });
+      return fail('routingRulesGet') ?? cfSuccess([]);
+    }
+
     const catchAllMatch = /\/zones\/([^/]+)\/email\/routing\/rules\/catch_all$/.exec(path);
     if (catchAllMatch && method === 'GET') {
       await record({ tag: 'catchAllGet', method, url });
@@ -260,6 +359,7 @@ export function stubCustomerCf(
       // form the ROUTING mirror stores — so a test can prove worker, row
       // and mirror carry ONE secret without the value ever being recorded.
       secretHashes.set(secretsMatch[1]!, await hashEmailRelaySecret(text));
+      relaySecrets.set(secretsMatch[1]!, text);
       await record({
         tag: 'secretPut',
         method,

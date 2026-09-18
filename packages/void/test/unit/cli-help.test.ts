@@ -176,7 +176,7 @@ describe('rendered help advertises the flags the parser honours', () => {
     });
 
     const group = render(['email']);
-    expect(group).toContain('domain <add|status|list|sync|remove>');
+    expect(group).toContain('domain <add|status|list|sync|rotate-secret|remove>');
 
     expect(hasHelpPage(['email', 'domain'])).toBe(true);
     expect(getHelpPath(['email', 'domain', '--help'])).toEqual(['email', 'domain']);
@@ -186,6 +186,7 @@ describe('rendered help advertises the flags the parser honours', () => {
       'status <domain>',
       'list',
       'sync <domain>',
+      'rotate-secret <domain>',
       'remove <domain>',
     ]) {
       expect(page).toContain(verb);
@@ -193,7 +194,7 @@ describe('rendered help advertises the flags the parser honours', () => {
     expect(page).toContain('--subdomain <label|host>');
     expect(page).toContain('--project <name>');
 
-    for (const verb of ['add', 'status', 'list', 'sync', 'remove']) {
+    for (const verb of ['add', 'status', 'list', 'sync', 'rotate-secret', 'remove']) {
       expect(hasHelpPage(['email', 'domain', verb])).toBe(true);
     }
     expect(render(['email', 'domain', 'add'])).toContain(

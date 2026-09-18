@@ -22,6 +22,10 @@ const { PLATFORM_USAGE_PROTOCOL_VERSION } = await import(
 const workers = [
   ['api', join(repositoryRoot, 'platform', 'packages', 'api', 'src', 'worker', 'index.ts')],
   ['proxy', join(repositoryRoot, 'platform', 'packages', 'proxy', 'src', 'index.ts')],
+  [
+    'emailGateway',
+    join(repositoryRoot, 'platform', 'packages', 'email-gateway', 'src', 'index.ts'),
+  ],
   ['tail', join(repositoryRoot, 'platform', 'packages', 'tail', 'src', 'index.ts')],
   ['dispatch', join(repositoryRoot, 'platform', 'packages', 'dispatch', 'src', 'index.ts')],
 ];
@@ -43,11 +47,12 @@ try {
     writeFileSync(
       configPath,
       JSON.stringify({
-        name: `void-runtime-build-${name}`,
+        name: `void-runtime-build-${name === 'emailGateway' ? 'email-gateway' : name}`,
         main: entrypoint,
         alias: sourceAliases,
         compatibility_date: '2026-02-24',
-        compatibility_flags: name === 'api' || name === 'proxy' ? ['nodejs_compat'] : [],
+        compatibility_flags:
+          name === 'api' || name === 'proxy' || name === 'emailGateway' ? ['nodejs_compat'] : [],
       }),
     );
     const result = spawnSync(
@@ -81,6 +86,7 @@ try {
     artifacts,
     applicationRoutingVersion: 1,
     authenticationProtocolVersion: 1,
+    emailProtocolVersion: 1,
     database,
     platformVersion: packageJson.version,
     safetyProtocols: { sandboxDrain: 2 },

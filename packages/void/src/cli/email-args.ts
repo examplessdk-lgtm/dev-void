@@ -17,7 +17,7 @@ export const emailSubcommands: Array<SubcommandDef> = [
   // errors naming the missing <domain>, the same as a typed invocation.
   {
     name: 'domain',
-    arg: '<add|status|list|sync|remove>',
+    arg: '<add|status|list|sync|rotate-secret|remove>',
     description: 'Send and receive at your own domain on a Cloudflare zone',
   },
   {
@@ -43,7 +43,14 @@ const EMAIL_SUBCOMMANDS = [
   'setup',
 ] as const;
 
-export const EMAIL_DOMAIN_VERBS = ['add', 'status', 'list', 'sync', 'remove'] as const;
+export const EMAIL_DOMAIN_VERBS = [
+  'add',
+  'status',
+  'list',
+  'sync',
+  'rotate-secret',
+  'remove',
+] as const;
 export type EmailDomainVerb = (typeof EMAIL_DOMAIN_VERBS)[number];
 
 export interface EmailArgs {
@@ -305,7 +312,7 @@ function parseEmailDomainArgs(
   const verb = positional[0];
   if (!verb || !(EMAIL_DOMAIN_VERBS as ReadonlyArray<string>).includes(verb)) {
     throw new Error(
-      'email: Usage: void email domain <add|status|list|sync|remove> [<domain>] [--project <name>].',
+      'email: Usage: void email domain <add|status|list|sync|rotate-secret|remove> [<domain>] [--project <name>].',
     );
   }
   if (flags.subdomain !== undefined && verb !== 'add') {

@@ -1452,7 +1452,7 @@ Show the current month's outbound and inbound counts, the monthly outbound limit
 void email logs [--limit <n>] [--project <name>]
 ```
 
-Show recent email activity — timestamp, direction, sender, recipient, status, and subject. `--limit` takes a positive integer. Email activity logs are not available yet on the platform; the command says so. Console output from your email handler appears in `void project logs`, like any other invocation of your worker.
+Show recent email operation metadata retained for 30 days: timestamp, direction, operation ID, recipient, and state. `--limit` accepts 1–100. Subjects, bodies, and attachments are not stored. Provider acceptance does not confirm mailbox delivery; inspect unknown outcomes before retrying.
 
 ### `void email destinations`
 
@@ -1478,7 +1478,7 @@ The project owner's email is added automatically when the project is created, so
 void email disallow <address> [--project <name>]
 ```
 
-Remove one recipient from the project's destination list. Sends to that address are refused within about a minute: the platform updates the project's allowlist as part of the command, and the proxy re-reads it every 60 seconds. No deploy is involved.
+Remove one recipient from the project's destination list. Sends to that address are refused for new sends immediately; previously admitted attempts may finish: the platform updates the project's allowlist as part of the command, and the proxy re-reads it every 60 seconds. No deploy is involved.
 
 ### `void email domain`
 
@@ -1494,7 +1494,7 @@ Send and receive at your own domain on a Cloudflare zone you own, registered to 
 void email domain add <domain> [--subdomain <label|host>] [--project <name>]
 ```
 
-Register the domain with the project. One credential is required, granted two ways: an OAuth grant from Cloudflare's hosted consent page (the page names Wrangler — Void borrows its OAuth client), or, as the fallback Enter switches to at any point, a scoped API token created from a three-click template link and picked up from the clipboard or a masked paste. The credential is POSTed once and stored on the platform, encrypted for the project — nothing is kept locally. Needs an interactive terminal. The CLI proposes `mail.<domain>` when the apex already carries MX records and allows the apex only when it carries none; `--subdomain` overrides the proposal. One live email domain per zone and one project per domain are enforced — a conflict is refused with a 409. Re-running `add` on a `failed`, `token_revoked`, or `token_expired` row replaces the credential and retries; the routing rules stay.
+Register an exact domain with the project using a scoped Cloudflare API token. The CLI opens a token template, accepts a masked paste or newly copied token, and asks you to confirm account and zone restrictions. Credentials are encrypted for the zone connection. The CLI proposes `mail.<domain>` when the apex already has MX records; `--subdomain` overrides that proposal. Several domains can share a zone connection, but each domain belongs to one project. Setup returns an operation ID so an interrupted request can be checked without restarting the operation.
 
 #### `void email domain status`
 
@@ -1502,7 +1502,7 @@ Register the domain with the project. One credential is required, granted two wa
 void email domain status <domain> [--project <name>]
 ```
 
-Show one registered domain. The platform re-probes the stored credential and the relay worker on every call, so this doubles as the drift report. A `pending` row whose only remaining step is the dashboard's subdomain form (printed by `add`) self-clears to `active` once public MX on the domain names Cloudflare — which makes this command the poll for that one human step.
+Show the recorded inbound, outbound, and management readiness, observation times, and latest operation. Use `sync` to reconcile setup and refresh readiness.
 
 #### `void email domain list`
 
@@ -1518,7 +1518,15 @@ List the project's registered email domains with their status and mode.
 void email domain sync <domain> [--project <name>]
 ```
 
-Redeploy the domain's relay worker at the current version and rotate its secret — the fix when `status` reports the relay missing or drifted.
+Reconcile the domain connection and refresh readiness. Sync does not rotate its secret. A blocked or uncertain operation exits unsuccessfully and names the operation to inspect.
+
+#### `void email domain rotate-secret`
+
+```sh
+void email domain rotate-secret <domain> [--project <name>]
+```
+
+Rotate the ingress secret for the zone connection shared by this domain and its siblings. The platform accepts the staged secret before updating the Worker and promotes it only after verifying the deployed generation. An uncertain update stays recorded for reconciliation.
 
 #### `void email domain remove`
 
@@ -1526,7 +1534,7 @@ Redeploy the domain's relay worker at the current version and rotate its secret 
 void email domain remove <domain> [--project <name>]
 ```
 
-Delete the registration: the platform row, the stored credential, and the relay secret. Cloudflare-side cleanup is best-effort; any step that fails is named (`failed_steps`) so you can finish it in the Cloudflare dashboard.
+Disable the domain assignment and record cleanup. Zone resources used by another domain remain available. Unfinished or uncertain cleanup remains recorded until it can be reconciled safely.
 
 ### `void email status`
 

@@ -3848,6 +3848,7 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
           {
             projectSlug: project.slug,
             emailSenderDomain: context.env.EMAIL_SENDER_DOMAIN,
+            deploymentId: deployment.id,
           },
         );
         await assertDeploymentNotCanceled(context.get('db'), deployment.id);

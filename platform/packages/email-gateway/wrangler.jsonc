@@ -1,0 +1,32 @@
+{
+  "name": "void-email-gateway",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "services": [{ "binding": "API", "service": "void-api" }],
+  "dispatch_namespaces": [{ "binding": "DISPATCH", "namespace": "void-users" }],
+  "kv_namespaces": [{ "binding": "ROUTING", "id": "9250c33f3db6494ebe8ad6272812c8c0" }],
+  "send_email": [{ "name": "SEND_EMAIL" }],
+  "vars": { "EMAIL_SENDER_DOMAIN": "mail.void.cloud" },
+  "env": {
+    "production": {
+      "name": "void-email-gateway",
+      "workers_dev": true,
+      "services": [{ "binding": "API", "service": "void-api" }],
+      "dispatch_namespaces": [{ "binding": "DISPATCH", "namespace": "void-users" }],
+      "kv_namespaces": [{ "binding": "ROUTING", "id": "9250c33f3db6494ebe8ad6272812c8c0" }],
+      "send_email": [{ "name": "SEND_EMAIL" }],
+      "vars": { "EMAIL_SENDER_DOMAIN": "mail.void.cloud" },
+    },
+    "staging": {
+      "name": "void-email-gateway-staging",
+      "workers_dev": true,
+      "services": [{ "binding": "API", "service": "void-api-staging" }],
+      "dispatch_namespaces": [{ "binding": "DISPATCH", "namespace": "void-users-staging" }],
+      "kv_namespaces": [{ "binding": "ROUTING", "id": "60240eecea804f39bf8b7395cd6c6b08" }],
+      "send_email": [{ "name": "SEND_EMAIL" }],
+      "vars": { "EMAIL_SENDER_DOMAIN": "mail.staging.void.cloud" },
+    },
+  },
+}

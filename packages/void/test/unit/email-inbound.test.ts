@@ -897,6 +897,8 @@ describe('compileWorkerEntry (email)', () => {
       'async email(envelope) { return handleEmail(envelope, this.env, this.ctx); }',
     );
     expect(code).toContain('async function handleEmail');
+    expect(code).toContain('from "void/_email-protocol"');
+    expect(code).not.toContain('from "@void/platform/email-protocol"');
   });
 
   it('omits the email export when hasEmail is false', () => {
@@ -1403,7 +1405,7 @@ describe('harness enforces the proxy action bounds, like production', () => {
     });
     await harness.deliver(DELIVERY);
     expect(thrown).toBeInstanceOf(MimeError);
-    expect((thrown as MimeError).message).toMatch(/exceeds Cloudflare limit/);
+    expect((thrown as MimeError).message).toMatch(/exceeds Void's sending limit/);
     expect(harness.replies).toEqual([]);
   });
 
@@ -3063,7 +3065,7 @@ describe('end-to-end: envelope → handler → action queue', () => {
       } as unknown as Parameters<ForwardableEmailMessage['reply']>[0]);
     });
     await expect(dispatchToHandler(makeEnvelope(), handler)).rejects.toThrow(
-      /exceeds Cloudflare limit/,
+      /exceeds Void's sending limit/,
     );
   });
 
@@ -3089,11 +3091,11 @@ describe('end-to-end: envelope → handler → action queue', () => {
       } as unknown as Parameters<ForwardableEmailMessage['reply']>[0]);
     });
     await expect(dispatchToHandler(makeEnvelope(), handler)).rejects.toThrow(
-      /exceeds Cloudflare limit/,
+      /exceeds Void's sending limit/,
     );
     expect(cancelled).toBe(true);
-    // 10 MiB limit + the chunk that crosses it + the stream's own read-ahead.
-    expect(pulls).toBeLessThanOrEqual(12);
+    // 5 MiB limit + the chunk that crosses it + the stream's own read-ahead.
+    expect(pulls).toBeLessThanOrEqual(7);
   });
 
   it('refuses the 101st queued action and leaves the queue at 100', async () => {
@@ -3119,10 +3121,7 @@ describe('end-to-end: envelope → handler → action queue', () => {
   });
 
   it('refuses a third reply once the cumulative reply budget is spent', async () => {
-    // This is what the per-reply cap does NOT catch: each of the first two
-    // replies is exactly at MAX_MESSAGE_BYTES and legal on its own, and the
-    // third is a single byte — but 2 x MAX_MESSAGE_BYTES is the whole budget
-    // for one delivery, so the byte is refused.
+    // The first two replies spend the 8 MiB response budget exactly.
     let thrown: unknown;
     const handler = defineEmail(async (message) => {
       const send = (raw: Uint8Array) =>
@@ -3131,8 +3130,8 @@ describe('end-to-end: envelope → handler → action queue', () => {
           to: 'sender@example.com',
           raw,
         } as unknown as Parameters<ForwardableEmailMessage['reply']>[0]);
-      await send(new Uint8Array(MAX_MESSAGE_BYTES));
-      await send(new Uint8Array(MAX_MESSAGE_BYTES));
+      await send(new Uint8Array(5 * 1024 * 1024));
+      await send(new Uint8Array(3 * 1024 * 1024));
       try {
         await send(new Uint8Array(1));
       } catch (e) {
@@ -3140,21 +3139,20 @@ describe('end-to-end: envelope → handler → action queue', () => {
       }
     });
     const actions = await dispatchToHandler(makeEnvelope(), handler);
-    // Both full-size replies are legal and queued; only the third is refused.
+    // Both in-budget replies are queued; only the third is refused.
     expect(actions).toHaveLength(2);
     expect(thrown).toBeInstanceOf(MimeError);
     expect((thrown as MimeError).message).toMatch(/cumulative reply size/);
   });
 
   it('cancels a stream reply at the REMAINING budget, not the per-reply cap', async () => {
-    // 15 MiB already spent out of the 20 MiB budget, so 5 MiB is left. A
-    // stream bounded by the per-reply cap would keep pulling to 10 MiB and
+    // 7 MiB already spent out of the 8 MiB budget, so 1 MiB is left. A
+    // stream bounded by the per-reply cap would keep pulling to 5 MiB and
     // report the wrong limit; the pull count and the message both pin that
     // the remaining budget is what stopped it.
     //
     // Two prior replies, not one: after a single full-size reply the
-    // remaining budget is exactly MAX_MESSAGE_BYTES, which cannot be told
-    // apart from the per-reply cap.
+    // remaining budget is still below the per-reply cap, but this pins a tighter boundary.
     let pulls = 0;
     let cancelled = false;
     const chunk = new Uint8Array(1024 * 1024);
@@ -3175,8 +3173,8 @@ describe('end-to-end: envelope → handler → action queue', () => {
           to: 'sender@example.com',
           raw: body,
         } as unknown as Parameters<ForwardableEmailMessage['reply']>[0]);
-      await send(new Uint8Array(MAX_MESSAGE_BYTES));
       await send(new Uint8Array(5 * 1024 * 1024));
+      await send(new Uint8Array(2 * 1024 * 1024));
       try {
         await send(raw);
       } catch (e) {
@@ -3186,9 +3184,8 @@ describe('end-to-end: envelope → handler → action queue', () => {
     const actions = await dispatchToHandler(makeEnvelope(), handler);
     expect(actions).toHaveLength(2);
     expect(cancelled).toBe(true);
-    // 5 MiB of remaining budget + the chunk that crosses it + read-ahead —
-    // NOT the ~11 a 10 MiB per-reply cap would have allowed.
-    expect(pulls).toBeLessThanOrEqual(7);
+    // 1 MiB of remaining budget + the chunk that crosses it + read-ahead.
+    expect(pulls).toBeLessThanOrEqual(3);
     expect(thrown).toBeInstanceOf(MimeError);
     expect((thrown as MimeError).message).toMatch(/cumulative reply size/);
   });
@@ -3299,12 +3296,10 @@ describe('end-to-end: envelope → handler → action queue', () => {
     },
   );
 
-  it("records a forward header bag exactly at the router's bounds", async () => {
-    // 32 headers, every name and value 1024 characters: the largest bag the
-    // managed router enacts. The bound is `>` on both sides, not `>=`.
+  it('records 32 forward headers within the wire metadata budget', async () => {
     const bag: Record<string, string> = {};
     for (let i = 0; i < 32; i++) {
-      bag[`X-${'a'.repeat(1020)}${String(i).padStart(2, '0')}`] = 'v'.repeat(1024);
+      bag[`X-${'a'.repeat(95)}${String(i).padStart(2, '0')}`] = 'v'.repeat(100);
     }
     const { message, getActions } = createMessageProxy(makeEnvelope());
     await message.forward('archive@example.com', bag as unknown as Headers);
@@ -3313,9 +3308,21 @@ describe('end-to-end: envelope → handler → action queue', () => {
     const recorded = (actions[0] as { headers?: Record<string, string> }).headers ?? {};
     expect(Object.keys(recorded)).toHaveLength(32);
     for (const [name, value] of Object.entries(recorded)) {
-      expect(name).toHaveLength(1024);
-      expect(value).toHaveLength(1024);
+      expect(name).toHaveLength(99);
+      expect(value).toHaveLength(100);
     }
+  });
+
+  it('rejects an aggregate forward header bag over the wire metadata budget', async () => {
+    const bag: Record<string, string> = {};
+    for (let i = 0; i < 32; i++) {
+      bag[`X-${i}`] = 'v'.repeat(1024);
+    }
+    const { message, getActions } = createMessageProxy(makeEnvelope());
+    await expect(message.forward('archive@example.com', bag as unknown as Headers)).rejects.toThrow(
+      'action metadata exceeds 8192 bytes',
+    );
+    expect(getActions()).toEqual([]);
   });
 
   it('normalizes the reject reason as the router does: slice to 1000, then strip controls', () => {

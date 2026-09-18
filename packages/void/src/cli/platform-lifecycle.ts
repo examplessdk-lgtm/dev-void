@@ -433,6 +433,12 @@ export async function runPlatformLifecycleCommand(args: PlatformArgs): Promise<v
       controlPlaneDomain,
       dedicatedZone,
       displayName,
+      ...(process.env.VOID_EMAIL_SHARED_ZONE_ID
+        ? { emailSharedZoneId: process.env.VOID_EMAIL_SHARED_ZONE_ID }
+        : {}),
+      ...(process.env.VOID_EMAIL_SENDER_DOMAIN
+        ? { emailSenderDomain: process.env.VOID_EMAIL_SENDER_DOMAIN }
+        : {}),
       installationSlug,
       zoneName,
       ...(workersDev ? { workersDev: true } : {}),
@@ -440,6 +446,7 @@ export async function runPlatformLifecycleCommand(args: PlatformArgs): Promise<v
     let plan = await createPlatformInstallPlan(client, planInput, existing, {
       authoritativeProvisionIntents,
       allowUnverifiedAiGateway: true,
+      includeEmailGateway: runtime.manifest.artifacts.emailGateway !== undefined,
     });
     note(
       formatPlatformInstallPlan(plan),
@@ -759,6 +766,7 @@ export async function runPlatformLifecycleCommand(args: PlatformArgs): Promise<v
           await createPlatformInstallPlan(client, planInput, manifest, {
             authoritativeProvisionIntents: true,
             repairMissing: true,
+            includeEmailGateway: runtime.manifest.artifacts.emailGateway !== undefined,
           })
         ).actions.filter((action) => action.kind === 'worker'),
       revalidateBeforeWorkerDeploy: (manifest, action) =>
@@ -873,6 +881,7 @@ export async function verifyPlatformAiGatewayPlan(
   try {
     verified = await createPlatformInstallPlan(client, input, existing, {
       authoritativeProvisionIntents,
+      includeEmailGateway: preview.actions.some((entry) => entry.key === 'email-gateway-worker'),
     });
   } catch (error) {
     if (

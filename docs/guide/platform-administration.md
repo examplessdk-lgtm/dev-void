@@ -217,11 +217,11 @@ void platform email policy-set any
 void platform email policy-set verified
 ```
 
-`domains` lets every project mail any address on the listed domains in addition to its verified recipients; `any` lifts the check. Cloudflare still refuses a recipient it has not verified until your mail domain is onboarded for Email Sending, which needs Workers Paid on the platform's account. Until then such sends come back as `UNVERIFIED_DESTINATION` for that recipient, whatever the policy says. Two things the policy never changes: sends from a project's own custom domain, and mail to any address on the platform's own mail domain — those stay verified-recipient-only, so no project reaches another project's inbox without its consent. A tightening takes effect everywhere within a minute. The same setting is on the admin UI's **Email** page.
+`domains` lets every project mail any address on the listed domains in addition to its verified recipients; `any` lifts the check. Cloudflare still refuses a recipient it has not verified until your mail domain is onboarded for Email Sending, which needs Workers Paid on the platform's account. Until then such sends come back as `UNVERIFIED_DESTINATION` for that recipient, whatever the policy says. Two things the policy never changes: sends from a project's own custom domain, and mail to any address on the platform's own mail domain — those stay verified-recipient-only, so no project reaches another project's inbox without its consent. A tightening applies to new send admissions as soon as it commits; previously admitted attempts may finish. The same setting is on the admin UI's **Email** page.
 
 ### Project caps
 
-Each project may send 200 messages a month and 10 a minute by default. Raise or lower a project's caps by id or slug:
+Each project has 200 recipient submissions per UTC calendar month and 10 in a rolling 60-second window by default. An attempt stays charged once it starts, including a failed or uncertain outcome. Raise or lower a project's caps by id or slug:
 
 ```sh
 void platform email limit hr-portal --monthly 2000 --burst 30
@@ -231,7 +231,7 @@ The project's page in the admin UI shows the current values and clears an overri
 
 ### Registering email domains for projects
 
-Your users may hold no Cloudflare account. Tell the platform that administrators register email domains, so `void email domain add` prints the command to ask you for instead of opening a Cloudflare consent:
+Your users may hold no Cloudflare account. Tell the platform that administrators register email domains, so `void email domain add` prints the command to ask you for instead of opening a token-creation page:
 
 ```sh
 void platform email settings-set --domains admin
@@ -245,7 +245,7 @@ void platform email domain-status mail.example.com
 void platform email domains
 ```
 
-Name the exact mail domain: a subdomain such as `mail.example.com` when the apex already receives mail, otherwise the apex itself. Enabling Email Routing on a subdomain is a one-time step in the Cloudflare dashboard; `domain-status` names it and reports the domain active once the MX records appear. Email Sending onboarding needs Workers Paid; after upgrading, `domain-sync` re-attempts it. For a zone in another Cloudflare account, pipe an API token for that account on standard input:
+Name the exact mail domain: a subdomain such as `mail.example.com` when the apex already receives mail, otherwise the apex itself. `domain-status` reports inbound, outbound, and management readiness separately. Follow any required DNS or Cloudflare dashboard step, then use `domain-sync` to reconcile. Email Sending onboarding needs Workers Paid; after upgrading, `domain-sync` re-attempts it. For a zone in another Cloudflare account, pipe an API token for that account on standard input:
 
 ```sh
 void platform email domain-add mail.other.example --project hr-portal --token-stdin --yes < token.txt
@@ -344,3 +344,5 @@ unset VOID_OPERATOR_TOKEN
 Disable shell tracing for the exchange and do not write either token to logs or plaintext files. A full API login session expires after 30 days and can be revoked sooner; renew it through the normal authenticated login flow and update the protected CI secret. A job that runs longer than one hour must repeat the exchange while its full API session is still valid. An expired operator token cannot refresh itself, and Void does not issue permanent service tokens for administrator automation.
 
 `auth login --token-stdin` performs the same elevation and saves the one-hour operator token in the system keychain for interactive use. See [operator authentication](../reference/cli.md#operator-authentication) for the full command syntax.
+
+An email zone has one connection and ingress Worker shared by its exact domain assignments. Removing one assignment preserves resources used by the others. The Email administration page can explicitly rotate that connection secret; ordinary synchronization does not rotate it. Setup and cleanup outcomes include operation IDs, and uncertain provider writes remain recorded until reconciled.

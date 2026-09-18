@@ -236,10 +236,15 @@ export type EmailUsageResponse = {
 export type EmailLogEntry = {
   timestamp: number;
   direction: 'sent' | 'received';
-  from: string;
-  to: string;
-  subject?: string;
+  operationId: string;
+  receiptId?: string | null;
+  actionId?: string;
+  recipient?: string | null;
   status: string;
+  transport?: string;
+  providerReference?: string | null;
+  errorCode?: string | null;
+  policyVersion?: number | null;
 };
 
 export type EmailLogsResponse = {
@@ -290,7 +295,15 @@ export type EmailDomainResponse = {
   id: string;
   domain: string;
   mode: 'apex' | 'subdomain' | null;
-  status: 'pending' | 'active' | 'token_revoked' | 'token_expired' | 'failed';
+  status:
+    | 'pending'
+    | 'ready'
+    | 'disabled'
+    | 'drifted'
+    | 'active'
+    | 'token_revoked'
+    | 'token_expired'
+    | 'failed';
   /** `platform` rows run on the platform's own credential — an administrator's row. */
   credential_kind: 'oauth_grant' | 'api_token' | 'platform';
   /** Who registered the row; owners may read an `admin` row but not sync or remove it. */
@@ -307,6 +320,9 @@ export type EmailDomainResponse = {
    * reconcile tells that apart from a stamped null.
    */
   attemptId?: string | null;
+  operationId?: string;
+  operationStatus?: EmailOperationResponse['status'];
+  readiness?: EmailReadiness;
   setup_state: {
     /** Orchestration step that left the row 'failed'. */
     failed_step?: string;
@@ -321,6 +337,34 @@ export type EmailDomainResponse = {
   error?: string;
   created_at: string;
   updated_at: string;
+};
+
+export type EmailReadiness = {
+  inbound: {
+    status: 'pending' | 'ready' | 'disabled' | 'drifted';
+    reason?: string | null;
+    observedAt?: string | null;
+  };
+  outbound: {
+    status: 'pending' | 'verified_only' | 'ready' | 'blocked';
+    reason?: string | null;
+    observedAt?: string | null;
+  };
+  management: {
+    status: 'healthy' | 'expired' | 'revoked' | 'refresh_unknown' | 'probe_failed';
+    reason?: string | null;
+    observedAt?: string | null;
+  };
+};
+
+export type EmailOperationResponse = {
+  operationId: string;
+  attemptId: string;
+  status: 'pending' | 'running' | 'blocked' | 'unknown' | 'completed';
+  domain: string;
+  readiness: EmailReadiness;
+  failedStep?: string;
+  error?: string;
 };
 
 /** The zone catch-all outcome of a sync — absent when the row has no zone_id. */
@@ -351,6 +395,9 @@ export type EmailDomainStatusResponse = EmailDomainResponse & {
 export type RemoveEmailDomainFailedStep = 'catch_all' | 'delete_relay' | 'revoke_grant';
 
 export type RemoveEmailDomainResponse = {
+  operationId?: string;
+  operationStatus?: EmailOperationResponse['status'];
+  error?: string;
   ok: boolean;
   /**
    * false = the row was KEPT for retry: a Cloudflare-side step failed and
@@ -1605,6 +1652,17 @@ export class PlatformClient {
     return res.json();
   }
 
+  async getEmailOperation(projectId: string, operationId: string): Promise<EmailOperationResponse> {
+    const res = await this.request(
+      `${this.baseUrl}/projects/${encodeURIComponent(projectId)}/email/operations/${encodeURIComponent(operationId)}`,
+      { headers: { ...this.authHeaders } },
+    );
+    if (!res.ok) {
+      await throwPlatformApiError('Failed to fetch email operation', res);
+    }
+    return res.json();
+  }
+
   async listEmailDestinations(projectId: string): Promise<Array<EmailDestinationResponse>> {
     const res = await this.request(`${this.baseUrl}/projects/${projectId}/email/destinations`, {
       headers: {
@@ -1713,7 +1771,7 @@ export class PlatformClient {
    */
   async addEmailDomain(
     projectId: string,
-    input: { domain: string; refreshToken?: string; apiToken?: string; attemptId?: string },
+    input: { domain: string; apiToken?: string; attemptId?: string },
   ): Promise<EmailDomainResponse> {
     const res = await this.request(`${this.baseUrl}/projects/${projectId}/email/domains`, {
       method: 'POST',
@@ -1723,7 +1781,6 @@ export class PlatformClient {
       },
       body: JSON.stringify({
         domain: input.domain,
-        ...(input.refreshToken !== undefined ? { refreshToken: input.refreshToken } : {}),
         ...(input.apiToken !== undefined ? { apiToken: input.apiToken } : {}),
         ...(input.attemptId !== undefined ? { attemptId: input.attemptId } : {}),
       }),
@@ -1753,7 +1810,18 @@ export class PlatformClient {
     return res.json();
   }
 
-  /** Redeploys the relay at the current version and rotates its secret (0078, `sync`). */
+  /** Reconciles the shared zone connection without rotating its secret. */
+  async rotateEmailDomainSecret(projectId: string, domain: string): Promise<EmailDomainResponse> {
+    const res = await this.request(
+      `${this.baseUrl}/projects/${projectId}/email/domains/${encodeURIComponent(domain)}/rotate-secret`,
+      { method: 'POST', headers: { ...this.authHeaders } },
+    );
+    if (!res.ok) {
+      await throwPlatformApiError('Failed to rotate email connection secret', res);
+    }
+    return res.json();
+  }
+
   async syncEmailDomain(projectId: string, domain: string): Promise<EmailDomainSyncResponse> {
     const res = await this.request(
       `${this.baseUrl}/projects/${projectId}/email/domains/${encodeURIComponent(domain)}/sync`,

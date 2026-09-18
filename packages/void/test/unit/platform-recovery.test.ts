@@ -81,6 +81,12 @@ function remoteManifest() {
     ['hyperdrive', 'hyperdrive', 'hyperdrive-id', deployment.resources.hyperdrive],
     ['api-worker', 'worker', deployment.resources.apiWorker, deployment.resources.apiWorker],
     ['proxy-worker', 'worker', deployment.resources.proxyWorker, deployment.resources.proxyWorker],
+    [
+      'email-gateway-worker',
+      'worker',
+      deployment.resources.emailGatewayWorker,
+      deployment.resources.emailGatewayWorker,
+    ],
     ['tail-worker', 'worker', deployment.resources.tailWorker, deployment.resources.tailWorker],
     [
       'dispatch-worker',
@@ -242,6 +248,7 @@ function client(manifest = remoteManifest()) {
     listWorkerNames: async () => [
       manifest.deployment.resources.apiWorker,
       manifest.deployment.resources.proxyWorker,
+      manifest.deployment.resources.emailGatewayWorker,
       manifest.deployment.resources.tailWorker,
       manifest.deployment.resources.dispatchWorker,
     ],

@@ -224,10 +224,12 @@ describe('cf-customer client', () => {
         bindings: [
           {
             type: 'plain_text',
-            name: 'VOID_PROXY_ORIGIN',
+            name: 'VOID_EMAIL_GATEWAY_ORIGIN',
             text: 'https://proxy.example.test',
           },
-          { type: 'plain_text', name: 'VOID_EMAIL_DOMAIN', text: 'acme.com' },
+          { type: 'plain_text', name: 'VOID_EMAIL_ACCOUNT', text: ACCOUNT },
+          { type: 'plain_text', name: 'VOID_EMAIL_ZONE', text: '' },
+          { type: 'plain_text', name: 'VOID_EMAIL_INGRESS', text: RELAY },
         ],
       });
       const modulePart = formData.get('index.js') as File;

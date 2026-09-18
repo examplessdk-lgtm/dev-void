@@ -1,18 +1,11 @@
+import { verifyEmailReceipt } from '@void/platform/email-protocol';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { ai } from './ai.ts';
 import { asNumber, asString, isProxyBody } from './body.ts';
 import { proxyCapabilityEnabled } from './capabilities.ts';
 import { d1 } from './d1.ts';
-import { emailRelay } from './email-relay.ts';
-import { routeInbound } from './email-router.ts';
-import {
-  email,
-  MAX_MIME_BYTES,
-  MAX_RECIPIENT_LENGTH,
-  MAX_SENDER_LENGTH,
-  readEmailDomainMirror,
-} from './email.ts';
+import { email, MAX_MIME_BYTES, MAX_RECIPIENT_LENGTH, MAX_SENDER_LENGTH } from './email.ts';
 import { guardHumanStream } from './human-stream.ts';
 import { kv } from './kv.ts';
 import { PLATFORM_DISABLED_KEY, PLATFORM_DISABLED_VALUE } from './platform-lifecycle.ts';
@@ -113,88 +106,97 @@ const PLATFORM_TOKEN_MAX_SKEW_SECONDS = 5 * 60;
  */
 const PLATFORM_TOKEN_LENGTH = 43;
 
+async function hmacSign(data: string, secret: string): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  );
+  const bytes = new Uint8Array(
+    await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(data)),
+  );
+  let binary = '';
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+  return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
+}
+
+// The tenant calls this over its internal service binding. JWT_SECRET never
+// enters the tenant, so a project token cannot mint a gateway receipt.
+app.post('/email/verify-receipt', async (context) => {
+  const declaredLength = context.req.header('content-length');
+  if (declaredLength && (!/^\d+$/.test(declaredLength) || Number(declaredLength) > 2048)) {
+    return context.json({ valid: false }, 400);
+  }
+  let body: unknown;
+  try {
+    const reader = context.req.raw.body?.getReader();
+    if (!reader) {
+      return context.json({ valid: false }, 400);
+    }
+    const bytes = new Uint8Array(2048);
+    let size = 0;
+    try {
+      while (true) {
+        const chunk = await reader.read();
+        if (chunk.done) {
+          break;
+        }
+        size += chunk.value.byteLength;
+        if (size > bytes.byteLength) {
+          return context.json({ valid: false }, 400);
+        }
+        bytes.set(chunk.value, size - chunk.value.byteLength);
+      }
+    } finally {
+      await reader.cancel().catch(() => {});
+      reader.releaseLock();
+    }
+    if (size === 0 || (declaredLength && size !== Number(declaredLength))) {
+      return context.json({ valid: false }, 400);
+    }
+    body = JSON.parse(new TextDecoder().decode(bytes.subarray(0, size)));
+  } catch {
+    return context.json({ valid: false }, 400);
+  }
+  if (!body || typeof body !== 'object') {
+    return context.json({ valid: false }, 400);
+  }
+  const input = body as Record<string, unknown>;
+  if (
+    typeof input.projectId !== 'string' ||
+    input.projectId.length > 128 ||
+    typeof input.deploymentId !== 'string' ||
+    input.deploymentId.length > 128 ||
+    typeof input.recipient !== 'string' ||
+    input.recipient.length > 320 ||
+    typeof input.receipt !== 'string' ||
+    input.receipt.length > 1536
+  ) {
+    return context.json({ valid: false }, 400);
+  }
+  const projectToken = await hmacSign(input.projectId, context.env.JWT_SECRET);
+  if (context.req.header('x-void-internal') !== projectToken) {
+    return context.json({ valid: false }, 403);
+  }
+  const claims = await verifyEmailReceipt(input.receipt, context.env.JWT_SECRET, {
+    projectId: input.projectId,
+    deploymentId: input.deploymentId,
+    recipient: input.recipient,
+  });
+  return context.json({ valid: claims !== null, receiptId: claims?.receiptId });
+});
+
+// The former relay endpoint is gone. Reject it before the generic JSON auth
+// middleware so an untrusted MIME stream is never parsed or buffered here.
+app.post('/email/relay', (context) => context.json({ error: 'not found' }, 404));
+
 // Auth middleware — parses body, authenticates, sets projectId
 app.post('/*', async (context, next) => {
   const path = new URL(context.req.url).pathname;
-
-  // /email/relay — the custom-domain inbound hop (design doc 0078, "Custom
-  // domains on Cloudflare"). A relay worker in the CUSTOMER's account POSTs
-  // the raw MIME as the request body — not JSON — with the envelope in
-  // headers:
-  //
-  //   Authorization: Bearer <relay secret>
-  //   X-Void-Email-Domain / X-Void-Email-From / X-Void-Email-To
-  //
-  // so this branch MUST run ahead of the JSON parse below. Modelled on the
-  // /email/internal/ branch: every size bound runs BEFORE any crypto, so an
-  // unauthenticated caller cannot choose how much hashing or KV work a
-  // malformed request buys.
-  if (path === '/email/relay') {
-    const relayDomain = context.req.header('X-Void-Email-Domain');
-    const relayFrom = context.req.header('X-Void-Email-From');
-    const relayTo = context.req.header('X-Void-Email-To');
-    const relayAuth = context.req.header('Authorization');
-    if (!relayDomain || !relayFrom || !relayTo || !relayAuth) {
-      return context.json({ error: 'relay envelope required' }, 400);
-    }
-    // Each header is bounded before it is used. 256 is generous: the
-    // bearer is a 43-char secret and RFC 5321 caps an address at 254.
-    if (
-      relayDomain.length > 256 ||
-      relayFrom.length > 256 ||
-      relayTo.length > 256 ||
-      relayAuth.length > 256
-    ) {
-      return context.json({ error: 'relay envelope required' }, 400);
-    }
-    // The MIME cap is checked against the DECLARED length before the body
-    // is touched; the handler re-bounds while streaming, since a declared
-    // length can lie. A missing length is refused outright — the relay
-    // knows rawSize and always sets it.
-    const contentLengthRaw = context.req.header('content-length');
-    if (!contentLengthRaw) {
-      return context.json({ error: 'content-length required' }, 400);
-    }
-    const contentLength = Number(contentLengthRaw);
-    if (!Number.isInteger(contentLength) || contentLength < 0) {
-      return context.json({ error: 'content-length required' }, 400);
-    }
-    if (contentLength > MAX_MIME_BYTES) {
-      return context.json({ error: 'mime too large' }, 413);
-    }
-    const relaySecret = relayAuth.startsWith('Bearer ') ? relayAuth.slice(7) : null;
-    if (!relaySecret) {
-      return context.json({ error: 'invalid relay credentials' }, 403);
-    }
-    // Attribution binds to the envelope RECIPIENT's domain, never to the
-    // relay's declared domain header: a catch-all rule can be zone-wide, so
-    // a relay can receive mail addressed to a different domain on the same
-    // zone — and its secret must not author that mail. The declared header
-    // must equal the recipient's domain; a mismatch means the relay or its
-    // wiring is wrong, and the cheap string check runs before any KV work.
-    const recipientDomain = relayTo.slice(relayTo.lastIndexOf('@') + 1).toLowerCase();
-    if (recipientDomain.length === 0 || recipientDomain !== relayDomain.toLowerCase()) {
-      return context.json({ error: 'relay domain mismatch' }, 403);
-    }
-    // secret → domain → project. The mirror carries only the sha256 of the
-    // relay secret, so knowledge is proved without KV holding anything
-    // reusable; the compare is constant-time against that hash. Read
-    // uncached: a revoked or rotated secret must stop working at KV speed.
-    const mirror = await readEmailDomainMirror(context.env.ROUTING, recipientDomain);
-    if (!mirror) {
-      return context.json({ error: 'invalid relay credentials' }, 403);
-    }
-    const presented = await sha256Hex(relaySecret);
-    if (!constantTimeEqual(presented, mirror.relaySecretSha256)) {
-      return context.json({ error: 'invalid relay credentials' }, 403);
-    }
-    if (mirror.status !== 'active') {
-      return context.json({ error: 'email domain is not active' }, 403);
-    }
-    context.set('projectId', mirror.projectId);
-    await next();
-    return;
-  }
 
   let body: ProxyBody;
   try {
@@ -437,18 +439,8 @@ app.route('/kv', kv);
 app.route('/r2', r2);
 app.route('/revalidate', revalidate);
 app.route('/email', email);
-app.route('/email', emailRelay);
 
-export default {
-  fetch: app.fetch,
-  /**
-   * Inbound email entry point — bound as the catch-all CF Email Routing rule
-   * on the platform mail zone. See `email-router.ts`.
-   */
-  async email(message: ForwardableEmailMessage, env: Env, ctx: ExecutionContext): Promise<void> {
-    await routeInbound(message, env, ctx);
-  },
-};
+export default { fetch: app.fetch };
 
 // --- HMAC verification ---
 
@@ -481,23 +473,6 @@ async function sha256Hex(input: string): Promise<string> {
     out += b.toString(16).padStart(2, '0');
   }
   return out;
-}
-
-/**
- * Constant-time equality for two sha256-hex strings. Length is checked
- * first: both sides are 64-char hex digests in every legitimate use (the
- * mirror's `relaySecretSha256` and the presented secret's hash), so the
- * early out leaks nothing an attacker doesn't already know.
- */
-function constantTimeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) {
-    return false;
-  }
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) {
-    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  }
-  return diff === 0;
 }
 
 async function verifyHmac(data: string, signature: string, secret: string): Promise<boolean> {

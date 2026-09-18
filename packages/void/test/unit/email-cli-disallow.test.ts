@@ -61,7 +61,9 @@ describe('void email disallow', () => {
 
     expect(c.removeEmailDestination).toHaveBeenCalledWith('prj_1', 'edst_1');
     const text = printed(successSpy);
-    expect(text).toBe(`Removed ${ADDRESS}. Sends to it are refused within about a minute.`);
+    expect(text).toBe(
+      `Removed ${ADDRESS}. New sends to it are refused immediately; already admitted attempts may finish.`,
+    );
     // The api tightens the KV allowlist in the DELETE and the proxy's
     // cacheTtl bounds convergence; nothing about a revoke waits for a deploy.
     expect(text).not.toMatch(/deploy/);

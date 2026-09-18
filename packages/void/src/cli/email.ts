@@ -5,7 +5,6 @@ import { readConfig } from '../config.ts';
 import { readProjectPaths } from '../project-paths.ts';
 import { scanEmailHandlersSync } from '../router/email.ts';
 import { getToken, openBrowser } from './auth.ts';
-import { revokeCfOauthGrant, runCfOauthGrant, type CfOauthGrant } from './cf-oauth.ts';
 import {
   PlatformApiError,
   PlatformClient,
@@ -198,7 +197,9 @@ export async function emailDisallow(
     process.exit(1);
   }
   await client.removeEmailDestination(projectId, dest.id);
-  log.success(`Removed ${dest.address}. Sends to it are refused within about a minute.`);
+  log.success(
+    `Removed ${dest.address}. New sends to it are refused immediately; already admitted attempts may finish.`,
+  );
 }
 
 /**
@@ -210,10 +211,6 @@ export async function emailLogs(
   projectId: string,
   limit?: number,
 ): Promise<void> {
-  // The API currently ignores `limit`; server-side wiring is pending the
-  // Analytics Engine integration. Forwarding it now keeps the CLI
-  // forward-compatible — once persistent storage lands, no client change is
-  // needed.
   const result = await client.getEmailLogs(projectId, limit);
   if (result.pending) {
     log.info(result.note ?? 'Persistent log storage is not yet wired up.');
@@ -234,8 +231,7 @@ export async function emailLogs(
   const lines = result.logs.map((entry) => {
     const ts = new Date(entry.timestamp).toISOString();
     const dir = entry.direction === 'sent' ? '→' : '←';
-    const subject = entry.subject ? ` "${entry.subject}"` : '';
-    return `${ts}  ${dir}  ${entry.from} → ${entry.to}  ${entry.status}${subject}`;
+    return `${ts}  ${dir}  ${entry.operationId}  ${entry.recipient ?? '—'}  ${entry.status}${entry.errorCode ? ` (${entry.errorCode})` : ''}`;
   });
   note(lines.join('\n'), 'Email Logs');
 }
@@ -244,9 +240,9 @@ export async function emailLogs(
 //
 // `void email domain add|status|list|sync|remove`. The api owns the
 // orchestration (contract 7); the CLI owns the MX-decision render, the
-// credential grant (the OAuth flow in cf-oauth.ts, the template link +
+// scoped API token (the template link +
 // clipboard watch below as the permanent fallback), and the result render.
-// The credential — grant refresh token or pasted API token — is held in
+// The pasted API token is held in
 // memory, POSTed once, and never printed, logged, or persisted locally.
 
 /**
@@ -263,7 +259,7 @@ const CF_TOKEN_TEMPLATE_PERMISSION_GROUPS = [
   { key: 'zone_settings', type: 'edit' },
 ] as const;
 
-/** The three-click template link — the fallback grant path (0078, "Creating the token in three clicks"). */
+/** The three-click template link — the scoped token path (0078, "Creating the token in three clicks"). */
 export function buildCfApiTokenTemplateUrl(domain: string): string {
   const url = new URL('https://dash.cloudflare.com/profile/api-tokens');
   url.searchParams.set('permissionGroupKeys', JSON.stringify(CF_TOKEN_TEMPLATE_PERMISSION_GROUPS));
@@ -475,11 +471,6 @@ function createEnterRace(waitForEnter?: () => Promise<unknown>): EnterRace {
 /** Seams for {@link emailDomainAdd} — every browser, clipboard, DNS, and stdin touch is injectable. */
 export interface EmailDomainAddDeps {
   dns?: Pick<EmailDns, 'resolveMx'>;
-  /** The OAuth grant (default: the real PKCE flow in cf-oauth.ts). */
-  runGrant?: (options: {
-    onUrl?: (url: string) => void;
-    signal?: AbortSignal;
-  }) => Promise<CfOauthGrant>;
   /** Browser open for the template link (default: auth.ts's openBrowser). */
   openUrl?: (url: string) => void;
   /** Clipboard read; null means no clipboard tool — the paste prompt is the path. */
@@ -489,6 +480,8 @@ export interface EmailDomainAddDeps {
   verifyToken?: (token: string) => Promise<CfTokenVerification>;
   /** The masked paste prompt; null means the user cancelled (Esc). */
   pasteToken?: () => Promise<string | null>;
+  /** Confirms the account/zone resource restriction shown in the token form. */
+  confirmScope?: (domain: string) => Promise<boolean>;
   /** The Enter keypress that switches paths (default: one stdin line). */
   waitForEnter?: () => Promise<unknown>;
   watchIntervalMs?: number;
@@ -512,9 +505,7 @@ async function defaultPasteToken(): Promise<string | null> {
   return result;
 }
 
-type EmailDomainCredential =
-  | { kind: 'oauth_grant'; refreshToken: string }
-  | { kind: 'api_token'; apiToken: string };
+type EmailDomainCredential = { kind: 'api_token'; apiToken: string };
 
 /**
  * Lost-answer reconcile bounds for `domain add`: attempt-count bounded (not
@@ -530,7 +521,7 @@ const ADD_RECONCILE_INTERVAL_MS = 1000;
  * `void email domain add <domain>` — exported for the unit test; the command
  * entry resolves the client and project first.
  *
- * The flow (0078, "The flow"): render the MX decision → the OAuth grant →
+ * The flow: render the MX decision → scoped API token →
  * the template-link + clipboard fallback (Enter switches to the masked paste
  * at any point) → POST the credential once → render the resulting row. A
  * failed add leaves the platform row 'failed' and re-running add replaces
@@ -541,7 +532,11 @@ const ADD_RECONCILE_INTERVAL_MS = 1000;
 export async function emailDomainAdd(
   client: Pick<
     PlatformClient,
-    'addEmailDomain' | 'getEmailDomain' | 'getEmailSettings' | 'listEmailDomains'
+    | 'addEmailDomain'
+    | 'getEmailDomain'
+    | 'getEmailOperation'
+    | 'getEmailSettings'
+    | 'listEmailDomains'
   >,
   projectId: string,
   rawDomain: string,
@@ -646,60 +641,19 @@ export async function emailDomainAdd(
     await decideTarget();
   }
 
-  // Both grant paths need a human: a browser, a clipboard, or a paste prompt.
+  // Token creation needs a browser or a masked paste prompt.
   const interactive = deps.isInteractive ?? !isWranglerNonInteractiveOrCI();
   if (!interactive) {
     return fail(
-      'email: `void email domain add` needs an interactive terminal (the grant opens a browser; the fallback reads the clipboard or a paste). Run it locally.',
+      'email: `void email domain add` needs an interactive terminal to create or paste a scoped Cloudflare API token. Run it locally.',
     );
   }
 
-  // 1. The OAuth grant on wrangler's client (cf-oauth.ts). Enter switches to
-  //    the template-link path mid-wait; any failure falls through to it too —
-  //    the borrowed client id is not ours, so the fallback is permanent.
-  let credential: EmailDomainCredential | undefined;
-  const runGrant = deps.runGrant ?? ((options) => runCfOauthGrant(options));
-  const grantSpinner = createSpinner();
-  grantSpinner.start("Opening Cloudflare's consent page…");
-  const controller = new AbortController();
-  const enterDuringGrant = createEnterRace(deps.waitForEnter);
-  const grantOutcome = await Promise.race([
-    runGrant({
-      signal: controller.signal,
-      onUrl: (url) =>
-        grantSpinner.message(
-          `Waiting for the Cloudflare grant — click Allow. If the browser didn't open, visit:\n${pc.cyan(url)}\n(Enter switches to the API-token path.)`,
-        ),
-    }).then(
-      (grant) => ({ type: 'grant' as const, grant }),
-      (error: unknown) => ({
-        type: 'error' as const,
-        error: error instanceof Error ? error : new Error(String(error)),
-      }),
-    ),
-    enterDuringGrant.promise.then(() => ({ type: 'enter' as const })),
-  ]);
-  enterDuringGrant.stop();
-  if (grantOutcome.type === 'grant') {
-    grantSpinner.stop('Grant received.');
-    credential = { kind: 'oauth_grant', refreshToken: grantOutcome.grant.refreshToken };
-  } else {
-    controller.abort();
-    grantSpinner.stop(
-      grantOutcome.type === 'enter'
-        ? 'Switched to the API-token path.'
-        : 'The consent flow did not complete — using the API-token path.',
+  let credential: EmailDomainCredential;
+  {
+    log.info(
+      `Create a Cloudflare API token restricted to the account and DNS zone containing ${target.emailDomain}. In the resource selectors, replace All accounts and All zones with those exact resources. Workers Scripts Write still applies to every Worker in the selected account.`,
     );
-    if (grantOutcome.type === 'error') {
-      log.warn(grantOutcome.error.message);
-    }
-  }
-
-  // 2. The template link + clipboard watch (0078, "Creating the token in
-  //    three clicks"). The clipboard is read only between opening the link
-  //    and getting a token, only a NEW value shaped like a CF token is
-  //    accepted, and the clipboard is cleared once it arrives.
-  if (credential === undefined) {
     const url = buildCfApiTokenTemplateUrl(target.emailDomain);
     const readClip = deps.readClipboard ?? readClipboard;
     const clearClip = deps.clearClipboard ?? clearClipboard;
@@ -821,132 +775,85 @@ export async function emailDomainAdd(
     }
   }
 
-  // 3. The one call that carries the credential. Everything after it
-  //    (status, sync, remove) addresses the row by domain. The attempt id
-  //    is stamped on the row by the api, so a reconcile after a lost answer
-  //    can tell this attempt's committed row apart from a pre-existing one.
+  const scopeConfirmed = await (
+    deps.confirmScope ??
+    (async (domain: string) => {
+      const answer = await confirm({
+        message: `Is this token restricted to the Cloudflare account and DNS zone containing ${domain}?`,
+        initialValue: false,
+      });
+      return !isCancel(answer) && answer === true;
+    })
+  )(target.emailDomain);
+  if (!scopeConfirmed) {
+    return fail(
+      'email: restrict the token to the selected account and zone before adding the domain. Nothing was submitted to the platform.',
+    );
+  }
+
   const attemptId = crypto.randomUUID();
+  log.info(`Setup operation: ${attemptId}`);
   let row: EmailDomainResponse;
   try {
     row = await client.addEmailDomain(projectId, {
       domain: target.emailDomain,
-      ...(credential.kind === 'oauth_grant'
-        ? { refreshToken: credential.refreshToken }
-        : { apiToken: credential.apiToken }),
+      apiToken: credential.apiToken,
       attemptId,
     });
-  } catch (err) {
-    if (
-      err instanceof PlatformApiError &&
-      (err.status === 400 || err.status === 404 || err.status === 409)
-    ) {
-      // Only the add route's deliberate rejections rethrow: it revokes a
-      // posted grant server-side before answering any of these, and the
-      // error names the reason. 403 is NOT in this set — the platform's
-      // middleware answers 403 pre-route (a suspended account, a
-      // deploy-token scope refusal) without ever parsing the body, so a
-      // 403 proves nothing about the grant and reconciles like any other
-      // ambiguous answer.
-      throw err;
+  } catch (error) {
+    if (error instanceof PlatformApiError && [400, 403, 404, 409].includes(error.status)) {
+      throw error;
     }
-    // A transport failure (DNS, a connection reset, a lost answer) OR an
-    // ambiguous answer (403, 5xx, or a 401/413/426/429 from middleware or
-    // the edge) leaves the add's outcome unknown: the request may never
-    // have reached the route, it may have failed before the grant was
-    // stored or revoked, or it COMMITTED and only the outcome was lost.
-    // The CLI holds the only copy of a freshly minted grant, so reconcile
-    // before anything irreversible — a committed row is the grant's
-    // revocation handle, and only a definitive "not on the row" makes a
-    // CLI-side revoke safe (revoking a stored-and-unrotated grant would
-    // brick the row it belongs to).
     const sleep =
       deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
-    // The last informative read picks the deadline branch: a row carrying a
-    // DIFFERENT attempt id means the platform kept the row's existing
-    // credential; a 404 means nothing persisted (yet).
-    let lastRead: 'foreign' | 'missing' | undefined;
     for (let attempt = 0; attempt < ADD_RECONCILE_ATTEMPTS; attempt++) {
       if (attempt > 0) {
         await sleep(ADD_RECONCILE_INTERVAL_MS);
       }
-      let existing: EmailDomainStatusResponse;
+      let operation;
       try {
-        existing = await client.getEmailDomain(projectId, target.emailDomain);
-      } catch (statusErr) {
-        if (statusErr instanceof PlatformApiError && statusErr.status === 404) {
-          lastRead = 'missing';
-        }
-        // Any other error is no read at all — keep polling.
+        operation = await client.getEmailOperation(projectId, attemptId);
+      } catch {
         continue;
       }
-      if ('attemptId' in existing) {
-        if (existing.attemptId === attemptId) {
-          // My POST committed. NEVER revoke — the row is the grant's handle.
-          log.warn(
-            "The add's answer was lost (network or platform error), but the platform has the row.",
-          );
-          printEmailDomainOutcome(existing);
-          return;
-        }
-        // Not mine (yet) — my in-flight POST could still commit a replace
-        // stamping this id, so keep polling to the deadline.
-        lastRead = 'foreign';
-        continue;
-      }
-      // An api without attempt identity (the key is absent): this could be
-      // my add committed there, indistinguishable from a pre-existing row.
-      // Trust the row like the pre-attempt flow did — NEVER revoke.
-      log.warn(
-        "The add's answer was lost (network or platform error), but the platform has the row.",
+      note(
+        [
+          `Operation:   ${operation.operationId}`,
+          `Status:      ${operation.status}`,
+          `Inbound:     ${operation.readiness.inbound.status}`,
+          `Outbound:    ${operation.readiness.outbound.status}`,
+          `Credential:  ${operation.readiness.management.status}`,
+        ].join('\n'),
+        'Email Setup',
       );
-      printEmailDomainOutcome(existing);
-      return;
-    }
-    if (lastRead === 'foreign') {
-      // The row settled on another attempt id (or none), so this attempt's
-      // credential was never stored — a committed mine would have stamped
-      // my id. The revoke cannot brick the row.
-      if (credential.kind === 'oauth_grant') {
-        const revoked = await revokeCfOauthGrant(credential.refreshToken);
-        return fail(
-          revoked
-            ? `email: the add did not complete, and ${target.emailDomain} kept the row's existing credential; the OAuth grant minted for this attempt was revoked — re-run to retry the replace.`
-            : `email: the add did not complete, and ${target.emailDomain} kept the row's existing credential; the OAuth grant minted for this attempt could not be revoked — revoke it in the Cloudflare dashboard, then re-run to retry the replace.`,
-        );
+      if (operation.error) {
+        log.error(operation.error);
+      }
+      log.info(`Run \`void email domain status ${target.emailDomain}\` to inspect setup.`);
+      if (operation.status === 'completed') {
+        return;
       }
       return fail(
-        `email: the add did not complete, and ${target.emailDomain} kept the row's existing credential. The token was not stored anywhere; delete it in the Cloudflare dashboard if you are not retrying.`,
+        `email: setup is ${operation.status}; operation ${operation.operationId} retains its confirmed progress on the platform.`,
       );
     }
-    if (lastRead === 'missing') {
-      // 404 at every poll — provably nothing persisted. The minted grant's
-      // only copy is in this process: revoke it rather than strand it live
-      // (an api_token has no revoke primitive — the customer deletes it
-      // themselves).
-      if (credential.kind === 'oauth_grant') {
-        const revoked = await revokeCfOauthGrant(credential.refreshToken);
-        return fail(
-          revoked
-            ? `email: the add did not complete — ${target.emailDomain} was not registered, and the OAuth grant minted for this attempt was revoked.`
-            : `email: the add did not complete — ${target.emailDomain} was not registered; the OAuth grant minted for this attempt could not be revoked — revoke it in the Cloudflare dashboard before retrying.`,
-        );
-      }
-      return fail(
-        `email: the add did not complete — ${target.emailDomain} was not registered. The token was not stored anywhere; delete it in the Cloudflare dashboard if you are not retrying.`,
-      );
-    }
-    // No poll produced any read — the add's state is unknown, and a blind
-    // revoke could brick a committed row: report, don't revoke.
     return fail(
-      `email: the add did not complete, and the follow-up check failed too — the add's state is unknown, so nothing was revoked. A grant minted for this attempt may still be live: once connectivity is back, run \`void email domain status ${target.emailDomain}\`; if it shows no row, revoke the grant in the Cloudflare dashboard before retrying.`,
+      `email: setup outcome is unknown (operation ${attemptId}). Nothing was revoked. Check \`void email domain status ${target.emailDomain}\` before starting another setup.`,
     );
   }
   log.success(
-    credential.kind === 'oauth_grant'
-      ? 'Grant stored on the platform, encrypted for this project — nothing is kept on this machine.'
-      : 'Token stored on the platform, encrypted for this project — nothing is kept on this machine.',
+    'Token stored encrypted on the platform for this zone connection — nothing is kept on this machine.',
   );
   printEmailDomainOutcome(row);
+  if (
+    row.status === 'failed' ||
+    row.status === 'token_revoked' ||
+    row.status === 'token_expired' ||
+    row.operationStatus === 'blocked' ||
+    row.operationStatus === 'unknown'
+  ) {
+    return exit(1);
+  }
 }
 
 /** An administrator's row runs on the platform's own credential; the owner never held one. */
@@ -961,7 +868,7 @@ function emailCredentialLabel(row: Pick<EmailDomainResponse, 'credential_kind' |
 }
 
 function emailDomainStatusText(status: EmailDomainResponse['status']): string {
-  if (status === 'active') {
+  if (status === 'active' || status === 'ready') {
     return pc.green('active');
   }
   if (status === 'pending') {
@@ -977,7 +884,7 @@ function emailDomainStatusText(status: EmailDomainResponse['status']): string {
  */
 function routingSubdomainInstruction(domain: string, mode: EmailDomainResponse['mode']): string {
   const zoneGuess = mode === 'subdomain' ? domain.split('.').slice(1).join('.') : domain;
-  return `add ${domain} in the Cloudflare dashboard — Email Routing → ${zoneGuess} → Settings → Subdomains (no API exists for it)`;
+  return `add ${domain} in the Cloudflare dashboard — Email Routing → ${zoneGuess} → Settings → Subdomains`;
 }
 
 /**
@@ -986,6 +893,28 @@ function routingSubdomainInstruction(domain: string, mode: EmailDomainResponse['
  * api guarantees it names a step or a CF error, never credential material.
  */
 function printEmailDomainOutcome(row: EmailDomainResponse): void {
+  if (row.readiness) {
+    const lines = [
+      `Domain:      ${row.domain}`,
+      ...Object.entries(row.readiness).map(
+        ([name, value]) =>
+          `${name.padEnd(12)} ${value.status}${value.reason ? ' — ' + value.reason : ''}${value.observedAt ? ' (' + value.observedAt + ')' : ''}`,
+      ),
+    ];
+    if (row.operationId) {
+      lines.push(
+        `Operation:   ${row.operationId}${row.operationStatus ? ' · ' + row.operationStatus : ''}`,
+      );
+    }
+    note(lines.join('\n'), 'Email Domain');
+    if (row.error) {
+      log.error(row.error);
+    }
+    if (row.readiness.inbound.status !== 'ready') {
+      log.info(`Run void email domain sync ${row.domain} to reconcile setup.`);
+    }
+    return;
+  }
   if (row.status === 'failed') {
     const step = row.setup_state?.failed_step;
     log.error(
@@ -1025,7 +954,7 @@ function printEmailDomainOutcome(row: EmailDomainResponse): void {
   }
   if (row.status === 'token_revoked' || row.status === 'token_expired') {
     log.warn(
-      `The stored credential was ${row.status === 'token_revoked' ? 'revoked at Cloudflare' : 'left to expire'} — re-run \`void email domain add ${row.domain}\` with a fresh grant or token. Rules and the relay stay.`,
+      `The stored credential was ${row.status === 'token_revoked' ? 'revoked at Cloudflare' : 'left to expire'} — re-run \`void email domain add ${row.domain}\` with a fresh API token. Rules and the relay stay.`,
     );
     return;
   }
@@ -1051,6 +980,10 @@ export async function emailDomainStatus(
 ): Promise<void> {
   const domain = normalizeEmailDomainInput(rawDomain);
   const row: EmailDomainStatusResponse = await client.getEmailDomain(projectId, domain);
+  if (row.readiness) {
+    printEmailDomainOutcome(row);
+    return;
+  }
   const adminRow = row.managed_by === 'admin';
 
   const lines = [
@@ -1130,7 +1063,7 @@ export async function emailDomainStatus(
       );
     } else {
       log.warn(
-        `Re-run \`void email domain add ${row.domain}\` with a fresh grant or token — adding again replaces the credential, rules stay.`,
+        `Re-run \`void email domain add ${row.domain}\` with a fresh scoped API token — adding again replaces the credential, rules stay.`,
       );
     }
   }
@@ -1164,20 +1097,39 @@ export async function emailDomainSync(
 ): Promise<void> {
   const domain = normalizeEmailDomainInput(rawDomain);
   const row = await client.syncEmailDomain(projectId, domain);
-  if (row.status !== 'failed') {
-    log.success(
-      `Relay redeployed${row.relay_version !== null ? ` at v${row.relay_version}` : ''} with a rotated secret.`,
+  if (row.catch_all === 'foreign_conflict') {
+    log.warn(
+      "Catch-all: the zone's catch-all points at a different worker and was not overwritten.",
     );
-    // catch_all is absent when the row carries no zone_id.
-    if (row.catch_all === 'foreign_conflict') {
-      log.warn(
-        "Catch-all: the zone's catch-all points at a different worker and was NOT overwritten — change it in the zone's Email Routing settings if inbound mail should reach this relay.",
-      );
-    } else if (row.catch_all !== undefined) {
-      log.info(`Catch-all: ${row.catch_all.replaceAll('_', ' ')}`);
-    }
+  } else if (row.catch_all) {
+    log.info(`Catch-all: ${row.catch_all.replaceAll('_', ' ')}`);
   }
   printEmailDomainOutcome(row);
+  if (
+    row.status === 'failed' ||
+    row.operationStatus === 'blocked' ||
+    row.operationStatus === 'unknown'
+  ) {
+    throw new Error(
+      `email: reconciliation ${row.operationStatus ?? row.status}; inspect operation ${row.operationId ?? row.domain}`,
+    );
+  }
+}
+
+/** Rotation applies to every domain sharing this zone connection. */
+export async function emailDomainRotateSecret(
+  client: Pick<PlatformClient, 'rotateEmailDomainSecret'>,
+  projectId: string,
+  rawDomain: string,
+): Promise<void> {
+  const row = await client.rotateEmailDomainSecret(projectId, normalizeEmailDomainInput(rawDomain));
+  printEmailDomainOutcome(row);
+  if (row.operationStatus !== 'completed') {
+    throw new Error(
+      `email: secret rotation ${row.operationStatus ?? 'pending'}; inspect operation ${row.operationId ?? row.domain}`,
+    );
+  }
+  log.success('Zone ingress secret rotated and verified on the deployed Worker.');
 }
 
 /** `void email domain remove <domain>` — exported for the unit test. */
@@ -1190,6 +1142,18 @@ export async function emailDomainRemove(
   const domain = normalizeEmailDomainInput(rawDomain);
   const result = await client.removeEmailDomain(projectId, domain, options.force);
 
+  if (result.operationId) {
+    log.info(`Operation: ${result.operationId} · ${result.operationStatus ?? 'pending'}`);
+    if (!result.removed) {
+      log.error(
+        result.error ??
+          'Email cleanup is not complete. Its operation and resources remain recorded for reconciliation.',
+      );
+      (options.exit ?? ((code: number): never => process.exit(code)))(1);
+    }
+    log.success(`Removed ${domain}. Zone resources still used by other domains were retained.`);
+    return;
+  }
   if (!result.removed) {
     // Kept for retry: a Cloudflare-side step failed without --force, so the
     // row (and the stored credential the retry needs) stays.
@@ -1234,6 +1198,8 @@ async function runEmailDomainCommand(
       return emailDomainList(client, projectId);
     case 'sync':
       return emailDomainSync(client, projectId, args.domain!);
+    case 'rotate-secret':
+      return emailDomainRotateSecret(client, projectId, args.domain!);
     case 'remove':
       return emailDomainRemove(client, projectId, args.domain!, { force: args.force });
   }

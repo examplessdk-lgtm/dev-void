@@ -221,6 +221,8 @@ export type LiveManifestMeta = {
 export type DeployManifest = {
   version: number;
   assetManifestVersion?: 1 | 2;
+  /** Authenticated framed HTTP delivery for managed inbound email. */
+  emailProtocolVersion?: 1;
   auth?: boolean;
   bindings: {
     d1?: Array<string>;

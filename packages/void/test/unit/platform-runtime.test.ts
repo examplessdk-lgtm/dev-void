@@ -110,6 +110,17 @@ describe('platform runtime manifest', () => {
     expect(parsePlatformRuntimeManifest(legacy).usageProtocolVersion).toBe(0);
     const { safetyProtocols: _safetyProtocols, ...legacySafety } = manifest;
     expect(parsePlatformRuntimeManifest(legacySafety).safetyProtocols).toEqual({ sandboxDrain: 0 });
+    const { emailGateway: _gateway, ...fourArtifacts } = manifest.artifacts;
+    const { emailProtocolVersion: _emailProtocolVersion, ...preEmailRuntime } = manifest;
+    expect(
+      parsePlatformRuntimeManifest({
+        ...preEmailRuntime,
+        artifacts: fourArtifacts,
+      }).artifacts.emailGateway,
+    ).toBeUndefined();
+    expect(() => parsePlatformRuntimeManifest({ ...manifest, artifacts: fourArtifacts })).toThrow(
+      'Email protocol version 1 requires an emailGateway runtime artifact',
+    );
   });
 
   it('resolves packaged and explicit runtime directories with provenance', () => {

@@ -1,8 +1,10 @@
 import { describe, it, expect, vi, afterEach } from 'vite-plus/test';
 import {
   RELAY_COMPATIBILITY_DATE,
-  RELAY_EMAIL_DOMAIN_BINDING,
-  RELAY_PROXY_ORIGIN_BINDING,
+  RELAY_GATEWAY_ORIGIN_BINDING,
+  RELAY_ACCOUNT_BINDING,
+  RELAY_ZONE_BINDING,
+  RELAY_INGRESS_BINDING,
   RELAY_SECRET_BINDING,
   RELAY_SOURCE,
   RELAY_VERSION,
@@ -53,6 +55,7 @@ type RelayMessage = {
  * export, so the wire test exercises the exact code the api deploys.
  */
 function loadRelayWorker(): {
+  fetch: (request: Request, env: RelayEnv) => Promise<Response>;
   email: (
     message: RelayMessage,
     env: RelayEnv,
@@ -60,6 +63,7 @@ function loadRelayWorker(): {
   ) => Promise<void>;
 } {
   const factory = new Function(RELAY_SOURCE.replace('export default', 'return')) as () => {
+    fetch: (request: Request, env: RelayEnv) => Promise<Response>;
     email: (
       message: RelayMessage,
       env: RelayEnv,
@@ -72,8 +76,10 @@ function loadRelayWorker(): {
 function relayContext() {
   const env: RelayEnv = {
     [RELAY_SECRET_BINDING]: RELAY_SECRET,
-    [RELAY_PROXY_ORIGIN_BINDING]: 'https://proxy.example.test',
-    [RELAY_EMAIL_DOMAIN_BINDING]: 'acme.com',
+    [RELAY_GATEWAY_ORIGIN_BINDING]: 'https://gateway.example.test',
+    [RELAY_ACCOUNT_BINDING]: 'acct_1',
+    [RELAY_ZONE_BINDING]: 'zone_1',
+    [RELAY_INGRESS_BINDING]: 'void-zone-ingress',
   };
   const rawBytes = new TextEncoder().encode(MIME_BODY);
   const message: RelayMessage = {
@@ -102,21 +108,23 @@ describe('RELAY_SOURCE', () => {
     expect(RELAY_SOURCE).toContain('export default');
     expect(RELAY_SOURCE).toContain('async email(message, env, ctx)');
     // No parsing, no buffering, no third-party imports.
-    expect(RELAY_SOURCE).not.toContain('import');
+    expect(RELAY_SOURCE).not.toMatch(/^\s*import\s/m);
   });
 
   it('reads exactly the binding names the uploader declares', () => {
     for (const binding of [
       RELAY_SECRET_BINDING,
-      RELAY_PROXY_ORIGIN_BINDING,
-      RELAY_EMAIL_DOMAIN_BINDING,
+      RELAY_GATEWAY_ORIGIN_BINDING,
+      RELAY_ACCOUNT_BINDING,
+      RELAY_ZONE_BINDING,
+      RELAY_INGRESS_BINDING,
     ]) {
       expect(RELAY_SOURCE).toContain(`env.${binding}`);
     }
     expect(RELAY_COMPATIBILITY_DATE).toMatch(/^\d{4}-\d{2}-\d{2}$/);
   });
 
-  it('POSTs the raw MIME to /email/relay through a FixedLengthStream with the contract-3 headers', async () => {
+  it('POSTs the raw MIME to the gateway through a FixedLengthStream with the zone identity', async () => {
     const fetchMock = vi.fn().mockResolvedValueOnce(new Response('ok', { status: 200 }));
     vi.stubGlobal('fetch', fetchMock);
     const { env, message, ctx } = relayContext();
@@ -125,14 +133,17 @@ describe('RELAY_SOURCE', () => {
 
     expect(fetchMock).toHaveBeenCalledOnce();
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(url).toBe('https://proxy.example.test/email/relay');
+    expect(url).toBe('https://gateway.example.test/email/ingress');
     expect(init.method).toBe('POST');
     // No hand-set Content-Length: the runtime ignores one on a stream body
     // and derives it from the FixedLengthStream instead — a plain stream
     // would go out chunked, and the proxy refuses a length-less body.
     expect(init.headers).toEqual({
       Authorization: `Bearer ${RELAY_SECRET}`,
-      'X-Void-Email-Domain': 'acme.com',
+      'X-Void-Email-Account': 'acct_1',
+      'X-Void-Email-Zone': 'zone_1',
+      'X-Void-Email-Ingress': 'void-zone-ingress',
+      'X-Void-Email-Request-Id': expect.stringMatching(/^[a-f0-9-]{36}$/),
       'X-Void-Email-From': 'sender@example.org',
       'X-Void-Email-To': 'support@acme.com',
     });
@@ -151,27 +162,23 @@ describe('RELAY_SOURCE', () => {
     expect(message.setReject).not.toHaveBeenCalled();
   });
 
-  it('refuses mail addressed to a different domain on the zone, without POSTing', async () => {
-    // The catch-all can be zone-wide: mail addressed to a DIFFERENT domain
-    // on the same zone can land here. It is not this relay's to forward —
-    // refuse it loudly (a bounce for the sender), never forward it under
-    // this domain's secret. RELAY_VERSION 3.
-    const fetchMock = vi.fn();
+  it('forwards another domain on the same zone for exact gateway resolution', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response('ok', { status: 200 }));
     vi.stubGlobal('fetch', fetchMock);
     const { env, message, ctx } = relayContext();
     message.to = 'user@other-acme.com';
 
     await loadRelayWorker().email(message, env, ctx);
 
-    expect(message.setReject).toHaveBeenCalledOnce();
-    const reason = (message.setReject as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
-    expect(reason).not.toContain(RELAY_SECRET);
-    expect(reason).not.toContain('other-acme.com');
-    expect(fetchMock).not.toHaveBeenCalled();
-    expect(ctx.waitUntil).not.toHaveBeenCalled();
+    expect(message.setReject).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect((fetchMock.mock.calls[0][1] as RequestInit).headers).toMatchObject({
+      'X-Void-Email-To': 'user@other-acme.com',
+    });
+    expect(ctx.waitUntil).toHaveBeenCalledTimes(2);
   });
 
-  it('matches the recipient domain against VOID_EMAIL_DOMAIN case-insensitively', async () => {
+  it('forwards the SMTP envelope recipient without changing its case', async () => {
     const fetchMock = vi.fn().mockResolvedValueOnce(new Response('ok', { status: 200 }));
     vi.stubGlobal('fetch', fetchMock);
     const { env, message, ctx } = relayContext();
@@ -183,8 +190,8 @@ describe('RELAY_SOURCE', () => {
     expect(fetchMock).toHaveBeenCalledOnce();
   });
 
-  it('rejects with a short generic reason on a non-2xx answer', async () => {
-    const fetchMock = vi.fn().mockResolvedValueOnce(new Response('nope', { status: 502 }));
+  it('rejects with a short generic reason on a permanent refusal', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response('nope', { status: 403 }));
     vi.stubGlobal('fetch', fetchMock);
     const { env, message, ctx } = relayContext();
 
@@ -196,7 +203,72 @@ describe('RELAY_SOURCE', () => {
     expect(reason.length).toBeLessThanOrEqual(64);
     // The bounce goes back to the original sender — no internals leak.
     expect(reason).not.toContain(RELAY_SECRET);
-    expect(reason).not.toContain('proxy.example.test');
+    expect(reason).not.toContain('gateway.example.test');
     expect(reason).not.toContain('502');
+  });
+
+  it('throws temporary gateway failures without permanently rejecting the message', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(new Response(null, { status: 503 })));
+    const { env, message, ctx } = relayContext();
+    await expect(loadRelayWorker().email(message, env, ctx)).rejects.toThrow(
+      'temporarily unavailable',
+    );
+    expect(message.setReject).not.toHaveBeenCalled();
+  });
+
+  it('proves the deployed secret with a challenge bound to the zone and generation', async () => {
+    const { env } = relayContext();
+    const challenge = 'a'.repeat(64);
+    const response = await loadRelayWorker().fetch(
+      new Request('https://worker.example/__void/email/probe', {
+        method: 'POST',
+        headers: { 'X-Void-Probe-Challenge': challenge, 'X-Void-Probe-Generation': '7' },
+      }),
+      env,
+    );
+    expect(response.status).toBe(200);
+    const proof = (await response.json()) as {
+      accountId: string;
+      zoneId: string;
+      ingressName: string;
+      generation: number;
+      challenge: string;
+      proof: string;
+    };
+    expect(proof).toMatchObject({
+      accountId: 'acct_1',
+      zoneId: 'zone_1',
+      ingressName: 'void-zone-ingress',
+      generation: 7,
+      challenge,
+    });
+    const key = await crypto.subtle.importKey(
+      'raw',
+      new TextEncoder().encode(RELAY_SECRET),
+      { name: 'HMAC', hash: 'SHA-256' },
+      false,
+      ['sign'],
+    );
+    const payload = [
+      'email-relay-proof-v1',
+      'acct_1',
+      'zone_1',
+      'void-zone-ingress',
+      '7',
+      challenge,
+    ].join('\n');
+    const expected = Array.from(
+      new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(payload))),
+      (b) => b.toString(16).padStart(2, '0'),
+    ).join('');
+    expect(proof.proof).toBe(expected);
+    expect(
+      (
+        await loadRelayWorker().fetch(
+          new Request('https://worker.example/__void/email/probe', { method: 'POST' }),
+          env,
+        )
+      ).status,
+    ).toBe(400);
   });
 });

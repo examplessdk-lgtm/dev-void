@@ -28,7 +28,7 @@ The package contains:
 - versioned deployment and installation manifests
 - deterministic resource naming and application-route generation
 - discovery-document and capability contracts
-- Cloudflare Worker configuration generation for the core API, proxy, tail, and dispatch Workers
+- Cloudflare Worker configuration generation for the API, proxy, tail, dispatch, and email gateway Workers
 - A shared installation-owned traffic-disable protocol used by lifecycle-safe retained Workers
 - integrity-checked, deployable Worker bundles plus a schema-versioned PostgreSQL migration and rollback-compatibility manifest under the `./installer` export
 

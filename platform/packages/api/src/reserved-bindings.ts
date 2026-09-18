@@ -34,6 +34,7 @@ export const RESERVED_BINDING_NAMES: ReadonlySet<string> = new Set([
   '__VOID_USER_ID',
   '__VOID_PROJECT_SLUG',
   '__VOID_EMAIL_DOMAIN',
+  '__VOID_EMAIL_DEPLOYMENT_ID',
   'USAGE_EVENTS_QUEUE',
   'SEND_EMAIL',
   'ASSETS',

@@ -241,6 +241,7 @@ export async function runInstalledPlatformCommand(args: PlatformArgs): Promise<v
       authoritativeProvisionIntents: databaseCheckpointExists,
       repairMissing: args.subcommand === 'repair',
       allowUnverifiedAiGateway: args.plan,
+      includeEmailGateway: runtime!.manifest.artifacts.emailGateway !== undefined,
     });
     note(
       formatPlatformInstallPlan(plan),
@@ -381,6 +382,7 @@ export async function runInstalledPlatformCommand(args: PlatformArgs): Promise<v
           await createPlatformInstallPlan(client, planInput, recoveryManifest, {
             authoritativeProvisionIntents: true,
             repairMissing: true,
+            includeEmailGateway: runtime!.manifest.artifacts.emailGateway !== undefined,
           })
         ).actions.filter((action) => action.kind === 'worker'),
       revalidateBeforeWorkerDeploy: (manifest, action) =>
@@ -481,6 +483,17 @@ export function assertPlatformRollbackCompatibility(
   target: ReturnType<typeof loadPlatformRuntime>,
   source: ReturnType<typeof loadPlatformRuntime>,
 ): void {
+  if (
+    target.manifest.emailProtocolVersion !== 1 &&
+    (installation.deployment.capabilities.email ||
+      installation.resources.some(
+        (resource) => resource.key === 'email-gateway-worker' && resource.state === 'ready',
+      ))
+  ) {
+    throw new Error(
+      'platform: The rollback target predates the email gateway and cannot safely replace this installation. Use a runtime with email protocol version 1.',
+    );
+  }
   if (!installation.runtime) {
     throw new Error(
       'platform: The installed runtime has no artifact provenance, so post-success rollback cannot identify its compatibility manifest.',
@@ -936,6 +949,7 @@ export async function recoverDurablyMarkedProvisionIntents(
   const candidates = [
     ['api-worker', 'worker', manifest.deployment.resources.apiWorker],
     ['proxy-worker', 'worker', manifest.deployment.resources.proxyWorker],
+    ['email-gateway-worker', 'worker', manifest.deployment.resources.emailGatewayWorker],
     ['tail-worker', 'worker', manifest.deployment.resources.tailWorker],
     ['dispatch-worker', 'worker', manifest.deployment.resources.dispatchWorker],
     ['assets-bucket', 'r2-bucket', manifest.deployment.resources.assetsBucket],

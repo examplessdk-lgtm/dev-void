@@ -99,6 +99,18 @@ describe('buildVoidManifest — self-host non-regression', () => {
     return (revalidate === undefined ? {} : { routing: { revalidate } }) as VoidConfig;
   }
 
+  it('advertises authenticated email protocol only for a managed inbound handler', () => {
+    expect(
+      buildVoidManifest({ bindings: makeBindings(), hasEmailHandlers: true }).emailProtocolVersion,
+    ).toBe(1);
+    expect(
+      buildVoidManifest({ bindings: makeBindings({ needsEmail: true }) }).emailProtocolVersion,
+    ).toBeUndefined();
+    const noEmail = buildVoidManifest({ bindings: makeBindings() });
+    expect(noEmail.emailProtocolVersion).toBeUndefined();
+    expect(noEmail.bindings).toEqual({});
+  });
+
   it('sets bindings.ai === true when the app needs Workers AI', () => {
     const manifest = buildVoidManifest({ bindings: makeBindings({ needsAI: true }) });
     expect(manifest.bindings.ai).toBe(true);

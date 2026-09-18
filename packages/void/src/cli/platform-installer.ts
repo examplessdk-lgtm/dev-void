@@ -772,6 +772,25 @@ export async function installPlatform(
   const resolvedRuntime = dependencies.runtime ?? resolvePlatformRuntime();
   const runtimeDirectory = resolvedRuntime.directory;
   const runtime = resolvedRuntime.manifest;
+  const hasEmailGatewayArtifact = runtime.artifacts.emailGateway !== undefined;
+  if (runtime.emailProtocolVersion !== 1 && plan.deployment.capabilities.email) {
+    throw new Error(
+      'platform: This runtime cannot serve enabled platform email without email protocol version 1.',
+    );
+  }
+  if (
+    runtime.emailProtocolVersion !== 1 &&
+    existing?.resources.some(
+      (resource) => resource.key === 'email-gateway-worker' && resource.state === 'ready',
+    )
+  ) {
+    throw new Error(
+      'platform: This runtime cannot replace an installed email gateway Worker. Use a runtime with email protocol version 1.',
+    );
+  }
+  const workerKeys: ReadonlyArray<PlatformWorkerKey> = hasEmailGatewayArtifact
+    ? ['api', 'proxy', 'emailGateway', 'tail', 'dispatch']
+    : ['api', 'proxy', 'tail', 'dispatch'];
   if (plan.deployment.authentication.configurable && runtime.authenticationProtocolVersion !== 1) {
     throw new Error(
       'platform: This runtime does not support configurable authentication. Upgrade Void or use a compatible runtime.',
@@ -1406,7 +1425,8 @@ export async function installPlatform(
         key,
         join(runtimeDirectory, artifact.path),
       ]),
-    ) as Record<'api' | 'dispatch' | 'proxy' | 'tail', string>;
+    ) as Record<'api' | 'dispatch' | 'proxy' | 'tail', string> &
+      Partial<Record<'emailGateway', string>>;
     let interruptedCutover = interruptedWorkerCutover(manifest);
     if (interruptedCutover && authenticationProtocolTransition && authenticationEnforcementActive) {
       manifest = recordWorkerCutoverResolution(
@@ -1422,7 +1442,10 @@ export async function installPlatform(
     }
     const recoveringUnsafeTraffic = (interruptedCutover?.unsafeTraffic.size ?? 0) > 0;
     const createsWorker = plan.actions.some(
-      (action) => action.kind === 'worker' && action.action === 'create',
+      (action) =>
+        action.kind === 'worker' &&
+        action.action === 'create' &&
+        (hasEmailGatewayArtifact || action.key !== 'email-gateway-worker'),
     );
     const recoveringCreatedWorker =
       interruptedCutover !== null &&
@@ -1472,6 +1495,7 @@ export async function installPlatform(
       ownershipNonce: manifest.ownershipNonce,
       platformVersion: version,
       proxyUrl: plan.proxyUrl,
+      emailGatewayUrl: `https://${plan.deployment.resources.emailGatewayWorker}.${plan.workersSubdomain}.workers.dev`,
       resources: {
         hyperdrive: requireId(ids, 'hyperdrive'),
         isrCacheKv: requireId(ids, 'isr-cache-kv'),
@@ -1479,7 +1503,7 @@ export async function installPlatform(
         routingKv: requireId(ids, 'routing-kv'),
         zone: zoneId,
       },
-      runtimeEntrypoints: entrypoints,
+      runtimeEntrypoints: entrypoints as Record<PlatformWorkerKey, string>,
     };
     const requiresStagedCommit = !preserveDisabled && requiresTrafficGuard;
     const enabledConfigs = createPlatformWorkerConfigs({
@@ -1501,7 +1525,9 @@ export async function installPlatform(
     });
     const managedRoutes = platformManagedWorkerTraffic(plan.deployment).routes;
     let workerActions: ReadonlyArray<PlatformInstallPlanAction> = plan.actions.filter(
-      (action) => action.kind === 'worker',
+      (action) =>
+        action.kind === 'worker' &&
+        (hasEmailGatewayArtifact || action.key !== 'email-gateway-worker'),
     );
     if (interruptedCutover) {
       for (const key of [...interruptedCutover.staged.keys()].reverse()) {
@@ -1618,7 +1644,7 @@ export async function installPlatform(
           plan,
           manifest,
           await dependencies.replanWorkers(manifest),
-        );
+        ).filter((action) => hasEmailGatewayArtifact || action.key !== 'email-gateway-worker');
       }
     }
     workerCutoverGeneration = nextWorkerCutoverGeneration(manifest);
@@ -1641,9 +1667,12 @@ export async function installPlatform(
         secretCheckpoint(secrets, workerSecretUpdateIntent),
       );
     }
-    for (const key of ['api', 'proxy', 'tail', 'dispatch'] as const) {
+    for (const key of workerKeys) {
       dependencies.onProgress?.(`Deploying the ${key} service`);
-      const action = workerActions.find((entry) => entry.key === `${key}-worker`)!;
+      const action = workerActions.find(
+        (entry) =>
+          entry.key === (key === 'emailGateway' ? 'email-gateway-worker' : `${key}-worker`),
+      )!;
       const workerSecrets = platformWorkerSecretPayload(
         key,
         workerDeploymentSecrets,
@@ -1892,6 +1921,7 @@ export async function installPlatform(
       workers: [
         plan.deployment.resources.apiWorker,
         plan.deployment.resources.proxyWorker,
+        ...(hasEmailGatewayArtifact ? [plan.deployment.resources.emailGatewayWorker] : []),
         plan.deployment.resources.dispatchWorker,
       ],
       resumeCommand: dependencies.healthCheckResumeCommand,
@@ -1986,9 +2016,12 @@ export async function installPlatform(
           secretCheckpoint(secrets, workerSecretUpdateIntent),
         );
       }
-      for (const key of ['api', 'proxy', 'tail', 'dispatch'] as const) {
+      for (const key of workerKeys) {
         dependencies.onProgress?.(`Enabling the ${key} service`);
-        const action = workerActions.find((entry) => entry.key === `${key}-worker`)!;
+        const action = workerActions.find(
+          (entry) =>
+            entry.key === (key === 'emailGateway' ? 'email-gateway-worker' : `${key}-worker`),
+        )!;
         const workerSecrets = platformWorkerSecretPayload(
           key,
           workerDeploymentSecrets,
@@ -2125,6 +2158,7 @@ export async function installPlatform(
           enabledConfigs,
           plan.account.id,
           runPinnedPlatformWrangler,
+          workerKeys,
         );
       }
     };
@@ -2767,13 +2801,13 @@ export function apiWorkerSecrets(
 
 /** Existing Workers inherit live secrets, including complete encryption keyrings. */
 export function platformWorkerSecretPayload(
-  worker: 'api' | 'proxy' | 'tail' | 'dispatch',
+  worker: 'api' | 'proxy' | 'emailGateway' | 'tail' | 'dispatch',
   secrets: PlatformInstallationSecrets,
   accountId: string,
   zoneId: string,
   existingWorker: boolean,
 ): Record<string, string> | null {
-  if (worker !== 'api' && worker !== 'proxy') {
+  if (worker !== 'api' && worker !== 'proxy' && worker !== 'emailGateway') {
     return null;
   }
   if (!existingWorker) {
@@ -2902,7 +2936,9 @@ export function assertRequiredPlatformSecrets(
   if (
     plan.actions.some(
       (action) =>
-        action.key === 'proxy-worker' && action.kind === 'worker' && action.action === 'create',
+        (action.key === 'proxy-worker' || action.key === 'email-gateway-worker') &&
+        action.kind === 'worker' &&
+        action.action === 'create',
     )
   ) {
     requireSecret(secrets.cloudflareApiToken, 'VOID_PLATFORM_RUNTIME_CLOUDFLARE_API_TOKEN');
@@ -4921,7 +4957,7 @@ function nextTrafficGeneration(manifest: PlatformInstallationManifest): number {
   );
 }
 
-type PlatformWorkerKey = 'api' | 'proxy' | 'tail' | 'dispatch';
+type PlatformWorkerKey = 'api' | 'proxy' | 'emailGateway' | 'tail' | 'dispatch';
 
 type PlatformWorkerCutoverSnapshot = Readonly<{
   previousVersionId: string | null;
@@ -5141,16 +5177,23 @@ export async function verifyPlatformWorkerCutoverVersions(
   configs: Record<PlatformWorkerKey, Record<string, unknown>>,
   accountId: string,
   runner: typeof runPlatformWrangler = runPlatformWrangler,
+  workerKeys: ReadonlyArray<PlatformWorkerKey> = [
+    'api',
+    'proxy',
+    'emailGateway',
+    'tail',
+    'dispatch',
+  ],
 ): Promise<void> {
   const cutover = interruptedWorkerCutover(manifest);
-  if (cutover?.generation !== generation || cutover.staged.size !== 4) {
+  if (cutover?.generation !== generation || cutover.staged.size !== workerKeys.length) {
     throw new Error(
       `platform: Worker cutover generation ${generation} is missing a complete immutable-version checkpoint.`,
     );
   }
   const directory = mkdtempSync(join(tmpdir(), 'void-platform-cutover-verify-'));
   try {
-    for (const key of ['api', 'proxy', 'tail', 'dispatch'] as const) {
+    for (const key of workerKeys) {
       const snapshot = cutover.staged.get(key);
       if (!snapshot) {
         throw new Error(

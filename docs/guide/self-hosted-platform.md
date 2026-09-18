@@ -136,6 +136,8 @@ The management token also needs **Zone Edit** with authority to create zones if 
 
 A custom runtime that enables email lets administrators [register email domains for projects](./platform-administration.md#registering-email-domains-for-projects) on the runtime token. That needs **Zone: Read**, **Zone Settings: Edit** and **Email Routing Rules: Edit** on the zones that will carry mail, and **Email Sending: Edit** on the account; the token link preselects them when the runtime enables email. Email Sending onboarding itself needs Workers Paid on the account.
 
+For an email-enabled runtime, set `VOID_EMAIL_SENDER_DOMAIN` to the shared sender domain and `VOID_EMAIL_SHARED_ZONE_ID` to its Cloudflare zone ID when installing or upgrading. Void records both values for later upgrades and rejects attempts to replace them during an ordinary upgrade. The mail zone can differ from the application zone; without an explicit mail-zone identity, shared inbound delivery stays unavailable. The dedicated email gateway is deployed in the platform account. Each customer zone uses its own ingress Worker to forward mail to that gateway.
+
 Void checks access before provisioning. If it reports a missing permission, update the token's permissions for the selected account or zone and retry.
 
 :::
@@ -460,17 +462,17 @@ The management token needs **SSL and Certificates: Read** (or Edit) on that zone
 
 Resources use a `void-<installation-name>-<random-suffix>-*` prefix where Cloudflare allows names. This keeps installations recognizable and avoids predictable Worker names colliding during setup.
 
-| Resource                                  |                                 Count | Purpose                                                                        |
-| ----------------------------------------- | ------------------------------------: | ------------------------------------------------------------------------------ |
-| Workers                                   | 4, plus one per app using workers.dev | API/control plane, proxy, tail ingestion, dispatch, and test-origin forwarders |
-| KV namespaces                             |                                     3 | Routing, ISR cache, and static asset storage                                   |
-| R2 buckets                                |                                     1 | Static and deployment assets                                                   |
-| Queues                                    |                                     2 | Usage events and cron firing                                                   |
-| Workers for Platforms dispatch namespaces |                                     1 | User application Workers                                                       |
-| Hyperdrive configurations                 |                                     1 | External platform PostgreSQL                                                   |
-| AI Gateways                               |                                     1 | Installation-isolated AI routing and metering                                  |
-| Proxied wildcard DNS records              |                                0 or 1 | Created only when an application domain is configured                          |
-| Zones                                     |                                0 or 1 | Created only when the requested application zone is absent                     |
+| Resource                                  |                                 Count | Purpose                                                                                       |
+| ----------------------------------------- | ------------------------------------: | --------------------------------------------------------------------------------------------- |
+| Workers                                   | 5, plus one per app using workers.dev | API/control plane, proxy, tail ingestion, dispatch, email gateway, and test-origin forwarders |
+| KV namespaces                             |                                     3 | Routing, ISR cache, and static asset storage                                                  |
+| R2 buckets                                |                                     1 | Static and deployment assets                                                                  |
+| Queues                                    |                                     2 | Usage events and cron firing                                                                  |
+| Workers for Platforms dispatch namespaces |                                     1 | User application Workers                                                                      |
+| Hyperdrive configurations                 |                                     1 | External platform PostgreSQL                                                                  |
+| AI Gateways                               |                                     1 | Installation-isolated AI routing and metering                                                 |
+| Proxied wildcard DNS records              |                                0 or 1 | Created only when an application domain is configured                                         |
+| Zones                                     |                                0 or 1 | Created only when the requested application zone is absent                                    |
 
 The API Worker uses four Durable Object classes for usage, cron scheduling, error monitoring, and concurrency. Worker bindings create the request and log datasets in Analytics Engine. The core installation doesn't create Container applications, a GitHub App, a dashboard Worker, or build Workers.
 

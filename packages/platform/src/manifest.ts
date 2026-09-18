@@ -28,6 +28,7 @@ export type PlatformResourceNames = Readonly<{
   dashboardWorker: string;
   dispatchNamespace: string;
   dispatchWorker: string;
+  emailGatewayWorker: string;
   hyperdrive: string;
   isrCacheKv: string;
   legacyAssetsKv: string;
@@ -41,6 +42,10 @@ export type PlatformResourceNames = Readonly<{
 
 export type PlatformDeploymentManifest = Readonly<{
   application: PlatformApplication;
+  /** Zone that owns the installation's shared sender mail domain. */
+  emailSharedZoneId?: string;
+  /** Shared sender domain registered for managed email. */
+  emailSenderDomain?: string;
   authentication: Readonly<{
     providers: ReadonlyArray<PlatformLoginKind>;
     configurable?: true;
@@ -62,6 +67,8 @@ export type PlatformDeploymentManifestInput = Readonly<{
     workersDev?: PlatformApplication['workersDev'];
     zoneId?: string;
   }>;
+  emailSharedZoneId?: string;
+  emailSenderDomain?: string;
   authentication?: Readonly<{
     providers?: ReadonlyArray<PlatformLoginKind>;
     configurable?: true;
@@ -152,6 +159,7 @@ export function createPlatformResourceNames(installationSlug: string): PlatformR
     dashboardWorker: `${prefix}-dashboard`,
     dispatchNamespace: `${prefix}-users`,
     dispatchWorker: `${prefix}-dispatch`,
+    emailGatewayWorker: `${prefix}-email-gateway`,
     hyperdrive: `${prefix}-database`,
     isrCacheKv: `${prefix}-isr-cache`,
     legacyAssetsKv: `${prefix}-legacy-assets`,
@@ -252,6 +260,12 @@ export function createPlatformDeploymentManifest(
       ...(input.authentication?.accessProtection ? { accessProtection: true } : {}),
     },
     capabilities,
+    ...(input.emailSharedZoneId !== undefined
+      ? { emailSharedZoneId: requiredString(input.emailSharedZoneId, 'emailSharedZoneId') }
+      : {}),
+    ...(input.emailSenderDomain !== undefined
+      ? { emailSenderDomain: normalizeApplicationDomain(input.emailSenderDomain) }
+      : {}),
     controlPlane: { ...CONTROL_PLANE_DEFAULTS, ...input.controlPlane },
     displayName: requiredString(input.displayName, 'displayName').trim(),
     installationSlug,
@@ -344,7 +358,10 @@ export function parsePlatformDeploymentManifest(value: unknown): PlatformDeploym
   );
   const resources: Partial<Record<keyof PlatformResourceNames, string>> = {};
   for (const key of Object.keys(resourceDefaults) as Array<keyof PlatformResourceNames>) {
-    resources[key] = requiredString(rawResources[key], `resources.${key}`);
+    resources[key] = requiredString(
+      rawResources[key] ?? (key === 'emailGatewayWorker' ? resourceDefaults[key] : undefined),
+      `resources.${key}`,
+    );
   }
   const readHostname = (key: keyof PlatformControlPlane): string | null => {
     const hostname = controlPlane[key];
@@ -367,6 +384,16 @@ export function parsePlatformDeploymentManifest(value: unknown): PlatformDeploym
       ...(authentication.accessProtection === true ? { accessProtection: true } : {}),
     },
     capabilities,
+    ...(value.emailSharedZoneId !== undefined
+      ? { emailSharedZoneId: requiredString(value.emailSharedZoneId, 'emailSharedZoneId') }
+      : {}),
+    ...(value.emailSenderDomain !== undefined
+      ? {
+          emailSenderDomain: normalizeApplicationDomain(
+            requiredString(value.emailSenderDomain, 'emailSenderDomain'),
+          ),
+        }
+      : {}),
     controlPlane: {
       apiHostname: readHostname('apiHostname'),
       dashboardHostname: readHostname('dashboardHostname'),

@@ -612,7 +612,7 @@ const HELP_TREE: HelpTree = {
       { command: 'allow <address>', description: 'Add a recipient and trigger CF verification' },
       { command: 'disallow <address>', description: 'Remove a recipient from the allowlist' },
       {
-        command: 'domain <add|status|list|sync|remove>',
+        command: 'domain <add|status|list|sync|rotate-secret|remove>',
         description: 'Send and receive at your own domain on a Cloudflare zone',
       },
       {
@@ -655,7 +655,7 @@ const HELP_TREE: HelpTree = {
         'Remove a recipient from the verified allowlist.',
         'void email disallow <address> [options]',
       ),
-      // The one nested group: verbs parse in email-args.ts (`domain <add|status|list|sync|remove>`).
+      // The one nested group: verbs parse in email-args.ts (`domain <add|status|list|sync|rotate-secret|remove>`).
       // Void-platform-only, so `--project` is global here; `--subdomain` is `add`-only.
       domain: {
         summary: 'Send and receive at your own domain on a Cloudflare zone.',
@@ -663,20 +663,24 @@ const HELP_TREE: HelpTree = {
         commands: [
           {
             command: 'add <domain>',
-            description: 'Register the domain (OAuth grant, or a scoped API token)',
+            description: 'Register the domain with a scoped Cloudflare API token',
           },
           {
             command: 'status <domain>',
-            description: 'Show state; re-probes the credential and relay, polls a pending row',
+            description: 'Show inbound, outbound, management, and operation readiness',
           },
           { command: 'list', description: 'List registered email domains' },
           {
+            command: 'rotate-secret <domain>',
+            description: 'Rotate the shared zone ingress secret with a deployment probe',
+          },
+          {
             command: 'sync <domain>',
-            description: 'Redeploy the relay at the current version and rotate its secret',
+            description: 'Reconcile the zone connection and refresh readiness',
           },
           {
             command: 'remove <domain>',
-            description: 'Delete the registration, stored credential, and relay secret',
+            description: 'Disable the domain assignment and reconcile shared resources',
           },
         ],
         options: [
@@ -700,26 +704,30 @@ const HELP_TREE: HelpTree = {
             ],
           },
           status: withProjectOption(
-            'Show a registered domain, re-probing its credential and relay.',
+            'Show a registered domain and its recorded readiness.',
             'void email domain status <domain> [options]',
           ),
           list: withProjectOption(
             'List registered email domains.',
             'void email domain list [options]',
           ),
+          'rotate-secret': withProjectOption(
+            'Rotate the shared zone ingress secret and verify the deployed generation.',
+            'void email domain rotate-secret <domain> [options]',
+          ),
           sync: withProjectOption(
-            'Redeploy the relay at the current version and rotate its secret.',
+            'Reconcile the zone connection and refresh readiness.',
             'void email domain sync <domain> [options]',
           ),
           // Not `withProjectOption`: `remove` has a flag of its own (`--force`),
           // same shape as the `email logs` page above.
           remove: {
-            summary: 'Delete the registration, stored credential, and relay secret.',
+            summary: 'Disable the domain assignment and reconcile shared resources.',
             usage: ['void email domain remove <domain> [options]'],
             options: [
               {
                 command: '--force',
-                description: 'Drop the row even when Cloudflare-side cleanup fails',
+                description: 'Retain cleanup intent when provider work cannot be completed',
               },
               { command: '--project <name>', description: 'Project name override' },
             ],

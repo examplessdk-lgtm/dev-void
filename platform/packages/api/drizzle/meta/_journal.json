@@ -281,6 +281,13 @@
       "when": 1789733775150,
       "tag": "0046_email_domains_platform_credential",
       "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "7",
+      "when": 1789749117331,
+      "tag": "0047_email_gateway",
+      "breakpoints": true
     }
   ]
 }

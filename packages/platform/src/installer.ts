@@ -33,7 +33,11 @@ export type PlatformRuntimeDatabaseManifest = Readonly<{
 export type PlatformRuntimeManifest = Readonly<{
   authenticationProtocolVersion?: 1;
   applicationRoutingVersion?: 1;
-  artifacts: Readonly<Record<'api' | 'dispatch' | 'proxy' | 'tail', PlatformRuntimeArtifact>>;
+  artifacts: Readonly<
+    Record<'api' | 'dispatch' | 'proxy' | 'tail', PlatformRuntimeArtifact> &
+      Partial<Record<'emailGateway', PlatformRuntimeArtifact>>
+  >;
+  emailProtocolVersion?: 1;
   database: PlatformRuntimeDatabaseManifest;
   platformVersion: string;
   safetyProtocols: Readonly<{ sandboxDrain: 0 | 1 | 2 }>;
@@ -83,13 +87,23 @@ export function parsePlatformRuntimeManifest(value: unknown): PlatformRuntimeMan
   ) {
     throw new Error('Unsupported authentication protocol version.');
   }
+  if (root.emailProtocolVersion !== undefined && root.emailProtocolVersion !== 1) {
+    throw new Error('Unsupported email protocol version.');
+  }
   const artifactsValue = record(root.artifacts, 'runtime manifest artifacts');
+  if (root.emailProtocolVersion === 1 && artifactsValue.emailGateway === undefined) {
+    throw new Error('Email protocol version 1 requires an emailGateway runtime artifact.');
+  }
+  const artifactNames = [
+    'api',
+    'dispatch',
+    'proxy',
+    'tail',
+    ...(artifactsValue.emailGateway === undefined ? [] : ['emailGateway']),
+  ] as const;
   const artifacts = Object.fromEntries(
-    (['api', 'dispatch', 'proxy', 'tail'] as const).map((name) => [
-      name,
-      parseArtifact(artifactsValue[name], name),
-    ]),
-  ) as Record<'api' | 'dispatch' | 'proxy' | 'tail', PlatformRuntimeArtifact>;
+    artifactNames.map((name) => [name, parseArtifact(artifactsValue[name], name)]),
+  ) as PlatformRuntimeManifest['artifacts'];
   const databaseValue = record(root.database, 'runtime manifest database');
   if (databaseValue.protocolVersion !== 1) {
     throw new Error('runtime manifest database protocolVersion must be 1');
@@ -162,6 +176,7 @@ export function parsePlatformRuntimeManifest(value: unknown): PlatformRuntimeMan
     ...(root.authenticationProtocolVersion === 1
       ? { authenticationProtocolVersion: 1 as const }
       : {}),
+    ...(root.emailProtocolVersion === 1 ? { emailProtocolVersion: 1 as const } : {}),
     ...(root.applicationRoutingVersion === 1 ? { applicationRoutingVersion: 1 as const } : {}),
     database: {
       journalSha256: sha256(databaseValue.journalSha256, 'database journal digest'),

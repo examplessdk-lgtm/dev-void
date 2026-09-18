@@ -50,6 +50,8 @@ export type PlatformInstallPlanInput = Readonly<{
   controlPlaneDomain: string;
   dedicatedZone: boolean;
   displayName: string;
+  emailSharedZoneId?: string;
+  emailSenderDomain?: string;
   installationSlug: string;
   zoneName: string;
   workersDev?: boolean;
@@ -85,6 +87,7 @@ export async function createPlatformInstallPlan(
     authoritativeProvisionIntents?: boolean;
     repairMissing?: boolean;
     allowUnverifiedAiGateway?: boolean;
+    includeEmailGateway?: boolean;
   },
 ): Promise<PlatformInstallPlan> {
   const accounts = await client.listAccounts();
@@ -92,6 +95,15 @@ export async function createPlatformInstallPlan(
   if (existing && existing.account.id !== account.id) {
     throw new Error(
       `platform: Refusing to resume installation ${existing.id} in a different Cloudflare account.`,
+    );
+  }
+  if (
+    existing?.deployment.emailSenderDomain &&
+    input.emailSenderDomain &&
+    existing.deployment.emailSenderDomain !== input.emailSenderDomain.trim().toLowerCase()
+  ) {
+    throw new Error(
+      'platform: The shared email sender domain is already recorded for this installation.',
     );
   }
   const installationSlug = normalizeInstallationSlug(input.installationSlug);
@@ -147,10 +159,31 @@ export async function createPlatformInstallPlan(
       proxyHostname: null,
     },
     displayName: input.displayName,
+    ...(existing?.deployment.emailSharedZoneId || input.emailSharedZoneId
+      ? { emailSharedZoneId: existing?.deployment.emailSharedZoneId ?? input.emailSharedZoneId }
+      : {}),
+    ...(existing?.deployment.emailSenderDomain || input.emailSenderDomain
+      ? { emailSenderDomain: existing?.deployment.emailSenderDomain ?? input.emailSenderDomain }
+      : {}),
     installationSlug,
     resources: existing?.deployment.resources ?? createPlatformResourceNames(installationSlug),
   });
-  if (existing && JSON.stringify(existing.deployment) !== JSON.stringify(deployment)) {
+  const {
+    emailSharedZoneId: configuredEmailZone,
+    emailSenderDomain: configuredSenderDomain,
+    ...deploymentWithoutEmailZone
+  } = deployment;
+  const {
+    emailSharedZoneId: recordedEmailZone,
+    emailSenderDomain: recordedSenderDomain,
+    ...existingWithoutEmailZone
+  } = existing?.deployment ?? deployment;
+  if (
+    existing &&
+    (JSON.stringify(existingWithoutEmailZone) !== JSON.stringify(deploymentWithoutEmailZone) ||
+      (recordedEmailZone !== undefined && recordedEmailZone !== configuredEmailZone) ||
+      (recordedSenderDomain !== undefined && recordedSenderDomain !== configuredSenderDomain))
+  ) {
     throw new Error(
       `platform: --resume inputs do not match installation ${existing.id}. Use its recorded configuration.`,
     );
@@ -266,6 +299,7 @@ export async function createPlatformInstallPlan(
     for (const [key, name] of [
       ['api-worker', names.apiWorker],
       ['proxy-worker', names.proxyWorker],
+      ['email-gateway-worker', names.emailGatewayWorker],
       ['tail-worker', names.tailWorker],
       ['dispatch-worker', names.dispatchWorker],
     ] as const) {
@@ -495,6 +529,9 @@ export async function createPlatformInstallPlan(
   for (const [key, name] of [
     ['api-worker', names.apiWorker],
     ['proxy-worker', names.proxyWorker],
+    ...(options?.includeEmailGateway === false
+      ? []
+      : ([['email-gateway-worker', names.emailGatewayWorker]] as const)),
     ['tail-worker', names.tailWorker],
     ['dispatch-worker', names.dispatchWorker],
   ] as const) {
@@ -561,7 +598,10 @@ export async function revalidatePlatformInstallAction(
       zoneName: deployment.application.zoneName,
     },
     manifest,
-    options,
+    {
+      ...options,
+      includeEmailGateway: original.actions.some((entry) => entry.key === 'email-gateway-worker'),
+    },
   );
   const current = refreshed.actions.find((entry) => entry.key === action.key);
   if (
@@ -942,6 +982,7 @@ const RESOURCE_NAME_KEY_BY_ACTION: Readonly<
   'isr-cache-kv': 'isrCacheKv',
   'legacy-assets-kv': 'legacyAssetsKv',
   'proxy-worker': 'proxyWorker',
+  'email-gateway-worker': 'emailGatewayWorker',
   'routing-kv': 'routingKv',
   'tail-worker': 'tailWorker',
   'usage-queue': 'usageQueue',

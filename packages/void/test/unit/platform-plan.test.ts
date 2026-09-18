@@ -80,6 +80,61 @@ function legacyInstallation(suffix = '0123456789ab') {
 }
 
 describe('platform installation planning', () => {
+  it('persists the shared email zone separately from the application zone on resume', async () => {
+    const configured = await createPlatformInstallPlan(
+      client(),
+      { ...input, emailSharedZoneId: 'mail-zone-id', emailSenderDomain: 'mail.example.org' },
+      null,
+    );
+    expect(configured.deployment.emailSharedZoneId).toBe('mail-zone-id');
+    expect(configured.deployment.emailSenderDomain).toBe('mail.example.org');
+    const manifest = createPlatformInstallationManifest({
+      account: configured.account,
+      deployment: configured.deployment,
+      id: configured.installationId,
+      ownershipNonce: '0123456789abcdef0123456789abcdef',
+      platformVersion: '1.0.0',
+      createdAt: '2026-09-17T00:00:00.000Z',
+    });
+    const resumed = await createPlatformInstallPlan(client(), input, manifest);
+    expect(resumed.deployment.emailSharedZoneId).toBe('mail-zone-id');
+    expect(resumed.deployment.emailSenderDomain).toBe('mail.example.org');
+    expect(resumed.zone?.id).not.toBe('mail-zone-id');
+  });
+
+  it('adds a configured shared email zone to a previously unconfigured installation', async () => {
+    const initial = await createPlatformInstallPlan(client(), input, null);
+    const manifest = createPlatformInstallationManifest({
+      account: initial.account,
+      deployment: initial.deployment,
+      id: initial.installationId,
+      ownershipNonce: '0123456789abcdef0123456789abcdef',
+      platformVersion: '1.0.0',
+      createdAt: '2026-09-17T00:00:00.000Z',
+    });
+    const upgraded = await createPlatformInstallPlan(
+      client(),
+      { ...input, emailSharedZoneId: 'mail-zone-id', emailSenderDomain: 'mail.example.org' },
+      manifest,
+    );
+    expect(upgraded.deployment.emailSharedZoneId).toBe('mail-zone-id');
+    expect(upgraded.deployment.emailSenderDomain).toBe('mail.example.org');
+    await expect(
+      createPlatformInstallPlan(
+        client(),
+        { ...input, emailSenderDomain: 'other.example.org' },
+        createPlatformInstallationManifest({
+          account: upgraded.account,
+          deployment: upgraded.deployment,
+          id: upgraded.installationId,
+          ownershipNonce: '0123456789abcdef0123456789abcdef',
+          platformVersion: '1.0.0',
+          createdAt: '2026-09-17T00:00:00.000Z',
+        }),
+      ),
+    ).rejects.toThrow('already recorded');
+  });
+
   it('resumes the recorded namespaces using the real unfiltered KV API response', async () => {
     const initial = await createPlatformInstallPlan(client(), input, null);
     let manifest = createPlatformInstallationManifest({
@@ -253,7 +308,7 @@ describe('platform installation planning', () => {
       zoneName: '',
       workersDev: { subdomain: 'example' },
     });
-    expect(plan.actions.filter((action) => action.kind === 'worker')).toHaveLength(4);
+    expect(plan.actions.filter((action) => action.kind === 'worker')).toHaveLength(5);
   });
   it('rejects an uncovered nested application domain before resource inventory', async () => {
     let inventoried = false;
@@ -378,7 +433,7 @@ describe('platform installation planning', () => {
     const plan = await createPlatformInstallPlan(fake, input, null);
     expect(plan.apiUrl).toBe(`https://${plan.deployment.resources.apiWorker}.example.workers.dev`);
     expect(plan.deployment.resources.apiWorker).toBe('void-example-api');
-    expect(plan.actions).toHaveLength(15);
+    expect(plan.actions).toHaveLength(16);
     expect(plan.actions.every((action) => action.action === 'create')).toBe(true);
     expect(Object.keys(fake)).not.toContain('createZone');
   });

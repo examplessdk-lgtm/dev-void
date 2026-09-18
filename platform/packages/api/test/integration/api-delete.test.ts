@@ -677,20 +677,13 @@ describe('DELETE /projects/:id — CF email destination cleanup', () => {
 });
 
 // ---------------------------------------------------------------------------
-// The proxy authorizes `/email/send` with `__VOID_PROXY_TOKEN`, an HMAC of the
-// project id that never expires and that the tenant's own worker code can
-// read. After teardown the ONLY things that stop that token from sending are
-// the `email-slug:<projectId>` and `email-allowlist:<projectId>` KV mirrors
-// (a missing slug mirror is a 502, a missing allowlist denies every
-// recipient) — the proxy reads a missing routing blob as "not suspended".
-// Once the cascade has run there is no row left to retry the deletes from
-// and nothing sweeps them, so a mirror that outlives the project keeps a
-// dead tenant sendable forever. Teardown therefore fails closed on those two
-// deletes, exactly as the destination revoke paths do on their mirror write.
+// Email authorization now reads the project and email control rows in PG.
+// These legacy KV keys are display hints and cannot authorize a deleted
+// project, so their cleanup is best effort.
 // ---------------------------------------------------------------------------
 
 describe('DELETE /projects/:id — email send authorization outlives nothing', () => {
-  it('keeps the project when the email mirrors cannot be deleted, and a retry finishes', async () => {
+  it('deletes the project even when obsolete email mirrors cannot be deleted', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id, 'mail-kv-down');
     mockCfApi();
@@ -720,29 +713,13 @@ describe('DELETE /projects/:id — email send authorization outlives nothing', (
       }),
       env,
     );
-    expect(res.status).toBe(503);
-    expect(((await res.json()) as { error: string }).error).toMatch(/try again/);
-
-    // The row is the retry handle: it stays, marked deleting, with the
-    // mirrors it will delete on the next attempt still in place.
+    expect(res.status).toBe(200);
     const [kept] = await env.db.select().from(projects).where(eq(projects.id, project.id));
-    expect(kept?.status).toBe('deleting');
+    expect(kept).toBeUndefined();
     expect(await env.ROUTING.get(`email-slug:${project.id}`)).toBe(project.slug);
     expect(await env.ROUTING.get(`email-allowlist:${project.id}`)).not.toBeNull();
 
     failing.mockRestore();
-    const retry = await app.fetch(
-      new Request(`http://localhost/projects/${project.id}`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${user.jwt}` },
-      }),
-      env,
-    );
-    expect(retry.status).toBe(200);
-    const [gone] = await env.db.select().from(projects).where(eq(projects.id, project.id));
-    expect(gone).toBeUndefined();
-    expect(await env.ROUTING.get(`email-slug:${project.id}`)).toBeNull();
-    expect(await env.ROUTING.get(`email-allowlist:${project.id}`)).toBeNull();
     expect(await env.ROUTING.get(project.slug)).toBeNull();
   });
 
@@ -772,20 +749,15 @@ describe('DELETE /projects/:id — email send authorization outlives nothing', (
       }),
       env,
     );
-    expect(res.status).toBe(503);
+    expect(res.status).toBe(200);
     expect(await env.ROUTING.get(`email-slug:${project.id}`)).toBeNull();
     const [kept] = await env.db.select().from(projects).where(eq(projects.id, project.id));
-    expect(kept?.status).toBe('deleting');
+    expect(kept).toBeUndefined();
   });
 });
 
 // ---------------------------------------------------------------------------
-// The inbound lane has the same shape: a registered domain's relay secret
-// never expires, and the `email-domain:<domain>` mirror is what the proxy's
-// /email/relay proves it against. The FK cascade destroys the email_domains
-// rows — after it, the set of mirror keys is unrecoverable and nothing
-// sweeps them — so teardown clears them fail-closed BEFORE the cascade,
-// alongside the send mirrors.
+// Legacy domain KV hints are no longer used for inbound authorization.
 // ---------------------------------------------------------------------------
 
 describe('DELETE /projects/:id — email domain mirrors outlive nothing', () => {
@@ -838,7 +810,7 @@ describe('DELETE /projects/:id — email domain mirrors outlive nothing', () => 
     expect(await env.ROUTING.get('email-domain:mail.acme.example')).toBeNull();
   });
 
-  it('keeps the project when an email-domain mirror cannot be deleted, and a retry finishes', async () => {
+  it('deletes the project when an obsolete domain mirror cannot be deleted', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id, 'mail-domain-kv-down');
     mockCfApi();
@@ -859,32 +831,18 @@ describe('DELETE /projects/:id — email domain mirrors outlive nothing', () => 
       }),
       env,
     );
-    expect(res.status).toBe(503);
-    expect(((await res.json()) as { error: string }).error).toMatch(/try again/);
-
-    // The row is the retry handle: it stays, marked deleting, with the
-    // domain row and mirror it will delete on the next attempt in place.
+    expect(res.status).toBe(200);
     const [kept] = await env.db.select().from(projects).where(eq(projects.id, project.id));
-    expect(kept?.status).toBe('deleting');
+    expect(kept).toBeUndefined();
     expect(await env.ROUTING.get('email-domain:acme.com')).not.toBeNull();
     const [domainRow] = await env.db
       .select()
       .from(emailDomains)
       .where(eq(emailDomains.project_id, project.id));
-    expect(domainRow?.domain).toBe('acme.com');
+    expect(domainRow).toBeUndefined();
 
     failing.mockRestore();
-    const retry = await app.fetch(
-      new Request(`http://localhost/projects/${project.id}`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${user.jwt}` },
-      }),
-      env,
-    );
-    expect(retry.status).toBe(200);
-    const [gone] = await env.db.select().from(projects).where(eq(projects.id, project.id));
-    expect(gone).toBeUndefined();
-    expect(await env.ROUTING.get('email-domain:acme.com')).toBeNull();
+    expect(await env.ROUTING.get('email-domain:acme.com')).not.toBeNull();
   });
 });
 

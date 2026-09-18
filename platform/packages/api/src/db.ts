@@ -20,6 +20,7 @@ import {
 import { drizzle } from 'drizzle-orm/node-postgres';
 import { alias } from 'drizzle-orm/pg-core';
 import { lockAuthSettings } from './auth/configuration.ts';
+import { lockEmailPolicy } from './email/admission.ts';
 import { generateId } from './id.ts';
 import * as schema from './schema.ts';
 import {
@@ -1684,14 +1685,23 @@ export async function tryCreateEmailDestination(
   };
   let inserted: EmailDestination | undefined;
   if (!ownerAudit) {
-    inserted = await insertRow(db);
-  } else {
-    const outcome = await db.transaction(async (tx) => {
+    inserted = await db.transaction(async (tx) => {
+      await lockEmailPolicy(tx);
       await tx
         .select({ id: projects.id })
         .from(projects)
         .where(eq(projects.id, projectId))
-        .for('key share')
+        .for('update');
+      return insertRow(tx as unknown as Db);
+    });
+  } else {
+    const outcome = await db.transaction(async (tx) => {
+      await lockEmailPolicy(tx);
+      await tx
+        .select({ id: projects.id })
+        .from(projects)
+        .where(eq(projects.id, projectId))
+        .for('update')
         .limit(1);
       const [owner] = await tx
         .select({ email: users.email })
@@ -1814,6 +1824,26 @@ export async function revokeOwnerVerifiedDestinationsForUserChange(
   oldEmail: string,
 ): Promise<Array<string>> {
   const lowered = oldEmail.toLowerCase();
+  // The caller holds the policy lock in its surrounding profile transaction.
+  // Lock affected projects before changing consent so admission cannot read
+  // their old verified destinations after this revocation commits.
+  const affected = await db
+    .selectDistinct({ project_id: emailDestinations.project_id })
+    .from(emailDestinations)
+    .where(
+      and(
+        eq(emailDestinations.verified_by_user_id, userId),
+        sql`lower(${emailDestinations.verified_by_email_snapshot}) = ${lowered}`,
+        eq(emailDestinations.verification_source, 'cf'),
+      ),
+    );
+  for (const projectId of affected.map((row) => row.project_id).sort()) {
+    await db
+      .select({ id: projects.id })
+      .from(projects)
+      .where(eq(projects.id, projectId))
+      .for('update');
+  }
   const updated = await db
     .update(emailDestinations)
     .set({
@@ -1944,11 +1974,52 @@ export async function updateEmailDestinationStatus(
   if (verificationSource !== undefined) {
     patch.verification_source = verificationSource;
   }
-  await db.update(emailDestinations).set(patch).where(eq(emailDestinations.id, id));
+  const [existing] = await db
+    .select({ project_id: emailDestinations.project_id })
+    .from(emailDestinations)
+    .where(eq(emailDestinations.id, id))
+    .limit(1);
+  if (!existing) {
+    return;
+  }
+  await db.transaction(async (tx) => {
+    await lockEmailPolicy(tx);
+    await tx
+      .select({ id: projects.id })
+      .from(projects)
+      .where(eq(projects.id, existing.project_id))
+      .for('update');
+    await tx
+      .update(emailDestinations)
+      .set(patch)
+      .where(
+        and(eq(emailDestinations.id, id), eq(emailDestinations.project_id, existing.project_id)),
+      );
+  });
 }
 
 export async function deleteEmailDestination(db: Db, id: string): Promise<void> {
-  await db.delete(emailDestinations).where(eq(emailDestinations.id, id));
+  const [existing] = await db
+    .select({ project_id: emailDestinations.project_id })
+    .from(emailDestinations)
+    .where(eq(emailDestinations.id, id))
+    .limit(1);
+  if (!existing) {
+    return;
+  }
+  await db.transaction(async (tx) => {
+    await lockEmailPolicy(tx);
+    await tx
+      .select({ id: projects.id })
+      .from(projects)
+      .where(eq(projects.id, existing.project_id))
+      .for('update');
+    await tx
+      .delete(emailDestinations)
+      .where(
+        and(eq(emailDestinations.id, id), eq(emailDestinations.project_id, existing.project_id)),
+      );
+  });
 }
 
 /**
@@ -2003,11 +2074,12 @@ export async function promoteEmailDestinationWithOwnerAudit(
   ownerAudit: OwnerVerificationAudit,
 ): Promise<boolean> {
   return db.transaction(async (tx) => {
+    await lockEmailPolicy(tx);
     await tx
       .select({ id: projects.id })
       .from(projects)
       .where(eq(projects.id, projectId))
-      .for('key share')
+      .for('update')
       .limit(1);
     const [owner] = await tx
       .select({ email: users.email })

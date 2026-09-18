@@ -60,6 +60,9 @@ export function validateManifestShape(parsed: unknown): string | null {
     return 'invalid manifest shape: expected a JSON object';
   }
   const manifest = parsed as Record<string, unknown>;
+  if (manifest.emailProtocolVersion !== undefined && manifest.emailProtocolVersion !== 1) {
+    return 'invalid manifest shape: emailProtocolVersion must be 1';
+  }
 
   if (
     manifest.bindings == null ||

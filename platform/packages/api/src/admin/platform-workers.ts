@@ -1,4 +1,10 @@
-export type PlatformWorkerName = 'proxy' | 'tail' | 'api' | 'dashboard' | 'dispatch';
+export type PlatformWorkerName =
+  | 'proxy'
+  | 'email-gateway'
+  | 'tail'
+  | 'api'
+  | 'dashboard'
+  | 'dispatch';
 
 type PlatformWorkerDef = Readonly<{
   name: PlatformWorkerName;
@@ -20,6 +26,13 @@ const WORKER_DEFS: ReadonlyArray<PlatformWorkerDef> = [
     stagingScript: 'void-proxy-staging',
     dependsOn: [],
     deployOrder: 1,
+  },
+  {
+    name: 'email-gateway',
+    prodScript: 'void-email-gateway',
+    stagingScript: 'void-email-gateway-staging',
+    dependsOn: ['api'],
+    deployOrder: 4,
   },
   {
     name: 'tail',

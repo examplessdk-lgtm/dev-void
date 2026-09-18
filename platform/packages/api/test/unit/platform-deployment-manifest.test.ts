@@ -16,6 +16,7 @@ describe('platform deployment manifest', () => {
       dashboardWorker: 'void-developer-platform-experience-dashboard',
       dispatchNamespace: 'void-developer-platform-experience-users',
       dispatchWorker: 'void-developer-platform-experience-dispatch',
+      emailGatewayWorker: 'void-developer-platform-experience-email-gateway',
       hyperdrive: 'void-developer-platform-experience-database',
       isrCacheKv: 'void-developer-platform-experience-isr-cache',
       legacyAssetsKv: 'void-developer-platform-experience-legacy-assets',

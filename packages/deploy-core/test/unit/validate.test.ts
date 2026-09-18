@@ -43,3 +43,14 @@ describe('WebSocket deployment manifest validation', () => {
     ).toContain('deletedClasses must be an array of strings');
   });
 });
+
+describe('managed email protocol', () => {
+  it('accepts version 1 and rejects unknown versions before deployment', () => {
+    expect(validateManifestShape({ version: 3, bindings: {}, emailProtocolVersion: 1 })).toBeNull();
+    for (const emailProtocolVersion of [0, 2, '1', null, {}]) {
+      expect(validateManifestShape({ version: 3, bindings: {}, emailProtocolVersion })).toContain(
+        'emailProtocolVersion must be 1',
+      );
+    }
+  });
+});

@@ -25,6 +25,14 @@
 import { isReservedEmailSlug } from '@voidcloud/api/reserved-slugs';
 import { EmailMessage } from 'cloudflare:email';
 import { validate as isValidEmailSyntax } from 'email-validator';
+import { dispatchBoundedEmailToTenant } from '../../email-gateway/src/tenant-dispatch.ts';
+import {
+  admitEmail,
+  emailPayloadDigest,
+  finishEmailAttempt,
+  recordEmailReceipt,
+  startEmailAttempt,
+} from './email-admission.ts';
 import { dropEmailDomainLease, leaseBearer, leaseEmailDomainCredential } from './email-lease.ts';
 import {
   VERIFIED_ONLY,
@@ -117,6 +125,7 @@ function describeUntrusted(value: unknown, maxLen: number): string {
 interface RoutingEntry {
   workerName?: string;
   projectId?: string;
+  version?: string;
   /**
    * Per-project dispatch limits (`{ cpuMs?, subRequests? }`), written by the
    * api worker and applied by `packages/dispatch` on every HTTP request.
@@ -134,6 +143,16 @@ interface RoutingEntry {
   suspended?: string;
   // Other routing fields exist on this KV value (used by HTTP dispatch);
   // we only care about these here.
+}
+
+export interface AuthoritativeEmailRoute {
+  projectId: string;
+  workerName: string;
+  deploymentId: string;
+  slug: string;
+  addressing: 'shared' | 'custom';
+  domain?: string;
+  limits?: Record<string, number>;
 }
 
 /**
@@ -227,6 +246,7 @@ export const MAX_INBOUND_BYTES = 10 * 1024 * 1024;
  * `MAX_INBOUND_HEADERS + 1` pairs.
  */
 export const MAX_INBOUND_HEADERS = 1024;
+export const MAX_INBOUND_HEADER_BYTES = 128 * 1024;
 
 /**
  * Cap user-supplied reject reasons — surfaced to remote MTAs and our logs.
@@ -300,7 +320,7 @@ export const MAX_FORWARD_HEADER_LENGTH = 1024;
  * failure is logged here and the reply silently never goes out). Checked
  * BEFORE `readMimeFromAddrSpec`, whose scan is linear in `raw`.
  */
-const MAX_REPLY_BYTES = MAX_MIME_BYTES;
+const MAX_REPLY_BYTES = 5 * 1024 * 1024;
 
 /**
  * Cumulative reply-byte budget for ONE delivery. Twin of the framework's
@@ -313,7 +333,7 @@ const MAX_REPLY_BYTES = MAX_MIME_BYTES;
  * injection attempt is the worse failure. An oversized reply is a resource
  * bound, and the in-budget replies cost no more than a compliant list.
  */
-const MAX_REPLY_BYTES_TOTAL = 2 * MAX_REPLY_BYTES;
+const MAX_REPLY_BYTES_TOTAL = 8 * 1024 * 1024;
 
 // workerd's RPC layer throws TypeError with messages like
 // "The RPC receiver does not implement the method 'X'". Match a couple of
@@ -333,6 +353,13 @@ class InboundTooManyHeadersError extends Error {
   constructor() {
     super(`inbound message carries more than ${MAX_INBOUND_HEADERS} headers`);
     this.name = 'InboundTooManyHeadersError';
+  }
+}
+
+class InboundHeadersTooLargeError extends Error {
+  constructor() {
+    super(`inbound headers exceed ${MAX_INBOUND_HEADER_BYTES} bytes`);
+    this.name = 'InboundHeadersTooLargeError';
   }
 }
 
@@ -475,6 +502,9 @@ function forwardHeadersWithinBounds(headers: unknown): headers is Record<string,
  * that must keep routing.
  */
 interface ReplySenderPin {
+  receiptId?: string;
+  authoritative?: boolean;
+  customDomain?: boolean;
   /** Routed project slug, already lowercased by the caller. */
   slug: string;
   /** Domain of the received recipient, already lowercased. */
@@ -529,6 +559,9 @@ async function isPermittedReplySender(from: string, pin: ReplySenderPin): Promis
   }
   const fromDomain = lower.slice(at + 1);
   if (fromDomain === pin.domain) {
+    if (pin.customDomain) {
+      return true;
+    }
     // Split on the first '+' exactly as the recipient is split in
     // `routeInbound`, so the sender's slug is read the same way the routed
     // slug was.
@@ -536,10 +569,13 @@ async function isPermittedReplySender(from: string, pin: ReplySenderPin): Promis
     if (localPrefix.length > 0 && localPrefix === pin.slug) {
       return true;
     }
-    // Fall through: the received domain may itself be registered to the
-    // receiving project — on the relay lane it always is — in which case
-    // any address on it is a permitted sender.
+    if (pin.authoritative) {
+      return false;
+    }
   }
+  if (pin.authoritative) {
+    return true;
+  } // PostgreSQL admission checks exact sender ownership.
   return isRegisteredDomainSender(fromDomain, pin);
 }
 
@@ -626,6 +662,7 @@ async function getMonthlyLimit(kv: KVNamespace, projectId: string): Promise<numb
  * outbound semantics.
  */
 interface OutboundGate {
+  receiptId?: string;
   /** undefined when routing has no projectId; gate is then closed. */
   projectId: string | undefined;
   /** Relay lane (custom-domain sends): the recipient allowlist does not gate; quotas still apply. */
@@ -649,6 +686,7 @@ export async function routeInbound(
   message: ForwardableEmailMessage,
   env: Env,
   ctx: ExecutionContext,
+  authoritative?: AuthoritativeEmailRoute,
 ): Promise<void> {
   // Every reject reason is prefixed with the zone this router serves, so a
   // bounce tells the remote MTA which platform environment refused it. The
@@ -684,98 +722,119 @@ export async function routeInbound(
   // entry, whatever its origin, can hand a reserved mailbox to a worker.
   // The reject matches what an unclaimed slug gets today: there is no
   // platform mailbox behind these addresses either.
-  if (isReservedEmailSlug(slug)) {
+  if (authoritative?.addressing !== 'custom' && isReservedEmailSlug(slug)) {
     message.setReject(`${label}: "${sanitize(slug, 64)}" is a reserved platform address`);
     return;
   }
 
-  // Look up project routing — same KV the HTTP dispatcher uses.
-  const routingJson = await env.ROUTING.get(slug);
-  if (!routingJson) {
-    message.setReject(`${label}: no project found for slug "${sanitize(slug, 64)}"`);
-    return;
-  }
+  let routing: RoutingEntry;
+  let workerName: string;
+  if (authoritative) {
+    if (
+      !authoritative.projectId ||
+      !authoritative.workerName ||
+      (authoritative.domain && authoritative.domain.toLowerCase() !== receivedDomain) ||
+      (authoritative.addressing === 'shared' && authoritative.slug.toLowerCase() !== slug)
+    ) {
+      message.setReject(`${label}: authoritative route mismatch`);
+      return;
+    }
+    workerName = authoritative.workerName;
+    routing = {
+      projectId: authoritative.projectId,
+      workerName,
+      version: authoritative.deploymentId,
+      limits: authoritative.limits,
+    };
+  } else {
+    // Look up project routing — same KV the HTTP dispatcher uses.
+    const routingJson = await env.ROUTING.get(slug);
+    if (!routingJson) {
+      message.setReject(`${label}: no project found for slug "${sanitize(slug, 64)}"`);
+      return;
+    }
 
-  let parsedRouting: unknown;
-  try {
-    parsedRouting = JSON.parse(routingJson);
-  } catch {
-    message.setReject(`${label}: routing data corrupt`);
-    return;
-  }
-  // `JSON.parse` also succeeds on `null`, on a bare number and on a string,
-  // none of which carry a suspension marker to read. Every producer of this
-  // value writes a `JSON.stringify`d object, so there is no legitimate writer
-  // of a non-object entry — treat one as corrupt rather than reaching for
-  // `.suspended` on it. Reading it as "not suspended" would disable the
-  // platform-wide gate for exactly the project whose entry got corrupted,
-  // which is the same reason the outbound path fails closed on `corrupt`.
-  if (typeof parsedRouting !== 'object' || parsedRouting === null) {
-    message.setReject(`${label}: routing data corrupt`);
-    return;
-  }
-  const routing = parsedRouting as RoutingEntry;
+    let parsedRouting: unknown;
+    try {
+      parsedRouting = JSON.parse(routingJson);
+    } catch {
+      message.setReject(`${label}: routing data corrupt`);
+      return;
+    }
+    // `JSON.parse` also succeeds on `null`, on a bare number and on a string,
+    // none of which carry a suspension marker to read. Every producer of this
+    // value writes a `JSON.stringify`d object, so there is no legitimate writer
+    // of a non-object entry — treat one as corrupt rather than reaching for
+    // `.suspended` on it. Reading it as "not suspended" would disable the
+    // platform-wide gate for exactly the project whose entry got corrupted,
+    // which is the same reason the outbound path fails closed on `corrupt`.
+    if (typeof parsedRouting !== 'object' || parsedRouting === null) {
+      message.setReject(`${label}: routing data corrupt`);
+      return;
+    }
+    routing = parsedRouting as RoutingEntry;
 
-  // Platform-wide suspension — the marker `packages/dispatch` answers with a
-  // 429. Checked BEFORE dispatch (and before the email-only kill-switch) so
-  // a suspended tenant's code never runs on platform CPU, and so a project
-  // suspended for abuse loses inbound and outbound mail at the same moment
-  // it loses HTTP.
-  if (routing.suspended) {
-    // The marker is declared `string`, but it arrives from KV — a non-string
-    // value would crash `sanitize`, which turns a suspended project into an
-    // unhandled handler error instead of a clean refusal.
-    const reason = typeof routing.suspended === 'string' ? routing.suspended : 'suspended';
-    message.setReject(
-      `${label}: project "${sanitize(slug, 64)}" is suspended (${sanitize(reason, 64)})`,
-    );
-    return;
-  }
+    // Platform-wide suspension — the marker `packages/dispatch` answers with a
+    // 429. Checked BEFORE dispatch (and before the email-only kill-switch) so
+    // a suspended tenant's code never runs on platform CPU, and so a project
+    // suspended for abuse loses inbound and outbound mail at the same moment
+    // it loses HTTP.
+    if (routing.suspended) {
+      // The marker is declared `string`, but it arrives from KV — a non-string
+      // value would crash `sanitize`, which turns a suspended project into an
+      // unhandled handler error instead of a clean refusal.
+      const reason = typeof routing.suspended === 'string' ? routing.suspended : 'suspended';
+      message.setReject(
+        `${label}: project "${sanitize(slug, 64)}" is suspended (${sanitize(reason, 64)})`,
+      );
+      return;
+    }
 
-  const workerName = routing.workerName;
-  if (!workerName) {
-    // Static-only deploys (KV/R2 path) don't have a worker — nothing to
-    // dispatch inbound mail to.
-    message.setReject(`${label}: project "${sanitize(slug, 64)}" has no worker (static deploy)`);
-    return;
-  }
-  // Declared `string`, but it arrives from KV like `suspended` does. Every
-  // failure handler below renders the name through `sanitize`, which throws
-  // on a non-string — a worker that cannot be reached would then surface as
-  // an unhandled handler error instead of a reject. `buildRoutingJson` only
-  // ever writes a string, so anything else is corrupt data, refused the same
-  // way as a non-object blob.
-  if (typeof workerName !== 'string') {
-    message.setReject(`${label}: routing data corrupt`);
-    return;
-  }
+    workerName = routing.workerName ?? '';
+    if (!workerName) {
+      // Static-only deploys (KV/R2 path) don't have a worker — nothing to
+      // dispatch inbound mail to.
+      message.setReject(`${label}: project "${sanitize(slug, 64)}" has no worker (static deploy)`);
+      return;
+    }
+    // Declared `string`, but it arrives from KV like `suspended` does. Every
+    // failure handler below renders the name through `sanitize`, which throws
+    // on a non-string — a worker that cannot be reached would then surface as
+    // an unhandled handler error instead of a reject. `buildRoutingJson` only
+    // ever writes a string, so anything else is corrupt data, refused the same
+    // way as a non-object blob.
+    if (typeof workerName !== 'string') {
+      message.setReject(`${label}: routing data corrupt`);
+      return;
+    }
 
-  // `projectId` arrives from KV the same way. The email-only kill-switch
-  // below is keyed `email-suspended:<projectId>`, and a template literal
-  // coerces whatever is there — a number, an object, an empty string — into
-  // a key that names no real project, so the lookup misses and a suspended
-  // tenant keeps receiving mail. Every failure handler after dispatch also
-  // renders the id through `sanitize`, which throws on a non-string. Every
-  // writer of a worker routing has put a string id in the blob since the
-  // first one (`buildRoutingJson` types it, and there is no static-deploy
-  // reading for a missing id the way there is for a missing `workerName`),
-  // so absent, empty or mistyped is corrupt data and is refused the same
-  // way — the suspension state cannot be read, so the message must not run.
-  if (typeof routing.projectId !== 'string' || routing.projectId === '') {
-    message.setReject(`${label}: routing data corrupt`);
-    return;
-  }
+    // `projectId` arrives from KV the same way. The email-only kill-switch
+    // below is keyed `email-suspended:<projectId>`, and a template literal
+    // coerces whatever is there — a number, an object, an empty string — into
+    // a key that names no real project, so the lookup misses and a suspended
+    // tenant keeps receiving mail. Every failure handler after dispatch also
+    // renders the id through `sanitize`, which throws on a non-string. Every
+    // writer of a worker routing has put a string id in the blob since the
+    // first one (`buildRoutingJson` types it, and there is no static-deploy
+    // reading for a missing id the way there is for a missing `workerName`),
+    // so absent, empty or mistyped is corrupt data and is refused the same
+    // way — the suspension state cannot be read, so the message must not run.
+    if (typeof routing.projectId !== 'string' || routing.projectId === '') {
+      message.setReject(`${label}: routing data corrupt`);
+      return;
+    }
 
-  // Email-only suspend kill-switch — the narrower control, set by the admin
-  // UI to stop mail without taking the whole project offline. Gates inbound
-  // as well as outbound so a suspended project doesn't keep accepting +
-  // dispatching mail (which costs CPU and storage on the user worker).
-  // No cacheTtl: this is an abuse-response control; we eat the extra KV
-  // get per inbound message so a suspend takes effect immediately
-  // (subject only to KV's ~near-instant per-colo consistency).
-  if (await env.ROUTING.get(`email-suspended:${routing.projectId}`)) {
-    message.setReject(`${label}: project "${sanitize(slug, 64)}" inbound is suspended`);
-    return;
+    // Email-only suspend kill-switch — the narrower control, set by the admin
+    // UI to stop mail without taking the whole project offline. Gates inbound
+    // as well as outbound so a suspended project doesn't keep accepting +
+    // dispatching mail (which costs CPU and storage on the user worker).
+    // No cacheTtl: this is an abuse-response control; we eat the extra KV
+    // get per inbound message so a suspend takes effect immediately
+    // (subject only to KV's ~near-instant per-colo consistency).
+    if (await env.ROUTING.get(`email-suspended:${routing.projectId}`)) {
+      message.setReject(`${label}: project "${sanitize(slug, 64)}" inbound is suspended`);
+      return;
+    }
   }
 
   let stub: EmailEntrypointStub;
@@ -789,6 +848,9 @@ export async function routeInbound(
       : env.DISPATCH.get(workerName)) as unknown as EmailEntrypointStub;
   } catch (e) {
     console.error(`[email-router] DISPATCH.get(${sanitize(workerName, 320)}) failed:`, e);
+    if (authoritative) {
+      throw new Error('email worker temporarily unavailable');
+    }
     message.setReject(`${label}: project worker unavailable`);
     return;
   }
@@ -815,6 +877,9 @@ export async function routeInbound(
   let envelope: EmailEnvelope;
   try {
     envelope = await buildEnvelope(message);
+    if (authoritative?.addressing === 'custom') {
+      envelope.viaDomain = receivedDomain;
+    }
   } catch (e) {
     if (e instanceof InboundTooLargeError) {
       message.setReject(`${label}: message too large (max ${MAX_INBOUND_BYTES} bytes)`);
@@ -822,6 +887,10 @@ export async function routeInbound(
     }
     if (e instanceof InboundTooManyHeadersError) {
       message.setReject(`${label}: too many headers (max ${MAX_INBOUND_HEADERS})`);
+      return;
+    }
+    if (e instanceof InboundHeadersTooLargeError) {
+      message.setReject(`${label}: headers too large (max ${MAX_INBOUND_HEADER_BYTES} bytes)`);
       return;
     }
     console.error(`[email-router] failed to read message body for ${sanitize(slug, 64)}:`, e);
@@ -836,60 +905,42 @@ export async function routeInbound(
   // weaponize inbound mail to fan out to addresses verified by another
   // project — nullifying the architectural premise that the platform's
   // per-project allowlist is the security boundary.
-  let gate: OutboundGate;
-  try {
-    gate = await loadOutboundGate(env, routing.projectId, { receivedDomain });
-  } catch (e) {
-    console.error(
-      `[email-router] failed to load outbound gate for ${sanitize(routing.projectId ?? '', 64)}:`,
-      e,
-    );
-    // Closing the gate (no allowlist, exhausted quota) means forward/reply
-    // actions get dropped with a logged error — the user message is still
-    // accepted by CF (we don't reject), matching the documented behavior
-    // that quota exhaustion never breaks message acceptance.
-    gate = {
-      projectId: routing.projectId,
-      skipAllowlist: false,
-      allowlist: new Set(),
-      policy: VERIFIED_ONLY,
-      platformDomains: [],
-      burstKey: '',
-      burstLimit: 0,
-      burstCurrent: 0,
-      monthKey: '',
-      monthLimit: 0,
-      monthCurrent: 0,
-      quotaExhausted: true,
-    };
-  }
+  const gate: OutboundGate = {
+    projectId: routing.projectId,
+    skipAllowlist: false,
+    allowlist: new Set(),
+    policy: VERIFIED_ONLY,
+    platformDomains: [],
+    burstKey: '',
+    burstLimit: 0,
+    burstCurrent: 0,
+    monthKey: '',
+    monthLimit: 0,
+    monthCurrent: 0,
+    quotaExhausted: false,
+  };
 
   let actions: Array<EmailAction>;
+  const receiptId = crypto.randomUUID();
   try {
-    // This await materializes the tenant's WHOLE return value in this isolate
-    // before any bound below can look at it. workerd deserializes an RPC
-    // result eagerly, in one call, with no size hook; the only transport
-    // bound is the callee-side 32 MiB cap on SERIALIZED bytes, and a dense
-    // array turns 32 MiB of nulls into 128 MiB of caller heap, or of `{}`
-    // into ~500 MiB (measured, workerd 1.20260701.1, pointer-compressed V8).
-    // No proxy-side code can bound that; a contract change binds only
-    // cooperative tenants. Accepted limit — design doc 0078, "RPC result
-    // materialization", records the numbers and the architectural options.
-    const result = await stub.email!(envelope);
-    if (result === undefined || result === null) {
-      actions = [];
-    } else if (Array.isArray(result)) {
-      actions = result;
-    } else {
-      // Handler authors who return e.g. `{ actions: [...] }` instead of
-      // the bare array would otherwise see a silent no-op. Warn so the
-      // mistake is debuggable.
-      console.warn(
-        `[email-router] ${sanitize(workerName, 320)} email handler returned non-array; treating as no-op`,
-      );
-      actions = [];
+    await recordEmailReceipt(env, receiptId, routing.projectId!, 'received');
+  } catch {
+    if (authoritative) {
+      throw new Error('email admission temporarily unavailable');
     }
+    message.setReject(`${label}: email admission unavailable`);
+    return;
+  }
+  try {
+    const result = await dispatchBoundedEmailToTenant(stub as Fetcher, env, {
+      projectId: routing.projectId!,
+      deploymentId: routing.version ?? '',
+      envelope,
+      receiptId,
+    });
+    actions = result.actions;
   } catch (e) {
+    await recordEmailReceipt(env, receiptId, routing.projectId!, 'handler_failed').catch(() => {});
     // The thrown value is the tenant's: a handler can throw an Error with any
     // message, or any value that crosses RPC. Only a bounded prefix is
     // inspected — workerd's own "does not implement" text is well under 320
@@ -910,6 +961,9 @@ export async function routeInbound(
       return;
     }
     console.error(`[email-router] dispatch to ${sanitize(workerName, 320)} failed:`, msg);
+    if (authoritative) {
+      throw new Error('email handler execution unresolved');
+    }
     message.setReject(`${label}: project handler error`);
     ctx.waitUntil(
       logRecv(env, routing.projectId, message, [{ type: 'reject', reason: 'dispatch-error' }]),
@@ -917,13 +971,30 @@ export async function routeInbound(
     return;
   }
 
-  await enactActions(env, message, actions, gate, {
-    slug,
-    domain: receivedDomain,
-    projectId: routing.projectId,
-    kv: env.ROUTING,
-    registeredDomains: new Map(),
-  });
+  try {
+    await recordEmailReceipt(env, receiptId, routing.projectId!, 'handler_completed');
+  } catch {
+    console.error('[email-router] handler completed but receipt status could not be saved');
+    message.setReject(`${label}: email admission unavailable`);
+    return;
+  }
+
+  gate.receiptId = receiptId;
+  try {
+    await enactActions(env, message, actions, gate, {
+      receiptId,
+      authoritative: !!authoritative,
+      customDomain: authoritative?.addressing === 'custom',
+      slug: authoritative?.slug ?? slug,
+      domain: receivedDomain,
+      projectId: routing.projectId,
+      kv: env.ROUTING,
+      registeredDomains: new Map(),
+    });
+  } catch {
+    console.error('[email-router] action execution unresolved', receiptId);
+    return;
+  }
 
   // Async log to the metering pipeline. Best-effort. Logged after every
   // dispatch — including reject-only outcomes — so operators have a
@@ -940,6 +1011,7 @@ export async function routeInbound(
  */
 export interface RelayRouteOutcome {
   reject: boolean;
+  temporary?: boolean;
 }
 
 /**
@@ -960,72 +1032,97 @@ export interface RelayRouteOutcome {
 export async function routeRelayed(
   env: Env,
   ctx: ExecutionContext,
-  input: { projectId: string; domain: string; envelope: EmailEnvelope },
+  input: {
+    projectId: string;
+    domain: string;
+    envelope: EmailEnvelope;
+    authoritative?: AuthoritativeEmailRoute;
+    receiptId?: string;
+  },
 ): Promise<RelayRouteOutcome> {
-  const { projectId, domain, envelope } = input;
+  const { projectId, domain, envelope, authoritative } = input;
 
-  // The platform lane resolves routing by the slug parsed from the
-  // recipient; a relayed recipient carries no slug, so resolve the
-  // project's slug via the `email-slug:<projectId>` mirror the api writes
-  // on project create, then read the same routing blob by slug.
-  const slug = await env.ROUTING.get(`email-slug:${projectId}`);
-  if (!slug) {
-    console.error(`[email-relay] no slug mirror for project ${sanitize(projectId, 64)}`);
-    return { reject: true };
-  }
-  const routingJson = await env.ROUTING.get(slug);
-  if (!routingJson) {
-    console.error(
-      `[email-relay] no routing entry for slug ${sanitize(slug, 64)} (project ${sanitize(projectId, 64)})`,
-    );
-    return { reject: true };
-  }
-  let parsedRouting: unknown;
-  try {
-    parsedRouting = JSON.parse(routingJson);
-  } catch {
-    console.error(`[email-relay] routing data corrupt for slug ${sanitize(slug, 64)}`);
-    return { reject: true };
-  }
-  // Same corrupt-data rule as the platform lane: every writer of this blob
-  // emits a `JSON.stringify`d object, so a non-object parse has no
-  // legitimate writer.
-  if (typeof parsedRouting !== 'object' || parsedRouting === null) {
-    console.error(`[email-relay] routing data corrupt for slug ${sanitize(slug, 64)}`);
-    return { reject: true };
-  }
-  const routing = parsedRouting as RoutingEntry;
+  let slug: string | null;
+  let routing: RoutingEntry;
+  let workerName: string;
+  if (authoritative) {
+    if (authoritative.projectId !== projectId || !authoritative.workerName || !authoritative.slug) {
+      return { reject: true };
+    }
+    slug = authoritative.slug;
+    workerName = authoritative.workerName;
+    routing = {
+      projectId,
+      workerName,
+      version: authoritative.deploymentId,
+      limits: authoritative.limits,
+    };
+  } else {
+    // The platform lane resolves routing by the slug parsed from the
+    // recipient; a relayed recipient carries no slug, so resolve the
+    // project's slug via the `email-slug:<projectId>` mirror the api writes
+    // on project create, then read the same routing blob by slug.
+    slug = await env.ROUTING.get(`email-slug:${projectId}`);
+    if (!slug) {
+      console.error(`[email-relay] no slug mirror for project ${sanitize(projectId, 64)}`);
+      return { reject: true };
+    }
+    const routingJson = await env.ROUTING.get(slug);
+    if (!routingJson) {
+      console.error(
+        `[email-relay] no routing entry for slug ${sanitize(slug, 64)} (project ${sanitize(projectId, 64)})`,
+      );
+      return { reject: true };
+    }
+    let parsedRouting: unknown;
+    try {
+      parsedRouting = JSON.parse(routingJson);
+    } catch {
+      console.error(`[email-relay] routing data corrupt for slug ${sanitize(slug, 64)}`);
+      return { reject: true };
+    }
+    // Same corrupt-data rule as the platform lane: every writer of this blob
+    // emits a `JSON.stringify`d object, so a non-object parse has no
+    // legitimate writer.
+    if (typeof parsedRouting !== 'object' || parsedRouting === null) {
+      console.error(`[email-relay] routing data corrupt for slug ${sanitize(slug, 64)}`);
+      return { reject: true };
+    }
+    routing = parsedRouting as RoutingEntry;
 
-  // The mirror's projectId is the authenticated identity (the relay secret
-  // proved it); the routing blob's is data. A disagreement is corrupt data
-  // — fail closed rather than dispatch one project's mail into another's
-  // worker.
-  if (routing.projectId !== projectId) {
-    console.error(
-      `[email-relay] routing blob names another project for slug ${sanitize(slug, 64)}`,
-    );
-    return { reject: true };
-  }
+    // The mirror's projectId is the authenticated identity (the relay secret
+    // proved it); the routing blob's is data. A disagreement is corrupt data
+    // — fail closed rather than dispatch one project's mail into another's
+    // worker.
+    if (routing.projectId !== projectId) {
+      console.error(
+        `[email-relay] routing blob names another project for slug ${sanitize(slug, 64)}`,
+      );
+      return { reject: true };
+    }
 
-  // Platform-wide suspension, then the email-only kill-switch — the same
-  // gates as the platform lane, so a suspended project loses relayed
-  // inbound at the same moment it loses everything else.
-  if (routing.suspended) {
-    console.error(`[email-relay] project ${sanitize(projectId, 64)} is suspended`);
-    return { reject: true };
-  }
-  const workerName = routing.workerName;
-  if (!workerName || typeof workerName !== 'string') {
-    // Static-only deploys have no worker to dispatch to; a truthy
-    // non-string is KV-corrupt data. Same refusal either way.
-    console.error(`[email-relay] project ${sanitize(projectId, 64)} has no worker (static deploy)`);
-    return { reject: true };
-  }
-  // No cacheTtl, as on the platform lane: an abuse-response control where
-  // convergence latency is the whole point.
-  if (await env.ROUTING.get(`email-suspended:${projectId}`)) {
-    console.error(`[email-relay] project ${sanitize(projectId, 64)} inbound is suspended`);
-    return { reject: true };
+    // Platform-wide suspension, then the email-only kill-switch — the same
+    // gates as the platform lane, so a suspended project loses relayed
+    // inbound at the same moment it loses everything else.
+    if (routing.suspended) {
+      console.error(`[email-relay] project ${sanitize(projectId, 64)} is suspended`);
+      return { reject: true };
+    }
+    workerName = routing.workerName ?? '';
+    if (!workerName || typeof workerName !== 'string') {
+      // Static-only deploys have no worker to dispatch to; a truthy
+      // non-string is KV-corrupt data. Same refusal either way.
+      console.error(
+        `[email-relay] project ${sanitize(projectId, 64)} has no worker (static deploy)`,
+      );
+      return { reject: true };
+    }
+    // No cacheTtl, as on the platform lane: an abuse-response control where
+    // convergence latency is the whole point.
+    if (await env.ROUTING.get(`email-suspended:${projectId}`)) {
+      console.error(`[email-relay] project ${sanitize(projectId, 64)} inbound is suspended`);
+      return { reject: true };
+    }
   }
 
   let stub: EmailEntrypointStub;
@@ -1036,7 +1133,7 @@ export async function routeRelayed(
       : env.DISPATCH.get(workerName)) as unknown as EmailEntrypointStub;
   } catch (e) {
     console.error(`[email-relay] DISPATCH.get(${sanitize(workerName, 320)}) failed:`, e);
-    return { reject: true };
+    return { reject: true, ...(authoritative ? { temporary: true } : {}) };
   }
 
   // Built before dispatch so the dispatch-failure paths can log the
@@ -1050,43 +1147,40 @@ export async function routeRelayed(
   // send leaves through the customer's own account, credential, DKIM and
   // quota — the reputation at stake is theirs. The burst cap and the kill
   // switch still apply.
-  let gate: OutboundGate;
-  try {
-    gate = await loadOutboundGate(env, projectId, { skipAllowlist: true });
-  } catch (e) {
-    console.error(`[email-relay] failed to load outbound gate for ${sanitize(projectId, 64)}:`, e);
-    gate = {
-      projectId,
-      skipAllowlist: true,
-      allowlist: new Set(),
-      policy: VERIFIED_ONLY,
-      platformDomains: [],
-      burstKey: '',
-      burstLimit: 0,
-      burstCurrent: 0,
-      monthKey: '',
-      monthLimit: 0,
-      monthCurrent: 0,
-      quotaExhausted: true,
-    };
-  }
+  const gate: OutboundGate = {
+    projectId: projectId,
+    skipAllowlist: authoritative?.addressing === 'custom' || !authoritative,
+    allowlist: new Set(),
+    policy: VERIFIED_ONLY,
+    platformDomains: [],
+    burstKey: '',
+    burstLimit: 0,
+    burstCurrent: 0,
+    monthKey: '',
+    monthLimit: 0,
+    monthCurrent: 0,
+    quotaExhausted: false,
+  };
 
   let actions: Array<EmailAction>;
+  const receiptId = input.receiptId ?? crypto.randomUUID();
   try {
-    // The RPC materialization note on the platform lane's dispatch applies
-    // unchanged here.
-    const result = await stub.email!(envelope);
-    if (result === undefined || result === null) {
-      actions = [];
-    } else if (Array.isArray(result)) {
-      actions = result;
-    } else {
-      console.warn(
-        `[email-relay] ${sanitize(workerName, 320)} email handler returned non-array; treating as no-op`,
-      );
-      actions = [];
+    if (!input.receiptId) {
+      await recordEmailReceipt(env, receiptId, projectId, 'received');
     }
+  } catch {
+    return { reject: true, ...(authoritative ? { temporary: true } : {}) };
+  }
+  try {
+    const result = await dispatchBoundedEmailToTenant(stub as Fetcher, env, {
+      projectId,
+      deploymentId: routing.version ?? '',
+      envelope,
+      receiptId,
+    });
+    actions = result.actions;
   } catch (e) {
+    await recordEmailReceipt(env, receiptId, projectId, 'handler_failed').catch(() => {});
     // Same bounded classification as the platform lane.
     const msg = e instanceof Error ? e.message.slice(0, 320) : describeUntrusted(e, 320);
     if (RPC_METHOD_MISSING.test(msg)) {
@@ -1103,16 +1197,44 @@ export async function routeRelayed(
     ctx.waitUntil(
       logRecv(env, projectId, relayed.message, [{ type: 'reject', reason: 'dispatch-error' }]),
     );
-    return { reject: true };
+    return { reject: true, ...(authoritative ? { temporary: true } : {}) };
   }
 
-  await enactActions(env, relayed.message, actions, gate, {
-    slug: slug.toLowerCase(),
-    domain,
-    projectId,
-    kv: env.ROUTING,
-    registeredDomains: new Map(),
-  });
+  try {
+    await recordEmailReceipt(env, receiptId, projectId, 'handler_completed');
+  } catch {
+    console.error('[email-relay] handler completed but receipt status could not be saved');
+    return { reject: false };
+  }
+
+  // A relayed forward resubmits the inbound MIME through send_raw. Validate
+  // every action's transport budget before any earlier action can send.
+  if (
+    envelope.raw.byteLength > MAX_REPLY_BYTES &&
+    actions.some((action) => action.type === 'forward')
+  ) {
+    console.error(
+      '[email-relay] action list dropped: forwarded message exceeds outbound MIME limit',
+    );
+    return { reject: false };
+  }
+
+  gate.receiptId = receiptId;
+  try {
+    await enactActions(env, relayed.message, actions, gate, {
+      receiptId,
+      authoritative: !!authoritative,
+      customDomain: authoritative?.addressing === 'custom',
+      slug: slug.toLowerCase(),
+      domain,
+      projectId,
+      kv: env.ROUTING,
+      registeredDomains: new Map(),
+    });
+  } catch {
+    console.error('[email-relay] action execution unresolved', receiptId);
+    return { reject: false };
+  }
 
   // Same audit trail as the platform lane — including reject-only outcomes.
   ctx.waitUntil(logRecv(env, projectId, relayed.message, actions));
@@ -1170,14 +1292,7 @@ function createRelayedMessage(
     // branch): the account id comes from it, and a row revoked or
     // re-registered to another project between the auth and this send must
     // not push mail into the account the mirror named then.
-    const mirror = await readEmailDomainMirror(env.ROUTING, senderDomain);
-    if (!mirror || mirror.projectId !== relay.projectId || mirror.status !== 'active') {
-      throw new Error('email domain registration is no longer active');
-    }
-    if (!mirror.accountId) {
-      throw new Error('email domain registration is incomplete');
-    }
-    const lease = await leaseEmailDomainCredential(env, senderDomain);
+    const lease = await leaseEmailDomainCredential(env, senderDomain, relay.projectId);
     if (!lease) {
       throw new Error('could not lease the domain credential');
     }
@@ -1188,7 +1303,7 @@ function createRelayedMessage(
     let res: Response;
     try {
       res = await fetch(
-        `https://api.cloudflare.com/client/v4/accounts/${mirror.accountId}/email/sending/send_raw`,
+        `https://api.cloudflare.com/client/v4/accounts/${lease.accountId}/email/sending/send_raw`,
         {
           method: 'POST',
           headers: {
@@ -1409,9 +1524,15 @@ async function buildEnvelope(message: ForwardableEmailMessage): Promise<EmailEnv
   // is defined: the bag is walked once, stops at the cap, and the collected
   // pairs feed `fromEntries` below. See `MAX_INBOUND_HEADERS`.
   const entries: Array<[string, string]> = [];
+  let headerBytes = 0;
+  const encoder = new TextEncoder();
   for (const entry of message.headers) {
     if (entries.length >= MAX_INBOUND_HEADERS) {
       throw new InboundTooManyHeadersError();
+    }
+    headerBytes += encoder.encode(entry[0]).byteLength + encoder.encode(entry[1]).byteLength;
+    if (headerBytes > MAX_INBOUND_HEADER_BYTES) {
+      throw new InboundHeadersTooLargeError();
     }
     entries.push(entry);
   }
@@ -1687,78 +1808,99 @@ async function enactSanitized(
   actions: Array<SanitizedAction>,
   gate: OutboundGate,
 ): Promise<void> {
-  let counterDirty = false;
-  for (const action of actions) {
+  if (!gate.projectId || !gate.receiptId) {
+    console.error(
+      '[email-router] action admission unavailable: missing project or receipt identity',
+    );
+    return;
+  }
+  for (const [index, action] of actions.entries()) {
     if (action.type === 'reject') {
       message.setReject(action.reason);
-      // Reject is terminal — flush any counters we already incremented
-      // before exiting so the burst window reflects forward/reply work
-      // that already fired ahead of the reject.
-      if (counterDirty) {
-        await commitGateCounters(env, gate);
-      }
       return;
     }
-    if (action.type === 'forward') {
-      if (!checkOutboundGate(gate, action.to, 'forward')) {
-        continue;
-      }
-      try {
-        await message.forward(action.to, action.headers);
-        gate.burstCurrent += 1;
-        gate.monthCurrent += 1;
-        counterDirty = true;
-      } catch (e) {
-        console.error(
-          `[email-router] forward to ${sanitize(action.to, 320)} failed:`,
-          e instanceof Error ? sanitize(e.message, 320) : sanitize(String(e), 320),
-        );
-      }
-    } else if (action.type === 'reply') {
-      if (!checkOutboundGate(gate, action.to, 'reply')) {
-        continue;
-      }
-      try {
-        // The relay lane's stand-in holds no CF email event, so a reply is
-        // a fresh REST send of the recorded bytes through the customer
-        // account (send_raw with the domain's leased credential — design
-        // doc 0078, "Inbound identity"), not a native reply on a real
-        // message. The stand-in advertises that channel as
-        // `__voidRelayReply`; a native EmailMessage could not carry the
-        // bytes anyway (no public body accessor).
+    const to = action.to.toLowerCase();
+    const from = action.type === 'reply' ? action.from : message.to;
+    const digest = await emailPayloadDigest(
+      action.type,
+      from,
+      [to],
+      action.type === 'reply'
+        ? action.raw
+        : new TextEncoder().encode(JSON.stringify([...(action.headers?.entries() ?? [])].sort())),
+    );
+    let admission;
+    try {
+      admission = await admitEmail(env, {
+        projectId: gate.projectId,
+        kind: action.type,
+        key: `${gate.receiptId}:${index}:${digest.slice(0, 16)}`,
+        digest,
+        from,
+        recipients: [to],
+        transport:
+          action.type === 'forward'
+            ? gate.skipAllowlist
+              ? 'send_raw'
+              : 'native_forward'
+            : gate.skipAllowlist
+              ? 'send_raw'
+              : 'native_reply',
+        receiptId: gate.receiptId,
+      });
+    } catch (error) {
+      console.error(
+        '[email-router] action admission unavailable:',
+        error instanceof Error ? error.message : 'unknown',
+      );
+      continue;
+    }
+    const admitted = admission.recipients.find((r) => r.recipient === to);
+    if (admission.replay || admitted?.state !== 'reserved') {
+      continue;
+    }
+    try {
+      await startEmailAttempt(env, admission.operationId, [to]);
+    } catch {
+      console.error('[email-router] could not commit attempt_started');
+      continue;
+    }
+    try {
+      if (action.type === 'forward') {
+        await message.forward(to, action.headers);
+      } else {
         const relayReply = (
           message as unknown as {
             __voidRelayReply?: (from: string, to: string, raw: Uint8Array) => Promise<void>;
           }
         ).__voidRelayReply;
-        if (relayReply !== undefined) {
-          await relayReply(action.from, action.to, action.raw);
+        if (relayReply) {
+          await relayReply(action.from, to, action.raw);
         } else {
-          // EmailMessage's `raw` parameter is `string | ReadableStream`;
-          // wrap the action's bytes as a one-shot stream rather than
-          // decoding to UTF-8 (which would corrupt non-text MIME parts).
           const stream = new ReadableStream<Uint8Array>({
             start(controller) {
               controller.enqueue(action.raw);
               controller.close();
             },
           });
-          const reply = new EmailMessage(action.from, action.to, stream);
-          await message.reply(reply as never);
+          await message.reply(new EmailMessage(action.from, to, stream) as never);
         }
-        gate.burstCurrent += 1;
-        gate.monthCurrent += 1;
-        counterDirty = true;
-      } catch (e) {
-        console.error(
-          `[email-router] reply ${sanitize(action.from, 320)}->${sanitize(action.to, 320)} failed:`,
-          e instanceof Error ? sanitize(e.message, 320) : sanitize(String(e), 320),
-        );
       }
+      try {
+        await finishEmailAttempt(env, admission.operationId, [to], 'provider_accepted');
+      } catch {
+        console.error('[email-router] provider accepted action but outcome ledger write failed');
+      }
+    } catch {
+      try {
+        await finishEmailAttempt(env, admission.operationId, [to], 'outcome_unknown', {
+          errorCode: 'OUTCOME_UNKNOWN',
+        });
+      } catch {
+        /* attempt_started remains visible for operator reconciliation */
+      }
+      console.error('[email-router] action provider outcome unknown');
     }
-  }
-  if (counterDirty) {
-    await commitGateCounters(env, gate);
   }
 }
 

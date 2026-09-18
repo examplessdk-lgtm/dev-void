@@ -248,14 +248,14 @@ describe('sendEmail (error mapping)', () => {
     try {
       const result = await sendEmail({
         from: 'a@x.dev',
-        to: Array.from({ length: 101 }, (_, i) => `u${i}@example.com`),
+        to: Array.from({ length: 51 }, (_, i) => `u${i}@example.com`),
         subject: 's',
         text: 't',
       });
       expect(result.ok).toBe(false);
       if (!result.ok && 'error' in result) {
         expect(result.error.code).toBe('INVALID_TO');
-        expect(result.error.message).toMatch(/too many recipients \(max 100, got 101\)/);
+        expect(result.error.message).toMatch(/too many recipients \(max 50, got 51\)/);
       }
       expect(harness.messages).toHaveLength(0);
     } finally {
@@ -625,7 +625,7 @@ describe('sendEmail (proxy round trip)', () => {
     }
   });
 
-  it('returns UPSTREAM_ERROR on proxy fetch failure', async () => {
+  it('returns OUTCOME_UNKNOWN on proxy fetch failure', async () => {
     const proxy = {
       async fetch() {
         throw new Error('network unreachable');
@@ -642,7 +642,7 @@ describe('sendEmail (proxy round trip)', () => {
     );
     expect(result.ok).toBe(false);
     if (!result.ok && 'error' in result) {
-      expect(result.error.code).toBe('UPSTREAM_ERROR');
+      expect(result.error.code).toBe('OUTCOME_UNKNOWN');
     }
   });
 
@@ -711,7 +711,7 @@ describe('sendEmail (proxy round trip)', () => {
     ['ok:false with neither error nor deliveries', { ok: false }],
     ['primitive number body', 42],
     ['primitive array body', []],
-  ])('returns UPSTREAM_ERROR (no throw) for malformed proxy response: %s', async (_, payload) => {
+  ])('returns OUTCOME_UNKNOWN (no throw) for malformed proxy response: %s', async (_, payload) => {
     const { proxy } = fakeProxy(() => ({ status: 200, body: payload }));
     const result = await withRuntimeEnv({ __VOID_PROXY: proxy, ...PROXY_ENV_KEYS }, () =>
       sendEmail({
@@ -724,7 +724,7 @@ describe('sendEmail (proxy round trip)', () => {
     );
     expect(result.ok).toBe(false);
     if (!result.ok && 'error' in result) {
-      expect(result.error.code).toBe('UPSTREAM_ERROR');
+      expect(result.error.code).toBe('OUTCOME_UNKNOWN');
     }
   });
 
@@ -781,12 +781,12 @@ describe('sendEmail (proxy round trip)', () => {
     );
     expect(result.ok).toBe(false);
     if (!result.ok && 'error' in result) {
-      expect(result.error.code).toBe('UPSTREAM_ERROR');
+      expect(result.error.code).toBe('OUTCOME_UNKNOWN');
       expect(result.error.message).toBe('email: proxy returned malformed response (status 200)');
     }
   });
 
-  it('returns UPSTREAM_ERROR when proxy responds with non-JSON', async () => {
+  it('returns OUTCOME_UNKNOWN when proxy responds with non-JSON', async () => {
     const proxy = {
       async fetch() {
         return new Response('not json', {
@@ -806,7 +806,7 @@ describe('sendEmail (proxy round trip)', () => {
     );
     expect(result.ok).toBe(false);
     if (!result.ok && 'error' in result) {
-      expect(result.error.code).toBe('UPSTREAM_ERROR');
+      expect(result.error.code).toBe('OUTCOME_UNKNOWN');
     }
   });
 
@@ -911,15 +911,15 @@ describe('sendEmail (proxy delivery list)', () => {
       'entry 0 names a recipient that was not requested',
     ],
   ])(
-    'returns UPSTREAM_ERROR for an ok:true response carrying %s',
+    'returns OUTCOME_UNKNOWN for an ok:true response carrying %s',
     async (_, to, payload, reason) => {
       const { proxy } = fakeProxy(() => ({ status: 200, body: payload }));
       const result = await send(proxy, to);
       expect(result).toEqual({
         ok: false,
         error: {
-          code: 'UPSTREAM_ERROR',
-          message: `email: proxy returned a malformed delivery list (${reason})`,
+          code: 'OUTCOME_UNKNOWN',
+          message: `email: proxy returned a malformed delivery list (${reason}); do not retry with a new idempotency key`,
           cause: payload,
         },
       });
@@ -1118,15 +1118,15 @@ describe('sendEmail (proxy mid-batch delivery list)', () => {
       `entry 1 is not ${SHAPE}`,
     ],
   ])(
-    'returns a top-level UPSTREAM_ERROR for a mid-batch response carrying %s',
+    'returns a top-level OUTCOME_UNKNOWN for a mid-batch response carrying %s',
     async (_, to, payload, reason) => {
       const { proxy } = fakeProxy(() => ({ status: 200, body: payload }));
       const result = await send(proxy, to);
       expect(result).toEqual({
         ok: false,
         error: {
-          code: 'UPSTREAM_ERROR',
-          message: `email: proxy returned a malformed delivery list (${reason})`,
+          code: 'OUTCOME_UNKNOWN',
+          message: `email: proxy returned a malformed delivery list (${reason}); do not retry with a new idempotency key`,
           cause: payload,
         },
       });
@@ -1266,5 +1266,71 @@ describe('sendEmail (sendInDev escape hatch)', () => {
       expect(result.error.message).toContain('`sendInDev: true`, which does not deliver');
       expect(result.error.message).toContain('`void dev` binds no send transport at all');
     }
+  });
+});
+
+describe('sendEmail platform idempotency', () => {
+  const options = { from: 'a@x.dev', to: 'b@y.dev', subject: 's', text: 't', sendInDev: true };
+  it('carries the key and preserves the operation and provider acceptance state', async () => {
+    const { proxy, calls } = fakeProxy(() => ({
+      status: 200,
+      body: {
+        ok: true,
+        operationId: 'emailact_1',
+        ids: [{ recipient: 'b@y.dev', messageId: 'cf-1', state: 'provider_accepted' }],
+      },
+    }));
+    const result = await withRuntimeEnv({ __VOID_PROXY: proxy, ...PROXY_ENV_KEYS }, () =>
+      sendEmail({ ...options, idempotencyKey: 'invoice:42' }),
+    );
+    expect(calls[0]?.body).toMatchObject({ idempotencyKey: 'invoice:42' });
+    expect(result).toMatchObject({
+      ok: true,
+      operationId: 'emailact_1',
+      ids: [{ state: 'provider_accepted' }],
+    });
+  });
+  it('keeps partial outcomes when the response also carries an overall error', async () => {
+    const { proxy } = fakeProxy(() => ({
+      status: 200,
+      body: {
+        ok: false,
+        operationId: 'emailact_2',
+        error: { code: 'OUTCOME_UNKNOWN', message: 'unknown' },
+        deliveries: [
+          {
+            recipient: 'b@y.dev',
+            ok: false,
+            state: 'outcome_unknown',
+            error: { code: 'OUTCOME_UNKNOWN', message: 'unknown' },
+          },
+        ],
+      },
+    }));
+    const result = await withRuntimeEnv({ __VOID_PROXY: proxy, ...PROXY_ENV_KEYS }, () =>
+      sendEmail(options),
+    );
+    expect(result).toMatchObject({
+      ok: false,
+      operationId: 'emailact_2',
+      deliveries: [{ state: 'outcome_unknown', error: { code: 'OUTCOME_UNKNOWN' } }],
+    });
+  });
+  it('refuses an invalid key before transport and rejects unsupported native deduplication', async () => {
+    const send = vi.fn();
+    for (const idempotencyKey of ['', 'a b', 'x'.repeat(129)]) {
+      const result = await withRuntimeEnv({ SEND_EMAIL: { send } }, () =>
+        sendEmail({ ...options, idempotencyKey }),
+      );
+      expect(result).toMatchObject({ ok: false, error: { code: 'MIME_ERROR' } });
+    }
+    const result = await withRuntimeEnv({ SEND_EMAIL: { send } }, () =>
+      sendEmail({ ...options, idempotencyKey: 'invoice:42' }),
+    );
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: 'MIME_ERROR', message: expect.stringContaining('native Cloudflare') },
+    });
+    expect(send).not.toHaveBeenCalled();
   });
 });

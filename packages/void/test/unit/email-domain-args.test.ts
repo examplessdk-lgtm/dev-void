@@ -63,7 +63,7 @@ describe('parseEmailArgs — domain group', () => {
 
   it('errors on a missing or unknown domain verb', () => {
     expect(() => parseEmailArgs(['domain'])).toThrow(
-      'email: Usage: void email domain <add|status|list|sync|remove> [<domain>] [--project <name>].',
+      'email: Usage: void email domain <add|status|list|sync|rotate-secret|remove> [<domain>] [--project <name>].',
     );
     expect(() => parseEmailArgs(['domain', 'frobnicate', 'acme.com'])).toThrow(
       /Usage: void email domain/,
@@ -71,7 +71,7 @@ describe('parseEmailArgs — domain group', () => {
   });
 
   it('errors when a domain verb is missing its domain', () => {
-    for (const verb of ['add', 'status', 'sync', 'remove']) {
+    for (const verb of ['add', 'status', 'sync', 'rotate-secret', 'remove']) {
       expect(() => parseEmailArgs(['domain', verb])).toThrow(
         `email: Usage: void email domain ${verb} <domain> [--project <name>].`,
       );

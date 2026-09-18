@@ -9,6 +9,8 @@ import {
   test,
   vi,
 } from 'vite-plus/test';
+import { emailProjectControls } from '../../src/email/admission-schema.ts';
+import { setProjectEmailLimits } from '../../src/email/admission.ts';
 import {
   EMAIL_DOMAIN_MANAGEMENT_SETTING,
   EMAIL_RECIPIENT_POLICY_MIRROR_KEY,
@@ -163,12 +165,11 @@ describe('operator email recipient policy', () => {
     expect(recorded[0]).toMatchObject({ action: 'email/policy', status: 'failed' });
   });
 
-  test('a mirror write failure commits the policy but leaves the proxy on the previous, stricter policy until republished', async () => {
+  test('a display mirror failure leaves committed policy authoritative and repairs on read', async () => {
     await req('/email/policy', { mode: 'domains', domains: 'corp.example' });
     const put = vi.spyOn(env.ROUTING, 'put').mockRejectedValueOnce(new Error('kv down'));
     const response = await req('/email/policy', { mode: 'any' });
-    expect(response.status).toBe(503);
-    expect(await response.json()).toMatchObject({ error: 'mirror_failed' });
+    expect(response.status).toBe(200);
     expect(await setting(EMAIL_RECIPIENT_POLICY_SETTING)).toEqual({ mode: 'any', domains: [] });
     expect(await env.ROUTING.get(EMAIL_RECIPIENT_POLICY_MIRROR_KEY)).toBe(
       JSON.stringify({ mode: 'domains', domains: ['corp.example'] }),
@@ -180,30 +181,33 @@ describe('operator email recipient policy', () => {
     );
   });
 
-  test('a failed tightening changes nothing', async () => {
+  test('a failed display mirror write does not undo a tighter policy', async () => {
     await req('/email/policy', { mode: 'any' });
     const put = vi.spyOn(env.ROUTING, 'put').mockRejectedValueOnce(new Error('kv down'));
     const response = await req('/email/policy', { mode: 'verified' });
-    expect(response.status).toBe(503);
-    expect(await setting(EMAIL_RECIPIENT_POLICY_SETTING)).toEqual({ mode: 'any', domains: [] });
+    expect(response.status).toBe(200);
+    expect(await setting(EMAIL_RECIPIENT_POLICY_SETTING)).toEqual({
+      mode: 'verified',
+      domains: [],
+    });
     expect(await env.ROUTING.get(EMAIL_RECIPIENT_POLICY_MIRROR_KEY)).toBe(
       JSON.stringify({ mode: 'any', domains: [] }),
     );
     put.mockRestore();
   });
 
-  test('publishes with exactly one KV write', async () => {
+  test('publishes display hints without deleting policy keys', async () => {
     const put = vi.spyOn(env.ROUTING, 'put');
     const del = vi.spyOn(env.ROUTING, 'delete');
 
     expect((await req('/email/policy', { mode: 'domains', domains: 'a.example' })).status).toBe(
       200,
     );
-    expect(put).toHaveBeenCalledTimes(1);
+    expect(put).toHaveBeenCalled();
     expect(del).not.toHaveBeenCalled();
 
     expect((await req('/email/policy', { mode: 'verified' })).status).toBe(200);
-    expect(put).toHaveBeenCalledTimes(2);
+    expect(put.mock.calls.length).toBeGreaterThan(1);
     expect(del).not.toHaveBeenCalled();
   });
 
@@ -214,7 +218,7 @@ describe('operator email recipient policy', () => {
       mode: 'domains',
       domains: 'b.example,c.example',
     });
-    expect(response.status).toBe(503);
+    expect(response.status).toBe(200);
     expect(await setting(EMAIL_RECIPIENT_POLICY_SETTING)).toEqual({
       mode: 'domains',
       domains: ['b.example', 'c.example'],
@@ -236,7 +240,7 @@ describe('operator email recipient policy', () => {
       mode: 'domains',
       domains: 'a.example,b.example',
     });
-    expect(response.status).toBe(503);
+    expect(response.status).toBe(200);
     expect(await setting(EMAIL_RECIPIENT_POLICY_SETTING)).toEqual({
       mode: 'domains',
       domains: ['a.example', 'b.example'],
@@ -305,11 +309,10 @@ describe('operator email settings', () => {
 });
 
 describe('operator email limits', () => {
-  test('sets both caps by project slug and reports the previous overrides', async () => {
+  test('previews and commits both limits in authoritative project controls', async () => {
     const owner = await createTestUser(env.db, 'limit-owner');
     const project = await createTestProject(env.db, owner.id, 'limit-project');
-    await env.ROUTING.put(`email-limit:${project.id}`, '500');
-
+    await setProjectEmailLimits(env.db, project.id, { monthly: 500 });
     const preview = await req(`/email/projects/${project.slug}/limit`, {
       monthly: '1000',
       burst: '25',
@@ -318,88 +321,58 @@ describe('operator email limits', () => {
     expect(await preview.json()).toMatchObject({
       dryRun: true,
       action: 'email.limit.set',
-      target: { projectId: project.id, slug: project.slug, monthly: 1000, burst: 25 },
-      previous: { monthly: 500, burst: null },
+      target: { projectId: project.id, monthly: 1000, burst: 25 },
+      previous: { monthly: 500, burst: 10 },
     });
-    expect(await env.ROUTING.get(`email-limit:${project.id}`)).toBe('500');
-    expect(await env.ROUTING.get(`email-burst-limit:${project.id}`)).toBeNull();
-
     const response = await req(`/email/projects/${project.slug}/limit`, {
       monthly: '1000',
       burst: '25',
     });
     expect(response.status).toBe(200);
-    expect(await env.ROUTING.get(`email-limit:${project.id}`)).toBe('1000');
-    expect(await env.ROUTING.get(`email-burst-limit:${project.id}`)).toBe('25');
-    const recorded = await events();
-    expect(recorded).toHaveLength(1);
-    expect(JSON.parse(recorded[0]!.target)).toEqual({
-      project: project.slug,
-      monthly: '1000',
-      burst: '25',
-    });
-  });
-
-  test('reports a partial cap write with 207 and a failed audit event', async () => {
-    const owner = await createTestUser(env.db, 'limit-partial-owner');
-    const project = await createTestProject(env.db, owner.id, 'limit-partial');
-    const burstKey = `email-burst-limit:${project.id}`;
-    await env.ROUTING.put(burstKey, '3');
-    const originalPut = env.ROUTING.put.bind(env.ROUTING);
-    vi.spyOn(env.ROUTING, 'put').mockImplementation(async (key, value, options) => {
-      if (key === burstKey) {
-        throw new Error('burst storage down');
-      }
-      return originalPut(key, value, options);
-    });
-    vi.spyOn(console, 'error').mockImplementation(() => {});
-
-    const response = await req(`/email/projects/${project.id}/limit`, {
-      monthly: '1000',
-      burst: '25',
-    });
-    expect(response.status).toBe(207);
-    expect(await response.json()).toMatchObject({
-      ok: false,
-      partial: true,
-      applied: ['monthly'],
-      failed: ['burst'],
-    });
-    expect(await env.ROUTING.get(`email-limit:${project.id}`)).toBe('1000');
-    expect(await env.ROUTING.get(burstKey)).toBe('3');
+    const control = (
+      await env.db
+        .select()
+        .from(emailProjectControls)
+        .where(eq(emailProjectControls.project_id, project.id))
+    )[0];
+    expect(control).toMatchObject({ monthly_limit: 1000, burst_limit: 25 });
     expect((await events()).at(-1)).toMatchObject({
-      action: `email/projects/${project.id}/limit`,
-      status: 'failed',
+      action: `email/projects/${project.slug}/limit`,
+      status: 'success',
     });
   });
 
-  test('returns kv_failed when routing storage refuses every cap', async () => {
-    const owner = await createTestUser(env.db, 'limit-failed-owner');
-    const project = await createTestProject(env.db, owner.id, 'limit-failed');
+  test('a KV failure cannot partially apply or undo database limits', async () => {
+    const owner = await createTestUser(env.db, 'limit-kv-owner');
+    const project = await createTestProject(env.db, owner.id, 'limit-kv');
     vi.spyOn(env.ROUTING, 'put').mockRejectedValue(new Error('storage down'));
-    vi.spyOn(console, 'error').mockImplementation(() => {});
-
     const response = await req(`/email/projects/${project.id}/limit`, {
       monthly: '1000',
       burst: '25',
     });
-    expect(response.status).toBe(502);
-    expect(await response.json()).toMatchObject({
-      error: 'kv_failed',
-      details: { failed: ['monthly', 'burst'] },
-    });
-    expect(await env.ROUTING.get(`email-limit:${project.id}`)).toBeNull();
-    expect(await env.ROUTING.get(`email-burst-limit:${project.id}`)).toBeNull();
+    expect(response.status).toBe(200);
+    const control = (
+      await env.db
+        .select()
+        .from(emailProjectControls)
+        .where(eq(emailProjectControls.project_id, project.id))
+    )[0];
+    expect(control).toMatchObject({ monthly_limit: 1000, burst_limit: 25 });
   });
 
-  test('sets one cap by project id and leaves the other override untouched', async () => {
+  test('sets one cap without changing the other', async () => {
     const owner = await createTestUser(env.db, 'limit-owner-2');
     const project = await createTestProject(env.db, owner.id, 'limit-project-2');
-    await env.ROUTING.put(`email-burst-limit:${project.id}`, '3');
+    await setProjectEmailLimits(env.db, project.id, { burst: 3 });
     const response = await req(`/email/projects/${project.id}/limit`, { monthly: '42' });
     expect(response.status).toBe(200);
-    expect(await env.ROUTING.get(`email-limit:${project.id}`)).toBe('42');
-    expect(await env.ROUTING.get(`email-burst-limit:${project.id}`)).toBe('3');
+    const control = (
+      await env.db
+        .select()
+        .from(emailProjectControls)
+        .where(eq(emailProjectControls.project_id, project.id))
+    )[0];
+    expect(control).toMatchObject({ monthly_limit: 42, burst_limit: 3 });
   });
 
   test.each([
@@ -409,16 +382,21 @@ describe('operator email limits', () => {
     ['a negative', { monthly: '-5' }],
     ['a value over the cap', { monthly: '1000001' }],
   ])('rejects %s with 400', async (_label, body) => {
-    const owner = await createTestUser(env.db, 'limit-owner-3');
-    const project = await createTestProject(env.db, owner.id, 'limit-project-3');
+    const owner = await createTestUser(env.db, 'limit-invalid-owner');
+    const project = await createTestProject(env.db, owner.id, 'limit-invalid');
     const response = await req(`/email/projects/${project.id}/limit`, body);
     expect(response.status).toBe(400);
-    expect(await env.ROUTING.get(`email-limit:${project.id}`)).toBeNull();
-    expect(await env.ROUTING.get(`email-burst-limit:${project.id}`)).toBeNull();
+    expect(
+      await env.db
+        .select()
+        .from(emailProjectControls)
+        .where(eq(emailProjectControls.project_id, project.id)),
+    ).toHaveLength(0);
   });
 
   test('answers 404 for an unknown project', async () => {
-    const response = await req('/email/projects/no-such-project/limit', { monthly: '10' });
-    expect(response.status).toBe(404);
+    expect((await req('/email/projects/no-such-project/limit', { monthly: '10' })).status).toBe(
+      404,
+    );
   });
 });

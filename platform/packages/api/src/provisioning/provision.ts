@@ -48,6 +48,8 @@ export async function provisionBindings(
   platform: {
     /** Project slug. Framework reads it as `__VOID_PROJECT_SLUG`. */
     projectSlug: string;
+    /** Immutable deployment identity for signed inbound email receipts. */
+    deploymentId?: string;
     /**
      * Platform mail domain for this environment (`EMAIL_SENDER_DOMAIN` on
      * the api worker — `mail.void.cloud` in production,
@@ -177,6 +179,16 @@ export async function provisionBindings(
   // Emitted after the user's vars in the upload array, so it also stops
   // being shadowable — see `reserved-bindings.ts`.
   bindings.push({ type: 'plain_text', name: '__VOID_PROJECT_SLUG', text: platform.projectSlug });
+  if (manifest.emailProtocolVersion === 1) {
+    if (!platform.deploymentId) {
+      throw new Error('email delivery requires a deployment identity');
+    }
+    bindings.push({
+      type: 'plain_text',
+      name: '__VOID_EMAIL_DEPLOYMENT_ID',
+      text: platform.deploymentId,
+    });
+  }
   if (platform.emailSenderDomain) {
     bindings.push({
       type: 'plain_text',

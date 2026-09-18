@@ -8117,6 +8117,8 @@ async function runFullDeploy(
     isFrameworkMode,
     {
       bindings: liveConfig ? { ...effectiveBindings, needsLive: true } : effectiveBindings,
+      hasEmailHandlers:
+        !isFrameworkMode && routeScan.email !== undefined && hasEmailHandlers(routeScan.email),
       migrations: validatedMigrations,
       schedules,
       ssr: isSsr || hasRoutes || hasMiddleware || hasWebSockets || authEnabled,

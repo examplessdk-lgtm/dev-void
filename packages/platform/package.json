@@ -18,6 +18,10 @@
     "./installer": {
       "types": "./dist/installer.d.mts",
       "import": "./dist/installer.mjs"
+    },
+    "./email-protocol": {
+      "types": "./dist/email-protocol.d.mts",
+      "import": "./dist/email-protocol.mjs"
     }
   },
   "publishConfig": {

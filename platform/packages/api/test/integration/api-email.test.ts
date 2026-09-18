@@ -40,6 +40,12 @@ import {
 import { signConfirmToken } from '../../src/auth/confirm-token.ts';
 import { revokeOwnerVerifiedDestinationsForUserChange } from '../../src/db.ts';
 import * as dbModule from '../../src/db.ts';
+import { emailMonthlyUsage } from '../../src/email/admission-schema.ts';
+import {
+  recordEmailReceipt,
+  setProjectEmailLimits,
+  setProjectEmailSuspended,
+} from '../../src/email/admission.ts';
 import {
   hashSendContent,
   PLATFORM_INTERNAL_EMAIL_SENTINEL,
@@ -1137,92 +1143,6 @@ describe('email-allowlist KV sync', () => {
     expect(await readAllowlist(project.id)).toEqual(['keep@example.com']);
   });
 
-  it('tightens the mirror while the revoked row is still present', async () => {
-    // Ordering is the whole point. The mirror is what the proxy enforces, and
-    // the row is what a retry would re-derive that mirror from. So the write
-    // lands FIRST, and it must already EXCLUDE the row being revoked —
-    // `getVerifiedEmailDestinationsByProjectId` still returns it at that
-    // moment, so a plain re-sync would write the revoked address straight back.
-    const user = await createTestUser(env.db);
-    const project = await createTestProject(env.db, user.id);
-    await seedVerifiedPair(project.id);
-
-    const observed: Array<{ written: Array<string> | null; rowIds: Array<string> }> = [];
-    observeAllowlistWrites(project.id, async (written) => {
-      const rows = await rowsFor(project.id);
-      observed.push({ written, rowIds: rows.map((r) => r.id).sort() });
-    });
-
-    mockCfApi();
-    const res = await removeDestination(project.id, 'edst_v2', user.jwt);
-    expect(res.status).toBe(200);
-
-    // Two writes. The tighten lands while BOTH rows are still present and
-    // already excludes the revoked one; the re-derive after the delete sees
-    // the row gone and agrees.
-    expect(observed).toEqual([
-      { written: ['keep@example.com'], rowIds: ['edst_v1', 'edst_v2'] },
-      { written: ['keep@example.com'], rowIds: ['edst_v1'] },
-    ]);
-    expect(await readAllowlist(project.id)).toEqual(['keep@example.com']);
-    expect(await rowsFor(project.id)).toHaveLength(1);
-  });
-
-  it('keeps the row and fails the revoke when the mirror write fails', async () => {
-    const user = await createTestUser(env.db);
-    const project = await createTestProject(env.db, user.id);
-    await seedVerifiedPair(project.id);
-    breakAllowlistWrites(project.id);
-
-    const fetchMock = mockCfApi();
-    const res = await removeDestination(project.id, 'edst_v2', user.jwt);
-
-    // Non-2xx, and nothing destructive ran: DELETE stays retryable. Dropping
-    // the row first and swallowing the KV error would strand
-    // `gone@example.com` in the allowlist forever — no row left for a retry
-    // to re-derive the mirror from, so the proxy keeps delivering to a
-    // revoked recipient.
-    expect(res.status).toBe(503);
-    expect((await rowsFor(project.id)).map((r) => r.id).sort()).toEqual(['edst_v1', 'edst_v2']);
-    expect(await readAllowlist(project.id)).toEqual(['keep@example.com', 'gone@example.com']);
-    expect(cfCalls(fetchMock, 'DELETE', '/email/routing/addresses/')).toHaveLength(0);
-  });
-
-  it('keeps the row when clearing the last address fails', async () => {
-    // Same inversion on the delete-on-empty branch of the mirror sync.
-    const user = await createTestUser(env.db);
-    const project = await createTestProject(env.db, user.id);
-    await env.db.insert(emailDestinations).values({
-      id: 'edst_v1',
-      project_id: project.id,
-      address: 'only@example.com',
-      status: 'verified',
-      cf_destination_id: 'cf-tag-only',
-      verified_at: '2026-04-29T00:00:00Z',
-    });
-    await env.ROUTING.put(`email-allowlist:${project.id}`, JSON.stringify(['only@example.com']));
-    breakAllowlistWrites(project.id);
-
-    mockCfApi();
-    const res = await removeDestination(project.id, 'edst_v1', user.jwt);
-
-    expect(res.status).toBe(503);
-    expect(await rowsFor(project.id)).toHaveLength(1);
-    expect(await readAllowlist(project.id)).toEqual(['only@example.com']);
-  });
-
-  // -------------------------------------------------------------------------
-  // Self-heal: the listing repairs a mirror a best-effort write lost.
-  //
-  // `syncProjectAllowlistKvBestEffort` swallows a KV failure that lands AFTER
-  // Postgres already committed `verified`, and nothing else re-derives the
-  // key — the confirm route early-returns on an already-verified row, the
-  // hourly `scheduled()` backfill touches only `email-slug:`, and no deploy
-  // hook calls the sync. The proxy reads a missing key as deny-all, so the
-  // owner is left looking at a `verified` destination that every send
-  // rejects as unverified, with no user-visible cause.
-  // -------------------------------------------------------------------------
-
   it('repairs a mirror a swallowed write left empty, on the next listing', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id);
@@ -1414,166 +1334,7 @@ describe('email-allowlist KV sync', () => {
       env,
     );
   }
-
-  it('does not let a confirm click that lands mid-revoke outlive the deleted row', async () => {
-    const { projectId, jwt, token } = await seedRevokeVsConfirm();
-    expect(await env.ROUTING.get(`email-allowlist:${projectId}`)).toBeNull();
-
-    // Park the revoke AFTER its row snapshot (`pending`) and BEFORE its row
-    // delete — the reference count is the first thing it awaits past the
-    // snapshot, and it sits next to the upstream Cloudflare call, the widest
-    // window in the route. Run the click to completion in there.
-    const original = dbModule.countProjectsUsingDestination;
-    let clicked = false;
-    vi.spyOn(dbModule, 'countProjectsUsingDestination').mockImplementation(async (db, tag) => {
-      if (!clicked) {
-        clicked = true;
-        const res = await confirmClick(token);
-        expect(res.status).toBe(200);
-        // The click flipped the row and derived the mirror from it.
-        expect(await readAllowlist(projectId)).toEqual(['shared@example.com']);
-      }
-      return original(db, tag);
-    });
-
-    const fetchMock = mockCfApi();
-    const res = await removeDestination(projectId, 'edst_pend', jwt);
-    expect(res.status).toBe(200);
-    expect(clicked).toBe(true);
-
-    // The row is gone, the shared Cloudflare address was (correctly) kept for
-    // the sibling — and the mirror must not keep granting the address.
-    expect(await rowsFor(projectId)).toHaveLength(0);
-    expect(cfCalls(fetchMock, 'DELETE', '/email/routing/addresses/')).toHaveLength(0);
-    expect(await readAllowlist(projectId)).toEqual([]);
-  });
-
-  it('does not let a sibling row confirmed mid-revoke write the revoked address back', async () => {
-    // Same window, other row. The snapshot says `verified`, so the tighten
-    // ran and excluded this row — but a click on ANOTHER row of the project
-    // re-derives the whole mirror from rows that still include this one,
-    // because the delete has not happened yet.
-    const user = await createTestUser(env.db);
-    const project = await createTestProject(env.db, user.id);
-    await env.db.insert(emailDestinations).values([
-      {
-        id: 'edst_gone',
-        project_id: project.id,
-        address: 'gone@example.com',
-        status: 'verified',
-        cf_destination_id: 'cf-tag-gone',
-        verified_at: '2026-04-29T00:00:00Z',
-      },
-      {
-        id: 'edst_other',
-        project_id: project.id,
-        address: 'other@example.com',
-        status: 'pending',
-        cf_destination_id: 'cf-tag-other',
-        verified_at: null,
-        verification_source: 'platform',
-      },
-    ]);
-    await env.ROUTING.put(`email-allowlist:${project.id}`, JSON.stringify(['gone@example.com']));
-    const now = Math.floor(Date.now() / 1000);
-    const token = await signConfirmToken(
-      {
-        v: 1,
-        pid: project.id,
-        did: 'edst_other',
-        addr: 'other@example.com',
-        iat: now,
-        exp: now + 24 * 60 * 60,
-      },
-      env.JWT_SECRET,
-    );
-
-    const original = dbModule.countProjectsUsingDestination;
-    let clicked = false;
-    vi.spyOn(dbModule, 'countProjectsUsingDestination').mockImplementation(async (db, tag) => {
-      if (!clicked) {
-        clicked = true;
-        // The tighten already ran: the mirror no longer grants the revoked row.
-        expect(await readAllowlist(project.id)).toEqual([]);
-        expect((await confirmClick(token)).status).toBe(200);
-        // ...and the sibling's click just wrote it back.
-        expect((await readAllowlist(project.id)).sort()).toEqual([
-          'gone@example.com',
-          'other@example.com',
-        ]);
-      }
-      return original(db, tag);
-    });
-
-    mockCfApi();
-    expect((await removeDestination(project.id, 'edst_gone', user.jwt)).status).toBe(200);
-    expect(clicked).toBe(true);
-    expect((await rowsFor(project.id)).map((r) => r.id)).toEqual(['edst_other']);
-    expect(await readAllowlist(project.id)).toEqual(['other@example.com']);
-  });
-
-  it('heals a click whose mirror write lands after the revoke, on the next listing', async () => {
-    // The residual. Postgres and KV are written separately and KV has no
-    // compare-and-swap, so a click that derived its mirror while the row was
-    // still verified can land its write AFTER the revoke's own. Pinned here
-    // so the bound is explicit: the grant is stale until this project's next
-    // listing, which re-derives the mirror from the rows and drops it.
-    const { projectId, jwt, token } = await seedRevokeVsConfirm();
-    const key = `email-allowlist:${projectId}`;
-
-    // Hold the click's mirror write (the only write that grants the address)
-    // until the revoke has finished everything it does.
-    const originalPut = env.ROUTING.put.bind(env.ROUTING);
-    let releasePut!: () => void;
-    const putReleased = new Promise<void>((resolve) => {
-      releasePut = resolve;
-    });
-    let putStarted!: () => void;
-    const putHeld = new Promise<void>((resolve) => {
-      putStarted = resolve;
-    });
-    vi.spyOn(env.ROUTING, 'put').mockImplementation((async (
-      k: string,
-      value: string | ArrayBuffer | ArrayBufferView | ReadableStream,
-      options?: KVNamespacePutOptions,
-    ) => {
-      if (k === key && String(value).includes('shared@example.com')) {
-        putStarted();
-        await putReleased;
-      }
-      return originalPut(k, value as never, options as never);
-    }) as typeof env.ROUTING.put);
-
-    const original = dbModule.countProjectsUsingDestination;
-    let click: Promise<Response> | null = null;
-    vi.spyOn(dbModule, 'countProjectsUsingDestination').mockImplementation(async (db, tag) => {
-      if (!click) {
-        click = confirmClick(token);
-        await putHeld;
-      }
-      return original(db, tag);
-    });
-
-    mockCfApi();
-    const res = await removeDestination(projectId, 'edst_pend', jwt);
-    expect(res.status).toBe(200);
-    expect(await rowsFor(projectId)).toHaveLength(0);
-
-    releasePut();
-    expect((await click!).status).toBe(200);
-    // Lost update: the click's write was last, and no row backs it.
-    expect(await readAllowlist(projectId)).toEqual(['shared@example.com']);
-
-    vi.restoreAllMocks();
-    mockCfApi();
-    expect((await listDestinations(projectId, jwt)).status).toBe(200);
-    expect(await readAllowlist(projectId)).toEqual([]);
-  });
 });
-
-// ---------------------------------------------------------------------------
-// Per-project verification: Option C (inherit) vs Option B (re-verify)
-// ---------------------------------------------------------------------------
 
 describe('per-project verification (Option C + Option B)', () => {
   it("Option C: the owner's own CF-verified address is inherited, with no platform email", async () => {
@@ -2553,14 +2314,22 @@ describe('GET /projects/:id/email/usage', () => {
     });
   });
 
-  it('reads the month counters, the per-project limit override, and the suspend flag', async () => {
+  it('reads the PostgreSQL month counter, limit override, and suspend flag', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id);
     const month = monthBucket();
-    await env.ROUTING.put(`email-sent:${project.id}:${month}`, '7');
-    await env.ROUTING.put(`email-recv:${project.id}:${month}`, '3');
-    await env.ROUTING.put(`email-limit:${project.id}`, '50');
-    await env.ROUTING.put(`email-suspended:${project.id}`, '1');
+    await env.db
+      .insert(emailMonthlyUsage)
+      .values({ project_id: project.id, month, recipient_attempts: 7 });
+    for (let n = 0; n < 3; n++) {
+      await recordEmailReceipt(env.db, {
+        receiptId: `receipt_${n}`,
+        projectId: project.id,
+        status: 'received',
+      });
+    }
+    await setProjectEmailLimits(env.db, project.id, { monthly: 50 });
+    await setProjectEmailSuspended(env.db, project.id, true);
 
     const res = await usage(project.id, user.jwt);
     expect(res.status).toBe(200);
@@ -2591,10 +2360,12 @@ describe('GET /projects/:id/email/usage', () => {
     expect(body.remaining).toBe(200);
   });
 
-  it('clamps remaining at zero once the limit is exceeded', async () => {
+  it('clamps remaining at zero once PostgreSQL usage exceeds the limit', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id);
-    await env.ROUTING.put(`email-sent:${project.id}:${monthBucket()}`, '500');
+    await env.db
+      .insert(emailMonthlyUsage)
+      .values({ project_id: project.id, month: monthBucket(), recipient_attempts: 500 });
 
     const body = (await (await usage(project.id, user.jwt)).json()) as { remaining: number };
     expect(body.remaining).toBe(0);
@@ -2632,17 +2403,14 @@ describe('GET /projects/:id/email/logs', () => {
     expect((await logs(project.id, intruder.jwt)).status).toBe(403);
   });
 
-  it('returns an empty list marked pending until AE-backed storage is wired', async () => {
+  it('returns an empty durable ledger for a project with no email activity', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id);
 
     const res = await logs(project.id, user.jwt);
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { logs: Array<unknown>; pending: boolean };
+    const body = (await res.json()) as { logs: Array<unknown> };
     expect(body.logs).toEqual([]);
-    // The marker is the contract consumers branch on — dropping it would
-    // make "no logs yet" indistinguishable from "this project sent none".
-    expect(body.pending).toBe(true);
   });
 });
 
