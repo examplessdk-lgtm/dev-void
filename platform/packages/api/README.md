@@ -95,11 +95,18 @@ drizzle/
   - project-scoped CI deploy credentials (`GET|POST /projects/:id/tokens`,
     `POST /projects/:id/tokens/:credentialId/renew`, and
     `DELETE /projects/:id/tokens/:credentialId`)
+  - project members and invitations
   - PostgreSQL and MySQL project database provisioning/update
   - `POST /projects/:id/prerender-token` — mint a five-minute, project-scoped token accepted only by the remote-binding proxy
-  - `/projects/:id/github` — connect/inspect/update/disconnect the GitHub repo (POST/GET/PATCH/DELETE; auth + ownership)
+  - `/projects/:id/github` — connect/inspect/update/disconnect the GitHub repo (POST/GET/PATCH/DELETE; readers may inspect, owners and project administrators may mutate)
   - `/projects/:id/email/*` — monthly usage, and the verified-recipient list the project may send to (`GET|POST|DELETE`). Adding a recipient triggers a verification email; the address only becomes sendable once the recipient consents. See [Email](#email).
 - `GET /usage`
+
+Project authorization resolves the implicit owner from `projects.user_id` and
+shared access from `project_members`. Readers can inspect, collaborators can
+deploy and manage deploy prerequisites, project administrators additionally
+manage domains, email, GitHub, and membership, and only the owner can delete.
+The owner's plan, quota, and suspension state govern every role's work.
 
 ### Deploy on GitHub
 
@@ -125,6 +132,7 @@ HMAC. See [Platform Development](../../../docs/guide/platform-development.md#opt
 - `POST /internal/revalidate/:projectId`
 - `POST /internal/resolve-resource/:projectId`
 - `POST /internal/resolve-worker/:projectId` — resolve the active deployment's versioned worker; static active deployments report that no worker exists
+- `POST /internal/verify-owner/:projectId` — legacy URL that live-checks the caller's project deploy capability
 
 ### Operator API
 
@@ -150,6 +158,12 @@ caching.
 retained receipt and recipient outcomes, with `page` and `limit` pagination.
 Accept a current project ID or slug; deleted projects remain inspectable by ID
 until ledger retention expires. Responses exclude message content and credentials.
+
+`POST /projects/:id/owner` previews or applies an ownership transfer through the
+same service used by the browser admin UI. The database transaction updates the
+owner and ownership periods atomically; usage counters and routing converge
+afterward, and retries repair an already-committed transfer without moving its
+billing boundary.
 
 Managed Sandbox disablement uses `void platform system sandbox-drain`. The
 preview inventories bounded pages of deployment manifests and container
@@ -211,7 +225,7 @@ Dashboard auth uses the same JWT model, stored in the `void_token` cookie.
 
 ### Worker deploys
 
-1. validate ownership and deploy limits
+1. validate the actor's deploy capability and the owner's deploy limits
 2. provision bindings and queues from the manifest
 3. upload worker modules and assets to CF via `assets-upload-session`
 4. also mirror assets to platform `STATIC_ASSETS`/`STATIC_ASSETS_R2` and write a serving manifest to `ROUTING` (safety net for CF asset dedupe poisoning — see `meta/design-docs/0066`)
@@ -231,7 +245,7 @@ Dashboard auth uses the same JWT model, stored in the `void_token` cookie.
 
 Connect a repo through a GitHub App; a `git push` then builds and deploys automatically.
 
-- **Connect**: the user installs the App (`/github/install-url` -> `/github/callback`) and links a repo to a project via `/projects/:id/github`. Installation-to-user mapping lives in `github_installations`; the OAuth callback backfills it on sign-in.
+- **Connect**: an owner or project administrator installs or joins the App (`/github/install-url` -> `/github/callback`) and links a repo they can access via `/projects/:id/github`. The connection records that authorizing user and is invalidated if they lose that level of project access. Installation-to-user mapping lives in `github_installations`; the OAuth callback backfills it on sign-in.
 - **Trigger**: `POST /webhooks/github` verifies the HMAC signature, then on `push` writes a `builds` row and pokes the `BuildScheduler`.
 - **Executors** (per `github_connections.build_executor`, default `container`):
   - **CF Container** — `BuildScheduler` (global, alarm-driven queue with per-tier concurrency from `tiers.ts`) atomically claims a build and starts a container on one of two classes by the owner's plan: `BuildManager` (free, `standard-3` = 2 vCPU / 8 GiB / 16 GB) or `BuildManagerLarge` (paid, `standard-4` = 4 vCPU / 12 GiB / 20 GB, Cloudflare's max per-container size). The class is routed by the persisted `builds.instance_type` (`standard-3` / `standard-4`, derived from the plan by `getBuildInstanceType`) via `buildManagerNamespace` in `build-namespace.ts`; cancel and reaper paths use the same picker, so they address the same class the build started on. `BuildManagerLarge` extends `BuildManager`, which extends `@cloudflare/containers` `Container`, enforces a timeout alarm, and persists status to Postgres via Hyperdrive.
@@ -271,7 +285,7 @@ Only reservations that never started can be cancelled and refunded. Started or u
 
 `/admin/email/:projectId` displays current-month recipient attempts and inbound receipts, effective limits, sender identity, verified destinations, and custom-domain readiness. Operators can suspend email, change monthly or burst limits, revoke destination consent, and manage domain operations. A blank limit restores the default.
 
-Destinations are added through the owner-facing `POST /projects/:id/email/destinations` consent flow. Operators cannot consent on a recipient’s behalf. Incomplete provider operations retain their operation ID and outcome for reconciliation or audited recovery; the page must not report them as completed.
+Destinations are added through the owner/project-administrator `POST /projects/:id/email/destinations` consent flow. Operators cannot consent on a recipient’s behalf. Incomplete provider operations retain their operation ID and outcome for reconciliation or audited recovery; the page must not report them as completed.
 
 Every admin write is additionally same-origin checked in `admin/middleware/auth.ts` before authentication runs; a `POST` whose `Origin` (or, failing that, `Referer`) does not match the request host is rejected with `403`, as is one that carries neither.
 

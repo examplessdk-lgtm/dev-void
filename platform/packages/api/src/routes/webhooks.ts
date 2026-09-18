@@ -1,4 +1,4 @@
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNull, or, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import type { Context } from 'hono';
 import {
@@ -1458,21 +1458,8 @@ export async function handleVerifiedGitHubWebhook(
         // redemption) or the redemption commits first (this post-lock re-read sees
         // its freshly-inserted connection and severs it).
         //
-        // CONNECTIONS + install OWNER pointers are OAUTH-backed: every
-        // `github_connections` row has exactly ONE insert site
-        // (`createGitHubConnection`), reached only through the connect gate after
-        // the connecting user's IMMUTABLE oauth GitHub id is proven — the OWNER
-        // branch adopts the install under the owner's own proven oauth id, the
-        // MEMBER branch requires (Threat-L1) `grant.githubAccountId === the
-        // caller's own linked GitHub id`. So a connection is "X-backed" — and must
-        // be severed when GitHub id X leaves the org — IFF the connecting user's
-        // oauth id is X IFF `getUserByOAuthAccount('github', X)` returns that user.
-        // That single user is therefore the SOLE driver of connection-severing +
-        // owner-clearing: its oauth is X, so ALL its org connections and
-        // owned-installs are X-backed → severing across every orgInstallId is
-        // correct with no residual. When it is null there is simply no X-backed
-        // connection to sever (the pre-mint hole) — the tombstone written above
-        // already fail-closes any later X-keyed artifact redemption.
+        // Connections record the owner/admin whose OAuth proof authorized them.
+        // Legacy rows have no provenance and retain the old owner-scoped behavior.
         const removedUser = await getUserByOAuthAccount(
           txDb,
           'github',
@@ -1485,28 +1472,29 @@ export async function handleVerifiedGitHubWebhook(
           instance_type: string | null;
         }> = [];
         if (removedUser) {
-          const projectIds = (await getOwnedProjectsByUserId(txDb, removedUser.id)).map(
+          const ownedProjectIds = (await getOwnedProjectsByUserId(txDb, removedUser.id)).map(
             (project) => project.id,
           );
-          if (projectIds.length > 0) {
-            // Single-table FOR UPDATE on githubConnections (NOT joined to
-            // projects) keeps the lock scope identical to the installation path;
-            // owner scoping is applied via `project_id IN (projectIds)`.
-            const conns = await tx
-              .select({ project_id: githubConnections.project_id })
-              .from(githubConnections)
-              .where(
-                and(
-                  inArray(githubConnections.installation_id, orgInstallIds),
-                  inArray(githubConnections.project_id, projectIds),
-                ),
-              )
-              .for('update');
-            for (const conn of conns) {
-              // terminate BEFORE delete: revoke the token, then remove the trigger.
-              acc.push(...(await terminateBuildsForProject(txDb, conn.project_id, { reason })));
-              await deleteGitHubConnection(txDb, conn.project_id);
-            }
+          const authorizationClause =
+            ownedProjectIds.length > 0
+              ? or(
+                  eq(githubConnections.authorized_by_user_id, removedUser.id),
+                  and(
+                    isNull(githubConnections.authorized_by_user_id),
+                    inArray(githubConnections.project_id, ownedProjectIds),
+                  ),
+                )
+              : eq(githubConnections.authorized_by_user_id, removedUser.id);
+          const conns = await tx
+            .select({ project_id: githubConnections.project_id })
+            .from(githubConnections)
+            .where(
+              and(inArray(githubConnections.installation_id, orgInstallIds), authorizationClause),
+            )
+            .for('update');
+          for (const conn of conns) {
+            acc.push(...(await terminateBuildsForProject(txDb, conn.project_id, { reason })));
+            await deleteGitHubConnection(txDb, conn.project_id);
           }
           // Clear the removed user's membership cache + owner pointer across every
           // org install (both guard on the user id, so a different owner/bearer is

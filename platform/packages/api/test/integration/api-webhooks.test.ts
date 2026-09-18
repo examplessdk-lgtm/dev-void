@@ -35,7 +35,13 @@ import { createGitHubWebhookIngressProof } from '../../src/github/webhook-ingres
 import { scheduled } from '../../src/index.ts';
 import internalGitHubWebhook from '../../src/routes/internal-github-webhook.ts';
 import { webhookRoutes } from '../../src/routes/webhooks.ts';
-import { builds, deployments, githubConnections, githubInstallations } from '../../src/schema.ts';
+import {
+  builds,
+  deployments,
+  githubConnections,
+  githubInstallations,
+  projectMembers,
+} from '../../src/schema.ts';
 import {
   clearTables,
   createTestDeployment,
@@ -4201,6 +4207,7 @@ describe('POST /webhooks/github — organization member_removed revocation', () 
       repositoryId: '81001',
       branch: 'main',
       buildExecutor: 'container',
+      authorizedByUserId: null,
     });
     await upsertGitHubInstallationMember(env.db, {
       installationId: '8100',
@@ -4237,6 +4244,54 @@ describe('POST /webhooks/github — organization member_removed revocation', () 
     const updated = await getBuild(env.db, build.id);
     expect(updated!.status).toBe('cancelled');
     expect(updated!.error).toBe('org membership removed');
+    expect(cancelledIds).toContain(build.id);
+  });
+
+  it('severs a shared-project connection authorized by the removed project admin', async () => {
+    const owner = await createTestUser(env.db, 'org-shared-owner');
+    const admin = await createTestUser(env.db, 'org-shared-admin', 'github', G);
+    await seedOrgInstall('8101', ORG, owner.id);
+    const project = await createTestProject(env.db, owner.id, 'org-shared-sever');
+    await env.db.insert(projectMembers).values({
+      project_id: project.id,
+      user_id: admin.id,
+      role: 'admin',
+      added_by_user_id: owner.id,
+    });
+    await createGitHubConnection(env.db, {
+      projectId: project.id,
+      installationId: '8101',
+      repoFullName: 'org/shared-repo',
+      repositoryId: '81011',
+      branch: 'main',
+      buildExecutor: 'container',
+      authorizedByUserId: admin.id,
+    });
+    await upsertGitHubInstallationMember(env.db, {
+      installationId: '8101',
+      userId: admin.id,
+      githubAccountId: G,
+      ttlSeconds: 3600,
+    });
+    const build = await createBuild(env.db, {
+      projectId: project.id,
+      userId: owner.id,
+      executor: 'container',
+      status: 'building',
+      commitSha: 'sha-org-shared',
+      branch: 'main',
+    });
+
+    const { app, appEnv, cancelledIds } = recordingApp();
+    const res = await post(app, appEnv, 'organization', {
+      action: 'member_removed',
+      organization: { id: Number(ORG) },
+      membership: { user: { id: Number(G) } },
+    });
+
+    expect(res.status).toBe(200);
+    expect(await getGitHubConnection(env.db, project.id)).toBeNull();
+    expect((await getBuild(env.db, build.id))?.status).toBe('cancelled');
     expect(cancelledIds).toContain(build.id);
   });
 

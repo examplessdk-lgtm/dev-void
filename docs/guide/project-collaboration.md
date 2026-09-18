@@ -15,7 +15,10 @@ A project hosted on a Void platform can have one owner and additional readers, c
 | Project administrator | Collaborator access plus domains, email destinations, GitHub configuration, invitations, roles, and member removal.       |
 | Owner                 | Project administrator access plus project deletion.                                                                       |
 
-A collaborator's deploys use the owner's plan and limits. Changing who performs the deploy does not change the project's available usage. A project administrator is not an installation administrator and receives no platform-wide access.
+The owner's plan, limits, and suspension state govern the project. A member's
+own plan does not change the project's available usage, and acting through a
+collaborator does not bypass an owner suspension. A project administrator is
+not an installation administrator and receives no platform-wide access.
 
 ## Invite a Registered User
 
@@ -46,6 +49,7 @@ void project team decline <invitation-id>
 ```
 
 An invitation is bound to the registered account. Forwarding its ID does not let another user accept it.
+
 These three invitation-response commands are account-scoped and do not depend
 on the current project's deploy target. They can run from a direct Cloudflare
 project directory when it resolves your connected Void platform account.
