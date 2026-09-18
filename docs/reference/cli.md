@@ -489,9 +489,9 @@ void platform email settings-set --domains <self-serve|admin>
 void platform email limit <project-id|slug> [--monthly <n>] [--burst <n>]
 ```
 
-`policy` decides which recipients a project's `<slug>+tag@<mail domain>` sender reaches: `verified` (the default) means only that project's verified destinations; `domains` adds every address on the listed domains; `any` lifts the check. Neither widens delivery to another project's address on the platform's own mail domain, which still needs that project's verified-destination consent. Cloudflare still refuses a destination it has not verified until the platform mail domain is onboarded for Email Sending, so under `domains` or `any` such refusals arrive as per-recipient `UNVERIFIED_DESTINATION` results. Custom-domain sends are not affected.
+`policy` decides which recipients a project's `<slug>+tag@<mail domain>` sender reaches: `verified` (the default) means only that project's verified destinations; `domains` adds every address on the listed domains; `any` lifts the check. Neither widens delivery to addresses on the platform's own mail domain: those stay verified-destination-only, so no project reaches another project's inbox without its consent. Cloudflare still refuses a destination it has not verified until the platform mail domain is onboarded for Email Sending, so under `domains` or `any` such refusals arrive as per-recipient `UNVERIFIED_DESTINATION` results. Custom-domain sends are not affected.
 
-`settings-set --domains admin` tells `void email domain add` to print the administrator's command instead of starting a Cloudflare grant. `limit` overrides the project's monthly and per-minute caps (defaults 200 and 10); a project page in the admin UI shows and clears them.
+`settings-set --domains admin` tells `void email domain add` to print the administrator's command instead of starting a Cloudflare grant. `limit` overrides the project's monthly and per-minute caps (defaults 200 and 10); a project page in the admin UI shows and clears them. When both caps are given and only one could be written, the result names the applied and failed cap and exits nonzero.
 
 Register and maintain email domains for projects whose owners hold no Cloudflare credential:
 

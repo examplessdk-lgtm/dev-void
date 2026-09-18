@@ -411,8 +411,8 @@ auto-responder to arbitrary senders needs
 and Void adds no allowlist — or a platform whose administrator has widened the
 recipient policy for the whole installation (see
 [On a platform your administrator runs](#your-own-domain-on-the-platform)),
-which lifts this gate for the listed domains; another project's address on the
-platform's mail domain always needs that project's consent.
+which lifts this gate for the listed domains; addresses on the platform's own
+mail domain always stay verified-recipient-only.
 :::
 
 Note the asymmetry with `sendEmail`: `sendEmail` returns an error result and

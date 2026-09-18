@@ -490,6 +490,39 @@ app.post('/:projectId/domains/add', async (context) => {
           typeof json.error === 'string' ? json.error : 'Adding the email domain failed.',
         );
       }
+      const row = (await res.json()) as {
+        status?: string;
+        error?: string;
+        setup_state?: { failed_step?: string };
+      };
+      if (
+        row.status === 'failed' ||
+        row.status === 'token_revoked' ||
+        row.status === 'token_expired'
+      ) {
+        const message =
+          row.error ??
+          (row.setup_state?.failed_step
+            ? `Setup failed at step "${row.setup_state.failed_step}".`
+            : 'The email domain setup did not finish.');
+        return {
+          response: await context.html(
+            <Layout title={`Adding ${domain} did not finish`} username={context.get('user').login}>
+              <h1>Adding {domain} did not finish</h1>
+              <p>{message}</p>
+              <p>
+                Fix the step named above, then add the domain again — adding again retries it; rules
+                stay.
+              </p>
+              <p>
+                <a href={`/admin/email/${projectId}`}>&larr; Back to project email</a>
+              </p>
+            </Layout>,
+            502,
+          ),
+          succeeded: false,
+        };
+      }
       return { response: context.redirect(`/admin/email/${projectId}`), succeeded: true };
     },
   );

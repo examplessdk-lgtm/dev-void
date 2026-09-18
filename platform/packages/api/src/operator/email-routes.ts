@@ -52,9 +52,9 @@ export const emailOperatorRoutes = new Hono<ApiEnv>().use(
 function policyEffect(policy: EmailRecipientPolicy): string {
   switch (policy.mode) {
     case 'any':
-      return "Shared-sender mail reaches any recipient except another project's address on the platform's own mail domain, which still needs that project's verified-destination consent; Cloudflare still refuses unverified destinations until the platform mail domain is onboarded for Email Sending.";
+      return "Shared-sender mail reaches any recipient; addresses on the platform's own mail domain stay verified-destination-only, so no project reaches another project's inbox without its consent. Cloudflare still refuses unverified destinations until the platform mail domain is onboarded for Email Sending.";
     case 'domains':
-      return `Shared-sender mail reaches verified destinations and any address on ${policy.domains.join(', ')} — never another project's address on the platform's own mail domain; Cloudflare still refuses unverified destinations until the platform mail domain is onboarded for Email Sending.`;
+      return `Shared-sender mail reaches verified destinations and any address on ${policy.domains.join(', ')}; addresses on the platform's own mail domain stay verified-destination-only. Cloudflare still refuses unverified destinations until the platform mail domain is onboarded for Email Sending.`;
     default:
       return "Shared-sender mail reaches only each project's verified destinations.";
   }
@@ -183,13 +183,35 @@ export async function setOperatorEmailLimit(
   if (dryRunRequested) {
     return preview(action, target, { previous });
   }
-  if (monthly !== undefined) {
-    await kv.put(emailMonthlyLimitKey(project.id), String(monthly));
+  const applied: Array<'monthly' | 'burst'> = [];
+  const failed: Array<'monthly' | 'burst'> = [];
+  for (const [name, key, value] of [
+    ['monthly', emailMonthlyLimitKey(project.id), monthly],
+    ['burst', emailBurstLimitKey(project.id), burst],
+  ] as const) {
+    if (value === undefined) {
+      continue;
+    }
+    try {
+      await kv.put(key, String(value));
+      applied.push(name);
+    } catch (err) {
+      console.error(`[operator-email] ${name} cap write failed:`, err);
+      failed.push(name);
+    }
   }
-  if (burst !== undefined) {
-    await kv.put(emailBurstLimitKey(project.id), String(burst));
+  if (failed.length === 0) {
+    return { action, target, previous };
   }
-  return { action, target, previous };
+  if (applied.length === 0) {
+    throw new OperatorError(
+      502,
+      'No cap was changed: routing storage refused the write.',
+      'kv_failed',
+      { failed },
+    );
+  }
+  return { action, target, previous, ok: false as const, partial: true as const, applied, failed };
 }
 
 emailOperatorRoutes.get('/email/policy', async (context) =>
@@ -224,17 +246,16 @@ emailOperatorRoutes.post('/email/settings', async (context) => {
 });
 emailOperatorRoutes.post('/email/projects/:project/limit', async (context) => {
   const body = await readBody(context);
-  return context.json(
-    await setOperatorEmailLimit(
-      context,
-      context.req.param('project'),
-      {
-        monthly: stringField(body, 'monthly', { optional: true, maxLength: 16 }) || undefined,
-        burst: stringField(body, 'burst', { optional: true, maxLength: 16 }) || undefined,
-      },
-      dryRun(body),
-    ),
+  const result = await setOperatorEmailLimit(
+    context,
+    context.req.param('project'),
+    {
+      monthly: stringField(body, 'monthly', { optional: true, maxLength: 16 }) || undefined,
+      burst: stringField(body, 'burst', { optional: true, maxLength: 16 }) || undefined,
+    },
+    dryRun(body),
   );
+  return context.json(result, 'ok' in result && result.ok === false ? 207 : 200);
 });
 
 // ---------------------------------------------------------------------------

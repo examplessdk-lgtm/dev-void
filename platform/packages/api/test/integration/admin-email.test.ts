@@ -1425,6 +1425,33 @@ describe('admin add domain form', () => {
     expect(html).toContain('admin (platform credential)');
   });
 
+  test('renders a failed setup as a failed audited mutation while keeping the row', async () => {
+    const { adminJwt, projectId } = await seedAdminAndProject();
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = typeof input === 'string' ? input : (input as Request).url;
+      if (url.includes('/zones?')) {
+        return Response.json(
+          { success: false, errors: [{ code: 10000, message: 'zone lookup unavailable' }] },
+          { status: 502 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    const res = await post(`/admin/email/${projectId}/domains/add`, adminJwt, {
+      domain: 'failed.example',
+      token: '',
+    });
+    expect(res.status).toBe(502);
+    const html = await res.text();
+    expect(html).toContain('Adding failed.example did not finish');
+    expect(html).toContain('zone lookup unavailable');
+    expect(await domainRow(projectId, 'failed.example')).toMatchObject({ status: 'failed' });
+    const events = await env.db.select().from(operatorEvents);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ action: 'email/domains', status: 'failed' });
+  });
+
   test('refuses to take over a row the project owner registered', async () => {
     const { adminJwt, projectId } = await seedAdminAndProject();
     const row = await seedEmailDomain(projectId, 'owned.test', { credentialKind: 'api_token' });

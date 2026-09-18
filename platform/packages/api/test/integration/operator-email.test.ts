@@ -336,6 +336,58 @@ describe('operator email limits', () => {
     });
   });
 
+  test('reports a partial cap write with 207 and a failed audit event', async () => {
+    const owner = await createTestUser(env.db, 'limit-partial-owner');
+    const project = await createTestProject(env.db, owner.id, 'limit-partial');
+    const burstKey = `email-burst-limit:${project.id}`;
+    await env.ROUTING.put(burstKey, '3');
+    const originalPut = env.ROUTING.put.bind(env.ROUTING);
+    vi.spyOn(env.ROUTING, 'put').mockImplementation(async (key, value, options) => {
+      if (key === burstKey) {
+        throw new Error('burst storage down');
+      }
+      return originalPut(key, value, options);
+    });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const response = await req(`/email/projects/${project.id}/limit`, {
+      monthly: '1000',
+      burst: '25',
+    });
+    expect(response.status).toBe(207);
+    expect(await response.json()).toMatchObject({
+      ok: false,
+      partial: true,
+      applied: ['monthly'],
+      failed: ['burst'],
+    });
+    expect(await env.ROUTING.get(`email-limit:${project.id}`)).toBe('1000');
+    expect(await env.ROUTING.get(burstKey)).toBe('3');
+    expect((await events()).at(-1)).toMatchObject({
+      action: `email/projects/${project.id}/limit`,
+      status: 'failed',
+    });
+  });
+
+  test('returns kv_failed when routing storage refuses every cap', async () => {
+    const owner = await createTestUser(env.db, 'limit-failed-owner');
+    const project = await createTestProject(env.db, owner.id, 'limit-failed');
+    vi.spyOn(env.ROUTING, 'put').mockRejectedValue(new Error('storage down'));
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const response = await req(`/email/projects/${project.id}/limit`, {
+      monthly: '1000',
+      burst: '25',
+    });
+    expect(response.status).toBe(502);
+    expect(await response.json()).toMatchObject({
+      error: 'kv_failed',
+      details: { failed: ['monthly', 'burst'] },
+    });
+    expect(await env.ROUTING.get(`email-limit:${project.id}`)).toBeNull();
+    expect(await env.ROUTING.get(`email-burst-limit:${project.id}`)).toBeNull();
+  });
+
   test('sets one cap by project id and leaves the other override untouched', async () => {
     const owner = await createTestUser(env.db, 'limit-owner-2');
     const project = await createTestProject(env.db, owner.id, 'limit-project-2');
