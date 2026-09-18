@@ -16,6 +16,11 @@ import {
   setProjectEmailSuspended,
   transitionEmailRecipients,
 } from '../../src/email/admission.ts';
+import {
+  emailCredentials,
+  emailDomainRoutes,
+  emailZoneConnections,
+} from '../../src/email/connection-schema.ts';
 import { setEmailRecipientPolicy } from '../../src/email/settings.ts';
 import { emailDestinations, projects } from '../../src/schema.ts';
 import {
@@ -70,6 +75,98 @@ function input(projectId: string, key: string, recipients = ['one@example.com'])
 }
 
 describe('authoritative email admission', () => {
+  it('records unsupported relayed forwarding without charging and retains native verified forwarding', async () => {
+    const project = await fixture();
+    await env.db.insert(emailCredentials).values({
+      id: 'cred',
+      installation_id: 'installation',
+      managed_by: 'admin',
+      kind: 'platform',
+      account_id: 'account',
+      zone_id: 'zone',
+    });
+    await env.db.insert(emailZoneConnections).values({
+      id: 'connection',
+      installation_id: 'installation',
+      account_id: 'account',
+      zone_id: 'zone',
+      zone_name: 'example.com',
+      managed_by: 'admin',
+      credential_id: 'cred',
+      ingress_worker_name: 'gateway',
+      secret_ciphertext: 'ciphertext',
+      secret_iv: 'iv',
+      secret_key_version: 'key',
+      management_status: 'healthy',
+    });
+    await env.db.insert(emailDomainRoutes).values({
+      id: 'route',
+      domain: 'example.com',
+      connection_id: 'connection',
+      project_id: project.id,
+      addressing: 'custom',
+      managed_by: 'admin',
+      inbound_status: 'ready',
+      outbound_status: 'ready',
+    });
+    const receiptId = 'f'.repeat(64);
+    await recordEmailReceipt(env.db, {
+      receiptId,
+      projectId: project.id,
+      status: 'handler_completed',
+    });
+    const forward = {
+      ...input(project.id, 'relay-forward'),
+      kind: 'forward' as const,
+      from: 'support@example.com',
+      receiptId,
+    };
+    const unsupported = await admitEmailAction(env.db, { ...forward, transport: 'send_raw' });
+    expect(unsupported.recipients).toMatchObject([
+      { state: 'rejected', errorCode: 'UNSUPPORTED_ACTION' },
+    ]);
+    expect((await getProjectEmailUsage(env.db, project.id)).sent).toBe(0);
+    const native = await admitEmailAction(env.db, {
+      ...forward,
+      key: 'native-forward',
+      transport: 'native_forward',
+      recipients: ['one@example.com', 'unverified@example.net'],
+    });
+    expect(native.recipients).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ recipient: 'one@example.com', state: 'reserved' }),
+        expect.objectContaining({
+          recipient: 'unverified@example.net',
+          state: 'rejected',
+          errorCode: 'UNVERIFIED_DESTINATION',
+        }),
+      ]),
+    );
+  });
+
+  it('keeps invalid handler actions visible when completing and replaying a receipt', async () => {
+    const project = await fixture();
+    const identity = {
+      receiptId: 'c'.repeat(64),
+      payloadDigest: 'd'.repeat(64),
+      projectId: project.id,
+    };
+    await claimRelayedEmailReceipt(env.db, identity);
+    await recordEmailReceipt(env.db, { ...identity, status: 'actions_rejected' });
+    await completeRelayedEmailReceipt(env.db, { ...identity, reject: false });
+    expect(await claimRelayedEmailReceipt(env.db, identity)).toEqual({
+      state: 'completed',
+      reject: false,
+    });
+    expect((await getProjectEmailLogs(env.db, project.id)).logs).toEqual([
+      expect.objectContaining({
+        receiptId: identity.receiptId,
+        status: 'actions_rejected',
+        errorCode: 'INVALID_ACTIONS',
+      }),
+    ]);
+  });
+
   it('claims a relay invocation once and replays its completed outcome without rerunning it', async () => {
     const project = await fixture();
     const identity = {

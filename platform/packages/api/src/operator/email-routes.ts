@@ -5,6 +5,7 @@ import { capabilityMiddleware } from '../capabilities.ts';
 import { getProject, getProjectBySlug, type Db } from '../db.ts';
 import { emailProjectControls } from '../email/admission-schema.ts';
 import { setProjectEmailLimits } from '../email/admission.ts';
+import { lookupMxOverDns } from '../email/cf-domain-probes.ts';
 import { emailDomainRoutes, emailZoneConnections } from '../email/connection-schema.ts';
 import {
   MAX_DOMAIN_LENGTH,
@@ -20,14 +21,7 @@ import {
   serializeEmailRoute,
   syncEmailDomainForProject,
 } from '../email/domain-service.ts';
-import {
-  emailBurstLimitKey,
-  emailMonthlyLimitKey,
-  parseEmailLimit,
-  parseEmailLimitInput,
-  MAX_EMAIL_LIMIT,
-} from '../email/limits.ts';
-import { lookupMxOverDns } from '../email/relay-engine.ts';
+import { parseEmailLimitInput, MAX_EMAIL_LIMIT } from '../email/limits.ts';
 import {
   EmailSettingsError,
   getEmailDomainManagement,
@@ -421,24 +415,21 @@ export async function syncOperatorEmailDomain(
 export async function removeOperatorEmailDomain(
   context: Context<ApiEnv>,
   rawDomain: string,
-  force: boolean,
   dryRunRequested = false,
 ) {
   const { domain, row, project } = await requireDomainRow(context.get('db'), rawDomain);
   const action = 'email.domain.remove';
-  const target = { domain, projectId: project.id, slug: project.slug, force };
+  const target = { domain, projectId: project.id, slug: project.slug };
   if (dryRunRequested) {
     return preview(action, target, {
       status: row.inbound_status,
       managed_by: row.managed_by,
       connection_id: row.connection_id,
-      effect: force
-        ? 'Disables the assignment and records any unresolved provider cleanup for manual recovery.'
-        : 'Disables this assignment; shared ingress remains while sibling domains use it.',
+      effect: 'Disables this assignment; shared ingress remains while sibling domains use it.',
     });
   }
   return operatorResult(
-    await removeEmailDomainForProject(context, project, domain, force, 'admin'),
+    await removeEmailDomainForProject(context, project, domain, 'admin'),
     action,
     target,
   );
@@ -448,6 +439,7 @@ export async function rotateOperatorEmailIngressSecret(
   context: Context<ApiEnv>,
   rawDomain: string,
   dryRunRequested = false,
+  attemptId?: string,
 ) {
   const { domain, row, project } = await requireDomainRow(context.get('db'), rawDomain);
   const action = 'email.domain.rotate-secret',
@@ -459,7 +451,7 @@ export async function rotateOperatorEmailIngressSecret(
     });
   }
   return operatorResult(
-    await rotateEmailIngressSecretForProject(context, project, domain, 'admin'),
+    await rotateEmailIngressSecretForProject(context, project, domain, 'admin', attemptId),
     action,
     target,
   );
@@ -494,20 +486,17 @@ emailOperatorRoutes.post('/email/domains/:domain/sync', async (context) => {
 emailOperatorRoutes.post('/email/domains/:domain/rotate-secret', async (context) => {
   const body = await readBody(context);
   return context.json(
-    await rotateOperatorEmailIngressSecret(context, context.req.param('domain'), dryRun(body)),
+    await rotateOperatorEmailIngressSecret(
+      context,
+      context.req.param('domain'),
+      dryRun(body),
+      body.attemptId === undefined ? undefined : stringField(body, 'attemptId', { maxLength: 128 }),
+    ),
   );
 });
 emailOperatorRoutes.post('/email/domains/:domain/remove', async (context) => {
   const body = await readBody(context);
-  if (body.force !== undefined && typeof body.force !== 'boolean') {
-    throw new OperatorError(400, 'force must be a boolean.', 'invalid_argument');
-  }
   return context.json(
-    await removeOperatorEmailDomain(
-      context,
-      context.req.param('domain'),
-      body.force === true,
-      dryRun(body),
-    ),
+    await removeOperatorEmailDomain(context, context.req.param('domain'), dryRun(body)),
   );
 });

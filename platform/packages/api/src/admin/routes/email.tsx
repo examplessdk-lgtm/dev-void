@@ -1,4 +1,4 @@
-import { asc, eq, gte, inArray, sql } from 'drizzle-orm';
+import { asc, desc, eq, gte, inArray, sql } from 'drizzle-orm';
 import { Hono, type Context } from 'hono';
 import { getPlatformCapabilities } from '../../capabilities.ts';
 import {
@@ -15,8 +15,8 @@ import {
 import { setProjectEmailLimits, setProjectEmailSuspended } from '../../email/admission.ts';
 import {
   emailDomainRoutes,
+  emailOperations,
   emailZoneConnections,
-  emailCredentials,
 } from '../../email/connection-schema.ts';
 import {
   addEmailDomainForProject,
@@ -26,10 +26,7 @@ import {
 import {
   DEFAULT_EMAIL_BURST_LIMIT as DEFAULT_BURST_LIMIT,
   DEFAULT_EMAIL_MONTHLY_LIMIT as DEFAULT_MONTHLY_LIMIT,
-  emailBurstLimitKey as burstLimitKey,
-  emailMonthlyLimitKey as monthlyLimitKey,
-  emailSuspendKey as suspendKey,
-  parseEmailLimit as parseLimit,
+  parseEmailLimitInput,
 } from '../../email/limits.ts';
 import {
   getEmailDomainManagement,
@@ -40,10 +37,6 @@ import type { ApiEnv } from '../../env.ts';
 import { executeAuditedMutation, operatorAuditIntent } from '../../operator/audit.ts';
 import { OperatorError } from '../../operator/common.ts';
 import { setOperatorEmailPolicy, setOperatorEmailSettings } from '../../operator/email-routes.ts';
-import {
-  syncProjectAllowlistKv,
-  syncProjectAllowlistKvBestEffort,
-} from '../../provisioning/email-allowlist.ts';
 import { deleteDestination } from '../../provisioning/email-routing.ts';
 import { renderOperationError } from '../operation-error.tsx';
 import { EmailSettingsPage } from '../views/email-settings.tsx';
@@ -62,22 +55,7 @@ app.use('*', async (context, next) => {
   await next();
 });
 
-/**
- * Email control plane for operators: installation-wide settings at `/`,
- * one project's usage, caps, kill switch, destinations and domains at
- * `/:projectId`.
- *
- * Every number on the project page is read straight out of `ROUTING` KV,
- * which is where the proxy worker (`packages/proxy/src/email.ts`) keeps the
- * counters and reads the caps from. The keys and defaults come from
- * `email/limits.ts`, the one spelling the api's writers share with the
- * proxy's readers — nothing at build time catches a drift.
- *
- * The destination and custom-domain rows are Postgres. The proxy's only
- * view of a custom domain is the `email-domain:` ROUTING mirror, so the
- * revoke below clears that key before the row.
- */
-const sentKey = (projectId: string, month: string) => `email-sent:${projectId}:${month}`;
+/** Operator email settings and project usage from the email ledger. */
 const recvKey = (projectId: string, month: string) => `email-recv:${projectId}:${month}`;
 
 /** The admin layout has no utility classes, so secondary text is inline. */
@@ -170,37 +148,57 @@ app.get('/:projectId', async (context) => {
       .select({
         route: emailDomainRoutes,
         connection: emailZoneConnections,
-        credential: emailCredentials,
       })
       .from(emailDomainRoutes)
       .innerJoin(emailZoneConnections, eq(emailDomainRoutes.connection_id, emailZoneConnections.id))
-      .leftJoin(emailCredentials, eq(emailZoneConnections.credential_id, emailCredentials.id))
       .where(eq(emailDomainRoutes.project_id, projectId))
       .orderBy(asc(emailDomainRoutes.created_at)),
   ]);
   const sent = sentRows[0]?.count ?? 0;
   const received = receivedRows[0]?.count ?? 0;
+  const latestOperations = domainRows.length
+    ? await context
+        .get('db')
+        .select({
+          id: emailOperations.id,
+          routeId: emailOperations.route_id,
+          connectionId: emailOperations.connection_id,
+          status: emailOperations.status,
+        })
+        .from(emailOperations)
+        .where(
+          inArray(
+            emailOperations.connection_id,
+            domainRows.map(({ connection }) => connection.id),
+          ),
+        )
+        .orderBy(desc(emailOperations.created_at))
+    : [];
 
-  // Distinguish an override from the default so an operator can see at a
-  // glance whether someone bumped a cap during a past incident — the
-  // override keys are write-only otherwise.
+  // Distinguish an override from the default in the project controls row.
   const control = controls[0];
   const monthlyLimit =
     control && control.monthly_limit !== DEFAULT_MONTHLY_LIMIT ? control.monthly_limit : undefined;
   const burstLimit =
     control && control.burst_limit !== DEFAULT_BURST_LIMIT ? control.burst_limit : undefined;
   const isSuspended = Boolean(control?.suspended_at);
-  const domains = domainRows.map(({ route, connection, credential }) => ({
+  const domains = domainRows.map(({ route, connection }) => ({
     id: route.id,
     domain: route.domain,
-    status: route.inbound_status,
+    inbound: route.inbound_status,
+    inboundReason: route.inbound_reason,
+    outbound: route.outbound_status,
+    outboundReason: route.outbound_reason,
+    management: connection.management_status,
+    managementReason: connection.management_reason,
     managed_by: route.managed_by,
-    credential_kind: credential?.kind ?? 'platform',
-    mode: route.addressing,
     relay_worker_name: connection.ingress_worker_name,
     relay_version: connection.ingress_version,
-    token_id: credential?.token_id ?? null,
-    token_expires_on: credential?.expires_on ?? null,
+    operation: latestOperations.find(
+      (operation) =>
+        operation.routeId === route.id ||
+        (operation.routeId === null && operation.connectionId === connection.id),
+    ),
   }));
   const senderDomain = context.env.EMAIL_SENDER_DOMAIN;
   const tz = (context.req.raw.cf?.timezone as string | undefined) ?? undefined;
@@ -392,13 +390,13 @@ app.get('/:projectId', async (context) => {
           <thead>
             <tr>
               <th>Domain</th>
-              <th>Status</th>
+              <th>Inbound</th>
+              <th>Outbound</th>
+              <th>Management</th>
               <th>Managed by</th>
-              <th>Mode</th>
-              <th>Relay worker</th>
+              <th>Ingress worker</th>
               <th>v</th>
-              <th>Token ID</th>
-              <th>Token expires</th>
+              <th>Latest operation</th>
               <th></th>
             </tr>
           </thead>
@@ -407,18 +405,34 @@ app.get('/:projectId', async (context) => {
               <tr key={domain.id}>
                 <td>{domain.domain}</td>
                 <td>
-                  <span style={`color: ${domainStatusColor(domain.status)}`}>{domain.status}</span>
+                  <span style={`color: ${domainStatusColor(domain.inbound)}`}>
+                    {domain.inbound}
+                  </span>
+                  {domain.inboundReason && <small> — {domain.inboundReason}</small>}
                 </td>
                 <td>
-                  {domain.managed_by}
-                  {domain.credential_kind === 'platform' ? ' (platform credential)' : ''}
+                  <span style={`color: ${domainStatusColor(domain.outbound)}`}>
+                    {domain.outbound}
+                  </span>
+                  {domain.outboundReason && <small> — {domain.outboundReason}</small>}
                 </td>
-                <td>{domain.mode ?? '-'}</td>
+                <td>
+                  <span style={`color: ${domainStatusColor(domain.management)}`}>
+                    {domain.management}
+                  </span>
+                  {domain.managementReason && <small> — {domain.managementReason}</small>}
+                </td>
+                <td>{domain.managed_by}</td>
                 <td>{domain.relay_worker_name ?? '-'}</td>
                 <td>{domain.relay_version ?? '-'}</td>
-                <td>{domain.token_id ?? '-'}</td>
                 <td>
-                  {domain.token_expires_on ? formatDateTime(domain.token_expires_on, tz) : '-'}
+                  {domain.operation ? (
+                    <>
+                      <code>{domain.operation.id}</code> ({domain.operation.status})
+                    </>
+                  ) : (
+                    '-'
+                  )}
                 </td>
                 <td>
                   <form
@@ -565,27 +579,7 @@ app.post('/:projectId/destinations/:destId/delete', async (context) => {
   if (!destination) {
     return context.html('<h1>Destination not found</h1>', 404);
   }
-  // Tighten the KV mirror BEFORE anything destructive runs. Same inversion as
-  // the user-facing revoke in `routes/email.ts`: the row is what a retry
-  // re-derives the mirror from, so deleting it first leaves a failed KV write
-  // with nothing to repair from and the revoked address keeps receiving mail.
-  // The sync must EXCLUDE this row — it is still `verified` in Postgres here,
-  // so a plain re-sync would write the address straight back.
-  if (destination.status === 'verified') {
-    try {
-      await syncProjectAllowlistKv(context.get('db'), context.env.ROUTING, projectId, {
-        excludeDestinationId: destination.id,
-      });
-    } catch (error) {
-      console.error('[admin-email] allowlist tighten failed; keeping destination row', {
-        projectId,
-        destinationId,
-        error,
-      });
-      return context.html('<h1>Failed to update send allowlist. Try again.</h1>', 503);
-    }
-  }
-
+  await deleteEmailDestination(context.get('db'), destination.id);
   // The Cloudflare destination address is account-level, so deleting it would
   // revoke the address for every project that shares it. Only the last
   // referencing project may remove it upstream.
@@ -594,7 +588,7 @@ app.post('/:projectId/destinations/:destId/delete', async (context) => {
       context.get('db'),
       destination.cf_destination_id,
     );
-    if (references <= 1) {
+    if (references === 0) {
       try {
         await deleteDestination(
           context.env.CF_ACCOUNT_ID,
@@ -602,9 +596,7 @@ app.post('/:projectId/destinations/:destId/delete', async (context) => {
           destination.cf_destination_id,
         );
       } catch (error) {
-        // Best effort: a stranded CF address is inert (the per-project
-        // allowlist below is what the proxy enforces), and failing the
-        // operator's revoke on it would leave the row in place instead.
+        // Best effort: the committed SQL revocation already denies sends.
         console.error('[admin-email] CF deleteDestination failed', {
           projectId,
           destinationId,
@@ -613,11 +605,6 @@ app.post('/:projectId/destinations/:destId/delete', async (context) => {
       }
     }
   }
-  await deleteEmailDestination(context.get('db'), destination.id);
-  // Re-derive after the delete: the tighten above works from a snapshot that
-  // a concurrent confirm click can make stale. Same shape and same reasoning
-  // as the owner-facing revoke in `routes/email.ts`.
-  await syncProjectAllowlistKvBestEffort(context.get('db'), context.env.ROUTING, projectId);
   return context.redirect(`/admin/email/${projectId}`);
 });
 
@@ -637,11 +624,31 @@ app.post('/:projectId/domains/:domain/revoke', async (context) => {
     context,
     project,
     context.req.param('domain'),
-    false,
     'admin',
   );
   if (!result.ok) {
     return context.html('<h1>Email domain removal failed</h1>', result.status as 400);
+  }
+  const outcome = (await result.json()) as {
+    operationId?: string;
+    operationStatus?: string;
+    error?: string;
+  };
+  if (outcome.operationStatus !== 'completed') {
+    return context.html(
+      <Layout title="Email domain removal" username={context.get('user').login}>
+        <h1>Email domain removal {outcome.operationStatus ?? 'pending'}</h1>
+        <p>
+          {outcome.error ??
+            'The operation has not completed. Check the domain status before retrying.'}
+        </p>
+        <p>
+          Operation ID: <code>{outcome.operationId ?? 'unavailable'}</code>
+        </p>
+        <a href={`/admin/email/${projectId}`}>Back to email settings</a>
+      </Layout>,
+      outcome.operationStatus === 'blocked' || outcome.operationStatus === 'unknown' ? 409 : 202,
+    );
   }
   return context.redirect(`/admin/email/${projectId}`);
 });
@@ -661,13 +668,33 @@ app.post('/:projectId/domains/:domain/rotate-secret', async (context) => {
   if (!result.ok) {
     return context.html('<h1>Email ingress rotation failed</h1>', result.status as 400);
   }
+  const outcome = (await result.json()) as {
+    operationId?: string;
+    operationStatus?: string;
+    error?: string;
+  };
+  if (outcome.operationStatus !== 'completed') {
+    return context.html(
+      <Layout title="Email ingress rotation" username={context.get('user').login}>
+        <h1>Email ingress rotation {outcome.operationStatus ?? 'pending'}</h1>
+        <p>
+          {outcome.error ??
+            'The operation has not completed. Check the domain status before retrying.'}
+        </p>
+        <p>
+          Operation ID: <code>{outcome.operationId ?? 'unavailable'}</code>
+        </p>
+        <a href={`/admin/email/${projectId}`}>Back to email settings</a>
+      </Layout>,
+      outcome.operationStatus === 'blocked' || outcome.operationStatus === 'unknown' ? 409 : 202,
+    );
+  }
   return context.redirect(`/admin/email/${projectId}`);
 });
 
 /**
- * Shared body of the two limit forms. A blank submission deletes the override
- * key, which is how an operator hands a project back to the platform default
- * after an incident — the proxy falls back to its own default on a missing key.
+ * Shared body of the two limit forms. A blank submission clears the SQL
+ * override so the project uses the platform default.
  */
 async function setLimit(
   context: Context<ApiEnv>,
@@ -686,7 +713,7 @@ async function setLimit(
     await setProjectEmailLimits(context.get('db'), projectId, { [kind]: null });
     return context.redirect(`/admin/email/${projectId}`);
   }
-  const limit = parseLimit(raw);
+  const limit = parseEmailLimitInput(raw);
   if (limit === undefined) {
     return context.html('<h1>Invalid limit</h1><p>Expected a positive integer, or blank.</p>', 400);
   }
@@ -694,29 +721,21 @@ async function setLimit(
   return context.redirect(`/admin/email/${projectId}`);
 }
 
-/** Domain rows reuse the shared status palette: active reads as success, anything dead as failed. */
+/** Domain readiness uses the shared status palette. */
 function domainStatusColor(status: string): string {
-  if (status === 'active') {
+  if (status === 'ready' || status === 'healthy') {
     return STATUS_COLORS.success;
   }
-  if (status === 'pending') {
+  if (status === 'pending' || status === 'verified_only' || status === 'probe_failed') {
     return STATUS_COLORS.pending;
   }
   return STATUS_COLORS.failed;
 }
 
-/** UTC `YYYY-MM`, matching `monthBucket` in `packages/proxy/src/email.ts`. */
+/** UTC `YYYY-MM` for the current usage window. */
 function monthBucket(): string {
   const now = new Date();
   return `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
-}
-
-function parseCounter(raw: string | null): number {
-  if (!raw) {
-    return 0;
-  }
-  const n = parseInt(raw, 10);
-  return Number.isFinite(n) && n >= 0 ? n : 0;
 }
 
 export default app;

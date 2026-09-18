@@ -3003,12 +3003,6 @@ describe('POST /projects — owner email destination auto-add', () => {
       verified_by_user_id: user.id,
     });
     expect(row.verified_at).toContain('2026-01-01');
-
-    // Verified on arrival, so the proxy's allowlist mirror is primed now
-    // rather than waiting for a refresh.
-    expect(JSON.parse((await env.ROUTING.get(`email-allowlist:${project.id}`))!)).toEqual([
-      ownerEmail,
-    ]);
   });
 
   it('still creates the project when CF Email Routing is down', async () => {
@@ -3337,8 +3331,6 @@ describe('POST /projects — owner email destination auto-add', () => {
         .from(emailDestinations)
         .where(eq(emailDestinations.project_id, project.id)),
     ).toHaveLength(0);
-    // No row landed, so nothing to mirror for the new project either.
-    expect(await env.ROUTING.get(`email-allowlist:${project.id}`)).toBeNull();
 
     expect(calls.filter((call) => call.method === 'DELETE')).toEqual([]);
     const [survivor] = await env.db
@@ -3424,27 +3416,5 @@ describe('POST /projects — owner email destination auto-add', () => {
     expect(res.status).toBe(201);
     expect(calls).toEqual([]);
     expect(await res.json()).not.toHaveProperty('owner_email_destination');
-  });
-
-  // The project-slug mirror the email proxy reads to pin a project's outbound
-  // `from` to its own slug. Written at create time; without it the proxy
-  // refuses every send with `project slug unknown`.
-  it('writes the email-slug KV mirror for the new project', async () => {
-    const user = await createTestUser(env.db);
-    const ownerEmail = await withEmail(user.id, 'owner@example.com');
-    mockCfApi();
-    stubEmailRouting(() =>
-      Response.json({
-        success: true,
-        errors: [],
-        messages: [],
-        result: { tag: 'cf-tag-slug', email: ownerEmail, verified: null },
-      }),
-    );
-
-    const res = await createProjectAs(user, 'slug-mirror-app', emailEnv());
-    expect(res.status).toBe(201);
-    const project = (await res.json()) as { id: string };
-    expect(await env.ROUTING.get(`email-slug:${project.id}`)).toBe('slug-mirror-app');
   });
 });

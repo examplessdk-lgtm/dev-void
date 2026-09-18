@@ -28,9 +28,6 @@ export const RELAY_GATEWAY_ORIGIN_BINDING = 'VOID_EMAIL_GATEWAY_ORIGIN';
 export const RELAY_ACCOUNT_BINDING = 'VOID_EMAIL_ACCOUNT';
 export const RELAY_ZONE_BINDING = 'VOID_EMAIL_ZONE';
 export const RELAY_INGRESS_BINDING = 'VOID_EMAIL_INGRESS';
-// Legacy exports keep older pre-release fixtures compiling.
-export const RELAY_PROXY_ORIGIN_BINDING = RELAY_GATEWAY_ORIGIN_BINDING;
-export const RELAY_EMAIL_DOMAIN_BINDING = RELAY_ZONE_BINDING;
 
 /**
  * Module-syntax Worker source. POST /email/ingress on the configured gateway

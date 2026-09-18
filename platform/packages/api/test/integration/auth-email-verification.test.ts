@@ -514,11 +514,6 @@ describe('email verification gating on account linking', () => {
         verification_source: 'platform',
       },
     ]);
-    await env.ROUTING.put(
-      `email-allowlist:${project.id}`,
-      JSON.stringify(['old-owner@example.com', 'teammate@example.com']),
-    );
-
     const state = await buildSignedState('github');
     await seedOAuthNonce(env.db, 'test-nonce');
     // Same GitHub identity, DIFFERENT verified primary email.
@@ -568,12 +563,6 @@ describe('email verification gating on account linking', () => {
     expect(revoked?.verified_by_email_snapshot).toBeNull();
 
     expect(byId.get('edst_third_party')?.status).toBe('verified');
-
-    // The proxy's per-project send boundary dropped the stale address.
-    const mirror = JSON.parse(
-      (await env.ROUTING.get(`email-allowlist:${project.id}`))!,
-    ) as Array<string>;
-    expect(mirror).toEqual(['teammate@example.com']);
   });
 
   it('leaves owner-inherited destinations alone when the primary email is unchanged', async () => {
@@ -626,8 +615,7 @@ describe('email verification gating on account linking', () => {
   });
 
   describe('owner email change survives a transient failure', () => {
-    // Shared fixture: one owner-inherited row (Option C / autoAddOwnerDestination
-    // shape) plus one per-recipient row, mirror already in sync.
+    // Shared fixture: owner-inherited consent plus independent recipient consent.
     async function seedRotatingOwner(providerId: string, login: string) {
       const existing = await createTestUser(env.db, login, 'github', providerId);
       await env.db
@@ -657,10 +645,6 @@ describe('email verification gating on account linking', () => {
           verification_source: 'platform',
         },
       ]);
-      await env.ROUTING.put(
-        `email-allowlist:${project.id}`,
-        JSON.stringify(['old-owner@example.com', 'teammate@example.com']),
-      );
       return { existing, project };
     }
 
@@ -685,18 +669,16 @@ describe('email verification gating on account linking', () => {
       );
     }
 
-    async function readState(userId: string, projectId: string, inheritedId: string) {
+    async function readState(userId: string, inheritedId: string) {
       const [user] = await env.db.select().from(users).where(eq(users.id, userId));
       const [row] = await env.db
         .select()
         .from(emailDestinations)
         .where(eq(emailDestinations.id, inheritedId));
-      const raw = await env.ROUTING.get(`email-allowlist:${projectId}`);
       return {
         email: user!.email,
         status: row!.status,
         source: row!.verification_source,
-        mirror: raw === null ? null : (JSON.parse(raw) as Array<string>),
       };
     }
 
@@ -708,7 +690,7 @@ describe('email verification gating on account linking', () => {
       // retries. Before this, `users.email` was committed first and the
       // demotion error swallowed — every later login saw
       // `previousEmail === email` and the stale grant survived forever.
-      const { existing, project } = await seedRotatingOwner('919191', 'blip-user');
+      const { existing } = await seedRotatingOwner('919191', 'blip-user');
       const inheritedId = 'edst_inherited_919191';
 
       const revokeSpy = vi
@@ -723,78 +705,24 @@ describe('email verification gating on account linking', () => {
       // ...and NOTHING of the change is committed: the email still reads the
       // old address, so the stale grant is not sitting next to a rotated
       // `users.email` that would hide it from every later comparison.
-      const afterFirst = await readState(existing.id, project.id, inheritedId);
+      const afterFirst = await readState(existing.id, inheritedId);
       expect(afterFirst.email).toBe('old-owner@example.com');
       expect(afterFirst.status).toBe('verified');
       expect(afterFirst.source).toBe('cf');
-      expect(afterFirst.mirror).toEqual(['old-owner@example.com', 'teammate@example.com']);
 
       // Second login, same new email — the retry.
       const second = await loginWithNewEmail('919191', 'blip-user');
       expect(second.status).toBe(302);
       expect(revokeSpy).toHaveBeenCalledTimes(2);
 
-      const afterSecond = await readState(existing.id, project.id, inheritedId);
+      const afterSecond = await readState(existing.id, inheritedId);
       expect(afterSecond.email).toBe('new-owner@example.com');
       expect(afterSecond.status).toBe('pending');
       expect(afterSecond.source).toBe('platform');
-      expect(afterSecond.mirror).toEqual(['teammate@example.com']);
     });
 
-    it('rolls the whole change back when the mirror tighten fails, and the next login retries it', async () => {
-      // The mirror write is the LAST step before the commit, not a best-effort
-      // step after it. Before this, the email and the demotion were committed
-      // first and a lost mirror write was swallowed: the proxy kept
-      // authorizing the old address from `email-allowlist:<projectId>`, every
-      // later login compared equal and skipped the revoke, and nothing else
-      // re-derived the key until the owner happened to list destinations.
-      const { existing, project } = await seedRotatingOwner('929292', 'kv-blip-user');
-      const inheritedId = 'edst_inherited_929292';
-
-      const putSpy = vi.spyOn(env.ROUTING, 'put').mockRejectedValueOnce(new Error('kv blip'));
-
-      const first = await loginWithNewEmail('929292', 'kv-blip-user');
-      // A KV blip is not a failed sign-in...
-      expect(first.status).toBe(302);
-      expect(putSpy).toHaveBeenCalledTimes(1);
-
-      // ...but NOTHING of the change is committed: the stored address is
-      // still the old one, so the next login sees the difference again.
-      const afterFirst = await readState(existing.id, project.id, inheritedId);
-      expect(afterFirst.email).toBe('old-owner@example.com');
-      expect(afterFirst.status).toBe('verified');
-      expect(afterFirst.source).toBe('cf');
-      expect(afterFirst.mirror).toEqual(['old-owner@example.com', 'teammate@example.com']);
-
-      // The tighten reads the verified rows THROUGH the transaction, so it
-      // sees the uncommitted demotion. Under PGlite `db` and `tx` share one
-      // session and a pool read would pass this suite while writing the old
-      // address straight back in production, so pin the handle, not the value.
-      const readSpy = vi.spyOn(dbModule, 'getVerifiedEmailDestinationsByProjectId');
-
-      // Second login, same new email — the retry, with KV healthy.
-      const second = await loginWithNewEmail('929292', 'kv-blip-user');
-      expect(second.status).toBe(302);
-      // First read: the in-transaction tighten, on the tx handle. Second: the
-      // post-commit re-derive, on the pool.
-      expect(readSpy).toHaveBeenCalledTimes(2);
-      expect(readSpy.mock.calls[0]![0]).not.toBe(env.db);
-      expect(readSpy.mock.calls[1]![0]).toBe(env.db);
-
-      const afterSecond = await readState(existing.id, project.id, inheritedId);
-      expect(afterSecond.email).toBe('new-owner@example.com');
-      expect(afterSecond.status).toBe('pending');
-      expect(afterSecond.source).toBe('platform');
-      expect(afterSecond.mirror).toEqual(['teammate@example.com']);
-    });
-
-    it('leaves a key tightened by a rolled-back login deny-only, never wider than the rows', async () => {
-      // Two affected projects, and the SECOND tighten fails. The first key is
-      // already written when the transaction rolls back, so it is ahead of
-      // Postgres — in the tightening direction only: the proxy denies the old
-      // address there until the listing re-widens the key to match the rows
-      // that are still `verified`, and the next login retries both.
-      const { existing, project: first } = await seedRotatingOwner('929393', 'kv-partial-user');
+    it('revokes owner-inherited consent across projects while retaining recipient consent', async () => {
+      const { existing, project: first } = await seedRotatingOwner('929393', 'multi-project-user');
       const second = await createTestProject(env.db, existing.id, 'owner-rotate-929393-b');
       await env.db.insert(emailDestinations).values({
         id: 'edst_inherited_929393_b',
@@ -807,119 +735,32 @@ describe('email verification gating on account linking', () => {
         verified_by_user_id: existing.id,
         verified_by_email_snapshot: 'old-owner@example.com',
       });
-      await env.ROUTING.put(
-        `email-allowlist:${second.id}`,
-        JSON.stringify(['old-owner@example.com']),
-      );
 
-      const realPut = env.ROUTING.put.bind(env.ROUTING);
-      const realDelete = env.ROUTING.delete.bind(env.ROUTING);
-      const writes: Array<string> = [];
-      vi.spyOn(env.ROUTING, 'put').mockImplementation(async (key, value, options) => {
-        writes.push(key);
-        if (writes.length === 2) {
-          throw new Error('kv blip');
-        }
-        return realPut(key, value, options as never);
-      });
-      // The second project's only verified row is the one being demoted, so
-      // its tighten is a delete, not a put.
-      vi.spyOn(env.ROUTING, 'delete').mockImplementation(async (key) => {
-        writes.push(key as string);
-        if (writes.length === 2) {
-          throw new Error('kv blip');
-        }
-        return realDelete(key);
-      });
-
-      const login1 = await loginWithNewEmail('929393', 'kv-partial-user');
-      expect(login1.status).toBe(302);
-      expect(writes).toHaveLength(2);
-      const [tightenedKey, failedKey] = writes as [string, string];
-      const tightened = tightenedKey.endsWith(first.id) ? first : second;
-      const untouched = tightened === first ? second : first;
-      expect(failedKey).toBe(`email-allowlist:${untouched.id}`);
-
-      // Nothing committed...
+      const login = await loginWithNewEmail('929393', 'multi-project-user');
+      expect(login.status).toBe(302);
       const [user] = await env.db.select().from(users).where(eq(users.id, existing.id));
-      expect(user!.email).toBe('old-owner@example.com');
-      const rows = await env.db
+      expect(user?.email).toBe('new-owner@example.com');
+      const destinations = await env.db
         .select()
         .from(emailDestinations)
         .where(eq(emailDestinations.verified_by_user_id, existing.id));
-      expect(rows.map((r) => r.status)).toEqual(['verified', 'verified']);
-      // ...the untouched key is exactly as it was...
-      const untouchedMirror = await env.ROUTING.get(`email-allowlist:${untouched.id}`);
-      expect(JSON.parse(untouchedMirror!)).toContain('old-owner@example.com');
-      // ...and the tightened key is missing the old address — deny, not grant.
-      const tightenedMirror = await env.ROUTING.get(`email-allowlist:${tightened.id}`);
-      expect(
-        tightenedMirror === null || !JSON.parse(tightenedMirror).includes('old-owner@example.com'),
-      ).toBe(true);
-
-      // The listing repairs the tightened key back to the rows Postgres still
-      // holds — the rollback means the owner's address has NOT changed yet.
-      vi.mocked(env.ROUTING.put).mockImplementation(realPut as never);
-      vi.mocked(env.ROUTING.delete).mockImplementation(realDelete as never);
-      const list = await app.fetch(
-        new Request(`http://localhost/projects/${tightened.id}/email/destinations`, {
-          headers: { Authorization: `Bearer ${existing.jwt}` },
-        }),
-        env,
-        executionCtx,
+      expect(destinations).toHaveLength(0);
+      const firstRows = await env.db
+        .select()
+        .from(emailDestinations)
+        .where(eq(emailDestinations.project_id, first.id));
+      expect(firstRows.find((row) => row.address === 'old-owner@example.com')?.status).toBe(
+        'pending',
       );
-      expect(list.status).toBe(200);
-      expect(JSON.parse((await env.ROUTING.get(`email-allowlist:${tightened.id}`))!)).toContain(
-        'old-owner@example.com',
+      expect(firstRows.find((row) => row.address === 'teammate@example.com')?.status).toBe(
+        'verified',
       );
-
-      // The next login retries the whole change.
-      const login2 = await loginWithNewEmail('929393', 'kv-partial-user');
-      expect(login2.status).toBe(302);
-      const [after] = await env.db.select().from(users).where(eq(users.id, existing.id));
-      expect(after!.email).toBe('new-owner@example.com');
-      expect(JSON.parse((await env.ROUTING.get(`email-allowlist:${first.id}`))!)).toEqual([
-        'teammate@example.com',
-      ]);
-      expect(await env.ROUTING.get(`email-allowlist:${second.id}`)).toBeNull();
-    });
-
-    it('undoes a re-widen that lands between the tighten and the commit', async () => {
-      // A listing repair (or a confirm click) that derives its mirror while
-      // the demotion is still uncommitted sees `verified` rows next to a key
-      // the tighten already narrowed, and writes the old address back. That
-      // interleaving needs a second Postgres session, which PGlite does not
-      // have, so model its effect at the seam: the moment the tighten's put
-      // lands, overwrite the key with the wide value. The best-effort
-      // re-derive after the commit must undo it.
-      const { existing, project } = await seedRotatingOwner('929494', 'kv-rewiden-user');
-      const inheritedId = 'edst_inherited_929494';
-      const key = `email-allowlist:${project.id}`;
-
-      const realPut = env.ROUTING.put.bind(env.ROUTING);
-      const values: Array<string> = [];
-      vi.spyOn(env.ROUTING, 'put').mockImplementation(async (k, value, options) => {
-        values.push(value as string);
-        await realPut(k, value, options as never);
-        if (values.length === 1) {
-          await realPut(k, JSON.stringify(['old-owner@example.com', 'teammate@example.com']));
-        }
-      });
-
-      const res = await loginWithNewEmail('929494', 'kv-rewiden-user');
-      expect(res.status).toBe(302);
-      // In-transaction tighten, then the post-commit re-derive.
-      expect(values).toEqual([
-        JSON.stringify(['teammate@example.com']),
-        JSON.stringify(['teammate@example.com']),
-      ]);
-      const after = readState(existing.id, project.id, inheritedId);
-      expect(await after).toMatchObject({
-        email: 'new-owner@example.com',
-        status: 'pending',
-        mirror: ['teammate@example.com'],
-      });
-      expect(await env.ROUTING.get(key)).toBe(JSON.stringify(['teammate@example.com']));
+      const [secondRow] = await env.db
+        .select()
+        .from(emailDestinations)
+        .where(eq(emailDestinations.project_id, second.id));
+      expect(secondRow?.status).toBe('pending');
+      expect(secondRow?.verification_source).toBe('platform');
     });
   });
 
@@ -929,9 +770,9 @@ describe('email verification gating on account linking', () => {
     // The demotion above runs `UPDATE users` + the revoke in one transaction,
     // but it can only demote rows that EXIST when it runs. A login that
     // changes the address while the auto-add is parked at Cloudflare commits
-    // first and finds nothing; the auto-add then inserts the OLD address as
-    // `verified`, attributed to the OLD identity, and mirrors it into the
-    // allowlist. Every later login compares equal and never looks again.
+    // first and finds nothing; the auto-add must not insert the OLD address as
+    // `verified`, attributed to the OLD identity. Every later login compares
+    // equal and never revisits that grant.
     //
     // Interleaves at the Cloudflare stub: the projects route awaits the stub,
     // and the stub drives the real `/auth/callback` before answering. Both
@@ -1041,7 +882,6 @@ describe('email verification gating on account linking', () => {
         .from(emailDestinations)
         .where(eq(emailDestinations.project_id, project.id));
       expect(rows.filter((r) => r.status === 'verified')).toEqual([]);
-      expect(await env.ROUTING.get(`email-allowlist:${project.id}`)).toBeNull();
       // Nothing references the tag any more, so the add released it — the
       // same rollback every other post-allocation failure takes.
       expect(calls.filter((c) => c.method === 'DELETE').map((c) => c.url)).toEqual([
@@ -1139,7 +979,6 @@ describe('email verification gating on account linking', () => {
         .from(emailDestinations)
         .where(eq(emailDestinations.project_id, project.id));
       expect(rows).toEqual([]);
-      expect(await env.ROUTING.get(`email-allowlist:${project.id}`)).toBeNull();
       expect(calls.filter((c) => c.method === 'DELETE').map((c) => c.url)).toEqual([
         expect.stringContaining('/email/routing/addresses/cf-tag-racing-manual'),
       ]);
@@ -1242,7 +1081,6 @@ describe('email verification gating on account linking', () => {
         verified_by_user_id: null,
         verified_by_email_snapshot: null,
       });
-      expect(await env.ROUTING.get(`email-allowlist:${project.id}`)).toBeNull();
     });
   });
 });

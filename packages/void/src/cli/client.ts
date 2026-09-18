@@ -237,20 +237,17 @@ export type EmailLogEntry = {
   timestamp: number;
   direction: 'sent' | 'received';
   operationId: string;
-  receiptId?: string | null;
-  actionId?: string;
-  recipient?: string | null;
+  receiptId: string | null;
+  recipient: string | null;
   status: string;
-  transport?: string;
-  providerReference?: string | null;
-  errorCode?: string | null;
-  policyVersion?: number | null;
+  transport: string;
+  providerReference: string | null;
+  errorCode: string | null;
+  policyVersion: number | null;
 };
 
 export type EmailLogsResponse = {
   logs: Array<EmailLogEntry>;
-  pending?: boolean;
-  note?: string;
 };
 
 export type EmailDestinationResponse = {
@@ -285,58 +282,22 @@ export type EmailSettingsResponse = {
   recipientPolicy?: { mode: 'verified' | 'domains' | 'any'; domains: Array<string> };
 };
 
-/**
- * The public shape of an `email_domains` row (design doc 0078, contract 1) —
- * metadata only. The api's serializer never carries the credential, the
- * relay secret, or any ciphertext, so this type can never accidentally
- * contain one.
- */
 export type EmailDomainResponse = {
   id: string;
   domain: string;
-  mode: 'apex' | 'subdomain' | null;
-  status:
-    | 'pending'
-    | 'ready'
-    | 'disabled'
-    | 'drifted'
-    | 'active'
-    | 'token_revoked'
-    | 'token_expired'
-    | 'failed';
-  /** `platform` rows run on the platform's own credential — an administrator's row. */
-  credential_kind: 'oauth_grant' | 'api_token' | 'platform';
-  /** Who registered the row; owners may read an `admin` row but not sync or remove it. */
-  managed_by?: 'owner' | 'admin';
-  relay_worker_name: string | null;
+  projectId: string;
+  managed_by: 'owner' | 'admin';
+  status: EmailReadiness['inbound']['status'];
+  connectionId: string;
+  account_id: string;
+  zone_id: string;
+  relay_worker_name: string;
   relay_version: number | null;
-  /** Metadata from GET /user/tokens/verify (api_token rows) — safe to print. */
-  token_id: string | null;
-  token_expires_on: string | null;
-  /**
-   * The add attempt that last wrote the credential (null when an older CLI
-   * wrote it). Optional: apis predating attempt identity omit the key
-   * entirely, and `in`-operator detection on the raw row is how the add
-   * reconcile tells that apart from a stamped null.
-   */
+  operationId: string | null;
+  operationStatus?: EmailOperationResponse['status'] | null;
   attemptId?: string | null;
-  operationId?: string;
-  operationStatus?: EmailOperationResponse['status'];
-  readiness?: EmailReadiness;
-  setup_state: {
-    /** Orchestration step that left the row 'failed'. */
-    failed_step?: string;
-    /** Steps still owed by the human (the routing-subdomain dashboard form). */
-    remaining_steps?: Array<string>;
-  } | null;
-  /**
-   * Present on add/sync outcomes that failed a step. The api guarantees the
-   * text names the failing step or CF error — never credential material — so
-   * the CLI prints it verbatim.
-   */
-  error?: string;
-  created_at: string;
-  updated_at: string;
+  readiness: EmailReadiness;
+  error?: string | null;
 };
 
 export type EmailReadiness = {
@@ -367,48 +328,15 @@ export type EmailOperationResponse = {
   error?: string;
 };
 
-/** The zone catch-all outcome of a sync — absent when the row has no zone_id. */
-export type EmailDomainSyncCatchAll =
-  | 'ensured'
-  | 'already_set'
-  | 'foreign_conflict'
-  | 'probe_failed';
-
-/** POST .../email/domains/:domain/sync adds the catch-all outcome at the top level. */
-export type EmailDomainSyncResponse = EmailDomainResponse & {
-  catch_all?: EmailDomainSyncCatchAll;
-};
-
-/** GET /email/domains/:domain adds a live credential probe and the relay-drift read. */
-export type EmailDomainStatusResponse = EmailDomainResponse & {
-  credential_status: 'active' | 'expired' | 'revoked' | 'probe_failed';
-  current_relay_version: number;
-  relay_drift: boolean;
-  relay_missing: boolean | null;
-  /** Live read of the zone's catch-all rule relative to this domain's relay. */
-  catch_all: 'points_here' | 'points_elsewhere' | 'missing' | 'disabled' | 'unknown';
-  /** true when the zone's catch-all no longer points at this relay — `domain sync` re-points it. */
-  catch_all_drift: boolean;
-};
-
-/** A Cloudflare-side cleanup step the email-domain delete orchestration can fail. */
-export type RemoveEmailDomainFailedStep = 'catch_all' | 'delete_relay' | 'revoke_grant';
+export type EmailDomainStatusResponse = EmailDomainResponse;
+export type EmailDomainSyncResponse = EmailDomainResponse;
 
 export type RemoveEmailDomainResponse = {
-  operationId?: string;
+  operationId: string;
   operationStatus?: EmailOperationResponse['status'];
-  error?: string;
+  error?: string | null;
   ok: boolean;
-  /**
-   * false = the row was KEPT for retry: a Cloudflare-side step failed and
-   * the remove was not forced, so the credential stays for the retry.
-   * true = the platform row, the stored credential and the relay secret
-   * are gone.
-   */
   removed: boolean;
-  /** true when `?force=1` dropped the row despite Cloudflare-side failures. */
-  forced?: true;
-  failed_steps?: Array<RemoveEmailDomainFailedStep>;
 };
 
 export type DomainResponse = {
@@ -1720,13 +1648,7 @@ export class PlatformClient {
     return res.json();
   }
 
-  /**
-   * Installation email settings the CLI reads before acting. A platform
-   * predating the route answers a bare 404, which reads as the defaults —
-   * owners register their own domains there. The route's own 404 (the
-   * project is gone) is a real error: acting on it would open a browser and
-   * mint a grant for nothing.
-   */
+  /** Installation email settings the CLI reads before starting a credential flow. */
   async getEmailSettings(projectId: string): Promise<EmailSettingsResponse> {
     const res = await this.request(`${this.baseUrl}/projects/${projectId}/email/settings`, {
       headers: {
@@ -1734,13 +1656,6 @@ export class PlatformClient {
       },
     });
 
-    if (res.status === 404) {
-      const body = await res.text();
-      if (parsePlatformErrorBody(body)?.error === 'project not found') {
-        throw new PlatformApiError('Failed to read email settings', res.status, body);
-      }
-      return { domains: { management: 'self-serve' } };
-    }
     if (!res.ok) {
       await throwPlatformApiError('Failed to read email settings', res);
     }
@@ -1762,13 +1677,7 @@ export class PlatformClient {
     return res.json();
   }
 
-  /**
-   * `domain add` sends the credential exactly once — the OAuth grant's
-   * refresh token xor a pasted API token (the api enforces exactly one). It
-   * is the only call that ever carries it: the platform stores it encrypted
-   * per project, and every later step (`status`, `sync`, `remove`) addresses
-   * the row by domain. The caller must not log the input.
-   */
+  /** Submit a scoped token once; later operations address the domain without it. */
   async addEmailDomain(
     projectId: string,
     input: { domain: string; apiToken?: string; attemptId?: string },
@@ -1810,11 +1719,19 @@ export class PlatformClient {
     return res.json();
   }
 
-  /** Reconciles the shared zone connection without rotating its secret. */
-  async rotateEmailDomainSecret(projectId: string, domain: string): Promise<EmailDomainResponse> {
+  /** Rotates the shared zone connection secret. */
+  async rotateEmailDomainSecret(
+    projectId: string,
+    domain: string,
+    attemptId: string,
+  ): Promise<EmailDomainResponse> {
     const res = await this.request(
       `${this.baseUrl}/projects/${projectId}/email/domains/${encodeURIComponent(domain)}/rotate-secret`,
-      { method: 'POST', headers: { ...this.authHeaders } },
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...this.authHeaders },
+        body: JSON.stringify({ attemptId }),
+      },
     );
     if (!res.ok) {
       await throwPlatformApiError('Failed to rotate email connection secret', res);
@@ -1840,29 +1757,16 @@ export class PlatformClient {
     return res.json();
   }
 
-  /**
-   * `force` appends `?force=1`: the api drops the row even when a
-   * Cloudflare-side cleanup step fails (and answers `forced: true` +
-   * `failed_steps`). Without it a CF-side failure keeps the row for retry
-   * (`removed: false`).
-   */
-  async removeEmailDomain(
-    projectId: string,
-    domain: string,
-    force?: boolean,
-  ): Promise<RemoveEmailDomainResponse> {
-    const url = new URL(
+  async removeEmailDomain(projectId: string, domain: string): Promise<RemoveEmailDomainResponse> {
+    const res = await this.request(
       `${this.baseUrl}/projects/${projectId}/email/domains/${encodeURIComponent(domain)}`,
-    );
-    if (force) {
-      url.searchParams.set('force', '1');
-    }
-    const res = await this.request(url, {
-      method: 'DELETE',
-      headers: {
-        ...this.authHeaders,
+      {
+        method: 'DELETE',
+        headers: {
+          ...this.authHeaders,
+        },
       },
-    });
+    );
 
     if (!res.ok) {
       await throwPlatformApiError('Failed to remove email domain', res);

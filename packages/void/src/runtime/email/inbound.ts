@@ -1,12 +1,6 @@
-// `ForwardableEmailMessage` is not in workerd's RPC BaseType allowlist, so the
-// platform router serializes it into an `EmailEnvelope` and the worker returns
-// `EmailAction[]` describing what the handler decided. The router enacts the
-// actions on the real message.
-//
-// On the developer's own Cloudflare account there is no router: Cloudflare
-// calls the worker's `email()` with the real message. The same proxy runs the
-// handler, and `enactEmailActions` replays the recorded actions on the native
-// message, whose return value Cloudflare ignores.
+// Managed delivery uses bounded HTTP envelopes and recorded action responses.
+// Native Cloudflare email events use the same proxy, then enact its actions on
+// the original message before returning.
 
 import type { Email as PostalMimeEmail } from 'postal-mime';
 import { getRawRuntimeEnv } from '../env-raw.ts';
@@ -18,72 +12,25 @@ import type { Address, Attachment } from './types.ts';
 // the default reply `from` address.
 const VALID_SLUG = /^[a-z0-9](?:[a-z0-9-]{0,54}[a-z0-9])?$/;
 
-/**
- * Guardrails on what one handler may queue.
- *
- * These are NOT the security boundary. Recording happens inside the tenant's
- * own worker, and on the platform a Workers-for-Platforms tenant can ship any
- * `WorkerEntrypoint` whose `email()` returns any array at all, bypassing this
- * file entirely — so the load-bearing caps are the matching ones in the
- * platform router (`MAX_ACTIONS` / `MAX_ACTION_ADDRESS_LENGTH` in
- * `email-router.ts`). What these buy is a fast, precise failure at the call
- * that went wrong, instead of a whole action list silently dropped at the
- * router with only a platform-side log to show for it.
- */
+// SDK limits give handlers early errors. The gateway independently validates
+// untrusted tenant responses before admitting any action.
 const MAX_ACTIONS = 100;
 const MAX_ACTION_ADDRESS_LENGTH = 320;
 const MAX_ACTION_METADATA_BYTES = 8 * 1024;
 
-/**
- * Bounds on one forward's header bag: how many, and how long a name or a
- * value may be. Restated from the router's `MAX_FORWARD_HEADERS` /
- * `MAX_FORWARD_HEADER_LENGTH` (`email-router.ts` — the platform depends on
- * the framework, never the reverse, so the numbers cannot be imported; a
- * proxy-side test pins them equal). The router drops the WHOLE action list
- * on a violation, so a bag that passed here and failed there was a handler
- * whose test reported the forward and whose managed deployment silently
- * performed no actions. Exported for that parity test only.
- */
+/** Bounds on a forward's headers, shared with the handler test harness. */
 export const MAX_FORWARD_HEADERS: number = 32;
 export const MAX_FORWARD_HEADER_LENGTH: number = 1024;
 
-/**
- * Cap on a reject reason, restated from the router's
- * `MAX_REJECT_REASON_LENGTH` in `email-router.ts` for the same reason as
- * above, and pinned by the same test. See `normalizeRejectReason`.
- */
+/** Maximum normalized SMTP rejection reason length. */
 export const MAX_REJECT_REASON_LENGTH: number = 1000;
 
-/**
- * The router's ADMISSION bounds — what it refuses BEFORE the handler runs
- * (`MAX_INBOUND_BYTES` / `MAX_INBOUND_HEADERS` in `email-router.ts`,
- * restated for the same reason as above and pinned by the same test).
- * `routeInbound` rejects a message over either one and never dispatches it,
- * so a handler's behaviour on such a message is unreachable after a managed
- * deploy; the test harness applies both before it invokes the handler.
- *
- * `MAX_INBOUND_BYTES` is NOT `MAX_MESSAGE_BYTES`, though the numbers agree
- * today. That one is Cloudflare's cap on an OUTBOUND message (and the
- * `parseEmail` guard); this one is the router's own heap headroom on an
- * inbound one, set well under Cloudflare's ~25 MB inbound ceiling, and the
- * two can move independently.
- */
+/** Inbound admission limits also applied by the handler test harness. */
 export const MAX_INBOUND_BYTES: number = 10 * 1024 * 1024;
 export const MAX_INBOUND_HEADERS: number = 1024;
 
-/**
- * Cumulative reply-byte budget for ONE dispatch.
- *
- * `MAX_MESSAGE_BYTES` bounds a single `reply()` call, not the queue: N replies
- * at the cap is N x 10 MiB of `Uint8Array` riding one RPC response. workerd
- * caps a serialized RPC payload at 32 MiB, so the queue that clears our
- * per-reply check still fails at the boundary — opaquely. The router cannot
- * tell that failure from any other dispatch error, so the whole message comes
- * back to the sender as a generic "project handler error" reject with nothing
- * in it a handler author could act on. Two full-size replies is already well
- * past any legitimate use, and failing here names the exact call that
- * overran.
- */
+// The protocol encoder additionally counts framing and metadata toward its
+// total response budget.
 const MAX_REPLY_BYTES = 5 * 1024 * 1024;
 const MAX_REPLY_BYTES_TOTAL = 8 * 1024 * 1024;
 
@@ -217,41 +164,25 @@ interface RawCache {
 }
 const proxyRawCache = new WeakMap<ForwardableEmailMessage, RawCache>();
 
-/**
- * Serialized inbound email message — sent from the platform router to the
- * user worker over RPC. Every field is in workerd's RPC `BaseType`
- * allowlist (string, plain object, ReadableStream<Uint8Array>, number).
- */
+/** Inbound message decoded from the authenticated gateway request. */
 export interface EmailEnvelope {
   from: string;
   to: string;
-  /** Headers serialized as a plain object so they cross RPC. */
+  /** Decoded header metadata. */
   headers: Record<string, string>;
   /**
-   * Raw RFC 5322 bytes. Pre-buffered by the router so it's replayable on the
-   * receiving side (`parseEmail` consumes the stream once; if the handler
-   * also calls `parseEmail` directly, the platform tee'd a fresh stream per
-   * delivery).
+   * Raw RFC 5322 bytes. The message proxy caches them for repeated reads.
    */
   raw: ReadableStream<Uint8Array> | Uint8Array;
   rawSize: number;
   /**
-   * The registered custom domain this message arrived on, set only by the
-   * platform's relay lane (`POST /email/relay` — design doc 0078, "Custom
-   * domains on Cloudflare"). Undefined on the platform mail zone. A relayed
-   * recipient carries no `<slug>+` prefix, so the generated dispatcher runs
-   * in no-prefix mode for it (Mode B item 4) and `replyEmail` defaults
-   * `from` to the address that received it, on this domain.
+   * Exact custom domain selected by the gateway. Custom-domain recipients
+   * have no project-slug prefix; replies default to the received address.
    */
   viaDomain?: string;
 }
 
-/**
- * What the user handler decided to do with a message. Returned from the
- * worker's `email(envelope)` RPC method as an array (handlers may chain
- * multiple actions, e.g. forward then reply); the router enacts each on the
- * real `ForwardableEmailMessage` in order.
- */
+/** Handler intents, validated and admitted by the gateway before delivery. */
 export type EmailAction =
   | { type: 'reject'; reason: string }
   | { type: 'forward'; to: string; headers?: Record<string, string> }
@@ -472,7 +403,7 @@ function bytesToReadableStream(bytes: Uint8Array): ReadableStream<Uint8Array> {
  * accept a native `EmailMessage` from `cloudflare:email`: that class exposes
  * only `from` and `to` (workers-types declares nothing else, and the body
  * has no public accessor), so its bytes cannot be recorded here, and nothing
- * could carry them over RPC to the platform router. The reply MIME bytes are
+ * could encode them for the gateway. The reply MIME bytes are
  * buffered before being recorded so the action is fully self-contained.
  *
  * When `opts.slug` is provided, `message.to` is rewritten to remove the
@@ -574,17 +505,8 @@ export function createMessageProxy(
         return; // already rejected; ignore second reject
       }
       rejected = true;
-      // Deliberately NOT bounded by MAX_ACTIONS. The purge below makes this
-      // the one call that SHRINKS the queue, so it can never be what overruns
-      // it — and throwing out of "refuse this mail" would cost the handler its
-      // reject and hand the message back to the sender as a dispatch error,
-      // which is strictly worse than whatever the oversized queue was.
-      // Walk back through the queue and drop any prior forward/reply: CF
-      // (and the platform router) treats setReject as terminal — preceding
-      // actions in this dispatch never execute. Without this purge the
-      // action queue lies (records a forward the router never enacts),
-      // which corrupts the audit trail. Warn so handler authors notice
-      // the misuse.
+      // Reject is terminal and replaces queued deliveries, so it must remain
+      // available even when the action queue is full.
       let dropped = 0;
       for (let i = actions.length - 1; i >= 0; i--) {
         const a = actions[i];
@@ -614,16 +536,7 @@ export function createMessageProxy(
       if (to.length > MAX_ACTION_ADDRESS_LENGTH) {
         throw addressTooLong('to', to.length);
       }
-      // Shape, after the length bound above so the scan is over at most 320
-      // characters. `forward(rcptTo)` takes a bare address — Cloudflare's
-      // "verified destination address" — so no display name is parsed; the
-      // rule is the one `sendEmail` applies to its `to` AND the one the
-      // platform router drops on (`email-validator`, on both sides), so a
-      // handler's forward refuses exactly what an outbound send refuses and
-      // records nothing the router would lose. Left to replay, a malformed
-      // address in a LATER forward was refused by Cloudflare only after
-      // earlier forwards and replies had fired (the platform router
-      // validates the whole list first and drops just that forward).
+      // Validate the bare address before recording any delivery intent.
       validateAddressParts('to', to);
       // Accept both `Headers` (matches CF's runtime signature) and a plain
       // `Record<string, string>`. `Headers.entries()` lowercases keys per
@@ -634,15 +547,8 @@ export function createMessageProxy(
       if (fwdHeaders instanceof Headers) {
         headersObj = Object.fromEntries(fwdHeaders.entries());
       } else if (fwdHeaders) {
-        // A `Headers` instance has already validated its names and values;
-        // a record has not. Every consumer replays the record through
-        // `new Headers()` — `enactEmailActions` on a native message, the
-        // platform router before its own replay — so run that constructor
-        // here and fail in the handler's own call. Left to replay, a CRLF
-        // or NUL in a LATER forward surfaced only after earlier forwards and
-        // replies had fired, leaving Cloudflare a failed invocation for a
-        // message that was partly delivered. The record itself is what is
-        // stored: preserving name casing is why this form exists.
+        // Validate now to avoid partial delivery during native replay. Keep
+        // the record itself so caller-provided header casing is preserved.
         try {
           void new Headers(fwdHeaders);
         } catch (e) {
@@ -1294,8 +1200,8 @@ export async function buildReplyMessage(
 /**
  * Send a threading-aware reply to an inbound message. Builds the reply MIME
  * (correct `In-Reply-To` / `References` / `Subject: Re: …`) and records a
- * reply intent on the message proxy. The platform router enacts the reply
- * via the real `ForwardableEmailMessage.reply()` once the handler returns.
+ * reply intent on the message proxy. Delivery follows handler completion and,
+ * on the platform, authoritative admission.
  *
  * The threading headers are best-effort, since the inbound values they are
  * built from are remote-sender controlled: an id no header line can carry
@@ -1315,10 +1221,8 @@ export async function replyEmail(
 }
 
 /**
- * Whether `value` is a real `ForwardableEmailMessage` — one Cloudflare
- * delivered to this worker's `email()` directly — rather than an
- * `EmailEnvelope` from the platform router. Functions do not survive RPC,
- * so their presence is the discriminator.
+ * Recognize native email operations. This structural check is not an
+ * authentication boundary; managed entrypoints require receipt authentication.
  */
 export function isForwardableEmailMessage(value: unknown): value is ForwardableEmailMessage {
   if (typeof value !== 'object' || value === null) {
@@ -1340,16 +1244,8 @@ export function isForwardableEmailMessage(value: unknown): value is ForwardableE
  * duck-typed object — so `cloudflare:email` is loaded here, and only when
  * a reply was recorded.
  *
- * The `new Headers()` below is the one step this loop constructs from
- * handler input, and it cannot fail on a recorded action: the proxy's
- * `forward()` already ran the record through that constructor, so a bad
- * record failed inside the handler, before any replay. (`EmailMessage`
- * construction neither validates nor reads its stream — measured under
- * workerd.) A reject's reason reaches the native `setReject()` as the proxy
- * recorded it — already sliced and stripped the way the platform router
- * would (`normalizeRejectReason`), so the SMTP reply is the same in both
- * deployments. What Cloudflare itself refuses at `forward()` / `reply()`
- * still throws out of the loop, as any native call would.
+ * The proxy already validated forward headers and normalized reject reasons.
+ * Provider refusals still propagate to the native event caller.
  */
 export async function enactEmailActions(
   message: ForwardableEmailMessage,

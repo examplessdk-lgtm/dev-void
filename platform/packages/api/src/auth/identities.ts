@@ -214,7 +214,6 @@ export async function resolvePlatformLogin(
   ) {
     await updateUserRevokingInheritedDestinations(
       db,
-      env.ROUTING,
       result.user.id,
       identity.login,
       result.user.email,

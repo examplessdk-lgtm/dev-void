@@ -201,13 +201,8 @@ describe('rendered help advertises the flags the parser honours', () => {
       'void email domain add <domain> [options]',
     );
 
-    // `remove` is the one domain verb with a flag of its own.
-    expect(parseEmailArgs(['domain', 'remove', 'acme.com', '--force'])).toMatchObject({
-      domainVerb: 'remove',
-      force: true,
-    });
     const removePage = render(['email', 'domain', 'remove']);
-    expect(removePage).toContain('--force');
+    expect(removePage).not.toContain('--force');
     expect(removePage).toContain('--project <name>');
   });
 });

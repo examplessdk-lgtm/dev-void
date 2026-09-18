@@ -9,13 +9,7 @@ import {
   finishEmailAttempt,
   startEmailAttempt,
 } from './email-admission.ts';
-import { dropEmailDomainLease, leaseBearer, leaseEmailDomainCredential } from './email-lease.ts';
-import {
-  readAllowlist,
-  readRecipientPolicy,
-  recipientAllowed,
-  recipientRefusalMessage,
-} from './email-policy.ts';
+import { leaseBearer, leaseEmailDomainCredential } from './email-lease.ts';
 import type { Env, ProxyEnv } from './types.ts';
 
 const app = new Hono<ProxyEnv>();
@@ -191,20 +185,6 @@ export function strictFromRe(domain: string): RegExp {
   strictFromCache.set(domain, re);
   return re;
 }
-
-/**
- * Valid project slug shape. The api worker writes `email-slug:<projectId>`
- * KV mirror entries; we read them and pin the `from` local-part against
- * the value. A poisoned KV (corrupted write, attacker-controlled bypass
- * of the api worker) returning e.g. `BADSLUG!` would then be accepted as
- * the source-of-truth slug and let `from: badslug!@<domain>` through — and
- * crucially, the strict-from regex above doesn't allow `!` in the
- * local-part, so the comparison would silently fail every future request
- * for that project without anyone noticing the bad data. Validate the slug
- * shape on read so a bad value surfaces as UPSTREAM_ERROR with a clear
- * message instead.
- */
-const SLUG_RE = /^[a-z0-9._-]+$/;
 
 /**
  * Strip CR/LF/NUL/control chars before logging or surfacing to remote MTAs.
@@ -523,78 +503,6 @@ function singleMailboxAddrSpec(value: string): string | null {
 }
 
 /**
- * Platform-wide suspension marker.
- *
- * `routing.suspended` is written into a project's routing blob by
- * `applyRoutingSuspension` / `setProjectsRoutingSuspension` in the api
- * worker and enforced with a 429 by `packages/dispatch`. Email is the other
- * tenant-facing egress path, so it has to honor the same marker: without
- * this check a project suspended for abuse keeps sending through the
- * platform's own account-level `send_email` binding. The narrower
- * `email-suspended:<projectId>` switch below stays as the email-only
- * kill-switch.
- *
- * No `cacheTtl`, for the same reason as `email-suspended:` — this is an
- * abuse-response control where convergence latency is the whole point.
- *
- * A MISSING routing blob is NOT read as a suspension. The marker is only
- * ever written INTO an existing entry, so a project with no routing entry
- * has nothing suspended; failing closed on absence would instead break every
- * send made before the first routing write.
- *
- * An UNPARSEABLE blob is a different case and is reported as `corrupt` so
- * the caller can fail closed. Every producer of this value
- * (`api/src/routing.ts`, `api/src/routes/deploy.ts`, `api/src/index.ts`)
- * writes a `JSON.stringify`d object, so there is no legitimate writer of a
- * malformed entry and therefore no false positive to trade against. Reading a parse
- * failure as "not suspended" would silently disable the platform-wide
- * suspension gate for exactly the project whose entry got corrupted.
- */
-type RoutingSuspension =
-  | { kind: 'absent' }
-  | { kind: 'clear' }
-  | { kind: 'suspended'; reason: string }
-  | { kind: 'corrupt' };
-
-async function readRoutingSuspension(kv: KVNamespace, slug: string): Promise<RoutingSuspension> {
-  const raw = await kv.get(slug);
-  if (!raw) {
-    return { kind: 'absent' };
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return { kind: 'corrupt' };
-  }
-  // `JSON.parse('null')` and friends parse cleanly but carry no marker to
-  // read, and no producer emits them either — treat them as corrupt rather
-  // than reaching for `.suspended` on a non-object.
-  if (typeof parsed !== 'object' || parsed === null) {
-    return { kind: 'corrupt' };
-  }
-  // The marker is read by TRUTHINESS, the same test the two sibling readers
-  // apply — `packages/dispatch` (`if (routing.suspended)` → 429) and the
-  // inbound router in `email-router.ts` (truthy → reject). A falsy present
-  // value (`null`, `false`, `''`, `0`) is "not suspended" to both of them, so
-  // it is `clear` here too: no writer emits one today (an unsuspend DELETES
-  // the key), but a future clear that stamps `suspended: null` must not
-  // brick every send. A TRUTHY value that is not a string has no writer
-  // either — every producer stamps a non-empty reason string — yet both
-  // siblings refuse on it, so it is `corrupt` rather than `clear`: the send
-  // path must not be the one gate that reads a marker the edge and inbound
-  // paths are blocking on as an open door.
-  const suspended = (parsed as { suspended?: unknown }).suspended;
-  if (!suspended) {
-    return { kind: 'clear' };
-  }
-  if (typeof suspended !== 'string') {
-    return { kind: 'corrupt' };
-  }
-  return { kind: 'suspended', reason: suspended };
-}
-
-/**
  * Outbound email send. The framework runtime POSTs:
  *
  *   {
@@ -610,15 +518,11 @@ async function readRoutingSuspension(kv: KVNamespace, slug: string): Promise<Rou
  *   1. Validates structure + size
  *   2. Checks platform suspension (`routing.suspended`) and the per-project
  *      email suspend kill-switch
- *   3. Checks the per-project verified-destinations allowlist
- *      (mirrored from `email_destinations` into `email-allowlist:<id>` KV)
- *   4. Runs burst + monthly outbound quota gates against the *allowed*
- *      recipient count (denied-by-allowlist sends don't burn quota)
- *   5. Calls `env.SEND_EMAIL.send()` per allowed recipient
- *   6. Returns a `SendEmailResult`-shaped JSON the framework passes through
+ *   3. Admits the send against the SQL recipient policy and quota ledger
+ *   4. Calls `env.SEND_EMAIL.send()` per admitted recipient
+ *   5. Returns per-recipient outcomes to the framework
  *
- * Quotas + allowlists live exclusively in the proxy. The user worker does
- * not have a `send_email` binding.
+ * The user worker does not have a `send_email` binding.
  */
 app.post('/send', async (context) => {
   const projectId = context.get('projectId');
@@ -811,13 +715,7 @@ app.post('/send', async (context) => {
     );
   }
 
-  // Custom sender domains (design doc 0078, "Custom domains on
-  // Cloudflare"): a `from` whose domain is NOT the platform sender domain
-  // belongs to a registered `email_domains` row, not to the shared zone.
-  // The slug pin and strict regex below only make sense ON `senderDomain`,
-  // so the paths fork here — after the size and structure gates that apply
-  // to both. A `from` with no usable domain part falls through to the
-  // shared-path guards, which refuse it.
+  // A sender outside the shared platform domain uses the custom-domain path.
   const fromAt = from.indexOf('@');
   const fromDomain = fromAt === -1 ? '' : from.slice(fromAt + 1).toLowerCase();
   if (fromDomain !== '' && fromDomain !== senderDomain) {
@@ -884,8 +782,7 @@ app.post('/send', async (context) => {
   // A mismatch here is a request the framework never produces — `buildMime`
   // renders `From:` from the same `from.email` it posts as the envelope — so
   // it is refused outright rather than reported per recipient. Runs before
-  // the suspension and allowlist reads for the same reason as the slug pin:
-  // no KV work for a request that can never be authorized. The refusal may
+  // the admission call for the same reason as the slug pin. The refusal may
   // echo `from`: it is at most `MAX_SENDER_LENGTH` printable-ASCII bytes by
   // now.
   const mimeFrom = readMimeFromAddrSpec(raw);
@@ -1038,11 +935,10 @@ app.post('/send', async (context) => {
     }
   }
 
-  // Inline log (analytics-engine wiring TODO).
+  // Record the per-recipient outcome.
   logSend(projectId, requestId, deliveries);
 
-  // If any recipient failed (allowlist miss OR upstream error), surface as
-  // a mid-batch failure so callers can retry per-recipient.
+  // Return each outcome; an unknown provider result must be inspected before retry.
   const anyFailed = deliveries.some((d) => !d.ok);
   if (anyFailed) {
     return context.json({ ok: false, operationId: admission.operationId, deliveries }, 200);
@@ -1059,8 +955,7 @@ app.post('/send', async (context) => {
 });
 
 // -----------------------------------------------------------------------------
-// Custom sender domains — a `/send` fork for `from` domains registered to
-// the project (design doc 0078, "Custom domains on Cloudflare").
+// Custom sender domains.
 // -----------------------------------------------------------------------------
 
 /**
@@ -1090,26 +985,7 @@ export function readSendRawAddressList(value: unknown): Set<string> {
   return out;
 }
 
-/**
- * Custom-domain outbound send. Reached from `/send` when the from-address
- * domain is not the platform sender domain.
- *
- * Authorization is the domain mirror, not the slug pin: the api mirrors
- * every `email_domains` row to `email-domain:<domain>` in ROUTING KV, and
- * the send proceeds only when that mirror maps the domain to the CALLING
- * project and the row is `active`. The message then leaves through the
- * CUSTOMER's Cloudflare account — `POST
- * /accounts/{accountId}/email/sending/send_raw` bearing a credential leased
- * from the api (`email-lease.ts`) — so DKIM alignment and the daily quota
- * are the customer's own.
- *
- * The platform's abuse and quota controls apply unchanged and run BEFORE
- * the external call: platform-wide routing suspension, the email-only
- * kill-switch, and the burst + monthly counters. The one shared-path gate
- * deliberately absent is the verified-destination allowlist (decision 6):
- * the customer's own Email Sending onboarding lifts Cloudflare's
- * verified-destination gate, and the reputation at stake is theirs.
- */
+/** Send through the customer's Cloudflare account after project-bound admission. */
 async function sendViaCustomDomain(
   context: Context<ProxyEnv>,
   projectId: string,
@@ -1135,15 +1011,7 @@ async function sendViaCustomDomain(
   }
   const fromLower = from.toLowerCase();
 
-  // PostgreSQL domain ownership is checked by the project-bound lease and
-  // again by admission. A stale ROUTING mirror cannot authorize or deny send.
-
-  // Pin what the recipient will SEE, exactly as the shared path does: the
-  // MIME `From:` must be the envelope sender. The mirror already bounds the
-  // domain to this project; this keeps the header from naming a different
-  // mailbox on it. Runs before the suspension and quota reads for the same
-  // reason as the shared path's pin: no KV work for a request that can
-  // never be authorized.
+  // The MIME From address must match the envelope sender before admission.
   const mimeFrom = readMimeFromAddrSpec(raw);
   if (!mimeFrom.ok || mimeFrom.addrSpec.toLowerCase() !== fromLower) {
     const detail = mimeFrom.ok
@@ -1315,12 +1183,8 @@ async function sendViaCustomDomain(
   }
   if (cfRes) {
     if (!cfRes.ok) {
-      // A refused credential (401/403) evicts the cached lease so the next
-      // send re-leases; the api marks the row on its own probe path. CF's
-      // error body is never echoed or logged — it is not ours to surface.
-      if (cfRes.status === 401 || cfRes.status === 403) {
-        dropEmailDomainLease(fromDomain);
-      }
+      // A fresh credential is leased for every attempt. Provider error
+      // bodies are not echoed or logged.
       failure = {
         code: cfRes.status === 429 ? 'QUOTA_EXCEEDED' : 'UPSTREAM_ERROR',
         message: `email sending API returned ${cfRes.status}`,
@@ -1565,88 +1429,6 @@ function logSend(projectId: string, requestId: string, deliveries: Array<Recipie
   }
 }
 
-/**
- * The api's `email_domains` row projected into ROUTING KV at
- * `email-domain:<domain>` (design doc 0078, "Custom domains on
- * Cloudflare"). Written on every row create/update, deleted on row delete;
- * the proxy has no database access, so this mirror is its ONLY view of a
- * registered custom domain. `relaySecretSha256` is the sha256 (hex) of the
- * domain's relay secret — the secret itself never reaches KV.
- *
- * Read by the `/email/relay` auth branch (index.ts), by the custom-domain
- * `/send` fork, and by the reply-sender pin (email-router.ts). The shape is
- * a wire contract with the api (`api/src/email/domains.ts`).
- */
-export interface EmailDomainMirror {
-  projectId: string;
-  status: string;
-  relaySecretSha256: string;
-  relayWorkerName: string | null;
-  accountId: string | null;
-  zoneId: string | null;
-  mode: string | null;
-}
-
-/**
- * Read the mirror for `domain` (already lowercased by the caller). Returns
- * null on absence AND on a malformed entry — the proxy trusts only the
- * fields it validates, and a poisoned KV value fails closed like a missing
- * one. `cacheTtl` follows the allowlist pattern (~60s per-colo
- * convergence); the relay auth branch reads WITHOUT it so a revoked or
- * rotated secret stops working at KV speed.
- */
-export async function readEmailDomainMirror(
-  kv: KVNamespace,
-  domain: string,
-  options?: { cacheTtl?: number },
-): Promise<EmailDomainMirror | null> {
-  const raw = await kv.get(`email-domain:${domain}`, options);
-  if (!raw) {
-    return null;
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return null;
-  }
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-    return null;
-  }
-  const entry = parsed as Record<string, unknown>;
-  if (
-    typeof entry.projectId !== 'string' ||
-    entry.projectId === '' ||
-    typeof entry.status !== 'string' ||
-    typeof entry.relaySecretSha256 !== 'string'
-  ) {
-    return null;
-  }
-  return {
-    projectId: entry.projectId,
-    status: entry.status,
-    relaySecretSha256: entry.relaySecretSha256,
-    relayWorkerName: typeof entry.relayWorkerName === 'string' ? entry.relayWorkerName : null,
-    accountId: typeof entry.accountId === 'string' ? entry.accountId : null,
-    zoneId: typeof entry.zoneId === 'string' ? entry.zoneId : null,
-    mode: typeof entry.mode === 'string' ? entry.mode : null,
-  };
-}
-
-/**
- * Defends against poisoned KV values: `parseInt('NaN'|'abc',10)` returns
- * NaN, which would (a) make `NaN > limit` false → bypass and (b) write
- * literal `"NaN"` back if used in arithmetic. Always coerces to a finite
- * non-negative integer, falling back to 0.
- */
-function readCounter(raw: string | null): number {
-  if (!raw) {
-    return 0;
-  }
-  const n = parseInt(raw, 10);
-  return Number.isFinite(n) && n >= 0 ? n : 0;
-}
-
 function base64Decode(b64: string): Uint8Array {
   // workerd `atob` is fast for body-sized payloads; fall back to manual
   // decode only when needed.
@@ -1656,51 +1438,6 @@ function base64Decode(b64: string): Uint8Array {
     out[i] = binary.charCodeAt(i);
   }
   return out;
-}
-
-function monthBucket(now: Date): string {
-  return `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
-}
-
-function minuteBucket(now: Date): string {
-  return `${now.getUTCFullYear()}${String(now.getUTCMonth() + 1).padStart(2, '0')}${String(
-    now.getUTCDate(),
-  ).padStart(2, '0')}T${String(now.getUTCHours()).padStart(2, '0')}${String(
-    now.getUTCMinutes(),
-  ).padStart(2, '0')}`;
-}
-
-/**
- * Seconds until shortly after the end of the current UTC month (1 hour
- * buffer absorbs late writes around the boundary). KV requires
- * `expirationTtl >= 60`.
- */
-function monthTtlSeconds(now: Date): number {
-  const endOfMonth = Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1, 0, 0, 0, 0);
-  const seconds = Math.ceil((endOfMonth - now.getTime()) / 1000) + 60 * 60;
-  return Math.max(60, seconds);
-}
-
-async function getBurstLimit(kv: KVNamespace, projectId: string): Promise<number> {
-  const raw = await kv.get(`email-burst-limit:${projectId}`, { cacheTtl: 60 });
-  if (raw) {
-    const n = parseInt(raw, 10);
-    if (Number.isFinite(n) && n > 0) {
-      return n;
-    }
-  }
-  return 10;
-}
-
-async function getMonthlyLimit(kv: KVNamespace, projectId: string): Promise<number> {
-  const raw = await kv.get(`email-limit:${projectId}`, { cacheTtl: 60 });
-  if (raw) {
-    const n = parseInt(raw, 10);
-    if (Number.isFinite(n) && n > 0) {
-      return n;
-    }
-  }
-  return 200;
 }
 
 /**

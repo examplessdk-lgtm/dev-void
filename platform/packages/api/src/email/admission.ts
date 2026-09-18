@@ -360,6 +360,8 @@ export async function admitEmailAction(
         errorCode = 'SUSPENDED';
       } else if (!senderAllowed) {
         errorCode = 'INVALID_FROM';
+      } else if (input.kind === 'forward' && input.transport === 'send_raw') {
+        errorCode = 'UNSUPPORTED_ACTION';
       } else if (!allowed) {
         errorCode = 'UNVERIFIED_DESTINATION';
       } else if (burstUsed >= controls.burst_limit || monthUsed >= controls.monthly_limit) {
@@ -779,7 +781,8 @@ export async function claimRelayedEmailReceipt(
     ) {
       throw new EmailAdmissionError('CONFLICT', 'relay invocation content conflict');
     }
-    return existing.status === 'delivery_completed' && existing.final_reject !== null
+    return (existing.status === 'delivery_completed' || existing.status === 'actions_rejected') &&
+      existing.final_reject !== null
       ? { state: 'completed', reject: existing.final_reject }
       : { state: 'in_progress' };
   });
@@ -802,18 +805,21 @@ export async function completeRelayedEmailReceipt(
     ) {
       throw new EmailAdmissionError('CONFLICT', 'relay receipt mismatch');
     }
-    if (existing.status === 'delivery_completed') {
+    if (existing.final_reject !== null) {
       if (existing.final_reject !== input.reject) {
         throw new EmailAdmissionError('CONFLICT', 'relay outcome conflict');
       }
       return;
     }
-    if (existing.status !== 'handler_completed') {
+    if (existing.status !== 'handler_completed' && existing.status !== 'actions_rejected') {
       throw new EmailAdmissionError('INVALID_STATE', 'relay handler has not completed');
     }
     await tx
       .update(emailReceipts)
-      .set({ status: 'delivery_completed', final_reject: input.reject })
+      .set({
+        status: existing.status === 'actions_rejected' ? 'actions_rejected' : 'delivery_completed',
+        final_reject: input.reject,
+      })
       .where(eq(emailReceipts.id, input.receiptId));
   });
 }
@@ -890,7 +896,7 @@ export async function getProjectEmailLogs(db: Db, projectId: string, limit = 50)
         status: receipt.status,
         transport: 'email_event',
         providerReference: null,
-        errorCode: null,
+        errorCode: receipt.status === 'actions_rejected' ? 'INVALID_ACTIONS' : null,
         policyVersion: null,
       })),
     ]

@@ -15,9 +15,8 @@
  * project can claim one. These five were reserved only when email shipped,
  * though, and the create-time check cannot reach a project registered
  * before that — so every consumer on the email path also refuses the slug
- * outright: the hourly `email-slug:` backfill writes no mirror for it (and
- * removes one written earlier), the proxy refuses `/email/send` for it, and
- * the inbound router rejects mail addressed to it. Kept in its own module
+ * outright: the proxy refuses `/email/send` for it, and the inbound router
+ * rejects mail addressed to it. Kept in its own module
  * so the proxy (`@voidcloud/api/reserved-slugs`) shares one list with the
  * api rather than carrying a copy that can drift.
  *
@@ -37,8 +36,8 @@ export const EMAIL_RESERVED_SLUGS: ReadonlySet<string> = new Set([
 /**
  * True when `slug` may not send or receive mail on the platform domain.
  * Callers pass a slug that is already lowercase: the api validates the
- * shape at create time, the proxy's `SLUG_RE` re-validates the KV mirror,
- * and the inbound router lowercases the recipient before splitting it.
+ * shape at create time, and the inbound router lowercases the recipient
+ * before splitting it.
  */
 export function isReservedEmailSlug(slug: string): boolean {
   return EMAIL_RESERVED_SLUGS.has(slug);

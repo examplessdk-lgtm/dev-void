@@ -18,7 +18,6 @@ import { verifyConfirmToken } from '../auth/confirm-token.ts';
 import { getEmailDestinationById, getProject, updateEmailDestinationStatus } from '../db.ts';
 import { escapeHtml } from '../email.ts';
 import type { ApiEnv } from '../env.ts';
-import { syncProjectAllowlistKvBestEffort } from '../provisioning/email-allowlist.ts';
 
 const app = new Hono<ApiEnv>();
 
@@ -80,7 +79,6 @@ app.get('/destinations/confirm', async (context) => {
     // (whatever the row was created with) stays put.
     undefined,
   );
-  await syncProjectAllowlistKvBestEffort(context.get('db'), context.env.ROUTING, row.project_id);
 
   return context.html(successPage(slug, row.address, false));
 });

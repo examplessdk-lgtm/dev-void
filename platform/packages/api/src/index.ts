@@ -75,7 +75,6 @@ import {
   deleteCustomHostname,
   getCustomHostname,
 } from './provisioning/cloudflare-api.ts';
-import { isReservedEmailSlug } from './reserved-slugs.ts';
 import { oidcRoutes } from './routes/auth-oidc.ts';
 import auth from './routes/auth.ts';
 import deleteRoute from './routes/delete.ts';
@@ -852,47 +851,6 @@ async function processUserRollover(
   user: { id: string; plan: string; billing_cycle_start: string; suspended_reason: string | null },
   userProjects: ReadonlyArray<{ id: string; slug: string }>,
 ): Promise<void> {
-  // Backfill the `email-slug:<projectId>` mirror. It is written
-  // best-effort at createProject time, so a transient KV blip during
-  // create would leave a project permanently unsendable (the proxy's
-  // /email/send answers 502 'project slug unknown' without it).
-  // Re-write it idempotently on every hourly pass so a missing — or
-  // stale, after a project rename — mirror heals with no operator
-  // action. In its own try/catch, ahead of the routing-JSON backfill
-  // below: that block throws out on a malformed routing entry every
-  // pass, so sharing its try/catch would hold the mirror hostage to one
-  // bad entry (and vice versa) — neither may block the other, and
-  // neither may block rollover/unsuspension.
-  //
-  // A project whose slug is an email identity (`EMAIL_RESERVED_SLUGS`:
-  // `noreply`, `postmaster`, …) gets NO mirror. Those slugs were reserved
-  // only when email shipped, so a project registered earlier can still
-  // hold one, and the create-time check never sees it; the mirror is what
-  // authorizes `/email/send`, so withholding it keeps the proxy's answer
-  // at 502 for that project. A mirror written before the slug was
-  // reserved is deleted here — this pass is the migration — and the
-  // proxy refuses the slug on its own as well, for the hour until it is.
-  try {
-    for (const project of userProjects) {
-      const emailSlugKey = `email-slug:${project.id}`;
-      const existingSlug = await env.ROUTING.get(emailSlugKey);
-      if (isReservedEmailSlug(project.slug)) {
-        if (existingSlug !== null) {
-          await env.ROUTING.delete(emailSlugKey);
-          console.warn(
-            `[backfill] removed email-slug mirror for project ${project.id}: "${project.slug}" is a reserved email identity`,
-          );
-        }
-        continue;
-      }
-      if (existingSlug !== project.slug) {
-        await env.ROUTING.put(emailSlugKey, project.slug);
-      }
-    }
-  } catch (err) {
-    console.error(`[backfill] email-slug backfill failed for user ${user.id}:`, err);
-  }
-
   // Backfill userId into old KV routing entries (all plans, before early return).
   // Wrapped in try/catch so a malformed KV entry doesn't block rollover/unsuspension.
   try {

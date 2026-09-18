@@ -620,7 +620,7 @@ void platform email limit <project-id|slug> [--monthly <n>] [--burst <n>]
 
 `policy` decides which recipients a project's `<slug>+tag@<mail domain>` sender reaches: `verified` (the default) means only that project's verified destinations; `domains` adds every address on the listed domains; `any` lifts the check. Neither widens delivery to addresses on the platform's own mail domain: those stay verified-destination-only, so no project reaches another project's inbox without its consent. Cloudflare still refuses a destination it has not verified until the platform mail domain is onboarded for Email Sending, so under `domains` or `any` such refusals arrive as per-recipient `UNVERIFIED_DESTINATION` results. Custom-domain sends are not affected.
 
-`settings-set --domains admin` tells `void email domain add` to print the administrator's command instead of starting a Cloudflare grant. `limit` overrides the project's monthly and per-minute caps (defaults 200 and 10); a project page in the admin UI shows and clears them. When both caps are given and only one could be written, the result names the applied and failed cap and exits nonzero.
+`settings-set --domains admin` tells `void email domain add` to print the administrator's command instead of starting token setup. `limit` overrides the project's monthly and rolling 60-second caps (defaults 200 and 10); a project page in the admin UI shows and clears them.
 
 Register and maintain email domains for projects whose owners hold no Cloudflare credential:
 
@@ -629,10 +629,10 @@ void platform email domains [--project <id|slug>]
 void platform email domain-add <domain> --project <id|slug> [--token-stdin]
 void platform email domain-status <domain>
 void platform email domain-sync <domain>
-void platform email domain-remove <domain> [--force]
+void platform email domain-remove <domain>
 ```
 
-`domain-add` runs the same setup as `void email domain add` on the platform's own Cloudflare credential, so the zone must be in the platform's account; for a zone elsewhere, pipe a Cloudflare API token for that account on standard input with `--token-stdin --yes`. Name the exact mail domain (`mail.example.com`, or the apex when it receives no mail yet). Enabling Email Routing on a subdomain stays a one-time Cloudflare dashboard step, which `domain-status` reports and self-clears once the MX records appear; after a Workers Paid upgrade, `domain-sync` re-attempts the Email Sending onboarding. A setup or sync that ends with the domain `failed` or its credential revoked or expired is reported as a partial failure and exits nonzero; the result names the failing step, and running `domain-add` again retries it. Rows an administrator adds show `managed_by: admin`; their owners can list and inspect them but are pointed at these commands for `sync` and `remove`.
+`domain-add` uses the platform's Cloudflare credential for zones in its account. For another account, pipe a scoped Cloudflare API token on standard input with `--token-stdin --yes`. Name the exact mail domain (`mail.example.com`, or the apex when it receives no mail yet). `domain-status` shows inbound, outbound, and credential-management readiness with the latest operation. A blocked or uncertain operation exits unsuccessfully and can be inspected by its operation ID; use `domain-sync` to reconcile the connection. Domains an administrator adds show `managed_by: admin`; their owners can list and inspect them but use these commands for `sync` and `remove`.
 
 #### System {#operator-system}
 
@@ -1478,12 +1478,12 @@ The project owner's email is added automatically when the project is created, so
 void email disallow <address> [--project <name>]
 ```
 
-Remove one recipient from the project's destination list. Sends to that address are refused for new sends immediately; previously admitted attempts may finish: the platform updates the project's allowlist as part of the command, and the proxy re-reads it every 60 seconds. No deploy is involved.
+Remove one recipient from the project's destination list. New sends to that address are refused immediately; previously admitted attempts may finish. No deploy is involved.
 
 ### `void email domain`
 
 ```
-void email domain <add|status|list|sync|remove> [<domain>] [--project <name>]
+void email domain <add|status|list|sync|rotate-secret|remove> [<domain>] [--project <name>]
 ```
 
 Send and receive at your own domain on a Cloudflare zone you own, registered to the project. Void platform only — on your own Cloudflare account the mail domain comes from `email.from` instead (see `void email setup`). The walkthrough is [Your own domain on the platform](../guide/email.md#your-own-domain-on-the-platform).
@@ -1510,7 +1510,7 @@ Show the recorded inbound, outbound, and management readiness, observation times
 void email domain list [--project <name>]
 ```
 
-List the project's registered email domains with their status and mode.
+List the project's registered email domains and readiness.
 
 #### `void email domain sync`
 

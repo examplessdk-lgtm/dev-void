@@ -363,14 +363,7 @@ app.get('/callback', async (context) => {
       // Only overwrite stored email when the new one is verified;
       // a transient /user/emails failure must not wipe the existing email.
       if (emailVerified) {
-        await updateUserRevokingInheritedDestinations(
-          db,
-          context.env.ROUTING,
-          user.id,
-          login,
-          user.email,
-          email,
-        );
+        await updateUserRevokingInheritedDestinations(db, user.id, login, user.email, email);
       } else {
         await updateUser(db, user.id, login, user.email);
       }

@@ -719,19 +719,10 @@ const HELP_TREE: HelpTree = {
             'Reconcile the zone connection and refresh readiness.',
             'void email domain sync <domain> [options]',
           ),
-          // Not `withProjectOption`: `remove` has a flag of its own (`--force`),
-          // same shape as the `email logs` page above.
-          remove: {
-            summary: 'Disable the domain assignment and reconcile shared resources.',
-            usage: ['void email domain remove <domain> [options]'],
-            options: [
-              {
-                command: '--force',
-                description: 'Retain cleanup intent when provider work cannot be completed',
-              },
-              { command: '--project <name>', description: 'Project name override' },
-            ],
-          },
+          remove: withProjectOption(
+            'Disable the domain assignment and reconcile shared resources.',
+            'void email domain remove <domain> [options]',
+          ),
         },
       },
       // Mode B (design doc 0078): both read the local project + your wrangler session,

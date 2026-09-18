@@ -1,12 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vite-plus/test';
-import {
-  CF_CUSTOMER_API_BASE,
-  CF_EMAIL_OAUTH_CLIENT_ID,
-  OAuthGrantError,
-  createCfCustomerClient,
-  refreshOauthGrant,
-  revokeOauthGrant,
-} from '../../src/email/cf-customer.ts';
+import { CF_CUSTOMER_API_BASE, createCfCustomerClient } from '../../src/email/cf-customer.ts';
 import { CloudflareApiError } from '../../src/provisioning/cloudflare-api.ts';
 
 // Dummy stand-ins — never real token material, per the no-secrets rule.
@@ -203,8 +196,10 @@ describe('cf-customer client', () => {
       await client.putRelayScript(ACCOUNT, RELAY, {
         source: 'export default {};\n',
         compatibilityDate: '2026-09-01',
-        proxyOrigin: 'https://proxy.example.test',
-        emailDomain: 'acme.com',
+        gatewayOrigin: 'https://gateway.example.test',
+        accountId: ACCOUNT,
+        zoneId: ZONE,
+        ingressName: RELAY,
       });
 
       const { url, init } = lastCall(fetchMock);
@@ -225,10 +220,10 @@ describe('cf-customer client', () => {
           {
             type: 'plain_text',
             name: 'VOID_EMAIL_GATEWAY_ORIGIN',
-            text: 'https://proxy.example.test',
+            text: 'https://gateway.example.test',
           },
           { type: 'plain_text', name: 'VOID_EMAIL_ACCOUNT', text: ACCOUNT },
-          { type: 'plain_text', name: 'VOID_EMAIL_ZONE', text: '' },
+          { type: 'plain_text', name: 'VOID_EMAIL_ZONE', text: ZONE },
           { type: 'plain_text', name: 'VOID_EMAIL_INGRESS', text: RELAY },
         ],
       });
@@ -428,142 +423,5 @@ describe('cf-customer client', () => {
       });
       expect(result).toEqual({ message_id: 'msg_1' });
     });
-  });
-});
-
-describe('refreshOauthGrant', () => {
-  let fetchMock: ReturnType<typeof vi.fn>;
-
-  beforeEach(() => {
-    fetchMock = vi.fn();
-    vi.stubGlobal('fetch', fetchMock);
-  });
-
-  afterEach(() => {
-    vi.unstubAllGlobals();
-  });
-
-  it("POSTs the form-encoded refresh grant to wrangler's client", async () => {
-    fetchMock.mockResolvedValueOnce(
-      Response.json({
-        access_token: 'cf-access-dummy',
-        refresh_token: 'cf-rotated-dummy',
-        expires_in: 3600,
-      }),
-    );
-
-    const tokens = await refreshOauthGrant('cf-refresh-dummy');
-
-    const { url, init } = lastCall(fetchMock);
-    expect(url).toBe('https://dash.cloudflare.com/oauth2/token');
-    expect(init.method).toBe('POST');
-    expect(init.headers).toEqual({ 'Content-Type': 'application/x-www-form-urlencoded' });
-    const params = new URLSearchParams(init.body as string);
-    expect(params.get('grant_type')).toBe('refresh_token');
-    expect(params.get('client_id')).toBe(CF_EMAIL_OAUTH_CLIENT_ID);
-    expect(params.get('refresh_token')).toBe('cf-refresh-dummy');
-    expect(tokens).toEqual({
-      accessToken: 'cf-access-dummy',
-      refreshToken: 'cf-rotated-dummy',
-      expiresIn: 3600,
-    });
-  });
-
-  it('throws OAuthGrantError with the upstream code, never token material', async () => {
-    fetchMock.mockResolvedValueOnce(
-      Response.json(
-        { error: 'invalid_grant', error_description: 'refresh token unknown' },
-        { status: 400 },
-      ),
-    );
-
-    const error = await refreshOauthGrant('cf-refresh-dummy').catch((err: unknown) => err);
-    expect(error).toBeInstanceOf(OAuthGrantError);
-    expect((error as OAuthGrantError).code).toBe('invalid_grant');
-    expect((error as OAuthGrantError).status).toBe(400);
-    expect((error as OAuthGrantError).message).not.toContain('cf-refresh-dummy');
-  });
-
-  it('fails loudly when the answer carries no rotated refresh token', async () => {
-    fetchMock.mockResolvedValueOnce(Response.json({ access_token: 'cf-access-dummy' }));
-
-    const error = await refreshOauthGrant('cf-refresh-dummy').catch((err: unknown) => err);
-    expect(error).toBeInstanceOf(OAuthGrantError);
-    expect((error as OAuthGrantError).code).toBe('invalid_response');
-  });
-
-  it('classifies a non-JSON error body as unknown_error with the HTTP status', async () => {
-    fetchMock.mockResolvedValueOnce(new Response('<html>bad gateway</html>', { status: 502 }));
-
-    const error = await refreshOauthGrant('cf-refresh-dummy').catch((err: unknown) => err);
-    expect(error).toBeInstanceOf(OAuthGrantError);
-    expect((error as OAuthGrantError).code).toBe('unknown_error');
-    expect((error as OAuthGrantError).status).toBe(502);
-  });
-});
-
-describe('revokeOauthGrant', () => {
-  let fetchMock: ReturnType<typeof vi.fn>;
-
-  beforeEach(() => {
-    fetchMock = vi.fn();
-    vi.stubGlobal('fetch', fetchMock);
-  });
-
-  afterEach(() => {
-    vi.unstubAllGlobals();
-    vi.restoreAllMocks();
-  });
-
-  // console.error output must never carry the token — render every logged
-  // argument (Errors included) before searching for it.
-  function loggedText(errorSpy: { mock: { calls: Array<Array<unknown>> } }): string {
-    return errorSpy.mock.calls
-      .flat()
-      .map((arg) => (arg instanceof Error ? `${arg.name}: ${arg.message}` : String(arg)))
-      .join(' ');
-  }
-
-  it("POSTs the form-encoded revocation to wrangler's client, with no Authorization header", async () => {
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    fetchMock.mockResolvedValueOnce(new Response(null, { status: 200 }));
-
-    await expect(revokeOauthGrant('cf-refresh-dummy')).resolves.toBeUndefined();
-
-    const { url, init } = lastCall(fetchMock);
-    expect(url).toBe('https://dash.cloudflare.com/oauth2/revoke');
-    expect(init.method).toBe('POST');
-    // A public client authenticates with the token itself — no bearer.
-    expect(init.headers).toEqual({ 'Content-Type': 'application/x-www-form-urlencoded' });
-    const params = new URLSearchParams(init.body as string);
-    expect(params.get('client_id')).toBe(CF_EMAIL_OAUTH_CLIENT_ID);
-    expect(params.get('token_type_hint')).toBe('refresh_token');
-    expect(params.get('token')).toBe('cf-refresh-dummy');
-    // A 2xx is silent (RFC 7009: revoked-or-invalid both answer 200).
-    expect(errorSpy).not.toHaveBeenCalled();
-  });
-
-  it('throws on a non-2xx, logging an error that never carries the token', async () => {
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    for (const status of [400, 500]) {
-      fetchMock.mockResolvedValueOnce(new Response('boom', { status }));
-      await expect(revokeOauthGrant('cf-refresh-dummy')).rejects.toThrow(`HTTP ${status}`);
-    }
-
-    expect(errorSpy).toHaveBeenCalledTimes(2);
-    const logged = loggedText(errorSpy);
-    expect(logged).toContain('400');
-    expect(logged).toContain('500');
-    expect(logged).not.toContain('cf-refresh-dummy');
-  });
-
-  it('rethrows a network rejection, logging an error that never carries the token', async () => {
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    fetchMock.mockRejectedValueOnce(new TypeError('fetch failed'));
-
-    await expect(revokeOauthGrant('cf-refresh-dummy')).rejects.toThrow('fetch failed');
-
-    expect(errorSpy).toHaveBeenCalledTimes(1);
-    expect(loggedText(errorSpy)).not.toContain('cf-refresh-dummy');
   });
 });

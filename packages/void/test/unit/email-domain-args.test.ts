@@ -111,37 +111,9 @@ describe('parseEmailArgs — domain group', () => {
     );
   });
 
-  it('parses --force on domain remove only', () => {
-    expect(parseEmailArgs(['domain', 'remove', 'acme.com', '--force'])).toMatchObject({
-      domainVerb: 'remove',
-      domain: 'acme.com',
-      force: true,
-    });
-    // Off by default, on every verb.
-    expect(parseEmailArgs(['domain', 'remove', 'acme.com'])).toMatchObject({
-      domainVerb: 'remove',
-      force: undefined,
-    });
-    for (const args of [
-      ['domain', 'add', 'acme.com', '--force'],
-      ['domain', 'status', 'acme.com', '--force'],
-      ['domain', 'sync', 'acme.com', '--force'],
-      ['domain', 'list', '--force'],
-      ['usage', '--force'],
-      ['disallow', 'a@x.dev', '--force'],
-    ]) {
-      expect(() => parseEmailArgs(args)).toThrow(
-        'email: --force applies to `void email domain remove` only.',
-      );
-    }
-  });
-
-  it('rejects --force with a value or repeated', () => {
-    expect(() => parseEmailArgs(['domain', 'remove', 'acme.com', '--force=yes'])).toThrow(
-      'email: --force takes no value.',
-    );
-    expect(() => parseEmailArgs(['domain', 'remove', 'acme.com', '--force', '--force'])).toThrow(
-      'email: --force can only be specified once.',
+  it('rejects the removed force option instead of silently ignoring it', () => {
+    expect(() => parseEmailArgs(['domain', 'remove', 'acme.com', '--force'])).toThrow(
+      /takes exactly one domain argument/,
     );
   });
 

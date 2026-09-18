@@ -358,10 +358,14 @@ Removal first commits the domain's disabled state, preventing new admission, the
 drains already admitted actions. Remove its assignment without modifying a sibling
 project's route. Retain tombstones and operation records until cleanup is resolved.
 Only the connection manager may remove the last connection: detach its catch-all
-if it is still owned, then delete the ingress, then revoke an unreferenced grant.
+if it is still owned, then delete the ingress and forget its stored credential.
+Scoped API tokens are created by the user and may also be used elsewhere; the
+user revokes an unused token in Cloudflare. Void does not require token-management
+permissions or claim to revoke it remotely.
 Do not delete the Worker while an owned rule still targets it. Provider cleanup
 failure leaves a retryable cleanup operation, including after project teardown.
-Force removal acknowledges orphaned resources; it cannot silently erase that record.
+Removal never discards an unresolved cleanup record; its operation remains visible
+until the provider resources have been reconciled.
 
 ## Bounded tenant execution
 
@@ -496,8 +500,6 @@ publisher and scheduled repair publish the latest committed value. Missed or
 out-of-order cache updates may affect display freshness but not authorization.
 Do not claim a global 60-second security boundary: Cloudflare documents visibility
 delays of [60 seconds or more](https://developers.cloudflare.com/kv/concepts/how-kv-works/#consistency).
-Legacy senders relying on cached authorization must be drained before the new
-policy guarantee is enabled.
 
 ## Observable delivery and retry semantics
 
@@ -554,7 +556,7 @@ sequenceDiagram
     G->>P: Execute admitted attempts
     P-->>G: Accepted, refused or unknown
     G->>A: Persist outcomes
-    G-->>I: Receipt result with action summary
+    G-->>I: Receipt result and ID; action outcomes remain queryable
     Note over I,A: Handler completion and action delivery are distinct
 ```
 

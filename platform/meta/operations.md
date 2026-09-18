@@ -123,6 +123,12 @@ Customer connections deploy one ingress Worker in the customer's account and zon
 
 Deploy the outbound proxy, API, and gateway before enabling inbound routing. The gateway must expose the new bounded email protocol, and tenant apps with handlers must be rebuilt and redeployed with its deployment metadata. The proxy no longer accepts inbound `/email/relay` requests or native email events.
 
+Development installations using the previous email implementation need explicit
+cleanup before setup: inspect their old relay Workers and credentials, detach
+only catch-all rules still targeting those Workers, delete the obsolete Workers,
+and revoke unused test grants in Cloudflare. Preserve unrelated rules and MX
+records. The new reconciler does not migrate old `email_domains` records.
+
 Inspect all three readiness states and the operation ID with `void email domain status <domain>`. Use `sync` to reconcile recoverable steps and `rotate-secret` for explicit ingress-secret rotation. An uncertain provider write remains blocked until its outcome can be proved; neither a timeout nor a missing cache entry authorizes another write. Never erase the operation to force a retry.
 
 PostgreSQL is authoritative for consent, policy, suspension, and recipient-attempt quotas. Cache publication retries independently. `void email logs` exposes receipt and action metadata: provider acceptance is not proof of delivery, and an unknown result must not be retried with a new idempotency key. Removing one domain or project must preserve sibling routes and unresolved cleanup records.

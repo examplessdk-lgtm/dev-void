@@ -38,10 +38,6 @@ import {
 import type { ApiEnv } from '../env.ts';
 import { isForeignKeyViolation, isUniqueViolation } from '../pg-errors.ts';
 import {
-  projectAllowlistKvDiffers,
-  syncProjectAllowlistKvBestEffort,
-} from '../provisioning/email-allowlist.ts';
-import {
   addDestination,
   deleteDestination,
   isAlreadyExistsError,
@@ -154,7 +150,6 @@ const app = new Hono<ApiEnv>()
     const pending = rows.filter(
       (r) => r.status === 'pending' && r.verification_source !== 'platform',
     );
-    let anyFlipped = false;
     if (pending.length > 0) {
       try {
         const cfRows = await listDestinations(context.env.CF_ACCOUNT_ID, context.env.CF_API_TOKEN);
@@ -228,35 +223,12 @@ const app = new Hono<ApiEnv>()
           row.status = 'verified';
           row.cf_destination_id = cf.tag;
           row.verified_at = cf.verified;
-          anyFlipped = true;
         }
       } catch (err) {
         console.error('[email] destinations refresh failed:', err);
         // Non-fatal — we still return the cached view.
       }
     }
-    // Push any newly-verified address into the proxy's allowlist KV, and
-    // repair the mirror whenever it has drifted from the verified rows.
-    //
-    // The repair is not belt-and-braces. Every write to this mirror is
-    // best-effort, and nothing else re-derives the key: the confirm route
-    // early-returns on an already-verified row, the hourly `scheduled()`
-    // backfill in `index.ts` touches only `email-slug:`, and no deploy hook
-    // calls the sync. One swallowed KV failure after Postgres committed
-    // `verified` therefore leaves the owner looking at a `verified` listing
-    // while the proxy — which reads a missing key as deny-all — rejects every
-    // send as an unverified destination, with no user-visible cause. So THIS
-    // listing is the repair: the same read-compare-write self-heal shape as
-    // the `email-slug:` backfill. Cost is one KV read (skipped entirely when
-    // a flip already forces the write); the write happens only on a real
-    // difference, never on every listing.
-    if (
-      anyFlipped ||
-      (await projectAllowlistKvDiffers(context.get('db'), context.env.ROUTING, projectId))
-    ) {
-      await syncProjectAllowlistKvBestEffort(context.get('db'), context.env.ROUTING, projectId);
-    }
-
     return context.json(rows.map(serializeDestination));
   })
 
@@ -414,9 +386,6 @@ const app = new Hono<ApiEnv>()
         return context.json({ error: 'destination concurrently modified, try again' }, 409);
       }
       const { row } = inserted;
-      if (row.status === 'verified') {
-        await syncProjectAllowlistKvBestEffort(context.get('db'), context.env.ROUTING, projectId);
-      }
       return context.json(serializeDestination(row), 201);
     }
 
@@ -531,7 +500,7 @@ const app = new Hono<ApiEnv>()
       return context.json({ error: 'destination not found' }, 404);
     }
 
-    // Admission observes this committed revocation regardless of KV publication.
+    // Admission observes this committed revocation.
     await deleteEmailDestination(context.get('db'), dest.id);
     if (
       dest.cf_destination_id &&
@@ -547,17 +516,12 @@ const app = new Hono<ApiEnv>()
         console.error('[email] destination provider cleanup failed:', error);
       }
     }
-    await syncProjectAllowlistKvBestEffort(context.get('db'), context.env.ROUTING, projectId);
     return context.json({ ok: true });
   })
 
   // -------------------------------------------------------------------------
-  // Custom email domains on the customer's own Cloudflare zone (design doc
-  // 0078, "Custom domains on Cloudflare"). The add/sync/remove orchestration
-  // lives in src/email/relay-engine.ts (contract 7); these routes own the
-  // owner guard, the `email_domains` row, both encrypted triples, and the
-  // ROUTING KV mirror the proxy reads (contract 2). Neither the credential
-  // nor the relay secret is ever returned — serializers carry metadata only.
+  // Custom email domain routes. The connection service runs durable
+  // operations; these routes apply the owner guard and map responses.
   // -------------------------------------------------------------------------
 
   // Installation settings the CLI needs before it acts: who manages email
@@ -578,7 +542,7 @@ const app = new Hono<ApiEnv>()
       getEmailDomainManagement(db),
       getEmailRecipientPolicy(db),
     ]);
-    // Same best-effort repair the destinations listing does for its mirror.
+    // Republish a drifted recipient-policy mirror for the proxy's local gate.
     await repairEmailRecipientPolicyMirror(db, context.env.ROUTING);
     return context.json({
       domains: { management, projectSlug: project.slug },
@@ -617,7 +581,6 @@ const app = new Hono<ApiEnv>()
     const projectId = context.req.param('id');
     let body: {
       domain?: unknown;
-      mode?: unknown;
       refreshToken?: unknown;
       apiToken?: unknown;
       attemptId?: unknown;
@@ -643,7 +606,6 @@ const app = new Hono<ApiEnv>()
     }
     return addEmailDomainForProject(context, project, {
       domain: typeof body.domain === 'string' ? body.domain : '',
-      mode: body.mode,
       apiToken: typeof body.apiToken === 'string' ? body.apiToken : undefined,
       attemptId: body.attemptId,
       managedBy: 'owner',
@@ -731,13 +693,7 @@ const app = new Hono<ApiEnv>()
     if (project.user_id !== context.get('user').id) {
       return context.json({ error: 'forbidden' }, 403);
     }
-    return removeEmailDomainForProject(
-      context,
-      project,
-      context.req.param('domain'),
-      context.req.query('force') === '1',
-      'owner',
-    );
+    return removeEmailDomainForProject(context, project, context.req.param('domain'), 'owner');
   });
 
 function parseCounter(raw: string | null): number {

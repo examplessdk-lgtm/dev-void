@@ -10,7 +10,11 @@ import {
   vi,
 } from 'vite-plus/test';
 import { hmacSignState } from '../../src/auth/hmac.ts';
-import { emailCredentials, emailOperations } from '../../src/email/connection-schema.ts';
+import {
+  emailCredentials,
+  emailDomainRoutes,
+  emailOperations,
+} from '../../src/email/connection-schema.ts';
 import app from '../../src/index.ts';
 import { stubCustomerCf } from './email-domain-cf-stub.ts';
 import {
@@ -59,6 +63,53 @@ afterEach(() => {
 });
 
 describe('project email domain authority', () => {
+  it('refreshes readiness from provider reads and preserves inbound state when the credential probe fails', async () => {
+    const owner = await createTestUser(env.db, 'readiness-owner');
+    const project = await createTestProject(env.db, owner.id, 'readiness-mail');
+    const routingRules: Array<{ enabled: boolean; addresses: Array<string> }> = [];
+    const failures: { routingRulesGet?: { message: string; status: number } } = {};
+    const stub = stubCustomerCf({ zones, routingRules, failOn: failures });
+    expect(
+      (
+        await call(project.id, owner.jwt, 'POST', '/domains', {
+          domain: 'status.example.com',
+          apiToken: token,
+        })
+      ).status,
+    ).toBe(200);
+    const checkpoint = stub.calls.length;
+    routingRules.push({ enabled: true, addresses: ['support@status.example.com'] });
+    const drifted = await call(project.id, owner.jwt, 'GET', '/domains/status.example.com');
+    expect(await drifted.json()).toMatchObject({
+      readiness: {
+        inbound: { status: 'drifted', reason: expect.stringContaining('explicit Cloudflare') },
+        management: { status: 'healthy' },
+      },
+    });
+    failures.routingRulesGet = { status: 403, message: 'permission revoked' };
+    const unavailable = await call(project.id, owner.jwt, 'GET', '/domains/status.example.com');
+    expect(await unavailable.json()).toMatchObject({
+      readiness: {
+        inbound: { status: 'drifted' },
+        management: { status: 'probe_failed' },
+      },
+    });
+    delete failures.routingRulesGet;
+    routingRules.length = 0;
+    await env.db
+      .update(emailDomainRoutes)
+      .set({ inbound_status: 'pending', inbound_reason: 'waiting for setup proof' })
+      .where(eq(emailDomainRoutes.project_id, project.id));
+    const pending = await call(project.id, owner.jwt, 'GET', '/domains/status.example.com');
+    expect(await pending.json()).toMatchObject({
+      readiness: {
+        inbound: { status: 'pending', reason: 'waiting for setup proof' },
+        management: { status: 'healthy' },
+      },
+    });
+    expect(stub.calls.slice(checkpoint).every((call) => call.method === 'GET')).toBe(true);
+  });
+
   it('rejects unauthenticated, foreign-owner, malformed and OAuth requests before Cloudflare writes', async () => {
     const owner = await createTestUser(env.db, 'domain-owner'),
       other = await createTestUser(env.db, 'domain-other');
@@ -133,6 +184,28 @@ describe('project email domain authority', () => {
     });
     expect(conflict.status).toBe(409);
     expect(await env.db.select().from(emailOperations)).toHaveLength(1);
+    const rotation = await call(
+      project.id,
+      owner.jwt,
+      'POST',
+      '/domains/mail.example.com/rotate-secret',
+      {
+        attemptId: 'stable-rotation',
+      },
+    );
+    expect(rotation.status).toBe(200);
+    const rotated = (await rotation.json()) as { operationId: string };
+    const recoveredRotation = await call(
+      project.id,
+      owner.jwt,
+      'GET',
+      '/operations/stable-rotation',
+    );
+    expect(recoveredRotation.status).toBe(200);
+    expect(await recoveredRotation.json()).toMatchObject({
+      operationId: rotated.operationId,
+      status: 'completed',
+    });
   });
 
   it('leases only an exact active route for the signed owning project', async () => {

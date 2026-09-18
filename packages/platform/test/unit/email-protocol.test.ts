@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vite-plus/test';
 import {
+  EMAIL_MAX_INBOUND_BYTES,
+  EMAIL_MAX_RESPONSE_BYTES,
   encodeEmailActions,
   readEmailEnvelope,
   readEmailActions,
@@ -80,6 +82,45 @@ describe('bounded email receipt protocol', () => {
         }),
       ),
     ).rejects.toThrow('invalid email action frame');
+  });
+
+  it('enforces the MIME limit independently of unused metadata capacity', async () => {
+    const metadata = new TextEncoder().encode(
+      JSON.stringify({
+        from: 'sender@example.com',
+        to: 'recipient@example.com',
+        headers: {},
+        rawSize: EMAIL_MAX_INBOUND_BYTES + 1,
+      }),
+    );
+    const bytes = new Uint8Array(4 + metadata.byteLength + EMAIL_MAX_INBOUND_BYTES + 1);
+    new DataView(bytes.buffer).setUint32(0, metadata.byteLength);
+    bytes.set(metadata, 4);
+    await expect(
+      readEmailEnvelope(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(bytes);
+            controller.close();
+          },
+        }),
+      ),
+    ).rejects.toThrow('invalid email envelope');
+  });
+
+  it('includes the terminal frame in the aggregate action limit', async () => {
+    const address = { from: 'a@b', to: 'c@d' };
+    const metadataBytes = new TextEncoder().encode(
+      JSON.stringify({ type: 'reply', ...address }),
+    ).byteLength;
+    const first = new Uint8Array(5 * 1024 * 1024);
+    const secondSize = EMAIL_MAX_RESPONSE_BYTES - 5 - 2 * (10 + metadataBytes) - first.byteLength;
+    const action = (raw: Uint8Array) => ({ type: 'reply' as const, ...address, raw });
+    const fitting = [action(first), action(new Uint8Array(secondSize))];
+    expect(await readEmailActions(encodeEmailActions(fitting))).toHaveLength(2);
+    await expect(
+      readEmailActions(encodeEmailActions([action(first), action(new Uint8Array(secondSize + 1))])),
+    ).rejects.toThrow('email actions too large');
   });
 
   it('rejects an oversized tenant response before retaining its chunk', async () => {

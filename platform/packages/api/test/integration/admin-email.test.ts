@@ -14,16 +14,8 @@ import type { Db } from '../../src/db.ts';
 import { emailProjectControls } from '../../src/email/admission-schema.ts';
 import { setProjectEmailLimits, setProjectEmailSuspended } from '../../src/email/admission.ts';
 import { emailDomainRoutes, emailZoneConnections } from '../../src/email/connection-schema.ts';
-import { refreshOauthGrantSerialized } from '../../src/email/credential-lease.ts';
-import {
-  encryptEmailDomainRelaySecret,
-  encryptEmailDomainToken,
-  hashEmailRelaySecret,
-  writeEmailDomainMirror,
-  type EmailDomain,
-} from '../../src/email/domains.ts';
 import { app } from '../../src/index.ts';
-import { emailDomains, operatorEvents, platformSettings } from '../../src/schema.ts';
+import { operatorEvents, platformSettings } from '../../src/schema.ts';
 import { stubCustomerCf, callsByTag } from './email-domain-cf-stub.ts';
 import {
   setupEnv,
@@ -109,33 +101,6 @@ function recordCfCalls(): Array<string> {
     return Response.json({ success: true, errors: [], result: { tag: 'cf-tag' } });
   });
   return calls;
-}
-
-/**
- * Fail this project's allowlist mirror write (both branches — the `put` and
- * the delete-on-empty), leaving every other KV op intact. Restored by the
- * file-level `vi.restoreAllMocks()`.
- */
-function breakAllowlistWrites(projectId: string): void {
-  const key = `email-allowlist:${projectId}`;
-  const originalPut = env.ROUTING.put.bind(env.ROUTING);
-  const originalDelete = env.ROUTING.delete.bind(env.ROUTING);
-  vi.spyOn(env.ROUTING, 'put').mockImplementation((async (
-    k: string,
-    value: string | ArrayBuffer | ArrayBufferView | ReadableStream,
-    options?: KVNamespacePutOptions,
-  ) => {
-    if (k === key) {
-      throw new Error('forced allowlist KV failure for test');
-    }
-    return originalPut(k, value as never, options as never);
-  }) as typeof env.ROUTING.put);
-  vi.spyOn(env.ROUTING, 'delete').mockImplementation((async (k: string) => {
-    if (k === key) {
-      throw new Error('forced allowlist KV failure for test');
-    }
-    return originalDelete(k as never);
-  }) as typeof env.ROUTING.delete);
 }
 
 /** UTC `YYYY-MM`, the bucket `admin/routes/email.tsx` and the proxy both use. */
@@ -436,7 +401,7 @@ describe('POST /admin/email/:projectId/limit', () => {
 });
 
 describe('POST /admin/email/:projectId/destinations/:destId/delete', () => {
-  test('removes the row, drops the CF address, and re-syncs the allowlist', async () => {
+  test('removes the row and drops an unreferenced CF address', async () => {
     const { adminJwt, projectId } = await seedAdminAndProject();
     const destination = await createEmailDestination(
       env.db,
@@ -445,7 +410,6 @@ describe('POST /admin/email/:projectId/destinations/:destId/delete', () => {
       'cf-tag-ops',
       'verified',
     );
-    await env.ROUTING.put(`email-allowlist:${projectId}`, JSON.stringify(['ops@example.com']));
     const cfCalls = recordCfCalls();
 
     const res = await post(
@@ -457,9 +421,7 @@ describe('POST /admin/email/:projectId/destinations/:destId/delete', () => {
     expect(cfCalls).toEqual([
       'DELETE https://api.cloudflare.com/client/v4/accounts/test-account-id/email/routing/addresses/cf-tag-ops',
     ]);
-    // Last verified row gone, so the proxy's allowlist key is removed rather
-    // than left holding an address the project may no longer send to.
-    expect(await env.ROUTING.get(`email-allowlist:${projectId}`)).toBeNull();
+    expect(await getEmailDestinationsByProjectId(env.db, projectId)).toEqual([]);
   });
 
   test('leaves the CF address alone while another project still references it', async () => {
@@ -490,84 +452,6 @@ describe('POST /admin/email/:projectId/destinations/:destId/delete', () => {
     expect(cfCalls).toEqual([]);
   });
 
-  test('tightens the mirror while the revoked row is still present', async () => {
-    // Same ordering contract as the user-facing revoke in `routes/email.ts`.
-    // The mirror is what the proxy enforces and the row is what a retry
-    // re-derives it from, so the write lands FIRST and must already exclude
-    // the row being revoked — it is still `verified` at that instant.
-    const { adminJwt, projectId } = await seedAdminAndProject();
-    await createEmailDestination(env.db, projectId, 'keep@example.com', 'cf-tag-keep', 'verified');
-    const doomed = await createEmailDestination(
-      env.db,
-      projectId,
-      'gone@example.com',
-      'cf-tag-gone',
-      'verified',
-    );
-
-    const observed: Array<{ written: Array<string>; rowIds: Array<string> }> = [];
-    const originalPut = env.ROUTING.put.bind(env.ROUTING);
-    vi.spyOn(env.ROUTING, 'put').mockImplementation((async (
-      k: string,
-      value: string | ArrayBuffer | ArrayBufferView | ReadableStream,
-      options?: KVNamespacePutOptions,
-    ) => {
-      await originalPut(k, value as never, options as never);
-      if (k === `email-allowlist:${projectId}`) {
-        const rows = await getEmailDestinationsByProjectId(env.db, projectId);
-        observed.push({
-          written: JSON.parse(String(value)) as Array<string>,
-          rowIds: rows.map((r) => r.id).sort(),
-        });
-      }
-    }) as typeof env.ROUTING.put);
-
-    const res = await post(`/admin/email/${projectId}/destinations/${doomed.id}/delete`, adminJwt);
-
-    expect(res.status).toBe(302);
-    // Two writes: the tighten with both rows still present, then the
-    // re-derive after the delete (a confirm click can promote a row between
-    // the snapshot and the delete; deriving afterwards cannot include it).
-    expect(observed).toHaveLength(2);
-    expect(observed[0]?.written).toEqual(['keep@example.com']);
-    // Both rows still there at the moment of the first write.
-    expect(observed[0]?.rowIds).toContain(doomed.id);
-    expect(observed[1]?.written).toEqual(['keep@example.com']);
-    expect(observed[1]?.rowIds).not.toContain(doomed.id);
-    expect(await env.ROUTING.get(`email-allowlist:${projectId}`)).toBe(
-      JSON.stringify(['keep@example.com']),
-    );
-  });
-
-  test('keeps the row and fails the revoke when the mirror write fails', async () => {
-    const { adminJwt, projectId } = await seedAdminAndProject();
-    const destination = await createEmailDestination(
-      env.db,
-      projectId,
-      'gone@example.com',
-      'cf-tag-gone',
-      'verified',
-    );
-    await env.ROUTING.put(`email-allowlist:${projectId}`, JSON.stringify(['gone@example.com']));
-    breakAllowlistWrites(projectId);
-    const cfCalls = recordCfCalls();
-
-    const res = await post(
-      `/admin/email/${projectId}/destinations/${destination.id}/delete`,
-      adminJwt,
-    );
-
-    // Nothing destructive ran, so the operator can just click again. Dropping
-    // the row first and swallowing the KV error would strand the revoked
-    // address in the allowlist with no row left to re-derive it from.
-    expect(res.status).toBe(503);
-    expect(await getEmailDestinationsByProjectId(env.db, projectId)).toHaveLength(1);
-    expect(await env.ROUTING.get(`email-allowlist:${projectId}`)).toBe(
-      JSON.stringify(['gone@example.com']),
-    );
-    expect(cfCalls).toEqual([]);
-  });
-
   test('404s for a destination that belongs to another project', async () => {
     const { adminJwt, projectId } = await seedAdminAndProject();
     const sibling = await createTestProject(env.db, (await createTestUser(env.db)).id);
@@ -589,170 +473,6 @@ describe('POST /admin/email/:projectId/destinations/:destId/delete', () => {
     expect(cfCalls).toEqual([]);
   });
 });
-
-// ---------------------------------------------------------------------------
-// Custom email domains (design doc 0078). The admin page lists the project's
-// email_domains rows; the revoke route clears the ROUTING mirror, best-effort
-// deletes the relay + catch-all in the customer's account via the relay
-// engine, then drops the row. All credential-shaped strings are dummy
-// stand-ins, and no assertion may contain one — the page and the error
-// bodies must never render them.
-// ---------------------------------------------------------------------------
-
-// Dummy stand-ins — never real token/secret material.
-const CUSTOMER_TOKEN = 'cf-customer-token-dummy';
-const GRANT_REFRESH_TOKEN = 'cf-grant-refresh-dummy';
-const RELAY_SECRET = 'admin-relay-secret-dummy';
-
-/**
- * Seed an email_domains row directly (no orchestration), always with its
- * ROUTING mirror — the revoke's first job is clearing that key. `deployed:
- * false` seeds a row whose setup failed before the relay deploy, so there is
- * nothing in the customer account to clean up. Domains must be unique per
- * test: ROUTING is file-scoped here and the mirror key is domain-scoped.
- */
-async function seedEmailDomain(
-  projectId: string,
-  domain: string,
-  options: {
-    status?: EmailDomain['status'];
-    deployed?: boolean;
-    credentialKind?: EmailDomain['credential_kind'];
-  } = {},
-): Promise<EmailDomain> {
-  const deployed = options.deployed ?? true;
-  const credentialKind = options.credentialKind ?? 'api_token';
-  // The stored credential is the pasted API token, or the grant's refresh
-  // token on the oauth_grant path.
-  const tokenEnc = await encryptEmailDomainToken(
-    env,
-    projectId,
-    domain,
-    credentialKind === 'oauth_grant' ? GRANT_REFRESH_TOKEN : CUSTOMER_TOKEN,
-  );
-  const relayEnc = await encryptEmailDomainRelaySecret(env, projectId, domain, RELAY_SECRET);
-  await env.db.insert(emailDomains).values({
-    id: `edom_admin_${domain.replace(/[^a-z0-9]/g, '')}`,
-    project_id: projectId,
-    domain,
-    zone_id: deployed ? 'zone_customer_1' : null,
-    account_id: deployed ? 'acct_customer_1' : null,
-    mode: deployed ? 'apex' : null,
-    status: options.status ?? 'active',
-    credential_kind: credentialKind,
-    token_ciphertext: tokenEnc.ciphertext,
-    token_iv: tokenEnc.iv,
-    token_key_version: tokenEnc.keyVersion,
-    relay_ciphertext: relayEnc.ciphertext,
-    relay_iv: relayEnc.iv,
-    relay_key_version: relayEnc.keyVersion,
-    relay_worker_name: deployed ? 'void-email-relay' : null,
-    relay_version: deployed ? 1 : null,
-    token_id: deployed ? 'tok_dummy' : null,
-    token_expires_on: null,
-    setup_state: deployed ? null : { failed_step: 'zone_lookup' },
-  });
-  const row = (await domainRow(projectId, domain))!;
-  await writeEmailDomainMirror(env.ROUTING, row, await hashEmailRelaySecret(RELAY_SECRET));
-  return row;
-}
-
-async function domainRow(projectId: string, domain: string): Promise<EmailDomain | undefined> {
-  const rows = await env.db
-    .select()
-    .from(emailDomains)
-    .where(eq(emailDomains.project_id, projectId));
-  return rows.find((row) => row.domain === domain);
-}
-
-/**
- * Record the customer-account CF calls the relay engine makes (method, url,
- * parsed JSON body) and answer each with a success envelope. The remove path
- * DELETEs the relay script and resets the catch-all — but only after an
- * ownership read, so the catch-all GET answers with a rule naming this
- * row's relay. The OAuth grant revoke (dash.cloudflare.com — NOT
- * api.cloudflare.com) is tagged `oauthRevoke` so a test can assert it fired.
- */
-function recordCustomerCfCalls(): Array<{
-  method: string;
-  url: string;
-  body?: unknown;
-  tag?: 'oauthRevoke' | 'oauthToken';
-}> {
-  const calls: Array<{
-    method: string;
-    url: string;
-    body?: unknown;
-    tag?: 'oauthRevoke' | 'oauthToken';
-  }> = [];
-  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
-    const url = typeof input === 'string' ? input : (input as Request).url;
-    let body: unknown;
-    if (typeof init?.body === 'string') {
-      try {
-        body = JSON.parse(init.body) as unknown;
-      } catch {
-        body = init.body;
-      }
-    }
-    const method = init?.method ?? 'GET';
-    const isTokenEndpoint = url.startsWith('https://dash.cloudflare.com/oauth2/token');
-    calls.push({
-      method,
-      url,
-      body,
-      ...(isTokenEndpoint ? { tag: 'oauthToken' as const } : {}),
-      ...(url.startsWith('https://dash.cloudflare.com/oauth2/revoke')
-        ? { tag: 'oauthRevoke' as const }
-        : {}),
-    });
-    if (isTokenEndpoint) {
-      // Grant refresh tokens rotate on every use; the caller persists this
-      // replacement and revokes the chain HEAD, not the presented token.
-      return Response.json({
-        access_token: 'cf-access-dummy-1',
-        refresh_token: 'cf-rotated-refresh-dummy-1',
-        expires_in: 3600,
-      });
-    }
-    if (method === 'GET' && url.includes('/email/routing/rules/catch_all')) {
-      return Response.json({
-        success: true,
-        errors: [],
-        result: {
-          enabled: true,
-          matchers: [{ type: 'all' }],
-          actions: [{ type: 'worker', value: ['void-email-relay'] }],
-        },
-      });
-    }
-    return Response.json({ success: true, errors: [], result: {} });
-  });
-  return calls;
-}
-
-/** Every CF call fails — the revoke must still complete (cleanup is best-effort). */
-function failCustomerCfCalls(): Array<string> {
-  const calls: Array<string> = [];
-  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
-    const url = typeof input === 'string' ? input : (input as Request).url;
-    calls.push(`${init?.method ?? 'GET'} ${url}`);
-    return Response.json({ success: false, errors: [{ message: 'boom' }] }, { status: 500 });
-  });
-  return calls;
-}
-
-/** Fail one domain's mirror-key delete, leaving every other KV op intact. */
-function breakMirrorDelete(domain: string): void {
-  const key = `email-domain:${domain}`;
-  const originalDelete = env.ROUTING.delete.bind(env.ROUTING);
-  vi.spyOn(env.ROUTING, 'delete').mockImplementation((async (k: string) => {
-    if (k === key) {
-      throw new Error('forced mirror KV failure for test');
-    }
-    return originalDelete(k as never);
-  }) as typeof env.ROUTING.delete);
-}
 
 describe('admin email domain controls', () => {
   test('registers, rotates and removes an exact route without exposing credential material', async () => {

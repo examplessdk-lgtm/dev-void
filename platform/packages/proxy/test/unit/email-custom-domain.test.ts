@@ -31,7 +31,6 @@ vi.mock('cloudflare:email', () => ({
 }));
 
 const worker = (await import('../../src/index.ts')).default;
-const { clearEmailDomainLeaseCache } = await import('../../src/email-lease.ts');
 
 const JWT_SECRET = 'test-secret-key';
 const PROD_DOMAIN = 'mail.void.cloud';
@@ -266,7 +265,6 @@ function kvKeysMatching(kv: MockKv, prefix: string): Array<string> {
 
 beforeEach(() => {
   // The lease cache is module-level — isolate every test from its neighbours.
-  clearEmailDomainLeaseCache();
   vi.spyOn(console, 'error').mockImplementation(() => {});
   vi.spyOn(console, 'warn').mockImplementation(() => {});
   vi.spyOn(console, 'log').mockImplementation(() => {});
@@ -328,22 +326,6 @@ describe('POST /email/send — custom sender domain', () => {
 
     expect(kvKeysMatching(kv, 'email-sent:proj_1:')).toHaveLength(0);
     expect(kvKeysMatching(kv, 'email-burst:proj_1:')).toHaveLength(0);
-  });
-
-  it('sends with an oauth_grant lease (accessToken) as the Bearer', async () => {
-    const kv = customDomainKv();
-    const { env, apiFetch } = createMockEnv(kv);
-    const normalFetch = apiFetch.getMockImplementation()!;
-    apiFetch.mockImplementation(async (url, init) =>
-      String(url).endsWith('/domain-credential')
-        ? Response.json({ kind: 'oauth_grant', accessToken: LEASED, accountId: 'acct_customer' })
-        : normalFetch(url, init),
-    );
-    const calls = stubCloudflare();
-    const res = await postSend(env, await sendBody());
-    expect(res.status).toBe(200);
-    const sendHeaders = new Headers(calls[0]?.init.headers);
-    expect(sendHeaders.get('authorization')).toBe(`Bearer ${LEASED}`);
   });
 
   it('re-leases the domain for each send', async () => {

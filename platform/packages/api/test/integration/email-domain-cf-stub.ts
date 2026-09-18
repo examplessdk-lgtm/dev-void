@@ -1,9 +1,8 @@
 import { vi } from 'vite-plus/test';
-import { hashEmailRelaySecret } from '../../src/email/domains.ts';
 import { cfError, cfSuccess } from './helpers.ts';
 
 // ---------------------------------------------------------------------------
-// Customer-side CF/OAuth/DNS fetch stub
+// Customer-side Cloudflare and DNS fetch stub
 // ---------------------------------------------------------------------------
 
 export type StubFailTag =
@@ -24,9 +23,7 @@ export type StubFailTag =
   | 'catchAllGet'
   | 'routingRulesGet'
   | 'routingSettingsGet'
-  | 'scriptDelete'
-  | 'oauthToken'
-  | 'oauthRevoke';
+  | 'scriptDelete';
 
 export type RecordedCall = {
   tag: StubFailTag;
@@ -34,8 +31,6 @@ export type RecordedCall = {
   url: string;
   /** Parsed JSON body for string bodies; parsed metadata for the script PUT. */
   body?: unknown;
-  /** OAuth token-endpoint form fields, minus nothing — dummy fixtures only. */
-  form?: Record<string, string>;
   /** Secrets PUT shape: name/type/text shape — never the text itself. */
   secret?: { name: string; type: string; textShape: string };
 };
@@ -56,16 +51,15 @@ export function stubCustomerCf(
     catchAllRule?: { enabled: boolean; workerName: string | null } | null;
     /** GET email/routing's result; default { enabled: true }. */
     routingSettings?: Record<string, unknown>;
+    routingRules?: Array<{ enabled: boolean; addresses: Array<string> }>;
     /** GET sending/subdomains entries; default []. */
     sendingSubdomains?: ReadonlyArray<{ name: string; enabled: boolean }>;
     failOn?: Partial<Record<StubFailTag, { message: string; status: number; code?: number }>>;
     /** Side-effect hook fired right after a call is recorded (mid-request seams). */
     on?: Partial<Record<StubFailTag, () => void | Promise<void>>>;
-    oauth?: 'rotate' | 'invalid_grant' | 'server_error';
   } = {},
 ) {
   const calls: Array<RecordedCall> = [];
-  let oauthRound = 0;
   const fail = (tag: StubFailTag): Response | null => {
     const failure = config.failOn?.[tag];
     return failure ? cfError(failure.message, failure.status, failure.code) : null;
@@ -99,49 +93,6 @@ export function stubCustomerCf(
     const url =
       typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
     const method = init?.method ?? 'GET';
-
-    if (url.startsWith('https://dash.cloudflare.com/oauth2/token')) {
-      const form: Record<string, string> = {};
-      if (typeof init?.body === 'string') {
-        for (const [key, value] of new URLSearchParams(init.body)) {
-          form[key] = value;
-        }
-      }
-      await record({ tag: 'oauthToken', method, url, form });
-      const failure = fail('oauthToken');
-      if (failure) {
-        return failure;
-      }
-      if (config.oauth === 'invalid_grant') {
-        return Response.json({ error: 'invalid_grant' }, { status: 400 });
-      }
-      if (config.oauth === 'server_error') {
-        return Response.json({ error: 'temporarily_unavailable' }, { status: 503 });
-      }
-      // Chain off the incoming token so the rotation survives stub resets:
-      // a presented `cf-rotated-refresh-dummy-N` rotates to N+1, anything
-      // else (the originally posted grant) starts at 1.
-      const roundMatch = /^cf-rotated-refresh-dummy-(\d+)$/.exec(form.refresh_token ?? '');
-      oauthRound = roundMatch ? Number(roundMatch[1]) + 1 : 1;
-      return Response.json({
-        access_token: `cf-access-dummy-${oauthRound}`,
-        refresh_token: `cf-rotated-refresh-dummy-${oauthRound}`,
-        expires_in: 3600,
-      });
-    }
-
-    if (url.startsWith('https://dash.cloudflare.com/oauth2/revoke')) {
-      const form: Record<string, string> = {};
-      if (typeof init?.body === 'string') {
-        for (const [key, value] of new URLSearchParams(init.body)) {
-          form[key] = value;
-        }
-      }
-      await record({ tag: 'oauthRevoke', method, url, form });
-      // RFC 7009 answers 200 whether the token was revoked or already
-      // invalid; the body is ignored.
-      return fail('oauthRevoke') ?? new Response(null, { status: 200 });
-    }
 
     if (url.startsWith('https://cloudflare-dns.com/dns-query')) {
       await record({ tag: 'mxLookup', method, url });
@@ -308,7 +259,15 @@ export function stubCustomerCf(
 
     if (/\/zones\/[^/]+\/email\/routing\/rules\?/.test(path) && method === 'GET') {
       await record({ tag: 'routingRulesGet', method, url });
-      return fail('routingRulesGet') ?? cfSuccess([]);
+      return (
+        fail('routingRulesGet') ??
+        cfSuccess(
+          (config.routingRules ?? []).map((rule) => ({
+            enabled: rule.enabled,
+            matchers: rule.addresses.map((value) => ({ type: 'literal', field: 'to', value })),
+          })),
+        )
+      );
     }
 
     const catchAllMatch = /\/zones\/([^/]+)\/email\/routing\/rules\/catch_all$/.exec(path);
@@ -358,7 +317,7 @@ export function stubCustomerCf(
       // The worker's CURRENT secret, tracked by sha256 only — the same
       // form the ROUTING mirror stores — so a test can prove worker, row
       // and mirror carry ONE secret without the value ever being recorded.
-      secretHashes.set(secretsMatch[1]!, await hashEmailRelaySecret(text));
+      secretHashes.set(secretsMatch[1]!, await sha256Hex(text));
       relaySecrets.set(secretsMatch[1]!, text);
       await record({
         tag: 'secretPut',
@@ -420,4 +379,9 @@ export function sleep(ms: number): Promise<void> {
 
 export function tags(calls: Array<RecordedCall>): Array<StubFailTag> {
   return calls.map((call) => call.tag);
+}
+
+async function sha256Hex(value: string): Promise<string> {
+  const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
+  return Array.from(new Uint8Array(hash), (byte) => byte.toString(16).padStart(2, '0')).join('');
 }

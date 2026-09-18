@@ -3,16 +3,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test'
 import type { PlatformClient } from '../../src/cli/client.ts';
 import { emailDisallow } from '../../src/cli/email.ts';
 
-/**
- * What `void email disallow <address>` prints on success. The one contract
- * under test: the line must not tell the user a deploy is needed. The api
- * tightens the proxy's `email-allowlist:<projectId>` KV mirror inside the
- * DELETE (503 if that write fails) and the proxy re-reads the mirror with a
- * 60s `cacheTtl` on both the send path and inbound forward/reply, so the
- * revocation lands on its own within about a minute — no deploy touches
- * the allowlist.
- */
-
 type Destination = Awaited<ReturnType<PlatformClient['listEmailDestinations']>>[number];
 
 const ADDRESS = 'owner@example.com';
@@ -64,8 +54,6 @@ describe('void email disallow', () => {
     expect(text).toBe(
       `Removed ${ADDRESS}. New sends to it are refused immediately; already admitted attempts may finish.`,
     );
-    // The api tightens the KV allowlist in the DELETE and the proxy's
-    // cacheTtl bounds convergence; nothing about a revoke waits for a deploy.
     expect(text).not.toMatch(/deploy/);
   });
 

@@ -19,7 +19,7 @@ const result = await sendEmail({
 
 if (!result.ok) {
   if ('error' in result) {
-    // Nothing was sent — the whole call failed before delivery.
+    // A request-level failure; OUTCOME_UNKNOWN may already have been submitted.
     console.error(result.error.code, result.error.message);
   } else {
     // Some recipients failed. `deliveries` says which.
@@ -90,6 +90,12 @@ Setup returns an operation ID. If your connection drops, the platform keeps the 
 - **Management**: whether the stored Cloudflare credential can manage the connection.
 
 Use `void email domain sync <domain>` to reconcile setup and refresh readiness. Sync does not rotate the connection secret. Use `void email domain rotate-secret <domain>` for an explicit rotation; it applies to all domains sharing that zone connection and verifies the deployed secret before completing. If a dashboard or credential step is required, the status names it. Removing a domain disables its assignment; zone resources used by another domain remain in place, and unfinished cleanup stays recorded for reconciliation.
+
+After the last assignment's ingress is deleted, the platform forgets its stored
+credential. Revoke a token you no longer use in Cloudflare; Void does not revoke
+tokens you created yourself. Re-adding a removed domain requires a scoped token
+again. A domain can move to another project only after its removal completes
+and the zone connection's manager authorizes the new assignment.
 
 Once inbound is ready, mail to any address on that domain reaches your `email/` handlers. Sending to arbitrary recipients also needs outbound readiness; a domain limited to verified destinations still requires recipient verification. Platform quotas and suspension apply to both shared and custom senders.
 
@@ -354,51 +360,49 @@ export default defineEmail(async (message, env, ctx, info) => {
 
 Everything taken from the inbound message is best-effort, because the remote sender controls it. A `Message-ID` or `References` value too long for a header line is dropped rather than threaded, and a `References` chain over 8 KiB keeps only its newest ids — the parent's `Message-ID` always ends it. Control characters in the subject become a space, and a subject over 4096 characters, or an ASCII one too long to fold, falls back to a bare `Re:`. None of these fallbacks suppresses the reply; pass `subject` to control it exactly.
 
-On the platform the `from` default is **not** `message.to`. A reply is sent from
-your project's own slug on the platform mail zone — `<slug>+noreply@<domain>` —
-built from the `__VOID_PROJECT_SLUG` and `__VOID_EMAIL_DOMAIN` bindings the
-platform injects. `replyEmail` throws when the slug is set but the domain is
-absent and you omitted `from`, rather than guessing a sender. With no slug at
-all — a worker on your own Cloudflare account — the reply is sent from
-`message.to`, the address on your own zone the message was delivered to.
+On the platform, shared-domain replies default to
+`<slug>+noreply@<mail domain>`. For mail received at a registered custom domain,
+replies default to the address that received the message. `replyEmail` throws
+when it cannot determine a sender. Native Cloudflare replies default to `message.to`.
 
 ::: warning The platform pins the reply sender
-You may override `from`, but only with an address on your own slug. The proxy
-accepts a reply sender whose local-part before the first `+` equals the slug the
-message was delivered to, on the zone it arrived on. Anything else is **dropped
-silently** — `replyEmail` still resolves, and the only trace is in the platform's
-log stream, not your project's.
+You may override `from` with your project's shared address or an address on
+a registered custom domain your project owns. An unauthorized sender is rejected
+and recorded in `void email logs`.
 
-This is what stops one project replying as another project's address. Note that
-`message.to` is the _stripped_ address (`<tag>@<domain>`), so `from: message.to`
-is exactly the shape the pin rejects.
+For shared addressing, `message.to` has the project prefix removed. Use the
+default sender instead of copying that stripped address into `from`.
 :::
 
 ::: warning The platform gates the reply recipient
-A reply's `to` goes through the same gate as `sendEmail()` and `forward()`: it
-must be one of your project's verified destinations —
-`void email allow <address>`, then the recipient's verification click. A reply
-to any other address is **dropped silently**: the inbound message is still
-accepted, `replyEmail` still resolves, nothing reaches your worker, and the
-only trace is in the platform's log stream, not your project's.
+A reply's `to` goes through the platform's recipient policy and the transport's
+capability checks. Shared sending defaults to your project's verified
+destinations: run `void email allow <address>` and have the recipient complete
+verification. A blocked reply is recorded in `void email logs`; the inbound
+message remains accepted.
 
-So the ticket example above answers only senders you have allowlisted. An
-auto-responder to arbitrary senders needs
-[your own Cloudflare account](#your-own-cloudflare-account)
-(`--platform cloudflare`), where `reply()` is Cloudflare's own reply-to-sender
-and Void adds no allowlist — or a platform whose administrator has widened the
-recipient policy for the whole installation (see
-[On a platform your administrator runs](#your-own-domain-on-the-platform)),
-which lifts this gate for the listed domains; addresses on the platform's own
-mail domain always stay verified-recipient-only.
+Custom-domain sends may reach external recipients when Cloudflare Sending is
+enabled. Addresses on the platform's own mail domain always require per-project
+consent. Native forwarding and reply operations can have additional Cloudflare
+restrictions; check the recorded outcome before assuming a reply was accepted.
 :::
 
-Note the asymmetry with `sendEmail`: `sendEmail` returns an error result and
-never throws, while `replyEmail` throws when it cannot determine a sender.
+In a platform handler, awaiting `replyEmail` or `message.forward` records an
+action for execution after the handler finishes. Use `void email logs` to see
+its provider outcome. `sendEmail` returns its send result directly.
+
+`message.forward` requires a native Cloudflare email event. A message relayed
+from a customer zone cannot use native forwarding; its forward action is
+recorded as `UNSUPPORTED_ACTION` without sending or consuming quota. Replies
+remain available through that domain's sending capability.
 
 ### Configuring inbound delivery
 
-In production, inbound runs on one shared mail facility. The platform routes `<slug>+anything@<mail domain>` to your worker's `email()` export — **there is nothing to configure in the Cloudflare dashboard and no per-project DNS work**. Your handlers are live as soon as the deploy lands. A [registered custom domain](#your-own-domain-on-the-platform) lands on the same facility: once `void email domain add` reports it `active`, mail to any address on the domain reaches your `email/` handlers, with nothing further to configure.
+On an email-enabled platform, `<slug>+anything@<mail domain>` reaches your
+deployed `email/` handlers without per-project DNS setup. A
+[registered custom domain](#your-own-domain-on-the-platform) reaches those
+handlers once its inbound readiness is `ready`. Use `void email domain status`
+to check current provider routing and any remaining setup steps.
 
 On your own Cloudflare account there is no shared facility: the deploy derives one Email Routing rule per handler and writes it into `wrangler.jsonc` for you — see [Your own Cloudflare account](#your-own-cloudflare-account).
 

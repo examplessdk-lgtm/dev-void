@@ -3,13 +3,16 @@
  * provider request. */
 import { and, eq, sql } from 'drizzle-orm';
 import type { Context } from 'hono';
-import type { Db, DbOrTx } from '../db.ts';
+import type { Db } from '../db.ts';
 import type { ApiEnv } from '../env.ts';
 import type { Project } from '../types.ts';
+import { createCfCustomerClient } from './cf-customer.ts';
 import { emailDomainRoutes, emailOperations, emailZoneConnections } from './connection-schema.ts';
 import {
   EmailOperationError,
+  credentialFor,
   getEmailOperation,
+  inspectEmailInboundRoute,
   requestEmailDomainAdd,
   requestEmailDomainRemove,
   requestEmailDomainSync,
@@ -23,8 +26,6 @@ import { getEmailDomainManagement } from './settings.ts';
 export const MAX_CREDENTIAL_LENGTH = 2048;
 export type EmailDomainAddInput = Readonly<{
   domain: string;
-  mode?: unknown;
-  refreshToken?: string;
   apiToken?: string;
   attemptId?: unknown;
   managedBy: 'owner' | 'admin';
@@ -36,43 +37,6 @@ export function adminEmailDomainCommand(
 ): string {
   const base = `void platform email domain-${verb} ${domain}`;
   return verb === 'add' && slug ? `${base} --project ${slug}` : base;
-}
-export function proxyOriginForEmail(env: ApiEnv['Bindings']): string {
-  const origin =
-    env.PROXY_URL ??
-    (env.PLATFORM_ENV === 'staging'
-      ? 'https://proxy.staging.void.cloud'
-      : 'https://proxy.void.cloud');
-  return origin.replace(/\/+$/, '');
-}
-export function emailDomainMirrorKey(domain: string): string {
-  return `email-domain:${domain}`;
-}
-export async function revokeRejectedGrant(): Promise<void> {
-  /* OAuth grants are no longer accepted for platform email. */
-}
-
-export async function getEmailDomainRow(db: Db, projectId: string, domain: string) {
-  return (
-    (
-      await db
-        .select()
-        .from(emailDomainRoutes)
-        .where(
-          and(
-            eq(emailDomainRoutes.project_id, projectId),
-            eq(emailDomainRoutes.domain, normalizeEmailDomain(domain)),
-          ),
-        )
-        .limit(1)
-    )[0] ?? null
-  );
-}
-export async function getEmailDomainRowById(db: DbOrTx, id: string) {
-  return (
-    (await db.select().from(emailDomainRoutes).where(eq(emailDomainRoutes.id, id)).limit(1))[0] ??
-    null
-  );
 }
 export async function getEmailDomainRowByDomain(db: Db, domain: string) {
   return (
@@ -121,20 +85,6 @@ export function serializeEmailRoute(
     },
   };
 }
-export function serializeEmailDomain(
-  route: typeof emailDomainRoutes.$inferSelect,
-  connection?: typeof emailZoneConnections.$inferSelect,
-) {
-  return connection
-    ? serializeEmailRoute(route, connection)
-    : {
-        id: route.id,
-        domain: route.domain,
-        project_id: route.project_id,
-        managed_by: route.managed_by,
-        status: route.inbound_status,
-      };
-}
 function serviceError(context: Context<ApiEnv>, error: unknown): Response {
   if (error instanceof EmailOperationError) {
     return context.json({ error: error.message }, error.status as 400);
@@ -165,15 +115,6 @@ export async function addEmailDomainForProject(
   input: EmailDomainAddInput,
 ): Promise<Response> {
   try {
-    if (input.refreshToken) {
-      return context.json(
-        {
-          error:
-            'Cloudflare OAuth grants are not accepted for platform email domains; use a scoped API token',
-        },
-        400,
-      );
-    }
     if (project.status === 'deleting') {
       return context.json({ error: 'Project is being deleted' }, 409);
     }
@@ -219,9 +160,88 @@ export async function getEmailDomainStatusForProject(
   project: Project,
   rawDomain: string,
 ): Promise<Response> {
-  const resolved = await resolveEmailDomain(context.get('db'), rawDomain);
+  const db = context.get('db');
+  let resolved = await resolveEmailDomain(db, rawDomain);
   if (!resolved || resolved.route.project_id !== project.id) {
     return context.json({ error: 'email domain not found' }, 404);
+  }
+  const snapshot = resolved;
+  if (snapshot.route.desired_state === 'active') {
+    let managementReason: string | null = null;
+    let inboundIssue: string | null = null;
+    let outbound: 'ready' | 'verified_only' | 'blocked' = 'blocked';
+    let outboundReason: string | null = null;
+    try {
+      const client = createCfCustomerClient(
+        await credentialFor(context.env, db, snapshot.connection),
+      );
+      inboundIssue = await inspectEmailInboundRoute(
+        client,
+        snapshot.connection,
+        snapshot.route.domain,
+      );
+      try {
+        const senders = await client.listSendingSubdomains(snapshot.connection.zone_id);
+        outbound = senders.some(
+          (sender) => sender.enabled && sender.name.toLowerCase() === snapshot.route.domain,
+        )
+          ? 'ready'
+          : 'verified_only';
+        outboundReason =
+          outbound === 'verified_only' ? 'Cloudflare Sending is not enabled for this domain' : null;
+      } catch {
+        outboundReason = 'Cloudflare Sending status could not be verified';
+      }
+    } catch {
+      managementReason =
+        'Cloudflare routing status could not be verified; check the connection credential';
+    }
+    await db.transaction(async (tx) => {
+      const updated = await tx
+        .update(emailZoneConnections)
+        .set({
+          management_status: managementReason ? 'probe_failed' : 'healthy',
+          management_reason: managementReason,
+          management_observed_at: sql`now()`,
+        })
+        .where(
+          and(
+            eq(emailZoneConnections.id, snapshot.connection.id),
+            eq(emailZoneConnections.desired_generation, snapshot.connection.desired_generation),
+          ),
+        )
+        .returning({ id: emailZoneConnections.id });
+      // A failed credential probe does not revoke independently authenticated ingress.
+      if (updated.length && !managementReason) {
+        // Routing reads cannot replace the setup operation's ingress identity proof.
+        const revalidateInbound =
+          snapshot.connection.inbound_status === 'ready' &&
+          (snapshot.route.inbound_status === 'ready' ||
+            snapshot.route.inbound_status === 'drifted');
+        await tx
+          .update(emailDomainRoutes)
+          .set({
+            ...(revalidateInbound
+              ? {
+                  inbound_status: inboundIssue ? ('drifted' as const) : ('ready' as const),
+                  inbound_reason: inboundIssue,
+                  inbound_observed_at: sql`now()`,
+                }
+              : {}),
+            outbound_status: outbound,
+            outbound_reason: outboundReason,
+            outbound_observed_at: sql`now()`,
+          })
+          .where(
+            and(
+              eq(emailDomainRoutes.id, snapshot.route.id),
+              eq(emailDomainRoutes.desired_generation, snapshot.route.desired_generation),
+              eq(emailDomainRoutes.desired_state, 'active'),
+            ),
+          );
+      }
+    });
+    resolved = (await resolveEmailDomain(db, rawDomain))!;
   }
   const op = (
     await context
@@ -310,7 +330,6 @@ export async function removeEmailDomainForProject(
   context: Context<ApiEnv>,
   project: Project,
   rawDomain: string,
-  force: boolean,
   actor: 'owner' | 'admin',
 ): Promise<Response> {
   try {
@@ -339,7 +358,6 @@ export async function removeEmailDomainForProject(
       operationId,
       operationStatus: op?.status,
       error: op?.failure_detail,
-      forced: force && op?.status !== 'completed',
     });
   } catch (error) {
     return serviceError(context, error);
@@ -354,8 +372,11 @@ export async function getEmailOperationForProject(
   if (!found) {
     return context.json({ error: 'email operation not found' }, 404);
   }
-  const status = await getEmailDomainStatusForProject(context, project, found.route.domain);
-  const domain = (await status.json()) as Record<string, unknown>;
+  const resolved = await resolveEmailDomain(context.get('db'), found.route.domain);
+  if (!resolved) {
+    return context.json({ error: 'email domain not found' }, 404);
+  }
+  const domain = serializeEmailRoute(resolved.route, resolved.connection);
   return context.json({
     operationId: found.operation.id,
     attemptId: found.operation.idempotency_key,

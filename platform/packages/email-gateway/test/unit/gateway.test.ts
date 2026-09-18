@@ -152,6 +152,33 @@ describe('dedicated email gateway', () => {
     );
     expect(message.setReject).not.toHaveBeenCalled();
   });
+
+  it.each([
+    () => new Response(null),
+    () => new Response('{'),
+    () => Response.json({ projectId: 'project-1' }),
+    () => new Response('x'.repeat(4097)),
+    () => new Response('{}', { headers: { 'content-length': '4097' } }),
+  ])(
+    'does not turn a malformed authority response into a permanent rejection',
+    async (response) => {
+      const environment = env(async () => response());
+      expect((await gateway.fetch(request(new Uint8Array()), environment, context)).status).toBe(
+        503,
+      );
+      const message = {
+        from: 'sender@example.net',
+        to: 'support@example.com',
+        setReject: vi.fn(),
+      } as unknown as ForwardableEmailMessage;
+      await expect(gateway.email(message, environment, context)).rejects.toThrow(
+        'temporarily unavailable',
+      );
+      expect(message.setReject).not.toHaveBeenCalled();
+      expect(router.routeInbound).not.toHaveBeenCalled();
+      expect(router.routeRelayed).not.toHaveBeenCalled();
+    },
+  );
   it('authenticates ingress before consuming MIME bytes', async () => {
     const pulled = vi.fn(() => {
       throw new Error('body must stay unread');

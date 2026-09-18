@@ -51,7 +51,6 @@ import {
   PLATFORM_INTERNAL_EMAIL_SENTINEL,
 } from '../../src/email/send-verification.ts';
 import app from '../../src/index.ts';
-import { syncProjectAllowlistKvBestEffort } from '../../src/provisioning/email-allowlist.ts';
 import { emailDestinations, platformSettings, projects, users } from '../../src/schema.ts';
 import {
   cfError,
@@ -149,19 +148,13 @@ async function setUserEmail(userId: string, email: string): Promise<string> {
   return email;
 }
 
-async function readAllowlist(projectId: string): Promise<Array<string>> {
-  const raw = await env.ROUTING.get(`email-allowlist:${projectId}`);
-  if (!raw) {
-    return [];
-  }
-  const parsed = JSON.parse(raw as string) as unknown;
-  return Array.isArray(parsed) ? parsed.filter((s): s is string => typeof s === 'string') : [];
+async function readVerifiedDestinations(projectId: string): Promise<Array<string>> {
+  return (await rowsFor(projectId))
+    .filter((row) => row.status === 'verified')
+    .map((row) => row.address);
 }
 
-/**
- * Two verified rows plus the matching mirror, the shape a live project has
- * once both recipients confirmed.
- */
+/** Two verified rows, the shape a live project has once both recipients confirmed. */
 async function seedVerifiedPair(projectId: string): Promise<void> {
   await env.db.insert(emailDestinations).values([
     {
@@ -181,67 +174,6 @@ async function seedVerifiedPair(projectId: string): Promise<void> {
       verified_at: '2026-04-29T00:00:00Z',
     },
   ]);
-  await env.ROUTING.put(
-    `email-allowlist:${projectId}`,
-    JSON.stringify(['keep@example.com', 'gone@example.com']),
-  );
-}
-
-/**
- * Fail this project's allowlist mirror write (both branches — the `put` and
- * the delete-on-empty), leaving every other KV op intact. Restored by the
- * file-level `vi.restoreAllMocks()`.
- */
-function breakAllowlistWrites(projectId: string): void {
-  const key = `email-allowlist:${projectId}`;
-  const originalPut = env.ROUTING.put.bind(env.ROUTING);
-  const originalDelete = env.ROUTING.delete.bind(env.ROUTING);
-  vi.spyOn(env.ROUTING, 'put').mockImplementation((async (
-    k: string,
-    value: string | ArrayBuffer | ArrayBufferView | ReadableStream,
-    options?: KVNamespacePutOptions,
-  ) => {
-    if (k === key) {
-      throw new Error('forced allowlist KV failure for test');
-    }
-    return originalPut(k, value as never, options as never);
-  }) as typeof env.ROUTING.put);
-  vi.spyOn(env.ROUTING, 'delete').mockImplementation((async (k: string) => {
-    if (k === key) {
-      throw new Error('forced allowlist KV failure for test');
-    }
-    return originalDelete(k as never);
-  }) as typeof env.ROUTING.delete);
-}
-
-/**
- * Call `observe` with the addresses this project's mirror was just set to
- * (`null` when the key was cleared), still INSIDE the awaited KV call — so an
- * observer can read what the database looked like at that instant.
- */
-function observeAllowlistWrites(
-  projectId: string,
-  observe: (written: Array<string> | null) => Promise<void>,
-): void {
-  const key = `email-allowlist:${projectId}`;
-  const originalPut = env.ROUTING.put.bind(env.ROUTING);
-  const originalDelete = env.ROUTING.delete.bind(env.ROUTING);
-  vi.spyOn(env.ROUTING, 'put').mockImplementation((async (
-    k: string,
-    value: string | ArrayBuffer | ArrayBufferView | ReadableStream,
-    options?: KVNamespacePutOptions,
-  ) => {
-    await originalPut(k, value as never, options as never);
-    if (k === key) {
-      await observe(JSON.parse(String(value)) as Array<string>);
-    }
-  }) as typeof env.ROUTING.put);
-  vi.spyOn(env.ROUTING, 'delete').mockImplementation((async (k: string) => {
-    await originalDelete(k as never);
-    if (k === key) {
-      await observe(null);
-    }
-  }) as typeof env.ROUTING.delete);
 }
 
 /** A CF list row for `address`, verified at `verified` (null = still pending). */
@@ -681,7 +613,7 @@ describe('GET /projects/:id/email/destinations', () => {
     const list = (await res.json()) as Array<{ status: string; verification_source: string }>;
     expect(list[0]?.status).toBe('pending');
     expect(list[0]?.verification_source).toBe('platform');
-    expect(await readAllowlist(project.id)).toEqual([]);
+    expect(await readVerifiedDestinations(project.id)).toEqual([]);
   });
 });
 
@@ -802,7 +734,7 @@ describe('GET refresh against a recreated Cloudflare destination', () => {
     expect(listedB.status).toBe(200);
     const bodyB = (await listedB.json()) as Array<{ status: string }>;
     expect(bodyB[0]?.status).toBe('verified');
-    expect(await readAllowlist(projectB.id)).toEqual(['alice@example.com']);
+    expect(await readVerifiedDestinations(projectB.id)).toEqual(['alice@example.com']);
 
     // A registered T1, which nobody clicked: it stays pending, off the
     // allowlist, and says why once.
@@ -812,7 +744,7 @@ describe('GET refresh against a recreated Cloudflare destination', () => {
     expect(bodyA).toHaveLength(1);
     expect(bodyA[0]?.status).toBe('pending');
     expect(bodyA[0]?.verification_source).toBe('cf');
-    expect(await readAllowlist(projectA.id)).toEqual([]);
+    expect(await readVerifiedDestinations(projectA.id)).toEqual([]);
     const persisted = (await rowsFor(projectA.id))[0];
     expect(persisted?.status).toBe('pending');
     expect(persisted?.cf_destination_id).toBe(tagT1);
@@ -846,7 +778,7 @@ describe('GET refresh against a recreated Cloudflare destination', () => {
     const bodyA = (await listedA.json()) as Array<{ status: string; verification_source: string }>;
     expect(bodyA[0]?.status).toBe('verified');
     expect(bodyA[0]?.verification_source).toBe('cf');
-    expect(await readAllowlist(projectA.id)).toEqual(['owner@example.com']);
+    expect(await readVerifiedDestinations(projectA.id)).toEqual(['owner@example.com']);
     const persisted = (await rowsFor(projectA.id))[0];
     expect(persisted?.status).toBe('verified');
     expect(persisted?.cf_destination_id).toBe(tagT2);
@@ -902,7 +834,7 @@ describe('GET refresh against a recreated Cloudflare destination', () => {
     const listed = await listDestinations(projectA.id, owner.jwt, emailEnv());
     expect(listed.status).toBe(200);
     expect(((await listed.json()) as Array<{ status: string }>)[0]?.status).toBe('pending');
-    expect(await readAllowlist(projectA.id)).toEqual([]);
+    expect(await readVerifiedDestinations(projectA.id)).toEqual([]);
   });
 });
 
@@ -1037,305 +969,6 @@ describe('DELETE /projects/:id/email/destinations/:destId', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// email-allowlist KV mirror
-//
-// The proxy reads `email-allowlist:<projectId>` from ROUTING KV on every send.
-// Postgres is the source of truth; KV is a denormalized read-cache that every
-// destinations CRUD re-syncs.
-// ---------------------------------------------------------------------------
-
-describe('email-allowlist KV sync', () => {
-  it('writes the address when CF reports it verified AND it matches the project owner', async () => {
-    // Option C — owner-relaxed reuse. Same human, same consent.
-    const user = await createTestUser(env.db);
-    await setUserEmail(user.id, 'verified@example.com');
-    const project = await createTestProject(env.db, user.id);
-    mockCfApi(cfAlreadyVerified('cf-recovered-tag', 'verified@example.com'));
-
-    const res = await addDestination(project.id, user.jwt, 'verified@example.com', emailEnv());
-    expect(res.status).toBe(201);
-    expect(await readAllowlist(project.id)).toEqual(['verified@example.com']);
-
-    const rows = await rowsFor(project.id);
-    expect(rows[0]?.status).toBe('verified');
-    expect(rows[0]?.verification_source).toBe('cf');
-  });
-
-  it('does NOT write a pending (unverified) destination', async () => {
-    const user = await createTestUser(env.db);
-    const project = await createTestProject(env.db, user.id);
-    mockCfApi(); // default: `verified: null`
-
-    const res = await addDestination(project.id, user.jwt, 'pending@example.com');
-    expect(res.status).toBe(201);
-    expect(await readAllowlist(project.id)).toEqual([]);
-  });
-
-  it('flips KV when the GET refresh observes CF verification', async () => {
-    const user = await createTestUser(env.db);
-    const project = await createTestProject(env.db, user.id);
-
-    mockCfApi();
-    const created = await addDestination(project.id, user.jwt, 'flip@example.com');
-    expect(created.status).toBe(201);
-    expect(await readAllowlist(project.id)).toEqual([]);
-
-    mockCfApi({
-      listEmailDestinations: () =>
-        cfSuccess([cfRow('cf-tag-flip@example.com', 'flip@example.com', '2026-04-29T00:00:00Z')]),
-    });
-    const refresh = await listDestinations(project.id, user.jwt);
-    expect(refresh.status).toBe(200);
-
-    expect(await readAllowlist(project.id)).toEqual(['flip@example.com']);
-  });
-
-  it('deletes the key when the last verified destination goes away', async () => {
-    const user = await createTestUser(env.db);
-    const project = await createTestProject(env.db, user.id);
-    await env.db.insert(emailDestinations).values({
-      id: 'edst_v1',
-      project_id: project.id,
-      address: 'doomed@example.com',
-      status: 'verified',
-      cf_destination_id: 'cf-tag-doomed',
-      verified_at: '2026-04-29T00:00:00Z',
-    });
-    await env.ROUTING.put(`email-allowlist:${project.id}`, JSON.stringify(['doomed@example.com']));
-
-    mockCfApi();
-    const res = await removeDestination(project.id, 'edst_v1', user.jwt);
-    expect(res.status).toBe(200);
-    // Deleted, not left as an empty array.
-    expect(await env.ROUTING.get(`email-allowlist:${project.id}`)).toBeNull();
-  });
-
-  it('keeps the other verified addresses after deleting one', async () => {
-    const user = await createTestUser(env.db);
-    const project = await createTestProject(env.db, user.id);
-    await env.db.insert(emailDestinations).values([
-      {
-        id: 'edst_v1',
-        project_id: project.id,
-        address: 'keep@example.com',
-        status: 'verified',
-        cf_destination_id: 'cf-tag-keep',
-        verified_at: '2026-04-29T00:00:00Z',
-      },
-      {
-        id: 'edst_v2',
-        project_id: project.id,
-        address: 'gone@example.com',
-        status: 'verified',
-        cf_destination_id: 'cf-tag-gone',
-        verified_at: '2026-04-29T00:00:00Z',
-      },
-    ]);
-    await env.ROUTING.put(
-      `email-allowlist:${project.id}`,
-      JSON.stringify(['keep@example.com', 'gone@example.com']),
-    );
-
-    mockCfApi();
-    const res = await removeDestination(project.id, 'edst_v2', user.jwt);
-    expect(res.status).toBe(200);
-    expect(await readAllowlist(project.id)).toEqual(['keep@example.com']);
-  });
-
-  it('repairs a mirror a swallowed write left empty, on the next listing', async () => {
-    const user = await createTestUser(env.db);
-    const project = await createTestProject(env.db, user.id);
-    // Exactly the state a confirm-click leaves behind when its best-effort KV
-    // write threw: the row says verified, the mirror the proxy enforces is
-    // empty.
-    await env.db.insert(emailDestinations).values({
-      id: 'edst_v1',
-      project_id: project.id,
-      address: 'stranded@example.com',
-      status: 'verified',
-      cf_destination_id: 'cf-tag-stranded',
-      verified_at: '2026-04-29T00:00:00Z',
-      verification_source: 'platform',
-    });
-    expect(await env.ROUTING.get(`email-allowlist:${project.id}`)).toBeNull();
-
-    mockCfApi();
-    const res = await listDestinations(project.id, user.jwt);
-    expect(res.status).toBe(200);
-
-    expect(await readAllowlist(project.id)).toEqual(['stranded@example.com']);
-  });
-
-  it('drops an address the mirror still grants but no verified row backs', async () => {
-    // The other direction of the same drift: a stale ALLOW is worse than a
-    // stale deny, so the compare must be two-way.
-    const user = await createTestUser(env.db);
-    const project = await createTestProject(env.db, user.id);
-    await env.db.insert(emailDestinations).values({
-      id: 'edst_v1',
-      project_id: project.id,
-      address: 'keep@example.com',
-      status: 'verified',
-      cf_destination_id: 'cf-tag-keep',
-      verified_at: '2026-04-29T00:00:00Z',
-    });
-    await env.ROUTING.put(
-      `email-allowlist:${project.id}`,
-      JSON.stringify(['keep@example.com', 'revoked@example.com']),
-    );
-
-    mockCfApi();
-    expect((await listDestinations(project.id, user.jwt)).status).toBe(200);
-
-    expect(await readAllowlist(project.id)).toEqual(['keep@example.com']);
-  });
-
-  it('does NOT write the mirror on a listing that finds it already correct', async () => {
-    // The repair costs one KV READ per listing. Writing unconditionally would
-    // put a KV write on a read endpoint, and row ORDER must not count as
-    // drift — the proxy loads the value into a Set.
-    const user = await createTestUser(env.db);
-    const project = await createTestProject(env.db, user.id);
-    await seedVerifiedPair(project.id);
-    await env.ROUTING.put(
-      `email-allowlist:${project.id}`,
-      JSON.stringify(['gone@example.com', 'keep@example.com']),
-    );
-
-    const writes: Array<Array<string> | null> = [];
-    observeAllowlistWrites(project.id, async (written) => {
-      writes.push(written);
-    });
-
-    mockCfApi();
-    expect((await listDestinations(project.id, user.jwt)).status).toBe(200);
-    expect((await listDestinations(project.id, user.jwt)).status).toBe(200);
-
-    expect(writes).toEqual([]);
-    expect((await readAllowlist(project.id)).sort()).toEqual([
-      'gone@example.com',
-      'keep@example.com',
-    ]);
-  });
-
-  it('repairs the mirror after a confirm click whose KV write really failed', async () => {
-    // Same repair, driven through the real path rather than a seeded state:
-    // the recipient clicks, Postgres commits `verified`, the mirror write
-    // throws and is swallowed, and the next listing is the only thing left
-    // that can re-derive the key.
-    const user = await createTestUser(env.db);
-    const project = await createTestProject(env.db, user.id);
-    await env.db.insert(emailDestinations).values({
-      id: 'edst_confirm',
-      project_id: project.id,
-      address: 'clicker@example.com',
-      status: 'pending',
-      cf_destination_id: 'cf-tag-shared',
-      verified_at: null,
-      verification_source: 'platform',
-    });
-    const now = Math.floor(Date.now() / 1000);
-    const token = await signConfirmToken(
-      {
-        v: 1,
-        pid: project.id,
-        did: 'edst_confirm',
-        addr: 'clicker@example.com',
-        iat: now,
-        exp: now + 24 * 60 * 60,
-      },
-      env.JWT_SECRET,
-    );
-
-    breakAllowlistWrites(project.id);
-    const confirmed = await app.fetch(
-      new Request(`http://localhost/email/destinations/confirm?token=${encodeURIComponent(token)}`),
-      env,
-    );
-    // The click succeeded and the row is verified — the KV failure was
-    // swallowed, which is the whole problem.
-    expect(confirmed.status).toBe(200);
-    expect((await rowsFor(project.id))[0]?.status).toBe('verified');
-    expect(await env.ROUTING.get(`email-allowlist:${project.id}`)).toBeNull();
-
-    // KV comes back. Nothing retries on its own; the listing is the repair.
-    vi.restoreAllMocks();
-    mockCfApi();
-    expect((await listDestinations(project.id, user.jwt)).status).toBe(200);
-
-    expect(await readAllowlist(project.id)).toEqual(['clicker@example.com']);
-  });
-
-  // -------------------------------------------------------------------------
-  // Revoke racing a confirmation click.
-  //
-  // The revoke snapshots the row ONCE. A platform-pending row is not in the
-  // mirror, so a revoke that snapshots `pending` has nothing to tighten before
-  // the delete. The confirm click can land in between: it flips the row and
-  // derives the mirror FROM the verified rows, which now include this one.
-  // The delete then drops the row, and the mirror still grants an address no
-  // row backs. Nothing in the revoke used to look at the mirror again after
-  // the delete, so the grant outlived the row until the next listing.
-  // -------------------------------------------------------------------------
-
-  async function seedRevokeVsConfirm(): Promise<{
-    projectId: string;
-    jwt: string;
-    token: string;
-  }> {
-    const user = await createTestUser(env.db);
-    const project = await createTestProject(env.db, user.id, 'project-a');
-    const sibling = await createTestProject(env.db, user.id, 'project-b');
-    // The account-level Cloudflare address is SHARED with a sibling project,
-    // which is the case where the stale grant delivers: the revoke sees two
-    // referencing projects, skips the upstream delete, and Cloudflare keeps
-    // the address verified. (A sole-reference revoke removes the Cloudflare
-    // address, and the send binding refuses the recipient regardless of the
-    // mirror.)
-    await env.db.insert(emailDestinations).values([
-      {
-        id: 'edst_pend',
-        project_id: project.id,
-        address: 'shared@example.com',
-        status: 'pending',
-        cf_destination_id: 'cf-tag-shared',
-        verified_at: null,
-        verification_source: 'platform',
-      },
-      {
-        id: 'edst_sibling',
-        project_id: sibling.id,
-        address: 'shared@example.com',
-        status: 'verified',
-        cf_destination_id: 'cf-tag-shared',
-        verified_at: '2026-04-29T00:00:00Z',
-        verification_source: 'cf',
-      },
-    ]);
-    const now = Math.floor(Date.now() / 1000);
-    const token = await signConfirmToken(
-      {
-        v: 1,
-        pid: project.id,
-        did: 'edst_pend',
-        addr: 'shared@example.com',
-        iat: now,
-        exp: now + 24 * 60 * 60,
-      },
-      env.JWT_SECRET,
-    );
-    return { projectId: project.id, jwt: user.jwt, token };
-  }
-
-  async function confirmClick(token: string): Promise<Response> {
-    return app.fetch(
-      new Request(`http://localhost/email/destinations/confirm?token=${encodeURIComponent(token)}`),
-      env,
-    );
-  }
-});
-
 describe('per-project verification (Option C + Option B)', () => {
   it("Option C: the owner's own CF-verified address is inherited, with no platform email", async () => {
     const user = await createTestUser(env.db);
@@ -1350,7 +983,7 @@ describe('per-project verification (Option C + Option B)', () => {
     expect(body.status).toBe('verified');
     expect(body.verification_source).toBe('cf');
 
-    expect(await readAllowlist(project.id)).toEqual(['owner@example.com']);
+    expect(await readVerifiedDestinations(project.id)).toEqual(['owner@example.com']);
     // No platform-side confirmation mail — that is the Option B path only.
     expect(proxySends(fetchMock)).toHaveLength(0);
   });
@@ -1390,8 +1023,8 @@ describe('per-project verification (Option C + Option B)', () => {
     expect(body.verification_source).toBe('platform');
     expect(body.platformVerificationPending).toBe(true);
 
-    // Still pending, so the proxy must refuse sends to it.
-    expect(await env.ROUTING.get(`email-allowlist:${project.id}`)).toBeNull();
+    // Still pending, so SQL admission must refuse sends to it.
+    expect(await readVerifiedDestinations(project.id)).toEqual([]);
 
     const sends = proxySends(fetchMock);
     expect(sends).toHaveLength(1);
@@ -1464,7 +1097,7 @@ describe('per-project verification (Option C + Option B)', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]!.status).toBe('pending');
     expect(rows[0]!.verification_source).toBe('platform');
-    expect(await readAllowlist(project.id)).toEqual([]);
+    expect(await readVerifiedDestinations(project.id)).toEqual([]);
   });
 
   it("owner's own address already on the account and still PENDING: adopted, and reported as no send", async () => {
@@ -1666,9 +1299,8 @@ describe('per-project verification (Option C + Option B)', () => {
     const res = await addDestination(project.id, user.jwt, 'shared@example.com', env);
 
     expect(res.status).toBe(500);
-    // Nothing was mailed, and nothing was allow-listed.
+    // Nothing was mailed, and the row remains pending.
     expect(proxySends(fetchMock)).toHaveLength(0);
-    expect(await env.ROUTING.get(`email-allowlist:${project.id}`)).toBeNull();
     // But the row was already committed before the sender was resolved, so
     // the misconfigured environment leaves behind a platform-pending row
     // with no link in anyone's inbox. Once the var is set, a repeat POST is
@@ -1722,7 +1354,7 @@ describe('POST /projects — owner destination auto-add', () => {
     );
   }
 
-  it("inherits CF's verification for the owner's own address and primes the allowlist", async () => {
+  it("inherits CF's verification for the owner's own address", async () => {
     // A second-or-later project for the same owner: CF already has the
     // address, so the row starts verified with `verification_source='cf'`
     // and the audit columns naming whose consent was inherited.
@@ -1744,7 +1376,7 @@ describe('POST /projects — owner destination auto-add', () => {
       verified_by_user_id: user.id,
       verified_by_email_snapshot: 'owner@example.com',
     });
-    expect(await readAllowlist(project.id)).toEqual(['owner@example.com']);
+    expect(await readVerifiedDestinations(project.id)).toEqual(['owner@example.com']);
   });
 
   it('leaves a fresh CF registration pending, with nothing allow-listed and no consent attributed', async () => {
@@ -1765,7 +1397,7 @@ describe('POST /projects — owner destination auto-add', () => {
       verification_source: 'cf',
     });
     expect(rows[0]?.verified_by_user_id).toBeNull();
-    expect(await readAllowlist(project.id)).toEqual([]);
+    expect(await readVerifiedDestinations(project.id)).toEqual([]);
   });
 
   it('registers nothing when the environment has no platform mail domain', async () => {
@@ -1845,12 +1477,7 @@ describe('revokeOwnerVerifiedDestinationsForUserChange', () => {
       },
     ]);
 
-    const affected = await revokeOwnerVerifiedDestinationsForUserChange(
-      env.db,
-      user.id,
-      'owner@example.com',
-    );
-    expect([...affected].sort()).toEqual([projectA.id, projectB.id].sort());
+    await revokeOwnerVerifiedDestinationsForUserChange(env.db, user.id, 'owner@example.com');
 
     const after = await env.db.select().from(emailDestinations);
     const byId = new Map(after.map((r) => [r.id, r]));
@@ -1883,12 +1510,7 @@ describe('revokeOwnerVerifiedDestinationsForUserChange', () => {
       verified_by_email_snapshot: 'MixedCase@Example.com',
     });
 
-    const affected = await revokeOwnerVerifiedDestinationsForUserChange(
-      env.db,
-      user.id,
-      'mixedcase@example.com',
-    );
-    expect(affected).toEqual([project.id]);
+    await revokeOwnerVerifiedDestinationsForUserChange(env.db, user.id, 'mixedcase@example.com');
 
     const [row] = await env.db
       .select()
@@ -1903,8 +1525,7 @@ describe('revokeOwnerVerifiedDestinationsForUserChange', () => {
     // refreshes every row that is `pending` and NOT 'platform'-sourced against
     // exactly that list — so demoting `status` alone leaves the row sitting in
     // the refresh filter, and the owner's very next `void email destinations`
-    // silently re-promotes it AND re-mirrors the address into the allowlist,
-    // undoing the revoke. Re-sourcing the row to 'platform' is the half that
+    // silently re-promotes it, undoing the revoke. Re-sourcing the row to 'platform' is the half that
     // makes it stick; this test fails without it.
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id, 'rev-sticky');
@@ -1919,17 +1540,8 @@ describe('revokeOwnerVerifiedDestinationsForUserChange', () => {
       verified_by_user_id: user.id,
       verified_by_email_snapshot: 'owner@example.com',
     });
-    await env.ROUTING.put(`email-allowlist:${project.id}`, JSON.stringify(['owner@example.com']));
-
-    const affected = await revokeOwnerVerifiedDestinationsForUserChange(
-      env.db,
-      user.id,
-      'owner@example.com',
-    );
-    expect(affected).toEqual([project.id]);
-    // The caller syncs the mirror; do what `routes/auth.ts` does.
-    await syncProjectAllowlistKvBestEffort(env.db, env.ROUTING, project.id);
-    expect(await readAllowlist(project.id)).toEqual([]);
+    await revokeOwnerVerifiedDestinationsForUserChange(env.db, user.id, 'owner@example.com');
+    expect(await readVerifiedDestinations(project.id)).toEqual([]);
 
     // CF is unchanged — the address is still verified on the account.
     mockCfApi({
@@ -1950,8 +1562,8 @@ describe('revokeOwnerVerifiedDestinationsForUserChange', () => {
     expect(row?.status).toBe('pending');
     expect(row?.verification_source).toBe('platform');
     expect(row?.verified_at).toBeNull();
-    // And the listing's mirror self-heal did not put the address back.
-    expect(await readAllowlist(project.id)).toEqual([]);
+    // The listing did not re-verify the address.
+    expect(await readVerifiedDestinations(project.id)).toEqual([]);
   });
 });
 
@@ -2004,7 +1616,7 @@ describe('GET /email/destinations/confirm', () => {
     );
   }
 
-  it('flips the row to verified, syncs KV, and renders the success page', async () => {
+  it('flips the row to verified and renders the success page', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id);
     const did = await seedPlatformPending('shared@example.com', project);
@@ -2025,7 +1637,7 @@ describe('GET /email/destinations/confirm', () => {
     // Audit trail: the recipient clicked OUR link, not CF's.
     expect(row?.verification_source).toBe('platform');
 
-    expect(await readAllowlist(project.id)).toEqual(['shared@example.com']);
+    expect(await readVerifiedDestinations(project.id)).toEqual(['shared@example.com']);
   });
 
   it('sets no-store and no-referrer on the success page', async () => {
@@ -2144,7 +1756,7 @@ describe('GET /email/destinations/confirm', () => {
       .from(emailDestinations)
       .where(eq(emailDestinations.id, didInB));
     expect(row?.status).toBe('pending');
-    expect(await readAllowlist(projectB.id)).toEqual([]);
+    expect(await readVerifiedDestinations(projectB.id)).toEqual([]);
   });
 
   it('is idempotent on an already-verified row', async () => {
@@ -2195,7 +1807,7 @@ describe('GET /email/destinations/confirm', () => {
     const rows = await rowsFor(project.id);
     expect(rows[0]?.status).toBe('verified');
     expect(rows[0]?.verification_source).toBe('platform');
-    expect(await readAllowlist(project.id)).toEqual(['shared@example.com']);
+    expect(await readVerifiedDestinations(project.id)).toEqual(['shared@example.com']);
   });
 });
 
@@ -2542,7 +2154,10 @@ describe('email platform capability', () => {
     // Not even the add rate-limit counter is charged.
     expect(kvPut).not.toHaveBeenCalled();
     expect((await rowsFor(project.id)).map((row) => row.id).sort()).toEqual(['edst_v1', 'edst_v2']);
-    expect(await readAllowlist(project.id)).toEqual(['keep@example.com', 'gone@example.com']);
+    expect(await readVerifiedDestinations(project.id)).toEqual([
+      'keep@example.com',
+      'gone@example.com',
+    ]);
   });
 
   it('answers 501 on the public confirm link and leaves the row pending', async () => {
@@ -2579,7 +2194,7 @@ describe('email platform capability', () => {
 
     const [row] = await rowsFor(project.id);
     expect(row).toMatchObject({ id: 'edst_gate', status: 'pending', verified_at: null });
-    expect(await readAllowlist(project.id)).toEqual([]);
+    expect(await readVerifiedDestinations(project.id)).toEqual([]);
   });
 
   it('does not gate sibling routers mounted at /projects', async () => {

@@ -12,6 +12,8 @@ import {
 import { emailUnresolvedAttempts } from '../../src/email/admission-schema.ts';
 import { disableEmailDomainRouteAndDrain } from '../../src/email/admission.ts';
 import {
+  emailCacheOutbox,
+  emailCredentials,
   emailDomainRoutes,
   emailOperationSteps,
   emailOperations,
@@ -19,6 +21,8 @@ import {
 } from '../../src/email/connection-schema.ts';
 import {
   ensureSharedEmailConnection,
+  flushEmailCacheOutbox,
+  getEmailOperation,
   reconcilePendingEmailOperations,
   requestEmailDomainAdd,
   requestEmailDomainRemove,
@@ -67,6 +71,73 @@ afterEach(() => {
 });
 
 describe('durable zone email connections', () => {
+  it('checks MX and explicit routing conflicts for new assignments on an existing zone', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'sibling-preflight');
+    const routingRules: Array<{ enabled: boolean; addresses: Array<string> }> = [];
+    const stub = stubCustomerCf({
+      zones,
+      routingRules,
+      mx: { 'occupied.example.com': ['mx.other.test'] },
+    });
+    const actor = { kind: 'owner' as const, userId: user.id };
+    const add = await requestEmailDomainAdd(env.db, bindings(), {
+      projectId: project.id,
+      domain: 'first.example.com',
+      actor,
+      token: TOKEN,
+    });
+    await runEmailOperation(env.db, bindings(), add.operationId);
+    const writes = stub.calls.filter((call) => call.method !== 'GET').length;
+    await expect(
+      requestEmailDomainAdd(env.db, bindings(), {
+        projectId: project.id,
+        domain: 'occupied.example.com',
+        actor,
+        token: TOKEN,
+      }),
+    ).rejects.toThrow('already has MX');
+    routingRules.push({ enabled: true, addresses: ['owner@second.example.com'] });
+    await expect(
+      requestEmailDomainAdd(env.db, bindings(), {
+        projectId: project.id,
+        domain: 'second.example.com',
+        actor,
+        token: TOKEN,
+      }),
+    ).rejects.toThrow('explicit Cloudflare email rules conflict');
+    expect(stub.calls.filter((call) => call.method !== 'GET')).toHaveLength(writes);
+    expect(await env.db.select().from(emailDomainRoutes)).toHaveLength(1);
+  });
+
+  it('returns the same operation for concurrent rotation and sync requests with the same key', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'operation-replay');
+    stubCustomerCf({ zones });
+    const actor = { kind: 'owner' as const, userId: user.id };
+    const add = await requestEmailDomainAdd(env.db, bindings(), {
+      projectId: project.id,
+      domain: 'replay.example.com',
+      actor,
+      token: TOKEN,
+    });
+    await runEmailOperation(env.db, bindings(), add.operationId);
+    const { connection } = (await resolveEmailDomain(env.db, 'replay.example.com'))!;
+    const rotations = await Promise.all(
+      Array.from({ length: 3 }, () =>
+        requestEmailSecretRotation(env.db, bindings(), connection.id, actor, 'same-rotation'),
+      ),
+    );
+    expect(new Set(rotations).size).toBe(1);
+    await runEmailOperation(env.db, bindings(), rotations[0]);
+    const syncs = await Promise.all(
+      Array.from({ length: 3 }, () =>
+        requestEmailDomainSync(env.db, bindings(), add.routeId, actor, 'same-sync'),
+      ),
+    );
+    expect(new Set(syncs).size).toBe(1);
+  });
+
   it('persists removal behind an unknown setup and resumes after project deletion', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id, 'remove-unknown');
@@ -204,6 +275,224 @@ describe('durable zone email connections', () => {
     );
   });
 
+  it('re-adds a removed last route with a new credential, deployed secret, and cache version', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'readd-mail');
+    const stub = stubCustomerCf({ zones });
+    const actor = { kind: 'owner' as const, userId: user.id };
+    const first = await requestEmailDomainAdd(env.db, bindings(), {
+      projectId: project.id,
+      domain: 'readd.example.com',
+      actor,
+      token: TOKEN,
+    });
+    await runEmailOperation(env.db, bindings(), first.operationId);
+    const original = (await resolveEmailDomain(env.db, 'readd.example.com'))!;
+    const removed = await requestEmailDomainRemove(env.db, bindings(), first.routeId, actor);
+    await runEmailOperation(env.db, bindings(), removed);
+    expect(callsByTag(stub.calls, 'scriptDelete')).toHaveLength(1);
+    expect(
+      (await resolveEmailDomain(env.db, 'readd.example.com'))?.connection.credential_id,
+    ).toBeNull();
+    expect(await env.db.select().from(emailCredentials)).toHaveLength(0);
+    await expect(requestEmailDomainSync(env.db, bindings(), first.routeId, actor)).rejects.toThrow(
+      'must be active',
+    );
+    await flushEmailCacheOutbox(env.db, env.ROUTING);
+    const cacheBase = `email-cache:route:${first.routeId}`;
+    const removedVersion = Number(await env.ROUTING.get(`${cacheBase}:latest`));
+    expect(JSON.parse((await env.ROUTING.get(`${cacheBase}:v${removedVersion}`))!).status).toBe(
+      'removed',
+    );
+
+    const readded = await requestEmailDomainAdd(env.db, bindings(), {
+      projectId: project.id,
+      domain: 'readd.example.com',
+      actor,
+      token: TOKEN,
+    });
+    expect(readded.routeId).toBe(first.routeId);
+    const pending = (await resolveEmailDomain(env.db, 'readd.example.com'))!;
+    expect(pending.route.desired_generation).toBeGreaterThan(removedVersion);
+    expect(pending.route.inbound_status).toBe('pending');
+    expect(pending.route.outbound_status).toBe('pending');
+    expect(pending.connection.credential_id).not.toBeNull();
+    await runEmailOperation(env.db, bindings(), readded.operationId);
+    expect(
+      (
+        await env.db
+          .select()
+          .from(emailOperations)
+          .where(eq(emailOperations.id, readded.operationId))
+      )[0]?.status,
+    ).toBe('completed');
+    expect(callsByTag(stub.calls, 'scriptPut')).toHaveLength(2);
+    expect(callsByTag(stub.calls, 'secretPut')).toHaveLength(2);
+    expect((await resolveEmailDomain(env.db, 'readd.example.com'))?.route.inbound_status).toBe(
+      'ready',
+    );
+    await flushEmailCacheOutbox(env.db, env.ROUTING);
+    const activeVersion = Number(await env.ROUTING.get(`${cacheBase}:latest`));
+    expect(activeVersion).toBeGreaterThan(removedVersion);
+    expect(JSON.parse((await env.ROUTING.get(`${cacheBase}:v${activeVersion}`))!).status).toBe(
+      'active',
+    );
+    expect(original.connection.id).toBe(pending.connection.id);
+    expect(await env.db.select().from(emailCacheOutbox)).toHaveLength(3);
+  });
+
+  it('retains the credential after an uncertain ingress delete until readback proves cleanup', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'unknown-delete');
+    const existingScripts: Array<string> = [];
+    const failures: { scriptDelete?: { message: string; status: number } } = {};
+    const stub = stubCustomerCf({ zones, existingScripts, failOn: failures });
+    const actor = { kind: 'owner' as const, userId: user.id };
+    const add = await requestEmailDomainAdd(env.db, bindings(), {
+      projectId: project.id,
+      domain: 'unknown-delete.example.com',
+      actor,
+      token: TOKEN,
+    });
+    await runEmailOperation(env.db, bindings(), add.operationId);
+    const connection = (await resolveEmailDomain(env.db, 'unknown-delete.example.com'))!.connection;
+    existingScripts.push(connection.ingress_worker_name);
+    const remove = await requestEmailDomainRemove(env.db, bindings(), add.routeId, actor);
+    failures.scriptDelete = { message: 'response lost', status: 504 };
+    await runEmailOperation(env.db, bindings(), remove);
+    expect(
+      (await env.db.select().from(emailOperations).where(eq(emailOperations.id, remove)))[0]
+        ?.status,
+    ).toBe('unknown');
+    expect(
+      (await resolveEmailDomain(env.db, 'unknown-delete.example.com'))?.connection.credential_id,
+    ).not.toBeNull();
+    await reconcilePendingEmailOperations(env.db, bindings());
+    expect(
+      (await resolveEmailDomain(env.db, 'unknown-delete.example.com'))?.connection.credential_id,
+    ).not.toBeNull();
+    existingScripts.length = 0;
+    delete failures.scriptDelete;
+    await reconcilePendingEmailOperations(env.db, bindings());
+    expect(
+      (await env.db.select().from(emailOperations).where(eq(emailOperations.id, remove)))[0]
+        ?.status,
+    ).toBe('completed');
+    expect(
+      (await resolveEmailDomain(env.db, 'unknown-delete.example.com'))?.connection.credential_id,
+    ).toBeNull();
+    expect(await env.db.select().from(emailCredentials)).toHaveLength(0);
+    expect(callsByTag(stub.calls, 'scriptDelete')).toHaveLength(1);
+  });
+
+  it('transfers only a completed removed assignment and never exposes old operation history', async () => {
+    const manager = await createTestUser(env.db, 'transfer-manager');
+    const stranger = await createTestUser(env.db, 'transfer-stranger');
+    const source = await createTestProject(env.db, manager.id, 'transfer-source');
+    const target = await createTestProject(env.db, manager.id, 'transfer-target');
+    const foreign = await createTestProject(env.db, stranger.id, 'transfer-foreign');
+    stubCustomerCf({ zones });
+    const actor = { kind: 'owner' as const, userId: manager.id };
+    const first = await requestEmailDomainAdd(env.db, bindings(), {
+      projectId: source.id,
+      domain: 'transfer.example.com',
+      actor,
+      token: TOKEN,
+    });
+    await runEmailOperation(env.db, bindings(), first.operationId);
+    await flushEmailCacheOutbox(env.db, env.ROUTING);
+    await expect(
+      requestEmailDomainAdd(env.db, bindings(), {
+        projectId: target.id,
+        domain: 'transfer.example.com',
+        actor,
+        token: TOKEN,
+      }),
+    ).rejects.toThrow('assigned to another project');
+    const removed = await requestEmailDomainRemove(env.db, bindings(), first.routeId, actor);
+    await runEmailOperation(env.db, bindings(), removed);
+    await flushEmailCacheOutbox(env.db, env.ROUTING);
+    const oldHint = await env.ROUTING.get(`email-cache:route:${first.routeId}:latest`);
+    expect(oldHint).not.toBeNull();
+    expect(
+      JSON.parse((await env.ROUTING.get(`email-cache:route:${first.routeId}:v${oldHint}`))!).status,
+    ).toBe('removed');
+    expect(
+      await resolveEmailIngress(env.db, {
+        installationId: 'void-hosted',
+        accountId: 'customer-account',
+        zoneId: 'zone-example',
+        ingressName: (await resolveEmailDomain(env.db, 'transfer.example.com'))!.connection
+          .ingress_worker_name,
+        recipient: 'hello@transfer.example.com',
+      }),
+    ).toBeNull();
+    await env.db.insert(emailUnresolvedAttempts).values({
+      id: 'transfer-unresolved',
+      project_id: source.id,
+      sender_domain: 'transfer.example.com',
+      started_at: new Date().toISOString(),
+    });
+    await expect(
+      requestEmailDomainAdd(env.db, bindings(), {
+        projectId: target.id,
+        domain: 'transfer.example.com',
+        actor,
+        token: TOKEN,
+      }),
+    ).rejects.toThrow('sends are unresolved');
+    await env.db
+      .delete(emailUnresolvedAttempts)
+      .where(eq(emailUnresolvedAttempts.id, 'transfer-unresolved'));
+    await expect(
+      requestEmailDomainAdd(env.db, bindings(), {
+        projectId: foreign.id,
+        domain: 'transfer.example.com',
+        actor: { kind: 'owner', userId: stranger.id },
+        token: TOKEN,
+      }),
+    ).rejects.toThrow('manager approval');
+
+    const transfer = await requestEmailDomainAdd(env.db, bindings(), {
+      projectId: target.id,
+      domain: 'transfer.example.com',
+      actor,
+      token: TOKEN,
+    });
+    expect(transfer.routeId).toBe(first.routeId);
+    expect((await resolveEmailDomain(env.db, 'transfer.example.com'))?.route.project_id).toBe(
+      target.id,
+    );
+    expect(await getEmailOperation(env.db, target.id, first.operationId)).toBeNull();
+    expect(await getEmailOperation(env.db, source.id, transfer.operationId)).toBeNull();
+    expect(
+      (
+        await env.db.select().from(emailOperations).where(eq(emailOperations.id, first.operationId))
+      )[0],
+    ).toBeTruthy();
+    await runEmailOperation(env.db, bindings(), transfer.operationId);
+    expect(
+      (
+        await env.db
+          .select()
+          .from(emailOperations)
+          .where(eq(emailOperations.id, transfer.operationId))
+      )[0]?.status,
+    ).toBe('completed');
+    const live = await resolveEmailIngress(env.db, {
+      installationId: 'void-hosted',
+      accountId: 'customer-account',
+      zoneId: 'zone-example',
+      ingressName: (await resolveEmailDomain(env.db, 'transfer.example.com'))!.connection
+        .ingress_worker_name,
+      recipient: 'hello@transfer.example.com',
+    });
+    expect(live?.route.project_id).toBe(target.id);
+    await flushEmailCacheOutbox(env.db, env.ROUTING);
+    const newHint = await env.ROUTING.get(`email-cache:route:${first.routeId}:latest`);
+    expect(Number(newHint)).toBeGreaterThan(Number(oldHint));
+  });
+
   it('serializes two sibling removals behind an unresolved connection write', async () => {
     const user = await createTestUser(env.db);
     const aProject = await createTestProject(env.db, user.id, 'queued-a');
@@ -307,6 +596,9 @@ describe('durable zone email connections', () => {
       'ready',
     );
     expect(callsByTag(stub.calls, 'scriptDelete')).toHaveLength(0);
+    expect(
+      (await resolveEmailDomain(env.db, 'support.example.com'))?.connection.credential_id,
+    ).not.toBeNull();
   });
 
   it('commits step intent before provider writes and fences an ambiguous result', async () => {

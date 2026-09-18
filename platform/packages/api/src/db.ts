@@ -408,38 +408,9 @@ export async function countUserDeploymentsToday(db: Db, userId: string): Promise
 
 // --- Projects ---
 
-export async function createProject(
-  db: Db,
-  userId: string,
-  slug: string,
-  routing?: KVNamespace,
-): Promise<Project> {
+export async function createProject(db: Db, userId: string, slug: string): Promise<Project> {
   const id = generateId('proj');
   const [row] = await db.insert(projects).values({ id, user_id: userId, slug }).returning();
-  // Mirror projectId -> slug into KV so the email proxy can validate that
-  // outbound `from` addresses belong to the calling project (the
-  // account-level send_email binding has no per-project constraint, so
-  // this mapping is the only thing preventing cross-project sender
-  // spoofing). Slug is immutable today — written once at create-time.
-  //
-  // INVARIANT: project slugs are immutable. If a slug-rename feature
-  // ever ships, every code path that mutates `projects.slug` MUST also
-  //   (1) update `email-slug:<projectId>` in ROUTING KV (this key), AND
-  //   (2) validate no `<oldslug>+...` send is in flight before the
-  //       rename completes (otherwise an in-flight outbound POST could
-  //       slip through with the old slug, then the proxy maps it back
-  //       and the new owner of that slug appears to send mail).
-  // TODO: revisit if/when project rename ships.
-  if (routing) {
-    try {
-      await routing.put(`email-slug:${id}`, slug);
-    } catch (err) {
-      // Don't fail project creation on a transient KV blip. The proxy
-      // will refuse sends with `project slug unknown` until this
-      // converges, and the hourly cron backfill re-writes the mirror.
-      console.error(`[createProject] failed to write email-slug:${id}:`, err);
-    }
-  }
   return row;
 }
 
@@ -1804,25 +1775,17 @@ export async function createEmailDestination(
  * also clear the audit columns so the row no longer claims to be
  * owner-verified by a stale identity.
  *
- * Returns the list of distinct project ids whose rows were touched, so
- * the caller can sync each project's allowlist KV (verified rows we
- * just demoted must drop out of `email-allowlist:<projectId>` so the
- * proxy stops accepting sends to them).
- *
  * Called from the OAuth callback in `routes/auth.ts`, which re-reads the
  * provider's current email on every login and writes it straight back
  * via `updateUser` — so the stored address really does change under us.
- * The caller runs this in the SAME transaction as that `updateUser`, and
- * tightens each returned project's mirror inside it too, before the commit:
- * the change is detected by comparing the stored address with the
- * provider's, so a demotion — or a mirror write — committed separately and
- * then lost would never be retried.
+ * The caller runs this in the same transaction as `updateUser` so consent
+ * and the owner's current address change together.
  */
 export async function revokeOwnerVerifiedDestinationsForUserChange(
   db: Db,
   userId: string,
   oldEmail: string,
-): Promise<Array<string>> {
+): Promise<void> {
   const lowered = oldEmail.toLowerCase();
   // The caller holds the policy lock in its surrounding profile transaction.
   // Lock affected projects before changing consent so admission cannot read
@@ -1844,7 +1807,7 @@ export async function revokeOwnerVerifiedDestinationsForUserChange(
       .where(eq(projects.id, projectId))
       .for('update');
   }
-  const updated = await db
+  await db
     .update(emailDestinations)
     .set({
       status: 'pending',
@@ -1857,8 +1820,7 @@ export async function revokeOwnerVerifiedDestinationsForUserChange(
       // against CF's account-level list — and nothing deleted the address
       // on CF's side, so CF still reports it verified. A row left as 'cf'
       // therefore drops straight back into that filter and the very next
-      // `void email destinations` re-promotes it to 'verified' and
-      // re-mirrors the address into `email-allowlist:<projectId>`, undoing
+      // `void email destinations` re-promotes it to 'verified', undoing
       // this revoke entirely. 'platform' is also the correct state on the
       // merits: the account-level CF flag is exactly the consent we just
       // decided we can no longer inherit, so the only thing that may
@@ -1876,9 +1838,7 @@ export async function revokeOwnerVerifiedDestinationsForUserChange(
         sql`lower(${emailDestinations.verified_by_email_snapshot}) = ${lowered}`,
         eq(emailDestinations.verification_source, 'cf'),
       ),
-    )
-    .returning({ project_id: emailDestinations.project_id });
-  return Array.from(new Set(updated.map((r) => r.project_id)));
+    );
 }
 
 export async function getEmailDestinationsByProjectId(

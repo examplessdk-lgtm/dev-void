@@ -5,12 +5,7 @@ import { readConfig } from '../config.ts';
 import { readProjectPaths } from '../project-paths.ts';
 import { scanEmailHandlersSync } from '../router/email.ts';
 import { getToken, openBrowser } from './auth.ts';
-import {
-  PlatformApiError,
-  PlatformClient,
-  type EmailDomainResponse,
-  type EmailDomainStatusResponse,
-} from './client.ts';
+import { PlatformApiError, PlatformClient, type EmailDomainResponse } from './client.ts';
 import {
   createDeployWranglerRunner,
   deriveWorkerName,
@@ -133,10 +128,6 @@ async function emailDestinations(client: PlatformClient, projectId: string): Pro
   note(lines.join('\n'), 'Email Destinations');
 }
 
-/**
- * `void email allow <address>` — exported for the unit test; the command
- * entry (`runEmailCommand`) resolves the client and project first.
- */
 export async function emailAllow(
   client: Pick<PlatformClient, 'addEmailDestination'>,
   projectId: string,
@@ -175,16 +166,6 @@ function freshLinkHint(address: string): string {
   return `For a fresh link, remove the address from every project that lists it (\`void email disallow ${address}\`), then \`void email allow ${address}\` — Cloudflare mails a new link only when it registers the address anew.`;
 }
 
-/**
- * `void email disallow <address>` — exported for the unit test; the command
- * entry (`runEmailCommand`) resolves the client and project first.
- *
- * No deploy is involved: the api tightens the proxy's `email-allowlist`
- * KV mirror inside the DELETE (and answers 503 if that write fails), and
- * the proxy re-reads the mirror with a 60s `cacheTtl` on both the send
- * path and inbound forward/reply — so the address is refused once that
- * per-colo cache turns over.
- */
 export async function emailDisallow(
   client: Pick<PlatformClient, 'listEmailDestinations' | 'removeEmailDestination'>,
   projectId: string,
@@ -202,28 +183,12 @@ export async function emailDisallow(
   );
 }
 
-/**
- * `void email logs` — exported for the unit test; the command entry
- * (`runEmailCommand`) resolves the client and project first.
- */
 export async function emailLogs(
   client: Pick<PlatformClient, 'getEmailLogs'>,
   projectId: string,
   limit?: number,
 ): Promise<void> {
   const result = await client.getEmailLogs(projectId, limit);
-  if (result.pending) {
-    log.info(result.note ?? 'Persistent log storage is not yet wired up.');
-    // The proxy's own send/receive records are the platform worker's console
-    // output, which a project's credentials cannot read — so nothing points
-    // at them. The one thing a user CAN read today is their own worker's
-    // console output: the email handler is invoked over RPC on the same
-    // tailed script as every HTTP request, so it lands in `void project logs`.
-    log.info(
-      'Email activity logs are not available yet. Console output from your email handler appears in `void project logs`.',
-    );
-    return;
-  }
   if (result.logs.length === 0) {
     log.info('No email activity recorded.');
     return;
@@ -517,18 +482,6 @@ type EmailDomainCredential = { kind: 'api_token'; apiToken: string };
 const ADD_RECONCILE_ATTEMPTS = 15;
 const ADD_RECONCILE_INTERVAL_MS = 1000;
 
-/**
- * `void email domain add <domain>` — exported for the unit test; the command
- * entry resolves the client and project first.
- *
- * The flow: render the MX decision → scoped API token →
- * the template-link + clipboard fallback (Enter switches to the masked paste
- * at any point) → POST the credential once → render the resulting row. A
- * failed add leaves the platform row 'failed' and re-running add replaces
- * the credential — the api's replace path, not anything here. On an
- * administrator-managed platform, only a row the owner registered before
- * the switch continues into that renewal flow.
- */
 export async function emailDomainAdd(
   client: Pick<
     PlatformClient,
@@ -636,7 +589,7 @@ export async function emailDomainAdd(
   // A renewal keeps its stored target: Email Routing itself put MX on the
   // apex it serves, so the MX decision would retarget it.
   if (renewal !== undefined) {
-    log.info(`Renewing ${renewal} — the stored credential is replaced; rules and the relay stay.`);
+    log.info(`Updating ${renewal} with a scoped credential; the platform will reconcile setup.`);
   } else {
     await decideTarget();
   }
@@ -845,231 +798,80 @@ export async function emailDomainAdd(
     'Token stored encrypted on the platform for this zone connection — nothing is kept on this machine.',
   );
   printEmailDomainOutcome(row);
-  if (
-    row.status === 'failed' ||
-    row.status === 'token_revoked' ||
-    row.status === 'token_expired' ||
-    row.operationStatus === 'blocked' ||
-    row.operationStatus === 'unknown'
-  ) {
+  if (row.operationStatus === 'blocked' || row.operationStatus === 'unknown') {
     return exit(1);
   }
 }
 
-/** An administrator's row runs on the platform's own credential; the owner never held one. */
-function emailCredentialLabel(row: Pick<EmailDomainResponse, 'credential_kind' | 'managed_by'>) {
-  const kind =
-    row.credential_kind === 'oauth_grant'
-      ? 'OAuth grant'
-      : row.credential_kind === 'platform'
-        ? 'platform credential'
-        : 'API token';
-  return row.managed_by === 'admin' ? `${kind} · managed by the administrator` : kind;
-}
-
 function emailDomainStatusText(status: EmailDomainResponse['status']): string {
-  if (status === 'active' || status === 'ready') {
-    return pc.green('active');
+  if (status === 'ready') {
+    return pc.green('ready');
   }
   if (status === 'pending') {
     return pc.yellow('pending');
   }
-  return pc.red(status === 'failed' ? 'failed' : status.replace('_', ' '));
+  return status === 'disabled' ? pc.yellow('disabled') : pc.red(status);
 }
 
-/**
- * The dashboard path for the one remaining human step. The row does not
- * carry the zone name, so a subdomain row strips its first label — the zone
- * the walk almost always lands on (`mail.acme.com` → `acme.com`).
- */
-function routingSubdomainInstruction(domain: string, mode: EmailDomainResponse['mode']): string {
-  const zoneGuess = mode === 'subdomain' ? domain.split('.').slice(1).join('.') : domain;
-  return `add ${domain} in the Cloudflare dashboard — Email Routing → ${zoneGuess} → Settings → Subdomains`;
-}
-
-/**
- * The shared result render for add and sync: the row as a block, then the
- * one guidance line the status calls for. `error` is printed verbatim — the
- * api guarantees it names a step or a CF error, never credential material.
- */
-function printEmailDomainOutcome(row: EmailDomainResponse): void {
-  if (row.readiness) {
-    const lines = [
-      `Domain:      ${row.domain}`,
-      ...Object.entries(row.readiness).map(
-        ([name, value]) =>
-          `${name.padEnd(12)} ${value.status}${value.reason ? ' — ' + value.reason : ''}${value.observedAt ? ' (' + value.observedAt + ')' : ''}`,
-      ),
-    ];
-    if (row.operationId) {
-      lines.push(
-        `Operation:   ${row.operationId}${row.operationStatus ? ' · ' + row.operationStatus : ''}`,
-      );
-    }
-    note(lines.join('\n'), 'Email Domain');
-    if (row.error) {
-      log.error(row.error);
-    }
-    if (row.readiness.inbound.status !== 'ready') {
-      log.info(`Run void email domain sync ${row.domain} to reconcile setup.`);
-    }
-    return;
-  }
-  if (row.status === 'failed') {
-    const step = row.setup_state?.failed_step;
-    log.error(
-      `email: ${row.domain} failed${step ? ` at ${step.replaceAll('_', ' ')}` : ''}${row.error ? ` — ${row.error}` : ''}`,
-    );
-    log.info(
-      `Fix the step above, then re-run \`void email domain add ${row.domain}\` — adding again replaces the credential and retries.`,
-    );
-    return;
-  }
-
+function printEmailDomainOutcome(row: EmailDomainResponse, projectRef?: string): void {
   const lines = [
     `Domain:      ${row.domain}`,
-    `Status:      ${emailDomainStatusText(row.status)}`,
-    `Mode:        ${row.mode ?? '—'}`,
-    `Credential:  ${emailCredentialLabel(row)}`,
+    `Managed by:  ${row.managed_by === 'admin' ? 'administrator' : 'project owner'}`,
+    ...Object.entries(row.readiness).map(
+      ([name, value]) =>
+        `${name.padEnd(12)} ${value.status}${value.reason ? ' — ' + value.reason : ''}${value.observedAt ? ' (' + value.observedAt + ')' : ''}`,
+    ),
   ];
-  if (row.relay_worker_name) {
+  if (row.operationId) {
     lines.push(
-      `Relay:       ${row.relay_worker_name}${row.relay_version !== null ? ` v${row.relay_version}` : ''}`,
+      `Operation:   ${row.operationId}${row.operationStatus ? ' · ' + row.operationStatus : ''}`,
     );
-  }
-  if (row.token_expires_on) {
-    lines.push(`Token TTL:   expires ${row.token_expires_on}`);
   }
   note(lines.join('\n'), 'Email Domain');
-
-  const remaining = row.setup_state?.remaining_steps ?? [];
-  if (row.status === 'pending' && remaining.includes('routing_subdomain')) {
-    log.warn(`One step only you can do: ${routingSubdomainInstruction(row.domain, row.mode)}.`);
-    log.info(`Then run \`void email domain status ${row.domain}\` to poll.`);
-    return;
+  if (row.error) {
+    log.error(row.error);
   }
-  if (row.status === 'pending') {
-    log.info(`Run \`void email domain status ${row.domain}\` to poll.`);
-    return;
-  }
-  if (row.status === 'token_revoked' || row.status === 'token_expired') {
+  if (row.operationStatus === 'unknown') {
     log.warn(
-      `The stored credential was ${row.status === 'token_revoked' ? 'revoked at Cloudflare' : 'left to expire'} — re-run \`void email domain add ${row.domain}\` with a fresh API token. Rules and the relay stay.`,
+      `Operation ${row.operationId} has an unknown outcome; inspect its status before retrying.`,
     );
     return;
   }
-  if (remaining.includes('sending_onboarding')) {
+  if (
+    row.readiness.management.status === 'expired' ||
+    row.readiness.management.status === 'revoked'
+  ) {
     log.info(
-      `Inbound is live. Sending to arbitrary recipients needs Workers Paid — until then sendEmail() works to verified destinations only. After upgrading, run \`void email domain sync ${row.domain}\` to finish onboarding.`,
+      row.managed_by === 'admin'
+        ? `Ask your administrator to run \`void platform email domain-add ${row.domain} --project ${projectRef ?? row.projectId}\` with a renewed credential.`
+        : `Run \`void email domain add ${row.domain}\` with a new scoped API token.`,
+    );
+  } else if (
+    row.readiness.inbound.status === 'pending' ||
+    row.readiness.inbound.status === 'drifted'
+  ) {
+    log.info(
+      row.managed_by === 'admin'
+        ? `Ask your administrator to run \`void platform email domain-sync ${row.domain}\` to reconcile setup.`
+        : `Run \`void email domain sync ${row.domain}\` to reconcile setup.`,
     );
   }
-  log.success(
-    `${row.domain} is live — send with \`sendEmail({ from: 'you@${row.domain}', … })\`; inbound mail to any address on ${row.domain} reaches your email/ handlers.`,
-  );
 }
 
-/**
- * `void email domain status <domain>` — exported for the unit test. Re-probes
- * the credential and the relay on every call (the api does it), so this is
- * also the drift report: it never fights the customer's edits, it names them.
- */
 export async function emailDomainStatus(
   client: Pick<PlatformClient, 'getEmailDomain' | 'getEmailSettings'>,
   projectId: string,
   rawDomain: string,
 ): Promise<void> {
   const domain = normalizeEmailDomainInput(rawDomain);
-  const row: EmailDomainStatusResponse = await client.getEmailDomain(projectId, domain);
-  if (row.readiness) {
-    printEmailDomainOutcome(row);
-    return;
-  }
-  const adminRow = row.managed_by === 'admin';
-
-  const lines = [
-    `Domain:      ${row.domain}`,
-    `Status:      ${emailDomainStatusText(row.status)}`,
-    `Mode:        ${row.mode ?? '—'}`,
-  ];
-  const credential =
-    row.credential_status === 'probe_failed'
-      ? `${emailCredentialLabel(row)} · probe failed (stored view shown)`
-      : `${emailCredentialLabel(row)} · ${row.credential_status}`;
-  lines.push(`Credential:  ${credential}`);
-  if (row.token_id) {
-    lines.push(
-      `Token:       id ${row.token_id}${row.token_expires_on ? ` · expires ${row.token_expires_on}` : ''}`,
-    );
-  }
-  if (row.relay_worker_name) {
-    let relay = `Relay:       ${row.relay_worker_name}${row.relay_version !== null ? ` v${row.relay_version}` : ''}`;
-    if (row.relay_missing === true) {
-      relay += ' · missing from the account';
-    } else if (row.relay_drift) {
-      relay += ` · drifted (current is v${row.current_relay_version})`;
-    }
-    lines.push(relay);
-  }
-  if (row.setup_state?.failed_step) {
-    lines.push(`Failed step: ${row.setup_state.failed_step.replaceAll('_', ' ')}`);
-  }
-  lines.push(`Catch-all:   ${row.catch_all}`);
-  note(lines.join('\n'), 'Email Domain');
-
-  if (row.error) {
-    log.error(`email: ${row.error}`);
-  }
-  const failedAdminRow = adminRow && row.status === 'failed';
-  if (failedAdminRow) {
-    const slug = (await client.getEmailSettings(projectId)).domains.projectSlug ?? projectId;
-    log.warn(
-      `Ask your administrator to re-run the setup: \`void platform email domain-add ${row.domain} --project ${slug}${row.credential_kind === 'api_token' ? ' --token-stdin' : ''}\` — adding again retries the failed step; rules stay.`,
-    );
-  }
-  const remaining = row.setup_state?.remaining_steps ?? [];
-  if (remaining.includes('routing_subdomain')) {
-    log.warn(
-      adminRow
-        ? `One step for your administrator, in the platform's Cloudflare account: ${routingSubdomainInstruction(row.domain, row.mode)}.`
-        : `One step only you can do: ${routingSubdomainInstruction(row.domain, row.mode)}.`,
-    );
-  }
-  if (remaining.includes('sending_onboarding')) {
-    log.info(
-      adminRow
-        ? `Sending to arbitrary recipients needs Workers Paid on the platform's Cloudflare account — inbound works; sendEmail() to verified destinations only. After the upgrade, ask your administrator to run \`void platform email domain-sync ${row.domain}\`.`
-        : `Sending to arbitrary recipients needs Workers Paid — inbound works; sendEmail() to verified destinations only. After upgrading, run \`void email domain sync ${row.domain}\`.`,
-    );
-  }
-  if (!failedAdminRow && (row.relay_missing === true || row.relay_drift)) {
-    log.info(
-      adminRow
-        ? `Ask your administrator to run \`void platform email domain-sync ${row.domain}\` to redeploy the relay in place.`
-        : `Run \`void email domain sync ${row.domain}\` to redeploy the relay in place.`,
-    );
-  }
-  if (!failedAdminRow && row.catch_all_drift) {
-    log.info(
-      adminRow
-        ? `Catch-all drifted — ask your administrator to run \`void platform email domain-sync ${row.domain}\` to re-point it.`
-        : `Catch-all drifted — run \`void email domain sync ${row.domain}\` to re-point it.`,
-    );
-  }
-  if (row.status === 'token_revoked' || row.status === 'token_expired') {
-    if (adminRow) {
-      const slug = (await client.getEmailSettings(projectId)).domains.projectSlug ?? projectId;
-      log.warn(
-        `Ask your administrator to re-add it: \`void platform email domain-add ${row.domain} --project ${slug} --token-stdin\` — adding again replaces the credential, rules stay.`,
-      );
-    } else {
-      log.warn(
-        `Re-run \`void email domain add ${row.domain}\` with a fresh scoped API token — adding again replaces the credential, rules stay.`,
-      );
-    }
-  }
+  const row = await client.getEmailDomain(projectId, domain);
+  const projectRef =
+    row.managed_by === 'admin'
+      ? ((await client.getEmailSettings(projectId)).domains.projectSlug ?? projectId)
+      : undefined;
+  printEmailDomainOutcome(row, projectRef);
 }
 
-/** `void email domain list` — exported for the unit test. */
 export async function emailDomainList(
   client: Pick<PlatformClient, 'listEmailDomains'>,
   projectId: string,
@@ -1084,12 +886,11 @@ export async function emailDomainList(
   const width = Math.max(...rows.map((row) => row.domain.length));
   const lines = rows.map(
     (row) =>
-      `  ${row.domain.padEnd(width)}  ${emailDomainStatusText(row.status)}  ${row.mode ?? '—'}`,
+      `  ${row.domain.padEnd(width)}  ${emailDomainStatusText(row.status)}  ${row.managed_by === 'admin' ? 'administrator' : 'project owner'}`,
   );
   note(lines.join('\n'), 'Email Domains');
 }
 
-/** `void email domain sync <domain>` — exported for the unit test. */
 export async function emailDomainSync(
   client: Pick<PlatformClient, 'syncEmailDomain'>,
   projectId: string,
@@ -1097,32 +898,64 @@ export async function emailDomainSync(
 ): Promise<void> {
   const domain = normalizeEmailDomainInput(rawDomain);
   const row = await client.syncEmailDomain(projectId, domain);
-  if (row.catch_all === 'foreign_conflict') {
-    log.warn(
-      "Catch-all: the zone's catch-all points at a different worker and was not overwritten.",
-    );
-  } else if (row.catch_all) {
-    log.info(`Catch-all: ${row.catch_all.replaceAll('_', ' ')}`);
-  }
   printEmailDomainOutcome(row);
-  if (
-    row.status === 'failed' ||
-    row.operationStatus === 'blocked' ||
-    row.operationStatus === 'unknown'
-  ) {
+  if (row.operationStatus !== 'completed') {
     throw new Error(
-      `email: reconciliation ${row.operationStatus ?? row.status}; inspect operation ${row.operationId ?? row.domain}`,
+      `email: reconciliation ${row.operationStatus ?? 'pending'}; inspect operation ${row.operationId ?? row.domain}`,
     );
   }
 }
 
 /** Rotation applies to every domain sharing this zone connection. */
 export async function emailDomainRotateSecret(
-  client: Pick<PlatformClient, 'rotateEmailDomainSecret'>,
+  client: Pick<PlatformClient, 'rotateEmailDomainSecret' | 'getEmailOperation'>,
   projectId: string,
   rawDomain: string,
+  deps: { sleep?: (ms: number) => Promise<void> } = {},
 ): Promise<void> {
-  const row = await client.rotateEmailDomainSecret(projectId, normalizeEmailDomainInput(rawDomain));
+  const domain = normalizeEmailDomainInput(rawDomain);
+  const attemptId = crypto.randomUUID();
+  let row: EmailDomainResponse;
+  try {
+    row = await client.rotateEmailDomainSecret(projectId, domain, attemptId);
+  } catch (error) {
+    if (error instanceof PlatformApiError && [400, 403, 404, 409].includes(error.status)) {
+      throw error;
+    }
+    const sleep =
+      deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+    for (let attempt = 0; attempt < ADD_RECONCILE_ATTEMPTS; attempt++) {
+      if (attempt > 0) {
+        await sleep(ADD_RECONCILE_INTERVAL_MS);
+      }
+      let operation;
+      try {
+        operation = await client.getEmailOperation(projectId, attemptId);
+      } catch {
+        continue;
+      }
+      note(
+        [
+          `Operation:   ${operation.operationId}`,
+          `Status:      ${operation.status}`,
+          `Inbound:     ${operation.readiness.inbound.status}`,
+          `Outbound:    ${operation.readiness.outbound.status}`,
+          `Credential:  ${operation.readiness.management.status}`,
+        ].join('\n'),
+        'Email Secret Rotation',
+      );
+      if (operation.status !== 'completed') {
+        throw new Error(
+          `email: secret rotation ${operation.status}; inspect operation ${operation.operationId}`,
+        );
+      }
+      log.success('Zone ingress secret rotated and verified on the deployed Worker.');
+      return;
+    }
+    throw new Error(
+      `email: secret rotation outcome is unknown (operation key ${attemptId}); inspect \`void email domain status ${domain}\` before starting another rotation.`,
+    );
+  }
   printEmailDomainOutcome(row);
   if (row.operationStatus !== 'completed') {
     throw new Error(
@@ -1132,56 +965,24 @@ export async function emailDomainRotateSecret(
   log.success('Zone ingress secret rotated and verified on the deployed Worker.');
 }
 
-/** `void email domain remove <domain>` — exported for the unit test. */
 export async function emailDomainRemove(
   client: Pick<PlatformClient, 'removeEmailDomain'>,
   projectId: string,
   rawDomain: string,
-  options: { force?: boolean; exit?: (code: number) => never } = {},
+  options: { exit?: (code: number) => never } = {},
 ): Promise<void> {
   const domain = normalizeEmailDomainInput(rawDomain);
-  const result = await client.removeEmailDomain(projectId, domain, options.force);
-
-  if (result.operationId) {
-    log.info(`Operation: ${result.operationId} · ${result.operationStatus ?? 'pending'}`);
-    if (!result.removed) {
-      log.error(
-        result.error ??
-          'Email cleanup is not complete. Its operation and resources remain recorded for reconciliation.',
-      );
-      (options.exit ?? ((code: number): never => process.exit(code)))(1);
-    }
-    log.success(`Removed ${domain}. Zone resources still used by other domains were retained.`);
-    return;
-  }
-  if (!result.removed) {
-    // Kept for retry: a Cloudflare-side step failed without --force, so the
-    // row (and the stored credential the retry needs) stays.
-    const steps = result.failed_steps?.length ? result.failed_steps.join(', ') : 'unknown';
-    log.error(`email: could not remove ${domain} — failed Cloudflare-side steps: ${steps}.`);
-    log.info(
-      `The registration was kept — retry \`void email domain remove ${domain}\` once the Cloudflare-side problem is fixed, or re-run with --force to drop the row anyway.`,
+  const result = await client.removeEmailDomain(projectId, domain);
+  log.info(`Operation: ${result.operationId} · ${result.operationStatus ?? 'pending'}`);
+  if (!result.removed || result.operationStatus !== 'completed') {
+    log.error(
+      result.error ??
+        'Email cleanup is not complete. Its operation and resources remain recorded for reconciliation.',
     );
     (options.exit ?? ((code: number): never => process.exit(code)))(1);
+    return;
   }
-
-  log.success(
-    `Removed ${domain} — the platform row, the stored credential and the relay secret are gone.`,
-  );
-  const failed = result.failed_steps ?? [];
-  if (
-    failed.length > 0 &&
-    (result.forced === true || failed.some((step) => step !== 'revoke_grant'))
-  ) {
-    log.warn(
-      `Cloudflare-side cleanup failed for: ${failed.join(', ')} — delete the relay worker and reset the catch-all in the zone's Email Routing settings yourself.`,
-    );
-  } else if (failed.length > 0) {
-    // Only the grant revoke failed: the rules and relay are already gone.
-    log.info(
-      'Note: the Cloudflare grant could not be revoked (already invalid or Cloudflare unreachable) — no mail impact.',
-    );
-  }
+  log.success(`Removed ${domain}. Zone resources still used by other domains were retained.`);
 }
 
 async function runEmailDomainCommand(
@@ -1201,7 +1002,7 @@ async function runEmailDomainCommand(
     case 'rotate-secret':
       return emailDomainRotateSecret(client, projectId, args.domain!);
     case 'remove':
-      return emailDomainRemove(client, projectId, args.domain!, { force: args.force });
+      return emailDomainRemove(client, projectId, args.domain!);
   }
 }
 

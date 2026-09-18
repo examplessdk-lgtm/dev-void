@@ -16,6 +16,7 @@ import {
   buildReplyMessage,
   createMessageProxy,
   defineEmail,
+  isForwardableEmailMessage,
   MAX_INBOUND_BYTES,
   MAX_INBOUND_HEADERS,
   parseEmail,
@@ -650,10 +651,8 @@ describe('generated __emailHandler dispatch (behavioural)', () => {
     expect(seen).toEqual([{ ticket: 'T-42' }]);
   });
 
-  it('runs a relayed (viaDomain) recipient in no-prefix mode even when a slug is passed', async () => {
-    // The relay lane of "Custom domains on Cloudflare" (design doc 0078):
-    // the platform router proves the domain's relay secret and sets
-    // `viaDomain`; the recipient carries no `<slug>+` prefix. A platform
+  it('runs a verified custom-domain recipient in no-prefix mode even when a slug is passed', async () => {
+    // A verified receipt carries `viaDomain` and no `<slug>+` prefix. A platform
     // deployment still injects `__VOID_PROJECT_SLUG`, and the generated
     // handleEmail suppresses it for this lane — and createMessageProxy
     // itself ignores a slug passed alongside viaDomain, so a slug equal to
@@ -890,12 +889,16 @@ describe('generated __emailHandler dispatch (behavioural)', () => {
 });
 
 describe('compileWorkerEntry (email)', () => {
-  it('adds email export and import when hasEmail is true', () => {
+  it('emits the native event gate and authenticated receipt path when hasEmail is true', () => {
     const code = compileWorkerEntry({ hasEmail: true });
     expect(code).toContain(', __emailHandler');
+    expect(code).toContain('async email(message)');
     expect(code).toContain(
-      'async email(envelope) { return handleEmail(envelope, this.env, this.ctx); }',
+      'this.env.__VOID_EMAIL_DEPLOYMENT_ID || !__isForwardableEmailMessage(message)',
     );
+    expect(code).not.toContain('async email(envelope)');
+    expect(code).toContain('return __handleEmailReceipt(request, env, ctx)');
+    expect(code).toContain('await __readEmailEnvelope(request.body)');
     expect(code).toContain('async function handleEmail');
     expect(code).toContain('from "void/_email-protocol"');
     expect(code).not.toContain('from "@void/platform/email-protocol"');
@@ -910,9 +913,37 @@ describe('compileWorkerEntry (email)', () => {
   it('co-exists with queue export when both present', () => {
     const code = compileWorkerEntry({ hasQueues: true, hasEmail: true });
     expect(code).toContain('async queue(batch) { return __voidQueue(batch, this.env, this.ctx); }');
-    expect(code).toContain(
-      'async email(envelope) { return handleEmail(envelope, this.env, this.ctx); }',
+    expect(code).toContain('async email(message)');
+  });
+
+  it('rejects envelope RPC and managed calls but accepts a native email event', async () => {
+    const code = compileWorkerEntry({ hasEmail: true });
+    const method = code.match(/ {2}async email\(message\) \{[\s\S]*?\n {2}\}/)?.[0];
+    expect(method).toBeDefined();
+    const handleEmail = vi.fn(async () => [{ type: 'reject', reason: 'test' }]);
+    // eslint-disable-next-line @typescript-eslint/no-implied-eval, no-new-func
+    const entryEmail = new Function(
+      '__isForwardableEmailMessage',
+      'handleEmail',
+      `return ({${method}}).email;`,
+    )(isForwardableEmailMessage, handleEmail) as (
+      this: { env: Record<string, string>; ctx: object },
+      message: unknown,
+    ) => Promise<void>;
+    const envelope = { from: 'sender@example.com', to: 'app@example.com', raw: new Uint8Array() };
+    await expect(entryEmail.call({ env: {}, ctx: {} }, envelope)).rejects.toThrow(
+      'Native email event required',
     );
+    expect(handleEmail).not.toHaveBeenCalled();
+
+    const native = { ...envelope, setReject() {}, async forward() {}, async reply() {} };
+    await expect(
+      entryEmail.call({ env: { __VOID_EMAIL_DEPLOYMENT_ID: 'deploy_1' }, ctx: {} }, native),
+    ).rejects.toThrow('Native email event required');
+    expect(handleEmail).not.toHaveBeenCalled();
+    await expect(entryEmail.call({ env: {}, ctx: {} }, native)).resolves.toBeUndefined();
+    expect(handleEmail).toHaveBeenCalledOnce();
+    expect(handleEmail).toHaveBeenCalledWith(native, {}, {});
   });
 });
 
@@ -2820,15 +2851,9 @@ describe('buildReplyMessage', () => {
 });
 
 // ---------------------------------------------------------------------------
-// End-to-end: replicates what the worker entry codegen does at runtime.
-// The codegen emits a `email(envelope)` method on a WorkerEntrypoint subclass
-// that:
-//   1. Builds a proxy via createMessageProxy(envelope)
-//   2. Runs the dispatcher (which delegates to the matching user handler)
-//   3. Returns getActions() to the platform router
-// This test stitches the same pieces together and asserts the contract,
-// without compiling and evaluating the actual generated code (which would
-// need virtual:void-routes + cloudflare:workers).
+// The verified receipt path builds a proxy, runs the matching handler, and
+// encodes the recorded actions for the platform. This exercises those pieces
+// without evaluating the generated Worker module.
 // ---------------------------------------------------------------------------
 
 describe('end-to-end: envelope → handler → action queue', () => {
@@ -2868,7 +2893,7 @@ describe('end-to-end: envelope → handler → action queue', () => {
     return getActions();
   }
 
-  it('records a setReject action and returns it as the RPC result', async () => {
+  it('records a setReject action for the receipt response', async () => {
     const handler = defineEmail(async (message) => {
       message.setReject('not allowed');
     });

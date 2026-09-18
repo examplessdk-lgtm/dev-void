@@ -150,6 +150,7 @@ export async function readEmailEnvelope(
   const value = metadata as Record<string, unknown>;
   const raw = bytes.subarray(4 + metadataLength, total);
   if (
+    raw.byteLength > EMAIL_MAX_INBOUND_BYTES ||
     typeof value.from !== 'string' ||
     value.from.length > 320 ||
     typeof value.to !== 'string' ||
@@ -206,18 +207,18 @@ async function receiptKey(secret: string, usage: 'sign' | 'verify'): Promise<Cry
 
 export async function signEmailReceipt(
   claims: EmailReceiptClaims,
-  projectToken: string,
+  signingSecret: string,
 ): Promise<string> {
   const payload = encoder.encode(JSON.stringify(claims));
   const signature = new Uint8Array(
-    await crypto.subtle.sign('HMAC', await receiptKey(projectToken, 'sign'), payload),
+    await crypto.subtle.sign('HMAC', await receiptKey(signingSecret, 'sign'), payload),
   );
   return `${base64url(payload)}.${base64url(signature)}`;
 }
 
 export async function verifyEmailReceipt(
   token: string,
-  projectToken: string,
+  signingSecret: string,
   expected: Pick<EmailReceiptClaims, 'projectId' | 'deploymentId' | 'recipient'>,
   now: number = Date.now(),
 ): Promise<EmailReceiptClaims | null> {
@@ -237,7 +238,7 @@ export async function verifyEmailReceipt(
     if (
       !(await crypto.subtle.verify(
         'HMAC',
-        await receiptKey(projectToken, 'verify'),
+        await receiptKey(signingSecret, 'verify'),
         Uint8Array.from(signature),
         Uint8Array.from(payload),
       ))
@@ -316,7 +317,7 @@ export function encodeEmailActions(
         pending = frame(2, action.raw);
       }
       total += 5 + metadata.byteLength + (pending?.byteLength ?? 0);
-      if (total > EMAIL_MAX_RESPONSE_BYTES) {
+      if (total + 5 > EMAIL_MAX_RESPONSE_BYTES) {
         throw new Error('email actions too large');
       }
       controller.enqueue(frame(1, metadata));

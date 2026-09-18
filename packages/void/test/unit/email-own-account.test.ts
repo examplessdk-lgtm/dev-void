@@ -673,7 +673,7 @@ describe('generated handleEmail on a native ForwardableEmailMessage', () => {
     expect((outcome as MimeError).message).toBe('forward: 33 headers, over the 32-header limit.');
   });
 
-  it('still returns the actions as data for a platform envelope, enacting nothing', async () => {
+  it('returns actions for an authenticated receipt envelope without native enaction', async () => {
     const handleEmail = buildHandleEmail(async (message) => {
       message.setReject('spam');
     });
@@ -693,16 +693,15 @@ describe('generated handleEmail on a native ForwardableEmailMessage', () => {
 });
 
 /**
- * The relay lane (design doc 0078, "Custom domains on Cloudflare"): the
- * envelope arrives over the platform router's `/email/relay` RPC with
- * `viaDomain` set and a recipient that carries NO `<slug>+` prefix, while
+ * A verified custom-domain receipt carries `viaDomain` and a recipient
+ * without a `<slug>+` prefix, while
  * provisioning still injects `__VOID_PROJECT_SLUG` unconditionally. The
  * generated `handleEmail` must suppress the slug so the dispatcher runs in
  * no-prefix mode (Mode B item 4) — left applied, the strip would take
  * everything up to the first `+` and `support+T-42@acme.com` would dispatch
  * as `T-42` to `_default` or a wrong `[user]` param.
  */
-describe('generated handleEmail on a relayed envelope (viaDomain)', () => {
+describe('generated handleEmail on a verified custom-domain receipt', () => {
   function relayEnvelope(to = 'support+T-42@acme.com') {
     return {
       from: 'sender@example.com',

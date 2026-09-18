@@ -92,11 +92,11 @@ async function resolveIngress(
   }
   const contentLength = Number(response.headers.get('content-length'));
   if (Number.isFinite(contentLength) && contentLength > 4096) {
-    return null;
+    throw new Error('invalid email routing response');
   }
   const reader = response.body?.getReader();
   if (!reader) {
-    return null;
+    throw new Error('invalid email routing response');
   }
   const chunks: Array<Uint8Array> = [];
   let total = 0;
@@ -105,7 +105,7 @@ async function resolveIngress(
     while (true) {
       const remaining = deadline - Date.now();
       if (remaining <= 0) {
-        return null;
+        throw new Error('email routing response timeout');
       }
       let timer: ReturnType<typeof setTimeout> | undefined;
       const chunk = await Promise.race([
@@ -123,7 +123,7 @@ async function resolveIngress(
       }
       total += chunk.value.byteLength;
       if (total > 4096) {
-        return null;
+        throw new Error('invalid email routing response');
       }
       chunks.push(chunk.value);
     }
@@ -142,10 +142,10 @@ async function resolveIngress(
   try {
     route = JSON.parse(text);
   } catch {
-    return null;
+    throw new Error('invalid email routing response');
   }
   if (!route || typeof route !== 'object') {
-    return null;
+    throw new Error('invalid email routing response');
   }
   const value = route as Partial<Route>;
   if (
@@ -157,7 +157,7 @@ async function resolveIngress(
     typeof value.domain !== 'string' ||
     (value.addressing !== 'shared' && value.addressing !== 'custom')
   ) {
-    return null;
+    throw new Error('invalid email routing response');
   }
   return value as Route;
 }
