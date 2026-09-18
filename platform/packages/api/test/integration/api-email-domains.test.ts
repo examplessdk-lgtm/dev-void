@@ -1967,15 +1967,25 @@ describe('GET /projects/:id/email/domains', () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id);
     await addActiveDomain(project.id, user.jwt);
+    // A public ID may contain `_iv`; only secret field names must be excluded.
+    const id = 'edom_ivm16k7p54l5';
+    await env.db.update(emailDomains).set({ id }).where(eq(emailDomains.project_id, project.id));
 
     const res = await listDomains(project.id, user.jwt);
     expect(res.status).toBe(200);
     const rows = (await res.json()) as Array<Record<string, unknown>>;
     expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ domain: 'acme.com', status: 'active' });
-    const raw = JSON.stringify(rows);
-    for (const leaked of [API_TOKEN, 'ciphertext', '_iv', 'key_version']) {
-      expect(raw).not.toContain(leaked);
+    expect(rows[0]).toMatchObject({ id, domain: 'acme.com', status: 'active' });
+    expect(JSON.stringify(rows)).not.toContain(API_TOKEN);
+    for (const field of [
+      'token_ciphertext',
+      'token_iv',
+      'token_key_version',
+      'relay_ciphertext',
+      'relay_iv',
+      'relay_key_version',
+    ]) {
+      expect(rows[0]).not.toHaveProperty(field);
     }
   });
 });

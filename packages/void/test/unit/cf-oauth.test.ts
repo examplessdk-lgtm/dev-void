@@ -24,6 +24,14 @@ import {
 const mockExecFile = vi.fn();
 const originalFetch = globalThis.fetch.bind(globalThis);
 
+function fetchLoopback(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  // Each grant binds the same port. Do not reuse a keep-alive connection to
+  // an earlier grant's server, which still holds that grant's state.
+  const request = new Request(input, init);
+  request.headers.set('Connection', 'close');
+  return originalFetch(request);
+}
+
 const AUTH_CODE = 'cf-auth-code-placeholder';
 const REFRESH_SENTINEL = 'cf-refresh-token-placeholder';
 
@@ -58,7 +66,7 @@ beforeEach(() => {
     const url =
       input instanceof Request ? input.url : input instanceof URL ? input.href : input.toString();
     if (url.startsWith('http://localhost:') || url.startsWith('http://127.0.0.1:')) {
-      return originalFetch(input, init);
+      return fetchLoopback(input, init);
     }
     if (url === CF_OAUTH_TOKEN_URL) {
       tokenExchangeBodies.push(new URLSearchParams(init?.body?.toString() ?? ''));
@@ -258,7 +266,7 @@ describe('runCfOauthGrant', () => {
       const url =
         input instanceof Request ? input.url : input instanceof URL ? input.href : input.toString();
       if (url.startsWith('http://localhost:') || url.startsWith('http://127.0.0.1:')) {
-        return originalFetch(input, init);
+        return fetchLoopback(input, init);
       }
       if (url === CF_OAUTH_TOKEN_URL) {
         tokenExchangeBodies.push(new URLSearchParams(init?.body?.toString() ?? ''));
