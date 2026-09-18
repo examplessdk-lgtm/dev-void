@@ -18,45 +18,99 @@ import {
   hashEmailRelaySecret,
   writeEmailDomainMirror,
 } from '../../email/domains.ts';
+import {
+  DEFAULT_EMAIL_BURST_LIMIT as DEFAULT_BURST_LIMIT,
+  DEFAULT_EMAIL_MONTHLY_LIMIT as DEFAULT_MONTHLY_LIMIT,
+  emailBurstLimitKey as burstLimitKey,
+  emailMonthlyLimitKey as monthlyLimitKey,
+  emailSuspendKey as suspendKey,
+  parseEmailLimit as parseLimit,
+} from '../../email/limits.ts';
 import { removeEmailDomain } from '../../email/relay-engine.ts';
+import { getEmailDomainManagement, getEmailRecipientPolicy } from '../../email/settings.ts';
 import type { ApiEnv } from '../../env.ts';
+import { executeAuditedMutation, operatorAuditIntent } from '../../operator/audit.ts';
+import { setOperatorEmailPolicy, setOperatorEmailSettings } from '../../operator/email-routes.ts';
 import {
   syncProjectAllowlistKv,
   syncProjectAllowlistKvBestEffort,
 } from '../../provisioning/email-allowlist.ts';
 import { deleteDestination } from '../../provisioning/email-routing.ts';
 import { emailDomains } from '../../schema.ts';
+import { renderOperationError } from '../operation-error.tsx';
+import { EmailSettingsPage } from '../views/email-settings.tsx';
 import { STATUS_COLORS, formatDateTime } from '../views/format.ts';
 import { Layout } from '../views/layout.tsx';
 
 const app = new Hono<ApiEnv>();
+app.onError(renderOperationError);
 
 /**
- * Per-project email control plane for operators.
+ * Email control plane for operators: installation-wide settings at `/`,
+ * one project's usage, caps, kill switch, destinations and domains at
+ * `/:projectId`.
  *
- * Every number on this page is read straight out of `ROUTING` KV, which is
- * where the proxy worker (`packages/proxy/src/email.ts`) keeps the counters
- * and reads the caps from. The keys and the defaults below MUST stay in
- * lockstep with that worker — they are the same contract written from both
- * ends, and nothing at build time catches a drift.
+ * Every number on the project page is read straight out of `ROUTING` KV,
+ * which is where the proxy worker (`packages/proxy/src/email.ts`) keeps the
+ * counters and reads the caps from. The keys and defaults come from
+ * `email/limits.ts`, the one spelling the api's writers share with the
+ * proxy's readers — nothing at build time catches a drift.
  *
  * The destination and custom-domain rows are Postgres. The proxy's only
  * view of a custom domain is the `email-domain:` ROUTING mirror, so the
  * revoke below clears that key before the row.
  */
-const suspendKey = (projectId: string) => `email-suspended:${projectId}`;
-const monthlyLimitKey = (projectId: string) => `email-limit:${projectId}`;
-const burstLimitKey = (projectId: string) => `email-burst-limit:${projectId}`;
 const sentKey = (projectId: string, month: string) => `email-sent:${projectId}:${month}`;
 const recvKey = (projectId: string, month: string) => `email-recv:${projectId}:${month}`;
 
-/** Mirrors `getMonthlyLimit` in `packages/proxy/src/email.ts`. */
-const DEFAULT_MONTHLY_LIMIT = 200;
-/** Mirrors `getBurstLimit` in `packages/proxy/src/email.ts`. */
-const DEFAULT_BURST_LIMIT = 10;
-
 /** The admin layout has no utility classes, so secondary text is inline. */
 const META = 'font-size: 0.8rem; color: #666';
+
+// GET /email/ — installation-wide recipient policy and domain management
+app.get('/', async (context) => {
+  const db = context.get('db');
+  const [policy, management] = await Promise.all([
+    getEmailRecipientPolicy(db),
+    getEmailDomainManagement(db),
+  ]);
+  return context.html(
+    <EmailSettingsPage
+      policy={policy}
+      management={management}
+      senderDomain={context.env.EMAIL_SENDER_DOMAIN}
+      username={context.get('user').login}
+    />,
+  );
+});
+
+// POST /email/policy — the shared-sender recipient policy
+app.post('/policy', async (context) => {
+  const body = await context.req.parseBody();
+  const mode = String(body.mode ?? '');
+  const domains = typeof body.domains === 'string' ? body.domains : '';
+  return executeAuditedMutation(
+    context,
+    operatorAuditIntent('email/policy', { mode, domains }),
+    async () => {
+      await setOperatorEmailPolicy(context, { mode, domains: domains || undefined });
+      return { response: context.redirect('/admin/email'), succeeded: true };
+    },
+  );
+});
+
+// POST /email/settings — who manages email domains
+app.post('/settings', async (context) => {
+  const body = await context.req.parseBody();
+  const domains = String(body.domains ?? '');
+  return executeAuditedMutation(
+    context,
+    operatorAuditIntent('email/settings', { domains }),
+    async () => {
+      await setOperatorEmailSettings(context, domains);
+      return { response: context.redirect('/admin/email'), succeeded: true };
+    },
+  );
+});
 
 // GET /email/:projectId — usage, caps, kill switch, destinations
 app.get('/:projectId', async (context) => {
@@ -796,19 +850,6 @@ function parseCounter(raw: string | null): number {
   }
   const n = parseInt(raw, 10);
   return Number.isFinite(n) && n >= 0 ? n : 0;
-}
-
-/**
- * Undefined means "no usable override" — either the key is absent or it holds
- * a value the proxy would itself reject, in which case the proxy is already
- * serving the default and this page must say so too.
- */
-function parseLimit(raw: string | null): number | undefined {
-  if (!raw) {
-    return undefined;
-  }
-  const n = parseInt(raw, 10);
-  return Number.isFinite(n) && n > 0 ? n : undefined;
 }
 
 export default app;

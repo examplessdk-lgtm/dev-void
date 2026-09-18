@@ -422,6 +422,17 @@ export const emailDomains = pgTable(
 );
 
 // ---------------------------------------------------------------------------
+// Installation-scoped settings an administrator changes at runtime (design
+// doc 0078, "Recipient policy"). Authoritative here; hot-path readers get a
+// ROUTING KV mirror written by the setting's own writer.
+// ---------------------------------------------------------------------------
+export const platformSettings = pgTable('platform_settings', {
+  key: text('key').primaryKey(),
+  value: jsonb('value').notNull(),
+  updated_at: timestamp('updated_at', { mode: 'string' }).notNull().defaultNow(),
+});
+
+// ---------------------------------------------------------------------------
 // Operator sessions and mutation audit, separate from browser/deployment auth.
 // Audit identities survive account deletion deliberately.
 // ---------------------------------------------------------------------------

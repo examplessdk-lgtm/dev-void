@@ -99,6 +99,33 @@ describe('operator argument and help coverage', () => {
       body: { cursor: '{"phase":"resources"}' },
     });
   });
+  it('routes the email group to the operator email endpoints', () => {
+    expect(parseOperatorArgs(['email', 'policy'])).toMatchObject({
+      method: 'GET',
+      path: '/email/policy',
+    });
+    expect(
+      parseOperatorArgs(['email', 'policy-set', 'domains', '--domains', 'a.example,b.example']),
+    ).toMatchObject({
+      method: 'POST',
+      path: '/email/policy',
+      body: { mode: 'domains', domains: 'a.example,b.example' },
+    });
+    expect(parseOperatorArgs(['email', 'settings-set', '--domains', 'admin'])).toMatchObject({
+      method: 'POST',
+      path: '/email/settings',
+      body: { domains: 'admin' },
+    });
+    expect(
+      parseOperatorArgs(['email', 'limit', 'my/slug', '--monthly', '500', '--burst', '20']),
+    ).toMatchObject({
+      method: 'POST',
+      path: '/email/projects/my%2Fslug/limit',
+      body: { monthly: '500', burst: '20' },
+    });
+    expect(() => parseOperatorArgs(['email', 'policy', '--domains', 'x'])).toThrow();
+    expect(() => parseOperatorArgs(['email', 'limit'])).toThrow();
+  });
   it.each([
     ['user', 'list', '--limit', '101'],
     ['user', 'list', '--page', '1e3'],

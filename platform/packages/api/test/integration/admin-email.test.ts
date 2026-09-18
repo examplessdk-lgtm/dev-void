@@ -20,7 +20,7 @@ import {
   type EmailDomain,
 } from '../../src/email/domains.ts';
 import { app } from '../../src/index.ts';
-import { emailDomains } from '../../src/schema.ts';
+import { emailDomains, operatorEvents, platformSettings } from '../../src/schema.ts';
 import {
   setupEnv,
   teardownEnv,
@@ -1256,5 +1256,66 @@ describe('POST /admin/email/:projectId/domains/:domain/revoke-grant', () => {
     expect(res.status).toBe(404);
     expect(cfCalls).toEqual([]);
     expect((await domainRow(sibling.id, 'acme-grant-elsewhere.com'))?.status).toBe('active');
+  });
+});
+
+describe('admin email settings page', () => {
+  test('renders the recipient policy and domain management forms with the defaults selected', async () => {
+    const { adminJwt } = await seedAdminAndProject();
+    const res = await get('/admin/email', adminJwt);
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain('Recipient policy');
+    expect(html).toContain('Domain management');
+    expect(html).toMatch(/name="mode" value="verified" checked/);
+    expect(html).toMatch(/name="domains" value="self-serve" checked/);
+    expect(html).toContain('UNVERIFIED_DESTINATION');
+  });
+
+  test('saves the recipient policy, mirrors it, audits it, and re-renders it selected', async () => {
+    const { adminJwt } = await seedAdminAndProject();
+    const res = await post('/admin/email/policy', adminJwt, {
+      mode: 'domains',
+      domains: 'Corp.Example\nexample.net',
+    });
+    expect(res.status).toBe(302);
+    expect(res.headers.get('Location')).toBe('/admin/email');
+    expect(res.headers.get('X-Void-Audit-Id')).toBeTruthy();
+    expect(await env.ROUTING.get('email-recipient-policy')).toBe(
+      JSON.stringify({ mode: 'domains', domains: ['corp.example', 'example.net'] }),
+    );
+    const events = await env.db.select().from(operatorEvents);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ action: 'email/policy', status: 'success' });
+
+    const html = await (await get('/admin/email', adminJwt)).text();
+    expect(html).toMatch(/name="mode" value="domains" checked/);
+    expect(html).toContain('corp.example');
+  });
+
+  test('renders a 400 for an invalid policy and stores nothing', async () => {
+    const { adminJwt } = await seedAdminAndProject();
+    await env.ROUTING.delete('email-recipient-policy');
+    const res = await post('/admin/email/policy', adminJwt, { mode: 'domains', domains: '' });
+    expect(res.status).toBe(400);
+    expect(await env.db.select().from(platformSettings)).toHaveLength(0);
+    expect(await env.ROUTING.get('email-recipient-policy')).toBeNull();
+  });
+
+  test('saves the domain management mode', async () => {
+    const { adminJwt } = await seedAdminAndProject();
+    const res = await post('/admin/email/settings', adminJwt, { domains: 'admin' });
+    expect(res.status).toBe(302);
+    const html = await (await get('/admin/email', adminJwt)).text();
+    expect(html).toMatch(/name="domains" value="admin" checked/);
+    const bad = await post('/admin/email/settings', adminJwt, { domains: 'nobody' });
+    expect(bad.status).toBe(400);
+  });
+
+  test('the project page still resolves under the index route', async () => {
+    const { adminJwt, projectId, slug } = await seedAdminAndProject();
+    const res = await get(`/admin/email/${projectId}`, adminJwt);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain(slug);
   });
 });

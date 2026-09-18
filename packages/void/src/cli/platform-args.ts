@@ -345,6 +345,6 @@ export function parsePlatformArgs(args: Array<string>): PlatformArgs {
   }
 
   throw new Error(
-    'platform: Usage: void platform <auth|user|project|deployment|build|signup|invitation|system|worker|list|use|status|discover|install|domain|upgrade|rollback|repair|disable|enable|uninstall>.',
+    'platform: Usage: void platform <auth|user|project|deployment|build|signup|invitation|email|system|worker|list|use|status|discover|install|domain|upgrade|rollback|repair|disable|enable|uninstall>.',
   );
 }

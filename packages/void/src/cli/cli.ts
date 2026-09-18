@@ -254,7 +254,7 @@ if (helpPath) {
     },
     {
       name: 'platform',
-      hint: 'auth | user | project | deployment | signup | system | install',
+      hint: 'auth | user | project | deployment | signup | email | system | install',
       description: 'Install platforms and administer users, projects, access, and operations',
     },
     {

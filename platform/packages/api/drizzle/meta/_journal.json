@@ -239,6 +239,13 @@
       "when": 1789678291923,
       "tag": "0040_productive_vector",
       "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "7",
+      "when": 1789717086658,
+      "tag": "0041_platform_settings",
+      "breakpoints": true
     }
   ]
 }

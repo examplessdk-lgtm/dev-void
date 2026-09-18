@@ -1778,6 +1778,33 @@ describe('routeInbound — per-project gating on forward/reply (HIGH H1)', () =>
     expect(forwardCalls).toHaveLength(1);
   });
 
+  it('widens the gate to a same-domain forward under the `domains` recipient policy', async () => {
+    const { env } = makeEnv({
+      kvSeed: withAllowlist(['admin@example.com'], {
+        'email-recipient-policy': JSON.stringify({ mode: 'domains', domains: ['corp.test'] }),
+      }),
+      emailReturn: [
+        { type: 'forward', to: 'anyone@corp.test' },
+        { type: 'forward', to: 'anyone@other.test' },
+      ],
+    });
+    const { message, forwardCalls } = createFakeMessage({ to: `myslug@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(forwardCalls.map((call) => call.to)).toEqual(['anyone@corp.test']);
+  });
+
+  it('keeps the gate closed for the same forward under the default `verified` policy', async () => {
+    const { env } = makeEnv({
+      kvSeed: withAllowlist(['admin@example.com']),
+      emailReturn: [{ type: 'forward', to: 'anyone@corp.test' }],
+    });
+    const { message, forwardCalls } = createFakeMessage({ to: `myslug@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(forwardCalls).toHaveLength(0);
+  });
+
   it('fails CLOSED when the routing entry has no projectId — refused before dispatch', async () => {
     // No projectId → no per-project guard is available, so forward/reply
     // must be refused rather than falling back to CF's account-wide flag.

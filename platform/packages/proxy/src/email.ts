@@ -4,6 +4,12 @@ import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { asString } from './body.ts';
 import { dropEmailDomainLease, leaseBearer, leaseEmailDomainCredential } from './email-lease.ts';
+import {
+  readAllowlist,
+  readRecipientPolicy,
+  recipientAllowed,
+  recipientRefusalMessage,
+} from './email-policy.ts';
 import type { Env, ProxyEnv } from './types.ts';
 
 const app = new Hono<ProxyEnv>();
@@ -926,18 +932,21 @@ app.post('/send', async (context) => {
     );
   }
 
-  // Per-project verified-destinations allowlist. KV mirror of the
-  // email_destinations table maintained by the API on every CRUD; cacheTtl
-  // bounds convergence at ~60s per colo. A cache miss (allowlist key
-  // missing entirely) reads as empty, so a brand-new project with no
-  // verified destinations gets every recipient rejected — matches the
-  // design intent.
-  const allowlist = await readAllowlist(context.env.ROUTING, projectId);
+  // Per-project verified-destinations allowlist, widened by the
+  // installation's recipient policy (email-policy.ts). Both are KV mirrors
+  // the API maintains; cacheTtl bounds convergence at ~60s per colo. A
+  // missing allowlist reads as empty and a missing policy as `verified`, so
+  // a brand-new project with no verified destinations gets every recipient
+  // rejected — matches the design intent.
+  const [allowlist, policy] = await Promise.all([
+    readAllowlist(context.env.ROUTING, projectId),
+    readRecipientPolicy(context.env.ROUTING),
+  ]);
 
   const allowed: Array<string> = [];
   const deliveries: Array<RecipientResult> = [];
   for (const r of recipients) {
-    if (allowlist.has(r)) {
+    if (recipientAllowed(policy, allowlist, r)) {
       allowed.push(r);
     } else {
       deliveries.push({
@@ -945,7 +954,7 @@ app.post('/send', async (context) => {
         ok: false,
         error: {
           code: 'UNVERIFIED_DESTINATION',
-          message: `recipient '${r}' is not a verified destination for this project`,
+          message: recipientRefusalMessage(policy, r),
         },
       });
     }
@@ -1562,35 +1571,6 @@ function logSend(projectId: string, requestId: string, deliveries: Array<Recipie
     console.log(
       `[email-log] ${projectId} ${requestId} ${sanitizeForLog(d.recipient, 320)} ${status} ${id} @${Date.now()}`,
     );
-  }
-}
-
-/**
- * Reads `email-allowlist:<projectId>` from ROUTING KV. The API writes a JSON
- * array of lowercased verified addresses on every destination CRUD, on the
- * platform confirmation click, and — as the repair for a write it swallowed —
- * on a destinations listing that finds the key stale. Never on deploy.
- * cacheTtl bounds per-colo convergence at ~60s.
- */
-async function readAllowlist(kv: KVNamespace, projectId: string): Promise<Set<string>> {
-  const raw = await kv.get(`email-allowlist:${projectId}`, { cacheTtl: 60 });
-  if (!raw) {
-    return new Set();
-  }
-  try {
-    const arr = JSON.parse(raw) as unknown;
-    if (!Array.isArray(arr)) {
-      return new Set();
-    }
-    const out = new Set<string>();
-    for (const v of arr) {
-      if (typeof v === 'string') {
-        out.add(v.toLowerCase());
-      }
-    }
-    return out;
-  } catch {
-    return new Set();
   }
 }
 

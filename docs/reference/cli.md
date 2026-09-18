@@ -477,6 +477,22 @@ void platform invitation revoke <id>
 
 Send accepts up to 100 comma-separated addresses. Invitations grant signup access even if email delivery is unavailable or fails; delivery is reported separately. Revoking a pending invitation removes its exact email grant. A broader domain entry can still allow that person to sign up.
 
+#### Email {#operator-email}
+
+Decide who mail from the shared sender may reach, who registers email domains, and a project's outbound caps:
+
+```sh
+void platform email policy
+void platform email policy-set <verified|domains|any> [--domains <domain[,domain...]>]
+void platform email settings
+void platform email settings-set --domains <self-serve|admin>
+void platform email limit <project-id|slug> [--monthly <n>] [--burst <n>]
+```
+
+`policy` decides which recipients a project's `<slug>+tag@<mail domain>` sender reaches: `verified` (the default) means only that project's verified destinations; `domains` adds every address on the listed domains; `any` lifts the check. Cloudflare still refuses a destination it has not verified until the platform mail domain is onboarded for Email Sending, so under `domains` or `any` such refusals arrive as per-recipient `UNVERIFIED_DESTINATION` results. Custom-domain sends are not affected.
+
+`settings-set --domains admin` tells `void email domain add` to print the administrator's command instead of starting a Cloudflare grant. `limit` overrides the project's monthly and per-minute caps (defaults 200 and 10); a project page in the admin UI shows and clears them.
+
 #### System {#operator-system}
 
 Inspect activity, check service health, or review administrative changes:

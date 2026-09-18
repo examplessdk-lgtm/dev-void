@@ -46,7 +46,7 @@ import {
 } from '../../src/email/send-verification.ts';
 import app from '../../src/index.ts';
 import { syncProjectAllowlistKvBestEffort } from '../../src/provisioning/email-allowlist.ts';
-import { emailDestinations, projects, users } from '../../src/schema.ts';
+import { emailDestinations, platformSettings, projects, users } from '../../src/schema.ts';
 import {
   cfError,
   cfSuccess,
@@ -2435,6 +2435,69 @@ describe('GET /email/destinations/confirm', () => {
     expect(rows[0]?.status).toBe('verified');
     expect(rows[0]?.verification_source).toBe('platform');
     expect(await readAllowlist(project.id)).toEqual(['shared@example.com']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET /projects/:id/email/settings
+// ---------------------------------------------------------------------------
+
+describe('GET /projects/:id/email/settings', () => {
+  async function settings(projectId: string, jwt: string): Promise<Response> {
+    return app.fetch(
+      new Request(`http://localhost/projects/${projectId}/email/settings`, {
+        headers: { Authorization: `Bearer ${jwt}` },
+      }),
+      env,
+    );
+  }
+
+  it('returns 401 without auth and 404 for an unknown project', async () => {
+    const anon = await app.fetch(
+      new Request('http://localhost/projects/proj_x/email/settings'),
+      env,
+    );
+    expect(anon.status).toBe(401);
+    const user = await createTestUser(env.db);
+    expect((await settings('proj_missing', user.jwt)).status).toBe(404);
+  });
+
+  it("returns 403 for another user's project", async () => {
+    const owner = await createTestUser(env.db, 'owner');
+    const intruder = await createTestUser(env.db, 'intruder');
+    const project = await createTestProject(env.db, owner.id);
+    expect((await settings(project.id, intruder.jwt)).status).toBe(403);
+  });
+
+  it('reports the defaults with the project slug and repairs the policy mirror', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'settings-project');
+    await env.ROUTING.delete('email-recipient-policy');
+
+    const res = await settings(project.id, user.jwt);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      domains: { management: 'self-serve', projectSlug: 'settings-project' },
+      recipientPolicy: { mode: 'verified', domains: [] },
+    });
+    expect(await env.ROUTING.get('email-recipient-policy')).toBe(
+      JSON.stringify({ mode: 'verified', domains: [] }),
+    );
+  });
+
+  it('reflects the stored settings', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    await env.db.insert(platformSettings).values([
+      { key: 'email.domains', value: 'admin' },
+      { key: 'email.recipientPolicy', value: { mode: 'domains', domains: ['corp.example'] } },
+    ]);
+
+    const body = await (await settings(project.id, user.jwt)).json();
+    expect(body).toMatchObject({
+      domains: { management: 'admin' },
+      recipientPolicy: { mode: 'domains', domains: ['corp.example'] },
+    });
   });
 });
 

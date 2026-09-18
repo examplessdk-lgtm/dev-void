@@ -4,6 +4,7 @@ import type { ApiEnv } from '../env.ts';
 import { operatorAudit, operatorAuditRoutes } from './audit.ts';
 import { authenticatedSessionRoutes, operatorAuth, operatorSessionRoutes } from './auth.ts';
 import { OperatorError } from './common.ts';
+import { emailOperatorRoutes } from './email-routes.ts';
 import { operationsRoutes } from './operations-routes.ts';
 import { tenantRoutes } from './tenant-routes.ts';
 
@@ -51,6 +52,7 @@ operatorApi.use('*', operatorAudit);
 operatorApi.route('/', operatorAuditRoutes);
 operatorApi.route('/', tenantRoutes);
 operatorApi.route('/', operationsRoutes);
+operatorApi.route('/', emailOperatorRoutes);
 operatorApi.notFound((context) =>
   context.json({ error: 'not_found', message: 'Unknown operator API endpoint.' }, 404),
 );

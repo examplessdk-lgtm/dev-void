@@ -27,6 +27,11 @@ import {
   withEmailDomainRowLock,
 } from '../email/credential-lease.ts';
 import {
+  MAX_DOMAIN_LENGTH,
+  isValidEmailDomain,
+  normalizeEmailDomain,
+} from '../email/domain-name.ts';
+import {
   applyEmailDomainDeployCheckpoint,
   clearEmailDomainMirror,
   decryptEmailDomainRelaySecret,
@@ -53,6 +58,11 @@ import {
 } from '../email/relay-engine.ts';
 import { RELAY_VERSION } from '../email/relay-worker.ts';
 import { sendPlatformVerificationEmail } from '../email/send-verification.ts';
+import {
+  getEmailDomainManagement,
+  getEmailRecipientPolicy,
+  repairEmailRecipientPolicyMirror,
+} from '../email/settings.ts';
 import type { ApiEnv } from '../env.ts';
 import { generateId } from '../id.ts';
 import {
@@ -100,14 +110,12 @@ const ADD_RATE_PER_DAY = 50;
 const MAX_ADDRESS_LENGTH = 320;
 
 /**
- * Caps for the custom-domain add route, checked on the RAW strings before
- * normalization (same reasoning as MAX_ADDRESS_LENGTH). 253 is the DNS
- * name cap from RFC 1035 — no legitimate domain exceeds it, IDN punycode
- * included. The credential cap is generous for either kind (a pasted API
- * token is ~50 chars; an OAuth refresh token a few hundred) and exists only
- * to bound the encrypt + CF call work.
+ * Cap for the custom-domain add route's credential, checked on the RAW
+ * string before normalization (same reasoning as MAX_ADDRESS_LENGTH; the
+ * domain cap is `MAX_DOMAIN_LENGTH` from `email/domain-name.ts`). Generous
+ * for either kind (a pasted API token is ~50 chars; an OAuth refresh token a
+ * few hundred) and exists only to bound the encrypt + CF call work.
  */
-const MAX_DOMAIN_LENGTH = 253;
 const MAX_CREDENTIAL_LENGTH = 2048;
 
 /**
@@ -679,6 +687,33 @@ const app = new Hono<ApiEnv>()
   // ROUTING KV mirror the proxy reads (contract 2). Neither the credential
   // nor the relay secret is ever returned — serializers carry metadata only.
   // -------------------------------------------------------------------------
+
+  // Installation settings the CLI needs before it acts: who manages email
+  // domains here (an `admin` platform prints the administrator's command
+  // instead of opening a Cloudflare consent) and the shared-sender recipient
+  // policy. Read-only for owners; the operator API and admin UI write them.
+  .get('/:id/email/settings', async (context) => {
+    const projectId = context.req.param('id');
+    const db = context.get('db');
+    const project = await getProject(db, projectId);
+    if (!project) {
+      return context.json({ error: 'project not found' }, 404);
+    }
+    if (project.user_id !== context.get('user').id) {
+      return context.json({ error: 'forbidden' }, 403);
+    }
+    const [management, recipientPolicy] = await Promise.all([
+      getEmailDomainManagement(db),
+      getEmailRecipientPolicy(db),
+    ]);
+    // Same best-effort repair the destinations listing does for its mirror.
+    await repairEmailRecipientPolicyMirror(db, context.env.ROUTING);
+    return context.json({
+      domains: { management, projectSlug: project.slug },
+      recipientPolicy: { mode: recipientPolicy.mode, domains: [...recipientPolicy.domains] },
+    });
+  })
+
   .get('/:id/email/domains', async (context) => {
     const projectId = context.req.param('id');
     const project = await getProject(context.get('db'), projectId);
@@ -1325,19 +1360,6 @@ function proxyOriginForEmail(env: ApiEnv['Bindings']): string {
       ? 'https://proxy.staging.void.cloud'
       : 'https://proxy.void.cloud');
   return origin.replace(/\/+$/, '');
-}
-
-function normalizeEmailDomain(raw: string): string {
-  return raw.trim().toLowerCase().replace(/\.$/, '');
-}
-
-/**
- * DNS hostname shape: two or more labels, each 1–63 chars, alphanumeric +
- * interior hyphens. Real validation is the engine's zone lookup — this
- * keeps junk out of the encrypt and CF calls.
- */
-function isValidEmailDomain(domain: string): boolean {
-  return /^(?!-)[a-z0-9-]{1,63}(?<!-)(\.(?!-)[a-z0-9-]{1,63}(?<!-))+$/.test(domain);
 }
 
 /**
