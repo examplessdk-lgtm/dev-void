@@ -337,12 +337,13 @@ export type ManifestOnlyDeployPayload = DeployUploadPayload;
  *   verbatim rather than replay a request it may have accepted.
  * - A rejected fetch does NOT prove the request never arrived — the
  *   connection may have dropped after delivery. Before each retry we look
- *   for a deployment created inside DEPLOY_POST_DEDUPE_WINDOW_MS whose
- *   recorded git commit equals this payload's (a timestamp alone could
- *   match an unrelated deploy racing ours). A correlated row means the
- *   earlier attempt reached the platform, so the retry is suppressed
- *   instead of bouncing off the server's concurrency guard (409) or
- *   registering a duplicate deployment.
+ *   for a deployment created inside DEPLOY_POST_DEDUPE_WINDOW_MS that
+ *   could be our earlier attempt: same git commit as this payload, or a
+ *   still-in-flight commit-less placeholder row (the server writes the
+ *   commit only after R2 inventory). A correlated row means the earlier
+ *   attempt reached the platform, so the retry is suppressed instead of
+ *   bouncing off the server's concurrency guard (409) or registering a
+ *   duplicate deployment.
  */
 const DEPLOY_POST_MAX_RETRIES = 3;
 const DEPLOY_POST_BACKOFF_MS = [1000, 5000, 10000];
@@ -718,15 +719,24 @@ export class PlatformClient {
   }
 
   /**
-   * Best-effort lookup for a deployment created within `windowMs` AND
-   * carrying `expectedCommit` — the deploy retry path uses it to detect
-   * that an earlier attempt reached the platform before the connection
-   * dropped. Commit equality is the correlation signal: a recency-only
-   * match could be an unrelated deploy racing ours. `null === null`
-   * counts (no commit metadata on either side, so ownership cannot be
-   * disproved). Returns `undefined` on any failure or ambiguity: the
-   * retried POST then still runs, with the server's own concurrency
-   * guard (409) as the backstop.
+   * Best-effort lookup for a deployment created within `windowMs` that
+   * could be OUR earlier attempt — the deploy retry path uses it to
+   * detect that the lost POST reached the platform before the connection
+   * dropped. A candidate must be recent and either:
+   *
+   * - carry `expectedCommit` (`null === null` counts — ownership cannot
+   *   be disproved without metadata on either side), or
+   * - be a still-in-flight `commit: null` row while we sent a commit:
+   *   `createDeployment` inserts the row as a concurrency claim with
+   *   NULL metadata and `updateDeploymentManifest` fills it only after
+   *   R2 inventory, so our own attempt reads `commit: null` for its
+   *   first seconds. Suppressing here is safe — an unrelated in-flight
+   *   deploy would reject the replay with 409 anyway.
+   *
+   * A `failed`/`canceled` row is a dead attempt and never suppresses:
+   * replaying is exactly what we want. Returns `undefined` on any
+   * failure or ambiguity: the retried POST then still runs, with the
+   * server's own concurrency guard (409) as the backstop.
    */
   private async findRecentDeployment(
     projectId: string,
@@ -740,12 +750,19 @@ export class PlatformClient {
         return undefined;
       }
       const createdMs = Date.parse(newest.created_at);
-      if (Number.isNaN(createdMs)) {
+      if (Number.isNaN(createdMs) || Date.now() - createdMs > windowMs) {
         return undefined;
       }
-      return Date.now() - createdMs <= windowMs && newest.commit === expectedCommit
-        ? newest
-        : undefined;
+      if (newest.status === 'failed' || newest.status === 'canceled') {
+        return undefined;
+      }
+      if (newest.commit === expectedCommit) {
+        return newest;
+      }
+      if (expectedCommit !== null && newest.commit === null && newest.status !== 'live') {
+        return newest;
+      }
+      return undefined;
     } catch {
       return undefined;
     }
