@@ -534,10 +534,15 @@ const ADD_RECONCILE_INTERVAL_MS = 1000;
  * the template-link + clipboard fallback (Enter switches to the masked paste
  * at any point) → POST the credential once → render the resulting row. A
  * failed add leaves the platform row 'failed' and re-running add replaces
- * the credential — the api's replace path, not anything here.
+ * the credential — the api's replace path, not anything here. On an
+ * administrator-managed platform, only a row the owner registered before
+ * the switch continues into that renewal flow.
  */
 export async function emailDomainAdd(
-  client: Pick<PlatformClient, 'addEmailDomain' | 'getEmailDomain' | 'getEmailSettings'>,
+  client: Pick<
+    PlatformClient,
+    'addEmailDomain' | 'getEmailDomain' | 'getEmailSettings' | 'listEmailDomains'
+  >,
   projectId: string,
   rawDomain: string,
   subdomain: string | undefined,
@@ -560,23 +565,29 @@ export async function emailDomainAdd(
     return fail(err instanceof Error ? err.message : String(err));
   }
 
-  // On an administrator-managed platform owners hold no Cloudflare
-  // credential, so there is no grant to open a browser for: print the
-  // administrator's command and stop before any network or clipboard work.
+  // On an administrator-managed platform owners normally hold no Cloudflare
+  // credential, so there is no grant to open a browser for. A row the owner
+  // registered before the switch stays theirs to renew (ownership table: add
+  // on an owner row), so that owner flow continues for an existing target.
   const settings = await client.getEmailSettings(projectId);
   if (settings.domains.management === 'admin') {
-    const project = settings.domains.projectSlug ?? projectId;
-    log.info(
-      [
-        'Email domains on this platform are managed by its administrator.',
-        'Ask them to run:',
-        '',
-        `  void platform email domain-add ${target.emailDomain} --project ${project}`,
-        '',
-        '`void email domain list` and `void email domain status` keep working here.',
-      ].join('\n'),
-    );
-    return exit(0);
+    const rows = await client.listEmailDomains(projectId);
+    const targets = new Set([target.emailDomain, ...(target.forced ? [] : [`mail.${domain}`])]);
+    const renewable = rows.some((row) => targets.has(row.domain) && row.managed_by !== 'admin');
+    if (!renewable) {
+      const project = settings.domains.projectSlug ?? projectId;
+      log.info(
+        [
+          'Email domains on this platform are managed by its administrator.',
+          'Ask them to run:',
+          '',
+          `  void platform email domain-add ${target.emailDomain} --project ${project}`,
+          '',
+          '`void email domain list` and `void email domain status` keep working here.',
+        ].join('\n'),
+      );
+      return exit(0);
+    }
   }
 
   // The MX decision. Forced (--subdomain) needs no default, only a warning
@@ -1011,12 +1022,13 @@ function printEmailDomainOutcome(row: EmailDomainResponse): void {
  * also the drift report: it never fights the customer's edits, it names them.
  */
 export async function emailDomainStatus(
-  client: Pick<PlatformClient, 'getEmailDomain'>,
+  client: Pick<PlatformClient, 'getEmailDomain' | 'getEmailSettings'>,
   projectId: string,
   rawDomain: string,
 ): Promise<void> {
   const domain = normalizeEmailDomainInput(rawDomain);
   const row: EmailDomainStatusResponse = await client.getEmailDomain(projectId, domain);
+  const adminRow = row.managed_by === 'admin';
 
   const lines = [
     `Domain:      ${row.domain}`,
@@ -1053,23 +1065,44 @@ export async function emailDomainStatus(
   }
   const remaining = row.setup_state?.remaining_steps ?? [];
   if (remaining.includes('routing_subdomain')) {
-    log.warn(`One step only you can do: ${routingSubdomainInstruction(row.domain, row.mode)}.`);
+    log.warn(
+      adminRow
+        ? `One step for your administrator, in the platform's Cloudflare account: ${routingSubdomainInstruction(row.domain, row.mode)}.`
+        : `One step only you can do: ${routingSubdomainInstruction(row.domain, row.mode)}.`,
+    );
   }
   if (remaining.includes('sending_onboarding')) {
     log.info(
-      `Sending to arbitrary recipients needs Workers Paid — inbound works; sendEmail() to verified destinations only. After upgrading, run \`void email domain sync ${row.domain}\`.`,
+      adminRow
+        ? `Sending to arbitrary recipients needs Workers Paid on the platform's Cloudflare account — inbound works; sendEmail() to verified destinations only. After the upgrade, ask your administrator to run \`void platform email domain-sync ${row.domain}\`.`
+        : `Sending to arbitrary recipients needs Workers Paid — inbound works; sendEmail() to verified destinations only. After upgrading, run \`void email domain sync ${row.domain}\`.`,
     );
   }
   if (row.relay_missing === true || row.relay_drift) {
-    log.info(`Run \`void email domain sync ${row.domain}\` to redeploy the relay in place.`);
+    log.info(
+      adminRow
+        ? `Ask your administrator to run \`void platform email domain-sync ${row.domain}\` to redeploy the relay in place.`
+        : `Run \`void email domain sync ${row.domain}\` to redeploy the relay in place.`,
+    );
   }
   if (row.catch_all_drift) {
-    log.info(`Catch-all drifted — run \`void email domain sync ${row.domain}\` to re-point it.`);
+    log.info(
+      adminRow
+        ? `Catch-all drifted — ask your administrator to run \`void platform email domain-sync ${row.domain}\` to re-point it.`
+        : `Catch-all drifted — run \`void email domain sync ${row.domain}\` to re-point it.`,
+    );
   }
   if (row.status === 'token_revoked' || row.status === 'token_expired') {
-    log.warn(
-      `Re-run \`void email domain add ${row.domain}\` with a fresh grant or token — adding again replaces the credential, rules stay.`,
-    );
+    if (adminRow) {
+      const slug = (await client.getEmailSettings(projectId)).domains.projectSlug ?? projectId;
+      log.warn(
+        `Ask your administrator to re-add it: \`void platform email domain-add ${row.domain} --project ${slug} --token-stdin\` — adding again replaces the credential, rules stay.`,
+      );
+    } else {
+      log.warn(
+        `Re-run \`void email domain add ${row.domain}\` with a fresh grant or token — adding again replaces the credential, rules stay.`,
+      );
+    }
   }
 }
 

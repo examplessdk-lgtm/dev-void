@@ -633,8 +633,8 @@ interface OutboundGate {
   allowlist: Set<string>;
   /** The installation's recipient policy (email-policy.ts); `VERIFIED_ONLY` when the allowlist is skipped. */
   policy: RecipientPolicy;
-  /** The platform's own mail domain — the policy never widens delivery to it. */
-  platformDomain: string | undefined;
+  /** The platform mail domains — the policy never widens delivery to them. */
+  platformDomains: ReadonlyArray<string>;
   burstKey: string;
   burstLimit: number;
   burstCurrent: number;
@@ -838,7 +838,7 @@ export async function routeInbound(
   // per-project allowlist is the security boundary.
   let gate: OutboundGate;
   try {
-    gate = await loadOutboundGate(env, routing.projectId);
+    gate = await loadOutboundGate(env, routing.projectId, { receivedDomain });
   } catch (e) {
     console.error(
       `[email-router] failed to load outbound gate for ${sanitize(routing.projectId ?? '', 64)}:`,
@@ -853,7 +853,7 @@ export async function routeInbound(
       skipAllowlist: false,
       allowlist: new Set(),
       policy: VERIFIED_ONLY,
-      platformDomain: undefined,
+      platformDomains: [],
       burstKey: '',
       burstLimit: 0,
       burstCurrent: 0,
@@ -1060,7 +1060,7 @@ export async function routeRelayed(
       skipAllowlist: true,
       allowlist: new Set(),
       policy: VERIFIED_ONLY,
-      platformDomain: undefined,
+      platformDomains: [],
       burstKey: '',
       burstLimit: 0,
       burstCurrent: 0,
@@ -1284,7 +1284,7 @@ function envelopeRawStream(bytes: Uint8Array): ReadableStream<Uint8Array> {
 async function loadOutboundGate(
   env: Env,
   projectId: string | undefined,
-  opts?: { skipAllowlist?: boolean },
+  opts?: { skipAllowlist?: boolean; receivedDomain?: string },
 ): Promise<OutboundGate> {
   const skipAllowlist = opts?.skipAllowlist ?? false;
   if (!projectId) {
@@ -1294,7 +1294,7 @@ async function loadOutboundGate(
       skipAllowlist,
       allowlist: new Set(),
       policy: VERIFIED_ONLY,
-      platformDomain: undefined,
+      platformDomains: [],
       burstKey: '',
       burstLimit: 0,
       burstCurrent: 0,
@@ -1320,7 +1320,13 @@ async function loadOutboundGate(
     skipAllowlist,
     allowlist,
     policy,
-    platformDomain: readSenderDomain(env) ?? undefined,
+    platformDomains: [
+      ...new Set(
+        [readSenderDomain(env), opts?.receivedDomain].flatMap((domain) =>
+          domain ? [domain.toLowerCase()] : [],
+        ),
+      ),
+    ],
     burstKey,
     burstLimit,
     burstCurrent: readCounter(burstRaw),
@@ -1782,7 +1788,7 @@ function checkOutboundGate(gate: OutboundGate, target: string, kind: 'forward' |
   const lowered = target.toLowerCase();
   if (
     !gate.skipAllowlist &&
-    !recipientAllowed(gate.policy, gate.allowlist, lowered, gate.platformDomain)
+    !recipientAllowed(gate.policy, gate.allowlist, lowered, gate.platformDomains)
   ) {
     console.error(
       `[email-router] ${kind} dropped: recipient not in project allowlist or recipient policy (target=${sanitize(target, 320)})`,

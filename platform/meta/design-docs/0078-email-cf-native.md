@@ -72,7 +72,9 @@ Scope: shared-sender sends and the inbound forward/reply gate
 (`recipientAllowed` in the proxy's `email-policy.ts`, one gate for both).
 Custom-domain sends are unchanged. Burst cap, monthly cap, the
 `email-suspended:` kill switch and the reply-sender pin do not move. The
-policy never widens delivery to an address on the platform's own mail domain:
+policy never widens delivery to an address on the platform's own mail domains
+— `EMAIL_SENDER_DOMAIN` and, on inbound, the domain Cloudflare accepted the
+message on, so an unset binding or a second routed domain opens nothing:
 another tenant's `<slug>+tag@` inbox is reached only through that project's
 verified-destination consent, whatever the mode — so `any` cannot turn two
 auto-replying handlers into a loop or one tenant into another's spam source.
@@ -82,12 +84,15 @@ Storage: authoritative in the `platform_settings` table (key/value jsonb —
 the installation's runtime-changeable settings), mirrored to routing KV as
 `email-recipient-policy` for the proxy's hot path (`cacheTtl: 60`, like the
 allowlist). An absent or unreadable mirror means `verified` — `any` included
-when its shape is not the api's. The writer publishes delete mirror → write
-DB → put mirror inside one transaction, so a KV failure rolls the DB back and
-leaves the proxy closed rather than on an older, looser mirror; publisher and
-repair serialize on a transaction-scoped advisory lock because KV has no
-compare-and-set, and every read surface (operator, owner settings, admin
-page) repairs a drifted mirror. Surface: the admin UI's **Email** page and
+when its shape is not the api's. The writer publishes in two locked steps:
+delete the mirror and commit the database value, then republish the mirror
+FROM the committed value. The mirror is therefore never ahead of the
+database: a failed clear changes nothing; a failed republish leaves the
+policy saved, the proxy on `verified`, and the operator told so (the
+response is an error) until a retry or the next read republishes it.
+Publisher and repair serialize on a transaction-scoped advisory lock because
+KV has no compare-and-set, and every read surface (operator, owner settings,
+admin page) repairs a drifted mirror. Surface: the admin UI's **Email** page and
 `void platform email policy` / `policy-set <mode> [--domains a,b]`, recorded
 in `operator_events`.
 
@@ -808,11 +813,17 @@ unchanged, and the operator layer re-shapes its JSON responses.
   an owner's request and an administrator's add can interleave, and the
   unlocked read only chooses the message. An administrator never takes over
   an owner's row (409, "ask them to remove it first"); an owner never rotates
-  or removes an administrator's (403, the operator command named).
+  or removes an administrator's (403, the operator command named). The
+  `admin` mode's refusal of a NEW owner domain is read inside the insert's
+  locked section too, so an owner row removed between the owner's read and
+  their insert cannot slip a new row past the mode.
 - A row of the `platform` kind is readable only by a runtime that knows the
   kind: an api or proxy still serving from before the upgrade would fail its
-  lease. Register administrator domains after an upgrade has finished; the
-  migration itself is compatible with the previous Workers.
+  lease, and that api authorizes the owner routes on project ownership alone
+  — it does not read `managed_by`. Register administrator domains after an
+  upgrade has finished, and remove them before rolling the api back below
+  this version; the migration itself is compatible with the previous
+  Workers.
 - The status probe for a `platform` row is a zone-scoped read
   (`GET /zones/{z}/email/routing`, or the zone lookup before a zone is known).
   A refusal reads `probe_failed`, never `token_revoked` / `token_expired` —
@@ -858,7 +869,10 @@ browser.
 `email.domains` lives in `platform_settings` and is served to the CLI on the
 authenticated `GET /projects/:id/email/settings` (with the project slug for
 the printed command), so `void email domain add` reads it before any DNS,
-browser or Cloudflare work. In `admin` mode:
+browser or Cloudflare work. In `admin` mode the CLI then lists the project's
+rows once: a row the owner registered before the switch for the domain this
+run targets (or its `mail.` fallback) keeps the owner flow — that is the
+renewal path — and any other input prints:
 
 ```
 $ void email domain add example.com
@@ -870,9 +884,12 @@ $ void email domain add example.com
   `void email domain list` and `void email domain status` keep working here.
 ```
 
-Exit 0, nothing contacted, nothing stored. The mode is enforced server-side —
-the add route answers 403 with the same text and revokes a posted grant — so
-the CLI check only spares the browser round trip. The default policy and mode
+Exit 0, Cloudflare never contacted, nothing stored. The mode is enforced
+server-side — the add route answers 403 with the same text and revokes a
+posted grant — so the CLI check only spares the browser round trip. `status`
+on an administrator's row names the operator command for each step the owner
+cannot take (`domain-sync` for drift, `domain-add … --token-stdin` for an
+expired pasted token). The default policy and mode
 leave the managed platform's behavior unchanged: no new probe, binding or
 account call for a platform that sets neither.
 

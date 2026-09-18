@@ -37,22 +37,19 @@ describe('recipientAllowed', () => {
   it("never widens delivery to the platform's own mail domain — allowlist only there", () => {
     const platform = 'mail.example.test';
     for (const policy of [anyPolicy, { mode: 'domains', domains: new Set([platform]) } as const]) {
-      expect(recipientAllowed(policy, new Set(), `other+tag@${platform}`, platform)).toBe(false);
-      // The platform domain is compared case-insensitively on its side.
+      expect(recipientAllowed(policy, new Set(), `other+tag@${platform}`, [platform])).toBe(false);
+      // Platform domains are compared case-insensitively on their side.
       expect(
-        recipientAllowed(policy, new Set(), `other+tag@${platform}`, 'MAIL.Example.TEST'),
+        recipientAllowed(policy, new Set(), `other+tag@${platform}`, ['MAIL.Example.TEST']),
       ).toBe(false);
       expect(
-        recipientAllowed(
-          policy,
-          new Set([`other+tag@${platform}`]),
-          `other+tag@${platform}`,
+        recipientAllowed(policy, new Set([`other+tag@${platform}`]), `other+tag@${platform}`, [
           platform,
-        ),
+        ]),
       ).toBe(true);
     }
     // Other domains are unaffected by the platform-domain rule.
-    expect(recipientAllowed(anyPolicy, new Set(), 'x@elsewhere.test', platform)).toBe(true);
+    expect(recipientAllowed(anyPolicy, new Set(), 'x@elsewhere.test', [platform])).toBe(true);
     expect(recipientAllowed(anyPolicy, new Set(), `x@${platform}`)).toBe(true);
   });
 

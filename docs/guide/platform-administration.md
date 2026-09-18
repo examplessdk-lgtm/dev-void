@@ -156,7 +156,7 @@ Your users may hold no Cloudflare account. Tell the platform that administrators
 void platform email settings-set --domains admin
 ```
 
-Then register a domain for a project. The zone must be in the platform's Cloudflare account; the platform's own credential does the setup, and nothing is stored per domain:
+Then register a domain for a project. The zone must be in the platform's Cloudflare account; the platform's own credential does the setup, and no Cloudflare credential is stored per domain:
 
 ```sh
 void platform email domain-add mail.example.com --project hr-portal
@@ -170,7 +170,9 @@ Name the exact mail domain: a subdomain such as `mail.example.com` when the apex
 void platform email domain-add mail.other.example --project hr-portal --token-stdin --yes < token.txt
 ```
 
-Project owners see administrator-registered domains in `void email domain list` and `status`; `sync` and `remove` point them at `void platform email domain-sync` and `domain-remove`. The runtime token needs the email permissions listed in the [self-hosting guide](./self-hosted-platform.md#runtime-token-permissions) for this to work.
+Project owners see administrator-registered domains in `void email domain list` and `status`; `status` names the `void platform email` command for any step they cannot take themselves, and `sync` and `remove` point them at `domain-sync` and `domain-remove`. A domain an owner registered before you switched to `admin` stays theirs to renew, sync and remove. The runtime token needs the email permissions listed in the [self-hosting guide](./self-hosted-platform.md#runtime-token-permissions) for this to work.
+
+Register administrator domains only after a platform upgrade has completed, and remove them before rolling the platform back to a version that predates this feature: an earlier runtime cannot use the platform credential for them and does not distinguish administrator-registered domains from owner-registered ones.
 
 ## Previewing Changes
 

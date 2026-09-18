@@ -1641,6 +1641,24 @@ describe('POST /email/send — recipient policy', () => {
     expect(sender.recipients().sort()).toEqual(['a@x.test', 'b@y.test']);
   });
 
+  it("does not widen `any` to another tenant's address on the platform sender domain", async () => {
+    const consented = `consented+tag@${PROD_DOMAIN}`;
+    const refused = `otherproject+tag@${PROD_DOMAIN}`;
+    const kv = policyKv({ mode: 'any', domains: [] }, [consented]);
+    const sender = createSender();
+    const env = createMockEnv(kv, { SEND_EMAIL: sender.binding });
+    const res = await postSend(
+      env,
+      await sendBody({ recipients: [refused, consented, 'someone@other.test'] }),
+    );
+    const body = await readSend(res);
+    expect(body.deliveries?.find((delivery) => delivery.recipient === refused)).toMatchObject({
+      ok: false,
+      error: { code: 'UNVERIFIED_DESTINATION' },
+    });
+    expect(sender.recipients().sort()).toEqual([consented, 'someone@other.test'].sort());
+  });
+
   it.each([
     ['malformed JSON', 'not json'],
     ['an unknown mode', { mode: 'open', domains: [] }],

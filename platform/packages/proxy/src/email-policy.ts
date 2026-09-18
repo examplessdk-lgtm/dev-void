@@ -97,24 +97,25 @@ export async function readAllowlist(kv: KVNamespace, projectId: string): Promise
 }
 
 /**
- * `recipient` is already lowercased by the caller. `platformDomain` is the
- * installation's own mail domain (`EMAIL_SENDER_DOMAIN`): the policy never
- * widens delivery to addresses on it, so one tenant cannot use `any` or a
- * listed platform domain to mail another tenant's `<slug>+tag@` inbox — or
- * form a reply loop with it — without that recipient's own consent.
+ * `recipient` is already lowercased by the caller. `platformDomains` are the
+ * installation's own mail domains — `EMAIL_SENDER_DOMAIN` and, on inbound,
+ * the domain Cloudflare accepted the message on. The policy never widens
+ * delivery to addresses on them, so one tenant cannot use `any` or a listed
+ * platform domain to mail another tenant's `<slug>+tag@` inbox — or form a
+ * reply loop with it — without that recipient's own consent.
  */
 export function recipientAllowed(
   policy: RecipientPolicy,
   allowlist: ReadonlySet<string>,
   recipient: string,
-  platformDomain?: string,
+  platformDomains: ReadonlyArray<string> = [],
 ): boolean {
   if (allowlist.has(recipient)) {
     return true;
   }
   const at = recipient.lastIndexOf('@');
   const domain = at > 0 ? recipient.slice(at + 1) : '';
-  if (platformDomain !== undefined && domain === platformDomain.toLowerCase()) {
+  if (domain !== '' && platformDomains.some((d) => d.toLowerCase() === domain)) {
     return false;
   }
   if (policy.mode === 'any') {

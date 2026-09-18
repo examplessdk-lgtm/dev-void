@@ -1842,6 +1842,41 @@ describe('routeInbound — per-project gating on forward/reply (HIGH H1)', () =>
     ]);
   });
 
+  it("uses the received domain when EMAIL_SENDER_DOMAIN is absent, so `any` cannot reach another tenant's inbox", async () => {
+    const { env } = makeEnv({
+      senderDomain: null,
+      kvSeed: withAllowlist([], {
+        'email-recipient-policy': JSON.stringify({ mode: 'any', domains: [] }),
+      }),
+      emailReturn: [{ type: 'forward', to: `project-b+x@${PROD_DOMAIN}` }],
+    });
+    const { message, forwardCalls } = createFakeMessage({ to: `myslug@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(forwardCalls).toHaveLength(0);
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('recipient policy'));
+  });
+
+  it('protects both the configured sender domain and a distinct received domain', async () => {
+    const receivedDomain = 'example.test';
+    const configuredDomain = 'mail.example.test';
+    const { env } = makeEnv({
+      senderDomain: configuredDomain,
+      kvSeed: withAllowlist([], {
+        'email-recipient-policy': JSON.stringify({ mode: 'any', domains: [] }),
+      }),
+      emailReturn: [
+        { type: 'forward', to: `b+x@${receivedDomain}` },
+        { type: 'forward', to: `b+x@${configuredDomain}` },
+        { type: 'forward', to: 'someone@other.test' },
+      ],
+    });
+    const { message, forwardCalls } = createFakeMessage({ to: `myslug@${receivedDomain}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(forwardCalls.map((call) => call.to)).toEqual(['someone@other.test']);
+  });
+
   it('keeps the gate closed for the same forward under the default `verified` policy', async () => {
     const { env } = makeEnv({
       kvSeed: withAllowlist(['admin@example.com']),

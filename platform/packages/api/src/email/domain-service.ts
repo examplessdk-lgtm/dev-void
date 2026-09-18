@@ -59,6 +59,7 @@ import {
   type EmailDomainSetupResult,
 } from './relay-engine.ts';
 import { RELAY_VERSION } from './relay-worker.ts';
+import { getEmailDomainManagement } from './settings.ts';
 
 /**
  * Cap for a posted credential, checked on the RAW string before any
@@ -1556,7 +1557,7 @@ export async function addEmailDomainForProject(
   // (runEmailDomainEngineSerialized), which re-takes this same lock, so
   // teardown either marks first (both transactions refuse) or runs
   // strictly after the committed setup and cleans everything it created.
-  type InsertOutcome = 'inserted' | 'project_gone' | 'project_deleting';
+  type InsertOutcome = 'inserted' | 'project_gone' | 'project_deleting' | 'admin_managed';
   let outcome: InsertOutcome;
   try {
     outcome = await db.transaction(async (tx): Promise<InsertOutcome> => {
@@ -1572,6 +1573,13 @@ export async function addEmailDomainForProject(
       }
       if (lockedProject.status === 'deleting') {
         return 'project_deleting';
+      }
+      // Authorized inside the locked section like every other ownership rule:
+      // while administrators manage domains an owner registers no NEW row. A
+      // row the owner registered before the switch takes the replace path
+      // above and never reaches this insert.
+      if (input.managedBy === 'owner' && (await getEmailDomainManagement(tx)) === 'admin') {
+        return 'admin_managed';
       }
       await tx.insert(emailDomains).values({
         id,
@@ -1610,7 +1618,15 @@ export async function addEmailDomainForProject(
     await revokeRejectedGrant(context, postedRefreshToken);
     return outcome === 'project_gone'
       ? context.json({ error: 'project not found' }, 404)
-      : context.json({ error: 'Project is being deleted' }, 409);
+      : outcome === 'admin_managed'
+        ? context.json(
+            {
+              error: 'email domains on this platform are managed by its administrator',
+              adminCommand: adminEmailDomainCommand('add', domain, project.slug),
+            },
+            403,
+          )
+        : context.json({ error: 'Project is being deleted' }, 409);
   }
 
   return await runEmailDomainEngineSerialized(context, projectId, id, proxyOrigin, {
