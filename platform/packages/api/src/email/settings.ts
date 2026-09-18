@@ -197,7 +197,7 @@ export async function setEmailRecipientPolicy(
       } catch (err) {
         console.error('[email-settings] recipient policy mirror write failed:', err);
         throw new Error(
-          'the recipient policy routing mirror could not be updated; nothing changed',
+          'the recipient policy routing mirror could not be updated; the saved policy is unchanged and the next read republishes it',
         );
       }
     }

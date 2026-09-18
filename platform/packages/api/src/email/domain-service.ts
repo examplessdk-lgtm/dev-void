@@ -52,6 +52,7 @@ import {
   ROUTING_SUBDOMAIN_STEP,
   SENDING_ONBOARDING_STEP,
   domainHasRoutingMx,
+  findZoneForEmailDomain,
   removeEmailDomain,
   sendingOnboardedReadback,
   setupEmailDomain,
@@ -1667,7 +1668,7 @@ export async function getEmailDomainStatusForProject(
       );
       if (row.zone_id !== null) {
         await client.getRoutingSettings(row.zone_id);
-      } else if ((await client.findZone(row.domain)) === null) {
+      } else if ((await findZoneForEmailDomain(client, row.domain)) === null) {
         throw new Error(`the platform credential cannot see a zone for ${row.domain}`);
       }
       credentialStatus = 'active';

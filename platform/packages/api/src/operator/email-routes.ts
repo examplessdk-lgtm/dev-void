@@ -52,9 +52,9 @@ export const emailOperatorRoutes = new Hono<ApiEnv>().use(
 function policyEffect(policy: EmailRecipientPolicy): string {
   switch (policy.mode) {
     case 'any':
-      return 'Shared-sender mail reaches any recipient; Cloudflare still refuses unverified destinations until the platform mail domain is onboarded for Email Sending.';
+      return "Shared-sender mail reaches any recipient except another project's address on the platform's own mail domain, which still needs that project's verified-destination consent; Cloudflare still refuses unverified destinations until the platform mail domain is onboarded for Email Sending.";
     case 'domains':
-      return `Shared-sender mail reaches verified destinations and any address on ${policy.domains.join(', ')}; Cloudflare still refuses unverified destinations until the platform mail domain is onboarded for Email Sending.`;
+      return `Shared-sender mail reaches verified destinations and any address on ${policy.domains.join(', ')} — never another project's address on the platform's own mail domain; Cloudflare still refuses unverified destinations until the platform mail domain is onboarded for Email Sending.`;
     default:
       return "Shared-sender mail reaches only each project's verified destinations.";
   }
@@ -258,10 +258,17 @@ async function operatorResult(
         : 'The email domain operation failed.';
     throw new OperatorError(response.status, message, 'email_domain_error', body);
   }
-  // A kept row after a failed destructive step answers 200 with
-  // `ok: false` (the owner contract); surface that at the top level so the
-  // audit records a failed mutation and the CLI reports the partial result.
-  return { action, target, ...(body.ok === false ? { ok: false } : {}), domain: body };
+  // A kept row after a failed destructive step answers 200 with `ok: false`
+  // (the owner contract), and a setup or sync that ended on a Cloudflare
+  // failure answers 200 with the row in a failed state. Both surface as a
+  // top-level `ok: false` so the audit records a failed mutation and the
+  // CLI reports the partial result.
+  const failed =
+    body.ok === false ||
+    body.status === 'failed' ||
+    body.status === 'token_revoked' ||
+    body.status === 'token_expired';
+  return { action, target, ...(failed ? { ok: false } : {}), domain: body };
 }
 
 function requireDomain(raw: string): string {
@@ -347,8 +354,9 @@ export async function addOperatorEmailDomain(
       existing: existing ? { status: existing.status, managed_by: existing.managed_by } : null,
       plan: existing ? 'rerun' : 'setup',
       mx,
-      effect:
-        mx === 'subdomain'
+      effect: existing?.mode
+        ? `Re-runs setup for ${domain} on ${project.slug} in its stored ${existing.mode} mode; the credential is replaced, rules and the relay stay.`
+        : mx === 'subdomain'
           ? `${domain} already receives mail; setup will refuse it — name a subdomain such as mail.${domain} instead.`
           : credentialKind === 'platform'
             ? `Registers ${domain} for ${project.slug} on the platform's own Cloudflare credential; the zone must be in the platform's account.`

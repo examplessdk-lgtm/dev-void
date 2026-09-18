@@ -1275,6 +1275,7 @@ describe('admin email settings page', () => {
     expect(html).toMatch(/name="mode" value="verified" checked/);
     expect(html).toMatch(/name="domains" value="self-serve" checked/);
     expect(html).toContain('UNVERIFIED_DESTINATION');
+    expect(html).toContain('own mail domain');
   });
 
   test('saves the recipient policy, mirrors it, audits it, and re-renders it selected', async () => {

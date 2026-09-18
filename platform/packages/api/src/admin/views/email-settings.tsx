@@ -40,7 +40,8 @@ export function EmailSettingsPage({
         </label>
         <label style="display: block">
           <input type="radio" name="mode" value="domains" checked={policy.mode === 'domains'} />{' '}
-          <strong>domains</strong> — verified destinations, plus any address on these domains:
+          <strong>domains</strong> — verified destinations, plus any address on these domains —
+          never another project's address on the platform's own mail domain:
         </label>
         <textarea
           name="domains"
@@ -52,7 +53,8 @@ export function EmailSettingsPage({
         </textarea>
         <label style="display: block">
           <input type="radio" name="mode" value="any" checked={policy.mode === 'any'} />{' '}
-          <strong>any</strong> — every recipient
+          <strong>any</strong> — every recipient except another project's address on the platform's
+          own mail domain, which still needs that project's verified-destination consent
         </label>
         <button type="submit" style="margin-top: 8px">
           Save policy

@@ -93,12 +93,18 @@ describe('operator email recipient policy', () => {
       dryRun: true,
     });
     expect(preview.status).toBe(200);
-    expect(await preview.json()).toMatchObject({
+    const previewBody = (await preview.json()) as Record<string, unknown>;
+    expect(previewBody).toMatchObject({
       dryRun: true,
       action: 'email.policy.set',
       target: { mode: 'domains', domains: ['corp.example', 'example.net'] },
       previous: { mode: 'verified', domains: [] },
     });
+    expect(String(previewBody.effect)).toContain("platform's own mail domain");
+    const anyPreview = await req('/email/policy', { mode: 'any', dryRun: true });
+    expect(String(((await anyPreview.json()) as Record<string, unknown>).effect)).toContain(
+      "platform's own mail domain",
+    );
     expect(await setting(EMAIL_RECIPIENT_POLICY_SETTING)).toBeNull();
     expect(await events()).toHaveLength(0);
 

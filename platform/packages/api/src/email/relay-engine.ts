@@ -349,6 +349,25 @@ export async function domainHasRoutingMx(domain: string): Promise<boolean> {
   }
 }
 
+/**
+ * The zone is the deepest suffix of the email domain that exists as a zone
+ * in an account the credential can see (mail.acme.com → acme.com, or the
+ * subdomain itself on an Enterprise subdomain setup). Errors propagate.
+ */
+export async function findZoneForEmailDomain(
+  client: CfCustomerClient,
+  domain: string,
+): Promise<CfCustomerZone | null> {
+  const labels = domain.split('.');
+  for (let start = 0; start <= labels.length - 2; start++) {
+    const zone = await client.findZone(labels.slice(start).join('.'));
+    if (zone) {
+      return zone;
+    }
+  }
+  return null;
+}
+
 type CredentialResolution =
   | Readonly<{
       ok: true;
@@ -476,19 +495,12 @@ export async function setupEmailDomain(
   progress.token_expires_on = resolved.token_expires_on;
   const client = resolved.client;
 
-  // Step 2: zone lookup. The zone is the deepest suffix of the email
-  // domain that exists as a zone in an account the credential can see
-  // (mail.acme.com → acme.com, or the subdomain itself on an Enterprise
-  // subdomain setup). Also yields account_id.
-  const labels = input.row.domain.split('.');
-  let zone: CfCustomerZone | null = null;
-  for (let start = 0; start <= labels.length - 2 && !zone; start++) {
-    const candidate = labels.slice(start).join('.');
-    try {
-      zone = await client.findZone(candidate);
-    } catch (err) {
-      return fail('zone_lookup', err);
-    }
+  // Step 2: zone lookup. Also yields account_id.
+  let zone: CfCustomerZone | null;
+  try {
+    zone = await findZoneForEmailDomain(client, input.row.domain);
+  } catch (err) {
+    return fail('zone_lookup', err);
   }
   if (!zone) {
     return failWith(

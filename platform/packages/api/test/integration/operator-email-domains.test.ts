@@ -186,6 +186,87 @@ describe('operator email domain-add', () => {
     });
   });
 
+  test('previews a re-run in the stored mode even when public MX is present', async () => {
+    const project = await seedProject();
+    stubCustomerCf({ zones: { 'example.com': PLATFORM_ZONE } });
+    expect(
+      (await req('/email/domains', { domain: 'example.com', project: project.id })).status,
+    ).toBe(200);
+    stubCustomerCf({ mx: { 'example.com': ['route1.mx.cloudflare.net'] } });
+
+    const preview = await req('/email/domains', {
+      domain: 'example.com',
+      project: project.id,
+      dryRun: true,
+    });
+    const body = (await preview.json()) as Record<string, unknown>;
+    expect(body).toMatchObject({
+      plan: 'rerun',
+      mx: 'subdomain',
+      effect: expect.stringContaining('stored apex mode'),
+    });
+    expect(String(body.effect)).not.toContain('setup will refuse');
+  });
+
+  test('keeps the MX refusal preview for an existing row with no stored mode', async () => {
+    const project = await seedProject();
+    stubCustomerCf({ zones: { 'example.com': PLATFORM_ZONE } });
+    expect(
+      (await req('/email/domains', { domain: 'example.com', project: project.id })).status,
+    ).toBe(200);
+    await env.db
+      .update(emailDomains)
+      .set({ mode: null })
+      .where(eq(emailDomains.domain, 'example.com'));
+    stubCustomerCf({ mx: { 'example.com': ['route1.mx.cloudflare.net'] } });
+
+    const preview = await req('/email/domains', {
+      domain: 'example.com',
+      project: project.id,
+      dryRun: true,
+    });
+    expect(await preview.json()).toMatchObject({
+      plan: 'rerun',
+      mx: 'subdomain',
+      effect: expect.stringContaining('setup will refuse'),
+    });
+  });
+
+  test('reports a failed setup as a partial failure and a failed audit event', async () => {
+    const project = await seedProject();
+    stubCustomerCf({
+      zones: { 'example.com': PLATFORM_ZONE },
+      failOn: { zones: { message: 'zone lookup failed', status: 502 } },
+    });
+
+    const response = await req('/email/domains', { domain: 'example.com', project: project.id });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      ok: false,
+      domain: { status: 'failed', setup_state: { failed_step: 'zone_lookup' } },
+    });
+    expect((await events()).at(-1)).toMatchObject({ action: 'email/domains', status: 'failed' });
+  });
+
+  test('keeps a pending setup as a successful operator result', async () => {
+    const project = await seedProject();
+    stubCustomerCf({
+      zones: { 'example.com': PLATFORM_ZONE },
+      failOn: { routingDns: { message: 'use the dashboard', status: 403 } },
+    });
+
+    const response = await req('/email/domains', {
+      domain: 'mail.example.com',
+      project: project.id,
+    });
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as Record<string, unknown> & {
+      domain: Record<string, unknown>;
+    };
+    expect(body.domain.status).toBe('pending');
+    expect(Object.hasOwn(body, 'ok')).toBe(false);
+  });
+
   test('refuses a zone outside the platform account before any write', async () => {
     const project = await seedProject();
     const stub = stubCustomerCf({ zones: { 'elsewhere.test': FOREIGN_ZONE } });
@@ -353,6 +434,45 @@ describe('operator email domain list, status, sync and remove', () => {
     expect(callsByTag(stub.calls, 'routingSettingsGet').length).toBeGreaterThan(0);
   });
 
+  test('status walks parent zones for a platform row that has not stored its zone yet', async () => {
+    const project = await seedProject();
+    const zone = { ...PLATFORM_ZONE, name: 'acme.com' };
+    stubCustomerCf({ zones: { 'acme.com': zone } });
+    expect(
+      (await req('/email/domains', { domain: 'mail.acme.com', project: project.id })).status,
+    ).toBe(200);
+    await env.db
+      .update(emailDomains)
+      .set({ zone_id: null })
+      .where(eq(emailDomains.domain, 'mail.acme.com'));
+    const stub = stubCustomerCf({ zones: { 'acme.com': zone } });
+
+    const response = await req('/email/domains/mail.acme.com');
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ credential_status: 'active' });
+    expect(
+      callsByTag(stub.calls, 'zones').map((call) => new URL(call.url).searchParams.get('name')),
+    ).toEqual(['mail.acme.com', 'acme.com']);
+  });
+
+  test('status reports probe_failed when no parent zone is visible for a platform row', async () => {
+    const project = await seedProject();
+    const zone = { ...PLATFORM_ZONE, name: 'acme.com' };
+    stubCustomerCf({ zones: { 'acme.com': zone } });
+    expect(
+      (await req('/email/domains', { domain: 'mail.acme.com', project: project.id })).status,
+    ).toBe(200);
+    await env.db
+      .update(emailDomains)
+      .set({ zone_id: null })
+      .where(eq(emailDomains.domain, 'mail.acme.com'));
+    stubCustomerCf({ zones: {} });
+
+    const response = await req('/email/domains/mail.acme.com');
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ credential_status: 'probe_failed' });
+  });
+
   test('status reports probe_failed, not revoked, when the runtime token is refused', async () => {
     const project = await seedProject();
     await addPlatformDomain(project.id);
@@ -392,11 +512,37 @@ describe('operator email domain list, status, sync and remove', () => {
     expect(after.relay_ciphertext).not.toBe(before.relay_ciphertext);
     expect(after.credential_kind).toBe('platform');
     const recorded = await events();
-    expect(recorded.map((event) => event.action)).toEqual([
-      'email/domains',
-      'email/domains/example.com/sync',
-    ]);
-    expect(JSON.parse(recorded[1]!.target)).toEqual({ domain: 'example.com' });
+    expect(recorded.map((event) => event.action).sort()).toEqual(
+      ['email/domains', 'email/domains/example.com/sync'].sort(),
+    );
+    const syncEvent = recorded.find((event) => event.action === 'email/domains/example.com/sync');
+    expect(JSON.parse(syncEvent!.target)).toEqual({ domain: 'example.com' });
+  });
+
+  test('reports a sync whose stored token was revoked as a partial failure', async () => {
+    const project = await seedProject();
+    stubCustomerCf({ zones: { 'example.com': PLATFORM_ZONE } });
+    expect(
+      (
+        await req('/email/domains', {
+          domain: 'example.com',
+          project: project.id,
+          apiToken: CUSTOMER_TOKEN,
+        })
+      ).status,
+    ).toBe(200);
+    stubCustomerCf({ verifyStatus: 'revoked' });
+
+    const response = await req('/email/domains/example.com/sync', {});
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      ok: false,
+      domain: { status: 'token_revoked' },
+    });
+    expect((await events()).at(-1)).toMatchObject({
+      action: 'email/domains/example.com/sync',
+      status: 'failed',
+    });
   });
 
   test('remove resets the catch-all, deletes the relay and drops the row', async () => {

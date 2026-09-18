@@ -87,12 +87,16 @@ allowlist). An absent or unreadable mirror means `verified` — `any` included
 when its shape is not the api's. A publish is ONE KV write — Workers KV
 refuses a second write to a key within a second, so the mirror is never
 cleared and re-put — ordered so the mirror is never looser than the
-database in any partial outcome: a tightening puts the mirror before the
-database commits (a failed put changes nothing; a failed commit leaves the
-proxy stricter until the next read republishes), a widening commits first
-and puts after (a failed put leaves the old, stricter policy in force and
-the operator told so, until a retry or the next read republishes). A
-`domains` list edited both ways publishes as a tightening. Publisher and
+database in any partial outcome of a mode change or a list grown or shrunk:
+a tightening puts the mirror before the database commits (a refused put
+leaves the saved policy unchanged; a failed commit leaves the proxy stricter
+until the next read republishes), a widening commits first and puts after
+(a failed put leaves the old, stricter policy in force and the operator told
+so, until a retry or the next read republishes). The one exception is a
+`domains` list edited both ways in a single publish: it goes as a
+tightening, so a failed commit can leave the ADDED domain reachable until
+the next read republishes the database's list — the removed ones are
+closed at once. Publisher and
 repair serialize on a transaction-scoped advisory lock because KV has no
 compare-and-set, and every read surface (operator, owner settings, admin
 page) repairs a drifted mirror. Surface: the admin UI's **Email** page and
@@ -774,10 +778,14 @@ void platform email limit    <project> [--monthly N] [--burst N]
 the token is read from standard input once and rides both the preview (which
 only classifies it) and the apply, never the audit target. Every POST previews
 first: the add preview resolves the project, the existing row and the public
-MX decision without a single Cloudflare call. A kept row after a failed
-destructive step (the owner contract's `200 { ok: false }`) surfaces as a
-top-level `ok: false` on the operator result, so the audit records a failed
-mutation and the CLI reports a partial result. The admin UI's project page has
+MX decision without a single Cloudflare call, and on a re-run names the
+stored mode rather than re-deciding it. A kept row after a failed
+destructive step (the owner contract's `200 { ok: false }`) and a setup or
+sync that ends with the row `failed` / `token_revoked` / `token_expired`
+both surface as a top-level `ok: false` on the operator result, so the audit
+records a failed mutation and the CLI exits nonzero with the row as the
+partial result. The policy preview and the admin label state the
+platform-domain exception next to `any` and `domains`. The admin UI's project page has
 the add form (blank token = platform credential) and shows `managed_by`; its
 `revoke` and `revoke-grant` actions stay.
 
@@ -829,7 +837,8 @@ unchanged, and the operator layer re-shapes its JSON responses.
   this version; the migration itself is compatible with the previous
   Workers.
 - The status probe for a `platform` row is a zone-scoped read
-  (`GET /zones/{z}/email/routing`, or the zone lookup before a zone is known).
+  (`GET /zones/{z}/email/routing`, or — before a zone is known — the same
+  suffix walk setup uses, so `mail.acme.com` finds the `acme.com` zone).
   A refusal reads `probe_failed`, never `token_revoked` / `token_expired` —
   those describe a stored credential's lifecycle. The probe's fenced update
   compares `token_ciphertext IS NULL` for such rows; `= NULL` would never

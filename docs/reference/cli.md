@@ -489,7 +489,7 @@ void platform email settings-set --domains <self-serve|admin>
 void platform email limit <project-id|slug> [--monthly <n>] [--burst <n>]
 ```
 
-`policy` decides which recipients a project's `<slug>+tag@<mail domain>` sender reaches: `verified` (the default) means only that project's verified destinations; `domains` adds every address on the listed domains; `any` lifts the check. Cloudflare still refuses a destination it has not verified until the platform mail domain is onboarded for Email Sending, so under `domains` or `any` such refusals arrive as per-recipient `UNVERIFIED_DESTINATION` results. Custom-domain sends are not affected.
+`policy` decides which recipients a project's `<slug>+tag@<mail domain>` sender reaches: `verified` (the default) means only that project's verified destinations; `domains` adds every address on the listed domains; `any` lifts the check. Neither widens delivery to another project's address on the platform's own mail domain, which still needs that project's verified-destination consent. Cloudflare still refuses a destination it has not verified until the platform mail domain is onboarded for Email Sending, so under `domains` or `any` such refusals arrive as per-recipient `UNVERIFIED_DESTINATION` results. Custom-domain sends are not affected.
 
 `settings-set --domains admin` tells `void email domain add` to print the administrator's command instead of starting a Cloudflare grant. `limit` overrides the project's monthly and per-minute caps (defaults 200 and 10); a project page in the admin UI shows and clears them.
 
@@ -503,7 +503,7 @@ void platform email domain-sync <domain>
 void platform email domain-remove <domain> [--force]
 ```
 
-`domain-add` runs the same setup as `void email domain add` on the platform's own Cloudflare credential, so the zone must be in the platform's account; for a zone elsewhere, pipe a Cloudflare API token for that account on standard input with `--token-stdin --yes`. Name the exact mail domain (`mail.example.com`, or the apex when it receives no mail yet). Enabling Email Routing on a subdomain stays a one-time Cloudflare dashboard step, which `domain-status` reports and self-clears once the MX records appear; after a Workers Paid upgrade, `domain-sync` re-attempts the Email Sending onboarding. Rows an administrator adds show `managed_by: admin`; their owners can list and inspect them but are pointed at these commands for `sync` and `remove`.
+`domain-add` runs the same setup as `void email domain add` on the platform's own Cloudflare credential, so the zone must be in the platform's account; for a zone elsewhere, pipe a Cloudflare API token for that account on standard input with `--token-stdin --yes`. Name the exact mail domain (`mail.example.com`, or the apex when it receives no mail yet). Enabling Email Routing on a subdomain stays a one-time Cloudflare dashboard step, which `domain-status` reports and self-clears once the MX records appear; after a Workers Paid upgrade, `domain-sync` re-attempts the Email Sending onboarding. A setup or sync that ends with the domain `failed` or its credential revoked or expired is reported as a partial failure and exits nonzero; the result names the failing step, and running `domain-add` again retries it. Rows an administrator adds show `managed_by: admin`; their owners can list and inspect them but are pointed at these commands for `sync` and `remove`.
 
 #### System {#operator-system}
 
