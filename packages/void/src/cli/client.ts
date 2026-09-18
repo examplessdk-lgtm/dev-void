@@ -646,7 +646,10 @@ export class PlatformClient {
         // naming the deployment rather than a bare HTTP failure.
         let parsed: { error?: string; deployment?: string } | null = null;
         try {
-          parsed = JSON.parse(body) as typeof parsed;
+          const raw: unknown = JSON.parse(body);
+          if (raw !== null && typeof raw === 'object') {
+            parsed = raw as { error?: string; deployment?: string };
+          }
         } catch {
           // Non-JSON 409 — fall through to the generic error below.
         }
