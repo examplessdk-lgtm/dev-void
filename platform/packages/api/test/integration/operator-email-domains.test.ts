@@ -466,6 +466,71 @@ describe('operator email domain list, status, sync and remove', () => {
     expect(await rowFor('example.com')).toBeUndefined();
   });
 
+  test("an administrator may sync and remove an owner's row, but never re-add it", async () => {
+    const project = await seedProject();
+    await seedOwnerDomain(project.id, 'owned.test');
+    const stub = stubCustomerCf({
+      zones: { 'owned.test': FOREIGN_ZONE },
+      catchAllRule: { enabled: true, workerName: RELAY_WORKER_BASE_NAME },
+    });
+
+    expect(
+      (await req('/email/domains', { domain: 'owned.test', project: project.id })).status,
+    ).toBe(409);
+    const sync = await req('/email/domains/owned.test/sync', {});
+    expect(sync.status).toBe(200);
+    expect(await sync.json()).toMatchObject({ action: 'email.domain.sync' });
+    // The owner's stored token did the work — never the runtime token.
+    for (const call of stub.fn.mock.calls) {
+      const auth = new Headers((call[1] as RequestInit | undefined)?.headers).get('Authorization');
+      if (auth) {
+        expect(auth).toBe(`Bearer ${CUSTOMER_TOKEN}`);
+      }
+    }
+    expect((await rowFor('owned.test'))?.managed_by).toBe('owner');
+
+    const remove = await req('/email/domains/owned.test/remove', {});
+    expect(remove.status).toBe(200);
+    expect(await remove.json()).toMatchObject({ domain: { ok: true, removed: true } });
+    expect(await rowFor('owned.test')).toBeUndefined();
+  });
+
+  test('an existing platform row survives runtime-token loss: probe_failed, no lease, 503 sync', async () => {
+    const project = await seedProject();
+    await addPlatformDomain(project.id);
+    const stub = stubCustomerCf({ zones: { 'example.com': PLATFORM_ZONE } });
+    const noToken = { CF_API_TOKEN: '' };
+
+    const status = await req('/email/domains/example.com', undefined, noToken);
+    expect(status.status).toBe(200);
+    expect(await status.json()).toMatchObject({
+      status: 'active',
+      credential_status: 'probe_failed',
+    });
+    expect((await rowFor('example.com'))?.status).toBe('active');
+
+    const lease = await app.fetch(
+      new Request('http://localhost/internal/email/domain-credential', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-void-internal': await hmacSignState('example.com', JWT_SECRET),
+        },
+        body: JSON.stringify({ domain: 'example.com' }),
+      }),
+      { ...env, ...noToken },
+    );
+    expect(lease.status).toBe(502);
+    expect(JSON.stringify(await lease.json())).not.toContain('token');
+
+    const sync = await req('/email/domains/example.com/sync', {}, noToken);
+    expect(sync.status).toBe(503);
+    expect(await sync.json()).toMatchObject({
+      message: expect.stringContaining('platform credential unavailable'),
+    });
+    expect(stub.calls).toEqual([]);
+  });
+
   test('status, sync and remove answer 404 for an unknown domain', async () => {
     expect((await req('/email/domains/nope.test')).status).toBe(404);
     expect((await req('/email/domains/nope.test/sync', {})).status).toBe(404);

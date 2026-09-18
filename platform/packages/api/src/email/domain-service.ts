@@ -95,11 +95,12 @@ export function adminEmailDomainCommand(
 }
 
 /**
- * Who may change a row: its `managed_by` side, and nobody else. An owner
- * touching an administrator's row is pointed at the operator command (403);
- * an administrator touching an owner's row is asked to have it removed
- * first (409) — a takeover would revoke the owner's grant. `null` when the
- * actor matches. Callers run this on the unlocked read for the message and
+ * Who may change a row. An owner touching an administrator's row is pointed
+ * at the operator command (403) for every verb — the row runs on the
+ * platform's credential. An administrator may sync or remove an owner's
+ * row (the ownership table's maintenance powers) but never re-`add` it: a
+ * takeover would revoke the owner's grant and flip the row (409). `null`
+ * when allowed. Callers run this on the unlocked read for the message and
  * AGAIN on the locked row, because either side can commit in between.
  */
 function refuseCrossOwnership(
@@ -120,6 +121,9 @@ function refuseCrossOwnership(
       },
       403,
     );
+  }
+  if (verb !== 'add') {
+    return null;
   }
   return context.json(
     { error: 'this email domain was registered by its project owner; ask them to remove it first' },
@@ -615,7 +619,15 @@ function refusePlatformCredentialOffAccount(
   context: Context<ApiEnv>,
   row: Pick<EmailDomain, 'credential_kind' | 'account_id' | 'domain'>,
 ): Response | null {
-  if (row.credential_kind !== 'platform' || platformAccountAllows(context, row)) {
+  if (row.credential_kind !== 'platform') {
+    return null;
+  }
+  // Without the runtime token there is nothing to sync with; say so rather
+  // than let the credential seam's throw surface as a 500.
+  if (!context.env.CF_API_TOKEN) {
+    return context.json({ error: 'platform credential unavailable' }, 503);
+  }
+  if (platformAccountAllows(context, row)) {
     return null;
   }
   return context.json(

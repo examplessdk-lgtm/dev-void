@@ -906,6 +906,8 @@ type CustomerEmailCleanupCall = {
   body?: unknown;
   /** OAuth endpoint form fields (dash.cloudflare.com) — dummy fixtures only. */
   form?: Record<string, string>;
+  /** The bearer the customer-account call carried — dummy fixtures only. */
+  authorization?: string | null;
 };
 
 /**
@@ -942,6 +944,7 @@ function captureCustomerEmailCleanup(
   vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
     const method = init?.method ?? 'GET';
+    const authorization = new Headers(init?.headers).get('Authorization');
 
     if (url.startsWith('https://dash.cloudflare.com/oauth2/token')) {
       calls.push({ tag: 'oauthToken', method, url, form: readForm(init) });
@@ -965,7 +968,7 @@ function captureCustomerEmailCleanup(
     }
 
     if (url.includes('/email/routing/rules/catch_all') && method === 'GET') {
-      calls.push({ tag: 'catchAllGet', method, url });
+      calls.push({ tag: 'catchAllGet', method, url, authorization });
       const failure = fail('catchAllGet');
       if (failure) {
         return failure;
@@ -984,12 +987,12 @@ function captureCustomerEmailCleanup(
     }
     if (url.includes('/email/routing/rules/catch_all') && method === 'PUT') {
       const body = typeof init?.body === 'string' ? JSON.parse(init.body) : undefined;
-      calls.push({ tag: 'catchAll', method, url, body });
+      calls.push({ tag: 'catchAll', method, url, body, authorization });
       return fail('catchAll') ?? cfSuccess({});
     }
     if (/\/accounts\/[^/]+\/workers\/scripts\/[^/?#]+$/.test(new URL(url).pathname)) {
       if (method === 'DELETE') {
-        calls.push({ tag: 'scriptDelete', method, url });
+        calls.push({ tag: 'scriptDelete', method, url, authorization });
         return fail('scriptDelete') ?? cfSuccess({});
       }
     }
@@ -1013,35 +1016,42 @@ describe('DELETE /projects/:id — customer-side email domain cleanup', () => {
     options: {
       status?: 'active' | 'failed';
       relayWorkerName?: string | null;
-      credentialKind?: 'api_token' | 'oauth_grant';
+      credentialKind?: 'api_token' | 'oauth_grant' | 'platform';
+      accountId?: string;
     } = {},
   ): Promise<void> {
     const status = options.status ?? 'active';
     const relayWorkerName =
       options.relayWorkerName === undefined ? RELAY_WORKER_BASE_NAME : options.relayWorkerName;
     const credentialKind = options.credentialKind ?? 'api_token';
+    const accountId = options.accountId ?? CUSTOMER_ACCOUNT_ID;
     // The token triple must really decrypt — teardown decrypts it to build
     // the customer CF client (the grant's refresh token on the oauth_grant
-    // path). The relay triple is never read on this path (dummy stand-ins,
-    // as in seedDomainMirror above).
-    const tokenEnc = await encryptEmailDomainToken(
-      env,
-      projectId,
-      domain,
-      credentialKind === 'oauth_grant' ? DOMAIN_REFRESH_TOKEN : DOMAIN_API_TOKEN,
-    );
+    // path). A platform row stores none: teardown resolves it to the
+    // runtime token. The relay triple is never read on this path (dummy
+    // stand-ins, as in seedDomainMirror above).
+    const tokenEnc =
+      credentialKind === 'platform'
+        ? null
+        : await encryptEmailDomainToken(
+            env,
+            projectId,
+            domain,
+            credentialKind === 'oauth_grant' ? DOMAIN_REFRESH_TOKEN : DOMAIN_API_TOKEN,
+          );
     await env.db.insert(emailDomains).values({
       id: `edom_${domain.replace(/[^a-z0-9]/g, '')}`,
       project_id: projectId,
       domain,
       zone_id: CUSTOMER_ZONE_ID,
-      account_id: CUSTOMER_ACCOUNT_ID,
+      account_id: accountId,
       mode: 'apex',
       status,
       credential_kind: credentialKind,
-      token_ciphertext: tokenEnc.ciphertext,
-      token_iv: tokenEnc.iv,
-      token_key_version: tokenEnc.keyVersion,
+      managed_by: credentialKind === 'platform' ? 'admin' : 'owner',
+      token_ciphertext: tokenEnc?.ciphertext ?? null,
+      token_iv: tokenEnc?.iv ?? null,
+      token_key_version: tokenEnc?.keyVersion ?? null,
       relay_ciphertext: 'dummy-ct',
       relay_iv: 'dummy-iv',
       relay_key_version: 'v1',
@@ -1054,7 +1064,7 @@ describe('DELETE /projects/:id — customer-side email domain cleanup', () => {
         status,
         relaySecretSha256: '00'.repeat(32),
         relayWorkerName,
-        accountId: CUSTOMER_ACCOUNT_ID,
+        accountId,
         zoneId: CUSTOMER_ZONE_ID,
         mode: 'apex',
       }),
@@ -1107,6 +1117,68 @@ describe('DELETE /projects/:id — customer-side email domain cleanup', () => {
     const [dbProject] = await env.db.select().from(projects).where(eq(projects.id, project.id));
     expect(dbProject).toBeUndefined();
     expect(await env.ROUTING.get('email-domain:acme-relay.example')).toBeNull();
+  });
+
+  it('cleans up an administrator-managed platform row with the runtime token', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'mail-relay-platform');
+    mockCfApi();
+    const customerCalls = captureCustomerEmailCleanup({
+      catchAllRule: { enabled: true, workerName: RELAY_WORKER_BASE_NAME },
+    });
+    await seedCustomerEmailDomain(project.id, 'acme-platform.example', {
+      credentialKind: 'platform',
+      accountId: env.CF_ACCOUNT_ID,
+    });
+
+    const res = await app.fetch(
+      new Request(`http://localhost/projects/${project.id}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${user.jwt}` },
+      }),
+      env,
+    );
+    expect(res.status).toBe(200);
+    expect(customerCalls.map((call) => call.tag)).toEqual([
+      'catchAllGet',
+      'catchAll',
+      'scriptDelete',
+    ]);
+    expect(customerCalls[2]!.url).toContain(
+      `/accounts/${env.CF_ACCOUNT_ID}/workers/scripts/${RELAY_WORKER_BASE_NAME}`,
+    );
+    for (const call of customerCalls) {
+      expect(call.authorization).toBe(`Bearer ${env.CF_API_TOKEN}`);
+    }
+    expect(await env.ROUTING.get('email-domain:acme-platform.example')).toBeNull();
+    expect(await env.db.select().from(projects).where(eq(projects.id, project.id))).toHaveLength(0);
+  });
+
+  it('still tears the project down when the runtime token is gone, leaving the relay for manual cleanup', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'mail-relay-platform-lost');
+    mockCfApi();
+    const customerCalls = captureCustomerEmailCleanup({
+      catchAllRule: { enabled: true, workerName: RELAY_WORKER_BASE_NAME },
+    });
+    await seedCustomerEmailDomain(project.id, 'acme-platform-lost.example', {
+      credentialKind: 'platform',
+      accountId: env.CF_ACCOUNT_ID,
+    });
+
+    const res = await app.fetch(
+      new Request(`http://localhost/projects/${project.id}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${user.jwt}` },
+      }),
+      { ...env, CF_API_TOKEN: '' },
+    );
+    expect(res.status).toBe(200);
+    // No credential, no customer-side call — but the mirror is gone and the
+    // project is deleted; the relay is the operator's to remove by hand.
+    expect(customerCalls).toEqual([]);
+    expect(await env.ROUTING.get('email-domain:acme-platform-lost.example')).toBeNull();
+    expect(await env.db.select().from(projects).where(eq(projects.id, project.id))).toHaveLength(0);
   });
 
   it('revokes the OAuth grant during teardown for an oauth_grant domain', async () => {

@@ -71,7 +71,12 @@ the admin UI and the operator preview say so next to the policy.
 Scope: shared-sender sends and the inbound forward/reply gate
 (`recipientAllowed` in the proxy's `email-policy.ts`, one gate for both).
 Custom-domain sends are unchanged. Burst cap, monthly cap, the
-`email-suspended:` kill switch and the reply-sender pin do not move.
+`email-suspended:` kill switch and the reply-sender pin do not move. The
+policy never widens delivery to an address on the platform's own mail domain:
+another tenant's `<slug>+tag@` inbox is reached only through that project's
+verified-destination consent, whatever the mode — so `any` cannot turn two
+auto-replying handlers into a loop or one tenant into another's spam source.
+A tightening reaches every colo within the mirror's 60-second read cache.
 
 Storage: authoritative in the `platform_settings` table (key/value jsonb —
 the installation's runtime-changeable settings), mirrored to routing KV as
@@ -433,15 +438,16 @@ sync-only path.
   re-read: relay name and `relay_version` both matching means the apply
   committed; otherwise the deployed state is compensated and the error
   rethrown.
-- **Sync, add, remove and revoke all serialize under the project row lock
-  (refusing when teardown marked it `deleting`) and then the domain row
-  lock**, re-reading the row — credential included — inside the lock. A
-  credential replace that lands while another operation waits is acted on as
-  the new credential, never the superseded one. Mirror writes ride the same
-  transaction; a KV failure rolls the row write back. The add path commits the
-  row insert first, then runs the engine in a follow-up serialized section that
-  decides sync versus full setup on the locked row; engine writes ride
-  savepoints so an expected index violation keeps the transaction committable.
+- **Sync, add and revoke serialize under the project row lock (refusing when
+  teardown marked it `deleting`) and then the domain row lock; remove takes
+  the domain row lock and re-reads the row's status inside it**, re-reading
+  the row — credential included — under the lock. A credential replace that
+  lands while another operation waits is acted on as the new credential,
+  never the superseded one. Mirror writes ride the same transaction; a KV
+  failure rolls the row write back. The add path commits the row insert
+  first, then runs the engine in a follow-up serialized section that decides
+  sync versus full setup on the locked row; engine writes ride savepoints so
+  an expected index violation keeps the transaction committable.
 - **A lease-time revocation publishes its mirror under the row lock**,
   conditioned on the row still holding the credential that was revoked, so it
   never overwrites a replace that committed in between.
@@ -837,7 +843,15 @@ which `domain-sync` re-attempts the onboarding.
 | project teardown | removes relay + catch-all with the row's credential | same, with the runtime token                                                                                |
 
 An administrator never takes over an owner's row: `domain-add` on one answers
-409 and asks for the owner to remove it first.
+409 and asks for the owner to remove it first; `domain-sync` and
+`domain-remove` on it run with the owner's stored credential. The `admin`
+mode refuses an owner's add of a NEW domain only — a row the owner registered
+before the switch stays theirs to renew, sync and remove, on the credential it
+already stores. The CLI reads the settings on the authenticated
+`GET /projects/:id/email/settings`; a platform predating that route answers a
+bare 404 and reads as `self-serve`, while the route's own
+`project not found` is an error, so a stale project link never opens a
+browser.
 
 ### The mode switch
 

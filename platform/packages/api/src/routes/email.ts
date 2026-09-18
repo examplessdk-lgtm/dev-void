@@ -22,6 +22,7 @@ import { MAX_DOMAIN_LENGTH, normalizeEmailDomain } from '../email/domain-name.ts
 import {
   addEmailDomainForProject,
   adminEmailDomainCommand,
+  getEmailDomainRow,
   getEmailDomainStatusForProject,
   removeEmailDomainForProject,
   revokeRejectedGrant,
@@ -733,17 +734,23 @@ const app = new Hono<ApiEnv>()
     }
     // On an administrator-managed platform owners hold no Cloudflare
     // credential; the CLI normally reads this from GET /email/settings and
-    // never starts a grant, but the mode is enforced here regardless.
-    if ((await getEmailDomainManagement(db)) === 'admin') {
+    // never starts a grant, but the mode is enforced here regardless. A row
+    // the owner registered before the switch stays theirs to renew — the
+    // ownership table's "add on an owner row" — so only a NEW domain is
+    // refused; an administrator's row is refused by the service itself.
+    const requested =
+      typeof body.domain === 'string' && body.domain.length <= MAX_DOMAIN_LENGTH
+        ? normalizeEmailDomain(body.domain)
+        : null;
+    if (
+      (await getEmailDomainManagement(db)) === 'admin' &&
+      (requested === null || (await getEmailDomainRow(db, projectId, requested)) === null)
+    ) {
       await revokeRejectedGrant(context, postedRefreshToken);
-      const requested =
-        typeof body.domain === 'string' && body.domain.length <= MAX_DOMAIN_LENGTH
-          ? normalizeEmailDomain(body.domain)
-          : '<domain>';
       return context.json(
         {
           error: 'email domains on this platform are managed by its administrator',
-          adminCommand: adminEmailDomainCommand('add', requested, project.slug),
+          adminCommand: adminEmailDomainCommand('add', requested ?? '<domain>', project.slug),
         },
         403,
       );

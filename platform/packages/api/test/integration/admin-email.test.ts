@@ -1307,6 +1307,51 @@ describe('admin email settings page', () => {
     expect(await env.ROUTING.get('email-recipient-policy')).toBeNull();
   });
 
+  test('is unavailable, reads and writes alike, when the platform does not enable email', async () => {
+    const { adminJwt, projectId } = await seedAdminAndProject();
+    const disabled = {
+      ...env,
+      PLATFORM_CAPABILITIES: JSON.stringify({
+        ai: true,
+        customDomains: true,
+        email: false,
+        githubActions: true,
+        githubOAuth: true,
+        googleOAuth: false,
+        managedBuilds: false,
+        sandbox: false,
+      }),
+    };
+    const page = await app.fetch(
+      new Request('http://localhost/admin/email', {
+        headers: { Cookie: `admin_token=${adminJwt}` },
+      }),
+      disabled,
+    );
+    expect(page.status).toBe(501);
+    const write = await app.fetch(
+      new Request('http://localhost/admin/email/settings', {
+        method: 'POST',
+        headers: {
+          Cookie: `admin_token=${adminJwt}`,
+          'Content-Type': 'application/x-www-form-urlencoded',
+          Origin: 'http://localhost',
+        },
+        body: new URLSearchParams({ domains: 'admin' }).toString(),
+      }),
+      disabled,
+    );
+    expect(write.status).toBe(501);
+    expect(await env.db.select().from(platformSettings)).toHaveLength(0);
+    const project = await app.fetch(
+      new Request(`http://localhost/admin/email/${projectId}`, {
+        headers: { Cookie: `admin_token=${adminJwt}` },
+      }),
+      disabled,
+    );
+    expect(project.status).toBe(501);
+  });
+
   test('saves the domain management mode', async () => {
     const { adminJwt } = await seedAdminAndProject();
     const res = await post('/admin/email/settings', adminJwt, { domains: 'admin' });

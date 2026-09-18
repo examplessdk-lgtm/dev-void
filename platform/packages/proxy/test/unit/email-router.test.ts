@@ -1794,6 +1794,54 @@ describe('routeInbound — per-project gating on forward/reply (HIGH H1)', () =>
     expect(forwardCalls.map((call) => call.to)).toEqual(['anyone@corp.test']);
   });
 
+  it('under `any`, still drops a reply that claims another project as sender', async () => {
+    const { env } = makeEnv({
+      kvSeed: withAllowlist([], {
+        'email-recipient-policy': JSON.stringify({ mode: 'any', domains: [] }),
+      }),
+      emailReturn: [
+        {
+          type: 'reply',
+          from: `otherproject+support@${PROD_DOMAIN}`,
+          to: 'anyone@elsewhere.test',
+          raw: replyRaw(`otherproject+support@${PROD_DOMAIN}`, 'r'),
+        },
+        {
+          type: 'reply',
+          from: `myslug+support@${PROD_DOMAIN}`,
+          to: 'anyone@elsewhere.test',
+          raw: replyRaw(`myslug+support@${PROD_DOMAIN}`, 'r'),
+        },
+      ],
+    });
+    const { message, replyCalls } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    // The sender pin does not move with the policy: only the project's own
+    // sender goes out, to a recipient the policy now permits.
+    expect(replyCalls).toHaveLength(1);
+  });
+
+  it("never widens a forward to another tenant's inbox on the platform's own mail domain", async () => {
+    const { env } = makeEnv({
+      kvSeed: withAllowlist([`consented+tag@${PROD_DOMAIN}`], {
+        'email-recipient-policy': JSON.stringify({ mode: 'any', domains: [] }),
+      }),
+      emailReturn: [
+        { type: 'forward', to: `otherproject+intake@${PROD_DOMAIN}` },
+        { type: 'forward', to: `consented+tag@${PROD_DOMAIN}` },
+        { type: 'forward', to: 'anyone@elsewhere.test' },
+      ],
+    });
+    const { message, forwardCalls } = createFakeMessage({ to: `myslug@${PROD_DOMAIN}` });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+    expect(forwardCalls.map((call) => call.to)).toEqual([
+      `consented+tag@${PROD_DOMAIN}`,
+      'anyone@elsewhere.test',
+    ]);
+  });
+
   it('keeps the gate closed for the same forward under the default `verified` policy', async () => {
     const { env } = makeEnv({
       kvSeed: withAllowlist(['admin@example.com']),

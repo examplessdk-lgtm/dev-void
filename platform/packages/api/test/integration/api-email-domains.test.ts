@@ -439,6 +439,36 @@ describe('email domain routes — administrator-managed platform', () => {
     expect(await rowFor(project.id, 'acme.com')).toBeUndefined();
   });
 
+  it('still lets an owner renew, sync and remove a row they registered before the switch', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'hr-portal');
+    await seedEmailDomain(project.id, 'acme.com', { status: 'token_expired' });
+    await env.db.insert(platformSettings).values({ key: 'email.domains', value: 'admin' });
+    const stub = stubCustomerCf({ zones: { 'acme.com': ZONE } });
+
+    // Renewal re-add of the owner's own row: allowed, credential replaced.
+    const readd = await addDomain(project.id, user.jwt, {
+      domain: 'acme.com',
+      apiToken: API_TOKEN_REPLACEMENT,
+    });
+    expect(readd.status).toBe(200);
+    expect((await rowFor(project.id, 'acme.com'))?.managed_by).toBe('owner');
+    expect(callsByTag(stub.calls, 'verifyToken').length).toBeGreaterThan(0);
+
+    expect((await syncDomain(project.id, 'acme.com', user.jwt)).status).toBe(200);
+    // A NEW domain is what admin mode refuses.
+    const fresh = await addDomain(project.id, user.jwt, {
+      domain: 'new.example',
+      apiToken: API_TOKEN,
+    });
+    expect(fresh.status).toBe(403);
+    expect(await fresh.json()).toMatchObject({
+      adminCommand: 'void platform email domain-add new.example --project hr-portal',
+    });
+    expect((await removeDomain(project.id, 'acme.com', user.jwt)).status).toBe(200);
+    expect(await rowFor(project.id, 'acme.com')).toBeUndefined();
+  });
+
   it("lets an owner read but not sync, remove or re-add an administrator's row", async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id, 'hr-portal');

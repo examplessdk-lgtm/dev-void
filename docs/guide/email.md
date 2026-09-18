@@ -408,7 +408,11 @@ So the ticket example above answers only senders you have allowlisted. An
 auto-responder to arbitrary senders needs
 [your own Cloudflare account](#your-own-cloudflare-account)
 (`--platform cloudflare`), where `reply()` is Cloudflare's own reply-to-sender
-and Void adds no allowlist.
+and Void adds no allowlist — or a platform whose administrator has widened the
+recipient policy for the whole installation (see
+[On a platform your administrator runs](#your-own-domain-on-the-platform)),
+which lifts this gate for the listed domains; another project's address on the
+platform's mail domain always needs that project's consent.
 :::
 
 Note the asymmetry with `sendEmail`: `sendEmail` returns an error result and

@@ -22,6 +22,9 @@ export type RecipientPolicy = Readonly<{
 
 export const RECIPIENT_POLICY_KEY = 'email-recipient-policy';
 
+/** Mirrors the api's `MAX_POLICY_DOMAINS`; a longer list is not the api's. */
+const MAX_POLICY_DOMAINS = 100;
+
 export const VERIFIED_ONLY: RecipientPolicy = Object.freeze({
   mode: 'verified',
   domains: new Set<string>(),
@@ -47,24 +50,20 @@ export async function readRecipientPolicy(kv: KVNamespace): Promise<RecipientPol
     return VERIFIED_ONLY;
   }
   const { mode, domains } = parsed as { mode?: unknown; domains?: unknown };
-  // The api always writes `{ mode, domains: [] }`; anything else is not the
-  // api's mirror and must not widen the gate, `any` included.
-  if (!Array.isArray(domains)) {
+  // The api writes exactly `{ mode: 'any', domains: [] }` or
+  // `{ mode: 'domains', domains: [1..100 non-empty lowercase strings] }`.
+  // Anything else is not the api's mirror and must not widen the gate.
+  if (!Array.isArray(domains) || domains.length > MAX_POLICY_DOMAINS) {
     return VERIFIED_ONLY;
   }
   if (mode === 'any') {
-    return { mode: 'any', domains: new Set() };
+    return domains.length === 0 ? { mode: 'any', domains: new Set() } : VERIFIED_ONLY;
   }
   if (mode === 'domains') {
-    const set = new Set<string>();
-    for (const d of domains) {
-      if (typeof d === 'string' && d !== '') {
-        set.add(d.toLowerCase());
-      }
+    if (domains.length === 0 || !domains.every((d) => typeof d === 'string' && d !== '')) {
+      return VERIFIED_ONLY;
     }
-    // An empty list is `verified` wearing another name; the api refuses to
-    // store one, so treat it the same way here.
-    return set.size === 0 ? VERIFIED_ONLY : { mode: 'domains', domains: set };
+    return { mode: 'domains', domains: new Set(domains.map((d) => d.toLowerCase())) };
   }
   return VERIFIED_ONLY;
 }
@@ -97,23 +96,31 @@ export async function readAllowlist(kv: KVNamespace, projectId: string): Promise
   }
 }
 
-/** `recipient` is already lowercased by the caller. */
+/**
+ * `recipient` is already lowercased by the caller. `platformDomain` is the
+ * installation's own mail domain (`EMAIL_SENDER_DOMAIN`): the policy never
+ * widens delivery to addresses on it, so one tenant cannot use `any` or a
+ * listed platform domain to mail another tenant's `<slug>+tag@` inbox — or
+ * form a reply loop with it — without that recipient's own consent.
+ */
 export function recipientAllowed(
   policy: RecipientPolicy,
   allowlist: ReadonlySet<string>,
   recipient: string,
+  platformDomain?: string,
 ): boolean {
-  if (policy.mode === 'any') {
-    return true;
-  }
   if (allowlist.has(recipient)) {
     return true;
   }
-  if (policy.mode === 'domains') {
-    const at = recipient.lastIndexOf('@');
-    return at > 0 && policy.domains.has(recipient.slice(at + 1));
+  const at = recipient.lastIndexOf('@');
+  const domain = at > 0 ? recipient.slice(at + 1) : '';
+  if (platformDomain !== undefined && domain === platformDomain.toLowerCase()) {
+    return false;
   }
-  return false;
+  if (policy.mode === 'any') {
+    return true;
+  }
+  return policy.mode === 'domains' && domain !== '' && policy.domains.has(domain);
 }
 
 /** The per-recipient `UNVERIFIED_DESTINATION` message for a refused recipient. */

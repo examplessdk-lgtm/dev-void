@@ -1446,8 +1446,10 @@ export class PlatformClient {
 
   /**
    * Installation email settings the CLI reads before acting. A platform
-   * predating the route answers 404, which reads as the defaults — owners
-   * register their own domains there.
+   * predating the route answers a bare 404, which reads as the defaults —
+   * owners register their own domains there. The route's own 404 (the
+   * project is gone) is a real error: acting on it would open a browser and
+   * mint a grant for nothing.
    */
   async getEmailSettings(projectId: string): Promise<EmailSettingsResponse> {
     const res = await fetch(`${this.baseUrl}/projects/${projectId}/email/settings`, {
@@ -1457,6 +1459,10 @@ export class PlatformClient {
     });
 
     if (res.status === 404) {
+      const body = await res.text();
+      if (parsePlatformErrorBody(body)?.error === 'project not found') {
+        throw new PlatformApiError('Failed to read email settings', res.status, body);
+      }
       return { domains: { management: 'self-serve' } };
     }
     if (!res.ok) {

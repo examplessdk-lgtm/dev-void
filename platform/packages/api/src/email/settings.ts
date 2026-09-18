@@ -142,12 +142,13 @@ function withRecipientPolicyLock<T>(db: Db, fn: (tx: Tx) => Promise<T>): Promise
 }
 
 /**
- * Publish order is delete mirror → write DB → put mirror, in one
- * transaction. Every partial outcome fails closed: an absent mirror reads
- * as `verified` at the proxy, a KV failure rolls the DB write back so the
- * database keeps the previous policy, and that is what the next repair
- * republishes. A stale, LOOSER mirror can therefore never outlive a
- * tightening; the thrown message tells the operator nothing changed.
+ * Publish in two locked steps: (1) delete the mirror and commit the new
+ * database value; (2) republish the mirror FROM the committed value. The
+ * mirror is therefore never ahead of the database — a put that lands
+ * without its response, or a commit that fails, cannot leave a policy in
+ * force that the database does not hold. Every partial outcome fails
+ * closed: an absent mirror reads as `verified` at the proxy, and whatever
+ * the database holds is what step (2) or the next read republishes.
  */
 export async function setEmailRecipientPolicy(
   db: Db,
@@ -159,34 +160,41 @@ export async function setEmailRecipientPolicy(
       await kv.delete(EMAIL_RECIPIENT_POLICY_MIRROR_KEY);
     } catch (err) {
       console.error('[email-settings] recipient policy mirror clear failed:', err);
-      throw new Error('the recipient policy routing mirror could not be updated; retry');
+      throw new Error('the recipient policy routing mirror could not be updated; nothing changed');
     }
     await setPlatformSetting(tx, EMAIL_RECIPIENT_POLICY_SETTING, {
       mode: policy.mode,
       domains: [...policy.domains],
     });
-    try {
-      await kv.put(EMAIL_RECIPIENT_POLICY_MIRROR_KEY, serializeEmailRecipientPolicyMirror(policy));
-    } catch (err) {
-      console.error('[email-settings] recipient policy mirror write failed:', err);
-      throw new Error('the recipient policy could not be published; nothing changed, retry');
+  });
+  try {
+    await publishEmailRecipientPolicyMirror(db, kv);
+  } catch (err) {
+    console.error('[email-settings] recipient policy mirror write failed:', err);
+    throw new Error(
+      'recipient policy saved; publishing it to routing failed and it reads as verified until a retry or the next read republishes it',
+    );
+  }
+}
+
+/** Under the publish lock: read the committed policy and put the mirror when it differs. */
+async function publishEmailRecipientPolicyMirror(db: Db, kv: KVNamespace): Promise<void> {
+  await withRecipientPolicyLock(db, async (tx) => {
+    const [policy, mirrored] = await Promise.all([
+      getEmailRecipientPolicy(tx),
+      kv.get(EMAIL_RECIPIENT_POLICY_MIRROR_KEY),
+    ]);
+    const expected = serializeEmailRecipientPolicyMirror(policy);
+    if (mirrored !== expected) {
+      await kv.put(EMAIL_RECIPIENT_POLICY_MIRROR_KEY, expected);
     }
   });
 }
 
-/** Best-effort read-compare repair of the mirror under the publish lock; never throws. */
+/** Best-effort read-compare repair of the mirror; never throws. */
 export async function repairEmailRecipientPolicyMirror(db: Db, kv: KVNamespace): Promise<void> {
   try {
-    await withRecipientPolicyLock(db, async (tx) => {
-      const [policy, mirrored] = await Promise.all([
-        getEmailRecipientPolicy(tx),
-        kv.get(EMAIL_RECIPIENT_POLICY_MIRROR_KEY),
-      ]);
-      const expected = serializeEmailRecipientPolicyMirror(policy);
-      if (mirrored !== expected) {
-        await kv.put(EMAIL_RECIPIENT_POLICY_MIRROR_KEY, expected);
-      }
-    });
+    await publishEmailRecipientPolicyMirror(db, kv);
   } catch (err) {
     console.error('[email-settings] recipient policy mirror repair failed:', err);
   }

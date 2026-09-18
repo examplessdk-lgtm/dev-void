@@ -208,6 +208,33 @@ describe('domain input helpers', () => {
   });
 });
 
+describe('PlatformClient.getEmailSettings', () => {
+  function clientWith(status: number, body: string) {
+    const fetchSpy = vi.fn(async () => new Response(body, { status }));
+    vi.stubGlobal('fetch', fetchSpy);
+    return new PlatformClient('jwt-dummy', 'https://api.example.test');
+  }
+
+  it('reads the settings the platform reports', async () => {
+    const client = clientWith(
+      200,
+      JSON.stringify({ domains: { management: 'admin', projectSlug: 'hr-portal' } }),
+    );
+    await expect(client.getEmailSettings('prj_1')).resolves.toMatchObject({
+      domains: { management: 'admin', projectSlug: 'hr-portal' },
+    });
+  });
+
+  it('treats a platform without the route as self-serve, but a missing project as an error', async () => {
+    await expect(clientWith(404, '404 Not Found').getEmailSettings('prj_1')).resolves.toEqual({
+      domains: { management: 'self-serve' },
+    });
+    await expect(
+      clientWith(404, JSON.stringify({ error: 'project not found' })).getEmailSettings('prj_gone'),
+    ).rejects.toThrow(PlatformApiError);
+  });
+});
+
 describe('emailDomainAdd', () => {
   // The fixed per-invocation attempt id the randomUUID spy returns.
   const ATTEMPT_ID = '11111111-2222-4333-8444-555555555555';

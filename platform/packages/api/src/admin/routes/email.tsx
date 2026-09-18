@@ -1,5 +1,6 @@
 import { asc, eq, sql } from 'drizzle-orm';
 import { Hono, type Context } from 'hono';
+import { getPlatformCapabilities } from '../../capabilities.ts';
 import {
   countProjectsUsingDestination,
   deleteEmailDestination,
@@ -50,6 +51,15 @@ import { Layout } from '../views/layout.tsx';
 
 const app = new Hono<ApiEnv>();
 app.onError(renderOperationError);
+// The same capability boundary the owner and operator email routes sit
+// behind: a platform that does not enable email must not have its policy,
+// settings or domains changed from the browser either.
+app.use('*', async (context, next) => {
+  if (!getPlatformCapabilities(context.env).email) {
+    return context.html('<h1>Email is not enabled on this platform</h1>', 501);
+  }
+  await next();
+});
 
 /**
  * Email control plane for operators: installation-wide settings at `/`,

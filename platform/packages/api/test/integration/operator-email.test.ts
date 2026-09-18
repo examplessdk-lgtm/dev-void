@@ -157,24 +157,22 @@ describe('operator email recipient policy', () => {
     expect(recorded[0]).toMatchObject({ action: 'email/policy', status: 'failed' });
   });
 
-  test('a mirror write failure changes nothing and fails closed, even when loosening', async () => {
+  test('a mirror write failure commits the policy but leaves the proxy closed until republished', async () => {
     await req('/email/policy', { mode: 'domains', domains: 'corp.example' });
     const put = vi.spyOn(env.ROUTING, 'put').mockRejectedValueOnce(new Error('kv down'));
     const response = await req('/email/policy', { mode: 'any' });
     expect(response.status).toBe(503);
     expect(await response.json()).toMatchObject({ error: 'mirror_failed' });
-    // The DB write rolled back with the failed publish; the mirror was
-    // cleared first, so the proxy is on `verified` — never `any`.
-    expect(await setting(EMAIL_RECIPIENT_POLICY_SETTING)).toEqual({
-      mode: 'domains',
-      domains: ['corp.example'],
-    });
+    // The database holds the new policy; the mirror was cleared before the
+    // failed put, so the proxy reads `verified` — never a policy the
+    // database does not hold, and never the stale one.
+    expect(await setting(EMAIL_RECIPIENT_POLICY_SETTING)).toEqual({ mode: 'any', domains: [] });
     expect(await env.ROUTING.get(EMAIL_RECIPIENT_POLICY_MIRROR_KEY)).toBeNull();
     put.mockRestore();
-    // The next read republishes the committed (previous) policy.
+    // The next read republishes the committed policy.
     await req('/email/policy');
     expect(await env.ROUTING.get(EMAIL_RECIPIENT_POLICY_MIRROR_KEY)).toBe(
-      JSON.stringify({ mode: 'domains', domains: ['corp.example'] }),
+      JSON.stringify({ mode: 'any', domains: [] }),
     );
   });
 
@@ -186,9 +184,28 @@ describe('operator email recipient policy', () => {
     const put = vi.spyOn(env.ROUTING, 'put').mockRejectedValueOnce(new Error('kv down'));
     const response = await req('/email/policy', { mode: 'verified' });
     expect(response.status).toBe(503);
+    expect(await setting(EMAIL_RECIPIENT_POLICY_SETTING)).toEqual({
+      mode: 'verified',
+      domains: [],
+    });
     // Absent reads as verified at the proxy: closed, not the stale `any`.
     expect(await env.ROUTING.get(EMAIL_RECIPIENT_POLICY_MIRROR_KEY)).toBeNull();
     put.mockRestore();
+  });
+
+  test('a failed mirror clear changes nothing', async () => {
+    await req('/email/policy', { mode: 'domains', domains: 'corp.example' });
+    const del = vi.spyOn(env.ROUTING, 'delete').mockRejectedValueOnce(new Error('kv down'));
+    const response = await req('/email/policy', { mode: 'any' });
+    expect(response.status).toBe(503);
+    expect(await setting(EMAIL_RECIPIENT_POLICY_SETTING)).toEqual({
+      mode: 'domains',
+      domains: ['corp.example'],
+    });
+    expect(await env.ROUTING.get(EMAIL_RECIPIENT_POLICY_MIRROR_KEY)).toBe(
+      JSON.stringify({ mode: 'domains', domains: ['corp.example'] }),
+    );
+    del.mockRestore();
   });
 
   test('is unavailable when the platform does not enable email', async () => {

@@ -34,6 +34,28 @@ describe('recipientAllowed', () => {
     ]).toEqual([...expected]);
   });
 
+  it("never widens delivery to the platform's own mail domain — allowlist only there", () => {
+    const platform = 'mail.example.test';
+    for (const policy of [anyPolicy, { mode: 'domains', domains: new Set([platform]) } as const]) {
+      expect(recipientAllowed(policy, new Set(), `other+tag@${platform}`, platform)).toBe(false);
+      // The platform domain is compared case-insensitively on its side.
+      expect(
+        recipientAllowed(policy, new Set(), `other+tag@${platform}`, 'MAIL.Example.TEST'),
+      ).toBe(false);
+      expect(
+        recipientAllowed(
+          policy,
+          new Set([`other+tag@${platform}`]),
+          `other+tag@${platform}`,
+          platform,
+        ),
+      ).toBe(true);
+    }
+    // Other domains are unaffected by the platform-domain rule.
+    expect(recipientAllowed(anyPolicy, new Set(), 'x@elsewhere.test', platform)).toBe(true);
+    expect(recipientAllowed(anyPolicy, new Set(), `x@${platform}`)).toBe(true);
+  });
+
   it('matches the recipient domain after the LAST @ only', () => {
     expect(recipientAllowed(domainsPolicy, new Set(), 'a@b@acme.test')).toBe(true);
     expect(recipientAllowed(domainsPolicy, new Set(), 'acme.test')).toBe(false);
@@ -79,9 +101,21 @@ describe('readRecipientPolicy', () => {
     ['an unknown mode', JSON.stringify({ mode: 'open', domains: [] })],
     ['`any` without a list', JSON.stringify({ mode: 'any' })],
     ['`any` with a non-array list', JSON.stringify({ mode: 'any', domains: 'corrupt' })],
+    ['`any` with a non-empty list', JSON.stringify({ mode: 'any', domains: ['acme.test'] })],
     ['`domains` without a list', JSON.stringify({ mode: 'domains' })],
     ['`domains` with an empty list', JSON.stringify({ mode: 'domains', domains: [] })],
     ['`domains` with only non-strings', JSON.stringify({ mode: 'domains', domains: [1, null] })],
+    [
+      '`domains` with a non-string beside a valid entry',
+      JSON.stringify({ mode: 'domains', domains: ['acme.test', 42] }),
+    ],
+    [
+      '`domains` over the api cap',
+      JSON.stringify({
+        mode: 'domains',
+        domains: Array.from({ length: 101 }, (_, i) => `d${i}.test`),
+      }),
+    ],
   ])('falls back to verified-only when the mirror is %s', async (_label, raw) => {
     const policy = await readRecipientPolicy(
       kvWith(raw === undefined ? {} : { [RECIPIENT_POLICY_KEY]: raw }),

@@ -633,6 +633,8 @@ interface OutboundGate {
   allowlist: Set<string>;
   /** The installation's recipient policy (email-policy.ts); `VERIFIED_ONLY` when the allowlist is skipped. */
   policy: RecipientPolicy;
+  /** The platform's own mail domain — the policy never widens delivery to it. */
+  platformDomain: string | undefined;
   burstKey: string;
   burstLimit: number;
   burstCurrent: number;
@@ -851,6 +853,7 @@ export async function routeInbound(
       skipAllowlist: false,
       allowlist: new Set(),
       policy: VERIFIED_ONLY,
+      platformDomain: undefined,
       burstKey: '',
       burstLimit: 0,
       burstCurrent: 0,
@@ -1057,6 +1060,7 @@ export async function routeRelayed(
       skipAllowlist: true,
       allowlist: new Set(),
       policy: VERIFIED_ONLY,
+      platformDomain: undefined,
       burstKey: '',
       burstLimit: 0,
       burstCurrent: 0,
@@ -1290,6 +1294,7 @@ async function loadOutboundGate(
       skipAllowlist,
       allowlist: new Set(),
       policy: VERIFIED_ONLY,
+      platformDomain: undefined,
       burstKey: '',
       burstLimit: 0,
       burstCurrent: 0,
@@ -1315,6 +1320,7 @@ async function loadOutboundGate(
     skipAllowlist,
     allowlist,
     policy,
+    platformDomain: readSenderDomain(env) ?? undefined,
     burstKey,
     burstLimit,
     burstCurrent: readCounter(burstRaw),
@@ -1774,7 +1780,10 @@ function checkOutboundGate(gate: OutboundGate, target: string, kind: 'forward' |
     return false;
   }
   const lowered = target.toLowerCase();
-  if (!gate.skipAllowlist && !recipientAllowed(gate.policy, gate.allowlist, lowered)) {
+  if (
+    !gate.skipAllowlist &&
+    !recipientAllowed(gate.policy, gate.allowlist, lowered, gate.platformDomain)
+  ) {
     console.error(
       `[email-router] ${kind} dropped: recipient not in project allowlist or recipient policy (target=${sanitize(target, 320)})`,
     );

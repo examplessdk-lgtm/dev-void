@@ -946,7 +946,7 @@ app.post('/send', async (context) => {
   const allowed: Array<string> = [];
   const deliveries: Array<RecipientResult> = [];
   for (const r of recipients) {
-    if (recipientAllowed(policy, allowlist, r)) {
+    if (recipientAllowed(policy, allowlist, r, senderDomain)) {
       allowed.push(r);
     } else {
       deliveries.push({
