@@ -337,10 +337,12 @@ export type ManifestOnlyDeployPayload = DeployUploadPayload;
  *   verbatim rather than replay a request it may have accepted.
  * - A rejected fetch does NOT prove the request never arrived — the
  *   connection may have dropped after delivery. Before each retry we look
- *   for a deployment created inside DEPLOY_POST_DEDUPE_WINDOW_MS; finding
- *   one means the earlier attempt reached the platform, so the retry is
- *   suppressed instead of bouncing off the server's concurrency guard
- *   (409) or registering a duplicate deployment.
+ *   for a deployment created inside DEPLOY_POST_DEDUPE_WINDOW_MS whose
+ *   recorded git commit equals this payload's (a timestamp alone could
+ *   match an unrelated deploy racing ours). A correlated row means the
+ *   earlier attempt reached the platform, so the retry is suppressed
+ *   instead of bouncing off the server's concurrency guard (409) or
+ *   registering a duplicate deployment.
  */
 const DEPLOY_POST_MAX_RETRIES = 3;
 const DEPLOY_POST_BACKOFF_MS = [1000, 5000, 10000];
@@ -576,7 +578,7 @@ export class PlatformClient {
     payload: ManifestOnlyDeployPayload,
   ): AsyncGenerator<DeployEvent> {
     const url = `${this.baseUrl}/projects/${projectId}/deploy`;
-    yield* this.streamDeployRequest(url, projectId, {
+    yield* this.streamDeployRequest(url, projectId, payload.commit ?? null, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -593,6 +595,7 @@ export class PlatformClient {
   private async *streamDeployRequest(
     url: string,
     projectId: string,
+    dedupeCommit: string | null,
     init: RequestInit,
   ): AsyncGenerator<DeployEvent> {
     const cliLog = this.cliLog;
@@ -612,7 +615,11 @@ export class PlatformClient {
           cliLog?.error('deploy_fetch_rejected', err, { url, attempts: attempt + 1 });
           throw err;
         }
-        const existing = await this.findRecentDeployment(projectId, DEPLOY_POST_DEDUPE_WINDOW_MS);
+        const existing = await this.findRecentDeployment(
+          projectId,
+          DEPLOY_POST_DEDUPE_WINDOW_MS,
+          dedupeCommit,
+        );
         if (existing) {
           cliLog?.warn('deploy_retry_suppressed', {
             url,
@@ -711,15 +718,20 @@ export class PlatformClient {
   }
 
   /**
-   * Best-effort lookup for a deployment created within `windowMs` — the
-   * deploy retry path uses it to detect that an earlier attempt reached
-   * the platform before the connection dropped. Returns `undefined` on
-   * any failure or ambiguity: the retried POST then still runs, with the
-   * server's own concurrency guard (409) as the backstop.
+   * Best-effort lookup for a deployment created within `windowMs` AND
+   * carrying `expectedCommit` — the deploy retry path uses it to detect
+   * that an earlier attempt reached the platform before the connection
+   * dropped. Commit equality is the correlation signal: a recency-only
+   * match could be an unrelated deploy racing ours. `null === null`
+   * counts (no commit metadata on either side, so ownership cannot be
+   * disproved). Returns `undefined` on any failure or ambiguity: the
+   * retried POST then still runs, with the server's own concurrency
+   * guard (409) as the backstop.
    */
   private async findRecentDeployment(
     projectId: string,
     windowMs: number,
+    expectedCommit: string | null,
   ): Promise<DeploymentResponse | undefined> {
     try {
       const { deployments } = await this.listDeployments(projectId);
@@ -731,7 +743,9 @@ export class PlatformClient {
       if (Number.isNaN(createdMs)) {
         return undefined;
       }
-      return Date.now() - createdMs <= windowMs ? newest : undefined;
+      return Date.now() - createdMs <= windowMs && newest.commit === expectedCommit
+        ? newest
+        : undefined;
     } catch {
       return undefined;
     }

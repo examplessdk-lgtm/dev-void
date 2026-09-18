@@ -364,6 +364,7 @@ describe('PlatformClient.finalizeDeploy', () => {
   });
 
   it('suppresses the retry when an earlier attempt already created a deployment', async () => {
+    // makeDeployment().commit === null matches makePayload().commit === null.
     const existing = makeDeployment({ id: 'dpl_existing', status: 'in-progress' });
     fetchMock.mockImplementation((url: string) => {
       if (String(url).includes('/deployments')) {
@@ -393,6 +394,68 @@ describe('PlatformClient.finalizeDeploy', () => {
       'deploy_retry_suppressed',
       expect.objectContaining({ deploymentId: 'dpl_existing', status: 'in-progress' }),
     );
+  });
+
+  it('suppresses when the recent deployment carries the same commit as the payload', async () => {
+    const existing = makeDeployment({ id: 'dpl_same', commit: 'sha_ours' });
+    fetchMock.mockImplementation((url: string) => {
+      if (String(url).includes('/deployments')) {
+        return Promise.resolve(deploymentListResponse([existing]));
+      }
+      return Promise.reject(new TypeError('fetch failed'));
+    });
+
+    const client = makeClient();
+    const payload = { ...makePayload(), commit: 'sha_ours' };
+    const events: Array<unknown> = [];
+    for await (const event of client.finalizeDeploy(projectId, payload)) {
+      events.push(event);
+    }
+
+    expect(deployPostCalls()).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      event: 'error',
+      message: expect.stringContaining('dpl_same'),
+    });
+  });
+
+  it('retries when the recent deployment carries a different commit than the payload', async () => {
+    vi.useFakeTimers();
+    // A racing deploy's row — not ours, so the POST must still be replayed.
+    const unrelated = makeDeployment({ id: 'dpl_theirs', commit: 'sha_theirs' });
+    let posts = 0;
+    fetchMock.mockImplementation((url: string) => {
+      if (String(url).includes('/deployments')) {
+        return Promise.resolve(deploymentListResponse([unrelated]));
+      }
+      posts++;
+      if (posts === 1) {
+        return Promise.reject(new TypeError('fetch failed'));
+      }
+      return Promise.resolve(
+        ndjsonStreamResponse([
+          { event: 'done', deployment: 'd1', url: 'https://x', urls: [], assets: 0, workers: 0 },
+        ]),
+      );
+    });
+
+    const client = makeClient();
+    const payload = { ...makePayload(), commit: 'sha_ours' };
+    try {
+      const events: Array<unknown> = [];
+      const consume = (async () => {
+        for await (const event of client.finalizeDeploy(projectId, payload)) {
+          events.push(event);
+        }
+      })();
+      await vi.runAllTimersAsync();
+      await consume;
+
+      expect(deployPostCalls()).toHaveLength(2);
+      expect(events[0]).toMatchObject({ event: 'done' });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('still retries when the newest deployment is older than the dedupe window', async () => {
