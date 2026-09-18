@@ -167,8 +167,20 @@ export function formatPlatformSetupPlan(plan: PlatformInstallPlan): string {
     platformSetupLink(pages.r2),
     pages.r2.instructions,
     '',
-    platformSetupLink(pages.github),
-    pages.github.instructions,
+    ...(plan.deployment.authentication.providers.includes('github')
+      ? [platformSetupLink(pages.github), pages.github.instructions]
+      : []),
+    ...plan.deployment.authentication.providers
+      .filter((provider) => provider !== 'github')
+      .map(
+        (provider) =>
+          `${provider === 'google' ? 'Google OAuth client' : provider === 'oidc' ? 'OIDC connection' : 'Cloudflare Access OIDC application'}: client ID and secret; callback ${plan.apiUrl}/auth/callback.`,
+      ),
+    ...(plan.deployment.authentication.accessProtection
+      ? [
+          'Cloudflare Access protection: configure API and proxy origins and admitted installer/CI credentials.',
+        ]
+      : []),
   ].join('\n');
 }
 

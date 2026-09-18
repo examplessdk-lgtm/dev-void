@@ -44,6 +44,7 @@ export type PlatformInstallPlan = Readonly<{
 }>;
 
 export type PlatformInstallPlanInput = Readonly<{
+  authentication?: import('@void/platform').PlatformDeploymentManifest['authentication'];
   accountId: string;
   applicationDomain: string;
   controlPlaneDomain: string;
@@ -119,6 +120,18 @@ export async function createPlatformInstallPlan(
   }
   const testing = !!workersDev && !input.zoneName;
   const deployment = createPlatformDeploymentManifest({
+    authentication: input.authentication ?? existing?.deployment.authentication,
+    ...(input.authentication
+      ? {
+          capabilities: {
+            ...existing?.deployment.capabilities,
+            githubOAuth: input.authentication.providers.includes('github'),
+            googleOAuth: input.authentication.providers.includes('google'),
+          },
+        }
+      : existing
+        ? { capabilities: existing.deployment.capabilities }
+        : {}),
     application: {
       baseDomain: testing ? `${accountSubdomain}.workers.dev` : input.applicationDomain,
       dedicatedZone: input.dedicatedZone,
@@ -1012,6 +1025,18 @@ export function formatPlatformInstallPlan(plan: PlatformInstallPlan): string {
       : `${pc.bold('Applications:')} workers.dev (testing); add a domain with void platform domain set <domain>`,
     `${pc.bold('Control plane:')} ${plan.apiUrl}`,
     `${pc.bold('Resource proxy:')} ${plan.proxyUrl}`,
+    `${pc.bold('Login methods:')} ${plan.deployment.authentication.providers.join(', ')}`,
+    `${pc.bold('Access protection:')} ${plan.deployment.authentication.accessProtection ? 'Enabled' : 'Not enabled'}`,
+    `${pc.bold('Login callback:')} ${plan.apiUrl}/auth/callback`,
+    ...(plan.deployment.authentication.providers.includes('cloudflare-access')
+      ? ['Access login: create a dedicated OIDC application or connect an existing issuer.']
+      : []),
+    ...(plan.deployment.authentication.accessProtection
+      ? [
+          `Access protection: verify an application covering ${plan.apiUrl} and ${plan.proxyUrl}, with a separate scoped service token for installation and CI.`,
+        ]
+      : []),
+    `${pc.bold('Database:')} Verify uncached Hyperdrive reads for authentication`,
     '',
   ];
   for (const action of plan.actions) {

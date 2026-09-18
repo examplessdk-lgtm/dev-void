@@ -74,6 +74,7 @@ async function requestGithubOidcToken(requestUrl: string, requestToken: string):
   try {
     res = await fetch(url, {
       headers: { Authorization: `Bearer ${requestToken}` },
+      redirect: 'manual',
     });
   } catch (err) {
     throw new Error(`github-oidc: Failed to reach the GitHub OIDC token endpoint: ${errText(err)}`);
@@ -124,6 +125,7 @@ async function exchangeOidcTokenAtApi(
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...cfAccessHeaders(process.env, apiUrl) },
       body: JSON.stringify({ oidcToken, project }),
+      redirect: 'manual',
     });
   } catch (err) {
     throw new Error(`github-oidc: Failed to reach ${url}: ${errText(err)}`);

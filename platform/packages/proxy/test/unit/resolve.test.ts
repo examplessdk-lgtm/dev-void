@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vite-plus/test';
-import { resolveResource, clearResolveCache } from '../../src/resolve.ts';
+import { resolveResource, clearResolveCache, verifyProjectOwner } from '../../src/resolve.ts';
 
 const JWT_SECRET = 'test-secret-key';
 
@@ -68,5 +68,36 @@ describe('resolveResource', () => {
     expect(headers['x-void-internal']).toBeDefined();
     expect(typeof headers['x-void-internal']).toBe('string');
     expect(headers['x-void-internal'].length).toBeGreaterThan(0);
+  });
+});
+
+describe('verifyProjectOwner', () => {
+  it('cryptographically binds the internal check to the actual proxy origin', async () => {
+    const api = { fetch: vi.fn(async () => Response.json({ ok: true })) } as unknown as Fetcher;
+    await expect(
+      verifyProjectOwner(
+        api,
+        JWT_SECRET,
+        'proj_1',
+        'user_1',
+        'jwt',
+        'access',
+        'https://proxy.example.com',
+      ),
+    ).resolves.toBe(true);
+    const [, init] = (api.fetch as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    expect(JSON.parse((init as RequestInit).body as string)).toMatchObject({
+      userId: 'user_1',
+      proxyOrigin: 'https://proxy.example.com',
+    });
+    expect(
+      ((init as RequestInit).headers as Record<string, string>)['x-void-internal'],
+    ).toBeTruthy();
+
+    const missing = { fetch: vi.fn() } as unknown as Fetcher;
+    await expect(
+      verifyProjectOwner(missing, JWT_SECRET, 'proj_1', 'user_1', 'jwt', 'access'),
+    ).resolves.toBe(false);
+    expect(missing.fetch).not.toHaveBeenCalled();
   });
 });

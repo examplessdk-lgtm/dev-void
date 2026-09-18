@@ -4,17 +4,17 @@ outline: deep
 
 # Install a Void Platform
 
-A Void platform lets your team deploy apps into a shared Cloudflare account. As an administrator, you install and maintain the platform. Developers connect the Void CLI to its URL, sign in with GitHub, and deploy their apps.
+A Void platform lets your team deploy apps into a shared Cloudflare account. As an administrator, you install and maintain the platform. Developers connect the Void CLI to its URL, sign in through an enabled login method, and deploy their apps.
 
 If you're deploying an app for yourself, [deploy directly to Cloudflare](../integrations/cloudflare.md#deploy-to-your-own-cloudflare-account). You don't need to install a platform first.
 
-The core platform supports GitHub login, CLI deploys, D1, KV, R2, Queues, cron jobs, Workers AI, WebSockets, SSE, ISR, routing, logs, and rollback.
+The core platform supports GitHub, Google, generic OIDC, and Cloudflare Access login, CLI deploys, D1, KV, R2, Queues, cron jobs, Workers AI, WebSockets, SSE, ISR, routing, logs, and rollback.
 
-The user dashboard, GitHub builds and webhooks, build Containers, email, Google login, custom project domains, and sandbox orchestration aren't part of the core installation.
+The user dashboard, GitHub builds and webhooks, build Containers, email, custom project domains, and sandbox orchestration aren't part of the core installation. Source-built platforms that add the optional GitHub services should follow the [isolated webhook ingress setup](./platform-development.md#optional-github-webhook-ingress-for-access-protected-apis) when Access protects the API.
 
 ## Before You Start {#prerequisites}
 
-Start with a Cloudflare account you can administer, a GitHub account, and an empty hosted PostgreSQL database. A domain is recommended. If yours is not ready, choose **Use workers.dev for testing** during installation and [add a domain later](#add-a-domain-later). The steps below explain how to get the credentials the installer asks for.
+Start with a Cloudflare account you can administer, an account with your chosen login provider, and an empty hosted PostgreSQL database. GitHub is the default and is optional when another method is selected. A domain is recommended. If yours is not ready, choose **Use workers.dev for testing** during installation and [add a domain later](#add-a-domain-later). The steps below explain how to get the credentials the installer asks for.
 
 Void creates the Workers, storage, queues, routing, and database tables through the CLI.
 
@@ -195,7 +195,107 @@ void platform install
 
 Use the same name, account, and domain as the preview, then confirm the installation plan. Void saves a local setup draft and opens the runtime-token page when that token is missing. Paste the token into the masked prompt. As you continue, it opens GitHub and R2 at their respective steps. Each page has a short checklist and a clickable fallback link in the terminal. Values already supplied through the environment or saved setup are reused without opening their pages again.
 
-### Configure GitHub OAuth {#configure-github-oauth}
+### Choose login methods {#configure-github-oauth}
+
+The installer offers GitHub, Google, generic OIDC, and Cloudflare Access login.
+Cloudflare Access protection is a separate choice from Access login. The
+GitHub-only setup below retains the existing workflow.
+
+For Google, create an OAuth client and register the printed callback URL. You
+can restrict it to named Google Workspace domains. For OIDC or Access login,
+provide the issuer URL, client ID, and client secret. Select **Company-approved
+users** when the configured company policy should allow colleagues to create
+accounts automatically without individual invitations.
+
+When using the configurable setup, installation prints a one-time setup code
+and a `/setup` URL. Enter the code, authenticate with the chosen administrator
+method, and review the identity before confirming its administrator role. That
+method becomes enabled; additional selected methods are saved as pending
+configurations to test and enable in Settings. No GitHub account is required
+for a Google-only or OIDC-only installation.
+
+For scripts, pass `--auth-config <path>` with nonsecret configuration and
+environment-variable references for secrets. For example:
+
+```json
+{
+  "connections": [
+    {
+      "configuration": {
+        "id": "google",
+        "kind": "google",
+        "label": "Company Google",
+        "clientId": "your-google-client-id",
+        "allowedDomains": ["example.com"]
+      },
+      "clientSecretEnv": "GOOGLE_CLIENT_SECRET"
+    }
+  ],
+  "administratorConnectionId": "google",
+  "admission": {
+    "mode": "company",
+    "connections": ["google"],
+    "access": false
+  }
+}
+```
+
+`--plan` reads this configuration without requiring the referenced secret.
+Supply the secret through your secret manager when applying the installation.
+
+#### Cloudflare Access {#cloudflare-access-setup}
+
+Choose Access login, platform protection, or both. Protection can also be used
+with GitHub or another login method. With company-approved signup, a colleague
+who passes the company gate can create an ordinary account using GitHub even
+when their GitHub email differs from their company email.
+
+Automatic setup uses an existing Zero Trust organization, selected identity
+providers, and existing company policies. Void creates dedicated applications
+and a scoped service token for protected installation checks. It preserves your
+company policies, including device and MFA requirements.
+
+The setup credential needs **Access: Apps and Policies Write** and
+**Access: Organizations, Identity Providers, and Groups Read** in the identity
+account. Creating protection also needs **Access: Service Tokens Write**.
+Provide a separate setup token through `VOID_PLATFORM_ACCESS_SETUP_TOKEN` if
+your Cloudflare management credential lacks these permissions. These permissions
+are not required by the platform's runtime token. See Cloudflare's
+[Access API](https://developers.cloudflare.com/api/resources/zero_trust/subresources/access/subresources/applications/)
+and [service-token permissions](https://developers.cloudflare.com/api/resources/zero_trust/subresources/access/subresources/service_tokens/methods/create/).
+
+To automate Access setup, add this to the authentication configuration file:
+
+```json
+{
+  "protection": true,
+  "cloudflareAccess": {
+    "mode": "create",
+    "identityProviderIds": ["your-company-identity-provider-id"],
+    "policyIds": ["your-company-allow-policy-id"]
+  }
+}
+```
+
+Keep the file's `connections` list from the example above, or use a connection
+with `{"id":"access","kind":"cloudflare-access","label":"Company Access"}`
+to create Access login as well. Omit `protection` for login-only setup.
+
+To connect applications managed elsewhere, select **Connect existing applications**.
+Scripts use `mode: "existing"`, optional `accountId`, and `loginApplicationId`
+and/or `protectionApplicationId`. For login, set `loginClientSecretEnv`. For
+protection, supply `serviceToken` with `id`, `clientIdEnv`, and `clientSecretEnv`
+for a token already admitted by the application. The selected policies must
+cover both printed API and proxy origins. Connecting existing resources needs
+read access to their applications, policies, organization, identity providers,
+groups, and service tokens; Void leaves their policies unchanged.
+
+Access login alone can connect to another account using only its issuer, client
+ID, and secret, without a `cloudflareAccess` block or Cloudflare management token.
+Follow Cloudflare's [OIDC application guide](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/saas-apps/generic-oidc-saas/)
+and register the exact callback printed by Void.
+
+For the default GitHub-only setup:
 
 1. The installer opens [GitHub's new OAuth App form](https://github.com/settings/applications/new) when it needs OAuth credentials. Sign in as the account that will own the login integration.
 2. Set **Application name** to your platform's display name and **Homepage URL** to the API URL Void just printed.
@@ -253,7 +353,40 @@ void deploy --platform void --project my-first-app
 
 The CLI stores login credentials in your system keychain, separately for each platform URL. With no URL, `void connect` offers Cloudflare or a Void platform; `void connect --platform void` offers saved platforms and an option to enter another URL.
 
-In CI, use `void connect <url> --no-login` to register the platform, and supply `VOID_TOKEN` and `VOID_API_URL` for deployment. To verify authentication during connection, omit `--no-login` and set both variables to credentials for that same platform.
+For CI, create a bounded, project-scoped deploy credential while signed in as
+the project owner:
+
+```sh
+void project token create --name ci --expires-in 30
+```
+
+Store the printed `VOID_TOKEN` and `VOID_API_URL` in the CI secret manager, then
+use `void connect <url> --no-login` in a fresh checkout if connection metadata
+is not committed. Rotate with `void project token renew <id>` and revoke with
+`void project token revoke <id>`. A human login token is not a CI credential.
+
+If Cloudflare Access protects the platform, Access proof and the project
+credential are both required; the service token does not grant Void user or
+operator authority. A deploy that uses prerendering or remote bindings calls
+both the API and proxy, so store `VOID_ACCESS_CREDENTIALS` in the CI secret
+manager with entries for both exact HTTPS origins. Include both entries even
+when the same admitted service-token pair is used for both origins:
+
+```json
+{
+  "https://void-company-api.example.workers.dev": {
+    "CF_ACCESS_CLIENT_ID": "<service-token client ID>",
+    "CF_ACCESS_CLIENT_SECRET": "<service-token client secret>"
+  },
+  "https://void-company-proxy.example.workers.dev": {
+    "CF_ACCESS_CLIENT_ID": "<service-token client ID>",
+    "CF_ACCESS_CLIENT_SECRET": "<service-token client secret>"
+  }
+}
+```
+
+`VOID_ACCESS_ORIGIN` can scope credentials to one origin only; setting it to
+the API origin does not authorize proxy requests.
 
 Use these commands to inspect connections and installations:
 
@@ -274,7 +407,7 @@ void platform signup allow github teammate
 
 Void shows the proposed access change and asks you to confirm it. Once approved, `teammate` can connect to the platform's API URL and sign in with GitHub.
 
-To see who can join, run `void platform signup show`. You can also allow an email address or a domain such as `*@example.com`. `void platform signup open` permits public signup; `void platform signup restrict` requires an allowlist match again.
+To see who can join, run `void platform signup show`. You can also allow an email address or a domain such as `*@example.com`. For an OIDC user without verified email, use `void platform signup allow identity <connection-id> <subject>`; the subject match is exact and the provider's domain or group restrictions still apply. Remove that grant with `void platform signup disallow identity <connection-id> <subject>`. `void platform signup open` permits public signup; `void platform signup restrict` requires an allowlist match again.
 
 Your administrator session lasts for one hour. Use it to inspect users, projects, logs, and platform health. The [Platform Administration guide](./platform-administration.md) walks through those workflows, previews, and automation. You can also open `<API origin>/admin/login` to use the browser admin UI.
 
@@ -359,18 +492,26 @@ You can correct the database URL if the initial connection failed. Once Void has
 
 If installation reports **Default-Deny (error 1050)**, Cloudflare blocked the HTTP health check before it reached Void. This is separate from the API token used to deploy the Workers.
 
-For a test platform intended to be publicly reachable:
+Keep the company protection in place. Automatic Access setup saves its scoped
+service credentials with the installation's encrypted recovery material. For an
+existing gate, verify that its service policy admits the installation token and
+that the application covers the printed API and proxy origins. A Cloudflare
+management API token does not authenticate an Access-protected HTTP request.
 
-1. Select the account named in the error and open **Zero Trust → Access controls → Applications → Create new application**.
-2. Choose **Self-hosted**. When adding destinations, choose **Worker** and select the API, proxy, and dispatch Workers listed in the error.
-3. Add a policy with **Action → Bypass** and **Include → Everyone**.
-4. Save the policy and application, then run the resume command shown by Void.
+For externally supplied credentials, set `VOID_ACCESS_CREDENTIALS` from your
+secret manager to an object keyed by each exact API/proxy origin, with
+`CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET` in each entry. Then rerun
+`void platform install --resume --name <id>`. Void retains the saved resources
+and stops if the gate still rejects its checks. Account-wide Default-Deny and
+deployed-application policies remain your responsibility.
 
-This removes Cloudflare Access protection for those Workers, not just their health-check URLs. Void's own authentication remains enabled. Keep account-wide Default-Deny on. Deployed apps will also need appropriate access rules.
+### Expired administrator setup code
 
-Once access is configured, rerun `void platform install --resume --name <id>`. You do not need to delete the installation or recreate its resources.
-
-If your platform must remain Access-protected, **do not add a Bypass policy**. The installer does not yet support Access authentication for self-hosted platform health checks; a browser login or Cloudflare API token does not authenticate those requests. Keep the protection in place until that integration is supported.
+Resume an unfinished installation with `void platform install --resume --name <id>`.
+For completed provisioning whose administrator setup is still pending, run
+`void platform repair <id>`. Void prints a fresh setup code if the earlier code
+expired. Enter it at `/setup`, sign in, and confirm the displayed identity.
+An installation that already has an administrator does not reopen setup.
 
 ### Repair missing resources
 

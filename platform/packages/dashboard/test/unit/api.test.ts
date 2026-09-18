@@ -6,6 +6,7 @@ function createContext() {
     env: { API_URL: 'https://api.test' },
     get: vi.fn((key: string) => (key === 'token' ? 'test-token' : undefined)),
     req: {
+      raw: new Request('https://localhost:5173/me'),
       header: vi.fn((key: string) => (key === 'host' ? 'localhost:5173' : undefined)),
     },
   };

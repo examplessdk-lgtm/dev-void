@@ -674,6 +674,8 @@ export function provisionEnv(ctx?: {
   scrub('CF_ACCESS_CLIENT_ID');
   scrub('CF_ACCESS_CLIENT_SECRET');
   scrub('CF_ACCESS_TOKEN');
+  scrub('VOID_ACCESS_CREDENTIALS');
+  scrub('VOID_ACCESS_ORIGIN');
   // Scrub EVERY transport-redirecting selector (CLOUDFLARE_ENV, the API-base overrides,
   // WRANGLER_API_ENVIRONMENT, CLOUDFLARE_COMPLIANCE_REGION). CLOUDFLARE_ENV would select a
   // named env-block whose account_id/bindings differ; the others would re-derive a

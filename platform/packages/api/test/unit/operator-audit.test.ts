@@ -42,6 +42,11 @@ describe('operator audit intent normalization', () => {
         body: { type: 'email', pattern: 'ONE@EXAMPLE.COM' },
         target: { type: 'email', pattern: 'one@example.com' },
       },
+      {
+        action: 'signup/disallow',
+        body: { type: 'identity', connectionId: 'company', subject: 'Employee-42' },
+        target: { type: 'identity', connectionId: 'company', subject: 'Employee-42' },
+      },
       { action: 'system/backfill-queue-tokens', target: { entries: 'queue:*' } },
       {
         action: 'system/sandbox-drain',

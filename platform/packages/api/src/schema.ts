@@ -1,3 +1,9 @@
+import type {
+  PlatformAccessProtection,
+  PlatformAdmissionPolicy,
+  PlatformLoginConfiguration,
+  PlatformLoginKind,
+} from '@void/platform';
 import { sql } from 'drizzle-orm';
 import {
   boolean,
@@ -13,6 +19,7 @@ import {
   uniqueIndex,
 } from 'drizzle-orm/pg-core';
 import type { PlatformWorkerName, PlatformEnv } from './admin/platform-workers.ts';
+import type { PlatformOidcIdentity, CompanyIdentity } from './auth/identity-types.ts';
 import type { PlanId } from './tiers.ts';
 import type { InvitationStatus } from './types.ts';
 
@@ -61,6 +68,224 @@ export const oauthAccounts = pgTable(
   ],
 );
 
+// Platform authentication is database-authoritative after its one-time import.
+// Lock the singleton before changing connections, admission, or administrator reachability.
+export const platformAuthSettings = pgTable(
+  'platform_auth_settings',
+  {
+    singleton: boolean('singleton').primaryKey().default(true),
+    revision: integer('revision').notNull().default(1),
+    admission: jsonb('admission').notNull().$type<PlatformAdmissionPolicy>(),
+    protection: jsonb('protection').$type<PlatformAccessProtection>(),
+    session_seconds: integer('session_seconds').notNull().default(2592000),
+    sessions_required: boolean('sessions_required').notNull().default(false),
+    created_at: timestamp('created_at', { mode: 'string', withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    check('platform_auth_settings_singleton', sql`${table.singleton} = true`),
+    check('platform_auth_settings_revision', sql`${table.revision} > 0`),
+    check(
+      'platform_auth_settings_session_seconds',
+      sql`${table.session_seconds} BETWEEN 300 AND 2592000`,
+    ),
+  ],
+);
+
+export const platformLoginConnections = pgTable(
+  'platform_login_connections',
+  {
+    id: text('id').primaryKey(),
+    kind: text('kind').notNull().$type<PlatformLoginKind>(),
+    enabled: boolean('enabled').notNull().default(false),
+    active_revision: integer('active_revision'),
+    revision: integer('revision').notNull().default(1),
+    generation: integer('generation').notNull().default(1),
+    created_at: timestamp('created_at', { mode: 'string', withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    check(
+      'platform_login_connections_kind',
+      sql`${table.kind} IN ('github', 'google', 'oidc', 'cloudflare-access')`,
+    ),
+    check(
+      'platform_login_connections_revision',
+      sql`${table.revision} > 0 AND ${table.generation} > 0`,
+    ),
+    check(
+      'platform_login_connections_active_revision',
+      sql`${table.active_revision} IS NULL OR ${table.active_revision} BETWEEN 1 AND ${table.revision}`,
+    ),
+    check(
+      'platform_login_connections_enabled',
+      sql`NOT ${table.enabled} OR ${table.active_revision} IS NOT NULL`,
+    ),
+  ],
+);
+
+/** Immutable revisions keep a credential edit separate from the working login method. */
+export const platformLoginRevisions = pgTable(
+  'platform_login_revisions',
+  {
+    connection_id: text('connection_id')
+      .notNull()
+      .references(() => platformLoginConnections.id),
+    revision: integer('revision').notNull(),
+    configuration: jsonb('configuration').notNull().$type<PlatformLoginConfiguration>(),
+    secret: jsonb('secret')
+      .notNull()
+      .$type<{ ciphertext: string; iv: string; keyVersion: string }>(),
+    created_at: timestamp('created_at', { mode: 'string', withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [primaryKey({ columns: [table.connection_id, table.revision] })],
+);
+
+export const platformLoginIdentities = pgTable(
+  'platform_login_identities',
+  {
+    id: text('id').primaryKey(),
+    user_id: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    connection_id: text('connection_id')
+      .notNull()
+      .references(() => platformLoginConnections.id),
+    issuer: text('issuer').notNull(),
+    subject: text('subject').notNull(),
+    last_authenticated_at: timestamp('last_authenticated_at', {
+      mode: 'string',
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+    created_at: timestamp('created_at', { mode: 'string', withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex('platform_login_identity_subject').on(
+      table.connection_id,
+      table.issuer,
+      table.subject,
+    ),
+    uniqueIndex('platform_login_identity_user').on(table.connection_id, table.user_id),
+  ],
+);
+
+export const platformHumanSessions = pgTable(
+  'platform_human_sessions',
+  {
+    id: text('id').primaryKey(),
+    user_id: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    connection_id: text('connection_id')
+      .notNull()
+      .references(() => platformLoginConnections.id),
+    generation: integer('generation').notNull(),
+    audience: text('audience').notNull().$type<'api' | 'admin'>(),
+    // When a company gate is required, both identities must belong to the same person.
+    access_issuer: text('access_issuer'),
+    access_subject: text('access_subject'),
+    expires_at: timestamp('expires_at', { mode: 'string', withTimezone: true }).notNull(),
+    revoked_at: timestamp('revoked_at', { mode: 'string', withTimezone: true }),
+    created_at: timestamp('created_at', { mode: 'string', withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index('platform_human_sessions_connection').on(table.connection_id),
+    index('platform_human_sessions_user').on(table.user_id),
+    index('platform_human_sessions_expiry').on(table.expires_at),
+    check('platform_human_sessions_audience', sql`${table.audience} IN ('api', 'admin')`),
+    check(
+      'platform_human_sessions_access_identity',
+      sql`(${table.access_issuer} IS NULL) = (${table.access_subject} IS NULL)`,
+    ),
+  ],
+);
+
+export const platformCompanyIdentities = pgTable(
+  'platform_company_identities',
+  {
+    user_id: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    issuer: text('issuer').notNull(),
+    subject: text('subject').notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.issuer, table.subject] }),
+    uniqueIndex('platform_company_identity_user').on(table.issuer, table.user_id),
+  ],
+);
+
+export const platformLoginTests = pgTable(
+  'platform_login_tests',
+  {
+    id: text('id').primaryKey(),
+    user_id: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    connection_id: text('connection_id')
+      .notNull()
+      .references(() => platformLoginConnections.id),
+    revision: integer('revision').notNull(),
+    issuer: text('issuer').notNull(),
+    subject: text('subject').notNull(),
+    login: text('login').notNull().default(''),
+    expires_at: timestamp('expires_at', { mode: 'string', withTimezone: true }).notNull(),
+  },
+  (table) => [index('platform_login_tests_expiry').on(table.expires_at)],
+);
+
+export const platformAuthAttempts = pgTable(
+  'platform_auth_attempts',
+  {
+    id: text('id').primaryKey(),
+    connection_id: text('connection_id')
+      .notNull()
+      .references(() => platformLoginConnections.id),
+    revision: integer('revision').notNull(),
+    generation: integer('generation').notNull(),
+    purpose: text('purpose').notNull().$type<'login' | 'admin' | 'test' | 'link' | 'bootstrap'>(),
+    browser_hash: text('browser_hash').notNull(),
+    // Contains the upstream PKCE verifier and callback context; consumed atomically.
+    context: jsonb('context').notNull().$type<Record<string, unknown>>(),
+    expires_at: timestamp('expires_at', { mode: 'string', withTimezone: true }).notNull(),
+  },
+  (table) => [index('platform_auth_attempts_expiry').on(table.expires_at)],
+);
+
+export const platformAuthBootstrap = pgTable(
+  'platform_auth_bootstrap',
+  {
+    singleton: boolean('singleton').primaryKey().default(true),
+    installation_id: text('installation_id').notNull(),
+    credential_hash: text('credential_hash').notNull(),
+    request_hash: text('request_hash').notNull().default(''),
+    claim_hash: text('claim_hash'),
+    pending_identity: jsonb('pending_identity').$type<{
+      revision: number;
+      generation: number;
+      identity: PlatformOidcIdentity;
+      companyIdentity?: CompanyIdentity;
+      expiresAt: string;
+    }>(),
+    connection_id: text('connection_id')
+      .notNull()
+      .references(() => platformLoginConnections.id),
+    expires_at: timestamp('expires_at', { mode: 'string', withTimezone: true }).notNull(),
+    consumed_at: timestamp('consumed_at', { mode: 'string', withTimezone: true }),
+  },
+  (table) => [check('platform_auth_bootstrap_singleton', sql`${table.singleton} = true`)],
+);
+
 // ---------------------------------------------------------------------------
 // projects
 // ---------------------------------------------------------------------------
@@ -82,6 +307,34 @@ export const projects = pgTable(
     unique().on(table.user_id, table.slug),
     uniqueIndex('idx_projects_slug').on(table.slug),
     index('idx_projects_user_id').on(table.user_id),
+  ],
+);
+
+// Revocable project-scoped credentials for headless CI. The bearer value is a
+// signed aud:deploy JWT; this row is the authoritative revocation and expiry
+// record checked on every request. Human login-provider lifecycle does not
+// revoke these independent deployment credentials.
+export const projectDeployCredentials = pgTable(
+  'project_deploy_credentials',
+  {
+    id: text('id').primaryKey(),
+    project_id: text('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    issued_by: text('issued_by')
+      .notNull()
+      .references(() => users.id),
+    name: text('name').notNull(),
+    expires_at: timestamp('expires_at', { mode: 'string', withTimezone: true }).notNull(),
+    revoked_at: timestamp('revoked_at', { mode: 'string', withTimezone: true }),
+    created_at: timestamp('created_at', { mode: 'string', withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index('project_deploy_credentials_project').on(table.project_id, table.created_at),
+    index('project_deploy_credentials_expiry').on(table.expires_at),
+    check('project_deploy_credentials_name', sql`length(${table.name}) BETWEEN 1 AND 80`),
   ],
 );
 
@@ -456,6 +709,9 @@ export const operatorSessions = pgTable(
     user_id: text('user_id')
       .notNull()
       .references(() => users.id, { onDelete: 'cascade' }),
+    human_session_id: text('human_session_id').references(() => platformHumanSessions.id, {
+      onDelete: 'cascade',
+    }),
     expires_at: timestamp('expires_at', { mode: 'string' }).notNull(),
     created_at: timestamp('created_at', { mode: 'string' }).notNull().defaultNow(),
   },

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -36,7 +37,7 @@ import {
   platformWorkerSecretPayload,
   assertRequiredPlatformSecrets,
   classifyPlatformWorkerDeploymentLineage,
-  installPlatform,
+  installPlatform as installPlatformImplementation,
   claimPlatformDatabaseConnection,
   createPlatformHealthProbeToken,
   createPlatformInstallationSecrets,
@@ -45,6 +46,7 @@ import {
   inventoryUnmanagedPlatformWorkerTraffic,
   isolatePlatformWorkerCustomDomains,
   mergePlatformWorkerTrafficConfig,
+  mergePlatformLiveAuthenticationDeployment,
   mergePreservedTriggerRoutes,
   preparePlatformDatabaseConnection,
   preparePlatformSandboxDrainConnection,
@@ -82,6 +84,37 @@ import {
 } from '../../src/cli/platform-setup-draft.ts';
 
 const directories: Array<string> = [];
+type InstallArguments = Parameters<typeof installPlatformImplementation>;
+type InstallClient = InstallArguments[3]['client'];
+type TestInstallerDependencies = Omit<InstallArguments[3], 'client'> & {
+  client: Omit<InstallClient, 'getHyperdriveConfig' | 'disableHyperdriveCaching'> &
+    Partial<Pick<InstallClient, 'getHyperdriveConfig' | 'disableHyperdriveCaching'>>;
+};
+
+// These lifecycle fixtures model an already uncached dedicated database. Cache
+// drift, adoption, and verification failures are exercised by platform-auth-database.test.ts.
+function installPlatform(
+  plan: InstallArguments[0],
+  secrets: InstallArguments[1],
+  existing: InstallArguments[2],
+  dependencies: TestInstallerDependencies,
+) {
+  return installPlatformImplementation(plan, secrets, existing, {
+    ...dependencies,
+    client: {
+      ...dependencies.client,
+      getHyperdriveConfig:
+        dependencies.client.getHyperdriveConfig ??
+        (async (_account, id) => ({
+          id,
+          name: plan.actions.find((action) => action.key === 'hyperdrive')!.name,
+          origin: hyperdriveOriginFromConnectionString(secrets.databaseUrl),
+          cachingDisabled: true,
+        })),
+      disableHyperdriveCaching: dependencies.client.disableHyperdriveCaching ?? (async () => {}),
+    },
+  });
+}
 const TEST_PLATFORM_JWT_SECRET = 'test-only-platform-jwt-secret-material';
 const TEST_PLATFORM_PROJECT_SECRET_KEY = Buffer.alloc(32, 5).toString('base64');
 
@@ -111,6 +144,7 @@ afterEach(() => {
   delete process.env.VOID_PLATFORM_REGISTRY_DIR;
   delete process.env.CF_ACCESS_CLIENT_ID;
   delete process.env.CF_ACCESS_CLIENT_SECRET;
+  delete process.env.VOID_ACCESS_CREDENTIALS;
   for (const directory of directories.splice(0)) {
     rmSync(directory, { force: true, recursive: true });
   }
@@ -169,6 +203,248 @@ describe('platform installer', () => {
     Object.assign(async () => {}, {
       prepareSandboxDrain: async () => sandboxDrainPreparation('complete'),
     });
+
+  it.each([
+    createPlatformDeploymentManifest({
+      application: { baseDomain: 'apps.example.com', zoneName: 'example.com' },
+      displayName: 'Schema 1',
+      installationSlug: 'schema-1',
+    }),
+    createPlatformDeploymentManifest({
+      application: {
+        baseDomain: 'example.workers.dev',
+        zoneName: '',
+        workersDev: { installationId: 'schema-2-a1b2c3d4', subdomain: 'example' },
+      },
+      displayName: 'Schema 2',
+      installationSlug: 'schema-2',
+    }),
+  ])(
+    'normalizes schema $schemaVersion with database-authoritative authentication state',
+    (deployment) => {
+      expect(
+        mergePlatformLiveAuthenticationDeployment(deployment, {
+          enabledProviders: ['google', 'oidc'],
+          protectedByAccess: true,
+          sessionsRequired: true,
+        }),
+      ).toMatchObject({
+        schemaVersion: 3,
+        authentication: {
+          accessProtection: true,
+          configurable: true,
+          providers: ['google', 'oidc'],
+        },
+        capabilities: { githubOAuth: false, googleOAuth: true },
+      });
+    },
+  );
+
+  it.each([
+    { kind: 'github' as const, protection: false },
+    { kind: 'google' as const, protection: false },
+    { kind: 'oidc' as const, protection: false },
+    { kind: 'cloudflare-access' as const, protection: false },
+    { kind: 'github' as const, protection: true },
+    { kind: 'cloudflare-access' as const, protection: true },
+  ])(
+    'installs $kind with Access protection=$protection and initializes auth after deploying the API',
+    async ({ kind, protection }) => {
+      const directory = mkdtempSync(join(tmpdir(), 'void-platform-google-install-'));
+      directories.push(directory);
+      process.env.VOID_PLATFORM_REGISTRY_DIR = directory;
+      const plan = await createPlatformInstallPlan(
+        planningClient(),
+        {
+          accountId: 'account',
+          installationSlug: 'google-team',
+          displayName: 'Google Team',
+          applicationDomain: '',
+          zoneName: '',
+          controlPlaneDomain: '',
+          dedicatedZone: false,
+          workersDev: true,
+          authentication: {
+            providers: [kind],
+            configurable: true,
+            ...(protection ? { accessProtection: true } : {}),
+          },
+        },
+        null,
+      );
+      const code = 'a'.repeat(64);
+      const setupJson = JSON.stringify({
+        connections: [
+          {
+            configuration: {
+              id: kind === 'cloudflare-access' ? 'access' : kind,
+              kind,
+              label: kind,
+              clientId: 'test-client',
+              ...(kind === 'google' ? { allowedDomains: ['example.com'] } : {}),
+              ...(kind === 'oidc' ? { issuer: 'https://id.example.com' } : {}),
+              ...(kind === 'cloudflare-access'
+                ? {
+                    issuer:
+                      'https://company.cloudflareaccess.com/cdn-cgi/access/sso/oidc/test-client',
+                  }
+                : {}),
+            },
+            clientSecret: 'google-secret',
+          },
+        ],
+        administratorConnectionId: kind === 'cloudflare-access' ? 'access' : kind,
+        bootstrapCredentialHash: createHash('sha256').update(code).digest('hex'),
+        admission: protection
+          ? { mode: 'company', connections: [], access: true }
+          : { mode: 'restricted' },
+        protection: protection
+          ? {
+              teamDomain: 'https://company.cloudflareaccess.com',
+              applications: [
+                { origin: plan.apiUrl, audience: 'api-audience' },
+                { origin: plan.proxyUrl, audience: 'proxy-audience' },
+                { origin: 'https://dashboard.example.com', audience: 'dashboard-audience' },
+              ],
+            }
+          : null,
+      });
+      const secrets = createPlatformInstallationSecrets({
+        bootstrapGitHubId: '',
+        bootstrapGitHubLogin: '',
+        githubClientId: '',
+        githubClientSecret: '',
+        cloudflareApiToken: 'runtime',
+        databaseUrl: 'postgresql://user:password@db.example.com/platform',
+        jwtSecret: TEST_PLATFORM_JWT_SECRET,
+        projectSecretKey: TEST_PLATFORM_PROJECT_SECRET_KEY,
+        r2AccessKeyId: 'r2',
+        r2SecretAccessKey: 'r2-secret',
+        configurableAuthentication: true,
+        authSetupToken: 't'.repeat(64),
+        authBootstrapCode: code,
+      });
+      const deployed: Array<{
+        config: Record<string, unknown>;
+        secrets: Record<string, string> | null;
+      }> = [];
+      const create = async (_account: string, name: string) => ({ id: `${name}-id`, name });
+      let initialized = 0;
+      let verifiedProtection = 0;
+      let claimed = false;
+      let prepared = false;
+      const result = await installPlatform(plan, secrets, null, {
+        verifyAccessProtection: async (input) => {
+          verifiedProtection++;
+          expect(input.protection).toEqual(JSON.parse(setupJson).protection);
+          expect(deployed).toHaveLength(0);
+          expect(prepared).toBe(true);
+        },
+        claimDatabase: async () => {
+          claimed = true;
+        },
+        acquireDatabaseLifecycleLock,
+        prepareAuthentication: async (manifest) => {
+          expect(claimed).toBe(true);
+          expect(deployed).toHaveLength(0);
+          prepared = true;
+          return {
+            authenticationSetupJson: setupJson,
+            ...(protection
+              ? {
+                  accessCredentialsJson: JSON.stringify(
+                    Object.fromEntries(
+                      [plan.apiUrl, plan.proxyUrl, 'https://dashboard.example.com'].map(
+                        (origin) => [
+                          origin,
+                          {
+                            CF_ACCESS_CLIENT_ID: 'service-client',
+                            CF_ACCESS_CLIENT_SECRET: 'service-secret',
+                          },
+                        ],
+                      ),
+                    ),
+                  ),
+                  accessProvisioningJson: JSON.stringify({
+                    version: 1,
+                    accountId: 'account',
+                    installationId: manifest.id,
+                    resources: {
+                      protection: {
+                        id: 'access-app',
+                        name: 'Protection',
+                        adopted: true,
+                        pending: false,
+                        fingerprint: 'test',
+                      },
+                    },
+                  }),
+                }
+              : {}),
+          };
+        },
+        client: {
+          createAiGateway: create,
+          createDispatchNamespace: create,
+          createHyperdrive: create,
+          createKvNamespace: create,
+          createQueue: create,
+          createR2Bucket: create,
+          createDnsRecord: async () => {
+            throw new Error('No DNS expected');
+          },
+          createZone: async () => {
+            throw new Error('No zone expected');
+          },
+          putKvValue: async () => {},
+          deleteKvValue: async () => {},
+          putR2Object: async () => {},
+        },
+        deployWorker: async (config, payload) => {
+          expect(prepared).toBe(true);
+          if (protection) {
+            expect(config.preview_urls).toBe(false);
+          }
+          deployed.push({ config, secrets: payload });
+        },
+        migrateDatabase: async () => {},
+        revalidateBeforeWorkerDeploy: async () => {},
+        verifyHealth: async () => {},
+        initializeAuthentication: async (url, id, token, json) => {
+          initialized++;
+          expect(url).toBe(plan.apiUrl);
+          expect(id).toBe(plan.installationId);
+          expect(token).toBe(secrets.authSetupToken);
+          expect(json).toBe(setupJson);
+          const api = deployed.find(
+            (worker) => worker.config.name === plan.deployment.resources.apiWorker,
+          )!;
+          expect(api.secrets).toHaveProperty('PLATFORM_AUTH_SETUP_TOKEN', secrets.authSetupToken);
+          expect(api.secrets).not.toHaveProperty('GITHUB_CLIENT_SECRET');
+          expect(api.config.vars).toHaveProperty('PLATFORM_AUTH_DATABASE_UNCACHED', 'true');
+          return { setupPending: true, expiresAt: new Date(Date.now() + 1_800_000).toISOString() };
+        },
+      });
+      expect(initialized).toBe(1);
+      expect(verifiedProtection).toBe(protection ? 1 : 0);
+      expect(result.manifest.status).toBe('installed');
+      expect(result.manifest.deployment.authentication).toEqual({
+        providers: [kind],
+        configurable: true,
+        ...(protection ? { accessProtection: true } : {}),
+      });
+      if (protection) {
+        expect(result.manifest.authenticationResources).toMatchObject([
+          { id: 'access-app', ownership: 'adopted' },
+        ]);
+      }
+      expect(JSON.stringify(result.manifest)).not.toContain('google-secret');
+      expect(JSON.stringify(result.manifest)).not.toContain(code);
+      expect(
+        result.manifest.steps.some((step) => step.key.startsWith('authentication-initialized:v1:')),
+      ).toBe(true);
+    },
+  );
 
   it.each([false, true])(
     'installs all four Workers without a zone and probes the actual dispatch hostname (credential draft: %s)',
@@ -3262,7 +3538,16 @@ describe('platform installer', () => {
     });
     await expect(
       installPlatform(upgradedPlan, rotatedWorkerSecrets, legacySourceManifest, {
-        acquireDatabaseLifecycleLock,
+        acquireDatabaseLifecycleLock: async () =>
+          Object.assign(async () => {}, {
+            prepareSandboxDrain: async () => sandboxDrainPreparation('complete'),
+            readAuthenticationState: async () => ({
+              enabledProviders: ['google', 'oidc'] as const,
+              sessionsRequired: true,
+              protectedByAccess: false,
+              protection: null,
+            }),
+          }),
         claimDatabase,
         client: {
           ...upgradeClient,
@@ -3306,7 +3591,6 @@ describe('platform installer', () => {
       `deploy:${deployment.resources.apiWorker}`,
       `deploy:${deployment.resources.proxyWorker}`,
       'gate:closed',
-      `rollback:${deployment.resources.apiWorker}`,
     ]);
     const interruptedManifest = listInstallationManifests(directory)[0]!;
     expect(interruptedManifest).toMatchObject({
@@ -3349,7 +3633,16 @@ describe('platform installer', () => {
         steps: interruptedManifest.steps,
       },
       {
-        acquireDatabaseLifecycleLock,
+        acquireDatabaseLifecycleLock: async () =>
+          Object.assign(async () => {}, {
+            prepareSandboxDrain: async () => sandboxDrainPreparation('complete'),
+            readAuthenticationState: async () => ({
+              enabledProviders: ['google', 'oidc'] as const,
+              sessionsRequired: true,
+              protectedByAccess: false,
+              protection: null,
+            }),
+          }),
         claimDatabase,
         client: upgradeClient,
         deployWorker: async (config, secretPayload) => {
@@ -3367,7 +3660,12 @@ describe('platform installer', () => {
     );
     expect(emptyCoreUpgrade.waitingForSandboxDrain).toBe(false);
     expect(emptyCoreUpgrade.manifest.safetyProtocols).toEqual({ sandboxDrain: 2 });
-    expect(emptyCoreUpgradeConfigs).toHaveLength(4);
+    expect(emptyCoreUpgrade.manifest.deployment).toMatchObject({
+      schemaVersion: 3,
+      authentication: { configurable: true, providers: ['google', 'oidc'] },
+      capabilities: { githubOAuth: false, googleOAuth: true },
+    });
+    expect(emptyCoreUpgradeConfigs).toHaveLength(8);
     expect(resumedSecretPayloads.slice(0, 2)).toEqual([
       resumedUpdates,
       { CF_API_TOKEN: 'retry-cf-token' },
@@ -3376,6 +3674,11 @@ describe('platform installer', () => {
       readInstallationRecoverySecrets(emptyCoreUpgrade.manifest)?.workerSecretUpdatesJson,
     ).toBe(undefined);
     for (const index of [0, 1, 3]) {
+      expect(
+        (emptyCoreUpgradeConfigs[index]!.vars as Record<string, unknown>).PLATFORM_TRAFFIC_STATE,
+      ).toBe('staging');
+    }
+    for (const index of [4, 5, 7]) {
       expect(
         (emptyCoreUpgradeConfigs[index]!.vars as Record<string, unknown>).PLATFORM_TRAFFIC_STATE,
       ).toBe('enabled');
@@ -3594,10 +3897,18 @@ describe('platform installer', () => {
       deployment.resources.proxyWorker,
       deployment.resources.tailWorker,
       deployment.resources.dispatchWorker,
+      deployment.resources.apiWorker,
+      deployment.resources.proxyWorker,
+      deployment.resources.tailWorker,
+      deployment.resources.dispatchWorker,
     ]);
     expect(migrations).toBe(0);
     expect(new Set(upgradeKvWrites)).toEqual(
-      new Set(['__void/platform/installation/v1', PLATFORM_SANDBOX_DRAIN_KEY]),
+      new Set([
+        '__void/platform/installation/v1',
+        PLATFORM_DISABLED_KEY,
+        PLATFORM_SANDBOX_DRAIN_KEY,
+      ]),
     );
     expect(upgraded.manifest.status).toBe('installed');
     expect(upgraded.manifest.platformVersion).toBe(readPlatformRuntimeManifest().platformVersion);
@@ -4090,6 +4401,7 @@ describe('platform installer', () => {
     );
     expect(enabledUpgrade.manifest.status).toBe('installed');
     expect(enabledUpgrade.manifest.desiredState).toBe('enabled');
+    expect(enabledUpgrade.manifest.deployment.authentication.configurable).toBe(true);
     expect(enabledHealthChecks).toBe(2);
     expect(deletedKvValues).toContain('__void/platform/disabled/v1');
     expect(enabledConfigs).toHaveLength(8);

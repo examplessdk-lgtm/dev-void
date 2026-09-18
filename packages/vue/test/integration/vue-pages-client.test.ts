@@ -567,7 +567,7 @@ describe('vue-pages client (dev)', () => {
     try {
       await prepareForViteHmr(page);
       await page.goto(`${DEV_BASE}/blog`);
-      await waitForIslandsHydrated(page);
+      await waitForIslandsHydrated(page, 2);
       await waitForViteHmr(page);
 
       // Interact to establish client state — count becomes 1

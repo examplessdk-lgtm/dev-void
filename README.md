@@ -101,7 +101,7 @@ Full docs at [void.cloud](https://void.cloud). Run `vp run dev:docs` in this rep
 
 Run `void connect` to choose a deployment destination and sign in, `void connect --platform cloudflare` for your own account, or `void connect <url>` for your team's platform. See the [connection reference](./docs/reference/cli.md#connect).
 
-To install a shared company platform, follow [Install a Void Platform](./docs/guide/self-hosted-platform.md). The walkthrough covers Cloudflare setup, a domain, PostgreSQL, credentials, and GitHub sign-in, then previews the installation with `void platform install --plan`. Void creates the core API, routing, proxy, and telemetry resources.
+To install a shared company platform, follow [Install a Void Platform](./docs/guide/self-hosted-platform.md). The walkthrough covers Cloudflare setup, a domain, PostgreSQL, credentials, and your choice of GitHub, Google, OIDC, or Cloudflare Access sign-in, then previews the installation with `void platform install --plan`. Void creates the core API, routing, proxy, and telemetry resources.
 
 Platform upgrades verify migrations and check the new Workers before completing the rollout. If a rollout fails, Void can restore the previous Workers against the compatible database schema. See the platform guide for recovery and upgrade details.
 

@@ -34,6 +34,7 @@ export class ProxyClient {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ ...body, projectId: this.projectId }),
+      redirect: 'manual',
     });
     if (!res.ok) {
       const text = await res.text().catch(() => res.statusText);
@@ -66,6 +67,7 @@ export class ProxyClient {
         ...this.authHeaders,
       },
       body,
+      redirect: 'manual',
     });
     if (!res.ok) {
       const text = await res.text().catch(() => res.statusText);

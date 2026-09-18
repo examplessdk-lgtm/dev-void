@@ -299,6 +299,20 @@ describe('void db drizzle-kit subprocesses', () => {
     expect(authSchema).toContain('export const verificationTable = sqliteTable("verification"');
   });
 
+  it('rejects invalid generated SQLite SQL and restores migration artifacts', async () => {
+    const root = createDrizzleProjectRoot();
+    const migrations = join(root, 'db', 'migrations');
+    mockExecFileSync.mockImplementation(() => {
+      mkdirSync(join(migrations, 'meta'), { recursive: true });
+      writeFileSync(join(migrations, '0000.sql'), 'THIS IS NOT SQL;');
+      writeFileSync(join(migrations, 'meta', '_journal.json'), '{}');
+    });
+
+    await expect(runDbCommand(root, { action: 'generate' })).rejects.toThrow('process.exit:1');
+    expect(mockLog.error).toHaveBeenCalledWith(expect.stringContaining('0000.sql'));
+    expect(existsSync(migrations)).toBe(false);
+  });
+
   it('generates Better Auth migrations for an auth-only project', async () => {
     const root = createDrizzleProjectRoot();
     rmSync(join(root, 'db', 'schema.ts'));

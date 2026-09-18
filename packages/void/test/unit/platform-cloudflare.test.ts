@@ -297,7 +297,10 @@ describe('platform Cloudflare client', () => {
       'postgresql://user:secret@db.example.com/void?sslmode=verify-full',
     );
 
-    expect(payload).toMatchObject({ mtls: { sslmode: 'verify-full' } });
+    expect(payload).toMatchObject({
+      mtls: { sslmode: 'verify-full' },
+      caching: { disabled: true },
+    });
     expect(() =>
       parsePostgresConnectionString('postgresql://user:secret@db.example.com/void?sslmode=prefer'),
     ).toThrow('Unsupported sslmode');

@@ -22,6 +22,7 @@ import {
 } from './asset-routing.ts';
 import { findVoidAuthConfig } from './auth/config.ts';
 import { getApiUrl, getProxyUrl, getToken, isStagingMode } from './cli/auth.ts';
+import { ensurePlatformProxyAccess } from './cli/cf-access.ts';
 import { SEND_EMAIL_BINDING } from './cli/email-cloudflare.ts';
 import { mergeRoutingRules } from './cli/headers.ts';
 import { readDeploymentPlatform, readProjectConfig } from './cli/project.ts';
@@ -91,6 +92,7 @@ import { scanMiddlewareSync, scanRoutePatternsSync } from './router/scan.ts';
 import { scanWebSocketRoutesSync } from './router/websocket.ts';
 import { DEV_INBOX_ENV_VAR, DEV_INBOX_TOKEN_ENV_VAR } from './runtime/email/dev-inbox.ts';
 import { SANDBOX_MIGRATION_TAG, isSandboxEnabled, resolveSandboxConfig } from './sandbox/config.ts';
+import { scopedAccessCredentials } from './shared/cf-access.ts';
 import {
   CLOUDFLARE_DEPLOY_BUILD_ENV,
   loadLocalEnv,
@@ -610,6 +612,7 @@ type CredentialStatus =
       token: string;
       projectId: string;
       proxyUrl: string;
+      accessCredentials?: string;
       staging?: boolean;
     }
   | { status: 'no-token' }
@@ -633,11 +636,14 @@ function readVoidDevCredentials(root: string): CredentialStatus {
     return { status: 'no-project', apiUrl, token, staging };
   }
 
+  const proxyUrl = getProxyUrl(root);
+  ensurePlatformProxyAccess(apiUrl, proxyUrl);
   return {
     status: 'ok',
     token,
     projectId: project.projectId,
-    proxyUrl: getProxyUrl(root),
+    proxyUrl,
+    accessCredentials: scopedAccessCredentials(process.env, proxyUrl),
     staging,
   };
 }
@@ -1715,6 +1721,9 @@ export function voidPlugin(options?: {
         vars.__VOID_TOKEN = credentials.token;
         vars.__VOID_PROJECT_ID = credentials.projectId;
         vars.__VOID_PROXY_URL = credentials.proxyUrl;
+        if (credentials.accessCredentials) {
+          vars.__VOID_ACCESS_CREDENTIALS = credentials.accessCredentials;
+        }
         if (credentials.staging) {
           vars.__VOID_STAGING = '1';
         }
@@ -1734,6 +1743,9 @@ export function voidPlugin(options?: {
       if (credentials.status === 'ok') {
         const vars = (result.vars as Record<string, string>) ?? {};
         vars.__VOID_PROXY_URL = credentials.proxyUrl;
+        if (credentials.accessCredentials) {
+          vars.__VOID_ACCESS_CREDENTIALS = credentials.accessCredentials;
+        }
         vars.__VOID_TOKEN = credentials.token;
         vars.__VOID_PROJECT_ID = credentials.projectId;
         vars.__VOID_REMOTE = '1';

@@ -331,7 +331,9 @@ export function cloudflareAuthEnvironment(
   for (const key of Object.keys(env)) {
     if (
       /^VOID_PLATFORM_/i.test(key) ||
-      /^(?:DATABASE_URL|CF_ACCESS_CLIENT_ID|CF_ACCESS_CLIENT_SECRET|CF_ACCESS_TOKEN)$/i.test(key) ||
+      /^(?:DATABASE_URL|CF_ACCESS_CLIENT_ID|CF_ACCESS_CLIENT_SECRET|CF_ACCESS_TOKEN|VOID_ACCESS_CREDENTIALS|VOID_ACCESS_ORIGIN)$/i.test(
+        key,
+      ) ||
       scrubbedWranglerKeys.has(key.toUpperCase())
     ) {
       delete env[key];

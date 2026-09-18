@@ -1,6 +1,6 @@
 ---
 title: Configurable Platform Login Methods
-status: proposed
+status: implemented
 created: 2026-09-18
 ---
 
@@ -65,7 +65,7 @@ identity-provider configuration or deployed platform changes are part of this ta
   restricted admission; never interpret an unrestricted social login as proof
   of employment. Automatically created accounts have the ordinary user role.
 
-## Current implementation and affected areas
+## Starting point and affected areas
 
 The deployment manifest and discovery document accept only `github | google`.
 Provider availability is derived from deployment-time capability flags; the core
@@ -106,6 +106,15 @@ these secrets. Never reuse a project's identity or lifecycle for platform secret
 Client secrets are write-only in APIs and redacted in previews, audit, and logs.
 Do not retain upstream access or refresh tokens unless a specified feature needs
 them; initial login needs neither long-term storage nor offline scopes.
+
+The platform's dedicated Hyperdrive configuration must have SQL result caching
+disabled. Hyperdrive otherwise caches reads by default and does not invalidate
+them on writes, which would violate immediate revocation and read-after-write
+configuration behavior. Configure and verify this during installation, upgrade,
+repair, and adoption before activating managed authentication. Do not mutate an
+unrelated or externally owned Hyperdrive configuration. Source-built/custom
+runtimes must supply the same uncached database guarantee; connection pooling
+remains enabled. Do not depend on SQL comments as a cache-control mechanism.
 
 Separate runtime support from administrator enablement. The deployment manifest
 declares supported authentication features and initial configuration, while the
@@ -234,7 +243,7 @@ Remove the first-admin GitHub dependency using an installation-bound bootstrap:
 2. The administrator authenticates through a selected connection and proves
    possession of that credential using a POST/browser-bound ceremony. Keep it out
    of query strings, history, referrers, and server logs.
-3. Show the authenticated identity in the installer for confirmation before
+3. Show the authenticated identity on the setup browser page for confirmation before
    consuming the setup claim and granting the first admin role atomically.
 4. Bind the ceremony to the installation, selected connection/revision, and browser.
    Serialize concurrent first-admin attempts. An ordinary first visitor gets no role.
@@ -244,6 +253,13 @@ finish provisioning with setup pending, returning a secure completion step.
 Provisioning complete and administrator setup complete must be separate statuses.
 Existing interrupted installations retain their pinned GitHub bootstrap until
 explicitly migrated; a timeout must not reopen unrestricted first-user signup.
+
+For new installations using configurable authentication, the chosen administrator
+method becomes enabled after that confirmation. Other selected methods remain
+configured and pending; the administrator tests and enables them in Settings.
+Bootstrap initialization uses its own installation-only setup capability, never
+the health-probe credential, and stops accepting configuration replacement once
+the first administrator has been created.
 
 ## 4. Installation experience and Cloudflare Access setup
 
@@ -336,6 +352,21 @@ Disable origins that cannot meet both requirements. Signature validation alone
 on an otherwise unprotected alternate origin is not equivalent to Access policy
 enforcement or Access credential revocation. Preserve these invariants during
 upgrade, repair, rollback, and recovery.
+
+The optional source-built GitHub integration uses a dedicated exception that does
+not expose an alternate API origin. A standalone Worker accepts only
+`POST /github`, applies GitHub's 25 MB payload class as a hard body bound, verifies
+the raw GitHub HMAC, and forwards only `POST /internal/github-webhook` over an API
+service binding. It strips caller authorization, cookies, and Access headers and
+adds a purpose-separated five-minute HMAC over timestamp, GitHub delivery GUID,
+event, and body digest. The API exempts only that exact internal operation from
+its runtime Access assertion, independently verifies the ingress proof and raw
+GitHub signature, then reuses the existing idempotent, capability-gated webhook
+handler. The ingress secret is optional and distinct from platform management,
+JWT, Access, and GitHub webhook credentials. The core installer does not deploy
+or configure this optional Worker; source operators configure its private secrets,
+API binding, and isolated GitHub App webhook URL explicitly. Unprotected installs
+retain the direct `/webhooks/github` path.
 
 The feature is complete only after Access-login-only, Access-protection-only with
 GitHub automatic enrollment, and combined Access protection/login pass the relevant
@@ -497,6 +528,10 @@ Required meaningful regressions:
   remains unaffected and Workers Free-compatible by default.
 - Supported runtime/CLI upgrade pairs; disabled providers survive an upgrade;
   incompatible rollback cannot restore a revoked login path.
+- Platform Hyperdrive creation and owned upgrades explicitly disable result
+  caching; preflight verifies that guarantee before authentication activation,
+  including adopted/custom-runtime cases. Application Hyperdrive settings remain
+  independent.
 
 After all code changes, run the final full `vp test run` and required formatting,
 lint, builds, and typechecks through the repository's `vpr test:all` workflow;
@@ -524,3 +559,49 @@ and organization-specific identity details out of public repository documentatio
 Recheck exact Access provisioning API permissions, available plan limits, and the
 selected OIDC library's Workers support while implementing. These are verification
 tasks, not assumptions that deployment credentials or a paid service are required.
+
+## Reconciliation of the remaining implementation
+
+The core provider/session work was already committed when this branch was resumed.
+The completion work covers these previously unfinished paths:
+
+- Access installer create/connect flows, encrypted provisioning checkpoints and
+  resource inventory, independent protection-only/login-only selection, scoped
+  machine credentials, and disabled unprotected preview/alternate origins.
+- Post-install protection management through `platform config auth protection`,
+  with Cloudflare coverage verification, installation authority, lifecycle and
+  settings revision checks, human company proof, and session revocation.
+- Expired setup-code renewal during resume/repair and owner-authorized recovery
+  of an existing administrator after a real provider test. Recovery preserves
+  the required company gate and never creates an administrator or reopens signup.
+- Live authentication preservation and runtime compatibility checks during
+  lifecycle operations, including refusal of authentication-incompatible rollback.
+- Ordinary-user account linking in the CLI/dashboard, current dashboard login
+  discovery, scoped development/prerender Access credentials, and authoritative
+  revalidation of long-lived human proxy streams. API build-log clients poll
+  authenticated endpoints; internal BuildManager sockets are not public routes.
+- Exact connection-and-subject allowlisting for identities without verified
+  email, and owner-issued project deployment credentials with expiry, renewal,
+  revocation, and derived-prerender authority checks for protected CI.
+- An optional isolated GitHub webhook ingress for source-built managed-build
+  installations, preserving signature checks without opening the protected API.
+  This service remains outside the core installer's footprint.
+- Access-safe optional GitHub webhook delivery through the standalone source
+  ingress, with an exact service-binding operation and no external API bypass.
+
+Focused regression suites exercise the installer combinations, explicit linking
+and callback races, Access policy verification and ambiguous creation, recovery,
+revocation, scoped machine paths, and compatibility checks. The final repository
+workflow, packed-consumer checks, and four independent review results are recorded
+with the task handoff. Real provider sign-in and live Cloudflare provisioning are
+separate acceptance evidence: no live identity-provider or deployed-platform
+changes are authorized by this design task.
+
+Local verification completed on Node 24.21.0: `vpr test:all` passed 537 files
+and 10,544 tests, with 11 skipped. The full packed-consumer matrix passed for
+npm and pnpm across React, Vue, Svelte, and Solid, and the optional webhook
+Worker compiled in deployment dry-run mode. Four independent GPT-6 Astra high
+reviews were completed; GPT-5.6 Sol high fixes and follow-up reviews resolved
+all reported P1 findings. A shared browser-test readiness fix requires both
+islands on the two-island fixture, without changing production behavior or
+timeouts.

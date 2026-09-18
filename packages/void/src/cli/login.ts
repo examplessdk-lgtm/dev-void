@@ -1,6 +1,8 @@
 import { intro, outro, log, select, isCancel, cancel } from '@clack/prompts';
+import type { PlatformAuthenticationDiscovery } from '@void/platform';
 import {
   getToken,
+  getApiUrl,
   getTokenSource,
   removeToken,
   runLogin,
@@ -12,22 +14,45 @@ import {
 import { isExpiredTokenError, PlatformClient } from './client.ts';
 import { cliTitle, createSpinner, pc } from './output.ts';
 
-export async function promptForLoginToken(
-  root: string = process.cwd(),
-  platform?: { apiUrl: string; authenticationProviders: ReadonlyArray<'github' | 'google'> },
-): Promise<string> {
+export type LoginPlatform = {
+  apiUrl: string;
+  authenticationProviders: ReadonlyArray<string>;
+  authentication?: PlatformAuthenticationDiscovery;
+};
+
+export async function selectPlatformLoginMethod(
+  platform?: LoginPlatform,
+  requestedId?: string,
+): Promise<{ id: string; label: string }> {
   const providers = platform?.authenticationProviders ?? ['github', 'google'];
+  const methods =
+    platform?.authentication?.methods ??
+    providers.map((id) => ({
+      id,
+      label: id === 'github' ? 'GitHub' : id === 'google' ? 'Google' : id,
+    }));
   if (providers.length === 0) {
-    throw new Error('auth: This platform has no login providers.');
+    throw new Error(
+      platform?.authentication?.setupPending
+        ? 'auth: The platform administrator must finish initial setup.'
+        : 'auth: This platform has no login providers.',
+    );
+  }
+  if (requestedId) {
+    const selected = methods.find((method) => method.id === requestedId);
+    if (!selected) {
+      throw new Error(`auth: Login method ${requestedId} is not enabled on this platform.`);
+    }
+    return selected;
   }
   const provider =
     providers.length === 1
       ? providers[0]!
       : await select({
           message: 'Choose a login provider:',
-          options: providers.map((value) => ({
-            value,
-            label: value === 'github' ? 'GitHub' : 'Google',
+          options: methods.map(({ id, label }) => ({
+            value: id,
+            label,
           })),
         });
 
@@ -35,8 +60,19 @@ export async function promptForLoginToken(
     cancel('Login cancelled.');
     process.exit(0);
   }
+  return methods.find((method) => method.id === provider)!;
+}
 
-  const providerName = provider === 'github' ? 'GitHub' : 'Google';
+export async function promptForLoginToken(
+  root: string = process.cwd(),
+  platform?: LoginPlatform,
+): Promise<string> {
+  const discovery =
+    platform ??
+    (await import('./platform-cmd.ts').then(({ discoverPlatform }) =>
+      discoverPlatform(getApiUrl(root)),
+    ));
+  const { id: provider, label: providerName } = await selectPlatformLoginMethod(discovery);
   const s = createSpinner();
   s.start(`Opening browser for ${providerName} login...`);
 

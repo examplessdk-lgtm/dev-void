@@ -279,14 +279,17 @@ describe('platform recovery', () => {
       },
     };
     let headers = new Headers();
+    let redirect: RequestRedirect | undefined;
 
     await verifyInstallationEndpoint(manifest, (async (_input, init) => {
       headers = new Headers(init?.headers);
+      redirect = init?.redirect;
       return Response.json({ installationId: manifest.id });
     }) as typeof fetch);
 
     expect(headers.get('CF-Access-Client-Id')).toBe('service-id');
     expect(headers.get('CF-Access-Client-Secret')).toBe('service-secret');
+    expect(redirect).toBe('manual');
   });
 
   it('limits shared-account discovery before verifying unrelated endpoints', async () => {

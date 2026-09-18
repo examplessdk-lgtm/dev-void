@@ -88,6 +88,32 @@ describe('operator argument and help coverage', () => {
       body: { type: 'email', pattern: '*@example.com', note: 'Operators only' },
       plan: true,
     });
+    expect(
+      parseOperatorArgs([
+        'signup',
+        'allow',
+        'identity',
+        'company-sso',
+        'Employee-42',
+        '--note',
+        'No email',
+      ]),
+    ).toMatchObject({
+      path: '/signup/allow',
+      method: 'POST',
+      body: {
+        type: 'identity',
+        connectionId: 'company-sso',
+        subject: 'Employee-42',
+        note: 'No email',
+      },
+    });
+    expect(
+      parseOperatorArgs(['signup', 'disallow', 'identity', 'company-sso', 'Employee-42']),
+    ).toMatchObject({
+      path: '/signup/disallow',
+      body: { type: 'identity', connectionId: 'company-sso', subject: 'Employee-42' },
+    });
     expect(parsePlatformArgs(['--timeout', '600', 'user', 'delete', 'id'])).toMatchObject({
       timeoutMs: 600_000,
     });
@@ -182,6 +208,10 @@ describe('operator argument and help coverage', () => {
     ['build', 'logs', 'id', '--since', '9007199254740992'],
     ['worker', 'rollback', 'api', 'version', '--environment', 'preview'],
     ['signup', 'allow', 'typo', '*'],
+    ['signup', 'allow', 'identity', 'company-sso'],
+    ['signup', 'allow', 'identity', 'Company', 'employee'],
+    ['signup', 'disallow', 'identity', 'company', 'employee', 'extra'],
+    ['signup', 'remove', 'identity', 'company'],
     ['auth', 'login', '--yes'],
     ['user', 'delete', 'id', '--timeout', '0'],
     ['user', 'delete', 'id', '--timeout', '3601'],

@@ -298,6 +298,7 @@ async function exchangeLoginCode(
       state,
       code_verifier: codeVerifier,
     }),
+    redirect: 'manual',
   });
 
   if (!res.ok) {

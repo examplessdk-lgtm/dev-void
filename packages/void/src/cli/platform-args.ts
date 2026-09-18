@@ -1,7 +1,13 @@
 import { operatorGroups, parseOperatorArgs, type OperatorArgs } from './operator-args.ts';
+import { parsePlatformConfigArgs, type PlatformConfigArgs } from './platform-config-args.ts';
 import type { SubcommandDef } from './subcommand-prompt.ts';
 
 export const platformSubcommands: Array<SubcommandDef> = [
+  {
+    name: 'config',
+    hint: 'Configure authentication',
+    description: 'Configure login methods, company protection, or provider recovery',
+  },
   ...operatorGroups.map((name) => ({
     name,
     hint: 'Operator commands',
@@ -29,6 +35,7 @@ export const platformSubcommands: Array<SubcommandDef> = [
 ];
 
 export type PlatformArgs =
+  | PlatformConfigArgs
   | OperatorArgs
   | { subcommand: 'list' }
   | { subcommand: 'use'; selector: string }
@@ -45,6 +52,7 @@ export type PlatformArgs =
     }
   | {
       subcommand: 'install';
+      authConfig?: string;
       account: string;
       applicationDomain: string;
       controlPlaneDomain: string;
@@ -156,6 +164,9 @@ export function parsePlatformArgs(args: Array<string>): PlatformArgs {
     return parseOperatorArgs(args);
   }
   const [subcommand, ...rest] = args;
+  if (subcommand === 'config') {
+    return parsePlatformConfigArgs(rest);
+  }
 
   if (subcommand === 'domain') {
     if (rest.length === 0) {
@@ -291,6 +302,7 @@ export function parsePlatformArgs(args: Array<string>): PlatformArgs {
     let yes = false;
     const valueFlags = new Set([
       '--account',
+      '--auth-config',
       '--application-domain',
       '--control-plane-domain',
       '--display-name',
@@ -330,6 +342,7 @@ export function parsePlatformArgs(args: Array<string>): PlatformArgs {
     return {
       subcommand,
       ...(workersDev ? { workersDev: true } : {}),
+      ...(values.has('--auth-config') ? { authConfig: values.get('--auth-config')! } : {}),
       account: values.get('--account') ?? '',
       applicationDomain: values.get('--application-domain') ?? '',
       controlPlaneDomain: values.get('--control-plane-domain') ?? '',
@@ -345,6 +358,6 @@ export function parsePlatformArgs(args: Array<string>): PlatformArgs {
   }
 
   throw new Error(
-    'platform: Usage: void platform <auth|user|project|deployment|build|signup|invitation|email|system|worker|list|use|status|discover|install|domain|upgrade|rollback|repair|disable|enable|uninstall>.',
+    'platform: Usage: void platform <config|auth|user|project|deployment|build|signup|invitation|email|system|worker|list|use|status|discover|install|domain|upgrade|rollback|repair|disable|enable|uninstall>.',
   );
 }

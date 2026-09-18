@@ -24,6 +24,23 @@ import {
 
 export const tenantRoutes = new Hono<ApiEnv>();
 
+function signupEntry(body: Record<string, unknown>) {
+  const type = stringField(body, 'type');
+  const note = stringField(body, 'note', { optional: true, maxLength: 1000 }) || undefined;
+  return type === 'identity'
+    ? {
+        type,
+        connectionId: stringField(body, 'connectionId', { maxLength: 64 }),
+        subject: body.subject,
+        ...(note ? { note } : {}),
+      }
+    : {
+        type,
+        pattern: stringField(body, 'pattern', { maxLength: 320 }),
+        ...(note ? { note } : {}),
+      };
+}
+
 tenantRoutes.get('/users', async (context) =>
   context.json(
     await listOperatorUsers(context.get('db'), pagination(context), context.req.query('search')),
@@ -91,27 +108,16 @@ for (const [action, enabled] of [
 }
 tenantRoutes.post('/signup/allow', async (context) => {
   const body = await readBody(context);
-  return context.json(
-    await allowOperatorSignup(
-      context,
-      stringField(body, 'type'),
-      [stringField(body, 'pattern', { maxLength: 320 })],
-      stringField(body, 'note', { optional: true, maxLength: 1000 }),
-      dryRun(body),
-    ),
-  );
+  return context.json(await allowOperatorSignup(context, [signupEntry(body)], dryRun(body)));
 });
-tenantRoutes.post('/signup/remove', async (context) => {
-  const body = await readBody(context);
-  return context.json(
-    await removeOperatorSignup(
-      context,
-      stringField(body, 'type'),
-      stringField(body, 'pattern', { maxLength: 320 }),
-      dryRun(body),
-    ),
-  );
-});
+for (const action of ['remove', 'disallow'] as const) {
+  tenantRoutes.post(`/signup/${action}`, async (context) => {
+    const body = await readBody(context);
+    return context.json(
+      await removeOperatorSignup(context, signupEntry(body), dryRun(body), action),
+    );
+  });
+}
 tenantRoutes.get('/invitations', async (context) =>
   context.json(await listOperatorInvitations(context.get('db'), pagination(context))),
 );

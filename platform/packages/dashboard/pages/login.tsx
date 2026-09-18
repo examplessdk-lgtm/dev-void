@@ -72,18 +72,26 @@ function LoginPageShell({ children }: { children: ReactNode }) {
   );
 }
 
-export default function LoginPage({ githubUrl, googleUrl, devLoginUrl }: Props) {
+export default function LoginPage({ methods, unavailable, devLoginUrl }: Props) {
   return (
     <LoginPageShell>
       <h1 className="max-w-[25rem] text-pretty">Sign in to Void.</h1>
       <Stack alignCenter className="mt-8 sm:!flex-row" gap={20} vertical>
-        <a className="button button--primary text-white! hover:text-white!" href={githubUrl}>
-          <span className="text-white">Continue with GitHub</span>
-        </a>
-        <a className="button" href={googleUrl}>
-          Continue with Google
-        </a>
+        {methods.map((method, index) => (
+          <a
+            key={method.id}
+            className={
+              index === 0 ? 'button button--primary text-white! hover:text-white!' : 'button'
+            }
+            href={method.url}
+          >
+            Continue with {method.label}
+          </a>
+        ))}
       </Stack>
+      {(unavailable || methods.length === 0) && (
+        <p>Login is unavailable. Try again shortly or contact your platform administrator.</p>
+      )}
       {devLoginUrl && (
         <div className="mt-4">
           <a className="button" href={devLoginUrl}>

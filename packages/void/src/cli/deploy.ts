@@ -76,6 +76,10 @@ import { voidWarn } from '../log.ts';
 import { collectMigrations } from '../migrations/collect.ts';
 import { runMySqlMigrations } from '../migrations/runner-mysql.ts';
 import { runPgMigrations } from '../migrations/runner-pg.ts';
+import {
+  openMigrationValidationDatabase,
+  SqliteMigrationError,
+} from '../migrations/sqlite-validation.ts';
 import { assertJournalCoherence, validateMigrations } from '../migrations/validate.ts';
 import { scanPages } from '../pages/scan.ts';
 import type { PageScanResult } from '../pages/types.ts';
@@ -2821,8 +2825,7 @@ export async function assertMigrationsProduceAuthSchema(
   migrations: Array<{ name: string; sql: string }>,
   required: Array<RequiredAuthTable>,
 ): Promise<void> {
-  const { DatabaseSync } = await import('node:sqlite');
-  const db = new DatabaseSync(':memory:');
+  const db = await openMigrationValidationDatabase(migrations);
   const quote = (identifier: string): string => `"${identifier.replace(/"/g, '""')}"`;
   // SQLite resolves identifiers case-insensitively, but `sqlite_master.name` and every PRAGMA
   // echo back the casing the migration DECLARED. So `CREATE TABLE "User" ("Email" TEXT UNIQUE)`
@@ -2856,16 +2859,6 @@ export async function assertMigrationsProduceAuthSchema(
     return primaryKey.length === 1 && primaryKey[0] ? primaryKey[0].name : null;
   };
   try {
-    for (const migration of migrations) {
-      try {
-        db.exec(migration.sql);
-      } catch (err) {
-        throw new Error(
-          `checked-in migration ${migration.name} could not be applied to a fresh SQLite database, ` +
-            `so the auth schema cannot be verified: ${getErrorMessage(err)}`,
-        );
-      }
-    }
     const tables = new Set(
       (
         db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{
@@ -5134,9 +5127,15 @@ export async function runCloudflareDeploy(
           'they must already produce the Better Auth schema — tables, columns, and the primary',
           'keys, unique constraints and foreign keys it declares:',
           `  ${getErrorMessage(err)}`,
-          '`void db generate` includes the production Better Auth schema automatically. Run it,',
-          'review and commit the generated migration, then rerun deploy — or deploy this app',
-          'with `void deploy` (the managed platform).',
+          ...(err instanceof SqliteMigrationError
+            ? [
+                'Repair the unapplied migration named above, then rerun deploy.',
+                '`void db generate` diffs snapshots and cannot repair existing invalid SQL.',
+              ]
+            : [
+                '`void db generate` includes the production Better Auth schema automatically.',
+                'Run it, review and commit the generated migration, then rerun deploy.',
+              ]),
         ].join('\n'),
       );
       return exit(1);
@@ -6170,7 +6169,9 @@ async function runCloudflareStaticDeploy(
             workerName,
             versionId,
           });
-          assertCloudflareBindingsPreserved(existingWorker, uploaded);
+          assertCloudflareBindingsPreserved(existingWorker, uploaded, [], {
+            staticAssetsBinding: 'ASSETS',
+          });
         }
       : undefined,
     recordVerifiedCandidate: existingWorker

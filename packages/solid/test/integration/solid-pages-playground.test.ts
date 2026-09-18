@@ -455,7 +455,7 @@ describe('solid-pages client (dev)', () => {
 
     try {
       await page.goto(`${DEV_BASE}/blog`);
-      await waitForIslandsHydrated(page);
+      await waitForIslandsHydrated(page, 2);
 
       // Interact to establish client state — count becomes 1
       await page.click("button:has-text('Increment')");

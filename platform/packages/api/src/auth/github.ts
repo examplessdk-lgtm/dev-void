@@ -23,6 +23,8 @@ export async function exchangeCodeForToken(
   clientId: string,
   clientSecret: string,
   code: string,
+  redirectUri?: string,
+  verifier?: string,
 ): Promise<string> {
   const res = await fetch('https://github.com/login/oauth/access_token', {
     method: 'POST',
@@ -34,6 +36,8 @@ export async function exchangeCodeForToken(
       client_id: clientId,
       client_secret: clientSecret,
       code,
+      ...(redirectUri ? { redirect_uri: redirectUri } : {}),
+      ...(verifier ? { code_verifier: verifier } : {}),
     }),
   });
 

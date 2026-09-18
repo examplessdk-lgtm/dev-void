@@ -6,6 +6,8 @@ import {
   domains,
   githubInstallations,
   invitations,
+  platformLoginConnections,
+  platformLoginRevisions,
   projects,
   users,
 } from '../../src/schema.ts';
@@ -1661,6 +1663,62 @@ describe('POST /admin/signup-control/toggle', () => {
 });
 
 describe('POST /admin/signup-control/add + delete', () => {
+  test('adds an exact identity grant for a configured login connection', async () => {
+    const admin = await createTestUser(
+      env.db,
+      'admin-sc-identity',
+      'github',
+      undefined,
+      'free',
+      'admin',
+    );
+    await env.db.insert(platformLoginConnections).values({
+      id: 'company',
+      kind: 'oidc',
+      revision: 1,
+    });
+    await env.db.insert(platformLoginRevisions).values({
+      connection_id: 'company',
+      revision: 1,
+      configuration: {
+        id: 'company',
+        kind: 'oidc',
+        label: 'Company SSO',
+        clientId: 'client',
+        issuer: 'https://identity.example.com',
+        allowedDomains: [],
+        requiredGroups: [],
+      },
+      secret: { ciphertext: 'unused', iv: 'unused', keyVersion: 'unused' },
+    });
+    const page = await req('/admin/signup-control', admin.adminJwt);
+    const html = await page.text();
+    expect(html).toContain('Exact provider subject');
+    expect(html).toContain('Company SSO (company)');
+
+    const body = new URLSearchParams({
+      type: 'identity',
+      connectionId: 'company',
+      subject: 'Employee-42',
+      note: 'No email',
+    });
+    const response = await req('/admin/signup-control/add', admin.adminJwt, {
+      method: 'POST',
+      body: body.toString(),
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' } as Record<string, string>,
+    });
+    expect(response.status).toBe(302);
+    expect(JSON.parse((await env.ROUTING.get('signup:allowlist'))!)).toEqual([
+      {
+        type: 'identity',
+        connectionId: 'company',
+        subject: 'Employee-42',
+        note: 'No email',
+      },
+    ]);
+    await env.ROUTING.delete('signup:allowlist');
+  });
+
   test('adds and removes entries', async () => {
     const admin = await createTestUser(env.db, 'admin-sc4', 'github', undefined, 'free', 'admin');
     await env.ROUTING.delete('signup:allowlist');

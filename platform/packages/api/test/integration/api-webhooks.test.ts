@@ -31,7 +31,9 @@ import type { Db } from '../../src/db.ts';
 // (the under-lock re-read inside the handler hits the row directly, not via this).
 import * as db from '../../src/db.ts';
 import type { ApiEnv } from '../../src/env.ts';
+import { createGitHubWebhookIngressProof } from '../../src/github/webhook-ingress-auth.ts';
 import { scheduled } from '../../src/index.ts';
+import internalGitHubWebhook from '../../src/routes/internal-github-webhook.ts';
 import { webhookRoutes } from '../../src/routes/webhooks.ts';
 import { builds, deployments, githubConnections, githubInstallations } from '../../src/schema.ts';
 import {
@@ -45,6 +47,8 @@ import {
 } from './helpers.ts';
 
 const WEBHOOK_SECRET = 'test-webhook-secret';
+const INGRESS_SECRET = 'test-purpose-separated-ingress-secret';
+const DELIVERY_ID = '72d3162e-cc78-11e3-81ab-4c9367dc0958';
 
 // The push handler now makes a live GitHub compare call to detect a stale
 // out-of-order push (`getBranchHeadComparisonStatus`). Stub the helper so tests
@@ -175,6 +179,7 @@ function makeApp(overrideEnv: TestEnv): { app: Hono<ApiEnv>; appEnv: TestEnv } {
     await next();
   });
   app.route('/webhooks', webhookRoutes);
+  app.route('/internal/github-webhook', internalGitHubWebhook);
   return { app, appEnv: overrideEnv };
 }
 
@@ -297,6 +302,58 @@ async function post(
   return res;
 }
 
+async function postThroughIngressOperation(
+  app: Hono<ApiEnv>,
+  appEnv: TestEnv,
+  event: string,
+  payload: unknown,
+  options?: {
+    deliveryId?: string;
+    timestampSeconds?: number;
+    proofBody?: string;
+    proof?: string;
+    signature?: string;
+  },
+): Promise<Response> {
+  const body = JSON.stringify(payload);
+  const bodyBytes = new TextEncoder().encode(body);
+  const deliveryId = options?.deliveryId ?? DELIVERY_ID;
+  const timestampSeconds = options?.timestampSeconds ?? Math.floor(Date.now() / 1000);
+  const proof =
+    options?.proof ??
+    (await createGitHubWebhookIngressProof({
+      secret: INGRESS_SECRET,
+      timestampSeconds,
+      deliveryId,
+      event,
+      body: new TextEncoder().encode(options?.proofBody ?? body),
+    }));
+  const response = await app.fetch(
+    new Request('https://void-api.internal/internal/github-webhook', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-GitHub-Event': event,
+        'X-GitHub-Delivery': deliveryId,
+        'X-Hub-Signature-256': options?.signature ?? (await sign(WEBHOOK_SECRET, body)),
+        'X-Void-GitHub-Ingress-Timestamp': String(timestampSeconds),
+        'X-Void-GitHub-Ingress-Proof': proof,
+      },
+      body: bodyBytes,
+    }),
+    {
+      ...appEnv,
+      GITHUB_WEBHOOK_SECRET: WEBHOOK_SECRET,
+      GITHUB_WEBHOOK_INGRESS_SECRET: INGRESS_SECRET,
+    },
+    {
+      waitUntil: () => {},
+      passThroughOnException: () => {},
+    } as unknown as ExecutionContext,
+  );
+  return response;
+}
+
 beforeAll(async () => {
   env = await setupEnv();
 });
@@ -345,6 +402,60 @@ describe('POST /webhooks/github', () => {
       },
     );
     expect(res.status).toBe(401);
+  });
+
+  it('rejects an invalid or expired ingress proof before webhook processing', async () => {
+    const { app, appEnv } = makeApp(env);
+    const invalid = await postThroughIngressOperation(
+      app,
+      appEnv,
+      'push',
+      {},
+      {
+        proof: `sha256=${'0'.repeat(64)}`,
+      },
+    );
+    expect(invalid.status).toBe(401);
+    expect(await invalid.json()).toEqual({ error: 'invalid ingress proof' });
+
+    const expired = await postThroughIngressOperation(
+      app,
+      appEnv,
+      'push',
+      {},
+      {
+        timestampSeconds: Math.floor(Date.now() / 1000) - 301,
+      },
+    );
+    expect(expired.status).toBe(401);
+    expect(await expired.json()).toEqual({ error: 'invalid ingress proof' });
+  });
+
+  it('binds the ingress proof to the exact body and still verifies GitHub independently', async () => {
+    const { app, appEnv } = makeApp(env);
+    const mutated = await postThroughIngressOperation(
+      app,
+      appEnv,
+      'push',
+      { value: 2 },
+      {
+        proofBody: JSON.stringify({ value: 1 }),
+      },
+    );
+    expect(mutated.status).toBe(401);
+    expect(await mutated.json()).toEqual({ error: 'invalid ingress proof' });
+
+    const invalidGitHub = await postThroughIngressOperation(
+      app,
+      appEnv,
+      'push',
+      {},
+      {
+        signature: `sha256=${'0'.repeat(64)}`,
+      },
+    );
+    expect(invalidGitHub.status).toBe(401);
+    expect(await invalidGitHub.json()).toEqual({ error: 'invalid signature' });
   });
 
   it('creates a container build row and pokes the scheduler on a matching push', async () => {
@@ -2331,6 +2442,38 @@ describe('POST /webhooks/github — push idempotency + latest-wins', () => {
     const buildCcc = await getBuild(env.db, third.buildId);
     expect(buildCcc!.status).toBe('queued');
     expect(buildCcc!.commit_sha).toBe('ccc');
+  });
+
+  it('keeps a valid ingress delivery idempotent through the existing push pipeline', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'wh-ingress-idem');
+    await createGitHubConnection(env.db, {
+      projectId: project.id,
+      installationId: '701',
+      repoFullName: 'octo/ingress-idem',
+      repositoryId: '71',
+      branch: 'main',
+      buildExecutor: 'container',
+    });
+    await seedInstallation(env.db, '701');
+    const { app, appEnv } = pokeApp();
+    const payload = {
+      ref: 'refs/heads/main',
+      after: 'ingress-sha',
+      installation: { id: 701 },
+      repository: { full_name: 'octo/ingress-idem', id: 71 },
+    };
+
+    const first = await postThroughIngressOperation(app, appEnv, 'push', payload);
+    const second = await postThroughIngressOperation(app, appEnv, 'push', payload);
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    const firstBody = await first.json<{ buildId: string }>();
+    const secondBody = await second.json<{ buildId: string }>();
+    expect(secondBody.buildId).toBe(firstBody.buildId);
+    expect(
+      (await env.db.select().from(builds)).filter((build) => build.project_id === project.id),
+    ).toHaveLength(1);
   });
 
   it('redelivery after the commit already COMPLETED reuses the build (no re-enqueue)', async () => {

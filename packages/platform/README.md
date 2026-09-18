@@ -16,6 +16,13 @@ for administrator sessions and audit records. See
 [Platform Administration](../../docs/guide/platform-administration.md) to operate
 an installed platform from your terminal.
 
+Platforms can use GitHub, Google, generic OIDC, Cloudflare Access, or a combination.
+Access protection is independent from login methods and can admit company-approved
+users automatically. Login settings, explicit account linking, and provider recovery
+are available through Void; upgrades preserve live settings and reject runtimes
+that cannot enforce their session revocation. See the installation and administration
+guides for setup, scoped CI credentials, and recovery requirements.
+
 The package contains:
 
 - versioned deployment and installation manifests

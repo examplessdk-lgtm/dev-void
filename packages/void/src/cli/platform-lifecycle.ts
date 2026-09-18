@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { confirm, intro, isCancel, log, note, outro, password, select, text } from '@clack/prompts';
 import {
   normalizeApplicationDomain,
@@ -18,6 +19,10 @@ import {
   type CloudflareAccount,
 } from './platform-cloudflare.ts';
 import {
+  selectInstallationAuthentication,
+  collectInstallationAuthentication,
+} from './platform-install-auth.ts';
+import {
   acquirePlatformDatabaseLifecycleLock,
   createPlatformInstallationSecrets,
   installPlatform,
@@ -35,6 +40,7 @@ import {
   acquirePlatformLifecycleLock,
   assertPlatformInstallationSlugAvailable,
   listInstallationManifests,
+  readInstallationRecoverySecrets,
   readPendingInstallationSecrets,
   resolveInstallationManifest,
   writeInstallationManifest,
@@ -416,7 +422,12 @@ export async function runPlatformLifecycleCommand(args: PlatformArgs): Promise<v
         }
       }
     }
+    const authenticationSelection = await selectInstallationAuthentication(
+      args.authConfig,
+      existing?.deployment.authentication,
+    );
     const planInput = {
+      authentication: authenticationSelection.authentication,
       accountId,
       applicationDomain,
       controlPlaneDomain,
@@ -563,47 +574,77 @@ export async function runPlatformLifecycleCommand(args: PlatformArgs): Promise<v
       await verifyRuntimeToken(runtimeCloudflareApiToken);
     }
     saveValues({ cloudflareApiToken: runtimeCloudflareApiToken });
-    const previousLogin = values.bootstrapGitHubLogin;
-    const bootstrapGitHubLogin = await collect(
-      'bootstrapGitHubLogin',
-      'VOID_PLATFORM_ADMIN_GITHUB_LOGIN',
-      'Initial administrator GitHub username:',
-      false,
-    );
-    const bootstrapGitHubId =
-      (previousLogin === bootstrapGitHubLogin ? values.bootstrapGitHubId : '') ||
-      process.env.VOID_PLATFORM_ADMIN_GITHUB_ID ||
-      (await resolveBootstrapGitHubId(bootstrapGitHubLogin));
-    saveValues({ bootstrapGitHubId });
+    const deferAuthentication =
+      !!authenticationSelection.authentication.accessProtection ||
+      authenticationSelection.authentication.providers.includes('cloudflare-access');
+    const saveAuthenticationValues = (updates: Record<string, string>) => {
+      Object.assign(values, updates);
+      const latest = readPendingInstallationSecrets(setupManifest) ?? {};
+      writePendingInstallationSecrets(setupManifest, { ...latest, ...updates });
+    };
+    const authenticationSecrets = deferAuthentication
+      ? {
+          authSetupToken: values.authSetupToken || randomBytes(32).toString('hex'),
+          authBootstrapCode: values.authBootstrapCode || randomBytes(32).toString('hex'),
+        }
+      : await collectInstallationAuthentication(
+          authenticationSelection,
+          plan,
+          values,
+          saveAuthenticationValues,
+        );
+    if (authenticationSecrets) {
+      saveAuthenticationValues(authenticationSecrets);
+    }
+    let bootstrapGitHubLogin = '';
+    let bootstrapGitHubId = '';
+    let githubClientId = '';
+    let githubClientSecret = '';
+    if (!authenticationSecrets) {
+      const previousLogin = values.bootstrapGitHubLogin;
+      bootstrapGitHubLogin = await collect(
+        'bootstrapGitHubLogin',
+        'VOID_PLATFORM_ADMIN_GITHUB_LOGIN',
+        'Initial administrator GitHub username:',
+        false,
+      );
+      bootstrapGitHubId =
+        (previousLogin === bootstrapGitHubLogin ? values.bootstrapGitHubId : '') ||
+        process.env.VOID_PLATFORM_ADMIN_GITHUB_ID ||
+        (await resolveBootstrapGitHubId(bootstrapGitHubLogin));
+      saveValues({ bootstrapGitHubId });
+    }
     const installationDatabaseUrl =
       databaseUrl ||
       (await collect('databaseUrl', 'VOID_PLATFORM_DATABASE_URL', 'PostgreSQL DATABASE_URL:'));
     saveValues({ databaseUrl: installationDatabaseUrl });
-    if (
-      !configured('githubClientId', 'VOID_PLATFORM_GITHUB_CLIENT_ID') ||
-      !configured('githubClientSecret', 'VOID_PLATFORM_GITHUB_CLIENT_SECRET')
-    ) {
-      openPlatformSetupPage(
-        configured('githubClientId', 'VOID_PLATFORM_GITHUB_CLIENT_ID')
-          ? { ...pages.github, url: 'https://github.com/settings/developers' }
-          : pages.github,
+    if (!authenticationSecrets) {
+      if (
+        !configured('githubClientId', 'VOID_PLATFORM_GITHUB_CLIENT_ID') ||
+        !configured('githubClientSecret', 'VOID_PLATFORM_GITHUB_CLIENT_SECRET')
+      ) {
+        openPlatformSetupPage(
+          configured('githubClientId', 'VOID_PLATFORM_GITHUB_CLIENT_ID')
+            ? { ...pages.github, url: 'https://github.com/settings/developers' }
+            : pages.github,
+        );
+      }
+      githubClientId = await collect(
+        'githubClientId',
+        'VOID_PLATFORM_GITHUB_CLIENT_ID',
+        'GitHub OAuth client ID:',
+        false,
+        false,
       );
+      githubClientSecret = await collect(
+        'githubClientSecret',
+        'VOID_PLATFORM_GITHUB_CLIENT_SECRET',
+        'GitHub OAuth client secret:',
+        true,
+        false,
+      );
+      saveValues({ githubClientId, githubClientSecret });
     }
-    const githubClientId = await collect(
-      'githubClientId',
-      'VOID_PLATFORM_GITHUB_CLIENT_ID',
-      'GitHub OAuth client ID:',
-      false,
-      false,
-    );
-    const githubClientSecret = await collect(
-      'githubClientSecret',
-      'VOID_PLATFORM_GITHUB_CLIENT_SECRET',
-      'GitHub OAuth client secret:',
-      true,
-      false,
-    );
-    saveValues({ githubClientId, githubClientSecret });
     if (
       !configured('r2AccessKeyId', 'VOID_PLATFORM_R2_ACCESS_KEY_ID') ||
       !configured('r2SecretAccessKey', 'VOID_PLATFORM_R2_SECRET_ACCESS_KEY')
@@ -632,6 +673,8 @@ export async function runPlatformLifecycleCommand(args: PlatformArgs): Promise<v
       process.env.VOID_PLATFORM_PROJECT_SECRET_ACTIVE_KEY_VERSION,
     );
     const secrets = createPlatformInstallationSecrets({
+      configurableAuthentication: !!authenticationSelection.authentication.configurable,
+      ...authenticationSecrets,
       bootstrapGitHubId,
       bootstrapGitHubLogin,
       cloudflareApiToken: runtimeCloudflareApiToken,
@@ -690,6 +733,27 @@ export async function runPlatformLifecycleCommand(args: PlatformArgs): Promise<v
       runtime,
       healthCheckResumeCommand: `${cliCommandName()} platform install --resume --name ${existing.id}`,
       onProgress: (message) => progress?.message(message),
+      ...(deferAuthentication
+        ? {
+            prepareAuthentication: async (manifest: PlatformInstallationManifest) => {
+              progress?.stop('Preparing Cloudflare Access configuration.');
+              progress = undefined;
+              const result = await collectInstallationAuthentication(
+                authenticationSelection,
+                plan,
+                values,
+                saveAuthenticationValues,
+                { client, ownershipNonce: manifest.ownershipNonce, yes: args.yes },
+              );
+              progress = startProgress('Continuing platform installation');
+              return {
+                ...result,
+                accessProvisioningJson: values.accessProvisioningJson,
+                accessCredentialsJson: values.accessCredentialsJson,
+              };
+            },
+          }
+        : {}),
       replanWorkers: async (manifest) =>
         (
           await createPlatformInstallPlan(client, planInput, manifest, {
@@ -744,6 +808,14 @@ export async function runPlatformLifecycleCommand(args: PlatformArgs): Promise<v
       `${result.manifest.deployment.displayName} is installed at ${new URL('/admin', plan.apiUrl).href}.`,
     );
     log.info(`API URL: ${plan.apiUrl}`);
+    const completedAuthCode = readInstallationRecoverySecrets(result.manifest)?.authBootstrapCode;
+    if (result.setupPending && completedAuthCode) {
+      log.info(`First administrator setup: ${plan.apiUrl}/setup`);
+      console.log(`One-time administrator setup code: ${completedAuthCode}`);
+      log.info(
+        'Confirm your identity in the browser, then test and enable any additional login methods in Settings.',
+      );
+    }
     if (!plan.deployment.application.zoneName) {
       log.info(
         'Apps will use workers.dev addresses. When your domain is ready: void platform domain set <domain>',

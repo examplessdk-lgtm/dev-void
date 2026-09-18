@@ -39,6 +39,57 @@ export function cfAccessHeaders(
   env: Record<string, unknown>,
   targetUrl: string,
 ): Record<string, string> {
+  let origin: string;
+  try {
+    const target = new URL(targetUrl);
+    if (target.protocol !== 'https:' || target.username || target.password) {
+      return {};
+    }
+    origin = target.origin;
+  } catch {
+    return {};
+  }
+  const encoded = env.VOID_ACCESS_CREDENTIALS ?? env.__VOID_ACCESS_CREDENTIALS;
+  if (typeof encoded === 'string' && encoded) {
+    try {
+      const records = JSON.parse(encoded) as Record<string, unknown>;
+      if (!records || typeof records !== 'object' || Array.isArray(records)) {
+        return {};
+      }
+      const entry =
+        records &&
+        typeof records === 'object' &&
+        !Array.isArray(records) &&
+        Object.hasOwn(records, origin)
+          ? records[origin]
+          : undefined;
+      if (entry && typeof entry === 'object' && !Array.isArray(entry)) {
+        return accessHeaders(entry as Record<string, unknown>);
+      }
+      if (Object.hasOwn(records, origin)) {
+        return {};
+      }
+    } catch {
+      // Invalid explicit configuration never falls back to credentials for another recipient.
+      return {};
+    }
+  }
+  if (typeof env.VOID_ACCESS_ORIGIN === 'string' && env.VOID_ACCESS_ORIGIN) {
+    try {
+      const selected = new URL(env.VOID_ACCESS_ORIGIN);
+      return selected.protocol === 'https:' &&
+        !selected.username &&
+        !selected.password &&
+        selected.pathname === '/' &&
+        !selected.search &&
+        !selected.hash &&
+        selected.origin === origin
+        ? accessHeaders(env)
+        : {};
+    } catch {
+      return {};
+    }
+  }
   return isVoidAccessGatedUrl(targetUrl) ? accessHeaders(env) : {};
 }
 
@@ -51,4 +102,23 @@ export function trustedCloudflareWorkerAccessHeaders(
   env: Record<string, unknown>,
 ): Record<string, string> {
   return accessHeaders(env);
+}
+
+/** Keep only this recipient's credentials when crossing into a local Worker runtime. */
+export function scopedAccessCredentials(
+  env: Record<string, unknown>,
+  targetUrl: string,
+): string | undefined {
+  const headers = cfAccessHeaders(env, targetUrl);
+  if (Object.keys(headers).length === 0) {
+    return undefined;
+  }
+  return JSON.stringify({
+    [new URL(targetUrl).origin]: headers['CF-Access-Client-Id']
+      ? {
+          CF_ACCESS_CLIENT_ID: headers['CF-Access-Client-Id'],
+          CF_ACCESS_CLIENT_SECRET: headers['CF-Access-Client-Secret'],
+        }
+      : { CF_ACCESS_TOKEN: headers['cf-access-token'] },
+  });
 }

@@ -13,10 +13,11 @@ import {
   MAX_SENDER_LENGTH,
   readEmailDomainMirror,
 } from './email.ts';
+import { guardHumanStream } from './human-stream.ts';
 import { kv } from './kv.ts';
 import { PLATFORM_DISABLED_KEY, PLATFORM_DISABLED_VALUE } from './platform-lifecycle.ts';
 import { r2 } from './r2.ts';
-import { verifyPrerenderBuild, verifyProjectOwner } from './resolve.ts';
+import { verifyPrerenderAuthority, verifyProjectOwner } from './resolve.ts';
 import { revalidate } from './revalidate.ts';
 import type { Env, JwtPayload, ProxyBody, ProxyEnv } from './types.ts';
 
@@ -300,6 +301,7 @@ app.post('/*', async (context, next) => {
     return;
   }
 
+  let revalidateHuman: (() => Promise<boolean>) | undefined;
   const authHeader = context.req.header('authorization');
   if (authHeader?.startsWith('Bearer ')) {
     // HTTPS path (local dev) — validate JWT
@@ -319,26 +321,42 @@ app.post('/*', async (context, next) => {
       if (!payload.project || payload.project !== projectId) {
         return context.json({ error: 'forbidden' }, 403);
       }
-      if (
-        payload.build &&
-        !(await verifyPrerenderBuild(
+      if (payload.build || payload.credential) {
+        const active = await verifyPrerenderAuthority(
           context.env.API,
           context.env.JWT_SECRET,
           projectId,
-          payload.build,
-        ))
-      ) {
-        return context.json({ error: 'prerender token build is no longer active' }, 403);
+          payload.sub,
+          {
+            ...(payload.build ? { buildId: payload.build } : {}),
+            ...(payload.credential ? { credentialId: payload.credential } : {}),
+          },
+        );
+        if (!active) {
+          return context.json(
+            {
+              error: payload.credential
+                ? 'prerender token credential is no longer active'
+                : 'prerender token build is no longer active',
+            },
+            403,
+          );
+        }
       }
     } else {
       // Full API tokens retain the local-development ownership lookup.
-      const owns = await verifyProjectOwner(
-        context.env.API,
-        context.env.JWT_SECRET,
-        projectId,
-        payload.sub,
-      );
-      if (!owns) {
+      const checkOwner = () =>
+        verifyProjectOwner(
+          context.env.API,
+          context.env.JWT_SECRET,
+          projectId,
+          payload.sub,
+          token,
+          context.req.header('Cf-Access-Jwt-Assertion'),
+          new URL(context.req.url).origin,
+        );
+      revalidateHuman = async () => payload.exp > Date.now() / 1000 && (await checkOwner());
+      if (!(await revalidateHuman())) {
         return context.json({ error: 'forbidden' }, 403);
       }
     }
@@ -357,6 +375,18 @@ app.post('/*', async (context, next) => {
   }
 
   await next();
+  if (
+    revalidateHuman &&
+    context.res.body &&
+    (context.res.headers.get('content-type')?.includes('text/event-stream') ||
+      path.startsWith('/ai/') ||
+      path === '/r2/get')
+  ) {
+    context.res = new Response(
+      guardHumanStream(context.res.body, revalidateHuman, context.req.raw.signal),
+      context.res,
+    );
+  }
 });
 
 // AI usage limit check — only applies to AI routes

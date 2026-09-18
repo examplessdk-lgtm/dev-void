@@ -80,6 +80,7 @@ try {
   const manifest = parsePlatformRuntimeManifest({
     artifacts,
     applicationRoutingVersion: 1,
+    authenticationProtocolVersion: 1,
     database,
     platformVersion: packageJson.version,
     safetyProtocols: { sandboxDrain: 2 },

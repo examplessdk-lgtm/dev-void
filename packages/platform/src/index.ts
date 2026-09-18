@@ -1,4 +1,33 @@
 export {
+  platformAuthenticationRecoveryMessage,
+  type PlatformAuthenticationRecovery,
+} from './authentication-recovery.ts';
+export {
+  DEFAULT_PLATFORM_SESSION_SECONDS,
+  GOOGLE_OIDC_ISSUER,
+  PLATFORM_LOGIN_KINDS,
+  PLATFORM_AUTH_SETUP_PROOF_PREFIX,
+  parsePlatformAccessProtection,
+  parsePlatformAdmissionPolicy,
+  parsePlatformAuthenticationSetup,
+  parsePlatformIdentityUrl,
+  parsePlatformLoginConfiguration,
+  parsePlatformLoginDescriptor,
+  parsePlatformLoginId,
+  parsePlatformSignupAllowlistEntry,
+  isPlatformSignupAllowed,
+  platformProtectionProofMessage,
+  validatePlatformAdmissionPolicy,
+  type PlatformAccessProtection,
+  type PlatformAdmissionPolicy,
+  type PlatformAuthenticationSetup,
+  type PlatformLoginConfiguration,
+  type PlatformLoginDescriptor,
+  type PlatformLoginKind,
+  type PlatformSignupAllowlistEntry,
+  type PlatformSignupIdentity,
+} from './authentication.ts';
+export {
   PLATFORM_DEPLOYMENT_SCHEMA_VERSION,
   createApplicationRoutes,
   createPlatformDeploymentManifest,
@@ -46,6 +75,7 @@ export {
   createPlatformDiscoveryDocument,
   parsePlatformDiscoveryDocument,
   type PlatformDiscoveryDocument,
+  type PlatformAuthenticationDiscovery,
 } from './discovery.ts';
 export {
   createPlatformWorkerConfigs,

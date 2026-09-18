@@ -17,8 +17,8 @@ vi.mock('@napi-rs/keyring', () => ({
   Entry: class {
     readonly account: string;
 
-    constructor(_service: string, account: string) {
-      this.account = account;
+    constructor(service: string, account: string) {
+      this.account = `${service}:${account}`;
     }
 
     deletePassword() {
@@ -145,7 +145,10 @@ describe('environment token destinations', () => {
       kind: 'connected',
       proxyUrl: 'https://proxy.example.test',
     });
-    state.passwords.set(platformCredentialAccount(origin), 'other-platform-saved-token');
+    state.passwords.set(
+      `dev.void.cli:${platformCredentialAccount(origin)}`,
+      'other-platform-saved-token',
+    );
     if (withProject) {
       mkdirSync(join(root, '.void'));
       writeFileSync(

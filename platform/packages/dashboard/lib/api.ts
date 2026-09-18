@@ -1,6 +1,8 @@
 import type { ApiRoutes } from '@voidcloud/api/api';
 import type { Context } from 'hono';
 import { hc, type InferResponseType } from 'hono/client';
+import { getCookie } from 'hono/cookie';
+import { dashboardRequestOrigin, isLocalDashboardHost } from './origin.ts';
 
 export type Client = ReturnType<typeof hc<ApiRoutes>>;
 export type ApiResponse = Pick<
@@ -23,7 +25,7 @@ function getApiUrl(context: Context): string {
 
 function isLocalHost(context: Context): boolean {
   const host = context.req.header('host') ?? '';
-  return host.startsWith('localhost') || host.startsWith('127.0.0.1');
+  return isLocalDashboardHost(host);
 }
 
 /**
@@ -34,7 +36,18 @@ function isLocalHost(context: Context): boolean {
 function getApiFetch(context: Context): typeof fetch {
   const binding = (context.env as { API?: Fetcher }).API;
   if (binding && !isLocalHost(context)) {
-    return binding.fetch.bind(binding);
+    return ((input: RequestInfo | URL, init?: RequestInit) => {
+      // The service binding is internal. Preserve the browser's actual protected origin so
+      // the API verifies the dashboard application's audience, not the API application's.
+      // No forwarded-host header participates in this choice.
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      if (context.req.header('Cf-Access-Jwt-Assertion')) {
+        const source = new URL(dashboardRequestOrigin(context));
+        url.host = source.host;
+        url.protocol = source.protocol;
+      }
+      return binding.fetch(input instanceof Request ? new Request(url, input) : url, init);
+    }) as typeof fetch;
   }
   return globalThis.fetch;
 }
@@ -60,7 +73,7 @@ function getTimedApiFetch(context: Context): typeof fetch {
   const apiFetch = getApiFetch(context);
   const timeoutMs = getApiTimeoutMs(context);
   return ((input: RequestInfo | URL, init?: RequestInit) =>
-    apiFetch(input, withTimeout(init, timeoutMs))) as typeof fetch;
+    apiFetch(input, withTimeout({ ...init, redirect: 'manual' }, timeoutMs))) as typeof fetch;
 }
 
 function getToken(context: Context): string | undefined {
@@ -69,6 +82,16 @@ function getToken(context: Context): string | undefined {
 
 function getCfAccessHeaders(context: Context): Record<string, string> {
   const env = context.env as Record<string, string | undefined>;
+  // The API independently checks the application audience and bound company subject.
+  // Prefer this browser's proof; a dashboard service token cannot represent a human.
+  const assertion = context.req.header('Cf-Access-Jwt-Assertion');
+  const browserToken = getCookie(context, 'CF_Authorization');
+  if (assertion || browserToken) {
+    return {
+      ...(assertion ? { 'Cf-Access-Jwt-Assertion': assertion } : {}),
+      ...(browserToken ? { 'cf-access-token': browserToken } : {}),
+    };
+  }
   if (env.CF_ACCESS_CLIENT_ID && env.CF_ACCESS_CLIENT_SECRET) {
     return {
       'CF-Access-Client-Id': env.CF_ACCESS_CLIENT_ID,

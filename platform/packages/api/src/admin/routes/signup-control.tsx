@@ -22,7 +22,7 @@ app.get('/', async (context) => {
 });
 
 app.post('/toggle', async (context) => {
-  const current = (await context.env.ROUTING.get('signup:enabled')) === 'true';
+  const current = (await getOperatorSignup(context)).enabled;
   const enabled = !current;
   return executeAuditedMutation(
     context,
@@ -37,13 +37,38 @@ app.post('/toggle', async (context) => {
 app.post('/add', async (context) => {
   const body = await context.req.parseBody();
   const type = String(body.type ?? '');
-  const patterns = parseAccessList(String(body.pattern ?? ''));
   const note = String(body.note ?? '');
+  const patterns = type === 'identity' ? [] : parseAccessList(String(body.pattern ?? ''));
+  const entries =
+    type === 'identity'
+      ? [
+          {
+            type,
+            connectionId: String(body.connectionId ?? ''),
+            subject: String(body.subject ?? ''),
+            ...(note ? { note } : {}),
+          },
+        ]
+      : patterns.map((pattern) => ({
+          type,
+          pattern,
+          ...(note ? { note } : {}),
+        }));
   return executeAuditedMutation(
     context,
-    operatorAuditIntent('signup/allow', { type, patterns, note }),
+    operatorAuditIntent(
+      'signup/allow',
+      type === 'identity'
+        ? {
+            type,
+            connectionId: String(body.connectionId ?? ''),
+            subject: String(body.subject ?? ''),
+            note,
+          }
+        : { type, patterns, note },
+    ),
     async () => {
-      await allowOperatorSignup(context, type, patterns, note);
+      await allowOperatorSignup(context, entries);
       return { response: context.redirect('/admin/signup-control'), succeeded: true };
     },
   );
@@ -57,14 +82,10 @@ app.post('/delete', async (context) => {
     throw new OperatorError(400, 'Invalid index');
   }
   const entry = entries[index];
-  return executeAuditedMutation(
-    context,
-    operatorAuditIntent('signup/remove', { type: entry.type, pattern: entry.pattern }),
-    async () => {
-      await removeOperatorSignup(context, entry.type, entry.pattern);
-      return { response: context.redirect('/admin/signup-control'), succeeded: true };
-    },
-  );
+  return executeAuditedMutation(context, operatorAuditIntent('signup/remove', entry), async () => {
+    await removeOperatorSignup(context, entry);
+    return { response: context.redirect('/admin/signup-control'), succeeded: true };
+  });
 });
 
 export default app;

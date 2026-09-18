@@ -9,6 +9,10 @@ export async function runAuthCommand(root: string, args: AuthArgs): Promise<void
   switch (args.subcommand) {
     case 'login':
       return runLoginCommand(root);
+    case 'link':
+      return import('./auth-link.ts').then(({ runAuthLink }) =>
+        runAuthLink(root, args.connectionId),
+      );
     case 'logout':
       if (removeToken(root)) {
         log.success('Logged out.');

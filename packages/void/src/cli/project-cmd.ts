@@ -24,6 +24,15 @@ export async function runProjectCommand(root: string, args: ProjectArgs): Promis
     }
     return runProjectsCommand(root);
   }
+  if (args.subcommand === 'token') {
+    if (cloudflare) {
+      throw new Error(
+        'project: CI deploy credentials are available only for Void platform projects.',
+      );
+    }
+    const { runProjectTokenCommand } = await import('./project-token.ts');
+    return runProjectTokenCommand(root, args);
+  }
   if (args.subcommand === 'logs') {
     const { runLogsCommand } = await import('./logs.ts');
     return runLogsCommand(

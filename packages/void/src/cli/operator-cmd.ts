@@ -245,11 +245,18 @@ async function runAuth(origin: string, args: OperatorArgs): Promise<void> {
     }
     const apiToken = args.tokenStdin
       ? await readOperatorApiTokenStdin()
-      : await import('./auth.ts').then(({ runPlatformLogin }) =>
-          runPlatformLogin(origin, args.provider, (url) =>
+      : await (async () => {
+          const { discoverPlatform } = await import('./platform-cmd.ts');
+          const { selectPlatformLoginMethod } = await import('./login.ts');
+          const { runPlatformLogin } = await import('./auth.ts');
+          const method = await selectPlatformLoginMethod(
+            await discoverPlatform(origin),
+            args.providerExplicit ? args.provider : undefined,
+          );
+          return runPlatformLogin(origin, method.id, (url) =>
             process.stderr.write(`Sign in at ${url}\n`),
-          ),
-        );
+          );
+        })();
     const session = await exchangeOperatorSession(origin, apiToken);
     const { token, ...identity } = session;
     if (args.action === 'token') {

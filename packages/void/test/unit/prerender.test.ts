@@ -225,6 +225,27 @@ export default {
 });
 
 describe('buildPrerenderBindings', () => {
+  it('passes only the selected proxy Access credentials to the local Worker', () => {
+    const result = buildPrerenderBindings({
+      wranglerVars: {},
+      env: {},
+      voidToken: 'human',
+      voidProjectId: 'project',
+      voidProxyUrl: 'https://proxy.example.com',
+      voidStaging: false,
+      remoteMode: true,
+      accessEnv: {
+        VOID_ACCESS_CREDENTIALS: JSON.stringify({
+          'https://proxy.example.com': { CF_ACCESS_TOKEN: 'proxy-proof' },
+          'https://api.example.com': { CF_ACCESS_TOKEN: 'api-proof' },
+        }),
+      },
+    });
+    expect(JSON.parse(result.__VOID_ACCESS_CREDENTIALS as string)).toEqual({
+      'https://proxy.example.com': { CF_ACCESS_TOKEN: 'proxy-proof' },
+    });
+    expect(JSON.stringify(result)).not.toContain('api-proof');
+  });
   it('omits __VOID_* bindings when the token is missing', () => {
     const result = buildPrerenderBindings({
       wranglerVars: {},

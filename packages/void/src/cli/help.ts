@@ -40,7 +40,7 @@ function operatorHelpTree(): HelpTree {
               entry.action,
               {
                 summary: `${entry.description}.`,
-                usage: [
+                usage: entry.usage ?? [
                   `void platform ${group} ${entry.action}${entry.positional?.map((name) => (entry.optionalPositional ? ` [${name}]` : ` <${name}>`)).join('') ?? ''} [options]`,
                 ],
                 options: [
@@ -180,16 +180,21 @@ const HELP_TREE: HelpTree = {
     ],
   },
   auth: {
-    summary: 'Log in, log out, and inspect local auth state.',
+    summary: 'Log in, link login methods, log out, and inspect local auth state.',
     usage: ['void auth <command>'],
     commands: [
-      { command: 'login', description: 'Log in with GitHub or Google' },
+      { command: 'login', description: 'Log in with an enabled platform login method' },
+      { command: 'link [connection-id]', description: 'Link another login method to your account' },
       { command: 'logout', description: 'Log out and remove credentials' },
       { command: 'whoami', description: 'Show the logged-in username' },
       { command: 'token', description: 'Copy auth token to clipboard' },
     ],
     children: {
-      login: basicSubcommand('Log in with GitHub or Google.', 'void auth login'),
+      login: basicSubcommand('Log in with an enabled platform login method.', 'void auth login'),
+      link: basicSubcommand(
+        'Sign in again, then verify and link another login method to your existing account.',
+        'void auth link [connection-id]',
+      ),
       logout: basicSubcommand('Log out and remove credentials.', 'void auth logout'),
       whoami: basicSubcommand('Show the logged-in username.', 'void auth whoami'),
       token: basicSubcommand('Copy auth token to clipboard.', 'void auth token'),
@@ -227,6 +232,10 @@ const HELP_TREE: HelpTree = {
         command: `${group} <command>`,
         description: `Administer platform ${group}`,
       })),
+      {
+        command: 'config auth [command]',
+        description: 'Configure login methods, company protection, and provider recovery',
+      },
       { command: 'list', description: 'List installed and connected platforms' },
       { command: 'use [id]', description: 'Select the default Void platform' },
       { command: 'status [id]', description: 'Inspect a platform and its health' },
@@ -248,6 +257,77 @@ const HELP_TREE: HelpTree = {
     ],
     children: {
       ...operatorHelpTree(),
+      config: {
+        summary: 'Configure platform settings.',
+        usage: ['void platform config auth [command] [options]'],
+        children: {
+          auth: {
+            summary:
+              'Manage login methods and independent platform protection. Without a command, opens interactive configuration.',
+            usage: [
+              'void platform config auth [list|show|initialize|add|configure|test|enable|disable|link|admission|protection|recover] [method-or-action] [options]',
+            ],
+            commands: [
+              {
+                command: 'list',
+                description: 'List configured login methods and platform protection',
+              },
+              {
+                command: 'show <id>',
+                description: 'Inspect a login method without displaying secrets',
+              },
+              {
+                command: 'initialize',
+                description: 'Import existing login settings before first configuration',
+              },
+              {
+                command: 'add <github|google|oidc|cloudflare-access>',
+                description: 'Configure a new login method',
+              },
+              { command: 'configure <id>', description: 'Stage an update to a login method' },
+              { command: 'test <id>', description: 'Verify a login configuration in the browser' },
+              { command: 'enable <id>', description: 'Enable a successfully tested configuration' },
+              {
+                command: 'disable <id>',
+                description: 'Disable a method and revoke its human sessions',
+              },
+              {
+                command: 'link <id>',
+                description: 'Explicitly link a tested identity to your account',
+              },
+              {
+                command: 'admission',
+                description: 'Choose invited, company-approved, or public signup',
+              },
+              {
+                command: 'protection <enable|disable|show>',
+                description: 'Create or connect Access protection independently from login',
+              },
+              {
+                command: 'recover <id>',
+                description: 'Recover an existing administrator using installation authority',
+              },
+            ],
+            options: [
+              { command: '--connection <id-or-url>', description: 'Select a registered platform' },
+              {
+                command: '--installation <id>',
+                description: 'Select recovery authority for protection or provider recovery',
+              },
+              { command: '--id <id>', description: 'Name a new OIDC or Access connection' },
+              { command: '--file <path>', description: 'Read nonsecret configuration from JSON' },
+              {
+                command: '--client-secret-env <name>',
+                description: 'Read the client secret from an environment variable',
+              },
+              { command: '--test-id <id>', description: 'Use a completed test for enable or link' },
+              { command: '--plan', description: 'Validate and preview a change' },
+              { command: '--yes', description: 'Apply without prompting' },
+              { command: '--json', description: 'Print structured output' },
+            ],
+          },
+        },
+      },
       domain: {
         summary: 'Add an application domain while keeping existing workers.dev URLs.',
         usage: ['void platform domain set <domain> [options]'],
@@ -293,6 +373,11 @@ const HELP_TREE: HelpTree = {
         summary: 'Install or resume a Void platform with a domain, or workers.dev for testing.',
         usage: ['void platform install [options]'],
         options: [
+          {
+            command: '--auth-config <path>',
+            description:
+              'Read login methods and signup policy from nonsecret JSON with environment secret references',
+          },
           { command: '--name <slug>', description: 'Installation name' },
           {
             command: '--workers-dev',
@@ -366,6 +451,7 @@ const HELP_TREE: HelpTree = {
       { command: 'status [name]', description: 'Show deployments for a project' },
       { command: 'link [name]', description: 'Link this directory to a project' },
       { command: 'list', description: 'List your projects' },
+      { command: 'token <command>', description: 'Manage project-scoped CI deploy credentials' },
       { command: 'logs', description: 'Show runtime logs from the deployed project' },
       { command: 'requests', description: 'Show request-level traffic (status, method, timing)' },
       { command: 'rollback [deployId]', description: 'Roll back to a previous deployment' },
@@ -385,6 +471,23 @@ const HELP_TREE: HelpTree = {
         'void project link my-app',
       ),
       list: basicSubcommand('List your projects.', 'void project list'),
+      token: {
+        summary: 'Manage revocable, project-scoped credentials for CI deploys.',
+        usage: ['void project token <create|list|renew|revoke> [options]'],
+        options: [
+          { command: '--project <name>', description: 'Project name override' },
+          { command: '--name <label>', description: 'Credential label (create only)' },
+          { command: '--expires-in <days>', description: 'Expiry from 1 to 90 days' },
+          { command: '--json', description: 'Print machine-readable output' },
+        ],
+        examples: [
+          {
+            command: 'void project token create --name github-actions --expires-in 30',
+            description: 'Create a CI deploy credential',
+          },
+          { command: 'void project token revoke <id>', description: 'Revoke a credential now' },
+        ],
+      },
       logs: {
         summary: 'Show runtime logs from the deployed project.',
         usage: ['void project logs [options]'],

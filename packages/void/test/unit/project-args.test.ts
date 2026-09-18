@@ -2,6 +2,45 @@ import { describe, expect, it } from 'vite-plus/test';
 import { parseProjectArgs } from '../../src/cli/project-args.ts';
 
 describe('parseProjectArgs', () => {
+  describe('token', () => {
+    it('parses bounded credential creation and revocation', () => {
+      expect(
+        parseProjectArgs([
+          'token',
+          'create',
+          '--project',
+          'app',
+          '--name',
+          'github-actions',
+          '--expires-in',
+          '30',
+          '--json',
+        ]),
+      ).toEqual({
+        subcommand: 'token',
+        action: 'create',
+        credentialId: '',
+        projectSlug: 'app',
+        name: 'github-actions',
+        expiresInDays: 30,
+        json: true,
+      });
+      expect(parseProjectArgs(['token', 'revoke', 'credential-id'])).toMatchObject({
+        subcommand: 'token',
+        action: 'revoke',
+        credentialId: 'credential-id',
+      });
+    });
+
+    it('rejects missing actions, IDs, and unbounded expiry', () => {
+      expect(() => parseProjectArgs(['token'])).toThrow('create|list|renew|revoke');
+      expect(() => parseProjectArgs(['token', 'renew'])).toThrow('requires a credential ID');
+      expect(() => parseProjectArgs(['token', 'create', '--expires-in', '91'])).toThrow(
+        'integer from 1 to 90',
+      );
+    });
+  });
+
   describe('cancel', () => {
     it('parses cancel without a deployment id', () => {
       expect(parseProjectArgs(['cancel'])).toEqual({

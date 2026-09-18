@@ -14,6 +14,7 @@ const state = vi.hoisted(() => ({
   events: [] as Array<string>,
   manifest: undefined as PlatformInstallationManifest | undefined,
   prepareDatabase: vi.fn(),
+  readAuthenticationState: vi.fn(),
   releaseDatabase: vi.fn(),
   spinner: vi.fn(),
   progress: { start: vi.fn(), message: vi.fn(), stop: vi.fn(), error: vi.fn(), clear: vi.fn() },
@@ -90,6 +91,7 @@ vi.mock('../../src/cli/platform-installer.ts', async (importOriginal) => {
           authoritativeManifest: state.manifest,
           checkpoint: vi.fn(),
           prepareDatabase: state.prepareDatabase,
+          readAuthenticationState: state.readAuthenticationState,
         },
       );
       return release;
@@ -106,6 +108,8 @@ vi.mock('../../src/cli/platform-installer.ts', async (importOriginal) => {
         existing!.ownershipNonce,
       );
       expect(borrowed.prepareDatabase).toBe(state.prepareDatabase);
+      expect(borrowed.readAuthenticationState).toBe(state.readAuthenticationState);
+      await borrowed.readAuthenticationState!();
       state.events.push('installer-start');
       dependencies.onProgress?.('Deploying the api service');
       await borrowed.prepareDatabase!(
@@ -193,6 +197,7 @@ describe('installed platform upgrade', () => {
         schemaDigest: database.schemaDigest,
       };
     });
+    state.readAuthenticationState.mockReset().mockResolvedValue(null);
     state.runtime = resolvePlatformRuntime(getPlatformRuntimeDirectory());
     const deployment = createPlatformDeploymentManifest({
       application: { baseDomain: 'apps.example.com', zoneName: 'example.com' },

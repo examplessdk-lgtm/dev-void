@@ -16,6 +16,7 @@ type ParsedProjectSecretKeys = Readonly<{
   activeVersion: string;
   rawKeys: Map<string, ArrayBuffer>;
   cryptoKeys: Map<string, Promise<CryptoKey>>;
+  credentialKeys: Map<string, Promise<CryptoKey>>;
 }>;
 
 let cachedKeyConfig:
@@ -106,6 +107,7 @@ function parseProjectSecretKeys(env: ProjectSecretBindings): ParsedProjectSecret
     activeVersion: env.PROJECT_SECRET_ACTIVE_KEY_VERSION,
     rawKeys,
     cryptoKeys: new Map(),
+    credentialKeys: new Map(),
   };
   cachedKeyConfig = {
     rawJson: env.PROJECT_SECRET_KEYS_JSON,
@@ -135,6 +137,93 @@ async function getCryptoKey(env: ProjectSecretBindings, version: string): Promis
 export function generateManagedAuthSecret(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(32));
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+export type EncryptedPlatformCredential = Readonly<{
+  ciphertext: string;
+  iv: string;
+  keyVersion: string;
+}>;
+
+/** Separate platform credential keys from the project's AES key and ciphertext namespace. */
+async function platformCredentialKey(
+  env: ProjectSecretBindings,
+  version: string,
+): Promise<CryptoKey> {
+  const config = parseProjectSecretKeys(env);
+  const rawKey = config.rawKeys.get(version);
+  if (!rawKey) {
+    throw new Error('Unknown platform credential key version.');
+  }
+  let key = config.credentialKeys.get(version);
+  if (!key) {
+    key = crypto.subtle.importKey('raw', rawKey, 'HKDF', false, ['deriveKey']).then((master) =>
+      crypto.subtle.deriveKey(
+        {
+          name: 'HKDF',
+          hash: 'SHA-256',
+          salt: encoder.encode('void-platform-auth-v1'),
+          info: encoder.encode('login-client-credentials'),
+        },
+        master,
+        { name: 'AES-GCM', length: 256 },
+        false,
+        ['encrypt', 'decrypt'],
+      ),
+    );
+    config.credentialKeys.set(version, key);
+  }
+  return key;
+}
+
+export async function encryptPlatformCredential(
+  env: ProjectSecretBindings,
+  installationId: string,
+  credentialId: string,
+  value: string,
+): Promise<EncryptedPlatformCredential> {
+  const { activeVersion } = parseProjectSecretKeys(env);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const key = await platformCredentialKey(env, activeVersion);
+  const ciphertext = await crypto.subtle.encrypt(
+    {
+      name: 'AES-GCM',
+      iv,
+      additionalData: encoder.encode(JSON.stringify([installationId, credentialId])),
+    },
+    key,
+    encoder.encode(value),
+  );
+  return {
+    ciphertext: bytesToBase64(new Uint8Array(ciphertext)),
+    iv: bytesToBase64(iv),
+    keyVersion: activeVersion,
+  };
+}
+
+export async function decryptPlatformCredential(
+  env: ProjectSecretBindings,
+  installationId: string,
+  credentialId: string,
+  credential: EncryptedPlatformCredential,
+): Promise<string> {
+  try {
+    const key = await platformCredentialKey(env, credential.keyVersion);
+    const plaintext = await crypto.subtle.decrypt(
+      {
+        name: 'AES-GCM',
+        iv: toArrayBuffer(base64ToBytes(credential.iv)),
+        additionalData: encoder.encode(JSON.stringify([installationId, credentialId])),
+      },
+      key,
+      toArrayBuffer(base64ToBytes(credential.ciphertext)),
+    );
+    return new TextDecoder().decode(plaintext);
+  } catch {
+    throw new Error(
+      'Failed to decrypt platform credential. Check the platform encryption keyring.',
+    );
+  }
 }
 
 export async function encryptProjectSecret(

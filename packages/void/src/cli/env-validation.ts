@@ -1400,6 +1400,8 @@ export function secretListEnv(accountId?: string, platform?: NodeJS.Platform): N
   };
   scrub('CF_ACCESS_CLIENT_ID');
   scrub('CF_ACCESS_CLIENT_SECRET');
+  scrub('VOID_ACCESS_CREDENTIALS');
+  scrub('VOID_ACCESS_ORIGIN');
   scrub('WRANGLER_LOG_SANITIZE');
   env.WRANGLER_LOG_SANITIZE = 'true';
   if (accountId) {

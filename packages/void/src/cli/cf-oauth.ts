@@ -205,6 +205,12 @@ export async function runCfOauthGrant(options: {
     };
 
     const server = http.createServer(async (req, res) => {
+      // This is a one-shot browser callback, so never leave a keep-alive
+      // connection behind after answering it. `server.close()` stops new
+      // connections, but an HTTP client may otherwise reuse an existing
+      // socket and send a later grant's callback to this server after its
+      // listener has closed.
+      res.setHeader('Connection', 'close');
       const url = new URL(req.url!, 'http://localhost');
       if (url.pathname !== CF_OAUTH_CALLBACK_PATH) {
         res.writeHead(404);

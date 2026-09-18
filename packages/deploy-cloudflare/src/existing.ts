@@ -1,6 +1,7 @@
 import { isDeepStrictEqual } from 'node:util';
 import { parseRootWranglerConfig } from './config.ts';
 import type { CloudflareCommandRunner } from './execute.ts';
+import { isWranglerSecretOnlyDraft } from './secret-draft.ts';
 
 export type ExistingCloudflareWorker = {
   versionId: string;
@@ -17,6 +18,11 @@ type ExistingCloudflareWorkerOptions = {
   configPath: string;
   workerName: string;
   versionId?: string;
+};
+
+type CloudflareWorkerInspection = {
+  snapshot: ExistingCloudflareWorker;
+  isSecretOnlyDraft: boolean;
 };
 
 export type CloudflareWorkerMigrationTagOptions = {
@@ -37,13 +43,13 @@ export async function readExistingCloudflareWorker(options: {
   if (!worker) {
     throw new Error(`Cloudflare Worker "${options.workerName}" does not have an active version.`);
   }
-  return worker;
+  return worker.snapshot;
 }
 
 async function readCloudflareWorker(
   options: ExistingCloudflareWorkerOptions,
   allowMissing: boolean,
-): Promise<ExistingCloudflareWorker | null> {
+): Promise<CloudflareWorkerInspection | null> {
   const target = ['-c', options.configPath, '--env=', '--name', options.workerName];
   const read = async (
     args: Array<string>,
@@ -112,10 +118,13 @@ async function readCloudflareWorker(
     );
   }
   return {
-    versionId,
-    bindings: resources.bindings,
-    runtime: resources.script_runtime,
-    script: resources.script,
+    snapshot: {
+      versionId,
+      bindings: resources.bindings,
+      runtime: resources.script_runtime,
+      script: resources.script,
+    },
+    isSecretOnlyDraft: isWranglerSecretOnlyDraft(version),
   };
 }
 
@@ -254,10 +263,19 @@ export async function assertCloudflareDurableObjectLifecycleSupported(options: {
   const activeTag = await readMigrationTag(migrationOptions);
   const after = await readCloudflareWorker(options, false);
   const afterTag = await readMigrationTag(migrationOptions);
-  if (!after || after.versionId !== existing.versionId || afterTag !== activeTag) {
+  if (
+    !after ||
+    after.snapshot.versionId !== existing.snapshot.versionId ||
+    afterTag !== activeTag
+  ) {
     throw new Error(
       'Cloudflare production or Durable Object migration state changed during verification. Retry from the current deployment.',
     );
+  }
+  // A retry after first-secret provisioning still needs its initial class migration. Use the
+  // same complete-version check as activation, and require no prior class migration history.
+  if (activeTag === null && existing.isSecretOnlyDraft && after.isSecretOnlyDraft) {
+    return;
   }
   const activeIndex =
     activeTag === null ? -1 : migrations.findIndex((migration) => migration.tag === activeTag);
@@ -317,7 +335,14 @@ export function assertCloudflareBindingsPreserved(
   before: ExistingCloudflareWorker,
   after: ExistingCloudflareWorker,
   approvedKv: ReadonlyArray<ApprovedCloudflareKvBinding> = [],
+  options: { staticAssetsBinding?: string } = {},
 ): void {
+  // Only the static adapter may introduce its fetch wrapper around an assets-only
+  // deployment. All existing bindings (including colliding names) remain protected.
+  const staticAssetsBinding = isAssetsOnlyWorker(before) ? options.staticAssetsBinding : undefined;
+  const addsAssetsBinding =
+    staticAssetsBinding !== undefined &&
+    !before.bindings.some((binding) => binding.name === staticAssetsBinding);
   const additions = newApprovedKvBindings(before, approvedKv);
   for (const addition of additions) {
     const matches = after.bindings.filter((binding) => binding.name === addition.binding);
@@ -336,23 +361,47 @@ export function assertCloudflareBindingsPreserved(
   );
   const sorted = (bindings: ExistingCloudflareWorker['bindings']) =>
     [...bindings].sort((a, b) => String(a.name).localeCompare(String(b.name)));
-  if (!isDeepStrictEqual(sorted(before.bindings), sorted(preservedBindings))) {
+  const expectedBindings = addsAssetsBinding
+    ? [...before.bindings, { type: 'assets', name: staticAssetsBinding }]
+    : before.bindings;
+  if (
+    (staticAssetsBinding !== undefined &&
+      !after.bindings.some(
+        (binding) => binding.type === 'assets' && binding.name === staticAssetsBinding,
+      )) ||
+    !isDeepStrictEqual(sorted(expectedBindings), sorted(preservedBindings))
+  ) {
     throw new Error(
       'The uploaded version did not preserve the existing Worker bindings and variables. It has not been activated.',
     );
   }
   const handlers = (worker: ExistingCloudflareWorker): Array<string> | null => {
-    const value = worker.script.handlers;
+    const value = existingWorkerHandlers(worker);
     return Array.isArray(value) &&
       value.every((handler): handler is string => typeof handler === 'string')
       ? [...new Set(value)].sort()
       : null;
   };
-  if (!isDeepStrictEqual(handlers(before), handlers(after))) {
+  const expectedHandlers = staticAssetsBinding !== undefined ? ['fetch'] : handlers(before);
+  if (!isDeepStrictEqual(expectedHandlers, handlers(after))) {
     throw new Error(
       'The uploaded version did not preserve the existing Worker event handlers. It has not been activated.',
     );
   }
+}
+
+function isAssetsOnlyWorker(worker: ExistingCloudflareWorker): boolean {
+  const handlers = worker.script.handlers;
+  return (
+    record(worker.runtime.assets) &&
+    (handlers === null || (Array.isArray(handlers) && handlers.length === 0))
+  );
+}
+
+function existingWorkerHandlers(worker: ExistingCloudflareWorker): unknown {
+  // Cloudflare represents the absence of a script on assets-only Workers as null.
+  // Missing or malformed handler metadata on other Workers must still fail closed.
+  return isAssetsOnlyWorker(worker) ? [] : worker.script.handlers;
 }
 
 /** Preserve the existing Worker, allowing only explicitly approved KV additions. */
@@ -388,7 +437,7 @@ export function assertExistingCloudflareConfig(
       };
     }
   }
-  const handlers = existing.script.handlers;
+  const handlers = existingWorkerHandlers(existing);
   if (
     !Array.isArray(handlers) ||
     handlers.some((handler) => handler !== 'fetch' && handler !== 'scheduled')

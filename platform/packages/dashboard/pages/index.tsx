@@ -14,6 +14,9 @@ export default function AuthenticatedPage({ user }: Props) {
             </p>
           </VStack>
           <Stack>
+            <a className="button" href="/account">
+              Manage login methods
+            </a>
             <a className="button" href="/logout">
               Sign out
             </a>

@@ -37,7 +37,7 @@ function hexToBytes(hex: string): Uint8Array | null {
  * missing/malformed header.
  */
 export async function verifyGithubWebhookSignature(
-  rawBody: string,
+  rawBody: string | Uint8Array,
   signatureHeader: string | null,
   secret: string,
 ): Promise<boolean> {
@@ -56,5 +56,6 @@ export async function verifyGithubWebhookSignature(
   }
 
   const key = await getVerifyKey(secret);
-  return crypto.subtle.verify('HMAC', key, sigBytes.buffer as ArrayBuffer, encoder.encode(rawBody));
+  const body = typeof rawBody === 'string' ? encoder.encode(rawBody) : rawBody;
+  return crypto.subtle.verify('HMAC', key, sigBytes.buffer as ArrayBuffer, body.slice().buffer);
 }

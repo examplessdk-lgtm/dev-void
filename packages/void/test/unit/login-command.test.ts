@@ -13,6 +13,7 @@ const mockSpinnerStop = vi.fn();
 const mockSpinnerMessage = vi.fn();
 const mockSelect = vi.fn();
 const mockGetToken = vi.fn();
+const mockGetApiUrl = vi.fn();
 const mockGetTokenSource = vi.fn();
 const mockRemoveToken = vi.fn();
 const mockRunLogin = vi.fn();
@@ -21,6 +22,7 @@ const mockSavePlatformToken = vi.fn();
 const mockSaveToken = vi.fn();
 const mockWhoami = vi.fn();
 const mockIsExpiredTokenError = vi.fn();
+const mockDiscoverPlatform = vi.fn();
 
 vi.mock('@clack/prompts', () => ({
   intro: (...args: Array<unknown>) => mockIntro(...args),
@@ -45,6 +47,7 @@ vi.mock('@clack/prompts', () => ({
 
 vi.mock('../../src/cli/auth', () => ({
   getToken: (...args: Array<unknown>) => mockGetToken(...args),
+  getApiUrl: (...args: Array<unknown>) => mockGetApiUrl(...args),
   getTokenSource: (...args: Array<unknown>) => mockGetTokenSource(...args),
   removeToken: (...args: Array<unknown>) => mockRemoveToken(...args),
   runLogin: (...args: Array<unknown>) => mockRunLogin(...args),
@@ -52,6 +55,10 @@ vi.mock('../../src/cli/auth', () => ({
   savePlatformToken: (...args: Array<unknown>) => mockSavePlatformToken(...args),
   saveToken: (...args: Array<unknown>) => mockSaveToken(...args),
   isStagingMode: () => false,
+}));
+
+vi.mock('../../src/cli/platform-cmd', () => ({
+  discoverPlatform: (...args: Array<unknown>) => mockDiscoverPlatform(...args),
 }));
 
 vi.mock('../../src/cli/client', () => ({
@@ -76,6 +83,7 @@ beforeEach(() => {
   mockSpinnerMessage.mockReset();
   mockSelect.mockReset();
   mockGetToken.mockReset();
+  mockGetApiUrl.mockReset().mockReturnValue('https://api.example.test');
   mockGetTokenSource.mockReset();
   mockRemoveToken.mockReset();
   mockRunLogin.mockReset();
@@ -84,6 +92,10 @@ beforeEach(() => {
   mockSaveToken.mockReset();
   mockWhoami.mockReset();
   mockIsExpiredTokenError.mockReset();
+  mockDiscoverPlatform.mockReset().mockResolvedValue({
+    apiUrl: 'https://api.example.test',
+    authenticationProviders: ['github'],
+  });
 
   mockGetTokenSource.mockReturnValue('manual');
   mockRunLogin.mockResolvedValue('fresh-token');
@@ -136,6 +148,7 @@ describe('runLoginCommand', () => {
 
     expect(mockRemoveToken).toHaveBeenCalledTimes(1);
     expect(mockWarn).toHaveBeenCalledWith('Stored auth token expired. Starting a new login.');
+    expect(mockDiscoverPlatform).toHaveBeenCalledWith('https://api.example.test');
     expect(mockRunLogin).toHaveBeenCalledWith(root, 'github', expect.any(Function));
     expect(mockSaveToken).toHaveBeenCalledWith('fresh-token', root);
     expect(mockSpinnerStop).toHaveBeenCalledWith('Logged in!');
@@ -153,6 +166,7 @@ describe('runLoginCommand', () => {
     expect(mockWarn).toHaveBeenCalledWith(
       '`VOID_TOKEN` is invalid or expired. Continuing with a new login.',
     );
+    expect(mockDiscoverPlatform).toHaveBeenCalledWith('https://api.example.test');
     expect(mockRunLogin).toHaveBeenCalledWith(root, 'github', expect.any(Function));
     expect(mockSaveToken).toHaveBeenCalledWith('fresh-token', root);
     expect(mockOutro).toHaveBeenCalledWith('Token saved. Unset `VOID_TOKEN` to use it.');

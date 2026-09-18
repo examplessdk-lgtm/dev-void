@@ -1,7 +1,10 @@
 import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
+import type { ContentfulStatusCode } from 'hono/utils/http-status';
+import { AuthenticationConfigurationError } from '../auth/configuration.ts';
 import type { ApiEnv } from '../env.ts';
 import { operatorAudit, operatorAuditRoutes } from './audit.ts';
+import { authenticationConfigRoutes } from './auth-config.ts';
 import { authenticatedSessionRoutes, operatorAuth, operatorSessionRoutes } from './auth.ts';
 import { OperatorError } from './common.ts';
 import { emailOperatorRoutes } from './email-routes.ts';
@@ -10,6 +13,12 @@ import { tenantRoutes } from './tenant-routes.ts';
 
 export const operatorApi = new Hono<ApiEnv>();
 operatorApi.onError((error, context) => {
+  if (error instanceof AuthenticationConfigurationError) {
+    return context.json(
+      { error: error.code, message: error.message },
+      error.status as ContentfulStatusCode,
+    );
+  }
   if (error instanceof OperatorError) {
     return context.json(
       {
@@ -52,6 +61,7 @@ operatorApi.use('*', operatorAudit);
 operatorApi.route('/', operatorAuditRoutes);
 operatorApi.route('/', tenantRoutes);
 operatorApi.route('/', operationsRoutes);
+operatorApi.route('/', authenticationConfigRoutes);
 operatorApi.route('/', emailOperatorRoutes);
 operatorApi.notFound((context) =>
   context.json({ error: 'not_found', message: 'Unknown operator API endpoint.' }, 404),

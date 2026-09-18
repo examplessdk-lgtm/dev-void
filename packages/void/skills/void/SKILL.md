@@ -23,7 +23,7 @@ read permission; `void platform install --plan` verifies coverage. Use the
 self-hosted platform guide for certificate setup rather than enabling a paid
 product without an explicit request.
 
-For first-time platform setup, follow `docs/guide/self-hosted-platform.md` in order and introduce credentials when the user reaches that step. Recommend a domain; offer explicit `void platform install --workers-dev` for testing before one is ready. PostgreSQL, GitHub OAuth registration, runtime/R2 credentials, and saved signing/encryption keys are still required. Domain-free installation skips zone/DNS/certificate operations and can use browser login. `void platform domain set <domain>` later performs resumable DNS/HTTPS setup while preserving existing test URLs and the API origin. The command checks the deployed runtime token's cache-purge permission for the new zone; it does not ask users to retrieve that token. Prefer interactive prompts for secrets and keep CI variables in the CI workflow. Void creates the platform infrastructure and database tables.
+For first-time platform setup, follow `docs/guide/self-hosted-platform.md` in order and introduce credentials when the user reaches that step. Recommend a domain; offer explicit `void platform install --workers-dev` for testing before one is ready. PostgreSQL, credentials for the selected login methods, runtime/R2 credentials, and saved signing/encryption keys are required. GitHub is the default and is optional. `--auth-config` accepts nonsecret provider configuration with environment secret references; `--plan` does not read those secrets. Configurable installations finish first-administrator setup using a one-time code and browser identity confirmation. Domain-free installation skips zone/DNS/certificate operations and can use browser login. `void platform domain set <domain>` later performs resumable DNS/HTTPS setup while preserving existing test URLs and the API origin. The command checks the deployed runtime token's cache-purge permission for the new zone; it does not ask users to retrieve that token. Prefer interactive prompts for secrets and keep CI variables in the CI workflow. Void creates the platform infrastructure and database tables.
 
 For an existing Cloudflare site, run `void deploy` with its root `wrangler.jsonc` or `wrangler.json`. An unlinked project gets a prompt to link and deploy using the existing Worker and resources. Accepting verifies and saves the destination, then continues deployment. Keep new application resources, migrations, auth setup, and secret changes separate from this first handoff; ISR has its own explicit cache choice. The active Worker Version must be the latest upload so inherited secrets have an unambiguous source. Failed builds retain the link for retry. Read `docs/integrations/cloudflare.md` for the supported configuration and rollback behavior.
 
@@ -39,11 +39,38 @@ to inspect mutations; approved noninteractive mutations require `--yes`.
 The last active administrator cannot be deleted or suspended. If an allowed
 administrator removal reports partial cleanup, access remains revoked; use a
 remaining administrator to inspect the result and retry.
+Use `void platform config auth` to configure login methods; `platform auth`
+manages your administrator session. Test a pending configuration before enabling
+it, explicitly link identities when switching methods, and verify a linked
+alternative before disabling a method. Disabling revokes its human sessions,
+including human tokens used in CI, while scoped deployment tokens remain valid.
+Create CI credentials with `void project token create`; they are bound to one
+project, expire within 90 days, and support explicit renewal and revocation.
+Cloudflare Access service credentials pass only the perimeter and never renew or
+elevate a human or operator token.
+For scripted configuration, use nonsecret JSON with `--file` and read secrets
+with `--client-secret-env`; never put client secrets in command arguments.
+Use `void platform config auth admission` to select company-approved automatic
+signup when the organization's identity policy already determines eligibility;
+individual invitations remain optional. The same controls are available under
+Settings in the administrator UI.
+Access login and platform protection are independent. The installer can create
+dedicated Access applications or connect existing ones, including a separate
+identity account. Protection setup verifies API/proxy coverage and uses scoped
+service credentials for installation and CI. Use `platform config auth protection`
+to show, enable, or disable protection; retain the company gate when probes fail.
+Users link another enabled method with `void auth link [connection-id]` after
+recent sign-in and explicit browser identity confirmation. For expired first-admin
+codes, resume installation or repair completed provisioning. Lost-provider recovery
+uses `platform config auth recover` with installation ownership, original recovery
+keys, an existing administrator ID, and a real provider login; never reopen signup.
 Operator credentials are separate from application deployment credentials and
 ignore repository platform selections. `VOID_OPERATOR_TOKEN` requires an
 explicit `VOID_API_URL` or `--connection`; credentials must never be written to
 project files. `signup open` allows public signup and `signup restrict` enforces
-the allowlist. Inspect `system events` and the target object after an ambiguous
+the allowlist. For OIDC identities without verified email, use `signup allow identity
+<connection-id> <subject>` and the exact `signup disallow` counterpart; never infer an
+email or link accounts. Inspect `system events` and the target object after an ambiguous
 mutation failure before retrying.
 
 Use `void connect` for deployment onboarding: no arguments offers Cloudflare or a Void platform, `--platform cloudflare` signs in and selects an account, and a platform URL verifies discovery and signs in with a supported provider. It preserves existing project links when connecting elsewhere. `--no-login` saves only verified Void connection metadata; authenticated headless connection requires a valid origin-scoped keychain session or `VOID_TOKEN` with matching `VOID_API_URL`. Platform installation and administration use `void platform`.

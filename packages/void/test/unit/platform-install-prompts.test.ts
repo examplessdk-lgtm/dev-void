@@ -8,6 +8,7 @@ import { runPlatformLifecycleCommand } from '../../src/cli/platform-lifecycle.ts
 
 const mocks = vi.hoisted(() => ({
   confirm: vi.fn(),
+  multiselect: vi.fn(),
   note: vi.fn(),
   select: vi.fn(),
   text: vi.fn(),
@@ -15,7 +16,12 @@ const mocks = vi.hoisted(() => ({
 }));
 vi.mock('@clack/prompts', async (original) => ({
   ...(await original<typeof import('@clack/prompts')>()),
-  confirm: mocks.confirm,
+  // These fixtures retain GitHub-only setup; Access choices have their own matrix.
+  confirm: (input: { message: string }) =>
+    input.message === 'Also protect the platform UI and APIs with Cloudflare Access?'
+      ? Promise.resolve(false)
+      : mocks.confirm(input),
+  multiselect: mocks.multiselect,
   select: mocks.select,
   text: mocks.text,
   intro: vi.fn(),
@@ -54,6 +60,7 @@ const args = [
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.multiselect.mockResolvedValue(['github']);
   Object.defineProperty(process.stdin, 'isTTY', { configurable: true, value: true });
   vi.spyOn(console, 'log').mockImplementation(() => {});
   vi.spyOn(PlatformCloudflareClient.prototype, 'listAccounts').mockResolvedValue([

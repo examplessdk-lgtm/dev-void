@@ -1,5 +1,5 @@
 {
-  "id": "b78c690a-2a77-495e-832b-f86dfb7078f8",
+  "id": "b079738a-1f87-41f4-b924-1adfc849b965",
   "prevId": "fa3784af-4da9-4456-abfc-e649a36bd6c1",
   "version": "7",
   "dialect": "postgresql",
@@ -1900,6 +1900,12 @@
           "primaryKey": false,
           "notNull": true
         },
+        "human_session_id": {
+          "name": "human_session_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "expires_at": {
           "name": "expires_at",
           "type": "timestamp",
@@ -1940,9 +1946,311 @@
           "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
+        },
+        "operator_sessions_human_session_id_platform_human_sessions_id_fk": {
+          "name": "operator_sessions_human_session_id_platform_human_sessions_id_fk",
+          "tableFrom": "operator_sessions",
+          "tableTo": "platform_human_sessions",
+          "columnsFrom": ["human_session_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.platform_auth_attempts": {
+      "name": "platform_auth_attempts",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "connection_id": {
+          "name": "connection_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "revision": {
+          "name": "revision",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "generation": {
+          "name": "generation",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "purpose": {
+          "name": "purpose",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "browser_hash": {
+          "name": "browser_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "context": {
+          "name": "context",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "expires_at": {
+          "name": "expires_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {
+        "platform_auth_attempts_expiry": {
+          "name": "platform_auth_attempts_expiry",
+          "columns": [
+            {
+              "expression": "expires_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "platform_auth_attempts_connection_id_platform_login_connections_id_fk": {
+          "name": "platform_auth_attempts_connection_id_platform_login_connections_id_fk",
+          "tableFrom": "platform_auth_attempts",
+          "tableTo": "platform_login_connections",
+          "columnsFrom": ["connection_id"],
+          "columnsTo": ["id"],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.platform_auth_bootstrap": {
+      "name": "platform_auth_bootstrap",
+      "schema": "",
+      "columns": {
+        "singleton": {
+          "name": "singleton",
+          "type": "boolean",
+          "primaryKey": true,
+          "notNull": true,
+          "default": true
+        },
+        "installation_id": {
+          "name": "installation_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "credential_hash": {
+          "name": "credential_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "connection_id": {
+          "name": "connection_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "expires_at": {
+          "name": "expires_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "consumed_at": {
+          "name": "consumed_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "platform_auth_bootstrap_connection_id_platform_login_connections_id_fk": {
+          "name": "platform_auth_bootstrap_connection_id_platform_login_connections_id_fk",
+          "tableFrom": "platform_auth_bootstrap",
+          "tableTo": "platform_login_connections",
+          "columnsFrom": ["connection_id"],
+          "columnsTo": ["id"],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "platform_auth_bootstrap_singleton": {
+          "name": "platform_auth_bootstrap_singleton",
+          "value": "\"platform_auth_bootstrap\".\"singleton\" = true"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.platform_auth_settings": {
+      "name": "platform_auth_settings",
+      "schema": "",
+      "columns": {
+        "singleton": {
+          "name": "singleton",
+          "type": "boolean",
+          "primaryKey": true,
+          "notNull": true,
+          "default": true
+        },
+        "revision": {
+          "name": "revision",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 1
+        },
+        "admission": {
+          "name": "admission",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "protection": {
+          "name": "protection",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "session_seconds": {
+          "name": "session_seconds",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 2592000
+        },
+        "sessions_required": {
+          "name": "sessions_required",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "platform_auth_settings_singleton": {
+          "name": "platform_auth_settings_singleton",
+          "value": "\"platform_auth_settings\".\"singleton\" = true"
+        },
+        "platform_auth_settings_revision": {
+          "name": "platform_auth_settings_revision",
+          "value": "\"platform_auth_settings\".\"revision\" > 0"
+        },
+        "platform_auth_settings_session_seconds": {
+          "name": "platform_auth_settings_session_seconds",
+          "value": "\"platform_auth_settings\".\"session_seconds\" BETWEEN 300 AND 2592000"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.platform_company_identities": {
+      "name": "platform_company_identities",
+      "schema": "",
+      "columns": {
+        "user_id": {
+          "name": "user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "issuer": {
+          "name": "issuer",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "subject": {
+          "name": "subject",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {
+        "platform_company_identity_user": {
+          "name": "platform_company_identity_user",
+          "columns": [
+            {
+              "expression": "issuer",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "platform_company_identities_user_id_users_id_fk": {
+          "name": "platform_company_identities_user_id_users_id_fk",
+          "tableFrom": "platform_company_identities",
+          "tableTo": "users",
+          "columnsFrom": ["user_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "platform_company_identities_issuer_subject_pk": {
+          "name": "platform_company_identities_issuer_subject_pk",
+          "columns": ["issuer", "subject"]
+        }
+      },
       "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {},
@@ -2072,24 +2380,199 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
-    "public.platform_settings": {
-      "name": "platform_settings",
+    "public.platform_human_sessions": {
+      "name": "platform_human_sessions",
       "schema": "",
       "columns": {
-        "key": {
-          "name": "key",
+        "id": {
+          "name": "id",
           "type": "text",
           "primaryKey": true,
           "notNull": true
         },
-        "value": {
-          "name": "value",
-          "type": "jsonb",
+        "user_id": {
+          "name": "user_id",
+          "type": "text",
           "primaryKey": false,
           "notNull": true
         },
-        "updated_at": {
-          "name": "updated_at",
+        "connection_id": {
+          "name": "connection_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "generation": {
+          "name": "generation",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "audience": {
+          "name": "audience",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "access_issuer": {
+          "name": "access_issuer",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "access_subject": {
+          "name": "access_subject",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "expires_at": {
+          "name": "expires_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "revoked_at": {
+          "name": "revoked_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "platform_human_sessions_connection": {
+          "name": "platform_human_sessions_connection",
+          "columns": [
+            {
+              "expression": "connection_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "platform_human_sessions_user": {
+          "name": "platform_human_sessions_user",
+          "columns": [
+            {
+              "expression": "user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "platform_human_sessions_expiry": {
+          "name": "platform_human_sessions_expiry",
+          "columns": [
+            {
+              "expression": "expires_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "platform_human_sessions_user_id_users_id_fk": {
+          "name": "platform_human_sessions_user_id_users_id_fk",
+          "tableFrom": "platform_human_sessions",
+          "tableTo": "users",
+          "columnsFrom": ["user_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "platform_human_sessions_connection_id_platform_login_connections_id_fk": {
+          "name": "platform_human_sessions_connection_id_platform_login_connections_id_fk",
+          "tableFrom": "platform_human_sessions",
+          "tableTo": "platform_login_connections",
+          "columnsFrom": ["connection_id"],
+          "columnsTo": ["id"],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "platform_human_sessions_audience": {
+          "name": "platform_human_sessions_audience",
+          "value": "\"platform_human_sessions\".\"audience\" IN ('api', 'admin')"
+        },
+        "platform_human_sessions_access_identity": {
+          "name": "platform_human_sessions_access_identity",
+          "value": "(\"platform_human_sessions\".\"access_issuer\" IS NULL) = (\"platform_human_sessions\".\"access_subject\" IS NULL)"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.platform_login_connections": {
+      "name": "platform_login_connections",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "kind": {
+          "name": "kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "enabled": {
+          "name": "enabled",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "active_revision": {
+          "name": "active_revision",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "revision": {
+          "name": "revision",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 1
+        },
+        "generation": {
+          "name": "generation",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 1
+        },
+        "created_at": {
+          "name": "created_at",
           "type": "timestamp",
           "primaryKey": false,
           "notNull": true,
@@ -2098,6 +2581,297 @@
       },
       "indexes": {},
       "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "platform_login_connections_kind": {
+          "name": "platform_login_connections_kind",
+          "value": "\"platform_login_connections\".\"kind\" IN ('github', 'google', 'oidc', 'cloudflare-access')"
+        },
+        "platform_login_connections_revision": {
+          "name": "platform_login_connections_revision",
+          "value": "\"platform_login_connections\".\"revision\" > 0 AND \"platform_login_connections\".\"generation\" > 0"
+        },
+        "platform_login_connections_active_revision": {
+          "name": "platform_login_connections_active_revision",
+          "value": "\"platform_login_connections\".\"active_revision\" IS NULL OR \"platform_login_connections\".\"active_revision\" BETWEEN 1 AND \"platform_login_connections\".\"revision\""
+        },
+        "platform_login_connections_enabled": {
+          "name": "platform_login_connections_enabled",
+          "value": "NOT \"platform_login_connections\".\"enabled\" OR \"platform_login_connections\".\"active_revision\" IS NOT NULL"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.platform_login_identities": {
+      "name": "platform_login_identities",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "connection_id": {
+          "name": "connection_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "issuer": {
+          "name": "issuer",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "subject": {
+          "name": "subject",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "last_authenticated_at": {
+          "name": "last_authenticated_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "platform_login_identity_subject": {
+          "name": "platform_login_identity_subject",
+          "columns": [
+            {
+              "expression": "connection_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "issuer",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "subject",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "platform_login_identity_user": {
+          "name": "platform_login_identity_user",
+          "columns": [
+            {
+              "expression": "connection_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "platform_login_identities_user_id_users_id_fk": {
+          "name": "platform_login_identities_user_id_users_id_fk",
+          "tableFrom": "platform_login_identities",
+          "tableTo": "users",
+          "columnsFrom": ["user_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "platform_login_identities_connection_id_platform_login_connections_id_fk": {
+          "name": "platform_login_identities_connection_id_platform_login_connections_id_fk",
+          "tableFrom": "platform_login_identities",
+          "tableTo": "platform_login_connections",
+          "columnsFrom": ["connection_id"],
+          "columnsTo": ["id"],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.platform_login_revisions": {
+      "name": "platform_login_revisions",
+      "schema": "",
+      "columns": {
+        "connection_id": {
+          "name": "connection_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "revision": {
+          "name": "revision",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "configuration": {
+          "name": "configuration",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "secret": {
+          "name": "secret",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "platform_login_revisions_connection_id_platform_login_connections_id_fk": {
+          "name": "platform_login_revisions_connection_id_platform_login_connections_id_fk",
+          "tableFrom": "platform_login_revisions",
+          "tableTo": "platform_login_connections",
+          "columnsFrom": ["connection_id"],
+          "columnsTo": ["id"],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "platform_login_revisions_connection_id_revision_pk": {
+          "name": "platform_login_revisions_connection_id_revision_pk",
+          "columns": ["connection_id", "revision"]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.platform_login_tests": {
+      "name": "platform_login_tests",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "connection_id": {
+          "name": "connection_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "revision": {
+          "name": "revision",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "issuer": {
+          "name": "issuer",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "subject": {
+          "name": "subject",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "expires_at": {
+          "name": "expires_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {
+        "platform_login_tests_expiry": {
+          "name": "platform_login_tests_expiry",
+          "columns": [
+            {
+              "expression": "expires_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "platform_login_tests_user_id_users_id_fk": {
+          "name": "platform_login_tests_user_id_users_id_fk",
+          "tableFrom": "platform_login_tests",
+          "tableTo": "users",
+          "columnsFrom": ["user_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "platform_login_tests_connection_id_platform_login_connections_id_fk": {
+          "name": "platform_login_tests_connection_id_platform_login_connections_id_fk",
+          "tableFrom": "platform_login_tests",
+          "tableTo": "platform_login_connections",
+          "columnsFrom": ["connection_id"],
+          "columnsTo": ["id"],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},

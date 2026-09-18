@@ -1,4 +1,5 @@
 import type { PlatformApplication } from './application.ts';
+import { PLATFORM_LOGIN_KINDS, type PlatformLoginKind } from './authentication.ts';
 
 export const PLATFORM_DEPLOYMENT_SCHEMA_VERSION = 1 as const;
 
@@ -41,14 +42,16 @@ export type PlatformResourceNames = Readonly<{
 export type PlatformDeploymentManifest = Readonly<{
   application: PlatformApplication;
   authentication: Readonly<{
-    providers: ReadonlyArray<'github' | 'google'>;
+    providers: ReadonlyArray<PlatformLoginKind>;
+    configurable?: true;
+    accessProtection?: true;
   }>;
   capabilities: PlatformCapabilities;
   controlPlane: PlatformControlPlane;
   displayName: string;
   installationSlug: string;
   resources: PlatformResourceNames;
-  schemaVersion: typeof PLATFORM_DEPLOYMENT_SCHEMA_VERSION | 2;
+  schemaVersion: typeof PLATFORM_DEPLOYMENT_SCHEMA_VERSION | 2 | 3;
 }>;
 
 export type PlatformDeploymentManifestInput = Readonly<{
@@ -60,7 +63,9 @@ export type PlatformDeploymentManifestInput = Readonly<{
     zoneId?: string;
   }>;
   authentication?: Readonly<{
-    providers?: ReadonlyArray<'github' | 'google'>;
+    providers?: ReadonlyArray<PlatformLoginKind>;
+    configurable?: true;
+    accessProtection?: true;
   }>;
   capabilities?: Partial<PlatformCapabilities>;
   controlPlane?: Partial<PlatformControlPlane>;
@@ -212,6 +217,16 @@ export function createPlatformDeploymentManifest(
     throw new Error('Managed builds require the GitHub Actions capability.');
   }
   const providers = input.authentication?.providers ?? ['github'];
+  if (
+    providers.some((provider) => !PLATFORM_LOGIN_KINDS.includes(provider)) ||
+    new Set(providers).size !== providers.length
+  ) {
+    throw new Error('Authentication providers must be unique supported login kinds.');
+  }
+  const configurable =
+    input.authentication?.configurable === true ||
+    input.authentication?.accessProtection === true ||
+    providers.some((provider) => provider === 'oidc' || provider === 'cloudflare-access');
   if (providers.length === 0) {
     throw new Error('At least one authentication provider is required.');
   }
@@ -231,13 +246,17 @@ export function createPlatformDeploymentManifest(
         ? { zoneId: requiredString(input.application.zoneId, 'application.zoneId') }
         : {}),
     },
-    authentication: { providers: [...providers] },
+    authentication: {
+      providers: [...providers],
+      ...(configurable ? { configurable: true } : {}),
+      ...(input.authentication?.accessProtection ? { accessProtection: true } : {}),
+    },
     capabilities,
     controlPlane: { ...CONTROL_PLANE_DEFAULTS, ...input.controlPlane },
     displayName: requiredString(input.displayName, 'displayName').trim(),
     installationSlug,
     resources,
-    schemaVersion: workersDev ? 2 : PLATFORM_DEPLOYMENT_SCHEMA_VERSION,
+    schemaVersion: configurable ? 3 : workersDev ? 2 : PLATFORM_DEPLOYMENT_SCHEMA_VERSION,
   };
   createApplicationRoutes(manifest.application);
   for (const [key, value] of Object.entries(manifest.controlPlane)) {
@@ -256,7 +275,11 @@ export function createPlatformDeploymentManifest(
 
 export function parsePlatformDeploymentManifest(value: unknown): PlatformDeploymentManifest {
   assertRecord(value, 'Platform deployment manifest');
-  if (value.schemaVersion !== PLATFORM_DEPLOYMENT_SCHEMA_VERSION && value.schemaVersion !== 2) {
+  if (
+    value.schemaVersion !== PLATFORM_DEPLOYMENT_SCHEMA_VERSION &&
+    value.schemaVersion !== 2 &&
+    value.schemaVersion !== 3
+  ) {
     throw new Error(
       `Unsupported platform deployment schema version: ${String(value.schemaVersion)}.`,
     );
@@ -268,7 +291,10 @@ export function parsePlatformDeploymentManifest(value: unknown): PlatformDeploym
   const rawResources = value.resources;
   assertRecord(application, 'application');
   let workersDev: PlatformApplication['workersDev'];
-  if (value.schemaVersion === 2) {
+  if (
+    value.schemaVersion === 2 ||
+    (value.schemaVersion === 3 && application.workersDev !== undefined)
+  ) {
     assertRecord(application.workersDev, 'application.workersDev');
     workersDev = {
       subdomain: requiredString(application.workersDev.subdomain, 'workersDev.subdomain'),
@@ -296,9 +322,22 @@ export function parsePlatformDeploymentManifest(value: unknown): PlatformDeploym
   const providers = authentication.providers;
   if (
     !Array.isArray(providers) ||
-    providers.some((provider) => provider !== 'github' && provider !== 'google')
+    providers.some(
+      (provider) =>
+        !PLATFORM_LOGIN_KINDS.includes(provider as PlatformLoginKind) ||
+        (value.schemaVersion !== 3 && provider !== 'github' && provider !== 'google'),
+    )
   ) {
     throw new Error('authentication.providers must contain only github or google.');
+  }
+  if (
+    (value.schemaVersion === 3 && authentication.configurable !== true) ||
+    (value.schemaVersion !== 3 &&
+      (authentication.configurable !== undefined ||
+        authentication.accessProtection !== undefined)) ||
+    (authentication.accessProtection !== undefined && authentication.accessProtection !== true)
+  ) {
+    throw new Error('Configurable authentication requires deployment schema version 3.');
   }
   const resourceDefaults = createPlatformResourceNames(
     requiredString(value.installationSlug, 'installationSlug'),
@@ -322,7 +361,11 @@ export function parsePlatformDeploymentManifest(value: unknown): PlatformDeploym
       ...(workersDev ? { workersDev } : {}),
       ...(typeof application.zoneId === 'string' ? { zoneId: application.zoneId } : {}),
     },
-    authentication: { providers: providers as Array<'github' | 'google'> },
+    authentication: {
+      providers: providers as Array<PlatformLoginKind>,
+      ...(authentication.configurable === true ? { configurable: true } : {}),
+      ...(authentication.accessProtection === true ? { accessProtection: true } : {}),
+    },
     capabilities,
     controlPlane: {
       apiHostname: readHostname('apiHostname'),

@@ -26,6 +26,7 @@ import {
 
 const mocks = vi.hoisted(() => ({
   confirm: vi.fn(),
+  multiselect: vi.fn(),
   select: vi.fn(),
   text: vi.fn(),
   password: vi.fn(),
@@ -39,7 +40,12 @@ const mocks = vi.hoisted(() => ({
 }));
 vi.mock('@clack/prompts', async (original) => ({
   ...(await original<typeof import('@clack/prompts')>()),
-  confirm: mocks.confirm,
+  // These fixtures retain GitHub-only setup; Access choices have their own matrix.
+  confirm: (input: { message: string }) =>
+    input.message === 'Also protect the platform UI and APIs with Cloudflare Access?'
+      ? Promise.resolve(false)
+      : mocks.confirm(input),
+  multiselect: mocks.multiselect,
   select: mocks.select,
   text: mocks.text,
   password: mocks.password,
@@ -104,6 +110,7 @@ const environment = {
 };
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.multiselect.mockResolvedValue(['github']);
   directory = mkdtempSync(join(tmpdir(), 'void-credential-flow-'));
   vi.stubEnv('VOID_PLATFORM_REGISTRY_DIR', directory);
   vi.stubEnv('VOID_PLATFORM_RECOVERY_KEY', Buffer.alloc(32, 3).toString('base64'));

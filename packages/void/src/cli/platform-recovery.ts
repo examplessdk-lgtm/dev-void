@@ -217,6 +217,7 @@ export async function verifyInstallationEndpoint(
       ...cfAccessHeaders(process.env, apiUrl),
     },
     signal: AbortSignal.timeout(15_000),
+    redirect: 'manual',
   });
   if (!response.ok) {
     throw new Error(

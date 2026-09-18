@@ -1,19 +1,31 @@
 import { readPlatformApplication, type PlatformApplication } from './application.ts';
+import {
+  parsePlatformLoginDescriptor,
+  parsePlatformLoginId,
+  type PlatformLoginDescriptor,
+} from './authentication.ts';
 import { normalizeApplicationDomain, type PlatformCapabilities } from './manifest.ts';
 
 export const PLATFORM_DISCOVERY_SCHEMA_VERSION = 1 as const;
+
+export type PlatformAuthenticationDiscovery = Readonly<{
+  methods: ReadonlyArray<PlatformLoginDescriptor>;
+  protectedByAccess: boolean;
+  setupPending?: boolean;
+}>;
 
 export type PlatformDiscoveryDocument = Readonly<{
   apiUrl: string;
   applicationDomain: string;
   applicationRouting?: PlatformApplication;
-  authenticationProviders: ReadonlyArray<'github' | 'google'>;
+  authenticationProviders: ReadonlyArray<string>;
+  authentication?: PlatformAuthenticationDiscovery;
   capabilities: PlatformCapabilities;
   displayName: string;
   installationId: string | null;
   platformVersion: string;
   proxyUrl: string;
-  schemaVersion: typeof PLATFORM_DISCOVERY_SCHEMA_VERSION | 2;
+  schemaVersion: typeof PLATFORM_DISCOVERY_SCHEMA_VERSION | 2 | 3;
   usageProtocolVersion: 0 | 1;
 }>;
 
@@ -68,8 +80,29 @@ export function createPlatformDiscoveryDocument(
   ) {
     throw new Error('usageProtocolVersion must be 0 or 1.');
   }
-  if (input.authenticationProviders.length === 0) {
+  const authentication = input.authentication
+    ? parseAuthentication(input.authentication)
+    : undefined;
+  if (
+    !authentication &&
+    input.authenticationProviders.some((provider) => provider !== 'github' && provider !== 'google')
+  ) {
+    throw new Error('Named login methods require authentication discovery descriptors.');
+  }
+  if (new Set(input.authenticationProviders).size !== input.authenticationProviders.length) {
+    throw new Error('Authentication provider IDs must be unique.');
+  }
+  if (input.authenticationProviders.length === 0 && !authentication?.setupPending) {
     throw new Error('At least one authentication provider is required.');
+  }
+  if (
+    authentication &&
+    (authentication.methods.length !== input.authenticationProviders.length ||
+      authentication.methods.some(
+        (method, index) => method.id !== input.authenticationProviders[index],
+      ))
+  ) {
+    throw new Error('Authentication method descriptors must match the advertised provider IDs.');
   }
   if (
     input.authenticationProviders.includes('github') !== input.capabilities.githubOAuth ||
@@ -82,11 +115,16 @@ export function createPlatformDiscoveryDocument(
     apiUrl: normalizeOrigin(input.apiUrl, 'apiUrl'),
     applicationDomain: normalizeApplicationDomain(input.applicationDomain),
     authenticationProviders: [...input.authenticationProviders],
+    ...(authentication ? { authentication } : {}),
     displayName: input.displayName.trim(),
     installationId: input.installationId?.trim() || null,
     platformVersion: input.platformVersion.trim(),
     proxyUrl: normalizeOrigin(input.proxyUrl, 'proxyUrl'),
-    schemaVersion: input.applicationRouting?.workersDev ? 2 : PLATFORM_DISCOVERY_SCHEMA_VERSION,
+    schemaVersion: authentication
+      ? 3
+      : input.applicationRouting?.workersDev
+        ? 2
+        : PLATFORM_DISCOVERY_SCHEMA_VERSION,
     usageProtocolVersion: input.usageProtocolVersion ?? 0,
   };
 }
@@ -98,7 +136,8 @@ export function parsePlatformDiscoveryDocument(value: unknown): PlatformDiscover
   const document = value as Record<string, unknown>;
   if (
     document.schemaVersion !== PLATFORM_DISCOVERY_SCHEMA_VERSION &&
-    document.schemaVersion !== 2
+    document.schemaVersion !== 2 &&
+    document.schemaVersion !== 3
   ) {
     throw new Error(
       `Unsupported platform discovery schema version: ${String(document.schemaVersion)}.`,
@@ -107,6 +146,9 @@ export function parsePlatformDiscoveryDocument(value: unknown): PlatformDiscover
   const capabilities = document.capabilities;
   if (document.schemaVersion === 1 && document.applicationRouting !== undefined) {
     throw new Error('Application routing requires discovery schema version 2.');
+  }
+  if (document.schemaVersion === 2 && document.applicationRouting === undefined) {
+    throw new Error('Discovery schema version 2 requires application routing.');
   }
   if (!capabilities || typeof capabilities !== 'object' || Array.isArray(capabilities)) {
     throw new Error('capabilities must be an object.');
@@ -132,9 +174,21 @@ export function parsePlatformDiscoveryDocument(value: unknown): PlatformDiscover
   const providers = document.authenticationProviders;
   if (
     !Array.isArray(providers) ||
-    providers.some((provider) => provider !== 'github' && provider !== 'google')
+    providers.some(
+      (provider) =>
+        typeof provider !== 'string' ||
+        (document.schemaVersion !== 3 && provider !== 'github' && provider !== 'google'),
+    )
   ) {
     throw new Error('authenticationProviders must contain only github or google.');
+  }
+  if (document.schemaVersion !== 3 && document.authentication !== undefined) {
+    throw new Error('Configurable authentication requires discovery schema version 3.');
+  }
+  const authentication =
+    document.schemaVersion === 3 ? parseAuthentication(document.authentication) : undefined;
+  if (authentication) {
+    providers.forEach(parsePlatformLoginId);
   }
   const string = (name: string): string => {
     const entry = document[name];
@@ -155,14 +209,15 @@ export function parsePlatformDiscoveryDocument(value: unknown): PlatformDiscover
   return createPlatformDiscoveryDocument({
     apiUrl,
     applicationDomain: string('applicationDomain'),
-    ...(document.schemaVersion === 2
+    ...(document.applicationRouting !== undefined
       ? {
           applicationRouting: readPlatformApplication({
             PLATFORM_APPLICATION: JSON.stringify(document.applicationRouting ?? null),
           }),
         }
       : {}),
-    authenticationProviders: providers as Array<'github' | 'google'>,
+    authenticationProviders: providers as Array<string>,
+    ...(authentication ? { authentication } : {}),
     capabilities: parsedCapabilities,
     displayName: string('displayName'),
     installationId: document.installationId === null ? null : string('installationId'),
@@ -170,6 +225,30 @@ export function parsePlatformDiscoveryDocument(value: unknown): PlatformDiscover
     proxyUrl,
     usageProtocolVersion: parseUsageProtocolVersion(document.usageProtocolVersion),
   });
+}
+
+function parseAuthentication(value: unknown): PlatformAuthenticationDiscovery {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('Authentication discovery must be an object.');
+  }
+  const authentication = value as Record<string, unknown>;
+  if (
+    !Array.isArray(authentication.methods) ||
+    authentication.methods.length > 32 ||
+    typeof authentication.protectedByAccess !== 'boolean' ||
+    (authentication.setupPending !== undefined && typeof authentication.setupPending !== 'boolean')
+  ) {
+    throw new Error('Authentication discovery requires login methods and a protection flag.');
+  }
+  const methods = authentication.methods.map(parsePlatformLoginDescriptor);
+  if (new Set(methods.map((method) => method.id)).size !== methods.length) {
+    throw new Error('Authentication connection IDs must be unique.');
+  }
+  return {
+    methods,
+    protectedByAccess: authentication.protectedByAccess,
+    ...(authentication.setupPending === true ? { setupPending: true } : {}),
+  };
 }
 
 function parseUsageProtocolVersion(value: unknown): 0 | 1 {

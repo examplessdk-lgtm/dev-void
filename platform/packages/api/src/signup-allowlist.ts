@@ -1,14 +1,23 @@
-export type AllowlistEntry = Readonly<{
-  type: 'github' | 'email';
-  pattern: string;
-  note?: string;
-}>;
+import {
+  isPlatformSignupAllowed,
+  parsePlatformSignupAllowlistEntry,
+  type PlatformSignupAllowlistEntry,
+} from '@void/platform';
+
+export type AllowlistEntry = PlatformSignupAllowlistEntry;
 
 const KV_KEY = 'signup:allowlist';
 
 export async function getAllowlist(kv: KVNamespace): Promise<Array<AllowlistEntry>> {
   const raw = await kv.get(KV_KEY);
-  return raw ? JSON.parse(raw) : [];
+  if (!raw) {
+    return [];
+  }
+  const entries: unknown = JSON.parse(raw);
+  if (!Array.isArray(entries)) {
+    throw new Error('The signup allowlist must be an array.');
+  }
+  return entries.map(parsePlatformSignupAllowlistEntry);
 }
 
 export async function putAllowlist(
@@ -27,23 +36,8 @@ export function isSignupAllowed(
   login: string,
   email: string | null,
   entries: ReadonlyArray<AllowlistEntry>,
+  connectionId = provider,
+  subject = login,
 ): boolean {
-  if (entries.length === 0) {
-    return false;
-  }
-
-  return entries.some((entry) => {
-    if (entry.type === 'github') {
-      return provider === 'github' && entry.pattern.toLowerCase() === login.toLowerCase();
-    }
-    // email entry — matches any provider if they have a matching email
-    if (!email) {
-      return false;
-    }
-    if (entry.pattern.startsWith('*@')) {
-      const domain = entry.pattern.slice(1).toLowerCase();
-      return email.toLowerCase().endsWith(domain);
-    }
-    return entry.pattern.toLowerCase() === email.toLowerCase();
-  });
+  return isPlatformSignupAllowed({ provider, login, email, connectionId, subject }, entries);
 }

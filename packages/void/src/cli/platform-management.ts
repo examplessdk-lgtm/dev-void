@@ -355,6 +355,11 @@ export async function runInstalledPlatformCommand(args: PlatformArgs): Promise<v
         },
       );
     }
+    if (!databaseLock?.readAuthenticationState) {
+      throw new Error(
+        'platform: The database lifecycle lock cannot read authoritative authentication settings.',
+      );
+    }
     const result = await installPlatform(plan, secrets, installation, {
       // runInstalledPlatformCommand holds the database session lock across the
       // entire replan and mutation sequence.
@@ -363,6 +368,7 @@ export async function runInstalledPlatformCommand(args: PlatformArgs): Promise<v
           checkpoint: databaseLock?.checkpoint,
           prepareDatabase: databaseLock?.prepareDatabase,
           prepareSandboxDrain: databaseLock?.prepareSandboxDrain,
+          readAuthenticationState: databaseLock?.readAuthenticationState,
           requiredSafetyProtocols: databaseLock?.requiredSafetyProtocols,
           verifyDatabase: databaseLock?.verifyDatabase,
         }),
@@ -410,6 +416,13 @@ export async function runInstalledPlatformCommand(args: PlatformArgs): Promise<v
           ? `${deployment.displayName} is running compatible runtime ${runtime!.manifest.platformVersion}; PostgreSQL remains at schema ${rollbackSourceRuntime!.manifest.database.schemaDigest}.`
           : `${deployment.displayName} is healthy at ${plan.apiUrl}.`,
       );
+      if (result.setupPending) {
+        const code = readInstallationRecoverySecrets(result.manifest)?.authBootstrapCode;
+        if (code) {
+          log.info(`First administrator setup: ${plan.apiUrl}/setup`);
+          console.log(`One-time administrator setup code: ${code}`);
+        }
+      }
     };
   };
 
@@ -483,6 +496,17 @@ export function assertPlatformRollbackCompatibility(
   }
   if (target.manifestSha256 === source.manifestSha256) {
     throw new Error('platform: The rollback target is already the installed runtime artifact.');
+  }
+  if (
+    (target.manifest.authenticationProtocolVersion ?? 0) <
+    Math.max(
+      source.manifest.authenticationProtocolVersion ?? 0,
+      installation.deployment.authentication.configurable ? 1 : 0,
+    )
+  ) {
+    throw new Error(
+      'platform: The rollback target cannot enforce the installed authentication configuration and session revocation protocol. Use a compatible runtime.',
+    );
   }
   if (target.manifest.database.lineage !== source.manifest.database.lineage) {
     throw new Error('platform: The rollback target belongs to a different database lineage.');
@@ -715,7 +739,7 @@ export async function uninstallPlatform(
       createdZone
         ? `Keep zone ${createdZone.name} for explicit manual cleanup.`
         : 'Never delete the adopted application zone.'
-    }`,
+    }${(manifest.authenticationResources ?? []).length ? '\nRetain Access resources for deliberate cleanup:\n' + manifest.authenticationResources!.map((resource) => `  ${resource.ownership} ${resource.kind}: ${resource.name} (${resource.id}, account ${resource.accountId})`).join('\n') : ''}`,
     'Uninstall plan',
   );
   if (args.plan) {
@@ -1358,7 +1382,12 @@ export function isPlatformManifestMonotonicExtension(
         entry.resultHash === step.resultHash,
     ),
   );
-  return resourcesAdvance && stepsAdvance;
+  const authenticationResourcesAdvance = (earlier.authenticationResources ?? []).every((resource) =>
+    (later.authenticationResources ?? []).some(
+      (next) => JSON.stringify(next) === JSON.stringify(resource),
+    ),
+  );
+  return resourcesAdvance && stepsAdvance && authenticationResourcesAdvance;
 }
 
 function hasNamedResource(

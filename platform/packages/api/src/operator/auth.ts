@@ -1,6 +1,7 @@
 import { and, eq, gt } from 'drizzle-orm';
 import { Hono, type MiddlewareHandler } from 'hono';
 import { signJwt, verifyJwt } from '../auth/jwt.ts';
+import { validateHumanSession } from '../auth/sessions.ts';
 import { getPlatformCapabilities } from '../capabilities.ts';
 import { getUser } from '../db.ts';
 import type { ApiEnv } from '../env.ts';
@@ -41,12 +42,24 @@ export const operatorAuth: MiddlewareHandler<ApiEnv> = async (context, next) => 
       'unauthorized',
     );
   }
+  if (
+    !(await validateHumanSession(
+      db,
+      { sub: payload.sub, aud: 'api', sid: session.human_session_id ?? undefined },
+      context.get('companyIdentity'),
+    ))
+  ) {
+    throw new OperatorError(401, 'The login session was revoked. Sign in again.', 'unauthorized');
+  }
   const user = await getUser(db, payload.sub);
   if (!user || user.role !== 'admin' || isAdminSuspended(user.suspended_reason)) {
     throw new OperatorError(403, 'An active administrator account is required.', 'forbidden');
   }
   context.set('user', user);
   context.set('operatorSession', { id: session.id, expiresAt: session.expires_at });
+  if (session.human_session_id) {
+    context.set('humanSession', { id: session.human_session_id, audience: 'api' });
+  }
   await next();
 };
 
@@ -68,6 +81,9 @@ operatorSessionRoutes.post('/session', async (context) => {
     );
   }
   const db = context.get('db');
+  if (!(await validateHumanSession(db, payload, context.get('companyIdentity')))) {
+    throw new OperatorError(401, 'The login session was revoked. Sign in again.', 'unauthorized');
+  }
   const user = await getUser(db, payload.sub);
   if (!user || user.role !== 'admin' || isAdminSuspended(user.suspended_reason)) {
     throw new OperatorError(403, 'An active administrator account is required.', 'forbidden');
@@ -87,7 +103,9 @@ operatorSessionRoutes.post('/session', async (context) => {
     context.env.JWT_SECRET,
     { ttlSeconds: SESSION_SECONDS },
   );
-  await db.insert(operatorSessions).values({ id, user_id: user.id, expires_at: expiresAt });
+  await db
+    .insert(operatorSessions)
+    .values({ id, user_id: user.id, expires_at: expiresAt, human_session_id: payload.sid });
   return context.json({
     apiVersion: 1,
     token,

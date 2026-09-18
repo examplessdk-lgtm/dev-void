@@ -1,7 +1,14 @@
 import { eq } from 'drizzle-orm';
 import { describe, it, expect, beforeAll, beforeEach, afterAll, vi } from 'vite-plus/test';
-import { signDeployToken, verifyPrerenderToken } from '../../src/auth/deploy-token.ts';
+import { importLegacyAuthentication } from '../../src/auth/configuration.ts';
+import {
+  signDeployToken,
+  signProjectCredentialToken,
+  verifyDeployToken,
+  verifyPrerenderToken,
+} from '../../src/auth/deploy-token.ts';
 import { hmacSignState } from '../../src/auth/hmac.ts';
+import { revokeConnectionSessions } from '../../src/auth/sessions.ts';
 import {
   createDeployment,
   updateDeploymentStatus,
@@ -19,6 +26,8 @@ import {
   projects,
   resources,
   projectDatabaseCredentials,
+  projectDeployCredentials,
+  platformLoginConnections,
 } from '../../src/schema.ts';
 import {
   setupEnv,
@@ -32,7 +41,7 @@ import {
   cfError,
   type TestEnv,
 } from './helpers.ts';
-import { setTestDb } from './setup.ts';
+import { setGetProjectOverride, setTestDb } from './setup.ts';
 
 let env: TestEnv;
 
@@ -46,6 +55,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await clearTables(env.db);
+  setGetProjectOverride(null);
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
@@ -257,6 +267,76 @@ describe('GET /projects/:id', () => {
 });
 
 describe('POST /projects/:id/prerender-token', () => {
+  async function proxyRequest(token: string, projectId: string) {
+    const proxyModuleUrl = new URL('../../../proxy/src/index.ts', import.meta.url).href;
+    const proxyWorker = (
+      (await import(/* @vite-ignore */ proxyModuleUrl)) as {
+        default: { fetch(request: Request, env: unknown): Promise<Response> };
+      }
+    ).default;
+    const apiBinding = {
+      fetch(input: string | Request, init?: RequestInit) {
+        return app.fetch(input instanceof Request ? input : new Request(input, init), env);
+      },
+    };
+    return proxyWorker.fetch(
+      new Request('https://proxy.example.com/ai/run', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ projectId, model: 'test-model', inputs: {} }),
+      }),
+      {
+        ...env,
+        API: apiBinding,
+        AI: {
+          run: vi.fn(async () => ({ response: 'ok' })),
+          models: vi.fn(async () => []),
+          toMarkdown: vi.fn(async () => ({ markdown: '' })),
+          gateway: vi.fn(),
+        },
+      } as never,
+    );
+  }
+
+  async function issueCiPrerenderToken(
+    user: Awaited<ReturnType<typeof createTestUser>>,
+    project: Awaited<ReturnType<typeof createTestProject>>,
+    name: string,
+  ) {
+    const issued = await app.fetch(
+      new Request(`http://localhost/projects/${project.id}/tokens`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${user.jwt}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, expiresInDays: 30 }),
+      }),
+      env,
+    );
+    expect(issued.status).toBe(201);
+    const credential = await issued.json<{ id: string; token: string }>();
+    const derived = await app.fetch(
+      new Request(`http://localhost/projects/${project.id}/prerender-token`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${credential.token}` },
+      }),
+      env,
+    );
+    expect(derived.status).toBe(200);
+    const { token } = await derived.json<{ token: string }>();
+    const payload = await verifyPrerenderToken(token, env.JWT_SECRET);
+    expect(payload).toMatchObject({
+      aud: 'prerender',
+      sub: user.id,
+      project: project.id,
+      credential: credential.id,
+    });
+    expect(payload?.sid).toBeUndefined();
+    expect((await proxyRequest(token, project.id)).status).toBe(200);
+    return { ...credential, derivedToken: token };
+  }
+
   it('mints a bounded proxy-only token long enough for a manual prerender', async () => {
     const user = await createTestUser(env.db, 'prerender-owner');
     const project = await createTestProject(env.db, user.id, 'prerender-app');
@@ -343,15 +423,148 @@ describe('POST /projects/:id/prerender-token', () => {
             'content-type': 'application/json',
             'x-void-internal': internalAuth,
           },
-          body: JSON.stringify({ buildId: build.id }),
+          body: JSON.stringify({ userId: user.id, buildId: build.id }),
         }),
         env,
       );
     expect((await verifyBuild()).status).toBe(200);
+    expect((await proxyRequest(token, project.id)).status).toBe(200);
+
+    await env.db
+      .update(users)
+      .set({ suspended_reason: 'admin_suspended' })
+      .where(eq(users.id, user.id));
+    expect((await proxyRequest(token, project.id)).status).toBe(403);
+    await env.db.update(users).set({ suspended_reason: null }).where(eq(users.id, user.id));
+    expect((await proxyRequest(token, project.id)).status).toBe(200);
 
     await db.markBuildTerminalIfActive(env.db, build.id, 'cancelled');
     expect((await verifyBuild()).status).toBe(403);
     expect((await mint()).status).toBe(403);
+  });
+
+  it('revokes CI-derived proxy access on parent revoke, renewal, expiry, and owner suspension', async () => {
+    const user = await createTestUser(env.db, 'prerender-durable-ci');
+    const project = await createTestProject(env.db, user.id, 'prerender-durable-ci-app');
+
+    const revoked = await issueCiPrerenderToken(user, project, 'revoke-parent');
+    const revoke = await app.fetch(
+      new Request(`http://localhost/projects/${project.id}/tokens/${revoked.id}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${user.jwt}` },
+      }),
+      env,
+    );
+    expect(revoke.status).toBe(200);
+    expect((await proxyRequest(revoked.derivedToken, project.id)).status).toBe(403);
+
+    const renewed = await issueCiPrerenderToken(user, project, 'renew-parent');
+    const renew = await app.fetch(
+      new Request(`http://localhost/projects/${project.id}/tokens/${renewed.id}/renew`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${user.jwt}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ expiresInDays: 30 }),
+      }),
+      env,
+    );
+    expect(renew.status).toBe(200);
+    expect((await proxyRequest(renewed.derivedToken, project.id)).status).toBe(403);
+
+    const expired = await issueCiPrerenderToken(user, project, 'expire-parent');
+    await env.db
+      .update(projectDeployCredentials)
+      .set({ expires_at: new Date(0).toISOString() })
+      .where(eq(projectDeployCredentials.id, expired.id));
+    expect((await proxyRequest(expired.derivedToken, project.id)).status).toBe(403);
+
+    const suspended = await issueCiPrerenderToken(user, project, 'suspend-owner');
+    await env.db
+      .update(users)
+      .set({ suspended_reason: 'admin_suspended' })
+      .where(eq(users.id, user.id));
+    expect((await proxyRequest(suspended.derivedToken, project.id)).status).toBe(403);
+  });
+
+  it('retains validated credential provenance when the parent JWT expires before minting', async () => {
+    const startedAt = new Date('2026-09-18T00:00:00.000Z').getTime();
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(startedAt);
+    try {
+      const user = await createTestUser(env.db, 'prerender-expiry-boundary');
+      const project = await createTestProject(env.db, user.id, 'prerender-expiry-boundary-app');
+      const credentialId = crypto.randomUUID();
+      const expiresAt = new Date(startedAt + 2_000);
+      await env.db.insert(projectDeployCredentials).values({
+        id: credentialId,
+        project_id: project.id,
+        issued_by: user.id,
+        name: 'expiry-boundary',
+        expires_at: expiresAt.toISOString(),
+      });
+      const parentToken = await signProjectCredentialToken(
+        {
+          credentialId,
+          projectId: project.id,
+          userId: user.id,
+          login: user.login,
+          expiresAt,
+        },
+        env.JWT_SECRET,
+      );
+
+      setGetProjectOverride(({ original, argsList }) => {
+        // authMiddleware has already verified the real JWT and credential row;
+        // the route's first project read crosses the JWT expiry boundary.
+        vi.setSystemTime(startedAt + 2_000);
+        return original(...argsList);
+      });
+      const response = await app.fetch(
+        new Request(`http://localhost/projects/${project.id}/prerender-token`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${parentToken}` },
+        }),
+        env,
+      );
+      expect(response.status).toBe(200);
+      expect(await verifyDeployToken(parentToken, env.JWT_SECRET)).toBeNull();
+      const { token } = await response.json<{ token: string }>();
+      const payload = await verifyPrerenderToken(token, env.JWT_SECRET);
+      expect(payload).toMatchObject({
+        aud: 'prerender',
+        project: project.id,
+        sub: user.id,
+        credential: credentialId,
+      });
+      expect(payload?.sid).toBeUndefined();
+      // The parent record expired at the same boundary as its JWT, so the
+      // credential-bound derived token is immediately rejected authoritatively.
+      expect((await proxyRequest(token, project.id)).status).toBe(403);
+    } finally {
+      setGetProjectOverride(null);
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps durable deploy and derived prerender credentials independent of provider disablement', async () => {
+    const user = await createTestUser(env.db, 'prerender-provider-independent');
+    const project = await createTestProject(env.db, user.id, 'prerender-provider-independent-app');
+    const credential = await issueCiPrerenderToken(user, project, 'provider-independent');
+
+    await importLegacyAuthentication(env.db, env);
+    await env.db
+      .update(platformLoginConnections)
+      .set({ enabled: false })
+      .where(eq(platformLoginConnections.id, 'github'));
+    await revokeConnectionSessions(env.db, 'github');
+
+    expect((await proxyRequest(credential.derivedToken, project.id)).status).toBe(200);
+    const parentStillValid = await app.fetch(
+      new Request('http://localhost/projects', {
+        headers: { Authorization: `Bearer ${credential.token}` },
+      }),
+      env,
+    );
+    expect(parentStillValid.status).toBe(200);
   });
 
   it("does not mint a token for another user's project", async () => {

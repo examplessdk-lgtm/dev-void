@@ -1,5 +1,6 @@
 import { count, desc, eq } from 'drizzle-orm';
 import { Hono, type Context, type MiddlewareHandler } from 'hono';
+import { AuthenticationConfigurationError } from '../auth/configuration.ts';
 import type { ApiEnv } from '../env.ts';
 import { operatorEvents } from '../schema.ts';
 import { dryRun, OperatorError, pagination, readBody } from './common.ts';
@@ -12,6 +13,12 @@ function boundedString(value: unknown, maximum: number, lowerCase = false) {
   }
   const trimmed = value.trim();
   return lowerCase ? trimmed.toLowerCase() : trimmed;
+}
+
+function boundedExactString(value: unknown, maximum: number) {
+  return typeof value === 'string' && value.length > 0 && value.length <= maximum
+    ? value
+    : undefined;
 }
 
 function pathIdentifier(value: string | undefined) {
@@ -59,6 +66,13 @@ function auditTarget(
 ): string | undefined {
   const segments = path.split('/');
   const id = pathIdentifier(segments[1]);
+  if (segments[0] === 'config' && segments[1] === 'auth') {
+    return JSON.stringify({
+      connectionId: pathIdentifier(segments[3]),
+      action: pathIdentifier(segments[4] ?? segments[2]),
+      revision: typeof body.revision === 'number' ? body.revision : undefined,
+    });
+  }
   if (segments[0] === 'users' && id) {
     if (segments[2] === 'plan') {
       return JSON.stringify({ userId: id, plan: boundedString(body.plan, 512) });
@@ -80,11 +94,17 @@ function auditTarget(
     if (segments[1] === 'restrict' || segments[1] === 'open') {
       return JSON.stringify({ restrictionsEnabled: segments[1] === 'restrict' });
     }
-    if (segments[1] === 'allow' || segments[1] === 'remove') {
+    if (segments[1] === 'allow' || segments[1] === 'remove' || segments[1] === 'disallow') {
       const patterns = accessPatterns(body.patterns);
+      const type = boundedString(body.type, 512);
       return JSON.stringify({
-        type: boundedString(body.type, 512),
-        pattern: boundedString(body.pattern, 320, true),
+        type,
+        ...(type === 'identity'
+          ? {
+              connectionId: boundedString(body.connectionId, 64),
+              subject: boundedExactString(body.subject, 255),
+            }
+          : { pattern: boundedString(body.pattern, 320, true) }),
         ...(patterns ? { patterns } : {}),
         ...(segments[1] === 'allow' ? { note: boundedString(body.note, 1000) } : {}),
       });
@@ -281,7 +301,14 @@ export async function executeAuditedMutation(
       )) ?? result.response
     );
   } catch (error) {
-    await completeAudit(context, id, false, error instanceof OperatorError ? error.status : 500);
+    await completeAudit(
+      context,
+      id,
+      false,
+      error instanceof OperatorError || error instanceof AuthenticationConfigurationError
+        ? error.status
+        : 500,
+    );
     throw error;
   }
 }

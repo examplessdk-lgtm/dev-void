@@ -9,6 +9,10 @@ See [Platform Administration](../../docs/guide/platform-administration.md) for a
 walkthrough and the [CLI reference](../../docs/reference/cli.md#operator-commands)
 for every command.
 
+Use `void platform config auth` to manage login methods and company signup.
+Cloudflare Access protection has separate create/connect controls. Users can
+link another enabled login to their account with `void auth link`.
+
 ## What It Covers
 
 - file-based API routes from `routes/`
@@ -58,7 +62,7 @@ export default defineConfig({
 - `void platform *` — list, select, inspect, install, recover, repair, upgrade, disable, and safely uninstall a company platform
 - `void deploy` — build and deploy to the saved Cloudflare or Void target
 - `void db *` — local DB and migration commands
-- `void project *` — target-aware status, logs, rollback, and managed-project operations
+- `void project *` — target-aware status, logs, rollback, managed-project operations, and scoped CI deploy credentials
 - `void secret *` / `void domain *` — target-aware Worker secrets and custom domains
 
 Runtime helpers include:

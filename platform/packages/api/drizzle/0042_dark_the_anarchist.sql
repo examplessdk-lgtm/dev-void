@@ -1,0 +1,1 @@
+ALTER TABLE "platform_login_tests" ADD COLUMN "login" text DEFAULT '' NOT NULL;

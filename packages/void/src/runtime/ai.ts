@@ -532,6 +532,7 @@ function makeHttpBackend(token: string, projectId: string, runtimeEnv: RuntimeEn
       method: 'POST',
       headers,
       body: JSON.stringify({ action, ...body, projectId }),
+      redirect: 'manual',
     });
     if (options.throwOnError !== false && !res.ok) {
       const text = await res.text();

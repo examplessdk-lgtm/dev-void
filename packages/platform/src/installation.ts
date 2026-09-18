@@ -73,6 +73,16 @@ export type PlatformRuntimeProvenance = Readonly<{
 }>;
 
 export type PlatformInstallationManifest = Readonly<{
+  authenticationResources?: ReadonlyArray<
+    Readonly<{
+      key: string;
+      kind: 'application' | 'service-token';
+      accountId: string;
+      id: string;
+      name: string;
+      ownership: 'created' | 'adopted';
+    }>
+  >;
   account: Readonly<{
     id: string;
     name: string;
@@ -429,6 +439,9 @@ export function parsePlatformInstallationManifest(value: unknown): PlatformInsta
       status: value.status,
       runtime,
       ...(pendingDomain ? { pendingDomain } : {}),
+      ...(value.authenticationResources !== undefined
+        ? { authenticationResources: parseAuthenticationResources(value.authenticationResources) }
+        : {}),
       updatedAt,
     },
     {
@@ -488,6 +501,40 @@ export function parsePlatformInstallationManifest(value: unknown): PlatformInsta
           ?.resultHash ?? null)
       : requiredString(value.databaseSchemaDigest, 'databaseSchemaDigest');
   return { ...next, databaseSchemaDigest: recordedDatabaseSchemaDigest, updatedAt };
+}
+
+function parseAuthenticationResources(
+  value: unknown,
+): NonNullable<PlatformInstallationManifest['authenticationResources']> {
+  if (!Array.isArray(value) || value.length > 100) {
+    throw new Error('Invalid authentication resource inventory.');
+  }
+  const resources = value.map(
+    (entry): NonNullable<PlatformInstallationManifest['authenticationResources']>[number] => {
+      assertRecord(entry, 'Authentication resource');
+      if (
+        (entry.kind !== 'application' && entry.kind !== 'service-token') ||
+        (entry.ownership !== 'created' && entry.ownership !== 'adopted')
+      ) {
+        throw new Error('Invalid authentication resource kind or ownership.');
+      }
+      return {
+        key: requiredString(entry.key, 'authentication resource key'),
+        kind: entry.kind,
+        accountId: requiredString(entry.accountId, 'authentication resource account'),
+        id: requiredString(entry.id, 'authentication resource ID'),
+        name: requiredString(entry.name, 'authentication resource name'),
+        ownership: entry.ownership,
+      };
+    },
+  );
+  if (
+    new Set(resources.map((resource) => `${resource.accountId}:${resource.kind}:${resource.id}`))
+      .size !== resources.length
+  ) {
+    throw new Error('Duplicate authentication resource identity.');
+  }
+  return resources;
 }
 
 function parseUsageProtocolVersion(value: unknown): 0 | 1 {

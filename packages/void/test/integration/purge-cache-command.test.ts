@@ -109,6 +109,7 @@ describe('runPurgeCacheCommand', () => {
           'X-Void-CLI-Version': expect.stringMatching(/^\d+\.\d+\.\d+/) as unknown as string,
         },
         body: JSON.stringify({ all: true }),
+        redirect: 'manual',
       },
     );
     expect(out).toContain('5 cached page(s)');

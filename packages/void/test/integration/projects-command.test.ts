@@ -113,6 +113,7 @@ describe('runProjectsCommand', () => {
         Authorization: 'Bearer test-token',
         'X-Void-CLI-Version': expect.stringMatching(/^\d+\.\d+\.\d+/) as unknown as string,
       },
+      redirect: 'manual',
     });
     expect(out).toContain('star-tracker');
     expect(out).toContain('https://star-tracker.staging.void.app');

@@ -579,9 +579,10 @@ In addition to `builds` and `github_connections`:
 `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY` (PKCS#8 PEM), `GITHUB_WEBHOOK_SECRET`,
 `GITHUB_APP_SLUG` — per-env, declared **optional** in `env.ts` (webhook + OIDC
 endpoints return 503 when unset). Distinct from the existing
-`GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` (user sign-in OAuth app). Staging
-Cloudflare Access must add `/webhooks/github` and `/auth/github-oidc` to the
-bypass list (GitHub cannot present Access creds).
+`GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` (user sign-in OAuth app). This
+archived design originally prescribed an Access bypass for the webhook. That is
+superseded by design 0080's standalone, signature-verifying ingress and fixed
+service-binding operation; do not add an API-hostname bypass.
 
 ### Known follow-ups (not done this round)
 

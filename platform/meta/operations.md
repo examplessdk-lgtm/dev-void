@@ -79,6 +79,7 @@ Keep these values recoverable through the deployment owner's secret manager:
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`                                            | Google sign-in OAuth client                                     |
 | `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`                                            | Signed asset-upload URLs                                        |
 | `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_WEBHOOK_SECRET`, `GITHUB_APP_SLUG` | GitHub deployment integration                                   |
+| `GITHUB_WEBHOOK_INGRESS_SECRET`                                                       | Optional isolated webhook ingress-to-API proof                  |
 | `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_CLIENT_SECRET`                                    | GitHub App user authorization for installation ownership checks |
 
 The project-secret keyring is a JSON object mapping key versions to base64-encoded 32-byte keys. The active version must exist in that object. Preserve older keys while any stored secret still uses them; losing a key makes those secrets unreadable. Database backups alone do not contain the decryption keys.
@@ -89,7 +90,7 @@ The API and proxy share their JWT signing configuration. Change it as a coordina
 
 The GitHub App used to build connected repositories is separate from the OAuth application used for platform sign-in. Its repository permissions are Contents read, Metadata read, Pull requests read, and Checks write.
 
-Subscribe to `push`, `installation`, `installation_repositories`, `pull_request`, `workflow_run`, `check_run`, and `check_suite`. The last two subscriptions deliver requests from GitHub's rerun buttons; granting Checks write alone does not enable those events. Set each App's webhook URL to its environment's `/webhooks/github` endpoint.
+Subscribe to `push`, `installation`, `installation_repositories`, `pull_request`, `workflow_run`, `check_run`, and `check_suite`. The last two subscriptions deliver requests from GitHub's rerun buttons; granting Checks write alone does not enable those events. An API hostname protected by Access cannot receive these deliveries. Deploy the optional ingress described in [Platform Development](../../docs/guide/platform-development.md#optional-github-webhook-ingress-for-access-protected-apis) and set the App webhook URL to that environment's isolated `/github` endpoint. Keep `/webhooks/github` only for an API origin that is not Access-protected.
 
 GitHub issues a PKCS#1 private key. The API expects PKCS#8:
 
@@ -125,13 +126,14 @@ Two server-side changes are retroactive. Before the first API deploy that carrie
 
 Void Cloud staging protects the API, dashboard, proxy, and app hostnames with Cloudflare Access. Configure user access in the identity provider and use a service-token pair for automation. Access credentials are separate from a Void user or administrator session.
 
-The following callbacks must be reachable by the sign-in providers and GitHub:
+The following callbacks must be reachable through their intended browser or machine flow:
 
 - API `/auth/callback` and `/admin/callback`
 - Dashboard `/auth/callback`
-- API `/webhooks/github` and `/auth/github-oidc`
+- API `/auth/github-oidc`
+- Isolated GitHub ingress `/github`
 
-Application code validates OAuth state, webhook signatures, and GitHub OIDC tokens on these paths. Check each callback's validation before changing an Access bypass policy.
+Application code validates OAuth state and GitHub OIDC tokens on the API paths. The isolated ingress and API both validate the GitHub webhook signature, and the service-binding hop has its own short-lived proof. Do not add an Everyone or path-bypass policy to the API hostname.
 
 For interactive staging development, install `cloudflared`. The CLI can open the browser sign-in flow for Void Cloud staging and reuse its cached Access session. To sign in manually:
 

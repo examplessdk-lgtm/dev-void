@@ -14,6 +14,7 @@ const mockGetResources = vi.fn<() => Promise<Array<{ type: string; binding_name:
   Promise.resolve([]),
 );
 const mockGetDatabaseUrl = vi.fn<() => Promise<{ url: string }>>();
+const mockEnsurePlatformAccessToken = vi.fn();
 
 vi.mock('../../src/cli/auth', () => ({
   getProxyUrl: () => mockGetProxyUrl(),
@@ -29,6 +30,7 @@ vi.mock('../../src/cli/project', () => ({
 
 vi.mock('../../src/cli/client', () => ({
   PlatformClient: class {
+    apiUrl = 'https://api.void.cloud';
     getResources() {
       return mockGetResources();
     }
@@ -45,6 +47,12 @@ vi.mock('../../src/cli/client', () => ({
       this.body = body;
     }
   },
+}));
+
+vi.mock('../../src/cli/cf-access', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../src/cli/cf-access.ts')>()),
+  ensurePlatformProxyAccess: vi.fn(),
+  ensurePlatformAccessToken: (...args: Array<unknown>) => mockEnsurePlatformAccessToken(...args),
 }));
 
 const mockPgConnect = vi.fn<() => Promise<void>>(() => Promise.resolve());
@@ -137,6 +145,7 @@ describe('void db execute --remote (D1)', () => {
       mockIsStagingMode() ? 'https://proxy.staging.void.cloud' : 'https://proxy.void.cloud',
     );
     mockGetResources.mockResolvedValue([]);
+    mockEnsurePlatformAccessToken.mockReset();
     // By default, confirm returns true (proceed)
     mockConfirm.mockResolvedValue(true);
     mockIsCancel.mockImplementation((v) => typeof v === 'symbol');
@@ -169,6 +178,7 @@ describe('void db execute --remote (D1)', () => {
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toBe('https://proxy.void.cloud/d1/query');
     expect(init.method).toBe('POST');
+    expect(init.redirect).toBe('manual');
     const headers = init.headers as Record<string, string>;
     expect(headers['Authorization']).toBe('Bearer test-token');
     expect(headers['Content-Type']).toBe('application/json');
@@ -195,14 +205,133 @@ describe('void db execute --remote (D1)', () => {
 
   it('sends custom platform credentials only to its pinned proxy', async () => {
     const root = createProjectRoot();
-    mockGetProxyUrl.mockReturnValue('https://void-company-proxy.example.workers.dev');
+    const proxyOrigin = 'https://void-company-proxy.example.workers.dev';
+    mockGetProxyUrl.mockReturnValue(proxyOrigin);
+    const saved = process.env.VOID_ACCESS_CREDENTIALS;
+    process.env.VOID_ACCESS_CREDENTIALS = JSON.stringify({
+      'https://api.void.cloud': {
+        CF_ACCESS_CLIENT_ID: 'api-id',
+        CF_ACCESS_CLIENT_SECRET: 'api-secret',
+      },
+      [proxyOrigin]: {
+        CF_ACCESS_CLIENT_ID: 'proxy-id',
+        CF_ACCESS_CLIENT_SECRET: 'proxy-secret',
+      },
+    });
     fetchMock.mockResolvedValueOnce(jsonResponse({ results: [], success: true }));
 
-    await runDbCommand(root, { action: 'execute', command: 'SELECT 1', remote: true });
+    try {
+      await runDbCommand(root, { action: 'execute', command: 'SELECT 1', remote: true });
+    } finally {
+      if (saved === undefined) {
+        delete process.env.VOID_ACCESS_CREDENTIALS;
+      } else {
+        process.env.VOID_ACCESS_CREDENTIALS = saved;
+      }
+    }
 
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
       'https://void-company-proxy.example.workers.dev/d1/query',
     );
+    const headers = (fetchMock.mock.calls[0]![1] as RequestInit).headers as Record<string, string>;
+    expect(headers['CF-Access-Client-Id']).toBe('proxy-id');
+    expect(headers['CF-Access-Client-Secret']).toBe('proxy-secret');
+    expect(headers['CF-Access-Client-Id']).not.toBe('api-id');
+  });
+
+  it('renews a verified Access challenge and retries D1 once at the original proxy', async () => {
+    const root = createProjectRoot();
+    const proxyOrigin = 'https://proxy.example.com';
+    mockGetProxyUrl.mockReturnValue(proxyOrigin);
+    const saved = process.env.VOID_ACCESS_CREDENTIALS;
+    process.env.VOID_ACCESS_CREDENTIALS = JSON.stringify({
+      [proxyOrigin]: { CF_ACCESS_TOKEN: 'stale-user-token' },
+    });
+    mockEnsurePlatformAccessToken.mockImplementation(() => {
+      process.env.VOID_ACCESS_CREDENTIALS = JSON.stringify({
+        [proxyOrigin]: { CF_ACCESS_TOKEN: 'fresh-user-token' },
+      });
+    });
+    const challengeLocation =
+      'https://team.cloudflareaccess.com/cdn-cgi/access/login/proxy.example.com';
+    fetchMock
+      .mockResolvedValueOnce(
+        new Response(null, { status: 302, headers: { Location: challengeLocation } }),
+      )
+      .mockResolvedValueOnce(jsonResponse({ results: [], success: true }));
+
+    try {
+      await runDbCommand(root, { action: 'execute', command: 'SELECT 1', remote: true });
+    } finally {
+      if (saved === undefined) {
+        delete process.env.VOID_ACCESS_CREDENTIALS;
+      } else {
+        process.env.VOID_ACCESS_CREDENTIALS = saved;
+      }
+    }
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      `${proxyOrigin}/d1/query`,
+      `${proxyOrigin}/d1/query`,
+    ]);
+    expect(fetchMock.mock.calls.some(([url]) => url === challengeLocation)).toBe(false);
+    expect(mockEnsurePlatformAccessToken).toHaveBeenCalledWith(
+      proxyOrigin,
+      true,
+      false,
+      'stale-user-token',
+    );
+    const firstHeaders = (fetchMock.mock.calls[0]![1] as RequestInit).headers as Record<
+      string,
+      string
+    >;
+    const secondHeaders = (fetchMock.mock.calls[1]![1] as RequestInit).headers as Record<
+      string,
+      string
+    >;
+    expect(firstHeaders['cf-access-token']).toBe('stale-user-token');
+    expect(secondHeaders['cf-access-token']).toBe('fresh-user-token');
+    expect(fetchMock.mock.calls.map(([, init]) => (init as RequestInit).redirect)).toEqual([
+      'manual',
+      'manual',
+    ]);
+  });
+
+  it('does not retry a proxy Access challenge for scoped CI service credentials', async () => {
+    const root = createProjectRoot();
+    const proxyOrigin = 'https://proxy.example.com';
+    mockGetProxyUrl.mockReturnValue(proxyOrigin);
+    const saved = process.env.VOID_ACCESS_CREDENTIALS;
+    process.env.VOID_ACCESS_CREDENTIALS = JSON.stringify({
+      [proxyOrigin]: {
+        CF_ACCESS_CLIENT_ID: 'ci-id',
+        CF_ACCESS_CLIENT_SECRET: 'ci-secret',
+      },
+    });
+    fetchMock.mockResolvedValueOnce(
+      new Response(null, {
+        status: 302,
+        headers: {
+          Location: 'https://team.cloudflareaccess.com/cdn-cgi/access/login/proxy.example.com',
+        },
+      }),
+    );
+
+    try {
+      await expect(
+        runDbCommand(root, { action: 'execute', command: 'SELECT 1', remote: true }),
+      ).rejects.toThrow('process.exit:1');
+    } finally {
+      if (saved === undefined) {
+        delete process.env.VOID_ACCESS_CREDENTIALS;
+      } else {
+        process.env.VOID_ACCESS_CREDENTIALS = saved;
+      }
+    }
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(mockEnsurePlatformAccessToken).not.toHaveBeenCalled();
   });
 
   it('uses the D1 binding name from getResources when available', async () => {

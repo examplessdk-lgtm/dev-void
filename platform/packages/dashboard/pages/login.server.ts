@@ -1,13 +1,15 @@
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
 import { defineHandler, defineHead } from 'void';
-import { getPublicApiUrl } from '../lib/api.ts';
+import { fetchApi, getPublicApiUrl } from '../lib/api.ts';
+import { isLocalDashboardHost } from '../lib/origin.ts';
+import { createPkceChallenge, createPkceVerifier } from '../lib/pkce.ts';
 import apkProtocolMedium from '../ui/fonts/APK-Protocol-Medium.woff2';
 import interRomanLatin from '../ui/fonts/inter-roman-latin.woff2';
 import khTekaMonoRegular from '../ui/fonts/KHTekaMono-Regular.woff2';
 
 export type Props = Readonly<{
-  githubUrl: string;
-  googleUrl: string;
+  methods: ReadonlyArray<{ id: string; label: string; url: string }>;
+  unavailable?: boolean;
   devLoginUrl?: string;
 }>;
 
@@ -19,13 +21,13 @@ export const head = defineHead<Props>(() => ({
   ],
 }));
 
-export const loader = defineHandler<Props>((context) => {
+export const loader = defineHandler<Props>(async (context) => {
   const platformUrl = getPublicApiUrl(context);
 
   // Derive origin from Host header — context.req.url can be localhost in prod
   // due to Workers Assets internal dispatch
   const host = context.req.header('host')!;
-  const isLocal = host.startsWith('localhost') || host.startsWith('127.0.0.1');
+  const isLocal = isLocalDashboardHost(host);
   const protocol = isLocal ? 'http' : 'https';
   const callbackUrl = `${protocol}://${host}/auth/callback`;
 
@@ -43,9 +45,71 @@ export const loader = defineHandler<Props>((context) => {
   });
   deleteCookie(context, 'void_auth_nonce', { path: '/auth' });
 
-  const callbackWithNonce = `${callbackUrl}?login_nonce=${nonce}`;
-  const githubUrl = `${platformUrl}/auth/login?provider=github&redirect=${encodeURIComponent(callbackWithNonce)}`;
-  const googleUrl = `${platformUrl}/auth/login?provider=google&redirect=${encodeURIComponent(callbackWithNonce)}`;
+  const callback = new URL(callbackUrl);
+  callback.searchParams.set('login_nonce', nonce);
+  let pkceChallenge: string | undefined;
+  if (isLocal) {
+    const verifier = createPkceVerifier();
+    const state = crypto.randomUUID();
+    pkceChallenge = await createPkceChallenge(verifier);
+    callback.searchParams.set('state', state);
+    setCookie(context, 'void_auth_pkce', `${state}:${verifier}`, {
+      httpOnly: true,
+      secure: false,
+      sameSite: 'Lax',
+      path: '/auth/callback',
+      maxAge: 300,
+    });
+  }
+  const callbackWithNonce = callback.href;
+  let methods: Props['methods'] = [];
+  let unavailable = false;
+  try {
+    const response = await fetchApi(context, '/.well-known/void-platform');
+    if (!response.ok) {
+      throw new Error('Discovery unavailable');
+    }
+    const document = (await response.json()) as {
+      schemaVersion?: number;
+      authentication?: { methods: Array<{ id: string; label: string }> };
+      authenticationProviders?: Array<string>;
+    };
+    if (![1, 2, 3].includes(document.schemaVersion ?? 0)) {
+      throw new Error('Unsupported platform');
+    }
+    const descriptors =
+      document.schemaVersion === 3
+        ? document.authentication?.methods
+        : document.authenticationProviders?.map((id) => ({
+            id,
+            label: id === 'github' ? 'GitHub' : id === 'google' ? 'Google' : id,
+          }));
+    if (!Array.isArray(descriptors) || descriptors.length > 32) {
+      throw new Error('Invalid login methods');
+    }
+    methods = descriptors.map((method) => {
+      if (typeof method.id !== 'string' || typeof method.label !== 'string') {
+        throw new Error('Invalid login method');
+      }
+      return {
+        id: method.id,
+        label: method.label,
+        url: (() => {
+          const url = new URL('/auth/login', platformUrl);
+          url.searchParams.set('provider', method.id);
+          url.searchParams.set('redirect', callbackWithNonce);
+          if (pkceChallenge) {
+            url.searchParams.set('code_challenge', pkceChallenge);
+            url.searchParams.set('code_challenge_method', 'S256');
+          }
+          return url.href;
+        })(),
+      };
+    });
+  } catch {
+    unavailable = true;
+  }
+  context.header('Cache-Control', 'no-store');
 
   let devLoginUrl: string | undefined;
   try {
@@ -57,5 +121,5 @@ export const loader = defineHandler<Props>((context) => {
     // malformed platformUrl — treat as non-local
   }
 
-  return { githubUrl, googleUrl, devLoginUrl };
+  return { methods, unavailable, devLoginUrl };
 });

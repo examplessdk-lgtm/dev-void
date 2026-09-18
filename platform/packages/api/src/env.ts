@@ -46,6 +46,8 @@ export type ApiEnv = Env & {
     /** App private key in PKCS#8 PEM form (`openssl pkcs8 -topk8 -nocrypt`). */
     GITHUB_APP_PRIVATE_KEY?: string;
     GITHUB_WEBHOOK_SECRET?: string;
+    /** Dedicated HMAC shared only with the optional, path-isolated GitHub ingress Worker. */
+    GITHUB_WEBHOOK_INGRESS_SECRET?: string;
     GITHUB_APP_SLUG?: string;
     /**
      * GitHub App user-to-server OAuth credentials (the App's own client id/secret,
@@ -72,6 +74,10 @@ export type ApiEnv = Env & {
     CF_ACCESS_CLIENT_SECRET_STAGING?: string;
     GOOGLE_CLIENT_ID: string;
     GOOGLE_CLIENT_SECRET: string;
+    /** Installation-only capability; never shared with health probes or tenant Workers. */
+    PLATFORM_AUTH_SETUP_TOKEN?: string;
+    /** Installer attestation after verifying the dedicated Hyperdrive cache is disabled. */
+    PLATFORM_AUTH_DATABASE_UNCACHED?: string;
     AUTH_REDIRECT_URI?: string;
     DEV_AUTH_BYPASS?: string;
     DISPATCH_NAMESPACE?: string;
@@ -178,6 +184,9 @@ export type ApiEnv = Env & {
     user: User;
     db: Db;
     operatorSession: { id: string; expiresAt: string };
+    /** Set only after validating an Access assertion against this installation's gate. */
+    companyIdentity?: { issuer: string; subject: string };
+    humanSession?: { id: string; audience: 'api' | 'admin' };
     /**
      * Project id a scoped deploy token is pinned to. Set by `authMiddleware`
      * for `aud:'deploy'` tokens; absent for full `aud:'api'` tokens. The deploy
@@ -192,5 +201,11 @@ export type ApiEnv = Env & {
      * a stale runner can't deploy an older commit after being superseded.
      */
     deployBuild?: string;
+    /**
+     * Durable credential provenance already validated by `authMiddleware`.
+     * Set only for deploy tokens carrying a credential claim, after the
+     * credential's project, owner, revocation, and expiry checks pass.
+     */
+    deployCredential?: string;
   };
 };

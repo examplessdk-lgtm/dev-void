@@ -2,6 +2,7 @@ import type { Context } from 'hono';
 import { getCookie, setCookie, deleteCookie } from 'hono/cookie';
 import { defineHandler } from 'void';
 import { fetchApi, getApiErrorMessage, readApiJson } from '../../lib/api.ts';
+import { isLocalDashboardHost } from '../../lib/origin.ts';
 
 function loginUrl(context: Context): string {
   return `${requestOrigin(context)}/login`;
@@ -12,7 +13,7 @@ function requestOrigin(context: Context): string {
   if (!host) {
     return new URL(context.req.url).origin;
   }
-  const isLocal = host.startsWith('localhost') || host.startsWith('127.0.0.1');
+  const isLocal = isLocalDashboardHost(host);
   return `${isLocal ? 'http' : 'https'}://${host}`;
 }
 
@@ -33,27 +34,41 @@ export const loader = defineHandler(async (context) => {
       console.warn('[dashboard] auth callback nonce mismatch');
       return context.redirect(loginUrl(context));
     }
-    const resp = await fetchApi(context, '/auth/exchange', {
+    const host = context.req.header('host') ?? '';
+    const isLocal = isLocalDashboardHost(host);
+    const pkce = getCookie(context, 'void_auth_pkce');
+    const separator = pkce?.indexOf(':') ?? -1;
+    const pkceState = separator > 0 ? pkce!.slice(0, separator) : undefined;
+    const pkceVerifier = separator > 0 ? pkce!.slice(separator + 1) : undefined;
+    const callbackState = context.req.query('state');
+    if (isLocal && (!pkceState || !pkceVerifier || callbackState !== pkceState)) {
+      console.warn('[dashboard] auth callback PKCE state mismatch');
+      return context.redirect(loginUrl(context));
+    }
+    const exchangePath = isLocal ? '/auth/cli/token' : '/auth/exchange';
+    const resp = await fetchApi(context, exchangePath, {
       method: 'POST',
-      body: JSON.stringify({ code }),
+      body: JSON.stringify(
+        isLocal ? { code, state: pkceState, code_verifier: pkceVerifier } : { code },
+      ),
     });
     if (!resp.ok) {
       console.warn(
-        `[dashboard] /auth/exchange returned ${resp.status}: ${await getApiErrorMessage(resp)}`,
+        `[dashboard] ${exchangePath} returned ${resp.status}: ${await getApiErrorMessage(resp)}`,
       );
       return context.redirect(loginUrl(context));
     }
     const exchange = await readApiJson<{ token: string }>(resp);
     if (!exchange?.token) {
-      console.warn('[dashboard] /auth/exchange returned no token');
+      console.warn(`[dashboard] ${exchangePath} returned no token`);
       return context.redirect(loginUrl(context));
     }
     deleteCookie(context, 'void_auth_nonce', { path: '/' });
     deleteCookie(context, 'void_auth_nonce', { path: '/auth' });
-    const host = context.req.header('host') ?? '';
+    deleteCookie(context, 'void_auth_pkce', { path: '/auth/callback' });
     setCookie(context, 'void_token', exchange.token, {
       httpOnly: true,
-      secure: !(host.startsWith('localhost') || host.startsWith('127.0.0.1')),
+      secure: !isLocal,
       sameSite: 'Lax',
       path: '/',
       maxAge: 30 * 24 * 60 * 60,
@@ -67,7 +82,7 @@ export const loader = defineHandler(async (context) => {
   const token = context.req.query('token');
   if (token) {
     const host = context.req.header('host') ?? '';
-    if (!host.startsWith('localhost') && !host.startsWith('127.0.0.1')) {
+    if (!isLocalDashboardHost(host)) {
       return context.redirect(loginUrl(context));
     }
     // Verify login nonce — same protection as the OAuth code path above.

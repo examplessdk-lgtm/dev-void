@@ -66,6 +66,11 @@ function hasTopLevelKeyword(statement: string, keyword: string): boolean {
 }
 
 function hasUnboundedWrite(statement: string): boolean {
+  // Referential actions in table definitions are not UPDATE/DELETE statements.
+  // ALTER TABLE ADD ... REFERENCES may declare them outside parentheses, too.
+  if (/^(?:CREATE\s+(?:(?:TEMP|TEMPORARY|UNLOGGED)\s+)?|ALTER\s+)TABLE\b/i.test(statement)) {
+    return false;
+  }
   if (/\bDELETE\s+FROM\b/i.test(statement)) {
     return !hasTopLevelKeyword(statement, 'WHERE');
   }

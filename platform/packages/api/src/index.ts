@@ -9,6 +9,7 @@ import { lt, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { adminAuthMiddleware } from './admin/middleware/auth.ts';
 import { adminCsrfMiddleware } from './admin/middleware/csrf.ts';
+import adminAuthConfig from './admin/routes/auth-config.tsx';
 import adminBuilds from './admin/routes/builds.tsx';
 import adminDeployments from './admin/routes/deployments.tsx';
 import adminEmail from './admin/routes/email.tsx';
@@ -19,6 +20,8 @@ import adminProjects from './admin/routes/projects.tsx';
 import adminSignupControl from './admin/routes/signup-control.tsx';
 import { dashboardHandler, adminSystem } from './admin/routes/system.tsx';
 import adminUsers from './admin/routes/users.tsx';
+import { pendingAuthenticationSetup } from './auth/bootstrap.ts';
+import { readAuthSettings, readEnabledLoginConnections } from './auth/configuration.ts';
 import { BuildManager, BuildManagerLarge } from './build-manager.ts';
 import { BuildScheduler } from './build-scheduler.ts';
 import { capabilityMiddleware, getPlatformCapabilities } from './capabilities.ts';
@@ -48,6 +51,7 @@ import type { ApiEnv } from './env.ts';
 import { ErrorAlertMonitor } from './error-alert-monitor.ts';
 import { cancelContainerBuildDos } from './github/cancel-builds.ts';
 import { authMiddleware } from './middleware/auth.ts';
+import { platformAccessProtection } from './middleware/platform-access.ts';
 import { operatorApi } from './operator/index.ts';
 import { sandboxDrainStatus } from './operator/sandbox-operations.ts';
 import {
@@ -72,12 +76,15 @@ import emailConfirm from './routes/email-confirm.ts';
 import emailRoutes from './routes/email.ts';
 import { githubProjectRoutes, githubRoutes } from './routes/github.ts';
 import internalEmailDomainCredential from './routes/internal-email.ts';
+import internalGitHubWebhook from './routes/internal-github-webhook.ts';
 import internalResolveResource from './routes/internal-resolve-resource.ts';
 import internalResolveWorker from './routes/internal-resolve-worker.ts';
 import internalRevalidate from './routes/internal-revalidate.ts';
 import internalVerifyOwner from './routes/internal-verify-owner.ts';
 import internalVerifyPrerenderBuild from './routes/internal-verify-prerender-build.ts';
 import me from './routes/me.ts';
+import platformBootstrapRoutes from './routes/platform-bootstrap.ts';
+import projectTokens from './routes/project-tokens.ts';
 import projects from './routes/projects.ts';
 import revalidate from './routes/revalidate.ts';
 import secrets from './routes/secrets.ts';
@@ -85,7 +92,12 @@ import { projectUsage, accountUsage } from './routes/usage.ts';
 import { webhookRoutes } from './routes/webhooks.ts';
 import { setProjectsRoutingSuspension } from './routing.ts';
 import { SandboxConcurrencyCounter } from './sandbox-concurrency-counter.ts';
-import { operatorSessions } from './schema.ts';
+import {
+  operatorSessions,
+  platformAuthAttempts,
+  platformLoginTests,
+  platformHumanSessions,
+} from './schema.ts';
 import { isAdminSuspended, REASON_REQUESTS_EXCEEDED } from './suspension.ts';
 import { getCurrentBillingPeriodStart, getPlanLimits } from './tiers.ts';
 import type { Domain, Project } from './types.ts';
@@ -142,7 +154,13 @@ const app = new Hono<ApiEnv>()
     const maintenanceSandboxDrain =
       context.env.PLATFORM_TRAFFIC_STATE === 'sandbox-drain' &&
       isSandboxDrainMaintenanceRequest(context.req.raw);
+    const authenticationSetup =
+      context.env.PLATFORM_AUTH_SETUP_TOKEN &&
+      context.req.header('X-Void-Auth-Setup') &&
+      context.req.method === 'POST' &&
+      context.req.path === '/internal/platform/auth-initialize';
     if (
+      !authenticationSetup &&
       !installerProbe &&
       !maintenanceSandboxDrain &&
       (context.env.PLATFORM_TRAFFIC_STATE === 'staging' ||
@@ -160,6 +178,8 @@ const app = new Hono<ApiEnv>()
     context.set('db', createDb(context.env.HYPERDRIVE.connectionString));
     await next();
   })
+
+  .use('*', platformAccessProtection)
 
   .get('/health', async (context) => {
     try {
@@ -195,8 +215,26 @@ const app = new Hono<ApiEnv>()
       return context.json({ status: 'unhealthy' }, 503);
     }
   })
-  .get('/.well-known/void-platform', (context) => {
-    const capabilities = getPlatformCapabilities(context.env);
+  .get('/.well-known/void-platform', async (context) => {
+    context.header('Cache-Control', 'no-store');
+    const settings = await readAuthSettings(context.get('db'));
+    const setupPending = settings && !!(await pendingAuthenticationSetup(context.get('db')));
+    const methods = settings
+      ? (await readEnabledLoginConnections(context.get('db'))).map(({ configuration }) => ({
+          id: configuration.id,
+          kind: configuration.kind,
+          label: configuration.label,
+        }))
+      : undefined;
+    const capabilities = {
+      ...getPlatformCapabilities(context.env),
+      ...(methods
+        ? {
+            githubOAuth: methods.some((method) => method.kind === 'github'),
+            googleOAuth: methods.some((method) => method.kind === 'google'),
+          }
+        : {}),
+    };
     return context.json(
       createPlatformDiscoveryDocument({
         apiUrl: new URL(context.req.url).origin,
@@ -204,10 +242,19 @@ const app = new Hono<ApiEnv>()
         ...(context.env.PLATFORM_APPLICATION
           ? { applicationRouting: readPlatformApplication(context.env) }
           : {}),
-        authenticationProviders: [
+        authenticationProviders: methods?.map((method) => method.id) ?? [
           ...(capabilities.githubOAuth ? (['github'] as const) : []),
           ...(capabilities.googleOAuth ? (['google'] as const) : []),
         ],
+        ...(methods
+          ? {
+              authentication: {
+                methods,
+                protectedByAccess: !!settings?.protection,
+                ...(setupPending ? { setupPending: true } : {}),
+              },
+            }
+          : {}),
         capabilities,
         displayName: context.env.PLATFORM_DISPLAY_NAME ?? 'Void Cloud',
         installationId: context.env.PLATFORM_INSTALLATION_ID ?? null,
@@ -282,11 +329,14 @@ const app = new Hono<ApiEnv>()
 </div>
 </body></html>`);
   })
+  .route('/', platformBootstrapRoutes)
   .route('/auth', auth)
   .route('/auth', oidcRoutes)
   .route('/internal/revalidate', internalRevalidate)
   .use('/internal/email/*', capabilityMiddleware('email'))
   .route('/internal/email/domain-credential', internalEmailDomainCredential)
+  .use('/internal/github-webhook', capabilityMiddleware('managedBuilds'))
+  .route('/internal/github-webhook', internalGitHubWebhook)
   .route('/internal/resolve-resource', internalResolveResource)
   .route('/internal/resolve-worker', internalResolveWorker)
   .route('/internal/verify-owner', internalVerifyOwner)
@@ -306,6 +356,7 @@ const app = new Hono<ApiEnv>()
   .route('/me', me)
   .use('/projects/*', authMiddleware)
   .route('/projects', projects)
+  .route('/projects', projectTokens)
   .route('/projects', deploy)
   .route('/projects', deleteRoute)
   .route('/projects', revalidate)
@@ -331,6 +382,7 @@ app.route('/admin/email', adminEmail);
 app.route('/admin/builds', adminBuilds);
 app.route('/admin/deployments', adminDeployments);
 app.route('/admin/signup-control', adminSignupControl);
+app.route('/admin/config/auth', adminAuthConfig);
 app.route('/admin/invitations', adminInvitations);
 app.route('/admin/platform', adminPlatform);
 app.route('/admin', adminSystem);
@@ -499,6 +551,14 @@ async function scheduled(
     .delete(operatorSessions)
     .where(lt(operatorSessions.expires_at, new Date().toISOString()))
     .catch((err) => console.error('[scheduled] failed to purge expired operator sessions:', err));
+  for (const table of [platformAuthAttempts, platformLoginTests, platformHumanSessions]) {
+    await db
+      .delete(table)
+      .where(lt(table.expires_at, new Date().toISOString()))
+      .catch((err) =>
+        console.error('[scheduled] failed to purge expired authentication state:', err),
+      );
+  }
 
   // Catch up on missed GitHub webhooks (design-doc 0074): list GitHub's own
   // `status=failure` delivery log and redeliver any failed event we haven't

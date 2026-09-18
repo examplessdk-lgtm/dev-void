@@ -18,7 +18,14 @@ import {
 } from '../../src/db.ts';
 import type { ApiEnv } from '../../src/env.ts';
 import { app } from '../../src/index.ts';
-import { invitations, resources, users } from '../../src/schema.ts';
+import {
+  invitations,
+  platformLoginConnections,
+  platformLoginIdentities,
+  platformLoginRevisions,
+  resources,
+  users,
+} from '../../src/schema.ts';
 import { getAllowlist } from '../../src/signup-allowlist.ts';
 import {
   clearTables,
@@ -404,6 +411,73 @@ describe('operator signup access and invitations', () => {
     ).toBe(404);
     await req('/signup/open', {});
     expect(await env.ROUTING.get('signup:enabled')).toBe('false');
+  });
+
+  test('manages exact connection-and-subject grants and validates their connection', async () => {
+    expect(
+      (
+        await req('/signup/allow', {
+          type: 'identity',
+          connectionId: 'missing',
+          subject: 'Employee-42',
+          dryRun: true,
+        })
+      ).status,
+    ).toBe(400);
+    await env.db.insert(platformLoginConnections).values({
+      id: 'company',
+      kind: 'oidc',
+      revision: 1,
+    });
+    await env.db.insert(platformLoginRevisions).values({
+      connection_id: 'company',
+      revision: 1,
+      configuration: {
+        id: 'company',
+        kind: 'oidc',
+        label: 'Company SSO',
+        clientId: 'client',
+        issuer: 'https://identity.example.com',
+        allowedDomains: [],
+        requiredGroups: [],
+      },
+      secret: { ciphertext: 'unused', iv: 'unused', keyVersion: 'unused' },
+    });
+    const entry = {
+      type: 'identity',
+      connectionId: 'company',
+      subject: 'Employee-42',
+      note: 'No verified email',
+    } as const;
+    expect((await req('/signup/allow', { ...entry, dryRun: true })).status).toBe(200);
+    expect((await req('/signup/allow', entry)).status).toBe(200);
+    expect(await getAllowlist(env.ROUTING)).toEqual([entry]);
+    expect(
+      (
+        await req('/signup/disallow', {
+          type: 'identity',
+          connectionId: 'company',
+          subject: 'employee-42',
+        })
+      ).status,
+    ).toBe(404);
+
+    const admitted = await createTestUser(env.db, 'subject-user', 'oidc:company', 'Employee-42');
+    await env.db.insert(platformLoginIdentities).values({
+      id: crypto.randomUUID(),
+      user_id: admitted.id,
+      connection_id: 'company',
+      issuer: 'https://identity.example.com',
+      subject: 'Employee-42',
+    });
+    const project = await createTestProject(env.db, admitted.id, 'identity-grant-project');
+    await createTestDeployment(env.db, project.id, 'live');
+    expect(await (await req('/signup')).json()).toMatchObject({
+      connections: [{ id: 'company', kind: 'oidc', label: 'Company SSO' }],
+      entries: [{ ...entry, accepted: true, deployed: true }],
+    });
+    expect((await req('/signup/disallow', entry)).status).toBe(200);
+    expect(await getAllowlist(env.ROUTING)).toEqual([]);
   });
 
   test('previews invitations without email or writes, sends a normalized batch, and revokes access', async () => {

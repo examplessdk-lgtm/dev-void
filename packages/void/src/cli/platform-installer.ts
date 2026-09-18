@@ -20,6 +20,7 @@ import {
   type CloudflareTriggerConfig,
 } from '@void/deploy-cloudflare';
 import {
+  createPlatformDeploymentManifest,
   createPlatformInstallationManifest,
   createPlatformResourceOwnershipMarker,
   createPlatformWorkerConfigs,
@@ -37,6 +38,10 @@ import {
   transitionInstallation,
   type InstallationResource,
   type PlatformInstallationManifest,
+  parsePlatformAuthenticationSetup,
+  parsePlatformAccessProtection,
+  type PlatformAccessProtection,
+  type PlatformLoginKind,
 } from '@void/platform';
 import { platformDatabaseSchemaDigest, resolvePlatformRuntime } from '@void/platform/installer';
 import type {
@@ -47,6 +52,18 @@ import type {
 } from '@void/platform/installer';
 import { join } from 'pathslash';
 import { cfAccessHeaders } from '../shared/cf-access.ts';
+import { ensurePlatformAccessToken } from './cf-access.ts';
+import { verifyInstalledPlatformAccessProtection } from './platform-access-preflight.ts';
+import {
+  activatePlatformAccessCredentials,
+  checkpointPlatformAccessResources,
+  isPlatformAuthenticationPreparationKey,
+} from './platform-access-setup.ts';
+import {
+  initializeInstalledPlatformAuthentication,
+  resumeInstalledPlatformAuthentication,
+} from './platform-auth-bootstrap.ts';
+import { verifyPlatformAuthenticationDatabase } from './platform-auth-database.ts';
 import {
   hyperdriveOriginConfigHash,
   hyperdriveOriginFromConnectionString,
@@ -66,6 +83,7 @@ import {
   latestPlatformWorkerCutoverGeneration,
   platformWorkerSecretUpdateIntentState,
   promoteInstallationSecrets,
+  readPendingInstallationSecrets,
   savePlatformConnection,
   writeInstallationManifest,
   writePendingInstallationSecrets,
@@ -82,6 +100,12 @@ import { createDefaultRunWrangler, resolvePinnedApiBaseUrl } from './provision.t
 export const REMOTE_INSTALLATION_MANIFEST_KEY: string = PLATFORM_REMOTE_INSTALLATION_MANIFEST_KEY;
 
 export type PlatformInstallationSecrets = Readonly<{
+  authenticationPreparation?: Readonly<Record<string, string>>;
+  accessProvisioningJson?: string;
+  accessCredentialsJson?: string;
+  authenticationSetupJson?: string;
+  authSetupToken?: string;
+  authBootstrapCode?: string;
   bootstrapGitHubId: string;
   bootstrapGitHubLogin: string;
   cloudflareApiToken: string;
@@ -132,6 +156,12 @@ type PlatformWorkerSecretUpdateIntent = Readonly<{
 }>;
 
 export type PlatformDatabaseLifecycleLock = (() => Promise<void>) & {
+  readAuthenticationState?: () => Promise<{
+    enabledProviders: ReadonlyArray<PlatformLoginKind>;
+    sessionsRequired: boolean;
+    protectedByAccess: boolean;
+    protection?: PlatformAccessProtection | null;
+  } | null>;
   authoritativeManifest?: PlatformInstallationManifest | null;
   checkpoint?: (manifest: PlatformInstallationManifest) => Promise<void>;
   prepareDatabase?: (
@@ -149,6 +179,32 @@ export type PlatformDatabaseLifecycleLock = (() => Promise<void>) & {
     database: PlatformRuntimeDatabaseManifest,
   ) => Promise<void>;
 };
+
+type PlatformLiveAuthenticationState = NonNullable<
+  Awaited<ReturnType<NonNullable<PlatformDatabaseLifecycleLock['readAuthenticationState']>>>
+>;
+
+/** Preserve database-authoritative authentication choices while upgrading old manifests. */
+export function mergePlatformLiveAuthenticationDeployment(
+  deployment: PlatformInstallationManifest['deployment'],
+  live: PlatformLiveAuthenticationState,
+): PlatformInstallationManifest['deployment'] {
+  const providers =
+    live.enabledProviders.length > 0 ? live.enabledProviders : deployment.authentication.providers;
+  return createPlatformDeploymentManifest({
+    ...deployment,
+    authentication: {
+      providers,
+      ...(live.sessionsRequired ? { configurable: true as const } : {}),
+      ...(live.protectedByAccess ? { accessProtection: true as const } : {}),
+    },
+    capabilities: {
+      ...deployment.capabilities,
+      githubOAuth: providers.includes('github'),
+      googleOAuth: providers.includes('google'),
+    },
+  });
+}
 
 export type PlatformDatabaseState = Readonly<{
   pendingMigrations: ReadonlyArray<PlatformRuntimeMigration>;
@@ -174,6 +230,8 @@ type InstallerClient = Pick<
   | 'createDnsRecord'
   | 'createAiGateway'
   | 'createHyperdrive'
+  | 'getHyperdriveConfig'
+  | 'disableHyperdriveCaching'
   | 'createKvNamespace'
   | 'createQueue'
   | 'createR2Bucket'
@@ -184,6 +242,8 @@ type InstallerClient = Pick<
   Partial<
     Pick<
       PlatformCloudflareClient,
+      | 'request'
+      | 'apiBaseUrl'
       | 'deleteKvValue'
       | 'getWorkerPlainTextBindings'
       | 'listWorkerDomains'
@@ -210,6 +270,23 @@ export class PlatformWorkerRecoveryIncompleteError extends Error {
 }
 
 export type PlatformInstallerDependencies = Readonly<{
+  prepareAuthentication?: (
+    manifest: PlatformInstallationManifest,
+    secrets: PlatformInstallationSecrets,
+  ) => Promise<
+    Partial<
+      Pick<
+        PlatformInstallationSecrets,
+        | 'authenticationSetupJson'
+        | 'authSetupToken'
+        | 'authBootstrapCode'
+        | 'accessProvisioningJson'
+        | 'accessCredentialsJson'
+      >
+    >
+  >;
+  initializeAuthentication?: typeof initializeInstalledPlatformAuthentication;
+  verifyAccessProtection?: typeof verifyInstalledPlatformAccessProtection;
   acquireDatabaseLifecycleLock: (
     databaseUrl: string,
     installationId: string,
@@ -269,6 +346,7 @@ export type PlatformInstallerDependencies = Readonly<{
 
 export type PlatformInstallationResult = Readonly<{
   manifest: PlatformInstallationManifest;
+  setupPending?: boolean;
   waitingForDns: boolean;
   waitingForSandboxDrain: boolean;
   zoneNameServers: ReadonlyArray<string>;
@@ -281,6 +359,10 @@ export function loadPlatformRuntime(customRuntimeDirectory: string): PlatformRun
 }
 
 export function createPlatformInstallationSecrets(input: {
+  configurableAuthentication?: boolean;
+  authenticationSetupJson?: string;
+  authSetupToken?: string;
+  authBootstrapCode?: string;
   bootstrapGitHubId: string;
   bootstrapGitHubLogin: string;
   cloudflareApiToken: string;
@@ -313,6 +395,37 @@ export function createPlatformInstallationSecrets(input: {
   const restoredIdentity = (explicit: string, name: string): string =>
     existingInstallation ? checkpoint[name] || explicit || '' : explicit || checkpoint[name] || '';
   const configured = (explicit: string, name: string): string => explicit || checkpoint[name] || '';
+  const authenticationSetupJson = configured(
+    input.authenticationSetupJson ?? '',
+    'authenticationSetupJson',
+  );
+  const authSetupToken = configured(input.authSetupToken ?? '', 'authSetupToken');
+  const authBootstrapCode = configured(input.authBootstrapCode ?? '', 'authBootstrapCode');
+  const modernAuthentication =
+    input.configurableAuthentication === true || !!authenticationSetupJson;
+  if (
+    modernAuthentication &&
+    !existingInstallation &&
+    (authSetupToken.length < 32 || !/^[a-f0-9]{64}$/.test(authBootstrapCode))
+  ) {
+    throw new Error(
+      'platform: Valid setup authority and an administrator setup code are required.',
+    );
+  }
+  if (authenticationSetupJson) {
+    const setup = parsePlatformAuthenticationSetup(JSON.parse(authenticationSetupJson));
+    if (
+      !existingInstallation &&
+      (authSetupToken.length < 32 ||
+        !/^[a-f0-9]{64}$/.test(authBootstrapCode) ||
+        createHash('sha256').update(authBootstrapCode).digest('hex') !==
+          setup.bootstrapCredentialHash)
+    ) {
+      throw new Error(
+        'platform: Valid installation setup authority and a matching administrator setup code are required.',
+      );
+    }
+  }
   const jwtSecret = restoredIdentity(input.jwtSecret || '', 'jwtSecret');
   const resolvedJwtSecret = input.existingInstallation
     ? jwtSecret
@@ -341,22 +454,34 @@ export function createPlatformInstallationSecrets(input: {
     R2_SECRET_ACCESS_KEY: input.r2SecretAccessKey,
   });
   return {
+    authenticationPreparation: Object.fromEntries(
+      Object.entries(checkpoint).filter(([name]) => isPlatformAuthenticationPreparationKey(name)),
+    ),
+    ...(modernAuthentication ? { authenticationSetupJson, authSetupToken, authBootstrapCode } : {}),
+    ...(checkpoint.accessProvisioningJson
+      ? { accessProvisioningJson: checkpoint.accessProvisioningJson }
+      : {}),
+    ...(checkpoint.accessCredentialsJson
+      ? { accessCredentialsJson: checkpoint.accessCredentialsJson }
+      : {}),
     workerSecretUpdates: input.updateExistingWorkers ? explicitWorkerSecretUpdates : {},
     pendingWorkerSecretUpdateIntent: input.updateExistingWorkers
       ? pendingWorkerSecretUpdateIntent
       : undefined,
-    bootstrapGitHubId: existingInstallation
-      ? configured(input.bootstrapGitHubId, 'bootstrapGitHubId')
-      : required(
-          configured(input.bootstrapGitHubId, 'bootstrapGitHubId'),
-          'resolved administrator GitHub account id',
-        ),
-    bootstrapGitHubLogin: existingInstallation
-      ? configured(input.bootstrapGitHubLogin, 'bootstrapGitHubLogin')
-      : required(
-          configured(input.bootstrapGitHubLogin, 'bootstrapGitHubLogin'),
-          'VOID_PLATFORM_ADMIN_GITHUB_LOGIN',
-        ),
+    bootstrapGitHubId:
+      existingInstallation || modernAuthentication
+        ? configured(input.bootstrapGitHubId, 'bootstrapGitHubId')
+        : required(
+            configured(input.bootstrapGitHubId, 'bootstrapGitHubId'),
+            'resolved administrator GitHub account id',
+          ),
+    bootstrapGitHubLogin:
+      existingInstallation || modernAuthentication
+        ? configured(input.bootstrapGitHubLogin, 'bootstrapGitHubLogin')
+        : required(
+            configured(input.bootstrapGitHubLogin, 'bootstrapGitHubLogin'),
+            'VOID_PLATFORM_ADMIN_GITHUB_LOGIN',
+          ),
     cloudflareApiToken: existingInstallation
       ? configured(input.cloudflareApiToken, 'cloudflareApiToken')
       : required(
@@ -364,18 +489,20 @@ export function createPlatformInstallationSecrets(input: {
           'VOID_PLATFORM_RUNTIME_CLOUDFLARE_API_TOKEN',
         ),
     databaseUrl: required(input.databaseUrl || checkpoint.databaseUrl || '', 'DATABASE_URL'),
-    githubClientId: existingInstallation
-      ? configured(input.githubClientId, 'githubClientId')
-      : required(
-          configured(input.githubClientId, 'githubClientId'),
-          'VOID_PLATFORM_GITHUB_CLIENT_ID',
-        ),
-    githubClientSecret: existingInstallation
-      ? configured(input.githubClientSecret, 'githubClientSecret')
-      : required(
-          configured(input.githubClientSecret, 'githubClientSecret'),
-          'VOID_PLATFORM_GITHUB_CLIENT_SECRET',
-        ),
+    githubClientId:
+      existingInstallation || modernAuthentication
+        ? configured(input.githubClientId, 'githubClientId')
+        : required(
+            configured(input.githubClientId, 'githubClientId'),
+            'VOID_PLATFORM_GITHUB_CLIENT_ID',
+          ),
+    githubClientSecret:
+      existingInstallation || modernAuthentication
+        ? configured(input.githubClientSecret, 'githubClientSecret')
+        : required(
+            configured(input.githubClientSecret, 'githubClientSecret'),
+            'VOID_PLATFORM_GITHUB_CLIENT_SECRET',
+          ),
     jwtSecret: resolvedJwtSecret,
     projectSecretActiveKeyVersion: projectSecretKeyring.activeVersion,
     projectSecretKey: projectSecretKeyring.v1Key,
@@ -521,6 +648,24 @@ function secretCheckpoint(
   workerSecretUpdateIntent?: PlatformWorkerSecretUpdateIntent | null,
 ): Record<string, string> {
   return {
+    ...Object.fromEntries(
+      Object.entries(secrets.authenticationPreparation ?? {}).filter(([name]) =>
+        isPlatformAuthenticationPreparationKey(name),
+      ),
+    ),
+    ...(secrets.authSetupToken
+      ? {
+          authenticationSetupJson: secrets.authenticationSetupJson ?? '',
+          authSetupToken: secrets.authSetupToken ?? '',
+          authBootstrapCode: secrets.authBootstrapCode ?? '',
+        }
+      : {}),
+    ...(secrets.accessProvisioningJson
+      ? { accessProvisioningJson: secrets.accessProvisioningJson }
+      : {}),
+    ...(secrets.accessCredentialsJson
+      ? { accessCredentialsJson: secrets.accessCredentialsJson }
+      : {}),
     bootstrapGitHubId: secrets.bootstrapGitHubId,
     bootstrapGitHubLogin: secrets.bootstrapGitHubLogin,
     cloudflareApiToken: secrets.cloudflareApiToken,
@@ -627,6 +772,11 @@ export async function installPlatform(
   const resolvedRuntime = dependencies.runtime ?? resolvePlatformRuntime();
   const runtimeDirectory = resolvedRuntime.directory;
   const runtime = resolvedRuntime.manifest;
+  if (plan.deployment.authentication.configurable && runtime.authenticationProtocolVersion !== 1) {
+    throw new Error(
+      'platform: This runtime does not support configurable authentication. Upgrade Void or use a compatible runtime.',
+    );
+  }
   if (plan.deployment.application.workersDev && runtime.applicationRoutingVersion !== 1) {
     throw new Error(
       'platform: This runtime does not support workers.dev application routing. Use a current platform runtime.',
@@ -650,10 +800,15 @@ export async function installPlatform(
   const wasDisabled = existing?.status === 'disabled';
   const preserveDisabled = existing?.desiredState === 'disabled';
   const previousPublicEndpoints = stablePublicEndpointState(existing);
+  const authenticationProtocolTransition =
+    hadPriorWorkers &&
+    existing?.deployment.authentication.configurable !== true &&
+    runtime.authenticationProtocolVersion === 1;
   let workerCutoverGeneration = 0;
   let workerRollbacks: Array<PlatformWorkerRollback> = [];
   let workerDeploymentCommitted = false;
   let workerTrafficGuarded = false;
+  let authenticationEnforcementActive = false;
   let manifest = existing;
   if (!manifest) {
     const createdAt = now();
@@ -695,7 +850,7 @@ export async function installPlatform(
     manifest = setInstallationDesiredState(manifest, 'disabled', now());
     writeInstallationManifest(manifest);
   }
-  assertRequiredPlatformSecrets(plan, manifest, secrets);
+  assertRequiredPlatformSecrets(plan, manifest, secrets, !!dependencies.prepareAuthentication);
   const pendingSecrets = secretCheckpoint(secrets, workerSecretUpdateIntent);
   writePendingInstallationSecrets(manifest, {
     ...pendingSecrets,
@@ -762,7 +917,7 @@ export async function installPlatform(
   ) {
     workerSecretUpdateIntent = null;
   }
-  const workerDeploymentSecrets: PlatformInstallationSecrets = {
+  let workerDeploymentSecrets: PlatformInstallationSecrets = {
     ...secrets,
     workerSecretUpdates: workerSecretUpdateIntent?.updates ?? {},
   };
@@ -778,8 +933,86 @@ export async function installPlatform(
         authoritative !== null && authoritative !== undefined,
       );
     }
+
+    const liveAuthentication = await releaseDatabaseLock.readAuthenticationState?.();
+    if (liveAuthentication) {
+      authenticationEnforcementActive = liveAuthentication.sessionsRequired;
+      if (liveAuthentication.sessionsRequired && runtime.authenticationProtocolVersion !== 1) {
+        throw new Error(
+          'platform: This runtime cannot enforce the active authentication configuration. Use an authentication-compatible runtime.',
+        );
+      }
+      const deployment = mergePlatformLiveAuthenticationDeployment(
+        plan.deployment,
+        liveAuthentication,
+      );
+      plan = { ...plan, deployment };
+      if (!authenticationProtocolTransition) {
+        manifest = { ...manifest, deployment };
+      }
+    }
+    if (
+      !liveAuthentication &&
+      manifest.deployment.authentication.configurable &&
+      !plan.deployment.authentication.configurable
+    ) {
+      const authentication = manifest.deployment.authentication;
+      const providers = authentication.providers;
+      plan = {
+        ...plan,
+        deployment: createPlatformDeploymentManifest({
+          ...plan.deployment,
+          authentication,
+          capabilities: {
+            ...plan.deployment.capabilities,
+            githubOAuth: providers.includes('github'),
+            googleOAuth: providers.includes('google'),
+          },
+        }),
+      };
+    }
+    if (authenticationProtocolTransition && !plan.deployment.authentication.configurable) {
+      const providers = plan.deployment.authentication.providers;
+      const deployment = createPlatformDeploymentManifest({
+        ...plan.deployment,
+        authentication: { providers, configurable: true },
+        capabilities: {
+          ...plan.deployment.capabilities,
+          githubOAuth: providers.includes('github'),
+          googleOAuth: providers.includes('google'),
+        },
+      });
+      plan = { ...plan, deployment };
+    }
+    const activateAccessCredentials = () => {
+      if (!secrets.accessCredentialsJson) {
+        return;
+      }
+      const credentials: unknown = JSON.parse(secrets.accessCredentialsJson);
+      if (!credentials || typeof credentials !== 'object' || Array.isArray(credentials)) {
+        throw new Error('platform: Invalid saved Access credentials.');
+      }
+      // Lifecycle HTTP calls use API/proxy origins. Retain optional dashboard credentials
+      // in recovery storage without activating them, including after protection removal.
+      const origins = [plan.apiUrl, plan.proxyUrl];
+      activatePlatformAccessCredentials(
+        JSON.stringify(
+          Object.fromEntries(
+            Object.entries(credentials).filter(([origin]) => origins.includes(origin)),
+          ),
+        ),
+        origins,
+      );
+    };
+    activateAccessCredentials();
+    manifest = checkpointAuthenticationResources(manifest, secrets, now());
+    writeInstallationManifest(manifest);
+    await releaseDatabaseLock.checkpoint?.(manifest);
     dependencies.onProgress?.('Checking and creating Cloudflare resources');
-    if (JSON.stringify(manifest.deployment) !== JSON.stringify(plan.deployment)) {
+    if (
+      !authenticationProtocolTransition &&
+      JSON.stringify(manifest.deployment) !== JSON.stringify(plan.deployment)
+    ) {
       manifest = { ...manifest, deployment: plan.deployment, updatedAt: now() };
       writeInstallationManifest(manifest);
       await releaseDatabaseLock.checkpoint?.(manifest);
@@ -788,6 +1021,86 @@ export async function installPlatform(
     if (manifest.status !== 'provisioning') {
       manifest = transitionInstallation(manifest, 'provisioning', now());
       writeInstallationManifest(manifest);
+    }
+
+    if (dependencies.prepareAuthentication) {
+      dependencies.onProgress?.('Preparing platform authentication');
+      try {
+        secrets = { ...secrets, ...(await dependencies.prepareAuthentication(manifest, secrets)) };
+      } catch (error) {
+        // Preserve provider secrets/ambiguous-create intents written while the preparation
+        // hook was running; the outer failure checkpoint must not erase that recovery data.
+        const latest = readPendingInstallationSecrets(manifest) ?? {};
+        secrets = {
+          ...secrets,
+          authenticationPreparation: Object.fromEntries(
+            Object.entries(latest).filter(([name]) => isPlatformAuthenticationPreparationKey(name)),
+          ),
+          authenticationSetupJson:
+            latest.authenticationSetupJson || secrets.authenticationSetupJson,
+          authSetupToken: latest.authSetupToken || secrets.authSetupToken,
+          authBootstrapCode: latest.authBootstrapCode || secrets.authBootstrapCode,
+          accessProvisioningJson: latest.accessProvisioningJson || secrets.accessProvisioningJson,
+          accessCredentialsJson: latest.accessCredentialsJson || secrets.accessCredentialsJson,
+        };
+        manifest = checkpointAuthenticationResources(manifest, secrets, now());
+        writeInstallationManifest(manifest);
+        await releaseDatabaseLock.checkpoint?.(manifest);
+        throw error;
+      }
+      const latest = readPendingInstallationSecrets(manifest) ?? {};
+      secrets = {
+        ...secrets,
+        authenticationPreparation: Object.fromEntries(
+          Object.entries(latest).filter(([name]) => isPlatformAuthenticationPreparationKey(name)),
+        ),
+      };
+      manifest = checkpointAuthenticationResources(manifest, secrets, now());
+      writeInstallationManifest(manifest);
+      await releaseDatabaseLock.checkpoint?.(manifest);
+      activateAccessCredentials();
+      assertRequiredPlatformSecrets(plan, manifest, secrets);
+      if (
+        secrets.authenticationSetupJson &&
+        createHash('sha256')
+          .update(secrets.authBootstrapCode ?? '')
+          .digest('hex') !==
+          parsePlatformAuthenticationSetup(JSON.parse(secrets.authenticationSetupJson))
+            .bootstrapCredentialHash
+      ) {
+        throw new Error(
+          'platform: Prepared authentication does not match its administrator setup code.',
+        );
+      }
+      workerDeploymentSecrets = {
+        ...secrets,
+        workerSecretUpdates: workerSecretUpdateIntent?.updates ?? {},
+      };
+      writePendingInstallationSecrets(manifest, {
+        ...secretCheckpoint(secrets, workerSecretUpdateIntent),
+        databaseClaimState: 'claimed',
+      });
+    }
+
+    if (plan.deployment.authentication.accessProtection) {
+      const protection = liveAuthentication
+        ? liveAuthentication.protection
+        : secrets.authenticationSetupJson
+          ? parsePlatformAuthenticationSetup(JSON.parse(secrets.authenticationSetupJson)).protection
+          : null;
+      if (!protection) {
+        throw new Error(
+          'platform: The active Access protection configuration is unavailable. Restore its database and encrypted setup checkpoint before maintenance.',
+        );
+      }
+      dependencies.onProgress?.('Verifying current Access policies and protected origins');
+      await (dependencies.verifyAccessProtection ?? verifyInstalledPlatformAccessProtection)({
+        client: dependencies.client,
+        manifest,
+        plan,
+        protection,
+        checkpoint: secretCheckpoint(secrets, workerSecretUpdateIntent),
+      });
     }
 
     // Establish the durable installation checkpoint before creating any
@@ -935,6 +1248,20 @@ export async function installPlatform(
       await writeRemoteInstallationCheckpoint(dependencies.client, plan, manifest);
     }
 
+    dependencies.onProgress?.('Verifying uncached authentication database reads');
+    const authenticationDatabase = manifest.resources.find(
+      (resource) => resource.key === 'hyperdrive',
+    );
+    if (!authenticationDatabase) {
+      throw new Error('platform: The authentication database resource is missing.');
+    }
+    await verifyPlatformAuthenticationDatabase(
+      dependencies.client,
+      plan.account.id,
+      authenticationDatabase,
+      secrets.databaseUrl,
+    );
+
     dependencies.onProgress?.('Checking the platform database schema');
     const rollbackDatabase = dependencies.databaseRollbackSource;
     const migrationStep = `database-schema:${runtime.database.schemaDigest}`;
@@ -1068,7 +1395,7 @@ export async function installPlatform(
         {
           completedAt: now(),
           key: bootstrapStep,
-          resultHash: hash(secrets.bootstrapGitHubId),
+          resultHash: hash(secrets.authenticationSetupJson ?? secrets.bootstrapGitHubId),
         },
         now(),
       );
@@ -1080,7 +1407,19 @@ export async function installPlatform(
         join(runtimeDirectory, artifact.path),
       ]),
     ) as Record<'api' | 'dispatch' | 'proxy' | 'tail', string>;
-    const interruptedCutover = interruptedWorkerCutover(manifest);
+    let interruptedCutover = interruptedWorkerCutover(manifest);
+    if (interruptedCutover && authenticationProtocolTransition && authenticationEnforcementActive) {
+      manifest = recordWorkerCutoverResolution(
+        manifest,
+        interruptedCutover.generation,
+        'committed',
+        now(),
+      );
+      manifest = recordWorkerTrafficState(manifest, interruptedCutover.generation, false, now());
+      writeInstallationManifest(manifest);
+      await writeRemoteInstallationCheckpoint(dependencies.client, plan, manifest);
+      interruptedCutover = null;
+    }
     const recoveringUnsafeTraffic = (interruptedCutover?.unsafeTraffic.size ?? 0) > 0;
     const createsWorker = plan.actions.some(
       (action) => action.kind === 'worker' && action.action === 'create',
@@ -1098,6 +1437,7 @@ export async function installPlatform(
       createsWorker ||
       recoveringCreatedWorker ||
       manifest.usageProtocolVersion !== targetUsageProtocolVersion ||
+      authenticationProtocolTransition ||
       requiresSandboxDrain;
     if (requiresTrafficGuard) {
       await dependencies.client.putKvValue(
@@ -1123,6 +1463,7 @@ export async function installPlatform(
       await writeRemoteInstallationCheckpoint(dependencies.client, plan, manifest);
     }
     const configInput = {
+      authenticationDatabaseUncached: true,
       accountId: plan.account.id,
       apiUrl: plan.apiUrl,
       deployment: plan.deployment,
@@ -1459,6 +1800,7 @@ export async function installPlatform(
       }
       manifest = {
         ...manifest,
+        deployment: plan.deployment,
         platformVersion: version,
         runtime: runtimeProvenance,
         updatedAt: now(),
@@ -1477,9 +1819,74 @@ export async function installPlatform(
         zoneNameServers: zone?.nameServers ?? [],
       };
     }
+    let authenticationCutoverCommitted = false;
+    if (authenticationProtocolTransition && requiresStagedCommit) {
+      manifest = recordWorkerCutoverResolution(
+        manifest,
+        workerCutoverGeneration,
+        'committed',
+        now(),
+      );
+      manifest = recordWorkerTrafficState(manifest, workerCutoverGeneration, false, now());
+      writeInstallationManifest(manifest);
+      await writeRemoteInstallationCheckpoint(dependencies.client, plan, manifest);
+      // From this point onward the database may enforce revocable sessions. Retain the
+      // compatible maintenance runtime on failure instead of restoring incapable Workers.
+      workerRollbacks = [];
+      authenticationCutoverCommitted = true;
+    }
+    let authenticationStep = secrets.authenticationSetupJson
+      ? 'authentication-initialized:v1:' + hash(secrets.authenticationSetupJson)
+      : '';
+    let setupPending = false;
     manifest = transitionInstallation(manifest, 'verifying', now());
     writeInstallationManifest(manifest);
+    if (plan.deployment.authentication.configurable && authenticationStep) {
+      if (!secrets.authenticationSetupJson || !secrets.authSetupToken) {
+        throw new Error(
+          'platform: Restore the encrypted authentication setup checkpoint before resuming.',
+        );
+      }
+      dependencies.onProgress?.('Initializing platform authentication');
+      const authentication = await resumeInstalledPlatformAuthentication(
+        {
+          apiUrl: plan.apiUrl,
+          installationId: manifest.id,
+          setupToken: secrets.authSetupToken,
+          setupJson: secrets.authenticationSetupJson,
+          checkpoint: (replacement) => {
+            secrets = { ...secrets, ...replacement };
+            authenticationStep =
+              'authentication-initialized:v1:' + hash(replacement.authenticationSetupJson);
+            writePendingInstallationSecrets(
+              manifest!,
+              secretCheckpoint(secrets, workerSecretUpdateIntent),
+            );
+          },
+        },
+        dependencies.initializeAuthentication ?? initializeInstalledPlatformAuthentication,
+      );
+      if (authentication.setupPending) {
+        setupPending = true;
+        dependencies.onProgress?.(`Administrator setup pending: ${plan.apiUrl}/setup`);
+      }
+      manifest = recordInstallationStep(
+        manifest,
+        {
+          key: authenticationStep,
+          completedAt: now(),
+          resultHash: hash(secrets.authenticationSetupJson),
+        },
+        now(),
+      );
+      writeInstallationManifest(manifest);
+      await writeRemoteInstallationCheckpoint(dependencies.client, plan, manifest);
+    }
     dependencies.onProgress?.('Verifying platform health');
+    if (plan.deployment.authentication.accessProtection) {
+      ensurePlatformAccessToken(plan.apiUrl, false, true);
+      ensurePlatformAccessToken(plan.proxyUrl, false, true);
+    }
     const healthCheckContext: PlatformHealthCheckContext = {
       accountName: plan.account.name,
       workers: [
@@ -1546,16 +1953,18 @@ export async function installPlatform(
       await writeSandboxDrainMirror(completedDrain);
     }
     if (requiresStagedCommit) {
-      manifest = recordWorkerCutoverResolution(
-        manifest,
-        workerCutoverGeneration,
-        'committed',
-        now(),
-      );
-      manifest = recordWorkerTrafficState(manifest, workerCutoverGeneration, false, now());
-      writeInstallationManifest(manifest);
-      await writeRemoteInstallationCheckpoint(dependencies.client, plan, manifest);
-      workerRollbacks = [];
+      if (!authenticationCutoverCommitted) {
+        manifest = recordWorkerCutoverResolution(
+          manifest,
+          workerCutoverGeneration,
+          'committed',
+          now(),
+        );
+        manifest = recordWorkerTrafficState(manifest, workerCutoverGeneration, false, now());
+        writeInstallationManifest(manifest);
+        await writeRemoteInstallationCheckpoint(dependencies.client, plan, manifest);
+        workerRollbacks = [];
+      }
 
       workerCutoverGeneration = nextWorkerCutoverGeneration(manifest);
       if (workerSecretUpdateIntent) {
@@ -1761,6 +2170,7 @@ export async function installPlatform(
     }
     manifest = {
       ...manifest,
+      deployment: plan.deployment,
       platformVersion: version,
       runtime: runtimeProvenance,
       safetyProtocols: runtime.safetyProtocols ?? { sandboxDrain: 0 },
@@ -1776,6 +2186,7 @@ export async function installPlatform(
     saveInstalledPlatformConnection(plan, manifest);
     return {
       manifest,
+      setupPending,
       waitingForDns: false,
       waitingForSandboxDrain: false,
       zoneNameServers: zone?.nameServers ?? [],
@@ -1801,7 +2212,11 @@ export async function installPlatform(
         );
       }
     }
-    if (!workerDeploymentCommitted && workerRollbacks.length > 0) {
+    if (
+      !workerDeploymentCommitted &&
+      workerRollbacks.length > 0 &&
+      !(authenticationEnforcementActive && authenticationProtocolTransition)
+    ) {
       const rollbackFailures: Array<string> = [];
       for (const rollback of workerRollbacks.reverse()) {
         try {
@@ -1833,6 +2248,9 @@ export async function installPlatform(
         );
         writeInstallationManifest(manifest);
       }
+    } else if (authenticationEnforcementActive && authenticationProtocolTransition) {
+      // Traffic remains closed and retry resumes toward a fully compatible Worker set.
+      workerRollbacks = [];
     }
     if (manifest.status !== 'failed' && manifest.status !== 'uninstalled') {
       try {
@@ -1847,6 +2265,14 @@ export async function installPlatform(
   } finally {
     await releaseDatabaseLock();
   }
+}
+
+function checkpointAuthenticationResources(
+  manifest: PlatformInstallationManifest,
+  secrets: PlatformInstallationSecrets,
+  updatedAt: string,
+): PlatformInstallationManifest {
+  return checkpointPlatformAccessResources(manifest, secrets.accessProvisioningJson, updatedAt);
 }
 
 async function writeR2OwnershipMarkerIfNeeded(
@@ -2327,6 +2753,7 @@ export function apiWorkerSecrets(
     GITHUB_CLIENT_SECRET: secrets.githubClientSecret,
     JWT_SECRET: secrets.jwtSecret,
     PLATFORM_BOOTSTRAP_GITHUB_ID: secrets.bootstrapGitHubId,
+    PLATFORM_AUTH_SETUP_TOKEN: secrets.authSetupToken ?? '',
     ...(secrets.projectSecretKeysJson && secrets.projectSecretActiveKeyVersion
       ? {
           PROJECT_SECRET_ACTIVE_KEY_VERSION: secrets.projectSecretActiveKeyVersion,
@@ -2425,6 +2852,7 @@ export function assertRequiredPlatformSecrets(
   plan: PlatformInstallPlan,
   manifest: PlatformInstallationManifest,
   secrets: PlatformInstallationSecrets,
+  authenticationWillBePrepared = false,
 ): void {
   const missing = new Set<string>();
   const requireSecret = (value: string, name: string) => {
@@ -2432,7 +2860,19 @@ export function assertRequiredPlatformSecrets(
       missing.add(name);
     }
   };
-  if (!manifest.steps.some((step) => step.key === 'bootstrap-access:v1')) {
+  if (
+    plan.deployment.authentication.configurable &&
+    !manifest.steps.some((step) => step.key.startsWith('authentication-initialized:v1:'))
+  ) {
+    if (!authenticationWillBePrepared) {
+      requireSecret(secrets.authenticationSetupJson ?? '', 'authentication setup configuration');
+    }
+    requireSecret(secrets.authSetupToken ?? '', 'installation authentication setup authority');
+    requireSecret(secrets.authBootstrapCode ?? '', 'administrator setup code');
+  } else if (
+    !plan.deployment.authentication.configurable &&
+    !manifest.steps.some((step) => step.key === 'bootstrap-access:v1')
+  ) {
     requireSecret(secrets.bootstrapGitHubId, 'VOID_PLATFORM_ADMIN_GITHUB_ID');
     requireSecret(secrets.bootstrapGitHubLogin, 'VOID_PLATFORM_ADMIN_GITHUB_LOGIN');
   }
@@ -2443,8 +2883,10 @@ export function assertRequiredPlatformSecrets(
     )
   ) {
     requireSecret(secrets.cloudflareApiToken, 'VOID_PLATFORM_RUNTIME_CLOUDFLARE_API_TOKEN');
-    requireSecret(secrets.githubClientId, 'VOID_PLATFORM_GITHUB_CLIENT_ID');
-    requireSecret(secrets.githubClientSecret, 'VOID_PLATFORM_GITHUB_CLIENT_SECRET');
+    if (!plan.deployment.authentication.configurable) {
+      requireSecret(secrets.githubClientId, 'VOID_PLATFORM_GITHUB_CLIENT_ID');
+      requireSecret(secrets.githubClientSecret, 'VOID_PLATFORM_GITHUB_CLIENT_SECRET');
+    }
     requireSecret(secrets.jwtSecret, 'VOID_PLATFORM_JWT_SECRET');
     requireSecret(
       secrets.projectSecretKeysJson,
@@ -2830,6 +3272,31 @@ export async function acquirePlatformDatabaseLifecycleLockConnection(
     await client.query('SELECT pg_advisory_unlock(hashtextextended($1, 0))', [lockIdentity]);
   };
   release.authoritativeManifest = authoritativeManifest;
+  release.readAuthenticationState = async () => {
+    const table = await client.query<{ present: boolean }>(
+      "SELECT to_regclass('public.platform_auth_settings') IS NOT NULL AS present",
+    );
+    if (!table.rows[0]?.present) {
+      return null;
+    }
+    const [result, enabledProviders] = await Promise.all([
+      client.query<{ sessions_required: boolean; protection: unknown }>(
+        'SELECT sessions_required, protection FROM platform_auth_settings WHERE singleton = true',
+      ),
+      client.query<{ kind: PlatformLoginKind }>(
+        'SELECT DISTINCT kind FROM platform_login_connections WHERE enabled = true ORDER BY kind',
+      ),
+    ]);
+    const settings = result.rows[0];
+    return settings
+      ? {
+          enabledProviders: enabledProviders.rows.map((row) => row.kind),
+          sessionsRequired: settings.sessions_required,
+          protectedByAccess: settings.protection !== null,
+          protection: parsePlatformAccessProtection(settings.protection),
+        }
+      : null;
+  };
   release.requiredSafetyProtocols = await readRequiredPlatformSafetyProtocols(client);
   release.checkpoint = async (manifest) => {
     if (released) {
@@ -4903,6 +5370,7 @@ export async function verifyPlatformSandboxDrain(
       ...cfAccessHeaders(process.env, apiUrl),
     },
     signal: AbortSignal.timeout(30_000),
+    redirect: 'manual',
   });
   if (!response.ok) {
     throw new Error(

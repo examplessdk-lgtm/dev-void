@@ -35,6 +35,7 @@ catalog:
   vite-plus: 0.3.1
   vitest: 4.1.11
   wrangler: 4.131.0
+  oauth4webapi: ^3.8.8
 
 catalogs:
   angular:

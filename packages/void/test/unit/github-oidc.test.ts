@@ -91,6 +91,7 @@ describe('exchangeGithubOidcForDeployToken', () => {
     expect(String(getUrl)).toContain('audience=void');
     expect(String(getUrl)).toContain('token.actions.githubusercontent.com');
     expect(getInit.method ?? 'GET').toBe('GET');
+    expect(getInit.redirect).toBe('manual');
     expect((getInit.headers as Record<string, string>).Authorization).toBe(
       `Bearer ${REQUEST_TOKEN}`,
     );
@@ -99,6 +100,7 @@ describe('exchangeGithubOidcForDeployToken', () => {
     const [postUrl, postInit] = fetchMock.mock.calls[1] as [string, RequestInit];
     expect(postUrl).toBe(`${apiUrl}/auth/github-oidc`);
     expect(postInit.method).toBe('POST');
+    expect(postInit.redirect).toBe('manual');
     expect((postInit.headers as Record<string, string>)['Content-Type']).toBe('application/json');
     expect(postInit.body).toBe(JSON.stringify({ oidcToken: 'oidc-jwt', project: 'my-app' }));
   });

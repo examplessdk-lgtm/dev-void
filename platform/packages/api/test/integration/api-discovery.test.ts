@@ -85,6 +85,13 @@ describe('GET /.well-known/void-platform', () => {
     );
     expect(managedBuild.status).toBe(501);
     expect(await managedBuild.json()).toMatchObject({ capability: 'managedBuilds' });
+
+    const webhookIngress = await app.fetch(
+      new Request('https://platform.example.com/internal/github-webhook', { method: 'POST' }),
+      selfHostedEnv,
+    );
+    expect(webhookIngress.status).toBe(501);
+    expect(await webhookIngress.json()).toMatchObject({ capability: 'managedBuilds' });
   });
 
   it('admits installer discovery while public traffic is disabled', async () => {

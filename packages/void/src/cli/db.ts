@@ -29,6 +29,11 @@ import type { SeedFn } from '../runtime/seed.ts';
 import { cfAccessHeaders } from '../shared/cf-access.ts';
 import { loadLocalEnv } from '../shared/env.ts';
 import { getProxyUrl, getToken } from './auth.ts';
+import {
+  ensurePlatformAccessToken,
+  ensurePlatformProxyAccess,
+  isCloudflareAccessChallenge,
+} from './cf-access.ts';
 import { PlatformApiError, PlatformClient } from './client.ts';
 import type { DbArgs } from './db-args.ts';
 import {
@@ -400,8 +405,16 @@ async function runGenerate(root: string, dialect: DatabaseDialect): Promise<void
   );
 
   try {
-    runDrizzleKit(root, ['generate', '--config', configPath]);
-  } catch {
+    if (dialect === 'sqlite') {
+      const { generateValidatedSqliteMigrations } = await import('../drizzle/generate.ts');
+      await generateValidatedSqliteMigrations(readProjectPaths(root).migrationsDir, () => {
+        runDrizzleKit(root, ['generate', '--config', configPath]);
+      });
+    } else {
+      runDrizzleKit(root, ['generate', '--config', configPath]);
+    }
+  } catch (error) {
+    log.error(getErrorMessage(error));
     process.exit(1);
   }
   outro('Done.');
@@ -910,21 +923,41 @@ async function runExecute(
     }
 
     const proxyUrl = getProxyUrl(root);
-    const res = await fetch(`${proxyUrl}/d1/query`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-        ...cfAccessHeaders(process.env, proxyUrl),
-      },
-      body: JSON.stringify({
-        projectId: projectConfig.projectId,
-        binding,
-        sql,
-        params: [],
-        method: 'all',
-      }),
-    });
+    ensurePlatformProxyAccess(platformClient.apiUrl, proxyUrl);
+    const capturedAccessHeaders = cfAccessHeaders(process.env, proxyUrl);
+    const requestProxy = () => {
+      const currentAccessHeaders = cfAccessHeaders(process.env, proxyUrl);
+      const accessHeaders =
+        Object.keys(currentAccessHeaders).length > 0 ? currentAccessHeaders : capturedAccessHeaders;
+      return {
+        accessHeaders,
+        response: fetch(`${proxyUrl}/d1/query`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+            ...accessHeaders,
+          },
+          body: JSON.stringify({
+            projectId: projectConfig.projectId,
+            binding,
+            sql,
+            params: [],
+            method: 'all',
+          }),
+          redirect: 'manual',
+        }),
+      };
+    };
+    const first = requestProxy();
+    let res = await first.response;
+    if (isCloudflareAccessChallenge(res) && !first.accessHeaders['CF-Access-Client-Id']) {
+      await res.body?.cancel();
+      ensurePlatformAccessToken(proxyUrl, true, false, first.accessHeaders['cf-access-token']);
+      // A verified perimeter challenge occurs before D1 executes. Retry once
+      // at the original proxy URL; never follow or authenticate to Location.
+      res = await requestProxy().response;
+    }
 
     if (!res.ok) {
       const text = await res.text().catch(() => res.statusText);

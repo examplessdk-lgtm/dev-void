@@ -10,6 +10,11 @@ export const projectSubcommands: Array<SubcommandDef> = [
   { name: 'status', arg: '[name]', description: 'Show deployments (omit name for linked project)' },
   { name: 'link', arg: '[name]', description: 'Link directory to a project' },
   { name: 'list', description: 'List your projects' },
+  {
+    name: 'token',
+    arg: '<create|list|renew|revoke>',
+    description: 'Manage project-scoped CI deploy credentials',
+  },
   { name: 'logs', description: 'Show runtime logs from the deployed project' },
   { name: 'requests', description: 'Show request-level traffic (status, method, timing)' },
   { name: 'rollback', arg: '[deployId]', description: 'Roll back to a previous deployment' },
@@ -26,6 +31,15 @@ export type ProjectArgs =
   | { subcommand: 'status'; name: string }
   | { subcommand: 'link'; name: string }
   | { subcommand: 'list' }
+  | {
+      subcommand: 'token';
+      action: 'create' | 'list' | 'renew' | 'revoke';
+      credentialId: string;
+      projectSlug: string;
+      name: string;
+      expiresInDays?: number;
+      json: boolean;
+    }
   | {
       subcommand: 'logs';
       filter: string;
@@ -69,6 +83,58 @@ export function parseProjectArgs(args: Array<string>): ProjectArgs {
       throw new Error(`project: Unexpected argument '${rest[0]}'.`);
     }
     return { subcommand };
+  }
+
+  if (subcommand === 'token') {
+    const action = rest.shift();
+    if (!action || !['create', 'list', 'renew', 'revoke'].includes(action)) {
+      throw new Error('project: Usage: void project token <create|list|renew|revoke>.');
+    }
+    let credentialId = '';
+    let projectSlug = '';
+    let name = '';
+    let expiresInDays: number | undefined;
+    let json = false;
+    for (let index = 0; index < rest.length; index++) {
+      const value = rest[index]!;
+      if (value === '--project' && rest[index + 1]) {
+        projectSlug = rest[++index]!;
+      } else if (value === '--name' && rest[index + 1]) {
+        name = rest[++index]!;
+      } else if (value === '--expires-in' && rest[index + 1]) {
+        const parsed = Number(rest[++index]);
+        if (!Number.isInteger(parsed) || parsed < 1 || parsed > 90) {
+          throw new Error('project: --expires-in must be an integer from 1 to 90 days.');
+        }
+        expiresInDays = parsed;
+      } else if (value === '--json') {
+        json = true;
+      } else if (value.startsWith('-')) {
+        throw new Error(`project: Unknown flag '${value}'.`);
+      } else if ((action === 'renew' || action === 'revoke') && !credentialId) {
+        credentialId = value;
+      } else {
+        throw new Error(`project: Unexpected argument '${value}'.`);
+      }
+    }
+    if ((action === 'renew' || action === 'revoke') && !credentialId) {
+      throw new Error(`project: ${action} requires a credential ID.`);
+    }
+    if (action !== 'create' && name) {
+      throw new Error('project: --name is only valid with token create.');
+    }
+    if (action !== 'create' && action !== 'renew' && expiresInDays !== undefined) {
+      throw new Error('project: --expires-in is only valid with token create or token renew.');
+    }
+    return {
+      subcommand,
+      action: action as 'create' | 'list' | 'renew' | 'revoke',
+      credentialId,
+      projectSlug,
+      name,
+      expiresInDays,
+      json,
+    };
   }
 
   if (subcommand === 'logs') {
@@ -171,6 +237,6 @@ export function parseProjectArgs(args: Array<string>): ProjectArgs {
   }
 
   throw new Error(
-    'project: Usage: void project <status|link|list|logs|requests|rollback|cancel|delete|purge-cache>.',
+    'project: Usage: void project <status|link|list|token|logs|requests|rollback|cancel|delete|purge-cache>.',
   );
 }

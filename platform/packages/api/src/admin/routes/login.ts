@@ -1,5 +1,7 @@
 import { Hono, type Context } from 'hono';
 import { setCookie, getCookie, deleteCookie } from 'hono/cookie';
+import { pendingAuthenticationSetup } from '../../auth/bootstrap.ts';
+import { readAuthSettings, readEnabledLoginConnections } from '../../auth/configuration.ts';
 import { getGitHubAuthorizeUrl, exchangeCodeForToken, getGitHubUser } from '../../auth/github.ts';
 import {
   getGoogleAuthorizeUrl,
@@ -8,6 +10,7 @@ import {
 } from '../../auth/google.ts';
 import { hmacSignState, hmacVerifyState } from '../../auth/hmac.ts';
 import { signJwt } from '../../auth/jwt.ts';
+import { startPlatformLogin } from '../../auth/login.ts';
 import { getPlatformCapabilities } from '../../capabilities.ts';
 import {
   bootstrapPlatformAdmin,
@@ -18,6 +21,7 @@ import {
   storeOAuthNonce,
   consumeOAuthNonce,
 } from '../../db.ts';
+import { escapeHtml } from '../../email.ts';
 import type { ApiEnv } from '../../env.ts';
 import { isAdminSuspended } from '../../suspension.ts';
 
@@ -38,12 +42,27 @@ export function isAdminOAuthState(state: string): boolean {
 }
 
 // GET /login
-app.get('/login', (context) => {
+app.get('/login', async (context) => {
+  if (await pendingAuthenticationSetup(context.get('db'))) {
+    return context.redirect('/setup');
+  }
   const capabilities = getPlatformCapabilities(context.env);
-  const providers = [
-    capabilities.githubOAuth ? '<p><a href="/admin/login/github">Sign in with GitHub</a></p>' : '',
-    capabilities.googleOAuth ? '<p><a href="/admin/login/google">Sign in with Google</a></p>' : '',
-  ].join('');
+  const configured = await readAuthSettings(context.get('db'));
+  const providers = configured
+    ? (await readEnabledLoginConnections(context.get('db')))
+        .map(
+          ({ configuration }) =>
+            `<p><a href="/admin/login/${encodeURIComponent(configuration.id)}">Sign in with ${escapeHtml(configuration.label)}</a></p>`,
+        )
+        .join('')
+    : [
+        capabilities.githubOAuth
+          ? '<p><a href="/admin/login/github">Sign in with GitHub</a></p>'
+          : '',
+        capabilities.googleOAuth
+          ? '<p><a href="/admin/login/google">Sign in with Google</a></p>'
+          : '',
+      ].join('');
   return context.html(`<!DOCTYPE html>
 <html>
 <head><title>Admin Login - Void</title></head>
@@ -60,6 +79,10 @@ ${providers}
 // GET /login/:provider
 app.get('/login/:provider', async (context) => {
   const provider = context.req.param('provider');
+  const managed = await startPlatformLogin(context, 'admin', provider);
+  if (managed) {
+    return managed;
+  }
   if (provider !== 'github' && provider !== 'google') {
     return context.html('<h1>Login failed</h1><p>Unknown authentication provider.</p>', 404);
   }

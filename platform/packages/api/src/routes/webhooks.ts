@@ -42,6 +42,11 @@ import {
   getBranchHeadComparisonStatus,
   getInstallationToken,
 } from '../github/installation-token.ts';
+import {
+  GitHubWebhookRequestError,
+  readBoundedGitHubWebhookBody,
+  readGitHubWebhookHeaders,
+} from '../github/webhook-ingress-auth.ts';
 import { verifyGithubWebhookSignature } from '../github/webhook-verify.ts';
 import { githubConnections, githubInstallations } from '../schema.ts';
 import type { GitHubInstallationRepository } from '../schema.ts';
@@ -532,37 +537,19 @@ async function rerunBuildForCommit(
   return context.json({ ok: true, buildId: buildIds[0], buildIds });
 }
 
-// POST /webhooks/github — GitHub App webhook receiver. PUBLIC: the HMAC
-// signature is the authentication. Returns 503 when the webhook secret is
-// unset (the App isn't configured in this environment) so the endpoint is
-// inert until secrets are provisioned. Always returns 2xx for valid-but-
-// unhandled events so GitHub doesn't retry them.
-app.post('/github', async (context) => {
-  const secret = context.env.GITHUB_WEBHOOK_SECRET;
-  if (typeof secret !== 'string' || secret === '') {
-    return context.json({ error: 'github app not configured' }, 503);
-  }
-
-  // Read the RAW body — the HMAC is computed over the exact bytes GitHub sent,
-  // so we must not re-serialize via c.req.json().
-  const raw = await context.req.text();
-  const valid = await verifyGithubWebhookSignature(
-    raw,
-    context.req.header('X-Hub-Signature-256') ?? null,
-    secret,
-  );
-  if (!valid) {
-    return context.json({ error: 'invalid signature' }, 401);
-  }
-
+/** Process a webhook whose caller has already verified its raw GitHub HMAC. */
+export async function handleVerifiedGitHubWebhook(
+  context: Context<ApiEnv>,
+  raw: Uint8Array,
+  event: string,
+): Promise<Response> {
   let payload: unknown;
   try {
-    payload = JSON.parse(raw);
+    payload = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(raw));
   } catch {
     return context.json({ error: 'invalid payload' }, 400);
   }
 
-  const event = context.req.header('X-GitHub-Event');
   const db = context.get('db');
 
   switch (event) {
@@ -1563,6 +1550,40 @@ app.post('/github', async (context) => {
     default:
       return context.json({ ok: true, ignored: event ?? 'unknown' });
   }
+}
+
+// POST /webhooks/github — direct GitHub App webhook receiver for installations
+// whose API origin is not behind Access. The raw GitHub HMAC is the
+// authentication. Access-protected installations use the standalone ingress,
+// which calls a separate fixed internal operation after adding its own proof.
+app.post('/github', async (context) => {
+  const secret = context.env.GITHUB_WEBHOOK_SECRET;
+  if (typeof secret !== 'string' || secret === '') {
+    return context.json({ error: 'github app not configured' }, 503);
+  }
+
+  let raw: Uint8Array;
+  let event: string;
+  let signature: string;
+  try {
+    ({ event, signature } = readGitHubWebhookHeaders(context.req.raw.headers, {
+      requireDelivery: false,
+    }));
+    raw = await readBoundedGitHubWebhookBody(context.req.raw);
+  } catch (error) {
+    if (error instanceof GitHubWebhookRequestError) {
+      if (error.code === 'invalid_signature_header') {
+        return context.json({ error: 'invalid signature' }, 401);
+      }
+      return context.json({ error: error.code }, error.status);
+    }
+    throw error;
+  }
+
+  if (!(await verifyGithubWebhookSignature(raw, signature, secret))) {
+    return context.json({ error: 'invalid signature' }, 401);
+  }
+  return handleVerifiedGitHubWebhook(context, raw, event);
 });
 
 export const webhookRoutes = app;

@@ -31,6 +31,24 @@ describe('isDestructive', () => {
     expect(isDestructive('CREATE TABLE users (id TEXT PRIMARY KEY);')).toBe(false);
   });
 
+  it.each(['NULL', 'DEFAULT'])('allows foreign-key SET %s actions in table DDL', (action) => {
+    const reference = `REFERENCES users(id) ON UPDATE NO ACTION ON DELETE SET ${action}`;
+    expect(isDestructive(`CREATE TABLE posts (userId TEXT ${reference});`)).toBe(false);
+    expect(isDestructive(`CREATE TEMP TABLE posts (userId TEXT ${reference});`)).toBe(false);
+    expect(isDestructive(`ALTER TABLE posts ADD COLUMN userId TEXT ${reference};`)).toBe(false);
+    expect(
+      isDestructive(`CREATE TABLE posts (userId TEXT ${reference}); UPDATE users SET name = NULL;`),
+    ).toBe(true);
+  });
+
+  it('still detects writes in trigger bodies', () => {
+    expect(
+      isDestructive(
+        'CREATE TRIGGER clear_names AFTER INSERT ON posts BEGIN UPDATE users SET name = NULL; END;',
+      ),
+    ).toBe(true);
+  });
+
   it('returns false for bounded INSERT/UPDATE/DELETE', () => {
     expect(isDestructive("INSERT INTO users VALUES ('1', 'test');")).toBe(false);
     expect(isDestructive("UPDATE users SET name = 'test' WHERE id = '1';")).toBe(false);

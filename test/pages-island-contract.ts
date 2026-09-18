@@ -47,7 +47,7 @@ function registerIslandTests(
     const page = await newPage();
     try {
       await page.goto(BASE + '/blog');
-      await waitForIslandsHydrated(page);
+      await waitForIslandsHydrated(page, 2);
 
       const countBefore = await page.textContent('[data-testid="count"]');
       expect(countBefore).toBe('Count: 0');
@@ -68,7 +68,7 @@ function registerIslandTests(
     const page = await newPage();
     try {
       await page.goto(BASE + '/blog');
-      await waitForIslandsHydrated(page);
+      await waitForIslandsHydrated(page, 2);
 
       await page.click('button:has-text("Add Post")');
       await waitForValidation(page);
@@ -85,7 +85,7 @@ function registerIslandTests(
     const page = await newPage();
     try {
       await page.goto(BASE + '/blog');
-      await waitForIslandsHydrated(page);
+      await waitForIslandsHydrated(page, 2);
 
       await page.fill('input:near(:text("Title:"))', 'New Post');
       await page.fill('textarea:near(:text("Body:"))', 'Some content');
@@ -124,7 +124,7 @@ function registerIslandTests(
       expect(marker).toBeUndefined();
 
       // Islands should be hydrated
-      await waitForIslandsHydrated(page);
+      await waitForIslandsHydrated(page, 2);
     } finally {
       await page.context().close();
     }

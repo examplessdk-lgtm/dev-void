@@ -489,6 +489,58 @@ describe('proxy worker', () => {
       expect(await res.json()).toEqual({ error: 'forbidden' });
     });
 
+    it('passes the actual proxy origin and revalidates every R2 download chunk', async () => {
+      let ownerValid = true;
+      const ownerChecks: Array<Record<string, unknown>> = [];
+      const api = createMockApi(async (input, init) => {
+        const url = typeof input === 'string' ? input : input.url;
+        if (url.includes('/internal/verify-owner/')) {
+          ownerChecks.push(JSON.parse(init?.body as string));
+          return ownerValid
+            ? Response.json({ ok: true })
+            : Response.json({ error: 'revoked' }, { status: 403 });
+        }
+        if (url.includes('/internal/resolve-worker/')) {
+          return Response.json({ error: 'not found' }, { status: 404 });
+        }
+        if (url.includes('/internal/resolve-resource/')) {
+          return Response.json({ cf_id: 'bucket' });
+        }
+        throw new Error(`unexpected API request: ${url}`);
+      });
+      let chunk = 0;
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(
+          async () =>
+            new Response(
+              new ReadableStream<Uint8Array>({
+                pull(controller) {
+                  controller.enqueue(new Uint8Array([++chunk]));
+                },
+              }),
+              { headers: { 'content-type': 'application/octet-stream' } },
+            ),
+        ),
+      );
+      const response = await worker.fetch(
+        post(
+          '/r2/get',
+          { binding: 'FILES', key: 'large.bin', projectId: 'proj_1' },
+          { authorization: `Bearer ${validToken}` },
+        ),
+        createEnv(undefined, undefined, api),
+      );
+      const reader = response.body!.getReader();
+      expect((await reader.read()).value).toEqual(new Uint8Array([1]));
+      ownerValid = false;
+      await expect(reader.read()).rejects.toThrow('revoked');
+      expect(ownerChecks.length).toBeGreaterThanOrEqual(3);
+      expect(ownerChecks.every((body) => body.proxyOrigin === 'https://proxy.void.cloud')).toBe(
+        true,
+      );
+    });
+
     it('HMAC path bypasses ownership check (service binding is trusted)', async () => {
       // Even for a project not in user_1's ownership, HMAC path should work
       const env = createEnv(undefined, undefined, createMockApi(undefined, {}));

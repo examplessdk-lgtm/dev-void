@@ -19,6 +19,7 @@ import {
 } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import { alias } from 'drizzle-orm/pg-core';
+import { lockAuthSettings } from './auth/configuration.ts';
 import { generateId } from './id.ts';
 import * as schema from './schema.ts';
 import {
@@ -43,6 +44,7 @@ import {
   githubInstallationMembers,
   githubInstallationRevocations,
   githubWebhookRedeliveries,
+  platformLoginIdentities,
 } from './schema.ts';
 import type { DomainVerificationData, GitHubInstallationRepository } from './schema.ts';
 import type { AllowlistEntry } from './signup-allowlist.ts';
@@ -113,8 +115,8 @@ export async function createUser(
  * Creates a user and grants the first account on a self-hosted installation
  * the admin role. Call this inside the same transaction that links the OAuth
  * identity. The table lock makes concurrent first logins observe one winner.
- * Hosted Void Cloud passes no installation id and retains the existing user
- * default without taking the lock.
+ * Hosted Void Cloud retains its existing user default. Both paths reject an
+ * old callback racing the migration to configurable authentication.
  */
 export async function createUserForPlatform(
   db: Db,
@@ -128,6 +130,9 @@ export async function createUserForPlatform(
     bootstrapGitHubId: string;
   },
 ): Promise<User> {
+  if (await lockAuthSettings(db)) {
+    throw new SelfHostedSignupRestrictedError();
+  }
   if (!installationId) {
     return createUser(db, provider, providerId, login, email);
   }
@@ -2197,14 +2202,35 @@ async function withAdminRemovalGuard<T>(
   return db.transaction(async (tx) => {
     // Serialize the check and access change with other removals and bootstrap.
     // A count outside this lock lets two administrators remove each other.
+    const authSettings = await lockAuthSettings(tx as unknown as Db);
     await tx.execute(sql`LOCK TABLE ${users} IN SHARE ROW EXCLUSIVE MODE`);
     const transactionDb = tx as unknown as Db;
     const user = await getUser(transactionDb, id);
     if (user?.role === 'admin') {
-      const others = await tx
+      let others = await tx
         .select({ suspended_reason: users.suspended_reason })
         .from(users)
         .where(and(eq(users.role, 'admin'), ne(users.id, id)));
+      if (authSettings?.sessions_required) {
+        others = await tx
+          .select({ suspended_reason: users.suspended_reason })
+          .from(users)
+          .innerJoin(
+            schema.platformLoginIdentities,
+            eq(schema.platformLoginIdentities.user_id, users.id),
+          )
+          .innerJoin(
+            schema.platformLoginConnections,
+            eq(schema.platformLoginConnections.id, schema.platformLoginIdentities.connection_id),
+          )
+          .where(
+            and(
+              eq(users.role, 'admin'),
+              ne(users.id, id),
+              eq(schema.platformLoginConnections.enabled, true),
+            ),
+          );
+      }
       if (!others.some((admin) => !isAdminSuspended(admin.suspended_reason))) {
         throw new LastAdminError();
       }
@@ -2452,23 +2478,25 @@ export async function getAllowlistEntryStatuses(
 
   const exactEmails = Array.from(
     new Set(
-      entries
-        .filter((entry) => entry.type === 'email' && !entry.pattern.startsWith('*@'))
-        .map((entry) => entry.pattern.toLowerCase()),
+      entries.flatMap((entry) =>
+        entry.type === 'email' && !entry.pattern.startsWith('*@')
+          ? [entry.pattern.toLowerCase()]
+          : [],
+      ),
     ),
   );
   const emailDomains = Array.from(
     new Set(
-      entries
-        .filter((entry) => entry.type === 'email' && entry.pattern.startsWith('*@'))
-        .map((entry) => entry.pattern.slice(1).toLowerCase()),
+      entries.flatMap((entry) =>
+        entry.type === 'email' && entry.pattern.startsWith('*@')
+          ? [entry.pattern.slice(1).toLowerCase()]
+          : [],
+      ),
     ),
   );
   const githubLogins = Array.from(
     new Set(
-      entries
-        .filter((entry) => entry.type === 'github')
-        .map((entry) => entry.pattern.toLowerCase()),
+      entries.flatMap((entry) => (entry.type === 'github' ? [entry.pattern.toLowerCase()] : [])),
     ),
   );
 
@@ -2493,6 +2521,28 @@ export async function getAllowlistEntryStatuses(
           .where(or(...userConditions))
       : [];
 
+  const identityEntries = entries.filter((entry) => entry.type === 'identity');
+  const matchingIdentities =
+    identityEntries.length > 0
+      ? await db
+          .select({
+            userId: platformLoginIdentities.user_id,
+            connectionId: platformLoginIdentities.connection_id,
+            subject: platformLoginIdentities.subject,
+          })
+          .from(platformLoginIdentities)
+          .where(
+            or(
+              ...identityEntries.map((entry) =>
+                and(
+                  eq(platformLoginIdentities.connection_id, entry.connectionId),
+                  eq(platformLoginIdentities.subject, entry.subject),
+                ),
+              ),
+            ),
+          )
+      : [];
+
   const invitationConditions = [
     exactEmails.length > 0
       ? inArray(sql<string>`lower(${invitations.email})`, exactEmails)
@@ -2508,7 +2558,12 @@ export async function getAllowlistEntryStatuses(
           .where(and(eq(invitations.status, 'accepted'), or(...invitationConditions)))
       : [];
 
-  const matchingUserIds = matchingUsers.map((user) => user.id);
+  const matchingUserIds = Array.from(
+    new Set([
+      ...matchingUsers.map((user) => user.id),
+      ...matchingIdentities.map((row) => row.userId),
+    ]),
+  );
   const deployedUserRows =
     matchingUserIds.length > 0
       ? await db
@@ -2521,6 +2576,9 @@ export async function getAllowlistEntryStatuses(
   const deployedUserIds = new Set(deployedUserRows.map((row) => row.id));
 
   function userMatchesEntry(user: (typeof matchingUsers)[number], entry: AllowlistEntry): boolean {
+    if (entry.type === 'identity') {
+      return false;
+    }
     if (entry.type === 'github') {
       return user.provider === 'github' && user.login.toLowerCase() === entry.pattern.toLowerCase();
     }
@@ -2547,6 +2605,19 @@ export async function getAllowlistEntryStatuses(
   }
 
   return entries.map((entry) => {
+    if (entry.type === 'identity') {
+      const userIds = matchingIdentities
+        .filter(
+          (identity) =>
+            identity.connectionId === entry.connectionId && identity.subject === entry.subject,
+        )
+        .map((identity) => identity.userId);
+      return {
+        ...entry,
+        accepted: userIds.length > 0,
+        deployed: userIds.some((userId) => deployedUserIds.has(userId)),
+      };
+    }
     const usersForEntry = matchingUsers.filter((user) => userMatchesEntry(user, entry));
     const hasAcceptedInvitation = acceptedInvitations.some((invitation) =>
       invitationMatchesEntry(invitation.email, entry),

@@ -7,6 +7,7 @@ export type OperatorCommand = {
   description: string;
   positional?: Array<string>;
   optionalPositional?: boolean;
+  usage?: Array<string>;
   values?: Record<string, string>;
   booleans?: Array<string>;
   method?: 'POST';
@@ -180,16 +181,32 @@ export const operatorCommands: Array<OperatorCommand> = [
   {
     group: 'signup',
     action: 'allow',
-    description: 'Add a github or email allowlist pattern',
+    description: 'Add a GitHub, email, or exact login identity grant',
     path: '/signup/allow',
     positional: ['type', 'pattern'],
+    usage: [
+      'void platform signup allow <github|email> <pattern> [options]',
+      'void platform signup allow identity <connection-id> <subject> [options]',
+    ],
     values: { note: 'Allowlist note' },
     method: 'POST',
   },
   {
     group: 'signup',
+    action: 'disallow',
+    description: 'Remove a GitHub, email, or exact login identity grant',
+    path: '/signup/disallow',
+    positional: ['type', 'pattern'],
+    usage: [
+      'void platform signup disallow <github|email> <pattern> [options]',
+      'void platform signup disallow identity <connection-id> <subject> [options]',
+    ],
+    method: 'POST',
+  },
+  {
+    group: 'signup',
     action: 'remove',
-    description: 'Remove a github or email allowlist pattern',
+    description: 'Remove a GitHub or email allowlist pattern (compatibility alias)',
     path: '/signup/remove',
     positional: ['type', 'pattern'],
     method: 'POST',
@@ -386,6 +403,7 @@ export type OperatorArgs = {
   follow: boolean;
   tokenStdin: boolean;
   provider: string;
+  providerExplicit?: boolean;
   timeoutMs?: number;
   method: 'GET' | 'POST';
   path: string;
@@ -436,6 +454,7 @@ export function parseOperatorArgs(args: Array<string>): OperatorArgs {
     follow: flags.has('follow'),
     tokenStdin: flags.has('token-stdin'),
     provider: values.provider ?? 'github',
+    ...(values.provider ? { providerExplicit: true } : {}),
     method: 'GET',
     path: '',
     query: {},
@@ -456,9 +475,20 @@ export function parseOperatorArgs(args: Array<string>): OperatorArgs {
     );
   }
   const count = command.positional?.length ?? 0;
-  if (parameters.length > count || (!command.optionalPositional && parameters.length !== count)) {
+  const identitySignupEntry =
+    group === 'signup' && ['allow', 'disallow'].includes(action) && parameters[0] === 'identity';
+  if (group === 'signup' && action === 'remove' && parameters[0] === 'identity') {
     throw new Error(
-      `platform: Usage: void platform ${group} ${action}${command.positional?.map((name) => ` <${name}>`).join('') ?? ''}.`,
+      'platform: Use `void platform signup disallow identity <connection-id> <subject>`.',
+    );
+  }
+  const expectedCount = identitySignupEntry ? 3 : count;
+  if (
+    parameters.length > expectedCount ||
+    (!command.optionalPositional && parameters.length !== expectedCount)
+  ) {
+    throw new Error(
+      `platform: Usage: ${command.usage?.[identitySignupEntry ? 1 : 0]?.replace(/ \[options\]$/, '') ?? `void platform ${group} ${action}${command.positional?.map((name) => ` <${name}>`).join('') ?? ''}`}.`,
     );
   }
   const paged = action === 'list' || action === 'events' || action === 'logs';
@@ -487,20 +517,33 @@ export function parseOperatorArgs(args: Array<string>): OperatorArgs {
   }
   parsed.path = command.path;
   parsed.method = command.method ?? 'GET';
-  for (const [index, name] of (command.positional ?? []).entries()) {
-    const value = parameters[index];
-    if (value === undefined) {
-      continue;
+  if (identitySignupEntry) {
+    const connectionId = parameters[1]!;
+    const subject = parameters[2]!;
+    if (!/^[a-z][a-z0-9-]{0,63}$/.test(connectionId)) {
+      throw new Error('platform: Invalid login connection ID.');
     }
-    if (value === '.' || value === '..') {
-      throw new Error('platform: An object ID cannot be a dot path segment.');
+    if (!subject || subject.length > 255) {
+      throw new Error('platform: Identity subject must be 1–255 characters.');
     }
-    if (parsed.path.includes(`:${name}`)) {
-      parsed.path = parsed.path.replace(`:${name}`, encodeURIComponent(value));
-    } else if (group === 'worker' && action === 'events') {
-      parsed.path += `/${encodeURIComponent(value)}`;
-    } else {
-      parsed.body[name] = name === 'emails' ? value.split(',').map((email) => email.trim()) : value;
+    parsed.body = { type: 'identity', connectionId, subject };
+  } else {
+    for (const [index, name] of (command.positional ?? []).entries()) {
+      const value = parameters[index];
+      if (value === undefined) {
+        continue;
+      }
+      if (value === '.' || value === '..') {
+        throw new Error('platform: An object ID cannot be a dot path segment.');
+      }
+      if (parsed.path.includes(`:${name}`)) {
+        parsed.path = parsed.path.replace(`:${name}`, encodeURIComponent(value));
+      } else if (group === 'worker' && action === 'events') {
+        parsed.path += `/${encodeURIComponent(value)}`;
+      } else {
+        parsed.body[name] =
+          name === 'emails' ? value.split(',').map((email) => email.trim()) : value;
+      }
     }
   }
   for (const [name, value] of Object.entries(values)) {
@@ -537,8 +580,8 @@ export function parseOperatorArgs(args: Array<string>): OperatorArgs {
       parsed.query[name] = value;
     }
   }
-  if (parsed.body.type && !['github', 'email'].includes(String(parsed.body.type))) {
-    throw new Error('platform: Signup pattern type must be github or email.');
+  if (parsed.body.type && !['github', 'email', 'identity'].includes(String(parsed.body.type))) {
+    throw new Error('platform: Signup grant type must be github, email, or identity.');
   }
   // Command-specific booleans other than the session's own `--token-stdin`
   // ride the body, where the server reads them as JSON booleans.

@@ -31,6 +31,7 @@ export type PlatformRuntimeDatabaseManifest = Readonly<{
 }>;
 
 export type PlatformRuntimeManifest = Readonly<{
+  authenticationProtocolVersion?: 1;
   applicationRoutingVersion?: 1;
   artifacts: Readonly<Record<'api' | 'dispatch' | 'proxy' | 'tail', PlatformRuntimeArtifact>>;
   database: PlatformRuntimeDatabaseManifest;
@@ -75,6 +76,12 @@ export function parsePlatformRuntimeManifest(value: unknown): PlatformRuntimeMan
   const root = record(value, 'runtime manifest');
   if (root.schemaVersion !== 2) {
     throw new Error('runtime manifest schemaVersion must be 2');
+  }
+  if (
+    root.authenticationProtocolVersion !== undefined &&
+    root.authenticationProtocolVersion !== 1
+  ) {
+    throw new Error('Unsupported authentication protocol version.');
   }
   const artifactsValue = record(root.artifacts, 'runtime manifest artifacts');
   const artifacts = Object.fromEntries(
@@ -152,6 +159,9 @@ export function parsePlatformRuntimeManifest(value: unknown): PlatformRuntimeMan
   }
   return {
     artifacts,
+    ...(root.authenticationProtocolVersion === 1
+      ? { authenticationProtocolVersion: 1 as const }
+      : {}),
     ...(root.applicationRoutingVersion === 1 ? { applicationRoutingVersion: 1 as const } : {}),
     database: {
       journalSha256: sha256(databaseValue.journalSha256, 'database journal digest'),

@@ -1,11 +1,12 @@
 import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { isDeepStrictEqual } from 'node:util';
+import { isDeepStrictEqual, stripVTControlCharacters } from 'node:util';
 import { join } from 'pathslash';
 import { parseRootWranglerConfig } from './config.ts';
 import { cloudflareCommandDiagnostic } from './diagnostics.ts';
 import type { CloudflareCommandResult, CloudflareCommandRunner } from './execute.ts';
+import { isWranglerSecretOnlyDraft } from './secret-draft.ts';
 
 const VERSION_ID_RE = /(?:Worker|Current) Version ID:\s*([0-9a-f]{8}-[0-9a-f-]{27})/i;
 const PREVIEW_URL_RE = /Version Preview(?: Alias)? URL:\s*(https:\/\/\S+)/i;
@@ -964,10 +965,14 @@ async function activateCloudflareVersionWithSecretsFile(
     ),
   );
   if (!isCleanCommandExit(upload)) {
-    const output = `${upload.stdout}\n${upload.stderr}`;
+    const output = stripVTControlCharacters(`${upload.stdout}\n${upload.stderr}`);
     const cloudflareErrorCode = parseCloudflareErrorCode(output);
     const isBootstrapError =
       cloudflareErrorCode === DURABLE_MIGRATION_VERSION_ERROR ||
+      // Recent Wrangler versions reject this locally, before Cloudflare can return 10211.
+      /This\s+Worker\s+has\s+a\s+pending\s+Durable\s+Object\s+migration,\s+which\s+cannot\s+be\s+applied\s+by\s+`wrangler\s+versions\s+upload`/i.test(
+        output,
+      ) ||
       /cannot upload a new version of a worker that does not yet exist/i.test(output);
     if (
       !options.preserveTriggers &&
@@ -1540,9 +1545,30 @@ async function readCloudflareVersionInspection(
       }
       const annotations = isRecord(entry.annotations) ? entry.annotations : undefined;
       const message = annotations?.['workers/message'];
+      // The list endpoint omits resources. Inspect the exact active version before deciding
+      // whether secret provisioning left a placeholder rather than an existing application.
+      let draft = entry;
+      if (
+        annotations?.['workers/triggered_by'] === 'secret' &&
+        Object.keys(annotations).length === 1 &&
+        !isRecord(entry.resources)
+      ) {
+        const inspection = await Promise.resolve(
+          options.runWrangler(
+            ['versions', 'view', versionId, ...commonArgs, '--name', options.workerName, '--json'],
+            { capture: true },
+          ),
+        );
+        if (isCleanCommandExit(inspection)) {
+          const inspected: unknown = JSON.parse(inspection.stdout);
+          if (isRecord(inspected) && inspected.id === versionId) {
+            draft = inspected;
+          }
+        }
+      }
       return {
         metadata: typeof message === 'string' ? parseCloudflareVersionMessage(message) : null,
-        isSecretOnlyDraft: isWranglerSecretOnlyDraft(entry),
+        isSecretOnlyDraft: isWranglerSecretOnlyDraft(draft),
       };
     }
   } catch {
@@ -1661,64 +1687,6 @@ async function readCloudflareVersionSecretBindings(
   } catch {
     return null;
   }
-}
-
-/**
- * `wrangler secret put` creates a fetch-only draft before attaching a first secret to a Worker.
- * Accept that draft as first-deployment proof only when its complete deployable shape contains no
- * application code configuration or non-secret resource that an ordinary deploy could own.
- */
-function isWranglerSecretOnlyDraft(entry: Record<string, unknown>): boolean {
-  if (!isRecord(entry.annotations)) {
-    return false;
-  }
-  const annotationKeys = Object.keys(entry.annotations);
-  if (
-    entry.annotations['workers/triggered_by'] !== 'secret' ||
-    annotationKeys.some((key) => key !== 'workers/triggered_by')
-  ) {
-    return false;
-  }
-
-  if (!isRecord(entry.resources)) {
-    return false;
-  }
-  const { bindings, script, script_runtime: scriptRuntime } = entry.resources;
-  if (
-    !Array.isArray(bindings) ||
-    bindings.length === 0 ||
-    !bindings.every(
-      (binding) =>
-        isRecord(binding) &&
-        typeof binding.name === 'string' &&
-        binding.name.length > 0 &&
-        binding.type === 'secret_text' &&
-        Object.keys(binding).every((key) => key === 'name' || key === 'type'),
-    )
-  ) {
-    return false;
-  }
-
-  if (
-    !isRecord(script) ||
-    !Array.isArray(script.handlers) ||
-    script.handlers.length !== 1 ||
-    script.handlers[0] !== 'fetch' ||
-    script.placement_mode !== undefined
-  ) {
-    return false;
-  }
-
-  if (!isRecord(scriptRuntime)) {
-    return false;
-  }
-  const runtimeKeys = Object.keys(scriptRuntime);
-  return (
-    scriptRuntime.usage_model === 'standard' &&
-    isRecord(scriptRuntime.limits) &&
-    Object.keys(scriptRuntime.limits).length === 0 &&
-    runtimeKeys.every((key) => key === 'usage_model' || key === 'limits')
-  );
 }
 
 /**

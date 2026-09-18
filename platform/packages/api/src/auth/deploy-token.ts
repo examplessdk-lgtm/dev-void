@@ -19,6 +19,8 @@ const DEPLOY_TOKEN_TTL_SECONDS = 15 * 60;
  */
 const PRERENDER_TOKEN_TTL_SECONDS = 5 * 60;
 
+export const PROJECT_CREDENTIAL_MAX_DAYS = 90;
+
 /** Hard ceiling on a deploy token's lifetime — even an "unlimited" (0) build
  * timeout can't mint an unbounded-life token. */
 export const DEPLOY_TOKEN_HARD_MAX_MINUTES = 60;
@@ -84,6 +86,34 @@ export async function verifyDeployToken(token: string, secret: string): Promise<
   return verifyJwt(token, secret, 'deploy');
 }
 
+/** Mint the bearer value for a durable, independently revocable CI credential. */
+export async function signProjectCredentialToken(
+  input: {
+    credentialId: string;
+    projectId: string;
+    userId: string;
+    login: string;
+    expiresAt: Date;
+  },
+  secret: string,
+): Promise<string> {
+  const ttlSeconds = Math.floor((input.expiresAt.getTime() - Date.now()) / 1000);
+  if (ttlSeconds <= 0 || ttlSeconds > PROJECT_CREDENTIAL_MAX_DAYS * 24 * 60 * 60) {
+    throw new Error('Project credential expiry is outside the supported range.');
+  }
+  return signJwt(
+    {
+      sub: input.userId,
+      login: input.login,
+      aud: 'deploy',
+      project: input.projectId,
+      credential: input.credentialId,
+    },
+    secret,
+    { ttlSeconds },
+  );
+}
+
 /** Mint a short-lived token accepted only by the remote-binding proxy. */
 export async function signPrerenderToken(
   {
@@ -91,7 +121,14 @@ export async function signPrerenderToken(
     userId,
     login,
     buildId,
-  }: { projectId: string; userId: string; login: string; buildId?: string },
+    credentialId,
+  }: {
+    projectId: string;
+    userId: string;
+    login: string;
+    buildId?: string;
+    credentialId?: string;
+  },
   secret: string,
   opts?: { ttlSeconds?: number },
 ): Promise<string> {
@@ -102,6 +139,7 @@ export async function signPrerenderToken(
       aud: 'prerender',
       project: projectId,
       ...(buildId !== undefined ? { build: buildId } : {}),
+      ...(credentialId !== undefined ? { credential: credentialId } : {}),
     },
     secret,
     { ttlSeconds: opts?.ttlSeconds ?? PRERENDER_TOKEN_TTL_SECONDS },

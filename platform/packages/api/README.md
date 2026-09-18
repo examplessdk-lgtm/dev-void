@@ -52,6 +52,7 @@ src/
     delete.ts                 # Project deletion
     github.ts                 # GitHub App install/connect + per-project connection routes
     webhooks.ts               # POST /webhooks/github (HMAC-verified push/installation/workflow_run)
+    internal-github-webhook.ts # fixed optional ingress operation (proof + GitHub HMAC)
     auth-oidc.ts              # POST /auth/github-oidc (verify Actions OIDC, mint scoped token)
     revalidate.ts             # Dashboard/admin ISR revalidation
     internal-revalidate.ts    # Proxy -> API ISR revalidation
@@ -91,6 +92,9 @@ drizzle/
     - Secret changes hold the project row lock through active-Worker propagation. A nonterminal deployment or rollback lease returns HTTP 409 before storage changes; retry after that operation completes. Propagation requests time out after 30 seconds so an unavailable upstream cannot hold the project fence indefinitely.
   - domains
   - usage
+  - project-scoped CI deploy credentials (`GET|POST /projects/:id/tokens`,
+    `POST /projects/:id/tokens/:credentialId/renew`, and
+    `DELETE /projects/:id/tokens/:credentialId`)
   - PostgreSQL and MySQL project database provisioning/update
   - `POST /projects/:id/prerender-token` — mint a five-minute, project-scoped token accepted only by the remote-binding proxy
   - `/projects/:id/github` — connect/inspect/update/disconnect the GitHub repo (POST/GET/PATCH/DELETE; auth + ownership)
@@ -105,10 +109,19 @@ drizzle/
 - `POST /webhooks/github` (public, HMAC-verified) — `push` queues a container build and pokes the scheduler; `installation`/`installation_repositories` sync access; `workflow_run` completes GitHub Actions builds
 - `POST /auth/github-oidc` (public) — verify a GitHub Actions OIDC token, create the Actions build row, and mint a scoped `VOID_TOKEN` (`{ oidcToken, project }` -> `{ token, projectId, buildId }`)
 
-The webhook and OIDC endpoints return `503` when the GitHub App secrets are unset, so the worker runs without them. On staging, both paths must be on the Cloudflare Access **bypass** list (GitHub cannot present Access credentials).
+The webhook and OIDC endpoints return `503` when the GitHub App secrets are unset,
+so the worker runs without them. Do not add an Access `Everyone` or path bypass
+policy to the API hostname. For an Access-protected source installation, deploy
+the standalone `src/github-webhook-ingress.ts` Worker with
+`wrangler.github-webhook-ingress.jsonc`. It validates the raw GitHub HMAC and
+forwards only `POST /internal/github-webhook` over its `API` service binding with
+a short-lived, body-bound proof. The API revalidates that proof and the GitHub
+HMAC. See [Platform Development](../../../docs/guide/platform-development.md#optional-github-webhook-ingress-for-access-protected-apis).
 
 ### Service-to-service API
 
+- `POST /internal/github-webhook` — optional ingress only; requires the dedicated
+  time-bounded ingress HMAC and the original valid GitHub signature
 - `POST /internal/revalidate/:projectId`
 - `POST /internal/resolve-resource/:projectId`
 - `POST /internal/resolve-worker/:projectId` — resolve the active deployment's versioned worker; static active deployments report that no worker exists
@@ -360,8 +373,10 @@ Optional vars:
 - `GITHUB_APP_PRIVATE_KEY` — PKCS#8 PEM (convert GitHub's PKCS#1 with `openssl pkcs8 -topk8 -nocrypt`)
 - `GITHUB_APP_SLUG` — App slug, used to build the install URL
 - `GITHUB_WEBHOOK_SECRET` — HMAC secret for `POST /webhooks/github`
+- `GITHUB_WEBHOOK_INGRESS_SECRET` — separate HMAC secret shared only by the API
+  and optional standalone webhook ingress; required on both Workers when used
 
-The four `GITHUB_APP_*` secrets are optional: when unset, `/webhooks/github` and `/auth/github-oidc` return `503` and the rest of the worker runs normally. They are the App for Deploy-on-GitHub, separate from the sign-in OAuth app above.
+The GitHub App secrets are optional: when unset, `/webhooks/github` and `/auth/github-oidc` return `503` and the rest of the worker runs normally. They are the App for Deploy-on-GitHub, separate from the sign-in OAuth app above. The ingress secret is also optional and does not enable any route unless the standalone Worker and service binding are configured.
 
 When enabling email on a self-hosted or custom-origin platform, configure
 `EMAIL_FROM` with a Cloudflare-verified sender and `AUTH_REDIRECT_URI` with the

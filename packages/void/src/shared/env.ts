@@ -93,6 +93,7 @@ export function resolveRemoteMode(configRemote: boolean | undefined): boolean {
  * `prerender.ts` runNodePrerenderRunner (Node prerender child process env).
  */
 export const INTERNAL_ENV_KEYS = [
+  '__VOID_ACCESS_CREDENTIALS',
   '__VOID_TOKEN',
   '__VOID_PROJECT_ID',
   '__VOID_REMOTE',

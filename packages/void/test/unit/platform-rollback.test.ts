@@ -77,6 +77,43 @@ function installed(source: PlatformRuntime) {
 }
 
 describe('platform post-success rollback', () => {
+  it('blocks a runtime without human-session revocation even when its database rollback is declared safe', () => {
+    const target = runtime({
+      digest: 'a'.repeat(64),
+      migrations: [firstMigration],
+      platformVersion: '1.0.0',
+      schemaDigest: 'c'.repeat(64),
+    });
+    const source = runtime({
+      digest: 'b'.repeat(64),
+      migrations: [firstMigration, secondMigration],
+      platformVersion: '1.1.0',
+      schemaDigest: 'd'.repeat(64),
+      rollbackSafeFrom: [{ platformVersion: '1.0.0', schemaDigest: 'c'.repeat(64) }],
+    });
+    const authenticatedSource = {
+      ...source,
+      manifest: { ...source.manifest, authenticationProtocolVersion: 1 as const },
+    };
+    expect(() =>
+      assertPlatformRollbackCompatibility(
+        installed(authenticatedSource),
+        target,
+        authenticatedSource,
+      ),
+    ).toThrow('session revocation protocol');
+    const authenticatedTarget = {
+      ...target,
+      manifest: { ...target.manifest, authenticationProtocolVersion: 1 as const },
+    };
+    expect(() =>
+      assertPlatformRollbackCompatibility(
+        installed(authenticatedSource),
+        authenticatedTarget,
+        authenticatedSource,
+      ),
+    ).not.toThrow();
+  });
   it('accepts an exact compatible prefix while preserving forward schema provenance', () => {
     const target = runtime({
       digest: 'a'.repeat(64),

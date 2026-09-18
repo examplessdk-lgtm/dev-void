@@ -53,7 +53,7 @@ export type CloudflareHyperdriveOrigin = Readonly<{
   user: string | null;
 }>;
 export type CloudflareHyperdriveConfig = CloudflareNamedResource &
-  Readonly<{ origin: CloudflareHyperdriveOrigin }>;
+  Readonly<{ origin: CloudflareHyperdriveOrigin; cachingDisabled?: boolean }>;
 export type CloudflareDnsRecord = CloudflareNamedResource &
   Readonly<{
     content: string;
@@ -205,6 +205,7 @@ export class PlatformCloudflareClient {
         ...init?.headers,
       },
       signal: init?.signal ?? AbortSignal.timeout(30_000),
+      redirect: 'manual',
     });
     let envelope: CloudflareEnvelope<T>;
     try {
@@ -779,6 +780,7 @@ export class PlatformCloudflareClient {
         method: 'POST',
         body: JSON.stringify({
           name,
+          caching: { disabled: true },
           origin: {
             database: parsed.database,
             host: parsed.host,
@@ -802,6 +804,16 @@ export class PlatformCloudflareClient {
       `/accounts/${encodeURIComponent(accountId)}/workers/scripts`,
     );
     return result.map((entry) => requiredString(entry.id, 'Worker name'));
+  }
+
+  async disableHyperdriveCaching(accountId: string, id: string): Promise<void> {
+    await this.request(
+      `/accounts/${encodeURIComponent(accountId)}/hyperdrive/configs/${encodeURIComponent(id)}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify({ caching: { disabled: true } }),
+      },
+    );
   }
 
   async putKvValue(
@@ -1213,6 +1225,11 @@ function parseHyperdriveConfig(value: Record<string, unknown>): CloudflareHyperd
   return {
     id: requiredString(value.id, 'Hyperdrive id'),
     name: requiredString(value.name, 'Hyperdrive name'),
+    cachingDisabled:
+      !!value.caching &&
+      typeof value.caching === 'object' &&
+      !Array.isArray(value.caching) &&
+      (value.caching as Record<string, unknown>).disabled === true,
     origin: {
       database: requiredString(record.database, 'Hyperdrive origin database'),
       host: requiredString(record.host, 'Hyperdrive origin host').toLowerCase(),

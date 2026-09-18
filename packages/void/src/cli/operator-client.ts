@@ -1,4 +1,5 @@
 import { cfAccessHeaders } from '../shared/cf-access.ts';
+import { ensureCloudflaredToken } from './cf-access.ts';
 import { normalizePlatformApiUrl } from './platform-registry.ts';
 
 export const OPERATOR_READ_TIMEOUT_MS: number = 30_000;
@@ -66,6 +67,7 @@ export class OperatorClient {
       );
     }
     const url = new URL(`${this.origin}/operator/v1${path}`);
+    ensureCloudflaredToken(this.origin);
     for (const [name, value] of Object.entries(options.query ?? {})) {
       url.searchParams.set(name, value);
     }

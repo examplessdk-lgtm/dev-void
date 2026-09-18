@@ -4,6 +4,7 @@ import { join } from 'pathslash';
 import { describe, expect, it, vi } from 'vite-plus/test';
 import {
   activateCloudflareVersion,
+  assertCloudflareDurableObjectLifecycleSupported,
   deployCloudflareVersionTriggers,
   encodeCloudflareVersionMessage,
   extractWorkersDevSubdomain,
@@ -16,6 +17,14 @@ import {
 const CURRENT = '11111111-1111-4111-8111-111111111111';
 const NEXT = '22222222-2222-4222-8222-222222222222';
 const CONCURRENT = '33333333-3333-4333-8333-333333333333';
+
+// The bundled uploader rejects locally without an API error code; keep its actual diagnostic.
+const LOCAL_DURABLE_MIGRATION_ERROR =
+  'This Worker has a pending Durable Object migration, which cannot be applied by `wrangler versions upload`. Durable Object migrations must be applied with `wrangler deploy`. Run `wrangler deploy` to apply the migration, then retry `wrangler versions upload`.';
+const DURABLE_MIGRATION_ERRORS = [
+  'Durable Object migrations require deploy. [code: 10211]',
+  LOCAL_DURABLE_MIGRATION_ERROR,
+];
 
 function secretOnlyDraftVersion() {
   return {
@@ -2396,67 +2405,73 @@ describe('Cloudflare version activation', () => {
     );
   });
 
-  it('bootstraps first-deploy Durable Object migrations through a non-versioned deploy', async () => {
-    const base = runner({
-      status: { stdout: '', stderr: 'The Worker first has no deployments.', status: 1 },
-      upload: {
-        stdout: '',
-        stderr: 'Durable Object migrations require deploy. [code: 10211]',
-        status: 1,
-      },
-      bootstrap: ok(
-        `Current Version ID: ${NEXT}\nVersion Preview URL: https://2e209d56-first.example.workers.dev`,
-      ),
-    });
-    const secretPayloads: Array<unknown> = [];
-    const secretPaths: Array<string> = [];
-    const runWrangler = vi.fn((args: Array<string>) => {
-      if (
-        (args[0] === 'deploy' || (args[0] === 'versions' && args[1] === 'upload')) &&
-        args.includes('--secrets-file')
-      ) {
-        const path = args[args.indexOf('--secrets-file') + 1]!;
-        secretPaths.push(path);
-        secretPayloads.push(JSON.parse(readFileSync(path, 'utf8')));
-      }
-      return base(args);
-    });
-    const fetcher = vi.fn(async () => Response.json({ ready: true }));
+  it.each(DURABLE_MIGRATION_ERRORS)(
+    'bootstraps first-deploy Durable Object migrations for %s',
+    async (error) => {
+      const base = runner({
+        status: { stdout: '', stderr: 'The Worker first has no deployments.', status: 1 },
+        upload: {
+          stdout: '',
+          stderr: error,
+          status: 1,
+        },
+        bootstrap: ok(
+          `Current Version ID: ${NEXT}\nVersion Preview URL: https://2e209d56-first.example.workers.dev`,
+        ),
+      });
+      const secretPayloads: Array<unknown> = [];
+      const secretPaths: Array<string> = [];
+      const runWrangler = vi.fn((args: Array<string>) => {
+        if (
+          (args[0] === 'deploy' || (args[0] === 'versions' && args[1] === 'upload')) &&
+          args.includes('--secrets-file')
+        ) {
+          const path = args[args.indexOf('--secrets-file') + 1]!;
+          secretPaths.push(path);
+          secretPayloads.push(JSON.parse(readFileSync(path, 'utf8')));
+        }
+        return base(args);
+      });
+      const fetcher = vi.fn(async () => Response.json({ ready: true }));
 
-    await expect(
-      activateCloudflareVersion({
-        runWrangler,
-        verifyUploader: () => true,
-        workerName: 'first',
-        configPath: '/app/wrangler.jsonc',
-        assetsDirectoryOverride: '/app/.void/deploy/cloudflare/assets',
-        message: encodeCloudflareVersionMessage(['0001_init.sql']),
-        candidateSecrets: { API_TOKEN: 'first-secret' },
-        fetch: fetcher,
-      }),
-    ).resolves.toEqual({
-      ok: true,
-      versionId: NEXT,
-      previewUrl: 'https://first.example.workers.dev',
-      previousVersionId: null,
-      workersDevSubdomain: 'example',
-    });
-    expect(runWrangler.mock.calls.map(([args]) => args.slice(0, 2))).toEqual([
-      ['deployments', 'status'],
-      ['versions', 'upload'],
-      ['deploy', '-c'],
-    ]);
-    expect(runWrangler.mock.calls[2]![0]).toContain('--autoconfig=false');
-    expect(runWrangler.mock.calls[2]![0]).toContain('--assets');
-    expect(runWrangler.mock.calls[2]![0]).toContain('/app/.void/deploy/cloudflare/assets');
-    expect(secretPayloads).toEqual([{ API_TOKEN: 'first-secret' }, { API_TOKEN: 'first-secret' }]);
-    expect(new Set(secretPaths).size).toBe(1);
-    expect(secretPaths.every((path) => !existsSync(path))).toBe(true);
-    expect(fetcher).toHaveBeenCalledWith(
-      'https://first.example.workers.dev/__void/ready',
-      expect.objectContaining({ signal: expect.any(AbortSignal) }),
-    );
-  });
+      await expect(
+        activateCloudflareVersion({
+          runWrangler,
+          verifyUploader: () => true,
+          workerName: 'first',
+          configPath: '/app/wrangler.jsonc',
+          assetsDirectoryOverride: '/app/.void/deploy/cloudflare/assets',
+          message: encodeCloudflareVersionMessage(['0001_init.sql']),
+          candidateSecrets: { API_TOKEN: 'first-secret' },
+          fetch: fetcher,
+        }),
+      ).resolves.toEqual({
+        ok: true,
+        versionId: NEXT,
+        previewUrl: 'https://first.example.workers.dev',
+        previousVersionId: null,
+        workersDevSubdomain: 'example',
+      });
+      expect(runWrangler.mock.calls.map(([args]) => args.slice(0, 2))).toEqual([
+        ['deployments', 'status'],
+        ['versions', 'upload'],
+        ['deploy', '-c'],
+      ]);
+      expect(runWrangler.mock.calls[2]![0]).toContain('--autoconfig=false');
+      expect(runWrangler.mock.calls[2]![0]).toContain('--assets');
+      expect(runWrangler.mock.calls[2]![0]).toContain('/app/.void/deploy/cloudflare/assets');
+      expect(secretPayloads).toEqual([
+        { API_TOKEN: 'first-secret' },
+        { API_TOKEN: 'first-secret' },
+      ]);
+      expect(new Set(secretPaths).size).toBe(1);
+      expect(secretPaths.every((path) => !existsSync(path))).toBe(true);
+      expect(fetcher).toHaveBeenCalledWith(
+        'https://first.example.workers.dev/__void/ready',
+        expect.objectContaining({ signal: expect.any(AbortSignal) }),
+      );
+    },
+  );
 
   it('reports Access blocking the already-active first Worker bootstrap', async () => {
     const runWrangler = runner({
@@ -2744,4 +2759,204 @@ describe('Cloudflare version activation', () => {
     });
     expect(runWrangler.mock.calls.some(([args]) => args[0] === 'deploy')).toBe(false);
   });
+
+  const firstSecretTriggers = {
+    preserveRoutes: true,
+    preserveWorkersDev: true,
+    preservePreviewUrls: true,
+    workers_dev: true,
+    preview_urls: true,
+    routes: [],
+    crons: [],
+    queueConsumers: [],
+    workflows: [],
+  };
+
+  function firstSecretRunner(
+    inspection: CloudflareCommandResult,
+    upload: CloudflareCommandResult = {
+      stdout: '',
+      stderr: DURABLE_MIGRATION_ERRORS[0]!,
+      status: 1,
+    },
+  ) {
+    const base = runner({
+      // Cloudflare's list response has annotations but no resources, unlike versions view.
+      versions: ok(
+        JSON.stringify([
+          { id: CONCURRENT, number: 1, annotations: { 'workers/triggered_by': 'upload' } },
+          { id: CURRENT, number: 2, annotations: { 'workers/triggered_by': 'secret' } },
+        ]),
+      ),
+      upload,
+      bootstrap: ok(`Current Version ID: ${NEXT}\nhttps://first.example.workers.dev`),
+    });
+    return vi.fn((args: Array<string>) => {
+      if (args[0] === 'versions' && args[1] === 'view') {
+        expect(args[2]).toBe(CURRENT);
+        return inspection;
+      }
+      return base(args);
+    });
+  }
+
+  const uploadFailures = [
+    { stdout: '', stderr: DURABLE_MIGRATION_ERRORS[0]!, status: 1 },
+    { stdout: '', stderr: LOCAL_DURABLE_MIGRATION_ERROR, status: 1 },
+    { stdout: LOCAL_DURABLE_MIGRATION_ERROR, stderr: '', status: 1 },
+    {
+      stdout: '',
+      stderr: `\u001b[31m${LOCAL_DURABLE_MIGRATION_ERROR.replace('pending Durable', 'pending\n  Durable')}\u001b[0m`,
+      status: 1,
+    },
+  ];
+  it.each(
+    [{}, { limits: {} }].flatMap((limits) => uploadFailures.map((upload) => ({ limits, upload }))),
+  )(
+    'passes lifecycle preflight and retries a first secret-only deploy for %j',
+    async ({ limits, upload }) => {
+      const draft = secretOnlyDraftVersion();
+      const runWrangler = firstSecretRunner(
+        ok(
+          JSON.stringify({
+            ...draft,
+            resources: {
+              ...draft.resources,
+              script_runtime: { usage_model: 'standard', ...limits },
+            },
+          }),
+        ),
+        upload,
+      );
+      const root = mkdtempSync(join(tmpdir(), 'void-secret-lifecycle-retry-'));
+      const configPath = join(root, 'wrangler.jsonc');
+      writeFileSync(
+        configPath,
+        JSON.stringify({
+          migrations: [{ tag: 'live-v1', new_sqlite_classes: ['VoidLiveStreamDurableObject'] }],
+        }),
+      );
+      const readMigrationTag = vi.fn(async () => null);
+      try {
+        await assertCloudflareDurableObjectLifecycleSupported({
+          runWrangler,
+          configPath,
+          workerName: 'first-with-existing-secret',
+          accountId: 'account',
+          apiBaseUrl: 'https://api.cloudflare.test/client/v4',
+          readMigrationTag,
+        });
+        expect(readMigrationTag).toHaveBeenCalledTimes(2);
+        expect(
+          runWrangler.mock.calls.some(([args]) => args[0] === 'deploy' || args[1] === 'upload'),
+        ).toBe(false);
+        await expect(
+          activateCloudflareVersion({
+            runWrangler,
+            configPath,
+            verifyUploader: () => true,
+            verifyInheritedSecrets: true,
+            workerName: 'first-with-existing-secret',
+            message: encodeCloudflareVersionMessage(['0001_state.sql'], firstSecretTriggers),
+            fetch: async () => Response.json({ ready: true }),
+          }),
+        ).resolves.toMatchObject({ ok: true, previousVersionId: CURRENT });
+        expect(runWrangler.mock.calls.some(([args]) => args[1] === 'view')).toBe(true);
+        expect(runWrangler.mock.calls.some(([args]) => args[0] === 'deploy')).toBe(true);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each([false, true])(
+    'does not bootstrap an existing app for the local migration error (preserve triggers: %s)',
+    async (preserveTriggers) => {
+      const runWrangler = runner({
+        upload: { stdout: '', stderr: LOCAL_DURABLE_MIGRATION_ERROR, status: 1 },
+      });
+      await expect(
+        activateCloudflareVersion({
+          runWrangler,
+          workerName: 'existing',
+          verifyUploader: () => true,
+          preserveTriggers,
+          message: encodeCloudflareVersionMessage([]),
+        }),
+      ).resolves.toMatchObject({
+        ok: false,
+        reason: 'upload-failed',
+        diagnostic: LOCAL_DURABLE_MIGRATION_ERROR,
+      });
+      expect(runWrangler.mock.calls.some(([args]) => args[0] === 'deploy')).toBe(false);
+    },
+  );
+
+  it('does not bootstrap a secret-only draft after an unrelated upload failure', async () => {
+    const runWrangler = firstSecretRunner(ok(JSON.stringify(secretOnlyDraftVersion())), {
+      stdout: '',
+      stderr: 'Authentication failed. [code: 10000]',
+      status: 1,
+    });
+    await expect(
+      activateCloudflareVersion({
+        runWrangler,
+        workerName: 'first-with-secret',
+        verifyUploader: () => true,
+        message: encodeCloudflareVersionMessage([]),
+      }),
+    ).resolves.toMatchObject({ ok: false, reason: 'upload-failed', cloudflareErrorCode: 10000 });
+    expect(runWrangler.mock.calls.some(([args]) => args[0] === 'deploy')).toBe(false);
+  });
+
+  it.each([{ limits: { cpu_ms: 100 } }, { limits: null }, { compatibility_date: '2026-09-01' }])(
+    'preserves existing traffic when the secret-triggered version has runtime settings %j',
+    async (runtime) => {
+      const draft = secretOnlyDraftVersion();
+      const runWrangler = firstSecretRunner(
+        ok(
+          JSON.stringify({
+            ...draft,
+            resources: {
+              ...draft.resources,
+              script_runtime: { usage_model: 'standard', ...runtime },
+            },
+          }),
+        ),
+      );
+      await expect(
+        activateCloudflareVersion({
+          runWrangler,
+          verifyUploader: () => true,
+          workerName: 'existing-with-secret',
+          message: encodeCloudflareVersionMessage([], firstSecretTriggers),
+        }),
+      ).resolves.toMatchObject({ ok: false, reason: 'traffic-preservation-unavailable' });
+      expect(
+        runWrangler.mock.calls.some(([args]) => args[1] === 'upload' || args[0] === 'deploy'),
+      ).toBe(false);
+    },
+  );
+
+  it.each([
+    { stdout: '', stderr: 'Permission denied', status: 1 },
+    ok('invalid JSON'),
+    ok(JSON.stringify({ ...secretOnlyDraftVersion(), id: CONCURRENT })),
+  ])(
+    'does not bypass traffic preservation when inspection fails or returns another version',
+    async (inspection) => {
+      const runWrangler = firstSecretRunner(inspection);
+      await expect(
+        activateCloudflareVersion({
+          runWrangler,
+          verifyUploader: () => true,
+          workerName: 'existing-with-secret',
+          message: encodeCloudflareVersionMessage([], firstSecretTriggers),
+        }),
+      ).resolves.toMatchObject({ ok: false, reason: 'traffic-preservation-unavailable' });
+      expect(
+        runWrangler.mock.calls.some(([args]) => args[1] === 'upload' || args[0] === 'deploy'),
+      ).toBe(false);
+    },
+  );
 });

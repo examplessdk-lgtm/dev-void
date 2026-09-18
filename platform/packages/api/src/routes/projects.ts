@@ -727,9 +727,16 @@ const app = new Hono<ApiEnv>()
       return context.json({ error: 'forbidden' }, 403);
     }
     const deployBuild = context.get('deployBuild');
+    const deployCredential = context.get('deployCredential');
     const signToken = (buildId?: string) =>
       signPrerenderToken(
-        { projectId: project.id, userId: user.id, login: user.login, buildId },
+        {
+          projectId: project.id,
+          userId: user.id,
+          login: user.login,
+          buildId,
+          credentialId: deployCredential,
+        },
         context.env.JWT_SECRET,
         {
           // A manual CLI prerender can legitimately run longer than five
