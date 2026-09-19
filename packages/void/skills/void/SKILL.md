@@ -32,7 +32,7 @@ When linking reports missing inferred resources, check the listed bindings and i
 For Cloudflare upload failures, use the detailed error message printed by the CLI and saved in the deploy log. A numeric error code alone may not identify the cause.
 
 Platform administration uses `void platform auth login` and the nested
-`user`, `project`, `deployment`, `build`, `signup`, `invitation`, `system`, and
+`user`, `project`, `deployment`, `build`, `signup`, `invitation`, `email`, `system`, and
 hosted-only `worker` groups. Open the operator section of `docs/reference/cli.md`
 before running these commands. Use `--json` for structured reads and `--plan`
 to inspect mutations; approved noninteractive mutations require `--yes`.
@@ -159,4 +159,4 @@ Then ask what to do next.
 - For Void-managed auth, `void db generate` automatically includes the production Better Auth schema in the generated migration, including configured model/field renames and plugin tables. Keep those migrations under `db/migrations/`; do not duplicate generated auth tables in the application Drizzle schema.
 - **Env vars:** When the project has `env.ts`, the canonical access pattern is `import { env } from "void/env"`. Declare every env key in `env.ts` via `defineEnv({...})` so values are typed and validated. Do not introduce ad-hoc `process.env.X` or untyped `c.env.X` access in new code — add the key to `env.ts` first.
 
-For platform email domains, use `void email domain add` with an account- and zone-scoped Cloudflare API token. Read inbound, outbound, and management readiness separately; `domain sync` reconciles without rotating secrets. Use a stable `sendEmail({ idempotencyKey })` for retryable sends and inspect `void email logs` when the result is `OUTCOME_UNKNOWN`; never retry an uncertain send with a new key. Native Cloudflare email setup remains `void email setup --platform cloudflare` and does not support platform idempotency keys.
+For platform email domains, use `void email domain add` with an account- and zone-scoped Cloudflare API token. Read inbound, outbound, and management readiness separately; `domain sync` reconciles without rotating secrets. Use a stable `sendEmail({ idempotencyKey })` for retryable sends and inspect `void email logs` when the result is `OUTCOME_UNKNOWN`; never retry an uncertain send with a new key. Administrators can inspect retained outcomes with `void platform email logs <project-id|slug> --json`; use the project ID after deletion. Native Cloudflare email setup remains `void email setup --platform cloudflare` and does not support platform idempotency keys.

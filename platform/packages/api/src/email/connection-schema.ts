@@ -36,21 +36,31 @@ export const emailZoneConnections = pgTable(
     staged_secret_iv: text('staged_secret_iv'),
     staged_secret_key_version: text('staged_secret_key_version'),
     previous_secret_hash: text('previous_secret_hash'),
-    previous_secret_until: timestamp('previous_secret_until', { mode: 'string' }),
+    previous_secret_until: timestamp('previous_secret_until', {
+      mode: 'string',
+      withTimezone: true,
+    }),
     inbound_status: text('inbound_status')
       .notNull()
       .default('pending')
       .$type<'pending' | 'ready' | 'disabled' | 'drifted'>(),
     inbound_reason: text('inbound_reason'),
-    inbound_observed_at: timestamp('inbound_observed_at', { mode: 'string' }),
+    inbound_observed_at: timestamp('inbound_observed_at', { mode: 'string', withTimezone: true }),
     management_status: text('management_status')
       .notNull()
       .default('probe_failed')
       .$type<'healthy' | 'expired' | 'revoked' | 'refresh_unknown' | 'probe_failed'>(),
     management_reason: text('management_reason'),
-    management_observed_at: timestamp('management_observed_at', { mode: 'string' }),
-    created_at: timestamp('created_at', { mode: 'string' }).notNull().defaultNow(),
-    updated_at: timestamp('updated_at', { mode: 'string' }).notNull().defaultNow(),
+    management_observed_at: timestamp('management_observed_at', {
+      mode: 'string',
+      withTimezone: true,
+    }),
+    created_at: timestamp('created_at', { mode: 'string', withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updated_at: timestamp('updated_at', { mode: 'string', withTimezone: true })
+      .notNull()
+      .defaultNow(),
   },
   (table) => [
     uniqueIndex('email_zone_connections_zone_uq').on(
@@ -92,16 +102,20 @@ export const emailDomainRoutes = pgTable(
       .default('pending')
       .$type<'pending' | 'ready' | 'disabled' | 'drifted'>(),
     inbound_reason: text('inbound_reason'),
-    inbound_observed_at: timestamp('inbound_observed_at', { mode: 'string' }),
+    inbound_observed_at: timestamp('inbound_observed_at', { mode: 'string', withTimezone: true }),
     outbound_status: text('outbound_status')
       .notNull()
       .default('pending')
       .$type<'pending' | 'verified_only' | 'ready' | 'blocked'>(),
     outbound_reason: text('outbound_reason'),
-    outbound_observed_at: timestamp('outbound_observed_at', { mode: 'string' }),
+    outbound_observed_at: timestamp('outbound_observed_at', { mode: 'string', withTimezone: true }),
     desired_generation: integer('desired_generation').notNull().default(1),
-    created_at: timestamp('created_at', { mode: 'string' }).notNull().defaultNow(),
-    updated_at: timestamp('updated_at', { mode: 'string' }).notNull().defaultNow(),
+    created_at: timestamp('created_at', { mode: 'string', withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updated_at: timestamp('updated_at', { mode: 'string', withTimezone: true })
+      .notNull()
+      .defaultNow(),
   },
   (table) => [
     uniqueIndex('email_domain_routes_domain_uq').on(table.domain),
@@ -128,14 +142,18 @@ export const emailCredentials = pgTable(
     iv: text('iv'),
     key_version: text('key_version'),
     token_id: text('token_id'),
-    expires_on: timestamp('expires_on', { mode: 'string' }),
+    expires_on: timestamp('expires_on', { mode: 'string', withTimezone: true }),
     generation: integer('generation').notNull().default(1),
     status: text('status')
       .notNull()
       .default('healthy')
       .$type<'healthy' | 'expired' | 'revoked' | 'probe_failed'>(),
-    created_at: timestamp('created_at', { mode: 'string' }).notNull().defaultNow(),
-    updated_at: timestamp('updated_at', { mode: 'string' }).notNull().defaultNow(),
+    created_at: timestamp('created_at', { mode: 'string', withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updated_at: timestamp('updated_at', { mode: 'string', withTimezone: true })
+      .notNull()
+      .defaultNow(),
   },
   (table) => [
     index('email_credentials_scope_idx').on(table.installation_id, table.account_id, table.zone_id),
@@ -155,6 +173,8 @@ export const emailOperations = pgTable(
       .notNull()
       .references(() => emailZoneConnections.id),
     route_id: text('route_id').references(() => emailDomainRoutes.id, { onDelete: 'set null' }),
+    /** Route generation captured when the operation intent was committed. */
+    route_generation: integer('route_generation'),
     actor_kind: text('actor_kind').notNull().$type<'owner' | 'admin' | 'system'>(),
     actor_user_id: text('actor_user_id'),
     actor_scope: text('actor_scope').notNull(),
@@ -169,8 +189,12 @@ export const emailOperations = pgTable(
     current_step: text('current_step'),
     failure_code: text('failure_code'),
     failure_detail: text('failure_detail'),
-    created_at: timestamp('created_at', { mode: 'string' }).notNull().defaultNow(),
-    updated_at: timestamp('updated_at', { mode: 'string' }).notNull().defaultNow(),
+    created_at: timestamp('created_at', { mode: 'string', withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updated_at: timestamp('updated_at', { mode: 'string', withTimezone: true })
+      .notNull()
+      .defaultNow(),
   },
   (table) => [
     uniqueIndex('email_operations_key_uq').on(
@@ -202,8 +226,8 @@ export const emailOperationSteps = pgTable(
     outcome: jsonb('outcome').$type<Record<string, unknown> | null>(),
     failure_code: text('failure_code'),
     failure_detail: text('failure_detail'),
-    started_at: timestamp('started_at', { mode: 'string' }),
-    finished_at: timestamp('finished_at', { mode: 'string' }),
+    started_at: timestamp('started_at', { mode: 'string', withTimezone: true }),
+    finished_at: timestamp('finished_at', { mode: 'string', withTimezone: true }),
   },
   (table) => [uniqueIndex('email_operation_steps_order_uq').on(table.operation_id, table.ordinal)],
 );
@@ -217,8 +241,10 @@ export const emailCacheOutbox = pgTable(
     resource_id: text('resource_id').notNull(),
     version: integer('version').notNull(),
     payload: jsonb('payload').$type<Record<string, unknown> | null>(),
-    published_at: timestamp('published_at', { mode: 'string' }),
-    created_at: timestamp('created_at', { mode: 'string' }).notNull().defaultNow(),
+    published_at: timestamp('published_at', { mode: 'string', withTimezone: true }),
+    created_at: timestamp('created_at', { mode: 'string', withTimezone: true })
+      .notNull()
+      .defaultNow(),
   },
   (table) => [
     uniqueIndex('email_cache_outbox_version_uq').on(

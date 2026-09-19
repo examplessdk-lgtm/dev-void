@@ -140,10 +140,16 @@ export async function readEmailEnvelope(
       total = nextTotal;
     }
   } catch (error) {
-    await reader.cancel().catch(() => {});
+    // Cancellation is cleanup, not part of the protocol deadline. A hostile
+    // stream may never settle its underlying cancel algorithm.
+    void reader.cancel().catch(() => {});
     throw error;
   } finally {
-    reader.releaseLock();
+    try {
+      reader.releaseLock();
+    } catch {
+      // A non-standard stream may keep a read pending after cancellation.
+    }
   }
   if (total < 4) {
     throw new Error('truncated email envelope');
@@ -289,6 +295,18 @@ function frame(kind: number, payload: Uint8Array): Uint8Array {
   return bytes;
 }
 
+function encodeEmailActionMetadata(action: EmailWireAction): Uint8Array {
+  return encoder.encode(
+    JSON.stringify(
+      action.type === 'reply' ? { type: action.type, from: action.from, to: action.to } : action,
+    ),
+  );
+}
+
+function emailActionWireSizeFromMetadata(action: EmailWireAction, metadata: Uint8Array): number {
+  return 5 + metadata.byteLength + (action.type === 'reply' ? 5 + action.raw.byteLength : 0);
+}
+
 export function encodeEmailActions(
   actions: ReadonlyArray<EmailWireAction>,
 ): ReadableStream<Uint8Array> {
@@ -311,13 +329,7 @@ export function encodeEmailActions(
         return;
       }
       const action = actions[index++];
-      const metadata = encoder.encode(
-        JSON.stringify(
-          action.type === 'reply'
-            ? { type: action.type, from: action.from, to: action.to }
-            : action,
-        ),
-      );
+      const metadata = encodeEmailActionMetadata(action);
       if (metadata.byteLength > EMAIL_MAX_METADATA_BYTES) {
         throw new Error('email action metadata too large');
       }
@@ -327,7 +339,7 @@ export function encodeEmailActions(
         }
         pending = frame(2, action.raw);
       }
-      total += 5 + metadata.byteLength + (pending?.byteLength ?? 0);
+      total += emailActionWireSizeFromMetadata(action, metadata);
       if (total + 5 > EMAIL_MAX_RESPONSE_BYTES) {
         throw new Error('email actions too large');
       }
@@ -466,9 +478,15 @@ export async function readEmailActions(
       }
     }
   } catch (error) {
-    await reader.cancel().catch(() => {});
+    // Cancellation is cleanup, not part of the protocol deadline. A hostile
+    // stream may never settle its underlying cancel algorithm.
+    void reader.cancel().catch(() => {});
     throw error;
   } finally {
-    reader.releaseLock();
+    try {
+      reader.releaseLock();
+    } catch {
+      // A non-standard stream may keep a read pending after cancellation.
+    }
   }
 }

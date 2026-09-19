@@ -125,7 +125,11 @@ describe('RELAY_SOURCE', () => {
   });
 
   it('POSTs the raw MIME to the gateway through a FixedLengthStream with the zone identity', async () => {
-    const fetchMock = vi.fn().mockResolvedValueOnce(new Response('ok', { status: 200 }));
+    let uploaded = new Uint8Array();
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+      uploaded = new Uint8Array(await new Response(init.body).arrayBuffer());
+      return new Response('ok', { status: 200 });
+    });
     vi.stubGlobal('fetch', fetchMock);
     const { env, message, ctx } = relayContext();
 
@@ -154,9 +158,9 @@ describe('RELAY_SOURCE', () => {
     const body = init.body as ReadableStream<Uint8Array>;
     expect(body).toBeInstanceOf(ReadableStream);
     expect(body).not.toBe(message.raw);
-    const drained = await new Response(body).arrayBuffer();
-    expect(drained.byteLength).toBe(message.rawSize);
-    expect(new TextDecoder().decode(drained)).toBe(MIME_BODY);
+    expect(uploaded.byteLength).toBe(message.rawSize);
+    expect(new TextDecoder().decode(uploaded)).toBe(MIME_BODY);
+    expect(init.signal?.aborted).toBe(true);
     // The pump and the POST both ride waitUntil.
     expect(ctx.waitUntil).toHaveBeenCalledTimes(2);
     expect(message.setReject).not.toHaveBeenCalled();
@@ -214,6 +218,35 @@ describe('RELAY_SOURCE', () => {
       'temporarily unavailable',
     );
     expect(message.setReject).not.toHaveBeenCalled();
+  });
+
+  it('aborts both a stalled gateway fetch and MIME pipe at the 60-second deadline', async () => {
+    vi.useFakeTimers();
+    try {
+      const requestSignals: Array<AbortSignal> = [];
+      const fetchMock = vi.fn((_url: string, init: RequestInit) => {
+        requestSignals.push(init.signal as AbortSignal);
+        return new Promise<Response>(() => {});
+      });
+      vi.stubGlobal('fetch', fetchMock);
+      const { env, message, ctx } = relayContext();
+      const cancel = vi.fn();
+      message.rawSize = 1;
+      message.raw = new ReadableStream<Uint8Array>({ cancel });
+
+      const pending = loadRelayWorker().email(message, env, ctx);
+      const outcome = expect(pending).rejects.toThrow('temporarily unavailable');
+      await vi.advanceTimersByTimeAsync(60_000);
+      await outcome;
+
+      expect(requestSignals[0]?.aborted).toBe(true);
+      await Promise.all(ctx.waitUntil.mock.calls.map(([promise]) => promise as Promise<unknown>));
+      expect(cancel).toHaveBeenCalledOnce();
+      expect(ctx.waitUntil).toHaveBeenCalledTimes(2);
+      expect(message.setReject).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('proves the deployed secret with a challenge bound to the zone and generation', async () => {

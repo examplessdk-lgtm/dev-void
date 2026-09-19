@@ -180,6 +180,52 @@ function outputLogs(result: Record<string, unknown>, json: boolean): void {
   }
 }
 
+function operationRecoveryFence(value: unknown): {
+  stepId: string;
+  attempt: number;
+  requestDigest: string;
+  resourceIdentity: string;
+  connectionId: string;
+  desiredGeneration: number;
+  routeId: string | null;
+  routeDesiredGeneration: number | null;
+} {
+  const target =
+    value && typeof value === 'object' && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : null;
+  if (
+    !target ||
+    typeof target.stepId !== 'string' ||
+    typeof target.attempt !== 'number' ||
+    !Number.isSafeInteger(target.attempt) ||
+    typeof target.requestDigest !== 'string' ||
+    typeof target.resourceIdentity !== 'string' ||
+    typeof target.connectionId !== 'string' ||
+    typeof target.desiredGeneration !== 'number' ||
+    !Number.isSafeInteger(target.desiredGeneration) ||
+    (target.routeId !== null && typeof target.routeId !== 'string') ||
+    (target.routeDesiredGeneration !== null &&
+      (typeof target.routeDesiredGeneration !== 'number' ||
+        !Number.isSafeInteger(target.routeDesiredGeneration)))
+  ) {
+    throw new OperatorClientError(
+      'The server did not return a valid email operation recovery fence. No change was requested.',
+      'invalid_preview',
+    );
+  }
+  return {
+    stepId: target.stepId,
+    attempt: target.attempt,
+    requestDigest: target.requestDigest,
+    resourceIdentity: target.resourceIdentity,
+    connectionId: target.connectionId,
+    desiredGeneration: target.desiredGeneration,
+    routeId: target.routeId,
+    routeDesiredGeneration: target.routeDesiredGeneration,
+  };
+}
+
 function runtimeLogFingerprint(row: unknown): string {
   const ingestedAt =
     row && typeof row === 'object' && !Array.isArray(row)
@@ -466,11 +512,12 @@ export async function runOperatorCommand(args: OperatorArgs): Promise<void> {
         'confirmation_required',
       );
     }
-    // `email domain-add --token-stdin`: a Cloudflare API token for a zone
-    // outside the platform's account, read once and carried in the body of
-    // both the preview (which only classifies it) and the apply. Never
-    // printed; the server keeps it out of the audit log.
-    if (args.tokenStdin && args.group === 'email' && args.action === 'domain-add') {
+    // Read once for preview and apply; the server excludes the token from audit output.
+    if (
+      args.tokenStdin &&
+      args.group === 'email' &&
+      (args.action === 'domain-add' || args.action === 'domain-remove')
+    ) {
       args = { ...args, body: { ...args.body, apiToken: await readOperatorApiTokenStdin() } };
     }
     const preview = await client.request(args.path, {
@@ -488,6 +535,10 @@ export async function runOperatorCommand(args: OperatorArgs): Promise<void> {
         'invalid_preview',
       );
     }
+    const recoveryFence =
+      args.group === 'email' && args.action === 'operation-resolve'
+        ? operationRecoveryFence(preview.target)
+        : {};
     if (!(await confirmOperatorMutation(origin, preview, args))) {
       return;
     }
@@ -496,6 +547,7 @@ export async function runOperatorCommand(args: OperatorArgs): Promise<void> {
       ...(args.group === 'worker' && args.action === 'rollback-all'
         ? { versions: preview.versions }
         : {}),
+      ...recoveryFence,
     };
     output(
       await client.request(args.path, { method: 'POST', body, timeoutMs: args.timeoutMs }),
@@ -505,7 +557,7 @@ export async function runOperatorCommand(args: OperatorArgs): Promise<void> {
     await followOperatorLogs(client, args);
   } else {
     const result = await client.request(args.path, { query: args.query });
-    if (args.action === 'logs') {
+    if (args.action === 'logs' && args.group !== 'email') {
       outputLogs(result, args.json);
     } else {
       output(result, args.json);

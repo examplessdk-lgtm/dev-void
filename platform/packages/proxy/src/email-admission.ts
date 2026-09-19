@@ -22,6 +22,8 @@ export type Admission = {
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
+const ADMISSION_DEADLINE_MS = 5_000;
+const MAX_ADMISSION_RESPONSE_BYTES = 65_536;
 
 async function sign(data: string, secret: string): Promise<string> {
   const key = await crypto.subtle.importKey(
@@ -43,17 +45,47 @@ async function call<T>(
   path: string,
   body: unknown,
 ): Promise<T> {
+  const controller = new AbortController();
+  const deadline = Date.now() + ADMISSION_DEADLINE_MS;
+  const beforeDeadline = async <U>(run: () => Promise<U>): Promise<U> => {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      controller.abort();
+      throw new Error('EMAIL_ADMISSION_TIMEOUT');
+    }
+    const promise = run();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            controller.abort();
+            reject(new Error('EMAIL_ADMISSION_TIMEOUT'));
+          }, remaining);
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) {
+        clearTimeout(timer);
+      }
+    }
+  };
   const raw = JSON.stringify(body);
-  const response = await env.API.fetch(`https://api/internal/email/actions${path}`, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      'x-void-internal': await sign(raw, env.JWT_SECRET),
-    },
-    body: raw,
-    signal: AbortSignal.timeout(5_000),
-  });
+  const proof = await sign(raw, env.JWT_SECRET);
+  const response = await beforeDeadline(() =>
+    env.API.fetch(`https://api/internal/email/actions${path}`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-void-internal': proof,
+      },
+      body: raw,
+      signal: controller.signal,
+    }),
+  );
   if (!response.ok) {
+    void response.body?.cancel().catch(() => {});
     if (response.status === 409) {
       throw new Error('IDEMPOTENCY_CONFLICT');
     }
@@ -63,26 +95,11 @@ async function call<T>(
   if (!reader) {
     throw new Error('EMAIL_ADMISSION_EMPTY_RESPONSE');
   }
-  const bytes = new Uint8Array(65_536);
+  const bytes = new Uint8Array(MAX_ADMISSION_RESPONSE_BYTES);
   let size = 0;
-  const deadline = Date.now() + 5_000;
   try {
     for (;;) {
-      const remaining = deadline - Date.now();
-      if (remaining <= 0) {
-        throw new Error('EMAIL_ADMISSION_TIMEOUT');
-      }
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const chunk = await Promise.race([
-        reader.read(),
-        new Promise<never>((_, reject) => {
-          timer = setTimeout(() => reject(new Error('EMAIL_ADMISSION_TIMEOUT')), remaining);
-        }),
-      ]).finally(() => {
-        if (timer !== undefined) {
-          clearTimeout(timer);
-        }
-      });
+      const chunk = await beforeDeadline(() => reader.read());
       if (chunk.done) {
         break;
       }
@@ -95,7 +112,11 @@ async function call<T>(
     return JSON.parse(decoder.decode(bytes.subarray(0, size))) as T;
   } finally {
     void reader.cancel().catch(() => {});
-    reader.releaseLock();
+    try {
+      reader.releaseLock();
+    } catch {
+      // A timed-out read may still be settling after cancellation.
+    }
   }
 }
 
@@ -103,6 +124,16 @@ export type RelayedReceiptIdentity = {
   receiptId: string;
   projectId: string;
   payloadDigest: string;
+  route?: ReceiptRouteFence;
+};
+
+export type ReceiptRouteFence = {
+  routeId: string;
+  routeGeneration: number;
+  connectionId: string;
+  addressing: 'shared' | 'custom';
+  domain: string;
+  projectSlug: string;
 };
 
 export function claimRelayedReceipt(
@@ -117,69 +148,185 @@ export function completeRelayedReceipt(
   identity: RelayedReceiptIdentity,
   reject: boolean,
 ): Promise<{ ok: true }> {
-  return call(env, '/receipts/complete', { ...identity, reject });
+  return call(env, '/receipts/complete', {
+    receiptId: identity.receiptId,
+    projectId: identity.projectId,
+    payloadDigest: identity.payloadDigest,
+    reject,
+  });
 }
 
 /** Only generated, transport-irrelevant MIME fields are normalized. Body text stays byte-sensitive. */
 export function canonicalizeVoidMime(raw: Uint8Array): Uint8Array {
-  const mime = decoder.decode(raw);
-  if (!mime.includes('\r\n\r\n')) {
+  if (findCrlfCrlf(raw) === -1) {
     return raw;
   }
-  const lines = mime.split('\r\n');
   const boundaries = new Map<string, string>();
-  const output: Array<string> = [];
+  const output: Array<Uint8Array> = [];
+  let outputBytes = 0;
+  let copyStart = 0;
+  let changed = false;
   let inHeaders = true;
   let topHeaders = true;
-  for (const line of lines) {
+
+  const append = (bytes: Uint8Array): void => {
+    if (bytes.byteLength === 0) {
+      return;
+    }
+    output.push(bytes);
+    outputBytes += bytes.byteLength;
+  };
+  const replace = (start: number, end: number, replacement: Uint8Array): void => {
+    append(raw.subarray(copyStart, start));
+    append(replacement);
+    copyStart = end;
+    changed = true;
+  };
+
+  let lineStart = 0;
+  while (lineStart < raw.byteLength) {
+    const lineEnd = findCrlf(raw, lineStart);
+    const nextLine = lineEnd === raw.byteLength ? raw.byteLength : lineEnd + 2;
     if (inHeaders) {
-      if (line === '') {
-        output.push(line);
+      if (lineEnd === lineStart) {
         inHeaders = false;
         topHeaders = false;
-        continue;
-      }
-      if (topHeaders && /^(?:Date|Message-ID): /i.test(line)) {
-        continue;
-      }
-      if (/^Content-Type:\s*multipart\//i.test(line)) {
-        output.push(
-          line.replace(
-            /boundary="(=_void_(?:mixed|alternative|related)_[A-Za-z0-9_-]+)"/g,
-            (_, token: string) => {
-              let marker = boundaries.get(token);
-              if (!marker) {
-                marker = `<void-boundary-${boundaries.size}>`;
-                boundaries.set(token, marker);
-              }
-              return `boundary="${marker}"`;
-            },
-          ),
+      } else if (
+        topHeaders &&
+        (asciiPrefixEquals(raw, lineStart, lineEnd, 'Date: ') ||
+          asciiPrefixEquals(raw, lineStart, lineEnd, 'Message-ID: '))
+      ) {
+        // Remove the generated field and its CRLF. The next header (or the
+        // terminating empty line) remains byte-for-byte unchanged.
+        replace(lineStart, nextLine, new Uint8Array());
+      } else if (isMultipartContentType(raw, lineStart, lineEnd)) {
+        const line = decoder.decode(raw.subarray(lineStart, lineEnd));
+        const normalized = line.replace(
+          /boundary="(=_void_(?:mixed|alternative|related)_[A-Za-z0-9_-]+)"/g,
+          (_, token: string) => {
+            let marker = boundaries.get(token);
+            if (!marker) {
+              marker = `<void-boundary-${boundaries.size}>`;
+              boundaries.set(token, marker);
+            }
+            return `boundary="${marker}"`;
+          },
         );
-        continue;
+        if (normalized !== line) {
+          replace(lineStart, lineEnd, encoder.encode(normalized));
+        }
       }
-      output.push(line);
-      continue;
-    }
-    let delimiter = false;
-    for (const [token, marker] of boundaries) {
-      if (line === `--${token}`) {
-        output.push(`--${marker}`);
+    } else if (raw[lineStart] === 45 && raw[lineStart + 1] === 45) {
+      const tokenStart = lineStart + 2;
+      const token = isBoundaryToken(raw, tokenStart, lineEnd)
+        ? decoder.decode(raw.subarray(tokenStart, lineEnd))
+        : undefined;
+      const openingMarker = token === undefined ? undefined : boundaries.get(token);
+      if (openingMarker !== undefined) {
+        replace(lineStart, lineEnd, encoder.encode(`--${openingMarker}`));
         inHeaders = true;
-        delimiter = true;
-        break;
-      }
-      if (line === `--${token}--`) {
-        output.push(`--${marker}--`);
-        delimiter = true;
-        break;
+      } else if (
+        lineEnd - tokenStart >= 2 &&
+        raw[lineEnd - 2] === 45 &&
+        raw[lineEnd - 1] === 45 &&
+        isBoundaryToken(raw, tokenStart, lineEnd - 2)
+      ) {
+        const closingToken = decoder.decode(raw.subarray(tokenStart, lineEnd - 2));
+        const closingMarker = boundaries.get(closingToken);
+        if (closingMarker !== undefined) {
+          replace(lineStart, lineEnd, encoder.encode(`--${closingMarker}--`));
+        }
       }
     }
-    if (!delimiter) {
-      output.push(line);
+    lineStart = nextLine;
+  }
+
+  if (!changed) {
+    return raw;
+  }
+  append(raw.subarray(copyStart));
+  const normalized = new Uint8Array(outputBytes);
+  let offset = 0;
+  for (const chunk of output) {
+    normalized.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return normalized;
+}
+
+function findCrlfCrlf(raw: Uint8Array): number {
+  for (let i = 0; i + 3 < raw.byteLength; i++) {
+    if (raw[i] === 13 && raw[i + 1] === 10 && raw[i + 2] === 13 && raw[i + 3] === 10) {
+      return i;
     }
   }
-  return encoder.encode(output.join('\r\n'));
+  return -1;
+}
+
+function findCrlf(raw: Uint8Array, start: number): number {
+  let cursor = start;
+  while (cursor < raw.byteLength) {
+    const cr = raw.indexOf(13, cursor);
+    if (cr === -1) {
+      return raw.byteLength;
+    }
+    if (raw[cr + 1] === 10) {
+      return cr;
+    }
+    cursor = cr + 1;
+  }
+  return raw.byteLength;
+}
+
+function asciiPrefixEquals(raw: Uint8Array, start: number, end: number, expected: string): boolean {
+  if (end - start < expected.length) {
+    return false;
+  }
+  for (let i = 0; i < expected.length; i++) {
+    const actual = raw[start + i];
+    const wanted = expected.charCodeAt(i);
+    if ((actual >= 65 && actual <= 90 ? actual + 32 : actual) !== (wanted | 32)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function isMultipartContentType(raw: Uint8Array, start: number, end: number): boolean {
+  const field = 'Content-Type:';
+  if (!asciiPrefixEquals(raw, start, end, field)) {
+    return false;
+  }
+  let cursor = start + field.length;
+  while (
+    cursor < end &&
+    (raw[cursor] === 32 || raw[cursor] === 9 || raw[cursor] === 11 || raw[cursor] === 12)
+  ) {
+    cursor++;
+  }
+  return asciiPrefixEquals(raw, cursor, end, 'multipart/');
+}
+
+function isBoundaryToken(raw: Uint8Array, start: number, end: number): boolean {
+  if (end <= start) {
+    return false;
+  }
+  for (let i = start; i < end; i++) {
+    const byte = raw[i];
+    if (
+      !(
+        (byte >= 65 && byte <= 90) ||
+        (byte >= 97 && byte <= 122) ||
+        (byte >= 48 && byte <= 57) ||
+        byte === 95 ||
+        byte === 45 ||
+        byte === 61
+      )
+    ) {
+      return false;
+    }
+  }
+  return true;
 }
 
 export async function emailPayloadDigest(
@@ -244,6 +391,7 @@ export function recordEmailReceipt(
   receiptId: string,
   projectId: string,
   status: string,
+  route?: ReceiptRouteFence,
 ): Promise<{ ok: true }> {
-  return call(env, '/receipts', { receiptId, projectId, status });
+  return call(env, '/receipts', { receiptId, projectId, status, ...(route ? { route } : {}) });
 }

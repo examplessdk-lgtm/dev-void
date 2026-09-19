@@ -307,6 +307,8 @@ app.post('/resolve-ingress', async (context) => {
     workerName: getVersionedWorkerName(slug, deploymentId),
     addressing: route.addressing,
     domain: route.domain,
+    routeId: route.id,
+    routeGeneration: route.desired_generation,
     connectionId: resolved.connection.id,
     ...(limits ? { limits } : {}),
   });

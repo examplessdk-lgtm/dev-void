@@ -4,8 +4,8 @@ import {
   admitEmailAction,
   claimRelayedEmailReceipt,
   completeRelayedEmailReceipt,
+  type EmailReceiptRouteFence,
   EmailAdmissionError,
-  getEmailAction,
   recordEmailReceipt,
   transitionEmailRecipients,
 } from '../email/admission.ts';
@@ -20,6 +20,7 @@ app.use('*', async (context, next) => {
     return context.json({ error: 'invalid internal auth' }, 403);
   }
   if (Number(context.req.header('content-length')) > 32_768) {
+    void context.req.raw.body?.cancel().catch(() => {});
     return context.json({ error: 'action request too large' }, 413);
   }
   const reader = context.req.raw.body?.getReader();
@@ -28,35 +29,46 @@ app.use('*', async (context, next) => {
   }
   const chunks: Array<Uint8Array> = [];
   let size = 0;
-  let timedOut = false;
-  const deadline = setTimeout(() => {
-    timedOut = true;
-    void reader.cancel().catch(() => {});
-  }, 5_000);
+  const deadline = Date.now() + 5_000;
   try {
     for (;;) {
-      const { done, value } = await reader.read();
-      if (timedOut) {
-        return context.json({ error: 'action request timed out' }, 408);
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        throw new Error('action request timed out');
       }
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const { done, value } = await Promise.race([
+        reader.read(),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error('action request timed out')), remaining);
+        }),
+      ]).finally(() => {
+        if (timer !== undefined) {
+          clearTimeout(timer);
+        }
+      });
       if (done) {
         break;
       }
       size += value.byteLength;
       if (size > 32_768) {
-        await reader.cancel();
+        void reader.cancel().catch(() => {});
         return context.json({ error: 'action request too large' }, 413);
       }
       chunks.push(value);
     }
   } catch (error) {
-    if (timedOut) {
+    if (error instanceof Error && error.message === 'action request timed out') {
       return context.json({ error: 'action request timed out' }, 408);
     }
     throw error;
   } finally {
-    clearTimeout(deadline);
-    reader.releaseLock();
+    void reader.cancel().catch(() => {});
+    try {
+      reader.releaseLock();
+    } catch {
+      // A timed-out read may still be settling after cancellation.
+    }
   }
   const bytes = new Uint8Array(size);
   let offset = 0;
@@ -89,6 +101,27 @@ function status(error: EmailAdmissionError): 400 | 404 | 409 {
     : error.code === 'CONFLICT' || error.code === 'INVALID_STATE'
       ? 409
       : 400;
+}
+
+function receiptRoute(value: unknown): EmailReceiptRouteFence | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return undefined;
+  }
+  const route = value as Record<string, unknown>;
+  if (
+    typeof route.routeId !== 'string' ||
+    typeof route.routeGeneration !== 'number' ||
+    typeof route.connectionId !== 'string' ||
+    (route.addressing !== 'shared' && route.addressing !== 'custom') ||
+    typeof route.domain !== 'string' ||
+    typeof route.projectSlug !== 'string'
+  ) {
+    return undefined;
+  }
+  return route as EmailReceiptRouteFence;
 }
 
 app.post('/admit', async (context) => {
@@ -127,6 +160,7 @@ app.post('/receipts', async (context) => {
     receiptId?: unknown;
     projectId?: unknown;
     status?: unknown;
+    route?: unknown;
   };
   if (
     typeof body?.receiptId !== 'string' ||
@@ -136,10 +170,15 @@ app.post('/receipts', async (context) => {
     return context.json({ error: 'invalid receipt' }, 400);
   }
   try {
+    const route = receiptRoute(body.route);
+    if (body.route !== undefined && !route) {
+      return context.json({ error: 'invalid receipt' }, 400);
+    }
     await recordEmailReceipt(context.get('db'), {
       receiptId: body.receiptId,
       projectId: body.projectId,
       status: body.status,
+      ...(route ? { route } : {}),
     });
     return context.json({ ok: true });
   } catch (error) {
@@ -160,11 +199,16 @@ app.post('/receipts/claim', async (context) => {
     return context.json({ error: 'invalid relay claim' }, 400);
   }
   try {
+    const route = receiptRoute(body.route);
+    if (body.route !== undefined && !route) {
+      return context.json({ error: 'invalid relay claim' }, 400);
+    }
     return context.json(
       await claimRelayedEmailReceipt(context.get('db'), {
         receiptId: body.receiptId,
         projectId: body.projectId,
         payloadDigest: body.payloadDigest,
+        ...(route ? { route } : {}),
       }),
     );
   } catch (error) {
@@ -258,11 +302,6 @@ app.post('/:id/finish', async (context) => {
     }
     throw error;
   }
-});
-
-app.post('/:id/status', async (context) => {
-  const action = await getEmailAction(context.get('db'), context.req.param('id'));
-  return action ? context.json(action) : context.json({ error: 'email action not found' }, 404);
 });
 
 export default app;

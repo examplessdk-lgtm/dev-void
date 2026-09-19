@@ -240,6 +240,14 @@ describe('admin write guard (cross-origin)', () => {
           .where(eq(emailProjectControls.project_id, projectId))
       )[0]?.suspended_at,
     ).not.toBeNull();
+    expect(await env.db.select().from(operatorEvents)).toEqual([
+      expect.objectContaining({
+        action: `email/projects/${projectId}/suspend`,
+        target: JSON.stringify({ project: projectId, suspended: true }),
+        status: 'success',
+        http_status: 302,
+      }),
+    ]);
   });
 
   test('leaves reads alone', async () => {
@@ -257,7 +265,7 @@ describe('GET /admin/email/:projectId', () => {
     const month = monthBucket();
     await env.db
       .insert(emailMonthlyUsage)
-      .values({ project_id: projectId, month, recipient_attempts: 7 });
+      .values({ project_id: projectId, month, recipient_attempts: 7, inbound_receipts: 3 });
     await pruneEmailActionHistory(env.db);
 
     const res = await get(`/admin/email/${projectId}`, adminJwt);
@@ -266,6 +274,8 @@ describe('GET /admin/email/:projectId', () => {
     const html = await res.text();
     expect(html).toContain(slug);
     expect(html).toContain('7 / 200');
+    expect(html).toContain('Outbound recipient attempts');
+    expect(html).toContain('Inbound (received)</th><td>3</td>');
     expect(html).toContain('(default)');
     expect(html).toContain('Suspend email');
     expect(html).toContain('No destinations yet.');
@@ -326,6 +336,14 @@ describe('POST /admin/email/:projectId/suspend', () => {
           .where(eq(emailProjectControls.project_id, projectId))
       )[0]?.suspended_at,
     ).toBeNull();
+    expect(await env.db.select().from(operatorEvents)).toEqual([
+      expect.objectContaining({
+        action: `email/projects/${projectId}/suspend`,
+        target: JSON.stringify({ project: projectId, suspended: false }),
+        status: 'success',
+        http_status: 302,
+      }),
+    ]);
   });
 
   test('suspending twice is idempotent, not a toggle', async () => {
@@ -369,6 +387,14 @@ describe('POST /admin/email/:projectId/limit', () => {
           .where(eq(emailProjectControls.project_id, projectId))
       )[0]?.monthly_limit,
     ).toBe(5000);
+    expect(await env.db.select().from(operatorEvents)).toEqual([
+      expect.objectContaining({
+        action: `email/projects/${projectId}/limit`,
+        target: JSON.stringify({ project: projectId, monthly: '5000' }),
+        status: 'success',
+        http_status: 302,
+      }),
+    ]);
   });
 
   test('a blank value drops the override back to the platform default', async () => {
@@ -421,6 +447,29 @@ describe('POST /admin/email/:projectId/limit', () => {
           .where(eq(emailProjectControls.project_id, projectId))
       )[0]?.burst_limit,
     ).toBe(10);
+    const recorded = (await env.db.select().from(operatorEvents)).map((event) => ({
+      action: event.action,
+      target: event.target,
+      status: event.status,
+      httpStatus: event.http_status,
+    }));
+    expect(recorded).toHaveLength(2);
+    expect(recorded).toEqual(
+      expect.arrayContaining([
+        {
+          action: `email/projects/${projectId}/limit`,
+          target: JSON.stringify({ project: projectId, burst: '60' }),
+          status: 'success',
+          httpStatus: 302,
+        },
+        {
+          action: `email/projects/${projectId}/limit`,
+          target: JSON.stringify({ project: projectId, burst: 'default' }),
+          status: 'success',
+          httpStatus: 302,
+        },
+      ]),
+    );
   });
 });
 
@@ -448,6 +497,16 @@ describe('POST /admin/email/:projectId/destinations/:destId/delete', () => {
     expect(await env.db.select().from(emailDestinationCleanups)).toEqual([
       expect.objectContaining({ cf_destination_id: 'cf-tag-ops', status: 'completed' }),
     ]);
+    const events = await env.db.select().from(operatorEvents);
+    expect(events).toEqual([
+      expect.objectContaining({
+        action: `email/projects/${projectId}/destinations/${destination.id}/remove`,
+        target: JSON.stringify({ project: projectId, destinationId: destination.id }),
+        status: 'success',
+        http_status: 302,
+      }),
+    ]);
+    expect(JSON.stringify(events)).not.toContain('ops@example.com');
   });
 
   test('leaves the CF address alone while another project still references it', async () => {
@@ -493,6 +552,125 @@ describe('POST /admin/email/:projectId/destinations/:destId/delete', () => {
 });
 
 describe('admin email domain controls', () => {
+  test('reports durable incomplete outcomes for add, rotate, and remove operations', async () => {
+    const { adminJwt } = await seedAdminAndProject();
+    const failures: NonNullable<Parameters<typeof stubCustomerCf>[0]>['failOn'] = {};
+    stubCustomerCf({
+      zones: {
+        'unknown.example.com': {
+          id: 'zone-unknown',
+          name: 'unknown.example.com',
+          accountId: CF_ACCOUNT_ID,
+        },
+        'blocked.example.net': {
+          id: 'zone-blocked',
+          name: 'blocked.example.net',
+          accountId: CF_ACCOUNT_ID,
+        },
+        'rotate.example.org': {
+          id: 'zone-rotate',
+          name: 'rotate.example.org',
+          accountId: CF_ACCOUNT_ID,
+        },
+        'remove.example.dev': {
+          id: 'zone-remove',
+          name: 'remove.example.dev',
+          accountId: CF_ACCOUNT_ID,
+        },
+      },
+      failOn: failures,
+    });
+    const project = async (slug: string) =>
+      createTestProject(env.db, (await createTestUser(env.db, `${slug}-owner`)).id, slug);
+
+    const unknownProject = await project('unknown-add');
+    failures.routingDns = { message: 'routing outcome unavailable', status: 408 };
+    const unknownAdd = await post(`/admin/email/${unknownProject.id}/domains/add`, adminJwt, {
+      domain: 'unknown.example.com',
+    });
+    expect({ status: unknownAdd.status, html: await unknownAdd.text() }).toMatchObject({
+      status: 409,
+      html: expect.stringContaining('unknown'),
+    });
+    delete failures.routingDns;
+
+    const blockedProject = await project('blocked-add');
+    failures.routingDns = { message: 'routing permission denied', status: 403 };
+    const blockedAdd = await post(`/admin/email/${blockedProject.id}/domains/add`, adminJwt, {
+      domain: 'blocked.example.net',
+    });
+    expect(blockedAdd.status).toBe(409);
+    expect(await blockedAdd.text()).toContain('blocked');
+    delete failures.routingDns;
+
+    const rotateProject = await project('blocked-rotate');
+    expect(
+      (
+        await post(`/admin/email/${rotateProject.id}/domains/add`, adminJwt, {
+          domain: 'rotate.example.org',
+        })
+      ).status,
+    ).toBe(302);
+    failures.secretPut = { message: 'secret permission denied', status: 403 };
+    const blockedRotate = await post(
+      `/admin/email/${rotateProject.id}/domains/rotate.example.org/rotate-secret`,
+      adminJwt,
+    );
+    expect(blockedRotate.status).toBe(409);
+    expect(await blockedRotate.text()).toContain('blocked');
+    delete failures.secretPut;
+
+    const removeProject = await project('unknown-remove');
+    expect(
+      (
+        await post(`/admin/email/${removeProject.id}/domains/add`, adminJwt, {
+          domain: 'remove.example.dev',
+        })
+      ).status,
+    ).toBe(302);
+    failures.scriptDelete = { message: 'delete outcome unavailable', status: 504 };
+    const unknownRemove = await post(
+      `/admin/email/${removeProject.id}/domains/remove.example.dev/revoke`,
+      adminJwt,
+      { confirm: removeProject.slug },
+    );
+    expect(unknownRemove.status).toBe(409);
+    expect(await unknownRemove.text()).toContain('unknown');
+
+    const failedEvents = (await env.db.select().from(operatorEvents))
+      .filter((event) => event.status === 'failed')
+      .map((event) => ({
+        action: event.action,
+        status: event.http_status,
+        target: JSON.parse(event.target),
+      }));
+    expect(failedEvents).toHaveLength(4);
+    expect(failedEvents).toEqual(
+      expect.arrayContaining([
+        {
+          action: 'email/domains',
+          status: 409,
+          target: { domain: 'unknown.example.com', project: unknownProject.id },
+        },
+        {
+          action: 'email/domains',
+          status: 409,
+          target: { domain: 'blocked.example.net', project: blockedProject.id },
+        },
+        {
+          action: 'email/domains/rotate.example.org/rotate-secret',
+          status: 409,
+          target: { domain: 'rotate.example.org' },
+        },
+        {
+          action: 'email/domains/remove.example.dev/remove',
+          status: 409,
+          target: { domain: 'remove.example.dev', force: false },
+        },
+      ]),
+    );
+  });
+
   test('registers, rotates and removes an exact route without exposing credential material', async () => {
     const { adminJwt, projectId, slug } = await seedAdminAndProject();
     const stub = stubCustomerCf({

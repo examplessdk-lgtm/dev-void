@@ -5,7 +5,7 @@ import {
   PLATFORM_DISABLED_KEY,
   PLATFORM_DISABLED_VALUE,
 } from '@void/platform';
-import { lt, sql } from 'drizzle-orm';
+import { eq, lt, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { adminAuthMiddleware } from './admin/middleware/auth.ts';
 import { adminCsrfMiddleware } from './admin/middleware/csrf.ts';
@@ -48,6 +48,7 @@ import {
 } from './db.ts';
 import { escapeHtml } from './email.ts';
 import { pruneEmailActionHistory } from './email/admission.ts';
+import { emailDomainRoutes, emailOperations } from './email/connection-schema.ts';
 import {
   ensureSharedEmailConnection,
   reconcilePendingEmailOperations,
@@ -159,6 +160,8 @@ const app = new Hono<ApiEnv>()
       (context.req.path === '/health' ||
         context.req.path === '/.well-known/void-platform' ||
         context.req.path === '/internal/platform/sandbox-drain' ||
+        (context.req.path === '/internal/platform/email-bootstrap' &&
+          context.req.method === 'POST') ||
         (context.req.path === '/internal/platform/domain-preflight' &&
           context.req.method === 'POST'));
     const maintenanceSandboxDrain =
@@ -279,6 +282,78 @@ const app = new Hono<ApiEnv>()
     );
   })
   .post('/internal/platform/domain-preflight', platformDomainPreflight)
+  .post('/internal/platform/email-bootstrap', async (context) => {
+    const healthProbeToken = context.env.PLATFORM_HEALTH_PROBE_TOKEN;
+    if (
+      !healthProbeToken ||
+      context.req.header('X-Void-Platform-Probe') !== healthProbeToken ||
+      !context.env.PLATFORM_INSTALLATION_ID ||
+      !getPlatformCapabilities(context.env).email
+    ) {
+      return context.json({ error: 'not found' }, 404);
+    }
+    let operationId: string | null = null;
+    try {
+      const db = context.get('db');
+      operationId = await ensureSharedEmailConnection(db, context.env);
+      if (!operationId) {
+        return context.json({ version: 1, state: 'unconfigured' }, 503);
+      }
+      await runEmailOperation(db, context.env, operationId);
+      const operation = (
+        await db
+          .select({
+            currentStep: emailOperations.current_step,
+            failureCode: emailOperations.failure_code,
+            routeId: emailOperations.route_id,
+            status: emailOperations.status,
+          })
+          .from(emailOperations)
+          .where(eq(emailOperations.id, operationId))
+          .limit(1)
+      )[0];
+      const route = operation?.routeId
+        ? (
+            await db
+              .select({
+                desiredState: emailDomainRoutes.desired_state,
+                inboundStatus: emailDomainRoutes.inbound_status,
+              })
+              .from(emailDomainRoutes)
+              .where(eq(emailDomainRoutes.id, operation.routeId))
+              .limit(1)
+          )[0]
+        : null;
+      if (
+        operation?.status !== 'completed' ||
+        route?.desiredState !== 'active' ||
+        route.inboundStatus !== 'ready'
+      ) {
+        return context.json(
+          {
+            version: 1,
+            state: 'incomplete',
+            operationId,
+            operationStatus: operation?.status ?? 'missing',
+            currentStep: operation?.currentStep ?? null,
+            failureCode: operation?.failureCode ?? null,
+          },
+          503,
+        );
+      }
+      return context.json({ version: 1, state: 'ready', operationId });
+    } catch (error) {
+      console.error('[api] shared email installer bootstrap failed', error);
+      return context.json(
+        {
+          version: 1,
+          state: 'failed',
+          ...(operationId ? { operationId, operationStatus: 'failed' } : {}),
+        },
+        503,
+      );
+    }
+  })
   .get('/internal/platform/sandbox-drain', async (context) => {
     const healthProbeToken = context.env.PLATFORM_HEALTH_PROBE_TOKEN;
     if (!healthProbeToken || context.req.header('X-Void-Platform-Probe') !== healthProbeToken) {

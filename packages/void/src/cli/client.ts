@@ -226,7 +226,7 @@ export type BuildLogsResponse = {
 
 export type EmailUsageResponse = {
   month: string;
-  sent: number;
+  attempts: number;
   received: number;
   limit: number;
   remaining: number;

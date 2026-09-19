@@ -11,6 +11,7 @@ import { emailDomainRoutes, emailOperations, emailZoneConnections } from './conn
 import {
   EmailOperationError,
   credentialFor,
+  EmailCredentialExpiredError,
   getEmailOperation,
   inspectEmailInboundRoute,
   requestEmailDomainAdd,
@@ -167,6 +168,7 @@ export async function getEmailDomainStatusForProject(
   }
   const snapshot = resolved;
   if (snapshot.route.desired_state === 'active') {
+    let managementStatus: 'healthy' | 'expired' | 'probe_failed' = 'healthy';
     let managementReason: string | null = null;
     let inboundIssue: string | null = null;
     let outbound: 'ready' | 'verified_only' | 'blocked' = 'blocked';
@@ -192,15 +194,55 @@ export async function getEmailDomainStatusForProject(
       } catch {
         outboundReason = 'Cloudflare Sending status could not be verified';
       }
-    } catch {
-      managementReason =
-        'Cloudflare routing status could not be verified; check the connection credential';
+    } catch (error) {
+      if (error instanceof EmailCredentialExpiredError) {
+        managementStatus = 'expired';
+        managementReason = 'Cloudflare API token has expired';
+      } else {
+        managementStatus = 'probe_failed';
+        managementReason =
+          'Cloudflare routing status could not be verified; check the connection credential';
+      }
     }
     await db.transaction(async (tx) => {
+      // Keep every route/connection mutation on the same lock order as setup,
+      // removal and recovery. The provider reads above may have raced a route
+      // transition, so validate that exact route before recording observations.
+      const currentRoute = (
+        await tx
+          .select()
+          .from(emailDomainRoutes)
+          .where(eq(emailDomainRoutes.id, snapshot.route.id))
+          .for('update')
+          .limit(1)
+      )[0];
+      if (
+        !currentRoute ||
+        currentRoute.project_id !== snapshot.route.project_id ||
+        currentRoute.connection_id !== snapshot.connection.id ||
+        currentRoute.desired_generation !== snapshot.route.desired_generation ||
+        currentRoute.desired_state !== 'active'
+      ) {
+        return;
+      }
+      const currentConnection = (
+        await tx
+          .select()
+          .from(emailZoneConnections)
+          .where(eq(emailZoneConnections.id, snapshot.connection.id))
+          .for('update')
+          .limit(1)
+      )[0];
+      if (
+        !currentConnection ||
+        currentConnection.desired_generation !== snapshot.connection.desired_generation
+      ) {
+        return;
+      }
       const updated = await tx
         .update(emailZoneConnections)
         .set({
-          management_status: managementReason ? 'probe_failed' : 'healthy',
+          management_status: managementStatus,
           management_reason: managementReason,
           management_observed_at: sql`now()`,
         })
@@ -212,7 +254,7 @@ export async function getEmailDomainStatusForProject(
         )
         .returning({ id: emailZoneConnections.id });
       // A failed credential probe does not revoke independently authenticated ingress.
-      if (updated.length && !managementReason) {
+      if (updated.length && managementStatus === 'healthy') {
         // Routing reads cannot replace the setup operation's ingress identity proof.
         const revalidateInbound =
           snapshot.connection.inbound_status === 'ready' &&
@@ -235,6 +277,8 @@ export async function getEmailDomainStatusForProject(
           .where(
             and(
               eq(emailDomainRoutes.id, snapshot.route.id),
+              eq(emailDomainRoutes.project_id, snapshot.route.project_id!),
+              eq(emailDomainRoutes.connection_id, snapshot.connection.id),
               eq(emailDomainRoutes.desired_generation, snapshot.route.desired_generation),
               eq(emailDomainRoutes.desired_state, 'active'),
             ),
@@ -331,7 +375,7 @@ export async function rotateEmailIngressSecretForProject(
 }
 export async function removeEmailDomainForProject(
   context: Context<ApiEnv>,
-  project: Project,
+  project: Pick<Project, 'id'>,
   rawDomain: string,
   actor: 'owner' | 'admin',
 ): Promise<Response> {

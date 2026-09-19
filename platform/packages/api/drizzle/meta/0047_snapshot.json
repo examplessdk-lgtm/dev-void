@@ -3844,13 +3844,13 @@
         },
         "published_at": {
           "name": "published_at",
-          "type": "timestamp",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
         },
         "created_at": {
           "name": "created_at",
-          "type": "timestamp",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
@@ -3985,7 +3985,7 @@
         },
         "expires_on": {
           "name": "expires_on",
-          "type": "timestamp",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
         },
@@ -4005,14 +4005,14 @@
         },
         "created_at": {
           "name": "created_at",
-          "type": "timestamp",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
         },
         "updated_at": {
           "name": "updated_at",
-          "type": "timestamp",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
@@ -4127,7 +4127,7 @@
         },
         "inbound_observed_at": {
           "name": "inbound_observed_at",
-          "type": "timestamp",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
         },
@@ -4146,7 +4146,7 @@
         },
         "outbound_observed_at": {
           "name": "outbound_observed_at",
-          "type": "timestamp",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
         },
@@ -4159,14 +4159,14 @@
         },
         "created_at": {
           "name": "created_at",
-          "type": "timestamp",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
         },
         "updated_at": {
           "name": "updated_at",
-          "type": "timestamp",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
@@ -4315,13 +4315,13 @@
         },
         "started_at": {
           "name": "started_at",
-          "type": "timestamp",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
         },
         "finished_at": {
           "name": "finished_at",
-          "type": "timestamp",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
         }
@@ -4394,6 +4394,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "route_generation": {
+          "name": "route_generation",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
         "actor_kind": {
           "name": "actor_kind",
           "type": "text",
@@ -4463,14 +4469,14 @@
         },
         "created_at": {
           "name": "created_at",
-          "type": "timestamp",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
         },
         "updated_at": {
           "name": "updated_at",
-          "type": "timestamp",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
@@ -4695,7 +4701,7 @@
         },
         "previous_secret_until": {
           "name": "previous_secret_until",
-          "type": "timestamp",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
         },
@@ -4714,7 +4720,7 @@
         },
         "inbound_observed_at": {
           "name": "inbound_observed_at",
-          "type": "timestamp",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
         },
@@ -4733,20 +4739,20 @@
         },
         "management_observed_at": {
           "name": "management_observed_at",
-          "type": "timestamp",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
         },
         "created_at": {
           "name": "created_at",
-          "type": "timestamp",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
         },
         "updated_at": {
           "name": "updated_at",
-          "type": "timestamp",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
@@ -4912,6 +4918,22 @@
             }
           ],
           "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_email_action_recipients_expiring": {
+          "name": "idx_email_action_recipients_expiring",
+          "columns": [
+            {
+              "expression": "reserved_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"email_action_recipients\".\"state\" = 'reserved'",
           "concurrently": false,
           "method": "btree",
           "with": {}
@@ -5084,6 +5106,13 @@
           "primaryKey": false,
           "notNull": true,
           "default": 0
+        },
+        "inbound_receipts": {
+          "name": "inbound_receipts",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
         }
       },
       "indexes": {},
@@ -5101,6 +5130,10 @@
         "email_monthly_usage_nonnegative_check": {
           "name": "email_monthly_usage_nonnegative_check",
           "value": "\"email_monthly_usage\".\"recipient_attempts\" >= 0"
+        },
+        "email_monthly_usage_inbound_nonnegative_check": {
+          "name": "email_monthly_usage_inbound_nonnegative_check",
+          "value": "\"email_monthly_usage\".\"inbound_receipts\" >= 0"
         }
       },
       "isRLSEnabled": false

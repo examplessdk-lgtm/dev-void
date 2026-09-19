@@ -24,6 +24,16 @@ const MAX_ENVELOPE_HEADER = 320;
 const MAX_CONCURRENT_DELIVERIES = 2;
 let activeDeliveries = 0;
 
+class MimeHeaderError extends Error {
+  constructor(
+    message: string,
+    readonly status: 400 | 413,
+  ) {
+    super(message);
+    this.name = 'MimeHeaderError';
+  }
+}
+
 async function withDeliverySlot<T>(run: () => Promise<T>): Promise<T> {
   if (activeDeliveries >= MAX_CONCURRENT_DELIVERIES) {
     throw new Error('email gateway busy');
@@ -53,6 +63,8 @@ async function sign(value: string, secret: string): Promise<string> {
 }
 
 type Route = {
+  routeId: string;
+  routeGeneration: number;
   connectionId: string;
   projectId: string;
   workerName: string;
@@ -75,17 +87,45 @@ async function resolveIngress(
     native?: true;
   },
 ): Promise<Route | null> {
+  const deadline = Date.now() + 5_000;
+  const controller = new AbortController();
+  const beforeDeadline = async <T>(run: () => Promise<T>): Promise<T> => {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      controller.abort();
+      throw new Error('ingress resolution timeout');
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        run(),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            controller.abort();
+            reject(new Error('ingress resolution timeout'));
+          }, remaining);
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) {
+        clearTimeout(timer);
+      }
+    }
+  };
   const proof = await sign(
     `email-ingress-v1\n${input.accountId}\n${input.zoneId}\n${input.ingressName}\n${input.to.toLowerCase()}`,
     env.JWT_SECRET,
   );
-  const response = await env.API.fetch('https://api/internal/email/resolve-ingress', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-void-internal': proof },
-    body: JSON.stringify(input),
-    signal: AbortSignal.timeout(5_000),
-  });
+  const response = await beforeDeadline(() =>
+    env.API.fetch('https://api/internal/email/resolve-ingress', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-void-internal': proof },
+      body: JSON.stringify(input),
+      signal: controller.signal,
+    }),
+  );
   if (!response.ok) {
+    void response.body?.cancel().catch(() => {});
     if (response.status >= 500 || response.status === 429) {
       throw new Error('email routing unavailable');
     }
@@ -93,6 +133,7 @@ async function resolveIngress(
   }
   const contentLength = Number(response.headers.get('content-length'));
   if (Number.isFinite(contentLength) && contentLength > 4096) {
+    void response.body?.cancel().catch(() => {});
     throw new Error('invalid email routing response');
   }
   const reader = response.body?.getReader();
@@ -101,24 +142,9 @@ async function resolveIngress(
   }
   const chunks: Array<Uint8Array> = [];
   let total = 0;
-  const deadline = Date.now() + 5_000;
   try {
     while (true) {
-      const remaining = deadline - Date.now();
-      if (remaining <= 0) {
-        throw new Error('email routing response timeout');
-      }
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const chunk = await Promise.race([
-        reader.read(),
-        new Promise<never>((_, reject) => {
-          timer = setTimeout(() => reject(new Error('ingress resolution timeout')), remaining);
-        }),
-      ]).finally(() => {
-        if (timer !== undefined) {
-          clearTimeout(timer);
-        }
-      });
+      const chunk = await beforeDeadline(() => reader.read());
       if (chunk.done) {
         break;
       }
@@ -129,8 +155,12 @@ async function resolveIngress(
       chunks.push(chunk.value);
     }
   } finally {
-    await reader.cancel().catch(() => {});
-    reader.releaseLock();
+    void reader.cancel().catch(() => {});
+    try {
+      reader.releaseLock();
+    } catch {
+      // A timed-out read may still be settling after cancellation.
+    }
   }
   const bytes = new Uint8Array(total);
   let offset = 0;
@@ -150,6 +180,9 @@ async function resolveIngress(
   }
   const value = route as Partial<Route>;
   if (
+    typeof value.routeId !== 'string' ||
+    !Number.isSafeInteger(value.routeGeneration) ||
+    value.routeGeneration! < 1 ||
     typeof value.projectId !== 'string' ||
     typeof value.connectionId !== 'string' ||
     typeof value.workerName !== 'string' ||
@@ -205,10 +238,14 @@ async function readMime(
     }
     return result;
   } catch (error) {
-    await reader.cancel().catch(() => {});
+    void reader.cancel().catch(() => {});
     throw error;
   } finally {
-    reader.releaseLock();
+    try {
+      reader.releaseLock();
+    } catch {
+      // A timed-out read may still be settling after cancellation.
+    }
   }
 }
 
@@ -220,8 +257,14 @@ function parseHeaders(raw: Uint8Array): Record<string, string> {
       break;
     }
   }
-  if (end < 0 || end > MAX_HEADER_BYTES) {
-    throw new Error('invalid MIME headers');
+  if (end < 0) {
+    throw new MimeHeaderError(
+      'invalid MIME headers',
+      raw.byteLength > MAX_HEADER_BYTES ? 413 : 400,
+    );
+  }
+  if (end > MAX_HEADER_BYTES) {
+    throw new MimeHeaderError('MIME headers too large', 413);
   }
   const lines = decoder.decode(raw.subarray(0, end)).split('\r\n');
   const headers: Record<string, string> = Object.create(null);
@@ -229,22 +272,22 @@ function parseHeaders(raw: Uint8Array): Record<string, string> {
   let physicalLines = 0;
   for (const line of lines) {
     if (++physicalLines > MAX_INBOUND_HEADERS) {
-      throw new Error('too many MIME headers');
+      throw new MimeHeaderError('too many MIME headers', 413);
     }
     if (/^[ \t]/.test(line)) {
       if (!current) {
-        throw new Error('invalid MIME header fold');
+        throw new MimeHeaderError('invalid MIME header fold', 400);
       }
       headers[current] += ` ${line.trim()}`;
       continue;
     }
     const colon = line.indexOf(':');
     if (colon <= 0) {
-      throw new Error('invalid MIME header');
+      throw new MimeHeaderError('invalid MIME header', 400);
     }
     const name = line.slice(0, colon).toLowerCase();
     if (!/^[!#$%&'*+.^_`|~0-9a-z-]+$/.test(name)) {
-      throw new Error('invalid MIME header name');
+      throw new MimeHeaderError('invalid MIME header name', 400);
     }
     headers[name] = headers[name]
       ? `${headers[name]}, ${line.slice(colon + 1).trim()}`
@@ -304,9 +347,26 @@ async function ingress(request: Request, env: Env, ctx: ExecutionContext): Promi
   if (!route) {
     return new Response(null, { status: 403 });
   }
+  let raw: Uint8Array;
   try {
-    const raw = await readMime(request.body, declared);
-    const headers = parseHeaders(raw);
+    raw = await readMime(request.body, declared);
+  } catch (error) {
+    console.error(
+      '[email-gateway] ingress failed:',
+      error instanceof Error ? error.message.slice(0, 200) : 'unknown',
+    );
+    return new Response(null, { status: 502 });
+  }
+  let headers: Record<string, string>;
+  try {
+    headers = parseHeaders(raw);
+  } catch (error) {
+    if (error instanceof MimeHeaderError) {
+      return new Response(null, { status: error.status });
+    }
+    throw error;
+  }
+  try {
     const domain = to.slice(to.lastIndexOf('@') + 1).toLowerCase();
     if (domain !== route.domain) {
       return new Response(null, { status: 403 });
@@ -319,11 +379,34 @@ async function ingress(request: Request, env: Env, ctx: ExecutionContext): Promi
       headers,
       ...(route.addressing === 'custom' ? { viaDomain: domain } : {}),
     };
+    let stub: Fetcher;
+    try {
+      stub = (
+        route.limits
+          ? env.DISPATCH.get(route.workerName, {}, { limits: route.limits })
+          : env.DISPATCH.get(route.workerName)
+      ) as Fetcher;
+    } catch (error) {
+      console.error('[email-gateway] tenant dispatch stub unavailable:', error);
+      return new Response(null, { status: 503 });
+    }
     const receiptId = await sha256(encoder.encode(JSON.stringify([route.connectionId, requestId])));
     const payloadDigest = await sha256(
       encoder.encode(JSON.stringify([from, to, await sha256(raw)])),
     );
-    const identity = { receiptId, projectId: route.projectId, payloadDigest };
+    const identity = {
+      receiptId,
+      projectId: route.projectId,
+      payloadDigest,
+      route: {
+        routeId: route.routeId,
+        routeGeneration: route.routeGeneration,
+        connectionId: route.connectionId,
+        addressing: route.addressing,
+        domain: route.domain,
+        projectSlug: route.slug,
+      },
+    };
     let claim;
     try {
       claim = await claimRelayedReceipt(env, identity);
@@ -343,6 +426,7 @@ async function ingress(request: Request, env: Env, ctx: ExecutionContext): Promi
       return new Response(null, { status: 503, headers: { 'x-void-email-receipt': receiptId } });
     }
     const result = await routeRelayed(env, ctx, {
+      stub,
       projectId: route.projectId,
       domain,
       envelope,
@@ -380,10 +464,12 @@ async function sha256(bytes: Uint8Array): Promise<string> {
 
 async function probe(request: Request, env: Env): Promise<Response> {
   if (request.headers.get('content-encoding')) {
+    void request.body?.cancel().catch(() => {});
     return new Response(null, { status: 400 });
   }
   const declared = request.headers.get('content-length');
   if (declared && (!/^\d+$/.test(declared) || Number(declared) > 1024)) {
+    void request.body?.cancel().catch(() => {});
     return new Response(null, { status: 400 });
   }
   const authorization = request.headers.get('authorization') ?? '';
@@ -426,8 +512,12 @@ async function probe(request: Request, env: Env): Promise<Response> {
   } catch {
     return new Response(null, { status: 400 });
   } finally {
-    await reader.cancel().catch(() => {});
-    reader.releaseLock();
+    void reader.cancel().catch(() => {});
+    try {
+      reader.releaseLock();
+    } catch {
+      // A timed-out read may still be settling after cancellation.
+    }
   }
   if (size === 0 || (declared && size !== Number(declared))) {
     return new Response(null, { status: 400 });
@@ -453,16 +543,35 @@ async function probe(request: Request, env: Env): Promise<Response> {
     `email-probe-v1\n${accountId}\n${zoneId}\n${ingressName}`,
     env.JWT_SECRET,
   );
+  const controller = new AbortController();
+  const apiDeadline = Date.now() + 5_000;
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    const response = await env.API.fetch('https://api/internal/email/probe-ingress', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-void-internal': proof },
-      body: JSON.stringify({ accountId, zoneId, ingressName, secret: authorization.slice(7) }),
-      signal: AbortSignal.timeout(5_000),
-    });
+    const response = await Promise.race([
+      env.API.fetch('https://api/internal/email/probe-ingress', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-void-internal': proof },
+        body: JSON.stringify({ accountId, zoneId, ingressName, secret: authorization.slice(7) }),
+        signal: controller.signal,
+      }),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => {
+            controller.abort();
+            reject(new Error('email probe timeout'));
+          },
+          Math.max(0, apiDeadline - Date.now()),
+        );
+      }),
+    ]);
+    void response.body?.cancel().catch(() => {});
     return new Response(null, { status: response.status === 204 ? 204 : 403 });
   } catch {
     return new Response(null, { status: 503 });
+  } finally {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
   }
 }
 

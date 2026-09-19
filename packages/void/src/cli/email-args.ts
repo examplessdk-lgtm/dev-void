@@ -7,7 +7,7 @@ const PLATFORM_FLAG = {
 };
 
 export const emailSubcommands: Array<SubcommandDef> = [
-  { name: 'usage', description: 'Show monthly email send/receive counts and quota' },
+  { name: 'usage', description: 'Show monthly recipient attempts, inbound receipts, and quota' },
   { name: 'logs', description: 'Show recent email delivery activity' },
   { name: 'destinations', description: 'List verified recipient addresses for outbound mail' },
   { name: 'allow', arg: '<address>', description: 'Add a recipient and trigger CF verification' },

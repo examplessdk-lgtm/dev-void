@@ -166,4 +166,16 @@ describe('bounded email receipt protocol', () => {
     const envelope = new ReadableStream<Uint8Array>();
     await expect(readEmailEnvelope(envelope, 5)).rejects.toThrow('email envelope timeout');
   });
+
+  it('does not extend protocol deadlines while an uncooperative stream cancels', async () => {
+    const uncooperative = () =>
+      new ReadableStream<Uint8Array>({
+        cancel() {
+          return new Promise<void>(() => {});
+        },
+      });
+
+    await expect(readEmailActions(uncooperative(), 5)).rejects.toThrow('email response timeout');
+    await expect(readEmailEnvelope(uncooperative(), 5)).rejects.toThrow('email envelope timeout');
+  });
 });

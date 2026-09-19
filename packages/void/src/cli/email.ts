@@ -100,10 +100,10 @@ async function emailUsage(client: PlatformClient, projectId: string): Promise<vo
   const usage = await client.getEmailUsage(projectId);
   const status = usage.suspended ? pc.red('SUSPENDED') : pc.green('active');
   const lines = [
-    `Month:       ${usage.month}`,
-    `Status:      ${status}`,
-    `Outbound:    ${usage.sent} / ${usage.limit} (${usage.remaining} remaining)`,
-    `Inbound:     ${usage.received}`,
+    `Month:              ${usage.month}`,
+    `Status:             ${status}`,
+    `Recipient attempts: ${usage.attempts} / ${usage.limit} (${usage.remaining} remaining)`,
+    `Inbound receipts:   ${usage.received}`,
   ];
   note(lines.join('\n'), 'Email Usage');
 }

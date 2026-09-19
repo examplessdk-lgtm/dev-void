@@ -2887,7 +2887,7 @@ ${envValidateCall}${isrDeploymentStamp}  const userEnv = __filterInternalBinding
   const emailImport = hasEmail ? ', __emailHandler' : '';
   const emailRuntimePath = runtimeEmailPath ?? deriveEmailRuntimePath(runtimeEnvPath);
   const emailProxyImport = hasEmail
-    ? `import { createMessageProxy as __createMessageProxy, enactEmailActions as __enactEmailActions, isForwardableEmailMessage as __isForwardableEmailMessage } from ${JSON.stringify(emailRuntimePath)};\nimport { EMAIL_PROTOCOL_VERSION as __EMAIL_PROTOCOL_VERSION, encodeEmailActions as __encodeEmailActions, readEmailEnvelope as __readEmailEnvelope } from "void/_email-protocol";\n`
+    ? `import { createMessageProxy as __createMessageProxy, enactEmailActions as __enactEmailActions, isForwardableEmailMessage as __isForwardableEmailMessage } from ${JSON.stringify(emailRuntimePath)};\nimport { EMAIL_PROTOCOL_VERSION as __EMAIL_PROTOCOL_VERSION, encodeEmailActions as __encodeEmailActions, readEmailEnvelope as __readEmailEnvelope, verifyEmailReceiptThroughProxy as __verifyEmailReceiptThroughProxy } from "void/_email-protocol";\n`
     : '';
   // `__VOID_PROJECT_SLUG` is the same binding the outbound `sendEmail` reads to
   // default `from`. It is passed to `createMessageProxy` so the user-visible
@@ -2932,16 +2932,11 @@ ${envValidateCall}  const userEnv = __filterInternalBindings(env);
       !env.__VOID_PROXY_TOKEN || !env.__PROJECT_ID || !env.__VOID_EMAIL_DEPLOYMENT_ID || !env.__VOID_PROXY) {
     return new Response(null, { status: 404 });
   }
-  const __verificationBody = JSON.stringify({ receipt: __token, projectId: env.__PROJECT_ID,
-    deploymentId: env.__VOID_EMAIL_DEPLOYMENT_ID, recipient: __recipient });
-  const __verification = await env.__VOID_PROXY.fetch("https://proxy/email/verify-receipt", {
-    method: "POST",
-    headers: { "content-type": "application/json", "x-void-internal": env.__VOID_PROXY_TOKEN },
-    body: __verificationBody,
+  const __verified = await __verifyEmailReceiptThroughProxy(env.__VOID_PROXY, env.__VOID_PROXY_TOKEN, {
+    receipt: __token, projectId: env.__PROJECT_ID,
+    deploymentId: env.__VOID_EMAIL_DEPLOYMENT_ID, recipient: __recipient,
   });
-  if (!__verification.ok) return new Response(null, { status: 404 });
-  const __verified = await __verification.json();
-  if (__verified?.valid !== true) return new Response(null, { status: 404 });
+  if (!__verified) return new Response(null, { status: 404 });
   let __envelope;
   try { __envelope = await __readEmailEnvelope(request.body); }
   catch { return new Response(null, { status: 400 }); }

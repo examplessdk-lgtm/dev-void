@@ -28,10 +28,12 @@ export const emailMonthlyUsage = pgTable(
     project_id: text('project_id').notNull(),
     month: text('month').notNull(),
     recipient_attempts: integer('recipient_attempts').notNull().default(0),
+    inbound_receipts: integer('inbound_receipts').notNull().default(0),
   },
   (table) => [
     unique('email_monthly_usage_project_month_uq').on(table.project_id, table.month),
     check('email_monthly_usage_nonnegative_check', sql`${table.recipient_attempts} >= 0`),
+    check('email_monthly_usage_inbound_nonnegative_check', sql`${table.inbound_receipts} >= 0`),
   ],
 );
 
@@ -102,6 +104,9 @@ export const emailActionRecipients = pgTable(
   (table) => [
     unique('email_action_recipients_action_recipient_uq').on(table.action_id, table.recipient),
     index('idx_email_action_recipients_project_reserved').on(table.project_id, table.reserved_at),
+    index('idx_email_action_recipients_expiring')
+      .on(table.reserved_at)
+      .where(sql`${table.state} = 'reserved'`),
     check(
       'email_action_recipients_state_check',
       sql`${table.state} IN ('rejected', 'reserved', 'attempt_started', 'provider_accepted', 'failed', 'outcome_unknown', 'cancelled')`,

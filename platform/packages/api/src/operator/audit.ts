@@ -5,7 +5,7 @@ import type { ApiEnv } from '../env.ts';
 import { operatorEvents } from '../schema.ts';
 import { dryRun, OperatorError, pagination, readBody } from './common.ts';
 
-const WORKER_NAMES = ['dispatch', 'dashboard', 'api', 'tail', 'proxy'] as const;
+const WORKER_NAMES = ['dispatch', 'dashboard', 'api', 'tail', 'proxy', 'email-gateway'] as const;
 
 function boundedString(value: unknown, maximum: number, lowerCase = false) {
   if (typeof value !== 'string' || !value.trim() || value.length > maximum) {
@@ -90,6 +90,17 @@ function auditTarget(
   if (segments[0] === 'projects' && id && segments[2] === 'delete') {
     return JSON.stringify({ projectId: id });
   }
+  if (segments[0] === 'email' && segments[1] === 'operations' && segments[3] === 'resolve') {
+    return JSON.stringify({
+      operationId: pathIdentifier(segments[2]),
+      stepId: boundedString(body.stepId, 128),
+      attempt: typeof body.attempt === 'number' ? body.attempt : undefined,
+      requestDigest: boundedString(body.requestDigest, 128),
+      outcome: boundedString(body.outcome, 32),
+      ended: body.ended === true,
+      reason: boundedString(body.reason, 500),
+    });
+  }
   if (segments[0] === 'signup') {
     if (segments[1] === 'restrict' || segments[1] === 'open') {
       return JSON.stringify({ restrictionsEnabled: segments[1] === 'restrict' });
@@ -149,16 +160,28 @@ function auditTarget(
     if (segments[1] === 'domains' && domain && segments[3] === 'sync') {
       return JSON.stringify({ domain });
     }
+    if (segments[1] === 'domains' && domain && segments[3] === 'rotate-secret') {
+      return JSON.stringify({ domain });
+    }
     if (segments[1] === 'domains' && domain && segments[3] === 'remove') {
       return JSON.stringify({ domain, force: body.force === true });
     }
     const project = pathIdentifier(segments[2]);
-    if (segments[1] === 'projects' && project && segments[3] === 'limit') {
-      return JSON.stringify({
-        project,
-        monthly: boundedString(body.monthly, 16),
-        burst: boundedString(body.burst, 16),
-      });
+    if (segments[1] === 'projects' && project) {
+      if (segments[3] === 'limit') {
+        return JSON.stringify({
+          project,
+          monthly: boundedString(body.monthly, 16),
+          burst: boundedString(body.burst, 16),
+        });
+      }
+      if (segments[3] === 'suspend') {
+        return JSON.stringify({ project, suspended: body.suspended === true });
+      }
+      const destinationId = boundedString(segments[4], 128);
+      if (segments[3] === 'destinations' && destinationId && segments[5] === 'remove') {
+        return JSON.stringify({ project, destinationId });
+      }
     }
   }
   if (segments[0] === 'system' && segments[1] === 'backfill-queue-tokens') {

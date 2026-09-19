@@ -26,7 +26,7 @@ import {
   type PlatformRuntimeDatabaseManifest,
 } from '@void/platform/installer';
 import { join } from 'pathslash';
-import { afterEach, beforeEach, describe, expect, it } from 'vite-plus/test';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 import {
   hyperdriveOriginConfigHash,
   hyperdriveOriginFromConnectionString,
@@ -34,6 +34,7 @@ import {
 import {
   acquirePlatformDatabaseLifecycleLockConnection,
   apiWorkerSecrets,
+  bootstrapPlatformSharedEmail,
   platformWorkerSecretPayload,
   assertRequiredPlatformSecrets,
   classifyPlatformWorkerDeploymentLineage,
@@ -567,6 +568,103 @@ describe('platform installer', () => {
       expect(parsePlatformInstallationManifest(result.manifest)).toEqual(result.manifest);
     },
   );
+
+  it('keeps traffic disabled and the verified Worker set when shared email bootstrap blocks', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'void-platform-email-bootstrap-test-'));
+    directories.push(directory);
+    process.env.VOID_PLATFORM_REGISTRY_DIR = directory;
+    const plan = await createPlatformInstallPlan(
+      planningClient(),
+      {
+        accountId: 'account',
+        applicationDomain: '',
+        zoneName: '',
+        workersDev: true,
+        controlPlaneDomain: '',
+        dedicatedZone: false,
+        displayName: 'Email',
+        emailSenderDomain: 'mail.example.com',
+        emailSharedZoneId: 'mail-zone-id',
+        installationSlug: 'email',
+      },
+      null,
+    );
+    const secrets = createPlatformInstallationSecrets({
+      bootstrapGitHubId: '583231',
+      bootstrapGitHubLogin: 'octocat',
+      cloudflareApiToken: 'test-token',
+      databaseUrl: 'postgres://user:password@db.example.com/email',
+      githubClientId: 'id',
+      githubClientSecret: 'secret',
+      jwtSecret: TEST_PLATFORM_JWT_SECRET,
+      projectSecretKey: TEST_PLATFORM_PROJECT_SECRET_KEY,
+      r2AccessKeyId: 'id',
+      r2SecretAccessKey: 'secret',
+    });
+    let index = 0;
+    const create = async (_account: string, name: string) => ({
+      id: `resource-${index++}`,
+      name,
+    });
+    const rollbacks: Array<string> = [];
+    const deletedKeys: Array<string> = [];
+    const kvWrites: Array<{ key: string; value: string }> = [];
+    const bootstrapEmail = vi.fn(async () => {
+      throw new Error('shared email operation is blocked');
+    });
+
+    await expect(
+      installPlatform(plan, secrets, null, {
+        claimDatabase,
+        acquireDatabaseLifecycleLock,
+        bootstrapEmail,
+        client: {
+          createAiGateway: create,
+          createDnsRecord: async () => {
+            throw new Error('no DNS expected');
+          },
+          createZone: async () => {
+            throw new Error('no zone expected');
+          },
+          createKvNamespace: create,
+          createR2Bucket: create,
+          createQueue: create,
+          createDispatchNamespace: create,
+          createHyperdrive: create,
+          putKvValue: async (_account, _namespace, key, value) => {
+            kvWrites.push({ key, value });
+          },
+          deleteKvValue: async (_account, _namespace, key) => {
+            deletedKeys.push(key);
+          },
+          putR2Object: async () => {},
+        },
+        deployWorker: async (config) => async () => {
+          rollbacks.push(String(config.name));
+        },
+        migrateDatabase: async () => {},
+        revalidateBeforeWorkerDeploy: async () => {},
+        verifyHealth: async () => {},
+      }),
+    ).rejects.toThrow('shared email operation is blocked');
+
+    expect(bootstrapEmail).toHaveBeenCalledTimes(1);
+    expect(deletedKeys).not.toContain(PLATFORM_DISABLED_KEY);
+    expect(kvWrites).toContainEqual({ key: PLATFORM_DISABLED_KEY, value: PLATFORM_DISABLED_VALUE });
+    expect(rollbacks).toEqual([]);
+    const failed = listInstallationManifests(directory)[0]!;
+    expect(failed.status).toBe('failed');
+    expect(
+      failed.steps.some(
+        (step) => step.key.startsWith('worker-cutover:') && step.resultHash === 'committed',
+      ),
+    ).toBe(true);
+    expect(
+      failed.steps.some(
+        (step) => step.key.startsWith('worker-traffic-state:') && step.resultHash === 'enabled',
+      ),
+    ).toBe(false);
+  });
 
   it('requires externally custodied identity keys for a fresh installation', () => {
     const input = {
@@ -1461,6 +1559,39 @@ describe('platform installer', () => {
     ).toBe(true);
     expect(requests.every((entry) => !entry.headers.has('X-Health-Check'))).toBe(true);
     expect(requests.every((entry) => entry.redirect === 'manual')).toBe(true);
+  });
+
+  it('requires the shared email bootstrap probe to report durable inbound readiness', async () => {
+    const requests: Array<{ headers: Headers; method?: string; redirect?: RequestRedirect }> = [];
+    const readyFetcher = (async (_input: string | URL | Request, init?: RequestInit) => {
+      requests.push({
+        headers: new Headers(init?.headers),
+        method: init?.method,
+        redirect: init?.redirect,
+      });
+      return Response.json({ version: 1, state: 'ready', operationId: 'eop-ready' });
+    }) as typeof fetch;
+
+    expect(
+      await bootstrapPlatformSharedEmail('https://api.example.com', 'probe-token', readyFetcher),
+    ).toBe('eop-ready');
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.method).toBe('POST');
+    expect(requests[0]?.redirect).toBe('manual');
+    expect(requests[0]?.headers.get('X-Void-Platform-Probe')).toBe('probe-token');
+
+    await expect(
+      bootstrapPlatformSharedEmail('https://api.example.com', 'probe-token', (async () =>
+        Response.json(
+          {
+            version: 1,
+            state: 'incomplete',
+            operationId: 'eop-blocked',
+            operationStatus: 'blocked',
+          },
+          { status: 503 },
+        )) as typeof fetch),
+    ).rejects.toThrow('Operation eop-blocked: blocked. Traffic remains disabled');
   });
 
   it.each([
@@ -2727,6 +2858,72 @@ describe('platform installer', () => {
     );
   });
 
+  it('recreates only the email gateway with its shared JWT and no Cloudflare token', async () => {
+    const fullPlan = await createPlatformInstallPlan(
+      planningClient(),
+      {
+        accountId: 'account',
+        applicationDomain: 'apps.example.com',
+        controlPlaneDomain: '',
+        dedicatedZone: false,
+        displayName: 'Example',
+        installationSlug: 'example',
+        zoneName: 'example.com',
+      },
+      null,
+    );
+    const plan = {
+      ...fullPlan,
+      actions: fullPlan.actions.filter((action) => action.key === 'email-gateway-worker'),
+    };
+    let manifest = createPlatformInstallationManifest({
+      account: plan.account,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      deployment: plan.deployment,
+      id: plan.installationId,
+      ownershipNonce: 'ownership-nonce-0123456789abcdef',
+      platformVersion: '1.0.0',
+    });
+    manifest = recordInstallationStep(
+      manifest,
+      {
+        completedAt: '2026-01-01T00:00:00.000Z',
+        key: 'bootstrap-access:v1',
+        resultHash: 'bootstrap-hash',
+      },
+      '2026-01-01T00:00:00.000Z',
+    );
+    const secrets = createPlatformInstallationSecrets({
+      bootstrapGitHubId: '',
+      bootstrapGitHubLogin: '',
+      cloudflareApiToken: '',
+      databaseUrl: 'postgres://user:password@db.example.com/void',
+      existingInstallation: true,
+      githubClientId: '',
+      githubClientSecret: '',
+      jwtSecret: TEST_PLATFORM_JWT_SECRET,
+      r2AccessKeyId: '',
+      r2SecretAccessKey: '',
+    });
+
+    expect(() => assertRequiredPlatformSecrets(plan, manifest, secrets)).not.toThrow();
+    expect(platformWorkerSecretPayload('emailGateway', secrets, 'account', 'zone', false)).toEqual({
+      JWT_SECRET: TEST_PLATFORM_JWT_SECRET,
+    });
+    expect(
+      platformWorkerSecretPayload(
+        'emailGateway',
+        { ...secrets, cloudflareApiToken: 'must-not-be-deployed' },
+        'account',
+        'zone',
+        false,
+      ),
+    ).toEqual({ JWT_SECRET: TEST_PLATFORM_JWT_SECRET });
+    expect(
+      platformWorkerSecretPayload('emailGateway', secrets, 'account', 'zone', true),
+    ).toBeNull();
+  });
+
   it('does not checkpoint failure when another host owns the lifecycle lock', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'void-platform-lock-contender-test-'));
     directories.push(directory);
@@ -3478,10 +3675,14 @@ describe('platform installer', () => {
         putR2Object: async () => {},
       },
       deployWorker: async () => {},
+      bootstrapEmail: async () => {
+        throw new Error('email bootstrap must stay disabled');
+      },
       migrateDatabase: async () => {},
       revalidateBeforeWorkerDeploy: async () => {},
       verifyHealth: async () => {},
     });
+    expect(installed.manifest.deployment.capabilities.email).toBe(false);
     const byKey = new Map(installed.manifest.resources.map((resource) => [resource.key, resource]));
     expect(byKey.get('hyperdrive')?.configHash).toBe(
       hyperdriveOriginConfigHash(hyperdriveOriginFromConnectionString(secrets.databaseUrl)),

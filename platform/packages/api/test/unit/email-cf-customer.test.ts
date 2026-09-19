@@ -401,27 +401,4 @@ describe('cf-customer client', () => {
       await expect(client.deleteRelayScript(ACCOUNT, RELAY)).rejects.toThrow('boom');
     });
   });
-
-  describe('sendRaw', () => {
-    it('POSTs { from, recipients, mime_message } to the account send_raw endpoint', async () => {
-      fetchMock.mockResolvedValueOnce(cfSuccess({ message_id: 'msg_1' }));
-      const client = createCfCustomerClient(CREDENTIAL);
-
-      const result = await client.sendRaw(ACCOUNT, {
-        from: 'noreply@acme.com',
-        recipients: ['user@example.org'],
-        mime_message: 'MIME-DUMMY',
-      });
-
-      const { url, init } = lastCall(fetchMock);
-      expect(url).toBe(`${CF_CUSTOMER_API_BASE}/accounts/${ACCOUNT}/email/sending/send_raw`);
-      expect(init.method).toBe('POST');
-      expect(JSON.parse(init.body as string)).toEqual({
-        from: 'noreply@acme.com',
-        recipients: ['user@example.org'],
-        mime_message: 'MIME-DUMMY',
-      });
-      expect(result).toEqual({ message_id: 'msg_1' });
-    });
-  });
 });

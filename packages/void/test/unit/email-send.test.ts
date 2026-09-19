@@ -172,6 +172,129 @@ describe('sendEmail (test harness)', () => {
     }
   });
 
+  it('bounds native binding submissions and preserves later provider references', async () => {
+    vi.useFakeTimers();
+    try {
+      const send = vi
+        .fn()
+        .mockImplementationOnce(() => new Promise(() => {}))
+        .mockResolvedValueOnce({ messageId: 'cf-second' });
+      const pending = withRuntimeEnv({ SEND_EMAIL: { send } }, () =>
+        sendEmail({
+          from: 'a@x.dev',
+          to: ['first@y.dev', 'second@y.dev'],
+          subject: 'deadline',
+          text: 'body',
+        }),
+      );
+
+      await vi.advanceTimersByTimeAsync(30_000);
+      const result = await pending;
+
+      expect(result).toMatchObject({
+        ok: false,
+        deliveries: [
+          {
+            recipient: 'first@y.dev',
+            state: 'outcome_unknown',
+            error: { code: 'OUTCOME_UNKNOWN' },
+          },
+          { recipient: 'second@y.dev', ok: true, messageId: 'cf-second' },
+        ],
+      });
+      expect(send).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('stops a native binding batch at 60 seconds without submitting the remainder', async () => {
+    vi.useFakeTimers();
+    try {
+      const send = vi.fn(() => new Promise(() => {}));
+      const pending = withRuntimeEnv({ SEND_EMAIL: { send } }, () =>
+        sendEmail({
+          from: 'a@x.dev',
+          to: ['first@y.dev', 'second@y.dev', 'third@y.dev'],
+          subject: 'batch deadline',
+          text: 'body',
+        }),
+      );
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      const result = await pending;
+
+      expect(send).toHaveBeenCalledTimes(2);
+      expect(result).toMatchObject({
+        ok: false,
+        deliveries: [
+          { state: 'outcome_unknown', error: { code: 'OUTCOME_UNKNOWN' } },
+          { state: 'outcome_unknown', error: { code: 'OUTCOME_UNKNOWN' } },
+          { state: 'cancelled', error: { code: 'UPSTREAM_ERROR' } },
+        ],
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('treats an undocumented native binding rejection as an unknown outcome', async () => {
+    const cause = new Error('connection closed after submission');
+    const send = vi.fn().mockRejectedValue(cause);
+    const result = await withRuntimeEnv({ SEND_EMAIL: { send } }, () =>
+      sendEmail({
+        from: 'a@x.dev',
+        to: 'b@y.dev',
+        subject: 'ambiguous rejection',
+        text: 'body',
+      }),
+    );
+
+    expect(result).toMatchObject({
+      ok: false,
+      deliveries: [
+        {
+          recipient: 'b@y.dev',
+          state: 'outcome_unknown',
+          error: {
+            code: 'OUTCOME_UNKNOWN',
+            message: 'connection closed after submission',
+            cause,
+          },
+        },
+      ],
+    });
+  });
+
+  it('keeps a documented native provider refusal definitive', async () => {
+    const cause = Object.assign(new Error('recipient is not allowed'), {
+      code: 'E_RECIPIENT_NOT_ALLOWED',
+    });
+    const result = await withRuntimeEnv(
+      { SEND_EMAIL: { send: vi.fn().mockRejectedValue(cause) } },
+      () =>
+        sendEmail({
+          from: 'a@x.dev',
+          to: 'b@y.dev',
+          subject: 'provider refusal',
+          text: 'body',
+        }),
+    );
+
+    expect(result).toMatchObject({
+      ok: false,
+      deliveries: [
+        {
+          recipient: 'b@y.dev',
+          error: { code: 'UNVERIFIED_DESTINATION', cause },
+        },
+      ],
+    });
+    if (!result.ok && 'deliveries' in result) {
+      expect(result.deliveries[0].state).toBeUndefined();
+    }
+  });
+
   it('clear() empties the harness without disposing the sink', async () => {
     const harness = createEmailTestHarness();
     try {
@@ -568,11 +691,7 @@ describe('sendEmail (proxy round trip)', () => {
     expect(calls[0].url).toContain('/email/send');
     const body = calls[0].body as Record<string, unknown>;
     expect(body.projectId).toBe('p_test');
-    // Legacy auth field name (proxy still reads it under the historical
-    // `aiToken` key). New `proxyToken` ships the same value so the proxy
-    // can migrate without a coordinated release.
     expect(body.aiToken).toBe('tok');
-    expect(body.proxyToken).toBe('tok');
     expect(body.from).toBe('a@x.dev');
     expect(Array.isArray(body.recipients)).toBe(true);
     expect(body.recipients as Array<string>).toEqual(['b@y.dev']);
@@ -644,6 +763,84 @@ describe('sendEmail (proxy round trip)', () => {
     if (!result.ok && 'error' in result) {
       expect(result.error.code).toBe('OUTCOME_UNKNOWN');
     }
+  });
+
+  it.each(['fetch', 'body'] as const)(
+    'returns OUTCOME_UNKNOWN when the platform proxy %s never settles',
+    async (stall) => {
+      vi.useFakeTimers();
+      try {
+        let markStarted!: () => void;
+        const started = new Promise<void>((resolve) => {
+          markStarted = resolve;
+        });
+        const proxy = {
+          fetch() {
+            markStarted();
+            if (stall === 'fetch') {
+              return new Promise<Response>(() => {});
+            }
+            return Promise.resolve(
+              new Response(
+                new ReadableStream<Uint8Array>({
+                  start(controller) {
+                    controller.enqueue(new TextEncoder().encode('{"ok":true,"ids":['));
+                  },
+                }),
+              ),
+            );
+          },
+        };
+        const pending = withRuntimeEnv({ __VOID_PROXY: proxy, ...PROXY_ENV_KEYS }, () =>
+          sendEmail({
+            from: 'a@x.dev',
+            to: 'b@y.dev',
+            subject: 's',
+            text: 't',
+            sendInDev: true,
+          }),
+        );
+
+        await started;
+        await vi.advanceTimersByTimeAsync(0);
+        await vi.advanceTimersByTimeAsync(60_000);
+        const result = await pending;
+        expect(result).toMatchObject({ ok: false, error: { code: 'OUTCOME_UNKNOWN' } });
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it('returns OUTCOME_UNKNOWN without reading an oversized proxy response', async () => {
+    const cancel = vi.fn();
+    const proxy = {
+      async fetch() {
+        return new Response(
+          new ReadableStream<Uint8Array>(
+            {
+              cancel,
+              pull() {
+                throw new Error('oversized body must not be read');
+              },
+            },
+            { highWaterMark: 0 },
+          ),
+          { headers: { 'content-length': String(64 * 1024 + 1) } },
+        );
+      },
+    };
+    const result = await withRuntimeEnv({ __VOID_PROXY: proxy, ...PROXY_ENV_KEYS }, () =>
+      sendEmail({
+        from: 'a@x.dev',
+        to: 'b@y.dev',
+        subject: 's',
+        text: 't',
+        sendInDev: true,
+      }),
+    );
+    expect(result).toMatchObject({ ok: false, error: { code: 'OUTCOME_UNKNOWN' } });
+    await vi.waitFor(() => expect(cancel).toHaveBeenCalledOnce());
   });
 
   it('passes mid-batch deliveries through unchanged', async () => {
@@ -958,13 +1155,12 @@ describe('sendEmail (proxy delivery list)', () => {
 // as `ids`: one entry per requested address, each either
 // `{ recipient, ok: true, messageId }` or `{ recipient, ok: false, error }`
 // (the proxy always attaches `error` to a failed entry — both its producer
-// paths do). The documented retry pattern acts on exactly the `ok: false`
-// entries, so a list that skips, repeats or invents a recipient, or an
-// entry that does not state its outcome, cannot be acted on: skipping the
-// bad entry would leave a recipient with no outcome and no retry, and
-// treating an entry with no `ok` as failed would retry a recipient that may
-// have been delivered. Such a response is a schema-skewed or corrupt proxy
-// and is refused as a whole, under the same rules as the success path.
+// paths do). A list that skips, repeats or invents a recipient, or an entry
+// that does not state its outcome, cannot be acted on: skipping the bad entry
+// would leave a recipient with no outcome, and treating an entry with no `ok`
+// as failed could lead to a duplicate delivery. Such a response is a
+// schema-skewed or corrupt proxy and is refused as a whole, under the same
+// rules as the success path.
 describe('sendEmail (proxy mid-batch delivery list)', () => {
   const send = (proxy: ReturnType<typeof fakeProxy>['proxy'], to: string | Array<string>) =>
     withRuntimeEnv({ __VOID_PROXY: proxy, ...PROXY_ENV_KEYS }, () =>
@@ -1181,8 +1377,8 @@ describe('sendEmail (proxy mid-batch delivery list)', () => {
 
   it('does not refuse a mid-batch list in which every entry succeeded', async () => {
     // Contradicts `anyFailed`, but every recipient has a trustworthy
-    // outcome and the retry filter selects nothing. Refusing it would make
-    // the caller retry the whole call and deliver duplicates.
+    // accepted outcome. Refusing it would make the caller treat the whole
+    // call as unknown despite the complete provider evidence.
     const { proxy } = fakeProxy(() => ({
       status: 200,
       body: {

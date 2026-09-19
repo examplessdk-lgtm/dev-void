@@ -816,6 +816,9 @@ export async function runPlatformLifecycleCommand(args: PlatformArgs): Promise<v
       `${result.manifest.deployment.displayName} is installed at ${new URL('/admin', plan.apiUrl).href}.`,
     );
     log.info(`API URL: ${plan.apiUrl}`);
+    if (result.emailOperationId) {
+      log.info(`Shared email routing ready (operation ${result.emailOperationId}).`);
+    }
     const completedAuthCode = readInstallationRecoverySecrets(result.manifest)?.authBootstrapCode;
     if (result.setupPending && completedAuthCode) {
       log.info(`First administrator setup: ${plan.apiUrl}/setup`);

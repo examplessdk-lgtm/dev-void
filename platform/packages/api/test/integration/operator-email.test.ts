@@ -11,7 +11,9 @@ import {
 } from 'vite-plus/test';
 import {
   emailActionRecipients,
+  emailActions,
   emailProjectControls,
+  emailReceipts,
   emailUnresolvedAttempts,
 } from '../../src/email/admission-schema.ts';
 import {
@@ -26,7 +28,7 @@ import {
 } from '../../src/email/settings.ts';
 import type { ApiEnv } from '../../src/env.ts';
 import { app } from '../../src/index.ts';
-import { emailDestinations, operatorEvents, platformSettings } from '../../src/schema.ts';
+import { emailDestinations, operatorEvents, platformSettings, projects } from '../../src/schema.ts';
 import {
   clearTables,
   createOperatorToken,
@@ -85,6 +87,126 @@ async function setting(key: string): Promise<unknown> {
 async function events() {
   return env.db.select().from(operatorEvents);
 }
+
+describe('operator email outcome logs', () => {
+  test('paginates retained receipt and recipient outcomes, including after project deletion', async () => {
+    const owner = await createTestUser(env.db, 'logs-owner');
+    const project = await createTestProject(env.db, owner.id, 'logs-project');
+    const other = await createTestProject(env.db, owner.id, 'other-logs');
+    const createdAt = '2026-09-19T01:02:03Z';
+    for (const [id, projectId] of [
+      ['action-a', project.id],
+      ['action-other', other.id],
+    ] as const) {
+      await env.db.insert(emailActions).values({
+        id,
+        project_id: projectId,
+        sender_domain: 'mail.example.com',
+        kind: 'direct',
+        idempotency_key: 'private-request-key',
+        payload_digest: 'd'.repeat(64),
+        transport: 'binding',
+        policy_version: 3,
+        created_at: createdAt,
+      });
+    }
+    await env.db.insert(emailActionRecipients).values([
+      {
+        id: 'recipient-a',
+        action_id: 'action-a',
+        project_id: project.id,
+        recipient: 'one@example.com',
+        state: 'provider_accepted',
+        provider_reference: 'provider-1',
+      },
+      {
+        id: 'recipient-b',
+        action_id: 'action-a',
+        project_id: project.id,
+        recipient: 'two@example.com',
+        state: 'failed',
+        error_code: 'RATE_LIMIT',
+      },
+      {
+        id: 'recipient-other',
+        action_id: 'action-other',
+        project_id: other.id,
+        recipient: 'other@example.com',
+        state: 'reserved',
+      },
+    ]);
+    await env.db.insert(emailReceipts).values({
+      id: 'receipt-a',
+      project_id: project.id,
+      status: 'handler_completed',
+      created_at: createdAt,
+    });
+    const page1 = await req(`/email/projects/${project.slug}/logs?limit=2`);
+    expect(page1.status).toBe(200);
+    const first = (await page1.json()) as {
+      projectId: string;
+      logs: Array<Record<string, unknown>>;
+    };
+    expect(first.projectId).toBe(project.id);
+    expect(first.logs).toHaveLength(2);
+    const second = (await (
+      await req(`/email/projects/${project.id}/logs?limit=2&page=2`)
+    ).json()) as { logs: Array<Record<string, unknown>> };
+    expect(second.logs).toHaveLength(1);
+    const all = [...first.logs, ...second.logs];
+    expect(all).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          operationId: 'action-a',
+          recipient: 'one@example.com',
+          status: 'provider_accepted',
+          providerReference: 'provider-1',
+          policyVersion: 3,
+          timestamp: Date.parse(createdAt),
+        }),
+        expect.objectContaining({
+          operationId: 'action-a',
+          recipient: 'two@example.com',
+          status: 'failed',
+          errorCode: 'RATE_LIMIT',
+        }),
+        expect.objectContaining({
+          operationId: 'receipt-a',
+          receiptId: 'receipt-a',
+          direction: 'received',
+          recipient: null,
+        }),
+      ]),
+    );
+    for (const log of all) {
+      expect(Object.keys(log).sort()).toEqual([
+        'direction',
+        'errorCode',
+        'operationId',
+        'policyVersion',
+        'providerReference',
+        'receiptId',
+        'recipient',
+        'status',
+        'timestamp',
+        'transport',
+      ]);
+    }
+    await env.db.delete(projects).where(eq(projects.id, project.id));
+    expect(await (await req(`/email/projects/${project.id}/logs?limit=2`)).json()).toMatchObject(
+      first,
+    );
+    expect(await events()).toHaveLength(0);
+  });
+
+  test('requires operator authentication and bounds outcome log pages', async () => {
+    for (const query of ['limit=101', 'page=0', 'page=1000001']) {
+      expect((await req(`/email/projects/retained-project/logs?${query}`)).status).toBe(400);
+    }
+    token = 'invalid';
+    expect((await req('/email/projects/retained-project/logs')).status).toBe(401);
+  });
+});
 
 describe('operator email recipient policy', () => {
   test('defaults to verified-only and repairs a missing mirror on read', async () => {

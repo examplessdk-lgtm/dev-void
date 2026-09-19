@@ -69,16 +69,6 @@ export type RelayScriptUpload = Readonly<{
   ingressName: string;
 }>;
 
-export type SendRawMessage = Readonly<{
-  from: string;
-  recipients: ReadonlyArray<string>;
-  mime_message: string;
-}>;
-
-export type SendRawResult = Readonly<{
-  message_id?: string;
-}>;
-
 export type CfCatchAllRule = Readonly<{
   enabled: boolean;
   /** The worker name a 'worker' action points at; null for any other action shape. */
@@ -154,8 +144,6 @@ export type CfCustomerClient = Readonly<{
   getRoutingSettings: (zoneId: string) => Promise<unknown>;
   /** DELETE the relay script. 404 is success — the customer may have deleted it themselves. */
   deleteRelayScript: (accountId: string, scriptName: string) => Promise<void>;
-  /** POST /accounts/{a}/email/sending/send_raw — the REST send (contract 5). */
-  sendRaw: (accountId: string, message: SendRawMessage) => Promise<SendRawResult>;
 }>;
 
 export function createCfCustomerClient(credential: string): CfCustomerClient {
@@ -405,11 +393,5 @@ export function createCfCustomerClient(credential: string): CfCustomerClient {
         throw err;
       }
     },
-
-    sendRaw: (accountId, message) =>
-      call<SendRawResult>(`/accounts/${accountId}/email/sending/send_raw`, {
-        method: 'POST',
-        body: JSON.stringify(message),
-      }),
   };
 }

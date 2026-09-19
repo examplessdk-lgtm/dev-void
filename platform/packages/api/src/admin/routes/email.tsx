@@ -1,12 +1,8 @@
-import { asc, desc, eq, gte, inArray, sql } from 'drizzle-orm';
+import { asc, desc, eq, inArray, sql } from 'drizzle-orm';
 import { Hono, type Context } from 'hono';
 import { getPlatformCapabilities } from '../../capabilities.ts';
 import { deleteEmailDestination, getEmailDestinationsByProjectId, getProject } from '../../db.ts';
-import {
-  emailMonthlyUsage,
-  emailProjectControls,
-  emailReceipts,
-} from '../../email/admission-schema.ts';
+import { emailMonthlyUsage, emailProjectControls } from '../../email/admission-schema.ts';
 import { setProjectEmailLimits, setProjectEmailSuspended } from '../../email/admission.ts';
 import {
   emailDomainRoutes,
@@ -50,18 +46,41 @@ app.use('*', async (context, next) => {
   await next();
 });
 
-/** Operator email settings and project usage from the email ledger. */
-const recvKey = (projectId: string, month: string) => `email-recv:${projectId}:${month}`;
-
 /** The admin layout has no utility classes, so secondary text is inline. */
 const META = 'font-size: 0.8rem; color: #666';
+
+type AdminEmailOperationOutcome = {
+  operationId?: string;
+  operationStatus?: typeof emailOperations.$inferSelect.status | null;
+  error?: string | null;
+};
+
+async function incompleteEmailOperationResponse(
+  context: Context<ApiEnv>,
+  projectId: string,
+  label: string,
+  outcome: AdminEmailOperationOutcome,
+): Promise<Response> {
+  const status = outcome.operationStatus ?? 'pending';
+  return context.html(
+    <Layout title={label} username={context.get('user').login}>
+      <h1>
+        {label} {status}
+      </h1>
+      <p>{outcome.error ?? 'The operation has not completed. Check its status before retrying.'}</p>
+      <p>
+        Operation ID: <code>{outcome.operationId ?? 'unavailable'}</code>
+      </p>
+      <a href={`/admin/email/${projectId}`}>Back to email settings</a>
+    </Layout>,
+    status === 'blocked' || status === 'unknown' ? 409 : 202,
+  );
+}
 
 // GET /email/ — installation-wide recipient policy and domain management
 app.get('/', async (context) => {
   const db = context.get('db');
-  // Every read surface republishes a drifted mirror, this page included:
-  // an administrator who sees `verified` here must be seeing what the
-  // proxy enforces.
+  // Refresh the best-effort display mirror before showing the authoritative SQL policy.
   await repairEmailRecipientPolicyMirror(db, context.env.ROUTING);
   const [policy, management] = await Promise.all([
     getEmailRecipientPolicy(db),
@@ -115,21 +134,16 @@ app.get('/:projectId', async (context) => {
   }
 
   const month = monthBucket();
-  const monthStart = `${month}-01T00:00:00.000Z`;
-  const [sentRows, receivedRows, controls, destinations, domainRows] = await Promise.all([
+  const [usageRows, controls, destinations, domainRows] = await Promise.all([
     context
       .get('db')
-      .select({ count: emailMonthlyUsage.recipient_attempts })
+      .select({
+        attempts: emailMonthlyUsage.recipient_attempts,
+        received: emailMonthlyUsage.inbound_receipts,
+      })
       .from(emailMonthlyUsage)
       .where(
         sql`${emailMonthlyUsage.project_id} = ${projectId} AND ${emailMonthlyUsage.month} = ${month}`,
-      ),
-    context
-      .get('db')
-      .select({ count: sql<number>`count(*)::int` })
-      .from(emailReceipts)
-      .where(
-        sql`${emailReceipts.project_id} = ${projectId} AND ${emailReceipts.created_at} >= ${monthStart}::timestamptz`,
       ),
     context
       .get('db')
@@ -149,8 +163,8 @@ app.get('/:projectId', async (context) => {
       .where(eq(emailDomainRoutes.project_id, projectId))
       .orderBy(asc(emailDomainRoutes.created_at)),
   ]);
-  const sent = sentRows[0]?.count ?? 0;
-  const received = receivedRows[0]?.count ?? 0;
+  const attempts = usageRows[0]?.attempts ?? 0;
+  const received = usageRows[0]?.received ?? 0;
   const latestOperations = domainRows.length
     ? await context
         .get('db')
@@ -237,9 +251,9 @@ app.get('/:projectId', async (context) => {
       <table>
         <tbody>
           <tr>
-            <th>Outbound (sent)</th>
+            <th>Outbound recipient attempts</th>
             <td>
-              {sent} / {monthlyLimit ?? DEFAULT_MONTHLY_LIMIT}{' '}
+              {attempts} / {monthlyLimit ?? DEFAULT_MONTHLY_LIMIT}{' '}
               <span style={META}>({monthlyLimit === undefined ? 'default' : 'override'})</span>
             </td>
           </tr>
@@ -269,9 +283,9 @@ app.get('/:projectId', async (context) => {
           {isSuspended ? 'Unsuspend email' : 'Suspend email'}
         </button>{' '}
         <span style={META}>
-          Suspending stops mail in both directions immediately. Outbound sends fail, and inbound
-          messages are rejected with a permanent SMTP error, so the sender gets a bounce rather than
-          a silent drop. There is no per-direction switch.
+          Suspending stops new outbound attempts and rejects new inbound messages with a permanent
+          SMTP error. Outbound submissions that already started may still finish. There is no
+          per-direction switch.
         </span>
       </form>
 
@@ -498,35 +512,14 @@ app.post('/:projectId/domains/add', async (context) => {
           typeof json.error === 'string' ? json.error : 'Adding the email domain failed.',
         );
       }
-      const row = (await res.json()) as {
-        status?: string;
-        error?: string;
-        setup_state?: { failed_step?: string };
-      };
-      if (
-        row.status === 'failed' ||
-        row.status === 'token_revoked' ||
-        row.status === 'token_expired'
-      ) {
-        const message =
-          row.error ??
-          (row.setup_state?.failed_step
-            ? `Setup failed at step "${row.setup_state.failed_step}".`
-            : 'The email domain setup did not finish.');
+      const outcome = (await res.json()) as AdminEmailOperationOutcome;
+      if (outcome.operationStatus !== 'completed') {
         return {
-          response: await context.html(
-            <Layout title={`Adding ${domain} did not finish`} username={context.get('user').login}>
-              <h1>Adding {domain} did not finish</h1>
-              <p>{message}</p>
-              <p>
-                Fix the step named above, then add the domain again — adding again retries it; rules
-                stay.
-              </p>
-              <p>
-                <a href={`/admin/email/${projectId}`}>&larr; Back to project email</a>
-              </p>
-            </Layout>,
-            502,
+          response: await incompleteEmailOperationResponse(
+            context,
+            projectId,
+            `Adding ${domain}`,
+            outcome,
           ),
           succeeded: false,
         };
@@ -545,14 +538,18 @@ app.post('/:projectId/suspend', async (context) => {
   }
   const body = await context.req.parseBody();
   const desired = body.state;
-  if (desired === 'suspended') {
-    await setProjectEmailSuspended(context.get('db'), projectId, true);
-  } else if (desired === 'active') {
-    await setProjectEmailSuspended(context.get('db'), projectId, false);
-  } else {
+  if (desired !== 'suspended' && desired !== 'active') {
     return context.html('<h1>Invalid state</h1><p>Expected "suspended" or "active".</p>', 400);
   }
-  return context.redirect(`/admin/email/${projectId}`);
+  const suspended = desired === 'suspended';
+  return executeAuditedMutation(
+    context,
+    operatorAuditIntent(`email/projects/${projectId}/suspend`, { suspended }),
+    async () => {
+      await setProjectEmailSuspended(context.get('db'), projectId, suspended);
+      return { response: context.redirect(`/admin/email/${projectId}`), succeeded: true };
+    },
+  );
 });
 
 // POST /email/:projectId/limit — set (or clear) the monthly outbound override
@@ -574,15 +571,21 @@ app.post('/:projectId/destinations/:destId/delete', async (context) => {
   if (!destination) {
     return context.html('<h1>Destination not found</h1>', 404);
   }
-  const cleanupTag = await deleteEmailDestination(context.get('db'), destination.id);
-  if (cleanupTag) {
-    await runEmailDestinationCleanup(
-      context.get('db'),
-      { accountId: context.env.CF_ACCOUNT_ID, apiToken: context.env.CF_API_TOKEN },
-      cleanupTag,
-    );
-  }
-  return context.redirect(`/admin/email/${projectId}`);
+  return executeAuditedMutation(
+    context,
+    operatorAuditIntent(`email/projects/${projectId}/destinations/${destinationId}/remove`),
+    async () => {
+      const cleanupTag = await deleteEmailDestination(context.get('db'), destination.id);
+      if (cleanupTag) {
+        await runEmailDestinationCleanup(
+          context.get('db'),
+          { accountId: context.env.CF_ACCOUNT_ID, apiToken: context.env.CF_API_TOKEN },
+          cleanupTag,
+        );
+      }
+      return { response: context.redirect(`/admin/email/${projectId}`), succeeded: true };
+    },
+  );
 });
 
 // An administrator removes one exact assignment through the same durable
@@ -597,37 +600,36 @@ app.post('/:projectId/domains/:domain/revoke', async (context) => {
   if (body.confirm !== project.slug) {
     return context.html('<h1>Not confirmed</h1>', 400);
   }
-  const result = await removeEmailDomainForProject(
+  const domain = context.req.param('domain');
+  return executeAuditedMutation(
     context,
-    project,
-    context.req.param('domain'),
-    'admin',
+    operatorAuditIntent(`email/domains/${domain}/remove`, { force: false }),
+    async () => {
+      const result = await removeEmailDomainForProject(context, project, domain, 'admin');
+      if (!result.ok) {
+        return {
+          response: await context.html(
+            '<h1>Email domain removal failed</h1>',
+            result.status as 400,
+          ),
+          succeeded: false,
+        };
+      }
+      const outcome = (await result.json()) as AdminEmailOperationOutcome;
+      if (outcome.operationStatus !== 'completed') {
+        return {
+          response: await incompleteEmailOperationResponse(
+            context,
+            projectId,
+            'Email domain removal',
+            outcome,
+          ),
+          succeeded: false,
+        };
+      }
+      return { response: context.redirect(`/admin/email/${projectId}`), succeeded: true };
+    },
   );
-  if (!result.ok) {
-    return context.html('<h1>Email domain removal failed</h1>', result.status as 400);
-  }
-  const outcome = (await result.json()) as {
-    operationId?: string;
-    operationStatus?: string;
-    error?: string;
-  };
-  if (outcome.operationStatus !== 'completed') {
-    return context.html(
-      <Layout title="Email domain removal" username={context.get('user').login}>
-        <h1>Email domain removal {outcome.operationStatus ?? 'pending'}</h1>
-        <p>
-          {outcome.error ??
-            'The operation has not completed. Check the domain status before retrying.'}
-        </p>
-        <p>
-          Operation ID: <code>{outcome.operationId ?? 'unavailable'}</code>
-        </p>
-        <a href={`/admin/email/${projectId}`}>Back to email settings</a>
-      </Layout>,
-      outcome.operationStatus === 'blocked' || outcome.operationStatus === 'unknown' ? 409 : 202,
-    );
-  }
-  return context.redirect(`/admin/email/${projectId}`);
 });
 
 app.post('/:projectId/domains/:domain/rotate-secret', async (context) => {
@@ -636,37 +638,36 @@ app.post('/:projectId/domains/:domain/rotate-secret', async (context) => {
   if (!project) {
     return context.html('<h1>Project not found</h1>', 404);
   }
-  const result = await rotateEmailIngressSecretForProject(
+  const domain = context.req.param('domain');
+  return executeAuditedMutation(
     context,
-    project,
-    context.req.param('domain'),
-    'admin',
+    operatorAuditIntent(`email/domains/${domain}/rotate-secret`),
+    async () => {
+      const result = await rotateEmailIngressSecretForProject(context, project, domain, 'admin');
+      if (!result.ok) {
+        return {
+          response: await context.html(
+            '<h1>Email ingress rotation failed</h1>',
+            result.status as 400,
+          ),
+          succeeded: false,
+        };
+      }
+      const outcome = (await result.json()) as AdminEmailOperationOutcome;
+      if (outcome.operationStatus !== 'completed') {
+        return {
+          response: await incompleteEmailOperationResponse(
+            context,
+            projectId,
+            'Email ingress rotation',
+            outcome,
+          ),
+          succeeded: false,
+        };
+      }
+      return { response: context.redirect(`/admin/email/${projectId}`), succeeded: true };
+    },
   );
-  if (!result.ok) {
-    return context.html('<h1>Email ingress rotation failed</h1>', result.status as 400);
-  }
-  const outcome = (await result.json()) as {
-    operationId?: string;
-    operationStatus?: string;
-    error?: string;
-  };
-  if (outcome.operationStatus !== 'completed') {
-    return context.html(
-      <Layout title="Email ingress rotation" username={context.get('user').login}>
-        <h1>Email ingress rotation {outcome.operationStatus ?? 'pending'}</h1>
-        <p>
-          {outcome.error ??
-            'The operation has not completed. Check the domain status before retrying.'}
-        </p>
-        <p>
-          Operation ID: <code>{outcome.operationId ?? 'unavailable'}</code>
-        </p>
-        <a href={`/admin/email/${projectId}`}>Back to email settings</a>
-      </Layout>,
-      outcome.operationStatus === 'blocked' || outcome.operationStatus === 'unknown' ? 409 : 202,
-    );
-  }
-  return context.redirect(`/admin/email/${projectId}`);
 });
 
 /**
@@ -686,16 +687,20 @@ async function setLimit(
   const body = await context.req.parseBody();
   const submitted = body[field];
   const raw = typeof submitted === 'string' ? submitted.trim() : '';
-  if (raw === '') {
-    await setProjectEmailLimits(context.get('db'), projectId, { [kind]: null });
-    return context.redirect(`/admin/email/${projectId}`);
-  }
-  const limit = parseEmailLimitInput(raw);
+  const limit = raw === '' ? null : parseEmailLimitInput(raw);
   if (limit === undefined) {
     return context.html('<h1>Invalid limit</h1><p>Expected a positive integer, or blank.</p>', 400);
   }
-  await setProjectEmailLimits(context.get('db'), projectId, { [kind]: limit });
-  return context.redirect(`/admin/email/${projectId}`);
+  return executeAuditedMutation(
+    context,
+    operatorAuditIntent(`email/projects/${projectId}/limit`, {
+      [kind]: limit === null ? 'default' : String(limit),
+    }),
+    async () => {
+      await setProjectEmailLimits(context.get('db'), projectId, { [kind]: limit });
+      return { response: context.redirect(`/admin/email/${projectId}`), succeeded: true };
+    },
+  );
 }
 
 /** Domain readiness uses the shared status palette. */

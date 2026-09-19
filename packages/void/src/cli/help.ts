@@ -77,11 +77,11 @@ function operatorHelpTree(): HelpTree {
                         {
                           command: '--limit <number>',
                           description:
-                            entry.action === 'logs'
+                            entry.action === 'logs' && group !== 'email'
                               ? 'Maximum 500 log records'
                               : 'Maximum 100 records per page',
                         },
-                        ...(entry.action !== 'logs'
+                        ...(entry.action !== 'logs' || group === 'email'
                           ? [{ command: '--page <number>', description: 'One-based page number' }]
                           : []),
                       ]
@@ -97,7 +97,11 @@ function operatorHelpTree(): HelpTree {
                         ? 'Poll new logs until interrupted or the build ends'
                         : flag === 'ended'
                           ? 'Attest that the original provider execution has ended'
-                          : 'Read a full API session from stdin for explicit operator session exchange',
+                          : flag === 'token-stdin' && group === 'email'
+                            ? entry.action === 'domain-remove'
+                              ? 'Read a replacement Cloudflare token for blocked project cleanup from stdin'
+                              : 'Read a scoped Cloudflare API token from stdin'
+                            : 'Read a full API session from stdin for explicit operator session exchange',
                   })),
                 ],
               },

@@ -2,6 +2,7 @@
 // Native Cloudflare email events use the same proxy, then enact its actions on
 // the original message before returning.
 
+import { EMAIL_MAX_RESPONSE_BYTES } from '@void/platform/email-protocol';
 import type { Email as PostalMimeEmail } from 'postal-mime';
 import { getRawRuntimeEnv } from '../env-raw.ts';
 import { buildMime, MimeError, normalizeEmail, validateAddressParts } from './mime.ts';
@@ -29,10 +30,19 @@ export const MAX_REJECT_REASON_LENGTH: number = 1000;
 export const MAX_INBOUND_BYTES: number = 10 * 1024 * 1024;
 export const MAX_INBOUND_HEADERS: number = 1024;
 
-// The protocol encoder additionally counts framing and metadata toward its
-// total response budget.
 const MAX_REPLY_BYTES = 5 * 1024 * 1024;
-const MAX_REPLY_BYTES_TOTAL = 8 * 1024 * 1024;
+const EMAIL_STREAM_DEADLINE_MS = 15_000;
+const EMAIL_ACTION_TERMINAL_BYTES = 5;
+const actionEncoder = new TextEncoder();
+
+function emailActionWireSize(action: EmailAction): number {
+  const metadata = actionEncoder.encode(
+    JSON.stringify(
+      action.type === 'reply' ? { type: action.type, from: action.from, to: action.to } : action,
+    ),
+  );
+  return 5 + metadata.byteLength + (action.type === 'reply' ? 5 + action.raw.byteLength : 0);
+}
 
 function readRawProjectSlug(): string | undefined {
   let raw: unknown;
@@ -243,8 +253,8 @@ function replyTooLarge(size: number): MimeError {
 function replyBudgetExhausted(size: number): MimeError {
   return new MimeError(
     'MIME_ERROR',
-    `reply: cumulative reply size ${size} bytes exceeds this delivery's budget of ` +
-      `${MAX_REPLY_BYTES_TOTAL} bytes.`,
+    `reply: serialized actions would use ${size} bytes, over this delivery's ` +
+      `${EMAIL_MAX_RESPONSE_BYTES}-byte response budget.`,
   );
 }
 
@@ -361,18 +371,47 @@ async function readStreamToBytes(
   const reader = stream.getReader();
   const chunks: Array<Uint8Array> = [];
   let total = 0;
-  for (;;) {
-    const { value, done } = await reader.read();
-    if (done) {
-      break;
+  const deadline = Date.now() + EMAIL_STREAM_DEADLINE_MS;
+  try {
+    for (;;) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        throw new MimeError('MIME_ERROR', 'email stream timed out');
+      }
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const { value, done } = await Promise.race([
+        reader.read(),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () => reject(new MimeError('MIME_ERROR', 'email stream timed out')),
+            remaining,
+          );
+        }),
+      ]).finally(() => {
+        if (timer !== undefined) {
+          clearTimeout(timer);
+        }
+      });
+      if (done) {
+        break;
+      }
+      total += value.byteLength;
+      if (total > limit) {
+        throw onOverflow(total);
+      }
+      chunks.push(value);
     }
-    total += value.byteLength;
-    if (total > limit) {
-      // Stop pulling: the producer would otherwise keep filling memory.
-      await reader.cancel().catch(() => {});
-      throw onOverflow(total);
+  } catch (error) {
+    // Cancellation is cleanup, not part of the stream deadline. A custom
+    // handler stream may never settle its underlying cancel algorithm.
+    void reader.cancel().catch(() => {});
+    throw error;
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {
+      // A timed-out read may still be settling after cancellation.
     }
-    chunks.push(value);
   }
   const out = new Uint8Array(total);
   let offset = 0;
@@ -466,12 +505,32 @@ export function createMessageProxy(
   }
 
   let rejected = false;
-  let replyBytesUsed = 0;
+  // The gateway counts every metadata/raw frame and the terminal frame, so
+  // reserve that terminal here and reject an action before recording it.
+  let actionWireBytesUsed = EMAIL_ACTION_TERMINAL_BYTES;
+  let pendingReplies = 0;
+  let replyRecordingTail: Promise<void> = Promise.resolve();
+
+  function recordAction(action: EmailAction): boolean {
+    if (rejected) {
+      return false;
+    }
+    if (actions.length >= MAX_ACTIONS) {
+      throw queueFull();
+    }
+    const nextSize = actionWireBytesUsed + emailActionWireSize(action);
+    if (nextSize > EMAIL_MAX_RESPONSE_BYTES) {
+      throw replyBudgetExhausted(nextSize);
+    }
+    actions.push(action);
+    actionWireBytesUsed = nextSize;
+    return true;
+  }
 
   // `actions` only ever grows through forward/reply, and `setReject` purges
   // both, so length IS the queue depth.
   function assertQueueHasRoom(): void {
-    if (actions.length >= MAX_ACTIONS) {
+    if (actions.length + pendingReplies >= MAX_ACTIONS) {
       throw queueFull();
     }
   }
@@ -522,7 +581,9 @@ export function createMessageProxy(
             'Move the reject earlier in the handler.',
         );
       }
-      actions.push({ type: 'reject', reason: normalizeRejectReason(reason) });
+      const action = { type: 'reject' as const, reason: normalizeRejectReason(reason) };
+      actions.push(action);
+      actionWireBytesUsed = EMAIL_ACTION_TERMINAL_BYTES + emailActionWireSize(action);
     },
     async forward(to: string, fwdHeaders?: Headers | Record<string, string>) {
       if (rejected) {
@@ -573,7 +634,7 @@ export function createMessageProxy(
           `forward: action metadata exceeds ${MAX_ACTION_METADATA_BYTES} bytes.`,
         );
       }
-      actions.push(action);
+      void recordAction(action);
     },
     async reply(reply: { from: string; to: string; raw: ReadableStream<Uint8Array> | Uint8Array }) {
       if (rejected) {
@@ -598,49 +659,84 @@ export function createMessageProxy(
       // every earlier action had fired. Both are bare addresses.
       validateAddressParts('from', reply.from);
       validateAddressParts('to', reply.to);
-      // `replyEmail()` is bounded by `buildMime`; a hand-built reply is not, so
-      // bound it here before the bytes travel to the proxy (or to native reply).
-      const remaining = MAX_REPLY_BYTES_TOTAL - replyBytesUsed;
-      let rawBytes: Uint8Array;
-      if (reply.raw instanceof Uint8Array) {
-        if (reply.raw.byteLength > MAX_REPLY_BYTES) {
-          throw replyTooLarge(reply.raw.byteLength);
+      pendingReplies++;
+      const previousReply = replyRecordingTail;
+      let releaseReply!: () => void;
+      replyRecordingTail = new Promise<void>((resolve) => {
+        releaseReply = resolve;
+      });
+      await previousReply;
+      try {
+        if (rejected) {
+          console.warn(
+            '[void/email] reply() completed after setReject() — ignored. ' +
+              'CF rejects are terminal: nothing else runs once setReject fires.',
+          );
+          return;
         }
-        if (reply.raw.byteLength > remaining) {
-          throw replyBudgetExhausted(replyBytesUsed + reply.raw.byteLength);
+        // `replyEmail()` is bounded by `buildMime`; a hand-built reply is not, so
+        // bound it here before the bytes travel to the proxy (or to native reply).
+        const metadataOnlyAction = {
+          type: 'reply' as const,
+          from: reply.from,
+          to: reply.to,
+          raw: new Uint8Array(),
+        };
+        const replyFrameBytes = emailActionWireSize(metadataOnlyAction);
+        const remaining = EMAIL_MAX_RESPONSE_BYTES - actionWireBytesUsed - replyFrameBytes;
+        if (remaining < 0) {
+          throw replyBudgetExhausted(EMAIL_MAX_RESPONSE_BYTES - remaining);
         }
-        rawBytes = reply.raw;
-      } else {
-        // A native `EmailMessage` lands here: `from` and `to` only, no `raw`.
-        // Name the problem instead of failing on `undefined.getReader()`,
-        // which in platform mode is a generic "project handler error" bounce
-        // with nothing a handler author could act on.
-        const raw: unknown = reply.raw;
-        if (
-          typeof raw !== 'object' ||
-          raw === null ||
-          typeof (raw as ReadableStream<Uint8Array>).getReader !== 'function'
-        ) {
-          throw new MimeError(
-            'MIME_ERROR',
-            'reply: expected { from, to, raw } with raw as a Uint8Array or ReadableStream. ' +
-              'A native EmailMessage cannot be replayed from a Void handler — its body has ' +
-              'no public accessor. Use replyEmail() from void/email, or pass the MIME bytes as raw.',
+        let rawBytes: Uint8Array;
+        if (reply.raw instanceof Uint8Array) {
+          if (reply.raw.byteLength > MAX_REPLY_BYTES) {
+            throw replyTooLarge(reply.raw.byteLength);
+          }
+          if (reply.raw.byteLength > remaining) {
+            throw replyBudgetExhausted(
+              actionWireBytesUsed + replyFrameBytes + reply.raw.byteLength,
+            );
+          }
+          rawBytes = reply.raw;
+        } else {
+          // A native `EmailMessage` lands here: `from` and `to` only, no `raw`.
+          // Name the problem instead of failing on `undefined.getReader()`,
+          // which in platform mode is a generic "project handler error" bounce
+          // with nothing a handler author could act on.
+          const raw: unknown = reply.raw;
+          if (
+            typeof raw !== 'object' ||
+            raw === null ||
+            typeof (raw as ReadableStream<Uint8Array>).getReader !== 'function'
+          ) {
+            throw new MimeError(
+              'MIME_ERROR',
+              'reply: expected { from, to, raw } with raw as a Uint8Array or ReadableStream. ' +
+                'A native EmailMessage cannot be replayed from a Void handler — its body has ' +
+                'no public accessor. Use replyEmail() from void/email, or pass the MIME bytes as raw.',
+            );
+          }
+          // The REMAINING budget, not the per-reply cap — an earlier reply has
+          // already spent part of it, and the stream must stop where the budget
+          // does. Whichever bound is lower is the one that fires, so the
+          // callback names the one that actually bound this read.
+          const limit = Math.min(MAX_REPLY_BYTES, remaining);
+          rawBytes = await readStreamToBytes(reply.raw, limit, (total) =>
+            limit === MAX_REPLY_BYTES
+              ? replyTooLarge(total)
+              : replyBudgetExhausted(actionWireBytesUsed + replyFrameBytes + total),
           );
         }
-        // The REMAINING budget, not the per-reply cap — an earlier reply has
-        // already spent part of it, and the stream must stop where the budget
-        // does. Whichever bound is lower is the one that fires, so the
-        // callback names the one that actually bound this read.
-        const limit = Math.min(MAX_REPLY_BYTES, remaining);
-        rawBytes = await readStreamToBytes(reply.raw, limit, (total) =>
-          limit === MAX_REPLY_BYTES
-            ? replyTooLarge(total)
-            : replyBudgetExhausted(replyBytesUsed + total),
-        );
+        if (!recordAction({ type: 'reply', from: reply.from, to: reply.to, raw: rawBytes })) {
+          console.warn(
+            '[void/email] reply() completed after setReject() — ignored. ' +
+              'CF rejects are terminal: nothing else runs once setReject fires.',
+          );
+        }
+      } finally {
+        pendingReplies--;
+        releaseReply();
       }
-      replyBytesUsed += rawBytes.byteLength;
-      actions.push({ type: 'reply', from: reply.from, to: reply.to, raw: rawBytes });
     },
   } as unknown as ForwardableEmailMessage;
 
@@ -1236,6 +1332,43 @@ export function isForwardableEmailMessage(value: unknown): value is ForwardableE
   );
 }
 
+const INBOUND_PROVIDER_DEADLINE_MS = 30_000;
+const INBOUND_ACTION_BATCH_DEADLINE_MS = 60_000;
+
+function createInboundProviderDeadline() {
+  const deadline = Date.now() + INBOUND_ACTION_BATCH_DEADLINE_MS;
+  return {
+    async run<T>(submit: () => Promise<T>): Promise<T> {
+      const remaining = Math.min(INBOUND_PROVIDER_DEADLINE_MS, deadline - Date.now());
+      if (remaining <= 0) {
+        throw new Error('email action batch deadline elapsed before provider submission');
+      }
+      const work = submit();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        return await Promise.race([
+          work,
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(
+              () =>
+                reject(
+                  new Error(
+                    'email action provider timed out; outcome unknown, do not retry automatically',
+                  ),
+                ),
+              remaining,
+            );
+          }),
+        ]);
+      } finally {
+        if (timer !== undefined) {
+          clearTimeout(timer);
+        }
+      }
+    },
+  };
+}
+
 /**
  * Replay recorded `EmailAction`s on a real `ForwardableEmailMessage`, in
  * order. The proxy already made `setReject` terminal (earlier forward/reply
@@ -1251,18 +1384,23 @@ export async function enactEmailActions(
   message: ForwardableEmailMessage,
   actions: ReadonlyArray<EmailAction>,
 ): Promise<void> {
+  const providerDeadline = createInboundProviderDeadline();
   for (const action of actions) {
     switch (action.type) {
       case 'reject':
         message.setReject(action.reason);
         break;
       case 'forward':
-        await message.forward(action.to, action.headers ? new Headers(action.headers) : undefined);
+        await providerDeadline.run(() =>
+          message.forward(action.to, action.headers ? new Headers(action.headers) : undefined),
+        );
         break;
       case 'reply': {
         const { EmailMessage } = await import('cloudflare:email');
-        await message.reply(
-          new EmailMessage(action.from, action.to, bytesToReadableStream(action.raw)),
+        await providerDeadline.run(() =>
+          message.reply(
+            new EmailMessage(action.from, action.to, bytesToReadableStream(action.raw)),
+          ),
         );
         break;
       }

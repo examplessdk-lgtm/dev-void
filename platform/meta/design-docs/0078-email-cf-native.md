@@ -267,6 +267,18 @@ outcome or stop for operator recovery. Repeat only an operation demonstrated to
 be idempotent with the same stored payload. A late response cannot overwrite a
 newer database generation.
 
+For provider mutations whose outcome cannot always be proved by read-back
+(`routing_enable`, `ingress_deploy`, `probe_route_enable`, `secret_put`,
+`catchall_ensure`, `sending_onboard`, `catchall_detach`, and `ingress_delete`),
+operator recovery requires the original execution to have ended, a minimum age
+of 24 hours, an explicit `applied` or `not-applied` attestation, and an audit
+reason. Preview and apply are fenced by operation, step, attempt, connection and
+route generation, resource identity, and request digest. Applied records the
+database postcondition without repeating the provider write; not-applied retries
+only when the current runtime reproduces the stored identity and digest. For a
+secret write, that identity includes the staged generation. Elapsed time alone
+never permits replay.
+
 Setup proceeds through:
 
 1. Resolve the exact account and zone, check grant scope, inspect existing MX and
@@ -367,6 +379,14 @@ failure leaves a retryable cleanup operation, including after project teardown.
 Removal never discards an unresolved cleanup record; its operation remains visible
 until the provider resources have been reconciled.
 
+When project teardown leaves the final assignment disabled with a blocked system
+cleanup, an administrator may provide a replacement scoped API token through
+`void platform email domain-remove --token-stdin`. Verify that the replacement is
+active and can read the same account and zone before committing it. Require the
+project to be missing or deleting and no live sibling assignment; preserve the
+connection manager, cleanup operation, and connection/route generations. This
+does not authorize taking over a live project or retrying an uncertain write.
+
 Recipient consent removal follows the same durability rule. Commit revocation and
 cleanup intent together, then delete an unreferenced Cloudflare destination outside
 the transaction. Fence registration against that immutable provider tag before
@@ -446,6 +466,12 @@ flowchart TD
 
 ### Policy and atomic quotas
 
+Provider submissions have a 30-second wait limit within a 60-second batch
+budget. Expiry never proves a provider refusal: started submissions stay unknown,
+and only reservations proven unstarted may be cancelled and refunded. Native
+bindings may finish after the caller stops waiting; do not automatically retry
+them. The zone relay also bounds its fetch and upload together to 60 seconds.
+
 PostgreSQL is the authority for project identity, exact-domain ownership, verified
 destination consent, installation policy, suspension and quota reservations. KV
 may suggest a route or accelerate display, but cannot independently authorize
@@ -500,6 +526,9 @@ that commit but before the actual call is conservatively unknown. A retry that i
 known safe is a new provider attempt with a fresh quota check and debit. Concurrent
 retries cannot consume one reservation twice. Account-level Cloudflare limits
 remain additional constraints, including when several projects share an account.
+Hourly cleanup cancels and refunds reservations older than 15 minutes only while
+they remain `reserved`; a delayed start fails if cleanup won, and
+`attempt_started` is never resolved by age alone.
 
 ### Cache publication
 

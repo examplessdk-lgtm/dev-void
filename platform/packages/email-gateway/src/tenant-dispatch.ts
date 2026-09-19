@@ -9,6 +9,8 @@ import {
 } from '@void/platform/email-protocol';
 
 const MAX_CONCURRENT_PER_PROJECT = 8;
+const TENANT_DISPATCH_DEADLINE_MS = 20_000;
+const TENANT_RESPONSE_DEADLINE_MS = 15_000;
 const active = new Map<string, number>();
 
 export async function dispatchBoundedEmailToTenant(
@@ -33,6 +35,9 @@ export async function dispatchBoundedEmailToTenant(
     throw new Error('email project concurrency exceeded');
   }
   active.set(input.projectId, count + 1);
+  const deadline = Date.now() + TENANT_DISPATCH_DEADLINE_MS;
+  const controller = new AbortController();
+  let response: Response | undefined;
   try {
     const receipt = await signEmailReceipt(
       {
@@ -45,16 +50,35 @@ export async function dispatchBoundedEmailToTenant(
       },
       env.JWT_SECRET,
     );
-    const response = await stub.fetch(`https://worker${EMAIL_RECEIPT_PATH}`, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/vnd.void.email-envelope; version=1',
-        'x-void-email-receipt': receipt,
-        'x-void-email-recipient': input.envelope.to,
-      },
-      body: encodeEmailEnvelope(input.envelope),
-      signal: AbortSignal.timeout(20_000),
-    });
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      throw new Error('email tenant request timeout');
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      response = await Promise.race([
+        stub.fetch(`https://worker${EMAIL_RECEIPT_PATH}`, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/vnd.void.email-envelope; version=1',
+            'x-void-email-receipt': receipt,
+            'x-void-email-recipient': input.envelope.to,
+          },
+          body: encodeEmailEnvelope(input.envelope),
+          signal: controller.signal,
+        }),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            controller.abort();
+            reject(new Error('email tenant request timeout'));
+          }, remaining);
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) {
+        clearTimeout(timer);
+      }
+    }
     if (
       !response.ok ||
       response.headers.get('content-encoding') ||
@@ -64,9 +88,15 @@ export async function dispatchBoundedEmailToTenant(
     ) {
       throw new Error(`invalid email tenant response (${response.status})`);
     }
-    const actions = await readEmailActions(response.body, 15_000);
+    const responseDeadline = Math.min(TENANT_RESPONSE_DEADLINE_MS, deadline - Date.now());
+    if (responseDeadline <= 0) {
+      throw new Error('email tenant request timeout');
+    }
+    const actions = await readEmailActions(response.body, responseDeadline);
     return { actions, receiptId };
   } finally {
+    controller.abort();
+    void response?.body?.cancel().catch(() => {});
     const remaining = (active.get(input.projectId) ?? 1) - 1;
     if (remaining === 0) {
       active.delete(input.projectId);

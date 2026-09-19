@@ -20,6 +20,8 @@ const identityHeaders = {
   'x-void-email-to': 'support@example.com',
 };
 const route = {
+  routeId: 'route-1',
+  routeGeneration: 1,
   connectionId: 'connection-1',
   projectId: 'project-1',
   slug: 'support',
@@ -29,14 +31,41 @@ const route = {
   domain: 'example.com',
 };
 const context = { waitUntil: vi.fn() } as unknown as ExecutionContext;
-const env = (apiFetch: (...args: Array<unknown>) => Promise<Response>) =>
+const env = (
+  apiFetch: (...args: Array<unknown>) => Promise<Response>,
+  dispatchGet: (...args: Array<unknown>) => Fetcher = () => ({ fetch: vi.fn() }) as never,
+) =>
   ({
     JWT_SECRET: 'platform-secret',
     API: { fetch: apiFetch },
     EMAIL_SHARED_ACCOUNT_ID: 'account-1',
     EMAIL_SHARED_ZONE_ID: 'zone-1',
     EMAIL_SHARED_INGRESS_NAME: 'gateway-1',
+    DISPATCH: { get: dispatchGet },
   }) as never;
+
+function uncooperativeStream(chunk: Uint8Array): ReadableStream<Uint8Array> {
+  return new ReadableStream({
+    start(controller) {
+      controller.enqueue(chunk);
+    },
+    cancel() {
+      return new Promise<void>(() => {});
+    },
+  });
+}
+
+async function settlesSoon<T>(promise: Promise<T>): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) => {
+      setTimeout(
+        () => reject(new Error('operation did not settle after stream cancellation')),
+        250,
+      );
+    }),
+  ]);
+}
 
 function request(body: BodyInit, headers: Record<string, string> = {}) {
   return new Request('https://gateway.example/email/ingress', {
@@ -86,6 +115,14 @@ describe('dedicated email gateway', () => {
       const input = JSON.parse(raw);
       const existing = receipts.get(input.receiptId);
       if (String(url).endsWith('/receipts/claim')) {
+        expect(input.route).toEqual({
+          routeId: route.routeId,
+          routeGeneration: route.routeGeneration,
+          connectionId: route.connectionId,
+          addressing: route.addressing,
+          domain: route.domain,
+          projectSlug: route.slug,
+        });
         if (!existing) {
           receipts.set(input.receiptId, { digest: input.payloadDigest });
           return Response.json({ state: 'claimed' });
@@ -153,6 +190,28 @@ describe('dedicated email gateway', () => {
     expect(router.routeRelayed).toHaveBeenCalledTimes(1);
   });
 
+  it('can retry the same request ID after tenant stub resolution fails before claiming', async () => {
+    const apiFetch = receiptApi();
+    const resolvedStub = { fetch: vi.fn() };
+    const dispatchGet = vi
+      .fn()
+      .mockImplementationOnce(() => {
+        throw new Error('dispatch unavailable');
+      })
+      .mockReturnValue(resolvedStub);
+    const environment = env(apiFetch, dispatchGet);
+    const raw = new TextEncoder().encode('From: sender@example.net\r\n\r\nbody');
+
+    expect((await gateway.fetch(request(raw), environment, context)).status).toBe(503);
+    expect((await gateway.fetch(request(raw), environment, context)).status).toBe(204);
+
+    expect(router.routeRelayed).toHaveBeenCalledTimes(1);
+    expect(router.routeRelayed.mock.calls[0]?.[2]).toMatchObject({ stub: resolvedStub });
+    expect(
+      apiFetch.mock.calls.filter(([url]) => String(url).endsWith('/receipts/claim')),
+    ).toHaveLength(1);
+  });
+
   it('preserves transient routing failures for both HTTP and native ingress', async () => {
     const environment = env(async () => new Response(null, { status: 503 }));
     expect((await gateway.fetch(request(new Uint8Array()), environment, context)).status).toBe(503);
@@ -216,6 +275,30 @@ describe('dedicated email gateway', () => {
       expect(router.routeRelayed).not.toHaveBeenCalled();
     },
   );
+
+  it('does not await cancellation of an oversized authority response', async () => {
+    const environment = env(async () => new Response(uncooperativeStream(new Uint8Array(4097))));
+    const response = await settlesSoon(
+      gateway.fetch(request(new Uint8Array()), environment, context),
+    );
+    expect(response.status).toBe(503);
+  });
+
+  it('bounds an authority fetch that ignores abort by the same response deadline', async () => {
+    vi.useFakeTimers();
+    try {
+      const pending = gateway.fetch(
+        request(new Uint8Array()),
+        env(() => new Promise<Response>(() => {})),
+        context,
+      );
+      await vi.advanceTimersByTimeAsync(5_001);
+      expect((await pending).status).toBe(503);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('authenticates ingress before consuming MIME bytes', async () => {
     const pulled = vi.fn(() => {
       throw new Error('body must stay unread');
@@ -241,6 +324,18 @@ describe('dedicated email gateway', () => {
     expect(apiFetch).not.toHaveBeenCalled();
   });
 
+  it('does not await cancellation after streamed MIME exceeds its declared length', async () => {
+    const body = uncooperativeStream(new Uint8Array(2));
+    const response = await settlesSoon(
+      gateway.fetch(
+        request(body, { 'content-length': '1' }),
+        env(async () => Response.json(route)),
+        context,
+      ),
+    );
+    expect(response.status).toBe(502);
+  });
+
   it('requires complete ingress identity', async () => {
     const apiFetch = vi.fn();
     const response = await gateway.fetch(
@@ -253,13 +348,21 @@ describe('dedicated email gateway', () => {
   });
 
   it('counts repeated physical MIME headers before routing to a tenant', async () => {
+    const apiFetch = vi.fn(async () => Response.json(route));
     const raw = new TextEncoder().encode(`${'X-A: value\r\n'.repeat(1025)}\r\nbody`);
-    const response = await gateway.fetch(
-      request(raw),
-      env(async () => Response.json(route)),
-      context,
-    );
-    expect(response.status).toBe(502);
+    const response = await gateway.fetch(request(raw), env(apiFetch), context);
+    expect(response.status).toBe(413);
+    expect(apiFetch).toHaveBeenCalledTimes(1);
+    expect(router.routeRelayed).not.toHaveBeenCalled();
+  });
+
+  it('permanently refuses malformed MIME headers before claiming or routing', async () => {
+    const apiFetch = vi.fn(async () => Response.json(route));
+    const raw = new TextEncoder().encode('not-a-header\r\n\r\nbody');
+    const response = await gateway.fetch(request(raw), env(apiFetch), context);
+
+    expect(response.status).toBe(400);
+    expect(apiFetch).toHaveBeenCalledTimes(1);
     expect(router.routeRelayed).not.toHaveBeenCalled();
   });
 
@@ -346,5 +449,48 @@ describe('dedicated email gateway', () => {
       context,
     );
     expect(response.status).toBe(204);
+  });
+
+  it('bounds a probe API call that ignores abort', async () => {
+    vi.useFakeTimers();
+    try {
+      const body = JSON.stringify({
+        accountId: 'account-1',
+        zoneId: 'zone-1',
+        ingressName: 'gateway-1',
+      });
+      let markStarted!: () => void;
+      const started = new Promise<void>((resolve) => {
+        markStarted = resolve;
+      });
+      const response = gateway.fetch(
+        new Request('https://gateway.example/email/probe', {
+          method: 'POST',
+          body,
+          headers: { authorization: 'Bearer staged-secret' },
+        }),
+        env(() => {
+          markStarted();
+          return new Promise<Response>(() => {});
+        }),
+        context,
+      );
+      await started;
+      await vi.advanceTimersByTimeAsync(5_001);
+      expect((await response).status).toBe(503);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not await cancellation of an oversized probe body', async () => {
+    const probe = new Request('https://gateway.example/email/probe', {
+      method: 'POST',
+      body: uncooperativeStream(new Uint8Array(1025)),
+      headers: { authorization: 'Bearer staged-secret' },
+      duplex: 'half',
+    } as RequestInit);
+    const response = await settlesSoon(gateway.fetch(probe, env(vi.fn()), context));
+    expect(response.status).toBe(400);
   });
 });

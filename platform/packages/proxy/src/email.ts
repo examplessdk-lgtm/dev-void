@@ -10,6 +10,11 @@ import {
   startEmailAttempt,
 } from './email-admission.ts';
 import { leaseBearer, leaseEmailDomainCredential } from './email-lease.ts';
+import {
+  EMAIL_PROVIDER_DEADLINE_MS,
+  EmailProviderTimeoutError,
+  createEmailProviderDeadline,
+} from './email-provider-deadline.ts';
 import type { Env, ProxyEnv } from './types.ts';
 
 const app = new Hono<ProxyEnv>();
@@ -71,7 +76,7 @@ export function customMimeHeaderBytesWithinLimit(raw: Uint8Array): boolean {
 }
 
 /** Bound the raw list before normalization allocates one copy and Set entry per recipient. */
-const MAX_RECIPIENTS = 100;
+const MAX_RECIPIENTS = 50;
 
 /**
  * Bound each address before normalization copies it. RFC 5321 caps a
@@ -485,8 +490,7 @@ function singleMailboxAddrSpec(value: string): string | null {
  *     from,                          // envelope sender (must be on an Email-Routing-enabled zone)
  *     recipients: string[],          // unique normalized recipient addresses
  *     mimeBase64,                    // raw MIME, base64-encoded
- *     byteSize,                      // declared raw byte count
- *     requestId, fromDomain?         // for logs
+ *     requestId                      // for logs and default operation identity
  *   }
  *
  * The proxy validates and normalizes the request, routes custom senders to
@@ -812,11 +816,15 @@ app.post('/send', async (context) => {
                 r.errorCode ??
                 (r.state === 'outcome_unknown' || r.state === 'attempt_started'
                   ? 'OUTCOME_UNKNOWN'
-                  : 'UNVERIFIED_DESTINATION'),
+                  : r.state === 'cancelled'
+                    ? 'UPSTREAM_ERROR'
+                    : 'UNVERIFIED_DESTINATION'),
               message:
                 r.state === 'outcome_unknown' || r.state === 'attempt_started'
                   ? 'provider outcome unknown; inspect email logs before retrying'
-                  : 'recipient was not admitted',
+                  : r.state === 'cancelled'
+                    ? 'email attempt was cancelled before provider submission'
+                    : 'recipient was not admitted',
             },
     }));
   if (admission.replay) {
@@ -836,18 +844,48 @@ app.post('/send', async (context) => {
   const allowed = admission.recipients
     .filter((r) => r.state === 'reserved')
     .map((r) => r.recipient);
+  const providerDeadline = createEmailProviderDeadline();
 
   // Send fan-out. CF's `send_email` binding takes one recipient per
   // EmailMessage — we already split by recipient above.
-  for (const r of allowed) {
+  for (let index = 0; index < allowed.length; index++) {
+    const r = allowed[index];
+    if (providerDeadline.expired()) {
+      const unstarted = allowed.slice(index);
+      const cancelled = await cancelUnstartedRecipients(
+        context.env,
+        admission.operationId,
+        unstarted,
+      );
+      for (const recipient of unstarted) {
+        deliveries.push({
+          recipient,
+          ok: false,
+          state: cancelled ? 'cancelled' : 'outcome_unknown',
+          error: cancelled
+            ? {
+                code: 'UPSTREAM_ERROR',
+                message: 'email batch deadline elapsed before provider submission',
+              }
+            : { code: 'OUTCOME_UNKNOWN', message: 'could not cancel unstarted email attempt' },
+        });
+      }
+      break;
+    }
     try {
       await startEmailAttempt(context.env, admission.operationId, [r]);
     } catch {
+      const cancelled = await cancelUnstartedRecipients(context.env, admission.operationId, [r]);
       deliveries.push({
         recipient: r,
         ok: false,
-        state: 'outcome_unknown',
-        error: { code: 'OUTCOME_UNKNOWN', message: 'could not confirm email attempt status' },
+        state: cancelled ? 'cancelled' : 'outcome_unknown',
+        error: cancelled
+          ? {
+              code: 'UPSTREAM_ERROR',
+              message: 'email attempt did not start; reservation cancelled',
+            }
+          : { code: 'OUTCOME_UNKNOWN', message: 'could not confirm email attempt status' },
       });
       continue;
     }
@@ -858,7 +896,7 @@ app.post('/send', async (context) => {
       const msg = new EmailMessage(from, r, bytesToStream(raw));
       // Some CF builds don't return the messageId; we surface "" rather
       // than crash and let the framework decide whether to fall back.
-      const result = await sendBinding.send(msg);
+      const result = await providerDeadline.run(() => sendBinding.send(msg));
       const providerReference = typeof result?.messageId === 'string' ? result.messageId : '';
       try {
         await finishEmailAttempt(context.env, admission.operationId, [r], 'provider_accepted', {
@@ -928,8 +966,7 @@ app.post('/send', async (context) => {
 /**
  * The Email Sending REST `send_raw` result. snake_case — the REST schema
  * names the id `message_id`, unlike the `send_email` binding's camelCase
- * `messageId` (and the api's `SendRawResult` in `email/cf-customer.ts`,
- * which declares the same field). Cloudflare returns every recipient in
+ * `messageId`. Cloudflare returns every recipient in
  * exactly one required list: `delivered` and `queued` are accepted;
  * `permanent_bounces` and `suppressed_recipients` are permanent failures.
  */
@@ -954,6 +991,115 @@ export type SendRawRecipientOutcome =
   | 'permanent_bounce'
   | 'suppressed'
   | 'outcome_unknown';
+
+type SendRawHttpResponse = { ok: true; data: unknown } | { ok: false; status: number };
+
+const MAX_SEND_RAW_RESPONSE_BYTES = 64 * 1024;
+
+/** Submit once and read the provider response within one absolute deadline. */
+export async function requestSendRaw(
+  input: {
+    accountId: string;
+    bearer: string;
+    from: string;
+    recipients: Array<string>;
+    mimeMessage: string;
+  },
+  deadlineMs = EMAIL_PROVIDER_DEADLINE_MS,
+): Promise<SendRawHttpResponse> {
+  const requestBody = JSON.stringify({
+    from: input.from,
+    recipients: input.recipients,
+    mime_message: input.mimeMessage,
+  });
+  const controller = new AbortController();
+  const deadline = Date.now() + Math.min(EMAIL_PROVIDER_DEADLINE_MS, deadlineMs);
+  const beforeDeadline = async <T>(run: () => Promise<T>): Promise<T> => {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      controller.abort();
+      throw new Error('email sending request timed out');
+    }
+    const promise = run();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            controller.abort();
+            reject(new Error('email sending request timed out'));
+          }, remaining);
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) {
+        clearTimeout(timer);
+      }
+    }
+  };
+  const response = await beforeDeadline(() =>
+    fetch(
+      `https://api.cloudflare.com/client/v4/accounts/${input.accountId}/email/sending/send_raw`,
+      {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${input.bearer}`,
+          'content-type': 'application/json',
+        },
+        body: requestBody,
+        signal: controller.signal,
+      },
+    ),
+  );
+  if (!response.ok) {
+    void response.body?.cancel().catch(() => {});
+    return { ok: false, status: response.status };
+  }
+  const declared = response.headers.get('content-length');
+  if (
+    declared !== null &&
+    (!/^\d+$/.test(declared) || Number(declared) > MAX_SEND_RAW_RESPONSE_BYTES)
+  ) {
+    void response.body?.cancel().catch(() => {});
+    throw new Error('email sending API response too large');
+  }
+  const reader = response.body?.getReader();
+  if (!reader) {
+    throw new Error('email sending API response unreadable');
+  }
+  const bytes = new Uint8Array(MAX_SEND_RAW_RESPONSE_BYTES);
+  let size = 0;
+  try {
+    for (;;) {
+      const chunk = await beforeDeadline(() => reader.read());
+      if (chunk.done) {
+        break;
+      }
+      if (size + chunk.value.byteLength > bytes.byteLength) {
+        throw new Error('email sending API response too large');
+      }
+      bytes.set(chunk.value, size);
+      size += chunk.value.byteLength;
+    }
+    if (declared !== null && size !== Number(declared)) {
+      throw new Error('email sending API response length mismatch');
+    }
+    return {
+      ok: true,
+      data: JSON.parse(
+        new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(bytes.subarray(0, size)),
+      ) as unknown,
+    };
+  } finally {
+    void reader.cancel().catch(() => {});
+    try {
+      reader.releaseLock();
+    } catch {
+      // A timed-out read may still be settling after cancellation.
+    }
+  }
+}
 
 /** Read one required send_raw address list without discarding schema violations. */
 function readSendRawAddressList(value: unknown): Set<string> | null {
@@ -1123,11 +1269,15 @@ async function sendViaCustomDomain(
                 r.errorCode ??
                 (r.state === 'outcome_unknown' || r.state === 'attempt_started'
                   ? 'OUTCOME_UNKNOWN'
-                  : 'UNVERIFIED_DESTINATION'),
+                  : r.state === 'cancelled'
+                    ? 'UPSTREAM_ERROR'
+                    : 'UNVERIFIED_DESTINATION'),
               message:
                 r.state === 'outcome_unknown' || r.state === 'attempt_started'
                   ? 'provider outcome unknown; inspect email logs before retrying'
-                  : 'recipient was not admitted',
+                  : r.state === 'cancelled'
+                    ? 'email attempt was cancelled before provider submission'
+                    : 'recipient was not admitted',
             },
     }));
   if (admission.replay) {
@@ -1181,12 +1331,22 @@ async function sendViaCustomDomain(
   try {
     await startEmailAttempt(context.env, admission.operationId, recipients);
   } catch {
+    const cancelled = await cancelUnstartedRecipients(
+      context.env,
+      admission.operationId,
+      recipients,
+    );
     for (const recipient of recipients) {
       deliveries.push({
         recipient,
         ok: false,
-        state: 'outcome_unknown',
-        error: { code: 'OUTCOME_UNKNOWN', message: 'could not confirm email attempt status' },
+        state: cancelled ? 'cancelled' : 'outcome_unknown',
+        error: cancelled
+          ? {
+              code: 'UPSTREAM_ERROR',
+              message: 'email attempt did not start; reservation cancelled',
+            }
+          : { code: 'OUTCOME_UNKNOWN', message: 'could not confirm email attempt status' },
       });
     }
     return emailActionResponse(context, admission.operationId, deliveries);
@@ -1198,56 +1358,47 @@ async function sendViaCustomDomain(
   let failure: { code: string; message: string } | null = null;
   let failureState: 'failed' | 'outcome_unknown' = 'failed';
   let sendRawResult: ParsedSendRawResult | null = null;
-  let cfRes: Response | null = null;
+  let providerResponse: SendRawHttpResponse | null = null;
   try {
-    cfRes = await fetch(
-      `https://api.cloudflare.com/client/v4/accounts/${lease.accountId}/email/sending/send_raw`,
-      {
-        method: 'POST',
-        headers: {
-          authorization: `Bearer ${leaseBearer(lease)}`,
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({ from, recipients, mime_message: mimeMessage }),
-      },
-    );
+    providerResponse = await requestSendRaw({
+      accountId: lease.accountId,
+      bearer: leaseBearer(lease),
+      from,
+      recipients,
+      mimeMessage,
+    });
   } catch {
     failure = { code: 'UPSTREAM_ERROR', message: 'email sending request failed' };
     failureState = 'outcome_unknown';
   }
-  if (cfRes) {
-    if (!cfRes.ok) {
+  if (providerResponse) {
+    if (!providerResponse.ok) {
       // A fresh credential is leased for every attempt. Provider error
       // bodies are not echoed or logged.
       failure = {
-        code: cfRes.status === 429 ? 'QUOTA_EXCEEDED' : 'UPSTREAM_ERROR',
-        message: `email sending API returned ${cfRes.status}`,
+        code: providerResponse.status === 429 ? 'QUOTA_EXCEEDED' : 'UPSTREAM_ERROR',
+        message: `email sending API returned ${providerResponse.status}`,
       };
-      failureState = cfRes.status >= 500 || cfRes.status === 408 ? 'outcome_unknown' : 'failed';
+      failureState =
+        providerResponse.status >= 500 || providerResponse.status === 408
+          ? 'outcome_unknown'
+          : 'failed';
     } else {
-      let data: unknown;
-      try {
-        data = await cfRes.json();
-      } catch {
-        failure = { code: 'OUTCOME_UNKNOWN', message: 'email sending API response unreadable' };
+      const data = providerResponse.data;
+      const success =
+        typeof data === 'object' && data !== null
+          ? (data as { success?: unknown }).success
+          : undefined;
+      if (success === false) {
+        failure = { code: 'UPSTREAM_ERROR', message: 'email sending API refused the message' };
+      } else if (success !== true) {
+        failure = { code: 'OUTCOME_UNKNOWN', message: 'email sending API response invalid' };
         failureState = 'outcome_unknown';
-      }
-      if (!failure) {
-        const success =
-          typeof data === 'object' && data !== null
-            ? (data as { success?: unknown }).success
-            : undefined;
-        if (success === false) {
-          failure = { code: 'UPSTREAM_ERROR', message: 'email sending API refused the message' };
-        } else if (success !== true) {
+      } else {
+        sendRawResult = parseSendRawResult((data as { result?: unknown }).result);
+        if (!sendRawResult) {
           failure = { code: 'OUTCOME_UNKNOWN', message: 'email sending API response invalid' };
           failureState = 'outcome_unknown';
-        } else {
-          sendRawResult = parseSendRawResult((data as { result?: unknown }).result);
-          if (!sendRawResult) {
-            failure = { code: 'OUTCOME_UNKNOWN', message: 'email sending API response invalid' };
-            failureState = 'outcome_unknown';
-          }
         }
       }
     }
@@ -1345,7 +1496,7 @@ async function sendViaCustomDomain(
 
   // Same mid-batch contract as the shared path: any per-recipient failure
   // (bounce, suppression, or a whole-call failure) answers ok:false with
-  // the per-recipient list so the caller retries exactly the failed ones.
+  // the complete per-recipient evidence needed for a safe retry decision.
   if (deliveries.some((d) => !d.ok)) {
     return context.json({ ok: false, operationId: admission.operationId, deliveries }, 200);
   }
@@ -1389,6 +1540,26 @@ interface RecipientResult {
   state?: string;
   messageId?: string;
   error?: { code: string; message: string };
+}
+
+/**
+ * A failed start response is ambiguous: its transaction may or may not have
+ * committed. Cancellation is the safe discriminator because the API accepts
+ * it only from `reserved`; a committed `attempt_started` transition conflicts.
+ */
+async function cancelUnstartedRecipients(
+  env: Pick<Env, 'API' | 'JWT_SECRET'>,
+  operationId: string,
+  recipients: Array<string>,
+): Promise<boolean> {
+  try {
+    const result = await finishEmailAttempt(env, operationId, recipients, 'cancelled');
+    return recipients.every((recipient) =>
+      result.recipients.some((row) => row.recipient === recipient && row.state === 'cancelled'),
+    );
+  } catch {
+    return false;
+  }
 }
 
 function emailActionResponse(
@@ -1538,14 +1709,20 @@ app.post('/internal/send', async (context) => {
 
   try {
     const msg = new EmailMessage(from, to, bytesToStream(raw));
-    await sendBinding.send(msg);
+    await createEmailProviderDeadline(EMAIL_PROVIDER_DEADLINE_MS).run(() => sendBinding.send(msg));
     return context.json({ ok: true });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error(
       `[email-internal] send failed from=${sanitizeForLog(from, 320)} to=${sanitizeForLog(to, 320)}: ${sanitizeForLog(message, 320)}`,
     );
-    return context.json({ ok: false, error: 'upstream error' }, 502);
+    return context.json(
+      {
+        ok: false,
+        error: err instanceof EmailProviderTimeoutError ? 'outcome unknown' : 'upstream error',
+      },
+      err instanceof EmailProviderTimeoutError ? 504 : 502,
+    );
   }
 });
 

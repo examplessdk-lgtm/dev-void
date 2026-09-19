@@ -63,6 +63,42 @@ afterEach(() => {
 });
 
 describe('project email domain authority', () => {
+  it('persists token identity and expiry and reports a known expired credential locally', async () => {
+    const owner = await createTestUser(env.db, 'expiry-owner');
+    const project = await createTestProject(env.db, owner.id, 'expiry-mail');
+    const expiresOn = new Date(Date.now() + 86_400_000).toISOString();
+    const stub = stubCustomerCf({ zones, verifyExpiresOn: expiresOn });
+    expect(
+      (
+        await call(project.id, owner.jwt, 'POST', '/domains', {
+          domain: 'expiry.example.com',
+          apiToken: token,
+        })
+      ).status,
+    ).toBe(200);
+    const credential = (await env.db.select().from(emailCredentials))[0]!;
+    expect(credential).toMatchObject({
+      token_id: 'tok_dummy',
+      status: 'healthy',
+    });
+    expect(Date.parse(credential.expires_on!)).toBe(Date.parse(expiresOn));
+
+    await env.db
+      .update(emailCredentials)
+      .set({ expires_on: new Date(Date.now() - 60_000).toISOString() });
+    const checkpoint = stub.calls.length;
+    const status = await call(project.id, owner.jwt, 'GET', '/domains/expiry.example.com');
+    expect(await status.json()).toMatchObject({
+      readiness: {
+        management: {
+          status: 'expired',
+          reason: expect.stringContaining('expired'),
+        },
+      },
+    });
+    expect(stub.calls).toHaveLength(checkpoint);
+  });
+
   it('refreshes readiness from provider reads and preserves inbound state when the credential probe fails', async () => {
     const owner = await createTestUser(env.db, 'readiness-owner');
     const project = await createTestProject(env.db, owner.id, 'readiness-mail');

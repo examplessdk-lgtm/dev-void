@@ -3,6 +3,11 @@ import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { join } from 'pathslash';
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
+import {
+  EMAIL_MAX_RESPONSE_BYTES,
+  encodeEmailActions,
+  readEmailActions,
+} from '../../../platform/src/email-protocol.ts';
 import { compileRouteTable } from '../../src/router/compile.ts';
 import { compileWorkerEntry } from '../../src/router/compile.ts';
 import {
@@ -16,6 +21,7 @@ import {
   buildReplyMessage,
   createMessageProxy,
   defineEmail,
+  enactEmailActions,
   isForwardableEmailMessage,
   MAX_INBOUND_BYTES,
   MAX_INBOUND_HEADERS,
@@ -32,6 +38,16 @@ const INVALID_ADDRESS =
   "at most 64 characters before the '@' and 254 in total).";
 import { createInboundTestHarness } from '../../src/runtime/email/testing.ts';
 import { envContext } from '../../src/runtime/env-raw.ts';
+
+vi.mock('cloudflare:email', () => ({
+  EmailMessage: class MockEmailMessage {
+    constructor(
+      readonly from: string,
+      readonly to: string,
+      readonly raw: ReadableStream<Uint8Array> | string,
+    ) {}
+  },
+}));
 
 const TMP = join(import.meta.dirname, '.tmp-email-inbound');
 
@@ -898,6 +914,7 @@ describe('compileWorkerEntry (email)', () => {
     );
     expect(code).not.toContain('async email(envelope)');
     expect(code).toContain('return __handleEmailReceipt(request, env, ctx)');
+    expect(code).toContain('await __verifyEmailReceiptThroughProxy(');
     expect(code).toContain('await __readEmailEnvelope(request.body)');
     expect(code).toContain('async function handleEmail');
     expect(code).toContain('from "void/_email-protocol"');
@@ -3123,6 +3140,33 @@ describe('end-to-end: envelope → handler → action queue', () => {
     expect(pulls).toBeLessThanOrEqual(7);
   });
 
+  it('bounds a stalled reply stream without awaiting its cancellation', async () => {
+    vi.useFakeTimers();
+    try {
+      const cancel = vi.fn(() => new Promise<void>(() => {}));
+      const raw = new ReadableStream<Uint8Array>({
+        pull() {
+          return new Promise<void>(() => {});
+        },
+        cancel,
+      });
+      const handler = defineEmail(async (message) => {
+        await message.reply({
+          from: 'support@app.dev',
+          to: 'sender@example.com',
+          raw,
+        } as unknown as Parameters<ForwardableEmailMessage['reply']>[0]);
+      });
+      const result = dispatchToHandler(makeEnvelope(), handler);
+      const rejected = expect(result).rejects.toThrow('email stream timed out');
+      await vi.advanceTimersByTimeAsync(15_001);
+      await rejected;
+      expect(cancel).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('refuses the 101st queued action and leaves the queue at 100', async () => {
     // The queue crosses the RPC boundary into the SHARED proxy isolate, where
     // it is walked entry by entry before any quota gate has looked at it.
@@ -3145,18 +3189,24 @@ describe('end-to-end: envelope → handler → action queue', () => {
     expect((thrown as MimeError).message).toMatch(/more than 100 actions/);
   });
 
-  it('refuses a third reply once the cumulative reply budget is spent', async () => {
-    // The first two replies spend the 8 MiB response budget exactly.
+  it('accounts for action frames in the cumulative reply budget before recording', async () => {
+    const from = 'support@app.dev';
+    const to = 'sender@example.com';
+    const metadataBytes = new TextEncoder().encode(
+      JSON.stringify({ type: 'reply', from, to }),
+    ).byteLength;
+    const firstSize = 5 * 1024 * 1024;
+    const secondSize = EMAIL_MAX_RESPONSE_BYTES - 5 - 2 * (10 + metadataBytes) - firstSize;
     let thrown: unknown;
     const handler = defineEmail(async (message) => {
       const send = (raw: Uint8Array) =>
         message.reply({
-          from: 'support@app.dev',
-          to: 'sender@example.com',
+          from,
+          to,
           raw,
         } as unknown as Parameters<ForwardableEmailMessage['reply']>[0]);
-      await send(new Uint8Array(5 * 1024 * 1024));
-      await send(new Uint8Array(3 * 1024 * 1024));
+      await send(new Uint8Array(firstSize));
+      await send(new Uint8Array(secondSize));
       try {
         await send(new Uint8Array(1));
       } catch (e) {
@@ -3164,14 +3214,19 @@ describe('end-to-end: envelope → handler → action queue', () => {
       }
     });
     const actions = await dispatchToHandler(makeEnvelope(), handler);
-    // Both in-budget replies are queued; only the third is refused.
     expect(actions).toHaveLength(2);
     expect(thrown).toBeInstanceOf(MimeError);
-    expect((thrown as MimeError).message).toMatch(/cumulative reply size/);
+    expect((thrown as MimeError).message).toMatch(/serialized actions/);
+    const decoded = await readEmailActions(encodeEmailActions(actions));
+    expect(decoded).toHaveLength(2);
+    expect(decoded.map((action) => (action.type === 'reply' ? action.raw.byteLength : -1))).toEqual(
+      [firstSize, secondSize],
+    );
   });
 
   it('cancels a stream reply at the REMAINING budget, not the per-reply cap', async () => {
-    // 7 MiB already spent out of the 8 MiB budget, so 1 MiB is left. A
+    // 7 MiB of reply bodies plus their frames have already been spent, so
+    // slightly less than 1 MiB is left. A
     // stream bounded by the per-reply cap would keep pulling to 5 MiB and
     // report the wrong limit; the pull count and the message both pin that
     // the remaining budget is what stopped it.
@@ -3209,11 +3264,82 @@ describe('end-to-end: envelope → handler → action queue', () => {
     const actions = await dispatchToHandler(makeEnvelope(), handler);
     expect(actions).toHaveLength(2);
     expect(cancelled).toBe(true);
-    // 1 MiB of remaining budget + the chunk that crosses it + read-ahead.
+    // Less than 1 MiB remains; allow the crossing chunk plus read-ahead.
     expect(pulls).toBeLessThanOrEqual(3);
     expect(thrown).toBeInstanceOf(MimeError);
-    expect((thrown as MimeError).message).toMatch(/cumulative reply size/);
+    expect((thrown as MimeError).message).toMatch(/serialized actions/);
   });
+
+  it('does not record a streamed reply that completes after setReject', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      let controller!: ReadableStreamDefaultController<Uint8Array>;
+      const raw = new ReadableStream<Uint8Array>({
+        start(value) {
+          controller = value;
+        },
+      });
+      const { message, getActions } = createMessageProxy(makeEnvelope());
+      const pending = message.reply({
+        from: 'support@app.dev',
+        to: 'sender@example.com',
+        raw,
+      } as unknown as Parameters<ForwardableEmailMessage['reply']>[0]);
+      await Promise.resolve();
+      message.setReject('stop');
+      controller.enqueue(new TextEncoder().encode('From: support@app.dev\r\n\r\nlate'));
+      controller.close();
+
+      await pending;
+      expect(getActions()).toEqual([{ type: 'reject', reason: 'stop' }]);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('completed after setReject'));
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('reserves queue slots for concurrent replies before buffering them', async () => {
+    const { message, getActions } = createMessageProxy(makeEnvelope());
+    const reply = () =>
+      message.reply({
+        from: 'support@app.dev',
+        to: 'sender@example.com',
+        raw: new Uint8Array(),
+      } as unknown as Parameters<ForwardableEmailMessage['reply']>[0]);
+    const pending = Array.from({ length: 100 }, reply);
+    await expect(reply()).rejects.toThrow(/more than 100 actions/);
+    await Promise.all(pending);
+    expect(getActions()).toHaveLength(100);
+  });
+
+  it.each(['forward', 'reply'] as const)(
+    'bounds a nonsettling native %s provider action',
+    async (kind) => {
+      vi.useFakeTimers();
+      try {
+        const message = {
+          setReject: vi.fn(),
+          forward: vi.fn(() => new Promise<void>(() => {})),
+          reply: vi.fn(() => new Promise<void>(() => {})),
+        } as unknown as ForwardableEmailMessage;
+        const action =
+          kind === 'forward'
+            ? ({ type: 'forward', to: 'archive@example.com' } as const)
+            : ({
+                type: 'reply',
+                from: 'support@app.dev',
+                to: 'sender@example.com',
+                raw: new Uint8Array(),
+              } as const);
+        const pending = enactEmailActions(message, [action]);
+        const outcome = expect(pending).rejects.toThrow(/outcome unknown/);
+        await vi.advanceTimersByTimeAsync(30_000);
+        await outcome;
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
 
   it('refuses a forward address over the address-length limit', async () => {
     const handler = defineEmail(async (message) => {

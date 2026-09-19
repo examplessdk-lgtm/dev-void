@@ -1,4 +1,4 @@
-import { sql as drizzleSql, and, eq, notInArray } from 'drizzle-orm';
+import { sql as drizzleSql, and, eq, ne, notInArray } from 'drizzle-orm';
 import type { Context } from 'hono';
 import { deleteProjectAssets, deleteWorkerBundle } from '../assets.ts';
 import { DEFAULT_DISPATCH_NAMESPACE } from '../constants.ts';
@@ -16,7 +16,7 @@ import {
   terminateBuildsForProject,
 } from '../db.ts';
 import { drainProjectEmailAdmissions } from '../email/admission.ts';
-import { emailDomainRoutes } from '../email/connection-schema.ts';
+import { emailDomainRoutes, emailZoneConnections } from '../email/connection-schema.ts';
 import { requestEmailDomainRemove, runEmailOperation } from '../email/connection-service.ts';
 import type { ApiEnv } from '../env.ts';
 import { cancelContainerBuildDos } from '../github/cancel-builds.ts';
@@ -569,7 +569,31 @@ async function cleanupProjectEmailAssignments(
     .where(eq(emailDomainRoutes.project_id, projectId));
   for (const assignment of assignments) {
     if (assignment.desired_state === 'removed') {
-      continue;
+      // An administrator may remove an owner-managed assignment while leaving
+      // its connection resources for the manager. Project teardown inherits
+      // cleanup authority, but only after the last live sibling is gone.
+      const [connection] = await db
+        .select({ id: emailZoneConnections.id, credentialId: emailZoneConnections.credential_id })
+        .from(emailZoneConnections)
+        .where(eq(emailZoneConnections.id, assignment.connection_id))
+        .limit(1);
+      if (!connection?.credentialId) {
+        continue;
+      }
+      const [sibling] = await db
+        .select({ id: emailDomainRoutes.id })
+        .from(emailDomainRoutes)
+        .where(
+          and(
+            eq(emailDomainRoutes.connection_id, connection.id),
+            ne(emailDomainRoutes.id, assignment.id),
+            ne(emailDomainRoutes.desired_state, 'removed'),
+          ),
+        )
+        .limit(1);
+      if (sibling) {
+        continue;
+      }
     }
     // The durable intent must exist before the project can cascade away.
     // A provider failure after that point is safe to reconcile later.
@@ -579,7 +603,11 @@ async function cleanupProjectEmailAssignments(
       assignment.id,
       { kind: 'system' },
       `teardown:${projectId}:${assignment.id}`,
+      projectId,
     );
+    if (!opId) {
+      continue;
+    }
     try {
       await runEmailOperation(db, context.env, opId);
     } catch (error) {

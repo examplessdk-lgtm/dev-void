@@ -181,6 +181,7 @@ vi.mock('../../src/cli/platform-registry.ts', async (importOriginal) => {
 import { log, note } from '@clack/prompts';
 import { installPlatform } from '../../src/cli/platform-installer.ts';
 import { runInstalledPlatformCommand } from '../../src/cli/platform-management.ts';
+import { createPlatformInstallPlan } from '../../src/cli/platform-plan.ts';
 
 describe('installed platform upgrade', () => {
   beforeEach(() => {
@@ -248,8 +249,30 @@ describe('installed platform upgrade', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
     delete process.env.VOID_PLATFORM_PROJECT_SECRET_ACTIVE_KEY_VERSION;
     delete process.env.VOID_PLATFORM_PROJECT_SECRET_KEYS_JSON;
+  });
+
+  it('includes shared email configuration when planning an upgrade', async () => {
+    vi.stubEnv('VOID_EMAIL_SHARED_ZONE_ID', 'mail-zone');
+    vi.stubEnv('VOID_EMAIL_SENDER_DOMAIN', 'mail.example.com');
+    await runInstalledPlatformCommand({
+      plan: true,
+      runtime: '',
+      selector: state.manifest!.id,
+      subcommand: 'upgrade',
+      yes: true,
+    });
+    expect(createPlatformInstallPlan).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        emailSharedZoneId: 'mail-zone',
+        emailSenderDomain: 'mail.example.com',
+      }),
+      expect.anything(),
+      expect.anything(),
+    );
   });
 
   it('borrows database preparation from the held lifecycle lock', async () => {

@@ -336,6 +336,7 @@ export type PlatformInstallerDependencies = Readonly<{
     databaseCheckpointExists: boolean,
   ) => Promise<void>;
   healthCheckResumeCommand?: string;
+  bootstrapEmail?: typeof bootstrapPlatformSharedEmail;
   verifyHealth?: typeof verifyPlatformHealth;
   verifySandboxDrain?: (apiUrl: string, healthProbeToken: string) => Promise<boolean>;
   verifyWorkerCutover?: (
@@ -345,6 +346,7 @@ export type PlatformInstallerDependencies = Readonly<{
 }>;
 
 export type PlatformInstallationResult = Readonly<{
+  emailOperationId?: string;
   manifest: PlatformInstallationManifest;
   setupPending?: boolean;
   waitingForDns: boolean;
@@ -818,6 +820,11 @@ export async function installPlatform(
       plan.actions.some((action) => action.kind === 'worker' && action.action !== 'create'));
   const wasDisabled = existing?.status === 'disabled';
   const preserveDisabled = existing?.desiredState === 'disabled';
+  const shouldBootstrapSharedEmail =
+    !preserveDisabled &&
+    plan.deployment.capabilities.email &&
+    runtime.emailProtocolVersion === 1 &&
+    !!plan.deployment.emailSharedZoneId;
   const previousPublicEndpoints = stablePublicEndpointState(existing);
   const authenticationProtocolTransition =
     hadPriorWorkers &&
@@ -1461,6 +1468,7 @@ export async function installPlatform(
       recoveringCreatedWorker ||
       manifest.usageProtocolVersion !== targetUsageProtocolVersion ||
       authenticationProtocolTransition ||
+      shouldBootstrapSharedEmail ||
       requiresSandboxDrain;
     if (requiresTrafficGuard) {
       await dependencies.client.putKvValue(
@@ -1579,7 +1587,7 @@ export async function installPlatform(
                 dependencies.client,
                 plan.account.id,
                 manifest!,
-                `${key}-worker`,
+                key === 'emailGateway' ? 'email-gateway-worker' : `${key}-worker`,
                 snapshot.workerName,
               ),
             removeCustomDomains: async () => {
@@ -2167,6 +2175,36 @@ export async function installPlatform(
       }
     };
     await verifyCurrentWorkerCutover();
+    let emailOperationId: string | undefined;
+    if (shouldBootstrapSharedEmail) {
+      // Shared-zone setup mutates provider routing. Once it begins, retain the
+      // verified Worker set and keep the installation's routing gate closed on
+      // failure so a retry can resume the durable email operation safely.
+      workerDeploymentCommitted = true;
+      manifest = recordWorkerCutoverResolution(
+        manifest,
+        workerCutoverGeneration,
+        'committed',
+        now(),
+      );
+      if (workerSecretUpdateIntent) {
+        manifest = recordWorkerSecretUpdateState(
+          manifest,
+          workerCutoverGeneration,
+          'committed',
+          workerSecretUpdateIntent.id,
+          now(),
+        );
+      }
+      writeInstallationManifest(manifest);
+      await writeRemoteInstallationCheckpoint(dependencies.client, plan, manifest);
+      workerRollbacks = [];
+      dependencies.onProgress?.('Preparing shared email routing');
+      emailOperationId = await (dependencies.bootstrapEmail ?? bootstrapPlatformSharedEmail)(
+        plan.apiUrl,
+        createPlatformHealthProbeToken(manifest.ownershipNonce),
+      );
+    }
     if (dependencies.client.deleteKvValue) {
       await dependencies.client.deleteKvValue(
         plan.account.id,
@@ -2224,6 +2262,7 @@ export async function installPlatform(
     saveInstalledPlatformConnection(plan, manifest);
     return {
       manifest,
+      ...(emailOperationId ? { emailOperationId } : {}),
       setupPending,
       waitingForDns: false,
       waitingForSandboxDrain: false,
@@ -2815,9 +2854,16 @@ export function platformWorkerSecretPayload(
     return null;
   }
   if (!existingWorker) {
-    return worker === 'api'
-      ? apiWorkerSecrets(secrets, accountId, zoneId)
-      : proxyWorkerSecrets(secrets, accountId);
+    if (worker === 'api') {
+      return apiWorkerSecrets(secrets, accountId, zoneId);
+    }
+    if (worker === 'emailGateway') {
+      return withoutEmptySecrets({ JWT_SECRET: secrets.jwtSecret });
+    }
+    return proxyWorkerSecrets(secrets, accountId);
+  }
+  if (worker === 'emailGateway') {
+    return null;
   }
   const allowed =
     worker === 'api'
@@ -2940,12 +2986,20 @@ export function assertRequiredPlatformSecrets(
   if (
     plan.actions.some(
       (action) =>
-        (action.key === 'proxy-worker' || action.key === 'email-gateway-worker') &&
+        action.key === 'proxy-worker' && action.kind === 'worker' && action.action === 'create',
+    )
+  ) {
+    requireSecret(secrets.cloudflareApiToken, 'VOID_PLATFORM_RUNTIME_CLOUDFLARE_API_TOKEN');
+    requireSecret(secrets.jwtSecret, 'VOID_PLATFORM_JWT_SECRET');
+  }
+  if (
+    plan.actions.some(
+      (action) =>
+        action.key === 'email-gateway-worker' &&
         action.kind === 'worker' &&
         action.action === 'create',
     )
   ) {
-    requireSecret(secrets.cloudflareApiToken, 'VOID_PLATFORM_RUNTIME_CLOUDFLARE_API_TOKEN');
     requireSecret(secrets.jwtSecret, 'VOID_PLATFORM_JWT_SECRET');
   }
   if (missing.size > 0) {
@@ -5499,6 +5553,52 @@ export async function verifyPlatformSandboxDrain(
     );
   }
   return status.state === 'complete';
+}
+
+export async function bootstrapPlatformSharedEmail(
+  apiUrl: string,
+  healthProbeToken: string,
+  fetcher: typeof fetch = fetch,
+): Promise<string> {
+  const response = await fetcher(`${apiUrl}/internal/platform/email-bootstrap`, {
+    method: 'POST',
+    headers: {
+      'X-Void-Platform-Probe': healthProbeToken,
+      ...cfAccessHeaders(process.env, apiUrl),
+    },
+    signal: AbortSignal.timeout(30_000),
+    redirect: 'manual',
+  });
+  let value: unknown;
+  try {
+    value = await response.json();
+  } catch {
+    throw new Error(
+      `platform: Shared email bootstrap failed at ${apiUrl} (HTTP ${response.status}). Traffic remains disabled.`,
+    );
+  }
+  const status =
+    value && typeof value === 'object' && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : null;
+  if (
+    !response.ok ||
+    status?.version !== 1 ||
+    status.state !== 'ready' ||
+    typeof status.operationId !== 'string' ||
+    status.operationId.length === 0
+  ) {
+    const detail =
+      status && typeof status.operationId === 'string'
+        ? ` Operation ${status.operationId}: ${typeof status.operationStatus === 'string' ? status.operationStatus : 'incomplete'}.`
+        : status && typeof status.operationStatus === 'string'
+          ? ` Operation status: ${status.operationStatus}.`
+          : '';
+    throw new Error(
+      `platform: Shared email bootstrap did not reach inbound readiness at ${apiUrl} (HTTP ${response.status}).${detail} Traffic remains disabled.`,
+    );
+  }
+  return status.operationId;
 }
 
 export function createPlatformHealthProbeToken(ownershipNonce: string): string {

@@ -131,7 +131,7 @@ function createMockEnv() {
     SEND_EMAIL: { send: sendEmail },
     EMAIL_SENDER_DOMAIN: PROD_DOMAIN,
   };
-  return { env, apiFetch, sendEmail };
+  return { env, apiFetch, sendEmail, actions };
 }
 
 function base64Of(bytes: Uint8Array): string {
@@ -262,6 +262,113 @@ describe('POST /email/send — custom sender domain', () => {
 
     // The platform binding is never touched on this path.
     expect(sendEmail).not.toHaveBeenCalled();
+  });
+
+  it('cancels the whole unstarted batch when the start checkpoint fails', async () => {
+    const { env, apiFetch, actions } = createMockEnv();
+    const normalFetch = apiFetch.getMockImplementation()!;
+    apiFetch.mockImplementation(async (url, init) =>
+      String(url).endsWith('/start') ? new Response(null, { status: 503 }) : normalFetch(url, init),
+    );
+    const providerCalls = stubCloudflare();
+
+    const response = await postSend(
+      env,
+      await sendBody({ recipients: ['one@example.com', 'two@example.com'] }),
+    );
+    const body = (await response.json()) as {
+      deliveries: Array<{ state: string; error: { code: string } }>;
+    };
+    expect(body.deliveries).toHaveLength(2);
+    expect(body.deliveries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          state: 'cancelled',
+          error: expect.objectContaining({ code: 'UPSTREAM_ERROR' }),
+        }),
+        expect.objectContaining({
+          state: 'cancelled',
+          error: expect.objectContaining({ code: 'UPSTREAM_ERROR' }),
+        }),
+      ]),
+    );
+    expect([...actions.values()][0]?.recipients.map((row) => row.state)).toEqual([
+      'cancelled',
+      'cancelled',
+    ]);
+    expect(providerCalls).toEqual([]);
+  });
+
+  it.each(['fetch', 'body'] as const)(
+    'times out a stalled credential lease %s and cancels before provider submission',
+    async (stall) => {
+      vi.useFakeTimers();
+      const { env, apiFetch, actions } = createMockEnv();
+      const normalFetch = apiFetch.getMockImplementation()!;
+      let markLeaseStarted!: () => void;
+      const leaseStarted = new Promise<void>((resolve) => {
+        markLeaseStarted = resolve;
+      });
+      apiFetch.mockImplementation(async (url, init) => {
+        if (!String(url).endsWith('/domain-credential')) {
+          return normalFetch(url, init);
+        }
+        markLeaseStarted();
+        if (stall === 'fetch') {
+          return new Promise<Response>(() => {});
+        }
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(
+                new TextEncoder().encode(
+                  JSON.stringify({
+                    kind: 'api_token',
+                    token: LEASED,
+                    accountId: 'acct_customer',
+                  }),
+                ),
+              );
+            },
+          }),
+        );
+      });
+      const providerCalls = stubCloudflare();
+
+      const pending = postSend(env, await sendBody());
+      await leaseStarted;
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(5_000);
+      const response = await pending;
+
+      expect(response.status).toBe(502);
+      expect([...actions.values()][0]?.recipients[0]?.state).toBe('cancelled');
+      const finish = apiFetch.mock.calls.find(([url]) => String(url).endsWith('/finish'));
+      expect(finish).toBeDefined();
+      expect(JSON.parse(String((finish![1] as RequestInit).body))).toMatchObject({
+        state: 'cancelled',
+      });
+      expect(providerCalls).toEqual([]);
+    },
+  );
+
+  it('rejects an oversized credential lease body before provider submission', async () => {
+    const { env, apiFetch, actions } = createMockEnv();
+    const normalFetch = apiFetch.getMockImplementation()!;
+    apiFetch.mockImplementation(async (url, init) =>
+      String(url).endsWith('/domain-credential')
+        ? Response.json({
+            kind: 'api_token',
+            token: 'x'.repeat(5 * 1024),
+            accountId: 'acct_customer',
+          })
+        : normalFetch(url, init),
+    );
+    const providerCalls = stubCloudflare();
+
+    expect((await postSend(env, await sendBody())).status).toBe(502);
+    expect([...actions.values()][0]?.recipients[0]?.state).toBe('cancelled');
+    expect(providerCalls).toEqual([]);
   });
 
   it('does not require the platform send binding for a custom-domain send', async () => {
@@ -466,6 +573,81 @@ describe('POST /email/send — custom sender domain', () => {
       code: 'OUTCOME_UNKNOWN',
       message: 'provider outcome unknown; inspect email logs before retrying',
     });
+  });
+
+  it.each(['fetch', 'body'] as const)(
+    'bounds a send_raw %s that never settles and records an unknown outcome',
+    async (stall) => {
+      vi.useFakeTimers();
+      const { env, apiFetch } = createMockEnv();
+      let markProviderStarted!: () => void;
+      const providerStarted = new Promise<void>((resolve) => {
+        markProviderStarted = resolve;
+      });
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(() => {
+          markProviderStarted();
+          if (stall === 'fetch') {
+            return new Promise<Response>(() => {});
+          }
+          return Promise.resolve(
+            new Response(
+              new ReadableStream<Uint8Array>({
+                start(controller) {
+                  controller.enqueue(new TextEncoder().encode('{"success":true,"result":'));
+                },
+              }),
+            ),
+          );
+        }),
+      );
+
+      const pending = postSend(env, await sendBody());
+      await providerStarted;
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(30_000);
+      const body = await (await pending).json();
+
+      expect(body).toMatchObject({
+        ok: false,
+        deliveries: [{ state: 'outcome_unknown', error: { code: 'OUTCOME_UNKNOWN' } }],
+      });
+      const finishCall = apiFetch.mock.calls.find(([url]) => String(url).endsWith('/finish'))!;
+      expect(JSON.parse(String(finishCall[1].body)).state).toBe('outcome_unknown');
+    },
+  );
+
+  it('bounds an oversized send_raw response and records an unknown outcome', async () => {
+    const { env, apiFetch } = createMockEnv();
+    const cancel = vi.fn();
+    stubCloudflare(
+      () =>
+        new Response(
+          new ReadableStream<Uint8Array>(
+            {
+              cancel,
+              pull() {
+                throw new Error('oversized body must not be read');
+              },
+            },
+            { highWaterMark: 0 },
+          ),
+          { headers: { 'content-length': String(64 * 1024 + 1) } },
+        ),
+    );
+
+    const body = await (await postSend(env, await sendBody())).json();
+    expect(body).toMatchObject({
+      ok: false,
+      deliveries: [{ state: 'outcome_unknown', error: { code: 'OUTCOME_UNKNOWN' } }],
+    });
+    expect(
+      JSON.parse(
+        String(apiFetch.mock.calls.find(([url]) => String(url).endsWith('/finish'))?.[1].body),
+      ).state,
+    ).toBe('outcome_unknown');
+    await vi.waitFor(() => expect(cancel).toHaveBeenCalledOnce());
   });
 
   it('answers 502 when the lease fails, without burning quota or calling send_raw', async () => {

@@ -1,6 +1,43 @@
 import { describe, expect, it } from 'vite-plus/test';
-import { createPlatformDeploymentManifest } from '../../src/manifest.ts';
+import {
+  createPlatformDeploymentManifest,
+  parsePlatformDeploymentManifest,
+} from '../../src/manifest.ts';
 import { createPlatformWorkerConfigs } from '../../src/worker-config.ts';
+
+describe('platform email deployment manifest', () => {
+  const input = {
+    application: { baseDomain: 'apps.example.com', zoneName: 'example.com' },
+    displayName: 'Example',
+    installationSlug: 'example',
+  };
+
+  it.each([{ emailSharedZoneId: 'mail-zone-id' }, { emailSenderDomain: 'mail.example.org' }])(
+    'rejects incomplete shared email settings from the factory',
+    (email) => {
+      expect(() => createPlatformDeploymentManifest({ ...input, ...email })).toThrow(
+        'requires both emailSenderDomain and emailSharedZoneId',
+      );
+    },
+  );
+
+  it('rejects either incomplete shared email setting while parsing', () => {
+    const complete = createPlatformDeploymentManifest({
+      ...input,
+      emailSharedZoneId: 'mail-zone-id',
+      emailSenderDomain: 'mail.example.org',
+    });
+    const { emailSenderDomain: _sender, ...zoneOnly } = complete;
+    const { emailSharedZoneId: _zone, ...senderOnly } = complete;
+
+    expect(() => parsePlatformDeploymentManifest(zoneOnly)).toThrow(
+      'requires both emailSenderDomain and emailSharedZoneId',
+    );
+    expect(() => parsePlatformDeploymentManifest(senderOnly)).toThrow(
+      'requires both emailSenderDomain and emailSharedZoneId',
+    );
+  });
+});
 
 describe('platform usage queue bindings', () => {
   it('routes shared mail through its configured zone, independent of the application zone', () => {
@@ -49,6 +86,7 @@ describe('platform usage queue bindings', () => {
     expect(configs.proxy.vars).toHaveProperty('EMAIL_SENDER_DOMAIN', 'mail.example.org');
     expect(configs.emailGateway.vars).toHaveProperty('EMAIL_SENDER_DOMAIN', 'mail.example.org');
     expect(configs.emailGateway).toHaveProperty('send_email', [{ name: 'SEND_EMAIL' }]);
+    expect(configs.proxy).toHaveProperty('send_email', [{ name: 'SEND_EMAIL' }]);
     expect(configs.api.compatibility_flags).toContain('global_fetch_strictly_public');
     expect(configs.api.vars).toHaveProperty(
       'EMAIL_GATEWAY_ORIGIN',
@@ -129,6 +167,8 @@ describe('platform usage queue bindings', () => {
       expect(configs.proxy.services).toEqual([
         { binding: 'API', service: deployment.resources.apiWorker },
       ]);
+      expect(configs.proxy).not.toHaveProperty('send_email');
+      expect(configs.emailGateway).not.toHaveProperty('send_email');
       expect(Object.keys(configs).sort()).toEqual([
         'api',
         'dispatch',

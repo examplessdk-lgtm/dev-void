@@ -11,11 +11,18 @@ import {
 import {
   EMAIL_ATTEMPT_RECOVERY_MIN_AGE_MS,
   EmailAdmissionError,
+  getProjectEmailLogs,
   resolveEmailUnresolvedAttempt,
   setProjectEmailLimits,
 } from '../email/admission.ts';
 import { lookupMxOverDns } from '../email/cf-domain-probes.ts';
 import { emailDomainRoutes, emailZoneConnections } from '../email/connection-schema.ts';
+import {
+  EmailOperationError,
+  inspectUnknownEmailOperationRecovery,
+  replaceBlockedSystemEmailCleanupCredential,
+  resolveUnknownEmailOperation,
+} from '../email/connection-service.ts';
 import {
   MAX_DOMAIN_LENGTH,
   isValidEmailDomain,
@@ -25,6 +32,7 @@ import {
   addEmailDomainForProject,
   getEmailDomainRowByDomain,
   getEmailDomainStatusForProject,
+  MAX_CREDENTIAL_LENGTH,
   removeEmailDomainForProject,
   rotateEmailIngressSecretForProject,
   serializeEmailRoute,
@@ -240,6 +248,27 @@ emailOperatorRoutes.post('/email/projects/:project/limit', async (context) => {
   return context.json(result, 'ok' in result && result.ok === false ? 207 : 200);
 });
 
+emailOperatorRoutes.get('/email/projects/:project/logs', async (context) => {
+  const { page, limit, offset } = pagination(context);
+  const selector = context.req.param('project');
+  if (!selector || selector.length > 128) {
+    throw new OperatorError(
+      400,
+      'Project ID or slug must be at most 128 characters.',
+      'invalid_argument',
+    );
+  }
+  const db = context.get('db');
+  const project = (await getProject(db, selector)) ?? (await getProjectBySlug(db, selector));
+  const projectId = project?.id ?? selector;
+  return context.json({
+    projectId,
+    page,
+    limit,
+    ...(await getProjectEmailLogs(db, projectId, limit, offset)),
+  });
+});
+
 emailOperatorRoutes.get('/email/attempts', async (context) => {
   const { page, limit, offset } = pagination(context);
   const db = context.get('db');
@@ -348,6 +377,117 @@ emailOperatorRoutes.post('/email/attempts/:id/resolve', async (context) => {
   }
 });
 
+emailOperatorRoutes.post('/email/operations/:id/resolve', async (context) => {
+  const body = await readBody(context);
+  const id = context.req.param('id');
+  const reason = stringField(body, 'reason', { maxLength: 500 });
+  const outcome = stringField(body, 'outcome', { maxLength: 32 });
+  if (outcome !== 'applied' && outcome !== 'not-applied') {
+    throw new OperatorError(400, 'Outcome must be applied or not-applied.', 'invalid_argument');
+  }
+  if (body.ended !== true) {
+    throw new OperatorError(
+      400,
+      'Confirm the original provider execution has ended with --ended.',
+      'invalid_argument',
+    );
+  }
+  const db = context.get('db');
+  let fence;
+  try {
+    fence = await inspectUnknownEmailOperationRecovery(db, context.env, id);
+  } catch (error) {
+    if (error instanceof EmailOperationError) {
+      throw new OperatorError(
+        error.status === 404 ? 404 : error.status === 400 ? 400 : 409,
+        error.message,
+        error.status === 404 ? 'not_found' : 'invalid_state',
+      );
+    }
+    throw error;
+  }
+  if (new Date(fence.eligibleAt).getTime() > Date.now()) {
+    throw new OperatorError(
+      409,
+      `Email operation cannot be resolved before ${fence.eligibleAt}.`,
+      'operation_too_recent',
+    );
+  }
+  const action = 'email.operation.resolve';
+  const target = { ...fence, outcome };
+  if (dryRun(body)) {
+    return context.json(
+      preview(action, target, {
+        reason,
+        effect:
+          outcome === 'applied'
+            ? 'Confirm the exact provider write and continue from the next step without replaying it.'
+            : 'Return the exact provider write to pending so the same fenced step can be retried.',
+      }),
+    );
+  }
+  const stepId = stringField(body, 'stepId', { maxLength: 128 });
+  const requestDigest = stringField(body, 'requestDigest', { maxLength: 128 });
+  const resourceIdentity = stringField(body, 'resourceIdentity', { maxLength: 500 });
+  const connectionId = stringField(body, 'connectionId', { maxLength: 128 });
+  const attempt = body.attempt;
+  if (typeof attempt !== 'number' || !Number.isSafeInteger(attempt) || attempt < 1) {
+    throw new OperatorError(400, 'Attempt must be a positive integer.', 'invalid_argument');
+  }
+  const desiredGeneration = body.desiredGeneration;
+  if (
+    typeof desiredGeneration !== 'number' ||
+    !Number.isSafeInteger(desiredGeneration) ||
+    desiredGeneration < 1
+  ) {
+    throw new OperatorError(
+      400,
+      'Desired generation must be a positive integer.',
+      'invalid_argument',
+    );
+  }
+  const routeId = body.routeId === null ? null : stringField(body, 'routeId', { maxLength: 128 });
+  const routeDesiredGeneration = body.routeDesiredGeneration;
+  if (
+    routeDesiredGeneration !== null &&
+    (typeof routeDesiredGeneration !== 'number' ||
+      !Number.isSafeInteger(routeDesiredGeneration) ||
+      routeDesiredGeneration < 1)
+  ) {
+    throw new OperatorError(
+      400,
+      'Route desired generation must be a positive integer or null.',
+      'invalid_argument',
+    );
+  }
+  try {
+    const result = await resolveUnknownEmailOperation(db, context.env, {
+      operationId: id,
+      stepId,
+      attempt,
+      requestDigest,
+      resourceIdentity,
+      connectionId,
+      desiredGeneration,
+      routeId,
+      routeDesiredGeneration,
+      ended: true,
+      outcome,
+      reason,
+    });
+    return context.json({ action, target, ...result });
+  } catch (error) {
+    if (error instanceof EmailOperationError) {
+      throw new OperatorError(
+        error.status === 404 ? 404 : error.status === 400 ? 400 : 409,
+        error.message,
+        error.status === 404 ? 'not_found' : 'invalid_state',
+      );
+    }
+    throw error;
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Administrator-managed domains. The operations are the owner routes' own
 // (email/domain-service.ts); this layer resolves the project for the
@@ -369,16 +509,9 @@ async function operatorResult(
         : 'The email domain operation failed.';
     throw new OperatorError(response.status, message, 'email_domain_error', body);
   }
-  // A kept row after a failed destructive step answers 200 with `ok: false`
-  // (the owner contract), and a setup or sync that ended on a Cloudflare
-  // failure answers 200 with the row in a failed state. Both surface as a
-  // top-level `ok: false` so the audit records a failed mutation and the
-  // CLI reports the partial result.
-  const failed =
-    body.ok === false ||
-    body.status === 'failed' ||
-    body.status === 'token_revoked' ||
-    body.status === 'token_expired';
+  // Owner routes return durable operation state with HTTP 200. The operator
+  // contract also needs a failure signal for its audit log and CLI exit status.
+  const failed = body.ok === false || body.operationStatus !== 'completed';
   return { action, target, ...(failed ? { ok: false } : {}), domain: body };
 }
 
@@ -407,6 +540,19 @@ async function requireDomainRow(db: Db, raw: string) {
     throw new OperatorError(404, 'Project not found.');
   }
   return { domain, row, project };
+}
+
+async function requireRemovableDomainRow(db: Db, raw: string) {
+  const domain = requireDomain(raw);
+  const row = await getEmailDomainRowByDomain(db, domain);
+  if (!row) {
+    throw new OperatorError(404, 'Email domain not found.');
+  }
+  if (!row.project_id) {
+    throw new OperatorError(404, 'Project not found.');
+  }
+  const projectId = row.project_id;
+  return { domain, row, projectId, project: await getProject(db, projectId) };
 }
 
 export async function listOperatorEmailDomains(context: Context<ApiEnv>, selector?: string) {
@@ -533,20 +679,46 @@ export async function removeOperatorEmailDomain(
   context: Context<ApiEnv>,
   rawDomain: string,
   dryRunRequested = false,
+  apiToken?: string,
 ) {
-  const { domain, row, project } = await requireDomainRow(context.get('db'), rawDomain);
+  const { domain, row, projectId, project } = await requireRemovableDomainRow(
+    context.get('db'),
+    rawDomain,
+  );
   const action = 'email.domain.remove';
-  const target = { domain, projectId: project.id, slug: project.slug };
+  const target = {
+    domain,
+    projectId,
+    slug: project?.slug ?? null,
+    ...(apiToken ? { credentialReplacement: true } : {}),
+  };
   if (dryRunRequested) {
     return preview(action, target, {
       status: row.inbound_status,
       managed_by: row.managed_by,
       connection_id: row.connection_id,
-      effect: 'Disables this assignment; shared ingress remains while sibling domains use it.',
+      effect: apiToken
+        ? 'Verifies the replacement scoped token and resumes the retained blocked project cleanup operation.'
+        : 'Disables this assignment; shared ingress remains while sibling domains use it.',
     });
   }
+  if (apiToken) {
+    try {
+      await replaceBlockedSystemEmailCleanupCredential(
+        context.get('db'),
+        context.env,
+        row.id,
+        apiToken,
+      );
+    } catch (error) {
+      if (error instanceof EmailOperationError) {
+        throw new OperatorError(error.status, error.message, 'email_domain_error');
+      }
+      throw error;
+    }
+  }
   return operatorResult(
-    await removeEmailDomainForProject(context, project, domain, 'admin'),
+    await removeEmailDomainForProject(context, { id: projectId }, domain, 'admin'),
     action,
     target,
   );
@@ -614,6 +786,12 @@ emailOperatorRoutes.post('/email/domains/:domain/rotate-secret', async (context)
 emailOperatorRoutes.post('/email/domains/:domain/remove', async (context) => {
   const body = await readBody(context);
   return context.json(
-    await removeOperatorEmailDomain(context, context.req.param('domain'), dryRun(body)),
+    await removeOperatorEmailDomain(
+      context,
+      context.req.param('domain'),
+      dryRun(body),
+      stringField(body, 'apiToken', { optional: true, maxLength: MAX_CREDENTIAL_LENGTH }) ||
+        undefined,
+    ),
   );
 });

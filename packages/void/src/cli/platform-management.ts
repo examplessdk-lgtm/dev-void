@@ -230,6 +230,12 @@ export async function runInstalledPlatformCommand(args: PlatformArgs): Promise<v
     const deployment = manifest.deployment;
     const planInput = {
       accountId: manifest.account.id,
+      ...(args.subcommand === 'upgrade' && process.env.VOID_EMAIL_SHARED_ZONE_ID
+        ? { emailSharedZoneId: process.env.VOID_EMAIL_SHARED_ZONE_ID }
+        : {}),
+      ...(args.subcommand === 'upgrade' && process.env.VOID_EMAIL_SENDER_DOMAIN
+        ? { emailSenderDomain: process.env.VOID_EMAIL_SENDER_DOMAIN }
+        : {}),
       applicationDomain: deployment.application.baseDomain,
       controlPlaneDomain: deployment.controlPlane.apiHostname ?? '',
       dedicatedZone: deployment.application.dedicatedZone,
@@ -418,6 +424,9 @@ export async function runInstalledPlatformCommand(args: PlatformArgs): Promise<v
           ? `${deployment.displayName} is running compatible runtime ${runtime!.manifest.platformVersion}; PostgreSQL remains at schema ${rollbackSourceRuntime!.manifest.database.schemaDigest}.`
           : `${deployment.displayName} is healthy at ${plan.apiUrl}.`,
       );
+      if (result.emailOperationId) {
+        log.info(`Shared email routing ready (operation ${result.emailOperationId}).`);
+      }
       if (result.setupPending) {
         const code = readInstallationRecoverySecrets(result.manifest)?.authBootstrapCode;
         if (code) {
@@ -560,7 +569,7 @@ export function assertPlatformRollbackCompatibility(
 
 export function resolvePlatformRuntimeTokenToPreflight(
   plan: {
-    actions: ReadonlyArray<{ action: string; kind: string }>;
+    actions: ReadonlyArray<{ action: string; key: string; kind: string }>;
   },
   secrets: Pick<
     ReturnType<typeof createPlatformInstallationSecrets>,
@@ -571,7 +580,12 @@ export function resolvePlatformRuntimeTokenToPreflight(
   if (explicitUpdate) {
     return explicitUpdate;
   }
-  return plan.actions.some((action) => action.kind === 'worker' && action.action === 'create')
+  return plan.actions.some(
+    (action) =>
+      action.kind === 'worker' &&
+      action.action === 'create' &&
+      (action.key === 'api-worker' || action.key === 'proxy-worker'),
+  )
     ? secrets.cloudflareApiToken
     : '';
 }

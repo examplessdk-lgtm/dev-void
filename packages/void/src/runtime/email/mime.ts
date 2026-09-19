@@ -40,31 +40,15 @@ export const MAX_MESSAGE_BYTES: number = 5 * 1024 * 1024;
 const MAX_ATTACHMENT_BYTES_TOTAL: number = Math.floor((MAX_MESSAGE_BYTES * 3) / 4);
 
 /**
- * Cap on the recipient count across `to`, `cc` and `bcc`, checked against
- * the RAW input before a single address is parsed.
- *
- * The platform proxy refuses more than 50 recipients (`MAX_RECIPIENTS` in
- * `proxy/src/email.ts`, counted on the deduplicated list this module
- * produces), so on the platform a larger list is always rejected — but only
- * after the tenant has parsed every address and rendered the whole `To:`
- * header. Measured, that rendering costs about 250 bytes of heap per
- * recipient plus the header's own ~31 bytes per character, so 230k short,
- * valid addresses (a 4.8 MiB message, legal under `MAX_MESSAGE_BYTES`)
- * terminated a 128 MB isolate instead of reaching the proxy's `INVALID_TO`.
- * Under `void dev` the same list was captured as a success and failed only
- * once deployed. Mirroring the cap here makes it a precise, catchable error
- * at the call that went wrong, in every mode.
- *
- * This is the framework's own limit on an own-account deploy, where the
- * `SEND_EMAIL` binding sends one envelope per recipient and imposes no
- * per-call count. Cloudflare's object-form `send()` API caps `to + cc + bcc`
- * at 50, so 100 is the looser of the two.
- *
- * Counted on the raw entries rather than after deduplication: parsing is what
- * this bound exists to skip, so a list of 150 entries with 100 unique
- * addresses is refused here where the proxy would have accepted it.
+ * Bound raw `to`, `cc`, and `bcc` entries before parsing or rendering headers.
+ * Counting before deduplication also bounds work for duplicate-heavy input.
+ * The same SDK limit applies in development and on both deployment targets;
+ * platform admission independently caps the unique recipients at 50.
  */
 export const MAX_RECIPIENTS: number = 50;
+
+/** Maximum serialized size of app-defined top-level MIME fields. */
+const MAX_CUSTOM_HEADER_BYTES: number = 16 * 1024;
 
 /**
  * Pre-parse cap on one parsed address, in characters. RFC 5321 §4.5.3.1
@@ -749,7 +733,9 @@ export async function normalizeEmail(opts: {
     rejectCRLF('subject', opts.subject);
   }
   if (opts.headers) {
+    let headerInputBytes = 0;
     let headerBytes = 0;
+    const encoder = new TextEncoder();
     for (const [name, value] of Object.entries(opts.headers)) {
       if (!HEADER_NAME.test(name)) {
         throw new MimeError(
@@ -775,14 +761,35 @@ export async function normalizeEmail(opts: {
             `so its line would exceed the ${MAX_LINE_OCTETS}-octet limit in RFC 5322 §2.1.1. Shorten the name.`,
         );
       }
-      if (headerBytes + name.length + value.length + 4 > 16 * 1024) {
+      // Keep raw input work bounded even when folding later collapses a long
+      // whitespace run. The character check rejects huge values before the
+      // UTF-8 measurement allocates its byte copy.
+      if (headerInputBytes + name.length + value.length + 4 > MAX_CUSTOM_HEADER_BYTES) {
         throw new MimeError('MIME_ERROR', 'email: custom headers exceed the 16 KiB limit.');
       }
-      headerBytes += name.length + new TextEncoder().encode(value).byteLength + 4;
-      if (headerBytes > 16 * 1024) {
+      headerInputBytes += name.length + encoder.encode(value).byteLength + 4;
+      if (headerInputBytes > MAX_CUSTOM_HEADER_BYTES) {
         throw new MimeError('MIME_ERROR', 'email: custom headers exceed the 16 KiB limit.');
       }
       rejectCRLF(`header '${name}'`, value);
+      if (RESERVED_HEADERS.has(name.toLowerCase())) {
+        continue;
+      }
+      // Reject an obviously oversized value before encoding it. This is a
+      // lower bound because encoded words and folding only add bytes.
+      if (
+        headerBytes + name.length + CUSTOM_HEADER_FRAMING_OCTETS + minHeaderValueOctets(value) >
+        MAX_CUSTOM_HEADER_BYTES
+      ) {
+        throw new MimeError('MIME_ERROR', 'email: custom headers exceed the 16 KiB limit.');
+      }
+      // Match the proxy's wire-level accounting exactly: RFC 2047 expansion,
+      // every folded continuation line, and the terminating CRLF. encodeWord
+      // always returns ASCII, so the rendered string length is its byte size.
+      headerBytes += foldHeader(name, encodeWord(value)).length + CRLF.length;
+      if (headerBytes > MAX_CUSTOM_HEADER_BYTES) {
+        throw new MimeError('MIME_ERROR', 'email: custom headers exceed the 16 KiB limit.');
+      }
     }
   }
   // Before any address is parsed: the count is what bounds the work below.

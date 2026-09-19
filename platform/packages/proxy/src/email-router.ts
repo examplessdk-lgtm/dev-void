@@ -11,7 +11,12 @@ import {
   recordEmailReceipt,
   startEmailAttempt,
 } from './email-admission.ts';
+import type { ReceiptRouteFence } from './email-admission.ts';
 import { leaseBearer, leaseEmailDomainCredential } from './email-lease.ts';
+import {
+  EMAIL_PROVIDER_DEADLINE_MS,
+  createEmailProviderDeadline,
+} from './email-provider-deadline.ts';
 import {
   MAX_MIME_BYTES,
   classifySendRawRecipient,
@@ -19,6 +24,7 @@ import {
   readMimeFromAddrSpec,
   readSenderDomain,
   recordInboundDelivery,
+  requestSendRaw,
 } from './email.ts';
 import type { Env } from './types.ts';
 
@@ -49,6 +55,9 @@ function describeUntrusted(value: unknown, maxLen: number): string {
 }
 
 export interface AuthoritativeEmailRoute {
+  routeId: string;
+  routeGeneration: number;
+  connectionId: string;
   projectId: string;
   workerName: string;
   deploymentId: string;
@@ -56,6 +65,17 @@ export interface AuthoritativeEmailRoute {
   addressing: 'shared' | 'custom';
   domain: string;
   limits?: Record<string, number>;
+}
+
+function receiptRouteFence(route: AuthoritativeEmailRoute): ReceiptRouteFence {
+  return {
+    routeId: route.routeId,
+    routeGeneration: route.routeGeneration,
+    connectionId: route.connectionId,
+    addressing: route.addressing,
+    domain: route.domain,
+    projectSlug: route.slug,
+  };
 }
 
 /** Bounded envelope passed through the gateway's tenant dispatch protocol. */
@@ -106,6 +126,7 @@ const MAX_REPLY_BYTES = 5 * 1024 * 1024;
 
 /** Limit total reply MIME bytes in one delivery. */
 const MAX_REPLY_BYTES_TOTAL = 8 * 1024 * 1024;
+const INBOUND_STREAM_DEADLINE_MS = 15_000;
 
 class InboundTooLargeError extends Error {
   constructor(public readonly size: number) {
@@ -315,7 +336,13 @@ export async function routeInbound(
 
   let actions: Array<EmailAction>;
   try {
-    await recordEmailReceipt(env, receiptId, projectId, 'received');
+    await recordEmailReceipt(
+      env,
+      receiptId,
+      projectId,
+      'received',
+      receiptRouteFence(authoritative),
+    );
   } catch {
     throw new Error('email admission temporarily unavailable');
   }
@@ -369,6 +396,7 @@ export async function routeRelayed(
   env: Env,
   ctx: ExecutionContext,
   input: {
+    stub: Fetcher;
     projectId: string;
     domain: string;
     envelope: EmailEnvelope;
@@ -376,7 +404,7 @@ export async function routeRelayed(
     receiptId: string;
   },
 ): Promise<RelayRouteOutcome> {
-  const { projectId, domain, envelope, authoritative, receiptId } = input;
+  const { stub, projectId, domain, envelope, authoritative, receiptId } = input;
 
   if (
     authoritative.projectId !== projectId ||
@@ -388,19 +416,6 @@ export async function routeRelayed(
   }
   const slug = authoritative.slug;
   const workerName = authoritative.workerName;
-
-  let stub: Fetcher;
-  try {
-    // Same per-project dispatch limits pass-through as the platform lane.
-    stub = (
-      authoritative.limits
-        ? env.DISPATCH.get(workerName, {}, { limits: authoritative.limits })
-        : env.DISPATCH.get(workerName)
-    ) as Fetcher;
-  } catch (e) {
-    console.error(`[email-relay] DISPATCH.get(${sanitize(workerName, 320)}) failed:`, e);
-    return { reject: true, temporary: true };
-  }
 
   // Built before dispatch so the dispatch-failure paths can log the
   // delivery against it, exactly as `routeInbound` logs against the real
@@ -490,42 +505,46 @@ async function prepareRelayedReply(
   from: string,
   raw: Uint8Array,
   expectedAccountId?: string,
-): Promise<(to: string) => Promise<void>> {
+): Promise<(to: string, deadlineMs?: number) => Promise<string | undefined>> {
   const senderDomain = from.slice(from.indexOf('@') + 1).toLowerCase();
+  if (senderDomain === readSenderDomain(env)) {
+    const binding = env.SEND_EMAIL;
+    if (!binding || typeof binding.send !== 'function') {
+      throw new Error('shared email binding is unavailable');
+    }
+    return async (to) => {
+      const result = await binding.send(new EmailMessage(from, to, envelopeRawStream(raw)));
+      return result?.messageId;
+    };
+  }
   const lease = await leaseEmailDomainCredential(env, senderDomain, projectId);
   if (!lease || (expectedAccountId && lease.accountId !== expectedAccountId)) {
     throw new Error('could not lease the domain credential');
   }
   const mimeMessage = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(raw);
-  return async (to) => {
-    let res: Response;
+  return async (to, deadlineMs = EMAIL_PROVIDER_DEADLINE_MS) => {
+    let response;
     try {
-      res = await fetch(
-        `https://api.cloudflare.com/client/v4/accounts/${lease.accountId}/email/sending/send_raw`,
+      response = await requestSendRaw(
         {
-          method: 'POST',
-          headers: {
-            authorization: `Bearer ${leaseBearer(lease)}`,
-            'content-type': 'application/json',
-          },
-          body: JSON.stringify({ from, recipients: [to], mime_message: mimeMessage }),
+          accountId: lease.accountId,
+          bearer: leaseBearer(lease),
+          from,
+          recipients: [to],
+          mimeMessage,
         },
+        deadlineMs,
       );
     } catch {
       throw new Error('email sending request failed');
     }
-    if (!res.ok) {
-      if (res.status >= 500 || res.status === 408) {
+    if (!response.ok) {
+      if (response.status >= 500 || response.status === 408) {
         throw new Error('email sending API outcome unknown');
       }
-      throw new DefinitiveEmailActionError(`email sending API returned ${res.status}`);
+      throw new DefinitiveEmailActionError(`email sending API returned ${response.status}`);
     }
-    let data: unknown;
-    try {
-      data = await res.json();
-    } catch {
-      throw new Error('email sending API response unreadable');
-    }
+    const data = response.data;
     if (typeof data !== 'object' || data === null || !('success' in data)) {
       throw new Error('email sending API response invalid');
     }
@@ -549,6 +568,7 @@ async function prepareRelayedReply(
     if (outcome === 'outcome_unknown') {
       throw new Error('email sending API did not classify the recipient');
     }
+    return result.messageId;
   };
 }
 
@@ -626,23 +646,47 @@ async function readStreamToBytes(stream: ReadableStream<Uint8Array>): Promise<Ui
   const reader = stream.getReader();
   const chunks: Array<Uint8Array> = [];
   let total = 0;
-  for (;;) {
-    const { value, done } = await reader.read();
-    if (done) {
-      break;
-    }
-    total += value.byteLength;
-    if (total > MAX_INBOUND_BYTES) {
-      // Cancel the stream so CF stops sending; throw a typed error the
-      // caller can recognize and turn into a clean SMTP reject.
-      try {
-        await reader.cancel();
-      } catch {
-        // Cancellation is best-effort.
+  const deadline = Date.now() + INBOUND_STREAM_DEADLINE_MS;
+  try {
+    for (;;) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        throw new Error('inbound message stream timed out');
       }
-      throw new InboundTooLargeError(total);
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const { value, done } = await Promise.race([
+        reader.read(),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error('inbound message stream timed out')),
+            remaining,
+          );
+        }),
+      ]).finally(() => {
+        if (timer !== undefined) {
+          clearTimeout(timer);
+        }
+      });
+      if (done) {
+        break;
+      }
+      total += value.byteLength;
+      if (total > MAX_INBOUND_BYTES) {
+        throw new InboundTooLargeError(total);
+      }
+      chunks.push(value);
     }
-    chunks.push(value);
+  } catch (error) {
+    // Do not let an uncooperative source extend the read deadline while its
+    // cancellation algorithm runs.
+    void reader.cancel().catch(() => {});
+    throw error;
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {
+      // A timed-out read may still be settling after cancellation.
+    }
   }
   const out = new Uint8Array(total);
   let offset = 0;
@@ -840,10 +884,15 @@ async function enactSanitized(
     );
     return;
   }
+  const providerDeadline = createEmailProviderDeadline();
   for (const [index, action] of actions.entries()) {
     if (action.type === 'reject') {
       message.setReject(action.reason);
       return;
+    }
+    if (providerDeadline.expired()) {
+      console.error('[email-router] action batch deadline elapsed before admission');
+      break;
     }
     const to = action.to.toLowerCase();
     const from = action.type === 'reply' ? action.from : message.to;
@@ -866,7 +915,11 @@ async function enactSanitized(
         recipients: [to],
         transport:
           gate.transport === 'relay'
-            ? 'send_raw'
+            ? action.type === 'reply' &&
+              action.from.slice(action.from.indexOf('@') + 1).toLowerCase() ===
+                readSenderDomain(env)
+              ? 'binding'
+              : 'send_raw'
             : action.type === 'forward'
               ? 'native_forward'
               : 'native_reply',
@@ -883,7 +936,9 @@ async function enactSanitized(
     if (admission.replay || admitted?.state !== 'reserved') {
       continue;
     }
-    let relayedReply: ((to: string) => Promise<void>) | undefined;
+    let relayedReply:
+      | ((to: string, deadlineMs?: number) => Promise<string | undefined>)
+      | undefined;
     if (gate.transport === 'relay' && action.type === 'reply') {
       try {
         relayedReply = await prepareRelayedReply(
@@ -901,18 +956,35 @@ async function enactSanitized(
         continue;
       }
     }
+    if (providerDeadline.expired()) {
+      const cancelled = await cancelUnstartedAction(env, admission.operationId, to);
+      console.error(
+        cancelled
+          ? '[email-router] action batch deadline elapsed; reservation cancelled'
+          : '[email-router] action batch deadline elapsed; cancellation unresolved',
+      );
+      break;
+    }
     try {
       await startEmailAttempt(env, admission.operationId, [to]);
     } catch {
-      console.error('[email-router] could not commit attempt_started');
+      const cancelled = await cancelUnstartedAction(env, admission.operationId, to);
+      console.error(
+        cancelled
+          ? '[email-router] attempt did not start; reservation cancelled'
+          : '[email-router] could not confirm attempt status',
+      );
       continue;
     }
     try {
+      let providerReference: string | undefined;
       if (action.type === 'forward') {
-        await message.forward(to, action.headers);
+        await providerDeadline.run(() => message.forward(to, action.headers));
       } else {
         if (relayedReply) {
-          await relayedReply(to);
+          providerReference = await providerDeadline.run(() =>
+            relayedReply!(to, providerDeadline.remainingMs()),
+          );
         } else {
           const stream = new ReadableStream<Uint8Array>({
             start(controller) {
@@ -920,11 +992,15 @@ async function enactSanitized(
               controller.close();
             },
           });
-          await message.reply(new EmailMessage(action.from, to, stream) as never);
+          await providerDeadline.run(() =>
+            message.reply(new EmailMessage(action.from, to, stream) as never),
+          );
         }
       }
       try {
-        await finishEmailAttempt(env, admission.operationId, [to], 'provider_accepted');
+        await finishEmailAttempt(env, admission.operationId, [to], 'provider_accepted', {
+          providerReference,
+        });
       } catch {
         console.error('[email-router] provider accepted action but outcome ledger write failed');
       }
@@ -949,5 +1025,21 @@ async function enactSanitized(
           : '[email-router] action provider outcome unknown',
       );
     }
+  }
+}
+
+/** Cancel only when the API still proves that no provider attempt started. */
+async function cancelUnstartedAction(
+  env: Env,
+  operationId: string,
+  recipient: string,
+): Promise<boolean> {
+  try {
+    const result = await finishEmailAttempt(env, operationId, [recipient], 'cancelled');
+    return result.recipients.some(
+      (row) => row.recipient === recipient && row.state === 'cancelled',
+    );
+  } catch {
+    return false;
   }
 }

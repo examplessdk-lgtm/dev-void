@@ -13,6 +13,11 @@ function internallyAuthenticated(method: string, path: string): boolean {
     ) ||
       path === '/internal/revalidate' ||
       path === '/internal/email/domain-credential' ||
+      path === '/internal/email/probe-ingress' ||
+      path === '/internal/email/resolve-ingress' ||
+      /^\/internal\/email\/actions\/(?:admit|receipts(?:\/(?:claim|complete))?|[^/]+\/(?:start|finish|status))$/.test(
+        path,
+      ) ||
       path === '/internal/github-webhook')
   );
 }
@@ -59,6 +64,7 @@ export const platformAccessProtection: MiddlewareHandler<ApiEnv> = async (contex
       (probe &&
         ((path === '/health' && method === 'GET') ||
           (path === '/internal/platform/sandbox-drain' && method === 'GET') ||
+          (path === '/internal/platform/email-bootstrap' && method === 'POST') ||
           (path === '/internal/platform/domain-preflight' && method === 'POST')))
     ) {
       return next();

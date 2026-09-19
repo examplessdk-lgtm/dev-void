@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vite-plus/test';
+import { readEmailRequestJson } from '../../src/email-request-body.ts';
 import worker from '../../src/index.ts';
 import { PLATFORM_DISABLED_KEY } from '../../src/platform-lifecycle.ts';
 
@@ -173,6 +174,7 @@ describe('proxy worker', () => {
   const aiTokens: Record<string, string> = {};
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
   });
 
@@ -277,6 +279,137 @@ describe('proxy worker', () => {
 
       expect(res.status).toBe(405);
       expect(await res.json()).toEqual({ error: 'method not allowed' });
+    });
+  });
+
+  describe('email receipt verification', () => {
+    it('initiates cancellation without awaiting an uncooperative request stream', async () => {
+      vi.useFakeTimers();
+      let cancelled = 0;
+      const body = new ReadableStream<Uint8Array>({
+        cancel() {
+          cancelled++;
+          return new Promise<void>(() => {});
+        },
+      });
+      const request = new Request('https://proxy.void.cloud/email/verify-receipt', {
+        method: 'POST',
+        body,
+        duplex: 'half',
+      } as RequestInit);
+      const outcome = readEmailRequestJson(request).then(
+        () => 'resolved',
+        (error: unknown) => error,
+      );
+
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(await outcome).toBeInstanceOf(Error);
+      expect(String(await outcome)).toContain('timeout');
+      expect(cancelled).toBe(1);
+    });
+
+    it('ends a stalled unauthenticated request body at five seconds', async () => {
+      vi.useFakeTimers();
+      const body = new ReadableStream<Uint8Array>({
+        cancel() {
+          return new Promise<void>(() => {});
+        },
+      });
+      const request = new Request('https://proxy.void.cloud/email/verify-receipt', {
+        method: 'POST',
+        body,
+        duplex: 'half',
+      } as RequestInit);
+      const response = worker.fetch(request, createEnv());
+
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect((await response).status).toBe(400);
+    });
+
+    it('rejects invalid UTF-8 before receipt authentication', async () => {
+      const response = await worker.fetch(
+        new Request('https://proxy.void.cloud/email/verify-receipt', {
+          method: 'POST',
+          headers: { 'content-length': '1' },
+          body: new Uint8Array([0xff]),
+        }),
+        createEnv(),
+      );
+
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({ valid: false });
+    });
+
+    it('rejects a mismatched declared request length', async () => {
+      const response = await worker.fetch(
+        new Request('https://proxy.void.cloud/email/verify-receipt', {
+          method: 'POST',
+          headers: { 'content-length': '3' },
+          body: '{}',
+        }),
+        createEnv(),
+      );
+
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({ valid: false });
+    });
+  });
+
+  describe('email send request bounds', () => {
+    it('allows a maximum-size MIME envelope through to authentication', async () => {
+      const response = await worker.fetch(
+        new Request('https://proxy.void.cloud/email/send', {
+          method: 'POST',
+          body: JSON.stringify({
+            projectId: 'proj_1',
+            aiToken: 'invalid-project-token',
+            mimeBase64: 'AAAA'.repeat(Math.ceil((5 * 1024 * 1024) / 3)),
+          }),
+        }),
+        createEnv(),
+      );
+      expect(response.status).toBe(403);
+    });
+
+    it.each(['/email/send', '/email/internal/send', '/email/unknown'])(
+      'rejects an oversized declared body before reading %s',
+      async (path) => {
+        const pull = vi.fn((controller: ReadableStreamDefaultController<Uint8Array>) => {
+          controller.enqueue(new TextEncoder().encode('{}'));
+          controller.close();
+        });
+        const cancel = vi.fn();
+        const request = new Request(`https://proxy.void.cloud${path}`, {
+          method: 'POST',
+          headers: { 'content-length': String(8 * 1024 * 1024 + 1) },
+          body: new ReadableStream({ pull, cancel }, { highWaterMark: 0 }),
+          duplex: 'half',
+        } as RequestInit);
+        const response = await worker.fetch(request, createEnv());
+        expect(response.status).toBe(400);
+        expect(pull).not.toHaveBeenCalled();
+        expect(cancel).toHaveBeenCalledOnce();
+      },
+    );
+
+    it('ends a stalled unauthenticated send body without waiting for cancellation', async () => {
+      vi.useFakeTimers();
+      const cancel = vi.fn(() => new Promise<void>(() => {}));
+      const request = new Request('https://proxy.void.cloud/email/send', {
+        method: 'POST',
+        body: new ReadableStream({ cancel }),
+        duplex: 'half',
+      } as RequestInit);
+      let status: number | undefined;
+      const response = worker.fetch(request, createEnv()).then((value) => {
+        status = value.status;
+      });
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(status).toBe(400);
+      expect(cancel).toHaveBeenCalledOnce();
+      await response;
     });
   });
 

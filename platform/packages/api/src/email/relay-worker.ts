@@ -14,7 +14,7 @@
  * Worker before promotion. The Worker name stays stable for its zone.
  */
 
-export const RELAY_VERSION = 6;
+export const RELAY_VERSION = 7;
 
 // Baked into the upload metadata; bump with RELAY_VERSION if the source
 // ever depends on newer runtime behavior.
@@ -35,9 +35,10 @@ export const RELAY_INGRESS_BINDING = 'VOID_EMAIL_INGRESS';
  * The stream is piped through a FixedLengthStream(rawSize):
  * the runtime derives Content-Length from the body and IGNORES a manually
  * set one, so a plain ReadableStream would go out chunked — and the gateway
- * rejects a length-less body before any crypto. The POST rides
- * ctx.waitUntil AND is awaited: waitUntil keeps the stream alive, the
- * await is what lets a non-2xx answer reject the message. The reject
+ * rejects a length-less body before any crypto. The pump and POST share a
+ * 60-second absolute deadline and abort signal; bounded waitUntil wrappers
+ * keep the stream alive without retaining a stuck fetch or pipe. The POST is
+ * also awaited so a non-2xx answer can reject the message. The reject
  * reason is deliberately generic — it travels back to the original sender
  * in a bounce.
  *
@@ -61,7 +62,27 @@ export const RELAY_SOURCE = `export default {
   async email(message, env, ctx) {
     const requestId = crypto.randomUUID();
     const { readable, writable } = new FixedLengthStream(message.rawSize);
-    const relay = fetch(env.VOID_EMAIL_GATEWAY_ORIGIN + '/email/ingress', {
+    const controller = new AbortController();
+    const deadline = Date.now() + 60000;
+    const beforeDeadline = (run) => {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        controller.abort();
+        return Promise.reject(new Error('Email gateway temporarily unavailable'));
+      }
+      const work = run();
+      let timer;
+      return Promise.race([
+        work,
+        new Promise((_, reject) => {
+          timer = setTimeout(() => {
+            controller.abort();
+            reject(new Error('Email gateway temporarily unavailable'));
+          }, remaining);
+        }),
+      ]).finally(() => clearTimeout(timer));
+    };
+    const relay = beforeDeadline(() => fetch(env.VOID_EMAIL_GATEWAY_ORIGIN + '/email/ingress', {
       method: 'POST',
       headers: {
         Authorization: 'Bearer ' + env.VOID_RELAY_SECRET,
@@ -73,10 +94,22 @@ export const RELAY_SOURCE = `export default {
         'X-Void-Email-To': message.to,
       },
       body: readable,
-    });
-    ctx.waitUntil(message.raw.pipeTo(writable));
-    ctx.waitUntil(relay);
-    const response = await relay;
+      signal: controller.signal,
+    }));
+    const pump = beforeDeadline(() => message.raw.pipeTo(writable, { signal: controller.signal }));
+    ctx.waitUntil(pump.catch(() => {}));
+    ctx.waitUntil(relay.catch(() => {}));
+    let response;
+    try {
+      response = await relay;
+    } catch {
+      controller.abort();
+      void pump.catch(() => {});
+      throw new Error('Email gateway temporarily unavailable');
+    }
+    controller.abort();
+    void pump.catch(() => {});
+    void response.body?.cancel().catch(() => {});
     if (response.status >= 500 || response.status === 408 || response.status === 429) {
       throw new Error('Email gateway temporarily unavailable');
     }

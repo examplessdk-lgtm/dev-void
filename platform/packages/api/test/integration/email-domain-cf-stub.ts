@@ -56,6 +56,8 @@ export function stubCustomerCf(
     /** GET sending/subdomains entries; default []. */
     sendingSubdomains?: ReadonlyArray<{ name: string; enabled: boolean }>;
     failOn?: Partial<Record<StubFailTag, { message: string; status: number; code?: number }>>;
+    /** Tags whose configured failure is returned before the provider-side mutation occurs. */
+    failBeforeEffect?: ReadonlyArray<StubFailTag>;
     /** Side-effect hook fired right after a call is recorded (mid-request seams). */
     on?: Partial<Record<StubFailTag, () => void | Promise<void>>>;
   } = {},
@@ -327,11 +329,6 @@ export function stubCustomerCf(
     if (secretsMatch && method === 'PUT') {
       const parsed = typeof init?.body === 'string' ? JSON.parse(init.body) : {};
       const text = typeof parsed.text === 'string' ? parsed.text : '';
-      // The worker's CURRENT secret, tracked by sha256 only — the same
-      // form the ROUTING mirror stores — so a test can prove worker, row
-      // and mirror carry ONE secret without the value ever being recorded.
-      secretHashes.set(secretsMatch[1]!, await sha256Hex(text));
-      relaySecrets.set(secretsMatch[1]!, text);
       await record({
         tag: 'secretPut',
         method,
@@ -343,6 +340,14 @@ export function stubCustomerCf(
           textShape: `len=${text.length} ${/^[A-Za-z0-9_-]+$/.test(text) ? 'base64url' : 'other'}`,
         },
       });
+      if (config.failBeforeEffect?.includes('secretPut')) {
+        return fail('secretPut') ?? cfSuccess({});
+      }
+      // The worker's CURRENT secret, tracked by sha256 only — the same
+      // form the ROUTING mirror stores — so a test can prove worker, row
+      // and mirror carry ONE secret without the value ever being recorded.
+      secretHashes.set(secretsMatch[1]!, await sha256Hex(text));
+      relaySecrets.set(secretsMatch[1]!, text);
       return fail('secretPut') ?? cfSuccess({});
     }
 

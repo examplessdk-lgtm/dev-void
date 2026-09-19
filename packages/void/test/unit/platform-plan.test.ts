@@ -80,6 +80,21 @@ function legacyInstallation(suffix = '0123456789ab') {
 }
 
 describe('platform installation planning', () => {
+  it.each(['install', 'upgrade'] as const)(
+    'rejects incomplete shared email settings during %s',
+    async (mode) => {
+      const existing = mode === 'upgrade' ? legacyInstallation() : null;
+      for (const emailSettings of [
+        { emailSharedZoneId: 'mail-zone-id' },
+        { emailSenderDomain: 'mail.example.org' },
+      ]) {
+        await expect(
+          createPlatformInstallPlan(client(), { ...input, ...emailSettings }, existing),
+        ).rejects.toThrow('VOID_EMAIL_SENDER_DOMAIN and VOID_EMAIL_SHARED_ZONE_ID together');
+      }
+    },
+  );
+
   it('persists the shared email zone separately from the application zone on resume', async () => {
     const configured = await createPlatformInstallPlan(
       client(),
@@ -88,6 +103,7 @@ describe('platform installation planning', () => {
     );
     expect(configured.deployment.emailSharedZoneId).toBe('mail-zone-id');
     expect(configured.deployment.emailSenderDomain).toBe('mail.example.org');
+    expect(configured.deployment.capabilities.email).toBe(true);
     const manifest = createPlatformInstallationManifest({
       account: configured.account,
       deployment: configured.deployment,
@@ -99,7 +115,36 @@ describe('platform installation planning', () => {
     const resumed = await createPlatformInstallPlan(client(), input, manifest);
     expect(resumed.deployment.emailSharedZoneId).toBe('mail-zone-id');
     expect(resumed.deployment.emailSenderDomain).toBe('mail.example.org');
+    expect(resumed.deployment.capabilities.email).toBe(true);
     expect(resumed.zone?.id).not.toBe('mail-zone-id');
+    await expect(
+      createPlatformInstallPlan(
+        client(),
+        { ...input, emailSharedZoneId: 'different-zone' },
+        manifest,
+      ),
+    ).rejects.toThrow('shared email zone is already recorded');
+  });
+
+  it('canonicalizes a trailing-dot sender domain before fresh-install resume checks', async () => {
+    const configuredInput = {
+      ...input,
+      emailSharedZoneId: 'mail-zone-id',
+      emailSenderDomain: 'Mail.Example.Org.',
+    };
+    const configured = await createPlatformInstallPlan(client(), configuredInput, null);
+    expect(configured.deployment.emailSenderDomain).toBe('mail.example.org');
+    const manifest = createPlatformInstallationManifest({
+      account: configured.account,
+      deployment: configured.deployment,
+      id: configured.installationId,
+      ownershipNonce: '0123456789abcdef0123456789abcdef',
+      platformVersion: '1.0.0',
+      createdAt: '2026-09-17T00:00:00.000Z',
+    });
+
+    const resumed = await createPlatformInstallPlan(client(), configuredInput, manifest);
+    expect(resumed.deployment.emailSenderDomain).toBe('mail.example.org');
   });
 
   it('adds a configured shared email zone to a previously unconfigured installation', async () => {
@@ -119,6 +164,7 @@ describe('platform installation planning', () => {
     );
     expect(upgraded.deployment.emailSharedZoneId).toBe('mail-zone-id');
     expect(upgraded.deployment.emailSenderDomain).toBe('mail.example.org');
+    expect(upgraded.deployment.capabilities.email).toBe(true);
     await expect(
       createPlatformInstallPlan(
         client(),
@@ -133,6 +179,21 @@ describe('platform installation planning', () => {
         }),
       ),
     ).rejects.toThrow('already recorded');
+  });
+
+  it('records shared email settings without enabling an older runtime', async () => {
+    const configured = await createPlatformInstallPlan(
+      client(),
+      { ...input, emailSharedZoneId: 'mail-zone-id', emailSenderDomain: 'mail.example.org' },
+      null,
+      { includeEmailGateway: false },
+    );
+    expect(configured.deployment.emailSharedZoneId).toBe('mail-zone-id');
+    expect(configured.deployment.emailSenderDomain).toBe('mail.example.org');
+    expect(configured.deployment.capabilities.email).toBe(false);
+    expect(configured.actions).not.toContainEqual(
+      expect.objectContaining({ key: 'email-gateway-worker' }),
+    );
   });
 
   it('resumes the recorded namespaces using the real unfiltered KV API response', async () => {

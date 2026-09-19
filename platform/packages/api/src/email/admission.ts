@@ -1,4 +1,4 @@
-import { and, asc, count, desc, eq, gte, ne, sql } from 'drizzle-orm';
+import { and, asc, count, eq, gte, ne, sql } from 'drizzle-orm';
 import type { Db, DbOrTx, Tx } from '../db.ts';
 import { generateId } from '../id.ts';
 import { isReservedEmailSlug } from '../reserved-slugs.ts';
@@ -11,8 +11,8 @@ import {
   emailReceipts,
   emailUnresolvedAttempts,
 } from './admission-schema.ts';
-import { emailCredentials, emailDomainRoutes } from './connection-schema.ts';
-import { resolveEmailDomain } from './connection-service.ts';
+import { emailCredentials, emailDomainRoutes, emailZoneConnections } from './connection-schema.ts';
+import { isEmailCredentialExpired, resolveEmailDomain } from './connection-service.ts';
 import { getEmailRecipientPolicy } from './settings.ts';
 
 export type EmailActionState =
@@ -47,6 +47,15 @@ export type EmailAdmissionInput = {
   receiptId?: string;
   /** Only configured server-side; never accept this from a tenant request. */
   sharedSenderDomain: string;
+};
+
+export type EmailReceiptRouteFence = {
+  routeId: string;
+  routeGeneration: number;
+  connectionId: string;
+  addressing: 'shared' | 'custom';
+  domain: string;
+  projectSlug: string;
 };
 
 export class EmailAdmissionError extends Error {
@@ -235,6 +244,24 @@ function monthStart(now: Date): string {
   return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString();
 }
 
+function utcMonth(timestamp: string): string {
+  return new Date(timestamp).toISOString().slice(0, 7);
+}
+
+async function incrementInboundReceiptUsage(
+  tx: Tx,
+  projectId: string,
+  createdAt: string,
+): Promise<void> {
+  await tx
+    .insert(emailMonthlyUsage)
+    .values({ project_id: projectId, month: utcMonth(createdAt), inbound_receipts: 1 })
+    .onConflictDoUpdate({
+      target: [emailMonthlyUsage.project_id, emailMonthlyUsage.month],
+      set: { inbound_receipts: sql`${emailMonthlyUsage.inbound_receipts} + 1` },
+    });
+}
+
 async function currentRecipients(
   tx: DbOrTx,
   actionId: string,
@@ -335,7 +362,8 @@ export async function admitEmailAction(
       !shared &&
       input.kind !== 'direct' &&
       input.transport === (input.kind === 'forward' ? 'native_forward' : 'native_reply');
-    if (input.transport !== expectedTransport && !nativeCustomTransport) {
+    const sharedBindingReply = shared && input.kind === 'reply' && input.transport === 'binding';
+    if (input.transport !== expectedTransport && !nativeCustomTransport && !sharedBindingReply) {
       throw new EmailAdmissionError('INVALID_REQUEST', 'invalid email transport');
     }
     let senderAllowed = false;
@@ -356,11 +384,12 @@ export async function admitEmailAction(
         nativeCustomTransport || domain?.route.outbound_status === 'verified_only';
       if (senderAllowed && domain?.connection.credential_id) {
         const [credential] = await tx
-          .select({ status: emailCredentials.status })
+          .select({ status: emailCredentials.status, expiresOn: emailCredentials.expires_on })
           .from(emailCredentials)
           .where(eq(emailCredentials.id, domain.connection.credential_id))
           .limit(1);
-        senderAllowed = credential?.status === 'healthy';
+        senderAllowed =
+          credential?.status === 'healthy' && !isEmailCredentialExpired(credential.expiresOn);
       } else {
         senderAllowed = false;
       }
@@ -507,7 +536,7 @@ export async function transitionEmailRecipients(
   return db.transaction(async (tx) => {
     // Serialize starts with project teardown. Once deleting is visible, an
     // admitted reservation cannot become a provider side effect.
-    if (next === 'attempt_started') {
+    if (next === 'attempt_started' || next === 'cancelled') {
       await lockEmailPolicyForAdmission(tx);
     }
     const [actionIdentity] = await tx
@@ -519,12 +548,31 @@ export async function transitionEmailRecipients(
       throw new EmailAdmissionError('NOT_FOUND', 'email action not found');
     }
     if (next === 'attempt_started') {
+      const [projectIdentity] = await tx
+        .select({ ownerId: projects.user_id })
+        .from(projects)
+        .where(eq(projects.id, actionIdentity.projectId))
+        .limit(1);
+      if (!projectIdentity) {
+        throw new EmailAdmissionError('INVALID_STATE', 'project is not active');
+      }
+      // Lock the owner before the project so a user deletion never has to wait
+      // on the project while this transaction waits on the user. Re-check the
+      // relationship under the project lock in case the unlocked lookup raced.
+      const [owner] = await tx
+        .select({ suspendedReason: users.suspended_reason })
+        .from(users)
+        .where(eq(users.id, projectIdentity.ownerId))
+        .for('share');
       const [project] = await tx
-        .select({ status: projects.status })
+        .select({ status: projects.status, ownerId: projects.user_id })
         .from(projects)
         .where(eq(projects.id, actionIdentity.projectId))
         .for('update');
-      if (project?.status !== 'active') {
+      if (!owner || owner.suspendedReason) {
+        throw new EmailAdmissionError('INVALID_STATE', 'email sending is suspended');
+      }
+      if (project?.status !== 'active' || project.ownerId !== projectIdentity.ownerId) {
         throw new EmailAdmissionError('INVALID_STATE', 'project is not active');
       }
     }
@@ -560,6 +608,17 @@ export async function transitionEmailRecipients(
             route.connection.management_status !== 'healthy'
           ) {
             throw new EmailAdmissionError('INVALID_STATE', 'email route is not active');
+          }
+          if (!route.connection.credential_id) {
+            throw new EmailAdmissionError('INVALID_STATE', 'email route credential is unavailable');
+          }
+          const [credential] = await tx
+            .select({ status: emailCredentials.status, expiresOn: emailCredentials.expires_on })
+            .from(emailCredentials)
+            .where(eq(emailCredentials.id, route.connection.credential_id))
+            .limit(1);
+          if (credential?.status !== 'healthy' || isEmailCredentialExpired(credential.expiresOn)) {
+            throw new EmailAdmissionError('INVALID_STATE', 'email route credential is unavailable');
           }
         }
       }
@@ -608,7 +667,7 @@ export async function transitionEmailRecipients(
           .where(
             and(
               eq(emailMonthlyUsage.project_id, action.project_id),
-              eq(emailMonthlyUsage.month, current.reserved_at.slice(0, 7)),
+              eq(emailMonthlyUsage.month, utcMonth(current.reserved_at)),
             ),
           );
       }
@@ -654,7 +713,7 @@ export async function drainProjectEmailAdmissions(
     const monthlyRefunds = new Map<string, number>();
     for (const row of cancelled) {
       if (row.reservedAt) {
-        const month = row.reservedAt.slice(0, 7);
+        const month = utcMonth(row.reservedAt);
         monthlyRefunds.set(month, (monthlyRefunds.get(month) ?? 0) + 1);
       }
     }
@@ -677,13 +736,6 @@ export async function drainProjectEmailAdmissions(
 }
 
 /** Disable a custom route and drain its unstarted sends under the admission fence. */
-export async function disableEmailDomainRouteAndDrain(
-  db: Db,
-  routeId: string,
-): Promise<{ cancelled: number; inFlight: number }> {
-  return db.transaction((tx) => disableEmailDomainRouteAndDrainTx(tx, routeId));
-}
-
 export async function disableEmailDomainRouteAndDrainTx(
   tx: Tx,
   routeId: string,
@@ -700,15 +752,17 @@ export async function disableEmailDomainRouteAndDrainTx(
   if (route.desired_state === 'removed') {
     return { cancelled: 0, inFlight: 0 };
   }
-  await tx
-    .update(emailDomainRoutes)
-    .set({
-      desired_state: 'disabled',
-      inbound_status: 'disabled',
-      desired_generation: sql`${emailDomainRoutes.desired_generation} + 1`,
-      updated_at: sql`now()`,
-    })
-    .where(eq(emailDomainRoutes.id, routeId));
+  if (route.desired_state !== 'disabled') {
+    await tx
+      .update(emailDomainRoutes)
+      .set({
+        desired_state: 'disabled',
+        inbound_status: 'disabled',
+        desired_generation: sql`${emailDomainRoutes.desired_generation} + 1`,
+        updated_at: sql`now()`,
+      })
+      .where(eq(emailDomainRoutes.id, routeId));
+  }
   const cancelled = await tx
     .update(emailActionRecipients)
     .set({
@@ -727,7 +781,7 @@ export async function disableEmailDomainRouteAndDrainTx(
   const monthlyRefunds = new Map<string, number>();
   for (const row of cancelled) {
     if (row.reservedAt) {
-      const month = row.reservedAt.slice(0, 7);
+      const month = utcMonth(row.reservedAt);
       monthlyRefunds.set(month, (monthlyRefunds.get(month) ?? 0) + 1);
     }
   }
@@ -753,55 +807,117 @@ export async function disableEmailDomainRouteAndDrainTx(
   return { cancelled: cancelled.length, inFlight: unresolved?.n ?? 0 };
 }
 
-export async function countEmailDomainInFlight(db: Db, routeId: string): Promise<number> {
-  const [route] = await db
-    .select({ projectId: emailDomainRoutes.project_id, domain: emailDomainRoutes.domain })
-    .from(emailDomainRoutes)
-    .where(eq(emailDomainRoutes.id, routeId))
+async function lockReceiptAdmissionProject(tx: Tx, projectId: string) {
+  await lockEmailPolicyForAdmission(tx);
+  const [identity] = await tx
+    .select({ ownerId: projects.user_id })
+    .from(projects)
+    .where(eq(projects.id, projectId))
     .limit(1);
-  if (!route?.projectId) {
-    return 0;
-  }
-  const [row] = await db
-    .select({ n: count() })
-    .from(emailUnresolvedAttempts)
-    .where(
-      and(
-        eq(emailUnresolvedAttempts.project_id, route.projectId),
-        eq(emailUnresolvedAttempts.sender_domain, route.domain),
-      ),
-    );
-  return row?.n ?? 0;
-}
-
-export async function getEmailAction(
-  db: Db,
-  actionId: string,
-): Promise<EmailAdmissionResult | null> {
-  const [action] = await db
-    .select()
-    .from(emailActions)
-    .where(eq(emailActions.id, actionId))
-    .limit(1);
-  if (!action) {
+  if (!identity) {
     return null;
   }
-  return { operationId: actionId, replay: true, recipients: await currentRecipients(db, actionId) };
+  // Match outbound admission's owner-before-project lock order during user deletion.
+  const [owner] = await tx
+    .select({ suspendedReason: users.suspended_reason })
+    .from(users)
+    .where(eq(users.id, identity.ownerId))
+    .for('share');
+  const [project] = await tx
+    .select({ status: projects.status, ownerId: projects.user_id, slug: projects.slug })
+    .from(projects)
+    .where(eq(projects.id, projectId))
+    .for('update');
+  if (!project || project.ownerId !== identity.ownerId) {
+    return null;
+  }
+  const [controls] = await tx
+    .select({ suspendedAt: emailProjectControls.suspended_at })
+    .from(emailProjectControls)
+    .where(eq(emailProjectControls.project_id, projectId));
+  return {
+    status: project.status,
+    slug: project.slug,
+    suspended: !owner || !!owner.suspendedReason || !!controls?.suspendedAt,
+  };
+}
+
+function validReceiptRouteFence(value: unknown): value is EmailReceiptRouteFence {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return false;
+  }
+  const route = value as Partial<EmailReceiptRouteFence>;
+  return (
+    typeof route.routeId === 'string' &&
+    route.routeId.length > 0 &&
+    route.routeId.length <= 128 &&
+    Number.isSafeInteger(route.routeGeneration) &&
+    route.routeGeneration! >= 1 &&
+    typeof route.connectionId === 'string' &&
+    route.connectionId.length > 0 &&
+    route.connectionId.length <= 128 &&
+    (route.addressing === 'shared' || route.addressing === 'custom') &&
+    typeof route.domain === 'string' &&
+    route.domain.length > 0 &&
+    route.domain.length <= 253 &&
+    typeof route.projectSlug === 'string' &&
+    route.projectSlug.length > 0 &&
+    route.projectSlug.length <= 128
+  );
+}
+
+async function requireCurrentReceiptRoute(
+  tx: Tx,
+  project: { slug: string },
+  projectId: string,
+  fence: EmailReceiptRouteFence,
+): Promise<void> {
+  const [route] = await tx
+    .select()
+    .from(emailDomainRoutes)
+    .where(eq(emailDomainRoutes.id, fence.routeId))
+    .for('share');
+  if (
+    !route ||
+    route.connection_id !== fence.connectionId ||
+    route.desired_generation !== fence.routeGeneration ||
+    route.desired_state !== 'active' ||
+    route.inbound_status !== 'ready' ||
+    route.addressing !== fence.addressing ||
+    route.domain !== fence.domain.toLowerCase() ||
+    project.slug.toLowerCase() !== fence.projectSlug.toLowerCase() ||
+    (route.addressing === 'custom' ? route.project_id !== projectId : route.project_id !== null)
+  ) {
+    throw new EmailAdmissionError('INVALID_STATE', 'email route is not active');
+  }
+  const [connection] = await tx
+    .select({ inboundStatus: emailZoneConnections.inbound_status })
+    .from(emailZoneConnections)
+    .where(eq(emailZoneConnections.id, fence.connectionId))
+    .limit(1);
+  if (connection?.inboundStatus !== 'ready') {
+    throw new EmailAdmissionError('INVALID_STATE', 'email route is not active');
+  }
 }
 
 export async function recordEmailReceipt(
   db: Db,
-  input: { receiptId: string; projectId: string; status: string },
+  input: {
+    receiptId: string;
+    projectId: string;
+    status: string;
+    route?: EmailReceiptRouteFence;
+  },
 ): Promise<void> {
-  if (!/^[a-zA-Z0-9_-]{1,128}$/.test(input.receiptId) || !/^[a-z_]{1,32}$/.test(input.status)) {
+  if (
+    !/^[a-zA-Z0-9_-]{1,128}$/.test(input.receiptId) ||
+    !/^[a-z_]{1,32}$/.test(input.status) ||
+    (input.route !== undefined && !validReceiptRouteFence(input.route))
+  ) {
     throw new EmailAdmissionError('INVALID_REQUEST', 'invalid receipt');
   }
   await db.transaction(async (tx) => {
-    const [project] = await tx
-      .select({ id: projects.id, status: projects.status })
-      .from(projects)
-      .where(eq(projects.id, input.projectId))
-      .for('update');
+    const project = await lockReceiptAdmissionProject(tx, input.projectId);
     if (!project) {
       throw new EmailAdmissionError('NOT_FOUND', 'project not found');
     }
@@ -813,8 +929,8 @@ export async function recordEmailReceipt(
     if (existing && existing.project_id !== input.projectId) {
       throw new EmailAdmissionError('CONFLICT', 'receipt belongs to another project');
     }
-    if (!existing && project.status !== 'active') {
-      throw new EmailAdmissionError('INVALID_STATE', 'project is not active');
+    if (!existing && (project.status !== 'active' || project.suspended)) {
+      throw new EmailAdmissionError('INVALID_STATE', 'inbound email is not active');
     }
     if (existing) {
       await tx
@@ -822,29 +938,64 @@ export async function recordEmailReceipt(
         .set({ status: input.status })
         .where(eq(emailReceipts.id, input.receiptId));
     } else {
-      await tx
+      if (!input.route) {
+        throw new EmailAdmissionError('INVALID_REQUEST', 'receipt route is required');
+      }
+      await requireCurrentReceiptRoute(tx, project, input.projectId, input.route);
+      const [inserted] = await tx
         .insert(emailReceipts)
-        .values({ id: input.receiptId, project_id: input.projectId, status: input.status });
+        .values({ id: input.receiptId, project_id: input.projectId, status: input.status })
+        .returning({ createdAt: emailReceipts.created_at });
+      await incrementInboundReceiptUsage(tx, input.projectId, inserted!.createdAt);
     }
   });
 }
 
 export async function claimRelayedEmailReceipt(
   db: Db,
-  input: { receiptId: string; projectId: string; payloadDigest: string },
+  input: {
+    receiptId: string;
+    projectId: string;
+    payloadDigest: string;
+    route?: EmailReceiptRouteFence;
+  },
 ): Promise<{ state: 'claimed' | 'in_progress' | 'completed'; reject?: boolean }> {
-  if (!/^[a-f0-9]{64}$/.test(input.receiptId) || !/^[a-f0-9]{64}$/.test(input.payloadDigest)) {
+  if (
+    !/^[a-f0-9]{64}$/.test(input.receiptId) ||
+    !/^[a-f0-9]{64}$/.test(input.payloadDigest) ||
+    (input.route !== undefined && !validReceiptRouteFence(input.route))
+  ) {
     throw new EmailAdmissionError('INVALID_REQUEST', 'invalid relay claim');
   }
   return db.transaction(async (tx) => {
-    const [project] = await tx
-      .select({ status: projects.status })
-      .from(projects)
-      .where(eq(projects.id, input.projectId))
-      .for('update');
+    const project = await lockReceiptAdmissionProject(tx, input.projectId);
     if (!project || project.status !== 'active') {
       throw new EmailAdmissionError('INVALID_STATE', 'project is not active');
     }
+    const [existing] = await tx
+      .select()
+      .from(emailReceipts)
+      .where(eq(emailReceipts.id, input.receiptId))
+      .for('update');
+    if (existing) {
+      if (
+        existing.project_id !== input.projectId ||
+        existing.payload_digest !== input.payloadDigest
+      ) {
+        throw new EmailAdmissionError('CONFLICT', 'relay invocation content conflict');
+      }
+      return (existing.status === 'delivery_completed' || existing.status === 'actions_rejected') &&
+        existing.final_reject !== null
+        ? { state: 'completed', reject: existing.final_reject }
+        : { state: 'in_progress' };
+    }
+    if (!input.route) {
+      throw new EmailAdmissionError('INVALID_REQUEST', 'receipt route is required');
+    }
+    if (project.suspended) {
+      throw new EmailAdmissionError('INVALID_STATE', 'inbound email is suspended');
+    }
+    await requireCurrentReceiptRoute(tx, project, input.projectId, input.route);
     const inserted = await tx
       .insert(emailReceipts)
       .values({
@@ -854,25 +1005,27 @@ export async function claimRelayedEmailReceipt(
         status: 'received',
       })
       .onConflictDoNothing()
-      .returning({ id: emailReceipts.id });
+      .returning({ id: emailReceipts.id, createdAt: emailReceipts.created_at });
     if (inserted.length) {
+      await incrementInboundReceiptUsage(tx, input.projectId, inserted[0]!.createdAt);
       return { state: 'claimed' };
     }
-    const [existing] = await tx
+    const [concurrent] = await tx
       .select()
       .from(emailReceipts)
       .where(eq(emailReceipts.id, input.receiptId))
       .for('update');
     if (
-      !existing ||
-      existing.project_id !== input.projectId ||
-      existing.payload_digest !== input.payloadDigest
+      !concurrent ||
+      concurrent.project_id !== input.projectId ||
+      concurrent.payload_digest !== input.payloadDigest
     ) {
       throw new EmailAdmissionError('CONFLICT', 'relay invocation content conflict');
     }
-    return (existing.status === 'delivery_completed' || existing.status === 'actions_rejected') &&
-      existing.final_reject !== null
-      ? { state: 'completed', reject: existing.final_reject }
+    return (concurrent.status === 'delivery_completed' ||
+      concurrent.status === 'actions_rejected') &&
+      concurrent.final_reject !== null
+      ? { state: 'completed', reject: concurrent.final_reject }
       : { state: 'in_progress' };
   });
 }
@@ -929,75 +1082,64 @@ export async function getProjectEmailUsage(db: Db, projectId: string) {
         eq(emailMonthlyUsage.month, monthStart(now).slice(0, 7)),
       ),
     );
-  const [received] = await db
-    .select({ n: count() })
-    .from(emailReceipts)
-    .where(
-      and(eq(emailReceipts.project_id, projectId), gte(emailReceipts.created_at, monthStart(now))),
-    );
   const limit = controls?.monthly_limit ?? 200;
-  const sent = monthly?.recipient_attempts ?? 0;
+  const attempts = monthly?.recipient_attempts ?? 0;
   return {
     month: monthStart(now).slice(0, 7),
-    sent,
-    received: received?.n ?? 0,
+    attempts,
+    received: monthly?.inbound_receipts ?? 0,
     limit,
-    remaining: Math.max(0, limit - sent),
+    remaining: Math.max(0, limit - attempts),
     suspended: !!controls?.suspended_at,
   };
 }
 
-export async function getProjectEmailLogs(db: Db, projectId: string, limit = 50) {
+export async function getProjectEmailLogs(db: Db, projectId: string, limit = 50, offset = 0) {
   const cap = Math.max(1, Math.min(limit, 100));
-  const rows = await db
-    .select({ action: emailActions, recipient: emailActionRecipients })
-    .from(emailActionRecipients)
-    .innerJoin(emailActions, eq(emailActions.id, emailActionRecipients.action_id))
-    .where(eq(emailActions.project_id, projectId))
-    .orderBy(desc(emailActions.created_at))
-    .limit(cap);
-  const receipts = await db
-    .select()
-    .from(emailReceipts)
-    .where(eq(emailReceipts.project_id, projectId))
-    .orderBy(desc(emailReceipts.created_at))
-    .limit(cap);
-  return {
-    logs: [
-      ...rows.map(({ action, recipient }) => ({
-        timestamp: Date.parse(action.created_at),
-        direction: 'sent' as const,
-        operationId: action.id,
-        receiptId: action.receipt_id,
-        recipient: recipient.recipient,
-        status: recipient.state,
-        transport: action.transport,
-        providerReference: recipient.provider_reference,
-        errorCode: recipient.error_code,
-        policyVersion: action.policy_version,
-      })),
-      ...receipts.map((receipt) => ({
-        timestamp: Date.parse(receipt.created_at),
-        direction: 'received' as const,
-        operationId: receipt.id,
-        receiptId: receipt.id,
-        recipient: null,
-        status: receipt.status,
-        transport: 'email_event',
-        providerReference: null,
-        errorCode: receipt.status === 'actions_rejected' ? 'INVALID_ACTIONS' : null,
-        policyVersion: null,
-      })),
-    ]
-      .sort((a, b) => b.timestamp - a.timestamp)
-      .slice(0, cap),
-  };
+  const result = await db.execute<{
+    timestamp: number;
+    direction: 'sent' | 'received';
+    operationId: string;
+    receiptId: string | null;
+    recipient: string | null;
+    status: string;
+    transport: string;
+    providerReference: string | null;
+    errorCode: string | null;
+    policyVersion: number | null;
+  }>(sql`
+    SELECT (extract(epoch FROM occurred_at) * 1000)::double precision AS timestamp,
+      direction, operation_id AS "operationId", receipt_id AS "receiptId", recipient,
+      status, transport, provider_reference AS "providerReference", error_code AS "errorCode",
+      policy_version AS "policyVersion"
+    FROM (
+      SELECT a.created_at AS occurred_at, 'recipient:' || r.id AS sort_id,
+        'sent' AS direction, a.id AS operation_id, a.receipt_id,
+        r.recipient, r.state AS status, a.transport, r.provider_reference,
+        r.error_code, a.policy_version
+      FROM ${emailActionRecipients} r
+      JOIN ${emailActions} a ON a.id = r.action_id
+      WHERE a.project_id = ${projectId}
+      UNION ALL
+      SELECT created_at AS occurred_at, 'receipt:' || id AS sort_id,
+        'received' AS direction, id AS operation_id, id AS receipt_id,
+        NULL AS recipient, status, 'email_event' AS transport, NULL AS provider_reference,
+        CASE WHEN status = 'actions_rejected' THEN 'INVALID_ACTIONS' ELSE NULL END AS error_code,
+        NULL::integer AS policy_version
+      FROM ${emailReceipts}
+      WHERE project_id = ${projectId}
+    ) outcomes
+    ORDER BY occurred_at DESC, sort_id DESC
+    LIMIT ${cap} OFFSET ${offset}
+  `);
+  return { logs: result.rows };
 }
 
 export async function pruneEmailActionHistory(
   db: Db,
   before: Date = new Date(Date.now() - 30 * 86_400_000),
 ) {
+  await cancelExpiredEmailReservations(db);
   // Active calls leave PII-free tombstones; delivery metadata expires normally.
   await db.delete(emailActions).where(sql`
     ${emailActions.created_at} < ${before.toISOString()}
@@ -1006,4 +1148,28 @@ export async function pruneEmailActionHistory(
   await db.delete(emailMonthlyUsage).where(sql`
     ${emailMonthlyUsage.month} < ${new Date().toISOString().slice(0, 7)}
   `);
+}
+
+async function cancelExpiredEmailReservations(db: Db) {
+  const before = new Date(Date.now() - 15 * 60_000).toISOString();
+  await db.transaction(async (tx) => {
+    // Starts and explicit cancellations take this lock shared. Whichever wins
+    // decides whether the provider may be called and whether quota is refunded.
+    await lockEmailPolicy(tx);
+    await tx.execute(sql`
+      with cancelled as (
+        update ${emailActionRecipients}
+        set state = 'cancelled', completed_at = now(), error_code = 'UPSTREAM_ERROR'
+        where state = 'reserved' and reserved_at < ${before}
+        returning project_id, to_char(reserved_at at time zone 'UTC', 'YYYY-MM') as month
+      ), refunds as (
+        select project_id, month, count(*) as amount
+        from cancelled group by project_id, month
+      )
+      update ${emailMonthlyUsage} as usage
+      set recipient_attempts = greatest(0, usage.recipient_attempts - refunds.amount)
+      from refunds
+      where usage.project_id = refunds.project_id and usage.month = refunds.month
+    `);
+  });
 }

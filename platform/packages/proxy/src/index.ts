@@ -5,6 +5,7 @@ import { ai } from './ai.ts';
 import { asNumber, asString, isProxyBody } from './body.ts';
 import { proxyCapabilityEnabled } from './capabilities.ts';
 import { d1 } from './d1.ts';
+import { readEmailRequestJson } from './email-request-body.ts';
 import { email, MAX_MIME_BYTES, MAX_RECIPIENT_LENGTH, MAX_SENDER_LENGTH } from './email.ts';
 import { guardHumanStream } from './human-stream.ts';
 import { kv } from './kv.ts';
@@ -76,12 +77,8 @@ app.all('/*', async (context, next) => {
 // coordinated proxy + api deploy.
 const PLATFORM_INTERNAL_EMAIL_SENTINEL = 'void-platform-internal-email-v1';
 
-/**
- * Largest base64 payload the platform-internal auth path will hash. Mirrors
- * `MAX_MIME_BYTES` in `email.ts` (10 MiB), expressed as its base64 length with
- * `+4` for padding rounding.
- */
-const MAX_PLATFORM_MIME_BASE64_LENGTH = Math.ceil((10 * 1024 * 1024 * 4) / 3) + 4;
+// Refuse impossible MIME sizes before hashing; the handler checks decoded bytes.
+const MAX_PLATFORM_MIME_BASE64_LENGTH = Math.ceil((MAX_MIME_BYTES * 4) / 3) + 4;
 
 // Bind a fresh timestamp into the HMAC and require the request to land
 // within this many seconds of "now" — without it, a single observed
@@ -127,38 +124,9 @@ async function hmacSign(data: string, secret: string): Promise<string> {
 // The tenant calls this over its internal service binding. JWT_SECRET never
 // enters the tenant, so a project token cannot mint a gateway receipt.
 app.post('/email/verify-receipt', async (context) => {
-  const declaredLength = context.req.header('content-length');
-  if (declaredLength && (!/^\d+$/.test(declaredLength) || Number(declaredLength) > 2048)) {
-    return context.json({ valid: false }, 400);
-  }
   let body: unknown;
   try {
-    const reader = context.req.raw.body?.getReader();
-    if (!reader) {
-      return context.json({ valid: false }, 400);
-    }
-    const bytes = new Uint8Array(2048);
-    let size = 0;
-    try {
-      while (true) {
-        const chunk = await reader.read();
-        if (chunk.done) {
-          break;
-        }
-        size += chunk.value.byteLength;
-        if (size > bytes.byteLength) {
-          return context.json({ valid: false }, 400);
-        }
-        bytes.set(chunk.value, size - chunk.value.byteLength);
-      }
-    } finally {
-      await reader.cancel().catch(() => {});
-      reader.releaseLock();
-    }
-    if (size === 0 || (declaredLength && size !== Number(declaredLength))) {
-      return context.json({ valid: false }, 400);
-    }
-    body = JSON.parse(new TextDecoder().decode(bytes.subarray(0, size)));
+    body = await readEmailRequestJson(context.req.raw);
   } catch {
     return context.json({ valid: false }, 400);
   }
@@ -200,7 +168,11 @@ app.post('/*', async (context, next) => {
 
   let body: ProxyBody;
   try {
-    const json = await context.req.json<unknown>();
+    // Five MiB of MIME expands to about seven MiB of base64, plus JSON metadata.
+    const json =
+      path === '/email' || path.startsWith('/email/')
+        ? await readEmailRequestJson(context.req.raw, 8 * 1024 * 1024)
+        : await context.req.json<unknown>();
     if (!isProxyBody(json)) {
       return context.json({ error: 'invalid JSON body' }, 400);
     }

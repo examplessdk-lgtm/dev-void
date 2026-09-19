@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vite-plus/test';
-import { emailPayloadDigest } from '../../src/email-admission.ts';
+import { describe, expect, it, vi } from 'vite-plus/test';
+import { admitEmail, emailPayloadDigest } from '../../src/email-admission.ts';
 
 const encoder = new TextEncoder();
 function message(date: string, id: string, boundary: string, body: string) {
@@ -23,6 +23,41 @@ function message(date: string, id: string, boundary: string, body: string) {
   );
 }
 
+function nestedMessage(generation: string, bodyLine: string) {
+  const depth = 64;
+  const boundaries = Array.from(
+    { length: depth },
+    (_, index) => `=_void_mixed_${generation}_${index}`,
+  );
+  const lines = [
+    `Date: Fri, 18 Sep 2026 01:00:${generation.padStart(2, '0')} +0000`,
+    'From: acme@mail.example.com',
+    'To: recipient@example.com',
+    `Message-ID: <${generation}@mail.example.com>`,
+    'MIME-Version: 1.0',
+    `Content-Type: multipart/mixed; boundary="${boundaries[0]}"`,
+    '',
+  ];
+  for (let index = 0; index < boundaries.length - 1; index++) {
+    lines.push(
+      `--${boundaries[index]}`,
+      `Content-Type: multipart/mixed; boundary="${boundaries[index + 1]}"`,
+      '',
+    );
+  }
+  lines.push(
+    `--${boundaries.at(-1)}`,
+    'Content-Type: text/plain; charset=UTF-8',
+    '',
+    ...Array.from({ length: 512 }, () => bodyLine),
+  );
+  for (let index = boundaries.length - 1; index >= 0; index--) {
+    lines.push(`--${boundaries[index]}--`);
+  }
+  lines.push('');
+  return encoder.encode(lines.join('\r\n'));
+}
+
 describe('email admission payload digest', () => {
   it('deduplicates retries when generated date, message ID and multipart boundary change', async () => {
     const a = message(
@@ -41,6 +76,52 @@ describe('email admission payload digest', () => {
       await emailPayloadDigest('direct', 'acme@mail.example.com', ['recipient@example.com'], a),
     ).toBe(
       await emailPayloadDigest('direct', 'acme@mail.example.com', ['recipient@example.com'], b),
+    );
+
+    const boundaryEndingInDashesA = message(
+      'Fri, 18 Sep 2026 01:00:00 +0000',
+      'one@mail.example.com',
+      '=_void_mixed_A--',
+      'hello',
+    );
+    const boundaryEndingInDashesB = message(
+      'Fri, 18 Sep 2026 01:01:00 +0000',
+      'two@mail.example.com',
+      '=_void_mixed_B--',
+      'hello',
+    );
+    expect(
+      await emailPayloadDigest(
+        'direct',
+        'acme@mail.example.com',
+        ['recipient@example.com'],
+        boundaryEndingInDashesA,
+      ),
+    ).toBe(
+      await emailPayloadDigest(
+        'direct',
+        'acme@mail.example.com',
+        ['recipient@example.com'],
+        boundaryEndingInDashesB,
+      ),
+    );
+
+    const dateOnlyA = encoder.encode('Date: first\r\nFrom: acme@mail.example.com\r\n\r\nhello');
+    const dateOnlyB = encoder.encode('Date: second\r\nFrom: acme@mail.example.com\r\n\r\nhello');
+    expect(
+      await emailPayloadDigest(
+        'direct',
+        'acme@mail.example.com',
+        ['recipient@example.com'],
+        dateOnlyA,
+      ),
+    ).toBe(
+      await emailPayloadDigest(
+        'direct',
+        'acme@mail.example.com',
+        ['recipient@example.com'],
+        dateOnlyB,
+      ),
     );
   });
 
@@ -93,5 +174,57 @@ describe('email admission payload digest', () => {
     ).not.toBe(
       await emailPayloadDigest('direct', 'acme@mail.example.com', ['recipient@example.com'], b),
     );
+  });
+
+  it('normalizes deeply nested generated boundaries without normalizing dense body lines', async () => {
+    const a = nestedMessage('1', 'same body');
+    const b = nestedMessage('2', 'same body');
+    const changed = nestedMessage('3', 'changed body');
+
+    const first = await emailPayloadDigest(
+      'direct',
+      'acme@mail.example.com',
+      ['recipient@example.com'],
+      a,
+    );
+    expect(first).toBe(
+      await emailPayloadDigest('direct', 'acme@mail.example.com', ['recipient@example.com'], b),
+    );
+    expect(first).not.toBe(
+      await emailPayloadDigest(
+        'direct',
+        'acme@mail.example.com',
+        ['recipient@example.com'],
+        changed,
+      ),
+    );
+  });
+});
+
+describe('email admission service deadline', () => {
+  it('settles when the service binding ignores its abort signal', async () => {
+    vi.useFakeTimers();
+    try {
+      const fetch = vi.fn(() => new Promise<Response>(() => {}));
+      const pending = admitEmail(
+        { API: { fetch } as never, JWT_SECRET: 'secret' },
+        {
+          projectId: 'project_1',
+          kind: 'direct',
+          key: 'request_1',
+          digest: 'a'.repeat(64),
+          from: 'sender@example.com',
+          recipients: ['recipient@example.com'],
+          transport: 'binding',
+        },
+      );
+
+      await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+      const rejection = expect(pending).rejects.toThrow('EMAIL_ADMISSION_TIMEOUT');
+      await vi.advanceTimersByTimeAsync(5_000);
+      await rejection;
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

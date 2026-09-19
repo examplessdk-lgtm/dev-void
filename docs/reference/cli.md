@@ -41,7 +41,7 @@ Use this page as a command reference. If you are setting up a project for the fi
 | `void build logs`                 | Stream, tail, or download build logs                                          |
 | `void email status`               | Show email readiness on your own Cloudflare account (`--platform cloudflare`) |
 | `void email setup`                | Set email up on your own Cloudflare account, without deploying                |
-| `void email usage`                | Show monthly email send/receive counts and quota                              |
+| `void email usage`                | Show monthly recipient attempts, inbound receipts, and quota                  |
 | `void email logs`                 | Show recent email delivery activity                                           |
 | `void email destinations`         | List verified recipient addresses                                             |
 | `void email allow <address>`      | Add a recipient and send a verification email                                 |
@@ -616,13 +616,17 @@ void platform email policy-set <verified|domains|any> [--domains <domain[,domain
 void platform email settings
 void platform email settings-set --domains <self-serve|admin>
 void platform email limit <project-id|slug> [--monthly <n>] [--burst <n>]
+void platform email logs <project-id|slug> [--page <n>] [--limit <n>] [--json]
 void platform email attempts [--project <id|slug>] [--page <n>] [--limit <n>]
 void platform email attempt-resolve <attempt-id> --ended --reason <text>
+void platform email operation-resolve <operation-id> --ended --outcome <applied|not-applied> --reason <text>
 ```
 
 `policy` decides which recipients a project's `<slug>+tag@<mail domain>` sender reaches: `verified` (the default) means only that project's verified destinations; `domains` adds every address on the listed domains; `any` lifts the check. Neither widens delivery to addresses on the platform's own mail domain: those stay verified-destination-only, so no project reaches another project's inbox without its consent. Cloudflare still refuses a destination it has not verified until the platform mail domain is onboarded for Email Sending, so under `domains` or `any` such refusals arrive as per-recipient `UNVERIFIED_DESTINATION` results. Custom-domain sends are not affected.
 
 `settings-set --domains admin` tells `void email domain add` to print the administrator's command instead of starting token setup. `limit` overrides the project's monthly and rolling 60-second caps (defaults 200 and 10); a project page in the admin UI shows and clears them.
+
+`logs` inspects retained receipt and recipient outcomes, including operation IDs, provider references, error codes, and policy versions. Pages contain at most 100 records, newest first; use `--json` for all fields. After project deletion, use its project ID to inspect metadata until the 30-day retention period expires. Message content and credentials are never included.
 
 `attempts` lists interrupted provider calls and their earliest resolution time. Once
 the original Worker execution has ended and the attempt is at least 24 hours old,
@@ -632,6 +636,16 @@ longer active; `--reason` is stored in the operator audit log. Keep recipient
 addresses and message content out of the reason. The send is never retried. Use
 `--plan` to preview and `--yes` to apply without a prompt.
 
+`operation-resolve` recovers a Cloudflare routing, Worker, secret, catch-all, or
+Sending mutation whose outcome remains unknown. After the original execution
+has ended and the operation is at least 24 hours old, inspect the exact resource
+named by the preview and attest whether its write was `applied` or `not-applied`.
+Applied writes continue at the next step; not-applied writes retry the same
+persisted intent. The running platform version must match that intent, so restore
+the matching version before recovering an operation created by older code. The
+preview pins the step, attempt, connection and route generations, resource
+identity, and digest used by the apply request. Time alone never retries a write.
+
 Register and maintain email domains for projects whose owners hold no Cloudflare credential:
 
 ```sh
@@ -639,10 +653,13 @@ void platform email domains [--project <id|slug>]
 void platform email domain-add <domain> --project <id|slug> [--token-stdin]
 void platform email domain-status <domain>
 void platform email domain-sync <domain>
-void platform email domain-remove <domain>
+void platform email domain-rotate-secret <domain>
+void platform email domain-remove <domain> [--token-stdin]
 ```
 
-`domain-add` uses the platform's Cloudflare credential for zones in its account. For another account, pipe a scoped Cloudflare API token on standard input with `--token-stdin --yes`. Name the exact mail domain (`mail.example.com`, or the apex when it receives no mail yet). `domain-status` shows inbound, outbound, and credential-management readiness with the latest operation. A blocked or uncertain operation exits unsuccessfully and can be inspected by its operation ID; use `domain-sync` to reconcile the connection. Domains an administrator adds show `managed_by: admin`; their owners can list and inspect them but use these commands for `sync` and `remove`.
+`domain-add` uses the platform's Cloudflare credential for zones in its account. For another account, pipe a scoped Cloudflare API token on standard input with `--token-stdin --yes`. Name the exact mail domain (`mail.example.com`, or the apex when it receives no mail yet). `domain-status` shows inbound, outbound, and credential-management readiness with the latest operation. A blocked operation resumes through `domain-sync`; a blocked rotation resumes through `domain-rotate-secret`, preserving already confirmed steps and its staged credential. An uncertain operation remains stopped until read-back proves the result or an administrator uses `operation-resolve`. Domains an administrator adds show `managed_by: admin`; their owners can list and inspect them but use these commands for `sync`, `domain-rotate-secret`, and `remove`.
+
+If project deletion leaves cleanup blocked by an expired or revoked Cloudflare token, use `domain-remove <domain> --token-stdin --yes` with a replacement scoped to the same account and zone. This resumes the retained cleanup only when no other project uses the connection. For a live project, renew its token through `domain-add` instead.
 
 #### System {#operator-system}
 
@@ -701,6 +718,8 @@ Read-only plans, workers.dev installations with the default API hostname, and su
 
 The installed platform needs a separate runtime token to provision resources for apps. The interactive installer prompts for it and the other setup values. For non-interactive installs, inject the variables listed in [Install from CI](../guide/self-hosted-platform.md#install-from-ci).
 
+To enable email during install or upgrade, set both `VOID_EMAIL_SENDER_DOMAIN` and `VOID_EMAIL_SHARED_ZONE_ID`. Void records the pair for later upgrades; supplying only one is an error.
+
 `--plan` prints the actual resource names, selected login methods, login callback, and direct setup links without opening credential pages or saving a draft; Cloudflare browser login still opens if needed. New platform resources use `void-<name>-<role>` names without random suffixes. Existing installations keep their recorded names, and unowned name conflicts stop installation without overwriting resources. After you confirm an interactive install, Void opens each missing credential's setup page and shows a short permission/checklist fallback. The runtime-token link preselects all required account permissions, including Workers Tail, Hyperdrive, and AI Gateway when needed; domain installations must also select the indicated zone. Supplied credentials skip browser opening. Setup drafts pin Worker names and the login callback and save partial credentials encrypted locally. Interactive installs list unfinished installations, including interrupted provisioning, or offer a new install. Entering an existing unfinished name asks to resume it; declining returns to name entry. Starting new leaves previous setup, credentials, and resources untouched. Completed platforms are not offered for resumption. `--resume` skips the choice and is required for non-interactive recovery.
 
 Use an empty PostgreSQL database dedicated to the installation. You can correct a failed initial connection, but after the database is claimed or Hyperdrive is provisioned, commands reject a different URL.
@@ -743,7 +762,7 @@ void platform uninstall [id] [--plan] [--purge-data] [--keep-zone] [--yes]
 
 Omit `id` when only one installation is configured, or choose from the interactive picker. Non-interactive commands need an ID when several installations exist. Commands that make changes also require `--yes`; `--plan` only previews changes.
 
-After discovery on another machine, set `VOID_PLATFORM_DATABASE_URL`. Normal upgrades preserve deployed Worker secrets. Restore the original runtime, GitHub, R2, JWT, and project-encryption values only if repair needs to recreate a missing API or proxy Worker.
+After discovery on another machine, set `VOID_PLATFORM_DATABASE_URL`. An upgrade that preserves every deployed Worker also preserves its secrets. If an upgrade adds the email gateway for the first time, or repair recreates only that Worker, restore `VOID_PLATFORM_JWT_SECRET`; the gateway does not need the Cloudflare runtime token. If repair recreates the API or proxy Worker, restore `VOID_PLATFORM_RUNTIME_CLOUDFLARE_API_TOKEN` and `VOID_PLATFORM_JWT_SECRET`. Recreating the API also requires its original GitHub, R2, and project-encryption values.
 
 | Command     | Behavior                                                                                      |
 | ----------- | --------------------------------------------------------------------------------------------- |
@@ -1454,7 +1473,7 @@ Project resolution for email commands follows the same order as deploy (`--proje
 void email usage [--project <name>]
 ```
 
-Show the current month's outbound and inbound counts, the monthly outbound limit, and how much of it is left. A suspended project is flagged in the output.
+Show the current month's recipient attempts and inbound receipts, the monthly attempt limit, and how much of it is left. Reserved submissions count toward the limit; started attempts remain charged even if delivery fails or its outcome is unknown. A suspended project is flagged in the output.
 
 ### `void email logs`
 

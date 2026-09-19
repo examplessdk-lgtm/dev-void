@@ -2517,14 +2517,28 @@ describe('buildMime header size projection', () => {
     });
   });
 
-  it('bounds aggregate custom headers before rendering, including names and UTF-8 bytes', async () => {
+  it('bounds aggregate custom headers by their encoded and folded wire size', async () => {
     const base = { from: 'a@x.dev', to: 'b@y.dev', subject: 's', text: 'hi' };
     await expect(
       normalizeEmail({ ...base, headers: { 'X-Note': 'x'.repeat(16 * 1024) } }),
     ).rejects.toThrow('16 KiB');
-    await expect(
-      normalizeEmail({ ...base, headers: { 'X-Note': '漢'.repeat(6000) } }),
-    ).rejects.toThrow('16 KiB');
+    // 15,000 input bytes expand to more than 25 KiB of RFC 2047 words and
+    // folded continuation lines. The proxy measures the latter.
+    const unicode = '漢'.repeat(5000);
+    expect(new TextEncoder().encode(unicode)).toHaveLength(15_000);
+    await expect(normalizeEmail({ ...base, headers: { 'X-Note': unicode } })).rejects.toThrow(
+      '16 KiB',
+    );
+    // These two fields occupy under 16 KiB before rendering, but folding
+    // replaces enough spaces with CRLF + SPACE to cross the wire limit.
+    const foldedValue = 'word '.repeat(1595).trimEnd();
+    const foldedHeaders = { 'X-One': foldedValue, 'X-Two': foldedValue };
+    const inputBytes = Object.entries(foldedHeaders).reduce(
+      (sum, [name, value]) => sum + name.length + new TextEncoder().encode(value).byteLength + 4,
+      0,
+    );
+    expect(inputBytes).toBeLessThan(16 * 1024);
+    await expect(normalizeEmail({ ...base, headers: foldedHeaders })).rejects.toThrow('16 KiB');
     const names = Object.fromEntries(
       Array.from({ length: 40 }, (_, i) => [`X${i}`.padEnd(500, 'a'), '']),
     );

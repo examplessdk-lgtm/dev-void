@@ -1,4 +1,4 @@
-import { eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import {
   afterAll,
   afterEach,
@@ -11,7 +11,7 @@ import {
 } from 'vite-plus/test';
 import { hmacSignState } from '../../src/auth/hmac.ts';
 import { emailUnresolvedAttempts } from '../../src/email/admission-schema.ts';
-import { disableEmailDomainRouteAndDrain } from '../../src/email/admission.ts';
+import { disableEmailDomainRouteAndDrainTx } from '../../src/email/admission.ts';
 import {
   emailCacheOutbox,
   emailCredentials,
@@ -22,9 +22,12 @@ import {
 } from '../../src/email/connection-schema.ts';
 import {
   ensureSharedEmailConnection,
+  EMAIL_OPERATION_RECOVERY_MIN_AGE_MS,
   flushEmailCacheOutbox,
   getEmailOperation,
+  inspectUnknownEmailOperationRecovery,
   reconcilePendingEmailOperations,
+  reconcileUnknownEmailOperation,
   requestEmailDomainAdd,
   requestEmailDomainRemove,
   requestEmailDomainSync,
@@ -32,6 +35,7 @@ import {
   readConnectionSecret,
   resolveEmailDomain,
   resolveEmailIngress,
+  resolveUnknownEmailOperation,
   runEmailOperation,
 } from '../../src/email/connection-service.ts';
 import type { ApiEnv } from '../../src/env.ts';
@@ -58,6 +62,24 @@ function bindings(): ApiEnv['Bindings'] {
     ...env,
     EMAIL_GATEWAY_ORIGIN: 'https://email-gateway.example.test',
   } as unknown as ApiEnv['Bindings'];
+}
+
+async function waitForPostgresLockWaiters(minimum: number): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const result = await env.db.execute(sql`
+      SELECT count(*)::int AS waiters
+      FROM pg_stat_activity
+      WHERE datname = current_database()
+        AND pid <> pg_backend_pid()
+        AND wait_event_type = 'Lock'
+    `);
+    if (Number((result.rows[0] as { waiters?: number } | undefined)?.waiters ?? 0) >= minimum) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timed out waiting for ${minimum} PostgreSQL lock waiters`);
 }
 
 beforeAll(async () => {
@@ -91,7 +113,7 @@ describe('durable zone email connections', () => {
       .update(deployments)
       .set({ manifest: JSON.stringify({ emailProtocolVersion: 1, limits: { cpuMs: 100 } }) })
       .where(eq(deployments.id, deployment.id));
-    const { connection } = (await resolveEmailDomain(env.db, 'limits.example.com'))!;
+    const { connection, route } = (await resolveEmailDomain(env.db, 'limits.example.com'))!;
     const to = 'support@limits.example.com';
     const proof = await hmacSignState(
       `email-ingress-v1\n${connection.account_id}\n${connection.zone_id}\n${connection.ingress_worker_name}\n${to}`,
@@ -115,6 +137,9 @@ describe('durable zone email connections', () => {
     expect(await response.json()).toMatchObject({
       projectId: project.id,
       deploymentId: deployment.id,
+      routeId: route.id,
+      routeGeneration: route.desired_generation,
+      connectionId: connection.id,
       limits: { cpuMs: 10, subRequests: 50 },
     });
   });
@@ -133,6 +158,302 @@ describe('durable zone email connections', () => {
     ).rejects.toThrow('DNS MX lookup');
     expect(stub.calls.filter((call) => call.method !== 'GET')).toEqual([]);
     expect(await env.db.select().from(emailOperations)).toEqual([]);
+  });
+
+  it('blocks setup when Cloudflare definitively refuses a provider write', async () => {
+    const owner = await createTestUser(env.db);
+    const project = await createTestProject(env.db, owner.id, 'routing-permission');
+    const failures: NonNullable<Parameters<typeof stubCustomerCf>[0]>['failOn'] = {
+      routingDns: { message: 'permission denied', status: 403 },
+    };
+    const stub = stubCustomerCf({
+      zones,
+      failOn: failures,
+    });
+    const actor = { kind: 'owner' as const, userId: owner.id };
+    const { operationId, routeId } = await requestEmailDomainAdd(env.db, bindings(), {
+      projectId: project.id,
+      domain: 'permission.example.com',
+      token: TOKEN,
+      actor,
+    });
+
+    await runEmailOperation(env.db, bindings(), operationId);
+
+    expect((await getEmailOperation(env.db, project.id, operationId))?.operation).toMatchObject({
+      status: 'blocked',
+      current_step: 'routing_enable',
+      failure_code: 'blocked',
+      failure_detail: expect.stringContaining('permission denied'),
+    });
+    expect(callsByTag(stub.calls, 'routingDns')).toHaveLength(1);
+    expect(await reconcilePendingEmailOperations(env.db, bindings())).toBe(0);
+
+    delete failures.routingDns;
+    const resumed = await requestEmailDomainSync(env.db, bindings(), routeId, actor);
+    expect(resumed).toBe(operationId);
+    await runEmailOperation(env.db, bindings(), resumed);
+    expect((await getEmailOperation(env.db, project.id, operationId))?.operation.status).toBe(
+      'completed',
+    );
+    expect(callsByTag(stub.calls, 'routingDns')).toHaveLength(2);
+  });
+
+  it('keeps a Cloudflare request timeout outcome unknown', async () => {
+    const owner = await createTestUser(env.db);
+    const project = await createTestProject(env.db, owner.id, 'routing-timeout');
+    const stub = stubCustomerCf({
+      zones,
+      failOn: { routingDns: { message: 'request timeout', status: 408 } },
+    });
+    const { operationId } = await requestEmailDomainAdd(env.db, bindings(), {
+      projectId: project.id,
+      domain: 'timeout.example.com',
+      token: TOKEN,
+      actor: { kind: 'owner', userId: owner.id },
+    });
+
+    await runEmailOperation(env.db, bindings(), operationId);
+
+    expect((await getEmailOperation(env.db, project.id, operationId))?.operation).toMatchObject({
+      status: 'unknown',
+      current_step: 'routing_enable',
+      failure_code: 'outcome_unknown',
+      failure_detail: expect.stringContaining('request timeout'),
+    });
+    expect(callsByTag(stub.calls, 'routingDns')).toHaveLength(1);
+  });
+
+  it('repairs a blocked initial setup with a corrected credential under a new attempt', async () => {
+    const owner = await createTestUser(env.db);
+    const project = await createTestProject(env.db, owner.id, 'setup-credential-repair');
+    const failures: NonNullable<Parameters<typeof stubCustomerCf>[0]>['failOn'] = {
+      routingDns: { message: 'routing permission denied', status: 403 },
+    };
+    const stub = stubCustomerCf({ zones, failOn: failures });
+    const actor = { kind: 'owner' as const, userId: owner.id };
+    const first = await requestEmailDomainAdd(env.db, bindings(), {
+      projectId: project.id,
+      domain: 'setup-repair.example.com',
+      token: TOKEN,
+      actor,
+      attemptId: 'initial-setup-attempt',
+    });
+    await runEmailOperation(env.db, bindings(), first.operationId);
+    expect(
+      (
+        await env.db.select().from(emailOperations).where(eq(emailOperations.id, first.operationId))
+      )[0],
+    ).toMatchObject({ status: 'blocked', current_step: 'routing_enable' });
+
+    delete failures.routingDns;
+    const replacementInput = {
+      projectId: project.id,
+      domain: 'setup-repair.example.com',
+      token: 'corrected-customer-token',
+      actor,
+      attemptId: 'replacement-setup-attempt',
+    };
+    const repaired = await requestEmailDomainAdd(env.db, bindings(), replacementInput);
+    expect(repaired.operationId).not.toBe(first.operationId);
+    expect(await requestEmailDomainAdd(env.db, bindings(), replacementInput)).toEqual(repaired);
+
+    await runEmailOperation(env.db, bindings(), repaired.operationId);
+
+    expect(
+      (
+        await env.db
+          .select()
+          .from(emailOperations)
+          .where(eq(emailOperations.id, repaired.operationId))
+      )[0]?.status,
+    ).toBe('completed');
+    expect(
+      (
+        await env.db.select().from(emailOperations).where(eq(emailOperations.id, first.operationId))
+      )[0]?.status,
+    ).toBe('blocked');
+    expect(
+      (await resolveEmailDomain(env.db, 'setup-repair.example.com'))?.route.inbound_status,
+    ).toBe('ready');
+    expect(callsByTag(stub.calls, 'routingDns')).toHaveLength(2);
+    expect(callsByTag(stub.calls, 'secretPut')).toHaveLength(1);
+  });
+
+  it('blocks a failed provider read before its write and resumes without an ambiguous mutation', async () => {
+    const owner = await createTestUser(env.db);
+    const project = await createTestProject(env.db, owner.id, 'probe-route-preflight');
+    const failures: NonNullable<Parameters<typeof stubCustomerCf>[0]>['failOn'] = {
+      scriptSubdomain: { message: 'subdomain lookup unavailable', status: 503 },
+    };
+    const stub = stubCustomerCf({ zones, failOn: failures });
+    const actor = { kind: 'owner' as const, userId: owner.id };
+    const { operationId, routeId } = await requestEmailDomainAdd(env.db, bindings(), {
+      projectId: project.id,
+      domain: 'probe-route.example.com',
+      token: TOKEN,
+      actor,
+    });
+
+    await runEmailOperation(env.db, bindings(), operationId);
+
+    expect((await getEmailOperation(env.db, project.id, operationId))?.operation).toMatchObject({
+      status: 'blocked',
+      current_step: 'probe_route_enable',
+      failure_code: 'blocked',
+    });
+    expect(callsByTag(stub.calls, 'scriptSubdomain')).toMatchObject([{ method: 'GET' }]);
+
+    delete failures.scriptSubdomain;
+    expect(await requestEmailDomainSync(env.db, bindings(), routeId, actor)).toBe(operationId);
+    await runEmailOperation(env.db, bindings(), operationId);
+
+    expect((await getEmailOperation(env.db, project.id, operationId))?.operation.status).toBe(
+      'completed',
+    );
+    expect(
+      callsByTag(stub.calls, 'scriptSubdomain').filter((call) => call.method === 'POST'),
+    ).toHaveLength(1);
+  });
+
+  it('blocks a failed catch-all ownership read before its write and resumes safely', async () => {
+    const owner = await createTestUser(env.db);
+    const project = await createTestProject(env.db, owner.id, 'catchall-preflight');
+    const failures: NonNullable<Parameters<typeof stubCustomerCf>[0]>['failOn'] = {};
+    const stub = stubCustomerCf({ zones, failOn: failures });
+    const actor = { kind: 'owner' as const, userId: owner.id };
+    const { operationId, routeId } = await requestEmailDomainAdd(env.db, bindings(), {
+      projectId: project.id,
+      domain: 'catchall-preflight.example.com',
+      token: TOKEN,
+      actor,
+    });
+    failures.catchAllGet = { message: 'catch-all lookup unavailable', status: 503 };
+
+    await runEmailOperation(env.db, bindings(), operationId);
+
+    expect((await getEmailOperation(env.db, project.id, operationId))?.operation).toMatchObject({
+      status: 'blocked',
+      current_step: 'catchall_ensure',
+      failure_code: 'blocked',
+    });
+    expect(callsByTag(stub.calls, 'catchAll')).toHaveLength(0);
+
+    delete failures.catchAllGet;
+    expect(await requestEmailDomainSync(env.db, bindings(), routeId, actor)).toBe(operationId);
+    await runEmailOperation(env.db, bindings(), operationId);
+
+    expect((await getEmailOperation(env.db, project.id, operationId))?.operation.status).toBe(
+      'completed',
+    );
+    expect(callsByTag(stub.calls, 'catchAll')).toHaveLength(1);
+  });
+
+  it('retries an attested not-applied routing write only through its exact recovery fence', async () => {
+    const owner = await createTestUser(env.db);
+    const project = await createTestProject(env.db, owner.id, 'routing-recovery');
+    const failures: NonNullable<Parameters<typeof stubCustomerCf>[0]>['failOn'] = {
+      routingDns: { message: 'response lost', status: 504 },
+    };
+    const stub = stubCustomerCf({ zones, failOn: failures });
+    const { operationId, routeId } = await requestEmailDomainAdd(env.db, bindings(), {
+      projectId: project.id,
+      domain: 'recover-routing.example.com',
+      token: TOKEN,
+      actor: { kind: 'owner', userId: owner.id },
+    });
+    await runEmailOperation(env.db, bindings(), operationId);
+    const old = new Date(Date.now() - EMAIL_OPERATION_RECOVERY_MIN_AGE_MS - 1_000).toISOString();
+    await env.db
+      .update(emailOperationSteps)
+      .set({ started_at: old })
+      .where(eq(emailOperationSteps.operation_id, operationId));
+    const fence = await inspectUnknownEmailOperationRecovery(env.db, bindings(), operationId);
+    await expect(
+      resolveUnknownEmailOperation(env.db, bindings(), {
+        ...fence,
+        attempt: fence.attempt + 1,
+        ended: true,
+        outcome: 'not-applied',
+        reason: 'Provider audit shows the request did not apply',
+      }),
+    ).rejects.toThrow('fence changed');
+
+    await resolveUnknownEmailOperation(env.db, bindings(), {
+      ...fence,
+      ended: true,
+      outcome: 'not-applied',
+      reason: 'Provider audit shows the request did not apply',
+    });
+    delete failures.routingDns;
+    await env.db
+      .update(emailOperationSteps)
+      .set({ request_digest: 'different-runtime-intent' })
+      .where(eq(emailOperationSteps.id, fence.stepId));
+    await runEmailOperation(env.db, bindings(), operationId);
+    expect((await getEmailOperation(env.db, project.id, operationId))?.operation.status).toBe(
+      'blocked',
+    );
+    expect(callsByTag(stub.calls, 'routingDns')).toHaveLength(1);
+    await env.db
+      .update(emailOperationSteps)
+      .set({ request_digest: fence.requestDigest })
+      .where(eq(emailOperationSteps.id, fence.stepId));
+    expect(
+      await requestEmailDomainSync(env.db, bindings(), routeId, {
+        kind: 'owner',
+        userId: owner.id,
+      }),
+    ).toBe(operationId);
+    await runEmailOperation(env.db, bindings(), operationId);
+    expect((await getEmailOperation(env.db, project.id, operationId))?.operation.status).toBe(
+      'completed',
+    );
+    expect(callsByTag(stub.calls, 'routingDns')).toHaveLength(2);
+  });
+
+  it('accepts an attested applied relay upload without replaying the ambiguous write', async () => {
+    const owner = await createTestUser(env.db);
+    const project = await createTestProject(env.db, owner.id, 'relay-recovery');
+    const failures: NonNullable<Parameters<typeof stubCustomerCf>[0]>['failOn'] = {
+      scriptPut: { message: 'response lost', status: 504 },
+    };
+    const stub = stubCustomerCf({ zones, failOn: failures });
+    const { operationId } = await requestEmailDomainAdd(env.db, bindings(), {
+      projectId: project.id,
+      domain: 'recover-relay.example.com',
+      token: TOKEN,
+      actor: { kind: 'owner', userId: owner.id },
+    });
+    await runEmailOperation(env.db, bindings(), operationId);
+    await env.db
+      .update(emailOperationSteps)
+      .set({
+        started_at: new Date(
+          Date.now() - EMAIL_OPERATION_RECOVERY_MIN_AGE_MS - 1_000,
+        ).toISOString(),
+      })
+      .where(eq(emailOperationSteps.operation_id, operationId));
+    const fence = await inspectUnknownEmailOperationRecovery(env.db, bindings(), operationId);
+    expect(fence.step).toBe('ingress_deploy');
+    await resolveUnknownEmailOperation(env.db, bindings(), {
+      ...fence,
+      ended: true,
+      outcome: 'applied',
+      reason: 'Cloudflare shows the exact relay upload is active',
+    });
+    delete failures.scriptPut;
+    await runEmailOperation(env.db, bindings(), operationId);
+    const operation = (await getEmailOperation(env.db, project.id, operationId))?.operation;
+    expect(operation?.status).toBe('completed');
+    expect(callsByTag(stub.calls, 'scriptPut')).toHaveLength(1);
+    expect(
+      (
+        await env.db
+          .select({ version: emailZoneConnections.ingress_version })
+          .from(emailZoneConnections)
+      )[0]?.version,
+    ).toBeGreaterThan(0);
   });
 
   it('lets newer operations progress while an older write remains unknown', async () => {
@@ -178,15 +499,14 @@ describe('durable zone email connections', () => {
     expect(callsByTag(stub.calls, 'scriptPut')).toHaveLength(2);
   });
 
-  it('keeps uncertain Sending onboarding recoverable without repeating its write', async () => {
+  it('applies an attested Sending onboarding result and restores outbound readiness', async () => {
     const owner = await createTestUser(env.db);
     const project = await createTestProject(env.db, owner.id, 'sending-uncertain');
     const failures: NonNullable<Parameters<typeof stubCustomerCf>[0]>['failOn'] = {
       onboardSending: { message: 'write outcome unavailable', status: 504 },
       sendingSubdomainsGet: { message: 'readback unavailable', status: 504 },
     };
-    const senders: Array<{ name: string; enabled: boolean }> = [];
-    const stub = stubCustomerCf({ zones, failOn: failures, sendingSubdomains: senders });
+    const stub = stubCustomerCf({ zones, failOn: failures });
     const { operationId } = await requestEmailDomainAdd(env.db, bindings(), {
       projectId: project.id,
       domain: 'sending.example.com',
@@ -201,9 +521,25 @@ describe('durable zone email connections', () => {
       inbound_status: 'ready',
       outbound_status: 'pending',
     });
+    await env.db
+      .update(emailOperationSteps)
+      .set({
+        started_at: new Date(
+          Date.now() - EMAIL_OPERATION_RECOVERY_MIN_AGE_MS - 1_000,
+        ).toISOString(),
+      })
+      .where(eq(emailOperationSteps.operation_id, operationId));
+    const fence = await inspectUnknownEmailOperationRecovery(env.db, bindings(), operationId);
+    expect(fence.step).toBe('sending_onboard');
+    await resolveUnknownEmailOperation(env.db, bindings(), {
+      ...fence,
+      ended: true,
+      outcome: 'applied',
+      reason: 'Cloudflare shows the exact sending domain is active',
+    });
+    delete failures.onboardSending;
     delete failures.sendingSubdomainsGet;
-    senders.push({ name: 'sending.example.com', enabled: true });
-    await reconcilePendingEmailOperations(env.db, bindings());
+    await runEmailOperation(env.db, bindings(), operationId);
     expect((await getEmailOperation(env.db, project.id, operationId))?.operation.status).toBe(
       'completed',
     );
@@ -211,6 +547,37 @@ describe('durable zone email connections', () => {
       'ready',
     );
     expect(callsByTag(stub.calls, 'onboardSending')).toHaveLength(1);
+  });
+
+  it('keeps a timed-out Sending onboarding unknown when readback is negative', async () => {
+    const owner = await createTestUser(env.db);
+    const project = await createTestProject(env.db, owner.id, 'sending-negative-readback');
+    const stub = stubCustomerCf({
+      zones,
+      sendingSubdomains: [],
+      failOn: {
+        onboardSending: { message: 'write outcome unavailable', status: 504 },
+      },
+    });
+    const { operationId } = await requestEmailDomainAdd(env.db, bindings(), {
+      projectId: project.id,
+      domain: 'sending-negative.example.com',
+      token: TOKEN,
+      actor: { kind: 'owner', userId: owner.id },
+    });
+
+    await runEmailOperation(env.db, bindings(), operationId);
+
+    expect((await getEmailOperation(env.db, project.id, operationId))?.operation).toMatchObject({
+      status: 'unknown',
+      current_step: 'sending_onboard',
+      failure_code: 'outcome_unknown',
+    });
+    expect(
+      (await resolveEmailDomain(env.db, 'sending-negative.example.com'))?.route.outbound_status,
+    ).toBe('pending');
+    expect(callsByTag(stub.calls, 'onboardSending')).toHaveLength(1);
+    expect(callsByTag(stub.calls, 'sendingSubdomainsGet')).toHaveLength(1);
   });
 
   it('does not report sync ready after the domain loses its MX records', async () => {
@@ -303,16 +670,341 @@ describe('durable zone email connections', () => {
     expect(new Set(syncs).size).toBe(1);
   });
 
-  it('persists removal behind an unknown setup and resumes after project deletion', async () => {
+  it.runIf(Boolean(process.env.VOID_TEST_DATABASE_URL))(
+    'serializes concurrent first assignments on the same Cloudflare zone',
+    async () => {
+      const user = await createTestUser(env.db);
+      const first = await createTestProject(env.db, user.id, 'concurrent-zone-first');
+      const second = await createTestProject(env.db, user.id, 'concurrent-zone-second');
+      stubCustomerCf({ zones });
+      const actor = { kind: 'owner' as const, userId: user.id };
+
+      const results = await Promise.allSettled([
+        requestEmailDomainAdd(env.db, bindings(), {
+          projectId: first.id,
+          domain: 'concurrent-one.example.com',
+          actor,
+          token: TOKEN,
+        }),
+        requestEmailDomainAdd(env.db, bindings(), {
+          projectId: second.id,
+          domain: 'concurrent-two.example.com',
+          actor,
+          token: TOKEN,
+        }),
+      ]);
+
+      const acceptedIndex = results.findIndex((result) => result.status === 'fulfilled');
+      const accepted = results[acceptedIndex];
+      const deferred = results[1 - acceptedIndex];
+      expect(acceptedIndex).toBeGreaterThanOrEqual(0);
+      expect(deferred?.status).toBe('rejected');
+      if (accepted?.status !== 'fulfilled' || deferred?.status !== 'rejected') {
+        throw new Error('expected one accepted assignment and one deferred assignment');
+      }
+      expect(deferred.reason).toMatchObject({
+        message: expect.stringMatching(/^connection operation .* is unresolved$/),
+        status: 409,
+      });
+      expect(await env.db.select().from(emailZoneConnections)).toHaveLength(1);
+      expect(await env.db.select().from(emailDomainRoutes)).toHaveLength(1);
+
+      await runEmailOperation(env.db, bindings(), accepted.value.operationId);
+      const deferredProject = acceptedIndex === 0 ? second : first;
+      const deferredDomain =
+        deferredProject.id === first.id
+          ? 'concurrent-one.example.com'
+          : 'concurrent-two.example.com';
+      await requestEmailDomainAdd(env.db, bindings(), {
+        projectId: deferredProject.id,
+        domain: deferredDomain,
+        actor,
+        token: TOKEN,
+      });
+      expect(await env.db.select().from(emailDomainRoutes)).toHaveLength(2);
+    },
+    15_000,
+  );
+
+  it.runIf(Boolean(process.env.VOID_TEST_DATABASE_URL))(
+    'keeps provider status read-back behind the route-to-connection removal lock order',
+    async () => {
+      const user = await createTestUser(env.db);
+      const project = await createTestProject(env.db, user.id, 'status-removal-lock-order');
+      stubCustomerCf({ zones });
+      const added = await requestEmailDomainAdd(env.db, bindings(), {
+        projectId: project.id,
+        domain: 'status-removal.example.com',
+        actor: { kind: 'owner', userId: user.id },
+        token: TOKEN,
+      });
+      await runEmailOperation(env.db, bindings(), added.operationId);
+      const before = (await resolveEmailDomain(env.db, 'status-removal.example.com'))!;
+
+      let continueRemoval!: () => void;
+      let routeLocked!: () => void;
+      const removalMayContinue = new Promise<void>((resolve) => {
+        continueRemoval = resolve;
+      });
+      const removalHasRoute = new Promise<void>((resolve) => {
+        routeLocked = resolve;
+      });
+      const removal = env.db.transaction(async (tx) => {
+        await disableEmailDomainRouteAndDrainTx(tx, added.routeId);
+        routeLocked();
+        await removalMayContinue;
+        await tx
+          .select({ id: emailZoneConnections.id })
+          .from(emailZoneConnections)
+          .where(eq(emailZoneConnections.id, before.connection.id))
+          .for('update');
+      });
+      await removalHasRoute;
+
+      const status = app.fetch(
+        new Request(
+          `http://localhost/projects/${project.id}/email/domains/status-removal.example.com`,
+          { headers: { Authorization: `Bearer ${user.jwt}` } },
+        ),
+        bindings(),
+      );
+      try {
+        await waitForPostgresLockWaiters(1);
+        continueRemoval();
+        const results = await Promise.allSettled([status, removal]);
+        expect(results.every((result) => result.status === 'fulfilled')).toBe(true);
+        if (results[0]?.status !== 'fulfilled') {
+          throw results[0]?.reason;
+        }
+        expect(results[0].value.status).toBe(200);
+        expect(await results[0].value.json()).toMatchObject({ status: 'disabled' });
+
+        const after = (await resolveEmailDomain(env.db, 'status-removal.example.com'))!;
+        expect(after.route).toMatchObject({
+          desired_state: 'disabled',
+          inbound_status: 'disabled',
+        });
+        expect(after.connection.management_observed_at).toEqual(
+          before.connection.management_observed_at,
+        );
+      } finally {
+        continueRemoval();
+        await Promise.allSettled([status, removal]);
+      }
+    },
+    15_000,
+  );
+
+  it.runIf(Boolean(process.env.VOID_TEST_DATABASE_URL))(
+    'keeps inbound probe read-back behind the route-to-connection removal lock order',
+    async () => {
+      const user = await createTestUser(env.db);
+      const project = await createTestProject(env.db, user.id, 'probe-removal-lock-order');
+      let gateInboundProbe = false;
+      let releaseProvider!: () => void;
+      let providerEntered!: () => void;
+      const providerMayReturn = new Promise<void>((resolve) => {
+        releaseProvider = resolve;
+      });
+      const providerWasEntered = new Promise<void>((resolve) => {
+        providerEntered = resolve;
+      });
+      stubCustomerCf({
+        zones,
+        on: {
+          routingRulesGet: async () => {
+            if (!gateInboundProbe) {
+              return;
+            }
+            gateInboundProbe = false;
+            providerEntered();
+            await providerMayReturn;
+          },
+        },
+      });
+      const added = await requestEmailDomainAdd(env.db, bindings(), {
+        projectId: project.id,
+        domain: 'probe-removal.example.com',
+        actor: { kind: 'owner', userId: user.id },
+        token: TOKEN,
+      });
+      const before = (await resolveEmailDomain(env.db, 'probe-removal.example.com'))!;
+
+      gateInboundProbe = true;
+      const driver = runEmailOperation(env.db, bindings(), added.operationId);
+      await providerWasEntered;
+
+      let continueRemoval!: () => void;
+      let routeLocked!: () => void;
+      const removalMayContinue = new Promise<void>((resolve) => {
+        continueRemoval = resolve;
+      });
+      const removalHasRoute = new Promise<void>((resolve) => {
+        routeLocked = resolve;
+      });
+      const removal = env.db.transaction(async (tx) => {
+        await disableEmailDomainRouteAndDrainTx(tx, added.routeId);
+        routeLocked();
+        await removalMayContinue;
+        await tx
+          .select({ id: emailZoneConnections.id })
+          .from(emailZoneConnections)
+          .where(eq(emailZoneConnections.id, before.connection.id))
+          .for('update');
+      });
+      await removalHasRoute;
+
+      try {
+        releaseProvider();
+        await waitForPostgresLockWaiters(1);
+        continueRemoval();
+        const results = await Promise.allSettled([driver, removal]);
+        expect(results.every((result) => result.status === 'fulfilled')).toBe(true);
+
+        const after = (await resolveEmailDomain(env.db, 'probe-removal.example.com'))!;
+        expect(after.route).toMatchObject({
+          desired_state: 'disabled',
+          inbound_status: 'disabled',
+        });
+        expect(after.connection.inbound_status).toBe(before.connection.inbound_status);
+        expect(
+          (
+            await env.db
+              .select()
+              .from(emailOperations)
+              .where(eq(emailOperations.id, added.operationId))
+          )[0]?.status,
+        ).toBe('blocked');
+      } finally {
+        releaseProvider();
+        continueRemoval();
+        await Promise.allSettled([driver, removal]);
+      }
+    },
+    15_000,
+  );
+
+  it.each(['applied', 'not-applied'] as const)(
+    'finishes removal after an unknown setup is resolved as %s without resuming setup',
+    async (outcome) => {
+      const user = await createTestUser(env.db);
+      const project = await createTestProject(env.db, user.id, 'remove-unknown');
+      const failures: { scriptPut?: { message: string; status: number } } = {
+        scriptPut: { message: 'lost response', status: 504 },
+      };
+      const stub = stubCustomerCf({ zones, failOn: failures });
+      const add = await requestEmailDomainAdd(env.db, bindings(), {
+        projectId: project.id,
+        domain: 'unknown.example.com',
+        actor: { kind: 'owner', userId: user.id },
+        token: TOKEN,
+      });
+      await runEmailOperation(env.db, bindings(), add.operationId);
+      expect(
+        (
+          await env.db.select().from(emailOperations).where(eq(emailOperations.id, add.operationId))
+        )[0]?.status,
+      ).toBe('unknown');
+      const remove = await requestEmailDomainRemove(env.db, bindings(), add.routeId, {
+        kind: 'system',
+      });
+      expect((await resolveEmailDomain(env.db, 'unknown.example.com'))?.route.desired_state).toBe(
+        'disabled',
+      );
+      await runEmailOperation(env.db, bindings(), remove);
+      expect(callsByTag(stub.calls, 'scriptDelete')).toHaveLength(0);
+      await env.db.delete(projects).where(eq(projects.id, project.id));
+      await env.db
+        .update(emailOperationSteps)
+        .set({
+          started_at: new Date(
+            Date.now() - EMAIL_OPERATION_RECOVERY_MIN_AGE_MS - 1_000,
+          ).toISOString(),
+        })
+        .where(
+          and(
+            eq(emailOperationSteps.operation_id, add.operationId),
+            eq(emailOperationSteps.status, 'unknown'),
+          ),
+        );
+      const fence = await inspectUnknownEmailOperationRecovery(env.db, bindings(), add.operationId);
+      expect(fence.step).toBe('ingress_deploy');
+      const resolution = await resolveUnknownEmailOperation(env.db, bindings(), {
+        ...fence,
+        ended: true,
+        outcome,
+        reason: `Provider audit says the relay upload was ${outcome}`,
+      });
+      expect(resolution).toMatchObject({
+        operationId: add.operationId,
+        stepId: fence.stepId,
+        status: 'completed',
+        outcome,
+      });
+      expect(
+        (
+          await env.db.select().from(emailOperations).where(eq(emailOperations.id, add.operationId))
+        )[0],
+      ).toMatchObject({ status: 'completed', current_step: null });
+      const predecessorSteps = await env.db
+        .select()
+        .from(emailOperationSteps)
+        .where(eq(emailOperationSteps.operation_id, add.operationId))
+        .orderBy(emailOperationSteps.ordinal);
+      const resolvedStep = predecessorSteps.find((step) => step.id === fence.stepId)!;
+      expect(resolvedStep).toMatchObject({
+        status: 'confirmed',
+        outcome: {
+          operatorResolution: outcome,
+          reason: `Provider audit says the relay upload was ${outcome}`,
+          supersededByRemoval: remove,
+        },
+      });
+      const skippedSteps = predecessorSteps.filter((step) => step.ordinal > resolvedStep.ordinal);
+      expect(skippedSteps.length).toBeGreaterThan(0);
+      expect(
+        skippedSteps.every(
+          (step) =>
+            step.status === 'confirmed' &&
+            (step.outcome as { skipped?: boolean; supersededByRemoval?: string } | null)
+              ?.skipped === true &&
+            (step.outcome as { skipped?: boolean; supersededByRemoval?: string } | null)
+              ?.supersededByRemoval === remove,
+        ),
+      ).toBe(true);
+      delete failures.scriptPut;
+      await runEmailOperation(env.db, bindings(), add.operationId);
+      await runEmailOperation(env.db, bindings(), remove);
+      expect(
+        (await env.db.select().from(emailOperations).where(eq(emailOperations.id, remove)))[0]
+          ?.status,
+      ).toBe('completed');
+      expect((await resolveEmailDomain(env.db, 'unknown.example.com'))?.route.desired_state).toBe(
+        'removed',
+      );
+      expect(callsByTag(stub.calls, 'scriptPut')).toHaveLength(1);
+      expect(callsByTag(stub.calls, 'secretPut')).toHaveLength(0);
+      expect(callsByTag(stub.calls, 'catchAll')).toHaveLength(0);
+      expect(callsByTag(stub.calls, 'onboardSending')).toHaveLength(0);
+      expect(callsByTag(stub.calls, 'scriptDelete')).toHaveLength(1);
+    },
+  );
+
+  it('finishes removal after Sending readback confirms a superseded setup', async () => {
     const user = await createTestUser(env.db);
-    const project = await createTestProject(env.db, user.id, 'remove-unknown');
-    const failures: { scriptPut?: { message: string; status: number } } = {
-      scriptPut: { message: 'lost response', status: 504 },
+    const project = await createTestProject(env.db, user.id, 'remove-sending-unknown');
+    const failures: NonNullable<Parameters<typeof stubCustomerCf>[0]>['failOn'] = {
+      onboardSending: { message: 'lost response', status: 504 },
+      sendingSubdomainsGet: { message: 'readback unavailable', status: 504 },
     };
-    const stub = stubCustomerCf({ zones, failOn: failures });
+    const stub = stubCustomerCf({
+      zones,
+      failOn: failures,
+      sendingSubdomains: [{ name: 'sending-removal.example.com', enabled: true }],
+    });
     const add = await requestEmailDomainAdd(env.db, bindings(), {
       projectId: project.id,
-      domain: 'unknown.example.com',
+      domain: 'sending-removal.example.com',
       actor: { kind: 'owner', userId: user.id },
       token: TOKEN,
     });
@@ -320,30 +1012,41 @@ describe('durable zone email connections', () => {
     expect(
       (
         await env.db.select().from(emailOperations).where(eq(emailOperations.id, add.operationId))
-      )[0]?.status,
-    ).toBe('unknown');
+      )[0],
+    ).toMatchObject({ status: 'unknown', current_step: 'sending_onboard' });
+
     const remove = await requestEmailDomainRemove(env.db, bindings(), add.routeId, {
       kind: 'system',
     });
-    expect((await resolveEmailDomain(env.db, 'unknown.example.com'))?.route.desired_state).toBe(
-      'disabled',
-    );
-    await runEmailOperation(env.db, bindings(), remove);
-    expect(callsByTag(stub.calls, 'scriptDelete')).toHaveLength(0);
     await env.db.delete(projects).where(eq(projects.id, project.id));
-    delete failures.scriptPut;
-    await reconcilePendingEmailOperations(env.db, bindings());
-    await reconcilePendingEmailOperations(env.db, bindings());
-    // The failed upload cannot be proved by readback, so the removal stays
-    // durably queued instead of replaying or deleting a possibly live relay.
+    expect(await reconcileUnknownEmailOperation(env.db, bindings(), add.operationId)).toBe(false);
+    delete failures.sendingSubdomainsGet;
+    expect(await reconcileUnknownEmailOperation(env.db, bindings(), add.operationId)).toBe(true);
+
+    expect(
+      (
+        await env.db.select().from(emailOperations).where(eq(emailOperations.id, add.operationId))
+      )[0],
+    ).toMatchObject({ status: 'completed', current_step: null });
+    expect(await resolveEmailDomain(env.db, 'sending-removal.example.com')).toMatchObject({
+      route: { desired_state: 'disabled', outbound_status: 'pending' },
+    });
+    await runEmailOperation(env.db, bindings(), add.operationId);
+    await runEmailOperation(env.db, bindings(), remove);
+
     expect(
       (await env.db.select().from(emailOperations).where(eq(emailOperations.id, remove)))[0]
         ?.status,
-    ).toBe('pending');
-    expect((await resolveEmailDomain(env.db, 'unknown.example.com'))?.route.desired_state).toBe(
-      'disabled',
-    );
+    ).toBe('completed');
+    expect(
+      (await resolveEmailDomain(env.db, 'sending-removal.example.com'))?.route.desired_state,
+    ).toBe('removed');
+    expect(callsByTag(stub.calls, 'onboardSending')).toHaveLength(1);
+    expect(callsByTag(stub.calls, 'sendingSubdomainsGet')).toHaveLength(3);
     expect(callsByTag(stub.calls, 'scriptPut')).toHaveLength(1);
+    expect(callsByTag(stub.calls, 'secretPut')).toHaveLength(1);
+    expect(callsByTag(stub.calls, 'catchAll')).toHaveLength(2);
+    expect(callsByTag(stub.calls, 'scriptDelete')).toHaveLength(1);
   });
 
   it('runs a persisted system removal after its project row is gone', async () => {
@@ -367,39 +1070,79 @@ describe('durable zone email connections', () => {
     );
   });
 
-  it('keeps ingress while a disabled sibling still owns the connection', async () => {
-    const user = await createTestUser(env.db);
-    const first = await createTestProject(env.db, user.id, 'disabled-first');
-    const second = await createTestProject(env.db, user.id, 'disabled-second');
-    const stub = stubCustomerCf({ zones });
-    const a = await requestEmailDomainAdd(env.db, bindings(), {
-      projectId: first.id,
-      domain: 'one.example.com',
-      actor: { kind: 'owner', userId: user.id },
-      token: TOKEN,
-    });
-    await runEmailOperation(env.db, bindings(), a.operationId);
-    const b = await requestEmailDomainAdd(env.db, bindings(), {
-      projectId: second.id,
-      domain: 'two.example.com',
-      actor: { kind: 'owner', userId: user.id },
-      token: TOKEN,
-    });
-    await runEmailOperation(env.db, bindings(), b.operationId);
-    await env.db
-      .update(emailDomainRoutes)
-      .set({ desired_state: 'disabled', inbound_status: 'disabled' })
-      .where(eq(emailDomainRoutes.id, b.routeId));
-    const remove = await requestEmailDomainRemove(env.db, bindings(), a.routeId, {
-      kind: 'owner',
-      userId: user.id,
-    });
-    await runEmailOperation(env.db, bindings(), remove);
-    expect(callsByTag(stub.calls, 'scriptDelete')).toHaveLength(0);
-    expect((await resolveEmailDomain(env.db, 'two.example.com'))?.route.desired_state).toBe(
-      'disabled',
-    );
-  });
+  it.each([
+    { credentialStatus: 'healthy', interruptStep: null },
+    { credentialStatus: 'expired', interruptStep: null },
+    { credentialStatus: 'expired', interruptStep: 'catchall_detach' },
+    { credentialStatus: 'expired', interruptStep: 'ingress_delete' },
+  ] as const)(
+    'keeps sibling ingress with $credentialStatus credentials after interruption at $interruptStep',
+    async ({ credentialStatus, interruptStep }) => {
+      const user = await createTestUser(env.db);
+      const first = await createTestProject(env.db, user.id, 'disabled-first');
+      const second = await createTestProject(env.db, user.id, 'disabled-second');
+      const stub = stubCustomerCf({ zones });
+      const a = await requestEmailDomainAdd(env.db, bindings(), {
+        projectId: first.id,
+        domain: 'one.example.com',
+        actor: { kind: 'owner', userId: user.id },
+        token: TOKEN,
+      });
+      await runEmailOperation(env.db, bindings(), a.operationId);
+      const b = await requestEmailDomainAdd(env.db, bindings(), {
+        projectId: second.id,
+        domain: 'two.example.com',
+        actor: { kind: 'owner', userId: user.id },
+        token: TOKEN,
+      });
+      await runEmailOperation(env.db, bindings(), b.operationId);
+      await env.db
+        .update(emailDomainRoutes)
+        .set({ desired_state: 'disabled', inbound_status: 'disabled' })
+        .where(eq(emailDomainRoutes.id, b.routeId));
+      await env.db.update(emailCredentials).set({ status: credentialStatus });
+      const callsBeforeRemoval = stub.calls.length;
+      const remove = await requestEmailDomainRemove(env.db, bindings(), a.routeId, {
+        kind: 'owner',
+        userId: user.id,
+      });
+      if (interruptStep) {
+        const transaction = env.db.transaction.bind(env.db);
+        const interrupted = vi.spyOn(env.db, 'transaction').mockImplementation(async (...args) => {
+          const result = await transaction(...args);
+          const [operation] = await env.db
+            .select()
+            .from(emailOperations)
+            .where(eq(emailOperations.id, remove));
+          if (operation?.current_step === interruptStep) {
+            interrupted.mockRestore();
+            throw new Error('driver exited after transaction commit');
+          }
+          return result;
+        });
+        await expect(runEmailOperation(env.db, bindings(), remove)).rejects.toThrow(
+          'driver exited after transaction commit',
+        );
+        await env.db
+          .update(emailOperationSteps)
+          .set({ started_at: sql`now() - interval '10 minutes'` })
+          .where(eq(emailOperationSteps.operation_id, remove));
+      }
+      await runEmailOperation(env.db, bindings(), remove);
+      expect((await resolveEmailDomain(env.db, 'one.example.com'))?.route.desired_state).toBe(
+        'removed',
+      );
+      expect(
+        (await env.db.select().from(emailOperations).where(eq(emailOperations.id, remove)))[0]
+          ?.status,
+      ).toBe('completed');
+      expect(stub.calls).toHaveLength(callsBeforeRemoval);
+      expect(callsByTag(stub.calls, 'scriptDelete')).toHaveLength(0);
+      expect((await resolveEmailDomain(env.db, 'two.example.com'))?.route.desired_state).toBe(
+        'disabled',
+      );
+    },
+  );
 
   it('defers destructive removal while an admitted provider attempt is live', async () => {
     const user = await createTestUser(env.db);
@@ -506,6 +1249,203 @@ describe('durable zone email connections', () => {
     expect(await env.db.select().from(emailCacheOutbox)).toHaveLength(3);
   });
 
+  it.each(['readd-staged.example.com', 'replacement-staged.example.com'])(
+    'retires a blocked rotation when the last removed connection is reused by %s',
+    async (replacementDomain) => {
+      const user = await createTestUser(env.db);
+      const project = await createTestProject(env.db, user.id, 'readd-staged-rotation');
+      const failures: NonNullable<Parameters<typeof stubCustomerCf>[0]>['failOn'] = {};
+      stubCustomerCf({ zones, failOn: failures });
+      const actor = { kind: 'owner' as const, userId: user.id };
+      const added = await requestEmailDomainAdd(env.db, bindings(), {
+        projectId: project.id,
+        domain: 'readd-staged.example.com',
+        actor,
+        token: TOKEN,
+      });
+      await runEmailOperation(env.db, bindings(), added.operationId);
+      const original = (await resolveEmailDomain(env.db, 'readd-staged.example.com'))!.connection;
+      const rotation = await requestEmailSecretRotation(env.db, bindings(), original.id, actor);
+      failures.secretPut = { message: 'secret permission denied', status: 403 };
+      await runEmailOperation(env.db, bindings(), rotation);
+      const staged = (await resolveEmailDomain(env.db, 'readd-staged.example.com'))!.connection;
+      expect(staged.staged_secret_generation).toBe(original.active_secret_generation + 1);
+
+      const removal = await requestEmailDomainRemove(env.db, bindings(), added.routeId, actor);
+      await runEmailOperation(env.db, bindings(), removal);
+      expect(
+        (await resolveEmailDomain(env.db, 'readd-staged.example.com'))?.route.desired_state,
+      ).toBe('removed');
+      expect(
+        (await resolveEmailDomain(env.db, 'readd-staged.example.com'))?.connection
+          .staged_secret_generation,
+      ).toBe(staged.staged_secret_generation);
+
+      delete failures.secretPut;
+      const readded = await requestEmailDomainAdd(env.db, bindings(), {
+        projectId: project.id,
+        domain: replacementDomain,
+        actor,
+        token: 'readd-corrected-token',
+        attemptId: 'readd-staged-attempt',
+      });
+      await runEmailOperation(env.db, bindings(), readded.operationId);
+
+      const repaired = (await resolveEmailDomain(env.db, replacementDomain))!;
+      expect(repaired.route.desired_state).toBe('active');
+      expect(repaired.route.inbound_status).toBe('ready');
+      expect(repaired.connection.active_secret_generation).toBe(original.active_secret_generation);
+      expect(repaired.connection.staged_secret_generation).toBeNull();
+      expect(repaired.connection.staged_secret_ciphertext).toBeNull();
+      expect(
+        (await env.db.select().from(emailOperations).where(eq(emailOperations.id, rotation)))[0]
+          ?.status,
+      ).toBe('blocked');
+      const nextRotation = await requestEmailSecretRotation(env.db, bindings(), original.id, actor);
+      await runEmailOperation(env.db, bindings(), nextRotation);
+      expect(
+        (await env.db.select().from(emailOperations).where(eq(emailOperations.id, nextRotation)))[0]
+          ?.status,
+      ).toBe('completed');
+    },
+  );
+
+  it('retires a blocked rotation when a manager-retained connection gets a new domain', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'manager-retained-staged');
+    const failures: NonNullable<Parameters<typeof stubCustomerCf>[0]>['failOn'] = {};
+    const stub = stubCustomerCf({ zones, failOn: failures });
+    const actor = { kind: 'owner' as const, userId: user.id };
+    const added = await requestEmailDomainAdd(env.db, bindings(), {
+      projectId: project.id,
+      domain: 'manager-retained-staged.example.com',
+      actor,
+      token: TOKEN,
+    });
+    await runEmailOperation(env.db, bindings(), added.operationId);
+    const original = (await resolveEmailDomain(env.db, 'manager-retained-staged.example.com'))!
+      .connection;
+    const rotation = await requestEmailSecretRotation(env.db, bindings(), original.id, actor);
+    failures.secretPut = { message: 'secret permission denied', status: 403 };
+    await runEmailOperation(env.db, bindings(), rotation);
+
+    const removal = await requestEmailDomainRemove(env.db, bindings(), added.routeId, {
+      kind: 'admin',
+      userId: 'admin-actor',
+    });
+    await runEmailOperation(env.db, bindings(), removal);
+    const retained = (await resolveEmailDomain(env.db, 'manager-retained-staged.example.com'))!;
+    expect(retained.route.desired_state).toBe('removed');
+    expect(retained.connection.inbound_status).toBe('ready');
+    expect(retained.connection.staged_secret_generation).toBe(
+      original.active_secret_generation + 1,
+    );
+    expect(callsByTag(stub.calls, 'scriptDelete')).toHaveLength(0);
+
+    delete failures.secretPut;
+    const replacement = await requestEmailDomainAdd(env.db, bindings(), {
+      projectId: project.id,
+      domain: 'manager-retained-replacement.example.com',
+      actor,
+      token: 'manager-retained-corrected-token',
+    });
+    await runEmailOperation(env.db, bindings(), replacement.operationId);
+
+    const repaired = (await resolveEmailDomain(
+      env.db,
+      'manager-retained-replacement.example.com',
+    ))!;
+    expect(repaired.route.inbound_status).toBe('ready');
+    expect(repaired.connection.active_secret_generation).toBe(original.active_secret_generation);
+    expect(repaired.connection.staged_secret_generation).toBeNull();
+    expect(
+      (await env.db.select().from(emailOperations).where(eq(emailOperations.id, rotation)))[0]
+        ?.status,
+    ).toBe('blocked');
+    const nextRotation = await requestEmailSecretRotation(env.db, bindings(), original.id, actor);
+    await runEmailOperation(env.db, bindings(), nextRotation);
+    expect(
+      (await env.db.select().from(emailOperations).where(eq(emailOperations.id, nextRotation)))[0]
+        ?.status,
+    ).toBe('completed');
+  });
+
+  it('does not reuse a blocked removal from an older route and connection generation', async () => {
+    const user = await createTestUser(env.db, 'stale-removal-owner');
+    const project = await createTestProject(env.db, user.id, 'stale-removal-project');
+    const failures: NonNullable<Parameters<typeof stubCustomerCf>[0]>['failOn'] = {};
+    stubCustomerCf({ zones, failOn: failures });
+    const actor = { kind: 'owner' as const, userId: user.id };
+    const added = await requestEmailDomainAdd(env.db, bindings(), {
+      projectId: project.id,
+      domain: 'stale-removal.example.com',
+      actor,
+      token: TOKEN,
+    });
+    await runEmailOperation(env.db, bindings(), added.operationId);
+
+    failures.scriptDelete = { message: 'script delete permission denied', status: 403 };
+    const staleRemoval = await requestEmailDomainRemove(env.db, bindings(), added.routeId, actor);
+    await runEmailOperation(env.db, bindings(), staleRemoval);
+    expect(
+      (await env.db.select().from(emailOperations).where(eq(emailOperations.id, staleRemoval)))[0],
+    ).toMatchObject({ status: 'blocked', current_step: 'ingress_delete' });
+
+    delete failures.scriptDelete;
+    const reactivated = await requestEmailDomainAdd(env.db, bindings(), {
+      projectId: project.id,
+      domain: 'stale-removal.example.com',
+      actor,
+      token: TOKEN,
+    });
+    await runEmailOperation(env.db, bindings(), reactivated.operationId);
+    const removal = await requestEmailDomainRemove(env.db, bindings(), added.routeId, actor);
+    expect(removal).not.toBe(staleRemoval);
+    await runEmailOperation(env.db, bindings(), removal);
+    expect(
+      (await env.db.select().from(emailOperations).where(eq(emailOperations.id, staleRemoval)))[0]
+        ?.status,
+    ).toBe('blocked');
+    expect(
+      (await env.db.select().from(emailOperations).where(eq(emailOperations.id, removal)))[0]
+        ?.status,
+    ).toBe('completed');
+  });
+
+  it('rejects new external MX records before reactivating a removed route', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'readd-mx-conflict');
+    const mx: Record<string, Array<string>> = {};
+    const stub = stubCustomerCf({ zones, mx });
+    const actor = { kind: 'owner' as const, userId: user.id };
+    const first = await requestEmailDomainAdd(env.db, bindings(), {
+      projectId: project.id,
+      domain: 'readd-conflict.example.com',
+      actor,
+      token: TOKEN,
+    });
+    await runEmailOperation(env.db, bindings(), first.operationId);
+    const removed = await requestEmailDomainRemove(env.db, bindings(), first.routeId, actor);
+    await runEmailOperation(env.db, bindings(), removed);
+    const writes = stub.calls.filter((call) => call.method !== 'GET').length;
+    mx['readd-conflict.example.com'] = ['route1.mx.cloudflare.net', 'mx.external.example.net'];
+
+    await expect(
+      requestEmailDomainAdd(env.db, bindings(), {
+        projectId: project.id,
+        domain: 'readd-conflict.example.com',
+        actor,
+        token: TOKEN,
+      }),
+    ).rejects.toThrow('already has MX');
+
+    expect(stub.calls.filter((call) => call.method !== 'GET')).toHaveLength(writes);
+    expect((await resolveEmailDomain(env.db, 'readd-conflict.example.com'))?.route).toMatchObject({
+      desired_state: 'removed',
+      inbound_status: 'disabled',
+    });
+  });
+
   it('retains the credential after an uncertain ingress delete until readback proves cleanup', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id, 'unknown-delete');
@@ -548,6 +1488,66 @@ describe('durable zone email connections', () => {
     ).toBeNull();
     expect(await env.db.select().from(emailCredentials)).toHaveLength(0);
     expect(callsByTag(stub.calls, 'scriptDelete')).toHaveLength(1);
+  });
+
+  it('retries only an attested not-applied ingress delete and completes removal cleanup', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'not-applied-delete');
+    const existingScripts: Array<string> = [];
+    const failures: NonNullable<Parameters<typeof stubCustomerCf>[0]>['failOn'] = {};
+    const stub = stubCustomerCf({ zones, existingScripts, failOn: failures });
+    const actor = { kind: 'owner' as const, userId: user.id };
+    const added = await requestEmailDomainAdd(env.db, bindings(), {
+      projectId: project.id,
+      domain: 'not-applied-delete.example.com',
+      actor,
+      token: TOKEN,
+    });
+    await runEmailOperation(env.db, bindings(), added.operationId);
+    const connection = (await resolveEmailDomain(env.db, 'not-applied-delete.example.com'))!
+      .connection;
+    existingScripts.push(connection.ingress_worker_name);
+    const removal = await requestEmailDomainRemove(env.db, bindings(), added.routeId, actor);
+    failures.scriptDelete = { message: 'request ended before Cloudflare applied it', status: 504 };
+
+    await runEmailOperation(env.db, bindings(), removal);
+
+    expect(
+      (await env.db.select().from(emailOperations).where(eq(emailOperations.id, removal)))[0]
+        ?.status,
+    ).toBe('unknown');
+    const catchAllWrites = callsByTag(stub.calls, 'catchAll').length;
+    expect(callsByTag(stub.calls, 'scriptDelete')).toHaveLength(1);
+    await reconcilePendingEmailOperations(env.db, bindings());
+    expect(callsByTag(stub.calls, 'scriptDelete')).toHaveLength(1);
+
+    await env.db
+      .update(emailOperationSteps)
+      .set({
+        started_at: new Date(
+          Date.now() - EMAIL_OPERATION_RECOVERY_MIN_AGE_MS - 1_000,
+        ).toISOString(),
+      })
+      .where(eq(emailOperationSteps.operation_id, removal));
+    const fence = await inspectUnknownEmailOperationRecovery(env.db, bindings(), removal);
+    expect(fence.step).toBe('ingress_delete');
+    await resolveUnknownEmailOperation(env.db, bindings(), {
+      ...fence,
+      ended: true,
+      outcome: 'not-applied',
+      reason: 'Provider audit proves the Worker delete did not apply',
+    });
+    delete failures.scriptDelete;
+    await runEmailOperation(env.db, bindings(), removal);
+
+    const resolved = await resolveEmailDomain(env.db, 'not-applied-delete.example.com');
+    expect(resolved?.route.desired_state).toBe('removed');
+    expect(resolved?.connection).toMatchObject({
+      inbound_status: 'disabled',
+      credential_id: null,
+    });
+    expect(callsByTag(stub.calls, 'scriptDelete')).toHaveLength(2);
+    expect(callsByTag(stub.calls, 'catchAll')).toHaveLength(catchAllWrites);
   });
 
   it('transfers only a completed removed assignment and never exposes old operation history', async () => {
@@ -862,6 +1862,269 @@ describe('durable zone email connections', () => {
     ).toBe('completed');
   });
 
+  it.runIf(Boolean(process.env.VOID_TEST_DATABASE_URL))(
+    'serializes late provider success with unknown-operation read-back',
+    async () => {
+      const user = await createTestUser(env.db);
+      const project = await createTestProject(env.db, user.id, 'late-success-mail');
+      let gateSecretWrite = false;
+      let releaseProvider!: () => void;
+      let enteredProvider!: () => void;
+      const providerMayReturn = new Promise<void>((resolve) => {
+        releaseProvider = resolve;
+      });
+      const providerEntered = new Promise<void>((resolve) => {
+        enteredProvider = resolve;
+      });
+      stubCustomerCf({
+        zones,
+        on: {
+          secretPut: async () => {
+            if (gateSecretWrite) {
+              enteredProvider();
+              await providerMayReturn;
+            }
+          },
+        },
+      });
+      const actor = { kind: 'owner' as const, userId: user.id };
+      const added = await requestEmailDomainAdd(env.db, bindings(), {
+        projectId: project.id,
+        domain: 'late-success.example.com',
+        actor,
+        token: TOKEN,
+      });
+      await runEmailOperation(env.db, bindings(), added.operationId);
+      const connection = (await resolveEmailDomain(env.db, 'late-success.example.com'))!.connection;
+      const operationId = await requestEmailSecretRotation(
+        env.db,
+        bindings(),
+        connection.id,
+        actor,
+      );
+
+      gateSecretWrite = true;
+      const firstDriver = runEmailOperation(env.db, bindings(), operationId);
+      await providerEntered;
+      await env.db
+        .update(emailOperationSteps)
+        .set({ started_at: new Date(Date.now() - 10 * 60_000).toISOString() })
+        .where(
+          and(
+            eq(emailOperationSteps.operation_id, operationId),
+            eq(emailOperationSteps.status, 'in_flight'),
+          ),
+        );
+      await runEmailOperation(env.db, bindings(), operationId);
+
+      let releaseOperationLock!: () => void;
+      let operationLocked!: () => void;
+      const operationMayUnlock = new Promise<void>((resolve) => {
+        releaseOperationLock = resolve;
+      });
+      const operationLockAcquired = new Promise<void>((resolve) => {
+        operationLocked = resolve;
+      });
+      const operationBlocker = env.db.transaction(async (tx) => {
+        await tx
+          .select({ id: emailOperations.id })
+          .from(emailOperations)
+          .where(eq(emailOperations.id, operationId))
+          .for('update');
+        operationLocked();
+        await operationMayUnlock;
+      });
+      await operationLockAcquired;
+
+      let readBack: Promise<boolean> | undefined;
+      try {
+        releaseProvider();
+        await waitForPostgresLockWaiters(1);
+        readBack = reconcileUnknownEmailOperation(env.db, bindings(), operationId);
+        await waitForPostgresLockWaiters(2);
+        releaseOperationLock();
+
+        const results = await Promise.allSettled([firstDriver, readBack, operationBlocker]);
+        expect(results.every((result) => result.status === 'fulfilled')).toBe(true);
+        expect(
+          (
+            await env.db.select().from(emailOperations).where(eq(emailOperations.id, operationId))
+          )[0]?.status,
+        ).toBe('completed');
+      } finally {
+        releaseProvider();
+        releaseOperationLock();
+        await Promise.allSettled([firstDriver, operationBlocker, ...(readBack ? [readBack] : [])]);
+      }
+    },
+    15_000,
+  );
+
+  it.runIf(Boolean(process.env.VOID_TEST_DATABASE_URL))(
+    'serializes an expired lease with a late provider failure',
+    async () => {
+      const user = await createTestUser(env.db);
+      const project = await createTestProject(env.db, user.id, 'late-failure-mail');
+      const failures: NonNullable<Parameters<typeof stubCustomerCf>[0]>['failOn'] = {};
+      let gateSecretWrite = false;
+      let releaseProvider!: () => void;
+      let enteredProvider!: () => void;
+      const providerMayReturn = new Promise<void>((resolve) => {
+        releaseProvider = resolve;
+      });
+      const providerEntered = new Promise<void>((resolve) => {
+        enteredProvider = resolve;
+      });
+      stubCustomerCf({
+        zones,
+        failOn: failures,
+        on: {
+          secretPut: async () => {
+            if (gateSecretWrite) {
+              enteredProvider();
+              await providerMayReturn;
+            }
+          },
+        },
+      });
+      const actor = { kind: 'owner' as const, userId: user.id };
+      const added = await requestEmailDomainAdd(env.db, bindings(), {
+        projectId: project.id,
+        domain: 'late-failure.example.com',
+        actor,
+        token: TOKEN,
+      });
+      await runEmailOperation(env.db, bindings(), added.operationId);
+      const connection = (await resolveEmailDomain(env.db, 'late-failure.example.com'))!.connection;
+      const operationId = await requestEmailSecretRotation(
+        env.db,
+        bindings(),
+        connection.id,
+        actor,
+      );
+      failures.secretPut = { message: 'provider response ended late', status: 504 };
+
+      gateSecretWrite = true;
+      const firstDriver = runEmailOperation(env.db, bindings(), operationId);
+      await providerEntered;
+      await env.db
+        .update(emailOperationSteps)
+        .set({ started_at: new Date(Date.now() - 10 * 60_000).toISOString() })
+        .where(
+          and(
+            eq(emailOperationSteps.operation_id, operationId),
+            eq(emailOperationSteps.status, 'in_flight'),
+          ),
+        );
+
+      let releaseOperationLock!: () => void;
+      let operationLocked!: () => void;
+      const operationMayUnlock = new Promise<void>((resolve) => {
+        releaseOperationLock = resolve;
+      });
+      const operationLockAcquired = new Promise<void>((resolve) => {
+        operationLocked = resolve;
+      });
+      const operationBlocker = env.db.transaction(async (tx) => {
+        await tx
+          .select({ id: emailOperations.id })
+          .from(emailOperations)
+          .where(eq(emailOperations.id, operationId))
+          .for('update');
+        operationLocked();
+        await operationMayUnlock;
+      });
+      await operationLockAcquired;
+
+      let expiryDriver: Promise<void> | undefined;
+      try {
+        expiryDriver = runEmailOperation(env.db, bindings(), operationId);
+        await waitForPostgresLockWaiters(1);
+        releaseProvider();
+        await waitForPostgresLockWaiters(2);
+        releaseOperationLock();
+
+        const results = await Promise.allSettled([firstDriver, expiryDriver, operationBlocker]);
+        expect(results.every((result) => result.status === 'fulfilled')).toBe(true);
+        const operation = (
+          await env.db.select().from(emailOperations).where(eq(emailOperations.id, operationId))
+        )[0];
+        const step = (
+          await env.db
+            .select()
+            .from(emailOperationSteps)
+            .where(eq(emailOperationSteps.operation_id, operationId))
+            .orderBy(emailOperationSteps.ordinal)
+        )[0];
+        expect(operation).toMatchObject({ status: 'unknown', current_step: 'secret_put' });
+        expect(step).toMatchObject({ status: 'unknown', failure_code: 'outcome_unknown' });
+      } finally {
+        releaseProvider();
+        releaseOperationLock();
+        await Promise.allSettled([
+          firstDriver,
+          operationBlocker,
+          ...(expiryDriver ? [expiryDriver] : []),
+        ]);
+      }
+    },
+    15_000,
+  );
+
+  it.runIf(Boolean(process.env.VOID_TEST_DATABASE_URL))(
+    'keeps operator recovery ineligible for 24 real hours under a non-UTC process timezone',
+    async () => {
+      const previousTimezone = process.env.TZ;
+      process.env.TZ = 'Asia/Singapore';
+      try {
+        const user = await createTestUser(env.db);
+        const project = await createTestProject(env.db, user.id, 'recovery-timezone-mail');
+        stubCustomerCf({
+          zones,
+          failOn: { scriptPut: { message: 'provider response lost', status: 504 } },
+        });
+        const added = await requestEmailDomainAdd(env.db, bindings(), {
+          projectId: project.id,
+          domain: 'recovery-timezone.example.com',
+          actor: { kind: 'owner', userId: user.id },
+          token: TOKEN,
+        });
+        await runEmailOperation(env.db, bindings(), added.operationId);
+        await env.db
+          .update(emailOperationSteps)
+          .set({ started_at: sql`now() - interval '23 hours'` })
+          .where(
+            and(
+              eq(emailOperationSteps.operation_id, added.operationId),
+              eq(emailOperationSteps.status, 'unknown'),
+            ),
+          );
+
+        const fence = await inspectUnknownEmailOperationRecovery(
+          env.db,
+          bindings(),
+          added.operationId,
+        );
+        expect(Date.parse(fence.eligibleAt)).toBeGreaterThan(Date.now());
+        await expect(
+          resolveUnknownEmailOperation(env.db, bindings(), {
+            ...fence,
+            ended: true,
+            outcome: 'not-applied',
+            reason: 'Provider audit completed before the minimum recovery age',
+          }),
+        ).rejects.toThrow('cannot be resolved before');
+      } finally {
+        if (previousTimezone === undefined) {
+          delete process.env.TZ;
+        } else {
+          process.env.TZ = previousTimezone;
+        }
+      }
+    },
+    15_000,
+  );
+
   it('promotes a rotated secret only after the gateway accepts it', async () => {
     const user = await createTestUser(env.db),
       project = await createTestProject(env.db, user.id, 'rotation-mail');
@@ -911,6 +2174,62 @@ describe('durable zone email connections', () => {
     expect(callsByTag(stub.calls, 'secretPut')).toHaveLength(2);
   });
 
+  it('blocks secret rotation before the provider write when its credential is unavailable', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'rotation-credential-preflight');
+    const stub = stubCustomerCf({ zones });
+    const actor = { kind: 'owner' as const, userId: user.id };
+    const add = await requestEmailDomainAdd(env.db, bindings(), {
+      projectId: project.id,
+      domain: 'rotation-credential.example.com',
+      actor,
+      token: TOKEN,
+    });
+    await runEmailOperation(env.db, bindings(), add.operationId);
+    const connection = (await resolveEmailDomain(env.db, 'rotation-credential.example.com'))!
+      .connection;
+    const operationId = await requestEmailSecretRotation(
+      env.db,
+      bindings(),
+      connection.id,
+      actor,
+      'credential-preflight-rotation',
+    );
+    await env.db
+      .update(emailCredentials)
+      .set({ status: 'revoked' })
+      .where(eq(emailCredentials.id, connection.credential_id!));
+    const writesBefore = callsByTag(stub.calls, 'secretPut').length;
+
+    await runEmailOperation(env.db, bindings(), operationId);
+
+    expect(
+      (await env.db.select().from(emailOperations).where(eq(emailOperations.id, operationId)))[0],
+    ).toMatchObject({ status: 'blocked', current_step: 'secret_put', failure_code: 'blocked' });
+    expect(callsByTag(stub.calls, 'secretPut')).toHaveLength(writesBefore);
+
+    await env.db
+      .update(emailCredentials)
+      .set({ status: 'healthy' })
+      .where(eq(emailCredentials.id, connection.credential_id!));
+    expect(
+      await requestEmailSecretRotation(
+        env.db,
+        bindings(),
+        connection.id,
+        actor,
+        'credential-preflight-rotation',
+      ),
+    ).toBe(operationId);
+    await runEmailOperation(env.db, bindings(), operationId);
+
+    expect(
+      (await env.db.select().from(emailOperations).where(eq(emailOperations.id, operationId)))[0]
+        ?.status,
+    ).toBe('completed');
+    expect(callsByTag(stub.calls, 'secretPut')).toHaveLength(writesBefore + 1);
+  });
+
   it('recovers a lost secret PUT response by proving the staged deployed value', async () => {
     const user = await createTestUser(env.db),
       project = await createTestProject(env.db, user.id, 'lost-rotation');
@@ -941,6 +2260,244 @@ describe('durable zone email connections', () => {
         ?.status,
     ).toBe('completed');
     expect(callsByTag(stub.calls, 'secretPut')).toHaveLength(2);
+  });
+
+  it('retries an attested not-applied secret write with the same staged generation', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'not-applied-rotation');
+    const failures: NonNullable<Parameters<typeof stubCustomerCf>[0]>['failOn'] = {};
+    const failBeforeEffect: Array<'secretPut'> = [];
+    const stub = stubCustomerCf({ zones, failOn: failures, failBeforeEffect });
+    const actor = { kind: 'owner' as const, userId: user.id };
+    const added = await requestEmailDomainAdd(env.db, bindings(), {
+      projectId: project.id,
+      domain: 'not-applied-rotation.example.com',
+      actor,
+      token: TOKEN,
+    });
+    await runEmailOperation(env.db, bindings(), added.operationId);
+    const before = (await resolveEmailDomain(env.db, 'not-applied-rotation.example.com'))!
+      .connection;
+    const setupSecretWrites = callsByTag(stub.calls, 'secretPut').length;
+    const setupScriptWrites = callsByTag(stub.calls, 'scriptPut').length;
+    const rotation = await requestEmailSecretRotation(env.db, bindings(), before.id, actor);
+    failures.secretPut = { message: 'request ended before Cloudflare applied it', status: 504 };
+    failBeforeEffect.push('secretPut');
+
+    await runEmailOperation(env.db, bindings(), rotation);
+
+    const staged = (
+      await env.db.select().from(emailZoneConnections).where(eq(emailZoneConnections.id, before.id))
+    )[0]!;
+    expect(staged.staged_secret_generation).toBe(before.active_secret_generation + 1);
+    await reconcilePendingEmailOperations(env.db, bindings());
+    expect(
+      (await env.db.select().from(emailOperations).where(eq(emailOperations.id, rotation)))[0]
+        ?.status,
+    ).toBe('unknown');
+    expect(callsByTag(stub.calls, 'secretPut')).toHaveLength(setupSecretWrites + 1);
+
+    await env.db
+      .update(emailOperationSteps)
+      .set({
+        started_at: new Date(
+          Date.now() - EMAIL_OPERATION_RECOVERY_MIN_AGE_MS - 1_000,
+        ).toISOString(),
+      })
+      .where(eq(emailOperationSteps.operation_id, rotation));
+    const fence = await inspectUnknownEmailOperationRecovery(env.db, bindings(), rotation);
+    expect(fence).toMatchObject({
+      step: 'secret_put',
+      desiredGeneration: staged.desired_generation,
+      routeId: null,
+      routeDesiredGeneration: null,
+    });
+    expect(fence.resourceIdentity).toContain(`/secret/${staged.staged_secret_generation}`);
+    await resolveUnknownEmailOperation(env.db, bindings(), {
+      ...fence,
+      ended: true,
+      outcome: 'not-applied',
+      reason: 'Provider audit proves the secret write did not apply',
+    });
+    delete failures.secretPut;
+    failBeforeEffect.length = 0;
+    await runEmailOperation(env.db, bindings(), rotation);
+
+    const promoted = (
+      await env.db.select().from(emailZoneConnections).where(eq(emailZoneConnections.id, before.id))
+    )[0]!;
+    expect(promoted.active_secret_generation).toBe(staged.staged_secret_generation);
+    expect(promoted.staged_secret_generation).toBeNull();
+    expect(
+      (await env.db.select().from(emailOperations).where(eq(emailOperations.id, rotation)))[0]
+        ?.status,
+    ).toBe('completed');
+    expect(callsByTag(stub.calls, 'secretPut')).toHaveLength(setupSecretWrites + 2);
+    expect(callsByTag(stub.calls, 'scriptPut')).toHaveLength(setupScriptWrites);
+  });
+
+  it('resumes a blocked secret rotation without replacing its staged generation', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'blocked-rotation');
+    const failures: NonNullable<Parameters<typeof stubCustomerCf>[0]>['failOn'] = {};
+    const stub = stubCustomerCf({ zones, failOn: failures });
+    const actor = { kind: 'owner' as const, userId: user.id };
+    const add = await requestEmailDomainAdd(env.db, bindings(), {
+      projectId: project.id,
+      domain: 'blocked-rotation.example.com',
+      actor,
+      token: TOKEN,
+    });
+    await runEmailOperation(env.db, bindings(), add.operationId);
+    const before = (await resolveEmailDomain(env.db, 'blocked-rotation.example.com'))!.connection;
+    const rotation = await requestEmailSecretRotation(env.db, bindings(), before.id, actor);
+    failures.secretPut = { message: 'secret permission denied', status: 403 };
+    await runEmailOperation(env.db, bindings(), rotation);
+    const staged = (
+      await env.db.select().from(emailZoneConnections).where(eq(emailZoneConnections.id, before.id))
+    )[0]!;
+    expect(staged.staged_secret_generation).toBe(before.active_secret_generation + 1);
+    expect(
+      (await env.db.select().from(emailOperations).where(eq(emailOperations.id, rotation)))[0],
+    ).toMatchObject({ status: 'blocked', current_step: 'secret_put' });
+
+    delete failures.secretPut;
+    const resumed = await requestEmailSecretRotation(env.db, bindings(), before.id, actor);
+    expect(resumed).toBe(rotation);
+    await runEmailOperation(env.db, bindings(), resumed);
+    const promoted = (
+      await env.db.select().from(emailZoneConnections).where(eq(emailZoneConnections.id, before.id))
+    )[0]!;
+    expect(promoted.active_secret_generation).toBe(before.active_secret_generation + 1);
+    expect(promoted.staged_secret_generation).toBeNull();
+    expect(callsByTag(stub.calls, 'secretPut')).toHaveLength(3);
+  });
+
+  it('repairs a blocked rotation with a corrected credential before retiring its staged secret', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'rotation-credential-repair');
+    const failures: NonNullable<Parameters<typeof stubCustomerCf>[0]>['failOn'] = {};
+    stubCustomerCf({ zones, failOn: failures });
+    const actor = { kind: 'owner' as const, userId: user.id };
+    const add = await requestEmailDomainAdd(env.db, bindings(), {
+      projectId: project.id,
+      domain: 'rotation-repair.example.com',
+      actor,
+      token: TOKEN,
+    });
+    await runEmailOperation(env.db, bindings(), add.operationId);
+    const before = (await resolveEmailDomain(env.db, 'rotation-repair.example.com'))!.connection;
+    const rotation = await requestEmailSecretRotation(env.db, bindings(), before.id, actor);
+    failures.secretPut = { message: 'replacement token lacks secret permission', status: 403 };
+    await runEmailOperation(env.db, bindings(), rotation);
+    const staged = (await resolveEmailDomain(env.db, 'rotation-repair.example.com'))!.connection;
+    expect(staged.staged_secret_generation).toBe(before.active_secret_generation + 1);
+    expect(
+      (await env.db.select().from(emailOperations).where(eq(emailOperations.id, rotation)))[0],
+    ).toMatchObject({ status: 'blocked', current_step: 'secret_put' });
+
+    delete failures.secretPut;
+    failures.gatewayProbe = { message: 'gateway proof temporarily unavailable', status: 503 };
+    const replacementInput = {
+      projectId: project.id,
+      domain: 'rotation-repair.example.com',
+      actor,
+      token: 'corrected-rotation-token',
+      attemptId: 'replacement-rotation-credential',
+    };
+    const repair = await requestEmailDomainAdd(env.db, bindings(), replacementInput);
+    expect(await requestEmailDomainAdd(env.db, bindings(), replacementInput)).toEqual(repair);
+    await runEmailOperation(env.db, bindings(), repair.operationId);
+
+    expect(
+      (
+        await env.db
+          .select()
+          .from(emailOperations)
+          .where(eq(emailOperations.id, repair.operationId))
+      )[0],
+    ).toMatchObject({ status: 'unknown', current_step: 'gateway_probe' });
+    const awaitingProof = (await resolveEmailDomain(env.db, 'rotation-repair.example.com'))!
+      .connection;
+    expect(awaitingProof.active_secret_generation).toBe(before.active_secret_generation);
+    expect(awaitingProof.staged_secret_generation).toBe(staged.staged_secret_generation);
+
+    delete failures.gatewayProbe;
+    await reconcilePendingEmailOperations(env.db, bindings());
+
+    const repaired = (await resolveEmailDomain(env.db, 'rotation-repair.example.com'))!.connection;
+    expect(repaired.active_secret_generation).toBe(before.active_secret_generation);
+    expect(repaired.staged_secret_generation).toBeNull();
+    expect(repaired.staged_secret_ciphertext).toBeNull();
+    expect(
+      (
+        await env.db
+          .select()
+          .from(emailOperations)
+          .where(eq(emailOperations.id, repair.operationId))
+      )[0]?.status,
+    ).toBe('completed');
+    expect(
+      (await env.db.select().from(emailOperations).where(eq(emailOperations.id, rotation)))[0]
+        ?.status,
+    ).toBe('blocked');
+    expect(
+      await env.db
+        .select({ kind: emailOperationSteps.kind })
+        .from(emailOperationSteps)
+        .where(eq(emailOperationSteps.operation_id, repair.operationId))
+        .orderBy(emailOperationSteps.ordinal),
+    ).toContainEqual({ kind: 'secret_retire' });
+  });
+
+  it('resumes a blocked removal without changing its route generation', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'blocked-removal');
+    const failures: NonNullable<Parameters<typeof stubCustomerCf>[0]>['failOn'] = {};
+    const stub = stubCustomerCf({ zones, failOn: failures });
+    const actor = { kind: 'owner' as const, userId: user.id };
+    const add = await requestEmailDomainAdd(env.db, bindings(), {
+      projectId: project.id,
+      domain: 'blocked-removal.example.com',
+      actor,
+      token: TOKEN,
+    });
+    await runEmailOperation(env.db, bindings(), add.operationId);
+
+    failures.scriptDelete = { message: 'script delete permission denied', status: 403 };
+    const removalKey = 'blocked-removal-attempt';
+    const removal = await requestEmailDomainRemove(
+      env.db,
+      bindings(),
+      add.routeId,
+      actor,
+      removalKey,
+    );
+    await runEmailOperation(env.db, bindings(), removal);
+    expect(
+      (await env.db.select().from(emailOperations).where(eq(emailOperations.id, removal)))[0],
+    ).toMatchObject({ status: 'blocked', current_step: 'ingress_delete' });
+    const disabled = (await resolveEmailDomain(env.db, 'blocked-removal.example.com'))!.route;
+    expect(disabled.desired_state).toBe('disabled');
+    expect(callsByTag(stub.calls, 'scriptDelete')).toHaveLength(1);
+
+    delete failures.scriptDelete;
+    expect(await requestEmailDomainRemove(env.db, bindings(), add.routeId, actor, removalKey)).toBe(
+      removal,
+    );
+    expect(
+      (await resolveEmailDomain(env.db, 'blocked-removal.example.com'))!.route.desired_generation,
+    ).toBe(disabled.desired_generation);
+    await runEmailOperation(env.db, bindings(), removal);
+
+    expect(
+      (await env.db.select().from(emailOperations).where(eq(emailOperations.id, removal)))[0]
+        ?.status,
+    ).toBe('completed');
+    expect(
+      (await resolveEmailDomain(env.db, 'blocked-removal.example.com'))!.route.desired_state,
+    ).toBe('removed');
+    expect(callsByTag(stub.calls, 'scriptDelete')).toHaveLength(2);
   });
 
   it('does not replace a foreign zone catch-all', async () => {
@@ -1048,7 +2605,9 @@ describe('durable zone email connections', () => {
     await runEmailOperation(env.db, shared, remove);
     const removedRoute = (await resolveEmailDomain(env.db, 'alerts.example.com'))!.route;
     expect(removedRoute.desired_state).toBe('removed');
-    expect(await disableEmailDomainRouteAndDrain(env.db, removedRoute.id)).toEqual({
+    expect(
+      await env.db.transaction((tx) => disableEmailDomainRouteAndDrainTx(tx, removedRoute.id)),
+    ).toEqual({
       cancelled: 0,
       inFlight: 0,
     });

@@ -202,6 +202,11 @@ export function createApplicationRoutes(
 export function createPlatformDeploymentManifest(
   input: PlatformDeploymentManifestInput,
 ): PlatformDeploymentManifest {
+  if ((input.emailSharedZoneId === undefined) !== (input.emailSenderDomain === undefined)) {
+    throw new Error(
+      'Shared email configuration requires both emailSenderDomain and emailSharedZoneId.',
+    );
+  }
   const installationSlug = normalizeInstallationSlug(input.installationSlug);
   const baseDomain = normalizeApplicationDomain(input.application.baseDomain);
   const workersDev = input.application.workersDev;

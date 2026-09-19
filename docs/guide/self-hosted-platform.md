@@ -10,7 +10,7 @@ If you're deploying an app for yourself, [deploy directly to Cloudflare](../inte
 
 The core platform supports GitHub, Google, generic OIDC, and Cloudflare Access login, CLI deploys, D1, KV, R2, Queues, cron jobs, Workers AI, WebSockets, SSE, ISR, routing, logs, and rollback.
 
-The user dashboard, GitHub builds and webhooks, build Containers, email, custom project domains, and sandbox orchestration aren't part of the core installation. Source-built platforms that add the optional GitHub services should follow the [isolated webhook ingress setup](./platform-development.md#optional-github-webhook-ingress-for-access-protected-apis) when Access protects the API.
+The core installation includes an email gateway; email is enabled when you configure a shared mail domain and zone. The user dashboard, GitHub builds and webhooks, build Containers, custom project domains, and sandbox orchestration aren't part of the core installation. Source-built platforms that add the optional GitHub services should follow the [isolated webhook ingress setup](./platform-development.md#optional-github-webhook-ingress-for-access-protected-apis) when Access protects the API.
 
 ## Before You Start {#prerequisites}
 
@@ -134,9 +134,11 @@ Use the following permissions for the core platform. Cloudflare may label write 
 
 The management token also needs **Zone Edit** with authority to create zones if you ask Void to create the zone. If it already exists, use the selected zone with Zone Read and DNS Edit. Nested application domains additionally need **SSL and Certificates: Read** on the management token. A custom runtime that enables custom project domains needs **SSL and Certificates: Edit** on the runtime token; the core runtime does not enable that feature.
 
-A custom runtime that enables email lets administrators [register email domains for projects](./platform-administration.md#registering-email-domains-for-projects) on the runtime token. That needs **Zone: Read**, **Zone Settings: Edit** and **Email Routing Rules: Edit** on the zones that will carry mail, and **Email Sending: Edit** on the account; the token link preselects them when the runtime enables email. Email Sending onboarding itself needs Workers Paid on the account.
+Enabling email lets administrators [register email domains for projects](./platform-administration.md#registering-email-domains-for-projects) on the runtime token. That needs **Zone: Read**, **Zone Settings: Edit** and **Email Routing Rules: Edit** on the zones that will carry mail, and **Email Sending: Edit** on the account; the token link preselects them when email is enabled. Email Sending onboarding itself needs Workers Paid on the account.
 
-For an email-enabled runtime, set `VOID_EMAIL_SENDER_DOMAIN` to the shared sender domain and `VOID_EMAIL_SHARED_ZONE_ID` to its Cloudflare zone ID when installing or upgrading. Void records both values for later upgrades and rejects attempts to replace them during an ordinary upgrade. The mail zone can differ from the application zone; without an explicit mail-zone identity, shared inbound delivery stays unavailable. The dedicated email gateway is deployed in the platform account. Each customer zone uses its own ingress Worker to forward mail to that gateway.
+To enable email, set `VOID_EMAIL_SENDER_DOMAIN` to the shared sender domain and `VOID_EMAIL_SHARED_ZONE_ID` to its Cloudflare zone ID when installing or upgrading. Void records both values for later upgrades and rejects attempts to replace them during an ordinary upgrade. The mail zone can differ from the application zone, but it must belong to the selected platform Cloudflare account; without an explicit mail-zone identity, shared inbound delivery stays unavailable. The dedicated email gateway is deployed in the platform account. Each customer zone uses its own ingress Worker to forward mail to that gateway.
+
+The installer prepares the shared mail route and verifies inbound readiness before it opens platform traffic. If that setup fails, the installation remains disabled. Correct the reported Cloudflare permission, mail-zone configuration, or routing conflict, then rerun the same install or upgrade command; a fresh install resumes with `void platform install --resume --name <installation-id>`.
 
 Void checks access before provisioning. If it reports a missing permission, update the token's permissions for the selected account or zone and retry.
 
@@ -573,7 +575,7 @@ void platform discover --account <account-id> --installation <id-or-name>
 
 Discovery restores local installation records after verifying the resources belong to your platform. It also works for interrupted or disabled installations. If infrastructure is missing, run `void platform repair [id]` after discovery. If ownership cannot be verified, the command stops without changing resources.
 
-After discovery, provide `VOID_PLATFORM_DATABASE_URL` for migrations and to coordinate administrator commands. You don't need to re-enter the other secrets for a normal upgrade. If repair must recreate a missing API or proxy Worker, supply its original runtime token, GitHub, R2, JWT, and project-encryption secrets through the `VOID_PLATFORM_*` variables. Cloudflare can't return those values, so keep them in your organization's secret manager.
+After discovery, provide `VOID_PLATFORM_DATABASE_URL` for migrations and to coordinate administrator commands. You don't need to re-enter the other secrets for an upgrade that preserves every deployed Worker. If an upgrade adds the email gateway for the first time, or repair recreates only that Worker, restore `VOID_PLATFORM_JWT_SECRET`; the gateway does not need the Cloudflare runtime token. If repair must recreate the API or proxy Worker, restore `VOID_PLATFORM_RUNTIME_CLOUDFLARE_API_TOKEN` and `VOID_PLATFORM_JWT_SECRET`. Recreating the API also requires its original GitHub, R2, and project-encryption secrets through the `VOID_PLATFORM_*` variables. Cloudflare can't return those values, so keep them in your organization's secret manager.
 
 If you have not rotated the project-encryption key, restore it with `VOID_PLATFORM_PROJECT_SECRET_KEY`. After rotation, supply `VOID_PLATFORM_PROJECT_SECRET_KEYS_JSON` with all retained keys and `VOID_PLATFORM_PROJECT_SECRET_ACTIVE_KEY_VERSION` with the active key's name. Keep older keys needed to decrypt existing project secrets. These values are used to recreate a missing API Worker; they do not replace the live keys during an ordinary upgrade. Supply them from your secret manager.
 
@@ -627,8 +629,12 @@ Inject the following values from protected CI secrets. Do not commit them in a w
 | `VOID_PLATFORM_JWT_SECRET`                   | Original JWT signing secret                                                                 |
 | `VOID_PLATFORM_PROJECT_SECRET_KEY`           | Original base64-encoded project-encryption key                                              |
 | `VOID_PLATFORM_RECOVERY_KEY`                 | Base64-encoded 32-byte key for local encrypted recovery state when no keychain is available |
+| `VOID_EMAIL_SENDER_DOMAIN`                   | Optional shared mail domain; requires `VOID_EMAIL_SHARED_ZONE_ID`                           |
+| `VOID_EMAIL_SHARED_ZONE_ID`                  | Cloudflare zone ID for that mail domain; requires `VOID_EMAIL_SENDER_DOMAIN`                |
 
 Use that installation's saved signing and encryption keys on every resume or repair that needs them. After a keyring rotation, use the [complete keyring recovery inputs](#manage-an-installation-from-another-machine). The database claim and tables remain after uninstall; use a fresh database for a different installation.
+
+Set both email values to enable email during install or upgrade. Later upgrades reuse the recorded values.
 
 ```sh
 void platform install \

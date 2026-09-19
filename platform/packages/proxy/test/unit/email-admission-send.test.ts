@@ -65,11 +65,19 @@ function fixture() {
     const entry = [...actions.values()].find((a) => a.operationId === operationId)!;
     if (path.endsWith('/start')) {
       for (const recipient of body.recipients as Array<string>) {
-        entry.recipients.find((r) => r.recipient === recipient)!.state = 'attempt_started';
+        const row = entry.recipients.find((r) => r.recipient === recipient)!;
+        if (row.state !== 'reserved') {
+          return Response.json({ code: 'INVALID_STATE' }, { status: 409 });
+        }
+        row.state = 'attempt_started';
       }
     } else if (path.endsWith('/finish')) {
       for (const recipient of body.recipients as Array<string>) {
         const row = entry.recipients.find((r) => r.recipient === recipient)!;
+        const expected = body.state === 'cancelled' ? 'reserved' : 'attempt_started';
+        if (row.state !== expected) {
+          return Response.json({ code: 'INVALID_STATE' }, { status: 409 });
+        }
         row.state = body.state as string;
         row.providerReference = (body.providerReference as string) ?? null;
         row.errorCode = (body.errorCode as string) ?? null;
@@ -148,5 +156,58 @@ describe('proxy email admission delivery', () => {
       'outcome_unknown',
       'provider_accepted',
     ]);
+  });
+
+  it('cancels and durably replays a reservation when start fails before committing', async () => {
+    const test = fixture();
+    const normalFetch = test.apiFetch.getMockImplementation()!;
+    test.apiFetch.mockImplementation(async (request, init) => {
+      const path = new URL(typeof request === 'string' ? request : request.url).pathname;
+      return path.endsWith('/start')
+        ? new Response(null, { status: 503 })
+        : normalFetch(request, init);
+    });
+
+    const first = (await (await test.send('unstarted')).json()) as {
+      deliveries: Array<{ state: string; error: { code: string } }>;
+    };
+    expect(first.deliveries[0]).toMatchObject({
+      state: 'cancelled',
+      error: { code: 'UPSTREAM_ERROR' },
+    });
+    expect(test.actions.get('unstarted')?.recipients[0]?.state).toBe('cancelled');
+    expect(test.sender).not.toHaveBeenCalled();
+
+    const replay = (await (await test.send('unstarted')).json()) as {
+      deliveries: Array<{ state: string; error: { code: string } }>;
+    };
+    expect(replay.deliveries[0]).toMatchObject({
+      state: 'cancelled',
+      error: { code: 'UPSTREAM_ERROR' },
+    });
+    expect(test.sender).not.toHaveBeenCalled();
+  });
+
+  it('keeps the outcome unknown when start committed but its response was lost', async () => {
+    const test = fixture();
+    const normalFetch = test.apiFetch.getMockImplementation()!;
+    test.apiFetch.mockImplementation(async (request, init) => {
+      const path = new URL(typeof request === 'string' ? request : request.url).pathname;
+      if (path.endsWith('/start')) {
+        await normalFetch(request, init);
+        return new Response(null, { status: 503 });
+      }
+      return normalFetch(request, init);
+    });
+
+    const body = (await (await test.send('ambiguous-start')).json()) as {
+      deliveries: Array<{ state: string; error: { code: string } }>;
+    };
+    expect(body.deliveries[0]).toMatchObject({
+      state: 'outcome_unknown',
+      error: { code: 'OUTCOME_UNKNOWN' },
+    });
+    expect(test.actions.get('ambiguous-start')?.recipients[0]?.state).toBe('attempt_started');
+    expect(test.sender).not.toHaveBeenCalled();
   });
 });

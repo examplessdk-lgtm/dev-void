@@ -41,11 +41,7 @@ import { signConfirmToken } from '../../src/auth/confirm-token.ts';
 import { revokeOwnerVerifiedDestinationsForUserChange } from '../../src/db.ts';
 import * as dbModule from '../../src/db.ts';
 import { emailMonthlyUsage } from '../../src/email/admission-schema.ts';
-import {
-  recordEmailReceipt,
-  setProjectEmailLimits,
-  setProjectEmailSuspended,
-} from '../../src/email/admission.ts';
+import { setProjectEmailLimits, setProjectEmailSuspended } from '../../src/email/admission.ts';
 import {
   hashSendContent,
   PLATFORM_INTERNAL_EMAIL_SENTINEL,
@@ -2076,7 +2072,7 @@ describe('GET /projects/:id/email/usage', () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({
       month: monthBucket(),
-      sent: 0,
+      attempts: 0,
       received: 0,
       limit: 200,
       remaining: 200,
@@ -2090,14 +2086,7 @@ describe('GET /projects/:id/email/usage', () => {
     const month = monthBucket();
     await env.db
       .insert(emailMonthlyUsage)
-      .values({ project_id: project.id, month, recipient_attempts: 7 });
-    for (let n = 0; n < 3; n++) {
-      await recordEmailReceipt(env.db, {
-        receiptId: `receipt_${n}`,
-        projectId: project.id,
-        status: 'received',
-      });
-    }
+      .values({ project_id: project.id, month, recipient_attempts: 7, inbound_receipts: 3 });
     await setProjectEmailLimits(env.db, project.id, { monthly: 50 });
     await setProjectEmailSuspended(env.db, project.id, true);
 
@@ -2105,7 +2094,7 @@ describe('GET /projects/:id/email/usage', () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({
       month,
-      sent: 7,
+      attempts: 7,
       received: 3,
       limit: 50,
       remaining: 43,
@@ -2123,8 +2112,8 @@ describe('GET /projects/:id/email/usage', () => {
     await env.ROUTING.put(`email-limit:${project.id}`, '-5');
 
     const res = await usage(project.id, user.jwt);
-    const body = (await res.json()) as { sent: number; limit: number; remaining: number };
-    expect(body.sent).toBe(0);
+    const body = (await res.json()) as { attempts: number; limit: number; remaining: number };
+    expect(body.attempts).toBe(0);
     // A non-positive override is ignored in favour of the default.
     expect(body.limit).toBe(200);
     expect(body.remaining).toBe(200);
@@ -2375,7 +2364,7 @@ describe('email platform capability', () => {
 
     const usage = await get(`/projects/${project.id}/email/usage`, user.jwt, capabilityEnv(true));
     expect(usage.status).toBe(200);
-    expect(await usage.json()).toMatchObject({ sent: 0, received: 0, limit: 200 });
+    expect(await usage.json()).toMatchObject({ attempts: 0, received: 0, limit: 200 });
 
     const list = await listDestinations(project.id, user.jwt, capabilityEnv(true));
     expect(list.status).toBe(200);

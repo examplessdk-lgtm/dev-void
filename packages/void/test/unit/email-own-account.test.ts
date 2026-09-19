@@ -178,8 +178,8 @@ describe('sendEmail (SEND_EMAIL binding)', () => {
     ['E_SENDER_DOMAIN_NOT_AVAILABLE', 'INVALID_FROM'],
     ['E_RATE_LIMIT_EXCEEDED', 'QUOTA_EXCEEDED'],
     ['E_DAILY_LIMIT_EXCEEDED', 'QUOTA_EXCEEDED'],
-    ['E_DELIVERY_FAILED', 'UPSTREAM_ERROR'],
-    ['E_INTERNAL_SERVER_ERROR', 'UPSTREAM_ERROR'],
+    ['E_DELIVERY_FAILED', 'OUTCOME_UNKNOWN'],
+    ['E_INTERNAL_SERVER_ERROR', 'OUTCOME_UNKNOWN'],
   ])(
     'maps a thrown %s to %s per recipient, keeping the Cloudflare message',
     async (cfCode, code) => {
@@ -196,6 +196,7 @@ describe('sendEmail (SEND_EMAIL binding)', () => {
           {
             recipient: 'b@example.com',
             ok: false,
+            ...(code === 'OUTCOME_UNKNOWN' ? { state: 'outcome_unknown' } : {}),
             error: { code, message: `cloudflare says: ${cfCode}`, cause: thrown },
           },
         ],
@@ -402,14 +403,7 @@ describe('generated handleEmail on a native ForwardableEmailMessage', () => {
   });
 
   it('enacts a forward recorded after parseEmail drained the native raw stream', async () => {
-    // The documented handler shape — `parseEmail(message)`, then
-    // `message.forward(...)` — reads the one-shot native `raw` to completion
-    // before the forward is replayed, exactly as Cloudflare's own "Email
-    // Storage" example does on a real message. The replay must not depend
-    // on `raw`: `forward(rcptTo, headers?)` carries no bytes, the runtime
-    // forwards the message it holds (miniflare's local `forward` never reads
-    // `raw` either), so a disturbed stream at replay time is the ordinary
-    // case, not a fault.
+    // Native forwarding must still work after parsing consumes the raw stream.
     const handleEmail = buildHandleEmail(async (message) => {
       const parsed = await parseEmail(message);
       await message.forward('ops@acme.com', new Headers({ 'X-Subject': parsed.subject ?? '' }));
@@ -419,18 +413,9 @@ describe('generated handleEmail on a native ForwardableEmailMessage', () => {
       to: 'support@mail.acme.com',
       mime: INBOUND_MIME,
     });
-    const nativeForward = message.forward.bind(message);
-    let rawLockedAtForward: boolean | undefined;
-    vi.spyOn(message, 'forward').mockImplementation(async (to, fwdHeaders) => {
-      rawLockedAtForward = message.raw.locked;
-      return nativeForward(to, fwdHeaders);
-    });
-
     const actions = await handleEmail(message, {}, {});
 
-    // The parse consumed the native stream and it is still held by that
-    // reader when the native forward fires — and the forward fires anyway.
-    expect(rawLockedAtForward).toBe(true);
+    expect(await readAll(message.raw)).toBe('');
     expect(calls.forwards).toHaveLength(1);
     expect(calls.forwards[0].to).toBe('ops@acme.com');
     expect(calls.forwards[0].headers?.get('X-Subject')).toBe('Help');

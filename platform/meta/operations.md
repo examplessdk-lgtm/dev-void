@@ -24,7 +24,7 @@ vp run check
 vp test run
 ```
 
-Void Cloud deploys the API after PostgreSQL migrations, then the proxy, tail, dispatch, and dashboard Workers. The API hosts the build scheduler and build-container Durable Objects. The optional dashboard uses the API for authentication and is deployed after the API it depends on.
+Void Cloud deploys the API after PostgreSQL migrations, then the proxy, email gateway, tail, dispatch, and dashboard Workers. The API hosts the build scheduler and build-container Durable Objects. The optional dashboard uses the API for authentication and is deployed after the API it depends on.
 
 The `deploy` and `deploy:staging` scripts in `platform/package.json` target these existing hosted environments. Forks should use `void platform upgrade --runtime` as described in [source deployment](../../docs/guide/platform-development.md#source-build-ci).
 
@@ -48,11 +48,11 @@ procedures in that owner's private runbook.
 
 ## Hosted Worker Maintenance
 
-Void Cloud operators can inspect the platform's five Workers and their versions:
+Void Cloud operators can inspect the platform's six Workers and their versions:
 
 ```sh
 void platform worker list
-void platform worker show <proxy|tail|api|dashboard|dispatch>
+void platform worker show <proxy|email-gateway|tail|api|dashboard|dispatch>
 void platform worker rollback <name> <version-id>
 void platform worker rollback-all
 void platform worker events [batch-id]
@@ -73,7 +73,7 @@ Keep these values recoverable through the deployment owner's secret manager:
 | Configuration                                                                         | Purpose                                                         |
 | ------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
 | `CF_API_TOKEN`, `CF_ACCOUNT_ID`, `CF_ZONE_ID`                                         | Runtime Cloudflare account and application-zone access          |
-| `JWT_SECRET`                                                                          | API and proxy authentication                                    |
+| `JWT_SECRET`                                                                          | API, proxy, and email gateway authentication                    |
 | `PROJECT_SECRET_KEYS_JSON`, `PROJECT_SECRET_ACTIVE_KEY_VERSION`                       | Encryption of project secrets                                   |
 | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`                                            | GitHub sign-in OAuth application                                |
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`                                            | Google sign-in OAuth client                                     |
@@ -108,12 +108,30 @@ The dedicated email gateway receives inbound mail and dispatches bounded request
 
 For a managed installation, provide `VOID_EMAIL_SENDER_DOMAIN` and `VOID_EMAIL_SHARED_ZONE_ID` during installation or upgrade. These values are recorded in the installation; routine upgrades preserve them. The installer supplies the platform account and gateway identity separately from the application zone.
 
-For repository deployments, configure the equivalent Worker values before enabling email:
+For repository deployments, add the equivalent values to the selected `env.production.vars` or `env.staging.vars` blocks in the Workers' Wrangler configuration before enabling email. Do not rely on dashboard-only plain-text variables; the checked-in Wrangler files remain the deployment source of truth.
 
 - API, proxy, and email gateway: the same `EMAIL_SENDER_DOMAIN`.
 - API and email gateway: `EMAIL_SHARED_ACCOUNT_ID`, `EMAIL_SHARED_ZONE_ID`, and `EMAIL_SHARED_INGRESS_NAME`, identifying the platform account, mail zone, and dedicated gateway Worker.
 - API: `EMAIL_GATEWAY_ORIGIN`, the gateway's HTTPS origin reachable from customer ingress Workers.
 - API, proxy, and email gateway: the same installation `JWT_SECRET`; the API retains the scoped runtime token and project-encryption keys.
+
+Install the gateway's copy of the shared JWT as a Wrangler secret in each environment before deploying it:
+
+```sh
+cd platform/packages/email-gateway
+wrangler secret put JWT_SECRET --env production
+wrangler secret put JWT_SECRET --env staging
+```
+
+For the first email rollout, configure and deploy the proxy and email gateway before adding the API's shared-email values. Verify both Workers, then add the API values and deploy the API so scheduled reconciliation cannot direct inbound mail at an unavailable gateway. From the repository root, the production sequence is:
+
+```sh
+vp run --filter @voidcloud/platform deploy:proxy
+vp run --filter @voidcloud/platform deploy:email-gateway
+vp run --filter @voidcloud/platform deploy:api
+```
+
+Use the corresponding `deploy:staging:*` commands for staging. After email is enabled and all three Workers exist, the normal platform deployment command can update them.
 
 The API's scheduled reconciliation creates the shared connection and reserved shared-domain route only when the complete identity is configured. Confirm the resulting operation and inbound readiness before directing traffic to the gateway. Provision routing and Sending independently: a provider permission or plan refusal must remain visible in the corresponding readiness state. Sending to arbitrary recipients requires Cloudflare Email Sending onboarding and its supported plan.
 
@@ -130,6 +148,13 @@ and revoke unused test grants in Cloudflare. Preserve unrelated rules and MX
 records. The new reconciler does not migrate old `email_domains` records.
 
 Inspect all three readiness states and the operation ID with `void email domain status <domain>`. Use `sync` to reconcile recoverable steps and `rotate-secret` for explicit ingress-secret rotation. An uncertain provider write remains blocked until its outcome can be proved; neither a timeout nor a missing cache entry authorizes another write. Never erase the operation to force a retry.
+
+If read-back cannot prove whether a routing, Worker, secret, catch-all, or Sending
+mutation applied, confirm that the original execution ended and wait at least 24
+hours before using `void platform email operation-resolve`. Its preview identifies
+the exact stored mutation. Record `applied` to continue without replaying it, or
+`not-applied` to retry only that fenced intent. Keep the same platform version and
+preserve staged secret state until the operation completes.
 
 PostgreSQL is authoritative for consent, policy, suspension, and recipient-attempt quotas. Cache publication retries independently. `void email logs` exposes receipt and action metadata: provider acceptance is not proof of delivery, and an unknown result must not be retried with a new idempotency key. Removing one domain or project must preserve sibling routes and unresolved cleanup records.
 

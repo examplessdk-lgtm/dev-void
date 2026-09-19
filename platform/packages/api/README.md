@@ -146,6 +146,11 @@ partial external failures report completed work instead of silently retrying.
 Requests are bounded to 32 KiB, list pages to 100 rows, and responses disable
 caching.
 
+`GET /operator/v1/email/projects/:project/logs` provides administrator access to
+retained receipt and recipient outcomes, with `page` and `limit` pagination.
+Accept a current project ID or slug; deleted projects remain inspectable by ID
+until ledger retention expires. Responses exclude message content and credentials.
+
 Managed Sandbox disablement uses `void platform system sandbox-drain`. The
 preview inventories bounded pages of deployment manifests and container
 resources without writing. Apply closes the activation gate, cancels active
@@ -178,7 +183,7 @@ recovery or promotion bypass.
 - `/admin/builds/:id` — build detail page (live log panel for container builds; GitHub link for `github_actions`)
 - `/admin/builds/:id/logs?since=N` — build-log poll endpoint backing the live tail; container builds front the `BuildManager`/`BuildManagerLarge` DO's read-only `GET /logs?since=N` (routed by `instance_type` via `buildManagerNamespace`), `github_actions` builds return the external `logs_url`
 - `/admin/deployments`
-- `/admin/email/:projectId` — per-project email usage, caps, outbound kill switch, and destination list
+- `/admin/email/:projectId` — per-project email usage, caps, inbound/outbound suspension, and destination list
 - `/admin/signup-control`
 - `/admin/platform`
 
@@ -237,7 +242,7 @@ Connect a repo through a GitHub App; a `git push` then builds and deploys automa
 
 ## Email
 
-Projects send and receive mail through `void/email`. The API owns consent and quota policy; the proxy worker (`packages/proxy/src/email.ts`) owns the send/receive path and every counter.
+Projects send and receive mail through `void/email`. The API authorizes routing, consent, suspension, and quota reservations in PostgreSQL. The proxy submits outbound mail, and the dedicated email gateway authenticates inbound zone traffic and dispatches it to the active project worker.
 
 ### Sender identity is per-environment
 
@@ -252,31 +257,21 @@ The runtime defaults `from` from those two bindings and refuses to send when eit
 
 ### Who a project may send to
 
-`email_destinations` in Postgres is the source of truth: one row per (project, recipient), `pending` until the recipient consents. `email-allowlist:<projectId>` in `ROUTING` KV is a denormalized read-cache of the **verified** rows, which is what the proxy enforces on every send. Every destination mutation re-syncs that key — the owner-facing add/revoke routes, the admin revoke, the project-create auto-add of the owner's own address, and the recipient's click on a platform confirmation link; an empty list deletes it. **Nothing syncs it on deploy.**
+`email_destinations` records consent per project and recipient. Admission reads verified destinations, current ownership, and installation policy from PostgreSQL. The default shared-sender policy requires verified destinations; operators may allow exact external domains or all external recipients. Destinations on the platform’s shared mail domain always require project consent. Custom senders may send externally when their domain and credential are ready, subject to transport capability, suspension, and quotas.
 
-Those writes are best-effort, so one swallowed KV failure after Postgres already committed `verified` would otherwise be unrecoverable — the proxy reads a missing key as deny-all, and the owner sees a `verified` destination whose every send is rejected as unverified. `GET /projects/:id/email/destinations` is the repair: it compares the mirror against the verified rows and rewrites it only when they differ (one KV read per listing; never a write on every listing). Same read-compare-write self-heal shape as the hourly `email-slug:` backfill in `index.ts`.
+KV contains routing and policy hints; it cannot authorize a send. Cloudflare destination addresses are account-level, so upstream cleanup occurs only after the last project reference is removed.
 
-Cloudflare Email Routing destination addresses are account-level, so a row is only deleted upstream when no other project still references the same address.
+### Quotas and outcomes
 
-### Quotas and counters
+`emailProjectControls` holds suspension and per-project limits. Admission atomically records a deduplicated action, reserves quota in `emailMonthlyUsage`, and creates per-recipient states in `emailActionRecipients`. The defaults are 200 recipient attempts per UTC month and 10 per minute. Direct sends and inbound actions use the same ledger.
 
-All of it lives in `ROUTING` KV, written by the proxy and read (and overridden) by the admin page:
-
-| Key                                | Meaning                                                                 |
-| ---------------------------------- | ----------------------------------------------------------------------- |
-| `email-sent:<projectId>:<YYYY-MM>` | Outbound count for the UTC month; expires shortly after the month ends  |
-| `email-recv:<projectId>:<YYYY-MM>` | Inbound count for the UTC month                                         |
-| `email-suspended:<projectId>`      | Presence stops mail both ways: outbound sends fail, inbound is rejected |
-| `email-limit:<projectId>`          | Monthly outbound override; absent means the platform default (200)      |
-| `email-burst-limit:<projectId>`    | Per-minute override; absent means the platform default (10)             |
-
-The defaults live in the proxy and are mirrored in `admin/routes/email.tsx` so the page can label a cap `default` or `override`. Nothing at build time catches a drift between the two — change them together.
+Only reservations that never started can be cancelled and refunded. Started or uncertain submissions retain their quota and are never automatically replayed. Suspension blocks new attempts; already-started submissions may finish. `emailReceipts` records inbound processing, and unresolved attempt records preserve the removal fence after detailed logs expire.
 
 ### Operator page
 
-`/admin/email/:projectId` is the whole control plane in one page: this month's outbound/inbound counts against the effective caps, the resolved sender address, the suspend/unsuspend kill switch, monthly and burst overrides (submit a blank value to drop an override back to the default), a counter reset, and the destination list with per-row revoke.
+`/admin/email/:projectId` displays current-month recipient attempts and inbound receipts, effective limits, sender identity, verified destinations, and custom-domain readiness. Operators can suspend email, change monthly or burst limits, revoke destination consent, and manage domain operations. A blank limit restores the default.
 
-The counter reset is guarded server-side — the operator types the project slug — so it cannot be triggered by a POST that never rendered the page. There is deliberately no operator-side "add destination": consent belongs to the recipient, and the owner-facing `POST /projects/:id/email/destinations` is the only path that asks for it.
+Destinations are added through the owner-facing `POST /projects/:id/email/destinations` consent flow. Operators cannot consent on a recipient’s behalf. Incomplete provider operations retain their operation ID and outcome for reconciliation or audited recovery; the page must not report them as completed.
 
 Every admin write is additionally same-origin checked in `admin/middleware/auth.ts` before authentication runs; a `POST` whose `Origin` (or, failing that, `Referer`) does not match the request host is rejected with `403`, as is one that carries neither.
 
@@ -318,7 +313,7 @@ Notable sections:
 - project and deployment inspection
 - deployment log viewing
 - per-project Builds section (ongoing build highlighted) plus a build detail page with a client-side polling live-log tail for container builds (mirrors the deployment live-tail; not a WebSocket), or a GitHub Actions link for `github_actions` builds. The tail polls `GET /admin/builds/:id/logs?since=N`, which fronts the `BuildManager`/`BuildManagerLarge` DO's read-only `GET /logs?since=N` (DO chosen by `instance_type` via `buildManagerNamespace`).
-- per-project email page (linked from the project detail view): usage, caps, outbound kill switch, destinations
+- per-project email page (linked from the project detail view): usage, caps, inbound/outbound suspension, destinations
 - signup restrictions and allowlists
 - platform worker version history and orchestrated rollback
 

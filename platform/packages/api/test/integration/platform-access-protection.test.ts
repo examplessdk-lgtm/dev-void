@@ -15,6 +15,7 @@ import { hmacSignState } from '../../src/auth/hmac.ts';
 import { signJwt } from '../../src/auth/jwt.ts';
 import { createCodeChallenge } from '../../src/auth/pkce.ts';
 import { createHumanSession } from '../../src/auth/sessions.ts';
+import { emailReceipts } from '../../src/email/admission-schema.ts';
 import { createGitHubWebhookIngressProof } from '../../src/github/webhook-ingress-auth.ts';
 import { app } from '../../src/index.ts';
 import { platformAuthSettings, users } from '../../src/schema.ts';
@@ -148,6 +149,84 @@ async function githubSignature(body: string): Promise<string> {
 }
 
 describe('Access-protected platform requests', () => {
+  it('admits the installer email probe only with both service Access and installation proof', async () => {
+    const call = (access?: string, probe = 'probe-fixture') =>
+      app.fetch(
+        new Request(`${origin}/internal/platform/email-bootstrap`, {
+          method: 'POST',
+          headers: {
+            ...(access ? { 'Cf-Access-Jwt-Assertion': access } : {}),
+            'X-Void-Platform-Probe': probe,
+          },
+        }),
+        {
+          ...env,
+          PLATFORM_INSTALLATION_ID: 'installation',
+          PLATFORM_HEALTH_PROBE_TOKEN: 'probe-fixture',
+        },
+      );
+    const service = await assertion({ service: true });
+    const response = await call(service);
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({ state: 'unconfigured' });
+    expect((await call()).status).toBe(403);
+    expect((await call(service, 'wrong')).status).toBe(403);
+  });
+
+  it('keeps internal email HMAC authentication usable behind Access without exempting unrelated routes', async () => {
+    const project = await createTestProject(env.db, user.id, 'email-access');
+    const receipt = { projectId: project.id, receiptId: 'a'.repeat(64), status: 'received' };
+    await env.db
+      .insert(emailReceipts)
+      .values({ id: receipt.receiptId, project_id: project.id, status: 'received' });
+    const proof = await hmacSignState(JSON.stringify(receipt), env.JWT_SECRET);
+    const accepted = await request(
+      '/internal/email/actions/receipts',
+      undefined,
+      undefined,
+      receipt,
+      { 'x-void-internal': proof },
+    );
+    expect(accepted.status).toBe(200);
+    const refused = await request(
+      '/internal/email/actions/receipts',
+      undefined,
+      undefined,
+      receipt,
+      { 'x-void-internal': 'invalid' },
+    );
+    expect(refused.status).toBe(403);
+    expect(await refused.json()).toEqual({ error: 'invalid internal auth' });
+    for (const operation of ['probe', 'resolve'] as const) {
+      const body = {
+        accountId: 'account',
+        zoneId: 'zone',
+        ingressName: 'ingress',
+        to: 'x@example.com',
+        secret: 'secret',
+      };
+      const payload =
+        operation === 'probe'
+          ? 'email-probe-v1\naccount\nzone\ningress'
+          : 'email-ingress-v1\naccount\nzone\ningress\nx@example.com';
+      const response = await request(
+        `/internal/email/${operation}-ingress`,
+        undefined,
+        undefined,
+        body,
+        { 'x-void-internal': await hmacSignState(payload, env.JWT_SECRET) },
+      );
+      expect(response.status).toBe(404);
+    }
+    expect(
+      (
+        await request('/internal/email/actions/unrecognized', undefined, undefined, receipt, {
+          'x-void-internal': proof,
+        })
+      ).status,
+    ).toBe(403);
+  });
+
   it('keeps existing signup controls authoritative after authentication migration without removing the gate', async () => {
     const access = await assertion();
     const elevation = await request('/operator/v1/session', access, humanToken, {});

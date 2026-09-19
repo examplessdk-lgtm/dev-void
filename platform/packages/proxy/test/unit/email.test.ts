@@ -520,6 +520,32 @@ describe('POST /email/internal/send', () => {
     expect(await res.json()).toMatchObject({ capability: 'email' });
     expect((env.SEND_EMAIL as { send: ReturnType<typeof vi.fn> }).send).not.toHaveBeenCalled();
   });
+
+  it('returns an unknown outcome when the internal binding submission times out', async () => {
+    vi.useFakeTimers();
+    try {
+      let markSubmitted!: () => void;
+      const submitted = new Promise<void>((resolve) => {
+        markSubmitted = resolve;
+      });
+      const env = createMockEnv(createMockKv(), {
+        SEND_EMAIL: {
+          send: vi.fn(() => {
+            markSubmitted();
+            return new Promise(() => {});
+          }),
+        },
+      });
+      const pending = postInternal(env, await internalBody(PROD_DOMAIN));
+      await submitted;
+      await vi.advanceTimersByTimeAsync(30_000);
+      const response = await pending;
+      expect(response.status).toBe(504);
+      expect(await response.json()).toEqual({ ok: false, error: 'outcome unknown' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 async function drainStream(raw: unknown): Promise<Uint8Array> {
@@ -605,6 +631,7 @@ interface SendResponseBody {
   deliveries?: Array<{
     recipient: string;
     ok: boolean;
+    state?: string;
     messageId?: string;
     error?: { code: string };
   }>;
@@ -658,6 +685,55 @@ describe('POST /email/send — request validation', () => {
     expect(kv.store.get(monthKeyFor('proj_1'))).toBeUndefined();
   });
 
+  it('bounds binding fan-out at 60 seconds and cancels the unstarted reservation', async () => {
+    vi.useFakeTimers();
+    try {
+      const recipients = ['first@example.com', 'second@example.com', 'third@example.com'];
+      const kv = happyPathKv({
+        'email-allowlist:proj_1': JSON.stringify(recipients),
+      });
+      let markFirst!: () => void;
+      let markSecond!: () => void;
+      const firstSubmitted = new Promise<void>((resolve) => {
+        markFirst = resolve;
+      });
+      const secondSubmitted = new Promise<void>((resolve) => {
+        markSecond = resolve;
+      });
+      let submissions = 0;
+      const send = vi.fn(() => {
+        submissions++;
+        (submissions === 1 ? markFirst : markSecond)();
+        return new Promise(() => {});
+      });
+      const env = createMockEnv(kv, { SEND_EMAIL: { send } });
+      const pending = postSend(env, await sendBody({ recipients }));
+
+      await firstSubmitted;
+      await vi.advanceTimersByTimeAsync(30_000);
+      await secondSubmitted;
+      await vi.advanceTimersByTimeAsync(30_000);
+      const body = await readSend(await pending);
+
+      expect(send).toHaveBeenCalledTimes(2);
+      expect(body.deliveries?.map((delivery) => delivery.state)).toEqual([
+        'outcome_unknown',
+        'outcome_unknown',
+        'cancelled',
+      ]);
+      const finishes = (env.API as { fetch: ReturnType<typeof vi.fn> }).fetch.mock.calls
+        .filter(([url]) => String(url).endsWith('/finish'))
+        .map(([, init]) => JSON.parse(String((init as RequestInit).body)) as { state: string });
+      expect(finishes.map((entry) => entry.state)).toEqual([
+        'outcome_unknown',
+        'outcome_unknown',
+        'cancelled',
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('rejects invalid base64 with 400 MIME_ERROR', async () => {
     const env = createMockEnv(happyPathKv());
     const res = await postSend(env, await sendBody({ mimeBase64: '!!!not-base64!!!' }));
@@ -690,17 +766,9 @@ describe('POST /email/send — request validation', () => {
     expect(res.status).toBe(400);
   });
 
-  // A tenant worker holds a valid project HMAC (`__VOID_PROXY_TOKEN` is baked
-  // in as a plain-text binding), so it can POST any body to the public proxy
-  // hostname. Every recipient costs a normalized copy, a `seen` Set entry,
-  // and — when the allowlist rejects it — a delivery object interpolating the
-  // address, all of it then serialized into the response. Uncapped, a ~2.5 MB
-  // body reaches the 128 MB per-isolate ceiling, and the all-rejected path
-  // returns ABOVE the quota gates so the work is never metered and is
-  // endlessly repeatable. The proxy isolate is shared with every other
-  // tenant's in-flight traffic, so the kill is cross-tenant.
+  // Authenticated tenants still need a work bound before per-recipient processing.
   it('rejects a recipient list one over the cap, before any KV read', async () => {
-    const MAX_RECIPIENTS = 100;
+    const MAX_RECIPIENTS = 50;
     const kv = happyPathKv();
     const sender = createSender();
     const env = createMockEnv(kv, { SEND_EMAIL: sender.binding });
@@ -723,7 +791,7 @@ describe('POST /email/send — request validation', () => {
   });
 
   it('still sends a recipient list sitting exactly at the cap', async () => {
-    const MAX_RECIPIENTS = 100;
+    const MAX_RECIPIENTS = 50;
     const recipients = Array.from({ length: MAX_RECIPIENTS }, (_, i) => `dev${i}@example.com`);
     const kv = createMockKv({
       'email-slug:proj_1': 'acme',
@@ -742,9 +810,7 @@ describe('POST /email/send — request validation', () => {
     expect(kv.store.get(monthKeyFor('proj_1'))).toBeUndefined();
   });
 
-  // `MAX_RECIPIENTS` alone still leaves a 100 x <address length> amplifier,
-  // because `.trim().toLowerCase()` copies each entry before anything has
-  // looked at its size.
+  // Bound each address before normalization copies it.
   it('rejects an over-long recipient before normalization allocates', async () => {
     const MAX_RECIPIENT_LENGTH = 320;
     const kv = happyPathKv();
@@ -1473,7 +1539,7 @@ describe('POST /email/internal/send — replay window + content binding', () => 
     expect(sender.calls).toHaveLength(0);
   });
 
-  it('rejects invalid base64 with 400 and oversized MIME with 413', async () => {
+  it('rejects invalid base64 and oversized JSON bodies before sending', async () => {
     const sender = createSender();
     const env = createMockEnv(createMockKv(), { SEND_EMAIL: sender.binding });
 
@@ -1492,20 +1558,8 @@ describe('POST /email/internal/send — replay window + content binding', () => 
     });
     expect(bad.status).toBe(400);
 
-    // 11 MB decodes past the 10 MB cap. The size bound for this endpoint lives
-    // at the AUTH boundary, not in the handler: the token binds
-    // sha256(from|to|mimeBase64), so hashing an unbounded body would let an
-    // unauthenticated caller choose how much work we do. The middleware
-    // therefore refuses to hash anything longer than the base64 form of the
-    // cap, and an oversized body is rejected as an invalid token rather than
-    // reaching the handler's 413. Outsiders get one uniform rejection.
-    const big = new Uint8Array(11 * 1024 * 1024);
-    let binary = '';
-    const CHUNK = 0x8000;
-    for (let i = 0; i < big.length; i += CHUNK) {
-      binary += String.fromCharCode(...big.subarray(i, i + CHUNK));
-    }
-    const oversized = btoa(binary);
+    // The JSON byte limit runs before parsing or authentication.
+    const oversized = 'AAAA'.repeat((8 * 1024 * 1024) / 4 + 1);
     const bigTs = Math.floor(Date.now() / 1000);
     const tooBig = await post(env, {
       platformToken: await signPlatform({
@@ -1519,7 +1573,29 @@ describe('POST /email/internal/send — replay window + content binding', () => 
       to: TO,
       mimeBase64: oversized,
     });
-    expect(tooBig.status).toBe(403);
+    expect(tooBig.status).toBe(400);
+    expect(sender.calls).toHaveLength(0);
+  });
+
+  it('refuses MIME over the send limit before authenticating its content hash', async () => {
+    const sender = createSender();
+    const env = createMockEnv(createMockKv(), { SEND_EMAIL: sender.binding });
+    const mime = 'A'.repeat(Math.ceil((5 * 1024 * 1024 * 4) / 3) + 5);
+    const platformTimestamp = Math.floor(Date.now() / 1000);
+    const response = await post(env, {
+      platformToken: await signPlatform({
+        unixSeconds: platformTimestamp,
+        from: FROM,
+        to: TO,
+        mimeBase64: mime,
+      }),
+      platformTimestamp,
+      from: FROM,
+      to: TO,
+      mimeBase64: mime,
+    });
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({ error: 'invalid platform token' });
     expect(sender.calls).toHaveLength(0);
   });
 
@@ -1559,17 +1635,9 @@ describe('POST /email/internal/send — replay window + content binding', () => 
   it.each([
     ['one character short (42)', (t: string) => t.slice(0, 42)],
     ['one character long (44)', (t: string) => `${t}A`],
-    ['30 MB', () => 'ab-_'.repeat((30 * 1024 * 1024) / 4)],
+    ['4 MiB', () => 'ab-_'.repeat((4 * 1024 * 1024) / 4)],
   ])('refuses a token that is %s before decoding it', async (_label, mutate) => {
-    // The only signer emits an HMAC-SHA256 tag as unpadded base64url — 32
-    // bytes, exactly 43 characters — so any other length can never verify.
-    // `verifyHmac` decodes the token before comparing (two global replaces,
-    // `atob`, then `Uint8Array.from` over every character), which is ~50 B
-    // of heap per token character and runs ahead of every credential check:
-    // measured, a 30 MB token is ~1.5 GB and ~2 s, and a 4 MB one exhausts
-    // a 128 MB heap. The gate refuses on length, so `crypto.subtle.verify`
-    // — the only consumer of the decoded bytes — is never reached, and the
-    // refusal is the same opaque one every other pre-auth gate gives.
+    // Reject malformed lengths before HMAC decoding, even within the JSON byte limit.
     const sender = createSender();
     const env = createMockEnv(createMockKv(), { SEND_EMAIL: sender.binding });
     const mime = mimeBase64();
@@ -1579,7 +1647,6 @@ describe('POST /email/internal/send — replay window + content binding', () => 
     );
     const verify = vi.spyOn(crypto.subtle, 'verify');
     try {
-      const t0 = performance.now();
       const res = await post(env, {
         platformToken,
         platformTimestamp,
@@ -1587,14 +1654,10 @@ describe('POST /email/internal/send — replay window + content binding', () => 
         to: TO,
         mimeBase64: mime,
       });
-      const elapsed = performance.now() - t0;
       expect(res.status).toBe(403);
       expect(await res.json()).toEqual({ error: 'invalid platform token' });
       expect(verify).not.toHaveBeenCalled();
       expect(sender.calls).toHaveLength(0);
-      // Generous: parsing the 30 MB JSON body is the whole cost now; the
-      // decode it no longer reaches measured ~2 s on this input.
-      expect(elapsed).toBeLessThan(1000);
     } finally {
       verify.mockRestore();
     }
@@ -1765,7 +1828,7 @@ describe('POST /email/send — the envelope handed to CF', () => {
 // hex chars, but a hand-built tenant worker holding a valid project HMAC can
 // send any string, and `logSend` used to interpolate it verbatim into one
 // `[email-log]` line per delivery — so a `\n` in it forged a second line under
-// any project id, and a multi-megabyte one was repeated up to 100 times into
+// any project id, and a multi-megabyte one was repeated per recipient into
 // the shared proxy log stream. It is bounded and sanitized once at intake.
 // ---------------------------------------------------------------------------
 

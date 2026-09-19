@@ -172,6 +172,8 @@ await sendEmail({
 
 `ok: false` carries either a top-level `error` or a complete per-recipient `deliveries` list. Platform results include an `operationId` when available, and per-recipient `state` distinguishes rejection, reservation, submission, provider acceptance, failure, cancellation, and an unknown outcome.
 
+Provider submissions have a 30-second wait limit and share a 60-second budget per batch. A submission that times out returns `OUTCOME_UNKNOWN`; the provider may still accept it later.
+
 Use an idempotency key for sends you may retry:
 
 ```ts
@@ -203,9 +205,9 @@ For 30 days, repeating a key with the same payload returns its recorded outcome 
 | `OUTCOME_UNKNOWN`        | The send may have reached the provider; do not blindly resend. |
 | `UPSTREAM_ERROR`         | The provider or platform refused the request.                  |
 
-The default platform allowance is 200 recipient submissions per UTC calendar month and 10 in a rolling 60-second window. Reserved submissions count toward the limits. Once an attempt starts, it stays charged even if the provider fails or the outcome is unknown. Administrators can change these limits.
+The default platform allowance is 200 recipient submissions per UTC calendar month and 10 in a rolling 60-second window. Reserved submissions count toward the limits. Hourly cleanup cancels reservations older than 15 minutes that never started and releases their quota. Once an attempt starts, it stays charged even if the provider fails or the outcome is unknown. Administrators can change these limits.
 
-`void email usage` shows the current allowance. `void email logs --limit 50` shows up to 100 recent metadata entries retained for 30 days: operation, recipient, direction, state, provider reference, and error code. It does not store subjects, bodies, or attachments. Receiving a message and sending a reply are separate events.
+`void email usage` shows monthly recipient attempts, inbound receipts, and the remaining allowance. `void email logs --limit 50` shows up to 100 recent metadata entries retained for 30 days: operation, recipient, direction, state, provider reference, and error code. It does not store subjects, bodies, or attachments. Receiving a message and sending a reply are separate events.
 
 ## Local development
 

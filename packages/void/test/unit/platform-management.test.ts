@@ -294,7 +294,9 @@ const uninstallArgs = {
 
 describe('platform lifecycle management', () => {
   it('preflights only a runtime token that will be applied', () => {
-    const updatePlan = { actions: [{ action: 'update', kind: 'worker' }] };
+    const updatePlan = {
+      actions: [{ action: 'update', key: 'api-worker', kind: 'worker' }],
+    };
     expect(
       resolvePlatformRuntimeTokenToPreflight(updatePlan, {
         cloudflareApiToken: 'stale-checkpoint-token',
@@ -309,13 +311,22 @@ describe('platform lifecycle management', () => {
     ).toBe('explicit-rotation-token');
     expect(
       resolvePlatformRuntimeTokenToPreflight(
-        { actions: [{ action: 'create', kind: 'worker' }] },
+        { actions: [{ action: 'create', key: 'api-worker', kind: 'worker' }] },
         {
           cloudflareApiToken: 'recovery-token',
           workerSecretUpdates: {},
         },
       ),
     ).toBe('recovery-token');
+    expect(
+      resolvePlatformRuntimeTokenToPreflight(
+        { actions: [{ action: 'create', key: 'email-gateway-worker', kind: 'worker' }] },
+        {
+          cloudflareApiToken: 'stale-checkpoint-token',
+          workerSecretUpdates: {},
+        },
+      ),
+    ).toBe('');
   });
 
   it('requires explicit acknowledgement for a non-interactive uninstall', async () => {

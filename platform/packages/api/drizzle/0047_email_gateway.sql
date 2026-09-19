@@ -5,8 +5,8 @@ CREATE TABLE "email_cache_outbox" (
 	"resource_id" text NOT NULL,
 	"version" integer NOT NULL,
 	"payload" jsonb,
-	"published_at" timestamp,
-	"created_at" timestamp DEFAULT now() NOT NULL
+	"published_at" timestamp with time zone,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
 CREATE TABLE "email_credentials" (
@@ -21,11 +21,11 @@ CREATE TABLE "email_credentials" (
 	"iv" text,
 	"key_version" text,
 	"token_id" text,
-	"expires_on" timestamp,
+	"expires_on" timestamp with time zone,
 	"generation" integer DEFAULT 1 NOT NULL,
 	"status" text DEFAULT 'healthy' NOT NULL,
-	"created_at" timestamp DEFAULT now() NOT NULL,
-	"updated_at" timestamp DEFAULT now() NOT NULL,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "email_credentials_material_check" CHECK (("email_credentials"."kind" = 'platform' AND "email_credentials"."ciphertext" IS NULL AND "email_credentials"."iv" IS NULL AND "email_credentials"."key_version" IS NULL) OR ("email_credentials"."kind" = 'api_token' AND "email_credentials"."ciphertext" IS NOT NULL AND "email_credentials"."iv" IS NOT NULL AND "email_credentials"."key_version" IS NOT NULL))
 );
 --> statement-breakpoint
@@ -40,13 +40,13 @@ CREATE TABLE "email_domain_routes" (
 	"desired_state" text DEFAULT 'active' NOT NULL,
 	"inbound_status" text DEFAULT 'pending' NOT NULL,
 	"inbound_reason" text,
-	"inbound_observed_at" timestamp,
+	"inbound_observed_at" timestamp with time zone,
 	"outbound_status" text DEFAULT 'pending' NOT NULL,
 	"outbound_reason" text,
-	"outbound_observed_at" timestamp,
+	"outbound_observed_at" timestamp with time zone,
 	"desired_generation" integer DEFAULT 1 NOT NULL,
-	"created_at" timestamp DEFAULT now() NOT NULL,
-	"updated_at" timestamp DEFAULT now() NOT NULL,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "email_domain_routes_assignment_check" CHECK (("email_domain_routes"."addressing" = 'custom' AND "email_domain_routes"."project_id" IS NOT NULL) OR ("email_domain_routes"."addressing" = 'shared' AND "email_domain_routes"."project_id" IS NULL))
 );
 --> statement-breakpoint
@@ -62,8 +62,8 @@ CREATE TABLE "email_operation_steps" (
 	"outcome" jsonb,
 	"failure_code" text,
 	"failure_detail" text,
-	"started_at" timestamp,
-	"finished_at" timestamp
+	"started_at" timestamp with time zone,
+	"finished_at" timestamp with time zone
 );
 --> statement-breakpoint
 CREATE TABLE "email_operations" (
@@ -71,6 +71,7 @@ CREATE TABLE "email_operations" (
 	"installation_id" text NOT NULL,
 	"connection_id" text NOT NULL,
 	"route_id" text,
+	"route_generation" integer,
 	"actor_kind" text NOT NULL,
 	"actor_user_id" text,
 	"actor_scope" text NOT NULL,
@@ -82,8 +83,8 @@ CREATE TABLE "email_operations" (
 	"current_step" text,
 	"failure_code" text,
 	"failure_detail" text,
-	"created_at" timestamp DEFAULT now() NOT NULL,
-	"updated_at" timestamp DEFAULT now() NOT NULL
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
 CREATE TABLE "email_zone_connections" (
@@ -107,15 +108,15 @@ CREATE TABLE "email_zone_connections" (
 	"staged_secret_iv" text,
 	"staged_secret_key_version" text,
 	"previous_secret_hash" text,
-	"previous_secret_until" timestamp,
+	"previous_secret_until" timestamp with time zone,
 	"inbound_status" text DEFAULT 'pending' NOT NULL,
 	"inbound_reason" text,
-	"inbound_observed_at" timestamp,
+	"inbound_observed_at" timestamp with time zone,
 	"management_status" text DEFAULT 'probe_failed' NOT NULL,
 	"management_reason" text,
-	"management_observed_at" timestamp,
-	"created_at" timestamp DEFAULT now() NOT NULL,
-	"updated_at" timestamp DEFAULT now() NOT NULL,
+	"management_observed_at" timestamp with time zone,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "email_zone_connections_manager_check" CHECK (("email_zone_connections"."managed_by" = 'owner' AND "email_zone_connections"."manager_user_id" IS NOT NULL) OR ("email_zone_connections"."managed_by" = 'admin'))
 );
 --> statement-breakpoint
@@ -153,8 +154,10 @@ CREATE TABLE "email_monthly_usage" (
 	"project_id" text NOT NULL,
 	"month" text NOT NULL,
 	"recipient_attempts" integer DEFAULT 0 NOT NULL,
+	"inbound_receipts" integer DEFAULT 0 NOT NULL,
 	CONSTRAINT "email_monthly_usage_project_month_uq" UNIQUE("project_id","month"),
-	CONSTRAINT "email_monthly_usage_nonnegative_check" CHECK ("email_monthly_usage"."recipient_attempts" >= 0)
+	CONSTRAINT "email_monthly_usage_nonnegative_check" CHECK ("email_monthly_usage"."recipient_attempts" >= 0),
+	CONSTRAINT "email_monthly_usage_inbound_nonnegative_check" CHECK ("email_monthly_usage"."inbound_receipts" >= 0)
 );
 --> statement-breakpoint
 CREATE TABLE "email_project_controls" (
@@ -202,6 +205,7 @@ CREATE UNIQUE INDEX "email_zone_connections_zone_uq" ON "email_zone_connections"
 CREATE UNIQUE INDEX "email_zone_connections_ingress_uq" ON "email_zone_connections" USING btree ("account_id","ingress_worker_name");--> statement-breakpoint
 CREATE INDEX "email_zone_connections_manager_idx" ON "email_zone_connections" USING btree ("manager_user_id");--> statement-breakpoint
 CREATE INDEX "idx_email_action_recipients_project_reserved" ON "email_action_recipients" USING btree ("project_id","reserved_at");--> statement-breakpoint
+CREATE INDEX "idx_email_action_recipients_expiring" ON "email_action_recipients" USING btree ("reserved_at") WHERE "email_action_recipients"."state" = 'reserved';--> statement-breakpoint
 CREATE INDEX "idx_email_actions_project_created" ON "email_actions" USING btree ("project_id","created_at");--> statement-breakpoint
 CREATE INDEX "idx_email_receipts_project_created" ON "email_receipts" USING btree ("project_id","created_at");--> statement-breakpoint
 CREATE INDEX "idx_email_unresolved_attempts_project" ON "email_unresolved_attempts" USING btree ("project_id");--> statement-breakpoint

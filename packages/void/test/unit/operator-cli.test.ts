@@ -151,6 +151,15 @@ describe('operator argument and help coverage', () => {
     });
     expect(() => parseOperatorArgs(['email', 'policy', '--domains', 'x'])).toThrow();
     expect(() => parseOperatorArgs(['email', 'limit'])).toThrow();
+    expect(
+      parseOperatorArgs(['email', 'logs', 'project/id', '--page', '2', '--limit', '100']),
+    ).toMatchObject({
+      method: 'GET',
+      path: '/email/projects/project%2Fid/logs',
+      query: { page: '2', limit: '100' },
+    });
+    expect(() => parseOperatorArgs(['email', 'logs', 'project', '--limit', '101'])).toThrow();
+    expect(() => parseOperatorArgs(['email', 'logs', 'project', '--follow'])).toThrow();
   });
   it('routes attempt inspection and attested resolution with a bounded audit reason', () => {
     expect(
@@ -177,8 +186,28 @@ describe('operator argument and help coverage', () => {
       yes: true,
     });
     expect(() => parseOperatorArgs(['email', 'attempts', '--ended'])).toThrow();
+    expect(
+      parseOperatorArgs([
+        'email',
+        'operation-resolve',
+        'operation/id',
+        '--ended',
+        '--outcome',
+        'not-applied',
+        '--reason',
+        'Provider audit completed',
+      ]),
+    ).toMatchObject({
+      method: 'POST',
+      path: '/email/operations/operation%2Fid/resolve',
+      body: {
+        ended: true,
+        outcome: 'not-applied',
+        reason: 'Provider audit completed',
+      },
+    });
   });
-  it('routes the email domain verbs and carries their booleans in the body', () => {
+  it('routes the email domain verbs', () => {
     expect(parseOperatorArgs(['email', 'domains', '--project', 'hr-portal'])).toMatchObject({
       method: 'GET',
       path: '/email/domains',
@@ -210,14 +239,22 @@ describe('operator argument and help coverage', () => {
       path: '/email/domains/mail.example.com/sync',
       body: {},
     });
+    expect(parseOperatorArgs(['email', 'domain-rotate-secret', 'mail.example.com'])).toMatchObject({
+      method: 'POST',
+      path: '/email/domains/mail.example.com/rotate-secret',
+      body: {},
+    });
+    expect(parseOperatorArgs(['email', 'domain-remove', 'mail.example.com']).body).toEqual({});
     expect(
-      parseOperatorArgs(['email', 'domain-remove', 'mail.example.com', '--force']),
+      parseOperatorArgs(['email', 'domain-remove', 'mail.example.com', '--token-stdin', '--yes']),
     ).toMatchObject({
       method: 'POST',
       path: '/email/domains/mail.example.com/remove',
-      body: { force: true },
+      body: {},
+      tokenStdin: true,
+      yes: true,
     });
-    expect(parseOperatorArgs(['email', 'domain-remove', 'mail.example.com']).body).toEqual({});
+    expect(() => parseOperatorArgs(['email', 'domain-remove', 'x', '--force'])).toThrow();
     expect(() => parseOperatorArgs(['email', 'domain-sync', 'x', '--force'])).toThrow();
     expect(() => parseOperatorArgs(['email', 'domain-add', 'x', '--force'])).toThrow();
   });
@@ -398,6 +435,76 @@ describe('operator transport and execution', () => {
       versions: { api: 'version-a' },
     });
   });
+  it.each(['--plan', '--yes'])(
+    'reads a cleanup token once for %s without printing it',
+    async (mode) => {
+      vi.stubEnv('VOID_API_URL', 'https://one.example');
+      vi.stubEnv('VOID_OPERATOR_TOKEN', 'operator');
+      const output = vi.spyOn(console, 'log').mockImplementation(() => {});
+      const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      const stdin = vi
+        .spyOn(process.stdin, Symbol.asyncIterator)
+        .mockImplementation(async function* () {
+          yield 'replacement-cloudflare-token\n';
+          return undefined;
+        });
+      const fetcher = vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(
+          Response.json({
+            dryRun: true,
+            action: 'email.domain.remove',
+            target: { domain: 'mail.example.com', credentialReplacement: true },
+          }),
+        )
+        .mockResolvedValueOnce(Response.json({ operationStatus: 'completed' }));
+      vi.stubGlobal('fetch', fetcher);
+      await runOperatorCommand(
+        parseOperatorArgs(['email', 'domain-remove', 'mail.example.com', '--token-stdin', mode]),
+      );
+      expect(stdin).toHaveBeenCalledTimes(1);
+      expect(fetcher).toHaveBeenCalledTimes(mode === '--plan' ? 1 : 2);
+      expect(JSON.parse(String(fetcher.mock.calls[0]![1]!.body))).toEqual({
+        apiToken: 'replacement-cloudflare-token',
+        dryRun: true,
+      });
+      if (mode === '--yes') {
+        expect(JSON.parse(String(fetcher.mock.calls[1]![1]!.body))).toEqual({
+          apiToken: 'replacement-cloudflare-token',
+        });
+      }
+      expect(JSON.stringify([output.mock.calls, stderr.mock.calls])).not.toContain(
+        'replacement-cloudflare-token',
+      );
+    },
+  );
+  it('prints email recipient outcomes through the operator logs command', async () => {
+    vi.stubEnv('VOID_API_URL', 'https://one.example');
+    vi.stubEnv('VOID_OPERATOR_TOKEN', 'operator');
+    const output = vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.stubGlobal(
+      'fetch',
+      vi.fn<typeof fetch>().mockResolvedValue(
+        Response.json({
+          projectId: 'project-1',
+          page: 1,
+          limit: 20,
+          logs: [
+            {
+              operationId: 'action-1',
+              recipient: 'one@example.com',
+              status: 'provider_accepted',
+              transport: 'binding',
+            },
+          ],
+        }),
+      ),
+    );
+    await runOperatorCommand(parseOperatorArgs(['email', 'logs', 'project-1']));
+    const printed = output.mock.calls.flat().join('\n');
+    expect(printed).toContain('one@example.com');
+    expect(printed).toContain('provider_accepted');
+  });
   it('previews then submits an attested email attempt resolution', async () => {
     vi.stubEnv('VOID_API_URL', 'https://one.example');
     vi.stubEnv('VOID_OPERATOR_TOKEN', 'operator');
@@ -436,6 +543,58 @@ describe('operator transport and execution', () => {
     expect(JSON.parse(String(fetcher.mock.calls[1]![1]!.body))).toEqual({
       ended: true,
       reason: 'Worker execution ended',
+    });
+  });
+  it('pins email operation recovery execution to the previewed step fence', async () => {
+    vi.stubEnv('VOID_API_URL', 'https://one.example');
+    vi.stubEnv('VOID_OPERATOR_TOKEN', 'operator');
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        Response.json({
+          dryRun: true,
+          action: 'email.operation.resolve',
+          target: {
+            operationId: 'eop_1',
+            stepId: 'estep_1',
+            attempt: 2,
+            requestDigest: 'digest-1',
+            resourceIdentity: 'account/zone/worker/relay/7',
+            connectionId: 'ezc_1',
+            desiredGeneration: 4,
+            routeId: 'edr_1',
+            routeDesiredGeneration: 3,
+          },
+        }),
+      )
+      .mockResolvedValueOnce(Response.json({ status: 'pending' }));
+    vi.stubGlobal('fetch', fetcher);
+    await runOperatorCommand(
+      parseOperatorArgs([
+        'email',
+        'operation-resolve',
+        'eop_1',
+        '--ended',
+        '--outcome',
+        'applied',
+        '--reason',
+        'Exact provider resource verified',
+        '--yes',
+      ]),
+    );
+    expect(JSON.parse(String(fetcher.mock.calls[1]![1]!.body))).toEqual({
+      ended: true,
+      outcome: 'applied',
+      reason: 'Exact provider resource verified',
+      stepId: 'estep_1',
+      attempt: 2,
+      requestDigest: 'digest-1',
+      resourceIdentity: 'account/zone/worker/relay/7',
+      connectionId: 'ezc_1',
+      desiredGeneration: 4,
+      routeId: 'edr_1',
+      routeDesiredGeneration: 3,
     });
   });
   it('drains runtime cursors and rejects repeated cursors instead of spinning', async () => {

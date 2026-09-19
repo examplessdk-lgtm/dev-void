@@ -25,6 +25,12 @@ import {
 } from '../../src/email-router.ts';
 import type { Env } from '../../src/types.ts';
 
+const ROUTE_FENCE = {
+  routeId: 'route-1',
+  routeGeneration: 1,
+  connectionId: 'connection-1',
+} as const;
+
 async function routeInbound(
   message: ForwardableEmailMessage,
   env: Env,
@@ -37,6 +43,7 @@ async function routeInbound(
     env,
     ctx,
     route ?? {
+      ...ROUTE_FENCE,
       projectId: 'p_test',
       workerName: 'user-worker',
       deploymentId: 'v1',
@@ -340,7 +347,7 @@ describe('routeInbound — shared-address parsing', () => {
   });
 
   it('routes a tag-less recipient (whole local-part is the slug)', async () => {
-    const { env, emailFn } = makeEnv({ emailReturn: [] });
+    const { env, emailFn, apiFetch } = makeEnv({ emailReturn: [] });
     const { message, rejectCalls } = createFakeMessage({ to: `myslug@${PROD_DOMAIN}` });
     const { ctx } = createCtx();
     await routeInbound(message, env, ctx);
@@ -349,6 +356,12 @@ describe('routeInbound — shared-address parsing', () => {
     // The user worker sees the full, untruncated recipient.
     const envelope = emailFn.mock.calls[0]?.[0] as { to: string };
     expect(envelope.to).toBe(`myslug@${PROD_DOMAIN}`);
+    expect(apiBodies(apiFetch, '/receipts')[0]?.route).toEqual({
+      ...ROUTE_FENCE,
+      addressing: 'shared',
+      domain: PROD_DOMAIN,
+      projectSlug: 'myslug',
+    });
   });
 
   it('uppercase recipients are lowercased before dispatch', async () => {
@@ -371,6 +384,7 @@ describe('routeInbound — authoritative routing', () => {
     const { message, rejectCalls } = createFakeMessage({ to: `myslug@${PROD_DOMAIN}` });
     const { ctx } = createCtx();
     await routeInbound(message, env, ctx, {
+      ...ROUTE_FENCE,
       projectId: 'p_test',
       workerName: 'user-worker',
       deploymentId: 'v1',
@@ -388,6 +402,7 @@ describe('routeInbound — authoritative routing', () => {
     const { ctx } = createCtx();
     const limits = { cpuMs: 1000 };
     await routeInbound(message, env, ctx, {
+      ...ROUTE_FENCE,
       projectId: 'p_test',
       workerName: 'user-worker',
       deploymentId: 'v1',
@@ -440,6 +455,34 @@ describe('routeInbound — message size guards', () => {
     expect(rejectCalls).toHaveLength(1);
     expect(rejectCalls[0]).toContain('too large');
     expect(emailFn).not.toHaveBeenCalled();
+  });
+
+  it('bounds a stalled inbound stream without awaiting its cancellation', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(FIXED_NOW);
+    try {
+      const { env, emailFn } = makeEnv();
+      const { message, rejectCalls } = createFakeMessage({
+        to: `myslug+tag@${PROD_DOMAIN}`,
+        rawSize: 1024,
+      });
+      (message as unknown as { raw: ReadableStream<Uint8Array> }).raw = new ReadableStream({
+        pull() {
+          return new Promise<void>(() => {});
+        },
+        cancel() {
+          return new Promise<void>(() => {});
+        },
+      });
+      const { ctx } = createCtx();
+      const result = routeInbound(message, env, ctx);
+      await vi.advanceTimersByTimeAsync(15_001);
+      await result;
+      expect(rejectCalls).toEqual(['mail.void.cloud: could not read inbound message body']);
+      expect(emailFn).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('accepts a message just under the cap', async () => {
@@ -760,6 +803,73 @@ describe('routeInbound — action enaction', () => {
     expect(replyCalls[0]?.to).toBe('admin@example.com');
     expect(replyCalls[0]?.raw).toBeInstanceOf(ReadableStream);
   });
+
+  it('stops native action dispatch at the 60-second batch deadline', async () => {
+    vi.useFakeTimers();
+    let firstSubmit!: () => void;
+    let secondSubmit!: () => void;
+    const firstSubmitted = new Promise<void>((resolve) => {
+      firstSubmit = resolve;
+    });
+    const secondSubmitted = new Promise<void>((resolve) => {
+      secondSubmit = resolve;
+    });
+    const { env, apiFetch } = makeEnv({
+      emailReturn: [
+        { type: 'forward', to: 'one@example.com' },
+        { type: 'forward', to: 'two@example.com' },
+        { type: 'forward', to: 'three@example.com' },
+      ],
+    });
+    const { message } = createFakeMessage({ to: `myslug@${PROD_DOMAIN}` });
+    let submissions = 0;
+    const forward = vi.fn(() => {
+      submissions++;
+      (submissions === 1 ? firstSubmit : secondSubmit)();
+      return new Promise<void>(() => {});
+    });
+    message.forward = forward;
+    const { ctx } = createCtx();
+    const pending = routeInbound(message, env, ctx);
+    await firstSubmitted;
+    await vi.advanceTimersByTimeAsync(30_000);
+    await secondSubmitted;
+    await vi.advanceTimersByTimeAsync(30_000);
+    await pending;
+
+    expect(forward).toHaveBeenCalledTimes(2);
+    expect(apiBodies(apiFetch, '/admit')).toHaveLength(2);
+    expect(apiBodies(apiFetch, '/finish').map((body) => body.state)).toEqual([
+      'outcome_unknown',
+      'outcome_unknown',
+    ]);
+  });
+
+  it('marks a nonsettling native reply outcome unknown after 30 seconds', async () => {
+    vi.useFakeTimers();
+    let markSubmitted!: () => void;
+    const submitted = new Promise<void>((resolve) => {
+      markSubmitted = resolve;
+    });
+    const sender = `myslug+support@${PROD_DOMAIN}`;
+    const { env, apiFetch } = makeEnv({
+      emailReturn: [
+        { type: 'reply', from: sender, to: 'admin@example.com', raw: replyRaw(sender) },
+      ],
+    });
+    const { message } = createFakeMessage({ to: `myslug@${PROD_DOMAIN}` });
+    message.reply = vi.fn(() => {
+      markSubmitted();
+      return new Promise<void>(() => {});
+    });
+    const { ctx } = createCtx();
+    const pending = routeInbound(message, env, ctx);
+    await submitted;
+    await vi.advanceTimersByTimeAsync(30_000);
+    await pending;
+
+    expect(apiBodies(apiFetch, '/finish')[0]?.state).toBe('outcome_unknown');
+  });
 });
 
 // -----------------------------------------------------------------------
@@ -876,6 +986,7 @@ describe('routeInbound — authoritative native custom domain', () => {
     });
     const { ctx } = createCtx();
     await routeInbound(message, env, ctx, {
+      ...ROUTE_FENCE,
       projectId: 'p_test',
       workerName: 'custom-worker',
       deploymentId: 'v1',
@@ -928,6 +1039,7 @@ describe('routeRelayed — unsupported forward', () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
     const { ctx } = createCtx();
     const outcome = await routeRelayed(env, ctx, {
+      stub: env.DISPATCH.get('user-worker') as Fetcher,
       projectId: 'p_test',
       domain: 'custom.example.com',
       receiptId: 'receipt_1',
@@ -939,6 +1051,7 @@ describe('routeRelayed — unsupported forward', () => {
         rawSize: 42,
       },
       authoritative: {
+        ...ROUTE_FENCE,
         projectId: 'p_test',
         workerName: 'user-worker',
         deploymentId: 'v1',
@@ -962,23 +1075,62 @@ describe('routeRelayed — reply attempt outcomes', () => {
 
   async function runReply(
     response: Response,
-    options: { raw?: Uint8Array; leaseUnavailable?: boolean } = {},
+    options: {
+      raw?: Uint8Array;
+      leaseUnavailable?: boolean;
+      from?: string;
+      bindingUnavailable?: boolean;
+      bindingNever?: boolean;
+      bindingStarted?: () => void;
+      startUnavailable?: boolean;
+      cancelUnavailable?: boolean;
+    } = {},
   ) {
+    const replyFrom = options.from ?? from;
     const { env, apiFetch } = makeEnv({
-      emailReturn: [{ type: 'reply', from, to, raw: options.raw ?? replyRaw(from) }],
+      emailReturn: [
+        { type: 'reply', from: replyFrom, to, raw: options.raw ?? replyRaw(replyFrom) },
+      ],
     });
+    if (options.bindingUnavailable) {
+      delete (env as { SEND_EMAIL?: Env['SEND_EMAIL'] }).SEND_EMAIL;
+    } else if (options.bindingNever) {
+      vi.mocked(env.SEND_EMAIL.send).mockImplementation(() => {
+        options.bindingStarted?.();
+        return new Promise(() => {});
+      });
+    } else {
+      vi.mocked(env.SEND_EMAIL.send).mockResolvedValue({ messageId: 'shared_reply' });
+    }
     const normalFetch = apiFetch.getMockImplementation()!;
-    apiFetch.mockImplementation(async (url, init) =>
-      String(url).endsWith('/domain-credential')
-        ? options.leaseUnavailable
+    apiFetch.mockImplementation(async (url, init) => {
+      const path = String(url);
+      if (path.endsWith('/domain-credential')) {
+        return options.leaseUnavailable
           ? new Response(null, { status: 503 })
-          : Response.json({ kind: 'api_token', token: 'test-lease', accountId: 'customer-account' })
-        : normalFetch(url, init),
-    );
+          : Response.json({
+              kind: 'api_token',
+              token: 'test-lease',
+              accountId: 'customer-account',
+            });
+      }
+      if (options.startUnavailable && path.endsWith('/start')) {
+        return new Response(null, { status: 503 });
+      }
+      if (
+        options.cancelUnavailable &&
+        path.endsWith('/finish') &&
+        JSON.parse(String((init as RequestInit).body)).state === 'cancelled'
+      ) {
+        return new Response(null, { status: 503 });
+      }
+      return normalFetch(url, init);
+    });
     const providerFetch = vi.fn(async () => response);
     vi.stubGlobal('fetch', providerFetch);
     const { ctx } = createCtx();
     const outcome = await routeRelayed(env, ctx, {
+      stub: env.DISPATCH.get('user-worker') as Fetcher,
       projectId: 'p_test',
       domain: 'custom.example.com',
       receiptId: 'receipt_1',
@@ -990,6 +1142,7 @@ describe('routeRelayed — reply attempt outcomes', () => {
         rawSize: replyRaw(to).byteLength,
       },
       authoritative: {
+        ...ROUTE_FENCE,
         projectId: 'p_test',
         workerName: 'user-worker',
         deploymentId: 'v1',
@@ -998,8 +1151,71 @@ describe('routeRelayed — reply attempt outcomes', () => {
         domain: 'custom.example.com',
       },
     });
-    return { outcome, apiFetch, providerFetch };
+    return { outcome, apiFetch, providerFetch, env };
   }
+
+  it('sends a relayed shared-sender reply through the shared binding', async () => {
+    const { outcome, apiFetch, providerFetch, env } = await runReply(new Response(null), {
+      from: `myslug+support@${PROD_DOMAIN}`,
+    });
+    expect(outcome.reject).toBe(false);
+    expect(apiBodies(apiFetch, '/admit')[0]).toMatchObject({ kind: 'reply', transport: 'binding' });
+    expect(apiBodies(apiFetch, '/domain-credential')).toEqual([]);
+    expect(providerFetch).not.toHaveBeenCalled();
+    expect(env.SEND_EMAIL.send).toHaveBeenCalledOnce();
+    expect(apiBodies(apiFetch, '/finish')[0]).toMatchObject({
+      state: 'provider_accepted',
+      providerReference: 'shared_reply',
+    });
+  });
+
+  it('marks a timed-out relayed shared-sender binding submission outcome unknown', async () => {
+    vi.useFakeTimers();
+    let markSubmitted!: () => void;
+    const submitted = new Promise<void>((resolve) => {
+      markSubmitted = resolve;
+    });
+    const pending = runReply(new Response(null), {
+      from: `myslug+support@${PROD_DOMAIN}`,
+      bindingNever: true,
+      bindingStarted: markSubmitted,
+    });
+    await submitted;
+    await vi.advanceTimersByTimeAsync(30_000);
+    const { apiFetch, env } = await pending;
+
+    expect(env.SEND_EMAIL.send).toHaveBeenCalledOnce();
+    expect(apiBodies(apiFetch, '/finish')[0]?.state).toBe('outcome_unknown');
+  });
+
+  it('cancels a shared reply before submission when its binding is unavailable', async () => {
+    const { outcome, apiFetch, providerFetch } = await runReply(new Response(null), {
+      from: `myslug+support@${PROD_DOMAIN}`,
+      bindingUnavailable: true,
+    });
+    expect(outcome.reject).toBe(false);
+    expect(apiBodies(apiFetch, '/start')).toEqual([]);
+    expect(apiBodies(apiFetch, '/finish')[0]?.state).toBe('cancelled');
+    expect(providerFetch).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [false, '[email-router] attempt did not start; reservation cancelled'],
+    [true, '[email-router] could not confirm attempt status'],
+  ])(
+    'does not submit after a failed start checkpoint (cancellation unavailable: %s)',
+    async (cancelUnavailable, expectedLog) => {
+      const { apiFetch, providerFetch, env } = await runReply(new Response(null), {
+        from: `myslug+support@${PROD_DOMAIN}`,
+        startUnavailable: true,
+        cancelUnavailable,
+      });
+      expect(apiBodies(apiFetch, '/finish')[0]?.state).toBe('cancelled');
+      expect(env.SEND_EMAIL.send).not.toHaveBeenCalled();
+      expect(providerFetch).not.toHaveBeenCalled();
+      expect(errorSpy).toHaveBeenCalledWith(expectedLog);
+    },
+  );
 
   it.each([
     [new Response(null, { status: 500 }), 'outcome_unknown'],
@@ -1063,6 +1279,25 @@ describe('routeRelayed — reply attempt outcomes', () => {
       expect(apiBodies(apiFetch, '/finish')[0]?.state).toBe('provider_accepted');
     },
   );
+
+  it('keeps an oversized provider response for a relayed reply unresolved', async () => {
+    const cancel = vi.fn();
+    const response = new Response(
+      new ReadableStream<Uint8Array>(
+        {
+          cancel,
+          pull() {
+            throw new Error('oversized body must not be read');
+          },
+        },
+        { highWaterMark: 0 },
+      ),
+      { headers: { 'content-length': String(64 * 1024 + 1) } },
+    );
+    const { apiFetch } = await runReply(response);
+    expect(apiBodies(apiFetch, '/finish')[0]?.state).toBe('outcome_unknown');
+    await vi.waitFor(() => expect(cancel).toHaveBeenCalledOnce());
+  });
 
   it.each([{ leaseUnavailable: true }, { raw: new Uint8Array([...replyRaw(from), 0xff]) }])(
     'cancels a reply that could not be submitted',
