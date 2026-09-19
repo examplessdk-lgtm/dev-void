@@ -183,10 +183,6 @@ function resolveSendEmailBinding(
  * no way to act on a delivery failure or a service outage beyond
  * reporting it.
  *
- * The platform proxy's `classifyUpstream` mirrors this table for its own
- * binding, except the two sender codes: there `from` is pinned to the
- * project sender, so a sender failure is the platform's to fix and stays
- * `UPSTREAM_ERROR`. Keep the recipient and limit rows in lockstep.
  */
 function classifyBindingError(e: unknown): SendEmailError {
   const message = e instanceof Error ? e.message : String(e);
@@ -213,7 +209,6 @@ function classifyBindingError(e: unknown): SendEmailError {
 // Anchored to Cloudflare's own phrasing ("destination address … not (yet)
 // verified"), with bounded runs so a long preamble or a multi-line stack
 // cannot drag an unrelated mention of the address into a false positive.
-// Mirrors `classifyUpstream` in the platform proxy.
 const UNVERIFIED_DESTINATION_RE =
   /^[^\n]{0,200}destination address[^\n]{0,200}not (?:yet )?verified/i;
 
@@ -468,9 +463,8 @@ type RecipientListRead<T> = { ok: true; entries: Array<T> } | { ok: false; reaso
  * The rules shared by both shapes: the count equals the recipients sent;
  * every entry is an object naming a requested recipient exactly once. The
  * list is compared as a set against the unique, lowercased recipients the
- * request carried and returned in the order the proxy gave it — order is
- * not part of the contract (the proxy lists allowlist rejections before the
- * sends it attempted). `readEntry` decides the rest of the entry's shape and
+ * request carried and returned in the order the proxy gave it; order is not
+ * part of the contract. `readEntry` decides the rest of the entry's shape and
  * returns `undefined` when it does not hold; `shape` names that shape in the
  * reason.
  *
@@ -516,14 +510,11 @@ function readRecipientList<T>(
 }
 
 /**
- * The `ids` list of an `ok: true` response. The proxy answers `ok: true`
- * only once every requested recipient passed its allowlist and
- * `SEND_EMAIL.send()` confirmed each one, so every entry is
- * `{ recipient, messageId }` with `messageId` always a string (`''` when
- * Cloudflare returned none; that is the proxy's explicit convention, and the
- * framework's own Message-ID stands in for it). An `ok: true` with a
- * delivery missing would tell the caller a send was confirmed when it never
- * was, and a success carries no per-recipient failure to retry from.
+ * The `ids` list of an `ok: true` response. The proxy answers `ok: true` only
+ * after every requested recipient has an accepted provider outcome. Each entry
+ * is `{ recipient, messageId }`; the framework's own Message-ID stands in for
+ * an empty provider reference. A missing delivery would leave no safe retry
+ * decision, so the whole response is rejected as malformed.
  */
 function readDeliveryList(
   raw: Array<unknown>,

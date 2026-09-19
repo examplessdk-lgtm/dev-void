@@ -9,13 +9,20 @@ import {
   test,
   vi,
 } from 'vite-plus/test';
-import { createEmailDestination, getEmailDestinationsByProjectId } from '../../src/db.ts';
+import { getEmailDestinationsByProjectId } from '../../src/db.ts';
 import type { Db } from '../../src/db.ts';
-import { emailProjectControls } from '../../src/email/admission-schema.ts';
+import { emailMonthlyUsage, emailProjectControls } from '../../src/email/admission-schema.ts';
+import { pruneEmailActionHistory } from '../../src/email/admission.ts';
 import { setProjectEmailLimits, setProjectEmailSuspended } from '../../src/email/admission.ts';
 import { emailDomainRoutes, emailZoneConnections } from '../../src/email/connection-schema.ts';
+import { generateId } from '../../src/id.ts';
 import { app } from '../../src/index.ts';
-import { operatorEvents, platformSettings } from '../../src/schema.ts';
+import {
+  emailDestinationCleanups,
+  emailDestinations,
+  operatorEvents,
+  platformSettings,
+} from '../../src/schema.ts';
 import { stubCustomerCf, callsByTag } from './email-domain-cf-stub.ts';
 import {
   setupEnv,
@@ -29,6 +36,21 @@ import { CF_ACCOUNT_ID } from './helpers.ts';
 import { setTestDb } from './setup.ts';
 
 let env: TestEnv;
+
+async function seedVerifiedDestination(db: Db, projectId: string, address: string, cfId: string) {
+  const [row] = await db
+    .insert(emailDestinations)
+    .values({
+      id: generateId('edst'),
+      project_id: projectId,
+      address,
+      cf_destination_id: cfId,
+      status: 'verified',
+      verified_at: new Date().toISOString(),
+    })
+    .returning();
+  return row!;
+}
 
 /**
  * Pause the app's FIRST `db.transaction` until released — the seam for
@@ -233,15 +255,17 @@ describe('GET /admin/email/:projectId', () => {
   test('renders usage, the platform defaults, and the destination list', async () => {
     const { adminJwt, projectId, slug } = await seedAdminAndProject();
     const month = monthBucket();
-    await env.ROUTING.put(`email-sent:${projectId}:${month}`, '7');
-    await env.ROUTING.put(`email-recv:${projectId}:${month}`, '3');
+    await env.db
+      .insert(emailMonthlyUsage)
+      .values({ project_id: projectId, month, recipient_attempts: 7 });
+    await pruneEmailActionHistory(env.db);
 
     const res = await get(`/admin/email/${projectId}`, adminJwt);
 
     expect(res.status).toBe(200);
     const html = await res.text();
     expect(html).toContain(slug);
-    expect(html).toContain('0 / 200');
+    expect(html).toContain('7 / 200');
     expect(html).toContain('(default)');
     expect(html).toContain('Suspend email');
     expect(html).toContain('No destinations yet.');
@@ -403,12 +427,11 @@ describe('POST /admin/email/:projectId/limit', () => {
 describe('POST /admin/email/:projectId/destinations/:destId/delete', () => {
   test('removes the row and drops an unreferenced CF address', async () => {
     const { adminJwt, projectId } = await seedAdminAndProject();
-    const destination = await createEmailDestination(
+    const destination = await seedVerifiedDestination(
       env.db,
       projectId,
       'ops@example.com',
       'cf-tag-ops',
-      'verified',
     );
     const cfCalls = recordCfCalls();
 
@@ -422,25 +445,21 @@ describe('POST /admin/email/:projectId/destinations/:destId/delete', () => {
       'DELETE https://api.cloudflare.com/client/v4/accounts/test-account-id/email/routing/addresses/cf-tag-ops',
     ]);
     expect(await getEmailDestinationsByProjectId(env.db, projectId)).toEqual([]);
+    expect(await env.db.select().from(emailDestinationCleanups)).toEqual([
+      expect.objectContaining({ cf_destination_id: 'cf-tag-ops', status: 'completed' }),
+    ]);
   });
 
   test('leaves the CF address alone while another project still references it', async () => {
     const { adminJwt, projectId } = await seedAdminAndProject();
     const sibling = await createTestProject(env.db, (await createTestUser(env.db)).id);
-    const destination = await createEmailDestination(
+    const destination = await seedVerifiedDestination(
       env.db,
       projectId,
       'shared@example.com',
       'cf-tag-shared',
-      'verified',
     );
-    await createEmailDestination(
-      env.db,
-      sibling.id,
-      'shared@example.com',
-      'cf-tag-shared',
-      'verified',
-    );
+    await seedVerifiedDestination(env.db, sibling.id, 'shared@example.com', 'cf-tag-shared');
     const cfCalls = recordCfCalls();
 
     const res = await post(
@@ -455,12 +474,11 @@ describe('POST /admin/email/:projectId/destinations/:destId/delete', () => {
   test('404s for a destination that belongs to another project', async () => {
     const { adminJwt, projectId } = await seedAdminAndProject();
     const sibling = await createTestProject(env.db, (await createTestUser(env.db)).id);
-    const destination = await createEmailDestination(
+    const destination = await seedVerifiedDestination(
       env.db,
       sibling.id,
       'elsewhere@example.com',
       'cf-tag-elsewhere',
-      'verified',
     );
     const cfCalls = recordCfCalls();
 

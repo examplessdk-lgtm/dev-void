@@ -1,10 +1,19 @@
-import { asc, eq, inArray } from 'drizzle-orm';
+import { asc, count, eq, inArray } from 'drizzle-orm';
 import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { capabilityMiddleware } from '../capabilities.ts';
 import { getProject, getProjectBySlug, type Db } from '../db.ts';
-import { emailProjectControls } from '../email/admission-schema.ts';
-import { setProjectEmailLimits } from '../email/admission.ts';
+import {
+  emailActionRecipients,
+  emailProjectControls,
+  emailUnresolvedAttempts,
+} from '../email/admission-schema.ts';
+import {
+  EMAIL_ATTEMPT_RECOVERY_MIN_AGE_MS,
+  EmailAdmissionError,
+  resolveEmailUnresolvedAttempt,
+  setProjectEmailLimits,
+} from '../email/admission.ts';
 import { lookupMxOverDns } from '../email/cf-domain-probes.ts';
 import { emailDomainRoutes, emailZoneConnections } from '../email/connection-schema.ts';
 import {
@@ -35,7 +44,7 @@ import {
 } from '../email/settings.ts';
 import type { ApiEnv } from '../env.ts';
 import { projects } from '../schema.ts';
-import { dryRun, OperatorError, preview, readBody, stringField } from './common.ts';
+import { dryRun, OperatorError, pagination, preview, readBody, stringField } from './common.ts';
 
 /**
  * Installation-wide email administration (design doc 0078, "Recipient
@@ -229,6 +238,114 @@ emailOperatorRoutes.post('/email/projects/:project/limit', async (context) => {
     dryRun(body),
   );
   return context.json(result, 'ok' in result && result.ok === false ? 207 : 200);
+});
+
+emailOperatorRoutes.get('/email/attempts', async (context) => {
+  const { page, limit, offset } = pagination(context);
+  const db = context.get('db');
+  const selector = context.req.query('project');
+  const project = selector ? await resolveProject(db, selector) : undefined;
+  const filter = project ? eq(emailUnresolvedAttempts.project_id, project.id) : undefined;
+  const [rows, totals] = await Promise.all([
+    db
+      .select()
+      .from(emailUnresolvedAttempts)
+      .where(filter)
+      .orderBy(asc(emailUnresolvedAttempts.started_at), asc(emailUnresolvedAttempts.id))
+      .limit(limit)
+      .offset(offset),
+    db.select({ total: count() }).from(emailUnresolvedAttempts).where(filter),
+  ]);
+  return context.json({
+    page,
+    limit,
+    total: totals[0]?.total ?? 0,
+    attempts: rows.map((row) => ({
+      id: row.id,
+      projectId: row.project_id,
+      senderDomain: row.sender_domain,
+      startedAt: row.started_at,
+      eligibleAt: new Date(
+        new Date(row.started_at).getTime() + EMAIL_ATTEMPT_RECOVERY_MIN_AGE_MS,
+      ).toISOString(),
+    })),
+  });
+});
+
+emailOperatorRoutes.post('/email/attempts/:id/resolve', async (context) => {
+  const body = await readBody(context);
+  const id = context.req.param('id');
+  const reason = stringField(body, 'reason', { maxLength: 500 });
+  if (body.ended !== true) {
+    throw new OperatorError(
+      400,
+      'Confirm the original provider execution has ended with --ended.',
+      'invalid_argument',
+    );
+  }
+  const db = context.get('db');
+  const [fence] = await db
+    .select()
+    .from(emailUnresolvedAttempts)
+    .where(eq(emailUnresolvedAttempts.id, id))
+    .limit(1);
+  if (!fence) {
+    throw new OperatorError(404, 'Unresolved email attempt not found.', 'not_found');
+  }
+  const eligibleAt = new Date(
+    new Date(fence.started_at).getTime() + EMAIL_ATTEMPT_RECOVERY_MIN_AGE_MS,
+  );
+  if (eligibleAt.getTime() > Date.now()) {
+    throw new OperatorError(
+      409,
+      `Email attempt cannot be resolved before ${eligibleAt.toISOString()}.`,
+      'attempt_too_recent',
+    );
+  }
+  const action = 'email.attempt.resolve';
+  const target = { attemptId: id, projectId: fence.project_id, senderDomain: fence.sender_domain };
+  if (dryRun(body)) {
+    const [recipient] = await db
+      .select({
+        state: emailActionRecipients.state,
+        projectId: emailActionRecipients.project_id,
+        attemptStartedAt: emailActionRecipients.attempt_started_at,
+      })
+      .from(emailActionRecipients)
+      .where(eq(emailActionRecipients.id, id))
+      .limit(1);
+    if (
+      recipient &&
+      (recipient.state !== 'attempt_started' ||
+        recipient.projectId !== fence.project_id ||
+        new Date(recipient.attemptStartedAt ?? new Date()).getTime() >
+          Date.now() - EMAIL_ATTEMPT_RECOVERY_MIN_AGE_MS)
+    ) {
+      throw new OperatorError(409, 'Email attempt ledger disagrees with fence.', 'invalid_state');
+    }
+    return context.json(
+      preview(action, target, {
+        startedAt: fence.started_at,
+        metadataExpired: !recipient,
+        reason,
+        effect:
+          'Mark the original send outcome unknown, retain its quota charge, and release its cleanup fence. No send is retried.',
+      }),
+    );
+  }
+  try {
+    const result = await resolveEmailUnresolvedAttempt(db, { id, ended: true, reason });
+    return context.json({ action, target, ...result });
+  } catch (error) {
+    if (error instanceof EmailAdmissionError) {
+      throw new OperatorError(
+        error.code === 'NOT_FOUND' ? 404 : error.code === 'INVALID_STATE' ? 409 : 400,
+        error.message,
+        error.code.toLowerCase(),
+      );
+    }
+    throw error;
+  }
 });
 
 // ---------------------------------------------------------------------------

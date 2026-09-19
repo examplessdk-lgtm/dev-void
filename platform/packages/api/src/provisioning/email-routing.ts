@@ -2,10 +2,8 @@
  * Cloudflare Email Routing destination-address API client.
  *
  * Destinations are CF account-level — adding `user@example.com` here makes
- * it a valid recipient for every `send_email` binding in the account
- * (across all WfP user workers). Per-project scoping is enforced separately
- * at the binding level via `allowed_destination_addresses` in the deploy
- * pipeline.
+ * it available to the account's email senders. Per-project consent is enforced
+ * by the platform's SQL admission transaction.
  *
  * `addDestination` triggers CF to email the recipient with a verification
  * link. Status flips from `pending` → `verified` once they click. We poll
@@ -13,14 +11,11 @@
  * fresh status to the caller.
  */
 
-import { cfFetch, CF_API_BASE } from './cloudflare-api.ts';
+import { cfFetch, CF_API_BASE, CloudflareApiError } from './cloudflare-api.ts';
 
 // CF Email Routing returns "destination address X already exists" or
-// similar wording when re-registering an account-level address. We use
-// the message-text match because cfFetch surfaces only an Error string;
-// if cfFetch ever starts attaching structured CF error codes, prefer
-// `err.cfErrors?.some(e => e.code === 10037)` (the actual code is in the
-// CF API reference for /accounts/:id/email/routing/addresses).
+// similar wording when re-registering an account-level address. Keep a text
+// fallback for provider variants that omit the documented numeric code.
 const ALREADY_EXISTS_PATTERN = /already exists|destination already/i;
 
 export interface CfDestinationAddress {
@@ -87,14 +82,7 @@ export async function listDestinations(
   throw new Error(`listDestinations exceeded ${LIST_PAGE_CAP} pages — increase cap or paginate`);
 }
 
-/**
- * Delete a destination from the CF account. Note: this affects the entire
- * account — if multiple projects had this address in their per-project
- * allowlist, they all lose it. The platform's destinations API is
- * responsible for refusing to delete addresses still referenced by other
- * projects (or implementing reference counting if cross-project sharing is
- * ever desired).
- */
+/** Delete an account-level destination after durable cleanup has fenced new references. */
 export async function deleteDestination(
   accountId: string,
   apiToken: string,
@@ -102,6 +90,7 @@ export async function deleteDestination(
 ): Promise<{ tag: string }> {
   return cfFetch<{ tag: string }>(`${ROUTING_BASE(accountId)}/${destinationTag}`, apiToken, {
     method: 'DELETE',
+    signal: AbortSignal.timeout(10_000),
   });
 }
 
@@ -114,11 +103,7 @@ export function isAlreadyExistsError(err: unknown): boolean {
   if (!(err instanceof Error)) {
     return false;
   }
-  // Prefer structured code if available (forward-compat). Today cfFetch
-  // joins CF error messages into a flat Error string, so this branch is
-  // a no-op until cfFetch is upgraded to attach `cfErrors`.
-  const maybe = err as Error & { cfErrors?: Array<{ code?: number }> };
-  if (maybe.cfErrors?.some((e) => e.code === 10037)) {
+  if (err instanceof CloudflareApiError && err.codes.includes(10037)) {
     return true;
   }
   return ALREADY_EXISTS_PATTERN.test(err.message);

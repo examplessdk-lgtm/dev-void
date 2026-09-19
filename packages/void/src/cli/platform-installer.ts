@@ -1912,6 +1912,9 @@ export async function installPlatform(
       await writeRemoteInstallationCheckpoint(dependencies.client, plan, manifest);
     }
     dependencies.onProgress?.('Verifying platform health');
+    const emailGatewayUrl = hasEmailGatewayArtifact
+      ? `https://${plan.deployment.resources.emailGatewayWorker}.${plan.workersSubdomain}.workers.dev`
+      : undefined;
     if (plan.deployment.authentication.accessProtection) {
       ensurePlatformAccessToken(plan.apiUrl, false, true);
       ensurePlatformAccessToken(plan.proxyUrl, false, true);
@@ -1925,6 +1928,7 @@ export async function installPlatform(
         plan.deployment.resources.dispatchWorker,
       ],
       resumeCommand: dependencies.healthCheckResumeCommand,
+      ...(emailGatewayUrl ? { emailGatewayUrl } : {}),
     };
     await (dependencies.verifyHealth ?? verifyPlatformHealth)(
       plan.apiUrl,
@@ -5128,9 +5132,8 @@ function interruptedWorkerCutover(
       generations.set(generation, entry);
       continue;
     }
-    const unsafeTraffic = /^worker-cutover:(\d+):unsafe-traffic:(api|proxy|tail|dispatch)$/.exec(
-      step.key,
-    );
+    const unsafeTraffic =
+      /^worker-cutover:(\d+):unsafe-traffic:(api|proxy|emailGateway|tail|dispatch)$/.exec(step.key);
     if (unsafeTraffic) {
       const generation = Number(unsafeTraffic[1]);
       const entry = generations.get(generation) ?? {
@@ -5142,7 +5145,9 @@ function interruptedWorkerCutover(
       generations.set(generation, entry);
       continue;
     }
-    const staged = /^worker-cutover:(\d+):staged:(api|proxy|tail|dispatch)$/.exec(step.key);
+    const staged = /^worker-cutover:(\d+):staged:(api|proxy|emailGateway|tail|dispatch)$/.exec(
+      step.key,
+    );
     if (!staged) {
       continue;
     }
@@ -5293,6 +5298,7 @@ export type PlatformHealthCheckContext = Readonly<{
   accountName: string;
   workers: ReadonlyArray<string>;
   resumeCommand?: string;
+  emailGatewayUrl?: string;
 }>;
 
 export class PlatformAccessBlockedError extends Error {
@@ -5366,11 +5372,12 @@ export async function verifyPlatformHealth(
       signal: AbortSignal.timeout(30_000),
     });
   const dispatchUrl = dispatchOrigin ?? `https://test.${applicationBaseDomain}`;
-  const [health, discovery, proxy, dispatch] = await Promise.all([
+  const [health, discovery, proxy, dispatch, emailGateway] = await Promise.all([
     request(`${apiUrl}/health`),
     request(`${apiUrl}/.well-known/void-platform`),
     request(`${proxyUrl}/health`),
     request(`${dispatchUrl}/health`),
+    context?.emailGatewayUrl ? request(`${context.emailGatewayUrl}/health`) : undefined,
   ]);
   if (!health.ok) {
     throw await platformProbeFailure('Health check', apiUrl, health, context);
@@ -5399,6 +5406,30 @@ export async function verifyPlatformHealth(
   }
   if (!dispatch.ok) {
     throw await platformProbeFailure('Dispatch health check', dispatchUrl, dispatch, context);
+  }
+  if (emailGateway) {
+    if (!emailGateway.ok) {
+      throw await platformProbeFailure(
+        'Email gateway health check',
+        context!.emailGatewayUrl!,
+        emailGateway,
+        context,
+      );
+    }
+    const identity = (await emailGateway.json()) as {
+      installationId?: unknown;
+      platformVersion?: unknown;
+      emailProtocolVersion?: unknown;
+    } | null;
+    if (
+      identity?.installationId !== installationId ||
+      identity.platformVersion !== platformVersion ||
+      identity.emailProtocolVersion !== 1
+    ) {
+      throw new Error(
+        'platform: Deployed email gateway identity, version, or protocol does not match this installation.',
+      );
+    }
   }
 }
 

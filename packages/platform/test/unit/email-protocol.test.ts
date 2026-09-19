@@ -3,6 +3,7 @@ import {
   EMAIL_MAX_INBOUND_BYTES,
   EMAIL_MAX_RESPONSE_BYTES,
   encodeEmailActions,
+  encodeEmailEnvelope,
   readEmailEnvelope,
   readEmailActions,
   signEmailReceipt,
@@ -53,6 +54,27 @@ describe('bounded email receipt protocol', () => {
         raw: new Uint8Array([0, 255, 17]),
       },
     ]);
+  });
+
+  it('reads a small envelope split across the length prefix, metadata and MIME', async () => {
+    const raw = new TextEncoder().encode('From: sender@example.com\r\n\r\nhello');
+    const envelope = {
+      from: 'sender@example.com',
+      to: 'support@example.com',
+      headers: { from: 'sender@example.com' },
+      raw,
+      rawSize: raw.byteLength,
+    };
+    const encoded = encodeEmailEnvelope(envelope);
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (let offset = 0; offset < encoded.byteLength; offset += 3) {
+          controller.enqueue(encoded.subarray(offset, offset + 3));
+        }
+        controller.close();
+      },
+    });
+    expect(await readEmailEnvelope(stream)).toEqual(envelope);
   });
 
   it('rejects a truncated tail instead of returning a partial action batch', async () => {

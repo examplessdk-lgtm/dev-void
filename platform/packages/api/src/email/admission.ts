@@ -58,6 +58,95 @@ export class EmailAdmissionError extends Error {
   }
 }
 
+/** Operator recovery is never based on elapsed time alone. This excludes recent calls. */
+export const EMAIL_ATTEMPT_RECOVERY_MIN_AGE_MS = 24 * 60 * 60 * 1_000;
+
+export async function resolveEmailUnresolvedAttempt(
+  db: Db,
+  input: { id: string; ended: boolean; reason: string; now?: Date },
+) {
+  if (!/^[a-zA-Z0-9_-]{1,128}$/.test(input.id)) {
+    throw new EmailAdmissionError('INVALID_REQUEST', 'invalid email attempt ID');
+  }
+  if (input.ended !== true || !input.reason.trim() || input.reason.length > 500) {
+    throw new EmailAdmissionError(
+      'INVALID_REQUEST',
+      'confirm that the original execution ended and supply a reason of at most 500 characters',
+    );
+  }
+  const now = input.now ?? new Date();
+  return db.transaction(async (tx) => {
+    // Finishing a send locks the action before deleting its fence. Match that
+    // order so a late provider response and operator resolution cannot race.
+    const [initialFence] = await tx
+      .select()
+      .from(emailUnresolvedAttempts)
+      .where(eq(emailUnresolvedAttempts.id, input.id))
+      .limit(1);
+    if (!initialFence) {
+      throw new EmailAdmissionError('NOT_FOUND', 'unresolved email attempt not found');
+    }
+    const [initialRecipient] = await tx
+      .select({ actionId: emailActionRecipients.action_id })
+      .from(emailActionRecipients)
+      .where(eq(emailActionRecipients.id, input.id))
+      .limit(1);
+    const [action] = initialRecipient
+      ? await tx
+          .select({ projectId: emailActions.project_id, senderDomain: emailActions.sender_domain })
+          .from(emailActions)
+          .where(eq(emailActions.id, initialRecipient.actionId))
+          .for('update')
+      : [];
+    const [fence] = await tx
+      .select()
+      .from(emailUnresolvedAttempts)
+      .where(eq(emailUnresolvedAttempts.id, input.id))
+      .for('update');
+    if (!fence) {
+      throw new EmailAdmissionError('NOT_FOUND', 'unresolved email attempt not found');
+    }
+    if (new Date(fence.started_at).getTime() > now.getTime() - EMAIL_ATTEMPT_RECOVERY_MIN_AGE_MS) {
+      throw new EmailAdmissionError('INVALID_STATE', 'email attempt is too recent to resolve');
+    }
+    const [recipient] = await tx
+      .select()
+      .from(emailActionRecipients)
+      .where(eq(emailActionRecipients.id, input.id))
+      .for('update');
+    if (recipient) {
+      if (
+        recipient.state !== 'attempt_started' ||
+        recipient.project_id !== fence.project_id ||
+        action?.projectId !== fence.project_id ||
+        action?.senderDomain !== fence.sender_domain ||
+        new Date(recipient.attempt_started_at ?? now).getTime() >
+          now.getTime() - EMAIL_ATTEMPT_RECOVERY_MIN_AGE_MS
+      ) {
+        throw new EmailAdmissionError('INVALID_STATE', 'email attempt ledger disagrees with fence');
+      }
+      await tx
+        .update(emailActionRecipients)
+        .set({
+          state: 'outcome_unknown',
+          error_code: 'OUTCOME_UNKNOWN',
+          completed_at: now.toISOString(),
+        })
+        .where(eq(emailActionRecipients.id, input.id));
+    }
+    await tx.delete(emailUnresolvedAttempts).where(eq(emailUnresolvedAttempts.id, input.id));
+    return {
+      id: fence.id,
+      projectId: fence.project_id,
+      senderDomain: fence.sender_domain,
+      startedAt: fence.started_at,
+      state: 'outcome_unknown' as const,
+      metadataExpired: !recipient,
+      charged: true,
+    };
+  });
+}
+
 /** Policy mutations take this exclusive lock; admission takes it shared. */
 export async function lockEmailPolicy(tx: Tx): Promise<void> {
   await tx.execute(sql`select pg_advisory_xact_lock(hashtext('email-admission:policy'))`);
@@ -250,7 +339,7 @@ export async function admitEmailAction(
       throw new EmailAdmissionError('INVALID_REQUEST', 'invalid email transport');
     }
     let senderAllowed = false;
-    let verifiedOnlyTransport = false;
+    let verifiedOnlyTransport = input.transport === 'native_forward';
     if (shared) {
       senderAllowed =
         !isReservedEmailSlug(project.slug) &&
@@ -914,4 +1003,7 @@ export async function pruneEmailActionHistory(
     ${emailActions.created_at} < ${before.toISOString()}
   `);
   await db.delete(emailReceipts).where(sql`${emailReceipts.created_at} < ${before.toISOString()}`);
+  await db.delete(emailMonthlyUsage).where(sql`
+    ${emailMonthlyUsage.month} < ${new Date().toISOString().slice(0, 7)}
+  `);
 }

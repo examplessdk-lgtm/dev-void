@@ -249,7 +249,7 @@ describe('emailDomainAdd', () => {
   }
   function client() {
     return {
-      addEmailDomain: vi.fn(async () => domainRow()),
+      addEmailDomain: vi.fn(async () => domainRow({ operationStatus: 'completed' })),
       getEmailDomain: vi.fn(async () => domainRow()),
       getEmailOperation: vi.fn(async () => ({
         operationId: 'op_1',
@@ -463,21 +463,20 @@ describe('emailDomainAdd', () => {
     expect(api.getEmailOperation).not.toHaveBeenCalled();
   });
 
-  it('returns failure for setup needing intervention, even if a row exists', async () => {
-    const api = client();
-    api.addEmailDomain.mockResolvedValue(
-      domainRow({
-        status: 'drifted',
-        operationId: 'op_1',
-        operationStatus: 'blocked',
-        error: 'catch-all conflict',
-      }),
-    );
-    await expect(emailDomainAdd(api, 'prj_1', 'acme.com', undefined, addDeps())).rejects.toThrow(
-      'exit 1',
-    );
-    expect(printed(errorSpy)).toContain('catch-all conflict');
-  });
+  it.each(['pending', 'running', 'blocked', 'unknown'] as const)(
+    'returns failure when setup is %s, even if a row exists',
+    async (operationStatus) => {
+      const api = client();
+      api.addEmailDomain.mockResolvedValue(
+        domainRow({ operationId: 'op_1', operationStatus, error: 'setup unfinished' }),
+      );
+      await expect(emailDomainAdd(api, 'prj_1', 'acme.com', undefined, addDeps())).rejects.toThrow(
+        'exit 1',
+      );
+      expect(printed(errorSpy)).toContain('setup unfinished');
+      expect(notedBlocks()).toContain(`op_1 · ${operationStatus}`);
+    },
+  );
 });
 
 describe('emailDomainStatus', () => {

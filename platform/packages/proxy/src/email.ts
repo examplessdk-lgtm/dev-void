@@ -70,34 +70,12 @@ export function customMimeHeaderBytesWithinLimit(raw: Uint8Array): boolean {
   return true;
 }
 
-/**
- * Cap the recipient list. Every entry costs a trimmed+lowercased copy, a
- * `seen` Set entry, and — for an address this project's allowlist rejects —
- * one delivery object whose message interpolates the address, all of which
- * is then serialized into the response. That is ~360 bytes of isolate heap
- * per recipient, so an uncapped list reaches the 128 MB per-isolate ceiling
- * from a ~2.5 MB request body. A tenant worker holds a valid project HMAC,
- * so it can POST that body to the public proxy hostname, and the
- * all-rejected path returns ABOVE the burst and monthly gates — the work is
- * never metered and the request is endlessly repeatable. The proxy isolate
- * is shared with every other tenant's in-flight AI/D1/KV/R2 traffic, so the
- * kill is cross-tenant. The MIME cap does not bound this: `bcc` recipients
- * are deliberately kept out of the rendered headers, so a huge bcc list
- * costs nothing against `MAX_MIME_BYTES`.
- *
- * Checked against the RAW array BEFORE the normalization loop below. The
- * loop is what allocates, so deduping first would already have paid the
- * per-entry cost for a list of duplicates.
- */
+/** Bound the raw list before normalization allocates one copy and Set entry per recipient. */
 const MAX_RECIPIENTS = 100;
 
 /**
- * Cap a single recipient string. `MAX_RECIPIENTS` alone still leaves a
- * 100 x <address length> amplifier, because `.trim().toLowerCase()` copies
- * the entry — and the allowlist-rejection message interpolates it a second
- * time — before anything has looked at its size. Checked BEFORE that
- * normalization for exactly that reason. RFC 5321 caps a forward-path at
- * 256 octets, so 320 is generous for any address that could be delivered.
+ * Bound each address before normalization copies it. RFC 5321 caps a
+ * forward-path at 256 octets, so 320 characters leaves room for validation.
  */
 export const MAX_RECIPIENT_LENGTH = 320;
 
@@ -107,11 +85,8 @@ export const MAX_RECIPIENT_LENGTH = 320;
  * (measured: V8 returns a fresh full-size string even when nothing
  * changed), and a sender the strict regex accepts — an unbounded `+tag`
  * is one — is then echoed verbatim into the MIME `From:` refusal and
- * serialized into the response, three more copies of it. All of that runs
- * above the allowlist and quota gates, so it is never metered. Checked
- * with the other raw-input size gates, before any configuration or KV
- * read. Same figure as `MAX_RECIPIENT_LENGTH`, for the same RFC 5321
- * reason.
+ * serialized into the response. Check it before those copies. The limit
+ * matches `MAX_RECIPIENT_LENGTH`.
  *
  * Both are exported for the platform-token gate in `index.ts`, which
  * applies them to `/email/internal/send`'s `from` and `to` BEFORE hashing
@@ -514,13 +489,9 @@ function singleMailboxAddrSpec(value: string): string | null {
  *     requestId, fromDomain?         // for logs
  *   }
  *
- * The proxy:
- *   1. Validates structure + size
- *   2. Checks platform suspension (`routing.suspended`) and the per-project
- *      email suspend kill-switch
- *   3. Admits the send against the SQL recipient policy and quota ledger
- *   4. Calls `env.SEND_EMAIL.send()` per admitted recipient
- *   5. Returns per-recipient outcomes to the framework
+ * The proxy validates and normalizes the request, routes custom senders to
+ * `send_raw`, and otherwise asks the API to admit each recipient before using
+ * the platform `send_email` binding.
  *
  * The user worker does not have a `send_email` binding.
  */
@@ -593,10 +564,7 @@ app.post('/send', async (context) => {
     );
   }
 
-  // Fail closed on missing sender configuration — never fall back to a
-  // baked-in domain (see readSenderDomain). Resolved before any KV work so a
-  // misconfigured environment can't burn quota counters on a send that can't
-  // possibly be authorized.
+  // Fail closed on missing sender configuration before admission.
   const senderDomain = readSenderDomain(context.env);
   if (!senderDomain) {
     return context.json(
@@ -611,25 +579,8 @@ app.post('/send', async (context) => {
     );
   }
 
-  // Same reasoning for the send binding itself. Wrangler does not inherit
-  // `send_email` into a named env, so a binding missing from one env block
-  // would otherwise surface as a throw AFTER both counters were incremented.
-  const sendBinding = context.env.SEND_EMAIL;
-  if (typeof sendBinding?.send !== 'function') {
-    return context.json(
-      {
-        ok: false,
-        error: {
-          code: 'UPSTREAM_ERROR',
-          message: 'email sending is not configured',
-        },
-      },
-      502,
-    );
-  }
-
   // Recipients must be unique strings; the framework already dedups but we
-  // re-validate so a buggy client can't double-charge quota or pollute logs.
+  // re-validate so a buggy client cannot create duplicate attempts or logs.
   const recipients: Array<string> = [];
   const seen = new Set<string>();
   for (const r of recipientsRaw) {
@@ -732,6 +683,22 @@ app.post('/send', async (context) => {
     );
   }
 
+  // Custom-domain sends use send_raw and do not depend on this binding.
+  // Check the platform binding before shared-domain admission starts.
+  const sendBinding = context.env.SEND_EMAIL;
+  if (typeof sendBinding?.send !== 'function') {
+    return context.json(
+      {
+        ok: false,
+        error: {
+          code: 'UPSTREAM_ERROR',
+          message: 'email sending is not configured',
+        },
+      },
+      502,
+    );
+  }
+
   // Sender ownership is checked against PostgreSQL by the admission service.
   const expectedSlug = from.split('@')[0]?.split('+')[0] ?? '';
   // Lowercase once for the strict regex + slug compare; the regex anchors
@@ -802,8 +769,8 @@ app.post('/send', async (context) => {
     );
   }
 
-  // The API transaction is authoritative for project state, sender identity, consent,
-  // suspension and both recipient-attempt quotas. KV is only a routing hint.
+  // The API transaction is authoritative for project state, sender identity,
+  // recipient consent, suspension, and attempt quotas.
   let admission;
   try {
     admission = await admitEmail(context.env, {
@@ -962,27 +929,99 @@ app.post('/send', async (context) => {
  * The Email Sending REST `send_raw` result. snake_case — the REST schema
  * names the id `message_id`, unlike the `send_email` binding's camelCase
  * `messageId` (and the api's `SendRawResult` in `email/cf-customer.ts`,
- * which declares the same field). `delivered` and `queued` are both
- * success for our purposes; `permanent_bounces` and
- * `suppressed_recipients` are per-recipient permanent failures.
+ * which declares the same field). Cloudflare returns every recipient in
+ * exactly one required list: `delivered` and `queued` are accepted;
+ * `permanent_bounces` and `suppressed_recipients` are permanent failures.
  */
 export interface SendRawResult {
+  delivered?: unknown;
   message_id?: unknown;
   permanent_bounces?: unknown;
+  queued?: unknown;
   suppressed_recipients?: unknown;
 }
 
-/** A send_raw address list as a lowercase set; non-string entries are dropped. */
-export function readSendRawAddressList(value: unknown): Set<string> {
+export interface ParsedSendRawResult {
+  delivered: ReadonlySet<string>;
+  messageId: string;
+  permanentBounces: ReadonlySet<string>;
+  queued: ReadonlySet<string>;
+  suppressedRecipients: ReadonlySet<string>;
+}
+
+export type SendRawRecipientOutcome =
+  | 'provider_accepted'
+  | 'permanent_bounce'
+  | 'suppressed'
+  | 'outcome_unknown';
+
+/** Read one required send_raw address list without discarding schema violations. */
+function readSendRawAddressList(value: unknown): Set<string> | null {
+  if (!Array.isArray(value)) {
+    return null;
+  }
   const out = new Set<string>();
-  if (Array.isArray(value)) {
-    for (const entry of value) {
-      if (typeof entry === 'string') {
-        out.add(entry.toLowerCase());
-      }
+  for (const entry of value) {
+    if (typeof entry !== 'string') {
+      return null;
     }
+    out.add(entry.toLowerCase());
   }
   return out;
+}
+
+/**
+ * Parse the documented send_raw result shape. Every recipient is classified by
+ * exactly one of four required lists; accepting a partial response would turn
+ * missing provider evidence into a false success.
+ */
+export function parseSendRawResult(value: unknown): ParsedSendRawResult | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+  const result = value as SendRawResult;
+  const delivered = readSendRawAddressList(result.delivered);
+  const permanentBounces = readSendRawAddressList(result.permanent_bounces);
+  const queued = readSendRawAddressList(result.queued);
+  const suppressedRecipients = readSendRawAddressList(result.suppressed_recipients);
+  if (
+    !delivered ||
+    !permanentBounces ||
+    !queued ||
+    !suppressedRecipients ||
+    typeof result.message_id !== 'string' ||
+    result.message_id === ''
+  ) {
+    return null;
+  }
+  return {
+    delivered,
+    messageId: result.message_id,
+    permanentBounces,
+    queued,
+    suppressedRecipients,
+  };
+}
+
+/** Require exactly one provider classification for the requested recipient. */
+export function classifySendRawRecipient(
+  result: ParsedSendRawResult,
+  recipient: string,
+): SendRawRecipientOutcome {
+  const target = recipient.toLowerCase();
+  const classifications = [
+    result.delivered.has(target),
+    result.queued.has(target),
+    result.permanentBounces.has(target),
+    result.suppressedRecipients.has(target),
+  ];
+  if (classifications.filter(Boolean).length !== 1) {
+    return 'outcome_unknown';
+  }
+  if (classifications[0] || classifications[1]) {
+    return 'provider_accepted';
+  }
+  return classifications[2] ? 'permanent_bounce' : 'suppressed';
 }
 
 /** Send through the customer's Cloudflare account after project-bound admission. */
@@ -1032,7 +1071,7 @@ async function sendViaCustomDomain(
   // send_raw carries the MIME as a JSON string. Decode FATALLY: the
   // framework's builder emits 7-bit-clean MIME, and a body that is not
   // valid UTF-8 would be silently altered by a lenient decode — refuse it
-  // instead. Local validation, so it runs before any quota is burned.
+  // instead. Local validation runs before admission.
   let mimeMessage: string;
   try {
     mimeMessage = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(raw);
@@ -1157,13 +1196,8 @@ async function sendViaCustomDomain(
   // one EmailMessage per recipient. The response's message id is shared by
   // the whole list.
   let failure: { code: string; message: string } | null = null;
-  let outcomeUnknown = false;
-  let messageId = '';
-  // Per-recipient permanent outcomes from the send_raw result: a recipient
-  // on either list was NOT sent to, and reporting it as delivered would
-  // tell the framework (and the log) a lie it cannot retry its way out of.
-  let bounced = new Set<string>();
-  let suppressed = new Set<string>();
+  let failureState: 'failed' | 'outcome_unknown' = 'failed';
+  let sendRawResult: ParsedSendRawResult | null = null;
   let cfRes: Response | null = null;
   try {
     cfRes = await fetch(
@@ -1179,7 +1213,7 @@ async function sendViaCustomDomain(
     );
   } catch {
     failure = { code: 'UPSTREAM_ERROR', message: 'email sending request failed' };
-    outcomeUnknown = true;
+    failureState = 'outcome_unknown';
   }
   if (cfRes) {
     if (!cfRes.ok) {
@@ -1189,53 +1223,79 @@ async function sendViaCustomDomain(
         code: cfRes.status === 429 ? 'QUOTA_EXCEEDED' : 'UPSTREAM_ERROR',
         message: `email sending API returned ${cfRes.status}`,
       };
-      outcomeUnknown = cfRes.status >= 500;
+      failureState = cfRes.status >= 500 || cfRes.status === 408 ? 'outcome_unknown' : 'failed';
     } else {
-      let data: unknown = null;
+      let data: unknown;
       try {
         data = await cfRes.json();
       } catch {
-        data = null;
+        failure = { code: 'OUTCOME_UNKNOWN', message: 'email sending API response unreadable' };
+        failureState = 'outcome_unknown';
       }
-      const success =
-        typeof data === 'object' &&
-        data !== null &&
-        (data as { success?: unknown }).success === true;
-      if (!success) {
-        failure = { code: 'UPSTREAM_ERROR', message: 'email sending API refused the message' };
-      } else {
-        const result = (data as { result?: SendRawResult | null }).result;
-        const id = result?.message_id;
-        messageId = typeof id === 'string' ? id : '';
-        bounced = readSendRawAddressList(result?.permanent_bounces);
-        suppressed = readSendRawAddressList(result?.suppressed_recipients);
+      if (!failure) {
+        const success =
+          typeof data === 'object' && data !== null
+            ? (data as { success?: unknown }).success
+            : undefined;
+        if (success === false) {
+          failure = { code: 'UPSTREAM_ERROR', message: 'email sending API refused the message' };
+        } else if (success !== true) {
+          failure = { code: 'OUTCOME_UNKNOWN', message: 'email sending API response invalid' };
+          failureState = 'outcome_unknown';
+        } else {
+          sendRawResult = parseSendRawResult((data as { result?: unknown }).result);
+          if (!sendRawResult) {
+            failure = { code: 'OUTCOME_UNKNOWN', message: 'email sending API response invalid' };
+            failureState = 'outcome_unknown';
+          }
+        }
       }
     }
   }
 
   for (const r of recipients) {
     if (failure) {
-      deliveries.push({ recipient: r, ok: false, error: failure });
-    } else if (bounced.has(r)) {
+      deliveries.push({ recipient: r, ok: false, state: failureState, error: failure });
+      continue;
+    }
+    const outcome = classifySendRawRecipient(sendRawResult!, r);
+    if (outcome === 'permanent_bounce') {
       deliveries.push({
         recipient: r,
         ok: false,
+        state: 'failed',
         error: {
           code: 'UNVERIFIED_DESTINATION',
           message: `recipient '${r}' permanently bounced`,
         },
       });
-    } else if (suppressed.has(r)) {
+    } else if (outcome === 'suppressed') {
       deliveries.push({
         recipient: r,
         ok: false,
+        state: 'failed',
         error: {
           code: 'UNVERIFIED_DESTINATION',
           message: `recipient '${r}' is on the suppression list`,
         },
       });
+    } else if (outcome === 'outcome_unknown') {
+      deliveries.push({
+        recipient: r,
+        ok: false,
+        state: 'outcome_unknown',
+        error: {
+          code: 'OUTCOME_UNKNOWN',
+          message: 'email sending API did not classify the recipient',
+        },
+      });
     } else {
-      deliveries.push({ recipient: r, ok: true, messageId });
+      deliveries.push({
+        recipient: r,
+        ok: true,
+        state: 'provider_accepted',
+        messageId: sendRawResult!.messageId,
+      });
     }
   }
 
@@ -1247,22 +1307,26 @@ async function sendViaCustomDomain(
         context.env,
         admission.operationId,
         [delivery.recipient],
-        delivery.ok ? 'provider_accepted' : outcomeUnknown ? 'outcome_unknown' : 'failed',
+        delivery.ok
+          ? 'provider_accepted'
+          : delivery.state === 'outcome_unknown'
+            ? 'outcome_unknown'
+            : 'failed',
         {
           providerReference: delivery.messageId,
           errorCode: delivery.ok
             ? undefined
-            : outcomeUnknown
+            : delivery.state === 'outcome_unknown'
               ? 'OUTCOME_UNKNOWN'
               : (failure?.code ?? delivery.error?.code),
         },
       );
       delivery.state = delivery.ok
         ? 'provider_accepted'
-        : outcomeUnknown
+        : delivery.state === 'outcome_unknown'
           ? 'outcome_unknown'
           : 'failed';
-      if (outcomeUnknown && !delivery.ok) {
+      if (delivery.state === 'outcome_unknown' && !delivery.ok) {
         delivery.error = {
           code: 'OUTCOME_UNKNOWN',
           message: 'provider outcome unknown; inspect email logs before retrying',
@@ -1291,6 +1355,7 @@ async function sendViaCustomDomain(
     ids: deliveries.map((d) => ({
       recipient: d.recipient,
       messageId: (d as { messageId: string }).messageId,
+      state: 'provider_accepted' as const,
     })),
   });
 }
@@ -1306,9 +1371,8 @@ async function sendViaCustomDomain(
  * 404 (and earlier did so silently).
  */
 export async function recordInboundDelivery(
-  _env: { ROUTING: KVNamespace },
   projectId: string,
-  info: { from: string; to: string; subject: string; byteSize: number; status: string },
+  info: { from: string; to: string; byteSize: number; status: string },
 ): Promise<void> {
   console.log(
     `[email-recv] ${projectId} ${sanitizeForLog(info.from, 320)} -> ${sanitizeForLog(info.to, 320)} ${info.status} (${info.byteSize}B) @${Date.now()}`,
@@ -1357,66 +1421,6 @@ function emailActionResponse(
     },
     200,
   );
-}
-
-/**
- * Map an error thrown by the platform's `send_email` binding to a
- * framework-facing error code. Mirrors `classifyBindingError` in
- * `void/email` (the framework's own-binding lane): Email Service throws
- * `Error`s carrying a `code` (the `E_*` table in Cloudflare's Workers API
- * reference), and that code is read FIRST — the message regex below is the
- * fallback for the older, message-only Email Routing sender. Anything else
- * is UPSTREAM_ERROR, which the framework retries.
- *
- * The two sender codes are where the lanes deliberately differ. `from` is
- * pinned to `<slug>[+tag]@<senderDomain>` above, so an
- * `E_SENDER_NOT_VERIFIED` / `E_SENDER_DOMAIN_NOT_AVAILABLE` here means the
- * PLATFORM's mail zone is not onboarded or verified: the tenant's `from`
- * passed the pin and nothing about it is theirs to fix. INVALID_FROM is
- * documented as "not the project sender" and as pre-flight, so it would be
- * false on both counts; the send stays UPSTREAM_ERROR (retryable once the
- * platform is repaired) with Cloudflare's message kept, and the code is
- * logged because `logSend` records only ours.
- *
- * UNVERIFIED_DESTINATION is special — the framework treats it as
- * "don't retry; the user has to verify the address first." A false
- * positive here turns retryable transient errors into permanent
- * non-retries, so the match is intentionally narrow.
- *
- * Anchored to the literal CF phrasing ("destination address … not
- * (yet) verified"), bounded character classes to keep `.*` from
- * jumping across log lines / multi-error stack traces, and a leading
- * `^[^\n]{0,200}` cap so a long preamble can't drag a tail-of-line
- * "destination address foo not verified" into a false positive on a
- * transient upstream error message that happens to mention the same
- * domain or address.
- */
-const UNVERIFIED_DESTINATION_RE =
-  /^[^\n]{0,200}destination address[^\n]{0,200}not (?:yet )?verified/i;
-
-function classifyUpstream(e: unknown, projectId: string): string {
-  const message = e instanceof Error ? e.message : String(e);
-  const code =
-    typeof (e as { code?: unknown })?.code === 'string' ? (e as { code: string }).code : '';
-  switch (code) {
-    case 'E_RECIPIENT_NOT_ALLOWED':
-      return 'UNVERIFIED_DESTINATION';
-    case 'E_RATE_LIMIT_EXCEEDED':
-    case 'E_DAILY_LIMIT_EXCEEDED':
-      return 'QUOTA_EXCEEDED';
-    case 'E_SENDER_NOT_VERIFIED':
-    case 'E_SENDER_DOMAIN_NOT_AVAILABLE':
-      console.error(
-        `[email-send] project ${projectId} send binding refused the platform sender (${code}): ${sanitizeForLog(message)}`,
-      );
-      return 'UPSTREAM_ERROR';
-    default:
-      break;
-  }
-  if (UNVERIFIED_DESTINATION_RE.test(message)) {
-    return 'UNVERIFIED_DESTINATION';
-  }
-  return 'UPSTREAM_ERROR';
 }
 
 function logSend(projectId: string, requestId: string, deliveries: Array<RecipientResult>): void {

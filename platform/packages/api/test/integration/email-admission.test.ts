@@ -1,7 +1,11 @@
 import { eq } from 'drizzle-orm';
 import { beforeAll, afterAll, beforeEach, describe, expect, it } from 'vite-plus/test';
 import { deleteEmailDestination } from '../../src/db.ts';
-import { emailUnresolvedAttempts } from '../../src/email/admission-schema.ts';
+import {
+  emailActionRecipients,
+  emailMonthlyUsage,
+  emailUnresolvedAttempts,
+} from '../../src/email/admission-schema.ts';
 import {
   admitEmailAction,
   claimRelayedEmailReceipt,
@@ -12,6 +16,7 @@ import {
   getProjectEmailLogs,
   getProjectEmailUsage,
   pruneEmailActionHistory,
+  resolveEmailUnresolvedAttempt,
   setProjectEmailLimits,
   setProjectEmailSuspended,
   transitionEmailRecipients,
@@ -75,6 +80,34 @@ function input(projectId: string, key: string, recipients = ['one@example.com'])
 }
 
 describe('authoritative email admission', () => {
+  it('requires verified recipients for shared native forwarding even under an open policy', async () => {
+    const project = await fixture();
+    await setEmailRecipientPolicy(env.db, env.ROUTING, { mode: 'any', domains: [] });
+    const receiptId = 'e'.repeat(64);
+    await recordEmailReceipt(env.db, {
+      receiptId,
+      projectId: project.id,
+      status: 'handler_completed',
+    });
+    const result = await admitEmailAction(env.db, {
+      ...input(project.id, 'shared-forward', ['one@example.com', 'unverified@example.net']),
+      kind: 'forward',
+      transport: 'native_forward',
+      receiptId,
+    });
+    expect(result.recipients).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ recipient: 'one@example.com', state: 'reserved' }),
+        expect.objectContaining({
+          recipient: 'unverified@example.net',
+          state: 'rejected',
+          errorCode: 'UNVERIFIED_DESTINATION',
+        }),
+      ]),
+    );
+    expect((await getProjectEmailUsage(env.db, project.id)).sent).toBe(1);
+  });
+
   it('records unsupported relayed forwarding without charging and retains native verified forwarding', async () => {
     const project = await fixture();
     await env.db.insert(emailCredentials).values({
@@ -288,6 +321,110 @@ describe('authoritative email admission', () => {
     });
   });
 
+  it('resolves a stopped old attempt without retrying or refunding it', async () => {
+    const project = await fixture();
+    const action = await admitEmailAction(env.db, input(project.id, 'crashed'));
+    await transitionEmailRecipients(
+      env.db,
+      action.operationId,
+      ['one@example.com'],
+      'attempt_started',
+    );
+    const [fence] = await env.db.select().from(emailUnresolvedAttempts);
+    const old = new Date(Date.now() - 25 * 60 * 60_000).toISOString();
+    await env.db
+      .update(emailUnresolvedAttempts)
+      .set({ started_at: old })
+      .where(eq(emailUnresolvedAttempts.id, fence!.id));
+    await env.db
+      .update(emailActionRecipients)
+      .set({ attempt_started_at: old })
+      .where(eq(emailActionRecipients.id, fence!.id));
+
+    await expect(
+      resolveEmailUnresolvedAttempt(env.db, { id: fence!.id, ended: false, reason: 'ended' }),
+    ).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
+    await expect(
+      resolveEmailUnresolvedAttempt(env.db, { id: fence!.id, ended: true, reason: '' }),
+    ).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
+    expect(
+      await resolveEmailUnresolvedAttempt(env.db, {
+        id: fence!.id,
+        ended: true,
+        reason: 'Worker execution ended; provider status cannot be verified',
+      }),
+    ).toMatchObject({ state: 'outcome_unknown', metadataExpired: false, charged: true });
+    expect(await env.db.select().from(emailUnresolvedAttempts)).toHaveLength(0);
+    expect((await getProjectEmailLogs(env.db, project.id)).logs).toEqual([
+      expect.objectContaining({ operationId: action.operationId, status: 'outcome_unknown' }),
+    ]);
+    expect((await getProjectEmailUsage(env.db, project.id)).sent).toBe(1);
+    expect(
+      (await admitEmailAction(env.db, input(project.id, 'crashed'))).recipients[0]?.state,
+    ).toBe('outcome_unknown');
+    await expect(
+      transitionEmailRecipients(
+        env.db,
+        action.operationId,
+        ['one@example.com'],
+        'provider_accepted',
+      ),
+    ).rejects.toMatchObject({ code: 'INVALID_STATE' });
+  });
+
+  it('requires an old fence even when the operator attests the execution ended', async () => {
+    const project = await fixture();
+    const action = await admitEmailAction(env.db, input(project.id, 'recent'));
+    await transitionEmailRecipients(
+      env.db,
+      action.operationId,
+      ['one@example.com'],
+      'attempt_started',
+    );
+    const [fence] = await env.db.select().from(emailUnresolvedAttempts);
+    await expect(
+      resolveEmailUnresolvedAttempt(env.db, {
+        id: fence!.id,
+        ended: true,
+        reason: 'Worker execution ended',
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_STATE' });
+    expect(await env.db.select().from(emailUnresolvedAttempts)).toHaveLength(1);
+    expect((await getProjectEmailLogs(env.db, project.id)).logs[0]?.status).toBe('attempt_started');
+  });
+
+  it('releases a PII-free fence after the recipient ledger has expired', async () => {
+    const project = await fixture();
+    const action = await admitEmailAction(env.db, input(project.id, 'expired'));
+    await transitionEmailRecipients(
+      env.db,
+      action.operationId,
+      ['one@example.com'],
+      'attempt_started',
+    );
+    const [fence] = await env.db.select().from(emailUnresolvedAttempts);
+    await env.db
+      .update(emailUnresolvedAttempts)
+      .set({ started_at: new Date(Date.now() - 31 * 86_400_000).toISOString() })
+      .where(eq(emailUnresolvedAttempts.id, fence!.id));
+    await pruneEmailActionHistory(env.db, new Date(Date.now() + 60_000));
+    expect((await getProjectEmailLogs(env.db, project.id)).logs).toHaveLength(0);
+    expect(
+      await resolveEmailUnresolvedAttempt(env.db, {
+        id: fence!.id,
+        ended: true,
+        reason: 'Worker execution ended; delivery record expired',
+      }),
+    ).toMatchObject({ metadataExpired: true, charged: true });
+    expect(await env.db.select().from(emailUnresolvedAttempts)).toHaveLength(0);
+    expect((await getProjectEmailUsage(env.db, project.id)).sent).toBe(1);
+    await env.db.update(projects).set({ status: 'deleting' }).where(eq(projects.id, project.id));
+    expect(await drainProjectEmailAdmissions(env.db, project.id)).toEqual({
+      cancelled: 0,
+      inFlight: 0,
+    });
+  });
+
   it('replays one operation without a second quota debit and conflicts on changed payload', async () => {
     const project = await fixture();
     const first = await admitEmailAction(env.db, input(project.id, 'same'));
@@ -364,7 +501,7 @@ describe('authoritative email admission', () => {
     expect(closed.recipients.every((r) => r.errorCode === 'UNVERIFIED_DESTINATION')).toBe(true);
   });
 
-  it('holds monthly quota after 30-day metadata pruning and clears it at month boundary', async () => {
+  it('holds current-month quota after metadata pruning while removing expired buckets', async () => {
     const project = await fixture();
     await setProjectEmailLimits(env.db, project.id, { monthly: 1, burst: 10 });
     const first = await admitEmailAction(env.db, input(project.id, 'first'));
@@ -380,7 +517,18 @@ describe('authoritative email admission', () => {
       ['one@example.com'],
       'provider_accepted',
     );
+    await env.db.insert(emailMonthlyUsage).values([
+      { project_id: project.id, month: '2000-01', recipient_attempts: 1 },
+      { project_id: 'deleted-project', month: '2000-01', recipient_attempts: 2 },
+    ]);
     await pruneEmailActionHistory(env.db, new Date(Date.now() + 60_000));
+    expect(await env.db.select().from(emailMonthlyUsage)).toEqual([
+      {
+        project_id: project.id,
+        month: new Date().toISOString().slice(0, 7),
+        recipient_attempts: 1,
+      },
+    ]);
     expect((await getProjectEmailLogs(env.db, project.id)).logs).toHaveLength(0);
     expect((await getProjectEmailUsage(env.db, project.id)).sent).toBe(1);
     const second = await admitEmailAction(env.db, input(project.id, 'second'));

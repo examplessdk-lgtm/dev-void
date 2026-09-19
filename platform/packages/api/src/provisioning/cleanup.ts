@@ -6,12 +6,11 @@ import { clearCronScheduler } from '../cron-scheduler-client.ts';
 import {
   TERMINAL_DEPLOYMENT_STATUSES,
   type Db,
-  countProjectsUsingDestination,
   deleteProjectCascade,
+  deleteProjectEmailDestinations,
   getAllProjectDeployments,
   getActiveDeployment,
   getDomainsByProjectId,
-  getEmailDestinationsByProjectId,
   getProject,
   getProjectResources,
   terminateBuildsForProject,
@@ -41,7 +40,7 @@ import {
   findContainerApplication,
   perDeployContainerApplicationName,
 } from './containers.ts';
-import { deleteDestination } from './email-routing.ts';
+import { runEmailDestinationCleanup } from './email-destination-cleanup.ts';
 
 function deleteCloudflareResource(
   accountId: string,
@@ -466,7 +465,7 @@ async function cleanupRaceWindowResourceOrphans(
  *      can't keep acting on its now-revoked token during the cleanup window.
  *   2. Run critical CF cleanup (container apps + per-deploy container
  *      orphan recovery). Throws on non-404 failure; the caller should surface
- *      a 5xx and the DB row remains, allowing retry. Then revoke the proxy's
+ *      a 5xx and the DB row remains, allowing retry.
  *   3. Run best-effort CF cleanup (D1, KV, R2, queues, hyperdrive, custom
  *      hostnames, routing entries, deployment workers). Failures become
  *      warnings.
@@ -539,63 +538,22 @@ export async function teardownProject(
   return { warnings: [...bestEffortWarnings, ...orphanWarnings] };
 }
 
-/**
- * Best-effort teardown of the Cloudflare Email Routing destinations this
- * project is the last holder of.
- *
- * CF destinations are ACCOUNT-level: one address added for project A is a
- * valid `send_email` recipient for every worker in the account. The
- * `email_destinations` table is what maps them back to projects, so
- * "is anyone else still using this address?" is a query over those rows —
- * and `deleteProjectCascade` deletes them. Run this BEFORE the cascade or
- * the answer is unknowable and the CF destination leaks forever.
- *
- * `refs <= 1` means this project is the only referent (1 = us; 0 would mean
- * the row vanished under us, which is equally safe to delete). A shared
- * address stays on the account for the projects that still reference it.
- *
- * Never throws: a CF orphan is recoverable by a sweep, but a project
- * delete that 5xx's on CF availability leaves a half-torn-down project.
- */
+/** Revoke project consent and hand last-reference tags to durable cleanup. */
 async function cleanupProjectEmailDestinations(
   context: Context<ApiEnv>,
   projectId: string,
 ): Promise<void> {
   const db = context.get('db');
-  let destinations: Awaited<ReturnType<typeof getEmailDestinationsByProjectId>> = [];
-  try {
-    destinations = await getEmailDestinationsByProjectId(db, projectId);
-  } catch (err) {
-    console.error(`[cleanup] email destination lookup failed for project=${projectId}:`, err);
-  }
-  for (const destination of destinations) {
-    const cfDestinationId = destination.cf_destination_id;
-    if (!cfDestinationId) {
-      continue;
-    }
-    try {
-      const refs = await countProjectsUsingDestination(db, cfDestinationId);
-      if (refs <= 1) {
-        await deleteDestination(
-          context.env.CF_ACCOUNT_ID,
-          context.env.CF_API_TOKEN,
-          cfDestinationId,
-        );
-      }
-    } catch (err) {
-      console.error(
-        `[cleanup] CF destination cleanup failed for project=${projectId} dest=${cfDestinationId}:`,
-        err,
-      );
-    }
+  const tags = await deleteProjectEmailDestinations(db, projectId);
+  for (const tag of tags) {
+    await runEmailDestinationCleanup(
+      db,
+      { accountId: context.env.CF_ACCOUNT_ID, apiToken: context.env.CF_API_TOKEN },
+      tag,
+    );
   }
 }
 
-/**
- * Thrown when teardown cannot revoke the project's email send authorization.
- * The project row is left in place (status `deleting`) so the caller can
- * answer with a retryable 5xx; the next teardown attempt repeats the deletes.
- */
 /** Disable project email assignments and record durable provider cleanup. */
 async function cleanupProjectEmailAssignments(
   context: Context<ApiEnv>,

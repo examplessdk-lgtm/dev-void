@@ -206,3 +206,17 @@ CREATE INDEX "idx_email_actions_project_created" ON "email_actions" USING btree 
 CREATE INDEX "idx_email_receipts_project_created" ON "email_receipts" USING btree ("project_id","created_at");--> statement-breakpoint
 CREATE INDEX "idx_email_unresolved_attempts_project" ON "email_unresolved_attempts" USING btree ("project_id");--> statement-breakpoint
 CREATE INDEX "idx_email_unresolved_attempts_domain" ON "email_unresolved_attempts" USING btree ("sender_domain");
+--> statement-breakpoint
+CREATE TABLE "email_destination_cleanups" (
+	"cf_destination_id" text PRIMARY KEY NOT NULL,
+	"status" text DEFAULT 'pending' NOT NULL,
+	"attempts" integer DEFAULT 0 NOT NULL,
+	"next_attempt_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"lease_started_at" timestamp with time zone,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
+	CONSTRAINT "email_destination_cleanups_status_check" CHECK ("email_destination_cleanups"."status" IN ('pending', 'deleting', 'completed')),
+	CONSTRAINT "email_destination_cleanups_attempts_check" CHECK ("email_destination_cleanups"."attempts" >= 0)
+);
+--> statement-breakpoint
+CREATE INDEX "idx_email_destination_cleanups_due" ON "email_destination_cleanups" USING btree ("status","next_attempt_at","updated_at");

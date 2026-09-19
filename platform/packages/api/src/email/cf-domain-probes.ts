@@ -10,8 +10,13 @@ export async function lookupMxOverDns(domain: string): Promise<ReadonlyArray<str
     throw new Error(`public DNS MX lookup failed with HTTP ${response.status}`);
   }
   const json = (await response.json()) as {
+    Status: number;
+    TC?: boolean;
     Answer?: ReadonlyArray<{ type: number; data: string }>;
   };
+  if ((json.Status !== 0 && json.Status !== 3) || json.TC) {
+    throw new Error('public DNS MX lookup did not return a complete answer');
+  }
   return (json.Answer ?? [])
     .filter((answer) => answer.type === 15)
     .map((answer) => answer.data.trim().split(/\s+/).slice(1).join(' ').replace(/\.$/, ''));
@@ -23,14 +28,10 @@ export async function sendingOnboardedReadback(
   zoneId: string,
   domain: string,
 ): Promise<boolean> {
-  try {
-    const subdomains = await client.listSendingSubdomains(zoneId);
-    return subdomains.some(
-      (subdomain) => subdomain.enabled && subdomain.name.toLowerCase() === domain.toLowerCase(),
-    );
-  } catch {
-    return false;
-  }
+  const subdomains = await client.listSendingSubdomains(zoneId);
+  return subdomains.some(
+    (subdomain) => subdomain.enabled && subdomain.name.toLowerCase() === domain.toLowerCase(),
+  );
 }
 
 /** Find the deepest visible Cloudflare zone containing a domain. */

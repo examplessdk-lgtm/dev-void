@@ -3,7 +3,10 @@ import { Hono } from 'hono';
 import { hmacVerifyState } from '../auth/hmac.ts';
 import type { ApiEnv } from '../env.ts';
 import { getVersionedWorkerName } from '../project-secrets.ts';
+import { computeDispatchLimits } from '../routing.ts';
 import { deployments, projects, users } from '../schema.ts';
+import { getPlanLimits } from '../tiers.ts';
+import type { DeployManifest } from '../types.ts';
 import { emailProjectControls } from './admission-schema.ts';
 import { emailZoneConnections } from './connection-schema.ts';
 import {
@@ -249,6 +252,7 @@ app.post('/resolve-ingress', async (context) => {
       .select({
         projectStatus: projects.status,
         suspendedReason: users.suspended_reason,
+        plan: users.plan,
         emailSuspendedAt: emailProjectControls.suspended_at,
       })
       .from(projects)
@@ -283,20 +287,19 @@ app.post('/resolve-ingress', async (context) => {
       .where(and(eq(deployments.id, deploymentId), eq(deployments.project_id, projectId!)))
       .limit(1)
   )[0];
-  let protocolVersion: unknown;
+  let manifest: Pick<DeployManifest, 'emailProtocolVersion' | 'limits'> | null;
   try {
-    protocolVersion = deployment?.manifest
-      ? JSON.parse(deployment.manifest).emailProtocolVersion
-      : null;
+    manifest = deployment?.manifest ? JSON.parse(deployment.manifest) : null;
   } catch {
-    protocolVersion = null;
+    manifest = null;
   }
-  if (deployment?.status !== 'live' || protocolVersion !== 1) {
+  if (deployment?.status !== 'live' || manifest?.emailProtocolVersion !== 1) {
     return context.json(
       { error: 'active deployment does not support email gateway protocol' },
       409,
     );
   }
+  const limits = computeDispatchLimits(getPlanLimits(authority.plan), manifest.limits);
   return context.json({
     projectId,
     slug,
@@ -305,6 +308,7 @@ app.post('/resolve-ingress', async (context) => {
     addressing: route.addressing,
     domain: route.domain,
     connectionId: resolved.connection.id,
+    ...(limits ? { limits } : {}),
   });
 });
 

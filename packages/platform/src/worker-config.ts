@@ -88,7 +88,9 @@ export function createPlatformWorkerConfigs(input: {
   // bindings here would make API/proxy bootstrap depend on each other existing.
   const fetchWorkersDev =
     Boolean(deployment.application.workersDev) ||
-    [apiUrl, proxyUrl].some((url) => new URL(url).hostname.endsWith('.workers.dev'));
+    [apiUrl, proxyUrl, ...(deployment.capabilities.email ? [emailGatewayUrl] : [])].some((url) =>
+      new URL(url).hostname.endsWith('.workers.dev'),
+    );
 
   const api: Record<string, unknown> = {
     ...common,
@@ -213,6 +215,7 @@ export function createPlatformWorkerConfigs(input: {
       vars: {
         PLATFORM_CAPABILITIES: JSON.stringify(deployment.capabilities),
         PLATFORM_INSTALLATION_ID: installationId,
+        PLATFORM_VERSION: platformVersion,
         PLATFORM_TRAFFIC_STATE: trafficState,
         ...sharedEmailIngress,
         ...senderDomain,

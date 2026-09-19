@@ -32,6 +32,7 @@ import {
   resources,
   domains,
   emailDestinations,
+  emailDestinationCleanups,
   platformEvents,
   invitations,
   oauthNonces,
@@ -1572,51 +1573,12 @@ export interface OwnerVerificationAudit {
 }
 
 /**
- * Insert a destination row, returning whether THIS call did the insert.
+ * RETURNING identifies the sole inserter so only it sends a verification email.
+ * A missing row means it was concurrently deleted; callers must retry.
  *
- * Uses ON CONFLICT DO NOTHING + RETURNING so the inserter is
- * unambiguously identified. Two concurrent POSTs for the same
- * (project_id, address) would otherwise both pass through
- * `createEmailDestination` + the unique-constraint catch — but the loser
- * would then read back the winner's pending/platform row and ALSO fire a
- * platform-side verification email. With `inserted=false`, the route can
- * correctly gate the email send on the inserter only.
- *
- * Returns:
- *   { row, inserted: true }  — this call did the INSERT.
- *   { row, inserted: false } — a sibling call already inserted; we read
- *                              back their row.
- *   { row: null }            — extremely unlikely race where the row was
- *                              deleted between insert-failure and select.
- *                              Caller must treat as a hard error.
- *   { row: null, ownerEmailChanged: true }
- *                            — `ownerAudit` was given but the owner no
- *                              longer holds `emailSnapshot`; nothing was
- *                              written. See below.
- *
- * With `ownerAudit`, the insert runs in one transaction behind
- * `SELECT … FOR SHARE` on the owner's `users` row and happens only while
- * `users.email` still equals the snapshot. The consent an Option C row
- * inherits is "this address IS the owner's", and the login callback
- * (`updateUserRevokingInheritedDestinations` in `routes/auth.ts`) retires
- * exactly these rows when that stops being true — but it can only retire
- * rows that exist when it runs. Both callers decide to inherit from an
- * unlocked read of the owner's email (the auto-add before its unbounded
- * Cloudflare call, the POST's owner branch after it), so a login that
- * rotates the address between that read and this insert commits first,
- * finds nothing, and the insert would then land a `verified` grant for
- * the old mailbox attributed to the old identity; every later login
- * compares equal and never looks again. The lock is
- * what makes this a real gate under READ COMMITTED: a plain re-read does
- * not see the login's uncommitted `UPDATE users`, whereas `FOR SHARE`
- * conflicts with the `FOR NO KEY UPDATE` that write takes (`email` is not
- * in a unique index), so this either waits for the login and re-reads the
- * rotated address, or holds the login until this row is committed and
- * visible to its revoke. The `projects` row is locked FIRST, in the
- * strength the INSERT's foreign key would take anyway, to keep the
- * `projects → users` lock order the build transactions use
- * (`createGithubActionsBuildWithinLimit`); taking `users` first deadlocks
- * against them.
+ * Inherited owner consent requires a FOR SHARE lock on users: an email change
+ * must either commit before this check or revoke the inserted row afterward.
+ * Lock projects first to match build transactions and avoid a lock-order cycle.
  */
 export async function tryCreateEmailDestination(
   db: Db,
@@ -1646,7 +1608,17 @@ export async function tryCreateEmailDestination(
     verified_by_user_id: ownerAudit?.userId ?? null,
     verified_by_email_snapshot: ownerAudit?.emailSnapshot ?? null,
   };
-  const insertRow = async (via: Db): Promise<EmailDestination | undefined> => {
+  const insertRow = async (via: DbOrTx): Promise<EmailDestination | undefined> => {
+    if (cfDestinationId) {
+      const [retired] = await via
+        .select({ id: emailDestinationCleanups.cf_destination_id })
+        .from(emailDestinationCleanups)
+        .where(eq(emailDestinationCleanups.cf_destination_id, cfDestinationId))
+        .limit(1);
+      if (retired) {
+        return undefined;
+      }
+    }
     const [row] = await via
       .insert(emailDestinations)
       .values(values)
@@ -1656,24 +1628,35 @@ export async function tryCreateEmailDestination(
   };
   let inserted: EmailDestination | undefined;
   if (!ownerAudit) {
-    inserted = await db.transaction(async (tx) => {
-      await lockEmailPolicy(tx);
-      await tx
-        .select({ id: projects.id })
-        .from(projects)
-        .where(eq(projects.id, projectId))
-        .for('update');
-      return insertRow(tx as unknown as Db);
-    });
-  } else {
     const outcome = await db.transaction(async (tx) => {
       await lockEmailPolicy(tx);
-      await tx
-        .select({ id: projects.id })
+      const [project] = await tx
+        .select({ status: projects.status })
         .from(projects)
         .where(eq(projects.id, projectId))
         .for('update')
         .limit(1);
+      if (!project || project.status === 'deleting') {
+        return 'project-unavailable' as const;
+      }
+      return insertRow(tx);
+    });
+    if (outcome === 'project-unavailable') {
+      return { row: null, inserted: false };
+    }
+    inserted = outcome;
+  } else {
+    const outcome = await db.transaction(async (tx) => {
+      await lockEmailPolicy(tx);
+      const [project] = await tx
+        .select({ status: projects.status })
+        .from(projects)
+        .where(eq(projects.id, projectId))
+        .for('update')
+        .limit(1);
+      if (!project || project.status === 'deleting') {
+        return 'project-unavailable' as const;
+      }
       const [owner] = await tx
         .select({ email: users.email })
         .from(users)
@@ -1683,76 +1666,23 @@ export async function tryCreateEmailDestination(
       if ((owner?.email?.toLowerCase() ?? null) !== ownerAudit.emailSnapshot.toLowerCase()) {
         return 'owner-email-changed';
       }
-      return insertRow(tx as unknown as Db);
+      return insertRow(tx);
     });
     if (outcome === 'owner-email-changed') {
       return { row: null, inserted: false, ownerEmailChanged: true };
+    }
+    if (outcome === 'project-unavailable') {
+      return { row: null, inserted: false };
     }
     inserted = outcome;
   }
   if (inserted) {
     return { row: inserted, inserted: true };
   }
-  // ON CONFLICT DO NOTHING didn't return a row, which means a sibling
-  // request inserted concurrently. Read it back — outside the transaction
-  // above, which has nothing left to write once the insert found a
-  // conflict. If the sibling DELETED their own row between insert-failure
-  // and select (extremely unlikely — only the project owner can DELETE),
-  // we return `{ row: null }`. The caller treats that as "concurrently
-  // modified, retry once".
+  // A concurrent insert may have won, or cleanup retired the provider tag.
+  // Return an existing project row if present; otherwise the caller retries.
   const existing = await getEmailDestinationByAddress(db, projectId, address);
   return { row: existing, inserted: false };
-}
-
-export async function createEmailDestination(
-  db: Db,
-  projectId: string,
-  address: string,
-  cfDestinationId: string | null,
-  status: EmailDestination['status'] = 'pending',
-  /**
-   * Audit timestamp. Pass CF's `verified` field when recovering an
-   * already-verified destination so the audit trail reflects the real
-   * verification time rather than local now(). Omit / pass null to use
-   * now() when status is verified.
-   */
-  verifiedAt?: string | null,
-  /**
-   * 'cf'       — the CF Email Routing verification email is the source of
-   *              truth (the default; covers fresh adds AND owner-relaxed
-   *              reuse, where the project owner had already verified the
-   *              address on a prior project).
-   * 'platform' — CF already had the address verified by a different
-   *              project. We're issuing our own confirmation email; the
-   *              row stays 'pending' until that link is clicked.
-   *
-   * Defaults to 'cf' to preserve the historical create-path behavior.
-   */
-  verificationSource: EmailDestination['verification_source'] = 'cf',
-  /**
-   * Audit columns for owner-relaxed CF reuse (Option C). See
-   * `tryCreateEmailDestination` for the populate / NULL rules.
-   */
-  ownerAudit?: OwnerVerificationAudit,
-): Promise<EmailDestination> {
-  const id = generateId('edst');
-  const resolvedVerifiedAt =
-    status === 'verified' ? (verifiedAt ?? new Date().toISOString()) : null;
-  const [row] = await db
-    .insert(emailDestinations)
-    .values({
-      id,
-      project_id: projectId,
-      address: address.toLowerCase(),
-      cf_destination_id: cfDestinationId,
-      status,
-      verified_at: resolvedVerifiedAt,
-      verification_source: verificationSource,
-      verified_by_user_id: ownerAudit?.userId ?? null,
-      verified_by_email_snapshot: ownerAudit?.emailSnapshot ?? null,
-    })
-    .returning();
-  return row;
 }
 
 /**
@@ -1852,19 +1782,6 @@ export async function getEmailDestinationsByProjectId(
     .orderBy(asc(emailDestinations.created_at));
 }
 
-export async function getVerifiedEmailDestinationsByProjectId(
-  db: Db,
-  projectId: string,
-): Promise<Array<EmailDestination>> {
-  return db
-    .select()
-    .from(emailDestinations)
-    .where(
-      and(eq(emailDestinations.project_id, projectId), eq(emailDestinations.status, 'verified')),
-    )
-    .orderBy(asc(emailDestinations.created_at));
-}
-
 export async function getEmailDestinationByAddress(
   db: Db,
   projectId: string,
@@ -1916,7 +1833,7 @@ export async function updateEmailDestinationStatus(
    * preserve the existing source value rather than overwriting it.
    */
   verificationSource?: EmailDestination['verification_source'],
-): Promise<void> {
+): Promise<boolean> {
   const patch: {
     status: EmailDestination['status'];
     verified_at?: string | null;
@@ -1940,35 +1857,55 @@ export async function updateEmailDestinationStatus(
     .where(eq(emailDestinations.id, id))
     .limit(1);
   if (!existing) {
-    return;
+    return false;
   }
-  await db.transaction(async (tx) => {
+  return db.transaction(async (tx) => {
     await lockEmailPolicy(tx);
     await tx
       .select({ id: projects.id })
       .from(projects)
       .where(eq(projects.id, existing.project_id))
       .for('update');
-    await tx
+    if (cfDestinationId) {
+      const [retired] = await tx
+        .select({ id: emailDestinationCleanups.cf_destination_id })
+        .from(emailDestinationCleanups)
+        .where(eq(emailDestinationCleanups.cf_destination_id, cfDestinationId))
+        .limit(1);
+      if (retired) {
+        return false;
+      }
+    }
+    const updated = await tx
       .update(emailDestinations)
       .set(patch)
       .where(
         and(eq(emailDestinations.id, id), eq(emailDestinations.project_id, existing.project_id)),
-      );
+      )
+      .returning({ id: emailDestinations.id });
+    return updated.length > 0;
   });
 }
 
-export async function deleteEmailDestination(db: Db, id: string): Promise<void> {
-  const [existing] = await db
-    .select({ project_id: emailDestinations.project_id })
-    .from(emailDestinations)
-    .where(eq(emailDestinations.id, id))
-    .limit(1);
-  if (!existing) {
-    return;
-  }
-  await db.transaction(async (tx) => {
+async function queueDestinationCleanupTx(tx: Tx, cfDestinationId: string): Promise<void> {
+  await tx
+    .insert(emailDestinationCleanups)
+    .values({ cf_destination_id: cfDestinationId })
+    .onConflictDoNothing();
+}
+
+/** Revoke one project's consent and durably queue the last provider tag. */
+export async function deleteEmailDestination(db: Db, id: string): Promise<string | null> {
+  return db.transaction(async (tx) => {
     await lockEmailPolicy(tx);
+    const [existing] = await tx
+      .select()
+      .from(emailDestinations)
+      .where(eq(emailDestinations.id, id))
+      .for('update');
+    if (!existing) {
+      return null;
+    }
     await tx
       .select({ id: projects.id })
       .from(projects)
@@ -1979,23 +1916,71 @@ export async function deleteEmailDestination(db: Db, id: string): Promise<void> 
       .where(
         and(eq(emailDestinations.id, id), eq(emailDestinations.project_id, existing.project_id)),
       );
+    if (!existing.cf_destination_id) {
+      return null;
+    }
+    const [references] = await tx
+      .select({ n: countDistinct(emailDestinations.project_id) })
+      .from(emailDestinations)
+      .where(eq(emailDestinations.cf_destination_id, existing.cf_destination_id));
+    if (Number(references?.n ?? 0) !== 0) {
+      return null;
+    }
+    await queueDestinationCleanupTx(tx, existing.cf_destination_id);
+    return existing.cf_destination_id;
   });
 }
 
-/**
- * How many DISTINCT projects still reference a CF destination. CF
- * destinations are account-level, so the CF-side address may only be
- * deleted once the last project stops referencing it.
- */
-export async function countProjectsUsingDestination(
+/** Revoke all project consent rows and queue provider tags with no live sibling. */
+export async function deleteProjectEmailDestinations(
+  db: Db,
+  projectId: string,
+): Promise<Array<string>> {
+  return db.transaction(async (tx) => {
+    await lockEmailPolicy(tx);
+    await tx
+      .select({ id: projects.id })
+      .from(projects)
+      .where(eq(projects.id, projectId))
+      .for('update');
+    const rows = await tx
+      .select()
+      .from(emailDestinations)
+      .where(eq(emailDestinations.project_id, projectId))
+      .for('update');
+    await tx.delete(emailDestinations).where(eq(emailDestinations.project_id, projectId));
+    const queued: Array<string> = [];
+    for (const tag of new Set(rows.map((row) => row.cf_destination_id).filter(Boolean))) {
+      const [references] = await tx
+        .select({ n: countDistinct(emailDestinations.project_id) })
+        .from(emailDestinations)
+        .where(eq(emailDestinations.cf_destination_id, tag!));
+      if (Number(references?.n ?? 0) === 0) {
+        await queueDestinationCleanupTx(tx, tag!);
+        queued.push(tag!);
+      }
+    }
+    return queued;
+  });
+}
+
+/** Queue an allocated tag that never gained a SQL consent row. */
+export async function queueUnreferencedEmailDestinationCleanup(
   db: Db,
   cfDestinationId: string,
-): Promise<number> {
-  const result = await db
-    .select({ n: countDistinct(emailDestinations.project_id) })
-    .from(emailDestinations)
-    .where(eq(emailDestinations.cf_destination_id, cfDestinationId));
-  return Number(result[0]?.n ?? 0);
+): Promise<boolean> {
+  return db.transaction(async (tx) => {
+    await lockEmailPolicy(tx);
+    const [references] = await tx
+      .select({ n: countDistinct(emailDestinations.project_id) })
+      .from(emailDestinations)
+      .where(eq(emailDestinations.cf_destination_id, cfDestinationId));
+    if (Number(references?.n ?? 0) !== 0) {
+      return false;
+    }
+    await queueDestinationCleanupTx(tx, cfDestinationId);
+    return true;
+  });
 }
 
 /**
@@ -2041,6 +2026,14 @@ export async function promoteEmailDestinationWithOwnerAudit(
       .where(eq(projects.id, projectId))
       .for('update')
       .limit(1);
+    const [retired] = await tx
+      .select({ id: emailDestinationCleanups.cf_destination_id })
+      .from(emailDestinationCleanups)
+      .where(eq(emailDestinationCleanups.cf_destination_id, cfDestinationId))
+      .limit(1);
+    if (retired) {
+      return false;
+    }
     const [owner] = await tx
       .select({ email: users.email })
       .from(users)

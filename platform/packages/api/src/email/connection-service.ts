@@ -451,10 +451,17 @@ export async function inspectEmailInboundRoute(
   connection: Pick<typeof emailZoneConnections.$inferSelect, 'zone_id' | 'ingress_worker_name'>,
   domain: string,
 ): Promise<string | null> {
-  const [catchall, rules] = await Promise.all([
+  const [catchall, rules, exchanges] = await Promise.all([
     client.getCatchAll(connection.zone_id),
     client.listRoutingRules(connection.zone_id),
+    lookupMxOverDns(domain),
   ]);
+  if (
+    !exchanges.length ||
+    exchanges.some((exchange) => !/\.mx\.cloudflare\.net$/i.test(exchange))
+  ) {
+    return `MX records for ${domain} do not route mail to Cloudflare Email Routing`;
+  }
   if (!catchall?.enabled || catchall.workerName !== connection.ingress_worker_name) {
     return 'zone catch-all does not point to this ingress';
   }
@@ -2082,9 +2089,15 @@ export async function reconcilePendingEmailOperations(
     .select({ id: emailOperations.id, status: emailOperations.status })
     .from(emailOperations)
     .where(inArray(emailOperations.status, ['pending', 'running', 'unknown']))
-    .orderBy(emailOperations.created_at)
+    .orderBy(emailOperations.updated_at, emailOperations.id)
     .limit(limit);
   for (const row of rows) {
+    // Ambiguous writes may need human recovery. Rotate visits so they cannot
+    // occupy every batch slot forever; step.started_at still owns its lease.
+    await db
+      .update(emailOperations)
+      .set({ updated_at: sql`now()` })
+      .where(eq(emailOperations.id, row.id));
     if (row.status === 'unknown') {
       await reconcileUnknownEmailOperation(db, env, row.id);
     }

@@ -41,6 +41,7 @@ export function stubCustomerCf(
     verifyStatus?: string;
     verifyExpiresOn?: string | null;
     mx?: Record<string, Array<string>>;
+    dnsStatus?: number;
     existingScripts?: ReadonlyArray<string>;
     /**
      * Initial catch-all state, applied to every zone. Absent → CF's real
@@ -60,6 +61,7 @@ export function stubCustomerCf(
   } = {},
 ) {
   const calls: Array<RecordedCall> = [];
+  const publishedMx = new Map<string, Array<string>>();
   const fail = (tag: StubFailTag): Response | null => {
     const failure = config.failOn?.[tag];
     return failure ? cfError(failure.message, failure.status, failure.code) : null;
@@ -101,8 +103,9 @@ export function stubCustomerCf(
         return failure;
       }
       const name = new URL(url).searchParams.get('name') ?? '';
-      const exchanges = config.mx?.[name] ?? [];
+      const exchanges = config.mx?.[name] ?? publishedMx.get(name) ?? [];
       return Response.json({
+        Status: config.dnsStatus ?? 0,
         Answer: exchanges.map((exchange) => ({ type: 15, data: `10 ${exchange}.` })),
       });
     }
@@ -228,7 +231,17 @@ export function stubCustomerCf(
     if (path.includes('/email/routing/dns') && method === 'POST') {
       const body = typeof init?.body === 'string' ? JSON.parse(init.body) : undefined;
       await record({ tag: 'routingDns', method, url, body });
-      return fail('routingDns') ?? cfSuccess({});
+      const failure = fail('routingDns');
+      if (failure) {
+        return failure;
+      }
+      const zoneId = path.split('/')[2];
+      const name =
+        body?.name ?? Object.values(config.zones ?? {}).find((zone) => zone.id === zoneId)?.name;
+      if (name) {
+        publishedMx.set(name, ['route1.mx.cloudflare.net']);
+      }
+      return cfSuccess({});
     }
 
     if (path.includes('/email/sending/subdomains') && method === 'POST') {

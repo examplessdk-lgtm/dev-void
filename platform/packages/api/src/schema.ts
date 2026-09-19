@@ -472,17 +472,8 @@ export const domains = pgTable(
 
 // ---------------------------------------------------------------------------
 // email_destinations
-// Per-project verified destination addresses for outbound email via the
-// shared platform sender (`EMAIL_SENDER_DOMAIN`, e.g. `mail.void.cloud` in
-// production and `mail.staging.void.cloud` in staging — never hard-coded).
-// Each row tracks the lifecycle of one recipient address — from "the user
-// added it" -> CF sends a verification email -> recipient clicks the link ->
-// status flips to "verified" and the next deploy puts the address into the
-// worker's `send_email` binding `allowed_destination_addresses` allowlist.
-//
-// `cf_destination_id` is CF's account-level identifier for the address —
-// destinations are account-wide on CF's side; per-project scoping is
-// enforced via the binding allowlist injected at deploy.
+// Per-project recipient consent for shared-sender email. Cloudflare destination
+// tags are account-wide; SQL admission enforces consent separately for each project.
 // ---------------------------------------------------------------------------
 export const emailDestinations = pgTable(
   'email_destinations',
@@ -493,10 +484,7 @@ export const emailDestinations = pgTable(
       .references(() => projects.id, { onDelete: 'cascade' }),
     address: text('address').notNull(),
     status: text('status').notNull().default('pending').$type<'pending' | 'verified'>(),
-    // Always populated by `createEmailDestination` after a successful CF
-    // addDestination call. Nullable in schema only for forward-compat with
-    // future async-tag flows (e.g. status='pending' rows created before the
-    // CF API has returned a tag).
+    // Cloudflare account-level tag, populated after destination creation.
     cf_destination_id: text('cf_destination_id'),
     // Audit timestamp: set the moment status first transitions to 'verified',
     // never cleared. Use `status === 'verified'` for current state, not
@@ -558,6 +546,43 @@ export const emailDestinations = pgTable(
       'email_destinations_verification_source_check',
       sql`${table.verification_source} IN ('cf', 'platform')`,
     ),
+  ],
+);
+
+// Provider destination deletion outlives the project consent row. The opaque
+// Cloudflare tag is retained as a tombstone so stale list responses cannot
+// reattach a destination while its deletion is pending or after it completes.
+export const emailDestinationCleanups = pgTable(
+  'email_destination_cleanups',
+  {
+    cf_destination_id: text('cf_destination_id').primaryKey(),
+    status: text('status')
+      .notNull()
+      .default('pending')
+      .$type<'pending' | 'deleting' | 'completed'>(),
+    attempts: integer('attempts').notNull().default(0),
+    next_attempt_at: timestamp('next_attempt_at', { mode: 'string', withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    lease_started_at: timestamp('lease_started_at', { mode: 'string', withTimezone: true }),
+    created_at: timestamp('created_at', { mode: 'string', withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updated_at: timestamp('updated_at', { mode: 'string', withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index('idx_email_destination_cleanups_due').on(
+      table.status,
+      table.next_attempt_at,
+      table.updated_at,
+    ),
+    check(
+      'email_destination_cleanups_status_check',
+      sql`${table.status} IN ('pending', 'deleting', 'completed')`,
+    ),
+    check('email_destination_cleanups_attempts_check', sql`${table.attempts} >= 0`),
   ],
 );
 

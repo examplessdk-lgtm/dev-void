@@ -616,11 +616,21 @@ void platform email policy-set <verified|domains|any> [--domains <domain[,domain
 void platform email settings
 void platform email settings-set --domains <self-serve|admin>
 void platform email limit <project-id|slug> [--monthly <n>] [--burst <n>]
+void platform email attempts [--project <id|slug>] [--page <n>] [--limit <n>]
+void platform email attempt-resolve <attempt-id> --ended --reason <text>
 ```
 
 `policy` decides which recipients a project's `<slug>+tag@<mail domain>` sender reaches: `verified` (the default) means only that project's verified destinations; `domains` adds every address on the listed domains; `any` lifts the check. Neither widens delivery to addresses on the platform's own mail domain: those stay verified-destination-only, so no project reaches another project's inbox without its consent. Cloudflare still refuses a destination it has not verified until the platform mail domain is onboarded for Email Sending, so under `domains` or `any` such refusals arrive as per-recipient `UNVERIFIED_DESTINATION` results. Custom-domain sends are not affected.
 
 `settings-set --domains admin` tells `void email domain add` to print the administrator's command instead of starting token setup. `limit` overrides the project's monthly and rolling 60-second caps (defaults 200 and 10); a project page in the admin UI shows and clears them.
+
+`attempts` lists interrupted provider calls and their earliest resolution time. Once
+the original Worker execution has ended and the attempt is at least 24 hours old,
+`attempt-resolve` records `outcome_unknown`, retains its quota charge, and releases
+the project/domain cleanup fence. `--ended` is your attestation that the call is no
+longer active; `--reason` is stored in the operator audit log. Keep recipient
+addresses and message content out of the reason. The send is never retried. Use
+`--plan` to preview and `--yes` to apply without a prompt.
 
 Register and maintain email domains for projects whose owners hold no Cloudflare credential:
 

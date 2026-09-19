@@ -67,7 +67,7 @@ app.get('/destinations/confirm', async (context) => {
     return context.html(successPage(slug, row.address, true));
   }
 
-  await updateEmailDestinationStatus(
+  const updated = await updateEmailDestinationStatus(
     context.get('db'),
     row.id,
     'verified',
@@ -79,6 +79,9 @@ app.get('/destinations/confirm', async (context) => {
     // (whatever the row was created with) stays put.
     undefined,
   );
+  if (!updated) {
+    return context.html(errorPage('Destination not found.'), 404);
+  }
 
   return context.html(successPage(slug, row.address, false));
 });

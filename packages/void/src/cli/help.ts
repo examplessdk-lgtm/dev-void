@@ -72,7 +72,7 @@ function operatorHelpTree(): HelpTree {
                         },
                       ]
                     : []),
-                  ...(['list', 'events', 'logs'].includes(entry.action)
+                  ...(['list', 'events', 'logs', 'attempts'].includes(entry.action)
                     ? [
                         {
                           command: '--limit <number>',
@@ -95,7 +95,9 @@ function operatorHelpTree(): HelpTree {
                     description:
                       flag === 'follow'
                         ? 'Poll new logs until interrupted or the build ends'
-                        : 'Read a full API session from stdin for explicit operator session exchange',
+                        : flag === 'ended'
+                          ? 'Attest that the original provider execution has ended'
+                          : 'Read a full API session from stdin for explicit operator session exchange',
                   })),
                 ],
               },

@@ -1,14 +1,9 @@
 import { asc, desc, eq, gte, inArray, sql } from 'drizzle-orm';
 import { Hono, type Context } from 'hono';
 import { getPlatformCapabilities } from '../../capabilities.ts';
+import { deleteEmailDestination, getEmailDestinationsByProjectId, getProject } from '../../db.ts';
 import {
-  countProjectsUsingDestination,
-  deleteEmailDestination,
-  getEmailDestinationsByProjectId,
-  getProject,
-} from '../../db.ts';
-import {
-  emailActionRecipients,
+  emailMonthlyUsage,
   emailProjectControls,
   emailReceipts,
 } from '../../email/admission-schema.ts';
@@ -37,7 +32,7 @@ import type { ApiEnv } from '../../env.ts';
 import { executeAuditedMutation, operatorAuditIntent } from '../../operator/audit.ts';
 import { OperatorError } from '../../operator/common.ts';
 import { setOperatorEmailPolicy, setOperatorEmailSettings } from '../../operator/email-routes.ts';
-import { deleteDestination } from '../../provisioning/email-routing.ts';
+import { runEmailDestinationCleanup } from '../../provisioning/email-destination-cleanup.ts';
 import { renderOperationError } from '../operation-error.tsx';
 import { EmailSettingsPage } from '../views/email-settings.tsx';
 import { STATUS_COLORS, formatDateTime } from '../views/format.ts';
@@ -124,10 +119,10 @@ app.get('/:projectId', async (context) => {
   const [sentRows, receivedRows, controls, destinations, domainRows] = await Promise.all([
     context
       .get('db')
-      .select({ count: sql<number>`count(*)::int` })
-      .from(emailActionRecipients)
+      .select({ count: emailMonthlyUsage.recipient_attempts })
+      .from(emailMonthlyUsage)
       .where(
-        sql`${emailActionRecipients.project_id} = ${projectId} AND ${emailActionRecipients.state} IN ('reserved','attempt_started','provider_accepted','failed','outcome_unknown') AND ${emailActionRecipients.reserved_at} >= ${monthStart}::timestamptz`,
+        sql`${emailMonthlyUsage.project_id} = ${projectId} AND ${emailMonthlyUsage.month} = ${month}`,
       ),
     context
       .get('db')
@@ -579,31 +574,13 @@ app.post('/:projectId/destinations/:destId/delete', async (context) => {
   if (!destination) {
     return context.html('<h1>Destination not found</h1>', 404);
   }
-  await deleteEmailDestination(context.get('db'), destination.id);
-  // The Cloudflare destination address is account-level, so deleting it would
-  // revoke the address for every project that shares it. Only the last
-  // referencing project may remove it upstream.
-  if (destination.cf_destination_id) {
-    const references = await countProjectsUsingDestination(
+  const cleanupTag = await deleteEmailDestination(context.get('db'), destination.id);
+  if (cleanupTag) {
+    await runEmailDestinationCleanup(
       context.get('db'),
-      destination.cf_destination_id,
+      { accountId: context.env.CF_ACCOUNT_ID, apiToken: context.env.CF_API_TOKEN },
+      cleanupTag,
     );
-    if (references === 0) {
-      try {
-        await deleteDestination(
-          context.env.CF_ACCOUNT_ID,
-          context.env.CF_API_TOKEN,
-          destination.cf_destination_id,
-        );
-      } catch (error) {
-        // Best effort: the committed SQL revocation already denies sends.
-        console.error('[admin-email] CF deleteDestination failed', {
-          projectId,
-          destinationId,
-          error,
-        });
-      }
-    }
   }
   return context.redirect(`/admin/email/${projectId}`);
 });

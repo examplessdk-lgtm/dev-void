@@ -307,6 +307,23 @@ export const operatorCommands: Array<OperatorCommand> = [
   },
   {
     group: 'email',
+    action: 'attempts',
+    description: 'List unresolved email send attempts awaiting operator reconciliation',
+    path: '/email/attempts',
+    values: { project: 'Project id or slug' },
+  },
+  {
+    group: 'email',
+    action: 'attempt-resolve',
+    description: 'Resolve a stopped send as outcome unknown and release its cleanup fence',
+    path: '/email/attempts/:id/resolve',
+    positional: ['id'],
+    values: { reason: 'Audit reason without recipient or message content' },
+    booleans: ['ended'],
+    method: 'POST',
+  },
+  {
+    group: 'email',
     action: 'domains',
     description: 'List email domains registered on this platform',
     path: '/email/domains',
@@ -415,7 +432,7 @@ export function parseOperatorArgs(args: Array<string>): OperatorArgs {
   const positional: Array<string> = [];
   const values: Record<string, string> = {};
   const flags = new Set<string>();
-  const booleanFlags = new Set(['json', 'plan', 'yes', 'follow', 'token-stdin', 'force']);
+  const booleanFlags = new Set(['json', 'plan', 'yes', 'follow', 'token-stdin', 'force', 'ended']);
   for (let index = 0; index < args.length; index++) {
     const arg = args[index]!;
     if (!arg.startsWith('-')) {
@@ -491,7 +508,8 @@ export function parseOperatorArgs(args: Array<string>): OperatorArgs {
       `platform: Usage: ${command.usage?.[identitySignupEntry ? 1 : 0]?.replace(/ \[options\]$/, '') ?? `void platform ${group} ${action}${command.positional?.map((name) => ` <${name}>`).join('') ?? ''}`}.`,
     );
   }
-  const paged = action === 'list' || action === 'events' || action === 'logs';
+  const paged =
+    action === 'list' || action === 'events' || action === 'logs' || action === 'attempts';
   const allowed = new Set([
     'connection',
     ...(command.method ? ['timeout'] : []),

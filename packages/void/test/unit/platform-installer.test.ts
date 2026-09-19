@@ -543,6 +543,7 @@ describe('platform installer', () => {
           );
           expect(context).toEqual({
             accountName: plan.account.name,
+            emailGatewayUrl: `https://${plan.deployment.resources.emailGatewayWorker}.workers-subdomain.workers.dev`,
             workers: [
               plan.deployment.resources.apiWorker,
               plan.deployment.resources.proxyWorker,
@@ -1418,17 +1419,18 @@ describe('platform installer', () => {
     });
   });
 
-  it('verifies API, discovery, proxy, and dispatch before committing a cutover', async () => {
+  it('verifies API, discovery, proxy, dispatch, and email gateway before committing a cutover', async () => {
     const requests: Array<{ headers: Headers; url: string; redirect?: RequestRedirect }> = [];
     const fetcher = (async (input: string | URL | Request, init?: RequestInit) => {
       const url = String(input);
       requests.push({ headers: new Headers(init?.headers), url, redirect: init?.redirect });
       return Response.json(
-        url.endsWith('/.well-known/void-platform')
+        url.endsWith('/.well-known/void-platform') || url === 'https://email.example.com/health'
           ? {
               installationId: 'example-a1b2c3d4',
               platformVersion: '1.2.3',
               usageProtocolVersion: 1,
+              emailProtocolVersion: 1,
             }
           : { ok: true },
       );
@@ -1443,6 +1445,8 @@ describe('platform installer', () => {
       1,
       'probe-token',
       fetcher,
+      undefined,
+      { accountName: 'Example', workers: [], emailGatewayUrl: 'https://email.example.com' },
     );
 
     expect(requests.map((entry) => entry.url)).toEqual([
@@ -1450,6 +1454,7 @@ describe('platform installer', () => {
       'https://api.example.com/.well-known/void-platform',
       'https://proxy.example.com/health',
       'https://test.apps.example.com/health',
+      'https://email.example.com/health',
     ]);
     expect(
       requests.every((entry) => entry.headers.get('X-Void-Platform-Probe') === 'probe-token'),
@@ -1719,6 +1724,38 @@ describe('platform installer', () => {
         fetcher,
       ),
     ).rejects.toThrow('Proxy health check failed');
+  });
+
+  it.each([
+    { failure: 'unavailable', status: 503, body: {} },
+    { failure: 'foreign installation', status: 200, body: { installationId: 'other' } },
+    { failure: 'stale version', status: 200, body: { platformVersion: '1.2.2' } },
+    { failure: 'unsupported protocol', status: 200, body: { emailProtocolVersion: 2 } },
+  ])('rejects an email gateway that is $failure before cutover', async ({ status, body }) => {
+    const identity = {
+      installationId: 'example-a1b2c3d4',
+      platformVersion: '1.2.3',
+      usageProtocolVersion: 1,
+      emailProtocolVersion: 1,
+    };
+    const fetcher = (async (input: string | URL | Request) =>
+      String(input) === 'https://email.example.com/health'
+        ? Response.json({ ...identity, ...body }, { status })
+        : Response.json(identity)) as typeof fetch;
+    await expect(
+      verifyPlatformHealth(
+        'https://api.example.com',
+        identity.installationId,
+        'https://proxy.example.com',
+        'apps.example.com',
+        identity.platformVersion,
+        1,
+        'probe-token',
+        fetcher,
+        undefined,
+        { accountName: 'Example', workers: [], emailGatewayUrl: 'https://email.example.com' },
+      ),
+    ).rejects.toThrow(/email gateway/i);
   });
 
   it('requires live PostgreSQL migration history to be an exact package prefix', async () => {
@@ -4602,6 +4639,20 @@ describe('platform installer', () => {
         },
         {
           completedAt: '2026-09-14T00:00:06.000Z',
+          key: 'worker-cutover:999:staged:emailGateway',
+          resultHash: cutoverSnapshot(
+            deployment.resources.emailGatewayWorker,
+            'previous-email',
+            'staged-email',
+          ),
+        },
+        {
+          completedAt: '2026-09-14T00:00:06.000Z',
+          key: 'worker-cutover:999:unsafe-traffic:emailGateway',
+          resultHash: deployment.resources.emailGatewayWorker,
+        },
+        {
+          completedAt: '2026-09-14T00:00:06.000Z',
           key: 'worker-cutover:999:unsafe-traffic:proxy',
           resultHash: deployment.resources.proxyWorker,
         },
@@ -4637,8 +4688,9 @@ describe('platform installer', () => {
         recoveryEvents.push('verify-cutover');
       },
     });
-    expect(recoveryEvents.slice(0, 3)).toEqual([
+    expect(recoveryEvents.slice(0, 4)).toEqual([
       `put:${PLATFORM_DISABLED_KEY}`,
+      'recover:emailGateway:previous-email:staged-email:true',
       'recover:proxy:previous-proxy:staged-proxy:true',
       'recover:api:previous-api:staged-api:false',
     ]);

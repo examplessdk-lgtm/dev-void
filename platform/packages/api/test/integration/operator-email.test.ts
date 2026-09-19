@@ -9,8 +9,16 @@ import {
   test,
   vi,
 } from 'vite-plus/test';
-import { emailProjectControls } from '../../src/email/admission-schema.ts';
-import { setProjectEmailLimits } from '../../src/email/admission.ts';
+import {
+  emailActionRecipients,
+  emailProjectControls,
+  emailUnresolvedAttempts,
+} from '../../src/email/admission-schema.ts';
+import {
+  admitEmailAction,
+  setProjectEmailLimits,
+  transitionEmailRecipients,
+} from '../../src/email/admission.ts';
 import {
   EMAIL_DOMAIN_MANAGEMENT_SETTING,
   EMAIL_RECIPIENT_POLICY_MIRROR_KEY,
@@ -18,7 +26,7 @@ import {
 } from '../../src/email/settings.ts';
 import type { ApiEnv } from '../../src/env.ts';
 import { app } from '../../src/index.ts';
-import { operatorEvents, platformSettings } from '../../src/schema.ts';
+import { emailDestinations, operatorEvents, platformSettings } from '../../src/schema.ts';
 import {
   clearTables,
   createOperatorToken,
@@ -196,65 +204,6 @@ describe('operator email recipient policy', () => {
     put.mockRestore();
   });
 
-  test('publishes display hints without deleting policy keys', async () => {
-    const put = vi.spyOn(env.ROUTING, 'put');
-    const del = vi.spyOn(env.ROUTING, 'delete');
-
-    expect((await req('/email/policy', { mode: 'domains', domains: 'a.example' })).status).toBe(
-      200,
-    );
-    expect(put).toHaveBeenCalled();
-    expect(del).not.toHaveBeenCalled();
-
-    expect((await req('/email/policy', { mode: 'verified' })).status).toBe(200);
-    expect(put.mock.calls.length).toBeGreaterThan(1);
-    expect(del).not.toHaveBeenCalled();
-  });
-
-  test('a list edited both ways publishes as a widening', async () => {
-    await req('/email/policy', { mode: 'domains', domains: 'a.example,b.example' });
-    const put = vi.spyOn(env.ROUTING, 'put').mockRejectedValueOnce(new Error('kv down'));
-    const response = await req('/email/policy', {
-      mode: 'domains',
-      domains: 'b.example,c.example',
-    });
-    expect(response.status).toBe(200);
-    expect(await setting(EMAIL_RECIPIENT_POLICY_SETTING)).toEqual({
-      mode: 'domains',
-      domains: ['b.example', 'c.example'],
-    });
-    expect(await env.ROUTING.get(EMAIL_RECIPIENT_POLICY_MIRROR_KEY)).toBe(
-      JSON.stringify({ mode: 'domains', domains: ['a.example', 'b.example'] }),
-    );
-    put.mockRestore();
-    await req('/email/policy');
-    expect(await env.ROUTING.get(EMAIL_RECIPIENT_POLICY_MIRROR_KEY)).toBe(
-      JSON.stringify({ mode: 'domains', domains: ['b.example', 'c.example'] }),
-    );
-  });
-
-  test('a grown list is a widening', async () => {
-    await req('/email/policy', { mode: 'domains', domains: 'a.example' });
-    const put = vi.spyOn(env.ROUTING, 'put').mockRejectedValueOnce(new Error('kv down'));
-    const response = await req('/email/policy', {
-      mode: 'domains',
-      domains: 'a.example,b.example',
-    });
-    expect(response.status).toBe(200);
-    expect(await setting(EMAIL_RECIPIENT_POLICY_SETTING)).toEqual({
-      mode: 'domains',
-      domains: ['a.example', 'b.example'],
-    });
-    expect(await env.ROUTING.get(EMAIL_RECIPIENT_POLICY_MIRROR_KEY)).toBe(
-      JSON.stringify({ mode: 'domains', domains: ['a.example'] }),
-    );
-    put.mockRestore();
-    await req('/email/policy');
-    expect(await env.ROUTING.get(EMAIL_RECIPIENT_POLICY_MIRROR_KEY)).toBe(
-      JSON.stringify({ mode: 'domains', domains: ['a.example', 'b.example'] }),
-    );
-  });
-
   test('is unavailable when the platform does not enable email', async () => {
     const response = await req('/email/policy', undefined, {
       PLATFORM_CAPABILITIES: JSON.stringify({
@@ -398,5 +347,90 @@ describe('operator email limits', () => {
     expect((await req('/email/projects/no-such-project/limit', { monthly: '10' })).status).toBe(
       404,
     );
+  });
+});
+
+describe('operator email attempt recovery', () => {
+  test('lists only PII-free fences and audits an explicitly attested resolution', async () => {
+    const owner = await createTestUser(env.db, 'attempt-owner');
+    const project = await createTestProject(env.db, owner.id, 'attempt-project');
+    await env.db.insert(emailDestinations).values({
+      id: 'attempt-destination',
+      project_id: project.id,
+      address: 'recipient@example.com',
+      status: 'verified',
+    });
+    const action = await admitEmailAction(env.db, {
+      projectId: project.id,
+      kind: 'direct',
+      key: 'attempt-key',
+      digest: 'a'.repeat(64),
+      from: 'attempt-project+news@mail.example.com',
+      recipients: ['recipient@example.com'],
+      transport: 'binding',
+      sharedSenderDomain: 'mail.example.com',
+    });
+    await transitionEmailRecipients(
+      env.db,
+      action.operationId,
+      ['recipient@example.com'],
+      'attempt_started',
+    );
+    const [fence] = await env.db.select().from(emailUnresolvedAttempts);
+    const list = await req(`/email/attempts?project=${project.slug}`);
+    expect(list.status).toBe(200);
+    const listed = await list.json();
+    expect(listed).toMatchObject({
+      total: 1,
+      attempts: [{ id: fence!.id, projectId: project.id }],
+    });
+    expect(JSON.stringify(listed)).not.toContain('recipient@example.com');
+
+    const tooRecent = await req(`/email/attempts/${fence!.id}/resolve`, {
+      ended: true,
+      reason: 'Original Worker execution ended',
+      dryRun: true,
+    });
+    expect(tooRecent.status).toBe(409);
+    const old = new Date(Date.now() - 25 * 60 * 60_000).toISOString();
+    await env.db
+      .update(emailUnresolvedAttempts)
+      .set({ started_at: old })
+      .where(eq(emailUnresolvedAttempts.id, fence!.id));
+    await env.db
+      .update(emailActionRecipients)
+      .set({ attempt_started_at: old })
+      .where(eq(emailActionRecipients.id, fence!.id));
+    const missingAttestation = await req(`/email/attempts/${fence!.id}/resolve`, {
+      reason: 'Original Worker execution ended',
+      dryRun: true,
+    });
+    expect(missingAttestation.status).toBe(400);
+    const preview = await req(`/email/attempts/${fence!.id}/resolve`, {
+      ended: true,
+      reason: 'Original Worker execution ended',
+      dryRun: true,
+    });
+    expect(preview.status).toBe(200);
+    expect(await preview.json()).toMatchObject({ dryRun: true, action: 'email.attempt.resolve' });
+    expect(await events()).toHaveLength(0);
+    const response = await req(`/email/attempts/${fence!.id}/resolve`, {
+      ended: true,
+      reason: 'Original Worker execution ended',
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ state: 'outcome_unknown', charged: true });
+    expect(((await (await req('/email/attempts')).json()) as { total: number }).total).toBe(0);
+    const recorded = await events();
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0]).toMatchObject({
+      action: `email/attempts/${fence!.id}/resolve`,
+      status: 'success',
+    });
+    expect(JSON.parse(recorded[0]!.target)).toEqual({
+      attemptId: fence!.id,
+      ended: true,
+      reason: 'Original Worker execution ended',
+    });
   });
 });

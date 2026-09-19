@@ -51,7 +51,17 @@ import {
   PLATFORM_INTERNAL_EMAIL_SENTINEL,
 } from '../../src/email/send-verification.ts';
 import app from '../../src/index.ts';
-import { emailDestinations, platformSettings, projects, users } from '../../src/schema.ts';
+import {
+  reconcileEmailDestinationCleanups,
+  runEmailDestinationCleanup,
+} from '../../src/provisioning/email-destination-cleanup.ts';
+import {
+  emailDestinationCleanups,
+  emailDestinations,
+  platformSettings,
+  projects,
+  users,
+} from '../../src/schema.ts';
 import {
   cfError,
   cfSuccess,
@@ -949,7 +959,7 @@ describe('DELETE /projects/:id/email/destinations/:destId', () => {
     expect(await rowsFor(projectB.id)).toHaveLength(1);
   });
 
-  it('still removes the DB row when the CF delete fails', async () => {
+  it('revokes consent immediately and retries failed provider cleanup from a durable tag', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id);
     mockCfApi();
@@ -966,6 +976,136 @@ describe('DELETE /projects/:id/email/destinations/:destId', () => {
       .from(emailDestinations)
       .where(eq(emailDestinations.id, dest.id));
     expect(rows).toHaveLength(0);
+    expect(await env.db.select().from(emailDestinationCleanups)).toEqual([
+      expect.objectContaining({
+        cf_destination_id: 'cf-tag-a@b.com',
+        status: 'pending',
+        attempts: 1,
+      }),
+    ]);
+
+    mockCfApi();
+    await reconcileEmailDestinationCleanups(
+      env.db,
+      { accountId: env.CF_ACCOUNT_ID, apiToken: env.CF_API_TOKEN },
+      10,
+      new Date(Date.now() + 2 * 60 * 60_000),
+    );
+    expect(await env.db.select().from(emailDestinationCleanups)).toEqual([
+      expect.objectContaining({
+        cf_destination_id: 'cf-tag-a@b.com',
+        status: 'completed',
+        attempts: 2,
+      }),
+    ]);
+  });
+
+  it('refuses a stale provider tag after its cleanup completed', async () => {
+    const user = await createTestUser(env.db);
+    const first = await createTestProject(env.db, user.id, 'first-tag-owner');
+    const second = await createTestProject(env.db, user.id, 'second-tag-owner');
+    mockCfApi();
+    const created = await addDestination(first.id, user.jwt, 'stale@example.com');
+    const destination = (await created.json()) as { id: string };
+    expect((await removeDestination(first.id, destination.id, user.jwt)).status).toBe(200);
+
+    mockCfApi({
+      addEmailDestination: () => cfError('address already exists'),
+      listEmailDestinations: () =>
+        cfSuccess([
+          {
+            tag: 'cf-tag-stale@example.com',
+            email: 'stale@example.com',
+            verified: '2026-09-01T00:00:00Z',
+            created: '2026-09-01T00:00:00Z',
+            modified: '2026-09-01T00:00:00Z',
+          },
+        ]),
+    });
+    const stale = await addDestination(second.id, user.jwt, 'stale@example.com', emailEnv());
+    expect(stale.status).toBe(409);
+    expect(await rowsFor(second.id)).toHaveLength(0);
+  });
+
+  it('fences a sibling add that recovers the tag while provider deletion is in flight', async () => {
+    const user = await createTestUser(env.db);
+    const deleting = await createTestProject(env.db, user.id, 'deleting-tag-owner');
+    const sibling = await createTestProject(env.db, user.id, 'sibling-tag-owner');
+    mockCfApi();
+    const created = await addDestination(deleting.id, user.jwt, 'racing@example.com');
+    const destination = (await created.json()) as { id: string };
+
+    let siblingStatus: number | undefined;
+    mockCfApi({
+      addEmailDestination: () => cfError('address already exists'),
+      listEmailDestinations: () =>
+        cfSuccess([
+          {
+            tag: 'cf-tag-racing@example.com',
+            email: 'racing@example.com',
+            verified: '2026-09-01T00:00:00Z',
+            created: '2026-09-01T00:00:00Z',
+            modified: '2026-09-01T00:00:00Z',
+          },
+        ]),
+      deleteEmailDestination: async () => {
+        siblingStatus = (
+          await addDestination(sibling.id, user.jwt, 'racing@example.com', emailEnv())
+        ).status;
+        return cfSuccess({ tag: 'cf-tag-racing@example.com' });
+      },
+    });
+
+    expect((await removeDestination(deleting.id, destination.id, user.jwt)).status).toBe(200);
+    expect(siblingStatus).toBe(409);
+    expect(await rowsFor(sibling.id)).toHaveLength(0);
+    expect(await env.db.select().from(emailDestinationCleanups)).toEqual([
+      expect.objectContaining({
+        cf_destination_id: 'cf-tag-racing@example.com',
+        status: 'completed',
+      }),
+    ]);
+  });
+
+  it('does not let an expired cleanup attempt overwrite a newer completion', async () => {
+    await env.db
+      .insert(emailDestinationCleanups)
+      .values({ cf_destination_id: 'cf-tag-expired-lease' });
+    let rejectFirst: ((error: Error) => void) | undefined;
+    let reachedFirst: (() => void) | undefined;
+    const firstReached = new Promise<void>((resolve) => {
+      reachedFirst = resolve;
+    });
+    let calls = 0;
+    vi.stubGlobal('fetch', async () => {
+      calls += 1;
+      if (calls === 1) {
+        reachedFirst?.();
+        return new Promise<Response>((_resolve, reject) => {
+          rejectFirst = reject;
+        });
+      }
+      return cfSuccess({ tag: 'cf-tag-expired-lease' });
+    });
+    const startedAt = new Date();
+    const first = runEmailDestinationCleanup(
+      env.db,
+      { accountId: env.CF_ACCOUNT_ID, apiToken: env.CF_API_TOKEN },
+      'cf-tag-expired-lease',
+      startedAt,
+    );
+    await firstReached;
+    await runEmailDestinationCleanup(
+      env.db,
+      { accountId: env.CF_ACCOUNT_ID, apiToken: env.CF_API_TOKEN },
+      'cf-tag-expired-lease',
+      new Date(startedAt.getTime() + 6 * 60_000),
+    );
+    rejectFirst?.(new Error('late timeout'));
+    await first;
+    expect(await env.db.select().from(emailDestinationCleanups)).toEqual([
+      expect.objectContaining({ status: 'completed', attempts: 2 }),
+    ]);
   });
 });
 
@@ -1651,6 +1791,24 @@ describe('GET /email/destinations/confirm', () => {
     expect(res.status).toBe(200);
     expect(res.headers.get('cache-control')).toBe('no-store');
     expect(res.headers.get('referrer-policy')).toBe('no-referrer');
+  });
+
+  it('does not report confirmation after consent is concurrently removed', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    const did = await seedPlatformPending('shared@example.com', project);
+    const updateStatus = dbModule.updateEmailDestinationStatus;
+    vi.spyOn(dbModule, 'updateEmailDestinationStatus').mockImplementationOnce(async (...args) => {
+      await dbModule.deleteEmailDestination(env.db, did);
+      return updateStatus(...args);
+    });
+    const response = await confirm(await makeToken(project.id, did, 'shared@example.com'));
+    expect(response.status).toBe(404);
+    expect(await response.text()).toContain('Destination not found');
+    expect(await readVerifiedDestinations(project.id)).toEqual([]);
+    expect(await env.db.select().from(emailDestinationCleanups)).toMatchObject([
+      { cf_destination_id: 'cf-tag-shared', status: 'pending' },
+    ]);
   });
 
   it('returns 400 for a missing token', async () => {

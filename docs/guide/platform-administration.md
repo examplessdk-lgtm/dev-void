@@ -229,6 +229,29 @@ void platform email limit hr-portal --monthly 2000 --burst 30
 
 The project's page in the admin UI shows the current values and clears an override.
 
+### Recovering an interrupted send
+
+If a sender stops after beginning a provider call, its unresolved attempt blocks
+removal of the project or sender domain. Inspect the attempt ID and start time:
+
+```sh
+void platform email attempts --project hr-portal
+```
+
+First confirm that the original execution has ended through your Worker logs or
+incident records. Once the attempt is at least 24 hours old, resolve it with an
+audit reason that contains no recipient address or message content:
+
+```sh
+void platform email attempt-resolve <attempt-id> --ended --reason "Original Worker execution ended; provider outcome could not be verified" --plan
+void platform email attempt-resolve <attempt-id> --ended --reason "Original Worker execution ended; provider outcome could not be verified"
+```
+
+This records the send as `outcome_unknown` and releases its cleanup fence. The
+attempt remains charged and is never retried. If its 30-day delivery record has
+expired, only its recipient-free fence is removed. Do not resolve an attempt
+while its original execution may still be active.
+
 ### Registering email domains for projects
 
 Your users may hold no Cloudflare account. Tell the platform that administrators register email domains, so `void email domain add` prints the command to ask you for instead of opening a token-creation page:

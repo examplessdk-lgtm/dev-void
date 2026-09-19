@@ -920,8 +920,30 @@ describe('email verification gating on account linking', () => {
         email: 'new-owner@example.com',
         emailVerified: true,
       });
+      let deleted = false;
       const calls = stubEmailRoutingOver(github, (method) => {
+        if (method === 'DELETE') {
+          deleted = true;
+          return Response.json({
+            success: true,
+            errors: [],
+            messages: [],
+            result: { tag: 'cf-tag-racing-manual' },
+          });
+        }
         if (method === 'POST') {
+          if (deleted) {
+            return Response.json({
+              success: true,
+              errors: [],
+              messages: [],
+              result: {
+                tag: 'cf-tag-racing-manual-recreated',
+                email: 'old-owner@example.com',
+                verified: null,
+              },
+            });
+          }
           return Response.json(
             {
               success: false,
@@ -983,9 +1005,8 @@ describe('email verification gating on account linking', () => {
         expect.stringContaining('/email/routing/addresses/cf-tag-racing-manual'),
       ]);
 
-      // The retry sees the rotated owner: the old address is now somebody
-      // else's, so it gets the per-project platform link, not inherited
-      // consent.
+      // The rollback deleted the old provider tag. The retry creates a fresh
+      // provider destination and waits on its new verification email.
       const retry = await app.fetch(
         new Request(`http://localhost/projects/${project.id}/email/destinations`, {
           method: 'POST',
@@ -998,8 +1019,7 @@ describe('email verification gating on account linking', () => {
       expect(retry.status).toBe(201);
       expect(await retry.json()).toMatchObject({
         status: 'pending',
-        verification_source: 'platform',
-        platformVerificationPending: true,
+        verification_source: 'cf',
       });
     });
 

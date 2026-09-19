@@ -12,7 +12,15 @@ import {
 import { createBuild } from '../../src/db.ts';
 import * as db from '../../src/db.ts';
 import app from '../../src/index.ts';
-import { resources, projects, deployments, builds, emailDestinations } from '../../src/schema.ts';
+import {
+  resources,
+  projects,
+  deployments,
+  builds,
+  emailDestinationCleanups,
+  emailDestinations,
+  users,
+} from '../../src/schema.ts';
 import {
   setupEnv,
   teardownEnv,
@@ -630,7 +638,7 @@ describe('DELETE /projects/:id — CF email destination cleanup', () => {
     expect(rows).toHaveLength(1);
   });
 
-  it('still deletes the project when Cloudflare refuses the destination delete', async () => {
+  it('deletes the project while retaining failed provider cleanup for scheduled retry', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id, 'mail-cf-down');
     mockCfApi();
@@ -655,10 +663,12 @@ describe('DELETE /projects/:id — CF email destination cleanup', () => {
       }),
       env,
     );
-    // A CF orphan is recoverable by a sweep; a half-torn-down project is not.
     expect(res.status).toBe(200);
     const [dbProject] = await env.db.select().from(projects).where(eq(projects.id, project.id));
     expect(dbProject).toBeUndefined();
+    expect(await env.db.select().from(emailDestinationCleanups)).toEqual([
+      expect.objectContaining({ cf_destination_id: 'cf-tag-down', status: 'pending', attempts: 1 }),
+    ]);
   });
 });
 
@@ -684,6 +694,47 @@ describe('POST /projects/:id/email/destinations — losing the teardown race', (
       })
       .map((call) => (typeof call[0] === 'string' ? call[0] : String(call[0])));
   }
+
+  it('retires a provider tag when teardown marks the locked project deleting', async () => {
+    const user = await createTestUser(env.db);
+    await env.db.update(users).set({ email: 'owner@example.com' }).where(eq(users.id, user.id));
+    const project = await createTestProject(env.db, user.id, 'mail-race-deleting');
+    const fetchMock = mockCfApi({
+      addEmailDestination: async (_url: string, init?: RequestInit) => {
+        await env.db
+          .update(projects)
+          .set({ status: 'deleting' })
+          .where(eq(projects.id, project.id));
+        const body = typeof init?.body === 'string' ? JSON.parse(init.body) : {};
+        return cfSuccess({
+          tag: 'cf-tag-project-deleting',
+          email: body.email,
+          verified: '2026-04-27T00:00:00Z',
+          created: '2026-04-27T00:00:00Z',
+          modified: '2026-04-27T00:00:00Z',
+        });
+      },
+    });
+
+    const res = await app.fetch(
+      addDestinationRequest(project.id, user.jwt, 'owner@example.com'),
+      env,
+    );
+
+    expect(res.status).toBe(409);
+    expect(await env.db.select().from(emailDestinations)).toHaveLength(0);
+    expect(cfDeleteCalls(fetchMock)).toEqual([
+      expect.stringContaining(
+        '/email/routing/addresses/cf-tag-project-deleting',
+      ) as unknown as string,
+    ]);
+    expect(await env.db.select().from(emailDestinationCleanups)).toEqual([
+      expect.objectContaining({
+        cf_destination_id: 'cf-tag-project-deleting',
+        status: 'completed',
+      }),
+    ]);
+  });
 
   it('deletes the CF destination it created and returns the not-inserted status', async () => {
     const user = await createTestUser(env.db);

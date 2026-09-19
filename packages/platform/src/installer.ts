@@ -94,6 +94,9 @@ export function parsePlatformRuntimeManifest(value: unknown): PlatformRuntimeMan
   if (root.emailProtocolVersion === 1 && artifactsValue.emailGateway === undefined) {
     throw new Error('Email protocol version 1 requires an emailGateway runtime artifact.');
   }
+  if (artifactsValue.emailGateway !== undefined && root.emailProtocolVersion !== 1) {
+    throw new Error('An emailGateway runtime artifact requires email protocol version 1.');
+  }
   const artifactNames = [
     'api',
     'dispatch',

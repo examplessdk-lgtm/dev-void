@@ -4,13 +4,13 @@ import type { Context } from 'hono';
 import { signConfirmToken, type ConfirmTokenPayload } from '../auth/confirm-token.ts';
 import { capabilityMiddleware } from '../capabilities.ts';
 import {
-  countProjectsUsingDestination,
   deleteEmailDestination,
   getEmailDestinationByAddress,
   getEmailDestinationsByProjectId,
   getProject,
   getUser,
   promoteEmailDestinationWithOwnerAudit,
+  queueUnreferencedEmailDestinationCleanup,
   tryCreateEmailDestination,
   updateEmailDestinationStatus,
   type Db,
@@ -37,9 +37,9 @@ import {
 } from '../email/settings.ts';
 import type { ApiEnv } from '../env.ts';
 import { isForeignKeyViolation, isUniqueViolation } from '../pg-errors.ts';
+import { runEmailDestinationCleanup } from '../provisioning/email-destination-cleanup.ts';
 import {
   addDestination,
-  deleteDestination,
   isAlreadyExistsError,
   listDestinations,
   type CfDestinationAddress,
@@ -54,8 +54,7 @@ import type { EmailDestination } from '../types.ts';
  *   - 5 requests / minute (TTL 5m)
  *   - 50 requests / day   (TTL 25h)
  *
- * Counters live in ROUTING KV (same namespace as the email-* counters)
- * with poisoning defense identical to the proxy's send counter:
+ * Counters live in ROUTING KV. Treat malformed values as zero:
  * `parseInt('NaN', 10) → NaN` would silently bypass `count >= LIMIT` if
  * not coerced, so any non-finite or negative read becomes 0.
  */
@@ -78,10 +77,9 @@ const MAX_ADDRESS_LENGTH = 320;
 /**
  * Email observability + destinations management.
  *
- * Counters live in `ROUTING` KV under monthly buckets — exposed via the
- * `/usage` endpoint. Recipient destinations live in the `email_destinations`
- * Postgres table; the `/destinations` endpoints proxy CF Email Routing's
- * account-level address API and keep our per-project view in sync.
+ * Usage and recipient consent are SQL-authoritative. The destination routes
+ * proxy CF Email Routing's account-level address API and keep the per-project
+ * consent view in sync.
  */
 const app = new Hono<ApiEnv>()
   // Path-scoped, NOT `use('*')` as `domains.ts` does: this router is one of
@@ -166,13 +164,16 @@ const app = new Hono<ApiEnv>()
           }
           if (cf.tag === row.cf_destination_id) {
             // The click answered the destination THIS row registered.
-            await updateEmailDestinationStatus(
+            const updated = await updateEmailDestinationStatus(
               context.get('db'),
               row.id,
               'verified',
               cf.tag,
               cf.verified,
             );
+            if (!updated) {
+              continue;
+            }
           } else {
             // The account carries the address under a tag this row never
             // registered: its own destination was deleted at Cloudflare
@@ -269,9 +270,7 @@ const app = new Hono<ApiEnv>()
       return context.json({ error: 'invalid address' }, 400);
     }
 
-    // Per-project rate-limit BEFORE calling CF. Counters use the
-    // NaN-poison-resistant reader; reads are not strongly consistent so
-    // the gate is approximate, but at our planned volumes that's fine.
+    // Rate-limit before Cloudflare calls. KV reads make this abuse gate approximate.
     const rateCheck = await checkAndIncrementAddRate(context.env.ROUTING, projectId);
     if (!rateCheck.allowed) {
       return context.json({ error: rateCheck.message }, 429);
@@ -379,8 +378,6 @@ const app = new Hono<ApiEnv>()
           context.get('db'),
           context.env.CF_ACCOUNT_ID,
           context.env.CF_API_TOKEN,
-          projectId,
-          address,
           cfRow.tag,
         );
         return context.json({ error: 'destination concurrently modified, try again' }, 409);
@@ -420,8 +417,6 @@ const app = new Hono<ApiEnv>()
           context.get('db'),
           context.env.CF_ACCOUNT_ID,
           context.env.CF_API_TOKEN,
-          projectId,
-          address,
           cfRow.tag,
         );
         return context.json({ error: 'destination concurrently modified, try again' }, 409);
@@ -466,8 +461,6 @@ const app = new Hono<ApiEnv>()
         context.get('db'),
         context.env.CF_ACCOUNT_ID,
         context.env.CF_API_TOKEN,
-        projectId,
-        address,
         cfRow.tag,
       );
       return context.json({ error: 'destination concurrently modified, try again' }, 409);
@@ -500,21 +493,13 @@ const app = new Hono<ApiEnv>()
       return context.json({ error: 'destination not found' }, 404);
     }
 
-    // Admission observes this committed revocation.
-    await deleteEmailDestination(context.get('db'), dest.id);
-    if (
-      dest.cf_destination_id &&
-      (await countProjectsUsingDestination(context.get('db'), dest.cf_destination_id)) === 0
-    ) {
-      try {
-        await deleteDestination(
-          context.env.CF_ACCOUNT_ID,
-          context.env.CF_API_TOKEN,
-          dest.cf_destination_id,
-        );
-      } catch (error) {
-        console.error('[email] destination provider cleanup failed:', error);
-      }
+    const cleanupTag = await deleteEmailDestination(context.get('db'), dest.id);
+    if (cleanupTag) {
+      await runEmailDestinationCleanup(
+        context.get('db'),
+        { accountId: context.env.CF_ACCOUNT_ID, apiToken: context.env.CF_API_TOKEN },
+        cleanupTag,
+      );
     }
     return context.json({ ok: true });
   })
@@ -771,25 +756,10 @@ async function dispatchPlatformVerification(
 /**
  * Insert + retry-on-race wrapper around `tryCreateEmailDestination`.
  *
- * The underlying helper returns `{ row: null }` only when:
- *   1. Our INSERT lost the ON CONFLICT race AND
- *   2. The winning row was DELETED before our follow-up SELECT could
- *      read it back.
- *
- * That's a real, observable race (sibling tab issuing a DELETE while
- * we're processing a duplicate POST). One retry with a fresh insert+
- * select almost always wins — if it still misses, the caller surfaces
- * a clean 409 to the user with a "concurrently modified, try again"
- * message rather than a generic 500. The caller rolls the CF tag back.
- *
- * A foreign-key violation reports the same "not inserted" outcome: see
- * the catch below. So does `ownerEmailChanged`, without the retry: the
- * helper found the owner's address rotated away from the one whose
- * Cloudflare consent the Option C branch meant to inherit (the read the
- * branch made is unlocked, and a login can commit between it and the
- * insert). A second attempt would read the same answer. The 409 is right
- * on the merits — the retry re-reads the owner and, the address now being
- * somebody else's, takes the Option B platform link instead.
+ * A missing row can mean the conflicting row disappeared before readback,
+ * or that project teardown marked the project deleting after the route's
+ * initial guard. One retry resolves the former; the latter stays rejected
+ * and lets the caller retire the provider tag.
  */
 async function tryInsertWithRetry(
   db: Db,
@@ -836,54 +806,21 @@ async function tryInsertWithRetry(
   return { row: null, inserted: false };
 }
 
-/**
- * Undo the CF-side registration for a destination whose row never landed.
- *
- * `email_destinations` rows are the ONLY thing that maps an account-level CF
- * destination back to a project — teardown's cleanup reads them, and there is
- * no sweep for one nothing points at. Every path here already failed to
- * persist a row, so without this the address stays allocated forever against
- * the shared 200-destination account cap.
- *
- * The reference count must be ZERO, not `<= 1` the way the DELETE route reads
- * it: that route still holds its own row, and we have none. A live sibling
- * project can legitimately share the tag (the already-exists recovery above
- * reuses one CF address across projects), so a non-zero count must never
- * delete — it would silently revoke the sibling's recipient. Anything that
- * goes wrong keeps the original log line so an operator can still find the
- * tag by hand.
- *
- * Takes `db` / account / token explicitly rather than a Hono `Context`
- * because `autoAddOwnerDestination` in `routes/projects.ts` shares it and has
- * no context by design — it runs after the 201 response, so it outlives the
- * request whose context it would otherwise borrow.
- */
+/** Queue an allocated provider tag when its project row did not land. */
 export async function rollbackCfDestination(
   db: Db,
   accountId: string,
   apiToken: string,
-  projectId: string,
-  address: string,
   cfDestinationId: string,
 ): Promise<void> {
-  try {
-    const refs = await countProjectsUsingDestination(db, cfDestinationId);
-    if (refs === 0) {
-      await deleteDestination(accountId, apiToken, cfDestinationId);
-      return;
-    }
-  } catch (err) {
-    console.error('[email] CF destination rollback failed:', err);
+  if (await queueUnreferencedEmailDestinationCleanup(db, cfDestinationId)) {
+    await runEmailDestinationCleanup(db, { accountId, apiToken }, cfDestinationId);
   }
-  console.error(
-    `[email] destination row not persisted for project=${projectId} address=${address}; orphan CF tag candidate: ${cfDestinationId}`,
-  );
 }
 
 /**
- * Approximate per-project rate-limit on POST /destinations. Same
- * NaN-poisoning defense as the proxy's send counter (`parseInt('NaN')`
- * returns NaN, which would silently bypass `count >= LIMIT`).
+ * Approximate per-project rate-limit on POST /destinations. Malformed values
+ * become zero so they cannot bypass the numeric comparisons.
  *
  * Not strongly consistent — KV reads can lag writes for ~60s per colo,
  * so racing requests across colos can exceed the limit by a few. That's

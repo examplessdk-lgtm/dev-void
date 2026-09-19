@@ -241,7 +241,10 @@ export async function getEmailDomainStatusForProject(
           );
       }
     });
-    resolved = (await resolveEmailDomain(db, rawDomain))!;
+    resolved = await resolveEmailDomain(db, rawDomain);
+    if (!resolved || resolved.route.project_id !== project.id) {
+      return context.json({ error: 'email domain not found' }, 404);
+    }
   }
   const op = (
     await context
@@ -314,7 +317,7 @@ export async function rotateEmailIngressSecretForProject(
         .limit(1)
     )[0];
     const current = await resolveEmailDomain(context.get('db'), rawDomain);
-    if (!current) {
+    if (!current || current.route.project_id !== project.id) {
       return context.json({ error: 'email domain not found' }, 404);
     }
     return context.json({
@@ -373,7 +376,7 @@ export async function getEmailOperationForProject(
     return context.json({ error: 'email operation not found' }, 404);
   }
   const resolved = await resolveEmailDomain(context.get('db'), found.route.domain);
-  if (!resolved) {
+  if (!resolved || resolved.route.project_id !== project.id) {
     return context.json({ error: 'email domain not found' }, 404);
   }
   const domain = serializeEmailRoute(resolved.route, resolved.connection);

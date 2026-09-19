@@ -152,6 +152,32 @@ describe('operator argument and help coverage', () => {
     expect(() => parseOperatorArgs(['email', 'policy', '--domains', 'x'])).toThrow();
     expect(() => parseOperatorArgs(['email', 'limit'])).toThrow();
   });
+  it('routes attempt inspection and attested resolution with a bounded audit reason', () => {
+    expect(
+      parseOperatorArgs(['email', 'attempts', '--project', 'my-project', '--page', '2']),
+    ).toMatchObject({
+      method: 'GET',
+      path: '/email/attempts',
+      query: { project: 'my-project', page: '2' },
+    });
+    expect(
+      parseOperatorArgs([
+        'email',
+        'attempt-resolve',
+        'attempt/id',
+        '--ended',
+        '--reason',
+        'Worker execution ended',
+        '--yes',
+      ]),
+    ).toMatchObject({
+      method: 'POST',
+      path: '/email/attempts/attempt%2Fid/resolve',
+      body: { ended: true, reason: 'Worker execution ended' },
+      yes: true,
+    });
+    expect(() => parseOperatorArgs(['email', 'attempts', '--ended'])).toThrow();
+  });
   it('routes the email domain verbs and carries their booleans in the body', () => {
     expect(parseOperatorArgs(['email', 'domains', '--project', 'hr-portal'])).toMatchObject({
       method: 'GET',
@@ -370,6 +396,46 @@ describe('operator transport and execution', () => {
     expect(fetcher).toHaveBeenCalledTimes(2);
     expect(JSON.parse(String(fetcher.mock.calls[1]![1]!.body))).toEqual({
       versions: { api: 'version-a' },
+    });
+  });
+  it('previews then submits an attested email attempt resolution', async () => {
+    vi.stubEnv('VOID_API_URL', 'https://one.example');
+    vi.stubEnv('VOID_OPERATOR_TOKEN', 'operator');
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        Response.json({
+          dryRun: true,
+          action: 'email.attempt.resolve',
+          target: { attemptId: 'er_1' },
+        }),
+      )
+      .mockResolvedValueOnce(Response.json({ state: 'outcome_unknown', charged: true }));
+    vi.stubGlobal('fetch', fetcher);
+    await runOperatorCommand(
+      parseOperatorArgs([
+        'email',
+        'attempt-resolve',
+        'er_1',
+        '--ended',
+        '--reason',
+        'Worker execution ended',
+        '--yes',
+      ]),
+    );
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(String(fetcher.mock.calls[0]![0])).toBe(
+      'https://one.example/operator/v1/email/attempts/er_1/resolve',
+    );
+    expect(JSON.parse(String(fetcher.mock.calls[0]![1]!.body))).toEqual({
+      ended: true,
+      reason: 'Worker execution ended',
+      dryRun: true,
+    });
+    expect(JSON.parse(String(fetcher.mock.calls[1]![1]!.body))).toEqual({
+      ended: true,
+      reason: 'Worker execution ended',
     });
   });
   it('drains runtime cursors and rejects repeated cursors instead of spinning', async () => {

@@ -75,6 +75,7 @@ import {
   deleteCustomHostname,
   getCustomHostname,
 } from './provisioning/cloudflare-api.ts';
+import { reconcileEmailDestinationCleanups } from './provisioning/email-destination-cleanup.ts';
 import { oidcRoutes } from './routes/auth-oidc.ts';
 import auth from './routes/auth.ts';
 import deleteRoute from './routes/delete.ts';
@@ -443,6 +444,10 @@ async function scheduled(
   const capabilities = getPlatformCapabilities(env);
 
   if (capabilities.email) {
+    await reconcileEmailDestinationCleanups(db, {
+      accountId: env.CF_ACCOUNT_ID,
+      apiToken: env.CF_API_TOKEN,
+    }).catch((error) => console.error('[scheduled] email destination cleanup failed:', error));
     await (async () => {
       const operationId = await ensureSharedEmailConnection(db, env);
       if (operationId) {

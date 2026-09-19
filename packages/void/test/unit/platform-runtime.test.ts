@@ -112,6 +112,9 @@ describe('platform runtime manifest', () => {
     expect(parsePlatformRuntimeManifest(legacySafety).safetyProtocols).toEqual({ sandboxDrain: 0 });
     const { emailGateway: _gateway, ...fourArtifacts } = manifest.artifacts;
     const { emailProtocolVersion: _emailProtocolVersion, ...preEmailRuntime } = manifest;
+    expect(() => parsePlatformRuntimeManifest(preEmailRuntime)).toThrow(
+      'An emailGateway runtime artifact requires email protocol version 1',
+    );
     expect(
       parsePlatformRuntimeManifest({
         ...preEmailRuntime,

@@ -367,6 +367,14 @@ failure leaves a retryable cleanup operation, including after project teardown.
 Removal never discards an unresolved cleanup record; its operation remains visible
 until the provider resources have been reconciled.
 
+Recipient consent removal follows the same durability rule. Commit revocation and
+cleanup intent together, then delete an unreferenced Cloudflare destination outside
+the transaction. Fence registration against that immutable provider tag before
+deletion starts, including registrations that read the tag before revocation.
+Retain a recipient-free tag tombstone after cleanup so a late registration cannot
+restore a reference to a deleted destination. Failed provider cleanup is retried;
+a sibling project's live reference prevents account-level deletion.
+
 ## Bounded tenant execution
 
 Cloudflare's native email message is not an RPC-serializable application object.
@@ -528,6 +536,12 @@ expires, containing only its opaque ID, project, sender domain and start time.
 That fence must contain no recipient address or message content. A completed
 `outcome_unknown` remains non-replayable but no longer represents an active call
 that must block resource cleanup.
+An administrator can list unresolved active-call fences and, after confirming
+the original Worker execution has ended and at least 24 hours have elapsed,
+resolve one as `outcome_unknown` with an audited reason. Resolution is atomic
+with removing the fence, retains the recipient-attempt charge, and never
+replays the provider call. If the 30-day delivery record has expired, only the
+PII-free fence is removed. Elapsed time by itself never resolves an attempt.
 Analytics, searchable message content and a hosted mailbox remain out of scope.
 
 `void email logs` becomes a view over this ledger, with receipt/action IDs that

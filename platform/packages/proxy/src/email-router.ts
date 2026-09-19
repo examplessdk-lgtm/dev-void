@@ -14,12 +14,12 @@ import {
 import { leaseBearer, leaseEmailDomainCredential } from './email-lease.ts';
 import {
   MAX_MIME_BYTES,
+  classifySendRawRecipient,
+  parseSendRawResult,
   readMimeFromAddrSpec,
   readSenderDomain,
-  readSendRawAddressList,
   recordInboundDelivery,
 } from './email.ts';
-import type { SendRawResult } from './email.ts';
 import type { Env } from './types.ts';
 
 // Built via new RegExp to dodge oxlint no-control-regex rule.
@@ -406,7 +406,7 @@ export async function routeRelayed(
   // delivery against it, exactly as `routeInbound` logs against the real
   // message. The domain + authenticated project id key its REST send path
   // (the customer account's send_raw with the domain's leased credential).
-  const relayed = createRelayedMessage(env, envelope, { domain, projectId });
+  const relayed = createRelayedMessage(envelope);
 
   const gate: OutboundGate = {
     projectId,
@@ -456,27 +456,48 @@ export async function routeRelayed(
   return { reject: relayed.rejectedReason() !== null };
 }
 
-/** A message stand-in for relayed replies; forwarding requires a native event. */
-function createRelayedMessage(
-  env: Env,
-  envelope: EmailEnvelope,
-  relay: { domain: string; projectId: string },
-): { message: ForwardableEmailMessage; rejectedReason: () => string | null } {
+/** A message stand-in for relayed delivery; forwarding requires a native event. */
+function createRelayedMessage(envelope: EmailEnvelope): {
+  message: ForwardableEmailMessage;
+  rejectedReason: () => string | null;
+} {
   let reason: string | null = null;
 
-  // Relayed replies use the customer account's Email Sending API.
-  async function sendRaw(from: string, to: string, raw: Uint8Array): Promise<void> {
-    // The account is selected by the reply sender's verified domain.
-    const senderDomain = from.slice(from.indexOf('@') + 1).toLowerCase();
-    // A fresh lease checks project ownership at send time.
-    const lease = await leaseEmailDomainCredential(env, senderDomain, relay.projectId);
-    if (!lease) {
-      throw new Error('could not lease the domain credential');
-    }
-    // send_raw carries the MIME as a JSON string. Decode FATALLY, as the
-    // outbound fork does: relayed mail is remote-sender bytes, and a lenient
-    // decode would silently alter a non-UTF-8 body.
-    const mimeMessage = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(raw);
+  const message = {
+    from: envelope.from,
+    to: envelope.to,
+    rawSize: envelope.rawSize,
+    headers: new Headers(envelope.headers),
+    raw: envelopeRawStream(envelope.raw),
+    setReject(r: string) {
+      reason = r;
+    },
+    async forward(_to: string, _headers?: Headers) {
+      throw new DefinitiveEmailActionError('relayed forward requires a native email event');
+    },
+  };
+  return {
+    message: message as unknown as ForwardableEmailMessage,
+    rejectedReason: () => reason,
+  };
+}
+
+// Finish all local work before attempt_started: a missing lease or invalid
+// MIME means no provider submission occurred and the reservation can be cancelled.
+async function prepareRelayedReply(
+  env: Env,
+  projectId: string,
+  from: string,
+  raw: Uint8Array,
+  expectedAccountId?: string,
+): Promise<(to: string) => Promise<void>> {
+  const senderDomain = from.slice(from.indexOf('@') + 1).toLowerCase();
+  const lease = await leaseEmailDomainCredential(env, senderDomain, projectId);
+  if (!lease || (expectedAccountId && lease.accountId !== expectedAccountId)) {
+    throw new Error('could not lease the domain credential');
+  }
+  const mimeMessage = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(raw);
+  return async (to) => {
     let res: Response;
     try {
       res = await fetch(
@@ -494,54 +515,40 @@ function createRelayedMessage(
       throw new Error('email sending request failed');
     }
     if (!res.ok) {
+      if (res.status >= 500 || res.status === 408) {
+        throw new Error('email sending API outcome unknown');
+      }
       throw new DefinitiveEmailActionError(`email sending API returned ${res.status}`);
     }
-    let data: unknown = null;
+    let data: unknown;
     try {
       data = await res.json();
     } catch {
-      data = null;
+      throw new Error('email sending API response unreadable');
     }
-    const success =
-      typeof data === 'object' && data !== null && (data as { success?: unknown }).success === true;
-    if (!success) {
+    if (typeof data !== 'object' || data === null || !('success' in data)) {
+      throw new Error('email sending API response invalid');
+    }
+    if (data.success === false) {
       throw new DefinitiveEmailActionError('email sending API refused the message');
     }
-    // success:true with the one recipient on a failure list is NOT sent —
-    // the same per-recipient read the outbound fork makes.
-    const result = (data as { result?: SendRawResult | null }).result;
-    const target = to.toLowerCase();
-    if (readSendRawAddressList(result?.permanent_bounces).has(target)) {
+    if (data.success !== true) {
+      throw new Error('email sending API response invalid');
+    }
+    const result = parseSendRawResult((data as { result?: unknown }).result);
+    if (!result) {
+      throw new Error('email sending API response invalid');
+    }
+    const outcome = classifySendRawRecipient(result, to);
+    if (outcome === 'permanent_bounce') {
       throw new DefinitiveEmailActionError('recipient permanently bounced');
     }
-    if (readSendRawAddressList(result?.suppressed_recipients).has(target)) {
+    if (outcome === 'suppressed') {
       throw new DefinitiveEmailActionError('recipient is on the suppression list');
     }
-  }
-
-  const message = {
-    from: envelope.from,
-    to: envelope.to,
-    rawSize: envelope.rawSize,
-    headers: new Headers(envelope.headers),
-    raw: envelopeRawStream(envelope.raw),
-    setReject(r: string) {
-      reason = r;
-    },
-    async forward(_to: string, _headers?: Headers) {
-      throw new DefinitiveEmailActionError('relayed forward requires a native email event');
-    },
-    // The reply channel `enactSanitized` prefers when present. A native
-    // reply needs both the CF email event this lane never had and a genuine
-    // EmailMessage — whose class exposes no body accessor, so the recorded
-    // reply bytes could not cross it anyway; they arrive on the action.
-    async __voidRelayReply(from: string, to: string, raw: Uint8Array) {
-      await sendRaw(from, to, raw);
-    },
-  };
-  return {
-    message: message as unknown as ForwardableEmailMessage,
-    rejectedReason: () => reason,
+    if (outcome === 'outcome_unknown') {
+      throw new Error('email sending API did not classify the recipient');
+    }
   };
 }
 
@@ -566,23 +573,17 @@ async function logRecv(
     );
     return;
   }
-  // Guard the RAW list the same way `validateActions` does. A user worker can
-  // return anything, this runs OUTSIDE the try below, and it is scheduled on
-  // `ctx.waitUntil` — so a null entry used to escape as an unhandled rejection
-  // and silently cost the delivery its recv counter and its audit line.
+  // Guard the raw list the same way `validateActions` does because a tenant
+  // response can contain arbitrary values.
   const status = actions.some((a) => a && typeof a === 'object' && a.type === 'reject')
     ? 'rejected'
     : actions.length === 0
       ? 'accepted'
       : 'handled';
   try {
-    await recordInboundDelivery(env, projectId, {
+    await recordInboundDelivery(projectId, {
       from: String(message.from ?? ''),
       to: String(message.to ?? ''),
-      // sanitize() in email.ts handles control-char stripping before logging;
-      // don't pre-truncate here so the full subject is available if logging
-      // ever moves to structured storage.
-      subject: message.headers.get('Subject') ?? '',
       byteSize: message.rawSize ?? 0,
       status,
     });
@@ -882,6 +883,24 @@ async function enactSanitized(
     if (admission.replay || admitted?.state !== 'reserved') {
       continue;
     }
+    let relayedReply: ((to: string) => Promise<void>) | undefined;
+    if (gate.transport === 'relay' && action.type === 'reply') {
+      try {
+        relayedReply = await prepareRelayedReply(
+          env,
+          gate.projectId,
+          action.from,
+          action.raw,
+          admission.accountId,
+        );
+      } catch {
+        await finishEmailAttempt(env, admission.operationId, [to], 'cancelled').catch(() => {
+          console.error('[email-router] could not cancel unsubmitted relayed reply');
+        });
+        console.error('[email-router] relayed reply could not be prepared');
+        continue;
+      }
+    }
     try {
       await startEmailAttempt(env, admission.operationId, [to]);
     } catch {
@@ -892,13 +911,8 @@ async function enactSanitized(
       if (action.type === 'forward') {
         await message.forward(to, action.headers);
       } else {
-        const relayReply = (
-          message as unknown as {
-            __voidRelayReply?: (from: string, to: string, raw: Uint8Array) => Promise<void>;
-          }
-        ).__voidRelayReply;
-        if (relayReply) {
-          await relayReply(action.from, to, action.raw);
+        if (relayedReply) {
+          await relayedReply(to);
         } else {
           const stream = new ReadableStream<Uint8Array>({
             start(controller) {

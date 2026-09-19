@@ -9,6 +9,7 @@ import {
   it,
   vi,
 } from 'vite-plus/test';
+import { hmacSignState } from '../../src/auth/hmac.ts';
 import { emailUnresolvedAttempts } from '../../src/email/admission-schema.ts';
 import { disableEmailDomainRouteAndDrain } from '../../src/email/admission.ts';
 import {
@@ -28,16 +29,19 @@ import {
   requestEmailDomainRemove,
   requestEmailDomainSync,
   requestEmailSecretRotation,
+  readConnectionSecret,
   resolveEmailDomain,
   resolveEmailIngress,
   runEmailOperation,
 } from '../../src/email/connection-service.ts';
 import type { ApiEnv } from '../../src/env.ts';
-import { projects } from '../../src/schema.ts';
+import { app } from '../../src/index.ts';
+import { deployments, projects } from '../../src/schema.ts';
 import { callsByTag, stubCustomerCf } from './email-domain-cf-stub.ts';
 import {
   clearTables,
   createTestProject,
+  createTestDeployment,
   createTestUser,
   setupEnv,
   teardownEnv,
@@ -71,6 +75,167 @@ afterEach(() => {
 });
 
 describe('durable zone email connections', () => {
+  it('resolves tenant dispatch limits from the owner plan and active deployment', async () => {
+    const owner = await createTestUser(env.db);
+    const project = await createTestProject(env.db, owner.id, 'ingress-limits');
+    stubCustomerCf({ zones });
+    const added = await requestEmailDomainAdd(env.db, bindings(), {
+      projectId: project.id,
+      domain: 'limits.example.com',
+      token: TOKEN,
+      actor: { kind: 'owner', userId: owner.id },
+    });
+    await runEmailOperation(env.db, bindings(), added.operationId);
+    const deployment = await createTestDeployment(env.db, project.id);
+    await env.db
+      .update(deployments)
+      .set({ manifest: JSON.stringify({ emailProtocolVersion: 1, limits: { cpuMs: 100 } }) })
+      .where(eq(deployments.id, deployment.id));
+    const { connection } = (await resolveEmailDomain(env.db, 'limits.example.com'))!;
+    const to = 'support@limits.example.com';
+    const proof = await hmacSignState(
+      `email-ingress-v1\n${connection.account_id}\n${connection.zone_id}\n${connection.ingress_worker_name}\n${to}`,
+      env.JWT_SECRET,
+    );
+    const response = await app.fetch(
+      new Request('https://api/internal/email/resolve-ingress', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-void-internal': proof },
+        body: JSON.stringify({
+          accountId: connection.account_id,
+          zoneId: connection.zone_id,
+          ingressName: connection.ingress_worker_name,
+          to,
+          secret: await readConnectionSecret(bindings(), connection),
+        }),
+      }),
+      bindings(),
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      projectId: project.id,
+      deploymentId: deployment.id,
+      limits: { cpuMs: 10, subRequests: 50 },
+    });
+  });
+
+  it('does not treat a DNS resolver failure as an unused mail domain', async () => {
+    const owner = await createTestUser(env.db);
+    const project = await createTestProject(env.db, owner.id, 'dns-failure');
+    const stub = stubCustomerCf({ zones, dnsStatus: 2 });
+    await expect(
+      requestEmailDomainAdd(env.db, bindings(), {
+        projectId: project.id,
+        domain: 'example.com',
+        token: TOKEN,
+        actor: { kind: 'owner', userId: owner.id },
+      }),
+    ).rejects.toThrow('DNS MX lookup');
+    expect(stub.calls.filter((call) => call.method !== 'GET')).toEqual([]);
+    expect(await env.db.select().from(emailOperations)).toEqual([]);
+  });
+
+  it('lets newer operations progress while an older write remains unknown', async () => {
+    const owner = await createTestUser(env.db);
+    const project = await createTestProject(env.db, owner.id, 'reconcile-fairness');
+    const failures: NonNullable<Parameters<typeof stubCustomerCf>[0]>['failOn'] = {
+      scriptPut: { message: 'write outcome unknown', status: 504 },
+    };
+    const stub = stubCustomerCf({
+      zones: {
+        ...zones,
+        'other.test': { id: 'zone-other', name: 'other.test', accountId: 'customer-account' },
+      },
+      failOn: failures,
+    });
+    const actor = { kind: 'owner' as const, userId: owner.id };
+    const first = await requestEmailDomainAdd(env.db, bindings(), {
+      projectId: project.id,
+      domain: 'mail.example.com',
+      actor,
+      token: TOKEN,
+    });
+    await runEmailOperation(env.db, bindings(), first.operationId);
+    delete failures.scriptPut;
+    const second = await requestEmailDomainAdd(env.db, bindings(), {
+      projectId: project.id,
+      domain: 'mail.other.test',
+      actor,
+      token: TOKEN,
+    });
+    await env.db
+      .update(emailOperations)
+      .set({ updated_at: '2020-01-01T00:00:00Z' })
+      .where(eq(emailOperations.id, first.operationId));
+    await reconcilePendingEmailOperations(env.db, bindings(), 1);
+    expect((await getEmailOperation(env.db, project.id, first.operationId))?.operation.status).toBe(
+      'unknown',
+    );
+    await reconcilePendingEmailOperations(env.db, bindings(), 1);
+    expect(
+      (await getEmailOperation(env.db, project.id, second.operationId))?.operation.status,
+    ).toBe('completed');
+    expect(callsByTag(stub.calls, 'scriptPut')).toHaveLength(2);
+  });
+
+  it('keeps uncertain Sending onboarding recoverable without repeating its write', async () => {
+    const owner = await createTestUser(env.db);
+    const project = await createTestProject(env.db, owner.id, 'sending-uncertain');
+    const failures: NonNullable<Parameters<typeof stubCustomerCf>[0]>['failOn'] = {
+      onboardSending: { message: 'write outcome unavailable', status: 504 },
+      sendingSubdomainsGet: { message: 'readback unavailable', status: 504 },
+    };
+    const senders: Array<{ name: string; enabled: boolean }> = [];
+    const stub = stubCustomerCf({ zones, failOn: failures, sendingSubdomains: senders });
+    const { operationId } = await requestEmailDomainAdd(env.db, bindings(), {
+      projectId: project.id,
+      domain: 'sending.example.com',
+      token: TOKEN,
+      actor: { kind: 'owner', userId: owner.id },
+    });
+    await runEmailOperation(env.db, bindings(), operationId);
+    expect((await getEmailOperation(env.db, project.id, operationId))?.operation.status).toBe(
+      'unknown',
+    );
+    expect((await resolveEmailDomain(env.db, 'sending.example.com'))?.route).toMatchObject({
+      inbound_status: 'ready',
+      outbound_status: 'pending',
+    });
+    delete failures.sendingSubdomainsGet;
+    senders.push({ name: 'sending.example.com', enabled: true });
+    await reconcilePendingEmailOperations(env.db, bindings());
+    expect((await getEmailOperation(env.db, project.id, operationId))?.operation.status).toBe(
+      'completed',
+    );
+    expect((await resolveEmailDomain(env.db, 'sending.example.com'))?.route.outbound_status).toBe(
+      'ready',
+    );
+    expect(callsByTag(stub.calls, 'onboardSending')).toHaveLength(1);
+  });
+
+  it('does not report sync ready after the domain loses its MX records', async () => {
+    const owner = await createTestUser(env.db);
+    const project = await createTestProject(env.db, owner.id, 'mx-drift');
+    const mx: Record<string, Array<string>> = {};
+    stubCustomerCf({ zones, mx });
+    const actor = { kind: 'owner' as const, userId: owner.id };
+    const added = await requestEmailDomainAdd(env.db, bindings(), {
+      projectId: project.id,
+      domain: 'mx.example.com',
+      token: TOKEN,
+      actor,
+    });
+    await runEmailOperation(env.db, bindings(), added.operationId);
+    mx['mx.example.com'] = [];
+    const sync = await requestEmailDomainSync(env.db, bindings(), added.routeId, actor);
+    await runEmailOperation(env.db, bindings(), sync);
+    expect((await getEmailOperation(env.db, project.id, sync))?.operation.status).toBe('blocked');
+    expect((await resolveEmailDomain(env.db, 'mx.example.com'))?.route).toMatchObject({
+      inbound_status: 'drifted',
+      inbound_reason: expect.stringContaining('MX records'),
+    });
+  });
+
   it('checks MX and explicit routing conflicts for new assignments on an existing zone', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id, 'sibling-preflight');
@@ -841,6 +1006,7 @@ describe('durable zone email connections', () => {
           accountId: env.CF_ACCOUNT_ID,
         },
       },
+      mx: { 'example.com': ['route1.mx.cloudflare.net'] },
     });
     const bootstrap = await ensureSharedEmailConnection(env.db, shared);
     expect(bootstrap).toBeTruthy();

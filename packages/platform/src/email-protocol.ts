@@ -99,7 +99,8 @@ export async function readEmailEnvelope(
     throw new Error('missing email envelope');
   }
   const reader = stream.getReader();
-  const bytes = new Uint8Array(4 + EMAIL_MAX_INBOUND_HEADER_BYTES + EMAIL_MAX_INBOUND_BYTES);
+  const limit = 4 + EMAIL_MAX_INBOUND_HEADER_BYTES + EMAIL_MAX_INBOUND_BYTES;
+  let bytes = new Uint8Array(1024);
   let total = 0;
   const deadline = Date.now() + deadlineMs;
   try {
@@ -122,11 +123,21 @@ export async function readEmailEnvelope(
       if (chunk.done) {
         break;
       }
-      total += chunk.value.byteLength;
-      if (total > bytes.byteLength) {
+      const nextTotal = total + chunk.value.byteLength;
+      if (nextTotal > limit) {
         throw new Error('email envelope too large');
       }
-      bytes.set(chunk.value, total - chunk.value.byteLength);
+      if (nextTotal > bytes.byteLength) {
+        let capacity = bytes.byteLength;
+        while (capacity < nextTotal) {
+          capacity = Math.min(limit, capacity * 2);
+        }
+        const grown = new Uint8Array(capacity);
+        grown.set(bytes.subarray(0, total));
+        bytes = grown;
+      }
+      bytes.set(chunk.value, total);
+      total = nextTotal;
     }
   } catch (error) {
     await reader.cancel().catch(() => {});

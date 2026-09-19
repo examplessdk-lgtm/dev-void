@@ -61,56 +61,8 @@ const PROD_DOMAIN = 'mail.void.cloud';
 function replyRaw(from: string, body = 'reply body'): Uint8Array {
   return new TextEncoder().encode(`From: ${from}\r\n\r\n${body}\r\n`);
 }
-const STAGING_DOMAIN = 'mail.staging.void.cloud';
-
-/** Frozen clock. Drives both quota buckets below. */
+/** Frozen clock for deterministic log timestamps. */
 const FIXED_NOW = new Date('2026-04-29T12:34:56.000Z');
-const MONTH_BUCKET = '2026-04';
-const MINUTE_BUCKET = '20260429T1234';
-
-const SENT_KEY = `email-sent:p_test:${MONTH_BUCKET}`;
-const BURST_KEY = `email-burst:p_test:${MINUTE_BUCKET}`;
-const RECV_KEY = `email-recv:p_test:${MONTH_BUCKET}`;
-
-/** Default routing entry: project p_test, worker user-worker, no limits. */
-const DEFAULT_ROUTING = JSON.stringify({
-  workerName: 'user-worker',
-  projectId: 'p_test',
-});
-
-// -----------------------------------------------------------------------
-// KV mock — the inbound router only touches `get` + `put`.
-// -----------------------------------------------------------------------
-
-interface KvWrite {
-  key: string;
-  value: string;
-  options?: { expirationTtl?: number };
-}
-
-function createMockKv(seed: Record<string, string> = {}, failGetKeys: Array<string> = []) {
-  const store = new Map<string, string>(Object.entries(seed));
-  const writes: Array<KvWrite> = [];
-  const failures = new Set(failGetKeys);
-  const kv = {
-    store,
-    writes,
-    get: vi.fn(async (key: string, _opts?: { cacheTtl?: number }) => {
-      if (failures.has(key)) {
-        throw new Error(`KV get failed for ${key}`);
-      }
-      return store.get(key) ?? null;
-    }),
-    put: vi.fn(async (key: string, value: string, options?: { expirationTtl?: number }) => {
-      store.set(key, value);
-      writes.push({ key, value, options });
-    }),
-    delete: vi.fn(async (key: string) => {
-      store.delete(key);
-    }),
-  };
-  return kv;
-}
 
 // -----------------------------------------------------------------------
 // Fake ForwardableEmailMessage. Records every method call — and their
@@ -239,9 +191,6 @@ function createCtx() {
 // -----------------------------------------------------------------------
 
 interface MakeEnvOptions {
-  kvSeed?: Record<string, string>;
-  /** KV keys whose `get` throws — used to exercise fail-closed paths. */
-  kvGetFailures?: Array<string>;
   /** When provided, the dispatch stub's `email()` returns this value. */
   emailReturn?: unknown;
   /** When provided, the dispatch stub's `email()` throws this. */
@@ -257,7 +206,6 @@ interface MakeEnvOptions {
 }
 
 function makeEnv(options: MakeEnvOptions = {}) {
-  const kv = createMockKv(options.kvSeed ?? {}, options.kvGetFailures ?? []);
   const emailFn = vi.fn(async (_envelope: unknown) => {
     if (options.emailThrow) {
       throw options.emailThrow;
@@ -331,7 +279,6 @@ function makeEnv(options: MakeEnvOptions = {}) {
   const env = {
     AI: {},
     JWT_SECRET: 'test-secret',
-    ROUTING: kv,
     CF_ACCOUNT_ID: 'acct',
     CF_API_TOKEN: 'token',
     API: { fetch: apiFetch },
@@ -339,7 +286,7 @@ function makeEnv(options: MakeEnvOptions = {}) {
     SEND_EMAIL: { send: vi.fn() },
     ...(senderDomain === null ? {} : { EMAIL_SENDER_DOMAIN: senderDomain }),
   } as unknown as Env;
-  return { env, kv, emailFn, dispatchGet, apiFetch };
+  return { env, emailFn, dispatchGet, apiFetch };
 }
 
 function apiBodies(
@@ -349,18 +296,6 @@ function apiBodies(
   return apiFetch.mock.calls
     .filter(([url]) => new URL(String(url)).pathname.endsWith(suffix))
     .map(([, init]) => JSON.parse(String((init as RequestInit).body)) as Record<string, unknown>);
-}
-
-/** Routing + allowlist seed for the happy outbound-gate path. */
-function withAllowlist(
-  addresses: Array<string> = ['admin@example.com', 'support@example.com'],
-  extra: Record<string, string> = {},
-): Record<string, string> {
-  return {
-    myslug: DEFAULT_ROUTING,
-    'email-allowlist:p_test': JSON.stringify(addresses),
-    ...extra,
-  };
 }
 
 // -----------------------------------------------------------------------
@@ -385,6 +320,7 @@ afterEach(() => {
   errorSpy.mockRestore();
   warnSpy.mockRestore();
   logSpy.mockRestore();
+  vi.unstubAllGlobals();
   vi.useRealTimers();
 });
 
@@ -404,7 +340,7 @@ describe('routeInbound — shared-address parsing', () => {
   });
 
   it('routes a tag-less recipient (whole local-part is the slug)', async () => {
-    const { env, emailFn } = makeEnv({ kvSeed: { myslug: DEFAULT_ROUTING }, emailReturn: [] });
+    const { env, emailFn } = makeEnv({ emailReturn: [] });
     const { message, rejectCalls } = createFakeMessage({ to: `myslug@${PROD_DOMAIN}` });
     const { ctx } = createCtx();
     await routeInbound(message, env, ctx);
@@ -416,7 +352,7 @@ describe('routeInbound — shared-address parsing', () => {
   });
 
   it('uppercase recipients are lowercased before dispatch', async () => {
-    const { env, emailFn } = makeEnv({ kvSeed: { myslug: DEFAULT_ROUTING }, emailReturn: [] });
+    const { env, emailFn } = makeEnv({ emailReturn: [] });
     const { message, rejectCalls } = createFakeMessage({ to: `MySlug+Tag@${PROD_DOMAIN}` });
     const { ctx } = createCtx();
     await routeInbound(message, env, ctx);
@@ -476,7 +412,7 @@ describe('routeInbound — authoritative routing', () => {
 
 describe('routeInbound — message size guards', () => {
   it('rejects messages exceeding rawSize > 10MB before streaming', async () => {
-    const { env, emailFn } = makeEnv({ kvSeed: { myslug: DEFAULT_ROUTING } });
+    const { env, emailFn } = makeEnv();
     const { message, rejectCalls } = createFakeMessage({
       to: `myslug+tag@${PROD_DOMAIN}`,
       rawBytes: new Uint8Array(0),
@@ -491,7 +427,7 @@ describe('routeInbound — message size guards', () => {
   });
 
   it('rejects when stream overflow exceeds cap (rawSize lied)', async () => {
-    const { env, emailFn } = makeEnv({ kvSeed: { myslug: DEFAULT_ROUTING } });
+    const { env, emailFn } = makeEnv();
     // rawSize claims 1KB but the stream actually carries 11MB.
     const big = new Uint8Array(11 * 1024 * 1024);
     const { message, rejectCalls } = createFakeMessage({
@@ -507,7 +443,7 @@ describe('routeInbound — message size guards', () => {
   });
 
   it('accepts a message just under the cap', async () => {
-    const { env, emailFn } = makeEnv({ kvSeed: { myslug: DEFAULT_ROUTING }, emailReturn: [] });
+    const { env, emailFn } = makeEnv({ emailReturn: [] });
     const { message, rejectCalls } = createFakeMessage({
       to: `myslug@${PROD_DOMAIN}`,
       rawBytes: new Uint8Array(10 * 1024 * 1024),
@@ -537,7 +473,7 @@ describe('routeInbound — inbound header count cap', () => {
   }
 
   it('rejects a message carrying more distinct headers than the cap, before dispatch', async () => {
-    const { env, emailFn } = makeEnv({ kvSeed: { myslug: DEFAULT_ROUTING }, emailReturn: [] });
+    const { env, emailFn } = makeEnv({ emailReturn: [] });
     const { message, rejectCalls } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
     for (const [name, value] of distinctHeaders(MAX_INBOUND_HEADERS + 1)) {
       message.headers.append(name, value);
@@ -552,7 +488,7 @@ describe('routeInbound — inbound header count cap', () => {
   });
 
   it('dispatches a message with exactly the cap, every header in the envelope', async () => {
-    const { env, emailFn } = makeEnv({ kvSeed: { myslug: DEFAULT_ROUTING }, emailReturn: [] });
+    const { env, emailFn } = makeEnv({ emailReturn: [] });
     const { message, rejectCalls } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
     for (const [name, value] of distinctHeaders(MAX_INBOUND_HEADERS)) {
       message.headers.append(name, value);
@@ -574,7 +510,7 @@ describe('routeInbound — inbound header count cap', () => {
     // 128 MB heap. The bag is a workerd-shaped iterable (see
     // `headerEntries`), so the heap read below is the router's own cost:
     // the first `MAX_INBOUND_HEADERS + 1` pairs, then the refusal.
-    const { env, emailFn } = makeEnv({ kvSeed: { myslug: DEFAULT_ROUTING }, emailReturn: [] });
+    const { env, emailFn } = makeEnv({ emailReturn: [] });
     const { message, rejectCalls } = createFakeMessage({
       to: `myslug+tag@${PROD_DOMAIN}`,
       headerEntries: distinctHeaders(1_500_000),
@@ -601,11 +537,10 @@ describe('routeInbound — inbound header count cap', () => {
 describe('routeInbound — action enaction', () => {
   it('drops the WHOLE list when a tenant returns more than 100 actions', async () => {
     // The tenant worker is not trusted to have capped its own queue: on WfP
-    // it can ship any WorkerEntrypoint whose email() returns any array. The
-    // list is walked HERE, in the shared proxy isolate, before any quota gate
+    // it can ship any WorkerEntrypoint whose receipt response contains any array. The
+    // list is walked here, in the shared proxy isolate, before admission
     // has charged for it — so the count is checked before the loop.
-    const { env, kv } = makeEnv({
-      kvSeed: withAllowlist(['admin@example.com']),
+    const { env, apiFetch } = makeEnv({
       emailReturn: Array.from({ length: 101 }, () => ({
         type: 'forward',
         to: 'admin@example.com',
@@ -620,21 +555,14 @@ describe('routeInbound — action enaction', () => {
     expect(replyCalls).toHaveLength(0);
     // Dropping the list is not a bounce — CF still accepted the message.
     expect(rejectCalls).toHaveLength(0);
-    // Nothing was charged: the list never reached the gate.
-    expect(kv.writes.filter((w) => w.key.startsWith('email-sent:'))).toHaveLength(0);
-    expect(kv.writes.filter((w) => w.key.startsWith('email-burst:'))).toHaveLength(0);
+    // Nothing was admitted: the list never reached the API.
+    expect(apiBodies(apiFetch, '/admit')).toEqual([]);
     expect(errorSpy).toHaveBeenCalled();
   });
 
   it('enacts a list of exactly 100 actions', async () => {
     // The bound is > MAX_ACTIONS, not >=.
     const { env } = makeEnv({
-      kvSeed: withAllowlist(['admin@example.com'], {
-        // Burst/month caps must clear 100 for this to be about the action
-        // count rather than the quota.
-        'email-burst-limit:p_test': '1000',
-        'email-limit:p_test': '1000',
-      }),
       emailReturn: Array.from({ length: 100 }, () => ({
         type: 'forward',
         to: 'admin@example.com',
@@ -648,7 +576,6 @@ describe('routeInbound — action enaction', () => {
 
   it('reject is terminal: forward and reply after a reject do NOT fire', async () => {
     const { env } = makeEnv({
-      kvSeed: withAllowlist(),
       emailReturn: [
         { type: 'reject', reason: 'spam' },
         { type: 'forward', to: 'admin@example.com' },
@@ -672,7 +599,6 @@ describe('routeInbound — action enaction', () => {
 
   it('a reject with no reason gets the default reason', async () => {
     const { env } = makeEnv({
-      kvSeed: { myslug: DEFAULT_ROUTING },
       emailReturn: [{ type: 'reject' }],
     });
     const { message, rejectCalls } = createFakeMessage({ to: `myslug@${PROD_DOMAIN}` });
@@ -682,9 +608,7 @@ describe('routeInbound — action enaction', () => {
   });
 
   it('forward followed by reply: both fire in order', async () => {
-    // Both targets must be in the per-project allowlist (HIGH H1).
     const { env } = makeEnv({
-      kvSeed: withAllowlist(),
       emailReturn: [
         { type: 'forward', to: 'admin@example.com' },
         {
@@ -711,7 +635,6 @@ describe('routeInbound — action enaction', () => {
 
   it('enacts the list in DECLARATION order across mixed action types', async () => {
     const { env } = makeEnv({
-      kvSeed: withAllowlist(['admin@example.com', 'support@example.com', 'ops@example.com']),
       emailReturn: [
         { type: 'forward', to: 'admin@example.com' },
         {
@@ -735,7 +658,6 @@ describe('routeInbound — action enaction', () => {
 
   it('rejects a whole action list with an invalid forward address', async () => {
     const { env, apiFetch } = makeEnv({
-      kvSeed: withAllowlist(),
       emailReturn: [
         { type: 'forward', to: 'not-an-email' },
         { type: 'forward', to: 'has\x00control@example.com' },
@@ -753,7 +675,6 @@ describe('routeInbound — action enaction', () => {
 
   it('reply with invalid from/to is dropped with console.error', async () => {
     const { env } = makeEnv({
-      kvSeed: withAllowlist(),
       emailReturn: [
         {
           type: 'reply',
@@ -778,7 +699,6 @@ describe('routeInbound — action enaction', () => {
 
   it('reject reason with CR/LF/NUL is sanitized', async () => {
     const { env } = makeEnv({
-      kvSeed: { myslug: DEFAULT_ROUTING },
       emailReturn: [
         {
           type: 'reject',
@@ -799,7 +719,6 @@ describe('routeInbound — action enaction', () => {
 
   it('a throwing forward is logged and does not abort the list', async () => {
     const { env } = makeEnv({
-      kvSeed: withAllowlist(),
       emailReturn: [
         { type: 'forward', to: 'admin@example.com' },
         {
@@ -824,7 +743,6 @@ describe('routeInbound — action enaction', () => {
 
   it('reply carries the action bytes through EmailMessage, not a decoded string', async () => {
     const { env } = makeEnv({
-      kvSeed: withAllowlist(),
       emailReturn: [
         {
           type: 'reply',
@@ -859,7 +777,6 @@ describe('routeInbound — envelope header bag (prototype pollution guard)', () 
     // pre-buffers headers with Object.fromEntries so the framework
     // sees it as a plain string property, not as a prototype mutation.
     const { env, emailFn } = makeEnv({
-      kvSeed: { myslug: DEFAULT_ROUTING },
       emailReturn: [],
     });
     const { message } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
@@ -868,8 +785,7 @@ describe('routeInbound — envelope header bag (prototype pollution guard)', () 
     const { ctx } = createCtx();
     await routeInbound(message, env, ctx);
     // Pull the envelope passed into emailFn; assert the header bag is an
-    // ORDINARY object (workerd RPC refuses to serialize a null-prototype
-    // one) and that the __proto__ key is a real own property (not a
+    // ordinary object and that the __proto__ key is a real own property (not a
     // prototype mutation that affects {}).
     const envelope = emailFn.mock.calls[0]?.[0] as { headers: Record<string, string> };
     expect(Object.getPrototypeOf(envelope.headers)).toBe(Object.prototype);
@@ -880,9 +796,8 @@ describe('routeInbound — envelope header bag (prototype pollution guard)', () 
     expect(({} as Record<string, unknown>)['evil']).toBeUndefined();
   });
 
-  it('serializes the envelope with RPC-safe primitives only', async () => {
+  it('passes a bounded envelope with the original MIME bytes', async () => {
     const { env, emailFn } = makeEnv({
-      kvSeed: { myslug: DEFAULT_ROUTING },
       emailReturn: [],
     });
     const body = new TextEncoder().encode('Subject: hi\r\n\r\nbody\r\n');
@@ -919,7 +834,6 @@ describe('routeInbound — envelope header bag (prototype pollution guard)', () 
 describe('routeInbound — log-recv via ctx.waitUntil', () => {
   it('schedules log-recv after a successful dispatch', async () => {
     const { env } = makeEnv({
-      kvSeed: { myslug: DEFAULT_ROUTING },
       emailReturn: [],
     });
     const { message } = createFakeMessage({
@@ -935,7 +849,6 @@ describe('routeInbound — log-recv via ctx.waitUntil', () => {
   // Invalid action data must not prevent inbound delivery from being logged.
   it('logs the inbound delivery even when the action list carries a non-object entry', async () => {
     const { env } = makeEnv({
-      kvSeed: withAllowlist(['admin@example.com']),
       emailReturn: [null, { type: 'forward', to: 'admin@example.com' }],
     });
     const { message } = createFakeMessage({ to: `myslug@${PROD_DOMAIN}` });
@@ -952,7 +865,7 @@ describe('routeInbound — log-recv via ctx.waitUntil', () => {
 describe('routeInbound — authoritative native custom domain', () => {
   it('dispatches the full custom recipient without KV and enacts native forward and reply', async () => {
     const from = 'support@custom.example.com';
-    const { env, kv, emailFn, dispatchGet, apiFetch } = makeEnv({
+    const { env, emailFn, dispatchGet, apiFetch } = makeEnv({
       emailReturn: [
         { type: 'forward', to: 'admin@example.com' },
         { type: 'reply', from, to: 'sender@example.com', raw: replyRaw(from) },
@@ -977,7 +890,6 @@ describe('routeInbound — authoritative native custom domain', () => {
         viaDomain: 'custom.example.com',
       }),
     );
-    expect(kv.get).not.toHaveBeenCalled();
     expect(forwardCalls).toHaveLength(1);
     expect(replyCalls).toHaveLength(1);
     expect(rejectCalls).toHaveLength(0);
@@ -1044,6 +956,125 @@ describe('routeRelayed — unsupported forward', () => {
   });
 });
 
+describe('routeRelayed — reply attempt outcomes', () => {
+  const from = 'support@custom.example.com';
+  const to = 'sender@example.com';
+
+  async function runReply(
+    response: Response,
+    options: { raw?: Uint8Array; leaseUnavailable?: boolean } = {},
+  ) {
+    const { env, apiFetch } = makeEnv({
+      emailReturn: [{ type: 'reply', from, to, raw: options.raw ?? replyRaw(from) }],
+    });
+    const normalFetch = apiFetch.getMockImplementation()!;
+    apiFetch.mockImplementation(async (url, init) =>
+      String(url).endsWith('/domain-credential')
+        ? options.leaseUnavailable
+          ? new Response(null, { status: 503 })
+          : Response.json({ kind: 'api_token', token: 'test-lease', accountId: 'customer-account' })
+        : normalFetch(url, init),
+    );
+    const providerFetch = vi.fn(async () => response);
+    vi.stubGlobal('fetch', providerFetch);
+    const { ctx } = createCtx();
+    const outcome = await routeRelayed(env, ctx, {
+      projectId: 'p_test',
+      domain: 'custom.example.com',
+      receiptId: 'receipt_1',
+      envelope: {
+        from: to,
+        to: from,
+        headers: {},
+        raw: replyRaw(to),
+        rawSize: replyRaw(to).byteLength,
+      },
+      authoritative: {
+        projectId: 'p_test',
+        workerName: 'user-worker',
+        deploymentId: 'v1',
+        slug: 'myslug',
+        addressing: 'custom',
+        domain: 'custom.example.com',
+      },
+    });
+    return { outcome, apiFetch, providerFetch };
+  }
+
+  it.each([
+    [new Response(null, { status: 500 }), 'outcome_unknown'],
+    [new Response('{', { status: 200 }), 'outcome_unknown'],
+    [Response.json({ success: true, result: {} }), 'outcome_unknown'],
+    [
+      Response.json({
+        success: true,
+        result: {
+          message_id: 'cf_reply_missing',
+          delivered: [],
+          permanent_bounces: [],
+          queued: [],
+          suppressed_recipients: [],
+        },
+      }),
+      'outcome_unknown',
+    ],
+    [
+      Response.json({
+        success: true,
+        result: {
+          message_id: 'cf_reply_overlap',
+          delivered: [to],
+          permanent_bounces: [to],
+          queued: [],
+          suppressed_recipients: [],
+        },
+      }),
+      'outcome_unknown',
+    ],
+    [Response.json({ success: false }), 'failed'],
+  ])(
+    'records ambiguous provider responses without marking them failed',
+    async (response, state) => {
+      const { outcome, apiFetch, providerFetch } = await runReply(response);
+      expect(outcome.reject).toBe(false);
+      expect(providerFetch).toHaveBeenCalledOnce();
+      expect(apiBodies(apiFetch, '/start')).toHaveLength(1);
+      expect(apiBodies(apiFetch, '/finish')[0]?.state).toBe(state);
+    },
+  );
+
+  it.each(['delivered', 'queued'] as const)(
+    'records a reply explicitly classified as %s as provider accepted',
+    async (classification) => {
+      const { outcome, apiFetch, providerFetch } = await runReply(
+        Response.json({
+          success: true,
+          result: {
+            message_id: 'cf_reply_accepted',
+            delivered: classification === 'delivered' ? [to] : [],
+            permanent_bounces: [],
+            queued: classification === 'queued' ? [to] : [],
+            suppressed_recipients: [],
+          },
+        }),
+      );
+      expect(outcome.reject).toBe(false);
+      expect(providerFetch).toHaveBeenCalledOnce();
+      expect(apiBodies(apiFetch, '/finish')[0]?.state).toBe('provider_accepted');
+    },
+  );
+
+  it.each([{ leaseUnavailable: true }, { raw: new Uint8Array([...replyRaw(from), 0xff]) }])(
+    'cancels a reply that could not be submitted',
+    async (options) => {
+      const { apiFetch, providerFetch } = await runReply(Response.json({ success: true }), options);
+      expect(apiBodies(apiFetch, '/start')).toEqual([]);
+      expect(apiBodies(apiFetch, '/finish')[0]?.state).toBe('cancelled');
+      expect(providerFetch).not.toHaveBeenCalled();
+    },
+  );
+});
+
 describe('routeInbound — reply size limits', () => {
   const MIB = 1024 * 1024;
   const SENDER = `myslug+support@${PROD_DOMAIN}`;
@@ -1065,8 +1096,7 @@ describe('routeInbound — reply size limits', () => {
     // No `From:` header at all: if the size check ran AFTER the scan, the
     // drop would be logged as a missing From header instead.
     const raw = new Uint8Array(5 * MIB + 1).fill(0x41);
-    const { env, kv } = makeEnv({
-      kvSeed: withAllowlist(['admin@example.com']),
+    const { env } = makeEnv({
       emailReturn: [replyAction(raw)],
     });
     const { message, replyCalls } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
@@ -1077,12 +1107,10 @@ describe('routeInbound — reply size limits', () => {
       expect.stringContaining(`reply dropped: raw is ${5 * MIB + 1} bytes (max ${5 * MIB})`),
     );
     expect(errorSpy).not.toHaveBeenCalledWith(expect.stringContaining('no From header'));
-    expect(kv.store.get(SENT_KEY)).toBeUndefined();
   });
 
   it('accepts a reply of exactly 5 MiB', async () => {
     const { env } = makeEnv({
-      kvSeed: withAllowlist(['admin@example.com']),
       emailReturn: [replyAction(sizedReply(5 * MIB))],
     });
     const { message, replyCalls } = createFakeMessage({ to: `myslug+tag@${PROD_DOMAIN}` });
@@ -1094,7 +1122,6 @@ describe('routeInbound — reply size limits', () => {
 
   it('rejects a whole list that exceeds the 8 MiB cumulative reply budget', async () => {
     const { env } = makeEnv({
-      kvSeed: withAllowlist(['admin@example.com']),
       emailReturn: [
         replyAction(sizedReply(3 * MIB)),
         replyAction(sizedReply(3 * MIB)),

@@ -798,7 +798,7 @@ export async function emailDomainAdd(
     'Token stored encrypted on the platform for this zone connection — nothing is kept on this machine.',
   );
   printEmailDomainOutcome(row);
-  if (row.operationStatus === 'blocked' || row.operationStatus === 'unknown') {
+  if (row.operationStatus !== 'completed') {
     return exit(1);
   }
 }

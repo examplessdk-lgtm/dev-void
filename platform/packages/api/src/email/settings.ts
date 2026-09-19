@@ -25,11 +25,6 @@ export const DEFAULT_EMAIL_RECIPIENT_POLICY: EmailRecipientPolicy = {
 export const MAX_POLICY_DOMAINS = 100;
 
 const POLICY_MODES: ReadonlyArray<EmailRecipientPolicyMode> = ['verified', 'domains', 'any'];
-const MODE_RANK: Readonly<Record<EmailRecipientPolicyMode, number>> = {
-  verified: 0,
-  domains: 1,
-  any: 2,
-};
 const MANAGEMENT_MODES: ReadonlyArray<EmailDomainManagement> = ['self-serve', 'admin'];
 
 export class EmailSettingsError extends Error {
@@ -93,25 +88,6 @@ export function normalizeEmailRecipientPolicy(input: unknown): EmailRecipientPol
     throw new EmailSettingsError(`at most ${MAX_POLICY_DOMAINS} recipient domains`);
   }
   return { mode: 'domains', domains: [...normalized].sort() };
-}
-
-/**
- * True when `next` lets through anything `prev` did not: a higher mode, or
- * a `domains` list that gains a domain — even one that also drops others.
- * Only a lower mode or a pure shrink is a tightening.
- */
-export function widensEmailRecipientPolicy(
-  prev: EmailRecipientPolicy,
-  next: EmailRecipientPolicy,
-): boolean {
-  if (next.mode !== prev.mode) {
-    return MODE_RANK[next.mode] > MODE_RANK[prev.mode];
-  }
-  if (next.mode !== 'domains') {
-    return false;
-  }
-  const before = new Set(prev.domains);
-  return next.domains.some((domain) => !before.has(domain));
 }
 
 function readStoredPolicy(value: unknown): EmailRecipientPolicy | null {

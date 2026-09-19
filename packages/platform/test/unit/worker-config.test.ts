@@ -44,10 +44,12 @@ describe('platform usage queue bindings', () => {
     };
     expect(configs.api.vars).toMatchObject(expected);
     expect(configs.emailGateway.vars).toMatchObject(expected);
+    expect(configs.emailGateway.vars).toHaveProperty('PLATFORM_VERSION', '1.0.0');
     expect(configs.api.vars).toHaveProperty('EMAIL_SENDER_DOMAIN', 'mail.example.org');
     expect(configs.proxy.vars).toHaveProperty('EMAIL_SENDER_DOMAIN', 'mail.example.org');
     expect(configs.emailGateway.vars).toHaveProperty('EMAIL_SENDER_DOMAIN', 'mail.example.org');
     expect(configs.emailGateway).toHaveProperty('send_email', [{ name: 'SEND_EMAIL' }]);
+    expect(configs.api.compatibility_flags).toContain('global_fetch_strictly_public');
     expect(configs.api.vars).toHaveProperty(
       'EMAIL_GATEWAY_ORIGIN',
       'https://email-gateway.account.workers.dev',

@@ -58,6 +58,20 @@ beforeEach(() => {
 });
 
 describe('dedicated email gateway', () => {
+  it('reports its deployment identity and protocol for installation health checks', async () => {
+    const response = await gateway.fetch(
+      new Request('https://gateway.example/health'),
+      { PLATFORM_INSTALLATION_ID: 'installation', PLATFORM_VERSION: '1.2.3' } as never,
+      context,
+    );
+    expect(await response.json()).toEqual({
+      ok: true,
+      installationId: 'installation',
+      platformVersion: '1.2.3',
+      emailProtocolVersion: 1,
+    });
+  });
+
   function receiptApi() {
     const receipts = new Map<string, { digest: string; reject?: boolean }>();
     return vi.fn(async (url: unknown, init?: unknown) => {
@@ -152,6 +166,29 @@ describe('dedicated email gateway', () => {
     );
     expect(message.setReject).not.toHaveBeenCalled();
   });
+
+  it.each(['staging', 'sandbox-drain'])(
+    'does not dispatch native email during %s',
+    async (state) => {
+      const apiFetch = vi.fn();
+      const environment = {
+        ...env(apiFetch),
+        PLATFORM_TRAFFIC_STATE: state,
+      } as never;
+      const message = {
+        from: 'sender@example.net',
+        to: 'support@example.com',
+        setReject: vi.fn(),
+      } as unknown as ForwardableEmailMessage;
+
+      await expect(gateway.email(message, environment, context)).rejects.toThrow(
+        'temporarily unavailable',
+      );
+      expect(message.setReject).not.toHaveBeenCalled();
+      expect(apiFetch).not.toHaveBeenCalled();
+      expect(router.routeInbound).not.toHaveBeenCalled();
+    },
+  );
 
   it.each([
     () => new Response(null),

@@ -1,20 +1,4 @@
-/**
- * Tests for the custom sender domain fork of POST /email/send (design doc
- * 0078, "Custom domains on Cloudflare").
- *
- * A `from` whose domain is NOT `EMAIL_SENDER_DOMAIN` belongs to a
- * registered `email_domains` row. The proxy reads the `email-domain:<d>`
- * KV mirror (its only view of the row), leases a credential from the api
- * (`email-lease.ts`, contract 4), and delivers through the CUSTOMER's
- * account via Email Sending's `send_raw` — never through the platform's
- * `send_email` binding. Platform quota, kill-switch and suspension gates
- * run unchanged and BEFORE the external call.
- *
- * Harness mirrors `email.test.ts`: the real worker entry, an in-memory KV
- * mock, `env.API.fetch` as the lease endpoint, and a stubbed global
- * `fetch` as `api.cloudflare.com`. The leased credential below is a dummy
- * fixture string, never a real token.
- */
+/** Custom-domain sends use SQL admission and a customer-account send_raw credential. */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 
@@ -65,23 +49,7 @@ async function signHmac(data: string, secret: string): Promise<string> {
 
 // --- Mocks ---
 
-type MockKv = ReturnType<typeof createMockKv>;
-
-function createMockKv(data: Record<string, string> = {}) {
-  const store = new Map(Object.entries(data));
-  return {
-    store,
-    get: vi.fn(async (key: string, _options?: unknown) => store.get(key) ?? null),
-    put: vi.fn(async (key: string, value: string, _options?: unknown) => {
-      store.set(key, value);
-    }),
-    delete: vi.fn(async (key: string) => {
-      store.delete(key);
-    }),
-  };
-}
-
-function createMockEnv(kv: MockKv) {
+function createMockEnv() {
   const actions = new Map<
     string,
     {
@@ -154,7 +122,7 @@ function createMockEnv(kv: MockKv) {
   const env = {
     AI: {},
     JWT_SECRET,
-    ROUTING: kv,
+    ROUTING: { get: vi.fn(async () => null) },
     CF_ACCOUNT_ID: 'acct',
     CF_API_TOKEN: 'cf-token',
     API: { fetch: apiFetch },
@@ -164,29 +132,6 @@ function createMockEnv(kv: MockKv) {
     EMAIL_SENDER_DOMAIN: PROD_DOMAIN,
   };
   return { env, apiFetch, sendEmail };
-}
-
-/** The mirror the api writes to ROUTING KV; sha field is a placeholder hex string. */
-function domainMirror(overrides: Record<string, unknown> = {}) {
-  return JSON.stringify({
-    projectId: 'proj_1',
-    status: 'active',
-    relaySecretSha256: '00'.repeat(32),
-    relayWorkerName: 'void-email-relay',
-    accountId: 'acct_customer',
-    zoneId: 'zone_1',
-    mode: 'subdomain',
-    ...overrides,
-  });
-}
-
-/** KV contents that let `proj_1` send from `support@acme.com`. */
-function customDomainKv(extra: Record<string, string> = {}) {
-  return createMockKv({
-    'email-slug:proj_1': 'acme',
-    [`email-domain:${CUSTOM_DOMAIN}`]: domainMirror(),
-    ...extra,
-  });
 }
 
 function base64Of(bytes: Uint8Array): string {
@@ -259,12 +204,7 @@ function stubCloudflare(handler?: (call: { url: string; init: RequestInit }) => 
   return calls;
 }
 
-function kvKeysMatching(kv: MockKv, prefix: string): Array<string> {
-  return [...kv.store.keys()].filter((k) => k.startsWith(prefix));
-}
-
 beforeEach(() => {
-  // The lease cache is module-level — isolate every test from its neighbours.
   vi.spyOn(console, 'error').mockImplementation(() => {});
   vi.spyOn(console, 'warn').mockImplementation(() => {});
   vi.spyOn(console, 'log').mockImplementation(() => {});
@@ -278,14 +218,13 @@ afterEach(() => {
 
 describe('POST /email/send — custom sender domain', () => {
   it('leases a credential and delivers through the customer account via send_raw', async () => {
-    const kv = customDomainKv();
-    const { env, apiFetch, sendEmail } = createMockEnv(kv);
+    const { env, apiFetch, sendEmail } = createMockEnv();
     const calls = stubCloudflare();
     const res = await postSend(env, await sendBody());
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({
       ok: true,
-      ids: [{ recipient: 'dev@example.com', messageId: 'cf_msg_1' }],
+      ids: [{ recipient: 'dev@example.com', messageId: 'cf_msg_1', state: 'provider_accepted' }],
       operationId: 'act_1',
     });
 
@@ -323,14 +262,109 @@ describe('POST /email/send — custom sender domain', () => {
 
     // The platform binding is never touched on this path.
     expect(sendEmail).not.toHaveBeenCalled();
+  });
 
-    expect(kvKeysMatching(kv, 'email-sent:proj_1:')).toHaveLength(0);
-    expect(kvKeysMatching(kv, 'email-burst:proj_1:')).toHaveLength(0);
+  it('does not require the platform send binding for a custom-domain send', async () => {
+    const { env } = createMockEnv();
+    delete (env as { SEND_EMAIL?: unknown }).SEND_EMAIL;
+    stubCloudflare();
+    const response = await postSend(env, await sendBody());
+    expect(await response.json()).toMatchObject({
+      ok: true,
+      ids: [{ recipient: 'dev@example.com', messageId: 'cf_msg_1', state: 'provider_accepted' }],
+    });
+  });
+
+  it.each([
+    { response: new Response(null, { status: 500 }), state: 'outcome_unknown' },
+    { response: new Response('{', { status: 200 }), state: 'outcome_unknown' },
+    { response: Response.json({ success: true, result: {} }), state: 'outcome_unknown' },
+    { response: Response.json({ success: false }), state: 'failed' },
+  ])(
+    'records a send_raw response as $state when provider submission may be ambiguous',
+    async ({ response, state }) => {
+      const { env, apiFetch } = createMockEnv();
+      const calls = stubCloudflare(() => response);
+      const result = await postSend(env, await sendBody());
+      const body = await result.json();
+      expect(body).toMatchObject({
+        ok: false,
+        operationId: 'act_1',
+        deliveries: [{ recipient: 'dev@example.com', ok: false, state }],
+      });
+      expect(calls).toHaveLength(1);
+      const finishCall = apiFetch.mock.calls.find(([url]) => String(url).endsWith('/finish'))!;
+      expect(JSON.parse(String(finishCall[1].body)).state).toBe(state);
+    },
+  );
+
+  it.each([
+    {
+      name: 'omitted',
+      result: {
+        message_id: 'cf_msg_missing',
+        delivered: [],
+        permanent_bounces: [],
+        queued: [],
+        suppressed_recipients: [],
+      },
+    },
+    {
+      name: 'overlapping',
+      result: {
+        message_id: 'cf_msg_overlap',
+        delivered: ['dev@example.com'],
+        permanent_bounces: ['dev@example.com'],
+        queued: [],
+        suppressed_recipients: [],
+      },
+    },
+  ])('keeps a recipient with an $name provider classification unresolved', async ({ result }) => {
+    const { env, apiFetch } = createMockEnv();
+    stubCloudflare(() => Response.json({ success: true, result }));
+    const response = await postSend(env, await sendBody());
+    expect(await response.json()).toMatchObject({
+      ok: false,
+      operationId: 'act_1',
+      deliveries: [
+        {
+          recipient: 'dev@example.com',
+          ok: false,
+          state: 'outcome_unknown',
+          error: { code: 'OUTCOME_UNKNOWN' },
+        },
+      ],
+    });
+    const finishCall = apiFetch.mock.calls.find(([url]) => String(url).endsWith('/finish'))!;
+    expect(JSON.parse(String(finishCall[1].body))).toMatchObject({
+      recipients: ['dev@example.com'],
+      state: 'outcome_unknown',
+    });
+  });
+
+  it('accepts a recipient explicitly classified as queued', async () => {
+    const { env } = createMockEnv();
+    stubCloudflare(() =>
+      Response.json({
+        success: true,
+        result: {
+          message_id: 'cf_msg_q',
+          delivered: [],
+          permanent_bounces: [],
+          queued: ['dev@example.com'],
+          suppressed_recipients: [],
+        },
+      }),
+    );
+    expect(await (await postSend(env, await sendBody())).json()).toEqual({
+      ok: true,
+      ids: [{ recipient: 'dev@example.com', messageId: 'cf_msg_q', state: 'provider_accepted' }],
+      operationId: 'act_1',
+    });
   });
 
   it('re-leases the domain for each send', async () => {
-    const kv = customDomainKv();
-    const { env, apiFetch } = createMockEnv(kv);
+    const { env, apiFetch } = createMockEnv();
     stubCloudflare();
     await postSend(env, await sendBody());
     await postSend(env, await sendBody({ requestId: 'req_2' }));
@@ -340,7 +374,7 @@ describe('POST /email/send — custom sender domain', () => {
   });
 
   it('replays a completed operation without consulting a later revoked credential', async () => {
-    const { env, apiFetch } = createMockEnv(customDomainKv());
+    const { env, apiFetch } = createMockEnv();
     const calls = stubCloudflare();
     const body = await sendBody({ idempotencyKey: 'same-operation' });
     expect((await (await postSend(env, body)).json()).ok).toBe(true);
@@ -356,8 +390,7 @@ describe('POST /email/send — custom sender domain', () => {
   });
 
   it('re-leases after a definitive 401 from send_raw', async () => {
-    const kv = customDomainKv();
-    const { env, apiFetch } = createMockEnv(kv);
+    const { env, apiFetch } = createMockEnv();
     let sendCount = 0;
     stubCloudflare(() => {
       sendCount += 1;
@@ -394,12 +427,12 @@ describe('POST /email/send — custom sender domain', () => {
         },
       ],
     });
-    // The refusal evicted the lease — the next send re-leases and succeeds.
+    // A distinct request leases again and can succeed after the refusal.
     const second = await postSend(env, await sendBody({ requestId: 'req_2' }));
     expect(second.status).toBe(200);
     expect(await second.json()).toEqual({
       ok: true,
-      ids: [{ recipient: 'dev@example.com', messageId: 'cf_msg_2' }],
+      ids: [{ recipient: 'dev@example.com', messageId: 'cf_msg_2', state: 'provider_accepted' }],
       operationId: 'act_2',
     });
     expect(
@@ -408,8 +441,7 @@ describe('POST /email/send — custom sender domain', () => {
   });
 
   it('maps a 429 from send_raw to QUOTA_EXCEEDED', async () => {
-    const kv = customDomainKv();
-    const { env } = createMockEnv(kv);
+    const { env } = createMockEnv();
     stubCloudflare(() => new Response('slow down', { status: 429 }));
     const res = await postSend(env, await sendBody());
     expect(res.status).toBe(200);
@@ -419,8 +451,7 @@ describe('POST /email/send — custom sender domain', () => {
   });
 
   it('marks a network failure on send_raw as an unknown outcome', async () => {
-    const kv = customDomainKv();
-    const { env } = createMockEnv(kv);
+    const { env } = createMockEnv();
     vi.stubGlobal(
       'fetch',
       vi.fn(async () => {
@@ -437,25 +468,8 @@ describe('POST /email/send — custom sender domain', () => {
     });
   });
 
-  it('sends with a stale KV domain mirror when PostgreSQL lease and admission agree', async () => {
-    const kv = customDomainKv({
-      [`email-domain:${CUSTOM_DOMAIN}`]: domainMirror({
-        projectId: 'p_other',
-        status: 'pending',
-        accountId: null,
-      }),
-    });
-    const { env } = createMockEnv(kv);
-    const calls = stubCloudflare();
-    const res = await postSend(env, await sendBody());
-    expect(res.status).toBe(200);
-    expect((await res.json()).ok).toBe(true);
-    expect(calls).toHaveLength(1);
-  });
-
   it('answers 502 when the lease fails, without burning quota or calling send_raw', async () => {
-    const kv = customDomainKv();
-    const { env, apiFetch } = createMockEnv(kv);
+    const { env, apiFetch } = createMockEnv();
     const normalFetch = apiFetch.getMockImplementation()!;
     apiFetch.mockImplementation(async (url, init) =>
       String(url).endsWith('/domain-credential')
@@ -471,13 +485,10 @@ describe('POST /email/send — custom sender domain', () => {
       message: 'could not lease the domain credential',
     });
     expect(cfFetch).not.toHaveBeenCalled();
-    expect(kvKeysMatching(kv, 'email-sent:proj_1:')).toHaveLength(0);
-    expect(kvKeysMatching(kv, 'email-burst:proj_1:')).toHaveLength(0);
   });
 
   it('pins the MIME From to the envelope sender on the custom domain too', async () => {
-    const kv = customDomainKv();
-    const { env, apiFetch } = createMockEnv(kv);
+    const { env, apiFetch } = createMockEnv();
     const cfFetch = vi.fn();
     vi.stubGlobal('fetch', cfFetch);
     const res = await postSend(
@@ -493,8 +504,7 @@ describe('POST /email/send — custom sender domain', () => {
   });
 
   it('refuses MIME that is not valid UTF-8 before leasing or burning quota', async () => {
-    const kv = customDomainKv();
-    const { env, apiFetch } = createMockEnv(kv);
+    const { env, apiFetch } = createMockEnv();
     const cfFetch = vi.fn();
     vi.stubGlobal('fetch', cfFetch);
     const prefix = new TextEncoder().encode(`From: ${CUSTOM_FROM}\r\n\r\n`);
@@ -509,12 +519,10 @@ describe('POST /email/send — custom sender domain', () => {
     });
     expect(apiFetch).not.toHaveBeenCalled();
     expect(cfFetch).not.toHaveBeenCalled();
-    expect(kvKeysMatching(kv, 'email-sent:proj_1:')).toHaveLength(0);
   });
 
   it('reports a permanently bounced recipient as failed, not sent', async () => {
-    const kv = customDomainKv();
-    const { env } = createMockEnv(kv);
+    const { env } = createMockEnv();
     stubCloudflare(
       () =>
         new Response(
@@ -551,8 +559,7 @@ describe('POST /email/send — custom sender domain', () => {
   });
 
   it('reports a suppressed recipient as failed, not sent', async () => {
-    const kv = customDomainKv();
-    const { env } = createMockEnv(kv);
+    const { env } = createMockEnv();
     stubCloudflare(
       () =>
         new Response(
@@ -589,8 +596,7 @@ describe('POST /email/send — custom sender domain', () => {
   });
 
   it('splits a mixed batch: delivered recipients keep the id, bounced ones fail', async () => {
-    const kv = customDomainKv();
-    const { env } = createMockEnv(kv);
+    const { env } = createMockEnv();
     stubCloudflare(
       () =>
         new Response(

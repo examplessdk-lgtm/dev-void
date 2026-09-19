@@ -3247,7 +3247,7 @@ async function autoAddOwnerDestination(
       // FK-only check. The `refs === 0` guard inside `rollbackCfDestination`
       // is what stops it revoking a recipient a sibling project still uses —
       // including the already-exists path, where the address predates us.
-      await rollbackCfDestination(db, accountId, apiToken, projectId, address, allocatedTag);
+      await rollbackCfDestination(db, accountId, apiToken, allocatedTag);
     }
   }
 }

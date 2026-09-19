@@ -131,6 +131,13 @@ function auditTarget(
     if (segments[1] === 'settings') {
       return JSON.stringify({ domains: boundedString(body.domains, 512) });
     }
+    if (segments[1] === 'attempts' && segments[3] === 'resolve') {
+      return JSON.stringify({
+        attemptId: pathIdentifier(segments[2]),
+        ended: body.ended === true,
+        reason: boundedString(body.reason, 500),
+      });
+    }
     // Never the credential: `apiToken` rides the add body and stays out.
     const domain = boundedString(segments[2], 253, true);
     if (segments[1] === 'domains' && segments.length === 2) {

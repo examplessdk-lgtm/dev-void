@@ -10,6 +10,7 @@ import type { Env as ProxyEnv } from '../../proxy/src/types.ts';
 
 type Env = ProxyEnv & {
   PLATFORM_INSTALLATION_ID?: string;
+  PLATFORM_VERSION?: string;
   PLATFORM_TRAFFIC_STATE?: string;
   EMAIL_SHARED_ACCOUNT_ID?: string;
   EMAIL_SHARED_ZONE_ID?: string;
@@ -469,7 +470,12 @@ export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     if (request.method === 'GET' && url.pathname === '/health') {
-      return Response.json({ ok: true });
+      return Response.json({
+        ok: true,
+        installationId: env.PLATFORM_INSTALLATION_ID,
+        platformVersion: env.PLATFORM_VERSION,
+        emailProtocolVersion: 1,
+      });
     }
     if (request.method !== 'POST') {
       return new Response(null, { status: 404 });
@@ -487,6 +493,12 @@ export default {
     return new Response(null, { status: 404 });
   },
   async email(message: ForwardableEmailMessage, env: Env, ctx: ExecutionContext): Promise<void> {
+    if (
+      env.PLATFORM_TRAFFIC_STATE === 'staging' ||
+      env.PLATFORM_TRAFFIC_STATE === 'sandbox-drain'
+    ) {
+      throw new Error('Email gateway temporarily unavailable');
+    }
     const accountId = env.EMAIL_SHARED_ACCOUNT_ID;
     const zoneId = env.EMAIL_SHARED_ZONE_ID;
     const ingressName = env.EMAIL_SHARED_INGRESS_NAME;
