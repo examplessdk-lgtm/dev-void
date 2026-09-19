@@ -588,10 +588,12 @@ async function resumeBlockedEmailOperationTx(
     operation.connection_id !== snapshot.connection_id ||
     operation.route_id !== snapshot.route_id ||
     operation.desired_generation !== snapshot.desired_generation ||
-    connection.desired_generation !== operation.desired_generation ||
     !canManageConnection(actor, connection)
   ) {
     throw new EmailOperationError('blocked email operation cannot be resumed', 409);
+  }
+  if (connection.desired_generation !== operation.desired_generation) {
+    return false;
   }
   const blocked = await tx
     .select()
@@ -1427,7 +1429,9 @@ export async function requestEmailDomainAdd(
                 eq(emailOperations.route_id, existingRoute.id),
                 eq(emailOperations.route_generation, existingRoute.desired_generation),
                 eq(emailOperations.actor_kind, actor.kind),
-                eq(emailOperations.actor_user_id, actor.userId),
+                ...(actor.kind === 'owner'
+                  ? [eq(emailOperations.actor_user_id, actor.userId)]
+                  : []),
                 inArray(emailOperations.kind, ['setup', 'sync']),
                 eq(emailOperations.status, 'blocked'),
                 eq(emailOperations.desired_generation, connection.desired_generation),
@@ -1532,10 +1536,14 @@ export async function requestEmailDomainAdd(
           request_digest: requestDigest,
           desired_generation: generation,
         });
-        const steps =
-          connection.staged_secret_generation !== null
+        const steps = isSharedGatewayConnection(env, connection)
+          ? SHARED_SYNC_STEPS
+          : connection.staged_secret_generation !== null
             ? STAGED_SECRET_REPAIR_STEPS
-            : connection.inbound_status === 'disabled' || blockedAssignment
+            : connection.inbound_status !== 'ready' ||
+                existingRoute.inbound_status !== 'ready' ||
+                reactivating ||
+                blockedAssignment
               ? SETUP_STEPS
               : SYNC_STEPS;
         const stepRoute: EmailStepRoute = {
@@ -1666,7 +1674,7 @@ export async function requestEmailDomainAdd(
           .where(eq(emailZoneConnections.id, connection.id));
       }
       const repairStaged = connection.staged_secret_generation !== null;
-      if (repairStaged) {
+      if (!created) {
         connection = (
           await tx
             .update(emailZoneConnections)
@@ -1701,11 +1709,13 @@ export async function requestEmailDomainAdd(
         request_digest: requestDigest,
         desired_generation: connection.desired_generation,
       });
-      const steps = repairStaged
-        ? STAGED_SECRET_REPAIR_STEPS
-        : created || connection.inbound_status === 'disabled'
-          ? SETUP_STEPS
-          : SIBLING_STEPS;
+      const steps = isSharedGatewayConnection(env, connection)
+        ? SHARED_SYNC_STEPS
+        : repairStaged
+          ? STAGED_SECRET_REPAIR_STEPS
+          : created || connection.inbound_status !== 'ready'
+            ? SETUP_STEPS
+            : SIBLING_STEPS;
       const stepRoute: EmailStepRoute = { id: routeId, domain, desired_generation: 1 };
       for (let i = 0; i < steps.length; i++) {
         const secretGeneration = emailStepSecretGeneration('setup', connection, steps[i]);
@@ -2129,6 +2139,9 @@ export async function requestEmailSecretRotation(
       await resumeBlockedEmailOperationTx(tx, env, blockedRotation.id, actor);
       return blockedRotation.id;
     }
+    if (connection.inbound_status !== 'ready') {
+      throw new EmailOperationError('email ingress must be ready before rotating its secret', 409);
+    }
     if (connection.staged_secret_generation !== null) {
       throw new EmailOperationError('ingress rotation already staged');
     }
@@ -2437,7 +2450,11 @@ async function requestExistingOperation(
       kind === 'sync'
         ? isSharedGatewayConnection(env, connection)
           ? SHARED_SYNC_STEPS
-          : SYNC_STEPS
+          : connection.staged_secret_generation !== null
+            ? STAGED_SECRET_REPAIR_STEPS
+            : connection.inbound_status !== 'ready' || route.inbound_status !== 'ready'
+              ? SETUP_STEPS
+              : SYNC_STEPS
         : REMOVE_STEPS;
     for (let i = 0; i < steps.length; i++) {
       const secretGeneration = emailStepSecretGeneration(kind, connection, steps[i]);

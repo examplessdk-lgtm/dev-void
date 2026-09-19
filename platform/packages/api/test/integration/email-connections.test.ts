@@ -280,6 +280,69 @@ describe('durable zone email connections', () => {
     expect(callsByTag(stub.calls, 'secretPut')).toHaveLength(1);
   });
 
+  it('repairs a pending reused connection and its superseded original route', async () => {
+    const owner = await createTestUser(env.db);
+    const project = await createTestProject(env.db, owner.id, 'pending-connection-repair');
+    const failures: NonNullable<Parameters<typeof stubCustomerCf>[0]>['failOn'] = {
+      routingDns: { message: 'routing permission denied', status: 403 },
+    };
+    const stub = stubCustomerCf({ zones, failOn: failures });
+    const actor = { kind: 'owner' as const, userId: owner.id };
+    const originalInput = {
+      projectId: project.id,
+      domain: 'pending-original.example.com',
+      token: TOKEN,
+      actor,
+      attemptId: 'pending-original-attempt',
+    };
+    const original = await requestEmailDomainAdd(env.db, bindings(), originalInput);
+    await runEmailOperation(env.db, bindings(), original.operationId);
+    const blocked = (
+      await env.db
+        .select()
+        .from(emailOperations)
+        .where(eq(emailOperations.id, original.operationId))
+    )[0]!;
+    expect(blocked).toMatchObject({ status: 'blocked', current_step: 'routing_enable' });
+
+    delete failures.routingDns;
+    const replacement = await requestEmailDomainAdd(env.db, bindings(), {
+      projectId: project.id,
+      domain: 'pending-replacement.example.com',
+      token: 'corrected-customer-token',
+      actor,
+    });
+    await runEmailOperation(env.db, bindings(), replacement.operationId);
+
+    const replacementRoute = (await resolveEmailDomain(env.db, 'pending-replacement.example.com'))!;
+    expect(replacementRoute.route.inbound_status).toBe('ready');
+    expect(replacementRoute.connection.desired_generation).toBeGreaterThan(
+      blocked.desired_generation,
+    );
+    expect(await requestEmailDomainAdd(env.db, bindings(), originalInput)).toEqual(original);
+    expect(
+      (
+        await env.db
+          .select()
+          .from(emailOperations)
+          .where(eq(emailOperations.id, original.operationId))
+      )[0]?.status,
+    ).toBe('blocked');
+
+    const repairedOriginal = await requestEmailDomainSync(
+      env.db,
+      bindings(),
+      original.routeId,
+      actor,
+    );
+    await runEmailOperation(env.db, bindings(), repairedOriginal);
+    expect(
+      (await resolveEmailDomain(env.db, 'pending-original.example.com'))?.route.inbound_status,
+    ).toBe('ready');
+    expect(callsByTag(stub.calls, 'scriptPut')).toHaveLength(2);
+    expect(callsByTag(stub.calls, 'secretPut')).toHaveLength(2);
+  });
+
   it('blocks a failed provider read before its write and resumes without an ambiguous mutation', async () => {
     const owner = await createTestUser(env.db);
     const project = await createTestProject(env.db, owner.id, 'probe-route-preflight');
@@ -2373,6 +2436,93 @@ describe('durable zone email connections', () => {
     expect(callsByTag(stub.calls, 'secretPut')).toHaveLength(3);
   });
 
+  it('retires a blocked rotation through domain sync before allowing the next rotation', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'sync-staged-rotation');
+    const failures: NonNullable<Parameters<typeof stubCustomerCf>[0]>['failOn'] = {};
+    stubCustomerCf({ zones, failOn: failures });
+    const actor = { kind: 'owner' as const, userId: user.id };
+    const added = await requestEmailDomainAdd(env.db, bindings(), {
+      projectId: project.id,
+      domain: 'sync-staged-rotation.example.com',
+      actor,
+      token: TOKEN,
+    });
+    await runEmailOperation(env.db, bindings(), added.operationId);
+    const connection = (await resolveEmailDomain(env.db, 'sync-staged-rotation.example.com'))!
+      .connection;
+    const blockedKey = 'sync-staged-blocked-rotation';
+    const blockedRotation = await requestEmailSecretRotation(
+      env.db,
+      bindings(),
+      connection.id,
+      actor,
+      blockedKey,
+    );
+    failures.secretPut = { message: 'secret permission denied', status: 403 };
+    await runEmailOperation(env.db, bindings(), blockedRotation);
+    const staged = (await resolveEmailDomain(env.db, 'sync-staged-rotation.example.com'))!
+      .connection;
+    expect(staged.staged_secret_generation).toBe(connection.active_secret_generation + 1);
+
+    delete failures.secretPut;
+    const sync = await requestEmailDomainSync(env.db, bindings(), added.routeId, actor);
+    await runEmailOperation(env.db, bindings(), sync);
+    const repaired = (await resolveEmailDomain(env.db, 'sync-staged-rotation.example.com'))!
+      .connection;
+    expect(repaired.active_secret_generation).toBe(connection.active_secret_generation);
+    expect(repaired.staged_secret_generation).toBeNull();
+    expect(
+      (
+        await env.db.select().from(emailOperations).where(eq(emailOperations.id, blockedRotation))
+      )[0]?.status,
+    ).toBe('blocked');
+    expect(
+      await requestEmailSecretRotation(env.db, bindings(), connection.id, actor, blockedKey),
+    ).toBe(blockedRotation);
+
+    const nextRotation = await requestEmailSecretRotation(env.db, bindings(), connection.id, actor);
+    await runEmailOperation(env.db, bindings(), nextRotation);
+    expect(
+      (await env.db.select().from(emailOperations).where(eq(emailOperations.id, nextRotation)))[0]
+        ?.status,
+    ).toBe('completed');
+  });
+
+  it('rejects a fresh secret rotation while the connection setup is pending', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'pending-rotation');
+    const actor = { kind: 'owner' as const, userId: user.id };
+    stubCustomerCf({
+      zones,
+      failOn: { routingDns: { message: 'routing permission denied', status: 403 } },
+    });
+    const added = await requestEmailDomainAdd(env.db, bindings(), {
+      projectId: project.id,
+      domain: 'pending-rotation.example.com',
+      actor,
+      token: TOKEN,
+    });
+    await runEmailOperation(env.db, bindings(), added.operationId);
+    const connection = (await resolveEmailDomain(env.db, 'pending-rotation.example.com'))!
+      .connection;
+
+    await expect(
+      requestEmailSecretRotation(env.db, bindings(), connection.id, actor),
+    ).rejects.toThrow('must be ready');
+    expect(
+      (
+        await env.db
+          .select()
+          .from(emailZoneConnections)
+          .where(eq(emailZoneConnections.id, connection.id))
+      )[0],
+    ).toMatchObject({
+      desired_generation: connection.desired_generation,
+      staged_secret_generation: null,
+    });
+  });
+
   it('repairs a blocked rotation with a corrected credential before retiring its staged secret', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id, 'rotation-credential-repair');
@@ -2592,6 +2742,13 @@ describe('durable zone email connections', () => {
       userId: owner.id,
     });
     await runEmailOperation(env.db, shared, sync);
+    const retried = await requestEmailDomainAdd(env.db, shared, {
+      projectId: project.id,
+      domain: 'alerts.example.com',
+      actor: { kind: 'admin', userId: owner.id },
+      attemptId: 'shared-active-retry',
+    });
+    await runEmailOperation(env.db, shared, retried.operationId);
     await expect(
       requestEmailSecretRotation(env.db, shared, route!.connection.id, {
         kind: 'admin',
@@ -2603,6 +2760,21 @@ describe('durable zone email connections', () => {
       userId: owner.id,
     });
     await runEmailOperation(env.db, shared, remove);
+    const readded = await requestEmailDomainAdd(env.db, shared, {
+      projectId: project.id,
+      domain: 'alerts.example.com',
+      actor: { kind: 'admin', userId: owner.id },
+      attemptId: 'shared-removed-retry',
+    });
+    await runEmailOperation(env.db, shared, readded.operationId);
+    expect((await resolveEmailDomain(env.db, 'alerts.example.com'))?.route.inbound_status).toBe(
+      'ready',
+    );
+    const finalRemove = await requestEmailDomainRemove(env.db, shared, added.routeId, {
+      kind: 'admin',
+      userId: owner.id,
+    });
+    await runEmailOperation(env.db, shared, finalRemove);
     const removedRoute = (await resolveEmailDomain(env.db, 'alerts.example.com'))!.route;
     expect(removedRoute.desired_state).toBe('removed');
     expect(

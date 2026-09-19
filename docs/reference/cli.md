@@ -1555,7 +1555,7 @@ Reconcile the domain connection and refresh readiness. Sync does not rotate its 
 void email domain rotate-secret <domain> [--project <name>]
 ```
 
-Rotate the ingress secret for the zone connection shared by this domain and its siblings. The platform accepts the staged secret before updating the Worker and promotes it only after verifying the deployed generation. An uncertain update stays recorded for reconciliation.
+Rotate the ingress secret for the zone connection shared by this domain and its siblings. Inbound must be ready; run `void email domain sync <domain>` first if setup is incomplete. The platform accepts the staged secret before updating the Worker and promotes it only after verifying the deployed generation. An uncertain update stays recorded for reconciliation.
 
 #### `void email domain remove`
 

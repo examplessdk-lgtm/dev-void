@@ -89,7 +89,7 @@ Setup returns an operation ID. If your connection drops, the platform keeps the 
 - **Outbound**: whether sending is ready, restricted to verified destinations, pending, or blocked.
 - **Management**: whether the stored Cloudflare credential can manage the connection.
 
-Use `void email domain sync <domain>` to reconcile setup and refresh readiness. Sync does not rotate the connection secret. Use `void email domain rotate-secret <domain>` for an explicit rotation; it applies to all domains sharing that zone connection and verifies the deployed secret before completing. If a dashboard or credential step is required, the status names it. Removing a domain disables its assignment; zone resources used by another domain remain in place, and unfinished cleanup stays recorded for reconciliation.
+Use `void email domain sync <domain>` to reconcile setup and refresh readiness. Sync does not rotate the connection secret. Use `void email domain rotate-secret <domain>` for an explicit rotation; it applies to all domains sharing that zone connection and verifies the deployed secret before completing. Rotation requires inbound readiness; run `sync` first if setup is incomplete. If a dashboard or credential step is required, the status names it. Removing a domain disables its assignment; zone resources used by another domain remain in place, and unfinished cleanup stays recorded for reconciliation.
 
 After the last assignment's ingress is deleted, the platform forgets its stored
 credential. Revoke a token you no longer use in Cloudflare; Void does not revoke
