@@ -165,6 +165,11 @@ export async function createPlatformInstallPlan(
       : {}),
     ...(enableEmail ? { email: true } : {}),
   };
+  if (capabilities.email && options?.includeEmailGateway !== false && !enableEmail) {
+    throw new Error(
+      'platform: Email-enabled installations require VOID_EMAIL_SENDER_DOMAIN and VOID_EMAIL_SHARED_ZONE_ID before deploying this runtime.',
+    );
+  }
   const deployment = createPlatformDeploymentManifest({
     authentication: input.authentication ?? existing?.deployment.authentication,
     ...(Object.keys(capabilities).length > 0 ? { capabilities } : {}),

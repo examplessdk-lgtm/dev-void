@@ -126,6 +126,39 @@ describe('platform installation planning', () => {
     ).rejects.toThrow('shared email zone is already recorded');
   });
 
+  it('requires shared ingress identity before upgrading an email-enabled installation', async () => {
+    const existing = legacyInstallation();
+    const enabled = {
+      ...existing,
+      deployment: createPlatformDeploymentManifest({
+        ...existing.deployment,
+        capabilities: { ...existing.deployment.capabilities, email: true },
+      }),
+    };
+    const listWorkerNames = vi.fn(async () => []);
+    await expect(
+      createPlatformInstallPlan(client({ listWorkerNames }), input, enabled, {
+        includeEmailGateway: true,
+      }),
+    ).rejects.toThrow('VOID_EMAIL_SENDER_DOMAIN and VOID_EMAIL_SHARED_ZONE_ID');
+    expect(listWorkerNames).not.toHaveBeenCalled();
+
+    const configured = await createPlatformInstallPlan(
+      client(),
+      { ...input, emailSharedZoneId: 'mail-zone-id', emailSenderDomain: 'mail.example.org' },
+      enabled,
+      { includeEmailGateway: true },
+    );
+    expect(configured.deployment).toMatchObject({
+      capabilities: { email: true },
+      emailSharedZoneId: 'mail-zone-id',
+      emailSenderDomain: 'mail.example.org',
+    });
+    expect(configured.actions).toContainEqual(
+      expect.objectContaining({ key: 'email-gateway-worker' }),
+    );
+  });
+
   it('canonicalizes a trailing-dot sender domain before fresh-install resume checks', async () => {
     const configuredInput = {
       ...input,

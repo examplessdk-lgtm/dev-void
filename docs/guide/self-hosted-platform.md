@@ -634,7 +634,7 @@ Inject the following values from protected CI secrets. Do not commit them in a w
 
 Use that installation's saved signing and encryption keys on every resume or repair that needs them. After a keyring rotation, use the [complete keyring recovery inputs](#manage-an-installation-from-another-machine). The database claim and tables remain after uninstall; use a fresh database for a different installation.
 
-Set both email values to enable email during install or upgrade. Later upgrades reuse the recorded values.
+Set both email values to enable email during install or upgrade. Later upgrades reuse the recorded values. If an email-enabled installation has no recorded values, supply both before upgrading.
 
 ```sh
 void platform install \
