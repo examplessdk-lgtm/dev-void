@@ -15,6 +15,7 @@ vi.mock('cloudflare:email', () => ({
 }));
 
 const worker = (await import('../../src/index.ts')).default;
+const { requestSendRaw } = await import('../../src/email.ts');
 
 const JWT_SECRET = 'test-secret-key';
 const PROD_DOMAIN = 'mail.void.cloud';
@@ -217,6 +218,35 @@ afterEach(() => {
 });
 
 describe('POST /email/send — custom sender domain', () => {
+  it('does not call send_raw when serialization exhausts the request deadline', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const providerFetch = vi.fn();
+    vi.stubGlobal('fetch', providerFetch);
+    const stringify = JSON.stringify;
+    const stringifySpy = vi.spyOn(JSON, 'stringify').mockImplementation((value: unknown) => {
+      if (typeof value === 'object' && value !== null && 'mime_message' in value) {
+        vi.setSystemTime(5_001);
+      }
+      return stringify(value);
+    });
+
+    await expect(
+      requestSendRaw(
+        {
+          accountId: 'acct_customer',
+          bearer: LEASED,
+          from: CUSTOM_FROM,
+          recipients: ['dev@example.com'],
+          mimeMessage: 'mime',
+        },
+        5_000,
+      ),
+    ).rejects.toThrow('email sending request timed out');
+    stringifySpy.mockRestore();
+    expect(providerFetch).not.toHaveBeenCalled();
+  });
+
   it('leases a credential and delivers through the customer account via send_raw', async () => {
     const { env, apiFetch, sendEmail } = createMockEnv();
     const calls = stubCloudflare();
@@ -576,10 +606,29 @@ describe('POST /email/send — custom sender domain', () => {
   });
 
   it.each(['fetch', 'body'] as const)(
-    'bounds a send_raw %s that never settles and records an unknown outcome',
+    'shares the request deadline with a send_raw %s and records an unknown outcome',
     async (stall) => {
       vi.useFakeTimers();
       const { env, apiFetch } = createMockEnv();
+      const normalFetch = apiFetch.getMockImplementation()!;
+      let markAdmissionStarted!: () => void;
+      const admissionStarted = new Promise<void>((resolve) => {
+        markAdmissionStarted = resolve;
+      });
+      let markStartStarted!: () => void;
+      const startStarted = new Promise<void>((resolve) => {
+        markStartStarted = resolve;
+      });
+      apiFetch.mockImplementation(async (url, init) => {
+        if (String(url).endsWith('/admit')) {
+          markAdmissionStarted();
+          await new Promise((resolve) => setTimeout(resolve, 10_000));
+        } else if (String(url).endsWith('/start')) {
+          markStartStarted();
+          await new Promise((resolve) => setTimeout(resolve, 10_000));
+        }
+        return normalFetch(url, init);
+      });
       let markProviderStarted!: () => void;
       const providerStarted = new Promise<void>((resolve) => {
         markProviderStarted = resolve;
@@ -604,9 +653,13 @@ describe('POST /email/send — custom sender domain', () => {
       );
 
       const pending = postSend(env, await sendBody());
+      await admissionStarted;
+      await vi.advanceTimersByTimeAsync(10_000);
+      await startStarted;
+      await vi.advanceTimersByTimeAsync(10_000);
       await providerStarted;
       await vi.advanceTimersByTimeAsync(0);
-      await vi.advanceTimersByTimeAsync(30_000);
+      await vi.advanceTimersByTimeAsync(25_001);
       const body = await (await pending).json();
 
       expect(body).toMatchObject({

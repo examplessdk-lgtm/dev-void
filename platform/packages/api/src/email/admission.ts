@@ -12,7 +12,11 @@ import {
   emailUnresolvedAttempts,
 } from './admission-schema.ts';
 import { emailCredentials, emailDomainRoutes, emailZoneConnections } from './connection-schema.ts';
-import { isEmailCredentialExpired, resolveEmailDomain } from './connection-service.ts';
+import {
+  isEmailCredentialExpired,
+  resolveEmailDomain,
+  resolveEmailDomains,
+} from './connection-service.ts';
 import { getEmailRecipientPolicy } from './settings.ts';
 
 export type EmailActionState =
@@ -345,7 +349,7 @@ export async function admitEmailAction(
     const policy = await getEmailRecipientPolicy(tx);
     const senderDomain = input.from.toLowerCase().split('@')[1]!;
     const shared = senderDomain === input.sharedSenderDomain.toLowerCase();
-    if (shared && !/^[a-z0-9._-]+(?:\+[a-z0-9._=/-]+)?@[a-z0-9.-]+$/i.test(input.from)) {
+    if (shared && !/^[a-z0-9._-]+(?:\+[a-z0-9._=/-]+)*@[a-z0-9.-]+$/i.test(input.from)) {
       throw new EmailAdmissionError('INVALID_REQUEST', 'invalid shared sender');
     }
     const expectedTransport =
@@ -461,13 +465,16 @@ export async function admitEmailAction(
       transport: input.transport,
       policy_version: controls.version,
     });
+    const recipientDomains = [...new Set(recipients.map((recipient) => recipient.split('@')[1]!))];
+    const destinationRoutes = await resolveEmailDomains(tx, recipientDomains);
     let admittedCount = 0;
+    const recipientRows: Array<typeof emailActionRecipients.$inferInsert> = [];
     for (const recipient of recipients) {
       const domain = recipient.split('@')[1]!;
       const consent = verified.has(recipient);
       const allowedByMode =
         policy.mode === 'any' || (policy.mode === 'domains' && policy.domains.includes(domain));
-      const destinationRoute = await resolveEmailDomain(tx, domain);
+      const destinationRoute = destinationRoutes.get(domain);
       const sharedDestination =
         domain === input.sharedSenderDomain.toLowerCase() ||
         destinationRoute?.route.addressing === 'shared';
@@ -486,7 +493,7 @@ export async function admitEmailAction(
         errorCode = 'QUOTA_EXCEEDED';
       }
       const admitted = errorCode === null;
-      await tx.insert(emailActionRecipients).values({
+      recipientRows.push({
         id: generateId('emailrcpt'),
         action_id: actionId,
         project_id: input.projectId,
@@ -501,6 +508,7 @@ export async function admitEmailAction(
         admittedCount++;
       }
     }
+    await tx.insert(emailActionRecipients).values(recipientRows);
     if (admittedCount) {
       await tx
         .update(emailMonthlyUsage)

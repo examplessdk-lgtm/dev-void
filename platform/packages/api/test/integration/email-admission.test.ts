@@ -31,6 +31,7 @@ import {
 import { setEmailRecipientPolicy } from '../../src/email/settings.ts';
 import { emailDestinations, projects, users } from '../../src/schema.ts';
 import {
+  captureQueries,
   clearTables,
   createTestProject,
   createTestUser,
@@ -74,6 +75,18 @@ async function fixture() {
     .values({
       id: 'receipt-route',
       domain: 'mail.example.com',
+      connection_id: 'receipt-connection',
+      project_id: null,
+      addressing: 'shared',
+      managed_by: 'admin',
+      inbound_status: 'ready',
+    })
+    .onConflictDoNothing();
+  await env.db
+    .insert(emailDomainRoutes)
+    .values({
+      id: 'shared-alias-route',
+      domain: 'shared-alias.example.com',
       connection_id: 'receipt-connection',
       project_id: null,
       addressing: 'shared',
@@ -522,6 +535,38 @@ describe('authoritative email admission', () => {
     expect((await getProjectEmailUsage(env.db, project.id)).attempts).toBe(1);
   });
 
+  it('admits a multi-tag shared forward only for the project named by the first segment', async () => {
+    const project = await fixture();
+    const receiptId = 'multi-tag-forward';
+    await recordEmailReceipt(env.db, {
+      receiptId,
+      projectId: project.id,
+      status: 'handler_completed',
+      route: receiptRoute(),
+    });
+
+    const admitted = await admitEmailAction(env.db, {
+      ...input(project.id, 'owned-multi-tag-forward'),
+      kind: 'forward',
+      from: 'acme+support+forward.run@mail.example.com',
+      transport: 'native_forward',
+      receiptId,
+    });
+    expect(admitted.recipients).toMatchObject([{ state: 'reserved', errorCode: null }]);
+
+    const crossProject = await admitEmailAction(env.db, {
+      ...input(project.id, 'cross-project-multi-tag-forward'),
+      kind: 'forward',
+      from: 'other+support+forward.run@mail.example.com',
+      transport: 'native_forward',
+      receiptId,
+    });
+    expect(crossProject.recipients).toMatchObject([
+      { state: 'rejected', errorCode: 'INVALID_FROM' },
+    ]);
+    expect((await getProjectEmailUsage(env.db, project.id)).attempts).toBe(1);
+  });
+
   it('records unsupported relayed forwarding without charging and retains native verified forwarding', async () => {
     const project = await fixture();
     await env.db.insert(emailCredentials).values({
@@ -906,6 +951,73 @@ describe('authoritative email admission', () => {
     await expect(
       transitionEmailRecipients(env.db, result.operationId, ['one@example.com'], 'attempt_started'),
     ).rejects.toMatchObject({ code: 'INVALID_STATE' });
+  });
+
+  it('keeps admission database round trips constant at the maximum recipient batch', async () => {
+    const project = await fixture();
+    await setEmailRecipientPolicy(env.db, env.ROUTING, { mode: 'any', domains: [] });
+    await setProjectEmailLimits(env.db, project.id, { burst: 1_000, monthly: 1_000 });
+
+    const single = await captureQueries(env.db, () =>
+      admitEmailAction(env.db, input(project.id, 'single-query-count', ['single@external.test'])),
+    );
+    const recipients = Array.from(
+      { length: 50 },
+      (_, index) => `recipient@external-${String(index).padStart(2, '0')}.test`,
+    );
+    const maximum = await captureQueries(env.db, () =>
+      admitEmailAction(env.db, input(project.id, 'maximum-query-count', recipients)),
+    );
+
+    expect(single.result.recipients).toHaveLength(1);
+    expect(maximum.result.recipients).toHaveLength(50);
+    expect(single.queries.length).toBeGreaterThan(0);
+    expect(maximum.queries).toHaveLength(single.queries.length);
+  });
+
+  it('preserves input priority when a maximum batch crosses the quota', async () => {
+    const project = await fixture();
+    await setEmailRecipientPolicy(env.db, env.ROUTING, { mode: 'any', domains: [] });
+    await setProjectEmailLimits(env.db, project.id, { burst: 25, monthly: 25 });
+    const recipients = Array.from(
+      { length: 50 },
+      (_, index) => `priority-${String(index).padStart(2, '0')}@external.test`,
+    );
+
+    const result = await admitEmailAction(env.db, input(project.id, 'maximum-quota', recipients));
+    const byRecipient = new Map(
+      result.recipients.map((recipient) => [recipient.recipient, recipient]),
+    );
+    for (const [index, recipient] of recipients.entries()) {
+      expect(byRecipient.get(recipient)).toMatchObject(
+        index < 25
+          ? { state: 'reserved', errorCode: null }
+          : { state: 'rejected', errorCode: 'QUOTA_EXCEEDED' },
+      );
+    }
+  });
+
+  it('keeps shared platform domains consent-gated in a mixed batch', async () => {
+    const project = await fixture();
+    await setEmailRecipientPolicy(env.db, env.ROUTING, { mode: 'any', domains: [] });
+
+    const result = await admitEmailAction(
+      env.db,
+      input(project.id, 'shared-domain-protection', [
+        'external@external.test',
+        'other-project@shared-alias.example.com',
+      ]),
+    );
+    expect(result.recipients).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ recipient: 'external@external.test', state: 'reserved' }),
+        expect.objectContaining({
+          recipient: 'other-project@shared-alias.example.com',
+          state: 'rejected',
+          errorCode: 'UNVERIFIED_DESTINATION',
+        }),
+      ]),
+    );
   });
 
   it('rejects new attempts after suspension and keeps a rejection in the ledger', async () => {

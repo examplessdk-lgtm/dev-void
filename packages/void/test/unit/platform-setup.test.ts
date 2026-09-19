@@ -146,14 +146,26 @@ describe('platform credential setup links', () => {
       JSON.parse(
         new URL(platformSetupPages(input).runtime.url).searchParams.get('permissionGroupKeys')!,
       ) as Array<{ key: string; type: string }>;
-    const emailKeys = ['zone', 'zone_settings', 'email_routing_rule', 'email_sending'];
+    const emailKeys = [
+      'zone',
+      'zone_settings',
+      'email_routing_address',
+      'email_routing_rule',
+      'email_sending',
+    ];
     expect(permissions(withEmail).map((permission) => permission.key)).toEqual(
       expect.arrayContaining(emailKeys),
     );
     expect(permissions(original).some((permission) => emailKeys.includes(permission.key))).toBe(
       false,
     );
+    expect(platformSetupPages(withEmail).runtime.instructions).toContain(
+      'Email Routing Addresses: Edit',
+    );
     expect(platformSetupPages(withEmail).runtime.instructions).toContain('Email Sending: Edit');
+    expect(platformSetupPages(original).runtime.instructions).not.toContain(
+      'Email Routing Addresses',
+    );
     expect(platformSetupPages(original).runtime.instructions).not.toContain('Email Sending');
   });
   it('shows the final callback in previews as well as interactive setup', () => {

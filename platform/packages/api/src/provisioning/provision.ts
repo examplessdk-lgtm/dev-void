@@ -53,7 +53,7 @@ export async function provisionBindings(
     /**
      * Platform mail domain for this environment (`EMAIL_SENDER_DOMAIN` on
      * the api worker — `mail.void.cloud` in production,
-     * `mail.staging.void.cloud` in staging). Never hard-coded: the proxy
+     * `mail.voidcloud.dev` in staging). Never hard-coded: the proxy
      * validates outbound senders against its own copy of the same value,
      * so a baked-in production domain would make staging unsendable.
      *

@@ -35,6 +35,7 @@ import {
   type EmittedWorkerVarsResult,
 } from '../../src/cli/deploy.ts';
 import { SENDING_FREE_PLAN_HINT, type EmailDns } from '../../src/cli/email-cloudflare.ts';
+import { runEmailCloudflareCommand } from '../../src/cli/email.ts';
 import {
   resolveEnvSchemaFactsViaSubprocess,
   validateEmittedVarsViaSubprocess,
@@ -9831,6 +9832,90 @@ describe('runCloudflareDeploy — Mode B email step (3b-ii)', () => {
     },
   };
 
+  it('preserves setup output and stops before build while the local resolver still sees no subdomain MX', async () => {
+    const root = emailProject();
+    const setupSpawns: Array<Spawn> = [];
+    const setupTrace: Array<string> = [];
+    const setupFetchCalls: Array<FetchCall> = [];
+
+    await runEmailCloudflareCommand(
+      root,
+      { subcommand: 'setup', platform: 'cloudflare' },
+      {
+        runWrangler: emailRunner({}, setupSpawns, setupTrace),
+        fetchImpl: emailFetch(setupFetchCalls),
+        dns: emailDns(),
+        isInteractive: true,
+        confirm: async () => true,
+        print: () => {},
+        exit: (code): never => {
+          throw new ExitError(code);
+        },
+      },
+    );
+
+    expect(readRootConfig(root)).toMatchObject({
+      send_email: [{ name: 'SEND_EMAIL' }],
+      addresses: ['support@mail.acme.com'],
+      vars: { __VOID_EMAIL_FROM: 'noreply@mail.acme.com' },
+    });
+    expect(
+      setupFetchCalls.filter((call) => call.method !== 'GET').map((call) => call.method),
+    ).toEqual(['POST', 'PATCH']);
+    const afterSetup = readFileSync(join(root, 'wrangler.jsonc'), 'utf8');
+
+    const baseDns = emailDns();
+    const dnsCases: Array<{ name: string; dns: EmailDns }> = [
+      { name: 'ENODATA', dns: emailDns() },
+      {
+        name: 'lookup failure',
+        dns: {
+          ...baseDns,
+          resolveMx: async (name) => {
+            if (name === 'mail.acme.com') {
+              throw new Error('SERVFAIL');
+            }
+            return baseDns.resolveMx(name);
+          },
+        },
+      },
+    ];
+    for (const dnsCase of dnsCases) {
+      // The setup calls returned success, but this process still cannot verify the new MX.
+      const { deps, spawns, exitCalls, trace } = emailHarness({
+        subaddressing: true,
+        dns: dnsCase.dns,
+        isCI: true,
+      });
+      const output = captureOutput();
+      try {
+        await expect(
+          runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps),
+        ).rejects.toBeInstanceOf(ExitError);
+      } finally {
+        output.restore();
+      }
+
+      expect(exitCalls, dnsCase.name).toEqual([1]);
+      expect(readFileSync(join(root, 'wrangler.jsonc'), 'utf8'), dnsCase.name).toBe(afterSetup);
+      expect(trace, dnsCase.name).not.toContain('probe');
+      expect(trace, dnsCase.name).not.toContain('build');
+      expect(
+        spawns.some((spawn) => spawn.args[0] === 'deploy'),
+        dnsCase.name,
+      ).toBe(false);
+      const printed = output.lines.join('\n');
+      expect(printed, dnsCase.name).toContain('cannot verify Email Routing on mail.acme.com');
+      expect(printed, dnsCase.name).toContain(
+        'existing addresses plan in wrangler.jsonc is preserved',
+      );
+      expect(printed, dnsCase.name).toContain(
+        'DNS may still be propagating after `void email setup`',
+      );
+      expect(printed, dnsCase.name).toContain('Nothing was built or uploaded');
+    }
+  });
+
   it('an API-token session (CLOUDFLARE_API_TOKEN) in CI with a committed config: --require-email passes, no prompt, map printed', async () => {
     // The CI credential. wrangler reports no `tokenPermissions` for it (they come from the
     // stored login file), so gating on them would fail every CI deploy before the build.
@@ -10140,72 +10225,50 @@ describe('runCloudflareDeploy — Mode B email step (3b-ii)', () => {
     expect(printed).toContain('outbound  sendEmail() from hello@mail.acme.com');
   });
 
-  it('a committed `addresses` array is withdrawn when routing is off, on the CI, declined and blocked exits; the worker ships with its binding', async () => {
+  it('a committed `addresses` array is still withdrawn when a separate blocker proves setup cannot proceed', async () => {
     // Left in place, wrangler's plan on it 400s (2062) AFTER the upload, on every deploy.
     // Deleting the KEY changes no rule (wrangler skips the plan on `undefined`).
-    const cases: Array<{
-      name: string;
-      options: Parameters<typeof emailHarness>[0];
-      wantConfirm: boolean;
-    }> = [
-      {
-        name: 'CI',
-        options: {
-          isCI: true,
-          confirm: async () => {
-            throw new Error('confirm must not be called in CI');
-          },
+    const root = emailProject(COMMITTED_EMAIL);
+    const baseDns = emailDns();
+    // Even with an unreadable MX, `unlocked` is independent evidence that this is not only a
+    // propagating DNS answer, so the preservation exception must not hide the stable blocker.
+    const { deps, spawns, fetchCalls, confirms, exitCalls, trace } = emailHarness({
+      runner: { 'email routing settings acme.com': routingSettings('acme.com', 'unlocked') },
+      dns: {
+        ...baseDns,
+        resolveMx: async (name) => {
+          if (name === 'mail.acme.com') {
+            throw new Error('SERVFAIL');
+          }
+          return baseDns.resolveMx(name);
         },
-        wantConfirm: false,
       },
-      { name: 'declined', options: { confirm: async () => false }, wantConfirm: false },
-      {
-        name: 'blocked (apex unlocked)',
-        options: {
-          runner: { 'email routing settings acme.com': routingSettings('acme.com', 'unlocked') },
-        },
-        wantConfirm: false,
-      },
-    ];
-    for (const c of cases) {
-      const root = emailProject(COMMITTED_EMAIL);
-      // The default harness DNS has no MX on mail.acme.com: routing reads `pending`.
-      const { deps, spawns, fetchCalls, confirms, exitCalls, trace } = emailHarness(c.options);
-      const output = captureOutput();
-      try {
-        await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
-      } finally {
-        output.restore();
-      }
-      expect(exitCalls, c.name).toEqual([]);
-      expect(confirms.length > 0, c.name).toBe(c.wantConfirm);
-      expect(
-        fetchCalls.filter((f) => f.method !== 'GET'),
-        c.name,
-      ).toEqual([]);
-      expect(
-        spawns.some((s) => s.args[0] === 'email' && s.args[2] === 'enable'),
-        c.name,
-      ).toBe(false);
-      const after = readRootConfig(root);
-      expect(after.addresses, c.name).toBeUndefined();
-      expect(after.send_email, c.name).toEqual(COMMITTED_EMAIL.send_email);
-      expect(after.vars, c.name).toEqual(COMMITTED_EMAIL.vars);
-      expect(trace, c.name).toContain('build');
-      expect(
-        spawns.some((s) => s.args[0] === 'deploy'),
-        c.name,
-      ).toBe(true);
-      const printed = output.lines.join('\n');
-      expect(printed, c.name).toContain('addresses removed from wrangler.jsonc');
-      expect(printed, c.name).toContain('support@mail.acme.com');
-      // The binding is committed, so the deploy is WITH email — the wording and the map say so.
-      expect(printed, c.name).not.toContain('deploying without email');
-      expect(printed, c.name).toContain(
-        'deploying with the email setup wrangler.jsonc already carries',
-      );
-      expect(printed, c.name).toContain('outbound  sendEmail() from noreply@mail.acme.com');
+    });
+    const output = captureOutput();
+    try {
+      await runCloudflareDeploy(root, { backend: 'cloudflare' }, silentCliLog, deps);
+    } finally {
+      output.restore();
     }
+    expect(exitCalls).toEqual([]);
+    expect(confirms).toEqual([]);
+    expect(fetchCalls.filter((call) => call.method !== 'GET')).toEqual([]);
+    expect(spawns.some((spawn) => spawn.args[0] === 'email' && spawn.args[2] === 'enable')).toBe(
+      false,
+    );
+    const after = readRootConfig(root);
+    expect(after.addresses).toBeUndefined();
+    expect(after.send_email).toEqual(COMMITTED_EMAIL.send_email);
+    expect(after.vars).toEqual(COMMITTED_EMAIL.vars);
+    expect(trace).toContain('build');
+    expect(spawns.some((spawn) => spawn.args[0] === 'deploy')).toBe(true);
+    const printed = output.lines.join('\n');
+    expect(printed).toContain('addresses removed from wrangler.jsonc');
+    expect(printed).toContain('support@mail.acme.com');
+    // The binding is committed, so the deploy is WITH email — the wording and the map say so.
+    expect(printed).not.toContain('deploying without email');
+    expect(printed).toContain('deploying with the email setup wrangler.jsonc already carries');
+    expect(printed).toContain('outbound  sendEmail() from noreply@mail.acme.com');
   });
 
   it('a committed `addresses` array Void did not derive stays untouched when routing is off too (decision 13)', async () => {

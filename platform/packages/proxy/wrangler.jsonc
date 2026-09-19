@@ -90,7 +90,7 @@
         },
       ],
       "send_email": [{ "name": "SEND_EMAIL" }],
-      "vars": { "EMAIL_SENDER_DOMAIN": "mail.staging.void.cloud" },
+      "vars": { "EMAIL_SENDER_DOMAIN": "mail.voidcloud.dev" },
       "routes": [{ "pattern": "proxy.staging.void.cloud", "custom_domain": true }],
     },
   },

@@ -45,6 +45,7 @@ describe('platform usage queue bindings', () => {
       application: { baseDomain: 'apps.example.com', zoneName: 'example.com' },
       emailSharedZoneId: 'mail-zone-id',
       emailSenderDomain: 'mail.example.org',
+      authentication: { accessProtection: true },
       capabilities: { email: true },
       displayName: 'Example',
       installationSlug: 'example',
@@ -85,8 +86,12 @@ describe('platform usage queue bindings', () => {
     expect(configs.api.vars).toHaveProperty('EMAIL_SENDER_DOMAIN', 'mail.example.org');
     expect(configs.proxy.vars).toHaveProperty('EMAIL_SENDER_DOMAIN', 'mail.example.org');
     expect(configs.emailGateway.vars).toHaveProperty('EMAIL_SENDER_DOMAIN', 'mail.example.org');
+    expect(configs.api).toHaveProperty('send_email', [{ name: 'EMAIL' }]);
     expect(configs.emailGateway).toHaveProperty('send_email', [{ name: 'SEND_EMAIL' }]);
     expect(configs.proxy).toHaveProperty('send_email', [{ name: 'SEND_EMAIL' }]);
+    expect(configs.api.workers_dev).toBe(false);
+    expect(configs.proxy.workers_dev).toBe(false);
+    expect(configs.emailGateway.workers_dev).toBe(true);
     expect(configs.api.compatibility_flags).toContain('global_fetch_strictly_public');
     expect(configs.api.vars).toHaveProperty(
       'EMAIL_GATEWAY_ORIGIN',
@@ -167,6 +172,7 @@ describe('platform usage queue bindings', () => {
       expect(configs.proxy.services).toEqual([
         { binding: 'API', service: deployment.resources.apiWorker },
       ]);
+      expect(configs.api).not.toHaveProperty('send_email');
       expect(configs.proxy).not.toHaveProperty('send_email');
       expect(configs.emailGateway).not.toHaveProperty('send_email');
       expect(Object.keys(configs).sort()).toEqual([

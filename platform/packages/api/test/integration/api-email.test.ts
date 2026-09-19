@@ -42,10 +42,6 @@ import { revokeOwnerVerifiedDestinationsForUserChange } from '../../src/db.ts';
 import * as dbModule from '../../src/db.ts';
 import { emailMonthlyUsage } from '../../src/email/admission-schema.ts';
 import { setProjectEmailLimits, setProjectEmailSuspended } from '../../src/email/admission.ts';
-import {
-  hashSendContent,
-  PLATFORM_INTERNAL_EMAIL_SENTINEL,
-} from '../../src/email/send-verification.ts';
 import app from '../../src/index.ts';
 import {
   reconcileEmailDestinationCleanups,
@@ -77,11 +73,33 @@ let env: TestEnv;
  * that hard-coded production's would pass against a route that ignored the
  * var entirely.
  */
-const MAIL_DOMAIN = 'mail.staging.void.cloud';
+const MAIL_DOMAIN = 'mail.voidcloud.dev';
+const EMAIL_GATEWAY_ORIGIN = 'https://void-email-gateway-staging.voidzer0.workers.dev';
 
-/** Bindings with the platform mail zone configured. */
+type VerificationSend = {
+  from: string;
+  to: string;
+  subject: string;
+  text: string;
+};
+
+const verificationSends: Array<VerificationSend> = [];
+let deliverVerification: () => void | Promise<void> = () => {};
+const verificationEmailBinding = {
+  send: vi.fn(async (message: VerificationSend) => {
+    verificationSends.push(message);
+    await deliverVerification();
+  }),
+};
+
+/** Bindings with platform verification mail configured. */
 function emailEnv(domain: string = MAIL_DOMAIN): TestEnv {
-  return { ...env, EMAIL_SENDER_DOMAIN: domain };
+  return {
+    ...env,
+    EMAIL: verificationEmailBinding as unknown as SendEmail,
+    EMAIL_GATEWAY_ORIGIN,
+    EMAIL_SENDER_DOMAIN: domain,
+  };
 }
 
 beforeAll(async () => {
@@ -93,6 +111,9 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
+  verificationSends.length = 0;
+  verificationEmailBinding.send.mockClear();
+  deliverVerification = () => {};
   await clearTables(env.db);
 });
 
@@ -205,54 +226,17 @@ function cfCalls(
   });
 }
 
-/**
- * `mockCfApi` plus a passthrough for the proxy's `/email/internal/send`. The
- * CF mock throws on any unmocked URL, and the platform verification email is
- * the one non-CF fetch the api makes.
- */
-function mockCfWithProxy(
+/** Configure the CF API mock and optional verification delivery behavior. */
+function mockCfWithEmail(
   overrides: Parameters<typeof mockCfApi>[0] = {},
-  respond: () => Response = () => Response.json({ ok: true }),
+  deliver: () => void | Promise<void> = () => {},
 ): ReturnType<typeof vi.fn> {
-  const cfMock = mockCfApi(overrides) as unknown as (
-    input: string | URL | Request,
-    init?: RequestInit,
-  ) => Promise<Response>;
-  const wrapper = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-    const url =
-      typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
-    if (url.includes('/email/internal/send')) {
-      return respond();
-    }
-    return cfMock(input, init);
-  });
-  vi.stubGlobal('fetch', wrapper);
-  return wrapper;
+  deliverVerification = deliver;
+  return mockCfApi(overrides);
 }
 
-type ProxySend = {
-  url: string;
-  body: {
-    platformToken?: unknown;
-    platformTimestamp?: unknown;
-    from?: unknown;
-    to?: unknown;
-    mimeBase64?: unknown;
-  };
-};
-
-function proxySends(fetchMock: ReturnType<typeof vi.fn>): Array<ProxySend> {
-  return (fetchMock.mock.calls as Array<Array<unknown>>)
-    .filter((call) => {
-      const url = typeof call[0] === 'string' ? call[0] : String(call[0]);
-      return url.includes('/email/internal/send');
-    })
-    .map((call) => {
-      const url = typeof call[0] === 'string' ? call[0] : String(call[0]);
-      const init = call[1] as RequestInit | undefined;
-      const body = typeof init?.body === 'string' ? JSON.parse(init.body) : {};
-      return { url, body } as ProxySend;
-    });
+function recordedVerificationSends(): Array<VerificationSend> {
+  return verificationSends;
 }
 
 /**
@@ -409,9 +393,9 @@ describe('POST /projects/:id/email/destinations', () => {
   it('returns the existing row without calling CF when the address is already in the DB', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id);
-    // Proxy reachable and sender configured, so a platform send COULD
+    // Email binding and sender configured, so a platform send COULD
     // happen here — the assertion below is that it does not.
-    const fetchMock = mockCfWithProxy();
+    const fetchMock = mockCfWithEmail();
 
     const first = await addDestination(project.id, user.jwt, 'a@b.com', emailEnv());
     expect(first.status).toBe(201);
@@ -431,7 +415,7 @@ describe('POST /projects/:id/email/destinations', () => {
     expect(await rowsFor(project.id)).toHaveLength(1);
     // A CF-pending row waits on CLOUDFLARE's link, which CF mails on create
     // only — there is nothing for the platform to resend.
-    expect(proxySends(fetchMock)).toHaveLength(0);
+    expect(recordedVerificationSends()).toHaveLength(0);
   });
 
   it('recovers via list when CF reports "already exists"', async () => {
@@ -440,7 +424,7 @@ describe('POST /projects/:id/email/destinations', () => {
     // the row lands platform-pending.
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id);
-    const fetchMock = mockCfWithProxy(cfAlreadyVerified('recovered-tag', 'shared@example.com'));
+    const fetchMock = mockCfWithEmail(cfAlreadyVerified('recovered-tag', 'shared@example.com'));
 
     const res = await addDestination(project.id, user.jwt, 'shared@example.com', emailEnv());
     expect(res.status).toBe(201);
@@ -450,7 +434,7 @@ describe('POST /projects/:id/email/destinations', () => {
     expect(rows[0]?.cf_destination_id).toBe('recovered-tag');
     expect(rows[0]?.status).toBe('pending');
     expect(rows[0]?.verification_source).toBe('platform');
-    expect(proxySends(fetchMock)).toHaveLength(1);
+    expect(recordedVerificationSends()).toHaveLength(1);
   });
 
   it('returns 502 when CF fails for any reason other than "already exists"', async () => {
@@ -655,7 +639,7 @@ describe('GET refresh against a recreated Cloudflare destination', () => {
     // the next tag: step 1 gets T1, step 3 gets T2.
     let onAccount: ReturnType<typeof cfRow> | null = null;
     const unissued = [tagT1, tagT2];
-    const fetchMock = mockCfWithProxy({
+    const fetchMock = mockCfWithEmail({
       addEmailDestination: (_url, init) => {
         if (onAccount) {
           return cfError('address already exists');
@@ -712,7 +696,7 @@ describe('GET refresh against a recreated Cloudflare destination', () => {
     expect(rowB.status).toBe('pending');
     expect(rowB.verification_source).toBe('cf');
     expect((await rowsFor(projectB.id))[0]?.cf_destination_id).toBe(tagT2);
-    expect(proxySends(fetchMock)).toHaveLength(0);
+    expect(recordedVerificationSends()).toHaveLength(0);
 
     // 4. alice clicks CF's link.
     onAccount = cfRow(tagT2, options.address, '2026-09-15T00:00:00Z');
@@ -831,9 +815,9 @@ describe('GET refresh against a recreated Cloudflare destination', () => {
     expect(body.status).toBe('pending');
     expect(body.verification_source).toBe('platform');
     expect(body.platformVerificationPending).toBe(true);
-    const sends = proxySends(fetchMock);
+    const sends = recordedVerificationSends();
     expect(sends).toHaveLength(1);
-    expect(sends[0]!.body.to).toBe('alice@example.com');
+    expect(sends[0]!.to).toBe('alice@example.com');
     expect((await rowsFor(projectA.id))[0]?.cf_destination_id).toBe(tagT2);
 
     // And the refresh keeps its hands off a platform-pending row.
@@ -1110,7 +1094,7 @@ describe('per-project verification (Option C + Option B)', () => {
     const user = await createTestUser(env.db);
     await setUserEmail(user.id, 'owner@example.com');
     const project = await createTestProject(env.db, user.id);
-    const fetchMock = mockCfWithProxy(cfAlreadyVerified('cf-tag-owner', 'owner@example.com'));
+    const fetchMock = mockCfWithEmail(cfAlreadyVerified('cf-tag-owner', 'owner@example.com'));
 
     const res = await addDestination(project.id, user.jwt, 'owner@example.com', emailEnv());
 
@@ -1121,7 +1105,7 @@ describe('per-project verification (Option C + Option B)', () => {
 
     expect(await readVerifiedDestinations(project.id)).toEqual(['owner@example.com']);
     // No platform-side confirmation mail — that is the Option B path only.
-    expect(proxySends(fetchMock)).toHaveLength(0);
+    expect(recordedVerificationSends()).toHaveLength(0);
   });
 
   it('Option C: records who consented and which address they used', async () => {
@@ -1146,7 +1130,7 @@ describe('per-project verification (Option C + Option B)', () => {
     const user = await createTestUser(env.db);
     await setUserEmail(user.id, 'owner@example.com');
     const project = await createTestProject(env.db, user.id);
-    const fetchMock = mockCfWithProxy(cfAlreadyVerified('cf-tag-shared', 'shared@example.com'));
+    const fetchMock = mockCfWithEmail(cfAlreadyVerified('cf-tag-shared', 'shared@example.com'));
 
     const res = await addDestination(project.id, user.jwt, 'shared@example.com', emailEnv());
     expect(res.status).toBe(201);
@@ -1162,22 +1146,19 @@ describe('per-project verification (Option C + Option B)', () => {
     // Still pending, so SQL admission must refuse sends to it.
     expect(await readVerifiedDestinations(project.id)).toEqual([]);
 
-    const sends = proxySends(fetchMock);
+    const sends = recordedVerificationSends();
     expect(sends).toHaveLength(1);
-    expect(sends[0]!.body.to).toBe('shared@example.com');
+    expect(sends[0]!.to).toBe('shared@example.com');
     // The sender is derived from the CONFIGURED domain, never a literal.
-    expect(sends[0]!.body.from).toBe(`noreply@${MAIL_DOMAIN}`);
-    // The proxy rejects a timestamp outside a 5-minute window.
-    const ts = sends[0]!.body.platformTimestamp;
-    expect(typeof ts).toBe('number');
-    expect(Math.abs(Math.floor(Date.now() / 1000) - (ts as number))).toBeLessThan(60);
+    expect(sends[0]!.from).toBe(`noreply@${MAIL_DOMAIN}`);
+    expect(sends[0]!.text).toContain('/email/destinations/confirm?token=');
   });
 
   it('Option B: does NOT populate the audit columns (consent was per-recipient)', async () => {
     const user = await createTestUser(env.db);
     await setUserEmail(user.id, 'owner@example.com');
     const project = await createTestProject(env.db, user.id);
-    mockCfWithProxy(cfAlreadyVerified('cf-tag-shared', 'shared@example.com'));
+    mockCfWithEmail(cfAlreadyVerified('cf-tag-shared', 'shared@example.com'));
 
     const res = await addDestination(project.id, user.jwt, 'shared@example.com', emailEnv());
     expect(res.status).toBe(201);
@@ -1201,7 +1182,7 @@ describe('per-project verification (Option C + Option B)', () => {
     await setUserEmail(user.id, 'owner@example.com');
     const project = await createTestProject(env.db, user.id);
     let cfVerifiedAt: string | null = null;
-    const fetchMock = mockCfWithProxy({
+    const fetchMock = mockCfWithEmail({
       addEmailDestination: () => cfError('address already exists'),
       listEmailDestinations: () =>
         cfSuccess([cfRow('cf-tag-shared', 'shared@example.com', cfVerifiedAt)]),
@@ -1219,9 +1200,9 @@ describe('per-project verification (Option C + Option B)', () => {
     expect(body.platformVerificationPending).toBe(true);
 
     // Our own link is the only one the recipient can receive for this project.
-    const sends = proxySends(fetchMock);
+    const sends = recordedVerificationSends();
     expect(sends).toHaveLength(1);
-    expect(sends[0]!.body.to).toBe('shared@example.com');
+    expect(sends[0]!.to).toBe('shared@example.com');
 
     // The recipient now clicks the link CF sent for the OTHER project. That
     // consent is not ours to claim: the row stays pending and the proxy keeps
@@ -1247,7 +1228,7 @@ describe('per-project verification (Option C + Option B)', () => {
     const user = await createTestUser(env.db);
     await setUserEmail(user.id, 'owner@example.com');
     const project = await createTestProject(env.db, user.id);
-    const fetchMock = mockCfWithProxy({
+    const fetchMock = mockCfWithEmail({
       addEmailDestination: () => cfError('address already exists'),
       listEmailDestinations: () => cfSuccess([cfRow('cf-tag-owner', 'owner@example.com', null)]),
     });
@@ -1269,7 +1250,7 @@ describe('per-project verification (Option C + Option B)', () => {
 
     // Nothing went out: CF refused, and the platform has no link of its own
     // to mail for a CF-pending owner row.
-    expect(proxySends(fetchMock)).toHaveLength(0);
+    expect(recordedVerificationSends()).toHaveLength(0);
     const rows = await rowsFor(project.id);
     expect(rows).toHaveLength(1);
     expect(rows[0]?.cf_destination_id).toBe('cf-tag-owner');
@@ -1295,7 +1276,7 @@ describe('per-project verification (Option C + Option B)', () => {
       verification_source: 'cf',
     });
     let onAccount = true;
-    const fetchMock = mockCfWithProxy({
+    const fetchMock = mockCfWithEmail({
       addEmailDestination: () =>
         onAccount
           ? cfError('address already exists')
@@ -1337,7 +1318,7 @@ describe('per-project verification (Option C + Option B)', () => {
       'verificationSent',
     );
     expect((await rowsFor(second.id))[0]?.cf_destination_id).toBe('cf-tag-owner-2');
-    expect(proxySends(fetchMock)).toHaveLength(0);
+    expect(recordedVerificationSends()).toHaveLength(0);
   });
 
   it('Option B: parallel POSTs for the same address send exactly one platform email', async () => {
@@ -1354,7 +1335,7 @@ describe('per-project verification (Option C + Option B)', () => {
       release = resolve;
     });
     const cfMocks = cfAlreadyVerified('cf-tag-shared', 'shared@example.com');
-    const fetchMock = mockCfWithProxy({
+    const fetchMock = mockCfWithEmail({
       ...cfMocks,
       addEmailDestination: async () => {
         if (++arrived === 2) {
@@ -1375,9 +1356,9 @@ describe('per-project verification (Option C + Option B)', () => {
     expect([200, 201]).toContain(resA.status);
     expect([200, 201]).toContain(resB.status);
 
-    const sends = proxySends(fetchMock);
+    const sends = recordedVerificationSends();
     expect(sends).toHaveLength(1);
-    expect(sends[0]!.body.to).toBe('shared@example.com');
+    expect(sends[0]!.to).toBe('shared@example.com');
     expect(await rowsFor(project.id)).toHaveLength(1);
   });
 
@@ -1388,20 +1369,24 @@ describe('per-project verification (Option C + Option B)', () => {
     const user = await createTestUser(env.db);
     await setUserEmail(user.id, 'owner@example.com');
     const project = await createTestProject(env.db, user.id);
-    let proxyStatus = 500;
-    const fetchMock = mockCfWithProxy(
+    let deliveryFails = true;
+    const fetchMock = mockCfWithEmail(
       cfAlreadyVerified('cf-tag-shared', 'shared@example.com'),
-      () => Response.json({ ok: proxyStatus === 200 }, { status: proxyStatus }),
+      () => {
+        if (deliveryFails) {
+          throw new Error('provider unavailable');
+        }
+      },
     );
 
     // First add: the row lands, the delivery fails, and the failure is
     // swallowed — the recipient has nothing to click.
     const first = await addDestination(project.id, user.jwt, 'shared@example.com', emailEnv());
     expect(first.status).toBe(201);
-    expect(proxySends(fetchMock)).toHaveLength(1);
+    expect(recordedVerificationSends()).toHaveLength(1);
 
     // Repeat: no new CF registration, no new row — one more link.
-    proxyStatus = 200;
+    deliveryFails = false;
     const second = await addDestination(project.id, user.jwt, 'shared@example.com', emailEnv());
     expect(second.status).toBe(200);
     const body = (await second.json()) as {
@@ -1413,9 +1398,9 @@ describe('per-project verification (Option C + Option B)', () => {
     expect(body.verification_source).toBe('platform');
     expect(body.platformVerificationPending).toBe(true);
 
-    const sends = proxySends(fetchMock);
+    const sends = recordedVerificationSends();
     expect(sends).toHaveLength(2);
-    expect(sends[1]!.body.to).toBe('shared@example.com');
+    expect(sends[1]!.to).toBe('shared@example.com');
     expect(cfCalls(fetchMock, 'POST', '/email/routing/addresses')).toHaveLength(1);
     expect(await rowsFor(project.id)).toHaveLength(1);
   });
@@ -1423,20 +1408,20 @@ describe('per-project verification (Option C + Option B)', () => {
   it('does not swallow a missing EMAIL_SENDER_DOMAIN into a delivery-failure log', async () => {
     // Every reader fails closed on the unset var. `sendPlatformVerificationEmail`
     // resolves the sender OUTSIDE its try, so the misconfiguration surfaces
-    // instead of looking like a transient proxy error. In this harness there
+    // instead of looking like a transient delivery error. In this harness there
     // is no ExecutionContext, so the inline-await fallback carries the throw
     // into the response — in production it lands in `waitUntil`.
     const user = await createTestUser(env.db);
     await setUserEmail(user.id, 'owner@example.com');
     const project = await createTestProject(env.db, user.id);
-    const fetchMock = mockCfWithProxy(cfAlreadyVerified('cf-tag-shared', 'shared@example.com'));
+    const fetchMock = mockCfWithEmail(cfAlreadyVerified('cf-tag-shared', 'shared@example.com'));
 
     // `env` as-is — EMAIL_SENDER_DOMAIN unset.
     const res = await addDestination(project.id, user.jwt, 'shared@example.com', env);
 
     expect(res.status).toBe(500);
     // Nothing was mailed, and the row remains pending.
-    expect(proxySends(fetchMock)).toHaveLength(0);
+    expect(recordedVerificationSends()).toHaveLength(0);
     // But the row was already committed before the sender was resolved, so
     // the misconfigured environment leaves behind a platform-pending row
     // with no link in anyone's inbox. Once the var is set, a repeat POST is
@@ -1448,9 +1433,9 @@ describe('per-project verification (Option C + Option B)', () => {
 
     const retry = await addDestination(project.id, user.jwt, 'shared@example.com', emailEnv());
     expect(retry.status).toBe(200);
-    const sends = proxySends(fetchMock);
+    const sends = recordedVerificationSends();
     expect(sends).toHaveLength(1);
-    expect(sends[0]!.body.to).toBe('shared@example.com');
+    expect(sends[0]!.to).toBe('shared@example.com');
     expect(await rowsFor(project.id)).toHaveLength(1);
   });
 
@@ -1940,17 +1925,14 @@ describe('GET /email/destinations/confirm', () => {
     const user = await createTestUser(env.db);
     await setUserEmail(user.id, 'owner@example.com');
     const project = await createTestProject(env.db, user.id);
-    const fetchMock = mockCfWithProxy(cfAlreadyVerified('cf-tag-shared', 'shared@example.com'));
+    const fetchMock = mockCfWithEmail(cfAlreadyVerified('cf-tag-shared', 'shared@example.com'));
 
     const added = await addDestination(project.id, user.jwt, 'shared@example.com', emailEnv());
     expect(added.status).toBe(201);
 
-    const [send] = proxySends(fetchMock);
-    const mime = new TextDecoder().decode(
-      Uint8Array.from(atob(send!.body.mimeBase64 as string), (ch) => ch.charCodeAt(0)),
-    );
-    const link = /https:\/\/\S*\/email\/destinations\/confirm\?token=(\S+)/.exec(mime);
-    expect(link, `no confirm link in the mail body:\n${mime}`).not.toBeNull();
+    const [send] = recordedVerificationSends();
+    const link = /https:\/\/\S*\/email\/destinations\/confirm\?token=(\S+)/.exec(send!.text);
+    expect(link, `no confirm link in the mail body:\n${send!.text}`).not.toBeNull();
 
     // Stop mocking fetch before the confirm request — nothing outbound is
     // expected on that path.
@@ -2174,50 +2156,6 @@ describe('GET /projects/:id/email/logs', () => {
 });
 
 // ---------------------------------------------------------------------------
-// api <-> proxy platform-internal send contract
-// ---------------------------------------------------------------------------
-
-describe('platform-internal send token (as produced by the route)', () => {
-  it('signs sentinel.timestamp.sha256(from|to|mimeBase64) with JWT_SECRET', async () => {
-    const user = await createTestUser(env.db);
-    await setUserEmail(user.id, 'owner@example.com');
-    const project = await createTestProject(env.db, user.id);
-    const fetchMock = mockCfWithProxy(cfAlreadyVerified('cf-tag-shared', 'shared@example.com'));
-
-    const res = await addDestination(project.id, user.jwt, 'shared@example.com', emailEnv());
-    expect(res.status).toBe(201);
-
-    const [send] = proxySends(fetchMock);
-    expect(send).toBeDefined();
-
-    const expectedHash = await hashSendContent(
-      `noreply@${MAIL_DOMAIN}`,
-      'shared@example.com',
-      send!.body.mimeBase64 as string,
-    );
-    expect(expectedHash).toMatch(/^[0-9a-f]{64}$/);
-
-    const enc = new TextEncoder();
-    const signed = `${PLATFORM_INTERNAL_EMAIL_SENTINEL}.${send!.body.platformTimestamp}.${expectedHash}`;
-    const key = await crypto.subtle.importKey(
-      'raw',
-      enc.encode(env.JWT_SECRET),
-      { name: 'HMAC', hash: 'SHA-256' },
-      false,
-      ['sign'],
-    );
-    const sig = new Uint8Array(await crypto.subtle.sign('HMAC', key, enc.encode(signed)));
-    let binary = '';
-    for (const b of sig) {
-      binary += String.fromCharCode(b);
-    }
-    const expectedToken = btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-
-    expect(send!.body.platformToken).toBe(expectedToken);
-  });
-});
-
-// ---------------------------------------------------------------------------
 // Platform capability gate
 // ---------------------------------------------------------------------------
 
@@ -2281,7 +2219,7 @@ describe('email platform capability', () => {
     await setUserEmail(user.id, 'owner@example.com');
     const project = await createTestProject(env.db, user.id);
     await seedVerifiedPair(project.id);
-    const fetchMock = mockCfWithProxy();
+    const fetchMock = mockCfWithEmail();
     const kvPut = vi.spyOn(env.ROUTING, 'put');
     const bindings = capabilityEnv(false, emailEnv());
 

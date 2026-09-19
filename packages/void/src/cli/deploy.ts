@@ -3714,19 +3714,58 @@ interface CloudflareEmailStepResult {
   satisfied: boolean;
   /** True when the root wrangler config was rewritten — the caller re-parses `rootConfig`. */
   configWritten: boolean;
+  /** Stop before project code, the build, or upload; used for an ambiguous DNS handoff. */
+  abortDeploy?: true;
   /** The post-deploy address map, when the worker ships with the binding; `null` otherwise. */
   map: EmailAddressMapInput | null;
+}
+
+/**
+ * Immediately after setup, the local resolver can retain ENODATA while Cloudflare's public DNS
+ * already serves the new subdomain MX. When the committed config is exactly setup's plan and
+ * every other inbound prerequisite is still ready, DNS is ambiguous: deleting `addresses`
+ * destroys the handoff, while deploying it could fail after upload if routing is genuinely off.
+ */
+function isCommittedSubdomainPlanWaitingForDns(
+  pre: EmailPreflight,
+  rootConfig: Record<string, unknown>,
+): boolean {
+  if (
+    pre.mode !== 'subdomain' ||
+    (pre.domainMx.state !== 'empty' && pre.domainMx.state !== 'unknown') ||
+    pre.routing.enabled !== true ||
+    pre.subaddressing.state !== 'on' ||
+    pre.binding.state !== 'present' ||
+    pre.sender.state !== 'ready' ||
+    pre.addressesOwnership.state !== 'mine' ||
+    pre.addressesStale ||
+    pre.rules.state === 'unknown' ||
+    pre.rules.foreign.length > 0 ||
+    !Array.isArray(rootConfig.addresses) ||
+    rootConfig.addresses.length === 0
+  ) {
+    return false;
+  }
+
+  const allBlockers = pre.blockers.filter((blocker) => blocker.scope === 'all');
+  if (pre.domainMx.state === 'empty') {
+    return allBlockers.length === 0;
+  }
+  // `preflightEmail` always adds one all-scope blocker for an unknown domain MX. Exactly one
+  // therefore means DNS is the only such blocker, without coupling this gate to rendered prose.
+  return allBlockers.length === 1;
 }
 
 /**
  * Step 3b-ii — Mode B email on the developer's own account (design doc 0078, "One keystroke").
  * Preflight is read-only; the checklist is shown; ONE `confirm` (default Yes) authorizes the
  * apply, which runs only the rows not ready and returns the root-config patch this writes.
- * Every branch that cannot finish prints why and returns `satisfied: false` so the deploy
- * continues (never a deploy failure on its own — `--require-email` is the caller's call),
- * WITH the email setup the config already carries when the binding is committed, and
- * without email otherwise. No output of this step ever contains the session bearer: the
- * module borrows it through `getSessionBearer` inside its own closures and drops it.
+ * Most branches that cannot finish return `satisfied: false`, leaving `--require-email` to
+ * decide whether deployment continues. One ambiguous handoff fails closed for every deploy:
+ * an exact committed subdomain plan whose new MX is still empty or unreadable. It is preserved,
+ * and the caller stops before build/upload until DNS can be verified. No output of this step
+ * ever contains the session bearer: the module borrows it through `getSessionBearer` inside its
+ * own closures and drops it.
  */
 async function runCloudflareEmailStep(
   input: CloudflareEmailStepInput,
@@ -3862,13 +3901,31 @@ async function runCloudflareEmailStep(
 
   // The checklist carries the `✘` rows, so a blocked run explains itself before the warn line.
   log.message(renderEmailChecklist(pre));
+  if (isCommittedSubdomainPlanWaitingForDns(pre, rootConfig)) {
+    const dnsState =
+      pre.domainMx.state === 'empty'
+        ? 'this resolver sees no MX records yet'
+        : 'the MX lookup failed';
+    log.error(
+      [
+        `deploy: cannot verify Email Routing on ${pre.domain} because ${dnsState}.`,
+        `The existing addresses plan in ${configName} is preserved. DNS may still be propagating after \`void email setup\`; run \`void email status --platform cloudflare\` and retry the deploy when this resolver sees Cloudflare's MX records.`,
+        'Nothing was built or uploaded.',
+      ].join('\n'),
+    );
+    return {
+      ...without,
+      abortDeploy: true,
+      map: mapFor(existingAddresses(rootConfig, pre), pre.sending.state === 'ready'),
+    };
+  }
   // The three exits below leave the account alone. What the worker then ships is whatever
   // the config already carries — so when the binding is committed the deploy is WITH the
-  // existing setup (map printed, wording says so), and a committed `addresses` array whose
-  // routing preflight found off is withdrawn first: wrangler's plan on it 400s (`2062`)
-  // AFTER the upload, on every deploy, until the key goes (0078: "deleted, never `[]`,
-  // when a later preflight finds routing off"). Only Void's own array is touched (decision
-  // 13); deleting the KEY changes no rule — wrangler skips the plan on `undefined`.
+  // existing setup (map printed, wording says so). A committed `addresses` array whose routing
+  // is verifiably off is withdrawn first: wrangler's plan on it 400s (`2062`) AFTER the upload,
+  // on every deploy, until the key goes (0078: "deleted, never `[]`, when a later preflight finds
+  // routing off"). The ambiguous post-setup DNS case returned above instead. Only Void's own
+  // array is touched (decision 13); deleting the KEY changes no rule — wrangler skips the plan.
   const shipsBinding = pre.binding.state === 'present';
   const leaveAccount = (reason: string): CloudflareEmailStepResult => {
     let configWritten = false;
@@ -4332,9 +4389,9 @@ export async function runCloudflareDeploy(
   // code has run when a credentialed call is made — and so `rootConfig` can simply be RE-PARSED
   // after the write: the post-probe laundering guard (the full-config `deepEqual` after 3c) then
   // sees `send_email` / `addresses` / `vars` as the pre-probe baseline and needs no exception.
-  // Only `needsEmail` apps pay for it. The step never fails the deploy on its own;
-  // `--require-email` turns every "deploying without email" branch into an exit BEFORE anything
-  // is built or uploaded.
+  // Only `needsEmail` apps pay for it. The step stops every deploy for an ambiguous committed
+  // subdomain plan waiting on DNS; otherwise `--require-email` turns every "deploying without
+  // email" branch into an exit BEFORE anything is built or uploaded.
   let emailMap: EmailAddressMapInput | null = null;
   if (needsEmail) {
     if (!assertUploaderStillPinned()) {
@@ -4360,6 +4417,9 @@ export async function runCloudflareDeploy(
       fetchImpl: deps.emailFetch ?? fetch,
       dns: deps.emailDns ?? (await createNodeEmailDns()),
     });
+    if (email.abortDeploy) {
+      return exit(1);
+    }
     if (options.requireEmail && !email.satisfied) {
       log.error(
         [

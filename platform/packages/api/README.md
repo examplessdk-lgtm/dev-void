@@ -246,7 +246,7 @@ Projects send and receive mail through `void/email`. The API authorizes routing,
 
 ### Sender identity is per-environment
 
-The platform mail domain is a configured var, `EMAIL_SENDER_DOMAIN` — never a literal in code. Production and staging run different domains (`mail.void.cloud` / `mail.staging.void.cloud`), and the proxy builds its sender regex from the same var, so a hard-coded domain would make a staging send unroutable.
+The platform mail domain is a configured var, `EMAIL_SENDER_DOMAIN` — never a literal in code. Production and staging run different domains (`mail.void.cloud` / `mail.voidcloud.dev`), and the proxy builds its sender regex from the same var, so a hard-coded domain would make a staging send unroutable.
 
 A project's sender address is `<slug>+noreply@<EMAIL_SENDER_DOMAIN>`. Deployed user workers receive the two halves as plain-text bindings:
 

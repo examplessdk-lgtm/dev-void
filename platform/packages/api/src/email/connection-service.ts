@@ -667,6 +667,33 @@ export async function resolveEmailDomain(db: DbOrTx, rawDomain: string) {
   return rows[0] ?? null;
 }
 
+type ResolvedEmailDomain = NonNullable<Awaited<ReturnType<typeof resolveEmailDomain>>>;
+
+export async function resolveEmailDomains(
+  db: DbOrTx,
+  rawDomains: ReadonlyArray<string>,
+): Promise<Map<string, ResolvedEmailDomain>> {
+  const normalizedByInput = new Map(
+    rawDomains.map((rawDomain) => [rawDomain, normalizeEmailDomain(rawDomain)]),
+  );
+  const domains = [...new Set(normalizedByInput.values())];
+  if (domains.length === 0) {
+    return new Map<string, ResolvedEmailDomain>();
+  }
+  const rows = await db
+    .select({ route: emailDomainRoutes, connection: emailZoneConnections })
+    .from(emailDomainRoutes)
+    .innerJoin(emailZoneConnections, eq(emailDomainRoutes.connection_id, emailZoneConnections.id))
+    .where(inArray(emailDomainRoutes.domain, domains));
+  const byDomain = new Map(rows.map((row) => [row.route.domain, row]));
+  return new Map(
+    [...normalizedByInput].flatMap(([input, normalized]) => {
+      const row = byDomain.get(normalized);
+      return row ? [[input, row] as const] : [];
+    }),
+  );
+}
+
 export async function resolveEmailIngress(
   db: DbOrTx,
   input: {
@@ -847,7 +874,7 @@ export async function replaceBlockedSystemEmailCleanupCredential(
   const client = createCfCustomerClient(token);
   let verifiedToken: { tokenId: string; expiresOn: string | null };
   try {
-    const verification = await client.verifyToken();
+    const verification = await client.verifyToken(connection.account_id);
     if (verification.status !== 'active') {
       throw new EmailOperationError('Cloudflare API token is not active', 403);
     }
@@ -1239,7 +1266,7 @@ export async function requestEmailDomainAdd(
   }
   let verifiedToken: { tokenId: string; expiresOn: string | null } | null = null;
   if (input.token) {
-    const verification = await client.verifyToken();
+    const verification = await client.verifyToken(zone.account.id);
     if (verification.status !== 'active') {
       throw new EmailOperationError('Cloudflare API token is not active', 403);
     }

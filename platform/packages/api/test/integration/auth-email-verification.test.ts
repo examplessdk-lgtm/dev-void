@@ -779,7 +779,11 @@ describe('email verification gating on account linking', () => {
     // routes run against the same PGlite session, so the login's transaction
     // has fully committed before the auto-add gets its answer — exactly the
     // ordering the reviewer described.
-    const emailEnv = () => ({ ...env, EMAIL_SENDER_DOMAIN: 'mail.staging.void.cloud' });
+    const emailEnv = () => ({
+      ...env,
+      EMAIL_GATEWAY_ORIGIN: 'https://void-email-gateway-staging.voidzer0.workers.dev',
+      EMAIL_SENDER_DOMAIN: 'mail.voidcloud.dev',
+    });
 
     function stubEmailRoutingOver(
       base: typeof fetch,

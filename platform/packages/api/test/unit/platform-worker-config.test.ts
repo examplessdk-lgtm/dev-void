@@ -35,6 +35,7 @@ describe('platform Worker configuration', () => {
     });
 
     expect(configs.api).not.toHaveProperty('containers');
+    expect(configs.api).not.toHaveProperty('send_email');
     expect(configs.emailGateway).not.toHaveProperty('send_email');
     expect(configs.emailGateway.vars).not.toHaveProperty('EMAIL_SHARED_ZONE_ID');
     expect(JSON.stringify(configs)).not.toContain('BuildManager');

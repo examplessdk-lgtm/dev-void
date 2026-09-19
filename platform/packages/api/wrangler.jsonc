@@ -6,8 +6,10 @@
   "observability": {
     "enabled": true,
   },
+  // Both hosted PostgreSQL origins are in AWS us-east-2.
   "placement": {
-    "mode": "smart",
+    "mode": "targeted",
+    "region": "aws:us-east-2",
   },
   "limits": {
     "cpu_ms": 300000,
@@ -154,7 +156,11 @@
     ],
   },
   "send_email": [
-    { "name": "EMAIL", "remote": true, "allowed_sender_addresses": ["noreply@void.cloud"] },
+    {
+      "name": "EMAIL",
+      "remote": true,
+      "allowed_sender_addresses": ["noreply@void.cloud", "noreply@mail.void.cloud"],
+    },
   ],
   "triggers": {
     "crons": ["0 * * * *", "*/2 * * * *"],
@@ -168,6 +174,10 @@
     "TAIL_SERVICE_NAME": "void-tail",
     // Must match packages/proxy/wrangler.jsonc — the proxy validates senders against its own copy.
     "EMAIL_SENDER_DOMAIN": "mail.void.cloud",
+    "EMAIL_GATEWAY_ORIGIN": "https://void-email-gateway.voidzer0.workers.dev",
+    "EMAIL_SHARED_ACCOUNT_ID": "f721b8e515fbab226f41e2807edaece7",
+    "EMAIL_SHARED_ZONE_ID": "5b66f5cb84fd7dcfdd0170515e622181",
+    "EMAIL_SHARED_INGRESS_NAME": "void-email-gateway",
     // Bucket name plumbing for the presigned R2 PUT URL path. Must match the
     // `r2_buckets[].bucket_name` value above — the binding surfaces an
     // R2Bucket object but not its name, and the presigner needs the name.
@@ -293,7 +303,11 @@
         ],
       },
       "send_email": [
-        { "name": "EMAIL", "remote": true, "allowed_sender_addresses": ["noreply@void.cloud"] },
+        {
+          "name": "EMAIL",
+          "remote": true,
+          "allowed_sender_addresses": ["noreply@void.cloud", "noreply@mail.void.cloud"],
+        },
       ],
       "routes": [{ "pattern": "api.void.cloud", "custom_domain": true }],
       "vars": {
@@ -303,6 +317,10 @@
         "REQUESTS_DATASET": "void_requests",
         "TAIL_SERVICE_NAME": "void-tail",
         "EMAIL_SENDER_DOMAIN": "mail.void.cloud",
+        "EMAIL_GATEWAY_ORIGIN": "https://void-email-gateway.voidzer0.workers.dev",
+        "EMAIL_SHARED_ACCOUNT_ID": "f721b8e515fbab226f41e2807edaece7",
+        "EMAIL_SHARED_ZONE_ID": "5b66f5cb84fd7dcfdd0170515e622181",
+        "EMAIL_SHARED_INGRESS_NAME": "void-email-gateway",
         "R2_STATIC_ASSETS_BUCKET": "void-static-assets-overflow",
       },
     },
@@ -419,7 +437,12 @@
           },
         ],
       },
-      "send_email": [{ "name": "EMAIL" }],
+      "send_email": [
+        {
+          "name": "EMAIL",
+          "allowed_sender_addresses": ["noreply@void.cloud", "noreply@mail.voidcloud.dev"],
+        },
+      ],
       "routes": [{ "pattern": "api.staging.void.cloud", "custom_domain": true }],
       "vars": {
         "CRON_FIRES_QUEUE_NAME": "void-cron-fires-staging",
@@ -431,7 +454,11 @@
         "AUTH_REDIRECT_URI": "https://api.staging.void.cloud/auth/callback",
         "LOGS_DATASET": "void_logs_staging",
         "REQUESTS_DATASET": "void_requests_staging",
-        "EMAIL_SENDER_DOMAIN": "mail.staging.void.cloud",
+        "EMAIL_SENDER_DOMAIN": "mail.voidcloud.dev",
+        "EMAIL_GATEWAY_ORIGIN": "https://void-email-gateway-staging.voidzer0.workers.dev",
+        "EMAIL_SHARED_ACCOUNT_ID": "f721b8e515fbab226f41e2807edaece7",
+        "EMAIL_SHARED_ZONE_ID": "57fc5c5286e74843013704368205de38",
+        "EMAIL_SHARED_INGRESS_NAME": "void-email-gateway-staging",
         "PLATFORM_ENV": "staging",
         "PROXY_URL": "https://proxy.staging.void.cloud",
         "TAIL_SERVICE_NAME": "void-tail-staging",

@@ -22,7 +22,9 @@ export type Admission = {
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
-const ADMISSION_DEADLINE_MS = 5_000;
+const EMAIL_DEFAULT_DEADLINE_MS = 5_000;
+const EMAIL_ACTION_DEADLINE_MS = 15_000;
+const EMAIL_ADMISSION_DEADLINE_MS = 15_000;
 const MAX_ADMISSION_RESPONSE_BYTES = 65_536;
 
 async function sign(data: string, secret: string): Promise<string> {
@@ -44,9 +46,10 @@ async function call<T>(
   env: Pick<Env, 'API' | 'JWT_SECRET'>,
   path: string,
   body: unknown,
+  deadlineMs = EMAIL_DEFAULT_DEADLINE_MS,
 ): Promise<T> {
   const controller = new AbortController();
-  const deadline = Date.now() + ADMISSION_DEADLINE_MS;
+  const deadline = Date.now() + deadlineMs;
   const beforeDeadline = async <U>(run: () => Promise<U>): Promise<U> => {
     const remaining = deadline - Date.now();
     if (remaining <= 0) {
@@ -364,16 +367,23 @@ export function admitEmail(
     transport: 'binding' | 'send_raw' | 'native_forward' | 'native_reply';
     receiptId?: string;
   },
+  deadlineMs = EMAIL_ADMISSION_DEADLINE_MS,
 ): Promise<Admission> {
-  return call(env, '/admit', body);
+  return call(env, '/admit', body, Math.min(deadlineMs, EMAIL_ADMISSION_DEADLINE_MS));
 }
 
 export function startEmailAttempt(
   env: Pick<Env, 'API' | 'JWT_SECRET'>,
   operationId: string,
   recipients: Array<string>,
+  deadlineMs = EMAIL_ACTION_DEADLINE_MS,
 ): Promise<{ recipients: Array<ActionRecipient> }> {
-  return call(env, `/${encodeURIComponent(operationId)}/start`, { recipients });
+  return call(
+    env,
+    `/${encodeURIComponent(operationId)}/start`,
+    { recipients },
+    Math.min(deadlineMs, EMAIL_ACTION_DEADLINE_MS),
+  );
 }
 
 export function finishEmailAttempt(
@@ -382,8 +392,14 @@ export function finishEmailAttempt(
   recipients: Array<string>,
   state: 'provider_accepted' | 'failed' | 'outcome_unknown' | 'cancelled',
   details: { providerReference?: string; errorCode?: string } = {},
+  deadlineMs = EMAIL_ACTION_DEADLINE_MS,
 ): Promise<{ recipients: Array<ActionRecipient> }> {
-  return call(env, `/${encodeURIComponent(operationId)}/finish`, { recipients, state, ...details });
+  return call(
+    env,
+    `/${encodeURIComponent(operationId)}/finish`,
+    { recipients, state, ...details },
+    Math.min(deadlineMs, EMAIL_ACTION_DEADLINE_MS),
+  );
 }
 
 export function recordEmailReceipt(

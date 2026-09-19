@@ -32,7 +32,7 @@ async function platformBindingNames(): Promise<ReadonlyArray<string>> {
     EMPTY_MANIFEST,
     'test-jwt-secret',
     'void-proxy',
-    { projectSlug: 'my-app', emailSenderDomain: 'mail.staging.void.cloud' },
+    { projectSlug: 'my-app', emailSenderDomain: 'mail.voidcloud.dev' },
   );
   return provisioned.map((binding) => binding.name);
 }
@@ -47,7 +47,7 @@ describe('reserved binding names cover every platform-injected binding', () => {
       EMPTY_MANIFEST,
       'test-jwt-secret',
       'void-proxy',
-      { projectSlug: 'my-app', emailSenderDomain: 'mail.staging.void.cloud' },
+      { projectSlug: 'my-app', emailSenderDomain: 'mail.voidcloud.dev' },
     );
     expect(provisioned.length).toBeGreaterThan(0);
     for (const binding of provisioned) {

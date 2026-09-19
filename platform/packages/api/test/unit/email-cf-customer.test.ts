@@ -40,7 +40,7 @@ describe('cf-customer client', () => {
       );
       const client = createCfCustomerClient(CREDENTIAL);
 
-      const result = await client.verifyToken();
+      const result = await client.verifyToken(ACCOUNT);
 
       const { url, init } = lastCall(fetchMock);
       expect(url).toBe(`${CF_CUSTOMER_API_BASE}/user/tokens/verify`);
@@ -54,13 +54,43 @@ describe('cf-customer client', () => {
     });
 
     it('throws CloudflareApiError carrying the HTTP status on envelope failure', async () => {
-      fetchMock.mockResolvedValueOnce(cfError('invalid token', 401));
+      fetchMock.mockImplementation(async () => cfError('invalid token', 401));
       const client = createCfCustomerClient(CREDENTIAL);
 
-      const error = await client.verifyToken().catch((err: unknown) => err);
+      const error = await client.verifyToken(ACCOUNT).catch((err: unknown) => err);
       expect(error).toBeInstanceOf(CloudflareApiError);
       expect((error as CloudflareApiError).status).toBe(401);
       expect((error as CloudflareApiError).message).toContain('invalid token');
+    });
+
+    it('verifies an account token when the user endpoint rejects it', async () => {
+      fetchMock
+        .mockResolvedValueOnce(cfError('invalid user token', 401))
+        .mockResolvedValueOnce(cfSuccess({ id: 'account-token', status: 'active' }));
+
+      await expect(createCfCustomerClient(CREDENTIAL).verifyToken(ACCOUNT)).resolves.toEqual({
+        id: 'account-token',
+        status: 'active',
+      });
+      expect(lastCall(fetchMock).url).toBe(
+        `${CF_CUSTOMER_API_BASE}/accounts/${ACCOUNT}/tokens/verify`,
+      );
+    });
+
+    it('does not retry a provider outage as another token type', async () => {
+      fetchMock.mockResolvedValueOnce(cfError('unavailable', 503));
+      await expect(createCfCustomerClient(CREDENTIAL).verifyToken(ACCOUNT)).rejects.toMatchObject({
+        status: 503,
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('retains an inactive user-token result without trying the account endpoint', async () => {
+      fetchMock.mockResolvedValueOnce(cfSuccess({ id: 'expired-token', status: 'expired' }));
+      await expect(createCfCustomerClient(CREDENTIAL).verifyToken(ACCOUNT)).resolves.toMatchObject({
+        status: 'expired',
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
     });
   });
 

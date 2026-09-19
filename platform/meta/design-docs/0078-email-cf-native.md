@@ -69,7 +69,9 @@ Interactive deployment shows the selected account, the domain and the
 unfinished account changes before offering setup. Non-interactive deployment
 reports unfinished setup and deploys without email; `--require-email` makes
 setup a prerequisite. Ready configuration is reconciled without repeating
-account mutations.
+account mutations. If setup already committed the exact subdomain routing plan
+and only its new MX records remain empty or unreadable, preserve that plan and
+stop every deployment before build or upload. Retry after DNS is verifiable.
 
 The checklist separates account work, config updates and routing rules.
 `wrangler deploy` owns rule application; a pending rule is not a reason to
@@ -111,8 +113,10 @@ Void owns the whole derived top-level `addresses` array. Hand-written entries
 it cannot derive skip setup without changing the array. Addresses already
 routed elsewhere are pruned from the plan. When routing is unready the key is
 deleted, never written as `[]` — that would ask Wrangler to delete every owned
-rule. The root config is re-read after edits and the deployment verifier's
-whole-array check is preserved.
+rule. The exception is the exact committed subdomain plan waiting only for MX
+propagation described above: preserve the array and abort deployment. The root
+config is re-read after edits and the deployment verifier's whole-array check
+is preserved.
 
 ### Error map and degraded branches
 
@@ -126,11 +130,11 @@ never reported complete merely because the Worker uploaded. Sender config and
 an inert send binding remain useful for verified destinations when
 arbitrary-recipient Sending is unavailable.
 
-### Unverified against live Cloudflare
+### Remaining live Cloudflare checks
 
 Unit tests are not provider acceptance. Still to establish with the selected
 credential type, per the [live release procedure](../release-acceptance.md):
-the subdomain routing POST and subaddressing PATCH, rule-plan permissions,
+the subaddressing PATCH, rule-plan permissions,
 conflict behavior after dashboard edits or Worker renames, and multi-label
 mail subdomains.
 
@@ -466,8 +470,12 @@ flowchart TD
 
 ### Policy and atomic quotas
 
-Provider submissions have a 30-second wait limit within a 60-second batch
-budget. Expiry never proves a provider refusal: started submissions stay unknown,
+Provider submissions have a 30-second wait limit. Direct sends share a 50-second
+proxy budget across admission, attempt checkpoints and provider work; stop new
+provider work at 45 seconds and reserve the remainder for finish or cancellation.
+The SDK bounds the full request to 60 seconds, including the proxy's bounded
+request-body read. Inbound handler action batches retain a 60-second budget.
+Expiry never proves a provider refusal: started submissions stay unknown,
 and only reservations proven unstarted may be cancelled and refunded. Native
 bindings may finish after the caller stops waiting; do not automatically retry
 them. The zone relay also bounds its fetch and upload together to 60 seconds.
@@ -494,6 +502,12 @@ owner; account-level Cloudflare verification alone does not create project
 consent. Custom-domain external sends retain their allowlist exemption, subject
 to provider capability, suspension and quotas. The shared-mail-domain exception
 also applies when the sender is custom, closing a cross-project loop path.
+
+Confirmation links use the email gateway's public Worker origin so recipients can
+reach them when Cloudflare Access protects the API. The gateway accepts only the
+fixed confirmation path with one bounded token query and relays it through its API
+service binding. The API remains responsible for HMAC verification and the
+single-use destination-row transition.
 
 Provider-native forwarding may still require verified destinations regardless of
 the platform's policy mode. A REST resend is not automatically equivalent to

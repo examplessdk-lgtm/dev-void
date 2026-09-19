@@ -87,8 +87,8 @@ export type CfSendingSubdomain = Readonly<{
 }>;
 
 export type CfCustomerClient = Readonly<{
-  /** GET /user/tokens/verify — the api_token verify step. */
-  verifyToken: () => Promise<CfTokenVerification>;
+  /** Verify a user or account token against the zone's authoritative account. */
+  verifyToken: (accountId: string) => Promise<CfTokenVerification>;
   /** GET /zones?name= — exact-name match, or null when the credential can't see it. */
   findZone: (name: string) => Promise<CfCustomerZone | null>;
   /**
@@ -151,7 +151,21 @@ export function createCfCustomerClient(credential: string): CfCustomerClient {
     cfCustomerFetch<T>(`${CF_CUSTOMER_API_BASE}${path}`, credential, init);
 
   return {
-    verifyToken: () => call<CfTokenVerification>('/user/tokens/verify'),
+    verifyToken: async (accountId) => {
+      try {
+        return await call<CfTokenVerification>('/user/tokens/verify');
+      } catch (error) {
+        if (
+          !(error instanceof CloudflareApiError) ||
+          (error.status !== 401 && error.status !== 403)
+        ) {
+          throw error;
+        }
+        return call<CfTokenVerification>(
+          `/accounts/${encodeURIComponent(accountId)}/tokens/verify`,
+        );
+      }
+    },
 
     findZone: async (name) => {
       const zones = await call<ReadonlyArray<CfCustomerZone>>(

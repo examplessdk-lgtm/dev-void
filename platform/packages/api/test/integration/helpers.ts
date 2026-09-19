@@ -73,12 +73,15 @@ export type TestEnv = {
   AUTH_REDIRECT_URI?: string;
   DEV_AUTH_BYPASS?: string;
   SITE_DOMAIN?: string;
+  EMAIL?: SendEmail;
+  EMAIL_GATEWAY_ORIGIN?: string;
   /**
    * Platform mail zone for the environment (`mail.void.cloud` in production,
-   * `mail.staging.void.cloud` in staging). Left UNSET by `setupEnv` on
+   * `mail.voidcloud.dev` in staging). Left UNSET by `setupEnv` on
    * purpose: every reader fails closed without it, and a test that wants the
    * email paths must opt in with `{ ...env, EMAIL_SENDER_DOMAIN: '...' }` so
-   * the fail-closed branch stays reachable.
+   * the fail-closed branch stays reachable. Verification-mail tests also set
+   * `EMAIL_GATEWAY_ORIGIN` explicitly.
    */
   EMAIL_SENDER_DOMAIN?: string;
   REQUESTS_DATASET?: string;
@@ -396,6 +399,26 @@ class MemoryR2Bucket {
 
 let pglite: PGlite | undefined;
 let pgPool: pg.Pool | undefined;
+type QueryCapture = { active: boolean; queries: Array<string> };
+const queryCaptures = new WeakMap<Db, QueryCapture>();
+
+export async function captureQueries<T>(
+  db: Db,
+  run: () => Promise<T>,
+): Promise<{ result: T; queries: Array<string> }> {
+  const capture = queryCaptures.get(db);
+  if (!capture || capture.active) {
+    throw new Error('query capture is unavailable or already active');
+  }
+  capture.active = true;
+  capture.queries = [];
+  try {
+    const result = await run();
+    return { result, queries: [...capture.queries] };
+  } finally {
+    capture.active = false;
+  }
+}
 
 export async function setupEnv(): Promise<TestEnv> {
   const kv = new MemoryKVNamespace();
@@ -404,17 +427,26 @@ export async function setupEnv(): Promise<TestEnv> {
   const staticAssetsR2 = new MemoryR2Bucket();
 
   const databaseUrl = process.env.VOID_TEST_DATABASE_URL;
+  const queryCapture: QueryCapture = { active: false, queries: [] };
+  const logger = {
+    logQuery(query: string) {
+      if (queryCapture.active) {
+        queryCapture.queries.push(query);
+      }
+    },
+  };
   let db: Db;
   if (databaseUrl) {
     pgPool = new pg.Pool({ connectionString: databaseUrl });
-    db = drizzlePg(pgPool, { schema }) as unknown as Db;
+    db = drizzlePg(pgPool, { schema, logger }) as unknown as Db;
   } else {
     pglite = new PGlite({
       loadDataDir: await loadPGliteTemplateBundle(),
       relaxedDurability: true,
     });
-    db = drizzle(pglite, { schema }) as unknown as Db;
+    db = drizzle(pglite, { schema, logger }) as unknown as Db;
   }
+  queryCaptures.set(db, queryCapture);
 
   // Register the test db so the vi.mock in setup.ts routes createDb() here
   setTestDb(db);

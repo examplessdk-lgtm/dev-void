@@ -169,7 +169,7 @@ export type ApiEnv = Env & {
     EMAIL_FROM?: string;
     /**
      * Platform mail domain for this environment (`mail.void.cloud` in
-     * production, `mail.staging.void.cloud` in staging). The proxy worker
+     * production, `mail.voidcloud.dev` in staging). The proxy worker
      * declares the SAME var and validates every sender against it, so the two
      * values must match or a correctly-signed send is rejected by its own
      * proxy. Optional on the type because the var is absent until the mail

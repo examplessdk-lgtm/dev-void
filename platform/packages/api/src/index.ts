@@ -432,11 +432,10 @@ const app = new Hono<ApiEnv>()
   .route('/webhooks', webhookRoutes)
   .use('/github/*', capabilityMiddleware('managedBuilds'))
   .route('/github', githubRoutes)
-  // Public: the HMAC-signed token in `?token=` IS the auth. Mounted
-  // BEFORE the `/projects/*` auth middleware so recipients (third
-  // parties, not Void users) can click without logging in. Gated like
-  // `/webhooks/*`: a platform without email issued no confirmation link,
-  // so the standard 501 replaces verifying a token nobody can hold.
+  // The gateway relays this exact route through its API service binding. The
+  // HMAC-signed token is the credential, so recipients need no Void or Access
+  // session. A platform without email issued no token and returns the standard
+  // capability response.
   .use('/email/*', capabilityMiddleware('email'))
   .route('/email', emailConfirm)
   .use('/me', authMiddleware)

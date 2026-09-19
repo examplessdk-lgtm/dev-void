@@ -738,14 +738,8 @@ async function dispatchPlatformVerification(
     address,
     token,
   );
-  // Same shape the rest of the api uses for post-response work: the
-  // call STARTS synchronously so it cannot be skipped, and a test
-  // harness that invoked `app.request` without an ExecutionContext
-  // falls back to an inline await so the send still happens.
-  // `sendPlatformVerificationEmail` logs and swallows delivery
-  // failures itself — the only thing that escapes it is a missing
-  // `EMAIL_SENDER_DOMAIN`, which is a deploy-time misconfiguration
-  // and is deliberately left loud.
+  // Keep delivery alive after the response; contexts without waitUntil await it.
+  // Delivery failures are logged; missing platform-mail configuration still rejects.
   try {
     context.executionCtx.waitUntil(sendPromise);
   } catch {

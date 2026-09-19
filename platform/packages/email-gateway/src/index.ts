@@ -22,6 +22,10 @@ const decoder = new TextDecoder();
 const MAX_HEADER_BYTES = 128 * 1024;
 const MAX_ENVELOPE_HEADER = 320;
 const MAX_CONCURRENT_DELIVERIES = 2;
+const CONFIRMATION_PATH = '/email/destinations/confirm';
+const MAX_CONFIRMATION_TOKEN_LENGTH = 4 * 1024;
+const MAX_CONFIRMATION_RESPONSE_BYTES = 32 * 1024;
+const CONFIRMATION_DEADLINE_MS = 5_000;
 let activeDeliveries = 0;
 
 class MimeHeaderError extends Error {
@@ -575,6 +579,138 @@ async function probe(request: Request, env: Env): Promise<Response> {
   }
 }
 
+function confirmationResponse(
+  body: BodyInit | null,
+  status: number,
+  contentType?: string | null,
+): Response {
+  const headers = new Headers({
+    'cache-control': 'no-store',
+    'referrer-policy': 'no-referrer',
+    'x-content-type-options': 'nosniff',
+  });
+  if (contentType) {
+    headers.set('content-type', contentType);
+  }
+  return new Response(body, { status, headers });
+}
+
+async function readConfirmationResponse(
+  response: Response,
+  deadline: number,
+  controller: AbortController,
+): Promise<Uint8Array | null> {
+  const declared = Number(response.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > MAX_CONFIRMATION_RESPONSE_BYTES) {
+    throw new Error('confirmation response too large');
+  }
+  const reader = response.body?.getReader();
+  if (!reader) {
+    return null;
+  }
+  const result = new Uint8Array(MAX_CONFIRMATION_RESPONSE_BYTES);
+  let size = 0;
+  try {
+    while (true) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        throw new Error('confirmation response timeout');
+      }
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const chunk = await Promise.race([
+        reader.read(),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            controller.abort();
+            reject(new Error('confirmation response timeout'));
+          }, remaining);
+        }),
+      ]).finally(() => {
+        if (timer !== undefined) {
+          clearTimeout(timer);
+        }
+      });
+      if (chunk.done) {
+        return result.slice(0, size);
+      }
+      size += chunk.value.byteLength;
+      if (size > result.byteLength) {
+        throw new Error('confirmation response too large');
+      }
+      result.set(chunk.value, size - chunk.value.byteLength);
+    }
+  } finally {
+    void reader.cancel().catch(() => {});
+    try {
+      reader.releaseLock();
+    } catch {
+      // A timed-out read may still be settling after cancellation.
+    }
+  }
+}
+
+async function confirmDestination(request: Request, env: Env): Promise<Response> {
+  const url = new URL(request.url);
+  const entries = [...url.searchParams.entries()];
+  if (
+    entries.length !== 1 ||
+    entries[0]![0] !== 'token' ||
+    !entries[0]![1] ||
+    entries[0]![1].length > MAX_CONFIRMATION_TOKEN_LENGTH ||
+    !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(entries[0]![1])
+  ) {
+    return confirmationResponse(null, 400);
+  }
+  if (env.PLATFORM_TRAFFIC_STATE === 'staging' || env.PLATFORM_TRAFFIC_STATE === 'sandbox-drain') {
+    return confirmationResponse(null, 503);
+  }
+
+  const deadline = Date.now() + CONFIRMATION_DEADLINE_MS;
+  const controller = new AbortController();
+  let response: Response | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const target = new URL(`https://api${CONFIRMATION_PATH}`);
+    target.searchParams.set('token', entries[0]![1]);
+    const serviceRequest = env.API.fetch(target.toString(), {
+      method: 'GET',
+      redirect: 'manual',
+      signal: controller.signal,
+    });
+    void serviceRequest.then(
+      (lateResponse) => {
+        if (controller.signal.aborted && lateResponse !== response) {
+          void lateResponse.body?.cancel().catch(() => {});
+        }
+      },
+      () => {},
+    );
+    response = await Promise.race([
+      serviceRequest,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          controller.abort();
+          reject(new Error('confirmation request timeout'));
+        }, CONFIRMATION_DEADLINE_MS);
+      }),
+    ]);
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      timer = undefined;
+    }
+    const body = await readConfirmationResponse(response, deadline, controller);
+    return confirmationResponse(body, response.status, response.headers.get('content-type'));
+  } catch {
+    return confirmationResponse(null, 503);
+  } finally {
+    controller.abort();
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
+    void response?.body?.cancel().catch(() => {});
+  }
+}
+
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
@@ -585,6 +721,9 @@ export default {
         platformVersion: env.PLATFORM_VERSION,
         emailProtocolVersion: 1,
       });
+    }
+    if (request.method === 'GET' && url.pathname === CONFIRMATION_PATH) {
+      return confirmDestination(request, env);
     }
     if (request.method !== 'POST') {
       return new Response(null, { status: 404 });

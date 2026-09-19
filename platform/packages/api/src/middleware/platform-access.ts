@@ -4,21 +4,22 @@ import { readAuthSettings } from '../auth/configuration.ts';
 import { verifyJwt } from '../auth/jwt.ts';
 import type { ApiEnv } from '../env.ts';
 
-/** These service-binding routes independently validate purpose-bound platform HMACs. */
+/** These service-binding routes independently validate purpose-bound credentials. */
 function internallyAuthenticated(method: string, path: string): boolean {
   return (
-    method === 'POST' &&
-    (/^\/internal\/(?:resolve-resource|resolve-worker|verify-owner|verify-prerender-build)\/[^/]+$/.test(
-      path,
-    ) ||
-      path === '/internal/revalidate' ||
-      path === '/internal/email/domain-credential' ||
-      path === '/internal/email/probe-ingress' ||
-      path === '/internal/email/resolve-ingress' ||
-      /^\/internal\/email\/actions\/(?:admit|receipts(?:\/(?:claim|complete))?|[^/]+\/(?:start|finish|status))$/.test(
+    (method === 'GET' && path === '/email/destinations/confirm') ||
+    (method === 'POST' &&
+      (/^\/internal\/(?:resolve-resource|resolve-worker|verify-owner|verify-prerender-build)\/[^/]+$/.test(
         path,
       ) ||
-      path === '/internal/github-webhook')
+        path === '/internal/revalidate' ||
+        path === '/internal/email/domain-credential' ||
+        path === '/internal/email/probe-ingress' ||
+        path === '/internal/email/resolve-ingress' ||
+        /^\/internal\/email\/actions\/(?:admit|receipts(?:\/(?:claim|complete))?|[^/]+\/(?:start|finish|status))$/.test(
+          path,
+        ) ||
+        path === '/internal/github-webhook'))
   );
 }
 

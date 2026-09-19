@@ -101,6 +101,169 @@ describe('dedicated email gateway', () => {
     });
   });
 
+  it('relays the public confirmation route through the fixed API service path only', async () => {
+    const apiFetch = vi.fn(async (input: unknown, init?: RequestInit) => {
+      expect(String(input)).toBe('https://api/email/destinations/confirm?token=payload.signature');
+      const forwarded = new Request(String(input), init);
+      expect(forwarded.method).toBe('GET');
+      expect([...forwarded.headers]).toEqual([]);
+      return new Response('<!doctype html><p>Confirmed</p>', {
+        headers: {
+          'content-type': 'text/html; charset=UTF-8',
+          'set-cookie': 'must-not-leave-the-api=1',
+        },
+      });
+    });
+    const response = await gateway.fetch(
+      new Request('https://gateway.example/email/destinations/confirm?token=payload.signature', {
+        headers: {
+          authorization: 'Bearer untrusted-client-value',
+          cookie: 'untrusted=1',
+          'cf-access-jwt-assertion': 'untrusted-client-value',
+        },
+      }),
+      env(apiFetch),
+      context,
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain('Confirmed');
+    expect(response.headers.get('content-type')).toBe('text/html; charset=UTF-8');
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(response.headers.get('referrer-policy')).toBe('no-referrer');
+    expect(response.headers.get('set-cookie')).toBeNull();
+    expect(apiFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['missing', ''],
+    ['wrong key', '?other=payload.signature'],
+    ['extra key', '?token=payload.signature&next=https://attacker.example'],
+    ['repeated token', '?token=one.signature&token=two.signature'],
+    ['malformed token', '?token=not-a-signed-token'],
+    ['oversized token', `?token=${'a'.repeat(4097)}.signature`],
+  ])('rejects a %s confirmation query', async (_label, query) => {
+    const apiFetch = vi.fn();
+    const response = await gateway.fetch(
+      new Request(`https://gateway.example/email/destinations/confirm${query}`),
+      env(apiFetch),
+      context,
+    );
+
+    expect(response.status).toBe(400);
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(response.headers.get('referrer-policy')).toBe('no-referrer');
+    expect(apiFetch).not.toHaveBeenCalled();
+  });
+
+  it.each(['staging', 'sandbox-drain'])('gates confirmation traffic while %s', async (state) => {
+    const apiFetch = vi.fn();
+    const response = await gateway.fetch(
+      new Request('https://gateway.example/email/destinations/confirm?token=payload.signature'),
+      { ...env(apiFetch), PLATFORM_TRAFFIC_STATE: state } as never,
+      context,
+    );
+
+    expect(response.status).toBe(503);
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(apiFetch).not.toHaveBeenCalled();
+  });
+
+  it('preserves the API capability response for an installation without email', async () => {
+    const response = await gateway.fetch(
+      new Request('https://gateway.example/email/destinations/confirm?token=payload.signature'),
+      env(async () =>
+        Response.json(
+          { error: 'platform capability unavailable', capability: 'email' },
+          { status: 501 },
+        ),
+      ),
+      context,
+    );
+
+    expect(response.status).toBe(501);
+    expect(await response.json()).toMatchObject({ capability: 'email' });
+    expect(response.headers.get('cache-control')).toBe('no-store');
+  });
+
+  it('bounds the confirmation service request and response', async () => {
+    const oversized = await gateway.fetch(
+      new Request('https://gateway.example/email/destinations/confirm?token=payload.signature'),
+      env(
+        async () =>
+          new Response('oversized', { headers: { 'content-length': String(32 * 1024 + 1) } }),
+      ),
+      context,
+    );
+    expect(oversized.status).toBe(503);
+
+    vi.useFakeTimers();
+    try {
+      let signal: AbortSignal | undefined;
+      let markStarted!: () => void;
+      const started = new Promise<void>((resolve) => {
+        markStarted = resolve;
+      });
+      const pending = gateway.fetch(
+        new Request('https://gateway.example/email/destinations/confirm?token=payload.signature'),
+        env((_input, init) => {
+          signal = (init as RequestInit | undefined)?.signal ?? undefined;
+          markStarted();
+          return new Promise<Response>(() => {});
+        }),
+        context,
+      );
+      await started;
+      await vi.advanceTimersByTimeAsync(5_001);
+      const timedOut = await pending;
+      expect(timedOut.status).toBe(503);
+      expect(timedOut.headers.get('cache-control')).toBe('no-store');
+      expect(signal?.aborted).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('cancels a service response that arrives after the confirmation timeout', async () => {
+    vi.useFakeTimers();
+    try {
+      let resolveApi!: (response: Response) => void;
+      let signal: AbortSignal | undefined;
+      const pending = gateway.fetch(
+        new Request('https://gateway.example/email/destinations/confirm?token=payload.signature'),
+        env((_input, init) => {
+          signal = (init as RequestInit | undefined)?.signal ?? undefined;
+          return new Promise<Response>((resolve) => {
+            resolveApi = resolve;
+          });
+        }),
+        context,
+      );
+      await vi.advanceTimersByTimeAsync(5_001);
+      expect((await pending).status).toBe(503);
+      expect(signal?.aborted).toBe(true);
+
+      let cancelled = false;
+      resolveApi(
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode('late'));
+            },
+            cancel() {
+              cancelled = true;
+            },
+          }),
+        ),
+      );
+      await vi.runAllTimersAsync();
+      await Promise.resolve();
+      expect(cancelled).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   function receiptApi() {
     const receipts = new Map<string, { digest: string; reject?: boolean }>();
     return vi.fn(async (url: unknown, init?: unknown) => {

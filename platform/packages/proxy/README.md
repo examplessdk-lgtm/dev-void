@@ -88,9 +88,7 @@ Cloudflare Email Routing → gateway (native or authenticated zone relay)
   → validate handler actions → same API admission and outcome ledger
 ```
 
-An idempotency key binds an action to its payload digest. Replays return recorded recipient states; a conflicting payload fails. An uncertain provider outcome is never automatically retried. Unstarted reservations can be cancelled and refunded; started attempts retain quota. Provider submissions wait at most 30 seconds within a 60-second batch budget.
-
-`POST /email/internal/send` sends platform verification mail. It authenticates a timestamped, content-bound HMAC under `JWT_SECRET` and pins the sender to `noreply@$EMAIL_SENDER_DOMAIN`. Field sizes are bounded before hashing; the API signer is `src/email/send-verification.ts` in the API package.
+An idempotency key binds an action to its payload digest. Replays return recorded recipient states; a conflicting payload fails. An uncertain provider outcome is never automatically retried. Unstarted reservations can be cancelled and refunded; started attempts retain quota. Provider submissions wait at most 30 seconds. Direct sends share one 50-second proxy budget, with the final 5 seconds reserved for finish or cancellation; inbound handler action batches retain a 60-second budget.
 
 The gateway resolves the active project worker and dispatch limits from the API. Tenant requests and framed responses have an absolute deadline, and a durable receipt prevents replay after dispatch may have started. Native ingress can forward or reply using the original Cloudflare message. Relayed replies select delivery by sender domain: the shared binding for platform addresses, or scoped `send_raw` for custom addresses. Relayed forwarding returns `UNSUPPORTED_ACTION` without consuming quota because REST resending does not preserve native forwarding semantics.
 
@@ -121,7 +119,7 @@ src/
   d1.ts           # D1 remote access
   kv.ts           # KV remote access
   r2.ts           # R2 remote access
-  email.ts        # Outbound /email/send + platform-internal /email/internal/send
+  email.ts        # Outbound /email/send
   email-router.ts # Shared native/relayed inbound routing and handler actions
   types.ts        # Env and JWT types
 test/unit/

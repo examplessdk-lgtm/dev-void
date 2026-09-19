@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { log } from '@clack/prompts';
 import { join } from 'pathslash';
@@ -73,9 +73,11 @@ type FetchCall = { url: string; method: string; headers: Record<string, string>;
 function fakeRunner(table: Record<string, EmailWranglerRunResult>, calls: Array<Call>) {
   return (args: Array<string>, opts: { capture: boolean }): EmailWranglerRunResult => {
     calls.push({ args: [...args], capture: opts.capture });
-    // The command appends `-c <configPath> --env=` to every call; key the table on the
-    // command words and assert the suffix separately.
-    const key = args.slice(0, args.indexOf('-c') < 0 ? args.length : args.indexOf('-c')).join(' ');
+    // Key the table on command words; config context is asserted separately.
+    const configIndex = args.indexOf('-c');
+    const envIndex = args.indexOf('--env=');
+    const suffixIndex = configIndex >= 0 ? configIndex : envIndex >= 0 ? envIndex : args.length;
+    const key = args.slice(0, suffixIndex).join(' ');
     const hit = table[key];
     if (!hit) {
       throw new Error(`unexpected wrangler call: ${args.join(' ')}`);
@@ -794,6 +796,74 @@ describe('void email setup --platform cloudflare', () => {
 });
 
 describe('void email status --platform cloudflare', () => {
+  it('fences off an ancestor config without creating a root config, then removes the temporary config', async () => {
+    const parent = mkdtempSync(join(tmpdir(), 'void-email-cli-parent-'));
+    roots.push(parent);
+    const parentConfigPath = join(parent, 'wrangler.jsonc');
+    const parentConfig = '{ "account_id": "wrong-account", "name": "wrong-worker" }\n';
+    writeFileSync(parentConfigPath, parentConfig);
+    const root = join(parent, 'app');
+    mkdirSync(join(root, 'email'), { recursive: true });
+    writeFileSync(
+      join(root, 'void.json'),
+      JSON.stringify({ email: { from: 'noreply@mail.acme.com' } }),
+    );
+    writeFileSync(join(root, 'email', 'support+[ticket].ts'), 'export default () => {};\n');
+    const configPath = join(root, 'wrangler.jsonc');
+    const { deps, calls, fetchCalls } = transcriptDeps({
+      runnerTable: {
+        'auth token --json': {
+          status: 0,
+          stdout: JSON.stringify({ type: 'oauth', token: BEARER }),
+          stderr: '',
+        },
+      },
+    });
+    const { getSessionBearer: _injectedBearer, ...defaultBearerDeps } = deps;
+    const runWrangler = defaultBearerDeps.runWrangler!;
+    const temporaryConfigPaths: Array<string> = [];
+    defaultBearerDeps.runWrangler = (args, options) => {
+      const configIndex = args.indexOf('-c');
+      expect(configIndex).toBeGreaterThanOrEqual(0);
+      const temporaryConfigPath = args[configIndex + 1] as string;
+      temporaryConfigPaths.push(temporaryConfigPath);
+      expect(temporaryConfigPath).not.toBe(parentConfigPath);
+      expect(temporaryConfigPath).not.toBe(configPath);
+      expect(readFileSync(temporaryConfigPath, 'utf8')).toBe('{}\n');
+      return runWrangler(args, options);
+    };
+    const savedAccountId = process.env.CLOUDFLARE_ACCOUNT_ID;
+    process.env.CLOUDFLARE_ACCOUNT_ID = ACCOUNT;
+
+    try {
+      const code = await run(root, 'status', defaultBearerDeps);
+
+      expect(code).toBe(1);
+      expect(existsSync(configPath)).toBe(false);
+      expect(readFileSync(parentConfigPath, 'utf8')).toBe(parentConfig);
+      expect(fetchCalls.every((call) => call.method === 'GET')).toBe(true);
+      expect(temporaryConfigPaths.length).toBeGreaterThan(0);
+      expect(new Set(temporaryConfigPaths).size).toBe(1);
+      expect(existsSync(temporaryConfigPaths[0] as string)).toBe(false);
+      expect(calls.every((call) => call.args.includes('-c'))).toBe(true);
+      expect(calls.every((call) => call.args.at(-1) === '--env=')).toBe(true);
+      expect(calls.find((call) => call.args[0] === 'auth')?.args).toEqual([
+        'auth',
+        'token',
+        '--json',
+        '-c',
+        temporaryConfigPaths[0],
+        '--env=',
+      ]);
+    } finally {
+      if (savedAccountId === undefined) {
+        delete process.env.CLOUDFLARE_ACCOUNT_ID;
+      } else {
+        process.env.CLOUDFLARE_ACCOUNT_ID = savedAccountId;
+      }
+    }
+  });
+
   it('not ready: status rows + address map, exit 1, read-only', async () => {
     const root = makeProject();
     roots.push(root);

@@ -14,10 +14,15 @@ import {
   EMAIL_PROVIDER_DEADLINE_MS,
   EmailProviderTimeoutError,
   createEmailProviderDeadline,
+  type EmailProviderDeadline,
 } from './email-provider-deadline.ts';
 import type { Env, ProxyEnv } from './types.ts';
 
 const app = new Hono<ProxyEnv>();
+// The SDK aborts at 60s. Body/auth can precede this handler, and final ledger
+// writes need time after provider work stops.
+const EMAIL_SEND_DEADLINE_MS = 50_000;
+const EMAIL_SEND_FINALIZATION_MARGIN_MS = 5_000;
 
 /**
  * Cap inbound MIME bytes well below CF's ~10 MB base64-inflated ceiling. The
@@ -82,7 +87,7 @@ const MAX_RECIPIENTS = 50;
  * Bound each address before normalization copies it. RFC 5321 caps a
  * forward-path at 256 octets, so 320 characters leaves room for validation.
  */
-export const MAX_RECIPIENT_LENGTH = 320;
+const MAX_RECIPIENT_LENGTH = 320;
 
 /**
  * Cap the envelope sender for the same reason. It is one string, so there
@@ -92,20 +97,14 @@ export const MAX_RECIPIENT_LENGTH = 320;
  * is one — is then echoed verbatim into the MIME `From:` refusal and
  * serialized into the response. Check it before those copies. The limit
  * matches `MAX_RECIPIENT_LENGTH`.
- *
- * Both are exported for the platform-token gate in `index.ts`, which
- * applies them to `/email/internal/send`'s `from` and `to` BEFORE hashing
- * the pair into the content binding — the same reason and the same
- * figures, on the one path that runs ahead of any credential check.
  */
-export const MAX_SENDER_LENGTH = 320;
+const MAX_SENDER_LENGTH = 320;
 
 /**
- * The platform mail domain for this environment — `mail.void.cloud` in
- * production, `mail.staging.void.cloud` in staging. Configured as the
- * `EMAIL_SENDER_DOMAIN` var on both the proxy and api workers, and mirrored
- * into deployed user workers as the `__VOID_EMAIL_DOMAIN` plain-text binding
- * so the framework builds its default `from` against the same zone.
+ * The platform mail domain for this environment. It is configured as the
+ * `EMAIL_SENDER_DOMAIN` var and mirrored into deployed user workers as the
+ * `__VOID_EMAIL_DOMAIN` plain-text binding so the framework builds its default
+ * `from` against the same zone.
  *
  * There is deliberately NO baked-in default. A staging proxy that fell back
  * to `mail.void.cloud` would accept a `from` on the production zone, and the
@@ -143,8 +142,8 @@ const strictFromCache = new Map<string, RegExp>();
  * this regex, a `from` like `slug+x\r\nX-Header: y@<domain>` would pass slug
  * pinning and then reach `new EmailMessage(from, ...)`, opening an SMTP
  * header injection primitive against the shared sender. The regex pins the
- * entire string to: lowercase ASCII local-part, optional `+<safe-tag>`
- * (constrained to RFC-5321 dot-atom-text + `=` and `/`), then exactly
+ * entire string to: lowercase ASCII local-part, zero or more `+<safe-tag>`
+ * segments (constrained to RFC-5321 dot-atom-text + `=` and `/`), then exactly
  * `@<EMAIL_SENDER_DOMAIN>`. Display names, encoded-words, and angle brackets
  * are intentionally not supported — the framework doesn't emit them for a
  * default `from`, and explicit user-supplied names are already disallowed by
@@ -161,7 +160,7 @@ export function strictFromRe(domain: string): RegExp {
   if (cached) {
     return cached;
   }
-  const re = new RegExp(`^[a-z0-9._-]+(?:\\+[a-z0-9._=/-]+)?@${escapeRegExp(domain)}$`);
+  const re = new RegExp(`^[a-z0-9._-]+(?:\\+[a-z0-9._=/-]+)*@${escapeRegExp(domain)}$`);
   strictFromCache.set(domain, re);
   return re;
 }
@@ -500,6 +499,7 @@ function singleMailboxAddrSpec(value: string): string | null {
  * The user worker does not have a `send_email` binding.
  */
 app.post('/send', async (context) => {
+  const sendDeadline = createEmailProviderDeadline(EMAIL_SEND_DEADLINE_MS);
   const projectId = context.get('projectId');
   const body = context.get('body');
 
@@ -684,6 +684,7 @@ app.post('/send', async (context) => {
       raw,
       requestId,
       operationKey,
+      sendDeadline,
     );
   }
 
@@ -777,15 +778,19 @@ app.post('/send', async (context) => {
   // recipient consent, suspension, and attempt quotas.
   let admission;
   try {
-    admission = await admitEmail(context.env, {
-      projectId,
-      kind: 'direct',
-      key: operationKey,
-      digest: await emailPayloadDigest('direct', from, recipients, raw),
-      from,
-      recipients,
-      transport: 'binding',
-    });
+    admission = await admitEmail(
+      context.env,
+      {
+        projectId,
+        kind: 'direct',
+        key: operationKey,
+        digest: await emailPayloadDigest('direct', from, recipients, raw),
+        from,
+        recipients,
+        transport: 'binding',
+      },
+      sendDeadline.remainingMs(EMAIL_SEND_FINALIZATION_MARGIN_MS),
+    );
   } catch (error) {
     const conflict = error instanceof Error && error.message === 'IDEMPOTENCY_CONFLICT';
     return context.json(
@@ -844,18 +849,17 @@ app.post('/send', async (context) => {
   const allowed = admission.recipients
     .filter((r) => r.state === 'reserved')
     .map((r) => r.recipient);
-  const providerDeadline = createEmailProviderDeadline();
-
   // Send fan-out. CF's `send_email` binding takes one recipient per
   // EmailMessage — we already split by recipient above.
   for (let index = 0; index < allowed.length; index++) {
     const r = allowed[index];
-    if (providerDeadline.expired()) {
+    if (sendDeadline.expired(EMAIL_SEND_FINALIZATION_MARGIN_MS)) {
       const unstarted = allowed.slice(index);
       const cancelled = await cancelUnstartedRecipients(
         context.env,
         admission.operationId,
         unstarted,
+        sendDeadline.remainingMs(),
       );
       for (const recipient of unstarted) {
         deliveries.push({
@@ -873,9 +877,19 @@ app.post('/send', async (context) => {
       break;
     }
     try {
-      await startEmailAttempt(context.env, admission.operationId, [r]);
+      await startEmailAttempt(
+        context.env,
+        admission.operationId,
+        [r],
+        sendDeadline.remainingMs(EMAIL_SEND_FINALIZATION_MARGIN_MS),
+      );
     } catch {
-      const cancelled = await cancelUnstartedRecipients(context.env, admission.operationId, [r]);
+      const cancelled = await cancelUnstartedRecipients(
+        context.env,
+        admission.operationId,
+        [r],
+        sendDeadline.remainingMs(),
+      );
       deliveries.push({
         recipient: r,
         ok: false,
@@ -896,12 +910,20 @@ app.post('/send', async (context) => {
       const msg = new EmailMessage(from, r, bytesToStream(raw));
       // Some CF builds don't return the messageId; we surface "" rather
       // than crash and let the framework decide whether to fall back.
-      const result = await providerDeadline.run(() => sendBinding.send(msg));
+      const result = await sendDeadline.run(
+        () => sendBinding.send(msg),
+        EMAIL_SEND_FINALIZATION_MARGIN_MS,
+      );
       const providerReference = typeof result?.messageId === 'string' ? result.messageId : '';
       try {
-        await finishEmailAttempt(context.env, admission.operationId, [r], 'provider_accepted', {
-          providerReference,
-        });
+        await finishEmailAttempt(
+          context.env,
+          admission.operationId,
+          [r],
+          'provider_accepted',
+          { providerReference },
+          sendDeadline.remainingMs(),
+        );
       } catch {
         deliveries.push({
           recipient: r,
@@ -922,9 +944,14 @@ app.post('/send', async (context) => {
       });
     } catch {
       try {
-        await finishEmailAttempt(context.env, admission.operationId, [r], 'outcome_unknown', {
-          errorCode: 'OUTCOME_UNKNOWN',
-        });
+        await finishEmailAttempt(
+          context.env,
+          admission.operationId,
+          [r],
+          'outcome_unknown',
+          { errorCode: 'OUTCOME_UNKNOWN' },
+          sendDeadline.remainingMs(),
+        );
       } catch {
         /* persisted attempt_started remains unresolved */
       }
@@ -1007,13 +1034,13 @@ export async function requestSendRaw(
   },
   deadlineMs = EMAIL_PROVIDER_DEADLINE_MS,
 ): Promise<SendRawHttpResponse> {
+  const controller = new AbortController();
+  const deadline = Date.now() + Math.min(EMAIL_PROVIDER_DEADLINE_MS, deadlineMs);
   const requestBody = JSON.stringify({
     from: input.from,
     recipients: input.recipients,
     mime_message: input.mimeMessage,
   });
-  const controller = new AbortController();
-  const deadline = Date.now() + Math.min(EMAIL_PROVIDER_DEADLINE_MS, deadlineMs);
   const beforeDeadline = async <T>(run: () => Promise<T>): Promise<T> => {
     const remaining = deadline - Date.now();
     if (remaining <= 0) {
@@ -1181,6 +1208,7 @@ async function sendViaCustomDomain(
   raw: Uint8Array,
   requestId: string,
   operationKey: string,
+  sendDeadline: EmailProviderDeadline,
 ): Promise<Response> {
   // The envelope is forwarded verbatim to the customer's account, so the
   // printable-ASCII guard runs here for the same reason as on the shared
@@ -1230,15 +1258,19 @@ async function sendViaCustomDomain(
 
   let admission;
   try {
-    admission = await admitEmail(context.env, {
-      projectId,
-      kind: 'direct',
-      key: operationKey,
-      digest: await emailPayloadDigest('direct', from, recipients, raw),
-      from,
-      recipients,
-      transport: 'send_raw',
-    });
+    admission = await admitEmail(
+      context.env,
+      {
+        projectId,
+        kind: 'direct',
+        key: operationKey,
+        digest: await emailPayloadDigest('direct', from, recipients, raw),
+        from,
+        recipients,
+        transport: 'send_raw',
+      },
+      sendDeadline.remainingMs(EMAIL_SEND_FINALIZATION_MARGIN_MS),
+    );
   } catch (error) {
     const conflict = error instanceof Error && error.message === 'IDEMPOTENCY_CONFLICT';
     return context.json(
@@ -1301,11 +1333,21 @@ async function sendViaCustomDomain(
   // A duplicate must return its durable outcome even if the credential was
   // subsequently revoked. Fresh attempts lease only after admission, then
   // cancel reservations if there can be no provider submission.
-  const lease = await leaseEmailDomainCredential(context.env, fromDomain, projectId);
+  const lease = await leaseEmailDomainCredential(
+    context.env,
+    fromDomain,
+    projectId,
+    sendDeadline.remainingMs(EMAIL_SEND_FINALIZATION_MARGIN_MS),
+  );
   if (!lease) {
-    await finishEmailAttempt(context.env, admission.operationId, recipients, 'cancelled').catch(
-      () => {},
-    );
+    await finishEmailAttempt(
+      context.env,
+      admission.operationId,
+      recipients,
+      'cancelled',
+      {},
+      sendDeadline.remainingMs(),
+    ).catch(() => {});
     return context.json(
       {
         ok: false,
@@ -1316,9 +1358,14 @@ async function sendViaCustomDomain(
     );
   }
   if (admission.accountId !== lease.accountId) {
-    await finishEmailAttempt(context.env, admission.operationId, recipients, 'cancelled').catch(
-      () => {},
-    );
+    await finishEmailAttempt(
+      context.env,
+      admission.operationId,
+      recipients,
+      'cancelled',
+      {},
+      sendDeadline.remainingMs(),
+    ).catch(() => {});
     return context.json(
       {
         ok: false,
@@ -1329,12 +1376,18 @@ async function sendViaCustomDomain(
     );
   }
   try {
-    await startEmailAttempt(context.env, admission.operationId, recipients);
+    await startEmailAttempt(
+      context.env,
+      admission.operationId,
+      recipients,
+      sendDeadline.remainingMs(EMAIL_SEND_FINALIZATION_MARGIN_MS),
+    );
   } catch {
     const cancelled = await cancelUnstartedRecipients(
       context.env,
       admission.operationId,
       recipients,
+      sendDeadline.remainingMs(),
     );
     for (const recipient of recipients) {
       deliveries.push({
@@ -1360,13 +1413,16 @@ async function sendViaCustomDomain(
   let sendRawResult: ParsedSendRawResult | null = null;
   let providerResponse: SendRawHttpResponse | null = null;
   try {
-    providerResponse = await requestSendRaw({
-      accountId: lease.accountId,
-      bearer: leaseBearer(lease),
-      from,
-      recipients,
-      mimeMessage,
-    });
+    providerResponse = await requestSendRaw(
+      {
+        accountId: lease.accountId,
+        bearer: leaseBearer(lease),
+        from,
+        recipients,
+        mimeMessage,
+      },
+      sendDeadline.remainingMs(EMAIL_SEND_FINALIZATION_MARGIN_MS),
+    );
   } catch {
     failure = { code: 'UPSTREAM_ERROR', message: 'email sending request failed' };
     failureState = 'outcome_unknown';
@@ -1471,6 +1527,7 @@ async function sendViaCustomDomain(
               ? 'OUTCOME_UNKNOWN'
               : (failure?.code ?? delivery.error?.code),
         },
+        sendDeadline.remainingMs(),
       );
       delivery.state = delivery.ok
         ? 'provider_accepted'
@@ -1551,9 +1608,17 @@ async function cancelUnstartedRecipients(
   env: Pick<Env, 'API' | 'JWT_SECRET'>,
   operationId: string,
   recipients: Array<string>,
+  deadlineMs?: number,
 ): Promise<boolean> {
   try {
-    const result = await finishEmailAttempt(env, operationId, recipients, 'cancelled');
+    const result = await finishEmailAttempt(
+      env,
+      operationId,
+      recipients,
+      'cancelled',
+      {},
+      deadlineMs,
+    );
     return recipients.every((recipient) =>
       result.recipients.some((row) => row.recipient === recipient && row.state === 'cancelled'),
     );
@@ -1614,116 +1679,5 @@ function base64Decode(b64: string): Uint8Array {
   }
   return out;
 }
-
-/**
- * Platform-internal send endpoint. Used by the api worker to dispatch
- * destination-verification emails: when project A adds an address that
- * a different project already verified via CF, we issue our own
- * confirmation email to the recipient instead of inheriting CF's
- * verification flag.
- *
- * Auth: HMAC of a fixed sentinel string + timestamp + sha256 of
- * (from|to|mimeBase64) under JWT_SECRET. The auth middleware in
- * `index.ts` validates the sentinel + timestamp window; this handler
- * additionally verifies the content-binding hash matches the body
- * fields it actually intends to act on. Without the content binding,
- * a captured platformToken inside the 5-minute skew window could be
- * replayed against a different (from, to, mime) tuple — the timestamp
- * alone has no relation to what the request asks the proxy to do.
- *
- * Token contract — the api worker MUST sign:
- *   `<sentinel>.<unixSeconds>.<sha256(from|to|mimeBase64) hex>`
- * with HMAC-SHA-256 under `JWT_SECRET`, where `mimeBase64` is the
- * EXACT string sent in the body and the three fields are joined by a
- * literal `|`. The proxy reconstructs and verifies. Mirroring this
- * format is required in `packages/api/src/email/send-verification.ts`.
- * Bumping the contract requires a coordinated proxy + api deploy.
- *
- * Only the proxy and api hold JWT_SECRET — user workers do not, so this
- * endpoint cannot be reached from a user worker.
- *
- * The `from` address is locked to a single allow-listed sender:
- * `noreply@<EMAIL_SENDER_DOMAIN>`. Earlier revisions trusted the body's
- * `from` and would have let a compromised api worker (or
- * misuse-via-coordinated-bug) send arbitrary platform-branded mail.
- * The verification-email use case is the only legitimate caller and it
- * always sends from `noreply@`; harden by allow-list rather than
- * relying on downstream filters.
- *
- * Body shape (validated below):
- *   { platformToken, platformTimestamp, from, to, mimeBase64 }.
- *
- * Quotas, allowlists, and the suspend kill-switch DO NOT apply here:
- * those are per-project guards, and platform verification mail is
- * account-level. Volume is bounded by the api worker's per-project KV
- * rate limit on `POST /destinations`, applied before tokens are issued.
- */
-
-/** The single allowed platform-internal `from` local-part. */
-const INTERNAL_FROM_LOCAL_PART = 'noreply';
-
-app.post('/internal/send', async (context) => {
-  const body = context.get('body');
-
-  // Fail closed on missing sender configuration, exactly as `/send` does —
-  // otherwise the allow-list below would have no domain to pin against.
-  const senderDomain = readSenderDomain(context.env);
-  if (!senderDomain) {
-    return context.json({ ok: false, error: 'email sender domain is not configured' }, 502);
-  }
-
-  const from = asString(body.from);
-  const to = asString(body.to);
-  const mimeBase64 = asString(body.mimeBase64);
-  if (!from || !to || !mimeBase64) {
-    return context.json({ ok: false, error: 'invalid body' }, 400);
-  }
-
-  // Pin the platform-internal `from` to a single allow-listed envelope on
-  // the configured zone: `noreply@<EMAIL_SENDER_DOMAIN>`.
-  // The envelope is forwarded verbatim, so validation has to run on bytes that
-  // cannot change under case folding. U+212A KELVIN SIGN lowercases to 'k' and
-  // U+0130 to 'i', so a non-ASCII `from` can satisfy a lowercased regex and
-  // still reach the shared envelope sender intact. Refuse it before that.
-  if (!/^[\x21-\x7e]+$/.test(from)) {
-    return context.json({ ok: false, error: 'from not allowed for internal send' }, 403);
-  }
-  if (from.toLowerCase() !== `${INTERNAL_FROM_LOCAL_PART}@${senderDomain}`) {
-    return context.json({ ok: false, error: 'from not allowed for internal send' }, 403);
-  }
-
-  const sendBinding = context.env.SEND_EMAIL;
-  if (typeof sendBinding?.send !== 'function') {
-    return context.json({ ok: false, error: 'email sending is not configured' }, 502);
-  }
-
-  let raw: Uint8Array;
-  try {
-    raw = base64Decode(mimeBase64);
-  } catch {
-    return context.json({ ok: false, error: 'invalid base64 mime' }, 400);
-  }
-  if (raw.byteLength > MAX_MIME_BYTES) {
-    return context.json({ ok: false, error: 'too large' }, 413);
-  }
-
-  try {
-    const msg = new EmailMessage(from, to, bytesToStream(raw));
-    await createEmailProviderDeadline(EMAIL_PROVIDER_DEADLINE_MS).run(() => sendBinding.send(msg));
-    return context.json({ ok: true });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.error(
-      `[email-internal] send failed from=${sanitizeForLog(from, 320)} to=${sanitizeForLog(to, 320)}: ${sanitizeForLog(message, 320)}`,
-    );
-    return context.json(
-      {
-        ok: false,
-        error: err instanceof EmailProviderTimeoutError ? 'outcome unknown' : 'upstream error',
-      },
-      err instanceof EmailProviderTimeoutError ? 504 : 502,
-    );
-  }
-});
 
 export { app as email };

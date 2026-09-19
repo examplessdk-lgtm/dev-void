@@ -20,9 +20,10 @@ export async function leaseEmailDomainCredential(
   env: Pick<Env, 'API' | 'JWT_SECRET'>,
   domain: string,
   projectId: string,
+  deadlineMs = LEASE_DEADLINE_MS,
 ): Promise<EmailDomainLease | null> {
   const controller = new AbortController();
-  const deadline = Date.now() + LEASE_DEADLINE_MS;
+  const deadline = Date.now() + Math.min(deadlineMs, LEASE_DEADLINE_MS);
   const beforeDeadline = async <T>(run: () => Promise<T>): Promise<T> => {
     const remaining = deadline - Date.now();
     if (remaining <= 0) {

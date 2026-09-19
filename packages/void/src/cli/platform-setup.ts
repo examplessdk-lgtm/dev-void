@@ -88,12 +88,12 @@ export function platformSetupPages(plan: PlatformInstallPlan): {
     ...(plan.deployment.capabilities.customDomains
       ? [{ key: 'ssl_and_certificates', type: 'edit' }]
       : []),
-    // Administrator-registered email domains run the Email Routing / Email
-    // Sending setup on this token against zones in this account.
+    // Email domain setup and destination consent use this token.
     ...(plan.deployment.capabilities.email
       ? [
           { key: 'zone', type: 'read' },
           { key: 'zone_settings', type: 'edit' },
+          { key: 'email_routing_address', type: 'edit' },
           { key: 'email_routing_rule', type: 'edit' },
           { key: 'email_sending', type: 'edit' },
         ]
@@ -121,7 +121,7 @@ export function platformSetupPages(plan: PlatformInstallPlan): {
           : []),
         ...(plan.deployment.capabilities.email
           ? [
-              'Administrator-registered email domains need Zone: Read, Zone Settings: Edit and Email Routing Rules: Edit on the mail zones, and Email Sending: Edit.',
+              'Email-enabled installations need Email Routing Addresses: Edit and Email Sending: Edit on the account, plus Zone: Read, Zone Settings: Edit and Email Routing Rules: Edit on the mail zones.',
             ]
           : []),
         'If the form differs, match the permissions above. Create the token, then paste it here.',

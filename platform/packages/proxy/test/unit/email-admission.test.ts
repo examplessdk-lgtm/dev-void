@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vite-plus/test';
-import { admitEmail, emailPayloadDigest } from '../../src/email-admission.ts';
+import { admitEmail, emailPayloadDigest, finishEmailAttempt } from '../../src/email-admission.ts';
 
 const encoder = new TextEncoder();
 function message(date: string, id: string, boundary: string, body: string) {
@@ -202,6 +202,97 @@ describe('email admission payload digest', () => {
 });
 
 describe('email admission service deadline', () => {
+  it('allows an admission response after five seconds within the control deadline', async () => {
+    vi.useFakeTimers();
+    try {
+      let signal: AbortSignal | undefined;
+      const fetch = vi.fn((_input: unknown, init?: RequestInit) => {
+        signal = init?.signal ?? undefined;
+        return new Promise<Response>((resolve) => {
+          setTimeout(
+            () =>
+              resolve(
+                Response.json({
+                  operationId: 'emailact_1',
+                  replay: false,
+                  recipients: [
+                    {
+                      recipient: 'recipient@example.com',
+                      state: 'reserved',
+                      errorCode: null,
+                      providerReference: null,
+                    },
+                  ],
+                }),
+              ),
+            6_000,
+          );
+        });
+      });
+      const pending = admitEmail(
+        { API: { fetch } as never, JWT_SECRET: 'secret' },
+        {
+          projectId: 'project_1',
+          kind: 'direct',
+          key: 'request_1',
+          digest: 'a'.repeat(64),
+          from: 'sender@example.com',
+          recipients: ['recipient@example.com'],
+          transport: 'binding',
+        },
+      );
+
+      await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+      await vi.advanceTimersByTimeAsync(6_000);
+      await expect(pending).resolves.toMatchObject({ operationId: 'emailact_1' });
+      expect(signal?.aborted).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('allows a lifecycle checkpoint after five seconds within its control deadline', async () => {
+    vi.useFakeTimers();
+    try {
+      const fetch = vi.fn(
+        () =>
+          new Promise<Response>((resolve) => {
+            setTimeout(
+              () =>
+                resolve(
+                  Response.json({
+                    recipients: [
+                      {
+                        recipient: 'recipient@example.com',
+                        state: 'provider_accepted',
+                        errorCode: null,
+                        providerReference: 'message-1',
+                      },
+                    ],
+                  }),
+                ),
+              6_000,
+            );
+          }),
+      );
+      const pending = finishEmailAttempt(
+        { API: { fetch } as never, JWT_SECRET: 'secret' },
+        'emailact_1',
+        ['recipient@example.com'],
+        'provider_accepted',
+        { providerReference: 'message-1' },
+      );
+
+      await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+      await vi.advanceTimersByTimeAsync(6_000);
+      await expect(pending).resolves.toMatchObject({
+        recipients: [{ state: 'provider_accepted' }],
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('settles when the service binding ignores its abort signal', async () => {
     vi.useFakeTimers();
     try {
@@ -221,7 +312,7 @@ describe('email admission service deadline', () => {
 
       await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
       const rejection = expect(pending).rejects.toThrow('EMAIL_ADMISSION_TIMEOUT');
-      await vi.advanceTimersByTimeAsync(5_000);
+      await vi.advanceTimersByTimeAsync(15_000);
       await rejection;
     } finally {
       vi.useRealTimers();

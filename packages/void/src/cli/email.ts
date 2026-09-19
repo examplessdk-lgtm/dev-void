@@ -1,6 +1,9 @@
 import { execSync } from 'node:child_process';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { confirm, isCancel, log, note, password } from '@clack/prompts';
 import { parseRootWranglerConfig, readWranglerTopLevelString } from '@void/deploy-cloudflare';
+import { join } from 'pathslash';
 import { readConfig } from '../config.ts';
 import { readProjectPaths } from '../project-paths.ts';
 import { scanEmailHandlersSync } from '../router/email.ts';
@@ -1029,6 +1032,36 @@ export interface EmailCloudflareCommandDeps {
   exit?: (code: number) => never;
 }
 
+interface EmailWranglerConfigContext {
+  path: string;
+  cleanup: () => void;
+}
+
+/**
+ * Wrangler discovers config files by walking parent directories. A standalone email command in
+ * an app with no root config must still run in an explicit empty config context, otherwise an
+ * unrelated ancestor config can select the wrong account. The real project path remains separate:
+ * setup writes there only after it succeeds, while status leaves the project untouched.
+ */
+function createEmailWranglerConfigContext(configPath: string): EmailWranglerConfigContext {
+  if (existsSync(configPath)) {
+    return { path: configPath, cleanup: () => {} };
+  }
+
+  const directory = mkdtempSync(join(tmpdir(), 'void-email-wrangler-'));
+  const path = join(directory, 'wrangler.jsonc');
+  try {
+    writeFileSync(path, '{}\n', { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+  } catch (error) {
+    rmSync(directory, { recursive: true, force: true });
+    throw error;
+  }
+  return {
+    path,
+    cleanup: () => rmSync(directory, { recursive: true, force: true }),
+  };
+}
+
 /**
  * `void email setup --platform cloudflare` and `void email status --platform cloudflare`.
  *
@@ -1048,6 +1081,53 @@ export async function runEmailCloudflareCommand(
   args: EmailArgs,
   deps: EmailCloudflareCommandDeps = {},
 ): Promise<void> {
+  const rawExit = deps.exit ?? ((code: number): never => process.exit(code));
+  // Keep project validation ahead of Cloudflare-config discovery, including its legacy-TOML
+  // refusal. No config context is needed until the command is ready to make account reads.
+  const voidConfig = readConfig(root);
+  const from = voidConfig.email?.from;
+  if (!from) {
+    log.error(
+      'email: no sender configured. Add "email": { "from": "you@mail.acme.com" } to void.json — its host is the domain email is set up on.',
+    );
+    return rawExit(1);
+  }
+  const paths = readProjectPaths(root);
+  const handlers = scanEmailHandlersSync(paths.sourceRoot);
+
+  const configPath = discoverRootWranglerConfig(root);
+  const wranglerConfig = createEmailWranglerConfigContext(configPath);
+  try {
+    return await runEmailCloudflareCommandInConfig(
+      root,
+      args,
+      { from, handlers },
+      configPath,
+      wranglerConfig.path,
+      {
+        ...deps,
+        exit: (code: number): never => {
+          wranglerConfig.cleanup();
+          return rawExit(code);
+        },
+      },
+    );
+  } finally {
+    wranglerConfig.cleanup();
+  }
+}
+
+async function runEmailCloudflareCommandInConfig(
+  root: string,
+  args: EmailArgs,
+  project: {
+    from: string;
+    handlers: ReturnType<typeof scanEmailHandlersSync>;
+  },
+  configPath: string,
+  wranglerConfigPath: string,
+  deps: EmailCloudflareCommandDeps,
+): Promise<void> {
   const exit = deps.exit ?? ((code: number): never => process.exit(code));
   const print = deps.print ?? ((block: string): void => log.message(block));
   const fail = (message: string): never => {
@@ -1056,19 +1136,10 @@ export async function runEmailCloudflareCommand(
   };
 
   // 1. Inputs from the local project: `email.from` is the ONLY domain input (decision 9).
-  const voidConfig = readConfig(root);
-  const from = voidConfig.email?.from;
-  if (!from) {
-    return fail(
-      'email: no sender configured. Add "email": { "from": "you@mail.acme.com" } to void.json — its host is the domain email is set up on.',
-    );
-  }
-  const paths = readProjectPaths(root);
-  const handlers = scanEmailHandlersSync(paths.sourceRoot);
+  const { from, handlers } = project;
 
   // 2. The same pinned transport + account + worker name as `void deploy --platform
   //    cloudflare`, so every wrangler child here consults the account the deploy will.
-  const configPath = discoverRootWranglerConfig(root);
   const rootConfig = parseRootWranglerConfig(configPath);
   await loadProvisionModule();
   let apiBaseUrl: string;
@@ -1094,7 +1165,7 @@ export async function runEmailCloudflareCommand(
   // The same bearer bridge the deploy's step 3b-ii uses: `wrangler auth token --json` on the
   // pinned runner, WRANGLER_WRITE_LOGS=false so the token never reaches wrangler's on-disk log.
   const getSessionBearer =
-    deps.getSessionBearer ?? (() => runWranglerAuthToken(runWrangler, configPath));
+    deps.getSessionBearer ?? (() => runWranglerAuthToken(runWrangler, wranglerConfigPath));
   const sendEmail = rootConfig.send_email;
   const inputs: EmailCloudflareInputs = {
     handlers,
@@ -1108,7 +1179,7 @@ export async function runEmailCloudflareCommand(
         ? (rootConfig.vars as Record<string, unknown>)
         : null,
     configConflicts: findEmailConfigConflicts(rootConfig),
-    wranglerArgs: ['-c', configPath, '--env='],
+    wranglerArgs: ['-c', wranglerConfigPath, '--env='],
     apiBaseUrl,
     runWrangler,
     getSessionBearer,

@@ -2,11 +2,11 @@ import { verifyEmailReceipt } from '@void/platform/email-protocol';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { ai } from './ai.ts';
-import { asNumber, asString, isProxyBody } from './body.ts';
+import { asString, isProxyBody } from './body.ts';
 import { proxyCapabilityEnabled } from './capabilities.ts';
 import { d1 } from './d1.ts';
 import { readEmailRequestJson } from './email-request-body.ts';
-import { email, MAX_MIME_BYTES, MAX_RECIPIENT_LENGTH, MAX_SENDER_LENGTH } from './email.ts';
+import { email } from './email.ts';
 import { guardHumanStream } from './human-stream.ts';
 import { kv } from './kv.ts';
 import { PLATFORM_DISABLED_KEY, PLATFORM_DISABLED_VALUE } from './platform-lifecycle.ts';
@@ -68,40 +68,6 @@ app.all('/*', async (context, next) => {
   }
   await next();
 });
-
-// Sentinel string the api worker signs with JWT_SECRET for platform-internal
-// calls (e.g. POST /email/internal/send). Only the proxy and api hold
-// JWT_SECRET — user workers do not — so this gate keeps user code from
-// reaching internal endpoints. Mirrors the same value in
-// `packages/api/src/email/send-verification.ts`; bumping requires a
-// coordinated proxy + api deploy.
-const PLATFORM_INTERNAL_EMAIL_SENTINEL = 'void-platform-internal-email-v1';
-
-// Refuse impossible MIME sizes before hashing; the handler checks decoded bytes.
-const MAX_PLATFORM_MIME_BASE64_LENGTH = Math.ceil((MAX_MIME_BYTES * 4) / 3) + 4;
-
-// Bind a fresh timestamp into the HMAC and require the request to land
-// within this many seconds of "now" — without it, a single observed
-// platformToken would replay forever (the sentinel never changes). Five
-// minutes covers normal clock skew without giving an attacker who
-// observed a token a meaningful replay window.
-const PLATFORM_TOKEN_MAX_SKEW_SECONDS = 5 * 60;
-
-/**
- * Exact length of a well-formed `platformToken`. The only signer
- * (`signSentinelAtBound` in `packages/api/src/email/send-verification.ts`)
- * emits an HMAC-SHA256 tag — 32 bytes — as unpadded base64url, and
- * ceil(32 * 4 / 3) = 43 characters is the only length that encodes to. Any
- * other length can never verify, so it is refused before `verifyHmac` runs:
- * `base64urlDecode` copies the token twice through global `replace` (V8
- * materializes one part per match) and then `Uint8Array.from` iterates
- * `atob`'s output one character at a time — measured, a 30 MB token is
- * ~1.5 GB of transient heap and ~2 s, and a 4 MB one kills a 128 MB heap,
- * the shared proxy isolate's ceiling. This gate runs ahead of any
- * credential check, so without the bound an unauthenticated caller chose
- * that cost.
- */
-const PLATFORM_TOKEN_LENGTH = 43;
 
 async function hmacSign(data: string, secret: string): Promise<string> {
   const key = await crypto.subtle.importKey(
@@ -181,99 +147,6 @@ app.post('/*', async (context, next) => {
     return context.json({ error: 'invalid JSON body' }, 400);
   }
   context.set('body', body);
-
-  // Platform-internal endpoints (e.g. /email/internal/send) authenticate
-  // via an HMAC of `<sentinel>.<unixSeconds>.<sha256(from|to|mimeBase64)>`
-  // under JWT_SECRET. They have no projectId — they exist for api → proxy
-  // calls that don't belong to a user project (verification mail, etc.).
-  // User-token requests can never reach this path because the sentinel is
-  // not a projectId.
-  //
-  // **Content binding.** The hash binds the token to the (from, to,
-  // mimeBase64) tuple it authorizes. Without it, a captured platformToken
-  // inside the 5-minute skew window could be replayed against a different
-  // recipient or arbitrary MIME bytes — the timestamp alone has no relation
-  // to what the request actually asks the proxy to do. With it, an attacker
-  // who observes one verification email's token can only ever resend that
-  // exact email; recipient, content, and quota are all locked.
-  //
-  // The api worker MUST sign:
-  //   `<sentinel>.<unixSeconds>.<hex sha256 of from|to|mimeBase64>`
-  // see `packages/api/src/email/send-verification.ts` for the reference
-  // signer. The fields are joined with a literal `|` so a tampering attempt
-  // can't slide bytes between them.
-  //
-  // The prefix is pinned to `/email/internal/` only. A bare `/internal/`
-  // prefix would be a footgun: any future handler mounted at root
-  // `/internal` would silently inherit sentinel-only auth with no projectId
-  // set. Today no such handler exists; if one ever does, it should be
-  // mounted under its own feature-prefixed namespace.
-  if (path.startsWith('/email/internal/')) {
-    const platformToken = asString(body.platformToken);
-    const platformTimestamp = asNumber(body.platformTimestamp);
-    if (!platformToken || platformTimestamp === null) {
-      return context.json({ error: 'platform token required' }, 403);
-    }
-    // A token of the wrong length is present but can never be valid, so it
-    // takes the same opaque refusal as the skew and size gates below —
-    // `required` is reserved for an absent token. Checked before anything
-    // else touches the token; see `PLATFORM_TOKEN_LENGTH`.
-    if (platformToken.length !== PLATFORM_TOKEN_LENGTH) {
-      return context.json({ error: 'invalid platform token' }, 403);
-    }
-    const nowSec = Math.floor(Date.now() / 1000);
-    if (Math.abs(nowSec - platformTimestamp) > PLATFORM_TOKEN_MAX_SKEW_SECONDS) {
-      // Stale or future-dated token. Don't distinguish for the caller —
-      // both look like an invalid token from outside.
-      return context.json({ error: 'invalid platform token' }, 403);
-    }
-    // Bind the token to the body's (from|to|mimeBase64). Pull the raw
-    // strings here (asString returns null for non-strings) and compute the
-    // same sha256 the api worker computes when signing.
-    const bindingFrom = asString(body.from);
-    const bindingTo = asString(body.to);
-    const bindingMime = asString(body.mimeBase64);
-    if (!bindingFrom || !bindingTo || !bindingMime) {
-      // No fields to bind — the request body is malformed for any
-      // /email/internal/* handler we expose today. Reject at the auth
-      // boundary so the handler doesn't have to re-decide what to do with a
-      // partially-authed request.
-      return context.json({ error: 'invalid platform token' }, 403);
-    }
-    // Bound the input BEFORE hashing it. This runs before the token is
-    // verified, so an unauthenticated caller would otherwise choose how much
-    // sha256 work we do. The bound is the base64 length of the same
-    // MAX_MIME_BYTES the handlers enforce; the handler still re-checks the
-    // decoded size, this only refuses to hash what can never be valid.
-    if (bindingMime.length > MAX_PLATFORM_MIME_BASE64_LENGTH) {
-      return context.json({ error: 'invalid platform token' }, 403);
-    }
-    // The two addresses are hashed alongside the MIME and were the only
-    // part of the input left unbounded. The template below flattens
-    // `from|to|mime` into one full-size string and `TextEncoder` copies it
-    // again (measured: +1x on the heap and +1x external for the pair), so
-    // without this an unauthenticated caller with a small MIME still chose
-    // two more full-size copies plus the sha256 over them. The bounds are
-    // the ones `/email/send` applies to its sender and recipients, and they
-    // refuse nothing the only signer sends: `/email/internal/send` accepts
-    // exactly `noreply@<EMAIL_SENDER_DOMAIN>` as `from`, and `to` is one
-    // address the api worker already bounded at the same 320 when it was
-    // registered (`api/src/routes/email.ts`) — RFC 5321 caps a path at 256
-    // octets anyway. Same opaque refusal: from outside, a body that cannot
-    // be signed and a body that was not are one case.
-    if (bindingFrom.length > MAX_SENDER_LENGTH || bindingTo.length > MAX_RECIPIENT_LENGTH) {
-      return context.json({ error: 'invalid platform token' }, 403);
-    }
-    const contentHash = await sha256Hex(`${bindingFrom}|${bindingTo}|${bindingMime}`);
-    const signed = `${PLATFORM_INTERNAL_EMAIL_SENTINEL}.${platformTimestamp}.${contentHash}`;
-    if (!(await verifyHmac(signed, platformToken, context.env.JWT_SECRET))) {
-      return context.json({ error: 'invalid platform token' }, 403);
-    }
-    // Internal endpoints don't operate on a project — leave projectId unset.
-    // Downstream handlers must not call context.get('projectId').
-    await next();
-    return;
-  }
 
   let revalidateHuman: (() => Promise<boolean>) | undefined;
   const authHeader = context.req.header('authorization');
@@ -387,9 +260,7 @@ app.post('/sandbox/*', (context) =>
 // the email module still holds `__VOID_PROXY` and a valid project token, so
 // an explicit-`from` `sendEmail()` reaches `/email/send` and would otherwise
 // answer with the sender-domain / send-binding configuration failures — or
-// send, if the operator left the bindings in place. `/email/internal/send`
-// is covered too: its only caller is the api's verification mail, which
-// sits behind the api's own `email` capability gate.
+// send, if the operator left the bindings in place.
 app.post('/email/*', async (context, next) => {
   if (!proxyCapabilityEnabled(context.env.PLATFORM_CAPABILITIES, 'email')) {
     return context.json(
@@ -435,16 +306,6 @@ async function getVerifyKey(secret: string): Promise<CryptoKey> {
   );
   cachedKeySecret = secret;
   return cachedVerifyKey;
-}
-
-async function sha256Hex(input: string): Promise<string> {
-  const digest = await crypto.subtle.digest('SHA-256', encoder.encode(input));
-  const bytes = new Uint8Array(digest);
-  let out = '';
-  for (const b of bytes) {
-    out += b.toString(16).padStart(2, '0');
-  }
-  return out;
 }
 
 async function verifyHmac(data: string, signature: string, secret: string): Promise<boolean> {

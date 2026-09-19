@@ -172,7 +172,7 @@ await sendEmail({
 
 `ok: false` carries either a top-level `error` or a complete per-recipient `deliveries` list. Platform results include an `operationId` when available, and per-recipient `state` distinguishes rejection, reservation, submission, provider acceptance, failure, cancellation, and an unknown outcome.
 
-Provider submissions have a 30-second wait limit and share a 60-second budget per batch. A submission that times out returns `OUTCOME_UNKNOWN`; the provider may still accept it later.
+Provider submissions have a 30-second wait limit. Platform `sendEmail` requests are bounded to 60 seconds, including admission and recording the result; native and inbound handler submissions share a 60-second batch budget. A submission that times out returns `OUTCOME_UNKNOWN`; the provider may still accept it later.
 
 Use an idempotency key for sends you may retry:
 
@@ -524,7 +524,9 @@ Enter (Yes is the default) applies only the `+` rows that are not ready, then th
     outbound  sendEmail() from support@mail.acme.com
 ```
 
-On the second deploy every row reads ready: no prompt, no account call, and wrangler reports `Email Routing rules are up to date.` Answer No, and the deploy continues without email.
+On the second deploy every row reads ready: no prompt, no account call, and wrangler reports `Email Routing rules are up to date.` Answer No before any setup has been committed, and the deploy continues without email.
+
+DNS can take a few minutes to become visible to the resolver running the deploy. If `void email setup` has already written the exact `addresses` plan but that resolver still sees no subdomain MX, Void preserves the plan and stops before the build or upload. Run `void email status --platform cloudflare`, then retry the deploy after it sees Cloudflare's MX records.
 
 Two rows live in `wrangler.jsonc` rather than in your account, and a deploy that finds every account row ready reconciles them with a plain file write, no prompt: the `addresses` array is rewritten whenever it is not the current derivation (an entry pruned since, a worker rename, a new handler), and `vars.__VOID_EMAIL_FROM` follows a changed `email.from`. Routing rules are `wrangler deploy`'s own work, so a committed `addresses` entry whose rule does not exist yet — the state right after `void email setup` — still reads ready; the address map marks it `(rule created by this deploy)`.
 
@@ -571,7 +573,7 @@ How handlers become addresses, with `email.from` on `mail.acme.com` under the zo
 | `email/_default.ts`                                             | **none** — a catch-all exists only on an apex        | `*@acme.com` (the catch-all) |
 | `email/[user].ts`, `email/[user]+[tag].ts` (dynamic local part) | **refused** — a dynamic local part needs a catch-all | `*@acme.com` (the catch-all) |
 
-On a subdomain, `email/_default.ts` gets no rule and never runs: mail to any other `@mail.acme.com` address bounces at Cloudflare. The checklist says so in a `!` row, and the handler is absent from the address map.
+On a subdomain, `email/_default.ts` gets no rule of its own, so it cannot make arbitrary `@mail.acme.com` addresses reach the worker. Mail admitted by an explicit rule can still fall through to `_default` when no handler pattern matches—for example, bare `support@mail.acme.com` admitted by the rule for `support+anything@`. Addresses that match no Cloudflare rule bounce before the worker runs. The checklist says so in a `!` row, and the handler is absent from the address map.
 
 Inside the worker, a message reaches your handlers exactly as addressed — `support+T-42@mail.acme.com` matches `email/support+[ticket].ts` with `info.params.ticket === "T-42"` — and `setReject`, `forward` and `replyEmail` act on the real message. `replyEmail` defaults `from` to `message.to`, the address on your zone the mail was delivered to.
 
@@ -602,9 +604,9 @@ deploy: email on mail.acme.com is not set up, and this shell cannot ask.
 Run `void email setup --platform cloudflare` once locally, commit wrangler.jsonc, then redeploy — deploying without email.
 ```
 
-then deploys **without** email. Pass `--require-email` to fail instead. Automatic resource provisioning is not an escape hatch: it creates D1/KV/R2/Queue/Hyperdrive resources, never a mail setup. To read the rows without deploying or being asked anything, run `void email status --platform cloudflare`.
+then deploys **without** email. Pass `--require-email` to fail instead. When setup has already committed the exact subdomain `addresses` plan and only its MX records are not visible yet, every deploy stops and preserves that plan until DNS can be verified. Automatic resource provisioning is not an escape hatch: it creates D1/KV/R2/Queue/Hyperdrive resources, never a mail setup. To read the rows without deploying or being asked anything, run `void email status --platform cloudflare`.
 
-So the CI story is: run `void email setup --platform cloudflare` once on your machine (it runs the same preflight, checklist and prompt as the first deploy, then writes `wrangler.jsonc`, without deploying), commit `wrangler.jsonc`, and let CI run `void deploy --platform cloudflare --require-email`. With the binding and `addresses` committed, every row reads ready and nothing is asked — on Workers Free too, where the committed binding is what remembers the refused sending onboarding (see [Sending](#sending)).
+So the CI story is: run `void email setup --platform cloudflare` once on your machine (it runs the same preflight, checklist and prompt as the first deploy, then writes `wrangler.jsonc`, without deploying), commit `wrangler.jsonc`, and let CI run `void deploy --platform cloudflare --require-email`. Once the MX records are visible, the committed binding and `addresses` make every row read ready and nothing is asked — on Workers Free too, where the committed binding is what remembers the refused sending onboarding (see [Sending](#sending)).
 
 ### If the subdomain step is refused
 

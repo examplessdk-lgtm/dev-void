@@ -51,7 +51,7 @@ export type Env = Readonly<{
 
   /**
    * Platform mail zone for this environment — `mail.void.cloud` in
-   * production, `mail.staging.void.cloud` in staging. Declared as a `vars`
+   * production, `mail.voidcloud.dev` in staging. Declared as a `vars`
    * entry in every `wrangler.jsonc` scope (wrangler does not inherit vars
    * into a named env) and mirrored into deployed user workers as the
    * `__VOID_EMAIL_DOMAIN` plain-text binding. Never defaulted in code: see

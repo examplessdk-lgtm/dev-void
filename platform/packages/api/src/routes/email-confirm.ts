@@ -1,16 +1,16 @@
 /**
- * Public, unauthenticated endpoint for clicking the platform-side
- * destination verification link. The HMAC-signed token IS the auth — it
+ * Token-authenticated endpoint for the platform-side destination verification
+ * link. The HMAC-signed token IS the auth — it
  * embeds (project_id, destination_id, address, exp) and is validated
  * against JWT_SECRET. Single-use is enforced by DB state: the click
  * flips the destination row to 'verified', so a second click finds an
  * already-verified row and returns idempotent success.
  *
- * Wired BEFORE the auth middleware in `index.ts` so recipients can click
- * without logging in (they're not Void users — they're third parties
- * being asked to consent).
+ * The email gateway exposes the public URL and relays this exact route through
+ * its API service binding. Access middleware recognizes only this token-auth
+ * route; project and operator routes remain protected.
  *
- * See the email design doc (Option B follow-up) for design rationale.
+ * See the email design's recipient-consent section for the trust boundary.
  */
 
 import { Hono } from 'hono';

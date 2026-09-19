@@ -149,6 +149,16 @@ async function githubSignature(body: string): Promise<string> {
 }
 
 describe('Access-protected platform requests', () => {
+  it('admits only the token-authenticated confirmation route without an Access assertion', async () => {
+    const confirmation = await request('/email/destinations/confirm?token=invalid.signature');
+    expect(confirmation.status).toBe(400);
+    expect(confirmation.headers.get('cache-control')).toBe('no-store');
+    expect(confirmation.headers.get('referrer-policy')).toBe('no-referrer');
+    expect(
+      (await request('/email/destinations/confirm/extra?token=invalid.signature')).status,
+    ).toBe(403);
+  });
+
   it('admits the installer email probe only with both service Access and installation proof', async () => {
     const call = (access?: string, probe = 'probe-fixture') =>
       app.fetch(

@@ -26,7 +26,7 @@ const { buildMime, normalizeEmail } =
 
 const JWT_SECRET = 'test-secret-key';
 const PROD_DOMAIN = 'mail.void.cloud';
-const STAGING_DOMAIN = 'mail.staging.void.cloud';
+const STAGING_DOMAIN = 'mail.voidcloud.dev';
 
 // --- HMAC helper (mirrors the worker's project token signing) ---
 
@@ -50,17 +50,6 @@ async function signHmac(data: string, secret: string): Promise<string> {
   return base64urlEncode(
     new Uint8Array(await crypto.subtle.sign('HMAC', key, encoder.encode(data))),
   );
-}
-
-async function sha256Hex(input: string): Promise<string> {
-  const digest = new Uint8Array(
-    await crypto.subtle.digest('SHA-256', new TextEncoder().encode(input)),
-  );
-  let hex = '';
-  for (const b of digest) {
-    hex += b.toString(16).padStart(2, '0');
-  }
-  return hex;
 }
 
 // --- Mock env ---
@@ -336,6 +325,59 @@ describe('proxy wrangler config', () => {
     expect((env.production.vars as Record<string, string>).EMAIL_SENDER_DOMAIN).toBe(PROD_DOMAIN);
     expect((env.staging.vars as Record<string, string>).EMAIL_SENDER_DOMAIN).toBe(STAGING_DOMAIN);
   });
+
+  it('keeps each API and public gateway environment on the same email routing identity', () => {
+    const config = parseJsonc(
+      readFileSync(new URL('../../../api/wrangler.jsonc', import.meta.url), 'utf8'),
+    );
+    const gatewayConfig = parseJsonc(
+      readFileSync(new URL('../../../email-gateway/wrangler.jsonc', import.meta.url), 'utf8'),
+    );
+    const env = config.env as Record<string, Record<string, unknown>>;
+    const proxyEnv = wranglerConfig.env as Record<string, Record<string, unknown>>;
+    const gatewayEnv = gatewayConfig.env as Record<string, Record<string, unknown>>;
+    for (const [name, scope, proxy, gateway] of [
+      ['top level', config, wranglerConfig, gatewayConfig],
+      ['env.production', env.production, proxyEnv.production, gatewayEnv.production],
+      ['env.staging', env.staging, proxyEnv.staging, gatewayEnv.staging],
+    ] as const) {
+      const vars = scope.vars as Record<string, string>;
+      const domain = vars.EMAIL_SENDER_DOMAIN;
+      const binding = (
+        scope.send_email as Array<{
+          name?: string;
+          allowed_sender_addresses?: Array<string>;
+        }>
+      ).find((entry) => entry.name === 'EMAIL');
+      expect(domain, `${name} EMAIL_SENDER_DOMAIN`).toBeTruthy();
+      expect(binding?.allowed_sender_addresses, `${name} EMAIL binding`).toContain(
+        `noreply@${domain}`,
+      );
+      expect(gateway.workers_dev, `${name} public email gateway`).toBe(true);
+      const proxyVars = proxy.vars as Record<string, string>;
+      const gatewayVars = gateway.vars as Record<string, string>;
+      expect(proxyVars.EMAIL_SENDER_DOMAIN, `${name} proxy sender domain`).toBe(domain);
+      expect(gatewayVars.EMAIL_SENDER_DOMAIN, `${name} gateway sender domain`).toBe(domain);
+      for (const key of ['EMAIL_SHARED_ACCOUNT_ID', 'EMAIL_SHARED_ZONE_ID']) {
+        expect(vars[key], `${name} API ${key}`).toMatch(/^[0-9a-f]{32}$/);
+        expect(gatewayVars[key], `${name} gateway ${key}`).toBe(vars[key]);
+      }
+      expect(vars.EMAIL_GATEWAY_ORIGIN, `${name} confirmation gateway origin`).toBe(
+        `https://${String(gateway.name)}.voidzer0.workers.dev`,
+      );
+      expect(vars.EMAIL_SHARED_INGRESS_NAME).toBe(gateway.name);
+      expect(gatewayVars.EMAIL_SHARED_INGRESS_NAME).toBe(gateway.name);
+      expect(proxy.services).toContainEqual({ binding: 'API', service: scope.name });
+      expect(gateway.services).toContainEqual({ binding: 'API', service: scope.name });
+    }
+    const productionVars = env.production.vars as Record<string, string>;
+    const stagingVars = env.staging.vars as Record<string, string>;
+    expect(stagingVars.EMAIL_SHARED_ACCOUNT_ID).toBe(productionVars.EMAIL_SHARED_ACCOUNT_ID);
+    expect(stagingVars.EMAIL_SHARED_ZONE_ID).not.toBe(productionVars.EMAIL_SHARED_ZONE_ID);
+    expect(stagingVars.EMAIL_SENDER_DOMAIN).not.toBe(productionVars.EMAIL_SENDER_DOMAIN);
+    expect(gatewayEnv.production.secrets).toEqual({ required: ['JWT_SECRET'] });
+    expect(gatewayEnv.staging.secrets).toEqual({ required: ['JWT_SECRET'] });
+  });
 });
 
 describe('POST /email/send — sender domain', () => {
@@ -434,117 +476,6 @@ describe('POST /email/send — platform capability', () => {
     expect(res.status).toBe(200);
     expect(((await res.json()) as { ok: boolean }).ok).toBe(true);
     expect((env.SEND_EMAIL as { send: ReturnType<typeof vi.fn> }).send).toHaveBeenCalledTimes(1);
-  });
-});
-
-describe('POST /email/internal/send', () => {
-  async function internalBody(
-    domain: string,
-    overrides: Record<string, unknown> = {},
-  ): Promise<Record<string, unknown>> {
-    const from = `noreply@${domain}`;
-    const to = 'dev@example.com';
-    const mime = mimeBase64();
-    const body = { from, to, mimeBase64: mime, ...overrides };
-    const timestamp = Math.floor(Date.now() / 1000);
-    const hash = await sha256Hex(
-      `${body.from as string}|${body.to as string}|${body.mimeBase64 as string}`,
-    );
-    return {
-      ...body,
-      platformTimestamp: timestamp,
-      platformToken: await signHmac(
-        `void-platform-internal-email-v1.${timestamp}.${hash}`,
-        JWT_SECRET,
-      ),
-    };
-  }
-
-  async function postInternal(
-    env: Record<string, unknown>,
-    body: Record<string, unknown>,
-  ): Promise<Response> {
-    return (worker.fetch as (req: Request, env: unknown) => Promise<Response>)(
-      new Request('https://proxy.void.cloud/email/internal/send', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(body),
-      }),
-      env,
-    );
-  }
-
-  it('accepts noreply@ on the configured domain', async () => {
-    const env = createMockEnv(createMockKv());
-    const res = await postInternal(env, await internalBody(PROD_DOMAIN));
-    expect(res.status).toBe(200);
-    expect((env.SEND_EMAIL as { send: ReturnType<typeof vi.fn> }).send).toHaveBeenCalledTimes(1);
-  });
-
-  it('rejects noreply@ on a different domain than the one configured', async () => {
-    const env = createMockEnv(createMockKv(), { EMAIL_SENDER_DOMAIN: STAGING_DOMAIN });
-    const res = await postInternal(env, await internalBody(PROD_DOMAIN));
-    expect(res.status).toBe(403);
-    expect((env.SEND_EMAIL as { send: ReturnType<typeof vi.fn> }).send).not.toHaveBeenCalled();
-  });
-
-  it('rejects a non-noreply local part on the configured domain', async () => {
-    const env = createMockEnv(createMockKv());
-    const res = await postInternal(
-      env,
-      await internalBody(PROD_DOMAIN, { from: `billing@${PROD_DOMAIN}` }),
-    );
-    expect(res.status).toBe(403);
-  });
-
-  it('rejects an unsigned request', async () => {
-    const env = createMockEnv(createMockKv());
-    const body = await internalBody(PROD_DOMAIN);
-    const res = await postInternal(env, { ...body, platformToken: 'nope' });
-    expect(res.status).toBe(403);
-    expect((env.SEND_EMAIL as { send: ReturnType<typeof vi.fn> }).send).not.toHaveBeenCalled();
-  });
-
-  it('fails closed when EMAIL_SENDER_DOMAIN is unset', async () => {
-    const env = createMockEnv(createMockKv(), { EMAIL_SENDER_DOMAIN: '' });
-    const res = await postInternal(env, await internalBody(PROD_DOMAIN));
-    expect(res.status).toBe(502);
-  });
-
-  it('is behind the same email capability gate as /email/send', async () => {
-    const env = createMockEnv(createMockKv(), {
-      PLATFORM_CAPABILITIES: JSON.stringify({ email: false }),
-    });
-    const res = await postInternal(env, await internalBody(PROD_DOMAIN));
-    expect(res.status).toBe(501);
-    expect(await res.json()).toMatchObject({ capability: 'email' });
-    expect((env.SEND_EMAIL as { send: ReturnType<typeof vi.fn> }).send).not.toHaveBeenCalled();
-  });
-
-  it('returns an unknown outcome when the internal binding submission times out', async () => {
-    vi.useFakeTimers();
-    try {
-      let markSubmitted!: () => void;
-      const submitted = new Promise<void>((resolve) => {
-        markSubmitted = resolve;
-      });
-      const env = createMockEnv(createMockKv(), {
-        SEND_EMAIL: {
-          send: vi.fn(() => {
-            markSubmitted();
-            return new Promise(() => {});
-          }),
-        },
-      });
-      const pending = postInternal(env, await internalBody(PROD_DOMAIN));
-      await submitted;
-      await vi.advanceTimersByTimeAsync(30_000);
-      const response = await pending;
-      expect(response.status).toBe(504);
-      expect(await response.json()).toEqual({ ok: false, error: 'outcome unknown' });
-    } finally {
-      vi.useRealTimers();
-    }
   });
 });
 
@@ -685,7 +616,7 @@ describe('POST /email/send — request validation', () => {
     expect(kv.store.get(monthKeyFor('proj_1'))).toBeUndefined();
   });
 
-  it('bounds binding fan-out at 60 seconds and cancels the unstarted reservation', async () => {
+  it('shares one request deadline across admission and binding fan-out', async () => {
     vi.useFakeTimers();
     try {
       const recipients = ['first@example.com', 'second@example.com', 'third@example.com'];
@@ -707,12 +638,27 @@ describe('POST /email/send — request validation', () => {
         return new Promise(() => {});
       });
       const env = createMockEnv(kv, { SEND_EMAIL: { send } });
+      const apiFetch = (env.API as { fetch: ReturnType<typeof vi.fn> }).fetch;
+      const normalFetch = apiFetch.getMockImplementation()!;
+      let markAdmissionStarted!: () => void;
+      const admissionStarted = new Promise<void>((resolve) => {
+        markAdmissionStarted = resolve;
+      });
+      apiFetch.mockImplementation(async (url, init) => {
+        if (String(url).endsWith('/admit')) {
+          markAdmissionStarted();
+          await new Promise((resolve) => setTimeout(resolve, 10_000));
+        }
+        return normalFetch(url, init);
+      });
       const pending = postSend(env, await sendBody({ recipients }));
 
+      await admissionStarted;
+      await vi.advanceTimersByTimeAsync(10_000);
       await firstSubmitted;
       await vi.advanceTimersByTimeAsync(30_000);
       await secondSubmitted;
-      await vi.advanceTimersByTimeAsync(30_000);
+      await vi.advanceTimersByTimeAsync(5_000);
       const body = await readSend(await pending);
 
       expect(send).toHaveBeenCalledTimes(2);
@@ -1282,6 +1228,16 @@ describe('POST /email/send — per-recipient fan-out', () => {
 });
 
 describe('POST /email/send — sender domain is configuration, never a baked-in default', () => {
+  it('accepts multiple safe plus-tag segments on a shared sender', async () => {
+    const from = `acme+support+forward.run@${PROD_DOMAIN}`;
+    const sender = createSender();
+    const env = createMockEnv(happyPathKv(), { SEND_EMAIL: sender.binding });
+    const res = await postSend(env, await sendBody({ from }));
+
+    expect((await readSend(res)).ok).toBe(true);
+    expect(sender.calls).toMatchObject([{ from }]);
+  });
+
   it.each([
     ['unset', undefined],
     ['an empty string', ''],
@@ -1308,485 +1264,6 @@ describe('POST /email/send — sender domain is configuration, never a baked-in 
     });
     const res = await postSend(env, await sendBody({ from: `acme@${PROD_DOMAIN}` }));
     expect((await readSend(res)).ok).toBe(true);
-    expect(sender.calls).toHaveLength(1);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Platform-internal endpoint. Auth is an HMAC of
-// `<sentinel>.<unixSeconds>.<sha256(from|to|mimeBase64)>` under JWT_SECRET.
-// The content binding is what stops a captured token inside the skew window
-// from being replayed against a different recipient or different bytes.
-// ---------------------------------------------------------------------------
-describe('POST /email/internal/send — replay window + content binding', () => {
-  const SENTINEL = 'void-platform-internal-email-v1';
-  const FROM = `noreply@${PROD_DOMAIN}`;
-  const TO = 'recipient@example.com';
-
-  async function signPlatform(opts: {
-    unixSeconds: number;
-    from: string;
-    to: string;
-    mimeBase64: string;
-  }): Promise<string> {
-    const hash = await sha256Hex(`${opts.from}|${opts.to}|${opts.mimeBase64}`);
-    return signHmac(`${SENTINEL}.${opts.unixSeconds}.${hash}`, JWT_SECRET);
-  }
-
-  async function post(
-    env: Record<string, unknown>,
-    body: Record<string, unknown>,
-  ): Promise<Response> {
-    return (worker.fetch as (req: Request, env: unknown) => Promise<Response>)(
-      new Request('https://proxy.void.cloud/email/internal/send', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(body),
-      }),
-      env,
-    );
-  }
-
-  it('accepts a token signed for exactly this body', async () => {
-    const sender = createSender();
-    const env = createMockEnv(createMockKv(), { SEND_EMAIL: sender.binding });
-    const mime = mimeBase64('Subject: Confirm\r\n\r\nclick the link\r\n');
-    const platformTimestamp = Math.floor(Date.now() / 1000);
-    const res = await post(env, {
-      platformToken: await signPlatform({
-        unixSeconds: platformTimestamp,
-        from: FROM,
-        to: TO,
-        mimeBase64: mime,
-      }),
-      platformTimestamp,
-      from: FROM,
-      to: TO,
-      mimeBase64: mime,
-    });
-    expect(res.status).toBe(200);
-    expect(sender.recipients()).toEqual([TO]);
-    expect(sender.texts()).toEqual(['Subject: Confirm\r\n\r\nclick the link\r\n']);
-  });
-
-  it.each([
-    ['stale by more than the 5-minute window', -6 * 60],
-    ['future-dated by more than the 5-minute window', 6 * 60],
-  ])('rejects a token %s with 403', async (_label, offset) => {
-    const sender = createSender();
-    const env = createMockEnv(createMockKv(), { SEND_EMAIL: sender.binding });
-    const mime = mimeBase64();
-    const platformTimestamp = Math.floor(Date.now() / 1000) + offset;
-    const res = await post(env, {
-      platformToken: await signPlatform({
-        unixSeconds: platformTimestamp,
-        from: FROM,
-        to: TO,
-        mimeBase64: mime,
-      }),
-      platformTimestamp,
-      from: FROM,
-      to: TO,
-      mimeBase64: mime,
-    });
-    expect(res.status).toBe(403);
-    expect(sender.calls).toHaveLength(0);
-  });
-
-  it.each([
-    ['4 minutes in the past', -4 * 60],
-    ['4 minutes in the future', 4 * 60],
-  ])('accepts a token %s (inside the skew window)', async (_label, offset) => {
-    const sender = createSender();
-    const env = createMockEnv(createMockKv(), { SEND_EMAIL: sender.binding });
-    const mime = mimeBase64();
-    const platformTimestamp = Math.floor(Date.now() / 1000) + offset;
-    const res = await post(env, {
-      platformToken: await signPlatform({
-        unixSeconds: platformTimestamp,
-        from: FROM,
-        to: TO,
-        mimeBase64: mime,
-      }),
-      platformTimestamp,
-      from: FROM,
-      to: TO,
-      mimeBase64: mime,
-    });
-    expect(res.status).toBe(200);
-    expect(sender.calls).toHaveLength(1);
-  });
-
-  it('rejects a captured token replayed with a different (in-window) timestamp', async () => {
-    // Extending a captured token's life by moving the timestamp forward must
-    // fail: the timestamp is part of the signed message.
-    const sender = createSender();
-    const env = createMockEnv(createMockKv(), { SEND_EMAIL: sender.binding });
-    const mime = mimeBase64();
-    const signedAt = Math.floor(Date.now() / 1000);
-    const res = await post(env, {
-      platformToken: await signPlatform({
-        unixSeconds: signedAt,
-        from: FROM,
-        to: TO,
-        mimeBase64: mime,
-      }),
-      platformTimestamp: signedAt + 60,
-      from: FROM,
-      to: TO,
-      mimeBase64: mime,
-    });
-    expect(res.status).toBe(403);
-    expect(sender.calls).toHaveLength(0);
-  });
-
-  it.each([
-    ['the recipient', { to: 'attacker@evil.com' }],
-    ['the MIME bytes', { mimeBase64: mimeBase64('Subject: swapped\r\n\r\nB\r\n') }],
-    ['the envelope sender', { from: `noreply@${STAGING_DOMAIN}` }],
-  ])('rejects a token replayed after changing %s', async (_label, tamper) => {
-    const sender = createSender();
-    const env = createMockEnv(createMockKv(), { SEND_EMAIL: sender.binding });
-    const mime = mimeBase64('Subject: Confirm\r\n\r\nA\r\n');
-    const platformTimestamp = Math.floor(Date.now() / 1000);
-    const platformToken = await signPlatform({
-      unixSeconds: platformTimestamp,
-      from: FROM,
-      to: TO,
-      mimeBase64: mime,
-    });
-    const res = await post(env, {
-      platformToken,
-      platformTimestamp,
-      from: FROM,
-      to: TO,
-      mimeBase64: mime,
-      ...tamper,
-    });
-    expect(res.status).toBe(403);
-    expect(sender.calls).toHaveLength(0);
-  });
-
-  it.each([
-    ['platformToken', 'platformToken'],
-    ['platformTimestamp', 'platformTimestamp'],
-    ['from', 'from'],
-    ['to', 'to'],
-    ['mimeBase64', 'mimeBase64'],
-  ])('rejects with 403 when `%s` is missing', async (_label, field) => {
-    const sender = createSender();
-    const env = createMockEnv(createMockKv(), { SEND_EMAIL: sender.binding });
-    const mime = mimeBase64();
-    const platformTimestamp = Math.floor(Date.now() / 1000);
-    const body: Record<string, unknown> = {
-      platformToken: await signPlatform({
-        unixSeconds: platformTimestamp,
-        from: FROM,
-        to: TO,
-        mimeBase64: mime,
-      }),
-      platformTimestamp,
-      from: FROM,
-      to: TO,
-      mimeBase64: mime,
-    };
-    delete body[field];
-    const res = await post(env, body);
-    // Malformed bodies are rejected at the auth boundary, not by the handler,
-    // so nothing leaks about which field the verifier could not bind.
-    expect(res.status).toBe(403);
-    expect(sender.calls).toHaveLength(0);
-  });
-
-  it("refuses a user worker's own project HMAC aimed at the internal endpoint", async () => {
-    // A user worker holds HMAC(projectId); it does not hold JWT_SECRET and
-    // cannot produce HMAC(sentinel.ts.hash).
-    const sender = createSender();
-    const env = createMockEnv(createMockKv(), { SEND_EMAIL: sender.binding });
-    const res = await post(env, {
-      platformToken: await signHmac('proj_1', JWT_SECRET),
-      platformTimestamp: Math.floor(Date.now() / 1000),
-      from: FROM,
-      to: TO,
-      mimeBase64: mimeBase64(),
-    });
-    expect(res.status).toBe(403);
-    expect(sender.calls).toHaveLength(0);
-  });
-
-  it('allows exactly one `from` — noreply@ on the configured zone', async () => {
-    const sender = createSender();
-    const env = createMockEnv(createMockKv(), { SEND_EMAIL: sender.binding });
-    const mime = mimeBase64();
-    const platformTimestamp = Math.floor(Date.now() / 1000);
-    // Correctly signed for this exact body — auth passes, the allow-list is
-    // what refuses. Without it, a compromised api worker could send
-    // arbitrary platform-branded mail.
-    const from = `support@${PROD_DOMAIN}`;
-    const res = await post(env, {
-      platformToken: await signPlatform({
-        unixSeconds: platformTimestamp,
-        from,
-        to: TO,
-        mimeBase64: mime,
-      }),
-      platformTimestamp,
-      from,
-      to: TO,
-      mimeBase64: mime,
-    });
-    expect(res.status).toBe(403);
-    expect(sender.calls).toHaveLength(0);
-  });
-
-  it('rejects invalid base64 and oversized JSON bodies before sending', async () => {
-    const sender = createSender();
-    const env = createMockEnv(createMockKv(), { SEND_EMAIL: sender.binding });
-
-    const badTs = Math.floor(Date.now() / 1000);
-    const bad = await post(env, {
-      platformToken: await signPlatform({
-        unixSeconds: badTs,
-        from: FROM,
-        to: TO,
-        mimeBase64: '!!!not-base64!!!',
-      }),
-      platformTimestamp: badTs,
-      from: FROM,
-      to: TO,
-      mimeBase64: '!!!not-base64!!!',
-    });
-    expect(bad.status).toBe(400);
-
-    // The JSON byte limit runs before parsing or authentication.
-    const oversized = 'AAAA'.repeat((8 * 1024 * 1024) / 4 + 1);
-    const bigTs = Math.floor(Date.now() / 1000);
-    const tooBig = await post(env, {
-      platformToken: await signPlatform({
-        unixSeconds: bigTs,
-        from: FROM,
-        to: TO,
-        mimeBase64: oversized,
-      }),
-      platformTimestamp: bigTs,
-      from: FROM,
-      to: TO,
-      mimeBase64: oversized,
-    });
-    expect(tooBig.status).toBe(400);
-    expect(sender.calls).toHaveLength(0);
-  });
-
-  it('refuses MIME over the send limit before authenticating its content hash', async () => {
-    const sender = createSender();
-    const env = createMockEnv(createMockKv(), { SEND_EMAIL: sender.binding });
-    const mime = 'A'.repeat(Math.ceil((5 * 1024 * 1024 * 4) / 3) + 5);
-    const platformTimestamp = Math.floor(Date.now() / 1000);
-    const response = await post(env, {
-      platformToken: await signPlatform({
-        unixSeconds: platformTimestamp,
-        from: FROM,
-        to: TO,
-        mimeBase64: mime,
-      }),
-      platformTimestamp,
-      from: FROM,
-      to: TO,
-      mimeBase64: mime,
-    });
-    expect(response.status).toBe(403);
-    expect(await response.json()).toEqual({ error: 'invalid platform token' });
-    expect(sender.calls).toHaveLength(0);
-  });
-
-  it.each([
-    ['from', { from: 'a'.repeat(321), to: TO }],
-    ['to', { from: FROM, to: 'a'.repeat(321) }],
-  ])('refuses an over-long `%s` at the auth boundary, before hashing it', async (_field, addrs) => {
-    // The MIME field was bounded before the content hash; `from` and `to`
-    // are hashed with it and were not. The template that joins the three
-    // flattens them into one full-size string and `TextEncoder` copies it
-    // again, both before the token is verified — so an unauthenticated
-    // caller with a small MIME still chose two full-size copies plus the
-    // sha256 over them. Same 320 as `/email/send`'s sender and recipient
-    // bounds, and the same opaque refusal as the other pre-auth gates: the
-    // body is `{ error: 'invalid platform token' }`, not the handler's
-    // `ok: false` shape, which is how this asserts the handler never ran.
-    const sender = createSender();
-    const env = createMockEnv(createMockKv(), { SEND_EMAIL: sender.binding });
-    const mime = mimeBase64();
-    const platformTimestamp = Math.floor(Date.now() / 1000);
-    const res = await post(env, {
-      // Correctly signed for this exact body, so only the bound refuses it.
-      platformToken: await signPlatform({
-        unixSeconds: platformTimestamp,
-        ...addrs,
-        mimeBase64: mime,
-      }),
-      platformTimestamp,
-      ...addrs,
-      mimeBase64: mime,
-    });
-    expect(res.status).toBe(403);
-    expect(await res.json()).toEqual({ error: 'invalid platform token' });
-    expect(sender.calls).toHaveLength(0);
-  });
-
-  it.each([
-    ['one character short (42)', (t: string) => t.slice(0, 42)],
-    ['one character long (44)', (t: string) => `${t}A`],
-    ['4 MiB', () => 'ab-_'.repeat((4 * 1024 * 1024) / 4)],
-  ])('refuses a token that is %s before decoding it', async (_label, mutate) => {
-    // Reject malformed lengths before HMAC decoding, even within the JSON byte limit.
-    const sender = createSender();
-    const env = createMockEnv(createMockKv(), { SEND_EMAIL: sender.binding });
-    const mime = mimeBase64();
-    const platformTimestamp = Math.floor(Date.now() / 1000);
-    const platformToken = mutate(
-      await signPlatform({ unixSeconds: platformTimestamp, from: FROM, to: TO, mimeBase64: mime }),
-    );
-    const verify = vi.spyOn(crypto.subtle, 'verify');
-    try {
-      const res = await post(env, {
-        platformToken,
-        platformTimestamp,
-        from: FROM,
-        to: TO,
-        mimeBase64: mime,
-      });
-      expect(res.status).toBe(403);
-      expect(await res.json()).toEqual({ error: 'invalid platform token' });
-      expect(verify).not.toHaveBeenCalled();
-      expect(sender.calls).toHaveLength(0);
-    } finally {
-      verify.mockRestore();
-    }
-  });
-
-  it('a 43-character token that is not the signature is still refused by the HMAC, not the length gate', async () => {
-    // Pins the gate to LENGTH only: a well-formed but wrong token must reach
-    // `crypto.subtle.verify` and fail there, so the length check cannot be
-    // mistaken for the credential check.
-    const sender = createSender();
-    const env = createMockEnv(createMockKv(), { SEND_EMAIL: sender.binding });
-    const mime = mimeBase64();
-    const platformTimestamp = Math.floor(Date.now() / 1000);
-    const platformToken = await signHmac('not-the-sentinel', JWT_SECRET);
-    expect(platformToken).toHaveLength(43);
-    const verify = vi.spyOn(crypto.subtle, 'verify');
-    try {
-      const res = await post(env, {
-        platformToken,
-        platformTimestamp,
-        from: FROM,
-        to: TO,
-        mimeBase64: mime,
-      });
-      expect(res.status).toBe(403);
-      expect(await res.json()).toEqual({ error: 'invalid platform token' });
-      expect(verify).toHaveBeenCalledTimes(1);
-      expect(sender.calls).toHaveLength(0);
-    } finally {
-      verify.mockRestore();
-    }
-  });
-
-  it('a 320-character `to` under a valid signature still reaches the handler', async () => {
-    // The bound sits exactly where `/email/send` puts its recipient bound.
-    // The handler applies no length rule of its own to `to`: it hands the
-    // address to `EmailMessage`, so the send goes through with it verbatim.
-    const sender = createSender();
-    const env = createMockEnv(createMockKv(), { SEND_EMAIL: sender.binding });
-    const mime = mimeBase64();
-    const to = `${'a'.repeat(320 - '@example.com'.length)}@example.com`;
-    expect(to).toHaveLength(320);
-    const platformTimestamp = Math.floor(Date.now() / 1000);
-    const res = await post(env, {
-      platformToken: await signPlatform({
-        unixSeconds: platformTimestamp,
-        from: FROM,
-        to,
-        mimeBase64: mime,
-      }),
-      platformTimestamp,
-      from: FROM,
-      to,
-      mimeBase64: mime,
-    });
-    expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ ok: true });
-    expect(sender.calls).toHaveLength(1);
-    expect(sender.calls[0].to).toBe(to);
-  });
-
-  it('fails closed with 502 when the SEND_EMAIL binding is missing', async () => {
-    const env = createMockEnv(createMockKv(), { SEND_EMAIL: undefined });
-    const mime = mimeBase64();
-    const platformTimestamp = Math.floor(Date.now() / 1000);
-    const res = await post(env, {
-      platformToken: await signPlatform({
-        unixSeconds: platformTimestamp,
-        from: FROM,
-        to: TO,
-        mimeBase64: mime,
-      }),
-      platformTimestamp,
-      from: FROM,
-      to: TO,
-      mimeBase64: mime,
-    });
-    expect(res.status).toBe(502);
-  });
-
-  it('reports 502 without leaking the upstream message when CF rejects the send', async () => {
-    const sender = createSender({ fail: () => new Error('cf mta exploded') });
-    const env = createMockEnv(createMockKv(), { SEND_EMAIL: sender.binding });
-    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
-    try {
-      const mime = mimeBase64();
-      const platformTimestamp = Math.floor(Date.now() / 1000);
-      const res = await post(env, {
-        platformToken: await signPlatform({
-          unixSeconds: platformTimestamp,
-          from: FROM,
-          to: TO,
-          mimeBase64: mime,
-        }),
-        platformTimestamp,
-        from: FROM,
-        to: TO,
-        mimeBase64: mime,
-      });
-      expect(res.status).toBe(502);
-      expect(await res.json()).toEqual({ ok: false, error: 'upstream error' });
-    } finally {
-      consoleError.mockRestore();
-    }
-  });
-
-  it('applies no per-project gate: platform mail touches neither quota nor allowlist', async () => {
-    // Documented contract — verification mail is account-level, bounded by
-    // the api worker's own rate limit on POST /destinations.
-    const kv = happyPathKv({ 'email-suspended:proj_1': '1' });
-    const sender = createSender();
-    const env = createMockEnv(kv, { SEND_EMAIL: sender.binding });
-    const mime = mimeBase64();
-    const platformTimestamp = Math.floor(Date.now() / 1000);
-    const res = await post(env, {
-      platformToken: await signPlatform({
-        unixSeconds: platformTimestamp,
-        from: FROM,
-        to: TO,
-        mimeBase64: mime,
-      }),
-      platformTimestamp,
-      from: FROM,
-      to: TO,
-      mimeBase64: mime,
-    });
-    expect(res.status).toBe(200);
-    expect(kv.get).not.toHaveBeenCalled();
-    expect(kv.put).not.toHaveBeenCalled();
     expect(sender.calls).toHaveLength(1);
   });
 });

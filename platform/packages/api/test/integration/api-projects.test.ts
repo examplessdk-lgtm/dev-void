@@ -2872,7 +2872,11 @@ describe('GET /projects/:id/logs limit validation', () => {
 describe('POST /projects — owner email destination auto-add', () => {
   // The gate the route checks. Without a platform mail domain there is no
   // sender to allow-list a recipient for, so the auto-add stays inert.
-  const emailEnv = () => ({ ...env, EMAIL_SENDER_DOMAIN: 'mail.staging.void.cloud' });
+  const emailEnv = () => ({
+    ...env,
+    EMAIL_GATEWAY_ORIGIN: 'https://void-email-gateway-staging.voidzer0.workers.dev',
+    EMAIL_SENDER_DOMAIN: 'mail.voidcloud.dev',
+  });
 
   // `respond` may be async so a test can commit a competing write (project
   // teardown's cascade) while the route is awaiting Cloudflare. The stub is

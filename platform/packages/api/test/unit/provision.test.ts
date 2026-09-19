@@ -354,7 +354,7 @@ describe('provisionBindings', () => {
 
   it('injects __VOID_EMAIL_DOMAIN from the configured platform mail domain', async () => {
     // Per-environment, never hard-coded: production is `mail.void.cloud` and
-    // staging `mail.staging.void.cloud`, and the proxy validates senders
+    // staging `mail.voidcloud.dev`, and the proxy validates senders
     // against its own copy of the same value.
     const manifest: DeployManifest = { version: 1, bindings: {} };
 
@@ -366,13 +366,13 @@ describe('provisionBindings', () => {
       manifest,
       JWT_SECRET,
       'void-proxy',
-      { projectSlug: PROJECT_SLUG, emailSenderDomain: 'mail.staging.void.cloud' },
+      { projectSlug: PROJECT_SLUG, emailSenderDomain: 'mail.voidcloud.dev' },
     );
 
     expect(bindings).toContainEqual({
       type: 'plain_text',
       name: '__VOID_EMAIL_DOMAIN',
-      text: 'mail.staging.void.cloud',
+      text: 'mail.voidcloud.dev',
     });
   });
 

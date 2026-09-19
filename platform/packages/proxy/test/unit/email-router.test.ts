@@ -804,6 +804,24 @@ describe('routeInbound — action enaction', () => {
     expect(replyCalls[0]?.raw).toBeInstanceOf(ReadableStream);
   });
 
+  it('forwards from a shared recipient with multiple safe plus-tag segments', async () => {
+    const recipient = `myslug+support+forward.run@${PROD_DOMAIN}`;
+    const { env, apiFetch } = makeEnv({
+      emailReturn: [{ type: 'forward', to: 'admin@example.com' }],
+    });
+    const { message, forwardCalls } = createFakeMessage({ to: recipient });
+    const { ctx } = createCtx();
+    await routeInbound(message, env, ctx);
+
+    expect(apiBodies(apiFetch, '/admit')[0]).toMatchObject({
+      kind: 'forward',
+      from: recipient,
+      transport: 'native_forward',
+    });
+    expect(forwardCalls).toMatchObject([{ to: 'admin@example.com' }]);
+    expect(apiBodies(apiFetch, '/finish')[0]?.state).toBe('provider_accepted');
+  });
+
   it('stops native action dispatch at the 60-second batch deadline', async () => {
     vi.useFakeTimers();
     let firstSubmit!: () => void;

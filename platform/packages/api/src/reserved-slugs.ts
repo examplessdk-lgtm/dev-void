@@ -4,8 +4,7 @@
  * A project's outbound `from` is `<slug>[+tag]@<EMAIL_SENDER_DOMAIN>` and
  * inbound mail to `<slug>[+tag]@` is dispatched into its worker, so owning a
  * slug owns that mailbox. `noreply` is the platform's own verification
- * sender (the proxy's `/email/internal/send` allow-list is exactly
- * `noreply@<domain>`), and `postmaster` / `abuse` / `bounce` / `security`
+ * sender, and `postmaster` / `abuse` / `bounce` / `security`
  * are the addresses recipients and mail providers treat as authoritative for
  * the whole domain. A project holding one of these could send mail that is
  * indistinguishable from ours, and would receive the bounces and replies to

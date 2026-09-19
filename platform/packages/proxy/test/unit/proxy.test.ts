@@ -373,7 +373,7 @@ describe('proxy worker', () => {
       expect(response.status).toBe(403);
     });
 
-    it.each(['/email/send', '/email/internal/send', '/email/unknown'])(
+    it.each(['/email/send', '/email/unknown'])(
       'rejects an oversized declared body before reading %s',
       async (path) => {
         const pull = vi.fn((controller: ReadableStreamDefaultController<Uint8Array>) => {

@@ -108,6 +108,7 @@ export function createPlatformWorkerConfigs(input: {
     placement: { mode: 'smart' },
     hyperdrive: [{ binding: 'HYPERDRIVE', id: resources.hyperdrive }],
     kv_namespaces: kv,
+    ...(deployment.capabilities.email ? { send_email: [{ name: 'EMAIL' }] } : {}),
     r2_buckets: r2,
     dispatch_namespaces: dispatchNamespace,
     durable_objects: {

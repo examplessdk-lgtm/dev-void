@@ -914,8 +914,8 @@ export async function preflightEmail(inputs: EmailCloudflareInputs): Promise<Ema
   const apex = pre.apex;
   const mode = pre.mode;
 
-  // 5. Routing status. `ready` is the only good state. `unlocked` / `misconfigured*`
-  //    mean a developer changed the locked records — print, never re-lock (0078).
+  // 5. Routing status. On the apex, `ready` is the only good state. `unlocked` /
+  //    `misconfigured*` mean its locked records changed — print, never re-lock (0078).
   if (settings) {
     if (mode === 'apex') {
       pre.routing = {
@@ -932,7 +932,10 @@ export async function preflightEmail(inputs: EmailCloudflareInputs): Promise<Ema
     } else {
       // No command reads a subdomain's routing state (`GET …/routing/dns?subdomain=` is
       // deprecated), so the subdomain's MX is the readiness signal: Cloudflare's own
-      // exchanges mean enabled. The apex prose still guards against an unlocked apex.
+      // exchanges mean enabled. A zone with routing configured only on subdomains reports
+      // the apex as `misconfigured` because the apex has no routing MX; that says nothing
+      // about this domain. Preserve only `unlocked` as an explicit signal that the developer
+      // took control of Cloudflare-managed apex records.
       pre.routing = {
         state:
           pre.domainMx.state === 'cloudflare'
@@ -943,7 +946,7 @@ export async function preflightEmail(inputs: EmailCloudflareInputs): Promise<Ema
         status: settings.status,
         enabled: settings.enabled,
       };
-      if (/^(unlocked|misconfigured)/.test(settings.status)) {
+      if (settings.status === 'unlocked') {
         block(
           'all',
           `Email Routing on ${apex} is ${settings.status} — fix it in the Cloudflare dashboard; Void never re-locks records you unlocked`,

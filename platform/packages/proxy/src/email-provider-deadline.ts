@@ -12,14 +12,14 @@ export class EmailProviderTimeoutError extends Error {
 export function createEmailProviderDeadline(totalMs = EMAIL_PROVIDER_BATCH_DEADLINE_MS) {
   const deadline = Date.now() + totalMs;
   return {
-    remainingMs(): number {
-      return Math.max(0, deadline - Date.now());
+    remainingMs(reserveMs = 0): number {
+      return Math.max(0, deadline - Date.now() - reserveMs);
     },
-    expired(): boolean {
-      return Date.now() >= deadline;
+    expired(reserveMs = 0): boolean {
+      return Date.now() >= deadline - reserveMs;
     },
-    async run<T>(submit: () => Promise<T>): Promise<T> {
-      const remaining = Math.min(EMAIL_PROVIDER_DEADLINE_MS, deadline - Date.now());
+    async run<T>(submit: () => Promise<T>, reserveMs = 0): Promise<T> {
+      const remaining = Math.min(EMAIL_PROVIDER_DEADLINE_MS, deadline - Date.now() - reserveMs);
       if (remaining <= 0) {
         throw new EmailProviderTimeoutError();
       }

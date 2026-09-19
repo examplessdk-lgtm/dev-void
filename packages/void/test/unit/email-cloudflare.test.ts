@@ -945,11 +945,14 @@ describe('preflightEmail', () => {
     expect(pre.blockers.map((b) => b.scope)).toEqual(['all']);
   });
 
-  it('blocks on routing status unlocked / misconfigured — never re-locks', async () => {
+  it('keeps apex-mode routing status unlocked / misconfigured blocked — never re-locks', async () => {
     for (const status of ['unlocked', 'misconfigured', 'misconfigured_locked']) {
       const { inputs } = transcriptInputs({
+        from: 'noreply@acme.com',
+        dns: fakeDns({}),
         runnerTable: {
           'email routing settings acme.com': routingSettings('acme.com', true, status, ZONE_ID),
+          'email sending settings acme.com': sendingNotFound('acme.com'),
         },
       });
       const pre = await preflightEmail(inputs);
@@ -959,6 +962,63 @@ describe('preflightEmail', () => {
         ),
       ).toBe(true);
     }
+  });
+
+  it('keeps an explicitly unlocked apex blocked for subdomain setup', async () => {
+    const { inputs } = transcriptInputs({
+      runnerTable: {
+        'email routing settings acme.com': routingSettings('acme.com', true, 'unlocked', ZONE_ID),
+      },
+    });
+    const pre = await preflightEmail(inputs);
+    expect(pre.blockers).toContainEqual({
+      scope: 'all',
+      message:
+        'Email Routing on acme.com is unlocked — fix it in the Cloudflare dashboard; Void never re-locks records you unlocked',
+    });
+  });
+
+  it('uses the subdomain MX as authoritative when apex routing is misconfigured', async () => {
+    const { inputs } = readyAccount({
+      runnerTable: {
+        'email routing settings acme.com': routingSettings(
+          'acme.com',
+          true,
+          'misconfigured',
+          ZONE_ID,
+        ),
+      },
+    });
+    const pre = await preflightEmail(inputs);
+    expect(pre.mode).toBe('subdomain');
+    expect(pre.routing).toEqual({
+      state: 'ready',
+      status: 'misconfigured',
+      enabled: true,
+    });
+    expect(pre.blockers).toEqual([]);
+    expect(pre.ready).toBe(true);
+  });
+
+  it('still blocks foreign MX on the subdomain when apex routing is misconfigured', async () => {
+    const { inputs } = transcriptInputs({
+      runnerTable: {
+        'email routing settings acme.com': routingSettings(
+          'acme.com',
+          true,
+          'misconfigured',
+          ZONE_ID,
+        ),
+      },
+      dns: fakeDns({ mx: { 'mail.acme.com': ['mx.example.net'] } }),
+    });
+    const pre = await preflightEmail(inputs);
+    expect(pre.routing.state).toBe('pending');
+    expect(pre.blockers).toContainEqual({
+      scope: 'all',
+      message:
+        'mail.acme.com already receives mail (mx.example.net). Void never enables routing over live mail.',
+    });
   });
 
   it('refuses sending onboarding when _dmarc / cf-bounce TXT already exist (sending-scoped)', async () => {
@@ -1446,6 +1506,49 @@ describe('applyEmailSetup', () => {
       expect(call.url).not.toContain(BEARER);
       expect(call.body).not.toContain(BEARER);
     }
+  });
+
+  it('first subdomain setup proceeds when only the apex routing status is misconfigured', async () => {
+    const calls: Array<Call> = [];
+    const fetchCalls: Array<FetchCall> = [];
+    const { inputs } = transcriptInputs({
+      calls,
+      fetchCalls,
+      runnerTable: {
+        'email routing settings acme.com': routingSettings(
+          'acme.com',
+          true,
+          'misconfigured',
+          ZONE_ID,
+        ),
+        'email sending enable mail.acme.com': sendingEnabled('mail.acme.com'),
+      },
+      fetchTable: {
+        [ROUTING_DNS_POST]: () =>
+          jsonResponse(200, { success: true, result: { name: 'mail.acme.com' } }),
+        [ROUTING_PATCH]: () =>
+          jsonResponse(200, { success: true, result: { support_subaddress: true } }),
+      },
+    });
+    const pre = await preflightEmail(inputs);
+    expect(pre.routing).toEqual({
+      state: 'pending',
+      status: 'misconfigured',
+      enabled: true,
+    });
+    expect(pre.blockers).toEqual([]);
+
+    calls.length = 0;
+    fetchCalls.length = 0;
+    const out = await applyEmailSetup(pre, inputs);
+    expect(out.routingReady).toBe(true);
+    expect(out.inboundReady).toBe(true);
+    expect(
+      fetchCalls.map((call) => `${call.method} ${call.url.slice(call.url.indexOf('/zones'))}`),
+    ).toEqual([ROUTING_DNS_POST, ROUTING_PATCH]);
+    expect(calls.map((call) => call.args)).toEqual([
+      ['email', 'sending', 'enable', 'mail.acme.com'],
+    ]);
   });
 
   it('apex path: `wrangler email routing enable <apex>`, then the subaddressing PATCH through the bearer', async () => {
