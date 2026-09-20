@@ -15,7 +15,13 @@ import {
   ProjectOwnerSuspendedError,
   requireProjectCapability,
 } from '../../src/project-access.ts';
-import { projectMembers, projectOwnershipPeriods, users } from '../../src/schema.ts';
+import {
+  deployments,
+  projectMembers,
+  projectOwnershipPeriods,
+  projects,
+  users,
+} from '../../src/schema.ts';
 import { clearTables, createTestUser, setupEnv, teardownEnv, type TestEnv } from './helpers.ts';
 
 let env: TestEnv;
@@ -136,6 +142,36 @@ describe('project access', () => {
     expect(deployment.initiated_by_user_id).toBe(actor.id);
   });
 
+  it('attributes projects and deployments inserted by the previous API revision', async () => {
+    const owner = await createTestUser(env.db, 'legacy-attribution-owner');
+    const [project] = await env.db
+      .insert(projects)
+      .values({ id: 'proj_legacy_attribution', user_id: owner.id, slug: 'legacy-attribution' })
+      .returning();
+    const [deployment] = await env.db
+      .insert(deployments)
+      .values({
+        id: 'dpl_legacy_attribution',
+        project_id: project.id,
+        manifest: '{}',
+      })
+      .returning();
+
+    expect(
+      await env.db
+        .select()
+        .from(projectOwnershipPeriods)
+        .where(eq(projectOwnershipPeriods.project_id, project.id)),
+    ).toEqual([
+      expect.objectContaining({
+        project_id: project.id,
+        owner_user_id: owner.id,
+        starts_at: project.created_at,
+      }),
+    ]);
+    expect(deployment.billing_user_id).toBe(owner.id);
+  });
+
   it('rejects a team mutation after the actor loses admin access', async () => {
     const owner = await userWithEmail('lock-owner');
     const admin = await userWithEmail('lock-admin');
@@ -183,7 +219,11 @@ describe('project access', () => {
         added_by_user_id: owner.id,
       },
     ]);
-    const internalAuth = await hmacSignState(project.id, env.JWT_SECRET);
+    const proxyOrigin = 'https://proxy.example.com';
+    const internalAuth = await hmacSignState(
+      `void-proxy-owner-v2\n${project.id}\n${proxyOrigin}`,
+      env.JWT_SECRET,
+    );
     const verify = (userId: string) =>
       app.fetch(
         new Request(`http://localhost/internal/verify-owner/${project.id}`, {
@@ -192,7 +232,7 @@ describe('project access', () => {
             'content-type': 'application/json',
             'x-void-internal': internalAuth,
           },
-          body: JSON.stringify({ userId }),
+          body: JSON.stringify({ userId, proxyOrigin }),
         }),
         env,
       );

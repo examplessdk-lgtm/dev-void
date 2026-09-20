@@ -125,6 +125,9 @@ describe('ownership-period account usage', () => {
       .update(users)
       .set({ billing_cycle_start: billingStart.toISOString() })
       .where(eq(users.id, formerOwner.id));
+    await env.db
+      .delete(projectOwnershipPeriods)
+      .where(eq(projectOwnershipPeriods.project_id, project.id));
     await env.db.insert(projectOwnershipPeriods).values([
       {
         id: 'pown_former',

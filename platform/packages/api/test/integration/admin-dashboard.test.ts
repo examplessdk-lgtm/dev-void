@@ -1410,6 +1410,9 @@ describe('POST /admin/projects/:id/owner', () => {
     const owner = await createTestUser(env.db, 'browser-convergence-owner');
     const project = await createTestProject(env.db, owner.id, 'browser-convergence-project');
     const deployment = await createTestDeployment(env.db, project.id, 'pending');
+    await env.db
+      .delete(projectOwnershipPeriods)
+      .where(eq(projectOwnershipPeriods.project_id, project.id));
     await env.db.insert(projectOwnershipPeriods).values([
       {
         id: 'pown_browser_convergence_former',

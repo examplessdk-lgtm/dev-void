@@ -1,18 +1,21 @@
 import { and, eq, gt, isNull } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { hmacVerifyState } from '../auth/hmac.ts';
-import { ACTIVE_BUILD_STATUSES, getBuild, getProject, getUser } from '../db.ts';
+import { ACTIVE_BUILD_STATUSES, getBuild, getUser } from '../db.ts';
 import type { ApiEnv } from '../env.ts';
-import { projectDeployCredentials } from '../schema.ts';
+import {
+  ProjectAccessDeniedError,
+  ProjectNotFoundError,
+  requireProjectCapability,
+} from '../project-access.ts';
+import { projectDeployCredentials, projects } from '../schema.ts';
 import { isAdminSuspended } from '../suspension.ts';
 
 const app = new Hono<ApiEnv>();
 
 /**
- * Authoritative check for build- and durable-CI-derived prerender credentials.
- * The binding proxy calls this over its service binding for every request so
- * termination, credential renewal/revocation/expiry, project reassignment, and
- * owner suspension take effect before the derived JWT expires.
+ * Authoritative check for prerender credentials. The binding proxy calls this
+ * for every request so access changes take effect before the JWT expires.
  */
 app.post('/:projectId', async (context) => {
   const projectId = context.req.param('projectId');
@@ -29,19 +32,25 @@ app.post('/:projectId', async (context) => {
     buildId?: string;
     credentialId?: string;
   }>();
-  if (!userId || (!buildId && !credentialId)) {
-    return context.json({ error: 'userId and credential provenance required' }, 400);
+  if (!userId) {
+    return context.json({ error: 'userId required' }, 400);
   }
 
   const db = context.get('db');
-  const [user, project] = await Promise.all([getUser(db, userId), getProject(db, projectId)]);
-  if (
-    !user ||
-    isAdminSuspended(user.suspended_reason) ||
-    !project ||
-    project.status === 'deleting' ||
-    project.user_id !== userId
-  ) {
+  const user = await getUser(db, userId);
+  if (!user || isAdminSuspended(user.suspended_reason)) {
+    return context.json({ error: 'prerender authority is no longer active' }, 403);
+  }
+  let access;
+  try {
+    access = await requireProjectCapability(db, projectId, userId, 'deploy');
+  } catch (error) {
+    if (error instanceof ProjectNotFoundError || error instanceof ProjectAccessDeniedError) {
+      return context.json({ error: 'prerender authority is no longer active' }, 403);
+    }
+    throw error;
+  }
+  if (access.project.status === 'deleting') {
     return context.json({ error: 'prerender authority is no longer active' }, 403);
   }
 
@@ -61,11 +70,13 @@ app.post('/:projectId', async (context) => {
     const credential = await db
       .select({ id: projectDeployCredentials.id })
       .from(projectDeployCredentials)
+      .innerJoin(projects, eq(projects.id, projectDeployCredentials.project_id))
       .where(
         and(
           eq(projectDeployCredentials.id, credentialId),
           eq(projectDeployCredentials.project_id, projectId),
           eq(projectDeployCredentials.issued_by, userId),
+          eq(projects.user_id, userId),
           isNull(projectDeployCredentials.revoked_at),
           gt(projectDeployCredentials.expires_at, new Date().toISOString()),
         ),

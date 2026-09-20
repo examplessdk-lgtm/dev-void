@@ -30,6 +30,7 @@ import {
   platformLoginConnections,
   platformLoginIdentities,
   platformLoginRevisions,
+  projectDeployCredentials,
   projectInvitations,
   projectMembers,
   projectOwnershipPeriods,
@@ -200,6 +201,9 @@ describe('operator tenant reads', () => {
       .update(users)
       .set({ billing_cycle_start: '2020-01-01T00:00:00.000Z' })
       .where(eq(users.id, currentOwner.id));
+    await env.db
+      .delete(projectOwnershipPeriods)
+      .where(eq(projectOwnershipPeriods.project_id, project.id));
     await env.db.insert(projectOwnershipPeriods).values([
       {
         id: 'pown_operator_former',
@@ -292,6 +296,10 @@ describe('operator tenant mutations', () => {
       expires_at: new Date(Date.now() + 86_400_000).toISOString(),
     });
     const deployment = await createTestDeployment(env.db, project.id, 'pending');
+    const ownershipPeriodsBefore = await env.db
+      .select()
+      .from(projectOwnershipPeriods)
+      .where(eq(projectOwnershipPeriods.project_id, project.id));
     const putSpy = vi.spyOn(env.ROUTING, 'put');
     const doGet = vi.fn();
 
@@ -327,7 +335,12 @@ describe('operator tenant mutations', () => {
     expect(
       (await env.db.select().from(projects).where(eq(projects.id, project.id)))[0],
     ).toMatchObject({ user_id: owner.id });
-    expect(await env.db.select().from(projectOwnershipPeriods)).toEqual([]);
+    expect(
+      await env.db
+        .select()
+        .from(projectOwnershipPeriods)
+        .where(eq(projectOwnershipPeriods.project_id, project.id)),
+    ).toEqual(ownershipPeriodsBefore);
     expect(
       await env.db.select().from(projectMembers).where(eq(projectMembers.project_id, project.id)),
     ).toMatchObject([{ user_id: target.id, role: 'collaborator' }]);
@@ -362,6 +375,13 @@ describe('operator tenant mutations', () => {
       target_email_snapshot: 'transfer-target@example.com',
       role: 'admin',
       invited_by_user_id: owner.id,
+      expires_at: new Date(Date.now() + 86_400_000).toISOString(),
+    });
+    await env.db.insert(projectDeployCredentials).values({
+      id: 'transfer-deploy-credential',
+      project_id: project.id,
+      issued_by: owner.id,
+      name: 'transfer credential',
       expires_at: new Date(Date.now() + 86_400_000).toISOString(),
     });
     await env.ROUTING.put(
@@ -417,6 +437,11 @@ describe('operator tenant mutations', () => {
     const current = periods.find((period) => period.owner_user_id === target.id)!;
     expect(former.ends_at).toBe(current.starts_at);
     expect(current).toMatchObject({ ends_at: null, changed_by_user_id: operatorAdminId });
+    const [revokedCredential] = await env.db
+      .select()
+      .from(projectDeployCredentials)
+      .where(eq(projectDeployCredentials.id, 'transfer-deploy-credential'));
+    expect(Date.parse(revokedCredential!.revoked_at!)).toBe(Date.parse(current.starts_at));
     expect(counterCalls).toEqual([
       {
         ownerId: owner.id,

@@ -4,7 +4,7 @@ import { verifyJwt } from '../auth/jwt.ts';
 import { validateHumanSession } from '../auth/sessions.ts';
 import { ACTIVE_BUILD_STATUSES, getBuild, getUser } from '../db.ts';
 import { type ApiEnv, isDevBypass } from '../env.ts';
-import { projectDeployCredentials, users } from '../schema.ts';
+import { projectDeployCredentials, projects, users } from '../schema.ts';
 import { isAdminSuspended } from '../suspension.ts';
 
 /**
@@ -127,11 +127,13 @@ export const authMiddleware: MiddlewareHandler<ApiEnv> = async (context, next) =
         .get('db')
         .select({ id: projectDeployCredentials.id })
         .from(projectDeployCredentials)
+        .innerJoin(projects, eq(projects.id, projectDeployCredentials.project_id))
         .where(
           and(
             eq(projectDeployCredentials.id, payload.credential),
             eq(projectDeployCredentials.project_id, payload.project),
             eq(projectDeployCredentials.issued_by, payload.sub),
+            eq(projects.user_id, payload.sub),
             isNull(projectDeployCredentials.revoked_at),
             gt(projectDeployCredentials.expires_at, new Date().toISOString()),
           ),

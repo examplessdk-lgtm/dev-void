@@ -542,7 +542,9 @@ describe('proxy worker', () => {
       );
       expect(allowed.status).toBe(200);
       expect(apiFetch).toHaveBeenCalledTimes(1);
-      expect(String(apiFetch.mock.calls[0]?.[0])).toContain('/internal/verify-owner/proj_1');
+      expect(String(apiFetch.mock.calls[0]?.[0])).toContain(
+        '/internal/verify-prerender-build/proj_1',
+      );
 
       const denied = await worker.fetch(
         post(
@@ -554,6 +556,35 @@ describe('proxy worker', () => {
       );
       expect(denied.status).toBe(403);
       expect(await denied.json()).toEqual({ error: 'forbidden' });
+    });
+
+    it('revokes an already-minted manual prerender token when project access changes', async () => {
+      const token = await signJwt(
+        { sub: 'user_1', login: 'testuser', aud: 'prerender', project: 'proj_1' },
+        JWT_SECRET,
+      );
+      let active = true;
+      const api = createMockApi(async (input) => {
+        expect(String(input)).toContain('/internal/verify-prerender-build/proj_1');
+        return active
+          ? Response.json({ ok: true })
+          : Response.json({ error: 'forbidden' }, { status: 403 });
+      });
+      const env = createEnv(undefined, undefined, api);
+      const request = () =>
+        post(
+          '/ai/run',
+          { model: 'test-model', inputs: {}, projectId: 'proj_1' },
+          { authorization: `Bearer ${token}` },
+        );
+
+      expect((await worker.fetch(request(), env)).status).toBe(200);
+      active = false;
+      const revoked = await worker.fetch(request(), env);
+      expect(revoked.status).toBe(403);
+      expect(await revoked.json()).toEqual({
+        error: 'prerender token authority is no longer active',
+      });
     });
 
     it('revokes an already-minted build-bound prerender token when its build terminates', async () => {

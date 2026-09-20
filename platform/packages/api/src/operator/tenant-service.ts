@@ -55,6 +55,7 @@ import {
   builds,
   deployments,
   githubConnections,
+  projectDeployCredentials,
   projectInvitations,
   projectMembers,
   projectOwnershipPeriods,
@@ -517,6 +518,15 @@ async function commitOwnershipTransfer(
       })
       .returning({ startsAt: projectOwnershipPeriods.starts_at });
     const transferredAt = newPeriod!.startsAt;
+    await txDb
+      .update(projectDeployCredentials)
+      .set({ revoked_at: transferBoundary })
+      .where(
+        and(
+          eq(projectDeployCredentials.project_id, projectId),
+          isNull(projectDeployCredentials.revoked_at),
+        ),
+      );
     const [updatedProject] = await txDb
       .update(projects)
       .set({ user_id: newOwner.id })

@@ -427,12 +427,15 @@ export async function createProject(db: Db, userId: string, slug: string): Promi
   const id = generateId('proj');
   const row = await db.transaction(async (tx) => {
     const [created] = await tx.insert(projects).values({ id, user_id: userId, slug }).returning();
-    await tx.insert(projectOwnershipPeriods).values({
-      id: generateId('pown'),
-      project_id: created.id,
-      owner_user_id: userId,
-      starts_at: created.created_at,
-    });
+    await tx
+      .insert(projectOwnershipPeriods)
+      .values({
+        id: generateId('pown'),
+        project_id: created.id,
+        owner_user_id: userId,
+        starts_at: created.created_at,
+      })
+      .onConflictDoNothing();
     return created;
   });
   return row;
@@ -902,6 +905,7 @@ export async function resendProjectInvitation(
       .select()
       .from(users)
       .where(eq(users.id, invitation.target_user_id))
+      .for('share')
       .limit(1);
     if (!target?.email) {
       throw new ProjectTeamMutationError('target-user-not-found');

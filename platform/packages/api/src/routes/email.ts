@@ -494,22 +494,19 @@ const app = new Hono<ApiEnv>()
 
   // -------------------------------------------------------------------------
   // Custom email domain routes. The connection service runs durable
-  // operations; these routes apply the owner guard and map responses.
+  // operations; these routes apply project capabilities and map responses.
   // -------------------------------------------------------------------------
 
   // Installation settings the CLI needs before it acts: who manages email
   // domains here (an `admin` platform prints the administrator's command
   // instead of opening a Cloudflare consent) and the shared-sender recipient
-  // policy. Read-only for owners; the operator API and admin UI write them.
+  // policy. Read-only for project members; the operator API and admin UI write them.
   .get('/:id/email/settings', async (context) => {
     const projectId = context.req.param('id');
     const db = context.get('db');
-    const project = await getProject(db, projectId);
-    if (!project) {
-      return context.json({ error: 'project not found' }, 404);
-    }
-    if (project.user_id !== context.get('user').id) {
-      return context.json({ error: 'forbidden' }, 403);
+    const access = await requireProjectRouteCapability(context, projectId, 'read');
+    if (access instanceof Response) {
+      return access;
     }
     const [management, recipientPolicy] = await Promise.all([
       getEmailDomainManagement(db),
@@ -518,19 +515,16 @@ const app = new Hono<ApiEnv>()
     // Republish a drifted recipient-policy mirror for the proxy's local gate.
     await repairEmailRecipientPolicyMirror(db, context.env.ROUTING);
     return context.json({
-      domains: { management, projectSlug: project.slug },
+      domains: { management, projectSlug: access.project.slug },
       recipientPolicy: { mode: recipientPolicy.mode, domains: [...recipientPolicy.domains] },
     });
   })
 
   .get('/:id/email/domains', async (context) => {
     const projectId = context.req.param('id');
-    const project = await getProject(context.get('db'), projectId);
-    if (!project) {
-      return context.json({ error: 'project not found' }, 404);
-    }
-    if (project.user_id !== context.get('user').id) {
-      return context.json({ error: 'forbidden' }, 403);
+    const access = await requireProjectRouteCapability(context, projectId, 'read');
+    if (access instanceof Response) {
+      return access;
     }
 
     const rows = await context
@@ -570,14 +564,11 @@ const app = new Hono<ApiEnv>()
       );
     }
     const db = context.get('db');
-    const project = await getProject(db, projectId);
-    if (!project) {
-      return context.json({ error: 'project not found' }, 404);
+    const access = await requireProjectRouteCapability(context, projectId, 'settings');
+    if (access instanceof Response) {
+      return access;
     }
-    if (project.user_id !== context.get('user').id) {
-      return context.json({ error: 'forbidden' }, 403);
-    }
-    return addEmailDomainForProject(context, project, {
+    return addEmailDomainForProject(context, access.project, {
       domain: typeof body.domain === 'string' ? body.domain : '',
       apiToken: typeof body.apiToken === 'string' ? body.apiToken : undefined,
       attemptId: body.attemptId,
@@ -586,35 +577,30 @@ const app = new Hono<ApiEnv>()
   })
 
   .get('/:id/email/operations/:operationId', async (context) => {
-    const project = await getProject(context.get('db'), context.req.param('id'));
-    if (!project) {
-      return context.json({ error: 'project not found' }, 404);
+    const access = await requireProjectRouteCapability(context, context.req.param('id'), 'read');
+    if (access instanceof Response) {
+      return access;
     }
-    if (project.user_id !== context.get('user').id) {
-      return context.json({ error: 'forbidden' }, 403);
-    }
-    return getEmailOperationForProject(context, project, context.req.param('operationId'));
+    return getEmailOperationForProject(context, access.project, context.req.param('operationId'));
   })
 
   .get('/:id/email/domains/:domain', async (context) => {
     const projectId = context.req.param('id');
-    const project = await getProject(context.get('db'), projectId);
-    if (!project) {
-      return context.json({ error: 'project not found' }, 404);
+    const access = await requireProjectRouteCapability(context, projectId, 'read');
+    if (access instanceof Response) {
+      return access;
     }
-    if (project.user_id !== context.get('user').id) {
-      return context.json({ error: 'forbidden' }, 403);
-    }
-    return getEmailDomainStatusForProject(context, project, context.req.param('domain'));
+    return getEmailDomainStatusForProject(context, access.project, context.req.param('domain'));
   })
 
   .post('/:id/email/domains/:domain/rotate-secret', async (context) => {
-    const project = await getProject(context.get('db'), context.req.param('id'));
-    if (!project) {
-      return context.json({ error: 'project not found' }, 404);
-    }
-    if (project.user_id !== context.get('user').id) {
-      return context.json({ error: 'forbidden' }, 403);
+    const access = await requireProjectRouteCapability(
+      context,
+      context.req.param('id'),
+      'settings',
+    );
+    if (access instanceof Response) {
+      return access;
     }
     let attemptId: string | undefined;
     if (context.req.header('content-type')?.includes('application/json')) {
@@ -636,7 +622,7 @@ const app = new Hono<ApiEnv>()
     }
     return rotateEmailIngressSecretForProject(
       context,
-      project,
+      access.project,
       context.req.param('domain'),
       'owner',
       attemptId,
@@ -645,28 +631,25 @@ const app = new Hono<ApiEnv>()
 
   .post('/:id/email/domains/:domain/sync', async (context) => {
     const projectId = context.req.param('id');
-    const db = context.get('db');
-    const project = await getProject(db, projectId);
-    if (!project) {
-      return context.json({ error: 'project not found' }, 404);
+    const access = await requireProjectRouteCapability(context, projectId, 'settings');
+    if (access instanceof Response) {
+      return access;
     }
-    if (project.user_id !== context.get('user').id) {
-      return context.json({ error: 'forbidden' }, 403);
-    }
-    return syncEmailDomainForProject(context, project, context.req.param('domain'), 'owner');
+    return syncEmailDomainForProject(context, access.project, context.req.param('domain'), 'owner');
   })
 
   .delete('/:id/email/domains/:domain', async (context) => {
     const projectId = context.req.param('id');
-    const db = context.get('db');
-    const project = await getProject(db, projectId);
-    if (!project) {
-      return context.json({ error: 'project not found' }, 404);
+    const access = await requireProjectRouteCapability(context, projectId, 'settings');
+    if (access instanceof Response) {
+      return access;
     }
-    if (project.user_id !== context.get('user').id) {
-      return context.json({ error: 'forbidden' }, 403);
-    }
-    return removeEmailDomainForProject(context, project, context.req.param('domain'), 'owner');
+    return removeEmailDomainForProject(
+      context,
+      access.project,
+      context.req.param('domain'),
+      'owner',
+    );
   });
 
 function parseCounter(raw: string | null): number {

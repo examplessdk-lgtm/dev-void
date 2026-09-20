@@ -171,27 +171,27 @@ app.post('/*', async (context, next) => {
       if (!payload.project || payload.project !== projectId) {
         return context.json({ error: 'forbidden' }, 403);
       }
-      if (payload.build || payload.credential) {
-        const active = await verifyPrerenderAuthority(
-          context.env.API,
-          context.env.JWT_SECRET,
-          projectId,
-          payload.sub,
+      const active = await verifyPrerenderAuthority(
+        context.env.API,
+        context.env.JWT_SECRET,
+        projectId,
+        payload.sub,
+        {
+          ...(payload.build ? { buildId: payload.build } : {}),
+          ...(payload.credential ? { credentialId: payload.credential } : {}),
+        },
+      );
+      if (!active) {
+        return context.json(
           {
-            ...(payload.build ? { buildId: payload.build } : {}),
-            ...(payload.credential ? { credentialId: payload.credential } : {}),
+            error: payload.credential
+              ? 'prerender token credential is no longer active'
+              : payload.build
+                ? 'prerender token build is no longer active'
+                : 'prerender token authority is no longer active',
           },
+          403,
         );
-        if (!active) {
-          return context.json(
-            {
-              error: payload.credential
-                ? 'prerender token credential is no longer active'
-                : 'prerender token build is no longer active',
-            },
-            403,
-          );
-        }
       }
     } else {
       // Full API tokens retain the local-development ownership lookup.

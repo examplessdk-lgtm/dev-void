@@ -54,6 +54,51 @@ CREATE TABLE "project_ownership_periods" (
 --> statement-breakpoint
 ALTER TABLE "deployments" ADD COLUMN "billing_user_id" text;--> statement-breakpoint
 ALTER TABLE "deployments" ADD COLUMN "initiated_by_user_id" text;--> statement-breakpoint
+CREATE UNIQUE INDEX "idx_project_ownership_periods_open" ON "project_ownership_periods" USING btree ("project_id") WHERE "project_ownership_periods"."ends_at" IS NULL;--> statement-breakpoint
+CREATE FUNCTION "void_set_missing_deployment_billing_user_id"()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+	IF NEW."billing_user_id" IS NULL THEN
+		SELECT "project"."user_id"
+		INTO NEW."billing_user_id"
+		FROM "public"."projects" AS "project"
+		WHERE "project"."id" = NEW."project_id";
+	END IF;
+	RETURN NEW;
+END;
+$$;--> statement-breakpoint
+CREATE TRIGGER "deployments_set_missing_billing_user_id"
+BEFORE INSERT ON "deployments"
+FOR EACH ROW
+WHEN (NEW."billing_user_id" IS NULL)
+EXECUTE FUNCTION "void_set_missing_deployment_billing_user_id"();--> statement-breakpoint
+CREATE FUNCTION "void_create_initial_project_ownership_period"()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+	INSERT INTO "public"."project_ownership_periods" (
+		"id",
+		"project_id",
+		"owner_user_id",
+		"starts_at"
+	)
+	VALUES (
+		'pown_' || NEW."id",
+		NEW."id",
+		NEW."user_id",
+		NEW."created_at"
+	)
+	ON CONFLICT DO NOTHING;
+	RETURN NEW;
+END;
+$$;--> statement-breakpoint
+CREATE TRIGGER "projects_create_initial_ownership_period"
+AFTER INSERT ON "projects"
+FOR EACH ROW
+EXECUTE FUNCTION "void_create_initial_project_ownership_period"();--> statement-breakpoint
 UPDATE "deployments" AS "deployment"
 SET "billing_user_id" = "project"."user_id"
 FROM "projects" AS "project"
@@ -85,5 +130,4 @@ CREATE INDEX "idx_project_invitations_target_status" ON "project_invitations" US
 CREATE UNIQUE INDEX "idx_project_invitations_pending_target" ON "project_invitations" USING btree ("project_id","target_user_id") WHERE "project_invitations"."status" = 'pending';--> statement-breakpoint
 CREATE INDEX "idx_project_members_user_project" ON "project_members" USING btree ("user_id","project_id");--> statement-breakpoint
 CREATE INDEX "idx_project_ownership_periods_owner_time" ON "project_ownership_periods" USING btree ("owner_user_id","starts_at","ends_at");--> statement-breakpoint
-CREATE INDEX "idx_project_ownership_periods_project_time" ON "project_ownership_periods" USING btree ("project_id","starts_at");--> statement-breakpoint
-CREATE UNIQUE INDEX "idx_project_ownership_periods_open" ON "project_ownership_periods" USING btree ("project_id") WHERE "project_ownership_periods"."ends_at" IS NULL;
+CREATE INDEX "idx_project_ownership_periods_project_time" ON "project_ownership_periods" USING btree ("project_id","starts_at");

@@ -211,6 +211,8 @@ is deferred until that hard-disabled capability is reintroduced.
 
 Add `deployments.billing_user_id` and `deployments.initiated_by_user_id`.
 Backfill `billing_user_id` from the current owner before transfers are enabled.
+Compatibility triggers create ownership periods and fill missing deployment
+billing owners for old-worker writes during a rolling upgrade.
 Daily deploy counts use `billing_user_id` instead of joining to the project's
 current owner.
 
@@ -282,8 +284,10 @@ has `deploy` capability as well as checking the bound build. Therefore:
 - a leaked unexpired deploy token cannot start new work after removal.
 
 The binding proxy's existing internal `verify-owner` route checks the `deploy`
-capability without changing its wire contract. Build-bound prerender
-credentials retain their build-state check.
+capability without changing its wire contract. Every prerender credential is
+also checked against current project access on each proxy request;
+build-derived and durable-CI-derived credentials additionally retain their
+build-state or parent-credential check.
 
 ## Invitation flow
 
@@ -406,8 +410,9 @@ The operator transfer performs these steps:
 
 1. In one database transaction, lock the project then both users in stable ID
    order; reject active lifecycle work; close/open the ownership periods;
-   update `projects.user_id`; remove the target's membership; add the former
-   owner as project admin.
+   revoke the project's scoped CI deploy credentials; update
+   `projects.user_id`; remove the target's membership; add the former owner as
+   project admin.
 2. Detach/attach the UsageCounter project mapping.
 3. Republish the project-account and active routing entries with the new owner
    ID, plan limits, and suspension state. Usage ingestion already uses the

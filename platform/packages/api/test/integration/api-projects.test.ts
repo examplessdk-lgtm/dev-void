@@ -43,7 +43,7 @@ import {
   cfError,
   type TestEnv,
 } from './helpers.ts';
-import { setGetProjectOverride, setTestDb } from './setup.ts';
+import { setTestDb } from './setup.ts';
 
 let env: TestEnv;
 
@@ -57,7 +57,6 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await clearTables(env.db);
-  setGetProjectOverride(null);
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
@@ -424,6 +423,39 @@ describe('POST /projects/:id/prerender-token', () => {
     expect(payload!.exp - payload!.iat).toBe(65 * 60);
   });
 
+  it('revokes a collaborator manual prerender token when the member is removed', async () => {
+    const owner = await createTestUser(env.db, 'prerender-removal-owner');
+    const collaborator = await createTestUser(env.db, 'prerender-removal-collaborator');
+    const project = await createTestProject(env.db, owner.id, 'prerender-removal-app');
+    await env.db.insert(projectMembers).values({
+      project_id: project.id,
+      user_id: collaborator.id,
+      role: 'collaborator',
+      added_by_user_id: owner.id,
+    });
+
+    const minted = await app.fetch(
+      new Request(`http://localhost/projects/${project.id}/prerender-token`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${collaborator.jwt}` },
+      }),
+      env,
+    );
+    expect(minted.status).toBe(200);
+    const { token } = await minted.json<{ token: string }>();
+    expect((await proxyRequest(token, project.id)).status).toBe(200);
+
+    const removed = await app.fetch(
+      new Request(`http://localhost/projects/${project.id}/members/${collaborator.id}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${owner.jwt}` },
+      }),
+      env,
+    );
+    expect(removed.status).toBe(204);
+    expect((await proxyRequest(token, project.id)).status).toBe(403);
+  });
+
   it('allows the project-scoped deploy token to mint it', async () => {
     const user = await createTestUser(env.db, 'prerender-ci');
     const project = await createTestProject(env.db, user.id, 'prerender-ci-app');
@@ -550,6 +582,36 @@ describe('POST /projects/:id/prerender-token', () => {
     expect((await proxyRequest(suspended.derivedToken, project.id)).status).toBe(403);
   });
 
+  it('revokes durable deploy and derived prerender credentials after ownership transfer', async () => {
+    const formerOwner = await createTestUser(env.db, 'prerender-transfer-former-owner');
+    const newOwner = await createTestUser(env.db, 'prerender-transfer-new-owner');
+    const project = await createTestProject(
+      env.db,
+      formerOwner.id,
+      'prerender-transfer-credential-app',
+    );
+    const credential = await issueCiPrerenderToken(formerOwner, project, 'transfer-parent');
+
+    await env.db.transaction(async (tx) => {
+      await tx.update(projects).set({ user_id: newOwner.id }).where(eq(projects.id, project.id));
+      await tx.insert(projectMembers).values({
+        project_id: project.id,
+        user_id: formerOwner.id,
+        role: 'admin',
+        added_by_user_id: newOwner.id,
+      });
+    });
+
+    const parent = await app.fetch(
+      new Request('http://localhost/projects', {
+        headers: { Authorization: `Bearer ${credential.token}` },
+      }),
+      env,
+    );
+    expect(parent.status).toBe(401);
+    expect((await proxyRequest(credential.derivedToken, project.id)).status).toBe(403);
+  });
+
   it('retains validated credential provenance when the parent JWT expires before minting', async () => {
     const startedAt = new Date('2026-09-18T00:00:00.000Z').getTime();
     vi.useFakeTimers({ toFake: ['Date'] });
@@ -577,11 +639,12 @@ describe('POST /projects/:id/prerender-token', () => {
         env.JWT_SECRET,
       );
 
-      setGetProjectOverride(({ original, argsList }) => {
+      const requireCapability = projectAccess.requireProjectCapability;
+      vi.spyOn(projectAccess, 'requireProjectCapability').mockImplementation(async (...args) => {
         // authMiddleware has already verified the real JWT and credential row;
-        // the route's first project read crosses the JWT expiry boundary.
+        // the route capability check crosses the JWT expiry boundary.
         vi.setSystemTime(startedAt + 2_000);
-        return original(...argsList);
+        return requireCapability(...args);
       });
       const response = await app.fetch(
         new Request(`http://localhost/projects/${project.id}/prerender-token`, {
@@ -605,7 +668,6 @@ describe('POST /projects/:id/prerender-token', () => {
       // credential-bound derived token is immediately rejected authoritatively.
       expect((await proxyRequest(token, project.id)).status).toBe(403);
     } finally {
-      setGetProjectOverride(null);
       vi.useRealTimers();
     }
   });
