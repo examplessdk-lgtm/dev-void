@@ -1,7 +1,29 @@
 import { describe, expect, it, vi } from 'vite-plus/test';
+import { hmacSignState } from '../../src/auth/hmac.ts';
 import emailActions from '../../src/routes/internal-email-actions.ts';
 
 describe('internal email action request bounds', () => {
+  it('authenticates actions with the email key and rejects the login key', async () => {
+    const bindings = { JWT_SECRET: 'login-key', EMAIL_SIGNING_SECRET: 'email-key' };
+    const raw = '{}';
+    const call = async (signingKey: string, emailKey = bindings.EMAIL_SIGNING_SECRET) =>
+      emailActions.request(
+        '/admit',
+        {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'x-void-internal': await hmacSignState(raw, signingKey),
+          },
+          body: raw,
+        },
+        { ...bindings, EMAIL_SIGNING_SECRET: emailKey },
+      );
+    expect((await call(bindings.EMAIL_SIGNING_SECRET)).status).toBe(400);
+    expect((await call(bindings.JWT_SECRET)).status).toBe(403);
+    expect((await call(bindings.JWT_SECRET, '')).status).toBe(403);
+  });
+
   it('times out a stalled body without awaiting its cancellation', async () => {
     vi.useFakeTimers();
     try {

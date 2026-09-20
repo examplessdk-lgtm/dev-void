@@ -34,6 +34,7 @@ export type ApiEnv = Env & {
     CF_ZONE_ID: string;
     AI_GATEWAY_ID?: string;
     JWT_SECRET: string;
+    EMAIL_SIGNING_SECRET: string;
     EMAIL_GATEWAY_ORIGIN?: string;
     EMAIL_SHARED_ACCOUNT_ID?: string;
     EMAIL_SHARED_ZONE_ID?: string;

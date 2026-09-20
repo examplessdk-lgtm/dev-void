@@ -344,6 +344,7 @@ Secrets used at runtime:
 - `CF_ACCOUNT_ID`
 - `CF_ZONE_ID`
 - `JWT_SECRET`
+- `EMAIL_SIGNING_SECRET` (email-enabled installations)
 - `PROJECT_SECRET_KEYS_JSON`
 - `PROJECT_SECRET_ACTIVE_KEY_VERSION`
 - `GITHUB_CLIENT_ID`

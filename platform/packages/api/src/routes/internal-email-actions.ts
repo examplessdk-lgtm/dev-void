@@ -82,7 +82,10 @@ app.use('*', async (context, next) => {
   } catch {
     return context.json({ error: 'invalid body' }, 400);
   }
-  if (!(await hmacVerifyState(raw, signature, context.env.JWT_SECRET))) {
+  if (
+    !context.env.EMAIL_SIGNING_SECRET ||
+    !(await hmacVerifyState(raw, signature, context.env.EMAIL_SIGNING_SECRET))
+  ) {
     return context.json({ error: 'invalid internal auth' }, 403);
   }
   let body: unknown;

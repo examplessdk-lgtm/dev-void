@@ -170,6 +170,8 @@ Paste it into your password manager as **JWT signing key**. Run the command agai
 
 :::
 
+When email is enabled, Void also creates an independent **Email signing key** for confirmation links and service-to-service email requests. The installer keeps it in encrypted recovery state. Set `VOID_PLATFORM_EMAIL_SIGNING_SECRET` to a separate value of at least 32 random bytes when you need an externally custodied copy, including a headless installation whose local recovery files will not persist.
+
 ## 5. Install and Connect GitHub {#install}
 
 For workers.dev testing, start the interactive install and continue to the GitHub setup below:
@@ -575,7 +577,7 @@ void platform discover --account <account-id> --installation <id-or-name>
 
 Discovery restores local installation records after verifying the resources belong to your platform. It also works for interrupted or disabled installations. If infrastructure is missing, run `void platform repair [id]` after discovery. If ownership cannot be verified, the command stops without changing resources.
 
-After discovery, provide `VOID_PLATFORM_DATABASE_URL` for migrations and to coordinate administrator commands. You don't need to re-enter the other secrets for an upgrade that preserves every deployed Worker. If an upgrade adds the email gateway for the first time, or repair recreates only that Worker, restore `VOID_PLATFORM_JWT_SECRET`; the gateway does not need the Cloudflare runtime token. If repair must recreate the API or proxy Worker, restore `VOID_PLATFORM_RUNTIME_CLOUDFLARE_API_TOKEN` and `VOID_PLATFORM_JWT_SECRET`. Recreating the API also requires its original GitHub, R2, and project-encryption secrets through the `VOID_PLATFORM_*` variables. Cloudflare can't return those values, so keep them in your organization's secret manager.
+After discovery, provide `VOID_PLATFORM_DATABASE_URL` for migrations and to coordinate administrator commands. You don't need to re-enter the other secrets for an upgrade that preserves every deployed Worker. For an email-enabled installation without its encrypted recovery file, restore `VOID_PLATFORM_EMAIL_SIGNING_SECRET`; recreating only the email gateway needs that key and no Cloudflare runtime token or JWT signing key. Recreating the API or proxy also requires the email key when email is enabled, in addition to their normal secrets. Recreating the API requires its original GitHub, R2, JWT, and project-encryption values through the `VOID_PLATFORM_*` variables; recreating the proxy requires the runtime token and JWT signing key. Cloudflare can't return these values, so keep them in your organization's secret manager.
 
 If you have not rotated the project-encryption key, restore it with `VOID_PLATFORM_PROJECT_SECRET_KEY`. After rotation, supply `VOID_PLATFORM_PROJECT_SECRET_KEYS_JSON` with all retained keys and `VOID_PLATFORM_PROJECT_SECRET_ACTIVE_KEY_VERSION` with the active key's name. Keep older keys needed to decrypt existing project secrets. These values are used to recreate a missing API Worker; they do not replace the live keys during an ordinary upgrade. Supply them from your secret manager.
 
@@ -586,7 +588,7 @@ If you have not rotated the project-encryption key, restore it with `VOID_PLATFO
 Keep a coordinated recovery set for each installation:
 
 - a PostgreSQL backup;
-- the installation identity—the JWT signing secret and complete project-encryption keyring—in a secret manager;
+- the installation identity—the JWT signing secret, the email signing secret when email is enabled, and the complete project-encryption keyring—in a secret manager;
 - provider-supported backups or exports for every data-bearing provider resource;
 - the immutable runtime artifacts and manifest for the installed version or custom source revision.
 
@@ -598,7 +600,7 @@ During a restore, keep platform and application traffic disabled before changing
 
 Installation records live in `~/.void/platforms/`. Credentials are stored separately in encrypted recovery files, with the encryption key in your operating system's keychain. Keep your original secrets in a password manager for recovery on another machine.
 
-If the keychain isn't available, Void stops before writing secrets. Headless environments can supply `VOID_PLATFORM_RECOVERY_KEY`: a canonical base64-encoded 32-byte key from a secret manager. A temporary CI runner can use a new recovery-encryption key for each run only when every original credential remains available in protected CI secrets, including `VOID_PLATFORM_JWT_SECRET` and either the original `VOID_PLATFORM_PROJECT_SECRET_KEY` or the complete rotated keyring and active-version pair.
+If the keychain isn't available, Void stops before writing secrets. Headless environments can supply `VOID_PLATFORM_RECOVERY_KEY`: a canonical base64-encoded 32-byte key from a secret manager. A temporary CI runner can use a new recovery-encryption key for each run only when every original credential remains available in protected CI secrets, including `VOID_PLATFORM_JWT_SECRET`, `VOID_PLATFORM_EMAIL_SIGNING_SECRET` for an email-enabled installation, and either the original `VOID_PLATFORM_PROJECT_SECRET_KEY` or the complete rotated keyring and active-version pair.
 
 ::: details Ownership and interrupted maintenance
 
@@ -627,6 +629,7 @@ Inject the following values from protected CI secrets. Do not commit them in a w
 | `VOID_PLATFORM_R2_ACCESS_KEY_ID`             | R2 Access Key ID                                                                            |
 | `VOID_PLATFORM_R2_SECRET_ACCESS_KEY`         | R2 Secret Access Key                                                                        |
 | `VOID_PLATFORM_JWT_SECRET`                   | Original JWT signing secret                                                                 |
+| `VOID_PLATFORM_EMAIL_SIGNING_SECRET`         | Dedicated email signing secret when email is enabled                                        |
 | `VOID_PLATFORM_PROJECT_SECRET_KEY`           | Original base64-encoded project-encryption key                                              |
 | `VOID_PLATFORM_RECOVERY_KEY`                 | Base64-encoded 32-byte key for local encrypted recovery state when no keychain is available |
 | `VOID_EMAIL_SENDER_DOMAIN`                   | Optional shared mail domain; requires `VOID_EMAIL_SHARED_ZONE_ID`                           |

@@ -26,7 +26,8 @@ import {
   recordInboundDelivery,
   requestSendRaw,
 } from './email.ts';
-import type { Env } from './types.ts';
+import type { Env as ProxyEnv } from './types.ts';
+type Env = Omit<ProxyEnv, 'JWT_SECRET'>;
 
 // Built via new RegExp to dodge oxlint no-control-regex rule.
 // oxlint-disable-next-line no-control-regex

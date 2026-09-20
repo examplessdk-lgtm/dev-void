@@ -18,6 +18,7 @@ const worker = (await import('../../src/index.ts')).default;
 const { requestSendRaw } = await import('../../src/email.ts');
 
 const JWT_SECRET = 'test-secret-key';
+const EMAIL_SIGNING_SECRET = 'test-email-signing-key-independent';
 const PROD_DOMAIN = 'mail.void.cloud';
 const CUSTOM_DOMAIN = 'acme.com';
 const CUSTOM_FROM = `support@${CUSTOM_DOMAIN}`;
@@ -123,6 +124,7 @@ function createMockEnv() {
   const env = {
     AI: {},
     JWT_SECRET,
+    EMAIL_SIGNING_SECRET,
     ROUTING: { get: vi.fn(async () => null) },
     CF_ACCOUNT_ID: 'acct',
     CF_API_TOKEN: 'cf-token',
@@ -273,7 +275,7 @@ describe('POST /email/send — custom sender domain', () => {
     });
     const leaseHeaders = new Headers(leaseInit.headers);
     expect(leaseHeaders.get('x-void-internal')).toBe(
-      await signHmac(`email-lease-v1\nproj_1\n${CUSTOM_DOMAIN}`, JWT_SECRET),
+      await signHmac(`email-lease-v1\nproj_1\n${CUSTOM_DOMAIN}`, EMAIL_SIGNING_SECRET),
     );
 
     // The delivery: one POST to the CUSTOMER account's send_raw, leased

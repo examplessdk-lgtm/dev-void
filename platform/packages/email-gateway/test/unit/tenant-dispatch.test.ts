@@ -19,7 +19,7 @@ describe('bounded tenant email dispatch', () => {
       };
       const pending = dispatchBoundedEmailToTenant(
         stub as never,
-        { JWT_SECRET: 'secret' },
+        { EMAIL_SIGNING_SECRET: 'secret' },
         {
           projectId: 'project-1',
           deploymentId: 'deployment-1',

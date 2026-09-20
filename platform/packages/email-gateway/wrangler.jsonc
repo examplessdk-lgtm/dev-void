@@ -18,7 +18,7 @@
     "production": {
       "name": "void-email-gateway",
       "workers_dev": true,
-      "secrets": { "required": ["JWT_SECRET"] },
+      "secrets": { "required": ["EMAIL_SIGNING_SECRET"] },
       "services": [{ "binding": "API", "service": "void-api" }],
       "dispatch_namespaces": [{ "binding": "DISPATCH", "namespace": "void-users" }],
       "kv_namespaces": [{ "binding": "ROUTING", "id": "9250c33f3db6494ebe8ad6272812c8c0" }],
@@ -33,7 +33,7 @@
     "staging": {
       "name": "void-email-gateway-staging",
       "workers_dev": true,
-      "secrets": { "required": ["JWT_SECRET"] },
+      "secrets": { "required": ["EMAIL_SIGNING_SECRET"] },
       "services": [{ "binding": "API", "service": "void-api-staging" }],
       "dispatch_namespaces": [{ "binding": "DISPATCH", "namespace": "void-users-staging" }],
       "kv_namespaces": [{ "binding": "ROUTING", "id": "60240eecea804f39bf8b7395cd6c6b08" }],

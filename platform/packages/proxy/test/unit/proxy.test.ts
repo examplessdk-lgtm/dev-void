@@ -1,9 +1,11 @@
+import { signEmailReceipt } from '@void/platform/email-protocol';
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vite-plus/test';
 import { readEmailRequestJson } from '../../src/email-request-body.ts';
 import worker from '../../src/index.ts';
 import { PLATFORM_DISABLED_KEY } from '../../src/platform-lifecycle.ts';
 
 const JWT_SECRET = 'test-secret-key';
+const EMAIL_SIGNING_SECRET = 'test-email-signing-key-independent';
 
 // --- JWT helper (mirrors the worker's HMAC-SHA256 signing) ---
 
@@ -144,6 +146,7 @@ function createEnv(
       ...aiOverrides,
     },
     JWT_SECRET,
+    EMAIL_SIGNING_SECRET,
     ROUTING: createMockKv(kvData),
     CF_ACCOUNT_ID: 'test-account-id',
     CF_API_TOKEN: 'test-api-token',
@@ -413,6 +416,38 @@ describe('proxy worker', () => {
     });
   });
 
+  it('verifies email receipts independently of project login authentication', async () => {
+    const claims = {
+      version: 1 as const,
+      receiptId: 'a'.repeat(64),
+      projectId: 'proj_1',
+      deploymentId: 'deploy_1',
+      recipient: 'support@example.com',
+      expiresAt: Date.now() + 30_000,
+    };
+    const projectToken = await signAiToken(claims.projectId, JWT_SECRET);
+    const call = async (receiptKey: string, auth = projectToken, env = createEnv()) =>
+      worker.fetch(
+        post(
+          '/email/verify-receipt',
+          { ...claims, receipt: await signEmailReceipt(claims, receiptKey) },
+          { 'x-void-internal': auth },
+        ),
+        env,
+      );
+    expect(await (await call(EMAIL_SIGNING_SECRET)).json()).toEqual({
+      valid: true,
+      receiptId: claims.receiptId,
+    });
+    expect(await (await call(JWT_SECRET)).json()).toEqual({ valid: false });
+    expect(
+      (await call(EMAIL_SIGNING_SECRET, await signAiToken(claims.projectId, EMAIL_SIGNING_SECRET)))
+        .status,
+    ).toBe(403);
+    const missing = { ...createEnv(), EMAIL_SIGNING_SECRET: '' };
+    expect((await call(JWT_SECRET, projectToken, missing)).status).toBe(503);
+  });
+
   describe('JWT authentication (HTTPS path)', () => {
     it('accepts valid JWT for the project owner', async () => {
       const env = createEnv();
@@ -448,8 +483,8 @@ describe('proxy worker', () => {
       expect(await res.json()).toEqual({ error: 'invalid or expired token' });
     });
 
-    it('rejects JWT signed with wrong secret', async () => {
-      const badToken = await signJwt({ sub: 'user_1', login: 'testuser' }, 'wrong-secret');
+    it('rejects login JWTs signed with the email key', async () => {
+      const badToken = await signJwt({ sub: 'user_1', login: 'testuser' }, EMAIL_SIGNING_SECRET);
 
       const res = await worker.fetch(
         post(

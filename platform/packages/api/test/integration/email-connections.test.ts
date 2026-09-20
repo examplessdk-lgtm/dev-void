@@ -117,7 +117,7 @@ describe('durable zone email connections', () => {
     const to = 'support@limits.example.com';
     const proof = await hmacSignState(
       `email-ingress-v1\n${connection.account_id}\n${connection.zone_id}\n${connection.ingress_worker_name}\n${to}`,
-      env.JWT_SECRET,
+      env.EMAIL_SIGNING_SECRET,
     );
     const response = await app.fetch(
       new Request('https://api/internal/email/resolve-ingress', {

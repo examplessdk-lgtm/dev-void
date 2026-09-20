@@ -28,6 +28,9 @@ const EMAIL_ADMISSION_DEADLINE_MS = 15_000;
 const MAX_ADMISSION_RESPONSE_BYTES = 65_536;
 
 async function sign(data: string, secret: string): Promise<string> {
+  if (!secret) {
+    throw new Error('Email signing key is not configured');
+  }
   const key = await crypto.subtle.importKey(
     'raw',
     encoder.encode(secret),
@@ -43,7 +46,7 @@ async function sign(data: string, secret: string): Promise<string> {
 }
 
 async function call<T>(
-  env: Pick<Env, 'API' | 'JWT_SECRET'>,
+  env: Pick<Env, 'API' | 'EMAIL_SIGNING_SECRET'>,
   path: string,
   body: unknown,
   deadlineMs = EMAIL_DEFAULT_DEADLINE_MS,
@@ -75,7 +78,7 @@ async function call<T>(
     }
   };
   const raw = JSON.stringify(body);
-  const proof = await sign(raw, env.JWT_SECRET);
+  const proof = await sign(raw, env.EMAIL_SIGNING_SECRET);
   const response = await beforeDeadline(() =>
     env.API.fetch(`https://api/internal/email/actions${path}`, {
       method: 'POST',
@@ -140,14 +143,14 @@ export type ReceiptRouteFence = {
 };
 
 export function claimRelayedReceipt(
-  env: Pick<Env, 'API' | 'JWT_SECRET'>,
+  env: Pick<Env, 'API' | 'EMAIL_SIGNING_SECRET'>,
   identity: RelayedReceiptIdentity,
 ): Promise<{ state: 'claimed' | 'in_progress' | 'completed'; reject?: boolean }> {
   return call(env, '/receipts/claim', identity);
 }
 
 export function completeRelayedReceipt(
-  env: Pick<Env, 'API' | 'JWT_SECRET'>,
+  env: Pick<Env, 'API' | 'EMAIL_SIGNING_SECRET'>,
   identity: RelayedReceiptIdentity,
   reject: boolean,
 ): Promise<{ ok: true }> {
@@ -356,7 +359,7 @@ export async function emailPayloadDigest(
 }
 
 export function admitEmail(
-  env: Pick<Env, 'API' | 'JWT_SECRET'>,
+  env: Pick<Env, 'API' | 'EMAIL_SIGNING_SECRET'>,
   body: {
     projectId: string;
     kind: 'direct' | 'forward' | 'reply';
@@ -373,7 +376,7 @@ export function admitEmail(
 }
 
 export function startEmailAttempt(
-  env: Pick<Env, 'API' | 'JWT_SECRET'>,
+  env: Pick<Env, 'API' | 'EMAIL_SIGNING_SECRET'>,
   operationId: string,
   recipients: Array<string>,
   deadlineMs = EMAIL_ACTION_DEADLINE_MS,
@@ -387,7 +390,7 @@ export function startEmailAttempt(
 }
 
 export function finishEmailAttempt(
-  env: Pick<Env, 'API' | 'JWT_SECRET'>,
+  env: Pick<Env, 'API' | 'EMAIL_SIGNING_SECRET'>,
   operationId: string,
   recipients: Array<string>,
   state: 'provider_accepted' | 'failed' | 'outcome_unknown' | 'cancelled',
@@ -403,7 +406,7 @@ export function finishEmailAttempt(
 }
 
 export function recordEmailReceipt(
-  env: Pick<Env, 'API' | 'JWT_SECRET'>,
+  env: Pick<Env, 'API' | 'EMAIL_SIGNING_SECRET'>,
   receiptId: string,
   projectId: string,
   status: string,

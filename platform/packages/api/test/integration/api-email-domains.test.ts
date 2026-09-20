@@ -21,7 +21,7 @@ import {
   clearTables,
   createTestProject,
   createTestUser,
-  JWT_SECRET,
+  EMAIL_SIGNING_SECRET,
   setupEnv,
   teardownEnv,
   type TestEnv,
@@ -320,7 +320,7 @@ describe('project email domain authority', () => {
             'Content-Type': 'application/json',
             'x-void-internal': await hmacSignState(
               `email-lease-v1\n${projectId}\n${signatureDomain}`,
-              JWT_SECRET,
+              EMAIL_SIGNING_SECRET,
             ),
           },
           body: JSON.stringify({ domain, projectId }),
@@ -338,7 +338,7 @@ describe('project email domain authority', () => {
     expect((await lease(project.id, 'lease.example.com', 'other.example.com')).status).toBe(403);
     const signed = await hmacSignState(
       `email-lease-v1\n${project.id}\nlease.example.com`,
-      JWT_SECRET,
+      EMAIL_SIGNING_SECRET,
     );
     const oversized = await app.fetch(
       new Request('http://localhost/internal/email/domain-credential', {

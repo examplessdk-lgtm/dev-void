@@ -762,7 +762,7 @@ void platform uninstall [id] [--plan] [--purge-data] [--keep-zone] [--yes]
 
 Omit `id` when only one installation is configured, or choose from the interactive picker. Non-interactive commands need an ID when several installations exist. Commands that make changes also require `--yes`; `--plan` only previews changes.
 
-After discovery on another machine, set `VOID_PLATFORM_DATABASE_URL`. An upgrade that preserves every deployed Worker also preserves its secrets. If an upgrade adds the email gateway for the first time, or repair recreates only that Worker, restore `VOID_PLATFORM_JWT_SECRET`; the gateway does not need the Cloudflare runtime token. If repair recreates the API or proxy Worker, restore `VOID_PLATFORM_RUNTIME_CLOUDFLARE_API_TOKEN` and `VOID_PLATFORM_JWT_SECRET`. Recreating the API also requires its original GitHub, R2, and project-encryption values.
+After discovery on another machine, set `VOID_PLATFORM_DATABASE_URL`. An upgrade that preserves every deployed Worker also preserves its secrets. For an email-enabled installation without its encrypted recovery file, restore `VOID_PLATFORM_EMAIL_SIGNING_SECRET`; recreating only the email gateway needs that key and does not need the Cloudflare runtime token or JWT signing key. Recreating the API or proxy also requires the email key when email is enabled, in addition to their normal secrets. Recreating the API requires its original runtime-token, GitHub, R2, JWT, and project-encryption values; recreating the proxy requires the runtime token and JWT signing key.
 
 | Command     | Behavior                                                                                      |
 | ----------- | --------------------------------------------------------------------------------------------- |

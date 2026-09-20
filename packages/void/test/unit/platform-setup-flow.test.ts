@@ -138,6 +138,13 @@ beforeEach(() => {
     const deployment = createPlatformDeploymentManifest({
       installationSlug: input.installationSlug,
       displayName: input.displayName,
+      ...(input.emailSharedZoneId && input.emailSenderDomain
+        ? {
+            capabilities: { email: true },
+            emailSenderDomain: input.emailSenderDomain,
+            emailSharedZoneId: input.emailSharedZoneId,
+          }
+        : {}),
       application: {
         baseDomain: 'account.workers.dev',
         zoneName: '',
@@ -885,6 +892,23 @@ describe('platform credential onboarding', () => {
     expect(mocks.password).not.toHaveBeenCalled();
     expect(mocks.install).toHaveBeenCalledOnce();
     expect(info.mock.calls.map(([message]) => message).join('\n')).not.toContain('openssl rand');
+  });
+  it('checkpoints a generated email key before leaving the setup draft', async () => {
+    for (const [key, value] of Object.entries(environment)) {
+      vi.stubEnv(key, value);
+    }
+    vi.stubEnv('VOID_EMAIL_SHARED_ZONE_ID', 'mail-zone');
+    vi.stubEnv('VOID_EMAIL_SENDER_DOMAIN', 'mail.example.com');
+
+    await runPlatformLifecycleCommand(parsePlatformArgs(args));
+
+    const manifest = listInstallationManifests()[0]!;
+    const saved = readPendingInstallationSecrets(manifest)!;
+    const installSecrets = mocks.install.mock.calls[0]![1];
+    expect(isPlatformSetupDraft(manifest)).toBe(false);
+    expect(saved.emailSigningSecret).toBe(installSecrets.emailSigningSecret);
+    expect(Buffer.byteLength(saved.emailSigningSecret, 'utf8')).toBeGreaterThanOrEqual(32);
+    expect(saved.emailSigningSecret).not.toBe(environment.VOID_PLATFORM_JWT_SECRET);
   });
   it('does not persist an invalid signing key or begin provisioning', async () => {
     const normal = mocks.password.getMockImplementation()!;

@@ -89,6 +89,9 @@ export async function signConfirmToken(
   payload: ConfirmTokenPayload,
   secret: string,
 ): Promise<string> {
+  if (!secret) {
+    throw new Error('Email signing key is not configured');
+  }
   const json = JSON.stringify(payload);
   const jsonBytes = encoder.encode(json);
   const headerPart = base64urlEncode(jsonBytes);
@@ -108,7 +111,7 @@ export async function verifyConfirmToken(
   secret: string,
   now: number = Math.floor(Date.now() / 1000),
 ): Promise<ConfirmTokenPayload | null> {
-  if (typeof token !== 'string' || !token.includes('.')) {
+  if (!secret || typeof token !== 'string' || !token.includes('.')) {
     return null;
   }
   const parts = token.split('.');

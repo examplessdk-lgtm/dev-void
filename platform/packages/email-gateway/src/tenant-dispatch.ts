@@ -15,7 +15,7 @@ const active = new Map<string, number>();
 
 export async function dispatchBoundedEmailToTenant(
   stub: Pick<Fetcher, 'fetch'>,
-  env: { JWT_SECRET: string },
+  env: { EMAIL_SIGNING_SECRET: string },
   input: {
     projectId: string;
     deploymentId: string;
@@ -48,7 +48,7 @@ export async function dispatchBoundedEmailToTenant(
         recipient: input.envelope.to,
         expiresAt: Date.now() + 30_000,
       },
-      env.JWT_SECRET,
+      env.EMAIL_SIGNING_SECRET,
     );
     const remaining = deadline - Date.now();
     if (remaining <= 0) {

@@ -285,7 +285,7 @@ function makeEnv(options: MakeEnvOptions = {}) {
   });
   const env = {
     AI: {},
-    JWT_SECRET: 'test-secret',
+    EMAIL_SIGNING_SECRET: 'test-secret',
     CF_ACCOUNT_ID: 'acct',
     CF_API_TOKEN: 'token',
     API: { fetch: apiFetch },

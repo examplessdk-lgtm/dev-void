@@ -183,7 +183,7 @@
     // R2Bucket object but not its name, and the presigner needs the name.
     "R2_STATIC_ASSETS_BUCKET": "void-static-assets-overflow",
   },
-  // Secrets (via `wrangler secret put`): CF_API_TOKEN, CF_ACCOUNT_ID, CF_ZONE_ID, JWT_SECRET, GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY
+  // Encrypted Worker secrets: CF_API_TOKEN, CF_ACCOUNT_ID, CF_ZONE_ID, JWT_SECRET, EMAIL_SIGNING_SECRET, GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY
   // R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY are S3-compatible API tokens used to presign direct-to-R2 asset uploads (see src/r2-presign.ts).
   // Optional env var: AUTH_REDIRECT_URI (defaults to https://api.void.cloud/auth/callback)
   // For local dev, set AUTH_REDIRECT_URI=http://localhost:8787/auth/callback and DEV_AUTH_BYPASS=true in .dev.vars
@@ -191,6 +191,7 @@
   "env": {
     "production": {
       "name": "void-api",
+      "secrets": { "required": ["EMAIL_SIGNING_SECRET"] },
       "hyperdrive": [
         {
           "binding": "HYPERDRIVE",
@@ -326,6 +327,7 @@
     },
     "staging": {
       "name": "void-api-staging",
+      "secrets": { "required": ["EMAIL_SIGNING_SECRET"] },
       "hyperdrive": [
         {
           "binding": "HYPERDRIVE",

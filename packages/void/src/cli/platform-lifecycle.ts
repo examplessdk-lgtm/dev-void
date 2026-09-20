@@ -687,6 +687,9 @@ export async function runPlatformLifecycleCommand(args: PlatformArgs): Promise<v
       cloudflareApiToken: runtimeCloudflareApiToken,
       checkpoint: values,
       databaseUrl: installationDatabaseUrl,
+      emailEnabled: plan.deployment.capabilities.email,
+      emailSigningSecret: process.env.VOID_PLATFORM_EMAIL_SIGNING_SECRET || '',
+      existingEmailEnabled: existing.deployment.capabilities.email,
       githubClientId,
       githubClientSecret,
       r2AccessKeyId,
@@ -731,7 +734,10 @@ export async function runPlatformLifecycleCommand(args: PlatformArgs): Promise<v
     progress = startProgress('Installing the platform');
     if (credentialSetup) {
       // Stop treating this as an untouched local draft before any database claim is attempted.
-      saveValues({ projectSecretKey: secrets.projectSecretKey });
+      saveValues({
+        projectSecretKey: secrets.projectSecretKey,
+        ...(secrets.emailEnabled ? { emailSigningSecret: secrets.emailSigningSecret } : {}),
+      });
       existing = completePlatformSetupDraft(existing);
     }
     const result = await installPlatform(plan, secrets, existing, {

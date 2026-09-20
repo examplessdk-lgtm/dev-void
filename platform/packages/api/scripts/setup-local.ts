@@ -141,6 +141,7 @@ function ensureLocalDevVars(): void {
     DEV_AUTH_BYPASS: 'true',
     PLATFORM_ENV: 'staging',
     JWT_SECRET: 'dev',
+    EMAIL_SIGNING_SECRET: 'dev-email-signing-key-not-for-production',
     CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE: localDbUrl,
   };
   const devVarsDirs = [platformDir, resolve(platformDir, '../dashboard')];

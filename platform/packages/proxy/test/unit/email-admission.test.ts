@@ -230,7 +230,7 @@ describe('email admission service deadline', () => {
         });
       });
       const pending = admitEmail(
-        { API: { fetch } as never, JWT_SECRET: 'secret' },
+        { API: { fetch } as never, EMAIL_SIGNING_SECRET: 'secret' },
         {
           projectId: 'project_1',
           kind: 'direct',
@@ -276,7 +276,7 @@ describe('email admission service deadline', () => {
           }),
       );
       const pending = finishEmailAttempt(
-        { API: { fetch } as never, JWT_SECRET: 'secret' },
+        { API: { fetch } as never, EMAIL_SIGNING_SECRET: 'secret' },
         'emailact_1',
         ['recipient@example.com'],
         'provider_accepted',
@@ -298,7 +298,7 @@ describe('email admission service deadline', () => {
     try {
       const fetch = vi.fn(() => new Promise<Response>(() => {}));
       const pending = admitEmail(
-        { API: { fetch } as never, JWT_SECRET: 'secret' },
+        { API: { fetch } as never, EMAIL_SIGNING_SECRET: 'secret' },
         {
           projectId: 'project_1',
           kind: 'direct',

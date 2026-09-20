@@ -87,7 +87,7 @@ async function hmacSign(data: string, secret: string): Promise<string> {
   return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
 }
 
-// The tenant calls this over its internal service binding. JWT_SECRET never
+// The tenant calls this over its internal service binding. EMAIL_SIGNING_SECRET never
 // enters the tenant, so a project token cannot mint a gateway receipt.
 app.post('/email/verify-receipt', async (context) => {
   let body: unknown;
@@ -116,7 +116,10 @@ app.post('/email/verify-receipt', async (context) => {
   if (context.req.header('x-void-internal') !== projectToken) {
     return context.json({ valid: false }, 403);
   }
-  const claims = await verifyEmailReceipt(input.receipt, context.env.JWT_SECRET, {
+  if (!context.env.EMAIL_SIGNING_SECRET) {
+    return context.json({ valid: false }, 503);
+  }
+  const claims = await verifyEmailReceipt(input.receipt, context.env.EMAIL_SIGNING_SECRET, {
     projectId: input.projectId,
     deploymentId: input.deploymentId,
     recipient: input.recipient,

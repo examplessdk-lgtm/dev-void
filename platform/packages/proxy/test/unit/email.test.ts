@@ -25,6 +25,7 @@ const { buildMime, normalizeEmail } =
   await import('../../../../../packages/void/src/runtime/email/mime.ts');
 
 const JWT_SECRET = 'test-secret-key';
+const EMAIL_SIGNING_SECRET = 'test-email-signing-key-independent';
 const PROD_DOMAIN = 'mail.void.cloud';
 const STAGING_DOMAIN = 'mail.voidcloud.dev';
 
@@ -140,6 +141,7 @@ function createMockEnv(
   return {
     AI: {},
     JWT_SECRET,
+    EMAIL_SIGNING_SECRET,
     ROUTING: kv,
     CF_ACCOUNT_ID: 'acct',
     CF_API_TOKEN: 'cf-token',
@@ -369,14 +371,17 @@ describe('proxy wrangler config', () => {
       expect(gatewayVars.EMAIL_SHARED_INGRESS_NAME).toBe(gateway.name);
       expect(proxy.services).toContainEqual({ binding: 'API', service: scope.name });
       expect(gateway.services).toContainEqual({ binding: 'API', service: scope.name });
+      if (name !== 'top level') {
+        expect(scope.secrets).toEqual({ required: ['EMAIL_SIGNING_SECRET'] });
+        expect(proxy.secrets).toEqual({ required: ['EMAIL_SIGNING_SECRET'] });
+        expect(gateway.secrets).toEqual({ required: ['EMAIL_SIGNING_SECRET'] });
+      }
     }
     const productionVars = env.production.vars as Record<string, string>;
     const stagingVars = env.staging.vars as Record<string, string>;
     expect(stagingVars.EMAIL_SHARED_ACCOUNT_ID).toBe(productionVars.EMAIL_SHARED_ACCOUNT_ID);
     expect(stagingVars.EMAIL_SHARED_ZONE_ID).not.toBe(productionVars.EMAIL_SHARED_ZONE_ID);
     expect(stagingVars.EMAIL_SENDER_DOMAIN).not.toBe(productionVars.EMAIL_SENDER_DOMAIN);
-    expect(gatewayEnv.production.secrets).toEqual({ required: ['JWT_SECRET'] });
-    expect(gatewayEnv.staging.secrets).toEqual({ required: ['JWT_SECRET'] });
   });
 });
 

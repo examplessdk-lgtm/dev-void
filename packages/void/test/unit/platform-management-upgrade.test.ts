@@ -332,6 +332,36 @@ describe('installed platform upgrade', () => {
     expect(state.progress.start).toHaveBeenCalledWith('Repairing the platform');
   });
 
+  it('forwards the dedicated email key and recorded capability during maintenance', async () => {
+    const emailSigningSecret = 'restored-email-signing-secret-material';
+    vi.stubEnv('VOID_PLATFORM_EMAIL_SIGNING_SECRET', emailSigningSecret);
+    state.manifest = {
+      ...state.manifest!,
+      deployment: createPlatformDeploymentManifest({
+        ...state.manifest!.deployment,
+        capabilities: { ...state.manifest!.deployment.capabilities, email: true },
+        emailSenderDomain: 'mail.example.com',
+        emailSharedZoneId: 'mail-zone',
+      }),
+    };
+
+    await runInstalledPlatformCommand({
+      plan: false,
+      runtime: '',
+      selector: state.manifest.id,
+      subcommand: 'repair',
+      yes: true,
+    });
+
+    expect(state.createSecrets).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        emailEnabled: true,
+        emailSigningSecret,
+        existingEmailEnabled: true,
+      }),
+    );
+  });
+
   it('releases the held lifecycle lock when database preparation fails', async () => {
     state.prepareDatabase.mockImplementationOnce(async () => {
       state.events.push('prepare:failed');

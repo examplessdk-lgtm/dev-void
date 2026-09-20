@@ -142,7 +142,7 @@ function verificationEnv(overrides: Partial<ApiEnv['Bindings']> = {}) {
   });
   return {
     env: {
-      JWT_SECRET: SECRET,
+      EMAIL_SIGNING_SECRET: SECRET,
       EMAIL: { send } as unknown as SendEmail,
       EMAIL_SENDER_DOMAIN: MAIL_DOMAIN,
       EMAIL_GATEWAY_ORIGIN: GATEWAY_ORIGIN,

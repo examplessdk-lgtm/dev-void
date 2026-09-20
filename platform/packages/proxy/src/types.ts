@@ -37,6 +37,7 @@ export type Env = Readonly<{
   AI: AiBinding;
   AI_GATEWAY_ID?: string;
   JWT_SECRET: string;
+  EMAIL_SIGNING_SECRET: string;
   ROUTING: KVNamespace;
 
   CF_ACCOUNT_ID: string;

@@ -1605,7 +1605,7 @@ interface RecipientResult {
  * it only from `reserved`; a committed `attempt_started` transition conflicts.
  */
 async function cancelUnstartedRecipients(
-  env: Pick<Env, 'API' | 'JWT_SECRET'>,
+  env: Pick<Env, 'API' | 'EMAIL_SIGNING_SECRET'>,
   operationId: string,
   recipients: Array<string>,
   deadlineMs?: number,

@@ -189,7 +189,7 @@ describe('Access-protected platform requests', () => {
     await env.db
       .insert(emailReceipts)
       .values({ id: receipt.receiptId, project_id: project.id, status: 'received' });
-    const proof = await hmacSignState(JSON.stringify(receipt), env.JWT_SECRET);
+    const proof = await hmacSignState(JSON.stringify(receipt), env.EMAIL_SIGNING_SECRET);
     const accepted = await request(
       '/internal/email/actions/receipts',
       undefined,
@@ -224,7 +224,7 @@ describe('Access-protected platform requests', () => {
         undefined,
         undefined,
         body,
-        { 'x-void-internal': await hmacSignState(payload, env.JWT_SECRET) },
+        { 'x-void-internal': await hmacSignState(payload, env.EMAIL_SIGNING_SECRET) },
       );
       expect(response.status).toBe(404);
     }

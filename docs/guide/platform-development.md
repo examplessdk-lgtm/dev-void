@@ -231,7 +231,7 @@ node packages/void/dist/cli/cli.mjs platform upgrade "$VOID_PLATFORM_INSTALLATIO
 
 Omit the installation selector only if the account has one discoverable installation. Run one deployment per installation at a time, and let it finish before starting the next. Cancelling during migrations or Worker rollout can leave an installation waiting for recovery.
 
-Keep the management token, database URL, JWT signing secret, and complete project-encryption keyring in a protected CI environment. Upgrades inherit deployed Worker secrets. The original values are needed when recreating a missing Worker; configuration credentials are also needed when explicitly rotating them.
+Keep the management token, database URL, JWT signing secret, email signing secret for email-enabled installations, and complete project-encryption keyring in a protected CI environment. Upgrades inherit deployed Worker secrets. The original values are needed when recreating a missing Worker; configuration credentials are also needed when explicitly rotating them.
 
 :::
 

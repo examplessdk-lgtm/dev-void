@@ -88,7 +88,7 @@ function fixture() {
   const sender = vi.fn(async () => ({ messageId: 'provider-1' }));
   const env = {
     API: { fetch: apiFetch },
-    JWT_SECRET: 'test-secret',
+    EMAIL_SIGNING_SECRET: 'test-secret',
     SEND_EMAIL: { send: sender },
     EMAIL_SENDER_DOMAIN: 'mail.example.com',
     ROUTING: { get: vi.fn() },

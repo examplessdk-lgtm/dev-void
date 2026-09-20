@@ -37,6 +37,7 @@ import { loadPGliteTemplateBundle } from './db-template.ts';
 import { setTestDb, clearTestDb } from './setup.ts';
 
 export const JWT_SECRET = 'test-jwt-secret';
+export const EMAIL_SIGNING_SECRET = 'test-email-signing-secret-independent';
 export const CF_API_TOKEN = 'test-cf-token';
 export const CF_ACCOUNT_ID = 'test-account-id';
 export const CF_ZONE_ID = 'test-zone-id';
@@ -59,6 +60,7 @@ export type TestEnv = {
   CF_ACCOUNT_ID: string;
   CF_ZONE_ID: string;
   JWT_SECRET: string;
+  EMAIL_SIGNING_SECRET: string;
   PLATFORM_AUTH_DATABASE_UNCACHED: string;
   PROJECT_SECRET_KEYS_JSON: string;
   PROJECT_SECRET_ACTIVE_KEY_VERSION: string;
@@ -463,6 +465,7 @@ export async function setupEnv(): Promise<TestEnv> {
     CF_ACCOUNT_ID,
     CF_ZONE_ID,
     JWT_SECRET,
+    EMAIL_SIGNING_SECRET,
     PLATFORM_AUTH_DATABASE_UNCACHED: 'true',
     PROJECT_SECRET_KEYS_JSON,
     PROJECT_SECRET_ACTIVE_KEY_VERSION,

@@ -73,7 +73,8 @@ Keep these values recoverable through the deployment owner's secret manager:
 | Configuration                                                                         | Purpose                                                         |
 | ------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
 | `CF_API_TOKEN`, `CF_ACCOUNT_ID`, `CF_ZONE_ID`                                         | Runtime Cloudflare account and application-zone access          |
-| `JWT_SECRET`                                                                          | API, proxy, and email gateway authentication                    |
+| `JWT_SECRET`                                                                          | API sessions and API/proxy platform authentication              |
+| `EMAIL_SIGNING_SECRET`                                                                | Email request proofs, receipts, and confirmation tokens         |
 | `PROJECT_SECRET_KEYS_JSON`, `PROJECT_SECRET_ACTIVE_KEY_VERSION`                       | Encryption of project secrets                                   |
 | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`                                            | GitHub sign-in OAuth application                                |
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`                                            | Google sign-in OAuth client                                     |
@@ -84,7 +85,7 @@ Keep these values recoverable through the deployment owner's secret manager:
 
 The project-secret keyring is a JSON object mapping key versions to base64-encoded 32-byte keys. The active version must exist in that object. Preserve older keys while any stored secret still uses them; losing a key makes those secrets unreadable. Database backups alone do not contain the decryption keys.
 
-The API and proxy share their JWT signing configuration. Change it as a coordinated operation because existing sessions and remote-binding clients depend on it. Inspect the Worker bindings and application configuration before rotating any shared credential.
+The API and proxy share their JWT signing configuration. Change it as a coordinated operation because existing sessions and remote-binding clients depend on it. Email uses a separate signing secret shared by the API, proxy, and email gateway. Keep stable, distinct values for production and staging, and rotate each shared credential independently as a coordinated operation. Inspect the Worker bindings and application configuration before rotating either one.
 
 ## GitHub Deployment Integration
 
@@ -113,15 +114,9 @@ For repository deployments, add the equivalent values to the selected `env.produ
 - API, proxy, and email gateway: the same `EMAIL_SENDER_DOMAIN`.
 - API and email gateway: `EMAIL_SHARED_ACCOUNT_ID`, `EMAIL_SHARED_ZONE_ID`, and `EMAIL_SHARED_INGRESS_NAME`, identifying the platform account, mail zone, and dedicated gateway Worker.
 - API: `EMAIL_GATEWAY_ORIGIN`, the gateway's HTTPS origin reachable from customer ingress Workers.
-- API, proxy, and email gateway: the same installation `JWT_SECRET`; the API retains the scoped runtime token and project-encryption keys.
+- API, proxy, and email gateway: the same installation `EMAIL_SIGNING_SECRET`; the API retains its separate `JWT_SECRET`, scoped runtime token, and project-encryption keys.
 
-Install the gateway's copy of the shared JWT as a Wrangler secret in each environment before deploying it:
-
-```sh
-cd platform/packages/email-gateway
-wrangler secret put JWT_SECRET --env production
-wrangler secret put JWT_SECRET --env staging
-```
+Store one stable, high-entropy `EMAIL_SIGNING_SECRET` in each deployment owner's secret manager and in the corresponding `Prod` or `Staging` GitHub environment. The hosted deployment preflight rejects a missing, short, or whitespace-padded value before database migrations or Worker changes. API, proxy, and gateway deployments upload the selected environment's value as an encrypted Worker secret, including when the gateway is created for the first time. Do not generate a new value for each deployment or put it in Wrangler `vars`.
 
 For the first email rollout, configure and deploy the proxy and email gateway before adding the API's shared-email values. Verify both Workers, then add the API values and deploy the API so scheduled reconciliation cannot direct inbound mail at an unavailable gateway. From the repository root, the production sequence is:
 
@@ -132,6 +127,8 @@ vp run --filter @voidcloud/platform deploy:api
 ```
 
 Use the corresponding `deploy:staging:*` commands for staging. After email is enabled and all three Workers exist, the normal platform deployment command can update them.
+
+A dedicated-key cutover has no compatibility bridge to the previous JWT-backed email protocol. Provision the same environment-specific `EMAIL_SIGNING_SECRET` for all three deployments, keep inbound routing disabled, and complete the gateway, proxy, and API rollout before enabling email traffic. Preserve `JWT_SECRET` on the API and proxy: login sessions and non-email authentication still depend on it. After cutover, remove a previous gateway's `JWT_SECRET` binding because Worker deployments preserve existing secrets. If a rollout stops between Workers, leave routing disabled and resume with the same email signing value.
 
 The API's scheduled reconciliation creates the shared connection and reserved shared-domain route only when the complete identity is configured. Confirm the resulting operation and inbound readiness before directing traffic to the gateway. Provision routing and Sending independently: a provider permission or plan refusal must remain visible in the corresponding readiness state. Sending to arbitrary recipients requires Cloudflare Email Sending onboarding and its supported plan.
 

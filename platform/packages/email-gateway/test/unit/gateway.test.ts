@@ -36,7 +36,7 @@ const env = (
   dispatchGet: (...args: Array<unknown>) => Fetcher = () => ({ fetch: vi.fn() }) as never,
 ) =>
   ({
-    JWT_SECRET: 'platform-secret',
+    EMAIL_SIGNING_SECRET: 'platform-secret',
     API: { fetch: apiFetch },
     EMAIL_SHARED_ACCOUNT_ID: 'account-1',
     EMAIL_SHARED_ZONE_ID: 'zone-1',

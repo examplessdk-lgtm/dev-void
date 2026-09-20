@@ -60,7 +60,11 @@ app.post('/probe-ingress', async (context) => {
   }
   const signed = `email-probe-v1\n${accountId}\n${zoneId}\n${ingressName}`;
   const auth = context.req.header('x-void-internal');
-  if (!auth || !(await hmacVerifyState(signed, auth, context.env.JWT_SECRET))) {
+  if (
+    !context.env.EMAIL_SIGNING_SECRET ||
+    !auth ||
+    !(await hmacVerifyState(signed, auth, context.env.EMAIL_SIGNING_SECRET))
+  ) {
     return context.json({ error: 'forbidden' }, 403);
   }
   const connection = (
@@ -134,7 +138,11 @@ app.post('/resolve-ingress', async (context) => {
   const recipient = (to as string).toLowerCase();
   const signed = `email-ingress-v1\n${accountId}\n${zoneId}\n${ingressName}\n${recipient}`;
   const auth = context.req.header('x-void-internal');
-  if (!auth || !(await hmacVerifyState(signed, auth, context.env.JWT_SECRET))) {
+  if (
+    !context.env.EMAIL_SIGNING_SECRET ||
+    !auth ||
+    !(await hmacVerifyState(signed, auth, context.env.EMAIL_SIGNING_SECRET))
+  ) {
     return context.json({ error: 'forbidden' }, 403);
   }
   const db = context.get('db');

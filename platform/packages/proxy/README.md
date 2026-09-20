@@ -134,16 +134,17 @@ test/unit/
 
 ## Bindings
 
-| Binding         | Type               | Purpose                                                |
-| --------------- | ------------------ | ------------------------------------------------------ |
-| `AI`            | Workers AI         | Real inference binding                                 |
-| `API`           | Service binding    | Internal API calls (`revalidate`, resource resolution) |
-| `DISPATCH`      | Dispatch namespace | Fast path to deployed user workers                     |
-| `ROUTING`       | KV                 | AI limit flags, routing blobs, email allowlists/quotas |
-| `SEND_EMAIL`    | send_email         | Account-level outbound mail                            |
-| `JWT_SECRET`    | Secret             | HMAC/JWT verification                                  |
-| `CF_ACCOUNT_ID` | Secret             | Cloudflare account ID                                  |
-| `CF_API_TOKEN`  | Secret             | Fallback REST API access                               |
+| Binding                | Type               | Purpose                                                |
+| ---------------------- | ------------------ | ------------------------------------------------------ |
+| `AI`                   | Workers AI         | Real inference binding                                 |
+| `API`                  | Service binding    | Internal API calls (`revalidate`, resource resolution) |
+| `DISPATCH`             | Dispatch namespace | Fast path to deployed user workers                     |
+| `ROUTING`              | KV                 | AI limit flags, routing blobs, email allowlists/quotas |
+| `SEND_EMAIL`           | send_email         | Account-level outbound mail                            |
+| `JWT_SECRET`           | Secret             | HMAC/JWT verification                                  |
+| `EMAIL_SIGNING_SECRET` | Secret             | Email request proofs, credential leases, and receipts  |
+| `CF_ACCOUNT_ID`        | Secret             | Cloudflare account ID                                  |
+| `CF_API_TOKEN`         | Secret             | Fallback REST API access                               |
 
 | Var                   | Purpose                                                   |
 | --------------------- | --------------------------------------------------------- |

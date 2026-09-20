@@ -8,7 +8,7 @@ import {
 import type { EmailEnvelope } from '../../proxy/src/email-router.ts';
 import type { Env as ProxyEnv } from '../../proxy/src/types.ts';
 
-type Env = ProxyEnv & {
+type Env = Omit<ProxyEnv, 'JWT_SECRET'> & {
   PLATFORM_INSTALLATION_ID?: string;
   PLATFORM_VERSION?: string;
   PLATFORM_TRAFFIC_STATE?: string;
@@ -51,6 +51,9 @@ async function withDeliverySlot<T>(run: () => Promise<T>): Promise<T> {
 }
 
 async function sign(value: string, secret: string): Promise<string> {
+  if (!secret) {
+    throw new Error('Email signing key is not configured');
+  }
   const key = await crypto.subtle.importKey(
     'raw',
     encoder.encode(secret),
@@ -118,7 +121,7 @@ async function resolveIngress(
   };
   const proof = await sign(
     `email-ingress-v1\n${input.accountId}\n${input.zoneId}\n${input.ingressName}\n${input.to.toLowerCase()}`,
-    env.JWT_SECRET,
+    env.EMAIL_SIGNING_SECRET,
   );
   const response = await beforeDeadline(() =>
     env.API.fetch('https://api/internal/email/resolve-ingress', {
@@ -545,7 +548,7 @@ async function probe(request: Request, env: Env): Promise<Response> {
   }
   const proof = await sign(
     `email-probe-v1\n${accountId}\n${zoneId}\n${ingressName}`,
-    env.JWT_SECRET,
+    env.EMAIL_SIGNING_SECRET,
   );
   const controller = new AbortController();
   const apiDeadline = Date.now() + 5_000;

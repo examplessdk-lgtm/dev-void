@@ -70,6 +70,9 @@
 
 ## Cloudflare and deployment
 
+- Preflight shared secrets before migrations or Worker changes, and upload them
+  with a new Worker's first deployment. An existing staging secret does not
+  prove that first-production bootstrap works.
 - Install CommonJS interoperability on the actual Worker build environment,
   whose name comes from Wrangler rather than a presumed `ssr` name.
 - Analytics Engine queries include timestamps used in filtering/sorting, use

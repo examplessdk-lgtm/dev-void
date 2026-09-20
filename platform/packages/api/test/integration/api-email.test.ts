@@ -1726,7 +1726,7 @@ describe('GET /email/destinations/confirm', () => {
         iat: overrides.iat ?? now,
         exp: overrides.exp ?? now + 24 * 60 * 60,
       },
-      env.JWT_SECRET,
+      env.EMAIL_SIGNING_SECRET,
     );
   }
 
@@ -1802,14 +1802,14 @@ describe('GET /email/destinations/confirm', () => {
     expect(res.status).toBe(400);
   });
 
-  it('returns 400 for a token signed with the wrong secret', async () => {
+  it('rejects a confirmation signed with the login key', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id);
     const did = await seedPlatformPending('shared@example.com', project);
     const now = Math.floor(Date.now() / 1000);
     const forged = await signConfirmToken(
       { v: 1, pid: project.id, did, addr: 'shared@example.com', iat: now, exp: now + 3600 },
-      'not-the-platform-secret',
+      env.JWT_SECRET,
     );
 
     const res = await confirm(forged);
@@ -2267,7 +2267,7 @@ describe('email platform capability', () => {
         iat: now,
         exp: now + 3600,
       },
-      env.JWT_SECRET,
+      env.EMAIL_SIGNING_SECRET,
     );
 
     const res = await app.fetch(

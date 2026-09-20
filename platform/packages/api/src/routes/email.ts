@@ -731,7 +731,7 @@ async function dispatchPlatformVerification(
     iat: now,
     exp: now + 24 * 60 * 60,
   };
-  const token = await signConfirmToken(tokenPayload, context.env.JWT_SECRET);
+  const token = await signConfirmToken(tokenPayload, context.env.EMAIL_SIGNING_SECRET);
   const sendPromise = sendPlatformVerificationEmail(
     context.env,
     { id: project.id, slug: project.slug },

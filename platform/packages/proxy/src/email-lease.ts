@@ -17,11 +17,14 @@ export function leaseBearer(lease: EmailDomainLease): string {
  * null on any failure; the caller maps that to a retryable upstream error.
  */
 export async function leaseEmailDomainCredential(
-  env: Pick<Env, 'API' | 'JWT_SECRET'>,
+  env: Pick<Env, 'API' | 'EMAIL_SIGNING_SECRET'>,
   domain: string,
   projectId: string,
   deadlineMs = LEASE_DEADLINE_MS,
 ): Promise<EmailDomainLease | null> {
+  if (!env.EMAIL_SIGNING_SECRET) {
+    return null;
+  }
   const controller = new AbortController();
   const deadline = Date.now() + Math.min(deadlineMs, LEASE_DEADLINE_MS);
   const beforeDeadline = async <T>(run: () => Promise<T>): Promise<T> => {
@@ -53,7 +56,7 @@ export async function leaseEmailDomainCredential(
   try {
     const token = await hmacSign(
       `email-lease-v1\n${projectId}\n${domain.toLowerCase()}`,
-      env.JWT_SECRET,
+      env.EMAIL_SIGNING_SECRET,
     );
     res = await beforeDeadline(() =>
       env.API.fetch('https://api/internal/email/domain-credential', {

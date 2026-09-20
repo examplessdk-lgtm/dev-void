@@ -44,11 +44,12 @@ app.post('/', async (context) => {
   const normalized = normalizeEmailDomain(domain);
   const signature = context.req.header('x-void-internal');
   if (
+    !context.env.EMAIL_SIGNING_SECRET ||
     !signature ||
     !(await hmacVerifyState(
       `email-lease-v1\n${projectId}\n${normalized}`,
       signature,
-      context.env.JWT_SECRET,
+      context.env.EMAIL_SIGNING_SECRET,
     ))
   ) {
     return context.json({ error: 'forbidden' }, 403);

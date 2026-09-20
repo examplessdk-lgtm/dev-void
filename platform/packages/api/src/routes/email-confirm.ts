@@ -2,7 +2,7 @@
  * Token-authenticated endpoint for the platform-side destination verification
  * link. The HMAC-signed token IS the auth — it
  * embeds (project_id, destination_id, address, exp) and is validated
- * against JWT_SECRET. Single-use is enforced by DB state: the click
+ * against EMAIL_SIGNING_SECRET. Single-use is enforced by DB state: the click
  * flips the destination row to 'verified', so a second click finds an
  * already-verified row and returns idempotent success.
  *
@@ -37,7 +37,7 @@ app.get('/destinations/confirm', async (context) => {
     return context.html(errorPage('Missing confirmation token.'), 400);
   }
 
-  const payload = await verifyConfirmToken(token, context.env.JWT_SECRET);
+  const payload = await verifyConfirmToken(token, context.env.EMAIL_SIGNING_SECRET);
   if (!payload) {
     // Don't distinguish bad signature vs expired vs malformed in the
     // user-visible page — they're all "this link no longer works".

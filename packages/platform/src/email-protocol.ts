@@ -213,6 +213,9 @@ function unbase64url(value: string): Uint8Array {
 }
 
 async function receiptKey(secret: string, usage: 'sign' | 'verify'): Promise<CryptoKey> {
+  if (!secret) {
+    throw new Error('Email signing key is not configured');
+  }
   return crypto.subtle.importKey(
     'raw',
     encoder.encode(secret),

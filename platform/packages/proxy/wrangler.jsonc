@@ -34,7 +34,7 @@
   // src/email-router.ts; mirrored to deployed user workers as the
   // __VOID_EMAIL_DOMAIN binding. Never defaulted in code.
   "vars": { "EMAIL_SENDER_DOMAIN": "mail.void.cloud" },
-  // Secrets (via `wrangler secret put`): JWT_SECRET, CF_ACCOUNT_ID, CF_API_TOKEN
+  // Encrypted Worker secrets: JWT_SECRET, EMAIL_SIGNING_SECRET, CF_ACCOUNT_ID, CF_API_TOKEN
   "observability": {
     "logs": {
       "enabled": true,
@@ -45,6 +45,7 @@
   "env": {
     "production": {
       "name": "void-proxy",
+      "secrets": { "required": ["EMAIL_SIGNING_SECRET"] },
       "ai": { "binding": "AI" },
       "kv_namespaces": [
         {
@@ -70,6 +71,7 @@
     },
     "staging": {
       "name": "void-proxy-staging",
+      "secrets": { "required": ["EMAIL_SIGNING_SECRET"] },
       "ai": { "binding": "AI" },
       "kv_namespaces": [
         {
