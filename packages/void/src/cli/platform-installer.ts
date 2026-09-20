@@ -120,7 +120,7 @@ export type PlatformInstallationSecrets = Readonly<{
   projectSecretKeysJson: string;
   r2AccessKeyId: string;
   r2SecretAccessKey: string;
-  /** Authorized Worker updates only; never populated from baseline recovery data. */
+  /** Explicitly authorized updates; recovered email identity remains authoritative. */
   workerSecretUpdates?: Readonly<
     Partial<
       Record<
@@ -446,7 +446,8 @@ export function createPlatformInstallationSecrets(input: {
   }
   const emailEnabled = input.emailEnabled === true;
   const existingEmailEnabled = input.existingEmailEnabled === true;
-  let emailSigningSecret = emailEnabled
+  const emailSigningSecretInScope = emailEnabled || existingEmailEnabled;
+  let emailSigningSecret = emailSigningSecretInScope
     ? restoredIdentity(input.emailSigningSecret || '', 'emailSigningSecret')
     : checkpoint.emailSigningSecret || '';
   if (emailEnabled && !emailSigningSecret) {
@@ -457,9 +458,18 @@ export function createPlatformInstallationSecrets(input: {
     }
     emailSigningSecret = randomBytes(32).toString('base64');
   }
-  if (emailEnabled && Buffer.byteLength(emailSigningSecret, 'utf8') < 32) {
+  if (
+    emailSigningSecretInScope &&
+    emailSigningSecret &&
+    Buffer.byteLength(emailSigningSecret, 'utf8') < 32
+  ) {
     throw new Error(
       'platform: VOID_PLATFORM_EMAIL_SIGNING_SECRET must contain at least 32 bytes of secret material unique to this installation.',
+    );
+  }
+  if (emailSigningSecretInScope && emailSigningSecret && emailSigningSecret === resolvedJwtSecret) {
+    throw new Error(
+      'platform: VOID_PLATFORM_EMAIL_SIGNING_SECRET must be different from VOID_PLATFORM_JWT_SECRET.',
     );
   }
   const projectSecretKeyring = resolveProjectSecretKeyring({
@@ -473,11 +483,14 @@ export function createPlatformInstallationSecrets(input: {
   const pendingWorkerSecretUpdateIntent = parseWorkerSecretUpdateIntent(
     checkpoint.workerSecretUpdatesJson,
   );
+  const emailSigningSecretUpdateAuthorized =
+    emailSigningSecretInScope &&
+    !!emailSigningSecret &&
+    ((emailEnabled && (!existingEmailEnabled || !checkpoint.emailSigningSecret)) ||
+      !!input.emailSigningSecret);
   const explicitWorkerSecretUpdates = withoutEmptySecrets({
     CF_API_TOKEN: input.cloudflareApiToken,
-    ...((!existingEmailEnabled || !checkpoint.emailSigningSecret) && emailEnabled
-      ? { EMAIL_SIGNING_SECRET: emailSigningSecret }
-      : {}),
+    ...(emailSigningSecretUpdateAuthorized ? { EMAIL_SIGNING_SECRET: emailSigningSecret } : {}),
     GITHUB_CLIENT_ID: input.githubClientId,
     GITHUB_CLIENT_SECRET: input.githubClientSecret,
     R2_ACCESS_KEY_ID: input.r2AccessKeyId,
@@ -962,6 +975,8 @@ export async function installPlatform(
       explicitUpdates: explicitWorkerSecretUpdates,
       localIntent: secrets.pendingWorkerSecretUpdateIntent,
       manifest,
+      requiresEmailSigningSecret:
+        manifest.deployment.capabilities.email || plan.deployment.capabilities.email,
     });
   } catch (error) {
     await releaseDatabaseLock();

@@ -1,13 +1,18 @@
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 
 const EMAIL_SIGNING_SECRET = 'EMAIL_SIGNING_SECRET';
-const EMAIL_WORKER_PACKAGES = new Set(['api', 'email-gateway', 'proxy']);
+const EMAIL_WORKER_DIRECTORIES = new Set(
+  ['api', 'email-gateway', 'proxy'].map((name) =>
+    fileURLToPath(new URL(`../packages/${name}`, import.meta.url)),
+  ),
+);
 
-const { values } = parseArgs({
+const { values, positionals } = parseArgs({
   allowPositionals: true,
   options: {
     build: {
@@ -15,6 +20,19 @@ const { values } = parseArgs({
     },
     env: {
       short: 'e',
+      type: 'string',
+    },
+    config: {
+      short: 'c',
+      type: 'string',
+    },
+    'dry-run': {
+      type: 'boolean',
+    },
+    outdir: {
+      type: 'string',
+    },
+    outfile: {
       type: 'string',
     },
     preflight: {
@@ -59,8 +77,12 @@ if (values.preflight === true) {
 
 const wranglerArgs = process.argv.slice(2).filter((arg) => arg !== '--build');
 const usesEmailSigningSecret =
-  EMAIL_WORKER_PACKAGES.has(basename(process.cwd())) &&
-  !wranglerArgs.some((arg) => arg === '--config' || arg.startsWith('--config='));
+  EMAIL_WORKER_DIRECTORIES.has(process.cwd()) &&
+  process.env.WRANGLER_CI_OVERRIDE_NAME === undefined &&
+  positionals.length === 0 &&
+  Object.keys(values).every((option) =>
+    ['build', 'env', 'dry-run', 'outdir', 'outfile'].includes(option),
+  );
 const emailSigningSecret = usesEmailSigningSecret ? readEmailSigningSecret() : undefined;
 
 if (values.build === true) {
@@ -79,14 +101,6 @@ if (values.build === true) {
 
 let secretsDirectory: string | undefined;
 try {
-  if (
-    emailSigningSecret &&
-    wranglerArgs.some((arg) => arg === '--secrets-file' || arg.startsWith('--secrets-file='))
-  ) {
-    console.error('Do not pass --secrets-file to first-party email Worker deployments.');
-    process.exit(1);
-  }
-
   const deployArgs = ['deploy', ...wranglerArgs];
   if (emailSigningSecret) {
     secretsDirectory = mkdtempSync(join(tmpdir(), 'void-platform-secrets-'));

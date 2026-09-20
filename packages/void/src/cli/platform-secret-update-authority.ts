@@ -8,6 +8,8 @@ const COMPLETE_WORKER_SECRET_UPDATE_NAMES = [
   'R2_SECRET_ACCESS_KEY',
 ] as const;
 
+const EMAIL_WORKER_SECRET_UPDATE_NAME = 'EMAIL_SIGNING_SECRET';
+
 type PendingWorkerSecretUpdateIntent = Readonly<{
   generation: number | null;
   id: string;
@@ -28,6 +30,7 @@ export function assertPlatformWorkerSecretUpdateAuthority(input: {
   explicitUpdates: WorkerSecretUpdates;
   localIntent?: PendingWorkerSecretUpdateIntent;
   manifest: PlatformInstallationManifest;
+  requiresEmailSigningSecret: boolean;
 }): void {
   const unresolved = unresolvedWorkerSecretUpdate(input.manifest);
   if (!unresolved) {
@@ -40,7 +43,10 @@ export function assertPlatformWorkerSecretUpdateAuthority(input: {
     input.localIntent?.id === unresolved.id &&
     (input.localIntent.generation === null ||
       input.localIntent.generation === unresolved.generation);
-  if (ownsCurrentIntent || hasCompleteWorkerSecretReplacement(input.explicitUpdates)) {
+  if (
+    ownsCurrentIntent ||
+    hasCompleteWorkerSecretReplacement(input.explicitUpdates, input.requiresEmailSigningSecret)
+  ) {
     return;
   }
 
@@ -88,8 +94,16 @@ function readLatestWorkerGeneration(manifest: PlatformInstallationManifest): num
   );
 }
 
-function hasCompleteWorkerSecretReplacement(updates: WorkerSecretUpdates): boolean {
-  return COMPLETE_WORKER_SECRET_UPDATE_NAMES.every(
-    (name) => typeof updates[name] === 'string' && updates[name] !== '',
+function hasCompleteWorkerSecretReplacement(
+  updates: WorkerSecretUpdates,
+  requiresEmailSigningSecret: boolean,
+): boolean {
+  return (
+    COMPLETE_WORKER_SECRET_UPDATE_NAMES.every(
+      (name) => typeof updates[name] === 'string' && updates[name] !== '',
+    ) &&
+    (!requiresEmailSigningSecret ||
+      (typeof updates[EMAIL_WORKER_SECRET_UPDATE_NAME] === 'string' &&
+        updates[EMAIL_WORKER_SECRET_UPDATE_NAME] !== ''))
   );
 }

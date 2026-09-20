@@ -746,6 +746,14 @@ describe('platform installer', () => {
     expect(
       platformWorkerSecretPayload('emailGateway', emailDisabled, 'account', 'zone', false),
     ).toBeNull();
+    const existingEmailDisabled = createPlatformInstallationSecrets({
+      ...freshInput,
+      emailSigningSecret: TEST_PLATFORM_EMAIL_SIGNING_SECRET,
+      existingInstallation: true,
+      updateExistingWorkers: true,
+    });
+    expect(existingEmailDisabled.emailSigningSecret).toBe('');
+    expect(existingEmailDisabled.workerSecretUpdates).not.toHaveProperty('EMAIL_SIGNING_SECRET');
 
     const freshEmail = createPlatformInstallationSecrets({
       ...freshInput,
@@ -767,6 +775,14 @@ describe('platform installer', () => {
       platformWorkerSecretPayload('emailGateway', freshEmail, 'account', 'zone', false),
     ).toEqual({ EMAIL_SIGNING_SECRET: freshEmail.emailSigningSecret });
 
+    expect(() =>
+      createPlatformInstallationSecrets({
+        ...freshInput,
+        emailEnabled: true,
+        emailSigningSecret: TEST_PLATFORM_JWT_SECRET,
+      }),
+    ).toThrow('must be different from VOID_PLATFORM_JWT_SECRET');
+
     const existingInput = {
       ...freshInput,
       existingInstallation: true,
@@ -782,6 +798,16 @@ describe('platform installer', () => {
         emailSigningSecret: 'short',
       }),
     ).toThrow('at least 32 bytes');
+    expect(() =>
+      createPlatformInstallationSecrets({
+        ...existingInput,
+        checkpoint: {
+          jwtSecret: TEST_PLATFORM_JWT_SECRET,
+          emailSigningSecret: TEST_PLATFORM_JWT_SECRET,
+        },
+        emailSigningSecret: TEST_PLATFORM_EMAIL_SIGNING_SECRET,
+      }),
+    ).toThrow('must be different from VOID_PLATFORM_JWT_SECRET');
     const restored = createPlatformInstallationSecrets({
       ...existingInput,
       checkpoint: { emailSigningSecret: TEST_PLATFORM_EMAIL_SIGNING_SECRET },
@@ -791,11 +817,51 @@ describe('platform installer', () => {
     expect(restored.emailSigningSecret).toBe(TEST_PLATFORM_EMAIL_SIGNING_SECRET);
     expect(restored.workerSecretUpdates).toEqual({
       CF_API_TOKEN: 'cf-token',
+      EMAIL_SIGNING_SECRET: TEST_PLATFORM_EMAIL_SIGNING_SECRET,
       GITHUB_CLIENT_ID: 'github-id',
       GITHUB_CLIENT_SECRET: 'github-secret',
       R2_ACCESS_KEY_ID: 'r2-id',
       R2_SECRET_ACCESS_KEY: 'r2-secret',
     });
+    expect(platformWorkerSecretPayload('api', restored, 'account', 'zone', true)).toEqual(
+      restored.workerSecretUpdates,
+    );
+    expect(platformWorkerSecretPayload('proxy', restored, 'account', 'zone', true)).toEqual({
+      CF_API_TOKEN: 'cf-token',
+      EMAIL_SIGNING_SECRET: TEST_PLATFORM_EMAIL_SIGNING_SECRET,
+    });
+    expect(platformWorkerSecretPayload('emailGateway', restored, 'account', 'zone', true)).toEqual({
+      EMAIL_SIGNING_SECRET: TEST_PLATFORM_EMAIL_SIGNING_SECRET,
+    });
+
+    const disabling = createPlatformInstallationSecrets({
+      ...freshInput,
+      checkpoint: { emailSigningSecret: TEST_PLATFORM_EMAIL_SIGNING_SECRET },
+      emailSigningSecret: 'replacement-signal-that-must-not-override-recovery',
+      existingInstallation: true,
+      existingEmailEnabled: true,
+      updateExistingWorkers: true,
+    });
+    expect(disabling.emailSigningSecret).toBe(TEST_PLATFORM_EMAIL_SIGNING_SECRET);
+    expect(disabling.workerSecretUpdates).toHaveProperty(
+      'EMAIL_SIGNING_SECRET',
+      TEST_PLATFORM_EMAIL_SIGNING_SECRET,
+    );
+    expect(() =>
+      createPlatformInstallationSecrets({
+        ...freshInput,
+        checkpoint: { emailSigningSecret: 'short' },
+        existingInstallation: true,
+        existingEmailEnabled: true,
+      }),
+    ).toThrow('at least 32 bytes');
+    expect(
+      createPlatformInstallationSecrets({
+        ...freshInput,
+        existingInstallation: true,
+        existingEmailEnabled: true,
+      }).emailSigningSecret,
+    ).toBe('');
   });
 
   it('checkpoints a first-enable email key as a resumable Worker secret update', () => {
@@ -823,6 +889,96 @@ describe('platform installer', () => {
         EMAIL_SIGNING_SECRET: secrets.emailSigningSecret,
       });
     }
+  });
+
+  it('does not let an email-disable plan bypass an unresolved email secret update', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'void-platform-email-secret-authority-test-'));
+    directories.push(directory);
+    process.env.VOID_PLATFORM_REGISTRY_DIR = directory;
+    const currentDeployment = createPlatformDeploymentManifest({
+      application: { baseDomain: 'apps.example.com', zoneName: 'example.com' },
+      capabilities: { email: true },
+      displayName: 'Example',
+      emailSenderDomain: 'mail.example.com',
+      emailSharedZoneId: 'mail-zone',
+      installationSlug: 'example',
+    });
+    let manifest = createPlatformInstallationManifest({
+      account: { id: 'account', name: 'Account' },
+      createdAt: '2026-09-20T00:00:00.000Z',
+      deployment: currentDeployment,
+      id: 'example-a1b2c3d4',
+      ownershipNonce: '0123456789abcdef0123456789abcdef',
+      platformVersion: '1.0.0',
+    });
+    manifest = recordInstallationStep(
+      manifest,
+      {
+        completedAt: '2026-09-20T00:00:01.000Z',
+        key: 'worker-secret-updates:1:pending',
+        resultHash: 'foreign-email-intent',
+      },
+      '2026-09-20T00:00:01.000Z',
+    );
+    manifest = recordInstallationStep(
+      manifest,
+      {
+        completedAt: '2026-09-20T00:00:02.000Z',
+        key: 'worker-cutover:1:restored',
+        resultHash: 'restored',
+      },
+      '2026-09-20T00:00:02.000Z',
+    );
+    writeInstallationManifest(manifest);
+    const currentPlan = await createPlatformInstallPlan(
+      planningClient(),
+      {
+        accountId: 'account',
+        applicationDomain: 'apps.example.com',
+        controlPlaneDomain: '',
+        dedicatedZone: false,
+        displayName: 'Example',
+        installationSlug: 'example',
+        zoneName: 'example.com',
+      },
+      manifest,
+    );
+    const plan = {
+      ...currentPlan,
+      deployment: createPlatformDeploymentManifest({
+        ...currentPlan.deployment,
+        capabilities: { ...currentPlan.deployment.capabilities, email: false },
+      }),
+    };
+    const secrets = createPlatformInstallationSecrets({
+      bootstrapGitHubId: '583231',
+      bootstrapGitHubLogin: 'octocat',
+      checkpoint: { emailSigningSecret: TEST_PLATFORM_EMAIL_SIGNING_SECRET },
+      cloudflareApiToken: 'cf-token',
+      databaseUrl: 'postgres://user:password@db.example.com/void',
+      existingEmailEnabled: true,
+      existingInstallation: true,
+      githubClientId: 'github-id',
+      githubClientSecret: 'github-secret',
+      jwtSecret: TEST_PLATFORM_JWT_SECRET,
+      projectSecretKey: TEST_PLATFORM_PROJECT_SECRET_KEY,
+      r2AccessKeyId: 'r2-id',
+      r2SecretAccessKey: 'r2-secret',
+      updateExistingWorkers: true,
+    });
+    expect(secrets.workerSecretUpdates).not.toHaveProperty('EMAIL_SIGNING_SECRET');
+    const deployWorker = vi.fn();
+
+    await expect(
+      installPlatform(plan, secrets, manifest, {
+        acquireDatabaseLifecycleLock,
+        claimDatabase,
+        client: {} as never,
+        deployWorker,
+        revalidateBeforeWorkerDeploy: async () => {},
+      }),
+    ).rejects.toThrow('owned by another encrypted recovery checkpoint');
+    expect(deployWorker).not.toHaveBeenCalled();
   });
 
   it('validates complete project-secret keyring restoration inputs', () => {

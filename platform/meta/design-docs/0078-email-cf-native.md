@@ -698,6 +698,8 @@ is required for the first release.
 There are no production email users to migrate, so dual-running the old design
 and maintaining legacy email protocol compatibility are not release requirements.
 Development installations may be reset or explicitly converted as appropriate.
+An explicit conversion must remove the gateway's obsolete `JWT_SECRET` binding
+after the dedicated email-key cutover; preserve the API and proxy login keys.
 Any reset must account for real provider resources and credentials: inspect owned
 catch-all rules, retain unrelated mail configuration, clean up obsolete relays,
 and explicitly revoke unused test grants. Test shared and custom routes together

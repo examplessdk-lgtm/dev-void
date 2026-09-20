@@ -14,6 +14,11 @@ const completeReplacement = {
   R2_SECRET_ACCESS_KEY: 'new-r2-secret-access-key',
 };
 
+const completeEmailReplacement = {
+  ...completeReplacement,
+  EMAIL_SIGNING_SECRET: 'new-email-signing-secret',
+};
+
 function manifestWithSteps(steps: ReadonlyArray<Readonly<{ key: string; resultHash: string }>>) {
   let manifest = createPlatformInstallationManifest({
     account: { id: 'account', name: 'Account' },
@@ -51,6 +56,7 @@ describe('platform Worker secret update authority', () => {
       assertPlatformWorkerSecretUpdateAuthority({
         explicitUpdates: { CF_API_TOKEN: 'partial-replacement' },
         manifest,
+        requiresEmailSigningSecret: false,
       }),
     ).toThrow('owned by another encrypted recovery checkpoint');
   });
@@ -66,6 +72,7 @@ describe('platform Worker secret update authority', () => {
         explicitUpdates: { CF_API_TOKEN: 'retry-override' },
         localIntent: { generation: 1, id: 'intent-a' },
         manifest,
+        requiresEmailSigningSecret: true,
       }),
     ).not.toThrow();
     expect(() =>
@@ -73,6 +80,7 @@ describe('platform Worker secret update authority', () => {
         explicitUpdates: {},
         localIntent: { generation: null, id: 'intent-a' },
         manifest,
+        requiresEmailSigningSecret: true,
       }),
     ).not.toThrow();
   });
@@ -87,6 +95,29 @@ describe('platform Worker secret update authority', () => {
       assertPlatformWorkerSecretUpdateAuthority({
         explicitUpdates: completeReplacement,
         manifest,
+        requiresEmailSigningSecret: false,
+      }),
+    ).not.toThrow();
+  });
+
+  it('requires the email key in a complete replacement for an email-enabled plan', () => {
+    const manifest = manifestWithSteps([
+      { key: 'worker-secret-updates:1:pending', resultHash: 'intent-a' },
+      { key: 'worker-cutover:1:restored', resultHash: 'restored' },
+    ]);
+
+    expect(() =>
+      assertPlatformWorkerSecretUpdateAuthority({
+        explicitUpdates: completeReplacement,
+        manifest,
+        requiresEmailSigningSecret: true,
+      }),
+    ).toThrow('owned by another encrypted recovery checkpoint');
+    expect(() =>
+      assertPlatformWorkerSecretUpdateAuthority({
+        explicitUpdates: completeEmailReplacement,
+        manifest,
+        requiresEmailSigningSecret: true,
       }),
     ).not.toThrow();
   });
@@ -103,6 +134,7 @@ describe('platform Worker secret update authority', () => {
         explicitUpdates: {},
         localIntent: { generation: 1, id: 'intent-a' },
         manifest,
+        requiresEmailSigningSecret: false,
       }),
     ).toThrow('owned by another encrypted recovery checkpoint');
     expect(() =>
@@ -110,6 +142,7 @@ describe('platform Worker secret update authority', () => {
         explicitUpdates: completeReplacement,
         localIntent: { generation: 1, id: 'intent-a' },
         manifest,
+        requiresEmailSigningSecret: false,
       }),
     ).not.toThrow();
   });
@@ -126,10 +159,18 @@ describe('platform Worker secret update authority', () => {
     ]);
 
     expect(() =>
-      assertPlatformWorkerSecretUpdateAuthority({ explicitUpdates: {}, manifest: committed }),
+      assertPlatformWorkerSecretUpdateAuthority({
+        explicitUpdates: {},
+        manifest: committed,
+        requiresEmailSigningSecret: true,
+      }),
     ).not.toThrow();
     expect(() =>
-      assertPlatformWorkerSecretUpdateAuthority({ explicitUpdates: {}, manifest: superseded }),
+      assertPlatformWorkerSecretUpdateAuthority({
+        explicitUpdates: {},
+        manifest: superseded,
+        requiresEmailSigningSecret: true,
+      }),
     ).not.toThrow();
   });
 });
