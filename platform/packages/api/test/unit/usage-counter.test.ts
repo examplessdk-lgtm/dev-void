@@ -1108,8 +1108,17 @@ describe('UsageCounter.handleRollover — request latch in response', () => {
 
 describe('UsageCounter ownership changes', () => {
   beforeEach(() => {
+    dbCalls.unsuspendIfReason.length = 0;
     vi.mocked(queryProjectAiUsage).mockReset().mockResolvedValue({ neurons: 0 });
     vi.mocked(getProjectOwnershipPeriodsByProjectIds).mockReset().mockResolvedValue([]);
+    vi.mocked(getProject)
+      .mockReset()
+      .mockImplementation(async (_db, id) => ({ id, user_id: 'u1', slug: id }) as never);
+    vi.mocked(getProjectsByIds)
+      .mockReset()
+      .mockImplementation(async (_db, ids) =>
+        ids.map((id) => ({ id, user_id: 'u1', slug: id }) as never),
+      );
     vi.mocked(getUser)
       .mockReset()
       .mockImplementation(
@@ -1308,6 +1317,94 @@ describe('UsageCounter ownership changes', () => {
       billingPeriodStart,
       billingPeriodInitialized: true,
       plan: 'custom',
+      totalNeurons: 57,
+      historicalAiWindows: {
+        [JSON.stringify(['transferred', ownershipStartedAt, ownershipEndedAt])]: {
+          neurons: 57,
+        },
+      },
+    });
+  });
+
+  it('advances an initialized counter before retaining a current-period transfer window', async () => {
+    const billingPeriodStart = '2026-02-01T00:00:00.000Z';
+    const ownershipStartedAt = '2026-01-15T00:00:00.000Z';
+    const ownershipEndedAt = '2026-03-01T00:00:00.000Z';
+    vi.mocked(queryProjectAiUsage).mockResolvedValueOnce({ neurons: 57 });
+    vi.mocked(getProjectsByIds).mockResolvedValueOnce([
+      { id: 'transferred', user_id: 'new-owner', slug: 'app' } as never,
+      { id: 'retained', user_id: 'u1', slug: 'retained-app' } as never,
+    ]);
+    const { counter, kv, storage } = makeCounter({
+      ownerUserId: 'u1',
+      plan: 'solo',
+      billingPeriodStart: '2026-01-01T00:00:00.000Z',
+      billingPeriodInitialized: true,
+      totalRequests: 10_000_000,
+      requestsSuspended: true,
+      totalNeurons: 42,
+      historicalNeurons: 11,
+      projectSlugs: { transferred: 'app', retained: 'retained-app' },
+      projectOwnershipStarts: {
+        transferred: ownershipStartedAt,
+        retained: '2026-01-20T00:00:00.000Z',
+      },
+      projectNeurons: { transferred: 31 },
+    });
+    kv.store.set(
+      'retained-app',
+      JSON.stringify({
+        workerName: 'retained-worker',
+        projectId: 'retained',
+        userId: 'u1',
+        suspended: 'requests_exceeded',
+      }),
+    );
+
+    const response = await counter.fetch(
+      new Request('https://do/detach-project', {
+        method: 'POST',
+        body: JSON.stringify({
+          projectId: 'transferred',
+          userId: 'u1',
+          billingPeriodStart,
+          ownershipStartedAt,
+          ownershipEndedAt,
+        }),
+      }),
+    );
+
+    expect(response.ok).toBe(true);
+    expect(dbCalls.unsuspendIfReason).toContainEqual({
+      id: 'u1',
+      reason: 'requests_exceeded',
+    });
+    expect(JSON.parse(kv.store.get('retained-app')!)).not.toHaveProperty('suspended');
+    expect(queryProjectAiUsage).toHaveBeenCalledWith(
+      undefined,
+      undefined,
+      'void',
+      'transferred',
+      new Date(billingPeriodStart),
+      new Date(ownershipEndedAt),
+      true,
+    );
+    expect(storage.data.get('state')).toMatchObject({
+      billingPeriodStart,
+      totalRequests: 0,
+      requestsSuspended: false,
+      totalNeurons: 57,
+      historicalNeurons: 0,
+      historicalAiWindows: {
+        [JSON.stringify(['transferred', ownershipStartedAt, ownershipEndedAt])]: {
+          neurons: 57,
+        },
+      },
+    });
+
+    const rollover = await counter.fetch(rolloverRequest(billingPeriodStart, 'solo', 'u1'));
+    expect(await rollover.json()).toMatchObject({ rolled: false });
+    expect(storage.data.get('state')).toMatchObject({
       totalNeurons: 57,
       historicalAiWindows: {
         [JSON.stringify(['transferred', ownershipStartedAt, ownershipEndedAt])]: {

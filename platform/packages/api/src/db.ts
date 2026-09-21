@@ -789,18 +789,26 @@ export async function createOrRefreshProjectInvitation(
   return db.transaction(async (tx) => {
     const txDb = tx as unknown as Db;
     const project = await lockProject(txDb, args.projectId);
-    await requireLockedMembersCapability(txDb, project, args.actorUserId);
-    const [lockedTarget] = await txDb
+    const lockedUsers = await txDb
       .select()
       .from(users)
-      .where(and(eq(users.id, target.id), sql`lower(${users.email}) = ${normalizedEmail}`))
-      // The invitation is bound to the account resolved from this registered
-      // email. Prevent a concurrent profile update from changing the address
-      // between resolution and the invitation commit.
-      .for('update')
-      .limit(1);
-    if (!lockedTarget) {
+      .where(inArray(users.id, [...new Set([project.user_id, target.id])].sort()))
+      .orderBy(asc(users.id))
+      .for('update');
+    const lockedById = new Map(lockedUsers.map((user) => [user.id, user]));
+    const lockedOwner = lockedById.get(project.user_id);
+    const lockedTarget = lockedById.get(target.id);
+    if (!lockedTarget || lockedTarget.email?.trim().toLowerCase() !== normalizedEmail) {
       throw new ProjectTeamMutationError('target-user-not-found');
+    }
+    if (lockedOwner && isAdminSuspended(lockedOwner.suspended_reason)) {
+      throw new ProjectTeamMutationError('owner-suspended');
+    }
+    if (project.user_id !== args.actorUserId) {
+      const actorMember = await getProjectMember(txDb, project.id, args.actorUserId);
+      if (actorMember?.role !== 'admin') {
+        throw new ProjectTeamMutationError('forbidden');
+      }
     }
     if (project.user_id === target.id) {
       throw new ProjectTeamMutationError('owner-conflict');

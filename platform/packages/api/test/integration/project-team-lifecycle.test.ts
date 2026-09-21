@@ -49,6 +49,37 @@ async function setEmail(userId: string, email: string): Promise<void> {
 }
 
 describe('project team lifecycle', () => {
+  it('locks invitation owner and target accounts together in stable order', async () => {
+    const owner = await createTestUser(env.db, 'lock-owner');
+    const target = await createTestUser(env.db, 'lock-target');
+    await setEmail(target.id, 'lock-target@example.com');
+    const project = await createProject(env.db, owner.id, 'invitation-user-locks');
+
+    const { queries } = await captureQueries(env.db, () =>
+      createOrRefreshProjectInvitation(env.db, {
+        projectId: project.id,
+        email: 'lock-target@example.com',
+        role: 'reader',
+        actorUserId: owner.id,
+      }),
+    );
+
+    const projectLock = queries.findIndex(
+      (query) => query.includes('from "projects"') && query.includes('for update'),
+    );
+    const accountLock = queries.findIndex(
+      (query) =>
+        query.includes('from "users"') &&
+        query.includes('order by "users"."id" asc') &&
+        query.includes('for update'),
+    );
+    expect(projectLock).toBeGreaterThanOrEqual(0);
+    expect(accountLock).toBeGreaterThan(projectLock);
+    expect(
+      queries.some((query) => query.includes('from "users"') && query.includes('for share')),
+    ).toBe(false);
+  });
+
   it('deleting a non-owner revokes their GitHub authority and preserves access audit history', async () => {
     const owner = await createTestUser(env.db, 'owner');
     const member = await createTestUser(env.db, 'member');

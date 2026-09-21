@@ -414,59 +414,14 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
       });
     }
 
-    const wasRequestsSuspended = state.requestsSuspended;
-    const wasAiSuspended = state.aiSuspended;
-    const wasSandboxRuntimeSuspended = state.sandboxRuntimeSuspended;
-
-    // Finish idempotent external cleanup before committing the new period.
-    // A failure leaves the cached and persisted period unchanged for retry.
-    if (wasAiSuspended) {
-      // The alarm's delete branch requires aiSuspended to still be true AND returns
-      // early for unlimited-AI plans, so without this the proxy keeps 429ing AI
-      // routes after rollover.
-      const ownedProjectIds = await this.ownedProjectIds(
-        createDb(this.env.HYPERDRIVE.connectionString),
-        Object.keys(state.projectSlugs),
-        body.userId ?? state.ownerUserId,
-      );
-      for (const projectId of ownedProjectIds) {
-        await this.env.ROUTING.delete(`ai-block:${projectId}`);
-      }
-    }
-    if (wasSandboxRuntimeSuspended) {
-      const db = createDb(this.env.HYPERDRIVE.connectionString);
-      await settleWrites([
-        this.env.ROUTING.delete(sandboxBlockKey(body.userId)),
-        unsuspendUserIfReason(db, body.userId, REASON_SANDBOX_RUNTIME_EXCEEDED),
-      ]);
-    }
-
-    // All external cleanup succeeded — persist the operation's new state.
-    state.totalRequests = 0;
-    state.totalNeurons = 0;
-    state.totalSandboxSeconds = 0;
-    state.historicalNeurons = 0;
-    state.historicalAiWindows = {};
-    state.projectNeurons = {};
-    state.plan = body.plan;
-    state.billingPeriodStart = body.billingPeriodStart;
-    state.billingPeriodInitialized = true;
-    if (wasRequestsSuspended) {
-      state.requestsSuspended = false;
-    }
-    if (wasAiSuspended) {
-      state.aiSuspended = false;
-    }
-    if (wasSandboxRuntimeSuspended) {
-      state.sandboxRuntimeSuspended = false;
-    }
+    const previousSuspensions = await this.advanceBillingPeriod(state, body, false);
 
     await this.saveState(state);
 
     return Response.json({
       rolled: true,
-      unsuspendRequests: wasRequestsSuspended,
-      unsuspendAi: wasAiSuspended,
+      unsuspendRequests: previousSuspensions.requests,
+      unsuspendAi: previousSuspensions.ai,
       // Post-rollover latch (false after a request rollover). Returned every
       // response so the scheduler reconciles KV against it each pass — see
       // processUserRollover in index.ts.
@@ -612,9 +567,23 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
     if (owner) {
       state.plan = owner.plan;
     }
-    if (!state.billingPeriodInitialized && body.billingPeriodStart) {
-      state.billingPeriodStart = body.billingPeriodStart;
-      state.billingPeriodInitialized = true;
+    if (body.billingPeriodStart) {
+      const incomingPeriodStart = Date.parse(body.billingPeriodStart);
+      const currentPeriodStart = Date.parse(state.billingPeriodStart);
+      if (!state.billingPeriodInitialized) {
+        state.billingPeriodStart = body.billingPeriodStart;
+        state.billingPeriodInitialized = true;
+      } else if (!Number.isFinite(currentPeriodStart) || incomingPeriodStart > currentPeriodStart) {
+        await this.advanceBillingPeriod(
+          state,
+          {
+            billingPeriodStart: body.billingPeriodStart,
+            plan: state.plan,
+            userId: state.ownerUserId ?? '',
+          },
+          true,
+        );
+      }
     }
     if (body.ownershipEndedAt) {
       const windowKey = this.retainHistoricalAiWindow(
@@ -911,6 +880,72 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
       0,
     );
     state.totalNeurons = state.historicalNeurons + historicalWindows + current;
+  }
+
+  private async advanceBillingPeriod(
+    state: CounterState,
+    next: { billingPeriodStart: string; plan: string; userId: string },
+    reconcileRequestSuspension: boolean,
+  ): Promise<Readonly<{ requests: boolean; ai: boolean }>> {
+    const requests = state.requestsSuspended;
+    const ai = state.aiSuspended;
+    const sandbox = state.sandboxRuntimeSuspended;
+    const db = createDb(this.env.HYPERDRIVE.connectionString);
+
+    // Finish idempotent external cleanup before committing the new period.
+    // A failure leaves the cached and persisted period unchanged for retry.
+    if (ai) {
+      const ownedProjectIds = await this.ownedProjectIds(
+        db,
+        Object.keys(state.projectSlugs),
+        next.userId || state.ownerUserId,
+      );
+      for (const projectId of ownedProjectIds) {
+        await this.env.ROUTING.delete(`ai-block:${projectId}`);
+      }
+    }
+    if (sandbox) {
+      await settleWrites([
+        this.env.ROUTING.delete(sandboxBlockKey(next.userId)),
+        unsuspendUserIfReason(db, next.userId, REASON_SANDBOX_RUNTIME_EXCEEDED),
+      ]);
+    }
+    if (requests && reconcileRequestSuspension) {
+      const ownerUserId = next.userId || state.ownerUserId;
+      if (!ownerUserId) {
+        throw new Error('cannot reconcile request suspension without an owner');
+      }
+      const ownedProjectIds = await this.ownedProjectIds(
+        db,
+        Object.keys(state.projectSlugs),
+        ownerUserId,
+      );
+      const ownedProjects = Object.entries(state.projectSlugs).flatMap(([id, slug]) =>
+        ownedProjectIds.has(id) ? [{ id, slug, user_id: ownerUserId }] : [],
+      );
+      await settleWrites([
+        unsuspendUserIfReason(db, ownerUserId, REASON_REQUESTS_EXCEEDED),
+        setProjectsRoutingSuspension(this.env.ROUTING, db, ownedProjects, {
+          op: 'unsuspend',
+          matchReason: REASON_REQUESTS_EXCEEDED,
+        }),
+      ]);
+    }
+
+    state.totalRequests = 0;
+    state.totalNeurons = 0;
+    state.totalSandboxSeconds = 0;
+    state.historicalNeurons = 0;
+    state.historicalAiWindows = {};
+    state.projectNeurons = {};
+    state.plan = next.plan;
+    state.billingPeriodStart = next.billingPeriodStart;
+    state.billingPeriodInitialized = true;
+    state.requestsSuspended = false;
+    state.aiSuspended = false;
+    state.sandboxRuntimeSuspended = false;
+
+    return { requests, ai };
   }
 
   private async suspendProjects(
