@@ -23,6 +23,7 @@ import { alias } from 'drizzle-orm/pg-core';
 import { lockAuthSettings } from './auth/configuration.ts';
 import { lockEmailPolicy } from './email/admission.ts';
 import { generateId } from './id.ts';
+import { requireProjectCapability } from './project-access.ts';
 import * as schema from './schema.ts';
 import {
   users,
@@ -2290,6 +2291,21 @@ export interface OwnerVerificationAudit {
   emailSnapshot: string;
 }
 
+type EmailDestinationMutationOptions = Readonly<{
+  ownerAudit?: OwnerVerificationAudit;
+  actorUserId?: string;
+}>;
+
+async function requireEmailDestinationSettingsAccess(
+  db: DbOrTx,
+  projectId: string,
+  actorUserId: string | undefined,
+): Promise<void> {
+  if (actorUserId) {
+    await requireProjectCapability(db as Db, projectId, actorUserId, 'settings');
+  }
+}
+
 /**
  * RETURNING identifies the sole inserter so only it sends a verification email.
  * A missing row means it was concurrently deleted; callers must retry.
@@ -2297,6 +2313,7 @@ export interface OwnerVerificationAudit {
  * Inherited owner consent requires a FOR SHARE lock on users: an email change
  * must either commit before this check or revoke the inserted row afterward.
  * Lock projects first to match build transactions and avoid a lock-order cycle.
+ * A supplied actor is reauthorized after that project lock is acquired.
  */
 export async function tryCreateEmailDestination(
   db: Db,
@@ -2306,15 +2323,9 @@ export async function tryCreateEmailDestination(
   status: EmailDestination['status'] = 'pending',
   verifiedAt?: string | null,
   verificationSource: EmailDestination['verification_source'] = 'cf',
-  /**
-   * Audit columns populated only on the owner-relaxed CF reuse branch
-   * (Option C in design doc 0078) — when we inherit the project owner's
-   * prior consent on a different project for THIS project. Pass
-   * `undefined` for every other path; the helper writes NULL columns
-   * so revocation only touches inherited-consent rows.
-   */
-  ownerAudit?: OwnerVerificationAudit,
+  options: EmailDestinationMutationOptions = {},
 ): Promise<{ row: EmailDestination | null; inserted: boolean; ownerEmailChanged?: true }> {
+  const { actorUserId, ownerAudit } = options;
   const values = {
     id: generateId('edst'),
     project_id: projectId,
@@ -2357,6 +2368,7 @@ export async function tryCreateEmailDestination(
       if (!project || project.status === 'deleting') {
         return 'project-unavailable' as const;
       }
+      await requireEmailDestinationSettingsAccess(tx, projectId, actorUserId);
       return insertRow(tx);
     });
     if (outcome === 'project-unavailable') {
@@ -2375,6 +2387,7 @@ export async function tryCreateEmailDestination(
       if (!project || project.status === 'deleting') {
         return 'project-unavailable' as const;
       }
+      await requireEmailDestinationSettingsAccess(tx, projectId, actorUserId);
       if (project.ownerUserId !== ownerAudit.userId) {
         return 'owner-email-changed' as const;
       }
@@ -2616,7 +2629,11 @@ async function queueDestinationCleanupTx(tx: Tx, cfDestinationId: string): Promi
 }
 
 /** Revoke one project's consent and durably queue the last provider tag. */
-export async function deleteEmailDestination(db: Db, id: string): Promise<string | null> {
+export async function deleteEmailDestination(
+  db: Db,
+  id: string,
+  actorUserId?: string,
+): Promise<string | null> {
   return db.transaction(async (tx) => {
     await lockEmailPolicy(tx);
     const [existing] = await tx
@@ -2632,6 +2649,7 @@ export async function deleteEmailDestination(db: Db, id: string): Promise<string
       .from(projects)
       .where(eq(projects.id, existing.project_id))
       .for('update');
+    await requireEmailDestinationSettingsAccess(tx, existing.project_id, actorUserId);
     await tx
       .delete(emailDestinations)
       .where(

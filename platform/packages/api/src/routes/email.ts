@@ -13,9 +13,7 @@ import {
   tryCreateEmailDestination,
   updateEmailDestinationStatus,
   type Db,
-  type DbOrTx,
   type OwnerVerificationAudit,
-  type Tx,
 } from '../db.ts';
 import { getProjectEmailUsage, getProjectEmailLogs } from '../email/admission.ts';
 import { emailDomainRoutes, emailZoneConnections } from '../email/connection-schema.ts';
@@ -36,6 +34,7 @@ import {
 } from '../email/settings.ts';
 import type { ApiEnv } from '../env.ts';
 import { isForeignKeyViolation, isUniqueViolation } from '../pg-errors.ts';
+import { ProjectAccessDeniedError, ProjectNotFoundError } from '../project-access.ts';
 import { runEmailDestinationCleanup } from '../provisioning/email-destination-cleanup.ts';
 import {
   addDestination,
@@ -277,6 +276,10 @@ const app = new Hono<ApiEnv>()
       // marker the recovered-owner insert below carries, because both mean
       // "nothing went out; the row waits on a Cloudflare link mailed earlier".
       if (existing.status === 'pending' && existing.verification_source === 'platform') {
+        const accessResponse = await recheckEmailDestinationSettingsAccess(context, projectId);
+        if (accessResponse) {
+          return accessResponse;
+        }
         await dispatchPlatformVerification(context, project, existing, address);
         return context.json(
           { ...serializeDestination(existing), platformVerificationPending: true },
@@ -349,7 +352,7 @@ const app = new Hono<ApiEnv>()
         emailSnapshot: ownerEmail!,
       };
       const inserted = await tryInsertWithRetry(
-        context.get('db'),
+        context,
         projectId,
         address,
         cfRow.tag,
@@ -358,6 +361,9 @@ const app = new Hono<ApiEnv>()
         'cf',
         ownerAudit,
       );
+      if (inserted instanceof Response) {
+        return inserted;
+      }
       if (!inserted.row) {
         // Either a sibling DELETE ate the row mid-INSERT-then-SELECT twice,
         // or project teardown's cascade landed between the `status` guard
@@ -394,7 +400,7 @@ const app = new Hono<ApiEnv>()
       // address first". It fails safe, and it self-heals the moment the
       // recipient clicks CF's link. No machinery for it.
       const inserted = await tryInsertWithRetry(
-        context.get('db'),
+        context,
         projectId,
         address,
         cfRow.tag,
@@ -402,6 +408,9 @@ const app = new Hono<ApiEnv>()
         null,
         'platform',
       );
+      if (inserted instanceof Response) {
+        return inserted;
+      }
       if (!inserted.row) {
         await rollbackCfDestination(
           context.get('db'),
@@ -438,7 +447,7 @@ const app = new Hono<ApiEnv>()
     //     bare 201 read as "a link went out": `void email allow` prints
     //     "Verification email sent" from the status code alone.
     const inserted = await tryInsertWithRetry(
-      context.get('db'),
+      context,
       projectId,
       address,
       cfRow.tag,
@@ -446,6 +455,9 @@ const app = new Hono<ApiEnv>()
       null,
       'cf',
     );
+    if (inserted instanceof Response) {
+      return inserted;
+    }
     if (!inserted.row) {
       await rollbackCfDestination(
         context.get('db'),
@@ -481,7 +493,16 @@ const app = new Hono<ApiEnv>()
       return context.json({ error: 'destination not found' }, 404);
     }
 
-    const cleanupTag = await deleteEmailDestination(context.get('db'), dest.id);
+    let cleanupTag: string | null;
+    try {
+      cleanupTag = await deleteEmailDestination(context.get('db'), dest.id, context.get('user').id);
+    } catch (error) {
+      const accessResponse = projectAccessErrorResponse(context, error);
+      if (accessResponse) {
+        return accessResponse;
+      }
+      throw error;
+    }
     if (cleanupTag) {
       await runEmailDestinationCleanup(
         context.get('db'),
@@ -681,6 +702,29 @@ function serializeDestination(row: EmailDestination) {
   };
 }
 
+function projectAccessErrorResponse(context: Context<ApiEnv>, error: unknown): Response | null {
+  if (error instanceof ProjectNotFoundError || error instanceof ProjectAccessDeniedError) {
+    return context.json({ error: error.message }, error.status);
+  }
+  return null;
+}
+
+async function recheckEmailDestinationSettingsAccess(
+  context: Context<ApiEnv>,
+  projectId: string,
+): Promise<Response | null> {
+  return context.get('db').transaction(async (tx) => {
+    await tx.execute(sql`SELECT id FROM projects WHERE id = ${projectId} FOR UPDATE`);
+    const access = await requireProjectRouteCapability(
+      context,
+      projectId,
+      'settings',
+      tx as unknown as Db,
+    );
+    return access instanceof Response ? access : null;
+  });
+}
+
 /**
  * Mint a fresh 24h confirmation token for a platform-pending row and mail
  * the link (Option B). Shared by the first insert and the repeat-POST
@@ -727,7 +771,7 @@ async function dispatchPlatformVerification(
  * and lets the caller retire the provider tag.
  */
 async function tryInsertWithRetry(
-  db: Db,
+  context: Context<ApiEnv>,
   projectId: string,
   address: string,
   cfDestinationId: string | null,
@@ -735,7 +779,8 @@ async function tryInsertWithRetry(
   verifiedAt: string | null,
   verificationSource: EmailDestination['verification_source'],
   ownerAudit?: OwnerVerificationAudit,
-): Promise<{ row: EmailDestination | null; inserted: boolean }> {
+): Promise<{ row: EmailDestination | null; inserted: boolean } | Response> {
+  const db = context.get('db');
   for (let attempt = 0; attempt < 2; attempt++) {
     let result: { row: EmailDestination | null; inserted: boolean; ownerEmailChanged?: true };
     try {
@@ -747,9 +792,21 @@ async function tryInsertWithRetry(
         status,
         verifiedAt,
         verificationSource,
-        ownerAudit,
+        { actorUserId: context.get('user').id, ownerAudit },
       );
     } catch (err) {
+      const accessResponse = projectAccessErrorResponse(context, err);
+      if (accessResponse) {
+        if (cfDestinationId) {
+          await rollbackCfDestination(
+            db,
+            context.env.CF_ACCOUNT_ID,
+            context.env.CF_API_TOKEN,
+            cfDestinationId,
+          );
+        }
+        return accessResponse;
+      }
       if (!isForeignKeyViolation(err)) {
         throw err;
       }

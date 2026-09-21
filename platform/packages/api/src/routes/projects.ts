@@ -3288,7 +3288,10 @@ async function autoAddOwnerDestination(
       status,
       cfRow.verified ?? null,
       'cf',
-      status === 'verified' ? { userId: ownerUserId, emailSnapshot: address } : undefined,
+      {
+        ownerAudit:
+          status === 'verified' ? { userId: ownerUserId, emailSnapshot: address } : undefined,
+      },
     );
     if (ownerEmailChanged) {
       // The owner's address moved while CF was answering. The consent this
