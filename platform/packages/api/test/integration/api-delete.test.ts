@@ -267,6 +267,56 @@ describe('DELETE /projects/:id', () => {
     );
   });
 
+  it('advances the retained usage cutoff when a failed teardown is retried', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'retry-usage-cutoff');
+    await env.db.insert(resources).values({
+      id: 'res_retry_container',
+      project_id: project.id,
+      type: 'container',
+      cf_id: 'container-retry',
+      binding_name: 'SANDBOX',
+    });
+    let containerDeleteAttempts = 0;
+    mockCfApi({
+      deleteContainerApp: () => {
+        containerDeleteAttempts += 1;
+        return containerDeleteAttempts === 1
+          ? cfError('temporary container API failure', 500)
+          : cfError('not found', 404);
+      },
+    });
+    const usageCalls: Array<{ body: { ownershipEndedAt: string } }> = [];
+    const usageCounter = {
+      idFromName: (name: string) => name,
+      get: () => ({
+        fetch: async (request: Request) => {
+          usageCalls.push({ body: await request.json() });
+          return Response.json({ ok: true });
+        },
+      }),
+    } as unknown as DurableObjectNamespace;
+    const request = () =>
+      app.fetch(
+        new Request(`http://localhost/projects/${project.id}`, {
+          method: 'DELETE',
+          headers: { Authorization: `Bearer ${user.jwt}` },
+        }),
+        { ...env, USAGE_COUNTER: usageCounter },
+      );
+
+    expect((await request()).status).toBe(500);
+    expect(await db.getProject(env.db, project.id)).toMatchObject({ status: 'deleting' });
+    expect(usageCalls).toHaveLength(1);
+
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect((await request()).status).toBe(200);
+    expect(usageCalls).toHaveLength(2);
+    expect(Date.parse(usageCalls[1]!.body.ownershipEndedAt)).toBeGreaterThan(
+      Date.parse(usageCalls[0]!.body.ownershipEndedAt),
+    );
+  });
+
   it('deletes project with resources, assets, and routing', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id, 'full-app');

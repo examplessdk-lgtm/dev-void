@@ -787,10 +787,24 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
       return null;
     }
     const normalizedStart = startedAt.toISOString();
-    const normalizedEnd = endedAt.toISOString();
+    const matchingWindows = Object.entries(state.historicalAiWindows).filter(
+      ([, window]) =>
+        window.projectId === projectId &&
+        Date.parse(window.ownershipStartedAt) === startedAt.getTime(),
+    );
+    const effectiveEnd = Math.max(
+      endedAt.getTime(),
+      ...matchingWindows
+        .map(([, window]) => Date.parse(window.ownershipEndedAt))
+        .filter(Number.isFinite),
+    );
+    const normalizedEnd = new Date(effectiveEnd).toISOString();
     const key = JSON.stringify([projectId, normalizedStart, normalizedEnd]);
-    const existing = state.historicalAiWindows[key];
+    const existing = state.historicalAiWindows[key] ?? matchingWindows[0]?.[1];
     const sampled = state.projectNeurons[projectId];
+    for (const [matchingKey] of matchingWindows) {
+      delete state.historicalAiWindows[matchingKey];
+    }
     state.historicalAiWindows[key] = {
       projectId,
       ownershipStartedAt: normalizedStart,

@@ -1222,9 +1222,11 @@ describe('UsageCounter ownership changes', () => {
   it('reconciles the complete pre-transfer AI window and resamples it idempotently', async () => {
     const ownershipStartedAt = '2026-02-01T00:00:00.000Z';
     const ownershipEndedAt = '2026-03-01T00:00:00.000Z';
+    const extendedOwnershipEndedAt = '2026-03-02T00:00:00.000Z';
     vi.mocked(queryProjectAiUsage)
       .mockResolvedValueOnce({ neurons: 57 })
-      .mockResolvedValueOnce({ neurons: 61 });
+      .mockResolvedValueOnce({ neurons: 61 })
+      .mockResolvedValueOnce({ neurons: 63 });
     const { counter, storage } = makeCounter({
       ownerUserId: 'former-owner',
       plan: 'solo',
@@ -1234,14 +1236,14 @@ describe('UsageCounter ownership changes', () => {
       projectOwnershipStarts: { transferred: ownershipStartedAt },
       projectNeurons: { transferred: 42 },
     });
-    const detachRequest = () =>
+    const detachRequest = (endedAt = ownershipEndedAt) =>
       new Request('https://do/detach-project', {
         method: 'POST',
         body: JSON.stringify({
           projectId: 'transferred',
           userId: 'former-owner',
           ownershipStartedAt,
-          ownershipEndedAt,
+          ownershipEndedAt: endedAt,
         }),
       });
 
@@ -1270,16 +1272,47 @@ describe('UsageCounter ownership changes', () => {
       },
     });
 
-    expect((await counter.fetch(detachRequest())).ok).toBe(true);
+    expect((await counter.fetch(detachRequest(extendedOwnershipEndedAt))).ok).toBe(true);
+    expect(queryProjectAiUsage).toHaveBeenLastCalledWith(
+      undefined,
+      undefined,
+      'void',
+      'transferred',
+      new Date(ownershipStartedAt),
+      new Date(extendedOwnershipEndedAt),
+      true,
+    );
     expect(storage.data.get('state')).toMatchObject({
       totalNeurons: 61,
       historicalNeurons: 0,
       historicalAiWindows: {
-        [JSON.stringify(['transferred', ownershipStartedAt, ownershipEndedAt])]: {
+        [JSON.stringify(['transferred', ownershipStartedAt, extendedOwnershipEndedAt])]: {
           neurons: 61,
         },
       },
     });
+
+    expect((await counter.fetch(detachRequest())).ok).toBe(true);
+    expect(queryProjectAiUsage).toHaveBeenLastCalledWith(
+      undefined,
+      undefined,
+      'void',
+      'transferred',
+      new Date(ownershipStartedAt),
+      new Date(extendedOwnershipEndedAt),
+      true,
+    );
+    expect(storage.data.get('state')).toMatchObject({
+      totalNeurons: 63,
+      historicalAiWindows: {
+        [JSON.stringify(['transferred', ownershipStartedAt, extendedOwnershipEndedAt])]: {
+          neurons: 63,
+        },
+      },
+    });
+    expect(
+      Object.keys((storage.data.get('state') as CounterState).historicalAiWindows),
+    ).toHaveLength(1);
   });
 
   it('initializes a fresh counter from the former owner billing window before detaching', async () => {

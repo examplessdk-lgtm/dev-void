@@ -34,7 +34,7 @@ import {
   projects as projectsTable,
 } from '../schema.ts';
 import { getCurrentBillingPeriodStart } from '../tiers.ts';
-import type { Build, DeployManifest, Project, Resource } from '../types.ts';
+import type { Build, DeployManifest, Project, ProjectOwnershipPeriod, Resource } from '../types.ts';
 import {
   deleteCustomHostname,
   deleteD1Database,
@@ -429,17 +429,27 @@ async function lockAndMarkDeleting(
             ),
           )
           .orderBy(desc(projectOwnershipPeriods.ends_at))
+          .for('update')
           .limit(1);
-    let ownership =
-      lockedProject.status === 'deleting' &&
-      latestClosedOwnership?.owner_user_id === lockedProject.user_id
-        ? latestClosedOwnership
-        : undefined;
+    let ownership: ProjectOwnershipPeriod | undefined;
     if (openOwnership) {
       [ownership] = await txDb
         .update(projectOwnershipPeriods)
         .set({ ends_at: drizzleSql`clock_timestamp()` })
         .where(eq(projectOwnershipPeriods.id, openOwnership.id))
+        .returning();
+    } else if (
+      lockedProject.status === 'deleting' &&
+      latestClosedOwnership?.owner_user_id === lockedProject.user_id
+    ) {
+      // A previous teardown attempt may have stopped after detaching usage.
+      // Extend its cutoff so the retry reconciles activity through this attempt.
+      [ownership] = await txDb
+        .update(projectOwnershipPeriods)
+        .set({
+          ends_at: drizzleSql`greatest(${projectOwnershipPeriods.ends_at}, clock_timestamp())`,
+        })
+        .where(eq(projectOwnershipPeriods.id, latestClosedOwnership.id))
         .returning();
     } else if (!ownership) {
       [ownership] = await txDb
