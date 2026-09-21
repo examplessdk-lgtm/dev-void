@@ -3073,22 +3073,30 @@ export async function updateUserRole(db: Db, id: string, role: 'user' | 'admin')
 export async function deleteUser(db: Db, id: string): Promise<ReadonlyArray<TerminatedBuild>> {
   return withAdminRemovalGuard(db, id, async (tx) => {
     const cancelledBuilds: Array<TerminatedBuild> = [];
-    const [memberships, existingConnections] = await Promise.all([
-      tx
-        .select({ projectId: projectMembers.project_id })
-        .from(projectMembers)
-        .where(eq(projectMembers.user_id, id)),
-      tx
-        .select({ projectId: githubConnections.project_id })
-        .from(githubConnections)
-        .where(eq(githubConnections.authorized_by_user_id, id)),
-    ]);
-    const projectIds = [
-      ...new Set([
-        ...memberships.map(({ projectId }) => projectId),
-        ...existingConnections.map(({ projectId }) => projectId),
-      ]),
-    ].sort();
+    // Discover every project from one statement snapshot. Separate reads could
+    // miss an invitation accepted between the membership and invitation reads.
+    const affectedProjects = await tx
+      .select({ projectId: projectMembers.project_id })
+      .from(projectMembers)
+      .where(eq(projectMembers.user_id, id))
+      .union(
+        tx
+          .select({ projectId: projectInvitations.project_id })
+          .from(projectInvitations)
+          .where(
+            and(
+              eq(projectInvitations.target_user_id, id),
+              eq(projectInvitations.status, 'pending'),
+            ),
+          ),
+      )
+      .union(
+        tx
+          .select({ projectId: githubConnections.project_id })
+          .from(githubConnections)
+          .where(eq(githubConnections.authorized_by_user_id, id)),
+      );
+    const projectIds = affectedProjects.map(({ projectId }) => projectId).sort();
     if (projectIds.length > 0) {
       // GitHub connection CRUD and build creation take the project lock before
       // the connection lock. Preserve that order here so deleting an
@@ -3100,10 +3108,10 @@ export async function deleteUser(db: Db, id: string): Promise<ReadonlyArray<Term
         .orderBy(asc(projects.id))
         .for('update');
 
-      // A connection creator that held one of the project locks before this
-      // deletion may have inserted after the initial discovery query. Re-read
-      // under all membership project locks so its connection cannot escape
-      // invalidation and be reduced to legacy NULL provenance by the user FK.
+      // Pending invitations are in the lock set so acceptance cannot add a
+      // membership after discovery. Re-read the connections under every lock:
+      // a creator that acquired a project lock first may have inserted after
+      // discovery and must not be reduced to legacy NULL provenance by the FK.
       const authorizedConnections = await tx
         .select({ projectId: githubConnections.project_id })
         .from(githubConnections)

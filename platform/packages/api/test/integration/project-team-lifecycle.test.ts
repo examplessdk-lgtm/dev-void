@@ -21,7 +21,14 @@ import {
   projectOwnershipPeriods,
   users,
 } from '../../src/schema.ts';
-import { clearTables, createTestUser, setupEnv, teardownEnv, type TestEnv } from './helpers.ts';
+import {
+  captureQueries,
+  clearTables,
+  createTestUser,
+  setupEnv,
+  teardownEnv,
+  type TestEnv,
+} from './helpers.ts';
 
 let env: TestEnv;
 
@@ -97,6 +104,40 @@ describe('project team lifecycle', () => {
       .where(eq(projectAccessEvents.project_id, project.id));
     expect(events.map((event) => event.action)).toEqual(['invited', 'accepted']);
     expect(events.every((event) => event.subject_user_id === member.id)).toBe(true);
+  });
+
+  it('atomically discovers and locks pending-invitation projects before user deletion', async () => {
+    const owner = await createTestUser(env.db, 'owner');
+    const invitee = await createTestUser(env.db, 'invitee');
+    await setEmail(invitee.id, 'invitee@example.com');
+    const project = await createProject(env.db, owner.id, 'pending-invitation-delete');
+    await createOrRefreshProjectInvitation(env.db, {
+      projectId: project.id,
+      email: 'invitee@example.com',
+      role: 'admin',
+      actorUserId: owner.id,
+    });
+
+    const { queries } = await captureQueries(env.db, () => deleteUser(env.db, invitee.id));
+
+    const discovery = queries.findIndex(
+      (query) =>
+        query.includes('from "project_members"') &&
+        query.includes('from "project_invitations"') &&
+        query.includes('from "github_connections"') &&
+        query.includes(' union '),
+    );
+    const projectLock = queries.findIndex(
+      (query) => query.includes('from "projects"') && query.includes('for update'),
+    );
+    expect(discovery).toBeGreaterThanOrEqual(0);
+    expect(projectLock).toBeGreaterThan(discovery);
+    expect(
+      await env.db
+        .select()
+        .from(projectInvitations)
+        .where(eq(projectInvitations.target_user_id, invitee.id)),
+    ).toEqual([]);
   });
 
   it('keeps owned-project lifecycle enumeration separate from accessible projects', async () => {

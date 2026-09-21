@@ -587,6 +587,31 @@ describe('proxy worker', () => {
       });
     });
 
+    it('accepts a manual prerender token while the previous API revision is active', async () => {
+      const token = await signJwt(
+        { sub: 'user_1', login: 'testuser', aud: 'prerender', project: 'proj_1' },
+        JWT_SECRET,
+      );
+      const api = createMockApi(async (input) => {
+        expect(String(input)).toContain('/internal/verify-prerender-build/proj_1');
+        return Response.json(
+          { error: 'userId and credential provenance required' },
+          { status: 400 },
+        );
+      });
+
+      const response = await worker.fetch(
+        post(
+          '/ai/run',
+          { model: 'test-model', inputs: {}, projectId: 'proj_1' },
+          { authorization: `Bearer ${token}` },
+        ),
+        createEnv(undefined, undefined, api),
+      );
+
+      expect(response.status).toBe(200);
+    });
+
     it('revokes an already-minted build-bound prerender token when its build terminates', async () => {
       const token = await signJwt(
         {

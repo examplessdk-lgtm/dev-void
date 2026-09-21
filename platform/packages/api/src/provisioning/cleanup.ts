@@ -1,4 +1,4 @@
-import { sql as drizzleSql, and, eq, ne, notInArray } from 'drizzle-orm';
+import { sql as drizzleSql, and, desc, eq, isNotNull, isNull, ne, notInArray } from 'drizzle-orm';
 import type { Context } from 'hono';
 import { deleteProjectAssets, deleteWorkerBundle } from '../assets.ts';
 import { DEFAULT_DISPATCH_NAMESPACE } from '../constants.ts';
@@ -13,6 +13,7 @@ import {
   getDomainsByProjectId,
   getProject,
   getProjectResources,
+  getUser,
   terminateBuildsForProject,
 } from '../db.ts';
 import { drainProjectEmailAdmissions } from '../email/admission.ts';
@@ -20,13 +21,19 @@ import { emailDomainRoutes, emailZoneConnections } from '../email/connection-sch
 import { requestEmailDomainRemove, runEmailOperation } from '../email/connection-service.ts';
 import type { ApiEnv } from '../env.ts';
 import { cancelContainerBuildDos } from '../github/cancel-builds.ts';
+import { generateId } from '../id.ts';
 import {
   getLegacyProjectWorkerName,
   getProjectDeploymentWorkerName,
   getProjectQueueName,
 } from '../naming.ts';
 import { requireProjectCapability } from '../project-access.ts';
-import { deployments as deploymentsTable, projects as projectsTable } from '../schema.ts';
+import {
+  deployments as deploymentsTable,
+  projectOwnershipPeriods,
+  projects as projectsTable,
+} from '../schema.ts';
+import { getCurrentBillingPeriodStart } from '../tiers.ts';
 import type { Build, DeployManifest, Project, Resource } from '../types.ts';
 import {
   deleteCustomHostname,
@@ -361,6 +368,9 @@ async function lockAndMarkDeleting(
   expectedOwnerUserId?: string,
 ): Promise<Readonly<{
   ownerUserId: string;
+  ownerBillingCycleStart: string | null;
+  ownershipStartedAt: string;
+  ownershipEndedAt: string;
   cancelledBuilds: ReadonlyArray<{
     id: string;
     executor: Build['executor'];
@@ -388,6 +398,60 @@ async function lockAndMarkDeleting(
     const activeDeployment = await getActiveDeployment(txDb, projectId);
     if (activeDeployment?.source === 'rollback-lease') {
       throw new ProjectOperationInProgressError();
+    }
+    const owner = await getUser(txDb, lockedProject.user_id);
+    if (!owner) {
+      throw new Error('project owner disappeared during deletion');
+    }
+    const [openOwnership] = await txDb
+      .select()
+      .from(projectOwnershipPeriods)
+      .where(
+        and(
+          eq(projectOwnershipPeriods.project_id, projectId),
+          isNull(projectOwnershipPeriods.ends_at),
+        ),
+      )
+      .for('update')
+      .limit(1);
+    if (openOwnership && openOwnership.owner_user_id !== lockedProject.user_id) {
+      throw new Error('project ownership history does not match the current owner');
+    }
+    const [latestClosedOwnership] = openOwnership
+      ? []
+      : await txDb
+          .select()
+          .from(projectOwnershipPeriods)
+          .where(
+            and(
+              eq(projectOwnershipPeriods.project_id, projectId),
+              isNotNull(projectOwnershipPeriods.ends_at),
+            ),
+          )
+          .orderBy(desc(projectOwnershipPeriods.ends_at))
+          .limit(1);
+    let ownership =
+      lockedProject.status === 'deleting' &&
+      latestClosedOwnership?.owner_user_id === lockedProject.user_id
+        ? latestClosedOwnership
+        : undefined;
+    if (openOwnership) {
+      [ownership] = await txDb
+        .update(projectOwnershipPeriods)
+        .set({ ends_at: drizzleSql`clock_timestamp()` })
+        .where(eq(projectOwnershipPeriods.id, openOwnership.id))
+        .returning();
+    } else if (!ownership) {
+      [ownership] = await txDb
+        .insert(projectOwnershipPeriods)
+        .values({
+          id: generateId('pown'),
+          project_id: projectId,
+          owner_user_id: lockedProject.user_id,
+          starts_at: latestClosedOwnership?.ends_at ?? lockedProject.created_at,
+          ends_at: drizzleSql`clock_timestamp()`,
+        })
+        .returning();
     }
     if (lockedProject.status !== 'deleting') {
       await tx
@@ -418,6 +482,9 @@ async function lockAndMarkDeleting(
     // on replay (already-terminal builds are not re-matched by the CAS).
     return {
       ownerUserId: lockedProject.user_id,
+      ownerBillingCycleStart: owner.billing_cycle_start,
+      ownershipStartedAt: ownership!.starts_at,
+      ownershipEndedAt: ownership!.ends_at!,
       cancelledBuilds: await terminateBuildsForProject(txDb, projectId, {
         reason: 'project deleted',
       }),
@@ -428,14 +495,33 @@ async function lockAndMarkDeleting(
 async function detachProjectUsage(
   context: Context<ApiEnv>,
   projectId: string,
-  ownerUserId: string,
+  options: Readonly<{
+    ownerUserId: string;
+    ownerBillingCycleStart: string | null;
+    ownershipStartedAt: string;
+    ownershipEndedAt: string;
+  }>,
 ): Promise<void> {
-  const stub = context.env.USAGE_COUNTER.get(context.env.USAGE_COUNTER.idFromName(ownerUserId));
+  const stub = context.env.USAGE_COUNTER.get(
+    context.env.USAGE_COUNTER.idFromName(options.ownerUserId),
+  );
   const response = await stub.fetch(
     new Request('https://do/detach-project', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ projectId, userId: ownerUserId }),
+      body: JSON.stringify({
+        projectId,
+        userId: options.ownerUserId,
+        ...(options.ownerBillingCycleStart
+          ? {
+              billingPeriodStart: getCurrentBillingPeriodStart(
+                options.ownerBillingCycleStart,
+              ).toISOString(),
+            }
+          : {}),
+        ownershipStartedAt: options.ownershipStartedAt,
+        ownershipEndedAt: options.ownershipEndedAt,
+      }),
     }),
   );
   if (!response.ok) {
@@ -549,7 +635,7 @@ export async function teardownProject(
 
   // Detach after the durable status change and before cleanup so a failed DO
   // call leaves the project row available for retry.
-  await detachProjectUsage(context, projectId, deletion.ownerUserId);
+  await detachProjectUsage(context, projectId, deletion);
 
   const emailDrain = await drainProjectEmailAdmissions(context.get('db'), projectId);
   if (emailDrain.inFlight > 0) {

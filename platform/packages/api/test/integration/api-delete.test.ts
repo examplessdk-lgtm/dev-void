@@ -22,6 +22,7 @@ import {
   emailDestinations,
   users,
   projectMembers,
+  projectOwnershipPeriods,
 } from '../../src/schema.ts';
 import {
   setupEnv,
@@ -208,9 +209,13 @@ describe('DELETE /projects/:id', () => {
     expect(await db.getProject(env.db, project.id)).not.toBeNull();
   });
 
-  it('deletes project with no resources', async () => {
+  it('deletes a project while retaining its final usage window', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id, 'empty-app');
+    const [ownership] = await env.db
+      .select()
+      .from(projectOwnershipPeriods)
+      .where(eq(projectOwnershipPeriods.project_id, project.id));
     await env.ROUTING.put(`ai-block:${project.id}`, '1');
     mockCfApi();
     const usageCalls: Array<{ ownerId: string; path: string; body: unknown }> = [];
@@ -247,9 +252,19 @@ describe('DELETE /projects/:id', () => {
       {
         ownerId: user.id,
         path: '/detach-project',
-        body: { projectId: project.id, userId: user.id },
+        body: {
+          projectId: project.id,
+          userId: user.id,
+          billingPeriodStart: expect.any(String),
+          ownershipStartedAt: ownership!.starts_at,
+          ownershipEndedAt: expect.any(String),
+        },
       },
     ]);
+    const detachBody = usageCalls[0]!.body as { ownershipEndedAt: string };
+    expect(Date.parse(detachBody.ownershipEndedAt)).toBeGreaterThanOrEqual(
+      Date.parse(ownership!.starts_at),
+    );
   });
 
   it('deletes project with resources, assets, and routing', async () => {
