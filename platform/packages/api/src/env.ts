@@ -145,6 +145,7 @@ export type ApiEnv = Env & {
     PLATFORM_TRAFFIC_STATE?: string;
     PLATFORM_VERSION?: string;
     PLATFORM_CAPABILITIES?: string;
+    VERSION_METADATA?: Readonly<{ id: string; tag: string; timestamp: string }>;
     PROXY_URL?: string;
     PROJECT_SECRET_KEYS_JSON: string;
     PROJECT_SECRET_ACTIVE_KEY_VERSION: string;

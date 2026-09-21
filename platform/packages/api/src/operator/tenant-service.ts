@@ -74,6 +74,24 @@ import { OperatorError, preview } from './common.ts';
 
 type Page = { page: number; limit: number; offset: number };
 
+const USAGE_CONSUMER_ROLLOUT_GRACE_MS = 15 * 60_000;
+
+function assertOwnershipTransferRolloutComplete(env: ApiEnv['Bindings']): void {
+  if (env.PLATFORM_ENV !== 'production' && env.PLATFORM_ENV !== 'staging') {
+    return;
+  }
+  const deployedAt = Date.parse(env.VERSION_METADATA?.timestamp ?? '');
+  const remainingMs = deployedAt + USAGE_CONSUMER_ROLLOUT_GRACE_MS - Date.now();
+  if (!Number.isFinite(deployedAt) || remainingMs > 0) {
+    throw new OperatorError(
+      503,
+      'Project ownership transfers are temporarily unavailable while the usage consumer rollout completes.',
+      'ownership_transfer_rollout_pending',
+      remainingMs > 0 ? { retryAfterSeconds: Math.ceil(remainingMs / 1_000) } : undefined,
+    );
+  }
+}
+
 function pageInfo(page: Page, total: number) {
   return {
     page: page.page,
@@ -728,6 +746,7 @@ export async function transferOperatorProjectOwner(
   if (dryRun) {
     return previewOperatorProjectOwner(context, projectId, targetUserId);
   }
+  assertOwnershipTransferRolloutComplete(context.env);
 
   const db = context.get('db');
   const transfer = await commitOwnershipTransfer(

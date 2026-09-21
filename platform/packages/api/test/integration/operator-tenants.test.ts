@@ -193,6 +193,7 @@ describe('operator tenant reads', () => {
     const project = await createTestProject(env.db, currentOwner.id, 'operator-usage-project');
     const ownedFrom = new Date(Date.now() - 5 * 24 * 60 * 60 * 1_000);
     const transferredAt = new Date(Date.now() - 2 * 24 * 60 * 60 * 1_000);
+    transferredAt.setMilliseconds(500);
     await env.db
       .update(users)
       .set({ billing_cycle_start: '2020-01-01T00:00:00.000Z' })
@@ -251,9 +252,12 @@ describe('operator tenant reads', () => {
     });
 
     expect(queries).toHaveLength(2);
-    expect(queries[0]).toContain(ownedFrom.toISOString().replace('T', ' ').slice(0, 19));
-    expect(queries[0]).toContain(transferredAt.toISOString().replace('T', ' ').slice(0, 19));
-    expect(queries[1]).toContain(transferredAt.toISOString().replace('T', ' ').slice(0, 19));
+    expect(queries[0]).toContain(
+      `toDateTime64('${transferredAt.toISOString().replace('T', ' ').slice(0, 23)}', 3)`,
+    );
+    expect(queries[1]).toContain(
+      `toDateTime64('${transferredAt.toISOString().replace('T', ' ').slice(0, 23)}', 3)`,
+    );
   });
 
   test('rejects invalid pagination and missing detail targets', async () => {
@@ -352,6 +356,53 @@ describe('operator tenant mutations', () => {
     ).toMatchObject([{ status: 'pending' }]);
     expect(putSpy).not.toHaveBeenCalled();
     expect(doGet).not.toHaveBeenCalled();
+  });
+
+  test('waits for the previous usage consumer lifetime before changing ownership', async () => {
+    const owner = await createTestUser(env.db, 'rollout-owner');
+    const target = await createTestUser(env.db, 'rollout-target');
+    const project = await createTestProject(env.db, owner.id, 'rollout-project');
+    const rolloutEnv = {
+      PLATFORM_ENV: 'production',
+      VERSION_METADATA: {
+        id: 'version-2',
+        tag: '',
+        timestamp: new Date().toISOString(),
+      },
+    } satisfies Partial<ApiEnv['Bindings']>;
+
+    const preview = await req(
+      `/projects/${project.id}/owner`,
+      { userId: target.id, dryRun: true },
+      rolloutEnv,
+    );
+    expect(preview.status).toBe(200);
+
+    const blocked = await req(`/projects/${project.id}/owner`, { userId: target.id }, rolloutEnv);
+    expect(blocked.status).toBe(503);
+    expect(await blocked.json()).toMatchObject({
+      error: 'ownership_transfer_rollout_pending',
+      details: { retryAfterSeconds: expect.any(Number) },
+    });
+    expect(
+      (await env.db.query.projects.findFirst({ where: eq(projects.id, project.id) }))?.user_id,
+    ).toBe(owner.id);
+
+    const completed = await req(
+      `/projects/${project.id}/owner`,
+      { userId: target.id },
+      {
+        ...rolloutEnv,
+        VERSION_METADATA: {
+          ...rolloutEnv.VERSION_METADATA,
+          timestamp: '2020-01-01T00:00:00.000Z',
+        },
+      },
+    );
+    expect(completed.status).toBe(200);
+    expect(
+      (await env.db.query.projects.findFirst({ where: eq(projects.id, project.id) }))?.user_id,
+    ).toBe(target.id);
   });
 
   test('transfers ownership atomically and converges counters and routing idempotently', async () => {

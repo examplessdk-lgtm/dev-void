@@ -305,7 +305,7 @@ async function queryBatchProjectUsageWindows(
   const predicates = windows.flatMap(({ project, intervals }) =>
     intervals.map(
       ({ start, end }) =>
-        `(blob1 = ${analyticsStringLiteral(project.id)} AND timestamp >= toDateTime(${analyticsStringLiteral(formatAnalyticsDate(start))}) AND timestamp < toDateTime(${analyticsStringLiteral(formatAnalyticsDate(end))}))`,
+        `(blob1 = ${analyticsStringLiteral(project.id)} AND timestamp >= toDateTime64(${analyticsStringLiteral(formatAnalyticsDateMilliseconds(start))}, 3) AND timestamp < toDateTime64(${analyticsStringLiteral(formatAnalyticsDateMilliseconds(end))}, 3))`,
     ),
   );
   const query = `
@@ -398,6 +398,10 @@ async function queryTopProjectTraffic(
 
 function formatAnalyticsDate(date: Date): string {
   return date.toISOString().replace('T', ' ').slice(0, 19);
+}
+
+function formatAnalyticsDateMilliseconds(date: Date): string {
+  return date.toISOString().replace('T', ' ').slice(0, 23);
 }
 
 function normalizeAnalyticsDate(value: string | null | undefined): string | null {

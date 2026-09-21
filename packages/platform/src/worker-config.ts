@@ -94,6 +94,7 @@ export function createPlatformWorkerConfigs(input: {
 
   const api: Record<string, unknown> = {
     ...common,
+    version_metadata: { binding: 'VERSION_METADATA' },
     workers_dev:
       publicEndpoints &&
       (!deployment.authentication.accessProtection ||

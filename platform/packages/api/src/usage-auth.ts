@@ -9,7 +9,7 @@ export const SANDBOX_USAGE_RETENTION_MS = 8 * 24 * 60 * 60_000;
 export type UsageEventSource = 'dispatch' | 'sandbox-counter';
 
 export type SignedUsageEnvelope<T = unknown> = Readonly<{
-  version: typeof USAGE_PROTOCOL_VERSION;
+  version: 1 | typeof USAGE_PROTOCOL_VERSION;
   source: UsageEventSource;
   eventId: string;
   event: T;
@@ -69,8 +69,13 @@ export async function readUsageSigningKey(routing: KVNamespace): Promise<string 
   return routing.get(USAGE_SIGNING_KEY_KV_KEY, { cacheTtl: 60 });
 }
 
-function signedPayload<T>(source: UsageEventSource, eventId: string, event: T): string {
-  return JSON.stringify([USAGE_PROTOCOL_VERSION, source, eventId, event]);
+function signedPayload<T>(
+  version: SignedUsageEnvelope['version'],
+  source: UsageEventSource,
+  eventId: string,
+  event: T,
+): string {
+  return JSON.stringify([version, source, eventId, event]);
 }
 
 export async function signUsageEvent<T>(
@@ -84,7 +89,9 @@ export async function signUsageEvent<T>(
     source,
     eventId,
     event,
-    signature: base64url(await hmac(signedPayload(source, eventId, event), key)),
+    signature: base64url(
+      await hmac(signedPayload(USAGE_PROTOCOL_VERSION, source, eventId, event), key),
+    ),
   };
 }
 
@@ -97,7 +104,7 @@ export async function verifyUsageEnvelope<T>(
   }
   const envelope = value as Record<string, unknown>;
   if (
-    envelope.version !== USAGE_PROTOCOL_VERSION ||
+    (envelope.version !== 1 && envelope.version !== USAGE_PROTOCOL_VERSION) ||
     (envelope.source !== 'dispatch' && envelope.source !== 'sandbox-counter') ||
     typeof envelope.eventId !== 'string' ||
     envelope.eventId.length === 0 ||
@@ -123,7 +130,9 @@ export async function verifyUsageEnvelope<T>(
       'HMAC',
       signingKey,
       signature.buffer as ArrayBuffer,
-      encoder.encode(signedPayload(envelope.source, envelope.eventId, envelope.event)),
+      encoder.encode(
+        signedPayload(envelope.version, envelope.source, envelope.eventId, envelope.event),
+      ),
     );
     return valid ? (envelope as SignedUsageEnvelope<T>) : null;
   } catch {

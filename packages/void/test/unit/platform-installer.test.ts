@@ -4057,7 +4057,7 @@ describe('platform installer', () => {
     const interruptedProtocolEvents: Array<string> = [];
     const legacySourceManifest = {
       ...sourceManifest,
-      usageProtocolVersion: 0 as const,
+      usageProtocolVersion: 1 as const,
     };
     const rotatedWorkerSecrets = createPlatformInstallationSecrets({
       bootstrapGitHubId: '',
@@ -4131,7 +4131,7 @@ describe('platform installer', () => {
     const interruptedManifest = listInstallationManifests(directory)[0]!;
     expect(interruptedManifest).toMatchObject({
       status: 'failed',
-      usageProtocolVersion: 0,
+      usageProtocolVersion: 1,
     });
     const interruptedSecretCheckpoint = readInstallationRecoverySecrets(interruptedManifest)!;
     const resumedWorkerSecrets = createPlatformInstallationSecrets({
