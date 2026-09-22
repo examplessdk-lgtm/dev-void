@@ -736,6 +736,9 @@ export default {
       }
       const res = new Response(response.body, response);
       res.headers.delete('X-Void-No-Match');
+      // Cache API and upstream responses have immutable headers. Strip the
+      // internal cache marker only from this writable client response.
+      res.headers.delete(SHARED_CACHE_POLICY_HEADER);
       res.headers.set('X-Hosted-By', 'void.cloud');
       return res;
     };
@@ -862,7 +865,6 @@ export default {
               }
             }
           }
-          ruled.headers.delete(SHARED_CACHE_POLICY_HEADER);
           return meter(ruled, failureKind ? { failureKind } : undefined);
         };
 
