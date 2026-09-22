@@ -264,6 +264,7 @@ function makeFakeStorage() {
   let pending: Map<string, unknown> | null = null;
   let rejectCommit = false;
   let alarm: number | null = null;
+  let pendingAlarm: number | null = null;
   type ListOptions = { prefix: string; startAfter?: string; limit: number };
   type Transaction = {
     get: <T>(key: string) => Promise<T | undefined>;
@@ -300,6 +301,7 @@ function makeFakeStorage() {
     }),
     transaction: async <T>(callback: (transaction: Transaction) => Promise<T>): Promise<T> => {
       pending = new Map(data);
+      pendingAlarm = alarm;
       try {
         const result = await callback({
           ...storage,
@@ -313,14 +315,26 @@ function makeFakeStorage() {
         for (const [key, value] of pending) {
           data.set(key, value);
         }
+        alarm = pendingAlarm;
         return result;
       } finally {
         pending = null;
       }
     },
-    getAlarm: async () => alarm,
+    getAlarm: async () => (pending ? pendingAlarm : alarm),
     setAlarm: async (ts: number) => {
-      alarm = ts;
+      if (pending) {
+        pendingAlarm = ts;
+      } else {
+        alarm = ts;
+      }
+    },
+    deleteAlarm: async () => {
+      if (pending) {
+        pendingAlarm = null;
+      } else {
+        alarm = null;
+      }
     },
   };
   return storage;
@@ -1439,6 +1453,9 @@ describe('UsageCounter ownership changes', () => {
       });
 
     expect((await counter.fetch(detachRequest())).ok).toBe(true);
+    expect(queryProjectAiUsage).not.toHaveBeenCalled();
+    expect(storage.data.get('state')).toMatchObject({ totalNeurons: 42, projectSlugs: {} });
+    await counter.alarm();
     expect(queryProjectAiUsage).toHaveBeenLastCalledWith(
       undefined,
       undefined,
@@ -1464,6 +1481,7 @@ describe('UsageCounter ownership changes', () => {
     });
 
     expect((await counter.fetch(detachRequest(extendedOwnershipEndedAt))).ok).toBe(true);
+    await counter.alarm();
     expect(queryProjectAiUsage).toHaveBeenLastCalledWith(
       undefined,
       undefined,
@@ -1484,6 +1502,7 @@ describe('UsageCounter ownership changes', () => {
     });
 
     expect((await counter.fetch(detachRequest())).ok).toBe(true);
+    await counter.alarm();
     expect(queryProjectAiUsage).toHaveBeenLastCalledWith(
       undefined,
       undefined,
@@ -1510,7 +1529,7 @@ describe('UsageCounter ownership changes', () => {
     const billingPeriodStart = '2026-01-15T00:00:00.000Z';
     const ownershipStartedAt = '2026-02-01T00:00:00.000Z';
     const ownershipEndedAt = '2026-03-01T00:00:00.000Z';
-    vi.mocked(getUser).mockResolvedValueOnce({ id: 'former-owner', plan: 'custom' } as never);
+    vi.mocked(getUser).mockResolvedValue({ id: 'former-owner', plan: 'custom' } as never);
     vi.mocked(queryProjectAiUsage).mockResolvedValueOnce({ neurons: 57 });
     const { counter, storage } = makeCounter();
 
@@ -1528,6 +1547,8 @@ describe('UsageCounter ownership changes', () => {
     );
 
     expect(response.ok).toBe(true);
+    expect(queryProjectAiUsage).not.toHaveBeenCalled();
+    await counter.alarm();
     expect(queryProjectAiUsage).toHaveBeenCalledWith(
       undefined,
       undefined,
@@ -1599,6 +1620,8 @@ describe('UsageCounter ownership changes', () => {
     );
 
     expect(response.ok).toBe(true);
+    expect(queryProjectAiUsage).not.toHaveBeenCalled();
+    await counter.alarm();
     expect(dbCalls.unsuspendIfReason).toContainEqual({
       id: 'u1',
       reason: 'requests_exceeded',
@@ -1638,9 +1661,9 @@ describe('UsageCounter ownership changes', () => {
     });
   });
 
-  it('keeps current ownership state retryable when cutoff reconciliation fails', async () => {
-    vi.mocked(queryProjectAiUsage).mockRejectedValueOnce(new Error('analytics unavailable'));
-    const { counter, storage } = makeCounter({
+  it('persists a detached window and retries reconciliation without losing its last sample', async () => {
+    vi.mocked(queryProjectAiUsage).mockRejectedValue(new Error('analytics unavailable'));
+    const { counter, storage, env } = makeCounter({
       ownerUserId: 'former-owner',
       plan: 'solo',
       totalNeurons: 42,
@@ -1648,26 +1671,68 @@ describe('UsageCounter ownership changes', () => {
       projectOwnershipStarts: { transferred: '2026-02-01T00:00:00.000Z' },
       projectNeurons: { transferred: 42 },
     });
-
-    await expect(
-      counter.fetch(
-        new Request('https://do/detach-project', {
-          method: 'POST',
-          body: JSON.stringify({
-            projectId: 'transferred',
-            userId: 'former-owner',
-            ownershipStartedAt: '2026-02-01T00:00:00.000Z',
-            ownershipEndedAt: '2026-03-01T00:00:00.000Z',
-          }),
+    const response = await counter.fetch(
+      new Request('https://do/detach-project', {
+        method: 'POST',
+        body: JSON.stringify({
+          projectId: 'transferred',
+          userId: 'former-owner',
+          ownershipStartedAt: '2026-02-01T00:00:00.000Z',
+          ownershipEndedAt: '2026-03-01T00:00:00.000Z',
         }),
-      ),
-    ).rejects.toThrow('analytics unavailable');
-    expect(storage.data.get('state')).toMatchObject({
+      }),
+    );
+    expect(response.ok).toBe(true);
+    expect(queryProjectAiUsage).not.toHaveBeenCalled();
+    const saved = structuredClone(storage.data.get('state'));
+    expect(saved).toMatchObject({ totalNeurons: 42, projectSlugs: {}, projectNeurons: {} });
+    expect(Object.values((saved as CounterState).historicalAiWindows)).toEqual([
+      {
+        projectId: 'transferred',
+        ownershipStartedAt: '2026-02-01T00:00:00.000Z',
+        ownershipEndedAt: '2026-03-01T00:00:00.000Z',
+        neurons: 42,
+      },
+    ]);
+    expect(await storage.getAlarm()).toEqual(expect.any(Number));
+    const restarted = new UsageCounter({ storage } as never, env as never);
+    Object.assign(restarted, { ctx: { storage }, env });
+    // Exhaust the native retry count: the durable schedule must still survive.
+    for (let attempt = 0; attempt < 7; attempt++) {
+      await storage.setAlarm(0);
+      await expect(restarted.alarm()).rejects.toThrow('analytics unavailable');
+      expect(await storage.getAlarm()).toBeGreaterThan(Date.now());
+      expect(storage.data.get('state')).toEqual(saved);
+    }
+    vi.mocked(queryProjectAiUsage).mockResolvedValue({ neurons: 57 });
+    await restarted.alarm();
+    expect(storage.data.get('state')).toMatchObject({ totalNeurons: 57, projectSlugs: {} });
+  });
+
+  it('commits the detached window and reconciliation alarm together before acknowledging', async () => {
+    const { counter, storage } = makeCounter({
       totalNeurons: 42,
-      projectSlugs: { transferred: 'app' },
       projectNeurons: { transferred: 42 },
-      historicalAiWindows: {},
+      projectSlugs: { transferred: 'app' },
+      projectOwnershipStarts: { transferred: '2026-02-01T00:00:00.000Z' },
     });
+    const before = structuredClone(storage.data.get('state'));
+    const request = () =>
+      new Request('https://do/detach-project', {
+        method: 'POST',
+        body: JSON.stringify({
+          projectId: 'transferred',
+          ownershipEndedAt: '2026-03-01T00:00:00.000Z',
+        }),
+      });
+    storage.failNextCommit();
+    await expect(counter.fetch(request())).rejects.toThrow('transaction commit failed');
+    expect(storage.data.get('state')).toEqual(before);
+    expect(await storage.getAlarm()).toBeNull();
+    expect((await counter.fetch(request())).ok).toBe(true);
+    expect(storage.data.get('state')).toMatchObject({ totalNeurons: 42, projectSlugs: {} });
+    expect(await storage.getAlarm()).toBeGreaterThan(Date.now());
+    expect(queryProjectAiUsage).not.toHaveBeenCalled();
   });
 
   it('queries AI only from the current ownership boundary', async () => {
@@ -1688,6 +1753,211 @@ describe('UsageCounter ownership changes', () => {
       'p1',
       new Date(ownershipStartedAt),
     );
+  });
+
+  describe('detached window lifecycle', () => {
+    const billingPeriodStart = '2026-01-01T00:00:00.000Z';
+    const ownershipEndedAt = '2026-01-20T00:00:00.000Z';
+    const windowKey = JSON.stringify(['deleted', billingPeriodStart, ownershipEndedAt]);
+
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime('2026-01-22T12:00:00.000Z');
+      vi.mocked(getUser).mockImplementation(
+        async (_db, id) =>
+          ({
+            id,
+            plan: 'solo',
+            billing_cycle_start: billingPeriodStart,
+          }) as never,
+      );
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    function detachedState(overrides: Partial<CounterState> = {}): Partial<CounterState> {
+      return {
+        ownerUserId: 'u1',
+        plan: 'solo',
+        billingPeriodStart,
+        totalRequests: 100,
+        totalNeurons: 42,
+        historicalAiWindows: {
+          [windowKey]: {
+            projectId: 'deleted',
+            ownershipStartedAt: billingPeriodStart,
+            ownershipEndedAt,
+            neurons: 42,
+          },
+        },
+        ...overrides,
+      };
+    }
+
+    it.each(['solo', 'sponsored'] as const)(
+      'ends %s historical reconciliation at rollover after the final project is deleted',
+      async (plan) => {
+        vi.mocked(getUser).mockResolvedValue({
+          id: 'u1',
+          plan,
+          billing_cycle_start: billingPeriodStart,
+        } as never);
+        const { counter, storage } = makeCounter(detachedState({ plan }));
+        const setAlarm = vi.spyOn(storage, 'setAlarm');
+        vi.setSystemTime('2026-02-02T12:00:00.000Z');
+
+        await counter.alarm();
+
+        expect(queryProjectAiUsage).not.toHaveBeenCalled();
+        expect(storage.data.get('state')).toMatchObject({
+          billingPeriodStart: '2026-02-01T00:00:00.000Z',
+          totalRequests: 0,
+          totalNeurons: 0,
+          historicalAiWindows: {},
+          projectSlugs: {},
+        });
+        expect(setAlarm).not.toHaveBeenCalled();
+        expect(await storage.getAlarm()).toBeNull();
+      },
+    );
+
+    it('stops reconciliation when the account has been deleted', async () => {
+      vi.mocked(getUser).mockResolvedValue(null);
+      const { counter, storage } = makeCounter(detachedState());
+      await storage.setAlarm(Date.now() + 60_000);
+      const before = structuredClone(storage.data.get('state'));
+      const setAlarm = vi.spyOn(storage, 'setAlarm');
+
+      await counter.alarm();
+
+      expect(queryProjectAiUsage).not.toHaveBeenCalled();
+      expect(storage.data.get('state')).toEqual(before);
+      expect(setAlarm).not.toHaveBeenCalled();
+      expect(await storage.getAlarm()).toBeNull();
+    });
+
+    it('reconciles unlimited account history without querying or blocking active projects', async () => {
+      vi.mocked(getUser).mockResolvedValue({
+        id: 'u1',
+        plan: 'sponsored',
+        billing_cycle_start: billingPeriodStart,
+      } as never);
+      vi.mocked(queryProjectAiUsage).mockResolvedValue({ neurons: 57 });
+      const { counter, storage, kv } = makeCounter(
+        detachedState({
+          projectSlugs: { active: 'active-app' },
+          projectOwnershipStarts: { active: billingPeriodStart },
+          projectNeurons: { active: 100 },
+          totalNeurons: 142,
+        }),
+      );
+
+      await counter.alarm();
+
+      expect(queryProjectAiUsage).toHaveBeenCalledExactlyOnceWith(
+        undefined,
+        undefined,
+        'void',
+        'deleted',
+        new Date(billingPeriodStart),
+        new Date(ownershipEndedAt),
+        true,
+      );
+      expect(storage.data.get('state')).toMatchObject({
+        plan: 'sponsored',
+        totalNeurons: 157,
+        projectNeurons: { active: 100 },
+        aiSuspended: false,
+        historicalAiWindows: { [windowKey]: { neurons: 57 } },
+      });
+      expect(kv.calls).toEqual([]);
+      expect(await storage.getAlarm()).toBeGreaterThan(Date.now());
+    });
+
+    it('preserves an earlier alarm when detaching a project', async () => {
+      const { counter, storage } = makeCounter({
+        ownerUserId: 'u1',
+        plan: 'solo',
+        billingPeriodStart,
+        totalNeurons: 42,
+        projectSlugs: { deleted: 'app' },
+        projectNeurons: { deleted: 42 },
+        projectOwnershipStarts: { deleted: billingPeriodStart },
+      });
+      const earlierAlarm = Date.now() + 60_000;
+      await storage.setAlarm(earlierAlarm);
+      const setAlarm = vi.spyOn(storage, 'setAlarm');
+
+      const response = await counter.fetch(
+        new Request('https://do/detach-project', {
+          method: 'POST',
+          body: JSON.stringify({ projectId: 'deleted', ownershipEndedAt }),
+        }),
+      );
+
+      expect(response.ok).toBe(true);
+      expect(queryProjectAiUsage).not.toHaveBeenCalled();
+      expect(await storage.getAlarm()).toBe(earlierAlarm);
+      expect(setAlarm).not.toHaveBeenCalled();
+      expect(storage.data.get('state')).toMatchObject({
+        historicalAiWindows: { [windowKey]: { neurons: 42 } },
+      });
+    });
+
+    it('clears active project suspensions while rolling over detached history', async () => {
+      const { counter, storage, kv } = makeCounter(
+        detachedState({
+          requestsSuspended: true,
+          aiSuspended: true,
+          sandboxRuntimeSuspended: true,
+          projectSlugs: { retained: 'retained-app' },
+          projectOwnershipStarts: { retained: billingPeriodStart },
+        }),
+      );
+      kv.store.set(
+        'retained-app',
+        JSON.stringify({
+          workerName: 'retained-worker',
+          projectId: 'retained',
+          userId: 'u1',
+          suspended: 'requests_exceeded',
+        }),
+      );
+      kv.store.set('ai-block:retained', '1');
+      kv.store.set('sandbox-block:u1', '1');
+      vi.mocked(queryProjectAiUsage).mockResolvedValue({ neurons: 7 });
+      vi.setSystemTime('2026-02-02T12:00:00.000Z');
+
+      await counter.alarm();
+
+      expect(queryProjectAiUsage).toHaveBeenCalledExactlyOnceWith(
+        undefined,
+        undefined,
+        'void',
+        'retained',
+        new Date('2026-02-01T00:00:00.000Z'),
+      );
+      expect(storage.data.get('state')).toMatchObject({
+        billingPeriodStart: '2026-02-01T00:00:00.000Z',
+        totalRequests: 0,
+        totalNeurons: 7,
+        historicalAiWindows: {},
+        requestsSuspended: false,
+        aiSuspended: false,
+        sandboxRuntimeSuspended: false,
+      });
+      expect(JSON.parse(kv.store.get('retained-app')!)).not.toHaveProperty('suspended');
+      expect(kv.store.has('ai-block:retained')).toBe(false);
+      expect(kv.store.has('sandbox-block:u1')).toBe(false);
+      expect(dbCalls.unsuspendIfReason).toEqual(
+        expect.arrayContaining([
+          { id: 'u1', reason: 'requests_exceeded' },
+          { id: 'u1', reason: 'sandbox_runtime_exceeded' },
+        ]),
+      );
+    });
   });
 
   it('reconciles a stale transferred project through its ownership cutoff before dropping it', async () => {

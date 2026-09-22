@@ -541,15 +541,15 @@ const HELP_TREE: HelpTree = {
           ),
           leave: withProjectOption('Leave a shared project.', 'void project team leave [options]'),
           pending: basicSubcommand(
-            'List project invitations awaiting your response.',
+            'List invitations on the active platform connection (VOID_API_URL overrides it).',
             'void project team pending',
           ),
           accept: basicSubcommand(
-            'Accept an invitation addressed to your account.',
+            'Accept your invitation on the active platform connection, preserving project links.',
             'void project team accept <invitation-id>',
           ),
           decline: basicSubcommand(
-            'Decline an invitation addressed to your account.',
+            'Decline your invitation on the active platform connection (VOID_API_URL overrides it).',
             'void project team decline <invitation-id>',
           ),
         },

@@ -37,8 +37,9 @@ void project team invite teammate@example.com --role collaborator
 Pass `--project <slug>` to manage a project other than the linked project. An unknown email is rejected. A project invitation neither creates an account nor adds the address to a restricted-signup allowlist.
 
 Invitations expire after seven days. If the platform cannot send invitation
-email, the invitation still appears when the invited user runs
-`void project team pending`.
+email, the CLI prints the invitation ID and connection and acceptance commands
+to share with the invited user. The invitation also appears when that user runs
+`void project team pending` on the same platform.
 
 List the roster and sent invitations with:
 
@@ -49,9 +50,11 @@ void project team invitations
 
 ## Respond to an Invitation
 
-The invited user can see invitations addressed to their account and respond using the invitation ID:
+Connect to the platform from your invitation, then see invitations addressed to
+your account and respond using the invitation ID:
 
 ```sh
+void connect https://api.example.com
 void project team pending
 void project team accept <invitation-id>
 # or
@@ -60,9 +63,23 @@ void project team decline <invitation-id>
 
 An invitation is bound to the registered account. Forwarding its ID does not let another user accept it.
 
-These three invitation-response commands are account-scoped and do not depend
-on the current project's deploy target. They can run from a direct Cloudflare
-project directory when it resolves your connected Void platform account.
+These three commands use the active platform connection selected by
+`void connect`, even inside a directory linked to another project or deployed
+directly to Cloudflare. `VOID_API_URL` takes precedence when set. If you use
+`VOID_TOKEN`, set `VOID_API_URL` to the matching platform; a token without that
+URL selects Void Cloud. Each command shows the platform it contacts.
+
+Accepting an invitation grants access without linking your current directory.
+Open the invited application's directory and run `void project link` if it is
+not linked yet. If it is already linked to another project, use a separate
+checkout without `.void/project.json`, connect to the invited platform there,
+and run `void project link`.
+
+If the invitation is missing, check the platform and signed-in account. To
+switch accounts, set `VOID_API_URL` to the invitation's platform URL, unset
+`VOID_TOKEN` if present, then run `void auth logout` and `void auth login` using
+the invited email address. For an expired or revoked invitation, ask a project
+administrator to invite you again.
 
 ## Change or Remove Access
 

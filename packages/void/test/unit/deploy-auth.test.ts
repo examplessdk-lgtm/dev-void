@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'pathslash';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
@@ -152,6 +152,110 @@ describe('runDeploy auth failures', () => {
     await expect(runDeploy(process.cwd(), { projectSlug: 'my-app' })).rejects.toThrow(
       '`VOID_TOKEN` is invalid or expired. Generate a new token and try again.',
     );
+  });
+});
+
+describe('runDeploy project access', () => {
+  let root: string;
+  let savedProject: string | undefined;
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'void-deploy-project-access-'));
+    savedProject = process.env.VOID_PROJECT;
+    delete process.env.VOID_PROJECT;
+    // Stop allowed projects at app configuration, before building or uploading.
+    // Reader errors must precede this deliberately invalid configuration.
+    writeFileSync(join(root, 'void.json'), '{');
+  });
+
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+    if (savedProject === undefined) {
+      delete process.env.VOID_PROJECT;
+    } else {
+      process.env.VOID_PROJECT = savedProject;
+    }
+  });
+
+  function linkProject(slug = 'my-app'): void {
+    mkdirSync(join(root, '.void'));
+    writeFileSync(
+      join(root, '.void', 'project.json'),
+      JSON.stringify({ projectId: 'proj_1', slug, platform: 'void' }),
+    );
+  }
+
+  it.each(['flag', 'environment', 'saved'])(
+    'rejects a reader selected by %s before loading app configuration or building',
+    async (source) => {
+      mockListProjects.mockResolvedValue([{ id: 'proj_1', slug: 'my-app', role: 'reader' }]);
+      if (source === 'environment') {
+        process.env.VOID_PROJECT = 'my-app';
+      } else if (source === 'saved') {
+        // Linked identity is the project ID, even if the saved slug is outdated.
+        linkProject('old-slug');
+      }
+
+      await expect(
+        runDeploy(root, {
+          platform: 'void',
+          ...(source === 'flag' ? { projectSlug: 'my-app' } : {}),
+        }),
+      ).rejects.toThrow(
+        'You have reader access to "my-app" and cannot deploy. Ask a project admin or owner to grant collaborator access',
+      );
+
+      expect(mockListProjects).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each(['collaborator', 'admin', 'owner', undefined])(
+    'continues to app configuration for an explicit project with role %s',
+    async (role) => {
+      mockListProjects.mockResolvedValue([{ id: 'proj_1', slug: 'my-app', role }]);
+
+      await expect(runDeploy(root, { platform: 'void', projectSlug: 'my-app' })).rejects.toThrow(
+        'config: Invalid JSON in void.json.',
+      );
+
+      expect(mockListProjects).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each(['collaborator', 'admin', 'owner', undefined])(
+    'continues to app configuration for a saved project with role %s',
+    async (role) => {
+      linkProject();
+      mockListProjects.mockResolvedValue([{ id: 'proj_1', slug: 'my-app', role }]);
+
+      await expect(runDeploy(root, { platform: 'void' })).rejects.toThrow(
+        'config: Invalid JSON in void.json.',
+      );
+
+      expect(mockListProjects).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('rejects a stale saved project before building, even when another project shares its slug', async () => {
+    linkProject();
+    mockListProjects.mockResolvedValue([{ id: 'proj_2', slug: 'my-app', role: 'owner' }]);
+
+    await expect(runDeploy(root, { platform: 'void' })).rejects.toThrow(
+      'The linked project "my-app" is unavailable or you no longer have access.',
+    );
+
+    expect(mockListProjects).toHaveBeenCalledOnce();
+  });
+
+  it('does not fetch Void project roles for a direct Cloudflare deployment', async () => {
+    linkProject();
+
+    await expect(
+      runDeploy(root, { platform: 'cloudflare', projectSlug: 'my-app' }),
+    ).rejects.toThrow('--project is not supported with platform cloudflare');
+
+    expect(mockListProjects).not.toHaveBeenCalled();
+    expect(mockClientCtor).not.toHaveBeenCalled();
   });
 });
 

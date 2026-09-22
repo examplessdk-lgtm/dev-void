@@ -50,6 +50,7 @@ export async function promptProjectSelection(
     ...projects.map((p) => ({
       value: p.id,
       label: `${p.slug} (${p.url ?? `${p.slug}.${getSiteDomain(root)}`})`,
+      ...(p.role ? { hint: p.role === 'reader' ? 'reader (read-only)' : p.role } : {}),
     })),
   ];
 
@@ -71,8 +72,10 @@ export async function promptProjectSelection(
   if (options.confirmExisting) {
     const confirmed = await confirm({
       message:
-        `Linking to an existing project. Running \`void deploy\` will overwrite the current deployment of ` +
-        `${project.url ?? `${project.slug}.${getSiteDomain(root)}`}. Continue?`,
+        project.role === 'reader'
+          ? `Link to ${project.slug} with read-only access? Deploying requires collaborator access or higher.`
+          : `Linking to an existing project. Running \`void deploy\` will overwrite the current deployment of ` +
+            `${project.url ?? `${project.slug}.${getSiteDomain(root)}`}. Continue?`,
     });
     if (isCancel(confirmed) || !confirmed) {
       cancel('Project link cancelled.');

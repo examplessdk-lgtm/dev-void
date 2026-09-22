@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'pathslash';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
@@ -104,83 +104,152 @@ describe('project team target selection', () => {
     ]);
   });
 
-  it('uses the active connection for account invitations when a Cloudflare project retains another platform link', async () => {
-    const platformA = 'https://platform-a.example.test';
-    const platformB = 'https://platform-b.example.test';
-    const root = rootWithPlatform('cloudflare', { platformUrl: platformA });
-    vi.stubEnv('VOID_PLATFORM_REGISTRY_DIR', join(root, 'registry'));
-    connect(platformA, 'Platform A');
-    connect(platformB, 'Platform B');
-    keyring.read.mockImplementation((service: string, account: string) => {
-      if (service !== 'dev.void.cli') {
-        return null;
-      }
-      if (account === platformCredentialAccount(platformA)) {
-        return 'platform-a-token';
-      }
-      return account === platformCredentialAccount(platformB) ? 'platform-b-token' : null;
-    });
-    const fetchMock = vi.fn(async (input: string | URL | Request, _init?: RequestInit) => {
-      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-      return url.endsWith('/me/project-invitations')
-        ? Response.json({ invitations: [] })
-        : Response.json({});
-    });
-    vi.stubGlobal('fetch', fetchMock);
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
-
-    await runProjectCommand(root, { subcommand: 'team', action: 'pending' });
-    await runProjectCommand(root, {
-      subcommand: 'team',
-      action: 'accept',
-      invitationId: 'pinv_1',
-    });
-    await runProjectCommand(root, {
-      subcommand: 'team',
-      action: 'decline',
-      invitationId: 'pinv_1',
-    });
-
-    expect(fetchMock.mock.calls.map(([input]) => String(input))).toEqual([
-      `${platformB}/me/project-invitations`,
-      `${platformB}/project-invitations/pinv_1/accept`,
-      `${platformB}/project-invitations/pinv_1/decline`,
-    ]);
-    for (const [, init] of fetchMock.mock.calls) {
-      expect(init).toMatchObject({
-        headers: expect.objectContaining({ Authorization: 'Bearer platform-b-token' }),
+  it.each(['cloudflare', 'void'] as const)(
+    'uses the active connection for account invitations from a read-only %s project linked elsewhere',
+    async (platform) => {
+      const platformA = 'https://platform-a.example.test';
+      const platformB = 'https://platform-b.example.test';
+      const root = rootWithPlatform(platform, { platformUrl: platformA });
+      const projectPath = join(root, '.void', 'project.json');
+      const originalProject = readFileSync(projectPath, 'utf8');
+      vi.stubEnv('VOID_PLATFORM_REGISTRY_DIR', join(root, 'registry'));
+      connect(platformA, 'Platform A');
+      connect(platformB, 'Platform B');
+      keyring.read.mockImplementation((service: string, account: string) => {
+        if (service !== 'dev.void.cli') {
+          return null;
+        }
+        if (account === platformCredentialAccount(platformA)) {
+          return 'platform-a-token';
+        }
+        return account === platformCredentialAccount(platformB) ? 'platform-b-token' : null;
       });
-    }
-  });
+      const fetchMock = vi.fn(async (input: string | URL | Request, _init?: RequestInit) => {
+        const url =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        return url.endsWith('/me/project-invitations')
+          ? Response.json({ invitations: [] })
+          : Response.json({});
+      });
+      vi.stubGlobal('fetch', fetchMock);
+      vi.spyOn(console, 'log').mockImplementation(() => undefined);
+      vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
 
-  it('keeps an unscoped VOID_TOKEN bound to Void Cloud for account invitations', async () => {
-    const platformA = 'https://platform-a.example.test';
-    const platformB = 'https://platform-b.example.test';
-    const root = rootWithPlatform('cloudflare', { platformUrl: platformA });
+      chmodSync(projectPath, 0o444);
+      chmodSync(join(root, '.void'), 0o555);
+      try {
+        await runProjectCommand(root, { subcommand: 'team', action: 'pending' });
+        await runProjectCommand(root, {
+          subcommand: 'team',
+          action: 'accept',
+          invitationId: 'pinv_1',
+        });
+        await runProjectCommand(root, {
+          subcommand: 'team',
+          action: 'decline',
+          invitationId: 'pinv_1',
+        });
+        expect(readFileSync(projectPath, 'utf8')).toBe(originalProject);
+      } finally {
+        chmodSync(join(root, '.void'), 0o755);
+        chmodSync(projectPath, 0o644);
+      }
+
+      expect(fetchMock.mock.calls.map(([input]) => String(input))).toEqual([
+        `${platformB}/me/project-invitations`,
+        `${platformB}/project-invitations/pinv_1/accept`,
+        `${platformB}/project-invitations/pinv_1/decline`,
+      ]);
+      for (const [, init] of fetchMock.mock.calls) {
+        expect(init).toMatchObject({
+          headers: expect.objectContaining({ Authorization: 'Bearer platform-b-token' }),
+        });
+      }
+    },
+  );
+
+  it.each(['cloudflare', 'void'] as const)(
+    'keeps an unscoped VOID_TOKEN bound to Void Cloud for account invitations from a %s project',
+    async (platform) => {
+      const platformA = 'https://platform-a.example.test';
+      const platformB = 'https://platform-b.example.test';
+      const root = rootWithPlatform(platform, { platformUrl: platformA });
+      vi.stubEnv('VOID_PLATFORM_REGISTRY_DIR', join(root, 'registry'));
+      vi.stubEnv('VOID_TOKEN', 'void-cloud-token');
+      vi.stubEnv('VOID_API_URL', undefined);
+      connect(platformA, 'Platform A');
+      connect(platformB, 'Platform B');
+      keyring.read.mockImplementation((service: string, account: string) =>
+        service === 'dev.void.cli' && account === platformCredentialAccount(platformB)
+          ? 'platform-b-token'
+          : null,
+      );
+      const fetchMock = vi.fn(async () => Response.json({ invitations: [] }));
+      vi.stubGlobal('fetch', fetchMock);
+      vi.spyOn(console, 'log').mockImplementation(() => undefined);
+      vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+
+      await runProjectCommand(root, { subcommand: 'team', action: 'pending' });
+
+      expect(fetchMock).toHaveBeenCalledWith(
+        'https://api.void.cloud/me/project-invitations',
+        expect.objectContaining({
+          headers: expect.objectContaining({ Authorization: 'Bearer void-cloud-token' }),
+        }),
+      );
+    },
+  );
+
+  it('uses an explicit environment origin and its matching token over saved project and active connections', async () => {
+    const root = rootWithPlatform('void', { platformUrl: 'https://platform-a.example.test' });
     vi.stubEnv('VOID_PLATFORM_REGISTRY_DIR', join(root, 'registry'));
-    vi.stubEnv('VOID_TOKEN', 'void-cloud-token');
-    vi.stubEnv('VOID_API_URL', undefined);
-    connect(platformA, 'Platform A');
-    connect(platformB, 'Platform B');
-    keyring.read.mockImplementation((service: string, account: string) =>
-      service === 'dev.void.cli' && account === platformCredentialAccount(platformB)
-        ? 'platform-b-token'
-        : null,
-    );
+    connect('https://platform-b.example.test', 'Platform B');
+    vi.stubEnv('VOID_API_URL', 'https://platform-c.example.test/');
+    vi.stubEnv('VOID_TOKEN', 'platform-c-token');
     const fetchMock = vi.fn(async () => Response.json({ invitations: [] }));
     vi.stubGlobal('fetch', fetchMock);
     vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    const output: Array<string> = [];
+    vi.spyOn(process.stdout, 'write').mockImplementation((chunk) => {
+      output.push(String(chunk));
+      return true;
+    });
 
     await runProjectCommand(root, { subcommand: 'team', action: 'pending' });
 
     expect(fetchMock).toHaveBeenCalledWith(
-      'https://api.void.cloud/me/project-invitations',
+      'https://platform-c.example.test/me/project-invitations',
       expect.objectContaining({
-        headers: expect.objectContaining({ Authorization: 'Bearer void-cloud-token' }),
+        headers: expect.objectContaining({ Authorization: 'Bearer platform-c-token' }),
       }),
     );
+    expect(output.join('')).toContain('Platform: https://platform-c.example.test');
+  });
+
+  it('never falls back to the linked project token when the active platform has no login', async () => {
+    const platformA = 'https://platform-a.example.test';
+    const platformB = 'https://platform-b.example.test';
+    const root = rootWithPlatform('void', { platformUrl: platformA });
+    vi.stubEnv('VOID_PLATFORM_REGISTRY_DIR', join(root, 'registry'));
+    connect(platformA, 'Platform A');
+    connect(platformB, 'Platform B');
+    keyring.read.mockImplementation((service: string, account: string) =>
+      service === 'dev.void.cli' && account === platformCredentialAccount(platformA)
+        ? 'platform-a-token'
+        : null,
+    );
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('missing login');
+    });
+
+    await expect(
+      runProjectCommand(root, { subcommand: 'team', action: 'pending' }),
+    ).rejects.toThrow('missing login');
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('uses the linked Void platform project for member listing', async () => {
@@ -297,5 +366,89 @@ describe('project team target selection', () => {
 
     expect(output.join('')).not.toContain('\u0007');
     expect(output.join('')).toContain('target @example.com');
+  });
+
+  it.each(['failed', 'not_configured', 'rate_limited'])(
+    'shows recovery instructions when invitation email is %s',
+    async (status) => {
+      const root = rootWithPlatform('void');
+      vi.stubEnv('VOID_TOKEN', 'test-token');
+      vi.stubEnv('VOID_API_URL', 'https://api.example.test');
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () =>
+          Response.json({
+            invitation: { id: 'pinv_a1b2c3d4e5f6', target_email: 'target@example.com' },
+            refreshed: false,
+            delivery: { status },
+          }),
+        ),
+      );
+      vi.spyOn(console, 'log').mockImplementation(() => undefined);
+      const output: Array<string> = [];
+      vi.spyOn(process.stdout, 'write').mockImplementation((chunk) => {
+        output.push(String(chunk));
+        return true;
+      });
+
+      await runProjectCommand(root, {
+        subcommand: 'team',
+        action: 'invite',
+        email: 'target@example.com',
+        role: 'reader',
+        projectSlug: '',
+      });
+
+      expect(output.join('')).toContain('Invitation saved; email was not sent');
+      expect(output.join('')).toContain('Invitation: pinv_a1b2c3d4e5f6');
+      expect(output.join('')).toContain("void connect 'https://api.example.test'");
+      expect(output.join('')).toContain('void project team pending');
+      expect(output.join('')).toContain('void project team accept pinv_a1b2c3d4e5f6');
+    },
+  );
+
+  it.each([
+    {
+      error: 'project invitation not found',
+      status: 404,
+      message: 'Invitation not found on https://api.example.test',
+      recovery: 'void connect <url>',
+    },
+    {
+      error: 'forbidden',
+      status: 403,
+      message: 'Your account cannot respond',
+      recovery: 'void auth logout',
+    },
+    {
+      error: 'project invitation has expired',
+      status: 409,
+      message: 'This invitation has expired',
+      recovery: 'invite you again',
+    },
+    {
+      error: 'project invitation is no longer pending',
+      status: 409,
+      message: 'already been answered or revoked',
+      recovery: 'check your access',
+    },
+  ])('explains $error with a recovery action', async ({ error, status, message, recovery }) => {
+    const root = rootWithPlatform('void');
+    vi.stubEnv('VOID_TOKEN', 'test-token');
+    vi.stubEnv('VOID_API_URL', 'https://api.example.test');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => Response.json({ error }, { status })),
+    );
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+
+    const result = runProjectCommand(root, {
+      subcommand: 'team',
+      action: 'accept',
+      invitationId: 'pinv_1',
+    });
+    await expect(result).rejects.toThrow(message);
+    await expect(result).rejects.toThrow(recovery);
   });
 });

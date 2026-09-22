@@ -135,6 +135,42 @@ export function getToken(root: string = process.cwd()): string | null {
     }
     return null;
   }
+  const config = readConfig();
+  return readTokenForOrigin(apiUrl, config, legacyCredentialAccount(root, apiUrl, config));
+}
+
+/** Account actions follow the selected connection, independently of application metadata. */
+export function getAccountCredential(): { apiUrl: string; token: string | null } {
+  const config = readConfig();
+  const apiUrl = normalizePlatformApiUrl(
+    process.env.VOID_API_URL ||
+      (process.env.VOID_TOKEN
+        ? DEFAULT_API_URL
+        : (getActivePlatformConnection()?.apiUrl ??
+          config.api ??
+          readLegacyHostedPlatformSelection()?.apiUrl ??
+          (keyringGet('token')
+            ? DEFAULT_API_URL
+            : keyringGet('stagingToken')
+              ? STAGING_API_URL
+              : DEFAULT_API_URL))),
+  );
+  return {
+    apiUrl,
+    token: readTokenForOrigin(
+      apiUrl,
+      config,
+      legacyCredentialAccountForMode(apiUrl === STAGING_API_URL, apiUrl, config),
+    ),
+  };
+}
+
+function readTokenForOrigin(
+  apiUrl: string,
+  config: Config,
+  legacyAccount: 'token' | 'stagingToken' | null,
+): string | null {
+  const envToken = process.env.VOID_TOKEN;
   if (envToken) {
     const tokenOrigin = process.env.VOID_API_URL
       ? normalizePlatformApiUrl(process.env.VOID_API_URL)
@@ -146,7 +182,6 @@ export function getToken(root: string = process.cwd()): string | null {
     }
     return envToken;
   }
-  const config = readConfig();
   const normalizedApiUrl = normalizePlatformApiUrl(apiUrl);
   const originToken = readOriginScopedToken(normalizedApiUrl, config);
   if (originToken) {
@@ -155,7 +190,6 @@ export function getToken(root: string = process.cwd()): string | null {
 
   const account = platformCredentialAccount(normalizedApiUrl);
 
-  const legacyAccount = legacyCredentialAccount(root, normalizedApiUrl, config);
   if (legacyAccount) {
     const legacyKeyringToken = keyringGet(legacyAccount);
     if (legacyKeyringToken) {
@@ -267,11 +301,19 @@ function legacyCredentialAccount(
   normalizedApiUrl: string,
   config: Config,
 ): 'token' | 'stagingToken' | null {
-  const account = isStagingMode(root) ? 'stagingToken' : 'token';
+  return legacyCredentialAccountForMode(isStagingMode(root), normalizedApiUrl, config);
+}
+
+function legacyCredentialAccountForMode(
+  staging: boolean,
+  normalizedApiUrl: string,
+  config: Config,
+): 'token' | 'stagingToken' | null {
+  const account = staging ? 'stagingToken' : 'token';
   let configuredUrl: string;
   try {
     configuredUrl = normalizePlatformApiUrl(
-      config.api ?? (isStagingMode(root) ? STAGING_API_URL : DEFAULT_API_URL),
+      config.api ?? (staging ? STAGING_API_URL : DEFAULT_API_URL),
     );
   } catch {
     return null;

@@ -1,4 +1,4 @@
-import { and, eq } from 'drizzle-orm';
+import { and, count, eq, gt, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 import {
   createBuild,
@@ -839,7 +839,7 @@ describe('project team API', () => {
     expect(declinedAgain.status).toBe(204);
   });
 
-  it('refreshes an expired pending invitation instead of consuming another pending slot', async () => {
+  it('refreshes an expired pending invitation using the same invitation ID', async () => {
     const owner = await createTestUser(env.db, 'owner');
     const target = await createTestUser(env.db, 'target');
     await setEmail(target.id, 'target@example.com');
@@ -859,6 +859,220 @@ describe('project team API', () => {
     expect(row).toMatchObject({ status: 'pending', role: 'admin' });
     expect(Date.parse(row.expires_at)).toBeGreaterThan(Date.now());
     expect(await env.db.select().from(projectInvitations)).toHaveLength(1);
+  });
+
+  describe('pending invitation capacity', () => {
+    async function seedInvitations(
+      projectId: string,
+      ownerId: string,
+      liveCount: number,
+    ): Promise<void> {
+      const targets = Array.from({ length: liveCount + 1 }, (_, index) => ({
+        id: `${projectId}-target-${index}`,
+        provider: 'github',
+        provider_id: `${projectId}-provider-${index}`,
+        login: `target-${index}`,
+        email: `target-${index}@example.com`,
+      }));
+      await env.db.insert(users).values(targets);
+      await env.db.insert(projectInvitations).values(
+        targets.map((target, index) => ({
+          id: `${projectId}-invitation-${index}`,
+          project_id: projectId,
+          target_user_id: target.id,
+          target_email_snapshot: target.email,
+          role: 'reader' as const,
+          invited_by_user_id: ownerId,
+          expires_at:
+            index < liveCount ? sql`now() + interval '1 day'` : sql`now() - interval '1 day'`,
+        })),
+      );
+    }
+
+    async function liveInvitationCount(projectId: string): Promise<number> {
+      const [result] = await env.db
+        .select({ count: count() })
+        .from(projectInvitations)
+        .where(
+          and(
+            eq(projectInvitations.project_id, projectId),
+            eq(projectInvitations.status, 'pending'),
+            gt(projectInvitations.expires_at, sql`now()`),
+          ),
+        );
+      return result!.count;
+    }
+
+    it.each(['create', 'refresh', 'resend'] as const)(
+      'rejects %s at capacity without changing invitations, auditing, or emailing',
+      async (action) => {
+        const owner = await createTestUser(env.db, 'capacity-owner');
+        const target = await createTestUser(env.db, 'capacity-new-target');
+        await setEmail(target.id, 'new-target@example.com');
+        const project = await createTestProject(env.db, owner.id);
+        await seedInvitations(project.id, owner.id, 100);
+        const before = await env.db.select().from(projectInvitations);
+        const send = vi.fn().mockResolvedValue(undefined);
+
+        const response = await app.fetch(
+          action === 'resend'
+            ? request(
+                `/projects/${project.id}/invitations/${project.id}-invitation-100/resend`,
+                owner.jwt,
+                {
+                  method: 'POST',
+                },
+              )
+            : request(`/projects/${project.id}/invitations`, owner.jwt, {
+                method: 'POST',
+                body: {
+                  email: action === 'create' ? 'new-target@example.com' : 'target-100@example.com',
+                  role: 'admin',
+                },
+              }),
+          { ...env, EMAIL: { send } as unknown as SendEmail },
+        );
+
+        expect(response.status).toBe(409);
+        expect(await response.json()).toEqual({
+          error: 'project has too many pending invitations',
+        });
+        expect(await env.db.select().from(projectInvitations)).toEqual(before);
+        expect(await liveInvitationCount(project.id)).toBe(100);
+        expect(await env.db.select().from(projectAccessEvents)).toEqual([]);
+        expect(send).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(['create', 'refresh', 'resend'] as const)(
+      'allows %s to consume the final live slot despite expired and historical invitations',
+      async (action) => {
+        const owner = await createTestUser(env.db, 'capacity-owner');
+        const target = await createTestUser(env.db, 'capacity-new-target');
+        await setEmail(target.id, 'new-target@example.com');
+        const project = await createTestProject(env.db, owner.id);
+        await seedInvitations(project.id, owner.id, 99);
+        await env.db.insert(projectInvitations).values(
+          (['accepted', 'declined', 'revoked', 'expired'] as const).map((status) => ({
+            id: `${project.id}-history-${status}`,
+            project_id: project.id,
+            target_user_id: target.id,
+            target_email_snapshot: 'new-target@example.com',
+            role: 'reader' as const,
+            invited_by_user_id: owner.id,
+            status,
+            expires_at: sql`now() + interval '1 day'`,
+          })),
+        );
+
+        const response = await app.fetch(
+          action === 'resend'
+            ? request(
+                `/projects/${project.id}/invitations/${project.id}-invitation-99/resend`,
+                owner.jwt,
+                {
+                  method: 'POST',
+                },
+              )
+            : request(`/projects/${project.id}/invitations`, owner.jwt, {
+                method: 'POST',
+                body: {
+                  email: action === 'create' ? 'new-target@example.com' : 'target-99@example.com',
+                  role: 'admin',
+                },
+              }),
+          env,
+        );
+
+        expect(response.status).toBe(action === 'create' ? 201 : 200);
+        expect(await response.json()).toMatchObject({
+          invitation: {
+            ...(action === 'create' ? {} : { id: `${project.id}-invitation-99` }),
+            status: 'pending',
+            role: action === 'resend' ? 'reader' : 'admin',
+          },
+        });
+        expect(await liveInvitationCount(project.id)).toBe(100);
+        expect(await env.db.select().from(projectAccessEvents)).toMatchObject([
+          { action: action === 'resend' ? 'invitation_resent' : 'invited' },
+        ]);
+      },
+    );
+
+    it.each(['refresh', 'resend'] as const)(
+      'allows %s of an existing live invitation at capacity without consuming another slot',
+      async (action) => {
+        const owner = await createTestUser(env.db, 'capacity-owner');
+        const project = await createTestProject(env.db, owner.id);
+        await seedInvitations(project.id, owner.id, 100);
+        const invitationId = `${project.id}-invitation-0`;
+        const [before] = await env.db
+          .select()
+          .from(projectInvitations)
+          .where(eq(projectInvitations.id, invitationId));
+
+        const response = await app.fetch(
+          action === 'resend'
+            ? request(`/projects/${project.id}/invitations/${invitationId}/resend`, owner.jwt, {
+                method: 'POST',
+              })
+            : request(`/projects/${project.id}/invitations`, owner.jwt, {
+                method: 'POST',
+                body: { email: 'target-0@example.com', role: 'admin' },
+              }),
+          env,
+        );
+
+        expect(response.status).toBe(200);
+        const [after] = await env.db
+          .select()
+          .from(projectInvitations)
+          .where(eq(projectInvitations.id, invitationId));
+        expect(Date.parse(after!.expires_at)).toBeGreaterThan(Date.parse(before!.expires_at));
+        expect(after!.role).toBe(action === 'resend' ? 'reader' : 'admin');
+        expect(await liveInvitationCount(project.id)).toBe(100);
+        expect(await env.db.select().from(projectInvitations)).toHaveLength(101);
+        expect(await env.db.select().from(projectAccessEvents)).toHaveLength(1);
+      },
+    );
+
+    it('serializes competing expired invitation renewals for the final live slot', async () => {
+      const owner = await createTestUser(env.db, 'capacity-owner');
+      const target = await createTestUser(env.db, 'capacity-resend-target');
+      await setEmail(target.id, 'resend-target@example.com');
+      const project = await createTestProject(env.db, owner.id);
+      await seedInvitations(project.id, owner.id, 99);
+      const resendId = `${project.id}-resend`;
+      await env.db.insert(projectInvitations).values({
+        id: resendId,
+        project_id: project.id,
+        target_user_id: target.id,
+        target_email_snapshot: 'resend-target@example.com',
+        role: 'reader',
+        invited_by_user_id: owner.id,
+        expires_at: sql`now() - interval '1 day'`,
+      });
+
+      const responses = await Promise.all([
+        app.fetch(
+          request(`/projects/${project.id}/invitations`, owner.jwt, {
+            method: 'POST',
+            body: { email: 'target-99@example.com', role: 'admin' },
+          }),
+          env,
+        ),
+        app.fetch(
+          request(`/projects/${project.id}/invitations/${resendId}/resend`, owner.jwt, {
+            method: 'POST',
+          }),
+          env,
+        ),
+      ]);
+
+      expect(responses.map((response) => response.status).sort()).toEqual([200, 409]);
+      expect(await liveInvitationCount(project.id)).toBe(100);
+      expect(await env.db.select().from(projectAccessEvents)).toHaveLength(1);
+    });
   });
 
   it('rejects acceptance when the invited account has become the project owner', async () => {

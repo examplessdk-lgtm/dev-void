@@ -423,11 +423,12 @@ const app = new Hono<ApiEnv>()
 <pre><code>${command}</code></pre>
 ${
   invitationCommand
-    ? `<p>Then accept the project invitation:</p>
+    ? `<p>Then accept the project invitation. The CLI checks that it is still valid and addressed to your signed-in account:</p>
 <pre><code>${invitationCommand}</code></pre>`
     : ''
 }
-<p>The CLI opens your browser to sign in when needed. If your application is already linked to another project, run <code>void project link</code> from its directory to choose a project on this platform before deploying.</p>
+<p>The CLI opens your browser to sign in when needed. Invitation commands use your connected platform account and can run from any directory.</p>
+<p>To work on an application on this platform, open its directory and run <code>void project link</code> if it is not linked yet. If that directory is already linked to another project, use a separate checkout without a <code>.void/project.json</code> file, connect to this platform there, and run <code>void project link</code>. Accepting an invitation keeps existing project links.</p>
 <p>Need to create an application? Read the <a href="https://void.cloud/guide/quickstart">Void quickstart</a>, then return here to connect to this platform before deploying.</p>
 </div>
 </body></html>`);

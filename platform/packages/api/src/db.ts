@@ -768,6 +768,29 @@ export async function getPendingProjectInvitationsByUserId(
   return rows.map((row) => row.invitation);
 }
 
+/** The project lock must be held while checking capacity and writing the invitation. */
+async function requireLockedProjectInvitationCapacity(
+  db: Db,
+  projectId: string,
+  existingInvitationId?: string,
+): Promise<void> {
+  const [pendingCount] = await db
+    .select({ count: count() })
+    .from(projectInvitations)
+    .where(
+      and(
+        eq(projectInvitations.project_id, projectId),
+        eq(projectInvitations.status, 'pending'),
+        gt(projectInvitations.expires_at, sql`now()`),
+        // A live invitation already occupies its slot; an expired one needs a free slot.
+        existingInvitationId ? ne(projectInvitations.id, existingInvitationId) : undefined,
+      ),
+    );
+  if ((pendingCount?.count ?? 0) >= 100) {
+    throw new ProjectTeamMutationError('pending-invitation-limit');
+  }
+}
+
 export async function createOrRefreshProjectInvitation(
   db: Db,
   args: {
@@ -832,21 +855,7 @@ export async function createOrRefreshProjectInvitation(
       .for('update')
       .limit(1);
 
-    if (!pending) {
-      const [pendingCount] = await txDb
-        .select({ count: count() })
-        .from(projectInvitations)
-        .where(
-          and(
-            eq(projectInvitations.project_id, args.projectId),
-            eq(projectInvitations.status, 'pending'),
-            gt(projectInvitations.expires_at, sql`now()`),
-          ),
-        );
-      if ((pendingCount?.count ?? 0) >= 100) {
-        throw new ProjectTeamMutationError('pending-invitation-limit');
-      }
-    }
+    await requireLockedProjectInvitationCapacity(txDb, args.projectId, pending?.id);
 
     let invitation: ProjectInvitation;
     if (pending) {
@@ -922,6 +931,7 @@ export async function resendProjectInvitation(
     if (!target?.email) {
       throw new ProjectTeamMutationError('target-user-not-found');
     }
+    await requireLockedProjectInvitationCapacity(txDb, args.projectId, invitation.id);
     const normalizedEmail = target.email.trim().toLowerCase();
     const [updated] = await txDb
       .update(projectInvitations)

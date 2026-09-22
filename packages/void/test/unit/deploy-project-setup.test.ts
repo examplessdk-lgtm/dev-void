@@ -259,4 +259,94 @@ describe('promptDeployProjectConfig', () => {
     expect(config).toEqual({ projectId: 'proj_1', slug: 'existing-app' });
     expect(client.createProject).not.toHaveBeenCalled();
   });
+
+  it('hides reader projects and identifies roles when selecting a deployment destination', async () => {
+    const { promptDeployProjectConfig } = await import('../../src/cli/deploy.ts');
+    const client = createClient();
+    client.listProjects.mockResolvedValueOnce([
+      { id: 'proj_reader', slug: 'read-only-app', role: 'reader' },
+      { id: 'proj_collaborator', slug: 'shared-app', role: 'collaborator' },
+      { id: 'proj_admin', slug: 'admin-app', role: 'admin' },
+      { id: 'proj_owner', slug: 'owned-app', role: 'owner' },
+      { id: 'proj_legacy', slug: 'legacy-app' },
+    ]);
+    mockSelect.mockResolvedValueOnce('link').mockResolvedValueOnce('proj_collaborator');
+    mockConfirm.mockResolvedValueOnce(true);
+
+    const config = await promptDeployProjectConfig(root, client);
+
+    expect(mockSelect.mock.calls[1]?.[0]).toEqual({
+      message: 'Select a project to deploy to:',
+      options: [
+        {
+          value: 'proj_collaborator',
+          label: 'shared-app (shared-app.void.app)',
+          hint: 'collaborator',
+        },
+        { value: 'proj_admin', label: 'admin-app (admin-app.void.app)', hint: 'admin' },
+        { value: 'proj_owner', label: 'owned-app (owned-app.void.app)', hint: 'owner' },
+        { value: 'proj_legacy', label: 'legacy-app (legacy-app.void.app)' },
+      ],
+    });
+    expect(mockWarn).toHaveBeenCalledWith(
+      expect.stringContaining('Projects with reader access are hidden from deploy selection.'),
+    );
+    expect(config).toEqual({ projectId: 'proj_collaborator', slug: 'shared-app' });
+  });
+
+  it('offers project creation without an empty link picker when every project is read-only', async () => {
+    const { promptDeployProjectConfig } = await import('../../src/cli/deploy.ts');
+    const client = createClient();
+    client.listProjects.mockResolvedValueOnce([
+      { id: 'proj_reader', slug: 'read-only-app', role: 'reader' },
+    ]);
+    client.createProject.mockResolvedValueOnce({ id: 'proj_new', slug: 'new-app' });
+    mockSelect.mockResolvedValueOnce('create');
+    mockText.mockResolvedValueOnce('new-app');
+
+    const config = await promptDeployProjectConfig(root, client);
+
+    expect(mockSelect).toHaveBeenCalledOnce();
+    expect(mockSelect).toHaveBeenCalledWith({
+      message: 'Set up a Void project for deploy:',
+      options: [{ value: 'create', label: 'Create a new project' }],
+    });
+    expect(mockWarn).toHaveBeenCalledWith(expect.stringContaining('grant collaborator access'));
+    expect(config).toEqual({ projectId: 'proj_new', slug: 'new-app' });
+  });
+
+  it('keeps reader projects linkable and describes read-only access in the shared picker', async () => {
+    const { promptProjectSelection } = await import('../../src/cli/prompt.ts');
+    const project = {
+      id: 'proj_reader',
+      user_id: 'user_owner',
+      slug: 'read-only-app',
+      type: 'worker',
+      created_at: '2026-04-24T00:00:00.000Z',
+      custom_domain: null,
+      role: 'reader' as const,
+    };
+    mockSelect.mockResolvedValueOnce(project.id);
+    mockConfirm.mockResolvedValueOnce(true);
+
+    await expect(
+      promptProjectSelection([project], 'Select a project:', root, { confirmExisting: true }),
+    ).resolves.toEqual({ action: 'select', project });
+
+    expect(mockSelect).toHaveBeenCalledWith({
+      message: 'Select a project:',
+      options: [
+        { value: '__create__', label: 'Create new project' },
+        {
+          value: 'proj_reader',
+          label: 'read-only-app (read-only-app.void.app)',
+          hint: 'reader (read-only)',
+        },
+      ],
+    });
+    expect(mockConfirm).toHaveBeenCalledWith({
+      message:
+        'Link to read-only-app with read-only access? Deploying requires collaborator access or higher.',
+    });
+  });
 });

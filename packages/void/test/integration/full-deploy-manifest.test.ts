@@ -15,6 +15,7 @@ import {
   createIsolatedPlayground,
   type IsolatedPlayground,
 } from '../../../../test/integration-helpers.ts';
+import type { ProjectRole } from '../../src/cli/client.ts';
 import type { DetectedFramework } from '../../src/plugin-inference.ts';
 
 // @clack/prompts + the output-spinner wrapper are TTY-bound; noop them (same as
@@ -102,13 +103,28 @@ type Captured = { finalizeBody: { manifest?: { pages?: unknown } } | null };
 // Minimal platform mock: report every asset as already-present so the
 // upload-urls + R2 PUT phase is skipped and runFullDeploy goes straight to the
 // finalize POST, whose JSON body we capture.
-function installPlatformMocks(): Captured {
+function installPlatformMocks(role: ProjectRole = 'owner'): Captured {
   const captured: Captured = { finalizeBody: null };
 
   fetchMock.mockImplementation(async (input: RequestInfo, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : (input as Request).url;
     const reqInit = init ?? {};
     const method = (reqInit.method ?? 'GET').toUpperCase();
+
+    if (url.endsWith('/projects') && method === 'GET') {
+      return json([
+        {
+          id: 'proj_named_layouts_test',
+          user_id: 'user_owner',
+          slug: 'named-layouts-test',
+          type: 'worker',
+          created_at: '2026-09-01T00:00:00.000Z',
+          custom_domain: null,
+          role,
+          owner: { id: 'user_owner', login: 'owner' },
+        },
+      ]);
+    }
 
     if (url.endsWith('/deploy/preflight') && method === 'POST') {
       const body = JSON.parse(reqInit.body as string) as {
@@ -215,7 +231,7 @@ describe('runFullDeploy emits manifest.pages (Void pages app, end-to-end)', () =
   beforeEach(() => {
     // Default: no framework detected → the Void pages path. The framework test
     // overrides this to a Class-A framework before driving runDeploy.
-    mockDetectFramework.mockReturnValue(undefined);
+    mockDetectFramework.mockReset().mockReturnValue(undefined);
 
     originalFetch = globalThis.fetch;
     globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
@@ -226,7 +242,7 @@ describe('runFullDeploy emits manifest.pages (Void pages app, end-to-end)', () =
     savedProject = process.env.VOID_PROJECT;
     // Explicit token bypasses getToken() + the GitHub-Actions OIDC branch.
     process.env.VOID_TOKEN = 'test-token-do-not-use';
-    // Force resolution via .void/project.json (avoid the listProjects() path).
+    // Select the saved project; runDeploy verifies its current role through the API.
     delete process.env.VOID_PROJECT;
   });
 
@@ -314,5 +330,21 @@ describe('runFullDeploy emits manifest.pages (Void pages app, end-to-end)', () =
     // the `isFrameworkMode ? undefined :` gate in assembleVoidManifest turns
     // this RED (pages becomes the populated array instead of undefined).
     expect(captured.finalizeBody!.manifest?.pages).toBeUndefined();
+  });
+
+  it('rejects a saved reader project before building or uploading', async () => {
+    const captured = installPlatformMocks('reader');
+
+    // Do not skip the build: access must be checked before framework detection
+    // can select a build path, regardless of the fixture's existing artifacts.
+    await expect(runDeploy(fixture)).rejects.toThrow(
+      'You have reader access to "named-layouts-test" and cannot deploy.',
+    );
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(fetchMock.mock.calls[0]?.[0]).toMatch(/\/projects$/);
+    expect(mockDetectFramework).not.toHaveBeenCalled();
+    expect(mockCollectPrerenderPaths).not.toHaveBeenCalled();
+    expect(captured.finalizeBody).toBeNull();
   });
 });

@@ -1,15 +1,14 @@
 import { intro, log, note, outro } from '@clack/prompts';
-import { getToken, readPlatformToken } from './auth.ts';
+import { getAccountCredential, getToken } from './auth.ts';
 import {
+  PlatformApiError,
   PlatformClient,
   type ProjectInvitationResponse,
   type ProjectMemberResponse,
 } from './client.ts';
-import { VOID_CLOUD_PLATFORM } from './hosted-platform.ts';
 import { cliTitle } from './output.ts';
-import { getActivePlatformConnection } from './platform-registry.ts';
 import type { ProjectArgs } from './project-args.ts';
-import { readDeploymentPlatform, readProjectConfig } from './project.ts';
+import { readProjectConfig } from './project.ts';
 import { getRequestedProjectSlug, resolveProjectBySlug } from './resolve-project.ts';
 
 type ProjectTeamArgs = Exclude<Extract<ProjectArgs, { subcommand: 'team' }>, { action: '' }>;
@@ -74,20 +73,25 @@ async function resolveProjectId(
   return linked.projectId;
 }
 
-function resolveCredential(
-  root: string,
-  accountScoped: boolean,
-): { apiUrl?: string; token: string | null } {
-  if (accountScoped && readDeploymentPlatform(root) === 'cloudflare' && !process.env.VOID_API_URL) {
-    if (process.env.VOID_TOKEN) {
-      return { apiUrl: VOID_CLOUD_PLATFORM.apiUrl, token: process.env.VOID_TOKEN };
-    }
-    const connection = getActivePlatformConnection();
-    if (connection) {
-      return { apiUrl: connection.apiUrl, token: readPlatformToken(connection.apiUrl) };
-    }
+function invitationResponseError(error: unknown, apiUrl: string): unknown {
+  if (!(error instanceof PlatformApiError)) {
+    return error;
   }
-  return { token: getToken(root) };
+  let message: string;
+  if (error.code === 'project invitation not found') {
+    message = `Invitation not found on ${apiUrl}. Check VOID_API_URL if set, connect to the platform in your invitation with \`void connect <url>\`, then run \`void project team pending\` to check the invitation ID. If it is missing, ask a project administrator for a new invitation.`;
+  } else if (error.code === 'forbidden') {
+    message = `Your account cannot respond to this invitation on ${apiUrl}. Sign in with the account whose registered email received the invitation. To switch accounts, set VOID_API_URL to ${apiUrl}, unset VOID_TOKEN if present, then run \`void auth logout\` and \`void auth login\`. Run \`void project team pending\` to see that account's invitations.`;
+  } else if (error.code === 'project invitation has expired') {
+    message =
+      'This invitation has expired. Ask a project administrator to invite you again, then run `void project team pending`.';
+  } else if (error.code === 'project invitation is no longer pending') {
+    message =
+      'This invitation has already been answered or revoked. Run `void project team pending` to see invitations awaiting your response, or ask a project administrator to check your access.';
+  } else {
+    return error;
+  }
+  return new Error(message, { cause: error });
 }
 
 export async function runProjectTeamCommand(root: string, args: ProjectTeamArgs): Promise<void> {
@@ -96,7 +100,12 @@ export async function runProjectTeamCommand(root: string, args: ProjectTeamArgs)
 
   const accountScoped =
     args.action === 'pending' || args.action === 'accept' || args.action === 'decline';
-  const { apiUrl, token } = resolveCredential(root, accountScoped);
+  const { apiUrl, token } = accountScoped
+    ? getAccountCredential()
+    : { apiUrl: undefined, token: getToken(root) };
+  if (apiUrl) {
+    log.info(`Platform: ${apiUrl}`);
+  }
   if (!token) {
     log.error(
       apiUrl
@@ -118,7 +127,16 @@ export async function runProjectTeamCommand(root: string, args: ProjectTeamArgs)
     return;
   }
   if (args.action === 'accept' || args.action === 'decline') {
-    await client.respondToProjectInvitation(args.invitationId, args.action);
+    try {
+      await client.respondToProjectInvitation(args.invitationId, args.action);
+    } catch (error) {
+      throw invitationResponseError(error, client.apiUrl);
+    }
+    if (args.action === 'accept') {
+      log.info(
+        'Open the invited application’s directory and run `void project link` if it is not linked yet. If it is linked to another project, use a separate checkout. Accepting an invitation keeps existing project links.',
+      );
+    }
     outro(`Project invitation ${args.action === 'accept' ? 'accepted' : 'declined'}.`);
     return;
   }
@@ -151,6 +169,12 @@ export async function runProjectTeamCommand(root: string, args: ProjectTeamArgs)
         ? ''
         : ` (email delivery: ${result.delivery.status.replace('_', ' ')})`;
     const action = result.refreshed ? 'Updated invitation for' : 'Invited';
+    if (result.delivery.status !== 'sent') {
+      note(
+        `Invitation: ${clean(result.invitation.id)}\nShare these steps with the invited user:\n\nvoid connect '${client.apiUrl.replaceAll("'", "'\\''")}'\nvoid project team pending\nvoid project team accept ${clean(result.invitation.id)}`,
+        'Invitation saved; email was not sent',
+      );
+    }
     outro(`${action} ${clean(invitationEmail(result.invitation))} as ${args.role}${delivery}.`);
     return;
   }

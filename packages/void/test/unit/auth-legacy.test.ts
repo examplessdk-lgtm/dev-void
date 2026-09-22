@@ -56,6 +56,67 @@ afterEach(() => {
 });
 
 describe('legacy Void Cloud authentication', () => {
+  it.each([
+    { account: 'token', apiUrl: 'https://api.void.cloud' },
+    { account: 'stagingToken', apiUrl: 'https://api.staging.void.cloud' },
+  ])(
+    'keeps legacy $account keychain login available for account invitation commands',
+    async ({ account, apiUrl }) => {
+      state.passwords.set(`dev.void.cli:${account}`, 'legacy-account-token');
+      const { getAccountCredential } = await import('../../src/cli/auth.ts');
+      const { platformCredentialAccount } = await import('../../src/cli/platform-registry.ts');
+
+      expect(getAccountCredential()).toEqual({ apiUrl, token: 'legacy-account-token' });
+      expect(state.passwords.get(`dev.void.cli:${platformCredentialAccount(apiUrl)}`)).toBe(
+        'legacy-account-token',
+      );
+    },
+  );
+
+  it.each([
+    { account: 'token', apiUrl: 'https://api.void.cloud' },
+    { account: 'stagingToken', apiUrl: 'https://api.staging.void.cloud' },
+    { account: 'token', apiUrl: 'https://legacy-platform.example.test' },
+  ])(
+    'migrates legacy file login for account invitation commands at $apiUrl',
+    async ({ account, apiUrl }) => {
+      const configDirectory = join(state.home, '.void');
+      mkdirSync(configDirectory, { recursive: true });
+      const configPath = join(configDirectory, 'config.json');
+      writeFileSync(configPath, JSON.stringify({ api: apiUrl, [account]: 'legacy-account-token' }));
+      const { getAccountCredential } = await import('../../src/cli/auth.ts');
+
+      expect(getAccountCredential()).toEqual({ apiUrl, token: 'legacy-account-token' });
+      expect(JSON.parse(readFileSync(configPath, 'utf8'))).toEqual({ api: apiUrl });
+    },
+  );
+
+  it('does not migrate a legacy credential for another active platform', async () => {
+    const configDirectory = join(state.home, '.void');
+    mkdirSync(configDirectory, { recursive: true });
+    writeFileSync(
+      join(configDirectory, 'config.json'),
+      JSON.stringify({ token: 'cloud-only-token' }),
+    );
+    const { savePlatformConnection } = await import('../../src/cli/platform-registry.ts');
+    savePlatformConnection({
+      accountId: null,
+      apiUrl: 'https://platform.example.test',
+      applicationDomain: null,
+      displayName: 'Platform',
+      installationId: null,
+      kind: 'connected',
+      proxyUrl: null,
+    });
+    const { getAccountCredential } = await import('../../src/cli/auth.ts');
+
+    expect(getAccountCredential()).toEqual({
+      apiUrl: 'https://platform.example.test',
+      token: null,
+    });
+    expect(state.passwords.size).toBe(0);
+  });
+
   it('preserves token-only Void Cloud CI on clean runners', async () => {
     const root = mkdtempSync(join(tmpdir(), 'void-auth-legacy-ci-'));
     directories.push(root);

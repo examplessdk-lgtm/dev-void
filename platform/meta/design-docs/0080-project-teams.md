@@ -322,7 +322,9 @@ bypasses restricted signup, or adds a platform allowlist entry.
 An invitation expires after seven days. Revoking it prevents later
 acceptance. Resend uses the target account's current registered email, keeps the
 same account binding, and follows the per-project invitation email rate limiter
-and a bounded pending-invitation limit.
+and a bounded pending-invitation limit. Creation, refresh, and resend enforce
+the same 100-live-invitation cap under the project lock. Renewing a live
+invitation retains its slot; reviving an expired invitation requires capacity.
 
 ## API and user experience
 
@@ -368,9 +370,17 @@ void project team decline <invitation-id>
 The existing project selector and saved project link identify the project when
 `--project` is absent. Project-scoped commands require a connected Void Platform
 project and give a clear error for a direct Cloudflare target. The account-scoped
-`pending`, `accept`, and `decline` commands use the connected Void Platform even
-when the current directory targets Cloudflare directly. Project list output
-gains a role column so shared projects are distinguishable.
+`pending`, `accept`, and `decline` commands use the active platform connection,
+independently of the current directory's project or direct Cloudflare target.
+An explicit API origin overrides that connection, with credentials restricted
+to the selected origin. Acceptance preserves directory links. The landing
+page directs users to link an unlinked application checkout; email delivery
+failures still return a saved invitation and CLI recovery commands.
+
+Project lists and selectors show each role. Deployment selection excludes
+readers, while ordinary project linking supports their read-only access.
+Explicit and saved deploy targets are checked before building so lost access
+or a reader role produces an actionable error.
 
 The API-owned invitation landing route shows the CLI connection and acceptance
 commands, so self-hosted installations do not require the optional dashboard.
@@ -406,6 +416,21 @@ from PostgreSQL instead of only merging slugs. Transfer control calls detach
 the project from the former owner's counter and attach it to the new owner's
 counter without moving already-billed totals. Delayed pre-transfer events may
 still increment the former owner's total but may not reattach the project.
+
+Detachment durably saves the closed ownership window, its last sampled AI
+usage, and a reconciliation alarm in one transaction before acknowledging.
+Project deletion can then cascade SQL history without depending on Analytics
+availability. The alarm re-queries the exact half-open window and preserves
+the saved amount when Analytics is unavailable or returns incomplete data.
+Failed alarms schedule another wakeup beyond the provider's bounded native
+retries. Strict accounting rejects partial GraphQL errors and invalid costs;
+diagnostics retain bounded provider messages without authentication values.
+
+Closed windows are reconciled for unlimited plans as well. Because deleting
+an owner's last project removes the scheduler's ownership rows, a counter
+with closed windows checks the owner's current billing period itself. It
+expires prior-period windows through the existing rollover path and stops
+querying once the account has been deleted.
 
 Counter writes that change project routing or AI blocks recheck current
 ownership under the project lock. This prevents a stale former-owner Durable

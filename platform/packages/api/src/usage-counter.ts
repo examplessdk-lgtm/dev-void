@@ -17,7 +17,7 @@ import {
   verifyActiveProjectOwner,
 } from './routing.ts';
 import { REASON_REQUESTS_EXCEEDED, REASON_SANDBOX_RUNTIME_EXCEEDED } from './suspension.ts';
-import { getPlanLimits, isWithinLimit } from './tiers.ts';
+import { getCurrentBillingPeriodStart, getPlanLimits, isWithinLimit } from './tiers.ts';
 import { SANDBOX_USAGE_RETENTION_MS } from './usage-auth.ts';
 
 // --- Exported types ---
@@ -188,13 +188,16 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
 
   private async saveState(
     state: CounterState,
-    watermarks: ReadonlyMap<string, number> = new Map(),
+    options: {
+      watermarks?: ReadonlyMap<string, number>;
+      scheduleAiAlarm?: boolean;
+    } = {},
   ): Promise<boolean> {
     const cutoff = Date.now() - SANDBOX_USAGE_RETENTION_MS;
     const hasWatermarks = await this.ctx.storage.transaction(async (transaction) => {
       // Receipts live in separate bounded-size records. Never evict a fresh
       // generation to make room: its next cumulative frame would rebill it.
-      for (const [key, through] of watermarks) {
+      for (const [key, through] of options.watermarks ?? []) {
         await transaction.put(key, through);
       }
 
@@ -222,6 +225,13 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
       // Counters, receipts, and pruning progress commit together. Publishing
       // the isolate cache afterwards also keeps a rejected commit retryable.
       await transaction.put('state', state);
+      if (options.scheduleAiAlarm) {
+        const nextAlarm = Date.now() + 15 * 60 * 1000;
+        const alarm = await transaction.getAlarm();
+        if (alarm === null || alarm > nextAlarm) {
+          await transaction.setAlarm(nextAlarm);
+        }
+      }
       return page.size > expired.length || page.size === SANDBOX_PRUNE_BATCH_SIZE || !!cursor;
     });
     this.state = state;
@@ -400,7 +410,7 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
       await this.ctx.storage.setAlarm(Date.now() + 15 * 60 * 1000);
     }
 
-    await this.saveState(state, watermarks);
+    await this.saveState(state, { watermarks });
 
     return Response.json({
       totalRequests: state.totalRequests,
@@ -642,23 +652,22 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
       }
     }
     if (body.ownershipEndedAt) {
-      const windowKey = this.retainHistoricalAiWindow(
+      this.retainHistoricalAiWindow(
         state,
         body.projectId,
         body.ownershipStartedAt ?? state.projectOwnershipStarts[body.projectId],
         body.ownershipEndedAt,
       );
-      if (windowKey) {
-        await this.refreshHistoricalAiWindows(state, [windowKey]);
-      }
     } else {
       this.retainHistoricalAiSample(state, body.projectId);
     }
     this.recomputeTotalNeurons(state);
-    await this.saveState(state);
-    if (Object.keys(state.historicalAiWindows).length > 0 && !(await this.ctx.storage.getAlarm())) {
-      await this.ctx.storage.setAlarm(Date.now() + 15 * 60 * 1000);
-    }
+    // Teardown may remove the SQL ownership history once this returns. Retain
+    // both the cutoff and its next reconciliation in one durable transaction;
+    // provider analytics availability must not hold deletion or transfer open.
+    await this.saveState(state, {
+      scheduleAiAlarm: Object.keys(state.historicalAiWindows).length > 0,
+    });
     return Response.json({ ok: true });
   }
 
@@ -718,12 +727,20 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
   // --- AI alarm handler ---
 
   async alarm(): Promise<void> {
-    return this.serialize(() => this.handleAlarm());
+    return this.serialize(async () => {
+      try {
+        await this.handleAlarm();
+      } catch (error) {
+        // Native alarm retries are bounded. Preserve a future wakeup through
+        // longer provider outages without replacing persisted usage with zero.
+        await this.ctx.storage.setAlarm(Date.now() + 15 * 60 * 1000);
+        throw error;
+      }
+    });
   }
 
   private async handleAlarm(): Promise<void> {
     const state = await this.getState();
-    const limits = getPlanLimits(state.plan);
 
     // Older persisted states do not identify their account. Wait for the next
     // trusted record/rollover/init instead of risking a cross-owner KV write.
@@ -743,12 +760,38 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
       (projectId) => !ownedProjectIds.has(projectId),
     );
     await this.retainTransferredProjectWindows(db, state, transferredProjectIds);
+    if (Object.keys(state.historicalAiWindows).length > 0) {
+      // Deleting the last project also deletes its ownership history, so the
+      // scheduler can no longer discover this counter for billing rollover.
+      const owner = await getUser(db, state.ownerUserId);
+      if (!owner) {
+        await this.ctx.storage.deleteAlarm();
+        return;
+      }
+      state.plan = owner.plan;
+      if (owner.billing_cycle_start) {
+        const billingPeriodStart = getCurrentBillingPeriodStart(owner.billing_cycle_start);
+        if (billingPeriodStart.getTime() > Date.parse(state.billingPeriodStart)) {
+          await this.advanceBillingPeriod(
+            state,
+            {
+              billingPeriodStart: billingPeriodStart.toISOString(),
+              plan: owner.plan,
+              userId: owner.id,
+            },
+            true,
+          );
+        }
+      }
+    }
+    const limits = getPlanLimits(state.plan);
     const projectIds = [...ownedProjectIds];
-    // Unlimited/no-project accounts still need bounded receipt cleanup. Keep
-    // waking only while the scan may have retained or not-yet-visited records.
+    // Closed windows still need reconciliation on unlimited plans: detachment
+    // preserves their samples without depending on provider availability.
+    // Otherwise inactive accounts only wake while receipt pruning has work.
     if (
-      limits.aiNeuronsPerMonth === 0 ||
-      (projectIds.length === 0 && Object.keys(state.historicalAiWindows).length === 0)
+      Object.keys(state.historicalAiWindows).length === 0 &&
+      (limits.aiNeuronsPerMonth === 0 || projectIds.length === 0)
     ) {
       if (await this.saveState(state)) {
         await this.ctx.storage.setAlarm(Date.now() + 15 * 60 * 1000);
@@ -763,7 +806,7 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
 
     // Query AI Gateway for each currently owned project's neuron usage.
     const billingSince = new Date(state.billingPeriodStart);
-    for (const projectId of projectIds) {
+    for (const projectId of limits.aiNeuronsPerMonth === 0 ? [] : projectIds) {
       const ownershipStartedAt = state.projectOwnershipStarts[projectId];
       const ownershipSince = ownershipStartedAt ? new Date(ownershipStartedAt) : billingSince;
       const since =
@@ -901,13 +944,9 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
     }
   }
 
-  private async refreshHistoricalAiWindows(
-    state: CounterState,
-    onlyKeys?: ReadonlyArray<string>,
-  ): Promise<void> {
+  private async refreshHistoricalAiWindows(state: CounterState): Promise<void> {
     const billingSince = new Date(state.billingPeriodStart);
-    const keys = onlyKeys ?? Object.keys(state.historicalAiWindows);
-    for (const key of keys) {
+    for (const key of Object.keys(state.historicalAiWindows)) {
       const window = state.historicalAiWindows[key];
       if (!window) {
         continue;

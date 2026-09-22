@@ -70,6 +70,11 @@ describe('platform onboarding pages', () => {
     expect(html).toContain('<title>Accept Project Invitation - Void Platform</title>');
     expect(html).toContain('void connect &#39;https://api.example.com&#39;');
     expect(html).toContain('void project team accept pinv_a1b2c3d4e5f6');
+    expect(html).toContain('The CLI checks that it is still valid');
+    expect(html).toContain('run <code>void project link</code> if it is not linked yet');
+    expect(html).toContain('use a separate checkout without a <code>.void/project.json</code>');
+    expect(html).toContain('Accepting an invitation keeps existing project links.');
+    expect(html).not.toContain('choose a project on this platform before deploying');
     expect(html).not.toMatch(/dashboard/i);
   });
 

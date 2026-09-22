@@ -529,16 +529,47 @@ async function queryProjectRequestOverview(
 }
 
 type AiGatewayResponse = Readonly<{
-  data: {
-    viewer: {
-      accounts: ReadonlyArray<{
-        aiGatewayRequests: ReadonlyArray<{ sum: { cost: number } }>;
-      }>;
-    };
-  };
+  data?: {
+    viewer?: {
+      accounts?: ReadonlyArray<{
+        aiGatewayRequests?: ReadonlyArray<{ sum?: { cost?: number | null } }> | null;
+      }> | null;
+    } | null;
+  } | null;
+  errors?: unknown;
 }>;
 
 const COST_PER_NEURON = 0.000011;
+
+function aiUsageGraphqlErrors(errors: ReadonlyArray<unknown>, apiToken: string): string {
+  return errors
+    .slice(0, 3)
+    .map((error) => {
+      if (
+        !error ||
+        typeof error !== 'object' ||
+        !('message' in error) ||
+        typeof error.message !== 'string'
+      ) {
+        return 'Unknown GraphQL error';
+      }
+      // Provider messages are useful; response extensions, echoed documents,
+      // and authentication values do not belong in persisted billing diagnostics.
+      let message = error.message;
+      if (apiToken) {
+        message = message.replaceAll(apiToken, '[redacted]');
+      }
+      return (
+        message
+          .replace(/\bBearer\s+\S+/gi, 'Bearer [redacted]')
+          .replace(/\s+/g, ' ')
+          .replace(/\{.*$/, '[query omitted]')
+          .trim()
+          .slice(0, 200) || 'Unknown GraphQL error'
+      );
+    })
+    .join('; ');
+}
 
 async function queryProjectAiUsage(
   accountId: string,
@@ -582,11 +613,48 @@ async function queryProjectAiUsage(
     return { neurons: 0 };
   }
 
-  const result = (await response.json()) as AiGatewayResponse;
-  const requests = result.data?.viewer?.accounts?.[0]?.aiGatewayRequests;
-  if (!requests && failOnError) {
-    throw new Error('AI usage query returned no account data');
+  let result: AiGatewayResponse | null;
+  try {
+    result = (await response.json()) as AiGatewayResponse | null;
+  } catch (error) {
+    if (failOnError) {
+      throw new Error('AI usage query returned invalid JSON');
+    }
+    throw error;
   }
+
+  if (failOnError && result?.errors != null) {
+    if (!Array.isArray(result.errors)) {
+      throw new Error('AI usage query returned invalid GraphQL errors');
+    }
+    if (result.errors.length > 0) {
+      throw new Error(`AI usage query failed: ${aiUsageGraphqlErrors(result.errors, apiToken)}`);
+    }
+  }
+
+  const accounts = result?.data?.viewer?.accounts;
+  const requests = accounts?.[0]?.aiGatewayRequests;
+  if (failOnError) {
+    if (!Array.isArray(accounts) || accounts.length !== 1) {
+      throw new Error('AI usage query returned no account data');
+    }
+    if (!Array.isArray(requests) || requests.length > 1) {
+      throw new Error('AI usage query returned invalid request data');
+    }
+    if (requests.length === 0) {
+      return { neurons: 0 };
+    }
+    const cost = requests[0]?.sum?.cost;
+    if (typeof cost !== 'number' || !Number.isFinite(cost) || cost < 0) {
+      throw new Error('AI usage query returned invalid cost data');
+    }
+    const neurons = Math.round(cost / COST_PER_NEURON);
+    if (!Number.isFinite(neurons)) {
+      throw new Error('AI usage query returned invalid cost data');
+    }
+    return { neurons };
+  }
+
   const cost = requests?.[0]?.sum?.cost ?? 0;
   return { neurons: Math.round(cost / COST_PER_NEURON) };
 }

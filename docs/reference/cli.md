@@ -253,8 +253,12 @@ Readers can view the project but cannot deploy. Collaborators can deploy and man
 
 Project-scoped team management commands are not available for projects deployed
 directly to Cloudflare. The account-scoped `pending`, `accept`, and `decline`
-commands do not depend on the project deploy target and can be run from a direct
-Cloudflare project directory that resolves the connected Void platform account.
+commands use the active connection selected by `void connect <url>`, regardless
+of the current project's link or deploy target. `VOID_API_URL` takes precedence;
+an unscoped `VOID_TOKEN` selects Void Cloud. These commands display their
+platform, and accepting an invitation leaves directory links intact. To link
+the invited application, run `void project link` in an unlinked checkout of
+that application.
 
 ### `void project token <create|list|renew|revoke>`
 

@@ -121,6 +121,7 @@ import {
   PlatformClient,
   type DeploymentResponse,
   type ManifestOnlyDeployPayload,
+  type ProjectResponse,
 } from './client.ts';
 import {
   CloudflareAuthenticationError,
@@ -6489,6 +6490,9 @@ async function runManagedDeploy(
 
       if (requestedProjectSlug) {
         const projects = await client.listProjects();
+        assertProjectDeployAccess(
+          projects.find((project) => project.slug === requestedProjectSlug),
+        );
         config = resolveProjectBySlug(projects, requestedProjectSlug);
 
         if (!config) {
@@ -6509,6 +6513,18 @@ async function runManagedDeploy(
         }
       } else {
         config = readProjectConfig(root);
+        if (config) {
+          const projects = await client.listProjects();
+          const { projectId, slug } = config;
+          const project = projects.find((project) => project.id === projectId);
+          if (!project) {
+            throw new Error(
+              `deploy: The linked project "${slug}" is unavailable or you no longer have access. ` +
+                'Ask a project admin or owner to restore access, or choose another project with `--project <slug>`.',
+            );
+          }
+          assertProjectDeployAccess(project);
+        }
       }
 
       if (!config && !process.stdin.isTTY) {
@@ -6666,14 +6682,30 @@ async function runManagedDeploy(
   }
 }
 
+function assertProjectDeployAccess(project: ProjectResponse | undefined): void {
+  // Older platforms omit roles; the API remains authoritative for every deploy.
+  if (project?.role === 'reader') {
+    throw new Error(
+      `deploy: You have reader access to "${project.slug}" and cannot deploy. ` +
+        'Ask a project admin or owner to grant collaborator access, or choose another project with `--project <slug>`.',
+    );
+  }
+}
+
 export async function promptDeployProjectConfig(
   root: string,
   client: PlatformClient,
   cliLog?: CliLogger,
 ): Promise<ProjectConfig> {
   const projects = await client.listProjects();
+  const deployableProjects = projects.filter((project) => project.role !== 'reader');
+  if (deployableProjects.length !== projects.length) {
+    log.warn(
+      'Projects with reader access are hidden from deploy selection. Ask a project admin or owner to grant collaborator access to deploy to them.',
+    );
+  }
   const action = await promptProjectSetupAction('Set up a Void project for deploy:', {
-    includeLink: projects.length > 0,
+    includeLink: deployableProjects.length > 0,
   });
 
   if (action === 'create') {
@@ -6681,10 +6713,12 @@ export async function promptDeployProjectConfig(
   }
 
   // Project names are only shown after the user opts into linking.
-  const result = await promptProjectSelection(projects, 'Select a project to deploy to:', root, {
-    confirmExisting: true,
-    includeCreate: false,
-  });
+  const result = await promptProjectSelection(
+    deployableProjects,
+    'Select a project to deploy to:',
+    root,
+    { confirmExisting: true, includeCreate: false },
+  );
 
   if (result.action === 'create') {
     throw new Error('Unexpected project selection result.');
