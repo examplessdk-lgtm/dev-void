@@ -2,6 +2,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from 'node:os';
 import { join } from 'pathslash';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
+import { PlatformApiError } from '../../src/cli/client.ts';
 import {
   platformCredentialAccount,
   savePlatformConnection,
@@ -450,5 +451,59 @@ describe('project team target selection', () => {
     });
     await expect(result).rejects.toThrow(message);
     await expect(result).rejects.toThrow(recovery);
+    await expect(result).rejects.toBeInstanceOf(PlatformApiError);
+    await expect(result).rejects.toMatchObject({
+      status,
+      code: error,
+      body: JSON.stringify({ error }),
+    });
+  });
+
+  it.each([
+    ['forbidden', 'This deployment token cannot respond to invitations. Use your platform login.'],
+    ['account suspended', 'This account is suspended. Contact the platform administrator.'],
+  ])('preserves the server explanation for invitation rejection %s', async (code, message) => {
+    const root = rootWithPlatform('void');
+    vi.stubEnv('VOID_TOKEN', 'test-token');
+    vi.stubEnv('VOID_API_URL', 'https://api.example.test');
+    const body = JSON.stringify({ error: code, message });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(body, { status: 403 })),
+    );
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    const error = await runProjectCommand(root, {
+      subcommand: 'team',
+      action: 'accept',
+      invitationId: 'pinv_1',
+    }).catch((error: unknown) => error);
+    expect(error).toBeInstanceOf(PlatformApiError);
+    expect(error).toMatchObject({ status: 403, code, body });
+    expect((error as Error).message).toContain(message);
+    expect((error as Error).message).not.toContain('auth logout');
+  });
+
+  it('explains an existing-member conflict from an older API', async () => {
+    const root = rootWithPlatform('void');
+    vi.stubEnv('VOID_TOKEN', 'test-token');
+    vi.stubEnv('VOID_API_URL', 'https://api.example.test');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        Response.json({ error: 'user is already a project member' }, { status: 409 }),
+      ),
+    );
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    await expect(
+      runProjectCommand(root, {
+        subcommand: 'team',
+        action: 'invite',
+        email: 'target@example.test',
+        role: 'reader',
+        projectSlug: '',
+      }),
+    ).rejects.toThrow('void project team role');
   });
 });

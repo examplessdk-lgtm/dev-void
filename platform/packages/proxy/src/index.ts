@@ -158,7 +158,14 @@ app.post('/*', async (context, next) => {
     const token = authHeader.slice(7);
     const payload = await verifyJwt(token, context.env.JWT_SECRET);
     if (!payload) {
-      return context.json({ error: 'invalid or expired token' }, 401);
+      return context.json(
+        {
+          error: 'invalid or expired token',
+          message:
+            'This proxy credential is invalid or expired. Sign in to the connected platform again for remote development, or restart the build to obtain a fresh prerender token.',
+        },
+        401,
+      );
     }
     const projectId = asString(body.projectId);
     if (!projectId) {
@@ -169,7 +176,14 @@ app.post('/*', async (context, next) => {
       // project by the API that minted them. Never turn one into a general
       // owner token by accepting a caller-selected projectId.
       if (!payload.project || payload.project !== projectId) {
-        return context.json({ error: 'forbidden' }, 403);
+        return context.json(
+          {
+            error: 'forbidden',
+            message:
+              'This prerender token does not match the requested project. Restart the build with a prerender token issued for the selected project.',
+          },
+          403,
+        );
       }
       const active = await verifyPrerenderAuthority(
         context.env.API,
@@ -189,6 +203,11 @@ app.post('/*', async (context, next) => {
               : payload.build
                 ? 'prerender token build is no longer active'
                 : 'prerender token authority is no longer active',
+            message: payload.credential
+              ? 'The deploy credential used for prerendering is no longer authorized. Ask the project owner for an active deploy credential, then restart the build.'
+              : payload.build
+                ? 'This build is no longer authorized to prerender. Start a new build to obtain a fresh prerender token.'
+                : 'This prerender token is no longer authorized. Confirm your project access with a project admin or owner, then restart the build to obtain a fresh token.',
           },
           403,
         );
@@ -207,7 +226,14 @@ app.post('/*', async (context, next) => {
         );
       revalidateHuman = async () => payload.exp > Date.now() / 1000 && (await checkOwner());
       if (!(await revalidateHuman())) {
-        return context.json({ error: 'forbidden' }, 403);
+        return context.json(
+          {
+            error: 'forbidden',
+            message:
+              'Remote access could not be authorized. Check the selected platform and project, then ask a project admin or owner to confirm your access. If your access is correct, retry shortly.',
+          },
+          403,
+        );
       }
     }
     context.set('projectId', projectId);

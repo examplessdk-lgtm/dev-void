@@ -18,6 +18,31 @@ const PROJECT_ROLE_CAPABILITIES = {
   owner: ['read', 'deploy', 'configure', 'settings', 'members', 'delete'],
 } as const satisfies Record<ProjectRole, ReadonlyArray<ProjectCapability>>;
 
+// These messages describe requirements, not the caller's role or private project data.
+export const PROJECT_PERMISSION_MESSAGES = {
+  read: 'You need project access to view this project. Ask a project admin or owner to invite you.',
+  deploy:
+    'Deploying requires the collaborator, admin, or owner role. Ask a project admin or owner to update your access.',
+  configure:
+    'Changing project configuration requires the collaborator, admin, or owner role. Ask a project admin or owner to update your access.',
+  settings:
+    'Changing project settings requires the admin or owner role. Ask a project admin or owner to update your access.',
+  members:
+    'Managing project members and invitations requires the admin or owner role. Ask a project admin or owner to update your access.',
+  delete: 'Only the project owner can delete this project. Ask the owner to delete it.',
+  tokens:
+    'Only the project owner can manage deploy tokens. Ask the owner to create or manage a token.',
+  'database-url':
+    'Only the project owner can view the database connection URL. Ask the owner to share the connection details you need.',
+  'owner-suspended':
+    "This project's owner account is suspended. Ask the owner to contact the platform administrator to restore access.",
+  'not-found':
+    'This project could not be found. Check the project ID or refresh your project list.',
+} as const satisfies Record<
+  ProjectCapability | 'tokens' | 'database-url' | 'owner-suspended' | 'not-found',
+  string
+>;
+
 function hasProjectCapability(role: ProjectRole, capability: ProjectCapability): boolean {
   return (PROJECT_ROLE_CAPABILITIES[role] as ReadonlyArray<ProjectCapability>).includes(capability);
 }
@@ -56,6 +81,7 @@ async function selectProjectAccess(
 
 export class ProjectNotFoundError extends Error {
   readonly status = 404 as const;
+  readonly userMessage = PROJECT_PERMISSION_MESSAGES['not-found'];
 
   constructor() {
     super('project not found');
@@ -66,7 +92,10 @@ export class ProjectNotFoundError extends Error {
 export class ProjectAccessDeniedError extends Error {
   readonly status = 403 as const;
 
-  constructor(message = 'forbidden') {
+  constructor(
+    message = 'forbidden',
+    readonly userMessage: string = PROJECT_PERMISSION_MESSAGES.read,
+  ) {
     super(message);
     this.name = 'ProjectAccessDeniedError';
   }
@@ -74,9 +103,16 @@ export class ProjectAccessDeniedError extends Error {
 
 export class ProjectOwnerSuspendedError extends ProjectAccessDeniedError {
   constructor() {
-    super('project owner suspended');
+    super('project owner suspended', PROJECT_PERMISSION_MESSAGES['owner-suspended']);
     this.name = 'ProjectOwnerSuspendedError';
   }
+}
+
+export function projectAccessErrorBody(error: ProjectNotFoundError | ProjectAccessDeniedError): {
+  error: string;
+  message: string;
+} {
+  return { error: error.message, message: error.userMessage };
 }
 
 /**
@@ -94,7 +130,7 @@ export async function requireProjectCapability(
     throw new ProjectNotFoundError();
   }
   if (!row.memberRole || !hasProjectCapability(row.memberRole, capability)) {
-    throw new ProjectAccessDeniedError();
+    throw new ProjectAccessDeniedError('forbidden', PROJECT_PERMISSION_MESSAGES[capability]);
   }
   if (isAdminSuspended(row.owner.suspended_reason)) {
     throw new ProjectOwnerSuspendedError();

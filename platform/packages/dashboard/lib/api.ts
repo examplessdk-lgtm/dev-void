@@ -140,25 +140,71 @@ export async function fetchApi(
   });
 }
 
+function apiErrorFallback(status: number): string {
+  switch (status) {
+    case 401:
+      return 'Sign in again and retry this action.';
+    case 403:
+      return 'You do not have permission to perform this action. Check that you are signed in to the correct account.';
+    case 404:
+      return 'This item is unavailable. Refresh the page and try again.';
+    case 409:
+      return 'This action could not be completed because something changed. Refresh the page and try again.';
+    case 429:
+      return 'Too many requests. Wait a moment and try again.';
+    default:
+      return status >= 500
+        ? 'The service is temporarily unavailable. Try again shortly.'
+        : 'Unable to complete this request. Check your details and try again.';
+  }
+}
+
+function readableApiError(value: unknown): string | undefined {
+  if (typeof value !== 'string') {
+    return;
+  }
+  const message = value.trim();
+  // Show the API's public explanation, never serialized bodies, markup or stack traces.
+  if (!message || message.length > 500 || /^[{["]/.test(message) || /[<>\r\n]/.test(message)) {
+    return;
+  }
+  const generic = message
+    .toLowerCase()
+    .replace(/^\d{3}\s+/, '')
+    .replace(/[.!]$/, '');
+  if (
+    /^(?:error|unknown error|request failed|bad request|unauthorized|unauthenticated|forbidden|access denied|not found|conflict|too many requests|internal server error|service unavailable|bad gateway|gateway timeout)$/.test(
+      generic,
+    ) ||
+    /^[a-z][a-z0-9]*[_-][a-z0-9_-]+$/i.test(message)
+  ) {
+    return;
+  }
+  return message;
+}
+
 export async function getApiErrorMessage(res: ApiResponse): Promise<string> {
-  const body = await res.text();
-  if (!body) {
-    return `${res.status} ${res.statusText}`;
+  const fallback = apiErrorFallback(res.status);
+  let body: string;
+  try {
+    body = await res.text();
+  } catch {
+    return fallback;
   }
 
   try {
-    const json = JSON.parse(body) as { error?: unknown; message?: unknown };
-    if (typeof json.error === 'string') {
-      return json.error;
-    }
-    if (typeof json.message === 'string') {
-      return json.message;
+    const json: unknown = JSON.parse(body);
+    if (json && typeof json === 'object' && !Array.isArray(json)) {
+      const { message, error } = json as { message?: unknown; error?: unknown };
+      return readableApiError(message) ?? readableApiError(error) ?? fallback;
     }
   } catch {
-    // Plain text error body.
+    const contentType = res.headers.get('content-type') ?? '';
+    if (!/json|html/i.test(contentType)) {
+      return readableApiError(body) ?? fallback;
+    }
   }
-
-  return body;
+  return fallback;
 }
 
 export async function readApiJson<T>(res: ApiResponse): Promise<T | null> {

@@ -3,6 +3,7 @@ import { Hono, type Context } from 'hono';
 import { PROJECT_CREDENTIAL_MAX_DAYS, signProjectCredentialToken } from '../auth/deploy-token.ts';
 import { getProject, type DbOrTx } from '../db.ts';
 import type { ApiEnv } from '../env.ts';
+import { PROJECT_PERMISSION_MESSAGES } from '../project-access.ts';
 import { projectDeployCredentials, projects } from '../schema.ts';
 import type { Project } from '../types.ts';
 
@@ -73,10 +74,13 @@ function publicCredential(row: typeof projectDeployCredentials.$inferSelect) {
 app.get('/:projectId/tokens', async (context) => {
   const project = await ownedProject(context);
   if (project === 'forbidden') {
-    return context.json({ error: 'forbidden' }, 403);
+    return context.json({ error: 'forbidden', message: PROJECT_PERMISSION_MESSAGES.tokens }, 403);
   }
   if (!project) {
-    return context.json({ error: 'project not found' }, 404);
+    return context.json(
+      { error: 'project not found', message: PROJECT_PERMISSION_MESSAGES['not-found'] },
+      404,
+    );
   }
   const rows = await context
     .get('db')
@@ -91,7 +95,10 @@ app.get('/:projectId/tokens', async (context) => {
 app.post('/:projectId/tokens', async (context) => {
   const projectId = context.req.param('projectId');
   if (!projectId) {
-    return context.json({ error: 'project not found' }, 404);
+    return context.json(
+      { error: 'project not found', message: PROJECT_PERMISSION_MESSAGES['not-found'] },
+      404,
+    );
   }
   const body = await context.req
     .json<{ name?: unknown; expiresInDays?: unknown }>()
@@ -132,13 +139,23 @@ app.post('/:projectId/tokens', async (context) => {
     return created!;
   });
   if (row === 'forbidden') {
-    return context.json({ error: 'forbidden' }, 403);
+    return context.json({ error: 'forbidden', message: PROJECT_PERMISSION_MESSAGES.tokens }, 403);
   }
   if (row === 'project-deleting') {
-    return context.json({ error: 'project is being deleted' }, 409);
+    return context.json(
+      {
+        error: 'project is being deleted',
+        message:
+          'This project is being deleted. Wait for deletion to finish and select another project.',
+      },
+      409,
+    );
   }
   if (!row) {
-    return context.json({ error: 'project not found' }, 404);
+    return context.json(
+      { error: 'project not found', message: PROJECT_PERMISSION_MESSAGES['not-found'] },
+      404,
+    );
   }
   return context.json({ ...publicCredential(row), token }, 201);
 });
@@ -146,7 +163,10 @@ app.post('/:projectId/tokens', async (context) => {
 app.post('/:projectId/tokens/:credentialId/renew', async (context) => {
   const projectId = context.req.param('projectId');
   if (!projectId) {
-    return context.json({ error: 'project not found' }, 404);
+    return context.json(
+      { error: 'project not found', message: PROJECT_PERMISSION_MESSAGES['not-found'] },
+      404,
+    );
   }
   const body = await context.req
     .json<{ expiresInDays?: unknown }>()
@@ -212,16 +232,33 @@ app.post('/:projectId/tokens/:credentialId/renew', async (context) => {
     return replacement!;
   });
   if (result === 'project-not-found') {
-    return context.json({ error: 'project not found' }, 404);
+    return context.json(
+      { error: 'project not found', message: PROJECT_PERMISSION_MESSAGES['not-found'] },
+      404,
+    );
   }
   if (result === 'forbidden') {
-    return context.json({ error: 'forbidden' }, 403);
+    return context.json({ error: 'forbidden', message: PROJECT_PERMISSION_MESSAGES.tokens }, 403);
   }
   if (result === 'project-deleting') {
-    return context.json({ error: 'project is being deleted' }, 409);
+    return context.json(
+      {
+        error: 'project is being deleted',
+        message:
+          'This project is being deleted. Wait for deletion to finish and select another project.',
+      },
+      409,
+    );
   }
   if (!result) {
-    return context.json({ error: 'active credential not found' }, 404);
+    return context.json(
+      {
+        error: 'active credential not found',
+        message:
+          'This active deploy token could not be found. Refresh the token list; it may have been revoked or renewed.',
+      },
+      404,
+    );
   }
   return context.json({ ...publicCredential(result), token });
 });
@@ -229,7 +266,10 @@ app.post('/:projectId/tokens/:credentialId/renew', async (context) => {
 app.delete('/:projectId/tokens/:credentialId', async (context) => {
   const projectId = context.req.param('projectId');
   if (!projectId) {
-    return context.json({ error: 'project not found' }, 404);
+    return context.json(
+      { error: 'project not found', message: PROJECT_PERMISSION_MESSAGES['not-found'] },
+      404,
+    );
   }
   const user = context.get('user');
   const row = await context.get('db').transaction(async (tx) => {
@@ -254,13 +294,23 @@ app.delete('/:projectId/tokens/:credentialId', async (context) => {
     return revoked ?? null;
   });
   if (row === 'project-not-found') {
-    return context.json({ error: 'project not found' }, 404);
+    return context.json(
+      { error: 'project not found', message: PROJECT_PERMISSION_MESSAGES['not-found'] },
+      404,
+    );
   }
   if (row === 'forbidden') {
-    return context.json({ error: 'forbidden' }, 403);
+    return context.json({ error: 'forbidden', message: PROJECT_PERMISSION_MESSAGES.tokens }, 403);
   }
   if (!row) {
-    return context.json({ error: 'active credential not found' }, 404);
+    return context.json(
+      {
+        error: 'active credential not found',
+        message:
+          'This active deploy token could not be found. Refresh the token list; it may have been revoked or renewed.',
+      },
+      404,
+    );
   }
   return context.json({ ok: true, id: row.id });
 });

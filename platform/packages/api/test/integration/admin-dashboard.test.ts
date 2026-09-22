@@ -84,6 +84,10 @@ describe('auth middleware', () => {
     const user = await createTestUser(env.db, 'regular');
     const res = await req('/admin/', user.adminJwt);
     expect(res.status).toBe(403);
+    const html = await res.text();
+    expect(html).toContain('Sign in with an administrator account for this platform.');
+    expect(html).toContain('href="/admin/logout"');
+    expect(html).not.toContain('suspended');
   });
 
   test('allows admin user', async () => {
@@ -109,6 +113,11 @@ describe('auth middleware', () => {
     const res = await req('/admin/', admin.adminJwt);
 
     expect(res.status).toBe(403);
+    const html = await res.text();
+    expect(html).toContain('Administrator access suspended');
+    expect(html).toContain('Contact another platform administrator to restore access.');
+    expect(html).toContain('href="/admin/logout"');
+    expect(html).not.toContain('admin_suspended');
   });
 
   test('allows an administrator suspended only by a usage limit', async () => {
@@ -154,6 +163,40 @@ describe('auth middleware', () => {
     });
     expect(res.status).toBe(403);
   });
+
+  test.each(['https://attacker.example.com/private', 'http://localhost'])(
+    'renders recovery navigation for rejected browser writes from %s',
+    async (origin) => {
+      const admin = await createTestUser(
+        env.db,
+        'admin-recovery',
+        'github',
+        undefined,
+        'free',
+        'admin',
+      );
+      // The same host with a different scheme passes the first guard and reaches the
+      // stricter CSRF middleware; both guards must give browser users a way back.
+      const res = await app.fetch(
+        new Request('https://localhost/admin/signup-control/toggle', {
+          method: 'POST',
+          headers: {
+            Cookie: `admin_token=${admin.adminJwt}`,
+            Origin: origin,
+            Accept: 'text/html,application/xhtml+xml',
+          },
+        }),
+        env,
+      );
+      expect(res.status).toBe(403);
+      expect(res.headers.get('content-type')).toContain('text/html');
+      const html = await res.text();
+      expect(html).toContain('Return to the admin page, refresh it, and try again.');
+      expect(html).toContain('href="/admin/"');
+      expect(html).not.toContain(origin);
+      expect(await env.db.select().from(operatorEvents)).toHaveLength(0);
+    },
+  );
 });
 
 describe('GET /admin/ (dashboard)', () => {
@@ -1934,6 +1977,9 @@ describe('POST /admin/signup-control/add + delete', () => {
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' } as Record<string, string>,
     });
     expect(res.status).toBe(400);
+    const html = await res.text();
+    expect(html).toContain('href="/admin/"');
+    expect(html).toContain('Return to admin');
   });
 
   test('rejects delete with out-of-bounds index', async () => {

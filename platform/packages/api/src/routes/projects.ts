@@ -53,6 +53,7 @@ import { type ApiEnv, isDevBypass } from '../env.ts';
 import { validateSubmittedExecutionPlans } from '../migrations/execution-plan.ts';
 import { ensureTrackingTable, queryD1, runRemoteMigrations } from '../migrations/remote-runner.ts';
 import { getProjectDeploymentWorkerName, getProjectQueueName } from '../naming.ts';
+import { PROJECT_PERMISSION_MESSAGES } from '../project-access.ts';
 import { encryptProjectSecret, decryptProjectSecret } from '../project-secrets.ts';
 import {
   CloudflareApiError,
@@ -198,13 +199,24 @@ class RollbackError extends Error {
      * concatenation are not safe to copy-paste.
      */
     public readonly destructiveMigrations?: ReadonlyArray<string>,
+    public readonly userMessage?: string,
   ) {
     super(message);
     this.name = 'RollbackError';
   }
 }
 
-async function getProjectAccessErrorMessage(response: Response): Promise<string> {
+async function getProjectAccessErrorBody(
+  response: Response,
+): Promise<{ error: string; message: string }> {
+  const fallback =
+    response.status === 404
+      ? { error: 'project not found', message: PROJECT_PERMISSION_MESSAGES['not-found'] }
+      : {
+          error: 'forbidden',
+          message:
+            'You do not have permission for this action. Ask a project admin or owner to check your access.',
+        };
   try {
     const body: unknown = await response.json();
     if (
@@ -213,12 +225,18 @@ async function getProjectAccessErrorMessage(response: Response): Promise<string>
       'error' in body &&
       typeof body.error === 'string'
     ) {
-      return body.error;
+      return {
+        error: body.error,
+        message:
+          'message' in body && typeof body.message === 'string' && body.message.trim()
+            ? body.message
+            : fallback.message,
+      };
     }
   } catch {
     // Preserve the established fallback if a future access response is not JSON.
   }
-  return response.status === 404 ? 'project not found' : 'forbidden';
+  return fallback;
 }
 
 class DatabaseUrlPersistenceError extends Error {
@@ -811,7 +829,14 @@ const app = new Hono<ApiEnv>()
         return minted;
       }
       if (!minted) {
-        return context.json({ error: 'deploy token build is no longer active' }, 403);
+        return context.json(
+          {
+            error: 'deploy token build is no longer active',
+            message:
+              'This build is no longer active. Start a new build to obtain a valid deployment credential.',
+          },
+          403,
+        );
       }
       token = minted;
     } else {
@@ -972,9 +997,12 @@ const app = new Hono<ApiEnv>()
           txDb,
         );
         if (lockedAccess instanceof Response) {
+          const denied = await getProjectAccessErrorBody(lockedAccess);
           throw new RollbackError(
             lockedAccess.status as 403 | 404,
-            await getProjectAccessErrorMessage(lockedAccess),
+            denied.error,
+            undefined,
+            denied.message,
           );
         }
         const lockedProject = lockedAccess.project;
@@ -1076,9 +1104,12 @@ const app = new Hono<ApiEnv>()
             txDb,
           );
           if (lockedAccess instanceof Response) {
+            const denied = await getProjectAccessErrorBody(lockedAccess);
             throw new RollbackError(
               lockedAccess.status as 403 | 404,
-              await getProjectAccessErrorMessage(lockedAccess),
+              denied.error,
+              undefined,
+              denied.message,
             );
           }
 
@@ -1691,7 +1722,10 @@ const app = new Hono<ApiEnv>()
             err.status,
           );
         } else {
-          rollbackErrorResponse = context.json({ error: err.message }, err.status);
+          rollbackErrorResponse = context.json(
+            { error: err.message, ...(err.userMessage ? { message: err.userMessage } : {}) },
+            err.status,
+          );
         }
       } else if (!rollbackCommitted) {
         rollbackErrorToThrow = err;
@@ -1916,9 +1950,7 @@ const app = new Hono<ApiEnv>()
         if (lockedAccess instanceof Response) {
           return {
             status: lockedAccess.status as 403 | 404,
-            body: {
-              error: await getProjectAccessErrorMessage(lockedAccess),
-            },
+            body: await getProjectAccessErrorBody(lockedAccess),
           };
         }
 
@@ -2117,7 +2149,7 @@ const app = new Hono<ApiEnv>()
             status: lockedAccess.status as 403 | 404,
             body: {
               ok: false,
-              error: await getProjectAccessErrorMessage(lockedAccess),
+              ...(await getProjectAccessErrorBody(lockedAccess)),
             },
           };
         }
@@ -3106,7 +3138,10 @@ const app = new Hono<ApiEnv>()
       return access;
     }
     if (access.role !== 'owner') {
-      return context.json({ error: 'forbidden' }, 403);
+      return context.json(
+        { error: 'forbidden', message: PROJECT_PERMISSION_MESSAGES['database-url'] },
+        403,
+      );
     }
 
     const row = await getProjectDatabaseUrl(context.get('db'), projectId);

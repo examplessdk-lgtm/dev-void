@@ -1,5 +1,5 @@
 import { defineHandler } from 'void';
-import { fetchApi } from '../lib/api.ts';
+import { fetchApi, getApiErrorMessage, readApiJson } from '../lib/api.ts';
 import { dashboardRequestOrigin } from '../lib/origin.ts';
 
 export type Props = { methods: Array<{ id: string; label: string }>; error?: string };
@@ -14,7 +14,10 @@ export const loader = defineHandler<Props>(async (context) => {
 export const action = defineHandler(async (context) => {
   // Cookie-authenticated mutations must originate in this dashboard.
   if (context.req.header('Origin') !== dashboardRequestOrigin(context)) {
-    return context.text('Forbidden', 403);
+    return context.text(
+      'This request could not be verified. Refresh the account page and try again.',
+      403,
+    );
   }
   const body = await context.req.parseBody();
   if (typeof body.connectionId !== 'string') {
@@ -24,12 +27,12 @@ export const action = defineHandler(async (context) => {
     method: 'POST',
     body: JSON.stringify({ connectionId: body.connectionId }),
   });
-  const result = (await response.json()) as { url?: string; message?: string };
-  if (!response.ok || !result.url) {
-    return context.text(
-      result.message ?? 'Unable to link. Sign in to your existing account again and retry.',
-      response.status as 400,
-    );
+  if (!response.ok) {
+    return context.text(await getApiErrorMessage(response), response.status as 400);
+  }
+  const result = await readApiJson<{ url?: string }>(response);
+  if (!result?.url) {
+    return context.text('Unable to link. Sign in to your existing account again and retry.', 502);
   }
   return context.redirect(result.url, 303);
 });

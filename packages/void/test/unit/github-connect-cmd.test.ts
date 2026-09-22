@@ -292,6 +292,40 @@ describe('runConnect — non-owner member connect-authorization round-trip', () 
     expect(exitSpy).not.toHaveBeenCalled();
   });
 
+  it('preserves a project permission rejection after GitHub authorization', async () => {
+    (process.stdin as { isTTY?: boolean }).isTTY = true;
+    const rejection = new PlatformApiError(
+      'Failed to connect GitHub repository',
+      403,
+      JSON.stringify({
+        error: 'forbidden',
+        message:
+          'Changing project settings requires admin or owner access. Ask a project admin to update your access.',
+      }),
+      'settings',
+    );
+    const connectGithub = vi
+      .fn()
+      .mockRejectedValueOnce(authRequired())
+      .mockRejectedValueOnce(rejection);
+    const { promise, getGithubConnectAuthorizeUrl } = driveConnect({
+      connectGithub,
+      args: { executor: 'container' },
+      callbackQuery: (cb) => {
+        const hit = new URL(cb);
+        hit.searchParams.set('connect_grant', 'fresh-grant');
+        return hit;
+      },
+    });
+    await expect(promise).rejects.toBe(rejection);
+    expect(rejection.message).toContain('Ask a project admin');
+    expect(getGithubConnectAuthorizeUrl).toHaveBeenCalledTimes(1);
+    expect(connectGithub).toHaveBeenCalledTimes(2);
+    expect(errorSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining('GitHub authorization failed or expired'),
+    );
+  });
+
   it('exits(1) with the auth-failed message (NOT "no project access") when the retry is rejected with 403', async () => {
     (process.stdin as { isTTY?: boolean }).isTTY = true;
     const connectGithub = vi

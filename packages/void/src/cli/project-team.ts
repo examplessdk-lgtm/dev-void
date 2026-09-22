@@ -7,6 +7,7 @@ import {
   type ProjectMemberResponse,
 } from './client.ts';
 import { cliTitle } from './output.ts';
+import { parsePlatformErrorBody, platformErrorMessage } from './platform-errors.ts';
 import type { ProjectArgs } from './project-args.ts';
 import { readProjectConfig } from './project.ts';
 import { getRequestedProjectSlug, resolveProjectBySlug } from './resolve-project.ts';
@@ -77,6 +78,11 @@ function invitationResponseError(error: unknown, apiUrl: string): unknown {
   if (!(error instanceof PlatformApiError)) {
     return error;
   }
+  // New APIs explain the rejection, including scoped-token and suspension cases.
+  // Do not mistake every 403 for an invitation addressed to another account.
+  if (platformErrorMessage(parsePlatformErrorBody(error.body))) {
+    return error;
+  }
   let message: string;
   if (error.code === 'project invitation not found') {
     message = `Invitation not found on ${apiUrl}. Check VOID_API_URL if set, connect to the platform in your invitation with \`void connect <url>\`, then run \`void project team pending\` to check the invitation ID. If it is missing, ask a project administrator for a new invitation.`;
@@ -91,7 +97,8 @@ function invitationResponseError(error: unknown, apiUrl: string): unknown {
   } else {
     return error;
   }
-  return new Error(message, { cause: error });
+  error.message = message;
+  return error;
 }
 
 export async function runProjectTeamCommand(root: string, args: ProjectTeamArgs): Promise<void> {

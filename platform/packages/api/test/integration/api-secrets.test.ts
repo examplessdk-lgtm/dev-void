@@ -346,7 +346,10 @@ describe('project secrets API', () => {
     );
 
     expect(res.status).toBe(403);
-    expect(await res.json()).toEqual({ error: 'forbidden' });
+    expect(await res.json()).toEqual({
+      error: 'forbidden',
+      message: expect.stringMatching(/Ask (a project admin or owner|the owner)/),
+    });
   });
 
   it('validates secret name', async () => {

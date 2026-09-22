@@ -24,6 +24,7 @@ import {
 import { escapeHtml } from '../../email.ts';
 import type { ApiEnv } from '../../env.ts';
 import { isAdminSuspended } from '../../suspension.ts';
+import { adminAccessRejected } from '../middleware/request-rejection.ts';
 
 const app = new Hono<ApiEnv>();
 type AdminProvider = 'github' | 'google';
@@ -231,11 +232,11 @@ export async function handleAdminOAuthCallback(context: Context<ApiEnv>): Promis
     );
   }
 
-  if (!user || user.role !== 'admin' || isAdminSuspended(user.suspended_reason)) {
-    return context.html(
-      '<h1>403 Forbidden</h1><p>Admin access required. You must have an admin account to sign in.</p>',
-      403,
-    );
+  if (!user || user.role !== 'admin') {
+    return adminAccessRejected(context, 'required');
+  }
+  if (isAdminSuspended(user.suspended_reason)) {
+    return adminAccessRejected(context, 'suspended');
   }
 
   const jwt = await signJwt({ sub: user.id, login, aud: 'admin' }, context.env.JWT_SECRET);

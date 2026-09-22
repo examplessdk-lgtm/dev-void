@@ -5,6 +5,7 @@ import { generateId } from '../id.ts';
 import {
   ProjectAccessDeniedError,
   ProjectNotFoundError,
+  PROJECT_PERMISSION_MESSAGES,
   requireProjectCapability,
 } from '../project-access.ts';
 import { decryptPlatformCredential, encryptPlatformCredential } from '../project-secrets.ts';
@@ -38,6 +39,7 @@ export class EmailOperationError extends Error {
   constructor(
     message: string,
     readonly status = 409,
+    readonly userMessage?: string,
   ) {
     super(message);
   }
@@ -440,7 +442,13 @@ async function requireProjectManagedEmailAccess(
     }
   } catch (error) {
     if (error instanceof ProjectNotFoundError || error instanceof ProjectAccessDeniedError) {
-      throw new EmailOperationError('forbidden', 403);
+      throw new EmailOperationError(
+        'forbidden',
+        403,
+        error instanceof ProjectAccessDeniedError
+          ? error.userMessage
+          : PROJECT_PERMISSION_MESSAGES.settings,
+      );
     }
     throw error;
   }
@@ -634,7 +642,11 @@ async function resumeBlockedEmailOperationTx(
   }
   if (route && actor.kind === 'owner') {
     if (!route.project_id || route.managed_by !== 'owner') {
-      throw new EmailOperationError('forbidden', 403);
+      throw new EmailOperationError(
+        'forbidden',
+        403,
+        'This email connection is managed by the platform. Contact a platform administrator to change it.',
+      );
     }
     await requireProjectManagedEmailAccess(tx, route.project_id, actor);
   }
@@ -2487,7 +2499,11 @@ async function requestExistingOperation(
     }
     if (actor.kind === 'owner') {
       if (!project || route.managed_by !== 'owner') {
-        throw new EmailOperationError('forbidden', 403);
+        throw new EmailOperationError(
+          'forbidden',
+          403,
+          'This email connection is managed by the platform. Contact a platform administrator to change it.',
+        );
       }
     }
     if (

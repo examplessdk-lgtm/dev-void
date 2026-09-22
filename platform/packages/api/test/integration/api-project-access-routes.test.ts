@@ -2,7 +2,19 @@ import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 import { verifyPrerenderToken } from '../../src/auth/deploy-token.ts';
 import app from '../../src/index.ts';
-import { projectMembers, projectOwnershipPeriods, users } from '../../src/schema.ts';
+import {
+  deployments,
+  domains,
+  projectAccessEvents,
+  projectDeployCredentials,
+  projectInvitations,
+  projectMembers,
+  projectOwnershipPeriods,
+  projects,
+  projectSecrets,
+  resources,
+  users,
+} from '../../src/schema.ts';
 import {
   JWT_SECRET,
   clearTables,
@@ -30,14 +42,214 @@ beforeEach(async () => {
   vi.unstubAllGlobals();
 });
 
-function authed(path: string, jwt: string, method = 'GET'): Request {
+function authed(path: string, jwt: string, method = 'GET', body?: unknown): Request {
   return new Request(`http://localhost${path}`, {
     method,
-    headers: { Authorization: `Bearer ${jwt}` },
+    headers: {
+      Authorization: `Bearer ${jwt}`,
+      ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+    },
+    ...(method !== 'GET' && body !== undefined ? { body: JSON.stringify(body) } : {}),
   });
 }
 
+async function projectState() {
+  return Promise.all([
+    env.db.select().from(projects),
+    env.db.select().from(projectMembers),
+    env.db.select().from(projectInvitations),
+    env.db.select().from(projectAccessEvents),
+    env.db.select().from(projectDeployCredentials),
+    env.db.select().from(deployments),
+    env.db.select().from(projectSecrets),
+    env.db.select().from(domains),
+    env.db.select().from(resources),
+  ]);
+}
+
 describe('project route membership capabilities', () => {
+  it.each([
+    ['POST', '/deploy', 'Deploying requires the collaborator, admin, or owner role'],
+    ['POST', '/deploy/preflight', 'Deploying requires the collaborator, admin, or owner role'],
+    ['POST', '/deploy/upload-urls', 'Deploying requires the collaborator, admin, or owner role'],
+    ['POST', '/prerender-token', 'Deploying requires the collaborator, admin, or owner role'],
+    ['POST', '/rollback', 'Deploying requires the collaborator, admin, or owner role'],
+    [
+      'POST',
+      '/deployments/missing/cancel',
+      'Deploying requires the collaborator, admin, or owner role',
+    ],
+    [
+      'PUT',
+      '/secrets/TEST_SECRET',
+      'Changing project configuration requires the collaborator, admin, or owner role',
+    ],
+    [
+      'DELETE',
+      '/secrets/TEST_SECRET',
+      'Changing project configuration requires the collaborator, admin, or owner role',
+    ],
+    [
+      'POST',
+      '/migrations/apply',
+      'Changing project configuration requires the collaborator, admin, or owner role',
+    ],
+    [
+      'PUT',
+      '/database-url',
+      'Changing project configuration requires the collaborator, admin, or owner role',
+    ],
+    ['POST', '/domains', 'Changing project settings requires the admin or owner role'],
+    [
+      'POST',
+      '/invitations',
+      'Managing project members and invitations requires the admin or owner role',
+    ],
+    [
+      'PATCH',
+      '/members/missing',
+      'Managing project members and invitations requires the admin or owner role',
+    ],
+    [
+      'DELETE',
+      '/members/missing',
+      'Managing project members and invitations requires the admin or owner role',
+    ],
+    ['DELETE', '', 'Only the project owner can delete this project'],
+  ])('explains reader denial for %s %s without side effects', async (method, suffix, guidance) => {
+    const owner = await createTestUser(env.db, 'private-owner');
+    const reader = await createTestUser(env.db, 'reader');
+    const project = await createTestProject(env.db, owner.id, 'private-project');
+    await env.db.insert(projectMembers).values({
+      project_id: project.id,
+      user_id: reader.id,
+      role: 'reader',
+      added_by_user_id: owner.id,
+    });
+    const before = await projectState();
+    const provider = vi.fn(() => {
+      throw new Error('Denied request must not contact a provider');
+    });
+    vi.stubGlobal('fetch', provider);
+    const routingWrite = vi.spyOn(env.ROUTING, 'put');
+    const response = await app.fetch(
+      authed(
+        `/projects/${project.id}${suffix}`,
+        reader.jwt,
+        method,
+        method === 'DELETE'
+          ? undefined
+          : {
+              value: 'must-not-be-written',
+              role: 'admin',
+              email: 'nobody@example.com',
+            },
+      ),
+      env,
+    );
+
+    expect(response.status).toBe(403);
+    const body = (await response.json()) as { error: string; message: string };
+    expect(body).toEqual({ error: 'forbidden', message: expect.stringContaining(guidance) });
+    expect(body.message).toMatch(/Ask (a project admin or owner|the owner)/);
+    for (const privateValue of [owner.id, owner.login, project.id, project.slug]) {
+      expect(JSON.stringify(body)).not.toContain(privateValue);
+    }
+    expect(await projectState()).toEqual(before);
+    expect(provider).not.toHaveBeenCalled();
+    expect(routingWrite).not.toHaveBeenCalled();
+  });
+
+  it.each(['reader', 'collaborator', 'admin', 'nonmember'] as const)(
+    'explains owner-only token access to a %s without changing credentials',
+    async (role) => {
+      const owner = await createTestUser(env.db, 'private-owner');
+      const actor = await createTestUser(env.db, 'actor');
+      const project = await createTestProject(env.db, owner.id, 'private-project');
+      if (role !== 'nonmember') {
+        await env.db.insert(projectMembers).values({
+          project_id: project.id,
+          user_id: actor.id,
+          role,
+          added_by_user_id: owner.id,
+        });
+      }
+      await env.db.insert(projectDeployCredentials).values({
+        id: 'existing-credential',
+        project_id: project.id,
+        issued_by: owner.id,
+        name: 'private-token-name',
+        expires_at: new Date(Date.now() + 86_400_000).toISOString(),
+      });
+      const before = await projectState();
+      for (const [method, suffix] of [
+        ['GET', '/tokens'],
+        ['POST', '/tokens'],
+        ['POST', '/tokens/existing-credential/renew'],
+        ['DELETE', '/tokens/existing-credential'],
+      ]) {
+        const response = await app.fetch(
+          authed(`/projects/${project.id}${suffix}`, actor.jwt, method),
+          env,
+        );
+        expect(response.status).toBe(403);
+        expect(await response.json()).toEqual({
+          error: 'forbidden',
+          message:
+            'Only the project owner can manage deploy tokens. Ask the owner to create or manage a token.',
+        });
+        expect(await projectState()).toEqual(before);
+      }
+    },
+  );
+
+  it('does not guess a nonmember role or expose private details in read denials', async () => {
+    const owner = await createTestUser(env.db, 'private-owner');
+    const stranger = await createTestUser(env.db, 'stranger');
+    const project = await createTestProject(env.db, owner.id, 'private-project');
+    const before = await projectState();
+    const denied = await app.fetch(authed(`/projects/${project.id}`, stranger.jwt), env);
+    expect(denied.status).toBe(403);
+    expect(await denied.json()).toEqual({
+      error: 'forbidden',
+      message:
+        'You need project access to view this project. Ask a project admin or owner to invite you.',
+    });
+    const missing = await app.fetch(authed('/projects/missing', stranger.jwt), env);
+    expect(missing.status).toBe(404);
+    expect(await missing.json()).toEqual({
+      error: 'project not found',
+      message:
+        'This project could not be found. Check the project ID or refresh your project list.',
+    });
+    expect(await projectState()).toEqual(before);
+  });
+
+  it('explains owner suspension to a member without exposing the suspension reason', async () => {
+    const owner = await createTestUser(env.db, 'private-owner');
+    const reader = await createTestUser(env.db, 'reader');
+    const project = await createTestProject(env.db, owner.id, 'private-project');
+    await env.db.insert(projectMembers).values({
+      project_id: project.id,
+      user_id: reader.id,
+      role: 'reader',
+      added_by_user_id: owner.id,
+    });
+    await env.db
+      .update(users)
+      .set({ suspended_reason: 'private policy violation details' })
+      .where(eq(users.id, owner.id));
+    const before = await projectState();
+    const response = await app.fetch(authed(`/projects/${project.id}`, reader.jwt), env);
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({
+      error: 'project owner suspended',
+      message:
+        "This project's owner account is suspended. Ask the owner to contact the platform administrator to restore access.",
+    });
+    expect(await projectState()).toEqual(before);
+  });
+
   it('lists shared projects with role and owner and grants readers view routes', async () => {
     const owner = await createTestUser(env.db, 'owner');
     const reader = await createTestUser(env.db, 'reader');

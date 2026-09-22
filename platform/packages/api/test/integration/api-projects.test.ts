@@ -65,6 +65,10 @@ describe('GET /projects', () => {
   it('returns 401 without auth', async () => {
     const res = await app.fetch(new Request('http://localhost/projects'), env);
     expect(res.status).toBe(401);
+    expect(await res.json()).toEqual({
+      error: 'unauthorized',
+      message: expect.stringMatching(/sign in to this platform/i),
+    });
   });
 
   it('returns 401 when user has been deleted', async () => {
@@ -78,7 +82,10 @@ describe('GET /projects', () => {
       env,
     );
     expect(res.status).toBe(401);
-    expect(await res.json()).toEqual({ error: 'user not found' });
+    expect(await res.json()).toEqual({
+      error: 'user not found',
+      message: expect.stringMatching(/sign in with an active account/i),
+    });
   });
 
   it('returns 403 when user is admin-suspended', async () => {
@@ -95,7 +102,10 @@ describe('GET /projects', () => {
       env,
     );
     expect(res.status).toBe(403);
-    expect(await res.json()).toEqual({ error: 'account suspended' });
+    expect(await res.json()).toEqual({
+      error: 'account suspended',
+      message: expect.stringMatching(/contact a platform administrator/i),
+    });
   });
 
   it('allows usage-suspended user to list projects', async () => {
@@ -299,7 +309,10 @@ describe('GET /projects/:id', () => {
       env,
     );
     expect(res.status).toBe(403);
-    expect(await res.json()).toEqual({ error: 'project owner suspended' });
+    expect(await res.json()).toEqual({
+      error: 'project owner suspended',
+      message: expect.any(String),
+    });
   });
 
   it('returns 403 when user does not own the project', async () => {
@@ -314,7 +327,7 @@ describe('GET /projects/:id', () => {
       env,
     );
     expect(res.status).toBe(403);
-    expect(await res.json()).toEqual({ error: 'forbidden' });
+    expect(await res.json()).toEqual({ error: 'forbidden', message: expect.any(String) });
   });
 
   it('returns 404 for nonexistent project', async () => {
@@ -391,7 +404,10 @@ describe('project CI credential ownership', () => {
         env,
       );
       expect(memberResponse.status).toBe(403);
-      expect(await memberResponse.json()).toEqual({ error: 'forbidden' });
+      expect(await memberResponse.json()).toEqual({
+        error: 'forbidden',
+        message: expect.any(String),
+      });
 
       const missingResponse = await app.fetch(
         credentialRequest(
@@ -404,7 +420,10 @@ describe('project CI credential ownership', () => {
         env,
       );
       expect(missingResponse.status).toBe(404);
-      expect(await missingResponse.json()).toEqual({ error: 'project not found' });
+      expect(await missingResponse.json()).toEqual({
+        error: 'project not found',
+        message: expect.any(String),
+      });
     }
   });
 
@@ -855,7 +874,10 @@ describe('POST /projects/:id/prerender-token', () => {
 
     expect(suspended).toBe(true);
     expect(response.status).toBe(403);
-    expect(await response.json()).toEqual({ error: 'project owner suspended' });
+    expect(await response.json()).toEqual({
+      error: 'project owner suspended',
+      message: expect.any(String),
+    });
   });
 
   it("does not mint a token for another user's project", async () => {
@@ -933,7 +955,7 @@ describe('PUT /projects/:id/database-url', () => {
       const res = await app.fetch(request, env);
 
       expect(res.status).toBe(403);
-      expect(await res.json()).toEqual({ error: 'forbidden' });
+      expect(await res.json()).toEqual({ error: 'forbidden', message: expect.any(String) });
       expect(downgraded).toBe(true);
       expect(cf).not.toHaveBeenCalled();
       expect(
@@ -1229,7 +1251,7 @@ describe('GET /projects/:id/database-url', () => {
     );
 
     expect(res.status).toBe(403);
-    expect(await res.json()).toEqual({ error: 'forbidden' });
+    expect(await res.json()).toEqual({ error: 'forbidden', message: expect.any(String) });
   });
 
   it('round-trips the connection string via POST /:id/database', async () => {

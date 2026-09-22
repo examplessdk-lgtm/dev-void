@@ -312,6 +312,10 @@ describe('deploy token scope enforcement', () => {
       env,
     );
     expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({
+      error: 'forbidden',
+      message: expect.stringMatching(/credential.*assigned project.*sign in with your account/i),
+    });
   });
 
   it('rejects PUT /projects/:id/secrets/:name (secret rewrite)', async () => {
@@ -329,6 +333,10 @@ describe('deploy token scope enforcement', () => {
       env,
     );
     expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({
+      error: 'forbidden',
+      message: expect.stringMatching(/credential.*assigned project.*sign in with your account/i),
+    });
   });
 
   it('rejects POST /projects/:id/github (repoint GitHub connection)', async () => {
@@ -346,6 +354,10 @@ describe('deploy token scope enforcement', () => {
       env,
     );
     expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({
+      error: 'forbidden',
+      message: expect.stringMatching(/credential.*assigned project.*sign in with your account/i),
+    });
   });
 
   it('rejects a P-scoped token used against a different project (cross-project)', async () => {
@@ -365,6 +377,10 @@ describe('deploy token scope enforcement', () => {
       env,
     );
     expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({
+      error: 'forbidden',
+      message: expect.stringMatching(/credential.*assigned project.*sign in with your account/i),
+    });
   });
 
   // A deploy token may be bound to the build it was minted for. Once that build
@@ -471,6 +487,10 @@ describe('deploy token scope enforcement', () => {
           env,
         );
         expect(res.status).toBe(403);
+        expect(await res.json()).toEqual({
+          error: 'deploy token build is no longer active',
+          message: expect.stringMatching(/start a new build/i),
+        });
       });
     }
   }

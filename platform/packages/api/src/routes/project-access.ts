@@ -4,6 +4,7 @@ import type { ApiEnv } from '../env.ts';
 import {
   ProjectAccessDeniedError,
   ProjectNotFoundError,
+  projectAccessErrorBody,
   requireProjectCapability,
   type ProjectAccess,
 } from '../project-access.ts';
@@ -19,7 +20,7 @@ export async function requireProjectRouteCapability(
     return await requireProjectCapability(db, projectId, context.get('user').id, capability);
   } catch (error) {
     if (error instanceof ProjectNotFoundError || error instanceof ProjectAccessDeniedError) {
-      return context.json({ error: error.message }, error.status);
+      return context.json(projectAccessErrorBody(error), error.status);
     }
     throw error;
   }

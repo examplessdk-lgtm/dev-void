@@ -88,7 +88,10 @@ export function serializeEmailRoute(
 }
 function serviceError(context: Context<ApiEnv>, error: unknown): Response {
   if (error instanceof EmailOperationError) {
-    return context.json({ error: error.message }, error.status as 400);
+    return context.json(
+      { error: error.message, ...(error.userMessage ? { message: error.userMessage } : {}) },
+      error.status as 400,
+    );
   }
   throw error;
 }

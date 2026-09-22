@@ -1,5 +1,6 @@
 import type { MiddlewareHandler } from 'hono';
 import type { ApiEnv } from '../../env.ts';
+import { adminRequestRejected } from './request-rejection.ts';
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
@@ -13,7 +14,7 @@ export const adminCsrfMiddleware: MiddlewareHandler<ApiEnv> = async (context, ne
   const origin = context.req.header('Origin');
   if (origin) {
     if (parseOrigin(origin) !== expectedOrigin) {
-      return context.text('Forbidden: invalid request origin.', 403);
+      return adminRequestRejected(context, 'Forbidden: invalid request origin.', 'text');
     }
     await next();
     return;
@@ -21,7 +22,7 @@ export const adminCsrfMiddleware: MiddlewareHandler<ApiEnv> = async (context, ne
 
   const referer = context.req.header('Referer');
   if (!referer || parseOrigin(referer) !== expectedOrigin) {
-    return context.text('Forbidden: missing request origin.', 403);
+    return adminRequestRejected(context, 'Forbidden: missing request origin.', 'text');
   }
   await next();
 };

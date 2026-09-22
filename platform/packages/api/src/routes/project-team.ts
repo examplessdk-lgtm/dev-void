@@ -17,6 +17,7 @@ import {
 import { sendProjectInvitationEmail } from '../email.ts';
 import type { ApiEnv } from '../env.ts';
 import { cancelContainerBuildDos } from '../github/cancel-builds.ts';
+import { PROJECT_PERMISSION_MESSAGES } from '../project-access.ts';
 import type {
   ProjectInvitation,
   ProjectInvitationStatus,
@@ -102,7 +103,7 @@ function mutationErrorResponse(context: Context<ApiEnv>, error: unknown): Respon
   if (!(error instanceof ProjectTeamMutationError)) {
     return null;
   }
-  const messages: Record<ProjectTeamMutationError['reason'], string> = {
+  const errors: Record<ProjectTeamMutationError['reason'], string> = {
     'project-not-found': 'project not found',
     'project-deleting': 'project is being deleted',
     'target-user-not-found': 'registered user not found',
@@ -117,7 +118,35 @@ function mutationErrorResponse(context: Context<ApiEnv>, error: unknown): Respon
     'owner-suspended': 'project owner suspended',
     forbidden: 'forbidden',
   };
-  return context.json({ error: messages[error.reason] }, error.status);
+  const messages: Record<ProjectTeamMutationError['reason'], string> = {
+    'project-not-found': PROJECT_PERMISSION_MESSAGES['not-found'],
+    'project-deleting':
+      'This project is being deleted. Wait for deletion to finish and select another project.',
+    'target-user-not-found':
+      'No eligible registered account matches that email. Check the address and ask the person to sign in to this platform before inviting them.',
+    'owner-conflict':
+      'The project owner already has full access and cannot be managed as a team member. Manage other members instead.',
+    'member-conflict':
+      'This account is already a project member. Refresh the member list to review its access.',
+    'member-not-found':
+      'This project member could not be found. Refresh the member list and send a new invitation if access is still needed.',
+    'invitation-not-found':
+      'This invitation could not be found. Check your pending invitations or ask a project admin or owner to send a new one.',
+    'invitation-not-pending':
+      'This invitation is no longer pending. If you still need access, ask a project admin or owner to send a new invitation.',
+    'invitation-not-target':
+      'This invitation belongs to a different account. Sign in with the account that received it, or ask a project admin or owner to invite your current account.',
+    'invitation-expired':
+      'This invitation has expired. Ask a project admin or owner to resend it, then accept the renewed invitation.',
+    'pending-invitation-limit':
+      'This project has reached its pending invitation limit. Revoke unused invitations or wait for them to expire, then try again.',
+    'owner-suspended': PROJECT_PERMISSION_MESSAGES['owner-suspended'],
+    forbidden: PROJECT_PERMISSION_MESSAGES.members,
+  };
+  return context.json(
+    { error: errors[error.reason], message: messages[error.reason] },
+    error.status,
+  );
 }
 
 async function deliverInvitation(
@@ -353,7 +382,14 @@ export const projectTeamRoutes = new Hono<ApiEnv>()
       );
       const user = await getUser(context.get('db'), member.user_id);
       if (!user) {
-        return context.json({ error: 'project member not found' }, 404);
+        return context.json(
+          {
+            error: 'project member not found',
+            message:
+              'This project member could not be found. Refresh the member list and send a new invitation if access is still needed.',
+          },
+          404,
+        );
       }
       return context.json({ member: memberJson(member, user) });
     } catch (error) {
@@ -399,7 +435,14 @@ export const projectTeamRoutes = new Hono<ApiEnv>()
       return access;
     }
     if (access.role === 'owner') {
-      return context.json({ error: 'the project owner cannot leave the project' }, 409);
+      return context.json(
+        {
+          error: 'the project owner cannot leave the project',
+          message:
+            'The project owner cannot leave. Ask a platform administrator to transfer ownership before leaving the project.',
+        },
+        409,
+      );
     }
     try {
       const { cancelledBuilds } = await removeProjectMember(context.get('db'), {

@@ -28,9 +28,9 @@ describe('describeConnectError', () => {
     );
   });
 
-  it('returns forbidden message for 403', () => {
+  it('leaves 403 explanations to the operation-aware client', () => {
     const msg = describeConnectError(403, 'forbidden');
-    expect(msg).toBe("You don't have access to this project.");
+    expect(msg).toBeNull();
   });
 
   it('returns not-found message for 404 / "project not found"', () => {
@@ -67,7 +67,7 @@ describe('describeUpdateError', () => {
   });
 
   it('falls back to the connect mapping for 403', () => {
-    expect(describeUpdateError(403, 'forbidden')).toBe("You don't have access to this project.");
+    expect(describeUpdateError(403, 'forbidden')).toBeNull();
   });
 
   it('returns null for an unrecognised status / code', () => {

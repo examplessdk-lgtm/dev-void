@@ -37,7 +37,10 @@ describe('GET /me', () => {
   it('returns 401 without auth header', async () => {
     const res = await app.fetch(new Request('http://localhost/me'), env);
     expect(res.status).toBe(401);
-    expect(await res.json()).toEqual({ error: 'unauthorized' });
+    expect(await res.json()).toEqual({
+      error: 'unauthorized',
+      message: expect.stringMatching(/sign in to this platform/i),
+    });
   });
 
   it('returns 401 with invalid JWT', async () => {
@@ -50,6 +53,7 @@ describe('GET /me', () => {
     expect(res.status).toBe(401);
     expect(await res.json()).toEqual({
       error: 'invalid or expired token',
+      message: expect.stringMatching(/sign in again.*replace the credential/i),
     });
   });
 
@@ -90,7 +94,10 @@ describe('GET /me', () => {
       env,
     );
     expect(res.status).toBe(401);
-    expect(await res.json()).toEqual({ error: 'user not found' });
+    expect(await res.json()).toEqual({
+      error: 'user not found',
+      message: expect.stringMatching(/sign in with an active account/i),
+    });
   });
 
   it('returns 403 when user is admin-suspended', async () => {
@@ -107,7 +114,10 @@ describe('GET /me', () => {
       env,
     );
     expect(res.status).toBe(403);
-    expect(await res.json()).toEqual({ error: 'account suspended' });
+    expect(await res.json()).toEqual({
+      error: 'account suspended',
+      message: expect.stringMatching(/contact a platform administrator/i),
+    });
   });
 
   it('allows usage-suspended user through', async () => {

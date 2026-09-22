@@ -652,7 +652,10 @@ describe('POST /auth/github-oidc', () => {
 
     const res = await exchange(app, env, { oidcToken: 'good', project: project.slug });
     expect(res.status).toBe(403);
-    expect(await res.json()).toEqual({ error: 'project owner suspended' });
+    expect(await res.json()).toEqual({
+      error: 'project owner suspended',
+      message: expect.any(String),
+    });
     expect(await getProjectBuilds(env.db, project.id)).toEqual([]);
     expect(checkRunCreateCount).toBe(0);
   });

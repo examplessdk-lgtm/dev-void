@@ -198,7 +198,10 @@ describe('POST /projects/:id/domains', () => {
     );
 
     expect(res.status).toBe(403);
-    expect(await res.json()).toEqual({ error: 'forbidden' });
+    expect(await res.json()).toEqual({
+      error: 'forbidden',
+      message: expect.stringMatching(/Ask (a project admin or owner|the owner)/),
+    });
     expect(
       await env.db.select().from(domains).where(eq(domains.hostname, 'access-race.example.com')),
     ).toEqual([]);

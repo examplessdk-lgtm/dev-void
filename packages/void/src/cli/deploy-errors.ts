@@ -1,4 +1,5 @@
 import { isCliOutdatedError, parsePlatformErrorBody, PlatformApiError } from './client.ts';
+import { platformErrorMessage } from './platform-errors.ts';
 
 const BODY_SNIPPET_MAX = 200;
 
@@ -58,8 +59,8 @@ export function formatConnectionLostMessage(
  * Three cases:
  *   1. `PlatformApiError` with 409 + a JSON body carrying `{error, deployment}`
  *      — surface the server-supplied error and prefer the body's deployment id.
- *   2. Any other `PlatformApiError` — surface as `Deploy failed (HTTP <status>): <detail>`
- *      where detail is the parsed `error`/`message` field or a trimmed body snippet.
+ *   2. Any other `PlatformApiError` — retain the client's actionable message and
+ *      structured error fields; opaque provider failures use a trimmed body snippet.
  *   3. Anything else — preserve the original message under a `Connection lost
  *      during deploy: <original>` prefix so the caller can still tell network,
  *      parse, and transport errors apart.
@@ -71,7 +72,7 @@ export function formatStreamDeployError(
 ): Error {
   if (err instanceof PlatformApiError) {
     const parsed = parsePlatformErrorBody(err.body);
-    const parsedError = parsed?.error ?? parsed?.message ?? null;
+    const parsedError = platformErrorMessage(parsed) ?? parsed?.error ?? null;
     const parsedDeployment = parsed?.deployment ?? null;
     const effectiveDeploymentId = parsedDeployment ?? deploymentId;
 
@@ -80,24 +81,21 @@ export function formatStreamDeployError(
     // `npm i -g void@latest`, so adding a status prefix would only obscure
     // the actionable line.
     if (isCliOutdatedError(err) && parsed?.message) {
-      return new Error(appendTrailingLines(parsed.message, effectiveDeploymentId, logPath));
+      err.message = appendTrailingLines(err.message, effectiveDeploymentId, logPath);
+      return err;
     }
 
-    if (err.status === 409 && parsedError) {
-      return new Error(
-        appendTrailingLines(
-          `deploy: Deploy failed: ${parsedError}`,
-          effectiveDeploymentId,
-          logPath,
-        ),
-      );
+    if (parsedError || err.status === 401 || err.status === 403 || parsed !== null) {
+      err.message = appendTrailingLines(`deploy: ${err.message}`, effectiveDeploymentId, logPath);
+      return err;
     }
 
     const detail = parsedError ?? trimSnippet(err.body);
     const base = detail
       ? `deploy: Deploy failed (HTTP ${err.status}): ${detail}`
       : `deploy: Deploy failed (HTTP ${err.status}).`;
-    return new Error(appendTrailingLines(base, effectiveDeploymentId, logPath));
+    err.message = appendTrailingLines(base, effectiveDeploymentId, logPath);
+    return err;
   }
 
   const original = err instanceof Error ? err.message : String(err);

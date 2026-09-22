@@ -34,7 +34,11 @@ import {
 } from '../email/settings.ts';
 import type { ApiEnv } from '../env.ts';
 import { isForeignKeyViolation, isUniqueViolation } from '../pg-errors.ts';
-import { ProjectAccessDeniedError, ProjectNotFoundError } from '../project-access.ts';
+import {
+  ProjectAccessDeniedError,
+  ProjectNotFoundError,
+  projectAccessErrorBody,
+} from '../project-access.ts';
 import { runEmailDestinationCleanup } from '../provisioning/email-destination-cleanup.ts';
 import {
   addDestination,
@@ -703,7 +707,7 @@ function serializeDestination(row: EmailDestination) {
 
 function projectAccessErrorResponse(context: Context<ApiEnv>, error: unknown): Response | null {
   if (error instanceof ProjectNotFoundError || error instanceof ProjectAccessDeniedError) {
-    return context.json({ error: error.message }, error.status);
+    return context.json(projectAccessErrorBody(error), error.status);
   }
   return null;
 }

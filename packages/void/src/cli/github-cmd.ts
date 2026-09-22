@@ -17,6 +17,7 @@ import {
 import { collectGitDeployMetadata } from './git-metadata.ts';
 import type { GithubArgs } from './github-args.ts';
 import { pc } from './output.ts';
+import { platformErrorMessage } from './platform-errors.ts';
 import { readProjectConfig } from './project.ts';
 import { getRequestedProjectSlug, resolveProjectBySlug } from './resolve-project.ts';
 
@@ -62,9 +63,6 @@ export function describeConnectError(status: number, errorCode: string | undefin
   if (status === 400 && code.includes('not accessible')) {
     return 'Repository not accessible by this installation. Check the App has access to it.';
   }
-  if (status === 403) {
-    return "You don't have access to this project.";
-  }
   if (status === 404) {
     return 'Project or installation not found.';
   }
@@ -84,6 +82,19 @@ export function describeUpdateError(status: number, errorCode: string | undefine
     return 'This project is not connected to a GitHub repository. Run `void github connect` first.';
   }
   return describeConnectError(status, code);
+}
+
+function describeGithubClientError(
+  error: PlatformApiError,
+  describe: typeof describeConnectError,
+): string | null {
+  const body = parsePlatformErrorBody(error.body);
+  // The client knows whether this was a project read, settings change, or an
+  // account-level GitHub operation. A 403 alone does not identify the cause.
+  if (platformErrorMessage(body) || error.status === 403) {
+    return error.message;
+  }
+  return describe(error.status, error.code);
 }
 
 /**
@@ -787,8 +798,7 @@ export async function runConnect(
       }
       // Organization participant: prove per-repo access via an authorize round-trip,
       // then retry the connect EXACTLY ONCE with the resulting grant. This MUST
-      // come before the generic `describeConnectError` branch below, which maps
-      // ANY 403 to "no project access" and would otherwise swallow this signal.
+      // come before the generic error display so users can authorize the repository.
       const grant = await runGithubConnectAuthorize(
         client,
         installation.installation_id,
@@ -800,8 +810,12 @@ export async function runConnect(
           codeVerifier: grant.codeVerifier,
         });
       } catch (retryErr) {
-        if (retryErr instanceof PlatformApiError && retryErr.status === 403) {
-          // A fresh grant should be accepted; a 403 here means it was rejected
+        if (
+          retryErr instanceof PlatformApiError &&
+          retryErr.status === 403 &&
+          retryErr.code === 'invalid connect grant'
+        ) {
+          // A fresh grant should be accepted; this code means it was rejected
           // (expired, or the browser identity differs from the linked one). Do
           // NOT fall through to the generic 403 "no project access" message.
           log.error(
@@ -812,9 +826,7 @@ export async function runConnect(
         throw retryErr;
       }
     } else {
-      const body = parsePlatformErrorBody(err.body);
-      const code = body?.error ?? body?.message ?? '';
-      const message = describeConnectError(err.status, code);
+      const message = describeGithubClientError(err, describeConnectError);
       if (message !== null) {
         log.error(`connect: ${message}`);
         process.exit(1);
@@ -918,9 +930,7 @@ export async function runGithubUpdate(
     current = await client.getGithubConnection(projectId);
   } catch (err) {
     if (err instanceof PlatformApiError) {
-      const body = parsePlatformErrorBody(err.body);
-      const code = body?.error ?? body?.message ?? '';
-      const message = describeUpdateError(err.status, code);
+      const message = describeGithubClientError(err, describeUpdateError);
       if (message !== null) {
         log.error(`update: ${message}`);
         process.exit(1);
@@ -1045,9 +1055,7 @@ export async function runGithubUpdate(
     updated = await client.updateGithubConnection(projectId, patch);
   } catch (err) {
     if (err instanceof PlatformApiError) {
-      const body = parsePlatformErrorBody(err.body);
-      const code = body?.error ?? body?.message ?? '';
-      const message = describeUpdateError(err.status, code);
+      const message = describeGithubClientError(err, describeUpdateError);
       if (message !== null) {
         log.error(`update: ${message}`);
         process.exit(1);
@@ -1142,9 +1150,7 @@ export async function runStatus(
     connection = await client.getGithubConnection(projectId);
   } catch (err) {
     if (err instanceof PlatformApiError) {
-      const body = parsePlatformErrorBody(err.body);
-      const code = body?.error ?? body?.message ?? '';
-      const message = describeUpdateError(err.status, code);
+      const message = describeGithubClientError(err, describeUpdateError);
       if (message !== null) {
         log.error(`status: ${message}`);
         process.exit(1);
@@ -1234,7 +1240,7 @@ export async function runGithubDisconnect(
         log.info('This project is not connected to a GitHub repository. Nothing to disconnect.');
         return;
       }
-      const message = describeConnectError(err.status, code);
+      const message = describeGithubClientError(err, describeConnectError);
       if (message !== null) {
         log.error(`disconnect: ${message}`);
         process.exit(1);
@@ -1276,9 +1282,7 @@ export async function runGithubDisconnect(
     await client.deleteGithubConnection(projectId);
   } catch (err) {
     if (err instanceof PlatformApiError) {
-      const body = parsePlatformErrorBody(err.body);
-      const code = body?.error ?? body?.message ?? '';
-      const message = describeConnectError(err.status, code);
+      const message = describeGithubClientError(err, describeConnectError);
       if (message !== null) {
         log.error(`disconnect: ${message}`);
         process.exit(1);

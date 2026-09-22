@@ -150,7 +150,10 @@ describe('POST /projects/:id/revalidate', () => {
     const res = await responsePromise;
 
     expect(res.status).toBe(403);
-    expect(await res.json()).toEqual({ error: 'forbidden' });
+    expect(await res.json()).toEqual({
+      error: 'forbidden',
+      message: expect.stringMatching(/Ask (a project admin or owner|the owner)/),
+    });
     expect(await env.ISR_CACHE.get(key)).toBe('cached');
     expect(
       fetchMock.mock.calls.filter(([url]) => String(url).includes('/purge_cache')),

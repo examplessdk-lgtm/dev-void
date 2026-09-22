@@ -9,6 +9,12 @@ import {
   isCloudflareAccessChallenge,
 } from './cf-access.ts';
 import type { CliLogger } from './log-file.ts';
+import {
+  formatPlatformApiError,
+  parsePlatformErrorBody,
+  platformErrorMessage,
+  type ProjectPermission,
+} from './platform-errors.ts';
 import { normalizePlatformApiUrl } from './platform-registry.ts';
 import type { DeployAssetUploadRequest, DeployEvent, DeployUploadPayload } from './types.ts';
 
@@ -37,25 +43,8 @@ export function readCliVersion(): string | null {
 
 const VOID_CLI_VERSION = readCliVersion();
 
-export type PlatformErrorPayload = {
-  error?: string;
-  message?: string;
-  deployment?: string;
-  minVersion?: string;
-  clientVersion?: string;
-};
-
-export function parsePlatformErrorBody(body: string): PlatformErrorPayload | null {
-  try {
-    const parsed = JSON.parse(body);
-    if (!parsed || typeof parsed !== 'object') {
-      return null;
-    }
-    return parsed as PlatformErrorPayload;
-  } catch {
-    return null;
-  }
-}
+export { parsePlatformErrorBody } from './platform-errors.ts';
+export type { PlatformErrorPayload } from './platform-errors.ts';
 
 /**
  * Detects the `cli_outdated` 426 response shape emitted by the platform's
@@ -79,16 +68,9 @@ export class PlatformApiError extends Error {
   readonly body: string;
   readonly code?: string;
 
-  constructor(action: string, status: number, body: string) {
+  constructor(action: string, status: number, body: string, permission?: ProjectPermission) {
     const parsed = parsePlatformErrorBody(body);
-    // cli_outdated: surface the server-supplied upgrade message verbatim
-    // instead of the raw `<action>: <status> <body>` default. The message
-    // already includes the `npm i -g void@latest` hint.
-    const message =
-      status === 426 && parsed?.error === 'cli_outdated' && parsed.message
-        ? parsed.message
-        : `${action}: ${status} ${body}`;
-    super(message);
+    super(formatPlatformApiError(action, status, body, permission));
     this.name = 'PlatformApiError';
     this.status = status;
     this.body = body;
@@ -96,8 +78,17 @@ export class PlatformApiError extends Error {
   }
 }
 
-async function throwPlatformApiError(action: string, res: Response): Promise<never> {
-  throw new PlatformApiError(action, res.status, await res.text());
+async function throwPlatformApiError(
+  action: string,
+  res: Response,
+  permission?: ProjectPermission,
+): Promise<never> {
+  throw new PlatformApiError(
+    action,
+    res.status,
+    await res.text(),
+    isCloudflareAccessChallenge(res) ? undefined : permission,
+  );
 }
 
 export function isExpiredTokenError(error: unknown): boolean {
@@ -105,6 +96,14 @@ export function isExpiredTokenError(error: unknown): boolean {
     return error.status === 401 && error.code === 'invalid or expired token';
   }
   return false;
+}
+
+function isPreflightRejection(error: unknown): boolean {
+  return (
+    error instanceof PlatformApiError &&
+    (([401, 403].includes(error.status) && !!parsePlatformErrorBody(error.body)?.error) ||
+      isCliOutdatedError(error))
+  );
 }
 
 export type ProjectResponse = {
@@ -621,7 +620,7 @@ export class PlatformClient {
       headers: { ...this.authHeaders },
     });
     if (!res.ok) {
-      await throwPlatformApiError('Failed to list project tokens', res);
+      await throwPlatformApiError('Failed to list project tokens', res, 'owner');
     }
     return res.json();
   }
@@ -636,7 +635,7 @@ export class PlatformClient {
       body: JSON.stringify(input),
     });
     if (!res.ok) {
-      await throwPlatformApiError('Failed to create project token', res);
+      await throwPlatformApiError('Failed to create project token', res, 'owner');
     }
     return res.json();
   }
@@ -646,7 +645,7 @@ export class PlatformClient {
       headers: { ...this.authHeaders },
     });
     if (!res.ok) {
-      await throwPlatformApiError('Failed to list project members', res);
+      await throwPlatformApiError('Failed to list project members', res, 'read');
     }
     const body = (await res.json()) as { members: Array<ProjectMemberResponse> };
     return body.members;
@@ -657,7 +656,7 @@ export class PlatformClient {
       headers: { ...this.authHeaders },
     });
     if (!res.ok) {
-      await throwPlatformApiError('Failed to list project invitations', res);
+      await throwPlatformApiError('Failed to list project invitations', res, 'members');
     }
     const body = (await res.json()) as { invitations: Array<ProjectInvitationResponse> };
     return body.invitations;
@@ -678,7 +677,7 @@ export class PlatformClient {
       body: JSON.stringify({ email, role }),
     });
     if (!res.ok) {
-      await throwPlatformApiError('Failed to invite project member', res);
+      await throwPlatformApiError('Failed to invite project member', res, 'members');
     }
     return res.json();
   }
@@ -697,7 +696,7 @@ export class PlatformClient {
       },
     );
     if (!res.ok) {
-      await throwPlatformApiError('Failed to renew project token', res);
+      await throwPlatformApiError('Failed to renew project token', res, 'owner');
     }
     return res.json();
   }
@@ -716,7 +715,7 @@ export class PlatformClient {
       },
     );
     if (!res.ok) {
-      await throwPlatformApiError('Failed to change project member role', res);
+      await throwPlatformApiError('Failed to change project member role', res, 'members');
     }
     return res.json();
   }
@@ -727,7 +726,7 @@ export class PlatformClient {
       { method: 'DELETE', headers: { ...this.authHeaders } },
     );
     if (!res.ok) {
-      await throwPlatformApiError('Failed to revoke project token', res);
+      await throwPlatformApiError('Failed to revoke project token', res, 'owner');
     }
     return res.json();
   }
@@ -738,7 +737,7 @@ export class PlatformClient {
       { method: 'DELETE', headers: { ...this.authHeaders } },
     );
     if (!res.ok) {
-      await throwPlatformApiError('Failed to remove project member', res);
+      await throwPlatformApiError('Failed to remove project member', res, 'members');
     }
   }
 
@@ -748,7 +747,7 @@ export class PlatformClient {
       { method: 'DELETE', headers: { ...this.authHeaders } },
     );
     if (!res.ok) {
-      await throwPlatformApiError('Failed to revoke project invitation', res);
+      await throwPlatformApiError('Failed to revoke project invitation', res, 'members');
     }
   }
 
@@ -794,7 +793,7 @@ export class PlatformClient {
     });
 
     if (!res.ok) {
-      await throwPlatformApiError('Failed to list deployments', res);
+      await throwPlatformApiError('Failed to list deployments', res, 'read');
     }
 
     return res.json();
@@ -826,7 +825,7 @@ export class PlatformClient {
     });
 
     if (!res.ok) {
-      await throwPlatformApiError('Rollback failed', res);
+      await throwPlatformApiError('Rollback failed', res, 'deploy');
     }
 
     return res.json();
@@ -847,7 +846,7 @@ export class PlatformClient {
     );
 
     if (!res.ok) {
-      await throwPlatformApiError('Cancel deployment failed', res);
+      await throwPlatformApiError('Cancel deployment failed', res, 'deploy');
     }
 
     return res.json();
@@ -887,8 +886,13 @@ export class PlatformClient {
       });
 
       if (!res.ok) {
-        const error = new PlatformApiError('Preflight failed', res.status, await res.text());
-        if (isExpiredTokenError(error)) {
+        const error = new PlatformApiError(
+          'Preflight failed',
+          res.status,
+          await res.text(),
+          isCloudflareAccessChallenge(res) ? undefined : 'deploy',
+        );
+        if (isPreflightRejection(error)) {
           throw error;
         }
         // Preflight not supported or error — fall back to uploading everything
@@ -897,7 +901,7 @@ export class PlatformClient {
 
       return res.json();
     } catch (error) {
-      if (isExpiredTokenError(error)) {
+      if (isPreflightRejection(error)) {
         throw error;
       }
       // Network error — fall back to uploading everything
@@ -936,7 +940,7 @@ export class PlatformClient {
     });
 
     if (!res.ok) {
-      await throwPlatformApiError('Failed to request upload URLs', res);
+      await throwPlatformApiError('Failed to request upload URLs', res, 'deploy');
     }
 
     const json = (await res.json()) as {
@@ -1022,15 +1026,7 @@ export class PlatformClient {
         // in flight (possibly the earlier attempt of this same deploy,
         // or a concurrent one). Surface it as a structured error event
         // naming the deployment rather than a bare HTTP failure.
-        let parsed: { error?: string; deployment?: string } | null = null;
-        try {
-          const raw: unknown = JSON.parse(body);
-          if (raw !== null && typeof raw === 'object') {
-            parsed = raw as { error?: string; deployment?: string };
-          }
-        } catch {
-          // Non-JSON 409 — fall through to the generic error below.
-        }
+        const parsed = parsePlatformErrorBody(body);
         if (parsed?.deployment) {
           cliLog?.warn('deploy_conflict', {
             url,
@@ -1041,14 +1037,19 @@ export class PlatformClient {
             event: 'error',
             step: 'finalize',
             message:
-              `${parsed.error ?? 'deploy in progress'}: deployment ${parsed.deployment} — ` +
+              `${platformErrorMessage(parsed) ?? platformErrorMessage({ message: parsed.error }) ?? 'deploy in progress'}: deployment ${parsed.deployment} — ` +
               'it may be an earlier attempt of this deploy or a concurrent one; ' +
               'inspect with `void project status` before redeploying',
           };
           return;
         }
       }
-      throw new PlatformApiError('Deploy failed', res.status, body);
+      throw new PlatformApiError(
+        'Deploy failed',
+        res.status,
+        body,
+        isCloudflareAccessChallenge(res) ? undefined : 'deploy',
+      );
     }
 
     const reader = res.body!.getReader();
@@ -1113,7 +1114,7 @@ export class PlatformClient {
     });
 
     if (!res.ok) {
-      await throwPlatformApiError('Failed to list secrets', res);
+      await throwPlatformApiError('Failed to list secrets', res, 'configure');
     }
 
     return res.json();
@@ -1133,7 +1134,7 @@ export class PlatformClient {
     );
 
     if (!res.ok) {
-      await throwPlatformApiError('Failed to set secret', res);
+      await throwPlatformApiError('Failed to set secret', res, 'configure');
     }
 
     return res.json();
@@ -1148,7 +1149,7 @@ export class PlatformClient {
     });
 
     if (!res.ok) {
-      await throwPlatformApiError('Failed to delete project', res);
+      await throwPlatformApiError('Failed to delete project', res, 'owner');
     }
 
     return res.json();
@@ -1169,7 +1170,7 @@ export class PlatformClient {
     });
 
     if (!res.ok) {
-      await throwPlatformApiError('Failed to get migration status', res);
+      await throwPlatformApiError('Failed to get migration status', res, 'read');
     }
 
     return res.json();
@@ -1197,7 +1198,7 @@ export class PlatformClient {
     });
 
     if (!res.ok) {
-      await throwPlatformApiError('Failed to apply remote migrations', res);
+      await throwPlatformApiError('Failed to apply remote migrations', res, 'configure');
     }
 
     return res.json();
@@ -1217,7 +1218,7 @@ export class PlatformClient {
     });
 
     if (!res.ok) {
-      await throwPlatformApiError('Failed to rename remote migrations', res);
+      await throwPlatformApiError('Failed to rename remote migrations', res, 'configure');
     }
 
     return res.json();
@@ -1234,7 +1235,7 @@ export class PlatformClient {
     });
 
     if (!res.ok) {
-      await throwPlatformApiError('Failed to add domain', res);
+      await throwPlatformApiError('Failed to add domain', res, 'settings');
     }
 
     return res.json();
@@ -1248,7 +1249,7 @@ export class PlatformClient {
     });
 
     if (!res.ok) {
-      await throwPlatformApiError('Failed to list domains', res);
+      await throwPlatformApiError('Failed to list domains', res, 'read');
     }
 
     return res.json();
@@ -1262,7 +1263,7 @@ export class PlatformClient {
     });
 
     if (!res.ok) {
-      await throwPlatformApiError('Failed to get domain status', res);
+      await throwPlatformApiError('Failed to get domain status', res, 'read');
     }
 
     return res.json();
@@ -1277,7 +1278,7 @@ export class PlatformClient {
     });
 
     if (!res.ok) {
-      await throwPlatformApiError('Failed to remove domain', res);
+      await throwPlatformApiError('Failed to remove domain', res, 'settings');
     }
 
     return res.json();
@@ -1295,7 +1296,7 @@ export class PlatformClient {
     );
 
     if (!res.ok) {
-      await throwPlatformApiError('Failed to delete secret', res);
+      await throwPlatformApiError('Failed to delete secret', res, 'configure');
     }
 
     return res.json();
@@ -1309,7 +1310,7 @@ export class PlatformClient {
     });
 
     if (!res.ok) {
-      await throwPlatformApiError('Failed to get resources', res);
+      await throwPlatformApiError('Failed to get resources', res, 'read');
     }
 
     return res.json();
@@ -1324,7 +1325,7 @@ export class PlatformClient {
     });
 
     if (!res.ok) {
-      await throwPlatformApiError('Failed to create prerender token', res);
+      await throwPlatformApiError('Failed to create prerender token', res, 'deploy');
     }
 
     const body = (await res.json()) as { token: string };
@@ -1342,7 +1343,7 @@ export class PlatformClient {
     });
 
     if (!res.ok) {
-      await throwPlatformApiError('Failed to provision database', res);
+      await throwPlatformApiError('Failed to provision database', res, 'configure');
     }
 
     return res.json();
@@ -1359,7 +1360,7 @@ export class PlatformClient {
     });
 
     if (!res.ok) {
-      await throwPlatformApiError('Failed to update database URL', res);
+      await throwPlatformApiError('Failed to update database URL', res, 'configure');
     }
 
     return res.json();
@@ -1373,7 +1374,7 @@ export class PlatformClient {
     });
 
     if (!res.ok) {
-      await throwPlatformApiError('Failed to fetch database URL', res);
+      await throwPlatformApiError('Failed to fetch database URL', res, 'owner');
     }
 
     return res.json();
@@ -1390,7 +1391,7 @@ export class PlatformClient {
     });
 
     if (!res.ok) {
-      await throwPlatformApiError('Cache purge failed', res);
+      await throwPlatformApiError('Cache purge failed', res, 'deploy');
     }
 
     return res.json();
@@ -1421,7 +1422,7 @@ export class PlatformClient {
     });
 
     if (!res.ok) {
-      await throwPlatformApiError('Failed to fetch logs', res);
+      await throwPlatformApiError('Failed to fetch logs', res, 'read');
     }
 
     const json = (await res.json()) as { data: Array<LogEntry> };
@@ -1449,7 +1450,7 @@ export class PlatformClient {
     });
 
     if (!res.ok) {
-      await throwPlatformApiError('Failed to fetch requests', res);
+      await throwPlatformApiError('Failed to fetch requests', res, 'read');
     }
 
     const json = (await res.json()) as { data: Array<RequestEntry> };
@@ -1465,7 +1466,7 @@ export class PlatformClient {
     });
 
     if (!res.ok) {
-      await throwPlatformApiError('Failed to list builds', res);
+      await throwPlatformApiError('Failed to list builds', res, 'read');
     }
 
     const json = (await res.json()) as { builds: Array<BuildSummary> };
@@ -1484,7 +1485,7 @@ export class PlatformClient {
     );
 
     if (!res.ok) {
-      await throwPlatformApiError('Failed to fetch build logs', res);
+      await throwPlatformApiError('Failed to fetch build logs', res, 'read');
     }
 
     return res.json();
@@ -1540,7 +1541,7 @@ export class PlatformClient {
     });
 
     if (!res.ok) {
-      await throwPlatformApiError('Failed to connect GitHub repository', res);
+      await throwPlatformApiError('Failed to connect GitHub repository', res, 'settings');
     }
 
     return res.json();
@@ -1587,7 +1588,7 @@ export class PlatformClient {
     });
 
     if (!res.ok) {
-      await throwPlatformApiError('Failed to get GitHub connection', res);
+      await throwPlatformApiError('Failed to get GitHub connection', res, 'read');
     }
 
     return res.json();
@@ -1611,7 +1612,7 @@ export class PlatformClient {
     });
 
     if (!res.ok) {
-      await throwPlatformApiError('Failed to update GitHub connection', res);
+      await throwPlatformApiError('Failed to update GitHub connection', res, 'settings');
     }
 
     return res.json();
@@ -1626,7 +1627,7 @@ export class PlatformClient {
     });
 
     if (!res.ok) {
-      await throwPlatformApiError('Failed to disconnect GitHub repository', res);
+      await throwPlatformApiError('Failed to disconnect GitHub repository', res, 'settings');
     }
 
     return res.json();
@@ -1718,7 +1719,7 @@ export class PlatformClient {
     });
 
     if (!res.ok) {
-      await throwPlatformApiError('Failed to fetch email usage', res);
+      await throwPlatformApiError('Failed to fetch email usage', res, 'read');
     }
 
     return res.json();
@@ -1737,7 +1738,7 @@ export class PlatformClient {
     });
 
     if (!res.ok) {
-      await throwPlatformApiError('Failed to fetch email logs', res);
+      await throwPlatformApiError('Failed to fetch email logs', res, 'read');
     }
 
     return res.json();
@@ -1749,7 +1750,7 @@ export class PlatformClient {
       { headers: { ...this.authHeaders } },
     );
     if (!res.ok) {
-      await throwPlatformApiError('Failed to fetch email operation', res);
+      await throwPlatformApiError('Failed to fetch email operation', res, 'read');
     }
     return res.json();
   }
@@ -1762,7 +1763,7 @@ export class PlatformClient {
     });
 
     if (!res.ok) {
-      await throwPlatformApiError('Failed to list email destinations', res);
+      await throwPlatformApiError('Failed to list email destinations', res, 'read');
     }
 
     return res.json();
@@ -1782,7 +1783,7 @@ export class PlatformClient {
     });
 
     if (!res.ok) {
-      await throwPlatformApiError('Failed to add email destination', res);
+      await throwPlatformApiError('Failed to add email destination', res, 'settings');
     }
 
     // 201 registered the address just now; 200 found it already on the
@@ -1805,7 +1806,7 @@ export class PlatformClient {
     );
 
     if (!res.ok) {
-      await throwPlatformApiError('Failed to remove email destination', res);
+      await throwPlatformApiError('Failed to remove email destination', res, 'settings');
     }
 
     return res.json();
@@ -1820,7 +1821,7 @@ export class PlatformClient {
     });
 
     if (!res.ok) {
-      await throwPlatformApiError('Failed to read email settings', res);
+      await throwPlatformApiError('Failed to read email settings', res, 'read');
     }
 
     return res.json();
@@ -1834,7 +1835,7 @@ export class PlatformClient {
     });
 
     if (!res.ok) {
-      await throwPlatformApiError('Failed to list email domains', res);
+      await throwPlatformApiError('Failed to list email domains', res, 'read');
     }
 
     return res.json();
@@ -1859,7 +1860,7 @@ export class PlatformClient {
     });
 
     if (!res.ok) {
-      await throwPlatformApiError('Failed to add email domain', res);
+      await throwPlatformApiError('Failed to add email domain', res, 'settings');
     }
 
     return res.json();
@@ -1876,7 +1877,7 @@ export class PlatformClient {
     );
 
     if (!res.ok) {
-      await throwPlatformApiError('Failed to fetch email domain status', res);
+      await throwPlatformApiError('Failed to fetch email domain status', res, 'read');
     }
 
     return res.json();
@@ -1897,7 +1898,7 @@ export class PlatformClient {
       },
     );
     if (!res.ok) {
-      await throwPlatformApiError('Failed to rotate email connection secret', res);
+      await throwPlatformApiError('Failed to rotate email connection secret', res, 'settings');
     }
     return res.json();
   }
@@ -1914,7 +1915,7 @@ export class PlatformClient {
     );
 
     if (!res.ok) {
-      await throwPlatformApiError('Failed to sync email domain', res);
+      await throwPlatformApiError('Failed to sync email domain', res, 'settings');
     }
 
     return res.json();
@@ -1932,7 +1933,7 @@ export class PlatformClient {
     );
 
     if (!res.ok) {
-      await throwPlatformApiError('Failed to remove email domain', res);
+      await throwPlatformApiError('Failed to remove email domain', res, 'settings');
     }
 
     return res.json();

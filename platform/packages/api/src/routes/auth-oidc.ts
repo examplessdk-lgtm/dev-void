@@ -14,6 +14,7 @@ import {
   getRepoInstallation,
 } from '../github/installation-token.ts';
 import { verifyGithubOidcToken } from '../github/oidc-verify.ts';
+import { PROJECT_PERMISSION_MESSAGES } from '../project-access.ts';
 import { isAdminSuspended } from '../suspension.ts';
 import { getPlanLimits } from '../tiers.ts';
 
@@ -180,7 +181,10 @@ app.post('/github-oidc', async (context) => {
     return context.json({ error: 'connection owner not found' }, 401);
   }
   if (isAdminSuspended(user.suspended_reason)) {
-    return context.json({ error: 'project owner suspended' }, 403);
+    return context.json(
+      { error: 'project owner suspended', message: PROJECT_PERMISSION_MESSAGES['owner-suspended'] },
+      403,
+    );
   }
 
   // Only branch pushes to the connected branch may mint a deploy token. This
@@ -318,7 +322,10 @@ app.post('/github-oidc', async (context) => {
     return context.json({ error: 'project is being deleted' }, 409);
   }
   if (result.outcome === 'owner-suspended') {
-    return context.json({ error: 'project owner suspended' }, 403);
+    return context.json(
+      { error: 'project owner suspended', message: PROJECT_PERMISSION_MESSAGES['owner-suspended'] },
+      403,
+    );
   }
   const build = result.build;
   // The build helper re-reads and locks the project, so `build.user_id` is the

@@ -80,7 +80,10 @@ export const authMiddleware: MiddlewareHandler<ApiEnv> = async (context, next) =
 
   const header = context.req.header('Authorization');
   if (!header?.startsWith('Bearer ')) {
-    return context.json({ error: 'unauthorized' }, 401);
+    return context.json(
+      { error: 'unauthorized', message: 'Sign in to this platform before continuing.' },
+      401,
+    );
   }
 
   const token = header.slice(7);
@@ -89,22 +92,49 @@ export const authMiddleware: MiddlewareHandler<ApiEnv> = async (context, next) =
   // audience, then accept only these two audiences.
   const payload = await verifyJwt(token, context.env.JWT_SECRET);
   if (!payload || (payload.aud !== 'api' && payload.aud !== 'deploy')) {
-    return context.json({ error: 'invalid or expired token' }, 401);
+    return context.json(
+      {
+        error: 'invalid or expired token',
+        message:
+          'Your sign-in or credential is invalid or has expired. Sign in again, or replace the credential used by your automation.',
+      },
+      401,
+    );
   }
 
   if (
     payload.aud === 'api' &&
     !(await validateHumanSession(context.get('db'), payload, context.get('companyIdentity')))
   ) {
-    return context.json({ error: 'session revoked; sign in again' }, 401);
+    return context.json(
+      {
+        error: 'session revoked; sign in again',
+        message:
+          'Your session is no longer active. Sign in to this platform again before continuing.',
+      },
+      401,
+    );
   }
 
   const user = await getUser(context.get('db'), payload.sub);
   if (!user) {
-    return context.json({ error: 'user not found' }, 401);
+    return context.json(
+      {
+        error: 'user not found',
+        message:
+          'This account is no longer available. Sign in with an active account on this platform.',
+      },
+      401,
+    );
   }
   if (isAdminSuspended(user.suspended_reason)) {
-    return context.json({ error: 'account suspended' }, 403);
+    return context.json(
+      {
+        error: 'account suspended',
+        message: 'Your account is suspended. Contact a platform administrator to restore access.',
+      },
+      403,
+    );
   }
 
   context.set('user', user);
@@ -114,7 +144,14 @@ export const authMiddleware: MiddlewareHandler<ApiEnv> = async (context, next) =
 
   if (payload.aud === 'deploy') {
     if (!payload.project) {
-      return context.json({ error: 'invalid or expired token' }, 401);
+      return context.json(
+        {
+          error: 'invalid or expired token',
+          message:
+            'This deploy credential is invalid. Ask the project owner to issue a replacement.',
+        },
+        401,
+      );
     }
     context.set('deployScope', payload.project);
     // Bind the token to its build (when present). The deploy endpoint rejects a
@@ -141,7 +178,14 @@ export const authMiddleware: MiddlewareHandler<ApiEnv> = async (context, next) =
         .limit(1)
         .then((rows) => rows[0]);
       if (!credential) {
-        return context.json({ error: 'deploy credential revoked or expired' }, 401);
+        return context.json(
+          {
+            error: 'deploy credential revoked or expired',
+            message:
+              'This deploy credential has expired or been revoked. Ask the project owner to issue a new credential and update your deployment configuration.',
+          },
+          401,
+        );
       }
       context.set('deployCredential', payload.credential);
     }
@@ -149,7 +193,14 @@ export const authMiddleware: MiddlewareHandler<ApiEnv> = async (context, next) =
     // real `void deploy` flow needs, and only for its own project. The
     // deploy.ts cross-project guard remains as defense-in-depth.
     if (!isDeployTokenAllowed(context.req.method, context.req.path, payload.project)) {
-      return context.json({ error: 'forbidden' }, 403);
+      return context.json(
+        {
+          error: 'forbidden',
+          message:
+            'This credential can only deploy to its assigned project. Use a credential issued for the selected project, or sign in with your account to manage project settings and members.',
+        },
+        403,
+      );
     }
     // A deploy token bound to a build is only valid while that build is in
     // flight. Once the build is superseded/cancelled/failed/complete the token
@@ -167,7 +218,14 @@ export const authMiddleware: MiddlewareHandler<ApiEnv> = async (context, next) =
         !ACTIVE_BUILD_STATUSES.includes(boundBuild.status) ||
         boundBuild.project_id !== payload.project
       ) {
-        return context.json({ error: 'deploy token build is no longer active' }, 403);
+        return context.json(
+          {
+            error: 'deploy token build is no longer active',
+            message:
+              'This build is no longer active. Start a new build to obtain a valid deployment credential.',
+          },
+          403,
+        );
       }
     }
   }

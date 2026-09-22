@@ -32,8 +32,7 @@ export async function createProjectWithSlugRetry(
       return project;
     } catch (error) {
       if (error instanceof PlatformApiError && isRetryableCreateError(error)) {
-        const reason = error.code || error.body || `HTTP ${error.status}`;
-        log.error(`project: Could not create project '${slug}': ${reason}.`);
+        log.error(`project: ${error.message}`);
         defaultSlug = slug;
         continue;
       }

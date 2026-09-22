@@ -355,7 +355,7 @@ describe('POST /projects/:id/deploy', () => {
 
     const res = await app.fetch(await buildDeployRequest(env, 'proj_nonexistent', user.jwt), env);
     expect(res.status).toBe(404);
-    expect(await res.json()).toEqual({ error: 'project not found' });
+    expect(await res.json()).toEqual({ error: 'project not found', message: expect.any(String) });
   });
 
   it('returns 403 when user does not own project', async () => {
@@ -366,7 +366,7 @@ describe('POST /projects/:id/deploy', () => {
 
     const res = await app.fetch(await buildDeployRequest(env, project.id, bob.jwt), env);
     expect(res.status).toBe(403);
-    expect(await res.json()).toEqual({ error: 'forbidden' });
+    expect(await res.json()).toEqual({ error: 'forbidden', message: expect.any(String) });
   });
 
   it('denies readers and bills collaborator deploys to the project owner', async () => {
@@ -512,7 +512,9 @@ describe('POST /projects/:id/deploy', () => {
     expect(response.status).toBe(200);
     const events = await readAllEvents(response);
     expect(events.some((event) => isDeployEvent(event) && event.event === 'done')).toBe(false);
-    expect(requireEvent<ErrorEvent>(events, 'error').message).toBe('forbidden');
+    expect(requireEvent<ErrorEvent>(events, 'error').message).toMatch(
+      /collaborator.*project admin or owner/i,
+    );
     expect(revoked).toBe(true);
     const [deployment] = await env.db
       .select({ status: deployments.status })
@@ -2074,7 +2076,7 @@ describe('POST /projects/:id/deploy', () => {
         expect(events.at(-1)).toMatchObject({
           event: 'error',
           step: 'migration',
-          message: 'forbidden',
+          message: expect.stringMatching(/collaborator.*project admin or owner/i),
         });
         expect(migrateCalls).toBe(0);
       } finally {
@@ -3220,7 +3222,7 @@ describe('Deploy serialization (concurrent deploy guard)', () => {
     );
 
     expect(response.status).toBe(403);
-    expect(await response.json()).toEqual({ error: 'forbidden' });
+    expect(await response.json()).toEqual({ error: 'forbidden', message: expect.any(String) });
     expect(downgraded).toBe(true);
     expect(await getDeployment(env.db, 'dpl_cancel_access_race')).toMatchObject({
       status: 'uploading',

@@ -155,6 +155,7 @@ describe('runGithubDisconnect', () => {
       'Failed to get GitHub connection',
       403,
       JSON.stringify({ error: 'forbidden' }),
+      'read',
     );
     const { client, deleteGithubConnection } = makeClient({
       getGithubConnection: vi.fn(async () => {
@@ -170,7 +171,35 @@ describe('runGithubDisconnect', () => {
       }),
     ).rejects.toThrow('process.exit(1)');
 
-    expect(errorSpy).toHaveBeenCalledWith("disconnect: You don't have access to this project.");
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining('project membership (reader or higher)'),
+    );
+    expect(deleteGithubConnection).not.toHaveBeenCalled();
+  });
+
+  it('preserves the server explanation for a GitHub read rejection', async () => {
+    const rejection = new PlatformApiError(
+      'Failed to get GitHub connection',
+      403,
+      JSON.stringify({
+        error: 'forbidden',
+        message: 'This credential cannot read GitHub settings. Use your platform login.',
+      }),
+      'read',
+    );
+    const { client, deleteGithubConnection } = makeClient({
+      getGithubConnection: vi.fn(async () => {
+        throw rejection;
+      }),
+    });
+    await expect(
+      runGithubDisconnect('/project', client, {
+        subcommand: 'disconnect',
+        projectName: slug,
+        yes: true,
+      }),
+    ).rejects.toThrow('process.exit(1)');
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('Use your platform login.'));
     expect(deleteGithubConnection).not.toHaveBeenCalled();
   });
 

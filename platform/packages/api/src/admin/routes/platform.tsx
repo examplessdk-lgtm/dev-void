@@ -25,6 +25,20 @@ const app = new Hono<ApiEnv>();
 // `void-*` Worker in the same account.
 app.use('*', async (context, next) => {
   if (context.env.PLATFORM_INSTALLATION_ID) {
+    if (context.req.header('Accept')?.includes('text/html')) {
+      return context.html(
+        <>
+          <h1>Manage this platform with the CLI</h1>
+          <p>
+            To upgrade this self-hosted Void platform, run <code>void platform upgrade</code>.
+          </p>
+          <p>
+            <a href="/admin/">Return to admin</a>
+          </p>
+        </>,
+        501,
+      );
+    }
     return context.json(
       {
         error: 'platform capability unavailable',

@@ -135,7 +135,10 @@ describe('DELETE /projects/:id', () => {
     );
 
     expect(res.status).toBe(403);
-    expect(await res.json()).toEqual({ error: 'forbidden' });
+    expect(await res.json()).toEqual({
+      error: 'forbidden',
+      message: expect.stringMatching(/Ask (a project admin or owner|the owner)/),
+    });
     expect(transferred).toBe(true);
     expect(cf).not.toHaveBeenCalled();
     expect(await db.getProject(env.db, project.id)).toMatchObject({
@@ -166,7 +169,10 @@ describe('DELETE /projects/:id', () => {
       env,
     );
     expect(res.status).toBe(404);
-    expect(await res.json()).toEqual({ error: 'project not found' });
+    expect(await res.json()).toEqual({
+      error: 'project not found',
+      message: expect.stringMatching(/check the project ID/i),
+    });
   });
 
   it('returns 403 when user does not own project', async () => {
@@ -183,7 +189,10 @@ describe('DELETE /projects/:id', () => {
       env,
     );
     expect(res.status).toBe(403);
-    expect(await res.json()).toEqual({ error: 'forbidden' });
+    expect(await res.json()).toEqual({
+      error: 'forbidden',
+      message: expect.stringMatching(/Ask (a project admin or owner|the owner)/),
+    });
   });
 
   it('returns 409 while a rollback lease protects external compensation', async () => {

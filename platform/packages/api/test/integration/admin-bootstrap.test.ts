@@ -1,3 +1,4 @@
+import { eq } from 'drizzle-orm';
 import {
   afterAll,
   afterEach,
@@ -148,6 +149,9 @@ describe('first administrator dashboard login', () => {
       const response = await login();
       expect(response.status).toBe(403);
       expect(response.headers.get('Set-Cookie')).not.toContain('admin_token=');
+      const html = await response.text();
+      expect(html).toContain('Sign in with an administrator account for this platform.');
+      expect(html).toContain('href="/admin/logout"');
       expect(await env.db.select().from(users)).toHaveLength(0);
       expect(await env.db.select().from(oauthAccounts)).toHaveLength(0);
     },
@@ -174,6 +178,29 @@ describe('first administrator dashboard login', () => {
     expect((await login()).status).toBe(302);
     expect(await env.db.select().from(users)).toEqual([expect.objectContaining({ role: 'admin' })]);
     expect(await env.db.select().from(oauthAccounts)).toHaveLength(1);
+  });
+
+  it('gives suspended administrators accurate recovery guidance without signing them in', async () => {
+    const admin = await createTestUser(
+      env.db,
+      'suspended-owner',
+      'github',
+      '4242',
+      'free',
+      'admin',
+    );
+    await env.db
+      .update(users)
+      .set({ suspended_reason: 'private review details' })
+      .where(eq(users.id, admin.id));
+    const response = await login();
+    expect(response.status).toBe(403);
+    expect(response.headers.get('Set-Cookie')).not.toContain('admin_token=');
+    const html = await response.text();
+    expect(html).toContain('Administrator access suspended');
+    expect(html).toContain('Contact another platform administrator to restore access.');
+    expect(html).toContain('href="/admin/logout"');
+    expect(html).not.toContain('private review details');
   });
 
   it('requires the initiating browser cookie before creating the owner', async () => {

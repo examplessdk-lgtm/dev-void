@@ -95,6 +95,33 @@ describe('promptAndCreateProject', () => {
     });
   });
 
+  it('keeps actionable rejection guidance when prompting for a replacement slug', async () => {
+    const { promptAndCreateProject } = await import('../../src/cli/create-project.ts');
+    const { PlatformApiError } = await import('../../src/cli/client.ts');
+    const client = createClient();
+    client.createProject
+      .mockRejectedValueOnce(
+        new PlatformApiError(
+          'Failed to create project',
+          403,
+          JSON.stringify({
+            error: 'forbidden',
+            message: 'Short slugs require a paid plan. Choose a name with at least six characters.',
+          }),
+        ),
+      )
+      .mockResolvedValueOnce({ id: 'proj_new', slug: 'longer-app' });
+    mockText.mockResolvedValueOnce('short').mockResolvedValueOnce('longer-app');
+
+    await promptAndCreateProject(root, client);
+
+    expect(mockError).toHaveBeenCalledWith(
+      expect.stringContaining('Choose a name with at least six characters.'),
+    );
+    expect(mockError.mock.calls[0]?.[0]).not.toContain('{');
+    expect(client.createProject).toHaveBeenNthCalledWith(2, 'longer-app');
+  });
+
   // The platform caps slugs at 56 characters (the `<slug>+noreply@` sender
   // has to fit RFC 5321's 64-octet local-part) and answers 400. Like every
   // other validation 400, that must re-prompt rather than abort the deploy.

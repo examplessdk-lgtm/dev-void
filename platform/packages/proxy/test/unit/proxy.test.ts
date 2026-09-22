@@ -25,6 +25,7 @@ async function signJwt(
     exp?: number;
     project?: string;
     build?: string;
+    credential?: string;
   },
   secret: string,
 ): Promise<string> {
@@ -480,7 +481,10 @@ describe('proxy worker', () => {
       );
 
       expect(res.status).toBe(401);
-      expect(await res.json()).toEqual({ error: 'invalid or expired token' });
+      expect(await res.json()).toEqual({
+        error: 'invalid or expired token',
+        message: expect.stringMatching(/Sign in.*restart the build/),
+      });
     });
 
     it('rejects login JWTs signed with the email key', async () => {
@@ -555,7 +559,12 @@ describe('proxy worker', () => {
         env,
       );
       expect(denied.status).toBe(403);
-      expect(await denied.json()).toEqual({ error: 'forbidden' });
+      expect(await denied.json()).toEqual({
+        error: 'forbidden',
+        message: expect.stringMatching(/does not match.*Restart the build/),
+      });
+      expect(apiFetch).toHaveBeenCalledTimes(1);
+      expect(env.AI.run).toHaveBeenCalledTimes(1);
     });
 
     it('revokes an already-minted manual prerender token when project access changes', async () => {
@@ -584,7 +593,9 @@ describe('proxy worker', () => {
       expect(revoked.status).toBe(403);
       expect(await revoked.json()).toEqual({
         error: 'prerender token authority is no longer active',
+        message: expect.stringMatching(/Confirm your project access.*restart the build/),
       });
+      expect(env.AI.run).toHaveBeenCalledTimes(1);
     });
 
     it('accepts a manual prerender token while the previous API revision is active', async () => {
@@ -648,7 +659,9 @@ describe('proxy worker', () => {
       expect(revoked.status).toBe(403);
       expect(await revoked.json()).toEqual({
         error: 'prerender token build is no longer active',
+        message: expect.stringMatching(/Start a new build.*fresh prerender token/),
       });
+      expect(env.AI.run).toHaveBeenCalledTimes(1);
     });
 
     it('rejects deploy tokens at the binding proxy', async () => {
@@ -667,6 +680,80 @@ describe('proxy worker', () => {
       expect(res.status).toBe(401);
     });
 
+    it('revokes credential-derived prerendering without invoking a resource handler', async () => {
+      const token = await signJwt(
+        {
+          sub: 'user_1',
+          login: 'testuser',
+          aud: 'prerender',
+          project: 'proj_1',
+          credential: 'cred_1',
+        },
+        JWT_SECRET,
+      );
+      let active = true;
+      const api = createMockApi(async (input, init) => {
+        expect(String(input)).toContain('/internal/verify-prerender-build/proj_1');
+        expect(JSON.parse(String(init?.body))).toEqual({
+          userId: 'user_1',
+          credentialId: 'cred_1',
+        });
+        return active
+          ? Response.json({ ok: true })
+          : Response.json({ error: 'forbidden' }, { status: 403 });
+      });
+      const env = createEnv(undefined, undefined, api);
+      const request = () =>
+        post(
+          '/ai/run',
+          { model: 'test-model', inputs: {}, projectId: 'proj_1' },
+          { authorization: `Bearer ${token}` },
+        );
+      expect((await worker.fetch(request(), env)).status).toBe(200);
+      active = false;
+      const denied = await worker.fetch(request(), env);
+      expect(denied.status).toBe(403);
+      expect(await denied.json()).toEqual({
+        error: 'prerender token credential is no longer active',
+        message: expect.stringMatching(
+          /Ask the project owner for an active deploy credential.*restart the build/,
+        ),
+      });
+      expect(env.AI.run).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([403, 404, 500, 'network-error'] as const)(
+      'gives the same neutral denial when the authority returns %s',
+      async (status) => {
+        const api = {
+          fetch: vi.fn(async () => {
+            if (status === 'network-error') {
+              throw new Error('private authority failure');
+            }
+            return Response.json({ error: 'private owner and project details' }, { status });
+          }),
+        };
+        const env = createEnv(undefined, undefined, api);
+        const response = await worker.fetch(
+          post(
+            '/ai/run',
+            { model: 'test-model', inputs: {}, projectId: 'proj_unknown' },
+            { authorization: `Bearer ${validToken}` },
+          ),
+          env,
+        );
+        expect(response.status).toBe(403);
+        expect(await response.json()).toEqual({
+          error: 'forbidden',
+          message:
+            'Remote access could not be authorized. Check the selected platform and project, then ask a project admin or owner to confirm your access. If your access is correct, retry shortly.',
+        });
+        expect(api.fetch).toHaveBeenCalledTimes(1);
+        expect(env.AI.run).not.toHaveBeenCalled();
+        expect(env.ROUTING.put).not.toHaveBeenCalled();
+      },
+    );
+
     it('rejects access when user does not own the project', async () => {
       // user_1 has no deploy role on "proj_other"
       const env = createEnv();
@@ -680,7 +767,13 @@ describe('proxy worker', () => {
       );
 
       expect(res.status).toBe(403);
-      expect(await res.json()).toEqual({ error: 'forbidden' });
+      expect(await res.json()).toEqual({
+        error: 'forbidden',
+        message: expect.stringMatching(
+          /could not be authorized.*Check the selected platform and project.*retry shortly/,
+        ),
+      });
+      expect(env.AI.run).not.toHaveBeenCalled();
     });
 
     it("rejects cross-tenant access to another user's project", async () => {
@@ -697,7 +790,13 @@ describe('proxy worker', () => {
       );
 
       expect(res.status).toBe(403);
-      expect(await res.json()).toEqual({ error: 'forbidden' });
+      expect(await res.json()).toEqual({
+        error: 'forbidden',
+        message: expect.stringMatching(
+          /could not be authorized.*Check the selected platform and project.*retry shortly/,
+        ),
+      });
+      expect(env.AI.run).not.toHaveBeenCalled();
     });
 
     it('allows a non-owner whose live role has deploy access', async () => {
@@ -733,7 +832,13 @@ describe('proxy worker', () => {
       );
 
       expect(res.status).toBe(403);
-      expect(await res.json()).toEqual({ error: 'forbidden' });
+      expect(await res.json()).toEqual({
+        error: 'forbidden',
+        message: expect.stringMatching(
+          /could not be authorized.*Check the selected platform and project.*retry shortly/,
+        ),
+      });
+      expect(env.AI.run).not.toHaveBeenCalled();
     });
 
     it('passes the actual proxy origin and revalidates every R2 download chunk', async () => {

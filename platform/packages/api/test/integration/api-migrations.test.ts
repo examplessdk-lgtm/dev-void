@@ -699,7 +699,10 @@ describe('POST /projects/:id/migrations/apply', () => {
 
     expect(suspended).toBe(true);
     expect(response.status).toBe(403);
-    expect(await response.json()).toEqual({ error: 'project owner suspended' });
+    expect(await response.json()).toEqual({
+      error: 'project owner suspended',
+      message: expect.stringMatching(/contact the platform administrator/i),
+    });
   });
 
   it('returns 400 when no D1 resource exists', async () => {

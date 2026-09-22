@@ -90,6 +90,8 @@ import { createDeployLogger, type DeployLogger } from '../observability/logger.t
 import {
   ProjectAccessDeniedError,
   ProjectOwnerSuspendedError,
+  PROJECT_PERMISSION_MESSAGES,
+  projectAccessErrorBody,
   requireProjectCapability,
 } from '../project-access.ts';
 import { ensureProjectIngress } from '../project-ingress.ts';
@@ -2007,10 +2009,7 @@ app.post('/:id/deploy/upload-urls', async (context) => {
     });
   } catch (err) {
     if (err instanceof ProjectAccessDeniedError) {
-      return context.json(
-        { error: err instanceof ProjectOwnerSuspendedError ? err.message : 'forbidden' },
-        403,
-      );
+      return context.json(projectAccessErrorBody(err), 403);
     }
     if (err instanceof Error && err.message === UPLOAD_URLS_PROJECT_DELETING) {
       return context.json({ error: 'project is being deleted' }, 410);
@@ -2077,7 +2076,14 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
   // deployScope unset and skip this guard.
   const deployScope = context.get('deployScope');
   if (deployScope && deployScope !== projectId) {
-    return context.json({ error: 'forbidden' }, 403);
+    return context.json(
+      {
+        error: 'forbidden',
+        message:
+          'This deploy credential belongs to a different project. Use a credential issued for the project you want to deploy.',
+      },
+      403,
+    );
   }
   // A scoped deploy token may carry the build it was minted for. Reject it once
   // that build is no longer active (e.g. superseded/cancelled by a newer push or
@@ -2087,7 +2093,14 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
   if (deployBuild) {
     const build = await getBuild(context.get('db'), deployBuild);
     if (!build || !ACTIVE_BUILD_STATUSES.includes(build.status)) {
-      return context.json({ error: 'forbidden' }, 403);
+      return context.json(
+        {
+          error: 'forbidden',
+          message:
+            'This build is no longer active. Start a new build to deploy the current version.',
+        },
+        403,
+      );
     }
   }
   if (project.status === 'deleting') {
@@ -2728,10 +2741,7 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
     });
   } catch (err) {
     if (err instanceof ProjectAccessDeniedError) {
-      return context.json(
-        { error: err instanceof ProjectOwnerSuspendedError ? err.message : 'forbidden' },
-        403,
-      );
+      return context.json(projectAccessErrorBody(err), 403);
     }
     if (err instanceof ConcurrentDeployError) {
       return context.json({ error: 'deploy in progress', deployment: err.deploymentId }, 409);
@@ -5094,7 +5104,12 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
           ...(migrationsApplied > 0 && { migrations: migrationsApplied }),
         });
       } catch (err) {
-        const raw = err instanceof Error ? err.message : String(err);
+        const raw =
+          err instanceof ProjectAccessDeniedError
+            ? err.userMessage
+            : err instanceof Error
+              ? err.message
+              : String(err);
         const msg = sanitizeDeployErrorMessage(raw);
         if (msg !== raw) {
           logger.error('catch', 'raw_error_before_sanitization', err, {
@@ -5689,10 +5704,16 @@ app.post('/:id/deploy/preflight', async (context) => {
       return context.json({ error: 'project not found' }, 404);
     }
     if (resolution.kind === 'forbidden') {
-      return context.json({ error: 'forbidden' }, 403);
+      return context.json({ error: 'forbidden', message: PROJECT_PERMISSION_MESSAGES.deploy }, 403);
     }
     if (resolution.kind === 'owner-suspended') {
-      return context.json({ error: 'project owner suspended' }, 403);
+      return context.json(
+        {
+          error: 'project owner suspended',
+          message: PROJECT_PERMISSION_MESSAGES['owner-suspended'],
+        },
+        403,
+      );
     }
     if (resolution.kind === 'deleting') {
       return context.json({ error: 'project is being deleted' }, 410);

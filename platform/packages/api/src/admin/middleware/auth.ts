@@ -5,6 +5,7 @@ import { validateHumanSession } from '../../auth/sessions.ts';
 import { getUser, getFirstAdmin } from '../../db.ts';
 import { type ApiEnv, isDevBypass } from '../../env.ts';
 import { isAdminSuspended } from '../../suspension.ts';
+import { adminAccessRejected, adminRequestRejected } from './request-rejection.ts';
 
 export const adminAuthMiddleware: MiddlewareHandler<ApiEnv> = async (context, next) => {
   // CSRF defense: every admin write is state-changing and authenticated by a
@@ -20,7 +21,7 @@ export const adminAuthMiddleware: MiddlewareHandler<ApiEnv> = async (context, ne
     const requestHost = new URL(context.req.url).host;
     const sourceHost = origin ? safeHost(origin) : referer ? safeHost(referer) : null;
     if (sourceHost === null || sourceHost !== requestHost) {
-      return context.json({ error: 'cross-site request blocked' }, 403);
+      return adminRequestRejected(context, 'cross-site request blocked', 'json');
     }
   }
 
@@ -49,8 +50,11 @@ export const adminAuthMiddleware: MiddlewareHandler<ApiEnv> = async (context, ne
   }
 
   const user = await getUser(context.get('db'), payload.sub);
-  if (!user || user.role !== 'admin' || isAdminSuspended(user.suspended_reason)) {
-    return context.html('<h1>403 Forbidden</h1><p>Admin access required.</p>', 403);
+  if (!user || user.role !== 'admin') {
+    return adminAccessRejected(context, 'required');
+  }
+  if (isAdminSuspended(user.suspended_reason)) {
+    return adminAccessRejected(context, 'suspended');
   }
 
   context.set('user', user);

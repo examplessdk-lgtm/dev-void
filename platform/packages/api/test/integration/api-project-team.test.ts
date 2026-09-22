@@ -109,7 +109,12 @@ describe('project team API', () => {
       env,
     );
     expect(forbidden.status).toBe(403);
-    expect(await forbidden.json()).toEqual({ error: 'forbidden' });
+    expect(await forbidden.json()).toEqual({
+      error: 'forbidden',
+      message: expect.stringMatching(
+        /requires the admin or owner role.*Ask a project admin or owner/,
+      ),
+    });
   });
 
   it('stops container builds when an authorizing admin is downgraded', async () => {
@@ -173,7 +178,10 @@ describe('project team API', () => {
       env,
     );
     expect(unknown.status).toBe(404);
-    expect(await unknown.json()).toEqual({ error: 'registered user not found' });
+    expect(await unknown.json()).toEqual({
+      error: 'registered user not found',
+      message: expect.stringMatching(/Check the address.*sign in to this platform/),
+    });
 
     const created = await invite(project.id, owner.jwt, 'target@example.com', 'collaborator');
     expect(created.delivery).toEqual({ status: 'not_configured' });
@@ -222,7 +230,10 @@ describe('project team API', () => {
       env,
     );
     expect(response.status).toBe(403);
-    expect(await response.json()).toEqual({ error: 'project owner suspended' });
+    expect(await response.json()).toEqual({
+      error: 'project owner suspended',
+      message: expect.stringMatching(/owner account is suspended.*platform administrator/),
+    });
     expect(await env.db.select().from(projectMembers)).toEqual([]);
 
     await env.db
@@ -260,14 +271,20 @@ describe('project team API', () => {
       env,
     );
     expect(createResponse.status).toBe(409);
-    expect(await createResponse.json()).toEqual({ error: 'project is being deleted' });
+    expect(await createResponse.json()).toEqual({
+      error: 'project is being deleted',
+      message: expect.stringMatching(/Wait for deletion to finish/),
+    });
 
     const acceptResponse = await app.fetch(
       request(`/project-invitations/${invitation.id}/accept`, invited.jwt, { method: 'POST' }),
       env,
     );
     expect(acceptResponse.status).toBe(409);
-    expect(await acceptResponse.json()).toEqual({ error: 'project is being deleted' });
+    expect(await acceptResponse.json()).toEqual({
+      error: 'project is being deleted',
+      message: expect.stringMatching(/Wait for deletion to finish/),
+    });
 
     expect(await env.db.select().from(projectMembers)).toEqual([]);
     expect(await env.db.select().from(projectInvitations)).toMatchObject([
@@ -312,7 +329,10 @@ describe('project team API', () => {
     );
     expect(suspended).toBe(true);
     expect(response.status).toBe(403);
-    expect(await response.json()).toEqual({ error: 'project owner suspended' });
+    expect(await response.json()).toEqual({
+      error: 'project owner suspended',
+      message: expect.stringMatching(/owner account is suspended.*platform administrator/),
+    });
     expect(await env.db.select().from(projectInvitations)).toEqual([]);
   });
 
@@ -347,7 +367,10 @@ describe('project team API', () => {
     );
     expect(suspended).toBe(true);
     expect(response.status).toBe(403);
-    expect(await response.json()).toEqual({ error: 'project owner suspended' });
+    expect(await response.json()).toEqual({
+      error: 'project owner suspended',
+      message: expect.stringMatching(/owner account is suspended.*platform administrator/),
+    });
     expect(await env.db.select().from(projectMembers)).toHaveLength(1);
   });
 
@@ -378,6 +401,7 @@ describe('project team API', () => {
     expect(inviteOwner.status).toBe(409);
     expect(await inviteOwner.json()).toEqual({
       error: 'the project owner cannot be invited or changed as a member',
+      message: expect.stringMatching(/owner already has full access.*Manage other members/),
     });
 
     const inviteMember = await app.fetch(
@@ -388,7 +412,10 @@ describe('project team API', () => {
       env,
     );
     expect(inviteMember.status).toBe(409);
-    expect(await inviteMember.json()).toEqual({ error: 'user is already a project member' });
+    expect(await inviteMember.json()).toEqual({
+      error: 'user is already a project member',
+      message: expect.stringMatching(/already a project member.*Refresh the member list/),
+    });
 
     const ambiguous = await app.fetch(
       request(`/projects/${project.id}/invitations`, owner.jwt, {
@@ -398,7 +425,10 @@ describe('project team API', () => {
       env,
     );
     expect(ambiguous.status).toBe(404);
-    expect(await ambiguous.json()).toEqual({ error: 'registered user not found' });
+    expect(await ambiguous.json()).toEqual({
+      error: 'registered user not found',
+      message: expect.stringMatching(/Check the address.*sign in to this platform/),
+    });
     expect(await env.db.select().from(projectInvitations)).toEqual([]);
   });
 
@@ -467,7 +497,10 @@ describe('project team API', () => {
       env,
     );
     expect(replay.status).toBe(409);
-    expect(await replay.json()).toEqual({ error: 'project invitation is no longer pending' });
+    expect(await replay.json()).toEqual({
+      error: 'project invitation is no longer pending',
+      message: expect.stringMatching(/no longer pending.*send a new invitation/),
+    });
     expect(
       await env.db
         .select()
@@ -495,6 +528,8 @@ describe('project team API', () => {
     const source = await createTestProject(env.db, owner.id, 'source-project');
     const other = await createTestProject(env.db, owner.id, 'other-project');
     const invitation = await invite(source.id, owner.jwt, 'target@example.com', 'reader');
+    const beforeInvitations = await env.db.select().from(projectInvitations);
+    const beforeEvents = await env.db.select().from(projectAccessEvents);
 
     for (const action of ['accept', 'decline']) {
       const response = await app.fetch(
@@ -504,6 +539,14 @@ describe('project team API', () => {
         env,
       );
       expect(response.status).toBe(403);
+      expect(await response.json()).toEqual({
+        error: 'forbidden',
+        message:
+          'This invitation belongs to a different account. Sign in with the account that received it, or ask a project admin or owner to invite your current account.',
+      });
+      expect(await env.db.select().from(projectInvitations)).toEqual(beforeInvitations);
+      expect(await env.db.select().from(projectAccessEvents)).toEqual(beforeEvents);
+      expect(await env.db.select().from(projectMembers)).toEqual([]);
     }
     const crossProjectResend = await app.fetch(
       request(`/projects/${other.id}/invitations/${invitation.id}/resend`, owner.jwt, {
@@ -512,6 +555,10 @@ describe('project team API', () => {
       env,
     );
     expect(crossProjectResend.status).toBe(404);
+    expect(await crossProjectResend.json()).toEqual({
+      error: 'project invitation not found',
+      message: expect.stringMatching(/Check your pending invitations.*send a new one/),
+    });
     const crossProjectRevoke = await app.fetch(
       request(`/projects/${other.id}/invitations/${invitation.id}`, owner.jwt, {
         method: 'DELETE',
@@ -519,6 +566,12 @@ describe('project team API', () => {
       env,
     );
     expect(crossProjectRevoke.status).toBe(404);
+    expect(await crossProjectRevoke.json()).toEqual({
+      error: 'project invitation not found',
+      message: expect.stringMatching(/Check your pending invitations.*send a new one/),
+    });
+    expect(await env.db.select().from(projectInvitations)).toEqual(beforeInvitations);
+    expect(await env.db.select().from(projectAccessEvents)).toEqual(beforeEvents);
 
     const targetAccept = await app.fetch(
       request(`/project-invitations/${invitation.id}/accept`, target.jwt, { method: 'POST' }),
@@ -563,12 +616,21 @@ describe('project team API', () => {
       env,
     );
     expect(revoked.status).toBe(204);
+    const beforeInvitations = await env.db.select().from(projectInvitations);
+    const beforeEvents = await env.db.select().from(projectAccessEvents);
 
     const acceptRevoked = await app.fetch(
       request(`/project-invitations/${first.id}/accept`, target.jwt, { method: 'POST' }),
       env,
     );
     expect(acceptRevoked.status).toBe(409);
+    expect(await acceptRevoked.json()).toEqual({
+      error: 'project invitation is no longer pending',
+      message: expect.stringMatching(/no longer pending.*send a new invitation/),
+    });
+    expect(await env.db.select().from(projectInvitations)).toEqual(beforeInvitations);
+    expect(await env.db.select().from(projectAccessEvents)).toEqual(beforeEvents);
+    expect(await env.db.select().from(projectMembers)).toEqual([]);
   });
 
   it('rate-limits create, refresh, and resend delivery while preserving invitations', async () => {
@@ -775,6 +837,10 @@ describe('project team API', () => {
       env,
     );
     expect(ownerLeave.status).toBe(409);
+    expect(await ownerLeave.json()).toEqual({
+      error: 'the project owner cannot leave the project',
+      message: expect.stringMatching(/Ask a platform administrator to transfer ownership/),
+    });
 
     const events = await env.db
       .select()
@@ -818,7 +884,10 @@ describe('project team API', () => {
       env,
     );
     expect(acceptExpired.status).toBe(409);
-    expect(await acceptExpired.json()).toEqual({ error: 'project invitation has expired' });
+    expect(await acceptExpired.json()).toEqual({
+      error: 'project invitation has expired',
+      message: expect.stringMatching(/expired.*resend.*renewed invitation/),
+    });
     expect(
       (
         await env.db.select().from(projectInvitations).where(eq(projectInvitations.id, expired.id))
@@ -936,6 +1005,7 @@ describe('project team API', () => {
         expect(response.status).toBe(409);
         expect(await response.json()).toEqual({
           error: 'project has too many pending invitations',
+          message: expect.stringMatching(/pending invitation limit.*Revoke unused invitations/),
         });
         expect(await env.db.select().from(projectInvitations)).toEqual(before);
         expect(await liveInvitationCount(project.id)).toBe(100);
@@ -1090,6 +1160,7 @@ describe('project team API', () => {
     expect(response.status).toBe(409);
     expect(await response.json()).toEqual({
       error: 'the project owner cannot be invited or changed as a member',
+      message: expect.stringMatching(/owner already has full access.*Manage other members/),
     });
     expect(await env.db.select().from(projectMembers)).toEqual([]);
   });

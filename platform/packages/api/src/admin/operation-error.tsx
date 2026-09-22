@@ -7,5 +7,17 @@ export const renderOperationError: ErrorHandler<ApiEnv> = (error, context) => {
   if (!(error instanceof OperatorError)) {
     throw error;
   }
-  return context.html(<h1>{error.message}</h1>, error.status);
+  return context.html(
+    <>
+      <h1>{error.message}</h1>
+      <p>
+        {error.status === 401 ? (
+          <a href="/admin/logout">Sign in again</a>
+        ) : (
+          <a href="/admin/">Return to admin</a>
+        )}
+      </p>
+    </>,
+    error.status,
+  );
 };

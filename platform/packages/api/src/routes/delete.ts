@@ -1,6 +1,10 @@
 import { Hono } from 'hono';
 import type { ApiEnv } from '../env.ts';
-import { ProjectAccessDeniedError, ProjectNotFoundError } from '../project-access.ts';
+import {
+  ProjectAccessDeniedError,
+  ProjectNotFoundError,
+  projectAccessErrorBody,
+} from '../project-access.ts';
 import { ProjectOperationInProgressError, teardownProject } from '../provisioning/cleanup.ts';
 import { requireProjectRouteCapability } from './project-access.ts';
 
@@ -27,7 +31,7 @@ app.delete('/:id', async (context) => {
     }));
   } catch (error) {
     if (error instanceof ProjectNotFoundError || error instanceof ProjectAccessDeniedError) {
-      return context.json({ error: error.message }, error.status);
+      return context.json(projectAccessErrorBody(error), error.status);
     }
     if (error instanceof ProjectOperationInProgressError) {
       return context.json({ error: error.message }, 409);
