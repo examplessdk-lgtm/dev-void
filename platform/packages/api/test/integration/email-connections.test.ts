@@ -40,7 +40,7 @@ import {
 } from '../../src/email/connection-service.ts';
 import type { ApiEnv } from '../../src/env.ts';
 import { app } from '../../src/index.ts';
-import { deployments, projects } from '../../src/schema.ts';
+import { deployments, projectMembers, projects } from '../../src/schema.ts';
 import { callsByTag, stubCustomerCf } from './email-domain-cf-stub.ts';
 import {
   clearTables,
@@ -725,13 +725,149 @@ describe('durable zone email connections', () => {
     );
     expect(new Set(rotations).size).toBe(1);
     await runEmailOperation(env.db, bindings(), rotations[0]);
+    expect(
+      await requestEmailSecretRotation(
+        env.db,
+        bindings(),
+        connection.id,
+        actor,
+        'same-rotation',
+        project.id,
+      ),
+    ).toBe(rotations[0]);
     const syncs = await Promise.all(
       Array.from({ length: 3 }, () =>
         requestEmailDomainSync(env.db, bindings(), add.routeId, actor, 'same-sync'),
       ),
     );
     expect(new Set(syncs).size).toBe(1);
+    expect(
+      await requestEmailDomainSync(env.db, bindings(), add.routeId, actor, 'same-sync', project.id),
+    ).toBe(syncs[0]);
   });
+
+  it.runIf(Boolean(process.env.VOID_TEST_DATABASE_URL))(
+    'orders project-admin demotion before durable email-domain mutations',
+    async () => {
+      const failures: NonNullable<Parameters<typeof stubCustomerCf>[0]>['failOn'] = {};
+      stubCustomerCf({ zones, failOn: failures });
+      const owner = await createTestUser(env.db, 'email-mutation-race-owner');
+      const admin = await createTestUser(env.db, 'email-mutation-race-admin');
+      const project = await createTestProject(env.db, owner.id, 'email-mutation-race-project');
+      await env.db.insert(projectMembers).values({
+        project_id: project.id,
+        user_id: admin.id,
+        role: 'admin',
+        added_by_user_id: owner.id,
+      });
+      const added = await requestEmailDomainAdd(env.db, bindings(), {
+        projectId: project.id,
+        domain: 'mutation-race.example.com',
+        actor: { kind: 'owner', userId: owner.id },
+        token: TOKEN,
+      });
+      await runEmailOperation(env.db, bindings(), added.operationId);
+      const connection = (await resolveEmailDomain(env.db, 'mutation-race.example.com'))!
+        .connection;
+      const replayInput = {
+        projectId: project.id,
+        domain: 'mutation-replay.example.com',
+        actor: { kind: 'owner' as const, userId: admin.id },
+        token: TOKEN,
+        attemptId: 'mutation-race-replay',
+      };
+      const blocked = await requestEmailDomainAdd(env.db, bindings(), replayInput);
+      failures.routingDns = { message: 'permission denied', status: 403 };
+      await runEmailOperation(env.db, bindings(), blocked.operationId);
+      delete failures.routingDns;
+      expect(
+        (
+          await env.db
+            .select()
+            .from(emailOperations)
+            .where(eq(emailOperations.id, blocked.operationId))
+        )[0],
+      ).toMatchObject({ status: 'blocked' });
+
+      for (const kind of ['add-replay', 'sync', 'remove', 'rotate'] as const) {
+        await env.db
+          .update(projectMembers)
+          .set({ role: 'admin' })
+          .where(
+            and(eq(projectMembers.project_id, project.id), eq(projectMembers.user_id, admin.id)),
+          );
+        const operationCount = (await env.db.select().from(emailOperations)).length;
+        let mutation:
+          | Promise<
+              { status: 'fulfilled'; value: string | null } | { status: 'rejected'; error: unknown }
+            >
+          | undefined;
+
+        await env.db.transaction(async (tx) => {
+          await tx
+            .select({ id: projects.id })
+            .from(projects)
+            .where(eq(projects.id, project.id))
+            .for('update');
+          await tx
+            .update(projectMembers)
+            .set({ role: 'collaborator' })
+            .where(
+              and(eq(projectMembers.project_id, project.id), eq(projectMembers.user_id, admin.id)),
+            );
+          const actor = { kind: 'owner' as const, userId: admin.id };
+          const request =
+            kind === 'add-replay'
+              ? requestEmailDomainAdd(env.db, bindings(), replayInput).then(
+                  ({ operationId }) => operationId,
+                )
+              : kind === 'sync'
+                ? requestEmailDomainSync(
+                    env.db,
+                    bindings(),
+                    added.routeId,
+                    actor,
+                    undefined,
+                    project.id,
+                  )
+                : kind === 'remove'
+                  ? requestEmailDomainRemove(
+                      env.db,
+                      bindings(),
+                      added.routeId,
+                      actor,
+                      undefined,
+                      project.id,
+                    )
+                  : requestEmailSecretRotation(
+                      env.db,
+                      bindings(),
+                      connection.id,
+                      actor,
+                      undefined,
+                      project.id,
+                    );
+          mutation = request.then(
+            (value) => ({ status: 'fulfilled' as const, value }),
+            (error: unknown) => ({ status: 'rejected' as const, error }),
+          );
+          await waitForPostgresLockWaiters(1);
+        });
+
+        const result = await mutation!;
+        expect(result.status).toBe('rejected');
+        if (result.status !== 'rejected') {
+          throw new Error(`${kind} unexpectedly committed after project-admin demotion`);
+        }
+        expect(result.error).toMatchObject({ message: 'forbidden', status: 403 });
+        expect(await env.db.select().from(emailOperations)).toHaveLength(operationCount);
+        expect(
+          (await resolveEmailDomain(env.db, 'mutation-race.example.com'))?.route,
+        ).toMatchObject({ desired_state: 'active' });
+      }
+    },
+    20_000,
+  );
 
   it.runIf(Boolean(process.env.VOID_TEST_DATABASE_URL))(
     'serializes concurrent first assignments on the same Cloudflare zone',

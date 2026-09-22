@@ -611,6 +611,9 @@ async function updateOwnershipCounters(
     projectId: transfer.project.id,
     userId: transfer.newOwner.id,
     slug: transfer.project.slug,
+    billingPeriodStart: getCurrentBillingPeriodStart(
+      transfer.newOwner.billing_cycle_start,
+    ).toISOString(),
     ownershipStartedAt: transfer.transferredAt,
   });
 }

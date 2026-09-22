@@ -30,6 +30,10 @@ void project team invite teammate@example.com --role collaborator
 
 Pass `--project <slug>` to manage a project other than the linked project. An unknown email is rejected. A project invitation neither creates an account nor adds the address to a restricted-signup allowlist.
 
+Invitations expire after seven days. If the platform cannot send invitation
+email, the invitation still appears when the invited user runs
+`void project team pending`.
+
 List the roster and sent invitations with:
 
 ```sh

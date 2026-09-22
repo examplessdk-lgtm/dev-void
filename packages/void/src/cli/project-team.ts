@@ -1,13 +1,15 @@
 import { intro, log, note, outro } from '@clack/prompts';
-import { getToken } from './auth.ts';
+import { getToken, readPlatformToken } from './auth.ts';
 import {
   PlatformClient,
   type ProjectInvitationResponse,
   type ProjectMemberResponse,
 } from './client.ts';
+import { VOID_CLOUD_PLATFORM } from './hosted-platform.ts';
 import { cliTitle } from './output.ts';
+import { getActivePlatformConnection } from './platform-registry.ts';
 import type { ProjectArgs } from './project-args.ts';
-import { readProjectConfig } from './project.ts';
+import { readDeploymentPlatform, readProjectConfig } from './project.ts';
 import { getRequestedProjectSlug, resolveProjectBySlug } from './resolve-project.ts';
 
 type ProjectTeamArgs = Exclude<Extract<ProjectArgs, { subcommand: 'team' }>, { action: '' }>;
@@ -72,16 +74,38 @@ async function resolveProjectId(
   return linked.projectId;
 }
 
+function resolveCredential(
+  root: string,
+  accountScoped: boolean,
+): { apiUrl?: string; token: string | null } {
+  if (accountScoped && readDeploymentPlatform(root) === 'cloudflare' && !process.env.VOID_API_URL) {
+    if (process.env.VOID_TOKEN) {
+      return { apiUrl: VOID_CLOUD_PLATFORM.apiUrl, token: process.env.VOID_TOKEN };
+    }
+    const connection = getActivePlatformConnection();
+    if (connection) {
+      return { apiUrl: connection.apiUrl, token: readPlatformToken(connection.apiUrl) };
+    }
+  }
+  return { token: getToken(root) };
+}
+
 export async function runProjectTeamCommand(root: string, args: ProjectTeamArgs): Promise<void> {
   console.log();
   intro(cliTitle(`project team ${args.action}`));
 
-  const token = getToken(root);
+  const accountScoped =
+    args.action === 'pending' || args.action === 'accept' || args.action === 'decline';
+  const { apiUrl, token } = resolveCredential(root, accountScoped);
   if (!token) {
-    log.error('Not logged in. Run `void auth login` first.');
+    log.error(
+      apiUrl
+        ? `Not logged in to ${apiUrl}. Run \`void connect ${apiUrl}\` to sign in.`
+        : 'Not logged in. Run `void auth login` first.',
+    );
     process.exit(1);
   }
-  const client = new PlatformClient(token, { root });
+  const client = new PlatformClient(token, apiUrl ? { apiUrl } : { root });
 
   if (args.action === 'pending') {
     const invitations = await client.listPendingProjectInvitations();
@@ -127,7 +151,7 @@ export async function runProjectTeamCommand(root: string, args: ProjectTeamArgs)
         ? ''
         : ` (email delivery: ${result.delivery.status.replace('_', ' ')})`;
     const action = result.refreshed ? 'Updated invitation for' : 'Invited';
-    outro(`${action} ${invitationEmail(result.invitation)} as ${args.role}${delivery}.`);
+    outro(`${action} ${clean(invitationEmail(result.invitation))} as ${args.role}${delivery}.`);
     return;
   }
   if (args.action === 'role') {

@@ -512,6 +512,7 @@ describe('operator tenant mutations', () => {
           projectId: project.id,
           userId: target.id,
           slug: project.slug,
+          billingPeriodStart: expect.any(String),
           ownershipStartedAt: current.starts_at,
         },
       },

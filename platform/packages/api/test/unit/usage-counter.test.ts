@@ -1180,6 +1180,7 @@ describe('UsageCounter ownership changes', () => {
         body: JSON.stringify({
           projectId: 'next',
           slug: 'next-app',
+          billingPeriodStart: '2026-01-01T00:00:00Z',
           ownershipStartedAt: startedAt,
           // Simulate the transfer caller's pre-plan-change snapshot. The DO
           // must use PostgreSQL's current `pro` plan from the getUser mock.
@@ -1195,6 +1196,88 @@ describe('UsageCounter ownership changes', () => {
       historicalNeurons: 42,
     });
     expect(kv.calls).toContainEqual(['delete', 'ai-block:next']);
+    expect(await storage.getAlarm()).toEqual(expect.any(Number));
+  });
+
+  it('advances a stale recipient period before attaching a transferred project', async () => {
+    const billingPeriodStart = '2026-02-01T00:00:00.000Z';
+    const ownershipStartedAt = '2026-02-02T00:00:00.000Z';
+    const { counter, kv, storage } = makeCounter({
+      ownerUserId: 'u1',
+      plan: 'solo',
+      billingPeriodStart: '2026-01-01T00:00:00.000Z',
+      billingPeriodInitialized: true,
+      totalRequests: 10_000_000,
+      totalNeurons: 100_001,
+      totalSandboxSeconds: 30 * 3_600,
+      requestsSuspended: true,
+      aiSuspended: true,
+      sandboxRuntimeSuspended: true,
+      projectSlugs: { retained: 'retained-app' },
+      projectOwnershipStarts: { retained: '2026-01-01T00:00:00.000Z' },
+      projectNeurons: { retained: 100_001 },
+      historicalNeurons: 17,
+    });
+    kv.store.set(
+      'retained-app',
+      JSON.stringify({
+        workerName: 'retained-worker',
+        projectId: 'retained',
+        userId: 'u1',
+        suspended: 'requests_exceeded',
+      }),
+    );
+    kv.store.set(
+      'next-app',
+      JSON.stringify({ workerName: 'next-worker', projectId: 'next', userId: 'u1' }),
+    );
+    kv.store.set('ai-block:retained', '1');
+    kv.store.set('ai-block:next', '1');
+    kv.store.set('sandbox-block:u1', '1');
+
+    const response = await counter.fetch(
+      new Request('https://do/attach-project', {
+        method: 'POST',
+        body: JSON.stringify({
+          projectId: 'next',
+          slug: 'next-app',
+          billingPeriodStart,
+          ownershipStartedAt,
+          userId: 'u1',
+        }),
+      }),
+    );
+
+    expect(response.ok).toBe(true);
+    expect(dbCalls.unsuspendIfReason).toEqual(
+      expect.arrayContaining([
+        { id: 'u1', reason: 'requests_exceeded' },
+        { id: 'u1', reason: 'sandbox_runtime_exceeded' },
+      ]),
+    );
+    expect(JSON.parse(kv.store.get('retained-app')!)).not.toHaveProperty('suspended');
+    expect(JSON.parse(kv.store.get('next-app')!)).not.toHaveProperty('suspended');
+    expect(kv.store.has('ai-block:retained')).toBe(false);
+    expect(kv.store.has('ai-block:next')).toBe(false);
+    expect(kv.store.has('sandbox-block:u1')).toBe(false);
+    expect(storage.data.get('state')).toMatchObject({
+      billingPeriodStart,
+      plan: 'pro',
+      totalRequests: 0,
+      totalNeurons: 0,
+      totalSandboxSeconds: 0,
+      requestsSuspended: false,
+      aiSuspended: false,
+      sandboxRuntimeSuspended: false,
+      projectSlugs: { retained: 'retained-app', next: 'next-app' },
+      projectOwnershipStarts: {
+        retained: '2026-01-01T00:00:00.000Z',
+        next: ownershipStartedAt,
+      },
+      projectNeurons: {},
+      historicalNeurons: 0,
+    });
+    expect(await storage.getAlarm()).toEqual(expect.any(Number));
   });
 
   it('does not attach a project after deletion has started', async () => {

@@ -492,13 +492,16 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
       projectId: string;
       slug: string;
       ownershipStartedAt: string;
+      billingPeriodStart?: string;
       userId?: string;
     };
     if (
       !body.projectId ||
       !body.slug ||
       !body.ownershipStartedAt ||
-      !Number.isFinite(Date.parse(body.ownershipStartedAt))
+      !Number.isFinite(Date.parse(body.ownershipStartedAt)) ||
+      (body.billingPeriodStart !== undefined &&
+        !Number.isFinite(Date.parse(body.billingPeriodStart)))
     ) {
       return Response.json({ error: 'invalid project attachment' }, { status: 400 });
     }
@@ -515,12 +518,30 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
     if (!owner) {
       return Response.json({ error: 'project owner changed' }, { status: 409 });
     }
-    state.projectSlugs[body.projectId] = body.slug;
-    state.projectOwnershipStarts[body.projectId] = body.ownershipStartedAt;
     // Ownership transfer requests may have waited behind a concurrent plan
     // change. PostgreSQL is authoritative; never restore the caller's stale
     // pre-transfer snapshot into this counter.
     state.plan = owner.plan;
+    if (body.billingPeriodStart !== undefined) {
+      const incomingPeriodStart = Date.parse(body.billingPeriodStart);
+      const currentPeriodStart = Date.parse(state.billingPeriodStart);
+      if (!state.billingPeriodInitialized) {
+        state.billingPeriodStart = body.billingPeriodStart;
+        state.billingPeriodInitialized = true;
+      } else if (!Number.isFinite(currentPeriodStart) || incomingPeriodStart > currentPeriodStart) {
+        await this.advanceBillingPeriod(
+          state,
+          {
+            billingPeriodStart: body.billingPeriodStart,
+            plan: owner.plan,
+            userId: state.ownerUserId ?? '',
+          },
+          true,
+        );
+      }
+    }
+    state.projectSlugs[body.projectId] = body.slug;
+    state.projectOwnershipStarts[body.projectId] = body.ownershipStartedAt;
     if (state.requestsSuspended) {
       await this.suspendProjects(
         db,
@@ -537,6 +558,9 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
       await this.env.ROUTING.delete(`ai-block:${body.projectId}`);
     }
     await this.saveState(state);
+    if (!(await this.ctx.storage.getAlarm())) {
+      await this.ctx.storage.setAlarm(Date.now() + 15 * 60 * 1000);
+    }
     return Response.json({ ok: true });
   }
 

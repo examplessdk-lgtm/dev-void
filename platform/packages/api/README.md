@@ -159,7 +159,7 @@ retained receipt and recipient outcomes, with `page` and `limit` pagination.
 Accept a current project ID or slug; deleted projects remain inspectable by ID
 until ledger retention expires. Responses exclude message content and credentials.
 
-`POST /projects/:id/owner` previews or applies an ownership transfer through the
+`POST /operator/v1/projects/:id/owner` previews or applies an ownership transfer through the
 same service used by the browser admin UI. The database transaction updates the
 owner and ownership periods atomically; usage counters and routing converge
 afterward, and retries repair an already-committed transfer without moving its

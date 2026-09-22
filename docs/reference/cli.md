@@ -815,7 +815,7 @@ Platform migrations only move forward. Void checks compatibility before updating
 
 An upgrade completes after the new Workers pass health checks. If rollout fails, Void attempts to restore the previous Workers. Retrying does not repeat completed migrations.
 
-`platform rollback` restores a compatible earlier runtime without reversing database migrations. Pass its files with `--runtime`. If the installed version is a custom build, also supply that version with `--from-runtime`. Void refuses rollbacks that are incompatible with the current database. A later `upgrade` can move forward again.
+`platform rollback` restores a compatible earlier runtime without reversing database migrations. Pass its files with `--runtime`. If the installed version is a custom build, also supply that version with `--from-runtime`. Void refuses targets that are incompatible with the current database or predate installed authentication, sandbox-drain, or ownership-aware usage protocols. A later `upgrade` can move forward again.
 
 Uninstall verifies remote ownership before removing anything. Data resources are retained unless you pass `--purge-data`. Workers, R2, AI Gateway, DNS records, routes, custom domains, adopted resources, external PostgreSQL, and zones are always retained for manual review.
 

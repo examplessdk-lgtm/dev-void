@@ -584,7 +584,6 @@ const app = new Hono<ApiEnv>()
         400,
       );
     }
-    const db = context.get('db');
     const access = await requireProjectRouteCapability(context, projectId, 'settings');
     if (access instanceof Response) {
       return access;
