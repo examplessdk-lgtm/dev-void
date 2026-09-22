@@ -865,6 +865,9 @@ importers:
       '@cloudflare/workers-types':
         specifier: catalog:platform
         version: 5.20260910.1
+      '@types/node':
+        specifier: 'catalog:'
+        version: 26.5.1
       typescript:
         specifier: 'catalog:'
         version: 7.0.2

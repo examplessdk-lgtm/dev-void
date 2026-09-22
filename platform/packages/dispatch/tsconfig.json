@@ -11,5 +11,6 @@
     "types": ["@cloudflare/workers-types"],
     "allowImportingTsExtensions": true
   },
-  "include": ["src", "test"]
+  "include": ["src", "test"],
+  "exclude": ["test/runtime"]
 }
