@@ -2367,6 +2367,110 @@ describe('POST /projects/:id/deploy', () => {
       }
     });
 
+    it('persists confirmed app migrations before a protocol v2 auth failure', async () => {
+      const user = await createTestUser(env.db);
+      const project = await createTestProject(env.db, user.id, 'migrate-v2-auth-failure');
+      mockCfApi({
+        createD1: () => cfSuccess({ uuid: 'd1-v2-auth-failure', name: 'test-db' }),
+      });
+
+      const originalDispatch = env.DISPATCH;
+      env.DISPATCH = {
+        get: () => ({
+          fetch: async (req: Request) => {
+            const url = new URL(req.url);
+            if (url.pathname === '/__void/ready') {
+              return Response.json({ ready: true });
+            }
+            if (url.pathname === '/__void/migrate/capabilities') {
+              return Response.json({
+                protocolVersion: 2,
+                endpoints: {
+                  app: '/__void/migrate/app',
+                  auth: '/__void/migrate/auth',
+                  reconcile: '/__void/migrate/app/attempt/:attemptId',
+                },
+                dialect: 'sqlite',
+                classifierVersion: 1,
+                migrationListHash: 'sha256:auth-failure',
+                destructiveValidation: 'passed',
+              });
+            }
+            if (url.pathname === '/__void/migrate/app') {
+              return Response.json({
+                ok: true,
+                protocolVersion: 2,
+                attemptId: 'attempt_auth_failure',
+                confirmedApplied: ['001_create_table.sql'],
+                confirmedSkipped: [],
+                stability: 'stable',
+                migrations: [
+                  {
+                    name: '001_create_table.sql',
+                    applied: true,
+                    status: 'applied',
+                    stability: 'stable',
+                    durationMs: 2,
+                  },
+                ],
+              });
+            }
+            if (url.pathname === '/__void/migrate/auth') {
+              return Response.json({ ok: false, error: 'auth schema rejected' }, { status: 500 });
+            }
+            return new Response('unexpected', { status: 500 });
+          },
+        }),
+      } as unknown as DispatchNamespace;
+
+      try {
+        const response = await app.fetch(
+          await buildDeployRequest(env, project.id, user.jwt, {
+            manifest: {
+              version: 3,
+              auth: true,
+              bindings: { d1: ['DB'] },
+              migrations: {
+                dialect: 'sqlite',
+                pending: 1,
+                protocolVersion: 2,
+                classifierVersion: 1,
+                migrationListHash: 'sha256:auth-failure',
+                stability: 'stable',
+              },
+            },
+          }),
+          env,
+        );
+        expect(response.status).toBe(200);
+        expect(parseDeployStream(await response.text()).at(-1)).toMatchObject({
+          event: 'error',
+          step: 'migration',
+          message: 'auth migration failed: auth schema rejected',
+        });
+
+        const migrationRows = await env.db
+          .select({ name: projectMigrations.name })
+          .from(projectMigrations)
+          .where(eq(projectMigrations.project_id, project.id));
+        expect(migrationRows).toEqual([{ name: '001_create_table.sql' }]);
+
+        const [failedDeployment] = await env.db
+          .select({
+            appliedMigrations: deployments.applied_migrations,
+            status: deployments.status,
+          })
+          .from(deployments)
+          .where(eq(deployments.project_id, project.id))
+          .orderBy(desc(deployments.created_at))
+          .limit(1);
+        expect(failedDeployment?.status).toBe('failed');
+        expect(JSON.parse(failedDeployment!.appliedMigrations!)).toEqual(['001_create_table.sql']);
+      } finally {
+        env.DISPATCH = originalDispatch;
+      }
+    });
+
     it('negotiates protocol v2 and runs MySQL migrations', async () => {
       const user = await createTestUser(env.db);
       const project = await createTestProject(env.db, user.id, 'migrate-v2-mysql-test');

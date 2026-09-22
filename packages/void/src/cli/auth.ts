@@ -70,6 +70,32 @@ function writeConfig(config: Config): void {
   writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
 }
 
+function readOriginScopedToken(apiUrl: string, config: Config): string | null {
+  const normalizedApiUrl = normalizePlatformApiUrl(apiUrl);
+  const account = platformCredentialAccount(normalizedApiUrl);
+  const keyringToken = keyringGet(account);
+  if (keyringToken) {
+    return keyringToken;
+  }
+
+  const fileToken = config.tokens?.[normalizedApiUrl];
+  if (!fileToken) {
+    return null;
+  }
+  if (keyringSet(account, fileToken)) {
+    delete config.tokens![normalizedApiUrl];
+    if (Object.keys(config.tokens!).length === 0) {
+      delete config.tokens;
+    }
+    try {
+      writeConfig(config);
+    } catch {
+      // Migration is best-effort; the file remains a usable fallback.
+    }
+  }
+  return fileToken;
+}
+
 export function isStagingMode(root: string = process.cwd()): boolean {
   return isVoidInternalStaging(root);
 }
@@ -120,31 +146,14 @@ export function getToken(root: string = process.cwd()): string | null {
     }
     return envToken;
   }
-  const account = platformCredentialAccount(apiUrl);
-
-  // Try keyring first
-  const keyringToken = keyringGet(account);
-  if (keyringToken) {
-    return keyringToken;
-  }
-
   const config = readConfig();
   const normalizedApiUrl = normalizePlatformApiUrl(apiUrl);
-  const fileToken = config.tokens?.[normalizedApiUrl];
-  if (fileToken) {
-    if (keyringSet(account, fileToken)) {
-      delete config.tokens![normalizedApiUrl];
-      if (Object.keys(config.tokens!).length === 0) {
-        delete config.tokens;
-      }
-      try {
-        writeConfig(config);
-      } catch {
-        // Ignore — migration is best-effort.
-      }
-    }
-    return fileToken;
+  const originToken = readOriginScopedToken(normalizedApiUrl, config);
+  if (originToken) {
+    return originToken;
   }
+
+  const account = platformCredentialAccount(normalizedApiUrl);
 
   const legacyAccount = legacyCredentialAccount(root, normalizedApiUrl, config);
   if (legacyAccount) {
@@ -192,7 +201,7 @@ export function saveToken(
 }
 
 export function readPlatformToken(apiUrl: string): string | null {
-  return keyringGet(platformCredentialAccount(normalizePlatformApiUrl(apiUrl)));
+  return readOriginScopedToken(apiUrl, readConfig());
 }
 
 export function savePlatformToken(

@@ -25,6 +25,47 @@ export function sandboxBlockKey(userId: string): string {
   return `sandbox-block:${userId}`;
 }
 
+async function withLockedProjectOwner(
+  db: Db,
+  projectId: string,
+  expectedOwnerUserId: string,
+  update: () => Promise<void>,
+): Promise<boolean> {
+  return db.transaction(async (tx) => {
+    await tx.execute(drizzleSql`SELECT id FROM projects WHERE id = ${projectId} FOR UPDATE`);
+    const project = await getProject(tx as unknown as Db, projectId);
+    if (!project || project.user_id !== expectedOwnerUserId || project.status === 'deleting') {
+      return false;
+    }
+    await update();
+    return true;
+  });
+}
+
+export async function verifyActiveProjectOwner(
+  db: Db,
+  projectId: string,
+  expectedOwnerUserId: string,
+): Promise<boolean> {
+  return withLockedProjectOwner(db, projectId, expectedOwnerUserId, async () => {});
+}
+
+export async function setProjectAiBlock(
+  routing: KVNamespace,
+  db: Db,
+  projectId: string,
+  expectedOwnerUserId: string,
+  blocked: boolean,
+): Promise<boolean> {
+  return withLockedProjectOwner(db, projectId, expectedOwnerUserId, async () => {
+    if (blocked) {
+      await routing.put(`ai-block:${projectId}`, '1');
+    } else {
+      await routing.delete(`ai-block:${projectId}`);
+    }
+  });
+}
+
 export function buildProjectAccountJson(entry: ProjectAccountEntry): string {
   return JSON.stringify({ userId: entry.userId, plan: entry.plan });
 }

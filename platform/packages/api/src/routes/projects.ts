@@ -3105,6 +3105,9 @@ const app = new Hono<ApiEnv>()
     if (access instanceof Response) {
       return access;
     }
+    if (access.role !== 'owner') {
+      return context.json({ error: 'forbidden' }, 403);
+    }
 
     const row = await getProjectDatabaseUrl(context.get('db'), projectId);
     if (!row) {

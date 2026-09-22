@@ -95,6 +95,23 @@ describe('legacy Void Cloud authentication', () => {
     expect(getToken(root)).toBe('legacy-token');
   });
 
+  it('reads and migrates an origin-scoped config token without project context', async () => {
+    const origin = 'https://platform.example.test';
+    const configDirectory = join(state.home, '.void');
+    mkdirSync(configDirectory, { recursive: true });
+    const configPath = join(configDirectory, 'config.json');
+    writeFileSync(configPath, JSON.stringify({ tokens: { [origin]: 'origin-file-token' } }));
+    const { readPlatformToken } = await import('../../src/cli/auth.ts');
+    const { platformCredentialAccount } = await import('../../src/cli/platform-registry.ts');
+
+    expect(readPlatformToken(`${origin}/`)).toBe('origin-file-token');
+    expect(state.passwords.get(`dev.void.cli:${platformCredentialAccount(origin)}`)).toBe(
+      'origin-file-token',
+    );
+    expect(JSON.parse(readFileSync(configPath, 'utf8'))).toEqual({});
+    expect(readPlatformToken(origin)).toBe('origin-file-token');
+  });
+
   it('lets an explicit platform connection supersede a legacy hosted selection', async () => {
     const root = mkdtempSync(join(tmpdir(), 'void-auth-platform-selection-'));
     directories.push(root);

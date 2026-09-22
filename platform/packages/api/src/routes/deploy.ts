@@ -4412,12 +4412,6 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
                 await appendProjectMigrations(txDb, projectId, confirmed, deployment.id);
                 await setAppliedMigrations(txDb, deployment.id, confirmed);
               }
-              if (appResult.ok && stableCapabilities.endpoints.auth) {
-                await dispatchStableAuthMigration(
-                  context.env.DISPATCH.get(workerName),
-                  proxyTokenBinding?.text ?? '',
-                );
-              }
               return { confirmed, result: appResult };
             });
 
@@ -4438,6 +4432,20 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
                 });
                 migrationsApplied++;
               }
+            }
+            if (stableCapabilities.endpoints.auth) {
+              // Persist the remotely committed app result before auth runs, and
+              // release the project lock before this request's 300-second timeout.
+              await context.get('db').transaction(async (tx) => {
+                await tx.execute(
+                  drizzleSql`SELECT id FROM projects WHERE id = ${projectId} FOR UPDATE`,
+                );
+                await requireActiveDeployAccess(tx as unknown as Db, projectId, actor.id);
+              });
+              await dispatchStableAuthMigration(
+                context.env.DISPATCH.get(workerName),
+                proxyTokenBinding?.text ?? '',
+              );
             }
           } else {
             const migrationRetry =

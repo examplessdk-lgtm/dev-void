@@ -752,17 +752,20 @@ export async function getPendingProjectInvitationsByUserId(
   db: Db,
   userId: string,
 ): Promise<ReadonlyArray<ProjectInvitation>> {
-  return db
-    .select()
+  const rows = await db
+    .select({ invitation: projectInvitations })
     .from(projectInvitations)
+    .innerJoin(projects, eq(projects.id, projectInvitations.project_id))
     .where(
       and(
         eq(projectInvitations.target_user_id, userId),
         eq(projectInvitations.status, 'pending'),
         gt(projectInvitations.expires_at, sql`now()`),
+        eq(projects.status, 'active'),
       ),
     )
     .orderBy(desc(projectInvitations.created_at));
+  return rows.map((row) => row.invitation);
 }
 
 export async function createOrRefreshProjectInvitation(
@@ -1037,15 +1040,14 @@ export async function respondToProjectInvitation(
         .where(eq(projectInvitations.id, invitation.id));
       return { error: 'invitation-expired' as const };
     }
-    if (project.user_id === args.actorUserId) {
-      throw new ProjectTeamMutationError('owner-conflict');
-    }
-    if (await getProjectMember(txDb, project.id, args.actorUserId)) {
-      throw new ProjectTeamMutationError('member-conflict');
-    }
-
     let member: ProjectMember | null = null;
     if (args.response === 'accept') {
+      if (project.user_id === args.actorUserId) {
+        throw new ProjectTeamMutationError('owner-conflict');
+      }
+      if (await getProjectMember(txDb, project.id, args.actorUserId)) {
+        throw new ProjectTeamMutationError('member-conflict');
+      }
       await requireLockedProjectOwnerActive(txDb, project);
       [member] = await txDb
         .insert(projectMembers)

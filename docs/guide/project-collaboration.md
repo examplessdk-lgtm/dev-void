@@ -15,6 +15,12 @@ A project hosted on a Void platform can have one owner and additional readers, c
 | Project administrator | Collaborator access plus domains, email destinations, GitHub configuration, invitations, roles, and member removal.       |
 | Owner                 | Project administrator access plus project deletion.                                                                       |
 
+Only the owner can create, list, renew, or revoke the project's CI deploy
+credentials. Those credentials run unattended deployments as the billing owner
+and remain independent of a member's login session, so collaborators and
+project administrators deploy with their own account instead of minting a
+durable owner credential.
+
 The owner's plan, limits, and suspension state govern the project. A member's
 own plan does not change the project's available usage, and acting through a
 collaborator does not bypass an owner suspension. A project administrator is

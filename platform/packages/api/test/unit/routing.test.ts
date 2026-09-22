@@ -8,6 +8,7 @@ import {
   computeDispatchLimits,
   projectAccountKey,
   resolveRoutingUndo,
+  setProjectAiBlock,
   setProjectsRoutingSuspension,
 } from '../../src/routing.ts';
 import { PLAN_LIMITS, type PlanLimits } from '../../src/tiers.ts';
@@ -547,6 +548,71 @@ describe('setProjectsRoutingSuspension', () => {
     });
     expect(spy).not.toHaveBeenCalled();
     expect(puts).toEqual([]);
+    vi.restoreAllMocks();
+  });
+});
+
+describe('setProjectAiBlock', () => {
+  it('stands down after a transfer wins the project lock', async () => {
+    const events: Array<string> = [];
+    const { store, kv } = createKvStore({ 'ai-block:proj_a': '1' });
+    vi.spyOn(dbModule, 'getProject').mockImplementation(async () => {
+      events.push('read-owner');
+      return {
+        id: 'proj_a',
+        user_id: 'new_owner',
+        status: 'active',
+      } as Awaited<ReturnType<typeof dbModule.getProject>>;
+    });
+    const db = {
+      transaction: async (fn: (tx: { execute: () => Promise<void> }) => Promise<unknown>) =>
+        fn({
+          execute: async () => {
+            events.push('lock-project');
+          },
+        }),
+    } as unknown as Parameters<typeof setProjectAiBlock>[1];
+
+    const changed = await setProjectAiBlock(kv, db, 'proj_a', 'former_owner', false);
+
+    expect(changed).toBe(false);
+    expect(events).toEqual(['lock-project', 'read-owner']);
+    expect(store.get('ai-block:proj_a')).toBe('1');
+    vi.restoreAllMocks();
+  });
+
+  it('writes only after confirming the owner under the project lock', async () => {
+    const events: Array<string> = [];
+    const store = new Map<string, string>();
+    const kv = {
+      put: async (key: string, value: string) => {
+        events.push('put-block');
+        store.set(key, value);
+      },
+      delete: async () => {},
+    } as unknown as KVNamespace;
+    vi.spyOn(dbModule, 'getProject').mockImplementation(async () => {
+      events.push('read-owner');
+      return {
+        id: 'proj_a',
+        user_id: 'owner_a',
+        status: 'active',
+      } as Awaited<ReturnType<typeof dbModule.getProject>>;
+    });
+    const db = {
+      transaction: async (fn: (tx: { execute: () => Promise<void> }) => Promise<unknown>) =>
+        fn({
+          execute: async () => {
+            events.push('lock-project');
+          },
+        }),
+    } as unknown as Parameters<typeof setProjectAiBlock>[1];
+
+    const changed = await setProjectAiBlock(kv, db, 'proj_a', 'owner_a', true);
+
+    expect(changed).toBe(true);
+    expect(events).toEqual(['lock-project', 'read-owner', 'put-block']);
+    expect(store.get('ai-block:proj_a')).toBe('1');
     vi.restoreAllMocks();
   });
 });

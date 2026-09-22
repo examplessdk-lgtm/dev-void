@@ -785,6 +785,20 @@ describe('project team API', () => {
     );
   });
 
+  it('hides pending invitations once project deletion starts', async () => {
+    const owner = await createTestUser(env.db, 'deleting-invitation-owner');
+    const target = await createTestUser(env.db, 'deleting-invitation-target');
+    await setEmail(target.id, 'deleting-target@example.com');
+    const project = await createTestProject(env.db, owner.id, 'deleting-invitation-project');
+    await invite(project.id, owner.jwt, 'deleting-target@example.com', 'reader');
+    await env.db.update(projects).set({ status: 'deleting' }).where(eq(projects.id, project.id));
+
+    const response = await app.fetch(request('/me/project-invitations', target.jwt), env);
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ invitations: [] });
+  });
+
   it('filters expired invitations and allows the target to decline a live invitation', async () => {
     const owner = await createTestUser(env.db, 'owner');
     const target = await createTestUser(env.db, 'target');

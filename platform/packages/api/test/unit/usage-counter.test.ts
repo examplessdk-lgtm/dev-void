@@ -1154,6 +1154,69 @@ describe('UsageCounter ownership changes', () => {
     });
   });
 
+  it('does not reattach from a stale current-owner queue snapshot after transfer', async () => {
+    vi.mocked(getProjectsByIds).mockResolvedValueOnce([
+      { id: 'transferred', user_id: 'new-owner', slug: 'app' } as never,
+    ]);
+    const { counter, storage } = makeCounter({
+      ownerUserId: 'former-owner',
+      plan: 'solo',
+    });
+
+    await counter.fetch(
+      recordRequest(
+        [
+          {
+            projectId: 'transferred',
+            userId: 'former-owner',
+            slug: 'app',
+            requests: 1,
+            responseBytes: 10,
+            currentOwner: true,
+            ownershipStartedAt: '2026-01-01T00:00:00.000Z',
+          },
+        ],
+        'former-owner',
+      ),
+    );
+
+    expect(storage.data.get('state')).toMatchObject({
+      totalRequests: 1,
+      projectSlugs: {},
+      projectOwnershipStarts: {},
+    });
+  });
+
+  it('preserves retained ownership boundaries from a legacy init payload', async () => {
+    const retainedStart = '2026-02-01T00:00:00.000Z';
+    const { counter, storage } = makeCounter({
+      ownerUserId: 'u1',
+      projectSlugs: { retained: 'retained-app', removed: 'removed-app' },
+      projectOwnershipStarts: {
+        retained: retainedStart,
+        removed: '2026-01-01T00:00:00.000Z',
+      },
+    });
+
+    const response = await counter.fetch(
+      new Request('https://do/init', {
+        method: 'POST',
+        body: JSON.stringify({
+          plan: 'solo',
+          billingPeriodStart: '2026-01-01T00:00:00.000Z',
+          projectSlugs: { retained: 'retained-app' },
+          userId: 'u1',
+        }),
+      }),
+    );
+
+    expect(response.ok).toBe(true);
+    expect(storage.data.get('state')).toMatchObject({
+      projectSlugs: { retained: 'retained-app' },
+      projectOwnershipStarts: { retained: retainedStart },
+    });
+  });
+
   it('detaches and attaches a project without erasing already billed AI usage', async () => {
     const { counter, storage, kv } = makeCounter({
       plan: 'solo',
@@ -1281,9 +1344,12 @@ describe('UsageCounter ownership changes', () => {
   });
 
   it('does not attach a project after deletion has started', async () => {
-    vi.mocked(getProjectsByIds).mockResolvedValueOnce([
-      { id: 'deleting', user_id: 'u1', slug: 'app', status: 'deleting' } as never,
-    ]);
+    vi.mocked(getProject).mockResolvedValueOnce({
+      id: 'deleting',
+      user_id: 'u1',
+      slug: 'app',
+      status: 'deleting',
+    } as never);
     const { counter, storage } = makeCounter();
 
     const response = await counter.fetch(
@@ -1300,6 +1366,48 @@ describe('UsageCounter ownership changes', () => {
 
     expect(response.status).toBe(409);
     expect(storage.data.get('state')).toBeUndefined();
+  });
+
+  it('rejects a stale attach before advancing the former owner billing period', async () => {
+    vi.mocked(getProject).mockResolvedValueOnce({
+      id: 'transferred',
+      user_id: 'new-owner',
+      slug: 'app',
+      status: 'active',
+    } as never);
+    const { counter, kv, storage } = makeCounter({
+      ownerUserId: 'former-owner',
+      plan: 'solo',
+      billingPeriodStart: '2026-01-01T00:00:00.000Z',
+      billingPeriodInitialized: true,
+      totalRequests: 10,
+      aiSuspended: true,
+      projectSlugs: { retained: 'retained-app' },
+    });
+    kv.store.set('ai-block:retained', '1');
+
+    const response = await counter.fetch(
+      new Request('https://do/attach-project', {
+        method: 'POST',
+        body: JSON.stringify({
+          projectId: 'transferred',
+          slug: 'app',
+          billingPeriodStart: '2026-02-01T00:00:00.000Z',
+          ownershipStartedAt: '2026-02-02T00:00:00.000Z',
+          userId: 'former-owner',
+        }),
+      }),
+    );
+
+    expect(response.status).toBe(409);
+    expect(kv.store.get('ai-block:retained')).toBe('1');
+    expect(storage.data.get('state')).toMatchObject({
+      billingPeriodStart: '2026-01-01T00:00:00.000Z',
+      totalRequests: 10,
+      aiSuspended: true,
+      projectSlugs: { retained: 'retained-app' },
+    });
+    expect(dbCalls.unsuspendIfReason).toEqual([]);
   });
 
   it('reconciles the complete pre-transfer AI window and resamples it idempotently', async () => {

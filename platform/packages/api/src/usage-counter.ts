@@ -10,7 +10,12 @@ import {
 } from './db.ts';
 import type { ApiEnv } from './env.ts';
 import { queryProjectAiUsage } from './routes/usage.ts';
-import { sandboxBlockKey, setProjectsRoutingSuspension } from './routing.ts';
+import {
+  sandboxBlockKey,
+  setProjectAiBlock,
+  setProjectsRoutingSuspension,
+  verifyActiveProjectOwner,
+} from './routing.ts';
 import { REASON_REQUESTS_EXCEEDED, REASON_SANDBOX_RUNTIME_EXCEEDED } from './suspension.ts';
 import { getPlanLimits, isWithinLimit } from './tiers.ts';
 import { SANDBOX_USAGE_RETENTION_MS } from './usage-auth.ts';
@@ -322,10 +327,33 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
     state.totalSandboxSeconds += incomingSandboxSeconds;
 
     // Only the current owner may keep a project in the active enforcement set.
-    // A delayed event from a closed ownership period still contributes to the
-    // former owner's already-billed totals, but must not reattach the project.
+    // Recheck the queue consumer's snapshot here so a transfer that completed
+    // before this serialized operation cannot be undone by a delayed record.
+    let db: ReturnType<typeof createDb> | undefined;
+    const getDb = (): ReturnType<typeof createDb> => {
+      db ??= createDb(this.env.HYPERDRIVE.connectionString);
+      return db;
+    };
+    const attachmentCandidates = [
+      ...new Set(
+        body.events
+          .filter(
+            (event) =>
+              event.currentOwner !== false && !Object.hasOwn(state.projectSlugs, event.projectId),
+          )
+          .map((event) => event.projectId),
+      ),
+    ];
+    const approvedAttachments =
+      attachmentCandidates.length > 0
+        ? await this.ownedProjectIds(getDb(), attachmentCandidates, body.userId)
+        : new Set<string>();
     for (const event of body.events) {
-      if (event.currentOwner !== false) {
+      if (
+        event.currentOwner !== false &&
+        (Object.hasOwn(state.projectSlugs, event.projectId) ||
+          approvedAttachments.has(event.projectId))
+      ) {
         state.projectSlugs[event.projectId] = event.slug;
         if (event.ownershipStartedAt) {
           state.projectOwnershipStarts[event.projectId] = event.ownershipStartedAt;
@@ -337,13 +365,6 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
     if (body.plan) {
       state.plan = body.plan;
     }
-
-    // Lazily create one db handle shared by any suspension paths below.
-    let db: ReturnType<typeof createDb> | undefined;
-    const getDb = (): ReturnType<typeof createDb> => {
-      db ??= createDb(this.env.HYPERDRIVE.connectionString);
-      return db;
-    };
 
     // Commit each suspension latch only after every enforcement write succeeds.
     const exceedsLimit = evaluateRequestLimit(state, 0); // already added above
@@ -453,7 +474,13 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
     const db = createDb(this.env.HYPERDRIVE.connectionString);
     await this.retainTransferredProjectWindows(db, state, removedProjectIds);
     state.projectSlugs = { ...body.projectSlugs };
-    state.projectOwnershipStarts = { ...(body.projectOwnershipStarts ?? {}) };
+    state.projectOwnershipStarts = Object.fromEntries(
+      Object.keys(body.projectSlugs).flatMap((projectId) => {
+        const startsAt =
+          body.projectOwnershipStarts?.[projectId] ?? state.projectOwnershipStarts[projectId];
+        return startsAt ? [[projectId, startsAt]] : [];
+      }),
+    );
     state.plan = body.plan;
     state.billingPeriodStart = body.billingPeriodStart;
     state.billingPeriodInitialized = true;
@@ -467,16 +494,15 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
         REASON_REQUESTS_EXCEEDED,
       );
     }
-    const ownedProjectIds = await this.ownedProjectIds(
-      db,
-      Object.keys(state.projectSlugs),
-      state.ownerUserId,
-    );
-    for (const projectId of ownedProjectIds) {
-      if (state.aiSuspended) {
-        await this.env.ROUTING.put(`ai-block:${projectId}`, '1');
-      } else {
-        await this.env.ROUTING.delete(`ai-block:${projectId}`);
+    if (state.ownerUserId) {
+      for (const projectId of Object.keys(state.projectSlugs)) {
+        await setProjectAiBlock(
+          this.env.ROUTING,
+          db,
+          projectId,
+          state.ownerUserId,
+          state.aiSuspended,
+        );
       }
     }
 
@@ -510,8 +536,10 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
       state.ownerUserId = body.userId;
     }
     const db = createDb(this.env.HYPERDRIVE.connectionString);
-    const ownedProjectIds = await this.ownedProjectIds(db, [body.projectId], state.ownerUserId);
-    if (!ownedProjectIds.has(body.projectId)) {
+    if (
+      !state.ownerUserId ||
+      !(await verifyActiveProjectOwner(db, body.projectId, state.ownerUserId))
+    ) {
       return Response.json({ error: 'project owner changed' }, { status: 409 });
     }
     const owner = state.ownerUserId ? await getUser(db, state.ownerUserId) : null;
@@ -540,6 +568,17 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
         );
       }
     }
+    if (
+      !(await setProjectAiBlock(
+        this.env.ROUTING,
+        db,
+        body.projectId,
+        state.ownerUserId,
+        state.aiSuspended,
+      ))
+    ) {
+      return Response.json({ error: 'project owner changed' }, { status: 409 });
+    }
     state.projectSlugs[body.projectId] = body.slug;
     state.projectOwnershipStarts[body.projectId] = body.ownershipStartedAt;
     if (state.requestsSuspended) {
@@ -549,13 +588,6 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
         state.ownerUserId,
         REASON_REQUESTS_EXCEEDED,
       );
-    }
-    if (state.aiSuspended) {
-      await this.env.ROUTING.put(`ai-block:${body.projectId}`, '1');
-    } else {
-      // The key is project-scoped and may have been left by the former
-      // owner's counter. The new owner's latch is authoritative after attach.
-      await this.env.ROUTING.delete(`ai-block:${body.projectId}`);
     }
     await this.saveState(state);
     if (!(await this.ctx.storage.getAlarm())) {
@@ -622,12 +654,6 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
     } else {
       this.retainHistoricalAiSample(state, body.projectId);
     }
-    if (state.aiSuspended) {
-      const ownedProjectIds = await this.ownedProjectIds(db, [body.projectId], state.ownerUserId);
-      if (ownedProjectIds.has(body.projectId)) {
-        await this.env.ROUTING.delete(`ai-block:${body.projectId}`);
-      }
-    }
     this.recomputeTotalNeurons(state);
     await this.saveState(state);
     if (Object.keys(state.historicalAiWindows).length > 0 && !(await this.ctx.storage.getAlarm())) {
@@ -654,13 +680,11 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
     state.sandboxRuntimeSuspended = false;
     if (state.aiSuspended) {
       // Keep the durable latch set until every idempotent delete succeeds.
-      const ownedProjectIds = await this.ownedProjectIds(
-        createDb(this.env.HYPERDRIVE.connectionString),
-        Object.keys(state.projectSlugs),
-        state.ownerUserId,
-      );
-      for (const projectId of ownedProjectIds) {
-        await this.env.ROUTING.delete(`ai-block:${projectId}`);
+      const db = createDb(this.env.HYPERDRIVE.connectionString);
+      if (state.ownerUserId) {
+        for (const projectId of Object.keys(state.projectSlugs)) {
+          await setProjectAiBlock(this.env.ROUTING, db, projectId, state.ownerUserId, false);
+        }
       }
       state.aiSuspended = false;
     }
@@ -764,13 +788,13 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
       state.aiSuspended = true;
       // Write ai-block KV keys for each project
       for (const projectId of projectIds) {
-        await this.env.ROUTING.put(`ai-block:${projectId}`, '1');
+        await setProjectAiBlock(this.env.ROUTING, db, projectId, state.ownerUserId, true);
       }
     } else if (!exceedsAi && state.aiSuspended) {
       state.aiSuspended = false;
       // Delete ai-block KV keys
       for (const projectId of projectIds) {
-        await this.env.ROUTING.delete(`ai-block:${projectId}`);
+        await setProjectAiBlock(this.env.ROUTING, db, projectId, state.ownerUserId, false);
       }
     }
 
@@ -933,13 +957,11 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
     // Finish idempotent external cleanup before committing the new period.
     // A failure leaves the cached and persisted period unchanged for retry.
     if (ai) {
-      const ownedProjectIds = await this.ownedProjectIds(
-        db,
-        Object.keys(state.projectSlugs),
-        next.userId || state.ownerUserId,
-      );
-      for (const projectId of ownedProjectIds) {
-        await this.env.ROUTING.delete(`ai-block:${projectId}`);
+      const ownerUserId = next.userId || state.ownerUserId;
+      if (ownerUserId) {
+        for (const projectId of Object.keys(state.projectSlugs)) {
+          await setProjectAiBlock(this.env.ROUTING, db, projectId, ownerUserId, false);
+        }
       }
     }
     if (sandbox) {

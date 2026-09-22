@@ -120,7 +120,7 @@ const app = new Hono<ApiEnv>()
   // -------------------------------------------------------------------------
   .get('/:id/email/destinations', async (context) => {
     const projectId = context.req.param('id');
-    const access = await requireProjectRouteCapability(context, projectId, 'read');
+    const access = await requireProjectRouteCapability(context, projectId, 'settings');
     if (access instanceof Response) {
       return access;
     }

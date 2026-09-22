@@ -330,6 +330,118 @@ describe('GET /projects/:id', () => {
   });
 });
 
+describe('project CI credential ownership', () => {
+  function credentialRequest(
+    projectId: string,
+    jwt: string,
+    method: 'GET' | 'POST' | 'DELETE',
+    suffix = '',
+    body?: Record<string, unknown>,
+  ): Request {
+    const init: RequestInit = {
+      method,
+      headers: {
+        Authorization: `Bearer ${jwt}`,
+        ...(body ? { 'Content-Type': 'application/json' } : {}),
+      },
+    };
+    if (body) {
+      init.body = JSON.stringify(body);
+    }
+    return new Request(`http://localhost/projects/${projectId}/tokens${suffix}`, init);
+  }
+
+  it('returns 403 to project members and 404 only for missing projects', async () => {
+    const owner = await createTestUser(env.db, 'credential-owner');
+    const admin = await createTestUser(env.db, 'credential-admin');
+    const project = await createTestProject(env.db, owner.id, 'credential-owner-only');
+    await env.db.insert(projectMembers).values({
+      project_id: project.id,
+      user_id: admin.id,
+      role: 'admin',
+      added_by_user_id: owner.id,
+    });
+    await env.db.insert(projectDeployCredentials).values({
+      id: 'credential-owner-only-row',
+      project_id: project.id,
+      issued_by: owner.id,
+      name: 'Owner CI',
+      expires_at: new Date(Date.now() + 86_400_000).toISOString(),
+    });
+    const operations = [
+      { method: 'GET' as const },
+      { method: 'POST' as const, body: { name: 'Admin CI' } },
+      {
+        method: 'POST' as const,
+        suffix: '/credential-owner-only-row/renew',
+        body: { expiresInDays: 30 },
+      },
+      { method: 'DELETE' as const, suffix: '/credential-owner-only-row' },
+    ];
+
+    for (const operation of operations) {
+      const memberResponse = await app.fetch(
+        credentialRequest(
+          project.id,
+          admin.jwt,
+          operation.method,
+          operation.suffix,
+          operation.body,
+        ),
+        env,
+      );
+      expect(memberResponse.status).toBe(403);
+      expect(await memberResponse.json()).toEqual({ error: 'forbidden' });
+
+      const missingResponse = await app.fetch(
+        credentialRequest(
+          'proj_missing',
+          admin.jwt,
+          operation.method,
+          operation.suffix,
+          operation.body,
+        ),
+        env,
+      );
+      expect(missingResponse.status).toBe(404);
+      expect(await missingResponse.json()).toEqual({ error: 'project not found' });
+    }
+  });
+
+  it('does not mint or renew a credential after project teardown begins', async () => {
+    const owner = await createTestUser(env.db, 'deleting-credential-owner');
+    const project = await createTestProject(env.db, owner.id, 'deleting-credential-project');
+    await env.db.insert(projectDeployCredentials).values({
+      id: 'deleting-credential-row',
+      project_id: project.id,
+      issued_by: owner.id,
+      name: 'Existing CI',
+      expires_at: new Date(Date.now() + 86_400_000).toISOString(),
+    });
+    await env.db.update(projects).set({ status: 'deleting' }).where(eq(projects.id, project.id));
+
+    const createResponse = await app.fetch(
+      credentialRequest(project.id, owner.jwt, 'POST', '', { name: 'Too late' }),
+      env,
+    );
+    const renewResponse = await app.fetch(
+      credentialRequest(project.id, owner.jwt, 'POST', '/deleting-credential-row/renew', {
+        expiresInDays: 30,
+      }),
+      env,
+    );
+
+    expect(createResponse.status).toBe(409);
+    expect(renewResponse.status).toBe(409);
+    expect(
+      await env.db
+        .select()
+        .from(projectDeployCredentials)
+        .where(eq(projectDeployCredentials.project_id, project.id)),
+    ).toMatchObject([{ id: 'deleting-credential-row', revoked_at: null }]);
+  });
+});
+
 describe('POST /projects/:id/prerender-token', () => {
   async function proxyRequest(token: string, projectId: string) {
     const proxyModuleUrl = new URL('../../../proxy/src/index.ts', import.meta.url).href;
@@ -1096,6 +1208,28 @@ describe('GET /projects/:id/database-url', () => {
     );
 
     expect(res.status).toBe(403);
+  });
+
+  it('does not expose the plaintext URL to a project member', async () => {
+    const owner = await createTestUser(env.db, 'database-url-owner');
+    const collaborator = await createTestUser(env.db, 'database-url-collaborator');
+    const project = await createTestProject(env.db, owner.id, 'database-url-member-read');
+    await env.db.insert(projectMembers).values({
+      project_id: project.id,
+      user_id: collaborator.id,
+      role: 'collaborator',
+      added_by_user_id: owner.id,
+    });
+
+    const res = await app.fetch(
+      new Request(`http://localhost/projects/${project.id}/database-url`, {
+        headers: { Authorization: `Bearer ${collaborator.jwt}` },
+      }),
+      env,
+    );
+
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: 'forbidden' });
   });
 
   it('round-trips the connection string via POST /:id/database', async () => {

@@ -604,6 +604,43 @@ describe('GET /projects/:id/email/destinations', () => {
     expect(await res.text()).not.toContain('secret@example.com');
   });
 
+  it('requires settings access to list destination addresses', async () => {
+    const owner = await createTestUser(env.db, 'destination-roles-owner');
+    const collaborator = await createTestUser(env.db, 'destination-roles-collaborator');
+    const admin = await createTestUser(env.db, 'destination-roles-admin');
+    const project = await createTestProject(env.db, owner.id, 'destination-roles-project');
+    await env.db.insert(projectMembers).values([
+      {
+        project_id: project.id,
+        user_id: collaborator.id,
+        role: 'collaborator',
+        added_by_user_id: owner.id,
+      },
+      {
+        project_id: project.id,
+        user_id: admin.id,
+        role: 'admin',
+        added_by_user_id: owner.id,
+      },
+    ]);
+    await env.db.insert(emailDestinations).values({
+      id: 'edst_role_private',
+      project_id: project.id,
+      address: 'private@example.com',
+      status: 'verified',
+      cf_destination_id: 'cf-tag-role-private',
+      verified_at: '2026-04-29T00:00:00Z',
+    });
+
+    const denied = await listDestinations(project.id, collaborator.jwt);
+    expect(denied.status).toBe(403);
+    expect(await denied.text()).not.toContain('private@example.com');
+
+    const allowed = await listDestinations(project.id, admin.jwt);
+    expect(allowed.status).toBe(200);
+    expect(await allowed.text()).toContain('private@example.com');
+  });
+
   it('refreshes pending rows that CF now reports verified', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id);

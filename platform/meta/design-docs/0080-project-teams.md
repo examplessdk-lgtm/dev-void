@@ -90,6 +90,12 @@ administrative capabilities.
 These role boundaries are confirmed product policy. Project administrators can
 manage any non-owner member, including another project administrator.
 
+Project-scoped CI deploy credentials remain owner-only. They authenticate
+unattended deployments as the billing owner and outlive a human session, so
+letting a member mint one would let their access survive a later membership
+removal unless the credential model gained a separate membership revocation
+binding. Ownership transfer revokes every active project CI credential.
+
 ### Owner-based limits
 
 For every project operation, authorization has two independent inputs:
