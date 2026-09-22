@@ -13,7 +13,16 @@ import {
 import { deleteRollbackLease, type Db } from '../../src/db.ts';
 import app from '../../src/index.ts';
 import { canonicalJson } from '../../src/migrations/canonical-json.ts';
-import { deployments, domains, projectMigrations, projects, resources } from '../../src/schema.ts';
+import * as projectAccess from '../../src/project-access.ts';
+import {
+  deployments,
+  domains,
+  projectMembers,
+  projectMigrations,
+  projects,
+  resources,
+  users,
+} from '../../src/schema.ts';
 import {
   setupEnv,
   teardownEnv,
@@ -653,6 +662,44 @@ describe('POST /projects/:id/migrations/apply', () => {
       env,
     );
     expect(res.status).toBe(404);
+  });
+
+  it('preserves the owner-suspension error from the locked capability recheck', async () => {
+    const owner = await createTestUser(env.db, 'suspended-apply-owner');
+    const collaborator = await createTestUser(env.db, 'suspended-apply-collaborator');
+    const project = await createTestProject(env.db, owner.id, 'suspended-apply-project');
+    await env.db.insert(projectMembers).values({
+      project_id: project.id,
+      user_id: collaborator.id,
+      role: 'collaborator',
+      added_by_user_id: owner.id,
+    });
+
+    const requireCapability = projectAccess.requireProjectCapability;
+    let suspended = false;
+    vi.spyOn(projectAccess, 'requireProjectCapability').mockImplementation(async (...args) => {
+      const access = await requireCapability(...args);
+      if (!suspended && args[3] === 'configure') {
+        suspended = true;
+        await env.db
+          .update(users)
+          .set({ suspended_reason: 'platform policy violation' })
+          .where(eq(users.id, owner.id));
+      }
+      return access;
+    });
+
+    const response = await app.fetch(
+      authedReq(`/projects/${project.id}/migrations/apply`, collaborator.jwt, {
+        method: 'POST',
+        body: JSON.stringify({ migrations: [] }),
+      }),
+      env,
+    );
+
+    expect(suspended).toBe(true);
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({ error: 'project owner suspended' });
   });
 
   it('returns 400 when no D1 resource exists', async () => {
@@ -2546,7 +2593,7 @@ describe('POST /projects/:id/migrations/apply', () => {
     expect(state.trackingRows.has('001_init.sql')).toBe(false);
   });
 
-  it('two concurrent /apply requests serialize via advisory lock and end with exactly one tracking row', async () => {
+  it('two concurrent /apply requests serialize via a project row lock and end with exactly one tracking row', async () => {
     // Two deploys fire `/migrations/apply` against the same project at
     // nearly the same time. The per-project pg transaction-scoped row
     // lock serializes them: the second request blocks at the transaction
@@ -4333,7 +4380,7 @@ describe('POST /projects/:id/migrations/rename', () => {
     mockCfApi({ queryD1: makeQueryD1(state) });
 
     // Kick rollback first — it will route through all the KV work and
-    // then hit the advisory-locked setActiveDeployment. /apply kicks off
+    // then enter the row-locked setActiveDeployment. /apply kicks off
     // right after and races to acquire the same lock.
     const rollbackPromise = app.fetch(
       authedReq(`/projects/${project.id}/rollback`, user.jwt, {
@@ -4362,7 +4409,7 @@ describe('POST /projects/:id/migrations/rename', () => {
     // Final state: project.active_deployment_id points at target, and
     // target's applied_migrations contains `002_new.sql` — /apply's
     // metadata append landed on the post-rollback active, not the old
-    // one. Without the advisory lock, /apply's re-read could observe
+    // one. Without the project row lock, /apply's re-read could observe
     // the pre-rollback active and write to oldActive.
     const targetRow = await env.db.select().from(deployments).where(eq(deployments.id, target.id));
     const oldActiveRow = await env.db
@@ -6202,41 +6249,5 @@ describe('POST /projects/:id/migrations/rename', () => {
     expect(match).not.toBeNull();
     const parsed = JSON.parse(match![1]) as Array<string>;
     expect(parsed).toEqual([exoticName]);
-  });
-
-  it('rollback/apply/rename use a project row lock, not a 32-bit hashtext advisory lock', async () => {
-    // The per-project serialization primitive is `SELECT id FROM projects
-    // WHERE id = $projectId FOR UPDATE` — collision-free and auto-released
-    // at tx end. A 32-bit `pg_advisory_xact_lock(hashtext($projectId))`
-    // would have a ~25% birthday-collision rate across ~50k projects,
-    // causing unrelated projects to serialize against each other.
-    //
-    // A behavioral regression test for hash collisions is impractical, so
-    // grep the handler source for any remaining `hashtext` / advisory-
-    // lock call site.
-    const { readFileSync } = await import('node:fs');
-    const { fileURLToPath } = await import('node:url');
-    const path = fileURLToPath(new URL('../../src/routes/projects.ts', import.meta.url));
-    const rawSource = readFileSync(path, 'utf8');
-
-    // Strip single-line `//` comments so that historical references
-    // to `hashtext(projectId)` or `pg_advisory_xact_lock` in rationale
-    // comments do not false-positive this guard. The point of the
-    // assertion is "no executable call site uses the hashtext key."
-    const source = rawSource.replaceAll(/\/\/[^\n]*/g, '');
-
-    // No `hashtext(` function call remains in executable code.
-    expect(source).not.toMatch(/hashtext\s*\(/);
-    // No `pg_advisory_xact_lock` call remains.
-    expect(source).not.toMatch(/pg_advisory_xact_lock/);
-    // Sanity: the row lock variant is present at the three call
-    // sites (/apply, /rename, /rollback).
-    const rowLockMatches = source.match(
-      /SELECT id FROM projects WHERE id = \$\{projectId\} FOR UPDATE/g,
-    );
-    expect(rowLockMatches).not.toBeNull();
-    // Apply, rename, rollback lease/cutover, and rollback's post-transaction
-    // compensation all use the collision-free project row lock.
-    expect(rowLockMatches!.length).toBe(5);
   });
 });

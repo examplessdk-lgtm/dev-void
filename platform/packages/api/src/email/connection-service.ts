@@ -1,7 +1,12 @@
-import { and, count, desc, eq, inArray, isNull, ne, or, sql } from 'drizzle-orm';
+import { and, count, desc, eq, inArray, isNotNull, isNull, ne, or, sql } from 'drizzle-orm';
 import type { Db, DbOrTx, Tx } from '../db.ts';
 import type { ApiEnv } from '../env.ts';
 import { generateId } from '../id.ts';
+import {
+  ProjectAccessDeniedError,
+  ProjectNotFoundError,
+  requireProjectCapability,
+} from '../project-access.ts';
 import { decryptPlatformCredential, encryptPlatformCredential } from '../project-secrets.ts';
 import { CloudflareApiError } from '../provisioning/cloudflare-api.ts';
 import { projects } from '../schema.ts';
@@ -415,6 +420,87 @@ function canManageConnection(
   );
 }
 
+async function requireProjectManagedEmailAccess(
+  db: DbOrTx,
+  projectId: string,
+  actor: EmailActor,
+): Promise<void> {
+  if (actor.kind !== 'owner') {
+    return;
+  }
+  try {
+    const access = await requireProjectCapability(
+      db as unknown as Db,
+      projectId,
+      actor.userId,
+      'settings',
+    );
+    if (access.project.status === 'deleting') {
+      throw new EmailOperationError('email domain not available', 404);
+    }
+  } catch (error) {
+    if (error instanceof ProjectNotFoundError || error instanceof ProjectAccessDeniedError) {
+      throw new EmailOperationError('forbidden', 403);
+    }
+    throw error;
+  }
+}
+
+async function lockProjectManagedEmailAccess(
+  tx: Tx,
+  projectId: string,
+  actor: EmailActor,
+): Promise<void> {
+  if (actor.kind !== 'owner') {
+    return;
+  }
+  await tx
+    .select({ id: projects.id })
+    .from(projects)
+    .where(eq(projects.id, projectId))
+    .for('update');
+  await requireProjectManagedEmailAccess(tx, projectId, actor);
+}
+
+async function hasDelegatedConnectionAccess(
+  db: DbOrTx,
+  connectionId: string,
+  actor: EmailActor,
+  assignedProjectId?: string | null,
+): Promise<boolean> {
+  if (actor.kind !== 'owner') {
+    return false;
+  }
+  const rows = await db
+    .select({ projectId: emailDomainRoutes.project_id })
+    .from(emailDomainRoutes)
+    .where(
+      and(
+        eq(emailDomainRoutes.connection_id, connectionId),
+        ne(emailDomainRoutes.desired_state, 'removed'),
+        isNotNull(emailDomainRoutes.project_id),
+      ),
+    );
+  const projectIds = new Set(rows.flatMap((row) => (row.projectId ? [row.projectId] : [])));
+  if (assignedProjectId) {
+    projectIds.add(assignedProjectId);
+  }
+  if (projectIds.size === 0) {
+    return false;
+  }
+  for (const projectId of projectIds) {
+    try {
+      await requireProjectManagedEmailAccess(db, projectId, actor);
+    } catch (error) {
+      if (error instanceof EmailOperationError && (error.status === 403 || error.status === 404)) {
+        return false;
+      }
+      throw error;
+    }
+  }
+  return true;
+}
+
 function emailStepResourceIdentity(
   connection: typeof emailZoneConnections.$inferSelect,
   kind: StepKind,
@@ -547,23 +633,10 @@ async function resumeBlockedEmailOperationTx(
     throw new EmailOperationError('email operation is unavailable', 404);
   }
   if (route && actor.kind === 'owner') {
-    const project = route.project_id
-      ? (
-          await tx
-            .select({ userId: projects.user_id, status: projects.status })
-            .from(projects)
-            .where(eq(projects.id, route.project_id))
-            .limit(1)
-        )[0]
-      : null;
-    if (
-      !project ||
-      project.status === 'deleting' ||
-      project.userId !== actor.userId ||
-      route.managed_by !== 'owner'
-    ) {
+    if (!route.project_id || route.managed_by !== 'owner') {
       throw new EmailOperationError('forbidden', 403);
     }
+    await requireProjectManagedEmailAccess(tx, route.project_id, actor);
   }
   const connection = (
     await tx
@@ -581,6 +654,11 @@ async function resumeBlockedEmailOperationTx(
       .for('update')
       .limit(1)
   )[0];
+  const canManage =
+    !!connection &&
+    (snapshot.kind === 'remove' ||
+      canManageConnection(actor, connection) ||
+      (await hasDelegatedConnectionAccess(tx, connection.id, actor)));
   if (
     !connection ||
     !operation ||
@@ -588,7 +666,7 @@ async function resumeBlockedEmailOperationTx(
     operation.connection_id !== snapshot.connection_id ||
     operation.route_id !== snapshot.route_id ||
     operation.desired_generation !== snapshot.desired_generation ||
-    !canManageConnection(actor, connection)
+    !canManage
   ) {
     throw new EmailOperationError('blocked email operation cannot be resumed', 409);
   }
@@ -651,9 +729,19 @@ async function resumeBlockedEmailOperation(
   expectedRouteId?: string,
   expectedProjectId?: string,
 ): Promise<boolean> {
-  return db.transaction((tx) =>
-    resumeBlockedEmailOperationTx(tx, env, operationId, actor, expectedRouteId, expectedProjectId),
-  );
+  return db.transaction(async (tx) => {
+    if (expectedProjectId) {
+      await lockProjectManagedEmailAccess(tx, expectedProjectId, actor);
+    }
+    return resumeBlockedEmailOperationTx(
+      tx,
+      env,
+      operationId,
+      actor,
+      expectedRouteId,
+      expectedProjectId,
+    );
+  });
 }
 
 export async function resolveEmailDomain(db: DbOrTx, rawDomain: string) {
@@ -1351,9 +1439,7 @@ export async function requestEmailDomainAdd(
       if (!project || project.status === 'deleting') {
         throw new EmailOperationError('project not available', 409);
       }
-      if (actor.kind === 'owner' && project.user_id !== actor.userId) {
-        throw new EmailOperationError('forbidden', 403);
-      }
+      await requireProjectManagedEmailAccess(tx, input.projectId, actor);
       await lockEmailZoneConnectionIdentity(tx, installationId, zone.account.id, zone.id);
       const existingRoute = (
         await tx
@@ -1412,7 +1498,11 @@ export async function requestEmailDomainAdd(
           .limit(1)
       )[0];
       const created = !connection;
-      if (connection && !canManageConnection(actor, connection)) {
+      const canManageExistingConnection =
+        !connection ||
+        canManageConnection(actor, connection) ||
+        (await hasDelegatedConnectionAccess(tx, connection.id, actor, existingRoute?.project_id));
+      if (!canManageExistingConnection) {
         throw new EmailOperationError('zone connection requires its manager approval', 403);
       }
       if (existingRoute && existingRoute.connection_id !== connection?.id) {
@@ -1438,7 +1528,7 @@ export async function requestEmailDomainAdd(
       if (existingRoute) {
         if (
           !connection ||
-          !canManageConnection(actor, connection) ||
+          !canManageExistingConnection ||
           existingRoute.managed_by !== actor.kind
         ) {
           throw new EmailOperationError(
@@ -2026,8 +2116,15 @@ export async function requestEmailDomainSync(
   routeId: string,
   actor: EmailActor,
   key = generateId('esync'),
+  expectedProjectId?: string,
 ): Promise<string> {
-  return requestExistingOperation(db, env, routeId, actor, 'sync', key);
+  const operationId = await (expectedProjectId === undefined
+    ? requestExistingOperation(db, env, routeId, actor, 'sync', key)
+    : requestExistingOperation(db, env, routeId, actor, 'sync', key, expectedProjectId));
+  if (!operationId) {
+    throw new EmailOperationError('email domain not available', 404);
+  }
+  return operationId;
 }
 export function requestEmailDomainRemove(
   db: Db,
@@ -2041,7 +2138,7 @@ export function requestEmailDomainRemove(
   env: Bindings,
   routeId: string,
   actor: EmailActor,
-  key: string,
+  key: string | undefined,
   expectedProjectId: string,
 ): Promise<string | null>;
 export async function requestEmailDomainRemove(
@@ -2064,6 +2161,7 @@ export async function requestEmailSecretRotation(
   connectionId: string,
   actor: EmailActor,
   key = generateId('erot'),
+  expectedProjectId?: string,
 ): Promise<string> {
   const installationId = emailInstallationId(env);
   const actorScope =
@@ -2082,7 +2180,7 @@ export async function requestEmailSecretRotation(
       )
       .limit(1)
   )[0];
-  if (prior) {
+  if (prior && expectedProjectId === undefined) {
     if (prior.request_digest !== requestDigest) {
       throw new EmailOperationError('email operation key conflict');
     }
@@ -2092,6 +2190,9 @@ export async function requestEmailSecretRotation(
   }
   const secret = randomSecret();
   return db.transaction(async (tx) => {
+    if (expectedProjectId) {
+      await lockProjectManagedEmailAccess(tx, expectedProjectId, actor);
+    }
     const connection = (
       await tx
         .select()
@@ -2103,7 +2204,28 @@ export async function requestEmailSecretRotation(
     if (!connection || connection.installation_id !== installationId) {
       throw new EmailOperationError('connection not found', 404);
     }
-    if (!canManageConnection(actor, connection)) {
+    if (actor.kind === 'owner' && expectedProjectId) {
+      const assignedRoute = (
+        await tx
+          .select({ id: emailDomainRoutes.id })
+          .from(emailDomainRoutes)
+          .where(
+            and(
+              eq(emailDomainRoutes.connection_id, connectionId),
+              eq(emailDomainRoutes.project_id, expectedProjectId),
+              eq(emailDomainRoutes.desired_state, 'active'),
+            ),
+          )
+          .limit(1)
+      )[0];
+      if (!assignedRoute) {
+        throw new EmailOperationError('connection not found', 404);
+      }
+    }
+    if (
+      !canManageConnection(actor, connection) &&
+      !(await hasDelegatedConnectionAccess(tx, connection.id, actor))
+    ) {
       throw new EmailOperationError('only the connection manager can rotate ingress', 403);
     }
     const replay = (
@@ -2123,7 +2245,9 @@ export async function requestEmailSecretRotation(
       if (replay.request_digest !== requestDigest) {
         throw new EmailOperationError('email operation key conflict');
       }
-      await resumeBlockedEmailOperationTx(tx, env, replay.id, actor);
+      if (replay.status === 'blocked') {
+        await resumeBlockedEmailOperationTx(tx, env, replay.id, actor);
+      }
       return replay.id;
     }
     if (isSharedGatewayConnection(env, connection)) {
@@ -2262,7 +2386,7 @@ async function requestExistingOperation(
     routeId,
     kind,
     actor: actor.kind,
-    ...(expectedProjectId === undefined ? {} : { expectedProjectId }),
+    ...(actor.kind === 'owner' || expectedProjectId === undefined ? {} : { expectedProjectId }),
   });
   const existing = (
     await db
@@ -2285,9 +2409,28 @@ async function requestExistingOperation(
       return existing.id;
     }
   }
+  const authorizationProjectId =
+    actor.kind === 'owner'
+      ? (expectedProjectId ??
+        (
+          await db
+            .select({ projectId: emailDomainRoutes.project_id })
+            .from(emailDomainRoutes)
+            .where(eq(emailDomainRoutes.id, routeId))
+            .limit(1)
+        )[0]?.projectId ??
+        null)
+      : null;
+  if (actor.kind === 'owner' && !authorizationProjectId) {
+    throw new EmailOperationError('email domain not available', 404);
+  }
+  const expectedRouteProjectId = authorizationProjectId ?? expectedProjectId ?? null;
   return db.transaction(async (tx) => {
     if (kind === 'remove') {
       await lockEmailPolicy(tx);
+    }
+    if (authorizationProjectId) {
+      await lockProjectManagedEmailAccess(tx, authorizationProjectId, actor);
     }
     let route = (
       await tx
@@ -2300,7 +2443,10 @@ async function requestExistingOperation(
     if (!route) {
       throw new EmailOperationError('email domain not available', 404);
     }
-    if (expectedProjectId !== undefined && route.project_id !== expectedProjectId) {
+    if (expectedRouteProjectId && route.project_id !== expectedRouteProjectId) {
+      if (expectedProjectId === undefined) {
+        throw new EmailOperationError('email domain not available', 404);
+      }
       return null;
     }
     if (kind === 'remove') {
@@ -2339,13 +2485,16 @@ async function requestExistingOperation(
     ) {
       throw new EmailOperationError('email domain not available', 404);
     }
-    if (
-      actor.kind === 'owner' &&
-      (project?.user_id !== actor.userId || route.managed_by !== 'owner')
-    ) {
-      throw new EmailOperationError('forbidden', 403);
+    if (actor.kind === 'owner') {
+      if (!project || route.managed_by !== 'owner') {
+        throw new EmailOperationError('forbidden', 403);
+      }
     }
-    if (kind === 'sync' && !canManageConnection(actor, connection)) {
+    if (
+      kind === 'sync' &&
+      !canManageConnection(actor, connection) &&
+      !(await hasDelegatedConnectionAccess(tx, connection.id, actor))
+    ) {
       throw new EmailOperationError(
         'only the connection manager can reconcile shared ingress',
         403,
@@ -2368,7 +2517,9 @@ async function requestExistingOperation(
       if (replay.request_digest !== requestDigest) {
         throw new EmailOperationError('email operation key conflict');
       }
-      await resumeBlockedEmailOperationTx(tx, env, replay.id, actor, routeId);
+      if (replay.status === 'blocked') {
+        await resumeBlockedEmailOperationTx(tx, env, replay.id, actor, routeId);
+      }
       return replay.id;
     }
     const existingRemoval =

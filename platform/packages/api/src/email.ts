@@ -93,6 +93,36 @@ export async function sendInvitationEmail(env: PlatformEmailEnv, to: string): Pr
   });
 }
 
+export async function sendProjectInvitationEmail(
+  env: PlatformEmailEnv,
+  params: {
+    to: string;
+    invitationId: string;
+    projectSlug: string;
+    inviterLogin: string;
+    role: 'reader' | 'collaborator' | 'admin';
+  },
+): Promise<void> {
+  const { apiUrl, name } = emailConfig(env);
+  const inviteUrl = new URL('/invite', apiUrl);
+  inviteUrl.searchParams.set('project-invitation', params.invitationId);
+  const command = platformConnectCommand(apiUrl);
+  await sendEmail(env, {
+    to: params.to,
+    subject: `You're invited to ${params.projectSlug}`,
+    html: emailHtml(
+      `<h2 style="margin-bottom:8px">You're invited to ${escapeHtml(params.projectSlug)}</h2>
+<p><strong>${escapeHtml(params.inviterLogin)}</strong> invited you to join <strong>${escapeHtml(params.projectSlug)}</strong> as ${escapeHtml(params.role)} on ${escapeHtml(name)}.</p>
+<p>Connect the Void CLI with this email address, then accept the invitation:</p>
+<pre><code>${escapeHtml(command)}
+void project team accept ${escapeHtml(params.invitationId)}</code></pre>
+<p>${button(inviteUrl.href, 'View Invitation')}</p>`,
+      "If you didn't expect this invitation, you can decline it or ignore this email.",
+    ),
+    text: `You're invited to ${params.projectSlug}\n\n${params.inviterLogin} invited you to join ${params.projectSlug} as ${params.role} on ${name}.\n\nConnect the Void CLI with this email address, then accept the invitation:\n\n${command}\nvoid project team accept ${params.invitationId}\n\nView invitation: ${inviteUrl.href}\n\nIf you didn't expect this invitation, you can decline it or ignore this email.`,
+  });
+}
+
 export async function sendWelcomeEmail(
   env: PlatformEmailEnv,
   to: string,

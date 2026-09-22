@@ -14,6 +14,7 @@ import {
   getRepoInstallation,
 } from '../github/installation-token.ts';
 import { verifyGithubOidcToken } from '../github/oidc-verify.ts';
+import { isAdminSuspended } from '../suspension.ts';
 import { getPlanLimits } from '../tiers.ts';
 
 const app = new Hono<ApiEnv>();
@@ -159,7 +160,7 @@ app.post('/github-oidc', async (context) => {
   }
 
   // Bind the deploy token to the connection's authorized workflow file
-  // (owner-configured `workflow_path`, default `.github/workflows/void-deploy.yml`
+  // (project-configured `workflow_path`, default `.github/workflows/void-deploy.yml`
   // as scaffolded by `void init --github`). The running workflow file must equal
   // that path under the OIDC token's OWN repository, so any OTHER workflow in the
   // repo that can request `id-token: write` (a hand-added workflow, an unsafe
@@ -177,6 +178,9 @@ app.post('/github-oidc', async (context) => {
   const user = await getUser(db, connection.user_id);
   if (!user) {
     return context.json({ error: 'connection owner not found' }, 401);
+  }
+  if (isAdminSuspended(user.suspended_reason)) {
+    return context.json({ error: 'project owner suspended' }, 403);
   }
 
   // Only branch pushes to the connected branch may mint a deploy token. This
@@ -263,11 +267,8 @@ app.post('/github-oidc', async (context) => {
   // so the workflow_run completion handler can finalize the RIGHT attempt's
   // build. Null-tolerant: a token lacking the claim creates a NULL-attempt row.
   const githubRunAttempt = claims.run_attempt != null ? String(claims.run_attempt) : null;
-  const limit = getPlanLimits(user.plan).concurrentBuilds;
   const result = await createGithubActionsBuildWithinLimit(db, {
     projectId: connection.project_id,
-    userId: connection.user_id,
-    limit,
     commitSha: claims.sha,
     branch,
     githubRunId,
@@ -305,7 +306,7 @@ app.post('/github-oidc', async (context) => {
     return context.json({ error: 'connected branch changed concurrently' }, 409);
   }
   if (result.outcome === 'workflow-mismatch') {
-    // The owner re-pinned workflow_path between the pre-tx gate and this locked
+    // The workflow_path was re-pinned between the pre-tx gate and this locked
     // re-read; the token's workflow is no longer the authorized one. Do not mint.
     // 409: a concurrent config change, same class as branch-mismatch above.
     return context.json({ error: 'authorized workflow changed concurrently' }, 409);
@@ -316,7 +317,22 @@ app.post('/github-oidc', async (context) => {
     // concurrent lifecycle change, same class as the other concurrency rejects.
     return context.json({ error: 'project is being deleted' }, 409);
   }
+  if (result.outcome === 'owner-suspended') {
+    return context.json({ error: 'project owner suspended' }, 403);
+  }
   const build = result.build;
+  // The build helper re-reads and locks the project, so `build.user_id` is the
+  // billing owner that was current at admission even if ownership changed after
+  // the earlier connection lookup. Use that authoritative owner for token
+  // identity and timeout sizing.
+  const billingOwner = await getUser(db, build.user_id);
+  if (!billingOwner) {
+    await markBuildTerminalIfActive(db, build.id, 'cancelled', {
+      error: 'project owner no longer exists',
+      completedAt: new Date().toISOString(),
+    });
+    return context.json({ error: 'connection owner not found' }, 401);
+  }
 
   // Post-create freshness re-check, closing the compare→insert TOCTOU: a newer
   // push landing between the pre-check above and the build INSERT is invisible
@@ -425,14 +441,14 @@ app.post('/github-oidc', async (context) => {
   const token = await signDeployToken(
     {
       projectId: connection.project_id,
-      userId: connection.user_id,
-      login: user.login,
+      userId: build.user_id,
+      login: billingOwner.login,
       buildId: build.id,
     },
     context.env.JWT_SECRET,
     {
       ttlSeconds: deployTokenTtlSecondsForBuildMinutes(
-        getPlanLimits(user.plan).buildTimeoutMinutes,
+        getPlanLimits(billingOwner.plan).buildTimeoutMinutes,
       ),
     },
   );

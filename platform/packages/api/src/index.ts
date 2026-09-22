@@ -42,6 +42,7 @@ import {
   failStaleActiveGithubActionsBuilds,
   hasQueuedContainerBuilds,
   getProject,
+  getOpenProjectOwnershipPeriodsByProjectIds,
   getProjectsByIds,
   getUsersByIds,
   type Db,
@@ -95,6 +96,11 @@ import internalVerifyOwner from './routes/internal-verify-owner.ts';
 import internalVerifyPrerenderBuild from './routes/internal-verify-prerender-build.ts';
 import me from './routes/me.ts';
 import platformBootstrapRoutes from './routes/platform-bootstrap.ts';
+import {
+  myProjectInvitationRoutes,
+  projectInvitationResponseRoutes,
+  projectTeamRoutes,
+} from './routes/project-team.ts';
 import projectTokens from './routes/project-tokens.ts';
 import projects from './routes/projects.ts';
 import revalidate from './routes/revalidate.ts';
@@ -110,7 +116,7 @@ import {
   platformHumanSessions,
 } from './schema.ts';
 import { isAdminSuspended, REASON_REQUESTS_EXCEEDED } from './suspension.ts';
-import { getCurrentBillingPeriodStart, getPlanLimits } from './tiers.ts';
+import { getCurrentBillingPeriodStart } from './tiers.ts';
 import type { Domain, Project } from './types.ts';
 import { ensureUsageSigningKey, USAGE_PROTOCOL_VERSION } from './usage-auth.ts';
 import { UsageCounter } from './usage-counter.ts';
@@ -395,20 +401,32 @@ const app = new Hono<ApiEnv>()
   })
   .get('/invite', (context) => {
     const name = escapeHtml(getPlatformDisplayName(context.env, context.req.url));
+    const invitationIdParam = context.req.query('project-invitation')?.trim();
+    const invitationId =
+      invitationIdParam && /^pinv_[0-9a-z]{12}$/.test(invitationIdParam) ? invitationIdParam : null;
     const command = escapeHtml(
       platformConnectCommand(getPlatformApiUrl(context.env, context.req.url)),
     );
+    const invitationCommand = invitationId
+      ? escapeHtml(`void project team accept ${invitationId}`)
+      : null;
     return context.html(`<!DOCTYPE html>
 <html><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Get Started - ${name}</title>
+<title>${invitationCommand ? 'Accept Project Invitation' : 'Get Started'} - ${name}</title>
 <style>body{font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#fafafa}.card{max-width:520px;padding:40px}h1{font-size:1.5rem;margin-bottom:12px}p{color:#666;line-height:1.6;margin-bottom:20px}pre{background:#eee;padding:16px;overflow:auto}a{color:inherit}</style>
 </head><body>
 <div class="card">
-<h1>Get Started with ${name}</h1>
+<h1>${invitationCommand ? 'Accept your project invitation' : `Get Started with ${name}`}</h1>
 <p>Connect the Void CLI to this platform. When prompted, sign in with an account whose verified email address matches your invitation:</p>
 <pre><code>${command}</code></pre>
+${
+  invitationCommand
+    ? `<p>Then accept the project invitation:</p>
+<pre><code>${invitationCommand}</code></pre>`
+    : ''
+}
 <p>The CLI opens your browser to sign in when needed. If your application is already linked to another project, run <code>void project link</code> from its directory to choose a project on this platform before deploying.</p>
 <p>Need to create an application? Read the <a href="https://void.cloud/guide/quickstart">Void quickstart</a>, then return here to connect to this platform before deploying.</p>
 </div>
@@ -439,10 +457,15 @@ const app = new Hono<ApiEnv>()
   .use('/email/*', capabilityMiddleware('email'))
   .route('/email', emailConfirm)
   .use('/me', authMiddleware)
+  .use('/me/*', authMiddleware)
   .route('/me', me)
+  .route('/me', myProjectInvitationRoutes)
+  .use('/project-invitations/*', authMiddleware)
+  .route('/project-invitations', projectInvitationResponseRoutes)
   .use('/projects/*', authMiddleware)
   .route('/projects', projects)
   .route('/projects', projectTokens)
+  .route('/projects', projectTeamRoutes)
   .route('/projects', deploy)
   .route('/projects', deleteRoute)
   .route('/projects', revalidate)
@@ -733,7 +756,9 @@ async function scheduled(
     }
 
     await Promise.allSettled(
-      batch.map(({ user, projects }) => processUserRollover(env, db, user, projects)),
+      batch.map(({ user, projects, needsUsageReconciliation }) =>
+        processUserRollover(env, db, user, projects, needsUsageReconciliation),
+      ),
     );
 
     offset += BATCH_SIZE;
@@ -928,7 +953,8 @@ async function processUserRollover(
   env: ApiEnv['Bindings'],
   db: Db,
   user: { id: string; plan: string; billing_cycle_start: string; suspended_reason: string | null },
-  userProjects: ReadonlyArray<{ id: string; slug: string }>,
+  userProjects: ReadonlyArray<{ id: string; slug: string; created_at: string }>,
+  needsUsageReconciliation: boolean,
 ): Promise<void> {
   // Backfill userId into old KV routing entries (all plans, before early return).
   // Wrapped in try/catch so a malformed KV entry doesn't block rollover/unsuspension.
@@ -975,19 +1001,23 @@ async function processUserRollover(
     console.error(`[backfill] userId backfill failed for user ${user.id}:`, err);
   }
 
-  const limits = getPlanLimits(user.plan);
-  // Skip unlimited plans (no enforcement needed)
-  if (limits.requestsPerMonth === 0 && limits.aiNeuronsPerMonth === 0) {
-    return;
-  }
-  if (userProjects.length === 0) {
+  if (!needsUsageReconciliation) {
     return;
   }
 
   const billingPeriodStart = getCurrentBillingPeriodStart(user.billing_cycle_start).toISOString();
   const projectSlugs: Record<string, string> = {};
+  const projectOwnershipStarts: Record<string, string> = {};
+  const ownershipPeriods = await getOpenProjectOwnershipPeriodsByProjectIds(
+    db,
+    userProjects.map((project) => project.id),
+  );
+  const ownershipStarts = new Map(
+    ownershipPeriods.map((period) => [period.project_id, period.starts_at]),
+  );
   for (const p of userProjects) {
     projectSlugs[p.id] = p.slug;
+    projectOwnershipStarts[p.id] = ownershipStarts.get(p.id) ?? p.created_at;
   }
 
   const doId = env.USAGE_COUNTER.idFromName(user.id);
@@ -1032,10 +1062,15 @@ async function processUserRollover(
     // the latch is true. (`undefined` from an old DO during a deploy: skipped,
     // and reconciled on the next pass once the DO is updated.)
     if (result.requestsSuspended === false) {
-      await setProjectsRoutingSuspension(env.ROUTING, db, userProjects, {
-        op: 'unsuspend',
-        matchReason: REASON_REQUESTS_EXCEEDED,
-      });
+      await setProjectsRoutingSuspension(
+        env.ROUTING,
+        db,
+        userProjects.map((project) => ({ ...project, user_id: user.id })),
+        {
+          op: 'unsuspend',
+          matchReason: REASON_REQUESTS_EXCEEDED,
+        },
+      );
     }
   }
 
@@ -1044,7 +1079,13 @@ async function processUserRollover(
     new Request('https://do/init', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ plan: user.plan, billingPeriodStart, projectSlugs }),
+      body: JSON.stringify({
+        plan: user.plan,
+        billingPeriodStart,
+        projectSlugs,
+        projectOwnershipStarts,
+        userId: user.id,
+      }),
     }),
   );
 }

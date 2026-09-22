@@ -51,6 +51,7 @@ import {
   emailDestinationCleanups,
   emailDestinations,
   platformSettings,
+  projectMembers,
   projects,
   users,
 } from '../../src/schema.ts';
@@ -175,6 +176,19 @@ async function setUserEmail(userId: string, email: string): Promise<string> {
   return email;
 }
 
+async function createProjectWithAdmin(label: string) {
+  const owner = await createTestUser(env.db, `${label}-owner`);
+  const admin = await createTestUser(env.db, `${label}-admin`);
+  const project = await createTestProject(env.db, owner.id, `${label}-project`);
+  await env.db.insert(projectMembers).values({
+    project_id: project.id,
+    user_id: admin.id,
+    role: 'admin',
+    added_by_user_id: owner.id,
+  });
+  return { owner, admin, project };
+}
+
 async function readVerifiedDestinations(projectId: string): Promise<Array<string>> {
   return (await rowsFor(projectId))
     .filter((row) => row.status === 'verified')
@@ -282,6 +296,58 @@ describe('POST /projects/:id/email/destinations', () => {
     // otherwise a stranger can register account-level addresses.
     expect(cfCalls(fetchMock, 'POST', '/email/routing/addresses')).toHaveLength(0);
     expect(await rowsFor(project.id)).toHaveLength(0);
+  });
+
+  it('rejects an add when the project admin is demoted during the provider call', async () => {
+    const { owner, admin, project } = await createProjectWithAdmin('add-race');
+    const fetchMock = mockCfApi({
+      addEmailDestination: async () => {
+        await dbModule.setProjectMemberRole(env.db, {
+          projectId: project.id,
+          subjectUserId: admin.id,
+          role: 'collaborator',
+          actorUserId: owner.id,
+        });
+        return cfSuccess(cfRow('cf-tag-add-race', 'race@example.com', null));
+      },
+    });
+
+    const response = await addDestination(project.id, admin.jwt, 'race@example.com', emailEnv());
+
+    expect(response.status).toBe(403);
+    expect(await rowsFor(project.id)).toHaveLength(0);
+    expect(recordedVerificationSends()).toHaveLength(0);
+    expect(cfCalls(fetchMock, 'DELETE', '/email/routing/addresses/')).toHaveLength(1);
+  });
+
+  it('does not resend verification after the project admin is demoted', async () => {
+    const { owner, admin, project } = await createProjectWithAdmin('resend-race');
+    await env.db.insert(emailDestinations).values({
+      id: 'edst_resend_race',
+      project_id: project.id,
+      address: 'race@example.com',
+      status: 'pending',
+      cf_destination_id: 'cf-tag-resend-race',
+      verification_source: 'platform',
+    });
+    mockCfApi();
+    const getDestination = dbModule.getEmailDestinationByAddress;
+    vi.spyOn(dbModule, 'getEmailDestinationByAddress').mockImplementationOnce(async (...args) => {
+      const destination = await getDestination(...args);
+      await dbModule.setProjectMemberRole(env.db, {
+        projectId: project.id,
+        subjectUserId: admin.id,
+        role: 'collaborator',
+        actorUserId: owner.id,
+      });
+      return destination;
+    });
+
+    const response = await addDestination(project.id, admin.jwt, 'race@example.com', emailEnv());
+
+    expect(response.status).toBe(403);
+    expect(recordedVerificationSends()).toHaveLength(0);
+    expect(await rowsFor(project.id)).toHaveLength(1);
   });
 
   it('returns 409 once the project is being torn down', async () => {
@@ -536,6 +602,43 @@ describe('GET /projects/:id/email/destinations', () => {
 
     expect(res.status).toBe(403);
     expect(await res.text()).not.toContain('secret@example.com');
+  });
+
+  it('requires settings access to list destination addresses', async () => {
+    const owner = await createTestUser(env.db, 'destination-roles-owner');
+    const collaborator = await createTestUser(env.db, 'destination-roles-collaborator');
+    const admin = await createTestUser(env.db, 'destination-roles-admin');
+    const project = await createTestProject(env.db, owner.id, 'destination-roles-project');
+    await env.db.insert(projectMembers).values([
+      {
+        project_id: project.id,
+        user_id: collaborator.id,
+        role: 'collaborator',
+        added_by_user_id: owner.id,
+      },
+      {
+        project_id: project.id,
+        user_id: admin.id,
+        role: 'admin',
+        added_by_user_id: owner.id,
+      },
+    ]);
+    await env.db.insert(emailDestinations).values({
+      id: 'edst_role_private',
+      project_id: project.id,
+      address: 'private@example.com',
+      status: 'verified',
+      cf_destination_id: 'cf-tag-role-private',
+      verified_at: '2026-04-29T00:00:00Z',
+    });
+
+    const denied = await listDestinations(project.id, collaborator.jwt);
+    expect(denied.status).toBe(403);
+    expect(await denied.text()).not.toContain('private@example.com');
+
+    const allowed = await listDestinations(project.id, admin.jwt);
+    expect(allowed.status).toBe(200);
+    expect(await allowed.text()).toContain('private@example.com');
   });
 
   it('refreshes pending rows that CF now reports verified', async () => {
@@ -855,6 +958,38 @@ describe('DELETE /projects/:id/email/destinations/:destId', () => {
 
     expect(res.status).toBe(403);
     expect(await rowsFor(project.id)).toHaveLength(1);
+  });
+
+  it('keeps the destination when the project admin is demoted before the locked delete', async () => {
+    const { owner, admin, project } = await createProjectWithAdmin('delete-race');
+    await env.db.insert(emailDestinations).values({
+      id: 'edst_delete_race',
+      project_id: project.id,
+      address: 'race@example.com',
+      status: 'verified',
+      cf_destination_id: 'cf-tag-delete-race',
+      verification_source: 'platform',
+    });
+    const fetchMock = mockCfApi();
+    const getDestinations = dbModule.getEmailDestinationsByProjectId;
+    vi.spyOn(dbModule, 'getEmailDestinationsByProjectId').mockImplementationOnce(
+      async (...args) => {
+        const destinations = await getDestinations(...args);
+        await dbModule.setProjectMemberRole(env.db, {
+          projectId: project.id,
+          subjectUserId: admin.id,
+          role: 'collaborator',
+          actorUserId: owner.id,
+        });
+        return destinations;
+      },
+    );
+
+    const response = await removeDestination(project.id, 'edst_delete_race', admin.jwt, emailEnv());
+
+    expect(response.status).toBe(403);
+    expect(await rowsFor(project.id)).toHaveLength(1);
+    expect(cfCalls(fetchMock, 'DELETE', '/email/routing/addresses/')).toHaveLength(0);
   });
 
   it('returns 409 once the project is being torn down', async () => {

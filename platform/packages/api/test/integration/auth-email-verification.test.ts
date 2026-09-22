@@ -971,20 +971,16 @@ describe('email verification gating on account linking', () => {
           ],
         });
       });
-      // The route's owner read returns the OLD address; the login lands
-      // right after it and before the insert. The auth middleware resolves
-      // the caller through the same helper first, so fire on the SECOND
-      // read only — the one the route makes after Cloudflare answered.
-      const realGetUser = dbModule.getUser;
-      let loginDuringAdd: Response | undefined;
-      let reads = 0;
-      vi.spyOn(dbModule, 'getUser').mockImplementation(async (...args) => {
-        const owner = await realGetUser(...args);
-        reads += 1;
-        if (reads === 2) {
-          loginDuringAdd = await loginAs('949494', 'racing-manual');
+      // Rotate the owner after the route captures its access snapshot. PGlite
+      // has one session, so update through the route's existing transaction.
+      const realTryCreate = dbModule.tryCreateEmailDestination;
+      let rotatedDuringAdd = false;
+      vi.spyOn(dbModule, 'tryCreateEmailDestination').mockImplementation(async (...args) => {
+        if (!rotatedDuringAdd) {
+          rotatedDuringAdd = true;
+          await dbModule.updateUser(args[0], existing.id, 'racing-manual', 'new-owner@example.com');
         }
-        return owner;
+        return realTryCreate(...args);
       });
 
       const res = await app.fetch(
@@ -996,9 +992,15 @@ describe('email verification gating on account linking', () => {
         emailEnv(),
         executionCtx,
       );
-      expect(loginDuringAdd?.status).toBe(302);
+      expect(rotatedDuringAdd).toBe(true);
       expect(res.status).toBe(409);
       expect(await res.json()).toEqual({ error: 'destination concurrently modified, try again' });
+
+      const [rotatedOwner] = await env.db
+        .select({ email: users.email })
+        .from(users)
+        .where(eq(users.id, existing.id));
+      expect(rotatedOwner?.email).toBe('new-owner@example.com');
 
       const rows = await env.db
         .select()

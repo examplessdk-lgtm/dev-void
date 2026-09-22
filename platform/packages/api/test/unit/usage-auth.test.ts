@@ -39,6 +39,31 @@ describe('usage signing key bootstrap', () => {
 });
 
 describe('usage envelopes', () => {
+  it('accepts a valid protocol-v1 envelope while protocol-v2 producers roll out', async () => {
+    const source = 'dispatch';
+    const eventId = 'event-v1';
+    const event = { projectId: 'project-1', requests: 1, responseBytes: 0 };
+    const key = 'key';
+    const signingKey = await crypto.subtle.importKey(
+      'raw',
+      new TextEncoder().encode(key),
+      { name: 'HMAC', hash: 'SHA-256' },
+      false,
+      ['sign'],
+    );
+    const signature = Buffer.from(
+      await crypto.subtle.sign(
+        'HMAC',
+        signingKey,
+        new TextEncoder().encode(JSON.stringify([1, source, eventId, event])),
+      ),
+    ).toString('base64url');
+
+    await expect(
+      verifyUsageEnvelope({ version: 1, source, eventId, event, signature }, key),
+    ).resolves.toEqual({ version: 1, source, eventId, event, signature });
+  });
+
   it('rejects a payload changed after signing', async () => {
     const envelope = await signUsageEvent('key', 'dispatch', 'event-1', {
       projectId: 'project-1',

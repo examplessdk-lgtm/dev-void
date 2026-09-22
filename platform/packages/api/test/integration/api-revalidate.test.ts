@@ -1,4 +1,5 @@
 import { hashOriginalUrl } from '@void/isr';
+import { eq } from 'drizzle-orm';
 import {
   describe,
   it,
@@ -11,7 +12,7 @@ import {
 } from 'vite-plus/test';
 import { hmacSignState } from '../../src/auth/hmac.ts';
 import app from '../../src/index.ts';
-import { domains } from '../../src/schema.ts';
+import { domains, projectMembers } from '../../src/schema.ts';
 import {
   setupEnv,
   teardownEnv,
@@ -109,6 +110,51 @@ describe('POST /projects/:id/revalidate', () => {
       env,
     );
     expect(res.status).toBe(403);
+  });
+
+  it('rechecks deploy access after body parsing before purging cache state', async () => {
+    const owner = await createTestUser(env.db, 'owner');
+    const collaborator = await createTestUser(env.db, 'collaborator');
+    const project = await createTestProject(env.db, owner.id);
+    const deployment = await createTestDeployment(env.db, project.id, 'live');
+    await env.db.insert(projectMembers).values({
+      project_id: project.id,
+      user_id: collaborator.id,
+      role: 'collaborator',
+      added_by_user_id: owner.id,
+    });
+    const key = isrKey(project.id, deployment.id, `${project.slug}.void.app`, 'cached');
+    await env.ISR_CACHE.put(key, 'cached');
+    const fetchMock = mockCfApi();
+    const bodyStream = new TransformStream<Uint8Array, Uint8Array>();
+    const writer = bodyStream.writable.getWriter();
+    const request = new Request(`http://localhost/projects/${project.id}/revalidate`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${collaborator.jwt}`,
+        'Content-Type': 'application/json',
+      },
+      body: bodyStream.readable,
+      duplex: 'half',
+    } as RequestInit & { duplex: 'half' });
+
+    const responsePromise = app.fetch(request, env);
+    await writer.write(new TextEncoder().encode(JSON.stringify({ paths: ['/cached'] })));
+    // The initial deploy-capability check has already passed. A downgrade
+    // committed while the body is read must prevent both R2 and edge purges.
+    await env.db
+      .update(projectMembers)
+      .set({ role: 'reader' })
+      .where(eq(projectMembers.user_id, collaborator.id));
+    await writer.close();
+    const res = await responsePromise;
+
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: 'forbidden' });
+    expect(await env.ISR_CACHE.get(key)).toBe('cached');
+    expect(
+      fetchMock.mock.calls.filter(([url]) => String(url).includes('/purge_cache')),
+    ).toHaveLength(0);
   });
 
   it('returns 400 without paths or all', async () => {

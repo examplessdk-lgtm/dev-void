@@ -7,16 +7,13 @@ import {
   deleteEmailDestination,
   getEmailDestinationByAddress,
   getEmailDestinationsByProjectId,
-  getProject,
   getUser,
   promoteEmailDestinationWithOwnerAudit,
   queueUnreferencedEmailDestinationCleanup,
   tryCreateEmailDestination,
   updateEmailDestinationStatus,
   type Db,
-  type DbOrTx,
   type OwnerVerificationAudit,
-  type Tx,
 } from '../db.ts';
 import { getProjectEmailUsage, getProjectEmailLogs } from '../email/admission.ts';
 import { emailDomainRoutes, emailZoneConnections } from '../email/connection-schema.ts';
@@ -37,6 +34,7 @@ import {
 } from '../email/settings.ts';
 import type { ApiEnv } from '../env.ts';
 import { isForeignKeyViolation, isUniqueViolation } from '../pg-errors.ts';
+import { ProjectAccessDeniedError, ProjectNotFoundError } from '../project-access.ts';
 import { runEmailDestinationCleanup } from '../provisioning/email-destination-cleanup.ts';
 import {
   addDestination,
@@ -45,6 +43,7 @@ import {
   type CfDestinationAddress,
 } from '../provisioning/email-routing.ts';
 import type { EmailDestination } from '../types.ts';
+import { requireProjectRouteCapability } from './project-access.ts';
 
 /**
  * Per-project rate-limit on POST /destinations to prevent abuse where a
@@ -90,12 +89,9 @@ const app = new Hono<ApiEnv>()
   .use('/:id/email/*', capabilityMiddleware('email'))
   .get('/:id/email/usage', async (context) => {
     const projectId = context.req.param('id');
-    const project = await getProject(context.get('db'), projectId);
-    if (!project) {
-      return context.json({ error: 'project not found' }, 404);
-    }
-    if (project.user_id !== context.get('user').id) {
-      return context.json({ error: 'forbidden' }, 403);
+    const access = await requireProjectRouteCapability(context, projectId, 'read');
+    if (access instanceof Response) {
+      return access;
     }
 
     return context.json(await getProjectEmailUsage(context.get('db'), projectId));
@@ -103,12 +99,9 @@ const app = new Hono<ApiEnv>()
 
   .get('/:id/email/logs', async (context) => {
     const projectId = context.req.param('id');
-    const project = await getProject(context.get('db'), projectId);
-    if (!project) {
-      return context.json({ error: 'project not found' }, 404);
-    }
-    if (project.user_id !== context.get('user').id) {
-      return context.json({ error: 'forbidden' }, 403);
+    const access = await requireProjectRouteCapability(context, projectId, 'read');
+    if (access instanceof Response) {
+      return access;
     }
 
     const limit = Number(context.req.query('limit') ?? 50);
@@ -127,13 +120,11 @@ const app = new Hono<ApiEnv>()
   // -------------------------------------------------------------------------
   .get('/:id/email/destinations', async (context) => {
     const projectId = context.req.param('id');
-    const project = await getProject(context.get('db'), projectId);
-    if (!project) {
-      return context.json({ error: 'project not found' }, 404);
+    const access = await requireProjectRouteCapability(context, projectId, 'settings');
+    if (access instanceof Response) {
+      return access;
     }
-    if (project.user_id !== context.get('user').id) {
-      return context.json({ error: 'forbidden' }, 403);
-    }
+    const project = access.project;
 
     const rows = await getEmailDestinationsByProjectId(context.get('db'), projectId);
     // Refresh status from CF for any rows still pending. CF's
@@ -235,13 +226,11 @@ const app = new Hono<ApiEnv>()
 
   .post('/:id/email/destinations', async (context) => {
     const projectId = context.req.param('id');
-    const project = await getProject(context.get('db'), projectId);
-    if (!project) {
-      return context.json({ error: 'project not found' }, 404);
+    const access = await requireProjectRouteCapability(context, projectId, 'settings');
+    if (access instanceof Response) {
+      return access;
     }
-    if (project.user_id !== context.get('user').id) {
-      return context.json({ error: 'forbidden' }, 403);
-    }
+    const project = access.project;
     // Same guard the other provisioning routes use (see `routes/projects.ts`).
     // Teardown snapshots the CF destination tags it must clean up ONCE; a
     // destination registered after that snapshot but before the cascade drops
@@ -287,6 +276,10 @@ const app = new Hono<ApiEnv>()
       // marker the recovered-owner insert below carries, because both mean
       // "nothing went out; the row waits on a Cloudflare link mailed earlier".
       if (existing.status === 'pending' && existing.verification_source === 'platform') {
+        const accessResponse = await recheckEmailDestinationSettingsAccess(context, projectId);
+        if (accessResponse) {
+          return accessResponse;
+        }
         await dispatchPlatformVerification(context, project, existing, address);
         return context.json(
           { ...serializeDestination(existing), platformVerificationPending: true },
@@ -359,7 +352,7 @@ const app = new Hono<ApiEnv>()
         emailSnapshot: ownerEmail!,
       };
       const inserted = await tryInsertWithRetry(
-        context.get('db'),
+        context,
         projectId,
         address,
         cfRow.tag,
@@ -368,6 +361,9 @@ const app = new Hono<ApiEnv>()
         'cf',
         ownerAudit,
       );
+      if (inserted instanceof Response) {
+        return inserted;
+      }
       if (!inserted.row) {
         // Either a sibling DELETE ate the row mid-INSERT-then-SELECT twice,
         // or project teardown's cascade landed between the `status` guard
@@ -404,7 +400,7 @@ const app = new Hono<ApiEnv>()
       // address first". It fails safe, and it self-heals the moment the
       // recipient clicks CF's link. No machinery for it.
       const inserted = await tryInsertWithRetry(
-        context.get('db'),
+        context,
         projectId,
         address,
         cfRow.tag,
@@ -412,6 +408,9 @@ const app = new Hono<ApiEnv>()
         null,
         'platform',
       );
+      if (inserted instanceof Response) {
+        return inserted;
+      }
       if (!inserted.row) {
         await rollbackCfDestination(
           context.get('db'),
@@ -448,7 +447,7 @@ const app = new Hono<ApiEnv>()
     //     bare 201 read as "a link went out": `void email allow` prints
     //     "Verification email sent" from the status code alone.
     const inserted = await tryInsertWithRetry(
-      context.get('db'),
+      context,
       projectId,
       address,
       cfRow.tag,
@@ -456,6 +455,9 @@ const app = new Hono<ApiEnv>()
       null,
       'cf',
     );
+    if (inserted instanceof Response) {
+      return inserted;
+    }
     if (!inserted.row) {
       await rollbackCfDestination(
         context.get('db'),
@@ -476,13 +478,11 @@ const app = new Hono<ApiEnv>()
   .delete('/:id/email/destinations/:destId', async (context) => {
     const projectId = context.req.param('id');
     const destId = context.req.param('destId');
-    const project = await getProject(context.get('db'), projectId);
-    if (!project) {
-      return context.json({ error: 'project not found' }, 404);
+    const access = await requireProjectRouteCapability(context, projectId, 'settings');
+    if (access instanceof Response) {
+      return access;
     }
-    if (project.user_id !== context.get('user').id) {
-      return context.json({ error: 'forbidden' }, 403);
-    }
+    const project = access.project;
     if (project.status === 'deleting') {
       return context.json({ error: 'Project is being deleted' }, 409);
     }
@@ -493,7 +493,16 @@ const app = new Hono<ApiEnv>()
       return context.json({ error: 'destination not found' }, 404);
     }
 
-    const cleanupTag = await deleteEmailDestination(context.get('db'), dest.id);
+    let cleanupTag: string | null;
+    try {
+      cleanupTag = await deleteEmailDestination(context.get('db'), dest.id, context.get('user').id);
+    } catch (error) {
+      const accessResponse = projectAccessErrorResponse(context, error);
+      if (accessResponse) {
+        return accessResponse;
+      }
+      throw error;
+    }
     if (cleanupTag) {
       await runEmailDestinationCleanup(
         context.get('db'),
@@ -506,22 +515,19 @@ const app = new Hono<ApiEnv>()
 
   // -------------------------------------------------------------------------
   // Custom email domain routes. The connection service runs durable
-  // operations; these routes apply the owner guard and map responses.
+  // operations; these routes apply project capabilities and map responses.
   // -------------------------------------------------------------------------
 
   // Installation settings the CLI needs before it acts: who manages email
   // domains here (an `admin` platform prints the administrator's command
   // instead of opening a Cloudflare consent) and the shared-sender recipient
-  // policy. Read-only for owners; the operator API and admin UI write them.
+  // policy. Read-only for project members; the operator API and admin UI write them.
   .get('/:id/email/settings', async (context) => {
     const projectId = context.req.param('id');
     const db = context.get('db');
-    const project = await getProject(db, projectId);
-    if (!project) {
-      return context.json({ error: 'project not found' }, 404);
-    }
-    if (project.user_id !== context.get('user').id) {
-      return context.json({ error: 'forbidden' }, 403);
+    const access = await requireProjectRouteCapability(context, projectId, 'read');
+    if (access instanceof Response) {
+      return access;
     }
     const [management, recipientPolicy] = await Promise.all([
       getEmailDomainManagement(db),
@@ -530,19 +536,16 @@ const app = new Hono<ApiEnv>()
     // Republish a drifted recipient-policy mirror for the proxy's local gate.
     await repairEmailRecipientPolicyMirror(db, context.env.ROUTING);
     return context.json({
-      domains: { management, projectSlug: project.slug },
+      domains: { management, projectSlug: access.project.slug },
       recipientPolicy: { mode: recipientPolicy.mode, domains: [...recipientPolicy.domains] },
     });
   })
 
   .get('/:id/email/domains', async (context) => {
     const projectId = context.req.param('id');
-    const project = await getProject(context.get('db'), projectId);
-    if (!project) {
-      return context.json({ error: 'project not found' }, 404);
-    }
-    if (project.user_id !== context.get('user').id) {
-      return context.json({ error: 'forbidden' }, 403);
+    const access = await requireProjectRouteCapability(context, projectId, 'read');
+    if (access instanceof Response) {
+      return access;
     }
 
     const rows = await context
@@ -581,15 +584,11 @@ const app = new Hono<ApiEnv>()
         400,
       );
     }
-    const db = context.get('db');
-    const project = await getProject(db, projectId);
-    if (!project) {
-      return context.json({ error: 'project not found' }, 404);
+    const access = await requireProjectRouteCapability(context, projectId, 'settings');
+    if (access instanceof Response) {
+      return access;
     }
-    if (project.user_id !== context.get('user').id) {
-      return context.json({ error: 'forbidden' }, 403);
-    }
-    return addEmailDomainForProject(context, project, {
+    return addEmailDomainForProject(context, access.project, {
       domain: typeof body.domain === 'string' ? body.domain : '',
       apiToken: typeof body.apiToken === 'string' ? body.apiToken : undefined,
       attemptId: body.attemptId,
@@ -598,35 +597,30 @@ const app = new Hono<ApiEnv>()
   })
 
   .get('/:id/email/operations/:operationId', async (context) => {
-    const project = await getProject(context.get('db'), context.req.param('id'));
-    if (!project) {
-      return context.json({ error: 'project not found' }, 404);
+    const access = await requireProjectRouteCapability(context, context.req.param('id'), 'read');
+    if (access instanceof Response) {
+      return access;
     }
-    if (project.user_id !== context.get('user').id) {
-      return context.json({ error: 'forbidden' }, 403);
-    }
-    return getEmailOperationForProject(context, project, context.req.param('operationId'));
+    return getEmailOperationForProject(context, access.project, context.req.param('operationId'));
   })
 
   .get('/:id/email/domains/:domain', async (context) => {
     const projectId = context.req.param('id');
-    const project = await getProject(context.get('db'), projectId);
-    if (!project) {
-      return context.json({ error: 'project not found' }, 404);
+    const access = await requireProjectRouteCapability(context, projectId, 'read');
+    if (access instanceof Response) {
+      return access;
     }
-    if (project.user_id !== context.get('user').id) {
-      return context.json({ error: 'forbidden' }, 403);
-    }
-    return getEmailDomainStatusForProject(context, project, context.req.param('domain'));
+    return getEmailDomainStatusForProject(context, access.project, context.req.param('domain'));
   })
 
   .post('/:id/email/domains/:domain/rotate-secret', async (context) => {
-    const project = await getProject(context.get('db'), context.req.param('id'));
-    if (!project) {
-      return context.json({ error: 'project not found' }, 404);
-    }
-    if (project.user_id !== context.get('user').id) {
-      return context.json({ error: 'forbidden' }, 403);
+    const access = await requireProjectRouteCapability(
+      context,
+      context.req.param('id'),
+      'settings',
+    );
+    if (access instanceof Response) {
+      return access;
     }
     let attemptId: string | undefined;
     if (context.req.header('content-type')?.includes('application/json')) {
@@ -648,7 +642,7 @@ const app = new Hono<ApiEnv>()
     }
     return rotateEmailIngressSecretForProject(
       context,
-      project,
+      access.project,
       context.req.param('domain'),
       'owner',
       attemptId,
@@ -657,28 +651,25 @@ const app = new Hono<ApiEnv>()
 
   .post('/:id/email/domains/:domain/sync', async (context) => {
     const projectId = context.req.param('id');
-    const db = context.get('db');
-    const project = await getProject(db, projectId);
-    if (!project) {
-      return context.json({ error: 'project not found' }, 404);
+    const access = await requireProjectRouteCapability(context, projectId, 'settings');
+    if (access instanceof Response) {
+      return access;
     }
-    if (project.user_id !== context.get('user').id) {
-      return context.json({ error: 'forbidden' }, 403);
-    }
-    return syncEmailDomainForProject(context, project, context.req.param('domain'), 'owner');
+    return syncEmailDomainForProject(context, access.project, context.req.param('domain'), 'owner');
   })
 
   .delete('/:id/email/domains/:domain', async (context) => {
     const projectId = context.req.param('id');
-    const db = context.get('db');
-    const project = await getProject(db, projectId);
-    if (!project) {
-      return context.json({ error: 'project not found' }, 404);
+    const access = await requireProjectRouteCapability(context, projectId, 'settings');
+    if (access instanceof Response) {
+      return access;
     }
-    if (project.user_id !== context.get('user').id) {
-      return context.json({ error: 'forbidden' }, 403);
-    }
-    return removeEmailDomainForProject(context, project, context.req.param('domain'), 'owner');
+    return removeEmailDomainForProject(
+      context,
+      access.project,
+      context.req.param('domain'),
+      'owner',
+    );
   });
 
 function parseCounter(raw: string | null): number {
@@ -708,6 +699,29 @@ function serializeDestination(row: EmailDestination) {
     verification_source: row.verification_source,
     created_at: row.created_at,
   };
+}
+
+function projectAccessErrorResponse(context: Context<ApiEnv>, error: unknown): Response | null {
+  if (error instanceof ProjectNotFoundError || error instanceof ProjectAccessDeniedError) {
+    return context.json({ error: error.message }, error.status);
+  }
+  return null;
+}
+
+async function recheckEmailDestinationSettingsAccess(
+  context: Context<ApiEnv>,
+  projectId: string,
+): Promise<Response | null> {
+  return context.get('db').transaction(async (tx) => {
+    await tx.execute(sql`SELECT id FROM projects WHERE id = ${projectId} FOR UPDATE`);
+    const access = await requireProjectRouteCapability(
+      context,
+      projectId,
+      'settings',
+      tx as unknown as Db,
+    );
+    return access instanceof Response ? access : null;
+  });
 }
 
 /**
@@ -756,7 +770,7 @@ async function dispatchPlatformVerification(
  * and lets the caller retire the provider tag.
  */
 async function tryInsertWithRetry(
-  db: Db,
+  context: Context<ApiEnv>,
   projectId: string,
   address: string,
   cfDestinationId: string | null,
@@ -764,7 +778,8 @@ async function tryInsertWithRetry(
   verifiedAt: string | null,
   verificationSource: EmailDestination['verification_source'],
   ownerAudit?: OwnerVerificationAudit,
-): Promise<{ row: EmailDestination | null; inserted: boolean }> {
+): Promise<{ row: EmailDestination | null; inserted: boolean } | Response> {
+  const db = context.get('db');
   for (let attempt = 0; attempt < 2; attempt++) {
     let result: { row: EmailDestination | null; inserted: boolean; ownerEmailChanged?: true };
     try {
@@ -776,9 +791,21 @@ async function tryInsertWithRetry(
         status,
         verifiedAt,
         verificationSource,
-        ownerAudit,
+        { actorUserId: context.get('user').id, ownerAudit },
       );
     } catch (err) {
+      const accessResponse = projectAccessErrorResponse(context, err);
+      if (accessResponse) {
+        if (cfDestinationId) {
+          await rollbackCfDestination(
+            db,
+            context.env.CF_ACCOUNT_ID,
+            context.env.CF_API_TOKEN,
+            cfDestinationId,
+          );
+        }
+        return accessResponse;
+      }
       if (!isForeignKeyViolation(err)) {
         throw err;
       }

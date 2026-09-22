@@ -321,6 +321,8 @@ export async function syncEmailDomainForProject(
       context.env,
       resolved.route.id,
       { kind: actor, userId: context.get('user').id },
+      undefined,
+      project.id,
     );
     await runEmailOperation(context.get('db'), context.env, operationId);
     return domainResult(context, project, rawDomain, operationId);
@@ -350,6 +352,7 @@ export async function rotateEmailIngressSecretForProject(
       resolved.connection.id,
       { kind: actor, userId: context.get('user').id },
       attemptId,
+      project.id,
     );
     await runEmailOperation(context.get('db'), context.env, operationId);
     const operation = (
@@ -389,7 +392,12 @@ export async function removeEmailDomainForProject(
       context.env,
       resolved.route.id,
       { kind: actor, userId: context.get('user').id },
+      undefined,
+      project.id,
     );
+    if (!operationId) {
+      return context.json({ error: 'email domain not found' }, 404);
+    }
     await runEmailOperation(context.get('db'), context.env, operationId);
     const op = (
       await context

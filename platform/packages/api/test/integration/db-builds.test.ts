@@ -1,6 +1,7 @@
 import { eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vite-plus/test';
 import {
+  cancelQueuedContainerBuildsForUsers,
   claimBuildForStartWithinLimit,
   createBuild,
   createGitHubConnection as createGitHubConnectionRecord,
@@ -41,8 +42,10 @@ import {
   githubConnections,
   githubInstallations,
   githubInstallationMembers,
+  projectMembers,
   projects,
   resources,
+  users,
 } from '../../src/schema.ts';
 import {
   clearTables,
@@ -364,7 +367,59 @@ describe('builds', () => {
 
     const owners = await getUsersWithQueuedContainerBuilds(env.db);
     expect(owners).toHaveLength(1);
-    expect(owners[0]).toEqual({ userId: withQueued.id, plan: 'free', activeBuilds: 2 });
+    expect(owners[0]).toEqual({
+      userId: withQueued.id,
+      plan: 'free',
+      suspendedReason: null,
+      activeBuilds: 2,
+    });
+  });
+
+  it('cancels all queued container builds for suspended owners, including blocked projects', async () => {
+    const suspended = await createTestUser(env.db, 'batch-suspended-owner');
+    const usageSuspended = await createTestUser(env.db, 'batch-usage-suspended-owner');
+    const activeProject = await createTestProject(env.db, suspended.id, 'batch-active');
+    const idleProject = await createTestProject(env.db, suspended.id, 'batch-idle');
+    const usageProject = await createTestProject(env.db, usageSuspended.id, 'batch-usage');
+    await createBuild(env.db, {
+      projectId: activeProject.id,
+      userId: suspended.id,
+      status: 'building',
+    });
+    const blocked = await createBuild(env.db, {
+      projectId: activeProject.id,
+      userId: suspended.id,
+    });
+    const idle = await createBuild(env.db, { projectId: idleProject.id, userId: suspended.id });
+    const usageQueued = await createBuild(env.db, {
+      projectId: usageProject.id,
+      userId: usageSuspended.id,
+    });
+    await env.db
+      .update(users)
+      .set({ suspended_reason: 'platform policy violation' })
+      .where(eq(users.id, suspended.id));
+    await env.db
+      .update(users)
+      .set({ suspended_reason: 'requests_exceeded' })
+      .where(eq(users.id, usageSuspended.id));
+
+    expect(
+      (await getUsersWithQueuedContainerBuilds(env.db)).find(
+        (owner) => owner.userId === suspended.id,
+      ),
+    ).toMatchObject({
+      userId: suspended.id,
+      suspendedReason: 'platform policy violation',
+      activeBuilds: 1,
+    });
+    expect(
+      await cancelQueuedContainerBuildsForUsers(env.db, [suspended.id, usageSuspended.id]),
+    ).toBe(2);
+    expect((await getBuild(env.db, blocked.id))?.status).toBe('cancelled');
+    expect((await getBuild(env.db, idle.id))?.status).toBe('cancelled');
+    expect((await getBuild(env.db, usageQueued.id))?.status).toBe('queued');
+    expect(await hasQueuedContainerBuilds(env.db)).toBe(true);
   });
 
   it('hasQueuedContainerBuilds reflects whether any queued container build exists', async () => {
@@ -538,7 +593,6 @@ describe('builds', () => {
     const created = await supersedeAndCreateContainerBuild(env.db, {
       projectId: project.id,
       connectionId: (await getGitHubConnection(env.db, project.id))!.id,
-      userId: user.id,
       branch: 'main',
       commitSha: 'aaa',
       installationId: '12345',
@@ -547,6 +601,7 @@ describe('builds', () => {
     expect(created.reused).toBe(false);
     expect(created.build!.status).toBe('queued');
     expect(created.build!.commit_sha).toBe('aaa');
+    expect(created.build!.instance_type).toBe('standard-3');
     expect(created.cancelled).toEqual([]);
 
     // Newer push for bbb -> the aaa build is superseded (cancelled) and a new
@@ -554,7 +609,6 @@ describe('builds', () => {
     const superseded = await supersedeAndCreateContainerBuild(env.db, {
       projectId: project.id,
       connectionId: (await getGitHubConnection(env.db, project.id))!.id,
-      userId: user.id,
       branch: 'main',
       commitSha: 'bbb',
       installationId: '12345',
@@ -565,7 +619,12 @@ describe('builds', () => {
     // The returned `status` reflects the post-UPDATE row (RETURNING returns new
     // values), so the superseded build reports `cancelled`.
     expect(superseded.cancelled).toEqual([
-      { id: created.build!.id, executor: 'container', status: 'cancelled', instance_type: null },
+      {
+        id: created.build!.id,
+        executor: 'container',
+        status: 'cancelled',
+        instance_type: 'standard-3',
+      },
     ]);
     const cancelledAaa = await getBuild(env.db, created.build!.id);
     expect(cancelledAaa!.status).toBe('cancelled');
@@ -575,7 +634,6 @@ describe('builds', () => {
     const reusedQueued = await supersedeAndCreateContainerBuild(env.db, {
       projectId: project.id,
       connectionId: (await getGitHubConnection(env.db, project.id))!.id,
-      userId: user.id,
       branch: 'main',
       commitSha: 'bbb',
       installationId: '12345',
@@ -594,7 +652,6 @@ describe('builds', () => {
     const reusedComplete = await supersedeAndCreateContainerBuild(env.db, {
       projectId: project.id,
       connectionId: (await getGitHubConnection(env.db, project.id))!.id,
-      userId: user.id,
       branch: 'main',
       commitSha: 'bbb',
       installationId: '12345',
@@ -603,6 +660,49 @@ describe('builds', () => {
     expect(reusedComplete.reused).toBe(true);
     expect(reusedComplete.build!.id).toBe(superseded.build!.id);
     expect(reusedComplete.cancelled).toEqual([]);
+  });
+
+  it('uses the locked current owner and plan when ownership changed after webhook resolution', async () => {
+    const staleOwner = await createTestUser(
+      env.db,
+      'container-stale-owner',
+      'github',
+      undefined,
+      'pro',
+    );
+    const currentOwner = await createTestUser(env.db, 'container-current-owner');
+    const project = await createTestProject(env.db, staleOwner.id);
+    await createGitHubConnection(env.db, {
+      projectId: project.id,
+      installationId: 'container-owner-race',
+      repoFullName: 'acme/owner-race',
+      repositoryId: DEFAULT_REPO_ID,
+      branch: 'main',
+      buildExecutor: 'container',
+    });
+    await seedActiveInstall(env.db, 'container-owner-race');
+    await env.db
+      .update(projects)
+      .set({ user_id: currentOwner.id })
+      .where(eq(projects.id, project.id));
+    await env.db.insert(projectMembers).values({
+      project_id: project.id,
+      user_id: staleOwner.id,
+      role: 'admin',
+      added_by_user_id: currentOwner.id,
+    });
+
+    const result = await supersedeAndCreateContainerBuild(env.db, {
+      projectId: project.id,
+      connectionId: (await getGitHubConnection(env.db, project.id))!.id,
+      branch: 'main',
+      commitSha: 'owner-race',
+      installationId: 'container-owner-race',
+      repositoryId: DEFAULT_REPO_ID,
+    });
+
+    expect(result.build?.user_id).toBe(currentOwner.id);
+    expect(result.build?.instance_type).toBe('standard-3');
   });
 
   // Same-SHA recreate race — a branch-delete cancellation samples a DB-clock fence
@@ -632,7 +732,6 @@ describe('builds', () => {
     const first = await supersedeAndCreateContainerBuild(env.db, {
       projectId: project.id,
       connectionId: connId,
-      userId: user.id,
       branch: 'main',
       commitSha: 'A',
       installationId: '12345',
@@ -662,7 +761,6 @@ describe('builds', () => {
     const reused = await supersedeAndCreateContainerBuild(env.db, {
       projectId: project.id,
       connectionId: connId,
-      userId: user.id,
       branch: 'main',
       commitSha: 'A',
       installationId: '12345',
@@ -730,7 +828,6 @@ describe('builds', () => {
     const rollback = await supersedeAndCreateContainerBuild(env.db, {
       projectId: project.id,
       connectionId: (await getGitHubConnection(env.db, project.id))!.id,
-      userId: user.id,
       branch: 'main',
       commitSha: 'C1',
       installationId: '12345',
@@ -760,7 +857,6 @@ describe('builds', () => {
     const redeliver = await supersedeAndCreateContainerBuild(env.db, {
       projectId: project.id,
       connectionId: (await getGitHubConnection(env.db, project.id))!.id,
-      userId: user.id,
       branch: 'main',
       commitSha: 'C1',
       installationId: '12345',
@@ -826,7 +922,6 @@ describe('builds', () => {
     const rollback = await supersedeAndCreateContainerBuild(env.db, {
       projectId: project.id,
       connectionId: (await getGitHubConnection(env.db, project.id))!.id,
-      userId: user.id,
       branch: 'main',
       commitSha: 'A',
       installationId: '12345',
@@ -871,7 +966,6 @@ describe('builds', () => {
     const redeliver = await supersedeAndCreateContainerBuild(env.db, {
       projectId: project.id,
       connectionId: (await getGitHubConnection(env.db, project.id))!.id,
-      userId: user.id,
       branch: 'main',
       commitSha: 'A',
       installationId: '12345',
@@ -915,7 +1009,6 @@ describe('builds', () => {
     const result = await supersedeAndCreateContainerBuild(env.db, {
       projectId: project.id,
       connectionId: (await getGitHubConnection(env.db, project.id))!.id,
-      userId: user.id,
       branch: 'main',
       commitSha: 'A',
       installationId: '12345',
@@ -953,7 +1046,6 @@ describe('builds', () => {
     const result = await supersedeAndCreateContainerBuild(env.db, {
       projectId: project.id,
       connectionId: (await getGitHubConnection(env.db, project.id))!.id,
-      userId: user.id,
       branch: 'main',
       commitSha: 'c2',
       installationId: '12345',
@@ -1000,7 +1092,6 @@ describe('builds', () => {
     const result = await supersedeAndCreateContainerBuild(env.db, {
       projectId: project.id,
       connectionId: (await getGitHubConnection(env.db, project.id))!.id,
-      userId: user.id,
       branch: 'main',
       commitSha: 'c2',
       installationId: '12345',
@@ -1028,7 +1119,6 @@ describe('builds', () => {
     const first = await supersedeAndCreateContainerBuild(env.db, {
       projectId: project.id,
       connectionId: (await getGitHubConnection(env.db, project.id))!.id,
-      userId: user.id,
       branch: 'main',
       commitSha: 'aaa',
       installationId: '12345',
@@ -1040,7 +1130,6 @@ describe('builds', () => {
     const retry = await supersedeAndCreateContainerBuild(env.db, {
       projectId: project.id,
       connectionId: (await getGitHubConnection(env.db, project.id))!.id,
-      userId: user.id,
       branch: 'main',
       commitSha: 'aaa',
       installationId: '12345',
@@ -1072,7 +1161,6 @@ describe('builds', () => {
     const result = await supersedeAndCreateContainerBuild(env.db, {
       projectId: project.id,
       connectionId: (await getGitHubConnection(env.db, project.id))!.id,
-      userId: user.id,
       branch: 'main',
       commitSha: 'aaa',
       installationId: '12345',
@@ -1103,7 +1191,6 @@ describe('builds', () => {
     const result = await supersedeAndCreateContainerBuild(env.db, {
       projectId: project.id,
       connectionId: (await getGitHubConnection(env.db, project.id))!.id,
-      userId: user.id,
       branch: 'main',
       commitSha: 'aaa',
       installationId: '12345',
@@ -1140,7 +1227,6 @@ describe('builds', () => {
     const result = await supersedeAndCreateContainerBuild(env.db, {
       projectId: project.id,
       connectionId,
-      userId: user.id,
       branch: 'main',
       commitSha: 'aaa',
       installationId: '12345',
@@ -1152,6 +1238,45 @@ describe('builds', () => {
     expect(result.cancelled).toEqual([]);
     // No build row was inserted.
     expect(await getProjectBuilds(env.db, project.id)).toEqual([]);
+  });
+
+  it('supersedeAndCreateContainerBuild skips manual owner suspension but permits usage suspension', async () => {
+    const user = await createTestUser(env.db, 'container-suspended-owner');
+    const project = await createTestProject(env.db, user.id);
+    await createGitHubConnection(env.db, {
+      projectId: project.id,
+      installationId: 'container-suspended-owner',
+      repoFullName: 'acme/suspended-owner',
+      repositoryId: DEFAULT_REPO_ID,
+      branch: 'main',
+      buildExecutor: 'container',
+    });
+    await seedActiveInstall(env.db, 'container-suspended-owner');
+    const connectionId = (await getGitHubConnection(env.db, project.id))!.id;
+    const args = {
+      projectId: project.id,
+      connectionId,
+      userId: user.id,
+      branch: 'main',
+      commitSha: 'suspended-owner',
+      installationId: 'container-suspended-owner',
+      repositoryId: DEFAULT_REPO_ID,
+    } as const;
+
+    await env.db
+      .update(users)
+      .set({ suspended_reason: 'platform policy violation' })
+      .where(eq(users.id, user.id));
+    const suspended = await supersedeAndCreateContainerBuild(env.db, args);
+    expect(suspended).toMatchObject({ build: null, skipped: 'owner-suspended' });
+    expect(await getProjectBuilds(env.db, project.id)).toEqual([]);
+
+    await env.db
+      .update(users)
+      .set({ suspended_reason: 'requests_exceeded' })
+      .where(eq(users.id, user.id));
+    const usageSuspended = await supersedeAndCreateContainerBuild(env.db, args);
+    expect(usageSuspended.build?.status).toBe('queued');
   });
 
   it('supersedeAndCreateContainerBuild inserts when the connection branch+executor match', async () => {
@@ -1170,7 +1295,6 @@ describe('builds', () => {
     const result = await supersedeAndCreateContainerBuild(env.db, {
       projectId: project.id,
       connectionId: (await getGitHubConnection(env.db, project.id))!.id,
-      userId: user.id,
       branch: 'main',
       commitSha: 'aaa',
       installationId: '12345',
@@ -1203,7 +1327,6 @@ describe('builds', () => {
     const result = await supersedeAndCreateContainerBuild(env.db, {
       projectId: project.id,
       connectionId: (await getGitHubConnection(env.db, project.id))!.id,
-      userId: user.id,
       branch: 'main',
       commitSha: 'aaa',
       installationId: '12345',
@@ -1232,7 +1355,6 @@ describe('builds', () => {
     const result = await supersedeAndCreateContainerBuild(env.db, {
       projectId: project.id,
       connectionId: (await getGitHubConnection(env.db, project.id))!.id,
-      userId: user.id,
       branch: 'main',
       commitSha: 'aaa',
       installationId: '12345',
@@ -1261,7 +1383,6 @@ describe('builds', () => {
     const result = await supersedeAndCreateContainerBuild(env.db, {
       projectId: project.id,
       connectionId: (await getGitHubConnection(env.db, project.id))!.id,
-      userId: user.id,
       branch: 'main',
       commitSha: 'aaa',
       installationId: '12345',
@@ -1290,7 +1411,6 @@ describe('builds', () => {
     const result = await supersedeAndCreateContainerBuild(env.db, {
       projectId: project.id,
       connectionId: (await getGitHubConnection(env.db, project.id))!.id,
-      userId: user.id,
       branch: 'main',
       commitSha: 'aaa',
       installationId: '12345',
@@ -1323,7 +1443,6 @@ describe('builds', () => {
     const result = await supersedeAndCreateContainerBuild(env.db, {
       projectId: project.id,
       connectionId: (await getGitHubConnection(env.db, project.id))!.id,
-      userId: user.id,
       branch: 'main',
       commitSha: 'aaa',
       installationId: '12345',
@@ -1355,7 +1474,6 @@ describe('builds', () => {
     const result = await supersedeAndCreateContainerBuild(env.db, {
       projectId: project.id,
       connectionId: (await getGitHubConnection(env.db, project.id))!.id,
-      userId: user.id,
       branch: 'main',
       commitSha: 'aaa',
       installationId: '12345',
@@ -1406,7 +1524,6 @@ describe('builds', () => {
     const replaced = await supersedeAndCreateContainerBuild(env.db, {
       projectId: project.id,
       connectionId: cOld.id,
-      userId: user.id,
       branch: 'main',
       commitSha: 'aaa',
       installationId: '12345',
@@ -1422,7 +1539,6 @@ describe('builds', () => {
     const ok = await supersedeAndCreateContainerBuild(env.db, {
       projectId: project.id,
       connectionId: cNew.id,
-      userId: user.id,
       branch: 'main',
       commitSha: 'aaa',
       installationId: '12345',
@@ -1514,10 +1630,8 @@ describe('builds', () => {
       buildId: build.id,
       userId: user.id,
       projectId: project.id,
-      limit: 1,
-      instanceType: 'basic',
     });
-    expect(claimed).toBe(true);
+    expect(claimed).toMatchObject({ instanceType: 'standard-3', ownerPlan: 'free' });
     const row = await getBuild(env.db, build.id);
     expect(row?.status).toBe('starting');
     expect(row?.started_at).not.toBeNull();
@@ -1527,10 +1641,51 @@ describe('builds', () => {
       buildId: build.id,
       userId: user.id,
       projectId: project.id,
-      limit: 1,
-      instanceType: 'basic',
     });
-    expect(reclaimed).toBe(false);
+    expect(reclaimed).toBeNull();
+  });
+
+  it('claimBuildForStartWithinLimit does not start a queued build for a manually suspended owner', async () => {
+    const user = await createTestUser(env.db, 'claim-suspended-owner');
+    const project = await createTestProject(env.db, user.id);
+    const build = await createBuild(env.db, { projectId: project.id, userId: user.id });
+    await env.db
+      .update(users)
+      .set({ suspended_reason: 'platform policy violation' })
+      .where(eq(users.id, user.id));
+
+    expect(
+      await claimBuildForStartWithinLimit(env.db, {
+        buildId: build.id,
+        userId: user.id,
+        projectId: project.id,
+      }),
+    ).toBeNull();
+    expect((await getBuild(env.db, build.id))?.status).toBe('queued');
+  });
+
+  it('claimBuildForStartWithinLimit uses the locked owner plan', async () => {
+    const user = await createTestUser(env.db, 'claim-current-plan');
+    const activeProject = await createTestProject(env.db, user.id);
+    const queuedProject = await createTestProject(env.db, user.id);
+    await createBuild(env.db, {
+      projectId: activeProject.id,
+      userId: user.id,
+      status: 'building',
+    });
+    const queued = await createBuild(env.db, {
+      projectId: queuedProject.id,
+      userId: user.id,
+    });
+
+    expect(
+      await claimBuildForStartWithinLimit(env.db, {
+        buildId: queued.id,
+        userId: user.id,
+        projectId: queuedProject.id,
+      }),
+    ).toBeNull();
+    expect((await getBuild(env.db, queued.id))?.status).toBe('queued');
   });
 
   it('requeueBuildIfStarting returns a starting row to queued (CAS)', async () => {
@@ -1543,8 +1698,6 @@ describe('builds', () => {
       buildId: build.id,
       userId: user.id,
       projectId: project.id,
-      limit: 1,
-      instanceType: 'basic',
     });
     expect((await getBuild(env.db, build.id))!.status).toBe('starting');
 
@@ -1563,8 +1716,6 @@ describe('builds', () => {
       buildId: build.id,
       userId: user.id,
       projectId: project.id,
-      limit: 1,
-      instanceType: 'basic',
     });
     await terminateBuildsForProject(env.db, project.id, { reason: 'project disconnected' });
     expect((await getBuild(env.db, build.id))!.status).toBe('cancelled');
@@ -1584,8 +1735,6 @@ describe('builds', () => {
       buildId: build.id,
       userId: user.id,
       projectId: project.id,
-      limit: 1,
-      instanceType: 'basic',
     });
     await markBuildBuildingIfStarting(env.db, build.id);
     expect((await getBuild(env.db, build.id))!.status).toBe('building');
@@ -1608,8 +1757,6 @@ describe('builds', () => {
       buildId: build.id,
       userId: user.id,
       projectId: project.id,
-      limit: 1,
-      instanceType: 'basic',
     });
     await markBuildBuildingIfStarting(env.db, build.id);
     expect((await getBuild(env.db, build.id))!.status).toBe('building');
@@ -1631,8 +1778,6 @@ describe('builds', () => {
       buildId: build.id,
       userId: user.id,
       projectId: project.id,
-      limit: 1,
-      instanceType: 'basic',
     });
     await terminateBuildsForProject(env.db, project.id, { reason: 'project disconnected' });
     expect((await getBuild(env.db, build.id))!.status).toBe('cancelled');
@@ -1670,8 +1815,6 @@ describe('builds', () => {
     // blocks the second build here — the per-project guard is.
     const user = await createTestUser(env.db, 'serialuser', 'github', undefined, 'pro');
     const project = await createTestProject(env.db, user.id);
-    const limit = 3;
-
     // Two queued container builds for the SAME project: commit A older, B newer.
     const a = await createBuild(env.db, {
       projectId: project.id,
@@ -1692,10 +1835,8 @@ describe('builds', () => {
         buildId: a.id,
         userId: user.id,
         projectId: project.id,
-        limit,
-        instanceType: 'standard-4',
       }),
-    ).toBe(true);
+    ).not.toBeNull();
     expect((await getBuild(env.db, a.id))!.status).toBe('starting');
 
     // 2. B is blocked: the project already has an active build (A is starting),
@@ -1705,10 +1846,8 @@ describe('builds', () => {
         buildId: b.id,
         userId: user.id,
         projectId: project.id,
-        limit,
-        instanceType: 'standard-4',
       }),
-    ).toBe(false);
+    ).toBeNull();
     expect((await getBuild(env.db, b.id))!.status).toBe('queued');
 
     // 3. Once A reaches a terminal status, the project has no active build, so
@@ -1721,10 +1860,8 @@ describe('builds', () => {
         buildId: b.id,
         userId: user.id,
         projectId: project.id,
-        limit,
-        instanceType: 'standard-4',
       }),
-    ).toBe(true);
+    ).not.toBeNull();
     expect((await getBuild(env.db, b.id))!.status).toBe('starting');
   });
 
@@ -1734,8 +1871,6 @@ describe('builds', () => {
     const user = await createTestUser(env.db, 'twoproj', 'github', undefined, 'pro');
     const projectA = await createTestProject(env.db, user.id);
     const projectB = await createTestProject(env.db, user.id);
-    const limit = 3;
-
     const a = await createBuild(env.db, { projectId: projectA.id, userId: user.id });
     const b = await createBuild(env.db, { projectId: projectB.id, userId: user.id });
 
@@ -1744,37 +1879,23 @@ describe('builds', () => {
         buildId: a.id,
         userId: user.id,
         projectId: projectA.id,
-        limit,
-        instanceType: 'standard-4',
       }),
-    ).toBe(true);
+    ).not.toBeNull();
     expect(
       await claimBuildForStartWithinLimit(env.db, {
         buildId: b.id,
         userId: user.id,
         projectId: projectB.id,
-        limit,
-        instanceType: 'standard-4',
       }),
-    ).toBe(true);
+    ).not.toBeNull();
 
     expect((await getBuild(env.db, a.id))!.status).toBe('starting');
     expect((await getBuild(env.db, b.id))!.status).toBe('starting');
   });
 
   it('claimBuildForStartWithinLimit persists the effective instance_type at claim time', async () => {
-    // Regression: the scheduler routes the container START on the effective
-    // instance_type (a paid/legacy-null row recomputes standard-4 and runs on
-    // BUILD_MANAGER_LARGE), but the claim used to SET only status/started_at,
-    // leaving instance_type NULL until onStart back-filled it. A cancel/reap in
-    // the START->onStart window then read the still-NULL value and addressed the
-    // WRONG (base) namespace, leaking the paid container. The claim must persist
-    // the effective size in the SAME tx so the size-of-record is correct the
-    // instant the row goes `starting`.
     const user = await createTestUser(env.db, 'claiminst', 'github', undefined, 'pro');
     const project = await createTestProject(env.db, user.id);
-    // A legacy row with no persisted instance_type (queued before enqueue-
-    // persistence). The scheduler recomputes standard-4 from the paid plan.
     const build = await createBuild(env.db, {
       projectId: project.id,
       userId: user.id,
@@ -1786,13 +1907,9 @@ describe('builds', () => {
       buildId: build.id,
       userId: user.id,
       projectId: project.id,
-      limit: 3,
-      instanceType: 'standard-4',
     });
-    expect(claimed).toBe(true);
+    expect(claimed).toEqual({ instanceType: 'standard-4', ownerPlan: 'pro' });
 
-    // The effective size is persisted at CLAIM time — before any onStart — so a
-    // cancel/reap in the start window addresses BUILD_MANAGER_LARGE, not base.
     const row = await getBuild(env.db, build.id);
     expect(row!.status).toBe('starting');
     expect(row!.instance_type).toBe('standard-4');
@@ -1913,15 +2030,110 @@ describe('builds', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// The GitHub Actions executor has no per-project active-build
-// serialization (unlike the container scheduler's claimBuildForStartWithinLimit),
-// so two DIFFERENT run_ids for one project+branch could both go active and race
-// `void deploy`. Latest-wins via supersede: a newer run marks older active
-// Actions builds terminal so they free the slot and can't race.
-// ---------------------------------------------------------------------------
-
 describe('createGithubActionsBuildWithinLimit', () => {
+  it('rejects manual owner suspension but permits usage suspension', async () => {
+    const user = await createTestUser(env.db, 'actions-suspended-owner');
+    const project = await createTestProject(env.db, user.id);
+    await createGitHubConnection(env.db, {
+      projectId: project.id,
+      installationId: 'actions-suspended-owner',
+      repoFullName: 'acme/actions-suspended-owner',
+      repositoryId: DEFAULT_REPO_ID,
+      buildExecutor: 'github_actions',
+    });
+    await seedActiveInstall(env.db, 'actions-suspended-owner');
+    const args = {
+      projectId: project.id,
+      connectionId: (await getGitHubConnection(env.db, project.id))!.id,
+      branch: 'main',
+      githubRunId: 'suspended-owner-1',
+      installationId: 'actions-suspended-owner',
+      repositoryId: DEFAULT_REPO_ID,
+      expectedWorkflowPath: '.github/workflows/void-deploy.yml',
+    } as const;
+
+    await env.db
+      .update(users)
+      .set({ suspended_reason: 'platform policy violation' })
+      .where(eq(users.id, user.id));
+    expect((await createGithubActionsBuildWithinLimit(env.db, args)).outcome).toBe(
+      'owner-suspended',
+    );
+    expect(await getProjectBuilds(env.db, project.id)).toEqual([]);
+
+    await env.db
+      .update(users)
+      .set({ suspended_reason: 'requests_exceeded' })
+      .where(eq(users.id, user.id));
+    expect(
+      (
+        await createGithubActionsBuildWithinLimit(env.db, {
+          ...args,
+          githubRunId: 'suspended-owner-2',
+        })
+      ).outcome,
+    ).toBe('created');
+  });
+
+  it('recomputes concurrency and attribution from the locked current owner after transfer', async () => {
+    const staleOwner = await createTestUser(
+      env.db,
+      'actions-stale-owner',
+      'github',
+      undefined,
+      'pro',
+    );
+    const currentOwner = await createTestUser(env.db, 'actions-current-owner');
+    const project = await createTestProject(env.db, staleOwner.id);
+    const otherProject = await createTestProject(env.db, currentOwner.id);
+    await createGitHubConnection(env.db, {
+      projectId: project.id,
+      installationId: 'actions-owner-race',
+      repoFullName: 'acme/actions-owner-race',
+      repositoryId: DEFAULT_REPO_ID,
+      buildExecutor: 'github_actions',
+    });
+    await seedActiveInstall(env.db, 'actions-owner-race');
+    await env.db
+      .update(projects)
+      .set({ user_id: currentOwner.id })
+      .where(eq(projects.id, project.id));
+    await env.db.insert(projectMembers).values({
+      project_id: project.id,
+      user_id: staleOwner.id,
+      role: 'admin',
+      added_by_user_id: currentOwner.id,
+    });
+    const occupying = await createBuild(env.db, {
+      projectId: otherProject.id,
+      userId: currentOwner.id,
+      executor: 'container',
+      status: 'building',
+    });
+    const args = {
+      projectId: project.id,
+      connectionId: (await getGitHubConnection(env.db, project.id))!.id,
+      branch: 'main',
+      githubRunId: 'owner-race-1',
+      installationId: 'actions-owner-race',
+      repositoryId: DEFAULT_REPO_ID,
+      expectedWorkflowPath: '.github/workflows/void-deploy.yml',
+    } as const;
+
+    expect((await createGithubActionsBuildWithinLimit(env.db, args)).outcome).toBe(
+      'limit-exceeded',
+    );
+    await updateBuildStatus(env.db, occupying.id, 'complete');
+    const created = await createGithubActionsBuildWithinLimit(env.db, {
+      ...args,
+      githubRunId: 'owner-race-2',
+    });
+    expect(created.outcome).toBe('created');
+    if (created.outcome === 'created') {
+      expect(created.build.user_id).toBe(currentOwner.id);
+    }
+  });
+
   // The workflow_path gate in auth-oidc runs against the connection SNAPSHOT; the
   // locked re-read here is the authority. A concurrent PATCH that re-pins
   // workflow_path between the gate and this lock must fail the exchange closed so
@@ -1944,8 +2156,6 @@ describe('createGithubActionsBuildWithinLimit', () => {
     const result = await createGithubActionsBuildWithinLimit(env.db, {
       projectId: project.id,
       connectionId: (await getGitHubConnection(env.db, project.id))!.id,
-      userId: user.id,
-      limit: 3,
       githubRunId: '9001',
       installationId: 'inst-wf',
       repositoryId: DEFAULT_REPO_ID,
@@ -1969,8 +2179,6 @@ describe('createGithubActionsBuildWithinLimit', () => {
     const first = await createGithubActionsBuildWithinLimit(env.db, {
       projectId: project.id,
       connectionId: (await getGitHubConnection(env.db, project.id))!.id,
-      userId: user.id,
-      limit: 3,
       branch: 'main',
       githubRunId: '1001',
       installationId: 'inst-supersede',
@@ -1986,8 +2194,6 @@ describe('createGithubActionsBuildWithinLimit', () => {
     const second = await createGithubActionsBuildWithinLimit(env.db, {
       projectId: project.id,
       connectionId: (await getGitHubConnection(env.db, project.id))!.id,
-      userId: user.id,
-      limit: 3,
       branch: 'main',
       githubRunId: '1002',
       installationId: 'inst-supersede',
@@ -2023,8 +2229,6 @@ describe('createGithubActionsBuildWithinLimit', () => {
     const first = await createGithubActionsBuildWithinLimit(env.db, {
       projectId: project.id,
       connectionId: (await getGitHubConnection(env.db, project.id))!.id,
-      userId: user.id,
-      limit: 3,
       branch: 'main',
       githubRunId: '2001',
       installationId: 'inst-reuse',
@@ -2039,8 +2243,6 @@ describe('createGithubActionsBuildWithinLimit', () => {
     const repeat = await createGithubActionsBuildWithinLimit(env.db, {
       projectId: project.id,
       connectionId: (await getGitHubConnection(env.db, project.id))!.id,
-      userId: user.id,
-      limit: 3,
       branch: 'main',
       githubRunId: '2001',
       installationId: 'inst-reuse',
@@ -2087,8 +2289,6 @@ describe('createGithubActionsBuildWithinLimit', () => {
     const onMain = await createGithubActionsBuildWithinLimit(env.db, {
       projectId: project.id,
       connectionId: (await getGitHubConnection(env.db, project.id))!.id,
-      userId: user.id,
-      limit: 3,
       branch: 'main',
       githubRunId: '3002',
       installationId: 'inst-branch',
@@ -2117,8 +2317,6 @@ describe('createGithubActionsBuildWithinLimit', () => {
     const first = await createGithubActionsBuildWithinLimit(env.db, {
       projectId: project.id,
       connectionId: (await getGitHubConnection(env.db, project.id))!.id,
-      userId: user.id,
-      limit: 1,
       branch: 'main',
       githubRunId: '4001',
       installationId: 'inst-cap',
@@ -2135,8 +2333,6 @@ describe('createGithubActionsBuildWithinLimit', () => {
     const second = await createGithubActionsBuildWithinLimit(env.db, {
       projectId: project.id,
       connectionId: (await getGitHubConnection(env.db, project.id))!.id,
-      userId: user.id,
-      limit: 1,
       branch: 'main',
       githubRunId: '4002',
       installationId: 'inst-cap',
@@ -2162,8 +2358,8 @@ describe('createGithubActionsBuildWithinLimit', () => {
     const capped = await createGithubActionsBuildWithinLimit(env.db, {
       projectId: otherProject.id,
       connectionId: (await getGitHubConnection(env.db, otherProject.id))!.id,
-      userId: user.id,
-      limit: 1,
+      // Simulate a stale pro-plan snapshot; the locked DB owner is free and
+      // already occupies its single slot.
       branch: 'main',
       githubRunId: '4003',
       installationId: 'inst-cap-other',
@@ -2186,8 +2382,6 @@ describe('createGithubActionsBuildWithinLimit', () => {
       // No connection is seeded, so any id is fine — the helper returns
       // `connection-removed` from the locked re-read before the id-match check.
       connectionId: 'ghc_absent',
-      userId: user.id,
-      limit: 3,
       branch: 'main',
       githubRunId: '5001',
       installationId: 'none',
@@ -2219,8 +2413,6 @@ describe('createGithubActionsBuildWithinLimit', () => {
     const result = await createGithubActionsBuildWithinLimit(env.db, {
       projectId: project.id,
       connectionId: (await getGitHubConnection(env.db, project.id))!.id,
-      userId: user.id,
-      limit: 3,
       branch: 'main',
       githubRunId: '5002',
       installationId: 'inst-container',
@@ -2253,8 +2445,6 @@ describe('createGithubActionsBuildWithinLimit', () => {
     const result = await createGithubActionsBuildWithinLimit(env.db, {
       projectId: project.id,
       connectionId: (await getGitHubConnection(env.db, project.id))!.id,
-      userId: user.id,
-      limit: 3,
       branch: 'feature',
       githubRunId: '7001',
       installationId: 'inst-branch-mismatch',
@@ -2285,8 +2475,6 @@ describe('createGithubActionsBuildWithinLimit', () => {
     const result = await createGithubActionsBuildWithinLimit(env.db, {
       projectId: project.id,
       connectionId: (await getGitHubConnection(env.db, project.id))!.id,
-      userId: user.id,
-      limit: 3,
       githubRunId: '7002',
       installationId: 'inst-no-branch',
       repositoryId: DEFAULT_REPO_ID,
@@ -2317,8 +2505,6 @@ describe('createGithubActionsBuildWithinLimit', () => {
     const attempt1 = await createGithubActionsBuildWithinLimit(env.db, {
       projectId: project.id,
       connectionId: (await getGitHubConnection(env.db, project.id))!.id,
-      userId: user.id,
-      limit: 3,
       branch: 'main',
       githubRunId: '6001',
       githubRunAttempt: '1',
@@ -2336,8 +2522,6 @@ describe('createGithubActionsBuildWithinLimit', () => {
     const attempt2 = await createGithubActionsBuildWithinLimit(env.db, {
       projectId: project.id,
       connectionId: (await getGitHubConnection(env.db, project.id))!.id,
-      userId: user.id,
-      limit: 3,
       branch: 'main',
       githubRunId: '6001',
       githubRunAttempt: '2',
@@ -2356,8 +2540,6 @@ describe('createGithubActionsBuildWithinLimit', () => {
     const repeat = await createGithubActionsBuildWithinLimit(env.db, {
       projectId: project.id,
       connectionId: (await getGitHubConnection(env.db, project.id))!.id,
-      userId: user.id,
-      limit: 3,
       branch: 'main',
       githubRunId: '6001',
       githubRunAttempt: '2',
@@ -2392,8 +2574,6 @@ describe('createGithubActionsBuildWithinLimit', () => {
     const attempt1 = await createGithubActionsBuildWithinLimit(env.db, {
       projectId: project.id,
       connectionId: (await getGitHubConnection(env.db, project.id))!.id,
-      userId: user.id,
-      limit: 3,
       branch: 'main',
       githubRunId: '6101',
       githubRunAttempt: '1',
@@ -2411,8 +2591,6 @@ describe('createGithubActionsBuildWithinLimit', () => {
     const attempt2 = await createGithubActionsBuildWithinLimit(env.db, {
       projectId: project.id,
       connectionId: (await getGitHubConnection(env.db, project.id))!.id,
-      userId: user.id,
-      limit: 3,
       branch: 'main',
       githubRunId: '6101',
       githubRunAttempt: '2',
@@ -2454,8 +2632,6 @@ describe('createGithubActionsBuildWithinLimit', () => {
     const result = await createGithubActionsBuildWithinLimit(env.db, {
       projectId: project.id,
       connectionId: (await getGitHubConnection(env.db, project.id))!.id,
-      userId: user.id,
-      limit: 3,
       branch: 'main',
       githubRunId: '8001',
       installationId: 'inst-revoked-susp',
@@ -2482,8 +2658,6 @@ describe('createGithubActionsBuildWithinLimit', () => {
     const result = await createGithubActionsBuildWithinLimit(env.db, {
       projectId: project.id,
       connectionId: (await getGitHubConnection(env.db, project.id))!.id,
-      userId: user.id,
-      limit: 3,
       branch: 'main',
       githubRunId: '8002',
       installationId: 'inst-revoked-del',
@@ -2515,8 +2689,6 @@ describe('createGithubActionsBuildWithinLimit', () => {
     const result = await createGithubActionsBuildWithinLimit(env.db, {
       projectId: project.id,
       connectionId: (await getGitHubConnection(env.db, project.id))!.id,
-      userId: user.id,
-      limit: 3,
       branch: 'main',
       githubRunId: '8003',
       installationId: 'inst-revoked-sel',
@@ -2548,8 +2720,6 @@ describe('createGithubActionsBuildWithinLimit', () => {
     const result = await createGithubActionsBuildWithinLimit(env.db, {
       projectId: project.id,
       connectionId: (await getGitHubConnection(env.db, project.id))!.id,
-      userId: user.id,
-      limit: 3,
       branch: 'main',
       githubRunId: '8004',
       installationId: 'inst-revoked-ok',
@@ -2599,8 +2769,6 @@ describe('createGithubActionsBuildWithinLimit', () => {
     const replaced = await createGithubActionsBuildWithinLimit(env.db, {
       projectId: project.id,
       connectionId: cOld.id,
-      userId: user.id,
-      limit: 3,
       branch: 'main',
       githubRunId: '9001',
       installationId: 'inst-replaced',
@@ -2614,8 +2782,6 @@ describe('createGithubActionsBuildWithinLimit', () => {
     const ok = await createGithubActionsBuildWithinLimit(env.db, {
       projectId: project.id,
       connectionId: cNew.id,
-      userId: user.id,
-      limit: 3,
       branch: 'main',
       githubRunId: '9001',
       installationId: 'inst-replaced',

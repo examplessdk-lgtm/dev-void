@@ -533,6 +533,14 @@ export function assertPlatformRollbackCompatibility(
       'platform: The rollback target cannot enforce the installed authentication configuration and session revocation protocol. Use a compatible runtime.',
     );
   }
+  if (
+    Math.max(installation.usageProtocolVersion, source.manifest.usageProtocolVersion) >= 2 &&
+    target.manifest.usageProtocolVersion < 2
+  ) {
+    throw new Error(
+      'platform: The rollback target predates ownership-aware usage attribution and cannot safely account for transferred projects. Use a runtime with usage protocol version 2 or newer.',
+    );
+  }
   if (target.manifest.database.lineage !== source.manifest.database.lineage) {
     throw new Error('platform: The rollback target belongs to a different database lineage.');
   }

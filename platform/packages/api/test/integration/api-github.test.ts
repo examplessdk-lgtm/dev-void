@@ -24,7 +24,10 @@ import {
   getGitHubInstallationMembers,
   getInstallationRevocationAt,
   getProjectBuilds,
+  hasGitHubConnectionAuthority,
   recordInstallationRevocations,
+  removeProjectMember,
+  setProjectMemberRole,
   upsertGitHubInstallation,
   upsertGitHubInstallationMember,
 } from '../../src/db.ts';
@@ -40,12 +43,15 @@ import {
   githubInstallationMembers,
   githubInstallationRevocations,
   oauthAccounts,
+  projectMembers,
+  projects,
 } from '../../src/schema.ts';
 import {
   JWT_SECRET,
   clearTables,
   createTestProject,
   createTestUser,
+  recordingBuildManager,
   setupEnv,
   teardownEnv,
   type TestEnv,
@@ -179,36 +185,6 @@ function authed(jwt: string, body?: unknown): RequestInit {
     },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   };
-}
-
-// A BUILD_MANAGER stand-in that records which build ids (keyed by the DO name,
-// which the handler sets to the build id) received a `cancelBuild` RPC. The
-// handler tears down orphaned containers via the trusted `cancelBuild` RPC on
-// BuildManager; the call is best-effort, so here we only assert it was ATTEMPTED
-// for the right (active container) builds. A `fetch` shim is kept for any
-// agent-authenticated `POST /cancel` path so the mock degrades gracefully.
-function recordingBuildManager(): {
-  namespace: DurableObjectNamespace;
-  cancelledIds: ReadonlyArray<string>;
-} {
-  const cancelledIds: Array<string> = [];
-  const namespace = {
-    idFromName: (name: string) => ({ toString: () => name }) as unknown as DurableObjectId,
-    get: (id: DurableObjectId) => ({
-      cancelBuild: async (_reason?: string) => {
-        cancelledIds.push(id.toString());
-      },
-      fetch: async (input: string | URL | Request) => {
-        const url =
-          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-        if (new URL(url).pathname === '/cancel') {
-          cancelledIds.push(id.toString());
-        }
-        return Response.json({ ok: true });
-      },
-    }),
-  } as unknown as DurableObjectNamespace;
-  return { namespace, cancelledIds };
 }
 
 // Minimal GitHub App env so isGitHubAppConfigured() is true. The private key is
@@ -458,6 +434,154 @@ function mockEmptyInstallAccount(opts: {
 }
 
 describe('POST /projects/:id/github', () => {
+  it('rejects connection mutations while the project is being deleted', async () => {
+    const owner = await createTestUser(env.db, 'deleting-github-owner');
+    const project = await createTestProject(env.db, owner.id, 'deleting-github');
+    await upsertGitHubInstallation(env.db, {
+      installationId: 'deleting-111',
+      userId: owner.id,
+      accountLogin: owner.login,
+      accountId: 'deleting-owner-account',
+      accountType: 'User',
+      repositories: [{ full_name: `${owner.login}/app`, id: 9101 }],
+    });
+    await createGitHubConnection(env.db, {
+      projectId: project.id,
+      installationId: 'deleting-111',
+      repoFullName: `${owner.login}/app`,
+      repositoryId: '9101',
+      authorizedByUserId: owner.id,
+    });
+    await env.db.update(projects).set({ status: 'deleting' }).where(eq(projects.id, project.id));
+
+    const requests = [
+      new Request(`http://localhost/projects/${project.id}/github`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${owner.jwt}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          installationId: 'deleting-111',
+          repoFullName: `${owner.login}/app`,
+        }),
+      }),
+      new Request(`http://localhost/projects/${project.id}/github`, {
+        method: 'PATCH',
+        headers: { Authorization: `Bearer ${owner.jwt}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ branch: 'release' }),
+      }),
+      new Request(`http://localhost/projects/${project.id}/github`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${owner.jwt}` },
+      }),
+    ];
+
+    for (const request of requests) {
+      const response = await app.fetch(request, env);
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({ error: 'project is being deleted' });
+    }
+    expect((await getGitHubConnection(env.db, project.id))?.branch).toBe('main');
+  });
+
+  it('lets project admins manage connections while readers and collaborators can only read them', async () => {
+    const owner = await createTestUser(env.db, 'team-github-owner');
+    const admin = await createTestUser(env.db, 'team-github-admin');
+    const collaborator = await createTestUser(env.db, 'team-github-collaborator');
+    const reader = await createTestUser(env.db, 'team-github-reader');
+    const project = await createTestProject(env.db, owner.id, 'team-github');
+    await env.db.insert(projectMembers).values([
+      {
+        project_id: project.id,
+        user_id: admin.id,
+        role: 'admin',
+        added_by_user_id: owner.id,
+      },
+      {
+        project_id: project.id,
+        user_id: collaborator.id,
+        role: 'collaborator',
+        added_by_user_id: owner.id,
+      },
+      {
+        project_id: project.id,
+        user_id: reader.id,
+        role: 'reader',
+        added_by_user_id: owner.id,
+      },
+    ]);
+    await upsertGitHubInstallation(env.db, {
+      installationId: 'team-111',
+      userId: admin.id,
+      accountLogin: admin.login,
+      accountId: 'team-admin-account',
+      accountType: 'User',
+      repositories: [{ full_name: `${admin.login}/app`, id: 9001 }],
+    });
+
+    const connect = await app.fetch(
+      new Request(`http://localhost/projects/${project.id}/github`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${admin.jwt}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          installationId: 'team-111',
+          repoFullName: `${admin.login}/app`,
+        }),
+      }),
+      env,
+    );
+    expect(connect.status).toBe(200);
+    expect((await getGitHubConnection(env.db, project.id))?.authorized_by_user_id).toBe(admin.id);
+
+    for (const user of [reader, collaborator]) {
+      const read = await app.fetch(
+        new Request(`http://localhost/projects/${project.id}/github`, authed(user.jwt)),
+        env,
+      );
+      expect(read.status).toBe(200);
+    }
+
+    const collaboratorPatch = await app.fetch(
+      new Request(`http://localhost/projects/${project.id}/github`, {
+        method: 'PATCH',
+        headers: {
+          Authorization: `Bearer ${collaborator.jwt}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ branch: 'blocked' }),
+      }),
+      env,
+    );
+    expect(collaboratorPatch.status).toBe(403);
+
+    const adminPatch = await app.fetch(
+      new Request(`http://localhost/projects/${project.id}/github`, {
+        method: 'PATCH',
+        headers: { Authorization: `Bearer ${admin.jwt}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ branch: 'release' }),
+      }),
+      env,
+    );
+    expect(adminPatch.status).toBe(200);
+
+    const readerDelete = await app.fetch(
+      new Request(`http://localhost/projects/${project.id}/github`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${reader.jwt}` },
+      }),
+      env,
+    );
+    expect(readerDelete.status).toBe(403);
+
+    const adminDelete = await app.fetch(
+      new Request(`http://localhost/projects/${project.id}/github`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${admin.jwt}` },
+      }),
+      env,
+    );
+    expect(adminDelete.status).toBe(200);
+    expect(await getGitHubConnection(env.db, project.id)).toBeNull();
+  });
+
   it('connects a project to a repo within the caller installation', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id, 'gh-app');
@@ -970,6 +1094,101 @@ describe('POST /projects/:id/github', () => {
       env,
     );
     expect(second.status).toBe(409);
+  });
+});
+
+describe('GitHub connection project-admin provenance', () => {
+  it('invalidates the connection and active builds when its authorizer loses admin access', async () => {
+    const owner = await createTestUser(env.db, 'provenance-owner');
+    const admin = await createTestUser(env.db, 'provenance-admin');
+    const project = await createTestProject(env.db, owner.id, 'provenance-project');
+    await env.db.insert(projectMembers).values({
+      project_id: project.id,
+      user_id: admin.id,
+      role: 'admin',
+      added_by_user_id: owner.id,
+    });
+    await upsertGitHubInstallation(env.db, {
+      installationId: 'provenance-install',
+      userId: admin.id,
+      accountLogin: admin.login,
+      accountId: 'provenance-account',
+      accountType: 'User',
+      repositories: [{ full_name: `${admin.login}/app`, id: 9101 }],
+    });
+    const connection = await createGitHubConnection(env.db, {
+      projectId: project.id,
+      installationId: 'provenance-install',
+      repoFullName: `${admin.login}/app`,
+      repositoryId: '9101',
+      authorizedByUserId: admin.id,
+    });
+    const build = await createBuild(env.db, {
+      projectId: project.id,
+      userId: owner.id,
+      executor: 'container',
+      status: 'building',
+    });
+    expect(await hasGitHubConnectionAuthority(env.db, connection.id, project.id)).toBe(true);
+
+    await setProjectMemberRole(env.db, {
+      projectId: project.id,
+      subjectUserId: admin.id,
+      role: 'collaborator',
+      actorUserId: owner.id,
+    });
+
+    expect(await getGitHubConnection(env.db, project.id)).toBeNull();
+    expect((await getBuild(env.db, build.id))?.status).toBe('cancelled');
+  });
+
+  it('keeps a connection reauthorized by another current admin', async () => {
+    const owner = await createTestUser(env.db, 'reauthorize-owner');
+    const firstAdmin = await createTestUser(env.db, 'reauthorize-first');
+    const secondAdmin = await createTestUser(env.db, 'reauthorize-second');
+    const project = await createTestProject(env.db, owner.id, 'reauthorize-project');
+    await env.db.insert(projectMembers).values([
+      {
+        project_id: project.id,
+        user_id: firstAdmin.id,
+        role: 'admin',
+        added_by_user_id: owner.id,
+      },
+      {
+        project_id: project.id,
+        user_id: secondAdmin.id,
+        role: 'admin',
+        added_by_user_id: owner.id,
+      },
+    ]);
+    await upsertGitHubInstallation(env.db, {
+      installationId: 'reauthorize-install',
+      userId: secondAdmin.id,
+      accountLogin: secondAdmin.login,
+      accountId: 'reauthorize-account',
+      accountType: 'User',
+      repositories: [{ full_name: `${secondAdmin.login}/app`, id: 9201 }],
+    });
+    const connection = await createGitHubConnection(env.db, {
+      projectId: project.id,
+      installationId: 'reauthorize-install',
+      repoFullName: `${secondAdmin.login}/app`,
+      repositoryId: '9201',
+      authorizedByUserId: firstAdmin.id,
+    });
+    await env.db
+      .update(githubConnections)
+      .set({ authorized_by_user_id: secondAdmin.id })
+      .where(eq(githubConnections.id, connection.id));
+
+    await removeProjectMember(env.db, {
+      projectId: project.id,
+      subjectUserId: firstAdmin.id,
+      actorUserId: owner.id,
+    });
+
+    expect((await getGitHubConnection(env.db, project.id))?.id).toBe(connection.id);
+    expect(await hasGitHubConnectionAuthority(env.db, connection.id, project.id)).toBe(true);
   });
 });
 
@@ -2497,7 +2716,7 @@ describe('PATCH /projects/:id/github', () => {
       branch: 'develop',
     });
 
-    const { namespace, cancelledIds } = recordingBuildManager();
+    const { namespace, cancelledIds } = recordingBuildManager({ recordFetchCancel: true });
     const res = await app.fetch(
       new Request(`http://localhost/projects/${project.id}/github`, {
         method: 'PATCH',
@@ -2555,7 +2774,7 @@ describe('PATCH /projects/:id/github', () => {
       status: 'building',
     });
 
-    const { namespace, cancelledIds } = recordingBuildManager();
+    const { namespace, cancelledIds } = recordingBuildManager({ recordFetchCancel: true });
     const res = await app.fetch(
       new Request(`http://localhost/projects/${project.id}/github`, {
         method: 'PATCH',
@@ -2616,7 +2835,7 @@ describe('PATCH /projects/:id/github', () => {
       status: 'building',
     });
 
-    const { namespace, cancelledIds } = recordingBuildManager();
+    const { namespace, cancelledIds } = recordingBuildManager({ recordFetchCancel: true });
     const res = await app.fetch(
       new Request(`http://localhost/projects/${project.id}/github`, {
         method: 'PATCH',
@@ -2673,7 +2892,7 @@ describe('PATCH /projects/:id/github', () => {
       branch: 'main',
     });
 
-    const { namespace, cancelledIds } = recordingBuildManager();
+    const { namespace, cancelledIds } = recordingBuildManager({ recordFetchCancel: true });
     const res = await app.fetch(
       new Request(`http://localhost/projects/${project.id}/github`, {
         method: 'PATCH',
@@ -2744,7 +2963,7 @@ describe('PATCH /projects/:id/github', () => {
       branch: 'release',
     });
 
-    const { namespace, cancelledIds } = recordingBuildManager();
+    const { namespace, cancelledIds } = recordingBuildManager({ recordFetchCancel: true });
     const res = await app.fetch(
       new Request(`http://localhost/projects/${project.id}/github`, {
         method: 'PATCH',
@@ -2876,7 +3095,7 @@ describe('DELETE /projects/:id/github', () => {
       status: 'complete',
     });
 
-    const { namespace, cancelledIds } = recordingBuildManager();
+    const { namespace, cancelledIds } = recordingBuildManager({ recordFetchCancel: true });
     const res = await app.fetch(
       new Request(`http://localhost/projects/${project.id}/github`, {
         method: 'DELETE',
@@ -4041,7 +4260,6 @@ describe('GET /github/callback', () => {
   // MEMBERSHIP row (per-repo proof required to connect), the owner pointer stays
   // NULL, and B is NOT the owner.
   it('cleared-owner org install: a different member B gets membership, not ownership (R15-1 confused-deputy closed)', async () => {
-    const formerOwner = await createTestUser(env.db, 'org-former-owner', 'github', '7010');
     const memberB = await createTestUser(env.db, 'org-member-b', 'github', '7011');
     // Cleared state member_removed leaves: null owner + tombstone for the FORMER
     // owner's GitHub id (7010). Member B has NO tombstone.

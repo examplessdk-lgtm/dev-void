@@ -26,7 +26,7 @@ export type PlatformDiscoveryDocument = Readonly<{
   platformVersion: string;
   proxyUrl: string;
   schemaVersion: typeof PLATFORM_DISCOVERY_SCHEMA_VERSION | 2 | 3;
-  usageProtocolVersion: 0 | 1;
+  usageProtocolVersion: 0 | 1 | 2;
 }>;
 
 function normalizeOrigin(value: string, name: 'apiUrl' | 'proxyUrl'): string {
@@ -50,7 +50,7 @@ function normalizeOrigin(value: string, name: 'apiUrl' | 'proxyUrl'): string {
 
 export function createPlatformDiscoveryDocument(
   input: Omit<PlatformDiscoveryDocument, 'schemaVersion' | 'usageProtocolVersion'> & {
-    usageProtocolVersion?: 0 | 1;
+    usageProtocolVersion?: 0 | 1 | 2;
   },
 ): PlatformDiscoveryDocument {
   if (!input.displayName.trim()) {
@@ -76,9 +76,10 @@ export function createPlatformDiscoveryDocument(
   if (
     input.usageProtocolVersion !== undefined &&
     input.usageProtocolVersion !== 0 &&
-    input.usageProtocolVersion !== 1
+    input.usageProtocolVersion !== 1 &&
+    input.usageProtocolVersion !== 2
   ) {
-    throw new Error('usageProtocolVersion must be 0 or 1.');
+    throw new Error('usageProtocolVersion must be 0, 1, or 2.');
   }
   const authentication = input.authentication
     ? parseAuthentication(input.authentication)
@@ -251,12 +252,15 @@ function parseAuthentication(value: unknown): PlatformAuthenticationDiscovery {
   };
 }
 
-function parseUsageProtocolVersion(value: unknown): 0 | 1 {
+function parseUsageProtocolVersion(value: unknown): 0 | 1 | 2 {
   if (value === undefined || value === 0) {
     return 0;
   }
   if (value === 1) {
     return 1;
   }
-  throw new Error('usageProtocolVersion must be 0 or 1.');
+  if (value === 2) {
+    return 2;
+  }
+  throw new Error('usageProtocolVersion must be 0, 1, or 2.');
 }

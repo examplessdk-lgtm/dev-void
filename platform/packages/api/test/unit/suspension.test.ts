@@ -3,6 +3,7 @@ import {
   isAdminSuspended,
   REASON_REQUESTS_EXCEEDED,
   REASON_SANDBOX_RUNTIME_EXCEEDED,
+  routingSuspensionReason,
 } from '../../src/suspension.ts';
 import {
   evaluateRequestLimit,
@@ -11,43 +12,28 @@ import {
 } from '../../src/usage-counter.ts';
 
 describe('isAdminSuspended', () => {
-  it('returns false for null (not suspended)', () => {
+  it('distinguishes usage limits from administrator suspensions', () => {
     expect(isAdminSuspended(null)).toBe(false);
-  });
-
-  it('returns false for usage-limit reason', () => {
     expect(isAdminSuspended(REASON_REQUESTS_EXCEEDED)).toBe(false);
-  });
-
-  it('returns false for sandbox runtime usage-limit reason', () => {
     expect(isAdminSuspended(REASON_SANDBOX_RUNTIME_EXCEEDED)).toBe(false);
-  });
-
-  it('does not treat sandbox_runtime_exceeded as admin suspension', () => {
-    expect(isAdminSuspended('sandbox_runtime_exceeded')).toBe(false);
-  });
-
-  it('returns true for admin_suspended', () => {
     expect(isAdminSuspended('admin_suspended')).toBe(true);
-  });
-
-  it('returns true for unknown suspension reason', () => {
-    expect(isAdminSuspended('some_other_reason')).toBe(true);
-  });
-
-  it('does not treat requests_exceeded as admin suspension', () => {
-    expect(isAdminSuspended('requests_exceeded')).toBe(false);
-  });
-
-  it('treats abuse and manual as admin suspension', () => {
     expect(isAdminSuspended('abuse')).toBe(true);
-    expect(isAdminSuspended('manual')).toBe(true);
+  });
+});
+
+describe('routingSuspensionReason', () => {
+  it('blocks app traffic only for request limits and administrator suspensions', () => {
+    expect(routingSuspensionReason(null)).toBeNull();
+    expect(routingSuspensionReason(REASON_REQUESTS_EXCEEDED)).toBe(REASON_REQUESTS_EXCEEDED);
+    expect(routingSuspensionReason(REASON_SANDBOX_RUNTIME_EXCEEDED)).toBeNull();
+    expect(routingSuspensionReason('admin_suspended')).toBe('admin_suspended');
   });
 });
 
 describe('evaluateRequestLimit (real implementation)', () => {
   function makeState(overrides: Partial<CounterState> = {}): CounterState {
     return {
+      ownerUserId: 'u1',
       totalRequests: 0,
       totalNeurons: 0,
       totalSandboxSeconds: 0,
@@ -57,6 +43,10 @@ describe('evaluateRequestLimit (real implementation)', () => {
       aiSuspended: false,
       sandboxRuntimeSuspended: false,
       projectSlugs: {},
+      projectOwnershipStarts: {},
+      projectNeurons: {},
+      historicalNeurons: 0,
+      historicalAiWindows: {},
       ...overrides,
     };
   }
@@ -83,6 +73,7 @@ describe('evaluateRequestLimit (real implementation)', () => {
 describe('evaluateAiLimit (real implementation)', () => {
   function makeState(overrides: Partial<CounterState> = {}): CounterState {
     return {
+      ownerUserId: 'u1',
       totalRequests: 0,
       totalNeurons: 0,
       totalSandboxSeconds: 0,
@@ -92,6 +83,10 @@ describe('evaluateAiLimit (real implementation)', () => {
       aiSuspended: false,
       sandboxRuntimeSuspended: false,
       projectSlugs: {},
+      projectOwnershipStarts: {},
+      projectNeurons: {},
+      historicalNeurons: 0,
+      historicalAiWindows: {},
       ...overrides,
     };
   }

@@ -1,20 +1,18 @@
 import { Hono } from 'hono';
-import { getProject } from '../db.ts';
 import type { ApiEnv } from '../env.ts';
+import { ProjectAccessDeniedError, ProjectNotFoundError } from '../project-access.ts';
 import { ProjectOperationInProgressError, teardownProject } from '../provisioning/cleanup.ts';
+import { requireProjectRouteCapability } from './project-access.ts';
 
 const app = new Hono<ApiEnv>();
 
 app.delete('/:id', async (context) => {
   const projectId = context.req.param('id');
-  const project = await getProject(context.get('db'), projectId);
-  if (!project) {
-    return context.json({ error: 'project not found' }, 404);
+  const access = await requireProjectRouteCapability(context, projectId, 'delete');
+  if (access instanceof Response) {
+    return access;
   }
-
-  if (project.user_id !== context.get('user').id) {
-    return context.json({ error: 'forbidden' }, 403);
-  }
+  const project = access.project;
 
   // `teardownProject` handles the FOR UPDATE lock, status='deleting' flip,
   // bulk deployment cancellation, critical CF cleanup (container apps from
@@ -24,8 +22,13 @@ app.delete('/:id', async (context) => {
   // cascade. Critical-cleanup failure throws and surfaces as a 5xx.
   let warnings: ReadonlyArray<string>;
   try {
-    ({ warnings } = await teardownProject(context, projectId, project));
+    ({ warnings } = await teardownProject(context, projectId, project, {
+      actorUserId: context.get('user').id,
+    }));
   } catch (error) {
+    if (error instanceof ProjectNotFoundError || error instanceof ProjectAccessDeniedError) {
+      return context.json({ error: error.message }, error.status);
+    }
     if (error instanceof ProjectOperationInProgressError) {
       return context.json({ error: error.message }, 409);
     }

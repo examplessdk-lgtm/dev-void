@@ -132,6 +132,32 @@ function createMockDoNamespace(): DurableObjectNamespace {
   } as unknown as DurableObjectNamespace;
 }
 
+export function recordingBuildManager(options: Readonly<{ recordFetchCancel?: boolean }> = {}): {
+  namespace: DurableObjectNamespace;
+  cancelledIds: ReadonlyArray<string>;
+} {
+  const cancelledIds: Array<string> = [];
+  const namespace = {
+    idFromName: (name: string) => ({ toString: () => name }) as unknown as DurableObjectId,
+    get: (id: DurableObjectId) => ({
+      cancelBuild: async (_reason?: string) => {
+        cancelledIds.push(id.toString());
+      },
+      fetch: async (input: string | URL | Request) => {
+        if (options.recordFetchCancel) {
+          const url =
+            typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+          if (new URL(url).pathname === '/cancel') {
+            cancelledIds.push(id.toString());
+          }
+        }
+        return Response.json({ ok: true });
+      },
+    }),
+  } as unknown as DurableObjectNamespace;
+  return { namespace, cancelledIds };
+}
+
 type StoredValue = {
   value: string | ArrayBuffer;
   metadata?: unknown;

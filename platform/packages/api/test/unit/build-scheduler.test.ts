@@ -43,7 +43,7 @@ const db = {
   // — queued rows exist but none are startable.
   queued: [] as Array<FakeBuild>,
   startable: null as Array<FakeBuild> | null,
-  users: new Map<string, { plan: string; login: string }>(),
+  users: new Map<string, { plan: string; login: string; suspended_reason?: string | null }>(),
   activeByUser: new Map<string, number>(),
   connections: new Map<
     string,
@@ -59,6 +59,7 @@ const db = {
   unauthorizedConnectionIds: new Set<string>(),
   // ids that should fail the atomic claim (simulate a lost race)
   unclaimable: new Set<string>(),
+  claimPlanByBuild: new Map<string, string>(),
   // ids a concurrent terminalizer (push-supersede / branch-executor change /
   // disconnect / install removal) already drove terminal while startBuild was in
   // flight. The guarded `requeueBuildIfStarting` CAS no-ops on these, so they are
@@ -78,18 +79,14 @@ const db = {
     buildId: string;
     userId: string;
     projectId: string;
-    limit: number;
-    instanceType: string;
   }>,
 };
 
 // The scheduler now enforces the per-user cap AND claims queued->starting in a
 // SINGLE primitive (`claimBuildForStartWithinLimit`) that holds a per-user
 // FOR UPDATE lock — the same lock the OIDC path takes — instead of a separate
-// countUserActiveBuilds + claimBuildForStart pair. The fake reproduces the
-// primitive's contract: false when at cap (limit > 0 && active >= limit) or
-// when the build is unclaimable (lost the queued->starting race); true
-// otherwise. limit === 0 means unlimited.
+// countUserActiveBuilds + claimBuildForStart pair. This fake models the cap and
+// queued->starting race outcomes exercised by the scheduler unit tests.
 vi.mock('../../src/db.ts', () => ({
   createDb: () => ({ __mock: 'db' }),
   // Models the real helper: excludes builds owned by `excludeUserIds`, then
@@ -114,13 +111,30 @@ vi.mock('../../src/db.ts', () => ({
     return Array.from(ownerIds).map((userId) => ({
       userId,
       plan: db.users.get(userId)?.plan ?? 'free',
+      suspendedReason: db.users.get(userId)?.suspended_reason ?? null,
       activeBuilds: db.activeByUser.get(userId) ?? 0,
     }));
   }),
+  cancelQueuedContainerBuildsForUsers: vi.fn(
+    async (_db: unknown, userIds: ReadonlyArray<string>) => {
+      const suspended = new Set(userIds);
+      const cancelled = db.queued.filter((build) => suspended.has(build.user_id));
+      for (const build of cancelled) {
+        db.cancelled.push({ id: build.id, error: 'project owner suspended' });
+      }
+      db.queued = db.queued.filter((build) => !suspended.has(build.user_id));
+      if (db.startable) {
+        db.startable = db.startable.filter((build) => !suspended.has(build.user_id));
+      }
+      return cancelled.length;
+    },
+  ),
   hasQueuedContainerBuilds: vi.fn(async (_db: unknown) => db.queued.length > 0),
   getUser: vi.fn(async (_db: unknown, id: string) => {
     const u = db.users.get(id);
-    return u ? { id, plan: u.plan, login: u.login } : null;
+    return u
+      ? { id, plan: u.plan, login: u.login, suspended_reason: u.suspended_reason ?? null }
+      : null;
   }),
   claimBuildForStartWithinLimit: vi.fn(
     async (
@@ -129,19 +143,34 @@ vi.mock('../../src/db.ts', () => ({
         buildId: string;
         userId: string;
         projectId: string;
-        limit: number;
-        instanceType: string;
       },
     ) => {
       db.claimArgs.push(args);
       const active = db.activeByUser.get(args.userId) ?? 0;
-      if (args.limit > 0 && active >= args.limit) {
-        return false;
+      const plan =
+        db.claimPlanByBuild.get(args.buildId) ?? db.users.get(args.userId)?.plan ?? 'free';
+      const limit =
+        plan === 'custom'
+          ? 0
+          : plan === 'sponsored'
+            ? 6
+            : plan === 'pro'
+              ? 3
+              : plan === 'solo'
+                ? 2
+                : 1;
+      if (limit > 0 && active >= limit) {
+        return null;
       }
       if (db.unclaimable.has(args.buildId)) {
-        return false;
+        return null;
       }
-      return true;
+      const build = db.queued.find((candidate) => candidate.id === args.buildId)!;
+      return {
+        instanceType:
+          build.instance_type ?? (plan === 'free' || plan === 'solo' ? 'standard-3' : 'standard-4'),
+        ownerPlan: plan,
+      };
     },
   ),
   getGitHubConnection: vi.fn(async (_db: unknown, projectId: string) => {
@@ -276,6 +305,7 @@ function resetDb() {
   db.projects = new Map();
   db.unauthorizedConnectionIds = new Set();
   db.unclaimable = new Set();
+  db.claimPlanByBuild = new Map();
   db.terminalized = new Set();
   db.failed = [];
   db.cancelled = [];
@@ -329,6 +359,10 @@ describe('BuildScheduler.alarm', () => {
       branch: 'main',
       ...b,
     };
+    if (build.instance_type === undefined) {
+      const plan = db.users.get(build.user_id)?.plan ?? 'free';
+      build.instance_type = plan === 'free' || plan === 'solo' ? 'standard-3' : 'standard-4';
+    }
     db.queued.push(build);
     if (!db.projects.has(build.project_id)) {
       db.projects.set(build.project_id, { slug: `slug-${build.project_id}` });
@@ -368,6 +402,25 @@ describe('BuildScheduler.alarm', () => {
         error: 'github organization repository must be reconnected to renew authorization',
       },
     ]);
+  });
+
+  it('cancels a queued build owned by a manually suspended user before claiming it', async () => {
+    db.users.set('u1', {
+      plan: 'free',
+      login: 'octocat',
+      suspended_reason: 'platform policy violation',
+    });
+    enqueue({ id: 'b1', user_id: 'u1', project_id: 'p1' });
+    db.activeByUser.set('u1', 1);
+    db.startable = [];
+    const startBuild = vi.fn(async () => {});
+    const s = makeScheduler(makeStubCtx(), makeEnv(startBuild));
+
+    await s.alarm();
+
+    expect(startBuild).not.toHaveBeenCalled();
+    expect(db.claimArgs).toEqual([]);
+    expect(db.cancelled).toEqual([{ id: 'b1', error: 'project owner suspended' }]);
   });
 
   it('re-arms the alarm when the queue is fully blocked (nothing startable but queued work remains)', async () => {
@@ -418,20 +471,14 @@ describe('BuildScheduler.alarm', () => {
     expect(cfg.login).toBe('octocat');
     expect(cfg.repoFullName).toBe('owner/repo');
     expect(cfg.installationId).toBe('inst1');
-    // free plan → standard-3, 10 min
     expect(cfg.instanceType).toBe('standard-3');
     expect(cfg.timeoutMinutes).toBe(10);
-    // BUILD_MANAGER keyed by build id.
     expect(
       (env as unknown as { BUILD_MANAGER: { idFromName: ReturnType<typeof vi.fn> } }).BUILD_MANAGER
         .idFromName,
     ).toHaveBeenCalledWith('b1');
-    // the cap + claim went through the single atomic primitive holding the
-    // per-user FOR UPDATE lock, with the plan's concurrency cap (free = 1).
     expect(claimBuildForStartWithinLimit).toHaveBeenCalledOnce();
-    expect(db.claimArgs).toEqual([
-      { buildId: 'b1', userId: 'u1', projectId: 'p1', limit: 1, instanceType: 'standard-3' },
-    ]);
+    expect(db.claimArgs).toEqual([{ buildId: 'b1', userId: 'u1', projectId: 'p1' }]);
   });
 
   it('enforces per-user tier concurrency (free plan = 1)', async () => {
@@ -445,25 +492,14 @@ describe('BuildScheduler.alarm', () => {
 
     await s.alarm();
 
-    // At cap → the owner is excluded from the scan UP FRONT, so the
-    // capped build is never inspected (no claim attempt) and never started. The
-    // alarm still re-arms because queued work remains, picked up once u1 frees a
-    // slot. (Previously the build was inspected-then-skipped at claim time,
-    // wasting a scan slot — the exclude avoids that.)
     expect(getQueuedBuilds).toHaveBeenCalledWith(expect.anything(), expect.any(Number), ['u1']);
     expect(db.claimArgs).toEqual([]);
     expect(startBuild).not.toHaveBeenCalled();
     expect(ctx.storage.setAlarm).toHaveBeenCalledOnce();
   });
 
-  // the scheduler must start a build ONLY when the atomic cap+claim primitive
-  // returns true; when it returns false (at cap OR lost the claim race) the build
-  // is left for a later tick. This mirrors the OIDC path's per-user FOR UPDATE
-  // lock so the container scan and a parallel OIDC exchange can't both create
-  // active builds beyond the cap.
-  it('starts only when claimBuildForStartWithinLimit returns true; leaves it otherwise', async () => {
+  it('starts only when claimBuildForStartWithinLimit returns a build', async () => {
     db.users.set('u1', { plan: 'pro', login: 'octocat' });
-    // b1 will be claimed (under cap); b2 is forced unclaimable → primitive false.
     enqueue({ id: 'b1', user_id: 'u1', project_id: 'p1' });
     enqueue({ id: 'b2', user_id: 'u1', project_id: 'p2' });
     db.unclaimable.add('b2');
@@ -474,15 +510,12 @@ describe('BuildScheduler.alarm', () => {
 
     await s.alarm();
 
-    // Both builds went through the atomic primitive (FIFO scan preserved).
     expect(db.claimArgs).toEqual([
-      { buildId: 'b1', userId: 'u1', projectId: 'p1', limit: 3, instanceType: 'standard-4' },
-      { buildId: 'b2', userId: 'u1', projectId: 'p2', limit: 3, instanceType: 'standard-4' },
+      { buildId: 'b1', userId: 'u1', projectId: 'p1' },
+      { buildId: 'b2', userId: 'u1', projectId: 'p2' },
     ]);
-    // Only the claimed build (b1) was started.
     expect(startBuild).toHaveBeenCalledOnce();
     expect((startBuild.mock.calls[0][0] as { buildId: string }).buildId).toBe('b1');
-    // b2 was neither started nor failed — left queued for a later tick.
     expect(db.failed.some((f) => f.id === 'b2')).toBe(false);
   });
 
@@ -570,12 +603,10 @@ describe('BuildScheduler.alarm', () => {
     expect(env.BUILD_MANAGER.idFromName).not.toHaveBeenCalled();
   });
 
-  it('recomputes from the plan for a legacy null instance_type row (paid plan → LARGE)', async () => {
-    // A row queued before enqueue-persistence has instance_type === null. START
-    // falls back to a plan recompute; a paid plan recomputes standard-4 and routes
-    // LARGE (and the config carries standard-4 so onStart's CAS back-fills it).
-    db.users.set('u1', { plan: 'pro', login: 'octocat' });
+  it('uses the locked owner plan for a legacy row when the earlier plan snapshot is stale', async () => {
+    db.users.set('u1', { plan: 'free', login: 'octocat' });
     enqueue({ id: 'b1', user_id: 'u1', project_id: 'p1', instance_type: null });
+    db.claimPlanByBuild.set('b1', 'pro');
     const startBuild = vi.fn(async (_cfg: unknown) => {});
     const ctx = makeStubCtx();
     const env = makeEnv(startBuild) as unknown as {
@@ -587,24 +618,14 @@ describe('BuildScheduler.alarm', () => {
     await s.alarm();
 
     expect(startBuild).toHaveBeenCalledOnce();
-    const cfg = startBuild.mock.calls[0][0] as unknown as { instanceType: string };
+    const cfg = startBuild.mock.calls[0][0] as unknown as {
+      instanceType: string;
+      timeoutMinutes: number;
+    };
     expect(cfg.instanceType).toBe('standard-4');
+    expect(cfg.timeoutMinutes).toBe(15);
     expect(env.BUILD_MANAGER_LARGE.idFromName).toHaveBeenCalledWith('b1');
     expect(env.BUILD_MANAGER.idFromName).not.toHaveBeenCalled();
-  });
-
-  it('skips a build whose atomic claim is lost (primitive returns false)', async () => {
-    db.users.set('u1', { plan: 'free', login: 'octocat' });
-    enqueue({ id: 'b1', user_id: 'u1', project_id: 'p1' });
-    db.unclaimable.add('b1');
-    const startBuild = vi.fn(async () => {});
-    const ctx = makeStubCtx();
-    const env = makeEnv(startBuild);
-    const s = makeScheduler(ctx, env);
-
-    await s.alarm();
-
-    expect(startBuild).not.toHaveBeenCalled();
   });
 
   it('fails a build with a missing user and continues', async () => {
@@ -693,9 +714,7 @@ describe('BuildScheduler.alarm', () => {
 
     // Only the eligible owner's build was claimed + started; the capped owner's
     // build was never even inspected (no claim attempt for b1).
-    expect(db.claimArgs).toEqual([
-      { buildId: 'b2', userId: 'u2', projectId: 'p2', limit: 1, instanceType: 'standard-3' },
-    ]);
+    expect(db.claimArgs).toEqual([{ buildId: 'b2', userId: 'u2', projectId: 'p2' }]);
     expect(startBuild).toHaveBeenCalledOnce();
     expect((startBuild.mock.calls[0][0] as { buildId: string }).buildId).toBe('b2');
   });
@@ -837,9 +856,7 @@ describe('BuildScheduler.alarm', () => {
     expect(base).toHaveBeenCalledOnce();
     expect((base.mock.calls[0][0] as { buildId: string }).buildId).toBe('b1');
     // Only b1 was claimed; b2 (same saturated fleet) was never claimed or started.
-    expect(db.claimArgs).toEqual([
-      { buildId: 'b1', userId: 'uf', projectId: 'p1', limit: 1, instanceType: 'standard-3' },
-    ]);
+    expect(db.claimArgs).toEqual([{ buildId: 'b1', userId: 'uf', projectId: 'p1' }]);
     // Only b1 (the claimed row) was requeued; b2 stays queued; nothing dropped.
     expect(db.requeued).toEqual(['b1']);
     expect(db.failed).toEqual([]);

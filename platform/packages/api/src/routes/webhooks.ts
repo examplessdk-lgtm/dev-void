@@ -1,4 +1,4 @@
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNull, or, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import type { Context } from 'hono';
 import {
@@ -13,8 +13,7 @@ import {
   getGitHubConnectionsByRepo,
   getGitHubInstallation,
   getGitHubInstallationsByAccount,
-  getProjectsByUserId,
-  getUser,
+  getOwnedProjectsByUserId,
   getUserByOAuthAccount,
   markBuildTerminalIfActive,
   markGitHubInstallationStatus,
@@ -50,7 +49,6 @@ import {
 import { verifyGithubWebhookSignature } from '../github/webhook-verify.ts';
 import { githubConnections, githubInstallations } from '../schema.ts';
 import type { GitHubInstallationRepository } from '../schema.ts';
-import { getBuildInstanceType } from '../tiers.ts';
 import type { Build } from '../types.ts';
 
 const app = new Hono<ApiEnv>();
@@ -452,16 +450,13 @@ async function rerunBuildForCommit(
       sawActions = true;
       continue;
     }
-    const owner = await getUser(db, connection.user_id);
     const { build, reused, cancelled } = await supersedeAndCreateContainerBuild(db, {
       projectId: connection.project_id,
-      userId: connection.user_id,
       branch: connection.branch,
       commitSha: headSha,
       connectionId: connection.id,
       installationId: connection.installation_id,
       repositoryId: connection.repository_id,
-      instanceType: owner ? getBuildInstanceType(owner.plan) : null,
     });
     cancelledContainerBuilds.push(...cancelled);
     if (!build) {
@@ -514,7 +509,8 @@ async function rerunBuildForCommit(
       );
     } else {
       // Everything left is a `skipped` reason from the supersede tx: project
-      // deleting, connection reconfigured or replaced, or installation revoked.
+      // deleting, owner suspended, connection reconfigured/replaced, or
+      // installation revoked.
       await completeRerun(
         refusedConclusion,
         'Nothing to rebuild',
@@ -801,25 +797,18 @@ export async function handleVerifiedGitHubWebhook(
         // enqueued to re-deploy it. The supersede also terminalizes older ACTIVE
         // builds (revoking their deploy token + freeing their slot); their DOs are
         // torn down after the tx commits, below.
-        // Resolve the owner's plan to fix the build's container size AT ENQUEUE so
-        // the row carries its own size-of-record. An orphaned connection (owner
-        // deleted) yields a null instance_type — START recomputes from plan there,
-        // and a null/unknown value routes to the safe base namespace either way.
-        const owner = await getUser(db, connection.user_id);
         const { build, cancelled } = await supersedeAndCreateContainerBuild(db, {
           projectId: connection.project_id,
-          userId: connection.user_id,
           branch,
           commitSha: after,
           connectionId: connection.id,
           installationId: connection.installation_id,
           repositoryId: connection.repository_id,
-          instanceType: owner ? getBuildInstanceType(owner.plan) : null,
         });
         cancelledContainerBuilds.push(...cancelled);
         // `build` is null on any skip: a concurrent PATCH /projects/:id/github
-        // changed the connection's branch/executor first (config-changed), or the
-        // project is being torn down (project-deleting). Either way no row is
+        // changed the connection, the project is being torn down, its owner is
+        // suspended, or installation authority was revoked. Either way no row is
         // enqueued and there's no id to push; the early-out + DO teardown below
         // tolerate the empty case.
         if (build) {
@@ -1469,21 +1458,8 @@ export async function handleVerifiedGitHubWebhook(
         // redemption) or the redemption commits first (this post-lock re-read sees
         // its freshly-inserted connection and severs it).
         //
-        // CONNECTIONS + install OWNER pointers are OAUTH-backed: every
-        // `github_connections` row has exactly ONE insert site
-        // (`createGitHubConnection`), reached only through the connect gate after
-        // the connecting user's IMMUTABLE oauth GitHub id is proven — the OWNER
-        // branch adopts the install under the owner's own proven oauth id, the
-        // MEMBER branch requires (Threat-L1) `grant.githubAccountId === the
-        // caller's own linked GitHub id`. So a connection is "X-backed" — and must
-        // be severed when GitHub id X leaves the org — IFF the connecting user's
-        // oauth id is X IFF `getUserByOAuthAccount('github', X)` returns that user.
-        // That single user is therefore the SOLE driver of connection-severing +
-        // owner-clearing: its oauth is X, so ALL its org connections and
-        // owned-installs are X-backed → severing across every orgInstallId is
-        // correct with no residual. When it is null there is simply no X-backed
-        // connection to sever (the pre-mint hole) — the tombstone written above
-        // already fail-closes any later X-keyed artifact redemption.
+        // Connections record the owner/admin whose OAuth proof authorized them.
+        // Legacy rows have no provenance and retain the old owner-scoped behavior.
         const removedUser = await getUserByOAuthAccount(
           txDb,
           'github',
@@ -1496,26 +1472,29 @@ export async function handleVerifiedGitHubWebhook(
           instance_type: string | null;
         }> = [];
         if (removedUser) {
-          const projectIds = (await getProjectsByUserId(txDb, removedUser.id)).map((p) => p.id);
-          if (projectIds.length > 0) {
-            // Single-table FOR UPDATE on githubConnections (NOT joined to
-            // projects) keeps the lock scope identical to the installation path;
-            // owner scoping is applied via `project_id IN (projectIds)`.
-            const conns = await tx
-              .select({ project_id: githubConnections.project_id })
-              .from(githubConnections)
-              .where(
-                and(
-                  inArray(githubConnections.installation_id, orgInstallIds),
-                  inArray(githubConnections.project_id, projectIds),
-                ),
-              )
-              .for('update');
-            for (const conn of conns) {
-              // terminate BEFORE delete: revoke the token, then remove the trigger.
-              acc.push(...(await terminateBuildsForProject(txDb, conn.project_id, { reason })));
-              await deleteGitHubConnection(txDb, conn.project_id);
-            }
+          const ownedProjectIds = (await getOwnedProjectsByUserId(txDb, removedUser.id)).map(
+            (project) => project.id,
+          );
+          const authorizationClause =
+            ownedProjectIds.length > 0
+              ? or(
+                  eq(githubConnections.authorized_by_user_id, removedUser.id),
+                  and(
+                    isNull(githubConnections.authorized_by_user_id),
+                    inArray(githubConnections.project_id, ownedProjectIds),
+                  ),
+                )
+              : eq(githubConnections.authorized_by_user_id, removedUser.id);
+          const conns = await tx
+            .select({ project_id: githubConnections.project_id })
+            .from(githubConnections)
+            .where(
+              and(inArray(githubConnections.installation_id, orgInstallIds), authorizationClause),
+            )
+            .for('update');
+          for (const conn of conns) {
+            acc.push(...(await terminateBuildsForProject(txDb, conn.project_id, { reason })));
+            await deleteGitHubConnection(txDb, conn.project_id);
           }
           // Clear the removed user's membership cache + owner pointer across every
           // org install (both guard on the user id, so a different owner/bearer is

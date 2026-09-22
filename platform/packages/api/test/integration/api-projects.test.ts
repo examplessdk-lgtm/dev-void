@@ -18,12 +18,14 @@ import {
 } from '../../src/db.ts';
 import * as db from '../../src/db.ts';
 import app from '../../src/index.ts';
+import * as projectAccess from '../../src/project-access.ts';
 import { users } from '../../src/schema.ts';
 import {
   deployments,
   domains,
   emailDestinations,
   projects,
+  projectMembers,
   resources,
   projectDatabaseCredentials,
   projectDeployCredentials,
@@ -41,7 +43,7 @@ import {
   cfError,
   type TestEnv,
 } from './helpers.ts';
-import { setGetProjectOverride, setTestDb } from './setup.ts';
+import { setTestDb } from './setup.ts';
 
 let env: TestEnv;
 
@@ -55,7 +57,6 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await clearTables(env.db);
-  setGetProjectOverride(null);
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
@@ -143,6 +144,44 @@ describe('GET /projects', () => {
     const projects = (await res.json()) as Array<{ slug: string }>;
     expect(projects).toHaveLength(1);
     expect(projects[0].slug).toBe('alice-app');
+  });
+
+  it('omits shared projects whose owner is manually suspended but keeps usage-suspended projects', async () => {
+    const owner = await createTestUser(env.db, 'list-suspended-owner');
+    const collaborator = await createTestUser(env.db, 'list-suspended-collaborator');
+    const project = await createTestProject(env.db, owner.id, 'list-suspended-project');
+    await env.db.insert(projectMembers).values({
+      project_id: project.id,
+      user_id: collaborator.id,
+      role: 'collaborator',
+      added_by_user_id: owner.id,
+    });
+    await env.db
+      .update(users)
+      .set({ suspended_reason: 'platform policy violation' })
+      .where(eq(users.id, owner.id));
+
+    const list = () =>
+      app.fetch(
+        new Request('http://localhost/projects', {
+          headers: { Authorization: `Bearer ${collaborator.jwt}` },
+        }),
+        env,
+      );
+    const suspended = await list();
+    expect(suspended.status).toBe(200);
+    expect(await suspended.json()).toEqual([]);
+
+    await env.db
+      .update(users)
+      .set({ suspended_reason: 'requests_exceeded' })
+      .where(eq(users.id, owner.id));
+    mockCfApi();
+    const usageSuspended = await list();
+    expect(usageSuspended.status).toBe(200);
+    expect((await usageSuspended.json()) as Array<{ id: string }>).toMatchObject([
+      { id: project.id },
+    ]);
   });
 
   it('returns deployment, traffic, and health summaries sorted by attention', async () => {
@@ -238,6 +277,31 @@ describe('GET /projects/:id', () => {
     expect(body.slug).toBe('my-app');
   });
 
+  it('rejects a collaborator when the owner is manually suspended', async () => {
+    const owner = await createTestUser(env.db, 'get-suspended-owner');
+    const collaborator = await createTestUser(env.db, 'get-suspended-collaborator');
+    const project = await createTestProject(env.db, owner.id, 'get-suspended-project');
+    await env.db.insert(projectMembers).values({
+      project_id: project.id,
+      user_id: collaborator.id,
+      role: 'reader',
+      added_by_user_id: owner.id,
+    });
+    await env.db
+      .update(users)
+      .set({ suspended_reason: 'platform policy violation' })
+      .where(eq(users.id, owner.id));
+
+    const res = await app.fetch(
+      new Request(`http://localhost/projects/${project.id}`, {
+        headers: { Authorization: `Bearer ${collaborator.jwt}` },
+      }),
+      env,
+    );
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: 'project owner suspended' });
+  });
+
   it('returns 403 when user does not own the project', async () => {
     const alice = await createTestUser(env.db, 'alice');
     const bob = await createTestUser(env.db, 'bob');
@@ -263,6 +327,118 @@ describe('GET /projects/:id', () => {
       env,
     );
     expect(res.status).toBe(404);
+  });
+});
+
+describe('project CI credential ownership', () => {
+  function credentialRequest(
+    projectId: string,
+    jwt: string,
+    method: 'GET' | 'POST' | 'DELETE',
+    suffix = '',
+    body?: Record<string, unknown>,
+  ): Request {
+    const init: RequestInit = {
+      method,
+      headers: {
+        Authorization: `Bearer ${jwt}`,
+        ...(body ? { 'Content-Type': 'application/json' } : {}),
+      },
+    };
+    if (body) {
+      init.body = JSON.stringify(body);
+    }
+    return new Request(`http://localhost/projects/${projectId}/tokens${suffix}`, init);
+  }
+
+  it('returns 403 to project members and 404 only for missing projects', async () => {
+    const owner = await createTestUser(env.db, 'credential-owner');
+    const admin = await createTestUser(env.db, 'credential-admin');
+    const project = await createTestProject(env.db, owner.id, 'credential-owner-only');
+    await env.db.insert(projectMembers).values({
+      project_id: project.id,
+      user_id: admin.id,
+      role: 'admin',
+      added_by_user_id: owner.id,
+    });
+    await env.db.insert(projectDeployCredentials).values({
+      id: 'credential-owner-only-row',
+      project_id: project.id,
+      issued_by: owner.id,
+      name: 'Owner CI',
+      expires_at: new Date(Date.now() + 86_400_000).toISOString(),
+    });
+    const operations = [
+      { method: 'GET' as const },
+      { method: 'POST' as const, body: { name: 'Admin CI' } },
+      {
+        method: 'POST' as const,
+        suffix: '/credential-owner-only-row/renew',
+        body: { expiresInDays: 30 },
+      },
+      { method: 'DELETE' as const, suffix: '/credential-owner-only-row' },
+    ];
+
+    for (const operation of operations) {
+      const memberResponse = await app.fetch(
+        credentialRequest(
+          project.id,
+          admin.jwt,
+          operation.method,
+          operation.suffix,
+          operation.body,
+        ),
+        env,
+      );
+      expect(memberResponse.status).toBe(403);
+      expect(await memberResponse.json()).toEqual({ error: 'forbidden' });
+
+      const missingResponse = await app.fetch(
+        credentialRequest(
+          'proj_missing',
+          admin.jwt,
+          operation.method,
+          operation.suffix,
+          operation.body,
+        ),
+        env,
+      );
+      expect(missingResponse.status).toBe(404);
+      expect(await missingResponse.json()).toEqual({ error: 'project not found' });
+    }
+  });
+
+  it('does not mint or renew a credential after project teardown begins', async () => {
+    const owner = await createTestUser(env.db, 'deleting-credential-owner');
+    const project = await createTestProject(env.db, owner.id, 'deleting-credential-project');
+    await env.db.insert(projectDeployCredentials).values({
+      id: 'deleting-credential-row',
+      project_id: project.id,
+      issued_by: owner.id,
+      name: 'Existing CI',
+      expires_at: new Date(Date.now() + 86_400_000).toISOString(),
+    });
+    await env.db.update(projects).set({ status: 'deleting' }).where(eq(projects.id, project.id));
+
+    const createResponse = await app.fetch(
+      credentialRequest(project.id, owner.jwt, 'POST', '', { name: 'Too late' }),
+      env,
+    );
+    const renewResponse = await app.fetch(
+      credentialRequest(project.id, owner.jwt, 'POST', '/deleting-credential-row/renew', {
+        expiresInDays: 30,
+      }),
+      env,
+    );
+
+    expect(createResponse.status).toBe(409);
+    expect(renewResponse.status).toBe(409);
+    expect(
+      await env.db
+        .select()
+        .from(projectDeployCredentials)
+        .where(eq(projectDeployCredentials.project_id, project.id)),
+    ).toMatchObject([{ id: 'deleting-credential-row', revoked_at: null }]);
   });
 });
 
@@ -357,6 +533,39 @@ describe('POST /projects/:id/prerender-token', () => {
       project: project.id,
     });
     expect(payload!.exp - payload!.iat).toBe(65 * 60);
+  });
+
+  it('revokes a collaborator manual prerender token when the member is removed', async () => {
+    const owner = await createTestUser(env.db, 'prerender-removal-owner');
+    const collaborator = await createTestUser(env.db, 'prerender-removal-collaborator');
+    const project = await createTestProject(env.db, owner.id, 'prerender-removal-app');
+    await env.db.insert(projectMembers).values({
+      project_id: project.id,
+      user_id: collaborator.id,
+      role: 'collaborator',
+      added_by_user_id: owner.id,
+    });
+
+    const minted = await app.fetch(
+      new Request(`http://localhost/projects/${project.id}/prerender-token`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${collaborator.jwt}` },
+      }),
+      env,
+    );
+    expect(minted.status).toBe(200);
+    const { token } = await minted.json<{ token: string }>();
+    expect((await proxyRequest(token, project.id)).status).toBe(200);
+
+    const removed = await app.fetch(
+      new Request(`http://localhost/projects/${project.id}/members/${collaborator.id}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${owner.jwt}` },
+      }),
+      env,
+    );
+    expect(removed.status).toBe(204);
+    expect((await proxyRequest(token, project.id)).status).toBe(403);
   });
 
   it('allows the project-scoped deploy token to mint it', async () => {
@@ -485,6 +694,36 @@ describe('POST /projects/:id/prerender-token', () => {
     expect((await proxyRequest(suspended.derivedToken, project.id)).status).toBe(403);
   });
 
+  it('revokes durable deploy and derived prerender credentials after ownership transfer', async () => {
+    const formerOwner = await createTestUser(env.db, 'prerender-transfer-former-owner');
+    const newOwner = await createTestUser(env.db, 'prerender-transfer-new-owner');
+    const project = await createTestProject(
+      env.db,
+      formerOwner.id,
+      'prerender-transfer-credential-app',
+    );
+    const credential = await issueCiPrerenderToken(formerOwner, project, 'transfer-parent');
+
+    await env.db.transaction(async (tx) => {
+      await tx.update(projects).set({ user_id: newOwner.id }).where(eq(projects.id, project.id));
+      await tx.insert(projectMembers).values({
+        project_id: project.id,
+        user_id: formerOwner.id,
+        role: 'admin',
+        added_by_user_id: newOwner.id,
+      });
+    });
+
+    const parent = await app.fetch(
+      new Request('http://localhost/projects', {
+        headers: { Authorization: `Bearer ${credential.token}` },
+      }),
+      env,
+    );
+    expect(parent.status).toBe(401);
+    expect((await proxyRequest(credential.derivedToken, project.id)).status).toBe(403);
+  });
+
   it('retains validated credential provenance when the parent JWT expires before minting', async () => {
     const startedAt = new Date('2026-09-18T00:00:00.000Z').getTime();
     vi.useFakeTimers({ toFake: ['Date'] });
@@ -512,11 +751,12 @@ describe('POST /projects/:id/prerender-token', () => {
         env.JWT_SECRET,
       );
 
-      setGetProjectOverride(({ original, argsList }) => {
+      const requireCapability = projectAccess.requireProjectCapability;
+      vi.spyOn(projectAccess, 'requireProjectCapability').mockImplementation(async (...args) => {
         // authMiddleware has already verified the real JWT and credential row;
-        // the route's first project read crosses the JWT expiry boundary.
+        // the route capability check crosses the JWT expiry boundary.
         vi.setSystemTime(startedAt + 2_000);
-        return original(...argsList);
+        return requireCapability(...args);
       });
       const response = await app.fetch(
         new Request(`http://localhost/projects/${project.id}/prerender-token`, {
@@ -540,7 +780,6 @@ describe('POST /projects/:id/prerender-token', () => {
       // credential-bound derived token is immediately rejected authoritatively.
       expect((await proxyRequest(token, project.id)).status).toBe(403);
     } finally {
-      setGetProjectOverride(null);
       vi.useRealTimers();
     }
   });
@@ -567,6 +806,58 @@ describe('POST /projects/:id/prerender-token', () => {
     expect(parentStillValid.status).toBe(200);
   });
 
+  it('preserves the owner-suspension error from the locked capability recheck', async () => {
+    const owner = await createTestUser(env.db, 'prerender-suspended-owner');
+    const collaborator = await createTestUser(env.db, 'prerender-suspended-collaborator');
+    const project = await createTestProject(env.db, owner.id, 'prerender-suspended-app');
+    await env.db.insert(projectMembers).values({
+      project_id: project.id,
+      user_id: collaborator.id,
+      role: 'collaborator',
+      added_by_user_id: owner.id,
+    });
+    const build = await db.createBuild(env.db, {
+      projectId: project.id,
+      userId: collaborator.id,
+      status: 'building',
+    });
+    const deployToken = await signDeployToken(
+      {
+        projectId: project.id,
+        userId: collaborator.id,
+        login: collaborator.login,
+        buildId: build.id,
+      },
+      env.JWT_SECRET,
+    );
+
+    const requireCapability = projectAccess.requireProjectCapability;
+    let suspended = false;
+    vi.spyOn(projectAccess, 'requireProjectCapability').mockImplementation(async (...args) => {
+      const access = await requireCapability(...args);
+      if (!suspended && args[3] === 'deploy') {
+        suspended = true;
+        await env.db
+          .update(users)
+          .set({ suspended_reason: 'platform policy violation' })
+          .where(eq(users.id, owner.id));
+      }
+      return access;
+    });
+
+    const response = await app.fetch(
+      new Request(`http://localhost/projects/${project.id}/prerender-token`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${deployToken}` },
+      }),
+      env,
+    );
+
+    expect(suspended).toBe(true);
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({ error: 'project owner suspended' });
+  });
+
   it("does not mint a token for another user's project", async () => {
     const owner = await createTestUser(env.db, 'prerender-owner-two');
     const attacker = await createTestUser(env.db, 'prerender-attacker');
@@ -584,6 +875,79 @@ describe('POST /projects/:id/prerender-token', () => {
 });
 
 describe('PUT /projects/:id/database-url', () => {
+  it.each([
+    { method: 'POST', suffix: 'database' },
+    { method: 'PUT', suffix: 'database-url' },
+  ] as const)(
+    'rechecks configure capability under the lock for $method /$suffix',
+    async ({ method, suffix }) => {
+      const owner = await createTestUser(env.db, `db-race-owner-${method.toLowerCase()}`);
+      const collaborator = await createTestUser(
+        env.db,
+        `db-race-collaborator-${method.toLowerCase()}`,
+      );
+      const project = await createTestProject(
+        env.db,
+        owner.id,
+        `db-access-race-${method.toLowerCase()}`,
+      );
+      await env.db.insert(projectMembers).values({
+        project_id: project.id,
+        user_id: collaborator.id,
+        role: 'collaborator',
+        added_by_user_id: owner.id,
+      });
+      const cf = mockCfApi();
+
+      // Return the route's first access snapshot, then commit the downgrade.
+      // The handler must re-resolve the collaborator under the project lock
+      // before either creating or updating a live Hyperdrive.
+      const requireCapability = projectAccess.requireProjectCapability;
+      let downgraded = false;
+      vi.spyOn(projectAccess, 'requireProjectCapability').mockImplementation(async (...args) => {
+        const result = await requireCapability(...args);
+        if (!downgraded && args[3] === 'configure') {
+          downgraded = true;
+          await env.db
+            .update(projectMembers)
+            .set({ role: 'reader' })
+            .where(eq(projectMembers.user_id, collaborator.id));
+        }
+        return result;
+      });
+
+      const requestUrl = `http://localhost/projects/${project.id}/${suffix}`;
+      const requestOptions = {
+        headers: {
+          Authorization: `Bearer ${collaborator.jwt}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          connectionString: 'postgresql://void_user:pass@db.example.com/appdb',
+        }),
+      };
+      const request =
+        method === 'POST'
+          ? new Request(requestUrl, { method: 'POST', ...requestOptions })
+          : new Request(requestUrl, { method: 'PUT', ...requestOptions });
+      const res = await app.fetch(request, env);
+
+      expect(res.status).toBe(403);
+      expect(await res.json()).toEqual({ error: 'forbidden' });
+      expect(downgraded).toBe(true);
+      expect(cf).not.toHaveBeenCalled();
+      expect(
+        await env.db.select().from(resources).where(eq(resources.project_id, project.id)),
+      ).toEqual([]);
+      expect(
+        await env.db
+          .select()
+          .from(projectDatabaseCredentials)
+          .where(eq(projectDatabaseCredentials.project_id, project.id)),
+      ).toEqual([]);
+    },
+  );
+
   it('provisions Hyperdrive with a Cloudflare-safe name', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id, 'pg-app-post');
@@ -844,6 +1208,28 @@ describe('GET /projects/:id/database-url', () => {
     );
 
     expect(res.status).toBe(403);
+  });
+
+  it('does not expose the plaintext URL to a project member', async () => {
+    const owner = await createTestUser(env.db, 'database-url-owner');
+    const collaborator = await createTestUser(env.db, 'database-url-collaborator');
+    const project = await createTestProject(env.db, owner.id, 'database-url-member-read');
+    await env.db.insert(projectMembers).values({
+      project_id: project.id,
+      user_id: collaborator.id,
+      role: 'collaborator',
+      added_by_user_id: owner.id,
+    });
+
+    const res = await app.fetch(
+      new Request(`http://localhost/projects/${project.id}/database-url`, {
+        headers: { Authorization: `Bearer ${collaborator.jwt}` },
+      }),
+      env,
+    );
+
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: 'forbidden' });
   });
 
   it('round-trips the connection string via POST /:id/database', async () => {
@@ -1488,6 +1874,51 @@ describe('GET /projects/:id/deployments', () => {
     expect(byId[d2.id].commit_url).toBeNull();
     expect(byId[d2.id].status).toBe('pending');
   });
+
+  it('hides manifest environment values from readers but not deploy-capable members', async () => {
+    const owner = await createTestUser(env.db, 'manifest-owner');
+    const reader = await createTestUser(env.db, 'manifest-reader');
+    const collaborator = await createTestUser(env.db, 'manifest-collaborator');
+    const project = await createTestProject(env.db, owner.id, 'manifest-project');
+    await env.db.insert(projectMembers).values([
+      {
+        project_id: project.id,
+        user_id: reader.id,
+        role: 'reader',
+        added_by_user_id: owner.id,
+      },
+      {
+        project_id: project.id,
+        user_id: collaborator.id,
+        role: 'collaborator',
+        added_by_user_id: owner.id,
+      },
+    ]);
+    await createDeployment(
+      env.db,
+      project.id,
+      JSON.stringify({ version: 1, vars: { TOKEN: 'plaintext' }, ssr: true }),
+    );
+
+    const listAs = async (jwt: string) => {
+      const response = await app.fetch(
+        new Request(`http://localhost/projects/${project.id}/deployments`, {
+          headers: { Authorization: `Bearer ${jwt}` },
+        }),
+        env,
+      );
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as { deployments: Array<{ manifest: string }> };
+      return JSON.parse(body.deployments[0]!.manifest) as Record<string, unknown>;
+    };
+
+    expect(await listAs(reader.jwt)).toEqual({ version: 1, ssr: true });
+    expect(await listAs(collaborator.jwt)).toEqual({
+      version: 1,
+      vars: { TOKEN: 'plaintext' },
+      ssr: true,
+    });
+  });
 });
 
 describe('POST /projects/:id/rollback', () => {
@@ -1540,10 +1971,7 @@ describe('POST /projects/:id/rollback', () => {
   });
 
   it('clamps a stored manifest limits.cpuMs to the current plan ceiling (never rejects)', async () => {
-    // Free plan ceiling is 10 cpuMs; the target manifest requests 60000 —
-    // e.g. deployed under a higher plan before a downgrade. Rollback must
-    // clamp with min() and go through, not 400.
-    const user = await createTestUser(env.db);
+    const user = await createTestUser(env.db, 'rollback-plan-owner', 'github', undefined, 'pro');
     const project = await createTestProject(env.db, user.id, 'clamp-rollback-app');
 
     const d1 = await createDeployment(
@@ -1563,6 +1991,17 @@ describe('POST /projects/:id/rollback', () => {
     await markDeploymentRetained(env.db, d2.id, true);
     await setActiveDeployment(env.db, project.id, d2.id);
 
+    const requireCapability = projectAccess.requireProjectCapability;
+    let downgraded = false;
+    vi.spyOn(projectAccess, 'requireProjectCapability').mockImplementation(async (...args) => {
+      const result = await requireCapability(...args);
+      if (!downgraded && args[3] === 'deploy') {
+        downgraded = true;
+        await env.db.update(users).set({ plan: 'free' }).where(eq(users.id, user.id));
+      }
+      return result;
+    });
+
     const res = await app.fetch(
       new Request(`http://localhost/projects/${project.id}/rollback`, {
         method: 'POST',
@@ -1575,6 +2014,7 @@ describe('POST /projects/:id/rollback', () => {
       env,
     );
     expect(res.status).toBe(200);
+    expect(downgraded).toBe(true);
 
     const routing = (await env.ROUTING.get(project.slug, 'json')) as {
       limits: { cpuMs: number; subRequests: number };

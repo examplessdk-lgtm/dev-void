@@ -4,16 +4,16 @@ import { verifyJwt } from '../auth/jwt.ts';
 import { validateHumanSession } from '../auth/sessions.ts';
 import { ACTIVE_BUILD_STATUSES, getBuild, getUser } from '../db.ts';
 import { type ApiEnv, isDevBypass } from '../env.ts';
-import { projectDeployCredentials, users } from '../schema.ts';
+import { projectDeployCredentials, projects, users } from '../schema.ts';
 import { isAdminSuspended } from '../suspension.ts';
 
 /**
- * Endpoints a scoped (`aud:'deploy'`) token may call. A deploy token
- * authenticates as the project owner but is minted for one purpose only —
- * running the real `void deploy` CLI against the single project named in
- * `payload.project`. Without this allowlist the token would satisfy the
- * owner-identity check on EVERY route mounted under `/projects/*` (delete,
- * secrets PUT, github connect, domains, rollback, cancel), so a leaked
+ * Endpoints a scoped (`aud:'deploy'`) token may call. A remote-build deploy
+ * token authenticates as the build's billing owner and is minted for one
+ * purpose only — running the real `void deploy` CLI against the single project
+ * named in `payload.project`. Without this allowlist the token could reach every
+ * route mounted under `/projects/*` (delete, secrets PUT, github connect,
+ * domains, rollback, cancel), so a leaked
  * 15-minute CI token could take over the project. Default-deny: anything not
  * listed here is rejected with 403.
  *
@@ -127,11 +127,13 @@ export const authMiddleware: MiddlewareHandler<ApiEnv> = async (context, next) =
         .get('db')
         .select({ id: projectDeployCredentials.id })
         .from(projectDeployCredentials)
+        .innerJoin(projects, eq(projects.id, projectDeployCredentials.project_id))
         .where(
           and(
             eq(projectDeployCredentials.id, payload.credential),
             eq(projectDeployCredentials.project_id, payload.project),
             eq(projectDeployCredentials.issued_by, payload.sub),
+            eq(projects.user_id, payload.sub),
             isNull(projectDeployCredentials.revoked_at),
             gt(projectDeployCredentials.expires_at, new Date().toISOString()),
           ),

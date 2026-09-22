@@ -1,4 +1,4 @@
-import { createDb, getProjectsByIds, getUser } from './db.ts';
+import { createDb, getProjectUsageOwnershipSnapshot, getUser } from './db.ts';
 import type { ApiEnv } from './env.ts';
 import { getCurrentBillingPeriodStart, getPlanLimits } from './tiers.ts';
 import {
@@ -127,25 +127,60 @@ export async function processUsageEventBatch(
   }
 
   const db = createDb(env.HYPERDRIVE.connectionString);
-  let projects: Awaited<ReturnType<typeof getProjectsByIds>>;
+  let ownershipSnapshot: Awaited<ReturnType<typeof getProjectUsageOwnershipSnapshot>>;
   try {
-    projects = await getProjectsByIds(db, [
-      ...new Set(authenticatedRecords.map(({ event }) => event.projectId)),
-    ]);
+    ownershipSnapshot = await getProjectUsageOwnershipSnapshot(
+      db,
+      authenticatedRecords.map(({ event }) => event.projectId),
+    );
   } catch (error) {
-    console.error('[usage-queue] project identity lookup failed:', error);
+    console.error('[usage-queue] project ownership lookup failed:', error);
     batch.retryAll();
     return;
   }
+  const projects = ownershipSnapshot.projects;
   const projectsById = new Map(projects.map((project) => [project.id, project]));
+  const ownershipPeriodsByProject = new Map<
+    string,
+    Array<(typeof ownershipSnapshot.ownershipPeriods)[number]>
+  >(projects.map((project) => [project.id, []]));
+  for (const period of ownershipSnapshot.ownershipPeriods) {
+    ownershipPeriodsByProject.get(period.project_id)?.push(period);
+  }
   const records = authenticatedRecords.flatMap(({ event, at }) => {
     const project = projectsById.get(event.projectId);
     if (!project) {
       return [];
     }
+    // Queue enqueue time is the single attribution timestamp. Managed Sandbox
+    // is hard-disabled; split interval attribution is deferred until reintroduction.
+    const occurredAt = at;
+    const ownershipPeriod = ownershipPeriodsByProject
+      .get(event.projectId)
+      ?.find(
+        (period) =>
+          Date.parse(period.starts_at) <= occurredAt &&
+          (period.ends_at === null || occurredAt < Date.parse(period.ends_at)),
+      );
+    const ownerUserId = ownershipPeriod?.owner_user_id ?? project.user_id;
     // PostgreSQL owns account identity and the canonical slug. Producer
-    // hints are never forwarded into enforcement or alert routing.
-    return [{ event: { ...event, userId: project.user_id, slug: project.slug }, at }];
+    // hints are never forwarded into enforcement or alert routing. Ownership
+    // is resolved at the event timestamp so a delayed queue message crossing
+    // a transfer remains billed to the correct account.
+    return [
+      {
+        event: {
+          ...event,
+          userId: ownerUserId,
+          slug: project.slug,
+          currentOwner:
+            project.status !== 'deleting' &&
+            (ownershipPeriod ? ownershipPeriod.ends_at === null : true),
+          ownershipStartedAt: ownershipPeriod?.starts_at ?? project.created_at,
+        },
+        at,
+      },
+    ];
   });
   const events = records.map((record) => record.event);
 

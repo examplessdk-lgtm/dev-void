@@ -23,6 +23,7 @@ export async function runProjectsCommand(root: string): Promise<void> {
 
   const rows = projects.map((p) => ({
     slug: p.slug,
+    role: p.role ?? 'owner',
     appType: p.type ?? 'worker',
     url: p.custom_domain
       ? `https://${p.custom_domain}`
@@ -30,13 +31,14 @@ export async function runProjectsCommand(root: string): Promise<void> {
   }));
 
   const slugWidth = Math.max('slug'.length, ...rows.map((r) => r.slug.length));
+  const roleWidth = Math.max('role'.length, ...rows.map((r) => r.role.length));
   const typeWidth = Math.max('type'.length, ...rows.map((r) => r.appType.length));
 
   const prefix = tablePrefix();
-  const header = `${prefix}${dim(`${'slug'.padEnd(slugWidth)}  ${'type'.padEnd(typeWidth)}  url`)}`;
+  const header = `${prefix}${dim(`${'slug'.padEnd(slugWidth)}  ${'role'.padEnd(roleWidth)}  ${'type'.padEnd(typeWidth)}  url`)}`;
   const lines = rows.map(
     (row) =>
-      `${prefix}${pc.green(row.slug)}${''.padEnd(slugWidth - row.slug.length)}  ${row.appType.padEnd(typeWidth)}  ${row.url}`,
+      `${prefix}${pc.green(row.slug)}${''.padEnd(slugWidth - row.slug.length)}  ${row.role.padEnd(roleWidth)}  ${row.appType.padEnd(typeWidth)}  ${row.url}`,
   );
   console.log(prefix);
   console.log(header);

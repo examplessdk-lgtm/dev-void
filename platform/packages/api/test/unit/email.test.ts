@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vite-plus/test';
 import {
   sendErrorAlertEmail,
   sendInvitationEmail,
+  sendProjectInvitationEmail,
   sendWelcomeEmail,
   sendDeployFailedEmail,
 } from '../../src/email.ts';
@@ -138,6 +139,27 @@ describe('platform email identity', () => {
       );
     }
     expect(sent[1].html).toContain('&lt;new-member&gt;');
+  });
+
+  it('directs project invitees to the CLI without claiming a dashboard flow', async () => {
+    const { binding, sent } = mockBinding();
+    await sendProjectInvitationEmail(
+      { ...binding, ...identity },
+      {
+        to: 'member@example.com',
+        invitationId: 'pinv_a1b2c3d4e5f6',
+        projectSlug: 'shared-project',
+        inviterLogin: 'owner',
+        role: 'collaborator',
+      },
+    );
+
+    expect(sent[0].html + sent[0].text).toContain("void connect 'https://api.example.com'");
+    expect(sent[0].html + sent[0].text).toContain('void project team accept pinv_a1b2c3d4e5f6');
+    expect(sent[0].html + sent[0].text).toContain(
+      'https://api.example.com/invite?project-invitation=pinv_a1b2c3d4e5f6',
+    );
+    expect(sent[0].html + sent[0].text).not.toMatch(/dashboard/i);
   });
 
   it('keeps deployment and error alerts on the selected platform without a dashboard', async () => {

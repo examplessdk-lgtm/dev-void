@@ -86,9 +86,13 @@ describe('platform installation manifest', () => {
       parsePlatformInstallationManifest({ ...installation(), usageProtocolVersion: 1 })
         .usageProtocolVersion,
     ).toBe(1);
+    expect(
+      parsePlatformInstallationManifest({ ...installation(), usageProtocolVersion: 2 })
+        .usageProtocolVersion,
+    ).toBe(2);
     expect(() =>
-      parsePlatformInstallationManifest({ ...installation(), usageProtocolVersion: 2 }),
-    ).toThrow('usageProtocolVersion must be 0 or 1');
+      parsePlatformInstallationManifest({ ...installation(), usageProtocolVersion: 3 }),
+    ).toThrow('usageProtocolVersion must be 0, 1, or 2');
   });
 
   it('rejects invalid state transitions', () => {

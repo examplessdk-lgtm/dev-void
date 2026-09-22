@@ -4,16 +4,17 @@ import { readAuthSettings } from '../auth/configuration.ts';
 import { hmacVerifyState } from '../auth/hmac.ts';
 import { verifyJwt } from '../auth/jwt.ts';
 import { validateHumanSession } from '../auth/sessions.ts';
-import { getProject, getUser } from '../db.ts';
+import { getUser } from '../db.ts';
 import type { ApiEnv } from '../env.ts';
+import { requireProjectCapability } from '../project-access.ts';
 import { isAdminSuspended } from '../suspension.ts';
 
 const app = new Hono<ApiEnv>();
 
 /**
- * Internal ownership verification — called by the proxy via service binding.
- * Used on the JWT auth path to confirm the authenticated user owns the project.
- * Authenticated via HMAC token in X-Void-Internal header.
+ * Live deploy-capability verification called by the binding proxy. The legacy
+ * verify-owner path is intentionally retained so old and new proxy revisions
+ * can coexist during rollout; its semantics now include collaborators/admins.
  *
  * POST /internal/verify-owner/:projectId
  * Body: { "userId": "...", "proxyOrigin": "https://proxy.example.com", ... }
@@ -92,8 +93,11 @@ app.post('/:projectId', async (context) => {
     return context.json({ error: 'forbidden' }, 403);
   }
 
-  const project = await getProject(context.get('db'), projectId);
-  if (!project || project.user_id !== userId) {
+  try {
+    await requireProjectCapability(context.get('db'), projectId, userId, 'deploy');
+  } catch {
+    // This internal authorization oracle deliberately does not disclose
+    // whether the project or membership exists.
     return context.json({ error: 'forbidden' }, 403);
   }
 

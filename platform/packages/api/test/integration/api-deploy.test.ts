@@ -17,10 +17,12 @@ import {
   failStaleDeployments,
   getDeployment,
   getProject,
+  removeProjectMember,
   updateDeploymentStatus,
   type Db,
 } from '../../src/db.ts';
 import app from '../../src/index.ts';
+import * as projectAccess from '../../src/project-access.ts';
 import { validateManifestShape } from '../../src/routes/deploy.ts';
 import {
   builds,
@@ -29,6 +31,7 @@ import {
   domains,
   projects,
   projectMigrations,
+  projectMembers,
   projectSecrets,
   users,
 } from '../../src/schema.ts';
@@ -364,6 +367,158 @@ describe('POST /projects/:id/deploy', () => {
     const res = await app.fetch(await buildDeployRequest(env, project.id, bob.jwt), env);
     expect(res.status).toBe(403);
     expect(await res.json()).toEqual({ error: 'forbidden' });
+  });
+
+  it('denies readers and bills collaborator deploys to the project owner', async () => {
+    const owner = await createTestUser(env.db, 'team-owner');
+    const reader = await createTestUser(env.db, 'team-reader');
+    const collaborator = await createTestUser(
+      env.db,
+      'team-collaborator',
+      'github',
+      undefined,
+      'custom',
+    );
+    const project = await createTestProject(env.db, owner.id, 'team-deploy');
+    await env.db.insert(projectMembers).values([
+      {
+        project_id: project.id,
+        user_id: reader.id,
+        role: 'reader',
+        added_by_user_id: owner.id,
+      },
+      {
+        project_id: project.id,
+        user_id: collaborator.id,
+        role: 'collaborator',
+        added_by_user_id: owner.id,
+      },
+    ]);
+    mockCfApi();
+
+    const readerResponse = await app.fetch(
+      await buildDeployRequest(env, project.id, reader.jwt),
+      env,
+    );
+    expect(readerResponse.status).toBe(403);
+
+    const collaboratorResponse = await app.fetch(
+      await buildDeployRequest(env, project.id, collaborator.jwt),
+      env,
+    );
+    expect(collaboratorResponse.status).toBe(200);
+    const done = requireEvent<DoneEvent>(await readAllEvents(collaboratorResponse), 'done');
+    const deployment = await getDeployment(env.db, done.deployment);
+    expect(deployment).toMatchObject({
+      billing_user_id: owner.id,
+      initiated_by_user_id: collaborator.id,
+      status: 'live',
+    });
+    const routing = (await env.ROUTING.get(project.slug, 'json')) as { userId: string };
+    expect(routing.userId).toBe(owner.id);
+  });
+
+  it("preserves the owner's request suspension on a collaborator's first deploy", async () => {
+    const owner = await createTestUser(env.db, 'suspended-team-owner');
+    const collaborator = await createTestUser(env.db, 'suspended-team-collaborator');
+    const project = await createTestProject(env.db, owner.id, 'suspended-team-deploy');
+    await env.db.insert(projectMembers).values({
+      project_id: project.id,
+      user_id: collaborator.id,
+      role: 'collaborator',
+      added_by_user_id: owner.id,
+    });
+    await env.db
+      .update(users)
+      .set({ suspended_reason: 'requests_exceeded' })
+      .where(eq(users.id, owner.id));
+    expect(await env.ROUTING.get(project.slug)).toBeNull();
+    mockCfApi();
+
+    const response = await app.fetch(
+      await buildDeployRequest(env, project.id, collaborator.jwt),
+      env,
+    );
+
+    expect(response.status).toBe(200);
+    requireEvent<DoneEvent>(await readAllEvents(response), 'done');
+    expect(await env.ROUTING.get(project.slug, 'json')).toMatchObject({
+      projectId: project.id,
+      userId: owner.id,
+      suspended: 'requests_exceeded',
+    });
+  });
+
+  it("uses the owner's plan rather than a collaborator's plan", async () => {
+    const owner = await createTestUser(env.db, 'limited-owner');
+    const collaborator = await createTestUser(
+      env.db,
+      'unlimited-collaborator',
+      'github',
+      undefined,
+      'custom',
+    );
+    const project = await createTestProject(env.db, owner.id, 'owner-plan-deploy');
+    await env.db.insert(projectMembers).values({
+      project_id: project.id,
+      user_id: collaborator.id,
+      role: 'collaborator',
+      added_by_user_id: owner.id,
+    });
+    mockCfApi();
+
+    const response = await app.fetch(
+      await buildDeployRequest(env, project.id, collaborator.jwt, {
+        manifest: { version: 3, bindings: {}, limits: { cpuMs: 60_000 } },
+      }),
+      env,
+    );
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      message: 'limits.cpuMs 60000 exceeds your plan maximum of 10',
+    });
+  });
+
+  it('revokes a collaborator before final publication even with an already-started deploy', async () => {
+    const owner = await createTestUser(env.db, 'final-owner');
+    const collaborator = await createTestUser(env.db, 'final-collaborator');
+    const project = await createTestProject(env.db, owner.id, 'final-revocation');
+    await env.db.insert(projectMembers).values({
+      project_id: project.id,
+      user_id: collaborator.id,
+      role: 'collaborator',
+      added_by_user_id: owner.id,
+    });
+    mockCfApi();
+
+    const originalPut = env.ROUTING.put.bind(env.ROUTING);
+    let revoked = false;
+    vi.spyOn(env.ROUTING, 'put').mockImplementation(async (key, value, options) => {
+      await originalPut(key, value, options);
+      if (!revoked && key.startsWith('cutover-ready:')) {
+        revoked = true;
+        await removeProjectMember(env.db, {
+          projectId: project.id,
+          subjectUserId: collaborator.id,
+          actorUserId: owner.id,
+        });
+      }
+    });
+
+    const response = await app.fetch(
+      await buildDeployRequest(env, project.id, collaborator.jwt),
+      env,
+    );
+    expect(response.status).toBe(200);
+    const events = await readAllEvents(response);
+    expect(events.some((event) => isDeployEvent(event) && event.event === 'done')).toBe(false);
+    expect(requireEvent<ErrorEvent>(events, 'error').message).toBe('forbidden');
+    expect(revoked).toBe(true);
+    const [deployment] = await env.db
+      .select({ status: deployments.status })
+      .from(deployments)
+      .where(eq(deployments.project_id, project.id));
+    expect(deployment?.status).not.toBe('live');
   });
 
   it('succeeds with minimal deploy (no bindings, no assets)', async () => {
@@ -1867,6 +2022,66 @@ describe('POST /projects/:id/deploy', () => {
       }
     });
 
+    it('rechecks collaborator access under the project lock before dispatching migrations', async () => {
+      const owner = await createTestUser(env.db, 'migration-race-owner');
+      const collaborator = await createTestUser(env.db, 'migration-race-collaborator');
+      const project = await createTestProject(env.db, owner.id, 'migration-access-race');
+      await env.db.insert(projectMembers).values({
+        project_id: project.id,
+        user_id: collaborator.id,
+        role: 'collaborator',
+        added_by_user_id: owner.id,
+      });
+      mockCfApi({
+        createD1: () => cfSuccess({ uuid: 'd1-access-race', name: 'test-db' }),
+      });
+
+      let migrateCalls = 0;
+      const originalDispatch = env.DISPATCH;
+      env.DISPATCH = {
+        get: () => ({
+          fetch: async (req: Request) => {
+            const url = new URL(req.url);
+            if (url.pathname === '/__void/ready') {
+              await env.db
+                .update(projectMembers)
+                .set({ role: 'reader' })
+                .where(eq(projectMembers.user_id, collaborator.id));
+              return Response.json({ ready: true });
+            }
+            migrateCalls++;
+            return Response.json({
+              ok: true,
+              migrations: [{ name: '001_create_table.sql', applied: true, durationMs: 1 }],
+            });
+          },
+        }),
+      } as unknown as DispatchNamespace;
+
+      try {
+        const response = await app.fetch(
+          await buildDeployRequest(env, project.id, collaborator.jwt, {
+            manifest: {
+              version: 3,
+              bindings: { d1: ['DB'] },
+              migrations: { dialect: 'sqlite', pending: 1 },
+            },
+          }),
+          env,
+        );
+        expect(response.status).toBe(200);
+        const events = parseDeployStream(await response.text());
+        expect(events.at(-1)).toMatchObject({
+          event: 'error',
+          step: 'migration',
+          message: 'forbidden',
+        });
+        expect(migrateCalls).toBe(0);
+      } finally {
+        env.DISPATCH = originalDispatch;
+      }
+    });
+
     it('treats 404 from readiness probe as compatible (older worker without /__void/ready)', async () => {
       const user = await createTestUser(env.db);
       const project = await createTestProject(env.db, user.id, 'migrate-compat-404-test');
@@ -2147,6 +2362,110 @@ describe('POST /projects/:id/deploy', () => {
         expect(calls).toContain('POST /__void/migrate/app');
         expect(calls).toContain('POST /__void/migrate/auth');
         expect(calls).not.toContain('POST /__void/migrate');
+      } finally {
+        env.DISPATCH = originalDispatch;
+      }
+    });
+
+    it('persists confirmed app migrations before a protocol v2 auth failure', async () => {
+      const user = await createTestUser(env.db);
+      const project = await createTestProject(env.db, user.id, 'migrate-v2-auth-failure');
+      mockCfApi({
+        createD1: () => cfSuccess({ uuid: 'd1-v2-auth-failure', name: 'test-db' }),
+      });
+
+      const originalDispatch = env.DISPATCH;
+      env.DISPATCH = {
+        get: () => ({
+          fetch: async (req: Request) => {
+            const url = new URL(req.url);
+            if (url.pathname === '/__void/ready') {
+              return Response.json({ ready: true });
+            }
+            if (url.pathname === '/__void/migrate/capabilities') {
+              return Response.json({
+                protocolVersion: 2,
+                endpoints: {
+                  app: '/__void/migrate/app',
+                  auth: '/__void/migrate/auth',
+                  reconcile: '/__void/migrate/app/attempt/:attemptId',
+                },
+                dialect: 'sqlite',
+                classifierVersion: 1,
+                migrationListHash: 'sha256:auth-failure',
+                destructiveValidation: 'passed',
+              });
+            }
+            if (url.pathname === '/__void/migrate/app') {
+              return Response.json({
+                ok: true,
+                protocolVersion: 2,
+                attemptId: 'attempt_auth_failure',
+                confirmedApplied: ['001_create_table.sql'],
+                confirmedSkipped: [],
+                stability: 'stable',
+                migrations: [
+                  {
+                    name: '001_create_table.sql',
+                    applied: true,
+                    status: 'applied',
+                    stability: 'stable',
+                    durationMs: 2,
+                  },
+                ],
+              });
+            }
+            if (url.pathname === '/__void/migrate/auth') {
+              return Response.json({ ok: false, error: 'auth schema rejected' }, { status: 500 });
+            }
+            return new Response('unexpected', { status: 500 });
+          },
+        }),
+      } as unknown as DispatchNamespace;
+
+      try {
+        const response = await app.fetch(
+          await buildDeployRequest(env, project.id, user.jwt, {
+            manifest: {
+              version: 3,
+              auth: true,
+              bindings: { d1: ['DB'] },
+              migrations: {
+                dialect: 'sqlite',
+                pending: 1,
+                protocolVersion: 2,
+                classifierVersion: 1,
+                migrationListHash: 'sha256:auth-failure',
+                stability: 'stable',
+              },
+            },
+          }),
+          env,
+        );
+        expect(response.status).toBe(200);
+        expect(parseDeployStream(await response.text()).at(-1)).toMatchObject({
+          event: 'error',
+          step: 'migration',
+          message: 'auth migration failed: auth schema rejected',
+        });
+
+        const migrationRows = await env.db
+          .select({ name: projectMigrations.name })
+          .from(projectMigrations)
+          .where(eq(projectMigrations.project_id, project.id));
+        expect(migrationRows).toEqual([{ name: '001_create_table.sql' }]);
+
+        const [failedDeployment] = await env.db
+          .select({
+            appliedMigrations: deployments.applied_migrations,
+            status: deployments.status,
+          })
+          .from(deployments)
+          .where(eq(deployments.project_id, project.id))
+          .orderBy(desc(deployments.created_at))
+          .limit(1);
+        expect(failedDeployment?.status).toBe('failed');
+        expect(JSON.parse(failedDeployment!.appliedMigrations!)).toEqual(['001_create_table.sql']);
       } finally {
         env.DISPATCH = originalDispatch;
       }
@@ -2856,6 +3175,57 @@ describe('Deploy serialization (concurrent deploy guard)', () => {
       .from(deployments)
       .where(eq(deployments.id, 'dpl_cancel_active'));
     expect(stillCanceling?.status).toBe('canceling');
+  });
+
+  it('rechecks deploy access under the project lock before cancelling', async () => {
+    const owner = await createTestUser(env.db, 'cancel-race-owner');
+    const collaborator = await createTestUser(env.db, 'cancel-race-collaborator');
+    const project = await createTestProject(env.db, owner.id, 'cancel-access-race');
+    await env.db.insert(projectMembers).values({
+      project_id: project.id,
+      user_id: collaborator.id,
+      role: 'collaborator',
+      added_by_user_id: owner.id,
+    });
+    await env.db.insert(deployments).values({
+      id: 'dpl_cancel_access_race',
+      project_id: project.id,
+      status: 'uploading',
+      created_at: sql`now()`,
+    });
+
+    const requireCapability = projectAccess.requireProjectCapability;
+    let downgraded = false;
+    vi.spyOn(projectAccess, 'requireProjectCapability').mockImplementation(async (...args) => {
+      const result = await requireCapability(...args);
+      if (!downgraded && args[3] === 'deploy') {
+        downgraded = true;
+        await env.db
+          .update(projectMembers)
+          .set({ role: 'reader' })
+          .where(eq(projectMembers.user_id, collaborator.id));
+      }
+      return result;
+    });
+
+    const response = await app.fetch(
+      new Request(
+        `http://localhost/projects/${project.id}/deployments/dpl_cancel_access_race/cancel`,
+        {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${collaborator.jwt}` },
+        },
+      ),
+      env,
+    );
+
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({ error: 'forbidden' });
+    expect(downgraded).toBe(true);
+    expect(await getDeployment(env.db, 'dpl_cancel_access_race')).toMatchObject({
+      status: 'uploading',
+      error_message: null,
+    });
   });
 
   it('does not cancel a terminal deployment', async () => {

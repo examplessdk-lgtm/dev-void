@@ -5,6 +5,9 @@ const LOG_LEVELS = new Set(['error', 'warn', 'info', 'log', 'debug', 'all']);
 // `all`. Exact codes are range-bounded so a typo like `600` errors instead of
 // silently returning an empty result.
 const STATUS_FILTER = /^([1-5]xx|[1-5]\d{2}|all)$/;
+const TEAM_ROLES = new Set(['reader', 'collaborator', 'admin']);
+
+type TeamRole = 'reader' | 'collaborator' | 'admin';
 
 export const projectSubcommands: Array<SubcommandDef> = [
   { name: 'status', arg: '[name]', description: 'Show deployments (omit name for linked project)' },
@@ -14,6 +17,11 @@ export const projectSubcommands: Array<SubcommandDef> = [
     name: 'token',
     arg: '<create|list|renew|revoke>',
     description: 'Manage project-scoped CI deploy credentials',
+  },
+  {
+    name: 'team',
+    hint: 'list | invite | invitations | role | remove | revoke | leave | pending | accept | decline',
+    description: 'Manage project members and invitations',
   },
   { name: 'logs', description: 'Show runtime logs from the deployed project' },
   { name: 'requests', description: 'Show request-level traffic (status, method, timing)' },
@@ -31,6 +39,47 @@ export type ProjectArgs =
   | { subcommand: 'status'; name: string }
   | { subcommand: 'link'; name: string }
   | { subcommand: 'list' }
+  | { subcommand: 'team'; action: '' }
+  | {
+      subcommand: 'team';
+      action: 'list' | 'invitations' | 'leave';
+      projectSlug: string;
+    }
+  | {
+      subcommand: 'team';
+      action: 'invite';
+      email: string;
+      role: TeamRole;
+      projectSlug: string;
+    }
+  | {
+      subcommand: 'team';
+      action: 'role';
+      userId: string;
+      role: TeamRole;
+      projectSlug: string;
+    }
+  | {
+      subcommand: 'team';
+      action: 'remove';
+      userId: string;
+      projectSlug: string;
+    }
+  | {
+      subcommand: 'team';
+      action: 'revoke';
+      invitationId: string;
+      projectSlug: string;
+    }
+  | {
+      subcommand: 'team';
+      action: 'pending';
+    }
+  | {
+      subcommand: 'team';
+      action: 'accept' | 'decline';
+      invitationId: string;
+    }
   | {
       subcommand: 'token';
       action: 'create' | 'list' | 'renew' | 'revoke';
@@ -137,6 +186,10 @@ export function parseProjectArgs(args: Array<string>): ProjectArgs {
     };
   }
 
+  if (subcommand === 'team') {
+    return parseTeamArgs(rest);
+  }
+
   if (subcommand === 'logs') {
     let filter = '';
     let range = '1h';
@@ -237,6 +290,114 @@ export function parseProjectArgs(args: Array<string>): ProjectArgs {
   }
 
   throw new Error(
-    'project: Usage: void project <status|link|list|token|logs|requests|rollback|cancel|delete|purge-cache>.',
+    'project: Usage: void project <status|link|list|team|token|logs|requests|rollback|cancel|delete|purge-cache>.',
   );
+}
+
+function parseTeamArgs(rest: Array<string>): ProjectArgs {
+  const [action, ...args] = rest;
+  const usage =
+    'project: Usage: void project team <list|invite|invitations|role|remove|revoke|leave|pending|accept|decline>.';
+  if (!action) {
+    return { subcommand: 'team', action: '' };
+  }
+
+  const positionals: Array<string> = [];
+  let projectSlug = '';
+  let role = '';
+  for (let index = 0; index < args.length; index++) {
+    const arg = args[index]!;
+    if (arg === '--project' || arg === '--role') {
+      const value = args[++index];
+      if (!value || value.startsWith('-')) {
+        throw new Error(`project: ${arg} requires a value.`);
+      }
+      if (arg === '--project') {
+        if (projectSlug) {
+          throw new Error("project: Duplicate flag '--project'.");
+        }
+        projectSlug = value;
+      } else {
+        if (role) {
+          throw new Error("project: Duplicate flag '--role'.");
+        }
+        role = value;
+      }
+    } else if (arg.startsWith('-')) {
+      throw new Error(`project: Unknown flag '${arg}'.`);
+    } else {
+      positionals.push(arg);
+    }
+  }
+
+  if (role && !TEAM_ROLES.has(role)) {
+    throw new Error(`project: Invalid role '${role}'. Use one of reader|collaborator|admin.`);
+  }
+  if (['pending', 'accept', 'decline'].includes(action) && projectSlug) {
+    throw new Error(`project: --project is not used with team ${action}.`);
+  }
+
+  if (action === 'list' || action === 'invitations' || action === 'leave') {
+    if (positionals.length || role) {
+      throw new Error(`project: Usage: void project team ${action} [--project <slug>].`);
+    }
+    return { subcommand: 'team', action, projectSlug };
+  }
+  if (action === 'invite') {
+    if (positionals.length !== 1 || !role) {
+      throw new Error(
+        'project: Usage: void project team invite <registered-email> --role <reader|collaborator|admin> [--project <slug>].',
+      );
+    }
+    const email = positionals[0]!;
+    if (email.length > 320 || !/^[^\s@]+@[^\s@]+$/.test(email)) {
+      throw new Error('project: Invitee must be a registered email address.');
+    }
+    return { subcommand: 'team', action, email, role: role as TeamRole, projectSlug };
+  }
+  if (action === 'role') {
+    if (positionals.length !== 2 || role) {
+      throw new Error(
+        'project: Usage: void project team role <user-id> <reader|collaborator|admin> [--project <slug>].',
+      );
+    }
+    const nextRole = positionals[1]!;
+    if (!TEAM_ROLES.has(nextRole)) {
+      throw new Error(`project: Invalid role '${nextRole}'. Use one of reader|collaborator|admin.`);
+    }
+    return {
+      subcommand: 'team',
+      action,
+      userId: positionals[0]!,
+      role: nextRole as TeamRole,
+      projectSlug,
+    };
+  }
+  if (action === 'remove') {
+    if (positionals.length !== 1 || role) {
+      throw new Error('project: Usage: void project team remove <user-id> [--project <slug>].');
+    }
+    return { subcommand: 'team', action, userId: positionals[0]!, projectSlug };
+  }
+  if (action === 'revoke') {
+    if (positionals.length !== 1 || role) {
+      throw new Error(
+        'project: Usage: void project team revoke <invitation-id> [--project <slug>].',
+      );
+    }
+    return { subcommand: 'team', action, invitationId: positionals[0]!, projectSlug };
+  }
+  if (action === 'pending') {
+    if (positionals.length || role) {
+      throw new Error('project: Usage: void project team pending.');
+    }
+    return { subcommand: 'team', action };
+  }
+  if (action === 'accept' || action === 'decline') {
+    if (positionals.length !== 1 || role) {
+      throw new Error(`project: Usage: void project team ${action} <invitation-id>.`);
+    }
+    return { subcommand: 'team', action, invitationId: positionals[0]! };
+  }
+  throw new Error(usage);
 }

@@ -1,6 +1,7 @@
 import { eq, sql } from 'drizzle-orm';
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vite-plus/test';
 import { scheduled } from '../../src/index.ts';
+import { transferOperatorProjectOwner } from '../../src/operator/tenant-service.ts';
 import { builds, domains, projects } from '../../src/schema.ts';
 import {
   setupEnv,
@@ -115,15 +116,26 @@ describe('scheduled()', () => {
     },
   );
 
-  it('skips unlimited plan users', async () => {
+  it('rolls over unlimited plan counters before replacing their project set', async () => {
     const { id } = await createTestUser(env.db, 'sponsor', 'github', undefined, 'sponsored');
     const proj = await createTestProject(env.db, id);
     await env.ROUTING.put(proj.slug, JSON.stringify({ worker: 'test' }));
+    const paths: Array<string> = [];
+    const usageCounter = {
+      idFromName: (name: string) => name,
+      get: () => ({
+        fetch: async (request: Request) => {
+          paths.push(new URL(request.url).pathname);
+          return new URL(request.url).pathname === '/rollover'
+            ? Response.json({ rolled: true, requestsSuspended: false })
+            : Response.json({ ok: true });
+        },
+      }),
+    } as unknown as DurableObjectNamespace;
 
-    // Should complete without errors (skips unlimited plans for usage counting)
-    await scheduled(mockController, makeBindings(env), mockCtx);
+    await scheduled(mockController, { ...makeBindings(env), USAGE_COUNTER: usageCounter }, mockCtx);
 
-    // userId backfill still runs for all plans (needed for 5xx alerting)
+    expect(paths).toEqual(['/rollover', '/init']);
     const routing = JSON.parse((await env.ROUTING.get(proj.slug))!);
     expect(routing.userId).toBe(id);
   });
@@ -559,5 +571,96 @@ describe('scheduled()', () => {
     );
 
     expect(JSON.parse((await env.ROUTING.get(proj.slug))!).suspended).toBe('requests_exceeded');
+  });
+
+  it('does not clear a transferred project from the former owner rollover snapshot', async () => {
+    const formerOwner = await createTestUser(
+      env.db,
+      'rollover-former',
+      'github',
+      undefined,
+      'free',
+    );
+    const newOwner = await createTestUser(env.db, 'rollover-current', 'github', undefined, 'free');
+    const project = await createTestProject(env.db, formerOwner.id, 'rollover-transferred');
+    await env.ROUTING.put(
+      project.slug,
+      JSON.stringify({
+        projectId: project.id,
+        userId: newOwner.id,
+        suspended: 'requests_exceeded',
+      }),
+    );
+    let transferred = false;
+    const usageCounter = {
+      idFromName: (name: string) => ({ toString: () => name }),
+      get: (id: { toString(): string }) => ({
+        fetch: async (request: Request) => {
+          if (
+            id.toString() === formerOwner.id &&
+            new URL(request.url).pathname === '/rollover' &&
+            !transferred
+          ) {
+            transferred = true;
+            await env.db
+              .update(projects)
+              .set({ user_id: newOwner.id })
+              .where(eq(projects.id, project.id));
+          }
+          return new URL(request.url).pathname === '/rollover'
+            ? Response.json({ rolled: false, requestsSuspended: false })
+            : Response.json({ ok: true });
+        },
+      }),
+    } as unknown as DurableObjectNamespace;
+
+    await scheduled(mockController, { ...makeBindings(env), USAGE_COUNTER: usageCounter }, mockCtx);
+
+    expect(transferred).toBe(true);
+    expect(JSON.parse((await env.ROUTING.get(project.slug))!)).toMatchObject({
+      userId: newOwner.id,
+      suspended: 'requests_exceeded',
+    });
+  });
+
+  it('reconciles an empty project set after the last project transfers away', async () => {
+    const formerOwner = await createTestUser(env.db, 'empty-former-owner');
+    const newOwner = await createTestUser(env.db, 'empty-current-owner');
+    const operator = await createTestUser(env.db, 'empty-transfer-operator');
+    const project = await createTestProject(env.db, formerOwner.id, 'empty-transferred');
+    await transferOperatorProjectOwner(
+      {
+        env,
+        get: (key: string) => (key === 'db' ? env.db : operator),
+      } as never,
+      project.id,
+      newOwner.id,
+    );
+
+    const initBodies = new Map<string, Record<string, unknown>>();
+    const usageCounter = {
+      idFromName: (name: string) => ({ toString: () => name }),
+      get: (id: { toString(): string }) => ({
+        fetch: async (request: Request) => {
+          if (new URL(request.url).pathname === '/init') {
+            initBodies.set(id.toString(), await request.json<Record<string, unknown>>());
+            return Response.json({ ok: true });
+          }
+          return Response.json({ rolled: false, requestsSuspended: false });
+        },
+      }),
+    } as unknown as DurableObjectNamespace;
+
+    await scheduled(mockController, { ...makeBindings(env), USAGE_COUNTER: usageCounter }, mockCtx);
+
+    expect(initBodies.get(formerOwner.id)).toMatchObject({
+      userId: formerOwner.id,
+      projectSlugs: {},
+      projectOwnershipStarts: {},
+    });
+    expect(initBodies.get(newOwner.id)).toMatchObject({
+      userId: newOwner.id,
+      projectSlugs: { [project.id]: project.slug },
+    });
   });
 });

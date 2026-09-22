@@ -33,6 +33,22 @@ export async function runProjectCommand(root: string, args: ProjectArgs): Promis
     const { runProjectTokenCommand } = await import('./project-token.ts');
     return runProjectTokenCommand(root, args);
   }
+  if (args.subcommand === 'team') {
+    if (args.action === '') {
+      const { printHelpPage } = await import('./help.ts');
+      printHelpPage(['project', 'team']);
+      return;
+    }
+    const accountInvitationAction =
+      args.action === 'pending' || args.action === 'accept' || args.action === 'decline';
+    if (cloudflare && !accountInvitationAction) {
+      throw new Error(
+        'project: Teams are available only for projects hosted on a Void platform, not direct Cloudflare deployments.',
+      );
+    }
+    const { runProjectTeamCommand } = await import('./project-team.ts');
+    return runProjectTeamCommand(root, args);
+  }
   if (args.subcommand === 'logs') {
     const { runLogsCommand } = await import('./logs.ts');
     return runLogsCommand(

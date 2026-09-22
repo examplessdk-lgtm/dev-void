@@ -124,6 +124,14 @@ describe('operator argument and help coverage', () => {
       plan: true,
       body: { cursor: '{"phase":"resources"}' },
     });
+    expect(
+      parsePlatformArgs(['project', 'owner', 'project / 1', 'user-2', '--plan']),
+    ).toMatchObject({
+      path: '/projects/project%20%2F%201/owner',
+      method: 'POST',
+      body: { userId: 'user-2' },
+      plan: true,
+    });
   });
   it('routes the email group to the operator email endpoints', () => {
     expect(parseOperatorArgs(['email', 'policy'])).toMatchObject({

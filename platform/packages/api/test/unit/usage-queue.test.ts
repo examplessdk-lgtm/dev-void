@@ -8,6 +8,7 @@ vi.mock('cloudflare:workers', () => ({
 // Mock db.ts (createDb is called inside processUsageEventBatch).
 const getUserMock = vi.fn();
 const getProjectsByIdsMock = vi.fn();
+const getProjectOwnershipPeriodsByProjectIdsMock = vi.fn();
 vi.mock('../../src/db.ts', () => ({
   createDb: () => ({ __mock: 'db' }),
   getUser: async (...args: Array<unknown>) => {
@@ -15,6 +16,12 @@ vi.mock('../../src/db.ts', () => ({
     return user ? { created_at: '2020-01-01T00:00:00.000Z', ...user } : user;
   },
   getProjectsByIds: (...args: Array<unknown>) => getProjectsByIdsMock(...args),
+  getProjectOwnershipPeriodsByProjectIds: (...args: Array<unknown>) =>
+    getProjectOwnershipPeriodsByProjectIdsMock(...args),
+  getProjectUsageOwnershipSnapshot: async (...args: Array<unknown>) => ({
+    projects: await getProjectsByIdsMock(...args),
+    ownershipPeriods: await getProjectOwnershipPeriodsByProjectIdsMock(...args),
+  }),
   suspendUser: vi.fn(),
   unsuspendUserIfReason: vi.fn(),
 }));
@@ -123,9 +130,16 @@ describe('processUsageEventBatch — sandbox events', () => {
   beforeEach(() => {
     getUserMock.mockReset();
     getProjectsByIdsMock.mockReset();
+    getProjectOwnershipPeriodsByProjectIdsMock.mockReset();
     getProjectsByIdsMock.mockImplementation(async (_db, ids: ReadonlyArray<string>) =>
-      ids.map((id) => ({ id, user_id: 'u1', slug: `slug-${id}` })),
+      ids.map((id) => ({
+        id,
+        user_id: 'u1',
+        slug: `slug-${id}`,
+        created_at: '2020-01-01T00:00:00.000Z',
+      })),
     );
+    getProjectOwnershipPeriodsByProjectIdsMock.mockResolvedValue([]);
   });
 
   it('forwards a sandbox event with userId to the DO', async () => {
@@ -173,6 +187,8 @@ describe('processUsageEventBatch — trusted provenance', () => {
   beforeEach(() => {
     getUserMock.mockReset();
     getProjectsByIdsMock.mockReset();
+    getProjectOwnershipPeriodsByProjectIdsMock.mockReset();
+    getProjectOwnershipPeriodsByProjectIdsMock.mockResolvedValue([]);
   });
 
   it('ignores expired signed sandbox intervals before their replay receipts can be pruned', async () => {
@@ -247,6 +263,104 @@ describe('processUsageEventBatch — trusted provenance', () => {
     expect(batch.calls.ackAll).toBe(1);
   });
 
+  it('bills delayed events to the owner at the queue timestamp', async () => {
+    const stubFetch = vi.fn(async () => new Response(null, { status: 200 }));
+    getProjectsByIdsMock.mockResolvedValue([
+      {
+        id: 'p1',
+        user_id: 'new-owner',
+        slug: 'canonical-slug',
+        created_at: '2026-01-01T00:00:00.000Z',
+      },
+    ]);
+    getProjectOwnershipPeriodsByProjectIdsMock.mockResolvedValue([
+      {
+        id: 'period-old',
+        project_id: 'p1',
+        owner_user_id: 'old-owner',
+        starts_at: '2026-01-01T00:00:00.000Z',
+        ends_at: '2026-06-01T00:00:00.000Z',
+        changed_by_user_id: null,
+      },
+      {
+        id: 'period-new',
+        project_id: 'p1',
+        owner_user_id: 'new-owner',
+        starts_at: '2026-06-01T00:00:00.000Z',
+        ends_at: null,
+        changed_by_user_id: 'admin',
+      },
+    ]);
+    getUserMock.mockImplementation(async (_db, userId) => ({ id: userId, plan: 'solo' }));
+    const event = {
+      projectId: 'p1',
+      requests: 1,
+      responseBytes: 12,
+    } as UsageEvent;
+    const batch = await makeSignedBatch(
+      [event, event],
+      [Date.parse('2026-05-31T23:59:59.000Z'), Date.parse('2026-06-01T00:00:00.000Z')],
+    );
+
+    await processUsageEventBatch(batch as never, makeEnv(stubFetch) as never);
+
+    expect(getUserMock).toHaveBeenCalledWith(expect.anything(), 'old-owner');
+    expect(getUserMock).toHaveBeenCalledWith(expect.anything(), 'new-owner');
+    const payloads = await Promise.all(
+      fetchCalls(stubFetch).map((call) => call[0].json() as Promise<{ events: Array<UsageEvent> }>),
+    );
+    expect(payloads.flatMap((payload) => payload.events)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          userId: 'old-owner',
+          currentOwner: false,
+          ownershipStartedAt: '2026-01-01T00:00:00.000Z',
+        }),
+        expect.objectContaining({
+          userId: 'new-owner',
+          currentOwner: true,
+          ownershipStartedAt: '2026-06-01T00:00:00.000Z',
+        }),
+      ]),
+    );
+    expect(batch.calls.ackAll).toBe(1);
+  });
+
+  it('bills queued usage without reattaching a project being deleted', async () => {
+    const stubFetch = vi.fn(async () => new Response(null, { status: 200 }));
+    getProjectsByIdsMock.mockResolvedValue([
+      {
+        id: 'p1',
+        user_id: 'owner',
+        slug: 'canonical-slug',
+        status: 'deleting',
+        created_at: '2026-01-01T00:00:00.000Z',
+      },
+    ]);
+    getProjectOwnershipPeriodsByProjectIdsMock.mockResolvedValue([
+      {
+        id: 'period',
+        project_id: 'p1',
+        owner_user_id: 'owner',
+        starts_at: '2026-01-01T00:00:00.000Z',
+        ends_at: null,
+        changed_by_user_id: null,
+      },
+    ]);
+    getUserMock.mockResolvedValue({ id: 'owner', plan: 'solo' });
+    const batch = await makeSignedBatch([
+      { projectId: 'p1', requests: 1, responseBytes: 12 } as UsageEvent,
+    ]);
+
+    await processUsageEventBatch(batch as never, makeEnv(stubFetch) as never);
+
+    const payload = (await fetchCalls(stubFetch)[0][0].json()) as {
+      events: Array<UsageEvent>;
+    };
+    expect(payload.events[0]).toMatchObject({ userId: 'owner', currentOwner: false });
+    expect(batch.calls.ackAll).toBe(1);
+  });
+
   it('rejects a correctly signed event with invalid quantities', async () => {
     const stubFetch = vi.fn(async () => new Response(null, { status: 200 }));
     const invalid = {
@@ -268,8 +382,15 @@ describe('processUsageEventBatch — 5xx alert window', () => {
   beforeEach(() => {
     getUserMock.mockReset();
     getProjectsByIdsMock.mockReset();
+    getProjectOwnershipPeriodsByProjectIdsMock.mockReset();
+    getProjectOwnershipPeriodsByProjectIdsMock.mockResolvedValue([]);
     getProjectsByIdsMock.mockImplementation(async (_db, ids: ReadonlyArray<string>) =>
-      ids.map((id) => ({ id, user_id: 'u1', slug: id })),
+      ids.map((id) => ({
+        id,
+        user_id: 'u1',
+        slug: id,
+        created_at: '2020-01-01T00:00:00.000Z',
+      })),
     );
   });
 
@@ -354,7 +475,13 @@ describe('processUsageEventBatch — 5xx alert window', () => {
     const counterBody = (await fetchCalls(stubFetch)[0][0].json()) as {
       events: Array<UsageEvent>;
     };
-    expect(counterBody.events).toEqual(platformFailures);
+    expect(counterBody.events).toEqual(
+      platformFailures.map((event) => ({
+        ...event,
+        currentOwner: true,
+        ownershipStartedAt: '2020-01-01T00:00:00.000Z',
+      })),
+    );
     expect(errorStubFetch).not.toHaveBeenCalled();
     expect(batch.calls.ackAll).toBe(1);
   });

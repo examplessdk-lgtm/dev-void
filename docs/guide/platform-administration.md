@@ -185,6 +185,19 @@ void platform project show <project-id>
 
 Project details include resources, domains, and recent builds and deployments. The [command reference](../reference/cli.md#operator-commands) also covers suspending and restoring users, deleting projects, and removing accounts.
 
+### Transferring Project Ownership
+
+Only an installation administrator can change a project's owner. The new owner must already have an account on this platform. Preview the transfer before applying it:
+
+```sh
+void platform project owner <project-id> <new-owner-user-id> --plan
+void platform project owner <project-id> <new-owner-user-id> --yes
+```
+
+The preview shows both owners, their plans and suspension state, active work that blocks the transfer, and the changes to routing and usage counters. Wait for or cancel any active deploy, rollback, or build before retrying.
+
+After the transfer, the former owner becomes a project administrator. Existing project-scoped CI deploy credentials are revoked; create replacements as the new owner. The new owner's plan and limits apply immediately. Usage before the transfer remains charged to the former owner; later usage is charged to the new owner. If an apply reports partial convergence, inspect the project and operator event log before repeating it.
+
 New users on a self-hosted installation start with the `custom` profile, which
 does not cap application requests, AI usage, deployment frequency, or retained
 Worker deployments. Named profiles such as `pro` apply the platform's quota and

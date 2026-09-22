@@ -11,3 +11,9 @@ const USAGE_LIMIT_REASONS = new Set([REASON_REQUESTS_EXCEEDED, REASON_SANDBOX_RU
 export function isAdminSuspended(suspendedReason: string | null): boolean {
   return suspendedReason !== null && !USAGE_LIMIT_REASONS.has(suspendedReason);
 }
+
+export function routingSuspensionReason(suspendedReason: string | null): string | null {
+  return suspendedReason === REASON_REQUESTS_EXCEEDED || isAdminSuspended(suspendedReason)
+    ? suspendedReason
+    : null;
+}

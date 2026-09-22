@@ -11,6 +11,9 @@ import type {
   oauthAccounts,
   platformEvents,
   projectDatabaseCredentials,
+  projectInvitations,
+  projectMembers,
+  projectOwnershipPeriods,
   projects,
   projectSecrets,
   resources,
@@ -49,10 +52,26 @@ export type {
 } from '@void/deploy-core';
 
 export type InvitationStatus = 'pending' | 'accepted' | 'revoked';
+export type ProjectMemberRole = 'reader' | 'collaborator' | 'admin';
+export type ProjectRole = ProjectMemberRole | 'owner';
+export type ProjectCapability = 'read' | 'deploy' | 'configure' | 'settings' | 'members' | 'delete';
+export type ProjectInvitationStatus = 'pending' | 'accepted' | 'declined' | 'revoked' | 'expired';
+export type ProjectAccessEventAction =
+  | 'invited'
+  | 'invitation_resent'
+  | 'accepted'
+  | 'declined'
+  | 'invitation_revoked'
+  | 'role_changed'
+  | 'member_removed'
+  | 'left';
 
 export type User = InferSelectModel<typeof users>;
 export type OAuthAccount = InferSelectModel<typeof oauthAccounts>;
 export type Project = InferSelectModel<typeof projects>;
+export type ProjectMember = InferSelectModel<typeof projectMembers>;
+export type ProjectInvitation = InferSelectModel<typeof projectInvitations>;
+export type ProjectOwnershipPeriod = InferSelectModel<typeof projectOwnershipPeriods>;
 export type Deployment = InferSelectModel<typeof deployments>;
 export type DeploymentStatus = Deployment['status'];
 export type ProjectSecret = InferSelectModel<typeof projectSecrets>;

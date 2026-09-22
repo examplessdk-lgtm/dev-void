@@ -44,7 +44,7 @@ export type PlatformRuntimeManifest = Readonly<{
   schemaVersion: 2;
   sourceRevision: string | null;
   /** Queue payload contract shared by the API consumer and trusted producers. */
-  usageProtocolVersion: 0 | 1;
+  usageProtocolVersion: 0 | 1 | 2;
 }>;
 
 export type PlatformRuntime = Readonly<{
@@ -219,14 +219,17 @@ function parseSafetyProtocols(value: unknown): PlatformRuntimeManifest['safetyPr
   return { sandboxDrain: protocols.sandboxDrain };
 }
 
-function usageProtocolVersion(value: unknown): 0 | 1 {
+function usageProtocolVersion(value: unknown): 0 | 1 | 2 {
   if (value === undefined || value === 0) {
     return 0;
   }
   if (value === 1) {
     return 1;
   }
-  throw new Error('runtime manifest usageProtocolVersion must be 0 or 1');
+  if (value === 2) {
+    return 2;
+  }
+  throw new Error('runtime manifest usageProtocolVersion must be 0, 1, or 2');
 }
 
 export function getPlatformRuntimeDirectory(): string {

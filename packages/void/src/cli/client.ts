@@ -115,6 +115,54 @@ export type ProjectResponse = {
   type: string;
   created_at: string;
   custom_domain: string | null;
+  role?: ProjectRole;
+  owner?: {
+    id: string;
+    login?: string;
+  };
+};
+
+export type ProjectRole = 'reader' | 'collaborator' | 'admin' | 'owner';
+
+export type ProjectMemberResponse = {
+  role: ProjectRole;
+  created_at: string;
+  user: {
+    id: string;
+    login: string | null;
+  };
+};
+
+export type ProjectInvitationResponse = {
+  id: string;
+  target_email?: string;
+  role: Exclude<ProjectRole, 'owner'>;
+  status?: 'pending' | 'accepted' | 'declined' | 'revoked' | 'expired';
+  created_at: string;
+  expires_at: string;
+  accepted_at?: string | null;
+  revoked_at?: string | null;
+  project?: {
+    id: string;
+    slug: string;
+    owner?: {
+      id: string;
+      login: string | null;
+    };
+  };
+  target?: {
+    id: string;
+    login: string | null;
+    email: string | null;
+  };
+  invited_by?: {
+    id: string;
+    login: string | null;
+  };
+};
+
+type ProjectInvitationDelivery = {
+  status: 'sent' | 'not_configured' | 'rate_limited' | 'failed';
 };
 
 export type ProjectDeployCredentialResponse = {
@@ -593,6 +641,48 @@ export class PlatformClient {
     return res.json();
   }
 
+  async listProjectMembers(projectId: string): Promise<Array<ProjectMemberResponse>> {
+    const res = await this.request(`${this.baseUrl}/projects/${projectId}/members`, {
+      headers: { ...this.authHeaders },
+    });
+    if (!res.ok) {
+      await throwPlatformApiError('Failed to list project members', res);
+    }
+    const body = (await res.json()) as { members: Array<ProjectMemberResponse> };
+    return body.members;
+  }
+
+  async listProjectInvitations(projectId: string): Promise<Array<ProjectInvitationResponse>> {
+    const res = await this.request(`${this.baseUrl}/projects/${projectId}/invitations`, {
+      headers: { ...this.authHeaders },
+    });
+    if (!res.ok) {
+      await throwPlatformApiError('Failed to list project invitations', res);
+    }
+    const body = (await res.json()) as { invitations: Array<ProjectInvitationResponse> };
+    return body.invitations;
+  }
+
+  async inviteProjectMember(
+    projectId: string,
+    email: string,
+    role: Exclude<ProjectRole, 'owner'>,
+  ): Promise<{
+    invitation: ProjectInvitationResponse;
+    refreshed: boolean;
+    delivery: ProjectInvitationDelivery;
+  }> {
+    const res = await this.request(`${this.baseUrl}/projects/${projectId}/invitations`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...this.authHeaders },
+      body: JSON.stringify({ email, role }),
+    });
+    if (!res.ok) {
+      await throwPlatformApiError('Failed to invite project member', res);
+    }
+    return res.json();
+  }
+
   async renewProjectToken(
     projectId: string,
     credentialId: string,
@@ -612,6 +702,25 @@ export class PlatformClient {
     return res.json();
   }
 
+  async updateProjectMemberRole(
+    projectId: string,
+    userId: string,
+    role: Exclude<ProjectRole, 'owner'>,
+  ): Promise<{ member: ProjectMemberResponse }> {
+    const res = await this.request(
+      `${this.baseUrl}/projects/${projectId}/members/${encodeURIComponent(userId)}`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', ...this.authHeaders },
+        body: JSON.stringify({ role }),
+      },
+    );
+    if (!res.ok) {
+      await throwPlatformApiError('Failed to change project member role', res);
+    }
+    return res.json();
+  }
+
   async revokeProjectToken(projectId: string, credentialId: string): Promise<{ ok: boolean }> {
     const res = await this.request(
       `${this.baseUrl}/projects/${projectId}/tokens/${encodeURIComponent(credentialId)}`,
@@ -621,6 +730,60 @@ export class PlatformClient {
       await throwPlatformApiError('Failed to revoke project token', res);
     }
     return res.json();
+  }
+
+  async removeProjectMember(projectId: string, userId: string): Promise<void> {
+    const res = await this.request(
+      `${this.baseUrl}/projects/${projectId}/members/${encodeURIComponent(userId)}`,
+      { method: 'DELETE', headers: { ...this.authHeaders } },
+    );
+    if (!res.ok) {
+      await throwPlatformApiError('Failed to remove project member', res);
+    }
+  }
+
+  async revokeProjectInvitation(projectId: string, invitationId: string): Promise<void> {
+    const res = await this.request(
+      `${this.baseUrl}/projects/${projectId}/invitations/${encodeURIComponent(invitationId)}`,
+      { method: 'DELETE', headers: { ...this.authHeaders } },
+    );
+    if (!res.ok) {
+      await throwPlatformApiError('Failed to revoke project invitation', res);
+    }
+  }
+
+  async leaveProject(projectId: string): Promise<void> {
+    const res = await this.request(`${this.baseUrl}/projects/${projectId}/leave`, {
+      method: 'POST',
+      headers: { ...this.authHeaders },
+    });
+    if (!res.ok) {
+      await throwPlatformApiError('Failed to leave project', res);
+    }
+  }
+
+  async listPendingProjectInvitations(): Promise<Array<ProjectInvitationResponse>> {
+    const res = await this.request(`${this.baseUrl}/me/project-invitations`, {
+      headers: { ...this.authHeaders },
+    });
+    if (!res.ok) {
+      await throwPlatformApiError('Failed to list pending project invitations', res);
+    }
+    const body = (await res.json()) as { invitations: Array<ProjectInvitationResponse> };
+    return body.invitations;
+  }
+
+  async respondToProjectInvitation(
+    invitationId: string,
+    action: 'accept' | 'decline',
+  ): Promise<void> {
+    const res = await this.request(
+      `${this.baseUrl}/project-invitations/${encodeURIComponent(invitationId)}/${action}`,
+      { method: 'POST', headers: { ...this.authHeaders } },
+    );
+    if (!res.ok) {
+      await throwPlatformApiError(`Failed to ${action} project invitation`, res);
+    }
   }
 
   async listDeployments(projectId: string): Promise<DeploymentListResponse> {

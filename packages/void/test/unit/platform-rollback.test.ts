@@ -28,6 +28,7 @@ function runtime(input: {
   rollbackSafeFrom?: ReadonlyArray<{ platformVersion: string; schemaDigest: string }>;
   safety?: 0 | 1;
   schemaDigest: string;
+  usageProtocolVersion?: 0 | 1 | 2;
 }): PlatformRuntime {
   return {
     directory: `/runtime/${input.digest.slice(0, 4)}`,
@@ -45,7 +46,7 @@ function runtime(input: {
       safetyProtocols: { sandboxDrain: input.safety ?? 1 },
       schemaVersion: 2,
       sourceRevision: null,
-      usageProtocolVersion: 1,
+      usageProtocolVersion: input.usageProtocolVersion ?? 1,
     },
     manifestSha256: input.digest,
     source: 'custom',
@@ -66,6 +67,7 @@ function installed(source: PlatformRuntime) {
       ownershipNonce: '0123456789abcdef0123456789abcdef',
       platformVersion: source.manifest.platformVersion,
       safetyProtocols: source.manifest.safetyProtocols,
+      usageProtocolVersion: source.manifest.usageProtocolVersion,
     }),
     databaseSchemaDigest: source.manifest.database.schemaDigest,
     runtime: {
@@ -161,6 +163,37 @@ describe('platform post-success rollback', () => {
         installed(authenticatedSource),
         authenticatedTarget,
         authenticatedSource,
+      ),
+    ).not.toThrow();
+  });
+  it('blocks rollback below the installed ownership-aware usage protocol', () => {
+    const target = runtime({
+      digest: 'a'.repeat(64),
+      migrations: [firstMigration],
+      platformVersion: '1.0.0',
+      schemaDigest: 'c'.repeat(64),
+      usageProtocolVersion: 1,
+    });
+    const source = runtime({
+      digest: 'b'.repeat(64),
+      migrations: [firstMigration, secondMigration],
+      platformVersion: '1.1.0',
+      rollbackSafeFrom: [{ platformVersion: '1.0.0', schemaDigest: 'c'.repeat(64) }],
+      schemaDigest: 'd'.repeat(64),
+      usageProtocolVersion: 2,
+    });
+
+    expect(() => assertPlatformRollbackCompatibility(installed(source), target, source)).toThrow(
+      'ownership-aware usage attribution',
+    );
+    expect(() =>
+      assertPlatformRollbackCompatibility(
+        installed(source),
+        {
+          ...target,
+          manifest: { ...target.manifest, usageProtocolVersion: 2 },
+        },
+        source,
       ),
     ).not.toThrow();
   });

@@ -1,9 +1,10 @@
 import { and, desc, eq, isNull } from 'drizzle-orm';
 import { Hono, type Context } from 'hono';
 import { PROJECT_CREDENTIAL_MAX_DAYS, signProjectCredentialToken } from '../auth/deploy-token.ts';
-import { getProject } from '../db.ts';
+import { getProject, type DbOrTx } from '../db.ts';
 import type { ApiEnv } from '../env.ts';
-import { projectDeployCredentials } from '../schema.ts';
+import { projectDeployCredentials, projects } from '../schema.ts';
+import type { Project } from '../types.ts';
 
 const app = new Hono<ApiEnv>();
 
@@ -24,14 +25,37 @@ function parseName(value: unknown): string {
   return name;
 }
 
-async function ownedProject(context: Context<ApiEnv>) {
+async function ownedProject(context: Context<ApiEnv>): Promise<Project | 'forbidden' | null> {
   const projectId = context.req.param('projectId');
   if (!projectId) {
     return null;
   }
   const project = await getProject(context.get('db'), projectId);
-  if (!project || project.user_id !== context.get('user').id) {
+  if (!project) {
     return null;
+  }
+  if (project.user_id !== context.get('user').id) {
+    return 'forbidden';
+  }
+  return project;
+}
+
+async function lockOwnedProject(
+  db: DbOrTx,
+  projectId: string,
+  userId: string,
+): Promise<Project | 'forbidden' | null> {
+  const [project] = await db
+    .select()
+    .from(projects)
+    .where(eq(projects.id, projectId))
+    .for('update')
+    .limit(1);
+  if (!project) {
+    return null;
+  }
+  if (project.user_id !== userId) {
+    return 'forbidden';
   }
   return project;
 }
@@ -48,6 +72,9 @@ function publicCredential(row: typeof projectDeployCredentials.$inferSelect) {
 
 app.get('/:projectId/tokens', async (context) => {
   const project = await ownedProject(context);
+  if (project === 'forbidden') {
+    return context.json({ error: 'forbidden' }, 403);
+  }
   if (!project) {
     return context.json({ error: 'project not found' }, 404);
   }
@@ -62,8 +89,8 @@ app.get('/:projectId/tokens', async (context) => {
 });
 
 app.post('/:projectId/tokens', async (context) => {
-  const project = await ownedProject(context);
-  if (!project) {
+  const projectId = context.req.param('projectId');
+  if (!projectId) {
     return context.json({ error: 'project not found' }, 404);
   }
   const body = await context.req
@@ -81,26 +108,44 @@ app.post('/:projectId/tokens', async (context) => {
   const expiresAt = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
   const user = context.get('user');
   const token = await signProjectCredentialToken(
-    { credentialId: id, projectId: project.id, userId: user.id, login: user.login, expiresAt },
+    { credentialId: id, projectId, userId: user.id, login: user.login, expiresAt },
     context.env.JWT_SECRET,
   );
-  const [row] = await context
-    .get('db')
-    .insert(projectDeployCredentials)
-    .values({
-      id,
-      project_id: project.id,
-      issued_by: user.id,
-      name,
-      expires_at: expiresAt.toISOString(),
-    })
-    .returning();
-  return context.json({ ...publicCredential(row!), token }, 201);
+  const row = await context.get('db').transaction(async (tx) => {
+    const project = await lockOwnedProject(tx, projectId, user.id);
+    if (typeof project === 'string' || !project) {
+      return project;
+    }
+    if (project.status === 'deleting') {
+      return 'project-deleting' as const;
+    }
+    const [created] = await tx
+      .insert(projectDeployCredentials)
+      .values({
+        id,
+        project_id: project.id,
+        issued_by: user.id,
+        name,
+        expires_at: expiresAt.toISOString(),
+      })
+      .returning();
+    return created!;
+  });
+  if (row === 'forbidden') {
+    return context.json({ error: 'forbidden' }, 403);
+  }
+  if (row === 'project-deleting') {
+    return context.json({ error: 'project is being deleted' }, 409);
+  }
+  if (!row) {
+    return context.json({ error: 'project not found' }, 404);
+  }
+  return context.json({ ...publicCredential(row), token }, 201);
 });
 
 app.post('/:projectId/tokens/:credentialId/renew', async (context) => {
-  const project = await ownedProject(context);
-  if (!project) {
+  const projectId = context.req.param('projectId');
+  if (!projectId) {
     return context.json({ error: 'project not found' }, 404);
   }
   const body = await context.req
@@ -118,7 +163,7 @@ app.post('/:projectId/tokens/:credentialId/renew', async (context) => {
   const token = await signProjectCredentialToken(
     {
       credentialId: replacementId,
-      projectId: project.id,
+      projectId,
       userId: user.id,
       login: user.login,
       expiresAt,
@@ -126,6 +171,16 @@ app.post('/:projectId/tokens/:credentialId/renew', async (context) => {
     context.env.JWT_SECRET,
   );
   const result = await context.get('db').transaction(async (transaction) => {
+    const project = await lockOwnedProject(transaction, projectId, user.id);
+    if (project === 'forbidden') {
+      return project;
+    }
+    if (!project) {
+      return 'project-not-found' as const;
+    }
+    if (project.status === 'deleting') {
+      return 'project-deleting' as const;
+    }
     const [current] = await transaction
       .select()
       .from(projectDeployCredentials)
@@ -156,6 +211,15 @@ app.post('/:projectId/tokens/:credentialId/renew', async (context) => {
       .returning();
     return replacement!;
   });
+  if (result === 'project-not-found') {
+    return context.json({ error: 'project not found' }, 404);
+  }
+  if (result === 'forbidden') {
+    return context.json({ error: 'forbidden' }, 403);
+  }
+  if (result === 'project-deleting') {
+    return context.json({ error: 'project is being deleted' }, 409);
+  }
   if (!result) {
     return context.json({ error: 'active credential not found' }, 404);
   }
@@ -163,22 +227,38 @@ app.post('/:projectId/tokens/:credentialId/renew', async (context) => {
 });
 
 app.delete('/:projectId/tokens/:credentialId', async (context) => {
-  const project = await ownedProject(context);
-  if (!project) {
+  const projectId = context.req.param('projectId');
+  if (!projectId) {
     return context.json({ error: 'project not found' }, 404);
   }
-  const [row] = await context
-    .get('db')
-    .update(projectDeployCredentials)
-    .set({ revoked_at: new Date().toISOString() })
-    .where(
-      and(
-        eq(projectDeployCredentials.id, context.req.param('credentialId')),
-        eq(projectDeployCredentials.project_id, project.id),
-        isNull(projectDeployCredentials.revoked_at),
-      ),
-    )
-    .returning();
+  const user = context.get('user');
+  const row = await context.get('db').transaction(async (tx) => {
+    const project = await lockOwnedProject(tx, projectId, user.id);
+    if (typeof project === 'string') {
+      return project;
+    }
+    if (!project) {
+      return 'project-not-found' as const;
+    }
+    const [revoked] = await tx
+      .update(projectDeployCredentials)
+      .set({ revoked_at: new Date().toISOString() })
+      .where(
+        and(
+          eq(projectDeployCredentials.id, context.req.param('credentialId')),
+          eq(projectDeployCredentials.project_id, project.id),
+          isNull(projectDeployCredentials.revoked_at),
+        ),
+      )
+      .returning();
+    return revoked ?? null;
+  });
+  if (row === 'project-not-found') {
+    return context.json({ error: 'project not found' }, 404);
+  }
+  if (row === 'forbidden') {
+    return context.json({ error: 'forbidden' }, 403);
+  }
   if (!row) {
     return context.json({ error: 'active credential not found' }, 404);
   }

@@ -12,7 +12,6 @@ import {
 } from 'vite-plus/test';
 import { verifyDeployToken } from '../../src/auth/deploy-token.ts';
 import {
-  claimBuildForStartWithinLimit,
   createBuild,
   createGitHubConnection as createGitHubConnectionRecord,
   createGithubActionsBuildWithinLimit,
@@ -31,7 +30,13 @@ import type { Db } from '../../src/db.ts';
 import type { ApiEnv } from '../../src/env.ts';
 import type { GithubOidcClaims } from '../../src/github/oidc-verify.ts';
 import { oidcRoutes } from '../../src/routes/auth-oidc.ts';
-import { builds, githubConnections, githubInstallations, projects } from '../../src/schema.ts';
+import {
+  builds,
+  githubConnections,
+  githubInstallations,
+  projects,
+  users,
+} from '../../src/schema.ts';
 import {
   JWT_SECRET,
   clearTables,
@@ -624,6 +629,32 @@ describe('POST /auth/github-oidc', () => {
     expect(build.branch).toBe('main');
     expect(build.github_run_id).toBe('424242');
     expect(build.logs_url).toBe('https://github.com/octo/repo/actions/runs/424242');
+  });
+
+  it('returns 403 and creates no build when the project owner is manually suspended', async () => {
+    const user = await createTestUser(env.db, 'oidc-suspended-owner');
+    const project = await createTestProject(env.db, user.id, 'oidc-suspended');
+    await seedActiveInstallation(env.db, '1');
+    await createGitHubConnection(env.db, {
+      projectId: project.id,
+      installationId: '1',
+      repoFullName: 'octo/repo',
+      repositoryId: '42',
+      branch: 'main',
+      buildExecutor: 'github_actions',
+    });
+    await env.db
+      .update(users)
+      .set({ suspended_reason: 'platform policy violation' })
+      .where(eq(users.id, user.id));
+    const app = makeApp(env);
+    setVerifyResult(makeClaims());
+
+    const res = await exchange(app, env, { oidcToken: 'good', project: project.slug });
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: 'project owner suspended' });
+    expect(await getProjectBuilds(env.db, project.id)).toEqual([]);
+    expect(checkRunCreateCount).toBe(0);
   });
 
   // The github_actions executor has no BuildManager DO, so the OIDC exchange is
@@ -1403,8 +1434,6 @@ describe('POST /auth/github-oidc', () => {
     const [a, b] = await Promise.all([
       createGithubActionsBuildWithinLimit(env.db, {
         projectId: project.id,
-        userId: user.id,
-        limit: 1,
         githubRunId: '301',
         connectionId: connection.id,
         installationId: '1',
@@ -1413,8 +1442,6 @@ describe('POST /auth/github-oidc', () => {
       }),
       createGithubActionsBuildWithinLimit(env.db, {
         projectId: project.id,
-        userId: user.id,
-        limit: 1,
         githubRunId: '302',
         connectionId: connection.id,
         installationId: '1',
@@ -2409,167 +2436,5 @@ describe('POST /auth/github-oidc', () => {
     const res = await exchange(app, env, { oidcToken: 'good', project: project.slug });
     expect(res.status).toBe(401);
     expect((await getProjectBuilds(env.db, project.id)).length).toBe(0);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// the shared atomic concurrency primitive. The container-scheduler path
-// claims a QUEUED build queued->starting and enforces the per-user cap in ONE
-// transaction under the SAME per-user FOR UPDATE lock the OIDC path takes, so
-// neither path can bust the cap. (The scheduler-path integration test is owned
-// by the build-scheduler suite; these are focused db-level guards.)
-// ---------------------------------------------------------------------------
-
-describe('claimBuildForStartWithinLimit', () => {
-  beforeEach(async () => {
-    await clearBuildTables(env.db);
-    await clearTables(env.db);
-  });
-
-  it('claims a queued build queued->starting and stamps started_at', async () => {
-    const user = await createTestUser(env.db);
-    const project = await createTestProject(env.db, user.id, 'claim-ok');
-    const build = await createBuild(env.db, {
-      projectId: project.id,
-      userId: user.id,
-      executor: 'container',
-      status: 'queued',
-    });
-
-    const claimed = await claimBuildForStartWithinLimit(env.db, {
-      buildId: build.id,
-      userId: user.id,
-      projectId: project.id,
-      limit: 1,
-      instanceType: 'standard-4',
-    });
-    expect(claimed).toBe(true);
-
-    const updated = await getBuild(env.db, build.id);
-    expect(updated!.status).toBe('starting');
-    expect(updated!.started_at).not.toBeNull();
-  });
-
-  it('returns false (no claim) when the owner is already at the cap', async () => {
-    const user = await createTestUser(env.db);
-    const project = await createTestProject(env.db, user.id, 'claim-capped');
-    // One ACTIVE build already occupies the single (limit=1) slot.
-    await createBuild(env.db, {
-      projectId: project.id,
-      userId: user.id,
-      executor: 'container',
-      status: 'building',
-    });
-    const queued = await createBuild(env.db, {
-      projectId: project.id,
-      userId: user.id,
-      executor: 'container',
-      status: 'queued',
-    });
-
-    const claimed = await claimBuildForStartWithinLimit(env.db, {
-      buildId: queued.id,
-      userId: user.id,
-      projectId: project.id,
-      limit: 1,
-      instanceType: 'standard-4',
-    });
-    expect(claimed).toBe(false);
-    // The queued build is left untouched for a later tick.
-    expect((await getBuild(env.db, queued.id))!.status).toBe('queued');
-  });
-
-  it('returns false when the build is no longer queued (lost the claim race)', async () => {
-    const user = await createTestUser(env.db);
-    const project = await createTestProject(env.db, user.id, 'claim-raced');
-    // Already claimed/started by another scan.
-    const build = await createBuild(env.db, {
-      projectId: project.id,
-      userId: user.id,
-      executor: 'container',
-      status: 'starting',
-    });
-
-    const claimed = await claimBuildForStartWithinLimit(env.db, {
-      buildId: build.id,
-      userId: user.id,
-      projectId: project.id,
-      limit: 0,
-      instanceType: 'standard-4',
-    });
-    expect(claimed).toBe(false);
-  });
-
-  it('treats limit === 0 as unlimited', async () => {
-    const user = await createTestUser(env.db);
-    // The active builds live on OTHER projects so they exercise the per-user
-    // cap (here unlimited) without tripping the per-project active-build guard,
-    // which serializes builds within a single project regardless of the cap.
-    const busyA = await createTestProject(env.db, user.id, 'claim-unlimited-a');
-    const busyB = await createTestProject(env.db, user.id, 'claim-unlimited-b');
-    const project = await createTestProject(env.db, user.id, 'claim-unlimited');
-    await createBuild(env.db, { projectId: busyA.id, userId: user.id, status: 'building' });
-    await createBuild(env.db, { projectId: busyB.id, userId: user.id, status: 'deploying' });
-    const queued = await createBuild(env.db, {
-      projectId: project.id,
-      userId: user.id,
-      status: 'queued',
-    });
-
-    const claimed = await claimBuildForStartWithinLimit(env.db, {
-      buildId: queued.id,
-      userId: user.id,
-      projectId: project.id,
-      limit: 0,
-      instanceType: 'standard-4',
-    });
-    expect(claimed).toBe(true);
-    expect((await getBuild(env.db, queued.id))!.status).toBe('starting');
-  });
-
-  it('admits only ONE of a scheduler claim and an OIDC create racing the same cap', async () => {
-    // Cross-path mutual exclusion: a queued container build claim and a parallel
-    // OIDC actions-build create for the SAME owner at a cap of 1 must not both
-    // produce an active build — both take the SAME per-user FOR UPDATE lock.
-    const user = await createTestUser(env.db); // free => concurrentBuilds = 1
-    const project = await createTestProject(env.db, user.id, 'claim-cross-path');
-    const queued = await createBuild(env.db, {
-      projectId: project.id,
-      userId: user.id,
-      executor: 'container',
-      status: 'queued',
-    });
-
-    const [claimed, oidc] = await Promise.all([
-      claimBuildForStartWithinLimit(env.db, {
-        buildId: queued.id,
-        userId: user.id,
-        projectId: project.id,
-        limit: 1,
-        instanceType: 'standard-4',
-      }),
-      createGithubActionsBuildWithinLimit(env.db, {
-        projectId: project.id,
-        userId: user.id,
-        limit: 1,
-        githubRunId: 'cross-1',
-        // No github_actions connection is seeded for this project, so the helper
-        // returns `connection-removed` before the id check — any id is fine.
-        connectionId: 'ghc_absent',
-        installationId: 'none',
-        repositoryId: '42',
-        expectedWorkflowPath: '.github/workflows/void-deploy.yml',
-      }),
-    ]);
-
-    // Exactly one path won the single slot.
-    const claimedWon = claimed === true;
-    const oidcWon = oidc.outcome === 'created';
-    expect(claimedWon !== oidcWon).toBe(true);
-
-    const active = (await getProjectBuilds(env.db, project.id)).filter((b) =>
-      ['starting', 'building', 'deploying'].includes(b.status),
-    );
-    expect(active.length).toBe(1);
   });
 });

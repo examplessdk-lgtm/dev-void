@@ -87,6 +87,11 @@ import { generateId } from '../id.ts';
 import { checkCliVersionOrRespond } from '../middleware/cli-version.ts';
 import { getProjectQueueName } from '../naming.ts';
 import { createDeployLogger, type DeployLogger } from '../observability/logger.ts';
+import {
+  ProjectAccessDeniedError,
+  ProjectOwnerSuspendedError,
+  requireProjectCapability,
+} from '../project-access.ts';
 import { ensureProjectIngress } from '../project-ingress.ts';
 import {
   BETTER_AUTH_SECRET_NAME,
@@ -120,6 +125,7 @@ import {
   resolveRoutingUndo,
 } from '../routing.ts';
 import { builds, deployments } from '../schema.ts';
+import { REASON_REQUESTS_EXCEEDED } from '../suspension.ts';
 import { getPlanLimits, isWithinLimit, STATIC_RETENTION_LIMIT, type PlanId } from '../tiers.ts';
 import {
   SUPPORTED_MANIFEST_VERSIONS,
@@ -132,6 +138,7 @@ import {
   type SandboxMigrationMeta,
   type WebSocketMigrationMeta,
 } from '../types.ts';
+import { requireProjectRouteCapability } from './project-access.ts';
 
 export { MAX_REVALIDATE_QUERY_ALLOWLIST_ENTRIES, MAX_ROUTING_RULES, validateManifestShape };
 
@@ -143,6 +150,10 @@ const cutoverIntentKey = (deploymentId: string): string => `cutover-intent:${dep
 const cutoverReadyKey = (deploymentId: string): string => `cutover-ready:${deploymentId}`;
 const cutoverCompensatedKey = (deploymentId: string): string =>
   `cutover-compensated:${deploymentId}`;
+
+async function requireActiveDeployAccess(db: Db, projectId: string, actorUserId: string) {
+  return requireProjectCapability(db, projectId, actorUserId, 'deploy');
+}
 
 export function databaseTimestampMs(value: string): number | null {
   const withSeparator = value.includes('T') ? value : value.replace(' ', 'T');
@@ -1802,8 +1813,8 @@ function validateUploadUrlsAsset(asset: unknown, index: number): string | null {
 /**
  * Issue presigned R2 PUT URLs for a batch of declared assets.
  *
- * Auth and ownership are handled the same way as `/deploy/preflight`:
- * project loaded, `user_id` checked, 403 on mismatch, 404 on missing.
+ * Project access is handled the same way as `/deploy/preflight`: the actor
+ * needs deploy capability and the current owner must be active.
  * Each asset's blake3 keys it under `assets/${projectId}/${blake3}`; MD5
  * is signed into the URL's headers so R2 enforces "uploaded bytes' MD5
  * matches declared MD5" at write time. URLs expire in 30 minutes.
@@ -1828,13 +1839,11 @@ const UPLOAD_URLS_PROJECT_DELETING = 'upload_urls:project_deleting';
 
 app.post('/:id/deploy/upload-urls', async (context) => {
   const projectId = context.req.param('id');
-  const project = await getProject(context.get('db'), projectId);
-  if (!project) {
-    return context.json({ error: 'project not found' }, 404);
+  const access = await requireProjectRouteCapability(context, projectId, 'deploy');
+  if (access instanceof Response) {
+    return access;
   }
-  if (project.user_id !== context.get('user').id) {
-    return context.json({ error: 'forbidden' }, 403);
-  }
+  const project = access.project;
   // Fast 410 — mirror `handleManifestOnlyDeploy`. The unlocked read here
   // is a TOCTOU best-effort: it short-circuits the common case (project
   // already marked `deleting` before this request arrived). The
@@ -1969,6 +1978,7 @@ app.post('/:id/deploy/upload-urls', async (context) => {
       // Derived signing keys are identical within this request. Keep the cache
       // request-local so credentials and derived keys are released with the batch.
       const signingKeyCache = new Map<string, ArrayBuffer>();
+      await requireActiveDeployAccess(txDb, projectId, context.get('user').id);
       await uploadPool(assets, PRESIGN_BATCH_CONCURRENCY, async (asset) => {
         const result = await presignAssetPut(
           {
@@ -1996,6 +2006,12 @@ app.post('/:id/deploy/upload-urls', async (context) => {
       });
     });
   } catch (err) {
+    if (err instanceof ProjectAccessDeniedError) {
+      return context.json(
+        { error: err instanceof ProjectOwnerSuspendedError ? err.message : 'forbidden' },
+        403,
+      );
+    }
     if (err instanceof Error && err.message === UPLOAD_URLS_PROJECT_DELETING) {
       return context.json({ error: 'project is being deleted' }, 410);
     }
@@ -2051,13 +2067,11 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
   // runtime — narrow by hand. The ApiEnv route registry guarantees the
   // path matched.
   const projectId = context.req.param('id') as string;
-  const project = await getProject(context.get('db'), projectId);
-  if (!project) {
-    return context.json({ error: 'project not found' }, 404);
+  const access = await requireProjectRouteCapability(context, projectId, 'deploy');
+  if (access instanceof Response) {
+    return access;
   }
-  if (project.user_id !== context.get('user').id) {
-    return context.json({ error: 'forbidden' }, 403);
-  }
+  let project = access.project;
   // Scoped deploy tokens (aud:'deploy') are pinned to a single project. Reject
   // any attempt to use one against a different project. Full api tokens leave
   // deployScope unset and skip this guard.
@@ -2091,12 +2105,13 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
   await ensureProjectIngress(context.env, project);
   const cliVersion = context.req.header('x-void-cli-version') ?? null;
 
-  const user = context.get('user');
+  const actor = context.get('user');
+  let owner = access.owner;
 
   let logger: DeployLogger = createDeployLogger({
     projectId,
     projectSlug: project.slug,
-    userId: user.id,
+    userId: actor.id,
     branch: null,
   });
 
@@ -2195,24 +2210,6 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
       },
       400,
     );
-  }
-
-  // Plan ceiling on a requested per-project CPU limit. Rejected at ingest —
-  // before the precheck-and-claim transaction or any asset work — so an
-  // over-ceiling deploy fails fast with both numbers. Rollback deliberately
-  // clamps instead of rejecting (see `computeDispatchLimits`).
-  const requestedCpuMs = incomingManifest.limits?.cpuMs;
-  if (requestedCpuMs !== undefined) {
-    const maxCpuMs = getPlanLimits(user.plan).maxCpuMsPerRequest;
-    if (maxCpuMs > 0 && requestedCpuMs > maxCpuMs) {
-      return context.json(
-        {
-          event: 'error',
-          message: `limits.cpuMs ${requestedCpuMs} exceeds your plan maximum of ${maxCpuMs}`,
-        },
-        400,
-      );
-    }
   }
 
   // Validate the v2 asset manifest. Each entry MUST carry a 32-hex blake3
@@ -2405,10 +2402,13 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
     | {
         deployment: Awaited<ReturnType<typeof createDeployment>>;
         currentLiveDeployment: Awaited<ReturnType<typeof getDeployment>>;
+        project: Project;
+        owner: typeof owner;
         reconciledMarkerKeys?: ReadonlyArray<string>;
       }
     | { canceling: string }
-    | { recoveryFailed: string };
+    | { recoveryFailed: string }
+    | { cpuLimit: Readonly<{ requested: number; maximum: number }> };
   try {
     precheckResult = await context.get('db').transaction(async (tx) => {
       await tx.execute(drizzleSql`SELECT id FROM projects WHERE id = ${projectId} FOR UPDATE`);
@@ -2416,6 +2416,12 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
       const lockedProject = await getProject(txDb, projectId);
       if (!lockedProject || lockedProject.status === 'deleting') {
         throw new Error(PROJECT_DELETING_ERROR_MESSAGE);
+      }
+      const lockedAccess = await requireActiveDeployAccess(txDb, projectId, actor.id);
+      const requestedCpuMs = incomingManifest.limits?.cpuMs;
+      const maxCpuMs = getPlanLimits(lockedAccess.owner.plan).maxCpuMsPerRequest;
+      if (requestedCpuMs !== undefined && maxCpuMs > 0 && requestedCpuMs > maxCpuMs) {
+        return { cpuLimit: { requested: requestedCpuMs, maximum: maxCpuMs } } as const;
       }
       let committedActiveDeploymentId = lockedProject.active_deployment_id;
       if (!committedActiveDeploymentId) {
@@ -2569,7 +2575,7 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
                   txDb,
                   lockedProject,
                   committedActive,
-                  user.plan,
+                  lockedAccess.owner.plan,
                   lockedProject.type,
                 );
               } else {
@@ -2629,7 +2635,7 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
                 txDb,
                 lockedProject,
                 protectedDeployment,
-                user.plan,
+                lockedAccess.owner.plan,
               );
               await assertPersistedDeploymentServingAssetsExist(context.env, protectedDeployment);
               await context.env.ROUTING.put(
@@ -2711,12 +2717,22 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
           // PUTs, old objects have no recent-upload grace period. GC acquires this
           // same project lock and includes nonterminal rows in its protected set.
           ...(hasWorkerFiles ? { assetHashes: JSON.stringify(incomingAssetManifest) } : {}),
+          billingUserId: lockedAccess.owner.id,
+          initiatedByUserId: actor.id,
         }),
         currentLiveDeployment,
+        project: lockedAccess.project,
+        owner: lockedAccess.owner,
         ...(reconciledMarkerKeys.length > 0 && { reconciledMarkerKeys }),
       } as const;
     });
   } catch (err) {
+    if (err instanceof ProjectAccessDeniedError) {
+      return context.json(
+        { error: err instanceof ProjectOwnerSuspendedError ? err.message : 'forbidden' },
+        403,
+      );
+    }
     if (err instanceof ConcurrentDeployError) {
       return context.json({ error: 'deploy in progress', deployment: err.deploymentId }, 409);
     }
@@ -2734,6 +2750,15 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
       503,
     );
   }
+  if ('cpuLimit' in precheckResult) {
+    return context.json(
+      {
+        event: 'error',
+        message: `limits.cpuMs ${precheckResult.cpuLimit.requested} exceeds your plan maximum of ${precheckResult.cpuLimit.maximum}`,
+      },
+      400,
+    );
+  }
   if ('canceling' in precheckResult) {
     return context.json(
       { error: 'deploy cancellation requested', deployment: precheckResult.canceling },
@@ -2748,9 +2773,11 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
   }
   const preDeployment = precheckResult.deployment;
   const currentLiveDeployment = precheckResult.currentLiveDeployment;
+  project = precheckResult.project;
+  owner = precheckResult.owner;
   const originalActiveDeploymentId = currentLiveDeployment?.id ?? null;
 
-  const planLimits = getPlanLimits(user.plan);
+  const planLimits = getPlanLimits(owner.plan);
 
   // Construct the response stream — same NDJSON wire contract as the
   // multipart path (heartbeats, progress events, `done`/`error`).
@@ -2828,6 +2855,7 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
         if (!lockedProject || lockedProject.status === 'deleting') {
           throw new Error(PROJECT_DELETING_ERROR_MESSAGE);
         }
+        await requireActiveDeployAccess(txDb, projectId, actor.id);
         await assertDeploymentNotCanceled(txDb, deploymentId);
         if (cutoverProtected) {
           const intent = parseCutoverMarker(
@@ -3281,10 +3309,7 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
       // we can defer the cap check until AFTER the dedupe short-circuit
       // — same as the multipart path's worker-backed branch.
       if (planLimits.deploysPerDay > 0) {
-        const todayCount = await countUserDeploymentsToday(
-          context.get('db'),
-          context.get('user').id,
-        );
+        const todayCount = await countUserDeploymentsToday(context.get('db'), owner.id);
         if (!isWithinLimit(planLimits.deploysPerDay, todayCount)) {
           emit({ event: 'error', message: 'deploy limit exceeded', step: currentStep });
           return;
@@ -3517,7 +3542,11 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
             deploymentId: deployment.id,
             assetConfig,
             manifest,
-            suspended: existingEntry?.suspended,
+            suspended:
+              existingEntry?.suspended ??
+              (owner.suspended_reason === REASON_REQUESTS_EXCEEDED
+                ? REASON_REQUESTS_EXCEEDED
+                : undefined),
           });
           currentStep = 'cutover_intent';
           const cutoverMarker: CutoverMarker = {
@@ -3567,7 +3596,7 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
             await putTrackedRouting(project.slug, routingJson);
             await putTrackedRouting(
               projectAccountKey(projectId),
-              buildProjectAccountJson({ userId: project.user_id, plan: user.plan }),
+              buildProjectAccountJson({ userId: project.user_id, plan: owner.plan }),
             );
             routingSwitched = true;
             logger = logger.with({ routingSwitched: true });
@@ -3606,6 +3635,7 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
             if (!lockedProject || lockedProject.status === 'deleting') {
               throw new Error(PROJECT_DELETING_ERROR_MESSAGE);
             }
+            await requireActiveDeployAccess(txDb, projectId, actor.id);
             const [intent, ready] = await Promise.all([
               context.env.ROUTING.get(cutoverIntentKey(deployment.id)).then(parseCutoverMarker),
               context.env.ROUTING.get(cutoverReadyKey(deployment.id)).then(parseCutoverMarker),
@@ -4366,6 +4396,7 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
                 drizzleSql`SELECT id FROM projects WHERE id = ${projectId} FOR UPDATE`,
               );
               const txDb = tx as unknown as Db;
+              await requireActiveDeployAccess(txDb, projectId, actor.id);
               const appResult = await dispatchStableAppMigration(
                 context.env.DISPATCH.get(workerName),
                 proxyTokenBinding?.text ?? '',
@@ -4403,6 +4434,14 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
               }
             }
             if (stableCapabilities.endpoints.auth) {
+              // Persist the remotely committed app result before auth runs, and
+              // release the project lock before this request's 300-second timeout.
+              await context.get('db').transaction(async (tx) => {
+                await tx.execute(
+                  drizzleSql`SELECT id FROM projects WHERE id = ${projectId} FOR UPDATE`,
+                );
+                await requireActiveDeployAccess(tx as unknown as Db, projectId, actor.id);
+              });
               await dispatchStableAuthMigration(
                 context.env.DISPATCH.get(workerName),
                 proxyTokenBinding?.text ?? '',
@@ -4417,6 +4456,7 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
                 drizzleSql`SELECT id FROM projects WHERE id = ${projectId} FOR UPDATE`,
               );
               const txDb = tx as unknown as Db;
+              await requireActiveDeployAccess(txDb, projectId, actor.id);
               const legacyResult = await retryWithBackoff<UserWorkerMigrationResult>(
                 async (attempt) => {
                   const attemptStart = Date.now();
@@ -4713,7 +4753,11 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
           manifest,
           deploymentId: deployment.id,
           dispatchLimits,
-          suspended: existingEntry?.suspended,
+          suspended:
+            existingEntry?.suspended ??
+            (owner.suspended_reason === REASON_REQUESTS_EXCEEDED
+              ? REASON_REQUESTS_EXCEEDED
+              : undefined),
           hasCrons,
           assetManifestId: assetCount > 0 ? deployment.id : undefined,
           assetConfig: assetCount > 0 ? assetConfig : undefined,
@@ -4727,7 +4771,7 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
           await putTrackedRouting(project.slug, routingJson);
           await putTrackedRouting(
             projectAccountKey(projectId),
-            buildProjectAccountJson({ userId: project.user_id, plan: user.plan }),
+            buildProjectAccountJson({ userId: project.user_id, plan: owner.plan }),
           );
           routingSwitched = true;
           logger = logger.with({ routingSwitched: true });
@@ -4775,6 +4819,7 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
           if (!lockedProject || lockedProject.status === 'deleting') {
             throw new Error(PROJECT_DELETING_ERROR_MESSAGE);
           }
+          await requireActiveDeployAccess(txDb, projectId, actor.id);
           const [intent, ready] = await Promise.all([
             context.env.ROUTING.get(cutoverIntentKey(deployment.id)).then(parseCutoverMarker),
             context.env.ROUTING.get(cutoverReadyKey(deployment.id)).then(parseCutoverMarker),
@@ -5250,7 +5295,7 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
                     txDb,
                     lockedProject,
                     committedActive,
-                    user.plan,
+                    owner.plan,
                     lockedProject.type,
                   );
                 } else {
@@ -5474,9 +5519,9 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
             currentStatus = 'canceled';
           }
           emit({ event: 'error', message: msg, step: currentStep });
-          if (!wasCanceled && context.env.EMAIL && user.email) {
+          if (!wasCanceled && context.env.EMAIL && owner.email) {
             context.executionCtx.waitUntil(
-              sendDeployFailedEmail(context.env, user.email, project.slug, msg).catch((err) =>
+              sendDeployFailedEmail(context.env, owner.email, project.slug, msg).catch((err) =>
                 logger.error('catch', 'failed_email_send_failed', err, {
                   projectSlug: project.slug,
                 }),
@@ -5548,14 +5593,11 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
 // Deploy preflight — returns which assets need uploading based on diff with last deploy
 app.post('/:id/deploy/preflight', async (context) => {
   const projectId = context.req.param('id');
-  const project = await getProject(context.get('db'), projectId);
-  if (!project) {
-    return context.json({ error: 'project not found' }, 404);
+  const access = await requireProjectRouteCapability(context, projectId, 'deploy');
+  if (access instanceof Response) {
+    return access;
   }
-
-  if (project.user_id !== context.get('user').id) {
-    return context.json({ error: 'forbidden' }, 403);
-  }
+  const project = access.project;
   // Mirror /upload-urls and handleManifestOnlyDeploy: short-circuit when
   // the project is being torn down so callers get the more specific 410
   // before any body parsing or version-gate work. A stale CLI on a
@@ -5619,8 +5661,16 @@ app.post('/:id/deploy/preflight', async (context) => {
       if (!lockedProject) {
         return { kind: 'missing' as const };
       }
-      if (lockedProject.user_id !== context.get('user').id) {
-        return { kind: 'forbidden' as const };
+      try {
+        await requireActiveDeployAccess(txDb, projectId, context.get('user').id);
+      } catch (error) {
+        if (error instanceof ProjectOwnerSuspendedError) {
+          return { kind: 'owner-suspended' as const };
+        }
+        if (error instanceof ProjectAccessDeniedError) {
+          return { kind: 'forbidden' as const };
+        }
+        throw error;
       }
       if (lockedProject.status === 'deleting') {
         return { kind: 'deleting' as const };
@@ -5640,6 +5690,9 @@ app.post('/:id/deploy/preflight', async (context) => {
     }
     if (resolution.kind === 'forbidden') {
       return context.json({ error: 'forbidden' }, 403);
+    }
+    if (resolution.kind === 'owner-suspended') {
+      return context.json({ error: 'project owner suspended' }, 403);
     }
     if (resolution.kind === 'deleting') {
       return context.json({ error: 'project is being deleted' }, 410);

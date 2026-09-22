@@ -46,10 +46,10 @@ export async function resolveResource(
 }
 
 /**
- * Verifies that a user owns a project via the API service binding.
- * Called on the JWT auth path to prevent cross-tenant access.
+ * Verifies that an actor still has deploy-equivalent project access through
+ * the API service binding. The endpoint keeps its legacy name during rollout.
  */
-export async function verifyProjectOwner(
+export async function verifyProjectDeployAccess(
   api: Fetcher,
   jwtSecret: string,
   projectId: string,
@@ -104,6 +104,12 @@ export async function verifyPrerenderAuthority(
       },
       body: JSON.stringify({ userId, ...provenance }),
     });
+    if (res.status === 400 && !provenance.buildId && !provenance.credentialId) {
+      // The previous API revision required provenance here. Preserve manual
+      // prerenders while the proxy and API revisions overlap during rollout.
+      const body = await res.json<{ error?: unknown }>().catch(() => null);
+      return body?.error === 'userId and credential provenance required';
+    }
     return res.ok;
   } catch {
     // Project-data access fails closed if the revocation authority is

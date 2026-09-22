@@ -458,6 +458,7 @@ const HELP_TREE: HelpTree = {
       { command: 'link [name]', description: 'Link this directory to a project' },
       { command: 'list', description: 'List your projects' },
       { command: 'token <command>', description: 'Manage project-scoped CI deploy credentials' },
+      { command: 'team <command>', description: 'Manage members and project invitations' },
       { command: 'logs', description: 'Show runtime logs from the deployed project' },
       { command: 'requests', description: 'Show request-level traffic (status, method, timing)' },
       { command: 'rollback [deployId]', description: 'Roll back to a previous deployment' },
@@ -493,6 +494,65 @@ const HELP_TREE: HelpTree = {
           },
           { command: 'void project token revoke <id>', description: 'Revoke a credential now' },
         ],
+      },
+      team: {
+        summary: 'Manage members and invitations for Void platform projects.',
+        usage: ['void project team <command>'],
+        commands: [
+          { command: 'list', description: 'List project members and roles' },
+          { command: 'invite <email>', description: 'Invite a registered user by email' },
+          { command: 'invitations', description: 'List invitations sent for a project' },
+          { command: 'role <user-id> <role>', description: "Change a member's role" },
+          { command: 'remove <user-id>', description: 'Remove a project member' },
+          { command: 'revoke <invitation-id>', description: 'Revoke a project invitation' },
+          { command: 'leave', description: 'Leave a shared project' },
+          { command: 'pending', description: 'List invitations awaiting your response' },
+          { command: 'accept <invitation-id>', description: 'Accept your invitation' },
+          { command: 'decline <invitation-id>', description: 'Decline your invitation' },
+        ],
+        children: {
+          list: withProjectOption(
+            'List project members and roles.',
+            'void project team list [options]',
+          ),
+          invite: {
+            summary: 'Invite an existing Void platform user by registered email address.',
+            usage: ['void project team invite <email> --role <role> [options]'],
+            options: [
+              { command: '--role <role>', description: 'reader, collaborator, or admin' },
+              { command: '--project <name>', description: 'Project name override' },
+            ],
+          },
+          invitations: withProjectOption(
+            'List invitations sent for a project.',
+            'void project team invitations [options]',
+          ),
+          role: withProjectOption(
+            "Change a member's role to reader, collaborator, or admin.",
+            'void project team role <user-id> <role> [options]',
+          ),
+          remove: withProjectOption(
+            'Remove a member from the project.',
+            'void project team remove <user-id> [options]',
+          ),
+          revoke: withProjectOption(
+            'Revoke a pending project invitation.',
+            'void project team revoke <invitation-id> [options]',
+          ),
+          leave: withProjectOption('Leave a shared project.', 'void project team leave [options]'),
+          pending: basicSubcommand(
+            'List project invitations awaiting your response.',
+            'void project team pending',
+          ),
+          accept: basicSubcommand(
+            'Accept an invitation addressed to your account.',
+            'void project team accept <invitation-id>',
+          ),
+          decline: basicSubcommand(
+            'Decline an invitation addressed to your account.',
+            'void project team decline <invitation-id>',
+          ),
+        },
       },
       logs: {
         summary: 'Show runtime logs from the deployed project.',

@@ -6,6 +6,7 @@
   "observability": {
     "enabled": true,
   },
+  "version_metadata": { "binding": "VERSION_METADATA" },
   // Both hosted PostgreSQL origins are in AWS us-east-2.
   "placement": {
     "mode": "targeted",
@@ -191,6 +192,7 @@
   "env": {
     "production": {
       "name": "void-api",
+      "version_metadata": { "binding": "VERSION_METADATA" },
       "secrets": { "required": ["EMAIL_SIGNING_SECRET"] },
       "hyperdrive": [
         {
@@ -327,6 +329,7 @@
     },
     "staging": {
       "name": "void-api-staging",
+      "version_metadata": { "binding": "VERSION_METADATA" },
       "secrets": { "required": ["EMAIL_SIGNING_SECRET"] },
       "hyperdrive": [
         {

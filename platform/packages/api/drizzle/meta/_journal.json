@@ -288,6 +288,13 @@
       "when": 1789749117331,
       "tag": "0047_email_gateway",
       "breakpoints": true
+    },
+    {
+      "idx": 48,
+      "version": "7",
+      "when": 1789920262096,
+      "tag": "0048_project_teams",
+      "breakpoints": true
     }
   ]
 }

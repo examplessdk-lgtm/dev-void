@@ -11,18 +11,30 @@ import {
 } from 'vite-plus/test';
 import {
   acceptInvitationByEmail,
+  createBuild,
+  createGitHubConnection,
   createInvitation,
+  getBuild,
   getInvitation,
   getUser,
   revokeInvitation,
+  upsertGitHubInstallation,
 } from '../../src/db.ts';
+import * as dbModule from '../../src/db.ts';
 import type { ApiEnv } from '../../src/env.ts';
 import { app } from '../../src/index.ts';
 import {
+  builds,
+  deployments,
   invitations,
   platformLoginConnections,
   platformLoginIdentities,
   platformLoginRevisions,
+  projectDeployCredentials,
+  projectInvitations,
+  projectMembers,
+  projectOwnershipPeriods,
+  projects,
   resources,
   users,
 } from '../../src/schema.ts';
@@ -34,6 +46,7 @@ import {
   createTestProject,
   createTestUser,
   mockCfApi,
+  recordingBuildManager,
   setupEnv,
   teardownEnv,
   type TestEnv,
@@ -41,6 +54,7 @@ import {
 
 let env: TestEnv;
 let token: string;
+let operatorAdminId: string;
 
 beforeAll(async () => {
   env = await setupEnv();
@@ -60,6 +74,7 @@ beforeEach(async () => {
     'free',
     'admin',
   );
+  operatorAdminId = admin.id;
   token = await createOperatorToken(env.db, admin);
 });
 afterEach(() => {
@@ -83,6 +98,33 @@ function req(
     }),
     { ...env, ...overrides },
   );
+}
+
+function captureUsageCounter(
+  calls: Array<{ ownerId: string; path: string; body: Record<string, unknown> }>,
+  failPath?: string,
+) {
+  return {
+    idFromName: (name: string) => name,
+    get: (ownerId: string) => ({
+      fetch: async (request: Request) => {
+        const path = new URL(request.url).pathname;
+        const body = (await request.json()) as Record<string, unknown>;
+        calls.push({ ownerId, path, body });
+        return path === failPath
+          ? new Response('counter unavailable', { status: 500 })
+          : Response.json({ ok: true });
+      },
+    }),
+  } as unknown as DurableObjectNamespace;
+}
+
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
 }
 
 describe('operator tenant reads', () => {
@@ -145,6 +187,79 @@ describe('operator tenant reads', () => {
     });
   });
 
+  test('attributes operator user usage only to ownership intervals in the billing window', async () => {
+    const formerOwner = await createTestUser(env.db, 'operator-usage-former');
+    const currentOwner = await createTestUser(env.db, 'operator-usage-current');
+    const project = await createTestProject(env.db, currentOwner.id, 'operator-usage-project');
+    const ownedFrom = new Date(Date.now() - 5 * 24 * 60 * 60 * 1_000);
+    const transferredAt = new Date(Date.now() - 2 * 24 * 60 * 60 * 1_000);
+    transferredAt.setMilliseconds(500);
+    await env.db
+      .update(users)
+      .set({ billing_cycle_start: '2020-01-01T00:00:00.000Z' })
+      .where(eq(users.id, formerOwner.id));
+    await env.db
+      .update(users)
+      .set({ billing_cycle_start: '2020-01-01T00:00:00.000Z' })
+      .where(eq(users.id, currentOwner.id));
+    await env.db
+      .delete(projectOwnershipPeriods)
+      .where(eq(projectOwnershipPeriods.project_id, project.id));
+    await env.db.insert(projectOwnershipPeriods).values([
+      {
+        id: 'pown_operator_former',
+        project_id: project.id,
+        owner_user_id: formerOwner.id,
+        starts_at: ownedFrom.toISOString(),
+        ends_at: transferredAt.toISOString(),
+      },
+      {
+        id: 'pown_operator_current',
+        project_id: project.id,
+        owner_user_id: currentOwner.id,
+        starts_at: transferredAt.toISOString(),
+      },
+    ]);
+
+    const queries: Array<string> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+        queries.push(String(init?.body));
+        return Response.json({
+          data: [{ blob1: project.id, requests: 12, bandwidth_bytes: 34 }],
+        });
+      }),
+    );
+
+    const formerResponse = await req(`/users/${formerOwner.id}`);
+    expect(formerResponse.status).toBe(200);
+    expect(await formerResponse.json()).toMatchObject({
+      projects: [],
+      usage: {
+        totalRequests: 12,
+        projects: [{ projectId: project.id, slug: project.slug }],
+      },
+    });
+    const currentResponse = await req(`/users/${currentOwner.id}`);
+    expect(currentResponse.status).toBe(200);
+    expect(await currentResponse.json()).toMatchObject({
+      projects: [{ id: project.id }],
+      usage: {
+        totalRequests: 12,
+        projects: [{ projectId: project.id, slug: project.slug }],
+      },
+    });
+
+    expect(queries).toHaveLength(2);
+    expect(queries[0]).toContain(
+      `toDateTime64('${transferredAt.toISOString().replace('T', ' ').slice(0, 23)}', 3)`,
+    );
+    expect(queries[1]).toContain(
+      `toDateTime64('${transferredAt.toISOString().replace('T', ' ').slice(0, 23)}', 3)`,
+    );
+  });
+
   test('rejects invalid pagination and missing detail targets', async () => {
     for (const query of ['limit=101', 'page=0', 'page=2abc', 'limit=-1']) {
       expect((await req(`/users?${query}`)).status).toBe(400);
@@ -155,6 +270,614 @@ describe('operator tenant reads', () => {
 });
 
 describe('operator tenant mutations', () => {
+  test('previews ownership transfer details without writes or external calls', async () => {
+    const owner = await createTestUser(env.db, 'transfer-preview-owner');
+    const target = await createTestUser(
+      env.db,
+      'transfer-preview-target',
+      'github',
+      undefined,
+      'pro',
+    );
+    await env.db
+      .update(users)
+      .set({ suspended_reason: 'operator_review' })
+      .where(eq(users.id, target.id));
+    const project = await createTestProject(env.db, owner.id, 'transfer-preview-project');
+    await env.db.insert(projectMembers).values({
+      project_id: project.id,
+      user_id: target.id,
+      role: 'collaborator',
+      added_by_user_id: owner.id,
+    });
+    await env.db.insert(projectInvitations).values({
+      id: 'pinv_transfer_target',
+      project_id: project.id,
+      target_user_id: target.id,
+      target_email_snapshot: 'transfer-target@example.com',
+      role: 'admin',
+      invited_by_user_id: owner.id,
+      expires_at: new Date(Date.now() + 86_400_000).toISOString(),
+    });
+    const deployment = await createTestDeployment(env.db, project.id, 'pending');
+    const ownershipPeriodsBefore = await env.db
+      .select()
+      .from(projectOwnershipPeriods)
+      .where(eq(projectOwnershipPeriods.project_id, project.id));
+    const putSpy = vi.spyOn(env.ROUTING, 'put');
+    const doGet = vi.fn();
+
+    const response = await req(
+      `/projects/${project.id}/owner`,
+      { userId: target.id, dryRun: true },
+      {
+        USAGE_COUNTER: {
+          idFromName: (name: string) => name,
+          get: doGet,
+        } as unknown as DurableObjectNamespace,
+      },
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      dryRun: true,
+      action: 'project.owner',
+      target: { id: project.id, slug: project.slug, userId: target.id },
+      previousOwner: { id: owner.id, plan: 'free', suspended: false },
+      newOwner: {
+        id: target.id,
+        plan: 'pro',
+        suspended: true,
+        suspendedReason: 'operator_review',
+      },
+      formerOwnerRole: 'admin',
+      targetPreviousRole: 'collaborator',
+      blockers: [{ kind: 'deployment', id: deployment.id, status: 'pending' }],
+      counterUpdates: { detachUserId: owner.id, attachUserId: target.id },
+      usageTransfer: 'non-retroactive',
+    });
+    expect(
+      (await env.db.select().from(projects).where(eq(projects.id, project.id)))[0],
+    ).toMatchObject({ user_id: owner.id });
+    expect(
+      await env.db
+        .select()
+        .from(projectOwnershipPeriods)
+        .where(eq(projectOwnershipPeriods.project_id, project.id)),
+    ).toEqual(ownershipPeriodsBefore);
+    expect(
+      await env.db.select().from(projectMembers).where(eq(projectMembers.project_id, project.id)),
+    ).toMatchObject([{ user_id: target.id, role: 'collaborator' }]);
+    expect(
+      await env.db
+        .select()
+        .from(projectInvitations)
+        .where(eq(projectInvitations.id, 'pinv_transfer_target')),
+    ).toMatchObject([{ status: 'pending' }]);
+    expect(putSpy).not.toHaveBeenCalled();
+    expect(doGet).not.toHaveBeenCalled();
+  });
+
+  test('waits for the previous usage consumer lifetime before changing ownership', async () => {
+    const owner = await createTestUser(env.db, 'rollout-owner');
+    const target = await createTestUser(env.db, 'rollout-target');
+    const project = await createTestProject(env.db, owner.id, 'rollout-project');
+    const rolloutEnv = {
+      PLATFORM_ENV: 'production',
+      VERSION_METADATA: {
+        id: 'version-2',
+        tag: '',
+        timestamp: new Date().toISOString(),
+      },
+    } satisfies Partial<ApiEnv['Bindings']>;
+
+    const preview = await req(
+      `/projects/${project.id}/owner`,
+      { userId: target.id, dryRun: true },
+      rolloutEnv,
+    );
+    expect(preview.status).toBe(200);
+
+    const blocked = await req(`/projects/${project.id}/owner`, { userId: target.id }, rolloutEnv);
+    expect(blocked.status).toBe(503);
+    expect(await blocked.json()).toMatchObject({
+      error: 'ownership_transfer_rollout_pending',
+      details: { retryAfterSeconds: expect.any(Number) },
+    });
+    expect(
+      (await env.db.query.projects.findFirst({ where: eq(projects.id, project.id) }))?.user_id,
+    ).toBe(owner.id);
+
+    const completed = await req(
+      `/projects/${project.id}/owner`,
+      { userId: target.id },
+      {
+        ...rolloutEnv,
+        VERSION_METADATA: {
+          ...rolloutEnv.VERSION_METADATA,
+          timestamp: '2020-01-01T00:00:00.000Z',
+        },
+      },
+    );
+    expect(completed.status).toBe(200);
+    expect(
+      (await env.db.query.projects.findFirst({ where: eq(projects.id, project.id) }))?.user_id,
+    ).toBe(target.id);
+  });
+
+  test('transfers ownership atomically and converges counters and routing idempotently', async () => {
+    const owner = await createTestUser(env.db, 'transfer-owner');
+    const target = await createTestUser(env.db, 'transfer-target', 'github', undefined, 'pro');
+    await env.db
+      .update(users)
+      .set({ suspended_reason: 'operator_review' })
+      .where(eq(users.id, target.id));
+    const project = await createTestProject(env.db, owner.id, 'transfer-project');
+    await env.db.insert(projectMembers).values({
+      project_id: project.id,
+      user_id: target.id,
+      role: 'reader',
+      added_by_user_id: owner.id,
+    });
+    await env.db.insert(projectInvitations).values({
+      id: 'pinv_transfer_target',
+      project_id: project.id,
+      target_user_id: target.id,
+      target_email_snapshot: 'transfer-target@example.com',
+      role: 'admin',
+      invited_by_user_id: owner.id,
+      expires_at: new Date(Date.now() + 86_400_000).toISOString(),
+    });
+    await env.db.insert(projectDeployCredentials).values({
+      id: 'transfer-deploy-credential',
+      project_id: project.id,
+      issued_by: owner.id,
+      name: 'transfer credential',
+      expires_at: new Date(Date.now() + 86_400_000).toISOString(),
+    });
+    await env.ROUTING.put(
+      project.slug,
+      JSON.stringify({ workerName: 'worker', projectId: project.id, userId: owner.id }),
+    );
+    const counterCalls: Array<{
+      ownerId: string;
+      path: string;
+      body: Record<string, unknown>;
+    }> = [];
+    const USAGE_COUNTER = captureUsageCounter(counterCalls);
+
+    const response = await req(
+      `/projects/${project.id}/owner`,
+      { userId: target.id },
+      { USAGE_COUNTER },
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      action: 'project.owner',
+      changed: true,
+      previousOwner: { id: owner.id },
+      newOwner: { id: target.id },
+      formerOwnerRole: 'admin',
+      convergence: { countersComplete: true, routingComplete: true },
+    });
+    expect(
+      (await env.db.select().from(projects).where(eq(projects.id, project.id)))[0],
+    ).toMatchObject({ user_id: target.id });
+    expect(
+      await env.db.select().from(projectMembers).where(eq(projectMembers.project_id, project.id)),
+    ).toMatchObject([{ user_id: owner.id, role: 'admin', added_by_user_id: operatorAdminId }]);
+    expect(
+      await env.db
+        .select()
+        .from(projectInvitations)
+        .where(eq(projectInvitations.id, 'pinv_transfer_target')),
+    ).toMatchObject([
+      {
+        status: 'revoked',
+        revoked_by_user_id: operatorAdminId,
+        revoked_at: expect.any(String),
+      },
+    ]);
+    const periods = await env.db
+      .select()
+      .from(projectOwnershipPeriods)
+      .where(eq(projectOwnershipPeriods.project_id, project.id));
+    expect(periods).toHaveLength(2);
+    const former = periods.find((period) => period.owner_user_id === owner.id)!;
+    const current = periods.find((period) => period.owner_user_id === target.id)!;
+    expect(former.ends_at).toBe(current.starts_at);
+    expect(current).toMatchObject({ ends_at: null, changed_by_user_id: operatorAdminId });
+    const [revokedCredential] = await env.db
+      .select()
+      .from(projectDeployCredentials)
+      .where(eq(projectDeployCredentials.id, 'transfer-deploy-credential'));
+    expect(Date.parse(revokedCredential!.revoked_at!)).toBe(Date.parse(current.starts_at));
+    expect(counterCalls).toEqual([
+      {
+        ownerId: owner.id,
+        path: '/detach-project',
+        body: {
+          projectId: project.id,
+          userId: owner.id,
+          billingPeriodStart: expect.any(String),
+          ownershipStartedAt: former.starts_at,
+          ownershipEndedAt: current.starts_at,
+        },
+      },
+      {
+        ownerId: target.id,
+        path: '/attach-project',
+        body: {
+          projectId: project.id,
+          userId: target.id,
+          slug: project.slug,
+          billingPeriodStart: expect.any(String),
+          ownershipStartedAt: current.starts_at,
+        },
+      },
+    ]);
+    expect(JSON.parse((await env.ROUTING.get(project.slug))!)).toMatchObject({
+      projectId: project.id,
+      userId: target.id,
+      suspended: 'operator_review',
+    });
+    expect(JSON.parse((await env.ROUTING.get(`project:${project.id}`))!)).toEqual({
+      userId: target.id,
+      plan: 'pro',
+    });
+
+    counterCalls.length = 0;
+    const retry = await req(
+      `/projects/${project.id}/owner`,
+      { userId: target.id },
+      { USAGE_COUNTER },
+    );
+    expect(retry.status).toBe(200);
+    expect(await retry.json()).toMatchObject({ changed: false, newOwner: { id: target.id } });
+    expect(
+      await env.db
+        .select()
+        .from(projectOwnershipPeriods)
+        .where(eq(projectOwnershipPeriods.project_id, project.id)),
+    ).toHaveLength(2);
+    expect(counterCalls.map((call) => call.path)).toEqual(['/detach-project', '/attach-project']);
+  });
+
+  test('converges plan, suspension, and restore changes interleaved with a transfer', async () => {
+    const owner = await createTestUser(env.db, 'concurrent-transfer-owner');
+    const target = await createTestUser(env.db, 'concurrent-transfer-target');
+    const project = await createTestProject(env.db, owner.id, 'concurrent-transfer-project');
+    await env.ROUTING.put(
+      project.slug,
+      JSON.stringify({ workerName: 'worker', projectId: project.id, userId: owner.id }),
+    );
+
+    const transferCounterCalls: Array<{
+      ownerId: string;
+      path: string;
+      body: Record<string, unknown>;
+    }> = [];
+    const pausingCounter = (
+      detachStarted: ReturnType<typeof deferred>,
+      resumeTransfer: ReturnType<typeof deferred>,
+    ) =>
+      ({
+        idFromName: (name: string) => name,
+        get: (ownerId: string) => ({
+          fetch: async (request: Request) => {
+            const path = new URL(request.url).pathname;
+            const body = (await request.json()) as Record<string, unknown>;
+            transferCounterCalls.push({ ownerId, path, body });
+            if (path === '/detach-project') {
+              detachStarted.resolve();
+              await resumeTransfer.promise;
+            }
+            return Response.json({ ok: true });
+          },
+        }),
+      }) as unknown as DurableObjectNamespace;
+
+    const detachStarted = deferred();
+    const resumeTransfer = deferred();
+
+    const transferPromise = req(
+      `/projects/${project.id}/owner`,
+      { userId: target.id },
+      { USAGE_COUNTER: pausingCounter(detachStarted, resumeTransfer) },
+    );
+    await detachStarted.promise;
+
+    const planCounterCalls: Array<{
+      ownerId: string;
+      path: string;
+      body: Record<string, unknown>;
+    }> = [];
+    const planChange = await req(
+      `/users/${target.id}/plan`,
+      { plan: 'pro' },
+      { USAGE_COUNTER: captureUsageCounter(planCounterCalls) },
+    );
+    expect(planChange.status).toBe(200);
+
+    const suspendDbStarted = deferred();
+    const resumeSuspendDb = deferred();
+    const suspendUser = dbModule.suspendUser;
+    const suspendSpy = vi.spyOn(dbModule, 'suspendUser').mockImplementation(async (...args) => {
+      suspendDbStarted.resolve();
+      await resumeSuspendDb.promise;
+      return suspendUser(...args);
+    });
+    const suspensionPromise = req(`/users/${target.id}/suspend`, {
+      reason: 'operator_review',
+    });
+    await suspendDbStarted.promise;
+
+    resumeTransfer.resolve();
+    const transfer = await transferPromise;
+
+    expect(transfer.status).toBe(200);
+    expect(await transfer.json()).toMatchObject({
+      newOwner: {
+        id: target.id,
+        plan: 'pro',
+        suspended: false,
+      },
+    });
+    expect(transferCounterCalls).toMatchObject([
+      { ownerId: owner.id, path: '/detach-project' },
+      {
+        ownerId: target.id,
+        path: '/attach-project',
+        body: { projectId: project.id, userId: target.id },
+      },
+    ]);
+    expect(transferCounterCalls[1]!.body).not.toHaveProperty('plan');
+    expect(planCounterCalls.map((call) => call.path)).toEqual(['/reevaluate-sandbox']);
+    expect(JSON.parse((await env.ROUTING.get(project.slug))!).suspended).toBeUndefined();
+
+    resumeSuspendDb.resolve();
+    const suspension = await suspensionPromise;
+    suspendSpy.mockRestore();
+    expect(suspension.status).toBe(200);
+    expect(JSON.parse((await env.ROUTING.get(project.slug))!)).toMatchObject({
+      userId: target.id,
+      suspended: 'operator_review',
+      limits: { cpuMs: 50, subRequests: 1000 },
+    });
+    expect(JSON.parse((await env.ROUTING.get(`project:${project.id}`))!)).toEqual({
+      userId: target.id,
+      plan: 'pro',
+    });
+
+    const retryDetachStarted = deferred();
+    const resumeRetry = deferred();
+    const retryPromise = req(
+      `/projects/${project.id}/owner`,
+      { userId: target.id },
+      { USAGE_COUNTER: pausingCounter(retryDetachStarted, resumeRetry) },
+    );
+    await retryDetachStarted.promise;
+
+    const restoreDbStarted = deferred();
+    const resumeRestoreDb = deferred();
+    const unsuspendUser = dbModule.unsuspendUser;
+    const restoreSpy = vi.spyOn(dbModule, 'unsuspendUser').mockImplementation(async (...args) => {
+      restoreDbStarted.resolve();
+      await resumeRestoreDb.promise;
+      return unsuspendUser(...args);
+    });
+    const restorePromise = req(`/users/${target.id}/restore`, {});
+    await restoreDbStarted.promise;
+
+    resumeRetry.resolve();
+    expect((await retryPromise).status).toBe(200);
+    expect(JSON.parse((await env.ROUTING.get(project.slug))!).suspended).toBe('operator_review');
+
+    resumeRestoreDb.resolve();
+    const restore = await restorePromise;
+    restoreSpy.mockRestore();
+    expect(restore.status).toBe(200);
+    expect(await getUser(env.db, target.id)).toMatchObject({
+      plan: 'pro',
+      suspended_reason: null,
+    });
+    expect(JSON.parse((await env.ROUTING.get(project.slug))!).suspended).toBeUndefined();
+  });
+
+  test('rejects unknown owners and deleting, deploy, rollback, and build work', async () => {
+    const owner = await createTestUser(env.db, 'blocked-transfer-owner');
+    const target = await createTestUser(env.db, 'blocked-transfer-target');
+    const project = await createTestProject(env.db, owner.id, 'blocked-transfer-project');
+
+    expect(
+      (await req(`/projects/${project.id}/owner`, { userId: 'user_missing', dryRun: true })).status,
+    ).toBe(404);
+
+    await env.db.update(projects).set({ status: 'deleting' }).where(eq(projects.id, project.id));
+    const deleting = await req(`/projects/${project.id}/owner`, { userId: target.id });
+    expect(deleting.status).toBe(409);
+    expect(await deleting.json()).toMatchObject({
+      error: 'ownership_transfer_blocked',
+      details: { blockers: [{ kind: 'deletion', id: project.id, status: 'deleting' }] },
+    });
+    await env.db.update(projects).set({ status: 'active' }).where(eq(projects.id, project.id));
+
+    const deployment = await createTestDeployment(env.db, project.id, 'uploading');
+    const deploying = await req(`/projects/${project.id}/owner`, { userId: target.id });
+    expect(deploying.status).toBe(409);
+    expect(await deploying.json()).toMatchObject({
+      details: { blockers: [{ kind: 'deployment', id: deployment.id, status: 'uploading' }] },
+    });
+    await env.db
+      .update(deployments)
+      .set({ status: 'failed' })
+      .where(eq(deployments.id, deployment.id));
+
+    const rollback = await createTestDeployment(env.db, project.id, 'pending', 'rollback-lease');
+    const rollingBack = await req(`/projects/${project.id}/owner`, { userId: target.id });
+    expect(rollingBack.status).toBe(409);
+    expect(await rollingBack.json()).toMatchObject({
+      details: { blockers: [{ kind: 'rollback', id: rollback.id, status: 'pending' }] },
+    });
+    await env.db
+      .update(deployments)
+      .set({ status: 'canceled' })
+      .where(eq(deployments.id, rollback.id));
+
+    await env.db.insert(builds).values({
+      id: 'build_transfer_blocker',
+      project_id: project.id,
+      user_id: owner.id,
+      status: 'queued',
+    });
+    for (const status of ['queued', 'building'] as const) {
+      await env.db.update(builds).set({ status }).where(eq(builds.id, 'build_transfer_blocker'));
+      const building = await req(`/projects/${project.id}/owner`, { userId: target.id });
+      expect(building.status).toBe(409);
+      expect(await building.json()).toMatchObject({
+        details: {
+          blockers: [{ kind: 'build', id: 'build_transfer_blocker', status }],
+        },
+      });
+    }
+  });
+
+  test('converges routing despite counter failure and resumes after the former owner is deleted', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const owner = await createTestUser(env.db, 'partial-transfer-owner');
+    const target = await createTestUser(env.db, 'partial-transfer-target');
+    await env.db
+      .update(users)
+      .set({ suspended_reason: 'operator_review' })
+      .where(eq(users.id, target.id));
+    const project = await createTestProject(env.db, owner.id, 'partial-transfer-project');
+    await env.ROUTING.put(
+      project.slug,
+      JSON.stringify({ workerName: 'worker', projectId: project.id, userId: owner.id }),
+    );
+    const failedCalls: Array<{
+      ownerId: string;
+      path: string;
+      body: Record<string, unknown>;
+    }> = [];
+    const failed = await req(
+      `/projects/${project.id}/owner`,
+      { userId: target.id },
+      { USAGE_COUNTER: captureUsageCounter(failedCalls, '/attach-project') },
+    );
+
+    expect(failed.status).toBe(500);
+    expect(await failed.json()).toMatchObject({
+      error: 'partial_failure',
+      details: {
+        partial: true,
+        ownershipTransferred: true,
+        previousOwner: { id: owner.id },
+        newOwner: { id: target.id },
+        convergence: { countersComplete: false, routingComplete: true },
+      },
+    });
+    expect(
+      (await env.db.select().from(projects).where(eq(projects.id, project.id)))[0],
+    ).toMatchObject({ user_id: target.id });
+    expect(JSON.parse((await env.ROUTING.get(project.slug))!)).toMatchObject({
+      userId: target.id,
+      suspended: 'operator_review',
+    });
+
+    const recoveryPreview = await req(`/projects/${project.id}/owner`, {
+      userId: target.id,
+      dryRun: true,
+    });
+    expect(recoveryPreview.status).toBe(200);
+    expect(await recoveryPreview.json()).toMatchObject({
+      currentOwner: { id: target.id },
+      previousOwner: { id: owner.id },
+      newOwner: { id: target.id },
+      changed: false,
+      formerOwnerRole: 'admin',
+      counterUpdates: { detachUserId: owner.id, attachUserId: target.id },
+    });
+    expect((await req(`/users/${owner.id}/delete`, {})).status).toBe(200);
+
+    const deletedOwnerPreview = await req(`/projects/${project.id}/owner`, {
+      userId: target.id,
+      dryRun: true,
+    });
+    expect(deletedOwnerPreview.status).toBe(200);
+    expect(await deletedOwnerPreview.json()).toMatchObject({
+      currentOwner: { id: target.id },
+      previousOwner: { id: owner.id, deleted: true },
+      newOwner: { id: target.id },
+      changed: false,
+    });
+
+    const retryCalls: Array<{
+      ownerId: string;
+      path: string;
+      body: Record<string, unknown>;
+    }> = [];
+    const retry = await req(
+      `/projects/${project.id}/owner`,
+      { userId: target.id },
+      { USAGE_COUNTER: captureUsageCounter(retryCalls) },
+    );
+    expect(retry.status).toBe(200);
+    expect(await retry.json()).toMatchObject({
+      changed: false,
+      convergence: { countersComplete: true, routingComplete: true },
+    });
+    expect(retryCalls.map(({ ownerId, path }) => ({ ownerId, path }))).toEqual([
+      { ownerId: owner.id, path: '/detach-project' },
+      { ownerId: target.id, path: '/attach-project' },
+    ]);
+    expect(JSON.parse((await env.ROUTING.get(project.slug))!)).toMatchObject({ userId: target.id });
+  });
+
+  test('reports a routing partial failure after counters converge', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const owner = await createTestUser(env.db, 'routing-partial-owner');
+    const target = await createTestUser(env.db, 'routing-partial-target');
+    const project = await createTestProject(env.db, owner.id, 'routing-partial-project');
+    await env.ROUTING.put(
+      project.slug,
+      JSON.stringify({ workerName: 'worker', projectId: project.id, userId: owner.id }),
+    );
+    const counterCalls: Array<{
+      ownerId: string;
+      path: string;
+      body: Record<string, unknown>;
+    }> = [];
+    const failingRouting = {
+      get: (key: string) => env.ROUTING.get(key),
+      put: async () => {
+        throw new Error('KV unavailable');
+      },
+      delete: (key: string) => env.ROUTING.delete(key),
+    } as unknown as KVNamespace;
+
+    const response = await req(
+      `/projects/${project.id}/owner`,
+      { userId: target.id },
+      { ROUTING: failingRouting, USAGE_COUNTER: captureUsageCounter(counterCalls) },
+    );
+
+    expect(response.status).toBe(500);
+    expect(await response.json()).toMatchObject({
+      error: 'partial_failure',
+      details: {
+        ownershipTransferred: true,
+        convergence: { countersComplete: true, routingComplete: false },
+      },
+    });
+    expect(
+      (await env.db.select().from(projects).where(eq(projects.id, project.id)))[0],
+    ).toMatchObject({ user_id: target.id });
+    expect(counterCalls.map((call) => call.path)).toEqual(['/detach-project', '/attach-project']);
+    expect(JSON.parse((await env.ROUTING.get(project.slug))!)).toMatchObject({ userId: owner.id });
+  });
+
   test('previews every user mutation and project deletion without changing data or calling services', async () => {
     const user = await createTestUser(env.db, 'preview-user');
     const project = await createTestProject(env.db, user.id, 'preview-project');
@@ -261,6 +984,70 @@ describe('operator tenant mutations', () => {
     });
     expect(await getUser(env.db, user.id)).toBeNull();
     expect((await req(`/projects/${project.id}`)).status).toBe(404);
+  });
+
+  test('does not delete a project transferred away after owned-project discovery', async () => {
+    const formerOwner = await createTestUser(env.db, 'former-delete-owner');
+    const newOwner = await createTestUser(env.db, 'new-delete-owner');
+    const project = await createTestProject(env.db, formerOwner.id, 'transferred-before-delete');
+    const staleProject = await dbModule.getProject(env.db, project.id);
+    expect(staleProject).not.toBeNull();
+
+    // Force the operator workflow to consume the pre-transfer enumeration
+    // while the authoritative project row already names the new owner. The
+    // teardown lock must treat this as a stale snapshot and skip all cleanup.
+    await env.db.update(projects).set({ user_id: newOwner.id }).where(eq(projects.id, project.id));
+    vi.spyOn(dbModule, 'getOwnedProjectsByUserId').mockResolvedValue([staleProject!]);
+    const cf = mockCfApi();
+
+    const response = await req(`/users/${formerOwner.id}/delete`, {});
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ deleted: true, deletedProjects: [] });
+    expect(await dbModule.getProject(env.db, project.id)).toMatchObject({ user_id: newOwner.id });
+    expect(await getUser(env.db, formerOwner.id)).toBeNull();
+    expect(cf).not.toHaveBeenCalled();
+  });
+
+  test('stops shared-project container builds invalidated by deleting their authorizer', async () => {
+    const owner = await createTestUser(env.db, 'surviving-owner');
+    const authorizer = await createTestUser(env.db, 'deleted-authorizer');
+    const project = await createTestProject(env.db, owner.id, 'surviving-project');
+    await env.db.insert(projectMembers).values({
+      project_id: project.id,
+      user_id: authorizer.id,
+      role: 'admin',
+      added_by_user_id: owner.id,
+    });
+    await upsertGitHubInstallation(env.db, {
+      installationId: 'deleted-authorizer-installation',
+      userId: authorizer.id,
+      accountLogin: authorizer.login,
+      accountId: 'deleted-authorizer-account',
+      accountType: 'User',
+      repositories: [{ full_name: `${authorizer.login}/app`, id: 8811 }],
+    });
+    await createGitHubConnection(env.db, {
+      projectId: project.id,
+      installationId: 'deleted-authorizer-installation',
+      repoFullName: `${authorizer.login}/app`,
+      repositoryId: '8811',
+      authorizedByUserId: authorizer.id,
+    });
+    const build = await createBuild(env.db, {
+      projectId: project.id,
+      userId: owner.id,
+      executor: 'container',
+      status: 'building',
+    });
+    const { namespace, cancelledIds } = recordingBuildManager();
+
+    const response = await req(`/users/${authorizer.id}/delete`, {}, { BUILD_MANAGER: namespace });
+
+    expect(response.status).toBe(200);
+    expect(await getUser(env.db, authorizer.id)).toBeNull();
+    expect((await getBuild(env.db, build.id))?.status).toBe('cancelled');
+    expect(cancelledIds).toEqual([build.id]);
   });
 
   test('deletes invitation actors while preserving invitation history and revoking sessions', async () => {

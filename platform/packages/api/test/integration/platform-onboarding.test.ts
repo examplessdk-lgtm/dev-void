@@ -55,6 +55,43 @@ describe('platform onboarding pages', () => {
     expect(html).not.toContain('attacker.example');
   });
 
+  it('turns a project invitation link into CLI acceptance instructions', async () => {
+    const response = await app.fetch(
+      new Request('https://api.example.com/invite?project-invitation=pinv_a1b2c3d4e5f6'),
+      {
+        ...env,
+        AUTH_REDIRECT_URI: 'https://api.example.com/auth/callback',
+        PLATFORM_INSTALLATION_ID: 'example-installation',
+      },
+    );
+
+    expect(response.status).toBe(200);
+    const html = await response.text();
+    expect(html).toContain('<title>Accept Project Invitation - Void Platform</title>');
+    expect(html).toContain('void connect &#39;https://api.example.com&#39;');
+    expect(html).toContain('void project team accept pinv_a1b2c3d4e5f6');
+    expect(html).not.toMatch(/dashboard/i);
+  });
+
+  it('does not render shell instructions for a malformed invitation id', async () => {
+    const response = await app.fetch(
+      new Request(
+        'https://api.example.com/invite?project-invitation=%24%28open%20https%3A%2F%2Fevil.example%29',
+      ),
+      {
+        ...env,
+        AUTH_REDIRECT_URI: 'https://api.example.com/auth/callback',
+        PLATFORM_INSTALLATION_ID: 'example-installation',
+      },
+    );
+
+    expect(response.status).toBe(200);
+    const html = await response.text();
+    expect(html).toContain('<title>Get Started - Void Platform</title>');
+    expect(html).not.toContain('void project team accept');
+    expect(html).not.toContain('evil.example');
+  });
+
   it.each(['/invite', '/signup-restricted'])(
     'uses a generic name for source deployments at %s',
     async (path) => {

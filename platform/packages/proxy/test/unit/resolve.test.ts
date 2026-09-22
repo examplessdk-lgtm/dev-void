@@ -1,5 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vite-plus/test';
-import { resolveResource, clearResolveCache, verifyProjectOwner } from '../../src/resolve.ts';
+import {
+  resolveResource,
+  clearResolveCache,
+  verifyProjectDeployAccess,
+} from '../../src/resolve.ts';
 
 const JWT_SECRET = 'test-secret-key';
 
@@ -71,11 +75,11 @@ describe('resolveResource', () => {
   });
 });
 
-describe('verifyProjectOwner', () => {
+describe('verifyProjectDeployAccess', () => {
   it('cryptographically binds the internal check to the actual proxy origin', async () => {
     const api = { fetch: vi.fn(async () => Response.json({ ok: true })) } as unknown as Fetcher;
     await expect(
-      verifyProjectOwner(
+      verifyProjectDeployAccess(
         api,
         JWT_SECRET,
         'proj_1',
@@ -96,7 +100,7 @@ describe('verifyProjectOwner', () => {
 
     const missing = { fetch: vi.fn() } as unknown as Fetcher;
     await expect(
-      verifyProjectOwner(missing, JWT_SECRET, 'proj_1', 'user_1', 'jwt', 'access'),
+      verifyProjectDeployAccess(missing, JWT_SECRET, 'proj_1', 'user_1', 'jwt', 'access'),
     ).resolves.toBe(false);
     expect(missing.fetch).not.toHaveBeenCalled();
   });

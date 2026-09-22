@@ -238,10 +238,10 @@ describe('POST /projects/:id/deploy/upload-urls', () => {
   // the in-tx re-read. Without the in-tx check, the handler would proceed
   // to issue presigned PUT URLs against a project that's being deleted,
   // letting the CLI write durable orphan bytes that teardown's R2 sweep
-  // races to clean up. We simulate the race by intercepting the second
-  // `getProject` call (the one made inside the FOR SHARE transaction) so
-  // it sees `status='deleting'` while the first (unlocked) call sees
-  // `active`.
+  // races to clean up. We simulate the race by intercepting the direct
+  // `getProject` call made inside the FOR SHARE transaction. The unlocked
+  // read now comes from the central project-access query, so this locked
+  // read must see `status='deleting'`.
   it('returns 410 when status flips to deleting between unlocked check and FOR SHARE re-read', async () => {
     const { setGetProjectOverride } = await import('./setup.ts');
     const user = await createTestUser(env.db);
@@ -250,12 +250,6 @@ describe('POST /projects/:id/deploy/upload-urls', () => {
     let calls = 0;
     setGetProjectOverride(({ original, argsList }) => {
       calls++;
-      // First call (unlocked early-out) → original = active.
-      // Second call (in-tx, post FOR SHARE) → simulate teardown that
-      // committed `status='deleting'` between the two reads.
-      if (calls === 1) {
-        return original(...argsList);
-      }
       return original(...argsList).then((p) => (p ? { ...p, status: 'deleting' as const } : p));
     });
 
@@ -277,8 +271,7 @@ describe('POST /projects/:id/deploy/upload-urls', () => {
       const body = (await res.json()) as { error: string; urls?: unknown };
       expect(body.error).toMatch(/being deleted/);
       expect(body.urls).toBeUndefined();
-      // Both reads must have run: unlocked early-out + in-tx re-read.
-      expect(calls).toBeGreaterThanOrEqual(2);
+      expect(calls).toBe(1);
     } finally {
       setGetProjectOverride(null);
     }

@@ -16,6 +16,7 @@ import {
   emailOperations,
 } from '../../src/email/connection-schema.ts';
 import app from '../../src/index.ts';
+import { projectMembers } from '../../src/schema.ts';
 import { stubCustomerCf } from './email-domain-cf-stub.ts';
 import {
   clearTables,
@@ -63,6 +64,81 @@ afterEach(() => {
 });
 
 describe('project email domain authority', () => {
+  it('allows members to read email state and only admins to change domains', async () => {
+    const owner = await createTestUser(env.db, 'email-team-owner');
+    const reader = await createTestUser(env.db, 'email-team-reader');
+    const collaborator = await createTestUser(env.db, 'email-team-collaborator');
+    const admin = await createTestUser(env.db, 'email-team-admin');
+    const project = await createTestProject(env.db, owner.id, 'email-team-project');
+    await env.db.insert(projectMembers).values([
+      {
+        project_id: project.id,
+        user_id: reader.id,
+        role: 'reader',
+        added_by_user_id: owner.id,
+      },
+      {
+        project_id: project.id,
+        user_id: collaborator.id,
+        role: 'collaborator',
+        added_by_user_id: owner.id,
+      },
+      {
+        project_id: project.id,
+        user_id: admin.id,
+        role: 'admin',
+        added_by_user_id: owner.id,
+      },
+    ]);
+    stubCustomerCf({ zones });
+
+    for (const member of [reader, collaborator, admin]) {
+      expect((await call(project.id, member.jwt, 'GET', '/settings')).status).toBe(200);
+      expect((await call(project.id, member.jwt, 'GET', '/domains')).status).toBe(200);
+    }
+    expect(
+      (
+        await call(project.id, collaborator.jwt, 'POST', '/domains', {
+          domain: 'team.example.com',
+          apiToken: token,
+        })
+      ).status,
+    ).toBe(403);
+    expect(
+      (
+        await call(project.id, owner.jwt, 'POST', '/domains', {
+          domain: 'team.example.com',
+          apiToken: token,
+        })
+      ).status,
+    ).toBe(200);
+    expect((await call(project.id, reader.jwt, 'GET', '/domains/team.example.com')).status).toBe(
+      200,
+    );
+    expect(
+      (
+        await call(project.id, admin.jwt, 'POST', '/domains', {
+          domain: 'team.example.com',
+          apiToken: token,
+        })
+      ).status,
+    ).toBe(200);
+    expect(
+      (await call(project.id, admin.jwt, 'POST', '/domains/team.example.com/sync')).status,
+    ).toBe(200);
+    expect((await call(project.id, admin.jwt, 'DELETE', '/domains/team.example.com')).status).toBe(
+      200,
+    );
+    expect(
+      (
+        await call(project.id, admin.jwt, 'POST', '/domains', {
+          domain: 'team.example.com',
+          apiToken: token,
+        })
+      ).status,
+    ).toBe(200);
+  });
+
   it('persists token identity and expiry and reports a known expired credential locally', async () => {
     const owner = await createTestUser(env.db, 'expiry-owner');
     const project = await createTestProject(env.db, owner.id, 'expiry-mail');

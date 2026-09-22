@@ -1,5 +1,5 @@
 import { sql as drizzleSql } from 'drizzle-orm';
-import { getDomainsByProjectIds, getProjectsByUserId, getUser, type Db } from './db.ts';
+import { getDomainsByProjectIds, getProject, type Db } from './db.ts';
 import type { PlanLimits } from './tiers.ts';
 import type { AssetConfig, DeployManifest } from './types.ts';
 
@@ -25,33 +25,49 @@ export function sandboxBlockKey(userId: string): string {
   return `sandbox-block:${userId}`;
 }
 
-export function buildProjectAccountJson(entry: ProjectAccountEntry): string {
-  return JSON.stringify({ userId: entry.userId, plan: entry.plan });
+async function withLockedProjectOwner(
+  db: Db,
+  projectId: string,
+  expectedOwnerUserId: string,
+  update: () => Promise<void>,
+): Promise<boolean> {
+  return db.transaction(async (tx) => {
+    await tx.execute(drizzleSql`SELECT id FROM projects WHERE id = ${projectId} FOR UPDATE`);
+    const project = await getProject(tx as unknown as Db, projectId);
+    if (!project || project.user_id !== expectedOwnerUserId || project.status === 'deleting') {
+      return false;
+    }
+    await update();
+    return true;
+  });
 }
 
-/**
- * Re-publish every `project:{projectId}` routing entry for `userId`. Invoked
- * after a plan-change so the proxy's sandbox gate sees the new concurrency
- * cap on the next acquire without waiting for the user to redeploy. Best-
- * effort: KV writes are idempotent and bounded by the user's project count,
- * but a failure here means stale plan data lives in KV until the next deploy
- * for that project — callers should log on failure.
- */
-export async function refreshProjectKvForUser(
+export async function verifyActiveProjectOwner(
   db: Db,
+  projectId: string,
+  expectedOwnerUserId: string,
+): Promise<boolean> {
+  return withLockedProjectOwner(db, projectId, expectedOwnerUserId, async () => {});
+}
+
+export async function setProjectAiBlock(
   routing: KVNamespace,
-  userId: string,
-): Promise<void> {
-  const user = await getUser(db, userId);
-  if (!user) {
-    return;
-  }
-  const projects = await getProjectsByUserId(db, userId);
-  if (projects.length === 0) {
-    return;
-  }
-  const payload = buildProjectAccountJson({ userId, plan: user.plan });
-  await Promise.all(projects.map((project) => routing.put(projectAccountKey(project.id), payload)));
+  db: Db,
+  projectId: string,
+  expectedOwnerUserId: string,
+  blocked: boolean,
+): Promise<boolean> {
+  return withLockedProjectOwner(db, projectId, expectedOwnerUserId, async () => {
+    if (blocked) {
+      await routing.put(`ai-block:${projectId}`, '1');
+    } else {
+      await routing.delete(`ai-block:${projectId}`);
+    }
+  });
+}
+
+export function buildProjectAccountJson(entry: ProjectAccountEntry): string {
+  return JSON.stringify({ userId: entry.userId, plan: entry.plan });
 }
 
 /**
@@ -185,7 +201,7 @@ export async function applyRoutingSuspension(
 export async function setProjectsRoutingSuspension(
   routing: KVNamespace,
   db: Db,
-  projects: ReadonlyArray<{ id: string; slug: string }>,
+  projects: ReadonlyArray<{ id: string; slug: string; user_id: string }>,
   update: RoutingSuspensionUpdate,
 ): Promise<void> {
   if (projects.length === 0) {
@@ -194,6 +210,12 @@ export async function setProjectsRoutingSuspension(
   for (const project of projects) {
     await db.transaction(async (tx) => {
       await tx.execute(drizzleSql`SELECT id FROM projects WHERE id = ${project.id} FOR UPDATE`);
+      const current = await getProject(tx as unknown as Db, project.id);
+      // If ownership changed before this lock, transfer convergence owns the
+      // route and this stale fan-out must stand down.
+      if (current?.user_id !== project.user_id) {
+        return;
+      }
       // Resolve domains only after the project lock. Domain activation takes
       // the same lock before publishing a route, so this read must happen
       // behind it or a domain activated between the eager read and this lock

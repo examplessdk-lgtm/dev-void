@@ -5468,7 +5468,7 @@ export async function verifyPlatformHealth(
   proxyUrl: string,
   applicationBaseDomain: string,
   platformVersion: string,
-  usageProtocolVersion: 0 | 1,
+  usageProtocolVersion: 0 | 1 | 2,
   healthProbeToken: string,
   fetcher: typeof fetch = fetch,
   dispatchOrigin?: string,

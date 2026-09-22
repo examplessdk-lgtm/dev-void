@@ -1,19 +1,20 @@
+import { and, eq, gt, isNull, lt, or } from 'drizzle-orm';
 import { Hono } from 'hono';
-import { getProject, getProjectsByUserId } from '../db.ts';
+import type { Db } from '../db.ts';
 import { type ApiEnv, isDevBypass } from '../env.ts';
+import { projectOwnershipPeriods, projects as projectsTable } from '../schema.ts';
 import { getCurrentBillingPeriodStart } from '../tiers.ts';
+import type { Project } from '../types.ts';
+import { requireProjectRouteCapability } from './project-access.ts';
 
 const projectUsage = new Hono<ApiEnv>()
 
   // Project usage for current billing period
   .get('/:id/usage', async (context) => {
     const projectId = context.req.param('id');
-    const project = await getProject(context.get('db'), projectId);
-    if (!project) {
-      return context.json({ error: 'project not found' }, 404);
-    }
-    if (project.user_id !== context.get('user').id) {
-      return context.json({ error: 'forbidden' }, 403);
+    const access = await requireProjectRouteCapability(context, projectId, 'read');
+    if (access instanceof Response) {
+      return access;
     }
 
     // Dev bypass — skip slow CF Analytics Engine API calls
@@ -27,7 +28,7 @@ const projectUsage = new Hono<ApiEnv>()
       });
     }
 
-    const since = getCurrentBillingPeriodStart(context.get('user').billing_cycle_start);
+    const since = getCurrentBillingPeriodStart(access.owner.billing_cycle_start);
     const requestsDataset = getRequestsDataset(context.env);
     const [usage, aiUsage] = await Promise.all([
       queryProjectUsage(
@@ -58,21 +59,28 @@ const accountUsage = new Hono<ApiEnv>()
 
   // Aggregate usage across all user's projects
   .get('/', async (context) => {
-    const projects = await getProjectsByUserId(context.get('db'), context.get('user').id);
-    if (projects.length === 0) {
+    const since = getCurrentBillingPeriodStart(context.get('user').billing_cycle_start);
+    const until = new Date();
+    const projectWindows = await getAccountUsageProjectWindows(
+      context.get('db'),
+      context.get('user').id,
+      since,
+      until,
+    );
+    if (projectWindows.length === 0) {
       return context.json({ requests: 0, bandwidthBytes: 0, aiNeurons: 0, projects: [] });
     }
 
     // Dev bypass — skip slow CF Analytics Engine API calls
     if (isDevBypass(context.env)) {
       return context.json({
-        billingPeriodStart: new Date().toISOString(),
+        billingPeriodStart: since.toISOString(),
         requests: 0,
         bandwidthBytes: 0,
         aiNeurons: 0,
-        projects: projects.map((p) => ({
-          projectId: p.id,
-          slug: p.slug,
+        projects: projectWindows.map(({ project }) => ({
+          projectId: project.id,
+          slug: project.slug,
           requests: 0,
           bandwidthBytes: 0,
           aiNeurons: 0,
@@ -80,31 +88,39 @@ const accountUsage = new Hono<ApiEnv>()
       });
     }
 
-    const since = getCurrentBillingPeriodStart(context.get('user').billing_cycle_start);
     const requestsDataset = getRequestsDataset(context.env);
 
     const [usageMap, ...aiUsages] = await Promise.all([
-      queryBatchProjectUsage(
+      queryBatchProjectUsageWindows(
         context.env.CF_ACCOUNT_ID,
         context.env.CF_API_TOKEN,
         requestsDataset,
-        projects.map((p) => p.id),
-        since,
+        projectWindows,
       ),
-      ...projects.map((p) =>
-        queryProjectAiUsage(
-          context.env.CF_ACCOUNT_ID,
-          context.env.CF_API_TOKEN,
-          context.env.AI_GATEWAY_ID ?? 'void',
-          p.id,
-          since,
+      ...projectWindows.map(async ({ project, intervals }) =>
+        intervals.reduce(
+          async (totalPromise, interval) => {
+            const [total, usage] = await Promise.all([
+              totalPromise,
+              queryProjectAiUsage(
+                context.env.CF_ACCOUNT_ID,
+                context.env.CF_API_TOKEN,
+                context.env.AI_GATEWAY_ID ?? 'void',
+                project.id,
+                interval.start,
+                interval.end,
+              ),
+            ]);
+            return { neurons: total.neurons + usage.neurons };
+          },
+          Promise.resolve({ neurons: 0 }),
         ),
       ),
     ]);
-    const projectUsages = projects.map((p, i) => ({
-      projectId: p.id,
-      slug: p.slug,
-      ...(usageMap.get(p.id) ?? ZERO_USAGE),
+    const projectUsages = projectWindows.map(({ project }, i) => ({
+      projectId: project.id,
+      slug: project.slug,
+      ...(usageMap.get(project.id) ?? ZERO_USAGE),
       aiNeurons: aiUsages[i].neurons,
     }));
 
@@ -214,27 +230,91 @@ async function queryProjectUsage(
 type UsageEntry = Readonly<{ requests: number; bandwidthBytes: number }>;
 const ZERO_USAGE: UsageEntry = { requests: 0, bandwidthBytes: 0 };
 
-async function queryBatchProjectUsage(
+type AccountUsageInterval = Readonly<{ start: Date; end: Date }>;
+type AccountUsageProjectWindow = Readonly<{
+  project: Project;
+  intervals: ReadonlyArray<AccountUsageInterval>;
+}>;
+
+function databaseTimestampMs(value: string): number {
+  const normalized = /(?:Z|[+-]\d{2}(?::?\d{2})?)$/i.test(value)
+    ? value
+    : `${value.replace(' ', 'T')}Z`;
+  return Date.parse(normalized);
+}
+
+/**
+ * Resolve the portions of the actor's current billing window for which they
+ * owned each project.
+ */
+async function getAccountUsageProjectWindows(
+  db: Db,
+  userId: string,
+  since: Date,
+  until: Date,
+): Promise<ReadonlyArray<AccountUsageProjectWindow>> {
+  const sinceIso = since.toISOString();
+  const untilIso = until.toISOString();
+  const rows = await db
+    .select({
+      project: projectsTable,
+      startsAt: projectOwnershipPeriods.starts_at,
+      endsAt: projectOwnershipPeriods.ends_at,
+    })
+    .from(projectOwnershipPeriods)
+    .innerJoin(projectsTable, eq(projectOwnershipPeriods.project_id, projectsTable.id))
+    .where(
+      and(
+        eq(projectOwnershipPeriods.owner_user_id, userId),
+        lt(projectOwnershipPeriods.starts_at, untilIso),
+        or(isNull(projectOwnershipPeriods.ends_at), gt(projectOwnershipPeriods.ends_at, sinceIso)),
+      ),
+    );
+
+  const windows = new Map<string, { project: Project; intervals: Array<AccountUsageInterval> }>();
+  for (const row of rows) {
+    const start = new Date(Math.max(since.getTime(), databaseTimestampMs(row.startsAt)));
+    const end = new Date(
+      Math.min(until.getTime(), row.endsAt ? databaseTimestampMs(row.endsAt) : until.getTime()),
+    );
+    if (start < end) {
+      const entry = windows.get(row.project.id) ?? { project: row.project, intervals: [] };
+      entry.intervals.push({ start, end });
+      windows.set(row.project.id, entry);
+    }
+  }
+
+  return [...windows.values()].sort((a, b) =>
+    b.project.created_at.localeCompare(a.project.created_at),
+  );
+}
+
+function analyticsStringLiteral(value: string): string {
+  return `'${value.replaceAll('\\', '\\\\').replaceAll("'", "\\'")}'`;
+}
+
+async function queryBatchProjectUsageWindows(
   accountId: string,
   apiToken: string,
   requestsDataset: string,
-  projectIds: ReadonlyArray<string>,
-  since: Date,
+  windows: ReadonlyArray<AccountUsageProjectWindow>,
 ): Promise<Map<string, UsageEntry>> {
-  if (projectIds.length === 0) {
+  if (windows.length === 0) {
     return new Map();
   }
-
-  const sinceStr = since.toISOString().replace('T', ' ').slice(0, 19);
-  const inList = projectIds.map((id) => `'${id}'`).join(', ');
+  const predicates = windows.flatMap(({ project, intervals }) =>
+    intervals.map(
+      ({ start, end }) =>
+        `(blob1 = ${analyticsStringLiteral(project.id)} AND timestamp >= toDateTime64(${analyticsStringLiteral(formatAnalyticsDateMilliseconds(start))}, 3) AND timestamp < toDateTime64(${analyticsStringLiteral(formatAnalyticsDateMilliseconds(end))}, 3))`,
+    ),
+  );
   const query = `
     SELECT
       blob1,
       SUM(_sample_interval * double1) as requests,
       SUM(_sample_interval * double2) as bandwidth_bytes
     FROM ${requestsDataset}
-    WHERE blob1 IN (${inList})
-      AND timestamp >= toDateTime('${sinceStr}')
+    WHERE ${predicates.join('\n      OR ')}
     GROUP BY blob1
   `;
 
@@ -249,20 +329,19 @@ async function queryBatchProjectUsage(
       body: query,
     },
   );
-
   if (!response.ok) {
     return new Map();
   }
-
   const json = (await response.json()) as { data: ReadonlyArray<BatchAnalyticsRow> };
-  const result = new Map<string, UsageEntry>();
-  for (const row of json.data ?? []) {
-    result.set(row.blob1, {
-      requests: Math.round(row.requests ?? 0),
-      bandwidthBytes: Math.round(row.bandwidth_bytes ?? 0),
-    });
-  }
-  return result;
+  return new Map(
+    (json.data ?? []).map((row) => [
+      row.blob1,
+      {
+        requests: Math.round(row.requests ?? 0),
+        bandwidthBytes: Math.round(row.bandwidth_bytes ?? 0),
+      },
+    ]),
+  );
 }
 
 async function queryTopProjectTraffic(
@@ -319,6 +398,10 @@ async function queryTopProjectTraffic(
 
 function formatAnalyticsDate(date: Date): string {
   return date.toISOString().replace('T', ' ').slice(0, 19);
+}
+
+function formatAnalyticsDateMilliseconds(date: Date): string {
+  return date.toISOString().replace('T', ' ').slice(0, 23);
 }
 
 function normalizeAnalyticsDate(value: string | null | undefined): string | null {
@@ -463,6 +546,8 @@ async function queryProjectAiUsage(
   gatewayId: string,
   projectId: string,
   since: Date,
+  until?: Date,
+  failOnError = false,
 ): Promise<{ neurons: number }> {
   const query = `query {
   viewer {
@@ -472,6 +557,7 @@ async function queryProjectAiUsage(
           gatewayId: "${gatewayId}"
           metadata_projectId: "${projectId}"
           datetime_geq: "${since.toISOString()}"
+          ${until ? `datetime_lt: "${until.toISOString()}"` : ''}
         }
       ) {
         sum { cost }
@@ -490,11 +576,17 @@ async function queryProjectAiUsage(
   });
 
   if (!response.ok) {
+    if (failOnError) {
+      throw new Error(`AI usage query failed with HTTP ${response.status}`);
+    }
     return { neurons: 0 };
   }
 
   const result = (await response.json()) as AiGatewayResponse;
   const requests = result.data?.viewer?.accounts?.[0]?.aiGatewayRequests;
+  if (!requests && failOnError) {
+    throw new Error('AI usage query returned no account data');
+  }
   const cost = requests?.[0]?.sum?.cost ?? 0;
   return { neurons: Math.round(cost / COST_PER_NEURON) };
 }
@@ -502,10 +594,11 @@ async function queryProjectAiUsage(
 export {
   getRequestsDataset,
   queryProjectUsage,
-  queryBatchProjectUsage,
+  queryBatchProjectUsageWindows,
   queryTopProjectTraffic,
   queryProjectRequestOverview,
   queryProjectAiUsage,
+  getAccountUsageProjectWindows,
   projectUsage,
   accountUsage,
   ZERO_USAGE,

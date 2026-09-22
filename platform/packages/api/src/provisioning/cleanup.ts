@@ -1,4 +1,4 @@
-import { sql as drizzleSql, and, eq, ne, notInArray } from 'drizzle-orm';
+import { sql as drizzleSql, and, desc, eq, isNotNull, isNull, ne, notInArray } from 'drizzle-orm';
 import type { Context } from 'hono';
 import { deleteProjectAssets, deleteWorkerBundle } from '../assets.ts';
 import { DEFAULT_DISPATCH_NAMESPACE } from '../constants.ts';
@@ -13,6 +13,7 @@ import {
   getDomainsByProjectId,
   getProject,
   getProjectResources,
+  getUser,
   terminateBuildsForProject,
 } from '../db.ts';
 import { drainProjectEmailAdmissions } from '../email/admission.ts';
@@ -20,13 +21,20 @@ import { emailDomainRoutes, emailZoneConnections } from '../email/connection-sch
 import { requestEmailDomainRemove, runEmailOperation } from '../email/connection-service.ts';
 import type { ApiEnv } from '../env.ts';
 import { cancelContainerBuildDos } from '../github/cancel-builds.ts';
+import { generateId } from '../id.ts';
 import {
   getLegacyProjectWorkerName,
   getProjectDeploymentWorkerName,
   getProjectQueueName,
 } from '../naming.ts';
-import { deployments as deploymentsTable, projects as projectsTable } from '../schema.ts';
-import type { Build, DeployManifest, Project, Resource } from '../types.ts';
+import { requireProjectCapability } from '../project-access.ts';
+import {
+  deployments as deploymentsTable,
+  projectOwnershipPeriods,
+  projects as projectsTable,
+} from '../schema.ts';
+import { getCurrentBillingPeriodStart } from '../tiers.ts';
+import type { Build, DeployManifest, Project, ProjectOwnershipPeriod, Resource } from '../types.ts';
 import {
   deleteCustomHostname,
   deleteD1Database,
@@ -287,6 +295,11 @@ async function cleanupBestEffortResources(
   cleanup.push(
     context.env.ROUTING.delete(project.slug).catch(warn('Failed to delete routing entry')),
   );
+  cleanup.push(
+    context.env.ROUTING.delete(`ai-block:${projectId}`).catch(
+      warn('Failed to delete AI block entry'),
+    ),
+  );
 
   // NOTE: `projectAccountKey(projectId)` (`project:{projectId}`) is intentionally
   // NOT deleted here — the sandbox gate's release path in `packages/proxy/src/sandbox.ts`
@@ -351,14 +364,20 @@ async function cleanupBestEffortResources(
 async function lockAndMarkDeleting(
   db: Db,
   projectId: string,
-): Promise<
-  ReadonlyArray<{
+  actorUserId?: string,
+  expectedOwnerUserId?: string,
+): Promise<Readonly<{
+  ownerUserId: string;
+  ownerBillingCycleStart: string | null;
+  ownershipStartedAt: string;
+  ownershipEndedAt: string;
+  cancelledBuilds: ReadonlyArray<{
     id: string;
     executor: Build['executor'];
     status: Build['status'];
     instance_type: string | null;
-  }>
-> {
+  }>;
+}> | null> {
   return await db.transaction(async (tx) => {
     await tx.execute(drizzleSql`SELECT id FROM projects WHERE id = ${projectId} FOR UPDATE`);
     const txDb = tx as unknown as Db;
@@ -366,9 +385,83 @@ async function lockAndMarkDeleting(
     if (!lockedProject) {
       throw new Error('project disappeared during deletion');
     }
+    // User deletion discovers projects before teardown. Recheck ownership
+    // under the lock shared with transfers before deleting anything.
+    if (expectedOwnerUserId && lockedProject.user_id !== expectedOwnerUserId) {
+      return null;
+    }
+    // The route precheck can go stale. Authorize again under the same lock as
+    // the irreversible status transition. Operator cleanup has no actor here.
+    if (actorUserId) {
+      await requireProjectCapability(txDb, projectId, actorUserId, 'delete');
+    }
     const activeDeployment = await getActiveDeployment(txDb, projectId);
     if (activeDeployment?.source === 'rollback-lease') {
       throw new ProjectOperationInProgressError();
+    }
+    const owner = await getUser(txDb, lockedProject.user_id);
+    if (!owner) {
+      throw new Error('project owner disappeared during deletion');
+    }
+    const [openOwnership] = await txDb
+      .select()
+      .from(projectOwnershipPeriods)
+      .where(
+        and(
+          eq(projectOwnershipPeriods.project_id, projectId),
+          isNull(projectOwnershipPeriods.ends_at),
+        ),
+      )
+      .for('update')
+      .limit(1);
+    if (openOwnership && openOwnership.owner_user_id !== lockedProject.user_id) {
+      throw new Error('project ownership history does not match the current owner');
+    }
+    const [latestClosedOwnership] = openOwnership
+      ? []
+      : await txDb
+          .select()
+          .from(projectOwnershipPeriods)
+          .where(
+            and(
+              eq(projectOwnershipPeriods.project_id, projectId),
+              isNotNull(projectOwnershipPeriods.ends_at),
+            ),
+          )
+          .orderBy(desc(projectOwnershipPeriods.ends_at))
+          .for('update')
+          .limit(1);
+    let ownership: ProjectOwnershipPeriod | undefined;
+    if (openOwnership) {
+      [ownership] = await txDb
+        .update(projectOwnershipPeriods)
+        .set({ ends_at: drizzleSql`clock_timestamp()` })
+        .where(eq(projectOwnershipPeriods.id, openOwnership.id))
+        .returning();
+    } else if (
+      lockedProject.status === 'deleting' &&
+      latestClosedOwnership?.owner_user_id === lockedProject.user_id
+    ) {
+      // A previous teardown attempt may have stopped after detaching usage.
+      // Extend its cutoff so the retry reconciles activity through this attempt.
+      [ownership] = await txDb
+        .update(projectOwnershipPeriods)
+        .set({
+          ends_at: drizzleSql`greatest(${projectOwnershipPeriods.ends_at}, clock_timestamp())`,
+        })
+        .where(eq(projectOwnershipPeriods.id, latestClosedOwnership.id))
+        .returning();
+    } else if (!ownership) {
+      [ownership] = await txDb
+        .insert(projectOwnershipPeriods)
+        .values({
+          id: generateId('pown'),
+          project_id: projectId,
+          owner_user_id: lockedProject.user_id,
+          starts_at: latestClosedOwnership?.ends_at ?? lockedProject.created_at,
+          ends_at: drizzleSql`clock_timestamp()`,
+        })
+        .returning();
     }
     if (lockedProject.status !== 'deleting') {
       await tx
@@ -397,8 +490,53 @@ async function lockAndMarkDeleting(
       );
     // Revoke in-flight build deploy tokens up front (see doc above). Idempotent
     // on replay (already-terminal builds are not re-matched by the CAS).
-    return await terminateBuildsForProject(txDb, projectId, { reason: 'project deleted' });
+    return {
+      ownerUserId: lockedProject.user_id,
+      ownerBillingCycleStart: owner.billing_cycle_start,
+      ownershipStartedAt: ownership!.starts_at,
+      ownershipEndedAt: ownership!.ends_at!,
+      cancelledBuilds: await terminateBuildsForProject(txDb, projectId, {
+        reason: 'project deleted',
+      }),
+    };
   });
+}
+
+async function detachProjectUsage(
+  context: Context<ApiEnv>,
+  projectId: string,
+  options: Readonly<{
+    ownerUserId: string;
+    ownerBillingCycleStart: string | null;
+    ownershipStartedAt: string;
+    ownershipEndedAt: string;
+  }>,
+): Promise<void> {
+  const stub = context.env.USAGE_COUNTER.get(
+    context.env.USAGE_COUNTER.idFromName(options.ownerUserId),
+  );
+  const response = await stub.fetch(
+    new Request('https://do/detach-project', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        projectId,
+        userId: options.ownerUserId,
+        ...(options.ownerBillingCycleStart
+          ? {
+              billingPeriodStart: getCurrentBillingPeriodStart(
+                options.ownerBillingCycleStart,
+              ).toISOString(),
+            }
+          : {}),
+        ownershipStartedAt: options.ownershipStartedAt,
+        ownershipEndedAt: options.ownershipEndedAt,
+      }),
+    }),
+  );
+  if (!response.ok) {
+    throw new Error(`UsageCounter /detach-project returned HTTP ${response.status}`);
+  }
 }
 
 export class ProjectOperationInProgressError extends Error {
@@ -485,16 +623,29 @@ export async function teardownProject(
   context: Context<ApiEnv>,
   projectId: string,
   project: Pick<Project, 'slug' | 'status'>,
-): Promise<{ warnings: ReadonlyArray<string> }> {
+  options: Readonly<{ actorUserId?: string; expectedOwnerUserId?: string }> = {},
+): Promise<{ warnings: ReadonlyArray<string>; ownerChanged?: true }> {
   // Always run lock + mark — idempotent for `status='deleting'` (the helper
   // skips the flip and just (re-)marks any non-terminal deployments + builds).
   // This covers retried teardown after partial failure where the previous
   // attempt crashed before the cancellations committed.
-  const cancelledOnLock = await lockAndMarkDeleting(context.get('db'), projectId);
+  const deletion = await lockAndMarkDeleting(
+    context.get('db'),
+    projectId,
+    options.actorUserId,
+    options.expectedOwnerUserId,
+  );
+  if (deletion === null) {
+    return { warnings: [], ownerChanged: true };
+  }
   // Stop the container DOs for the builds revoked above BEFORE any CF cleanup
   // begins (post-commit, never under the row lock — it's a DO round-trip), so
   // their tokens are dead and their containers stopped before we touch CF.
-  await cancelContainerBuildDos(context.env, cancelledOnLock, 'project deleted');
+  await cancelContainerBuildDos(context.env, deletion.cancelledBuilds, 'project deleted');
+
+  // Detach after the durable status change and before cleanup so a failed DO
+  // call leaves the project row available for retry.
+  await detachProjectUsage(context, projectId, deletion);
 
   const emailDrain = await drainProjectEmailAdmissions(context.get('db'), projectId);
   if (emailDrain.inFlight > 0) {

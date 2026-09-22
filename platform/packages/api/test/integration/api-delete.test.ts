@@ -12,6 +12,7 @@ import {
 import { createBuild } from '../../src/db.ts';
 import * as db from '../../src/db.ts';
 import app from '../../src/index.ts';
+import * as projectAccess from '../../src/project-access.ts';
 import {
   resources,
   projects,
@@ -20,6 +21,8 @@ import {
   emailDestinationCleanups,
   emailDestinations,
   users,
+  projectMembers,
+  projectOwnershipPeriods,
 } from '../../src/schema.ts';
 import {
   setupEnv,
@@ -94,6 +97,53 @@ async function addResource(
 }
 
 describe('DELETE /projects/:id', () => {
+  it('rechecks delete capability under the lock after ownership transfers', async () => {
+    const formerOwner = await createTestUser(env.db, 'former-delete-owner');
+    const newOwner = await createTestUser(env.db, 'new-delete-owner');
+    const project = await createTestProject(env.db, formerOwner.id, 'transferred-delete');
+    const cf = mockCfApi();
+
+    // Drive the transfer after the route's fast authorization snapshot but
+    // before teardown takes the project lock. The stale snapshot still says
+    // owner; the locked recheck must observe the former owner's new admin role.
+    const requireCapability = projectAccess.requireProjectCapability;
+    let transferred = false;
+    vi.spyOn(projectAccess, 'requireProjectCapability').mockImplementation(async (...args) => {
+      const result = await requireCapability(...args);
+      if (!transferred && args[3] === 'delete') {
+        transferred = true;
+        await env.db
+          .update(projects)
+          .set({ user_id: newOwner.id })
+          .where(eq(projects.id, project.id));
+        await env.db.insert(projectMembers).values({
+          project_id: project.id,
+          user_id: formerOwner.id,
+          role: 'admin',
+          added_by_user_id: newOwner.id,
+        });
+      }
+      return result;
+    });
+
+    const res = await app.fetch(
+      new Request(`http://localhost/projects/${project.id}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${formerOwner.jwt}` },
+      }),
+      env,
+    );
+
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: 'forbidden' });
+    expect(transferred).toBe(true);
+    expect(cf).not.toHaveBeenCalled();
+    expect(await db.getProject(env.db, project.id)).toMatchObject({
+      user_id: newOwner.id,
+      status: 'active',
+    });
+  });
+
   it('returns 401 without auth', async () => {
     const res = await app.fetch(
       new Request('http://localhost/projects/proj_fake', {
@@ -159,17 +209,36 @@ describe('DELETE /projects/:id', () => {
     expect(await db.getProject(env.db, project.id)).not.toBeNull();
   });
 
-  it('deletes project with no resources', async () => {
+  it('deletes a project while retaining its final usage window', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id, 'empty-app');
+    const [ownership] = await env.db
+      .select()
+      .from(projectOwnershipPeriods)
+      .where(eq(projectOwnershipPeriods.project_id, project.id));
+    await env.ROUTING.put(`ai-block:${project.id}`, '1');
     mockCfApi();
+    const usageCalls: Array<{ ownerId: string; path: string; body: unknown }> = [];
+    const usageCounter = {
+      idFromName: (name: string) => name,
+      get: (ownerId: string) => ({
+        fetch: async (request: Request) => {
+          usageCalls.push({
+            ownerId,
+            path: new URL(request.url).pathname,
+            body: await request.json(),
+          });
+          return Response.json({ ok: true });
+        },
+      }),
+    } as unknown as DurableObjectNamespace;
 
     const res = await app.fetch(
       new Request(`http://localhost/projects/${project.id}`, {
         method: 'DELETE',
         headers: { Authorization: `Bearer ${user.jwt}` },
       }),
-      env,
+      { ...env, USAGE_COUNTER: usageCounter },
     );
     expect(res.status).toBe(200);
     const body = (await res.json()) as { ok: boolean; id: string; slug: string };
@@ -178,6 +247,74 @@ describe('DELETE /projects/:id', () => {
     // Verify project is gone from DB
     const [dbProject] = await env.db.select().from(projects).where(eq(projects.id, project.id));
     expect(dbProject).toBeUndefined();
+    expect(await env.ROUTING.get(`ai-block:${project.id}`)).toBeNull();
+    expect(usageCalls).toEqual([
+      {
+        ownerId: user.id,
+        path: '/detach-project',
+        body: {
+          projectId: project.id,
+          userId: user.id,
+          billingPeriodStart: expect.any(String),
+          ownershipStartedAt: ownership!.starts_at,
+          ownershipEndedAt: expect.any(String),
+        },
+      },
+    ]);
+    const detachBody = usageCalls[0]!.body as { ownershipEndedAt: string };
+    expect(Date.parse(detachBody.ownershipEndedAt)).toBeGreaterThanOrEqual(
+      Date.parse(ownership!.starts_at),
+    );
+  });
+
+  it('advances the retained usage cutoff when a failed teardown is retried', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'retry-usage-cutoff');
+    await env.db.insert(resources).values({
+      id: 'res_retry_container',
+      project_id: project.id,
+      type: 'container',
+      cf_id: 'container-retry',
+      binding_name: 'SANDBOX',
+    });
+    let containerDeleteAttempts = 0;
+    mockCfApi({
+      deleteContainerApp: () => {
+        containerDeleteAttempts += 1;
+        return containerDeleteAttempts === 1
+          ? cfError('temporary container API failure', 500)
+          : cfError('not found', 404);
+      },
+    });
+    const usageCalls: Array<{ body: { ownershipEndedAt: string } }> = [];
+    const usageCounter = {
+      idFromName: (name: string) => name,
+      get: () => ({
+        fetch: async (request: Request) => {
+          usageCalls.push({ body: await request.json() });
+          return Response.json({ ok: true });
+        },
+      }),
+    } as unknown as DurableObjectNamespace;
+    const request = () =>
+      app.fetch(
+        new Request(`http://localhost/projects/${project.id}`, {
+          method: 'DELETE',
+          headers: { Authorization: `Bearer ${user.jwt}` },
+        }),
+        { ...env, USAGE_COUNTER: usageCounter },
+      );
+
+    expect((await request()).status).toBe(500);
+    expect(await db.getProject(env.db, project.id)).toMatchObject({ status: 'deleting' });
+    expect(usageCalls).toHaveLength(1);
+
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect((await request()).status).toBe(200);
+    expect(usageCalls).toHaveLength(2);
+    expect(Date.parse(usageCalls[1]!.body.ownershipEndedAt)).toBeGreaterThan(
+      Date.parse(usageCalls[0]!.body.ownershipEndedAt),
+    );
   });
 
   it('deletes project with resources, assets, and routing', async () => {

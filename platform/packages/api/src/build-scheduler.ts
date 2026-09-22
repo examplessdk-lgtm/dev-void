@@ -3,6 +3,7 @@ import type { BuildManager } from './build-manager.ts';
 import { buildManagerNamespace } from './build-namespace.ts';
 import { type BuildConfig, isContainerCapacityError } from './build-types.ts';
 import {
+  cancelQueuedContainerBuildsForUsers,
   claimBuildForStartWithinLimit,
   createDb,
   getGitHubConnection,
@@ -17,7 +18,8 @@ import {
   updateBuildStatus,
 } from './db.ts';
 import type { ApiEnv } from './env.ts';
-import { getBuildInstanceType, getPlanLimits } from './tiers.ts';
+import { isAdminSuspended } from './suspension.ts';
+import { getPlanLimits } from './tiers.ts';
 
 /** A poke arms the alarm this far ahead so the next scan runs almost immediately. */
 const POKE_DELAY_MS = 50;
@@ -66,18 +68,18 @@ export class BuildScheduler extends DurableObject<ApiEnv['Bindings']> {
   async alarm(): Promise<void> {
     const db = createDb(this.env.HYPERDRIVE.connectionString);
 
-    // Compute which queue owners are AT their plan's concurrency cap and exclude
-    // them from the scan. The cap is plan-derived (`getPlanLimits`), not a DB
-    // column, so it can't be filtered in SQL — without this, a capped tenant's
-    // lowest-project_id rows would fill the scan limit every tick and the claim
-    // step would reject them all, indefinitely delaying an unrelated under-cap
-    // tenant. `limit === 0` means unlimited (never capped). `hasQueuedContainer-
-    // Builds` below still reflects ANY queued work, so the alarm keeps re-arming
-    // while an excluded owner's work waits — it becomes claimable the moment they
-    // free a slot.
+    // Clear manually suspended owners' whole queues, including builds hidden
+    // behind active work, then exclude capped owners to avoid scan starvation.
     const owners = await getUsersWithQueuedContainerBuilds(db);
+    const suspendedUserIds = owners
+      .filter((owner) => isAdminSuspended(owner.suspendedReason))
+      .map((owner) => owner.userId);
+    await cancelQueuedContainerBuildsForUsers(db, suspendedUserIds);
     const cappedUserIds = owners
       .filter((o) => {
+        if (isAdminSuspended(o.suspendedReason)) {
+          return false;
+        }
         const limit = getPlanLimits(o.plan).concurrentBuilds;
         return limit > 0 && o.activeBuilds >= limit;
       })
@@ -115,6 +117,13 @@ export class BuildScheduler extends DurableObject<ApiEnv['Bindings']> {
         // mint a token. Fail it so it leaves the queue and never blocks.
         await updateBuildStatus(db, build.id, 'failed', {
           error: 'owning user not found',
+          completedAt: new Date().toISOString(),
+        });
+        continue;
+      }
+      if (isAdminSuspended(user.suspended_reason)) {
+        await updateBuildStatus(db, build.id, 'cancelled', {
+          error: 'project owner suspended',
           completedAt: new Date().toISOString(),
         });
         continue;
@@ -176,54 +185,36 @@ export class BuildScheduler extends DurableObject<ApiEnv['Bindings']> {
         continue;
       }
 
-      // Container size of record: prefer the value persisted at enqueue; only
-      // recompute from the plan for legacy rows queued before enqueue-persistence
-      // (instance_type === null). The persisted value is authoritative — it is
-      // what onStart's CAS lands and what dictates which DO namespace this build
-      // runs on, so a plan change between enqueue and start can't relocate an
-      // in-flight build to a different container size. Computed BEFORE the claim
-      // so the claim can persist it in the same tx (see below) and so its target
-      // namespace can be checked against this tick's saturated set.
-      const instanceType = build.instance_type ?? getBuildInstanceType(user.plan);
-
-      // Route the container start to the DO class matching the build's size.
-      // `@cloudflare/containers` has no per-start sizing, so each size is a
-      // distinct DO class; buildManagerNamespace maps standard-4 → the large
-      // class and everything else (free/legacy/null) → the base class.
-      const ns = buildManagerNamespace(this.env, instanceType);
-
-      // Per-namespace shedding: if this build's target fleet already hit capacity
-      // THIS tick, skip it without attempting a start (and without claiming) —
-      // it would only hit the same full fleet, burning a GitHub compare + token
-      // mint. A build targeting the OTHER (non-saturated) fleet is unaffected, so
-      // the scan keeps draining it.
-      if (saturatedNamespaces.has(ns)) {
+      // Persisted sizes can be shed before claiming. Legacy-null rows need the
+      // owner's plan under lock before their target fleet is known.
+      if (
+        build.instance_type &&
+        saturatedNamespaces.has(buildManagerNamespace(this.env, build.instance_type))
+      ) {
         continue;
       }
 
-      // Atomically enforce the per-user cap AND claim queued->starting in a
-      // SINGLE transaction holding `SELECT ... FOR UPDATE` on the owner's users
-      // row — the SAME lock the OIDC path (`createGithubActionsBuildWithinLimit`)
-      // takes. This makes the container-scheduler path and the OIDC path
-      // mutually exclusive per user, so a scheduler scan and a parallel OIDC
-      // exchange can't both observe sub-cap capacity and both create active
-      // builds (which the old separate count-then-claim allowed). `limit === 0`
-      // means unlimited. Returns false when at cap OR when the build was already
-      // claimed elsewhere; either way leave it for a later tick. The claim also
-      // persists the effective instanceType in the same tx, so a cancel/reap in
-      // the START->onStart window reads the correct size and addresses the right
-      // DO namespace. This is the commit point: only pure config assembly + the
-      // try/catch-wrapped startBuild follow it, so nothing can throw between the
-      // claim and the BuildManager that owns the timeout.
-      const limit = getPlanLimits(user.plan).concurrentBuilds;
+      // Admission, legacy size resolution, and the owner plan are read under the
+      // same user lock used by GitHub Actions admission.
       const claimed = await claimBuildForStartWithinLimit(db, {
         buildId: build.id,
         userId: build.user_id,
         projectId: build.project_id,
-        limit,
-        instanceType,
       });
       if (!claimed) {
+        continue;
+      }
+      const instanceType = claimed.instanceType;
+      const ns = buildManagerNamespace(this.env, instanceType);
+      if (saturatedNamespaces.has(ns)) {
+        try {
+          await requeueBuildIfStarting(db, build.id);
+        } catch (error) {
+          console.error(
+            `[build-scheduler] failed to requeue build ${build.id} after its fleet saturated; it will be reaped as stale`,
+            error,
+          );
+        }
         continue;
       }
 
@@ -244,10 +235,8 @@ export class BuildScheduler extends DurableObject<ApiEnv['Bindings']> {
         // App installation still covers this repo before minting the deploy
         // token; a null id fails that check closed.
         repositoryId: connection.repository_id,
-        // Carry the effective size into the config so onStart's CAS persists it
-        // for any legacy-null row (back-filling the size-of-record on first start).
         instanceType,
-        timeoutMinutes: getPlanLimits(user.plan).buildTimeoutMinutes,
+        timeoutMinutes: getPlanLimits(claimed.ownerPlan).buildTimeoutMinutes,
       };
 
       // `ns` (the build's target fleet) was resolved above; address the per-build

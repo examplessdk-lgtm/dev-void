@@ -8,7 +8,6 @@ import {
 import {
   deleteProjectSecret,
   getActiveDeployment,
-  getProject,
   listProjectSecretNames,
   upsertProjectSecret,
   type Db,
@@ -21,6 +20,8 @@ import {
   putWorkerSecret,
 } from '../project-secrets.ts';
 import { isReservedBindingName } from '../reserved-bindings.ts';
+import type { Project } from '../types.ts';
+import { requireProjectRouteCapability } from './project-access.ts';
 
 function isValidSecretName(name: string): boolean {
   return /^[A-Z][A-Z0-9_]*$/.test(name);
@@ -28,10 +29,7 @@ function isValidSecretName(name: string): boolean {
 
 async function withProjectSecretUpdate(
   context: Context<ApiEnv>,
-  update: (
-    db: Db,
-    project: NonNullable<Awaited<ReturnType<typeof getProject>>>,
-  ) => Promise<Response>,
+  update: (db: Db, project: Project) => Promise<Response>,
 ): Promise<Response> {
   const projectId = context.req.param('id')!;
   return context.get('db').transaction(async (tx) => {
@@ -40,13 +38,11 @@ async function withProjectSecretUpdate(
     // before changing storage: a candidate may already have captured secrets.
     await tx.execute(sql`SELECT id FROM projects WHERE id = ${projectId} FOR UPDATE`);
     const db = tx as unknown as Db;
-    const project = await getProject(db, projectId);
-    if (!project) {
-      return context.json({ error: 'project not found' }, 404);
+    const access = await requireProjectRouteCapability(context, projectId, 'configure', db);
+    if (access instanceof Response) {
+      return access;
     }
-    if (project.user_id !== context.get('user').id) {
-      return context.json({ error: 'forbidden' }, 403);
-    }
+    const project = access.project;
     if (project.status === 'deleting') {
       return context.json({ error: 'project is being deleted' }, 410);
     }
@@ -68,12 +64,9 @@ const app = new Hono<ApiEnv>()
 
   .get('/:id/secrets', async (context) => {
     const projectId = context.req.param('id');
-    const project = await getProject(context.get('db'), projectId);
-    if (!project) {
-      return context.json({ error: 'project not found' }, 404);
-    }
-    if (project.user_id !== context.get('user').id) {
-      return context.json({ error: 'forbidden' }, 403);
+    const access = await requireProjectRouteCapability(context, projectId, 'configure');
+    if (access instanceof Response) {
+      return access;
     }
 
     return context.json(await listProjectSecretNames(context.get('db'), projectId));
@@ -96,12 +89,9 @@ const app = new Hono<ApiEnv>()
       return context.json({ error: 'reserved binding name' }, 400);
     }
 
-    const project = await getProject(context.get('db'), projectId);
-    if (!project) {
-      return context.json({ error: 'project not found' }, 404);
-    }
-    if (project.user_id !== context.get('user').id) {
-      return context.json({ error: 'forbidden' }, 403);
+    const access = await requireProjectRouteCapability(context, projectId, 'configure');
+    if (access instanceof Response) {
+      return access;
     }
 
     let body: { value?: string } = {};
@@ -158,12 +148,9 @@ const app = new Hono<ApiEnv>()
       return context.json({ error: 'invalid secret name' }, 400);
     }
 
-    const project = await getProject(context.get('db'), projectId);
-    if (!project) {
-      return context.json({ error: 'project not found' }, 404);
-    }
-    if (project.user_id !== context.get('user').id) {
-      return context.json({ error: 'forbidden' }, 403);
+    const access = await requireProjectRouteCapability(context, projectId, 'configure');
+    if (access instanceof Response) {
+      return access;
     }
 
     return withProjectSecretUpdate(context, async (db, project) => {
