@@ -7,6 +7,24 @@ import {
   type PlatformCloudflareClient,
 } from './platform-cloudflare.ts';
 
+/** Read the database name from an owner URL without applying Hyperdrive origin restrictions. */
+export function platformDatabaseNameFromOwnerUrl(databaseUrl: string): string {
+  let url: URL;
+  try {
+    url = new URL(databaseUrl);
+  } catch {
+    throw new Error('platform: DATABASE_URL must be a PostgreSQL connection string.');
+  }
+  if ((url.protocol !== 'postgres:' && url.protocol !== 'postgresql:') || !url.hostname) {
+    throw new Error('platform: DATABASE_URL must use postgres:// or postgresql://.');
+  }
+  const database = decodeURIComponent(url.pathname.replace(/^\//, ''));
+  if (!database) {
+    throw new Error('platform: DATABASE_URL must include a database.');
+  }
+  return database;
+}
+
 /** Pin an externally managed Hyperdrive without treating the owner URL as its runtime origin. */
 export function verifyExternalPlatformHyperdrive(input: {
   config: CloudflareHyperdriveConfig;
@@ -15,7 +33,7 @@ export function verifyExternalPlatformHyperdrive(input: {
   recordedHash?: string;
 }): string {
   const { config, expected } = input;
-  const database = hyperdriveOriginFromConnectionString(input.databaseUrl).database;
+  const database = platformDatabaseNameFromOwnerUrl(input.databaseUrl);
   const hash = hyperdriveOriginConfigHash(config.origin);
   if (
     config.id !== expected.id ||
@@ -53,16 +71,21 @@ export async function verifyPlatformAuthenticationDatabase(
       'platform: Authentication database verification requires the platform Hyperdrive resource.',
     );
   }
-  const expected = hyperdriveOriginFromConnectionString(databaseUrl);
+  const expectedDatabase =
+    resource.ownership === 'adopted' ? platformDatabaseNameFromOwnerUrl(databaseUrl) : undefined;
+  const expectedOrigin =
+    resource.ownership !== 'adopted'
+      ? hyperdriveOriginFromConnectionString(databaseUrl)
+      : undefined;
   const read = async () => {
     const current = await client.getHyperdriveConfig(accountId, resource.id);
     if (
       current.id !== resource.id ||
       current.name !== resource.name ||
       (resource.ownership === 'adopted'
-        ? current.origin.database !== expected.database ||
+        ? current.origin.database !== expectedDatabase ||
           hyperdriveOriginConfigHash(current.origin) !== resource.configHash
-        : !hyperdriveOriginMatches(current.origin, expected))
+        : expectedOrigin === undefined || !hyperdriveOriginMatches(current.origin, expectedOrigin))
     ) {
       throw new Error(
         'platform: Hyperdrive does not match this installation’s pinned database. No authentication configuration was activated.',

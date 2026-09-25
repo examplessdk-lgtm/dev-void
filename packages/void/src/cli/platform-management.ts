@@ -16,6 +16,7 @@ import {
 } from '@void/platform';
 import { createSpinner } from './output.ts';
 import type { PlatformArgs } from './platform-args.ts';
+import { platformDatabaseNameFromOwnerUrl } from './platform-auth-database.ts';
 import {
   assertPlatformOperatorCredentialCanApplyPlan,
   resolvePlatformCloudflareCredential,
@@ -1257,8 +1258,7 @@ async function verifyPlatformMutationOwnership(
             resource.ownership === 'adopted' &&
             (resource.configHash !== hyperdriveOriginConfigHash(live.origin) ||
               (options.databaseUrl &&
-                live.origin.database !==
-                  hyperdriveOriginFromConnectionString(options.databaseUrl).database))
+                live.origin.database !== platformDatabaseNameFromOwnerUrl(options.databaseUrl)))
           ) {
             throw ownershipError(`hyperdrive ${resource.name} changed configuration`);
           } else if (

@@ -29,6 +29,7 @@ const config = {
 
 describe('fresh platform authentication database reads', () => {
   it('pins an uncached Terraform-managed origin while migrations use the owner connection', async () => {
+    const ownerDatabaseUrl = `${databaseUrl}?sslmode=disable`;
     const external = {
       ...config,
       origin: {
@@ -39,7 +40,7 @@ describe('fresh platform authentication database reads', () => {
     };
     const hash = verifyExternalPlatformHyperdrive({
       config: external,
-      databaseUrl,
+      databaseUrl: ownerDatabaseUrl,
       expected: {
         id: resource.id,
         name: resource.name,
@@ -56,13 +57,13 @@ describe('fresh platform authentication database reads', () => {
       client,
       'account',
       { ...resource, ownership: 'adopted', configHash: hash },
-      databaseUrl,
+      ownerDatabaseUrl,
     );
     expect(client.disableHyperdriveCaching).not.toHaveBeenCalled();
     expect(() =>
       verifyExternalPlatformHyperdrive({
         config: { ...external, origin: { ...external.origin, database: 'other' } },
-        databaseUrl,
+        databaseUrl: ownerDatabaseUrl,
         expected: {
           id: resource.id,
           name: resource.name,
@@ -76,7 +77,7 @@ describe('fresh platform authentication database reads', () => {
         client,
         'account',
         { ...resource, ownership: 'adopted', configHash: '0'.repeat(64) },
-        databaseUrl,
+        ownerDatabaseUrl,
       ),
     ).rejects.toThrow('pinned database');
   });
