@@ -63,7 +63,10 @@ import {
   initializeInstalledPlatformAuthentication,
   resumeInstalledPlatformAuthentication,
 } from './platform-auth-bootstrap.ts';
-import { verifyPlatformAuthenticationDatabase } from './platform-auth-database.ts';
+import {
+  verifyExternalPlatformHyperdrive,
+  verifyPlatformAuthenticationDatabase,
+} from './platform-auth-database.ts';
 import {
   hyperdriveOriginConfigHash,
   hyperdriveOriginFromConnectionString,
@@ -848,6 +851,35 @@ export async function installPlatform(
     );
   }
   verifyRuntimeArtifacts(runtimeDirectory, runtime);
+  const hyperdriveAction = plan.actions.find((action) => action.key === 'hyperdrive');
+  const recordedHyperdrive = existing?.resources.find((resource) => resource.key === 'hyperdrive');
+  let externalHyperdriveOriginHash: string | undefined;
+  if (
+    hyperdriveAction &&
+    (hyperdriveAction.action === 'adopt' || recordedHyperdrive?.ownership === 'adopted')
+  ) {
+    if (!hyperdriveAction.id) {
+      throw new Error('platform: The Terraform-managed Hyperdrive has no ID.');
+    }
+    if (!plan.externalHyperdrive && !recordedHyperdrive) {
+      throw new Error('platform: The Terraform-managed Hyperdrive origin must be specified.');
+    }
+    const live = await dependencies.client.getHyperdriveConfig(
+      plan.account.id,
+      hyperdriveAction.id,
+    );
+    externalHyperdriveOriginHash = verifyExternalPlatformHyperdrive({
+      config: live,
+      databaseUrl: secrets.databaseUrl,
+      expected: {
+        id: hyperdriveAction.id,
+        name: hyperdriveAction.name,
+        host: plan.externalHyperdrive?.host ?? live.origin.host,
+        user: plan.externalHyperdrive?.user ?? live.origin.user ?? '',
+      },
+      ...(recordedHyperdrive ? { recordedHash: recordedHyperdrive.configHash } : {}),
+    });
+  }
   const runtimeProvenance = {
     manifestSha256: resolvedRuntime.manifestSha256,
     source: resolvedRuntime.source,
@@ -1271,6 +1303,7 @@ export async function installPlatform(
           'adopted',
           now(),
           secrets.databaseUrl,
+          action.kind === 'hyperdrive' ? externalHyperdriveOriginHash : undefined,
         );
         writeInstallationManifest(manifest);
         await writeRemoteInstallationCheckpoint(dependencies.client, plan, manifest);
@@ -1289,6 +1322,7 @@ export async function installPlatform(
             undefined,
             now(),
             secrets.databaseUrl,
+            action.kind === 'hyperdrive' ? externalHyperdriveOriginHash : undefined,
           );
           writeInstallationManifest(manifest);
           await writeR2OwnershipMarkerIfNeeded(dependencies.client, plan, manifest, action);
@@ -1313,7 +1347,7 @@ export async function installPlatform(
         'created',
         now(),
         secrets.databaseUrl,
-        resource.fingerprint,
+        action.kind === 'hyperdrive' ? externalHyperdriveOriginHash : resource.fingerprint,
       );
       writeInstallationManifest(manifest);
       await writeR2OwnershipMarkerIfNeeded(dependencies.client, plan, manifest, action);
@@ -2596,11 +2630,13 @@ export function recordResource(
       configHash:
         action.kind === 'dns-record'
           ? dnsRecordConfigHash(action.name, 'AAAA', '100::', true)
-          : action.kind === 'hyperdrive' && databaseUrl
-            ? hyperdriveOriginConfigHash(hyperdriveOriginFromConnectionString(databaseUrl))
-            : action.kind === 'r2-bucket' && resourceFingerprint
-              ? r2BucketConfigHash(action.name, resourceFingerprint)
-              : hash(JSON.stringify({ kind: action.kind, name: action.name })),
+          : action.kind === 'hyperdrive' && resourceFingerprint
+            ? resourceFingerprint
+            : action.kind === 'hyperdrive' && databaseUrl
+              ? hyperdriveOriginConfigHash(hyperdriveOriginFromConnectionString(databaseUrl))
+              : action.kind === 'r2-bucket' && resourceFingerprint
+                ? r2BucketConfigHash(action.name, resourceFingerprint)
+                : hash(JSON.stringify({ kind: action.kind, name: action.name })),
       id,
       key: action.key,
       kind: action.kind,

@@ -774,6 +774,8 @@ To enable email during install or upgrade, set both `VOID_EMAIL_SENDER_DOMAIN` a
 
 Use an empty PostgreSQL database dedicated to the installation. You can correct a failed initial connection, but after the database is claimed or Hyperdrive is provisioned, commands reject a different URL.
 
+For an externally managed Hyperdrive, set `VOID_PLATFORM_HYPERDRIVE_ID`, `VOID_PLATFORM_HYPERDRIVE_ORIGIN_HOST`, and `VOID_PLATFORM_HYPERDRIVE_ORIGIN_USER` together. Supply an owner connection in `VOID_PLATFORM_DATABASE_URL` for database claims and migrations. Void adopts the named Hyperdrive after verifying its origin and disabled SQL result caching; its configuration stays under the external manager's control.
+
 Recovery secrets are encrypted with AES-256-GCM using a key in your system keychain. The encrypted data is tied to the installation identity. Without a keychain, supply a canonical base64-encoded 32-byte `VOID_PLATFORM_RECOVERY_KEY`; otherwise Void stops before saving secrets. CI can generate a temporary key when its original credentials remain in protected secrets.
 
 If a newly created zone is waiting for registrar delegation, resume after it becomes active:

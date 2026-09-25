@@ -392,6 +392,17 @@ export async function runPlatformLifecycleCommand(args: PlatformArgs): Promise<v
     }
     const checkpoint = existing ? readPendingInstallationSecrets(existing) : null;
     const databaseUrl = resolvePlatformInstallDatabaseUrl(checkpoint, existing);
+    const externalHyperdriveId = process.env.VOID_PLATFORM_HYPERDRIVE_ID?.trim() || '';
+    const externalHyperdriveHost = process.env.VOID_PLATFORM_HYPERDRIVE_ORIGIN_HOST?.trim() || '';
+    const externalHyperdriveUser = process.env.VOID_PLATFORM_HYPERDRIVE_ORIGIN_USER?.trim() || '';
+    if (
+      [externalHyperdriveId, externalHyperdriveHost, externalHyperdriveUser].some(Boolean) &&
+      ![externalHyperdriveId, externalHyperdriveHost, externalHyperdriveUser].every(Boolean)
+    ) {
+      throw new Error(
+        'platform: VOID_PLATFORM_HYPERDRIVE_ID, VOID_PLATFORM_HYPERDRIVE_ORIGIN_HOST, and VOID_PLATFORM_HYPERDRIVE_ORIGIN_USER must be set together.',
+      );
+    }
     let authoritativeProvisionIntents = false;
     if (existing && !isPlatformSetupDraft(existing)) {
       if (!databaseUrl) {
@@ -433,6 +444,15 @@ export async function runPlatformLifecycleCommand(args: PlatformArgs): Promise<v
       controlPlaneDomain,
       dedicatedZone,
       displayName,
+      ...(externalHyperdriveId
+        ? {
+            externalHyperdrive: {
+              id: externalHyperdriveId,
+              host: externalHyperdriveHost,
+              user: externalHyperdriveUser,
+            },
+          }
+        : {}),
       ...(process.env.VOID_EMAIL_SHARED_ZONE_ID
         ? { emailSharedZoneId: process.env.VOID_EMAIL_SHARED_ZONE_ID }
         : {}),

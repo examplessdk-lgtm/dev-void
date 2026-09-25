@@ -84,3 +84,5 @@ Void does not require a particular database provider. Use an existing PostgreSQL
 For a dedicated Supabase project, [disable the Data API](https://supabase.com/docs/guides/api/securing-your-api#disable-the-data-api) so the platform's tables are not exposed through Supabase's auto-generated endpoints. Void uses the PostgreSQL connection, not Supabase API keys.
 
 Once installation claims the database, continue using that same database for resume and maintenance commands. Uninstall never deletes external PostgreSQL.
+
+If your organization provisions Hyperdrive separately, use a database owner connection for installation and migrations. Set `VOID_PLATFORM_DATABASE_URL` to that connection, then set `VOID_PLATFORM_HYPERDRIVE_ID`, `VOID_PLATFORM_HYPERDRIVE_ORIGIN_HOST`, and `VOID_PLATFORM_HYPERDRIVE_ORIGIN_USER` to the existing Hyperdrive's ID, exact origin host, and runtime database user. The Hyperdrive name must be `void-<installation-name>-database`, point to the same database, and have SQL result caching disabled. Void records its identity for later maintenance without taking ownership of it.

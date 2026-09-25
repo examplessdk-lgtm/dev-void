@@ -1,7 +1,11 @@
 import type { InstallationResource } from '@void/platform';
 import { describe, expect, it, vi } from 'vite-plus/test';
-import { verifyPlatformAuthenticationDatabase } from '../../src/cli/platform-auth-database.ts';
 import {
+  verifyExternalPlatformHyperdrive,
+  verifyPlatformAuthenticationDatabase,
+} from '../../src/cli/platform-auth-database.ts';
+import {
+  hyperdriveOriginConfigHash,
   hyperdriveOriginFromConnectionString,
   PlatformCloudflareClient,
 } from '../../src/cli/platform-cloudflare.ts';
@@ -24,6 +28,58 @@ const config = {
 };
 
 describe('fresh platform authentication database reads', () => {
+  it('pins an uncached Terraform-managed origin while migrations use the owner connection', async () => {
+    const external = {
+      ...config,
+      origin: {
+        ...config.origin,
+        host: 'hyperdrive-productiondb.databases.cfdata.org/itdb/primary',
+        user: 'hyperdrive_void_platform_service',
+      },
+    };
+    const hash = verifyExternalPlatformHyperdrive({
+      config: external,
+      databaseUrl,
+      expected: {
+        id: resource.id,
+        name: resource.name,
+        host: external.origin.host,
+        user: external.origin.user,
+      },
+    });
+    expect(hash).toBe(hyperdriveOriginConfigHash(external.origin));
+    const client = {
+      getHyperdriveConfig: vi.fn(async () => external),
+      disableHyperdriveCaching: vi.fn(),
+    };
+    await verifyPlatformAuthenticationDatabase(
+      client,
+      'account',
+      { ...resource, ownership: 'adopted', configHash: hash },
+      databaseUrl,
+    );
+    expect(client.disableHyperdriveCaching).not.toHaveBeenCalled();
+    expect(() =>
+      verifyExternalPlatformHyperdrive({
+        config: { ...external, origin: { ...external.origin, database: 'other' } },
+        databaseUrl,
+        expected: {
+          id: resource.id,
+          name: resource.name,
+          host: external.origin.host,
+          user: external.origin.user,
+        },
+      }),
+    ).toThrow('expected database origin');
+    await expect(
+      verifyPlatformAuthenticationDatabase(
+        client,
+        'account',
+        { ...resource, ownership: 'adopted', configHash: '0'.repeat(64) },
+        databaseUrl,
+      ),
+    ).rejects.toThrow('pinned database');
+  });
   it('accepts a verified uncached database without changing it', async () => {
     const client = {
       getHyperdriveConfig: vi.fn(async () => config),
@@ -53,7 +109,11 @@ describe('fresh platform authentication database reads', () => {
       verifyPlatformAuthenticationDatabase(
         client,
         'account',
-        { ...resource, ownership: 'adopted' },
+        {
+          ...resource,
+          ownership: 'adopted',
+          configHash: hyperdriveOriginConfigHash(config.origin),
+        },
         databaseUrl,
       ),
     ).rejects.toThrow('by its owner');

@@ -80,6 +80,55 @@ function legacyInstallation(suffix = '0123456789ab') {
 }
 
 describe('platform installation planning', () => {
+  it('adopts only the explicitly selected Terraform-managed Hyperdrive', async () => {
+    const fake = client({
+      listHyperdriveConfigs: async () => [{ id: 'terraform-id', name: 'void-example-database' }],
+    });
+    await expect(createPlatformInstallPlan(fake, input, null)).rejects.toThrow('not owned');
+    const externalHyperdrive = {
+      id: 'terraform-id',
+      host: 'hyperdrive-productiondb.databases.cfdata.org/itdb/primary',
+      user: 'hyperdrive_void_platform_service',
+    };
+    const plan = await createPlatformInstallPlan(fake, { ...input, externalHyperdrive }, null);
+    expect(plan.actions.find((action) => action.key === 'hyperdrive')).toMatchObject({
+      action: 'adopt',
+      id: 'terraform-id',
+      name: 'void-example-database',
+    });
+    const recorded = recordInstallationResource(
+      createPlatformInstallationManifest({
+        account: plan.account,
+        createdAt: '2026-09-25T00:00:00.000Z',
+        deployment: plan.deployment,
+        id: plan.installationId,
+        ownershipNonce: 'a'.repeat(43),
+        platformVersion: '1.0.0',
+      }),
+      {
+        key: 'hyperdrive',
+        kind: 'hyperdrive',
+        id: 'terraform-id',
+        name: 'void-example-database',
+        ownership: 'adopted',
+        state: 'ready',
+        configHash: '0'.repeat(64),
+      },
+      '2026-09-25T00:00:00.000Z',
+    );
+    const resumed = await createPlatformInstallPlan(fake, input, recorded);
+    expect(resumed.actions.find((action) => action.key === 'hyperdrive')).toMatchObject({
+      action: 'reuse',
+      id: 'terraform-id',
+    });
+    await expect(
+      createPlatformInstallPlan(
+        fake,
+        { ...input, externalHyperdrive: { ...externalHyperdrive, id: 'other' } },
+        null,
+      ),
+    ).rejects.toThrow('must exist');
+  });
   it.each(['install', 'upgrade'] as const)(
     'rejects incomplete shared email settings during %s',
     async (mode) => {

@@ -1236,7 +1236,7 @@ async function verifyPlatformMutationOwnership(
             .update(JSON.stringify({ kind: resource.kind, name: resource.name }))
             .digest('hex');
           const malformedLegacyHash = !/^[a-f0-9]{64}$/.test(resource.configHash);
-          if (options.databaseUrl) {
+          if (options.databaseUrl && resource.ownership !== 'adopted') {
             const expected = hyperdriveOriginFromConnectionString(options.databaseUrl);
             if (!hyperdriveOriginMatches(live.origin, expected)) {
               throw ownershipError(
@@ -1254,6 +1254,15 @@ async function verifyPlatformMutationOwnership(
               );
             }
           } else if (
+            resource.ownership === 'adopted' &&
+            (resource.configHash !== hyperdriveOriginConfigHash(live.origin) ||
+              (options.databaseUrl &&
+                live.origin.database !==
+                  hyperdriveOriginFromConnectionString(options.databaseUrl).database))
+          ) {
+            throw ownershipError(`hyperdrive ${resource.name} changed configuration`);
+          } else if (
+            resource.ownership !== 'adopted' &&
             resource.configHash !== hyperdriveOriginConfigHash(live.origin) &&
             resource.configHash !== legacyHash &&
             !malformedLegacyHash

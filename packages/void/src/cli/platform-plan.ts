@@ -38,10 +38,17 @@ export type PlatformInstallPlan = Readonly<{
   actions: ReadonlyArray<PlatformInstallPlanAction>;
   apiUrl: string;
   deployment: PlatformDeploymentManifest;
+  externalHyperdrive?: PlatformExternalHyperdrive;
   installationId: string;
   proxyUrl: string;
   workersSubdomain: string;
   zone: CloudflareZone | null;
+}>;
+
+export type PlatformExternalHyperdrive = Readonly<{
+  id: string;
+  host: string;
+  user: string;
 }>;
 
 export type PlatformInstallPlanInput = Readonly<{
@@ -51,6 +58,7 @@ export type PlatformInstallPlanInput = Readonly<{
   controlPlaneDomain: string;
   dedicatedZone: boolean;
   displayName: string;
+  externalHyperdrive?: PlatformExternalHyperdrive;
   emailSharedZoneId?: string;
   emailSenderDomain?: string;
   installationSlug: string;
@@ -557,17 +565,46 @@ export async function createPlatformInstallPlan(
     options,
     remoteOwnership,
   );
-  addNamedPlan(
-    actions,
-    existing,
-    'hyperdrive',
-    'hyperdrive',
-    names.hyperdrive,
-    hyperdrives.filter((resource) => resource.name === names.hyperdrive),
-    'reuse',
-    options,
-    remoteOwnership,
-  );
+  const recordedHyperdrive = existing?.resources.find((resource) => resource.key === 'hyperdrive');
+  const externalHyperdriveId =
+    input.externalHyperdrive?.id ||
+    (recordedHyperdrive?.ownership === 'adopted' ? recordedHyperdrive.id : '');
+  if (externalHyperdriveId) {
+    if (
+      recordedHyperdrive &&
+      (recordedHyperdrive.ownership !== 'adopted' || recordedHyperdrive.id !== externalHyperdriveId)
+    ) {
+      throw new Error('platform: The Terraform-managed Hyperdrive differs from this installation.');
+    }
+    const remote = hyperdrives.find((resource) => resource.id === externalHyperdriveId);
+    if (!remote || remote.name !== names.hyperdrive) {
+      throw new Error(
+        `platform: Terraform-managed Hyperdrive ${JSON.stringify(externalHyperdriveId)} must exist with the name ${JSON.stringify(names.hyperdrive)}.`,
+      );
+    }
+    actions.push({
+      action: recordedHyperdrive ? 'reuse' : 'adopt',
+      id: remote.id,
+      key: 'hyperdrive',
+      kind: 'hyperdrive',
+      name: remote.name,
+      reason: recordedHyperdrive
+        ? 'Reuse the recorded Terraform-managed Hyperdrive.'
+        : 'Use the Terraform-managed Hyperdrive without taking ownership.',
+    });
+  } else {
+    addNamedPlan(
+      actions,
+      existing,
+      'hyperdrive',
+      'hyperdrive',
+      names.hyperdrive,
+      hyperdrives.filter((resource) => resource.name === names.hyperdrive),
+      'reuse',
+      options,
+      remoteOwnership,
+    );
+  }
   for (const [key, name] of [
     ['api-worker', names.apiWorker],
     ['proxy-worker', names.proxyWorker],
@@ -613,6 +650,7 @@ export async function createPlatformInstallPlan(
     actions,
     apiUrl,
     deployment: resolvedDeployment,
+    ...(input.externalHyperdrive ? { externalHyperdrive: input.externalHyperdrive } : {}),
     installationId,
     proxyUrl,
     workersSubdomain,
@@ -636,6 +674,7 @@ export async function revalidatePlatformInstallAction(
       controlPlaneDomain: deployment.controlPlane.apiHostname ?? '',
       dedicatedZone: deployment.application.dedicatedZone,
       displayName: deployment.displayName,
+      ...(original.externalHyperdrive ? { externalHyperdrive: original.externalHyperdrive } : {}),
       installationSlug: deployment.installationSlug,
       zoneName: deployment.application.zoneName,
     },
