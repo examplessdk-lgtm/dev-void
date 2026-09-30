@@ -1,5 +1,5 @@
 import { platformProjectHostnames, readPlatformApplication } from '@void/platform';
-import { and, eq, sql } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import type { Db, DbOrTx } from '../db.ts';
 import { getDomainsByProjectId } from '../db.ts';
 import type { ApiEnv } from '../env.ts';
@@ -211,18 +211,33 @@ export async function markProjectError(
     .where(eq(projectZeroTrust.project_id, projectId));
 }
 
-/** Like markProjectError, but leaves rows that settled since the failure alone. */
+/**
+ * Like markProjectError, but leaves rows that settled since the failure alone.
+ * A project whose first checkpoint failed has no row yet. Record the failure
+ * with its initial protection so its next retry waits behind other pending
+ * projects instead of being picked first again.
+ */
 export async function markPendingProjectError(
   db: Db,
   projectId: string,
   error: unknown,
+  initialProtection: boolean,
 ): Promise<void> {
+  const lastError = errorMessage(error);
   await db
-    .update(projectZeroTrust)
-    .set({ status: 'error', last_error: errorMessage(error), updated_at: sql`now()` })
-    .where(
-      and(eq(projectZeroTrust.project_id, projectId), sql`${projectZeroTrust.status} <> 'ready'`),
-    );
+    .insert(projectZeroTrust)
+    .values({
+      project_id: projectId,
+      desired_protected: initialProtection,
+      effective_protected: false,
+      status: 'error',
+      last_error: lastError,
+    })
+    .onConflictDoUpdate({
+      target: projectZeroTrust.project_id,
+      set: { status: 'error', last_error: lastError, updated_at: sql`now()` },
+      setWhere: sql`${projectZeroTrust.status} <> 'ready'`,
+    });
 }
 
 /**

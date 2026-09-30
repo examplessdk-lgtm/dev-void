@@ -22,6 +22,7 @@ import {
 import {
   clientForConfiguration,
   getProjectZeroTrustState,
+  initialProjectProtection,
   markPendingProjectError,
   MAX_ZERO_TRUST_CUSTOM_DOMAINS_PER_PROJECT,
   putProjectState,
@@ -147,7 +148,9 @@ export async function reconcilePendingProjectZeroTrust(
         or(isNull(projectZeroTrust.project_id), sql`${projectZeroTrust.status} <> 'ready'`),
       ),
     )
-    .orderBy(projectZeroTrust.updated_at, projects.created_at)
+    // A project without a row has no recorded attempt and cannot deploy, so it
+    // goes first. Postgres would otherwise sort its NULL timestamp last.
+    .orderBy(sql`${projectZeroTrust.updated_at} ASC NULLS FIRST`, projects.created_at)
     .limit(limit);
   if (rows.length === 0) {
     return;
@@ -170,9 +173,15 @@ export async function reconcilePendingProjectZeroTrust(
         projectId: row.project.id,
         error,
       });
-      // A checkpoint failure rolls back without touching the row. Record it
-      // so the row moves behind other pending rows in the next run.
-      await markPendingProjectError(db, row.project.id, error).catch((markError) =>
+      // A checkpoint failure rolls back without touching the row, or without
+      // creating it. Record it so the project moves behind other pending
+      // projects in the next run.
+      await markPendingProjectError(
+        db,
+        row.project.id,
+        error,
+        initialProjectProtection(configuration, row.project),
+      ).catch((markError) =>
         console.error('[zero-trust] could not record scheduled reconciliation failure', {
           projectId: row.project.id,
           error: markError,

@@ -367,6 +367,94 @@ describe('Zero Trust operation failures', () => {
     });
   });
 
+  it('initializes a project missing its Zero Trust row before retrying older failures', async () => {
+    const owner = await createTestUser(env.db, 'missing-first-owner');
+    const failing = await createTestProject(env.db, owner.id, 'missing-first-failing');
+    await env.db.insert(domains).values(
+      Array.from({ length: 101 }, (_, index) => ({
+        id: `missing-first-${index}`,
+        project_id: failing.id,
+        hostname: `missing-first-${index}.example.net`,
+        cf_hostname_id: `cf-missing-first-${index}`,
+        status: 'pending' as const,
+      })),
+    );
+    vi.stubGlobal('fetch', accessApi().fetcher);
+    const platform = bindings();
+    await configurePlatformZeroTrust(
+      platform,
+      env.db,
+      configurationInput({ existingProjects: 'protected', protectNewProjects: true }),
+    );
+    // Its initialization failed after the project was created.
+    const missing = await createTestProject(env.db, owner.id, 'missing-first-new');
+    await expect(resolveProjectZeroTrustRouting(env.db, missing.id)).rejects.toThrow(
+      'still being initialized',
+    );
+
+    // The failing project keeps failing, so every run records a newer attempt.
+    for (let run = 0; run < 2; run += 1) {
+      await reconcilePendingProjectZeroTrust(platform, env.db, 1);
+    }
+
+    expect(await getProjectZeroTrustState(env.db, missing.id)).toMatchObject({
+      desired_protected: true,
+      effective_protected: true,
+      status: 'ready',
+    });
+    expect(await getProjectZeroTrustState(env.db, failing.id)).toMatchObject({
+      status: 'error',
+      last_error: expect.stringContaining('at most 100 custom domains'),
+    });
+  });
+
+  it('moves a project missing its Zero Trust row behind other pending projects when it fails', async () => {
+    const owner = await createTestUser(env.db, 'missing-retry-owner');
+    const pending = await createTestProject(env.db, owner.id, 'missing-retry-pending');
+    vi.stubGlobal('fetch', accessApi().fetcher);
+    const platform = bindings();
+    await configurePlatformZeroTrust(
+      platform,
+      env.db,
+      configurationInput({ existingProjects: 'protected', protectNewProjects: true }),
+    );
+    await env.db
+      .update(projectZeroTrust)
+      .set({ status: 'error', last_error: 'Earlier failure', effective_protected: false })
+      .where(eq(projectZeroTrust.project_id, pending.id));
+    const missing = await createTestProject(env.db, owner.id, 'missing-retry-large');
+    await env.db.insert(domains).values(
+      Array.from({ length: 101 }, (_, index) => ({
+        id: `missing-retry-${index}`,
+        project_id: missing.id,
+        hostname: `missing-retry-${index}.example.net`,
+        cf_hostname_id: `cf-missing-retry-${index}`,
+        status: 'pending' as const,
+      })),
+    );
+
+    await reconcilePendingProjectZeroTrust(platform, env.db, 1);
+    expect(await getProjectZeroTrustState(env.db, missing.id)).toMatchObject({
+      desired_protected: true,
+      effective_protected: false,
+      status: 'error',
+      last_error: expect.stringContaining('at most 100 custom domains'),
+    });
+    // The recorded failure still blocks its deploys.
+    await expect(resolveProjectZeroTrustRouting(env.db, missing.id)).rejects.toThrow(
+      'still reconciling',
+    );
+    expect(await getProjectZeroTrustState(env.db, pending.id)).toMatchObject({ status: 'error' });
+
+    await reconcilePendingProjectZeroTrust(platform, env.db, 1);
+    expect(await getProjectZeroTrustState(env.db, pending.id)).toMatchObject({
+      desired_protected: true,
+      effective_protected: true,
+      status: 'ready',
+      last_error: null,
+    });
+  });
+
   it('checks the routing budget after the checkpoint and keeps the bypass until routes publish', async () => {
     const owner = await createTestUser(env.db, 'budget-owner');
     const project = await createTestProject(env.db, owner.id, 'budget-project');
