@@ -13,12 +13,16 @@ import { parse } from 'jsonc-parser';
 import { dirname, join, resolve } from 'pathslash';
 import { EnvHttpProxyAgent, fetch as httpFetch } from 'undici';
 import { prepareCfBuildOutput } from './cf-build-output.ts';
+import { persistCfKeyringPreference, readCfSessionCredential } from './cf-session.ts';
 
 type Result = { status: number; stdout: string; stderr: string };
 type Json = Record<string, unknown>;
 
 const cf = join(dirname(fileURLToPath(import.meta.resolve('cf/package.json'))), 'bin', 'cf');
 const args = process.argv.slice(2);
+// This dedicated transport process uses the same encrypted OAuth store for
+// login, deployment, and ancillary API calls. API-token overrides still win.
+process.env.CLOUDFLARE_AUTH_USE_KEYRING = 'true';
 
 function cfEnvironment(): NodeJS.ProcessEnv {
   // The pinned bin otherwise delegates to any cf installed by the project.
@@ -51,14 +55,9 @@ function result(status: number, stdout = '', stderr = ''): Result {
   return { status, stdout, stderr };
 }
 
-function runCf(command: Array<string>, cwd = process.cwd(), useLoginProfile = false): Result {
+function runCf(command: Array<string>, cwd = process.cwd()): Result {
   const env = cfEnvironment();
   env.CF_QUIET = '1';
-  if (useLoginProfile) {
-    // Void's browser login uses cf's regular profile. Deploy's legacy Wrangler
-    // keyring pin must not switch the credential source while borrowing it.
-    delete env.CLOUDFLARE_AUTH_USE_KEYRING;
-  }
   const child = spawnSync(process.execPath, [cf, ...command], {
     cwd,
     env,
@@ -290,6 +289,42 @@ async function clearWorkerCronSchedules(worker: string): Promise<Result> {
   }
 }
 
+async function clearWorkerCustomDomains(worker: string): Promise<Result> {
+  const base = (
+    process.env.CLOUDFLARE_API_BASE_URL ?? 'https://api.cloudflare.com/client/v4'
+  ).replace(/\/$/, '');
+  const endpoint = `${base}/accounts/${encodeURIComponent(accountId())}/workers/scripts/${encodeURIComponent(worker)}/domains/records`;
+  const proxy =
+    process.env.HTTP_PROXY ||
+    process.env.HTTPS_PROXY ||
+    process.env.http_proxy ||
+    process.env.https_proxy
+      ? new EnvHttpProxyAgent()
+      : null;
+  try {
+    const response = await httpFetch(endpoint, {
+      method: 'PUT',
+      headers: { ...apiHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        override_scope: true,
+        override_existing_origin: false,
+        override_existing_dns_record: false,
+        origins: [],
+      }),
+      redirect: 'error',
+      signal: AbortSignal.timeout(30_000),
+      ...(proxy ? { dispatcher: proxy } : {}),
+    });
+    const body = object(await response.json());
+    if (!response.ok || body.success !== true) {
+      throw new Error(`Cloudflare rejected the empty custom-domain set (HTTP ${response.status}).`);
+    }
+    return result(0);
+  } finally {
+    await proxy?.close();
+  }
+}
+
 async function assertExistingProvisionableResources(
   directory: string,
   account: string,
@@ -405,7 +440,7 @@ function sessionCredential(): { type: 'oauth' | 'api_token'; token: string } | n
   if (token) {
     return { type: 'api_token', token };
   }
-  const identity = runCf(['auth', 'whoami'], process.cwd(), true);
+  const identity = runCf(['auth', 'whoami']);
   if (identity.status !== 0) {
     return null;
   }
@@ -413,21 +448,17 @@ function sessionCredential(): { type: 'oauth' | 'api_token'; token: string } | n
   if (state.authenticated !== true || state.tokenValid !== true) {
     return null;
   }
-  const source = state.authSource;
-  if (typeof source !== 'string' || !source.startsWith('OAuth token from ')) {
-    return null;
-  }
-  const credential = object(
-    parsedJson(readFileSync(source.slice('OAuth token from '.length), 'utf8')),
-  );
-  return typeof credential.oauth_token === 'string' && credential.oauth_token
-    ? { type: 'oauth', token: credential.oauth_token }
-    : null;
+  const credential = readCfSessionCredential(process.cwd(), state);
+  return credential ? { type: 'oauth', token: credential } : null;
 }
 
 function auth(): Result {
   if (args[0] === 'login') {
-    return runInteractiveCf(['auth', 'login', '--force']);
+    const loggedIn = runInteractiveCf(['auth', 'login', '--force']);
+    if (loggedIn.status === 0) {
+      persistCfKeyringPreference(process.cwd());
+    }
+    return loggedIn;
   }
   if (args[0] === 'logout') {
     return runCf(['auth', 'logout']);
@@ -444,6 +475,9 @@ function auth(): Result {
         JSON.stringify({ loggedIn: false }),
         'Cloudflare authentication is required.',
       );
+    }
+    if (String(identity.authSource).startsWith('OAuth token from ')) {
+      persistCfKeyringPreference(process.cwd());
     }
     return result(
       0,
@@ -1028,6 +1062,14 @@ async function workerChanges(): Promise<Result> {
       throw new Error('Cloudflare trigger target changed.');
     }
     return await clearWorkerCronSchedules(name);
+  }
+  if (args[0] === 'triggers' && args[1] === 'clear-domains') {
+    const raw = config();
+    const name = workerName();
+    if (raw.name !== name || (raw.account_id !== undefined && raw.account_id !== accountId())) {
+      throw new Error('Cloudflare trigger target changed.');
+    }
+    return await clearWorkerCustomDomains(name);
   }
   if ((args[0] === 'versions' && args[1] === 'upload') || args[0] === 'deploy') {
     const raw = config();

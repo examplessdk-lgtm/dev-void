@@ -721,50 +721,50 @@ describe('Cloudflare custom domains', () => {
     const root = project(
       '{"name":"my-worker","account_id":"account-1","routes":[{"pattern":"app.example.com","custom_domain":true}]}',
     );
-    vi.stubEnv('CLOUDFLARE_API_TOKEN', 'test-token');
-    const fetchMock = vi.fn<typeof fetch>(async () =>
-      Response.json({ success: true, errors: [], messages: [], result: null }),
+    vi.stubEnv('CLOUDFLARE_API_TOKEN', '');
+    vi.stubEnv('CF_API_TOKEN', '');
+    const runner = vi
+      .fn<CloudflareOperationRunner>()
+      .mockResolvedValue({ status: 0, stdout: '', stderr: '' });
+    await changeCloudflareDomain(root, 'app.example.com', 'delete', runner);
+    expect(runner).toHaveBeenCalledWith(
+      [
+        'triggers',
+        'clear-domains',
+        '-c',
+        join(root, 'wrangler.jsonc'),
+        '--env=',
+        '--name',
+        'my-worker',
+      ],
+      { capture: true },
     );
-    vi.stubGlobal('fetch', fetchMock);
-
-    await changeCloudflareDomain(root, 'app.example.com', 'delete', vi.fn());
-
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    const [url, init] = fetchMock.mock.calls[0]!;
-    expect(url).toBe(
-      'https://api.cloudflare.com/client/v4/accounts/account-1/workers/scripts/my-worker/domains/records',
-    );
-    expect(init).toMatchObject({
-      method: 'PUT',
-      headers: {
-        Authorization: 'Bearer test-token',
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        override_scope: true,
-        override_existing_origin: false,
-        override_existing_dns_record: false,
-        origins: [],
-      }),
-      redirect: 'error',
-    });
   });
 
-  it('fails closed before deleting the final domain without an API token', async () => {
+  it('restores the final domain when the authenticated clear operation is rejected', async () => {
     const root = project(
       '{"name":"my-worker","account_id":"account-1","routes":[{"pattern":"app.example.com","custom_domain":true}]}',
     );
     const before = readFileSync(join(root, 'wrangler.jsonc'), 'utf-8');
-    const runner = vi.fn<CloudflareOperationRunner>();
+    const runner = vi
+      .fn<CloudflareOperationRunner>()
+      .mockResolvedValueOnce({
+        status: 1,
+        stdout: '',
+        stderr: 'Cloudflare authentication is required.',
+      })
+      .mockResolvedValue({ status: 0, stdout: '', stderr: '' });
     vi.stubEnv('CLOUDFLARE_API_TOKEN', '');
     vi.stubEnv('CF_API_TOKEN', '');
 
     await expect(changeCloudflareDomain(root, 'app.example.com', 'delete', runner)).rejects.toThrow(
-      'No local or remote state changed',
+      'both the local config and remote triggers were restored',
     );
 
     expect(readFileSync(join(root, 'wrangler.jsonc'), 'utf-8')).toBe(before);
-    expect(runner).not.toHaveBeenCalled();
+    expect(runner).toHaveBeenCalledTimes(2);
+    expect(runner.mock.calls[0]?.[0].slice(0, 2)).toEqual(['triggers', 'clear-domains']);
+    expect(runner.mock.calls[1]?.[0].slice(0, 2)).toEqual(['triggers', 'deploy']);
   });
 
   it('lists configured domains without an account mutation', () => {

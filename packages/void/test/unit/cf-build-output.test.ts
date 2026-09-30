@@ -43,7 +43,10 @@ function worker(config: Record<string, unknown>): string {
     join(output, 'index.js'),
     'export default { fetch() { return new Response("ok") } };\n',
   );
-  writeFileSync(join(output, 'wrangler.json'), JSON.stringify(config));
+  writeFileSync(
+    join(output, 'wrangler.json'),
+    JSON.stringify({ compatibility_date: '2026-09-29', ...config }),
+  );
   return output;
 }
 
@@ -253,6 +256,71 @@ it(
   },
   CF_BUILD_TIMEOUT_MS,
 );
+
+it(
+  'accepts a nested hashed Worker entry with binary font modules',
+  async () => {
+    const output = worker({
+      name: 'void-test',
+      compatibility_date: '2026-09-29',
+      main: './assets/index-hash.js',
+    });
+    mkdirSync(join(output, 'assets'));
+    writeFileSync(
+      join(output, 'assets/index-hash.js'),
+      "import font from './font.woff2'; export default { fetch() { return new Response(String(font.byteLength)) } };\n",
+    );
+    writeFileSync(join(output, 'assets/font.woff2'), Buffer.from([1, 2, 3]));
+    rmSync(join(output, 'index.js'));
+    const prepared = await prepareCfBuildOutput(output, 'account-id');
+    expect(prepared).not.toBeNull();
+    if (!prepared) {
+      return;
+    }
+    try {
+      const built = await readBuildOutput(prepared.directory);
+      expect(built.workers.default.config.manifest).toMatchObject({
+        mainModule: 'assets/index-hash.js',
+        modules: { 'assets/font.woff2': { type: 'data' } },
+      });
+      const cf = join(dirname(fileURLToPath(import.meta.resolve('cf/package.json'))), 'bin', 'cf');
+      const dryRun = spawnSync(
+        process.execPath,
+        [cf, 'workers', 'versions', 'create', '--prebuilt', '--dry-run'],
+        { cwd: prepared.directory, encoding: 'utf8' },
+      );
+      expect(dryRun.status, `${dryRun.stdout}\n${dryRun.stderr}`).toBe(0);
+    } finally {
+      prepared.dispose();
+    }
+  },
+  CF_BUILD_TIMEOUT_MS,
+);
+
+it.each(['../index.js', '/index.js', 'C:\\index.js'])(
+  'rejects an out-of-bundle entry %s',
+  async (main) => {
+    const output = worker({ name: 'void-test', main });
+    await expect(prepareCfBuildOutput(output, 'account-id')).rejects.toThrow(
+      'inside its output directory',
+    );
+  },
+);
+
+it('names the file when a plugin emits an unsupported module', async () => {
+  const output = worker({ name: 'void-test', main: 'index.js' });
+  writeFileSync(join(output, 'plugin.unknown'), 'unexpected');
+  await expect(prepareCfBuildOutput(output, 'account-id')).rejects.toThrow(
+    'unsupported module "plugin.unknown"',
+  );
+});
+
+it('reports a missing built entry', async () => {
+  const output = worker({ name: 'void-test', main: 'assets/missing.js' });
+  await expect(prepareCfBuildOutput(output, 'account-id')).rejects.toThrow(
+    '"assets/missing.js" is missing',
+  );
+});
 
 it('preserves worker settings that the previous bridge dropped', async () => {
   const output = worker({

@@ -81,13 +81,20 @@ export function recordCloudflareCandidateUpload(
     expected &&
     (expected.accountId !== accountId ||
       expected.workerName !== workerName ||
-      expected.parentVersionId !== parentVersionId)
+      (expected.parentVersionId !== parentVersionId &&
+        expected.versionIds.at(-1) !== parentVersionId))
   ) {
     throw new Error(
       'The saved Cloudflare candidate belongs to a different Worker or live version. Inspect the deployment before retrying.',
     );
   }
-  const versionIds = [...(expected?.versionIds ?? []), versionId];
+  // The activation runner supplies its verified live parent. If the last saved
+  // candidate already became that parent, begin a new chain instead of retaining
+  // the interrupted deployment's old parent and inactive-version authorization.
+  const versionIds = [
+    ...(expected?.parentVersionId === parentVersionId ? expected.versionIds : []),
+    versionId,
+  ];
   mkdirSync(join(root, '.void'), { recursive: true });
   const path = join(root, CANDIDATE_FILE);
   const temp = `${path}.${process.pid}.tmp`;

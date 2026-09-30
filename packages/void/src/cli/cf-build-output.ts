@@ -48,6 +48,11 @@ const moduleTypes: Record<string, ModuleType> = {
   '.cjs': 'cjs',
   '.wasm': 'wasm',
   '.bin': 'data',
+  '.woff': 'data',
+  '.woff2': 'data',
+  '.ttf': 'data',
+  '.otf': 'data',
+  '.eot': 'data',
   '.txt': 'text',
   '.html': 'text',
   '.sql': 'text',
@@ -92,7 +97,9 @@ function copyBundle(
     }
     const type = moduleTypes[extname(entry.name).toLowerCase()];
     if (!type) {
-      return null;
+      throw new Error(
+        `The built Worker contains an unsupported module ${JSON.stringify(name)}. Emit public assets into the client output or configure the plugin that produced this file to run only in the client environment.`,
+      );
     }
     const destinationPath = join(destination, name);
     mkdirSync(dirname(destinationPath), { recursive: true });
@@ -123,9 +130,24 @@ export async function prepareCfBuildOutput(
   if (!config.worker) {
     throw new Error('cf did not produce a Worker configuration.');
   }
-  const main = raw.main;
-  if (typeof main !== 'string' || basename(main) !== main || !existsSync(join(source, main))) {
-    return null;
+  if (typeof raw.main !== 'string' || !raw.main) {
+    throw new Error('The built Worker configuration is missing its main entry. Rebuild the app.');
+  }
+  const entry = raw.main.replaceAll('\\', '/');
+  const main = relative(source, resolve(source, entry));
+  if (
+    isAbsolute(entry) ||
+    /^[a-z]:/i.test(entry) ||
+    !main ||
+    main === '..' ||
+    main.startsWith('../')
+  ) {
+    throw new Error('The built Worker main entry must be inside its output directory.');
+  }
+  if (!existsSync(join(source, main))) {
+    throw new Error(
+      `The built Worker main entry ${JSON.stringify(main)} is missing. Rebuild the app.`,
+    );
   }
 
   const assets = object(raw.assets);

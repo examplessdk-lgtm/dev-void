@@ -617,13 +617,6 @@ export async function changeCloudflareDomain(
   if (!update.modified) {
     return update;
   }
-  if (update.domains.length === 0 && !emptyDomainPublisher && !resolveCloudflareApiToken()) {
-    writeFileSync(before.configPath, original);
-    persistCloudflareConfig(root);
-    throw new Error(
-      'Deleting the final Cloudflare custom domain requires CLOUDFLARE_API_TOKEN for the empty-domain API update. Export a scoped token with Workers Scripts: Edit permission and retry. No local or remote state changed.',
-    );
-  }
   const triggerConfigDir = mkdtempSync(join(tmpdir(), 'void-domain-triggers-'));
   const triggerConfigPath = join(triggerConfigDir, 'wrangler.json');
   const deployRoutes = async (): Promise<void> => {
@@ -668,55 +661,14 @@ export async function changeCloudflareDomain(
 }
 
 /**
- * Reconcile an empty Custom Domain set through the API Wrangler itself uses.
- * Wrangler 4.130 skips `publishCustomDomains()` when its configured set is
- * empty, so `triggers deploy` exits successfully without removing the final
- * domain. Direct API access is deliberately limited to an explicit API token;
- * OAuth credential storage is Wrangler-private and must not be scraped.
+ * Publish an explicit empty Custom Domain set through the pinned cf transport.
+ * Trigger deploy omits empty domain sets; this operation must reconcile them
+ * explicitly using the same verified browser/API credentials as other commands.
  */
 export async function publishEmptyCloudflareCustomDomainSet(
   context: CloudflareOperationContext,
 ): Promise<void> {
-  const token = resolveCloudflareApiToken();
-  if (!token) {
-    throw new Error(
-      'CLOUDFLARE_API_TOKEN is required to restore an empty custom-domain set after the Cloudflare trigger update failed.',
-    );
-  }
-  const response = await fetch(
-    `${context.apiBaseUrl}/accounts/${context.accountId}/workers/scripts/${context.workerName}/domains/records`,
-    {
-      method: 'PUT',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        override_scope: true,
-        override_existing_origin: false,
-        override_existing_dns_record: false,
-        origins: [],
-      }),
-      redirect: 'error',
-      signal: AbortSignal.timeout(30_000),
-    },
-  );
-  let body: unknown;
-  try {
-    body = await response.json();
-  } catch {
-    throw new Error(
-      `Cloudflare returned HTTP ${response.status} with a non-JSON custom-domain response.`,
-    );
-  }
-  if (
-    !response.ok ||
-    typeof body !== 'object' ||
-    body === null ||
-    (body as Record<string, unknown>).success !== true
-  ) {
-    throw new Error(`Cloudflare rejected the empty custom-domain set (HTTP ${response.status}).`);
-  }
+  await run(context, ['triggers', 'clear-domains', ...targetArgs(context)]);
 }
 
 /** Adapt the direct empty-domain API call to the deployment package's result contract. */
@@ -744,11 +696,6 @@ export function createCloudflareEmptyCronPublisher(
       return { status: 1, stdout: '', stderr: errorMessage(error), error: errorMessage(error) };
     }
   };
-}
-
-function resolveCloudflareApiToken(): string | undefined {
-  const token = process.env.CLOUDFLARE_API_TOKEN || process.env.CF_API_TOKEN;
-  return token || undefined;
 }
 
 /**

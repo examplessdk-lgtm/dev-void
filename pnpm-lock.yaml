@@ -646,6 +646,9 @@ importers:
       vite:
         specifier: npm:@voidzero-dev/vite-plus-core@0.3.1
         version: '@voidzero-dev/vite-plus-core@0.3.1(@types/node@26.5.1)(esbuild@0.27.7)(jiti@2.7.0)(sass@1.99.0)(terser@5.51.2)(tsx@4.23.0)(typescript@7.0.2)(yaml@2.9.0)'
+      "@cloudflare/workers-auth":
+        specifier: 0.9.4
+        version: 0.9.4(vitest@4.1.11)
     devDependencies:
       '@clack/core':
         specifier: 1.5.0
@@ -11186,6 +11189,29 @@ packages:
 
   zwitch@2.0.4:
     resolution: {integrity: sha512-bXE4cR/kVZhKZX/RjPEflHaKVhUVl85noU3v6b8apfQEc1x4A+zBxjZ4lN8LqGd6WZ3dl98pY4o717VFmoPp+A==}
+  "@cloudflare/workers-auth@0.9.4":
+    resolution: {integrity: sha512-Rmia49NzDLU+tHEwzv2yKkoDb4k4Gk1kAEyUe8nJ+BfhcfUwJ2otSaN/4PbP4QRjUBH9g/ERzniIgktb6K/QuQ==}
+    peerDependencies:
+      msw: 2.14.6
+      vitest: ^4.1.0
+    peerDependenciesMeta:
+      msw:
+        optional: true
+      vitest:
+        optional: true
+  "@cloudflare/workers-utils@0.44.0":
+    resolution: {integrity: sha512-3IpuKdIXpkICftrg75IO5rKLTweOfY82gH1cTqnP1Zj5lS40VOW7OJ3j9ZlI+TnP1IzeCsN8nk6R7FMypXQTtg==}
+    peerDependencies:
+      vitest: ^4.1.0
+    peerDependenciesMeta:
+      vitest:
+        optional: true
+  dotenv@16.3.1:
+    resolution: {integrity: sha512-IPzF4w4/Rd94bA9imS68tZBaYyBWSCE47V1RGuMrB94iyTOIEwRmVL2x/4An+6mETpLrKJ5hQkB8W4kFAadeIQ==}
+    engines: {node: '>=12'}
+  chalk@5.3.0:
+    resolution: {integrity: sha512-dLitG79d+GV1Nb/VYcCDFivJeK1hiukt9QjRNVOsUtTy1rR1YJsmpGGTZ3qJos+uw7WmWF4wUwBd9jxjocFC2w==}
+    engines: {node: ^12.17.0 || ^14.13 || >=16.0.0}
 
 snapshots:
 
@@ -22853,3 +22879,18 @@ snapshots:
   zod@4.6.5: {}
 
   zwitch@2.0.4: {}
+  "@cloudflare/workers-auth@0.9.4(vitest@4.1.11)":
+    dependencies:
+      '@cloudflare/workers-utils': 0.44.0(vitest@4.1.11)
+      undici: 7.29.0
+    optionalDependencies:
+      vitest: 4.1.11(@types/node@26.5.1)(@vitest/browser-preview@4.1.11)(@voidzero-dev/vite-plus-core@0.3.1(@types/node@26.5.1)(esbuild@0.27.7)(jiti@2.7.0)(sass@1.99.0)(terser@5.51.2)(tsx@4.23.0)(typescript@7.0.2)(yaml@2.9.0))
+  "@cloudflare/workers-utils@0.44.0(vitest@4.1.11)":
+    dependencies:
+      chalk: 5.3.0
+      dotenv: 16.3.1
+      undici: 7.29.0
+    optionalDependencies:
+      vitest: 4.1.11(@types/node@26.5.1)(@vitest/browser-preview@4.1.11)(@voidzero-dev/vite-plus-core@0.3.1(@types/node@26.5.1)(esbuild@0.27.7)(jiti@2.7.0)(sass@1.99.0)(terser@5.51.2)(tsx@4.23.0)(typescript@7.0.2)(yaml@2.9.0))
+  dotenv@16.3.1: {}
+  chalk@5.3.0: {}
