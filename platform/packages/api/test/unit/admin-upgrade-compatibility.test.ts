@@ -149,3 +149,39 @@ it('allows upgrading the 0.21.2 schema after adding project cleanup jobs', () =>
     schemaDigest,
   });
 });
+
+it('allows upgrading the 0.21.3 through 0.21.9 schema after adding project Zero Trust', () => {
+  const root = resolve(import.meta.dirname, '../../drizzle');
+  const journal = JSON.parse(readFileSync(resolve(root, 'meta/_journal.json'), 'utf8')) as {
+    entries: Array<{ tag: string; idx: number; when: number }>;
+  };
+  const compatibility = JSON.parse(readFileSync(resolve(root, 'compatibility.json'), 'utf8')) as {
+    lineage: string;
+    rollbackSafeFrom: Array<{ platformVersion: string; schemaDigest: string }>;
+  };
+  const previous = journal.entries.filter((entry) => entry.idx <= 51);
+  expect(previous.at(-1)?.tag).toBe('0051_icy_psylocke');
+  const schemaDigest = platformDatabaseSchemaDigest(
+    compatibility.lineage,
+    previous.map((entry) => ({
+      index: entry.idx,
+      tag: entry.tag,
+      timestampMillis: entry.when,
+      sha256: createHash('sha256')
+        .update(readFileSync(resolve(root, `${entry.tag}.sql`)))
+        .digest('hex'),
+    })),
+  );
+  expect(schemaDigest).toBe('ac70deb5847c71ece9938edd27e5dbc50ce41e16771926c78e757850baf15bfa');
+  for (const platformVersion of [
+    '0.21.3',
+    '0.21.4',
+    '0.21.5',
+    '0.21.6',
+    '0.21.7',
+    '0.21.8',
+    '0.21.9',
+  ]) {
+    expect(compatibility.rollbackSafeFrom).toContainEqual({ platformVersion, schemaDigest });
+  }
+});

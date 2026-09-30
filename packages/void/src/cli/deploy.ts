@@ -182,7 +182,7 @@ import { readGeneratedWranglerConfigFile } from './generated-wrangler-config.ts'
 import { assertInstalledVoidMatchesCli } from './installed-void.ts';
 import { migrateLegacyVoidConfig } from './migrate.ts';
 export { parseRootWranglerConfig } from '@void/deploy-cloudflare';
-import { promptAndCreateProject } from './create-project.ts';
+import { promptAndCreateProject, reportProjectCreationWarnings } from './create-project.ts';
 import {
   formatConnectionLostMessage,
   formatDeployFailureMessage,
@@ -9053,6 +9053,7 @@ async function createProjectFromSlug(
   const config = { projectId: project.id, slug: project.slug };
   writeProjectConfig(root, attachSelectedPlatform(root, config, client.apiUrl));
   log.success(`Project created: ${pc.blue(config.slug)}`);
+  reportProjectCreationWarnings(project);
   cliLog?.info('project_create_success', { projectId: config.projectId, slug: config.slug });
   return config;
 }

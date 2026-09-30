@@ -16,6 +16,7 @@ import {
   domains,
   githubInstallations,
   invitations,
+  platformSettings,
   platformLoginConnections,
   platformLoginRevisions,
   operatorEvents,
@@ -23,6 +24,7 @@ import {
   projectInvitations,
   projectMembers,
   projectOwnershipPeriods,
+  projectZeroTrust,
   projects,
   users,
 } from '../../src/schema.ts';
@@ -449,6 +451,93 @@ describe('auth middleware', () => {
 });
 
 describe('GET /admin/ (dashboard)', () => {
+  test('renders Zero Trust configuration without exposing a credential', async () => {
+    const admin = await createTestUser(
+      env.db,
+      'zero-trust-admin',
+      'github',
+      undefined,
+      'free',
+      'admin',
+    );
+    const encryptedCredential = 'stored-access-management-credential';
+    await env.db.insert(platformSettings).values({
+      key: 'zeroTrust.configuration',
+      value: {
+        version: 1,
+        revision: 1,
+        status: 'configuring',
+        enabled: false,
+        protectNewProjects: true,
+        accountId: 'zero-trust-account',
+        teamDomain: 'https://company.cloudflareaccess.com',
+        identityProviderIds: ['idp-1'],
+        policyIds: ['policy-1'],
+        credential: {
+          ciphertext: encryptedCredential,
+          iv: 'credential-iv',
+          keyVersion: 'v1',
+        },
+        wildcardApplication: null,
+        operation: {
+          kind: 'configure',
+          phase: 'public-bypasses',
+          owner: null,
+          leaseExpiresAt: null,
+          startedAt: '2026-09-22T00:00:00.000Z',
+          existingProjects: 'public',
+        },
+        lastError: null,
+        updatedAt: '2026-09-22T00:00:00.000Z',
+      },
+    });
+    const project = await createTestProject(env.db, admin.id, 'zero-trust-admin-status');
+    await env.db.insert(projectZeroTrust).values({
+      project_id: project.id,
+      desired_protected: false,
+      effective_protected: false,
+      state: 'public',
+    });
+
+    const res = await req('/admin/zero-trust', admin.adminJwt);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('Cache-Control')).toBe('no-store');
+    expect(res.headers.get('Referrer-Policy')).toBe('no-referrer');
+    const html = await res.text();
+    expect(html).toContain('Project Zero Trust');
+    expect(html).toContain('Protect new projects by default');
+    expect(html).toContain('zero-trust-account');
+    expect(html).toContain('configure · public-bypasses');
+    expect(html).toContain('value="public" selected');
+    expect(html).toContain('pending operation will resume');
+    expect(html).toContain('action="/admin/zero-trust/disable"');
+    expect(html).toContain('Cancel setup and clean up');
+    expect(html).toContain('Project states');
+    expect(html).toContain('name="apiToken"');
+    expect(html).not.toContain(encryptedCredential);
+    expect(html).not.toContain(env.CF_API_TOKEN);
+  });
+
+  test('rejects an invalid project protection form value', async () => {
+    const admin = await createTestUser(
+      env.db,
+      'zero-trust-project-admin',
+      'github',
+      undefined,
+      'free',
+      'admin',
+    );
+    const project = await createTestProject(env.db, admin.id, 'zero-trust-project-form');
+
+    const res = await req(`/admin/projects/${project.id}/zero-trust`, admin.adminJwt, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ protected: 'invalid' }).toString(),
+    });
+
+    expect(res.status).toBe(400);
+  });
+
   test('renders dashboard with stats and projects', async () => {
     const admin = await createTestUser(env.db, 'admin1', 'github', undefined, 'free', 'admin');
     await createTestUser(env.db, 'user1');

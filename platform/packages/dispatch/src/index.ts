@@ -1,4 +1,6 @@
+import type { ProjectZeroTrustRouting } from '@void/edge';
 import { resolvePlatformApplicationEnvironment } from '@void/platform';
+import { projectAccessVerifier } from './access.ts';
 import type { Env } from './env.ts';
 import { createErrorResponse } from './error-page.ts';
 import { applyHeaderRules, type HeaderRule } from './headers.ts';
@@ -78,6 +80,7 @@ type RoutingEntry = Readonly<{
   staticDeploymentId?: string;
   assetManifestId?: string;
   assetConfig?: AssetConfig;
+  zeroTrust?: ProjectZeroTrustRouting;
 }>;
 
 type QueueRoutingEntry = Readonly<{
@@ -683,6 +686,22 @@ export default {
     const routing: RoutingEntry = JSON.parse(routingRaw);
     if (selected.projectId && selected.projectId !== routing.projectId) {
       return createErrorResponse(request, 404, 'Not Found');
+    }
+
+    // Access normally rejects unauthenticated traffic before dispatch. This
+    // independent assertion check makes an accidentally deleted or drifted
+    // Access application fail closed instead of publishing the project.
+    if (
+      routing.zeroTrust &&
+      !(await projectAccessVerifier.verify(
+        url.hostname,
+        request.headers.get('Cf-Access-Jwt-Assertion'),
+        routing.zeroTrust,
+      ))
+    ) {
+      return createErrorResponse(request, 403, 'Cloudflare Access authentication required', {
+        'Cache-Control': 'no-store',
+      });
     }
 
     // Check if project is suspended

@@ -2416,19 +2416,6 @@ export async function deleteDomain(db: Db, id: string): Promise<void> {
   await db.delete(domains).where(eq(domains.id, id));
 }
 
-// Atomically delete a domain row ONLY if it is still `pending`. Used by the
-// cleanup janitor to "claim" a stale row: if a concurrent status poll has
-// since activated the domain (status → 'active'), the delete is a no-op and
-// returns false, so the janitor leaves the now-live domain (and its CF
-// hostname) untouched. Returns true iff a pending row was deleted.
-export async function deleteDomainIfPending(db: Db, id: string): Promise<boolean> {
-  const deleted = await db
-    .delete(domains)
-    .where(and(eq(domains.id, id), eq(domains.status, 'pending')))
-    .returning({ id: domains.id });
-  return deleted.length > 0;
-}
-
 // --- Email destinations ---
 
 /**

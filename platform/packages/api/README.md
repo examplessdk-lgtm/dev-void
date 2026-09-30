@@ -99,6 +99,7 @@ drizzle/
     `POST /projects/:id/tokens/:credentialId/renew`, and
     `DELETE /projects/:id/tokens/:credentialId`)
   - project members and invitations
+  - project Zero Trust status and owner/admin overrides
   - PostgreSQL and MySQL project database provisioning/update
   - `POST /projects/:id/prerender-token` — mint a five-minute, project-scoped token accepted only by the remote-binding proxy
   - `/projects/:id/github` — connect/inspect/update/disconnect the GitHub repo (POST/GET/PATCH/DELETE; readers may inspect, owners and project administrators may mutate)

@@ -1,0 +1,551 @@
+import { eq, isNull } from 'drizzle-orm';
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vite-plus/test';
+import type { ApiEnv } from '../../src/env.ts';
+import { FAST_CRON, scheduled } from '../../src/index.ts';
+import {
+  domains,
+  platformSettings,
+  projects as projectTable,
+  projectZeroTrust,
+} from '../../src/schema.ts';
+import { readZeroTrustConfigurationStrict } from '../../src/zero-trust/configuration.ts';
+import {
+  cleanupProjectZeroTrust,
+  configurePlatformZeroTrust,
+  getProjectZeroTrustState,
+  initializeNewProjectZeroTrust,
+  resolveProjectZeroTrustRouting,
+  setProjectZeroTrustProtection,
+  zeroTrustStatus,
+} from '../../src/zero-trust/service.ts';
+import {
+  clearTables,
+  createTestProject,
+  createTestUser,
+  setupEnv,
+  teardownEnv,
+  type TestEnv,
+} from './helpers.ts';
+
+let env: TestEnv;
+
+beforeAll(async () => {
+  env = await setupEnv();
+});
+
+afterAll(async () => {
+  await teardownEnv();
+});
+
+beforeEach(async () => {
+  await clearTables(env.db);
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+function accessApi(options?: {
+  beforeCreateApplication?: (application: Record<string, unknown>) => Promise<void> | void;
+}) {
+  const applications = new Map<string, Record<string, unknown>>();
+  let nextApplication = 1;
+  const fetcher = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(input.toString());
+    const path = url.pathname.split('/access/')[1] ?? '';
+    if (path === 'organizations') {
+      return Response.json({
+        success: true,
+        result: { auth_domain: 'company.cloudflareaccess.com' },
+      });
+    }
+    if (path === 'identity_providers/idp-1') {
+      return Response.json({ success: true, result: { id: 'idp-1', name: 'Company SSO' } });
+    }
+    if (path === 'policies/policy-1' || path === 'policies/policy-2') {
+      const id = path.split('/').at(-1)!;
+      return Response.json({
+        success: true,
+        result: {
+          id,
+          decision: 'allow',
+          include: [{ email_domain: { domain: 'example.com' } }],
+        },
+      });
+    }
+    if (path === 'apps' && init?.method === 'POST') {
+      const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+      await options?.beforeCreateApplication?.(body);
+      const id = `app-${nextApplication++}`;
+      const application = { ...body, id, aud: `aud-${id}` };
+      applications.set(id, application);
+      return Response.json({ success: true, result: application });
+    }
+    if (path === 'apps') {
+      const page = Number(url.searchParams.get('page') ?? '1');
+      const perPage = Number(url.searchParams.get('per_page') ?? '100');
+      const start = (page - 1) * perPage;
+      return Response.json({
+        success: true,
+        result: [...applications.values()].slice(start, start + perPage),
+      });
+    }
+    const match = path.match(/^apps\/([^/]+)$/);
+    if (match && init?.method === 'PUT') {
+      const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+      const previous = applications.get(match[1]!);
+      const application = { ...body, id: match[1], aud: previous?.aud ?? `aud-${match[1]}` };
+      applications.set(match[1]!, application);
+      return Response.json({ success: true, result: application });
+    }
+    if (match && init?.method === 'DELETE') {
+      applications.delete(match[1]!);
+      return Response.json({ success: true, result: { id: match[1] } });
+    }
+    if (match) {
+      const application = applications.get(match[1]!);
+      return application
+        ? Response.json({ success: true, result: application })
+        : Response.json(
+            { success: false, errors: [{ message: 'application not found' }] },
+            { status: 404 },
+          );
+    }
+    throw new Error(`unexpected Cloudflare request: ${url}`);
+  });
+  return { applications, fetcher };
+}
+
+describe('project Zero Trust reconciliation', () => {
+  it('fails closed when saved routing configuration is malformed', async () => {
+    const owner = await createTestUser(env.db, 'zero-trust-malformed-owner');
+    const project = await createTestProject(env.db, owner.id, 'zero-trust-malformed-app');
+    await env.db.insert(projectZeroTrust).values({
+      project_id: project.id,
+      desired_protected: true,
+      effective_protected: true,
+      state: 'protected',
+    });
+    await env.db.insert(platformSettings).values({
+      key: 'zeroTrust.configuration',
+      value: { version: 999 },
+    });
+
+    await expect(resolveProjectZeroTrustRouting(env.db, project.id)).rejects.toThrow(
+      'unsupported Zero Trust configuration version',
+    );
+  });
+
+  it('rejects an existing-project selection on a resumed reconcile operation', async () => {
+    const cloudflare = accessApi();
+    vi.stubGlobal('fetch', cloudflare.fetcher);
+    const bindings = {
+      ...env,
+      SITE_DOMAIN: 'apps.example.com',
+      PLATFORM_INSTALLATION_ID: 'installation-test',
+    } as unknown as ApiEnv['Bindings'];
+    await configurePlatformZeroTrust(bindings, env.db, {
+      accountId: env.CF_ACCOUNT_ID,
+      apiToken: 'access-management-token',
+      identityProviderIds: ['idp-1'],
+      policyIds: ['policy-1'],
+      protectNewProjects: true,
+      existingProjects: 'protected',
+    });
+    const configuration = (await readZeroTrustConfigurationStrict(env.db))!;
+    await env.db
+      .update(platformSettings)
+      .set({
+        value: {
+          ...configuration,
+          status: 'configuring',
+          operation: {
+            kind: 'reconcile',
+            phase: 'seed',
+            owner: null,
+            leaseExpiresAt: null,
+            startedAt: new Date().toISOString(),
+            existingProjects: 'protected',
+          },
+        },
+      })
+      .where(eq(platformSettings.key, 'zeroTrust.configuration'));
+
+    await expect(readZeroTrustConfigurationStrict(env.db)).rejects.toThrow(
+      'Zero Trust existing-project selection is inconsistent',
+    );
+  });
+
+  it('blocks routing while enabled project protection state is missing or incomplete', async () => {
+    const owner = await createTestUser(env.db, 'zero-trust-routing-guard-owner');
+    const cloudflare = accessApi();
+    vi.stubGlobal('fetch', cloudflare.fetcher);
+    const bindings = {
+      ...env,
+      SITE_DOMAIN: 'apps.example.com',
+      PLATFORM_INSTALLATION_ID: 'installation-test',
+    } as unknown as ApiEnv['Bindings'];
+    await configurePlatformZeroTrust(bindings, env.db, {
+      accountId: env.CF_ACCOUNT_ID,
+      apiToken: 'access-management-token',
+      identityProviderIds: ['idp-1'],
+      policyIds: ['policy-1'],
+      protectNewProjects: true,
+      existingProjects: 'protected',
+    });
+
+    const missing = await createTestProject(env.db, owner.id, 'zero-trust-missing-state');
+    await expect(resolveProjectZeroTrustRouting(env.db, missing.id)).rejects.toThrow(
+      'still being initialized',
+    );
+
+    const incomplete = await createTestProject(env.db, owner.id, 'zero-trust-incomplete-state');
+    await env.db.insert(projectZeroTrust).values({
+      project_id: incomplete.id,
+      desired_protected: true,
+      effective_protected: false,
+      state: 'reconciling',
+    });
+    await expect(resolveProjectZeroTrustRouting(env.db, incomplete.id)).rejects.toThrow(
+      'still reconciling',
+    );
+  });
+
+  it('keeps protected routing until the project disable batch processes it', async () => {
+    const owner = await createTestUser(env.db, 'zero-trust-disable-routing-owner');
+    const project = await createTestProject(env.db, owner.id, 'zero-trust-disable-routing');
+    const cloudflare = accessApi();
+    vi.stubGlobal('fetch', cloudflare.fetcher);
+    const bindings = {
+      ...env,
+      SITE_DOMAIN: 'apps.example.com',
+      PLATFORM_INSTALLATION_ID: 'installation-test',
+    } as unknown as ApiEnv['Bindings'];
+    await configurePlatformZeroTrust(bindings, env.db, {
+      accountId: env.CF_ACCOUNT_ID,
+      apiToken: 'access-management-token',
+      identityProviderIds: ['idp-1'],
+      policyIds: ['policy-1'],
+      protectNewProjects: true,
+      existingProjects: 'protected',
+    });
+    const configuration = (await readZeroTrustConfigurationStrict(env.db))!;
+    await env.db
+      .update(platformSettings)
+      .set({
+        value: {
+          ...configuration,
+          status: 'disabling',
+          operation: {
+            kind: 'disable',
+            phase: 'projects',
+            owner: null,
+            leaseExpiresAt: null,
+            startedAt: new Date().toISOString(),
+            existingProjects: null,
+          },
+        },
+      })
+      .where(eq(platformSettings.key, 'zeroTrust.configuration'));
+
+    await expect(resolveProjectZeroTrustRouting(env.db, project.id)).resolves.toMatchObject({
+      teamDomain: 'https://company.cloudflareaccess.com',
+      audiences: [
+        {
+          hostname: '*.apps.example.com',
+          audience: expect.stringMatching(/^aud-app-/),
+        },
+      ],
+    });
+  });
+
+  it('reports wildcard drift when the platform application domain changes', async () => {
+    const cloudflare = accessApi();
+    vi.stubGlobal('fetch', cloudflare.fetcher);
+    const bindings = {
+      ...env,
+      SITE_DOMAIN: 'apps.example.com',
+      PLATFORM_INSTALLATION_ID: 'installation-test',
+    } as unknown as ApiEnv['Bindings'];
+    await configurePlatformZeroTrust(bindings, env.db, {
+      accountId: env.CF_ACCOUNT_ID,
+      apiToken: 'access-management-token',
+      identityProviderIds: ['idp-1'],
+      policyIds: ['policy-1'],
+      protectNewProjects: true,
+      existingProjects: 'protected',
+    });
+
+    await expect(
+      zeroTrustStatus({ ...bindings, SITE_DOMAIN: 'new.example.com' }, env.db),
+    ).resolves.toMatchObject({ live: { present: true, drifted: true } });
+  });
+
+  // Exercises several persisted reconciliation batches across more than 100 projects.
+  it('bounds installation work and resumes it on the fast maintenance tier', async () => {
+    const owner = await createTestUser(env.db, 'zero-trust-bounded-owner');
+    await env.db.insert(projectTable).values(
+      Array.from({ length: 101 }, (_, index) => ({
+        id: `proj_bounded${index}`,
+        user_id: owner.id,
+        slug: `zero-trust-bounded-${index}`,
+      })),
+    );
+    const cloudflare = accessApi();
+    vi.stubGlobal('fetch', cloudflare.fetcher);
+    const bindings = {
+      ...env,
+      SITE_DOMAIN: 'apps.example.com',
+      PLATFORM_INSTALLATION_ID: 'installation-test',
+    } as unknown as ApiEnv['Bindings'];
+
+    const initial = await configurePlatformZeroTrust(bindings, env.db, {
+      accountId: env.CF_ACCOUNT_ID,
+      apiToken: 'access-management-token',
+      identityProviderIds: ['idp-1'],
+      policyIds: ['policy-1'],
+      protectNewProjects: true,
+      existingProjects: 'public',
+    });
+    expect(initial).toMatchObject({
+      status: 'configuring',
+      operation: { kind: 'configure', phase: 'seed' },
+    });
+    const [unseeded] = await env.db
+      .select({ id: projectTable.id })
+      .from(projectTable)
+      .leftJoin(projectZeroTrust, eq(projectZeroTrust.project_id, projectTable.id))
+      .where(isNull(projectZeroTrust.project_id))
+      .limit(1);
+    expect(unseeded).toBeDefined();
+    await expect(
+      initializeNewProjectZeroTrust(bindings, env.db, unseeded!.id),
+    ).resolves.toMatchObject({ desired_protected: false, state: 'reconciling' });
+
+    const controller = {
+      cron: FAST_CRON,
+      scheduledTime: Date.now(),
+    } as ScheduledController;
+    const context = {
+      waitUntil() {},
+      passThroughOnException() {},
+    } as unknown as ExecutionContext;
+    await scheduled(controller, bindings, context);
+    expect(await readZeroTrustConfigurationStrict(env.db)).toMatchObject({
+      status: 'configuring',
+      operation: { kind: 'configure', phase: 'public-bypasses' },
+    });
+
+    await scheduled(controller, bindings, context);
+    expect(await readZeroTrustConfigurationStrict(env.db)).toMatchObject({
+      status: 'configuring',
+      operation: { phase: 'projects' },
+    });
+    await scheduled(controller, bindings, context);
+    expect(await readZeroTrustConfigurationStrict(env.db)).toMatchObject({
+      status: 'ready',
+      operation: null,
+    });
+  }, 10_000);
+
+  it('creates public exceptions before the wildcard app and preserves owner opt-outs on reconfigure', async () => {
+    const owner = await createTestUser(env.db, 'zero-trust-owner');
+    const protectedProject = await createTestProject(env.db, owner.id, 'protected-app');
+    const publicProject = await createTestProject(env.db, owner.id, 'public-app');
+    const cloudflare = accessApi();
+    vi.stubGlobal('fetch', cloudflare.fetcher);
+    const bindings = {
+      ...env,
+      SITE_DOMAIN: 'apps.example.com',
+      PLATFORM_INSTALLATION_ID: 'installation-test',
+    } as unknown as ApiEnv['Bindings'];
+
+    await configurePlatformZeroTrust(bindings, env.db, {
+      accountId: env.CF_ACCOUNT_ID,
+      apiToken: 'access-management-token',
+      identityProviderIds: ['idp-1'],
+      policyIds: ['policy-1'],
+      protectNewProjects: true,
+      existingProjects: 'public',
+    });
+
+    expect(await getProjectZeroTrustState(env.db, protectedProject.id)).toMatchObject({
+      desired_protected: false,
+      effective_protected: false,
+      state: 'public',
+    });
+    expect(await getProjectZeroTrustState(env.db, publicProject.id)).toMatchObject({
+      desired_protected: false,
+      effective_protected: false,
+      state: 'public',
+    });
+    expect(
+      [...cloudflare.applications.values()].filter((application) =>
+        String(application.name).includes('-public-'),
+      ),
+    ).toHaveLength(2);
+    expect(
+      [...cloudflare.applications.values()].some((application) =>
+        String(application.domain).startsWith('*.'),
+      ),
+    ).toBe(true);
+    expect(
+      [...cloudflare.applications.values()].find((application) =>
+        String(application.domain).startsWith('*.'),
+      )?.name,
+    ).toMatch(/^void-installation-test-[a-f0-9]{16}-[a-f0-9]{32}-project-zero-trust$/);
+
+    await setProjectZeroTrustProtection(bindings, env.db, protectedProject.id, true);
+    expect(await getProjectZeroTrustState(env.db, protectedProject.id)).toMatchObject({
+      desired_protected: true,
+      effective_protected: true,
+      state: 'protected',
+    });
+
+    await configurePlatformZeroTrust(bindings, env.db, {
+      accountId: env.CF_ACCOUNT_ID,
+      apiToken: 'replacement-access-token',
+      identityProviderIds: ['idp-1'],
+      policyIds: ['policy-2'],
+      protectNewProjects: false,
+      existingProjects: 'public',
+    });
+
+    expect(await getProjectZeroTrustState(env.db, protectedProject.id)).toMatchObject({
+      desired_protected: true,
+      effective_protected: true,
+      state: 'protected',
+    });
+    expect(await getProjectZeroTrustState(env.db, publicProject.id)).toMatchObject({
+      desired_protected: false,
+      effective_protected: false,
+      state: 'public',
+    });
+    expect(
+      [...cloudflare.applications.values()].find((application) =>
+        String(application.domain).startsWith('*.'),
+      )?.policies,
+    ).toEqual([{ id: 'policy-2', precedence: 1 }]);
+  });
+
+  it('serializes a newer protected intent behind an in-flight public transition', async () => {
+    const owner = await createTestUser(env.db, 'zero-trust-race-owner');
+    const project = await createTestProject(env.db, owner.id, 'zero-trust-race-app');
+    await env.db.insert(domains).values({
+      id: 'domain-zero-trust-race',
+      project_id: project.id,
+      hostname: 'race.example.com',
+      cf_hostname_id: 'cf-domain-zero-trust-race',
+      status: 'active',
+    });
+    await env.ROUTING.put(project.slug, JSON.stringify({ worker: 'test' }));
+    await env.ROUTING.put('domain:race.example.com', JSON.stringify({ worker: 'test' }));
+
+    let releaseBypassCreation = () => {};
+    const bypassCreationReleased = new Promise<void>((resolve) => {
+      releaseBypassCreation = resolve;
+    });
+    let reportBypassCreation = () => {};
+    const bypassCreationStarted = new Promise<void>((resolve) => {
+      reportBypassCreation = resolve;
+    });
+    const cloudflare = accessApi({
+      beforeCreateApplication: async (application) => {
+        if (String(application.name).includes('-public-')) {
+          reportBypassCreation();
+          await bypassCreationReleased;
+        }
+      },
+    });
+    vi.stubGlobal('fetch', cloudflare.fetcher);
+    const bindings = {
+      ...env,
+      SITE_DOMAIN: 'apps.example.com',
+      PLATFORM_INSTALLATION_ID: 'installation-test',
+    } as unknown as ApiEnv['Bindings'];
+
+    await configurePlatformZeroTrust(bindings, env.db, {
+      accountId: env.CF_ACCOUNT_ID,
+      apiToken: 'access-management-token',
+      identityProviderIds: ['idp-1'],
+      policyIds: ['policy-1'],
+      protectNewProjects: true,
+      existingProjects: 'protected',
+    });
+
+    const publicTransition = setProjectZeroTrustProtection(bindings, env.db, project.id, false);
+    await bypassCreationStarted;
+
+    const protectedTransition = setProjectZeroTrustProtection(bindings, env.db, project.id, true);
+    releaseBypassCreation();
+
+    await expect(publicTransition).resolves.toMatchObject({ state: 'public' });
+    await expect(protectedTransition).resolves.toMatchObject({ state: 'protected' });
+    expect(await getProjectZeroTrustState(env.db, project.id)).toMatchObject({
+      desired_protected: true,
+      effective_protected: true,
+      state: 'protected',
+      bypass_application_id: null,
+      bypass_application_name: null,
+    });
+    expect(
+      [...cloudflare.applications.values()].some((application) =>
+        String(application.name).includes('-public-'),
+      ),
+    ).toBe(false);
+    expect(JSON.parse((await env.ROUTING.get(project.slug))!)).toMatchObject({
+      zeroTrust: {
+        teamDomain: 'https://company.cloudflareaccess.com',
+        audiences: [
+          {
+            hostname: '*.apps.example.com',
+            audience: expect.stringMatching(/^aud-app-/),
+          },
+          {
+            hostname: 'race.example.com',
+            audience: expect.stringMatching(/^aud-app-/),
+          },
+        ],
+      },
+    });
+    expect(JSON.parse((await env.ROUTING.get('domain:race.example.com'))!)).toMatchObject({
+      zeroTrust: {
+        audiences: expect.arrayContaining([
+          {
+            hostname: 'race.example.com',
+            audience: expect.stringMatching(/^aud-app-/),
+          },
+        ]),
+      },
+    });
+  });
+
+  it('preserves cleanup handles when the management configuration is unavailable', async () => {
+    const owner = await createTestUser(env.db, 'zero-trust-cleanup-owner');
+    const project = await createTestProject(env.db, owner.id, 'zero-trust-cleanup-app');
+    await env.db.insert(projectZeroTrust).values({
+      project_id: project.id,
+      desired_protected: false,
+      effective_protected: false,
+      state: 'reconciling',
+      bypass_application_id: 'app-cleanup',
+      bypass_application_name: 'void-installation-public-cleanup',
+    });
+
+    await expect(
+      cleanupProjectZeroTrust(env as unknown as ApiEnv['Bindings'], env.db, project.id),
+    ).rejects.toThrow('managed Access applications cannot be safely deleted');
+    expect(await getProjectZeroTrustState(env.db, project.id)).toMatchObject({
+      bypass_application_id: 'app-cleanup',
+    });
+  });
+});

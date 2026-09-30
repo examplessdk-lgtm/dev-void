@@ -29,6 +29,7 @@
     "@nkzw/fate": "1.7.3",
     "@stylexjs/stylex": "catalog:",
     "@void/deploy-core": "workspace:*",
+    "@void/edge": "workspace:*",
     "@void/isr": "workspace:*",
     "@void/react": "workspace:*",
     "@xterm/headless": "^6.0.0",

@@ -323,6 +323,13 @@
       "when": 1790827715142,
       "tag": "0052_github_connection_authority",
       "breakpoints": true
+    },
+    {
+      "idx": 53,
+      "version": "7",
+      "when": 1790838220205,
+      "tag": "0053_project_zero_trust",
+      "breakpoints": true
     }
   ]
 }

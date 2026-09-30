@@ -30,6 +30,7 @@ import {
   projectDatabaseCredentials,
   projectDeployCredentials,
   platformLoginConnections,
+  platformSettings,
 } from '../../src/schema.ts';
 import {
   setupEnv,
@@ -1856,6 +1857,36 @@ describe('POST /projects', () => {
     };
     expect(body.slug).toBe('my-app');
     expect(body.user_id).toBe(user.id);
+  });
+
+  it('returns initialization failures in the standard warnings collection', async () => {
+    const user = await createTestUser(env.db);
+    await env.db.insert(platformSettings).values({
+      key: 'zeroTrust.configuration',
+      value: { version: 999 },
+    });
+
+    const res = await app.fetch(
+      new Request('http://localhost/projects', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${user.jwt}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ slug: 'warning-app' }),
+      }),
+      env,
+    );
+
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    expect(body).toMatchObject({
+      slug: 'warning-app',
+      warnings: [
+        'Project created, but its Zero Trust protection could not be initialized. Reconcile the project Zero Trust status before deployment.',
+      ],
+    });
+    expect(body).not.toHaveProperty('warning');
   });
 
   it('rejects missing slug', async () => {

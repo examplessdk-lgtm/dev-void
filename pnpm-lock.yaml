@@ -794,6 +794,9 @@ importers:
       '@void/deploy-core':
         specifier: workspace:*
         version: link:../../../packages/deploy-core
+      '@void/edge':
+        specifier: workspace:*
+        version: link:../../../packages/edge
       '@void/isr':
         specifier: workspace:*
         version: link:../../../packages/isr
@@ -953,6 +956,9 @@ importers:
       '@voidcloud/api':
         specifier: workspace:*
         version: link:../api
+      jose:
+        specifier: 6.2.12
+        version: 6.2.12
     devDependencies:
       '@cloudflare/workers-types':
         specifier: catalog:platform

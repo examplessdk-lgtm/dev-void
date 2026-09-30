@@ -7,6 +7,7 @@ import type { PlatformClient } from '../../src/cli/client.ts';
 const mockText = vi.fn();
 const mockInfo = vi.fn();
 const mockError = vi.fn();
+const mockWarn = vi.fn();
 
 vi.mock('@clack/prompts', () => ({
   cancel: vi.fn(),
@@ -16,7 +17,7 @@ vi.mock('@clack/prompts', () => ({
     info: (...args: Array<unknown>) => mockInfo(...args),
     step: vi.fn(),
     success: vi.fn(),
-    warn: vi.fn(),
+    warn: (...args: Array<unknown>) => mockWarn(...args),
   },
   text: (...args: Array<unknown>) => mockText(...args),
 }));
@@ -41,6 +42,7 @@ describe('promptAndCreateProject', () => {
     mockText.mockReset();
     mockInfo.mockReset();
     mockError.mockReset();
+    mockWarn.mockReset();
   });
 
   afterEach(() => {
@@ -120,6 +122,29 @@ describe('promptAndCreateProject', () => {
     );
     expect(mockError.mock.calls[0]?.[0]).not.toContain('{');
     expect(client.createProject).toHaveBeenNthCalledWith(2, 'longer-app');
+  });
+
+  it('surfaces every project creation warning without terminal control characters', async () => {
+    const { promptAndCreateProject } = await import('../../src/cli/create-project.ts');
+    const client = createClient();
+    client.createProject.mockResolvedValueOnce({
+      id: 'proj_new',
+      slug: 'new-app',
+      warnings: [
+        'Project created, but its Zero Trust protection could not be initialized.',
+        'Retry\u001b[31m before deployment.',
+      ],
+    });
+    mockText.mockResolvedValueOnce('new-app');
+
+    await promptAndCreateProject(root, client);
+
+    expect(mockWarn).toHaveBeenCalledTimes(2);
+    expect(mockWarn).toHaveBeenNthCalledWith(
+      1,
+      'Project created, but its Zero Trust protection could not be initialized.',
+    );
+    expect(mockWarn).toHaveBeenNthCalledWith(2, 'Retry [31m before deployment.');
   });
 
   // The platform caps slugs at 56 characters (the `<slug>+noreply@` sender

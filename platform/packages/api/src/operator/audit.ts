@@ -45,6 +45,16 @@ function accessPatterns(value: unknown) {
     : undefined;
 }
 
+function boundedIds(value: unknown) {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 16) {
+    return undefined;
+  }
+  const values = value.map((entry) => boundedString(entry, 128));
+  return values.every((entry): entry is string => entry !== undefined)
+    ? [...new Set(values)]
+    : undefined;
+}
+
 function rollbackVersions(value: unknown) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return undefined;
@@ -213,6 +223,28 @@ function auditTarget(
       if (segments[3] === 'destinations' && destinationId && segments[5] === 'remove') {
         return JSON.stringify({ project, destinationId });
       }
+    }
+  }
+  if (segments[0] === 'zero-trust') {
+    if (segments[1] === 'configure') {
+      return JSON.stringify({
+        accountId: boundedString(body.accountId, 128),
+        identityProviderIds: boundedIds(body.identityProviderIds),
+        policyIds: boundedIds(body.policyIds),
+        protectNewProjects: body.protectNewProjects === true,
+        existingProjects: boundedString(body.existingProjects, 16),
+      });
+    }
+    if (segments[1] === 'reconcile' || segments[1] === 'disable') {
+      return JSON.stringify({ installation: 'platform' });
+    }
+    if (segments[1] === 'projects' && segments[2]) {
+      return JSON.stringify({
+        projectId: pathIdentifier(segments[2]),
+        ...(segments[3] === 'reconcile'
+          ? { reconcile: true }
+          : { protected: body.protected === true }),
+      });
     }
   }
   if (segments[0] === 'system' && segments[1] === 'backfill-queue-tokens') {

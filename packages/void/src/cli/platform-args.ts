@@ -11,7 +11,11 @@ export const platformSubcommands: Array<SubcommandDef> = [
   ...operatorGroups.map((name) => ({
     name,
     hint:
-      name === 'email' ? 'Domains, policy, limits, outcomes, and recovery' : 'Operator commands',
+      name === 'email'
+        ? 'Domains, policy, limits, outcomes, and recovery'
+        : name === 'zero-trust'
+          ? 'Configure Access protection and project overrides'
+          : 'Operator commands',
     description: `Administer platform ${name}`,
   })),
   { name: 'list', description: 'List installed and connected platforms' },

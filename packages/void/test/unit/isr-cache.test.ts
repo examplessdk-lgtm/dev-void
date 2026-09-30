@@ -1247,6 +1247,29 @@ describe('handleIsr', () => {
     expect(edge.store.size).toBe(0);
   });
 
+  it('bypasses all shared ISR work for an assertion-only Access request', async () => {
+    const { kv, getWithMetadata, put } = createKvMock();
+    const { render, spy } = createRender(() => new Response('private profile'));
+    const { ctx, tasks } = createCtx();
+
+    expect(
+      await handleIsr(
+        htmlRequest('/blog/post', { 'Cf-Access-Jwt-Assertion': 'signed-access-assertion' }),
+        makeEnv(kv),
+        ctx,
+        OPTS,
+        render,
+      ),
+    ).toBeNull();
+
+    expect(edge.match).not.toHaveBeenCalled();
+    expect(getWithMetadata).not.toHaveBeenCalled();
+    expect(edge.put).not.toHaveBeenCalled();
+    expect(put).not.toHaveBeenCalled();
+    expect(spy).not.toHaveBeenCalled();
+    expect(tasks).toHaveLength(0);
+  });
+
   it('returns null (caller renders live) for non-GET, credentialed, and non-ISR paths', async () => {
     const { kv } = createKvMock();
     const env = makeEnv(kv);

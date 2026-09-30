@@ -284,7 +284,7 @@ if (helpPath) {
     },
     {
       name: 'platform',
-      hint: 'auth | user | project | deployment | signup | email | system | install',
+      hint: 'auth | user | project | deployment | signup | email | zero-trust | system | install',
       description: 'Install platforms and administer users, projects, access, and operations',
     },
     {
@@ -294,7 +294,7 @@ if (helpPath) {
     },
     {
       name: 'project',
-      hint: 'status | link | list | team | token | logs | requests | rollback | cancel | delete | purge-cache',
+      hint: 'status | link | list | team | token | zero-trust | logs | requests | rollback | cancel | delete | purge-cache',
       description: 'Manage projects, teams, deployments, and scoped CI credentials',
     },
     { name: 'secret', hint: 'list | put | delete | sync', description: 'Manage project secrets' },

@@ -5,7 +5,7 @@ import { matchLiteralPattern, matchSegmentPattern } from '@void/edge';
  * proven safe to share. Readers reject entries from earlier policies instead
  * of replaying opaque bodies whose private headers were stripped at write time.
  */
-export const SHARED_CACHE_POLICY_VERSION = 1 as const;
+export const SHARED_CACHE_POLICY_VERSION = 2 as const;
 export const SHARED_CACHE_POLICY_HEADER = 'x-void-shared-cache-policy';
 
 /** Stamp an internal edge-cache representation with the policy that admitted it. */
@@ -244,6 +244,7 @@ export function shouldBypassIsr(request: Request): boolean {
   return (
     request.headers.has('Cookie') ||
     request.headers.has('Authorization') ||
+    request.headers.has('Cf-Access-Jwt-Assertion') ||
     acceptsEventStream(request)
   );
 }

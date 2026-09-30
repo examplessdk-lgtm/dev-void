@@ -123,6 +123,7 @@ const platformSidebar = [
       { text: 'Overview', link: '/guide/platform-administration' },
       { text: 'Sign-in and Access', link: '/guide/platform/administration/access' },
       { text: 'Users and Projects', link: '/guide/platform/administration/projects' },
+      { text: 'Project Zero Trust', link: '/guide/platform/administration/zero-trust' },
       { text: 'Email', link: '/guide/platform/administration/email' },
       { text: 'Operations', link: '/guide/platform/administration/operations' },
     ],

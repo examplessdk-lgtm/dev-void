@@ -1,6 +1,7 @@
+import { eq } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, beforeEach, expect, test, vi } from 'vite-plus/test';
 import { app } from '../../src/index.ts';
-import { operatorEvents } from '../../src/schema.ts';
+import { operatorEvents, projects } from '../../src/schema.ts';
 import {
   clearTables,
   createOperatorToken,
@@ -102,6 +103,56 @@ test('previews and reads produce no audit or configuration writes', async () => 
   expect(await env.ROUTING.get('signup:enabled')).toBe('false');
   expect((await request('/signup')).status).toBe(200);
   expect(await env.db.select().from(operatorEvents)).toHaveLength(0);
+});
+
+test('previews Zero Trust configuration without returning or auditing the API token', async () => {
+  const secret = 'access-management-secret';
+  const res = await request('/zero-trust/configure', {
+    dryRun: true,
+    accountId: env.CF_ACCOUNT_ID,
+    apiToken: secret,
+    identityProviderIds: ['idp-1'],
+    policyIds: ['policy-1'],
+    protectNewProjects: true,
+    existingProjects: 'public',
+  });
+
+  expect(res.status).toBe(200);
+  const body = await res.text();
+  expect(JSON.parse(body)).toMatchObject({
+    dryRun: true,
+    action: 'zero-trust.configure',
+    target: 'platform',
+    accountId: env.CF_ACCOUNT_ID,
+    credential: 'replace-encrypted',
+    protectNewProjects: true,
+    existingProjects: 'public',
+  });
+  expect(body).not.toContain(secret);
+  expect(await env.db.select().from(operatorEvents)).toHaveLength(0);
+});
+
+test('validates operator project Zero Trust targets', async () => {
+  expect((await request('/zero-trust/projects/missing')).status).toBe(404);
+  expect(
+    (await request('/zero-trust/projects/missing', { protected: true, dryRun: true })).status,
+  ).toBe(404);
+
+  const owner = await createTestUser(env.db, 'zero-trust-target-owner');
+  const project = await createTestProject(env.db, owner.id, 'zero-trust-target');
+  await env.db.update(projects).set({ status: 'deleting' }).where(eq(projects.id, project.id));
+
+  const status = await request(`/zero-trust/projects/${project.id}`);
+  expect(status.status).toBe(200);
+  expect(await status.json()).toEqual({ project: null });
+  expect(
+    (
+      await request(`/zero-trust/projects/${project.id}`, {
+        protected: true,
+        dryRun: true,
+      })
+    ).status,
+  ).toBe(409);
 });
 
 test('records actor, target, and success without recording credentials', async () => {

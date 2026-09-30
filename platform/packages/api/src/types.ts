@@ -14,6 +14,7 @@ import type {
   projectInvitations,
   projectMembers,
   projectOwnershipPeriods,
+  projectZeroTrust,
   projects,
   projectSecrets,
   resources,
@@ -74,6 +75,7 @@ export type Project = InferSelectModel<typeof projects>;
 export type ProjectMember = InferSelectModel<typeof projectMembers>;
 export type ProjectInvitation = InferSelectModel<typeof projectInvitations>;
 export type ProjectOwnershipPeriod = InferSelectModel<typeof projectOwnershipPeriods>;
+export type ProjectZeroTrust = InferSelectModel<typeof projectZeroTrust>;
 export type Deployment = InferSelectModel<typeof deployments>;
 export type DeploymentStatus = Deployment['status'];
 export type ProjectSecret = InferSelectModel<typeof projectSecrets>;

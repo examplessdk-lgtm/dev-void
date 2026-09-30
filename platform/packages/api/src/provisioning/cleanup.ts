@@ -51,6 +51,7 @@ import {
 } from '../schema.ts';
 import { getCurrentBillingPeriodStart } from '../tiers.ts';
 import type { Build, DeployManifest, Project, ProjectOwnershipPeriod, Resource } from '../types.ts';
+import { cleanupProjectZeroTrust } from '../zero-trust/service.ts';
 import {
   CloudflareApiError,
   deleteCustomHostname,
@@ -801,9 +802,9 @@ export async function reconcileProjectCleanupJobs(db: Db, env: ApiEnv['Bindings'
  *      in-flight builds (revoking their deploy tokens). Then stop the container
  *      DOs of those builds — BEFORE any CF cleanup runs, so a still-running build
  *      can't keep acting on its now-revoked token during the cleanup window.
- *   2. Run critical CF cleanup (container apps + per-deploy container
- *      orphan recovery). Throws on non-404 failure; the caller should surface
- *      a 5xx and the DB row remains, allowing retry.
+ *   2. Run critical CF cleanup (container apps, per-deploy container orphan
+ *      recovery, and Zero Trust applications). Throws on non-404 failure; the
+ *      caller should surface a 5xx and the DB row remains, allowing retry.
  *   3. Delete CF resources (D1, KV, R2, queues, Hyperdrive, custom hostnames,
  *      routing entries, deployment Workers). Persist failed operations for
  *      scheduled retry; keep reusable names reserved if their deletion fails.
@@ -856,6 +857,9 @@ export async function teardownProject(
   }
 
   await cleanupCriticalResources(context, projectId, project);
+  // Access application IDs live only on the project row. Deletion must succeed
+  // before the cascade or a retry would no longer be able to address them.
+  await cleanupProjectZeroTrust(context.env, context.get('db'), projectId);
   // Customer-side cleanup is durable and may continue after project deletion.
   await cleanupProjectEmailAssignments(context, projectId);
   const { warnings: bestEffortWarnings, cleanedCfIds } = await cleanupBestEffortResources(

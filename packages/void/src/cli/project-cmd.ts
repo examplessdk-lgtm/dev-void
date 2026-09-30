@@ -49,6 +49,21 @@ export async function runProjectCommand(root: string, args: ProjectArgs): Promis
     const { runProjectTeamCommand } = await import('./project-team.ts');
     return runProjectTeamCommand(root, args);
   }
+  if (args.subcommand === 'zero-trust') {
+    if (cloudflare) {
+      throw new Error(
+        'project: Zero Trust overrides are available only for projects hosted on a Void platform.',
+      );
+    }
+    if (args.action === '') {
+      const { printHelpPage } = await import('./help.ts');
+      printHelpPage(['project', 'zero-trust']);
+      return;
+    }
+    const action = args.action;
+    const { runProjectZeroTrustCommand } = await import('./project-zero-trust.ts');
+    return runProjectZeroTrustCommand(root, { ...args, action });
+  }
   if (args.subcommand === 'logs') {
     const { runLogsCommand } = await import('./logs.ts');
     return runLogsCommand(

@@ -1,7 +1,11 @@
+import type { ProjectZeroTrustRouting } from '@void/edge';
 import { sql as drizzleSql } from 'drizzle-orm';
 import { getDomainsByProjectIds, getProject, type Db } from './db.ts';
-import type { PlanLimits } from './tiers.ts';
 import type { AssetConfig, DeployManifest } from './types.ts';
+import {
+  resolveProjectZeroTrustRoutingForPublication,
+  withProjectZeroTrustRouting,
+} from './zero-trust/service.ts';
 
 /**
  * KV key + payload shape for the per-project routing entry consumed by the
@@ -20,6 +24,8 @@ export type ProjectAccountEntry = Readonly<{
 export function projectAccountKey(projectId: string): string {
   return `project:${projectId}`;
 }
+
+export { computeDispatchLimits } from './routing-limits.ts';
 
 export function sandboxBlockKey(userId: string): string {
   return `sandbox-block:${userId}`;
@@ -92,10 +98,10 @@ export type RoutingSuspensionUpdate =
 
 /**
  * Resolve a routing undo without overwriting a later authoritative mutation.
- * Exact matches restore directly. A suspension-only rewrite still belongs to
- * the attempted deployment, so restore its prior route while carrying the
- * newest `suspended` marker. Any other change (including deletion) wins and
- * suppresses the stale undo.
+ * Exact matches restore directly. Suspension and Zero Trust rewrites still
+ * belong to the attempted deployment, so restore its prior route while carrying
+ * the newest protection metadata. Any other change (including deletion) wins
+ * and suppresses the stale undo.
  */
 export function resolveRoutingUndo(
   current: string | null,
@@ -111,10 +117,15 @@ export function resolveRoutingUndo(
   try {
     const currentEntry = JSON.parse(current) as Record<string, unknown>;
     const writtenEntry = JSON.parse(written) as Record<string, unknown>;
-    const hasCurrentSuspension = Object.hasOwn(currentEntry, 'suspended');
-    const currentSuspension = currentEntry.suspended;
-    delete currentEntry.suspended;
-    delete writtenEntry.suspended;
+    const protectionFields = ['suspended', 'zeroTrust'] as const;
+    const currentProtection: Record<string, unknown> = {};
+    for (const field of protectionFields) {
+      if (Object.hasOwn(currentEntry, field)) {
+        currentProtection[field] = currentEntry[field];
+      }
+      delete currentEntry[field];
+      delete writtenEntry[field];
+    }
     if (JSON.stringify(currentEntry) !== JSON.stringify(writtenEntry)) {
       return { restore: false, value: null };
     }
@@ -122,10 +133,12 @@ export function resolveRoutingUndo(
       return { restore: true, value: null };
     }
     const restoredEntry = JSON.parse(previous) as Record<string, unknown>;
-    if (hasCurrentSuspension) {
-      restoredEntry.suspended = currentSuspension;
-    } else {
-      delete restoredEntry.suspended;
+    for (const field of protectionFields) {
+      if (Object.hasOwn(currentProtection, field)) {
+        restoredEntry[field] = currentProtection[field];
+      } else {
+        delete restoredEntry[field];
+      }
     }
     return { restore: true, value: JSON.stringify(restoredEntry) };
   } catch {
@@ -143,11 +156,14 @@ export function resolveRoutingUndo(
  * mid-deploy), and skips the write whenever the entry already satisfies the
  * update (set → same reason / weaker reason preserved, clear → no matching
  * marker) so repeated suspend/unsuspend is a cheap no-op.
+ * Production callers supply protection read under the project lock, because a
+ * stale KV value must never decide protection for a newly published route.
  */
 export async function applyRoutingSuspension(
   routing: KVNamespace,
   keys: ReadonlyArray<string>,
   update: RoutingSuspensionUpdate,
+  protection?: ProjectZeroTrustRouting | null,
 ): Promise<void> {
   for (const key of keys) {
     const raw = await routing.get(key);
@@ -172,7 +188,11 @@ export async function applyRoutingSuspension(
       }
       delete entry.suspended;
     }
-    await routing.put(key, JSON.stringify(entry));
+    const next = JSON.stringify(entry);
+    await routing.put(
+      key,
+      protection === undefined ? next : withProjectZeroTrustRouting(next, protection),
+    );
   }
 }
 
@@ -213,7 +233,7 @@ export async function setProjectsRoutingSuspension(
       const current = await getProject(tx as unknown as Db, project.id);
       // If ownership changed before this lock, transfer convergence owns the
       // route and this stale fan-out must stand down.
-      if (current?.user_id !== project.user_id) {
+      if (!current || current.user_id !== project.user_id || current.status === 'deleting') {
         return;
       }
       // Resolve domains only after the project lock. Domain activation takes
@@ -221,60 +241,13 @@ export async function setProjectsRoutingSuspension(
       // behind it or a domain activated between the eager read and this lock
       // could escape the suspension entirely.
       const domainMap = await getDomainsByProjectIds(tx as unknown as Db, [project.id]);
+      const protection = await resolveProjectZeroTrustRoutingForPublication(tx, project.id);
       const domainKeys = (domainMap.get(project.id) ?? []).map(
         (domain) => `domain:${domain.hostname}`,
       );
-      await applyRoutingSuspension(routing, [project.slug, ...domainKeys], update);
+      await applyRoutingSuspension(routing, [project.slug, ...domainKeys], update, protection);
     });
   }
-}
-
-/**
- * Compute the `dispatchLimits` blob `buildRoutingJson` embeds in a routing
- * entry, honoring an optional per-project `manifest.limits.cpuMs` override.
- *
- * - Override present: clamp to the plan's `maxCpuMsPerRequest` when that
- *   ceiling is non-zero (rollback under a downgraded plan clamps, never
- *   rejects — ingest is where over-ceiling requests get a 400), otherwise
- *   pass it through verbatim.
- * - No override: fall back to the plan default `cpuMsPerRequest` (0 = no
- *   cpuMs key), byte-identical in shape to the historical inline expression.
- * - An override that is not a safe integer >= 1 is treated as absent and
- *   falls back to the plan default. A rollback replays a stored manifest,
- *   and a manifest stored before ingest validated `limits` can carry an
- *   out-of-domain value that must not erase or corrupt the plan cap.
- * - `subRequests` always comes from the plan (0 = no key).
- *
- * Returns `null` when neither limit is set so the routing entry omits the
- * `limits` key entirely.
- */
-export function computeDispatchLimits(
-  planLimits: PlanLimits,
-  manifestLimits: DeployManifest['limits'] | null | undefined,
-): { cpuMs?: number; subRequests?: number } | null {
-  const rawRequested = manifestLimits?.cpuMs;
-  const requested =
-    typeof rawRequested === 'number' && Number.isSafeInteger(rawRequested) && rawRequested >= 1
-      ? rawRequested
-      : undefined;
-  const max = planLimits.maxCpuMsPerRequest;
-  const cpuMs =
-    requested !== undefined
-      ? max > 0
-        ? Math.min(requested, max)
-        : requested
-      : planLimits.cpuMsPerRequest > 0
-        ? planLimits.cpuMsPerRequest
-        : undefined;
-  const subRequests =
-    planLimits.subRequestsPerInvocation > 0 ? planLimits.subRequestsPerInvocation : undefined;
-  if (!cpuMs && !subRequests) {
-    return null;
-  }
-  return {
-    ...(cpuMs ? { cpuMs } : {}),
-    ...(subRequests ? { subRequests } : {}),
-  };
 }
 
 export function buildRoutingJson(opts: {
@@ -288,6 +261,7 @@ export function buildRoutingJson(opts: {
   hasCrons?: boolean;
   assetManifestId?: string;
   assetConfig?: AssetConfig;
+  zeroTrust?: ProjectZeroTrustRouting | null;
 }): string {
   const { manifest } = opts;
   return JSON.stringify({
@@ -314,6 +288,7 @@ export function buildRoutingJson(opts: {
     ...(opts.hasCrons ? { hasCrons: true } : {}),
     ...(opts.assetManifestId ? { assetManifestId: opts.assetManifestId } : {}),
     ...(opts.assetConfig ? { assetConfig: opts.assetConfig } : {}),
+    ...(opts.zeroTrust ? { zeroTrust: opts.zeroTrust } : {}),
   });
 }
 
@@ -324,6 +299,7 @@ export function buildStaticRoutingJson(opts: {
   assetConfig: AssetConfig;
   manifest: DeployManifest | null;
   suspended?: string;
+  zeroTrust?: ProjectZeroTrustRouting | null;
 }): string {
   const { manifest } = opts;
   return JSON.stringify({
@@ -341,5 +317,6 @@ export function buildStaticRoutingJson(opts: {
       ? { queryAllowlist: manifest.revalidateQueryAllowlist }
       : {}),
     ...(opts.suspended ? { suspended: opts.suspended } : {}),
+    ...(opts.zeroTrust ? { zeroTrust: opts.zeroTrust } : {}),
   });
 }

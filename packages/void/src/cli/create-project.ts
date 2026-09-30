@@ -1,6 +1,6 @@
 import { log } from '@clack/prompts';
 import { PlatformApiError, type CreateProjectResponse, type PlatformClient } from './client.ts';
-import { pc } from './output.ts';
+import { pc, sanitizeTerminalText } from './output.ts';
 import { attachSelectedPlatform, writeProjectConfig, type ProjectConfig } from './project.ts';
 import { promptProjectSlug } from './prompt.ts';
 import { inferDefaultSlug } from './resolve-project.ts';
@@ -29,6 +29,7 @@ export async function createProjectWithSlugRetry(
       log.step(`Creating project ${pc.blue(slug)}...`);
       const project = await client.createProject(slug);
       log.success(`Project created: ${pc.blue(project.slug)}`);
+      reportProjectCreationWarnings(project);
       return project;
     } catch (error) {
       if (error instanceof PlatformApiError && isRetryableCreateError(error)) {
@@ -38,6 +39,12 @@ export async function createProjectWithSlugRetry(
       }
       throw error;
     }
+  }
+}
+
+export function reportProjectCreationWarnings(project: CreateProjectResponse): void {
+  for (const warning of project.warnings ?? []) {
+    log.warn(sanitizeTerminalText(warning));
   }
 }
 

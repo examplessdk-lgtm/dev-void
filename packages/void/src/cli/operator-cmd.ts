@@ -515,8 +515,9 @@ export async function runOperatorCommand(args: OperatorArgs): Promise<void> {
     // Read once for preview and apply; the server excludes the token from audit output.
     if (
       args.tokenStdin &&
-      args.group === 'email' &&
-      (args.action === 'domain-add' || args.action === 'domain-remove')
+      ((args.group === 'email' &&
+        (args.action === 'domain-add' || args.action === 'domain-remove')) ||
+        (args.group === 'zero-trust' && args.action === 'configure'))
     ) {
       args = { ...args, body: { ...args.body, apiToken: await readOperatorApiTokenStdin() } };
     }

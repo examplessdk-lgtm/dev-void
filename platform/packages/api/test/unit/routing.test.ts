@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vite-plus/test';
+import { beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 import * as dbModule from '../../src/db.ts';
 import {
   applyRoutingSuspension,
@@ -13,6 +13,7 @@ import {
 } from '../../src/routing.ts';
 import { PLAN_LIMITS, type PlanLimits } from '../../src/tiers.ts';
 import type { DeployManifest } from '../../src/types.ts';
+import * as zeroTrust from '../../src/zero-trust/service.ts';
 
 function createKvStore(initial: Record<string, string> = {}): {
   store: Map<string, string>;
@@ -73,6 +74,63 @@ describe('resolveRoutingUndo', () => {
     expect(resolveRoutingUndo('{"deploymentId":"c"}', '{"deploymentId":"b"}', 'old').restore).toBe(
       false,
     );
+  });
+
+  const oldProtection = {
+    teamDomain: 'company.cloudflareaccess.com',
+    audiences: [{ hostname: '*.apps.example.com', audience: 'old-audience' }],
+  };
+  const newProtection = {
+    teamDomain: 'company.cloudflareaccess.com',
+    audiences: [{ hostname: '*.apps.example.com', audience: 'new-audience' }],
+  };
+
+  it.each([
+    { change: 'addition', before: undefined, after: newProtection },
+    { change: 'removal', before: oldProtection, after: undefined },
+    { change: 'audience replacement', before: oldProtection, after: newProtection },
+  ])('preserves Zero Trust $change when restoring the prior route', ({ before, after }) => {
+    const result = resolveRoutingUndo(
+      JSON.stringify({ deploymentId: 'b', zeroTrust: after, suspended: 'admin_suspended' }),
+      JSON.stringify({ deploymentId: 'b', zeroTrust: before }),
+      JSON.stringify({ deploymentId: 'a', zeroTrust: before }),
+    );
+    expect(result.restore).toBe(true);
+    expect(JSON.parse(result.value!)).toEqual({
+      deploymentId: 'a',
+      ...(after ? { zeroTrust: after } : {}),
+      suspended: 'admin_suspended',
+    });
+  });
+
+  it.each([
+    { workerName: 'new-worker' },
+    { staticDeploymentId: 'new-static-deployment' },
+    { version: 'new-deployment' },
+  ])('does not overwrite newer deployment fields %j when protection also changes', (newFields) => {
+    const written = {
+      workerName: 'attempted-worker',
+      staticDeploymentId: 'attempted-static-deployment',
+      version: 'attempted-deployment',
+      zeroTrust: oldProtection,
+    };
+    expect(
+      resolveRoutingUndo(
+        JSON.stringify({ ...written, ...newFields, zeroTrust: newProtection }),
+        JSON.stringify(written),
+        '{"workerName":"previous-worker"}',
+      ).restore,
+    ).toBe(false);
+  });
+
+  it('removes a failed first-deployment route even when its protection changed', () => {
+    expect(
+      resolveRoutingUndo(
+        JSON.stringify({ workerName: 'attempted-worker', zeroTrust: newProtection }),
+        JSON.stringify({ workerName: 'attempted-worker' }),
+        null,
+      ),
+    ).toEqual({ restore: true, value: null });
   });
 });
 
@@ -369,6 +427,10 @@ describe('applyRoutingSuspension', () => {
 });
 
 describe('setProjectsRoutingSuspension', () => {
+  beforeEach(() => {
+    vi.spyOn(zeroTrust, 'resolveProjectZeroTrustRoutingForPublication').mockResolvedValue(null);
+  });
+
   it('reads domains only after acquiring the project lock', async () => {
     const events: Array<string> = [];
     const { kv } = createKvStore({

@@ -66,7 +66,8 @@ export const platformAccessProtection: MiddlewareHandler<ApiEnv> = async (contex
         ((path === '/health' && method === 'GET') ||
           (path === '/internal/platform/sandbox-drain' && method === 'GET') ||
           (path === '/internal/platform/email-bootstrap' && method === 'POST') ||
-          (path === '/internal/platform/domain-preflight' && method === 'POST')))
+          (path === '/internal/platform/domain-preflight' && method === 'POST') ||
+          (path === '/internal/platform/domain-activate' && method === 'POST')))
     ) {
       return next();
     }

@@ -61,13 +61,97 @@ describe('operator argument and help coverage', () => {
       const parameters = (command.positional ?? []).map((name) =>
         name === 'type' ? 'email' : `${name}-value`,
       );
-      const result = parsePlatformArgs([command.group, command.action, ...parameters]);
+      const configureFlags =
+        command.group === 'zero-trust' && command.action === 'configure'
+          ? [
+              '--account',
+              'account-1',
+              '--identity-providers',
+              'idp-1',
+              '--policies',
+              'policy-1',
+              '--existing-projects',
+              'public',
+              '--token-stdin',
+            ]
+          : [];
+      const result = parsePlatformArgs([
+        command.group,
+        command.action,
+        ...parameters,
+        ...configureFlags,
+      ]);
       expect(result).toMatchObject({
         subcommand: 'operator',
         group: command.group,
         action: command.action,
       });
     }
+  });
+  it('parses Zero Trust configuration and project overrides without accepting a token in argv', () => {
+    expect(
+      parseOperatorArgs([
+        'zero-trust',
+        'configure',
+        '--account',
+        'account-1',
+        '--identity-providers',
+        'idp-1,idp-2',
+        '--policies',
+        'policy-1, policy-2',
+        '--existing-projects',
+        'public',
+        '--protect-new-projects',
+        '--token-stdin',
+      ]),
+    ).toMatchObject({
+      method: 'POST',
+      path: '/zero-trust/configure',
+      tokenStdin: true,
+      body: {
+        accountId: 'account-1',
+        identityProviderIds: ['idp-1', 'idp-2'],
+        policyIds: ['policy-1', 'policy-2'],
+        existingProjects: 'public',
+        protectNewProjects: true,
+      },
+    });
+    expect(parseOperatorArgs(['zero-trust', 'project-enable', 'project/id'])).toMatchObject({
+      path: '/zero-trust/projects/project%2Fid',
+      body: { protected: true },
+    });
+    expect(parseOperatorArgs(['zero-trust', 'project-disable', 'project/id'])).toMatchObject({
+      body: { protected: false },
+    });
+    expect(() =>
+      parseOperatorArgs([
+        'zero-trust',
+        'configure',
+        '--account',
+        'account-1',
+        '--identity-providers',
+        'idp-1',
+        '--policies',
+        'policy-1',
+        '--existing-projects',
+        'public',
+      ]),
+    ).toThrow('requires --token-stdin');
+    expect(() =>
+      parseOperatorArgs([
+        'zero-trust',
+        'configure',
+        '--account',
+        'account-1',
+        '--identity-providers',
+        'idp-1',
+        '--policies',
+        'policy-1',
+        '--existing-projects',
+        'invalid',
+        '--token-stdin',
+      ]),
+    ).toThrow('--existing-projects must be protected or public');
   });
   it('accepts explicit flags before the operator group and encodes IDs', () => {
     expect(

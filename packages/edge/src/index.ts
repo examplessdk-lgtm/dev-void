@@ -1,3 +1,4 @@
+export type { ProjectZeroTrustRouting } from './access.ts';
 export {
   applyHeaderRules,
   parseClearSiteData,

@@ -32,7 +32,9 @@ import {
   projects,
   projectMigrations,
   projectMembers,
+  projectZeroTrust,
   projectSecrets,
+  platformSettings,
   users,
 } from '../../src/schema.ts';
 import {
@@ -562,6 +564,82 @@ describe('POST /projects/:id/deploy', () => {
       limits: { cpuMs: 10, subRequests: 50 },
     });
   });
+
+  it.each([
+    { backend: 'worker' as const, slug: 'zero-trust-cutover-worker' },
+    { backend: 'static' as const, slug: 'zero-trust-cutover-static' },
+  ])(
+    'publishes the Zero Trust state committed before the $backend cutover lock',
+    async ({ backend, slug }) => {
+      const user = await createTestUser(env.db, `owner-${backend}`);
+      const project = await createTestProject(env.db, user.id, slug);
+      mockCfApi();
+
+      await env.db.insert(platformSettings).values({
+        key: 'zeroTrust.configuration',
+        value: {
+          version: 1,
+          revision: 1,
+          status: 'ready',
+          enabled: true,
+          protectNewProjects: true,
+          accountId: env.CF_ACCOUNT_ID,
+          teamDomain: 'https://company.cloudflareaccess.com',
+          identityProviderIds: ['idp-1'],
+          policyIds: ['policy-1'],
+          credential: { ciphertext: 'unused', iv: 'unused', keyVersion: 'v1' },
+          wildcardApplication: {
+            id: 'access-wildcard',
+            name: 'void-test-projects',
+            audience: 'access-audience',
+            destinations: ['*.void.app'],
+          },
+          lastError: null,
+          updatedAt: new Date().toISOString(),
+        },
+      });
+      await env.db.insert(projectZeroTrust).values({
+        project_id: project.id,
+        desired_protected: true,
+        effective_protected: false,
+        state: 'reconciling',
+      });
+
+      let protectionCommitted = false;
+      const cronScheduler = {
+        idFromName: (name: string) => ({ toString: () => name }),
+        get: () => ({
+          fetch: async (request: Request) => {
+            if (new URL(request.url).pathname === '/snapshot' && !protectionCommitted) {
+              await env.db
+                .update(projectZeroTrust)
+                .set({ effective_protected: true, state: 'protected' })
+                .where(eq(projectZeroTrust.project_id, project.id));
+              protectionCommitted = true;
+              return Response.json({ state: null });
+            }
+            return Response.json({ ok: true });
+          },
+        }),
+      } as unknown as DurableObjectNamespace;
+      const testEnv = { ...env, CRON_SCHEDULER: cronScheduler };
+      const request =
+        backend === 'static'
+          ? await buildStaticDeployRequest(env, project.id, user.jwt, { type: 'static' })
+          : await buildDeployRequest(env, project.id, user.jwt);
+
+      const response = await app.fetch(request, testEnv);
+      expect(response.status).toBe(200);
+      expect(parseDeployStream(await response.text()).at(-1)).toMatchObject({ event: 'done' });
+      expect(protectionCommitted).toBe(true);
+      expect(await env.ROUTING.get(project.slug, 'json')).toMatchObject({
+        zeroTrust: {
+          teamDomain: 'https://company.cloudflareaccess.com',
+          audiences: [{ hostname: '*.void.app', audience: 'access-audience' }],
+        },
+      });
+    },
+  );
 
   it.each([
     { notFoundHandling: 'single-page-application', framework: undefined, type: 'void' },

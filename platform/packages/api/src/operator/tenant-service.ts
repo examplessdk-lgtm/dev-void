@@ -70,6 +70,10 @@ import {
 } from '../suspension.ts';
 import { getCurrentBillingPeriodStart, PLAN_LIMITS, type PlanId } from '../tiers.ts';
 import type { DeployManifest, Project, User } from '../types.ts';
+import {
+  resolveProjectZeroTrustRoutingForPublication,
+  withProjectZeroTrustRouting,
+} from '../zero-trust/service.ts';
 import { OperatorError, preview } from './common.ts';
 
 type Page = { page: number; limit: number; offset: number };
@@ -671,6 +675,7 @@ async function republishProjectOwnerState(
       manifest = JSON.parse(activeDeployment.manifest) as DeployManifest;
     }
     const dispatchLimits = computeDispatchLimits(PLAN_LIMITS[owner.plan], manifest?.limits);
+    const protection = await resolveProjectZeroTrustRoutingForPublication(tx, project.id);
     for (const key of [project.slug, ...domains.map((domain) => `domain:${domain.hostname}`)]) {
       const raw = await context.env.ROUTING.get(key);
       if (!raw) {
@@ -691,7 +696,10 @@ async function republishProjectOwnerState(
       } else {
         delete entry.suspended;
       }
-      await context.env.ROUTING.put(key, JSON.stringify(entry));
+      await context.env.ROUTING.put(
+        key,
+        withProjectZeroTrustRouting(JSON.stringify(entry), protection),
+      );
     }
     await context.env.ROUTING.put(
       projectAccountKey(project.id),

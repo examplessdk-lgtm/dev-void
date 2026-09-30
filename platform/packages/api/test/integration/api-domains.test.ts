@@ -17,8 +17,15 @@ import {
 import type { ApiEnv } from '../../src/env.ts';
 import app, { scheduled, cleanupStalePendingDomains, FAST_CRON } from '../../src/index.ts';
 import { tryActivateDomain } from '../../src/provisioning/activate-domain.ts';
-import { domains, projectMembers, users } from '../../src/schema.ts';
+import {
+  domains,
+  platformSettings,
+  projectMembers,
+  projectZeroTrust,
+  users,
+} from '../../src/schema.ts';
 import type { Domain, Project } from '../../src/types.ts';
+import { configurePlatformZeroTrust } from '../../src/zero-trust/service.ts';
 import {
   setupEnv,
   teardownEnv,
@@ -28,6 +35,7 @@ import {
   mockCfApi,
   cfSuccess,
   cfError,
+  captureQueries,
   type TestEnv,
 } from './helpers.ts';
 
@@ -209,6 +217,70 @@ describe('POST /projects/:id/domains', () => {
       fetchMock.mock.calls.filter(
         ([url, init]) =>
           String(url).includes('/custom_hostnames/ch-access-race') &&
+          (init as RequestInit | undefined)?.method === 'DELETE',
+      ),
+    ).toHaveLength(1);
+  });
+
+  it('compensates a protected-project create that loses the final domain-limit race', async () => {
+    const user = await createTestUser(env.db, 'domain-limit-owner');
+    const project = await createTestProject(env.db, user.id, 'domain-limit-race');
+    await env.db.insert(projectZeroTrust).values({
+      project_id: project.id,
+      desired_protected: true,
+      effective_protected: true,
+      state: 'protected',
+    });
+    await env.db.insert(domains).values(
+      Array.from({ length: 99 }, (_, index) => ({
+        id: `dom_limit_${index}`,
+        project_id: project.id,
+        hostname: `limit-${index}.example.com`,
+        cf_hostname_id: `ch-limit-${index}`,
+        status: 'active' as const,
+      })),
+    );
+    const fetchMock = mockCfApi({
+      createCustomHostname: async () => {
+        await env.db.insert(domains).values({
+          id: 'dom_limit_winner',
+          project_id: project.id,
+          hostname: 'limit-winner.example.com',
+          cf_hostname_id: 'ch-limit-winner',
+          status: 'active',
+        });
+        return cfSuccess({
+          id: 'ch-limit-loser',
+          hostname: 'limit-loser.example.com',
+          status: 'pending',
+          ssl: { status: 'pending_validation', method: 'http', type: 'dv' },
+        });
+      },
+    });
+
+    const response = await app.fetch(
+      new Request(`http://localhost/projects/${project.id}/domains`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${user.jwt}`,
+        },
+        body: JSON.stringify({ hostname: 'limit-loser.example.com' }),
+      }),
+      env,
+    );
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({
+      error: 'Protected projects support at most 100 custom domains',
+    });
+    expect(
+      await env.db.select().from(domains).where(eq(domains.project_id, project.id)),
+    ).toHaveLength(100);
+    expect(
+      fetchMock.mock.calls.filter(
+        ([url, init]) =>
+          String(url).includes('/custom_hostnames/ch-limit-loser') &&
           (init as RequestInit | undefined)?.method === 'DELETE',
       ),
     ).toHaveLength(1);
@@ -1650,8 +1722,10 @@ describe('scheduled() — stale pending domain janitor', () => {
       status: 'pending',
     });
 
-    const controller = { scheduledTime: nowMs } as ScheduledController;
-    await scheduled(controller, makeBindings(env), mockCtx);
+    const { queries } = await captureQueries(env.db, () =>
+      cleanupStalePendingDomains(makeBindings(env), env.db, nowMs),
+    );
+    expect(queries.some((query) => /from\s+"?projects"?.*for update/i.test(query))).toBe(true);
 
     // Stale row is gone.
     const [staleRow] = await env.db.select().from(domains).where(eq(domains.id, 'dom_stale'));
@@ -1705,6 +1779,131 @@ describe('scheduled() — stale pending domain janitor', () => {
       return url.includes('/custom_hostnames/') && init?.method === 'DELETE';
     });
     expect(customHostnameDeletes).toHaveLength(0);
+  });
+
+  it('removes a deleted stale domain from protected Zero Trust destinations', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'janitor-zero-trust');
+    const applications = new Map<string, Record<string, unknown>>();
+    let nextApplication = 1;
+    let customHostnameStatus: 'active' | 'pending' = 'active';
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const url = new URL(input.toString());
+        if (url.pathname.includes('/custom_hostnames/')) {
+          if (init?.method === 'DELETE') {
+            return cfSuccess(null);
+          }
+          return cfSuccess({
+            id: 'ch-janitor-zero-trust',
+            hostname: 'stale-protected.example.com',
+            status: customHostnameStatus,
+            ssl: {
+              status: customHostnameStatus === 'active' ? 'active' : 'pending_validation',
+              method: 'http',
+              type: 'dv',
+            },
+          });
+        }
+        const path = url.pathname.split('/access/')[1] ?? '';
+        if (path === 'organizations') {
+          return cfSuccess({ auth_domain: 'company.cloudflareaccess.com' });
+        }
+        if (path === 'identity_providers/idp-1') {
+          return cfSuccess({ id: 'idp-1', name: 'Company SSO' });
+        }
+        if (path === 'policies/policy-1') {
+          return cfSuccess({
+            id: 'policy-1',
+            decision: 'allow',
+            include: [{ email_domain: { domain: 'example.com' } }],
+          });
+        }
+        if (path === 'apps' && init?.method === 'POST') {
+          const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+          const id = `app-${nextApplication++}`;
+          const application = { ...body, id, aud: `aud-${id}` };
+          applications.set(id, application);
+          return cfSuccess(application);
+        }
+        if (path === 'apps') {
+          return cfSuccess([...applications.values()]);
+        }
+        const match = /^apps\/([^/]+)$/.exec(path);
+        const applicationId = match?.[1];
+        if (applicationId && init?.method === 'PUT') {
+          const previous = applications.get(applicationId);
+          const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+          const application = { ...body, id: applicationId, aud: previous?.aud };
+          applications.set(applicationId, application);
+          return cfSuccess(application);
+        }
+        if (applicationId && init?.method === 'DELETE') {
+          applications.delete(applicationId);
+          return cfSuccess({ id: applicationId });
+        }
+        if (applicationId) {
+          return cfSuccess(applications.get(applicationId));
+        }
+        throw new Error(`unexpected Cloudflare request: ${url}`);
+      }),
+    );
+    const bindings = {
+      ...makeBindings(env),
+      SITE_DOMAIN: 'apps.example.com',
+      PLATFORM_INSTALLATION_ID: 'installation-test',
+    } as ApiEnv['Bindings'];
+
+    await configurePlatformZeroTrust(bindings, env.db, {
+      accountId: env.CF_ACCOUNT_ID,
+      apiToken: 'access-management-token',
+      identityProviderIds: ['idp-1'],
+      policyIds: ['policy-1'],
+      protectNewProjects: true,
+      existingProjects: 'protected',
+    });
+
+    const nowMs = Date.now();
+    await env.db.insert(domains).values({
+      id: 'dom_janitor_zero_trust',
+      project_id: project.id,
+      hostname: 'stale-protected.example.com',
+      cf_hostname_id: 'ch-janitor-zero-trust',
+      status: 'pending',
+      created_at: new Date(nowMs - 8 * 24 * 60 * 60 * 1000).toISOString(),
+    });
+    const [pendingDomain] = await env.db
+      .select()
+      .from(domains)
+      .where(eq(domains.id, 'dom_janitor_zero_trust'));
+
+    const activation = await tryActivateDomain(
+      bindings,
+      env.db,
+      pendingDomain as unknown as Domain,
+      project as unknown as Project,
+    );
+    expect(activation).toMatchObject({ activated: false, awaitingDeployment: true });
+    expect(
+      [...applications.values()].some((application) =>
+        JSON.stringify(application.destinations).includes('stale-protected.example.com'),
+      ),
+    ).toBe(true);
+
+    customHostnameStatus = 'pending';
+    await cleanupStalePendingDomains(bindings, env.db, nowMs);
+
+    const [deletedDomain] = await env.db
+      .select()
+      .from(domains)
+      .where(eq(domains.id, 'dom_janitor_zero_trust'));
+    expect(deletedDomain).toBeUndefined();
+    expect(
+      [...applications.values()].some((application) =>
+        JSON.stringify(application.destinations).includes('stale-protected.example.com'),
+      ),
+    ).toBe(false);
   });
 
   it('does NOT delete a stale row that CF reports active (verified after day 7)', async () => {
@@ -1772,11 +1971,31 @@ describe('scheduled() — stale pending domain janitor', () => {
       created_at: eightDaysAgo,
     });
 
+    let transactionDepth = 0;
+    const originalTransaction = env.db.transaction.bind(env.db);
+    vi.spyOn(env.db, 'transaction').mockImplementation(async (...args) => {
+      transactionDepth += 1;
+      try {
+        return await originalTransaction(...args);
+      } finally {
+        transactionDepth -= 1;
+      }
+    });
+    let routeDeletedUnderFence = false;
+    const originalRoutingDelete = env.ROUTING.delete.bind(env.ROUTING);
+    vi.spyOn(env.ROUTING, 'delete').mockImplementation(async (key) => {
+      if (key === 'domain:cf-gone.example.com') {
+        routeDeletedUnderFence = transactionDepth > 0;
+      }
+      return originalRoutingDelete(key);
+    });
+
     const controller = { scheduledTime: Date.now() } as ScheduledController;
     await scheduled(controller, makeBindings(env), mockCtx);
 
     const [row] = await env.db.select().from(domains).where(eq(domains.id, 'dom_cf_gone'));
     expect(row).toBeUndefined();
+    expect(routeDeletedUnderFence).toBe(true);
 
     // No DELETE attempted — CF already reported it gone on read.
     const deletes = fetchMock.mock.calls.filter((call: Array<unknown>) => {
@@ -2039,6 +2258,49 @@ describe('scheduled() — cron-driven auto-activation reconciliation', () => {
       workerName: 'user-fast-young-activate',
       projectId: project.id,
     });
+  });
+
+  it('does not let malformed Zero Trust state starve fast domain reconciliation', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'fast-invalid-zero-trust');
+    const fetchMock = mockCfApi({
+      getCustomHostname: () =>
+        gatePassingCfHostname('ch-fast-invalid-zero-trust', 'invalid-zero-trust.example.com'),
+    });
+    await env.db.insert(platformSettings).values({
+      key: 'zeroTrust.configuration',
+      value: { version: 999 },
+    });
+    await env.db.insert(domains).values({
+      id: 'dom_fast_invalid_zero_trust',
+      project_id: project.id,
+      hostname: 'invalid-zero-trust.example.com',
+      cf_hostname_id: 'ch-fast-invalid-zero-trust',
+      status: 'pending',
+      created_at: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
+    });
+    await env.ROUTING.put(
+      project.slug,
+      JSON.stringify({ workerName: 'user-fast-invalid-zero-trust', projectId: project.id }),
+    );
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await scheduled(
+      { scheduledTime: Date.now(), cron: FAST_CRON } as ScheduledController,
+      makeBindings(env),
+      mockCtx,
+    );
+
+    const [row] = await env.db
+      .select({ status: domains.status })
+      .from(domains)
+      .where(eq(domains.id, 'dom_fast_invalid_zero_trust'));
+    expect(row?.status).toBe('pending');
+    expect(
+      fetchMock.mock.calls.some(([input]) =>
+        String(input).includes('/custom_hostnames/ch-fast-invalid-zero-trust'),
+      ),
+    ).toBe(true);
   });
 
   it('fast tier (*/2) ignores an old pending domain (created >30 min ago)', async () => {

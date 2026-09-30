@@ -20,6 +20,11 @@ import {
 import { getPlatformDisplayName } from '../../platform-identity.ts';
 import { deliverInvitation } from '../../routes/project-team.ts';
 import type { ProjectMemberRole } from '../../types.ts';
+import {
+  reconcileProjectZeroTrust,
+  setProjectZeroTrustProtection,
+  ZeroTrustUnavailableError,
+} from '../../zero-trust/service.ts';
 import { renderFateDetailPage, renderFateListPage } from '../fate/render.ts';
 import { renderOperationError } from '../operation-error.tsx';
 import { renderAdminPage } from '../react/server.ts';
@@ -60,6 +65,18 @@ function teamMutationError(error: unknown): never {
     throw new OperatorError(error.status, messages[error.reason] ?? error.message);
   }
   throw error;
+}
+
+function projectZeroTrustError(error: unknown): never {
+  if (error instanceof ZeroTrustUnavailableError) {
+    throw new OperatorError(error.status, error.message, 'zero_trust_unavailable');
+  }
+  console.error('[zero-trust] admin project operation failed', error);
+  throw new OperatorError(
+    502,
+    'Cloudflare Zero Trust reconciliation failed. Review the project state and retry.',
+    'zero_trust_reconciliation_failed',
+  );
 }
 
 // GET /projects
@@ -202,6 +219,54 @@ app.post('/:id/team/invitations/:invitationId/revoke', async (context) => {
       } catch (error) {
         teamMutationError(error);
       }
+    },
+  );
+});
+
+app.post('/:id/zero-trust', async (context) => {
+  const projectId = context.req.param('id');
+  const body = await context.req.parseBody();
+  if (body.protected !== 'true' && body.protected !== 'false') {
+    throw new OperatorError(400, 'Project protection must be true or false.', 'invalid_argument');
+  }
+  const protectedProject = body.protected === 'true';
+  return executeAuditedMutation(
+    context,
+    operatorAuditIntent(`zero-trust/projects/${projectId}`, { protected: protectedProject }),
+    async () => {
+      try {
+        await setProjectZeroTrustProtection(
+          context.env,
+          context.get('db'),
+          projectId,
+          protectedProject,
+        );
+      } catch (error) {
+        projectZeroTrustError(error);
+      }
+      return {
+        response: context.redirect(`/admin/projects/${encodeURIComponent(projectId)}`),
+        succeeded: true,
+      };
+    },
+  );
+});
+
+app.post('/:id/zero-trust/reconcile', async (context) => {
+  const projectId = context.req.param('id');
+  return executeAuditedMutation(
+    context,
+    operatorAuditIntent(`zero-trust/projects/${projectId}/reconcile`),
+    async () => {
+      try {
+        await reconcileProjectZeroTrust(context.env, context.get('db'), projectId);
+      } catch (error) {
+        projectZeroTrustError(error);
+      }
+      return {
+        response: context.redirect(`/admin/projects/${encodeURIComponent(projectId)}`),
+        succeeded: true,
+      };
     },
   );
 });

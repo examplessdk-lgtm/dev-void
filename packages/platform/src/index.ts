@@ -86,6 +86,7 @@ export {
   platformProjectHostname,
   platformProjectHostnames,
   platformProjectIngressName,
+  platformProjectIngressPrefix,
   platformProjectWorkersDevHostname,
   platformWorkersDevAliasKey,
   readPlatformApplication,

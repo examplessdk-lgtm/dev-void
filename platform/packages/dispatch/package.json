@@ -11,7 +11,8 @@
     "@void/deploy-core": "workspace:*",
     "@void/edge": "workspace:*",
     "@void/isr": "workspace:*",
-    "@voidcloud/api": "workspace:*"
+    "@voidcloud/api": "workspace:*",
+    "jose": "6.2.12"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "catalog:platform",

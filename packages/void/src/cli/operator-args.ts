@@ -117,6 +117,72 @@ export const operatorCommands: Array<OperatorCommand> = [
     description: 'Transfer project ownership to another registered user',
     path: '/projects/:id/owner',
     positional: ['id', 'userId'],
+    usage: ['void platform project owner <project-id> <user-id> [options]'],
+    method: 'POST',
+  },
+  {
+    group: 'zero-trust',
+    action: 'status',
+    description: 'Inspect platform Zero Trust configuration, health, and project state counts',
+    path: '/zero-trust',
+  },
+  {
+    group: 'zero-trust',
+    action: 'configure',
+    description: 'Configure and reconcile project Zero Trust protection',
+    path: '/zero-trust/configure',
+    values: {
+      account: 'Cloudflare account ID',
+      'identity-providers': 'Comma-separated Access identity provider IDs',
+      policies: 'Comma-separated reusable Access policy IDs',
+      'existing-projects': 'Initial state: protected or public',
+    },
+    booleans: ['token-stdin', 'protect-new-projects'],
+    method: 'POST',
+  },
+  {
+    group: 'zero-trust',
+    action: 'reconcile',
+    description: 'Repair platform and project Access configuration drift',
+    path: '/zero-trust/reconcile',
+    method: 'POST',
+  },
+  {
+    group: 'zero-trust',
+    action: 'disable',
+    description: 'Remove Void-managed Access applications and make projects public',
+    path: '/zero-trust/disable',
+    method: 'POST',
+  },
+  {
+    group: 'zero-trust',
+    action: 'project-status',
+    description: 'Inspect one project Zero Trust override and effective state',
+    path: '/zero-trust/projects/:id',
+    positional: ['id'],
+  },
+  {
+    group: 'zero-trust',
+    action: 'project-enable',
+    description: 'Protect one project, overriding the platform default',
+    path: '/zero-trust/projects/:id',
+    positional: ['id'],
+    method: 'POST',
+  },
+  {
+    group: 'zero-trust',
+    action: 'project-disable',
+    description: 'Make one project public, overriding the platform default',
+    path: '/zero-trust/projects/:id',
+    positional: ['id'],
+    method: 'POST',
+  },
+  {
+    group: 'zero-trust',
+    action: 'project-reconcile',
+    description: 'Repair Access configuration drift for one project',
+    path: '/zero-trust/projects/:id/reconcile',
+    positional: ['id'],
     method: 'POST',
   },
   {
@@ -471,7 +537,16 @@ export function parseOperatorArgs(args: Array<string>): OperatorArgs {
   const positional: Array<string> = [];
   const values: Record<string, string> = {};
   const flags = new Set<string>();
-  const booleanFlags = new Set(['json', 'plan', 'yes', 'follow', 'token-stdin', 'force', 'ended']);
+  const booleanFlags = new Set([
+    'json',
+    'plan',
+    'yes',
+    'follow',
+    'token-stdin',
+    'force',
+    'ended',
+    ...operatorCommands.flatMap((command) => command.booleans ?? []),
+  ]);
   for (let index = 0; index < args.length; index++) {
     const arg = args[index]!;
     if (!arg.startsWith('-')) {
@@ -647,6 +722,40 @@ export function parseOperatorArgs(args: Array<string>): OperatorArgs {
     if (name !== 'token-stdin' && flags.has(name)) {
       parsed.body[name] = true;
     }
+  }
+  if (group === 'zero-trust' && action === 'configure') {
+    if (!parsed.tokenStdin) {
+      throw new Error('platform: zero-trust configure requires --token-stdin.');
+    }
+    const accountId = values.account;
+    const identityProviderIds = values['identity-providers']
+      ?.split(',')
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+    const policyIds = values.policies
+      ?.split(',')
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+    const existingProjects = values['existing-projects'];
+    if (!accountId || !identityProviderIds?.length || !policyIds?.length || !existingProjects) {
+      throw new Error(
+        'platform: zero-trust configure requires --account, --identity-providers, --policies, and --existing-projects.',
+      );
+    }
+    if (existingProjects !== 'protected' && existingProjects !== 'public') {
+      throw new Error('platform: --existing-projects must be protected or public.');
+    }
+    parsed.body = {
+      accountId,
+      identityProviderIds,
+      policyIds,
+      existingProjects,
+      protectNewProjects: flags.has('protect-new-projects'),
+    };
+  } else if (group === 'zero-trust' && action === 'project-enable') {
+    parsed.body.protected = true;
+  } else if (group === 'zero-trust' && action === 'project-disable') {
+    parsed.body.protected = false;
   }
   return parsed;
 }

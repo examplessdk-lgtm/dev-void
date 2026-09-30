@@ -5,6 +5,7 @@ import app from '../../src/index.ts';
 import {
   deployments,
   domains,
+  platformSettings,
   projectAccessEvents,
   projectDeployCredentials,
   projectInvitations,
@@ -12,6 +13,7 @@ import {
   projectOwnershipPeriods,
   projects,
   projectSecrets,
+  projectZeroTrust,
   resources,
   users,
 } from '../../src/schema.ts';
@@ -248,6 +250,119 @@ describe('project route membership capabilities', () => {
         "This project's owner account is suspended. Ask the owner to contact the platform administrator to restore access.",
     });
     expect(await projectState()).toEqual(before);
+  });
+
+  it('lets readers inspect Zero Trust while reserving overrides for project admins and owners', async () => {
+    const owner = await createTestUser(env.db, 'zero-trust-owner');
+    const reader = await createTestUser(env.db, 'zero-trust-reader');
+    const collaborator = await createTestUser(env.db, 'zero-trust-collaborator');
+    const admin = await createTestUser(env.db, 'zero-trust-admin');
+    const project = await createTestProject(env.db, owner.id, 'zero-trust-roles');
+    await env.db.insert(projectMembers).values([
+      {
+        project_id: project.id,
+        user_id: reader.id,
+        role: 'reader',
+        added_by_user_id: owner.id,
+      },
+      {
+        project_id: project.id,
+        user_id: collaborator.id,
+        role: 'collaborator',
+        added_by_user_id: owner.id,
+      },
+      {
+        project_id: project.id,
+        user_id: admin.id,
+        role: 'admin',
+        added_by_user_id: owner.id,
+      },
+    ]);
+    await env.db.insert(projectZeroTrust).values({
+      project_id: project.id,
+      desired_protected: true,
+      effective_protected: true,
+      state: 'protected',
+      protected_application_id: 'access-app-internal',
+      protected_application_name: 'void-internal-name',
+      protected_application_audience: 'internal-audience',
+    });
+
+    const status = await app.fetch(authed(`/projects/${project.id}/zero-trust`, reader.jwt), env);
+    expect(status.status).toBe(200);
+    expect(await status.json()).toEqual({
+      available: false,
+      platformStatus: 'not_configured',
+      protectNewProjects: false,
+      project: {
+        project_id: project.id,
+        desired_protected: true,
+        effective_protected: true,
+        state: 'protected',
+        last_error: null,
+        updated_at: expect.any(String),
+      },
+    });
+
+    const collaboratorUpdate = await app.fetch(
+      new Request(`http://localhost/projects/${project.id}/zero-trust`, {
+        method: 'PUT',
+        headers: {
+          Authorization: `Bearer ${collaborator.jwt}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ protected: true }),
+      }),
+      env,
+    );
+    expect(collaboratorUpdate.status).toBe(403);
+
+    const adminUpdate = await app.fetch(
+      new Request(`http://localhost/projects/${project.id}/zero-trust`, {
+        method: 'PUT',
+        headers: {
+          Authorization: `Bearer ${admin.jwt}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ protected: true }),
+      }),
+      env,
+    );
+    expect(adminUpdate.status).toBe(409);
+    expect(await adminUpdate.json()).toEqual({
+      error: 'Project Zero Trust is not ready on this platform.',
+    });
+  });
+
+  it('reports malformed saved Zero Trust configuration without exposing a server error', async () => {
+    const owner = await createTestUser(env.db, 'zero-trust-invalid-owner');
+    const project = await createTestProject(env.db, owner.id, 'zero-trust-invalid');
+    await env.db.insert(platformSettings).values({
+      key: 'zeroTrust.configuration',
+      value: {
+        version: 1,
+        revision: 1,
+        status: 'ready',
+        enabled: false,
+        protectNewProjects: true,
+        accountId: env.CF_ACCOUNT_ID,
+        teamDomain: 'not a URL',
+        identityProviderIds: ['idp-1'],
+        policyIds: ['policy-1'],
+        credential: { ciphertext: 'saved', iv: 'saved', keyVersion: 'v1' },
+        wildcardApplication: null,
+        operation: null,
+        lastError: null,
+        updatedAt: new Date().toISOString(),
+      },
+    });
+
+    const response = await app.fetch(authed(`/projects/${project.id}/zero-trust`, owner.jwt), env);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      available: false,
+      platformStatus: 'invalid_configuration',
+    });
   });
 
   it('lists shared projects with role and owner and grants readers view routes', async () => {

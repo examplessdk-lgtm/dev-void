@@ -20,6 +20,7 @@ import adminProjects from './admin/routes/projects.tsx';
 import adminSignupControl from './admin/routes/signup-control.tsx';
 import { dashboardHandler, adminSystem } from './admin/routes/system.tsx';
 import adminUsers from './admin/routes/users.tsx';
+import adminZeroTrust from './admin/routes/zero-trust.tsx';
 import { pendingAuthenticationSetup } from './auth/bootstrap.ts';
 import { readAuthSettings, readEnabledLoginConnections } from './auth/configuration.ts';
 import { BuildManager, BuildManagerLarge } from './build-manager.ts';
@@ -34,7 +35,7 @@ import {
   getPendingDomainsOlderThan,
   getPendingDomains,
   getPendingDomainsNewerThan,
-  deleteDomainIfPending,
+  deleteDomain,
   purgeExpiredOAuthNonces,
   purgeExpiredAuthCodes,
   failStaleDeployments,
@@ -42,6 +43,7 @@ import {
   failStaleActiveGithubActionsBuilds,
   hasQueuedContainerBuilds,
   getProject,
+  getDomain,
   getOpenProjectOwnershipPeriodsByProjectIds,
   getProjectsByIds,
   getUsersByIds,
@@ -65,6 +67,8 @@ import { authMiddleware } from './middleware/auth.ts';
 import { platformAccessProtection } from './middleware/platform-access.ts';
 import { operatorApi } from './operator/index.ts';
 import { sandboxDrainStatus } from './operator/sandbox-operations.ts';
+import { platformDomainActivation } from './platform-domain-activation.ts';
+import { platformDomainPreflight } from './platform-domain-preflight.ts';
 import {
   getPlatformApiUrl,
   getPlatformDisplayName,
@@ -105,6 +109,7 @@ import {
   projectTeamRoutes,
 } from './routes/project-team.ts';
 import projectTokens from './routes/project-tokens.ts';
+import projectZeroTrustRoutes from './routes/project-zero-trust.ts';
 import projects from './routes/projects.ts';
 import revalidate from './routes/revalidate.ts';
 import secrets from './routes/secrets.ts';
@@ -125,6 +130,13 @@ import type { Domain, Project } from './types.ts';
 import { ensureUsageSigningKey, USAGE_PROTOCOL_VERSION } from './usage-auth.ts';
 import { UsageCounter } from './usage-counter.ts';
 import { replayFailedWebhookDeliveries } from './webhook-replay.ts';
+import {
+  reconcilePendingProjectZeroTrust,
+  reconcileProjectZeroTrustDomains,
+  resolveProjectZeroTrustRoutingForPublication,
+  resumePlatformZeroTrustOperation,
+  withProjectZeroTrustRouting,
+} from './zero-trust/service.ts';
 
 function isSandboxDrainMaintenanceRequest(request: Request): boolean {
   const path = new URL(request.url).pathname;
@@ -173,6 +185,8 @@ const app = new Hono<ApiEnv>()
         (context.req.path === '/internal/platform/email-bootstrap' &&
           context.req.method === 'POST') ||
         (context.req.path === '/internal/platform/domain-preflight' &&
+          context.req.method === 'POST') ||
+        (context.req.path === '/internal/platform/domain-activate' &&
           context.req.method === 'POST'));
     const maintenanceSandboxDrain =
       context.env.PLATFORM_TRAFFIC_STATE === 'sandbox-drain' &&
@@ -292,6 +306,7 @@ const app = new Hono<ApiEnv>()
     );
   })
   .post('/internal/platform/domain-preflight', platformDomainPreflight)
+  .post('/internal/platform/domain-activate', platformDomainActivation)
   .post('/internal/platform/email-bootstrap', async (context) => {
     const healthProbeToken = context.env.PLATFORM_HEALTH_PROBE_TOKEN;
     if (
@@ -471,6 +486,7 @@ ${
   .route('/projects', projects)
   .route('/projects', projectTokens)
   .route('/projects', projectTeamRoutes)
+  .route('/projects', projectZeroTrustRoutes)
   .route('/projects', deploy)
   .route('/projects', deleteRoute)
   .route('/projects', revalidate)
@@ -495,6 +511,7 @@ app.get('/admin/', adminAuthMiddleware, dashboardHandler);
 app.route('/admin/users', adminUsers);
 app.route('/admin/projects', adminProjects);
 app.route('/admin/email', adminEmail);
+app.route('/admin/zero-trust', adminZeroTrust);
 app.route('/admin/builds', adminBuilds);
 app.route('/admin/deployments', adminDeployments);
 app.route('/admin/signup-control', adminSignupControl);
@@ -535,6 +552,7 @@ async function scheduled(
   env: ApiEnv['Bindings'],
   _ctx: ExecutionContext,
 ): Promise<void> {
+  env = await resolvePlatformApplicationEnvironment(env);
   if (
     env.PLATFORM_TRAFFIC_STATE === 'staging' ||
     env.PLATFORM_TRAFFIC_STATE === 'sandbox-drain' ||
@@ -549,6 +567,19 @@ async function scheduled(
   await reconcileProjectCleanupJobs(db, env).catch((error) =>
     console.error('[scheduled] project cleanup retry failed:', error),
   );
+
+  // Fast tier: a resumable Zero Trust batch owns the rest of this invocation so
+  // it stays within the per-invocation subrequest budget. A failed batch does
+  // not, so the pending-domain and email work below still runs.
+  if (controller.cron === FAST_CRON) {
+    const zeroTrustProgressed = await resumePlatformZeroTrustOperation(env, db).catch((error) => {
+      console.error('[scheduled] Zero Trust operation resume failed:', error);
+      return false;
+    });
+    if (zeroTrustProgressed) {
+      return;
+    }
+  }
 
   if (capabilities.email) {
     await reconcileEmailDestinationCleanups(db, {
@@ -575,10 +606,9 @@ async function scheduled(
     }
   }
 
-  // Fast tier (every 2 min): only reconcile recently-created pending domains
-  // (within the last 30 min) so a freshly-configured custom domain comes online
-  // quickly without the user polling. The heavier hourly maintenance does NOT
-  // run on this tick.
+  // Fast tier (every 2 min): if no Zero Trust batch consumed this invocation,
+  // reconcile recently-created pending domains (within the last 30 min). The
+  // heavier hourly maintenance does not run on this tick.
   if (controller.cron === FAST_CRON) {
     if (!capabilities.customDomains) {
       return;
@@ -605,6 +635,10 @@ async function scheduled(
       console.error('[scheduled] Sandbox controller cleanup failed:', error),
     );
   }
+
+  await reconcilePendingProjectZeroTrust(env, db).catch((error) =>
+    console.error('[scheduled] Zero Trust reconciliation failed:', error),
+  );
 
   // Auto-fail deployments stuck in active states for more than 30 minutes
   await failStaleDeployments(db)
@@ -852,6 +886,26 @@ async function reconcilePendingDomains(
   }
 }
 
+async function cleanupPendingDomainUnderProjectFence(
+  env: ApiEnv['Bindings'],
+  db: Db,
+  domain: Domain,
+  beforeDelete?: () => Promise<void>,
+): Promise<boolean> {
+  return db.transaction(async (tx) => {
+    await tx.execute(sql`SELECT id FROM projects WHERE id = ${domain.project_id} FOR UPDATE`);
+    const txDb = tx as unknown as Db;
+    const current = await getDomain(txDb, domain.id);
+    if (current?.status !== 'pending') {
+      return false;
+    }
+    await beforeDelete?.();
+    await env.ROUTING.delete(`domain:${domain.hostname}`).catch(() => {});
+    await deleteDomain(txDb, domain.id);
+    return true;
+  });
+}
+
 // Exported for direct integration testing of the janitor branch in isolation
 // from the reconcile pass (the hourly `scheduled()` runs reconcile first, which
 // would otherwise activate any gate-passing pending domain before the janitor
@@ -886,10 +940,16 @@ export async function cleanupStalePendingDomains(
       // cleanup). Nothing to revoke — fall through to drop the orphaned DB row
       // (and any stray KV) so the customer can re-add the hostname.
       if (err instanceof CloudflareApiError && err.status === 404) {
-        await env.ROUTING.delete(`domain:${domain.hostname}`).catch(() => {});
-        if (await deleteDomainIfPending(db, domain.id)) {
-          cleaned += 1;
+        if (!(await cleanupPendingDomainUnderProjectFence(env, db, domain))) {
+          continue;
         }
+        cleaned += 1;
+        await reconcileProjectZeroTrustDomains(env, db, domain.project_id).catch((error) =>
+          console.error(
+            `[scheduled] failed to reconcile Zero Trust after deleting ${domain.hostname}:`,
+            error,
+          ),
+        );
         continue;
       }
       console.error(`[scheduled] failed to read stale CF hostname for ${domain.hostname}:`, err);
@@ -927,36 +987,35 @@ export async function cleanupStalePendingDomains(
       continue;
     }
 
-    // Still genuinely pending. Claim the row FIRST via a conditional delete:
-    // if a concurrent poll has activated it, this no-ops and we skip teardown,
-    // so we never revoke the cert of a live domain.
-    if (!(await deleteDomainIfPending(db, domain.id))) {
-      continue;
-    }
-
-    // Row claimed — revoke the CF cert order (treat an already-gone 404 as
-    // success) and drop any routing entry a racing activation may have written.
-    // The DB row is already deleted, so a non-404 CF failure orphans the CF
-    // hostname (cert order stays open). Retry the DELETE ONCE to shrink that
-    // orphan window — no backoff/sleep (cron context). If the retry also fails
-    // non-404, log an error explicitly noting the orphan so ops can detect it.
-    try {
-      await deleteCustomHostname(env.CF_ZONE_ID, env.CF_API_TOKEN, domain.cf_hostname_id);
-    } catch (err) {
-      if (!(err instanceof CloudflareApiError && err.status === 404)) {
-        try {
-          await deleteCustomHostname(env.CF_ZONE_ID, env.CF_API_TOKEN, domain.cf_hostname_id);
-        } catch (retryErr) {
-          if (!(retryErr instanceof CloudflareApiError && retryErr.status === 404)) {
-            console.error(
-              `[scheduled] failed to delete stale CF hostname for ${domain.hostname} after retry — CF hostname ${domain.cf_hostname_id} is ORPHANED (DB row already removed):`,
-              retryErr,
-            );
+    // Keep the row visible until provider and routing cleanup finish so a
+    // concurrent add cannot publish a replacement that this run then removes.
+    const claimed = await cleanupPendingDomainUnderProjectFence(env, db, domain, async () => {
+      try {
+        await deleteCustomHostname(env.CF_ZONE_ID, env.CF_API_TOKEN, domain.cf_hostname_id);
+      } catch (err) {
+        if (!(err instanceof CloudflareApiError && err.status === 404)) {
+          try {
+            await deleteCustomHostname(env.CF_ZONE_ID, env.CF_API_TOKEN, domain.cf_hostname_id);
+          } catch (retryErr) {
+            if (!(retryErr instanceof CloudflareApiError && retryErr.status === 404)) {
+              console.error(
+                `[scheduled] failed to delete stale CF hostname for ${domain.hostname} after retry — CF hostname ${domain.cf_hostname_id} is ORPHANED:`,
+                retryErr,
+              );
+            }
           }
         }
       }
+    });
+    if (!claimed) {
+      continue;
     }
-    await env.ROUTING.delete(`domain:${domain.hostname}`).catch(() => {});
+    await reconcileProjectZeroTrustDomains(env, db, domain.project_id).catch((error) =>
+      console.error(
+        `[scheduled] failed to reconcile Zero Trust after deleting ${domain.hostname}:`,
+        error,
+      ),
+    );
     cleaned += 1;
   }
 
@@ -976,42 +1035,39 @@ async function processUserRollover(
   // Wrapped in try/catch so a malformed KV entry doesn't block rollover/unsuspension.
   try {
     for (const project of userProjects) {
-      const raw = await env.ROUTING.get(project.slug);
-      if (!raw) {
-        continue;
-      }
-      const routing = JSON.parse(raw);
-      if (!routing.userId) {
-        routing.userId = user.id;
-        await env.ROUTING.put(project.slug, JSON.stringify(routing));
-      }
-    }
-
-    // Also backfill domain:* entries — check all projects, not just those that needed
-    // slug backfill (slug may have been patched in a prior run before domain support).
-    const projectIds = userProjects.map((p) => p.id);
-    if (projectIds.length > 0) {
-      const domainMap = await getDomainsByProjectIds(db, projectIds);
-      for (const projectId of projectIds) {
-        const projectDomains = domainMap.get(projectId);
-        if (!projectDomains) {
-          continue;
+      await db.transaction(async (tx) => {
+        await tx.execute(sql`SELECT id FROM projects WHERE id = ${project.id} FOR UPDATE`);
+        const txDb = tx as unknown as Db;
+        const current = await getProject(txDb, project.id);
+        if (!current || current.user_id !== user.id || current.status === 'deleting') {
+          return;
         }
-        for (const domain of projectDomains) {
-          if (domain.status !== 'active') {
-            continue;
-          }
-          const raw = await env.ROUTING.get(`domain:${domain.hostname}`);
+
+        // Resolve both route keys and values behind the same fence as deploy,
+        // protection changes, domain activation, transfer, and deletion.
+        const domainMap = await getDomainsByProjectIds(txDb, [current.id]);
+        const protection = await resolveProjectZeroTrustRoutingForPublication(tx, current.id);
+        const keys = [
+          current.slug,
+          ...(domainMap.get(current.id) ?? [])
+            .filter((domain) => domain.status === 'active')
+            .map((domain) => `domain:${domain.hostname}`),
+        ];
+        for (const key of keys) {
+          const raw = await env.ROUTING.get(key);
           if (!raw) {
             continue;
           }
           const routing = JSON.parse(raw);
           if (!routing.userId) {
-            routing.userId = user.id;
-            await env.ROUTING.put(`domain:${domain.hostname}`, JSON.stringify(routing));
+            routing.userId = current.user_id;
+            await env.ROUTING.put(
+              key,
+              withProjectZeroTrustRouting(JSON.stringify(routing), protection),
+            );
           }
         }
-      }
+      });
     }
   } catch (err) {
     console.error(`[backfill] userId backfill failed for user ${user.id}:`, err);
@@ -1125,4 +1181,3 @@ export default {
     await processPlatformQueue(batch, env);
   },
 } satisfies ExportedHandler<ApiEnv['Bindings']>;
-import { platformDomainPreflight } from './platform-domain-preflight.ts';

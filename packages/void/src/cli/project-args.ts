@@ -23,6 +23,11 @@ export const projectSubcommands: Array<SubcommandDef> = [
     hint: 'list | invite | invitations | role | remove | revoke | leave | pending | accept | decline',
     description: 'Manage project members and invitations',
   },
+  {
+    name: 'zero-trust',
+    hint: 'status | enable | disable | reconcile',
+    description: 'Inspect or override Cloudflare Zero Trust protection',
+  },
   { name: 'logs', description: 'Show runtime logs from the deployed project' },
   { name: 'requests', description: 'Show request-level traffic (status, method, timing)' },
   { name: 'rollback', arg: '[deployId]', description: 'Roll back to a previous deployment' },
@@ -39,6 +44,11 @@ export type ProjectArgs =
   | { subcommand: 'status'; name: string }
   | { subcommand: 'link'; name: string }
   | { subcommand: 'list' }
+  | {
+      subcommand: 'zero-trust';
+      action: '' | 'status' | 'enable' | 'disable' | 'reconcile';
+      projectSlug: string;
+    }
   | { subcommand: 'team'; action: '' }
   | {
       subcommand: 'team';
@@ -190,6 +200,36 @@ export function parseProjectArgs(args: Array<string>): ProjectArgs {
     return parseTeamArgs(rest);
   }
 
+  if (subcommand === 'zero-trust') {
+    const [action = '', ...args] = rest;
+    if (action && !['status', 'enable', 'disable', 'reconcile'].includes(action)) {
+      throw new Error(
+        'project: Usage: void project zero-trust <status|enable|disable|reconcile> [--project <slug>].',
+      );
+    }
+    let projectSlug = '';
+    for (let index = 0; index < args.length; index++) {
+      const arg = args[index]!;
+      if (arg === '--project') {
+        const value = args[++index];
+        if (!value || value.startsWith('-')) {
+          throw new Error('project: --project requires a value.');
+        }
+        if (projectSlug) {
+          throw new Error("project: Duplicate flag '--project'.");
+        }
+        projectSlug = value;
+      } else {
+        throw new Error(`project: Unexpected argument '${arg}'.`);
+      }
+    }
+    return {
+      subcommand,
+      action: action as '' | 'status' | 'enable' | 'disable' | 'reconcile',
+      projectSlug,
+    };
+  }
+
   if (subcommand === 'logs') {
     let filter = '';
     let range = '1h';
@@ -290,7 +330,7 @@ export function parseProjectArgs(args: Array<string>): ProjectArgs {
   }
 
   throw new Error(
-    'project: Usage: void project <status|link|list|team|token|logs|requests|rollback|cancel|delete|purge-cache>.',
+    'project: Usage: void project <status|link|list|team|token|zero-trust|logs|requests|rollback|cancel|delete|purge-cache>.',
   );
 }
 

@@ -1,0 +1,94 @@
+import { intro, log, note, outro } from '@clack/prompts';
+import { getToken } from './auth.ts';
+import { PlatformClient, type ProjectZeroTrustResponse } from './client.ts';
+import { cliTitle, sanitizeTerminalText } from './output.ts';
+import type { ProjectArgs } from './project-args.ts';
+import { readProjectConfig } from './project.ts';
+import { getRequestedProjectSlug, resolveProjectBySlug } from './resolve-project.ts';
+
+type ZeroTrustArgs = Extract<ProjectArgs, { subcommand: 'zero-trust' }> & {
+  action: 'status' | 'enable' | 'disable' | 'reconcile';
+};
+
+async function resolveTarget(root: string, args: ZeroTrustArgs) {
+  const token = getToken(root);
+  if (!token) {
+    throw new Error('project: Sign in before managing Zero Trust protection.');
+  }
+  const client = new PlatformClient(token, { root });
+  const requestedSlug = getRequestedProjectSlug({ projectSlug: args.projectSlug });
+  if (requestedSlug) {
+    const project = resolveProjectBySlug(await client.listProjects(), requestedSlug);
+    if (!project) {
+      throw new Error(`project: No project found with slug '${requestedSlug}'.`);
+    }
+    return { client, projectId: project.projectId, slug: project.slug };
+  }
+  const linked = readProjectConfig(root);
+  if (!linked) {
+    throw new Error('project: No linked project. Pass --project <name> or set VOID_PROJECT.');
+  }
+  return { client, projectId: linked.projectId, slug: linked.slug };
+}
+
+function statusLines(result: ProjectZeroTrustResponse): string {
+  const project = result.project;
+  const platformStatus = sanitizeTerminalText(result.platformStatus ?? 'unknown');
+  const unavailableMessage =
+    result.platformStatus === 'invalid_configuration'
+      ? 'The platform Zero Trust configuration is invalid. Ask a platform administrator to review it.'
+      : result.platformStatus === 'configuring'
+        ? 'The platform is still applying Zero Trust configuration. A platform administrator can resume it with `void platform zero-trust reconcile`.'
+        : result.platformStatus === 'disabling'
+          ? 'The platform is disabling project Zero Trust. A platform administrator can resume it with `void platform zero-trust reconcile`.'
+          : result.platformStatus === 'error'
+            ? 'The platform Zero Trust configuration needs administrator attention. A platform administrator can inspect its status and reconcile it.'
+            : result.platformStatus === 'ready'
+              ? 'The platform administrator has disabled project Zero Trust.'
+              : 'The platform administrator has not configured project Zero Trust.';
+  return [
+    `Available: ${result.available ? 'yes' : 'no'}`,
+    `Platform: ${platformStatus}`,
+    ...(typeof result.protectNewProjects === 'boolean'
+      ? [`Default for new projects: ${result.protectNewProjects ? 'protected' : 'public'}`]
+      : []),
+    `Desired: ${project ? (project.desired_protected ? 'protected' : 'public') : 'not initialized'}`,
+    `Effective: ${project ? (project.effective_protected ? 'protected' : 'public') : 'not initialized'}`,
+    `State: ${project?.state ?? 'not initialized'}`,
+    ...(project?.last_error ? [`Last error: ${sanitizeTerminalText(project.last_error)}`] : []),
+    ...(!result.available ? [unavailableMessage] : []),
+  ].join('\n');
+}
+
+export async function runProjectZeroTrustCommand(root: string, args: ZeroTrustArgs): Promise<void> {
+  console.log();
+  intro(cliTitle(`project zero-trust ${args.action}`));
+  const { client, projectId, slug } = await resolveTarget(root, args);
+  if (args.action === 'status') {
+    note(statusLines(await client.getProjectZeroTrust(projectId)), slug);
+    outro(`${slug} Zero Trust status`);
+    return;
+  }
+  let result: ProjectZeroTrustResponse;
+  if (args.action === 'reconcile') {
+    result = await client.reconcileProjectZeroTrust(projectId);
+  } else {
+    result = await client.setProjectZeroTrust(projectId, args.action === 'enable');
+  }
+  if (result.project?.last_error) {
+    log.warn(sanitizeTerminalText(result.project.last_error));
+  }
+  if (result.project?.state === 'reconciling') {
+    outro(
+      `${slug} Zero Trust update is still in progress. Run \`void project zero-trust reconcile\` to continue, or wait for scheduled maintenance.`,
+    );
+    return;
+  }
+  outro(
+    args.action === 'enable'
+      ? `${slug} is protected by Zero Trust.`
+      : args.action === 'disable'
+        ? `${slug} is public.`
+        : `${slug} Zero Trust reconciled (${result.project?.state ?? 'unknown'}).`,
+  );
+}

@@ -73,6 +73,12 @@ export async function resolvePlatformApplicationEnvironment<
   };
 }
 
+export function platformProjectIngressPrefix(
+  workersDev: NonNullable<PlatformApplication['workersDev']>,
+): string {
+  return `void-${workersDev.installationId.slice(-12)}-`;
+}
+
 export function platformProjectIngressName(
   project: PlatformApplicationProject,
   workersDev: NonNullable<PlatformApplication['workersDev']>,
@@ -80,7 +86,7 @@ export function platformProjectIngressName(
   if (!/^proj_[a-z0-9]{1,32}$/.test(project.id) || !/^[a-z0-9][a-z0-9-]*$/.test(project.slug)) {
     throw new Error('Invalid platform project identity.');
   }
-  const prefix = `void-${workersDev.installationId.slice(-12)}-`;
+  const prefix = platformProjectIngressPrefix(workersDev);
   const suffix = `-${project.id.slice(5)}`;
   const slug = project.slug.slice(0, 63 - prefix.length - suffix.length).replace(/-+$/, '');
   return `${prefix}${slug}${suffix}`;

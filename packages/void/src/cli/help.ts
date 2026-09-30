@@ -97,11 +97,15 @@ function operatorHelpTree(): HelpTree {
                         ? 'Poll new logs until interrupted or the build ends'
                         : flag === 'ended'
                           ? 'Attest that the original provider execution has ended'
-                          : flag === 'token-stdin' && group === 'email'
-                            ? entry.action === 'domain-remove'
-                              ? 'Read a replacement Cloudflare token for blocked project cleanup from stdin'
-                              : 'Read a scoped Cloudflare API token from stdin'
-                            : 'Read a full API session from stdin for explicit operator session exchange',
+                          : flag === 'protect-new-projects'
+                            ? 'Protect newly created projects by default'
+                            : flag === 'token-stdin' && group === 'zero-trust'
+                              ? 'Read the Access management API token from stdin'
+                              : flag === 'token-stdin' && group === 'email'
+                                ? entry.action === 'domain-remove'
+                                  ? 'Read a replacement Cloudflare token for blocked project cleanup from stdin'
+                                  : 'Read a scoped Cloudflare API token from stdin'
+                                : 'Read a full API session from stdin for explicit operator session exchange',
                   })),
                 ],
               },
@@ -496,6 +500,10 @@ const HELP_TREE: HelpTree = {
       { command: 'list', description: 'List your projects' },
       { command: 'token <command>', description: 'Manage project-scoped CI deploy credentials' },
       { command: 'team <command>', description: 'Manage members and project invitations' },
+      {
+        command: 'zero-trust <command>',
+        description: 'Inspect or override Cloudflare Zero Trust protection',
+      },
       { command: 'logs', description: 'Show runtime logs from the deployed project' },
       { command: 'requests', description: 'Show request-level traffic (status, method, timing)' },
       { command: 'rollback [deployId]', description: 'Roll back to a previous deployment' },
@@ -590,6 +598,32 @@ const HELP_TREE: HelpTree = {
             'void project team decline <invitation-id>',
           ),
         },
+      },
+      'zero-trust': {
+        summary: 'Inspect and manage Zero Trust protection for a Void platform project.',
+        usage: ['void project zero-trust <status|enable|disable|reconcile> [options]'],
+        commands: [
+          { command: 'status', description: 'Show desired and effective protection state' },
+          { command: 'enable', description: 'Protect the project' },
+          { command: 'disable', description: 'Make the project public' },
+          { command: 'reconcile', description: 'Repair Cloudflare Access configuration drift' },
+        ],
+        options: [{ command: '--project <name>', description: 'Project name override' }],
+        children: Object.fromEntries(
+          ['status', 'enable', 'disable', 'reconcile'].map((action) => [
+            action,
+            withProjectOption(
+              action === 'status'
+                ? 'Show desired and effective Zero Trust protection.'
+                : action === 'enable'
+                  ? 'Protect the project with the platform Access policy.'
+                  : action === 'disable'
+                    ? 'Make the project public with a managed Access bypass.'
+                    : 'Repair Cloudflare Access configuration drift for the project.',
+              `void project zero-trust ${action} [options]`,
+            ),
+          ]),
+        ),
       },
       logs: {
         summary: 'Show runtime logs from the deployed project.',

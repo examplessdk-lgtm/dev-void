@@ -53,6 +53,10 @@ type RoutingEntry = {
   redirectRules?: Array<{ source: string; destination: string; status: number; host?: string }>;
   fallbackRules?: Array<{ source: string; destination: string; status: number; host?: string }>;
   queryAllowlist?: Record<string, Array<string>>;
+  zeroTrust?: {
+    teamDomain: string;
+    audiences: Array<{ hostname: string; audience: string }>;
+  };
 };
 
 function createCtx(): ExecutionContext {
@@ -199,6 +203,29 @@ function createEnv(options: {
 }
 
 describe('dispatch fetch handler', () => {
+  it('fails closed before dispatch when a protected route has no Access assertion', async () => {
+    const { env, workerFetch } = createEnv({
+      routing: {
+        workerName: 'user-app',
+        projectId: 'proj_1',
+        zeroTrust: {
+          teamDomain: 'https://company.cloudflareaccess.com',
+          audiences: [{ hostname: '*.void.app', audience: 'project-audience' }],
+        },
+      },
+    });
+
+    const response = await app.fetch(
+      new Request('https://my-app.void.app/private'),
+      env,
+      createCtx(),
+    );
+
+    expect(response.status).toBe(403);
+    expect(response.headers.get('Cache-Control')).toBe('no-store');
+    expect(workerFetch).not.toHaveBeenCalled();
+  });
+
   it('forwards /api requests to user worker', async () => {
     const { env, workerFetch } = createEnv({
       routing: { workerName: 'user-app', projectId: 'proj_1' },

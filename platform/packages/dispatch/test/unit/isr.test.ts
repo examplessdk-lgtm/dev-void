@@ -538,6 +538,16 @@ describe('shouldBypassIsr', () => {
     expect(shouldBypassIsr(request)).toBe(true);
   });
 
+  it.each(['signed-access-assertion', ''])(
+    'returns true when Cf-Access-Jwt-Assertion is present: %j',
+    (assertion) => {
+      const request = new Request('https://example.com', {
+        headers: { 'Cf-Access-Jwt-Assertion': assertion },
+      });
+      expect(shouldBypassIsr(request)).toBe(true);
+    },
+  );
+
   it('returns false for X-VoidPages header (uses JSON edge cache instead)', () => {
     const request = new Request('https://example.com', {
       headers: { 'X-VoidPages': 'true' },

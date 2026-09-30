@@ -4,7 +4,6 @@ import {
   createApplicationRoutes,
   createPlatformDeploymentManifest,
   normalizeApplicationDomain,
-  PLATFORM_APPLICATION_KEY,
   PLATFORM_REMOTE_INSTALLATION_MANIFEST_KEY,
   type PlatformApplication,
   type PlatformInstallationManifest,
@@ -43,6 +42,7 @@ type DomainArgs = Extract<PlatformArgs, { subcommand: 'domain' }>;
 type DomainResult = Readonly<{
   manifest: PlatformInstallationManifest;
   waitingForDns: boolean;
+  waitingForProtection: boolean;
   nameServers: ReadonlyArray<string>;
 }>;
 
@@ -98,6 +98,10 @@ export async function applyPlatformDomain(
     verifyOwnership: (manifest: PlatformInstallationManifest) => Promise<void>;
     verifyRuntimeToken: (zoneId: string) => Promise<void>;
     probe?: (hostname: string, manifest: PlatformInstallationManifest) => Promise<void>;
+    activate?: (
+      application: PlatformApplication,
+      manifest: PlatformInstallationManifest,
+    ) => Promise<boolean>;
   },
 ): Promise<DomainResult> {
   let manifest = original;
@@ -130,7 +134,12 @@ export async function applyPlatformDomain(
     ),
   );
   if (zone.status !== 'active') {
-    return { manifest, waitingForDns: true, nameServers: zone.nameServers };
+    return {
+      manifest,
+      waitingForDns: true,
+      waitingForProtection: false,
+      nameServers: zone.nameServers,
+    };
   }
   await dependencies.verifyRuntimeToken(zone.id);
   const dnsAction = plan.actions.find((action) => action.key === 'application-dns');
@@ -190,15 +199,51 @@ export async function applyPlatformDomain(
   if (!routing) {
     throw new Error('platform: Routing storage is missing. Run platform repair first.');
   }
-  await client.putKvValue(
-    manifest.account.id,
-    routing.id,
-    PLATFORM_APPLICATION_KEY,
-    JSON.stringify(deployment.application),
+  const activated = await (dependencies.activate ?? activatePlatformDomain)(
+    deployment.application,
+    manifest,
   );
+  if (!activated) {
+    return { manifest, waitingForDns: false, waitingForProtection: true, nameServers: [] };
+  }
   const { pendingDomain: _pending, ...ready } = manifest;
   await save({ ...ready, deployment, updatedAt: now() });
-  return { manifest, waitingForDns: false, nameServers: [] };
+  return { manifest, waitingForDns: false, waitingForProtection: false, nameServers: [] };
+}
+
+async function activatePlatformDomain(
+  application: PlatformApplication,
+  manifest: PlatformInstallationManifest,
+): Promise<boolean> {
+  const url = `${manifest.endpoints.apiUrl}/internal/platform/domain-activate`;
+  const response = await fetch(url, {
+    method: 'POST',
+    redirect: 'manual',
+    signal: AbortSignal.timeout(120_000),
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Void-Platform-Probe': createPlatformHealthProbeToken(manifest.ownershipNonce),
+      ...cfAccessHeaders(process.env, url),
+    },
+    body: JSON.stringify({ application }),
+  });
+  const body = (await response.json()) as {
+    ok?: boolean;
+    installationId?: string;
+    ready?: boolean;
+    error?: string;
+  };
+  if (
+    !response.ok ||
+    body.ok !== true ||
+    body.installationId !== manifest.id ||
+    typeof body.ready !== 'boolean'
+  ) {
+    throw new Error(
+      `platform: ${body.error ?? 'The running platform could not prepare domain protection. Update or repair the platform, then rerun this command.'}`,
+    );
+  }
+  return body.ready;
 }
 
 async function probePlatformDomain(
@@ -333,6 +378,13 @@ export async function runPlatformDomainCommand(args: DomainArgs): Promise<void> 
       note(
         `Set the domain's nameservers at its registrar to:\n${result.nameServers.join('\n')}\nThen rerun: void platform domain set ${domain}`,
         'Waiting for DNS',
+      );
+      return;
+    }
+    if (result.waitingForProtection) {
+      note(
+        `Domain protection is still being prepared. Existing workers.dev URLs remain active. Rerun: void platform domain set ${domain}`,
+        'Preparing application domain',
       );
       return;
     }
