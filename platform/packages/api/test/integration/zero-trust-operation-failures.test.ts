@@ -22,7 +22,9 @@ import {
   configurePlatformZeroTrust,
   disablePlatformZeroTrust,
 } from '../../src/zero-trust/installation.ts';
+import * as zeroTrustLock from '../../src/zero-trust/lock.ts';
 import { reconcilePendingProjectZeroTrust } from '../../src/zero-trust/maintenance.ts';
+import * as zeroTrustProject from '../../src/zero-trust/project.ts';
 import {
   reconcileProjectZeroTrust,
   reconcileProjectZeroTrustDomains,
@@ -315,6 +317,87 @@ describe('Zero Trust operation failures', () => {
     await expect(resolveProjectZeroTrustRoutingForPublication(env.db, large.id)).resolves.toEqual({
       teamDomain: '',
       audiences: [],
+    });
+  });
+
+  it('does not skip a failed project for an operation a newer one replaced', async () => {
+    const owner = await createTestUser(env.db, 'replaced-skip-owner');
+    const large = await createTestProject(env.db, owner.id, 'replaced-skip-large');
+    await env.db.insert(domains).values(
+      Array.from({ length: 101 }, (_, index) => ({
+        id: `replaced-skip-${index}`,
+        project_id: large.id,
+        hostname: `replaced-skip-${index}.example.net`,
+        cf_hostname_id: `cf-replaced-skip-${index}`,
+        status: 'pending' as const,
+      })),
+    );
+    vi.stubGlobal('fetch', accessApi().fetcher);
+    const platform = bindings();
+    const reconcile = zeroTrustProject.reconcileProjectZeroTrust;
+    const lock = zeroTrustLock.withProjectZeroTrustLock;
+    let stepFailed = false;
+    let replaced = false;
+    vi.spyOn(zeroTrustProject, 'reconcileProjectZeroTrust').mockImplementation(async (...args) => {
+      try {
+        return await reconcile(...args);
+      } catch (error) {
+        stepFailed ||= args[2] === large.id;
+        throw error;
+      }
+    });
+    // Between the failed step and the skip, this operation's lease expires. A
+    // newer operation claims the installation and reconciles the project.
+    vi.spyOn(zeroTrustLock, 'withProjectZeroTrustLock').mockImplementation(async (...args) => {
+      if (stepFailed && !replaced && args[1] === large.id) {
+        replaced = true;
+        await env.db
+          .delete(domains)
+          .where(sql`${domains.project_id} = ${large.id} AND ${domains.id} <> 'replaced-skip-0'`);
+        const saved = (await readZeroTrustConfigurationStrict(env.db))!;
+        const newer = {
+          ...saved,
+          revision: saved.revision + 1,
+          operation: {
+            ...saved.operation!,
+            id: 'newer-operation',
+            kind: 'reconcile' as const,
+            phase: 'projects' as const,
+            owner: 'newer-runner',
+            existingProjects: null,
+            leaseExpiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+          },
+        };
+        await env.db
+          .update(platformSettings)
+          .set({ value: newer })
+          .where(eq(platformSettings.key, 'zeroTrust.configuration'));
+        await reconcile(platform, env.db, large.id, {
+          configuration: newer,
+          routingBudget: { remaining: 300 },
+        });
+      }
+      return lock(...args);
+    });
+
+    await expect(
+      configurePlatformZeroTrust(
+        platform,
+        env.db,
+        configurationInput({ existingProjects: 'protected', protectNewProjects: true }),
+      ),
+    ).rejects.toThrow('at most 100 custom domains');
+
+    expect(replaced).toBe(true);
+    expect(await getProjectZeroTrustState(env.db, large.id)).toMatchObject({
+      desired_protected: true,
+      effective_protected: true,
+      status: 'ready',
+      reconciled_operation: 'newer-operation',
+      last_error: null,
+    });
+    expect(await readZeroTrustConfigurationStrict(env.db)).toMatchObject({
+      operation: { id: 'newer-operation', owner: 'newer-runner' },
     });
   });
 

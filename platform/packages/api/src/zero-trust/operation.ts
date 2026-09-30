@@ -205,20 +205,27 @@ function isOperationWideFailure(error: unknown): boolean {
  * Record a project failure and let the operation continue. The row keeps a
  * skip marker so later batches pass over it; scheduled per-project maintenance
  * retries it after the operation finishes. Failed protection stays effective
- * or denied: this never marks a project public.
+ * or denied: this never marks a project public. Returns false, writing
+ * nothing, when a newer operation has replaced this one.
  */
 async function skipFailedProject(
   db: Db,
   projectId: string,
   configuration: ZeroTrustConfiguration & { operation: ZeroTrustOperation },
   error: unknown,
-): Promise<void> {
+): Promise<boolean> {
   const reconciledOperation = skippedOperationKey(configuration.operation);
   const lastError = errorMessage(error);
-  await withProjectZeroTrustLock(db, projectId, async (lockedDb) => {
+  const skipped = await withProjectZeroTrustLock(db, projectId, async (lockedDb) => {
+    // A claim takes the exclusive lock, so the revision cannot change while this
+    // shared lock is held. A newer operation may already have reconciled this
+    // row; recording the stale failure would overwrite its result.
+    if (!sameConfiguration(configuration, await readZeroTrustConfigurationStrict(lockedDb))) {
+      return false;
+    }
     const project = await getProject(lockedDb, projectId);
     if (!project || project.status === 'deleting') {
-      return;
+      return true;
     }
     await lockedDb
       .insert(projectZeroTrust)
@@ -241,11 +248,15 @@ async function skipFailedProject(
           updated_at: sql`now()`,
         },
       });
+    return true;
   });
-  console.error('[zero-trust] installation operation skipped a failed project', {
-    projectId,
-    error,
-  });
+  if (skipped) {
+    console.error('[zero-trust] installation operation skipped a failed project', {
+      projectId,
+      error,
+    });
+  }
+  return skipped;
 }
 
 /** Run one project's work inside an installation batch; only operation-wide failures escape. */
@@ -265,11 +276,10 @@ async function runOperationProjectStep(
     if (
       !operation ||
       isOperationWideFailure(error) ||
-      !sameConfiguration(configuration, await readZeroTrustConfigurationStrict(db))
+      !(await skipFailedProject(db, projectId, { ...configuration, operation }, error))
     ) {
       throw error;
     }
-    await skipFailedProject(db, projectId, { ...configuration, operation }, error);
   }
 }
 
