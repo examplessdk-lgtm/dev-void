@@ -33,7 +33,6 @@ type WorkerSettings = {
     namespace_id?: string;
     service?: string;
     entrypoint?: string;
-    props?: Record<string, unknown>;
   }>;
 };
 
@@ -134,18 +133,12 @@ function assertConfiguration(
       throw new Error(`Sandbox controller binding ${name} differs from this deployment.`);
     }
   }
+  // Cloudflare does not return service binding `props` from `/settings`. The
+  // plain-text bindings checked above come from the same upload as the props.
   const control = settings.bindings.find(
     (binding) => binding.type === 'service' && binding.name === '__VOID_SANDBOX_CONTROL',
   );
-  if (
-    control?.service !== apiService ||
-    control.entrypoint !== 'SandboxControl' ||
-    !control.props ||
-    control.props.projectId !== identity.projectId ||
-    control.props.deploymentId !== identity.deploymentId ||
-    control.props.userId !== identity.userId ||
-    control.props.slug !== identity.slug
-  ) {
+  if (control?.service !== apiService || control.entrypoint !== 'SandboxControl') {
     throw new Error('Sandbox controller authority binding differs from this deployment.');
   }
   namespaceId(settings);

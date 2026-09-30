@@ -1620,8 +1620,18 @@ export function mockCfApi(overrides: Partial<CfApiMocks> = {}): MockCfApiHandle 
       if (method === 'GET' && url.endsWith('/settings')) {
         const name = parseScriptNameFromUrl(url);
         const script = name ? state.hostScripts.get(name) : undefined;
+        // Cloudflare accepts `props` on a service binding upload and applies
+        // them at runtime, but never echoes them from `/settings`.
         return script
-          ? cfSuccess({ bindings: script.bindings })
+          ? cfSuccess({
+              bindings: script.bindings.map((binding) => {
+                if (binding.type !== 'service') {
+                  return binding;
+                }
+                const { props: _props, ...rest } = binding;
+                return { ...rest, environment: 'production' };
+              }),
+            })
           : Response.json(
               { success: false, errors: [{ code: 10007, message: 'script not found' }] },
               { status: 404 },
