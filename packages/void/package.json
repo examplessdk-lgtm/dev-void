@@ -328,6 +328,7 @@
     "@cloudflare/config": "0.20.0",
     "@cloudflare/sandbox": "^0.12.9",
     "@cloudflare/vite-plugin": "1.54.7",
+    "@cloudflare/workers-auth": "0.9.4",
     "@cloudflare/workers-types": "catalog:",
     "@napi-rs/keyring": "2.0.0",
     "@void/deploy-cloudflare": "workspace:*",

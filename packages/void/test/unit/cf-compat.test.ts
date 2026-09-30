@@ -1,11 +1,11 @@
 import { execFile } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, request as httpRequest } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { connect } from 'node:net';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { expect, it } from 'vite-plus/test';
 import { resolveWranglerArgv } from '../../src/cli/preset.ts';
 
@@ -64,94 +64,97 @@ it('clears Worker Cron Triggers through the pinned account API', async () => {
   }
 }, 30_000);
 
-it('reads OAuth credentials through cf instead of using the whoami source as a file path', async () => {
-  const directory = mkdtempSync(join(tmpdir(), 'void-cf-clear-crons-oauth-'));
-  const server = createServer((request, response) => {
-    expect(request.headers.authorization).toBe('Bearer synthetic-oauth-token');
-    request.resume();
-    response.setHeader('Content-Type', 'application/json');
-    response.end(JSON.stringify({ success: true, result: { schedules: [] } }));
-  });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-  try {
-    const configPath = join(directory, 'wrangler.json');
-    const cfDist = join(dirname(fileURLToPath(import.meta.resolve('cf/package.json'))), 'dist');
-    const cfModule = readdirSync(cfDist).find((name) => /^cf-[^/]+\.mjs$/.test(name));
-    if (!cfModule) {
-      throw new Error('The pinned Cloudflare auth module is missing.');
-    }
-    const preload = join(directory, 'mock-cf.mjs');
-    writeFileSync(configPath, JSON.stringify({ name: 'test-worker', account_id: 'test-account' }));
-    writeFileSync(
-      preload,
-      `import child from 'node:child_process';
+it.each(['clear-crons'])(
+  'uses encrypted browser credentials for %s',
+  async (operation) => {
+    const directory = mkdtempSync(join(tmpdir(), 'void-cf-clear-crons-oauth-'));
+    const server = createServer((request, response) => {
+      expect(request.headers.authorization).toBe('Bearer synthetic-oauth-token');
+      request.resume();
+      response.setHeader('Content-Type', 'application/json');
+      response.end(JSON.stringify({ success: true, result: { schedules: [] } }));
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const configPath = join(directory, 'wrangler.json');
+      const preload = join(directory, 'mock-cf.mjs');
+      writeFileSync(
+        configPath,
+        JSON.stringify({ name: 'test-worker', account_id: 'test-account' }),
+      );
+      writeFileSync(
+        preload,
+        `import child from 'node:child_process';
 import os from 'node:os';
 import { syncBuiltinESMExports } from 'node:module';
 os.homedir = () => process.env.VOID_TEST_HOME;
 syncBuiltinESMExports();
-process.env.CLOUDFLARE_AUTH_USE_KEYRING = 'false';
-const cf = await import(${JSON.stringify(pathToFileURL(join(cfDist, cfModule)).href)});
-const noop = () => {};
-cf.t({ logger: { debug: noop, info: noop, log: noop, warn: noop, error: noop } })
-  .writeAuthCredentials({ oauth_token: 'synthetic-oauth-token' });
+import { setKeyProviderFactoryForTesting } from ${JSON.stringify(import.meta.resolve('@cloudflare/workers-auth'))};
+import { createCfAuth } from ${JSON.stringify(import.meta.resolve('@cloudflare/workers-auth/cf'))};
+let key;
+setKeyProviderFactoryForTesting(() => ({ getKey: () => key, setKey: (value) => { key = value; }, deleteKey: () => { key = undefined; }, describe: () => 'synthetic provider' }));
+const logger = { debug() {}, info() {}, log() {}, warn() {}, error() {} };
+const auth = createCfAuth({ logger, userAgent: 'void-test', prompt: async () => '', select: async () => '', isNoDefaultValueProvidedError: () => false });
+auth.writeAuthCredentials({ oauth_token: 'synthetic-oauth-token', refresh_token: 'synthetic-refresh', expiration_time: new Date(Date.now() + 3600000).toISOString(), scopes: [] });
+const credentialPath = auth.getCredentialStore().path();
 child.spawnSync = (_binary, args, options) => {
   if (args[1] !== 'auth' || args[2] !== 'whoami' || options.env.CLOUDFLARE_AUTH_USE_KEYRING !== 'true') {
     return { status: 1, stdout: '', stderr: 'Wrong authentication source.' };
   }
-  // Keep this synthetic test independent of the host OS keyring. The cf
-  // subprocess still has to receive the keyring pin.
-  return { status: 0, stdout: JSON.stringify({ authenticated: true, tokenValid: true, authSource: 'OAuth token from encrypted store' }), stderr: '' };
+  return { status: 0, stdout: JSON.stringify({ authenticated: true, tokenValid: true, authSource: 'OAuth token from ' + credentialPath }), stderr: '' };
 };
 syncBuiltinESMExports();
 `,
-    );
-    const entry = join(import.meta.dirname, '..', '..', 'src', 'cli', 'cf-compat.ts');
-    const output = await new Promise<{ status: number; stderr: string }>((resolve) => {
-      execFile(
-        process.execPath,
-        [
-          '--import',
-          pathToFileURL(preload).href,
-          entry,
-          'triggers',
-          'clear-crons',
-          '-c',
-          configPath,
-          '--name',
-          'test-worker',
-        ],
-        {
-          cwd: directory,
-          encoding: 'utf8',
-          timeout: 20_000,
-          env: {
-            PATH: process.env.PATH,
-            SYSTEMROOT: process.env.SYSTEMROOT,
-            WINDIR: process.env.WINDIR,
-            CI: 'true',
-            HOME: directory,
-            USERPROFILE: directory,
-            XDG_CONFIG_HOME: join(directory, '.config'),
-            APPDATA: join(directory, 'AppData', 'Roaming'),
-            LOCALAPPDATA: join(directory, 'AppData', 'Local'),
-            CLOUDFLARE_AUTH_USE_KEYRING: 'true',
-            CLOUDFLARE_ACCOUNT_ID: 'test-account',
-            CLOUDFLARE_API_BASE_URL: `http://127.0.0.1:${(server.address() as AddressInfo).port}/client/v4`,
-            VOID_TEST_HOME: directory,
-          },
-        },
-        (error, _stdout, stderr) => resolve({ status: error ? 1 : 0, stderr }),
       );
-    });
-    expect(output.status, output.stderr).toBe(0);
-  } finally {
-    await new Promise<void>((resolve) => {
-      server.close(() => resolve());
-      server.closeAllConnections();
-    });
-    rmSync(directory, { recursive: true, force: true });
-  }
-}, 30_000);
+      const entry = join(import.meta.dirname, '..', '..', 'src', 'cli', 'cf-compat.ts');
+      const output = await new Promise<{ status: number; stderr: string }>((resolve) => {
+        execFile(
+          process.execPath,
+          [
+            '--import',
+            pathToFileURL(preload).href,
+            entry,
+            'triggers',
+            operation,
+            '-c',
+            configPath,
+            '--name',
+            'test-worker',
+          ],
+          {
+            cwd: directory,
+            encoding: 'utf8',
+            timeout: 20_000,
+            env: {
+              PATH: process.env.PATH,
+              SYSTEMROOT: process.env.SYSTEMROOT,
+              WINDIR: process.env.WINDIR,
+              CI: 'true',
+              CLOUDFLARE_AUTH_USE_KEYRING: 'true',
+              CLOUDFLARE_ACCOUNT_ID: 'test-account',
+              CLOUDFLARE_API_BASE_URL: `http://127.0.0.1:${(server.address() as AddressInfo).port}/client/v4`,
+              HOME: directory,
+              USERPROFILE: directory,
+              XDG_CONFIG_HOME: join(directory, '.config'),
+              APPDATA: join(directory, 'AppData', 'Roaming'),
+              LOCALAPPDATA: join(directory, 'AppData', 'Local'),
+              VOID_TEST_HOME: directory,
+            },
+          },
+          (error, _stdout, stderr) => resolve({ status: error ? 1 : 0, stderr }),
+        );
+      });
+      expect(output.status, output.stderr).toBe(0);
+    } finally {
+      await new Promise<void>((resolve) => {
+        server.close(() => resolve());
+        server.closeAllConnections();
+      });
+      rmSync(directory, { recursive: true, force: true });
+    }
+  },
+  30_000,
+);
 
 it('reports an absent cf session as authentication failure', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'void-cf-no-auth-'));

@@ -5,27 +5,24 @@
  * process translates them to the pinned cf CLI. It never invokes Wrangler.
  */
 import { spawnSync } from 'node:child_process';
-import {
-  copyFileSync,
-  mkdtempSync,
-  readFileSync,
-  readdirSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
+import { copyFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 import { readBuildOutput } from '@cloudflare/build-output-utils';
 import { parse } from 'jsonc-parser';
 import { dirname, join, resolve } from 'pathslash';
 import { EnvHttpProxyAgent, fetch as httpFetch } from 'undici';
 import { prepareCfBuildOutput } from './cf-build-output.ts';
+import { persistCfKeyringPreference, readCfSessionCredential } from './cf-session.ts';
 
 type Result = { status: number; stdout: string; stderr: string };
 type Json = Record<string, unknown>;
 
 const cf = join(dirname(fileURLToPath(import.meta.resolve('cf/package.json'))), 'bin', 'cf');
 const args = process.argv.slice(2);
+// This dedicated transport process uses the same encrypted OAuth store for
+// login, deployment, and ancillary API calls. API-token overrides still win.
+process.env.CLOUDFLARE_AUTH_USE_KEYRING = 'true';
 
 function cfEnvironment(): NodeJS.ProcessEnv {
   // The pinned bin otherwise delegates to any cf installed by the project.
@@ -416,37 +413,17 @@ async function sessionCredential(): Promise<{ type: 'oauth' | 'api_token'; token
   if (state.authenticated !== true || state.tokenValid !== true) {
     return null;
   }
-  if (typeof state.authSource !== 'string' || !state.authSource.startsWith('OAuth token')) {
-    return null;
-  }
-  // cf's encrypted store is authoritative. Reading the path from whoami would
-  // fail after cf migrates and deletes the old plaintext credential file.
-  const dist = join(dirname(fileURLToPath(import.meta.resolve('cf/package.json'))), 'dist');
-  const entry = readdirSync(dist).find((name) => /^cf-[^/]+\.mjs$/.test(name));
-  if (!entry) {
-    throw new Error('The bundled Cloudflare credential reader is unavailable.');
-  }
-  const module = (await import(pathToFileURL(join(dist, entry)).href)) as {
-    t?: (options: { logger: Record<string, (...args: Array<unknown>) => void> }) => {
-      readAuthCredentials: () => unknown;
-    };
-  };
-  if (typeof module.t !== 'function') {
-    throw new Error('The bundled Cloudflare credential reader is unavailable.');
-  }
-  const noop = () => {};
-  const stored = module
-    .t({ logger: { debug: noop, info: noop, log: noop, warn: noop, error: noop } })
-    .readAuthCredentials();
-  const credential = stored && typeof stored === 'object' ? (stored as Json) : null;
-  return credential && typeof credential.oauth_token === 'string' && credential.oauth_token
-    ? { type: 'oauth', token: credential.oauth_token }
-    : null;
+  const credential = readCfSessionCredential(process.cwd(), state);
+  return credential ? { type: 'oauth', token: credential } : null;
 }
 
 async function auth(): Promise<Result> {
   if (args[0] === 'login') {
-    return runInteractiveCf(['auth', 'login', '--force']);
+    const loggedIn = runInteractiveCf(['auth', 'login', '--force']);
+    if (loggedIn.status === 0) {
+      persistCfKeyringPreference(process.cwd());
+    }
+    return loggedIn;
   }
   if (args[0] === 'logout') {
     return runCf(['auth', 'logout']);
@@ -463,6 +440,9 @@ async function auth(): Promise<Result> {
         JSON.stringify({ loggedIn: false }),
         'Cloudflare authentication is required.',
       );
+    }
+    if (String(identity.authSource).startsWith('OAuth token from ')) {
+      persistCfKeyringPreference(process.cwd());
     }
     return result(
       0,
