@@ -1522,7 +1522,7 @@ Add a custom domain to the saved target. Hosted Void projects print the DNS reco
 void domain delete <hostname> [--project <name>]
 ```
 
-Direct Cloudflare projects apply the change immediately. Deleting the final custom domain requires `CLOUDFLARE_API_TOKEN` with Workers Scripts: Edit permission because the standard trigger operation does not reconcile an empty custom-domain set; Void fails before changing local or remote state when that token is unavailable.
+Direct Cloudflare projects apply the change immediately. Deleting the final custom domain uses your browser session from `void cloudflare login` or an API token with Workers Scripts: Edit permission. If Cloudflare rejects the change, Void attempts to restore the previous domain configuration and reports whether recovery succeeded.
 
 Remove a custom domain from the saved target. For Cloudflare, this removes the matching `custom_domain` route and synchronizes triggers. If Cloudflare rejects the update, Void restores the exact previous local config and immediately reapplies it remotely. If that second synchronization also fails, the CLI reports that remote route state may be partial instead of claiming a successful rollback.
 

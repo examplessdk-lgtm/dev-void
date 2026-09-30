@@ -290,6 +290,52 @@ async function clearWorkerCronSchedules(worker: string): Promise<Result> {
   }
 }
 
+async function clearWorkerCustomDomains(worker: string): Promise<Result> {
+  const base = (
+    process.env.CLOUDFLARE_API_BASE_URL ?? 'https://api.cloudflare.com/client/v4'
+  ).replace(/\/$/, '');
+  const endpoint = `${base}/accounts/${encodeURIComponent(accountId())}/workers/scripts/${encodeURIComponent(worker)}/domains/records`;
+  const proxy =
+    process.env.HTTP_PROXY ||
+    process.env.HTTPS_PROXY ||
+    process.env.http_proxy ||
+    process.env.https_proxy
+      ? new EnvHttpProxyAgent()
+      : null;
+  try {
+    const response = await httpFetch(endpoint, {
+      method: 'PUT',
+      headers: { ...(await apiHeaders()), 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        override_scope: true,
+        override_existing_origin: false,
+        override_existing_dns_record: false,
+        origins: [],
+      }),
+      redirect: 'error',
+      signal: AbortSignal.timeout(30_000),
+      ...(proxy ? { dispatcher: proxy } : {}),
+    });
+    if (!response.ok) {
+      throw new Error(`Cloudflare rejected the empty custom-domain set (HTTP ${response.status}).`);
+    }
+    let body: unknown;
+    try {
+      body = await response.json();
+    } catch {
+      throw new Error(
+        `Cloudflare returned HTTP ${response.status} with a non-JSON custom-domain response.`,
+      );
+    }
+    if (object(body).success !== true) {
+      throw new Error(`Cloudflare rejected the empty custom-domain set (HTTP ${response.status}).`);
+    }
+    return result(0);
+  } finally {
+    await proxy?.close();
+  }
+}
+
 async function assertExistingProvisionableResources(
   directory: string,
   account: string,
@@ -1027,6 +1073,14 @@ async function workerChanges(): Promise<Result> {
       throw new Error('Cloudflare trigger target changed.');
     }
     return await clearWorkerCronSchedules(name);
+  }
+  if (args[0] === 'triggers' && args[1] === 'clear-domains') {
+    const raw = config();
+    const name = workerName();
+    if (raw.name !== name || (raw.account_id !== undefined && raw.account_id !== accountId())) {
+      throw new Error('Cloudflare trigger target changed.');
+    }
+    return await clearWorkerCustomDomains(name);
   }
   if ((args[0] === 'versions' && args[1] === 'upload') || args[0] === 'deploy') {
     const raw = config();
