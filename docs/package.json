@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "build": "vitepress build",
+    "deploy": "wrangler deploy",
     "dev": "vitepress dev",
     "preview": "vitepress preview"
   },
@@ -14,6 +15,7 @@
     "reka-ui": "2.10.4",
     "vitepress": "2.0.0-alpha.16",
     "vitepress-plugin-group-icons": "^1.7.6",
-    "void": "workspace:*"
+    "void": "workspace:*",
+    "wrangler": "catalog:"
   }
 }
